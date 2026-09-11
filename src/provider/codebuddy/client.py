@@ -255,6 +255,15 @@ class CodeBuddyProvider:
 
     # -------------------------------------------------------------- M1.5
 
+    async def aclose(self) -> None:
+        """释放内部 HTTP 连接池与 OAuth 客户端。"""
+        await self.client.aclose()
+        for cached in (_CHECKIN_CACHE.pop(id(self.client), None),
+                       _REFRESH_CACHE.pop(id(self.client), None)):
+            closer = getattr(cached, "aclose", None)
+            if callable(closer):
+                await closer()
+
     def credential_from(self, credential_data: dict) -> CodeBuddyCredential:
         return CodeBuddyCredential.from_dict(credential_data)
 

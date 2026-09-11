@@ -1,0 +1,108 @@
+"""后台任务调度：把额度探测、签到、token 预刷新、明细清理接进应用生命周期。
+
+设计要点（PROPOSAL §8 / TECHNICAL §6）：
+- 两类任务共用一个全局随机间隔节流器（跨所有用户）
+- 后台任务失败只记日志，绝不影响聊天请求
+- 启动时先做一轮额度探测（不节流），避免调度器拿到全 unknown 的池
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import time
+from collections.abc import Awaitable, Callable
+
+from .background import CheckinTask, Pacer, QuotaProbeTask, RefreshTask, RetentionTask
+
+logger = logging.getLogger(__name__)
+
+
+class TaskRunner:
+    """周期任务循环。每类任务一个 asyncio 任务，异常互不影响。"""
+
+    def __init__(
+        self,
+        *,
+        quota_probe: QuotaProbeTask,
+        checkin: CheckinTask,
+        refresh: RefreshTask,
+        retention: RetentionTask,
+        quota_probe_minutes: int = 60,
+        checkin_hour: int = 9,
+        refresh_interval_minutes: int = 60,
+        retention_interval_hours: int = 6,
+    ) -> None:
+        self._quota_probe = quota_probe
+        self._checkin = checkin
+        self._refresh = refresh
+        self._retention = retention
+        self._quota_interval = max(60, quota_probe_minutes * 60)
+        self._checkin_hour = checkin_hour
+        self._refresh_interval = max(60, refresh_interval_minutes * 60)
+        self._retention_interval = max(600, retention_interval_hours * 3600)
+        self._tasks: list[asyncio.Task[None]] = []
+
+    async def start(self) -> None:
+        """启动所有周期任务；首轮额度探测立即执行（不节流）。"""
+        await self._guarded(self._quota_probe.run_once(apply_pacing=False),
+                            "启动额度探测")
+        loops: list[tuple[str, Callable[[], Awaitable[object]], float]] = [
+            ("额度探测", lambda: self._quota_probe.run_once(), self._quota_interval),
+            ("token 预刷新", self._refresh.run_once, self._refresh_interval),
+            ("明细清理", self._sync_retention, self._retention_interval),
+            ("每日签到", self._sync_checkin, 1800),  # 每 30 分钟检查一次是否到点
+        ]
+        for name, runner, interval in loops:
+            self._tasks.append(asyncio.create_task(self._loop(name, runner, interval)))
+
+    async def _sync_checkin(self) -> object:
+        """签到的「当日一次」由 CheckinTask.due() 判定，循环只负责到点触发。"""
+        if not self._checkin.due():
+            return None
+        return await self._checkin.run_once()
+
+    async def _sync_retention(self) -> object:
+        return self._retention.run_once()
+
+    async def _loop(self, name: str, runner: Callable[[], Awaitable[object]],
+                    interval: float) -> None:
+        while True:
+            try:
+                await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                raise
+            await self._guarded(runner(), name)
+
+    async def _guarded(self, awaitable: Awaitable[object], name: str) -> bool:
+        try:
+            await awaitable
+            return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 - 后台任务不能拖垮服务
+            logger.warning("后台任务「%s」失败: %s", name, error)
+            return False
+
+    async def stop(self) -> None:
+        for task in self._tasks:
+            task.cancel()
+        for task in self._tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        self._tasks.clear()
+
+
+def build_runner(credentials, providers: dict, stats_collector, config) -> TaskRunner:
+    """按配置装配后台任务（Pacer 由两个 provider 共享）。"""
+    pacer = Pacer(config.pacer_min_seconds, config.pacer_max_seconds)
+    return TaskRunner(
+        quota_probe=QuotaProbeTask(credentials, providers, pacer),
+        checkin=CheckinTask(credentials, providers, checkin_hour=config.checkin_hour),
+        refresh=RefreshTask(credentials, providers, skew_seconds=config.refresh_skew_hours * 3600,
+                            now=lambda: int(time.time())),
+        retention=RetentionTask(stats_collector),
+        quota_probe_minutes=config.quota_probe_minutes,
+        checkin_hour=config.checkin_hour,
+    )

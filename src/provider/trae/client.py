@@ -319,6 +319,10 @@ class TraeProvider:
         refreshed = await self.client.refresh_token(TraeCredential.from_dict(credential_data))
         return refreshed.to_dict()
 
+    async def aclose(self) -> None:
+        """释放内部 HTTP 连接池。"""
+        await self.client.aclose()
+
     def parse_login_url(self, raw_url: str) -> dict:
         """解析 TRAE 登录回调链接（Q17=C callback 轨道）。"""
         return parse_callback_url(raw_url)

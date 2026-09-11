@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,8 +30,11 @@ from .provider.codebuddy.oauth import CodeBuddyOAuth
 from .provider.trae.client import TraeProvider
 from .provider.trae.events import UpstreamProtocolViolation
 from .stats.collector import StatsCollector, StatsQuery
+from .tasks.runner import build_runner
 
 SESSION_COOKIE = "coding2api_session"
+
+logger = logging.getLogger(__name__)
 
 
 def build_app(settings: Settings | None = None, *, providers: dict | None = None,
@@ -51,9 +56,22 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                      stats=StatsCollector(db)))
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI):
-        yield
-        db.close()
+    async def lifespan(app: FastAPI):
+        runner = build_runner(credentials, registry, app.state.stats_collector, config)
+        app.state.task_runner = runner
+        await runner.start()
+        try:
+            yield
+        finally:
+            await runner.stop()
+            for task in app.state.pending_probes:
+                task.cancel()
+            app.state.pending_probes.clear()
+            for provider in registry.values():
+                closer = getattr(provider, "aclose", None)
+                if callable(closer):
+                    await closer()
+            db.close()
 
     app = FastAPI(title="coding2api", version="0.1.0", lifespan=lifespan)
     app.state.settings = config
@@ -64,6 +82,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.stats_collector = StatsCollector(db)
     app.state.stats_query = StatsQuery(db)
     app.state.upstream_auth = _upstream_auth(registry, config)
+    app.state.pending_probes = []
 
     # ------------------------------------------------------------ 鉴权依赖
 
@@ -206,6 +225,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         credential_id = credentials.add(provider=provider_id, credential_data=credential_data,
                                         nickname=str(payload.get("nickname") or ""),
                                         added_by=principal.username)
+        schedule_probe(credential_id)
         return {"id": credential_id}
 
     @app.post("/api/credentials/{credential_id}/toggle")
@@ -273,6 +293,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         credential_id = credentials.add(
             provider=provider_id, credential_data=result.credential_data,
             nickname=result.nickname, added_by=principal.username)
+        schedule_probe(credential_id)
         return {"status": "success", "credential_id": credential_id}
 
     @app.post("/api/auth/upstream/cancel")
@@ -315,6 +336,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         if provider is None or data is None or not hasattr(provider, "checkin"):
             raise InvalidRequest("credential does not support checkin")
         result = await provider.checkin(data)
+        if result.ok:
+            schedule_probe(credential_id)      # 签到发放积分 → 立即刷新额度
         return {"ok": result.ok, "credit": result.credit, "code": result.code,
                 "message": result.message}
 
@@ -342,7 +365,34 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             raise InvalidRequest("credential does not support account switching")
         switched = await provider.switch_account(data, str(payload.get("account_id") or ""))
         credentials.save_credential_data(credential_id, switched)
+        # 账号切换后额度对应的是新账号，必须重探测而不是沿用旧值
+        schedule_probe(credential_id)
         return {"switched": True}
+
+    # --------------------------------------------------- 即时额度探测
+
+    def schedule_probe(credential_id: str) -> None:
+        """新增凭证 / OAuth 保存 / 账号切换 / 签到后立即重探测（不阻塞响应）。
+
+        周期扫描是 60 分钟一轮，若不等这一轮，刚加进来的凭证在界面上会一直
+        显示「未探测到额度」，调度器也只能把它排在 known 之后。
+        """
+        provider_id = credentials.provider_of(credential_id)
+        provider = registry.get(provider_id or "")
+        data = credentials.credential_data(credential_id)
+        if provider is None or data is None:
+            return
+
+        async def probe() -> None:
+            try:
+                quota = await provider.probe_quota(data)
+            except Exception as error:  # noqa: BLE001 - 探测失败标记为未探测
+                logger.warning("即时额度探测失败 %s: %s", credential_id, error)
+                credentials.mark_probe_failed(credential_id)
+                return
+            credentials.save_quota(credential_id, quota)
+
+        app.state.pending_probes.append(asyncio.create_task(probe()))
 
     # ------------------------------------------------------------- 统计
 
@@ -415,3 +465,17 @@ def _load_users(*, settings: Settings):
     store = UsersFileStore(path)
     store.validate()
     return store
+
+
+def run() -> None:
+    """本地启动入口：python -m src.main 或 coding2api 命令。"""
+    import uvicorn
+
+    config = load_settings()
+    uvicorn.run(
+        build_app(config), host=config.host, port=config.port, log_level=config.log_level.lower()
+    )
+
+
+if __name__ == "__main__":  # pragma: no cover
+    run()

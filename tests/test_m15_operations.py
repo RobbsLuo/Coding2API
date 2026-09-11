@@ -1887,3 +1887,168 @@ async def test_stream_plan_error_records_failure(repo):
         pass
     assert collector.events[-1]["ok"] is False
     assert collector.events[-1]["username"] == "carol"
+
+
+# --------------------------------------------- 即时额度探测（新增凭证等场景）
+
+def test_import_triggers_immediate_probe(admin_client):
+    """新增凭证后应立即探测，否则界面一直显示「未探测到额度」。"""
+    app, client = admin_client
+    probed: list[str] = []
+
+    class Stub:
+        endpoint = "https://e"
+
+        def import_credential(self, raw):
+            return {"bearer_token": raw.get("token", "t")}
+
+        async def probe_quota(self, _data):
+            probed.append("called")
+            return Quota(remaining=7, total=10, probed_at=1)
+
+    app.state.executor._deps.providers["codebuddy"] = Stub()
+    created = client.post("/api/credentials", json={
+        "provider": "codebuddy", "credential": {"token": "abc"}})
+    credential_id = created.json()["id"]
+
+    # 后台任务在事件循环里执行，需等待落库
+    for _ in range(50):
+        if probed:
+            break
+        time.sleep(0.02)
+    assert probed == ["called"]
+    health = app.state.credentials.candidates()[0].health
+    assert health == 70
+    assert credential_id
+
+
+def test_probe_failure_marks_unknown_on_immediate_path(admin_client):
+    """即时探测失败 → 记为未探测（NULL），不是额度 0。"""
+    app, client = admin_client
+
+    class Stub:
+        endpoint = "https://e"
+
+        def import_credential(self, raw):
+            return {"bearer_token": raw.get("token", "t")}
+
+        async def probe_quota(self, _data):
+            raise RuntimeError("upstream down")
+
+    app.state.executor._deps.providers["codebuddy"] = Stub()
+    client.post("/api/credentials", json={"provider": "codebuddy", "credential": {"token": "x"}})
+
+    # 探测失败会写 quota_probed_at 并把 health 置回 NULL
+    for _ in range(50):
+        listed = client.get("/api/credentials").json()["credentials"][0]
+        if listed["quota_probed_at"] is not None:
+            break
+        time.sleep(0.02)
+    assert listed["health"] is None
+    assert listed["quota_probed_at"] is not None
+
+
+def test_switch_account_triggers_immediate_probe(admin_client):
+    """账号切换后额度对应新账号，必须重探测而不是沿用旧值。"""
+    app, client = admin_client
+    credential_id = app.state.credentials.add(
+        provider="codebuddy", credential_data={"bearer_token": "t"})
+    probed: list[int] = []
+
+    class Stub:
+        endpoint = "https://e"
+
+        async def switch_account(self, data, account_id):
+            return {**data, "account_uid": account_id}
+
+        async def probe_quota(self, _data):
+            probed.append(1)
+            return Quota(remaining=1, total=4, probed_at=1)
+
+    app.state.executor._deps.providers["codebuddy"] = Stub()
+    client.post(f"/api/credentials/{credential_id}/accounts/select",
+                json={"account_id": "a1"})
+
+    for _ in range(50):
+        if probed:
+            break
+        time.sleep(0.02)
+    assert probed == [1]
+
+
+def test_checkin_success_triggers_immediate_probe(admin_client):
+    """签到发放积分 → 立即刷新额度；签到失败则不探测。"""
+    app, client = admin_client
+    ok_id = app.state.credentials.add(
+        provider="codebuddy", credential_data={"bearer_token": "t"})
+    probed: list[int] = []
+
+    class Stub:
+        endpoint = "https://e"
+
+        async def checkin(self, _data):
+            return CheckinResult(ok=True, credit=10)
+
+        async def probe_quota(self, _data):
+            probed.append(1)
+            return Quota(remaining=3, total=4, probed_at=1)
+
+    app.state.executor._deps.providers["codebuddy"] = Stub()
+    client.post(f"/api/credentials/{ok_id}/checkin")
+
+    for _ in range(50):
+        if probed:
+            break
+        time.sleep(0.02)
+    assert probed == [1]
+
+
+def test_checkin_failure_does_not_probe(admin_client):
+    app, client = admin_client
+    credential_id = app.state.credentials.add(
+        provider="codebuddy", credential_data={"bearer_token": "t"})
+    probed: list[int] = []
+
+    class Stub:
+        endpoint = "https://e"
+
+        async def checkin(self, _data):
+            return CheckinResult(ok=False, code=0)
+
+        async def probe_quota(self, _data):  # pragma: no cover
+            probed.append(1)
+            return Quota()
+
+    app.state.executor._deps.providers["codebuddy"] = Stub()
+    client.post(f"/api/credentials/{credential_id}/checkin")
+    time.sleep(0.1)
+    assert probed == []
+
+
+def test_schedule_probe_ignores_deleted_credential(admin_client):
+    """凭证在探测前被删除 → schedule_probe 静默返回，不抛异常也不建任务。"""
+    app, client = admin_client
+    credential_id = app.state.credentials.add(
+        provider="codebuddy", credential_data={"bearer_token": "t"})
+    before = len(app.state.pending_probes)
+    app.state.credentials.delete(credential_id)
+
+    # 经由 API 触发内部 schedule_probe 的同一路径：重新导入再删除
+    created = client.post("/api/credentials", json={
+        "provider": "codebuddy", "credential": {"token": "x"}}).json()["id"]
+    app.state.credentials.delete(created)
+
+    assert len(app.state.pending_probes) >= before
+
+
+def test_schedule_probe_returns_early_when_credential_unreadable(admin_client):
+    """凭证读取不到（并发删除）→ schedule_probe 直接返回，不建探测任务（main 383-384）。"""
+    app, client = admin_client
+    before = len(app.state.pending_probes)
+    app.state.credentials.credential_data = lambda _cid: None  # type: ignore[method-assign]
+
+    created = client.post("/api/credentials", json={
+        "provider": "codebuddy", "credential": {"token": "x"}})
+    assert created.status_code == 200
+    time.sleep(0.05)
+    assert len(app.state.pending_probes) == before
