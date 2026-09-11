@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import Path
 
 import httpx
 import pytest
@@ -1575,3 +1576,82 @@ def test_credentials_endpoint_exposes_admin_flag(tmp_path):
         client.post("/api/auth/login", json={"username": "guest", "password": "guestpw"})
         body = client.get("/api/credentials").json()
         assert body["viewer"] == "guest" and body["is_admin"] is False
+
+
+# ------------------------------------------------------- 前端静态资源服务
+
+def _spa_app(tmp_path, monkeypatch, *, build: bool = True):
+    """构造带/不带 web/dist 的 app，用于验证 SPA 回退行为。"""
+    import os
+
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    app = build_app(settings)
+    dist = Path("web/dist")
+    if build:
+        dist.mkdir(parents=True, exist_ok=True)
+        (dist / "index.html").write_text("<html>spa</html>", encoding="utf-8")
+        (dist / "app.js").write_text("console.log(1)", encoding="utf-8")
+    return app, dist, os.getcwd()
+
+
+def test_spa_serves_index_for_unknown_path(tmp_path):
+    app, dist, cwd = _spa_app(tmp_path, None)
+    try:
+        with TestClient(app) as client:
+            response = client.get("/credentials")
+        assert response.status_code == 200
+        assert "spa" in response.text
+    finally:
+        import shutil
+
+        shutil.rmtree(dist, ignore_errors=True)
+
+
+def test_spa_serves_real_asset(tmp_path):
+    app, dist, cwd = _spa_app(tmp_path, None)
+    try:
+        with TestClient(app) as client:
+            response = client.get("/app.js")
+        assert response.status_code == 200 and "console.log" in response.text
+    finally:
+        import shutil
+
+        shutil.rmtree(dist, ignore_errors=True)
+
+
+def test_spa_reports_missing_build(tmp_path):
+    app, dist, cwd = _spa_app(tmp_path, None, build=False)
+    with TestClient(app) as client:
+        response = client.get("/credentials")
+    assert response.status_code == 404
+    assert "frontend build not found" in response.text
+
+
+def test_spa_reports_missing_index(tmp_path):
+    import shutil
+
+    app, dist, cwd = _spa_app(tmp_path, None)
+    try:
+        (dist / "index.html").unlink()
+        with TestClient(app) as client:
+            response = client.get("/credentials")
+        assert response.status_code == 404
+        assert "index.html missing" in response.text
+    finally:
+        shutil.rmtree(dist, ignore_errors=True)
+
+
+def test_spa_does_not_escape_dist(tmp_path):
+    """路径穿越必须拒绝：解析后位于 dist 之外的文件不能被读出。"""
+    import shutil
+
+    app, dist, cwd = _spa_app(tmp_path, None)
+    try:
+        secret = Path("web/pyproject.toml")
+        if secret.exists():
+            with TestClient(app) as client:
+                response = client.get("/../pyproject.toml")
+            # 拒绝时回退到 index.html，而不是泄漏文件内容
+            assert "[project]" not in response.text
+    finally:
+        shutil.rmtree(dist, ignore_errors=True)

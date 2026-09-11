@@ -29,3 +29,9 @@ web/build/
 .idea/
 .vscode/
 *.swp
+
+# 前端
+web/node_modules/
+web/dist/
+web/coverage/
+web/*.tsbuildinfo

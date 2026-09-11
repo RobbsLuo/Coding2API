@@ -1,0 +1,79 @@
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { api } from "../api/client";
+import type { Credential, CredentialsResponse, SessionInfo } from "../api/types";
+
+/** Query key 约定：所有管理数据以 ["admin", username, ...] 开头。 */
+export function adminKey(username: string | undefined, ...rest: unknown[]) {
+  return ["admin", username ?? "anonymous", ...rest] as const;
+}
+
+export function useSession() {
+  return useQuery({
+    queryKey: ["session"],
+    queryFn: api.session,
+    retry: false,
+    staleTime: 60_000,
+  });
+}
+
+export function useCredentials(username?: string) {
+  return useQuery<CredentialsResponse>({
+    queryKey: adminKey(username, "credentials"),
+    queryFn: api.credentials,
+  });
+}
+
+export function useApiKeys(username?: string) {
+  return useQuery({
+    queryKey: adminKey(username, "api-keys"),
+    queryFn: api.apiKeys,
+  });
+}
+
+export function useStatsOverview(username?: string, target?: string, since?: number) {
+  return useQuery({
+    queryKey: adminKey(username, "stats-overview", target, since),
+    queryFn: () => api.statsOverview(target, since),
+  });
+}
+
+export function useStatsByProvider(username?: string, target?: string, since?: number) {
+  return useQuery({
+    queryKey: adminKey(username, "stats-providers", target, since),
+    queryFn: () => api.statsByProvider(target, since),
+  });
+}
+
+/** 凭证相关写操作：成功后统一失效凭证与统计查询。 */
+export function useCredentialMutation<TArgs, TResult>(
+  mutationFn: (args: TArgs) => Promise<TResult>,
+  username?: string,
+) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn,
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: ["admin", username ?? "anonymous"] });
+    },
+  });
+}
+
+export function useLogout() {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: api.logout,
+    onSuccess: () => {
+      client.clear();
+    },
+  });
+}
+
+export { useQueryClient };
+
+export function isDisabled(credential: Credential): boolean {
+  return credential.disabled === 1;
+}
+
+export function sessionOf(data: SessionInfo | undefined): SessionInfo | undefined {
+  return data;
+}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -364,6 +365,26 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         raw = str(request.url)
         app.state.last_callback_url = raw
         return {"ok": True, "captured": True, "at": int(time.time())}
+
+    # 静态资源必须最后注册：catch-all 会匹配所有未命中的路径
+    # ------------------------------------------------------- 前端静态资源
+
+    @app.get("/{path:path}", include_in_schema=False)
+    async def spa(path: str):
+        """生产模式服务 web/dist；开发模式由 Vite 代理，无需此路由。"""
+        from fastapi.responses import FileResponse, PlainTextResponse
+
+        dist = Path("web/dist")
+        if not dist.is_dir():
+            return PlainTextResponse("frontend build not found; run pnpm build in web/",
+                                     status_code=404)
+        candidate = (dist / path).resolve()
+        if path and candidate.is_file() and dist.resolve() in candidate.parents:
+            return FileResponse(candidate)
+        index = dist / "index.html"
+        if not index.is_file():
+            return PlainTextResponse("index.html missing", status_code=404)
+        return FileResponse(index)
 
     return app
 

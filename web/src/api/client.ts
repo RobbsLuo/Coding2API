@@ -1,0 +1,138 @@
+import type {
+  ApiKey,
+  ApiKeyCreated,
+  CredentialsResponse,
+  ModelInfo,
+  ProviderStats,
+  SessionInfo,
+  StatsOverview,
+  UpstreamAuthPoll,
+  UpstreamAuthStart,
+} from "./types";
+
+export class ApiError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+      ...init.headers,
+    },
+    credentials: "same-origin",
+  });
+
+  const text = await response.text();
+  const body = text ? (JSON.parse(text) as unknown) : null;
+
+  if (!response.ok) {
+    const error = (body as { error?: { code?: string; message?: string } } | null)?.error;
+    throw new ApiError(response.status, error?.code ?? "unknown", error?.message ?? response.statusText);
+  }
+  return body as T;
+}
+
+const json = (body: unknown): RequestInit => ({ body: JSON.stringify(body) });
+
+export const api = {
+  // ---------------------------------------------------------------- 会话
+  login: (username: string, password: string) =>
+    request<SessionInfo>("/api/auth/login", { method: "POST", ...json({ username, password }) }),
+  logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+  session: () => request<SessionInfo>("/api/auth/session"),
+
+  // ---------------------------------------------------------------- 凭证
+  credentials: () => request<CredentialsResponse>("/api/credentials"),
+  importCredential: (provider: string, credential: unknown, nickname = "") =>
+    request<{ id: string }>("/api/credentials", {
+      method: "POST",
+      ...json({ provider, credential, nickname }),
+    }),
+  toggleCredential: (id: string, enabled: boolean) =>
+    request<{ ok: boolean }>(`/api/credentials/${id}/toggle`, { method: "POST", ...json({ enabled }) }),
+  pinCredential: (id: string | null) =>
+    request<{ ok: boolean }>("/api/credentials/pin", { method: "POST", ...json({ credential_id: id }) }),
+  deleteCredential: (id: string) =>
+    request<{ ok: boolean }>(`/api/credentials/${id}`, { method: "DELETE" }),
+  probeCredential: (id: string) =>
+    request<{ probed: boolean; remaining?: number; total?: number; reason?: string }>(
+      `/api/credentials/${id}/probe`,
+      { method: "POST" },
+    ),
+  checkinCredential: (id: string) =>
+    request<{ ok: boolean; credit: number | null; code: number | null; message: string }>(
+      `/api/credentials/${id}/checkin`,
+      { method: "POST" },
+    ),
+  accounts: (id: string) =>
+    request<{ accounts: { account_id: string; nickname: string; type: string }[] }>(
+      `/api/credentials/${id}/accounts`,
+    ),
+  selectAccount: (id: string, accountId: string) =>
+    request<{ switched: boolean }>(`/api/credentials/${id}/accounts/select`, {
+      method: "POST",
+      ...json({ account_id: accountId }),
+    }),
+
+  // ------------------------------------------------------------ 上游登录
+  upstreamStart: (provider: string) =>
+    request<UpstreamAuthStart>("/api/auth/upstream/start", { method: "POST", ...json({ provider }) }),
+  upstreamPoll: (provider: string, state: string) =>
+    request<UpstreamAuthPoll>("/api/auth/upstream/poll", {
+      method: "POST",
+      ...json({ provider, state }),
+    }),
+  upstreamCancel: (provider: string, state: string) =>
+    request<{ cancelled: boolean }>("/api/auth/upstream/cancel", {
+      method: "POST",
+      ...json({ provider, state }),
+    }),
+
+  // ------------------------------------------------------------- API Key
+  apiKeys: () => request<{ api_keys: ApiKey[] }>("/api/api-keys"),
+  createApiKey: (name: string) =>
+    request<ApiKeyCreated>("/api/api-keys", { method: "POST", ...json({ name }) }),
+  deleteApiKey: (id: string) => request<{ ok: boolean }>(`/api/api-keys/${id}`, { method: "DELETE" }),
+
+  // ---------------------------------------------------------------- 统计
+  statsOverview: (username?: string, since?: number) =>
+    request<StatsOverview>(`/api/stats/overview${query({ username, since })}`),
+  statsByProvider: (username?: string, since?: number) =>
+    request<{ providers: ProviderStats[] }>(`/api/stats/by-provider${query({ username, since })}`),
+
+  // ---------------------------------------------------------------- 模型
+  models: (apiKey: string) =>
+    request<{ object: string; data: ModelInfo[] }>("/v1/models", {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    }),
+
+  // ------------------------------------------------------------ Playground
+  chatCompletion: (apiKey: string, body: unknown) =>
+    fetch("/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
+      body: JSON.stringify(body),
+    }),
+
+  /** 明文 API Key 立即撤销（Playground 用完后清理） */
+  revokeApiKey: (id: string) =>
+    request<{ ok: boolean }>(`/api/api-keys/${id}`, { method: "DELETE" }),
+};
+
+function query(params: Record<string, string | number | undefined>): string {
+  const search = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== "") search.set(key, String(value));
+  }
+  const text = search.toString();
+  return text ? `?${text}` : "";
+}
