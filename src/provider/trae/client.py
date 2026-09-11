@@ -14,7 +14,15 @@ from typing import Any
 import httpx
 
 from ...engine.sse import iter_frames
-from ...provider.base import AuthSession, CheckinResult, ErrKind, Event, Model, Quota
+from ...provider.base import (
+    AuthSession,
+    CheckinResult,
+    ErrKind,
+    Event,
+    Model,
+    Quota,
+    body_hint,
+)
 from . import events as trae_events
 from .callback import (
     CallbackInfo,
@@ -371,9 +379,9 @@ def _normalize_epoch(value: int) -> int:
 
 class UpstreamHTTPError(Exception):
     def __init__(self, status: int, body: bytes) -> None:
-        super().__init__(f"upstream http {status}")
         self.status = status
         self.body = body
+        super().__init__(f"upstream http {status}: {body_hint(body)}")
 
     def kind(self) -> ErrKind:
         return trae_events.classify_status(self.status, self.body)

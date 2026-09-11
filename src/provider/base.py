@@ -30,6 +30,15 @@ class ErrKind(StrEnum):
     INVALID = "invalid"  # 请求无效（如模型不存在）→ 不冷却凭证，直接 400 回客户端
 
 
+def body_hint(body: bytes, limit: int = 160) -> str:
+    """上游错误响应体的单行摘要（进日志与错误文案，便于定位拒绝原因）。"""
+    if not body:
+        return ""
+    text = body.decode("utf-8", errors="replace")
+    text = " ".join(text.split())
+    return text[:limit]
+
+
 @dataclass(slots=True)
 class Usage:
     input_tokens: int | None = None

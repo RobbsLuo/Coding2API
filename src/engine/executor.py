@@ -154,6 +154,8 @@ class Executor:
                 if kind is ErrKind.INVALID:
                     # 请求无效（如该上游不认识模型）：不冷却凭证，
                     # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
+                    logger.warning("上游 %s 拒绝模型 %s（凭证 %s 跳过）: %s",
+                                   provider_id, target.model, credential_id, error)
                     self._record_invalid(username, provider_id, credential_id,
                                          target.model, started, error)
                     last_error, last_kind = error, ErrKind.INVALID
@@ -222,6 +224,8 @@ class Executor:
                 if kind is ErrKind.INVALID:
                     # 请求无效（如该上游不认识模型）：不冷却凭证，
                     # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
+                    logger.warning("上游 %s 拒绝模型 %s（凭证 %s 跳过）: %s",
+                                   provider_id, target.model, credential_id, error)
                     self._record_invalid(username, provider_id, credential_id,
                                          target.model, started, error)
                     last_error, last_kind = error, ErrKind.INVALID
