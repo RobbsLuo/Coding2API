@@ -587,7 +587,12 @@ def test_parse_checkin_response(body, ok):
 
 
 def test_parse_checkin_response_marks_already_checked_in():
-    assert parse_checkin_response({"code": 0, "data": {}}).already_checked_in is True
+    """上游把「已签到」返回成 HTTP 400 + code=10001，必须视为成功。"""
+    real = parse_checkin_response(
+        {"code": 10001, "msg": "今天已签到，请明天再来",
+         "requestId": "595bc3bc-a294-44dc-90dc-4cc3e3756018"})
+    assert real.ok is True and real.already_checked_in is True
+    assert parse_checkin_response({"code": 0, "msg": "OK", "data": {}}).ok is False
     assert parse_checkin_response({"code": 5, "msg": "boom"}).message == "boom"
 
 

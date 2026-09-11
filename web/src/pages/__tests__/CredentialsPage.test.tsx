@@ -246,6 +246,48 @@ describe("CredentialsPage", () => {
     expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("100");
   });
 
+  it("已签到时显示上游原文，不出现「获得 — 积分」", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/checkin")) {
+          return jsonResponse({
+            ok: true, credit: null, code: 10001,
+            message: "今天已签到，请明天再来", already_checked_in: true,
+          });
+        }
+        return jsonResponse(listBody([makeCredential({ id: "cred_1" })]));
+      }),
+    );
+
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByRole("button", { name: "签到" }));
+    const notice = await screen.findByTestId("credentials-notice");
+    expect(notice).toHaveTextContent("今天已签到，请明天再来");
+    expect(notice).not.toHaveTextContent("获得");
+  });
+
+  it("签到成功但无 credit 时显示「签到成功」", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/checkin")) {
+          return jsonResponse({ ok: true, credit: null, code: 0,
+                                message: "", already_checked_in: false });
+        }
+        return jsonResponse(listBody([makeCredential({ id: "cred_1" })]));
+      }),
+    );
+
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByRole("button", { name: "签到" }));
+    expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("签到成功");
+  });
+
   it("签到未成功展示 code，且 code 为 null 时也能渲染", async () => {
     vi.stubGlobal(
       "fetch",

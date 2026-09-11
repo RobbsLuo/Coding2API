@@ -1,6 +1,7 @@
 import type {
   ApiKey,
   ApiKeyCreated,
+  CheckinResult,
   CredentialsResponse,
   ModelInfo,
   ProbeResult,
@@ -67,10 +68,7 @@ export const api = {
   probeCredential: (id: string) =>
     request<ProbeResult>(`/api/credentials/${id}/probe`, { method: "POST" }),
   checkinCredential: (id: string) =>
-    request<{ ok: boolean; credit: number | null; code: number | null; message: string }>(
-      `/api/credentials/${id}/checkin`,
-      { method: "POST" },
-    ),
+    request<CheckinResult>(`/api/credentials/${id}/checkin`, { method: "POST" }),
   accounts: (id: string) =>
     request<{ accounts: { account_id: string; nickname: string; type: string }[] }>(
       `/api/credentials/${id}/accounts`,

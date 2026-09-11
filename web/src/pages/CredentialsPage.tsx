@@ -113,11 +113,20 @@ export function CredentialsPage() {
         setNotice(null);
         try {
           const result = await api.checkinCredential(credential.id);
-          setNotice(
-            result.ok
-              ? `签到成功，获得 ${formatNumber(result.credit)} 积分`
-              : `签到未成功（code=${result.code ?? "null"}）${result.message ? ` ${result.message}` : ""}`,
-          );
+          if (result.ok && result.already_checked_in) {
+            // 上游把「已签到」返回成 HTTP 400 + code=10001，这不是错误
+            setNotice(result.message || "今天已签到，请明天再来");
+          } else if (result.ok) {
+            setNotice(
+              result.credit === null
+                ? "签到成功"
+                : `签到成功，获得 ${formatNumber(result.credit)} 积分`,
+            );
+          } else {
+            setNotice(
+              `签到未成功（code=${result.code ?? "null"}）${result.message ? ` ${result.message}` : ""}`,
+            );
+          }
           await refresh();
         } catch (caught) {
           setError(caught instanceof Error ? caught.message : "签到失败");

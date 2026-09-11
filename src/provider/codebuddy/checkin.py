@@ -45,9 +45,12 @@ def parse_checkin_response(body: Any) -> CheckinResult:
 
     if code == 0 and valid_credit:
         return CheckinResult(ok=True, credit=float(credit), code=0, message=message)
-    already = code == 0 and not valid_credit
+    # 上游把「已签到」返回成 HTTP 400 + code=10001；这也算成功
+    if code is not None and "已签到" in message:
+        return CheckinResult(ok=True, credit=None, code=code, message=message,
+                             already_checked_in=True)
     return CheckinResult(ok=False, credit=None, code=code, message=message,
-                         already_checked_in=already)
+                         already_checked_in=False)
 
 
 def checkin_scope_key(endpoint: str, user_id: str) -> str:
@@ -71,11 +74,19 @@ class CodeBuddyCheckin:
             await self._client.aclose()
 
     async def claim(self, credential: CodeBuddyCredential) -> CheckinResult:
+        """上游把「已签到」也返回成 HTTP 400 + code=10001。
+
+        这不是错误——重复签到是日常操作，报错会让用户以为签到坏了
+        （原项目同样把「已签到」视为成功）。
+        """
         response = await self._http.post(
             f"{self.endpoint}{EP_DAILY_CHECKIN}", json={},
             headers=build_headers(credential, self.endpoint))
-        if response.status_code >= 400:
-            raise UpstreamProtocolViolation(f"checkin rejected with {response.status_code}")
+        if response.status_code in (401, 403):
+            raise UpstreamProtocolViolation("checkin unauthorized: credential rejected")
+        if response.status_code >= 500:
+            raise UpstreamProtocolViolation(
+                f"checkin rejected with {response.status_code}")
         try:
             body = response.json()
         except ValueError as error:

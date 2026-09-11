@@ -112,6 +112,15 @@ export interface ProbeResult {
   detail?: string;
 }
 
+export interface CheckinResult {
+  ok: boolean;
+  credit: number | null;
+  code: number | null;
+  message: string;
+  /** 上游把「已签到」返回成 400 + code=10001，这不是错误 */
+  already_checked_in: boolean;
+}
+
 export interface ModelInfo {
   id: string;
   object: string;
