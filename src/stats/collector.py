@@ -225,3 +225,32 @@ class StatsQuery:
              "credit": row["credit_sum"]}
             for row in rows
         ]
+
+    def timeline(self, *, username: str | None = None,
+                 since: int | None = None) -> list[dict[str, Any]]:
+        """按小时的请求量时间序列（usage_hourly 聚合，跨 model 汇总）。
+
+        每点包含 codebuddy / trae 两个上游的请求数，供前端绘制曲线。
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if username is not None:
+            clauses.append("username = ?")
+            params.append(username)
+        if since is not None:
+            clauses.append("hour_utc >= ?")
+            params.append(since)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._db.connect().execute(
+            f"""
+            SELECT hour_utc,
+                   COALESCE(SUM(CASE WHEN provider = 'codebuddy' THEN requests ELSE 0 END), 0) AS codebuddy,
+                   COALESCE(SUM(CASE WHEN provider = 'trae' THEN requests ELSE 0 END), 0) AS trae
+            FROM usage_hourly {where}
+            GROUP BY hour_utc
+            ORDER BY hour_utc
+            """, params).fetchall()
+        return [
+            {"hour": row["hour_utc"], "codebuddy": row["codebuddy"], "trae": row["trae"]}
+            for row in rows
+        ]

@@ -520,6 +520,12 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         target = username if principal.is_admin else principal.username
         return {"providers": app.state.stats_query.by_provider(username=target, since=since)}
 
+    @app.get("/api/stats/timeline")
+    async def stats_timeline(principal: Principal = Depends(principal_from_request),
+                             username: str | None = None, since: int | None = None):
+        target = username if principal.is_admin else principal.username
+        return {"points": app.state.stats_query.timeline(username=target, since=since)}
+
     # -------------------------------------------------- TRAE 回调（无鉴权）
 
     @app.get("/authorize")

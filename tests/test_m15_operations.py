@@ -1034,6 +1034,27 @@ def test_stats_overview_since_filter(stats):
     assert query.overview(username="u", since=5000)["requests"] == 1
 
 
+def test_stats_timeline_by_hour_and_provider(stats):
+    collector, query = stats
+    # 同一小时两条明细（同一 provider 累积到同一点，跨 provider 分列）
+    collector.record(username="u", provider="codebuddy", model="m", ok=True, now=1_700_000_000)
+    collector.record(username="u", provider="codebuddy", model="m", ok=True, now=1_700_000_100)
+    collector.record(username="u", provider="trae", model="m", ok=True, now=1_700_000_200)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     now=1_700_000_000 + 3600)  # 下一小时
+    collector.rollup_hourly()
+    points = query.timeline(username="u")
+    # 两小时、每个小时都含 codebuddy/trae 两路计数
+    assert len(points) == 2
+    first = points[0]
+    assert first["codebuddy"] == 2 and first["trae"] == 1
+    assert points[1]["trae"] == 1
+    # since 过滤按小时边界（第二小时整点 = first hour 整点 + 3600）
+    second_hour = first["hour"] + 3600
+    filtered = query.timeline(username="u", since=second_hour)
+    assert len(filtered) == 1 and filtered[0]["trae"] == 1
+
+
 # ------------------------------------------------------------ API 端到端
 
 @pytest.fixture()
@@ -1103,11 +1124,15 @@ def test_stats_endpoints_scope_by_principal(admin_client):
     app, client = admin_client
     app.state.stats_collector.record(username="root", provider="trae", model="m", ok=True)
     app.state.stats_collector.record(username="other", provider="trae", model="m", ok=True)
+    app.state.stats_collector.rollup_hourly()
     overview = client.get("/api/stats/overview").json()
     assert overview["requests"] == 2                     # admin 看全局
     scoped = client.get("/api/stats/overview", params={"username": "other"}).json()
     assert scoped["requests"] == 1
     assert client.get("/api/stats/by-provider").json()["providers"][0]["requests"] == 2
+    timeline = client.get("/api/stats/timeline").json()
+    assert timeline["points"]
+    assert list(timeline["points"][0].keys()) == ["hour", "codebuddy", "trae"]
 
 
 def test_stats_endpoints_restrict_non_admin(tmp_path):
