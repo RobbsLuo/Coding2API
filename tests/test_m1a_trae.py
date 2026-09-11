@@ -883,3 +883,49 @@ def test_authorize_rejects_callback_without_pending_login(client):
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request"
     assert "refreshToken=RT" in client.app.state.last_callback_url
+
+
+def test_prepare_body_stringifies_tool_parameters():
+    """OpenAI tools.parameters(object) → TRAE 要求 JSON 字符串（code=4001 回归）。"""
+    from src.provider.trae.client import prepare_body
+
+    payload = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "tools": [
+            {"type": "function", "function": {
+                "name": "read", "description": "d",
+                "parameters": {"type": "object", "properties": {"p": {"type": "string"}}}}},
+            {"type": "function", "function": {"name": "no_params"}},   # 缺 parameters
+            "junk",                                                     # 非对象跳过
+        ],
+        "tool_choice": "auto",
+    }
+    body = prepare_body(payload, "m")
+    tools = body["tools"]
+    assert isinstance(tools, list) and len(tools) == 2
+    first = tools[0]["function"]["parameters"]
+    assert isinstance(first, str) and json.loads(first)["type"] == "object"
+    assert tools[1]["function"]["parameters"] == "{}"
+    # tool_choice 归一化不受影响
+    assert body["tool_choice"] == "auto"
+
+
+def test_prepare_body_tools_edge_cases():
+    """tools 非 list / parameters 为 list / 带 parameters 的字符串透传。"""
+    from src.provider.trae.client import prepare_body
+
+    # tools 不是 list → 原样保留（走 _stringify 的早退分支）
+    body = prepare_body({"messages": [], "tools": "nope"}, "m")
+    assert body["tools"] == "nope"
+
+    # parameters 为 list → 同样字符串化
+    body = prepare_body({"messages": [], "tools": [
+        {"type": "function", "function": {"name": "f", "parameters": ["a"]}},
+    ]}, "m")
+    assert body["tools"][0]["function"]["parameters"] == '["a"]'
+
+    # parameters 已是字符串 → 原样保留
+    body = prepare_body({"messages": [], "tools": [
+        {"type": "function", "function": {"name": "f", "parameters": "{}"}},
+    ]}, "m")
+    assert body["tools"][0]["function"]["parameters"] == "{}"

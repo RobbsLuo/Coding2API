@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -119,6 +120,35 @@ def _normalize_tools(body: dict[str, Any]) -> None:
             body.pop("tool_choice", None)
     if body.get("tools") is None:
         body.pop("tools", None)
+        return
+    _stringify_tool_parameters(body)
+
+
+def _stringify_tool_parameters(body: dict[str, Any]) -> None:
+    """OpenAI 的 function.parameters 是 object，TRAE（Go）要求 JSON 字符串。
+
+    实测不转换 → 400 code=4001 "cannot unmarshal object into Go struct
+    field FunctionDefinition.tools.function.parameters of type string"。
+    """
+    tools = body.get("tools")
+    if not isinstance(tools, list):
+        return
+    normalized: list[Any] = []
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        tool = dict(tool)
+        function = tool.get("function")
+        if isinstance(function, dict):
+            function = dict(function)
+            params = function.get("parameters")
+            if isinstance(params, (dict, list)):
+                function["parameters"] = json.dumps(params, ensure_ascii=False)
+            elif params is None:
+                function["parameters"] = "{}"
+            tool["function"] = function
+        normalized.append(tool)
+    body["tools"] = normalized
 
 
 def solo_headers(credential: TraeCredential, *, stream: bool = True) -> dict[str, str]:
