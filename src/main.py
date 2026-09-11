@@ -23,8 +23,10 @@ from .provider.codebuddy.client import CodeBuddyProvider
 from .provider.codebuddy.events import (
     UpstreamProtocolViolation as CodeBuddyProtocolViolation,
 )
+from .provider.codebuddy.oauth import CodeBuddyOAuth
 from .provider.trae.client import TraeProvider
 from .provider.trae.events import UpstreamProtocolViolation
+from .stats.collector import StatsCollector, StatsQuery
 
 SESSION_COOKIE = "coding2api_session"
 
@@ -54,6 +56,9 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.credentials = credentials
     app.state.api_keys = api_keys
     app.state.executor = executor
+    app.state.stats_collector = StatsCollector(db)
+    app.state.stats_query = StatsQuery(db)
+    app.state.upstream_auth = _upstream_auth(registry, config)
 
     # ------------------------------------------------------------ 鉴权依赖
 
@@ -205,6 +210,121 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             raise InvalidRequest("api key not found")
         return {"ok": True}
 
+    # ------------------------------------------------- 上游登录（poll 轨道）
+
+    @app.post("/api/auth/upstream/start")
+    async def upstream_auth_start(payload: dict,
+                                  principal: Principal = Depends(principal_from_request)):
+        require_admin(principal)
+        provider_id = str(payload.get("provider") or "")
+        oauth = app.state.upstream_auth.get(provider_id)
+        if oauth is None:
+            raise InvalidRequest(f"provider {provider_id!r} does not support polling login")
+        session = await oauth.start(principal.username)
+        return {"flow": session.flow, "state": session.state, "auth_url": session.auth_url,
+                "interval": session.interval}
+
+    @app.post("/api/auth/upstream/poll")
+    async def upstream_auth_poll(payload: dict,
+                                 principal: Principal = Depends(principal_from_request)):
+        require_admin(principal)
+        provider_id = str(payload.get("provider") or "")
+        state = str(payload.get("state") or "")
+        oauth = app.state.upstream_auth.get(provider_id)
+        if oauth is None:
+            raise InvalidRequest(f"provider {provider_id!r} does not support polling login")
+        result = await oauth.poll(state, principal.username)
+        if result is None:
+            return {"status": "pending"}
+        # 登录成功：直接落库，绝不在响应里回传 token
+        credential_id = credentials.add(
+            provider=provider_id, credential_data=result.credential_data,
+            nickname=result.nickname, added_by=principal.username)
+        return {"status": "success", "credential_id": credential_id}
+
+    @app.post("/api/auth/upstream/cancel")
+    async def upstream_auth_cancel(payload: dict,
+                                   principal: Principal = Depends(principal_from_request)):
+        require_admin(principal)
+        oauth = app.state.upstream_auth.get(str(payload.get("provider") or ""))
+        if oauth is None:
+            raise InvalidRequest("provider does not support polling login")
+        cancelled = oauth.store.cancel(str(payload.get("state") or ""), principal.username)
+        return {"cancelled": cancelled}
+
+    # ------------------------------------------------------- 凭证运维（M1.5）
+
+    @app.post("/api/credentials/{credential_id}/probe")
+    async def probe_credential(credential_id: str,
+                               principal: Principal = Depends(principal_from_request)):
+        require_admin(principal)
+        provider_id = credentials.provider_of(credential_id)
+        provider = registry.get(provider_id or "")
+        data = credentials.credential_data(credential_id)
+        if provider is None or data is None:
+            raise InvalidRequest("credential not found")
+        try:
+            quota = await provider.probe_quota(data)
+        except Exception as error:  # noqa: BLE001 - 探测失败 → unknown，不当作 0
+            credentials.mark_probe_failed(credential_id)
+            return {"probed": False, "reason": type(error).__name__}
+        credentials.save_quota(credential_id, quota)
+        return {"probed": True, "remaining": quota.remaining, "total": quota.total,
+                "cycle_end": quota.cycle_end}
+
+    @app.post("/api/credentials/{credential_id}/checkin")
+    async def checkin_credential(credential_id: str,
+                                 principal: Principal = Depends(principal_from_request)):
+        require_admin(principal)
+        provider_id = credentials.provider_of(credential_id)
+        provider = registry.get(provider_id or "")
+        data = credentials.credential_data(credential_id)
+        if provider is None or data is None or not hasattr(provider, "checkin"):
+            raise InvalidRequest("credential does not support checkin")
+        result = await provider.checkin(data)
+        return {"ok": result.ok, "credit": result.credit, "code": result.code,
+                "message": result.message}
+
+    @app.get("/api/credentials/{credential_id}/accounts")
+    async def list_credential_accounts(credential_id: str,
+                                       principal: Principal = Depends(principal_from_request)):
+        require_admin(principal)
+        provider_id = credentials.provider_of(credential_id)
+        provider = registry.get(provider_id or "")
+        data = credentials.credential_data(credential_id)
+        if provider is None or data is None or not hasattr(provider, "list_accounts"):
+            raise InvalidRequest("credential does not support account switching")
+        accounts = await provider.list_accounts(data)
+        return {"accounts": [{"account_id": a.account_id, "nickname": a.nickname,
+                              "type": a.account_type} for a in accounts]}
+
+    @app.post("/api/credentials/{credential_id}/accounts/select")
+    async def select_credential_account(credential_id: str, payload: dict,
+                                        principal: Principal = Depends(principal_from_request)):
+        require_admin(principal)
+        provider_id = credentials.provider_of(credential_id)
+        provider = registry.get(provider_id or "")
+        data = credentials.credential_data(credential_id)
+        if provider is None or data is None or not hasattr(provider, "switch_account"):
+            raise InvalidRequest("credential does not support account switching")
+        switched = await provider.switch_account(data, str(payload.get("account_id") or ""))
+        credentials.save_credential_data(credential_id, switched)
+        return {"switched": True}
+
+    # ------------------------------------------------------------- 统计
+
+    @app.get("/api/stats/overview")
+    async def stats_overview(principal: Principal = Depends(principal_from_request),
+                             username: str | None = None, since: int | None = None):
+        target = username if principal.is_admin else principal.username
+        return app.state.stats_query.overview(username=target, since=since)
+
+    @app.get("/api/stats/by-provider")
+    async def stats_by_provider(principal: Principal = Depends(principal_from_request),
+                                username: str | None = None, since: int | None = None):
+        target = username if principal.is_admin else principal.username
+        return {"providers": app.state.stats_query.by_provider(username=target, since=since)}
+
     # -------------------------------------------------- TRAE 回调（无鉴权）
 
     @app.get("/authorize")
@@ -220,3 +340,13 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 def resolve_public_callback_url(settings: Settings) -> str:
     """PUBLIC_BASE_URL + /authorize（远程部署必须可被浏览器访问）。"""
     return settings.public_base_url.rstrip("/") + "/authorize"
+
+
+def _upstream_auth(registry: dict, settings: Settings) -> dict:
+    """返回支持 poll 轨道的 provider 的 OAuth 实现（当前仅 CodeBuddy）。"""
+    flows: dict = {}
+    codebuddy = registry.get("codebuddy")
+    endpoint = getattr(getattr(codebuddy, "client", None), "endpoint", None)
+    if endpoint is not None:
+        flows["codebuddy"] = CodeBuddyOAuth(endpoint)
+    return flows

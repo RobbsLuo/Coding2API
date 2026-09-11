@@ -6,17 +6,20 @@ OAuth 轮询、企业额度、多账号切换在 M1.5。
 
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .checkin import CheckinResult
 
 import httpx
 
 from ...engine.sse import iter_frames
 from ...provider.base import ErrKind, Event, Model, Quota
 from . import events as cb_events
+from .credential import CodeBuddyCredential, parse_credential
 from .events import UpstreamProtocolViolation
 from .headers import (
     CN_ENDPOINT,
@@ -33,91 +36,6 @@ STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
 SHORT_TIMEOUT = httpx.Timeout(30.0)
 
 DEFAULT_MODELS: tuple[str, ...] = ("glm-5.2", "deepseek-v4-pro")
-
-
-@dataclass(slots=True)
-class CodeBuddyCredential:
-    """归一化凭证。bearer-only 手动凭证只有 bearer_token 也是合法的。"""
-
-    bearer_token: str = ""
-    user_id: str = ""
-    account_uid: str = ""
-    domain: str = ""
-    enterprise_id: str = ""
-    department_full_name: str = ""
-    refresh_token: str = ""
-    expires_at: int = 0
-    auth_source: str = "unknown"          # manual | oauth | unknown
-    quota_probe_mode: str = "personal"    # personal | enterprise
-    nickname: str = ""
-
-    @property
-    def is_oauth(self) -> bool:
-        return self.auth_source == "oauth"
-
-    def needs_refresh(self, skew_seconds: int, now: int | None = None) -> bool:
-        """只有 OAuth 凭证参与刷新；bearer-only 手动凭证永不刷新（AGENTS.md）。"""
-        if not self.is_oauth or not self.refresh_token or self.expires_at <= 0:
-            return False
-        current = int(now if now is not None else time.time())
-        return current + skew_seconds >= self.expires_at
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "bearer_token": self.bearer_token, "user_id": self.user_id,
-            "account_uid": self.account_uid, "domain": self.domain,
-            "enterprise_id": self.enterprise_id,
-            "department_full_name": self.department_full_name,
-            "refresh_token": self.refresh_token, "expires_at": self.expires_at,
-            "auth_source": self.auth_source, "quota_probe_mode": self.quota_probe_mode,
-            "nickname": self.nickname,
-        }
-
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> CodeBuddyCredential:
-        source = raw.get("auth_source")
-        return cls(
-            bearer_token=str(raw.get("bearer_token") or raw.get("bearerToken") or ""),
-            user_id=str(raw.get("user_id") or ""),
-            account_uid=str(raw.get("account_uid") or ""),
-            domain=str(raw.get("domain") or ""),
-            enterprise_id=str(raw.get("enterprise_id") or ""),
-            department_full_name=str(raw.get("department_full_name") or ""),
-            refresh_token=str(raw.get("refresh_token") or ""),
-            expires_at=int(raw.get("expires_at") or 0),
-            auth_source=source if source in ("manual", "oauth") else "unknown",
-            quota_probe_mode="enterprise"
-            if raw.get("quota_probe_mode") == "enterprise" else "personal",
-            nickname=str(raw.get("nickname") or ""),
-        )
-
-
-def parse_credential(raw: bytes | dict[str, Any], *,
-                     auth_source: str = "manual") -> CodeBuddyCredential:
-    """手动导入路径：接受 token / access_token / bearer_token 任一键名。
-
-    auth_source 只能由可信创建入口显式写入：手动添加为 manual，OAuth 为 oauth。
-    """
-    if isinstance(raw, bytes):
-        try:
-            raw = json.loads(raw.decode("utf-8"))
-        except (json.JSONDecodeError, UnicodeDecodeError) as error:
-            raise UpstreamProtocolViolation("credential is not valid JSON") from error
-    if not isinstance(raw, dict):
-        raise UpstreamProtocolViolation("credential is not an object")
-
-    token = raw.get("bearer_token") or raw.get("access_token") or raw.get("token")
-    if not isinstance(token, str) or not token.strip():
-        raise UpstreamProtocolViolation("credential missing bearer token")
-    credential = CodeBuddyCredential.from_dict(raw)
-    credential.bearer_token = token.strip()
-    # AGENTS.md 约束：来源只能由可信创建入口显式写入。
-    # - 字段缺失 → 由入口决定（手动导入 = manual）
-    # - 字段存在但非法 → 保持 unknown，绝不能默认成 manual
-    if "auth_source" not in raw:
-        credential.auth_source = auth_source
-    return credential
-
 
 def build_headers(credential: CodeBuddyCredential, endpoint: str, *,
                   quota_only: bool = False) -> dict[str, str]:
@@ -270,6 +188,32 @@ def _cycle_end_epoch(value: Any) -> int | None:
     return None
 
 
+_CHECKIN_CACHE: dict[int, object] = {}
+_REFRESH_CACHE: dict[int, object] = {}
+
+
+def _cached_checkin(client: CodeBuddyClient):
+    from .checkin import CodeBuddyCheckin
+
+    key = id(client)
+    cached = _CHECKIN_CACHE.get(key)
+    if cached is None:
+        cached = CodeBuddyCheckin(client.endpoint, client=client._short)
+        _CHECKIN_CACHE[key] = cached
+    return cached
+
+
+def _cached_refresh(client: CodeBuddyClient):
+    from .refresh import CodeBuddyRefresh
+
+    key = id(client)
+    cached = _REFRESH_CACHE.get(key)
+    if cached is None:
+        cached = CodeBuddyRefresh(client.endpoint, client=client._short)
+        _REFRESH_CACHE[key] = cached
+    return cached
+
+
 class UpstreamHTTPError(Exception):
     def __init__(self, status: int, body: bytes) -> None:
         super().__init__(f"upstream http {status}")
@@ -308,3 +252,45 @@ class CodeBuddyProvider:
 
     def host(self) -> str:
         return host_of(self.client.endpoint)
+
+    # -------------------------------------------------------------- M1.5
+
+    def credential_from(self, credential_data: dict) -> CodeBuddyCredential:
+        return CodeBuddyCredential.from_dict(credential_data)
+
+    async def checkin(self, credential_data: dict) -> CheckinResult:  # noqa: F821
+
+        client = _cached_checkin(self.client)
+        credential = CodeBuddyCredential.from_dict(credential_data)
+        result = await client.claim(credential)
+        return result
+
+    def checkin_scope(self, credential_data: dict) -> str:
+        """签到隔离键：endpoint + X-User-Id（AGENTS.md 约束）。"""
+        from .checkin import checkin_scope_key
+
+        credential = CodeBuddyCredential.from_dict(credential_data)
+        return checkin_scope_key(self.client.endpoint,
+                                 credential.account_uid or credential.user_id)
+
+    async def refresh(self, credential_data: dict) -> dict:
+        """OAuth 凭证刷新；bearer-only 手动凭证直接返回原值（AGENTS.md）。"""
+
+        credential = CodeBuddyCredential.from_dict(credential_data)
+        if not credential.needs_refresh(0, now=2**31 - 1) and not credential.is_oauth:
+            return credential_data
+        client = _cached_refresh(self.client)
+        outcome = await client.refresh(credential)
+        return outcome.credential.to_dict()
+
+    async def list_accounts(self, credential_data: dict) -> list:
+
+        client = _cached_refresh(self.client)
+        return await client.list_accounts(CodeBuddyCredential.from_dict(credential_data))
+
+    async def switch_account(self, credential_data: dict, account_id: str) -> dict:
+
+        client = _cached_refresh(self.client)
+        switched = await client.switch_account(
+            CodeBuddyCredential.from_dict(credential_data), account_id)
+        return switched.to_dict()
