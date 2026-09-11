@@ -122,10 +122,6 @@ export const api = {
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
       body: JSON.stringify(body),
     }),
-
-  /** 明文 API Key 立即撤销（Playground 用完后清理） */
-  revokeApiKey: (id: string) =>
-    request<{ ok: boolean }>(`/api/api-keys/${id}`, { method: "DELETE" }),
 };
 
 function query(params: Record<string, string | number | undefined>): string {

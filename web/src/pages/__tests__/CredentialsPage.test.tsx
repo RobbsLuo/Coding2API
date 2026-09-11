@@ -273,3 +273,124 @@ describe("CredentialsPage", () => {
     expect(screen.getByTestId("no-credentials")).toBeInTheDocument();
   });
 });
+
+
+describe("上游登录入口", () => {
+  it("两个上游都能发起登录", async () => {
+    mockFetch({ "/api/credentials": listBody([]) });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    expect(screen.getByTestId("start-login-codebuddy")).toHaveTextContent("登录 CodeBuddy");
+    expect(screen.getByTestId("start-login-trae")).toHaveTextContent("登录 TRAE");
+  });
+
+  it("CodeBuddy 走 poll：打开授权页并轮询上游", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const opened: string[] = [];
+    vi.stubGlobal("open", (url: string) => {
+      opened.push(url);
+      return null;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/upstream/start")) {
+          return jsonResponse({
+            flow: "poll",
+            state: "res-1",
+            auth_url: "https://auth.example/x",
+            interval: 5,
+            callback_url: null,
+          });
+        }
+        if (url.includes("/upstream/poll")) {
+          return jsonResponse({ status: "success", credential_id: "cred_new" });
+        }
+        return jsonResponse(listBody([]));
+      }),
+    );
+
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("start-login-codebuddy"));
+
+    expect(opened).toEqual(["https://auth.example/x"]);
+    expect(await screen.findByTestId("cancel-login-codebuddy")).toBeInTheDocument();
+
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("登录成功");
+    vi.useRealTimers();
+  });
+
+  it("TRAE 走 callback：不轮询上游，靠凭证列表变化检测完成", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.stubGlobal("open", () => null);
+    let credentialCount = 1;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/upstream/start")) {
+          return jsonResponse({
+            flow: "callback",
+            state: "machine:device",
+            auth_url: "https://trae.example/login",
+            interval: null,
+            callback_url: "http://127.0.0.1:8000/authorize",
+          });
+        }
+        return jsonResponse(
+          listBody(Array.from({ length: credentialCount }, (_, index) =>
+            makeCredential({ id: `c${index}` }))),
+        );
+      }),
+    );
+
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("start-login-trae"));
+    expect(await screen.findByTestId("cancel-login-trae")).toBeInTheDocument();
+
+    // 浏览器授权完成后服务端落库 → 下一次轮询发现凭证变多
+    credentialCount = 2;
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("登录成功");
+    vi.useRealTimers();
+  });
+
+  it("取消登录会调用 cancel 接口并移除挂起状态", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/upstream/start")) {
+        return jsonResponse({ flow: "poll", state: "res-2",
+                              auth_url: "https://auth.example/y", interval: 60 });
+      }
+      if (url.includes("/upstream/cancel")) return jsonResponse({ cancelled: true });
+      return jsonResponse(listBody([]));
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    vi.stubGlobal("open", () => null);
+
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("start-login-codebuddy"));
+    await screen.findByTestId("cancel-login-codebuddy");
+    await userEvent.click(screen.getByTestId("cancel-login-codebuddy"));
+
+    await waitFor(() =>
+      expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("/upstream/cancel"))).toBe(true),
+    );
+    expect(screen.queryByTestId("cancel-login-codebuddy")).not.toBeInTheDocument();
+    expect(screen.getByTestId("start-login-codebuddy")).toBeInTheDocument();
+  });
+
+  it("非管理员看不到登录入口", async () => {
+    mockFetch({ "/api/credentials": listBody([], false) });
+    renderPage(<CredentialsPage />, READER);
+    await settle();
+    expect(screen.queryByTestId("start-login-codebuddy")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("start-login-trae")).not.toBeInTheDocument();
+  });
+});

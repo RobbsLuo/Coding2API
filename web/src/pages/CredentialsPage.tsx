@@ -38,7 +38,8 @@ export function CredentialsPage() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [accountsFor, setAccountsFor] = useState<string | null>(null);
   const [accounts, setAccounts] = useState<{ account_id: string; nickname: string; type: string }[]>([]);
-  const [loginState, setLoginState] = useState<string | null>(null);
+  // 每个上游各自可能有进行中的登录（CodeBuddy 轮询 / TRAE 回调）
+  const [loginProviders, setLoginProviders] = useState<Provider[]>([]);
 
   const credentials = data?.credentials ?? [];
   const isAdmin = data?.is_admin ?? false;
@@ -134,7 +135,26 @@ export function CredentialsPage() {
     try {
       const started = await api.upstreamStart(provider);
       if (started.auth_url) window.open(started.auth_url, "_blank", "noopener");
-      setLoginState(started.state);
+      setLoginProviders((previous) => [...new Set([...previous, provider])]);
+
+      if (started.flow === "callback") {
+        // TRAE：浏览器完成授权后 302 回本服务的 /authorize，那里直接落库。
+        // 前端无法轮询上游，改为轮询凭证列表，出现新凭证即视为完成。
+        setNotice("已在新标签页打开授权页。完成授权后本页会自动刷新出凭证。");
+        const deadline = Date.now() + 5 * 60 * 1000;
+        const timer = window.setInterval(async () => {
+          const before = credentials.length;
+          await refresh();
+          const after = (await api.credentials()).credentials.length;
+          if (after > before || Date.now() > deadline) {
+            window.clearInterval(timer);
+            setLoginProviders((previous) => previous.filter((item) => item !== provider));
+            setNotice(after > before ? "登录成功，凭证已保存。" : "授权超时，请重新发起登录。");
+          }
+        }, 3000);
+        return;
+      }
+
       setNotice("已在新标签页打开授权页，完成后此页会自动检测。");
       const interval = (started.interval ?? 5) * 1000;
       const timer = window.setInterval(async () => {
@@ -142,18 +162,29 @@ export function CredentialsPage() {
           const result = await api.upstreamPoll(provider, started.state);
           if (result.status === "success") {
             window.clearInterval(timer);
-            setLoginState(null);
+            setLoginProviders((previous) => previous.filter((item) => item !== provider));
             setNotice("登录成功，凭证已保存。");
             await refresh();
           }
         } catch {
           window.clearInterval(timer);
-          setLoginState(null);
+          setLoginProviders((previous) => previous.filter((item) => item !== provider));
           setError("登录轮询失败，请重试。");
         }
       }, interval);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "无法启动登录流程");
+    }
+  };
+
+  const cancelLogin = async (provider: Provider) => {
+    setError(null);
+    try {
+      const started = await api.upstreamStart(provider).catch(() => null);
+      if (started) await api.upstreamCancel(provider, started.state).catch(() => undefined);
+    } finally {
+      setLoginProviders((previous) => previous.filter((item) => item !== provider));
+      setNotice("已取消登录。");
     }
   };
 
@@ -262,35 +293,40 @@ export function CredentialsPage() {
       {isAdmin && (
         <Panel title="登录上游账号">
           <div className="flex flex-wrap items-center gap-3">
-            <span className="text-xs text-[var(--color-ink-muted)]">
-              CodeBuddy 使用设备码轮询：点击后在新标签页完成授权，本页自动检测结果。
-            </span>
-            {loginState ? (
-              <Button
-                size="sm"
-                variant="danger"
-                onClick={() =>
-                  void api.upstreamCancel("codebuddy", loginState).then(() => {
-                    setLoginState(null);
-                    setNotice("已取消登录。");
-                  })
-                }
-              >
-                取消登录
-              </Button>
-            ) : (
-              <Button
-                size="sm"
-                variant="primary"
-                data-testid="start-login"
-                onClick={() => void startLogin("codebuddy")}
-              >
-                登录 CodeBuddy
-              </Button>
-            )}
+            {PROVIDERS.map((item) => {
+              const pending = loginProviders.includes(item);
+              return pending ? (
+                <span key={item} className="inline-flex items-center gap-2">
+                  <span className="text-xs text-[var(--color-ink-muted)]">
+                    {PROVIDER_LABEL[item]} 登录中…
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    data-testid={`cancel-login-${item}`}
+                    onClick={() => void cancelLogin(item)}
+                  >
+                    取消登录
+                  </Button>
+                </span>
+              ) : (
+                <Button
+                  key={item}
+                  size="sm"
+                  variant="primary"
+                  data-testid={`start-login-${item}`}
+                  disabled={busy}
+                  onClick={() => void startLogin(item)}
+                >
+                  登录 {PROVIDER_LABEL[item]}
+                </Button>
+              );
+            })}
           </div>
           <p className="mt-2 text-xs text-[var(--color-ink-muted)]">
-            TRAE 使用浏览器回调：请通过「导入凭证」粘贴回调链接或凭证 JSON。
+            CodeBuddy 走设备码轮询（本页自动轮询上游）；TRAE 走浏览器回调
+            （授权后由 <code>/authorize</code> 直接落库，本页轮询凭证列表检测完成）。
+            也可以直接粘贴凭证 JSON 导入。
           </p>
         </Panel>
       )}

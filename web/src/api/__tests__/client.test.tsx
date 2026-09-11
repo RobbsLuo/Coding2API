@@ -152,9 +152,7 @@ describe("api client", () => {
     expect(chat.url).toBe("/v1/chat/completions");
     expect(chat.init?.headers).toMatchObject({ Authorization: "Bearer sk-abc" });
 
-    await api.revokeApiKey("k1");
-    expect(calls.at(-1)?.url).toBe("/api/api-keys/k1");
-    expect(calls.at(-1)?.init?.method).toBe("DELETE");
+
   });
 });
 
