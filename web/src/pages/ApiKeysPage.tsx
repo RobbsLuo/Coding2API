@@ -64,34 +64,42 @@ function OpenAIEntry({ apiKey }: { apiKey: string }) {
         </div>
         <ul className="space-y-1 text-xs text-[var(--color-ink-muted)]">
           <li>
-            <Badge>POST</Badge> <code>{baseUrl}/chat/completions</code>　对话补全（流式 / 非流式）
+            {/* 示例默认折叠：点开端点行查看 curl / SDK 调用方式 */}
+            <details data-testid="example-details">
+              <summary className="cursor-pointer select-none">
+                <Badge>POST</Badge> <code>{baseUrl}/chat/completions</code>　对话补全（流式 / 非流式）
+                <span className="ml-1">▸ 调用示例</span>
+              </summary>
+              <div className="mt-3 space-y-3">
+                <div>
+                  <div className="mb-1 flex items-center justify-between">
+                    <span>curl 示例</span>
+                    <Button size="sm" variant="ghost" data-testid="copy-curl" onClick={() => copy("curl", examples.curl)}>
+                      {copied === "curl" ? "已复制" : "复制"}
+                    </Button>
+                  </div>
+                  <pre data-testid="example-curl" className="overflow-x-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] p-3 font-mono text-xs">
+                    {examples.curl}
+                  </pre>
+                </div>
+                <div>
+                  <div className="mb-1 flex items-center justify-between">
+                    <span>OpenAI Python SDK</span>
+                    <Button size="sm" variant="ghost" data-testid="copy-python" onClick={() => copy("python", examples.python)}>
+                      {copied === "python" ? "已复制" : "复制"}
+                    </Button>
+                  </div>
+                  <pre data-testid="example-python" className="overflow-x-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] p-3 font-mono text-xs">
+                    {examples.python}
+                  </pre>
+                </div>
+              </div>
+            </details>
           </li>
           <li>
             <Badge>GET</Badge> <code>{baseUrl}/models</code>　模型列表
           </li>
         </ul>
-        <div>
-          <div className="mb-1 flex items-center justify-between">
-            <span className="text-xs text-[var(--color-ink-muted)]">curl 示例</span>
-            <Button size="sm" variant="ghost" data-testid="copy-curl" onClick={() => copy("curl", examples.curl)}>
-              {copied === "curl" ? "已复制" : "复制"}
-            </Button>
-          </div>
-          <pre data-testid="example-curl" className="overflow-x-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] p-3 font-mono text-xs">
-            {examples.curl}
-          </pre>
-        </div>
-        <div>
-          <div className="mb-1 flex items-center justify-between">
-            <span className="text-xs text-[var(--color-ink-muted)]">OpenAI Python SDK</span>
-            <Button size="sm" variant="ghost" data-testid="copy-python" onClick={() => copy("python", examples.python)}>
-              {copied === "python" ? "已复制" : "复制"}
-            </Button>
-          </div>
-          <pre data-testid="example-python" className="overflow-x-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] p-3 font-mono text-xs">
-            {examples.python}
-          </pre>
-        </div>
         <Notice tone="muted">
           任何兼容 OpenAI 协议的客户端（ChatGPT Next Web、LobeChat、Cursor 等）
           都可以按上面的 Base URL + API Key 接入。模型名从 /v1/models 获取。

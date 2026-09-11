@@ -169,3 +169,15 @@ describe("OpenAI 客户端接入面板", () => {
     expect(screen.getByTestId("example-python")).toHaveTextContent('api_key="sk-real-key"');
   });
 });
+
+it("调用示例默认折叠，点击端点行展开", async () => {
+  mockFetch({ "/api/api-keys": { api_keys: [] } });
+  renderPage(<ApiKeysPage />);
+  await settle();
+
+  const details = screen.getByTestId("example-details") as HTMLDetailsElement;
+  expect(details.open).toBe(false);
+  await userEvent.click(details.querySelector("summary")!);
+  expect(details.open).toBe(true);
+  expect(screen.getByTestId("example-curl")).toBeVisible();
+});
