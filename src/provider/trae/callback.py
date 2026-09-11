@@ -12,10 +12,13 @@ from dataclasses import dataclass
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .credential import TraeCredential
-from .events import UpstreamProtocolViolation
+from .events import CLIENT_ID, UpstreamProtocolViolation
 
 LOGIN_VERSION = "1"
 IDE_VERSION = "0.1.52"
+PLUGIN_VERSION = "2.3.62834"
+LOGIN_HOST = "https://www.trae.cn"
+LOGIN_PATH = "/authorization"
 
 
 @dataclass(slots=True)
@@ -33,17 +36,33 @@ def new_machine_identity() -> tuple[str, str]:
 
 
 def build_login_url(callback_url: str, *, machine_id: str, device_id: str) -> str:
-    """构造 TRAE 登录 URL；auth_callback_url 可配（PUBLIC_BASE_URL）。"""
-    trace_id = (machine_id + device_id)[:16]
+    """构造 TRAE 登录 URL（复刻原实现的参数集，勿增删）。
+
+    端点是 ConsoleHost + /authorization；machine/device id 与落盘凭证共用同一对，
+    否则登录态与凭证不匹配。
+    """
+    trace_id = (machine_id + device_id)[-16:]
     query = (
         f"login_version={LOGIN_VERSION}"
-        f"&auth_callback_url={quote(callback_url, safe='')}"
-        f"&machine_id={machine_id}"
-        f"&device_id={device_id}"
+        "&auth_from=solo"
+        "&login_channel=native_ide"
+        f"&plugin_version={PLUGIN_VERSION}"
+        "&auth_type=local"
+        f"&client_id={CLIENT_ID}"
+        "&redirect=0"
+        "&auth_callback_url=" + quote(callback_url, safe="") +
         f"&login_trace_id={trace_id}"
-        f"&ide_version={IDE_VERSION}"
+        f"&machine_id={quote(machine_id, safe='')}"
+        f"&device_id={quote(device_id, safe='')}"
+        f"&x_device_id={quote(device_id, safe='')}"
+        f"&x_machine_id={quote(machine_id, safe='')}"
+        "&x_device_brand=PC"
+        "&x_device_type=PC"
+        "&x_os_version=1.0"
+        f"&x_app_version={quote(IDE_VERSION, safe='')}"
+        "&x_app_type=stable"
     )
-    return f"https://www.trae.com.cn/login?{query}"
+    return f"{LOGIN_HOST}{LOGIN_PATH}?{query}"
 
 
 def _get_string(payload: dict, key: str) -> str:

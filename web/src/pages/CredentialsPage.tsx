@@ -150,9 +150,16 @@ export function CredentialsPage() {
   const startLogin = async (provider: Provider) => {
     setError(null);
     setNotice(null);
+    // 先同步开一个占位窗口：window.open 若在 await 之后才调用，
+    // 会脱离用户手势上下文而被浏览器弹窗拦截。
+    const popup = window.open("", "_blank");
     try {
       const started = await api.upstreamStart(provider);
-      if (started.auth_url) window.open(started.auth_url, "_blank", "noopener");
+      if (started.auth_url && popup && !popup.closed) {
+        popup.location.href = started.auth_url;
+      } else if (popup) {
+        popup.close();                         // 失败时关掉空白占位窗
+      }
       setLoginProviders((previous) => [...new Set([...previous, provider])]);
 
       if (started.flow === "callback") {
@@ -160,14 +167,13 @@ export function CredentialsPage() {
         // 前端无法轮询上游，改为轮询凭证列表，出现新凭证即视为完成。
         setNotice("已在新标签页打开授权页。完成授权后本页会自动刷新出凭证。");
         const deadline = Date.now() + 5 * 60 * 1000;
+        const baseline = credentials.length;
         const timer = window.setInterval(async () => {
-          const before = credentials.length;
-          await refresh();
           const after = (await api.credentials()).credentials.length;
-          if (after > before || Date.now() > deadline) {
+          if (after > baseline || Date.now() > deadline) {
             window.clearInterval(timer);
             setLoginProviders((previous) => previous.filter((item) => item !== provider));
-            setNotice(after > before ? "登录成功，凭证已保存。" : "授权超时，请重新发起登录。");
+            setNotice(after > baseline ? "登录成功，凭证已保存。" : "授权超时，请重新发起登录。");
           }
         }, 3000);
         return;
@@ -191,6 +197,8 @@ export function CredentialsPage() {
         }
       }, interval);
     } catch (caught) {
+      // 启动失败：关掉占位窗口，并把授权地址给出来让用户手动打开
+      popup?.close();
       setError(caught instanceof Error ? caught.message : "无法启动登录流程");
     }
   };

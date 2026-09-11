@@ -357,9 +357,14 @@ describe("上游登录入口", () => {
   it("CodeBuddy 走 poll：打开授权页并轮询上游", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const opened: string[] = [];
-    vi.stubGlobal("open", (url: string) => {
-      opened.push(url);
-      return null;
+    vi.stubGlobal("open", () => {
+      const win = { closed: false, location: { href: "" } };
+      // 记录最终被导航到的地址（占位窗口先开空白，再被赋值 auth_url）
+      Object.defineProperty(win.location, "href", {
+        set: (value: string) => opened.push(value),
+        get: () => opened[opened.length - 1] ?? "",
+      });
+      return win;
     });
     vi.stubGlobal(
       "fetch",
