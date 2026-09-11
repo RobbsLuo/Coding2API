@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pathlib
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -659,11 +661,10 @@ def test_solo_headers_include_uid_when_present():
 # ------------------------------------------- TRAE 签到（三态 + 真实请求）
 
 def _trae_client(handler) -> TraeClient:
-    import httpx as _httpx
 
-    transport = _httpx.MockTransport(handler)
-    return TraeClient(stream_client=_httpx.AsyncClient(transport=transport, timeout=None),
-                      short_client=_httpx.AsyncClient(transport=transport, timeout=None))
+    transport = httpx.MockTransport(handler)
+    return TraeClient(stream_client=httpx.AsyncClient(transport=transport, timeout=None),
+                      short_client=httpx.AsyncClient(transport=transport, timeout=None))
 
 
 async def test_trae_checkin_status_and_claim_use_ug_headers():
@@ -819,3 +820,81 @@ def test_lifespan_warmup_failure_is_logged_not_raised(tmp_path, caplog):
     with caplog.at_level(logging.WARNING), TestClient(app):
         pass
     assert any("预热模型列表失败" in r.getMessage() for r in caplog.records)
+
+
+def test_trae_unknown_event_with_non_object_data_is_skipped():
+    """progress_notice 等未知事件 data 非 JSON 对象 → 跳过而非致命（回归）。"""
+    from src.engine.sse import SSEFrame
+    from src.provider.trae.events import UpstreamProtocolViolation, parse_frame
+
+    assert parse_frame(SSEFrame(event="progress_notice",
+                                data='[1,2,"x"]')) is None
+    assert parse_frame(SSEFrame(event="progress_notice", data='"plain"')) is None
+    assert parse_frame(SSEFrame(event="timing_cost", data="123")) is None
+    # 有语义的事件 data 非对象仍然是协议违规
+    with pytest.raises(UpstreamProtocolViolation):
+        parse_frame(SSEFrame(event="output", data='["no"]'))
+    with pytest.raises(UpstreamProtocolViolation):
+        parse_frame(SSEFrame(event="done", data='["no"]'))
+
+
+def test_similar_models_suggests_available_alternatives():
+    """400 建议列表：相近模型优先，前缀兜底，排除自身。"""
+    from src.main import _similar_models
+
+    aliases = {"trae": {"qwen-3.7-plus": "qwen-3.7-plus", "glm-5.2": "GLM-5.2"},
+               "codebuddy": {"glm-5.2": "glm-5.2", "kimi-k2.6": "kimi-k2.6"}}
+    # 前缀兜底：不存在 qwen3.8-max，但存在 qwen 开头的
+    assert _similar_models("qwen3.8-max", aliases) == ["qwen-3.7-plus"]
+    # 完全不相关 → 空列表
+    assert _similar_models("xyzzy", aliases) == []
+    # 自身被排除
+    assert _similar_models("GLM-5.2", aliases) == []
+
+
+async def test_suggestion_callback_failure_does_not_break_400():
+    """建议回调抛错 → 主错误照常（executor 74-75）。"""
+    from src.compat.openai.request import InvalidRequest
+    from src.db.conn import Database
+    from src.db.crypto import CredentialCipher
+    from src.db.migrate import apply_schema
+    from src.db.repo import CredentialRepository
+    from src.engine.executor import Executor, ExecutorDeps
+    from src.engine.scheduler import Scheduler
+    from src.provider.codebuddy.client import CodeBuddyProvider
+    from tests.test_m1b_codebuddy import _client, _request
+
+    db = Database(str(_tmpdir() / "s.sqlite3"))
+    apply_schema(db.connect())
+    repo = CredentialRepository(db, CredentialCipher("s"))
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+
+    def handler(_request):
+        return httpx.Response(400, json={"code": 1002, "msg": "no"})
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": CodeBuddyProvider(client=_client(handler))},
+        credentials=repo, scheduler=Scheduler(), default_model="qwen3.8",
+        model_suggestions=lambda _name: (_ for _ in ()).throw(RuntimeError("boom"))))
+
+    with pytest.raises(InvalidRequest):
+        await executor.complete(_request("qwen3.8"), username="u")
+    db.close()
+
+
+def _tmpdir():
+    import tempfile
+
+    return pathlib.Path(tempfile.mkdtemp())
+
+
+def test_trae_unknown_named_error_falls_through_to_none():
+    """已知集合穷尽后 return None（events 79）此前不可达，现在保持覆盖。"""
+    from src.engine.sse import SSEFrame
+    from src.provider.trae.events import parse_frame
+
+    # data 为合法 JSON 对象但事件名未知 → None
+    assert parse_frame(SSEFrame(event="extra_info", data='{"x":1}')) is None
+    # error 事件带非 int code → ERROR 事件无 code
+    event = parse_frame(SSEFrame(event="error", data='{"code":"oops","message":"m"}'))
+    assert event is not None and event.kind.value == "error"

@@ -41,6 +41,7 @@ class ExecutorDeps:
     default_model: str = "glm-5.2"
     stats: Any | None = None            # StatsCollector；None 表示不采集（测试可用）
     upstream_model_name: Any | None = None  # (provider_id, 归一名) → 上游原始名；None 则原样传
+    model_suggestions: Any | None = None    # (模型名) → 相近可用模型列表；None 则不给建议
 
     def record(self, **fields: Any) -> None:
         """统计写入失败绝不能影响聊天响应。"""
@@ -63,6 +64,15 @@ class Executor:
             username=username, provider=provider_id, credential_id=credential_id,
             model=model, ok=False, error_type="invalid_request",
             latency_ms=int((time.monotonic() - started) * 1000))
+
+    def _suggestions(self, model: str) -> list[str] | None:
+        """400 时给用户的相近模型建议（未注入或无候选则 None）。"""
+        if self._deps.model_suggestions is None:
+            return None
+        try:
+            return self._deps.model_suggestions(model) or None
+        except Exception:  # noqa: BLE001 - 建议失败不影响主错误
+            return None
 
     def _skip_provider(self, provider_id: str, tried: set[str]) -> None:
         """INVALID 后跳过该上游：把它的全部凭证都标记为已试。"""
@@ -96,8 +106,10 @@ class Executor:
             if pick is None:
                 if last_kind is ErrKind.INVALID:
                     # 所有候选上游都拒绝了该模型：400 语义而非 503
-                    yield _error_frame(_reject_message(target.model, last_error),
-                                       "invalid_request")
+                    yield _error_frame(
+                        _reject_message(target.model, last_error,
+                                        self._suggestions(target.model)),
+                        "invalid_request")
                     return
                 self._deps.record(
                     username=username, provider=last_provider, credential_id=last_credential,
@@ -154,8 +166,10 @@ class Executor:
             if not self._deps.scheduler.should_rotate(tried):
                 if last_kind is ErrKind.INVALID:
                     # 流已开始（200 已发出），以 invalid_request 错误帧结束
-                    yield _error_frame(_reject_message(target.model, last_error),
-                                       "invalid_request")
+                    yield _error_frame(
+                        _reject_message(target.model, last_error,
+                                        self._suggestions(target.model)),
+                        "invalid_request")
                     return
                 kind = _classify(last_error) if last_error is not None else None
                 self._deps.record(
@@ -182,7 +196,8 @@ class Executor:
             if pick is None:
                 if last_kind is ErrKind.INVALID:
                     # 所有候选上游都拒绝了该模型：400 而非 503
-                    raise InvalidRequest(_reject_message(target.model, last_error))
+                    raise InvalidRequest(_reject_message(
+                        target.model, last_error, self._suggestions(target.model)))
                 self._deps.record(
                     username=username, provider=last_provider, credential_id=last_credential,
                     model=target.model, ok=False, error_type="no_healthy_credential",
@@ -235,7 +250,8 @@ class Executor:
                     return result
             if not self._deps.scheduler.should_rotate(tried):
                 if last_kind is ErrKind.INVALID:
-                    raise InvalidRequest(_reject_message(target.model, last_error))
+                    raise InvalidRequest(_reject_message(
+                        target.model, last_error, self._suggestions(target.model)))
                 kind = _classify(last_error) if last_error is not None else None
                 self._deps.record(
                     username=username, provider=provider_id, credential_id=credential_id,
@@ -304,10 +320,14 @@ def _usage_field(usage: object, name: str) -> object:
     return getattr(usage, name, None) if usage is not None else None
 
 
-def _reject_message(model: str, last_error: Exception | None) -> str:
+def _reject_message(model: str, last_error: Exception | None,
+                    suggestions: list[str] | None = None) -> str:
     """所有上游都拒绝该模型时的 400 文案。"""
     detail = f": {last_error}" if last_error is not None else ""
-    return f"model {model!r} not available on any configured upstream{detail}"
+    message = f"model {model!r} not available on any configured upstream{detail}"
+    if suggestions:
+        message += f" (similar available models: {', '.join(suggestions)})"
+    return message
 
 
 def _error_type_for(kind: ErrKind) -> str:

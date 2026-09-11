@@ -38,6 +38,21 @@ SESSION_COOKIE = "coding2api_session"
 logger = logging.getLogger(__name__)
 
 
+
+def _similar_models(name: str, aliases: dict[str, dict[str, str]],
+                    limit: int = 4) -> list[str]:
+    """从全部上游的已知模型里找与 name 相近的（400 报错时给用户指路）。"""
+    import difflib
+
+    known = sorted({original for per in aliases.values() for original in per.values()})
+    close = difflib.get_close_matches(name, known, n=limit, cutoff=0.3)
+    if not close:
+        prefix = name.lower().split("-")[0]
+        close = [m for m in known if m.lower().startswith(prefix)][:limit]
+    return [m for m in close if m.lower() != name.lower()][:limit]
+
+
+
 def build_app(settings: Settings | None = None, *, providers: dict | None = None,
               users: object | None = None) -> FastAPI:
     config = settings or load_settings()
@@ -61,7 +76,9 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                      upstream_model_name=lambda provider_id, model_name: (
                                          model_aliases.get(provider_id, {}).get(
                                              model_name.lower(), model_name)
-                                     )))
+                                     ),
+                                     model_suggestions=lambda name: _similar_models(
+                                         name, model_aliases)))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):

@@ -13,6 +13,10 @@ import json
 from ...engine.sse import SSEFrame
 from ...provider.base import ErrKind, Event, EventKind, Usage
 
+# 有下游语义的事件名；其余（metadata/timing_cost/progress_notice/…）一律跳过。
+# 实测 progress_notice 的 data 可能不是 JSON 对象，提前短路避免误判协议违规。
+KNOWN_EVENT_NAMES = frozenset({"output", "token_usage", "done", "error"})
+
 # 上游技术常量（来自逆向实测，勿改）
 AGENT_HOST = "https://trae-api-cn.mchost.guru"
 UG_HOST = "https://api.trae.cn"
@@ -45,6 +49,10 @@ def parse_frame(frame: SSEFrame) -> Event | None:
     name = frame.event.strip()
     if not frame.data:
         return None
+    if name not in KNOWN_EVENT_NAMES:
+        # metadata / timing_cost / progress_notice 等无下游语义；
+        # 实测 progress_notice 的 data 可能不是 JSON 对象，不能解析检查
+        return None
     try:
         payload = json.loads(frame.data)
     except json.JSONDecodeError as error:
@@ -68,7 +76,9 @@ def parse_frame(frame: SSEFrame) -> Event | None:
             error_code=code if isinstance(code, int) and not isinstance(code, bool) else None,
             error_message=message if isinstance(message, str) else None,
         )
-    return None  # metadata / timing_cost / extra_info 等无下游语义
+    # name ∈ KNOWN_EVENT_NAMES，上面分支已穷尽；防御未来新增名字漏写分支
+    raise UpstreamProtocolViolation(  # pragma: no cover
+        f"unhandled known event {name!r}")
 
 
 def _parse_output(payload: dict) -> Event | None:
@@ -114,8 +124,10 @@ def parse_all_events(frame: SSEFrame) -> list[Event]:
     try:
         payload = json.loads(frame.data)
     except json.JSONDecodeError as error:
-        raise UpstreamProtocolViolation(f"unparsable SSE data for event {name!r}") from error
+        raise UpstreamProtocolViolation(
+            f"unparsable SSE data for event {name!r}") from error
     if not isinstance(payload, dict):
+        # output 承载内容语义，data 非对象才是真正的协议违规
         raise UpstreamProtocolViolation(f"SSE data for {name!r} is not an object")
 
     events: list[Event] = []

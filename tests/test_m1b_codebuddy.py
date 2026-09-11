@@ -998,3 +998,21 @@ async def test_complete_rotate_exhausted_with_invalid_last_error(dual_repo):
 
     with pytest.raises(InvalidRequest):
         await executor.complete(_request("qwen3.8"), username="u")
+
+
+async def test_executor_invalid_request_includes_suggestions(dual_repo):
+    """全部上游 400 → 400 文案附相近模型建议。"""
+    from src.compat.openai.request import InvalidRequest
+
+    repo, _db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="trae", credential_data={"accessToken": "tr"})
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": _RejectProvider("codebuddy", [_http_400()]),
+                   "trae": _RejectProvider("trae", [_http_400()])},
+        credentials=repo, scheduler=Scheduler(), default_model="qwen3.8-max",
+        model_suggestions=lambda name: ["qwen-3.7-plus"]))
+
+    with pytest.raises(InvalidRequest) as exc_info:
+        await executor.complete(_request("qwen3.8-max"), username="u")
+    assert "qwen-3.7-plus" in str(exc_info.value)
