@@ -790,3 +790,32 @@ async def test_trae_dynamic_models_with_valid_credential():
     fallback = await provider2.list_models({"accessToken": "a"})
     assert [m.id for m in fallback] == list(
         __import__("src.provider.trae.client", fromlist=["STATIC_MODELS"]).STATIC_MODELS)
+
+
+def test_lifespan_warmup_failure_is_logged_not_raised(tmp_path, caplog):
+    """启动预热模型列表失败 → 仅记日志，服务正常起（main 74-75）。"""
+    import logging
+
+    from fastapi.testclient import TestClient
+
+    from src.config import Settings
+    from src.main import build_app
+
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+
+    class Exploding:
+        id = "boom"
+
+        async def list_models(self, _data):
+            raise RuntimeError("upstream down")
+
+        def import_credential(self, raw):  # pragma: no cover
+            return raw
+
+    app = build_app(settings, providers={"boom": Exploding()})
+    # candidates 在单上游 try 之外，让它抛错以触发 lifespan 兜底 except
+    app.state.credentials.candidates = (
+        lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("db gone")))
+    with caplog.at_level(logging.WARNING), TestClient(app):
+        pass
+    assert any("预热模型列表失败" in r.getMessage() for r in caplog.records)

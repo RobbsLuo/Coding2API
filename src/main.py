@@ -7,6 +7,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -50,16 +51,28 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         "trae": TraeProvider(),
         "codebuddy": CodeBuddyProvider(),
     }
+    # provider → {小写模型名: 上游原始 id}；playground_models 拉取后就地更新，
+    # executor 发请求前把归一名映射回各上游的原始大小写
+    model_aliases: dict[str, dict[str, str]] = {}
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
                                      scheduler=Scheduler(),
                                      default_model=config.default_model,
-                                     stats=StatsCollector(db)))
+                                     stats=StatsCollector(db),
+                                     upstream_model_name=lambda provider_id, model_name: (
+                                         model_aliases.get(provider_id, {}).get(
+                                             model_name.lower(), model_name)
+                                     )))
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         runner = build_runner(credentials, registry, app.state.stats_collector, config)
         app.state.task_runner = runner
         await runner.start()
+        # 预热模型别名表（动态拉取失败仅记日志，不阻塞启动）
+        try:
+            await playground_models()
+        except Exception as error:  # noqa: BLE001
+            logger.warning("启动预热模型列表失败: %s", error)
         try:
             yield
         finally:
@@ -83,6 +96,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.stats_query = StatsQuery(db)
     app.state.upstream_auth = _upstream_auth(registry, config)
     app.state.pending_probes = []
+    app.state.model_aliases = model_aliases
     app.state.pending_callback_state = None
     app.state.pending_callback_user = None
 
@@ -181,9 +195,13 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     async def playground_models() -> dict:
         """与 /v1/models 相同的模型列表，供管理台内部使用。
 
-        CodeBuddy 的模型是动态拉取（异步），单个 provider 失败只影响它自己。
+        CodeBuddy/TRAE 的动态列表里同一模型常只差大小写
+        （如 deepseek-v4-flash vs DeepSeek-V4-Flash），此处按小写归一合并，
+        providers 取并集；同时记录各上游的原始 id 供执行时映射。
         """
-        grouped: dict[str, set[str]] = {}
+        # provider → {小写名: 上游原始 id}
+        aliases: dict[str, dict[str, str]] = {}
+        grouped: dict[str, dict[str, Any]] = {}   # 小写名 → {canonical, providers}
         for provider_id, provider in registry.items():
             # 用该上游的一个可用凭证拉取（凭证有归属，模型列表是账号级的）
             candidates = credentials.candidates([provider_id])
@@ -196,12 +214,22 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             except Exception as error:  # noqa: BLE001 - 单上游失败不影响其他
                 logger.warning("模型列表获取失败 %s: %s", provider_id, error)
                 continue
+            provider_aliases = aliases.setdefault(provider_id, {})
             for model in models:
-                grouped.setdefault(model.id, set()).add(provider_id)
+                provider_aliases[model.id.lower()] = model.id
+                entry = grouped.setdefault(model.id.lower(),
+                                           {"canonical": model.id, "providers": set()})
+                # canonical 偏向全小写形式（与 OpenAI 惯例一致）
+                if model.id == model.id.lower():
+                    entry["canonical"] = model.id
+                entry["providers"].add(provider_id)
+        # 就地更新（executor 的映射闭包引用同一个 dict 对象）
+        model_aliases.clear()
+        model_aliases.update(aliases)
         return {"object": "list", "data": [
-            {"id": model, "object": "model", "owned_by": "coding2api",
-             "providers": sorted(providers)}
-            for model, providers in sorted(grouped.items())
+            {"id": entry["canonical"], "object": "model", "owned_by": "coding2api",
+             "providers": sorted(entry["providers"])}
+            for entry in sorted(grouped.values(), key=lambda e: e["canonical"])
         ]}
 
     @app.get("/api/playground/models")

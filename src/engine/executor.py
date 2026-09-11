@@ -40,6 +40,7 @@ class ExecutorDeps:
     scheduler: Scheduler
     default_model: str = "glm-5.2"
     stats: Any | None = None            # StatsCollector；None 表示不采集（测试可用）
+    upstream_model_name: Any | None = None  # (provider_id, 归一名) → 上游原始名；None 则原样传
 
     def record(self, **fields: Any) -> None:
         """统计写入失败绝不能影响聊天响应。"""
@@ -54,6 +55,12 @@ class ExecutorDeps:
 class Executor:
     def __init__(self, deps: ExecutorDeps) -> None:
         self._deps = deps
+
+    def _upstream_model(self, provider_id: str, model: str) -> str:
+        """归一模型名 → 该上游注册的原始 id（大小写变体映射，未知则原样）。"""
+        if self._deps.upstream_model_name is None:
+            return model
+        return self._deps.upstream_model_name(provider_id, model)
 
     def resolve_target(self, request: ChatRequest) -> ModelTarget:
         return resolve(request.model, self._deps.default_model)
@@ -85,7 +92,7 @@ class Executor:
             tried.add(credential_id)
             try:
                 async for event in self._deps.providers[provider_id].stream_chat(
-                    credential_data, request.raw, target.model
+                    credential_data, request.raw, self._upstream_model(provider_id, target.model)
                 ):
                     if event.kind is EventKind.ERROR:
                         outcome = self._deps.scheduler.note_error(
@@ -154,7 +161,7 @@ class Executor:
             events: list[Event] = []
             try:
                 async for event in self._deps.providers[provider_id].stream_chat(
-                    credential_data, request.raw, target.model
+                    credential_data, request.raw, self._upstream_model(provider_id, target.model)
                 ):
                     events.append(event)
             except Exception as error:  # noqa: BLE001
