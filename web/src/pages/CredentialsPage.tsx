@@ -206,6 +206,14 @@ export function CredentialsPage() {
           <Notice tone="muted">只读模式：仅管理员可以导入、启停或删除凭证。</Notice>
         </div>
       )}
+      {credentials.length === 0 && isAdmin && (
+        <div data-testid="first-run-hint">
+          <Notice tone="muted">
+            还没有凭证。点右上角「功能说明」查看各按钮的含义；或用下方「登录上游账号」
+            完成 CodeBuddy / TRAE 授权，也可以直接粘贴凭证 JSON 导入。
+          </Notice>
+        </div>
+      )}
       {error && (
         <div data-testid="credentials-error">
           <Notice tone="danger">{error}</Notice>

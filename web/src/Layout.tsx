@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useOutletContext } from "react-router-dom";
 import type { SessionInfo } from "./api/types";
+import { HelpPanel } from "./components/HelpPanel";
 import { Button } from "./ui";
 
 const NAV = [
@@ -39,6 +40,7 @@ export function Layout({ session }: { session: SessionInfo }) {
               </NavLink>
             ))}
           </nav>
+          <HelpPanel />
           <span className="text-xs text-[var(--color-ink-muted)]">
             {session.username}
             {session.is_admin ? " · 管理员" : " · 只读"}
