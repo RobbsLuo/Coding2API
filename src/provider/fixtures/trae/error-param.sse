@@ -1,0 +1,6 @@
+event:error
+data:{"code":4001,"message":"We are sorry, the param is invalid.","extra":null}
+
+event:done
+data:{"finish_reason":"stop"}
+

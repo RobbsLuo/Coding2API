@@ -1,0 +1,6 @@
+event:error
+data:{"code":1005,"message":"plan quota insufficient","extra":null}
+
+event:done
+data:{"finish_reason":"stop"}
+

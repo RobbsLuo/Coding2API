@@ -9,8 +9,6 @@ import sqlite3
 import threading
 from pathlib import Path
 
-_local = threading.local()
-
 PRAGMAS = (
     "PRAGMA journal_mode = WAL",
     "PRAGMA busy_timeout = 5000",
@@ -20,6 +18,8 @@ PRAGMAS = (
 
 class Database:
     def __init__(self, path: str | Path) -> None:
+        # 线程本地必须按实例隔离：模块级变量会让不同 Database 共用同一连接
+        self._local = threading.local()
         self.path = str(path)
         parent = Path(self.path).parent
         if str(parent) not in ("", "."):
@@ -27,18 +27,18 @@ class Database:
 
     def connect(self) -> sqlite3.Connection:
         """返回当前线程的专属连接（同线程复用）。"""
-        conn: sqlite3.Connection | None = getattr(_local, "conn", None)
+        conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
         if conn is None:
             conn = sqlite3.connect(self.path, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             for pragma in PRAGMAS:
                 conn.execute(pragma)
-            _local.conn = conn
+            self._local.conn = conn
         return conn
 
     def close(self) -> None:
         """关闭当前线程连接（测试用）。"""
-        conn: sqlite3.Connection | None = getattr(_local, "conn", None)
+        conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
         if conn is not None:
             conn.close()
-            _local.conn = None
+            self._local.conn = None

@@ -51,3 +51,5 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
+# FastAPI 的 Depends() 默认参数写法是官方推荐的，B008 为误报
+ignore = ["B008"]

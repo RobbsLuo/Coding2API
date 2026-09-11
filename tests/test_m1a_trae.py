@@ -1,0 +1,882 @@
+"""M1a 测试：SSE 解析、TRAE 事件映射、payload 改写、OpenAI 适配、执行引擎、API。
+
+契约测试用真实 SSE fixture（从 trae2api-web 的 sse_test.go 提取）。
+"""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import httpx
+import pytest
+
+from src.compat.openai.request import InvalidRequest, parse_chat_request
+from src.compat.openai.response import (
+    StreamTranslator,
+    UpstreamStreamError,
+    aggregate,
+    error_payload,
+)
+from src.config import Settings
+from src.db.conn import Database
+from src.db.crypto import CredentialCipher
+from src.db.migrate import apply_schema
+from src.db.repo import ApiKeyRepository, CredentialRepository
+from src.engine.executor import (
+    Executor,
+    ExecutorDeps,
+    NoHealthyCredential,
+    NoProviderForModel,
+)
+from src.engine.model_resolver import UnknownModelError, resolve
+from src.engine.scheduler import Scheduler
+from src.engine.sse import SSE_DONE, format_openai_frame, iter_frames, parse_frames
+from src.main import build_app, resolve_public_callback_url
+from src.provider.base import ErrKind, Event, EventKind, Model, Usage
+from src.provider.trae import events as trae_events
+from src.provider.trae.callback import (
+    build_login_url,
+    credential_from_callback,
+    new_machine_identity,
+    parse_callback_url,
+)
+from src.provider.trae.client import (
+    STATIC_MODELS,
+    TraeClient,
+    TraeCredential,
+    TraeProvider,
+    UpstreamHTTPError,
+    parse_credential,
+    prepare_body,
+)
+from src.provider.trae.events import UpstreamProtocolViolation
+
+FIXTURES = Path(__file__).parent.parent / "src" / "provider" / "fixtures" / "trae"
+
+
+def fixture(name: str) -> str:
+    return (FIXTURES / name).read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------- SSE 解析
+
+def test_parse_frames_from_real_fixture():
+    frames = parse_frames(fixture("chat-basic.sse"))
+    assert [f.event for f in frames] == [
+        "metadata", "timing_cost", "output", "output", "extra_info",
+        "token_usage", "done",
+    ]
+    assert json.loads(frames[2].data)["response"] == "中国"
+
+
+def test_parse_frames_handles_comments_blank_and_multiline():
+    text = ": keepalive\nevent: x\ndata: a\ndata: b\n\n"
+    frames = parse_frames(text)
+    assert len(frames) == 1 and frames[0].data == "a\nb"
+
+
+def test_parse_frames_without_trailing_blank_line():
+    assert parse_frames("event: x\ndata: 1") == [trae_events.SSEFrame(event="x", data="1")]
+
+
+def test_parse_frames_no_space_after_colon():
+    frames = parse_frames("event:x\ndata:1\n\n")
+    assert frames[0].event == "x" and frames[0].data == "1"
+
+
+def test_parse_frames_ignores_data_less_events():
+    assert parse_frames("event: ping\n\n") == []
+
+
+async def test_iter_frames_streaming_matches_sync_parse():
+    raw = fixture("chat-basic.sse").encode()
+    chunks = [raw[i:i + 7] for i in range(0, len(raw), 7)]
+
+    async def gen():
+        for chunk in chunks:
+            yield chunk
+
+    streamed = [f async for f in iter_frames(gen())]
+    assert streamed == parse_frames(fixture("chat-basic.sse"))
+
+
+def test_format_openai_frame_and_done():
+    assert format_openai_frame('{"a":1}') == b'data: {"a":1}\n\n'
+    assert SSE_DONE == b"data: [DONE]\n\n"
+
+
+# ------------------------------------------------------- TRAE 事件映射
+
+def test_real_fixture_maps_to_neutral_events():
+    events = [e for e in (trae_events.parse_frame(f)
+                          for f in parse_frames(fixture("chat-basic.sse"))) if e]
+    kinds = [e.kind for e in events]
+    assert kinds == [EventKind.CONTENT, EventKind.CONTENT, EventKind.USAGE, EventKind.FINISH]
+    assert events[0].content == "中国"
+    assert events[0].kind is EventKind.CONTENT          # parse_frame 单事件：content 优先
+    assert events[2].usage == Usage(21, 142, 135)
+    assert events[3].finish_reason == "stop"
+
+
+def test_reasoning_only_output_maps_to_reasoning_event():
+    frame = trae_events.SSEFrame(event="output",
+                                 data='{"response":"","reasoning_content":"想想","tool_calls":null}')
+    event = trae_events.parse_frame(frame)
+    assert event.kind is EventKind.REASONING and event.content == "想想"
+
+
+def test_tool_calls_fixture_maps_to_tool_call_event():
+    events = [e for e in (trae_events.parse_frame(f)
+                          for f in parse_frames(fixture("tool-calls.sse"))) if e]
+    assert events[0].kind is EventKind.TOOL_CALLS
+    assert events[0].tool_calls[0]["function"]["name"] == "get_weather"
+    assert events[1].finish_reason == "tool_calls"
+
+
+def test_empty_output_frame_yields_nothing():
+    frame = trae_events.SSEFrame(event="output",
+                                 data='{"response":"","reasoning_content":"","tool_calls":null}')
+    assert trae_events.parse_frame(frame) is None
+
+
+def test_metadata_and_heartbeat_frames_yield_nothing():
+    for frame in parse_frames(fixture("chat-basic.sse")):
+        if frame.event in ("metadata", "timing_cost", "extra_info"):
+            assert trae_events.parse_frame(frame) is None
+
+
+def test_frames_without_data_yield_nothing():
+    assert trae_events.parse_frame(trae_events.SSEFrame(event="output", data="")) is None
+
+
+@pytest.mark.parametrize("frame", [
+    trae_events.SSEFrame(event="output", data="{broken"),
+    trae_events.SSEFrame(event="output", data="[1,2]"),
+    trae_events.SSEFrame(event="token_usage", data='"text"'),
+])
+def test_malformed_frames_raise_not_silently(frame):
+    with pytest.raises(trae_events.UpstreamProtocolViolation):
+        trae_events.parse_frame(frame)
+
+
+def test_error_fixtures_classify_plan_and_other():
+    plan = trae_events.parse_frame(parse_frames(fixture("error-1005.sse"))[0])
+    other = trae_events.parse_frame(parse_frames(fixture("error-param.sse"))[0])
+    assert plan.error_code == 1005 and trae_events.classify_error_code(1005) is ErrKind.PLAN
+    assert other.error_code == 4001 and trae_events.classify_error_code(4001) is ErrKind.OTHER
+    assert trae_events.classify_error_code(None) is ErrKind.OTHER
+
+
+@pytest.mark.parametrize(("status", "expected"), [
+    (401, ErrKind.DEAD), (404, ErrKind.SOFT), (429, ErrKind.SOFT),
+    (500, ErrKind.OTHER), (400, ErrKind.OTHER),
+])
+def test_classify_status(status, expected):
+    assert trae_events.classify_status(status) is expected
+
+
+def test_classify_status_detects_1005_in_body():
+    assert trae_events.classify_status(400, b'{"code": 1005}') is ErrKind.PLAN
+
+
+# ---------------------------------------------------------- 凭证与 payload
+
+def test_parse_credential_nested_and_flat():
+    nested = {"auth": {"accessToken": "a", "refreshToken": "r", "expiresAt": 10,
+                       "machineId": "m", "deviceId": "d"},
+              "account": {"uid": "u1", "nickname": "nick"}}
+    flat = {"accessToken": "a", "uid": "u1"}
+    assert parse_credential(nested).access_token == "a"
+    assert parse_credential(nested).nickname == "nick"
+    assert parse_credential(flat).uid == "u1"
+
+
+@pytest.mark.parametrize("raw", [
+    b"{broken", b'{"auth":[]}', b'{"auth":"x","account":{}}',
+    b'{"auth":{"accessToken":""},"account":{}}', b"[1,2]",
+])
+def test_parse_credential_rejects_malformed(raw):
+    with pytest.raises(trae_events.UpstreamProtocolViolation):
+        parse_credential(raw)
+
+
+def test_credential_needs_refresh():
+    assert TraeCredential(access_token="a").needs_refresh(3600, now=0)
+    cred = TraeCredential(access_token="a", expires_at=10_000)
+    assert cred.needs_refresh(3600, now=7_000)
+    assert not cred.needs_refresh(3600, now=1_000)
+
+
+def test_credential_dict_roundtrip():
+    original = TraeCredential(uid="u", access_token="a", refresh_token="r", expires_at=5,
+                              machine_id="m", device_id="d", nickname="n")
+    assert TraeCredential.from_dict(original.to_dict()) == original
+
+
+def test_prepare_body_rewrites_openai_shape():
+    body = prepare_body({"model": "glm-5.2",
+                         "messages": [{"role": "user", "content": "hi"}]}, "glm-5.2")
+    assert body["stream"] is True and body["function"] == "solo_work_lite"
+    assert body["config_name"] == body["model"] == "glm-5.2"
+    assert body["messages"][0]["content"] == [{"type": "text", "text": "hi"}]
+
+
+def test_prepare_body_keeps_array_content_and_skips_non_dict():
+    body = prepare_body({"messages": [
+        {"role": "user", "content": [{"type": "text", "text": "x"}]},
+        "raw",
+    ]}, "m")
+    assert body["messages"][0]["content"] == [{"type": "text", "text": "x"}]
+    assert body["messages"][1] == "raw"
+
+
+def test_prepare_body_normalizes_tool_choice_none():
+    body = prepare_body({"messages": [], "tool_choice": "none", "tools": [{}],
+                         "functions": [{}]}, "m")
+    assert "tool_choice" not in body and "tools" not in body and "functions" not in body
+
+
+def test_prepare_body_derives_function_name():
+    body = prepare_body({"messages": [], "tool_choice": {"type": "function",
+                                                         "function": {"name": "get_w"}}}, "m")
+    assert body["tool_choice"] == "get_w"
+
+
+def test_prepare_body_drops_unsupported_tool_choice_shape():
+    body = prepare_body({"messages": [], "tool_choice": {"type": "auto"}}, "m")
+    assert "tool_choice" not in body
+
+
+def test_prepare_body_drops_empty_tool_calls_and_content():
+    body = prepare_body({"messages": [{"role": "assistant", "content": None,
+                                       "tool_calls": []}]}, "m")
+    assert "tool_calls" not in body["messages"][0]
+    assert "content" not in body["messages"][0]
+
+
+def test_prepare_body_keeps_valid_tool_calls():
+    body = prepare_body({"messages": [{"role": "assistant", "content": "x",
+                                       "tool_calls": [{"id": "c"}]}]}, "m")
+    assert body["messages"][0]["tool_calls"] == [{"id": "c"}]
+
+
+# ------------------------------------------------------------ 模型解析
+
+def test_resolve_flat_auto_and_forced():
+    assert resolve("glm-5.2", "d").providers == ("codebuddy", "trae")
+    assert resolve("", "glm-5.2").model == "glm-5.2"
+    assert resolve("auto", "glm-5.2").model == "glm-5.2"
+    assert resolve(None, "glm-5.2").model == "glm-5.2"
+    forced = resolve("glm-5.2@trae", "d")
+    assert forced.providers == ("trae",) and forced.forced and forced.model == "glm-5.2"
+
+
+@pytest.mark.parametrize("model", ["glm-5.2@nope", "@trae", "glm-5.2@"])
+def test_resolve_rejects_bad_provider_suffix(model):
+    with pytest.raises(UnknownModelError):
+        resolve(model, "d")
+
+
+# ------------------------------------------------------- 请求校验
+
+def test_parse_chat_request_ok():
+    request = parse_chat_request({"messages": [{"role": "user", "content": "hi"}],
+                                  "model": "glm-5.2", "stream": True})
+    assert request.stream is True and request.model == "glm-5.2"
+
+
+@pytest.mark.parametrize("body", [
+    "not-a-dict", {}, {"messages": []}, {"messages": ["x"]},
+    {"messages": [{"content": "no role"}]}, {"messages": [{"role": "user"}], "model": 5},
+    {"messages": [{"role": "user"}], "stream": "yes"},
+])
+def test_parse_chat_request_rejects_invalid(body):
+    with pytest.raises(InvalidRequest):
+        parse_chat_request(body)
+
+
+# ----------------------------------------------- OpenAI 流式/非流式适配
+
+def test_stream_translator_emits_role_then_content_then_done():
+    """首块补 role:assistant（与 codebuddy2api 的 OpenAIStreamNormalizer 语义一致）。"""
+    t = StreamTranslator("glm-5.2")
+    frames = list(t.translate(Event(kind=EventKind.CONTENT, content="你")))
+    frames += list(t.translate(Event(kind=EventKind.FINISH, finish_reason="stop")))
+    first = json.loads(frames[0].decode()[6:])
+    assert first["choices"][0]["delta"] == {"role": "assistant", "content": "你"}
+    assert json.loads(frames[1].decode()[6:])["choices"][0]["finish_reason"] == "stop"
+    assert frames[2] == SSE_DONE
+
+
+def test_stream_translator_usage_is_not_a_frame():
+    t = StreamTranslator("m")
+    assert list(t.translate(Event(kind=EventKind.USAGE, usage=Usage(1, 2)))) == []
+
+
+def test_stream_translator_reasoning_and_tools():
+    t = StreamTranslator("m")
+    list(t.translate(Event(kind=EventKind.CONTENT, content="x")))
+    frames = list(t.translate(Event(kind=EventKind.REASONING, content="think")))
+    frames += list(t.translate(Event(kind=EventKind.TOOL_CALLS,
+                                     tool_calls=[{"id": "c1", "function": {"name": "f"}}])))
+    reasoning = json.loads(frames[0].decode()[6:])
+    tools = json.loads(frames[1].decode()[6:])
+    assert reasoning["choices"][0]["delta"] == {"reasoning_content": "think"}
+    assert tools["choices"][0]["delta"]["tool_calls"][0]["index"] == 0
+
+
+def test_stream_translator_missing_tool_index_gets_stable_position():
+    t = StreamTranslator("m")
+    list(t.translate(Event(kind=EventKind.CONTENT, content="x")))
+    frames = list(t.translate(Event(kind=EventKind.TOOL_CALLS,
+                                    tool_calls=[{"id": "a", "function": {}},
+                                                {"id": "b", "function": {}}])))
+    indices = [tc["index"] for tc in json.loads(frames[0].decode()[6:])
+               ["choices"][0]["delta"]["tool_calls"]]
+    assert indices == [0, 1]
+
+
+def test_stream_translator_error_frame():
+    t = StreamTranslator("m")
+    frames = list(t.translate(Event(kind=EventKind.ERROR, error_code=1005,
+                                    error_message="quota")))
+    payload = json.loads(frames[0].decode()[6:])
+    assert payload["error"]["code"] == 1005
+    assert b"[DONE]" not in frames[0]
+
+
+def test_stream_translator_finish_without_upstream_done():
+    t = StreamTranslator("m")
+    frames = list(t.finish())
+    assert json.loads(frames[0].decode()[6:])["choices"][0]["finish_reason"] == "stop"
+    assert frames[1] == SSE_DONE
+
+
+def test_stream_translator_finish_after_done_only_emits_done():
+    t = StreamTranslator("m")
+    list(t.translate(Event(kind=EventKind.FINISH, finish_reason="stop")))
+    assert list(t.finish()) == [SSE_DONE]
+
+
+def test_stream_translator_empty_delta_is_skipped():
+    t = StreamTranslator("m")
+    assert list(t.translate(Event(kind=EventKind.CONTENT, content=None))) == []
+
+
+def test_aggregate_builds_completion_from_fixture_events():
+    events = [e for e in (trae_events.parse_frame(f)
+                          for f in parse_frames(fixture("chat-basic.sse"))) if e]
+    result = aggregate(events, "glm-5.2")
+    choice = result["choices"][0]
+    assert choice["message"]["content"] == "中国的首都是北京。"
+    assert choice["finish_reason"] == "stop"
+    assert result["usage"]["prompt_tokens"] == 21
+    assert result["usage"]["total_tokens"] == 163
+    assert result["usage"]["completion_tokens_details"]["reasoning_tokens"] == 135
+
+
+def test_aggregate_merges_tool_call_arguments_and_reasoning():
+    events = [
+        Event(kind=EventKind.REASONING, content="想"),
+        Event(kind=EventKind.TOOL_CALLS,
+              tool_calls=[{"id": "c1", "index": 0,
+                           "function": {"name": "f", "arguments": '{"a"'}}]),
+        Event(kind=EventKind.TOOL_CALLS,
+              tool_calls=[{"id": "c1", "index": 0, "function": {"arguments": ":1}"}}]),
+        Event(kind=EventKind.FINISH, finish_reason="tool_calls"),
+    ]
+    message = aggregate(events, "m")["choices"][0]["message"]
+    assert message["content"] is None
+    assert message["reasoning_content"] == "想"
+    assert message["tool_calls"][0]["function"]["arguments"] == '{"a":1}'
+
+
+def test_aggregate_without_usage_reports_nulls():
+    result = aggregate([Event(kind=EventKind.CONTENT, content="x")], "m")
+    assert result["usage"]["prompt_tokens"] is None
+    assert result["usage"]["total_tokens"] is None
+
+
+def test_aggregate_raises_on_stream_error():
+    with pytest.raises(UpstreamStreamError):
+        aggregate([Event(kind=EventKind.ERROR, error_code=1005, error_message="quota")], "m")
+
+
+def test_error_payload_shape():
+    payload = error_payload("msg", "code", 400)
+    assert payload["error"]["message"] == "msg" and payload["error"]["status"] == 400
+
+
+# --------------------------------------------------------------- 回调解析
+
+def test_parse_callback_url_with_refresh_token():
+    url = ("http://127.0.0.1:8000/authorize?refreshToken=RT&userInfo="
+           "%7B%22uid%22%3A%22u1%22%2C%22nickname%22%3A%22nick%22%7D")
+    info = parse_callback_url(url)
+    assert info.refresh_token == "RT" and info.uid == "u1" and info.nickname == "nick"
+
+
+def test_parse_callback_url_falls_back_to_user_jwt():
+    url = ('http://x/authorize?userJwt=%7B%22Token%22%3A%22T%22%2C%22RefreshToken%22%3A%22R%22%7D')
+    assert parse_callback_url(url).refresh_token == "R"
+
+
+@pytest.mark.parametrize("url", ["", "   ", "http://x/authorize?other=1"])
+def test_parse_callback_url_rejects_missing_token(url):
+    with pytest.raises(trae_events.UpstreamProtocolViolation):
+        parse_callback_url(url)
+
+
+def test_build_login_url_contains_configurable_callback():
+    url = build_login_url("https://gw.example/authorize", machine_id="m" * 32,
+                          device_id="d" * 32)
+    assert "auth_callback_url=https%3A%2F%2Fgw.example%2Fauthorize" in url
+    assert "login_version=1" in url and "machine_id=" in url
+
+
+def test_resolve_public_callback_url():
+    settings = Settings(_env_file=None, APP_SECRET="s", PUBLIC_BASE_URL="https://gw.example/")
+    assert resolve_public_callback_url(settings) == "https://gw.example/authorize"
+
+
+def test_new_machine_identity_is_hex32():
+    machine_id, device_id = new_machine_identity()
+    assert len(machine_id) == 32 and len(device_id) == 32 and machine_id != device_id
+
+
+def test_credential_from_callback():
+    url = "http://x/authorize?refreshToken=R&userInfo=%7B%22uid%22%3A%22u%22%7D"
+    info = parse_callback_url(url)
+    credential = credential_from_callback(info, "A", machine_id="m", device_id="d")
+    assert credential.access_token == "A" and credential.refresh_token == "R"
+    assert credential.uid == "u" and credential.needs_refresh(0, now=0) is False
+
+
+# ------------------------------------------------------------ TRAE 客户端
+
+def _client(handler, **kw) -> TraeClient:
+    transport = httpx.MockTransport(handler)
+    return TraeClient(
+        stream_client=httpx.AsyncClient(transport=transport, timeout=None),
+        short_client=httpx.AsyncClient(transport=transport, timeout=None), **kw)
+
+
+async def test_client_stream_chat_yields_events():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/agent/v3/llm_utils_chat"
+        return httpx.Response(200, text=fixture("chat-basic.sse"))
+
+    events = [e async for e in _client(handler).stream_chat(
+        TraeCredential(access_token="a"), {"messages": []}, "glm-5.2")]
+    assert [e.kind for e in events][-1] is EventKind.FINISH
+
+
+async def test_client_stream_chat_raises_classified_http_error():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, content=b'{"code":1005}')
+
+    with pytest.raises(UpstreamHTTPError) as caught:
+        [e async for e in _client(handler).stream_chat(
+            TraeCredential(access_token="a"), {"messages": []}, "m")]
+    assert caught.value.kind() is ErrKind.PLAN
+
+
+async def test_client_fetch_models_and_quota():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("get_detail_param"):
+            return httpx.Response(200, json={"config_info_list": [
+                {"config_name": "glm-5.2", "display_config": {"display_name": "GLM"}}]})
+        return httpx.Response(200, json={"user_entitlement_pack_list": [
+            {"entitlement_base_info": {"quota": {"credits_limit": 100}},
+             "usage": {"credits_amount": 30}}]})
+
+    client = _client(handler)
+    models = await client.fetch_models(TraeCredential(access_token="a"))
+    quota = await client.fetch_quota(TraeCredential(access_token="a"))
+    assert models == [Model(id="glm-5.2", name="GLM")]
+    assert quota.remaining == 70 and quota.total == 100
+
+
+@pytest.mark.parametrize("payload", [
+    {}, {"config_info_list": "no"}, {"config_info_list": []},
+])
+async def test_fetch_models_rejects_bad_shapes(payload):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=payload)
+
+    with pytest.raises(trae_events.UpstreamProtocolViolation):
+        await _client(handler).fetch_models(TraeCredential(access_token="a"))
+
+
+async def test_fetch_quota_skips_zero_and_bad_packs():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"user_entitlement_pack_list": [
+            "junk", {"entitlement_base_info": {"quota": {"credits_limit": 0}}},
+            {"entitlement_base_info": {"quota": {"credits_limit": 10}}, "usage": {}},
+        ]})
+
+    quota = await _client(handler).fetch_quota(TraeCredential(access_token="a"))
+    assert quota.total == 10 and quota.remaining == 10
+
+
+async def test_fetch_quota_rejects_missing_list():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    with pytest.raises(trae_events.UpstreamProtocolViolation):
+        await _client(handler).fetch_quota(TraeCredential(access_token="a"))
+
+
+async def test_refresh_token_normalizes_millisecond_expiry():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"Result": {"Token": "new", "RefreshToken": "r2",
+                                                    "TokenExpireAt": 1_786_847_930_141}})
+
+    refreshed = await _client(handler).refresh_token(
+        TraeCredential(access_token="a", refresh_token="r1", expires_at=1))
+    assert refreshed.access_token == "new" and refreshed.refresh_token == "r2"
+    assert refreshed.expires_at == 1_786_847_930
+
+
+async def test_refresh_token_uses_duration_when_no_timestamp():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"Result": {"Token": "new",
+                                                    "TokenExpireDuration": 3600}})
+
+    refreshed = await _client(handler).refresh_token(
+        TraeCredential(access_token="a", refresh_token="r"))
+    assert refreshed.expires_at > 0 and refreshed.refresh_token == "r"
+
+
+async def test_refresh_token_failure_leaves_original_untouched():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"Result": {}})
+
+    original = TraeCredential(access_token="a", refresh_token="r")
+    with pytest.raises(trae_events.UpstreamProtocolViolation):
+        await _client(handler).refresh_token(original)
+    assert original.access_token == "a" and original.refresh_token == "r"
+
+
+async def test_get_user_info():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"Result": {"UserID": "u1", "ScreenName": "n"}})
+
+    assert await _client(handler).get_user_info(TraeCredential(access_token="a")) == ("u1", "n")
+
+
+async def test_get_user_info_rejects_bad_shape():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={})
+
+    with pytest.raises(trae_events.UpstreamProtocolViolation):
+        await _client(handler).get_user_info(TraeCredential(access_token="a"))
+
+
+async def test_post_json_surfaces_http_and_non_json_errors():
+    def failing(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"boom")
+
+    with pytest.raises(UpstreamHTTPError):
+        await _client(failing).fetch_quota(TraeCredential(access_token="a"))
+
+    def not_json(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>")
+
+    with pytest.raises(trae_events.UpstreamProtocolViolation):
+        await _client(not_json).fetch_quota(TraeCredential(access_token="a"))
+
+    def not_object(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[1, 2])
+
+    with pytest.raises(trae_events.UpstreamProtocolViolation):
+        await _client(not_object).fetch_quota(TraeCredential(access_token="a"))
+
+
+async def test_client_lazy_and_close_paths():
+    client = TraeClient()
+    assert client._stream() is client._stream()
+    assert client._short() is client._short()
+    await client.aclose()
+
+
+def test_provider_import_classify_and_models():
+    provider = TraeProvider()
+    data = provider.import_credential({"accessToken": "a", "uid": "u"})
+    assert data["uid"] == "u"
+    assert provider.classify(429, b"") is ErrKind.SOFT
+    assert provider.list_models({}) == [Model(id=m) for m in STATIC_MODELS]
+    with pytest.raises(trae_events.UpstreamProtocolViolation):
+        provider.import_credential({"accessToken": "a"})
+
+
+async def test_provider_stream_and_refresh_via_client():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=fixture("chat-basic.sse"))
+
+    provider = TraeProvider(client=_client(handler))
+    events = [e async for e in provider.stream_chat({"accessToken": "a"}, {}, "m")]
+    assert events[-1].kind is EventKind.FINISH
+
+
+# -------------------------------------------------------------- 执行引擎
+
+@pytest.fixture()
+def repo(tmp_path):
+    db = Database(tmp_path / "e.sqlite3")
+    apply_schema(db.connect())
+    yield CredentialRepository(db, CredentialCipher("s")), ApiKeyRepository(db), db
+    db.close()
+
+
+class FakeProvider:
+    id = "trae"
+
+    def __init__(self, script: list) -> None:
+        self.script = script
+        self.calls = 0
+
+    async def stream_chat(self, credential_data, payload, model):
+        index = min(self.calls, len(self.script) - 1)
+        self.calls += 1
+        for item in self.script[index]:
+            if isinstance(item, Exception):
+                raise item
+            yield item
+
+    def list_models(self, _credential_data):
+        return [Model(id="glm-5.2")]
+
+    def import_credential(self, raw):
+        if not raw.get("accessToken"):
+            raise UpstreamProtocolViolation("credential missing accessToken")
+        return dict(raw)
+
+    def classify(self, status, body=b""):
+        return ErrKind.OTHER
+
+
+class UpstreamError(Exception):
+    def __init__(self, kind: ErrKind) -> None:
+        super().__init__(f"upstream {kind}")
+        self._kind = kind
+
+    def kind(self) -> ErrKind:
+        return self._kind
+
+
+def build_executor(repo_tuple, script, **kwargs):
+    credentials, _keys, _db = repo_tuple
+    provider = FakeProvider(script)
+    executor = Executor(ExecutorDeps(providers={"trae": provider}, credentials=credentials,
+                                     scheduler=Scheduler(**kwargs), default_model="glm-5.2"))
+    return executor, provider, credentials
+
+
+def add_credential(credentials, **kw):
+    return credentials.add(provider="trae", credential_data={"accessToken": "a"}, **kw)
+
+
+GOOD = [Event(kind=EventKind.CONTENT, content="hi"),
+        Event(kind=EventKind.USAGE, usage=Usage(1, 2, 0)),
+        Event(kind=EventKind.FINISH, finish_reason="stop")]
+
+
+async def test_executor_complete_success(repo, tmp_path):
+    add_credential(repo[0])
+    executor, _provider, _credentials = build_executor(repo, [GOOD])
+    result = await executor.complete(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}]}))
+    assert result["choices"][0]["message"]["content"] == "hi"
+
+
+async def test_executor_stream_success_frames(repo):
+    add_credential(repo[0])
+    executor, _provider, _credentials = build_executor(repo, [GOOD])
+    chunks = [c async for c in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
+    assert chunks[-1] == SSE_DONE
+    assert b'"hi"' in chunks[0]                      # 首帧即带 role + content
+
+
+async def test_executor_rotates_on_http_error(repo):
+    add_credential(repo[0], nickname="first")
+    add_credential(repo[0], nickname="second")
+    script = [[UpstreamError(ErrKind.SOFT)], GOOD]
+    executor, provider, _credentials = build_executor(repo, script)
+    result = await executor.complete(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}]}))
+    assert result["choices"][0]["message"]["content"] == "hi"
+    assert provider.calls == 2
+
+
+async def test_executor_cools_plan_error_then_fails_when_exhausted(repo):
+    add_credential(repo[0])
+    executor, _provider, credentials = build_executor(repo, [[UpstreamError(ErrKind.PLAN)]])
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+    assert credentials.candidates()[0].cooling_until is not None
+
+
+async def test_executor_stream_reports_no_credential(repo):
+    executor, _provider, _credentials = build_executor(repo, [GOOD])
+    chunks = [c async for c in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
+    assert b"no_healthy_credential" in chunks[0]
+
+
+async def test_executor_stream_inline_error_triggers_rotation(repo):
+    add_credential(repo[0])
+    add_credential(repo[0])
+    script = [[Event(kind=EventKind.ERROR, error_code=1005, error_message="quota")], GOOD]
+    executor, provider, _credentials = build_executor(repo, script)
+    chunks = [c async for c in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
+    assert provider.calls == 2 and chunks[-1] == SSE_DONE
+
+
+async def test_executor_unknown_error_propagates(repo):
+    add_credential(repo[0])
+    executor, _provider, _credentials = build_executor(repo, [[RuntimeError("boom")]])
+    with pytest.raises(RuntimeError):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+
+
+async def test_executor_dead_error_disables_credential(repo):
+    add_credential(repo[0])
+    executor, _provider, credentials = build_executor(repo, [[UpstreamError(ErrKind.DEAD)]])
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+    assert credentials.candidates()[0].disabled is True
+
+
+async def test_executor_reports_no_credential_as_service_unavailable(repo):
+    """provider 已注册但无凭证 → NoHealthyCredential（503），不是 400。"""
+    executor, _provider, _credentials = build_executor(repo, [GOOD])
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+
+
+async def test_executor_rejects_model_without_provider(repo):
+    add_credential(repo[0])
+    executor, _provider, _credentials = build_executor(repo, [GOOD])
+    with pytest.raises(NoProviderForModel):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}], "model": "x@codebuddy"}))
+
+
+# ------------------------------------------------------------------- API
+
+@pytest.fixture()
+def client(tmp_path):
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings, providers={"trae": FakeProvider([GOOD])})
+    from fastapi.testclient import TestClient
+
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def test_health_endpoint(client):
+    assert client.get("/health").json() == {"status": "ok"}
+
+
+def test_api_requires_key(client):
+    response = client.post("/v1/chat/completions", json={"messages": [{"role": "user"}]})
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "invalid_api_key"
+
+
+def test_api_rejects_bad_key(client):
+    response = client.post("/v1/chat/completions", headers={"Authorization": "Bearer nope"},
+                           json={"messages": [{"role": "user"}]})
+    assert response.status_code == 401
+
+
+def test_full_flow_apikey_chat_and_models(client, tmp_path):
+    app = client.app
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    created = app.state.api_keys.create("root", "test")
+    headers = {"Authorization": f"Bearer {created['api_key']}"}
+    models = client.get("/v1/models", headers=headers)
+    assert models.status_code == 200
+    assert models.json()["data"][0]["providers"] == ["trae"]
+    chat = client.post("/v1/chat/completions", headers=headers,
+                       json={"messages": [{"role": "user", "content": "hi"}]})
+    assert chat.status_code == 200
+    assert chat.json()["choices"][0]["message"]["content"] == "hi"
+
+
+def test_api_validation_error(client):
+    app = client.app
+    key = app.state.api_keys.create("root")["api_key"]
+    headers = {"Authorization": f"Bearer {key}"}
+    response = client.post("/v1/chat/completions", headers=headers, json={"messages": []})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_admin_endpoints_require_session(client):
+    assert client.get("/api/credentials").status_code == 401
+
+
+def _login(client, username="root"):
+    from src.auth.session import create_session_token
+
+    token = create_session_token(username, "s")
+    client.cookies.set("coding2api_session", token)
+
+
+def test_admin_credential_lifecycle(client):
+    _login(client)
+    created = client.post("/api/credentials", json={
+        "provider": "trae", "credential": {"accessToken": "a", "uid": "u"}, "nickname": "n"})
+    assert created.status_code == 200
+    credential_id = created.json()["id"]
+    assert client.get("/api/credentials").json()["credentials"][0]["id"] == credential_id
+    pinned = client.post("/api/credentials/pin", json={"credential_id": credential_id})
+    assert pinned.status_code == 200
+    assert client.post(f"/api/credentials/{credential_id}/toggle",
+                       json={"enabled": False}).status_code == 200
+    assert client.delete(f"/api/credentials/{credential_id}").status_code == 200
+    assert client.delete(f"/api/credentials/{credential_id}").status_code == 400
+
+
+def test_admin_import_rejects_unknown_provider(client):
+    _login(client)
+    response = client.post("/api/credentials", json={"provider": "nope", "credential": {}})
+    assert response.status_code == 400
+
+
+def test_admin_import_rejects_bad_credential(client):
+    _login(client)
+    response = client.post("/api/credentials", json={"provider": "trae", "credential": {}})
+    assert response.status_code == 400
+
+
+def test_api_key_crud(client):
+    _login(client)
+    created = client.post("/api/api-keys", json={"name": "k"})
+    assert created.status_code == 200 and created.json()["api_key"].startswith("sk-")
+    key_id = created.json()["id"]
+    assert client.get("/api/api-keys").json()["api_keys"][0]["id"] == key_id
+    assert client.delete(f"/api/api-keys/{key_id}").status_code == 200
+    assert client.delete(f"/api/api-keys/{key_id}").status_code == 400
+
+
+def test_non_admin_cannot_write(client):
+    _login(client, username="guest")
+    assert client.post("/api/credentials", json={"provider": "trae",
+                                                 "credential": {}}).status_code == 403
+
+
+def test_authorize_callback_capture(client):
+    response = client.get("/authorize?refreshToken=RT")
+    assert response.status_code == 200 and response.json()["captured"] is True
+    assert "refreshToken=RT" in client.app.state.last_callback_url
