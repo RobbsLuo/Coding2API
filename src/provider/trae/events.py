@@ -82,21 +82,33 @@ def parse_frame(frame: SSEFrame) -> Event | None:
         f"unhandled known event {name!r}")
 
 
-def _solo_tool_call_name(item: Any) -> str:
-    """SOLO 增量块里工具名（function_call 或 function 下）。"""
+def _normalize_solo_tool_call(item: Any) -> dict | None:
+    """SOLO tool_call → OpenAI 形状。
+
+    上游流里的 tool_call 用 function_call{name, arguments}（SOLO 协议），
+    客户端契约是 OpenAI 的 function{name, arguments}。缺失/无 name 的
+    条目丢弃（客户端无法执行）。
+    """
     if not isinstance(item, dict):
-        return ""
+        return None
     fn = item.get("function_call")
     if not isinstance(fn, dict):
         fn = item.get("function")
-    if not isinstance(fn, dict):
-        return ""
-    return fn.get("name") if isinstance(fn.get("name"), str) else ""
+    if not isinstance(fn, dict) or not str(fn.get("name") or "").strip():
+        return None
+    out = {k: v for k, v in item.items() if k not in ("function", "function_call")}
+    out["function"] = fn
+    return out
 
 
 def _named_tool_calls(tool_calls: list) -> list:
-    """剔除 name 为空的 tool_call 增量（上游分片噪声，PI 无法执行）。"""
-    return [tc for tc in tool_calls if _solo_tool_call_name(tc)]
+    """归一为 OpenAI 形状并剔除无 name 的条目。"""
+    out = []
+    for tc in tool_calls:
+        normalized = _normalize_solo_tool_call(tc)
+        if normalized is not None:
+            out.append(normalized)
+    return out
 
 
 def _parse_output(payload: dict) -> Event | None:

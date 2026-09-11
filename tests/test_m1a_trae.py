@@ -1041,7 +1041,7 @@ def test_parse_all_events_non_dict_tool_call_entry_skipped():
         data='{"tool_calls":["junk",{"function_call":{"name":"f","arguments":"{}"}}]}')
     events = trae_events.parse_all_events(frame)
     tools = [e for e in events if e.kind is EventKind.TOOL_CALLS]
-    assert len(tools) == 1 and tools[0].tool_calls[0]["function_call"]["name"] == "f"
+    assert len(tools) == 1 and tools[0].tool_calls[0]["function"]["name"] == "f"
 
     empty = trae_events.SSEFrame(
         event="output",

@@ -305,7 +305,7 @@ def test_parse_all_events_orders_tools_first():
         data='{"response":"x","tool_calls":[{"id":"c"},{"id":"d","function_call":{"name":"f"}}]}')
     events = trae_events.parse_all_events(noisy)
     tools = [e for e in events if e.kind is EventKind.TOOL_CALLS]
-    assert len(tools) == 1 and tools[0].tool_calls[0]["function_call"]["name"] == "f"
+    assert len(tools) == 1 and tools[0].tool_calls[0]["function"]["name"] == "f"
 
 
 def test_parse_all_events_passes_through_non_output_frames():

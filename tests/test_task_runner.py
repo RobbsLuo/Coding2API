@@ -140,9 +140,10 @@ async def test_runner_direct_loop_invocation_is_guarded(repo):
 
 
 async def test_runner_checkin_skips_before_hour(repo):
-    """未到签到时刻时 _sync_checkin 是 no-op。"""
+    """未到签到时刻（due()=False）时 _sync_checkin 是 no-op。"""
     provider = StubProvider()
     runner, _collector = _runner(repo, provider)
+    runner._checkin.due = lambda **kwargs: False   # 固定"未到点"，避免真实时钟依赖
     assert await runner._sync_checkin() is None
 
 
