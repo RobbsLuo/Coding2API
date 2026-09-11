@@ -31,13 +31,15 @@ from .stats.collector import StatsCollector, StatsQuery
 SESSION_COOKIE = "coding2api_session"
 
 
-def build_app(settings: Settings | None = None, *, providers: dict | None = None) -> FastAPI:
+def build_app(settings: Settings | None = None, *, providers: dict | None = None,
+              users: object | None = None) -> FastAPI:
     config = settings or load_settings()
     db = Database(config.db_path)
     apply_schema(db.connect())
     cipher = CredentialCipher(config.app_secret)
     credentials = CredentialRepository(db, cipher)
     api_keys = ApiKeyRepository(db)
+    store = users if users is not None else _load_users(settings=config)
     registry = providers if providers is not None else {
         "trae": TraeProvider(),
         "codebuddy": CodeBuddyProvider(),
@@ -53,6 +55,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     app = FastAPI(title="coding2api", version="0.1.0", lifespan=lifespan)
     app.state.settings = config
+    app.state.users = store
     app.state.credentials = credentials
     app.state.api_keys = api_keys
     app.state.executor = executor
@@ -123,6 +126,33 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         return JSONResponse(status_code=403,
                             content=error_payload("admin only", "forbidden", 403))
 
+    # ----------------------------------------------------------- 管理台登录
+
+    @app.post("/api/auth/login")
+    async def login(payload: dict):
+        from .auth.session import create_session_token
+
+        username = str(payload.get("username") or "")
+        password = str(payload.get("password") or "")
+        if not store.verify(username, password):
+            raise UnauthorizedError("invalid credentials")
+        token = create_session_token(username, config.app_secret)
+        response = JSONResponse({"username": username, "is_admin": config.is_admin(username)})
+        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
+                            secure=config.public_base_url.startswith("https://"),
+                            max_age=12 * 3600, path="/")
+        return response
+
+    @app.post("/api/auth/logout")
+    async def logout():
+        response = JSONResponse({"ok": True})
+        response.delete_cookie(SESSION_COOKIE, path="/")
+        return response
+
+    @app.get("/api/auth/session")
+    async def session_info(principal: Principal = Depends(principal_from_request)):
+        return {"username": principal.username, "is_admin": principal.is_admin}
+
     # ------------------------------------------------------------- 对外端点
 
     @app.get("/health")
@@ -154,7 +184,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.get("/api/credentials")
     async def list_credentials(principal: Principal = Depends(principal_from_request)):
-        return {"credentials": credentials.list_all(), "viewer": principal.username}
+        return {"credentials": credentials.list_all(), "viewer": principal.username,
+                "is_admin": principal.is_admin}
 
     @app.get("/api/api-keys")
     async def list_keys(principal: Principal = Depends(principal_from_request)):
@@ -350,3 +381,15 @@ def _upstream_auth(registry: dict, settings: Settings) -> dict:
     if endpoint is not None:
         flows["codebuddy"] = CodeBuddyOAuth(endpoint)
     return flows
+
+
+def _load_users(*, settings: Settings):
+    """用户文件是唯一用户源（PROPOSAL §5）。启动时必须存在且至少一个有效用户。"""
+    import os
+
+    from .auth.users import UsersFileStore
+
+    path = os.environ.get("USERS_FILE", os.path.join("secrets", "users.txt"))
+    store = UsersFileStore(path)
+    store.validate()
+    return store

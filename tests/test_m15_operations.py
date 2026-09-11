@@ -1514,3 +1514,64 @@ async def test_aclose_without_client_is_noop():
     await CodeBuddyOAuth("https://e").aclose()
     await CodeBuddyRefresh("https://e").aclose()
     await CodeBuddyCheckin("https://e").aclose()
+
+
+# ------------------------------------------------------------ 管理台登录
+
+def test_login_success_sets_httponly_cookie(tmp_path):
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings)
+    with TestClient(app) as client:
+        response = client.post("/api/auth/login",
+                               json={"username": "root", "password": "rootpw"})
+        assert response.status_code == 200
+        assert response.json() == {"username": "root", "is_admin": True}
+        cookie = response.headers["set-cookie"]
+        assert "httponly" in cookie.lower() and "samesite=lax" in cookie.lower()
+        assert client.get("/api/auth/session").json()["username"] == "root"
+
+
+def test_login_rejects_bad_password_and_unknown_user(tmp_path):
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    app = build_app(settings)
+    with TestClient(app) as client:
+        for payload in ({"username": "root", "password": "wrong"},
+                        {"username": "ghost", "password": "rootpw"},
+                        {}):
+            assert client.post("/api/auth/login", json=payload).status_code == 401
+
+
+def test_logout_clears_session(tmp_path):
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    app = build_app(settings)
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "root", "password": "rootpw"})
+        assert client.post("/api/auth/logout").json() == {"ok": True}
+        assert client.get("/api/auth/session").status_code == 401
+
+
+def test_session_endpoint_requires_login(tmp_path):
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    app = build_app(settings)
+    with TestClient(app) as client:
+        assert client.get("/api/auth/session").status_code == 401
+
+
+def test_build_app_fails_without_users_file(tmp_path, monkeypatch):
+    from src.auth.users import UsersFileError
+
+    monkeypatch.setenv("USERS_FILE", str(tmp_path / "missing.txt"))
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    with pytest.raises(UsersFileError):
+        build_app(settings)
+
+
+def test_credentials_endpoint_exposes_admin_flag(tmp_path):
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings)
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "guest", "password": "guestpw"})
+        body = client.get("/api/credentials").json()
+        assert body["viewer"] == "guest" and body["is_admin"] is False
