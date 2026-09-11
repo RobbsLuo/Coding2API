@@ -9,7 +9,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
-from ..compat.openai.request import ChatRequest
+from ..compat.openai.request import ChatRequest, InvalidRequest
 from ..compat.openai.response import (
     StreamTranslator,
     UpstreamStreamError,
@@ -55,6 +55,14 @@ class ExecutorDeps:
 class Executor:
     def __init__(self, deps: ExecutorDeps) -> None:
         self._deps = deps
+
+    def _record_invalid(self, username: str, provider_id: str, credential_id: str,
+                        model: str, started: float, error: object) -> None:
+        """请求无效：只记统计（invalid_request），绝不冷却/禁用凭证。"""
+        self._deps.record(
+            username=username, provider=provider_id, credential_id=credential_id,
+            model=model, ok=False, error_type="invalid_request",
+            latency_ms=int((time.monotonic() - started) * 1000))
 
     def _upstream_model(self, provider_id: str, model: str) -> str:
         """归一模型名 → 该上游注册的原始 id（大小写变体映射，未知则原样）。"""
@@ -120,6 +128,15 @@ class Executor:
                 kind = _classify(error)
                 if kind is None:
                     raise
+                if kind is ErrKind.INVALID:
+                    # 请求无效（如上游不认识该模型）：不冷却不轮换；
+                    # 流已开始（200 已发出），以 invalid_request 错误帧结束
+                    self._record_invalid(username, provider_id, credential_id,
+                                         target.model, started, error)
+                    yield _error_frame(
+                        f"upstream rejected request (model {target.model!r} "
+                        f"unavailable): {error}", "invalid_request")
+                    return
                 outcome = self._deps.scheduler.note_error(
                     self._candidate(credential_id), kind, int(time.time()))
                 self._deps.credentials.save_error(credential_id, outcome)
@@ -168,6 +185,13 @@ class Executor:
                 kind = _classify(error)
                 if kind is None:
                     raise
+                if kind is ErrKind.INVALID:
+                    # 请求无效（如上游不认识该模型）：不冷却凭证，直接 400
+                    self._record_invalid(username, provider_id, credential_id,
+                                         target.model, started, error)
+                    raise InvalidRequest(
+                        f"upstream rejected request (model {target.model!r} "
+                        f"unavailable): {error}") from error
                 self._record_error(credential_id, kind)
                 last_error = error
             else:
@@ -263,6 +287,8 @@ def _error_type_for(kind: ErrKind) -> str:
         return "rate_limit"
     if kind is ErrKind.DEAD:
         return "credential_unavailable"
+    if kind is ErrKind.INVALID:
+        return "invalid_request"
     return "upstream_error"
 
 

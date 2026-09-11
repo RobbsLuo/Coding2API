@@ -248,7 +248,7 @@ def test_usage_ignores_boolean_and_non_numeric_values():
 
 @pytest.mark.parametrize(("status", "expected"), [
     (401, ErrKind.DEAD), (403, ErrKind.DEAD), (404, ErrKind.SOFT), (429, ErrKind.SOFT),
-    (500, ErrKind.OTHER), (400, ErrKind.OTHER), (200, ErrKind.OTHER),
+    (500, ErrKind.OTHER), (400, ErrKind.INVALID), (200, ErrKind.OTHER),
 ])
 def test_classify_status(status, expected):
     assert cb_events.classify_status(status) is expected
@@ -831,3 +831,64 @@ async def test_fetch_models_rejects_non_object_config():
 
     with pytest.raises(UpstreamProtocolViolation):
         await _client(handler).fetch_models(CodeBuddyCredential(bearer_token="t"))
+
+
+# ------------------------------------- 400 = INVALID：不冷却凭证
+
+async def test_http_400_does_not_cooldown_or_rotate(dual_repo):
+    """上游 400（模型不存在等）→ 抛 InvalidRequest；凭证不冷却、不轮换。"""
+    from src.compat.openai.request import InvalidRequest
+
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(400, json={"code": 1002, "msg": "model not found"})
+
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "t1"})
+    provider = CodeBuddyProvider(client=_client(handler))
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": provider}, credentials=repo, scheduler=Scheduler(),
+        default_model="qwen3.8"))
+
+    with pytest.raises(InvalidRequest) as exc_info:
+        await executor.complete(_request("qwen3.8"), username="u")
+    assert "qwen3.8" in str(exc_info.value)
+    assert calls["n"] == 1                      # 未轮换重试
+    # 凭证零错误记录、无冷却、未禁用
+    row = db.connect().execute(
+        "SELECT err_count, cooling_until, disabled FROM credentials").fetchone()
+    assert tuple(row) == (0, None, 0)
+
+
+async def test_http_400_stream_yields_invalid_request_frame(dual_repo):
+    """流式路径：400 → invalid_request 错误帧；凭证不冷却、不轮换。"""
+    import json as _json
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"code": 1002, "msg": "model not found"})
+
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "t1"})
+    provider = CodeBuddyProvider(client=_client(handler))
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": provider}, credentials=repo, scheduler=Scheduler(),
+        default_model="qwen3.8"))
+
+    frames = [f async for f in executor.stream(_request("qwen3.8"), username="u")]
+    assert len(frames) == 1                     # 错误帧（内含 [DONE]）
+    payload = _json.loads(frames[0].split(b"\n\n")[0].removeprefix(b"data: "))
+    assert payload["error"]["type"] == "api_error"
+    assert payload["error"]["code"] == "invalid_request"
+    assert "qwen3.8" in payload["error"]["message"]
+    row = db.connect().execute(
+        "SELECT err_count, cooling_until FROM credentials").fetchone()
+    assert tuple(row) == (0, None)
+
+
+def test_error_type_for_invalid():
+    """INVALID → invalid_request（executor 290-291）。"""
+    from src.engine.executor import _error_type_for
+
+    assert _error_type_for(ErrKind.INVALID) == "invalid_request"

@@ -27,6 +27,7 @@ class ErrKind(StrEnum):
     SOFT = "soft"      # 限流/404 → 60s，不累计错误数
     DEAD = "dead"      # session 失效 → 硬禁用
     OTHER = "other"    # 其他 4xx/5xx → 累计，连续 3 次 → 10m
+    INVALID = "invalid"  # 请求无效（如模型不存在）→ 不冷却凭证，直接 400 回客户端
 
 
 @dataclass(slots=True)

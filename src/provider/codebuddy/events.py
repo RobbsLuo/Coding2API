@@ -119,6 +119,9 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
     compact = body.decode("utf-8", errors="replace").replace(" ", "").lower()
     if '"code":1005' in compact or ("1005" in compact and "plan" in compact):
         return ErrKind.PLAN
+    if status == 400:
+        # 请求无效（如模型不存在）是客户端错误，冷却凭证只会误伤健康凭证
+        return ErrKind.INVALID
     if status in (401, 403):
         return ErrKind.DEAD
     if status in (404, 429):

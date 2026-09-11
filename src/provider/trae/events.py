@@ -143,6 +143,9 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
     text = body.decode("utf-8", errors="replace")
     if '"code":1005' in text.replace(" ", ""):
         return ErrKind.PLAN
+    if status == 400:
+        # 请求无效（如模型不存在）是客户端错误，冷却凭证只会误伤健康凭证
+        return ErrKind.INVALID
     if status == 401:
         return ErrKind.DEAD
     if status in (404, 429):

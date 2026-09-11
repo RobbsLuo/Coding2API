@@ -170,7 +170,7 @@ def test_error_fixtures_classify_plan_and_other():
 
 @pytest.mark.parametrize(("status", "expected"), [
     (401, ErrKind.DEAD), (404, ErrKind.SOFT), (429, ErrKind.SOFT),
-    (500, ErrKind.OTHER), (400, ErrKind.OTHER),
+    (500, ErrKind.OTHER), (400, ErrKind.INVALID),
 ])
 def test_classify_status(status, expected):
     assert trae_events.classify_status(status) is expected
