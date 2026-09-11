@@ -13,9 +13,15 @@ from typing import Any
 import httpx
 
 from ...engine.sse import iter_frames
-from ...provider.base import ErrKind, Event, Model, Quota
+from ...provider.base import AuthSession, ErrKind, Event, Model, Quota
 from . import events as trae_events
-from .callback import build_login_url, parse_callback_url
+from .callback import (
+    CallbackInfo,
+    build_login_url,
+    credential_from_callback,
+    new_machine_identity,
+    parse_callback_url,
+)
 from .credential import TraeCredential, parse_credential
 from .events import (
     AGENT_HOST,
@@ -323,10 +329,55 @@ class TraeProvider:
         """释放内部 HTTP 连接池。"""
         await self.client.aclose()
 
-    def parse_login_url(self, raw_url: str) -> dict:
-        """解析 TRAE 登录回调链接（Q17=C callback 轨道）。"""
+    # ------------------------------------------------- callback 轨道（Q17=C）
+
+    def parse_login_url(self, raw_url: str) -> CallbackInfo:
+        """解析 TRAE 登录回调链接。"""
         return parse_callback_url(raw_url)
 
     def build_login_url(self, callback_url: str, *, machine_id: str,
                         device_id: str) -> str:
         return build_login_url(callback_url, machine_id=machine_id, device_id=device_id)
+
+    def start_auth(self, callback_url: str) -> AuthSession:
+        """生成登录 URL。machine/device id 由调用方保管，落盘凭证必须复用同一对。"""
+        machine_id, device_id = new_machine_identity()
+        return AuthSession(
+            flow="callback", state=f"{machine_id}:{device_id}",
+            callback_url=callback_url,
+            auth_url=build_login_url(callback_url, machine_id=machine_id,
+                                     device_id=device_id),
+        )
+
+    async def complete_callback(self, raw_url: str, state: str) -> dict:
+        """回调链接 → ExchangeToken → 归一化凭证。
+
+        state 形如 ``machine_id:device_id``，用于保证落盘凭证与登录时用的
+        设备标识一致（原实现里这两者不一致会导致登录态与凭证不匹配）。
+        """
+        info = parse_callback_url(raw_url)
+        machine_id, _, device_id = state.partition(":")
+        if not machine_id or not device_id:
+            raise UpstreamProtocolViolation("auth state missing machine/device id")
+
+        # 回调只给 refreshToken，accessToken 必须由 ExchangeToken 换出来。
+        # 换失败就没有可用凭证，绝不能用 refreshToken 充当 accessToken 混进池子。
+        credential = credential_from_callback(
+            info, "", machine_id=machine_id, device_id=device_id)
+        try:
+            credential = await self.client.refresh_token(credential)
+        except UpstreamHTTPError as error:
+            # 上游拒绝兑换（refreshToken 过期/失效）→ 归一为协议违规，
+            # 让调用方按「凭证无效」处理，而不是把 HTTP 细节漏到 API 层
+            raise UpstreamProtocolViolation(
+                f"token exchange rejected: {error.status}") from error
+        if not credential.uid:
+            uid, nickname = await self.client.get_user_info(credential)
+            credential = TraeCredential(
+                uid=uid or credential.uid, access_token=credential.access_token,
+                refresh_token=credential.refresh_token, expires_at=credential.expires_at,
+                domain=credential.domain, api_host=credential.api_host,
+                machine_id=credential.machine_id, device_id=credential.device_id,
+                enterprise_id=credential.enterprise_id,
+                nickname=nickname or credential.nickname)
+        return credential.to_dict()

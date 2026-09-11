@@ -876,7 +876,9 @@ def test_non_admin_cannot_write(client):
                                                  "credential": {}}).status_code == 403
 
 
-def test_authorize_callback_capture(client):
+def test_authorize_rejects_callback_without_pending_login(client):
+    """没有进行中的登录时，任意回调不得被塞进凭证池。"""
     response = client.get("/authorize?refreshToken=RT")
-    assert response.status_code == 200 and response.json()["captured"] is True
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
     assert "refreshToken=RT" in client.app.state.last_callback_url

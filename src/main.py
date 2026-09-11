@@ -83,6 +83,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.stats_query = StatsQuery(db)
     app.state.upstream_auth = _upstream_auth(registry, config)
     app.state.pending_probes = []
+    app.state.pending_callback_state = None
+    app.state.pending_callback_user = None
 
     # ------------------------------------------------------------ 鉴权依赖
 
@@ -270,12 +272,19 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                   principal: Principal = Depends(principal_from_request)):
         require_admin(principal)
         provider_id = str(payload.get("provider") or "")
-        oauth = app.state.upstream_auth.get(provider_id)
-        if oauth is None:
-            raise InvalidRequest(f"provider {provider_id!r} does not support polling login")
-        session = await oauth.start(principal.username)
+        if provider_id in app.state.upstream_auth:
+            session = await app.state.upstream_auth[provider_id].start(principal.username)
+        else:
+            provider = registry.get(provider_id)
+            builder = getattr(provider, "start_auth", None)
+            if not callable(builder):
+                raise InvalidRequest(f"provider {provider_id!r} does not support login")
+            session = builder(resolve_public_callback_url(config))
+            app.state.pending_callback_state = session.state
+            app.state.pending_callback_user = principal.username
+            # 回调轨道没有本地轮询：登录结果由 /authorize 落库后由前端查凭证列表
         return {"flow": session.flow, "state": session.state, "auth_url": session.auth_url,
-                "interval": session.interval}
+                "interval": session.interval, "callback_url": session.callback_url}
 
     @app.post("/api/auth/upstream/poll")
     async def upstream_auth_poll(payload: dict,
@@ -412,9 +421,36 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.get("/authorize")
     async def authorize(request: Request):
-        """TRAE 浏览器 302 落点：只捕获 query，不落盘。"""
+        """TRAE 浏览器 302 落点。
+
+        回调不需要 API Key（浏览器不会带），因此这里不做鉴权，但：
+        - 只接受带 refreshToken 的链接，其他一律拒绝
+        - 换到的凭证直接落库，响应里绝不回传 token
+        - state 必须与 start_auth 发放的一致，防止任意回调被塞进池子
+        """
         raw = str(request.url)
         app.state.last_callback_url = raw
+        state = request.query_params.get("state")
+        provider = registry.get("trae")
+        pending = app.state.pending_callback_state
+        if provider is None or pending is None or state != pending:
+            # 没有进行中的登录，或 state 不匹配（含已消费后的重放）→ 拒绝。
+            # 不允许回退到 URL 里的 state，否则旧链接可以被重复兑换。
+            return JSONResponse(status_code=400, content=error_payload(
+                "no pending TRAE login in progress", "invalid_request", 400))
+        if not request.query_params.get("refreshToken") and not request.query_params.get("userJwt"):
+            return JSONResponse(status_code=400, content=error_payload(
+                "callback missing refreshToken", "invalid_request", 400))
+        try:
+            credential_data = await provider.complete_callback(raw, state)
+        except UpstreamProtocolViolation as error:
+            return JSONResponse(status_code=400, content=error_payload(
+                str(error), "invalid_credential", 400))
+        app.state.pending_callback_state = None
+        credential_id = credentials.add(provider="trae", credential_data=credential_data,
+                                        nickname=str(credential_data.get("nickname") or ""),
+                                        added_by=app.state.pending_callback_user or "")
+        schedule_probe(credential_id)
         return {"ok": True, "captured": True, "at": int(time.time())}
 
     # 静态资源必须最后注册：catch-all 会匹配所有未命中的路径
