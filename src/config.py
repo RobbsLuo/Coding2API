@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     quota_probe_minutes: int = 60
     pacer_min_seconds: float = 5
     pacer_max_seconds: float = 20
+    # CodeBuddy 聊天最小间隔：腾讯频率风控（11128）在连续快速请求时触发，
+    # 实测 ≥5s 间隔稳定避开；0 关闭节流
+    codebuddy_chat_min_interval: float = 5
 
     @cached_property
     def admin_set(self) -> frozenset[str]:

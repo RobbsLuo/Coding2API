@@ -320,9 +320,13 @@ class UpstreamHTTPError(Exception):
 
 @dataclass(slots=True)
 class CodeBuddyProvider:
-    """Provider 协议实现（M1b：bearer-only + 聊天 + 个人额度）。"""
+    """Provider 协议实现（M1b：bearer-only + 聊天 + 个人额度）。
+
+    pacer：聊天请求节流器（腾讯频率风控对策）；None 表示不限速。
+    """
 
     client: CodeBuddyClient = field(default_factory=CodeBuddyClient)
+    pacer: Any | None = None
 
     id: str = "codebuddy"
 
@@ -349,6 +353,8 @@ class CodeBuddyProvider:
     async def stream_chat(self, credential_data: dict, payload: dict,
                           model: str) -> AsyncIterator[Event]:
         credential = CodeBuddyCredential.from_dict(credential_data)
+        if self.pacer is not None:
+            await self.pacer.wait_turn()
         async for event in self.client.stream_chat(credential, payload, model):
             yield event
 

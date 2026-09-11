@@ -31,6 +31,7 @@ from .provider.codebuddy.oauth import CodeBuddyOAuth
 from .provider.trae.client import TraeProvider
 from .provider.trae.events import UpstreamProtocolViolation
 from .stats.collector import StatsCollector, StatsQuery
+from .tasks.background import Pacer
 from .tasks.runner import build_runner
 
 SESSION_COOKIE = "coding2api_session"
@@ -62,9 +63,15 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     credentials = CredentialRepository(db, cipher)
     api_keys = ApiKeyRepository(db)
     store = users if users is not None else _load_users(settings=config)
+    chat_pacer = (
+        None
+        if config.codebuddy_chat_min_interval <= 0
+        else Pacer(config.codebuddy_chat_min_interval,
+                   config.codebuddy_chat_min_interval)
+    )
     registry = providers if providers is not None else {
         "trae": TraeProvider(),
-        "codebuddy": CodeBuddyProvider(),
+        "codebuddy": CodeBuddyProvider(pacer=chat_pacer),
     }
     # provider → {小写模型名: 上游原始 id}；playground_models 拉取后就地更新，
     # executor 发请求前把归一名映射回各上游的原始大小写

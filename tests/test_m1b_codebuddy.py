@@ -1071,3 +1071,33 @@ def test_stainless_fingerprint_variants():
         assert h._stainless_os() == "Linux"
     with mock.patch.object(h.platform, "system", return_value="SunOS"):
         assert h._stainless_os() == "SunOS"
+
+
+async def test_chat_pacer_throttles_and_can_be_disabled():
+    """CB 聊天节流：请求前等待；None/关闭时不等待。"""
+    import time as _time
+
+    from src.provider.codebuddy.client import CodeBuddyProvider
+
+    waited = []
+
+    class FakePacer:
+        async def wait_turn(self):
+            waited.append(_time.monotonic())
+
+    async def stream_ok(cred, payload, model):
+        yield GOOD[0]
+
+    class FakeClient:
+        async def stream_chat(self, cred, payload, model):
+            async for ev in stream_ok(cred, payload, model):
+                yield ev
+
+    provider = CodeBuddyProvider(client=FakeClient(), pacer=FakePacer())
+    events = [e async for e in provider.stream_chat({"bearer_token": "t"}, {}, "m")]
+    assert events and waited
+
+    provider2 = CodeBuddyProvider(client=FakeClient(), pacer=None)
+    waited.clear()
+    _ = [e async for e in provider2.stream_chat({"bearer_token": "t"}, {}, "m")]
+    assert not waited
