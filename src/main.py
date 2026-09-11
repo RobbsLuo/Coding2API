@@ -347,10 +347,12 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         if provider is None or data is None or not hasattr(provider, "checkin"):
             raise InvalidRequest("credential does not support checkin")
         result = await provider.checkin(data)
-        if result.ok:
-            schedule_probe(credential_id)      # 签到发放积分 → 立即刷新额度
+        if result.ok and not result.already_checked_in:
+            schedule_probe(credential_id)      # 只有真签到了才会发积分
+        # already_checked_in 必须透传：前端靠它区分「刚签到」与「今天已签过」
         return {"ok": result.ok, "credit": result.credit, "code": result.code,
-                "message": result.message}
+                "message": result.message,
+                "already_checked_in": result.already_checked_in}
 
     @app.get("/api/credentials/{credential_id}/accounts")
     async def list_credential_accounts(credential_id: str,
