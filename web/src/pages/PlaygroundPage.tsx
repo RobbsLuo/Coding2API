@@ -1,11 +1,25 @@
-import { useState } from "react";
-import { api } from "../api/client";
-import type { ModelInfo } from "../api/types";
-import { Button, Empty, Field, Input, Notice, Panel, Select, Textarea } from "../ui";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { useSessionContext } from "../Layout";
+import { Button, Empty, Field, Notice, Panel, Select, Textarea } from "../ui";
+
+interface ModelInfo {
+  id: string;
+  object: string;
+  owned_by: string;
+  providers: string[];
+}
+
+/** 通过会话鉴权的内部端点取数据，不需要用户自己造 API Key。 */
+async function fetchPlaygroundModels(signal?: AbortSignal) {
+  const response = await fetch("/api/playground/models", { credentials: "same-origin", signal });
+  if (!response.ok) throw new Error("模型列表加载失败");
+  const body = (await response.json()) as { data: ModelInfo[] };
+  return body.data;
+}
 
 export function PlaygroundPage() {
-  const [apiKey, setApiKey] = useState("");
-  const [models, setModels] = useState<ModelInfo[]>([]);
+  const session = useSessionContext();
   const [model, setModel] = useState("");
   const [prompt, setPrompt] = useState("");
   const [stream, setStream] = useState(true);
@@ -15,16 +29,21 @@ export function PlaygroundPage() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  const loadModels = async () => {
-    setError(null);
-    try {
-      const result = await api.models(apiKey);
-      setModels(result.data);
-      setModel(result.data[0]?.id ?? "");
-    } catch {
-      setError("模型列表加载失败，请确认 API Key 有效");
+  const modelsQuery = useQuery({
+    queryKey: ["playground-models"],
+    queryFn: ({ signal }) => fetchPlaygroundModels(signal),
+  });
+  const models = modelsQuery.data ?? [];
+
+  // 模型载入后自动选中第一个，省一次无意义的手动选择。
+  // 只依赖数量：models 引用每次渲染都变，会导致 effect 反复触发。
+  const modelCount = models.length;
+  const hasModel = model !== "";
+  useEffect(() => {
+    if (modelCount > 0 && !hasModel) {
+      setModel(models[0].id);
     }
-  };
+  }, [modelCount, hasModel, models]);
 
   const send = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -34,11 +53,21 @@ export function PlaygroundPage() {
     setReasoning("");
     setUsage(null);
     try {
-      const response = await api.chatCompletion(apiKey, {
-        model,
-        messages: [{ role: "user", content: prompt }],
-        stream,
+      const response = await fetch("/api/playground/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({
+          model,
+          messages: [{ role: "user", content: prompt }],
+          stream,
+        }),
       });
+      if (response.status === 401) {
+        // 会话过期：提示重新登录而不是一句原始错误
+        window.location.href = "/login";
+        return;
+      }
       if (!response.ok) {
         const body = (await response.json()) as { error?: { message?: string } };
         setError(body.error?.message ?? `请求失败（${response.status}）`);
@@ -65,45 +94,33 @@ export function PlaygroundPage() {
 
   return (
     <div className="space-y-6" data-testid="playground-page">
-      <Panel title="连接">
-        <div className="flex flex-wrap items-end gap-3">
-          <div className="w-72">
-            <Field label="API Key" hint="仅保存在本页内存，不写入 localStorage">
-              <Input
-                type="password"
-                value={apiKey}
-                data-testid="playground-key"
-                placeholder="sk-..."
-                onChange={(event) => setApiKey(event.target.value)}
-              />
-            </Field>
-          </div>
-          <Button onClick={() => void loadModels()} data-testid="load-models">
-            载入模型
-          </Button>
-          {models.length > 0 && (
-            <div className="w-64">
-              <Field label="模型" hint="可用 model@provider 强制指定上游">
+      <Panel title="请求">
+        <form onSubmit={send} className="space-y-3">
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="w-72">
+              <Field
+                label="模型"
+                hint="自动选健康上游；写 model@provider 可强制指定"
+              >
                 <Select
                   value={model}
                   data-testid="model-select"
                   onChange={(event) => setModel(event.target.value)}
                 >
+                  <option value="">选择模型…</option>
                   {models.map((item) => (
                     <option key={item.id} value={item.id}>
                       {item.id}（{item.providers.join(" / ")}）
                     </option>
                   ))}
-                  {/* 强制指定上游后当前值形如 model@provider，不在原始列表里，
-                      必须补一个合成选项，否则 select 会显示为空白 */}
+                  {/* model@provider 组合不在原始列表里，必须补合成选项，
+                      否则 React 会把 select 渲染成无选中项 */}
                   {model.includes("@") && (
                     <option value={model}>{model}（强制指定）</option>
                   )}
                 </Select>
               </Field>
             </div>
-          )}
-          {models.length > 0 && (
             <div className="w-56">
               <Field label="强制指定上游">
                 <Select
@@ -120,12 +137,10 @@ export function PlaygroundPage() {
                 </Select>
               </Field>
             </div>
-          )}
-        </div>
-      </Panel>
-
-      <Panel title="请求">
-        <form onSubmit={send} className="space-y-3">
+            {modelsQuery.isFetching && (
+              <span className="text-xs text-[var(--color-ink-muted)]">载入模型中…</span>
+            )}
+          </div>
           <Field label="提示词">
             <Textarea
               rows={4}
@@ -149,9 +164,11 @@ export function PlaygroundPage() {
         </form>
       </Panel>
 
-      {error && (
+      {(error || modelsQuery.error) && (
         <div data-testid="playground-error">
-          <Notice tone="danger">{error}</Notice>
+          <Notice tone="danger">
+            {error ?? "模型列表加载失败，请刷新重试"}
+          </Notice>
         </div>
       )}
 
@@ -182,7 +199,17 @@ export function PlaygroundPage() {
         </Panel>
       )}
 
-      {!answer && !reasoning && !error && <Empty>还没有响应</Empty>}
+      {!answer && !reasoning && !error && (
+        <Empty>
+          <div className="space-y-1">
+            <p>填写提示词后发送，请求会走与外部 API 相同的调度与统计。</p>
+            <p className="text-xs">
+              无需 API Key——这里用的是你的登录会话，用量计入 {session.username}。
+              API Key 仅供外部客户端接入使用。
+            </p>
+          </div>
+        </Empty>
+      )}
     </div>
   );
 }

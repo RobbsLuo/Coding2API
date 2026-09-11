@@ -176,6 +176,39 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     async def session_info(principal: Principal = Depends(principal_from_request)):
         return {"username": principal.username, "is_admin": principal.is_admin}
 
+    # ------------------------------------- Playground（会话鉴权，无需 API Key）
+
+    def playground_models() -> dict:
+        """与 /v1/models 相同的模型列表，供管理台内部使用。"""
+        grouped: dict[str, set[str]] = {}
+        for provider_id, provider in registry.items():
+            for model in provider.list_models({}):
+                grouped.setdefault(model.id, set()).add(provider_id)
+        return {"object": "list", "data": [
+            {"id": model, "object": "model", "owned_by": "coding2api",
+             "providers": sorted(providers)}
+            for model, providers in sorted(grouped.items())
+        ]}
+
+    @app.get("/api/playground/models")
+    async def playground_list_models(
+            _principal: Principal = Depends(principal_from_request)):
+        return playground_models()
+
+    @app.post("/api/playground/chat/completions")
+    async def playground_chat(request: Request,
+                              principal: Principal = Depends(principal_from_request)):
+        """会话内直接调试：与外部 /v1 走同一执行引擎，用量记到当前用户。
+
+        不走 API Key 鉴权——调试是管理台自带能力，不应强迫用户先造一个 Key。
+        """
+        body = await request.json()
+        chat_request = parse_chat_request(body)
+        if chat_request.stream:
+            return StreamingResponse(executor.stream(chat_request, username=principal.username),
+                                     media_type="text/event-stream")
+        return JSONResponse(await executor.complete(chat_request, username=principal.username))
+
     # ------------------------------------------------------------- 对外端点
 
     @app.get("/health")
@@ -193,15 +226,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.get("/v1/models")
     async def list_models(_user: str = Depends(api_key_user)):
-        models: dict[str, set[str]] = {}
-        for provider_id, provider in registry.items():
-            for model in provider.list_models({}):
-                models.setdefault(model.id, set()).add(provider_id)
-        return {"object": "list", "data": [
-            {"id": model, "object": "model", "owned_by": "coding2api",
-             "providers": sorted(providers)}
-            for model, providers in sorted(models.items())
-        ]}
+        return playground_models()
 
     # --------------------------------------------------------- 管理端点（读）
 
