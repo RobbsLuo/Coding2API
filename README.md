@@ -46,15 +46,22 @@ APP_SECRET="换成你自己的随机字符串" ADMIN_USERNAMES=admin uv run pyth
 ### Docker
 
 ```bash
+# 1. 配置
 cat > .env <<'EOF'
 APP_SECRET=换成你自己的随机字符串
 ADMIN_USERNAMES=admin
+PUBLIC_BASE_URL=http://127.0.0.1:8000
 EOF
 
-mkdir -p secrets
-docker run --rm -it -v "$PWD/secrets:/app/secrets" \
-  --entrypoint python coding2api:local scripts/hash_password.py admin
+# 2. 构建镜像
+docker compose build
 
+# 3. 创建管理台用户（镜像内已带脚本）
+mkdir -p secrets
+docker compose run --rm --entrypoint python coding2api scripts/hash_password.py admin \
+  --output /app/secrets/users.txt
+
+# 4. 启动
 docker compose up -d
 ```
 

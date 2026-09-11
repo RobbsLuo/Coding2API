@@ -1,0 +1,29 @@
+# 版本控制与本地环境
+.git/
+.gitignore
+.github/
+
+# Python 虚拟环境与缓存（宿主平台产物会覆盖容器内安装）
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 前端依赖与产物（产物由构建阶段生成，依赖由容器内安装）
+web/node_modules/
+web/dist/
+web/coverage/
+
+# 运行数据与密钥：绝不进镜像
+data/
+secrets/
+.env
+*.sqlite3*
+
+# 文档与设计稿不需要进镜像
+diagrams/*.png
+*.md
+!README.md

@@ -23,7 +23,8 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY src/ ./src/
 COPY scripts/ ./scripts/
-COPY web/dist/ ./web/dist/
+# 从构建阶段取前端产物：web/dist 是 gitignored，CI 检出后不存在
+COPY --from=web /web/dist ./web/dist/
 RUN uv sync --frozen --no-dev
 
 # 运行数据与用户文件由挂载提供；非 root 运行
