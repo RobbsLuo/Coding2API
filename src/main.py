@@ -69,8 +69,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         else Pacer(config.codebuddy_chat_min_interval,
                    config.codebuddy_chat_min_interval)
     )
+    # TRAE/CB 共享同一 pacer：两渠道请求共同保持最小间隔，
+    # 避开各自的频率风控（CB 11128 / TRAE 流内错误）
     registry = providers if providers is not None else {
-        "trae": TraeProvider(),
+        "trae": TraeProvider(pacer=chat_pacer),
         "codebuddy": CodeBuddyProvider(pacer=chat_pacer),
     }
     # provider → {小写模型名: 上游原始 id}；playground_models 拉取后就地更新，

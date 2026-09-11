@@ -1101,3 +1101,67 @@ async def test_chat_pacer_throttles_and_can_be_disabled():
     waited.clear()
     _ = [e async for e in provider2.stream_chat({"bearer_token": "t"}, {}, "m")]
     assert not waited
+
+
+async def test_stream_inner_error_other_is_logged_and_counted(dual_repo, caplog):
+    """流内非 4001/1005 错误 → 记冷却并打日志（可观测性回归）。"""
+    import logging
+
+    from src.provider.base import Event
+
+    repo, _db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    calls = {"n": 0}
+
+    async def gen(_cred, _payload, _model):
+        calls["n"] += 1
+        yield Event(kind=EventKind.ERROR, error_code=41291, error_message="rate limited")
+
+    class P:
+        id = "codebuddy"
+        stream_chat = staticmethod(gen)
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": P()}, credentials=repo,
+        scheduler=Scheduler(max_rotate=1), default_model="m"))
+    frames = [f async for f in executor.stream(_request("m"), username="u")]
+    assert any(b"error" in f for f in frames)
+    assert calls["n"] == 1
+    assert any("流内错误" in r.getMessage() for r in caplog.records
+               if r.levelno == logging.WARNING)
+
+
+async def test_stream_inner_4001_yields_invalid_frame(dual_repo, caplog):
+    """流内 4001 → INVALID：跳过上游 + invalid_request 帧。"""
+    import json as _json
+    import logging
+
+    from src.provider.base import Event
+
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    calls = {"n": 0}
+
+    async def gen(_cred, _payload, _model):
+        calls["n"] += 1
+        yield Event(kind=EventKind.ERROR, error_code=4001, error_message="param invalid")
+
+    class P:
+        id = "codebuddy"
+        stream_chat = staticmethod(gen)
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": P()}, credentials=repo,
+        scheduler=Scheduler(max_rotate=1), default_model="m",
+        model_suggestions=lambda _n: ["alt-model"]))
+
+    with caplog.at_level(logging.WARNING):
+        frames = [f async for f in executor.stream(_request("m"), username="u")]
+    payload = _json.loads(frames[0].split(b"\n\n")[0].removeprefix(b"data: "))
+    assert payload["error"]["code"] == "invalid_request"
+    assert "alt-model" in payload["error"]["message"]
+    assert calls["n"] == 1                              # 不轮换
+    row = db.connect().execute(
+        "SELECT err_count, cooling_until FROM credentials").fetchone()
+    assert tuple(row) == (0, None)                      # 不冷却
+    assert any("流内拒绝模型" in r.getMessage() for r in caplog.records)

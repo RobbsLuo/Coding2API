@@ -392,6 +392,7 @@ class TraeProvider:
     """Provider 协议实现（细接口，Q16=A）。"""
 
     client: TraeClient = field(default_factory=TraeClient)
+    pacer: Any | None = None
 
     id: str = "trae"
 
@@ -431,6 +432,8 @@ class TraeProvider:
                           model: str) -> AsyncIterator[Event]:
         """引擎调用入口：dict 凭证 → 上游流 → 中立事件。"""
         credential = TraeCredential.from_dict(credential_data)
+        if self.pacer is not None:
+            await self.pacer.wait_turn()
         async for event in self.client.stream_chat(credential, payload, model):
             yield event
 

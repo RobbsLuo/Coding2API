@@ -126,8 +126,26 @@ class Executor:
                     credential_data, request.raw, self._upstream_model(provider_id, target.model)
                 ):
                     if event.kind is EventKind.ERROR:
+                        kind = _event_kind(event)
+                        if kind is ErrKind.INVALID:
+                            # 流内 4001 等参数/模型错误：换凭证没用，跳过该上游
+                            logger.warning(
+                                "上游 %s 流内拒绝模型 %s（凭证 %s 跳过）: code=%s %s",
+                                provider_id, target.model, credential_id,
+                                event.error_code, event.error_message)
+                            self._record_invalid(username, provider_id, credential_id,
+                                                 target.model, started, event)
+                            yield _error_frame(
+                                _reject_message(target.model, last_error,
+                                                self._suggestions(target.model)),
+                                "invalid_request")
+                            return
+                        logger.warning(
+                            "上游 %s 流内错误（凭证 %s，kind=%s）: code=%s %s",
+                            provider_id, credential_id, kind,
+                            event.error_code, event.error_message)
                         outcome = self._deps.scheduler.note_error(
-                            self._candidate(credential_id), _event_kind(event), int(time.time()))
+                            self._candidate(credential_id), kind, int(time.time()))
                         self._deps.credentials.save_error(credential_id, outcome)
                         last_error = UpstreamStreamError(event)
                         break

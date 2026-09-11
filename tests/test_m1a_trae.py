@@ -929,3 +929,29 @@ def test_prepare_body_tools_edge_cases():
         {"type": "function", "function": {"name": "f", "parameters": "{}"}},
     ]}, "m")
     assert body["tools"][0]["function"]["parameters"] == "{}"
+
+
+async def test_trae_pacer_wait_and_disable():
+    """TRAE stream_chat 前等待 pacer；None 不等待（与 CB 对称）。"""
+    import time as _time
+
+    from src.provider.trae.client import TraeProvider
+
+    waited = []
+
+    class FakePacer:
+        async def wait_turn(self):
+            waited.append(_time.monotonic())
+
+    class FakeClient:
+        async def stream_chat(self, cred, payload, model):
+            yield Event(kind=EventKind.CONTENT, content="ok")
+
+    provider = TraeProvider(client=FakeClient(), pacer=FakePacer())
+    events = [e async for e in provider.stream_chat({"accessToken": "a"}, {}, "m")]
+    assert events and waited
+
+    provider2 = TraeProvider(client=FakeClient(), pacer=None)
+    waited.clear()
+    _ = [e async for e in provider2.stream_chat({"accessToken": "a"}, {}, "m")]
+    assert not waited
