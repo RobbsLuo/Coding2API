@@ -58,8 +58,11 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await waitForModelLoaded();
 
-    expect(screen.getByTestId("model-select")).toHaveTextContent("glm-5.2");
-    expect(screen.getByTestId("model-select")).toHaveTextContent("codebuddy / trae");
+    const select = screen.getByTestId("model-select");
+    // 双上游模型出现在「自动路由」分组
+    expect(select).toHaveTextContent("glm-5.2");
+    const groups = [...select.querySelectorAll("optgroup")].map((g) => g.label);
+    expect(groups).toContain("双上游（自动调度）");
     expect(spy.mock.calls.some(([url]) => String(url).includes("/api/playground/models"))).toBe(true);
     expect(spy.mock.calls.some(([url]) => String(url).includes("/v1/models"))).toBe(false);
   });
@@ -227,6 +230,33 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     renderPage(<PlaygroundPage />, { username: "alice", is_admin: false });
     expect(screen.getByText(/无需 API Key/)).toBeInTheDocument();
     expect(screen.getByText(/计入 alice/)).toBeInTheDocument();
+  });
+
+  it("仅单一上游可用的模型按分组展示（避免淹没在长列表里）", async () => {
+    const mixed = {
+      object: "list",
+      data: [
+        { id: "glm-5.2", object: "model", owned_by: "x",
+          providers: ["codebuddy", "trae"] },
+        { id: "deepseek-v4-pro", object: "model", owned_by: "x",
+          providers: ["codebuddy"] },
+        { id: "kimi-k3", object: "model", owned_by: "x", providers: ["trae"] },
+      ],
+    };
+    mockFetch({ "/api/playground/models": mixed });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    const select = screen.getByTestId("model-select");
+    const groups = [...select.querySelectorAll("optgroup")].map(
+      (group) => [group.label, [...group.querySelectorAll("option")].map((o) => o.value)],
+    );
+    expect(groups).toContainEqual(["仅 CodeBuddy", ["deepseek-v4-pro@codebuddy"]]);
+    expect(groups).toContainEqual(["仅 TRAE", ["kimi-k3@trae"]]);
+    // 双上游模型保留原值（不带 @），走自动路由
+    const dualGroup = select.querySelector('optgroup[label="双上游（自动调度）"]');
+    expect(dualGroup).not.toBeNull();
+    expect(dualGroup!.querySelector("option")?.value).toBe("glm-5.2");
   });
 
   it("没有可用模型时 select 为空", async () => {

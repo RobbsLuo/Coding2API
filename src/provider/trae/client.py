@@ -369,7 +369,17 @@ class TraeProvider:
     async def probe_quota(self, credential_data: dict) -> Quota:
         return await self.client.fetch_quota(TraeCredential.from_dict(credential_data))
 
-    def list_models(self, credential_data: dict) -> list[Model]:
+    async def list_models(self, credential_data: dict) -> list[Model]:
+        """优先动态拉取（需要凭证）；失败回退静态表。"""
+        credential = TraeCredential.from_dict(credential_data)
+        if credential.access_token:
+            try:
+                return await self.client.fetch_models(credential)
+            except Exception as error:  # noqa: BLE001 - 回退不是静默：错误带上日志
+                import logging
+
+                logging.getLogger(__name__).warning(
+                    "TRAE 动态模型拉取失败，回退静态表: %s", error)
         return [Model(id=mid) for mid in STATIC_MODELS]
 
     async def stream_chat(self, credential_data: dict, payload: dict,

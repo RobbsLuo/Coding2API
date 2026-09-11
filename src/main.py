@@ -178,11 +178,25 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     # ------------------------------------- Playground（会话鉴权，无需 API Key）
 
-    def playground_models() -> dict:
-        """与 /v1/models 相同的模型列表，供管理台内部使用。"""
+    async def playground_models() -> dict:
+        """与 /v1/models 相同的模型列表，供管理台内部使用。
+
+        CodeBuddy 的模型是动态拉取（异步），单个 provider 失败只影响它自己。
+        """
         grouped: dict[str, set[str]] = {}
         for provider_id, provider in registry.items():
-            for model in provider.list_models({}):
+            # 用该上游的一个可用凭证拉取（凭证有归属，模型列表是账号级的）
+            candidates = credentials.candidates([provider_id])
+            credential_data = (
+                credentials.credential_data(candidates[0].credential_id)
+                if candidates else {}
+            )
+            try:
+                models = await provider.list_models(credential_data)
+            except Exception as error:  # noqa: BLE001 - 单上游失败不影响其他
+                logger.warning("模型列表获取失败 %s: %s", provider_id, error)
+                continue
+            for model in models:
                 grouped.setdefault(model.id, set()).add(provider_id)
         return {"object": "list", "data": [
             {"id": model, "object": "model", "owned_by": "coding2api",
@@ -193,7 +207,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     @app.get("/api/playground/models")
     async def playground_list_models(
             _principal: Principal = Depends(principal_from_request)):
-        return playground_models()
+        return await playground_models()
 
     @app.post("/api/playground/chat/completions")
     async def playground_chat(request: Request,
@@ -226,7 +240,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.get("/v1/models")
     async def list_models(_user: str = Depends(api_key_user)):
-        return playground_models()
+        return await playground_models()
 
     # --------------------------------------------------------- 管理端点（读）
 

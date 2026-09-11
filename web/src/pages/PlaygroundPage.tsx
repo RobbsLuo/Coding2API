@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useSessionContext } from "../Layout";
 import { Button, Empty, Field, Notice, Panel, Select, Textarea } from "../ui";
 
@@ -9,6 +9,11 @@ interface ModelInfo {
   owned_by: string;
   providers: string[];
 }
+
+const PROVIDER_LABEL: Record<string, string> = {
+  codebuddy: "CodeBuddy",
+  trae: "TRAE",
+};
 
 /** 通过会话鉴权的内部端点取数据，不需要用户自己造 API Key。 */
 async function fetchPlaygroundModels(signal?: AbortSignal) {
@@ -33,17 +38,26 @@ export function PlaygroundPage() {
     queryKey: ["playground-models"],
     queryFn: ({ signal }) => fetchPlaygroundModels(signal),
   });
-  const models = modelsQuery.data ?? [];
+  const fetched = modelsQuery.data ?? [];
 
-  // 模型载入后自动选中第一个，省一次无意义的手动选择。
-  // 只依赖数量：models 引用每次渲染都变，会导致 effect 反复触发。
-  const modelCount = models.length;
-  const hasModel = model !== "";
-  useEffect(() => {
-    if (modelCount > 0 && !hasModel) {
-      setModel(models[0].id);
-    }
-  }, [modelCount, hasModel, models]);
+  // 每个模型的受控值：单上游模型带 @provider（该组选项即强制指定），
+  // 双上游模型用裸 id（走自动路由）。派生选中时必须用同一套值，
+  // 否则受控值与任何 option 都对不上，select 会显示为空。
+  const valueOf = (item: { id: string; providers: string[] }): string =>
+    item.providers.length === 1 ? `${item.id}@${item.providers[0]}` : item.id;
+  const models = fetched.map((item) => ({ ...item, value: valueOf(item) }));
+  const selectedModel = model || (models[0]?.value ?? "");
+  const dualSource = models.filter((item) => item.providers.length > 1);
+  const onlyCodebuddy = models.filter(
+    (item) => item.providers.length === 1 && item.providers[0] === "codebuddy",
+  );
+  const onlyTrae = models.filter(
+    (item) => item.providers.length === 1 && item.providers[0] === "trae",
+  );
+  void valueOf;
+  const groups: [string, typeof onlyCodebuddy][] = [];
+  if (onlyCodebuddy.length) groups.push(["codebuddy", onlyCodebuddy]);
+  if (onlyTrae.length) groups.push(["trae", onlyTrae]);
 
   const send = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -58,7 +72,7 @@ export function PlaygroundPage() {
         headers: { "Content-Type": "application/json" },
         credentials: "same-origin",
         body: JSON.stringify({
-          model,
+          model: selectedModel,
           messages: [{ role: "user", content: prompt }],
           stream,
         }),
@@ -103,31 +117,45 @@ export function PlaygroundPage() {
                 hint="自动选健康上游；写 model@provider 可强制指定"
               >
                 <Select
-                  value={model}
+                  value={selectedModel}
                   data-testid="model-select"
                   onChange={(event) => setModel(event.target.value)}
                 >
                   <option value="">选择模型…</option>
-                  {models.map((item) => (
-                    <option key={item.id} value={item.id}>
-                      {item.id}（{item.providers.join(" / ")}）
-                    </option>
+                  {/* 双上游可用的模型置顶：默认调度即可覆盖 */}
+                  {dualSource.length > 0 && (
+                    <optgroup label="双上游（自动调度）">
+                      {dualSource.map((item) => (
+                        <option key={item.id} value={item.id}>
+                          {item.id}（自动路由）
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                  {groups.map(([provider, items]) => (
+                    <optgroup key={provider} label={`仅 ${PROVIDER_LABEL[provider]}`}>
+                      {items.map((item) => (
+                        <option key={item.id} value={item.value}>
+                          {item.id}
+                        </option>
+                      ))}
+                    </optgroup>
                   ))}
                   {/* model@provider 组合不在原始列表里，必须补合成选项，
                       否则 React 会把 select 渲染成无选中项 */}
-                  {model.includes("@") && (
-                    <option value={model}>{model}（强制指定）</option>
+                  {selectedModel.includes("@") && (
+                    <option value={selectedModel}>{selectedModel}（强制指定）</option>
                   )}
                 </Select>
               </Field>
             </div>
             <div className="w-56">
-              <Field label="强制指定上游">
+              <Field label="强制指定上游" hint="双上游模型可用；单上游模型始终固定">
                 <Select
-                  value={model.includes("@") ? model.split("@")[1] : ""}
+                  value={selectedModel.includes("@") ? selectedModel.split("@")[1] : ""}
                   data-testid="provider-pin"
                   onChange={(event) => {
-                    const base = model.split("@")[0];
+                    const base = selectedModel.split("@")[0];
                     setModel(event.target.value ? `${base}@${event.target.value}` : base);
                   }}
                 >

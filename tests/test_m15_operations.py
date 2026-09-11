@@ -2334,7 +2334,7 @@ class _PlaygroundProvider:
                 raise item
             yield item
 
-    def list_models(self, _data):
+    async def list_models(self, _data):
         from src.provider.base import Model
 
         return [Model(id="glm-5.2"), Model(id="trae-only")]

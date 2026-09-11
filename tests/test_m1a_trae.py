@@ -601,12 +601,13 @@ async def test_client_lazy_and_close_paths():
     await client.aclose()
 
 
-def test_provider_import_classify_and_models():
+async def test_provider_import_classify_and_models():
     provider = TraeProvider()
     data = provider.import_credential({"accessToken": "a", "uid": "u"})
     assert data["uid"] == "u"
     assert provider.classify(429, b"") is ErrKind.SOFT
-    assert provider.list_models({}) == [Model(id=m) for m in STATIC_MODELS]
+    models = await provider.list_models({})
+    assert [m.id for m in models] == list(STATIC_MODELS)
     with pytest.raises(trae_events.UpstreamProtocolViolation):
         provider.import_credential({"accessToken": "a"})
 
@@ -645,7 +646,7 @@ class FakeProvider:
                 raise item
             yield item
 
-    def list_models(self, _credential_data):
+    async def list_models(self, _credential_data):
         return [Model(id="glm-5.2")]
 
     def import_credential(self, raw):

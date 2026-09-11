@@ -36,6 +36,8 @@ STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
 SHORT_TIMEOUT = httpx.Timeout(30.0)
 
 DEFAULT_MODELS: tuple[str, ...] = ("glm-5.2", "deepseek-v4-pro")
+EP_CONFIG = "/v3/config"
+MODEL_CACHE_TTL_SECONDS = 600
 
 def build_headers(credential: CodeBuddyCredential, endpoint: str, *,
                   quota_only: bool = False) -> dict[str, str]:
@@ -141,6 +143,54 @@ class CodeBuddyClient:
             raise UpstreamProtocolViolation("enterprise quota missing limitNum")
         return Quota(remaining=max(0.0, total - (used or 0.0)), total=total,
                      probed_at=int(time.time()))
+
+    async def fetch_models(self, credential: CodeBuddyCredential) -> list[Model]:
+        """动态拉取模型列表（/v3/config），带 10 分钟缓存。失败抛错由调用方兜底。"""
+        cache_key = (credential.bearer_token[:64], self.endpoint)
+        cached = _MODEL_CACHE.get(cache_key)
+        now = time.time()
+        if cached and now - cached[0] < MODEL_CACHE_TTL_SECONDS:
+            return cached[1]
+
+        headers = build_headers(credential, self.endpoint)
+        host = host_of(self.endpoint)
+        headers.update({
+            "Host": host,
+            "X-Domain": host,
+            "Accept": "application/json",
+            "X-IDE-Type": "CodeBuddyIDE",
+            "X-IDE-Name": "CodeBuddyIDE",
+            "X-IDE-Version": CODEBUDDY_IDE_VERSION,
+            "X-Product-Version": CODEBUDDY_IDE_VERSION,
+        })
+        response = await self._short.get(f"{self.endpoint}{EP_CONFIG}", headers=headers)
+        if response.status_code >= 400:
+            raise UpstreamHTTPError(response.status_code, response.content)
+        try:
+            body = response.json()
+        except ValueError as error:
+            raise UpstreamProtocolViolation("config response is not JSON") from error
+        if not isinstance(body, dict):
+            raise UpstreamProtocolViolation("config response is not an object")
+        if body.get("code") != 0:
+            raise UpstreamProtocolViolation(
+                f"config rejected with code {body.get('code')!r}")
+
+        data = body.get("data")
+        if not isinstance(data, dict) or not isinstance(data.get("models"), list):
+            raise UpstreamProtocolViolation("config response missing models list")
+        ids: list[str] = []
+        for item in data["models"]:
+            if isinstance(item, dict):
+                model_id = str(item.get("id", "")).strip()
+                if model_id and model_id not in ids:
+                    ids.append(model_id)
+        if not ids:
+            raise UpstreamProtocolViolation("config returned no valid model ids")
+
+        models = [Model(id=model_id) for model_id in ids]
+        _MODEL_CACHE[cache_key] = (now, models)
+        return models
 
     async def _post_json(self, url: str, payload: dict[str, Any],
                          credential: CodeBuddyCredential, *,
@@ -254,6 +304,10 @@ def _cached_refresh(client: CodeBuddyClient):
     return cached
 
 
+_MODEL_CACHE: dict[tuple[str, str], tuple[float, list[Model]]] = {}
+CODEBUDDY_IDE_VERSION = "1.42.0"
+
+
 class UpstreamHTTPError(Exception):
     def __init__(self, status: int, body: bytes) -> None:
         super().__init__(f"upstream http {status}")
@@ -281,8 +335,16 @@ class CodeBuddyProvider:
     async def probe_quota(self, credential_data: dict) -> Quota:
         return await self.client.fetch_quota(CodeBuddyCredential.from_dict(credential_data))
 
-    def list_models(self, _credential_data: dict) -> list[Model]:
-        return [Model(id=mid) for mid in DEFAULT_MODELS]
+    async def list_models(self, credential_data: dict) -> list[Model]:
+        """动态拉取上游模型；失败回退静态表（保证 Play grounds/客户端始终有列表）。"""
+        try:
+            return await self.client.fetch_models(
+                CodeBuddyCredential.from_dict(credential_data))
+        except Exception as error:  # noqa: BLE001 - 兜底不是静默：错误会带上抛路径
+            import logging
+
+            logging.getLogger(__name__).warning("动态模型拉取失败，回退静态表: %s", error)
+            return [Model(id=mid) for mid in DEFAULT_MODELS]
 
     async def stream_chat(self, credential_data: dict, payload: dict,
                           model: str) -> AsyncIterator[Event]:

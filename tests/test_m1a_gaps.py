@@ -765,3 +765,28 @@ async def test_checkin_task_skips_provider_without_scope(tmp_path):
     report = await task.run_once()
     assert report.skipped == 1
     db.close()
+
+
+async def test_trae_dynamic_models_with_valid_credential():
+    """有 access_token → 动态拉取；失败回退静态（trae client 375-381）。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("get_detail_param"):
+            return httpx.Response(200, json={"config_info_list": [
+                {"config_name": "DeepSeek-V4-Flash"},
+                {"config_name": "glm-5.2"},
+            ]})
+        return httpx.Response(200, json={})
+
+    from src.provider.trae.client import TraeProvider
+
+    provider = TraeProvider(client=_trae_client(handler))
+    models = await provider.list_models({"accessToken": "a"})
+    assert [m.id for m in models] == ["DeepSeek-V4-Flash", "glm-5.2"]
+
+    def failing(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"down")
+
+    provider2 = TraeProvider(client=_trae_client(failing))
+    fallback = await provider2.list_models({"accessToken": "a"})
+    assert [m.id for m in fallback] == list(
+        __import__("src.provider.trae.client", fromlist=["STATIC_MODELS"]).STATIC_MODELS)

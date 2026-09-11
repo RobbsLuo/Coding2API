@@ -407,7 +407,7 @@ def test_models_endpoint_lists_all_registered_providers(tmp_path):
     class TwoProviders:
         id = "codebuddy"
 
-        def list_models(self, _credential_data):
+        async def list_models(self, _credential_data):
             return [Model(id="glm-5.2"), Model(id="only-cb")]
 
         def import_credential(self, raw):  # pragma: no cover
@@ -416,7 +416,7 @@ def test_models_endpoint_lists_all_registered_providers(tmp_path):
     class TraeStub:
         id = "trae"
 
-        def list_models(self, _credential_data):
+        async def list_models(self, _credential_data):
             return [Model(id="glm-5.2")]
 
         def import_credential(self, raw):  # pragma: no cover

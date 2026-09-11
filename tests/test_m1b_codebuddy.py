@@ -49,6 +49,16 @@ def fixture(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
 
 
+@pytest.fixture(autouse=True)
+def _clear_model_cache():
+    """模块级模型缓存必须按测试清空，否则用例间互相污染。"""
+    from src.provider.codebuddy.client import _MODEL_CACHE
+
+    _MODEL_CACHE.clear()
+    yield
+    _MODEL_CACHE.clear()
+
+
 def _client(handler) -> CodeBuddyClient:
     transport = httpx.MockTransport(handler)
     return CodeBuddyClient(
@@ -421,7 +431,6 @@ def test_provider_import_classify_and_models():
     data = provider.import_credential({"token": "abc"})
     assert data["bearer_token"] == "abc" and data["auth_source"] == "manual"
     assert provider.classify(429, b"") is ErrKind.SOFT
-    assert [m.id for m in provider.list_models({})] == list(DEFAULT_MODELS)
     assert provider.host() == "copilot.tencent.com"
     with pytest.raises(UpstreamProtocolViolation):
         provider.import_credential({})
@@ -551,15 +560,40 @@ async def test_dual_provider_no_credential_when_both_registered(dual_repo):
 # ------------------------------------------------------------------- API
 
 def test_default_registry_contains_both_providers(tmp_path):
+    """双上游注册后 /v1/models 与 playground 模型一致，动态拉取失败回退静态表。"""
     settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
-    app = build_app(settings)
+
+    class FailingCB:
+        id = "codebuddy"
+
+        def list_models(self, _data):
+            raise RuntimeError("dynamic fetch unavailable")
+
+        def import_credential(self, raw):
+            return raw
+
+    class TraeStub:
+        id = "trae"
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            return [Model(id="glm-5.2")]
+
+        def import_credential(self, raw):  # pragma: no cover
+            return raw
+
+    app = build_app(settings, providers={
+        "trae": TraeStub(),
+        "codebuddy": FailingCB(),
+    })
+    key = app.state.api_keys.create("root")["api_key"]
     with TestClient(app) as client:
-        key = app.state.api_keys.create("root")["api_key"]
         data = client.get("/v1/models",
                           headers={"Authorization": f"Bearer {key}"}).json()["data"]
     by_id = {item["id"]: item["providers"] for item in data}
-    assert by_id["glm-5.2"] == ["codebuddy", "trae"]
-    assert "deepseek-v4-pro" in by_id
+    # CB 的 list_models 抛错 → 该上游被跳过（不拖垮整个列表），TRAE 正常返回
+    assert by_id["glm-5.2"] == ["trae"]
 
 
 def test_codebuddy_import_via_api(tmp_path):
@@ -713,3 +747,87 @@ def test_number_parses_strings_and_rejects_junk(value, expected):
         assert result is None
     else:
         assert result == pytest.approx(expected)
+
+
+# ------------------------------------- CodeBuddy 动态模型列表
+
+async def test_fetch_models_parses_config_and_caches():
+    """/v3/config 动态拉取：data.models[].id，按 token+endpoint 缓存。"""
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"code": 0, "data": {"models": [
+            {"id": "glm-5.2"}, {"id": "glm-5.3"}, {"id": ""}, "junk",
+            {"id": "glm-5.2"},
+        ]}})
+
+    client = _client(handler)
+    models = await client.fetch_models(CodeBuddyCredential(bearer_token="t"))
+    assert [m.id for m in models] == ["glm-5.2", "glm-5.3"]
+    await client.fetch_models(CodeBuddyCredential(bearer_token="t"))
+    assert calls["n"] == 1                      # 命中缓存
+
+
+@pytest.mark.parametrize("body", [
+    {"code": 1, "msg": "no"},
+    {"code": 0, "data": {}},
+    {"code": 0, "data": {"models": "no"}},
+    {"code": 0, "data": {"models": []}},
+    "not-json",
+])
+async def test_fetch_models_rejects_bad_responses(body):
+    def handler(_request: httpx.Request) -> httpx.Response:
+        if isinstance(body, str):
+            return httpx.Response(200, content=body)
+        return httpx.Response(200, json=body)
+
+    with pytest.raises(UpstreamProtocolViolation):
+        await _client(handler).fetch_models(CodeBuddyCredential(bearer_token="t"))
+
+
+async def test_fetch_models_http_error():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, content=b"unauthorized")
+
+    with pytest.raises(UpstreamHTTPError):
+        await _client(handler).fetch_models(CodeBuddyCredential(bearer_token="t"))
+
+
+async def test_provider_list_models_falls_back_to_static_on_failure():
+    """动态拉取失败 → 回退静态表，保证客户端始终有可用列表。"""
+    provider = CodeBuddyProvider(client=_client(
+        lambda _r: httpx.Response(500, content=b"down")))
+    models = await provider.list_models({"bearer_token": "t"})
+    assert [m.id for m in models] == list(DEFAULT_MODELS)
+
+
+async def test_provider_list_models_uses_dynamic_when_available():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 0, "data": {"models": [
+            {"id": "glm-5.2"}, {"id": "glm-5.3"},
+        ]}})
+
+    provider = CodeBuddyProvider(client=_client(handler))
+    models = await provider.list_models({"bearer_token": "t"})
+    assert [m.id for m in models] == ["glm-5.2", "glm-5.3"]
+
+
+def test_config_api_headers_adds_ide_identity():
+    from src.provider.codebuddy.headers import config_api_headers
+
+    headers = config_api_headers({"Authorization": "Bearer t",
+                                  "X-Domain": "copilot.tencent.com"},
+                                 "https://copilot.tencent.com")
+    assert headers["X-IDE-Type"] == "CodeBuddyIDE"
+    assert headers["X-Domain"] == headers["Host"] == "copilot.tencent.com"
+    assert headers["Authorization"] == "Bearer t"       # 原有头保留
+
+
+async def test_fetch_models_rejects_non_object_config():
+    """config 返回 JSON 数组 → 显式失败（client 173-174）。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[1, 2])
+
+    with pytest.raises(UpstreamProtocolViolation):
+        await _client(handler).fetch_models(CodeBuddyCredential(bearer_token="t"))
