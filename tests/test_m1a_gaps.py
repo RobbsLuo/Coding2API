@@ -898,3 +898,36 @@ def test_trae_unknown_named_error_falls_through_to_none():
     # error 事件带非 int code → ERROR 事件无 code
     event = parse_frame(SSEFrame(event="error", data='{"code":"oops","message":"m"}'))
     assert event is not None and event.kind.value == "error"
+
+
+async def test_stream_finish_frames_yielded_when_upstream_never_sent_done():
+    """上游没发 done 就正常结束 → finish() 补帧（executor 147-148）。"""
+    from src.provider.base import Event as E
+    from src.provider.base import EventKind as EK
+    from tests.test_m1b_codebuddy import _RejectProvider, _request
+
+    class _NoDoneProvider(_RejectProvider):
+        """正常输出 content 但不发 FINISH。"""
+
+        async def stream_chat(self, _credential_data, _payload, _model):
+            self.calls += 1
+            yield E(kind=EK.CONTENT, content="ok")
+
+    from src.db.conn import Database
+    from src.db.crypto import CredentialCipher
+    from src.db.migrate import apply_schema
+    from src.db.repo import CredentialRepository
+    from src.engine.executor import Executor, ExecutorDeps
+    from src.engine.scheduler import Scheduler
+
+    db = Database(str(_tmpdir() / "nd.sqlite3"))
+    apply_schema(db.connect())
+    repo = CredentialRepository(db, CredentialCipher("s"))
+    repo.add(provider="trae", credential_data={"accessToken": "t"})
+    executor = Executor(ExecutorDeps(
+        providers={"trae": _NoDoneProvider("trae", [E(kind=EK.CONTENT, content="ok")])},
+        credentials=repo, scheduler=Scheduler(), default_model="glm-5.2"))
+
+    frames = [f async for f in executor.stream(_request("glm-5.2"), username="u")]
+    assert any(b"[DONE]" in f for f in frames)     # finish() 补的 DONE 已发出
+    db.close()

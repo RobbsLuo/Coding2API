@@ -115,8 +115,7 @@ class StreamTranslator:
     def finish(self) -> Iterator[bytes]:
         """上游未发 done 就断流：补一个结束帧，保证客户端不会挂住。"""
         if self._finished:
-            yield SSE_DONE
-            return
+            return  # 上游已发 done，DONE 已随 _close 发出，不能重复
         yield from self._close("stop")
         yield SSE_DONE
 

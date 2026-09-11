@@ -353,10 +353,10 @@ def test_stream_translator_finish_without_upstream_done():
     assert frames[1] == SSE_DONE
 
 
-def test_stream_translator_finish_after_done_only_emits_done():
+def test_stream_translator_finish_after_done_emits_nothing():
     t = StreamTranslator("m")
     list(t.translate(Event(kind=EventKind.FINISH, finish_reason="stop")))
-    assert list(t.finish()) == [SSE_DONE]
+    assert list(t.finish()) == []             # DONE 已随 _close 发出，不重复
 
 
 def test_stream_translator_empty_delta_is_skipped():
