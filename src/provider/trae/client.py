@@ -84,6 +84,12 @@ def prepare_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
 
     messages = body.get("messages")
     if isinstance(messages, list):
+        for message in messages:
+            # OpenAI developer 角色（PI 等客户端对 reasoning 模型使用）
+            # TRAE 上游不认：静默返回空流（3003）→ 归一为 system
+            if isinstance(message, dict) and message.get("role") == "developer":
+                message["role"] = "system"
+    if isinstance(messages, list):
         rewritten: list[Any] = []
         for message in messages:
             if not isinstance(message, dict):
@@ -97,12 +103,25 @@ def prepare_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
                 pass  # 已是数组 → 透传
             tool_calls = item.get("tool_calls")
             if isinstance(tool_calls, list):
-                kept = [tc for tc in tool_calls if isinstance(tc, dict)]
+                kept = []
+                for tc in tool_calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function")
+                    if not isinstance(fn, dict):
+                        continue
+                    # OpenAI function{name,arguments} → SOLO function_call；
+                    # 上游要求 FunctionCall.Name 必填，无 name 的剔除
+                    if not str(fn.get("name") or "").strip():
+                        continue
+                    tc = dict(tc)
+                    tc["function_call"] = fn
+                    del tc["function"]
+                    kept.append(tc)
                 if kept:
                     item["tool_calls"] = kept
                 else:
                     item.pop("tool_calls", None)
-                item.pop("content", None) if not content else None
             rewritten.append(item)
         body["messages"] = rewritten
 

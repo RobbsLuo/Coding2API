@@ -252,13 +252,31 @@ def test_prepare_body_drops_empty_tool_calls_and_content():
     body = prepare_body({"messages": [{"role": "assistant", "content": None,
                                        "tool_calls": []}]}, "m")
     assert "tool_calls" not in body["messages"][0]
-    assert "content" not in body["messages"][0]
+
+
+def test_prepare_body_skips_non_dict_tool_call_entries():
+    """非对象 tool_call 条目跳过（102-103 分支）。"""
+    body = prepare_body({"messages": [{"role": "assistant", "content": None,
+        "tool_calls": ["junk", {"id": "c", "type": "function",
+                                "function": {"name": "bash", "arguments": "{}"}}]}]}, "m")
+    tcs = body["messages"][0]["tool_calls"]
+    assert len(tcs) == 1 and tcs[0]["function_call"]["name"] == "bash"
+    assert body["messages"][0]["content"] is None   # 原实现保留 nil content
 
 
 def test_prepare_body_keeps_valid_tool_calls():
+    """有 name 的 function → function_call；无 function/name 的剔除。"""
     body = prepare_body({"messages": [{"role": "assistant", "content": "x",
-                                       "tool_calls": [{"id": "c"}]}]}, "m")
-    assert body["messages"][0]["tool_calls"] == [{"id": "c"}]
+        "tool_calls": [
+            {"id": "c1", "type": "function",
+             "function": {"name": "bash", "arguments": "{\"a\":1}"}},
+            {"id": "c2", "type": "function", "function": {"arguments": "{}"}},
+            {"id": "c3"},
+        ]}]}, "m")
+    tcs = body["messages"][0]["tool_calls"]
+    assert len(tcs) == 1 and tcs[0]["id"] == "c1"
+    assert tcs[0]["function_call"] == {"name": "bash", "arguments": "{\"a\":1}"}
+    assert "function" not in tcs[0]
 
 
 # ------------------------------------------------------------ 模型解析
@@ -955,3 +973,24 @@ async def test_trae_pacer_wait_and_disable():
     waited.clear()
     _ = [e async for e in provider2.stream_chat({"accessToken": "a"}, {}, "m")]
     assert not waited
+
+
+def test_prepare_body_drops_unnamed_function_call():
+    """function_call 无 name 剔除后若全空 → 整个 tool_calls 删除（102-103）。"""
+    body = prepare_body({"messages": [
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "c", "type": "function",
+                         "function": {"arguments": "{}"}}]},
+    ]}, "m")
+    assert "tool_calls" not in body["messages"][0]
+
+
+
+def test_prepare_body_normalizes_developer_role():
+    """TRAE 不认 developer 角色（静默空流 3003）→ 归一 system。"""
+    body = prepare_body({"messages": [
+        {"role": "developer", "content": "You are PI."},
+        {"role": "user", "content": "hi"},
+    ]}, "m")
+    roles = [m["role"] for m in body["messages"]]
+    assert roles == ["system", "user"]
