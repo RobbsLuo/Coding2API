@@ -38,6 +38,13 @@ from src.provider.codebuddy.headers import encode_department, host_of
 FIXTURES = Path(__file__).parent.parent / "src" / "provider" / "fixtures" / "codebuddy"
 
 
+def _quota_body(accounts: object) -> dict:
+    """包出上游真实的个人版额度响应结构（data.Response.Data.Accounts）。"""
+    return {"code": 0, "msg": "OK",
+            "data": {"Response": {"Data": {"Accounts": accounts},
+                                  "RequestId": "<redacted>"}}}
+
+
 def fixture(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
 
@@ -283,42 +290,68 @@ async def test_stream_chat_forces_stream_true_even_if_client_sent_false():
     assert seen["stream"] is True and seen["model"] == "glm-5.2"
 
 
-async def test_fetch_personal_quota_sums_precise_packages():
+async def test_fetch_personal_quota_parses_real_nested_response():
+    """真实响应是 data.Response.Data.Accounts，且 *Precise 是字符串。
+
+    用抓取的真实结构做契约测试：层级读错或忽略字符串都会让有效凭证
+    被误判成「未探测到额度」。
+    """
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"Accounts": [
-            {"Status": 0, "CycleCapacitySizePrecise": 100, "CycleCapacityRemainPrecise": 60,
-             "CycleCapacitySize": 999, "CycleEndTime": "2026-12-31 23:59:59"},
-            {"Status": 0, "CycleCapacitySize": 50, "CycleCapacityRemain": 10},
-            {"Status": 1, "CycleCapacitySizePrecise": 777, "CycleCapacityRemainPrecise": 777},
-            "junk",
-        ]})
+        return httpx.Response(200, text=fixture("quota-personal.json"))
 
     quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
-    assert quota.total == 150 and quota.remaining == 70
+    # fixture 是脱敏后的真实响应：两个 Status=0 的套餐
+    #   CodeBuddy个人体验版        500 / 500
+    #   CodeBuddy个人版国内运营裂变包 5000 / 4767.50000158
+    assert quota.total == 5500.0
+    assert quota.remaining == pytest.approx(5267.50000158)
+    assert quota.cycle_end is not None
+    assert quota.probe_failed is False
+    assert quota.remaining < quota.total      # 真实已用量必须体现出来
+
+
+async def test_fetch_personal_quota_prefers_precise_over_plain():
+    """Precise 优先，且能解析字符串；被禁用的套餐（Status!=0）要跳过。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        accounts = [
+            {"Status": 0, "CycleCapacitySizePrecise": "100",
+             "CycleCapacityRemainPrecise": "60", "CycleCapacitySize": 999,
+             "CycleEndTime": "2026-12-31 23:59:59"},
+            {"Status": 0, "CycleCapacitySize": 50, "CycleCapacityRemain": 10},
+            {"Status": 1, "CycleCapacitySizePrecise": "777",
+             "CycleCapacityRemainPrecise": "777"},
+            "junk",
+        ]
+        return httpx.Response(200, json=_quota_body(accounts))
+
+    quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
+    assert quota.total == 150.0      # 100(Precise 字符串) + 50(回退非 Precise)
+    assert quota.remaining == 70.0
     assert quota.cycle_end is not None
 
 
-async def test_fetch_quota_accepts_null_accounts_as_no_personal_quota():
+@pytest.mark.parametrize("accounts", [None, []])
+async def test_fetch_quota_accepts_null_accounts_as_no_personal_quota(accounts):
     """个人版 Accounts: null / [] 表示探测成功但没有额度（AGENTS.md 约束）。"""
-    for payload in ({"Accounts": None}, {"Accounts": []}):
-        def handler(_request: httpx.Request, payload=payload) -> httpx.Response:
-            return httpx.Response(200, json=payload)
-
-        quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
-        assert quota.total == 0 and quota.remaining == 0
-
-
-async def test_fetch_quota_missing_accounts_key_fails():
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={})
+        return httpx.Response(200, json=_quota_body(accounts))
 
-    with pytest.raises(UpstreamProtocolViolation):
-        await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
+    quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
+    assert quota.total == 0 and quota.remaining == 0
+    assert quota.probe_failed is False
 
 
-async def test_fetch_quota_rejects_non_list_accounts():
+@pytest.mark.parametrize("body", [
+    {},                                     # 完全没有 data
+    {"data": None},
+    {"data": {}},                           # data 里没有 Accounts
+    {"data": {"Response": {}}},
+    {"data": {"Response": {"Data": {}}}},
+    {"data": {"Accounts": "no"}},           # 类型错误
+])
+async def test_fetch_quota_missing_accounts_fails(body):
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"Accounts": "no"})
+        return httpx.Response(200, json=body)
 
     with pytest.raises(UpstreamProtocolViolation):
         await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
@@ -332,7 +365,7 @@ async def test_fetch_enterprise_quota_requires_oauth():
         calls.append(request.url.path)
         if request.url.path.endswith("get-enterprise-user-usage"):
             return httpx.Response(200, json={"credit": 30, "limitNum": 100})
-        return httpx.Response(200, json={"Accounts": []})
+        return httpx.Response(200, json=_quota_body([]))
 
     oauth = CodeBuddyCredential(bearer_token="t", auth_source="oauth",
                                 enterprise_id="e", quota_probe_mode="enterprise")
@@ -550,24 +583,23 @@ def test_codebuddy_import_via_api(tmp_path):
 # ---------------------------------------------------- 覆盖率收尾
 
 async def test_fetch_quota_skips_packages_with_zero_total():
-    """总量为 0 的套餐跳过（client 216-217）。"""
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"Accounts": [
-            {"Status": 0, "CycleCapacitySizePrecise": 0, "CycleCapacityRemainPrecise": 5},
-            {"Status": 0, "CycleCapacitySizePrecise": 10, "CycleCapacityRemainPrecise": 10},
-        ]})
+        return httpx.Response(200, json=_quota_body([
+            {"Status": 0, "CycleCapacitySizePrecise": "0", "CycleCapacityRemainPrecise": "5"},
+            {"Status": 0, "CycleCapacitySizePrecise": "10",
+             "CycleCapacityRemainPrecise": "10"},
+        ]))
 
     quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
     assert quota.total == 10 and quota.remaining == 10
 
 
 async def test_fetch_quota_tolerates_bad_cycle_end_format():
-    """CycleEndTime 格式无法解析 → 不设置 cycle_end（client 268-270）。"""
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"Accounts": [
-            {"Status": 0, "CycleCapacitySizePrecise": 5, "CycleCapacityRemainPrecise": 5,
-             "CycleEndTime": "not-a-date"},
-        ]})
+        return httpx.Response(200, json=_quota_body([
+            {"Status": 0, "CycleCapacitySizePrecise": "5",
+             "CycleCapacityRemainPrecise": "5", "CycleEndTime": "not-a-date"},
+        ]))
 
     quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
     assert quota.cycle_end is None
@@ -583,12 +615,11 @@ def test_cycle_end_accepts_iso_separator():
 
 async def test_provider_probe_quota_delegates():
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"Accounts": [
-            {"Status": 0, "CycleCapacitySizePrecise": 4, "CycleCapacityRemainPrecise": 1}]})
+        return httpx.Response(200, text=fixture("quota-personal.json"))
 
     provider = CodeBuddyProvider(client=_client(handler))
     quota = await provider.probe_quota({"bearer_token": "t"})
-    assert quota.total == 4 and quota.remaining == 1
+    assert quota.total == 5500.0
 
 
 def test_auth_start_headers_mark_anonymous():
@@ -656,3 +687,29 @@ async def test_aclose_when_only_short_client_was_created():
     client = CodeBuddyClient()
     assert client._short is not None    # 只实例化 short
     await client.aclose()
+
+
+# --------------------------------------------- _number 的字符串解析
+
+@pytest.mark.parametrize(("value", "expected"), [
+    (500, 500.0),
+    (500.5, 500.5),
+    ("500", 500.0),          # 上游 Precise 字段是字符串
+    (" 4767.50000158 ", 4767.50000158),
+    ("", None),              # 空字符串
+    ("   ", None),
+    ("not-a-number", None),  # 无法解析
+    (None, None),
+    ([], None),
+    (True, None),            # 布尔不算数字
+    (False, None),
+])
+def test_number_parses_strings_and_rejects_junk(value, expected):
+    """额度解析必须能处理字符串型 Precise，否则整批额度会被算成 0。"""
+    from src.provider.codebuddy.client import _number
+
+    result = _number(value)
+    if expected is None:
+        assert result is None
+    else:
+        assert result == pytest.approx(expected)

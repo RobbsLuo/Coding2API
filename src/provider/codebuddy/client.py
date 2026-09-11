@@ -114,15 +114,9 @@ class CodeBuddyClient:
             "PackageEndTimeRangeBegin": time.strftime("%Y-%m-%d %H:%M:%S", now),
             "PackageEndTimeRangeEnd": QUOTA_RANGE_END,
         }
-        data = await self._post_json(f"{self.endpoint}{EP_USER_RESOURCE}", payload,
+        body = await self._post_json(f"{self.endpoint}{EP_USER_RESOURCE}", payload,
                                      credential, quota_only=True)
-        if "Accounts" not in data:
-            raise UpstreamProtocolViolation("quota response missing Accounts")
-        accounts = data.get("Accounts")
-        if accounts is None:                    # null = 探测成功但无个人版额度
-            accounts = []
-        if not isinstance(accounts, list):
-            raise UpstreamProtocolViolation("quota Accounts is not an array")
+        accounts = _extract_accounts(body)
         total = 0.0
         remaining = 0.0
         cycle_end: int | None = None
@@ -164,17 +158,63 @@ class CodeBuddyClient:
         return data
 
 
+def _extract_accounts(body: dict[str, Any]) -> list[Any]:
+    """从上游响应里取出账户列表。
+
+    真实结构是三层嵌套：``data.Response.Data.Accounts``。
+    只读 ``data.Accounts`` 会把有效凭证误判成「未探测到额度」。
+    上游历史上出现过不同层级，因此按已知路径依次尝试，最后才失败。
+    """
+    data = body.get("data")
+    if not isinstance(data, dict):
+        raise UpstreamProtocolViolation("quota response missing data")
+    for path in (
+        ("Response", "Data", "Accounts"),   # 实测结构
+        ("Response", "Accounts"),
+        ("Data", "Accounts"),
+        ("Accounts",),                       # 兼容更早的扁平结构
+    ):
+        node: Any = data
+        for key in path:
+            node = node.get(key) if isinstance(node, dict) else None
+        if isinstance(node, list):
+            return node
+        if node is None and path == ("Response", "Data", "Accounts"):
+            # 该路径存在但值为 null → 探测成功但无个人版额度
+            holder: Any = data
+            for key in path[:-1]:
+                holder = holder.get(key) if isinstance(holder, dict) else None
+            if isinstance(holder, dict) and path[-1] in holder:
+                return []
+    raise UpstreamProtocolViolation("quota response missing Accounts")
+
+
 def _cycle_capacity(account: dict[str, Any], field: str) -> float:
-    """优先 *Precise 字段（AGENTS.md：额度以 Precise 为准）。"""
+    """优先 *Precise 字段（AGENTS.md：额度以 Precise 为准）。
+
+    上游把 Precise 值返回成**字符串**（"500"），因此必须能解析数字字符串，
+    否则整批额度都会被算成 0。
+    """
     precise = account.get(f"{field}Precise")
     value = precise if precise is not None else account.get(field)
     return _number(value) or 0.0
 
 
 def _number(value: Any) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    """接受 int/float 以及上游返回的数字字符串（Precise 字段是字符串）。"""
+    if isinstance(value, bool):
         return None
-    return float(value)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+    return None
 
 
 def _cycle_end_epoch(value: Any) -> int | None:

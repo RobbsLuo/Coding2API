@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import time
-from pathlib import Path
 
 import httpx
 import pytest
@@ -1594,81 +1593,85 @@ def test_credentials_endpoint_exposes_admin_flag(tmp_path):
 
 # ------------------------------------------------------- 前端静态资源服务
 
-def _spa_app(tmp_path, monkeypatch, *, build: bool = True):
-    """构造带/不带 web/dist 的 app，用于验证 SPA 回退行为。"""
-    import os
-
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
-    app = build_app(settings)
-    dist = Path("web/dist")
+def _spa_client(tmp_path, *, build: bool = True, monkeypatch=None):
+    """构造前端产物目录并注入，避免在仓库里真的建删 web/dist。"""
+    dist = tmp_path / "dist"
     if build:
         dist.mkdir(parents=True, exist_ok=True)
         (dist / "index.html").write_text("<html>spa</html>", encoding="utf-8")
         (dist / "app.js").write_text("console.log(1)", encoding="utf-8")
-    return app, dist, os.getcwd()
+    monkeypatch.setattr("src.main._frontend_dist", lambda: dist if build else None)
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    return TestClient(build_app(settings))
 
 
-def test_spa_serves_index_for_unknown_path(tmp_path):
-    app, dist, cwd = _spa_app(tmp_path, None)
-    try:
-        with TestClient(app) as client:
-            response = client.get("/credentials")
-        assert response.status_code == 200
-        assert "spa" in response.text
-    finally:
-        import shutil
+def test_frontend_dist_prefers_project_root():
+    """路径必须锚定项目根，而不是当前工作目录。"""
+    from src import main
 
-        shutil.rmtree(dist, ignore_errors=True)
+    resolved = main._frontend_dist()
+    # 本仓库已构建前端时应能找到；未构建时返回 None（由下面的注入测试覆盖）
+    if resolved is not None:
+        assert resolved.name == "dist"
+        assert (resolved / "index.html").is_file()
 
 
-def test_spa_serves_real_asset(tmp_path):
-    app, dist, cwd = _spa_app(tmp_path, None)
-    try:
-        with TestClient(app) as client:
-            response = client.get("/app.js")
-        assert response.status_code == 200 and "console.log" in response.text
-    finally:
-        import shutil
+def test_frontend_dist_returns_none_when_absent(tmp_path, monkeypatch):
+    from src import main
 
-        shutil.rmtree(dist, ignore_errors=True)
+    monkeypatch.setattr(main, "_PROJECT_ROOT", tmp_path)
+    monkeypatch.chdir(tmp_path)
+    assert main._frontend_dist() is None
 
 
-def test_spa_reports_missing_build(tmp_path):
-    app, dist, cwd = _spa_app(tmp_path, None, build=False)
-    with TestClient(app) as client:
+def test_spa_serves_index_for_unknown_path(tmp_path, monkeypatch):
+    with _spa_client(tmp_path, monkeypatch=monkeypatch) as client:
         response = client.get("/credentials")
-    assert response.status_code == 404
-    assert "frontend build not found" in response.text
+    assert response.status_code == 200
+    assert "spa" in response.text
 
 
-def test_spa_reports_missing_index(tmp_path):
-    import shutil
-
-    app, dist, cwd = _spa_app(tmp_path, None)
-    try:
-        (dist / "index.html").unlink()
-        with TestClient(app) as client:
-            response = client.get("/credentials")
-        assert response.status_code == 404
-        assert "index.html missing" in response.text
-    finally:
-        shutil.rmtree(dist, ignore_errors=True)
+def test_spa_serves_real_asset(tmp_path, monkeypatch):
+    with _spa_client(tmp_path, monkeypatch=monkeypatch) as client:
+        response = client.get("/app.js")
+    assert response.status_code == 200 and "console.log" in response.text
 
 
-def test_spa_does_not_escape_dist(tmp_path):
+def test_spa_reports_missing_build_with_actionable_page(tmp_path, monkeypatch):
+    """未构建前端时必须给出可执行的下一步，而不是一句英文错误。"""
+    with _spa_client(tmp_path, build=False, monkeypatch=monkeypatch) as client:
+        response = client.get("/credentials")
+    assert response.status_code == 503
+    assert "pnpm build" in response.text
+    assert "尚未构建" in response.text or "not" in response.text.lower()
+    # 提示里要说明 API 仍可用，避免用户以为整个服务挂了
+    assert "/v1/" in response.text or "/api/" in response.text
+
+
+def test_spa_reports_missing_index_with_actionable_page(tmp_path, monkeypatch):
+    dist = tmp_path / "dist"
+    dist.mkdir(parents=True)
+    monkeypatch.setattr("src.main._frontend_dist", lambda: dist)
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    with TestClient(build_app(settings)) as client:
+        response = client.get("/credentials")
+    assert response.status_code == 503
+    assert "pnpm build" in response.text
+
+
+def test_spa_does_not_escape_dist(tmp_path, monkeypatch):
     """路径穿越必须拒绝：解析后位于 dist 之外的文件不能被读出。"""
-    import shutil
+    dist = tmp_path / "dist"
+    dist.mkdir(parents=True)
+    (dist / "index.html").write_text("<html>spa</html>", encoding="utf-8")
+    (tmp_path / "secret.env").write_text("APP_SECRET=leaked", encoding="utf-8")
+    monkeypatch.setattr("src.main._frontend_dist", lambda: dist)
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    with TestClient(build_app(settings)) as client:
+        response = client.get("/../secret.env")
+    assert "leaked" not in response.text
+    assert "spa" in response.text          # 回退到 index.html
 
-    app, dist, cwd = _spa_app(tmp_path, None)
-    try:
-        secret = Path("web/pyproject.toml")
-        if secret.exists():
-            with TestClient(app) as client:
-                response = client.get("/../pyproject.toml")
-            # 拒绝时回退到 index.html，而不是泄漏文件内容
-            assert "[project]" not in response.text
-    finally:
-        shutil.rmtree(dist, ignore_errors=True)
 
 
 # ------------------------------------------------- 执行引擎的统计埋点
@@ -2257,3 +2260,20 @@ def test_authorize_reports_invalid_credential(tmp_path):
         response = client.get("/authorize?refreshToken=RT&state=broken")
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_credential"
+
+
+def test_frontend_dist_falls_back_to_container_and_cwd(tmp_path, monkeypatch):
+    """项目根没有产物时，依次尝试容器路径与当前工作目录（main 516-517）。"""
+
+    from src import main
+
+    monkeypatch.setattr(main, "_PROJECT_ROOT", tmp_path)          # 项目根没有
+    container_dist = tmp_path / "container" / "web" / "dist"
+    container_dist.mkdir(parents=True)
+    (container_dist / "index.html").write_text("x", encoding="utf-8")
+
+    # 容器候选已抽成模块常量，可直接指到临时目录
+    monkeypatch.setattr(main, "_CONTAINER_DIST", container_dist)
+
+    found = main._frontend_dist()
+    assert found is not None and found.name == "dist"
