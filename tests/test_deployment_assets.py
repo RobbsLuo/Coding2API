@@ -115,3 +115,40 @@ def test_ci_workflow_paths_match_repository():
         assert (ROOT / path).exists(), f"CI 引用 {path} 但它不存在"
     # 覆盖率门槛必须保留
     assert "--cov-fail-under=100" in workflow
+
+
+# ------------------------------------------------- 探测失败原因的分类
+
+def test_describe_probe_failure_maps_http_status_to_actionable_reason():
+    """探测失败原因必须可操作，不能是 Python 类名。"""
+    from src.main import describe_probe_failure
+    from src.provider.codebuddy.client import UpstreamHTTPError as CBHTTP
+    from src.provider.trae.client import UpstreamHTTPError as TraeHTTP
+
+    assert describe_probe_failure(CBHTTP(401, b"")) == "credential_rejected"
+    assert describe_probe_failure(CBHTTP(403, b"")) == "credential_rejected"
+    assert describe_probe_failure(TraeHTTP(429, b"")) == "rate_limited"
+    assert describe_probe_failure(TraeHTTP(503, b"")) == "upstream_unavailable"
+    assert describe_probe_failure(TraeHTTP(400, b"")) == "upstream_rejected"
+
+
+def test_describe_probe_failure_maps_protocol_violation():
+    from src.main import describe_probe_failure
+    from src.provider.codebuddy.events import (
+        UpstreamProtocolViolation as CBViolation,
+    )
+    from src.provider.trae.events import UpstreamProtocolViolation as TraeViolation
+
+    assert describe_probe_failure(CBViolation("x")) == "upstream_response_invalid"
+    assert describe_probe_failure(TraeViolation("x")) == "upstream_response_invalid"
+
+
+def test_describe_probe_failure_handles_timeout_and_unknown():
+    from src.main import describe_probe_failure
+
+    assert describe_probe_failure(TimeoutError()) == "upstream_timeout"
+    assert describe_probe_failure(RuntimeError("boom")) == "unknown_error"
+    # 任何情况下都不得把类名当 reason
+    for error in (RuntimeError("x"), ValueError("y"), KeyError("z")):
+        reason = describe_probe_failure(error)
+        assert type(error).__name__ not in reason

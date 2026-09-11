@@ -245,6 +245,32 @@ class Scheduler:
 
 ---
 
+## 6.5 面向用户的错误语义
+
+管理端点返回的失败原因必须是**稳定的机器可读枚举**，不能是 Python 异常类名。
+类名是实现细节：用户既判断不出问题，也不知道下一步做什么，而且重构时会漂移。
+
+`POST /api/credentials/{id}/probe` 的失败响应：
+
+```json
+{ "probed": false, "reason": "credential_rejected", "detail": "upstream http 401" }
+```
+
+| `reason` | 含义 | 用户该做什么 |
+|---|---|---|
+| `credential_rejected` | 上游 401/403 拒绝凭证 | 重新登录该账号 |
+| `rate_limited` | 上游 429 | 稍后重试 |
+| `upstream_unavailable` | 上游 5xx | 等待上游恢复，与本账号无关 |
+| `upstream_rejected` | 其他 4xx | 检查账号状态 |
+| `upstream_response_invalid` | 响应结构不符 | 可能是官方接口变更 |
+| `upstream_timeout` | 请求超时 | 重试 |
+| `unknown_error` | 未归类 | 查 `detail` |
+
+`detail` 保留原始错误摘要**仅供排查**，界面不得把它当作主提示展示。
+前端 `probeFailureLabel()` 负责把 `reason` 翻成中文，并对未知值兜底。
+
+未识别的 `reason` 必须回退到 `unknown_error`，不得透传原始字符串。
+
 ## 7. 数据库（T-Q2 定稿）
 
 DDL 以 PROPOSAL §5 为准（users.txt 为用户唯一源、无 users 表、凭证加密列、usage_events.credit 可空），补充实现细节：

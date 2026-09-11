@@ -330,7 +330,9 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             quota = await provider.probe_quota(data)
         except Exception as error:  # noqa: BLE001 - 探测失败 → unknown，不当作 0
             credentials.mark_probe_failed(credential_id)
-            return {"probed": False, "reason": type(error).__name__}
+            reason = describe_probe_failure(error)
+            logger.info("额度探测失败 %s: %s", credential_id, reason)
+            return {"probed": False, "reason": reason, "detail": str(error)[:200]}
         credentials.save_quota(credential_id, quota)
         return {"probed": True, "remaining": quota.remaining, "total": quota.total,
                 "cycle_end": quota.cycle_end}
@@ -479,6 +481,36 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 def resolve_public_callback_url(settings: Settings) -> str:
     """PUBLIC_BASE_URL + /authorize（远程部署必须可被浏览器访问）。"""
     return settings.public_base_url.rstrip("/") + "/authorize"
+
+
+def describe_probe_failure(error: Exception) -> str:
+    """把探测异常翻译成用户能据以行动的原因。
+
+    不能直接暴露 Python 类名（如 UpstreamProtocolViolation）——那是实现细节，
+    用户看到它既判断不出问题，也不知道下一步该做什么。
+    """
+    from .provider.codebuddy.client import UpstreamHTTPError as CodeBuddyHTTPError
+    from .provider.codebuddy.events import (
+        UpstreamProtocolViolation as CodeBuddyViolation,
+    )
+    from .provider.trae.client import UpstreamHTTPError as TraeHTTPError
+    from .provider.trae.events import UpstreamProtocolViolation as TraeViolation
+
+    http_errors = (CodeBuddyHTTPError, TraeHTTPError)
+    if isinstance(error, http_errors):
+        status = getattr(error, "status", 0)
+        if status in (401, 403):
+            return "credential_rejected"      # 凭证失效，需要重新登录
+        if status == 429:
+            return "rate_limited"             # 上游限流，稍后再试
+        if status >= 500:
+            return "upstream_unavailable"     # 上游故障，与凭证无关
+        return "upstream_rejected"            # 上游拒绝该请求
+    if isinstance(error, (CodeBuddyViolation, TraeViolation)):
+        return "upstream_response_invalid"    # 响应结构不符，可能是上游改版
+    if isinstance(error, TimeoutError):
+        return "upstream_timeout"
+    return "unknown_error"
 
 
 def _upstream_auth(registry: dict, settings: Settings) -> dict:

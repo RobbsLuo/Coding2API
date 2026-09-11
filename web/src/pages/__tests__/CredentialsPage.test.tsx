@@ -159,13 +159,17 @@ describe("CredentialsPage", () => {
     );
   });
 
-  it("探测失败时提示「未探测」而非额度为 0", async () => {
+  it("探测失败时提示「未探测」而非额度为 0，并给出可操作原因", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes("/probe")) {
-          return jsonResponse({ probed: false, reason: "CredentialQuotaProbeError" });
+          return jsonResponse({
+            probed: false,
+            reason: "upstream_response_invalid",
+            detail: "quota response missing Accounts",
+          });
         }
         return jsonResponse(listBody([makeCredential({ id: "cred_1" })]));
       }),
@@ -178,6 +182,29 @@ describe("CredentialsPage", () => {
     const notice = await screen.findByTestId("credentials-notice");
     expect(notice).toHaveTextContent("探测失败");
     expect(notice).toHaveTextContent("未探测");
+    // 面向用户的是可操作的中文说明，不是枚举或异常类名
+    expect(notice).toHaveTextContent("上游响应格式与预期不符");
+    expect(notice).not.toHaveTextContent("upstream_response_invalid");
+    // 原始错误另置于折叠区，便于排查
+    expect(screen.getByTestId("probe-detail")).toHaveTextContent(
+      "quota response missing Accounts",
+    );
+  });
+
+  it("探测失败的未知原因有兜底文案", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/probe")) return jsonResponse({ probed: false });
+        return jsonResponse(listBody([makeCredential({ id: "cred_1" })]));
+      }),
+    );
+
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByRole("button", { name: "探测" }));
+    expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("未知错误");
   });
 
   it("探测成功展示剩余与总量", async () => {

@@ -3,6 +3,7 @@ import type {
   ApiKeyCreated,
   CredentialsResponse,
   ModelInfo,
+  ProbeResult,
   ProviderStats,
   SessionInfo,
   StatsOverview,
@@ -64,10 +65,7 @@ export const api = {
   deleteCredential: (id: string) =>
     request<{ ok: boolean }>(`/api/credentials/${id}`, { method: "DELETE" }),
   probeCredential: (id: string) =>
-    request<{ probed: boolean; remaining?: number; total?: number; reason?: string }>(
-      `/api/credentials/${id}/probe`,
-      { method: "POST" },
-    ),
+    request<ProbeResult>(`/api/credentials/${id}/probe`, { method: "POST" }),
   checkinCredential: (id: string) =>
     request<{ ok: boolean; credit: number | null; code: number | null; message: string }>(
       `/api/credentials/${id}/checkin`,

@@ -11,6 +11,7 @@ import {
   formatNumber,
   formatTime,
   healthView,
+  probeFailureLabel,
   quotaSemantics,
 } from "../display";
 import { makeCredential } from "../../pages/__tests__/helpers";
@@ -205,6 +206,13 @@ describe("display helpers", () => {
     expect(formatDuration(120)).toBe("2 分钟");
     expect(formatDuration(7200)).toBe("2.0 小时");
     expect(formatDuration(172800)).toBe("2.0 天");
+  });
+
+  it("探测失败原因有中文文案，且未知值有兜底", () => {
+    expect(probeFailureLabel("credential_rejected")).toContain("重新登录");
+    expect(probeFailureLabel("upstream_unavailable")).toContain("与本账号凭证无关");
+    expect(probeFailureLabel(undefined)).toBe("未知错误");
+    expect(probeFailureLabel("something_new" as never)).toBe("未知错误");
   });
 
   it("时间与数字格式化处理空值", () => {

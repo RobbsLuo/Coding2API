@@ -90,10 +90,17 @@ describe("StatsPage", () => {
     await settle();
 
     expect(screen.getByTestId("username-filter")).toBeInTheDocument();
-    await userEvent.type(screen.getByTestId("username-filter"), "bob");
+    // 用 paste 一次写入，避免逐字符输入叠加防抖延迟导致断言超时
+    const filter = screen.getByTestId("username-filter");
+    await userEvent.click(filter);
+    await userEvent.paste("bob");
 
-    await waitFor(() =>
-      expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("username=bob"))).toBe(true),
+    await waitFor(
+      () =>
+        expect(
+          fetchSpy.mock.calls.some(([url]) => String(url).includes("username=bob")),
+        ).toBe(true),
+      { timeout: 3000 },
     );
   });
 

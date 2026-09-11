@@ -93,6 +93,25 @@ export interface UpstreamAuthPoll {
   credential_id?: string;
 }
 
+/** 后端保证是稳定的机器可读枚举，不是 Python 异常类名。 */
+export type ProbeFailureReason =
+  | "credential_rejected"
+  | "rate_limited"
+  | "upstream_unavailable"
+  | "upstream_rejected"
+  | "upstream_response_invalid"
+  | "upstream_timeout"
+  | "unknown_error";
+
+export interface ProbeResult {
+  probed: boolean;
+  remaining?: number;
+  total?: number;
+  reason?: ProbeFailureReason;
+  /** 原始错误摘要，仅用于排查；界面不应直接展示给普通用户 */
+  detail?: string;
+}
+
 export interface ModelInfo {
   id: string;
   object: string;

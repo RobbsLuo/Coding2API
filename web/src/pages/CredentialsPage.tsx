@@ -9,6 +9,7 @@ import {
   formatNumber,
   formatTime,
   healthView,
+  probeFailureLabel,
   quotaSemantics,
   STATE_LABEL,
   STATE_TONE,
@@ -40,6 +41,7 @@ export function CredentialsPage() {
   const [accounts, setAccounts] = useState<{ account_id: string; nickname: string; type: string }[]>([]);
   // 每个上游各自可能有进行中的登录（CodeBuddy 轮询 / TRAE 回调）
   const [loginProviders, setLoginProviders] = useState<Provider[]>([]);
+  const [probeDetail, setProbeDetail] = useState<string | null>(null);
 
   const credentials = data?.credentials ?? [];
   const isAdmin = data?.is_admin ?? false;
@@ -82,14 +84,21 @@ export function CredentialsPage() {
         setBusy(true);
         setError(null);
         setNotice(null);
+        setProbeDetail(null);
         try {
           const result = await api.probeCredential(credential.id);
-          // 探测失败表示「未知」，绝不能显示成额度为 0
-          setNotice(
-            result.probed
-              ? `探测成功：剩余 ${formatNumber(result.remaining)} / ${formatNumber(result.total)}`
-              : `探测失败：${result.reason ?? "上游未返回额度"}（健康度保持为「未探测」）`,
-          );
+          // 探测失败表示「未知」，绝不能显示成额度为 0。
+          // 失败原因用可操作的中文说明，不直接把后端枚举或异常类名丢给用户。
+          if (result.probed) {
+            setNotice(
+              `探测成功：剩余 ${formatNumber(result.remaining)} / ${formatNumber(result.total)}`,
+            );
+          } else {
+            setNotice(
+              `探测失败：${probeFailureLabel(result.reason)}（健康度保持为「未探测」）`,
+            );
+            if (result.detail) setProbeDetail(result.detail);
+          }
           await refresh();
         } catch (caught) {
           setError(caught instanceof Error ? caught.message : "探测失败");
@@ -204,7 +213,14 @@ export function CredentialsPage() {
       )}
       {notice && (
         <div data-testid="credentials-notice">
-          <Notice tone="ok">{notice}</Notice>
+          <Notice tone="ok">
+            {notice}
+            {probeDetail && (
+              <span className="ml-2 text-[var(--color-ink-muted)]" data-testid="probe-detail">
+                原始错误：{probeDetail}
+              </span>
+            )}
+          </Notice>
         </div>
       )}
 

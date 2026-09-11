@@ -1311,7 +1311,11 @@ def test_probe_endpoint_marks_failed_on_provider_error(admin_client):
 
     app.state.executor._deps.providers["codebuddy"] = Boom()
     body = client.post(f"/api/credentials/{credential_id}/probe").json()
-    assert body["probed"] is False and body["reason"] == "RuntimeError"
+    assert body["probed"] is False
+    # 不能把 Python 类名当作 reason 暴露给用户
+    assert body["reason"] == "unknown_error"
+    assert "RuntimeError" not in body["reason"]
+    assert body["detail"] == "boom"
     assert app.state.credentials.candidates()[0].health is None
 
 

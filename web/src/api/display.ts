@@ -5,7 +5,7 @@
  * 展示层必须区分它们，否则探测失败会被误读成「没额度」。
  */
 
-import type { Credential, Health } from "../api/types";
+import type { Credential, Health, ProbeFailureReason } from "../api/types";
 
 export type HealthKind = "known" | "unknown" | "exhausted";
 
@@ -99,4 +99,19 @@ export function formatTime(epoch: number | null | undefined): string {
 export function formatNumber(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
   return value.toLocaleString("zh-CN");
+}
+
+
+export const PROBE_FAILURE_LABEL: Record<ProbeFailureReason, string> = {
+  credential_rejected: "凭证被上游拒绝，需要重新登录该账号",
+  rate_limited: "上游限流，稍后重试",
+  upstream_unavailable: "上游服务异常，与本账号凭证无关",
+  upstream_rejected: "上游拒绝了这次请求",
+  upstream_response_invalid: "上游响应格式与预期不符，可能是官方接口变更",
+  upstream_timeout: "上游响应超时",
+  unknown_error: "未知错误",
+};
+
+export function probeFailureLabel(reason: ProbeFailureReason | undefined): string {
+  return reason ? (PROBE_FAILURE_LABEL[reason] ?? "未知错误") : "未知错误";
 }
