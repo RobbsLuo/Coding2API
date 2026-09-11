@@ -12,10 +12,9 @@ from dataclasses import dataclass
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from .credential import TraeCredential
-from .events import CLIENT_ID, UpstreamProtocolViolation
+from .events import CLIENT_ID, IDE_VERSION, UpstreamProtocolViolation
 
 LOGIN_VERSION = "1"
-IDE_VERSION = "0.1.52"
 PLUGIN_VERSION = "2.3.62834"
 LOGIN_HOST = "https://www.trae.cn"
 LOGIN_PATH = "/authorization"

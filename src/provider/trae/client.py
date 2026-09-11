@@ -25,13 +25,18 @@ from .callback import (
 from .credential import TraeCredential, parse_credential
 from .events import (
     AGENT_HOST,
+    APP_ID,
     CLIENT_ID,
+    DEVICE_BRAND,
     EP_CHAT,
     EP_EXCHANGE,
     EP_MODELS,
     EP_USER_INFO,
     FUNCTION,
+    IDE_VERSION,
+    IDE_VERSION_CODE,
     OAUTH_HOST,
+    OS_VERSION,
     UG_HOST,
     UpstreamProtocolViolation,
 )
@@ -116,21 +121,57 @@ def _normalize_tools(body: dict[str, Any]) -> None:
         body.pop("tools", None)
 
 
-def auth_headers(credential: TraeCredential, *, stream: bool = True) -> dict[str, str]:
+def solo_headers(credential: TraeCredential, *, stream: bool = True) -> dict[str, str]:
+    """聊天/模型端点头（agent host）。逐项对照原实现 SOLOHeaders（实测必须）。"""
+    token = credential.access_token
     headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream" if stream else "application/json",
-        "x-cloudide-token": credential.access_token,
+        "User-Agent": f"Trae/{IDE_VERSION}",
+        "Authorization": f"Cloud-IDE-JWT {token}",
+        "X-Cloudide-Token": token,
+        "X-Ide-Token": token,
+        "X-App-Id": APP_ID,
+        "X-App-Version": "default",
+        "X-Ide-Version": IDE_VERSION,
+        "X-Ide-Version-Code": IDE_VERSION_CODE,
+        "X-App-Version-Code": IDE_VERSION_CODE,
+        "X-Ide-Version-Type": "stable",
+        "X-Device-Type": "windows",
+        "X-OS-Version": OS_VERSION,
+        "X-Device-Brand": DEVICE_BRAND,
+        "Request-Traffic-Type": "prod",
     }
+    if credential.uid:
+        headers["X-Uid"] = credential.uid
     if credential.machine_id:
-        headers["x-machine-id"] = credential.machine_id
+        headers["X-Machine-Id"] = credential.machine_id
     if credential.device_id:
-        headers["x-device-id"] = credential.device_id
+        headers["X-Device-Id"] = credential.device_id
+    return headers
+
+
+def ug_headers(credential: TraeCredential) -> dict[str, str]:
+    """签到/积分端点头（api.trae.cn）。对照原实现 UgHeaders。"""
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": f"Trae/{IDE_VERSION}",
+        "Authorization": f"Cloud-IDE-JWT {credential.access_token}",
+        "X-User-Region": "CN",
+    }
+    if credential.device_id:
+        headers["X-Device-Id"] = credential.device_id
     return headers
 
 
 def oauth_headers() -> dict[str, str]:
-    return {"Content-Type": "application/json", "Accept": "application/json"}
+    """兑换/用户信息头：无签名，仅 UA（对照原实现 OAuthHeaders）。"""
+    return {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": f"Trae/{IDE_VERSION}",
+    }
 
 
 class TraeClient:
@@ -175,7 +216,7 @@ class TraeClient:
         body = prepare_body(payload, model)
         url = f"{self.agent_host}{EP_CHAT}"
         async with self._stream().stream(
-            "POST", url, json=body, headers=auth_headers(credential),
+            "POST", url, json=body, headers=solo_headers(credential),
         ) as response:
             if response.status_code >= 400:
                 raw = await response.aread()
@@ -193,7 +234,7 @@ class TraeClient:
             "mode_type": None, "agent_type": None,
         }
         data = await self._post_json(
-            f"{self.agent_host}{EP_MODELS}", body, auth_headers(credential, stream=False),
+            f"{self.agent_host}{EP_MODELS}", body, solo_headers(credential, stream=False),
         )
         configs = data.get("config_info_list")
         if not isinstance(configs, list):
@@ -210,7 +251,7 @@ class TraeClient:
         """ide_user_ent_usage：remain = limit - used；多权益包求和。"""
         data = await self._post_json(
             f"{self.ug_host}/trae/api/v2/pay/ide_user_ent_usage", {},
-            auth_headers(credential, stream=False),
+            ug_headers(credential),
         )
         packs = data.get("user_entitlement_pack_list")
         if not isinstance(packs, list):
@@ -255,8 +296,10 @@ class TraeClient:
     async def get_user_info(self, credential: TraeCredential) -> tuple[str, str]:
         """返回 (uid, nickname)；失败不影响主流程。"""
         host = credential.api_host or self.oauth_host
-        headers = oauth_headers() | {"X-Cloudide-Token": credential.access_token}
-        data = await self._post_json(f"{host}{EP_USER_INFO}", {"ReqSource": "IDE"}, headers)
+        data = await self._post_json(
+            f"{host}{EP_USER_INFO}", {"ReqSource": "IDE"},
+            oauth_headers() | {"X-Cloudide-Token": credential.access_token},
+        )
         result = data.get("Result")
         if not isinstance(result, dict):
             raise UpstreamProtocolViolation("userinfo response missing Result")

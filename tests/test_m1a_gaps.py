@@ -221,11 +221,26 @@ def test_prepare_body_function_choice_without_name_is_dropped():
     assert "tool_choice" not in body
 
 
-def test_auth_headers_include_device_id():
-    from src.provider.trae.client import auth_headers
+def test_solo_headers_include_device_and_auth():
+    from src.provider.trae.client import solo_headers
 
-    headers = auth_headers(TraeCredential(access_token="a", machine_id="m", device_id="d"))
-    assert headers["x-machine-id"] == "m" and headers["x-device-id"] == "d"
+    headers = solo_headers(TraeCredential(access_token="a", machine_id="m", device_id="d"))
+    assert headers["X-Machine-Id"] == "m" and headers["X-Device-Id"] == "d"
+    # 原 SOLOHeaders 实测必须的头：Authorization 与 X-Cloudide-Token 并存
+    assert headers["Authorization"] == "Cloud-IDE-JWT a"
+    assert headers["X-Cloudide-Token"] == "a"
+    assert headers["Request-Traffic-Type"] == "prod"
+
+
+def test_ug_headers_carry_region_and_auth():
+    """积分/签到端点（api.trae.cn）的独立头集合——此前缺失导致探测 401。"""
+    from src.provider.trae.client import ug_headers
+
+    headers = ug_headers(TraeCredential(access_token="a", device_id="d"))
+    assert headers["Authorization"] == "Cloud-IDE-JWT a"
+    assert headers["X-User-Region"] == "CN"
+    assert headers["X-Device-Id"] == "d"
+    assert "X-Cloudide-Token" not in headers
 
 
 async def test_client_aclose_is_idempotent():
@@ -629,3 +644,13 @@ def test_aggregate_tool_calls_event_with_none_payload():
                         Event(kind=EventKind.CONTENT, content="c")], "m")
     assert result["choices"][0]["message"]["content"] == "c"
     assert "tool_calls" not in result["choices"][0]["message"]
+
+
+def test_solo_headers_include_uid_when_present():
+    """有 uid 时必须带 X-Uid（SOLOHeaders 分支，client 145-146）。"""
+    from src.provider.trae.client import solo_headers
+
+    headers = solo_headers(TraeCredential(access_token="a", uid="u-9"))
+    assert headers["X-Uid"] == "u-9"
+    no_uid = solo_headers(TraeCredential(access_token="a"))
+    assert "X-Uid" not in no_uid
