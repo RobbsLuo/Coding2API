@@ -10,7 +10,9 @@ import {
   STATE_TONE,
 } from "../api/display";
 import type { Credential, Provider } from "../api/types";
-import { Badge, Empty, Metric, Panel } from "../ui";
+import { Badge, Empty, Metric, Panel, Skeleton } from "../ui";
+import { PageHeader } from "../components/PageHeader";
+import { cn } from "@/lib/utils";
 
 const PROVIDER_LABEL: Record<Provider, string> = { codebuddy: "CodeBuddy", trae: "TRAE" };
 
@@ -40,32 +42,74 @@ export function DashboardPage() {
     items: credentials.filter((item) => item.provider === provider),
   }));
 
-  if (isLoading) return <Empty>载入中…</Empty>;
+  if (isLoading) {
+    return (
+      <div className="space-y-6" data-testid="dashboard">
+        <p className="sr-only">载入中…</p>
+        <SkeletonMetricGrid />
+        <Panel title="凭证池">
+          <div className="space-y-2">
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+          </div>
+        </Panel>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6" data-testid="dashboard">
+      <PageHeader
+        title="池仪表盘"
+        description="凭证池整体健康与配额概况：健康度按剩余积分占比三态统计，切换标签页可对凭证进行维护。"
+      />
+
       <section className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
         <Metric label="凭证总数" value={formatNumber(counts.total)} />
-        <Metric label="可用" value={formatNumber(counts.ready)} />
-        <Metric label="冷却中" value={formatNumber(counts.cooling)} />
+        <Metric label="可用" value={formatNumber(counts.ready)} tone="ok" />
+        <Metric label="冷却中" value={formatNumber(counts.cooling)} tone="warn" />
         <Metric label="已禁用" value={formatNumber(counts.disabled)} />
-        <Metric label="额度耗尽" value={formatNumber(counts.exhausted)} />
+        <Metric label="额度耗尽" value={formatNumber(counts.exhausted)} tone="danger" />
         <Metric label="已关闭" value={formatNumber(counts.off)} />
       </section>
 
       <Panel title="健康度三态分布">
-        <div className="flex flex-wrap gap-3 text-sm">
-          <span data-testid="health-known">
+        <div className="flex h-2 w-full overflow-hidden rounded-full bg-muted">
+          {healthTally.known > 0 && (
+            <div
+              className="bg-ok transition-all"
+              style={{ width: `${(healthTally.known / Math.max(1, credentials.length)) * 100}%` }}
+            />
+          )}
+          {healthTally.unknown > 0 && (
+            <div
+              className="bg-warn transition-all"
+              style={{ width: `${(healthTally.unknown / Math.max(1, credentials.length)) * 100}%` }}
+            />
+          )}
+          {healthTally.exhausted > 0 && (
+            <div
+              className="bg-destructive transition-all"
+              style={{ width: `${(healthTally.exhausted / Math.max(1, credentials.length)) * 100}%` }}
+            />
+          )}
+        </div>
+        <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-sm">
+          <span data-testid="health-known" className="inline-flex items-center gap-1.5">
+            <span className="size-2 rounded-full bg-ok" />
             已知剩余：<strong>{healthTally.known}</strong>
           </span>
-          <span data-testid="health-unknown" className="text-[var(--color-ink-muted)]">
+          <span data-testid="health-unknown" className="inline-flex items-center gap-1.5 text-muted-foreground">
+            <span className="size-2 rounded-full bg-warn" />
             未探测到额度：<strong>{healthTally.unknown}</strong>
           </span>
-          <span data-testid="health-exhausted" className="text-[var(--color-danger)]">
+          <span data-testid="health-exhausted" className="inline-flex items-center gap-1.5 text-destructive">
+            <span className="size-2 rounded-full bg-destructive" />
             已耗尽：<strong>{healthTally.exhausted}</strong>
           </span>
         </div>
-        <p className="mt-2 text-xs text-[var(--color-ink-muted)]">
+        <p className="mt-2 text-xs text-muted-foreground">
           「未探测到额度」表示探测失败或上游未提供额度信息，与「已耗尽」含义不同，不应互相替代。
         </p>
       </Panel>
@@ -74,8 +118,12 @@ export function DashboardPage() {
         <div className="grid gap-4 md:grid-cols-2">
           {byProvider.map(({ provider, items }) => (
             <div key={provider} data-testid={`provider-group-${provider}`}>
-              <div className="mb-2 text-xs font-medium text-[var(--color-ink-muted)]">
-                {PROVIDER_LABEL[provider]}（{items.length}）
+              <div className="mb-2 flex items-center text-xs font-medium text-muted-foreground">
+                {PROVIDER_LABEL[provider]}（
+                <span className="rounded-full bg-muted px-1.5 py-0.5 tabular-nums">
+                  {items.length}
+                </span>
+                ）
               </div>
               {items.length === 0 ? (
                 <Empty>暂无凭证</Empty>
@@ -98,13 +146,14 @@ export function DashboardPage() {
           <ul className="space-y-1.5" data-testid="cooling-list">
             {cooling.map((item) => (
               <li key={item.id} className="flex items-center justify-between text-sm">
-                <span>
+                <span className="flex items-center gap-2">
+                  <span className="size-1.5 rounded-full bg-warn" />
                   {item.nickname || item.id.slice(0, 12)}
-                  <span className="ml-2 text-xs text-[var(--color-ink-muted)]">
+                  <span className="text-xs text-muted-foreground">
                     {PROVIDER_LABEL[item.provider]}
                   </span>
                 </span>
-                <span className="text-xs text-[var(--color-warn)]">
+                <span className="text-xs font-medium text-warn">
                   剩余 {formatDuration(cooldownRemaining(item.cooling_until, now))}
                   {item.disabled_reason ? ` · ${item.disabled_reason}` : ""}
                 </span>
@@ -117,20 +166,57 @@ export function DashboardPage() {
   );
 }
 
+function SkeletonMetricGrid() {
+  return (
+    <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+      {Array.from({ length: 6 }).map((_, index) => (
+        <div key={index} className="rounded-xl border border-border p-4">
+          <Skeleton className="h-3 w-14" />
+          <Skeleton className="mt-2 h-6 w-10" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function CredentialRow({ credential, now }: { credential: Credential; now: number }) {
   const health = healthView(credential.health);
   const state = credentialState(credential, now);
+  const barTone =
+    health.percent === null
+      ? ""
+      : health.percent >= 50
+        ? "bg-ok"
+        : health.percent > 0
+          ? "bg-warn"
+          : "bg-destructive";
   return (
-    <li className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border-soft)] px-3 py-2 text-sm">
-      <span className="truncate">{credential.nickname || credential.id.slice(0, 12)}</span>
-      <span className="flex shrink-0 items-center gap-2">
-        <Badge tone={health.tone}>{health.label}</Badge>
-        <Badge tone={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
-      </span>
-      <span className="shrink-0 text-xs text-[var(--color-ink-muted)]">
-        {formatNumber(credential.quota_remaining)}/{formatNumber(credential.quota_total)}
-        <span className="ml-1">{quotaSemantics(credential)}</span>
-      </span>
+    <li className="rounded-lg border border-border bg-card px-3 py-2.5 text-sm transition-colors hover:bg-muted/40">
+      <div className="flex items-center justify-between gap-3">
+        <span className="truncate font-medium">
+          {credential.nickname || credential.id.slice(0, 12)}
+        </span>
+        <span className="flex shrink-0 items-center gap-2">
+          <Badge tone={health.tone}>{health.label}</Badge>
+          <Badge tone={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
+        </span>
+      </div>
+      <div className="mt-2 flex items-center gap-3">
+        {health.percent !== null ? (
+          <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+            <div
+              className={cn("h-full rounded-full transition-all", barTone)}
+              style={{ width: `${health.percent}%` }}
+            />
+          </div>
+        ) : (
+          <span className="h-1.5 flex-1" />
+        )}
+        <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+          {formatNumber(credential.quota_remaining)}/{formatNumber(credential.quota_total)}
+          <span className="ml-1">{quotaSemantics(credential)}</span>
+        </span>
+      </div>
     </li>
   );
 }

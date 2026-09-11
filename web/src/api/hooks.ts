@@ -44,6 +44,13 @@ export function useStatsByProvider(username?: string, target?: string, since?: n
   });
 }
 
+export function useStatsTimeline(username?: string, target?: string, since?: number) {
+  return useQuery({
+    queryKey: adminKey(username, "stats-timeline", target, since),
+    queryFn: () => api.statsTimeline(target, since),
+  });
+}
+
 /** 凭证相关写操作：成功后统一失效凭证与统计查询。 */
 export function useCredentialMutation<TArgs, TResult>(
   mutationFn: (args: TArgs) => Promise<TResult>,

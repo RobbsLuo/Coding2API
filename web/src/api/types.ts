@@ -70,6 +70,14 @@ export interface ProviderStats {
   credit: number | null;
 }
 
+/** 小时粒度时间序列点（usage_hourly 聚合，跨 model 汇合）。 */
+export interface TimelinePoint {
+  /** UTC 秒，对齐到小时起点 */
+  hour: number;
+  codebuddy: number;
+  trae: number;
+}
+
 export interface SessionInfo {
   username: string;
   is_admin: boolean;

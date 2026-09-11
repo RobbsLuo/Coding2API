@@ -1,14 +1,22 @@
 import { NavLink, Outlet, useOutletContext } from "react-router-dom";
+import {
+  BarChart3,
+  Database,
+  KeyRound,
+  LayoutDashboard,
+  TerminalSquare,
+} from "lucide-react";
 import type { SessionInfo } from "./api/types";
-import { HelpPanel } from "./components/HelpPanel";
-import { Button } from "./ui";
+import { ThemeToggle } from "./components/ThemeToggle";
+import { UserMenu } from "./components/UserMenu";
+import { cn } from "@/lib/utils";
 
 const NAV = [
-  { to: "/", label: "池仪表盘" },
-  { to: "/credentials", label: "凭证管理" },
-  { to: "/api-keys", label: "API Key" },
-  { to: "/stats", label: "用量统计" },
-  { to: "/playground", label: "Playground" },
+  { to: "/", label: "池仪表盘", icon: LayoutDashboard, end: true },
+  { to: "/credentials", label: "凭证管理", icon: Database },
+  { to: "/api-keys", label: "API Key", icon: KeyRound },
+  { to: "/stats", label: "用量统计", icon: BarChart3 },
+  { to: "/playground", label: "Playground", icon: TerminalSquare },
 ];
 
 export function Layout({ session }: { session: SessionInfo }) {
@@ -19,40 +27,48 @@ export function Layout({ session }: { session: SessionInfo }) {
 
   return (
     <div className="flex min-h-full flex-col">
-      <header className="border-b border-[var(--color-border-soft)] bg-[var(--color-panel)]">
-        <div className="mx-auto flex w-full max-w-6xl items-center gap-6 px-6 py-3">
-          <span className="font-semibold tracking-tight">coding2api</span>
+      <header className="sticky top-0 z-20 border-b border-border bg-[color:color-mix(in_oklch,var(--background)_88%,transparent)] backdrop-blur">
+        <div className="mx-auto flex w-full max-w-7xl items-center gap-3 px-4 py-2.5 sm:gap-4 sm:px-6">
+          <span className="flex items-center gap-2 font-semibold tracking-tight">
+            <span className="grid size-7 place-items-center rounded-lg bg-primary text-primary-foreground">
+              <TerminalSquare className="size-4" />
+            </span>
+            coding2api
+          </span>
           <nav className="flex flex-1 gap-1">
             {NAV.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
-                end={item.to === "/"}
+                end={item.end}
                 className={({ isActive }) =>
-                  `rounded-lg px-3 py-1.5 text-sm ${
+                  cn(
+                    "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors sm:px-3",
                     isActive
-                      ? "bg-[var(--color-accent)]/12 font-medium text-[var(--color-accent)]"
-                      : "text-[var(--color-ink-muted)] hover:bg-[var(--color-surface)]"
-                  }`
+                      ? "bg-primary/12 font-medium text-primary"
+                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )
                 }
               >
-                {item.label}
+                <item.icon className="size-4 shrink-0" />
+                <span className="hidden sm:inline">{item.label}</span>
               </NavLink>
             ))}
           </nav>
-          <HelpPanel />
-          <span className="text-xs text-[var(--color-ink-muted)]">
-            {session.username}
-            {session.is_admin ? " · 管理员" : " · 只读"}
-          </span>
-          <Button size="sm" variant="ghost" onClick={logout}>
-            退出
-          </Button>
+          <ThemeToggle />
+          <UserMenu
+            username={session.username}
+            isAdmin={session.is_admin}
+            onLogout={logout}
+          />
         </div>
       </header>
-      <main className="mx-auto w-full max-w-6xl flex-1 px-6 py-6">
+      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6">
         <Outlet context={session} />
       </main>
+      <footer className="mx-auto w-full max-w-7xl px-4 py-4 text-xs text-muted-foreground sm:px-6">
+        coding2api · 仅供学习研究，未做安全审计
+      </footer>
     </div>
   );
 }

@@ -1,4 +1,5 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -224,16 +225,26 @@ describe("display helpers", () => {
 });
 
 describe("Layout", () => {
-  it("管理员显示管理员徽标与全部导航", () => {
+  it("管理员用户菜单显示角色与退出，且导航全量", async () => {
     renderWithProviders(<Layout session={{ username: "root", is_admin: true }} />);
-    expect(screen.getByText(/管理员/)).toBeInTheDocument();
+    // 导航始终可见
     expect(screen.getByText("凭证管理")).toBeInTheDocument();
     expect(screen.getByText("Playground")).toBeInTheDocument();
+    // 角色与退出收在用户菜单（触发器只显示用户名+箭头）
+    expect(screen.queryByText(/管理员/)).not.toBeInTheDocument();
+    const trigger = screen.getByRole("button", { name: "用户菜单" });
+    expect(trigger).not.toHaveTextContent("管理员");
+    await userEvent.click(trigger);
+    const menu = await screen.findByRole("menu");
+    expect(menu).toHaveTextContent("root · 管理员");
+    expect(menu).toHaveTextContent("退出");
   });
 
-  it("普通用户显示只读标记", () => {
+  it("普通用户展开用户菜单显示只读标记", async () => {
     renderWithProviders(<Layout session={{ username: "guest", is_admin: false }} />);
-    expect(screen.getByText(/只读/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "用户菜单" }));
+    const menu = await screen.findByRole("menu");
+    expect(menu).toHaveTextContent("guest · 只读");
   });
 });
 

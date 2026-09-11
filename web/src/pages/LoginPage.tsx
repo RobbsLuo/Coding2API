@@ -1,6 +1,7 @@
 import { useState } from "react";
+import { TerminalSquare, TriangleAlert } from "lucide-react";
 import { api, ApiError } from "../api/client";
-import { Button, Field, Input, Notice, Panel } from "../ui";
+import { Button, Input, Notice, Panel } from "../ui";
 
 export function LoginPage() {
   const [username, setUsername] = useState("");
@@ -24,42 +25,54 @@ export function LoginPage() {
   };
 
   return (
-    <div className="grid min-h-full place-items-center px-6">
+    <div className="grid min-h-full place-items-center bg-[color:color-mix(in_oklch,var(--accent)_4%,var(--background))] px-6">
       <form onSubmit={submit} className="w-full max-w-sm">
         <div className="mb-6 text-center">
-          <h1 className="text-lg font-semibold tracking-tight">coding2api</h1>
-          <p className="mt-1 text-xs text-[var(--color-ink-muted)]">管理台登录</p>
+          <div className="mx-auto mb-3 grid size-11 place-items-center rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/25">
+            <TerminalSquare className="size-6" />
+          </div>
+          <h1 className="text-xl font-semibold tracking-tight">coding2api</h1>
+          <p className="mt-1 text-xs text-muted-foreground">双上游统一调度 · OpenAI 兼容管理台</p>
         </div>
-        <Panel>
+        <Panel className="shadow-lg shadow-foreground/5">
           <div className="space-y-4">
-            <Field label="用户名">
+            <label className="block space-y-1.5">
+              <span className="text-xs font-medium text-muted-foreground">用户名</span>
               <Input
                 value={username}
                 autoComplete="username"
+                placeholder="admin"
                 data-testid="login-username"
                 onChange={(event) => setUsername(event.target.value)}
               />
-            </Field>
-            <Field label="密码">
+            </label>
+            <label className="block space-y-1.5">
+              <span className="text-xs font-medium text-muted-foreground">密码</span>
               <Input
                 type="password"
                 value={password}
                 autoComplete="current-password"
+                placeholder="••••••••"
                 data-testid="login-password"
                 onChange={(event) => setPassword(event.target.value)}
               />
-            </Field>
+            </label>
             {error && (
               <div data-testid="login-error">
-                <Notice tone="danger">{error}</Notice>
+                <Notice tone="danger">
+                  <span className="inline-flex items-center gap-1.5">
+                    <TriangleAlert className="size-3.5" />
+                    {error}
+                  </span>
+                </Notice>
               </div>
             )}
-            <Button type="submit" variant="primary" disabled={pending} >
+            <Button type="submit" variant="primary" disabled={pending} className="w-full">
               {pending ? "登录中…" : "登录"}
             </Button>
           </div>
         </Panel>
-        <p className="mt-4 text-center text-xs text-[var(--color-ink-muted)]">
+        <p className="mt-4 text-center text-xs text-muted-foreground">
           用户来自 <code>secrets/users.txt</code>，使用 <code>scripts/hash_password.py</code> 添加。
         </p>
       </form>

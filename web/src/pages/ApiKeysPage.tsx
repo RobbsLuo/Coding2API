@@ -1,9 +1,25 @@
+import { Check, Copy, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api/client";
 import { useApiKeys, useQueryClient } from "../api/hooks";
 import { formatTime } from "../api/display";
+import { PageHeader } from "../components/PageHeader";
 import type { ApiKeyCreated } from "../api/types";
-import { Badge, Button, Empty, Field, Input, Notice, Panel } from "../ui";
+import {
+  Badge,
+  Button,
+  Empty,
+  Field,
+  Input,
+  Notice,
+  Panel,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../ui";
 
 /** OpenAI 兼容入口的 Base URL：本服务地址 + /v1 */
 export const openaiBaseUrl = (): string => `${window.location.origin}/v1`;
@@ -34,6 +50,29 @@ print(resp.choices[0].message.content)`,
   };
 }
 
+function CopyButton({
+  label,
+  onCopy,
+  testid,
+}: {
+  label: string;
+  onCopy: () => void;
+  testid?: string;
+}) {
+  return (
+    <Button
+      size="sm"
+      variant="ghost"
+      data-testid={testid}
+      onClick={onCopy}
+      className="gap-1"
+    >
+      {label === "已复制" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+      {label}
+    </Button>
+  );
+}
+
 /** OpenAI 客户端接入面板：Base URL + 端点 + 可复制的示例 */
 function OpenAIEntry({ apiKey }: { apiKey: string }) {
   const baseUrl = openaiBaseUrl();
@@ -49,47 +88,44 @@ function OpenAIEntry({ apiKey }: { apiKey: string }) {
     <Panel title="OpenAI 客户端接入">
       <div className="space-y-4 text-sm" data-testid="openai-entry">
         <div>
-          <div className="mb-1 text-xs text-[var(--color-ink-muted)]">Base URL</div>
+          <div className="mb-1 text-xs text-muted-foreground">Base URL</div>
           <div className="flex items-center gap-2">
             <code
               data-testid="openai-base-url"
-              className="flex-1 rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs break-all"
+              className="flex-1 truncate rounded-lg border border-input bg-muted/40 px-3 py-2 font-mono text-xs transition-colors hover:border-ring"
             >
               {baseUrl}
             </code>
-            <Button size="sm" data-testid="copy-base-url" onClick={() => copy("url", baseUrl)}>
-              {copied === "url" ? "已复制" : "复制"}
-            </Button>
+            <CopyButton label={copied === "url" ? "已复制" : "复制"} onCopy={() => void copy("url", baseUrl)} />
           </div>
         </div>
-        <ul className="space-y-1 text-xs text-[var(--color-ink-muted)]">
+        <ul className="space-y-1 text-xs text-muted-foreground">
           <li>
             {/* 示例默认折叠：点开端点行查看 curl / SDK 调用方式 */}
-            <details data-testid="example-details">
-              <summary className="cursor-pointer select-none">
-                <Badge>POST</Badge> <code>{baseUrl}/chat/completions</code>　对话补全（流式 / 非流式）
-                <span className="ml-1">▸ 调用示例</span>
+            <details data-testid="example-details" className="group rounded-lg border border-border px-3 py-2 [&_summary::-webkit-details-marker]:hidden">
+              <summary className="flex cursor-pointer select-none items-center flex-wrap gap-2">
+                <Badge>POST</Badge> <code>{baseUrl}/chat/completions</code>
+                <span>对话补全（流式 / 非流式）</span>
+                <span className="ml-auto inline-flex items-center gap-1 text-muted-foreground group-open:hidden">
+                  <Plus className="size-3" />调用示例
+                </span>
               </summary>
               <div className="mt-3 space-y-3">
                 <div>
-                  <div className="mb-1 flex items-center justify-between">
+                  <div className="mb-1 flex items-center justify-between text-foreground">
                     <span>curl 示例</span>
-                    <Button size="sm" variant="ghost" data-testid="copy-curl" onClick={() => copy("curl", examples.curl)}>
-                      {copied === "curl" ? "已复制" : "复制"}
-                    </Button>
+                    <CopyButton label={copied === "curl" ? "已复制" : "复制"} onCopy={() => void copy("curl", examples.curl)} testid="copy-curl" />
                   </div>
-                  <pre data-testid="example-curl" className="overflow-x-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] p-3 font-mono text-xs">
+                  <pre data-testid="example-curl" className="overflow-x-auto rounded-lg border border-input bg-muted/40 p-3 font-mono text-xs">
                     {examples.curl}
                   </pre>
                 </div>
                 <div>
-                  <div className="mb-1 flex items-center justify-between">
+                  <div className="mb-1 flex items-center justify-between text-foreground">
                     <span>OpenAI Python SDK</span>
-                    <Button size="sm" variant="ghost" data-testid="copy-python" onClick={() => copy("python", examples.python)}>
-                      {copied === "python" ? "已复制" : "复制"}
-                    </Button>
+                    <CopyButton label={copied === "python" ? "已复制" : "复制"} onCopy={() => void copy("python", examples.python)} testid="copy-python" />
                   </div>
-                  <pre data-testid="example-python" className="overflow-x-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] p-3 font-mono text-xs">
+                  <pre data-testid="example-python" className="overflow-x-auto rounded-lg border border-input bg-muted/40 p-3 font-mono text-xs">
                     {examples.python}
                   </pre>
                 </div>
@@ -153,6 +189,10 @@ export function ApiKeysPage() {
 
   return (
     <div className="space-y-6" data-testid="api-keys-page">
+      <PageHeader
+        title="API Key 管理"
+        description="创建外部客户端（ChatGPT Next Web、LobeChat、Cursor 等）接入用的 Key，协议与 OpenAI 兼容。Key 仅在创建时完整显示一次，请立即保存；用量按 Key 归属用户统计。"
+      />
       <OpenAIEntry apiKey={created?.api_key ?? ""} />
 
       <Panel title="创建 API Key">
@@ -168,6 +208,7 @@ export function ApiKeysPage() {
             </Field>
           </div>
           <Button type="submit" variant="primary">
+            <Plus className="mr-1 size-4" />
             创建
           </Button>
         </form>
@@ -184,13 +225,11 @@ export function ApiKeysPage() {
           <div className="mt-3 flex items-center gap-3">
             <code
               data-testid="new-key-plaintext"
-              className="flex-1 rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs break-all"
+              className="flex-1 break-all rounded-lg border border-input bg-muted/40 px-3 py-2 font-mono text-xs"
             >
               {created.api_key}
             </code>
-            <Button size="sm" onClick={copy}>
-              {copied ? "已复制" : "复制"}
-            </Button>
+            <CopyButton label={copied ? "已复制" : "复制"} onCopy={copy} />
             <Button size="sm" variant="ghost" onClick={() => setCreated(null)}>
               我已保存
             </Button>
@@ -204,26 +243,26 @@ export function ApiKeysPage() {
         ) : keys.length === 0 ? (
           <Empty data-testid="no-keys">还没有 API Key</Empty>
         ) : (
-          <table className="w-full text-sm" data-testid="keys-table">
-            <thead>
-              <tr className="text-left text-xs text-[var(--color-ink-muted)]">
-                <th className="pb-2 font-medium">名称</th>
-                <th className="pb-2 font-medium">Key</th>
-                <th className="pb-2 font-medium">创建时间</th>
-                <th className="pb-2 font-medium">最后使用</th>
-                <th className="pb-2 font-medium" />
-              </tr>
-            </thead>
-            <tbody>
+          <Table data-testid="keys-table">
+            <TableHeader>
+              <TableRow>
+                <TableHead>名称</TableHead>
+                <TableHead>Key</TableHead>
+                <TableHead>创建时间</TableHead>
+                <TableHead>最后使用</TableHead>
+                <TableHead className="text-right">操作</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {keys.map((key) => (
-                <tr key={key.id} className="border-t border-[var(--color-border-soft)]">
-                  <td className="py-2">{key.name || "—"}</td>
-                  <td className="py-2 font-mono text-xs">{key.preview}</td>
-                  <td className="py-2 text-xs">{formatTime(key.created_at)}</td>
-                  <td className="py-2 text-xs">
+                <TableRow key={key.id}>
+                  <TableCell>{key.name || "—"}</TableCell>
+                  <TableCell className="font-mono text-xs">{key.preview}</TableCell>
+                  <TableCell className="text-xs">{formatTime(key.created_at)}</TableCell>
+                  <TableCell className="text-xs">
                     {key.last_used_at ? formatTime(key.last_used_at) : "从未使用"}
-                  </td>
-                  <td className="py-2 text-right">
+                  </TableCell>
+                  <TableCell className="text-right">
                     {confirming === key.id ? (
                       <span className="inline-flex gap-2">
                         <Button size="sm" variant="danger" onClick={() => remove(key.id)}>
@@ -235,14 +274,15 @@ export function ApiKeysPage() {
                       </span>
                     ) : (
                       <Button size="sm" variant="ghost" onClick={() => setConfirming(key.id)}>
+                        <Trash2 className="mr-1 size-3.5" />
                         删除
                       </Button>
                     )}
-                  </td>
-                </tr>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         )}
       </Panel>
     </div>

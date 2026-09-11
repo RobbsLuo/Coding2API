@@ -1,7 +1,11 @@
 import { useState } from "react";
+import { CalendarCheck, Pin, Power, RefreshCw, Trash2, Users } from "lucide-react";
 import { api } from "../api/client";
 import { useSessionContext } from "../Layout";
 import { useCredentials, useQueryClient } from "../api/hooks";
+import { HelpBlock } from "../components/HelpBlock";
+import { PageHeader } from "../components/PageHeader";
+import { Tip, ColumnHint } from "../components/Tip";
 import {
   credentialState,
   cooldownRemaining,
@@ -15,7 +19,23 @@ import {
   STATE_TONE,
 } from "../api/display";
 import type { Credential, Provider } from "../api/types";
-import { Badge, Button, Empty, Field, Input, Notice, Panel, Select, Textarea } from "../ui";
+import {
+  Badge,
+  Button,
+  Empty,
+  Field,
+  Input,
+  Notice,
+  Panel,
+  Select,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+  Textarea,
+} from "../ui";
 
 const PROVIDERS: Provider[] = ["codebuddy", "trae"];
 const PROVIDER_LABEL: Record<Provider, string> = { codebuddy: "CodeBuddy", trae: "TRAE" };
@@ -218,6 +238,10 @@ export function CredentialsPage() {
 
   return (
     <div className="space-y-6" data-testid="credentials-page">
+      <PageHeader
+        title="凭证管理"
+        description="凭证是调度池里可被选中的上游账号。登录上游授权或粘贴 JSON 导入后，可在此探测剩余额度、签到、切换账号或启停。"
+      />
       {!isAdmin && (
         <div data-testid="readonly-banner">
           <Notice tone="muted">只读模式：仅管理员可以导入、启停或删除凭证。</Notice>
@@ -226,8 +250,8 @@ export function CredentialsPage() {
       {credentials.length === 0 && isAdmin && (
         <div data-testid="first-run-hint">
           <Notice tone="muted">
-            还没有凭证。点右上角「功能说明」查看各按钮的含义；或用下方「登录上游账号」
-            完成 CodeBuddy / TRAE 授权，也可以直接粘贴凭证 JSON 导入。
+            还没有凭证。用下方「登录上游账号」完成 CodeBuddy / TRAE 授权，或直接粘贴凭证 JSON 导入；
+            凭证表下方的「凭证状态与操作说明」可查看各状态和按钮的含义。
           </Notice>
         </div>
       )}
@@ -241,7 +265,7 @@ export function CredentialsPage() {
           <Notice tone="ok">
             {notice}
             {probeDetail && (
-              <span className="ml-2 text-[var(--color-ink-muted)]" data-testid="probe-detail">
+              <span className="ml-2 text-muted-foreground" data-testid="probe-detail">
                 原始错误：{probeDetail}
               </span>
             )}
@@ -253,18 +277,18 @@ export function CredentialsPage() {
         {credentials.length === 0 ? (
           <Empty data-testid="no-credentials">还没有凭证</Empty>
         ) : (
-          <table className="w-full text-sm" data-testid="credentials-table">
-            <thead>
-              <tr className="text-left text-xs text-[var(--color-ink-muted)]">
-                <th className="pb-2 font-medium">昵称</th>
-                <th className="pb-2 font-medium">上游</th>
-                <th className="pb-2 font-medium">状态</th>
-                <th className="pb-2 font-medium">健康度</th>
-                <th className="pb-2 font-medium">额度</th>
-                {isAdmin && <th className="pb-2 font-medium">操作</th>}
-              </tr>
-            </thead>
-            <tbody>
+          <Table data-testid="credentials-table">
+            <TableHeader>
+              <TableRow>
+                <TableHead>昵称</TableHead>
+                <TableHead>上游</TableHead>
+                <TableHead><span className="inline-flex items-center gap-1">状态<ColumnHint text="可用/冷却中/已禁用/已关闭/额度耗尽；冷却中到期自动恢复。" /></span></TableHead>
+                <TableHead><span className="inline-flex items-center gap-1">健康度<ColumnHint text="剩余积分占比三态：已知百分比 / 未探测 / 已耗尽。未探测≠已耗尽，点「探测」可重试。" /></span></TableHead>
+                <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。单位都是积分。" /></span></TableHead>
+                {isAdmin && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测：查剩余额度；签到：领当日积分；账号：切换子账号；指定：设为优先；停用/删除：移出调度或移除。" /></span></TableHead>}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {credentials.map((credential) => (
                 <Row
                   key={credential.id}
@@ -277,10 +301,74 @@ export function CredentialsPage() {
                   actions={actions}
                 />
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         )}
       </Panel>
+
+      {isAdmin && (
+        <div className="grid gap-6 lg:grid-cols-2" data-testid="add-credentials">
+          <Panel title="登录上游账号">
+            <div className="flex flex-wrap items-center gap-3">
+              {PROVIDERS.map((item) => {
+                const pending = loginProviders.includes(item);
+                return pending ? (
+                  <span key={item} className="inline-flex items-center gap-2">
+                    <span className="text-xs text-muted-foreground">
+                      {PROVIDER_LABEL[item]} 登录中…
+                    </span>
+                    <Button
+                      size="sm"
+                      variant="danger"
+                      data-testid={`cancel-login-${item}`}
+                      onClick={() => void cancelLogin(item)}
+                    >
+                      取消登录
+                    </Button>
+                  </span>
+                ) : (
+                  <Button
+                    key={item}
+                    size="sm"
+                    variant="primary"
+                    data-testid={`start-login-${item}`}
+                    disabled={busy}
+                    onClick={() => void startLogin(item)}
+                  >
+                    登录 {PROVIDER_LABEL[item]}
+                  </Button>
+                );
+              })}
+            </div>
+            <p className="mt-2 text-xs text-muted-foreground">
+              CodeBuddy 走设备码轮询（本页自动轮询上游）；TRAE 走浏览器回调
+              （授权后由 <code>/authorize</code> 直接落库，本页轮询凭证列表检测完成）。
+              也可以直接粘贴凭证 JSON 导入。
+            </p>
+          </Panel>
+          <ImportPanel
+            busy={busy}
+            onImport={async (provider, credential, nickname) => {
+              await run(() => api.importCredential(provider, credential, nickname), "凭证已导入。");
+            }}
+          />
+        </div>
+      )}
+
+      <HelpBlock
+        title="凭证状态与操作说明"
+        entries={[
+          { term: "可用", where: "状态列", meaning: "该凭证当前能被调度器选中处理请求。" },
+          { term: "冷却中（显示剩余时间）", where: "状态列", meaning: "上游暂时拒绝（权益耗尽 12 小时、限流 60 秒、连续出错 10 分钟），到期自动恢复，无需手动操作。" },
+          { term: "已禁用", where: "状态列", meaning: "上游判定会话失效，凭证已永久停止使用；删除后重新登录该账号即可。" },
+          { term: "已关闭", where: "状态列", meaning: "管理员手动停用（软开关），随时可以重新启用。" },
+          { term: "健康度：百分比", where: "健康度列", meaning: "剩余积分占总积分的比例，调度器优先选数值高的。" },
+          { term: "健康度：未探测到额度", where: "健康度列", meaning: "探测失败或上游没返回额度信息。注意它不是「已耗尽」——点「探测」可重新获取。" },
+          { term: "额度下方的时间语义", where: "额度列", meaning: "CodeBuddy 是「本周期剩余，<日期> 重置」；TRAE 是「账户剩余（单调递减）」。两者单位都是积分，但重置行为不同。" },
+          { term: "探测 / 签到 / 账号", where: "操作列", meaning: "探测：立即向上游查询一次剩余额度。签到：领取当日积分（每天 9 点系统自动签到）。账号：同一登录下的个人/企业账号切换（仅 CodeBuddy 支持）。" },
+          { term: "指定 / 停用 / 删除", where: "操作列", meaning: "指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。停用：临时移出调度池不删数据。删除：彻底移除凭证。" },
+        ]}
+      />
 
       {accountsFor && isAdmin && (
         <Panel
@@ -299,7 +387,7 @@ export function CredentialsPage() {
                 <li key={account.account_id} className="flex items-center justify-between text-sm">
                   <span>
                     {account.nickname || account.account_id}
-                    <span className="ml-2 text-xs text-[var(--color-ink-muted)]">
+                    <span className="ml-2 text-xs text-muted-foreground">
                       {account.type || "未知类型"}
                     </span>
                   </span>
@@ -322,55 +410,6 @@ export function CredentialsPage() {
         </Panel>
       )}
 
-      {isAdmin && (
-        <ImportPanel
-          busy={busy}
-          onImport={async (provider, credential, nickname) => {
-            await run(() => api.importCredential(provider, credential, nickname), "凭证已导入。");
-          }}
-        />
-      )}
-
-      {isAdmin && (
-        <Panel title="登录上游账号">
-          <div className="flex flex-wrap items-center gap-3">
-            {PROVIDERS.map((item) => {
-              const pending = loginProviders.includes(item);
-              return pending ? (
-                <span key={item} className="inline-flex items-center gap-2">
-                  <span className="text-xs text-[var(--color-ink-muted)]">
-                    {PROVIDER_LABEL[item]} 登录中…
-                  </span>
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    data-testid={`cancel-login-${item}`}
-                    onClick={() => void cancelLogin(item)}
-                  >
-                    取消登录
-                  </Button>
-                </span>
-              ) : (
-                <Button
-                  key={item}
-                  size="sm"
-                  variant="primary"
-                  data-testid={`start-login-${item}`}
-                  disabled={busy}
-                  onClick={() => void startLogin(item)}
-                >
-                  登录 {PROVIDER_LABEL[item]}
-                </Button>
-              );
-            })}
-          </div>
-          <p className="mt-2 text-xs text-[var(--color-ink-muted)]">
-            CodeBuddy 走设备码轮询（本页自动轮询上游）；TRAE 走浏览器回调
-            （授权后由 <code>/authorize</code> 直接落库，本页轮询凭证列表检测完成）。
-            也可以直接粘贴凭证 JSON 导入。
-          </p>
-        </Panel>
-      )}
     </div>
   );
 }
@@ -397,58 +436,68 @@ function Row({
   const cooldown = cooldownRemaining(credential.cooling_until, now);
 
   return (
-    <tr className="border-t border-[var(--color-border-soft)]" data-testid={`row-${credential.id}`}>
-      <td className="py-2">
+    <TableRow data-testid={`row-${credential.id}`}>
+      <TableCell>
         {credential.nickname || credential.id.slice(0, 12)}
         {credential.pinned === 1 && (
           <span className="ml-2">
             <Badge tone="accent">已指定</Badge>
           </span>
         )}
-      </td>
-      <td className="py-2 text-xs">{PROVIDER_LABEL[credential.provider]}</td>
-      <td className="py-2">
+      </TableCell>
+      <TableCell className="text-xs">{PROVIDER_LABEL[credential.provider]}</TableCell>
+      <TableCell>
         <Badge tone={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
         {state === "cooling" && (
-          <span className="ml-2 text-xs text-[var(--color-ink-muted)]">{formatDuration(cooldown)}</span>
+          <span className="ml-2 text-xs text-muted-foreground">{formatDuration(cooldown)}</span>
         )}
         {credential.disabled_reason && state === "disabled" && (
-          <span className="ml-2 text-xs text-[var(--color-ink-muted)]">
+          <span className="ml-2 text-xs text-muted-foreground">
             {credential.disabled_reason}
           </span>
         )}
-      </td>
-      <td className="py-2">
+      </TableCell>
+      <TableCell>
         <Badge tone={health.tone}>{health.label}</Badge>
         {health.kind === "unknown" && (
-          <span className="ml-2 text-xs text-[var(--color-ink-muted)]">探测失败或未提供</span>
+          <span className="ml-2 text-xs text-muted-foreground">探测失败或未提供</span>
         )}
-      </td>
-      <td className="py-2 text-xs">
+      </TableCell>
+      <TableCell className="text-xs">
         {formatNumber(credential.quota_remaining)} / {formatNumber(credential.quota_total)}
-        <div className="text-[var(--color-ink-muted)]">{quotaSemantics(credential)}</div>
-        <div className="text-[var(--color-ink-muted)]">
+        <div className="text-muted-foreground">{quotaSemantics(credential)}</div>
+        <div className="text-muted-foreground">
           探测于 {formatTime(credential.quota_probed_at)}
         </div>
-      </td>
+      </TableCell>
       {isAdmin && (
-        <td className="py-2">
-          <div className="flex flex-wrap justify-end gap-1.5">
-            <Button size="sm" disabled={busy} onClick={() => actions.probe(credential)}>
-              探测
-            </Button>
-            <Button size="sm" disabled={busy} onClick={() => actions.checkin(credential)}>
-              签到
-            </Button>
-            <Button size="sm" disabled={busy} onClick={() => actions.openAccounts(credential)}>
-              账号
-            </Button>
-            <Button size="sm" disabled={busy} onClick={() => actions.toggle(credential)}>
-              {credential.enabled === 1 ? "停用" : "启用"}
-            </Button>
-            <Button size="sm" disabled={busy} onClick={() => actions.pin(credential)}>
-              {credential.pinned === 1 ? "取消指定" : "指定"}
-            </Button>
+        <TableCell>
+          <div className="flex flex-wrap justify-end gap-1">
+            <Tip content="立即向上游查询一次剩余额度；失败保持「未探测」">
+              <Button size="icon" variant="ghost" aria-label="探测" disabled={busy} onClick={() => actions.probe(credential)}>
+                <RefreshCw />
+              </Button>
+            </Tip>
+            <Tip content="领取当日积分（每天 9 点系统自动签到）">
+              <Button size="icon" variant="ghost" aria-label="签到" disabled={busy} onClick={() => actions.checkin(credential)}>
+                <CalendarCheck />
+              </Button>
+            </Tip>
+            <Tip content="切换账号：同一登录下的个人/企业账号（仅 CodeBuddy）">
+              <Button size="icon" variant="ghost" aria-label="账号" disabled={busy} onClick={() => actions.openAccounts(credential)}>
+                <Users />
+              </Button>
+            </Tip>
+            <Tip content={credential.enabled === 1 ? "停用：临时移出调度池，不删除数据" : "启用：重新加入调度池"}>
+              <Button size="icon" variant="ghost" aria-label={credential.enabled === 1 ? "停用" : "启用"} disabled={busy} onClick={() => actions.toggle(credential)}>
+                <Power />
+              </Button>
+            </Tip>
+            <Tip content={credential.pinned === 1 ? "取消指定：解除全局唯一指定" : "指定：设为优先使用的唯一凭证（全局只能一个）"}>
+              <Button size="icon" variant="ghost" aria-label={credential.pinned === 1 ? "取消指定" : "指定"} disabled={busy} onClick={() => actions.pin(credential)}>
+                <Pin />
+              </Button>
+            </Tip>
             {confirming ? (
               <>
                 <Button
@@ -464,18 +513,16 @@ function Row({
                 </Button>
               </>
             ) : (
-              <Button
-                size="sm"
-                variant="ghost"
-                onClick={() => onConfirmDelete(credential.id)}
-              >
-                删除
-              </Button>
+              <Tip content="删除该凭证，需要二次确认">
+                <Button size="icon" variant="ghost" aria-label="删除" onClick={() => onConfirmDelete(credential.id)}>
+                  <Trash2 />
+                </Button>
+              </Tip>
             )}
           </div>
-        </td>
+        </TableCell>
       )}
-    </tr>
+    </TableRow>
   );
 }
 
@@ -543,6 +590,7 @@ function ImportPanel({
             rows={4}
             value={raw}
             data-testid="import-payload"
+            className="font-mono text-xs"
             placeholder='{"token":"..."}'
             onChange={(event) => setRaw(event.target.value)}
           />

@@ -1,25 +1,114 @@
 @import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
 
-@theme {
-  --color-surface: oklch(98.5% 0.002 250);
-  --color-panel: oklch(100% 0 0);
-  --color-border-soft: oklch(91% 0.004 250);
-  --color-ink: oklch(24% 0.012 250);
-  --color-ink-muted: oklch(52% 0.01 250);
-  --color-accent: oklch(58% 0.16 255);
-  --color-ok: oklch(62% 0.15 155);
-  --color-warn: oklch(72% 0.16 75);
-  --color-danger: oklch(58% 0.19 25);
+@custom-variant dark (&:is(.dark *));
+
+/* 品牌语义色（单源）：页面旧引用 var(--color-*) 与 shadcn token 都映射到这里的变量 */
+:root {
+  color-scheme: light;
+  --surface: oklch(0.982 0.004 255);
+  --panel: oklch(1 0 0);
+  --border-soft: oklch(0.918 0.006 255);
+  --ink: oklch(0.235 0.016 255);
+  --ink-muted: oklch(0.52 0.016 255);
+  --primary: oklch(0.55 0.17 255);
+  --ok: oklch(0.56 0.14 155);
+  --warn: oklch(0.6 0.15 65);
+  --danger: oklch(0.55 0.21 25);
+
+  /* shadcn 主题 token → 引用品牌变量 */
+  --background: var(--surface);
+  --foreground: var(--ink);
+  --card: var(--panel);
+  --card-foreground: var(--ink);
+  --popover: var(--panel);
+  --popover-foreground: var(--ink);
+  --primary-foreground: oklch(0.99 0 0);
+  --secondary: oklch(0.96 0.006 255);
+  --secondary-foreground: var(--ink);
+  --muted: oklch(0.958 0.006 255);
+  --muted-foreground: var(--ink-muted);
+  --accent: oklch(0.945 0.008 255);
+  --accent-foreground: var(--ink);
+  --destructive: var(--danger);
+  --border: var(--border-soft);
+  --input: var(--border-soft);
+  --ring: oklch(0.7 0.12 255);
+  --radius: 0.625rem;
+  --chart-1: oklch(0.55 0.17 255);
+  --chart-2: oklch(0.6 0.15 155);
+  --chart-3: oklch(0.6 0.15 65);
+  --chart-4: oklch(0.55 0.18 300);
+  --chart-5: oklch(0.55 0.14 200);
 }
 
-@media (prefers-color-scheme: dark) {
-  @theme {
-    --color-surface: oklch(19% 0.008 250);
-    --color-panel: oklch(23% 0.01 250);
-    --color-border-soft: oklch(31% 0.012 250);
-    --color-ink: oklch(94% 0.004 250);
-    --color-ink-muted: oklch(70% 0.01 250);
-  }
+.dark {
+  color-scheme: dark;
+  --surface: oklch(0.17 0.012 258);
+    --panel: oklch(0.215 0.014 258);
+    --border-soft: oklch(0.295 0.014 258);
+    --ink: oklch(0.955 0.005 258);
+    --ink-muted: oklch(0.74 0.014 258);
+    --primary: oklch(0.70 0.17 258);
+    --ok: oklch(0.70 0.14 155);
+    --warn: oklch(0.78 0.13 70);
+    --danger: oklch(0.70 0.20 22);
+
+    --secondary: oklch(0.27 0.014 258);
+    --muted: oklch(0.26 0.014 258);
+    --accent: oklch(0.275 0.016 258);
+    --ring: oklch(0.64 0.13 258);
+    --chart-1: oklch(0.70 0.17 258);
+    --chart-2: oklch(0.70 0.14 155);
+    --chart-3: oklch(0.78 0.13 70);
+    --chart-4: oklch(0.70 0.17 300);
+    --chart-5: oklch(0.70 0.14 200);
+}
+
+@theme inline {
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system, "PingFang SC",
+    "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  /* 旧页面引用的 --color-* 全部映射回品牌变量，保持向后兼容 */
+  --color-surface: var(--surface);
+  --color-panel: var(--panel);
+  --color-border-soft: var(--border-soft);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-danger: var(--danger);
+  /* shadcn token 的 Tailwind 类映射 */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-destructive: var(--destructive);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
 }
 
 html,
@@ -28,10 +117,16 @@ body,
   height: 100%;
 }
 
-body {
-  margin: 0;
-  background: var(--color-surface);
-  color: var(--color-ink);
-  font-family: ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
-  -webkit-font-smoothing: antialiased;
+@layer base {
+  body {
+    margin: 0;
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+  }
+  * {
+    border-color: var(--border);
+    outline-color: color-mix(in oklch, var(--ring) 50%, transparent);
+  }
 }

@@ -1,6 +1,9 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
+import { Loader2, RefreshCw, Send } from "lucide-react";
 import { useSessionContext } from "../Layout";
+import { HelpBlock } from "../components/HelpBlock";
+import { PageHeader } from "../components/PageHeader";
 import { Button, Empty, Field, Notice, Panel, Select, Textarea } from "../ui";
 
 interface ModelInfo {
@@ -108,10 +111,21 @@ export function PlaygroundPage() {
 
   return (
     <div className="space-y-6" data-testid="playground-page">
+      <PageHeader
+        title="Playground"
+        description="用登录会话直接测试模型调度，无需 API Key；请求会走与外部 API 相同的调度与统计，用量计入当前用户。"
+      />
+
+      <HelpBlock
+        title="模型与上游调度说明"
+        entries={[
+          { term: "模型名 model@provider", where: "模型 · 强制指定上游", meaning: "默认 glm-5.2 由调度器在两个上游间自动选健康的；写 glm-5.2@trae 则只走 TRAE，glm-5.2@codebuddy 只走 CodeBuddy。" },
+        ]}
+      />
+
       <Panel title="请求">
         <form onSubmit={send} className="space-y-3">
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="w-72">
+          <div className="grid items-start gap-3 sm:grid-cols-[minmax(0,20rem)_minmax(0,16rem)]">
               <Field
                 label="模型"
                 hint="自动选健康上游；写 model@provider 可强制指定"
@@ -148,8 +162,6 @@ export function PlaygroundPage() {
                   )}
                 </Select>
               </Field>
-            </div>
-            <div className="w-56">
               <Field label="强制指定上游" hint="双上游模型可用；单上游模型始终固定">
                 <Select
                   value={selectedModel.includes("@") ? selectedModel.split("@")[1] : ""}
@@ -164,29 +176,34 @@ export function PlaygroundPage() {
                   <option value="trae">TRAE</option>
                 </Select>
               </Field>
-            </div>
-            {modelsQuery.isFetching && (
-              <span className="text-xs text-[var(--color-ink-muted)]">载入模型中…</span>
-            )}
           </div>
+          {modelsQuery.isFetching && (
+            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+              <RefreshCw className="size-3 animate-spin" />
+              载入模型中…
+            </span>
+          )}
           <Field label="提示词">
             <Textarea
               rows={4}
               value={prompt}
               data-testid="playground-prompt"
+              className="font-mono text-xs"
               onChange={(event) => setPrompt(event.target.value)}
             />
           </Field>
-          <label className="flex items-center gap-2 text-sm">
+          <label className="flex w-fit cursor-pointer select-none items-center gap-2 text-sm">
             <input
               type="checkbox"
               checked={stream}
+              className="size-4 accent-primary"
               data-testid="stream-toggle"
               onChange={(event) => setStream(event.target.checked)}
             />
             流式输出
           </label>
-          <Button type="submit" variant="primary" disabled={busy} data-testid="send-request">
+          <Button type="submit" variant="primary" disabled={busy} data-testid="send-request" className="gap-1.5">
+            {busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
             {busy ? "请求中…" : "发送"}
           </Button>
         </form>
@@ -204,22 +221,28 @@ export function PlaygroundPage() {
         <Panel title="响应">
           {reasoning && (
             <div className="mb-3" data-testid="playground-reasoning">
-              <div className="mb-1 text-xs text-[var(--color-ink-muted)]">思考链</div>
-              <pre className="rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] p-3 text-xs whitespace-pre-wrap">
+              <div className="mb-1 inline-flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+                <span className="rounded px-1 py-0.5 font-mono bg-muted">reasoning</span>
+                思考链
+              </div>
+              <pre className="rounded-lg border border-border bg-foreground/[0.03] p-3 text-xs whitespace-pre-wrap">
                 {reasoning}
               </pre>
             </div>
           )}
           <div data-testid="playground-answer">
-            <div className="mb-1 text-xs text-[var(--color-ink-muted)]">回答</div>
-            <pre className="rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] p-3 text-xs whitespace-pre-wrap">
+            <div className="mb-1 text-xs text-muted-foreground">回答</div>
+            <pre className="rounded-lg border border-border bg-foreground/[0.03] p-3 text-xs whitespace-pre-wrap">
               {answer}
             </pre>
           </div>
           {usage && (
-            <div className="mt-3 text-xs text-[var(--color-ink-muted)]" data-testid="playground-usage">
-              {JSON.stringify(usage)}
-              <div className="mt-1">
+            <div
+              className="mt-3 rounded-lg border border-border bg-muted/40 px-3 py-2 font-mono text-xs text-muted-foreground"
+              data-testid="playground-usage"
+            >
+              <pre className="whitespace-pre-wrap">{JSON.stringify(usage, null, 2)}</pre>
+              <div className="mt-1 font-sans">
                 credit 为上游可选字段，经常不返回；健康度只依赖额度探测接口。
               </div>
             </div>
@@ -230,9 +253,9 @@ export function PlaygroundPage() {
       {!answer && !reasoning && !error && (
         <Empty>
           <div className="space-y-1">
-            <p>填写提示词后发送，请求会走与外部 API 相同的调度与统计。</p>
+            <p>选择模型并填写提示词后发送，结果会显示在下方。</p>
             <p className="text-xs">
-              无需 API Key——这里用的是你的登录会话，用量计入 {session.username}。
+              用量计入 {session.username}，与外部 API 同一条调度与统计链路。
               API Key 仅供外部客户端接入使用。
             </p>
           </div>

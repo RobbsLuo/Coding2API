@@ -1,63 +1,131 @@
 import type { ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
+import { cn } from "@/lib/utils";
+import { Button as ShadButton } from "@/components/ui/button";
+import { Badge as ShadBadge } from "@/components/ui/badge";
+import {
+  Card,
+  CardAction,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Alert as ShadAlert } from "@/components/ui/alert";
 
-/** 极简共享 UI 原语：不引入组件库，保持依赖为零。 */
+import {
+  Label,
+  Skeleton,
+  Separator,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/controls";
 
-export function Panel({ title, action, children }: { title?: string; action?: ReactNode; children: ReactNode }) {
-  return (
-    <section className="rounded-xl border border-[var(--color-border-soft)] bg-[var(--color-panel)] p-5">
-      {(title || action) && (
-        <header className="mb-4 flex items-center justify-between gap-3">
-          {title && <h2 className="text-sm font-semibold tracking-wide">{title}</h2>}
-          {action}
-        </header>
-      )}
-      {children}
-    </section>
-  );
-}
-
-type Tone = "ok" | "warn" | "danger" | "muted" | "accent";
-
-const TONE_CLASS: Record<Tone, string> = {
-  ok: "bg-[var(--color-ok)]/12 text-[var(--color-ok)]",
-  warn: "bg-[var(--color-warn)]/15 text-[var(--color-warn)]",
-  danger: "bg-[var(--color-danger)]/12 text-[var(--color-danger)]",
-  muted: "bg-[var(--color-ink-muted)]/12 text-[var(--color-ink-muted)]",
-  accent: "bg-[var(--color-accent)]/12 text-[var(--color-accent)]",
+// 控件 re-export shadcn 标准件（Label 同时本地用于 Field）
+export { Input } from "@/components/ui/input";
+export { Textarea } from "@/components/ui/textarea";
+export {
+  Label,
+  Skeleton,
+  Separator,
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
 };
 
-export function Badge({ tone = "muted", children }: { tone?: Tone; children: ReactNode }) {
-  return (
-    <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium ${TONE_CLASS[tone]}`}>
-      {children}
-    </span>
-  );
-}
+// ================================================================ Button
+// 旧变体映射到 shadcn：primary(实底)→default；default(描边)→outline；danger→destructive
+type ButtonVariant = "default" | "primary" | "danger" | "ghost";
+type ButtonSize = "sm" | "md" | "icon";
+
+const VARIANT_MAP = {
+  default: "outline",
+  primary: "default",
+  danger: "destructive",
+  ghost: "ghost",
+} as const;
+
+const SIZE_MAP = { sm: "sm", md: "default", icon: "icon-sm" } as const;
 
 export function Button({
   children,
   variant = "default",
   size = "md",
+  className,
   ...rest
 }: {
   children: ReactNode;
-  variant?: "default" | "primary" | "danger" | "ghost";
-  size?: "sm" | "md";
+  variant?: ButtonVariant;
+  size?: ButtonSize;
+  className?: string;
 } & Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "className">) {
-  const base = "inline-flex items-center justify-center rounded-lg font-medium disabled:opacity-40 disabled:cursor-not-allowed";
-  const sizes = size === "sm" ? "px-2.5 py-1 text-xs" : "px-3.5 py-2 text-sm";
-  const variants = {
-    default: "border border-[var(--color-border-soft)] hover:bg-[var(--color-surface)]",
-    primary: "bg-[var(--color-accent)] text-white hover:opacity-90",
-    danger: "border border-[var(--color-danger)]/40 text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10",
-    ghost: "hover:bg-[var(--color-surface)]",
-  };
   return (
-    <button {...rest} type={rest.type ?? "button"} className={`${base} ${sizes} ${variants[variant]}`}>
+    <ShadButton
+      variant={VARIANT_MAP[variant] as "outline"}
+      size={SIZE_MAP[size] as "default"}
+      className={className}
+      {...rest}
+    >
       {children}
-    </button>
+    </ShadButton>
   );
 }
+
+// ================================================================ Panel (Card)
+
+export function Panel({
+  title,
+  action,
+  children,
+  className,
+}: {
+  title?: string;
+  action?: ReactNode;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <Card className={cn("rounded-xl", className)}>
+      {(title || action) && (
+        <CardHeader>
+          {title && (
+            <CardTitle className="text-sm font-semibold tracking-wide">{title}</CardTitle>
+          )}
+          <CardAction>{action}</CardAction>
+        </CardHeader>
+      )}
+      <CardContent>{children}</CardContent>
+    </Card>
+  );
+}
+
+// ================================================================ Badge
+// 语义色调(ok/warn/danger/muted/accent)在 shadcn Badge 基础上用颜色类扩展
+type Tone = "ok" | "warn" | "danger" | "muted" | "accent";
+
+const TONE_CLASS: Record<Tone, string> = {
+  ok: "border-ok/30 bg-ok/10 text-ok",
+  warn: "border-warn/40 bg-warn/15 text-warn",
+  danger: "border-destructive/30 bg-destructive/10 text-destructive",
+  muted: "border-transparent bg-secondary text-secondary-foreground",
+  accent: "border-primary/30 bg-primary/10 text-primary",
+};
+
+export function Badge({ tone = "muted", children }: { tone?: Tone; children: ReactNode }) {
+  return (
+    <ShadBadge variant="outline" className={cn(TONE_CLASS[tone])}>
+      {children}
+    </ShadBadge>
+  );
+}
+
+// ================================================================ Field (Label)
 
 export function Field({
   label,
@@ -69,62 +137,91 @@ export function Field({
   children: ReactNode;
 }) {
   return (
-    <label className="block space-y-1.5">
-      <span className="text-xs font-medium text-[var(--color-ink-muted)]">{label}</span>
+    <div className="space-y-1.5">
+      <Label className="text-xs font-medium text-muted-foreground">{label}</Label>
       {children}
-      {hint && <span className="block text-xs text-[var(--color-ink-muted)]">{hint}</span>}
-    </label>
+      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+    </div>
   );
 }
 
-export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {
+// ================================================================ 表单控件
+// Input/Textarea/Label 直接来自 shadcn；Select 因页面用 optgroup（radix 不支持）保留原生，
+// 但样式对齐 shadcn input + lucide 箭头。
+
+export function Select({ className, ...props }: React.SelectHTMLAttributes<HTMLSelectElement>) {
   return (
-    <input
-      {...props}
-      className={`w-full rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)] ${props.className ?? ""}`}
-    />
+    <div className={cn("relative", className)}>
+      <select
+        data-slot="select"
+        className="h-8 w-full appearance-none rounded-lg border border-input bg-background px-2.5 pr-8 text-sm transition-colors outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-input/30"
+        {...props}
+      />
+      <ChevronDown className="pointer-events-none absolute top-1/2 right-2 size-4 -translate-y-1/2 text-muted-foreground" />
+    </div>
   );
 }
 
-export function Textarea(props: React.TextareaHTMLAttributes<HTMLTextAreaElement>) {
+// ================================================================ Notice (Alert)
+
+export function Notice({ tone = "muted", children }: { tone?: Tone; children: ReactNode }) {
+  const cls: Record<Tone, string> = {
+    ok: "border-ok/30 bg-ok/10 text-ok",
+    warn: "border-warn/40 bg-warn/15 text-warn",
+    danger: "border-destructive/30 bg-destructive/10 text-destructive",
+    muted: "border-border bg-muted text-muted-foreground",
+    accent: "border-primary/35 bg-primary/10 text-primary",
+  };
   return (
-    <textarea
-      {...props}
-      className={`w-full rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs outline-none focus:border-[var(--color-accent)] ${props.className ?? ""}`}
-    />
+    <ShadAlert
+      variant={tone === "danger" ? "destructive" : "default"}
+      className={cn("items-center", cls[tone])}
+    >
+      {children}
+    </ShadAlert>
   );
 }
 
-export function Select(props: React.SelectHTMLAttributes<HTMLSelectElement>) {
-  return (
-    <select
-      {...props}
-      className={`rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] px-3 py-2 text-sm outline-none focus:border-[var(--color-accent)] ${props.className ?? ""}`}
-    />
-  );
-}
+// ================================================================ Empty
 
 export function Empty({
   children,
   ...rest
 }: { children: ReactNode } & React.HTMLAttributes<HTMLParagraphElement>) {
   return (
-    <p {...rest} className="py-8 text-center text-sm text-[var(--color-ink-muted)]">
+    <p {...rest} className="py-8 text-center text-sm text-muted-foreground">
       {children}
     </p>
   );
 }
 
-export function Notice({ tone = "muted", children }: { tone?: Tone; children: ReactNode }) {
-  return <div className={`rounded-lg px-3 py-2 text-xs ${TONE_CLASS[tone]}`}>{children}</div>;
-}
+// ================================================================ Metric (Card)
 
-export function Metric({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) {
+export function Metric({
+  label,
+  value,
+  hint,
+  tone,
+}: {
+  label: string;
+  value: ReactNode;
+  hint?: string;
+  tone?: "ok" | "danger" | "warn";
+}) {
   return (
-    <div className="rounded-xl border border-[var(--color-border-soft)] bg-[var(--color-panel)] px-4 py-3">
-      <div className="text-xs text-[var(--color-ink-muted)]">{label}</div>
-      <div className="mt-1 text-xl font-semibold tabular-nums">{value}</div>
-      {hint && <div className="mt-0.5 text-xs text-[var(--color-ink-muted)]">{hint}</div>}
-    </div>
+    <Card className="px-3 py-3">
+      <div className="text-xs text-muted-foreground">{label}</div>
+      <div
+        className={cn(
+          "mt-1 text-xl font-semibold tracking-tight tabular-nums",
+          tone === "ok" && "text-ok",
+          tone === "danger" && "text-destructive",
+          tone === "warn" && "text-warn",
+        )}
+      >
+        {value}
+      </div>
+      {hint && <div className="mt-0.5 text-xs text-muted-foreground">{hint}</div>}
+    </Card>
   );
 }

@@ -4,6 +4,16 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>coding2api 管理台</title>
+    <script>
+      // 挂载前读取主题，避免暗色下白屏闪烁；默认跟随系统偏好
+      (function () {
+        var stored = localStorage.getItem("theme");
+        var dark =
+          stored === "dark" ||
+          (!stored && window.matchMedia("(prefers-color-scheme: dark)").matches);
+        if (dark) document.documentElement.classList.add("dark");
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
