@@ -1,0 +1,29 @@
+services:
+  coding2api:
+    build: .
+    image: ghcr.io/robbsluo/coding2api:latest
+    container_name: coding2api
+    restart: unless-stopped
+    environment:
+      # 必填：凭证列加密密钥。丢失后已存凭证全部不可解，只能重录。
+      APP_SECRET: ${APP_SECRET:?set APP_SECRET in .env}
+      # 管理台管理员用户名（逗号分隔）；留空则所有用户只读
+      ADMIN_USERNAMES: ${ADMIN_USERNAMES:-admin}
+      # 远程部署时必须设为浏览器可达的地址，TRAE 登录回调依赖它
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://127.0.0.1:8000}
+      CODEBUDDY_API_ENDPOINT: ${CODEBUDDY_API_ENDPOINT:-https://copilot.tencent.com}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-glm-5.2}
+      CHECKIN_HOUR: ${CHECKIN_HOUR:-9}
+      QUOTA_PROBE_MINUTES: ${QUOTA_PROBE_MINUTES:-60}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "${PORT:-8000}:8000"
+    volumes:
+      # 凭证与统计（SQLite）与用户文件分开挂载
+      - ./data:/app/data
+      - ./secrets:/app/secrets:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

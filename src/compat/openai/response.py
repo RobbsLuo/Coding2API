@@ -74,6 +74,8 @@ class StreamTranslator:
         self._sent_role = False
         self._tool_index = ToolIndexState()
         self._finished = False
+        # 上游 usage 不单独成帧，但要留给统计采集
+        self.usage: Usage | None = None
 
     @staticmethod
     def _is_empty_payload(event: Event) -> bool:
@@ -89,6 +91,7 @@ class StreamTranslator:
             return
         if event.kind is EventKind.USAGE:
             # usage 不单独成帧，由聚合路径处理；流式沿用上游语义不额外发 usage 块
+            self.usage = event.usage
             return
         if event.kind is EventKind.FINISH:
             self._finished = True

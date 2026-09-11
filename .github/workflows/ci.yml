@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync --frozen
+      - name: Ruff
+        run: uv run ruff check src tests scripts
+      - name: 测试与覆盖率（门槛 100%）
+        run: uv run pytest -q --cov=src --cov-report=term --cov-fail-under=100
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec tsc --noEmit
+      - run: pnpm exec vitest run
+      - run: pnpm build
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 校验 compose 语法
+        run: docker compose config --quiet
+        env:
+          APP_SECRET: ci-placeholder-secret
+      - name: 构建镜像并启动（验证 compose 可真实运行）
+        run: |
+          mkdir -p secrets
+          docker build -t coding2api:ci .
+          printf 'ci:%s\n' "$(docker run --rm coding2api:ci python -c 'from src.auth.users import create_password_hash;print(create_password_hash("cipw"))')" > secrets/users.txt
+          APP_SECRET=ci-placeholder-secret docker compose up -d
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null; then break; fi
+            sleep 2
+          done
+          curl -fsS http://127.0.0.1:8000/health
+          docker compose down

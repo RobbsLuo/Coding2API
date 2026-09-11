@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -19,6 +20,8 @@ from ..provider.base import ErrKind, Event, EventKind
 from .model_resolver import ModelTarget, resolve
 from .scheduler import Scheduler
 
+logger = logging.getLogger(__name__)
+
 
 class NoHealthyCredential(Exception):
     pass
@@ -30,12 +33,22 @@ class NoProviderForModel(Exception):
 
 @dataclass(slots=True)
 class ExecutorDeps:
-    """注入点：provider 客户端、仓储、调度器。"""
+    """注入点：provider 客户端、仓储、调度器、统计采集。"""
 
     providers: dict[str, Any]           # provider_id → 带 stream_chat 的客户端适配器
     credentials: CredentialRepository
     scheduler: Scheduler
     default_model: str = "glm-5.2"
+    stats: Any | None = None            # StatsCollector；None 表示不采集（测试可用）
+
+    def record(self, **fields: Any) -> None:
+        """统计写入失败绝不能影响聊天响应。"""
+        if self.stats is None:
+            return
+        try:
+            self.stats.record(**fields)
+        except Exception as error:  # noqa: BLE001
+            logger.warning("usage stats write failed: %s", error)
 
 
 class Executor:
@@ -45,24 +58,35 @@ class Executor:
     def resolve_target(self, request: ChatRequest) -> ModelTarget:
         return resolve(request.model, self._deps.default_model)
 
-    async def stream(self, request: ChatRequest) -> AsyncIterator[bytes]:
+    async def stream(self, request: ChatRequest, *, username: str = "unknown"
+                     ) -> AsyncIterator[bytes]:
         """流式执行；上游错误按分类冷却并换号，最多 3 次。"""
         target = self.resolve_target(request)
         tried: set[str] = set()
         last_error: Exception | None = None
         translator = StreamTranslator(target.model)
+        started = time.monotonic()
+        # 轮换耗尽后再次选号会失败，此时统计仍应归到实际尝试过的上游
+        last_provider = "-"
+        last_credential: str | None = None
 
         while True:
             pick = self._pick(target, tried)
             if pick is None:
+                self._deps.record(
+                    username=username, provider=last_provider, credential_id=last_credential,
+                    model=target.model, ok=False, error_type="no_healthy_credential",
+                    latency_ms=int((time.monotonic() - started) * 1000))
                 yield _unavailable_frame(last_error)
                 return
             credential_id, credential_data = pick
+            provider_id = self._deps.credentials.provider_of(credential_id)
+            last_provider, last_credential = provider_id or "-", credential_id
             tried.add(credential_id)
             try:
-                async for event in self._deps.providers[
-                    self._deps.credentials.provider_of(credential_id)
-                ].stream_chat(credential_data, request.raw, target.model):
+                async for event in self._deps.providers[provider_id].stream_chat(
+                    credential_data, request.raw, target.model
+                ):
                     if event.kind is EventKind.ERROR:
                         outcome = self._deps.scheduler.note_error(
                             self._candidate(credential_id), _event_kind(event), int(time.time()))
@@ -73,6 +97,15 @@ class Executor:
                         yield frame
                 else:
                     self._deps.credentials.save_success(credential_id)
+                    self._deps.record(
+                        username=username,
+                        provider=self._deps.credentials.provider_of(credential_id) or "-",
+                        credential_id=credential_id, model=target.model, ok=True,
+                        input_tokens=_usage_field(translator.usage, "input_tokens"),
+                        output_tokens=_usage_field(translator.usage, "output_tokens"),
+                        reasoning_tokens=_usage_field(translator.usage, "reasoning_tokens"),
+                        credit=_usage_field(translator.usage, "credit"),
+                        latency_ms=int((time.monotonic() - started) * 1000))
                     for frame in translator.finish():
                         yield frame
                     return
@@ -85,24 +118,39 @@ class Executor:
                 self._deps.credentials.save_error(credential_id, outcome)
                 last_error = error
             if not self._deps.scheduler.should_rotate(tried):
+                kind = _classify(last_error) if last_error is not None else None
+                self._deps.record(
+                    username=username, provider=provider_id,
+                    credential_id=credential_id, model=target.model, ok=False,
+                    error_type=_error_type_for(kind) if kind else "upstream_protocol",
+                    latency_ms=int((time.monotonic() - started) * 1000))
                 yield _unavailable_frame(last_error)
                 return
 
-    async def complete(self, request: ChatRequest) -> dict[str, Any]:
+    async def complete(self, request: ChatRequest, *, username: str = "unknown"
+                       ) -> dict[str, Any]:
         """非流式：聚合同一执行路径的事件。流内错误会触发换号重试。"""
         target = self.resolve_target(request)
         tried: set[str] = set()
         last_error: Exception | None = None
+        started = time.monotonic()
+        last_provider = "-"
+        last_credential: str | None = None
 
         while True:
             pick = self._pick(target, tried)
             if pick is None:
+                self._deps.record(
+                    username=username, provider=last_provider, credential_id=last_credential,
+                    model=target.model, ok=False, error_type="no_healthy_credential",
+                    latency_ms=int((time.monotonic() - started) * 1000))
                 raise NoHealthyCredential(
                     f"all credentials unavailable: {last_error}" if last_error
                     else "all credentials unavailable")
             credential_id, credential_data = pick
             tried.add(credential_id)
             provider_id = self._deps.credentials.provider_of(credential_id)
+            last_provider, last_credential = provider_id or "-", credential_id
             events: list[Event] = []
             try:
                 async for event in self._deps.providers[provider_id].stream_chat(
@@ -124,8 +172,23 @@ class Executor:
                     last_error = error
                 else:
                     self._deps.credentials.save_success(credential_id)
+                    usage = result.get("usage") or {}
+                    self._deps.record(
+                        username=username, provider=provider_id,
+                        credential_id=credential_id, model=target.model, ok=True,
+                        input_tokens=usage.get("prompt_tokens"),
+                        output_tokens=usage.get("completion_tokens"),
+                        reasoning_tokens=(usage.get("completion_tokens_details") or {})
+                        .get("reasoning_tokens"),
+                        latency_ms=int((time.monotonic() - started) * 1000))
                     return result
             if not self._deps.scheduler.should_rotate(tried):
+                kind = _classify(last_error) if last_error is not None else None
+                self._deps.record(
+                    username=username, provider=provider_id, credential_id=credential_id,
+                    model=target.model, ok=False,
+                    error_type=_error_type_for(kind) if kind else "upstream_protocol",
+                    latency_ms=int((time.monotonic() - started) * 1000))
                 raise NoHealthyCredential(
                     f"all credentials unavailable: {last_error}" if last_error
                     else "all credentials unavailable")
@@ -181,6 +244,19 @@ def _unavailable_frame(last_error: Exception | None) -> bytes:
     if last_error is not None:
         message += f": {last_error}"
     return _error_frame(message, "no_healthy_credential")
+
+
+def _usage_field(usage: object, name: str) -> object:
+    """上游可能完全没有 usage 帧，统计字段要容忍缺失。"""
+    return getattr(usage, name, None) if usage is not None else None
+
+
+def _error_type_for(kind: ErrKind) -> str:
+    if kind is ErrKind.PLAN:
+        return "rate_limit"
+    if kind is ErrKind.DEAD:
+        return "credential_unavailable"
+    return "upstream_error"
 
 
 def _error_frame(message: str, code: str) -> bytes:

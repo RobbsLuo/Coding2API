@@ -153,7 +153,8 @@ describe("api client", () => {
     expect(chat.init?.headers).toMatchObject({ Authorization: "Bearer sk-abc" });
 
     await api.revokeApiKey("k1");
-    expect(spy).toHaveBeenCalledWith("/api/api-keys/k1", expect.objectContaining({ method: "DELETE" }));
+    expect(calls.at(-1)?.url).toBe("/api/api-keys/k1");
+    expect(calls.at(-1)?.init?.method).toBe("DELETE");
   });
 });
 

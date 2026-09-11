@@ -47,7 +47,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     }
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
                                      scheduler=Scheduler(),
-                                     default_model=config.default_model))
+                                     default_model=config.default_model,
+                                     stats=StatsCollector(db)))
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
@@ -161,13 +162,13 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         return {"status": "ok"}
 
     @app.post("/v1/chat/completions")
-    async def chat_completions(request: Request, _user: str = Depends(api_key_user)):
+    async def chat_completions(request: Request, user: str = Depends(api_key_user)):
         body = await request.json()
         chat_request = parse_chat_request(body)
         if chat_request.stream:
-            return StreamingResponse(executor.stream(chat_request),
+            return StreamingResponse(executor.stream(chat_request, username=user),
                                      media_type="text/event-stream")
-        return JSONResponse(await executor.complete(chat_request))
+        return JSONResponse(await executor.complete(chat_request, username=user))
 
     @app.get("/v1/models")
     async def list_models(_user: str = Depends(api_key_user)):
