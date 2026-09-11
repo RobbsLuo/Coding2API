@@ -797,14 +797,45 @@ async def test_checkin_dedupes_same_upstream_account(repo):
     assert provider.checkin_calls == 1
 
 
-async def test_checkin_skips_disabled_and_unsupported(repo):
+async def test_checkin_skips_disabled(repo):
     credentials, _db = repo
     credential_id = credentials.add(provider="codebuddy", credential_data={"bearer_token": "a"})
     credentials.save_error(credential_id, _disabled_outcome())
-    credentials.add(provider="trae", credential_data={"accessToken": "t"})
-    task = CheckinTask(credentials, {"codebuddy": ProbeProvider(), "trae": TraeProvider()})
+    task = CheckinTask(credentials, {"codebuddy": ProbeProvider()})
     report = await task.run_once()
     assert report.attempted == 0
+    assert report.skipped == 1
+
+
+async def test_checkin_supports_both_providers(repo):
+    """TRAE 与 CodeBuddy 都实现签到后，任务要能覆盖两个上游。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "a",
+                                                          "account_uid": "cb"})
+    credentials.add(provider="trae", credential_data={"accessToken": "t", "uid": "tr"})
+
+    class TraeCheckinProvider:
+        id = "trae"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def checkin(self, _data):
+            self.calls += 1
+            from src.provider.base import CheckinResult
+
+            return CheckinResult(ok=True, credit=None, message="今天已签到",
+                                 already_checked_in=True)
+
+        def checkin_scope(self, data):
+            return f"trae|{data.get('uid', '')}"
+
+    trae = TraeCheckinProvider()
+    task = CheckinTask(credentials, {"codebuddy": ProbeProvider(), "trae": trae})
+    report = await task.run_once()
+    assert report.attempted == 2
+    assert report.succeeded == 2
+    assert trae.calls == 1
 
 
 def _disabled_outcome():
@@ -2079,7 +2110,6 @@ def test_schedule_probe_returns_early_when_credential_unreadable(admin_client):
 
 def test_trae_start_auth_builds_login_url_with_public_callback():
     from src.main import resolve_public_callback_url
-    from src.provider.trae.client import TraeProvider
 
     settings = Settings(_env_file=None, APP_SECRET="s", PUBLIC_BASE_URL="https://gw.example")
     provider = TraeProvider()
@@ -2096,7 +2126,7 @@ async def test_trae_complete_callback_exchanges_token():
     """回调链接必须真的换 token，而不是只存 refreshToken。"""
     import httpx as _httpx
 
-    from src.provider.trae.client import TraeClient, TraeProvider
+    from src.provider.trae.client import TraeClient
 
     def handler(request: _httpx.Request) -> _httpx.Response:
         if request.url.path.endswith("ExchangeToken"):
@@ -2123,7 +2153,6 @@ async def test_trae_complete_callback_exchanges_token():
 
 
 async def test_trae_complete_callback_rejects_bad_state():
-    from src.provider.trae.client import TraeProvider
     from src.provider.trae.events import UpstreamProtocolViolation
 
     provider = TraeProvider()
@@ -2135,7 +2164,7 @@ def test_authorize_completes_trae_login_end_to_end(tmp_path):
     """完整闭环：start → 浏览器回调 → 凭证入库 → 立即探测。"""
     import httpx as _httpx
 
-    from src.provider.trae.client import TraeClient, TraeProvider
+    from src.provider.trae.client import TraeClient
 
     def handler(request: _httpx.Request) -> _httpx.Response:
         if request.url.path.endswith("ExchangeToken"):
@@ -2214,7 +2243,7 @@ async def test_complete_callback_does_not_use_refresh_token_as_access_token():
     """ExchangeToken 失败时不得把 refreshToken 当 accessToken 塞进池子。"""
     import httpx as _httpx
 
-    from src.provider.trae.client import TraeClient, TraeProvider
+    from src.provider.trae.client import TraeClient
     from src.provider.trae.events import UpstreamProtocolViolation
 
     def handler(request: _httpx.Request) -> _httpx.Response:
@@ -2236,7 +2265,7 @@ async def test_complete_callback_does_not_use_refresh_token_as_access_token():
 async def test_complete_callback_raises_when_no_token_available():
     import httpx as _httpx
 
-    from src.provider.trae.client import TraeClient, TraeProvider
+    from src.provider.trae.client import TraeClient
     from src.provider.trae.events import UpstreamProtocolViolation
 
     def handler(_request: _httpx.Request) -> _httpx.Response:
@@ -2398,7 +2427,7 @@ def test_authorize_accepts_real_trae_callback_without_state(tmp_path):
     """
     import httpx as _httpx
 
-    from src.provider.trae.client import TraeClient, TraeProvider
+    from src.provider.trae.client import TraeClient
 
     def handler(request: _httpx.Request) -> _httpx.Response:
         if request.url.path.endswith("ExchangeToken"):

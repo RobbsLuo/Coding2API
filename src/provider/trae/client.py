@@ -13,7 +13,7 @@ from typing import Any
 import httpx
 
 from ...engine.sse import iter_frames
-from ...provider.base import AuthSession, ErrKind, Event, Model, Quota
+from ...provider.base import AuthSession, CheckinResult, ErrKind, Event, Model, Quota
 from . import events as trae_events
 from .callback import (
     CallbackInfo,
@@ -270,6 +270,21 @@ class TraeClient:
             used += float(pack_used) if isinstance(pack_used, (int, float)) else 0.0
         return Quota(remaining=max(0.0, limit - used), total=limit, probed_at=int(time.time()))
 
+    async def fetch_checkin_status(self, credential: TraeCredential) -> dict[str, Any]:
+        """checkin_credits/status：checked_in / credits / enable。"""
+        data = await self._post_json(
+            f"{self.ug_host}{trae_events.EP_CHECKIN_STATUS}", {}, ug_headers(credential))
+        return {
+            "checked_in": bool(data.get("checked_in")),
+            "credits": data.get("credits"),
+            "enable": bool(data.get("enable")),
+        }
+
+    async def claim_checkin(self, credential: TraeCredential) -> dict[str, Any] | None:
+        """checkin_credits/claim：领取当日积分。"""
+        return await self._post_json(
+            f"{self.ug_host}{trae_events.EP_CHECKIN_CLAIM}", {}, ug_headers(credential))
+
     async def refresh_token(self, credential: TraeCredential) -> TraeCredential:
         """ExchangeToken；失败不改写原凭证字段。"""
         host = credential.api_host or self.oauth_host
@@ -371,6 +386,25 @@ class TraeProvider:
     async def aclose(self) -> None:
         """释放内部 HTTP 连接池。"""
         await self.client.aclose()
+
+    async def checkin(self, credential_data: dict) -> CheckinResult:
+        """TRAE 签到：先查状态，未签且可签才领取。
+
+        上游没有独立的「已签到」错误码，status.checked_in 就是已签语义。
+        """
+        credential = TraeCredential.from_dict(credential_data)
+        status = await self.client.fetch_checkin_status(credential)
+        if status["checked_in"]:
+            return CheckinResult(ok=True, credit=None, message="今天已签到",
+                                 already_checked_in=True)
+        if not status["enable"]:
+            return CheckinResult(ok=False, message="当前账号不可签到")
+        await self.client.claim_checkin(credential)
+        return CheckinResult(ok=True, credit=None)
+
+    def checkin_scope(self, credential_data: dict) -> str:
+        """同上游账号的多凭证共享一次签到。"""
+        return f"trae|{credential_data.get('uid', '')}"
 
     # ------------------------------------------------- callback 轨道（Q17=C）
 

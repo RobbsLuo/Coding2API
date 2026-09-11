@@ -75,6 +75,17 @@ def health_score(quota: Quota | None) -> int | None:
 
 
 @dataclass(slots=True)
+class CheckinResult:
+    """签到结果。already_checked_in 表示当日已签（不算错误）。"""
+
+    ok: bool
+    credit: float | None = None
+    code: int | None = None
+    message: str = ""
+    already_checked_in: bool = False
+
+
+@dataclass(slots=True)
 class Model:
     id: str
     name: str = ""

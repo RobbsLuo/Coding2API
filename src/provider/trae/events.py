@@ -28,6 +28,8 @@ EP_CHAT = "/api/agent/v3/llm_utils_chat"
 EP_MODELS = "/api/ide/v1/get_detail_param"
 EP_EXCHANGE = "/cloudide/api/v3/trae/oauth/ExchangeToken"
 EP_USER_INFO = "/cloudide/api/v3/trae/GetUserInfo"
+EP_CHECKIN_STATUS = "/trae/api/v2/ug/checkin_credits/status"
+EP_CHECKIN_CLAIM = "/trae/api/v2/ug/checkin_credits/claim"
 
 
 class UpstreamProtocolViolation(ValueError):

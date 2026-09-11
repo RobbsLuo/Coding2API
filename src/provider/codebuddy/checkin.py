@@ -9,24 +9,15 @@ AGENTS.md 约束：
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
+from ...provider.base import CheckinResult
 from .client import build_headers
 from .credential import CodeBuddyCredential
 from .events import UpstreamProtocolViolation
 from .headers import EP_DAILY_CHECKIN
-
-
-@dataclass(slots=True)
-class CheckinResult:
-    ok: bool
-    credit: float | None = None
-    code: int | None = None
-    message: str = ""
-    already_checked_in: bool = False
 
 
 def parse_checkin_response(body: Any) -> CheckinResult:

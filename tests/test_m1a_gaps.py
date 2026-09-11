@@ -654,3 +654,114 @@ def test_solo_headers_include_uid_when_present():
     assert headers["X-Uid"] == "u-9"
     no_uid = solo_headers(TraeCredential(access_token="a"))
     assert "X-Uid" not in no_uid
+
+
+# ------------------------------------------- TRAE 签到（三态 + 真实请求）
+
+def _trae_client(handler) -> TraeClient:
+    import httpx as _httpx
+
+    transport = _httpx.MockTransport(handler)
+    return TraeClient(stream_client=_httpx.AsyncClient(transport=transport, timeout=None),
+                      short_client=_httpx.AsyncClient(transport=transport, timeout=None))
+
+
+async def test_trae_checkin_status_and_claim_use_ug_headers():
+    """签到两端点必须走 ug_headers（含 X-User-Region），且用 POST。"""
+    seen: list[tuple[str, dict]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.path, dict(request.headers)))
+        if request.url.path.endswith("checkin_credits/status"):
+            return httpx.Response(200, json={"checked_in": False, "credits": 0,
+                                             "enable": True})
+        return httpx.Response(200, json={"credits": 200})
+
+    client = _trae_client(handler)
+    status = await client.fetch_checkin_status(TraeCredential(access_token="a", device_id="d"))
+    assert status == {"checked_in": False, "credits": 0, "enable": True}
+
+    claim = await client.claim_checkin(TraeCredential(access_token="a", device_id="d"))
+    assert claim == {"credits": 200}
+
+    assert len(seen) == 2
+    for path, headers in seen:
+        assert "checkin_credits" in path
+        # httpx 内部存储全小写
+        assert headers.get("x-user-region") == "CN"
+        assert headers.get("authorization") == "Cloud-IDE-JWT a"
+
+
+async def test_trae_provider_checkin_already_is_success():
+    """已签到（status.checked_in=true）→ ok=true + already_checked_in。"""
+    from src.provider.trae.client import TraeProvider
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"checked_in": True, "credits": 0, "enable": True})
+
+    provider = TraeProvider(client=_trae_client(handler))
+    result = await provider.checkin({"accessToken": "a"})
+    assert result.ok is True and result.already_checked_in is True
+    assert result.message == "今天已签到"
+
+
+async def test_trae_provider_checkin_disabled_reports_not_ok():
+    """status.enable=false → 不可签到。"""
+    from src.provider.trae.client import TraeProvider
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"checked_in": False, "credits": 0, "enable": False})
+
+    provider = TraeProvider(client=_trae_client(handler))
+    result = await provider.checkin({"accessToken": "a"})
+    assert result.ok is False
+
+
+async def test_trae_provider_checkin_claims_when_eligible():
+    """未签且可签 → 调 claim 并成功。"""
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("checkin_credits/status"):
+            return httpx.Response(200, json={"checked_in": False, "credits": 0,
+                                             "enable": True})
+        return httpx.Response(200, json={"credits": 500})
+
+    from src.provider.trae.client import TraeProvider
+
+    provider = TraeProvider(client=_trae_client(handler))
+    result = await provider.checkin({"accessToken": "a"})
+    assert result.ok is True and result.already_checked_in is False
+    assert any(p.endswith("checkin_credits/claim") for p in paths)
+
+
+def test_trae_checkin_scope_uses_uid():
+    from src.provider.trae.client import TraeProvider
+
+    provider = TraeProvider()
+    assert provider.checkin_scope({"uid": "u1"}) == "trae|u1"
+    assert provider.checkin_scope({}) == "trae|"
+
+
+async def test_checkin_task_skips_provider_without_scope(tmp_path):
+    """provider 没有 checkin_scope 时跳过（background 148-150）。"""
+    from src.db.conn import Database
+    from src.db.crypto import CredentialCipher
+    from src.db.migrate import apply_schema
+    from src.db.repo import CredentialRepository
+
+    db = Database(tmp_path / "ns.sqlite3")
+    apply_schema(db.connect())
+    credentials = CredentialRepository(db, CredentialCipher("s"))
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+
+    from src.tasks.background import CheckinTask
+
+    class NoScope:
+        id = "codebuddy"
+
+    task = CheckinTask(credentials, {"codebuddy": NoScope()})
+    report = await task.run_once()
+    assert report.skipped == 1
+    db.close()
