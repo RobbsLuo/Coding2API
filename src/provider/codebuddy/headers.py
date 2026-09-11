@@ -8,12 +8,17 @@
 
 from __future__ import annotations
 
+import platform
+import secrets
+import uuid
 from urllib.parse import quote, urlsplit
 
 CN_ENDPOINT = "https://copilot.tencent.com"
 INTL_ENDPOINT = "https://www.codebuddy.ai"
 
 CLI_VERSION = "2.107.0"
+OPENAI_JS_PACKAGE_VERSION = "6.25.0"
+NODE_RUNTIME_VERSION = "v24.11.1"
 EP_CHAT = "/v2/chat/completions"
 EP_AUTH_STATE = "/v2/plugin/auth/state"
 EP_AUTH_TOKEN = "/v2/plugin/auth/token"
@@ -54,6 +59,26 @@ def encode_department(name: str) -> str:
     return quote(name, safe="")
 
 
+def _stainless_arch() -> str:
+    machine = platform.machine().lower()
+    if machine in ("arm64", "aarch64"):
+        return "arm64"
+    if machine in ("x86_64", "amd64"):
+        return "x64"
+    return machine or "x64"
+
+
+def _stainless_os() -> str:
+    system = platform.system().lower()
+    if system == "darwin":
+        return "MacOS"
+    if system == "linux":
+        return "Linux"
+    if system == "windows":
+        return "Windows"
+    return platform.system() or "Linux"
+
+
 def generate_headers(
     *,
     endpoint: str,
@@ -74,8 +99,29 @@ def generate_headers(
     headers = {
         "Authorization": f"Bearer {bearer_token}",
         "Content-Type": "application/json",
-        "Accept": "application/json, text/plain, */*",
+        "Accept": "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+        # OpenAI JS SDK 指纹（官方 CLI 用 openai@js 发请求，腾讯校验这些头）
+        "x-stainless-arch": _stainless_arch(),
+        "x-stainless-lang": "js",
+        "x-stainless-os": _stainless_os(),
+        "x-stainless-package-version": OPENAI_JS_PACKAGE_VERSION,
+        "x-stainless-retry-count": "0",
+        "x-stainless-runtime": "node",
+        "x-stainless-runtime-version": NODE_RUNTIME_VERSION,
+        # 会话链路 ID：原实现每次请求随机生成，缺失会触发 11128 渠道风控
+        "X-Conversation-ID": str(uuid.uuid4()),
+        "X-Conversation-Request-ID": secrets.token_hex(16),
+        "X-Conversation-Message-ID": uuid.uuid4().hex,
+        "X-Request-ID": uuid.uuid4().hex,
+        "X-Agent-Intent": "craft",
+        "X-Agent-Purpose": "conversation",
+        "X-IDE-Type": "CLI",
+        "X-IDE-Name": "CLI",
+        "X-IDE-Version": CLI_VERSION,
         "User-Agent": f"CLI/{CLI_VERSION} CodeBuddy/{CLI_VERSION}",
+        "X-Private-Data": "false",
+        "X-CodeBuddy-Request": "1",
         "X-Product": "SaaS",
         "X-Domain": host,
         "Host": host,
@@ -88,6 +134,7 @@ def generate_headers(
         headers["X-User-Id"] = effective_user
     if enterprise_id:
         headers["X-Enterprise-Id"] = enterprise_id
+        headers["X-Tenant-Id"] = enterprise_id
     if department_full_name:
         headers["X-Department-Info"] = encode_department(department_full_name)
     return headers
