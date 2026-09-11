@@ -161,6 +161,8 @@ class Executor:
                     last_error, last_kind = error, ErrKind.INVALID
                     self._skip_provider(provider_id, tried)
                 else:
+                    logger.warning("上游 %s 错误（凭证 %s，kind=%s）: %s",
+                                   provider_id, credential_id, kind, error)
                     outcome = self._deps.scheduler.note_error(
                         self._candidate(credential_id), kind, int(time.time()))
                     self._deps.credentials.save_error(credential_id, outcome)
@@ -231,6 +233,8 @@ class Executor:
                     last_error, last_kind = error, ErrKind.INVALID
                     self._skip_provider(provider_id, tried)
                 else:
+                    logger.warning("上游 %s 错误（凭证 %s，kind=%s）: %s",
+                                   provider_id, credential_id, kind, error)
                     self._record_error(credential_id, kind)
                     last_error = error
             else:
@@ -300,6 +304,9 @@ class Executor:
 def _event_kind(event: Event) -> ErrKind:
     if event.error_code == 1005:
         return ErrKind.PLAN
+    if event.error_code == 4001:
+        # TRAE 流内 4001 = 参数/模型不可用：换凭证也没用，跳过该上游
+        return ErrKind.INVALID
     return ErrKind.OTHER
 
 

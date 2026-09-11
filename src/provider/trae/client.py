@@ -408,17 +408,24 @@ class TraeProvider:
         return await self.client.fetch_quota(TraeCredential.from_dict(credential_data))
 
     async def list_models(self, credential_data: dict) -> list[Model]:
-        """优先动态拉取（需要凭证）；失败回退静态表。"""
+        """动态拉取 + 静态表合并（两者都给，调用方按序去重）。
+
+        静态表放在后面：别名表按顺序覆盖，静态表的实测大小写
+        （如 DeepSeek-V4-Flash）优先于动态列表的小写形式——
+        TRAE 上游列表数据与实际行为不一致（实测小写名 4001、驼峰名成功）。
+        """
+        models: list[Model] = []
         credential = TraeCredential.from_dict(credential_data)
         if credential.access_token:
             try:
-                return await self.client.fetch_models(credential)
+                models.extend(await self.client.fetch_models(credential))
             except Exception as error:  # noqa: BLE001 - 回退不是静默：错误带上日志
                 import logging
 
                 logging.getLogger(__name__).warning(
                     "TRAE 动态模型拉取失败，回退静态表: %s", error)
-        return [Model(id=mid) for mid in STATIC_MODELS]
+        models.extend(Model(id=mid) for mid in STATIC_MODELS)
+        return models
 
     async def stream_chat(self, credential_data: dict, payload: dict,
                           model: str) -> AsyncIterator[Event]:

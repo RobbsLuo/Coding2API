@@ -778,11 +778,12 @@ async def test_trae_dynamic_models_with_valid_credential():
             ]})
         return httpx.Response(200, json={})
 
-    from src.provider.trae.client import TraeProvider
+    from src.provider.trae.client import STATIC_MODELS, TraeProvider
 
     provider = TraeProvider(client=_trae_client(handler))
     models = await provider.list_models({"accessToken": "a"})
-    assert [m.id for m in models] == ["DeepSeek-V4-Flash", "glm-5.2"]
+    # 动态在前、静态在后（静态大小写覆盖同 key 的动态条目）
+    assert [m.id for m in models] == ["DeepSeek-V4-Flash", "glm-5.2", *STATIC_MODELS]
 
     def failing(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, content=b"down")
@@ -931,3 +932,13 @@ async def test_stream_finish_frames_yielded_when_upstream_never_sent_done():
     frames = [f async for f in executor.stream(_request("glm-5.2"), username="u")]
     assert any(b"[DONE]" in f for f in frames)     # finish() 补的 DONE 已发出
     db.close()
+
+
+def test_stream_error_4001_is_invalid_not_other():
+    """TRAE 流内 4001 → INVALID（跳过上游不冷却凭证）。"""
+    from src.engine.executor import _event_kind
+    from src.provider.base import ErrKind, Event, EventKind
+
+    assert _event_kind(Event(kind=EventKind.ERROR, error_code=4001)) is ErrKind.INVALID
+    assert _event_kind(Event(kind=EventKind.ERROR, error_code=1005)) is ErrKind.PLAN
+    assert _event_kind(Event(kind=EventKind.ERROR, error_code=500)) is ErrKind.OTHER
