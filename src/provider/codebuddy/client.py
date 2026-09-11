@@ -87,6 +87,13 @@ class CodeBuddyClient:
         body = dict(payload)
         body["model"] = model
         body["stream"] = True
+        # PI 等客户端对 reasoning 模型会把 system 转成 OpenAI 的 developer
+        # 角色；腾讯后端不认 developer，实测直接判 11128 渠道风控 → 归一为 system
+        messages = body.get("messages")
+        if isinstance(messages, list):
+            for message in messages:
+                if isinstance(message, dict) and message.get("role") == "developer":
+                    message["role"] = "system"
         # 官方 CLI 请求的标准特征字段；缺失会被渠道风控判定非官方调用（11128）
         body.setdefault("enable_thinking", True)
         stream_options = body.get("stream_options")

@@ -2474,3 +2474,40 @@ def test_authorize_without_pending_login_still_rejected(tmp_path):
         response = client.get("/authorize?refreshToken=RT")
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_dump_request_bodies_writes_file(tmp_path):
+    """诊断开关：dump_request_bodies=True 时 /v1 请求体落盘（main 291-293）。"""
+    import json as _json
+
+    from fastapi.testclient import TestClient
+
+    from src.config import Settings
+    from src.main import build_app
+
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+                        dump_request_bodies=True)
+
+    class P:
+        id = "p1"
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            return [Model(id="m")]
+
+        def import_credential(self, raw):  # pragma: no cover
+            return raw
+
+    app = build_app(settings, providers={"p1": P()})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        r = client.post("/v1/chat/completions",
+                        headers={"Authorization": f"Bearer {key}"},
+                        json={"model": "m", "stream": False,
+                              "messages": [{"role": "user", "content": "hi"}]})
+        assert r.status_code in (200, 400, 503)  # body 是否合法不影响 dump
+        dumps = list((tmp_path / "dumps").glob("*.json"))
+        assert dumps, "应产生 dump 文件"
+        body = _json.loads(dumps[0].read_text(encoding="utf-8"))
+        assert body["model"] == "m"

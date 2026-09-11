@@ -43,6 +43,8 @@ class Settings(BaseSettings):
     # CodeBuddy 聊天最小间隔：腾讯频率风控（11128）在连续快速请求时触发，
     # 实测 ≥5s 间隔稳定避开；0 关闭节流
     codebuddy_chat_min_interval: float = 5
+    # 诊断：把 /v1 入口的原始请求体落到 data/dumps/（排查客户端差异用）
+    dump_request_bodies: bool = False
 
     @cached_property
     def admin_set(self) -> frozenset[str]:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from contextlib import asynccontextmanager
@@ -286,6 +287,11 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     @app.post("/v1/chat/completions")
     async def chat_completions(request: Request, user: str = Depends(api_key_user)):
         body = await request.json()
+        if config.dump_request_bodies:
+            dump_dir = Path(config.data_dir) / "dumps"
+            dump_dir.mkdir(parents=True, exist_ok=True)
+            (dump_dir / f"{int(time.time() * 1000)}.json").write_text(
+                json.dumps(body, ensure_ascii=False, indent=1), encoding="utf-8")
         chat_request = parse_chat_request(body)
         if chat_request.stream:
             return StreamingResponse(executor.stream(chat_request, username=user),

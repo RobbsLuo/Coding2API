@@ -1230,3 +1230,23 @@ async def test_trae_4001_falls_through_to_codebuddy(dual_repo, caplog):
     rows = [tuple(r) for r in db.connect().execute(
         "SELECT err_count, cooling_until FROM credentials ORDER BY provider")]
     assert rows == [(0, None), (0, None)]       # TRAE 4001 不冷却
+
+
+async def test_stream_chat_normalizes_developer_role():
+    """PI 的 developer 角色归一为 system（腾讯实测 developer → 11128）。"""
+    import json as _json
+
+    captured: dict = {}
+
+    def capture_handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = _json.loads(request.read())
+        return httpx.Response(200, text=fixture("chat-basic.sse"))
+
+    provider = CodeBuddyProvider(client=_client(capture_handler))
+    payload = {"messages": [
+        {"role": "developer", "content": "You are PI."},
+        {"role": "user", "content": "hi"},
+    ]}
+    _ = [e async for e in provider.stream_chat({"bearer_token": "t"}, payload, "m")]
+    roles = [m["role"] for m in captured["body"]["messages"]]
+    assert roles == ["system", "user"]
