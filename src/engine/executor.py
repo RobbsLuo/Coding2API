@@ -128,18 +128,18 @@ class Executor:
                     if event.kind is EventKind.ERROR:
                         kind = _event_kind(event)
                         if kind is ErrKind.INVALID:
-                            # 流内 4001 等参数/模型错误：换凭证没用，跳过该上游
+                            # 流内 4001 等参数/模型错误：换凭证没用，
+                            # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
                             logger.warning(
                                 "上游 %s 流内拒绝模型 %s（凭证 %s 跳过）: code=%s %s",
                                 provider_id, target.model, credential_id,
                                 event.error_code, event.error_message)
                             self._record_invalid(username, provider_id, credential_id,
                                                  target.model, started, event)
-                            yield _error_frame(
-                                _reject_message(target.model, last_error,
-                                                self._suggestions(target.model)),
-                                "invalid_request")
-                            return
+                            last_error = UpstreamStreamError(event)
+                            last_kind = ErrKind.INVALID
+                            self._skip_provider(provider_id, tried)
+                            break
                         logger.warning(
                             "上游 %s 流内错误（凭证 %s，kind=%s）: code=%s %s",
                             provider_id, credential_id, kind,
@@ -260,8 +260,19 @@ class Executor:
                     result = aggregate(events, target.model)
                 except UpstreamStreamError as error:
                     kind = _event_kind(error.event)
-                    self._record_error(credential_id, kind)
-                    last_error = error
+                    if kind is ErrKind.INVALID:
+                        # 流内参数/模型错误：跳过该上游继续轮换，不冷却
+                        logger.warning(
+                            "上游 %s 流内拒绝模型 %s（凭证 %s 跳过）: code=%s %s",
+                            provider_id, target.model, credential_id,
+                            error.event.error_code, error.event.error_message)
+                        self._record_invalid(username, provider_id, credential_id,
+                                             target.model, started, error)
+                        last_error, last_kind = error, ErrKind.INVALID
+                        self._skip_provider(provider_id, tried)
+                    else:
+                        self._record_error(credential_id, kind)
+                        last_error = error
                 else:
                     self._deps.credentials.save_success(credential_id)
                     usage = result.get("usage") or {}

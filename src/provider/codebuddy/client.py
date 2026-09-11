@@ -87,6 +87,13 @@ class CodeBuddyClient:
         body = dict(payload)
         body["model"] = model
         body["stream"] = True
+        # 官方 CLI 请求的标准特征字段；缺失会被渠道风控判定非官方调用（11128）
+        body.setdefault("enable_thinking", True)
+        stream_options = body.get("stream_options")
+        body["stream_options"] = {
+            **(stream_options if isinstance(stream_options, dict) else {}),
+            "include_usage": True,
+        }
         url = f"{self.endpoint}{EP_CHAT}"
         async with self._stream.stream(
             "POST", url, json=body, headers=build_headers(credential, self.endpoint),

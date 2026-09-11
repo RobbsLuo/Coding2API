@@ -1165,3 +1165,68 @@ async def test_stream_inner_4001_yields_invalid_frame(dual_repo, caplog):
         "SELECT err_count, cooling_until FROM credentials").fetchone()
     assert tuple(row) == (0, None)                      # 不冷却
     assert any("流内拒绝模型" in r.getMessage() for r in caplog.records)
+
+
+async def test_stream_chat_body_carries_cli_signature_fields():
+    """官方 CLI 特征字段：enable_thinking / stream_options.include_usage。"""
+    import json as _json
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=fixture("chat-basic.sse"))
+
+    captured: dict = {}
+
+    def capture_handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = _json.loads(request.read())
+        return httpx.Response(200, text=fixture("chat-basic.sse"))
+
+    provider = CodeBuddyProvider(client=_client(capture_handler))
+    payload = {"messages": [{"role": "user", "content": "hi"}],
+               "stream_options": {"include_usage": False}}
+    events = [e async for e in provider.stream_chat({"bearer_token": "t"}, payload, "m")]
+
+    body = captured["body"]
+    assert body["enable_thinking"] is True          # 缺失触发 11128 渠道风控
+    assert body["stream_options"]["include_usage"] is True
+    assert body["stream"] is True
+    assert body["model"] == "m"
+    assert events[-1].kind is EventKind.FINISH
+
+
+async def test_trae_4001_falls_through_to_codebuddy(dual_repo, caplog):
+    """TRAE 流内 4001 → 跳过 TRAE → CB 成功接住；TRAE 凭证不被冷却。"""
+
+    from src.provider.base import Event
+
+    class Trae4001:
+        id = "trae"
+        calls = 0
+
+        async def stream_chat(self, _cred, _payload, _model):
+            self.calls += 1
+            yield Event(kind=EventKind.ERROR, error_code=4001, error_message="param")
+
+    class CbOk:
+        id = "codebuddy"
+        calls = 0
+
+        async def stream_chat(self, _cred, _payload, _model):
+            self.calls += 1
+            yield Event(kind=EventKind.CONTENT, content="ok")
+            yield Event(kind=EventKind.FINISH, finish_reason="stop")
+
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="trae", credential_data={"accessToken": "tr"})
+    db.connect().execute("UPDATE credentials SET pinned = 1 WHERE provider = 'trae'")
+    trae, cb = Trae4001(), CbOk()
+    executor = Executor(ExecutorDeps(
+        providers={"trae": trae, "codebuddy": cb}, credentials=repo,
+        scheduler=Scheduler(), default_model="m"))
+
+    result = await executor.complete(_request("m"), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert trae.calls == 1 and cb.calls == 1
+    rows = [tuple(r) for r in db.connect().execute(
+        "SELECT err_count, cooling_until FROM credentials ORDER BY provider")]
+    assert rows == [(0, None), (0, None)]       # TRAE 4001 不冷却
