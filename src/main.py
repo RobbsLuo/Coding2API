@@ -19,6 +19,10 @@ from .db.repo import ApiKeyRepository, CredentialRepository
 from .engine.executor import Executor, ExecutorDeps, NoHealthyCredential, NoProviderForModel
 from .engine.model_resolver import UnknownModelError
 from .engine.scheduler import Scheduler
+from .provider.codebuddy.client import CodeBuddyProvider
+from .provider.codebuddy.events import (
+    UpstreamProtocolViolation as CodeBuddyProtocolViolation,
+)
 from .provider.trae.client import TraeProvider
 from .provider.trae.events import UpstreamProtocolViolation
 
@@ -32,7 +36,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     cipher = CredentialCipher(config.app_secret)
     credentials = CredentialRepository(db, cipher)
     api_keys = ApiKeyRepository(db)
-    registry = providers if providers is not None else {"trae": TraeProvider()}
+    registry = providers if providers is not None else {
+        "trae": TraeProvider(),
+        "codebuddy": CodeBuddyProvider(),
+    }
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
                                      scheduler=Scheduler(),
                                      default_model=config.default_model))
@@ -87,6 +94,12 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.exception_handler(UpstreamProtocolViolation)
     async def _bad_credential(_request: Request, error: UpstreamProtocolViolation):
+        return JSONResponse(status_code=400,
+                            content=error_payload(str(error), "invalid_credential", 400))
+
+    @app.exception_handler(CodeBuddyProtocolViolation)
+    async def _bad_codebuddy_credential(_request: Request,
+                                        error: CodeBuddyProtocolViolation):
         return JSONResponse(status_code=400,
                             content=error_payload(str(error), "invalid_credential", 400))
 

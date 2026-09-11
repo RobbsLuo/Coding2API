@@ -1,0 +1,8 @@
+data: {"choices":[{"delta":{"reasoning_content":"我","content":""}}]}
+
+data: {"choices":[{"delta":{"reasoning_content":"需要想一想","content":null}}]}
+
+data: {"choices":[{"delta":{"content":"答案是 42"},"finish_reason":"stop"}]}
+
+data: [DONE]
+

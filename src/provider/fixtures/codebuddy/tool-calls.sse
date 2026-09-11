@@ -1,0 +1,8 @@
+data: {"choices":[{"delta":{"tool_calls":[{"id":"call_1","function":{"name":"lookup","arguments":""}}]},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\"q\":"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"x\"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: [DONE]
+

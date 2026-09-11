@@ -1,0 +1,8 @@
+data: {"id":"upstream-1","created":1,"model":"glm-5.2","choices":[{"index":0,"delta":{"role":"assistant","content":"你好"}}]}
+
+data: {"choices":[{"delta":{"content":"，世界"},"finish_reason":null}]}
+
+data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":7}}
+
+data: [DONE]
+
