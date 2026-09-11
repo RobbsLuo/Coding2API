@@ -1,0 +1,420 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "coding2api 技术架构",
+    "locale": "zh-CN",
+    "output": "coding2api-architecture.html",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1120,
+      640
+    ],
+    "views": [
+      {
+        "id": "request-path",
+        "label": "请求主链路",
+        "focus": [
+          "clients",
+          "openai",
+          "engine",
+          "cb",
+          "trae",
+          "cb-up",
+          "trae-up"
+        ],
+        "note": "客户端请求经协议层规范化，由执行引擎选号后流式转发到上游。"
+      },
+      {
+        "id": "admin-plane",
+        "label": "管理面",
+        "focus": [
+          "admin-ui",
+          "admin-api",
+          "engine",
+          "db"
+        ],
+        "note": "React 管理台经管理 API 同进程调用引擎，状态落 SQLite。"
+      },
+      {
+        "id": "background",
+        "label": "后台任务",
+        "focus": [
+          "bg",
+          "cb",
+          "trae"
+        ],
+        "note": "签到、额度探测与 token 预刷新经 provider 客户端触达上游。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "auth",
+      "type": "security",
+      "label": "API Key 鉴权",
+      "sublabel": "sk- 摘要校验",
+      "pos": [
+        20,
+        70
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "sk-"
+    },
+    {
+      "id": "admin-ui",
+      "type": "frontend",
+      "label": "React 管理台",
+      "sublabel": "凭证 / Key / 仪表盘",
+      "pos": [
+        260,
+        70
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "admin-api",
+      "type": "backend",
+      "label": "管理 API",
+      "sublabel": "/api/* 会话 Cookie",
+      "pos": [
+        500,
+        70
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "clients",
+      "type": "external",
+      "label": "OpenAI 客户端",
+      "sublabel": "OpenCode / Cline 等",
+      "pos": [
+        20,
+        280
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "openai",
+      "type": "backend",
+      "label": "OpenAI 协议层",
+      "sublabel": "/v1/chat/completions",
+      "pos": [
+        260,
+        280
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "FastAPI"
+    },
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "执行引擎",
+      "sublabel": "调度器 + 冷却状态机",
+      "pos": [
+        500,
+        280
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "三态健康度"
+    },
+    {
+      "id": "cb",
+      "type": "backend",
+      "label": "CodeBuddy Provider",
+      "sublabel": "OAuth / 额度 / 签到",
+      "pos": [
+        760,
+        150
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "bg",
+      "type": "backend",
+      "label": "后台任务",
+      "sublabel": "签到 / 探测 / 刷新",
+      "pos": [
+        760,
+        280
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "节流器"
+    },
+    {
+      "id": "trae",
+      "type": "backend",
+      "label": "TRAE Provider",
+      "sublabel": "回调 / 刷新 / 额度",
+      "pos": [
+        760,
+        410
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "cb-up",
+      "type": "external",
+      "label": "CodeBuddy 上游",
+      "sublabel": "copilot.tencent.com",
+      "pos": [
+        980,
+        150
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "trae-up",
+      "type": "external",
+      "label": "TRAE 上游",
+      "sublabel": "trae-api-cn.mchost.guru",
+      "pos": [
+        980,
+        410
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "SQLite",
+      "sublabel": "加密凭证 + 脱敏统计",
+      "pos": [
+        500,
+        520
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "WAL"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "coding2api 单进程（FastAPI + SQLite）",
+      "wraps": [
+        "openai",
+        "engine",
+        "cb",
+        "bg",
+        "trae",
+        "admin-ui",
+        "admin-api",
+        "db"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "clients-to-openai",
+      "from": "clients",
+      "to": "openai",
+      "label": "HTTPS",
+      "variant": "emphasis",
+      "labelDy": -18
+    },
+    {
+      "id": "openai-to-engine",
+      "from": "openai",
+      "to": "engine",
+      "label": "规范化"
+    },
+    {
+      "id": "engine-to-cb",
+      "from": "engine",
+      "to": "cb",
+      "label": "健康度选号",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          700,
+          312
+        ],
+        [
+          700,
+          182
+        ]
+      ]
+    },
+    {
+      "id": "engine-to-trae",
+      "from": "engine",
+      "to": "trae",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          745,
+          312
+        ],
+        [
+          745,
+          442
+        ]
+      ]
+    },
+    {
+      "id": "cb-to-cbup",
+      "from": "cb",
+      "to": "cb-up",
+      "label": "SSE",
+      "variant": "emphasis"
+    },
+    {
+      "id": "trae-to-traeup",
+      "from": "trae",
+      "to": "trae-up",
+      "label": "SSE",
+      "variant": "emphasis"
+    },
+    {
+      "id": "bg-to-cb",
+      "from": "bg",
+      "to": "cb",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "via": [
+        [
+          940,
+          312
+        ],
+        [
+          940,
+          282
+        ],
+        [
+          830,
+          282
+        ]
+      ]
+    },
+    {
+      "id": "bg-to-trae",
+      "from": "bg",
+      "to": "trae",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "engine-to-db",
+      "from": "engine",
+      "to": "db",
+      "label": "统计 / 凭证状态",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        590,
+        450
+      ]
+    },
+    {
+      "id": "admin-ui-to-api",
+      "from": "admin-ui",
+      "to": "admin-api",
+      "label": "会话 Cookie",
+      "labelDy": 20
+    },
+    {
+      "id": "admin-api-to-engine",
+      "from": "admin-api",
+      "to": "engine",
+      "label": "同进程调用",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelAt": [
+        610,
+        240
+      ]
+    },
+    {
+      "id": "auth-to-openai",
+      "from": "auth",
+      "to": "openai",
+      "label": "校验",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "top",
+      "via": [
+        [
+          210,
+          102
+        ],
+        [
+          210,
+          250
+        ],
+        [
+          330,
+          250
+        ]
+      ]
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "对外契约",
+      "items": [
+        "OpenAI 兼容：/v1/chat/completions + /v1/models",
+        "扁平模型名 + model@provider 后缀强制指定上游",
+        "非流式请求由服务端聚合 SSE 后返回"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "调度与弹性",
+      "items": [
+        "三态健康度：known / unknown / exhausted",
+        "三级冷却：权益耗尽 12h、限流 60s、连续错误 10m",
+        "单请求最多轮换 3 个凭证，流内错误注入 SSE"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "数据与安全",
+      "items": [
+        "SQLite WAL：凭证加密列、API Key 摘要、脱敏统计",
+        "统计不存提示词 / Token，明细保留 90 天"
+      ]
+    }
+  ]
+}

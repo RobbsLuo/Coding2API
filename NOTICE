@@ -1,0 +1,19 @@
+coding2api
+Copyright (c) 2026 Hongsheng Luo (Robbs)
+
+本项目从零实现，但在设计与实现上参考了以下项目：
+
+- codebuddy2api - https://github.com/IceeAn/codebuddy2api
+  Copyright (c) 2026 An! - MIT License
+  （提供 CodeBuddy 上游协议、凭证管理、脱敏统计的设计参考）
+
+- trae2api-web - https://github.com/connectedGraph/trae2api-web
+  Copyright (c) 2026 connectedGraph - MIT License
+  （提供 TRAE SOLO 上游协议、账号池冷却状态机的设计参考）
+
+  其上游：
+  - xueyue33/codebuddy2api - https://github.com/xueyue33/codebuddy2api
+  - Sliverkiss/traework2api - https://github.com/Sliverkiss/traework2api
+
+本项目的代码为独立实现，不复制上述项目的源代码。
+上游服务的协议细节来自对客户端行为的观察，不属于上述项目的版权范围。
