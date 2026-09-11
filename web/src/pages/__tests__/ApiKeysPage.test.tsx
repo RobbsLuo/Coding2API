@@ -86,7 +86,9 @@ describe("ApiKeysPage", () => {
     await settle();
     await userEvent.click(screen.getByRole("button", { name: "创建" }));
     await screen.findByTestId("new-key-plaintext");
-    await userEvent.click(screen.getByRole("button", { name: "复制" }));
+    // 新 Key 面板的复制按钮（页面上还有 Base URL/curl/Python 三处复制）
+    const keyCopy = screen.getByTestId("new-key-plaintext").parentElement!.querySelector("button")!;
+    await userEvent.click(keyCopy);
 
     expect(writeText).toHaveBeenCalledWith("sk-copy-me");
     expect(await screen.findByRole("button", { name: "已复制" })).toBeInTheDocument();
@@ -127,5 +129,43 @@ describe("ApiKeysPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "删除" }));
     await userEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(screen.getByRole("button", { name: "删除" })).toBeInTheDocument();
+  });
+});
+
+describe("OpenAI 客户端接入面板", () => {
+  it("显示 Base URL 与端点，未创建 Key 时示例用占位符", async () => {
+    mockFetch({ "/api/api-keys": { api_keys: [] } });
+    renderPage(<ApiKeysPage />);
+    await settle();
+
+    const baseUrl = screen.getByTestId("openai-base-url").textContent;
+    expect(baseUrl).toBe(`${window.location.origin}/v1`);
+    expect(screen.getByTestId("openai-entry")).toHaveTextContent("/chat/completions");
+    expect(screen.getByTestId("openai-entry")).toHaveTextContent("/models");
+    expect(screen.getByTestId("example-curl")).toHaveTextContent("sk-…");
+    expect(screen.getByTestId("example-python")).toHaveTextContent(
+      `base_url="${window.location.origin}/v1"`,
+    );
+  });
+
+  it("创建 Key 后示例自动带入真实 Key", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/api-keys" && init?.method === "POST") {
+        return jsonResponse({ ...KEY, api_key: "sk-real-key" });
+      }
+      if (url === "/api/api-keys") return jsonResponse({ api_keys: [] });
+      throw new Error(`未 mock: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    renderPage(<ApiKeysPage />);
+    await settle();
+
+    await userEvent.type(screen.getByTestId("key-name"), "test");
+    await userEvent.click(screen.getByRole("button", { name: "创建" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("example-curl")).toHaveTextContent("sk-real-key");
+    });
+    expect(screen.getByTestId("example-python")).toHaveTextContent('api_key="sk-real-key"');
   });
 });

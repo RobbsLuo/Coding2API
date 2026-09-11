@@ -3,7 +3,103 @@ import { api } from "../api/client";
 import { useApiKeys, useQueryClient } from "../api/hooks";
 import { formatTime } from "../api/display";
 import type { ApiKeyCreated } from "../api/types";
-import { Button, Empty, Field, Input, Notice, Panel } from "../ui";
+import { Badge, Button, Empty, Field, Input, Notice, Panel } from "../ui";
+
+/** OpenAI 兼容入口的 Base URL：本服务地址 + /v1 */
+export const openaiBaseUrl = (): string => `${window.location.origin}/v1`;
+
+/** 接入示例代码；apiKey 占位时用 sk-… */
+export function openaiExamples(baseUrl: string, apiKey: string): {
+  curl: string;
+  python: string;
+} {
+  const key = apiKey || "sk-…";
+  return {
+    curl: `curl ${baseUrl}/chat/completions \\
+  -H "Authorization: Bearer ${key}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "glm-5.2",
+    "messages": [{"role": "user", "content": "你好"}],
+    "stream": true
+  }'`,
+    python: `from openai import OpenAI
+
+client = OpenAI(base_url="${baseUrl}", api_key="${key}")
+resp = client.chat.completions.create(
+    model="glm-5.2",
+    messages=[{"role": "user", "content": "你好"}],
+)
+print(resp.choices[0].message.content)`,
+  };
+}
+
+/** OpenAI 客户端接入面板：Base URL + 端点 + 可复制的示例 */
+function OpenAIEntry({ apiKey }: { apiKey: string }) {
+  const baseUrl = openaiBaseUrl();
+  const examples = openaiExamples(baseUrl, apiKey);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const copy = async (label: string, text: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopied(label);
+  };
+
+  return (
+    <Panel title="OpenAI 客户端接入">
+      <div className="space-y-4 text-sm" data-testid="openai-entry">
+        <div>
+          <div className="mb-1 text-xs text-[var(--color-ink-muted)]">Base URL</div>
+          <div className="flex items-center gap-2">
+            <code
+              data-testid="openai-base-url"
+              className="flex-1 rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] px-3 py-2 font-mono text-xs break-all"
+            >
+              {baseUrl}
+            </code>
+            <Button size="sm" data-testid="copy-base-url" onClick={() => copy("url", baseUrl)}>
+              {copied === "url" ? "已复制" : "复制"}
+            </Button>
+          </div>
+        </div>
+        <ul className="space-y-1 text-xs text-[var(--color-ink-muted)]">
+          <li>
+            <Badge>POST</Badge> <code>{baseUrl}/chat/completions</code>　对话补全（流式 / 非流式）
+          </li>
+          <li>
+            <Badge>GET</Badge> <code>{baseUrl}/models</code>　模型列表
+          </li>
+        </ul>
+        <div>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-xs text-[var(--color-ink-muted)]">curl 示例</span>
+            <Button size="sm" variant="ghost" data-testid="copy-curl" onClick={() => copy("curl", examples.curl)}>
+              {copied === "curl" ? "已复制" : "复制"}
+            </Button>
+          </div>
+          <pre data-testid="example-curl" className="overflow-x-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] p-3 font-mono text-xs">
+            {examples.curl}
+          </pre>
+        </div>
+        <div>
+          <div className="mb-1 flex items-center justify-between">
+            <span className="text-xs text-[var(--color-ink-muted)]">OpenAI Python SDK</span>
+            <Button size="sm" variant="ghost" data-testid="copy-python" onClick={() => copy("python", examples.python)}>
+              {copied === "python" ? "已复制" : "复制"}
+            </Button>
+          </div>
+          <pre data-testid="example-python" className="overflow-x-auto rounded-lg border border-[var(--color-border-soft)] bg-[var(--color-surface)] p-3 font-mono text-xs">
+            {examples.python}
+          </pre>
+        </div>
+        <Notice tone="muted">
+          任何兼容 OpenAI 协议的客户端（ChatGPT Next Web、LobeChat、Cursor 等）
+          都可以按上面的 Base URL + API Key 接入。模型名从 /v1/models 获取。
+        </Notice>
+      </div>
+    </Panel>
+  );
+}
 
 export function ApiKeysPage() {
   const { data, isLoading } = useApiKeys();
@@ -49,6 +145,8 @@ export function ApiKeysPage() {
 
   return (
     <div className="space-y-6" data-testid="api-keys-page">
+      <OpenAIEntry apiKey={created?.api_key ?? ""} />
+
       <Panel title="创建 API Key">
         <form onSubmit={create} className="flex flex-wrap items-end gap-3">
           <div className="w-56">
