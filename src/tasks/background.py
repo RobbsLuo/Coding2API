@@ -166,7 +166,11 @@ class CheckinTask:
                     self._on_success(candidate.credential_id)
             else:
                 report.failed += 1
-        self._done_scopes.add(self._day_key(current))
+                logger.warning("checkin failed for %s: %s",
+                               candidate.credential_id, result.message or "未知原因")
+        # 只有全部成功才当日封账；有失败时留着，下轮循环重试
+        if report.failed == 0:
+            self._done_scopes.add(self._day_key(current))
         return report
 
 

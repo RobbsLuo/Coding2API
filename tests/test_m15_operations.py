@@ -2511,3 +2511,40 @@ def test_dump_request_bodies_writes_file(tmp_path):
         assert dumps, "应产生 dump 文件"
         body = _json.loads(dumps[0].read_text(encoding="utf-8"))
         assert body["model"] == "m"
+
+
+async def test_trae_checkin_claim_soft_failure_and_success_paths():
+    """TRAE claim HTTP 200 + 业务码非 0 是软失败（9074），不得误报成功。"""
+    from src.provider.trae.client import TraeClient, TraeProvider
+
+    seen: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path.endswith("status"):
+            # 只有第二次（成功的）claim 之后才算已签
+            checked = len([p for p in seen if p.endswith("claim")]) >= 2
+            credits = 200 if checked else 150
+            return httpx.Response(200, json={"checked_in": checked, "credits": credits,
+                                             "enable": True, "code": 0})
+        # 第一次 claim 软失败，之后成功
+        failures = len([p for p in seen if p.endswith("claim")])
+        if failures == 1:
+            return httpx.Response(200, json={"code": 9074,
+                                             "message": "当前参与用户太多，请稍后再试"})
+        return httpx.Response(200, json={"code": 0})
+
+    import httpx as _httpx
+    transport = _httpx.MockTransport(handler)
+    client = TraeClient(stream_client=_httpx.AsyncClient(transport=transport, timeout=None),
+                        short_client=_httpx.AsyncClient(transport=transport, timeout=None))
+    provider = TraeProvider(client=client)
+    data = {"bearer_token": "t", "device_id": "d"}
+
+    first = await provider.checkin(data)
+    assert not first.ok and first.code == 9074
+    assert "当前参与用户太多" in first.message
+
+    second = await provider.checkin(data)
+    assert second.ok and second.code == 0 and second.credit == 200
+

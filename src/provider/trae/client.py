@@ -486,10 +486,16 @@ class TraeProvider:
         """释放内部 HTTP 连接池。"""
         await self.client.aclose()
 
+    def checkin_scope(self, credential_data: dict) -> str:
+        """同上游账号的多凭证共享一次签到。"""
+        return f"trae|{credential_data.get('uid', '')}"
+
     async def checkin(self, credential_data: dict) -> CheckinResult:
         """TRAE 签到：先查状态，未签且可签才领取。
 
         上游没有独立的「已签到」错误码，status.checked_in 就是已签语义。
+        claim 可能返回 HTTP 200 + 业务码非 0 的软失败（如实测 9074
+        「当前参与用户太多」），必须解析 code，否则会误报成功。
         """
         credential = TraeCredential.from_dict(credential_data)
         status = await self.client.fetch_checkin_status(credential)
@@ -498,12 +504,15 @@ class TraeProvider:
                                  already_checked_in=True)
         if not status["enable"]:
             return CheckinResult(ok=False, message="当前账号不可签到")
-        await self.client.claim_checkin(credential)
-        return CheckinResult(ok=True, credit=None)
-
-    def checkin_scope(self, credential_data: dict) -> str:
-        """同上游账号的多凭证共享一次签到。"""
-        return f"trae|{credential_data.get('uid', '')}"
+        claim = await self.client.claim_checkin(credential)  # _post_json 保证 dict
+        code = claim.get("code")
+        if code not in (0, None):
+            # 软失败：不抛异常（后台任务按失败计数，当日不封账，下轮重试）
+            return CheckinResult(ok=False, code=int(code),
+                                 message=str(claim.get("message") or "claim 失败"))
+        # 领取成功 → 回查 status 带回当前积分总额
+        latest = await self.client.fetch_checkin_status(credential)
+        return CheckinResult(ok=True, credit=latest.get("credits"), code=0)
 
     # ------------------------------------------------- callback 轨道（Q17=C）
 

@@ -314,3 +314,35 @@ async def test_loop_executes_runner_after_interval(repo):
     with pytest.raises(asyncio.CancelledError):
         await task
     assert calls, "循环体未执行"
+
+
+async def test_checkin_task_soft_failure_retries_same_day(repo, monkeypatch):
+    """claim 软失败（ok=False）→ 计入 failed 且当日不封账，下轮还能重试。"""
+    import time as _time
+
+    from src.provider.base import CheckinResult
+
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    provider = StubProvider()
+
+    async def failing_checkin(_data):
+        return CheckinResult(ok=False, code=9074, message="当前参与用户太多，请稍后再试")
+
+    provider.checkin = failing_checkin
+    runner, _collector = _runner(repo, provider)
+    task = runner._checkin
+    task._done_scopes.clear()
+    now = _time.localtime()
+    report = await task.run_once(now=now)
+    assert report.failed == 1 and report.succeeded == 0
+    assert task._day_key(now) not in task._done_scopes   # 未封账 → 下轮重试
+
+    # 下一轮成功 → 封账
+    async def ok_checkin(_data):
+        return CheckinResult(ok=True, credit=200, code=0)
+
+    provider.checkin = ok_checkin
+    report2 = await task.run_once(now=now)
+    assert report2.succeeded == 1 and report2.failed == 0
+    assert task._day_key(now) in task._done_scopes
