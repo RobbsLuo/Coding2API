@@ -39,6 +39,49 @@ DEFAULT_MODELS: tuple[str, ...] = ("glm-5.2", "deepseek-v4-pro")
 EP_CONFIG = "/v3/config"
 MODEL_CACHE_TTL_SECONDS = 600
 
+
+
+def _clean_history_tool_calls(body: dict[str, Any]) -> None:
+    """清理历史消息中的脏 tool_call（如 PI 会话里残留的空名调用）：
+    剔除无 function/name 的条目；清空后 content 为空的 assistant 占位
+    整条丢弃；悬空的 role=tool 结果消息成对清理。"""
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return
+    rewritten = []
+    orphan_ids: set[str] = set()
+    for message in messages:
+        if not isinstance(message, dict):
+            rewritten.append(message)
+            continue
+        tool_calls = message.get("tool_calls")
+        if isinstance(tool_calls, list):
+            kept = []
+            for tc in tool_calls:
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function")
+                if not isinstance(fn, dict):
+                    orphan_ids.add(str(tc.get("id")))
+                    continue
+                if not str(fn.get("name") or "").strip():
+                    orphan_ids.add(str(tc.get("id")))
+                    continue
+                kept.append(tc)
+            if kept:
+                message["tool_calls"] = kept
+            else:
+                message.pop("tool_calls", None)
+                if message.get("content") is None:
+                    continue
+        rewritten.append(message)
+    body["messages"] = [
+        m for m in rewritten
+        if not (isinstance(m, dict) and m.get("role") == "tool"
+                and str(m.get("tool_call_id")) in orphan_ids)
+    ]
+
+
 def build_headers(credential: CodeBuddyCredential, endpoint: str, *,
                   quota_only: bool = False) -> dict[str, str]:
     """头构造统一入口：X-Domain 与 Host 由同一 endpoint 派生。"""
@@ -87,6 +130,7 @@ class CodeBuddyClient:
         body = dict(payload)
         body["model"] = model
         body["stream"] = True
+        _clean_history_tool_calls(body)
         # PI 等客户端对 reasoning 模型会把 system 转成 OpenAI 的 developer
         # 角色；腾讯后端不认 developer，实测直接判 11128 渠道风控 → 归一为 system
         messages = body.get("messages")

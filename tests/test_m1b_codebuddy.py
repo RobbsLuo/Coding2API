@@ -209,8 +209,18 @@ def test_tool_calls_fixture_keeps_upstream_ids():
 
 def test_tool_call_list_with_non_dict_entries_is_filtered():
     frame = cb_events.SSEFrame(
-        event="", data='{"choices":[{"delta":{"tool_calls":[1,{"id":"ok"}]}}]}')
-    assert cb_events.parse_frame(frame).tool_calls == [{"id": "ok"}]
+        event="", data='{"choices":[{"delta":{"tool_calls":[1,{"id":"ok",'
+                       '"function":{"name":"f","arguments":"{}"}}]}}]}')
+    assert cb_events.parse_frame(frame).tool_calls == [
+        {"id": "ok", "function": {"name": "f", "arguments": "{}"}}]
+
+
+def test_tool_call_without_name_is_dropped():
+    """空名 tool_call（上游噪声）被丢弃，不转发给客户端。"""
+    frame = cb_events.SSEFrame(
+        event="", data='{"choices":[{"delta":{"tool_calls":'
+                       '[{"id":"x","function":{"arguments":"{}"}}]}}]}')
+    assert cb_events.parse_frame(frame) is None
 
 
 @pytest.mark.parametrize("data", ["{broken", "[1,2]", '{"choices":"no"}',
@@ -678,7 +688,8 @@ def test_parse_all_events_raises_on_malformed(data):
 def test_parse_all_events_with_tool_calls_does_not_duplicate_finish():
     """带 tool_calls 的收尾帧：工具事件 + finish，且 usage 不重复。"""
     frame = cb_events.SSEFrame(event="", data=(
-        '{"choices":[{"delta":{"tool_calls":[{"id":"c"}]},"finish_reason":"tool_calls"}],'
+        '{"choices":[{"delta":{"tool_calls":[{"id":"c","function":'
+        '{"name":"f","arguments":"{}"}}]},"finish_reason":"tool_calls"}],'
         '"usage":{"prompt_tokens":2}}'))
     kinds = [e.kind for e in cb_events.parse_all_events(frame)]
     assert kinds == [EventKind.TOOL_CALLS, EventKind.USAGE, EventKind.FINISH]
@@ -1250,3 +1261,71 @@ async def test_stream_chat_normalizes_developer_role():
     _ = [e async for e in provider.stream_chat({"bearer_token": "t"}, payload, "m")]
     roles = [m["role"] for m in captured["body"]["messages"]]
     assert roles == ["system", "user"]
+
+
+def test_blank_noise_tool_call_is_dropped_but_argument_shards_kept():
+    """噪声（无 name 且空 arguments）丢弃；正常分片（带实际 arguments）保留。"""
+    body_obj = {
+        "choices": [{"delta": {"tool_calls": [
+            {"index": 0, "function": {}},
+            {"index": 0, "function": {"arguments": "{}"}},
+            {"index": 0, "id": "c1", "type": "function",
+             "function": {"name": "bash", "arguments": ""}},
+            {"index": 0, "function": {"arguments": '{"x":1}'}},
+        ]}}],
+    }
+    frame = cb_events.SSEFrame(event="", data=json.dumps(body_obj))
+    event = cb_events.parse_frame(frame)
+    assert event is not None and event.kind is EventKind.TOOL_CALLS
+    kept = event.tool_calls
+    assert len(kept) == 2                                  # 两个噪声被丢
+    assert kept[0]["function"]["name"] == "bash"           # 首块保留
+    assert kept[1]["function"]["arguments"] == '{"x":1}'   # 分片保留
+
+def test_clean_history_tool_calls_removes_dirty_and_orphans(tmp_path):
+    """历史清理：空名剔除、空占位丢弃、悬空 tool 成对清理。"""
+    from src.provider.codebuddy.client import _clean_history_tool_calls
+
+    body = {"messages": [
+        {"role": "system", "content": "s"},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "bad", "type": "function",
+                         "function": {"arguments": "{}"}},
+                        {"id": "good", "type": "function",
+                         "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "bad", "content": "x"},
+        {"role": "tool", "tool_call_id": "good", "content": "y"},
+        {"role": "assistant", "content": None, "tool_calls": []},
+        {"role": "user", "content": "hi"},
+    ]}
+    _clean_history_tool_calls(body)
+    # bad 被剔 → 其 tool 消息删；good 保留 → 其 tool 消息保留；
+    # 空占位 assistant 丢弃
+    roles = [(m["role"], m.get("tool_call_id", "")) for m in body["messages"]]
+    assert roles == [
+        ("system", ""), ("assistant", ""), ("tool", "good"), ("user", "")]
+
+    # 边界：非 list messages 原样返回；非 dict 消息与非 dict tc 跳过
+    body2 = {"messages": "nope"}
+    _clean_history_tool_calls(body2)
+    assert body2["messages"] == "nope"
+
+    body3 = {"messages": [
+        "junk",
+        {"role": "assistant", "content": None, "tool_calls": ["junk", {"id": "bad"}]},
+        {"role": "tool", "tool_call_id": "bad", "content": "x"},
+    ]}
+    _clean_history_tool_calls(body3)
+    # 非dict消息保留、非dict tc 剔除；assistant 带 content 保留；悬空 tool 清理
+    assert [(m if isinstance(m, str) else m["role"]) for m in body3["messages"]] == ["junk"]
+
+    # assistant 有实际 content → tool_calls 剔除后消息本身保留
+    body4 = {"messages": [
+        {"role": "assistant", "content": "文本",
+         "tool_calls": [{"id": "bad", "type": "function",
+                         "function": {"arguments": "{}"}}]},
+    ]}
+    _clean_history_tool_calls(body4)
+    assert body4["messages"][0]["role"] == "assistant"
+    assert body4["messages"][0]["content"] == "文本"
+    assert "tool_calls" not in body4["messages"][0]

@@ -18,6 +18,16 @@ class UpstreamProtocolViolation(ValueError):
     """上游事件违反可映射的结构约束。"""
 
 
+def _is_blank_tool_call(tc: dict) -> bool:
+    """无 name 且 arguments 为空/{} 的噪声 tool_call（模型输出的空调用）。"""
+    fn = tc.get("function")
+    fn = fn if isinstance(fn, dict) else {}
+    if str(fn.get("name") or "").strip():
+        return False
+    args = fn.get("arguments")
+    return args in (None, "", "{}", {})
+
+
 def parse_frame(frame: SSEFrame) -> Event | None:
     """单帧 → 中立事件；[DONE] 与无 delta 的帧返回 None。"""
     if not frame.data:
@@ -38,7 +48,10 @@ def parse_frame(frame: SSEFrame) -> Event | None:
 
     tool_calls = delta.get("tool_calls")
     if isinstance(tool_calls, list):
-        kept = [tc for tc in tool_calls if isinstance(tc, dict)]
+        # 上游偶发噪声调用：无 name 且 arguments 为空/{}（客户端聚合后
+        # 显示 "Tool not found"）。正常分片块无 name 但带实际 arguments，
+        # 必须保留。空名噪声整条丢弃。
+        kept = [tc for tc in tool_calls if isinstance(tc, dict) and not _is_blank_tool_call(tc)]
         if kept:
             return Event(kind=EventKind.TOOL_CALLS, tool_calls=kept)
 
