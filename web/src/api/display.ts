@@ -31,13 +31,20 @@ export function healthView(health: Health): HealthView {
 /**
  * 周期语义：CodeBuddy 的额度随周期重置，TRAE 是单调递减的账户余额。
  * 两者单位都是积分（credit），但重置行为不同，必须标注。
+ *
+ * 判定依据是**上游类型**，不是 quota_cycle_end 是否存在：
+ * CodeBuddy 未探测时 cycle_end 同样是 null，而按 cycle_end 推断会把它
+ * 错标成 TRAE 的「账户剩余（单调递减）」。
  */
 export function quotaSemantics(credential: Credential): string {
-  if (credential.quota_cycle_end) {
-    const date = new Date(credential.quota_cycle_end * 1000).toLocaleDateString("zh-CN");
-    return `本周期剩余，${date} 重置`;
+  if (credential.provider !== "codebuddy") {
+    return "账户剩余（单调递减）";
   }
-  return "账户剩余（单调递减）";
+  if (!credential.quota_cycle_end) {
+    return "本周期剩余（未探测到重置时间）";
+  }
+  const date = new Date(credential.quota_cycle_end * 1000).toLocaleDateString("zh-CN");
+  return `本周期剩余，${date} 重置`;
 }
 
 export function cooldownRemaining(coolingUntil: number | null, now = Date.now() / 1000): number {

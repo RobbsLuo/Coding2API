@@ -169,10 +169,22 @@ describe("display helpers", () => {
     expect(healthView(undefined as unknown as null).kind).toBe("unknown");
   });
 
-  it("周期语义区分重置与单调", () => {
-    const cycle = quotaSemantics(makeCredential({ quota_cycle_end: 1_800_000_000 }) as never);
-    expect(cycle).toContain("本周期剩余");
-    const balance = quotaSemantics(makeCredential({ quota_cycle_end: null }) as never);
+  it("周期语义按上游类型判定，而不是看 cycle_end 是否存在", () => {
+    // CodeBuddy 有重置时间
+    const cycle = quotaSemantics(makeCredential({
+      provider: "codebuddy", quota_cycle_end: 1_800_000_000 }) as never);
+    expect(cycle).toContain("本周期剩余，");
+    expect(cycle).toContain("重置");
+
+    // CodeBuddy 未探测：cycle_end 为 null，但绝不能显示成 TRAE 的语义
+    const unprobed = quotaSemantics(makeCredential({
+      provider: "codebuddy", quota_cycle_end: null }) as never);
+    expect(unprobed).toContain("本周期剩余");
+    expect(unprobed).not.toContain("单调递减");
+
+    // TRAE 永远是单调递减
+    const balance = quotaSemantics(makeCredential({
+      provider: "trae", quota_cycle_end: null }) as never);
     expect(balance).toBe("账户剩余（单调递减）");
   });
 
