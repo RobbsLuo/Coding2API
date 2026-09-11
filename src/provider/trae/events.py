@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 
 from ...engine.sse import SSEFrame
 from ...provider.base import ErrKind, Event, EventKind, Usage
@@ -81,6 +82,23 @@ def parse_frame(frame: SSEFrame) -> Event | None:
         f"unhandled known event {name!r}")
 
 
+def _solo_tool_call_name(item: Any) -> str:
+    """SOLO 增量块里工具名（function_call 或 function 下）。"""
+    if not isinstance(item, dict):
+        return ""
+    fn = item.get("function_call")
+    if not isinstance(fn, dict):
+        fn = item.get("function")
+    if not isinstance(fn, dict):
+        return ""
+    return fn.get("name") if isinstance(fn.get("name"), str) else ""
+
+
+def _named_tool_calls(tool_calls: list) -> list:
+    """剔除 name 为空的 tool_call 增量（上游分片噪声，PI 无法执行）。"""
+    return [tc for tc in tool_calls if _solo_tool_call_name(tc)]
+
+
 def _parse_output(payload: dict) -> Event | None:
     content = payload.get("response")
     reasoning = payload.get("reasoning_content")
@@ -88,6 +106,7 @@ def _parse_output(payload: dict) -> Event | None:
 
     has_content = isinstance(content, str) and content != ""
     has_reasoning = isinstance(reasoning, str) and reasoning != ""
+    tool_calls = _named_tool_calls(tool_calls) if isinstance(tool_calls, list) else tool_calls
     has_tools = isinstance(tool_calls, list) and len(tool_calls) > 0
 
     if has_tools:
@@ -135,7 +154,9 @@ def parse_all_events(frame: SSEFrame) -> list[Event]:
     reasoning = payload.get("reasoning_content")
     tool_calls = payload.get("tool_calls")
     if isinstance(tool_calls, list) and tool_calls:
-        events.append(Event(kind=EventKind.TOOL_CALLS, tool_calls=tool_calls))
+        named = _named_tool_calls(tool_calls)
+        if named:
+            events.append(Event(kind=EventKind.TOOL_CALLS, tool_calls=named))
     if isinstance(content, str) and content:
         events.append(Event(kind=EventKind.CONTENT, content=content))
     if isinstance(reasoning, str) and reasoning:

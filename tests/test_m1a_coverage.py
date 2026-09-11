@@ -295,9 +295,17 @@ def test_parse_all_events_splits_content_and_reasoning():
 def test_parse_all_events_orders_tools_first():
     frame = trae_events.SSEFrame(
         event="output",
-        data='{"response":"x","reasoning_content":"y","tool_calls":[{"id":"c"}]}')
+        data='{"response":"x","reasoning_content":"y","tool_calls":'
+             '[{"id":"c","function_call":{"name":"bash","arguments":"{}"}}]}')
     assert [e.kind for e in trae_events.parse_all_events(frame)] == [
         EventKind.TOOL_CALLS, EventKind.CONTENT, EventKind.REASONING]
+    # name 为空的 tool_call 增量（上游分片噪声）被过滤，不产生 TOOL_CALLS
+    noisy = trae_events.SSEFrame(
+        event="output",
+        data='{"response":"x","tool_calls":[{"id":"c"},{"id":"d","function_call":{"name":"f"}}]}')
+    events = trae_events.parse_all_events(noisy)
+    tools = [e for e in events if e.kind is EventKind.TOOL_CALLS]
+    assert len(tools) == 1 and tools[0].tool_calls[0]["function_call"]["name"] == "f"
 
 
 def test_parse_all_events_passes_through_non_output_frames():

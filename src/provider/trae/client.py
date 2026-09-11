@@ -122,11 +122,33 @@ def prepare_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
                     item["tool_calls"] = kept
                 else:
                     item.pop("tool_calls", None)
+                    # 全部 tool_call 被剔（如历史中的空 name 脏数据）：
+                    # content 为空的 assistant 占位消息也一并丢弃
+                    if item.get("content") is None:
+                        continue
             rewritten.append(item)
         body["messages"] = rewritten
 
     _normalize_tools(body)
+    _drop_orphan_tool_results(body)
     return body
+
+
+def _drop_orphan_tool_results(body: dict[str, Any]) -> None:
+    """删除引用了已剔除 tool_call 的悬空 role=tool 消息（TRAE 空流对策）。"""
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return
+    known_call_ids = {
+        tc.get("id")
+        for m in messages if isinstance(m, dict) and m.get("role") == "assistant"
+        for tc in (m.get("tool_calls") or []) if isinstance(tc, dict)
+    }
+    body["messages"] = [
+        m for m in messages
+        if not (isinstance(m, dict) and m.get("role") == "tool"
+                and m.get("tool_call_id") not in known_call_ids)
+    ]
 
 
 def _normalize_tools(body: dict[str, Any]) -> None:

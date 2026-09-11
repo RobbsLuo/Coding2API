@@ -251,7 +251,7 @@ def test_prepare_body_drops_unsupported_tool_choice_shape():
 def test_prepare_body_drops_empty_tool_calls_and_content():
     body = prepare_body({"messages": [{"role": "assistant", "content": None,
                                        "tool_calls": []}]}, "m")
-    assert "tool_calls" not in body["messages"][0]
+    assert body["messages"] == []   # 唯一 assistant 被丢弃
 
 
 def test_prepare_body_skips_non_dict_tool_call_entries():
@@ -982,7 +982,7 @@ def test_prepare_body_drops_unnamed_function_call():
          "tool_calls": [{"id": "c", "type": "function",
                          "function": {"arguments": "{}"}}]},
     ]}, "m")
-    assert "tool_calls" not in body["messages"][0]
+    assert body["messages"] == []   # 唯一 assistant 被丢弃
 
 
 
@@ -994,3 +994,57 @@ def test_prepare_body_normalizes_developer_role():
     ]}, "m")
     roles = [m["role"] for m in body["messages"]]
     assert roles == ["system", "user"]
+
+
+def test_prepare_body_drops_empty_assistant_with_kept_tool_calls():
+    """tool_call 有 name 保留 + assistant 占位删除后悬空 tool 也清（127-129）。"""
+    body = prepare_body({"messages": [
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "keep", "type": "function",
+                         "function": {"name": "bash", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "keep", "content": "out"},
+    ]}, "m")
+    assert len(body["messages"]) == 2
+    assert body["messages"][0]["tool_calls"][0]["id"] == "keep"
+    assert body["messages"][1]["role"] == "tool"
+
+
+def test_prepare_body_drops_placeholder_assistant_when_all_calls_dropped():
+    """全部 tool_call 被剔 + content=None → 占位 assistant 整条丢弃（127-129）。"""
+    body = prepare_body({"messages": [
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "x", "type": "function",
+                         "function": {"arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "x", "content": "out"},
+    ]}, "m")
+    assert [m["role"] for m in body["messages"]] == []
+
+
+def test_prepare_body_keeps_assistant_placeholder_when_content_present():
+    """占位 assistant 带 content → 保留（127-129 不走 continue 分支）。"""
+    body = prepare_body({"messages": [
+        {"role": "assistant", "content": "文本",
+         "tool_calls": [{"id": "x", "type": "function",
+                         "function": {"arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "x", "content": "out"},
+    ]}, "m")
+    assert body["messages"][0]["content"] == [{"type": "text", "text": "文本"}]
+    assert "tool_calls" not in body["messages"][0]
+    # 悬空 tool 消息被成对清理
+    assert [m["role"] for m in body["messages"][1:]] == []
+
+
+def test_parse_all_events_non_dict_tool_call_entry_skipped():
+    """非对象 tool_call 条目（88）与全空结果（158-160）覆盖。"""
+    frame = trae_events.SSEFrame(
+        event="output",
+        data='{"tool_calls":["junk",{"function_call":{"name":"f","arguments":"{}"}}]}')
+    events = trae_events.parse_all_events(frame)
+    tools = [e for e in events if e.kind is EventKind.TOOL_CALLS]
+    assert len(tools) == 1 and tools[0].tool_calls[0]["function_call"]["name"] == "f"
+
+    empty = trae_events.SSEFrame(
+        event="output",
+        data='{"tool_calls":["junk"],"response":"x"}')
+    kinds = [e.kind for e in trae_events.parse_all_events(empty)]
+    assert EventKind.TOOL_CALLS not in kinds
