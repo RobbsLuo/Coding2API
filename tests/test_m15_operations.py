@@ -2387,3 +2387,61 @@ def test_v1_models_and_playground_models_are_consistent(tmp_path):
         client.cookies.set("coding2api_session", create_session_token("root", "s"))
         playground = client.get("/api/playground/models").json()
     assert v1 == playground
+
+
+# --------------------------------- TRAE 真实回调形态（上游不回传 state）
+
+def test_authorize_accepts_real_trae_callback_without_state(tmp_path):
+    """TRAE 回跳只带 refreshToken/userInfo，不会回传我们的 state。
+
+    之前实现要求 state 匹配，导致真实登录必然 400。
+    """
+    import httpx as _httpx
+
+    from src.provider.trae.client import TraeClient, TraeProvider
+
+    def handler(request: _httpx.Request) -> _httpx.Response:
+        if request.url.path.endswith("ExchangeToken"):
+            return _httpx.Response(200, json={"Result": {"Token": "ACCESS",
+                                                         "RefreshToken": "RT2"}})
+        return _httpx.Response(200, json={"Result": {"UserID": "u9",
+                                                     "ScreenName": "真名"}})
+
+    transport = _httpx.MockTransport(handler)
+    trae = TraeProvider(client=TraeClient(
+        stream_client=_httpx.AsyncClient(transport=transport, timeout=None),
+        short_client=_httpx.AsyncClient(transport=transport, timeout=None)))
+
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings, providers={"trae": trae})
+
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "root", "password": "rootpw"})
+        started = client.post("/api/auth/upstream/start", json={"provider": "trae"}).json()
+
+        # 与真实回调一致：不带 state 参数
+        callback = ("/authorize?refreshToken=RT1&userInfo="
+                    "%7B%22uid%22%3A%22uid-9%22%2C%22nickname%22%3A%22%E7%9C%9F%E5%90%8D%22%7D")
+        response = client.get(callback)
+        assert response.status_code == 200, response.text
+
+        listed = client.get("/api/credentials").json()["credentials"]
+        assert len(listed) == 1 and listed[0]["provider"] == "trae"
+        assert listed[0]["nickname"] == "真名"
+        # machine/device id 来自 pending state，与登录 URL 一致
+        assert started["state"].partition(":")[0] in started["auth_url"]
+
+    # 回调成功后 pending 已清空：同一链接重放必须拒绝
+    with TestClient(app) as replay:
+        assert replay.get(callback).status_code == 400
+
+
+def test_authorize_without_pending_login_still_rejected(tmp_path):
+    """没有进行中的登录时，带 refreshToken 的回调依然拒绝（防乱塞池子）。"""
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    app = build_app(settings)
+    with TestClient(app) as client:
+        response = client.get("/authorize?refreshToken=RT")
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
