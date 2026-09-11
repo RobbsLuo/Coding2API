@@ -64,6 +64,11 @@ class Executor:
             model=model, ok=False, error_type="invalid_request",
             latency_ms=int((time.monotonic() - started) * 1000))
 
+    def _skip_provider(self, provider_id: str, tried: set[str]) -> None:
+        """INVALID 后跳过该上游：把它的全部凭证都标记为已试。"""
+        for candidate in self._deps.credentials.candidates([provider_id]):
+            tried.add(candidate.credential_id)
+
     def _upstream_model(self, provider_id: str, model: str) -> str:
         """归一模型名 → 该上游注册的原始 id（大小写变体映射，未知则原样）。"""
         if self._deps.upstream_model_name is None:
@@ -79,6 +84,7 @@ class Executor:
         target = self.resolve_target(request)
         tried: set[str] = set()
         last_error: Exception | None = None
+        last_kind: ErrKind | None = None
         translator = StreamTranslator(target.model)
         started = time.monotonic()
         # 轮换耗尽后再次选号会失败，此时统计仍应归到实际尝试过的上游
@@ -88,6 +94,11 @@ class Executor:
         while True:
             pick = self._pick(target, tried)
             if pick is None:
+                if last_kind is ErrKind.INVALID:
+                    # 所有候选上游都拒绝了该模型：400 语义而非 503
+                    yield _error_frame(_reject_message(target.model, last_error),
+                                       "invalid_request")
+                    return
                 self._deps.record(
                     username=username, provider=last_provider, credential_id=last_credential,
                     model=target.model, ok=False, error_type="no_healthy_credential",
@@ -129,19 +140,23 @@ class Executor:
                 if kind is None:
                     raise
                 if kind is ErrKind.INVALID:
-                    # 请求无效（如上游不认识该模型）：不冷却不轮换；
-                    # 流已开始（200 已发出），以 invalid_request 错误帧结束
+                    # 请求无效（如该上游不认识模型）：不冷却凭证，
+                    # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
                     self._record_invalid(username, provider_id, credential_id,
                                          target.model, started, error)
-                    yield _error_frame(
-                        f"upstream rejected request (model {target.model!r} "
-                        f"unavailable): {error}", "invalid_request")
-                    return
-                outcome = self._deps.scheduler.note_error(
-                    self._candidate(credential_id), kind, int(time.time()))
-                self._deps.credentials.save_error(credential_id, outcome)
-                last_error = error
+                    last_error, last_kind = error, ErrKind.INVALID
+                    self._skip_provider(provider_id, tried)
+                else:
+                    outcome = self._deps.scheduler.note_error(
+                        self._candidate(credential_id), kind, int(time.time()))
+                    self._deps.credentials.save_error(credential_id, outcome)
+                    last_error = error
             if not self._deps.scheduler.should_rotate(tried):
+                if last_kind is ErrKind.INVALID:
+                    # 流已开始（200 已发出），以 invalid_request 错误帧结束
+                    yield _error_frame(_reject_message(target.model, last_error),
+                                       "invalid_request")
+                    return
                 kind = _classify(last_error) if last_error is not None else None
                 self._deps.record(
                     username=username, provider=provider_id,
@@ -157,6 +172,7 @@ class Executor:
         target = self.resolve_target(request)
         tried: set[str] = set()
         last_error: Exception | None = None
+        last_kind: ErrKind | None = None
         started = time.monotonic()
         last_provider = "-"
         last_credential: str | None = None
@@ -164,6 +180,9 @@ class Executor:
         while True:
             pick = self._pick(target, tried)
             if pick is None:
+                if last_kind is ErrKind.INVALID:
+                    # 所有候选上游都拒绝了该模型：400 而非 503
+                    raise InvalidRequest(_reject_message(target.model, last_error))
                 self._deps.record(
                     username=username, provider=last_provider, credential_id=last_credential,
                     model=target.model, ok=False, error_type="no_healthy_credential",
@@ -186,14 +205,15 @@ class Executor:
                 if kind is None:
                     raise
                 if kind is ErrKind.INVALID:
-                    # 请求无效（如上游不认识该模型）：不冷却凭证，直接 400
+                    # 请求无效（如该上游不认识模型）：不冷却凭证，
+                    # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
                     self._record_invalid(username, provider_id, credential_id,
                                          target.model, started, error)
-                    raise InvalidRequest(
-                        f"upstream rejected request (model {target.model!r} "
-                        f"unavailable): {error}") from error
-                self._record_error(credential_id, kind)
-                last_error = error
+                    last_error, last_kind = error, ErrKind.INVALID
+                    self._skip_provider(provider_id, tried)
+                else:
+                    self._record_error(credential_id, kind)
+                    last_error = error
             else:
                 try:
                     result = aggregate(events, target.model)
@@ -214,6 +234,8 @@ class Executor:
                         latency_ms=int((time.monotonic() - started) * 1000))
                     return result
             if not self._deps.scheduler.should_rotate(tried):
+                if last_kind is ErrKind.INVALID:
+                    raise InvalidRequest(_reject_message(target.model, last_error))
                 kind = _classify(last_error) if last_error is not None else None
                 self._deps.record(
                     username=username, provider=provider_id, credential_id=credential_id,
@@ -280,6 +302,12 @@ def _unavailable_frame(last_error: Exception | None) -> bytes:
 def _usage_field(usage: object, name: str) -> object:
     """上游可能完全没有 usage 帧，统计字段要容忍缺失。"""
     return getattr(usage, name, None) if usage is not None else None
+
+
+def _reject_message(model: str, last_error: Exception | None) -> str:
+    """所有上游都拒绝该模型时的 400 文案。"""
+    detail = f": {last_error}" if last_error is not None else ""
+    return f"model {model!r} not available on any configured upstream{detail}"
 
 
 def _error_type_for(kind: ErrKind) -> str:

@@ -892,3 +892,109 @@ def test_error_type_for_invalid():
     from src.engine.executor import _error_type_for
 
     assert _error_type_for(ErrKind.INVALID) == "invalid_request"
+
+
+# ------------------------------------- INVALID 跳过上游：双上游回退
+
+class _RejectProvider:
+    """可脚本化的 provider：按调用次序抛指定异常或返回事件。"""
+
+    def __init__(self, provider_id: str, outcomes: list) -> None:
+        self.id = provider_id
+        self.outcomes = outcomes
+        self.calls = 0
+
+    async def stream_chat(self, _credential_data, _payload, _model):
+        index = min(self.calls, len(self.outcomes) - 1)
+        self.calls += 1
+        item = self.outcomes[index]
+        if isinstance(item, Exception):
+            raise item
+        for event in item:
+            yield event
+
+    def list_models(self, _credential_data):
+        return []
+
+
+def _http_400() -> Exception:
+    from src.provider.codebuddy.client import UpstreamHTTPError
+
+    return UpstreamHTTPError(400, b'{"code":1002,"msg":"model not found"}')
+
+
+async def test_invalid_skips_provider_and_falls_back_to_next(dual_repo):
+    """CB 400（不认识模型）→ 跳过 CB，TRAE 成功接住；凭证零冷却。"""
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="trae", credential_data={"accessToken": "trae"})
+    # pin CB 保证它先被选中，从而触发「400 → 跳过 → TRAE 接住」路径
+    db.connect().execute("UPDATE credentials SET pinned = 1 WHERE provider = 'codebuddy'")
+    cb = _RejectProvider("codebuddy", [_http_400()])
+    trae = _RejectProvider("trae", [GOOD])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb, "trae": trae}, credentials=repo,
+        scheduler=Scheduler(), default_model="qwen3.8-max"))
+
+    result = await executor.complete(_request("qwen3.8-max"), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert cb.calls == 1 and trae.calls == 1
+    assert tuple(db.connect().execute(
+        "SELECT err_count, cooling_until, disabled FROM credentials").fetchone()) \
+        is not None
+    rows = [tuple(r) for r in db.connect().execute(
+        "SELECT err_count, cooling_until, disabled FROM credentials")]
+    assert rows == [(0, None, 0), (0, None, 0)]     # 谁都没被冷却
+
+
+async def test_all_upstreams_reject_yields_400(dual_repo):
+    """两个上游都 400 → InvalidRequest（400 语义），凭证零冷却。"""
+    from src.compat.openai.request import InvalidRequest
+
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="trae", credential_data={"accessToken": "trae"})
+    cb = _RejectProvider("codebuddy", [_http_400()])
+    trae = _RejectProvider("trae", [_http_400()])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb, "trae": trae}, credentials=repo,
+        scheduler=Scheduler(), default_model="qwen3.8-max"))
+
+    with pytest.raises(InvalidRequest) as exc_info:
+        await executor.complete(_request("qwen3.8-max"), username="u")
+    assert "qwen3.8-max" in str(exc_info.value)
+    rows = [tuple(r) for r in db.connect().execute(
+        "SELECT err_count, cooling_until, disabled FROM credentials")]
+    assert rows == [(0, None, 0), (0, None, 0)]
+
+
+async def test_stream_rotate_exhausted_with_invalid_last_error(dual_repo):
+    """流式 + 轮换耗尽时最后错误是 INVALID → invalid_request 帧（155-159）。"""
+    import json as _json
+
+    repo, _db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    cb = _RejectProvider("codebuddy", [_http_400()])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb}, credentials=repo,
+        scheduler=Scheduler(max_rotate=1), default_model="qwen3.8"))
+
+    frames = [f async for f in executor.stream(_request("qwen3.8"), username="u")]
+    payload = _json.loads(frames[0].split(b"\n\n")[0].removeprefix(b"data: "))
+    assert payload["error"]["code"] == "invalid_request"
+    assert "qwen3.8" in payload["error"]["message"]
+
+
+async def test_complete_rotate_exhausted_with_invalid_last_error(dual_repo):
+    """非流式 + 轮换耗尽 + 最后错误 INVALID → 400（executor 238）。"""
+    from src.compat.openai.request import InvalidRequest
+
+    repo, _db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    cb = _RejectProvider("codebuddy", [_http_400()])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb}, credentials=repo,
+        scheduler=Scheduler(max_rotate=1), default_model="qwen3.8"))
+
+    with pytest.raises(InvalidRequest):
+        await executor.complete(_request("qwen3.8"), username="u")
