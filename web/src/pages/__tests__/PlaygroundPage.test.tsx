@@ -9,7 +9,7 @@ const MODELS = {
     {
       id: "glm-5.2",
       object: "model",
-      owned_by: "coding2api",
+      owned_by: "Coding2API",
       providers: ["codebuddy", "trae"],
     },
   ],
@@ -58,14 +58,14 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
       object: "list",
       data: [
         {
-          id: "glm-5.2", object: "model", owned_by: "coding2api",
+          id: "glm-5.2", object: "model", owned_by: "Coding2API",
           providers: ["codebuddy", "trae"],
           credit_rate: 0.29, max_input_tokens: 200000,
           supports_images: false, supports_tool_call: true,
           by_provider: { codebuddy: { credit_rate: 0.29 }, trae: { credit_rate: 0.17 } },
         },
         {
-          id: "DeepSeek-V4-Flash-Official", object: "model", owned_by: "coding2api",
+          id: "DeepSeek-V4-Flash-Official", object: "model", owned_by: "Coding2API",
           providers: ["trae"],
           credit_rate: 0.08, max_input_tokens: 256000,
         },
@@ -116,15 +116,15 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
       object: "list",
       data: [
         {
-          id: "glm-5.2", object: "model", owned_by: "coding2api",
+          id: "glm-5.2", object: "model", owned_by: "Coding2API",
           providers: ["codebuddy", "trae"], credit_rate: 0.29,
           by_provider: { codebuddy: { credit_rate: 0.29 }, trae: { credit_rate: 0.17 } },
         },
         {
-          id: "DeepSeek-V4-Flash-Official", object: "model", owned_by: "coding2api",
+          id: "DeepSeek-V4-Flash-Official", object: "model", owned_by: "Coding2API",
           providers: ["trae"], credit_rate: 0.08,
         },
-        { id: "no-rate", object: "model", owned_by: "coding2api", providers: ["trae"] },
+        { id: "no-rate", object: "model", owned_by: "Coding2API", providers: ["trae"] },
       ],
     };
     mockFetch({ "/api/playground/models": RATED_MODELS });
@@ -151,12 +151,12 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
       object: "list",
       data: [
         {
-          id: "same-rate", object: "model", owned_by: "coding2api",
+          id: "same-rate", object: "model", owned_by: "Coding2API",
           providers: ["codebuddy", "trae"], credit_rate: 0.5,
           by_provider: { codebuddy: { credit_rate: 0.5 }, trae: { credit_rate: 0.5 } },
         },
         {
-          id: "one-sided", object: "model", owned_by: "coding2api",
+          id: "one-sided", object: "model", owned_by: "Coding2API",
           providers: ["codebuddy", "trae"], credit_rate: 0.29,
           by_provider: { codebuddy: { credit_rate: 0.29 } },
         },

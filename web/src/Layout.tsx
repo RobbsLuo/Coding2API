@@ -33,7 +33,7 @@ export function Layout({ session }: { session: SessionInfo }) {
             <span className="grid size-7 place-items-center rounded-lg bg-primary text-primary-foreground">
               <TerminalSquare className="size-4" />
             </span>
-            coding2api
+            Coding2API
           </span>
           <nav className="flex flex-1 gap-1">
             {NAV.map((item) => (
@@ -67,7 +67,7 @@ export function Layout({ session }: { session: SessionInfo }) {
         <Outlet context={session} />
       </main>
       <footer className="mx-auto w-full max-w-7xl px-4 py-4 text-xs text-muted-foreground sm:px-6">
-        coding2api · 仅供学习研究，未做安全审计
+        Coding2API · 仅供学习研究，未做安全审计
       </footer>
     </div>
   );

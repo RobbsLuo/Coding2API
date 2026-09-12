@@ -1,4 +1,4 @@
-# coding2api
+# Coding2API
 
 把 **CodeBuddy** 与 **TRAE SOLO** 两个 coding agent 上游通道，统一封装为 OpenAI 兼容 API，
 并提供公共凭证池、统一调度与按人用量统计。

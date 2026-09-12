@@ -1,4 +1,4 @@
-# coding2api 实施方案
+# Coding2API 实施方案
 
 把 CodeBuddy 与 TRAE SOLO 两个 coding agent 上游通道，统一封装为 OpenAI 兼容 API，并提供公共凭证池、统一调度与按人用量统计。
 
@@ -605,7 +605,7 @@ React + Tailwind + shadcn/ui，6 页（对齐 Q11=B：无设置页，运行配�
 ## 12. NOTICE 三方溯源
 
 ```
-coding2api
+Coding2API
 Copyright (c) 2026
 
 本项目从零实现，但在设计与实现上参考了以下项目：

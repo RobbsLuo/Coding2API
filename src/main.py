@@ -121,7 +121,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                     await closer()
             db.close()
 
-    app = FastAPI(title="coding2api", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Coding2API", version="0.1.0", lifespan=lifespan)
     app.state.settings = config
     app.state.users = store
     app.state.credentials = credentials
@@ -300,7 +300,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _CONTAINER_DIST = Path("/app/web/dist")
 
 _FRONTEND_MISSING_HTML = """<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><title>coding2api</title>
+<html lang="zh-CN"><head><meta charset="utf-8"><title>Coding2API</title>
 <style>body{font-family:ui-sans-serif,system-ui,sans-serif;max-width:44rem;margin:4rem auto;
 padding:0 1.5rem;line-height:1.7;color:#1f2937}
 code{background:#f3f4f6;padding:.15rem .4rem;border-radius:.25rem;font-size:.9em}

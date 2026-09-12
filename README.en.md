@@ -1,4 +1,4 @@
-# coding2api
+# Coding2API
 
 Unified OpenAI-compatible gateway for the **CodeBuddy** and **TRAE SOLO** coding-agent
 upstream channels, with a shared credential pool, unified scheduling, and per-user usage stats.

@@ -1,4 +1,4 @@
-# coding2api 技术方案
+# Coding2API 技术方案
 
 PROPOSAL.md 定方向，本文档定实现。每个模块标注来源决策（Q 编号）。
 

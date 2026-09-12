@@ -31,7 +31,7 @@ export function LoginPage() {
           <div className="mx-auto mb-3 grid size-11 place-items-center rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/25">
             <TerminalSquare className="size-6" />
           </div>
-          <h1 className="text-xl font-semibold tracking-tight">coding2api</h1>
+          <h1 className="text-xl font-semibold tracking-tight">Coding2API</h1>
           <p className="mt-1 text-xs text-muted-foreground">双上游统一调度 · OpenAI 兼容管理台</p>
         </div>
         <Panel className="shadow-lg shadow-foreground/5">

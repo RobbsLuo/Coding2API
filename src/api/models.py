@@ -67,7 +67,7 @@ def _entry_response(entry: dict[str, Any]) -> dict[str, Any]:
     前端按渠道分别展示。
     """
     result: dict[str, Any] = {
-        "id": entry["canonical"], "object": "model", "owned_by": "coding2api",
+        "id": entry["canonical"], "object": "model", "owned_by": "Coding2API",
         "providers": sorted(entry["providers"]),
         **{key: value for key, value in entry["meta"].items() if value is not None},
     }
