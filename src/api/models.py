@@ -3,11 +3,14 @@
 带服务层缓存：某上游拉取成功后把归一结果写入 services.model_list_cache；
 下次该上游拉取失败时用缓存兜底，保证 /v1/models 稳定返回完整列表
 （冷启动无缓存时才退化为跳过该上游）。
+另按 MODEL_BLOCKLIST（fnmatch glob）过滤非用户模型与老模型，
+只影响列表展示；直连指定被滤模型不受影响。
 """
 
 from __future__ import annotations
 
 import logging
+from fnmatch import fnmatch
 from typing import Any
 
 from fastapi import APIRouter, Depends
@@ -15,6 +18,11 @@ from fastapi import APIRouter, Depends
 from .deps import Services, api_key_user
 
 logger = logging.getLogger(__name__)
+
+
+def _blocked(model_id: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch(model_id, pattern) or fnmatch(model_id.lower(), pattern)
+               for pattern in patterns)
 
 
 def _merge_provider(grouped: dict[str, dict[str, Any]],
@@ -60,7 +68,9 @@ async def list_models(services: Services) -> dict:
             else:
                 logger.warning("模型列表获取失败 %s: %s", provider_id, error)
             continue
-        name_map = {model.id.lower(): model.id for model in models}
+        patterns = services.settings.blocklist_patterns
+        name_map = {model.id.lower(): model.id for model in models
+                    if not _blocked(model.id, patterns)}
         _merge_provider(grouped, aliases, provider_id, name_map)
         # 成功 → 更新该上游缓存（下次失败时兜底）
         cache[provider_id] = name_map

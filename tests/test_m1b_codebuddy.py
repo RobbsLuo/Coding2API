@@ -657,6 +657,46 @@ def test_models_cache_used_when_fetch_fails(tmp_path):
         assert {item["id"] for item in third} == {"glm-5.2", "DeepSeek-V4-Flash"}
 
 
+def test_models_blocklist_filters_noise_and_old(tmp_path):
+    """默认黑名单滤非用户模型（custom_model_*/subagent/summary），
+    MODEL_BLOCKLIST 覆盖后可再滤老模型；直连指定不受列表过滤影响。"""
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+
+    class NoisyProvider:
+        id = "trae"
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            return [Model(id="glm-5.2"), Model(id="kimi-k2.6"),
+                    Model(id="custom_model_claude"),
+                    Model(id="explore_sub_agent_v13"), Model(id="summary")]
+
+        def import_credential(self, raw):
+            return raw
+
+    app = build_app(settings, providers={"trae": NoisyProvider()})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        ids = {item["id"] for item in client.get(
+            "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]}
+    # 默认黑名单：噪音全滤，老模型默认保留（是否滤由配置决定）
+    assert "custom_model_claude" not in ids
+    assert "explore_sub_agent_v13" not in ids
+    assert "summary" not in ids
+    assert {"glm-5.2", "kimi-k2.6"} <= ids
+
+    # 覆盖黑名单：额外滤老模型（完全替换语义，需重写噪音规则）
+    settings2 = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+                         MODEL_BLOCKLIST="custom_model_*,*sub*agent*,summary,kimi-k2.6")
+    app2 = build_app(settings2, providers={"trae": NoisyProvider()})
+    key2 = app2.state.api_keys.create("root")["api_key"]
+    with TestClient(app2) as client:
+        ids2 = {item["id"] for item in client.get(
+            "/v1/models", headers={"Authorization": f"Bearer {key2}"}).json()["data"]}
+    assert "kimi-k2.6" not in ids2 and "glm-5.2" in ids2
+
+
 def test_codebuddy_import_via_api(tmp_path):
     settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")

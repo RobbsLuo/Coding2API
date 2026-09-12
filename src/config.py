@@ -45,6 +45,10 @@ class Settings(BaseSettings):
     # CodeBuddy 聊天最小间隔：腾讯频率风控（11128）在连续快速请求时触发，
     # 实测 ≥5s 间隔稳定避开；0 关闭节流
     codebuddy_chat_min_interval: float = 5
+    # 模型列表黑名单（fnmatch glob，逗号分隔）：滤掉非用户模型与老模型，
+    # 只影响 /v1/models 与 playground 列表，直连指定不受影响。
+    # 覆盖此值时为完全替换（含默认噪音规则），增删请重写全量。
+    model_blocklist: str = "custom_model_*,*sub*agent*,summary,browser_use_*"
     # 诊断：把 /v1 入口的原始请求体落到 data/dumps/（排查客户端差异用）
     dump_request_bodies: bool = False
 
@@ -55,6 +59,10 @@ class Settings(BaseSettings):
     @cached_property
     def allowed_endpoints(self) -> tuple[str, ...]:
         return tuple(e.strip() for e in self.codebuddy_allowed_endpoints.split(",") if e.strip())
+
+    @cached_property
+    def blocklist_patterns(self) -> tuple[str, ...]:
+        return tuple(p.strip() for p in self.model_blocklist.split(",") if p.strip())
 
     def is_admin(self, username: str) -> bool:
         return username in self.admin_set
