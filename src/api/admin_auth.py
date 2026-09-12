@@ -26,9 +26,12 @@ def create_router(services: Services) -> APIRouter:
         password = str(payload.get("password") or "")
         ip = request.client.host if request.client else ""
         throttle = services.login_throttle
+        # 哈希前先卡全局/IP 窗口：PBKDF2（600k 迭代）是 CPU 密集操作，
+        # 不限流的话无效尝试就能占满线程池（DoS）。
+        # 用户名窗口故意放到验证之后：它可能被他人输错用户名抬高，
+        # 提前拦截会误伤合法用户。
+        throttle.check_transport_windows(ip=ip)
         # PBKDF2 是 CPU 密集同步操作：线程池 + 信号量限并发，防事件循环卡死。
-        # 先验证再限流：正确密码永不被窗口卡死（一次成功即解锁），
-        # 失败才走窗口计数——爆破频率被压到可用性以下。
         verified = await throttle.verify(services.users.verify, username, password)
         if not verified:
             # 超限时抛 429 且不再计数；未超限则记一次失败并回 401
@@ -46,7 +49,8 @@ def create_router(services: Services) -> APIRouter:
         return response
 
     @router.post("/api/auth/logout")
-    async def logout():
+    async def logout(_csrf: None = Depends(csrf_protected)):
+        # 不校验 CSRF 时，任何跨站页面都能强制登出（拒绝服务式骚扰）。
         response = JSONResponse({"ok": True})
         response.delete_cookie(SESSION_COOKIE, path="/")
         return response

@@ -335,24 +335,8 @@ CREATE TABLE usage_hourly (
     PRIMARY KEY (hour_utc, username, provider, model)
 );
 
--- 签到记录（按上游账号去重，避免同号多凭证重复签到）
-CREATE TABLE checkins (
-    provider     TEXT NOT NULL,
-    account_key  TEXT NOT NULL,
-    date_local   TEXT NOT NULL,
-    ok           INTEGER NOT NULL,
-    credit       REAL,
-    checked_at   INTEGER NOT NULL,
-    PRIMARY KEY (provider, account_key, date_local)
-);
-
--- 模型缓存
-CREATE TABLE model_cache (
-    provider     TEXT NOT NULL,
-    model_id     TEXT NOT NULL,
-    fetched_at   INTEGER NOT NULL,
-    PRIMARY KEY (provider, model_id)
-);
+-- 签到去重与模型列表缓存不进库：前者由 CheckinTask 的当日作用域集合实现，
+-- 后者是进程内 TTL 缓存（重启即重建，无需持久化）。
 ```
 
 **脱敏纪律**（继承 CB）：不存提示词、回答、请求头、Token、工具参数、原始错误体、会话 ID。
@@ -478,16 +462,23 @@ coding2api/
 沿用 codebuddy2api 的既有约定：
 
 - 上游 endpoint 白名单：**只接受明确配置的地址**，真实 Token 绝不转发到未授权站点
+  （`CODEBUDDY_API_ENDPOINT` 启动时强制校验，不在白名单直接失败）
 - TLS 校验默认开启，公网部署必须保持
 - Host / Origin 白名单，CSP `frame-ancestors`
 - 登录三级限流（全局 / IP / 用户名）+ PBKDF2 并发上限
-- 请求体上限 16MB，登录接口 8KB
+- 请求体上限 16MB，登录接口 8KB（ASGI 层按实际字节计数，`chunked` 不能绕过）
 - API Key 仅存摘要，明文只在创建时返回一次
 - 凭证内容加密入库，密钥走 `APP_SECRET` env；**密钥丢失 = 已存凭证全部不可解，只能重录**，不做密钥轮换
-- 管理台会话 Cookie `SameSite=Lax` + 写操作自定义头校验（CSRF）
+  - `APP_SECRET` 最短 16 字符，弱密钥拒绝启动（占位值不再能加密真实凭证）
+  - 解密失败返回可行动错误码 `credential_decrypt_failed`，不暴露裸 500
+- 管理台会话 Cookie `SameSite=Lax` + 写操作自定义头校验（CSRF，含 logout）
+- 会话与 API Key 除签名/摘要外**校验用户仍存在于 users.txt**：删用户即失效
+- 未匹配的 `/api`、`/v1` 路径返回 JSON 404（不再落到 SPA 的 200 + HTML）
 - 日志脱敏：不打印 Token、完整请求体
+- 审计：凭证增删改、pin、账号切换写 INFO 日志（含操作人）
 
-不做的：mTLS、审计日志、IP 白名单（交给反向代理）。
+不做的：mTLS、IP 白名单（交给反向代理）。审计日志只覆盖凭证管理写操作，
+不做全量请求审计（统计表已是脱敏的请求级记录）。
 
 ### 配置参考（env）
 
@@ -501,7 +492,7 @@ coding2api/
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | 监听地址与端口 |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |
 | `DEFAULT_MODEL` | `glm-5.2` | model 为空/auto 时的路由目标 |
-| `CHECKIN_HOUR` | `9` | 每日签到时刻（服务器本地时区） |
+| `CHECKIN_HOUR` | `9` | 每日签到时刻（容器本地时区，镜像默认 `TZ=Asia/Shanghai`） |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |
 | `PACER_MIN_SECONDS` / `PACER_MAX_SECONDS` | `5` / `20` | 后台任务随机节流区间 |
 | `REFRESH_SKEW_HOURS` | `24` | token 预刷新窗口 |
@@ -509,7 +500,7 @@ coding2api/
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB 聊天最小间隔（秒），避频控风控；0 关闭 |
 | `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*` | 模型列表黑名单（fnmatch glob）；只影响列表展示 |
 | `ALLOWED_HOSTS` | 空 | Host 白名单（防 DNS rebinding）；空 = 本地回环 + PUBLIC_BASE_URL 主机 |
-| `DUMP_REQUEST_BODIES` | `false` | 诊断开关：/v1 原始请求体落到 data/dumps/ |
+| `DUMP_REQUEST_BODIES` | `false` | 诊断开关：/v1 原始请求体落到 data/dumps/（最多保留 200 份） |
 
 ---
 

@@ -8,7 +8,6 @@ AGENTS.md 约束：
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -225,12 +224,3 @@ def _to_account(raw: Any) -> Account | None:
         enterprise_id=str(raw.get("enterpriseId") or ""),
         enabled=raw.get("pluginEnabled") is True,
     )
-
-
-def account_generation_changed(previous: str, current: str) -> bool:
-    """只在规范 account_id 确实变化时才推进额度代次（AGENTS.md）。"""
-    return (previous or "").strip() != (current or "").strip()
-
-
-def now_seconds() -> int:  # pragma: no cover - 便于测试替身
-    return int(time.time())

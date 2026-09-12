@@ -65,6 +65,8 @@ export const api = {
       method: "POST",
       ...json({ provider, credential, nickname }),
     }),
+  reviveCredential: (id: string) =>
+    request<{ ok: boolean }>(`/api/credentials/${id}/revive`, { method: "POST" }),
   toggleCredential: (id: string, enabled: boolean) =>
     request<{ ok: boolean }>(`/api/credentials/${id}/toggle`, { method: "POST", ...json({ enabled }) }),
   pinCredential: (id: string | null) =>

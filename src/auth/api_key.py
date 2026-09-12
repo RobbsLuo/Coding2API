@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import hmac
 import secrets
 
 API_KEY_PREFIX = "sk-"
@@ -22,7 +21,3 @@ def preview_api_key(api_key: str) -> str:
     """仅保留前缀与末 4 位，其余打码。"""
     tail = api_key[-4:] if len(api_key) > 4 else ""
     return f"{API_KEY_PREFIX}…{tail}"
-
-
-def matches(candidate: str, expected_digest: str) -> bool:
-    return hmac.compare_digest(digest_api_key(candidate), expected_digest)

@@ -34,7 +34,6 @@ from src.provider.codebuddy.oauth import AuthProgress, AuthStateStore, CodeBuddy
 from src.provider.codebuddy.refresh import (
     Account,
     CodeBuddyRefresh,
-    account_generation_changed,
 )
 from src.provider.trae.client import TraeProvider
 from src.stats.collector import StatsCollector
@@ -45,6 +44,7 @@ from src.tasks.pacer import Pacer
 from src.tasks.quota_probe import QuotaProbeTask
 from src.tasks.refresh import RefreshTask
 from src.tasks.retention import RetentionTask
+from tests.conftest import SECRET
 
 # ---------------------------------------------------------------- Pacer
 
@@ -547,13 +547,6 @@ async def test_switch_account_rejects_upstream_failure(switch_response):
     await client.aclose()
 
 
-def test_account_generation_changed_normalization():
-    assert account_generation_changed("a", "b") is True
-    assert account_generation_changed("a", " a ") is False
-    assert account_generation_changed("", "a") is True
-    assert account_generation_changed("a", "") is True
-
-
 async def test_refresh_lazy_client_and_close():
     client = CodeBuddyRefresh("https://e")
     assert client._http is client._http
@@ -700,7 +693,7 @@ async def test_provider_refresh_updates_oauth_credential():
 def repo(tmp_path):
     db = Database(tmp_path / "t.sqlite3")
     apply_schema(db.connect())
-    yield CredentialRepository(db, CredentialCipher("s")), db
+    yield CredentialRepository(db, CredentialCipher(SECRET)), db
     db.close()
 
 
@@ -1083,11 +1076,11 @@ def test_stats_model_timeline_top_models_and_points(stats):
 
 @pytest.fixture()
 def admin_client(tmp_path):
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
     app = build_app(settings)
     client = TestClient(app)
-    client.cookies.set("coding2api_session", create_session_token("root", "s"))
+    client.cookies.set("coding2api_session", create_session_token("root", SECRET))
     with client:
         yield app, client
 
@@ -1116,10 +1109,10 @@ def test_upstream_auth_poll_unknown_state(admin_client):
 
 
 def test_upstream_auth_rejects_non_admin(tmp_path):
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     app = build_app(settings)
     with TestClient(app) as client:
-        client.cookies.set("coding2api_session", create_session_token("guest", "s"))
+        client.cookies.set("coding2api_session", create_session_token("guest", SECRET))
         assert client.post("/api/auth/upstream/start",
                            json={"provider": "codebuddy"}).status_code == 403
 
@@ -1160,12 +1153,12 @@ def test_stats_endpoints_scope_by_principal(admin_client):
 
 
 def test_stats_endpoints_restrict_non_admin(tmp_path):
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     app = build_app(settings)
     app.state.stats_collector.record(username="alice", provider="trae", model="m", ok=True)
     app.state.stats_collector.record(username="bob", provider="trae", model="m", ok=True)
     with TestClient(app) as client:
-        client.cookies.set("coding2api_session", create_session_token("alice", "s"))
+        client.cookies.set("coding2api_session", create_session_token("alice", SECRET))
         assert client.get("/api/stats/overview").json()["requests"] == 1
         # 非 admin 指定他人用户名无效，仍只看自己
         assert client.get("/api/stats/overview",
@@ -1623,12 +1616,12 @@ def test_stats_events_restrict_non_admin(tmp_path):
     from src.config import Settings
     from src.main import build_app
 
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     app = build_app(settings)
     app.state.stats_collector.record(username="alice", provider="trae", model="m", ok=True)
     app.state.stats_collector.record(username="bob", provider="trae", model="m", ok=True)
     with TestClient(app) as client:
-        client.cookies.set("coding2api_session", create_session_token("alice", "s"))
+        client.cookies.set("coding2api_session", create_session_token("alice", SECRET))
         mine = client.get("/api/stats/events").json()
         assert [e["username"] for e in mine["events"]] == ["alice"]
         forced = client.get("/api/stats/events", params={"username": "bob"}).json()
@@ -1768,7 +1761,7 @@ async def test_aclose_without_client_is_noop():
 # ------------------------------------------------------------ 管理台登录
 
 def test_login_success_sets_httponly_cookie(tmp_path):
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
     app = build_app(settings)
     with TestClient(app) as client:
@@ -1782,7 +1775,7 @@ def test_login_success_sets_httponly_cookie(tmp_path):
 
 
 def test_login_rejects_bad_password_and_unknown_user(tmp_path):
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     app = build_app(settings)
     with TestClient(app) as client:
         for payload in ({"username": "root", "password": "wrong"},
@@ -1792,7 +1785,7 @@ def test_login_rejects_bad_password_and_unknown_user(tmp_path):
 
 
 def test_logout_clears_session(tmp_path):
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     app = build_app(settings)
     with TestClient(app) as client:
         client.post("/api/auth/login", json={"username": "root", "password": "rootpw"})
@@ -1801,7 +1794,7 @@ def test_logout_clears_session(tmp_path):
 
 
 def test_session_endpoint_requires_login(tmp_path):
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     app = build_app(settings)
     with TestClient(app) as client:
         assert client.get("/api/auth/session").status_code == 401
@@ -1811,13 +1804,13 @@ def test_build_app_fails_without_users_file(tmp_path, monkeypatch):
     from src.auth.users import UsersFileError
 
     monkeypatch.setenv("USERS_FILE", str(tmp_path / "missing.txt"))
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     with pytest.raises(UsersFileError):
         build_app(settings)
 
 
 def test_credentials_endpoint_exposes_admin_flag(tmp_path):
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
     app = build_app(settings)
     with TestClient(app) as client:
@@ -1836,7 +1829,7 @@ def _spa_client(tmp_path, *, build: bool = True, monkeypatch=None):
         (dist / "index.html").write_text("<html>spa</html>", encoding="utf-8")
         (dist / "app.js").write_text("console.log(1)", encoding="utf-8")
     monkeypatch.setattr("src.main._frontend_dist", lambda: dist if build else None)
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     return TestClient(build_app(settings))
 
 
@@ -1887,7 +1880,7 @@ def test_spa_reports_missing_index_with_actionable_page(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     dist.mkdir(parents=True)
     monkeypatch.setattr("src.main._frontend_dist", lambda: dist)
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     with TestClient(build_app(settings)) as client:
         response = client.get("/credentials")
     assert response.status_code == 503
@@ -1901,7 +1894,7 @@ def test_spa_does_not_escape_dist(tmp_path, monkeypatch):
     (dist / "index.html").write_text("<html>spa</html>", encoding="utf-8")
     (tmp_path / "secret.env").write_text("APP_SECRET=leaked", encoding="utf-8")
     monkeypatch.setattr("src.main._frontend_dist", lambda: dist)
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     with TestClient(build_app(settings)) as client:
         response = client.get("/../secret.env")
     assert "leaked" not in response.text
@@ -2310,7 +2303,7 @@ def test_schedule_probe_returns_early_when_credential_unreadable(admin_client):
 def test_trae_start_auth_builds_login_url_with_public_callback():
     from src.api.admin_auth import resolve_public_callback_url
 
-    settings = Settings(_env_file=None, APP_SECRET="s", PUBLIC_BASE_URL="https://gw.example")
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, PUBLIC_BASE_URL="https://gw.example")
     provider = TraeProvider()
     session = provider.start_auth(resolve_public_callback_url(settings))
 
@@ -2380,7 +2373,7 @@ def test_authorize_completes_trae_login_end_to_end(tmp_path):
         stream_client=_httpx.AsyncClient(transport=transport, timeout=None),
         short_client=_httpx.AsyncClient(transport=transport, timeout=None)))
 
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
     app = build_app(settings, providers={"trae": trae})
 
@@ -2406,7 +2399,7 @@ def test_authorize_completes_trae_login_end_to_end(tmp_path):
 
 def test_authorize_rejects_callback_without_token(tmp_path):
     """带 state 但没有 refreshToken/userJwt 的回调必须拒绝。"""
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
     app = build_app(settings)
     with TestClient(app) as client:
@@ -2482,7 +2475,7 @@ async def test_complete_callback_raises_when_no_token_available():
 
 def test_authorize_reports_invalid_credential(tmp_path):
     """回调结构损坏 → 400 invalid_credential（main 446-448）。"""
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
     app = build_app(settings)
     with TestClient(app) as client:
@@ -2543,7 +2536,7 @@ class _PlaygroundProvider:
 
 
 def _playground_app(tmp_path, script=None):
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
     app = build_app(settings, providers={"trae": _PlaygroundProvider(script)})
     app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
@@ -2554,7 +2547,7 @@ def test_playground_models_uses_session(tmp_path):
     app = _playground_app(tmp_path)
     with TestClient(app) as client:
         assert client.get("/api/playground/models").status_code == 401
-        client.cookies.set("coding2api_session", create_session_token("root", "s"))
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
         body = client.get("/api/playground/models").json()
     assert [m["id"] for m in body["data"]] == ["glm-5.2", "trae-only"]
     assert body["data"][0]["providers"] == ["trae"]
@@ -2571,7 +2564,7 @@ def test_playground_chat_requires_session(tmp_path):
 def test_playground_chat_works_without_api_key(tmp_path):
     app = _playground_app(tmp_path, [GOOD_EVENTS])
     with TestClient(app) as client:
-        client.cookies.set("coding2api_session", create_session_token("root", "s"))
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
         response = client.post("/api/playground/chat/completions",
                                json={"messages": [{"role": "user", "content": "hi"}]})
     assert response.status_code == 200
@@ -2581,7 +2574,7 @@ def test_playground_chat_works_without_api_key(tmp_path):
 def test_playground_chat_stream(tmp_path):
     app = _playground_app(tmp_path, [GOOD_EVENTS])
     with TestClient(app) as client:
-        client.cookies.set("coding2api_session", create_session_token("root", "s"))
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
         response = client.post("/api/playground/chat/completions",
                                json={"messages": [{"role": "user", "content": "hi"}],
                                      "stream": True})
@@ -2592,7 +2585,7 @@ def test_playground_chat_stream(tmp_path):
 def test_playground_attributes_usage_to_session_user(tmp_path):
     app = _playground_app(tmp_path, [GOOD_EVENTS])
     with TestClient(app) as client:
-        client.cookies.set("coding2api_session", create_session_token("alice", "s"))
+        client.cookies.set("coding2api_session", create_session_token("alice", SECRET))
         client.post("/api/playground/chat/completions",
                     json={"messages": [{"role": "user", "content": "hi"}]})
     overview = app.state.stats_query.overview(username="alice")
@@ -2602,7 +2595,7 @@ def test_playground_attributes_usage_to_session_user(tmp_path):
 def test_playground_invalid_request_returns_400(tmp_path):
     app = _playground_app(tmp_path, [GOOD_EVENTS])
     with TestClient(app) as client:
-        client.cookies.set("coding2api_session", create_session_token("root", "s"))
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
         response = client.post("/api/playground/chat/completions", json={"messages": []})
     assert response.status_code == 400
 
@@ -2612,7 +2605,7 @@ def test_v1_models_and_playground_models_are_consistent(tmp_path):
     key = app.state.api_keys.create("root")["api_key"]
     with TestClient(app) as client:
         v1 = client.get("/v1/models", headers={"Authorization": f"Bearer {key}"}).json()
-        client.cookies.set("coding2api_session", create_session_token("root", "s"))
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
         playground = client.get("/api/playground/models").json()
     assert v1 == playground
 
@@ -2640,7 +2633,7 @@ def test_authorize_accepts_real_trae_callback_without_state(tmp_path):
         stream_client=_httpx.AsyncClient(transport=transport, timeout=None),
         short_client=_httpx.AsyncClient(transport=transport, timeout=None)))
 
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
     app = build_app(settings, providers={"trae": trae})
 
@@ -2667,7 +2660,7 @@ def test_authorize_accepts_real_trae_callback_without_state(tmp_path):
 
 def test_authorize_without_pending_login_still_rejected(tmp_path):
     """没有进行中的登录时，带 refreshToken 的回调依然拒绝（防乱塞池子）。"""
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     app = build_app(settings)
     with TestClient(app) as client:
         response = client.get("/authorize?refreshToken=RT")
@@ -2684,7 +2677,7 @@ def test_dump_request_bodies_writes_file(tmp_path):
     from src.config import Settings
     from src.main import build_app
 
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         dump_request_bodies=True)
 
     class P:

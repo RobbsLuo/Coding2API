@@ -31,6 +31,7 @@ from src.provider.base import (
     Quota,
     health_score,
 )
+from tests.conftest import SECRET
 
 # --------------------------------------------------------------------- 配置
 
@@ -38,7 +39,7 @@ BASE_ENV = {"APP_SECRET": "test-secret"}
 
 
 def test_settings_defaults_and_admin_set():
-    s = Settings(_env_file=None, APP_SECRET="s", ADMIN_USERNAMES="alice, bob ,")
+    s = Settings(_env_file=None, APP_SECRET=SECRET, ADMIN_USERNAMES="alice, bob ,")
     assert s.admin_set == frozenset({"alice", "bob"})
     assert s.default_model == "glm-5.2"
     assert s.checkin_hour == 9
@@ -53,29 +54,29 @@ def test_settings_requires_app_secret():
 
 
 def test_allowed_endpoints_whitelist():
-    s = Settings(_env_file=None, APP_SECRET="s")
+    s = Settings(_env_file=None, APP_SECRET=SECRET)
     assert validate_endpoint_allowed("https://copilot.tencent.com", s)
     assert validate_endpoint_allowed("https://www.codebuddy.ai", s)
     assert not validate_endpoint_allowed("https://evil.example", s)
 
 
 def test_db_path_joins_data_dir():
-    s = Settings(_env_file=None, APP_SECRET="s", DATA_DIR="/tmp/cbd")
+    s = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR="/tmp/cbd")
     assert s.db_path == "/tmp/cbd/coding2api.sqlite3"
 
 
 # --------------------------------------------------------------------- 加密
 
 def test_cipher_roundtrip():
-    cipher = CredentialCipher("secret-a")
+    cipher = CredentialCipher("secret-a-0123456789")
     token = cipher.encrypt(b'{"uid": "1"}')
     assert cipher.decrypt(token) == b'{"uid": "1"}'
 
 
 def test_cipher_wrong_secret_raises():
-    token = CredentialCipher("secret-a").encrypt(b"x")
+    token = CredentialCipher("secret-a-0123456789").encrypt(b"x")
     with pytest.raises(CredentialDecryptError):
-        CredentialCipher("secret-b").decrypt(token)
+        CredentialCipher("secret-b-0123456789").decrypt(token)
 
 
 def test_cipher_rejects_empty_secret():
@@ -165,8 +166,6 @@ def test_api_key_generate_digest_preview():
     key = api_key.generate_api_key()
     assert key.startswith("sk-")
     assert api_key.digest_api_key(key) == api_key.digest_api_key(key)
-    assert api_key.matches(key, api_key.digest_api_key(key))
-    assert not api_key.matches(api_key.generate_api_key(), api_key.digest_api_key(key))
     assert api_key.preview_api_key(key).startswith("sk-…")
 
 
@@ -273,13 +272,6 @@ def test_note_error_other_accumulates_then_cools():
     assert out2.err_count == 2 and out2.cooling_until is None
     out3 = s.note_error(cand(err_count=2), ErrKind.OTHER, NOW)
     assert out3.err_count == 0 and out3.cooling_until == NOW + 10 * 60
-
-
-def test_note_success_clears_errors():
-    s = Scheduler()
-    assert s.note_success(cand(err_count=2)).err_count == 0
-    clean = cand(err_count=0)
-    assert s.note_success(clean) is clean     # 无变化时返回原对象
 
 
 def test_scheduler_end_to_end_rotation():

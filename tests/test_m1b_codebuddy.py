@@ -34,6 +34,7 @@ from src.provider.codebuddy.client import (
 )
 from src.provider.codebuddy.events import UpstreamProtocolViolation
 from src.provider.codebuddy.headers import encode_department, host_of
+from tests.conftest import SECRET
 
 FIXTURES = Path(__file__).parent.parent / "src" / "provider" / "fixtures" / "codebuddy"
 
@@ -485,7 +486,7 @@ async def test_provider_stream_and_probe_delegate():
 def dual_repo(tmp_path):
     db = Database(tmp_path / "dual.sqlite3")
     apply_schema(db.connect())
-    yield CredentialRepository(db, CredentialCipher("s")), db
+    yield CredentialRepository(db, CredentialCipher(SECRET)), db
     db.close()
 
 
@@ -594,7 +595,7 @@ async def test_dual_provider_no_credential_when_both_registered(dual_repo):
 
 def test_default_registry_contains_both_providers(tmp_path):
     """双上游注册后 /v1/models 与 playground 模型一致，动态拉取失败回退静态表。"""
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
 
     class FailingCB:
         id = "codebuddy"
@@ -631,7 +632,7 @@ def test_default_registry_contains_both_providers(tmp_path):
 
 def test_models_cache_used_when_fetch_fails(tmp_path):
     """拉取成功后写入缓存；之后失败时用缓存兜底，/v1/models 保持完整。"""
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
 
     class FailingCB:
         id = "codebuddy"
@@ -683,7 +684,7 @@ def test_models_cache_used_when_fetch_fails(tmp_path):
 def test_models_blocklist_filters_noise_and_old(tmp_path):
     """默认黑名单滤非用户模型（custom_model_*/subagent/summary），
     MODEL_BLOCKLIST 覆盖后可再滤老模型；直连指定不受列表过滤影响。"""
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
 
     class NoisyProvider:
         id = "trae"
@@ -710,7 +711,7 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
     assert {"glm-5.2", "kimi-k2.6"} <= ids
 
     # 覆盖黑名单：额外滤老模型（完全替换语义，需重写噪音规则）
-    settings2 = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings2 = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                          MODEL_BLOCKLIST="custom_model_*,*sub*agent*,summary,kimi-k2.6")
     app2 = build_app(settings2, providers={"trae": NoisyProvider()})
     key2 = app2.state.api_keys.create("root")["api_key"]
@@ -722,7 +723,7 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
 
 def test_models_by_provider_rates_when_dual_upstream(tmp_path):
     """双上游同名模型倍率不同时，响应带 by_provider 按渠道给倍率。"""
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
 
     class Stub:
         def __init__(self, pid: str, rate: float):
@@ -751,13 +752,13 @@ def test_models_by_provider_rates_when_dual_upstream(tmp_path):
 
 
 def test_codebuddy_import_via_api(tmp_path):
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
     app = build_app(settings)
     from src.auth.session import create_session_token
 
     with TestClient(app) as client:
-        client.cookies.set("coding2api_session", create_session_token("root", "s"))
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
         created = client.post("/api/credentials", json={
             "provider": "codebuddy", "credential": {"token": "abc"}})
         assert created.status_code == 200
@@ -986,17 +987,6 @@ async def test_provider_list_models_uses_dynamic_when_available():
     provider = CodeBuddyProvider(client=_client(handler))
     models = await provider.list_models({"bearer_token": "t"})
     assert [m.id for m in models] == ["glm-5.2", "glm-5.3"]
-
-
-def test_config_api_headers_adds_ide_identity():
-    from src.provider.codebuddy.headers import config_api_headers
-
-    headers = config_api_headers({"Authorization": "Bearer t",
-                                  "X-Domain": "copilot.tencent.com"},
-                                 "https://copilot.tencent.com")
-    assert headers["X-IDE-Type"] == "CodeBuddyIDE"
-    assert headers["X-Domain"] == headers["Host"] == "copilot.tencent.com"
-    assert headers["Authorization"] == "Bearer t"       # 原有头保留
 
 
 async def test_fetch_models_rejects_non_object_config():

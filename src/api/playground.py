@@ -6,8 +6,9 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..compat.openai.request import parse_chat_request
-from .deps import Services, csrf_protected, principal_from_request
+from .deps import Services, csrf_protected, principal_from_request, read_json_body
 from .models import list_models
+from .streaming import with_keepalive
 
 
 def create_router(services: Services) -> APIRouter:
@@ -26,11 +27,13 @@ def create_router(services: Services) -> APIRouter:
 
         不走 API Key 鉴权——调试是管理台自带能力，不应强迫用户先造一个 Key。
         """
-        body = await request.json()
+        body = await read_json_body(request)
         chat_request = parse_chat_request(body)
         if chat_request.stream:
+            executor.preflight(chat_request)
             return StreamingResponse(
-                executor.stream(chat_request, username=principal.username),
+                with_keepalive(executor.stream_guarded(chat_request,
+                                                       username=principal.username)),
                 media_type="text/event-stream")
         return JSONResponse(await executor.complete(chat_request, username=principal.username))
 

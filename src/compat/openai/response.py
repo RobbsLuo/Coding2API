@@ -15,7 +15,7 @@ from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...engine.sse import SSE_DONE, format_openai_frame
+from ...engine.sse import SSE_COMMENT, SSE_DONE, format_openai_frame
 from ...provider.base import Event, EventKind, Usage
 from .errors import UpstreamStreamError
 
@@ -77,7 +77,6 @@ class StreamTranslator:
         self._finished = False
         # 上游 usage 不单独成帧，但要留给统计采集
         self.usage: Usage | None = None
-
     @staticmethod
     def _is_empty_payload(event: Event) -> bool:
         """空内容不消耗首帧 role 标记，避免发出无意义 chunk。"""
@@ -119,6 +118,15 @@ class StreamTranslator:
             return  # 上游已发 done，DONE 已随 _close 发出，不能重复
         yield from self._close("stop")
         yield SSE_DONE
+
+    def keepalive(self) -> bytes:
+        """SSE 注释帧心跳。
+
+        上游推理可能长时间不吐字节（长思考、排队），中间没有字节时部分
+        客户端/反向代理会因空闲超时断开。注释帧被 SSE 客户端忽略，
+        只为保活。
+        """
+        return SSE_COMMENT
 
     def _close(self, finish_reason: str) -> Iterator[bytes]:
         yield format_openai_frame(json.dumps(

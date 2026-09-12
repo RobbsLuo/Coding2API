@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
@@ -26,15 +28,15 @@ from .auth.rbac import ForbiddenError, UnauthorizedError
 from .auth.throttle import LoginThrottle, ThrottledError
 from .compat.openai.errors import error_payload
 from .compat.openai.request import InvalidRequest
-from .config import Settings, load_settings
+from .config import Settings, load_settings, validate_endpoint_allowed
 from .db.conn import Database
-from .db.crypto import CredentialCipher
+from .db.crypto import CredentialCipher, CredentialDecryptError
 from .db.migrate import apply_schema
 from .db.repo import ApiKeyRepository, CredentialRepository
 from .engine.executor import Executor, ExecutorDeps, NoHealthyCredential, NoProviderForModel
 from .engine.model_resolver import UnknownModelError
 from .engine.scheduler import Scheduler
-from .provider.codebuddy.client import CodeBuddyProvider
+from .provider.codebuddy.client import CodeBuddyClient, CodeBuddyProvider
 from .provider.codebuddy.events import (
     UpstreamProtocolViolation as CodeBuddyProtocolViolation,
 )
@@ -48,6 +50,110 @@ from .tasks.runner import build_runner
 
 logger = logging.getLogger(__name__)
 
+# 上游连接/超时失败：502（调用方可重试），与凭证健康度无关。
+UPSTREAM_ERROR_STATUS = 502
+
+# 请求体上限：登录 8KB（PBKDF2 是 CPU 密集操作，超大 body 无意义）；
+# 其余 16MB（聊天请求可能带图片 base64）。
+LOGIN_BODY_LIMIT = 8 * 1024
+DEFAULT_BODY_LIMIT = 16 * 1024 * 1024
+
+# 每个路径前缀对应的 API 错误形状：/v1 走 OpenAI 兼容体，其余走管理台形状
+_API_PREFIXES = ("api/", "v1/")
+
+
+def _body_limit(path: str) -> int:
+    return LOGIN_BODY_LIMIT if path == "/api/auth/login" else DEFAULT_BODY_LIMIT
+
+
+async def _send_too_large(send) -> None:
+    await send({"type": "http.response.start", "status": 413,
+                "headers": [(b"content-type", b"application/json")]})
+    await send({"type": "http.response.body",
+                "body": b'{"error":{"message":"request body too large",'
+                        b'"type":"api_error","code":"invalid_request","status":413}}'})
+
+
+class BodySizeLimitMiddleware:
+    """请求体上限（纯 ASGI）：content-length 与实际分块计数双管。
+
+    只看 content-length 头会被 `Transfer-Encoding: chunked` 绕过——
+    分块请求根本不带这个头。这里在 receive 层累计字节数，
+    超限立即换成 413 响应并截断下游消费。
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        limit = _body_limit(scope.get("path", ""))
+        # content-length 已超限时直接拒，不必读 body
+        for name, value in scope.get("headers", ()):
+            if name == b"content-length":
+                try:
+                    if int(value) > limit:
+                        await _send_too_large(send)
+                        return
+                except ValueError:
+                    break
+
+        received = 0
+        exceeded = False
+        replaced = False
+
+        async def limited_receive():
+            nonlocal received, exceeded
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    exceeded = True
+                    # 截断：让下游读到 EOF，避免继续消费攻击流量
+                    return {"type": "http.request", "body": b"", "more_body": False}
+            return message
+
+        async def guarded_send(message):
+            """超限后丢弃下游的全部响应，只发出我们自己的 413。"""
+            nonlocal replaced
+            if not exceeded:
+                await send(message)
+                return
+            if message["type"] != "http.response.start":
+                return                      # 丢弃下游 body
+            if not replaced:
+                replaced = True
+                await _send_too_large(send)
+
+        await self.app(scope, limited_receive, guarded_send)
+
+
+def _api_not_found(path: str) -> JSONResponse:
+    """未匹配的 /api、/v1 路径返回 JSON 404。
+
+    静态资源是 catch-all 路由（返回 index.html），不排除 API 前缀的话，
+    客户端拼错端点会拿到 200 + HTML，看起来“调用成功”，极难排查。
+    """
+    return JSONResponse(status_code=404,
+                        content=error_payload(f"no such endpoint: /{path}",
+                                              "invalid_request", 404))
+
+
+def _codebuddy_endpoint(config: Settings) -> str:
+    """解析 CodeBuddy 上游地址，并强制白名单校验。
+
+    CODEBUDDY_API_ENDPOINT 是文档化的配置项，但之前从未被接线——
+    改这个值对实际请求无效，属于隐蔽的配置陷阱。白名单校验确保
+    真实 Token 不会被发往未授权主机。
+    """
+    endpoint = config.codebuddy_api_endpoint.strip()
+    if not validate_endpoint_allowed(endpoint, config):
+        raise ValueError(
+            f"CODEBUDDY_API_ENDPOINT {endpoint!r} is not in CODEBUDDY_ALLOWED_ENDPOINTS")
+    return endpoint
+
 
 def _similar_models(name: str, aliases: dict[str, dict[str, str]],
                     limit: int = 4) -> list[str]:
@@ -60,6 +166,12 @@ def _similar_models(name: str, aliases: dict[str, dict[str, str]],
         prefix = name.lower().split("-")[0]
         close = [m for m in known if m.lower().startswith(prefix)][:limit]
     return [m for m in close if m.lower() != name.lower()][:limit]
+
+
+def _forget_task(task: asyncio.Task, pending: list) -> None:
+    """从 pending_probes 摘除已完成的探测任务（幂等，关机清理后不报错）。"""
+    with contextlib.suppress(ValueError):
+        pending.remove(task)
 
 
 def build_app(settings: Settings | None = None, *, providers: dict | None = None,
@@ -81,7 +193,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 避开各自的频率风控（CB 11128 / TRAE 流内错误）
     registry = providers if providers is not None else {
         "trae": TraeProvider(pacer=chat_pacer),
-        "codebuddy": CodeBuddyProvider(pacer=chat_pacer),
+        "codebuddy": CodeBuddyProvider(
+            client=CodeBuddyClient(endpoint=_codebuddy_endpoint(config)), pacer=chat_pacer),
     }
     # provider → {小写模型名: 上游原始 id}；api/models.list_models 拉取后就地更新，
     # executor 发请求前把归一名映射回各上游的原始大小写
@@ -104,9 +217,9 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         runner = build_runner(credentials, registry, app_.state.stats_collector, config)
         app_.state.task_runner = runner
         await runner.start()
-        # 预热模型别名表（动态拉取失败仅记日志，不阻塞启动）
+        # 预热模型别名表（动态拉取失败仅记日志，不阻塞启动）；force 绕过 TTL
         try:
-            await models.list_models(services_)
+            await models.list_models(services_, force=True)
         except Exception as error:  # noqa: BLE001
             logger.warning("启动预热模型列表失败: %s", error)
         try:
@@ -123,6 +236,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             db.close()
 
     app = FastAPI(title="Coding2API", version="0.1.0", lifespan=lifespan)
+    # BodySizeLimitMiddleware 必须在最外层：FastAPI.add_middleware 会把后加
+    # 的包在更外层，所以它在最后添加（见 build_app 末尾）。
     app.state.settings = config
     app.state.users = store
     app.state.credentials = credentials
@@ -159,7 +274,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                 return
             credentials.save_quota(credential_id, quota)
 
-        app.state.pending_probes.append(asyncio.create_task(probe()))
+        # 完成后从列表里摘除：否则长时间运行会无限累积已完成的 Task 对象
+        task = asyncio.create_task(probe())
+        app.state.pending_probes.append(task)
+        task.add_done_callback(lambda done: _forget_task(done, app.state.pending_probes))
 
     services = Services(
         settings=config,
@@ -187,14 +305,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             return JSONResponse(status_code=400,
                                 content=error_payload("invalid host header",
                                                       "invalid_request", 400))
-        content_length = request.headers.get("content-length")
-        if content_length is not None and content_length.isdigit():
-            limit = (8 * 1024 if request.url.path == "/api/auth/login"
-                     else 16 * 1024 * 1024)
-            if int(content_length) > limit:
-                return JSONResponse(status_code=413,
-                                    content=error_payload("request body too large",
-                                                          "invalid_request", 413))
+        # 请求体上限由 BodySizeLimitMiddleware 在 ASGI 层处理
+        # （纯读 content-length 会被 chunked 请求绕过）。
         response = await call_next(request)
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         response.headers.setdefault("X-Frame-Options", "DENY")
@@ -251,11 +363,37 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                             content=error_payload("cross-origin write rejected",
                                                   "forbidden", 403))
 
+    @app.exception_handler(CredentialDecryptError)
+    async def _decrypt_failed(_request: Request, _error: CredentialDecryptError):
+        """APP_SECRET 变更或密文损坏：必须给出可行动提示，而不是 500。"""
+        logger.error("凭证解密失败：APP_SECRET 是否被更换过？")
+        return JSONResponse(status_code=500,
+                            content=error_payload(
+                                "credential decryption failed; APP_SECRET may have changed",
+                                "credential_decrypt_failed", 500))
+
+    @app.exception_handler(httpx.TransportError)
+    async def _transport_error(_request: Request, error: httpx.TransportError):
+        """上游连接/超时失败：502 而不是 500（调用方可重试）。
+
+        httpx 的 TimeoutException/ConnectError 在引擎里不被 _classify 认识
+        （没有 kind()），会直接冒泡——以前表现成 500，语义错误。
+        """
+        logger.warning("上游传输层失败: %s: %s", type(error).__name__, error)
+        return JSONResponse(
+            status_code=UPSTREAM_ERROR_STATUS,
+            content=error_payload(f"upstream transport failed: {type(error).__name__}",
+                                  "upstream_unavailable", UPSTREAM_ERROR_STATUS))
+
     @app.exception_handler(ThrottledError)
     async def _throttled(_request: Request, _error: ThrottledError):
-        return JSONResponse(status_code=429,
-                            content=error_payload("too many login attempts, slow down",
-                                                  "rate_limited", 429))
+        response = JSONResponse(status_code=429,
+                                content=error_payload(
+                                    "too many login attempts, slow down",
+                                    "rate_limited", 429))
+        # OpenAI 客户端按 Retry-After 退避；缺失会立即重试加剧限流
+        response.headers.setdefault("Retry-After", "60")
+        return response
 
     # ------------------------------------------------------------- 对外端点
 
@@ -282,7 +420,11 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         路径锚定到项目根（而不是当前工作目录），否则从其他目录启动服务时
         会找不到前端产物。找不到时给出可执行的下一步，而不是一句
         「frontend build not found」。
+
+        /api、/v1 前缀不当作前端路由：让拼错的端点显式失败。
         """
+        if path.startswith(_API_PREFIXES) or path in ("api", "v1"):
+            return _api_not_found(path)
         dist = _frontend_dist()
         if dist is None:
             return HTMLResponse(_FRONTEND_MISSING_HTML, status_code=503)
@@ -294,6 +436,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             return HTMLResponse(_FRONTEND_MISSING_HTML, status_code=503)
         return FileResponse(index)
 
+    app.add_middleware(BodySizeLimitMiddleware)
     return app
 
 

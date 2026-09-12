@@ -10,6 +10,12 @@ RUN pnpm exec vite build
 
 FROM python:3.12-slim AS runtime
 
+# tzdata 是 CHECKIN_HOUR / 额度周期正确性的前提：任务用 time.localtime() 判断
+# "今天 9 点"，基础镜像不带 zoneinfo 时 TZ 会被静默忽略、退回 UTC。
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tzdata \
+    && rm -rf /var/lib/apt/lists/*
+
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     UV_PROJECT_ENVIRONMENT=/app/.venv \
@@ -37,6 +43,7 @@ USER appuser
 
 ENV DATA_DIR=/app/data \
     USERS_FILE=/app/secrets/users.txt \
+    TZ=Asia/Shanghai \
     HOST=0.0.0.0 \
     PORT=8000
 

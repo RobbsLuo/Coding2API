@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from fnmatch import fnmatch
 from typing import Any
 
@@ -21,6 +22,10 @@ from ..provider.base import Model
 from .deps import Services, api_key_user
 
 logger = logging.getLogger(__name__)
+
+# 模型列表 TTL：TTL 内直接复用上次结果。客户端（IDE/Playground）打开面板
+# 就会调 /v1/models，无 TTL 时每次都会向上游真实发起请求。
+MODEL_LIST_TTL_SECONDS = 300
 
 # 响应透传的元数据字段（Model → OpenAI 额外字段）
 _META_FIELDS = ("credit_rate", "max_input_tokens", "max_output_tokens",
@@ -80,20 +85,31 @@ def _entry_response(entry: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-async def list_models(services: Services) -> dict:
+async def list_models(services: Services, *, force: bool = False) -> dict:
     """跨上游拉取并合并模型列表。
 
     CodeBuddy/TRAE 的动态列表里同一模型常只差大小写
     （如 deepseek-v4-flash vs DeepSeek-V4-Flash），此处按小写归一合并，
     providers 取并集；同时记录各上游的原始 id 供执行时映射。
     某上游拉取失败时用上次成功的缓存兜底，而不是让该上游从列表里消失。
+
+    force=False（默认）时 TTL 内直接复用刚才的结果；启动预热传 force=True。
     """
     aliases: dict[str, dict[str, str]] = {}
     grouped: dict[str, dict[str, Any]] = {}   # 小写名 → {canonical, providers, meta}
     cache = services.model_list_cache
+    now = time.monotonic()
     for provider_id, provider in services.registry.items():
+        fetched_at = services.model_list_fetched_at.get(provider_id)
+        fresh = (cache.get(provider_id)
+                 and fetched_at is not None
+                 and now - fetched_at < MODEL_LIST_TTL_SECONDS)
+        if fresh and not force:
+            _merge_provider(grouped, aliases, provider_id, cache[provider_id])
+            continue
         # 用该上游的一个可用凭证拉取（凭证有归属，模型列表是账号级的）
-        candidates = services.credentials.candidates([provider_id])
+        # selectable_only：硬禁用/用户关闭的凭证取不到数据，只会白失败
+        candidates = services.credentials.candidates([provider_id], selectable_only=True)
         credential_data = (
             services.credentials.credential_data(candidates[0].credential_id)
             if candidates else {}
@@ -114,6 +130,7 @@ async def list_models(services: Services) -> dict:
         _merge_provider(grouped, aliases, provider_id, models_by_lower)
         # 成功 → 更新该上游缓存（下次失败时兜底）
         cache[provider_id] = models_by_lower
+        services.model_list_fetched_at[provider_id] = time.monotonic()
     # 就地更新（executor 的映射闭包引用同一个 dict 对象）
     services.model_aliases.clear()
     services.model_aliases.update(aliases)

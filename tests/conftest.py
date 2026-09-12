@@ -11,7 +11,10 @@ import pytest
 
 from src.auth.users import create_password_hash
 
-USERS = (("root", "rootpw"), ("guest", "guestpw"))
+USERS = (("root", "rootpw"), ("guest", "guestpw"), ("alice", "alicepw"))
+
+# 测试用 APP_SECRET：必须满足 CredentialCipher 的最短长度校验（>=16）
+SECRET = "test-secret-0123456789"
 
 
 @pytest.fixture(scope="session")

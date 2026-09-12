@@ -77,6 +77,37 @@ describe("CredentialsPage", () => {
     );
   });
 
+  it("被硬禁用的凭证显示「恢复」并调用 revive 接口", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/revive")) return jsonResponse({ ok: true });
+      return jsonResponse(listBody([
+        makeCredential({ id: "cred_1", disabled: 1, disabled_reason: "session dead" }),
+      ]));
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "恢复" }));
+
+    await waitFor(() =>
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "/api/credentials/cred_1/revive",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+  });
+
+  it("健康凭证不显示「恢复」入口", async () => {
+    mockFetch({ "/api/credentials": listBody([makeCredential({ id: "cred_1" })]) });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    expect(screen.queryByRole("menuitem", { name: "恢复" })).not.toBeInTheDocument();
+  });
+
   it("指定优先使用调用 pin 接口", async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);

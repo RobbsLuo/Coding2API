@@ -22,6 +22,7 @@ from src.provider.trae.client import (
     prepare_body,
 )
 from src.provider.trae.events import UpstreamProtocolViolation
+from tests.conftest import SECRET
 
 
 class _Provider:
@@ -60,7 +61,7 @@ def _repo(tmp_path):
 
     db = Database(tmp_path / "c.sqlite3")
     apply_schema(db.connect())
-    return CredentialRepository(db, CredentialCipher("s")), db
+    return CredentialRepository(db, CredentialCipher(SECRET)), db
 
 
 def _executor(credentials, provider, **kw):
@@ -137,7 +138,7 @@ async def test_complete_rotates_then_exhausts(tmp_path):
 # --------------------------------------------------------------- main 分支
 
 def _client(tmp_path, provider=None):
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
     app = build_app(settings, providers={"trae": provider or _Provider([GOOD])})
     return app, TestClient(app)
@@ -145,7 +146,7 @@ def _client(tmp_path, provider=None):
 
 def test_forbidden_handler_returns_403(tmp_path):
     app, client = _client(tmp_path)
-    client.cookies.set("coding2api_session", create_session_token("guest", "s"))
+    client.cookies.set("coding2api_session", create_session_token("guest", SECRET))
     with client:
         response = client.post("/api/credentials", json={"provider": "trae",
                                                          "credential": {}})
@@ -204,7 +205,7 @@ def test_streaming_endpoint_returns_sse(tmp_path):
 
 def test_toggle_missing_credential_returns_400(tmp_path):
     app, client = _client(tmp_path)
-    client.cookies.set("coding2api_session", create_session_token("root", "s"))
+    client.cookies.set("coding2api_session", create_session_token("root", SECRET))
     with client:
         response = client.post("/api/credentials/ghost/toggle", json={"enabled": False})
     assert response.status_code == 400
@@ -755,7 +756,7 @@ async def test_checkin_task_skips_provider_without_scope(tmp_path):
 
     db = Database(tmp_path / "ns.sqlite3")
     apply_schema(db.connect())
-    credentials = CredentialRepository(db, CredentialCipher("s"))
+    credentials = CredentialRepository(db, CredentialCipher(SECRET))
     credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
 
     from src.tasks.checkin import CheckinTask
@@ -838,7 +839,7 @@ def test_lifespan_warmup_failure_is_logged_not_raised(tmp_path, caplog):
     from src.config import Settings
     from src.main import build_app
 
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
 
     class Exploding:
         id = "boom"
@@ -902,7 +903,7 @@ async def test_suggestion_callback_failure_does_not_break_400():
 
     db = Database(str(_tmpdir() / "s.sqlite3"))
     apply_schema(db.connect())
-    repo = CredentialRepository(db, CredentialCipher("s"))
+    repo = CredentialRepository(db, CredentialCipher(SECRET))
     repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
 
     def handler(_request):
@@ -958,7 +959,7 @@ async def test_stream_finish_frames_yielded_when_upstream_never_sent_done():
 
     db = Database(str(_tmpdir() / "nd.sqlite3"))
     apply_schema(db.connect())
-    repo = CredentialRepository(db, CredentialCipher("s"))
+    repo = CredentialRepository(db, CredentialCipher(SECRET))
     repo.add(provider="trae", credential_data={"accessToken": "t"})
     executor = Executor(ExecutorDeps(
         providers={"trae": _NoDoneProvider("trae", [E(kind=EK.CONTENT, content="ok")])},

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import time
@@ -91,18 +92,59 @@ class Executor:
     def resolve_target(self, request: ChatRequest) -> ModelTarget:
         return resolve(request.model, self._deps.default_model)
 
+    def preflight(self, request: ChatRequest) -> ModelTarget:
+        """流式路由建立 StreamingResponse 之前的前置校验。
+
+        生成器体内的异常发生在响应头（200）已发出之后，只能表现为连接被
+        截断——客户端拿到空 body，误以为请求成功。凡是"请求本身不可能成功"
+        的错误（未知 provider、模型不属于任何已注册上游）必须在返回
+        StreamingResponse 之前抛给异常处理器，才能得到正确的 400。
+        """
+        target = self.resolve_target(request)
+        if not [pid for pid in self._narrow_providers(target) if pid in self._deps.providers]:
+            raise NoProviderForModel(f"no provider registered for model {target.model!r}")
+        return target
+
+    async def stream_guarded(self, request: ChatRequest, *, username: str = "unknown"
+                             ) -> AsyncIterator[bytes]:
+        """流式出口的最终兜底：任何逃逸异常都转成 SSE 错误帧。
+
+        没有这一层时，未预期的异常（如凭证在轮换中途被删除）会让连接
+        静默断开，客户端无法区分"空回复"与"服务出错"。
+        """
+        try:
+            async for frame in self.stream(request, username=username):
+                yield frame
+        except (GeneratorExit, asyncio.CancelledError):
+            raise                          # 客户端断开：已由 stream() 记账
+        except Exception as error:  # noqa: BLE001 - 流已开始，只能以错误帧收尾
+            logger.exception("流式响应失败: %s", error)
+            yield _error_frame("internal server error", "internal_error")
+
     async def stream(self, request: ChatRequest, *, username: str = "unknown"
                      ) -> AsyncIterator[bytes]:
-        """流式执行；上游错误按分类冷却并换号，最多 3 次。"""
+        """流式执行；上游错误按分类冷却并换号，最多 3 次。
+
+        客户端中途断开时（生成器被关闭 / 任务被取消）把已产生的用量
+        记入统计，标记 client_disconnect：否则统计里的用量低于真实消耗，
+        而断开是长回复场景下的常态。
+        """
         target = self.resolve_target(request)
+        state = _StreamState(translator=StreamTranslator(target.model),
+                             started=time.monotonic(), username=username)
+        try:
+            async for frame in self._stream_loop(request, target, state):
+                yield frame
+        except (GeneratorExit, asyncio.CancelledError):
+            if state.translator.usage is not None or state._first_byte_at is not None:
+                self._record_disconnect(target, state)
+            raise
+
+    async def _stream_loop(self, request: ChatRequest, target: ModelTarget,
+                           state: _StreamState) -> AsyncIterator[bytes]:
         tried: set[str] = set()
         last_error: Exception | None = None
         last_kind: ErrKind | None = None
-        translator = StreamTranslator(target.model)
-        started = time.monotonic()
-        # 轮换耗尽后再次选号会失败，此时统计仍应归到实际尝试过的上游
-        last_provider = "-"
-        last_credential: str | None = None
 
         while True:
             pick = self._pick(target, tried)
@@ -115,14 +157,15 @@ class Executor:
                         "invalid_request")
                     return
                 self._deps.record(
-                    username=username, provider=last_provider, credential_id=last_credential,
-                    model=target.model, ok=False, error_type="no_healthy_credential",
-                    latency_ms=int((time.monotonic() - started) * 1000))
+                    username=state.username, provider=state.provider,
+                    credential_id=state.credential_id, model=target.model, ok=False,
+                    error_type="no_healthy_credential",
+                    latency_ms=_elapsed_ms(state.started))
                 yield _unavailable_frame(last_error)
                 return
             credential_id, credential_data = pick
             provider_id = self._deps.credentials.provider_of(credential_id)
-            last_provider, last_credential = provider_id or "-", credential_id
+            state.provider, state.credential_id = provider_id or "-", credential_id
             tried.add(credential_id)
             try:
                 async for event in self._deps.providers[provider_id].stream_chat(
@@ -137,8 +180,8 @@ class Executor:
                                 "上游 %s 流内拒绝模型 %s（凭证 %s 跳过）: code=%s %s",
                                 provider_id, target.model, credential_id,
                                 event.error_code, event.error_message)
-                            self._record_invalid(username, provider_id, credential_id,
-                                                 target.model, started, event)
+                            self._record_invalid(state.username, provider_id, credential_id,
+                                                 target.model, state.started, event)
                             last_error = UpstreamStreamError(event)
                             last_kind = ErrKind.INVALID
                             self._skip_provider(provider_id, tried)
@@ -152,21 +195,13 @@ class Executor:
                         self._deps.credentials.save_error(credential_id, outcome)
                         last_error = UpstreamStreamError(event)
                         break
-                    for frame in translator.translate(event):
+                    for frame in state.translator.translate(event):
+                        state.mark_first_byte()
                         yield frame
                 else:
                     self._deps.credentials.save_success(credential_id)
-                    self._deps.record(
-                        username=username,
-                        provider=self._deps.credentials.provider_of(credential_id) or "-",
-                        credential_id=credential_id, model=target.model, ok=True,
-                        input_tokens=_usage_field(translator.usage, "input_tokens"),
-                        output_tokens=_usage_field(translator.usage, "output_tokens"),
-                        reasoning_tokens=_usage_field(translator.usage, "reasoning_tokens"),
-                        cached_tokens=_usage_field(translator.usage, "cached_tokens"),
-                        credit=_usage_field(translator.usage, "credit"),
-                        latency_ms=int((time.monotonic() - started) * 1000))
-                    for frame in translator.finish():
+                    self._record_success(target, state, provider_id, credential_id)
+                    for frame in state.translator.finish():
                         yield frame
                     return
             except Exception as error:  # noqa: BLE001 - 统一转为冷却或上抛
@@ -178,8 +213,8 @@ class Executor:
                     # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
                     logger.warning("上游 %s 拒绝模型 %s（凭证 %s 跳过）: %s",
                                    provider_id, target.model, credential_id, error)
-                    self._record_invalid(username, provider_id, credential_id,
-                                         target.model, started, error)
+                    self._record_invalid(state.username, provider_id, credential_id,
+                                         target.model, state.started, error)
                     last_error, last_kind = error, ErrKind.INVALID
                     self._skip_provider(provider_id, tried)
                 else:
@@ -199,12 +234,36 @@ class Executor:
                     return
                 kind = _classify(last_error) if last_error is not None else None
                 self._deps.record(
-                    username=username, provider=provider_id,
+                    username=state.username, provider=provider_id,
                     credential_id=credential_id, model=target.model, ok=False,
                     error_type=_error_type_for(kind) if kind else "upstream_protocol",
-                    latency_ms=int((time.monotonic() - started) * 1000))
+                    latency_ms=_elapsed_ms(state.started))
                 yield _unavailable_frame(last_error)
                 return
+
+    def _record_success(self, target: ModelTarget, state: _StreamState,
+                        provider_id: str, credential_id: str) -> None:
+        usage = state.translator.usage
+        self._deps.record(
+            username=state.username, provider=provider_id, credential_id=credential_id,
+            model=target.model, ok=True,
+            input_tokens=_usage_field(usage, "input_tokens"),
+            output_tokens=_usage_field(usage, "output_tokens"),
+            reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
+            cached_tokens=_usage_field(usage, "cached_tokens"),
+            credit=_usage_field(usage, "credit"),
+            ttfb_ms=state.ttfb_ms(), latency_ms=_elapsed_ms(state.started))
+
+    def _record_disconnect(self, target: ModelTarget, state: _StreamState) -> None:
+        """客户端断开：按已知用量记账，标记 client_disconnect。"""
+        usage = state.translator.usage
+        self._deps.record(
+            username=state.username, provider=state.provider,
+            credential_id=state.credential_id, model=target.model, ok=False,
+            error_type="client_disconnect",
+            input_tokens=_usage_field(usage, "input_tokens"),
+            output_tokens=_usage_field(usage, "output_tokens"),
+            ttfb_ms=state.ttfb_ms(), latency_ms=_elapsed_ms(state.started))
 
     async def complete(self, request: ChatRequest, *, username: str = "unknown"
                        ) -> dict[str, Any]:
@@ -353,6 +412,31 @@ class Executor:
         outcome = self._deps.scheduler.note_error(
             self._candidate(credential_id), kind, int(time.time()))
         self._deps.credentials.save_error(credential_id, outcome)
+
+
+@dataclass(slots=True)
+class _StreamState:
+    """流式轮换过程中需要跨尝试保留的状态（统计用）。"""
+
+    translator: StreamTranslator
+    started: float
+    username: str
+    provider: str = "-"
+    credential_id: str | None = None
+    _first_byte_at: float | None = None
+
+    def mark_first_byte(self) -> None:
+        if self._first_byte_at is None:
+            self._first_byte_at = time.monotonic()
+
+    def ttfb_ms(self) -> int | None:
+        if self._first_byte_at is None:
+            return None
+        return int((self._first_byte_at - self.started) * 1000)
+
+
+def _elapsed_ms(started: float, end: float | None = None) -> int:
+    return int(((end if end is not None else time.monotonic()) - started) * 1000)
 
 
 def _event_kind(event: Event) -> ErrKind:

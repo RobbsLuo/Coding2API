@@ -12,9 +12,16 @@ from dataclasses import dataclass
 from typing import Any
 
 CONTROLLED_ERROR_TYPES = frozenset({
-    "authentication_error", "client_disconnect", "credential_unavailable",
+    # 实际会写入的取值（与 executor / api 层的 error_type 一一对应）：
+    #   client_disconnect  — 客户端中途断开（executor.stream）
+    #   credential_unavailable — session 失效（_error_type_for(DEAD)）
+    #   invalid_request    — 请求无效（_record_invalid）
+    #   no_healthy_credential — 无可用凭证（executor 耗尽轮换）
+    #   rate_limit         — 权益耗尽（_error_type_for(PLAN)）
+    #   upstream_error / upstream_protocol — 其它上游失败
+    "client_disconnect", "credential_unavailable",
     "invalid_request", "no_healthy_credential", "rate_limit", "upstream_error",
-    "upstream_protocol", "internal_error",
+    "upstream_protocol",
 })
 MAX_MODEL_LENGTH = 64
 

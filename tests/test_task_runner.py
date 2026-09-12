@@ -23,13 +23,14 @@ from src.tasks.quota_probe import QuotaProbeTask
 from src.tasks.refresh import RefreshTask
 from src.tasks.retention import RetentionTask
 from src.tasks.runner import TaskRunner, build_runner
+from tests.conftest import SECRET
 
 
 @pytest.fixture()
 def repo(tmp_path):
     db = Database(tmp_path / "t.sqlite3")
     apply_schema(db.connect())
-    yield CredentialRepository(db, CredentialCipher("s")), db
+    yield CredentialRepository(db, CredentialCipher(SECRET)), db
     db.close()
 
 
@@ -171,7 +172,7 @@ async def test_runner_retention_purges_expired_detail_and_keeps_rollup(repo):
 
 def test_build_runner_wires_everything(repo):
     credentials, db = repo
-    config = Settings(_env_file=None, APP_SECRET="s", QUOTA_PROBE_MINUTES=15,
+    config = Settings(_env_file=None, APP_SECRET=SECRET, QUOTA_PROBE_MINUTES=15,
                       CHECKIN_HOUR=7, REFRESH_SKEW_HOURS=6,
                       PACER_MIN_SECONDS=0, PACER_MAX_SECONDS=0)
     runner = build_runner(credentials, {"codebuddy": StubProvider()}, StatsCollector(db), config)
@@ -185,7 +186,7 @@ def test_build_runner_wires_everything(repo):
 def test_build_runner_clamps_intervals(repo):
     """过小的配置值必须被夹到安全下限，避免打爆上游。"""
     credentials, db = repo
-    config = Settings(_env_file=None, APP_SECRET="s", QUOTA_PROBE_MINUTES=0)
+    config = Settings(_env_file=None, APP_SECRET=SECRET, QUOTA_PROBE_MINUTES=0)
     runner = build_runner(credentials, {}, StatsCollector(db), config)
     assert runner._quota_interval == 60
     assert runner._refresh_interval >= 60
@@ -289,7 +290,7 @@ def test_run_entry_point_starts_uvicorn(monkeypatch, tmp_path):
     fake_uvicorn = types.ModuleType("uvicorn")
     fake_uvicorn.run = fake_run  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
-    monkeypatch.setenv("APP_SECRET", "s")
+    monkeypatch.setenv("APP_SECRET", SECRET)
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     monkeypatch.setenv("HOST", "0.0.0.0")
     monkeypatch.setenv("PORT", "9123")

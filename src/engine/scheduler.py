@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from ..provider.base import ErrKind
 
@@ -89,12 +89,6 @@ class Scheduler:
         return len(tried) < self.max_rotate
 
     # ------------------------------------------------------------ 结果反馈
-
-    def note_success(self, candidate: Candidate) -> Candidate:
-        """成功：清空连续错误计数。"""
-        if candidate.err_count == 0:
-            return candidate
-        return replace(candidate, err_count=0)
 
     def note_error(self, candidate: Candidate, kind: ErrKind, now: int) -> ErrorOutcome:
         """按错误分类更新冷却/禁用状态。

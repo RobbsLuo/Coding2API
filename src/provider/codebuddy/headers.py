@@ -34,19 +34,6 @@ QUOTA_PRODUCT_CODE = "codebuddy"
 CODEBUDDY_IDE_VERSION = "1.42.0"
 
 
-def config_api_headers(headers: dict[str, str], endpoint: str) -> dict[str, str]:
-    """/v3/config 模型接口的附加头（AGENTS.md：URL/Host/X-Domain 同源派生）。"""
-    host = host_of(endpoint)
-    return {
-        **headers,
-        "Host": host,
-        "X-Domain": host,
-        "Accept": "application/json",
-        "X-IDE-Type": "CodeBuddyIDE",
-        "X-IDE-Name": "CodeBuddyIDE",
-        "X-IDE-Version": CODEBUDDY_IDE_VERSION,
-        "X-Product-Version": CODEBUDDY_IDE_VERSION,
-    }
 QUOTA_RANGE_END = "2099-12-31 23:59:59"
 
 

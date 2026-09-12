@@ -17,10 +17,23 @@ def derive_key(app_secret: str) -> bytes:
     return base64.urlsafe_b64encode(digest)
 
 
+# 弱密钥直接拒绝：Fernet 的密钥完全由 APP_SECRET 派生，
+# 而 .env 里的占位值（local-dev-secret-change-me 之类）会被用来加密
+# 真实上游凭证。长度下限是启发式，但足以拦住占位与手滑。
+MIN_SECRET_LENGTH = 16
+
+
+class WeakSecretError(ValueError):
+    """APP_SECRET 过短（占位值/手滑），拒绝启动。"""
+
+
 class CredentialCipher:
     def __init__(self, app_secret: str) -> None:
         if not app_secret:
             raise ValueError("APP_SECRET must not be empty")
+        if len(app_secret) < MIN_SECRET_LENGTH:
+            raise WeakSecretError(
+                f"APP_SECRET must be at least {MIN_SECRET_LENGTH} characters")
         self._fernet = Fernet(derive_key(app_secret))
 
     def encrypt(self, plaintext: bytes) -> bytes:

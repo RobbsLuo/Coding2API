@@ -142,18 +142,34 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `APP_SECRET` | **必填** | 凭证列加密密钥；丢失等于凭证全部作废 |
+| `APP_SECRET` | **必填** | 凭证列加密密钥，至少 16 字符；丢失等于凭证全部作废 |
 | `ADMIN_USERNAMES` | 空 | 逗号分隔；空则所有用户只读 |
 | `USERS_FILE` | `secrets/users.txt` | 用户文件路径 |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | 浏览器可达地址；TRAE 登录回调依赖它 |
-| `CODEBUDDY_API_ENDPOINT` | 中国站 | 上游地址，只接受白名单内地址 |
+| `CODEBUDDY_API_ENDPOINT` | 中国站 | 上游地址，只接受 `CODEBUDDY_ALLOWED_ENDPOINTS` 白名单内地址 |
+| `CODEBUDDY_ALLOWED_ENDPOINTS` | 中/国际站 | 逗号分隔白名单；不在其中启动即失败 |
 | `DEFAULT_MODEL` | `glm-5.2` | 模型为空或 `auto` 时的目标 |
-| `CHECKIN_HOUR` | `9` | 每日签到时刻（服务器本地时区） |
+| `CHECKIN_HOUR` | `9` | 每日签到时刻（容器本地时区，镜像默认 `TZ=Asia/Shanghai`） |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB 聊天最小间隔（秒），避频控风控；0 关闭 |
 | `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*` | 模型列表黑名单（fnmatch glob，逗号分隔，完全替换语义）；只影响列表展示，直连指定不受影响 |
 | `ALLOWED_HOSTS` | 空 | Host 白名单（防 DNS rebinding）；空 = 本地回环 + `PUBLIC_BASE_URL` 主机 |
+| `DUMP_REQUEST_BODIES` | `false` | 诊断开关：把 `/v1` 原始请求体落到 `data/dumps/`（含对话内容，勿长期开启） |
+
+## 部署注意
+
+- **挂载目录属主**：容器内以 uid 1001（`appuser`）运行，`./data` 与 `./secrets`
+  必须可写/可读，否则 SQLite 打不开、服务崩溃重启：
+
+  ```bash
+  mkdir -p data secrets && sudo chown -R 1001:1001 data secrets
+  ```
+
+- **时区**：`CHECKIN_HOUR` 按容器本地时区解释。镜像已装 `tzdata` 并默认
+  `TZ=Asia/Shanghai`；如需其它时区，显式覆盖 `TZ`，否则签到时刻会按 UTC 算。
+- **APP_SECRET**：至少 16 字符，弱密钥（如 `.env.example` 里的占位串）会在
+  启动时被拒绝；更换后已存凭证全部无法解密，需重新录入。
 
 ## 开发
 

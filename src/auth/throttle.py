@@ -61,6 +61,23 @@ class LoginThrottle:
         if username and len(self._events[("u", username)]) >= self.limits.max_per_user:
             raise ThrottledError()
 
+    def check_transport_windows(self, *, ip: str) -> None:
+        """只查全局/IP 窗口（哈希前调用）。
+
+        威胁模型：PBKDF2-600k 是 CPU 密集操作，攻击者用无效尝试就能占满
+        线程池。全局与 IP 窗口完全由攻击者自己触发，因此在哈希前检查，
+        把“无限烧 CPU”压到 max_global/窗口；用户名窗口故意不在此处检查，
+        因为它可能被第三方（他人输错自己的用户名）抬高，放在哈希后
+        能保证“密码正确就一定放行”。
+        """
+        now = time.monotonic()
+        self._prune(("g", ""), now)
+        self._prune(("i", ip), now)
+        if len(self._events[("g", "")]) >= self.limits.max_global:
+            raise ThrottledError()
+        if len(self._events[("i", ip)]) >= self.limits.max_per_ip:
+            raise ThrottledError()
+
     def record_failure(self, *, ip: str, username: str) -> None:
         now = time.monotonic()
         self._events[("g", "")].append(now)

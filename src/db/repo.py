@@ -9,7 +9,6 @@ import json
 import time
 import uuid
 from collections.abc import Iterable
-from dataclasses import replace
 from typing import Any
 
 from ..auth.api_key import digest_api_key, generate_api_key, preview_api_key
@@ -61,6 +60,18 @@ class CredentialRepository:
             conn.execute("UPDATE credentials SET pinned = 1 WHERE id = ?", (credential_id,))
         conn.commit()
 
+    def revive(self, credential_id: str) -> bool:
+        """解除硬禁用（session 死亡）与冷却，允许凭证重新参与调度。
+
+        没有这个入口时，凭证一旦因 session 失效被硬禁用就只能删除重建，
+        重新登录后也无法复用同一条记录。
+        """
+        cursor = self._db.connect().execute(
+            "UPDATE credentials SET disabled = 0, disabled_reason = NULL, cooling_until = NULL, "
+            "err_count = 0 WHERE id = ?", (credential_id,))
+        self._db.connect().commit()
+        return cursor.rowcount > 0
+
     def save_error(self, credential_id: str, outcome: ErrorOutcome) -> None:
         conn = self._db.connect()
         if outcome.disabled:
@@ -103,12 +114,19 @@ class CredentialRepository:
 
     # ------------------------------------------------------------- 读取
 
-    def candidates(self, providers: Iterable[str] | None = None) -> list[Candidate]:
+    def candidates(self, providers: Iterable[str] | None = None,
+                   *, selectable_only: bool = False) -> list[Candidate]:
+        """列出候选凭证。
+
+        selectable_only=True 时排除硬禁用（session 死亡）与用户软关闭的凭证：
+        它们不会被调度器选中，用它们去拉模型列表/探测只会白白失败。
+        默认 False：签到、刷新等任务需要看到全部凭证才能正确计数 skipped。
+        """
         rows = self._db.connect().execute(
             "SELECT id, provider, health, cooling_until, disabled, enabled, err_count, pinned "
             "FROM credentials").fetchall()
         allowed = set(providers) if providers is not None else None
-        return [
+        result = [
             Candidate(
                 credential_id=row["id"], provider=row["provider"], health=row["health"],
                 cooling_until=row["cooling_until"], disabled=bool(row["disabled"]),
@@ -117,6 +135,9 @@ class CredentialRepository:
             )
             for row in rows if allowed is None or row["provider"] in allowed
         ]
+        if selectable_only:
+            result = [c for c in result if c.enabled and not c.disabled]
+        return result
 
     def provider_of(self, credential_id: str) -> str | None:
         row = self._db.connect().execute(
@@ -180,8 +201,3 @@ class ApiKeyRepository:
             "DELETE FROM api_keys WHERE id = ? AND username = ?", (key_id, username))
         self._db.connect().commit()
         return cursor.rowcount > 0
-
-
-def candidate_with_health(candidate: Candidate, quota: Quota | None) -> Candidate:
-    """把探测到的额度换算成三态健康度写回候选。"""
-    return replace(candidate, health=health_score(quota))

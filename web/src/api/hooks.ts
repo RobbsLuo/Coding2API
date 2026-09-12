@@ -12,7 +12,9 @@ export function useSession() {
     queryKey: ["session"],
     queryFn: api.session,
     retry: false,
-    staleTime: 60_000,
+    // 会话状态变化必须立刻反映：删用户/换密钥后不能继续放行
+    staleTime: 0,
+    refetchOnWindowFocus: true,
   });
 }
 

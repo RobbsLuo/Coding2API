@@ -13,12 +13,13 @@ from src.auth.session import create_session_token
 from src.auth.throttle import LoginThrottle, ThrottleLimits
 from src.config import Settings
 from src.main import build_app
+from tests.conftest import SECRET
 
 
 @pytest.fixture()
 def app(tmp_path):
     settings = Settings(
-        _env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path), ADMIN_USERNAMES="root"
+        _env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path), ADMIN_USERNAMES="root"
     )
     application = build_app(settings)
     with TestClient(application) as client:
@@ -28,7 +29,7 @@ def app(tmp_path):
 @pytest.fixture()
 def admin_client(app):
     _app, client = app
-    client.cookies.set("coding2api_session", create_session_token("root", "s"))
+    client.cookies.set("coding2api_session", create_session_token("root", SECRET))
     return client
 
 
@@ -264,10 +265,10 @@ def test_host_allowed_public_base_url_edge_shapes():
     from src.main import _host_allowed
 
     # 无 scheme：startswith 分支不命中，主机仍进白名单
-    settings = Settings(_env_file=None, APP_SECRET="s", PUBLIC_BASE_URL="localhost:8000")
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, PUBLIC_BASE_URL="localhost:8000")
     assert _host_allowed("localhost", settings)
     # base 主机为空：path_host 分支不命中，仅默认白名单生效
-    empty = Settings(_env_file=None, APP_SECRET="s", PUBLIC_BASE_URL="/oops")
+    empty = Settings(_env_file=None, APP_SECRET=SECRET, PUBLIC_BASE_URL="/oops")
     assert _host_allowed("localhost", empty)
     assert not _host_allowed("evil.example", empty)
 
@@ -286,7 +287,7 @@ def test_host_whitelist_allows_default(app):
 def test_host_whitelist_allows_configured(tmp_path):
     settings = Settings(
         _env_file=None,
-        APP_SECRET="s",
+        APP_SECRET=SECRET,
         DATA_DIR=str(tmp_path),
         ADMIN_USERNAMES="root",
         ALLOWED_HOSTS="api.example.com",

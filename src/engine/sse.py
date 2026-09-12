@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import codecs
-from collections.abc import AsyncIterator, Iterable
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 
@@ -94,11 +94,5 @@ def format_openai_frame(payload: str) -> bytes:
 
 
 SSE_DONE = b"data: [DONE]\n\n"
-
-
-def format_frames(frames: Iterable[SSEFrame]) -> bytes:  # pragma: no cover - 测试辅助
-    return b"".join(
-        f"event: {f.event}\ndata: {f.data}\n\n".encode() if f.event
-        else f"data: {f.data}\n\n".encode()
-        for f in frames
-    )
+# SSE 注释帧：被客户端忽略，只为长空隙保活（上游思考/排队时可能长时间无字节）
+SSE_COMMENT = b": keepalive\n\n"

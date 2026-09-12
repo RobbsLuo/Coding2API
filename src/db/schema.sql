@@ -1,5 +1,8 @@
 -- coding2api schema（PROPOSAL §5 定稿 + pin 列）
 
+-- 注：不建 checkins / model_cache 表——签到去重由 CheckinTask 的当日作用域
+-- 集合实现（上游 status 为准），模型列表是进程内 TTL 缓存，重启即重建。
+
 -- 用户不建表：users.txt（PBKDF2）是唯一源，角色走 ADMIN_USERNAMES env。
 -- api_keys.username 由应用层校验存在性，不加外键。
 
@@ -69,21 +72,4 @@ CREATE TABLE IF NOT EXISTS usage_hourly (
     credit_known  INTEGER NOT NULL DEFAULT 0,
     latency_sum   INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (hour_utc, username, provider, model)
-);
-
-CREATE TABLE IF NOT EXISTS checkins (
-    provider     TEXT NOT NULL,
-    account_key  TEXT NOT NULL,
-    date_local   TEXT NOT NULL,
-    ok           INTEGER NOT NULL,
-    credit       REAL,
-    checked_at   INTEGER NOT NULL,
-    PRIMARY KEY (provider, account_key, date_local)
-);
-
-CREATE TABLE IF NOT EXISTS model_cache (
-    provider    TEXT NOT NULL,
-    model_id    TEXT NOT NULL,
-    fetched_at  INTEGER NOT NULL,
-    PRIMARY KEY (provider, model_id)
 );

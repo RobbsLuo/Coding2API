@@ -14,10 +14,9 @@ from src.db.migrate import apply_schema
 from src.db.repo import (
     ApiKeyRepository,
     CredentialRepository,
-    candidate_with_health,
 )
 from src.engine.executor import Executor, ExecutorDeps, NoHealthyCredential
-from src.engine.scheduler import Candidate, Scheduler
+from src.engine.scheduler import Scheduler
 from src.engine.sse import iter_frames, parse_frames
 from src.main import build_app
 from src.provider.base import Event, EventKind, Quota, Usage
@@ -25,6 +24,7 @@ from src.provider.trae import events as trae_events
 from src.provider.trae.callback import parse_callback_url
 from src.provider.trae.client import TraeClient, TraeCredential, TraeProvider
 from src.provider.trae.events import UpstreamProtocolViolation
+from tests.conftest import SECRET
 
 # ------------------------------------------------------------------ repo
 
@@ -32,7 +32,7 @@ from src.provider.trae.events import UpstreamProtocolViolation
 def repo(tmp_path):
     db = Database(tmp_path / "r.sqlite3")
     apply_schema(db.connect())
-    yield CredentialRepository(db, CredentialCipher("s")), db
+    yield CredentialRepository(db, CredentialCipher(SECRET)), db
     db.close()
 
 
@@ -69,12 +69,6 @@ def test_repo_candidates_filter_by_provider(repo):
     assert len(credentials.candidates()) == 2
     assert len(credentials.candidates(["trae"])) == 1
     assert credentials.candidates(["trae"])[0].provider == "trae"
-
-
-def test_candidate_with_health_helper():
-    candidate = Candidate(credential_id="c", provider="trae")
-    assert candidate_with_health(candidate, Quota(remaining=1, total=4)).health == 25
-    assert candidate_with_health(candidate, Quota(probe_failed=True)).health is None
 
 
 def test_apikey_repository_verify_updates_last_used(repo):
@@ -430,9 +424,9 @@ def test_models_endpoint_lists_all_registered_providers(tmp_path):
         def import_credential(self, raw):  # pragma: no cover
             return raw
 
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     app = build_app(settings, providers={"codebuddy": TwoProviders(), "trae": TraeStub()})
-    key = app.state.api_keys.create("u")["api_key"]
+    key = app.state.api_keys.create("root")["api_key"]
     from fastapi.testclient import TestClient
 
     with TestClient(app) as test_client:

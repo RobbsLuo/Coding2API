@@ -480,6 +480,14 @@ class TraeProvider:
             raise UpstreamProtocolViolation("credential missing uid")
         return credential.to_dict()
 
+    def credential_from(self, credential_data: dict) -> TraeCredential:
+        """供 RefreshTask 判断是否进入刷新窗口（Q12 预刷新）。
+
+        缺少这个方法时 `_needs_refresh` 对 TRAE 恒返回 False，
+        凭证只能等 access token 过期后被动失效，永远不预刷新。
+        """
+        return TraeCredential.from_dict(credential_data)
+
     def classify(self, status: int, body: bytes) -> ErrKind:
         return trae_events.classify_status(status, body)
 

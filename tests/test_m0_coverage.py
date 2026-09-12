@@ -135,8 +135,9 @@ def test_database_schema_is_idempotent(db):
     apply_schema(db.connect())
     tables = {r["name"] for r in db.connect().execute(
         "SELECT name FROM sqlite_master WHERE type='table'")}
-    assert {"api_keys", "credentials", "usage_events", "usage_hourly",
-            "checkins", "model_cache"} <= tables
+    assert {"api_keys", "credentials", "usage_events", "usage_hourly"} <= tables
+    # checkins / model_cache 已删除（零引用：签到去重走内存态，模型列表是 TTL 缓存）
+    assert "checkins" not in tables and "model_cache" not in tables
 
 
 def test_database_connection_is_per_thread(db):

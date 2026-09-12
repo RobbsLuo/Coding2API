@@ -71,6 +71,8 @@ def create_router(services: Services) -> APIRouter:
                                         credential_data=credential_data,
                                         nickname=str(payload.get("nickname") or ""),
                                         added_by=principal.username)
+        logger.info("管理员 %s 新增凭证 %s（上游 %s）", principal.username, credential_id,
+                    provider_id)
         schedule_probe(credential_id)
         return {"id": credential_id}
 
@@ -81,6 +83,19 @@ def create_router(services: Services) -> APIRouter:
         require_admin(principal)
         if not credentials.set_enabled(credential_id, bool(payload.get("enabled", True))):
             raise InvalidRequest("credential not found")
+        logger.info("管理员 %s 开关凭证 %s -> %s", principal.username, credential_id,
+                    payload.get("enabled", True))
+        return {"ok": True}
+
+    @router.post("/api/credentials/{credential_id}/revive")
+    async def revive_credential(credential_id: str,
+                                _csrf: None = Depends(csrf_protected),
+                                principal=Depends(principal_from_request)):
+        """解除硬禁用/冷却，让重新登录后的凭证回到池子。"""
+        require_admin(principal)
+        if not credentials.revive(credential_id):
+            raise InvalidRequest("credential not found")
+        logger.info("管理员 %s 恢复了凭证 %s", principal.username, credential_id)
         return {"ok": True}
 
     @router.post("/api/credentials/pin")
@@ -88,7 +103,9 @@ def create_router(services: Services) -> APIRouter:
                              _csrf: None = Depends(csrf_protected),
                              principal=Depends(principal_from_request)):
         require_admin(principal)
-        credentials.set_pinned(payload.get("credential_id"))
+        pin = payload.get("credential_id")
+        credentials.set_pinned(pin)
+        logger.info("管理员 %s 固定凭证 %s", principal.username, pin)
         return {"ok": True}
 
     @router.delete("/api/credentials/{credential_id}")
@@ -98,6 +115,7 @@ def create_router(services: Services) -> APIRouter:
         require_admin(principal)
         if not credentials.delete(credential_id):
             raise InvalidRequest("credential not found")
+        logger.info("管理员 %s 删除凭证 %s", principal.username, credential_id)
         return {"ok": True}
 
     @router.post("/api/credentials/{credential_id}/probe")
@@ -164,6 +182,8 @@ def create_router(services: Services) -> APIRouter:
             raise InvalidRequest("credential does not support account switching")
         switched = await provider.switch_account(data, str(payload.get("account_id") or ""))
         credentials.save_credential_data(credential_id, switched)
+        logger.info("管理员 %s 切换凭证 %s 账号 -> %s", principal.username, credential_id,
+                    payload.get("account_id"))
         # 账号切换后额度对应的是新账号，必须重探测而不是沿用旧值
         schedule_probe(credential_id)
         return {"switched": True}

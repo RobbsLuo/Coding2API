@@ -51,6 +51,7 @@ from src.provider.trae.client import (
     prepare_body,
 )
 from src.provider.trae.events import UpstreamProtocolViolation
+from tests.conftest import SECRET
 
 FIXTURES = Path(__file__).parent.parent / "src" / "provider" / "fixtures" / "trae"
 
@@ -454,7 +455,7 @@ def test_build_login_url_contains_configurable_callback():
 
 
 def test_resolve_public_callback_url():
-    settings = Settings(_env_file=None, APP_SECRET="s", PUBLIC_BASE_URL="https://gw.example/")
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, PUBLIC_BASE_URL="https://gw.example/")
     assert resolve_public_callback_url(settings) == "https://gw.example/authorize"
 
 
@@ -721,7 +722,7 @@ async def test_provider_stream_and_refresh_via_client():
 def repo(tmp_path):
     db = Database(tmp_path / "e.sqlite3")
     apply_schema(db.connect())
-    yield CredentialRepository(db, CredentialCipher("s")), ApiKeyRepository(db), db
+    yield CredentialRepository(db, CredentialCipher(SECRET)), ApiKeyRepository(db), db
     db.close()
 
 
@@ -869,7 +870,7 @@ async def test_executor_rejects_model_without_provider(repo):
 
 @pytest.fixture()
 def client(tmp_path):
-    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
     app = build_app(settings, providers={"trae": FakeProvider([GOOD])})
     from fastapi.testclient import TestClient
@@ -924,7 +925,7 @@ def test_admin_endpoints_require_session(client):
 def _login(client, username="root"):
     from src.auth.session import create_session_token
 
-    token = create_session_token(username, "s")
+    token = create_session_token(username, SECRET)
     client.cookies.set("coding2api_session", token)
 
 
