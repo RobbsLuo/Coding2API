@@ -244,8 +244,10 @@ class StatsQuery:
         rows = self._db.connect().execute(
             f"""
             SELECT hour_utc,
-                   COALESCE(SUM(CASE WHEN provider = 'codebuddy' THEN requests ELSE 0 END), 0) AS codebuddy,
-                   COALESCE(SUM(CASE WHEN provider = 'trae' THEN requests ELSE 0 END), 0) AS trae
+                   COALESCE(SUM(CASE WHEN provider = 'codebuddy'
+                               THEN requests ELSE 0 END), 0) AS codebuddy,
+                   COALESCE(SUM(CASE WHEN provider = 'trae'
+                               THEN requests ELSE 0 END), 0) AS trae
             FROM usage_hourly {where}
             GROUP BY hour_utc
             ORDER BY hour_utc

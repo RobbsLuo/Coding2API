@@ -13,7 +13,9 @@ from typing import Any
 from fastapi import Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from .auth.csrf import CsrfRejectedError, check_csrf
 from .auth.rbac import ForbiddenError, Principal, UnauthorizedError, require_admin
+from .auth.throttle import LoginThrottle, ThrottledError
 from .compat.openai.request import InvalidRequest, parse_chat_request
 from .compat.openai.response import error_payload
 from .config import Settings, load_settings
@@ -126,6 +128,35 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.model_aliases = model_aliases
     app.state.pending_callback_state = None
     app.state.pending_callback_user = None
+    app.state.login_throttle = LoginThrottle()
+
+    # --------------------------------------------- 安全中间件（PROPOSAL §8）
+    # 1. Host 白名单（防 DNS rebinding）；2. 请求体上限（登录 8KB / 其余 16MB）；
+    # 3. 安全响应头（CSP frame-ancestors + X-Frame-Options + nosniff）。
+
+    async def csrf_protected(request: Request) -> None:
+        check_csrf(request)
+
+    @app.middleware("http")
+    async def security_middleware(request: Request, call_next):
+        host_header = request.headers.get("host", "")
+        if not _host_allowed(host_header, config):
+            return JSONResponse(status_code=400,
+                                content=error_payload("invalid host header",
+                                                      "invalid_request", 400))
+        content_length = request.headers.get("content-length")
+        if content_length is not None and content_length.isdigit():
+            limit = (8 * 1024 if request.url.path == "/api/auth/login"
+                     else 16 * 1024 * 1024)
+            if int(content_length) > limit:
+                return JSONResponse(status_code=413,
+                                    content=error_payload("request body too large",
+                                                          "invalid_request", 413))
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+        return response
 
     # ------------------------------------------------------------ 鉴权依赖
 
@@ -190,16 +221,38 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         return JSONResponse(status_code=403,
                             content=error_payload("admin only", "forbidden", 403))
 
+    @app.exception_handler(CsrfRejectedError)
+    async def _csrf_rejected(_request: Request, _error: CsrfRejectedError):
+        return JSONResponse(status_code=403,
+                            content=error_payload("cross-origin write rejected",
+                                                  "forbidden", 403))
+
+    @app.exception_handler(ThrottledError)
+    async def _throttled(_request: Request, _error: ThrottledError):
+        return JSONResponse(status_code=429,
+                            content=error_payload("too many login attempts, slow down",
+                                                  "rate_limited", 429))
+
     # ----------------------------------------------------------- 管理台登录
 
     @app.post("/api/auth/login")
-    async def login(payload: dict):
+    async def login(request: Request, payload: dict):
         from .auth.session import create_session_token
 
         username = str(payload.get("username") or "")
         password = str(payload.get("password") or "")
-        if not store.verify(username, password):
+        ip = request.client.host if request.client else ""
+        throttle = app.state.login_throttle
+        # PBKDF2 是 CPU 密集同步操作：线程池 + 信号量限并发，防事件循环卡死。
+        # 先验证再限流：正确密码永不被窗口卡死（一次成功即解锁），
+        # 失败才走窗口计数——爆破频率被压到可用性以下。
+        verified = await throttle.verify(store.verify, username, password)
+        if not verified:
+            # 超限时抛 429 且不再计数；未超限则记一次失败并回 401
+            throttle.check(ip=ip, username=username)
+            throttle.record_failure(ip=ip, username=username)
             raise UnauthorizedError("invalid credentials")
+        throttle.record_success(username=username)
         token = create_session_token(username, config.app_secret)
         response = JSONResponse({"username": username, "is_admin": config.is_admin(username)})
         response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
@@ -266,6 +319,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.post("/api/playground/chat/completions")
     async def playground_chat(request: Request,
+                              _csrf: None = Depends(csrf_protected),
                               principal: Principal = Depends(principal_from_request)):
         """会话内直接调试：与外部 /v1 走同一执行引擎，用量记到当前用户。
 
@@ -317,6 +371,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.post("/api/credentials")
     async def import_credential(payload: dict,
+                                _csrf: None = Depends(csrf_protected),
                                 principal: Principal = Depends(principal_from_request)):
         require_admin(principal)
         provider_id = str(payload.get("provider") or "")
@@ -331,6 +386,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.post("/api/credentials/{credential_id}/toggle")
     async def toggle_credential(credential_id: str, payload: dict,
+                                _csrf: None = Depends(csrf_protected),
                                 principal: Principal = Depends(principal_from_request)):
         require_admin(principal)
         if not credentials.set_enabled(credential_id, bool(payload.get("enabled", True))):
@@ -339,6 +395,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.post("/api/credentials/pin")
     async def pin_credential(payload: dict,
+                             _csrf: None = Depends(csrf_protected),
                              principal: Principal = Depends(principal_from_request)):
         require_admin(principal)
         credentials.set_pinned(payload.get("credential_id"))
@@ -346,6 +403,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.delete("/api/credentials/{credential_id}")
     async def delete_credential(credential_id: str,
+                                _csrf: None = Depends(csrf_protected),
                                 principal: Principal = Depends(principal_from_request)):
         require_admin(principal)
         if not credentials.delete(credential_id):
@@ -354,12 +412,14 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.post("/api/api-keys")
     async def create_key(payload: dict,
+                         _csrf: None = Depends(csrf_protected),
                          principal: Principal = Depends(principal_from_request)):
         created = api_keys.create(principal.username, str(payload.get("name") or ""))
         return created          # 明文只在此返回一次
 
     @app.delete("/api/api-keys/{key_id}")
-    async def delete_key(key_id: str, principal: Principal = Depends(principal_from_request)):
+    async def delete_key(key_id: str, _csrf: None = Depends(csrf_protected),
+                         principal: Principal = Depends(principal_from_request)):
         if not api_keys.delete(key_id, principal.username):
             raise InvalidRequest("api key not found")
         return {"ok": True}
@@ -368,6 +428,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.post("/api/auth/upstream/start")
     async def upstream_auth_start(payload: dict,
+                                  _csrf: None = Depends(csrf_protected),
                                   principal: Principal = Depends(principal_from_request)):
         require_admin(principal)
         provider_id = str(payload.get("provider") or "")
@@ -387,6 +448,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.post("/api/auth/upstream/poll")
     async def upstream_auth_poll(payload: dict,
+                                 _csrf: None = Depends(csrf_protected),
                                  principal: Principal = Depends(principal_from_request)):
         require_admin(principal)
         provider_id = str(payload.get("provider") or "")
@@ -406,6 +468,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.post("/api/auth/upstream/cancel")
     async def upstream_auth_cancel(payload: dict,
+                                   _csrf: None = Depends(csrf_protected),
                                    principal: Principal = Depends(principal_from_request)):
         require_admin(principal)
         oauth = app.state.upstream_auth.get(str(payload.get("provider") or ""))
@@ -418,6 +481,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.post("/api/credentials/{credential_id}/probe")
     async def probe_credential(credential_id: str,
+                               _csrf: None = Depends(csrf_protected),
                                principal: Principal = Depends(principal_from_request)):
         require_admin(principal)
         provider_id = credentials.provider_of(credential_id)
@@ -438,6 +502,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.post("/api/credentials/{credential_id}/checkin")
     async def checkin_credential(credential_id: str,
+                                 _csrf: None = Depends(csrf_protected),
                                  principal: Principal = Depends(principal_from_request)):
         require_admin(principal)
         provider_id = credentials.provider_of(credential_id)
@@ -468,6 +533,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
     @app.post("/api/credentials/{credential_id}/accounts/select")
     async def select_credential_account(credential_id: str, payload: dict,
+                                        _csrf: None = Depends(csrf_protected),
                                         principal: Principal = Depends(principal_from_request)):
         require_admin(principal)
         provider_id = credentials.provider_of(credential_id)
@@ -679,6 +745,28 @@ def _load_users(*, settings: Settings):
     store = UsersFileStore(path)
     store.validate()
     return store
+
+
+def _host_allowed(host_header: str, settings: Settings) -> bool:
+    """Host 白名单（防 DNS rebinding，PROPOSAL §8）。
+
+    ALLOWED_HOSTS 配置优先（逗号分隔）；未配置时放行本地回环、PUBLIC_BASE_URL
+    的主机与 testserver（FastAPI TestClient 默认 Host，仅测试场景）。
+    只比较主机名，忽略端口。
+    """
+    hostname = host_header.split(":", 1)[0].strip().lower().strip("[]")
+    if settings.allowed_hosts:
+        allowed = {h.split(":", 1)[0].strip().lower().strip("[]")
+                   for h in settings.allowed_hosts.split(",") if h.strip()}
+        return hostname in allowed
+    allowed = {"localhost", "127.0.0.1", "::1", "testserver"}
+    base = settings.public_base_url
+    if base.startswith(("http://", "https://")):
+        base = base.split("://", 1)[1]
+    path_host = base.split("/", 1)[0].split(":", 1)[0].strip().lower().strip("[]")
+    if path_host:
+        allowed.add(path_host)
+    return hostname in allowed
 
 
 def run() -> None:

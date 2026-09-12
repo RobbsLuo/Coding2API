@@ -28,6 +28,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const response = await fetch(path, {
     ...init,
     headers: {
+      // CSRF 纵深（服务端要求写请求带自定义头，PROPOSAL §8）：
+      // 浏览器跨站表单/简单请求无法携带自定义头
+      "X-Requested-With": "XMLHttpRequest",
       ...(init.body ? { "Content-Type": "application/json" } : {}),
       ...init.headers,
     },

@@ -134,8 +134,8 @@ class CredentialRepository:
     def list_all(self) -> list[dict[str, Any]]:
         """管理台列表：绝不返回明文凭证。"""
         rows = self._db.connect().execute(
-            "SELECT id, provider, nickname, enabled, disabled, disabled_reason, pinned, health, "
-            "cooling_until, err_count, quota_remaining, quota_total, quota_cycle_end, "
+            "SELECT id, provider, nickname, enabled, disabled, disabled_reason, pinned, "
+            "health, cooling_until, err_count, quota_remaining, quota_total, quota_cycle_end, "
             "quota_probed_at, created_at, added_by FROM credentials ORDER BY created_at").fetchall()
         return [dict(row) for row in rows]
 

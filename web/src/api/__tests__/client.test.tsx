@@ -138,7 +138,9 @@ describe("api client", () => {
     await api.models("sk-abc");
     expect(spy).toHaveBeenCalledWith(
       "/v1/models",
-      expect.objectContaining({ headers: { Authorization: "Bearer sk-abc" } }),
+      expect.objectContaining({
+        headers: expect.objectContaining({ Authorization: "Bearer sk-abc" }),
+      }),
     );
 
     const calls: { url: string; init?: RequestInit }[] = [];
