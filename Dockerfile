@@ -1,7 +1,9 @@
 # 多阶段构建：前端产物 + Python 运行时
 FROM node:24-alpine AS web
 WORKDIR /web
-COPY web/package.json web/pnpm-lock.yaml ./
+# pnpm-workspace.yaml 必须一起 COPY：pnpm 从这里读 allowBuilds（放行 esbuild
+# 的 postinstall），缺失会以 ERR_PNPM_IGNORED_BUILDS 退出。
+COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
 RUN corepack enable && pnpm install --frozen-lockfile
 COPY web/ ./
 RUN pnpm exec vite build

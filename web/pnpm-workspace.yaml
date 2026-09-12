@@ -1,2 +1,5 @@
-onlyBuiltDependencies:
-  - esbuild
+# esbuild 需要跑 postinstall（下载/校验平台二进制），否则 vite build 失败。
+# 用 allowBuilds map 而非 onlyBuiltDependencies 列表：后者在 pnpm 11 已移除，
+# allowBuilds 在 pnpm 10.18 与 11 都支持，两个版本都能装。
+allowBuilds:
+  esbuild: true
