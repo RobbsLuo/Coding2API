@@ -9,12 +9,13 @@ import {
   STATE_LABEL,
   STATE_TONE,
 } from "../api/display";
-import type { Credential, Provider } from "../api/types";
+import type { Credential } from "../api/types";
 import { Badge, Empty, Metric, Panel, Skeleton } from "../ui";
 import { PageHeader } from "../components/PageHeader";
+import { ProviderIcon } from "../components/ProviderIcon";
 import { cn } from "@/lib/utils";
 
-const PROVIDER_LABEL: Record<Provider, string> = { codebuddy: "CodeBuddy", trae: "TRAE" };
+const PROVIDER_LABEL: Record<string, string> = { codebuddy: "CodeBuddy", trae: "TRAE" };
 
 export function DashboardPage() {
   const { data, isLoading } = useCredentials();
@@ -37,11 +38,6 @@ export function DashboardPage() {
   }
 
   const cooling = credentials.filter((item) => credentialState(item, now) === "cooling");
-  const byProvider = (["codebuddy", "trae"] as Provider[]).map((provider) => ({
-    provider,
-    items: credentials.filter((item) => item.provider === provider),
-  }));
-
   if (isLoading) {
     return (
       <div className="space-y-6" data-testid="dashboard">
@@ -114,29 +110,16 @@ export function DashboardPage() {
         </p>
       </Panel>
 
-      <Panel title="按时段上游分组">
-        <div className="grid gap-4 md:grid-cols-2">
-          {byProvider.map(({ provider, items }) => (
-            <div key={provider} data-testid={`provider-group-${provider}`}>
-              <div className="mb-2 flex items-center text-xs font-medium text-muted-foreground">
-                {PROVIDER_LABEL[provider]}（
-                <span className="rounded-full bg-muted px-1.5 py-0.5 tabular-nums">
-                  {items.length}
-                </span>
-                ）
-              </div>
-              {items.length === 0 ? (
-                <Empty>暂无凭证</Empty>
-              ) : (
-                <ul className="space-y-1.5">
-                  {items.map((item) => (
-                    <CredentialRow key={item.id} credential={item} now={now} />
-                  ))}
-                </ul>
-              )}
-            </div>
-          ))}
-        </div>
+      <Panel title="凭证池">
+        {credentials.length === 0 ? (
+          <Empty data-testid="no-credentials">暂无凭证</Empty>
+        ) : (
+          <ul className="space-y-1.5" data-testid="credential-list">
+            {credentials.map((item) => (
+              <CredentialRow key={item.id} credential={item} now={now} />
+            ))}
+          </ul>
+        )}
       </Panel>
 
       <Panel title="冷却中的账号">
@@ -191,10 +174,17 @@ function CredentialRow({ credential, now }: { credential: Credential; now: numbe
           ? "bg-warn"
           : "bg-destructive";
   return (
-    <li className="rounded-lg border border-border bg-card px-3 py-2.5 text-sm transition-colors hover:bg-muted/40">
+    <li
+      className="rounded-lg border border-border bg-card px-3 py-2.5 text-sm transition-colors hover:bg-muted/40"
+      data-testid={`credential-${credential.id}`}
+      data-provider={credential.provider}
+    >
       <div className="flex items-center justify-between gap-3">
-        <span className="truncate font-medium">
-          {credential.nickname || credential.id.slice(0, 12)}
+        <span className="flex min-w-0 items-center gap-1.5">
+          <ProviderIcon provider={credential.provider} />
+          <span className="truncate font-medium" title={PROVIDER_LABEL[credential.provider]}>
+            {credential.nickname || credential.id.slice(0, 12)}
+          </span>
         </span>
         <span className="flex shrink-0 items-center gap-2">
           <Badge tone={health.tone}>{health.label}</Badge>

@@ -78,7 +78,7 @@ describe("DashboardPage", () => {
     expect(list).toHaveTextContent("plan 权益不足");
   });
 
-  it("按上游分组展示凭证", async () => {
+  it("凭证池单列表展示，行内标注所属上游", async () => {
     mockFetch({
       "/api/credentials": {
         credentials: [
@@ -92,8 +92,11 @@ describe("DashboardPage", () => {
     renderPage(<DashboardPage />);
     await settle();
 
-    expect(screen.getByTestId("provider-group-trae")).toHaveTextContent("TRAE（1）");
-    expect(screen.getByTestId("provider-group-codebuddy")).toHaveTextContent("CodeBuddy（1）");
+    // 不再按上游分组成两个列表，而是单一列表 + 行内渠道标注
+    expect(screen.getByTestId("credential-list")).toBeInTheDocument();
+    expect(screen.queryByTestId("provider-group-trae")).not.toBeInTheDocument();
+    expect(screen.getByTestId("credential-t1")).toHaveAttribute("data-provider", "trae");
+    expect(screen.getByTestId("credential-c1")).toHaveAttribute("data-provider", "codebuddy");
   });
 
   it("区分周期额度与单调余额的语义", async () => {
