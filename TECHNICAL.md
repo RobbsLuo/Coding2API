@@ -16,7 +16,7 @@ PROPOSAL.md 定方向，本文档定实现。每个模块标注来源决策（Q 
 | 数据库 | 标准库 sqlite3（WAL）+ 手写 SQL | 内置 | T-Q2 |
 | 加密 | cryptography Fernet（凭证列） | 50.x | T-Q2 |
 | 测试 | pytest + pytest-cov + respx + 文件化 fixture | respx 0.23.1 | T-Q5 |
-| 前端 | React 19.3 + Tailwind 4.3 + shadcn/ui 4.21 + Vite | 已核实 | Q5 |
+| 前端 | React 19.3 + Tailwind 4.3 + shadcn/ui 4.21 + @lobehub/icons + Vite | 已核实 | Q5 |
 
 ---
 
@@ -36,7 +36,9 @@ coding2api/
 │   ├── auth/
 │   │   ├── users.py             # users.txt 解析（username:PBKDF2），hash_password.py CLI
 │   │   ├── session.py           # 会话 Cookie 签发/校验（itsdangerous 或手写 HMAC）
-│   │   ├── apikey.py            # sk- 生成（secrets）、SHA-256 摘要存储、常量时间校验
+│   │   ├── api_key.py           # sk- 生成（secrets）、SHA-256 摘要存储、常量时间校验
+│   │   ├── csrf.py             # 写操作 CSRF 校验（自定义头 / 同源 Origin）
+│   │   └── throttle.py         # 登录限流（三级窗口 + PBKDF2 并发上限）
 │   │   └── rbac.py              # ADMIN_USERNAMES 判定；require_admin 依赖
 │   ├── provider/
 │   │   ├── base.py              # Provider 协议、Event、ErrKind、HealthScore、Quota
@@ -77,17 +79,18 @@ coding2api/
 │   │   ├── collector.py         # usage_events 写入（脱敏）
 │   │   └── query.py             # overview / by-provider 聚合查询
 │   └── api/
-│       ├── deps.py              # require_api_key / require_session / require_admin
+│       ├── deps.py              # Services 容器 + require_api_key / session / csrf 依赖
 │       ├── chat.py              # POST /v1/chat/completions
-│       ├── models.py            # GET /v1/models
+│       ├── models.py            # GET /v1/models（动态拉取 + 黑名单 + 缓存兑底 + 元数据）
 │       ├── authorize.py         # GET /authorize（TRAE 回调落点）
-│       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin
+│       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin / 账号切换
 │       ├── admin_keys.py        # API Key CRUD
-│       ├── admin_stats.py       # 统计查询
-│       └── admin_auth.py        # 登录 / 登出 / 会话；上游登录 start/poll/result
+│       ├── admin_stats.py       # 统计查询（overview / by-provider / timeline / model-timeline）
+│       ├── admin_auth.py        # 登录 / 登出 / 会话；上游登录 start/poll/cancel
+│       └── playground.py        # 会话调试端点（无需 API Key）
 ├── web/                         # React 前端（M2）
 ├── tests/                       # §9
-├── deploy/                      # Dockerfile / compose（M3）
+├── Dockerfile / docker-compose.yml  # 仓库根（M3；compose build context 依赖根目录）
 ├── NOTICE / LICENSE / README.md / README.zh.md
 ```
 

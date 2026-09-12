@@ -458,6 +458,11 @@ coding2api/
 | DELETE | `/api/api-keys/{id}` | 全部 |
 | GET | `/api/stats/overview` | 全部（自己的）；admin 可加 `?username=` 看任何人 |
 | GET | `/api/stats/by-provider` | 全部；admin 可跨用户聚合 |
+| GET | `/api/stats/timeline` | 全部；按小时的请求量时间序列（实装新增） |
+| GET | `/api/stats/model-timeline` | 全部；按模型请求量趋势 Top N（实装新增） |
+| GET/POST | `/api/credentials/{id}/accounts[/select]` | admin；多账号切换（实装新增） |
+| POST | `/api/auth/upstream/cancel` | admin；取消进行中的登录（实装新增） |
+| GET/POST | `/api/playground/models`、`/api/playground/chat/completions` | 全部（会话鉴权，无需 API Key；实装新增） |
 
 ### 回调（无鉴权，TRAE 浏览器 302 不带 key）
 
@@ -500,6 +505,10 @@ coding2api/
 | `PACER_MIN_SECONDS` / `PACER_MAX_SECONDS` | `5` / `20` | 后台任务随机节流区间 |
 | `REFRESH_SKEW_HOURS` | `24` | token 预刷新窗口 |
 | `LOG_LEVEL` | `INFO` | 日志级别 |
+| `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB 聊天最小间隔（秒），避频控风控；0 关闭 |
+| `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*` | 模型列表黑名单（fnmatch glob）；只影响列表展示 |
+| `ALLOWED_HOSTS` | 空 | Host 白名单（防 DNS rebinding）；空 = 本地回环 + PUBLIC_BASE_URL 主机 |
+| `DUMP_REQUEST_BODIES` | `false` | 诊断开关：/v1 原始请求体落到 data/dumps/ |
 
 ---
 

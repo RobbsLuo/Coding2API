@@ -16,6 +16,7 @@
 - **凭证加密入库**：Fernet（AES-128-CBC + HMAC），密钥走 `APP_SECRET`
 - **脱敏统计**：不保存提示词、回答、请求头、Token、工具参数；明细 90 天、小时汇总永久
 - **完整凭证运维**：OAuth 设备码登录、多账号切换、额度探测、每日签到、token 预刷新
+- **用量可视化**：请求量趋势（按上游）、按模型趋势（Top N）、按上游分组；品牌 logo 标注渠道
 - **管理台安全加固**：登录三级限流（全局/IP/用户名）+ PBKDF2 并发上限、写操作 CSRF 校验、
   请求体上限（登录 8KB / 其余 16MB）、安全响应头（CSP `frame-ancestors`）与 Host 白名单
 - **模型目录治理**：`MODEL_BLOCKLIST` 过滤内部/老模型；上游拉取失败用缓存兜底；
@@ -135,7 +136,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ## 配置
 
-全部通过环境变量（见 `docker-compose.yml`）。完整清单参考 `TECHNICAL.md` §8。
+全部通过环境变量（见 `docker-compose.yml`）。完整清单参考 `PROPOSAL.md` §8。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
@@ -148,6 +149,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `DEFAULT_MODEL` | `glm-5.2` | 模型为空或 `auto` 时的目标 |
 | `CHECKIN_HOUR` | `9` | 每日签到时刻（服务器本地时区） |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |
+| `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB 聊天最小间隔（秒），避频控风控；0 关闭 |
 | `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*` | 模型列表黑名单（fnmatch glob，逗号分隔，完全替换语义）；只影响列表展示，直连指定不受影响 |
 | `ALLOWED_HOSTS` | 空 | Host 白名单（防 DNS rebinding）；空 = 本地回环 + `PUBLIC_BASE_URL` 主机 |
 
