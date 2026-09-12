@@ -630,6 +630,54 @@ async def test_provider_import_classify_and_models():
         provider.import_credential({"accessToken": "a"})
 
 
+async def test_provider_model_failure_negative_cache():
+    """拉取失败后 5 分钟内不再打上游（静态表兜底），缓存过期后恢复拉取。"""
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(500)
+
+    provider = TraeProvider(client=_client(handler))
+    first = await provider.list_models({"accessToken": "a", "uid": "u"})
+    assert calls["n"] == 1
+    assert [m.id for m in first] == list(STATIC_MODELS)
+    # 负缓存生效：第二次不请求上游，仍回静态表
+    second = await provider.list_models({"accessToken": "a", "uid": "u"})
+    assert calls["n"] == 1
+    assert [m.id for m in second] == list(STATIC_MODELS)
+    # 模拟缓存过期：恢复动态拉取
+    provider._dynamic_models_blocked_until = 0
+    await provider.list_models({"accessToken": "a", "uid": "u"})
+    assert calls["n"] == 2
+
+
+async def test_provider_model_success_clears_negative_cache():
+    """动态拉取成功后清除负缓存，后续请求恢复直连上游。"""
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(500)
+        return httpx.Response(200, json={"config_info_list": [
+            {"config_name": "glm-5.2",
+             "display_config": {"display_name": "GLM"}}]})
+
+    provider = TraeProvider(client=_client(handler))
+    await provider.list_models({"accessToken": "a", "uid": "u"})
+    assert provider._dynamic_models_blocked_until is not None
+    # 缓存过期后重试成功 → 清除负缓存
+    provider._dynamic_models_blocked_until = 0
+    models = await provider.list_models({"accessToken": "a", "uid": "u"})
+    assert any(m.id == "glm-5.2" for m in models)
+    assert provider._dynamic_models_blocked_until is None
+    # 负缓存已清除：再次调用重新拉取（成功路径）
+    before = calls["n"]
+    await provider.list_models({"accessToken": "a", "uid": "u"})
+    assert calls["n"] == before + 1
+
+
 async def test_provider_stream_and_refresh_via_client():
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=fixture("chat-basic.sse"))

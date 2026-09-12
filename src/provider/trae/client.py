@@ -437,6 +437,11 @@ class TraeProvider:
 
     id: str = "trae"
 
+    # 动态模型拉取失败负缓存：失败后 N 秒内不再打上游（静态表兜底）。
+    # 上游 /v1/models 每次都要拉取，故障期会反复失败；
+    # 负缓存把无效请求压到 5 分钟一次（PROPOSAL §4.4 约定）。
+    _dynamic_models_blocked_until: float | None = field(default=None, init=False)
+
     def import_credential(self, raw: dict) -> dict:
         credential = parse_credential(raw)
         if not credential.uid:
@@ -458,14 +463,18 @@ class TraeProvider:
         """
         models: list[Model] = []
         credential = TraeCredential.from_dict(credential_data)
-        if credential.access_token:
+        blocked_until = self._dynamic_models_blocked_until
+        if credential.access_token and (blocked_until is None
+                                        or time.monotonic() >= blocked_until):
             try:
                 models.extend(await self.client.fetch_models(credential))
+                self._dynamic_models_blocked_until = None   # 成功即清除负缓存
             except Exception as error:  # noqa: BLE001 - 回退不是静默：错误带上日志
                 import logging
 
+                self._dynamic_models_blocked_until = time.monotonic() + 300
                 logging.getLogger(__name__).warning(
-                    "TRAE 动态模型拉取失败，回退静态表: %s", error)
+                    "TRAE 动态模型拉取失败，回退静态表 5 分钟: %s", error)
         models.extend(Model(id=mid) for mid in STATIC_MODELS)
         return models
 
