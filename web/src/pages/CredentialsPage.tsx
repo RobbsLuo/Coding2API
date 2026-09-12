@@ -1,12 +1,27 @@
 import { useState } from "react";
-import { CalendarCheck, Pin, Power, RefreshCw, Trash2, Users } from "lucide-react";
+import {
+  CalendarCheck,
+  MoreHorizontal,
+  Pin,
+  Power,
+  RefreshCw,
+  Trash2,
+  Users,
+} from "lucide-react";
 import { api } from "../api/client";
 import { useSessionContext } from "../Layout";
 import { useCredentials, useQueryClient } from "../api/hooks";
 import { HelpBlock } from "../components/HelpBlock";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
-import { Tip, ColumnHint } from "../components/Tip";
+import { ColumnHint } from "../components/Tip";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   credentialState,
   cooldownRemaining,
@@ -478,32 +493,7 @@ function Row({
       </TableCell>
       {isAdmin && (
         <TableCell>
-          <div className="flex flex-wrap justify-end gap-1">
-            <Tip content="立即向上游查询一次剩余额度；失败保持「未探测」">
-              <Button size="icon" variant="ghost" aria-label="探测" disabled={busy} onClick={() => actions.probe(credential)}>
-                <RefreshCw />
-              </Button>
-            </Tip>
-            <Tip content="领取当日积分（每天 9 点系统自动签到）">
-              <Button size="icon" variant="ghost" aria-label="签到" disabled={busy} onClick={() => actions.checkin(credential)}>
-                <CalendarCheck />
-              </Button>
-            </Tip>
-            <Tip content="切换账号：同一登录下的个人/企业账号（仅 CodeBuddy）">
-              <Button size="icon" variant="ghost" aria-label="账号" disabled={busy} onClick={() => actions.openAccounts(credential)}>
-                <Users />
-              </Button>
-            </Tip>
-            <Tip content={credential.enabled === 1 ? "停用：临时移出调度池，不删除数据" : "启用：重新加入调度池"}>
-              <Button size="icon" variant="ghost" aria-label={credential.enabled === 1 ? "停用" : "启用"} disabled={busy} onClick={() => actions.toggle(credential)}>
-                <Power />
-              </Button>
-            </Tip>
-            <Tip content={credential.pinned === 1 ? "取消指定：解除全局唯一指定" : "指定：设为优先使用的唯一凭证（全局只能一个）"}>
-              <Button size="icon" variant="ghost" aria-label={credential.pinned === 1 ? "取消指定" : "指定"} disabled={busy} onClick={() => actions.pin(credential)}>
-                <Pin />
-              </Button>
-            </Tip>
+          <div className="flex items-center justify-end gap-1">
             {confirming ? (
               <>
                 <Button
@@ -519,11 +509,44 @@ function Row({
                 </Button>
               </>
             ) : (
-              <Tip content="删除该凭证，需要二次确认">
-                <Button size="icon" variant="ghost" aria-label="删除" onClick={() => onConfirmDelete(credential.id)}>
-                  <Trash2 />
-                </Button>
-              </Tip>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    aria-label="操作"
+                    disabled={busy}
+                    data-testid={`actions-${credential.id}`}
+                  >
+                    <MoreHorizontal />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="w-44">
+                  <DropdownMenuItem onSelect={() => actions.probe(credential)}>
+                    <RefreshCw className="size-4" /> 探测
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => actions.checkin(credential)}>
+                    <CalendarCheck className="size-4" /> 签到
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => actions.openAccounts(credential)}>
+                    <Users className="size-4" /> 账号
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={() => actions.toggle(credential)}>
+                    <Power className="size-4" /> {credential.enabled === 1 ? "停用" : "启用"}
+                  </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => actions.pin(credential)}>
+                    <Pin className="size-4" /> {credential.pinned === 1 ? "取消指定" : "指定"}
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onSelect={() => onConfirmDelete(credential.id)}
+                    className="text-destructive focus:text-destructive focus:bg-destructive/10"
+                  >
+                    <Trash2 className="size-4" /> 删除
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
             )}
           </div>
         </TableCell>

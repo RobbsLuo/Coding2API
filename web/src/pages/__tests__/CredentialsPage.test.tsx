@@ -38,9 +38,7 @@ describe("CredentialsPage", () => {
     await settle();
 
     expect(screen.getByTestId("readonly-banner")).toHaveTextContent("只读模式");
-    expect(screen.queryByRole("button", { name: "探测" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "签到" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "删除" })).not.toBeInTheDocument();
+    expect(screen.queryByTestId("actions-cred_1")).not.toBeInTheDocument();
     expect(screen.queryByTestId("import-submit")).not.toBeInTheDocument();
     expect(screen.queryByTestId("start-login")).not.toBeInTheDocument();
   });
@@ -68,7 +66,8 @@ describe("CredentialsPage", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
-    await userEvent.click(screen.getByRole("button", { name: "停用" }));
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "停用" }));
 
     await waitFor(() =>
       expect(fetchSpy).toHaveBeenCalledWith(
@@ -88,7 +87,8 @@ describe("CredentialsPage", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
-    await userEvent.click(screen.getByRole("button", { name: "指定" }));
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "指定" }));
 
     await waitFor(() =>
       expect(fetchSpy).toHaveBeenCalledWith(
@@ -107,7 +107,8 @@ describe("CredentialsPage", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
-    await userEvent.click(screen.getByRole("button", { name: "删除" }));
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "删除" }));
     expect(screen.getByRole("button", { name: "确认删除" })).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: "确认删除" }));
@@ -177,7 +178,8 @@ describe("CredentialsPage", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
-    await userEvent.click(screen.getByRole("button", { name: "探测" }));
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "探测" }));
 
     const notice = await screen.findByTestId("credentials-notice");
     expect(notice).toHaveTextContent("探测失败");
@@ -203,7 +205,8 @@ describe("CredentialsPage", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
-    await userEvent.click(screen.getByRole("button", { name: "探测" }));
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "探测" }));
     expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("未知错误");
   });
 
@@ -221,7 +224,8 @@ describe("CredentialsPage", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
-    await userEvent.click(screen.getByRole("button", { name: "探测" }));
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "探测" }));
 
     const notice = await screen.findByTestId("credentials-notice");
     expect(notice).toHaveTextContent("探测成功");
@@ -242,7 +246,8 @@ describe("CredentialsPage", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
-    await userEvent.click(screen.getByRole("button", { name: "签到" }));
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "签到" }));
     expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("100");
   });
 
@@ -263,7 +268,8 @@ describe("CredentialsPage", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
-    await userEvent.click(screen.getByRole("button", { name: "签到" }));
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "签到" }));
     const notice = await screen.findByTestId("credentials-notice");
     expect(notice).toHaveTextContent("今天已签到，请明天再来");
     expect(notice).not.toHaveTextContent("获得");
@@ -284,7 +290,8 @@ describe("CredentialsPage", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
-    await userEvent.click(screen.getByRole("button", { name: "签到" }));
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "签到" }));
     expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("签到成功");
   });
 
@@ -302,7 +309,8 @@ describe("CredentialsPage", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
-    await userEvent.click(screen.getByRole("button", { name: "签到" }));
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "签到" }));
     expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("code=null");
   });
 
@@ -321,7 +329,8 @@ describe("CredentialsPage", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
-    await userEvent.click(screen.getByRole("button", { name: "账号" }));
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "账号" }));
 
     const list = await screen.findByTestId("accounts-list");
     expect(list).toHaveTextContent("第二个");
