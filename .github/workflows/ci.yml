@@ -47,7 +47,10 @@ jobs:
           APP_SECRET: ci-placeholder-secret
       - name: 构建镜像并启动（验证 compose 可真实运行）
         run: |
-          mkdir -p secrets
+          mkdir -p data secrets
+          # 容器以 uid 1001 (appuser) 运行，挂载目录必须可写，
+          # 否则 SQLite 打不开、服务崩溃重启，health 永远不通
+          sudo chown -R 1001:1001 data secrets
           docker build -t coding2api:ci .
           printf 'ci:%s\n' "$(docker run --rm coding2api:ci python -c 'from src.auth.users import create_password_hash;print(create_password_hash("cipw"))')" > secrets/users.txt
           APP_SECRET=ci-placeholder-secret docker compose up -d
@@ -55,5 +58,7 @@ jobs:
             if curl -fsS http://127.0.0.1:8000/health >/dev/null; then break; fi
             sleep 2
           done
+          # 失败排查线索：容器日志（含启动 Traceback）
+          docker compose logs --tail 80
           curl -fsS http://127.0.0.1:8000/health
           docker compose down
