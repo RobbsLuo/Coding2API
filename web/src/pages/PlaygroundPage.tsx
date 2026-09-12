@@ -76,19 +76,21 @@ export function PlaygroundPage() {
     models.find((item) => item.value === selectedModel) ??
     models.find((item) => item.value === selectedModel.split("@")[0]);
 
-  // option 文本里的倍率标记：双上游显示 xCB倍率/xTRAE倍率，单上游显示 x倍率。
-  // 原生 option 不支持 svg，渠道用 optgroup 分组 + 文字缩写表达。
-  // 渠道缩写（原生 option 不支持 svg icon，用文字缩写标注渠道）
+  // option 文本里的倍率标记：双上游一律按渠道逐个标注（相同倍率也各自
+  // 写出；只有一个渠道有倍率时只标那个渠道）；单上游带渠道缩写。
 const CHANNEL_ABBR: Record<string, string> = { codebuddy: "CB", trae: "TR" };
 
-// option 文本里的倍率标记：双上游显示 xCB倍率/xTRAE倍率，单上游带渠道缩写。
 const rateLabel = (item: ModelInfo, provider?: string): string => {
   const byProvider = item.by_provider;
-  if (byProvider && Object.keys(byProvider).length > 1) {
-    const rates = (["codebuddy", "trae"] as const)
-      .map((pid) => byProvider[pid]?.credit_rate)
-      .filter((rate): rate is number => rate !== undefined);
-    if (rates.length > 1) return `CB x${rates[0]}/TR x${rates[1]}`;
+  const multi = item.providers && item.providers.length > 1;
+  if (multi && byProvider && Object.keys(byProvider).length > 0) {
+    const parts = (["codebuddy", "trae"] as const)
+      .map((pid) => {
+        const rate = byProvider[pid]?.credit_rate;
+        return rate === undefined ? null : `${CHANNEL_ABBR[pid] ?? pid} x${rate}`;
+      })
+      .filter(Boolean);
+    if (parts.length) return parts.join("/");
   }
   if (item.credit_rate !== undefined) {
     const abbr = provider ? `${CHANNEL_ABBR[provider] ?? provider} ` : "";

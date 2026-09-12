@@ -141,6 +141,36 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
       "DeepSeek-V4-Flash-Official · TR x0.08");
     // 无倍率数据：不追加任何标记
     expect(textOf("no-rate@trae")).toBe("no-rate");
+
+    // 双上游倍率相同：两个渠道都要写出来
+    // 双上游只有一个渠道返回倍率：只标那个渠道，不裸显数字
+  });
+
+  it("双上游倍率相同或缺失时，渠道标注规则", async () => {
+    const EDGE_MODELS = {
+      object: "list",
+      data: [
+        {
+          id: "same-rate", object: "model", owned_by: "coding2api",
+          providers: ["codebuddy", "trae"], credit_rate: 0.5,
+          by_provider: { codebuddy: { credit_rate: 0.5 }, trae: { credit_rate: 0.5 } },
+        },
+        {
+          id: "one-sided", object: "model", owned_by: "coding2api",
+          providers: ["codebuddy", "trae"], credit_rate: 0.29,
+          by_provider: { codebuddy: { credit_rate: 0.29 } },
+        },
+      ],
+    };
+    mockFetch({ "/api/playground/models": EDGE_MODELS });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    const options = [...screen.getByTestId("model-select").querySelectorAll("option")];
+    const textOf = (value: string) =>
+      options.find((o) => o.value === value)?.textContent ?? "";
+    expect(textOf("same-rate")).toBe("same-rate（自动路由 · CB x0.5/TR x0.5）");
+    expect(textOf("one-sided")).toBe("one-sided（自动路由 · CB x0.29）");
   });
 
   it("模型加载失败时给出提示", async () => {
