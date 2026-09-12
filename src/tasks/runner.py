@@ -14,7 +14,11 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
-from .background import CheckinTask, Pacer, QuotaProbeTask, RefreshTask, RetentionTask
+from .checkin import CheckinTask
+from .pacer import Pacer
+from .quota_probe import QuotaProbeTask
+from .refresh import RefreshTask
+from .retention import RetentionTask
 
 logger = logging.getLogger(__name__)
 

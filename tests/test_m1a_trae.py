@@ -11,12 +11,12 @@ from pathlib import Path
 import httpx
 import pytest
 
+from src.api.admin_auth import resolve_public_callback_url
+from src.compat.openai.errors import UpstreamStreamError, error_payload
 from src.compat.openai.request import InvalidRequest, parse_chat_request
 from src.compat.openai.response import (
     StreamTranslator,
-    UpstreamStreamError,
     aggregate,
-    error_payload,
 )
 from src.config import Settings
 from src.db.conn import Database
@@ -32,7 +32,7 @@ from src.engine.executor import (
 from src.engine.model_resolver import UnknownModelError, resolve
 from src.engine.scheduler import Scheduler
 from src.engine.sse import SSE_DONE, format_openai_frame, iter_frames, parse_frames
-from src.main import build_app, resolve_public_callback_url
+from src.main import build_app
 from src.provider.base import ErrKind, Event, EventKind, Model, Usage
 from src.provider.trae import events as trae_events
 from src.provider.trae.callback import (

@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
-from ..auth.apikey import digest_api_key, generate_api_key, preview_api_key
+from ..auth.api_key import digest_api_key, generate_api_key, preview_api_key
 from ..db.crypto import CredentialCipher
 from ..engine.scheduler import Candidate, ErrorOutcome
 from ..provider.base import Quota, health_score

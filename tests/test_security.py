@@ -37,7 +37,7 @@ def admin_client(app):
 
 def test_login_throttled_after_repeated_failures(app):
     _app, client = app
-    _app.state.login_throttle = LoginThrottle(
+    _app.state.services.login_throttle = LoginThrottle(
         limits=ThrottleLimits(max_per_user=3, max_global=100, max_per_ip=100)
     )
     payload = {"username": "root", "password": "wrong"}
@@ -49,7 +49,7 @@ def test_login_throttled_after_repeated_failures(app):
 
 def test_login_throttle_per_ip_isolates_users(app):
     _app, client = app
-    _app.state.login_throttle = LoginThrottle(
+    _app.state.services.login_throttle = LoginThrottle(
         limits=ThrottleLimits(max_per_user=100, max_per_ip=2, max_global=100)
     )
     for _ in range(2):
@@ -66,7 +66,7 @@ def test_login_throttle_per_ip_isolates_users(app):
 
 def test_login_throttle_success_clears_user_window(app):
     _app, client = app
-    _app.state.login_throttle = LoginThrottle(
+    _app.state.services.login_throttle = LoginThrottle(
         limits=ThrottleLimits(max_per_user=2, max_global=100, max_per_ip=100)
     )
     # 失败 2 次达到阈值

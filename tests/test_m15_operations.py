@@ -36,15 +36,14 @@ from src.provider.codebuddy.refresh import (
     account_generation_changed,
 )
 from src.provider.trae.client import TraeProvider
-from src.stats.collector import StatsCollector, StatsQuery
-from src.tasks.background import (
-    CheckinTask,
-    Pacer,
-    QuotaProbeTask,
-    RefreshTask,
-    RetentionTask,
-    TaskReport,
-)
+from src.stats.collector import StatsCollector
+from src.stats.query import StatsQuery
+from src.tasks import TaskReport
+from src.tasks.checkin import CheckinTask
+from src.tasks.pacer import Pacer
+from src.tasks.quota_probe import QuotaProbeTask
+from src.tasks.refresh import RefreshTask
+from src.tasks.retention import RetentionTask
 
 # ---------------------------------------------------------------- Pacer
 
@@ -927,7 +926,7 @@ async def test_refresh_task_isolates_failures(repo):
 
 
 def test_needs_refresh_without_builder_returns_false():
-    from src.tasks.background import _needs_refresh
+    from src.tasks.refresh import _needs_refresh
 
     assert _needs_refresh(object(), {}, 10, 0) is False
 
@@ -2134,7 +2133,7 @@ def test_schedule_probe_returns_early_when_credential_unreadable(admin_client):
 # ------------------------------------------- TRAE callback 登录闭环
 
 def test_trae_start_auth_builds_login_url_with_public_callback():
-    from src.main import resolve_public_callback_url
+    from src.api.admin_auth import resolve_public_callback_url
 
     settings = Settings(_env_file=None, APP_SECRET="s", PUBLIC_BASE_URL="https://gw.example")
     provider = TraeProvider()

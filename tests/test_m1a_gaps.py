@@ -757,7 +757,7 @@ async def test_checkin_task_skips_provider_without_scope(tmp_path):
     credentials = CredentialRepository(db, CredentialCipher("s"))
     credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
 
-    from src.tasks.background import CheckinTask
+    from src.tasks.checkin import CheckinTask
 
     class NoScope:
         id = "codebuddy"

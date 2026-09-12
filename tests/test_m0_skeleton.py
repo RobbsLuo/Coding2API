@@ -6,7 +6,7 @@ import base64
 
 import pytest
 
-from src.auth import apikey
+from src.auth import api_key
 from src.auth import session as session_mod
 from src.auth.rbac import ForbiddenError, Principal, require_admin
 from src.auth.users import (
@@ -162,12 +162,12 @@ def test_session_rejects_malformed(bad):
 # ----------------------------------------------------------------- API Key
 
 def test_api_key_generate_digest_preview():
-    key = apikey.generate_api_key()
+    key = api_key.generate_api_key()
     assert key.startswith("sk-")
-    assert apikey.digest_api_key(key) == apikey.digest_api_key(key)
-    assert apikey.matches(key, apikey.digest_api_key(key))
-    assert not apikey.matches(apikey.generate_api_key(), apikey.digest_api_key(key))
-    assert apikey.preview_api_key(key).startswith("sk-…")
+    assert api_key.digest_api_key(key) == api_key.digest_api_key(key)
+    assert api_key.matches(key, api_key.digest_api_key(key))
+    assert not api_key.matches(api_key.generate_api_key(), api_key.digest_api_key(key))
+    assert api_key.preview_api_key(key).startswith("sk-…")
 
 
 # -------------------------------------------------------------------- RBAC

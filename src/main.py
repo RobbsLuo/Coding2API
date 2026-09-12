@@ -1,23 +1,31 @@
-"""FastAPI 组装：外部 OpenAI 端点 + 管理端点 + TRAE 回调落点。"""
+"""FastAPI 组装：基础设施装配 + 中间件/异常处理器，路由委托 src/api 各模块。"""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
 
-from fastapi import Depends, FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 
-from .auth.csrf import CsrfRejectedError, check_csrf
-from .auth.rbac import ForbiddenError, Principal, UnauthorizedError, require_admin
+from .api import (
+    admin_auth,
+    admin_credentials,
+    admin_keys,
+    admin_stats,
+    authorize,
+    chat,
+    models,
+    playground,
+)
+from .api.deps import Services
+from .auth.csrf import CsrfRejectedError
+from .auth.rbac import ForbiddenError, UnauthorizedError
 from .auth.throttle import LoginThrottle, ThrottledError
-from .compat.openai.request import InvalidRequest, parse_chat_request
-from .compat.openai.response import error_payload
+from .compat.openai.errors import error_payload
+from .compat.openai.request import InvalidRequest
 from .config import Settings, load_settings
 from .db.conn import Database
 from .db.crypto import CredentialCipher
@@ -33,14 +41,12 @@ from .provider.codebuddy.events import (
 from .provider.codebuddy.oauth import CodeBuddyOAuth
 from .provider.trae.client import TraeProvider
 from .provider.trae.events import UpstreamProtocolViolation
-from .stats.collector import StatsCollector, StatsQuery
-from .tasks.background import Pacer
+from .stats.collector import StatsCollector
+from .stats.query import StatsQuery
+from .tasks.pacer import Pacer
 from .tasks.runner import build_runner
 
-SESSION_COOKIE = "coding2api_session"
-
 logger = logging.getLogger(__name__)
-
 
 
 def _similar_models(name: str, aliases: dict[str, dict[str, str]],
@@ -54,7 +60,6 @@ def _similar_models(name: str, aliases: dict[str, dict[str, str]],
         prefix = name.lower().split("-")[0]
         close = [m for m in known if m.lower().startswith(prefix)][:limit]
     return [m for m in close if m.lower() != name.lower()][:limit]
-
 
 
 def build_app(settings: Settings | None = None, *, providers: dict | None = None,
@@ -78,7 +83,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         "trae": TraeProvider(pacer=chat_pacer),
         "codebuddy": CodeBuddyProvider(pacer=chat_pacer),
     }
-    # provider → {小写模型名: 上游原始 id}；playground_models 拉取后就地更新，
+    # provider → {小写模型名: 上游原始 id}；api/models.list_models 拉取后就地更新，
     # executor 发请求前把归一名映射回各上游的原始大小写
     model_aliases: dict[str, dict[str, str]] = {}
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
@@ -93,22 +98,23 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                          name, model_aliases)))
 
     @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        runner = build_runner(credentials, registry, app.state.stats_collector, config)
-        app.state.task_runner = runner
+    async def lifespan(app_: FastAPI):
+        services_ = app_.state.services
+        runner = build_runner(credentials, registry, app_.state.stats_collector, config)
+        app_.state.task_runner = runner
         await runner.start()
         # 预热模型别名表（动态拉取失败仅记日志，不阻塞启动）
         try:
-            await playground_models()
+            await models.list_models(services_)
         except Exception as error:  # noqa: BLE001
             logger.warning("启动预热模型列表失败: %s", error)
         try:
             yield
         finally:
             await runner.stop()
-            for task in app.state.pending_probes:
+            for task in app_.state.pending_probes:
                 task.cancel()
-            app.state.pending_probes.clear()
+            app_.state.pending_probes.clear()
             for provider in registry.values():
                 closer = getattr(provider, "aclose", None)
                 if callable(closer):
@@ -130,12 +136,48 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.pending_callback_user = None
     app.state.login_throttle = LoginThrottle()
 
+    # 路由层共享依赖容器（TECHNICAL §2 deps.py）
+    def schedule_probe(credential_id: str) -> None:
+        """新增凭证 / OAuth 保存 / 账号切换 / 签到后立即重探测（不阻塞响应）。
+
+        周期扫描是 60 分钟一轮，若不等这一轮，刚加进来的凭证在界面上会一直
+        显示「未探测到额度」，调度器也只能把它排在 known 之后。
+        """
+        provider_id = credentials.provider_of(credential_id)
+        provider = registry.get(provider_id or "")
+        data = credentials.credential_data(credential_id)
+        if provider is None or data is None:
+            return
+
+        async def probe() -> None:
+            try:
+                quota = await provider.probe_quota(data)
+            except Exception as error:  # noqa: BLE001 - 探测失败标记为未探测
+                logger.warning("即时额度探测失败 %s: %s", credential_id, error)
+                credentials.mark_probe_failed(credential_id)
+                return
+            credentials.save_quota(credential_id, quota)
+
+        app.state.pending_probes.append(asyncio.create_task(probe()))
+
+    services = Services(
+        settings=config,
+        credentials=credentials,
+        api_keys=api_keys,
+        executor=executor,
+        registry=registry,
+        users=store,
+        stats_query=app.state.stats_query,
+        login_throttle=app.state.login_throttle,
+        upstream_auth=app.state.upstream_auth,
+        model_aliases=model_aliases,
+        schedule_probe=schedule_probe,
+    )
+    app.state.services = services
+
     # --------------------------------------------- 安全中间件（PROPOSAL §8）
     # 1. Host 白名单（防 DNS rebinding）；2. 请求体上限（登录 8KB / 其余 16MB）；
     # 3. 安全响应头（CSP frame-ancestors + X-Frame-Options + nosniff）。
-
-    async def csrf_protected(request: Request) -> None:
-        check_csrf(request)
 
     @app.middleware("http")
     async def security_middleware(request: Request, call_next):
@@ -158,26 +200,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
         return response
 
-    # ------------------------------------------------------------ 鉴权依赖
-
-    async def principal_from_request(request: Request) -> Principal:
-        from .auth.session import verify_session_token
-
-        token = request.cookies.get(SESSION_COOKIE, "")
-        username = verify_session_token(token, config.app_secret)
-        if not username:
-            raise UnauthorizedError("session missing or expired")
-        return Principal(username=username, is_admin=config.is_admin(username))
-
-    async def api_key_user(request: Request) -> str:
-        header = request.headers.get("authorization", "")
-        prefix = "Bearer "
-        if not header.lower().startswith(prefix.lower()):
-            raise UnauthorizedError("missing api key")
-        username = api_keys.verify(header[len(prefix):].strip())
-        if not username:
-            raise UnauthorizedError("invalid api key")
-        return username
+    # ------------------------------------------------------- 异常处理器
 
     @app.exception_handler(UnauthorizedError)
     async def _unauthorized(_request: Request, _error: UnauthorizedError):
@@ -233,405 +256,22 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                             content=error_payload("too many login attempts, slow down",
                                                   "rate_limited", 429))
 
-    # ----------------------------------------------------------- 管理台登录
-
-    @app.post("/api/auth/login")
-    async def login(request: Request, payload: dict):
-        from .auth.session import create_session_token
-
-        username = str(payload.get("username") or "")
-        password = str(payload.get("password") or "")
-        ip = request.client.host if request.client else ""
-        throttle = app.state.login_throttle
-        # PBKDF2 是 CPU 密集同步操作：线程池 + 信号量限并发，防事件循环卡死。
-        # 先验证再限流：正确密码永不被窗口卡死（一次成功即解锁），
-        # 失败才走窗口计数——爆破频率被压到可用性以下。
-        verified = await throttle.verify(store.verify, username, password)
-        if not verified:
-            # 超限时抛 429 且不再计数；未超限则记一次失败并回 401
-            throttle.check(ip=ip, username=username)
-            throttle.record_failure(ip=ip, username=username)
-            raise UnauthorizedError("invalid credentials")
-        throttle.record_success(username=username)
-        token = create_session_token(username, config.app_secret)
-        response = JSONResponse({"username": username, "is_admin": config.is_admin(username)})
-        response.set_cookie(SESSION_COOKIE, token, httponly=True, samesite="lax",
-                            secure=config.public_base_url.startswith("https://"),
-                            max_age=12 * 3600, path="/")
-        return response
-
-    @app.post("/api/auth/logout")
-    async def logout():
-        response = JSONResponse({"ok": True})
-        response.delete_cookie(SESSION_COOKIE, path="/")
-        return response
-
-    @app.get("/api/auth/session")
-    async def session_info(principal: Principal = Depends(principal_from_request)):
-        return {"username": principal.username, "is_admin": principal.is_admin}
-
-    # ------------------------------------- Playground（会话鉴权，无需 API Key）
-
-    async def playground_models() -> dict:
-        """与 /v1/models 相同的模型列表，供管理台内部使用。
-
-        CodeBuddy/TRAE 的动态列表里同一模型常只差大小写
-        （如 deepseek-v4-flash vs DeepSeek-V4-Flash），此处按小写归一合并，
-        providers 取并集；同时记录各上游的原始 id 供执行时映射。
-        """
-        # provider → {小写名: 上游原始 id}
-        aliases: dict[str, dict[str, str]] = {}
-        grouped: dict[str, dict[str, Any]] = {}   # 小写名 → {canonical, providers}
-        for provider_id, provider in registry.items():
-            # 用该上游的一个可用凭证拉取（凭证有归属，模型列表是账号级的）
-            candidates = credentials.candidates([provider_id])
-            credential_data = (
-                credentials.credential_data(candidates[0].credential_id)
-                if candidates else {}
-            )
-            try:
-                models = await provider.list_models(credential_data)
-            except Exception as error:  # noqa: BLE001 - 单上游失败不影响其他
-                logger.warning("模型列表获取失败 %s: %s", provider_id, error)
-                continue
-            provider_aliases = aliases.setdefault(provider_id, {})
-            for model in models:
-                provider_aliases[model.id.lower()] = model.id
-                entry = grouped.setdefault(model.id.lower(),
-                                           {"canonical": model.id, "providers": set()})
-                # canonical 偏向全小写形式（与 OpenAI 惯例一致）
-                if model.id == model.id.lower():
-                    entry["canonical"] = model.id
-                entry["providers"].add(provider_id)
-        # 就地更新（executor 的映射闭包引用同一个 dict 对象）
-        model_aliases.clear()
-        model_aliases.update(aliases)
-        return {"object": "list", "data": [
-            {"id": entry["canonical"], "object": "model", "owned_by": "coding2api",
-             "providers": sorted(entry["providers"])}
-            for entry in sorted(grouped.values(), key=lambda e: e["canonical"])
-        ]}
-
-    @app.get("/api/playground/models")
-    async def playground_list_models(
-            _principal: Principal = Depends(principal_from_request)):
-        return await playground_models()
-
-    @app.post("/api/playground/chat/completions")
-    async def playground_chat(request: Request,
-                              _csrf: None = Depends(csrf_protected),
-                              principal: Principal = Depends(principal_from_request)):
-        """会话内直接调试：与外部 /v1 走同一执行引擎，用量记到当前用户。
-
-        不走 API Key 鉴权——调试是管理台自带能力，不应强迫用户先造一个 Key。
-        """
-        body = await request.json()
-        chat_request = parse_chat_request(body)
-        if chat_request.stream:
-            return StreamingResponse(executor.stream(chat_request, username=principal.username),
-                                     media_type="text/event-stream")
-        return JSONResponse(await executor.complete(chat_request, username=principal.username))
-
     # ------------------------------------------------------------- 对外端点
 
     @app.get("/health")
     async def health():
         return {"status": "ok"}
 
-    @app.post("/v1/chat/completions")
-    async def chat_completions(request: Request, user: str = Depends(api_key_user)):
-        body = await request.json()
-        if config.dump_request_bodies:
-            dump_dir = Path(config.data_dir) / "dumps"
-            dump_dir.mkdir(parents=True, exist_ok=True)
-            (dump_dir / f"{int(time.time() * 1000)}.json").write_text(
-                json.dumps(body, ensure_ascii=False, indent=1), encoding="utf-8")
-        chat_request = parse_chat_request(body)
-        if chat_request.stream:
-            return StreamingResponse(executor.stream(chat_request, username=user),
-                                     media_type="text/event-stream")
-        return JSONResponse(await executor.complete(chat_request, username=user))
+    # 路由挂载（src/api 各模块；静态资源最后注册，catch-all 会匹配所有路径）
+    app.include_router(admin_auth.create_router(services))
+    app.include_router(admin_credentials.create_router(services))
+    app.include_router(admin_keys.create_router(services))
+    app.include_router(admin_stats.create_router(services))
+    app.include_router(chat.create_router(services))
+    app.include_router(models.create_router(services))
+    app.include_router(playground.create_router(services))
+    app.include_router(authorize.create_router(services))
 
-    @app.get("/v1/models")
-    async def list_models(_user: str = Depends(api_key_user)):
-        return await playground_models()
-
-    # --------------------------------------------------------- 管理端点（读）
-
-    @app.get("/api/credentials")
-    async def list_credentials(principal: Principal = Depends(principal_from_request)):
-        return {"credentials": credentials.list_all(), "viewer": principal.username,
-                "is_admin": principal.is_admin}
-
-    @app.get("/api/api-keys")
-    async def list_keys(principal: Principal = Depends(principal_from_request)):
-        return {"api_keys": api_keys.list_for(principal.username)}
-
-    # --------------------------------------------------------- 管理端点（写）
-
-    @app.post("/api/credentials")
-    async def import_credential(payload: dict,
-                                _csrf: None = Depends(csrf_protected),
-                                principal: Principal = Depends(principal_from_request)):
-        require_admin(principal)
-        provider_id = str(payload.get("provider") or "")
-        if provider_id not in registry:
-            raise InvalidRequest(f"unknown provider {provider_id!r}")
-        credential_data = registry[provider_id].import_credential(payload.get("credential") or {})
-        credential_id = credentials.add(provider=provider_id, credential_data=credential_data,
-                                        nickname=str(payload.get("nickname") or ""),
-                                        added_by=principal.username)
-        schedule_probe(credential_id)
-        return {"id": credential_id}
-
-    @app.post("/api/credentials/{credential_id}/toggle")
-    async def toggle_credential(credential_id: str, payload: dict,
-                                _csrf: None = Depends(csrf_protected),
-                                principal: Principal = Depends(principal_from_request)):
-        require_admin(principal)
-        if not credentials.set_enabled(credential_id, bool(payload.get("enabled", True))):
-            raise InvalidRequest("credential not found")
-        return {"ok": True}
-
-    @app.post("/api/credentials/pin")
-    async def pin_credential(payload: dict,
-                             _csrf: None = Depends(csrf_protected),
-                             principal: Principal = Depends(principal_from_request)):
-        require_admin(principal)
-        credentials.set_pinned(payload.get("credential_id"))
-        return {"ok": True}
-
-    @app.delete("/api/credentials/{credential_id}")
-    async def delete_credential(credential_id: str,
-                                _csrf: None = Depends(csrf_protected),
-                                principal: Principal = Depends(principal_from_request)):
-        require_admin(principal)
-        if not credentials.delete(credential_id):
-            raise InvalidRequest("credential not found")
-        return {"ok": True}
-
-    @app.post("/api/api-keys")
-    async def create_key(payload: dict,
-                         _csrf: None = Depends(csrf_protected),
-                         principal: Principal = Depends(principal_from_request)):
-        created = api_keys.create(principal.username, str(payload.get("name") or ""))
-        return created          # 明文只在此返回一次
-
-    @app.delete("/api/api-keys/{key_id}")
-    async def delete_key(key_id: str, _csrf: None = Depends(csrf_protected),
-                         principal: Principal = Depends(principal_from_request)):
-        if not api_keys.delete(key_id, principal.username):
-            raise InvalidRequest("api key not found")
-        return {"ok": True}
-
-    # ------------------------------------------------- 上游登录（poll 轨道）
-
-    @app.post("/api/auth/upstream/start")
-    async def upstream_auth_start(payload: dict,
-                                  _csrf: None = Depends(csrf_protected),
-                                  principal: Principal = Depends(principal_from_request)):
-        require_admin(principal)
-        provider_id = str(payload.get("provider") or "")
-        if provider_id in app.state.upstream_auth:
-            session = await app.state.upstream_auth[provider_id].start(principal.username)
-        else:
-            provider = registry.get(provider_id)
-            builder = getattr(provider, "start_auth", None)
-            if not callable(builder):
-                raise InvalidRequest(f"provider {provider_id!r} does not support login")
-            session = builder(resolve_public_callback_url(config))
-            app.state.pending_callback_state = session.state
-            app.state.pending_callback_user = principal.username
-            # 回调轨道没有本地轮询：登录结果由 /authorize 落库后由前端查凭证列表
-        return {"flow": session.flow, "state": session.state, "auth_url": session.auth_url,
-                "interval": session.interval, "callback_url": session.callback_url}
-
-    @app.post("/api/auth/upstream/poll")
-    async def upstream_auth_poll(payload: dict,
-                                 _csrf: None = Depends(csrf_protected),
-                                 principal: Principal = Depends(principal_from_request)):
-        require_admin(principal)
-        provider_id = str(payload.get("provider") or "")
-        state = str(payload.get("state") or "")
-        oauth = app.state.upstream_auth.get(provider_id)
-        if oauth is None:
-            raise InvalidRequest(f"provider {provider_id!r} does not support polling login")
-        result = await oauth.poll(state, principal.username)
-        if result is None:
-            return {"status": "pending"}
-        # 登录成功：直接落库，绝不在响应里回传 token
-        credential_id = credentials.add(
-            provider=provider_id, credential_data=result.credential_data,
-            nickname=result.nickname, added_by=principal.username)
-        schedule_probe(credential_id)
-        return {"status": "success", "credential_id": credential_id}
-
-    @app.post("/api/auth/upstream/cancel")
-    async def upstream_auth_cancel(payload: dict,
-                                   _csrf: None = Depends(csrf_protected),
-                                   principal: Principal = Depends(principal_from_request)):
-        require_admin(principal)
-        oauth = app.state.upstream_auth.get(str(payload.get("provider") or ""))
-        if oauth is None:
-            raise InvalidRequest("provider does not support polling login")
-        cancelled = oauth.store.cancel(str(payload.get("state") or ""), principal.username)
-        return {"cancelled": cancelled}
-
-    # ------------------------------------------------------- 凭证运维（M1.5）
-
-    @app.post("/api/credentials/{credential_id}/probe")
-    async def probe_credential(credential_id: str,
-                               _csrf: None = Depends(csrf_protected),
-                               principal: Principal = Depends(principal_from_request)):
-        require_admin(principal)
-        provider_id = credentials.provider_of(credential_id)
-        provider = registry.get(provider_id or "")
-        data = credentials.credential_data(credential_id)
-        if provider is None or data is None:
-            raise InvalidRequest("credential not found")
-        try:
-            quota = await provider.probe_quota(data)
-        except Exception as error:  # noqa: BLE001 - 探测失败 → unknown，不当作 0
-            credentials.mark_probe_failed(credential_id)
-            reason = describe_probe_failure(error)
-            logger.info("额度探测失败 %s: %s", credential_id, reason)
-            return {"probed": False, "reason": reason, "detail": str(error)[:200]}
-        credentials.save_quota(credential_id, quota)
-        return {"probed": True, "remaining": quota.remaining, "total": quota.total,
-                "cycle_end": quota.cycle_end}
-
-    @app.post("/api/credentials/{credential_id}/checkin")
-    async def checkin_credential(credential_id: str,
-                                 _csrf: None = Depends(csrf_protected),
-                                 principal: Principal = Depends(principal_from_request)):
-        require_admin(principal)
-        provider_id = credentials.provider_of(credential_id)
-        provider = registry.get(provider_id or "")
-        data = credentials.credential_data(credential_id)
-        if provider is None or data is None or not hasattr(provider, "checkin"):
-            raise InvalidRequest("credential does not support checkin")
-        result = await provider.checkin(data)
-        if result.ok and not result.already_checked_in:
-            schedule_probe(credential_id)      # 只有真签到了才会发积分
-        # already_checked_in 必须透传：前端靠它区分「刚签到」与「今天已签过」
-        return {"ok": result.ok, "credit": result.credit, "code": result.code,
-                "message": result.message,
-                "already_checked_in": result.already_checked_in}
-
-    @app.get("/api/credentials/{credential_id}/accounts")
-    async def list_credential_accounts(credential_id: str,
-                                       principal: Principal = Depends(principal_from_request)):
-        require_admin(principal)
-        provider_id = credentials.provider_of(credential_id)
-        provider = registry.get(provider_id or "")
-        data = credentials.credential_data(credential_id)
-        if provider is None or data is None or not hasattr(provider, "list_accounts"):
-            raise InvalidRequest("credential does not support account switching")
-        accounts = await provider.list_accounts(data)
-        return {"accounts": [{"account_id": a.account_id, "nickname": a.nickname,
-                              "type": a.account_type} for a in accounts]}
-
-    @app.post("/api/credentials/{credential_id}/accounts/select")
-    async def select_credential_account(credential_id: str, payload: dict,
-                                        _csrf: None = Depends(csrf_protected),
-                                        principal: Principal = Depends(principal_from_request)):
-        require_admin(principal)
-        provider_id = credentials.provider_of(credential_id)
-        provider = registry.get(provider_id or "")
-        data = credentials.credential_data(credential_id)
-        if provider is None or data is None or not hasattr(provider, "switch_account"):
-            raise InvalidRequest("credential does not support account switching")
-        switched = await provider.switch_account(data, str(payload.get("account_id") or ""))
-        credentials.save_credential_data(credential_id, switched)
-        # 账号切换后额度对应的是新账号，必须重探测而不是沿用旧值
-        schedule_probe(credential_id)
-        return {"switched": True}
-
-    # --------------------------------------------------- 即时额度探测
-
-    def schedule_probe(credential_id: str) -> None:
-        """新增凭证 / OAuth 保存 / 账号切换 / 签到后立即重探测（不阻塞响应）。
-
-        周期扫描是 60 分钟一轮，若不等这一轮，刚加进来的凭证在界面上会一直
-        显示「未探测到额度」，调度器也只能把它排在 known 之后。
-        """
-        provider_id = credentials.provider_of(credential_id)
-        provider = registry.get(provider_id or "")
-        data = credentials.credential_data(credential_id)
-        if provider is None or data is None:
-            return
-
-        async def probe() -> None:
-            try:
-                quota = await provider.probe_quota(data)
-            except Exception as error:  # noqa: BLE001 - 探测失败标记为未探测
-                logger.warning("即时额度探测失败 %s: %s", credential_id, error)
-                credentials.mark_probe_failed(credential_id)
-                return
-            credentials.save_quota(credential_id, quota)
-
-        app.state.pending_probes.append(asyncio.create_task(probe()))
-
-    # ------------------------------------------------------------- 统计
-
-    @app.get("/api/stats/overview")
-    async def stats_overview(principal: Principal = Depends(principal_from_request),
-                             username: str | None = None, since: int | None = None):
-        target = username if principal.is_admin else principal.username
-        return app.state.stats_query.overview(username=target, since=since)
-
-    @app.get("/api/stats/by-provider")
-    async def stats_by_provider(principal: Principal = Depends(principal_from_request),
-                                username: str | None = None, since: int | None = None):
-        target = username if principal.is_admin else principal.username
-        return {"providers": app.state.stats_query.by_provider(username=target, since=since)}
-
-    @app.get("/api/stats/timeline")
-    async def stats_timeline(principal: Principal = Depends(principal_from_request),
-                             username: str | None = None, since: int | None = None):
-        target = username if principal.is_admin else principal.username
-        return {"points": app.state.stats_query.timeline(username=target, since=since)}
-
-    # -------------------------------------------------- TRAE 回调（无鉴权）
-
-    @app.get("/authorize")
-    async def authorize(request: Request):
-        """TRAE 浏览器 302 落点。
-
-        回调不需要 API Key（浏览器不会带），因此这里不做鉴权，但：
-        - 只在存在待完成的登录时接受回调（防止任意链接被塞进池子）
-        - 只接受带 refreshToken 的链接，其他一律拒绝
-        - 换到的凭证直接落库，响应里绝不回传 token
-
-        注意：TRAE 回跳时只带 refreshToken/userInfo/userJwt，**不会回传
-        登录 URL 里的 state**——machine/device id 从待完成登录的 state 里取，
-        这正是 start_auth 把它们编码进 state 的原因（保证登录与落盘凭证一致）。
-        """
-        raw = str(request.url)
-        app.state.last_callback_url = raw
-        provider = registry.get("trae")
-        pending = app.state.pending_callback_state
-        if provider is None or pending is None:
-            return JSONResponse(status_code=400, content=error_payload(
-                "no pending TRAE login in progress", "invalid_request", 400))
-        if not request.query_params.get("refreshToken") and not request.query_params.get("userJwt"):
-            return JSONResponse(status_code=400, content=error_payload(
-                "callback missing refreshToken", "invalid_request", 400))
-        # 先消费 pending，防止并发回调重复兑换同一登录
-        app.state.pending_callback_state = None
-        callback_user = app.state.pending_callback_user or ""
-        try:
-            credential_data = await provider.complete_callback(raw, pending)
-        except UpstreamProtocolViolation as error:
-            return JSONResponse(status_code=400, content=error_payload(
-                str(error), "invalid_credential", 400))
-        credential_id = credentials.add(provider="trae", credential_data=credential_data,
-                                        nickname=str(credential_data.get("nickname") or ""),
-                                        added_by=callback_user)
-        schedule_probe(credential_id)
-        return {"ok": True, "captured": True, "at": int(time.time())}
-
-    # 静态资源必须最后注册：catch-all 会匹配所有未命中的路径
     # ------------------------------------------------------- 前端静态资源
 
     @app.get("/{path:path}", include_in_schema=False)
@@ -642,8 +282,6 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         会找不到前端产物。找不到时给出可执行的下一步，而不是一句
         「frontend build not found」。
         """
-        from fastapi.responses import FileResponse, HTMLResponse
-
         dist = _frontend_dist()
         if dist is None:
             return HTMLResponse(_FRONTEND_MISSING_HTML, status_code=503)
@@ -656,11 +294,6 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         return FileResponse(index)
 
     return app
-
-
-def resolve_public_callback_url(settings: Settings) -> str:
-    """PUBLIC_BASE_URL + /authorize（远程部署必须可被浏览器访问）。"""
-    return settings.public_base_url.rstrip("/") + "/authorize"
 
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -693,36 +326,6 @@ def _frontend_dist() -> Path | None:
         if (candidate / "index.html").is_file():
             return candidate
     return None
-
-
-def describe_probe_failure(error: Exception) -> str:
-    """把探测异常翻译成用户能据以行动的原因。
-
-    不能直接暴露 Python 类名（如 UpstreamProtocolViolation）——那是实现细节，
-    用户看到它既判断不出问题，也不知道下一步该做什么。
-    """
-    from .provider.codebuddy.client import UpstreamHTTPError as CodeBuddyHTTPError
-    from .provider.codebuddy.events import (
-        UpstreamProtocolViolation as CodeBuddyViolation,
-    )
-    from .provider.trae.client import UpstreamHTTPError as TraeHTTPError
-    from .provider.trae.events import UpstreamProtocolViolation as TraeViolation
-
-    http_errors = (CodeBuddyHTTPError, TraeHTTPError)
-    if isinstance(error, http_errors):
-        status = getattr(error, "status", 0)
-        if status in (401, 403):
-            return "credential_rejected"      # 凭证失效，需要重新登录
-        if status == 429:
-            return "rate_limited"             # 上游限流，稍后再试
-        if status >= 500:
-            return "upstream_unavailable"     # 上游故障，与凭证无关
-        return "upstream_rejected"            # 上游拒绝该请求
-    if isinstance(error, (CodeBuddyViolation, TraeViolation)):
-        return "upstream_response_invalid"    # 响应结构不符，可能是上游改版
-    if isinstance(error, TimeoutError):
-        return "upstream_timeout"
-    return "unknown_error"
 
 
 def _upstream_auth(registry: dict, settings: Settings) -> dict:

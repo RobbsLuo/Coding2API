@@ -18,7 +18,10 @@ from src.db.migrate import apply_schema
 from src.db.repo import CredentialRepository
 from src.provider.base import Quota
 from src.stats.collector import StatsCollector
-from src.tasks.background import CheckinTask, QuotaProbeTask, RefreshTask, RetentionTask
+from src.tasks.checkin import CheckinTask
+from src.tasks.quota_probe import QuotaProbeTask
+from src.tasks.refresh import RefreshTask
+from src.tasks.retention import RetentionTask
 from src.tasks.runner import TaskRunner, build_runner
 
 
@@ -230,7 +233,7 @@ async def test_runner_checkin_fires_when_due(repo, monkeypatch):
 
     async def fake_run_once(*, now=None):
         calls.append(1)
-        from src.tasks.background import TaskReport
+        from src.tasks import TaskReport
 
         return TaskReport()
 

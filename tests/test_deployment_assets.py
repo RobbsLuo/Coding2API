@@ -121,7 +121,7 @@ def test_ci_workflow_paths_match_repository():
 
 def test_describe_probe_failure_maps_http_status_to_actionable_reason():
     """探测失败原因必须可操作，不能是 Python 类名。"""
-    from src.main import describe_probe_failure
+    from src.api.admin_credentials import describe_probe_failure
     from src.provider.codebuddy.client import UpstreamHTTPError as CBHTTP
     from src.provider.trae.client import UpstreamHTTPError as TraeHTTP
 
@@ -133,7 +133,7 @@ def test_describe_probe_failure_maps_http_status_to_actionable_reason():
 
 
 def test_describe_probe_failure_maps_protocol_violation():
-    from src.main import describe_probe_failure
+    from src.api.admin_credentials import describe_probe_failure
     from src.provider.codebuddy.events import (
         UpstreamProtocolViolation as CBViolation,
     )
@@ -144,7 +144,7 @@ def test_describe_probe_failure_maps_protocol_violation():
 
 
 def test_describe_probe_failure_handles_timeout_and_unknown():
-    from src.main import describe_probe_failure
+    from src.api.admin_credentials import describe_probe_failure
 
     assert describe_probe_failure(TimeoutError()) == "upstream_timeout"
     assert describe_probe_failure(RuntimeError("boom")) == "unknown_error"

@@ -9,10 +9,10 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from ..compat.openai.errors import UpstreamStreamError
 from ..compat.openai.request import ChatRequest, InvalidRequest
 from ..compat.openai.response import (
     StreamTranslator,
-    UpstreamStreamError,
     aggregate,
 )
 from ..db.repo import CredentialRepository

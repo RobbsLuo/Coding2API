@@ -17,6 +17,7 @@ from typing import Any
 
 from ...engine.sse import SSE_DONE, format_openai_frame
 from ...provider.base import Event, EventKind, Usage
+from .errors import UpstreamStreamError
 
 ROLE_CHUNK = {"role": "assistant", "content": ""}
 
@@ -181,16 +182,3 @@ def aggregate(events: Iterable[Event], model: str) -> dict[str, Any]:
             "reasoning_tokens": usage.reasoning_tokens if usage else None},
     }
     return result
-
-
-class UpstreamStreamError(Exception):
-    """流内业务错误（聚合路径抛出，由 executor 转成冷却 + 轮换）。"""
-
-    def __init__(self, event: Event) -> None:
-        super().__init__(event.error_message or "upstream stream error")
-        self.event = event
-
-
-def error_payload(message: str, code: str, status: int) -> dict[str, Any]:
-    return {"error": {"message": message, "type": "api_error", "code": code,
-                      "status": status}}
