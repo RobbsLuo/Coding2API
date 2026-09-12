@@ -401,8 +401,22 @@ def test_unknown_api_path_returns_json_404(client):
         assert response.json()["error"]["code"] == "invalid_request"
 
 
-def test_frontend_routes_still_served(client):
-    assert client.get("/credentials").status_code == 200
+def test_frontend_routes_are_not_treated_as_api_404(client, tmp_path, monkeypatch):
+    """前端路由（非 /api、/v1）不进 API 404 分支，走 SPA 兜底。
+
+    dist 产物是 gitignored 的（CI 上不存在），因此这里把 dist 指到临时目录，
+    同时断言「服务了 index.html」而不是「依赖本地构建产物」。
+    """
+    from src import main
+
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "index.html").write_text("<html>spa</html>", encoding="utf-8")
+    monkeypatch.setattr(main, "_frontend_dist", lambda: dist)
+
+    response = client.get("/credentials")
+    assert response.status_code == 200
+    assert "spa" in response.text
 
 
 def test_api_not_found_helper_shape():
