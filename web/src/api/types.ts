@@ -55,6 +55,8 @@ export interface StatsOverview {
   input_tokens: number;
   output_tokens: number;
   reasoning_tokens: number;
+  /** 输入中命中缓存的 token；任一明细上报过才非 null */
+  cached_tokens: number | null;
   /** 上游可选字段，两边都经常为 null */
   credit: number | null;
   avg_latency_ms: number | null;
@@ -87,6 +89,28 @@ export interface ModelTimelinePoint {
 export interface ModelTimelineResponse {
   models: string[];
   points: ModelTimelinePoint[];
+}
+
+/** 逐请求明细（usage_events，仅保留 90 天）。 */
+export interface UsageEventRow {
+  rowid: number;
+  ts: number;
+  username: string;
+  provider: string;
+  model: string;
+  ok: number;
+  error_type: string | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
+  cached_tokens: number | null;
+  credit: number | null;
+  latency_ms: number | null;
+}
+
+export interface StatsEventsResponse {
+  events: UsageEventRow[];
+  /** 下一页游标：本页最小 rowid；null 表示到底 */
+  next_before: number | null;
 }
 
 export interface SessionInfo {

@@ -95,7 +95,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                              model_name.lower(), model_name)
                                      ),
                                      model_suggestions=lambda name: _similar_models(
-                                         name, model_aliases)))
+                                         name, model_aliases),
+                                     model_aliases=model_aliases))
 
     @asynccontextmanager
     async def lifespan(app_: FastAPI):

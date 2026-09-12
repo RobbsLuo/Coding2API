@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
 import type { Credential, CredentialsResponse, SessionInfo } from "../api/types";
 
@@ -55,6 +55,15 @@ export function useStatsModelTimeline(username?: string, target?: string, since?
   return useQuery({
     queryKey: adminKey(username, "stats-model-timeline", target, since),
     queryFn: () => api.statsModelTimeline(target, since),
+  });
+}
+
+/** 逐请求明细：游标分页（before + limit），翻页时保留旧数据避免闪空。 */
+export function useStatsEvents(username?: string, since?: number, before?: number, limit?: number) {
+  return useQuery({
+    queryKey: adminKey(username, "stats-events", since, before, limit),
+    queryFn: () => api.statsEvents(undefined, since, before, limit),
+    placeholderData: keepPreviousData,
   });
 }
 

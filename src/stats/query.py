@@ -1,4 +1,4 @@
-"""用量统计查询（TECHNICAL §2 query.py）：overview / by-provider / timeline。"""
+"""用量统计查询（TECHNICAL §2 query.py）：overview / by-provider / timeline / events。"""
 
 from __future__ import annotations
 
@@ -32,6 +32,8 @@ class StatsQuery:
                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
                    COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+                   SUM(cached_tokens) AS cached_tokens,
+                   SUM(CASE WHEN cached_tokens IS NULL THEN 0 ELSE 1 END) AS cached_known,
                    SUM(credit) AS credit_sum,
                    SUM(CASE WHEN credit IS NULL THEN 0 ELSE 1 END) AS credit_known,
                    COALESCE(AVG(latency_ms), 0) AS avg_latency,
@@ -46,6 +48,8 @@ class StatsQuery:
             "input_tokens": row["input_tokens"],
             "output_tokens": row["output_tokens"],
             "reasoning_tokens": row["reasoning_tokens"],
+            # 缓存命中：任一明细上报过才可信，否则 None（前端显示 —）
+            "cached_tokens": row["cached_tokens"] if row["cached_known"] else None,
             "credit": row["credit_sum"] if row["credit_known"] else None,
             "avg_latency_ms": round(row["avg_latency"]) if requests else None,
             "avg_ttfb_ms": round(row["avg_ttfb"]) if requests else None,
@@ -107,6 +111,40 @@ class StatsQuery:
             {"hour": row["hour_utc"], "codebuddy": row["codebuddy"], "trae": row["trae"]}
             for row in rows
         ]
+
+    def events(self, *, username: str | None = None, since: int | None = None,
+               before: int | None = None, limit: int = 50) -> dict[str, Any]:
+        """逐请求明细（新→旧，rowid 游标分页）。明细仅保留 90 天。
+
+        rowid 即插入序，稳定且可比大小，游标翻页不漏不重；
+        返回 next_before 供下一页取「rowid 更小」的记录，null 表示到底。
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if username is not None:
+            clauses.append("username = ?")
+            params.append(username)
+        if since is not None:
+            clauses.append("ts >= ?")
+            params.append(since)
+        if before is not None:
+            clauses.append("rowid < ?")
+            params.append(before)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._db.connect().execute(
+            f"""
+            SELECT rowid, ts, username, provider, model, ok, error_type,
+                   input_tokens, output_tokens, reasoning_tokens, cached_tokens,
+                   credit, latency_ms
+            FROM usage_events {where}
+            ORDER BY rowid DESC LIMIT ?
+            """, [*params, limit + 1]).fetchall()
+        has_more = len(rows) > limit
+        page = rows[:limit]
+        return {
+            "events": [dict(row) for row in page],
+            "next_before": page[-1]["rowid"] if has_more and page else None,
+        }
 
     def model_timeline(self, *, username: str | None = None,
                        since: int | None = None, top: int = 6) -> dict[str, Any]:

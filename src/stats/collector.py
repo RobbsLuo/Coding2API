@@ -46,6 +46,7 @@ class UsageEvent:
     input_tokens: int | None
     output_tokens: int | None
     reasoning_tokens: int | None
+    cached_tokens: int | None
     credit: float | None
     latency_ms: int | None
     ttfb_ms: int | None
@@ -67,6 +68,7 @@ class StatsCollector:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         reasoning_tokens: int | None = None,
+        cached_tokens: int | None = None,
         credit: float | None = None,
         latency_ms: int | None = None,
         ttfb_ms: int | None = None,
@@ -85,6 +87,7 @@ class StatsCollector:
             input_tokens=_int_or_none(input_tokens),
             output_tokens=_int_or_none(output_tokens),
             reasoning_tokens=_int_or_none(reasoning_tokens),
+            cached_tokens=_int_or_none(cached_tokens),
             credit=_float_or_none(credit),
             latency_ms=_int_or_none(latency_ms),
             ttfb_ms=_int_or_none(ttfb_ms),
@@ -92,12 +95,12 @@ class StatsCollector:
         conn = self._db.connect()
         conn.execute(
             "INSERT INTO usage_events (id, ts, username, provider, credential_id, model, ok, "
-            "error_type, input_tokens, output_tokens, reasoning_tokens, credit, latency_ms, "
-            "ttfb_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "error_type, input_tokens, output_tokens, reasoning_tokens, cached_tokens, credit, "
+            "latency_ms, ttfb_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (event.id, event.ts, event.username, event.provider, event.credential_id,
              event.model, int(event.ok), event.error_type, event.input_tokens,
-             event.output_tokens, event.reasoning_tokens, event.credit, event.latency_ms,
-             event.ttfb_ms),
+             event.output_tokens, event.reasoning_tokens, event.cached_tokens, event.credit,
+             event.latency_ms, event.ttfb_ms),
         )
         conn.commit()
 

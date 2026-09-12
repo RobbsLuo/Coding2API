@@ -162,6 +162,44 @@ export function Select({ className, ...props }: React.SelectHTMLAttributes<HTMLS
   );
 }
 
+// ================================================================ Tabs (Segmented)
+// 轻量分段切换（非 radix Tab）：一排互斥按钮，选中项白底浮起。适用少量平级选项（如时间范围）。
+
+export function Tabs({
+  value,
+  options,
+  onChange,
+  testId,
+}: {
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (value: string) => void;
+  testId?: string;
+}) {
+  return (
+    <div role="tablist" data-testid={testId} className="inline-flex items-center gap-0.5 rounded-lg bg-muted p-0.5">
+      {options.map((option) => (
+        <button
+          key={option.value}
+          role="tab"
+          type="button"
+          aria-selected={option.value === value}
+          data-testid={testId ? `${testId}-${option.value}` : undefined}
+          onClick={() => onChange(option.value)}
+          className={cn(
+            "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+            option.value === value
+              ? "bg-background text-foreground shadow-sm"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 // ================================================================ Notice (Alert)
 
 export function Notice({ tone = "muted", children }: { tone?: Tone; children: ReactNode }) {

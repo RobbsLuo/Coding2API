@@ -118,10 +118,17 @@ def _usage(raw: dict[str, Any]) -> Usage:
         return value if isinstance(value, int) and not isinstance(value, bool) else None
 
     credit = raw.get("credit")
+    # 缓存命中：OpenAI 惯例在 prompt_tokens_details.cached_tokens，顶层 cached_tokens 兜底
+    details = raw.get("prompt_tokens_details")
+    cached = (details or {}).get("cached_tokens") if isinstance(details, dict) else None
+    if not isinstance(cached, int) or isinstance(cached, bool):
+        cached = as_int("cached_tokens")
+
     return Usage(
         input_tokens=as_int("prompt_tokens"),
         output_tokens=as_int("completion_tokens"),
         reasoning_tokens=as_int("reasoning_tokens"),
+        cached_tokens=cached,
         credit=float(credit) if isinstance(credit, (int, float)) and not isinstance(credit, bool)
         else None,
     )

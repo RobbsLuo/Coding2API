@@ -6,6 +6,7 @@ fixture 结构来自 codebuddy2api 的 codebuddy_oauth.py / credential_checkin.p
 from __future__ import annotations
 
 import json
+import sqlite3
 import time
 
 import httpx
@@ -1482,6 +1483,133 @@ def test_stats_overview_provider_filter(stats):
     collector.record(username="u", provider="trae", model="m", ok=True)
     collector.record(username="u", provider="codebuddy", model="m", ok=True)
     assert query.overview(username="u", provider="trae")["requests"] == 1
+
+
+def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
+    """老库升级：usage_events 无 cached_tokens 列时幂等补齐，且可写入。"""
+    import sqlite3
+
+    from src.db.migrate import apply_schema
+
+    db = Database(tmp_path / "legacy.sqlite3")
+    conn = sqlite3.connect(db.path)
+    conn.execute("""
+        CREATE TABLE usage_events (
+            id TEXT PRIMARY KEY, ts INTEGER NOT NULL, username TEXT NOT NULL,
+            provider TEXT NOT NULL, credential_id TEXT, model TEXT NOT NULL,
+            ok INTEGER NOT NULL, error_type TEXT, input_tokens INTEGER,
+            output_tokens INTEGER, reasoning_tokens INTEGER, credit REAL,
+            latency_ms INTEGER, ttfb_ms INTEGER)
+    """)
+    conn.commit()
+    conn.close()
+
+    apply_schema(db.connect())
+    columns = {row[1] for row in db.connect().execute("PRAGMA table_info(usage_events)")}
+    assert "cached_tokens" in columns
+    apply_schema(db.connect())                          # 二次执行不抛错
+    db.close()
+
+
+def test_migrate_reraises_non_duplicate_errors():
+    """迁移中非 duplicate column 的 OperationalError 必须重新抛出。"""
+    import pytest as _pytest
+
+    class _FakeConn:
+        OperationalError = sqlite3.OperationalError
+
+        def executescript(self, _script):
+            pass
+
+        def execute(self, _sql):
+            raise sqlite3.OperationalError("no such table")
+
+        def commit(self):
+            pass
+
+    with _pytest.raises(sqlite3.OperationalError):
+        apply_schema(_FakeConn())
+
+
+def test_stats_cached_tokens_overview_and_events(stats):
+    """输入缓存命中：汇总（无上报则 None）与明细返回。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     input_tokens=100, cached_tokens=40)
+    collector.record(username="u", provider="trae", model="m", ok=True, input_tokens=50)
+    overview = query.overview()
+    assert overview["input_tokens"] == 150
+    assert overview["cached_tokens"] == 40              # 只有一条上报 → SUM=40
+
+    events = query.events()                          # 新→旧：后插入的未上报记录在前
+    assert [e["cached_tokens"] for e in events["events"]] == [None, 40]
+
+
+def test_stats_events_empty(stats):
+    """空库：明细返回空页且无游标。"""
+    _collector, query = stats
+    assert query.events() == {"events": [], "next_before": None}
+
+
+def test_stats_events_pagination_and_filters(stats):
+    """明细查询：新→旧、rowid 游标翻页不漏不重、筛选组合生效。"""
+    collector, query = stats
+    for index in range(5):
+        collector.record(username="alice" if index % 2 else "bob",
+                         provider="trae", model=f"m{index}", ok=bool(index % 2),
+                         error_type=None if index % 2 else "rate_limit",
+                         now=1000 + index)
+
+    page1 = query.events(limit=2)
+    assert [e["model"] for e in page1["events"]] == ["m4", "m3"]
+    assert page1["next_before"] == page1["events"][-1]["rowid"]
+    page2 = query.events(limit=2, before=page1["next_before"])
+    assert [e["model"] for e in page2["events"]] == ["m2", "m1"]
+    page3 = query.events(limit=2, before=page2["next_before"])
+    assert [e["model"] for e in page3["events"]] == ["m0"]
+    assert page3["next_before"] is None                     # 到底
+
+    # 组合筛选：按用户（新→旧）；按时间下限
+    assert [e["model"] for e in query.events(username="alice")["events"]] == ["m3", "m1"]
+    assert [e["model"] for e in query.events(since=1003)["events"]] == ["m4", "m3"]
+
+
+def test_stats_events_endpoint_scope_and_clamp(admin_client):
+    """明细端点：admin 可看他人；limit 被夹在 1..200。"""
+    _app, client = admin_client
+    collector = client.app.state.stats_collector
+    for index in range(3):
+        collector.record(username="other", provider="trae", model=f"m{index}", ok=True)
+
+    body = client.get("/api/stats/events").json()
+    assert [e["model"] for e in body["events"]] == ["m2", "m1", "m0"]
+    scoped = client.get("/api/stats/events", params={"username": "other"}).json()
+    assert len(scoped["events"]) == 3
+    limited = client.get("/api/stats/events", params={"limit": 2}).json()
+    assert len(limited["events"]) == 2 and limited["next_before"] is not None
+    assert len(client.get("/api/stats/events", params={"limit": 0}).json()["events"]) == 1
+    huge = client.get("/api/stats/events", params={"limit": 10 ** 9}).json()
+    assert len(huge["events"]) == 3
+
+
+def test_stats_events_restrict_non_admin(tmp_path):
+    """非 admin 只见自己的明细，指定他人用户名无效。"""
+    from fastapi.testclient import TestClient
+
+    from src.auth.session import create_session_token
+    from src.config import Settings
+    from src.main import build_app
+
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+    app = build_app(settings)
+    app.state.stats_collector.record(username="alice", provider="trae", model="m", ok=True)
+    app.state.stats_collector.record(username="bob", provider="trae", model="m", ok=True)
+    with TestClient(app) as client:
+        client.cookies.set("coding2api_session", create_session_token("alice", "s"))
+        mine = client.get("/api/stats/events").json()
+        assert [e["username"] for e in mine["events"]] == ["alice"]
+        forced = client.get("/api/stats/events", params={"username": "bob"}).json()
+        assert [e["username"] for e in forced["events"]] == ["alice"]
 
 
 # --------------------------------------------------- 最后 11 行覆盖

@@ -44,6 +44,7 @@ class Usage:
     input_tokens: int | None = None
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
+    cached_tokens: int | None = None   # 输入中命中缓存的 token（上游可选，缺省 None）
     credit: float | None = None   # 上游可选字段，两边都经常为 None
 
 

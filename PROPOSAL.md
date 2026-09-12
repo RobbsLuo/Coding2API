@@ -460,6 +460,7 @@ coding2api/
 | GET | `/api/stats/by-provider` | 全部；admin 可跨用户聚合 |
 | GET | `/api/stats/timeline` | 全部；按小时的请求量时间序列（实装新增） |
 | GET | `/api/stats/model-timeline` | 全部；按模型请求量趋势 Top N（实装新增） |
+| GET | `/api/stats/events` | 全部（自己的）；逐请求明细（rowid 游标分页，明细保留 90 天；实装新增） |
 | GET/POST | `/api/credentials/{id}/accounts[/select]` | admin；多账号切换（实装新增） |
 | POST | `/api/auth/upstream/cancel` | admin；取消进行中的登录（实装新增） |
 | GET/POST | `/api/playground/models`、`/api/playground/chat/completions` | 全部（会话鉴权，无需 API Key；实装新增） |

@@ -44,13 +44,13 @@ export function jsonResponse(body: unknown, status = 200): Response {
   });
 }
 
-/** 按 URL 分派的 fetch mock。 */
-export function mockFetch(routes: Record<string, unknown | (() => Response)>) {
+/** 按 URL 分派的 fetch mock；函数路由会收到完整 URL 字符串。 */
+export function mockFetch(routes: Record<string, unknown | ((url: string) => Response)>) {
   const spy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === "string" ? input : input.toString();
     for (const [pattern, value] of Object.entries(routes)) {
       if (url.includes(pattern)) {
-        if (typeof value === "function") return (value as () => Response)();
+        if (typeof value === "function") return (value as (url: string) => Response)(url);
         return jsonResponse(value);
       }
     }

@@ -178,6 +178,8 @@ def aggregate(events: Iterable[Event], model: str) -> dict[str, Any]:
         "total_tokens": (
             (usage.input_tokens or 0) + (usage.output_tokens or 0) if usage else None
         ),
+        "prompt_tokens_details": {
+            "cached_tokens": usage.cached_tokens if usage else None},
         "completion_tokens_details": {
             "reasoning_tokens": usage.reasoning_tokens if usage else None},
     }

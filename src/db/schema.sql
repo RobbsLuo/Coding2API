@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
     input_tokens     INTEGER,
     output_tokens    INTEGER,
     reasoning_tokens INTEGER,
+    cached_tokens    INTEGER,                  -- 输入中命中缓存的 token（上游可选，NULL=未上报）
     credit           REAL,                     -- 上游可选字段，两边都经常为 NULL
     latency_ms       INTEGER,
     ttfb_ms          INTEGER

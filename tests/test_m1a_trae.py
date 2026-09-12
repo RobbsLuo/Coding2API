@@ -1118,3 +1118,19 @@ def test_parse_all_events_non_dict_tool_call_entry_skipped():
         data='{"tool_calls":["junk"],"response":"x"}')
     kinds = [e.kind for e in trae_events.parse_all_events(empty)]
     assert EventKind.TOOL_CALLS not in kinds
+
+def test_trae_usage_cached_tokens():
+    """TRAE usage：details 路径 + 顶层兜底 + 缺省 None。"""
+    from src.provider.trae.events import SSEFrame
+
+    frame = SSEFrame(event="token_usage", data=(
+        '{"prompt_tokens":9,'
+        '"prompt_tokens_details":{"cached_tokens":6}}'))
+    assert trae_events.parse_frame(frame).usage.cached_tokens == 6
+
+    frame = SSEFrame(event="token_usage", data='{"prompt_tokens":9,"cached_tokens":2}')
+    assert trae_events.parse_frame(frame).usage.cached_tokens == 2
+
+    frame = SSEFrame(event="token_usage", data='{"prompt_tokens":9}')
+    assert trae_events.parse_frame(frame).usage.cached_tokens is None
+

@@ -35,4 +35,13 @@ def create_router(services: Services) -> APIRouter:
         target = username if principal.is_admin else principal.username
         return stats_query.model_timeline(username=target, since=since)
 
+    @router.get("/api/stats/events")
+    async def stats_events(principal=Depends(principal_from_request),
+                           username: str | None = None, since: int | None = None,
+                           before: int | None = None, limit: int = 50):
+        # 明细保留 90 天；单页上限 200，防止一次拉爆
+        target = username if principal.is_admin else principal.username
+        return stats_query.events(username=target, since=since, before=before,
+                                  limit=max(1, min(limit, 200)))
+
     return router

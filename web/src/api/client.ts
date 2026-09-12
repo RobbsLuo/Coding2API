@@ -10,6 +10,7 @@ import type {
   StatsOverview,
   TimelinePoint,
   ModelTimelineResponse,
+  StatsEventsResponse,
   UpstreamAuthPoll,
   UpstreamAuthStart,
 } from "./types";
@@ -113,6 +114,8 @@ export const api = {
     request<{ points: TimelinePoint[] }>(`/api/stats/timeline${query({ username, since })}`),
   statsModelTimeline: (username?: string, since?: number) =>
     request<ModelTimelineResponse>(`/api/stats/model-timeline${query({ username, since })}`),
+  statsEvents: (username?: string, since?: number, before?: number, limit?: number) =>
+    request<StatsEventsResponse>(`/api/stats/events${query({ username, since, before, limit })}`),
 
   // ---------------------------------------------------------------- 模型
   models: (apiKey: string) =>

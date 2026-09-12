@@ -247,6 +247,20 @@ def test_usage_credit_is_optional():
     assert usage.credit == 0.25
 
 
+def test_usage_cached_tokens_from_details_and_top_level():
+    """缓存命中：优先 prompt_tokens_details.cached_tokens，顶层 cached_tokens 兜底。"""
+    frame = cb_events.SSEFrame(event="", data=(
+        '{"usage":{"prompt_tokens":10,"prompt_tokens_details":{"cached_tokens":7}}}'))
+    usage = cb_events.parse_frame(frame).usage
+    assert usage.cached_tokens == 7
+
+    frame = cb_events.SSEFrame(event="", data='{"usage":{"prompt_tokens":10,"cached_tokens":4}}')
+    assert cb_events.parse_frame(frame).usage.cached_tokens == 4
+
+    frame = cb_events.SSEFrame(event="", data='{"usage":{"prompt_tokens":10}}')
+    assert cb_events.parse_frame(frame).usage.cached_tokens is None
+
+
 def test_usage_ignores_boolean_and_non_numeric_values():
     frame = cb_events.SSEFrame(
         event="", data='{"usage":{"prompt_tokens":true,"credit":true,"completion_tokens":"x"}}')
@@ -1118,6 +1132,92 @@ async def test_all_upstreams_reject_yields_400(dual_repo):
     rows = [tuple(r) for r in db.connect().execute(
         "SELECT err_count, cooling_until, disabled FROM credentials")]
     assert rows == [(0, None, 0), (0, None, 0)]
+
+
+# ------------------------------------- 独有模型目录收窄：不白打无关上游
+
+async def test_flat_exclusive_model_skips_other_upstream(dual_repo):
+    """CodeBuddy 独有模型（目录可证归属）→ 只打 CB；TRAE 零调用、零统计记录。"""
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="trae", credential_data={"accessToken": "trae"})
+    # pin TRAE：旧逻辑会先选中它并把请求真实打到 TRAE（留下无效请求记录）
+    db.connect().execute("UPDATE credentials SET pinned = 1 WHERE provider = 'trae'")
+    cb = _RejectProvider("codebuddy", [GOOD])
+    trae = _RejectProvider("trae", [GOOD])
+    records: list[dict] = []
+
+    class _Stats:
+        @staticmethod
+        def record(**fields):
+            records.append(fields)
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb, "trae": trae}, credentials=repo,
+        scheduler=Scheduler(), default_model="cb-only", stats=_Stats(),
+        # "ghost" 未注册：顺带覆盖目录里混入未知上游的过滤分支
+        model_aliases={"codebuddy": {"cb-only": "cb-only"},
+                       "ghost": {"cb-only": "cb-only"}}))
+
+    result = await executor.complete(_request("cb-only"), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert trae.calls == 0 and cb.calls == 1
+    assert [(r["provider"], r["ok"]) for r in records] == [("codebuddy", True)]
+
+
+async def test_forced_provider_bypasses_catalog_narrowing(dual_repo):
+    """@provider 强制指定不过滤：目录里只有 CB 登记也照样打 TRAE。"""
+    from src.compat.openai.request import InvalidRequest
+
+    repo, _db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="trae", credential_data={"accessToken": "trae"})
+    cb = _RejectProvider("codebuddy", [GOOD])
+    trae = _RejectProvider("trae", [_http_400()])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb, "trae": trae}, credentials=repo,
+        scheduler=Scheduler(), default_model="cb-only",
+        model_aliases={"codebuddy": {"cb-only": "cb-only"}}))
+
+    with pytest.raises(InvalidRequest):
+        await executor.complete(_request("cb-only@trae"), username="u")
+    assert trae.calls == 1 and cb.calls == 0
+
+
+async def test_narrowing_disabled_without_catalog(dual_repo):
+    """目录未就绪（model_aliases 缺省/为空）→ 保持双上游参与的原行为。"""
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="trae", credential_data={"accessToken": "trae"})
+    db.connect().execute("UPDATE credentials SET pinned = 1 WHERE provider = 'trae'")
+    cb = _RejectProvider("codebuddy", [GOOD])
+    trae = _RejectProvider("trae", [_http_400()])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb, "trae": trae}, credentials=repo,
+        scheduler=Scheduler(), default_model="qwen3.8-max"))
+
+    result = await executor.complete(_request("qwen3.8-max"), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert trae.calls == 1 and cb.calls == 1
+
+
+async def test_narrowing_keeps_candidates_when_model_unknown_to_catalog(dual_repo):
+    """目录就绪但没有已注册上游登记该模型 → 不过滤（黑名单滤掉仍可直连）。"""
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="trae", credential_data={"accessToken": "trae"})
+    db.connect().execute("UPDATE credentials SET pinned = 1 WHERE provider = 'trae'")
+    cb = _RejectProvider("codebuddy", [GOOD])
+    trae = _RejectProvider("trae", [_http_400()])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb, "trae": trae}, credentials=repo,
+        scheduler=Scheduler(), default_model="qwen3.8-max",
+        model_aliases={"codebuddy": {"glm-5.2": "glm-5.2"},
+                       "trae": {"GLM-5.2": "GLM-5.2"}}))
+
+    result = await executor.complete(_request("qwen3.8-max"), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert trae.calls == 1 and cb.calls == 1
 
 
 async def test_stream_rotate_exhausted_with_invalid_last_error(dual_repo):

@@ -1,16 +1,22 @@
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { useSessionContext } from "../Layout";
-import { useStatsByProvider, useStatsModelTimeline, useStatsOverview, useStatsTimeline } from "../api/hooks";
-import { formatNumber } from "../api/display";
+import {
+  useStatsByProvider,
+  useStatsEvents,
+  useStatsModelTimeline,
+  useStatsOverview,
+  useStatsTimeline,
+} from "../api/hooks";
+import { formatCompact, formatLatency, formatNumber, formatTime } from "../api/display";
+import { Notice } from "../ui";
 import { ModelTrendChart } from "../components/ModelTrendChart";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
 import { UsageChart } from "../components/UsageChart";
-import type { Provider } from "../api/types";
+import type { Provider, UsageEventRow } from "../api/types";
 import {
+  Button,
   Empty,
-  Field,
-  Input,
   Metric,
   Panel,
   Select,
@@ -21,6 +27,7 @@ import {
   TableHead,
   TableHeader,
   TableRow,
+  Tabs,
 } from "../ui";
 
 const RANGES = [
@@ -32,35 +39,64 @@ const RANGES = [
 
 const PROVIDER_LABEL: Record<Provider, string> = { codebuddy: "CodeBuddy", trae: "TRAE" };
 
-/** 用户名筛选的被控输入与服务端查询值分离，避免每敲一个字都打一次接口。 */
-const FILTER_DEBOUNCE_MS = 300;
+/** 明细分页的可选每页条数。 */
+const PAGE_SIZES = [10, 20, 50, 100];
+
+/** 明细状态列：成功固定文案；失败展示受控错误类型（脱敏，不含原始错误体）。 */
+function statusCell(row: UsageEventRow) {
+  if (row.ok) {
+    return <span className="text-ok">成功</span>;
+  }
+  return <span className="text-destructive">{row.error_type ?? "失败"}</span>;
+}
 
 export function StatsPage() {
   const session = useSessionContext();
   const [range, setRange] = useState("7d");
-  const [target, setTarget] = useState("");
-  const [debouncedTarget, setDebouncedTarget] = useState("");
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => setDebouncedTarget(target), FILTER_DEBOUNCE_MS);
-    return () => window.clearTimeout(timer);
-  }, [target]);
+  // 明细分页：cursors[i] = 第 i 页的 before 游标（第 0 页为 undefined）；
+  // rowid 单调递增，游标栈支持双向翻页且不漏不重
+  const [pageIndex, setPageIndex] = useState(0);
+  const [pageSize, setPageSize] = useState(20);
+  const [cursors, setCursors] = useState<(number | undefined)[]>([undefined]);
 
   const seconds = RANGES.find((item) => item.value === range)?.seconds ?? 0;
-  const since = seconds > 0 ? Math.floor(Date.now() / 1000) - seconds : undefined;
-  const username = session.is_admin && debouncedTarget ? debouncedTarget : undefined;
+  // since 必须锚定：若每次渲染都重算 Date.now()-seconds，值会随时间漂移，
+  // 导致 queryKey 抖动重复请求，且「范围变化回第一页」的 effect 把翻页打回第一页
+  const since = useMemo(
+    () => (seconds > 0 ? Math.floor(Date.now() / 1000) - seconds : undefined),
+    [seconds],
+  );
 
-  const overview = useStatsOverview(session.username, username, since);
-  const byProvider = useStatsByProvider(session.username, username, since);
-  const timeline = useStatsTimeline(session.username, username, since);
-  const modelTimeline = useStatsModelTimeline(session.username, username, since);
+  const events = useStatsEvents(
+    session.username, since, cursors[Math.min(pageIndex, cursors.length - 1)], pageSize);
+  const eventRows = events.data?.events ?? [];
+  const hasNextPage = events.data ? events.data.next_before !== null : false;
+
+  // 切时间范围 = 换了数据集：事件驱动重置分页（不监听 since 派生值，
+  // 否则值随时间漂移会把正常翻页误重置）
+  const changeRange = (value: string) => {
+    setRange(value);
+    setPageIndex(0);
+    setCursors([undefined]);
+  };
+
+  const changePageSize = (size: number) => {
+    setPageSize(size);
+    setPageIndex(0);
+    setCursors([undefined]);
+  };
+
+  const overview = useStatsOverview(session.username, undefined, since);
+  const byProvider = useStatsByProvider(session.username, undefined, since);
+  const timeline = useStatsTimeline(session.username, undefined, since);
+  const modelTimeline = useStatsModelTimeline(session.username, undefined, since);
 
   if (overview.isLoading) {
     return (
       <div className="space-y-6" data-testid="stats-page">
         <p className="sr-only">载入中…</p>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          {Array.from({ length: 8 }).map((_, index) => (
+          {Array.from({ length: 4 }).map((_, index) => (
             <div key={index} className="rounded-xl border border-border p-4">
               <Skeleton className="h-3 w-14" />
               <Skeleton className="mt-2 h-6 w-12" />
@@ -75,71 +111,51 @@ export function StatsPage() {
     stats?.success_rate === null || stats?.success_rate === undefined
       ? null
       : stats.success_rate;
-  const rateTone =
-    rate === null ? undefined : rate >= 0.99 ? "ok" : rate >= 0.9 ? "warn" : "danger";
+  const rateText = rate === null ? "—" : `${(rate * 100).toFixed(1)}%`;
+  const totalTokens = (stats?.input_tokens ?? 0) + (stats?.output_tokens ?? 0);
+  // 输入缓存：命中 = 上报的 cached_tokens；未命中 = 输入 − 命中（缺上报则显示 —）
+  const cached = stats?.cached_tokens ?? null;
+  const hitText = cached === null ? "—" : formatCompact(cached);
+  const missText =
+    cached === null || stats?.input_tokens === null || stats?.input_tokens === undefined
+      ? "—"
+      : formatCompact(stats.input_tokens - cached);
+  const tokenHint =
+    `输入 ${formatCompact(stats?.input_tokens)}（命中 ${hitText} · 未命中 ${missText}）`
+    + ` · 输出 ${formatCompact(stats?.output_tokens)} · 推理 ${formatCompact(stats?.reasoning_tokens)}`;
 
   return (
     <div className="space-y-6" data-testid="stats-page">
       <PageHeader
         title="用量统计"
-        description="按用户与上游查看请求量、成功率与 token 消耗；管理员可筛选任意用户，普通用户只能看自己。"
+        description="按时间范围查看请求量、成功率与 token 消耗；数据按 API Key 归属用户统计，普通用户只能看自己。"
       />
 
       <Panel title="筛选">
-        <div className="grid items-end gap-3 sm:max-w-xl sm:grid-cols-[minmax(0,14rem)_minmax(0,18rem)]">
-          <Field label="时间范围">
-            <Select
-              value={range}
-              data-testid="range-select"
-              onChange={(event) => setRange(event.target.value)}
-            >
-              {RANGES.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </Select>
-          </Field>
-          {session.is_admin && (
-            <Field label="用户名" hint="留空表示全部用户">
-              <Input
-                value={target}
-                data-testid="username-filter"
-                placeholder="全部用户"
-                onChange={(event) => setTarget(event.target.value)}
-              />
-            </Field>
-          )}
+        {/* 「时间范围」label 后紧接 tabs（左右相邻，不拉开两端） */}
+        <div className="flex flex-wrap items-center gap-3">
+          <span className="text-sm font-medium text-muted-foreground">时间范围</span>
+          <Tabs
+            value={range}
+            options={RANGES.map(({ value, label }) => ({ value, label }))}
+            onChange={changeRange}
+            testId="range-tabs"
+          />
         </div>
       </Panel>
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Metric label="请求数" value={formatNumber(stats?.requests)} tone="ok" />
+        <Metric label="请求数" value={formatNumber(stats?.requests)} tone="ok"
+                hint={`成功率 ${rateText}`} />
         <Metric
-          label="成功率"
-          value={
-            rate === null ? "—" : `${(rate * 100).toFixed(1)}%`
-          }
-          tone={rateTone}
+          label="Token 消耗"
+          value={formatCompact(totalTokens)}
+          hint={tokenHint}
         />
-        <Metric label="输入 token" value={formatNumber(stats?.input_tokens)} />
-        <Metric label="输出 token" value={formatNumber(stats?.output_tokens)} />
-        <Metric label="推理 token" value={formatNumber(stats?.reasoning_tokens)} />
         <Metric
           label="平均延迟"
-          value={
-            stats?.avg_latency_ms === null || stats?.avg_latency_ms === undefined
-              ? "—"
-              : `${formatNumber(stats.avg_latency_ms)} ms`
-          }
-        />
-        <Metric
-          label="平均首字延迟"
-          value={
-            stats?.avg_ttfb_ms === null || stats?.avg_ttfb_ms === undefined
-              ? "—"
-              : `${formatNumber(stats.avg_ttfb_ms)} ms`
-          }
+          value={formatLatency(stats?.avg_latency_ms)}
+          hint={`首字 ${formatLatency(stats?.avg_ttfb_ms)}`}
         />
         <Metric
           label="Credit 消耗"
@@ -214,8 +230,8 @@ export function StatsPage() {
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{formatNumber(row.requests)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatNumber(row.ok_count)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatNumber(row.input_tokens)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatNumber(row.output_tokens)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatCompact(row.input_tokens)}</TableCell>
+                  <TableCell className="text-right tabular-nums">{formatCompact(row.output_tokens)}</TableCell>
                   <TableCell className="text-right tabular-nums">
                     {row.credit === null ? "—" : formatNumber(Number(row.credit.toFixed(2)))}
                   </TableCell>
@@ -223,6 +239,112 @@ export function StatsPage() {
               ))}
             </TableBody>
           </Table>
+        )}
+      </Panel>
+
+      <Panel title="请求明细" action={
+        <div className="flex items-center gap-3 text-xs text-muted-foreground">
+          <span>共 {formatNumber(overview.data?.requests)} 条 · 保留 90 天</span>
+          <label className="flex items-center gap-1.5">
+            每页
+            <Select
+              value={String(pageSize)}
+              data-testid="events-page-size"
+              className="h-7 w-20 text-xs"
+              onChange={(event) => changePageSize(Number(event.target.value))}
+            >
+              {PAGE_SIZES.map((size) => (
+                <option key={size} value={size}>{size} 条</option>
+              ))}
+            </Select>
+          </label>
+        </div>
+      }>
+        {events.isError ? (
+          <Notice tone="danger" data-testid="events-error">
+            请求明细加载失败，请刷新重试；若刚升级服务，请确认后端已重启加载新端点。
+          </Notice>
+        ) : eventRows.length === 0 ? (
+          <Empty data-testid="no-events">该范围内没有请求明细</Empty>
+        ) : (
+          <>
+            <Table data-testid="events-table">
+              <TableHeader>
+                <TableRow>
+                  <TableHead>时间</TableHead>
+                  {session.is_admin && <TableHead>用户</TableHead>}
+                  <TableHead>上游</TableHead>
+                  <TableHead>模型</TableHead>
+                  <TableHead>状态</TableHead>
+                  <TableHead className="text-right">输入</TableHead>
+                  <TableHead className="text-right">输出</TableHead>
+                  <TableHead className="text-right">命中</TableHead>
+                  <TableHead className="text-right">Credit</TableHead>
+                  <TableHead className="text-right">延迟</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {eventRows.map((row) => (
+                  <TableRow key={row.rowid} data-testid="event-row">
+                    <TableCell className="whitespace-nowrap tabular-nums">
+                      {formatTime(row.ts)}
+                    </TableCell>
+                    {session.is_admin && <TableCell>{row.username}</TableCell>}
+                    <TableCell>
+                      <span className="inline-flex items-center gap-1.5">
+                        <ProviderIcon provider={row.provider as Provider} size={13} />
+                        {PROVIDER_LABEL[row.provider as Provider] ?? row.provider}
+                      </span>
+                    </TableCell>
+                    <TableCell className="max-w-48 truncate" title={row.model}>{row.model}</TableCell>
+                    <TableCell>{statusCell(row)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{formatCompact(row.input_tokens)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{formatCompact(row.output_tokens)}</TableCell>
+                    <TableCell className="text-right tabular-nums">{formatCompact(row.cached_tokens)}</TableCell>
+                    <TableCell className="text-right tabular-nums">
+                      {row.credit === null ? "—" : formatNumber(Number(row.credit.toFixed(2)))}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums">{formatLatency(row.latency_ms)}</TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+            {eventRows.length > 0 && (
+              <div className="mt-3 flex items-center justify-between">
+                <span className="text-xs text-muted-foreground" data-testid="events-page-info">
+                  第 {pageIndex + 1} 页
+                </span>
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    data-testid="events-prev"
+                    disabled={pageIndex === 0 || events.isFetching}
+                    onClick={() => setPageIndex((p) => Math.max(0, p - 1))}
+                  >
+                    上一页
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    data-testid="events-next"
+                    disabled={!hasNextPage || events.isFetching}
+                    onClick={() => {
+                      const nextBefore = events.data?.next_before;
+                      if (nextBefore === null || nextBefore === undefined) return;
+                      setCursors((prev) => {
+                        const next = prev.slice();
+                        next[pageIndex + 1] = nextBefore;
+                        return next;
+                      });
+                      setPageIndex((p) => p + 1);
+                    }}
+                  >
+                    下一页
+                  </Button>
+                </div>
+              </div>
+            )}          </>
         )}
       </Panel>
 

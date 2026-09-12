@@ -101,6 +101,19 @@ export function formatNumber(value: number | null | undefined): string {
   return value.toLocaleString("zh-CN");
 }
 
+/** 大数紧凑格式（万/亿），用于 token 量级；万以下保持原样。 */
+export function formatCompact(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  return value.toLocaleString("zh-CN", { notation: "compact", maximumFractionDigits: 1 });
+}
+
+/** 延迟展示：≥1s 以 s 计（保留 1 位小数、去尾零），否则 ms。 */
+export function formatLatency(ms: number | null | undefined): string {
+  if (ms === null || ms === undefined) return "—";
+  if (ms >= 1000) return `${Number((ms / 1000).toFixed(1))} s`;
+  return `${formatNumber(ms)} ms`;
+}
+
 
 export const PROBE_FAILURE_LABEL: Record<ProbeFailureReason, string> = {
   credential_rejected: "凭证被上游拒绝，需要重新登录该账号",

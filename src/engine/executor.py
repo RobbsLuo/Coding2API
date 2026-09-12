@@ -42,6 +42,9 @@ class ExecutorDeps:
     stats: Any | None = None            # StatsCollector；None 表示不采集（测试可用）
     upstream_model_name: Any | None = None  # (provider_id, 归一名) → 上游原始名；None 则原样传
     model_suggestions: Any | None = None    # (模型名) → 相近可用模型列表；None 则不给建议
+    # provider → {小写模型名: 上游原始 id}；api/models.list_models 拉取后就地更新。
+    # 用于把独有模型的候选上游收窄到真正登记了它的上游，避免白打一次请求
+    model_aliases: dict[str, dict[str, str]] | None = None
 
     def record(self, **fields: Any) -> None:
         """统计写入失败绝不能影响聊天响应。"""
@@ -160,6 +163,7 @@ class Executor:
                         input_tokens=_usage_field(translator.usage, "input_tokens"),
                         output_tokens=_usage_field(translator.usage, "output_tokens"),
                         reasoning_tokens=_usage_field(translator.usage, "reasoning_tokens"),
+                        cached_tokens=_usage_field(translator.usage, "cached_tokens"),
                         credit=_usage_field(translator.usage, "credit"),
                         latency_ms=int((time.monotonic() - started) * 1000))
                     for frame in translator.finish():
@@ -283,6 +287,8 @@ class Executor:
                         output_tokens=usage.get("completion_tokens"),
                         reasoning_tokens=(usage.get("completion_tokens_details") or {})
                         .get("reasoning_tokens"),
+                        cached_tokens=(usage.get("prompt_tokens_details") or {})
+                        .get("cached_tokens"),
                         latency_ms=int((time.monotonic() - started) * 1000))
                     return result
             if not self._deps.scheduler.should_rotate(tried):
@@ -303,7 +309,8 @@ class Executor:
 
     def _pick(self, target: ModelTarget, tried: set[str]):
         # 区分两种情况：模型所属 provider 完全没注册（400）vs 注册了但没有可用凭证（503）
-        registered = [pid for pid in target.providers if pid in self._deps.providers]
+        registered = [pid for pid in self._narrow_providers(target)
+                      if pid in self._deps.providers]
         if not registered:
             raise NoProviderForModel(f"no provider registered for model {target.model!r}")
         candidates = self._deps.credentials.candidates(registered)
@@ -317,6 +324,24 @@ class Executor:
             tried.add(credential_id)
             return self._pick(target, tried)
         return credential_id, credential_data
+
+    def _narrow_providers(self, target: ModelTarget) -> tuple[str, ...]:
+        """模型目录能证明归属时，把候选上游收窄到登记了该模型的上游。
+
+        CodeBuddy 独有模型用扁平名请求时，若先选中 TRAE 凭证会真实打一次
+        TRAE 上游：对侧账号留请求记录、统计多一条 invalid_request，随后才
+        轮换到正确上游。强制指定（@provider）是用户明确意图，不过滤；
+        目录未就绪或没有任何已注册上游登记该模型时保持原候选（保守：
+        模型列表只是展示口径，直连指定不受黑名单影响，见 README）。
+        """
+        aliases = self._deps.model_aliases
+        if target.forced or not aliases:
+            return target.providers
+        lower = target.model.lower()
+        known = tuple(
+            pid for pid in target.providers
+            if pid in self._deps.providers and lower in aliases.get(pid, {}))
+        return known or target.providers
 
     def _candidate(self, credential_id: str):
         for candidate in self._deps.credentials.candidates():
