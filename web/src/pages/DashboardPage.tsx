@@ -181,8 +181,11 @@ function CredentialRow({ credential, now }: { credential: Credential; now: numbe
     >
       <div className="flex items-center justify-between gap-3">
         <span className="flex min-w-0 items-center gap-1.5">
-          <ProviderIcon provider={credential.provider} />
-          <span className="truncate font-medium" title={PROVIDER_LABEL[credential.provider]}>
+          <ProviderIcon provider={credential.provider} size={13} />
+          <span className="shrink-0 text-xs text-muted-foreground">
+            {PROVIDER_LABEL[credential.provider]}
+          </span>
+          <span className="truncate font-medium">
             {credential.nickname || credential.id.slice(0, 12)}
           </span>
         </span>

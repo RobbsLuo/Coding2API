@@ -51,7 +51,7 @@ describe("StatsPage", () => {
 
     // TRAE 那一行的 credit 为 null（限定表格范围：图例 logo 的 title 也叫 TRAE）
     const table = screen.getByTestId("provider-table");
-    const row = within(table).getByText("TRAE").closest("tr")!;
+    const row = within(table).getAllByText("TRAE")[0].closest("tr")!;
     expect(row).toHaveTextContent("—");
     // 总览未探测到 credit
     expect(screen.getByText("Credit 消耗").parentElement).toHaveTextContent("—");

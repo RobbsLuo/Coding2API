@@ -187,7 +187,12 @@ export function StatsPage() {
             <TableBody>
               {byProvider.data?.providers.map((row) => (
                 <TableRow key={row.provider}>
-                  <TableCell>{PROVIDER_LABEL[row.provider] ?? row.provider}</TableCell>
+                  <TableCell>
+                    <span className="inline-flex items-center gap-1.5">
+                      <ProviderIcon provider={row.provider} size={13} />
+                      {PROVIDER_LABEL[row.provider] ?? row.provider}
+                    </span>
+                  </TableCell>
                   <TableCell className="text-right tabular-nums">{formatNumber(row.requests)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatNumber(row.ok_count)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatNumber(row.input_tokens)}</TableCell>
