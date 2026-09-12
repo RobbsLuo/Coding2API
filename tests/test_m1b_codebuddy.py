@@ -606,6 +606,57 @@ def test_default_registry_contains_both_providers(tmp_path):
     assert by_id["glm-5.2"] == ["trae"]
 
 
+def test_models_cache_used_when_fetch_fails(tmp_path):
+    """拉取成功后写入缓存；之后失败时用缓存兜底，/v1/models 保持完整。"""
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+
+    class FailingCB:
+        id = "codebuddy"
+
+        def list_models(self, _data):
+            raise RuntimeError("dynamic fetch unavailable")
+
+        def import_credential(self, raw):
+            return raw
+
+    class FlakyTrae:
+        id = "trae"
+        fail = False
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            if self.fail:
+                raise RuntimeError("upstream down")
+            return [Model(id="glm-5.2"), Model(id="DeepSeek-V4-Flash")]
+
+        def import_credential(self, raw):
+            return raw
+
+    trae = FlakyTrae()
+    app = build_app(settings, providers={"trae": trae, "codebuddy": FailingCB()})
+    key = app.state.api_keys.create("root")["api_key"]
+    auth = {"Authorization": f"Bearer {key}"}
+    with TestClient(app) as client:
+        # 第一次：拉取成功，缓存写入
+        first = client.get("/v1/models", headers=auth).json()["data"]
+        assert {item["id"] for item in first} == {"glm-5.2", "DeepSeek-V4-Flash"}
+        cached_keys = app.state.services.model_list_cache["trae"].keys()
+        assert cached_keys == {"glm-5.2", "deepseek-v4-flash"}
+
+        # 第二次：拉取失败 → 用缓存兜底，列表不缺模型
+        trae.fail = True
+        second = client.get("/v1/models", headers=auth).json()["data"]
+        assert {item["id"] for item in second} == {"glm-5.2", "DeepSeek-V4-Flash"}
+        assert {item["id"] for item in second} and all(
+            item["providers"] == ["trae"] for item in second)
+
+        # 恢复后重新拉取成功，缓存刷新
+        trae.fail = False
+        third = client.get("/v1/models", headers=auth).json()["data"]
+        assert {item["id"] for item in third} == {"glm-5.2", "DeepSeek-V4-Flash"}
+
+
 def test_codebuddy_import_via_api(tmp_path):
     settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")

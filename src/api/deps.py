@@ -9,7 +9,7 @@ request 可用）。
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import Request
@@ -46,6 +46,9 @@ class Services:
     upstream_auth: dict[str, Any]
     model_aliases: dict[str, dict[str, str]]
     schedule_probe: Callable[[str], None]
+    # 模型列表缓存：provider_id → {小写模型名: 上游原始 id}。
+    # list_models 成功时更新，某上游拉取失败时用缓存兜底（v1/models 稳定返回）。
+    model_list_cache: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 def get_services(request: Request) -> Services:
