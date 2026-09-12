@@ -51,6 +51,13 @@ export function useStatsTimeline(username?: string, target?: string, since?: num
   });
 }
 
+export function useStatsModelTimeline(username?: string, target?: string, since?: number) {
+  return useQuery({
+    queryKey: adminKey(username, "stats-model-timeline", target, since),
+    queryFn: () => api.statsModelTimeline(target, since),
+  });
+}
+
 /** 凭证相关写操作：成功后统一失效凭证与统计查询。 */
 export function useCredentialMutation<TArgs, TResult>(
   mutationFn: (args: TArgs) => Promise<TResult>,

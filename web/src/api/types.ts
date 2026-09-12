@@ -78,6 +78,17 @@ export interface TimelinePoint {
   trae: number;
 }
 
+/** 按模型趋势：每小时各 Top N 模型的请求数（模型名为动态键）。 */
+export interface ModelTimelinePoint {
+  hour: number;
+  [model: string]: number;
+}
+
+export interface ModelTimelineResponse {
+  models: string[];
+  points: ModelTimelinePoint[];
+}
+
 export interface SessionInfo {
   username: string;
   is_admin: boolean;

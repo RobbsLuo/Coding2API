@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useSessionContext } from "../Layout";
-import { useStatsByProvider, useStatsOverview, useStatsTimeline } from "../api/hooks";
+import { useStatsByProvider, useStatsModelTimeline, useStatsOverview, useStatsTimeline } from "../api/hooks";
 import { formatNumber } from "../api/display";
+import { ModelTrendChart } from "../components/ModelTrendChart";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
 import { UsageChart } from "../components/UsageChart";
@@ -52,6 +53,7 @@ export function StatsPage() {
   const overview = useStatsOverview(session.username, username, since);
   const byProvider = useStatsByProvider(session.username, username, since);
   const timeline = useStatsTimeline(session.username, username, since);
+  const modelTimeline = useStatsModelTimeline(session.username, username, since);
 
   if (overview.isLoading) {
     return (
@@ -166,6 +168,23 @@ export function StatsPage() {
           <Empty>该范围内没有小时汇总数据</Empty>
         ) : (
           <UsageChart points={timeline.data?.points ?? []} />
+        )}
+      </Panel>
+
+      <Panel title="按模型趋势" action={
+        modelTimeline.data?.models.length ? (
+          <span className="text-xs text-muted-foreground">
+            请求量 Top {modelTimeline.data.models.length} 模型
+          </span>
+        ) : undefined
+      }>
+        {(modelTimeline.data?.points.length ?? 0) === 0 ? (
+          <Empty data-testid="no-model-trend">该范围内没有小时汇总数据</Empty>
+        ) : (
+          <ModelTrendChart
+            points={modelTimeline.data?.points ?? []}
+            models={modelTimeline.data?.models ?? []}
+          />
         )}
       </Panel>
 

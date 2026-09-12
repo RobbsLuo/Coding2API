@@ -25,13 +25,21 @@ const PROVIDERS = {
   ],
 };
 
+const MODEL_TIMELINE = {
+  models: ["glm-5.2", "kimi-k3"],
+  points: [
+    { hour: 1700000000, "glm-5.2": 4, "kimi-k3": 1 },
+    { hour: 1700003600, "glm-5.2": 0, "kimi-k3": 2 },
+  ],
+};
+
 describe("StatsPage", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
   });
 
   it("渲染总览指标与按上游分组", async () => {
-    mockFetch({ "/api/stats/overview": OVERVIEW, "/api/stats/by-provider": PROVIDERS });
+    mockFetch({ "/api/stats/overview": OVERVIEW, "/api/stats/by-provider": PROVIDERS, "/api/stats/model-timeline": MODEL_TIMELINE });
     renderPage(<StatsPage />, ADMIN);
     await settle();
 
@@ -41,10 +49,21 @@ describe("StatsPage", () => {
     expect(screen.getByTestId("provider-table")).toHaveTextContent("TRAE");
   });
 
+  it("按模型趋势面板与 Top 文案渲染", async () => {
+    mockFetch({ "/api/stats/overview": OVERVIEW, "/api/stats/by-provider": PROVIDERS, "/api/stats/model-timeline": MODEL_TIMELINE });
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    expect(screen.getByText("按模型趋势")).toBeInTheDocument();
+    expect(screen.getByText("请求量 Top 2 模型")).toBeInTheDocument();
+    expect(screen.getByTestId("model-trend-chart")).toBeInTheDocument();
+  });
+
   it("credit 为 null 时显示占位符而非 0", async () => {
     mockFetch({
       "/api/stats/overview": { ...OVERVIEW, credit: null },
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
     });
     renderPage(<StatsPage />, ADMIN);
     await settle();
@@ -68,15 +87,17 @@ describe("StatsPage", () => {
         avg_ttfb_ms: null,
       },
       "/api/stats/by-provider": { providers: [] },
+      "/api/stats/model-timeline": { models: [], points: [] },
     });
     renderPage(<StatsPage />, ADMIN);
     await settle();
     expect(screen.getByText("成功率").parentElement).toHaveTextContent("—");
     expect(screen.getByTestId("no-provider-stats")).toBeInTheDocument();
+    expect(screen.getByTestId("no-model-trend")).toBeInTheDocument();
   });
 
   it("非管理员看不到用户名筛选器", async () => {
-    mockFetch({ "/api/stats/overview": OVERVIEW, "/api/stats/by-provider": PROVIDERS });
+    mockFetch({ "/api/stats/overview": OVERVIEW, "/api/stats/by-provider": PROVIDERS, "/api/stats/model-timeline": MODEL_TIMELINE });
     renderPage(<StatsPage />, READER);
     await settle();
     expect(screen.queryByTestId("username-filter")).not.toBeInTheDocument();
@@ -86,6 +107,7 @@ describe("StatsPage", () => {
     const fetchSpy = mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
     });
     renderPage(<StatsPage />, ADMIN);
     await settle();
@@ -109,6 +131,7 @@ describe("StatsPage", () => {
     const fetchSpy = mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
     });
     renderPage(<StatsPage />, READER);
     await settle();
@@ -123,6 +146,7 @@ describe("StatsPage", () => {
     const fetchSpy = mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
     });
     renderPage(<StatsPage />, READER);
     await settle();

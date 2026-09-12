@@ -29,4 +29,10 @@ def create_router(services: Services) -> APIRouter:
         target = username if principal.is_admin else principal.username
         return {"points": stats_query.timeline(username=target, since=since)}
 
+    @router.get("/api/stats/model-timeline")
+    async def stats_model_timeline(principal=Depends(principal_from_request),
+                                   username: str | None = None, since: int | None = None):
+        target = username if principal.is_admin else principal.username
+        return stats_query.model_timeline(username=target, since=since)
+
     return router

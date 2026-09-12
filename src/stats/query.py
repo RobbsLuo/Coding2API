@@ -107,3 +107,43 @@ class StatsQuery:
             {"hour": row["hour_utc"], "codebuddy": row["codebuddy"], "trae": row["trae"]}
             for row in rows
         ]
+
+    def model_timeline(self, *, username: str | None = None,
+                       since: int | None = None, top: int = 6) -> dict[str, Any]:
+        """按小时的各模型请求数趋势（usage_hourly 聚合）。
+
+        取时间范围内请求量 Top N 的模型，返回宽表点列（每点含各模型键），
+        供前端绘制多曲线。模型过多时曲线不可读，非 Top N 不单独出线。
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if username is not None:
+            clauses.append("username = ?")
+            params.append(username)
+        if since is not None:
+            clauses.append("hour_utc >= ?")
+            params.append(since)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._db.connect().execute(
+            f"""
+            SELECT hour_utc, model, SUM(requests) AS requests
+            FROM usage_hourly {where}
+            GROUP BY hour_utc, model
+            ORDER BY hour_utc
+            """, params).fetchall()
+        totals: dict[str, int] = {}
+        series: dict[str, dict[int, int]] = {}
+        hours: list[int] = []
+        for row in rows:
+            hour, model, requests = row["hour_utc"], row["model"], row["requests"]
+            if not hours or hours[-1] != hour:
+                hours.append(hour)
+            totals[model] = totals.get(model, 0) + requests
+            series.setdefault(model, {})[hour] = requests
+        # Top N 模型：按总量降序；总量相同按名字稳定排序
+        top_models = sorted(totals, key=lambda m: (-totals[m], m))[:top]
+        points = [
+            {"hour": hour, **{m: series.get(m, {}).get(hour, 0) for m in top_models}}
+            for hour in hours
+        ]
+        return {"models": top_models, "points": points}

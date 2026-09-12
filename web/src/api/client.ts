@@ -9,6 +9,7 @@ import type {
   SessionInfo,
   StatsOverview,
   TimelinePoint,
+  ModelTimelineResponse,
   UpstreamAuthPoll,
   UpstreamAuthStart,
 } from "./types";
@@ -110,6 +111,8 @@ export const api = {
     request<{ providers: ProviderStats[] }>(`/api/stats/by-provider${query({ username, since })}`),
   statsTimeline: (username?: string, since?: number) =>
     request<{ points: TimelinePoint[] }>(`/api/stats/timeline${query({ username, since })}`),
+  statsModelTimeline: (username?: string, since?: number) =>
+    request<ModelTimelineResponse>(`/api/stats/model-timeline${query({ username, since })}`),
 
   // ---------------------------------------------------------------- 模型
   models: (apiKey: string) =>

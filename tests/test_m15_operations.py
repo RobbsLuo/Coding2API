@@ -1054,6 +1054,30 @@ def test_stats_timeline_by_hour_and_provider(stats):
     assert len(filtered) == 1 and filtered[0]["trae"] == 1
 
 
+def test_stats_model_timeline_top_models_and_points(stats):
+    """按模型趋势：Top N 宽表点列，按总量降序；其余模型不出线。"""
+    collector, query = stats
+    base = 1_700_000_000
+    # glm-5.2 共 4 次（最热）、kimi-k3 共 2 次、legacy-old 共 1 次（超出 Top 2）
+    for _ in range(4):
+        collector.record(username="u", provider="codebuddy", model="glm-5.2", ok=True, now=base)
+    collector.record(username="u", provider="trae", model="kimi-k3", ok=True, now=base)
+    collector.record(username="u", provider="trae", model="kimi-k3", ok=True,
+                     now=base + 3600)
+    collector.record(username="u", provider="codebuddy", model="legacy-old", ok=True,
+                     now=base + 3600)
+    collector.rollup_hourly()
+
+    result = query.model_timeline(username="u", top=2)
+    assert result["models"] == ["glm-5.2", "kimi-k3"]
+    points = result["points"]
+    assert len(points) == 2
+    assert points[0] == {"hour": base // 3600 * 3600, "glm-5.2": 4, "kimi-k3": 1}
+    assert points[1]["glm-5.2"] == 0 and points[1]["kimi-k3"] == 1
+    # username 过滤：只统计指定用户
+    assert query.model_timeline(username="nobody")["points"] == []
+
+
 # ------------------------------------------------------------ API 端到端
 
 @pytest.fixture()
