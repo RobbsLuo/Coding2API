@@ -16,6 +16,10 @@
 - **凭证加密入库**：Fernet（AES-128-CBC + HMAC），密钥走 `APP_SECRET`
 - **脱敏统计**：不保存提示词、回答、请求头、Token、工具参数；明细 90 天、小时汇总永久
 - **完整凭证运维**：OAuth 设备码登录、多账号切换、额度探测、每日签到、token 预刷新
+- **管理台安全加固**：登录三级限流（全局/IP/用户名）+ PBKDF2 并发上限、写操作 CSRF 校验、
+  请求体上限（登录 8KB / 其余 16MB）、安全响应头（CSP `frame-ancestors`）与 Host 白名单
+- **模型目录治理**：`MODEL_BLOCKLIST` 过滤内部/老模型；上游拉取失败用缓存兜底；
+  消耗倍率与 token 上限/能力字段透传到列表，Playground 选中即览
 
 ## 快速开始
 
@@ -104,6 +108,12 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 - API Key：上一步创建的 `sk-...`
 - 模型名：以 `GET /v1/models` 返回为准
 
+### 5. Playground 调试
+
+「Playground」页用登录会话直接测试，无需 API Key；用量计入当前用户。
+选中模型后下方显示**消耗倍率、最大输入/输出、图片与工具调用支持**，
+双上游倍率不同时会按渠道（前置 icon 标注）分别显示。
+
 ## 功能对照表
 
 管理台右上角有「功能说明」按钮，随时可查。这里列出最容易困惑的几项：
@@ -120,6 +130,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | 接入第三方客户端 | 客户端设置 Base URL | 地址加 `/v1`，Key 用 `sk-…` |
 | 查某个人用了多少 | 用量统计 → 用户名筛选 | 仅管理员；普通用户只见自己 |
 | 统计里 credit 是 — | 用量统计 | 上游可选字段，经常不返回；主指标是 token |
+| 看某个模型消耗多快 | Playground → 选中模型 | 下方显示倍率 / token 上限 / 图片与工具支持 |
+| 列表里老模型/内部模型太多 | `MODEL_BLOCKLIST` env | glob 黑名单；只影响列表展示，直连指定不受影响 |
 
 ## 配置
 
@@ -136,6 +148,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `DEFAULT_MODEL` | `glm-5.2` | 模型为空或 `auto` 时的目标 |
 | `CHECKIN_HOUR` | `9` | 每日签到时刻（服务器本地时区） |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |
+| `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*` | 模型列表黑名单（fnmatch glob，逗号分隔，完全替换语义）；只影响列表展示，直连指定不受影响 |
+| `ALLOWED_HOSTS` | 空 | Host 白名单（防 DNS rebinding）；空 = 本地回环 + `PUBLIC_BASE_URL` 主机 |
 
 ## 开发
 
@@ -163,7 +177,9 @@ pnpm build
 
 ## 状态
 
-后端完成（M0–M1.5），前端完成（M2）。当前 `main` 分支可运行。
+后端完成（M0–M1.5），前端完成（M2），`main` 分支可运行。
+PROPOSAL §8 安全边界（登录限流 / CSRF / 请求体上限 / 安全头 / Host 白名单）
+与 §4.4 模型目录治理（黑名单 / 失败兜底缓存 / 元数据透传）已落地。
 
 ## 授权协议
 

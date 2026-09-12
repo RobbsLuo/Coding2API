@@ -16,6 +16,8 @@ upstream channels, with a shared credential pool, unified scheduling, and per-us
 - **Shared credential pool**: admins maintain credentials, everyone shares them; usage is tracked per user
 - **Encrypted credentials at rest**: Fernet (AES-128-CBC + HMAC), key from `APP_SECRET`
 - **Privacy-preserving stats**: never stores prompts, completions, headers, tokens, or tool arguments; 90-day detail, permanent hourly rollups
+- **Hardened admin surface**: login rate limiting (global/IP/username + PBKDF2 concurrency cap), CSRF checks on writes, request body limits, security headers, Host allowlist
+- **Model catalog hygiene**: `MODEL_BLOCKLIST` filters placeholder/legacy models; cached model list as fallback when upstreams fail; credit rates and token limits passed through to `/v1/models` and the Playground
 
 ## Quick start
 
