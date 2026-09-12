@@ -1,6 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import { Loader2, RefreshCw, Send } from "lucide-react";
+import {
+  Check,
+  Cloud,
+  Loader2,
+  RefreshCw,
+  Send,
+  X,
+  Zap,
+} from "lucide-react";
 import { useSessionContext } from "../Layout";
 import { HelpBlock } from "../components/HelpBlock";
 import { PageHeader } from "../components/PageHeader";
@@ -16,11 +24,19 @@ interface ModelInfo {
   max_output_tokens?: number;
   supports_images?: boolean;
   supports_tool_call?: boolean;
+  by_provider?: Record<string, { credit_rate?: number }>;
 }
 
 const PROVIDER_LABEL: Record<string, string> = {
   codebuddy: "CodeBuddy",
   trae: "TRAE",
+};
+
+// 渠道前置 icon 与颜色（与统计页图例同色系：CB 蓝 / TRAE 橙）
+const CHANNEL_ICON: Record<string, typeof Cloud> = { codebuddy: Cloud, trae: Zap };
+const CHANNEL_COLOR: Record<string, string> = {
+  codebuddy: "text-[var(--chart-1)]",
+  trae: "text-[var(--chart-3)]",
 };
 
 /** 通过会话鉴权的内部端点取数据，不需要用户自己造 API Key。 */
@@ -195,15 +211,45 @@ export function PlaygroundPage() {
             selectedInfo.supports_images !== undefined ||
             selectedInfo.supports_tool_call !== undefined) && (
             <div
-              className="flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+              className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
               data-testid="model-meta"
             >
-              {selectedInfo.credit_rate !== undefined && (
-                <span>
-                  消耗倍数 <span className="font-medium tabular-nums text-foreground">
-                    x{selectedInfo.credit_rate}
+              {/* 渠道：前置 icon 标注，多渠道全部显示 */}
+              <span className="inline-flex items-center gap-1.5">
+                渠道
+                {(selectedInfo.providers ?? []).map((pid) => {
+                  const Icon = CHANNEL_ICON[pid];
+                  return (
+                    <span
+                      key={pid}
+                      className="inline-flex items-center gap-1 font-medium text-foreground"
+                    >
+                      {Icon && <Icon className={"size-3.5 " + (CHANNEL_COLOR[pid] ?? "")} />}
+                      {PROVIDER_LABEL[pid] ?? pid}
+                    </span>
+                  );
+                })}
+              </span>
+              {/* 倍率：多渠道且各不相同则按渠道分别显示 */}
+              {selectedInfo.providers && selectedInfo.providers.length > 1 && selectedInfo.by_provider ? (
+                selectedInfo.providers.map((pid) => {
+                  const rate = selectedInfo.by_provider?.[pid]?.credit_rate;
+                  const Icon = CHANNEL_ICON[pid];
+                  return rate === undefined ? null : (
+                    <span key={pid} className="inline-flex items-center gap-1">
+                      {Icon && <Icon className={"size-3.5 " + (CHANNEL_COLOR[pid] ?? "")} />}
+                      倍率 <span className="font-medium tabular-nums text-foreground">x{rate}</span>
+                    </span>
+                  );
+                })
+              ) : (
+                selectedInfo.credit_rate !== undefined && (
+                  <span>
+                    消耗倍数 <span className="font-medium tabular-nums text-foreground">
+                      x{selectedInfo.credit_rate}
+                    </span>
                   </span>
-                </span>
+                )
               )}
               {selectedInfo.max_input_tokens !== undefined && (
                 <span>
@@ -220,10 +266,20 @@ export function PlaygroundPage() {
                 </span>
               )}
               {selectedInfo.supports_images !== undefined && (
-                <span>图片 {selectedInfo.supports_images ? "✓" : "✕"}</span>
+                <span className="inline-flex items-center gap-1">
+                  图片
+                  {selectedInfo.supports_images
+                    ? <Check className="size-3.5 text-ok" />
+                    : <X className="size-3.5 text-destructive" />}
+                </span>
               )}
               {selectedInfo.supports_tool_call !== undefined && (
-                <span>工具调用 {selectedInfo.supports_tool_call ? "✓" : "✕"}</span>
+                <span className="inline-flex items-center gap-1">
+                  工具调用
+                  {selectedInfo.supports_tool_call
+                    ? <Check className="size-3.5 text-ok" />
+                    : <X className="size-3.5 text-destructive" />}
+                </span>
               )}
             </div>
           )}

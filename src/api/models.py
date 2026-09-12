@@ -40,20 +40,44 @@ def _merge_provider(grouped: dict[str, dict[str, Any]],
 
     元数据逐字段补缺：先到的上游先填，后到的只补 None 字段，
     避免双上游同名模型互相覆盖已有信息。
+    同时记录每渠道各自的元数据（provider_meta），供前端按渠道展示倍率。
     """
     provider_aliases = aliases.setdefault(provider_id, {})
     for lower, model in models_by_lower.items():
         provider_aliases[lower] = model.id
         entry = grouped.setdefault(lower, {"canonical": model.id, "providers": set(),
-                                           "meta": dict.fromkeys(_META_FIELDS)})
+                                           "meta": dict.fromkeys(_META_FIELDS),
+                                           "provider_meta": {}})
         # canonical 偏向全小写形式（与 OpenAI 惯例一致）
         if model.id == model.id.lower():
             entry["canonical"] = model.id
         entry["providers"].add(provider_id)
         meta = entry["meta"]
+        provider_meta = {key: getattr(model, key) for key in _META_FIELDS}
+        entry["provider_meta"][provider_id] = provider_meta
         for key in _META_FIELDS:
             if meta[key] is None:
-                meta[key] = getattr(model, key)
+                meta[key] = provider_meta[key]
+
+
+def _entry_response(entry: dict[str, Any]) -> dict[str, Any]:
+    """合并后的 grouped 条目 → OpenAI 兼容响应条目。
+
+    多渠道模型额外给 by_provider.{pid}.credit_rate：双上游倍率不同，
+    前端按渠道分别展示。
+    """
+    result: dict[str, Any] = {
+        "id": entry["canonical"], "object": "model", "owned_by": "coding2api",
+        "providers": sorted(entry["providers"]),
+        **{key: value for key, value in entry["meta"].items() if value is not None},
+    }
+    if len(entry["providers"]) > 1:
+        by_provider = {pid: {"credit_rate": meta["credit_rate"]}
+                       for pid, meta in entry["provider_meta"].items()
+                       if meta.get("credit_rate") is not None}
+        if by_provider:
+            result["by_provider"] = by_provider
+    return result
 
 
 async def list_models(services: Services) -> dict:
@@ -94,9 +118,7 @@ async def list_models(services: Services) -> dict:
     services.model_aliases.clear()
     services.model_aliases.update(aliases)
     return {"object": "list", "data": [
-        {**{"id": entry["canonical"], "object": "model", "owned_by": "coding2api",
-            "providers": sorted(entry["providers"])},
-         **{key: value for key, value in entry["meta"].items() if value is not None}}
+        _entry_response(entry)
         for entry in sorted(grouped.values(), key=lambda e: e["canonical"])
     ]}
 

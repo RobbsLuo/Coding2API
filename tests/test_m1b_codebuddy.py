@@ -697,6 +697,36 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
     assert "kimi-k2.6" not in ids2 and "glm-5.2" in ids2
 
 
+def test_models_by_provider_rates_when_dual_upstream(tmp_path):
+    """双上游同名模型倍率不同时，响应带 by_provider 按渠道给倍率。"""
+    settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, rate: float):
+            self.id = pid
+            self._rate = rate
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            return [Model(id="glm-5.2", credit_rate=self._rate)]
+
+        def import_credential(self, raw):
+            return raw
+
+    app = build_app(settings, providers={
+        "codebuddy": Stub("codebuddy", 0.29), "trae": Stub("trae", 0.17)})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        item = next(m for m in client.get("/v1/models", headers={
+            "Authorization": f"Bearer {key}"}).json()["data"]
+            if m["id"] == "glm-5.2")
+    assert item["providers"] == ["codebuddy", "trae"]
+    assert item["credit_rate"] == 0.29          # 合并值：先到先填
+    assert item["by_provider"] == {"codebuddy": {"credit_rate": 0.29},
+                                   "trae": {"credit_rate": 0.17}}
+
+
 def test_codebuddy_import_via_api(tmp_path):
     settings = Settings(_env_file=None, APP_SECRET="s", DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")

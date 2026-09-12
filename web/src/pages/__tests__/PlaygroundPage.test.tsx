@@ -53,6 +53,50 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(screen.queryByTestId("playground-key")).not.toBeInTheDocument();
   });
 
+  it("选中模型后展示渠道与元数据，双上游倍率按渠道显示", async () => {
+    const META_MODELS = {
+      object: "list",
+      data: [
+        {
+          id: "glm-5.2", object: "model", owned_by: "coding2api",
+          providers: ["codebuddy", "trae"],
+          credit_rate: 0.29, max_input_tokens: 200000,
+          supports_images: false, supports_tool_call: true,
+          by_provider: { codebuddy: { credit_rate: 0.29 }, trae: { credit_rate: 0.17 } },
+        },
+        {
+          id: "DeepSeek-V4-Flash-Official", object: "model", owned_by: "coding2api",
+          providers: ["trae"],
+          credit_rate: 0.08, max_input_tokens: 256000,
+        },
+      ],
+    };
+    mockFetch({ "/api/playground/models": META_MODELS });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    const meta = screen.getByTestId("model-meta");
+    // 渠道前置 icon 标注：双上游全部显示（icon + 名称）
+    expect(meta).toHaveTextContent("CodeBuddy");
+    expect(meta).toHaveTextContent("TRAE");
+    // 双上游倍率按渠道分别显示
+    expect(meta).toHaveTextContent("x0.29");
+    expect(meta).toHaveTextContent("x0.17");
+    // 合并字段照常展示；勾/叉用 icon（svg）而非文本符号
+    expect(meta).toHaveTextContent("200,000");
+    expect(meta).toHaveTextContent("图片");
+    expect(meta.querySelector("svg.lucide-check")).toBeInTheDocument();
+    expect(meta.querySelector("svg.lucide-x")).toBeInTheDocument();
+    expect(meta).not.toHaveTextContent("✓");
+
+    // 切到单上游模型：倍率不按渠道拆分，显示合并值
+    await userEvent.selectOptions(screen.getByTestId("model-select"),
+      "DeepSeek-V4-Flash-Official@trae");
+    const meta2 = screen.getByTestId("model-meta");
+    expect(meta2).toHaveTextContent("x0.08");
+    expect(meta2).not.toHaveTextContent("x0.29");
+  });
+
   it("自动载入模型列表并展示可选上游，请求走会话端点", async () => {
     const spy = mockFetch({ "/api/playground/models": MODELS });
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
