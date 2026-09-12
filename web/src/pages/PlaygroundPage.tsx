@@ -78,16 +78,24 @@ export function PlaygroundPage() {
 
   // option 文本里的倍率标记：双上游显示 xCB倍率/xTRAE倍率，单上游显示 x倍率。
   // 原生 option 不支持 svg，渠道用 optgroup 分组 + 文字缩写表达。
-  const rateLabel = (item: ModelInfo): string => {
-    const byProvider = item.by_provider;
-    if (byProvider && Object.keys(byProvider).length > 1) {
-      const rates = (["codebuddy", "trae"] as const)
-        .map((pid) => byProvider[pid]?.credit_rate)
-        .filter((rate): rate is number => rate !== undefined);
-      if (rates.length > 1) return `CB x${rates[0]}/TR x${rates[1]}`;
-    }
-    return item.credit_rate !== undefined ? `x${item.credit_rate}` : "";
-  };
+  // 渠道缩写（原生 option 不支持 svg icon，用文字缩写标注渠道）
+const CHANNEL_ABBR: Record<string, string> = { codebuddy: "CB", trae: "TR" };
+
+// option 文本里的倍率标记：双上游显示 xCB倍率/xTRAE倍率，单上游带渠道缩写。
+const rateLabel = (item: ModelInfo, provider?: string): string => {
+  const byProvider = item.by_provider;
+  if (byProvider && Object.keys(byProvider).length > 1) {
+    const rates = (["codebuddy", "trae"] as const)
+      .map((pid) => byProvider[pid]?.credit_rate)
+      .filter((rate): rate is number => rate !== undefined);
+    if (rates.length > 1) return `CB x${rates[0]}/TR x${rates[1]}`;
+  }
+  if (item.credit_rate !== undefined) {
+    const abbr = provider ? `${CHANNEL_ABBR[provider] ?? provider} ` : "";
+    return `${abbr}x${item.credit_rate}`;
+  }
+  return "";
+};
   const dualSource = models.filter((item) => item.providers.length > 1);
   const onlyCodebuddy = models.filter(
     (item) => item.providers.length === 1 && item.providers[0] === "codebuddy",
@@ -190,7 +198,7 @@ export function PlaygroundPage() {
                   {groups.map(([provider, items]) => (
                     <optgroup key={provider} label={`仅 ${PROVIDER_LABEL[provider]}`}>
                       {items.map((item) => {
-                        const rate = rateLabel(item);
+                        const rate = rateLabel(item, provider);
                         return (
                           <option key={item.id} value={item.value}>
                             {item.id}{rate ? ` · ${rate}` : ""}

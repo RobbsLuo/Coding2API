@@ -136,9 +136,9 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
       options.find((o) => o.value === value)?.textContent ?? "";
     // 双上游：渠道缩写 + 各自倍率
     expect(textOf("glm-5.2")).toBe("glm-5.2（自动路由 · CB x0.29/TR x0.17）");
-    // 单上游：optgroup 已标渠道，只加倍率
+    // 单上游：optgroup 已标渠道，仍带渠道缩写 + 倍率
     expect(textOf("DeepSeek-V4-Flash-Official@trae")).toBe(
-      "DeepSeek-V4-Flash-Official · x0.08");
+      "DeepSeek-V4-Flash-Official · TR x0.08");
     // 无倍率数据：不追加任何标记
     expect(textOf("no-rate@trae")).toBe("no-rate");
   });
