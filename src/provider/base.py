@@ -97,8 +97,16 @@ class CheckinResult:
 
 @dataclass(slots=True)
 class Model:
+    """模型条目：id/name 之外的可选元数据来自模型列表接口（有则透传）。"""
+
     id: str
     name: str = ""
+    # 消耗倍数：CB 为 "x0.29 credits" 解析出的数值；TRAE 为 consumption_rate.rate
+    credit_rate: float | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    supports_images: bool | None = None
+    supports_tool_call: bool | None = None
 
 
 @dataclass(slots=True)

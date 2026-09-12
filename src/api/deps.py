@@ -46,9 +46,9 @@ class Services:
     upstream_auth: dict[str, Any]
     model_aliases: dict[str, dict[str, str]]
     schedule_probe: Callable[[str], None]
-    # 模型列表缓存：provider_id → {小写模型名: 上游原始 id}。
+    # 模型列表缓存：provider_id → {小写模型名: Model}（含元数据）。
     # list_models 成功时更新，某上游拉取失败时用缓存兜底（v1/models 稳定返回）。
-    model_list_cache: dict[str, dict[str, str]] = field(default_factory=dict)
+    model_list_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 def get_services(request: Request) -> Services:

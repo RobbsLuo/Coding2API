@@ -237,16 +237,26 @@ class CodeBuddyClient:
         data = body.get("data")
         if not isinstance(data, dict) or not isinstance(data.get("models"), list):
             raise UpstreamProtocolViolation("config response missing models list")
-        ids: list[str] = []
+        models: list[Model] = []
+        seen: set[str] = set()
         for item in data["models"]:
-            if isinstance(item, dict):
-                model_id = str(item.get("id", "")).strip()
-                if model_id and model_id not in ids:
-                    ids.append(model_id)
-        if not ids:
+            if not isinstance(item, dict):
+                continue
+            model_id = str(item.get("id", "")).strip()
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            models.append(Model(
+                id=model_id,
+                name=str(item.get("name") or ""),
+                credit_rate=_parse_credit_rate(item.get("credits")),
+                max_input_tokens=_int_field(item.get("maxInputTokens")),
+                max_output_tokens=_int_field(item.get("maxOutputTokens")),
+                supports_images=_bool_field(item.get("supportsImages")),
+                supports_tool_call=_bool_field(item.get("supportsToolCall")),
+            ))
+        if not models:
             raise UpstreamProtocolViolation("config returned no valid model ids")
-
-        models = [Model(id=model_id) for model_id in ids]
         _MODEL_CACHE[cache_key] = (now, models)
         return models
 
@@ -264,6 +274,29 @@ class CodeBuddyClient:
         if not isinstance(data, dict):
             raise UpstreamProtocolViolation(f"unexpected response shape from {url}")
         return data
+
+
+def _parse_credit_rate(value: object) -> float | None:
+    """"credits": "x0.29 credits" → 0.29；格式不符返回 None。"""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text.startswith("x"):
+        return None
+    try:
+        return float(text[1:].split()[0])
+    except (ValueError, IndexError):
+        return None
+
+
+def _int_field(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(value)
+
+
+def _bool_field(value: object) -> bool | None:
+    return value if isinstance(value, bool) else None
 
 
 def _extract_accounts(body: dict[str, Any]) -> list[Any]:

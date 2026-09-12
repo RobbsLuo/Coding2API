@@ -318,13 +318,43 @@ class TraeClient:
         configs = data.get("config_info_list")
         if not isinstance(configs, list):
             raise UpstreamProtocolViolation("models response missing config_info_list")
-        models = [Model(id=str(c["config_name"]),
-                        name=str((c.get("display_config") or {}).get("display_name") or ""))
-                  for c in configs
+        models = [self._to_model(c) for c in configs
                   if isinstance(c, dict) and c.get("config_name")]
+        models = [m for m in models if m is not None]
         if not models:
             raise UpstreamProtocolViolation("models api returned empty list")
         return models
+
+    @staticmethod
+    def _to_model(config: dict) -> Model | None:
+        """config 条目 → Model：解析消耗倍率与上下文窗口（缺失留空）。
+
+        倍率在 display_contact_config（JSON 字符串）里：
+        consumption_rate.enable 且有 data.rate 时才可信。
+        """
+        display = config.get("display_config") or {}
+        credit_rate: float | None = None
+        contact = config.get("display_contact_config")
+        if isinstance(contact, str) and contact:
+            try:
+                parsed = json.loads(contact)
+            except ValueError:
+                parsed = None
+            rate_info = (parsed or {}).get("consumption_rate") or {}
+            if rate_info.get("enable") and isinstance(rate_info.get("data"), dict):
+                rate = rate_info["data"].get("rate")
+                if isinstance(rate, (int, float)) and not isinstance(rate, bool):
+                    credit_rate = float(rate)
+        context_window = config.get("context_window_tokens") or {}
+        max_input = context_window.get("dev") if isinstance(context_window, dict) else None
+        if not isinstance(max_input, int) or isinstance(max_input, bool):
+            max_input = None
+        return Model(
+            id=str(config["config_name"]),
+            name=str(display.get("display_name") or ""),
+            credit_rate=credit_rate,
+            max_input_tokens=max_input,
+        )
 
     async def fetch_quota(self, credential: TraeCredential) -> Quota:
         """ide_user_ent_usage：remain = limit - used；多权益包求和。"""

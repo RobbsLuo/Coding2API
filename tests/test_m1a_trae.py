@@ -516,6 +516,28 @@ async def test_client_fetch_models_and_quota():
     assert quota.remaining == 70 and quota.total == 100
 
 
+async def test_client_fetch_models_metadata():
+    """倍率（display_contact_config.consumption_rate）与上下文窗口透传。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"config_info_list": [
+            {"config_name": "Doubao-Seed-Evolving",
+             "display_config": {"display_name": "Seed-Evolving"},
+             "context_window_tokens": {"dev": 256000},
+             "display_contact_config": json.dumps({
+                 "consumption_rate": {"enable": True, "data": {"rate": 0.08}}})},
+            {"config_name": "glm-5.2",
+             "display_config": {"display_name": "GLM"},
+             "display_contact_config": "{bad json",
+             "context_window_tokens": "oops"},
+        ]})
+
+    models = await _client(handler).fetch_models(TraeCredential(access_token="a"))
+    assert models[0].credit_rate == 0.08
+    assert models[0].max_input_tokens == 256000
+    # 坏数据 → 字段留空，不影响条目
+    assert models[1].credit_rate is None and models[1].max_input_tokens is None
+
+
 @pytest.mark.parametrize("payload", [
     {}, {"config_info_list": "no"}, {"config_info_list": []},
 ])

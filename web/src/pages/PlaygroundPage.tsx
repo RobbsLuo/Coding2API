@@ -11,6 +11,11 @@ interface ModelInfo {
   object: string;
   owned_by: string;
   providers: string[];
+  credit_rate?: number;
+  max_input_tokens?: number;
+  max_output_tokens?: number;
+  supports_images?: boolean;
+  supports_tool_call?: boolean;
 }
 
 const PROVIDER_LABEL: Record<string, string> = {
@@ -50,6 +55,10 @@ export function PlaygroundPage() {
     item.providers.length === 1 ? `${item.id}@${item.providers[0]}` : item.id;
   const models = fetched.map((item) => ({ ...item, value: valueOf(item) }));
   const selectedModel = model || (models[0]?.value ?? "");
+  // 选中模型的元数据：优先精确匹配 value，退化为按小写基础名匹配
+  const selectedInfo =
+    models.find((item) => item.value === selectedModel) ??
+    models.find((item) => item.value === selectedModel.split("@")[0]);
   const dualSource = models.filter((item) => item.providers.length > 1);
   const onlyCodebuddy = models.filter(
     (item) => item.providers.length === 1 && item.providers[0] === "codebuddy",
@@ -180,6 +189,44 @@ export function PlaygroundPage() {
                 </Select>
               </Field>
           </div>
+          {selectedInfo && (selectedInfo.credit_rate !== undefined ||
+            selectedInfo.max_input_tokens !== undefined ||
+            selectedInfo.max_output_tokens !== undefined ||
+            selectedInfo.supports_images !== undefined ||
+            selectedInfo.supports_tool_call !== undefined) && (
+            <div
+              className="flex flex-wrap gap-x-4 gap-y-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+              data-testid="model-meta"
+            >
+              {selectedInfo.credit_rate !== undefined && (
+                <span>
+                  消耗倍数 <span className="font-medium tabular-nums text-foreground">
+                    x{selectedInfo.credit_rate}
+                  </span>
+                </span>
+              )}
+              {selectedInfo.max_input_tokens !== undefined && (
+                <span>
+                  最大输入 <span className="font-medium tabular-nums text-foreground">
+                    {selectedInfo.max_input_tokens.toLocaleString()}
+                  </span>
+                </span>
+              )}
+              {selectedInfo.max_output_tokens !== undefined && (
+                <span>
+                  最大输出 <span className="font-medium tabular-nums text-foreground">
+                    {selectedInfo.max_output_tokens.toLocaleString()}
+                  </span>
+                </span>
+              )}
+              {selectedInfo.supports_images !== undefined && (
+                <span>图片 {selectedInfo.supports_images ? "✓" : "✕"}</span>
+              )}
+              {selectedInfo.supports_tool_call !== undefined && (
+                <span>工具调用 {selectedInfo.supports_tool_call ? "✓" : "✕"}</span>
+              )}
+            </div>
+          )}
           {modelsQuery.isFetching && (
             <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
               <RefreshCw className="size-3 animate-spin" />

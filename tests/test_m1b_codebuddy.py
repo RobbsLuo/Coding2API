@@ -871,6 +871,26 @@ async def test_fetch_models_parses_config_and_caches():
     assert calls["n"] == 1                      # 命中缓存
 
 
+async def test_fetch_models_parses_metadata():
+    """模型元数据解析：倍率（credits 字符串）/ token 上限 / 支持性。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 0, "data": {"models": [
+            {"id": "default", "name": "Default", "credits": "x2.00 credits",
+             "maxInputTokens": 200000, "maxOutputTokens": 24000,
+             "supportsImages": False, "supportsToolCall": True},
+            {"id": "glm-5.3", "credits": "bad-format"},
+        ]}})
+
+    models = await _client(handler).fetch_models(CodeBuddyCredential(bearer_token="t"))
+    assert models[0].credit_rate == 2.0
+    assert models[0].max_input_tokens == 200000
+    assert models[0].max_output_tokens == 24000
+    assert models[0].supports_images is False
+    assert models[0].supports_tool_call is True
+    # 格式不符 → 留空，不影响条目
+    assert models[1].credit_rate is None
+
+
 @pytest.mark.parametrize("body", [
     {"code": 1, "msg": "no"},
     {"code": 0, "data": {}},
