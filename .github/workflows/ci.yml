@@ -61,4 +61,4 @@ jobs:
           # 失败排查线索：容器日志（含启动 Traceback）
           docker logs coding2api --tail 80
           curl -fsS http://127.0.0.1:8000/health
-          docker compose down
+          APP_SECRET=ci-placeholder-secret docker compose down
