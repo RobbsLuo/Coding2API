@@ -1,22 +1,34 @@
-import { Cloud, Zap } from "lucide-react";
-import { cn } from "@/lib/utils";
+import CodeBuddyColor from "@lobehub/icons/es/CodeBuddy/components/Color";
+import CodeBuddyMono from "@lobehub/icons/es/CodeBuddy/components/Mono";
+import TraeColor from "@lobehub/icons/es/Trae/components/Color";
+import TraeMono from "@lobehub/icons/es/Trae/components/Mono";
+import type { ComponentType } from "react";
 
-const ICON: Record<string, typeof Cloud> = { codebuddy: Cloud, trae: Zap };
-// 颜色与用量统计页图例一致（CB 蓝 / TRAE 橙）
-const COLOR: Record<string, string> = {
-  codebuddy: "text-[var(--chart-1)]",
-  trae: "text-[var(--chart-3)]",
+type BrandComp = ComponentType<{ size?: number | string; className?: string }>;
+
+const BRAND: Record<string, { Main: BrandComp; Color: BrandComp }> = {
+  codebuddy: { Main: CodeBuddyMono, Color: CodeBuddyColor },
+  trae: { Main: TraeMono, Color: TraeColor },
 };
 
-/** 渠道前置 icon：CodeBuddy = Cloud（蓝），TRAE = Zap（橙）。未知渠道不渲染。 */
+/**
+ * 渠道品牌 logo（@lobehub/icons）：默认品牌彩色版；未知渠道不渲染。
+ * 深路径 import 绕开 Avatar 变体（其依赖 @lobehub/ui 的 emoji-mart JSON
+ * 在 vitest/node 下无法加载）。
+ */
 export function ProviderIcon({
   provider,
+  size = 14,
+  colored = true,
   className,
 }: {
   provider: string;
+  size?: number;
+  colored?: boolean;
   className?: string;
 }) {
-  const Icon = ICON[provider];
-  if (!Icon) return null;
-  return <Icon className={cn("size-3.5 shrink-0", COLOR[provider], className)} />;
+  const brand = BRAND[provider];
+  if (!brand) return null;
+  const Icon = colored ? brand.Color : brand.Main;
+  return <Icon size={size} className={className} />;
 }

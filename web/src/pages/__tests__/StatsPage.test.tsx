@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { StatsPage } from "../StatsPage";
 import { mockFetch, renderPage, settle, userEvent } from "./helpers";
@@ -49,8 +49,9 @@ describe("StatsPage", () => {
     renderPage(<StatsPage />, ADMIN);
     await settle();
 
-    // TRAE 那一行的 credit 为 null
-    const row = screen.getByText("TRAE").closest("tr")!;
+    // TRAE 那一行的 credit 为 null（限定表格范围：图例 logo 的 title 也叫 TRAE）
+    const table = screen.getByTestId("provider-table");
+    const row = within(table).getByText("TRAE").closest("tr")!;
     expect(row).toHaveTextContent("—");
     // 总览未探测到 credit
     expect(screen.getByText("Credit 消耗").parentElement).toHaveTextContent("—");

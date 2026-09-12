@@ -3,6 +3,7 @@ import { useSessionContext } from "../Layout";
 import { useStatsByProvider, useStatsOverview, useStatsTimeline } from "../api/hooks";
 import { formatNumber } from "../api/display";
 import { PageHeader } from "../components/PageHeader";
+import { ProviderIcon } from "../components/ProviderIcon";
 import { UsageChart } from "../components/UsageChart";
 import type { Provider } from "../api/types";
 import {
@@ -152,11 +153,11 @@ export function StatsPage() {
       <Panel title="请求量趋势" action={
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
           <span className="inline-flex items-center gap-1.5">
-            <span className="size-2 rounded-full bg-[var(--chart-1)]" />
+            <ProviderIcon provider="codebuddy" size={12} />
             CodeBuddy 上游
           </span>
           <span className="inline-flex items-center gap-1.5">
-            <span className="size-2 rounded-full bg-[var(--chart-3)]" />
+            <ProviderIcon provider="trae" size={12} />
             TRAE 上游
           </span>
         </div>
