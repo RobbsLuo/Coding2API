@@ -156,8 +156,11 @@ export function PlaygroundPage() {
                     </optgroup>
                   ))}
                   {/* model@provider 组合不在原始列表里，必须补合成选项，
-                      否则 React 会把 select 渲染成无选中项 */}
-                  {selectedModel.includes("@") && (
+                      否则 React 会把 select 渲染成无选中项。
+                      单上游模型的 value 本身带 @provider 且已在列表里，
+                      不重复合成，避免下拉显示成「xxx@trae（强制指定）」。 */}
+                  {selectedModel.includes("@") &&
+                    !models.some((item) => item.value === selectedModel) && (
                     <option value={selectedModel}>{selectedModel}（强制指定）</option>
                   )}
                 </Select>
