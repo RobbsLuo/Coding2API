@@ -75,6 +75,19 @@ export function PlaygroundPage() {
   const selectedInfo =
     models.find((item) => item.value === selectedModel) ??
     models.find((item) => item.value === selectedModel.split("@")[0]);
+
+  // option 文本里的倍率标记：双上游显示 xCB倍率/xTRAE倍率，单上游显示 x倍率。
+  // 原生 option 不支持 svg，渠道用 optgroup 分组 + 文字缩写表达。
+  const rateLabel = (item: ModelInfo): string => {
+    const byProvider = item.by_provider;
+    if (byProvider && Object.keys(byProvider).length > 1) {
+      const rates = (["codebuddy", "trae"] as const)
+        .map((pid) => byProvider[pid]?.credit_rate)
+        .filter((rate): rate is number => rate !== undefined);
+      if (rates.length > 1) return `CB x${rates[0]}/TR x${rates[1]}`;
+    }
+    return item.credit_rate !== undefined ? `x${item.credit_rate}` : "";
+  };
   const dualSource = models.filter((item) => item.providers.length > 1);
   const onlyCodebuddy = models.filter(
     (item) => item.providers.length === 1 && item.providers[0] === "codebuddy",
@@ -164,20 +177,26 @@ export function PlaygroundPage() {
                   {/* 双上游可用的模型置顶：默认调度即可覆盖 */}
                   {dualSource.length > 0 && (
                     <optgroup label="双上游（自动调度）">
-                      {dualSource.map((item) => (
-                        <option key={item.id} value={item.id}>
-                          {item.id}（自动路由）
-                        </option>
-                      ))}
+                      {dualSource.map((item) => {
+                        const rate = rateLabel(item);
+                        return (
+                          <option key={item.id} value={item.id}>
+                            {item.id}（自动路由{rate ? ` · ${rate}` : ""}）
+                          </option>
+                        );
+                      })}
                     </optgroup>
                   )}
                   {groups.map(([provider, items]) => (
                     <optgroup key={provider} label={`仅 ${PROVIDER_LABEL[provider]}`}>
-                      {items.map((item) => (
-                        <option key={item.id} value={item.value}>
-                          {item.id}
-                        </option>
-                      ))}
+                      {items.map((item) => {
+                        const rate = rateLabel(item);
+                        return (
+                          <option key={item.id} value={item.value}>
+                            {item.id}{rate ? ` · ${rate}` : ""}
+                          </option>
+                        );
+                      })}
                     </optgroup>
                   ))}
                   {/* model@provider 组合不在原始列表里，必须补合成选项，

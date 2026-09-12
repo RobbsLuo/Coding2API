@@ -111,6 +111,38 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(spy.mock.calls.some(([url]) => String(url).includes("/v1/models"))).toBe(false);
   });
 
+  it("模型 option 文本带消耗倍率（双上游按渠道标注）", async () => {
+    const RATED_MODELS = {
+      object: "list",
+      data: [
+        {
+          id: "glm-5.2", object: "model", owned_by: "coding2api",
+          providers: ["codebuddy", "trae"], credit_rate: 0.29,
+          by_provider: { codebuddy: { credit_rate: 0.29 }, trae: { credit_rate: 0.17 } },
+        },
+        {
+          id: "DeepSeek-V4-Flash-Official", object: "model", owned_by: "coding2api",
+          providers: ["trae"], credit_rate: 0.08,
+        },
+        { id: "no-rate", object: "model", owned_by: "coding2api", providers: ["trae"] },
+      ],
+    };
+    mockFetch({ "/api/playground/models": RATED_MODELS });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    const options = [...screen.getByTestId("model-select").querySelectorAll("option")];
+    const textOf = (value: string) =>
+      options.find((o) => o.value === value)?.textContent ?? "";
+    // 双上游：渠道缩写 + 各自倍率
+    expect(textOf("glm-5.2")).toBe("glm-5.2（自动路由 · CB x0.29/TR x0.17）");
+    // 单上游：optgroup 已标渠道，只加倍率
+    expect(textOf("DeepSeek-V4-Flash-Official@trae")).toBe(
+      "DeepSeek-V4-Flash-Official · x0.08");
+    // 无倍率数据：不追加任何标记
+    expect(textOf("no-rate@trae")).toBe("no-rate");
+  });
+
   it("模型加载失败时给出提示", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ error: { message: "nope" } }, 401)));
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
