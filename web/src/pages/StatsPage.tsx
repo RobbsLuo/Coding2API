@@ -154,11 +154,11 @@ export function StatsPage() {
         <div className="flex items-center gap-3 text-xs text-muted-foreground">
           <span className="inline-flex items-center gap-1.5">
             <ProviderIcon provider="codebuddy" size={12} />
-            CodeBuddy 上游
+            CodeBuddy
           </span>
           <span className="inline-flex items-center gap-1.5">
             <ProviderIcon provider="trae" size={12} />
-            TRAE 上游
+            TRAE
           </span>
         </div>
       }>

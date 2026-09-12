@@ -5,6 +5,7 @@ import { useSessionContext } from "../Layout";
 import { useCredentials, useQueryClient } from "../api/hooks";
 import { HelpBlock } from "../components/HelpBlock";
 import { PageHeader } from "../components/PageHeader";
+import { ProviderIcon } from "../components/ProviderIcon";
 import { Tip, ColumnHint } from "../components/Tip";
 import {
   credentialState,
@@ -445,7 +446,12 @@ function Row({
           </span>
         )}
       </TableCell>
-      <TableCell className="text-xs">{PROVIDER_LABEL[credential.provider]}</TableCell>
+      <TableCell className="text-xs">
+        <span className="inline-flex items-center gap-1.5">
+          <ProviderIcon provider={credential.provider} size={13} />
+          {PROVIDER_LABEL[credential.provider]}
+        </span>
+      </TableCell>
       <TableCell>
         <Badge tone={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
         {state === "cooling" && (
