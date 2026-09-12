@@ -471,6 +471,8 @@ class TraeProvider:
     # 上游 /v1/models 每次都要拉取，故障期会反复失败；
     # 负缓存把无效请求压到 5 分钟一次（PROPOSAL §4.4 约定）。
     _dynamic_models_blocked_until: float | None = field(default=None, init=False)
+    # 上次成功动态拉取的元数据（lower 名 → 字段表），静态表兜底时填倍率不丢
+    _last_dynamic_meta: dict[str, dict] = field(default_factory=dict, init=False)
 
     def import_credential(self, raw: dict) -> dict:
         credential = parse_credential(raw)
@@ -485,28 +487,60 @@ class TraeProvider:
         return await self.client.fetch_quota(TraeCredential.from_dict(credential_data))
 
     async def list_models(self, credential_data: dict) -> list[Model]:
-        """动态拉取 + 静态表合并（两者都给，调用方按序去重）。
+        """动态拉取 + 静态表合并：静态表的实测大小写优先，元数据继承动态结果。
 
-        静态表放在后面：别名表按顺序覆盖，静态表的实测大小写
-        （如 DeepSeek-V4-Flash）优先于动态列表的小写形式——
-        TRAE 上游列表数据与实际行为不一致（实测小写名 4001、驼峰名成功）。
+        TRAE 上游列表数据与实际行为不一致（实测小写名 4001、驼峰名成功），
+        因此重名条目的 id 用静态表的实测大小写，但保留动态条目的
+        倍率 / token 上限等元数据。动态拉取失败（负缓存期）时，
+        静态表条目用上次成功动态拉取的元数据填充，倍率不丢。
         """
-        models: list[Model] = []
+        by_lower: dict[str, Model] = {}
         credential = TraeCredential.from_dict(credential_data)
         blocked_until = self._dynamic_models_blocked_until
         if credential.access_token and (blocked_until is None
                                         or time.monotonic() >= blocked_until):
             try:
-                models.extend(await self.client.fetch_models(credential))
+                for model in await self.client.fetch_models(credential):
+                    by_lower.setdefault(model.id.lower(), model)
                 self._dynamic_models_blocked_until = None   # 成功即清除负缓存
+                self._last_dynamic_meta = {
+                    lower: {"name": m.name, "credit_rate": m.credit_rate,
+                            "max_input_tokens": m.max_input_tokens,
+                            "max_output_tokens": m.max_output_tokens,
+                            "supports_images": m.supports_images,
+                            "supports_tool_call": m.supports_tool_call}
+                    for lower, m in by_lower.items()}
             except Exception as error:  # noqa: BLE001 - 回退不是静默：错误带上日志
                 import logging
 
                 self._dynamic_models_blocked_until = time.monotonic() + 300
                 logging.getLogger(__name__).warning(
                     "TRAE 动态模型拉取失败，回退静态表 5 分钟: %s", error)
-        models.extend(Model(id=mid) for mid in STATIC_MODELS)
-        return models
+        # 静态表：重名时 id 用实测大小写，元数据优先取动态结果，
+        # 其次取上次成功的动态拉取（负缓存期倍率不丢）
+        merged: list[Model] = []
+        for mid in STATIC_MODELS:
+            lower = mid.lower()
+            existing = by_lower.get(lower)
+            if existing is not None:
+                merged.append(Model(id=mid, name=existing.name,
+                                    credit_rate=existing.credit_rate,
+                                    max_input_tokens=existing.max_input_tokens,
+                                    max_output_tokens=existing.max_output_tokens,
+                                    supports_images=existing.supports_images,
+                                    supports_tool_call=existing.supports_tool_call))
+                continue
+            meta = self._last_dynamic_meta.get(lower)
+            if meta is not None and any(value is not None for value in meta.values()):
+                merged.append(Model(id=mid, **meta))
+            else:
+                merged.append(Model(id=mid))
+        # 动态独有的模型（静态表没有的新模型）附在后面
+        known = {m.id.lower() for m in merged}
+        for lower, model in by_lower.items():
+            if lower not in known:
+                merged.append(model)
+        return merged
 
     async def stream_chat(self, credential_data: dict, payload: dict,
                           model: str) -> AsyncIterator[Event]:

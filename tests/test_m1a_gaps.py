@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import pathlib
 
 import httpx
@@ -782,8 +783,42 @@ async def test_trae_dynamic_models_with_valid_credential():
 
     provider = TraeProvider(client=_trae_client(handler))
     models = await provider.list_models({"accessToken": "a"})
-    # 动态在前、静态在后（静态大小写覆盖同 key 的动态条目）
-    assert [m.id for m in models] == ["DeepSeek-V4-Flash", "glm-5.2", *STATIC_MODELS]
+    # 静态表为骨架（实测大小写），动态独有模型附后；重名不重复出现
+    assert [m.id for m in models] == list(STATIC_MODELS)
+
+
+async def test_trae_list_models_merges_metadata_and_dedupes():
+    """重名条目：id 用静态表实测大小写，元数据继承动态结果；
+    动态独有模型附后；负缓存期间静态表用上次动态元数据填充。"""
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, json={"config_info_list": [
+                {"config_name": "glm-5.2",
+                 "display_contact_config": json.dumps({
+                     "consumption_rate": {"enable": True, "data": {"rate": 0.78}}}),
+                "context_window_tokens": {"dev": 128000}},
+                {"config_name": "New-Dynamic-Model"},
+            ]})
+        return httpx.Response(500)
+
+    from src.provider.trae.client import STATIC_MODELS, TraeProvider
+
+    provider = TraeProvider(client=_trae_client(handler))
+    first = {m.id: m for m in await provider.list_models(
+        {"accessToken": "a", "uid": "u"})}
+    # 重名：id 用静态表实测大小写，倍率继承动态
+    assert first["glm-5.2"].credit_rate == 0.78
+    assert first["glm-5.2"].max_input_tokens == 128000
+    assert "New-Dynamic-Model" in first          # 动态独有附后
+    # 第二次拉取失败（负缓存）：只剩静态表骨架，但重名模型的倍率不丢
+    second_list = await provider.list_models({"accessToken": "a", "uid": "u"})
+    assert len(second_list) == len(STATIC_MODELS)
+    second = {m.id: m for m in second_list}
+    assert second["glm-5.2"].credit_rate == 0.78
+    assert second["glm-5.2"].max_input_tokens == 128000
 
     def failing(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, content=b"down")
