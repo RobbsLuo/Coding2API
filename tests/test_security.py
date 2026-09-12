@@ -198,6 +198,80 @@ def test_security_headers_present(app):
 # ------------------------------------------------------------- Host 白名单
 
 
+def test_same_host_malformed_references_and_ipv6():
+    """_same_host 的异常与边界：坏 URL、无 host、IPv6、非法端口。"""
+    from starlette.requests import Request
+
+    from src.auth.csrf import _same_host
+
+    def request_with_host(host: str) -> Request:
+        return Request(scope={"type": "http",
+                              "headers": [(b"host", host.encode())]})
+
+    request = request_with_host("localhost:8000")
+    # urlsplit 异常（非法 IPv6）与无 hostname 的引用
+    assert _same_host("http://[::1", request) is False
+    assert _same_host("not-a-url", request) is False
+    # IPv6 字面量 host 头
+    ipv6 = request_with_host("[::1]:8000")
+    assert _same_host("http://[::1]:8000/x", ipv6) is True
+    # reference 端口非法 → 视为缺省端口，与 8000 不一致
+    assert _same_host("http://localhost:abc", request) is False
+    # host 头端口非法 → 直接 False
+    assert _same_host("http://localhost", request_with_host("localhost:abc")) is False
+
+
+def test_csrf_referer_same_origin_allows_write():
+    """带会话 cookie 且 Referer 同源（无 Origin）的写请求放行。"""
+    from starlette.requests import Request
+
+    from src.auth.csrf import SESSION_COOKIE, check_csrf
+
+    request = Request(scope={"type": "http", "headers": [
+        (b"cookie", f"{SESSION_COOKIE}=tok".encode()),
+        (b"referer", b"http://testserver/page"),
+        (b"host", b"testserver"),
+    ]})
+    check_csrf(request)          # 不抛 CsrfRejectedError 即放行
+
+
+def test_login_throttle_prunes_expired_and_global_cap():
+    """过期事件被清理；全局窗口超限抛 ThrottledError；空用户名成功不清空。"""
+    import time as _time
+
+    from src.auth.throttle import LoginThrottle, ThrottledError, ThrottleLimits
+
+    throttle = LoginThrottle(ThrottleLimits(max_global=40, max_per_ip=8, max_per_user=5))
+    # 塞一条过期失败记录，check 的 _prune 应清理它（popleft 分支）
+    throttle._events[("g", "")].append(_time.monotonic() - 61)
+    throttle.check(ip="1.2.3.4", username="alice")            # 不抛
+
+    # 全局窗口：塞满 max_global 条新失败 → 任意 IP/用户都被拒
+    global_throttle = LoginThrottle(
+        ThrottleLimits(max_global=1, max_per_ip=100, max_per_user=100))
+    global_throttle.record_failure(ip="9.9.9.9", username="ghost")
+    with pytest.raises(ThrottledError):
+        global_throttle.check(ip="1.2.3.4", username="alice")
+
+    # 空用户名的成功登录不清空任何计数
+    throttle.record_success(username="")
+    assert len(throttle._events[("g", "")]) == 0              # 上一行 check 已清
+
+
+def test_host_allowed_public_base_url_edge_shapes():
+    """PUBLIC_BASE_URL 无 scheme / path_host 为空时不炸也不误放行。"""
+    from src.config import Settings
+    from src.main import _host_allowed
+
+    # 无 scheme：startswith 分支不命中，主机仍进白名单
+    settings = Settings(_env_file=None, APP_SECRET="s", PUBLIC_BASE_URL="localhost:8000")
+    assert _host_allowed("localhost", settings)
+    # base 主机为空：path_host 分支不命中，仅默认白名单生效
+    empty = Settings(_env_file=None, APP_SECRET="s", PUBLIC_BASE_URL="/oops")
+    assert _host_allowed("localhost", empty)
+    assert not _host_allowed("evil.example", empty)
+
+
 def test_host_whitelist_rejects_foreign(app):
     _app, client = app
     response = client.get("/health", headers={"Host": "evil.example.com"})

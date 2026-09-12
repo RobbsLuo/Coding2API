@@ -1531,6 +1531,19 @@ def test_migrate_reraises_non_duplicate_errors():
         apply_schema(_FakeConn())
 
 
+def test_stats_model_timeline_filters(stats):
+    """按模型趋势：username / since 筛选生效。"""
+    collector, query = stats
+    collector.record(username="alice", provider="trae", model="m", ok=True, now=1000)
+    collector.record(username="bob", provider="trae", model="m2", ok=True, now=9000)
+    collector.rollup_hourly()
+
+    scoped = query.model_timeline(username="alice")
+    assert scoped["models"] == ["m"]
+    recent = query.model_timeline(since=3600)          # bob 的小时桶 7200 命中
+    assert recent["models"] == ["m2"]
+
+
 def test_stats_cached_tokens_overview_and_events(stats):
     """输入缓存命中：汇总（无上报则 None）与明细返回。"""
     collector, query = stats
@@ -1543,6 +1556,16 @@ def test_stats_cached_tokens_overview_and_events(stats):
 
     events = query.events()                          # 新→旧：后插入的未上报记录在前
     assert [e["cached_tokens"] for e in events["events"]] == [None, 40]
+
+
+def test_stats_model_timeline_endpoint(admin_client):
+    """model-timeline 端点透传聚合结果。"""
+    _app, client = admin_client
+    collector = client.app.state.stats_collector
+    collector.record(username="root", provider="trae", model="m", ok=True)
+    collector.rollup_hourly()
+    body = client.get("/api/stats/model-timeline").json()
+    assert body["models"] == ["m"] and body["points"]
 
 
 def test_stats_events_empty(stats):

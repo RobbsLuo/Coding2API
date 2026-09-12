@@ -529,6 +529,10 @@ async def test_client_fetch_models_metadata():
              "display_config": {"display_name": "GLM"},
              "display_contact_config": "{bad json",
              "context_window_tokens": "oops"},
+            {"config_name": "kimi-k3",
+             "display_config": {"display_name": "K3"},
+             "display_contact_config": json.dumps({
+                 "consumption_rate": {"enable": True, "data": {"rate": "oops"}}})},
         ]})
 
     models = await _client(handler).fetch_models(TraeCredential(access_token="a"))
@@ -536,6 +540,8 @@ async def test_client_fetch_models_metadata():
     assert models[0].max_input_tokens == 256000
     # 坏数据 → 字段留空，不影响条目
     assert models[1].credit_rate is None and models[1].max_input_tokens is None
+    # rate 非数值同样留空
+    assert models[2].credit_rate is None
 
 
 @pytest.mark.parametrize("payload", [

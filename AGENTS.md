@@ -1,0 +1,27 @@
+# coding2api 项目级约束
+
+全局约束见 `~/.pi/agent/AGENTS.md`；本文件是更具体的项目规则，冲突时以本文件为准。
+
+## 质量门槛（提交前必须全部通过）
+
+- 后端：`uv run ruff check src tests scripts` + `uv run pytest -q --cov=src --cov-report=term --cov-fail-under=100`
+  - 行/分支覆盖率 100% 是硬门槛；新增/修改的代码必须带测试，覆盖率缺口一律补测试解决，
+    禁止用 pragma/排除来"达标"
+- 前端（web/）：`pnpm exec tsc --noEmit` + `pnpm exec vitest run` + `pnpm build`
+- 注意平台差异：本地 macOS 通过不代表 CI（ubuntu-latest）通过；平台相关分支
+  （platform.system/machine 等）必须用 monkeypatch 测全所有分支
+
+## GitHub Actions（硬约束）
+
+- push 到 main（或 PR）会触发 CI（.github/workflows/ci.yml）：backend / frontend / compose 三个 job
+- **推送后必须确认 CI 全绿才算完成**：`gh run watch $(gh run list --limit 1 --json databaseId -q '.[0].databaseId')`
+  或 `gh run list --limit 1`
+- CI 失败必须修复直到通过；不允许留下红色 main 分支
+- compose job 会在 Docker 内真实构建并启动服务（health 检查），改 Dockerfile / 依赖 /
+  启动逻辑时先本地 `docker build` 预演
+
+## 其他
+
+- 覆盖率/测试之外的行为变更（API 语义、DB schema、上游解析）需同步 PROPOSAL.md / README.md
+- SQLite schema 变更：schema.sql 只加不改；已有表的新列必须走 `src/db/migrate.py`
+  的 `_MIGRATION_COLUMNS` 幂等补列，并附老库升级测试

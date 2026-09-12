@@ -38,9 +38,14 @@ def _same_host(reference: str, request: Request) -> bool:
     if parts.hostname is None:
         return False
     host_header = request.headers.get("host", "")
-    request_name, _, request_port = host_header.partition(":")
-    if request_name.startswith("["):  # IPv6 字面量
-        request_name = request_name.strip("[]")
+    if host_header.startswith("["):
+        # IPv6 字面量：[::1]:8000 → 主机 ::1，端口 8000（partition(":") 会在
+        # 第一个冒号处切开，必须先取 "]" 前的部分）
+        request_name, _, request_port = host_header.partition("]")
+        request_name = request_name.lstrip("[")
+        request_port = request_port.lstrip(":")
+    else:
+        request_name, _, request_port = host_header.partition(":")
     try:
         reference_port = parts.port
     except ValueError:

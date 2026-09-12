@@ -241,6 +241,15 @@ def test_finish_only_frame():
     assert cb_events.parse_frame(frame).finish_reason == "length"
 
 
+def test_parse_credit_rate_malformed_returns_none():
+    """credit_rate 解析：非数值/无数字等坏格式走异常路径返回 None。"""
+    from src.provider.codebuddy.client import _parse_credit_rate
+
+    assert _parse_credit_rate("x") is None            # IndexError
+    assert _parse_credit_rate("xabc") is None         # ValueError
+    assert _parse_credit_rate("x0.25 credits") == 0.25
+
+
 def test_usage_credit_is_optional():
     frame = cb_events.SSEFrame(event="", data='{"usage":{"credit":0.25,"prompt_tokens":1}}')
     usage = cb_events.parse_frame(frame).usage
@@ -1317,6 +1326,8 @@ def test_stainless_fingerprint_variants():
         assert h._stainless_arch() == "arm64"
     with mock.patch.object(h.platform, "machine", return_value="riscv"):
         assert h._stainless_arch() == "riscv"
+    with mock.patch.object(h.platform, "system", return_value="Darwin"):
+        assert h._stainless_os() == "MacOS"
     with mock.patch.object(h.platform, "system", return_value="Windows"):
         assert h._stainless_os() == "Windows"
     with mock.patch.object(h.platform, "system", return_value="Linux"):
