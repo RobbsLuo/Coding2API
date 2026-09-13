@@ -23,10 +23,10 @@ export function UserMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="sm" className="gap-1.5" aria-label="用户菜单">
+        <Button variant="ghost" size="sm" className="gap-1.5 px-2 sm:px-2.5" aria-label="用户菜单">
           <UserRound className="size-4" />
-          {username}
-          <ChevronDown className="size-3.5 text-muted-foreground" />
+          <span className="hidden sm:inline">{username}</span>
+          <ChevronDown className="hidden size-3.5 text-muted-foreground sm:inline" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-48">

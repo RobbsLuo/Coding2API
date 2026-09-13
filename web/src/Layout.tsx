@@ -5,9 +5,17 @@ import {
   Globe,
   KeyRound,
   LayoutDashboard,
+  Menu,
   TerminalSquare,
 } from "lucide-react";
 import type { SessionInfo } from "./api/types";
+import { Button } from "./components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "./components/ui/dropdown-menu";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { UserMenu } from "./components/UserMenu";
 import { cn } from "@/lib/utils";
@@ -49,12 +57,44 @@ export function Layout({ session }: { session: SessionInfo }) {
   return (
     <div className="flex min-h-full flex-col">
       <header className="sticky top-0 z-20 border-b border-border bg-[color:color-mix(in_oklch,var(--background)_88%,transparent)] backdrop-blur">
-        <div className="mx-auto flex w-full max-w-7xl items-center gap-3 px-4 py-2.5 sm:gap-4 sm:px-6">
-          <span className="flex items-center gap-2 font-semibold tracking-tight">
+        <div className="mx-auto flex w-full max-w-7xl items-center gap-2 px-3 py-2.5 sm:gap-4 sm:px-6">
+          {/* 移动端导航：汉堡下拉，替代横向导航图标（sm 以下空间不足） */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="sm:hidden"
+                aria-label="打开导航菜单"
+              >
+                <Menu />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-52">
+              {NAV.map((item) => (
+                <DropdownMenuItem key={item.to} asChild>
+                  <NavLink to={item.to} end={item.end} className="cursor-pointer">
+                    {({ isActive }) => (
+                      <span
+                        className={cn(
+                          "flex items-center gap-2.5",
+                          isActive && "font-medium text-primary",
+                        )}
+                      >
+                        <item.icon className="size-4" />
+                        {item.label}
+                      </span>
+                    )}
+                  </NavLink>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+          <span className="flex min-w-0 items-center gap-2 font-semibold tracking-tight">
             <BrandMark className="size-7" />
             Coding2API
           </span>
-          <nav className="flex flex-1 gap-1">
+          <nav className="hidden flex-1 gap-1 sm:flex">
             {NAV.map((item) => (
               <NavLink
                 key={item.to}
@@ -72,7 +112,7 @@ export function Layout({ session }: { session: SessionInfo }) {
                 {() => (
                   <>
                     <item.icon className="size-4 shrink-0" />
-                    <span className="hidden sm:inline">{item.label}</span>
+                    <span>{item.label}</span>
                   </>
                 )}
               </NavLink>
