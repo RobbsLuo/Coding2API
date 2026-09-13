@@ -231,7 +231,12 @@ def solo_headers(credential: TraeCredential, *, stream: bool = True) -> dict[str
 
 
 def ug_headers(credential: TraeCredential) -> dict[str, str]:
-    """签到/积分端点头（api.trae.cn）。对照原实现 UgHeaders。"""
+    """签到/积分端点头（api.trae.cn）。对照原实现 UgHeaders。
+
+    论坛实测（topic/180147）：设备头是签到 API 的隐藏必填项。
+    缺 X-Machine-Id / X-Device-Id 时 status 直接返回 9004（参数错误）；
+    补齐后请求格式正确，只剩 9074（服务器繁忙/限流）。uid 对应 auth.userId。
+    """
     headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -239,8 +244,12 @@ def ug_headers(credential: TraeCredential) -> dict[str, str]:
         "Authorization": f"Cloud-IDE-JWT {credential.access_token}",
         "X-User-Region": "CN",
     }
+    if credential.machine_id:
+        headers["X-Machine-Id"] = credential.machine_id
     if credential.device_id:
         headers["X-Device-Id"] = credential.device_id
+    if credential.uid:
+        headers["X-Uid"] = credential.uid
     return headers
 
 

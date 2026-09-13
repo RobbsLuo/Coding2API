@@ -237,13 +237,19 @@ def test_solo_headers_include_device_and_auth():
 
 
 def test_ug_headers_carry_region_and_auth():
-    """积分/签到端点（api.trae.cn）的独立头集合——此前缺失导致探测 401。"""
+    """积分/签到端点（api.trae.cn）的独立头集合——此前缺失导致探测 401。
+
+    论坛实测（topic/180147）：X-Machine-Id / X-Device-Id / userId 均为隐藏必填。
+    """
     from src.provider.trae.client import ug_headers
 
-    headers = ug_headers(TraeCredential(access_token="a", device_id="d"))
+    headers = ug_headers(TraeCredential(access_token="a", device_id="d",
+                                        machine_id="m", uid="u"))
     assert headers["Authorization"] == "Cloud-IDE-JWT a"
     assert headers["X-User-Region"] == "CN"
     assert headers["X-Device-Id"] == "d"
+    assert headers["X-Machine-Id"] == "m"
+    assert headers["X-Uid"] == "u"
     assert "X-Cloudide-Token" not in headers
 
 
@@ -681,10 +687,11 @@ async def test_trae_checkin_status_and_claim_use_ug_headers():
         return httpx.Response(200, json={"credits": 200})
 
     client = _trae_client(handler)
-    status = await client.fetch_checkin_status(TraeCredential(access_token="a", device_id="d"))
+    credential = TraeCredential(access_token="a", device_id="d", machine_id="m", uid="u")
+    status = await client.fetch_checkin_status(credential)
     assert status == {"checked_in": False, "credits": 0, "enable": True}
 
-    claim = await client.claim_checkin(TraeCredential(access_token="a", device_id="d"))
+    claim = await client.claim_checkin(credential)
     assert claim == {"credits": 200}
 
     assert len(seen) == 2
@@ -693,6 +700,10 @@ async def test_trae_checkin_status_and_claim_use_ug_headers():
         # httpx 内部存储全小写
         assert headers.get("x-user-region") == "CN"
         assert headers.get("authorization") == "Cloud-IDE-JWT a"
+        # 论坛实测（topic/180147）：设备头是签到 API 的隐藏必填项
+        assert headers.get("x-device-id") == "d"
+        assert headers.get("x-machine-id") == "m"
+        assert headers.get("x-uid") == "u"
 
 
 async def test_trae_provider_checkin_already_is_success():
