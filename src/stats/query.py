@@ -135,7 +135,7 @@ class StatsQuery:
             f"""
             SELECT rowid, ts, username, provider, model, ok, error_type,
                    input_tokens, output_tokens, reasoning_tokens, cached_tokens,
-                   credit, latency_ms
+                   credit, latency_ms, ttfb_ms
             FROM usage_events {where}
             ORDER BY rowid DESC LIMIT ?
             """, [*params, limit + 1]).fetchall()

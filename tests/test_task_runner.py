@@ -68,7 +68,7 @@ def _runner(repo_tuple, provider, *, quota_interval_minutes=60):
     collector = StatsCollector(db)
     runner = TaskRunner(
         quota_probe=QuotaProbeTask(credentials, {"codebuddy": provider}, None),
-        checkin=CheckinTask(credentials, {"codebuddy": provider}, checkin_hour=23),
+        checkin=CheckinTask(credentials, {"codebuddy": provider}),
         refresh=RefreshTask(credentials, {"codebuddy": provider}, skew_seconds=3600),
         retention=RetentionTask(collector),
         quota_probe_minutes=quota_interval_minutes,
@@ -116,7 +116,7 @@ async def test_runner_loop_survives_task_failure(repo):
     collector = StatsCollector(db)
     runner = TaskRunner(
         quota_probe=Exploding(),  # type: ignore[arg-type]
-        checkin=CheckinTask(credentials, {"codebuddy": provider}, checkin_hour=23),
+        checkin=CheckinTask(credentials, {"codebuddy": provider}),
         refresh=RefreshTask(credentials, {"codebuddy": provider}, skew_seconds=3600),
         retention=RetentionTask(collector),
         quota_probe_minutes=60,
@@ -173,11 +173,10 @@ async def test_runner_retention_purges_expired_detail_and_keeps_rollup(repo):
 def test_build_runner_wires_everything(repo):
     credentials, db = repo
     config = Settings(_env_file=None, APP_SECRET=SECRET, QUOTA_PROBE_MINUTES=15,
-                      CHECKIN_HOUR=7, REFRESH_SKEW_HOURS=6,
+                      REFRESH_SKEW_HOURS=6,
                       PACER_MIN_SECONDS=0, PACER_MAX_SECONDS=0)
     runner = build_runner(credentials, {"codebuddy": StubProvider()}, StatsCollector(db), config)
     assert runner._quota_interval == 15 * 60
-    assert runner._checkin_hour == 7
     assert runner._quota_probe._pacer is not None
     assert runner._quota_probe._pacer.disabled is True
     assert runner._refresh.skew_seconds == 6 * 3600
@@ -190,7 +189,7 @@ def test_build_runner_clamps_intervals(repo):
     runner = build_runner(credentials, {}, StatsCollector(db), config)
     assert runner._quota_interval == 60
     assert runner._refresh_interval >= 60
-    assert runner._retention_interval >= 600
+    assert runner._retention_interval >= 60
 
 
 async def test_providers_release_http_pools_on_shutdown(tmp_path):
@@ -349,4 +348,4 @@ async def test_checkin_task_soft_failure_retries_same_day(repo, monkeypatch):
     provider.checkin = ok_checkin
     report2 = await task.run_once(now=now)
     assert report2.succeeded == 1 and report2.failed == 0
-    assert task._day_key(now) in task._done_scopes
+    assert any(key.startswith(f"{task._day_key(now)}:") for key in task._done_scopes)

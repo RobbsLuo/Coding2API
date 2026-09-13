@@ -38,7 +38,6 @@ class Settings(BaseSettings):
     refresh_skew_hours: int = 24
 
     # 后台任务
-    checkin_hour: int = 9
     quota_probe_minutes: int = 60
     pacer_min_seconds: float = 5
     pacer_max_seconds: float = 20

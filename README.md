@@ -136,6 +136,17 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | 看某个模型消耗多快 | Playground → 选中模型 | 下方显示倍率 / token 上限 / 图片与工具支持 |
 | 列表里老模型/内部模型太多 | `MODEL_BLOCKLIST` env | glob 黑名单；只影响列表展示，直连指定不受影响 |
 
+## 后台任务
+
+四类任务由 `TaskRunner` 自动调度，失败互不影响（只记日志）：
+
+| 任务 | 周期 | 说明 |
+|---|---|---|
+| 额度探测 | 启动立即 + 每 60 分钟 | `QUOTA_PROBE_MINUTES` 可调 |
+| Token 预刷新 | 每 60 分钟 | 到期前 24h 窗口内轮换 |
+| 每日签到 | 每 10 分钟（全天） | 成功即当日封账该凭证，失败自动重试 |
+| 明细清理 | 每 5 分钟 | 小时汇总重算（趋势图延迟 ≤5 分钟）+ 90 天前明细清理 |
+
 ## 配置
 
 全部通过环境变量（见 `docker-compose.yml`）。完整清单参考 `PROPOSAL.md` §8。
@@ -150,7 +161,6 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `CODEBUDDY_API_ENDPOINT` | 中国站 | 上游地址，只接受 `CODEBUDDY_ALLOWED_ENDPOINTS` 白名单内地址 |
 | `CODEBUDDY_ALLOWED_ENDPOINTS` | 中/国际站 | 逗号分隔白名单；不在其中启动即失败 |
 | `DEFAULT_MODEL` | `glm-5.2` | 模型为空或 `auto` 时的目标 |
-| `CHECKIN_HOUR` | `9` | 每日签到时刻（容器本地时区，镜像默认 `TZ=Asia/Shanghai`） |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB 聊天最小间隔（秒），避频控风控；0 关闭 |
 | `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*` | 模型列表黑名单（fnmatch glob，逗号分隔，完全替换语义）；只影响列表展示，直连指定不受影响 |
@@ -166,8 +176,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   mkdir -p data secrets && sudo chown -R 1001:1001 data secrets
   ```
 
-- **时区**：`CHECKIN_HOUR` 按容器本地时区解释。镜像已装 `tzdata` 并默认
-  `TZ=Asia/Shanghai`；如需其它时区，显式覆盖 `TZ`，否则签到时刻会按 UTC 算。
+- **时区**：镜像已装 `tzdata` 并默认 `TZ=Asia/Shanghai`；如需其它时区，显式覆盖 `TZ`。
 - **APP_SECRET**：至少 16 字符，弱密钥（如 `.env.example` 里的占位串）会在
   启动时被拒绝；更换后已存凭证全部无法解密，需重新录入。
 

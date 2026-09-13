@@ -41,10 +41,10 @@ const EVENTS_PAGE1 = {
   events: [
     { rowid: 3, ts: BASE_TS + 200, username: "root", provider: "codebuddy", model: "glm-5.2",
       ok: 1, error_type: null, input_tokens: 120, output_tokens: 480, cached_tokens: 90,
-      credit: 0.35, latency_ms: 8200 },
+      credit: 0.35, latency_ms: 8200, ttfb_ms: 2400 },
     { rowid: 2, ts: BASE_TS + 100, username: "root", provider: "trae", model: "deepseek-v4",
       ok: 0, error_type: "rate_limit", input_tokens: null, output_tokens: null, cached_tokens: null,
-      credit: null, latency_ms: 460 },
+      credit: null, latency_ms: 460, ttfb_ms: 120 },
   ],
   next_before: 2,
 };
@@ -53,7 +53,7 @@ const EVENTS_PAGE2 = {
   events: [
     { rowid: 1, ts: BASE_TS, username: "root", provider: "trae", model: "kimi-k3",
       ok: 1, error_type: null, input_tokens: 5, output_tokens: 9, cached_tokens: null,
-      credit: null, latency_ms: 300 },
+      credit: null, latency_ms: 300, ttfb_ms: 150 },
   ],
   next_before: null,
 };
@@ -78,7 +78,7 @@ describe("StatsPage", () => {
     expect(screen.getByText("成功率 95.0%")).toBeInTheDocument();
     expect(screen.getByText(/输入 1000（命中 400 · 未命中 600） · 输出 2000 · 推理 300/))
       .toBeInTheDocument();
-    expect(screen.getByText(/首字 220 ms/)).toBeInTheDocument();
+    expect(screen.getByText(/首字延迟 220 ms/)).toBeInTheDocument();
     expect(screen.getByTestId("provider-table")).toHaveTextContent("CodeBuddy");
     expect(screen.getByTestId("provider-table")).toHaveTextContent("TRAE");
   });
@@ -151,7 +151,7 @@ describe("StatsPage", () => {
     renderPage(<StatsPage />, ADMIN);
     await settle();
     expect(screen.getByText("请求数").parentElement).toHaveTextContent("成功率 —");
-    expect(screen.getByText("平均延迟").parentElement).toHaveTextContent("首字 —");
+    expect(screen.getByText("平均耗时").parentElement).toHaveTextContent("首字延迟 —");
     expect(screen.getByTestId("no-provider-stats")).toBeInTheDocument();
     expect(screen.getByTestId("no-model-trend")).toBeInTheDocument();
   });
@@ -209,8 +209,10 @@ describe("StatsPage", () => {
     expect(within(table).getByText("成功")).toBeInTheDocument();
     expect(within(table).getByText("rate_limit")).toBeInTheDocument();
     expect(within(table).getByText("8.2 s")).toBeInTheDocument();
+    expect(within(table).getByText("2.4 s")).toBeInTheDocument();
     expect(within(table).getByText("90")).toBeInTheDocument();
     expect(within(table).getByText("460 ms")).toBeInTheDocument();
+    expect(within(table).getByText("120 ms")).toBeInTheDocument();
     expect(screen.getByTestId("events-prev")).toBeDisabled();
     expect(screen.getByTestId("events-next")).toBeEnabled();
   });

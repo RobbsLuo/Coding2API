@@ -30,22 +30,20 @@ class TaskRunner:
         self,
         *,
         quota_probe: QuotaProbeTask,
-        checkin: CheckinTask,
-        refresh: RefreshTask,
-        retention: RetentionTask,
-        quota_probe_minutes: int = 60,
-        checkin_hour: int = 9,
-        refresh_interval_minutes: int = 60,
-        retention_interval_hours: int = 6,
-    ) -> None:
+    checkin: CheckinTask,
+    refresh: RefreshTask,
+    retention: RetentionTask,
+    quota_probe_minutes: int = 60,
+    refresh_interval_minutes: int = 60,
+    retention_interval_minutes: int = 5,
+) -> None:
         self._quota_probe = quota_probe
         self._checkin = checkin
         self._refresh = refresh
         self._retention = retention
         self._quota_interval = max(60, quota_probe_minutes * 60)
-        self._checkin_hour = checkin_hour
         self._refresh_interval = max(60, refresh_interval_minutes * 60)
-        self._retention_interval = max(600, retention_interval_hours * 3600)
+        self._retention_interval = max(60, retention_interval_minutes * 60)
         self._tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
@@ -56,13 +54,13 @@ class TaskRunner:
             ("额度探测", lambda: self._quota_probe.run_once(), self._quota_interval),
             ("token 预刷新", self._refresh.run_once, self._refresh_interval),
             ("明细清理", self._sync_retention, self._retention_interval),
-            ("每日签到", self._sync_checkin, 1800),  # 每 30 分钟检查一次是否到点
+            ("每日签到", self._sync_checkin, 600),  # 全天每 10 分钟签到一次（成功凭证当日封账）
         ]
         for name, runner, interval in loops:
             self._tasks.append(asyncio.create_task(self._loop(name, runner, interval)))
 
     async def _sync_checkin(self) -> object:
-        """签到的「当日一次」由 CheckinTask.due() 判定，循环只负责到点触发。"""
+        """全天每 10 分钟一轮；成功凭证当日封账（run_once 内跳过），失败凭证持续重试。"""
         if not self._checkin.due():
             return None
         return await self._checkin.run_once()
@@ -103,10 +101,9 @@ def build_runner(credentials, providers: dict, stats_collector, config) -> TaskR
     pacer = Pacer(config.pacer_min_seconds, config.pacer_max_seconds)
     return TaskRunner(
         quota_probe=QuotaProbeTask(credentials, providers, pacer),
-        checkin=CheckinTask(credentials, providers, checkin_hour=config.checkin_hour),
+        checkin=CheckinTask(credentials, providers),
         refresh=RefreshTask(credentials, providers, skew_seconds=config.refresh_skew_hours * 3600,
                             now=lambda: int(time.time())),
         retention=RetentionTask(stats_collector),
         quota_probe_minutes=config.quota_probe_minutes,
-        checkin_hour=config.checkin_hour,
     )

@@ -42,7 +42,6 @@ def test_settings_defaults_and_admin_set():
     s = Settings(_env_file=None, APP_SECRET=SECRET, ADMIN_USERNAMES="alice, bob ,")
     assert s.admin_set == frozenset({"alice", "bob"})
     assert s.default_model == "glm-5.2"
-    assert s.checkin_hour == 9
     assert s.is_admin("alice") and not s.is_admin("carol")
 
 

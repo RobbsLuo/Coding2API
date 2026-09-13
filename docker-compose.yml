@@ -15,7 +15,6 @@ services:
       DEFAULT_MODEL: ${DEFAULT_MODEL:-glm-5.2}
       # 模型列表黑名单（fnmatch glob，逗号分隔，完全替换语义）
       MODEL_BLOCKLIST: ${MODEL_BLOCKLIST:-custom_model_*,*sub*agent*,summary,browser_use_*}
-      CHECKIN_HOUR: ${CHECKIN_HOUR:-9}
       QUOTA_PROBE_MINUTES: ${QUOTA_PROBE_MINUTES:-60}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:

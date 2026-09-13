@@ -107,7 +107,7 @@ export function formatCompact(value: number | null | undefined): string {
   return value.toLocaleString("zh-CN", { notation: "compact", maximumFractionDigits: 1 });
 }
 
-/** 延迟展示：≥1s 以 s 计（保留 1 位小数、去尾零），否则 ms。 */
+/** 时长展示（耗时 / 首字延迟共用）：≥1s 以 s 计（保留 1 位小数、去尾零），否则 ms。 */
 export function formatLatency(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return "—";
   if (ms >= 1000) return `${Number((ms / 1000).toFixed(1))} s`;

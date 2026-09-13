@@ -45,7 +45,7 @@
 
 - 单一 OpenAI 兼容端点，后面挂 CodeBuddy 与 TRAE 两个上游
 - 凭证由 admin 集中维护，全员共享，调度器自动挑健康的号
-- 按人统计用量（请求数、成功率、token、延迟）
+- 按人统计用量（请求数、成功率、token、耗时与首字延迟）
 - 上游死亡自动冷却，不反复踩死号
 - 支持 `model@provider` 精确指定上游
 
@@ -313,8 +313,8 @@ CREATE TABLE usage_events (
     output_tokens INTEGER,
     reasoning_tokens INTEGER,
     credit       REAL,                    -- 上游可选字段，两边都经常为 NULL，仅辅助展示
-    latency_ms   INTEGER,
-    ttfb_ms      INTEGER
+    latency_ms   INTEGER,                 -- 端到端耗时（排队+首字+生成），非网络延迟
+    ttfb_ms      INTEGER                  -- 首字延迟（请求开始到首个内容帧）
 );
 CREATE INDEX idx_usage_ts ON usage_events(ts);
 CREATE INDEX idx_usage_user ON usage_events(username, ts);
@@ -335,7 +335,9 @@ CREATE TABLE usage_hourly (
     PRIMARY KEY (hour_utc, username, provider, model)
 );
 
--- 签到去重与模型列表缓存不进库：前者由 CheckinTask 的当日作用域集合实现，
+-- 签到去重（当日成功作用域，进程内，重启重建）与模型列表缓存不进库：
+-- 前者由 CheckinTask 的当日作用域集合实现，成功凭证即刻封账、失败凭证
+-- 随 10 分钟一轮的签到循环持续重试（不等待次日）；
 -- 后者是进程内 TTL 缓存（重启即重建，无需持久化）。
 ```
 
@@ -383,11 +385,12 @@ coding2api/
 │   │   └── openai/              # v1
 │   │       ├── request.py
 │   │       └── response.py
-│   ├── scheduler/               # 后台任务
-│   │   ├── quota_probe.py       # 周期额度探测
-│   │   ├── checkin.py
-│   │   ├── refresh.py
-│   │   └── pacer.py             # 全局节流器
+│   ├── tasks/					# 后台任务（TaskRunner 周期循环，失败互不影响）
+│   │   ├── quota_probe.py		# 启动立即跑一轮 + 每 QUOTA_PROBE_MINUTES 分钟
+│   │   ├── checkin.py			# 全天每 10 分钟；成功即当日封账；失败凭证持续重试
+│   │   ├── refresh.py			# 每 60 分钟预刷新；多账号切换
+│   │   ├── retention.py			# 每 5 分钟：小时汇总重算 + 明细 90 天清理
+│   │   └── pacer.py				# 全局节流器
 │   ├── stats/
 │   │   ├── collector.py
 │   │   └── query.py
@@ -492,7 +495,6 @@ coding2api/
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | 监听地址与端口 |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |
 | `DEFAULT_MODEL` | `glm-5.2` | model 为空/auto 时的路由目标 |
-| `CHECKIN_HOUR` | `9` | 每日签到时刻（容器本地时区，镜像默认 `TZ=Asia/Shanghai`） |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |
 | `PACER_MIN_SECONDS` / `PACER_MAX_SECONDS` | `5` / `20` | 后台任务随机节流区间 |
 | `REFRESH_SKEW_HOURS` | `24` | token 预刷新窗口 |

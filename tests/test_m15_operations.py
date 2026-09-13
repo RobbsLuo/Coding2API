@@ -790,6 +790,20 @@ async def test_checkin_dedupes_same_upstream_account(repo):
     assert provider.checkin_calls == 1
 
 
+async def test_checkin_same_scope_failure_still_dedupes(repo):
+    """同账号多凭证：首条失败时本轮不重试第二条（seen 去重），下轮才重试。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "a",
+                                                          "account_uid": "same"})
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "b",
+                                                          "account_uid": "same"})
+    provider = ProbeProvider(checkin_ok=False)
+    task = CheckinTask(credentials, {"codebuddy": provider})
+    report = await task.run_once()
+    assert report.attempted == 1 and report.skipped == 1 and report.failed == 1
+    assert provider.checkin_calls == 1
+
+
 async def test_checkin_skips_disabled(repo):
     credentials, _db = repo
     credential_id = credentials.add(provider="codebuddy", credential_data={"bearer_token": "a"})
@@ -862,16 +876,60 @@ async def test_checkin_error_is_isolated(repo):
     assert report.failed == 1
 
 
-async def test_checkin_due_before_and_after_hour():
+async def test_checkin_due_is_always_true():
+    """签到全天每 10 分钟一轮，不再受时刻限制（due 恒 True）。"""
     task = CheckinTask.__new__(CheckinTask)
-    task.checkin_hour = 9
     task._done_scopes = set()
-    early = time.struct_time((2026, 9, 11, 8, 0, 0, 3, 254, 0))
-    late = time.struct_time((2026, 9, 11, 10, 0, 0, 3, 254, 0))
-    assert task.due(now=early) is False
+    midnight = time.struct_time((2026, 9, 11, 0, 30, 0, 3, 254, 0))
+    late = time.struct_time((2026, 9, 11, 23, 59, 0, 3, 254, 0))
+    assert task.due(now=midnight) is True
     assert task.due(now=late) is True
-    task._done_scopes.add("2026-09-11")
-    assert task.due(now=late) is False          # 当日只执行一次
+
+
+async def test_checkin_success_locks_scope_for_the_day(repo):
+    """成功签到即封账该 scope：当日不再调上游；失败 scope 下轮（10 分钟一轮）继续重试。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "a",
+                                                          "account_uid": "ok"})
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "b",
+                                                          "account_uid": "bad"})
+
+    class Flaky:
+        def __init__(self) -> None:
+            self.calls: dict[str, int] = {"ok": 0, "bad": 0}
+            self.bad_fail_first = True
+
+        def checkin_scope(self, data):
+            return f"cb|{data['account_uid']}"
+
+        async def checkin(self, data):
+            uid = data["account_uid"]
+            self.calls[uid] += 1
+            if uid == "ok":
+                return CheckinResult(ok=True, credit=100)
+            # bad 首次失败（上游瞬时故障），之后恢复——验证失败凭证下轮重试
+            if self.bad_fail_first:
+                self.bad_fail_first = False
+                return CheckinResult(ok=False, message="参与人数过多")
+            return CheckinResult(ok=True, credit=50)
+
+    provider = Flaky()
+    task = CheckinTask(credentials, {"codebuddy": provider})
+    now = time.struct_time((2026, 9, 11, 10, 0, 0, 3, 254, 0))
+    first = await task.run_once(now=now)
+    assert first.succeeded == 1 and first.failed == 1
+    # 第二轮：ok 已封账（skipped），bad 重试成功
+    second = await task.run_once(now=now)
+    assert second.skipped == 1 and second.succeeded == 1 and second.failed == 0
+    # 第三轮：全部封账，不再调上游
+    third = await task.run_once(now=now)
+    assert third.attempted == 0 and third.skipped == 2
+    assert provider.calls == {"ok": 1, "bad": 2}
+    # 次日清账：所有 scope 重新可签
+    tomorrow = time.struct_time((2026, 9, 12, 9, 0, 0, 4, 255, 0))
+    next_day = await task.run_once(now=tomorrow)
+    assert next_day.attempted == 2 and next_day.succeeded == 2
+    assert provider.calls == {"ok": 2, "bad": 3}
 
 
 async def test_refresh_task_only_touches_due_credentials(repo):
@@ -945,6 +1003,7 @@ def test_stats_records_and_redacts(stats):
     assert overview["input_tokens"] == 10
     assert overview["credit"] == 0.5
     assert overview["avg_latency_ms"] == 100
+    assert overview["avg_ttfb_ms"] == 30
     by_provider = query.by_provider(username="alice")
     assert [row["provider"] for row in by_provider] == ["codebuddy", "trae"]
 
@@ -1025,6 +1084,26 @@ def test_stats_overview_since_filter(stats):
     collector.record(username="u", provider="trae", model="m", ok=True, now=1000)
     collector.record(username="u", provider="trae", model="m", ok=True, now=9000)
     assert query.overview(username="u", since=5000)["requests"] == 1
+
+
+def test_stats_hourly_rolls_via_retention(stats):
+    """record 不写汇总；5 分钟一轮的 retention 滚动后最新小时才上趋势图。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True, now=1_700_003_600)
+    collector.record(username="u", provider="trae", model="m", ok=False,
+                     error_type="rate_limit", now=1_700_003_601)
+    collector.record(username="u", provider="codebuddy", model="m", ok=True,
+                     now=1_700_003_602, input_tokens=7, output_tokens=3,
+                     credit=0.5, latency_ms=100)
+    # 实时累加已撤销：滚动前最新小时尚不在趋势图
+    assert query.timeline(username="u", since=1_700_000_000) == []
+    RetentionTask(collector, retention_days=90).run_once()
+    points = query.timeline(username="u", since=1_700_000_000)
+    assert len(points) == 1 and points[0]["trae"] == 2 and points[0]["codebuddy"] == 1
+    bucket = collector._db.connect().execute(
+        "SELECT SUM(requests), SUM(ok_count), SUM(input_tokens), SUM(output_tokens), "
+        "SUM(credit_known), SUM(latency_sum) FROM usage_hourly").fetchone()
+    assert tuple(bucket) == (3, 2, 7, 3, 1, 100)
 
 
 def test_stats_timeline_by_hour_and_provider(stats):
@@ -1967,6 +2046,7 @@ async def test_stream_records_success_with_usage_and_username(repo):
     assert event["input_tokens"] == 11 and event["output_tokens"] == 22
     assert event["reasoning_tokens"] == 3
     assert event["latency_ms"] is not None
+    assert event["ttfb_ms"] is not None
 
 
 async def test_stream_without_usage_frame_records_null_tokens(repo):
@@ -2014,6 +2094,8 @@ async def test_complete_records_success_and_failure(repo):
         {"messages": [{"role": "user", "content": "hi"}]}), username="alice")
     assert collector.events[-1]["ok"] is True
     assert collector.events[-1]["input_tokens"] == 11
+    # 非流式也记首字延迟（上游首个事件时刻）
+    assert collector.events[-1]["ttfb_ms"] is not None
 
     credentials.save_error(credentials.candidates()[0].credential_id, _disabled_outcome())
     with pytest.raises(NoHealthyCredential):

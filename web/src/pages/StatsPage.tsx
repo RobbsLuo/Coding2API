@@ -153,9 +153,9 @@ export function StatsPage() {
           hint={tokenHint}
         />
         <Metric
-          label="平均延迟"
+          label="平均耗时"
           value={formatLatency(stats?.avg_latency_ms)}
-          hint={`首字 ${formatLatency(stats?.avg_ttfb_ms)}`}
+          hint={`首字延迟 ${formatLatency(stats?.avg_ttfb_ms)}`}
         />
         <Metric
           label="Credit 消耗"
@@ -280,7 +280,8 @@ export function StatsPage() {
                   <TableHead className="text-right">输出</TableHead>
                   <TableHead className="text-right">命中</TableHead>
                   <TableHead className="text-right">Credit</TableHead>
-                  <TableHead className="text-right">延迟</TableHead>
+                  <TableHead className="text-right">首字延迟</TableHead>
+                  <TableHead className="text-right">耗时</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -304,6 +305,7 @@ export function StatsPage() {
                     <TableCell className="text-right tabular-nums">
                       {row.credit === null ? "—" : formatNumber(Number(row.credit.toFixed(2)))}
                     </TableCell>
+                    <TableCell className="text-right tabular-nums">{formatLatency(row.ttfb_ms)}</TableCell>
                     <TableCell className="text-right tabular-nums">{formatLatency(row.latency_ms)}</TableCell>
                   </TableRow>
                 ))}

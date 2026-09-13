@@ -71,10 +71,10 @@ coding2api/
 │   │       └── errors.py        # OpenAI error shape
 │   ├── tasks/
 │   │   ├── pacer.py             # 全局节流器（PACER_MIN/MAX 随机区间）
-│   │   ├── quota_probe.py       # 周期探测 → credentials.quota_* 写回
-│   │   ├── checkin.py           # CHECKIN_HOUR 每日签到 + 启动补偿
-│   │   ├── refresh.py           # REFRESH_SKEW_HOURS 窗口预刷新
-│   │   └── retention.py         # usage_events 90 天清理（小时汇总永久）
+│   │   ├── quota_probe.py       # 启动立即跑一轮 + 每 QUOTA_PROBE_MINUTES 分钟探测
+│   │   ├── checkin.py           # 全天每 10 分钟签到；成功即当日封账该凭证
+│   │   ├── refresh.py           # 每 60 分钟；REFRESH_SKEW_HOURS 窗口内预刷新
+│   │   └── retention.py         # 每 5 分钟：小时汇总重算（幂等）+ 90 天前明细清理
 │   ├── stats/
 │   │   ├── collector.py         # usage_events 写入（脱敏）
 │   │   └── query.py             # overview / by-provider 聚合查询
@@ -222,7 +222,7 @@ class Provider(Protocol):
      - 流内 Event.ERROR → 同上映射 → 注入 OpenAI SSE 错误帧 + 冷却 + 轮换
   5. response.py：Event → OpenAI chunk（流式）或聚合（非流式）
      - 首块补 role:assistant；上游无 index 的 tool_calls 补稳定 index
-  6. stats.collector：写 usage_events（username/provider/model/tokens/latency/ttfb/ok）
+  6. stats.collector：写 usage_events（username/provider/model/tokens/latency/ttfb/ok；latency=端到端耗时，ttfb=首字延迟）
   7. scheduler.note_success：清 err_count
 ```
 
@@ -245,6 +245,19 @@ class Scheduler:
 ```
 
 状态全部落 `credentials` 表（`cooling_until` / `err_count` / `health` / `disabled`），进程重启不丢冷却状态。写路径用单连接串行（SQLite WAL 下单写者）。
+
+---
+
+## 6.1 后台任务（tasks/）
+
+`TaskRunner`（runner.py）每类任务一个独立 asyncio 循环，失败只记日志不拖垮服务；间隔有安全下限，避免打爆上游。所有对外 HTTP 请求经 `pacer.py` 全局节流。
+
+| 任务 | 周期 | 行为 |
+|---|---|---|
+| 额度探测（quota_probe.py） | 启动立即跑一轮（不节流） + 每 `QUOTA_PROBE_MINUTES`（默认 60）分钟 | 探测上游剩余额度 → `credentials.quota_*` / `health` 写回 |
+| token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token |
+| 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态，重启重建）；失败凭证持续重试，同账号多凭证共享一次 |
+| 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，最新小时滞后 ≤5 分钟）+ 90 天前明细清理 |
 
 ---
 

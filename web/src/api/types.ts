@@ -59,7 +59,9 @@ export interface StatsOverview {
   cached_tokens: number | null;
   /** 上游可选字段，两边都经常为 null */
   credit: number | null;
+  /** 平均端到端耗时（排队 + 首字 + 生成），非网络延迟 */
   avg_latency_ms: number | null;
+  /** 平均首字延迟（TTFB）：请求开始到首个内容帧，接近真实体感延迟 */
   avg_ttfb_ms: number | null;
 }
 
@@ -104,7 +106,10 @@ export interface UsageEventRow {
   output_tokens: number | null;
   cached_tokens: number | null;
   credit: number | null;
+  /** 端到端耗时（排队 + 首字 + 生成），非网络延迟 */
   latency_ms: number | null;
+  /** 首字延迟（TTFB）：请求开始到首个内容帧；无帧（如预热失败）时为 null */
+  ttfb_ms: number | null;
 }
 
 export interface StatsEventsResponse {

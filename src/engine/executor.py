@@ -275,6 +275,8 @@ class Executor:
         started = time.monotonic()
         last_provider = "-"
         last_credential: str | None = None
+        # 首事件时刻：上游响应的第一个事件（TTFE，非流式的首字延迟）；跨重试只记最早一次
+        first_event_at: float | None = None
 
         while True:
             pick = self._pick(target, tried)
@@ -299,6 +301,8 @@ class Executor:
                 async for event in self._deps.providers[provider_id].stream_chat(
                     credential_data, request.raw, self._upstream_model(provider_id, target.model)
                 ):
+                    if first_event_at is None:
+                        first_event_at = time.monotonic()
                     events.append(event)
             except Exception as error:  # noqa: BLE001
                 kind = _classify(error)
@@ -348,6 +352,8 @@ class Executor:
                         .get("reasoning_tokens"),
                         cached_tokens=(usage.get("prompt_tokens_details") or {})
                         .get("cached_tokens"),
+                        ttfb_ms=(int((first_event_at - started) * 1000)
+                                 if first_event_at is not None else None),
                         latency_ms=int((time.monotonic() - started) * 1000))
                     return result
             if not self._deps.scheduler.should_rotate(tried):
