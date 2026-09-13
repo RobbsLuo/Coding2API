@@ -63,7 +63,9 @@ _API_PREFIXES = ("api/", "v1/")
 
 
 def _body_limit(path: str) -> int:
-    return LOGIN_BODY_LIMIT if path == "/api/auth/login" else DEFAULT_BODY_LIMIT
+    # rstrip 处理尾斜杠：/api/auth/login/ 同样按登录上限（8KB），否则会先被
+    # 按 16MB 读完再 307 重定向，绕过登录限流一次
+    return LOGIN_BODY_LIMIT if path.rstrip("/") == "/api/auth/login" else DEFAULT_BODY_LIMIT
 
 
 async def _send_too_large(send) -> None:

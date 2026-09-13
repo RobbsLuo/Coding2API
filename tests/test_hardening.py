@@ -688,6 +688,7 @@ def test_body_limit_selects_login_limit():
     from src.main import DEFAULT_BODY_LIMIT, LOGIN_BODY_LIMIT, _body_limit
 
     assert _body_limit("/api/auth/login") == LOGIN_BODY_LIMIT
+    assert _body_limit("/api/auth/login/") == LOGIN_BODY_LIMIT
     assert _body_limit("/v1/chat/completions") == DEFAULT_BODY_LIMIT
 
 
