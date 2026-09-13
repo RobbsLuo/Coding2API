@@ -1127,6 +1127,55 @@ def test_stats_timeline_by_hour_and_provider(stats):
     assert len(filtered) == 1 and filtered[0]["trae"] == 1
 
 
+def test_stats_timeline_metric_dimensions(stats):
+    """timeline 支持请求数/token/耗时/首字四维；均值按成功数归一；非法回退。"""
+    collector, query = stats
+    base = 1_700_000_000
+    collector.record(username="u", provider="codebuddy", model="m", ok=True,
+                     input_tokens=10, output_tokens=5, latency_ms=100, ttfb_ms=40, now=base)
+    collector.record(username="u", provider="codebuddy", model="m", ok=True,
+                     input_tokens=20, output_tokens=5, latency_ms=300, ttfb_ms=60, now=base)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     input_tokens=100, output_tokens=50, latency_ms=200, ttfb_ms=80, now=base)
+    collector.rollup_hourly()
+
+    req = query.timeline(username="u")  # 默认请求次数
+    first = req[0]
+    assert first["codebuddy"] == 2 and first["trae"] == 1
+    # token = 输入 + 输出（跨渠道各自的合计）
+    tok = query.timeline(username="u", metric="tokens")[0]
+    assert tok["codebuddy"] == 40 and tok["trae"] == 150
+    # 耗时/首字 = 成功请求均值：(100+300)/2=200，trae 单条即自身
+    lat = query.timeline(username="u", metric="latency")[0]
+    assert lat["codebuddy"] == 200 and lat["trae"] == 200
+    ttf = query.timeline(username="u", metric="ttfb")[0]
+    assert ttf["codebuddy"] == 50 and ttf["trae"] == 80
+    # 非法 metric 回退请求次数
+    assert query.timeline(username="u", metric="bogus") == req
+
+
+def test_stats_model_timeline_metric_and_ttfb_rollup(stats):
+    """model_timeline 指标切换 + ttfb 聚合进小时表（老库补列后可用）。"""
+    collector, query = stats
+    base = 1_700_000_000
+    collector.record(username="u", provider="codebuddy", model="glm-5.2", ok=True,
+                     input_tokens=10, output_tokens=5, latency_ms=100, ttfb_ms=40, now=base)
+    collector.record(username="u", provider="codebuddy", model="glm-5.2", ok=True,
+                     input_tokens=20, output_tokens=5, latency_ms=300, ttfb_ms=60, now=base)
+    collector.rollup_hourly()
+
+    tok = query.model_timeline(username="u", metric="tokens")
+    assert tok["points"][0]["glm-5.2"] == 40
+    ttf = query.model_timeline(username="u", metric="ttfb")
+    assert ttf["points"][0]["glm-5.2"] == 50
+    # Top N 排序口径不随 metric 变（仍按请求量）
+    assert query.model_timeline(username="u", metric="latency")["models"] == ["glm-5.2"]
+    # ttfb 确实聚合进了小时表
+    conn = collector._db.connect()
+    row = conn.execute("SELECT ttfb_sum, latency_sum FROM usage_hourly").fetchone()
+    assert row["ttfb_sum"] == 100 and row["latency_sum"] == 400
+
+
 def test_stats_model_timeline_top_models_and_points(stats):
     """按模型趋势：Top N 宽表点列，按总量降序；其余模型不出线。"""
     collector, query = stats
@@ -1561,7 +1610,7 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     """老库升级：usage_events 无 cached_tokens 列时幂等补齐，且可写入。"""
     import sqlite3
 
-    from src.db.migrate import apply_schema
+    from src.db.migrate import SCHEMA_VERSION, apply_schema
 
     db = Database(tmp_path / "legacy.sqlite3")
     conn = sqlite3.connect(db.path)
@@ -1573,12 +1622,31 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
             output_tokens INTEGER, reasoning_tokens INTEGER, credit REAL,
             latency_ms INTEGER, ttfb_ms INTEGER)
     """)
+    # 旧版 usage_hourly：无 ttfb_sum 列（图表指标升级前的结构）
+    conn.execute("""
+        CREATE TABLE usage_hourly (
+            hour_utc INTEGER NOT NULL, username TEXT NOT NULL,
+            provider TEXT NOT NULL, model TEXT NOT NULL,
+            requests INTEGER NOT NULL DEFAULT 0, ok_count INTEGER NOT NULL DEFAULT 0,
+            input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
+            credit_sum REAL, credit_known INTEGER NOT NULL DEFAULT 0,
+            latency_sum INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (hour_utc, username, provider, model))
+    """)
     conn.commit()
     conn.close()
 
     apply_schema(db.connect())
-    columns = {row[1] for row in db.connect().execute("PRAGMA table_info(usage_events)")}
-    assert "cached_tokens" in columns
+    events_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(usage_events)")}
+    assert "cached_tokens" in events_columns
+    hourly_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(usage_hourly)")}
+    assert "ttfb_sum" in hourly_columns
+    # schema 版本推进到位；补列后新聚合可写
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    db.connect().execute(
+        "INSERT INTO usage_hourly (hour_utc, username, provider, model, requests,"
+        " ok_count, ttfb_sum) VALUES (1, 'u', 'trae', 'm', 1, 1, 120)")
+    db.connect().commit()
     apply_schema(db.connect())                          # 二次执行不抛错
     db.close()
 
@@ -1631,13 +1699,19 @@ def test_stats_cached_tokens_overview_and_events(stats):
 
 
 def test_stats_model_timeline_endpoint(admin_client):
-    """model-timeline 端点透传聚合结果。"""
+    """model-timeline 端点透传聚合结果；metric 参数透传。"""
     _app, client = admin_client
     collector = client.app.state.stats_collector
-    collector.record(username="root", provider="trae", model="m", ok=True)
+    collector.record(username="root", provider="trae", model="m", ok=True,
+                     input_tokens=10, output_tokens=5, ttfb_ms=40)
     collector.rollup_hourly()
     body = client.get("/api/stats/model-timeline").json()
     assert body["models"] == ["m"] and body["points"]
+    # metric 参数切换取值语义（默认请求次数 vs tokens 合计）
+    tokens = client.get("/api/stats/model-timeline?metric=tokens").json()
+    assert tokens["points"][0]["m"] == 15
+    # 非法 metric 回退请求次数
+    assert client.get("/api/stats/model-timeline?metric=bogus").json()["points"] == body["points"]
 
 
 def test_stats_events_empty(stats):

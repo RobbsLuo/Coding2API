@@ -71,5 +71,6 @@ CREATE TABLE IF NOT EXISTS usage_hourly (
     credit_sum    REAL,
     credit_known  INTEGER NOT NULL DEFAULT 0,
     latency_sum   INTEGER NOT NULL DEFAULT 0,
+    ttfb_sum      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (hour_utc, username, provider, model)
 );

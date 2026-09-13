@@ -57,7 +57,7 @@ export interface StatsOverview {
   reasoning_tokens: number;
   /** 输入中命中缓存的 token；任一明细上报过才非 null */
   cached_tokens: number | null;
-  /** 上游可选字段，两边都经常为 null */
+  /** 渠道可选字段，两边都经常为 null */
   credit: number | null;
   /** 平均端到端耗时（排队 + 首字 + 生成），非网络延迟 */
   avg_latency_ms: number | null;
@@ -74,7 +74,10 @@ export interface ProviderStats {
   credit: number | null;
 }
 
-/** 小时粒度时间序列点（usage_hourly 聚合，跨 model 汇合）。 */
+/** 图表指标：请求次数 / token 消耗 / 平均耗时 / 平均首字延迟。 */
+export type StatsMetric = "requests" | "tokens" | "latency" | "ttfb";
+
+/** 小时粒度时间序列点（usage_hourly 聚合，跨 model 汇合）。值语义随 metric 变化。 */
 export interface TimelinePoint {
   /** UTC 秒，对齐到小时起点 */
   hour: number;
@@ -82,7 +85,7 @@ export interface TimelinePoint {
   trae: number;
 }
 
-/** 按模型趋势：每小时各 Top N 模型的请求数（模型名为动态键）。 */
+/** 按模型趋势：每小时各 Top N 模型的指标值（模型名为动态键）。 */
 export interface ModelTimelinePoint {
   hour: number;
   [model: string]: number;
@@ -165,7 +168,7 @@ export interface CheckinResult {
   credit: number | null;
   code: number | null;
   message: string;
-  /** 上游把「已签到」返回成 400 + code=10001，这不是错误 */
+  /** 渠道把「已签到」返回成 400 + code=10001，这不是错误 */
   already_checked_in: boolean;
 }
 

@@ -15,12 +15,14 @@ from importlib import resources
 SCHEMA_NAME = "schema.sql"
 
 # 当前 schema 版本。新增列/表时 +1，并在 _MIGRATION_COLUMNS 里补上增量。
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("usage_events",
      "cached_tokens INTEGER"),  # 输入中命中缓存的 token（上游可选，NULL=未上报）
+    ("usage_hourly",
+     "ttfb_sum INTEGER NOT NULL DEFAULT 0"),  # 首字延迟聚合（图表维度，老库补 0）
 )
 
 

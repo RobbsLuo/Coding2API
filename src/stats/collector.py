@@ -130,12 +130,12 @@ class StatsCollector:
             """
             INSERT INTO usage_hourly (hour_utc, username, provider, model, requests, ok_count,
                                       input_tokens, output_tokens, credit_sum, credit_known,
-                                      latency_sum)
+                                      latency_sum, ttfb_sum)
             SELECT (ts / 3600) * 3600 AS hour_utc, username, provider, model,
                    COUNT(*), SUM(ok),
                    COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
                    SUM(credit), SUM(CASE WHEN credit IS NULL THEN 0 ELSE 1 END),
-                   COALESCE(SUM(latency_ms), 0)
+                   COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttfb_ms), 0)
             FROM usage_events WHERE (? IS NULL OR ts >= ?)
             GROUP BY hour_utc, username, provider, model
             ON CONFLICT(hour_utc, username, provider, model) DO UPDATE SET
@@ -145,7 +145,8 @@ class StatsCollector:
                 output_tokens = excluded.output_tokens,
                 credit_sum = excluded.credit_sum,
                 credit_known = excluded.credit_known,
-                latency_sum = excluded.latency_sum
+                latency_sum = excluded.latency_sum,
+                ttfb_sum = excluded.ttfb_sum
             """, (since, since))
         conn.commit()
         return cursor.rowcount

@@ -63,7 +63,7 @@ describe("StatsPage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("渲染合并后的总览指标与按上游分组", async () => {
+  it("渲染合并后的总览指标与按渠道分组", async () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
@@ -130,7 +130,7 @@ describe("StatsPage", () => {
     const row = within(table).getAllByText("TRAE")[0].closest("tr")!;
     expect(row).toHaveTextContent("—");
     // 总览未探测到 credit
-    expect(screen.getByText("Credit 消耗").parentElement).toHaveTextContent("—");
+    expect(screen.getByText("Credit 消耗").closest("[data-slot=card]")).toHaveTextContent("—");
   });
 
   it("成功率与延迟缺失时显示占位符", async () => {
@@ -150,8 +150,8 @@ describe("StatsPage", () => {
     });
     renderPage(<StatsPage />, ADMIN);
     await settle();
-    expect(screen.getByText("请求数").parentElement).toHaveTextContent("成功率 —");
-    expect(screen.getByText("平均耗时").parentElement).toHaveTextContent("首字延迟 —");
+    expect(screen.getByText("请求数").closest("[data-slot=card]")).toHaveTextContent("成功率 —");
+    expect(screen.getByText("平均耗时").closest("[data-slot=card]")).toHaveTextContent("首字延迟 —");
     expect(screen.getByTestId("no-provider-stats")).toBeInTheDocument();
     expect(screen.getByTestId("no-model-trend")).toBeInTheDocument();
   });
@@ -166,11 +166,11 @@ describe("StatsPage", () => {
     renderPage(<StatsPage />, READER);
     await settle();
 
-    expect(screen.getByRole("tab", { selected: true })).toHaveTextContent("最近 7 天");
+    expect(screen.getByTestId("range-tabs-7d")).toHaveAttribute("aria-selected", "true");
     await userEvent.click(screen.getByTestId("range-tabs-24h"));
     // React 会重建 tablist 节点，断言必须每次现查，不能缓存元素引用
     await waitFor(() =>
-      expect(screen.getByRole("tab", { selected: true })).toHaveTextContent("最近 24 小时"),
+      expect(screen.getByTestId("range-tabs-24h")).toHaveAttribute("aria-selected", "true"),
     );
     await waitFor(() =>
       expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("since="))).toBe(true),
@@ -191,6 +191,29 @@ describe("StatsPage", () => {
     await userEvent.click(screen.getByTestId("range-tabs-all"));
     await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
     expect(fetchSpy.mock.calls.every(([url]) => !String(url).includes("since="))).toBe(true);
+  });
+
+  it("切换图表指标触发带 metric 的查询（默认请求次数）", async () => {
+    const fetchSpy = mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    renderPage(<StatsPage />, READER);
+    await settle();
+    // 默认选中请求次数；初始请求带 metric=requests
+    expect(screen.getByTestId("metric-tabs-requests")).toHaveAttribute("aria-selected", "true");
+    expect(fetchSpy.mock.calls.some(([url]) =>
+      String(url).includes("metric=requests"))).toBe(true);
+    fetchSpy.mockClear();
+
+    await userEvent.click(screen.getByTestId("metric-tabs-tokens"));
+    await waitFor(() =>
+      expect(fetchSpy.mock.calls.some(([url]) =>
+        String(url).includes("metric=tokens"))).toBe(true),
+    );
+    expect(screen.getByTestId("metric-tabs-tokens")).toHaveAttribute("aria-selected", "true");
   });
 
   it("请求明细面板渲染成功与失败状态，管理员见用户列", async () => {

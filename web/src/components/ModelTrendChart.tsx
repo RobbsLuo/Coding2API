@@ -9,6 +9,7 @@ import {
   YAxis,
 } from "recharts";
 import type { ModelTimelinePoint } from "../api/types";
+import { formatChartValue } from "../api/display";
 
 const COLORS = [
   "var(--chart-1)",
@@ -19,13 +20,15 @@ const COLORS = [
   "var(--primary)",
 ];
 
-/** 按模型请求量趋势：每小时各 Top N 模型一条曲线（recharts）。 */
+/** 按模型指标趋势：每小时各 Top N 模型一条曲线（recharts）。 */
 export function ModelTrendChart({
   points,
   models,
+  metric,
 }: {
   points: ModelTimelinePoint[];
   models: string[];
+  metric?: string;
 }) {
   const data = points.map((point) => ({
     ...point,
@@ -66,6 +69,7 @@ export function ModelTrendChart({
               color: "var(--popover-foreground)",
             }}
             labelStyle={{ fontWeight: 600 }}
+            formatter={(value, name) => [formatChartValue(Number(value), metric ?? "requests"), name]}
           />
           <Legend wrapperStyle={{ fontSize: 11 }} />
           {models.map((model, index) => (

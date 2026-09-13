@@ -7,6 +7,7 @@ import type {
   ProbeResult,
   ProviderStats,
   SessionInfo,
+  StatsMetric,
   StatsOverview,
   TimelinePoint,
   ModelTimelineResponse,
@@ -77,17 +78,8 @@ export const api = {
     request<ProbeResult>(`/api/credentials/${id}/probe`, { method: "POST" }),
   checkinCredential: (id: string) =>
     request<CheckinResult>(`/api/credentials/${id}/checkin`, { method: "POST" }),
-  accounts: (id: string) =>
-    request<{ accounts: { account_id: string; nickname: string; type: string }[] }>(
-      `/api/credentials/${id}/accounts`,
-    ),
-  selectAccount: (id: string, accountId: string) =>
-    request<{ switched: boolean }>(`/api/credentials/${id}/accounts/select`, {
-      method: "POST",
-      ...json({ account_id: accountId }),
-    }),
 
-  // ------------------------------------------------------------ 上游登录
+  // ------------------------------------------------------------ 渠道登录
   upstreamStart: (provider: string) =>
     request<UpstreamAuthStart>("/api/auth/upstream/start", { method: "POST", ...json({ provider }) }),
   upstreamPoll: (provider: string, state: string) =>
@@ -112,10 +104,10 @@ export const api = {
     request<StatsOverview>(`/api/stats/overview${query({ username, since })}`),
   statsByProvider: (username?: string, since?: number) =>
     request<{ providers: ProviderStats[] }>(`/api/stats/by-provider${query({ username, since })}`),
-  statsTimeline: (username?: string, since?: number) =>
-    request<{ points: TimelinePoint[] }>(`/api/stats/timeline${query({ username, since })}`),
-  statsModelTimeline: (username?: string, since?: number) =>
-    request<ModelTimelineResponse>(`/api/stats/model-timeline${query({ username, since })}`),
+  statsTimeline: (username?: string, since?: number, metric?: StatsMetric) =>
+    request<{ points: TimelinePoint[] }>(`/api/stats/timeline${query({ username, since, metric })}`),
+  statsModelTimeline: (username?: string, since?: number, metric?: StatsMetric) =>
+    request<ModelTimelineResponse>(`/api/stats/model-timeline${query({ username, since, metric })}`),
   statsEvents: (username?: string, since?: number, before?: number, limit?: number) =>
     request<StatsEventsResponse>(`/api/stats/events${query({ username, since, before, limit })}`),
 

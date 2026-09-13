@@ -1,6 +1,11 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api/client";
-import type { Credential, CredentialsResponse, SessionInfo } from "../api/types";
+import type {
+  Credential,
+  CredentialsResponse,
+  SessionInfo,
+  StatsMetric,
+} from "../api/types";
 
 /** Query key 约定：所有管理数据以 ["admin", username, ...] 开头。 */
 export function adminKey(username: string | undefined, ...rest: unknown[]) {
@@ -46,17 +51,19 @@ export function useStatsByProvider(username?: string, target?: string, since?: n
   });
 }
 
-export function useStatsTimeline(username?: string, target?: string, since?: number) {
+export function useStatsTimeline(username?: string, target?: string, since?: number,
+                                  metric?: string) {
   return useQuery({
-    queryKey: adminKey(username, "stats-timeline", target, since),
-    queryFn: () => api.statsTimeline(target, since),
+    queryKey: adminKey(username, "stats-timeline", target, since, metric),
+    queryFn: () => api.statsTimeline(target, since, metric as StatsMetric),
   });
 }
 
-export function useStatsModelTimeline(username?: string, target?: string, since?: number) {
+export function useStatsModelTimeline(username?: string, target?: string, since?: number,
+                                      metric?: string) {
   return useQuery({
-    queryKey: adminKey(username, "stats-model-timeline", target, since),
-    queryFn: () => api.statsModelTimeline(target, since),
+    queryKey: adminKey(username, "stats-model-timeline", target, since, metric),
+    queryFn: () => api.statsModelTimeline(target, since, metric as StatsMetric),
   });
 }
 

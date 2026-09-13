@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { Activity, BarChart3, Coins, CreditCard, Gauge, Timer } from "lucide-react";
 import { useSessionContext } from "../Layout";
 import {
   useStatsByProvider,
@@ -37,6 +38,14 @@ const RANGES = [
   { value: "all", label: "全部", seconds: 0 },
 ];
 
+/** 图表指标筛选：默认请求次数；均值类（耗时/首字）后端按成功请求归一。 */
+const METRICS = [
+  { value: "requests", label: "请求次数", icon: <BarChart3 className="size-3.5" /> },
+  { value: "tokens", label: "Token", icon: <Coins className="size-3.5" /> },
+  { value: "latency", label: "耗时", icon: <Timer className="size-3.5" /> },
+  { value: "ttfb", label: "首字延迟", icon: <Gauge className="size-3.5" /> },
+];
+
 const PROVIDER_LABEL: Record<Provider, string> = { codebuddy: "CodeBuddy", trae: "TRAE" };
 
 /** 明细分页的可选每页条数。 */
@@ -53,6 +62,7 @@ function statusCell(row: UsageEventRow) {
 export function StatsPage() {
   const session = useSessionContext();
   const [range, setRange] = useState("7d");
+  const [metric, setMetric] = useState("requests");
   // 明细分页：cursors[i] = 第 i 页的 before 游标（第 0 页为 undefined）；
   // rowid 单调递增，游标栈支持双向翻页且不漏不重
   const [pageIndex, setPageIndex] = useState(0);
@@ -88,8 +98,8 @@ export function StatsPage() {
 
   const overview = useStatsOverview(session.username, undefined, since);
   const byProvider = useStatsByProvider(session.username, undefined, since);
-  const timeline = useStatsTimeline(session.username, undefined, since);
-  const modelTimeline = useStatsModelTimeline(session.username, undefined, since);
+  const timeline = useStatsTimeline(session.username, undefined, since, metric);
+  const modelTimeline = useStatsModelTimeline(session.username, undefined, since, metric);
 
   if (overview.isLoading) {
     return (
@@ -129,6 +139,7 @@ export function StatsPage() {
       <PageHeader
         title="用量统计"
         description="按时间范围查看请求量、成功率与 token 消耗；数据按 API Key 归属用户统计，普通用户只能看自己。"
+        icon={<BarChart3 className="size-5" />}
       />
 
       <Panel title="筛选">
@@ -146,16 +157,18 @@ export function StatsPage() {
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
         <Metric label="请求数" value={formatNumber(stats?.requests)} tone="ok"
-                hint={`成功率 ${rateText}`} />
+                hint={`成功率 ${rateText}`} icon={<Activity className="size-4" />} />
         <Metric
           label="Token 消耗"
           value={formatCompact(totalTokens)}
           hint={tokenHint}
+          icon={<Coins className="size-4" />}
         />
         <Metric
           label="平均耗时"
           value={formatLatency(stats?.avg_latency_ms)}
           hint={`首字延迟 ${formatLatency(stats?.avg_ttfb_ms)}`}
+          icon={<Timer className="size-4" />}
         />
         <Metric
           label="Credit 消耗"
@@ -164,54 +177,68 @@ export function StatsPage() {
               ? "—"
               : formatNumber(Number(stats.credit.toFixed(2)))
           }
-          hint="上游可选字段，可能不返回"
+          hint="渠道可选字段，可能不返回"
+          icon={<CreditCard className="size-4" />}
         />
       </section>
 
-      <Panel title="请求量趋势" action={
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          <span className="inline-flex items-center gap-1.5">
-            <ProviderIcon provider="codebuddy" size={12} />
-            CodeBuddy
-          </span>
-          <span className="inline-flex items-center gap-1.5">
-            <ProviderIcon provider="trae" size={12} />
-            TRAE
-          </span>
-        </div>
-      }>
-        {(timeline.data?.points.length ?? 0) === 0 ? (
-          <Empty>该范围内没有小时汇总数据</Empty>
-        ) : (
-          <UsageChart points={timeline.data?.points ?? []} />
-        )}
-      </Panel>
+      <section className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="text-sm font-medium text-muted-foreground">图表指标</h2>
+        <Tabs
+          value={metric}
+          options={METRICS.map(({ value, label }) => ({ value, label }))}
+          onChange={setMetric}
+          testId="metric-tabs"
+        />
+      </section>
 
-      <Panel title="按模型趋势" action={
-        modelTimeline.data?.models.length ? (
-          <span className="text-xs text-muted-foreground">
-            请求量 Top {modelTimeline.data.models.length} 模型
-          </span>
-        ) : undefined
-      }>
-        {(modelTimeline.data?.points.length ?? 0) === 0 ? (
-          <Empty data-testid="no-model-trend">该范围内没有小时汇总数据</Empty>
-        ) : (
-          <ModelTrendChart
-            points={modelTimeline.data?.points ?? []}
-            models={modelTimeline.data?.models ?? []}
-          />
-        )}
-      </Panel>
+      <section className="grid gap-4 lg:grid-cols-2">
+        <Panel title="请求量趋势" action={
+          <div className="flex items-center gap-3 text-xs text-muted-foreground">
+            <span className="inline-flex items-center gap-1.5">
+              <ProviderIcon provider="codebuddy" size={12} />
+              CodeBuddy
+            </span>
+            <span className="inline-flex items-center gap-1.5">
+              <ProviderIcon provider="trae" size={12} />
+              TRAE
+            </span>
+          </div>
+        }>
+          {(timeline.data?.points.length ?? 0) === 0 ? (
+            <Empty>该范围内没有小时汇总数据</Empty>
+          ) : (
+            <UsageChart points={timeline.data?.points ?? []} metric={metric} />
+          )}
+        </Panel>
 
-      <Panel title="按上游分组">
+        <Panel title="按模型趋势" action={
+          modelTimeline.data?.models.length ? (
+            <span className="text-xs text-muted-foreground">
+              请求量 Top {modelTimeline.data.models.length} 模型
+            </span>
+          ) : undefined
+        }>
+          {(modelTimeline.data?.points.length ?? 0) === 0 ? (
+            <Empty data-testid="no-model-trend">该范围内没有小时汇总数据</Empty>
+          ) : (
+            <ModelTrendChart
+              points={modelTimeline.data?.points ?? []}
+              models={modelTimeline.data?.models ?? []}
+              metric={metric}
+            />
+          )}
+        </Panel>
+      </section>
+
+      <Panel title="按渠道分组">
         {(byProvider.data?.providers.length ?? 0) === 0 ? (
           <Empty data-testid="no-provider-stats">该范围内没有请求</Empty>
         ) : (
           <Table data-testid="provider-table">
             <TableHeader>
               <TableRow>
-                <TableHead>上游</TableHead>
+                <TableHead>渠道</TableHead>
                 <TableHead className="text-right">请求数</TableHead>
                 <TableHead className="text-right">成功数</TableHead>
                 <TableHead className="text-right">输入 token</TableHead>
@@ -273,7 +300,7 @@ export function StatsPage() {
                 <TableRow>
                   <TableHead>时间</TableHead>
                   {session.is_admin && <TableHead>用户</TableHead>}
-                  <TableHead>上游</TableHead>
+                  <TableHead>渠道</TableHead>
                   <TableHead>模型</TableHead>
                   <TableHead>状态</TableHead>
                   <TableHead className="text-right">输入</TableHead>
@@ -355,7 +382,7 @@ export function StatsPage() {
           隐私：不保存提示词、回答、请求头、Token、工具参数与原始错误体；逐请求明细保留 90 天，小时汇总永久保留；按 API Key 归属用户统计。
         </p>
         <p>
-          credit 为上游可选字段，经常不返回；健康度只依赖额度探测接口，主指标是 token 数。
+          credit 为渠道可选字段，经常不返回；健康度只依赖额度探测接口，主指标是 token 数。
         </p>
       </div>
     </div>

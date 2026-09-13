@@ -32,7 +32,7 @@ export function healthView(health: Health): HealthView {
  * 周期语义：CodeBuddy 的额度随周期重置，TRAE 是单调递减的账户余额。
  * 两者单位都是积分（credit），但重置行为不同，必须标注。
  *
- * 判定依据是**上游类型**，不是 quota_cycle_end 是否存在：
+ * 判定依据是**渠道类型**，不是 quota_cycle_end 是否存在：
  * CodeBuddy 未探测时 cycle_end 同样是 null，而按 cycle_end 推断会把它
  * 错标成 TRAE 的「账户剩余（单调递减）」。
  */
@@ -114,14 +114,27 @@ export function formatLatency(ms: number | null | undefined): string {
   return `${formatNumber(ms)} ms`;
 }
 
+/** 图表 hover 数值：按指标格式化，单位用 () 包裹（耗时/首字数已含 ms/s）。 */
+export function formatChartValue(value: number, metric: string): string {
+  switch (metric) {
+    case "tokens":
+      return `${formatCompact(value)} (tokens)`;
+    case "ttfb":
+    case "latency":
+      return formatLatency(value);
+    default:
+      return `${formatCompact(value)} (次)`;
+  }
+}
+
 
 export const PROBE_FAILURE_LABEL: Record<ProbeFailureReason, string> = {
-  credential_rejected: "凭证被上游拒绝，需要重新登录该账号",
-  rate_limited: "上游限流，稍后重试",
-  upstream_unavailable: "上游服务异常，与本账号凭证无关",
-  upstream_rejected: "上游拒绝了这次请求",
-  upstream_response_invalid: "上游响应格式与预期不符，可能是官方接口变更",
-  upstream_timeout: "上游响应超时",
+  credential_rejected: "凭证被渠道拒绝，需要重新登录该账号",
+  rate_limited: "渠道限流，稍后重试",
+  upstream_unavailable: "渠道服务异常，与本账号凭证无关",
+  upstream_rejected: "渠道拒绝了这次请求",
+  upstream_response_invalid: "渠道响应格式与预期不符，可能是官方接口变更",
+  upstream_timeout: "渠道响应超时",
   unknown_error: "未知错误",
 };
 

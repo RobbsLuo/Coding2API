@@ -7,10 +7,11 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
+import { formatChartValue } from "../api/display";
 import type { TimelinePoint } from "../api/types";
 
 /** 请求量时间序列曲线（recharts）。点少时仍画满可用宽度，不加插值。 */
-export function UsageChart({ points }: { points: TimelinePoint[] }) {
+export function UsageChart({ points, metric }: { points: TimelinePoint[]; metric?: string }) {
   const data = points.map((point) => ({
     ...point,
     time: new Date(point.hour * 1000).toLocaleString("zh-CN", {
@@ -60,6 +61,7 @@ export function UsageChart({ points }: { points: TimelinePoint[] }) {
               color: "var(--popover-foreground)",
             }}
             labelStyle={{ fontWeight: 600 }}
+            formatter={(value, name) => [formatChartValue(Number(value), metric ?? "requests"), name]}
           />
           <Area
             type="monotone"

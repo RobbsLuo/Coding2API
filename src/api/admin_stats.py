@@ -25,15 +25,17 @@ def create_router(services: Services) -> APIRouter:
 
     @router.get("/api/stats/timeline")
     async def stats_timeline(principal=Depends(principal_from_request),
-                             username: str | None = None, since: int | None = None):
+                             username: str | None = None, since: int | None = None,
+                             metric: str = "requests"):
         target = username if principal.is_admin else principal.username
-        return {"points": stats_query.timeline(username=target, since=since)}
+        return {"points": stats_query.timeline(username=target, since=since, metric=metric)}
 
     @router.get("/api/stats/model-timeline")
     async def stats_model_timeline(principal=Depends(principal_from_request),
-                                   username: str | None = None, since: int | None = None):
+                                   username: str | None = None, since: int | None = None,
+                                   metric: str = "requests"):
         target = username if principal.is_admin else principal.username
-        return stats_query.model_timeline(username=target, since=since)
+        return stats_query.model_timeline(username=target, since=since, metric=metric)
 
     @router.get("/api/stats/events")
     async def stats_events(principal=Depends(principal_from_request),

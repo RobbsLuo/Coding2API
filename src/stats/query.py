@@ -4,10 +4,29 @@ from __future__ import annotations
 
 from typing import Any
 
+METRIC_COLUMNS: dict[str, str] = {
+    # metric 参数 → usage_hourly 上的取值表达式
+    "requests": "requests",
+    "tokens": "input_tokens + output_tokens",
+    "latency": "latency_sum",      # 均值由调用方除以 ok_count
+    "ttfb": "ttfb_sum",            # 同上
+}
+
 
 class StatsQuery:
     def __init__(self, db) -> None:
         self._db = db
+
+    def _metric_sql(self, metric: str) -> tuple[str, bool]:
+        """返回 (取值表达式, 是否均值语义)。非法 metric 回退 requests。"""
+        expr = METRIC_COLUMNS.get(metric, "requests")
+        return expr, metric in ("latency", "ttfb")
+
+    def _metric_value(self, metric: str, expr_value, ok_count) -> Any:
+        """把 SQL 原始值按 metric 归一：均值类除以 ok_count，无成功则 0。"""
+        if metric in ("latency", "ttfb"):
+            return round(expr_value / ok_count) if ok_count else 0
+        return expr_value
 
     def overview(self, *, username: str | None = None, provider: str | None = None,
                  since: int | None = None) -> dict[str, Any]:
@@ -82,11 +101,14 @@ class StatsQuery:
         ]
 
     def timeline(self, *, username: str | None = None,
-                 since: int | None = None) -> list[dict[str, Any]]:
-        """按小时的请求量时间序列（usage_hourly 聚合，跨 model 汇总）。
+                 since: int | None = None, metric: str = "requests") -> list[dict[str, Any]]:
+        """按小时的指标时间序列（usage_hourly 聚合，跨 model 汇总）。
 
-        每点包含 codebuddy / trae 两个上游的请求数，供前端绘制曲线。
+        每点包含 codebuddy / trae 两个渠道的指标值（按 metric 变化：
+        请求数 / 总 token / 平均耗时 ms / 平均首字延迟 ms），供前端绘制曲线。
+        返回结构 {hour, codebuddy, trae} 恒定，指标语义随 metric 参数切换。
         """
+        expr, as_mean = self._metric_sql(metric)
         clauses: list[str] = []
         params: list[Any] = []
         if username is not None:
@@ -99,16 +121,22 @@ class StatsQuery:
         rows = self._db.connect().execute(
             f"""
             SELECT hour_utc,
-                   COALESCE(SUM(CASE WHEN provider = 'codebuddy'
-                               THEN requests ELSE 0 END), 0) AS codebuddy,
-                   COALESCE(SUM(CASE WHEN provider = 'trae'
-                               THEN requests ELSE 0 END), 0) AS trae
+                   COALESCE(SUM(CASE WHEN provider = 'codebuddy' THEN {expr} ELSE 0 END), 0)
+                   AS codebuddy,
+                   COALESCE(SUM(CASE WHEN provider = 'trae' THEN {expr} ELSE 0 END), 0)
+                   AS trae,
+                   COALESCE(SUM(CASE WHEN provider = 'codebuddy' THEN ok_count ELSE 0 END), 0)
+                   AS codebuddy_ok,
+                   COALESCE(SUM(CASE WHEN provider = 'trae' THEN ok_count ELSE 0 END), 0)
+                   AS trae_ok
             FROM usage_hourly {where}
             GROUP BY hour_utc
             ORDER BY hour_utc
             """, params).fetchall()
         return [
-            {"hour": row["hour_utc"], "codebuddy": row["codebuddy"], "trae": row["trae"]}
+            {"hour": row["hour_utc"],
+             "codebuddy": self._metric_value(metric, row["codebuddy"], row["codebuddy_ok"]),
+             "trae": self._metric_value(metric, row["trae"], row["trae_ok"])}
             for row in rows
         ]
 
@@ -147,12 +175,15 @@ class StatsQuery:
         }
 
     def model_timeline(self, *, username: str | None = None,
-                       since: int | None = None, top: int = 6) -> dict[str, Any]:
-        """按小时的各模型请求数趋势（usage_hourly 聚合）。
+                       since: int | None = None, top: int = 6,
+                       metric: str = "requests") -> dict[str, Any]:
+        """按小时的各模型指标趋势（usage_hourly 聚合）。
 
-        取时间范围内请求量 Top N 的模型，返回宽表点列（每点含各模型键），
-        供前端绘制多曲线。模型过多时曲线不可读，非 Top N 不单独出线。
+        Top N 模型按「请求数」排序（排序口径固定，与图表指标解耦）；
+        曲线值按 metric 变化（请求数 / 总 token / 平均耗时 / 平均首字延迟）。
+        返回结构 {models, points} 不变。
         """
+        expr, as_mean = self._metric_sql(metric)
         clauses: list[str] = []
         params: list[Any] = []
         if username is not None:
@@ -164,7 +195,8 @@ class StatsQuery:
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self._db.connect().execute(
             f"""
-            SELECT hour_utc, model, SUM(requests) AS requests
+            SELECT hour_utc, model, SUM(requests) AS requests,
+                   SUM({expr}) AS value, SUM(ok_count) AS ok_count
             FROM usage_hourly {where}
             GROUP BY hour_utc, model
             ORDER BY hour_utc
@@ -173,11 +205,12 @@ class StatsQuery:
         series: dict[str, dict[int, int]] = {}
         hours: list[int] = []
         for row in rows:
-            hour, model, requests = row["hour_utc"], row["model"], row["requests"]
+            hour, model = row["hour_utc"], row["model"]
             if not hours or hours[-1] != hour:
                 hours.append(hour)
-            totals[model] = totals.get(model, 0) + requests
-            series.setdefault(model, {})[hour] = requests
+            totals[model] = totals.get(model, 0) + row["requests"]
+            series.setdefault(model, {})[hour] = (
+                self._metric_value(metric, row["value"], row["ok_count"]))
         # Top N 模型：按总量降序；总量相同按名字稳定排序
         top_models = sorted(totals, key=lambda m: (-totals[m], m))[:top]
         points = [
