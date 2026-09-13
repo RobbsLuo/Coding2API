@@ -1127,7 +1127,7 @@ def test_parse_all_events_non_dict_tool_call_entry_skipped():
     assert EventKind.TOOL_CALLS not in kinds
 
 def test_trae_usage_cached_tokens():
-    """TRAE usage：details 路径 + 顶层兜底 + 缺省 None。"""
+    """TRAE usage：details 路径 + 顶层兜底 + TRAE 官方字段 + 缺省 None。"""
     from src.provider.trae.events import SSEFrame
 
     frame = SSEFrame(event="token_usage", data=(
@@ -1136,6 +1136,20 @@ def test_trae_usage_cached_tokens():
     assert trae_events.parse_frame(frame).usage.cached_tokens == 6
 
     frame = SSEFrame(event="token_usage", data='{"prompt_tokens":9,"cached_tokens":2}')
+    assert trae_events.parse_frame(frame).usage.cached_tokens == 2
+
+    # TRAE 官方字段：命中>0 与未命中=0 都要保留（0 是有效值不是缺失）
+    frame = SSEFrame(event="token_usage", data=(
+        '{"prompt_tokens":13,"completion_tokens":159,'
+        '"cache_read_input_tokens":7,"reasoning_tokens":148}'))
+    assert trae_events.parse_frame(frame).usage.cached_tokens == 7
+    frame = SSEFrame(event="token_usage", data=(
+        '{"prompt_tokens":13,"cache_read_input_tokens":0}'))
+    assert trae_events.parse_frame(frame).usage.cached_tokens == 0
+
+    # OpenAI 惯例字段优先于 TRAE 字段
+    frame = SSEFrame(event="token_usage", data=(
+        '{"prompt_tokens":9,"cached_tokens":2,"cache_read_input_tokens":5}'))
     assert trae_events.parse_frame(frame).usage.cached_tokens == 2
 
     frame = SSEFrame(event="token_usage", data='{"prompt_tokens":9}')

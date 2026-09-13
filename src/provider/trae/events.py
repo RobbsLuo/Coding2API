@@ -135,11 +135,15 @@ def _parse_usage(payload: dict) -> Usage:
         value = payload.get(key)
         return value if isinstance(value, int) and not isinstance(value, bool) else None
 
-    # 缓存命中：OpenAI 惯例在 prompt_tokens_details.cached_tokens，顶层 cached_tokens 兜底
+    # 缓存命中解析链：OpenAI 惯例（prompt_tokens_details.cached_tokens）→ 顶层
+    # cached_tokens 兜底 → TRAE 官方字段 cache_read_input_tokens（实测真实返回该
+    # 字段，且未命中时值为 0——0 是有效值必须保留，不能当缺失）。
     details = payload.get("prompt_tokens_details")
     cached = (details or {}).get("cached_tokens") if isinstance(details, dict) else None
     if not isinstance(cached, int) or isinstance(cached, bool):
         cached = as_int("cached_tokens")
+    if not isinstance(cached, int) or isinstance(cached, bool):
+        cached = as_int("cache_read_input_tokens")
 
     return Usage(
         input_tokens=as_int("prompt_tokens"),

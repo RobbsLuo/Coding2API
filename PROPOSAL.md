@@ -80,7 +80,7 @@
 - Token 刷新：`POST /cloudide/api/v3/trae/oauth/ExchangeToken`（refreshToken 轮换）
 - 签到：`/trae/api/v2/ug/checkin_credits/{status,claim}`；额度：`/trae/api/v2/pay/ide_user_ent_usage`
 - SSE 事件序列：`metadata` → `timing_cost` → `output`×N → `extra_info` → `token_usage` → `done`
-- SSE **只有 `token_usage`，无 per-request credit**
+- SSE `token_usage` 含缓存字段：`cache_read_input_tokens` / `cache_creation_input_tokens`（未命中时为 0，非缺失），映射为统计的 cached_tokens；**无 per-request credit**
 - 错误码 `1005` = 权益不足；上游仅流式，非流式需聚合
 
 ### 3.2 冲突与陷阱
