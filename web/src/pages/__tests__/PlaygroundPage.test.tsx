@@ -53,7 +53,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(screen.queryByTestId("playground-key")).not.toBeInTheDocument();
   });
 
-  it("选中模型后展示渠道与元数据，双上游倍率按渠道显示", async () => {
+  it("选中模型后展示渠道与元数据，双渠道倍率按渠道显示", async () => {
     const META_MODELS = {
       object: "list",
       data: [
@@ -76,10 +76,10 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     await waitForModelLoaded();
 
     const meta = screen.getByTestId("model-meta");
-    // 渠道前置 icon 标注：双上游全部显示（icon + 名称）
+    // 渠道前置 icon 标注：双渠道全部显示（icon + 名称）
     expect(meta).toHaveTextContent("CodeBuddy");
     expect(meta).toHaveTextContent("TRAE");
-    // 双上游倍率按渠道分别显示
+    // 双渠道倍率按渠道分别显示
     expect(meta).toHaveTextContent("x0.29");
     expect(meta).toHaveTextContent("x0.17");
     // 合并字段照常展示；勾/叉用 icon（svg）而非文本符号
@@ -89,7 +89,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(meta.querySelector("svg.lucide-x")).toBeInTheDocument();
     expect(meta).not.toHaveTextContent("✓");
 
-    // 切到单上游模型：倍率不按渠道拆分，显示合并值
+    // 切到单渠道模型：倍率不按渠道拆分，显示合并值
     await userEvent.selectOptions(screen.getByTestId("model-select"),
       "DeepSeek-V4-Flash-Official@trae");
     const meta2 = screen.getByTestId("model-meta");
@@ -97,21 +97,21 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(meta2).not.toHaveTextContent("x0.29");
   });
 
-  it("自动载入模型列表并展示可选上游，请求走会话端点", async () => {
+  it("自动载入模型列表并展示可选渠道，请求走会话端点", async () => {
     const spy = mockFetch({ "/api/playground/models": MODELS });
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await waitForModelLoaded();
 
     const select = screen.getByTestId("model-select");
-    // 双上游模型出现在「自动路由」分组
+    // 双渠道模型出现在「自动路由」分组
     expect(select).toHaveTextContent("glm-5.2");
     const groups = [...select.querySelectorAll("optgroup")].map((g) => g.label);
-    expect(groups).toContain("双上游（自动调度）");
+    expect(groups).toContain("双渠道（自动调度）");
     expect(spy.mock.calls.some(([url]) => String(url).includes("/api/playground/models"))).toBe(true);
     expect(spy.mock.calls.some(([url]) => String(url).includes("/v1/models"))).toBe(false);
   });
 
-  it("模型 option 文本带消耗倍率（双上游按渠道标注）", async () => {
+  it("模型 option 文本带消耗倍率（双渠道按渠道标注）", async () => {
     const RATED_MODELS = {
       object: "list",
       data: [
@@ -134,19 +134,19 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     const options = [...screen.getByTestId("model-select").querySelectorAll("option")];
     const textOf = (value: string) =>
       options.find((o) => o.value === value)?.textContent ?? "";
-    // 双上游：渠道缩写 + 各自倍率
+    // 双渠道：渠道缩写 + 各自倍率
     expect(textOf("glm-5.2")).toBe("glm-5.2（自动路由 · CB x0.29/TR x0.17）");
-    // 单上游：optgroup 已标渠道，仍带渠道缩写 + 倍率
+    // 单渠道：optgroup 已标渠道，仍带渠道缩写 + 倍率
     expect(textOf("DeepSeek-V4-Flash-Official@trae")).toBe(
       "DeepSeek-V4-Flash-Official · TR x0.08");
     // 无倍率数据：不追加任何标记
     expect(textOf("no-rate@trae")).toBe("no-rate");
 
-    // 双上游倍率相同：两个渠道都要写出来
-    // 双上游只有一个渠道返回倍率：只标那个渠道，不裸显数字
+    // 双渠道倍率相同：两个渠道都要写出来
+    // 双渠道只有一个渠道返回倍率：只标那个渠道，不裸显数字
   });
 
-  it("双上游倍率相同或缺失时，渠道标注规则", async () => {
+  it("双渠道倍率相同或缺失时，渠道标注规则", async () => {
     const EDGE_MODELS = {
       object: "list",
       data: [
@@ -179,7 +179,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(await screen.findByTestId("playground-error")).toHaveTextContent("模型列表加载失败");
   });
 
-  it("强制指定上游生成 model@provider，恢复自动路由去掉后缀", async () => {
+  it("强制指定渠道生成 model@provider，恢复自动路由去掉后缀", async () => {
     mockFetch({ "/api/playground/models": MODELS });
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await waitForModelLoaded();
@@ -233,7 +233,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
       vi.fn(async (input: RequestInfo | URL) => {
         const url = String(input);
         if (url.includes("/api/playground/models")) return jsonResponse(MODELS);
-        return jsonResponse({ error: { message: "上游不可用" } }, 503);
+        return jsonResponse({ error: { message: "渠道不可用" } }, 503);
       }),
     );
 
@@ -241,7 +241,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     await waitForModelLoaded();
     await userEvent.click(screen.getByTestId("stream-toggle"));
     await fillPromptAndSend("hi");
-    expect(await screen.findByTestId("playground-error")).toHaveTextContent("上游不可用");
+    expect(await screen.findByTestId("playground-error")).toHaveTextContent("渠道不可用");
   });
 
   it("会话过期时跳回登录页", async () => {
@@ -338,7 +338,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(screen.getByText(/计入 alice/)).toBeInTheDocument();
   });
 
-  it("仅单一上游可用的模型按分组展示（避免淹没在长列表里）", async () => {
+  it("仅单一渠道可用的模型按分组展示（避免淹没在长列表里）", async () => {
     const mixed = {
       object: "list",
       data: [
@@ -359,8 +359,8 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     );
     expect(groups).toContainEqual(["仅 CodeBuddy", ["deepseek-v4-pro@codebuddy"]]);
     expect(groups).toContainEqual(["仅 TRAE", ["kimi-k3@trae"]]);
-    // 双上游模型保留原值（不带 @），走自动路由
-    const dualGroup = select.querySelector('optgroup[label="双上游（自动调度）"]');
+    // 双渠道模型保留原值（不带 @），走自动路由
+    const dualGroup = select.querySelector('optgroup[label="双渠道（自动调度）"]');
     expect(dualGroup).not.toBeNull();
     expect(dualGroup!.querySelector("option")?.value).toBe("glm-5.2");
   });

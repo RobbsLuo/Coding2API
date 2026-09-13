@@ -78,7 +78,7 @@ describe("DashboardPage", () => {
     expect(list).toHaveTextContent("plan 权益不足");
   });
 
-  it("凭证池单列表展示，行内标注所属上游", async () => {
+  it("凭证池单列表展示，行内标注所属渠道", async () => {
     mockFetch({
       "/api/credentials": {
         credentials: [
@@ -92,7 +92,7 @@ describe("DashboardPage", () => {
     renderPage(<DashboardPage />);
     await settle();
 
-    // 不再按上游分组成两个列表，而是单一列表 + 行内渠道标注
+    // 不再按渠道分组成两个列表，而是单一列表 + 行内渠道标注
     expect(screen.getByTestId("credential-list")).toBeInTheDocument();
     expect(screen.queryByTestId("provider-group-trae")).not.toBeInTheDocument();
     expect(screen.getByTestId("credential-t1")).toHaveAttribute("data-provider", "trae");
