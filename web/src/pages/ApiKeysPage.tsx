@@ -1,4 +1,4 @@
-import { Check, Copy, Plus, Trash2 } from "lucide-react";
+import { Check, Copy, KeyRound, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api/client";
 import { useApiKeys, useQueryClient } from "../api/hooks";
@@ -192,6 +192,7 @@ export function ApiKeysPage() {
       <PageHeader
         title="API Key 管理"
         description="创建外部客户端（ChatGPT Next Web、LobeChat、Cursor 等）接入用的 Key，协议与 OpenAI 兼容。Key 仅在创建时完整显示一次，请立即保存；用量按 Key 归属用户统计。"
+        icon={<KeyRound className="size-5" />}
       />
       <OpenAIEntry apiKey={created?.api_key ?? ""} />
 

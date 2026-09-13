@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Inbox } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button as ShadButton } from "@/components/ui/button";
 import { Badge as ShadBadge } from "@/components/ui/badge";
@@ -172,7 +172,7 @@ export function Tabs({
   testId,
 }: {
   value: string;
-  options: { value: string; label: string }[];
+  options: { value: string; label: string; icon?: ReactNode }[];
   onChange: (value: string) => void;
   testId?: string;
 }) {
@@ -193,6 +193,7 @@ export function Tabs({
               : "text-muted-foreground hover:text-foreground",
           )}
         >
+          {option.icon && <span className="mr-1.5 inline-flex align-[-0.1em]">{option.icon}</span>}
           {option.label}
         </button>
       ))}
@@ -227,7 +228,8 @@ export function Empty({
   ...rest
 }: { children: ReactNode } & React.HTMLAttributes<HTMLParagraphElement>) {
   return (
-    <p {...rest} className="py-8 text-center text-sm text-muted-foreground">
+    <p {...rest} className="flex items-center justify-center gap-2 py-8 text-center text-sm text-muted-foreground">
+      <Inbox className="size-4 shrink-0" />
       {children}
     </p>
   );
@@ -240,18 +242,23 @@ export function Metric({
   value,
   hint,
   tone,
+  icon,
 }: {
   label: string;
   value: ReactNode;
   hint?: string;
   tone?: "ok" | "danger" | "warn";
+  icon?: ReactNode;
 }) {
   return (
-    <Card className="px-3 py-3">
-      <div className="text-xs text-muted-foreground">{label}</div>
+    <Card className="px-4 py-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs text-muted-foreground">{label}</div>
+        {icon && <span className="text-muted-foreground/80">{icon}</span>}
+      </div>
       <div
         className={cn(
-          "mt-1 text-xl font-semibold tracking-tight tabular-nums",
+          "mt-1 text-2xl font-bold tracking-tight tabular-nums",
           tone === "ok" && "text-ok",
           tone === "danger" && "text-destructive",
           tone === "warn" && "text-warn",

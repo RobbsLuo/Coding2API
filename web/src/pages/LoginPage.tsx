@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { TerminalSquare, TriangleAlert } from "lucide-react";
+import { TriangleAlert } from "lucide-react";
 import { api, ApiError } from "../api/client";
+import { BrandMark } from "../Layout";
 import { Button, Input, Notice, Panel } from "../ui";
 
 export function LoginPage() {
@@ -28,13 +29,11 @@ export function LoginPage() {
     <div className="grid min-h-full place-items-center bg-[color:color-mix(in_oklch,var(--accent)_4%,var(--background))] px-6">
       <form onSubmit={submit} className="w-full max-w-sm">
         <div className="mb-6 text-center">
-          <div className="mx-auto mb-3 grid size-11 place-items-center rounded-xl bg-primary text-primary-foreground shadow-lg shadow-primary/25">
-            <TerminalSquare className="size-6" />
-          </div>
+          <BrandMark className="mx-auto mb-3 size-12 rounded-xl" />
           <h1 className="text-xl font-semibold tracking-tight">Coding2API</h1>
-          <p className="mt-1 text-xs text-muted-foreground">双上游统一调度 · OpenAI 兼容管理台</p>
+          <p className="mt-1 text-xs text-muted-foreground">双渠道统一调度 · OpenAI 兼容管理台</p>
         </div>
-        <Panel className="shadow-lg shadow-foreground/5">
+        <Panel>
           <div className="space-y-4">
             <label className="block space-y-1.5">
               <span className="text-xs font-medium text-muted-foreground">用户名</span>

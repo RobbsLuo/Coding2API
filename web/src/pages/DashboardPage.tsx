@@ -14,6 +14,7 @@ import { Badge, Empty, Metric, Panel, Skeleton } from "../ui";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
 import { cn } from "@/lib/utils";
+import { Ban, BatteryLow, CheckCircle2, Database, LayoutDashboard, Timer, ToggleLeft } from "lucide-react";
 
 const PROVIDER_LABEL: Record<string, string> = { codebuddy: "CodeBuddy", trae: "TRAE" };
 
@@ -59,15 +60,16 @@ export function DashboardPage() {
       <PageHeader
         title="池仪表盘"
         description="凭证池整体健康与配额概况：健康度按剩余积分占比三态统计，切换标签页可对凭证进行维护。"
+        icon={<LayoutDashboard className="size-5" />}
       />
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-        <Metric label="凭证总数" value={formatNumber(counts.total)} />
-        <Metric label="可用" value={formatNumber(counts.ready)} tone="ok" />
-        <Metric label="冷却中" value={formatNumber(counts.cooling)} tone="warn" />
-        <Metric label="已禁用" value={formatNumber(counts.disabled)} />
-        <Metric label="额度耗尽" value={formatNumber(counts.exhausted)} tone="danger" />
-        <Metric label="已关闭" value={formatNumber(counts.off)} />
+        <Metric label="凭证总数" value={formatNumber(counts.total)} icon={<Database className="size-4" />} />
+        <Metric label="可用" value={formatNumber(counts.ready)} tone="ok" icon={<CheckCircle2 className="size-4" />} />
+        <Metric label="冷却中" value={formatNumber(counts.cooling)} tone="warn" icon={<Timer className="size-4" />} />
+        <Metric label="已禁用" value={formatNumber(counts.disabled)} icon={<Ban className="size-4" />} />
+        <Metric label="额度耗尽" value={formatNumber(counts.exhausted)} tone="danger" icon={<BatteryLow className="size-4" />} />
+        <Metric label="已关闭" value={formatNumber(counts.off)} icon={<ToggleLeft className="size-4" />} />
       </section>
 
       <Panel title="健康度三态分布">
@@ -106,7 +108,7 @@ export function DashboardPage() {
           </span>
         </div>
         <p className="mt-2 text-xs text-muted-foreground">
-          「未探测到额度」表示探测失败或上游未提供额度信息，与「已耗尽」含义不同，不应互相替代。
+          「未探测到额度」表示探测失败或渠道未提供额度信息，与「已耗尽」含义不同，不应互相替代。
         </p>
       </Panel>
 
@@ -114,7 +116,7 @@ export function DashboardPage() {
         {credentials.length === 0 ? (
           <Empty data-testid="no-credentials">暂无凭证</Empty>
         ) : (
-          <ul className="space-y-1.5" data-testid="credential-list">
+          <ul className="grid grid-cols-1 gap-2.5 md:grid-cols-2 xl:grid-cols-3" data-testid="credential-list">
             {credentials.map((item) => (
               <CredentialRow key={item.id} credential={item} now={now} />
             ))}
@@ -153,7 +155,7 @@ function SkeletonMetricGrid() {
   return (
     <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
       {Array.from({ length: 6 }).map((_, index) => (
-        <div key={index} className="rounded-xl border border-border p-4">
+        <div key={index} className="rounded-xl px-4 py-3 ring-1 ring-border">
           <Skeleton className="h-3 w-14" />
           <Skeleton className="mt-2 h-6 w-10" />
         </div>
@@ -165,6 +167,12 @@ function SkeletonMetricGrid() {
 function CredentialRow({ credential, now }: { credential: Credential; now: number }) {
   const health = healthView(credential.health);
   const state = credentialState(credential, now);
+  // 配额使用率（已用 %）：total>0 时才有意义，否则不展示
+  const quotaTotal = credential.quota_total ?? 0;
+  const usedPct =
+    quotaTotal > 0 && credential.quota_remaining !== null
+      ? Math.max(0, Math.min(100, Math.round((1 - credential.quota_remaining / quotaTotal) * 100)))
+      : null;
   const barTone =
     health.percent === null
       ? ""
@@ -175,13 +183,13 @@ function CredentialRow({ credential, now }: { credential: Credential; now: numbe
           : "bg-destructive";
   return (
     <li
-      className="rounded-lg border border-border bg-card px-3 py-2.5 text-sm transition-colors hover:bg-muted/40"
+      className="rounded-xl bg-card p-3.5 ring-1 ring-border transition-colors hover:ring-primary/30"
       data-testid={`credential-${credential.id}`}
       data-provider={credential.provider}
     >
-      <div className="flex items-center justify-between gap-3">
+      <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5">
-          <ProviderIcon provider={credential.provider} size={13} />
+          <ProviderIcon provider={credential.provider} size={14} />
           <span className="shrink-0 text-xs text-muted-foreground">
             {PROVIDER_LABEL[credential.provider]}
           </span>
@@ -189,26 +197,34 @@ function CredentialRow({ credential, now }: { credential: Credential; now: numbe
             {credential.nickname || credential.id.slice(0, 12)}
           </span>
         </span>
-        <span className="flex shrink-0 items-center gap-2">
+        <span className="flex shrink-0 items-center gap-1.5">
           <Badge tone={health.tone}>{health.label}</Badge>
           <Badge tone={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
         </span>
       </div>
-      <div className="mt-2 flex items-center gap-3">
-        {health.percent !== null ? (
+      <div className="mt-3">
+        <div className="flex items-end justify-between gap-2">
+          <span className="text-lg font-bold tabular-nums">
+            {health.percent !== null ? `${health.percent}%` : "—"}
+          </span>
+          <span className="text-xs text-muted-foreground tabular-nums">
+            {formatNumber(credential.quota_remaining)}/{formatNumber(credential.quota_total)}
+            <span className="ml-1">{quotaSemantics(credential)}</span>
+            {usedPct !== null && (
+              <span className="ml-1.5 text-muted-foreground/80">已用 {usedPct}%</span>
+            )}
+          </span>
+        </div>
+        <div className="mt-1.5 flex items-center gap-1.5">
           <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
-            <div
-              className={cn("h-full rounded-full transition-all", barTone)}
-              style={{ width: `${health.percent}%` }}
-            />
+            {health.percent !== null && (
+              <div
+                className={cn("h-full rounded-full transition-all", barTone)}
+                style={{ width: `${health.percent}%` }}
+              />
+            )}
           </div>
-        ) : (
-          <span className="h-1.5 flex-1" />
-        )}
-        <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-          {formatNumber(credential.quota_remaining)}/{formatNumber(credential.quota_total)}
-          <span className="ml-1">{quotaSemantics(credential)}</span>
-        </span>
+        </div>
       </div>
     </li>
   );

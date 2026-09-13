@@ -1,6 +1,6 @@
 # Coding2API
 
-把 **CodeBuddy** 与 **TRAE SOLO** 两个 coding agent 上游通道，统一封装为 OpenAI 兼容 API，
+把 **CodeBuddy** 与 **TRAE SOLO** 两个 coding agent 渠道，统一封装为 OpenAI 兼容 API，
 并提供公共凭证池、统一调度与按人用量统计。
 
 > [!WARNING]
@@ -10,17 +10,17 @@
 ## 特性
 
 - **OpenAI 兼容出口**：`/v1/chat/completions`（流式 + 非流式）、`/v1/models`
-- **双上游统一调度**：同一扁平模型名可按健康度自动选号，`model@provider` 可强制指定
+- **双渠道统一调度**：同一扁平模型名可按健康度自动选号，`model@provider` 可强制指定
 - **三态健康度 + 三级冷却**：权益耗尽 12h / 限流 60s / 连续错误 10m / 会话失效硬禁用
 - **公共凭证池**：管理员集中维护，全员共享；按人统计用量
 - **凭证加密入库**：Fernet（AES-128-CBC + HMAC），密钥走 `APP_SECRET`
 - **脱敏统计**：不保存提示词、回答、请求头、Token、工具参数；明细 90 天、小时汇总永久
 - **完整凭证运维**：OAuth 设备码登录、多账号切换、额度探测、每日签到、token 预刷新
-- **用量可视化**：请求量趋势（按上游）、按模型趋势（Top N）、按上游分组、逐请求明细
+- **用量可视化**：请求量趋势（按渠道）、按模型趋势（Top N）、按渠道分组、逐请求明细
   （保留 90 天，游标翻页）；8 项总览指标合并为 4 张卡片；品牌 logo 标注渠道
 - **管理台安全加固**：登录三级限流（全局/IP/用户名）+ PBKDF2 并发上限、写操作 CSRF 校验、
   请求体上限（登录 8KB / 其余 16MB）、安全响应头（CSP `frame-ancestors`）与 Host 白名单
-- **模型目录治理**：`MODEL_BLOCKLIST` 过滤内部/老模型；上游拉取失败用缓存兜底；
+- **模型目录治理**：`MODEL_BLOCKLIST` 过滤内部/老模型；渠道拉取失败用缓存兜底；
   消耗倍率与 token 上限/能力字段透传到列表，Playground 选中即览
 
 ## 快速开始
@@ -95,7 +95,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-强制走某个上游：
+强制走某个渠道：
 
 ```bash
 -d '{"model":"glm-5.2@trae", ...}'      # 只走 TRAE
@@ -114,7 +114,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 「Playground」页用登录会话直接测试，无需 API Key；用量计入当前用户。
 选中模型后下方显示**消耗倍率、最大输入/输出、图片与工具调用支持**，
-双上游倍率不同时会按渠道（前置 icon 标注）分别显示。
+双渠道倍率不同时会按渠道（前置 icon 标注）分别显示。
 
 ## 功能对照表
 
@@ -128,11 +128,11 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | 看懂冷却时间 | 凭证管理 → 状态列 | 到期自动恢复，不需要手动处理 |
 | 固定用某个账号 | 凭证管理 → 「指定」 | 全局唯一，请求只走它 |
 | 切换个人/企业账号 | 凭证管理 → 「账号」 | 仅 CodeBuddy 支持 |
-| 强制走某个上游 | 模型名写 `glm-5.2@trae` | 不写则自动选健康的 |
+| 强制走某个渠道 | 模型名写 `glm-5.2@trae` | 不写则自动选健康的 |
 | 接入第三方客户端 | 客户端设置 Base URL | 地址加 `/v1`，Key 用 `sk-…` |
 | 查某个人用了多少 | 用量统计 → 用户名筛选 | 仅管理员；普通用户只见自己 |
-| 统计里 credit 是 — | 用量统计 | 上游可选字段，经常不返回；主指标是 token |
-| Token 卡片里命中/未命中是 — | 用量统计 | 上游未上报缓存命中（cached_tokens）时无法拆分输入 |
+| 统计里 credit 是 — | 用量统计 | 渠道可选字段，经常不返回；主指标是 token |
+| Token 卡片里命中/未命中是 — | 用量统计 | 渠道未上报缓存命中（cached_tokens）时无法拆分输入 |
 | 看某个模型消耗多快 | Playground → 选中模型 | 下方显示倍率 / token 上限 / 图片与工具支持 |
 | 列表里老模型/内部模型太多 | `MODEL_BLOCKLIST` env | glob 黑名单；只影响列表展示，直连指定不受影响 |
 
@@ -158,7 +158,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `USERS_FILE` | `secrets/users.txt` | 用户文件路径 |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | 浏览器可达地址；TRAE 登录回调依赖它 |
-| `CODEBUDDY_API_ENDPOINT` | 中国站 | 上游地址，只接受 `CODEBUDDY_ALLOWED_ENDPOINTS` 白名单内地址 |
+| `CODEBUDDY_API_ENDPOINT` | 中国站 | 渠道地址，只接受 `CODEBUDDY_ALLOWED_ENDPOINTS` 白名单内地址 |
 | `CODEBUDDY_ALLOWED_ENDPOINTS` | 中/国际站 | 逗号分隔白名单；不在其中启动即失败 |
 | `DEFAULT_MODEL` | `glm-5.2` | 模型为空或 `auto` 时的目标 |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |

@@ -5,6 +5,7 @@ import {
   Loader2,
   RefreshCw,
   Send,
+  TerminalSquare,
   X,
 } from "lucide-react";
 import { useSessionContext } from "../Layout";
@@ -56,8 +57,8 @@ export function PlaygroundPage() {
   });
   const fetched = modelsQuery.data ?? [];
 
-  // 每个模型的受控值：单上游模型带 @provider（该组选项即强制指定），
-  // 双上游模型用裸 id（走自动路由）。派生选中时必须用同一套值，
+  // 每个模型的受控值：单渠道模型带 @provider（该组选项即强制指定），
+  // 双渠道模型用裸 id（走自动路由）。派生选中时必须用同一套值，
   // 否则受控值与任何 option 都对不上，select 会显示为空。
   const valueOf = (item: { id: string; providers: string[] }): string =>
     item.providers.length === 1 ? `${item.id}@${item.providers[0]}` : item.id;
@@ -68,8 +69,8 @@ export function PlaygroundPage() {
     models.find((item) => item.value === selectedModel) ??
     models.find((item) => item.value === selectedModel.split("@")[0]);
 
-  // option 文本里的倍率标记：双上游一律按渠道逐个标注（相同倍率也各自
-  // 写出；只有一个渠道有倍率时只标那个渠道）；单上游带渠道缩写。
+  // option 文本里的倍率标记：双渠道一律按渠道逐个标注（相同倍率也各自
+  // 写出；只有一个渠道有倍率时只标那个渠道）；单渠道带渠道缩写。
 const CHANNEL_ABBR: Record<string, string> = { codebuddy: "CB", trae: "TR" };
 
 const rateLabel = (item: ModelInfo, provider?: string): string => {
@@ -154,12 +155,13 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
       <PageHeader
         title="Playground"
         description="用登录会话直接测试模型调度，无需 API Key；请求会走与外部 API 相同的调度与统计，用量计入当前用户。"
+        icon={<TerminalSquare className="size-5" />}
       />
 
       <HelpBlock
-        title="模型与上游调度说明"
+        title="模型与渠道调度说明"
         entries={[
-          { term: "模型名 model@provider", where: "模型 · 强制指定上游", meaning: "默认 glm-5.2 由调度器在两个上游间自动选健康的；写 glm-5.2@trae 则只走 TRAE，glm-5.2@codebuddy 只走 CodeBuddy。" },
+          { term: "模型名 model@provider", where: "模型 · 强制指定渠道", meaning: "默认 glm-5.2 由调度器在两个渠道间自动选健康的；写 glm-5.2@trae 则只走 TRAE，glm-5.2@codebuddy 只走 CodeBuddy。" },
         ]}
       />
 
@@ -168,7 +170,7 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
           <div className="grid items-start gap-3 sm:grid-cols-[minmax(0,20rem)_minmax(0,16rem)]">
               <Field
                 label="模型"
-                hint="自动选健康上游；写 model@provider 可强制指定"
+                hint="自动选健康渠道；写 model@provider 可强制指定"
               >
                 <Select
                   value={selectedModel}
@@ -176,9 +178,9 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                   onChange={(event) => setModel(event.target.value)}
                 >
                   <option value="">选择模型…</option>
-                  {/* 双上游可用的模型置顶：默认调度即可覆盖 */}
+                  {/* 双渠道可用的模型置顶：默认调度即可覆盖 */}
                   {dualSource.length > 0 && (
-                    <optgroup label="双上游（自动调度）">
+                    <optgroup label="双渠道（自动调度）">
                       {dualSource.map((item) => {
                         const rate = rateLabel(item);
                         return (
@@ -203,7 +205,7 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                   ))}
                   {/* model@provider 组合不在原始列表里，必须补合成选项，
                       否则 React 会把 select 渲染成无选中项。
-                      单上游模型的 value 本身带 @provider 且已在列表里，
+                      单渠道模型的 value 本身带 @provider 且已在列表里，
                       不重复合成，避免下拉显示成「xxx@trae（强制指定）」。 */}
                   {selectedModel.includes("@") &&
                     !models.some((item) => item.value === selectedModel) && (
@@ -211,7 +213,7 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                   )}
                 </Select>
               </Field>
-              <Field label="强制指定上游" hint="双上游模型可用；单上游模型始终固定">
+              <Field label="强制指定渠道" hint="双渠道模型可用；单渠道模型始终固定">
                 <Select
                   value={selectedModel.includes("@") ? selectedModel.split("@")[1] : ""}
                   data-testid="provider-pin"
@@ -366,7 +368,7 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
             >
               <pre className="whitespace-pre-wrap">{JSON.stringify(usage, null, 2)}</pre>
               <div className="mt-1 font-sans">
-                credit 为上游可选字段，经常不返回；健康度只依赖额度探测接口。
+                credit 为渠道可选字段，经常不返回；健康度只依赖额度探测接口。
               </div>
             </div>
           )}

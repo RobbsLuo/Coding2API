@@ -112,18 +112,11 @@ describe("api client", () => {
       expect.objectContaining({ method: "POST" }),
     );
 
-    await api.selectAccount("c1", "a1");
-    expect(spy).toHaveBeenCalledWith(
-      "/api/credentials/c1/accounts/select",
-      expect.objectContaining({ method: "POST" }),
-    );
-
     await api.upstreamStart("codebuddy");
     await api.upstreamPoll("codebuddy", "s");
     await api.upstreamCancel("codebuddy", "s");
     await api.probeCredential("c1");
     await api.checkinCredential("c1");
-    await api.accounts("c1");
     await api.apiKeys();
     await api.createApiKey("n");
     await api.deleteApiKey("k1");
@@ -173,7 +166,7 @@ describe("display helpers", () => {
     expect(healthView(undefined as unknown as null).kind).toBe("unknown");
   });
 
-  it("周期语义按上游类型判定，而不是看 cycle_end 是否存在", () => {
+  it("周期语义按渠道类型判定，而不是看 cycle_end 是否存在", () => {
     // CodeBuddy 有重置时间
     const cycle = quotaSemantics(makeCredential({
       provider: "codebuddy", quota_cycle_end: 1_800_000_000 }) as never);

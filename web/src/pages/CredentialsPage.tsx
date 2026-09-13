@@ -1,13 +1,13 @@
 import { useState } from "react";
 import {
   CalendarCheck,
+  Database,
   HeartPulse,
   MoreHorizontal,
   Pin,
   Power,
   RefreshCw,
   Trash2,
-  Users,
 } from "lucide-react";
 import { api } from "../api/client";
 import { useSessionContext } from "../Layout";
@@ -64,7 +64,6 @@ interface Actions {
   remove: (credential: Credential) => void;
   probe: (credential: Credential) => void;
   checkin: (credential: Credential) => void;
-  openAccounts: (credential: Credential) => void;
 }
 
 export function CredentialsPage() {
@@ -75,9 +74,7 @@ export function CredentialsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  const [accountsFor, setAccountsFor] = useState<string | null>(null);
-  const [accounts, setAccounts] = useState<{ account_id: string; nickname: string; type: string }[]>([]);
-  // 每个上游各自可能有进行中的登录（CodeBuddy 轮询 / TRAE 回调）
+  // 每个渠道各自可能有进行中的登录（CodeBuddy 轮询 / TRAE 回调）
   const [loginProviders, setLoginProviders] = useState<Provider[]>([]);
   const [probeDetail, setProbeDetail] = useState<string | null>(null);
 
@@ -156,7 +153,7 @@ export function CredentialsPage() {
         try {
           const result = await api.checkinCredential(credential.id);
           if (result.ok && result.already_checked_in) {
-            // 上游把「已签到」返回成 HTTP 400 + code=10001，这不是错误
+            // 渠道把「已签到」返回成 HTTP 400 + code=10001，这不是错误
             setNotice(result.message || "今天已签到，请明天再来");
           } else if (result.ok) {
             setNotice(
@@ -174,17 +171,6 @@ export function CredentialsPage() {
           setError(caught instanceof Error ? caught.message : "签到失败");
         } finally {
           setBusy(false);
-        }
-      })(),
-    openAccounts: (credential) =>
-      void (async () => {
-        setAccountsFor(credential.id);
-        setError(null);
-        try {
-          setAccounts((await api.accounts(credential.id)).accounts);
-        } catch (caught) {
-          setAccounts([]);
-          setError(caught instanceof Error ? caught.message : "账号列表获取失败");
         }
       })(),
   };
@@ -206,7 +192,7 @@ export function CredentialsPage() {
 
       if (started.flow === "callback") {
         // TRAE：浏览器完成授权后 302 回本服务的 /authorize，那里直接落库。
-        // 前端无法轮询上游，改为轮询凭证列表，出现新凭证即视为完成。
+        // 前端无法轮询渠道，改为轮询凭证列表，出现新凭证即视为完成。
         setNotice("已在新标签页打开授权页。完成授权后本页会自动刷新出凭证。");
         const deadline = Date.now() + 5 * 60 * 1000;
         const baseline = credentials.length;
@@ -262,7 +248,8 @@ export function CredentialsPage() {
     <div className="space-y-6" data-testid="credentials-page">
       <PageHeader
         title="凭证管理"
-        description="凭证是调度池里可被选中的上游账号。登录上游授权或粘贴 JSON 导入后，可在此探测剩余额度、签到、切换账号或启停。"
+        description="凭证是调度池里可被选中的渠道账号。登录渠道授权或粘贴 JSON 导入后，可在此探测剩余额度、签到或启停。"
+        icon={<Database className="size-5" />}
       />
       {!isAdmin && (
         <div data-testid="readonly-banner">
@@ -272,7 +259,7 @@ export function CredentialsPage() {
       {credentials.length === 0 && isAdmin && (
         <div data-testid="first-run-hint">
           <Notice tone="muted">
-            还没有凭证。用下方「登录上游账号」完成 CodeBuddy / TRAE 授权，或直接粘贴凭证 JSON 导入；
+            还没有凭证。用下方「登录渠道账号」完成 CodeBuddy / TRAE 授权，或直接粘贴凭证 JSON 导入；
             凭证表下方的「凭证状态与操作说明」可查看各状态和按钮的含义。
           </Notice>
         </div>
@@ -303,11 +290,11 @@ export function CredentialsPage() {
             <TableHeader>
               <TableRow>
                 <TableHead>昵称</TableHead>
-                <TableHead>上游</TableHead>
+                <TableHead>渠道</TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">状态<ColumnHint text="可用/冷却中/已禁用/已关闭/额度耗尽；冷却中到期自动恢复。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">健康度<ColumnHint text="剩余积分占比三态：已知百分比 / 未探测 / 已耗尽。未探测≠已耗尽，点「探测」可重试。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。单位都是积分。" /></span></TableHead>
-                {isAdmin && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测：查剩余额度；签到：领当日积分；账号：切换子账号；指定：设为优先；停用/删除：移出调度或移除。" /></span></TableHead>}
+                {isAdmin && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测：查剩余额度；签到：领当日积分；指定：设为优先；停用/删除：移出调度或移除。" /></span></TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -330,7 +317,7 @@ export function CredentialsPage() {
 
       {isAdmin && (
         <div className="grid gap-6 lg:grid-cols-2" data-testid="add-credentials">
-          <Panel title="登录上游账号">
+          <Panel title="登录渠道账号">
             <div className="flex flex-wrap items-center gap-3">
               {PROVIDERS.map((item) => {
                 const pending = loginProviders.includes(item);
@@ -363,7 +350,7 @@ export function CredentialsPage() {
               })}
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
-              CodeBuddy 走设备码轮询（本页自动轮询上游）；TRAE 走浏览器回调
+              CodeBuddy 走设备码轮询（本页自动轮询渠道）；TRAE 走浏览器回调
               （授权后由 <code>/authorize</code> 直接落库，本页轮询凭证列表检测完成）。
               也可以直接粘贴凭证 JSON 导入。
             </p>
@@ -381,56 +368,16 @@ export function CredentialsPage() {
         title="凭证状态与操作说明"
         entries={[
           { term: "可用", where: "状态列", meaning: "该凭证当前能被调度器选中处理请求。" },
-          { term: "冷却中（显示剩余时间）", where: "状态列", meaning: "上游暂时拒绝（权益耗尽 12 小时、限流 60 秒、连续出错 10 分钟），到期自动恢复，无需手动操作。" },
-          { term: "已禁用", where: "状态列", meaning: "上游判定会话失效，凭证已永久停止使用；删除后重新登录该账号即可。" },
+          { term: "冷却中（显示剩余时间）", where: "状态列", meaning: "渠道暂时拒绝（权益耗尽 12 小时、限流 60 秒、连续出错 10 分钟），到期自动恢复，无需手动操作。" },
+          { term: "已禁用", where: "状态列", meaning: "渠道判定会话失效，凭证已永久停止使用；删除后重新登录该账号即可。" },
           { term: "已关闭", where: "状态列", meaning: "管理员手动停用（软开关），随时可以重新启用。" },
           { term: "健康度：百分比", where: "健康度列", meaning: "剩余积分占总积分的比例，调度器优先选数值高的。" },
-          { term: "健康度：未探测到额度", where: "健康度列", meaning: "探测失败或上游没返回额度信息。注意它不是「已耗尽」——点「探测」可重新获取。" },
+          { term: "健康度：未探测到额度", where: "健康度列", meaning: "探测失败或渠道没返回额度信息。注意它不是「已耗尽」——点「探测」可重新获取。" },
           { term: "额度下方的时间语义", where: "额度列", meaning: "CodeBuddy 是「本周期剩余，<日期> 重置」；TRAE 是「账户剩余（单调递减）」。两者单位都是积分，但重置行为不同。" },
-          { term: "探测 / 签到 / 账号", where: "操作列", meaning: "探测：立即向上游查询一次剩余额度。签到：领取当日积分（每天 9 点系统自动签到）。账号：同一登录下的个人/企业账号切换（仅 CodeBuddy 支持）。" },
+          { term: "探测 / 签到", where: "操作列", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（每天 9 点系统自动签到）。" },
           { term: "指定 / 停用 / 删除", where: "操作列", meaning: "指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。停用：临时移出调度池不删数据。删除：彻底移除凭证。" },
         ]}
       />
-
-      {accountsFor && isAdmin && (
-        <Panel
-          title="切换账号"
-          action={
-            <Button size="sm" variant="ghost" onClick={() => setAccountsFor(null)}>
-              关闭
-            </Button>
-          }
-        >
-          {accounts.length === 0 ? (
-            <Empty>没有可用账号</Empty>
-          ) : (
-            <ul className="space-y-1.5" data-testid="accounts-list">
-              {accounts.map((account) => (
-                <li key={account.account_id} className="flex items-center justify-between text-sm">
-                  <span>
-                    {account.nickname || account.account_id}
-                    <span className="ml-2 text-xs text-muted-foreground">
-                      {account.type || "未知类型"}
-                    </span>
-                  </span>
-                  <Button
-                    size="sm"
-                    disabled={busy}
-                    onClick={() =>
-                      void run(
-                        () => api.selectAccount(accountsFor, account.account_id),
-                        "账号已切换。",
-                      ).then(() => setAccountsFor(null))
-                    }
-                  >
-                    切换到此账号
-                  </Button>
-                </li>
-              ))}
-            </ul>
-          )}
-        </Panel>
-      )}
 
     </div>
   );
@@ -534,9 +481,6 @@ function Row({
                   <DropdownMenuItem onSelect={() => actions.checkin(credential)}>
                     <CalendarCheck className="size-4" /> 签到
                   </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => actions.openAccounts(credential)}>
-                    <Users className="size-4" /> 账号
-                  </DropdownMenuItem>
                   <DropdownMenuSeparator />
                   {credential.disabled === 1 && (
                     <DropdownMenuItem onSelect={() => actions.revive(credential)}>
@@ -598,7 +542,7 @@ function ImportPanel({
       <form onSubmit={submit} className="space-y-3">
         <div className="flex flex-wrap gap-3">
           <div className="w-40">
-            <Field label="上游">
+            <Field label="渠道">
               <Select
                 value={provider}
                 data-testid="import-provider"

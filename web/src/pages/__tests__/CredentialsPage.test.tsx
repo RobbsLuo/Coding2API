@@ -216,7 +216,7 @@ describe("CredentialsPage", () => {
     expect(notice).toHaveTextContent("探测失败");
     expect(notice).toHaveTextContent("未探测");
     // 面向用户的是可操作的中文说明，不是枚举或异常类名
-    expect(notice).toHaveTextContent("上游响应格式与预期不符");
+    expect(notice).toHaveTextContent("渠道响应格式与预期不符");
     expect(notice).not.toHaveTextContent("upstream_response_invalid");
     // 原始错误另置于折叠区，便于排查
     expect(screen.getByTestId("probe-detail")).toHaveTextContent(
@@ -282,7 +282,7 @@ describe("CredentialsPage", () => {
     expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("100");
   });
 
-  it("已签到时显示上游原文，不出现「获得 — 积分」", async () => {
+  it("已签到时显示渠道原文，不出现「获得 — 积分」", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -345,36 +345,6 @@ describe("CredentialsPage", () => {
     expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("code=null");
   });
 
-  it("账号切换：拉列表并可切换", async () => {
-    const fetchSpy = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
-      const url = String(input);
-      if (url.includes("/accounts/select")) return jsonResponse({ switched: true });
-      if (url.includes("/accounts")) {
-        return jsonResponse({
-          accounts: [{ account_id: "acct_1", nickname: "第二个", type: "personal" }],
-        });
-      }
-      return jsonResponse(listBody([makeCredential({ id: "cred_1" })]));
-    });
-    vi.stubGlobal("fetch", fetchSpy);
-
-    renderPage(<CredentialsPage />, ADMIN);
-    await settle();
-    await userEvent.click(screen.getByTestId("actions-cred_1"));
-    await userEvent.click(screen.getByRole("menuitem", { name: "账号" }));
-
-    const list = await screen.findByTestId("accounts-list");
-    expect(list).toHaveTextContent("第二个");
-
-    await userEvent.click(screen.getByRole("button", { name: "切换到此账号" }));
-    await waitFor(() =>
-      expect(fetchSpy).toHaveBeenCalledWith(
-        "/api/credentials/cred_1/accounts/select",
-        expect.objectContaining({ method: "POST" }),
-      ),
-    );
-  });
-
   it("空池提示", async () => {
     mockFetch({ "/api/credentials": listBody([]) });
     renderPage(<CredentialsPage />, ADMIN);
@@ -384,8 +354,8 @@ describe("CredentialsPage", () => {
 });
 
 
-describe("上游登录入口", () => {
-  it("两个上游都能发起登录", async () => {
+describe("渠道登录入口", () => {
+  it("两个渠道都能发起登录", async () => {
     mockFetch({ "/api/credentials": listBody([]) });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
@@ -394,7 +364,7 @@ describe("上游登录入口", () => {
     expect(screen.getByTestId("start-login-trae")).toHaveTextContent("登录 TRAE");
   });
 
-  it("CodeBuddy 走 poll：打开授权页并轮询上游", async () => {
+  it("CodeBuddy 走 poll：打开授权页并轮询渠道", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const opened: string[] = [];
     vi.stubGlobal("open", () => {
@@ -438,7 +408,7 @@ describe("上游登录入口", () => {
     vi.useRealTimers();
   });
 
-  it("TRAE 走 callback：不轮询上游，靠凭证列表变化检测完成", async () => {
+  it("TRAE 走 callback：不轮询渠道，靠凭证列表变化检测完成", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.stubGlobal("open", () => null);
     let credentialCount = 1;
