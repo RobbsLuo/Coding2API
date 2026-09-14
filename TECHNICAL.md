@@ -8,7 +8,7 @@ PROPOSAL.md 定方向，本文档定实现。每个模块标注来源决策（Q 
 
 | 层 | 选型 | 版本 | 决策 |
 |---|---|---|---|
-| 运行时 | Python | 3.14（≥3.12） | PROPOSAL §10 |
+| 运行时 | Python | 3.14（≥3.12） | Q2 |
 | 包管理 | uv（venv + pyproject.toml + uv.lock） | 本机 0.12.12 | T-Q1 |
 | Web | FastAPI + Uvicorn | 最新稳定 | Q2=A |
 | 配置 | pydantic-settings | 最新稳定 | T-Q3 |
@@ -27,11 +27,12 @@ coding2api/
 ├── pyproject.toml               # uv 项目；[tool.pytest.ini_options] 设 coverage 目标
 ├── src/
 │   ├── main.py                  # FastAPI 组装、lifespan、路由挂载
-│   ├── config.py                # pydantic-settings：PROPOSAL §8 全部 14 项 env
+│   ├── config.py                # pydantic-settings：README「配置」全部 env
 │   ├── db/
-│   │   ├── schema.sql           # §5 DDL 定稿
+│   │   ├── schema.sql           # DDL 定稿
 │   │   ├── conn.py              # 连接管理（线程本地 + WAL + busy_timeout）
 │   │   ├── migrate.py           # 启动时执行 schema.sql（CREATE IF NOT EXISTS）
+│   │   ├── repo.py              # 凭证/API Key 持久化（手写 SQL）
 │   │   └── crypto.py            # Fernet：APP_SECRET → key derive → encrypt/decrypt
 │   ├── auth/
 │   │   ├── users.py             # users.txt 解析（username:PBKDF2），hash_password.py CLI
@@ -41,22 +42,21 @@ coding2api/
 │   │   └── throttle.py         # 登录限流（三级窗口 + PBKDF2 并发上限）
 │   │   └── rbac.py              # ADMIN_USERNAMES 判定；require_admin 依赖
 │   ├── provider/
-│   │   ├── base.py              # Provider 协议、Event、ErrKind、HealthScore、Quota
-│   │   ├── registry.py          # {"codebuddy": ..., "trae": ...}；未注册 → 400
+│   │   ├── base.py              # Provider 协议、Event、ErrKind、Quota、HealthScore
 │   │   ├── codebuddy/
-│   │   │   ├── client.py        # 上游 HTTP + SSE 流
+│   │   │   ├── client.py        # 上游 HTTP + SSE 流 + 额度探测
 │   │   │   ├── events.py        # OpenAI 风格 SSE → Event
-│   │   │   ├── oauth.py         # 设备码轮询（801 行参考）
-│   │   │   ├── quota.py         # 个人/企业额度
+│   │   │   ├── credential.py    # 凭证类型与解析
+│   │   │   ├── headers.py       # 上游技术常量与请求头构造
+│   │   │   ├── oauth.py         # 设备码轮询
 │   │   │   ├── checkin.py       # 签到
 │   │   │   └── refresh.py       # token 刷新 + 多账号切换
 │   │   ├── trae/
-│   │   │   ├── client.py        # SOLO 上游 + 双 httpx 客户端
+│   │   │   ├── client.py        # SOLO 上游 + 双 httpx 客户端 + 额度探测
 │   │   │   ├── events.py        # 自定义 SSE → Event
 │   │   │   ├── credential.py    # 凭证解析（嵌套/扁平）+ 原子写回
-│   │   │   ├── callback.py      # 登录 URL 构造 + 回调解析（205 行参考）
-│   │   │   └── quota.py         # ide_user_ent_usage
-│   │   └── fixtures/            # §8 fixture 清单
+│   │   │   └── callback.py      # 登录 URL 构造 + 回调解析
+│   │   └── fixtures/            # fixture 清单
 │   │       ├── codebuddy/*.sse
 │   │       └── trae/*.sse
 │   ├── engine/
@@ -74,7 +74,8 @@ coding2api/
 │   │   ├── quota_probe.py       # 启动立即跑一轮 + 每 QUOTA_PROBE_MINUTES 分钟探测
 │   │   ├── checkin.py           # 全天每 10 分钟签到；成功即当日封账该凭证
 │   │   ├── refresh.py           # 每 60 分钟；REFRESH_SKEW_HOURS 窗口内预刷新
-│   │   └── retention.py         # 每 5 分钟：小时汇总重算（幂等）+ 90 天前明细清理
+│   │   ├── retention.py         # 每 5 分钟：小时汇总重算（幂等）+ 90 天前明细清理
+│   │   └── runner.py            # 后台任务调度，接入应用生命周期
 │   ├── stats/
 │   │   ├── collector.py         # usage_events 写入（脱敏）
 │   │   └── query.py             # overview / by-provider 聚合查询
@@ -87,11 +88,12 @@ coding2api/
 │       ├── admin_keys.py        # API Key CRUD
 │       ├── admin_stats.py       # 统计查询（overview / by-provider / timeline / model-timeline）
 │       ├── admin_auth.py        # 登录 / 登出 / 会话；上游登录 start/poll/cancel
-│       └── playground.py        # 会话调试端点（无需 API Key）
+│       ├── playground.py        # 会话调试端点（无需 API Key）
+│       └── streaming.py         # SSE 流包装（长空隙插心跳帧）
 ├── web/                         # React 前端（M2）
-├── tests/                       # §9
-├── Dockerfile / docker-compose.yml  # 仓库根（M3；compose build context 依赖根目录）
-├── NOTICE / LICENSE / README.md / README.zh.md
+├── tests/
+├── Dockerfile / docker-compose.yml  # 仓库根（compose build context 依赖根目录）
+├── NOTICE / LICENSE / README.md（中文）/ README.en.md
 ```
 
 ---
@@ -289,7 +291,7 @@ class Scheduler:
 
 ## 7. 数据库（T-Q2 定稿）
 
-DDL 以 PROPOSAL §5 为准（users.txt 为用户唯一源、无 users 表、凭证加密列、usage_events.credit 可空），补充实现细节：
+DDL 以 src/db/schema.sql 为准（users.txt 为用户唯一源、无 users 表、凭证加密列、usage_events.credit 可空），补充实现细节：
 
 ```sql
 -- conn.py 打开时执行
@@ -318,39 +320,13 @@ PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users.txt 无表）
 | 统计/查询 | 70% | sqlite 内存库集成 |
 | 其余 | ≥70% | — |
 
-fixture 提取来源（开工时执行，不手写）：
-
-| fixture | 来源文件 | 提取内容 |
-|---|---|---|
-| `codebuddy/chat-basic.sse` | `codebuddy2api/tests/test_stream_service.py`（L268/L1285 附近） | `data: {"choices":[...],"usage":{...}}` 帧 |
-| `codebuddy/tool-calls.sse` | 同上（`_process_tool_calls` 用例） | delta.tool_calls 分片 |
-| `codebuddy/reasoning.sse` | 同上 | reasoning_content delta |
-| `codebuddy/error-state.json` | `test_codebuddy_oauth.py` | auth/state 响应体 |
-| `trae/chat-basic.sse` | `trae2api-web/internal/upstream/sse_test.go` | metadata→output→token_usage→done 全序列 |
-| `trae/tool-calls.sse` | 同上 | output.tool_calls |
-| `trae/error-1005.sse` | 同上 | `event:error` code=1005 |
-| `trae/callback-url.txt` | `internal/server/callback_test.go` | 真实回调 URL 样本 |
+fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文、思考、工具调用、错误码与额度）。
 
 fixture 断言两个方向：**解析正确**（样本 → 期望 Event）与**不静默**（畸形样本 → UpstreamProtocolViolation）。
 
 ---
 
-## 9. 里程碑 → 模块映射
-
-| 里程碑 | 交付模块 | 周 |
-|---|---|---|
-| M0 骨架 | config / db / auth / engine(scheduler+mock provider) / 测试基线 | 1 |
-| M1a TRAE | provider/trae 全部 + engine(executor/sse) + compat/openai + api/chat,models,authorize + tasks | 2 |
-| M1b CB 基础 | provider/codebuddy 的 client/events/quota + import_credential（bearer-only） | 2 |
-| M1.5 CB 完整 | oauth / refresh(多账号) / checkin + tasks/checkin | 2 |
-| M2 前端 | web/ 6 页 | 2 |
-| M3 收尾 | deploy/ + 文档 + NOTICE + CI | 1 |
-
-M1b 结束执行双 provider 对比验证（Q25=A）：同一请求走两个 provider，断言调度行为、统计字段、错误分类一致。
-
----
-
-## 10. 已知取舍备忘
+## 9. 已知取舍备忘
 
 - **同步 sqlite3 而非 aiosqlite**（T-Q2）：本地微秒级操作，asyncio 封装开销大于收益
 - **双 httpx 客户端**（T-Q4）：聊天流 read=None 防长流截断；短请求总超时 30s 防悬挂；共享 `trust_env=False`

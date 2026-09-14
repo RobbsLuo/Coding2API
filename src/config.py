@@ -1,6 +1,6 @@
 """启动配置：pydantic-settings 绑定 env（T-Q3）。
 
-PROPOSAL §8 的 14 项配置在此定型，缺必填项在进程启动阶段失败。
+立项定义的配置项在此定型，缺必填项在进程启动阶段失败。
 """
 
 from __future__ import annotations
