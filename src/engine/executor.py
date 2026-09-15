@@ -128,6 +128,10 @@ class Executor:
         客户端中途断开时（生成器被关闭 / 任务被取消）把已产生的用量
         记入统计，标记 client_disconnect：否则统计里的用量低于真实消耗，
         而断开是长回复场景下的常态。
+
+        例外：完整响应（[DONE]）已产出后的断开不算中途——客户端拿到
+        回调后立即关闭连接是正常收尾（SSE 流在 [DONE] 发出到结束帧
+        more_body=False 之间有一拍竞态，框架会把它当断开），按成功记账。
         """
         target = self.resolve_target(request)
         state = _StreamState(translator=StreamTranslator(target.model),
@@ -136,8 +140,16 @@ class Executor:
             async for frame in self._stream_loop(request, target, state):
                 yield frame
         except (GeneratorExit, asyncio.CancelledError):
-            if state.translator.usage is not None or state._first_byte_at is not None:
-                self._record_disconnect(target, state)
+            if not state.recorded and (state.translator.usage is not None
+                                       or state._first_byte_at is not None):
+                if state.translator.done_sent:
+                    # [DONE] 已产出：客户端收尾断开，按成功记账（tokens 如实记录）
+                    if state.credential_id is not None:
+                        self._deps.credentials.save_success(state.credential_id)
+                    self._record_success(target, state, state.provider,
+                                         state.credential_id or "-")
+                else:
+                    self._record_disconnect(target, state)
             raise
 
     async def _stream_loop(self, request: ChatRequest, target: ModelTarget,
@@ -243,6 +255,7 @@ class Executor:
 
     def _record_success(self, target: ModelTarget, state: _StreamState,
                         provider_id: str, credential_id: str) -> None:
+        state.recorded = True
         usage = state.translator.usage
         self._deps.record(
             username=state.username, provider=provider_id, credential_id=credential_id,
@@ -256,6 +269,7 @@ class Executor:
 
     def _record_disconnect(self, target: ModelTarget, state: _StreamState) -> None:
         """客户端断开：按已知用量记账，标记 client_disconnect。"""
+        state.recorded = True
         usage = state.translator.usage
         self._deps.record(
             username=state.username, provider=state.provider,
@@ -430,6 +444,8 @@ class _StreamState:
     provider: str = "-"
     credential_id: str | None = None
     _first_byte_at: float | None = None
+    # 已记账标记：断开分支防与正常成功路径重复记账
+    recorded: bool = False
 
     def mark_first_byte(self) -> None:
         if self._first_byte_at is None:

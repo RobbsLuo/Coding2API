@@ -228,7 +228,9 @@ class Provider(Protocol):
   7. scheduler.note_success：清 err_count
 ```
 
-客户端断连：`request.is_disconnected()` 轮询，断连时统计 `error_type=client_disconnect`，关闭上游流。
+客户端断连：生成器被关闭/取消时统计 `error_type=client_disconnect`，关闭上游流；
+例外：`[DONE]` 已产出后的收尾断开（客户端拿到回调即关连接，框架在结束帧
+`more_body=False` 前有一拍竞态会把它判为断开）按成功记账，避免误标。
 
 ---
 

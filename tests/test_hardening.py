@@ -255,6 +255,123 @@ async def test_stream_disconnect_records_usage():
 
 
 @pytest.mark.asyncio
+async def test_stream_disconnect_after_done_records_success():
+    """[DONE] 已产出后客户端断开：拿到完整回调，按成功记账而非 client_disconnect。
+
+    真实场景（opencode2）：SSE 流的 [DONE] 发出到结束帧 more_body=False
+    之间有一拍竞态，框架（Starlette listen_for_disconnect）会把收尾断开
+    当中途断开并取消生成器；此时响应内容已完整送达，应记 ok=True。
+    """
+    from src.engine.executor import Executor, ExecutorDeps
+
+    recorded = []
+    successes = []
+
+    @dataclass
+    class Provider:
+        id: str = "trae"
+
+        async def stream_chat(self, credential_data, payload, model):
+            yield Event(kind=EventKind.CONTENT, content="hello")
+            yield Event(kind=EventKind.USAGE,
+                        usage=Usage(input_tokens=7, output_tokens=3))
+            yield Event(kind=EventKind.FINISH, finish_reason="stop")
+
+    class Creds(_FakeCredentials):
+        def save_success(self, credential_id):
+            successes.append(credential_id)
+
+    executor = Executor(ExecutorDeps(
+        providers={"trae": Provider()}, credentials=Creds(),
+        scheduler=_Scheduler(), stats=_Collector(recorded)))
+
+    stream = executor.stream(_request(), username="alice")
+    while True:
+        frame = await anext(stream)
+        if b"[DONE]" in frame:
+            await stream.aclose()
+            break
+    assert successes == ["c1"]
+    assert len(recorded) == 1
+    r = recorded[0]
+    assert r["ok"] is True
+    assert "error_type" not in r
+    assert (r["username"], r["provider"], r["credential_id"]) == ("alice", "trae", "c1")
+    assert r["input_tokens"] == 7
+    assert r["output_tokens"] == 3
+    assert r["ttfb_ms"] is not None
+
+
+@pytest.mark.asyncio
+async def test_stream_success_then_tail_disconnect_not_double_recorded():
+    """成功路径已记账后，收尾阶段的断开不再重复记账。
+
+    上游未发 FINISH 时 executor 补发 [DONE]（finish()），正常成功记录
+    先行产生；若客户端此时断开，断连分支不得再记第二条。
+    """
+    from src.engine.executor import Executor, ExecutorDeps
+
+    recorded = []
+
+    @dataclass
+    class Provider:
+        id: str = "trae"
+
+        async def stream_chat(self, credential_data, payload, model):
+            yield Event(kind=EventKind.CONTENT, content="a")
+            yield Event(kind=EventKind.CONTENT, content="b")
+
+    executor = Executor(ExecutorDeps(
+        providers={"trae": Provider()}, credentials=_FakeCredentials(),
+        scheduler=_Scheduler(), stats=_Collector(recorded)))
+
+    stream = executor.stream(_request(), username="alice")
+    while True:
+        frame = await anext(stream)
+        if b"[DONE]" in frame:
+            await stream.aclose()
+            break
+    assert len(recorded) == 1
+    assert recorded[0]["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_stream_done_disconnect_without_credential(monkeypatch):
+    """done_sent 断开但凭证缺失（防御分支）：跳过 save_success，仍按成功记账。"""
+    from src.engine.executor import Executor, ExecutorDeps
+
+    recorded = []
+    successes = []
+
+    @dataclass
+    class Provider:
+        id: str = "trae"
+
+        async def stream_chat(self, credential_data, payload, model):
+            yield Event(kind=EventKind.CONTENT, content="x")
+            yield Event(kind=EventKind.FINISH, finish_reason="stop")
+
+    class Creds(_FakeCredentials):
+        def save_success(self, credential_id):
+            successes.append(credential_id)
+
+    executor = Executor(ExecutorDeps(
+        providers={"trae": Provider()}, credentials=Creds(),
+        scheduler=_Scheduler(), stats=_Collector(recorded)))
+    monkeypatch.setattr(executor, "_pick", lambda target, tried: (None, None))
+
+    stream = executor.stream(_request(), username="alice")
+    while True:
+        frame = await anext(stream)
+        if b"[DONE]" in frame:
+            await stream.aclose()
+            break
+    assert successes == []
+    assert recorded[0]["ok"] is True
+    assert recorded[0]["credential_id"] == "-"
+
+
+@pytest.mark.asyncio
 async def test_stream_guarded_converts_unexpected_error_to_frame():
     from src.engine.executor import Executor, ExecutorDeps
 
@@ -524,7 +641,7 @@ class _FakeCredentials:
     def credential_data(self, credential_id):
         return self.data
 
-    def save_success(self, credential_id):  # pragma: no cover - 断连路径不触发
+    def save_success(self, credential_id):
         pass
 
     def save_error(self, credential_id, outcome):  # pragma: no cover

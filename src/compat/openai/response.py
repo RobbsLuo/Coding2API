@@ -77,6 +77,8 @@ class StreamTranslator:
         self._finished = False
         # 上游 usage 不单独成帧，但要留给统计采集
         self.usage: Usage | None = None
+        # [DONE] 已产出：客户端此后断开属正常收尾（拿到回调即关连接）
+        self.done_sent = False
     @staticmethod
     def _is_empty_payload(event: Event) -> bool:
         """空内容不消耗首帧 role 标记，避免发出无意义 chunk。"""
@@ -131,6 +133,9 @@ class StreamTranslator:
     def _close(self, finish_reason: str) -> Iterator[bytes]:
         yield format_openai_frame(json.dumps(
             _chunk(self.model, {}, finish_reason=finish_reason), ensure_ascii=False))
+        # 在产出 [DONE] 前置位：executor 据此区分「完整响应已送出后的断开」
+        # （客户端拿到回调即关闭连接，属正常收尾）与真正的中途断开
+        self.done_sent = True
         yield SSE_DONE
 
 
