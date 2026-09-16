@@ -32,6 +32,32 @@ const PROVIDER_LABEL: Record<string, string> = {
   trae: "TRAE",
 };
 
+/** 模型排序用倍率：多渠道取各渠道最小倍率；无倍率视为最大（排最后）。 */
+function modelRate(item: ModelInfo): number | undefined {
+  const byProvider = item.by_provider;
+  if (byProvider && Object.keys(byProvider).length > 0) {
+    const rates = Object.values(byProvider)
+      .map((entry) => entry.credit_rate)
+      .filter((rate): rate is number => rate !== undefined);
+    if (rates.length) return Math.min(...rates);
+  }
+  return item.credit_rate;
+}
+
+/** 默认选中：倍率最小的模型；全部无倍率时回退列表第一个。 */
+function pickDefaultValue(models: (ModelInfo & { value: string })[]): string {
+  let best: (ModelInfo & { value: string }) | null = null;
+  let bestRate = Infinity;
+  for (const item of models) {
+    const rate = modelRate(item);
+    if (rate !== undefined && rate < bestRate) {
+      bestRate = rate;
+      best = item;
+    }
+  }
+  return (best ?? models[0])?.value ?? "";
+}
+
 /** 通过会话鉴权的内部端点取数据，不需要用户自己造 API Key。 */
 async function fetchPlaygroundModels(signal?: AbortSignal) {
   const response = await fetch("/api/playground/models", { credentials: "same-origin", signal });
@@ -63,7 +89,7 @@ export function PlaygroundPage() {
   const valueOf = (item: { id: string; providers: string[] }): string =>
     item.providers.length === 1 ? `${item.id}@${item.providers[0]}` : item.id;
   const models = fetched.map((item) => ({ ...item, value: valueOf(item) }));
-  const selectedModel = model || (models[0]?.value ?? "");
+  const selectedModel = model || pickDefaultValue(models);
   // 选中模型的元数据：优先精确匹配 value，退化为按小写基础名匹配
   const selectedInfo =
     models.find((item) => item.value === selectedModel) ??

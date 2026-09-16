@@ -53,7 +53,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(screen.queryByTestId("playground-key")).not.toBeInTheDocument();
   });
 
-  it("选中模型后展示渠道与元数据，双渠道倍率按渠道显示", async () => {
+  it("默认选中倍率最小的模型；选中后展示渠道与元数据，双渠道倍率按渠道显示", async () => {
     const META_MODELS = {
       object: "list",
       data: [
@@ -75,26 +75,32 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await waitForModelLoaded();
 
+    // 默认选中倍率最小的模型（DeepSeek 单渠道 TRAE x0.08 < glm-5.2 的 0.17）
+    expect((screen.getByTestId("model-select") as HTMLSelectElement).value)
+      .toBe("DeepSeek-V4-Flash-Official@trae");
     const meta = screen.getByTestId("model-meta");
-    // 渠道前置 icon 标注：双渠道全部显示（icon + 名称）
-    expect(meta).toHaveTextContent("CodeBuddy");
-    expect(meta).toHaveTextContent("TRAE");
-    // 双渠道倍率按渠道分别显示
-    expect(meta).toHaveTextContent("x0.29");
-    expect(meta).toHaveTextContent("x0.17");
-    // 合并字段照常展示；勾/叉用 icon（svg）而非文本符号
-    expect(meta).toHaveTextContent("200,000");
-    expect(meta).toHaveTextContent("图片");
-    expect(meta.querySelector("svg.lucide-check")).toBeInTheDocument();
-    expect(meta.querySelector("svg.lucide-x")).toBeInTheDocument();
-    expect(meta).not.toHaveTextContent("✓");
+    expect(meta).toHaveTextContent("x0.08");
+    expect(meta).not.toHaveTextContent("x0.29");
+
+    // 切到双渠道模型：渠道 icon 标注全部显示 + 倍率按渠道分别显示
+    await userEvent.selectOptions(screen.getByTestId("model-select"), "glm-5.2");
+    const meta2 = screen.getByTestId("model-meta");
+    expect(meta2).toHaveTextContent("CodeBuddy");
+    expect(meta2).toHaveTextContent("TRAE");
+    expect(meta2).toHaveTextContent("x0.29");
+    expect(meta2).toHaveTextContent("x0.17");
+    expect(meta2).toHaveTextContent("200,000");
+    expect(meta2).toHaveTextContent("图片");
+    expect(meta2.querySelector("svg.lucide-check")).toBeInTheDocument();
+    expect(meta2.querySelector("svg.lucide-x")).toBeInTheDocument();
+    expect(meta2).not.toHaveTextContent("✓");
 
     // 切到单渠道模型：倍率不按渠道拆分，显示合并值
     await userEvent.selectOptions(screen.getByTestId("model-select"),
       "DeepSeek-V4-Flash-Official@trae");
-    const meta2 = screen.getByTestId("model-meta");
-    expect(meta2).toHaveTextContent("x0.08");
-    expect(meta2).not.toHaveTextContent("x0.29");
+    const meta3 = screen.getByTestId("model-meta");
+    expect(meta3).toHaveTextContent("x0.08");
+    expect(meta3).not.toHaveTextContent("x0.29");
   });
 
   it("自动载入模型列表并展示可选渠道，请求走会话端点", async () => {
@@ -105,6 +111,8 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     const select = screen.getByTestId("model-select");
     // 双渠道模型出现在「自动路由」分组
     expect(select).toHaveTextContent("glm-5.2");
+    // 无倍率数据：默认选中回退列表第一个
+    expect((select as HTMLSelectElement).value).toBe("glm-5.2");
     const groups = [...select.querySelectorAll("optgroup")].map((g) => g.label);
     expect(groups).toContain("双渠道（自动调度）");
     expect(spy.mock.calls.some(([url]) => String(url).includes("/api/playground/models"))).toBe(true);
