@@ -40,9 +40,11 @@ const BASE_TS = 1_700_000_000;
 const EVENTS_PAGE1 = {
   events: [
     { rowid: 3, ts: BASE_TS + 200, username: "root", provider: "codebuddy", model: "glm-5.2",
+      credential_id: "cred_abc123", credential_name: "主账号",
       ok: 1, error_type: null, input_tokens: 120, output_tokens: 480, cached_tokens: 90,
       credit: 0.35, latency_ms: 8200, ttfb_ms: 2400 },
     { rowid: 2, ts: BASE_TS + 100, username: "root", provider: "trae", model: "deepseek-v4",
+      credential_id: null, credential_name: null,
       ok: 0, error_type: "rate_limit", input_tokens: null, output_tokens: null, cached_tokens: null,
       credit: null, latency_ms: 460, ttfb_ms: 120 },
   ],
@@ -228,6 +230,8 @@ describe("StatsPage", () => {
 
     const table = screen.getByTestId("events-table");
     expect(within(table).getByText("用户")).toBeInTheDocument();
+    expect(within(table).getByText("凭证")).toBeInTheDocument();
+    expect(within(table).getByText("主账号")).toBeInTheDocument();
     expect(within(table).getByText("glm-5.2")).toBeInTheDocument();
     expect(within(table).getByText("成功")).toBeInTheDocument();
     expect(within(table).getByText("rate_limit")).toBeInTheDocument();

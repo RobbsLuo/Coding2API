@@ -78,7 +78,7 @@ coding2api/
 │   │   └── runner.py            # 后台任务调度，接入应用生命周期
 │   ├── stats/
 │   │   ├── collector.py         # usage_events 写入（脱敏）
-│   │   └── query.py             # overview / by-provider 聚合查询
+│   │   └── query.py             # overview / by-provider / events 查询（events JOIN credentials 带凭证昵称）
 │   └── api/
 │       ├── deps.py              # Services 容器 + require_api_key / session / csrf 依赖
 │       ├── chat.py              # POST /v1/chat/completions

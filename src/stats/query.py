@@ -28,21 +28,32 @@ class StatsQuery:
             return round(expr_value / ok_count) if ok_count else 0
         return expr_value
 
-    def overview(self, *, username: str | None = None, provider: str | None = None,
-                 since: int | None = None) -> dict[str, Any]:
-        """总览。admin 传 username=None 看全局；普通用户只看自己。"""
+    @staticmethod
+    def _where(*, username: str | None = None, provider: str | None = None,
+               since: int | None = None, since_col: str = "ts",
+               before: int | None = None, before_col: str = "rowid",
+               alias: str = "") -> tuple[str, list[Any]]:
+        """拼 WHERE 子句与参数。alias 为 JOIN 时的表前缀（如 "e."）。"""
         clauses: list[str] = []
         params: list[Any] = []
         if username is not None:
-            clauses.append("username = ?")
+            clauses.append(f"{alias}username = ?")
             params.append(username)
         if provider is not None:
-            clauses.append("provider = ?")
+            clauses.append(f"{alias}provider = ?")
             params.append(provider)
         if since is not None:
-            clauses.append("ts >= ?")
+            clauses.append(f"{alias}{since_col} >= ?")
             params.append(since)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        if before is not None:
+            clauses.append(f"{alias}{before_col} < ?")
+            params.append(before)
+        return (f"WHERE {' AND '.join(clauses)}" if clauses else ""), params
+
+    def overview(self, *, username: str | None = None, provider: str | None = None,
+                 since: int | None = None) -> dict[str, Any]:
+        """总览。admin 传 username=None 看全局；普通用户只看自己。"""
+        where, params = self._where(username=username, provider=provider, since=since)
 
         row = self._db.connect().execute(
             f"""
@@ -76,15 +87,7 @@ class StatsQuery:
 
     def by_provider(self, *, username: str | None = None,
                     since: int | None = None) -> list[dict[str, Any]]:
-        clauses: list[str] = []
-        params: list[Any] = []
-        if username is not None:
-            clauses.append("username = ?")
-            params.append(username)
-        if since is not None:
-            clauses.append("ts >= ?")
-            params.append(since)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        where, params = self._where(username=username, since=since)
         rows = self._db.connect().execute(
             f"""
             SELECT provider, COUNT(*) AS requests, COALESCE(SUM(ok), 0) AS ok_count,
@@ -109,15 +112,7 @@ class StatsQuery:
         返回结构 {hour, codebuddy, trae} 恒定，指标语义随 metric 参数切换。
         """
         expr, as_mean = self._metric_sql(metric)
-        clauses: list[str] = []
-        params: list[Any] = []
-        if username is not None:
-            clauses.append("username = ?")
-            params.append(username)
-        if since is not None:
-            clauses.append("hour_utc >= ?")
-            params.append(since)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        where, params = self._where(username=username, since=since, since_col="hour_utc")
         rows = self._db.connect().execute(
             f"""
             SELECT hour_utc,
@@ -147,25 +142,18 @@ class StatsQuery:
         rowid 即插入序，稳定且可比大小，游标翻页不漏不重；
         返回 next_before 供下一页取「rowid 更小」的记录，null 表示到底。
         """
-        clauses: list[str] = []
-        params: list[Any] = []
-        if username is not None:
-            clauses.append("username = ?")
-            params.append(username)
-        if since is not None:
-            clauses.append("ts >= ?")
-            params.append(since)
-        if before is not None:
-            clauses.append("rowid < ?")
-            params.append(before)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        where, params = self._where(username=username, since=since, before=before,
+                                    alias="e.")
         rows = self._db.connect().execute(
             f"""
-            SELECT rowid, ts, username, provider, model, ok, error_type,
-                   input_tokens, output_tokens, reasoning_tokens, cached_tokens,
-                   credit, latency_ms, ttfb_ms
-            FROM usage_events {where}
-            ORDER BY rowid DESC LIMIT ?
+            SELECT e.rowid, e.ts, e.username, e.provider, e.credential_id, e.model,
+                   e.ok, e.error_type, e.input_tokens, e.output_tokens,
+                   e.reasoning_tokens, e.cached_tokens, e.credit, e.latency_ms,
+                   e.ttfb_ms, c.nickname AS credential_name
+            FROM usage_events e
+            LEFT JOIN credentials c ON c.id = e.credential_id
+            {where}
+            ORDER BY e.rowid DESC LIMIT ?
             """, [*params, limit + 1]).fetchall()
         has_more = len(rows) > limit
         page = rows[:limit]
@@ -184,15 +172,7 @@ class StatsQuery:
         返回结构 {models, points} 不变。
         """
         expr, as_mean = self._metric_sql(metric)
-        clauses: list[str] = []
-        params: list[Any] = []
-        if username is not None:
-            clauses.append("username = ?")
-            params.append(username)
-        if since is not None:
-            clauses.append("hour_utc >= ?")
-            params.append(since)
-        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        where, params = self._where(username=username, since=since, since_col="hour_utc")
         rows = self._db.connect().execute(
             f"""
             SELECT hour_utc, model, SUM(requests) AS requests,

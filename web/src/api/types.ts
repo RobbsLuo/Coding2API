@@ -103,6 +103,10 @@ export interface UsageEventRow {
   username: string;
   provider: string;
   model: string;
+  /** 本次请求命中的凭证 ID（预热失败等无凭证场景为 null） */
+  credential_id: string | null;
+  /** 凭证昵称（凭证已删除时为 null，回退展示 credential_id 前缀） */
+  credential_name: string | null;
   ok: number;
   error_type: string | null;
   input_tokens: number | null;

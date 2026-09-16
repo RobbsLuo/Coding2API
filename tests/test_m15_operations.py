@@ -1743,6 +1743,27 @@ def test_stats_events_pagination_and_filters(stats):
     assert [e["model"] for e in query.events(since=1003)["events"]] == ["m4", "m3"]
 
 
+def test_stats_events_include_credential_name(repo):
+    """明细带凭证 ID 与昵称：存在时 JOIN 昵称；已删除/无凭证时回退 NULL。"""
+    credentials, db = repo
+    collector, query = StatsCollector(db), StatsQuery(db)
+    keep_id = credentials.add(provider="trae", credential_data={"accessToken": "t"},
+                              nickname="主号")
+    ghost_id = credentials.add(provider="trae", credential_data={"accessToken": "g"},
+                               nickname="将删")
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     credential_id=keep_id)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     credential_id=ghost_id)
+    collector.record(username="u", provider="trae", model="m", ok=True)  # 无凭证
+    assert credentials.delete(ghost_id) is True
+
+    rows = {e["credential_id"]: e for e in query.events()["events"]}
+    assert rows[keep_id]["credential_name"] == "主号"
+    assert rows[ghost_id]["credential_name"] is None        # 已删除 → 回退
+    assert rows[None]["credential_name"] is None            # 无凭证
+
+
 def test_stats_events_endpoint_scope_and_clamp(admin_client):
     """明细端点：admin 可看他人；limit 被夹在 1..200。"""
     _app, client = admin_client

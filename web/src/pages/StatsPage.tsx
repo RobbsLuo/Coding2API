@@ -301,6 +301,7 @@ export function StatsPage() {
                   <TableHead>时间</TableHead>
                   {session.is_admin && <TableHead>用户</TableHead>}
                   <TableHead>渠道</TableHead>
+                  <TableHead>凭证</TableHead>
                   <TableHead>模型</TableHead>
                   <TableHead>状态</TableHead>
                   <TableHead className="text-right">输入</TableHead>
@@ -323,6 +324,9 @@ export function StatsPage() {
                         <ProviderIcon provider={row.provider as Provider} size={13} />
                         {PROVIDER_LABEL[row.provider as Provider] ?? row.provider}
                       </span>
+                    </TableCell>
+                    <TableCell className="max-w-40 truncate" title={row.credential_name ?? row.credential_id ?? undefined}>
+                      {row.credential_name ?? (row.credential_id ? row.credential_id.slice(0, 12) : "—")}
                     </TableCell>
                     <TableCell className="max-w-48 truncate" title={row.model}>{row.model}</TableCell>
                     <TableCell>{statusCell(row)}</TableCell>
