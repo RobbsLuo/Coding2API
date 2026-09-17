@@ -16,6 +16,8 @@ services:
       # 模型列表黑名单（fnmatch glob，逗号分隔，完全替换语义）
       MODEL_BLOCKLIST: ${MODEL_BLOCKLIST:-custom_model_*,*sub*agent*,summary,browser_use_*}
       QUOTA_PROBE_MINUTES: ${QUOTA_PROBE_MINUTES:-60}
+      # 到期排序窗口（秒）：把距到期 ≤ 该值的积分加总，多的账号先用；≤0 关闭
+      QUOTA_EXPIRY_WINDOW_SECONDS: ${QUOTA_EXPIRY_WINDOW_SECONDS:-129600}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "${PORT:-8000}:8000"

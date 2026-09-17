@@ -54,7 +54,9 @@ def create_router(services: Services) -> APIRouter:
 
     @router.get("/api/credentials")
     async def list_credentials(principal=Depends(principal_from_request)):
-        return {"credentials": credentials.list_all(), "viewer": principal.username,
+        window = services.settings.quota_expiry_window_seconds
+        return {"credentials": credentials.list_all(expiring_window=window),
+                "expiry_window_seconds": window, "viewer": principal.username,
                 "is_admin": principal.is_admin}
 
     @router.post("/api/credentials")

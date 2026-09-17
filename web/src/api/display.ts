@@ -47,6 +47,21 @@ export function quotaSemantics(credential: Credential): string {
   return `本周期剩余，${date} 重置`;
 }
 
+/**
+ * 到期指标：调度窗口内即将到期的积分（后端与选号排序同源计算）。
+ *
+ * 返回 null 表示「不值得展示」：渠道没有到期信息（TRAE → 后端回 null），
+ * 或窗口关闭 / 确实没有积分临近过期（后端回 0）。只有关键的 0 需要藏起来。
+ */
+export function expiringQuotaLabel(
+  credits: number | null | undefined,
+  windowSeconds: number | undefined,
+): string | null {
+  if (credits === null || credits === undefined) return null;
+  if (credits <= 0 || !windowSeconds || windowSeconds <= 0) return null;
+  return `${formatNumber(credits)} 积分将在 ${formatDuration(windowSeconds)}内过期`;
+}
+
 export function cooldownRemaining(coolingUntil: number | null, now = Date.now() / 1000): number {
   if (!coolingUntil) return 0;
   return Math.max(0, Math.ceil(coolingUntil - now));

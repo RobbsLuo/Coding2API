@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatChartValue } from "../display";
+import { expiringQuotaLabel, formatChartValue } from "../display";
 
 describe("formatChartValue", () => {
   it("请求次数：紧凑数字 + 单位（次）", () => {
@@ -19,5 +19,19 @@ describe("formatChartValue", () => {
 
   it("未知指标回退请求次数", () => {
     expect(formatChartValue(12, "bogus")).toBe("12 (次)");
+  });
+});
+
+describe("expiringQuotaLabel", () => {
+  it("窗口内有过期积分时给出量级与剩余时间", () => {
+    expect(expiringQuotaLabel(100, 129600)).toBe("100 积分将在 1.5 天内过期");
+    expect(expiringQuotaLabel(25.5, 3600)).toBe("25.5 积分将在 1.0 小时内过期");
+  });
+
+  it("无到期信息、窗口关闭或零积分时不展示", () => {
+    expect(expiringQuotaLabel(null, 129600)).toBeNull();
+    expect(expiringQuotaLabel(100, undefined)).toBeNull();
+    expect(expiringQuotaLabel(100, 0)).toBeNull();
+    expect(expiringQuotaLabel(0, 129600)).toBeNull();
   });
 });

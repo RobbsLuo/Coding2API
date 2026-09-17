@@ -19,7 +19,7 @@
 | Q9 | 存储 | SQLite，schema 重新设计，凭证入加密列 |
 | Q10 | 配额 | 不做配额，只做按人统计 |
 | Q11 | 前端范围 | 中等 6 页（无设置页，配置走 env） |
-| Q12 | 调度策略 | 统一健康度 + 冷却状态机，保留手动 pin |
+| Q12 | 调度策略 | 统一健康度 + 到期积分指标 + 冷却状态机，保留手动 pin |
 | Q13 | Anthropic | v1.1，架构预留中立事件层 |
 | Q14 | 测试 | 核心路径 100%，其余 70%，契约测试优先 |
 | Q15/Q26 | 健康度归一化 | 剩余积分百分比，跨 provider 可比 |
@@ -36,6 +36,7 @@
 | Q28 | 容器 | Dockerfile + compose 双份，CI 验证 compose |
 | Q29 | 文档 | 中文为主 + 英文 README |
 | Q30 | License | MIT + NOTICE 三方溯源，不做自更新 |
+| Q31 | 到期积分排序 | 窗口内到期积分总量做第一排序键（默认 36h，env 可配）；落库到期阶梯而非单一日期 |
 
 ## 2. 目标与非目标
 
@@ -123,9 +124,17 @@
 
 Provider 承担上游协议私有部分：发请求、解析事件、分类错误，以及凭证生命周期与健康度探测。调度、冷却、重试、统计全在共享引擎。协议定义见 [TECHNICAL.md §4](TECHNICAL.md)。
 
-### 4.3 调度器（Q12=B + Q26）
+### 4.3 调度器（Q12=B + Q26 + Q31）
 
-统一实现，两个 provider 共用：手动 pin 优先 → 过滤 healthy → 按健康度三态排序（`known 降序 > unknown > exhausted`）→ 无可用返回 None。冷却与错误累计规则见 [TECHNICAL.md §6](TECHNICAL.md)。
+统一实现，两个 provider 共用：手动 pin 优先 → 过滤 healthy → 到期积分多者优先（把 `quota_expiry_ladder` 中距到期 ≤ `QUOTA_EXPIRY_WINDOW_SECONDS`、默认 36h 的积分加总）→ 按健康度三态排序（`known 降序 > unknown > exhausted`）→ 无可用返回 None。到期指标让快过期的积分先用掉，避免白丢；冷却与错误累计规则见 [TECHNICAL.md §6](TECHNICAL.md)。
+
+**为什么是「窗口内积分总量」而不是「是否即将过期」（Q31）**。实测 CodeBuddy 的额度不是一个整块周期，而是几十个各自独立到期的小包（每日 100 积分 × N，`get-user-resource` 一次返回 30~36 个套餐），这决定了三个取舍：
+
+- **只存一个日期没有区分度**：各账号的「最早到期」经常落在同一天同一时刻，布尔分组退化成健康度排序。改成统计窗口内的到期积分总量，账号之间才有可比的高低。
+- **落库到期阶梯而非预计算数字**：窗口是运行时参数，存 `[(到期 epoch, 该包剩余积分)]` 后，改 `QUOTA_EXPIRY_WINDOW_SECONDS` 立刻生效，不必等下一轮探测。
+- **过滤条件必须是 `end > now`**：上游会把已过期套餐一起返回（`PackageEndTimeRangeBegin` 过滤的是套餐有效期，不是积分周期），不过滤的话「最早到期」永远是过去的时间，指标恒为 0；已用完的包（剩余 0）同样排除，它不携带积分。
+
+窗口 `≤0` 等于全员 0 分，退回纯健康度排序；TRAE 无周期概念，恒为 0 分。
 
 **健康度归一化**（Q26 核心）。两者都是积分制，但周期语义不同：
 
@@ -186,7 +195,7 @@ v1 只接 OpenAI 出口，但上游 SSE 解析到「中立事件」这一步独�
 
 - **用户不建表**：`users.txt`（PBKDF2）是唯一源，角色走 `ADMIN_USERNAMES` env；`api_keys.username` 由应用层校验存在性，不加外键
 - **API Key 存摘要**：SHA-256，明文仅创建时返回一次
-- **凭证加密列**：`data_enc` 走 Fernet，调度状态（`health` / `cooling_until` / `err_count` / `pinned`）落库，进程重启不丢冷却状态
+- **凭证加密列**：`data_enc` 走 Fernet，调度状态（`health` / `cooling_until` / `err_count` / `pinned` / `quota_expiry_ladder`）落库，进程重启不丢冷却状态与到期阶梯
 - **用量脱敏**：`usage_events`（明细 90 天）+ `usage_hourly`（小时汇总永久），`credit` 可空仅辅助展示
 - 签到去重与模型列表缓存均进程内实现，不进库
 

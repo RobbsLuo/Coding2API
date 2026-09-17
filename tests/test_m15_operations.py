@@ -1633,6 +1633,16 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
             latency_sum INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (hour_utc, username, provider, model))
     """)
+    # 旧版 credentials：无 quota_expiry_ladder 列（到期排序指标升级前的结构）
+    conn.execute("""
+        CREATE TABLE credentials (
+            id TEXT PRIMARY KEY, provider TEXT NOT NULL, data_enc TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1, disabled INTEGER NOT NULL DEFAULT 0,
+            disabled_reason TEXT, pinned INTEGER NOT NULL DEFAULT 0,
+            health INTEGER, cooling_until INTEGER, err_count INTEGER NOT NULL DEFAULT 0,
+            quota_remaining REAL, quota_total REAL, quota_cycle_end INTEGER,
+            quota_probed_at INTEGER, created_at INTEGER NOT NULL, added_by TEXT)
+    """)
     conn.commit()
     conn.close()
 
@@ -1641,6 +1651,16 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     assert "cached_tokens" in events_columns
     hourly_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(usage_hourly)")}
     assert "ttfb_sum" in hourly_columns
+    cred_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
+    assert "quota_expiry_ladder" in cred_columns
+    # 补列后可写入、可读出
+    db.connect().execute(
+        "INSERT INTO credentials (id, provider, data_enc, quota_expiry_ladder, created_at) "
+        "VALUES ('cred_1', 'codebuddy', 'x', '[[123, 100.0]]', 1)")
+    db.connect().commit()
+    assert db.connect().execute(
+        "SELECT quota_expiry_ladder FROM credentials WHERE id = 'cred_1'").fetchone()[0] == \
+        "[[123, 100.0]]"
     # schema 版本推进到位；补列后新聚合可写
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     db.connect().execute(
@@ -1993,6 +2013,39 @@ def test_credentials_endpoint_exposes_admin_flag(tmp_path):
         assert body["viewer"] == "guest" and body["is_admin"] is False
 
 
+def test_credentials_endpoint_exposes_expiring_credits(tmp_path):
+    """到期指标随列表下发（与调度排序同源）；无周期信息为 None，原始阶梯不外泄。"""
+    from src.db.repo import _ladder_text
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings)
+    with TestClient(app) as client:
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+        repo = app.state.credentials
+        repo.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+        repo.add(provider="trae", credential_data={"token": "x"})
+        ids = {row["provider"]: row["id"] for row in repo.list_all()}
+        now = int(time.time())
+        ladder = _ladder_text([(now + 3600, 100.0), (now + 999_999, 50.0)])
+        conn = repo._db.connect()
+        conn.execute(
+            "UPDATE credentials SET quota_expiry_ladder = ? WHERE id = ?",
+            (ladder, ids["codebuddy"]))
+        conn.commit()
+        body = client.get("/api/credentials").json()
+
+    rows = {row["provider"]: row for row in body["credentials"]}
+    assert body["expiry_window_seconds"] == settings.quota_expiry_window_seconds
+    assert rows["codebuddy"]["quota_expiring_credits"] == 100.0
+    assert rows["trae"]["quota_expiring_credits"] is None
+    assert "quota_expiry_ladder" not in rows["codebuddy"]
+    # 窗口关闭 → 0 而不是 None，展示层据此隐藏该行
+    closed = {row["provider"]: row for row in repo.list_all(
+        expiring_window=0, now=now)}
+    assert closed["codebuddy"]["quota_expiring_credits"] == 0.0
+
+
 # ------------------------------------------------------- 前端静态资源服务
 
 def _spa_client(tmp_path, *, build: bool = True, monkeypatch=None):
@@ -2159,6 +2212,57 @@ async def test_stream_without_usage_frame_records_null_tokens(repo):
             {"messages": [{"role": "user", "content": "hi"}], "stream": True})):
         pass
     assert collector.events[-1]["input_tokens"] is None
+
+
+async def test_stream_prefers_credential_expiring_soon(repo):
+    """到期积分指标贯通到真实选号：低健康度但快过期积分多的号先被选中。"""
+    credentials, _db = repo
+    steady_id = credentials.add(provider="codebuddy", credential_data={"bearer_token": "s"})
+    burn_id = credentials.add(provider="codebuddy", credential_data={"bearer_token": "b"})
+    now = int(time.time())
+    credentials.save_quota(steady_id, Quota(remaining=95, total=100,
+                                            cycle_end=now + 48 * 3600, probed_at=now))
+    credentials.save_quota(burn_id, Quota(remaining=10, total=100, cycle_end=now + 600,
+                                           expiry_ladder=[(now + 600, 100.0),
+                                                          (now + 700, 50.0)],
+                                           probed_at=now))
+    cands = {c.credential_id: c for c in credentials.candidates()}
+    assert cands[burn_id].expiry_ladder == [(now + 600, 100.0), (now + 700, 50.0)]
+    assert cands[steady_id].expiry_ladder is None
+    collector = RecordingCollector()
+    executor = _exec_with_stats(repo, [GOOD_EVENTS], collector)
+
+    from src.compat.openai.request import parse_chat_request
+
+    async for _ in executor.stream(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}], "stream": True}),
+            username="alice"):
+        pass
+
+    assert collector.events[-1]["credential_id"] == burn_id
+
+
+async def test_stream_expiry_window_zero_keeps_health_order(repo):
+    """窗口关闭后退回健康度排序（到期指标全员 0 分）。"""
+    credentials, _db = repo
+    steady_id = credentials.add(provider="codebuddy", credential_data={"bearer_token": "s"})
+    burn_id = credentials.add(provider="codebuddy", credential_data={"bearer_token": "b"})
+    now = int(time.time())
+    credentials.save_quota(steady_id, Quota(remaining=95, total=100, probed_at=now))
+    credentials.save_quota(burn_id, Quota(remaining=10, total=100,
+                                           expiry_ladder=[(now + 600, 100.0)],
+                                           probed_at=now))
+    collector = RecordingCollector()
+    executor = _exec_with_stats(repo, [GOOD_EVENTS], collector, expiry_window=0)
+
+    from src.compat.openai.request import parse_chat_request
+
+    async for _ in executor.stream(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}], "stream": True}),
+            username="alice"):
+        pass
+
+    assert collector.events[-1]["credential_id"] == steady_id
 
 
 async def test_stream_records_failure_when_credentials_exhausted(repo):

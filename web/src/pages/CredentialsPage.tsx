@@ -26,6 +26,7 @@ import {
 import {
   credentialState,
   cooldownRemaining,
+  expiringQuotaLabel,
   formatDuration,
   formatNumber,
   formatTime,
@@ -79,6 +80,7 @@ export function CredentialsPage() {
   const [probeDetail, setProbeDetail] = useState<string | null>(null);
 
   const credentials = data?.credentials ?? [];
+  const expiryWindow = data?.expiry_window_seconds ?? 0;
   const isAdmin = data?.is_admin ?? false;
   const now = Date.now() / 1000;
 
@@ -293,7 +295,7 @@ export function CredentialsPage() {
                 <TableHead>渠道</TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">状态<ColumnHint text="可用/冷却中/已禁用/已关闭/额度耗尽；冷却中到期自动恢复。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">健康度<ColumnHint text="剩余积分占比三态：已知百分比 / 未探测 / 已耗尽。未探测≠已耗尽，点「探测」可重试。" /></span></TableHead>
-                <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。单位都是积分。" /></span></TableHead>
+                <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期积分行＝调度窗口内即将过期、会被优先消耗的额度。" /></span></TableHead>
                 {isAdmin && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测：查剩余额度；签到：领当日积分；指定：设为优先；停用/删除：移出调度或移除。" /></span></TableHead>}
               </TableRow>
             </TableHeader>
@@ -303,6 +305,7 @@ export function CredentialsPage() {
                   key={credential.id}
                   credential={credential}
                   now={now}
+                  expiryWindow={expiryWindow}
                   isAdmin={isAdmin}
                   busy={busy}
                   confirming={confirmDelete === credential.id}
@@ -386,6 +389,7 @@ export function CredentialsPage() {
 function Row({
   credential,
   now,
+  expiryWindow,
   isAdmin,
   busy,
   confirming,
@@ -394,12 +398,14 @@ function Row({
 }: {
   credential: Credential;
   now: number;
+  expiryWindow: number;
   isAdmin: boolean;
   busy: boolean;
   confirming: boolean;
   onConfirmDelete: (id: string | null) => void;
   actions: Actions;
 }) {
+  const expiring = expiringQuotaLabel(credential.quota_expiring_credits, expiryWindow);
   const health = healthView(credential.health);
   const state = credentialState(credential, now);
   const cooldown = cooldownRemaining(credential.cooling_until, now);
@@ -439,6 +445,11 @@ function Row({
       </TableCell>
       <TableCell className="text-xs">
         {formatNumber(credential.quota_remaining)} / {formatNumber(credential.quota_total)}
+        {expiring && (
+          <div className="text-warn" data-testid="quota-expiring">
+            {expiring}
+          </div>
+        )}
         <div className="text-muted-foreground">{quotaSemantics(credential)}</div>
         <div className="text-muted-foreground">
           探测于 {formatTime(credential.quota_probed_at)}

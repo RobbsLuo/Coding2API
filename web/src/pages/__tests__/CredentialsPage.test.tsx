@@ -7,7 +7,8 @@ const ADMIN = { username: "root", is_admin: true } as const;
 const READER = { username: "guest", is_admin: false } as const;
 
 function listBody(credentials: unknown[], isAdmin = true) {
-  return { credentials, viewer: isAdmin ? "root" : "guest", is_admin: isAdmin };
+  return { credentials, expiry_window_seconds: 129600,
+            viewer: isAdmin ? "root" : "guest", is_admin: isAdmin };
 }
 
 describe("CredentialsPage", () => {
@@ -54,6 +55,22 @@ describe("CredentialsPage", () => {
     const row = screen.getByTestId(/^row-/);
     expect(within(row).getByText("冷却中")).toBeInTheDocument();
     expect(within(row).getByText(/小时/)).toBeInTheDocument();
+  });
+
+  it("窗口内即将到期的积分单独成行；无到期信息的渠道不显示", async () => {
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ id: "cb", provider: "codebuddy", quota_expiring_credits: 100 }),
+        makeCredential({ id: "tr", provider: "trae", quota_expiring_credits: null }),
+        makeCredential({ id: "zero", provider: "codebuddy", quota_expiring_credits: 0 }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const shown = screen.getAllByTestId("quota-expiring");
+    expect(shown).toHaveLength(1);
+    expect(shown[0]).toHaveTextContent("100 积分将在");
   });
 
   it("启用/停用调用 toggle 接口", async () => {

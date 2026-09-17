@@ -8,8 +8,8 @@
 
 ## 特性
 
-- **OpenAI 兼容出口**：`/v1/chat/completions`（流式 + 非流式）、`/v1/models`
-- **统一调度**：扁平模型名按健康度自动选号，`模型@渠道` 强制指定；三态健康度 + 分级冷却自动避开坏号
+- **OpenAI 兼容出口**：`/v1/chat/completions`（流式 + 非流式）、`/v1/models`、`/v1/user/balance`（DeepSeek 兼容余额查询）
+- **统一调度**：扁平模型名按健康度自动选号，`模型@渠道` 强制指定；三态健康度 + 分级冷却自动避开坏号；积分 36h 内即将到期多者优先（先用掉，避免过期浪费；管理台凭证列表直接显示每个账号的到期积分）
 - **公共凭证池**：admin 集中维护、全员共享；按人统计用量
 - **完整凭证运维**：设备码登录、多账号切换、额度探测、每日签到、token 预刷新；凭证加密入库（`APP_SECRET`）
 - **脱敏统计**：不存对话内容；明细 90 天、小时汇总永久；按人/渠道/模型可视化
@@ -63,7 +63,27 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 `模型@渠道` 强制指定上游（如 `glm-5.2@trae`），不写则自动选健康渠道。
 
-任意 OpenAI 兼容客户端可直接接入（Base URL `http://127.0.0.1:8000/v1`、Key 用 `sk-...`、模型名以 `GET /v1/models` 为准）；「Playground」页用登录会话直接测试，无需 API Key。管理台右上角「功能说明」按钮可随时查各功能入口。
+任意 OpenAI 兼容客户端可直接接入（Base URL `http://127.0.0.1:8000/v1`、Key 用 `sk-...`、模型名以 `GET /v1/models` 为准）；「Playground」页用登录会话直接测试，无需 API Key。
+
+### 余额查询
+
+`GET /v1/user/balance` 兼容 DeepSeek 余额接口的响应形状，Bearer `sk-...` 鉴权，供 Cherry Studio / cc-switch 等客户端显示余额。余额来自凭证池的额度探测缓存（`QUOTA_PROBE_MINUTES` 周期刷新），按可用凭证汇总，单位为上游 credits：
+
+```bash
+curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的key"
+```
+
+```json
+{
+  "is_available": true,
+  "balance_infos": [{"currency": "credits", "total_balance": "60.00",
+                     "granted_balance": "0.00", "topped_up_balance": "0.00"}],
+  "balance_known": true,
+  "providers": [{"provider": "codebuddy", "remaining": 50.0, "total": 150.0, "credentials": 2}]
+}
+```
+
+池内凭证从未探测成功时 `balance_known` 为 `false`（余额未知，不是 0）。管理台右上角「功能说明」按钮可随时查各功能入口。
 
 ## 后台任务
 
@@ -82,6 +102,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 | `USERS_FILE` | `secrets/users.txt` | 用户文件路径 |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |
+| `QUOTA_EXPIRY_WINDOW_SECONDS` | `129600` | 到期排序窗口：把距到期 ≤ 该秒数的积分加总，多的账号先用（避免积分过期浪费）；`≤0` 关闭，退回纯健康度排序 |
 | `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*` | 模型列表黑名单（仅影响列表展示） |
 | `ALLOWED_HOSTS` | 空 | Host 白名单，防 DNS rebinding |
 

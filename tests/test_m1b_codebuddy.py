@@ -6,6 +6,7 @@ fixture 从 codebuddy2api 的 tests/test_stream_service.py 提取（真实 SSE �
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -29,6 +30,7 @@ from src.provider.codebuddy.client import (
     CodeBuddyCredential,
     CodeBuddyProvider,
     UpstreamHTTPError,
+    _cycle_end_epoch,
     build_headers,
     parse_credential,
 )
@@ -344,14 +346,25 @@ async def test_fetch_personal_quota_parses_real_nested_response():
         return httpx.Response(200, text=fixture("quota-personal.json"))
 
     quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
-    # fixture 是脱敏后的真实响应：两个 Status=0 的套餐
-    #   CodeBuddy个人体验版        500 / 500
-    #   CodeBuddy个人版国内运营裂变包 5000 / 4767.50000158
+    # fixture 是脱敏后的真实响应：两个 Status=0 的套餐（累加 5500 / 5267.5），
+    # 但 TotalDosage 是脱敏前的官方汇总值 9070——优先取官方口径，不逐包累加。
     assert quota.total == 5500.0
-    assert quota.remaining == pytest.approx(5267.50000158)
+    assert quota.remaining == 9070.0
     assert quota.cycle_end is not None
     assert quota.probe_failed is False
-    assert quota.remaining < quota.total      # 真实已用量必须体现出来
+
+
+@pytest.mark.parametrize(("body", "expected"), [
+    ({"data": None}, None),                                # data 非 dict
+    ({"data": {"Response": {"Data": {"TotalDosage": 9070}}}}, 9070.0),
+    ({"data": {"Response": {"Data": {"TotalDosage": "3344.5"}}}}, 3344.5),
+    ({"data": {"Response": {"Data": {}}}}, None),         # 缺失 → 回退累加
+    ({"data": {"Response": {"Data": {"TotalDosage": "x"}}}}, None),  # 非数字
+])
+def test_total_dosage_extracts_official_remaining(body, expected):
+    from src.provider.codebuddy.client import _total_dosage
+
+    assert _total_dosage(body) == expected
 
 
 async def test_fetch_personal_quota_prefers_precise_over_plain():
@@ -372,6 +385,79 @@ async def test_fetch_personal_quota_prefers_precise_over_plain():
     assert quota.total == 150.0      # 100(Precise 字符串) + 50(回退非 Precise)
     assert quota.remaining == 70.0
     assert quota.cycle_end is not None
+
+
+def _days(offset: int) -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() + offset * 3600))
+
+
+async def test_fetch_personal_quota_cycle_end_is_earliest_not_expired():
+    """账号常有几十个套餐各自独立到期（每日 100 积分 × N），cycle_end 取最早的那个。
+
+    上游会把已过期套餐一起返回（EndTimeRangeBegin 过滤的是套餐有效期，不是积分周期），
+    直接取最小值会得到过去的时间，调度器的到期偏好就永远不触发。
+    """
+    def handler(_request: httpx.Request) -> httpx.Response:
+        accounts = [
+            {"Status": 0, "CycleCapacitySizePrecise": "100",
+             "CycleCapacityRemainPrecise": "100", "CycleEndTime": _days(400)},
+            {"Status": 0, "CycleCapacitySizePrecise": "100",
+             "CycleCapacityRemainPrecise": "100", "CycleEndTime": _days(2)},
+            {"Status": 0, "CycleCapacitySizePrecise": "100",
+             "CycleCapacityRemainPrecise": "64", "CycleEndTime": _days(-1)},
+        ]
+        return httpx.Response(200, json=_quota_body(accounts))
+
+    quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
+    assert quota.cycle_end == _cycle_end_epoch(_days(2))
+    assert quota.cycle_end < _cycle_end_epoch(_days(400))
+    assert quota.cycle_end > time.time()          # 已过期套餐不参与
+    assert quota.total == 300.0
+    # 到期阶梯保留套餐顺序，只收未过期的包
+    assert quota.expiry_ladder == [(_cycle_end_epoch(_days(400)), 100.0),
+                                   (_cycle_end_epoch(_days(2)), 100.0)]
+
+
+async def test_fetch_personal_quota_expiry_ladder_filters_packages():
+    """到期阶梯只收「未过期 + 有余额」的包：状态异常、零容量、已用完、
+    时间格式不合法的套餐都排除；total/remaining 仍按原口径累加。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        accounts = [
+            {"Status": 1, "CycleCapacitySizePrecise": "100",
+             "CycleCapacityRemainPrecise": "100", "CycleEndTime": _days(1)},
+            {"Status": 0, "CycleCapacitySizePrecise": "0",
+             "CycleCapacityRemainPrecise": "0", "CycleEndTime": _days(1)},
+            {"Status": 0, "CycleCapacitySizePrecise": "100",
+             "CycleCapacityRemainPrecise": "0", "CycleEndTime": _days(1)},
+            {"Status": 0, "CycleCapacitySizePrecise": "100",
+             "CycleCapacityRemainPrecise": "100", "CycleEndTime": "not-a-date"},
+            {"Status": 0, "CycleCapacitySizePrecise": "100",
+             "CycleCapacityRemainPrecise": "40", "CycleEndTime": _days(3)},
+        ]
+        return httpx.Response(200, json=_quota_body(accounts))
+
+    quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
+    assert quota.expiry_ladder == [(_cycle_end_epoch(_days(3)), 40.0)]
+    assert quota.total == 300.0
+    assert quota.remaining == 140.0
+    assert quota.cycle_end == _cycle_end_epoch(_days(3))
+
+
+async def test_fetch_personal_quota_cycle_end_none_when_all_packages_expired():
+    """套餐全部过期（积分已作废）时不给出过去的到期点。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        accounts = [
+            {"Status": 0, "CycleCapacitySizePrecise": "100",
+             "CycleCapacityRemainPrecise": "100", "CycleEndTime": _days(-2)},
+            {"Status": 0, "CycleCapacitySizePrecise": "100",
+             "CycleCapacityRemainPrecise": "100", "CycleEndTime": _days(-48)},
+        ]
+        return httpx.Response(200, json=_quota_body(accounts))
+
+    quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
+    assert quota.cycle_end is None
+    assert quota.total == 200.0
+    assert quota.expiry_ladder == []
 
 
 @pytest.mark.parametrize("accounts", [None, []])

@@ -142,10 +142,15 @@ describe("OpenAI 客户端接入面板", () => {
     expect(baseUrl).toBe(`${window.location.origin}/v1`);
     expect(screen.getByTestId("openai-entry")).toHaveTextContent("/chat/completions");
     expect(screen.getByTestId("openai-entry")).toHaveTextContent("/models");
+    expect(screen.getByTestId("openai-entry")).toHaveTextContent("/user/balance");
     expect(screen.getByTestId("example-curl")).toHaveTextContent("sk-…");
     expect(screen.getByTestId("example-python")).toHaveTextContent(
       `base_url="${window.location.origin}/v1"`,
     );
+    expect(screen.getByTestId("example-balance-curl")).toHaveTextContent(
+      `curl ${window.location.origin}/v1/user/balance`,
+    );
+    expect(screen.getByTestId("example-balance-curl")).toHaveTextContent("sk-…");
   });
 
   it("创建 Key 后示例自动带入真实 Key", async () => {
@@ -167,6 +172,7 @@ describe("OpenAI 客户端接入面板", () => {
       expect(screen.getByTestId("example-curl")).toHaveTextContent("sk-real-key");
     });
     expect(screen.getByTestId("example-python")).toHaveTextContent('api_key="sk-real-key"');
+    expect(screen.getByTestId("example-balance-curl")).toHaveTextContent("sk-real-key");
   });
 });
 
@@ -180,4 +186,24 @@ it("调用示例默认折叠，点击端点行展开", async () => {
   await userEvent.click(details.querySelector("summary")!);
   expect(details.open).toBe(true);
   expect(screen.getByTestId("example-curl")).toBeVisible();
+});
+
+it("余额端点示例同样默认折叠，展开后可复制 curl", async () => {
+  const writeText = vi.fn(async () => undefined);
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  mockFetch({ "/api/api-keys": { api_keys: [] } });
+  renderPage(<ApiKeysPage />);
+  await settle();
+
+  const details = screen.getByTestId("example-details-balance") as HTMLDetailsElement;
+  expect(details.open).toBe(false);
+  await userEvent.click(details.querySelector("summary")!);
+  expect(details.open).toBe(true);
+
+  const copy = screen.getByTestId("copy-balance-curl");
+  await userEvent.click(copy);
+  expect(writeText).toHaveBeenCalledWith(
+    `curl ${window.location.origin}/v1/user/balance \\
+  -H "Authorization: Bearer sk-…"`,
+  );
 });

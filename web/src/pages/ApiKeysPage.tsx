@@ -28,6 +28,7 @@ export const openaiBaseUrl = (): string => `${window.location.origin}/v1`;
 export function openaiExamples(baseUrl: string, apiKey: string): {
   curl: string;
   python: string;
+  balance: string;
 } {
   const key = apiKey || "sk-…";
   return {
@@ -47,6 +48,8 @@ resp = client.chat.completions.create(
     messages=[{"role": "user", "content": "你好"}],
 )
 print(resp.choices[0].message.content)`,
+    balance: `curl ${baseUrl}/user/balance \\
+  -H "Authorization: Bearer ${key}"`,
   };
 }
 
@@ -70,6 +73,63 @@ function CopyButton({
       {label === "已复制" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
       {label}
     </Button>
+  );
+}
+
+/** 端点展开后的单条调用示例：标题 + 复制按钮 + 代码块 */
+function CodeExample({
+  label,
+  text,
+  copied,
+  onCopy,
+  testid,
+  copyTestid,
+}: {
+  label: string;
+  text: string;
+  copied: boolean;
+  onCopy: () => void;
+  testid: string;
+  copyTestid?: string;
+}) {
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between text-foreground">
+        <span>{label}</span>
+        <CopyButton label={copied ? "已复制" : "复制"} onCopy={onCopy} testid={copyTestid} />
+      </div>
+      <pre data-testid={testid} className="overflow-x-auto rounded-lg border border-input bg-muted/40 p-3 font-mono text-xs">
+        {text}
+      </pre>
+    </div>
+  );
+}
+
+/** 折叠的端点行：summary 显示方法与说明，展开后可复制调用示例 */
+function EndpointRow({
+  method,
+  path,
+  description,
+  children,
+  testid,
+}: {
+  method: string;
+  path: string;
+  description: string;
+  children: React.ReactNode;
+  testid: string;
+}) {
+  return (
+    <details data-testid={testid} className="group rounded-lg border border-border px-3 py-2 [&_summary::-webkit-details-marker]:hidden">
+      <summary className="flex cursor-pointer select-none items-center flex-wrap gap-2">
+        <Badge>{method}</Badge> <code>{path}</code>
+        <span>{description}</span>
+        <span className="ml-auto inline-flex items-center gap-1 text-muted-foreground group-open:hidden">
+          <Plus className="size-3" />调用示例
+        </span>
+      </summary>
+      <div className="mt-3 space-y-3">{children}</div>
+    </details>
   );
 }
 
@@ -102,35 +162,15 @@ function OpenAIEntry({ apiKey }: { apiKey: string }) {
         <ul className="space-y-1 text-xs text-muted-foreground">
           <li>
             {/* 示例默认折叠：点开端点行查看 curl / SDK 调用方式 */}
-            <details data-testid="example-details" className="group rounded-lg border border-border px-3 py-2 [&_summary::-webkit-details-marker]:hidden">
-              <summary className="flex cursor-pointer select-none items-center flex-wrap gap-2">
-                <Badge>POST</Badge> <code>{baseUrl}/chat/completions</code>
-                <span>对话补全（流式 / 非流式）</span>
-                <span className="ml-auto inline-flex items-center gap-1 text-muted-foreground group-open:hidden">
-                  <Plus className="size-3" />调用示例
-                </span>
-              </summary>
-              <div className="mt-3 space-y-3">
-                <div>
-                  <div className="mb-1 flex items-center justify-between text-foreground">
-                    <span>curl 示例</span>
-                    <CopyButton label={copied === "curl" ? "已复制" : "复制"} onCopy={() => void copy("curl", examples.curl)} testid="copy-curl" />
-                  </div>
-                  <pre data-testid="example-curl" className="overflow-x-auto rounded-lg border border-input bg-muted/40 p-3 font-mono text-xs">
-                    {examples.curl}
-                  </pre>
-                </div>
-                <div>
-                  <div className="mb-1 flex items-center justify-between text-foreground">
-                    <span>OpenAI Python SDK</span>
-                    <CopyButton label={copied === "python" ? "已复制" : "复制"} onCopy={() => void copy("python", examples.python)} testid="copy-python" />
-                  </div>
-                  <pre data-testid="example-python" className="overflow-x-auto rounded-lg border border-input bg-muted/40 p-3 font-mono text-xs">
-                    {examples.python}
-                  </pre>
-                </div>
-              </div>
-            </details>
+            <EndpointRow method="POST" path={`${baseUrl}/chat/completions`} description="对话补全（流式 / 非流式）" testid="example-details">
+              <CodeExample label="curl 示例" text={examples.curl} copied={copied === "curl"} onCopy={() => void copy("curl", examples.curl)} testid="example-curl" copyTestid="copy-curl" />
+              <CodeExample label="OpenAI Python SDK" text={examples.python} copied={copied === "python"} onCopy={() => void copy("python", examples.python)} testid="example-python" copyTestid="copy-python" />
+            </EndpointRow>
+          </li>
+          <li>
+            <EndpointRow method="GET" path={`${baseUrl}/user/balance`} description="余额查询（上游额度，DeepSeek 兼容结构）" testid="example-details-balance">
+              <CodeExample label="curl 示例" text={examples.balance} copied={copied === "balance"} onCopy={() => void copy("balance", examples.balance)} testid="example-balance-curl" copyTestid="copy-balance-curl" />
+            </EndpointRow>
           </li>
           <li>
             <Badge>GET</Badge> <code>{baseUrl}/models</code>　模型列表

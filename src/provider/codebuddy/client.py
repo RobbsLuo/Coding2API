@@ -177,21 +177,35 @@ class CodeBuddyClient:
         body = await self._post_json(f"{self.endpoint}{EP_USER_RESOURCE}", payload,
                                      credential, quota_only=True)
         accounts = _extract_accounts(body)
+        now_epoch = time.time()
         total = 0.0
         remaining = 0.0
         cycle_end: int | None = None
+        ladder: list[tuple[int, float]] = []
         for account in accounts:
             if not isinstance(account, dict) or account.get("Status") != 0:
                 continue
             package_total = _cycle_capacity(account, "CycleCapacitySize")
-            package_remaining = _cycle_capacity(account, "CycleCapacityRemain")
             if package_total <= 0:
                 continue
+            package_remaining = _cycle_capacity(account, "CycleCapacityRemain")
             total += package_total
             remaining += package_remaining
-            cycle_end = _cycle_end_epoch(account.get("CycleEndTime")) or cycle_end
+            end = _cycle_end_epoch(account.get("CycleEndTime"))
+            # 一个账号常有几十个套餐各自独立到期（每日 100 积分 × N）。
+            # 上游会把已过期套餐一起返回，所以 end > now 才有效；已用完的包
+            # （剩余 0）不携带积分。两类都不进入到期排序。
+            if end is None or end <= now_epoch or package_remaining <= 0:
+                continue
+            cycle_end = end if cycle_end is None else min(cycle_end, end)
+            ladder.append((end, package_remaining))
+        # 官方界面同口径：TotalDosage 是上游服务端汇总的剩余，优先于逐包累加
+        # （各包 Precise 小数累加会与界面显示差零点几）。
+        official = _total_dosage(body)
+        if official is not None:
+            remaining = official
         return Quota(remaining=remaining, total=total, cycle_end=cycle_end,
-                     probed_at=int(time.time()))
+                     expiry_ladder=ladder, probed_at=int(time.time()))
 
     async def _fetch_enterprise_quota(self, credential: CodeBuddyCredential) -> Quota:
         data = await self._post_json(f"{self.endpoint}{EP_ENTERPRISE_USAGE}", {}, credential)
@@ -328,6 +342,19 @@ def _extract_accounts(body: dict[str, Any]) -> list[Any]:
             if isinstance(holder, dict) and path[-1] in holder:
                 return []
     raise UpstreamProtocolViolation("quota response missing Accounts")
+
+
+def _total_dosage(body: dict[str, Any]) -> float | None:
+    """上游官方汇总剩余（data.Response.Data.TotalDosage）。
+
+    官方界面同口径；逐包 Precise 累加会因各包小数精度与界面差零点几。
+    """
+    node: Any = body
+    for key in ("data", "Response", "Data"):
+        node = node.get(key) if isinstance(node, dict) else None
+    if not isinstance(node, dict):
+        return None
+    return _number(node.get("TotalDosage"))
 
 
 def _cycle_capacity(account: dict[str, Any], field: str) -> float:

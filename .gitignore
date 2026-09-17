@@ -30,6 +30,9 @@ web/build/
 .vscode/
 *.swp
 
+# 本地服务日志（nohup uvicorn）
+logs/
+
 # 前端
 web/node_modules/
 web/dist/

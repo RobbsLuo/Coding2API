@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS credentials (
     err_count        INTEGER NOT NULL DEFAULT 0,
     quota_remaining  REAL,
     quota_total      REAL,
-    quota_cycle_end  INTEGER,                      -- CB 有周期；TRAE 为 NULL
+    quota_cycle_end  INTEGER,                      -- 最早到期 epoch；TRAE 为 NULL
+    quota_expiry_ladder TEXT,                      -- 到期阶梯 JSON [[epoch, 剩余积分]]；TRAE 为 NULL
     quota_probed_at  INTEGER,
     created_at       INTEGER NOT NULL,
     added_by         TEXT                          -- 应用层校验存在于 users.txt

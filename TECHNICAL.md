@@ -83,6 +83,7 @@ coding2api/
 │       ├── deps.py              # Services 容器 + require_api_key / session / csrf 依赖
 │       ├── chat.py              # POST /v1/chat/completions
 │       ├── models.py            # GET /v1/models（动态拉取 + 黑名单 + 缓存兑底 + 元数据）
+│       ├── balance.py           # GET /v1/user/balance（DeepSeek 兼容余额，读探测缓存聚合）
 │       ├── authorize.py         # GET /authorize（TRAE 回调落点）
 │       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin / 账号切换
 │       ├── admin_keys.py        # API Key CRUD
@@ -155,7 +156,8 @@ class ErrKind(StrEnum):
 class Quota:
     remaining: float | None = None
     total: float | None = None
-    cycle_end: int | None = None      # CB 有周期；TRAE None
+    cycle_end: int | None = None      # 最早到期 epoch（CB 多包各自独立）；TRAE None
+    expiry_ladder: list[tuple[int, float]] | None = None  # [(到期 epoch, 该包剩余积分)]
     probed_at: int | None = None
     probe_failed: bool = False
 
@@ -188,7 +190,7 @@ class Provider(Protocol):
     def list_accounts(self, cred: DecryptedCred) -> list[Account]: ...
     def switch_account(self, cred: DecryptedCred, account_id: str) -> None: ...
 
-    # 健康度（调度器唯一依赖）
+    # 额度探测（调度器依赖：健康度 + 到期阶梯）
     async def probe_quota(self, cred: DecryptedCred) -> Quota: ...
 
     # 执行
@@ -218,7 +220,10 @@ class Provider(Protocol):
      a. 候选 = 注册表中支持该模型的 provider
      b. pin 优先：pinned 凭证属于候选 provider 且 healthy → 直接用
      c. 过滤 healthy（enabled=1, disabled=0, 非冷却中）
-     d. health 三态排序，取最高分；同分按 provider 顺序
+     d. 到期积分排序：把 quota_expiry_ladder 中「距到期 ≤ QUOTA_EXPIRY_WINDOW_SECONDS」
+        （默认 36h）的积分加总，多的先用（避免积分过期浪费）；无周期信息
+        （TRAE/企业版）计 0 分；窗口 ≤0 时全员 0 分，等于关闭该指标
+     e. 到期积分相同时按 health 三态排序取最高分；同分按 credential_id 稳定
   4. executor：解密凭证 → provider.stream_chat()
      - 上游 HTTP ≥400 → classify → scheduler.note_error → tried 加入 → 回到 3（最多 3 次轮换）
      - 流内 Event.ERROR → 同上映射 → 注入 OpenAI SSE 错误帧 + 冷却 + 轮换
@@ -234,11 +239,12 @@ class Provider(Protocol):
 
 ---
 
-## 6. 调度器规格（Q12=B + Q26）
+## 6. 调度器规格（Q12=B + Q26 + Q31）
 
 ```python
 class Scheduler:
     MAX_ROTATE = 3
+    EXPIRY_WINDOW = 36h          # 到期积分排序窗口，QUOTA_EXPIRY_WINDOW_SECONDS 覆盖；≤0 关闭
     COOLDOWN = {ErrKind.PLAN: 12h, ErrKind.SOFT: 60s, ErrKind.OTHER: 10m}
     ERR_THRESHOLD = 3          # 连续 OTHER 错误 → 冷却
 
@@ -248,7 +254,9 @@ class Scheduler:
     def pin(self, credential_id: str | None) -> None: ...
 ```
 
-状态全部落 `credentials` 表（`cooling_until` / `err_count` / `health` / `disabled`），进程重启不丢冷却状态。写路径用单连接串行（SQLite WAL 下单写者）。
+状态全部落 `credentials` 表（`cooling_until` / `err_count` / `health` / `disabled` / `quota_expiry_ladder`），进程重启不丢冷却状态。写路径用单连接串行（SQLite WAL 下单写者）。
+
+到期积分只算一处：`expiring_credits()`。选号走 `Candidate.expiry_credits()`，管理台列表走 `GET /api/credentials` 的 `quota_expiring_credits`（窗口值随响应返回 `expiry_window_seconds`），两处共用同一实现，界面数字与选号顺序不会漂移；渠道无到期信息时返回 `null`（不显示），窗口关闭或确实无积分临近过期时返回 `0`（同样不显示）。
 
 ---
 
@@ -258,7 +266,7 @@ class Scheduler:
 
 | 任务 | 周期 | 行为 |
 |---|---|---|
-| 额度探测（quota_probe.py） | 启动立即跑一轮（不节流） + 每 `QUOTA_PROBE_MINUTES`（默认 60）分钟 | 探测上游剩余额度 → `credentials.quota_*` / `health` 写回 |
+| 额度探测（quota_probe.py） | 启动立即跑一轮（不节流） + 每 `QUOTA_PROBE_MINUTES`（默认 60）分钟 | 探测上游剩余额度 → `credentials.quota_*` / `quota_expiry_ladder` / `health` 写回 |
 | token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token |
 | 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态，重启重建）；失败凭证持续重试，同账号多凭证共享一次 |
 | 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，最新小时滞后 ≤5 分钟）+ 90 天前明细清理 |
@@ -304,7 +312,7 @@ PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users.txt 无表）
 
 - 连接：`threading.local()` 每线程一个 `sqlite3.Connection(row_factory=sqlite3.Row)`；写操作集中在引擎线程，读操作 FastAPI 线程池
 - 加密：`Fernet(base64.urlsafe_b64encode(sha256(APP_SECRET).digest()))`；APP_SECRET 丢失 = 凭证全部不可解，只能重录（Q13 已明示）
-- migration：启动时读 `schema.sql` 逐条 `CREATE TABLE IF NOT EXISTS`；未来加列用 `ALTER TABLE ... ADD COLUMN` 幂等脚本
+- migration：启动时读 `schema.sql` 逐条 `CREATE TABLE IF NOT EXISTS`（只加不改）；新增列写进 `migrate._MIGRATION_COLUMNS` 走 `ALTER TABLE ... ADD COLUMN`（重复列名忽略，老库幂等补列），同时 `SCHEMA_VERSION + 1`，版本记在 `PRAGMA user_version`
 
 ---
 
@@ -312,7 +320,7 @@ PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users.txt 无表）
 
 | 目标 | 覆盖 | 方式 |
 |---|---|---|
-| 调度器（冷却/三态排序/轮换/pin） | 100% | 纯单元，注入假 provider |
+| 调度器（到期指标/冷却/三态排序/轮换/pin） | 100% | 纯单元，注入假 provider |
 | 鉴权（users/apikey/session/rbac） | 100% | 单元 + FastAPI TestClient |
 | SSE 帧解析 | 100% | fixture 契约测试 |
 | provider 事件映射 | 100% | fixture：真实 SSE 样本 → Event 断言 |

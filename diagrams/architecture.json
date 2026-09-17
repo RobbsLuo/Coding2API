@@ -258,7 +258,7 @@
       "id": "engine-to-cb",
       "from": "engine",
       "to": "cb",
-      "label": "健康度选号",
+      "label": "健康度+到期选号",
       "fromSide": "right",
       "toSide": "left",
       "via": [

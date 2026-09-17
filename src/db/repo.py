@@ -13,12 +13,35 @@ from typing import Any
 
 from ..auth.api_key import digest_api_key, generate_api_key, preview_api_key
 from ..db.crypto import CredentialCipher
-from ..engine.scheduler import Candidate, ErrorOutcome
+from ..engine.scheduler import Candidate, ErrorOutcome, expiring_credits
 from ..provider.base import Quota, health_score
 
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
+
+
+def _ladder_text(ladder: list[tuple[int, float]] | None) -> str | None:
+    """到期阶梯落库：[[epoch, 剩余积分], ...]；无到期信息的渠道写 NULL。"""
+    if not ladder:
+        return None
+    return json.dumps([[end, remaining] for end, remaining in ladder])
+
+
+def _ladder_value(text: str | None) -> list[tuple[int, float]] | None:
+    """读回到期阶梯。缺失、迁移前的空值或历史脏数据一律当「无周期概念」，
+    不能让一行坏数据把整个选号流程拖崩。"""
+    if not text:
+        return None
+    try:
+        items = json.loads(text)
+    except ValueError:
+        return None
+    ladder: list[tuple[int, float]] = []
+    for item in items:
+        if isinstance(item, list) and len(item) == 2:
+            ladder.append((int(item[0]), float(item[1])))
+    return ladder
 
 
 class CredentialRepository:
@@ -100,8 +123,9 @@ class CredentialRepository:
         conn = self._db.connect()
         conn.execute(
             "UPDATE credentials SET quota_remaining = ?, quota_total = ?, quota_cycle_end = ?, "
-            "quota_probed_at = ?, health = ? WHERE id = ?",
-            (quota.remaining, quota.total, quota.cycle_end, quota.probed_at,
+            "quota_expiry_ladder = ?, quota_probed_at = ?, health = ? WHERE id = ?",
+            (quota.remaining, quota.total, quota.cycle_end,
+             _ladder_text(quota.expiry_ladder), quota.probed_at,
              health_score(quota), credential_id),
         )
         conn.commit()
@@ -123,15 +147,16 @@ class CredentialRepository:
         默认 False：签到、刷新等任务需要看到全部凭证才能正确计数 skipped。
         """
         rows = self._db.connect().execute(
-            "SELECT id, provider, health, cooling_until, disabled, enabled, err_count, pinned "
-            "FROM credentials").fetchall()
+            "SELECT id, provider, health, cooling_until, disabled, enabled, err_count, pinned, "
+            "quota_cycle_end, quota_expiry_ladder FROM credentials").fetchall()
         allowed = set(providers) if providers is not None else None
         result = [
             Candidate(
                 credential_id=row["id"], provider=row["provider"], health=row["health"],
                 cooling_until=row["cooling_until"], disabled=bool(row["disabled"]),
                 enabled=bool(row["enabled"]), err_count=row["err_count"],
-                pinned=bool(row["pinned"]),
+                pinned=bool(row["pinned"]), cycle_end=row["quota_cycle_end"],
+                expiry_ladder=_ladder_value(row["quota_expiry_ladder"]),
             )
             for row in rows if allowed is None or row["provider"] in allowed
         ]
@@ -152,13 +177,29 @@ class CredentialRepository:
         plaintext = self._cipher.decrypt(row["data_enc"])
         return json.loads(plaintext.decode("utf-8"))
 
-    def list_all(self) -> list[dict[str, Any]]:
-        """管理台列表：绝不返回明文凭证。"""
+    def list_all(
+        self, *, expiring_window: int = 0, now: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """管理台列表：绝不返回明文凭证。
+
+        附 `quota_expiring_credits`（窗口内即将到期的积分，与调度排序同源口径）；
+        渠道无到期信息（TRAE）为 None，展示层据此隐藏该行。
+        """
+        now = int(now or time.time())
         rows = self._db.connect().execute(
             "SELECT id, provider, nickname, enabled, disabled, disabled_reason, pinned, "
             "health, cooling_until, err_count, quota_remaining, quota_total, quota_cycle_end, "
-            "quota_probed_at, created_at, added_by FROM credentials ORDER BY created_at").fetchall()
-        return [dict(row) for row in rows]
+            "quota_probed_at, created_at, added_by, quota_expiry_ladder "
+            "FROM credentials ORDER BY created_at").fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            rec = dict(row)
+            ladder = _ladder_value(row["quota_expiry_ladder"])
+            rec.pop("quota_expiry_ladder", None)
+            rec["quota_expiring_credits"] = (
+                None if ladder is None else expiring_credits(ladder, expiring_window, now))
+            out.append(rec)
+        return out
 
 
 class ApiKeyRepository:

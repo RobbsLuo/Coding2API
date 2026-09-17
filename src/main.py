@@ -18,6 +18,7 @@ from .api import (
     admin_keys,
     admin_stats,
     authorize,
+    balance,
     chat,
     models,
     playground,
@@ -202,7 +203,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # executor 发请求前把归一名映射回各上游的原始大小写
     model_aliases: dict[str, dict[str, str]] = {}
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
-                                     scheduler=Scheduler(),
+                                     scheduler=Scheduler(
+                                         expiry_window=config.quota_expiry_window_seconds),
                                      default_model=config.default_model,
                                      stats=StatsCollector(db),
                                      upstream_model_name=lambda provider_id, model_name: (
@@ -410,6 +412,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.include_router(admin_stats.create_router(services))
     app.include_router(chat.create_router(services))
     app.include_router(models.create_router(services))
+    app.include_router(balance.create_router(services))
     app.include_router(playground.create_router(services))
     app.include_router(authorize.create_router(services))
 

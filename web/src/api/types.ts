@@ -28,6 +28,8 @@ export interface Credential {
   quota_total: number | null;
   /** 仅 CodeBuddy 有周期；TRAE 为 null */
   quota_cycle_end: number | null;
+  /** 调度窗口内即将到期的积分（与选号排序同源）；无到期信息的渠道为 null */
+  quota_expiring_credits: number | null;
   quota_probed_at: number | null;
   created_at: number;
   added_by: string | null;
@@ -132,6 +134,8 @@ export interface SessionInfo {
 
 export interface CredentialsResponse {
   credentials: Credential[];
+  /** 调度到期排序窗口（秒）；与列表中各凭证的到期积分同一口径 */
+  expiry_window_seconds: number;
   viewer: string;
   is_admin: boolean;
 }

@@ -18,6 +18,7 @@ from src.auth.users import (
 from src.config import Settings, validate_endpoint_allowed
 from src.db.crypto import CredentialCipher, CredentialDecryptError, derive_key
 from src.engine.scheduler import (
+    EXPIRY_WINDOW_SECONDS,
     PLAN_COOLDOWN_SECONDS,
     SOFT_COOLDOWN_SECONDS,
     Candidate,
@@ -42,6 +43,7 @@ def test_settings_defaults_and_admin_set():
     s = Settings(_env_file=None, APP_SECRET=SECRET, ADMIN_USERNAMES="alice, bob ,")
     assert s.admin_set == frozenset({"alice", "bob"})
     assert s.default_model == "glm-5.2"
+    assert s.quota_expiry_window_seconds == EXPIRY_WINDOW_SECONDS
     assert s.is_admin("alice") and not s.is_admin("carol")
 
 
@@ -233,6 +235,62 @@ def test_select_excludes_tried_and_disabled_and_cooling():
     assert s.select(pool, set(), NOW) == "b"
     assert s.select(pool, {"b"}, NOW) == "a"
     assert s.select(pool, {"a", "b"}, NOW) is None
+
+
+def test_select_prefers_more_expiring_credits_over_health():
+    """到期积分多者优先：低健康度但快过期的号，胜过健康的高健康度号。"""
+    steady = cand("steady", health=95)
+    burning = cand("burn", health=10, expiry_ladder=[(NOW + 600, 100.0)])
+    assert Scheduler().select([steady, burning], set(), NOW) == "burn"
+
+
+def test_select_expiry_credits_desc_then_health():
+    """到期积分降序；相同的再按健康度降序。"""
+    pool = [cand("few", health=90, expiry_ladder=[(NOW + 1000, 50.0)]),
+            cand("many", health=20, expiry_ladder=[(NOW + 1000, 100.0),
+                                                    (NOW + 2000, 100.0)]),
+            cand("tied", health=80, expiry_ladder=[(NOW + 2000, 150.0)])]
+    assert Scheduler().select(pool, set(), NOW) == "many"
+    assert Scheduler().select([p for p in pool if p.credential_id != "many"],
+                              set(), NOW) == "tied"
+
+
+def test_select_expiry_window_boundaries():
+    """恰好窗口内算到期；超过窗口或已过期（探测滞后）都不计入。"""
+    steady = cand("steady", health=95)
+    at_edge = cand("at_edge", health=5, expiry_ladder=[(NOW + EXPIRY_WINDOW_SECONDS, 100.0)])
+    beyond = cand("beyond", health=5,
+                  expiry_ladder=[(NOW + EXPIRY_WINDOW_SECONDS + 1, 100.0)])
+    stale = cand("stale", health=5, expiry_ladder=[(NOW - 1, 100.0)])
+    assert Scheduler().select([steady, at_edge], set(), NOW) == "at_edge"
+    assert Scheduler().select([steady, beyond], set(), NOW) == "steady"
+    assert Scheduler().select([steady, stale], set(), NOW) == "steady"
+    # 只按落在窗口内的包累加，窗口外的包不计
+    mixed = cand("mixed", health=5, expiry_ladder=[(NOW + 600, 100.0),
+                                                    (NOW + 2 * EXPIRY_WINDOW_SECONDS, 900.0)])
+    assert mixed.expiry_credits(NOW, EXPIRY_WINDOW_SECONDS) == 100.0
+
+
+def test_select_without_expiry_ladder_keeps_health_order():
+    """无周期信息（TRAE、企业版）计 0 分，退回健康度排序。"""
+    assert Scheduler().select([cand("a", health=10), cand("b", health=90)],
+                              set(), NOW) == "b"
+    assert cand("empty", expiry_ladder=[]).expiry_credits(NOW, EXPIRY_WINDOW_SECONDS) == 0.0
+
+
+def test_select_expiry_window_zero_disables_metric():
+    s = Scheduler(expiry_window=0)
+    assert s.select([cand("steady", health=95),
+                     cand("burn", health=5,
+                          expiry_ladder=[(NOW + 600, 100.0)])], set(), NOW) == "steady"
+    assert cand("burn", expiry_ladder=[(NOW + 600, 100.0)]).expiry_credits(NOW, 0) == 0.0
+
+
+def test_select_pinned_still_wins_over_expiry_metric():
+    """pin 是显式指定，优先级高于到期积分。"""
+    pinned = cand("pinned", health=90, pinned=True)
+    burning = cand("burn", health=5, expiry_ladder=[(NOW + 600, 100.0)])
+    assert Scheduler().select([burning, pinned], set(), NOW) == "pinned"
 
 
 def test_select_returns_none_when_empty():

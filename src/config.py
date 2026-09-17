@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     # 路由与调度
     default_model: str = "glm-5.2"
     refresh_skew_hours: int = 24
+    # 到期排序窗口：把「距到期 ≤ 该秒数」的积分加总，作为选号第一排序指标（多者先用）；
+    # CodeBuddy 是每日 100 积分 × N 的小包；≤0 关闭该指标，退回纯健康度排序
+    quota_expiry_window_seconds: int = 36 * 3600
 
     # 后台任务
     quota_probe_minutes: int = 60

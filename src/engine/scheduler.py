@@ -16,6 +16,26 @@ SOFT_COOLDOWN_SECONDS = 60
 OTHER_COOLDOWN_SECONDS = 10 * 60
 ERR_THRESHOLD = 3
 MAX_ROTATE = 3
+# 到期排序窗口：把「距到期 ≤ 该时长」的积分加总，作为选号排序指标（多者先用）
+# CodeBuddy 是每日 100 积分 × N 的小包，36h 覆盖今天与后天的到期点
+EXPIRY_WINDOW_SECONDS = 36 * 3600
+
+
+def expiring_credits(
+    ladder: list[tuple[int, float]] | None,
+    window_seconds: int,
+    now: int,
+) -> float:
+    """窗口内即将到期的积分：`now < 到期 <= now + window` 的各包剩余之和。
+
+    窗口 ≤0 或无阶梯（TRAE 无周期概念）为 0。调度排序与管理台展示共用此口径。
+    """
+    if not ladder or window_seconds <= 0:
+        return 0
+    return sum(
+        amount for expiring_at, amount in ladder
+        if now < expiring_at <= now + window_seconds
+    )
 
 
 @dataclass(frozen=True)
@@ -30,6 +50,15 @@ class Candidate:
     enabled: bool = True
     err_count: int = 0
     pinned: bool = False
+    cycle_end: int | None = None       # 额度最早到期（epoch）；无周期概念的渠道为 None
+    expiry_ladder: list[tuple[int, float]] | None = None  # [(到期 epoch, 该包剩余积分)]
+
+    def expiry_credits(self, now: int, window: int) -> float:
+        """窗口内即将到期的积分总量（不含已过期与已用完的包）。
+
+        窗口 ≤ 0 或渠道无周期概念时恒为 0，选号退回健康度排序。
+        """
+        return expiring_credits(self.expiry_ladder, window, now)
 
     def is_selectable(self, now: int) -> bool:
         if self.disabled or not self.enabled:
@@ -55,9 +84,11 @@ class Scheduler:
         plan_cooldown: int = PLAN_COOLDOWN_SECONDS,
         soft_cooldown: int = SOFT_COOLDOWN_SECONDS,
         other_cooldown: int = OTHER_COOLDOWN_SECONDS,
+        expiry_window: int = EXPIRY_WINDOW_SECONDS,
     ) -> None:
         self.max_rotate = max_rotate
         self.err_threshold = err_threshold
+        self.expiry_window = expiry_window
         self._cooldowns = {
             ErrKind.PLAN: plan_cooldown,
             ErrKind.SOFT: soft_cooldown,
@@ -69,7 +100,9 @@ class Scheduler:
     def select(self, candidates: Iterable[Candidate], tried: set[str], now: int) -> str | None:
         """返回应使用的 credential_id；无可用的返回 None。
 
-        排序规则：pin 优先 → known 降序 → unknown → exhausted 垫底。
+        排序规则：pin 优先 → 窗口内即将到期积分多者优先 → known 降序
+        → unknown → exhausted 垫底。到期积分优先于健康度：快过期的先用掉，
+        避免白丢；到期积分相同时才比健康度。
         """
         pool = [
             c for c in candidates
@@ -80,7 +113,8 @@ class Scheduler:
         pinned = [c for c in pool if c.pinned]
         chosen = sorted(
             pinned or pool,
-            key=lambda c: (_rank(c.health), -(_health_value(c.health)), c.credential_id),
+            key=lambda c: (-c.expiry_credits(now, self.expiry_window),
+                           _rank(c.health), -(_health_value(c.health)), c.credential_id),
         )
         return chosen[0].credential_id
 

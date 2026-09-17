@@ -65,7 +65,10 @@ class Quota:
 
     remaining: float | None = None
     total: float | None = None
-    cycle_end: int | None = None      # CB 有周期；TRAE 为 None
+    cycle_end: int | None = None      # 最早到期（epoch）；TRAE 为 None
+    # 到期阶梯 [(到期 epoch, 该套餐剩余积分)]：选号按"窗口内即将到期积分"排序。
+    # 只有按包独立到期的渠道（CodeBuddy）有值；TRAE 无周期概念为 None。
+    expiry_ladder: list[tuple[int, float]] | None = None
     probed_at: int | None = None
     probe_failed: bool = False
 

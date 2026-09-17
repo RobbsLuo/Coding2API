@@ -42,8 +42,15 @@ def test_repo_update_paths(repo):
     credentials.save_credential_data(credential_id, {"accessToken": "b"})
     assert credentials.credential_data(credential_id) == {"accessToken": "b"}
 
-    credentials.save_quota(credential_id, Quota(remaining=5, total=10, probed_at=1))
+    credentials.save_quota(credential_id, Quota(remaining=5, total=10, cycle_end=123,
+                                                expiry_ladder=[(123, 5.0)], probed_at=1))
     assert credentials.candidates()[0].health == 50
+    assert credentials.candidates()[0].cycle_end == 123
+    assert credentials.candidates()[0].expiry_ladder == [(123, 5.0)]
+
+    credentials.save_quota(credential_id, Quota(remaining=5, total=10, cycle_end=123,
+                                                probed_at=1))
+    assert credentials.candidates()[0].expiry_ladder is None
 
     credentials.mark_probe_failed(credential_id, now=2)
     assert credentials.candidates()[0].health is None
@@ -52,6 +59,21 @@ def test_repo_update_paths(repo):
     assert credentials.candidates()[0].pinned is True
     credentials.set_pinned(None)
     assert credentials.candidates()[0].pinned is False
+
+
+def test_repo_expiry_ladder_tolerates_missing_and_dirty_values():
+    """到期阶梯读写：空值写 NULL，NULL/空串/坏 JSON/坏行一律当「无周期概念」，
+    不能让一行脏数据把整个选号流程拖崩。"""
+    from src.db.repo import _ladder_text, _ladder_value
+
+    assert _ladder_text(None) is None
+    assert _ladder_text([]) is None
+    assert json.loads(_ladder_text([(1, 2.0), (3, 4.5)])) == [[1, 2.0], [3, 4.5]]
+
+    assert _ladder_value(None) is None
+    assert _ladder_value("") is None
+    assert _ladder_value("{not json") is None
+    assert _ladder_value("[[123, 5], [9], 7, \"junk\", [1, 2, 3]]") == [(123, 5.0)]
 
 
 def test_repo_missing_credential_returns_none(repo):
