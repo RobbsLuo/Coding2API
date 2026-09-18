@@ -13,6 +13,7 @@ upstream channels, with a shared credential pool, unified scheduling, and per-us
 - **OpenAI-compatible surface**: `/v1/chat/completions` (streaming and non-streaming), `/v1/models`, `/v1/user/balance` (DeepSeek-compatible balance query)
 - **Two upstreams, one model namespace**: flat model names auto-route — credits expiring within the window first, then health; `model@provider` pins an upstream
 - **Expiry-aware scheduling**: sums the credits expiring within `QUOTA_EXPIRY_WINDOW_SECONDS` (default 36h) per credential and burns the largest first, so near-expiry quota is not wasted
+- **Conversation stickiness**: multi-turn conversations keep the same credential (matched by message-prefix fingerprint) and only rotate on errors, avoiding upstream risk control and lost prompt cache
 - **Three-state health + tiered cooldowns**: quota exhausted 12h, rate limited 60s, consecutive errors 10m, dead session disabled
 - **Shared credential pool**: admins maintain credentials, everyone shares them; usage is tracked per user
 - **Encrypted credentials at rest**: Fernet (AES-128-CBC + HMAC), key from `APP_SECRET`

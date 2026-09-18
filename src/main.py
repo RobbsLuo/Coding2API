@@ -34,6 +34,7 @@ from .db.conn import Database
 from .db.crypto import CredentialCipher, CredentialDecryptError
 from .db.migrate import apply_schema
 from .db.repo import ApiKeyRepository, CredentialRepository
+from .engine.affinity import ConversationAffinity
 from .engine.executor import Executor, ExecutorDeps, NoHealthyCredential, NoProviderForModel
 from .engine.model_resolver import UnknownModelError
 from .engine.scheduler import Scheduler
@@ -207,6 +208,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                          expiry_window=config.quota_expiry_window_seconds),
                                      default_model=config.default_model,
                                      stats=StatsCollector(db),
+                                     affinity=ConversationAffinity(
+                                         ttl_seconds=config.conversation_sticky_seconds),
                                      upstream_model_name=lambda provider_id, model_name: (
                                          model_aliases.get(provider_id, {}).get(
                                              model_name.lower(), model_name)

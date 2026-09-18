@@ -46,6 +46,9 @@ class ExecutorDeps:
     # provider → {小写模型名: 上游原始 id}；api/models.list_models 拉取后就地更新。
     # 用于把独有模型的候选上游收窄到真正登记了它的上游，避免白打一次请求
     model_aliases: dict[str, dict[str, str]] | None = None
+    # 会话粘性（ConversationAffinity）；None 表示关闭。对话进行中固定用原
+    # 凭证，出错才轮换，成功后重新粘定实际服务的凭证
+    affinity: Any | None = None
 
     def record(self, **fields: Any) -> None:
         """统计写入失败绝不能影响聊天响应。"""
@@ -136,6 +139,8 @@ class Executor:
         target = self.resolve_target(request)
         state = _StreamState(translator=StreamTranslator(target.model),
                              started=time.monotonic(), username=username)
+        if self._deps.affinity is not None:
+            state.affinity_id = self._deps.affinity.pin_for(request.messages, username)
         try:
             async for frame in self._stream_loop(request, target, state):
                 yield frame
@@ -159,7 +164,7 @@ class Executor:
         last_kind: ErrKind | None = None
 
         while True:
-            pick = self._pick(target, tried)
+            pick = self._pick(target, tried, state.affinity_id)
             if pick is None:
                 if last_kind is ErrKind.INVALID:
                     # 所有候选上游都拒绝了该模型：400 语义而非 503
@@ -212,6 +217,7 @@ class Executor:
                         yield frame
                 else:
                     self._deps.credentials.save_success(credential_id)
+                    self._remember(request, state.username, credential_id)
                     self._record_success(target, state, provider_id, credential_id)
                     for frame in state.translator.finish():
                         yield frame
@@ -291,9 +297,12 @@ class Executor:
         last_credential: str | None = None
         # 首事件时刻：上游响应的第一个事件（TTFE，非流式的首字延迟）；跨重试只记最早一次
         first_event_at: float | None = None
+        # 会话粘性：对话上一轮用过哪个凭证，本轮优先复用
+        affinity_id = (self._deps.affinity.pin_for(request.messages, username)
+                       if self._deps.affinity is not None else None)
 
         while True:
-            pick = self._pick(target, tried)
+            pick = self._pick(target, tried, affinity_id)
             if pick is None:
                 if last_kind is ErrKind.INVALID:
                     # 所有候选上游都拒绝了该模型：400 而非 503
@@ -356,6 +365,7 @@ class Executor:
                         last_error = error
                 else:
                     self._deps.credentials.save_success(credential_id)
+                    self._remember(request, username, credential_id)
                     usage = result.get("usage") or {}
                     self._deps.record(
                         username=username, provider=provider_id,
@@ -386,7 +396,13 @@ class Executor:
 
     # -------------------------------------------------------------- 内部
 
-    def _pick(self, target: ModelTarget, tried: set[str]):
+    def _remember(self, request: ChatRequest, username: str, credential_id: str) -> None:
+        """成功后把本对话粘到实际服务的凭证（轮换降级后随之换粘）。"""
+        if self._deps.affinity is not None:
+            self._deps.affinity.remember(request.messages, username, credential_id)
+
+    def _pick(self, target: ModelTarget, tried: set[str],
+              affinity_id: str | None = None):
         # 区分两种情况：模型所属 provider 完全没注册（400）vs 注册了但没有可用凭证（503）
         registered = [pid for pid in self._narrow_providers(target)
                       if pid in self._deps.providers]
@@ -395,14 +411,30 @@ class Executor:
         candidates = self._deps.credentials.candidates(registered)
         if not candidates:
             return None
-        credential_id = self._deps.scheduler.select(candidates, tried, int(time.time()))
+        credential_id = (self._sticky(candidates, tried, affinity_id)
+                         or self._deps.scheduler.select(candidates, tried, int(time.time())))
         if credential_id is None:
             return None
         credential_data = self._deps.credentials.credential_data(credential_id)
         if credential_data is None:  # 并发删除
             tried.add(credential_id)
-            return self._pick(target, tried)
+            return self._pick(target, tried, affinity_id)
         return credential_id, credential_data
+
+    def _sticky(self, candidates: list, tried: set[str],
+                affinity_id: str | None) -> str | None:
+        """会话粘性优先：指纹命中的凭证仍可选时直接复用，不参与排序。
+
+        只校验「在候选池里且未冷却/禁用/本请求已轮换过」；其余情况
+        （凭证被删、冷却中、用户强制了别的上游）回退常规调度，成功后
+        重新粘定，对话不会因此永久失粘。
+        """
+        if affinity_id is None or affinity_id in tried:
+            return None
+        match = next((c for c in candidates if c.credential_id == affinity_id), None)
+        if match is None or not match.is_selectable(int(time.time())):
+            return None
+        return affinity_id
 
     def _narrow_providers(self, target: ModelTarget) -> tuple[str, ...]:
         """模型目录能证明归属时，把候选上游收窄到登记了该模型的上游。
@@ -443,6 +475,7 @@ class _StreamState:
     username: str
     provider: str = "-"
     credential_id: str | None = None
+    affinity_id: str | None = None
     _first_byte_at: float | None = None
     # 已记账标记：断开分支防与正常成功路径重复记账
     recorded: bool = False

@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # 到期排序窗口：把「距到期 ≤ 该秒数」的积分加总，作为选号第一排序指标（多者先用）；
     # CodeBuddy 是每日 100 积分 × N 的小包；≤0 关闭该指标，退回纯健康度排序
     quota_expiry_window_seconds: int = 36 * 3600
+    # 会话粘性 TTL（秒）：同一对话（消息前缀延续）的多轮请求固定用同一凭证，
+    # 对话进行中不换号（避免上游风控与丢失上游提示词缓存）；凭证出错仍会
+    # 正常轮换，成功后重新粘定。≤0 关闭粘性
+    conversation_sticky_seconds: int = 3600
 
     # 后台任务
     quota_probe_minutes: int = 60

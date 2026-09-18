@@ -18,6 +18,8 @@ services:
       QUOTA_PROBE_MINUTES: ${QUOTA_PROBE_MINUTES:-60}
       # 到期排序窗口（秒）：把距到期 ≤ 该值的积分加总，多的账号先用；≤0 关闭
       QUOTA_EXPIRY_WINDOW_SECONDS: ${QUOTA_EXPIRY_WINDOW_SECONDS:-129600}
+      # 会话粘性 TTL（秒）：同一对话多轮请求固定用同一凭证；≤0 关闭
+      CONVERSATION_STICKY_SECONDS: ${CONVERSATION_STICKY_SECONDS:-3600}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     ports:
       - "${PORT:-8000}:8000"

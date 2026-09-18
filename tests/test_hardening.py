@@ -358,7 +358,7 @@ async def test_stream_done_disconnect_without_credential(monkeypatch):
     executor = Executor(ExecutorDeps(
         providers={"trae": Provider()}, credentials=Creds(),
         scheduler=_Scheduler(), stats=_Collector(recorded)))
-    monkeypatch.setattr(executor, "_pick", lambda target, tried: (None, None))
+    monkeypatch.setattr(executor, "_pick", lambda target, tried, affinity_id=None: (None, None))
 
     stream = executor.stream(_request(), username="alice")
     while True:
