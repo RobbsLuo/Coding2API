@@ -35,6 +35,8 @@ APP_SECRET="换成你自己的随机字符串" ADMIN_USERNAMES=admin \
 
 ### Docker
 
+本地构建：
+
 ```bash
 cat > .env <<'EOF'
 APP_SECRET=换成你自己的随机字符串
@@ -47,6 +49,15 @@ docker compose run --rm --entrypoint python coding2api scripts/hash_password.py 
   --output /app/secrets/users.txt
 docker compose up -d
 ```
+
+拉取 GHCR 镜像（推荐，跳过本地构建）：
+
+```bash
+docker compose pull
+# 或指定版本：docker pull ghcr.io/robbsluo/coding2api:v0.1.0
+```
+
+推送新版本：打 tag `v*` 推到 main 即触发 publish workflow（见 `.github/workflows/publish.yml`），同时打 `<tag>` 和 `:latest` 到 GHCR。也可在 Actions 页面手动触发（填版本号）。
 
 ## 使用
 

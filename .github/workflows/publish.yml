@@ -1,0 +1,87 @@
+name: Publish
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要打的版本号（如 v0.1.0，留空则跳过）'
+        required: false
+        default: ''
+
+# GITHUB_TOKEN 自带 packages:write（README → Packages → GitHub Actions 权限），
+# 无需额外 secret。跨仓库拉私有依赖时再补 PAT。
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      # 确定要发的 tag：tag push 用 github.ref_name，手动触发用 inputs.tag
+      - id: meta
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          fi
+          if [ -z "$TAG" ]; then
+            echo "tag=skip" >> "$GITHUB_OUTPUT"
+            echo "::notice::没有 tag，跳过 publish"
+          else
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 跳过（无 tag）
+        if: steps.meta.outputs.tag == 'skip'
+        run: echo "skip publish"
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        if: steps.meta.outputs.tag != 'skip'
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86  # v5
+        if: steps.meta.outputs.tag != 'skip'
+
+      # tag push 到 v* 时跑后端测试，避免把坏代码发到 GHCR。
+      # 前端由 Dockerfile 的 vite build 兜底，这里不重复。
+      - name: 后端测试（tag push 场景）
+        if: steps.meta.outputs.tag != 'skip' && github.event_name == 'push'
+        run: |
+          uv sync --frozen
+          uv run ruff check src tests scripts
+          uv run pytest -q --cov=src --cov-report=term --cov-fail-under=100
+
+      - name: Setup buildx
+        if: steps.meta.outputs.tag != 'skip'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        if: steps.meta.outputs.tag != 'skip'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build & push
+        if: steps.meta.outputs.tag != 'skip'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          # ghcr.io 用户名必须小写；robbsluo 已全小写
+          # 两个 tag：语义版本 + latest（compose 里引用的是 :latest）
+          tags: |
+            ghcr.io/robbsluo/coding2api:${{ steps.meta.outputs.tag }}
+            ghcr.io/robbsluo/coding2api:latest
+          # 层缓存：同 commit 反复 push 直接命中，冷启动也能复用远端 cache
+          cache-from: type=gha,scope=build
+          cache-to: type=gha,scope=build,mode=max
+          # provenance 让 GHCR 在 Packages 页面显示构建来源
+          provenance: true
+          # 单架构（linux/amd64）够 GitHub Actions ubuntu-latest 跑；
+          # Apple Silicon 用户需要 arm64 时改 platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
