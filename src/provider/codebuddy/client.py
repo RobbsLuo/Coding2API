@@ -26,7 +26,6 @@ from .headers import (
     EP_CHAT,
     EP_ENTERPRISE_USAGE,
     EP_USER_RESOURCE,
-    QUOTA_PRODUCT_CODE,
     QUOTA_RANGE_END,
     generate_headers,
     host_of,
@@ -165,11 +164,13 @@ class CodeBuddyClient:
         return await self._fetch_personal_quota(credential)
 
     async def _fetch_personal_quota(self, credential: CodeBuddyCredential) -> Quota:
+        # 不带 ProductCode：上游对部分账号已拒绝 "codebuddy" 产品码
+        # （InvalidParameterValue: productCode:param format error），而缺省时
+        # 会返回该账号全部套餐（实测与官方后台口径一致）。
         now = time.localtime()
         payload = {
             "PageNumber": 1,
             "PageSize": 200,
-            "ProductCode": QUOTA_PRODUCT_CODE,
             "Status": [0, 3],
             "PackageEndTimeRangeBegin": time.strftime("%Y-%m-%d %H:%M:%S", now),
             "PackageEndTimeRangeEnd": QUOTA_RANGE_END,
@@ -323,6 +324,14 @@ def _extract_accounts(body: dict[str, Any]) -> list[Any]:
     data = body.get("data")
     if not isinstance(data, dict):
         raise UpstreamProtocolViolation("quota response missing data")
+    # 业务层错误（如参数被上游拒绝）与「没有额度」必须区分：前者抛探测
+    # 失败，否则会被当成 total=0，把还有积分的凭证误标成「已耗尽」。
+    response = data.get("Response")
+    error = response.get("Error") if isinstance(response, dict) else None
+    if isinstance(error, dict) and error.get("Code"):
+        raise UpstreamProtocolViolation(
+            f"quota response error {error.get('Code')}: "
+            f"{str(error.get('Message') or '').strip()}")
     for path in (
         ("Response", "Data", "Accounts"),   # 实测结构
         ("Response", "Accounts"),

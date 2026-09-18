@@ -35,7 +35,7 @@ from src.provider.codebuddy.client import (
     parse_credential,
 )
 from src.provider.codebuddy.events import UpstreamProtocolViolation
-from src.provider.codebuddy.headers import encode_department, host_of
+from src.provider.codebuddy.headers import QUOTA_RANGE_END, encode_department, host_of
 from tests.conftest import SECRET
 
 FIXTURES = Path(__file__).parent.parent / "src" / "provider" / "fixtures" / "codebuddy"
@@ -469,6 +469,41 @@ async def test_fetch_quota_accepts_null_accounts_as_no_personal_quota(accounts):
     quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
     assert quota.total == 0 and quota.remaining == 0
     assert quota.probe_failed is False
+
+
+async def test_fetch_personal_quota_omits_product_code():
+    """回归：探测请求不带 ProductCode。
+
+    上游对部分账号已拒绝 "codebuddy" 产品码（InvalidParameterValue:
+    productCode:param format error），缺省时才返回全部套餐。
+    """
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        bodies.append(json.loads(request.read()))
+        return httpx.Response(200, json=_quota_body([]))
+
+    await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
+    assert bodies == [{"PageNumber": 1, "PageSize": 200, "Status": [0, 3],
+                       "PackageEndTimeRangeBegin": bodies[0]["PackageEndTimeRangeBegin"],
+                       "PackageEndTimeRangeEnd": QUOTA_RANGE_END}]
+
+
+@pytest.mark.parametrize("message", ["[productCode:param format error] ", None])
+async def test_fetch_quota_response_error_is_probe_failure(message):
+    """上游业务层错误（Response.Error）必须抛探测失败，不能当成 0 额度
+    把还有积分的凭证误标成「已耗尽」。"""
+    error = {"Code": "InvalidParameterValue", "Message": message}
+    body = {"code": 0, "msg": "OK",
+            "data": {"Response": {"Data": {"Accounts": None,
+                                          "TotalDosage": 0},
+                                  "Error": error}}}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    with pytest.raises(UpstreamProtocolViolation, match="InvalidParameterValue"):
+        await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
 
 
 @pytest.mark.parametrize("body", [
