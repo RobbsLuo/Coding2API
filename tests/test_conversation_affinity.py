@@ -227,6 +227,33 @@ async def test_stream_ignores_sticky_when_not_in_candidates():
 
 
 @pytest.mark.asyncio
+async def test_stream_sticky_yields_to_manual_pin():
+    """手动 pin 优先于粘性（PROPOSAL §4.3）：管理员显式指定的凭证不被粘性顶掉。"""
+    provider = FakeProvider()
+    affinity = FakeAffinity(pinned="c_z")
+    executor = Executor(ExecutorDeps(
+        providers={"trae": provider},
+        credentials=_repo(("c_a", {"pinned": True}), "c_z"),
+        scheduler=Scheduler(), affinity=affinity))
+    await _drain(executor.stream(_request(TURN1), username="alice"))
+    assert provider.served == ["c_a"]
+    assert affinity.remembered == ["c_a"]
+
+
+@pytest.mark.asyncio
+async def test_stream_sticky_wins_when_pinned_credential_not_selectable():
+    """pin 的凭证不可选（冷却中）时粘性照常生效，不会因 pin 就卡死。"""
+    provider = FakeProvider()
+    affinity = FakeAffinity(pinned="c_z")
+    executor = Executor(ExecutorDeps(
+        providers={"trae": provider},
+        credentials=_repo(("c_a", {"pinned": True, "cooling_until": 10**12}), "c_z"),
+        scheduler=Scheduler(), affinity=affinity))
+    await _drain(executor.stream(_request(TURN1), username="alice"))
+    assert provider.served == ["c_z"]
+
+
+@pytest.mark.asyncio
 async def test_stream_without_affinity_still_works():
     provider = FakeProvider()
     executor = Executor(ExecutorDeps(

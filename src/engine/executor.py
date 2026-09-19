@@ -423,16 +423,25 @@ class Executor:
 
     def _sticky(self, candidates: list, tried: set[str],
                 affinity_id: str | None) -> str | None:
-        """会话粘性优先：指纹命中的凭证仍可选时直接复用，不参与排序。
+        """会话粘性：指纹命中的凭证仍可选时直接复用，不参与排序。
 
         只校验「在候选池里且未冷却/禁用/本请求已轮换过」；其余情况
         （凭证被删、冷却中、用户强制了别的上游）回退常规调度，成功后
         重新粘定，对话不会因此永久失粘。
+
+        手动 pin 优先于粘性（PROPOSAL §4.3「手动 pin 优先 → 过滤 healthy →
+        到期积分」）：管理员显式指定了凭证时，粘性不得把它顶掉，否则"指定"
+        在对话中途失效且无处可见。
         """
         if affinity_id is None or affinity_id in tried:
             return None
+        now = int(time.time())
+        pinned = [c for c in candidates
+                  if c.pinned and c.credential_id not in tried and c.is_selectable(now)]
+        if pinned:
+            return None
         match = next((c for c in candidates if c.credential_id == affinity_id), None)
-        if match is None or not match.is_selectable(int(time.time())):
+        if match is None or not match.is_selectable(now):
             return None
         return affinity_id
 

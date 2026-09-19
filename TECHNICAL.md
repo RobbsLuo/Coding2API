@@ -62,6 +62,7 @@ coding2api/
 │   ├── engine/
 │   │   ├── scheduler.py         # 选号 + 冷却状态机 + pin
 │   │   ├── executor.py          # 请求执行 + 轮换重试 + 统计埋点
+│   │   ├── affinity.py          # 会话粘性：对话前缀指纹 → 固定凭证（CONVERSATION_STICKY_SECONDS）
 │   │   ├── model_resolver.py    # "glm-5.2" | "glm-5.2@trae" | auto → 候选集
 │   │   └── sse.py               # SSE 帧解析（跨 provider 共用）
 │   ├── compat/
@@ -130,6 +131,11 @@ class Usage:
     credit: float | None = None    # 上游可选字段，两边都经常为 None
 ```
 
+事件名过滤：TRAE 上游会发 `metadata` / `timing_cost` / `extra_info` / `progress_notice`
+等无下游语义的事件，`events.py` 的 `KNOWN_EVENT_NAMES` 之外的名字直接跳过。
+「解析失败不静默」（PROPOSAL §11）针对的是**已知事件的畸形数据**：归一集内的事件
+JSON 非对象/字段类型不对仍然抛 `UpstreamProtocolViolation`，不退回默认值。
+
 ### 3.2 错误分类（决定冷却时长，Q12=B）
 
 ```python
@@ -138,6 +144,7 @@ class ErrKind(StrEnum):
     SOFT = "soft"        # 限流/404 → 冷却 60s，不累计错误数
     DEAD = "dead"        # session 失效 → 硬禁用 disabled=1
     OTHER = "other"      # 其他 4xx/5xx → 累计，连续 3 次 → 冷却 10m
+    INVALID = "invalid"  # 请求无效（模型不存在等）→ 不冷却凭证，跳过该上游；全拒 → 400
 ```
 
 | 上游信号 | CB | TRAE | ErrKind |
@@ -147,6 +154,7 @@ class ErrKind(StrEnum):
 | 不存在 | 404 | 404 | SOFT |
 | 会话失效 | 401/403 | 401 + login 标记 | DEAD |
 | 服务端错误 | 5xx | 5xx | OTHER |
+| 请求自身无效 | 400 | 400 | INVALID |
 | 流内错误事件 | SSE error 事件 | `event:error` code=1005→PLAN | 同上映射 |
 
 ### 3.3 三态健康度（Q26/A）
@@ -216,21 +224,25 @@ class Provider(Protocol):
   1. deps.require_api_key：摘要查 api_keys 表 → username
   2. request.py：校验 body → ChatRequest；model_resolver 解析候选集
      - "glm-5.2" → 两 provider 都可能；"glm-5.2@trae" → 仅 trae；auto/空 → DEFAULT_MODEL
-  3. scheduler.select(model, tried)：
-     a. 候选 = 注册表中支持该模型的 provider
-     b. pin 优先：pinned 凭证属于候选 provider 且 healthy → 直接用
-     c. 过滤 healthy（enabled=1, disabled=0, 非冷却中）
-     d. 到期积分排序：把 quota_expiry_ladder 中「距到期 ≤ QUOTA_EXPIRY_WINDOW_SECONDS」
+  3. 选号（executor._pick → scheduler.select）：
+     a. 候选 = 注册表中支持该模型的 provider（模型目录能证明归属时先收窄，见 _narrow_providers）
+     b. 会话粘性：存在可选的 pinned 凭证时跳过（pin 优先），否则指纹命中的
+        凭证仍可选时直接复用，不参与排序（CONVERSATION_STICKY_SECONDS，≤0 关闭）
+     c. pin 优先：pinned 凭证属于候选 provider 且 healthy → 直接用
+     d. 过滤 healthy（enabled=1, disabled=0, 非冷却中）
+     e. 到期积分排序：把 quota_expiry_ladder 中「距到期 ≤ QUOTA_EXPIRY_WINDOW_SECONDS」
         （默认 36h）的积分加总，多的先用（避免积分过期浪费）；无周期信息
         （TRAE/企业版）计 0 分；窗口 ≤0 时全员 0 分，等于关闭该指标
-     e. 到期积分相同时按 health 三态排序取最高分；同分按 credential_id 稳定
+     f. 到期积分相同时按 health 三态排序取最高分；同分按 credential_id 稳定
   4. executor：解密凭证 → provider.stream_chat()
      - 上游 HTTP ≥400 → classify → scheduler.note_error → tried 加入 → 回到 3（最多 3 次轮换）
      - 流内 Event.ERROR → 同上映射 → 注入 OpenAI SSE 错误帧 + 冷却 + 轮换
+     - 上游 400（INVALID，如模型不存在）不冷却凭证，跳过该上游全部凭证；
+       全部拒绝时 400 invalid_request（未知模型名 ≡ 无上游提供，不走 503）
   5. response.py：Event → OpenAI chunk（流式）或聚合（非流式）
      - 首块补 role:assistant；上游无 index 的 tool_calls 补稳定 index
   6. stats.collector：写 usage_events（username/provider/model/tokens/latency/ttfb/ok；latency=端到端耗时，ttfb=首字延迟）
-  7. scheduler.note_success：清 err_count
+  7. scheduler.note_success：清 err_count，并把本对话重新粘到实际服务的凭证
 ```
 
 客户端断连：生成器被关闭/取消时统计 `error_type=client_disconnect`，关闭上游流；
@@ -254,7 +266,7 @@ class Scheduler:
     def pin(self, credential_id: str | None) -> None: ...
 ```
 
-状态全部落 `credentials` 表（`cooling_until` / `err_count` / `health` / `disabled` / `quota_expiry_ladder`），进程重启不丢冷却状态。写路径用单连接串行（SQLite WAL 下单写者）。
+状态全部落 `credentials` 表（`cooling_until` / `err_count` / `health` / `disabled` / `quota_expiry_ladder`），进程重启不丢冷却状态。写路径无应用层锁：每个写方法直接走当前线程的连接，并发写靠 SQLite WAL + `busy_timeout=5000` 串行化。
 
 到期积分只算一处：`expiring_credits()`。选号走 `Candidate.expiry_credits()`，管理台列表走 `GET /api/credentials` 的 `quota_expiring_credits`（窗口值随响应返回 `expiry_window_seconds`），两处共用同一实现，界面数字与选号顺序不会漂移；渠道无到期信息时返回 `null`（不显示），窗口关闭或确实无积分临近过期时返回 `0`（同样不显示）。
 
@@ -310,9 +322,9 @@ PRAGMA busy_timeout = 5000;
 PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users.txt 无表）
 ```
 
-- 连接：`threading.local()` 每线程一个 `sqlite3.Connection(row_factory=sqlite3.Row)`；写操作集中在引擎线程，读操作 FastAPI 线程池
+- 连接：`threading.local()` 每线程一个 `sqlite3.Connection(row_factory=sqlite3.Row)`；引擎与 FastAPI 线程池各自持有自己的连接。没有应用层写锁，写入并发由 SQLite 自身串行化（WAL + `busy_timeout=5000` 下短写足够；确需多语句原子性时用显式事务）
 - 加密：`Fernet(base64.urlsafe_b64encode(sha256(APP_SECRET).digest()))`；APP_SECRET 丢失 = 凭证全部不可解，只能重录（Q13 已明示）
-- migration：启动时读 `schema.sql` 逐条 `CREATE TABLE IF NOT EXISTS`（只加不改）；新增列写进 `migrate._MIGRATION_COLUMNS` 走 `ALTER TABLE ... ADD COLUMN`（重复列名忽略，老库幂等补列），同时 `SCHEMA_VERSION + 1`，版本记在 `PRAGMA user_version`
+- migration：启动时读 `schema.sql` 逐条 `CREATE TABLE IF NOT EXISTS`（只加不改，列注释可改）；新增列写进 `migrate._MIGRATION_COLUMNS` 走 `ALTER TABLE ... ADD COLUMN`（重复列名忽略，老库幂等补列），删表写进 `migrate._MIGRATION_DROPS` 走 `DROP TABLE IF EXISTS`（`CREATE TABLE IF NOT EXISTS` 对老库无效，不给删会遗留死表），同时 `SCHEMA_VERSION + 1`，版本记在 `PRAGMA user_version`
 
 ---
 
