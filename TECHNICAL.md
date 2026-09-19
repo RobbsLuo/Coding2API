@@ -26,8 +26,13 @@ PROPOSAL.md 定方向，本文档定实现。每个模块标注来源决策（Q 
 coding2api/
 ├── pyproject.toml               # uv 项目；[tool.pytest.ini_options] 设 coverage 目标
 ├── src/
-│   ├── main.py                  # FastAPI 组装、lifespan、路由挂载
+│   ├── main.py                  # FastAPI 组装、lifespan、路由挂载（只做接线）
 │   ├── config.py                # pydantic-settings：README「配置」全部 env
+│   ├── webapp/                  # HTTP 边缘层（横切关注点，与业务装配分开）
+│   │   ├── limits.py            # 请求体上限 ASGI 中间件（登录 8KB / 其余 16MB）
+│   │   ├── security.py          # Host 白名单 + 安全响应头（CSP/nosniff）
+│   │   ├── handlers.py          # 异常 → HTTP 响应（稳定错误码，TECHNICAL §6.5）
+│   │   └── static.py            # 前端产物定位 + SPA catch-all
 │   ├── db/
 │   │   ├── schema.sql           # DDL 定稿
 │   │   ├── conn.py              # 连接管理（线程本地 + WAL + busy_timeout）

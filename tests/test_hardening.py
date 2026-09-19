@@ -524,12 +524,12 @@ def test_frontend_routes_are_not_treated_as_api_404(client, tmp_path, monkeypatc
     dist 产物是 gitignored 的（CI 上不存在），因此这里把 dist 指到临时目录，
     同时断言「服务了 index.html」而不是「依赖本地构建产物」。
     """
-    from src import main
+    from src.webapp import static
 
     dist = tmp_path / "dist"
     dist.mkdir()
     (dist / "index.html").write_text("<html>spa</html>", encoding="utf-8")
-    monkeypatch.setattr(main, "_frontend_dist", lambda: dist)
+    monkeypatch.setattr(static, "frontend_dist", lambda: dist)
 
     response = client.get("/credentials")
     assert response.status_code == 200

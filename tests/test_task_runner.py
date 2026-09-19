@@ -220,6 +220,38 @@ def test_run_entry_point_exists_and_is_callable():
     assert len(inspect.signature(main.run).parameters) == 0
 
 
+def test_main_reexports_match_webapp_definitions():
+    """拆分后 main 的兼容别名必须指向真实定义（同一对象）。
+
+    拆分 main.py 时最隐蔽的坑：把函数移到 src/webapp/ 但保留 main 的别名，
+    测试里 `monkeypatch.setattr("src.main.x", ...)` 仍会“成功”——
+    只是再也影响不到 webapp 内部的调用，测试静默地测了空气。
+    这里断言别名与真实定义同一，patch 目标才有意义。
+    """
+    from src import main
+    from src.webapp import limits, static
+
+    assert main._frontend_dist is static.frontend_dist
+    assert main._api_not_found is static.api_not_found
+    assert main._API_PREFIXES is static._API_PREFIXES
+    assert main.LOGIN_BODY_LIMIT == limits.LOGIN_BODY_LIMIT
+    assert main.DEFAULT_BODY_LIMIT == limits.DEFAULT_BODY_LIMIT
+    assert main._body_limit("/api/auth/login") == limits.LOGIN_BODY_LIMIT
+    assert main._body_limit("/v1/chat/completions") == limits.DEFAULT_BODY_LIMIT
+    assert main._host_allowed is not None
+
+
+def test_webapp_static_patch_targets_are_the_used_globals():
+    """SPA 路由必须读 webapp.static 的全局，patch 那里才生效。"""
+    from src.webapp import static
+
+    # 真实定义处必须同时拥有函数与它依赖的两个常量
+    for name in ("frontend_dist", "api_not_found", "register_spa_routes"):
+        assert callable(getattr(static, name))
+    for name in ("_PROJECT_ROOT", "_CONTAINER_DIST"):
+        assert getattr(static, name) is not None
+
+
 # ------------------------------------------------- 剩余边界分支
 
 async def test_runner_checkin_fires_when_due(repo, monkeypatch):

@@ -2162,16 +2162,16 @@ def _spa_client(tmp_path, *, build: bool = True, monkeypatch=None):
         dist.mkdir(parents=True, exist_ok=True)
         (dist / "index.html").write_text("<html>spa</html>", encoding="utf-8")
         (dist / "app.js").write_text("console.log(1)", encoding="utf-8")
-    monkeypatch.setattr("src.main._frontend_dist", lambda: dist if build else None)
+    monkeypatch.setattr("src.webapp.static.frontend_dist", lambda: dist if build else None)
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     return TestClient(build_app(settings))
 
 
 def test_frontend_dist_prefers_project_root():
     """路径必须锚定项目根，而不是当前工作目录。"""
-    from src import main
+    from src.webapp import static
 
-    resolved = main._frontend_dist()
+    resolved = static.frontend_dist()
     # 本仓库已构建前端时应能找到；未构建时返回 None（由下面的注入测试覆盖）
     if resolved is not None:
         assert resolved.name == "dist"
@@ -2179,11 +2179,11 @@ def test_frontend_dist_prefers_project_root():
 
 
 def test_frontend_dist_returns_none_when_absent(tmp_path, monkeypatch):
-    from src import main
+    from src.webapp import static
 
-    monkeypatch.setattr(main, "_PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(static, "_PROJECT_ROOT", tmp_path)
     monkeypatch.chdir(tmp_path)
-    assert main._frontend_dist() is None
+    assert static.frontend_dist() is None
 
 
 def test_spa_serves_index_for_unknown_path(tmp_path, monkeypatch):
@@ -2213,7 +2213,7 @@ def test_spa_reports_missing_build_with_actionable_page(tmp_path, monkeypatch):
 def test_spa_reports_missing_index_with_actionable_page(tmp_path, monkeypatch):
     dist = tmp_path / "dist"
     dist.mkdir(parents=True)
-    monkeypatch.setattr("src.main._frontend_dist", lambda: dist)
+    monkeypatch.setattr("src.webapp.static.frontend_dist", lambda: dist)
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     with TestClient(build_app(settings)) as client:
         response = client.get("/credentials")
@@ -2227,7 +2227,7 @@ def test_spa_does_not_escape_dist(tmp_path, monkeypatch):
     dist.mkdir(parents=True)
     (dist / "index.html").write_text("<html>spa</html>", encoding="utf-8")
     (tmp_path / "secret.env").write_text("APP_SECRET=leaked", encoding="utf-8")
-    monkeypatch.setattr("src.main._frontend_dist", lambda: dist)
+    monkeypatch.setattr("src.webapp.static.frontend_dist", lambda: dist)
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     with TestClient(build_app(settings)) as client:
         response = client.get("/../secret.env")
@@ -2879,17 +2879,17 @@ def test_authorize_reports_invalid_credential(tmp_path):
 def test_frontend_dist_falls_back_to_container_and_cwd(tmp_path, monkeypatch):
     """项目根没有产物时，依次尝试容器路径与当前工作目录（main 516-517）。"""
 
-    from src import main
+    from src.webapp import static
 
-    monkeypatch.setattr(main, "_PROJECT_ROOT", tmp_path)          # 项目根没有
+    monkeypatch.setattr(static, "_PROJECT_ROOT", tmp_path)          # 项目根没有
     container_dist = tmp_path / "container" / "web" / "dist"
     container_dist.mkdir(parents=True)
     (container_dist / "index.html").write_text("x", encoding="utf-8")
 
     # 容器候选已抽成模块常量，可直接指到临时目录
-    monkeypatch.setattr(main, "_CONTAINER_DIST", container_dist)
+    monkeypatch.setattr(static, "_CONTAINER_DIST", container_dist)
 
-    found = main._frontend_dist()
+    found = static.frontend_dist()
     assert found is not None and found.name == "dist"
 
 
