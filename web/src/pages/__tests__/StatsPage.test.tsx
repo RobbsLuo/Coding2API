@@ -234,7 +234,7 @@ describe("StatsPage", () => {
     expect(within(table).getByText("主账号")).toBeInTheDocument();
     expect(within(table).getByText("glm-5.2")).toBeInTheDocument();
     expect(within(table).getByText("成功")).toBeInTheDocument();
-    expect(within(table).getByText("rate_limit")).toBeInTheDocument();
+    expect(within(table).getByText("额度耗尽")).toBeInTheDocument();
     expect(within(table).getByText("8.2 s")).toBeInTheDocument();
     expect(within(table).getByText("2.4 s")).toBeInTheDocument();
     expect(within(table).getByText("90")).toBeInTheDocument();

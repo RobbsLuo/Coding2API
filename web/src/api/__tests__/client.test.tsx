@@ -13,6 +13,7 @@ import {
   formatTime,
   healthView,
   probeFailureLabel,
+  usageErrorLabel,
   quotaSemantics,
 } from "../display";
 import { makeCredential } from "../../pages/__tests__/helpers";
@@ -209,6 +210,15 @@ describe("display helpers", () => {
     expect(probeFailureLabel("upstream_unavailable")).toContain("与本账号凭证无关");
     expect(probeFailureLabel(undefined)).toBe("未知错误");
     expect(probeFailureLabel("something_new" as never)).toBe("未知错误");
+  });
+
+  it("明细失败类型翻成中文，未知值不进主提示但保留原文", () => {
+    expect(usageErrorLabel("rate_limit")).toBe("额度耗尽");
+    expect(usageErrorLabel("client_disconnect")).toBe("客户端中断");
+    expect(usageErrorLabel(null)).toBe("失败");
+    expect(usageErrorLabel(undefined)).toBe("失败");
+    // 后端新增枚举时前端不能显示空白：兜底文案带原值便于对照排查
+    expect(usageErrorLabel("brand_new_reason")).toBe("失败（brand_new_reason）");
   });
 
   it("时间与数字格式化处理空值", () => {

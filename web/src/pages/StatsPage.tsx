@@ -8,7 +8,7 @@ import {
   useStatsOverview,
   useStatsTimeline,
 } from "../api/hooks";
-import { formatCompact, formatLatency, formatNumber, formatTime } from "../api/display";
+import { formatCompact, formatLatency, formatNumber, formatTime, usageErrorLabel } from "../api/display";
 import { Notice } from "../ui";
 import { ModelTrendChart } from "../components/ModelTrendChart";
 import { PageHeader } from "../components/PageHeader";
@@ -51,12 +51,12 @@ const PROVIDER_LABEL: Record<Provider, string> = { codebuddy: "CodeBuddy", trae:
 /** 明细分页的可选每页条数。 */
 const PAGE_SIZES = [10, 20, 50, 100];
 
-/** 明细状态列：成功固定文案；失败展示受控错误类型（脱敏，不含原始错误体）。 */
+/** 明细状态列：成功固定文案；失败展示受控错误类型的中文说明（脱敏，不含原始错误体）。 */
 function statusCell(row: UsageEventRow) {
   if (row.ok) {
     return <span className="text-ok">成功</span>;
   }
-  return <span className="text-destructive">{row.error_type ?? "失败"}</span>;
+  return <span className="text-destructive">{usageErrorLabel(row.error_type)}</span>;
 }
 
 export function StatsPage() {

@@ -102,7 +102,9 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 
 ## 配置
 
-常用项如下，其余高级项（监听地址、上游端点白名单、节流、预刷新窗口、诊断转储等）见 `docker-compose.yml` 与 `src/config.py`。
+常用项如下；完整的可配置项见 `src/config.py`（权威），且**每一个都已透传到 `docker-compose.yml`**——`.env` 里写这些变量即可生效（compose 的 `.env` 只做插值，未透传的变量不会进容器）。
+
+> 容器里改监听地址用 `HOST`/`PORT`（`PORT` 同时决定宿主机映射端口），入口读 `config.py`，不硬编码。
 
 | 变量 | 默认 | 说明 |
 |---|---|---|

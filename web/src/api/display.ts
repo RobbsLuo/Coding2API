@@ -143,6 +143,35 @@ export function formatChartValue(value: number, metric: string): string {
 }
 
 
+/** 统计明细的失败类型（线值，来自后端 CONTROLLED_ERROR_TYPES）。
+ *  注意与 ProbeFailureReason 不是同一套：那是探测失败，这是请求失败。 */
+export type UsageErrorType =
+  | "client_disconnect"
+  | "credential_unavailable"
+  | "invalid_request"
+  | "no_healthy_credential"
+  | "rate_limit"
+  | "upstream_error"
+  | "upstream_protocol";
+
+/** 明细失败类型的中文说明（TECHNICAL §6.5：界面只展示稳定枚举的翻译）。 */
+export const USAGE_ERROR_LABEL: Record<UsageErrorType, string> = {
+  client_disconnect: "客户端中断",
+  credential_unavailable: "凭证失效",
+  invalid_request: "请求无效",
+  no_healthy_credential: "无可用凭证",
+  rate_limit: "额度耗尽",
+  upstream_error: "渠道错误",
+  upstream_protocol: "渠道响应异常",
+};
+
+/** 未知取值不得原样透传（TECHNICAL §6.5），兜底为「失败」。 */
+export function usageErrorLabel(errorType: string | null | undefined): string {
+  if (!errorType) return "失败";
+  return USAGE_ERROR_LABEL[errorType as UsageErrorType] ?? `失败（${errorType}）`;
+}
+
+
 export const PROBE_FAILURE_LABEL: Record<ProbeFailureReason, string> = {
   credential_rejected: "凭证被渠道拒绝，需要重新登录该账号",
   rate_limited: "渠道限流，稍后重试",

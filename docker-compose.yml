@@ -21,6 +21,29 @@ services:
       # 会话粘性 TTL（秒）：同一对话多轮请求固定用同一凭证；≤0 关闭
       CONVERSATION_STICKY_SECONDS: ${CONVERSATION_STICKY_SECONDS:-3600}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # ---- 高级项：默认值已合适，需要时在 .env 里设即可生效 ----
+      # 注意：compose 的 .env 只用于 ${VAR} 插值，只有在这里透传过的变量
+      # 才会真正进容器；漏透传会让 .env 里的设置静默失效（无任何报错）。
+      # Host 白名单（防 DNS rebinding）；空 = 本地回环 + PUBLIC_BASE_URL 主机
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      # 上游端点白名单（逗号分隔）；改 CODEBUDDY_API_ENDPOINT 时必须同时含它
+      CODEBUDDY_ALLOWED_ENDPOINTS: ${CODEBUDDY_ALLOWED_ENDPOINTS:-https://copilot.tencent.com,https://www.codebuddy.ai}
+      # CodeBuddy 聊天最小间隔（秒）：腾讯频率风控，0 关闭
+      CODEBUDDY_CHAT_MIN_INTERVAL: ${CODEBUDDY_CHAT_MIN_INTERVAL:-5}
+      # token 预刷新窗口（小时）
+      REFRESH_SKEW_HOURS: ${REFRESH_SKEW_HOURS:-24}
+      # 全局节流器随机区间（秒）
+      PACER_MIN_SECONDS: ${PACER_MIN_SECONDS:-5}
+      PACER_MAX_SECONDS: ${PACER_MAX_SECONDS:-20}
+      # 诊断：把 /v1 原始请求体落盘到 data/dumps/（含对话内容，仅排查用）
+      DUMP_REQUEST_BODIES: ${DUMP_REQUEST_BODIES:-false}
+      # 服务监听地址（容器内必须 0.0.0.0 才能被映射访问）
+      HOST: ${HOST:-0.0.0.0}
+      PORT: ${PORT:-8000}
+      # 用户文件路径（容器内固定挂载点，一般无需改）
+      USERS_FILE: ${USERS_FILE:-/app/secrets/users.txt}
+      # SQLite 与运行数据目录（容器内固定挂载点，一般无需改）
+      DATA_DIR: ${DATA_DIR:-/app/data}
     ports:
       - "${PORT:-8000}:8000"
     volumes:

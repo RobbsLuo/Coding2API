@@ -107,6 +107,33 @@ def test_compose_publishes_same_port_as_dockerfile():
     assert f":{dockerfile_port.group(1)}" in COMPOSE.read_text(encoding="utf-8")
 
 
+def test_compose_forwards_every_settings_field():
+    """compose 必须透传 config.py 的每个可配置字段。
+
+    compose 的 .env 只用于 ${VAR} 插值，**不会**注入容器：没写进
+    environment 的变量在 .env 里设了也无效，而且完全无报错（静默失效）。
+    所以这里把两边对一遍，漏一个就抦住。
+    """
+    config_text = (ROOT / "src" / "config.py").read_text(encoding="utf-8")
+    fields = set(re.findall(r"^    ([a-z_]+):[^=\n]*=", config_text, re.MULTILINE))
+    # pydantic-settings 默认大小写不敏感，惯例上 env 全大写
+    expected = {name.upper() for name in fields}
+    compose_text = COMPOSE.read_text(encoding="utf-8")
+    forwarded = set(re.findall(r"^\s+([A-Z_]+):", compose_text, re.MULTILINE))
+    missing = expected - forwarded
+    assert not missing, f"compose 未透传（.env 里设了也不会生效）: {sorted(missing)}"
+
+
+def test_compose_forwards_port_used_by_entrypoint():
+    """HOST/PORT 必须既透传又在入口生效（CMD 不得硬编码地址）。"""
+    compose_text = COMPOSE.read_text(encoding="utf-8")
+    assert "${PORT" in compose_text
+    cmd = re.search(r"^CMD (.+)$", DOCKERFILE.read_text(encoding="utf-8"), re.MULTILINE)
+    assert cmd is not None
+    # 硬编码 --host/--port 会让 config.py 里的 HOST/PORT 在容器里静默失效
+    assert "--host" not in cmd.group(1) and "--port" not in cmd.group(1)
+
+
 def test_ci_workflow_paths_match_repository():
     """CI 里用到的路径必须存在，否则 workflow 必然失败。"""
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")

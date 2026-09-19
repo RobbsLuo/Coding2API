@@ -360,3 +360,8 @@ fixture 断言两个方向：**解析正确**（样本 → 期望 Event）与**�
 - **手写 SQL 而非 ORM**：8 张表规模下 ORM 收益为负
 - **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + PUBLIC_BASE_URL
 - **v1 无 Anthropic**（Q8=A）：Event 层已预留，v1.1 只加 `compat/anthropic/` 适配器
+- **两套数据源共存（已知不一致）**：`overview` / `by_provider` 读 `usage_events`（即时，
+  仅覆盖 90 天明细），`timeline` / `model-timeline` 读 `usage_hourly`（≤5 分钟滞后，永久）。
+  时间范围 ≤90 天时两者一致（汇总由同一批明细算出）；选「全部」时总览会小于图表，
+  因为超过 90 天的明细已被清理、只剩小时汇总。修法已列入待办（把总览也切到小时表），
+  但会引入 ≤5 分钟延迟，待定。

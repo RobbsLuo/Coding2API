@@ -51,4 +51,6 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s \
     CMD python -c "import urllib.request;urllib.request.urlopen('http://127.0.0.1:8000/health')"
 
-CMD ["python", "-m", "uvicorn", "src.main:build_app", "--factory", "--host", "0.0.0.0", "--port", "8000"]
+# CMD 走 src.main:run（而非硬编码 --host/--port）：HOST/PORT 是文档化配置项
+# （config.py + README），硬编码会让它们只对本地启动生效、在容器里静默失效。
+CMD ["python", "-m", "src.main"]
