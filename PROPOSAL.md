@@ -136,6 +136,10 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 窗口 `≤0` 等于全员 0 分，退回纯健康度排序；TRAE 无周期概念，恒为 0 分。
 
+**会话粘性**（调度前置一步）。OpenAI 协议本身无会话概念，但 agent/CLI 的「对话」表现为 messages 前缀延续。以「用户名 + 消息增量前缀指纹」定位上一轮实际服务的凭证，TTL（`CONVERSATION_STICKY_SECONDS`，默认 1h，≤0 关闭）内固定复用，不再按到期积分/健康度重排——对话中途换号会触发上游风控并丢掉上游侧的提示词缓存。
+
+优先级：**手动 pin 优先于粘性**。存在可选（enabled、未禁用、未冷却）的 pinned 凭证时粘性让位，否则管理员显式「指定」会在对话中途无形失效。粘住的凭证报错仍走正常轮换，成功后重新粘到实际服务的凭证。指纹链掺入用户名，防不同用户的相同消息数组串到同一凭证；条目纯内存，重启后丢粘性只影响一轮选号。
+
 **健康度归一化**（Q26 核心）。两者都是积分制，但周期语义不同：
 
 | | CodeBuddy | TRAE |
@@ -185,7 +189,14 @@ class AuthSession(BaseModel):
     state: str
 ```
 
-**回调统一走主端口** `/authorize`，废弃 TRAE 的 18080 独立端口。远程部署只需暴露一个端口。回调地址要写进登录 URL，因此必须可配：`PUBLIC_BASE_URL`（默认 `http://127.0.0.1:8000`），远程部署设为浏览器可达的公网地址。前端一个 `LoginSession` 组件，两种 flow 共用状态机：`pending → success / failed / expired`。
+**回调统一走主端口** `/authorize`，废弃 TRAE 的 18080 独立端口。远程部署只需暴露一个端口。回调地址要写进登录 URL，因此必须可配：`PUBLIC_BASE_URL`（默认 `http://127.0.0.1:8000`），远程部署设为浏览器可达的公网地址。
+
+前端在「凭证管理」页内实现两种 flow（`CredentialsPage` 的 `startLogin`/`cancelLogin`，无独立组件）：
+- **CB poll**：拿到 `authUrl` 开新窗 → 后端轮询 `/api/auth/upstream/poll`，得到成功/失败/超时
+- **TRAE callback**：开授权窗，浏览器 302 回 `/authorize` 直接落库；前端轮询凭证列表出现新条目即视为完成（上游不回传 state，无法直接轮询登录状态）
+- **取消**：重新 `start` 拿 state 后调 `/api/auth/upstream/cancel`
+
+两轨的失败/超时以通知文案呈现（无统一 `failed`/`expired` 状态机）。
 
 ### 4.6 中立事件层（Q13=B 预留）
 
@@ -193,7 +204,7 @@ v1 只接 OpenAI 出口，但上游 SSE 解析到「中立事件」这一步独�
 
 ## 5. 数据模型
 
-- **用户不建表**：`users.txt`（PBKDF2）是唯一源，角色走 `ADMIN_USERNAMES` env；`api_keys.username` 由应用层校验存在性，不加外键
+- **用户不建表**：`users.txt`（PBKDF2）是唯一源，路径走 `USERS_FILE`（`config.py` 的 `users_file`，默认 `secrets/users.txt`），角色走 `ADMIN_USERNAMES` env；`api_keys.username` 由应用层校验存在性，不加外键
 - **API Key 存摘要**：SHA-256，明文仅创建时返回一次
 - **凭证加密列**：`data_enc` 走 Fernet，调度状态（`health` / `cooling_until` / `err_count` / `pinned` / `quota_expiry_ladder`）落库，进程重启不丢冷却状态与到期阶梯
 - **用量脱敏**：`usage_events`（明细 90 天）+ `usage_hourly`（小时汇总永久），`credit` 可空仅辅助展示
@@ -203,13 +214,15 @@ DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见
 
 **脱敏纪律**（继承 CB）：不存提示词、回答、请求头、Token、工具参数、原始错误体、会话 ID。
 
+唯一例外：诊断开关 `DUMP_REQUEST_BODIES=true`（默认关）会把 `/v1` 原始请求体落盘到 `data/dumps/`（有界保留 200 份）。这是排查客户端差异的临时手段，**含完整对话内容**，不得长期开启、不得随库交付。
+
 ## 6. 目录结构
 
 以 [TECHNICAL.md §2](TECHNICAL.md) 为准（随代码同步维护）。
 
 ## 7. API 契约
 
-外部（API Key 鉴权）：`POST /v1/chat/completions`（流式 + 非流式）、`GET /v1/models`（扁平模型名 + `providers` 字段）、`GET /health`。
+外部（API Key 鉴权）：`POST /v1/chat/completions`（流式 + 非流式）、`GET /v1/models`（扁平模型名 + `providers` 字段）、`GET /v1/user/balance`（DeepSeek 兼容余额，读探测缓存聚合，不实时打上游）、`GET /health`。
 
 管理台（会话 Cookie）：凭证管理、API Key 管理、用量统计、Playground 等，admin 管凭证与全量统计，普通用户仅见自己的数据。回调（无鉴权，TRAE 浏览器 302 不带 key）：`GET /authorize`。
 
@@ -219,7 +232,11 @@ DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见
 
 沿用 codebuddy2api 的既有约定：
 
-- 上游 endpoint 白名单：**只接受明确配置的地址**，真实 Token 绝不转发到未授权站点（`CODEBUDDY_API_ENDPOINT` 启动时强制校验，不在白名单直接失败）
+- 上游 endpoint 白名单：**只接受明确配置的地址**，真实 Token 绝不转发到未授权站点
+  - CodeBuddy：`CODEBUDDY_API_ENDPOINT` 启动时强制校验，不在白名单直接失败
+  - TRAE：凭证 JSON 里的 `apiHost` 是用户可控输入，导入时按官方地址白名单校验，
+    不在白名单直接拒绝；旧库里已存的越界 `apiHost` 在刷新/取用户信息前退回官方地址
+    （校验在 `TraeClient` 内部，不只 HTTP 边界）
 - TLS 校验默认开启，公网部署必须保持
 - Host / Origin 白名单，CSP `frame-ancestors`
 - 登录三级限流（全局 / IP / 用户名）+ PBKDF2 并发上限

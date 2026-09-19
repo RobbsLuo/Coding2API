@@ -405,7 +405,7 @@ class TraeClient:
 
     async def refresh_token(self, credential: TraeCredential) -> TraeCredential:
         """ExchangeToken；失败不改写原凭证字段。"""
-        host = credential.api_host or self.oauth_host
+        host = resolve_oauth_host(credential, self.oauth_host)
         body = {"ClientID": CLIENT_ID, "RefreshToken": credential.refresh_token,
                 "ClientSecret": "-", "UserID": ""}
         data = await self._post_json(f"{host}{EP_EXCHANGE}", body, oauth_headers())
@@ -428,7 +428,7 @@ class TraeClient:
 
     async def get_user_info(self, credential: TraeCredential) -> tuple[str, str]:
         """返回 (uid, nickname)；失败不影响主流程。"""
-        host = credential.api_host or self.oauth_host
+        host = resolve_oauth_host(credential, self.oauth_host)
         data = await self._post_json(
             f"{host}{EP_USER_INFO}", {"ReqSource": "IDE"},
             oauth_headers() | {"X-Cloudide-Token": credential.access_token},
@@ -467,6 +467,24 @@ class UpstreamHTTPError(Exception):
         return trae_events.classify_status(self.status, self.body)
 
 
+# 上游 OAuth 地址白名单：凭证 JSON 里的 apiHost 是用户可控输入，
+# 一旦被伪造，ExchangeToken 会把真实 refreshToken 发往任意主机
+# （PROPOSAL §8「真实 Token 绝不转发到未授权站点」）。
+ALLOWED_OAUTH_HOSTS: frozenset[str] = frozenset(
+    {AGENT_HOST, UG_HOST, OAUTH_HOST, "https://api.trae.cn", "https://api.trae.com.cn"}
+)
+
+
+def resolve_oauth_host(credential: TraeCredential, oauth_host: str) -> str:
+    """校验凭证自带 apiHost；不在白名单时退回已核实的官方地址。
+
+    只做一次校验、不抛异常：落库的旧凭证可能带任意 apiHost，
+    抛错会让这些凭证永远无法刷新，退回官方地址既保住可用性又不泄 Token。
+    """
+    host = (credential.api_host or "").strip().rstrip("/")
+    return host if host in ALLOWED_OAUTH_HOSTS else oauth_host
+
+
 @dataclass(slots=True)
 class TraeProvider:
     """Provider 协议实现（细接口，Q16=A）。"""
@@ -487,6 +505,11 @@ class TraeProvider:
         credential = parse_credential(raw)
         if not credential.uid:
             raise UpstreamProtocolViolation("credential missing uid")
+        host = credential.api_host.strip().rstrip("/")
+        if host and host not in ALLOWED_OAUTH_HOSTS:
+            # 导入即拒绝：让用户立刻看到，而不是等下一次刷新时静默走官方地址
+            raise UpstreamProtocolViolation(
+                f"apiHost {host!r} is not in the TRAE allowed upstream hosts")
         return credential.to_dict()
 
     def credential_from(self, credential_data: dict) -> TraeCredential:

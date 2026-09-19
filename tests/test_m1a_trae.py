@@ -659,6 +659,51 @@ async def test_provider_import_classify_and_models():
         provider.import_credential({"accessToken": "a"})
 
 
+def test_provider_import_rejects_foreign_api_host():
+    """apiHost 是用户可控输入：非白名单立即拒绝导入，不落库（PROPOSAL §8）。"""
+    provider = TraeProvider()
+    with pytest.raises(trae_events.UpstreamProtocolViolation) as error:
+        provider.import_credential(
+            {"accessToken": "a", "uid": "u", "apiHost": "https://evil.example"})
+    assert "not in the TRAE allowed upstream hosts" in str(error.value)
+    # 官方白名单地址（含尾斜杠归一）正常放行
+    for host in ("https://api.trae.com.cn", "https://api.trae.com.cn/", ""):
+        assert provider.import_credential(
+            {"accessToken": "a", "uid": "u", "apiHost": host})["uid"] == "u"
+
+
+async def test_refresh_ignores_foreign_api_host_from_legacy_credential():
+    """旧库里带任意 apiHost 的凭证：刷新退回官方地址，绝不把 refreshToken 发出去。"""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"Result": {"Token": "t2", "RefreshToken": "r2"}})
+
+    provider = TraeProvider(client=_client(handler))
+    refreshed = await provider.refresh(
+        {"accessToken": "a", "refreshToken": "r", "uid": "u",
+         "apiHost": "https://evil.example"})
+    assert refreshed["accessToken"] == "t2"
+    assert all(url.startswith("https://api.trae.com.cn/") for url in seen)
+
+
+async def test_user_info_ignores_foreign_api_host():
+    """GetUserInfo 走同一个白名单：伪造 apiHost 不会收到 accessToken。"""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        return httpx.Response(200, json={"Result": {"UserID": "u1", "ScreenName": "n"}})
+
+    client = _client(handler)
+    provider = TraeProvider(client=client)
+    uid, nickname = await provider.client.get_user_info(
+        TraeCredential(access_token="a", api_host="https://evil.example"))
+    assert (uid, nickname) == ("u1", "n")
+    assert all(url.startswith("https://api.trae.com.cn/") for url in seen)
+
+
 async def test_provider_model_failure_negative_cache():
     """拉取失败后 5 分钟内不再打上游（静态表兜底），缓存过期后恢复拉取。"""
     calls = {"n": 0}
