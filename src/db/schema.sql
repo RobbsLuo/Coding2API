@@ -1,4 +1,10 @@
 -- coding2api schema（PROPOSAL §5 定稿 + pin 列）
+--
+-- 变更纪律：只加不改。
+--   新增列 → 这里加定义 + src/db/migrate.py 的 _MIGRATION_COLUMNS 补一条
+--   删除表 → 这里删定义 + _MIGRATION_DROPS 补一条（老库不会被 CREATE IF NOT EXISTS 清掉）
+--   列注释可以改（不影响存量库结构）
+--
 
 -- 注：不建 checkins / model_cache 表——签到去重由 CheckinTask 的当日作用域
 -- 集合实现（上游 status 为准），模型列表是进程内 TTL 缓存，重启即重建。

@@ -23,5 +23,8 @@
 ## 其他
 
 - 覆盖率/测试之外的行为变更（API 语义、DB schema、上游解析）需同步 PROPOSAL.md / README.md
-- SQLite schema 变更：schema.sql 只加不改；已有表的新列必须走 `src/db/migrate.py`
-  的 `_MIGRATION_COLUMNS` 幂等补列，并附老库升级测试
+- SQLite schema 变更：schema.sql 只加不改（列注释可改）
+  - 已有表的新列必须走 `src/db/migrate.py` 的 `_MIGRATION_COLUMNS` 幂等补列
+  - 删表必须在 schema.sql 删定义**同时**在 `_MIGRATION_DROPS` 补一条
+    （`CREATE TABLE IF NOT EXISTS` 对老库无效，不补删则遗留死表），并 `SCHEMA_VERSION + 1`
+  - 两者都需附老库升级测试（`test_m15_operations.py` 有现成样板）

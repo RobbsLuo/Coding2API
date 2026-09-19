@@ -1606,6 +1606,27 @@ def test_stats_overview_provider_filter(stats):
     assert query.overview(username="u", provider="trae")["requests"] == 1
 
 
+def test_migration_declarations_match_schema_sql():
+    """防漂移：迁移声明的列必须在 schema.sql 里存在，删表清单不得重建。
+
+    `_MIGRATION_COLUMNS` 里的列名写错、或 schema.sql 删掉了对应的新库列定义，
+    都会让两边静默分叉（新库/老库结构不一致），这里在测试期就抦住。
+    """
+    from src.db.migrate import _MIGRATION_COLUMNS, _MIGRATION_DROPS, _read_schema
+
+    schema = _read_schema()
+    for table, column_def in _MIGRATION_COLUMNS:
+        column = column_def.split()[0]
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in schema, table
+        # 取该表定义段落，断言列在其中
+        segment = schema.split(f"CREATE TABLE IF NOT EXISTS {table}", 1)[1]
+        segment = segment.split(");", 1)[0]
+        assert column in segment, f"{table}.{column} 不在 schema.sql"
+    for table in _MIGRATION_DROPS:
+        # 删掉的表不得在 schema.sql 里重建，否则每次启动都会建了又删
+        assert f"CREATE TABLE IF NOT EXISTS {table}" not in schema, table
+
+
 def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     """老库升级：usage_events 无 cached_tokens 列时幂等补齐，且可写入。"""
     import sqlite3
@@ -1644,6 +1665,10 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
             quota_probed_at INTEGER, created_at INTEGER NOT NULL, added_by TEXT)
     """)
     conn.commit()
+    # 老库遗留的废弃表（schema.sql 已删定义，但老库里还在）
+    conn.execute("CREATE TABLE checkins (provider TEXT, account_key TEXT)")
+    conn.execute("CREATE TABLE model_cache (provider TEXT, model_id TEXT)")
+    conn.commit()
     conn.close()
 
     apply_schema(db.connect())
@@ -1653,6 +1678,10 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     assert "ttfb_sum" in hourly_columns
     cred_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
     assert "quota_expiry_ladder" in cred_columns
+    # 废弃表被 _MIGRATION_DROPS 清理（schema.sql 删定义对老库无效）
+    tables = {row[0] for row in db.connect().execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "checkins" not in tables and "model_cache" not in tables
     # 补列后可写入、可读出
     db.connect().execute(
         "INSERT INTO credentials (id, provider, data_enc, quota_expiry_ladder, created_at) "

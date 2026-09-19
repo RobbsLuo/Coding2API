@@ -1,11 +1,12 @@
-"""启动时执行 schema.sql（幂等）+ 已有库的增量列迁移。
+"""启动时执行 schema.sql（幂等）+ 已有库的增量列/表迁移。
 
-schema.sql 只含 CREATE TABLE IF NOT EXISTS，已存在的表不会被改动；
-新增列通过 _MIGRATION_COLUMNS 幂等补齐（ALTER TABLE ADD COLUMN，
-列已存在时忽略 SQLite duplicate column name 错误）。
+schema.sql 只含 CREATE TABLE IF NOT EXISTS，已存在的表不会被改动：
+- 新增列 → `_MIGRATION_COLUMNS`（ALTER TABLE ADD COLUMN，列已存在时忽略）
+- 删除表 → `_MIGRATION_DROPS`（DROP TABLE IF EXISTS；schema.sql 里删定义
+  不会作用于老库，遗留表必须在这里显式删，否则 schema.sql 与实际库不一致）
 
 schema 版本记在 SQLite 的 `PRAGMA user_version` 里，便于运维判断
-"这个库是哪一代"；旧库（user_version=0）在升级时只补列不丢数据。
+"这个库是哪一代"；旧库（user_version=0）在升级时只补列/删表不丢数据。
 """
 
 from __future__ import annotations
@@ -14,8 +15,8 @@ from importlib import resources
 
 SCHEMA_NAME = "schema.sql"
 
-# 当前 schema 版本。新增列/表时 +1，并在 _MIGRATION_COLUMNS 里补上增量。
-SCHEMA_VERSION = 4
+# 当前 schema 版本。新增列/表、删表时 +1，并在下方对应元组里补增量。
+SCHEMA_VERSION = 5
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -26,6 +27,10 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("credentials",
      "quota_expiry_ladder TEXT"),  # 到期阶梯 JSON：选号按窗口内到期积分排序
 )
+
+# 已废弃的表：schema.sql 里已删定义，但老库里可能还留着，必须显式清理。
+# 签到去重改为当日内存态、模型列表改为进程内 TTL 缓存后这两张表零引用。
+_MIGRATION_DROPS: tuple[str, ...] = ("checkins", "model_cache")
 
 
 def _read_schema() -> str:
@@ -46,6 +51,8 @@ def apply_schema(conn) -> None:
         except conn.OperationalError as error:  # 列已存在
             if "duplicate column name" not in str(error).lower():
                 raise
+    for table in _MIGRATION_DROPS:
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
     # PRAGMA 不支持参数绑定，版本号来自本模块常量（非外部输入）
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
