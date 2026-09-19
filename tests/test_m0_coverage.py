@@ -130,6 +130,22 @@ def test_database_reuses_thread_local_connection(db):
     assert db.connect() is db.connect()
 
 
+def test_transaction_commits_and_rolls_back(db):
+    """transaction() 上下文：正常提交，异常回滚（不留半完成写入）。"""
+    with db.transaction() as conn:
+        conn.execute("INSERT INTO api_keys (id, username, key_digest, preview, created_at) "
+                     "VALUES ('k1', 'u', 'd1', 'p', 1)")
+    assert db.connect().execute(
+        "SELECT COUNT(*) FROM api_keys").fetchone()[0] == 1
+
+    with pytest.raises(RuntimeError), db.transaction() as conn:
+        conn.execute("INSERT INTO api_keys (id, username, key_digest, preview, created_at) "
+                     "VALUES ('k2', 'u', 'd2', 'p', 1)")
+        raise RuntimeError("abort")
+    assert db.connect().execute(
+        "SELECT COUNT(*) FROM api_keys").fetchone()[0] == 1          # k2 被回滚
+
+
 def test_database_schema_is_idempotent(db):
     apply_schema(db.connect())
     apply_schema(db.connect())

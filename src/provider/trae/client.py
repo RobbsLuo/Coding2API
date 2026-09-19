@@ -14,6 +14,7 @@ from typing import Any
 import httpx
 
 from ...engine.sse import iter_frames
+from ...provider import base
 from ...provider.base import (
     AuthSession,
     CheckinResult,
@@ -21,7 +22,6 @@ from ...provider.base import (
     Event,
     Model,
     Quota,
-    body_hint,
 )
 from . import events as trae_events
 from .callback import (
@@ -457,14 +457,10 @@ def _normalize_epoch(value: int) -> int:
     return value // 1000 if value > 1_000_000_000_000 else value
 
 
-class UpstreamHTTPError(Exception):
-    def __init__(self, status: int, body: bytes) -> None:
-        self.status = status
-        self.body = body
-        super().__init__(f"upstream http {status}: {body_hint(body)}")
+class UpstreamHTTPError(base.UpstreamHTTPError):
+    """TRAE 上游非 2xx；kind() 走 TRAE 的 1005/400 规则。"""
 
-    def kind(self) -> ErrKind:
-        return trae_events.classify_status(self.status, self.body)
+    classify_status = staticmethod(trae_events.classify_status)
 
 
 # 上游 OAuth 地址白名单：凭证 JSON 里的 apiHost 是用户可控输入，

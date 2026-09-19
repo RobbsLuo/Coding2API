@@ -55,33 +55,32 @@ class CredentialRepository:
             added_by: str = "", now: int | None = None) -> str:
         credential_id = _new_id("cred")
         payload = json.dumps(credential_data, ensure_ascii=False).encode("utf-8")
-        self._db.connect().execute(
-            "INSERT INTO credentials (id, provider, nickname, data_enc, created_at, added_by) "
-            "VALUES (?,?,?,?,?,?)",
-            (credential_id, provider, nickname, self._cipher.encrypt(payload),
-             int(now if now is not None else time.time()), added_by),
-        )
-        self._db.connect().commit()
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO credentials (id, provider, nickname, data_enc, created_at, added_by) "
+                "VALUES (?,?,?,?,?,?)",
+                (credential_id, provider, nickname, self._cipher.encrypt(payload),
+                 int(now if now is not None else time.time()), added_by),
+            )
         return credential_id
 
     def delete(self, credential_id: str) -> bool:
-        cursor = self._db.connect().execute("DELETE FROM credentials WHERE id = ?",
-                                           (credential_id,))
-        self._db.connect().commit()
+        with self._db.transaction() as conn:
+            cursor = conn.execute("DELETE FROM credentials WHERE id = ?", (credential_id,))
         return cursor.rowcount > 0
 
     def set_enabled(self, credential_id: str, enabled: bool) -> bool:
-        cursor = self._db.connect().execute(
-            "UPDATE credentials SET enabled = ? WHERE id = ?", (1 if enabled else 0, credential_id))
-        self._db.connect().commit()
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE credentials SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, credential_id))
         return cursor.rowcount > 0
 
     def set_pinned(self, credential_id: str | None) -> None:
-        conn = self._db.connect()
-        conn.execute("UPDATE credentials SET pinned = 0")
-        if credential_id is not None:
-            conn.execute("UPDATE credentials SET pinned = 1 WHERE id = ?", (credential_id,))
-        conn.commit()
+        with self._db.transaction() as conn:
+            conn.execute("UPDATE credentials SET pinned = 0")
+            if credential_id is not None:
+                conn.execute("UPDATE credentials SET pinned = 1 WHERE id = ?", (credential_id,))
 
     def revive(self, credential_id: str) -> bool:
         """解除硬禁用（session 死亡）与冷却，允许凭证重新参与调度。
@@ -89,52 +88,48 @@ class CredentialRepository:
         没有这个入口时，凭证一旦因 session 失效被硬禁用就只能删除重建，
         重新登录后也无法复用同一条记录。
         """
-        cursor = self._db.connect().execute(
-            "UPDATE credentials SET disabled = 0, disabled_reason = NULL, cooling_until = NULL, "
-            "err_count = 0 WHERE id = ?", (credential_id,))
-        self._db.connect().commit()
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE credentials SET disabled = 0, disabled_reason = NULL, "
+                "cooling_until = NULL, err_count = 0 WHERE id = ?", (credential_id,))
         return cursor.rowcount > 0
 
     def save_error(self, credential_id: str, outcome: ErrorOutcome) -> None:
-        conn = self._db.connect()
-        if outcome.disabled:
-            conn.execute(
-                "UPDATE credentials SET disabled = 1, disabled_reason = ?, err_count = 0, "
-                "cooling_until = NULL WHERE id = ?", ("session dead", credential_id))
-        else:
-            conn.execute(
-                "UPDATE credentials SET cooling_until = ?, err_count = ? WHERE id = ?",
-                (outcome.cooling_until, outcome.err_count, credential_id))
-        conn.commit()
+        with self._db.transaction() as conn:
+            if outcome.disabled:
+                conn.execute(
+                    "UPDATE credentials SET disabled = 1, disabled_reason = ?, err_count = 0, "
+                    "cooling_until = NULL WHERE id = ?", ("session dead", credential_id))
+            else:
+                conn.execute(
+                    "UPDATE credentials SET cooling_until = ?, err_count = ? WHERE id = ?",
+                    (outcome.cooling_until, outcome.err_count, credential_id))
 
     def save_success(self, credential_id: str) -> None:
-        conn = self._db.connect()
-        conn.execute("UPDATE credentials SET err_count = 0 WHERE id = ?", (credential_id,))
-        conn.commit()
+        with self._db.transaction() as conn:
+            conn.execute("UPDATE credentials SET err_count = 0 WHERE id = ?", (credential_id,))
 
     def save_credential_data(self, credential_id: str, credential_data: dict) -> None:
         payload = json.dumps(credential_data, ensure_ascii=False).encode("utf-8")
-        conn = self._db.connect()
-        conn.execute("UPDATE credentials SET data_enc = ? WHERE id = ?",
-                     (self._cipher.encrypt(payload), credential_id))
-        conn.commit()
+        with self._db.transaction() as conn:
+            conn.execute("UPDATE credentials SET data_enc = ? WHERE id = ?",
+                         (self._cipher.encrypt(payload), credential_id))
 
     def save_quota(self, credential_id: str, quota: Quota) -> None:
-        conn = self._db.connect()
-        conn.execute(
-            "UPDATE credentials SET quota_remaining = ?, quota_total = ?, quota_cycle_end = ?, "
-            "quota_expiry_ladder = ?, quota_probed_at = ?, health = ? WHERE id = ?",
-            (quota.remaining, quota.total, quota.cycle_end,
-             _ladder_text(quota.expiry_ladder), quota.probed_at,
-             health_score(quota), credential_id),
-        )
-        conn.commit()
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE credentials SET quota_remaining = ?, quota_total = ?, "
+                "quota_cycle_end = ?, quota_expiry_ladder = ?, quota_probed_at = ?, health = ? "
+                "WHERE id = ?",
+                (quota.remaining, quota.total, quota.cycle_end,
+                 _ladder_text(quota.expiry_ladder), quota.probed_at,
+                 health_score(quota), credential_id),
+            )
 
     def mark_probe_failed(self, credential_id: str, now: int | None = None) -> None:
-        conn = self._db.connect()
-        conn.execute("UPDATE credentials SET quota_probed_at = ?, health = NULL WHERE id = ?",
-                     (int(now if now is not None else time.time()), credential_id))
-        conn.commit()
+        with self._db.transaction() as conn:
+            conn.execute("UPDATE credentials SET quota_probed_at = ?, health = NULL WHERE id = ?",
+                         (int(now if now is not None else time.time()), credential_id))
 
     # ------------------------------------------------------------- 读取
 
@@ -210,13 +205,13 @@ class ApiKeyRepository:
         plaintext = generate_api_key()
         key_id = _new_id("key")
         created_at = int(now if now is not None else time.time())
-        self._db.connect().execute(
-            "INSERT INTO api_keys (id, username, name, key_digest, preview, created_at) "
-            "VALUES (?,?,?,?,?,?)",
-            (key_id, username, name, digest_api_key(plaintext), preview_api_key(plaintext),
-             created_at),
-        )
-        self._db.connect().commit()
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO api_keys (id, username, name, key_digest, preview, created_at) "
+                "VALUES (?,?,?,?,?,?)",
+                (key_id, username, name, digest_api_key(plaintext), preview_api_key(plaintext),
+                 created_at),
+            )
         return {"id": key_id, "username": username, "name": name, "api_key": plaintext,
                 "preview": preview_api_key(plaintext), "created_at": created_at}
 
@@ -226,9 +221,9 @@ class ApiKeyRepository:
             "SELECT id, username FROM api_keys WHERE key_digest = ?", (digest,)).fetchone()
         if row is None:
             return None
-        self._db.connect().execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?",
-                                   (int(time.time()), row["id"]))
-        self._db.connect().commit()
+        with self._db.transaction() as conn:
+            conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?",
+                         (int(time.time()), row["id"]))
         return row["username"]
 
     def list_for(self, username: str) -> list[dict[str, Any]]:
@@ -238,7 +233,7 @@ class ApiKeyRepository:
         return [dict(row) for row in rows]
 
     def delete(self, key_id: str, username: str) -> bool:
-        cursor = self._db.connect().execute(
-            "DELETE FROM api_keys WHERE id = ? AND username = ?", (key_id, username))
-        self._db.connect().commit()
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "DELETE FROM api_keys WHERE id = ? AND username = ?", (key_id, username))
         return cursor.rowcount > 0

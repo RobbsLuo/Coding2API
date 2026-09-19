@@ -194,7 +194,7 @@ class Provider(Protocol):
     def import_credential(self, raw: dict) -> Credential: ...
     def refresh(self, cred: DecryptedCred) -> None: ...
 
-    # 可选能力（CB 独有；trae 抛 NotImplementedError）
+    # 可选能力（CB 独有：多账号切换）
     def list_accounts(self, cred: DecryptedCred) -> list[Account]: ...
     def switch_account(self, cred: DecryptedCred, account_id: str) -> None: ...
 
@@ -213,6 +213,11 @@ class Provider(Protocol):
 约定：
 - `DecryptedCred` = db 取出 `data_enc` → Fernet 解密后的 dataclass；provider 不接触 sqlite
 - `stream_chat` 只产出 `Event`，产出前先做 HTTP 状态码检查；`classify` 由 executor 调用
+- 可选能力**不实现即不定义**（不是抛 `NotImplementedError`）：调用方用
+  `getattr`/`hasattr` 探测，缺失时返回 400「该凭证不支持此操作」，而不是 500。
+  当前可选集：`start_auth`/`poll_auth`（仅支持 poll 的 provider 才有）、
+  `complete_callback`（仅 TRAE）、`list_accounts`/`switch_account`（仅 CodeBuddy）、
+  `credential_from`/`checkin_scope`（刷新与签到任务的能力探测）
 - 两个 provider 共用 `engine/sse.py` 的帧解析器（SSE 规范层），事件语义各自映射
 
 ---
@@ -266,7 +271,7 @@ class Scheduler:
     def pin(self, credential_id: str | None) -> None: ...
 ```
 
-状态全部落 `credentials` 表（`cooling_until` / `err_count` / `health` / `disabled` / `quota_expiry_ladder`），进程重启不丢冷却状态。写路径无应用层锁：每个写方法直接走当前线程的连接，并发写靠 SQLite WAL + `busy_timeout=5000` 串行化。
+状态全部落 `credentials` 表（`cooling_until` / `err_count` / `health` / `disabled` / `quota_expiry_ladder`），进程重启不丢冷却状态。写路径无应用层锁：并发写靠 SQLite WAL + `busy_timeout=5000` 串行化；每个写方法走 `Database.transaction()` 上下文（正常提交、异常回滚），不再散落 `connect()/commit()` 样板。
 
 到期积分只算一处：`expiring_credits()`。选号走 `Candidate.expiry_credits()`，管理台列表走 `GET /api/credentials` 的 `quota_expiring_credits`（窗口值随响应返回 `expiry_window_seconds`），两处共用同一实现，界面数字与选号顺序不会漂移；渠道无到期信息时返回 `null`（不显示），窗口关闭或确实无积分临近过期时返回 `0`（同样不显示）。
 
@@ -322,7 +327,7 @@ PRAGMA busy_timeout = 5000;
 PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users.txt 无表）
 ```
 
-- 连接：`threading.local()` 每线程一个 `sqlite3.Connection(row_factory=sqlite3.Row)`；引擎与 FastAPI 线程池各自持有自己的连接。没有应用层写锁，写入并发由 SQLite 自身串行化（WAL + `busy_timeout=5000` 下短写足够；确需多语句原子性时用显式事务）
+- 连接：`threading.local()` 每线程一个 `sqlite3.Connection(row_factory=sqlite3.Row)`；引擎与 FastAPI 线程池各自持有自己的连接。写入统一走 `Database.transaction()`（`conn.commit()` / 异常 `rollback()`），没有应用层写锁，并发由 SQLite 自身串行化（WAL + `busy_timeout=5000` 下短写足够）
 - 加密：`Fernet(base64.urlsafe_b64encode(sha256(APP_SECRET).digest()))`；APP_SECRET 丢失 = 凭证全部不可解，只能重录（Q13 已明示）
 - migration：启动时读 `schema.sql` 逐条 `CREATE TABLE IF NOT EXISTS`（只加不改，列注释可改）；新增列写进 `migrate._MIGRATION_COLUMNS` 走 `ALTER TABLE ... ADD COLUMN`（重复列名忽略，老库幂等补列），删表写进 `migrate._MIGRATION_DROPS` 走 `DROP TABLE IF EXISTS`（`CREATE TABLE IF NOT EXISTS` 对老库无效，不给删会遗留死表），同时 `SCHEMA_VERSION + 1`，版本记在 `PRAGMA user_version`
 

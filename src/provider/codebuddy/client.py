@@ -17,7 +17,8 @@ if TYPE_CHECKING:
 import httpx
 
 from ...engine.sse import iter_frames
-from ...provider.base import ErrKind, Event, Model, Quota, body_hint
+from ...provider import base
+from ...provider.base import ErrKind, Event, Model, Quota
 from . import events as cb_events
 from .credential import CodeBuddyCredential, parse_credential
 from .events import UpstreamProtocolViolation
@@ -435,14 +436,10 @@ _MODEL_CACHE: dict[tuple[str, str], tuple[float, list[Model]]] = {}
 CODEBUDDY_IDE_VERSION = "1.42.0"
 
 
-class UpstreamHTTPError(Exception):
-    def __init__(self, status: int, body: bytes) -> None:
-        self.status = status
-        self.body = body
-        super().__init__(f"upstream http {status}: {body_hint(body)}")
+class UpstreamHTTPError(base.UpstreamHTTPError):
+    """CodeBuddy 上游非 2xx；kind() 走 CB 的 1005/400 规则。"""
 
-    def kind(self) -> ErrKind:
-        return cb_events.classify_status(self.status, self.body)
+    classify_status = staticmethod(cb_events.classify_status)
 
 
 @dataclass(slots=True)

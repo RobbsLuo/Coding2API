@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 PRAGMAS = (
@@ -42,3 +44,19 @@ class Database:
         if conn is not None:
             conn.close()
             self._local.conn = None
+
+    @contextmanager
+    def transaction(self) -> Iterator[sqlite3.Connection]:
+        """写操作事务：正常退出提交，异常回滚。
+
+        多语句写入必须走这个上下文（如「先清 pin 再置 pin」），
+        否则中途抛错会留下半完成状态；单语句写入也可用，
+        让「connect → execute → commit」的样板只出现一次。
+        """
+        conn = self.connect()
+        try:
+            yield conn
+        except BaseException:
+            conn.rollback()
+            raise
+        conn.commit()

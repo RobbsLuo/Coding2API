@@ -6,9 +6,10 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Protocol, runtime_checkable
+from typing import ClassVar, Protocol, runtime_checkable
 
 
 class EventKind(StrEnum):
@@ -37,6 +38,24 @@ def body_hint(body: bytes, limit: int = 160) -> str:
     text = body.decode("utf-8", errors="replace")
     text = " ".join(text.split())
     return text[:limit]
+
+
+class UpstreamHTTPError(Exception):
+    """上游非 2xx；两个 provider 共用同一形状（status + 原始 body）。
+
+    `kind()` 由子类绑定各自的 classify_status，因为 1005 等业务码的
+    判定规则是上游协议私有的。
+    """
+
+    classify_status: ClassVar[Callable[[int, bytes], ErrKind]]
+
+    def __init__(self, status: int, body: bytes) -> None:
+        self.status = status
+        self.body = body
+        super().__init__(f"upstream http {status}: {body_hint(body)}")
+
+    def kind(self) -> ErrKind:
+        return self.classify_status(self.status, self.body)
 
 
 @dataclass(slots=True)

@@ -99,24 +99,22 @@ class StatsCollector:
             latency_ms=_int_or_none(latency_ms),
             ttfb_ms=_int_or_none(ttfb_ms),
         )
-        conn = self._db.connect()
-        conn.execute(
-            "INSERT INTO usage_events (id, ts, username, provider, credential_id, model, ok, "
-            "error_type, input_tokens, output_tokens, reasoning_tokens, cached_tokens, credit, "
-            "latency_ms, ttfb_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (event.id, event.ts, event.username, event.provider, event.credential_id,
-             event.model, int(event.ok), event.error_type, event.input_tokens,
-             event.output_tokens, event.reasoning_tokens, event.cached_tokens, event.credit,
-             event.latency_ms, event.ttfb_ms),
-        )
-        conn.commit()
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO usage_events (id, ts, username, provider, credential_id, model, "
+                "ok, error_type, input_tokens, output_tokens, reasoning_tokens, cached_tokens, "
+                "credit, latency_ms, ttfb_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (event.id, event.ts, event.username, event.provider, event.credential_id,
+                 event.model, int(event.ok), event.error_type, event.input_tokens,
+                 event.output_tokens, event.reasoning_tokens, event.cached_tokens, event.credit,
+                 event.latency_ms, event.ttfb_ms),
+            )
 
     def purge_expired(self, retention_days: int = 90, now: int | None = None) -> int:
         """明细保留 90 天；小时汇总永久（PROPOSAL §8）。"""
         cutoff = int(now if now is not None else time.time()) - retention_days * 86400
-        conn = self._db.connect()
-        cursor = conn.execute("DELETE FROM usage_events WHERE ts < ?", (cutoff,))
-        conn.commit()
+        with self._db.transaction() as conn:
+            cursor = conn.execute("DELETE FROM usage_events WHERE ts < ?", (cutoff,))
         return cursor.rowcount
 
     def rollup_hourly(self, since: int | None = None) -> int:
@@ -125,30 +123,29 @@ class StatsCollector:
         默认汇总全部明细：小时汇总要永久保留，不能因为「只看最近 N 小时」
         而丢掉历史数据。需要增量时由调用方显式传 since。
         """
-        conn = self._db.connect()
-        cursor = conn.execute(
-            """
-            INSERT INTO usage_hourly (hour_utc, username, provider, model, requests, ok_count,
-                                      input_tokens, output_tokens, credit_sum, credit_known,
-                                      latency_sum, ttfb_sum)
-            SELECT (ts / 3600) * 3600 AS hour_utc, username, provider, model,
-                   COUNT(*), SUM(ok),
-                   COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-                   SUM(credit), SUM(CASE WHEN credit IS NULL THEN 0 ELSE 1 END),
-                   COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttfb_ms), 0)
-            FROM usage_events WHERE (? IS NULL OR ts >= ?)
-            GROUP BY hour_utc, username, provider, model
-            ON CONFLICT(hour_utc, username, provider, model) DO UPDATE SET
-                requests = excluded.requests,
-                ok_count = excluded.ok_count,
-                input_tokens = excluded.input_tokens,
-                output_tokens = excluded.output_tokens,
-                credit_sum = excluded.credit_sum,
-                credit_known = excluded.credit_known,
-                latency_sum = excluded.latency_sum,
-                ttfb_sum = excluded.ttfb_sum
-            """, (since, since))
-        conn.commit()
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO usage_hourly (hour_utc, username, provider, model, requests, ok_count,
+                                          input_tokens, output_tokens, credit_sum, credit_known,
+                                          latency_sum, ttfb_sum)
+                SELECT (ts / 3600) * 3600 AS hour_utc, username, provider, model,
+                       COUNT(*), SUM(ok),
+                       COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                       SUM(credit), SUM(CASE WHEN credit IS NULL THEN 0 ELSE 1 END),
+                       COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttfb_ms), 0)
+                FROM usage_events WHERE (? IS NULL OR ts >= ?)
+                GROUP BY hour_utc, username, provider, model
+                ON CONFLICT(hour_utc, username, provider, model) DO UPDATE SET
+                    requests = excluded.requests,
+                    ok_count = excluded.ok_count,
+                    input_tokens = excluded.input_tokens,
+                    output_tokens = excluded.output_tokens,
+                    credit_sum = excluded.credit_sum,
+                    credit_known = excluded.credit_known,
+                    latency_sum = excluded.latency_sum,
+                    ttfb_sum = excluded.ttfb_sum
+                """, (since, since))
         return cursor.rowcount
 
 
