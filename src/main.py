@@ -492,12 +492,9 @@ def _upstream_auth(registry: dict, settings: Settings) -> dict:
 
 def _load_users(*, settings: Settings):
     """用户文件是唯一用户源（PROPOSAL §5）。启动时必须存在且至少一个有效用户。"""
-    import os
-
     from .auth.users import UsersFileStore
 
-    path = os.environ.get("USERS_FILE", os.path.join("secrets", "users.txt"))
-    store = UsersFileStore(path)
+    store = UsersFileStore(settings.users_file)
     store.validate()
     return store
 

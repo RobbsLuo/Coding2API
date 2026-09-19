@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     host: str = "127.0.0.1"
     port: int = 8000
     data_dir: str = "./data"
+    # 用户文件（PBKDF2 users.txt）：唯一用户源，启动时必须存在且至少一个有效用户
+    users_file: str = "secrets/users.txt"
     log_level: str = "INFO"
     # Host 白名单（防 DNS rebinding）：逗号分隔；空 = 本地默认 + PUBLIC_BASE_URL 主机
     allowed_hosts: str = ""

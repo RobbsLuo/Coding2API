@@ -61,7 +61,7 @@ docker compose pull
 
 ## 使用
 
-1. 「凭证管理」添加凭证：CodeBuddy 走设备码登录（或粘贴 `{"token":"..."}`）；TRAE 粘贴凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接
+1. 「凭证管理」添加凭证：CodeBuddy 走设备码登录（或粘贴 `{"token":"..."}`）；TRAE 粘贴凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（凭证里的 `apiHost` 只接受官方地址，其他值会被拒绝导入）
 2. 「API Key」创建 `sk-...`（明文仅显示一次）
 3. 调用：
 
@@ -110,11 +110,11 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 | `ADMIN_USERNAMES` | 空 | 管理员用户名，逗号分隔；空则全员只读 |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | 浏览器可达地址；TRAE 登录回调依赖它 |
 | `DEFAULT_MODEL` | `glm-5.2` | 模型为空/`auto` 时的默认 |
-| `USERS_FILE` | `secrets/users.txt` | 用户文件路径 |
+| `USERS_FILE` | `secrets/users.txt` | 用户文件路径（`config.py` 的 `users_file`） |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |
 | `QUOTA_EXPIRY_WINDOW_SECONDS` | `129600` | 到期排序窗口：把距到期 ≤ 该秒数的积分加总，多的账号先用（避免积分过期浪费）；`≤0` 关闭，退回纯健康度排序 |
-| `CONVERSATION_STICKY_SECONDS` | `3600` | 会话粘性 TTL：同一对话（消息前缀延续）多轮请求固定用同一凭证；凭证出错仍会轮换，成功后重新粘定；`≤0` 关闭 |
+| `CONVERSATION_STICKY_SECONDS` | `3600` | 会话粘性 TTL：同一对话（消息前缀延续）多轮请求固定用同一凭证（手动 pin 的凭证优先，粘性让位）；凭证出错仍会轮换，成功后重新粘定；`≤0` 关闭 |
 | `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*` | 模型列表黑名单（仅影响列表展示） |
 | `ALLOWED_HOSTS` | 空 | Host 白名单，防 DNS rebinding |
 
