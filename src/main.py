@@ -46,6 +46,7 @@ from .webapp import limits as _limits
 from .webapp import static as _static
 from .webapp.handlers import register_exception_handlers
 from .webapp.limits import BodySizeLimitMiddleware
+from .webapp.logging import configure_logging
 from .webapp.security import host_allowed, security_middleware
 
 logger = logging.getLogger(__name__)
@@ -108,6 +109,10 @@ def _forget_task(task: asyncio.Task, pending: list) -> None:
 def build_app(settings: Settings | None = None, *, providers: dict | None = None,
               users: object | None = None) -> FastAPI:
     config = settings or load_settings()
+    # 这里必须配：生产路径是 `uvicorn src.main:build_app --factory`（launchd /
+    # 容器 / systemd 均如此），不经过 run()，否则审计等 INFO 日志仍被丢弃。
+    # 幂等，测试反复调用 build_app 不会叠加 handler。
+    configure_logging(config.log_level)
     db = Database(config.db_path)
     apply_schema(db.connect())
     cipher = CredentialCipher(config.app_secret)
@@ -284,6 +289,8 @@ def run() -> None:
     import uvicorn
 
     config = load_settings()
+    # 应用日志（审计、上游错误等）在此之前无 handler 会被丢弃
+    configure_logging(config.log_level)
     uvicorn.run(
         build_app(config), host=config.host, port=config.port, log_level=config.log_level.lower()
     )

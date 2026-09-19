@@ -179,3 +179,97 @@ def test_describe_probe_failure_handles_timeout_and_unknown():
     for error in (RuntimeError("x"), ValueError("y"), KeyError("z")):
         reason = describe_probe_failure(error)
         assert type(error).__name__ not in reason
+
+
+# ------------------------------------------------------------ 日志轮转
+
+NEWSYSLOG = ROOT / "deploy" / "newsyslog" / "coding2api.conf"
+LOGROTATE = ROOT / "deploy" / "logrotate" / "coding2api"
+SYSTEMD_UNIT = ROOT / "deploy" / "systemd" / "coding2api.service"
+LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / "com.coding2api.plist"
+
+
+def test_compose_limits_docker_log_growth():
+    """json-file 驱动默认无上限，会把宿主磁盘写满——必须显式限额。"""
+    text = COMPOSE.read_text(encoding="utf-8")
+    assert re.search(r"^\s+logging:", text, re.M), "compose 缺 logging 段"
+    assert "max-size" in text and "max-file" in text
+    assert "json-file" in text
+
+
+def test_newsyslog_rule_matches_launchd_plist_paths():
+    """轮转路径必须与 launchd 实际写的文件一致，否则规则永远不生效。"""
+    text = NEWSYSLOG.read_text(encoding="utf-8")
+    paths = [line.split()[0] for line in text.splitlines()
+             if line.strip() and not line.startswith("#")]
+    assert paths, "newsyslog 规则里没有有效条目"
+    if LAUNCHD_PLIST.is_file():
+        plist = LAUNCHD_PLIST.read_text(encoding="utf-8")
+        for path in paths:
+            assert path in plist, f"newsyslog 规则里的 {path} 不在 launchd plist 中"
+    # 每条规则必须有 8 个字段（路径 属主 权限 份数 大小 时间 标志）
+    for line in text.splitlines():
+        if line.strip() and not line.startswith("#"):
+            assert len(line.split()) == 7, f"newsyslog 字段数不对（需 7 列）: {line}"
+
+
+def test_logrotate_rule_uses_copytruncate():
+    """进程持有 fd（>> 重定向）时 rename 不会让它换文件，必须 copytruncate。"""
+    text = LOGROTATE.read_text(encoding="utf-8")
+    assert "copytruncate" in text
+    assert "rotate " in text and "maxsize" in text
+    assert "compress" in text
+
+
+def test_systemd_unit_sends_logs_to_journal():
+    """systemd 路线靠 journald 自带轮转，不需要额外 logrotate 配置。"""
+    text = SYSTEMD_UNIT.read_text(encoding="utf-8")
+    assert "StandardOutput=journal" in text
+    assert "StandardError=journal" in text
+    assert "ExecStart=" in text and "build_app" in text
+    # 密钥不得写进 unit（systemctl cat 会暴露给所有用户）
+    assert "APP_SECRET=" not in text
+
+
+def test_newsyslog_install_script_is_executable():
+    """安装脚本必须可执行，否则 README 里的用法会失败。"""
+    script = ROOT / "scripts" / "install-newsyslog.sh"
+    assert script.is_file()
+    assert script.stat().st_mode & 0o111, "安装脚本没有执行位"
+    body = script.read_text(encoding="utf-8")
+    assert "/etc/newsyslog.d/" in body      # 装到 newsyslog 会读的目录
+    assert "--uninstall" in body
+
+
+def test_newsyslog_owner_matches_actual_log_owner():
+    """owned:group 必须与文件实际属主一致，否则 newsyslog 会跳过该条目。
+
+    本机日志由 launchd 以当前用户身份写入，规则写成 root:wheel 就永远不会
+    轮转（newsyslog 静默跳过），是很容易埋下的坑。
+    """
+    text = NEWSYSLOG.read_text(encoding="utf-8")
+    entries = [line.split() for line in text.splitlines()
+               if line.strip() and not line.startswith("#")]
+    assert entries
+    for path, owner in ((e[0], e[1]) for e in entries):
+        target = Path(path)
+        if not target.exists():
+            continue                      # 未部署到本机的路径跳过
+        import grp
+        import pwd
+
+        stat = target.stat()
+        actual = f"{pwd.getpwuid(stat.st_uid).pw_name}:{grp.getgrgid(stat.st_gid).gr_name}"
+        assert owner == actual, f"{path} 规则写 {owner}，实际是 {actual}"
+
+
+def test_webapp_logging_module_does_not_open_files():
+    """应用只写 stderr：不得引入 RotatingFileHandler / FileHandler。
+
+    文件与轮转交给平台（launchd+newsyslog / systemd+journald / docker json-file）。
+    应用自己写文件会与平台轮转争抢同一文件，容器里还会写进镜像层重启即丢。
+    """
+    src = (ROOT / "src" / "webapp" / "logging.py").read_text(encoding="utf-8")
+    assert "RotatingFileHandler" not in src
+    assert "FileHandler" not in src
+    assert "StreamHandler" in src

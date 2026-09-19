@@ -55,3 +55,12 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+    # 日志轮转（唯一声明式、无需运维动手的一层）：json-file 驱动默认
+    # **无上限**，长期运行会把宿主磁盘写满。应用只写 stdout/stderr，
+    # 由 docker 采集，因此限额必须在这里给。
+    # 查看：docker logs coding2api；宿主机路径见 docker inspect 的 LogPath
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

@@ -131,6 +131,38 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 
 - **时区**：镜像默认 `TZ=Asia/Shanghai`；如需其它时区显式覆盖 `TZ`。
 
+## 日志
+
+应用只写 **stdout / stderr**，不自己写文件也不自己轮转（原因见
+[`src/webapp/logging.py`](src/webapp/logging.py) 顶部说明）：三种部署形态的
+采集方式不同，但都靠这两个 fd 对接，轮转交给各自的平台工具。因此**日志自己
+不会停止增长**——按下面对应形态配一次即可。
+
+| 部署形态 | 日志到哪 | 轮转机制 | 需做什么 |
+|---|---|---|---|
+| **Docker / compose** | `docker logs coding2api` | json-file 驱动（已在 compose 配好 `10m × 5`） | **无需操作** |
+| **macOS（launchd）** | `logs/launchd.{out,err}.log` | 系统自带 `newsyslog` | 跑一次 `./scripts/install-newsyslog.sh`（需 sudo） |
+| **Linux（systemd）** | `journalctl -u coding2api` | journald 自带 | **无需操作**（模板见 `deploy/systemd/`） |
+| **Linux（非 systemd）** | 重定向到 `/var/log/coding2api/*.log` | `logrotate` | `sudo cp deploy/logrotate/coding2api /etc/logrotate.d/` |
+| **裸跑**（`uv run python -m src.main`） | 终端 stderr | 无 | 自己重定向并自备轮转 |
+
+级别用 `LOG_LEVEL`（默认 `INFO`）控制。**审计日志（凭证增删改/pin/账号切换）
+是 INFO 级**，把 `LOG_LEVEL` 调到 `WARNING` 会把它一并关掉。
+
+```bash
+# macOS：装轮转规则（单文件超 10MB 转，留 7 份，bzip2 压缩）
+./scripts/install-newsyslog.sh
+./scripts/install-newsyslog.sh --uninstall   # 卸载
+
+# 看日志
+tail -f logs/launchd.err.log          # macOS
+docker logs -f coding2api             # 容器
+journalctl -u coding2api -f           # systemd
+```
+
+> 容器里的 `data/dumps/`（诊断开关 `DUMP_REQUEST_BODIES=true` 写入）不在
+> docker 日志体系内，由应用自行保持最多 200 份。
+
 ## 开发
 
 ```bash

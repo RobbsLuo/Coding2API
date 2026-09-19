@@ -32,6 +32,7 @@ coding2api/
 │   │   ├── limits.py            # 请求体上限 ASGI 中间件（登录 8KB / 其余 16MB）
 │   │   ├── security.py          # Host 白名单 + 安全响应头（CSP/nosniff）
 │   │   ├── handlers.py          # 异常 → HTTP 响应（稳定错误码，TECHNICAL §6.5）
+│   │   ├── logging.py           # root logger 配置（审计/上游日志落 stderr）
 │   │   └── static.py            # 前端产物定位 + SPA catch-all
 │   ├── db/
 │   │   ├── schema.sql           # DDL 定稿
@@ -378,6 +379,16 @@ fixture 断言两个方向：**解析正确**（样本 → 期望 Event）与**�
   全量重算作对账，两者结果一致（幂等）
 - **延迟均值只算成功请求**：分子 `SUM(latency_ms WHERE ok=1)` 与分母 `ok_count`
   配对；失败请求的耗时不能拉偏「典型耗时」（与图表口径一致）
+- **应用日志只写 stderr，轮转交给平台**：不在应用内开文件、不用
+  `RotatingFileHandler`。理由：三种部署形态（launchd / systemd / docker）的
+  采集方式不同但都靠 stdout/stderr 对接；应用自己写文件会与平台轮转争抢同一个
+  文件，容器里还会写进镜像层（重启即丢且 `docker logs` 看不到）。
+  各自配置见 `deploy/`（newsyslog / logrotate / systemd）与 compose 的 `logging` 段
+- **必须在 build_app 里配 root logger**：uvicorn 默认 `LOGGING_CONFIG` 只配
+  `uvicorn` / `uvicorn.access`（`propagate=false`），**从不配 root**；root 默认
+  `WARNING` 且无 handler，导致 `logging.getLogger(__name__)` 的 INFO 静默丢失。
+  生产路径 `uvicorn src.main:build_app --factory` 不经过 `run()`，
+  所以配置必须挂在 `build_app`（幂等，见 `src/webapp/logging.py`）
 - **两套数据源共存（已知不一致）**：`overview` / `by_provider` 读 `usage_events`（即时，
   仅覆盖 90 天明细），`timeline` / `model-timeline` 读 `usage_hourly`（≤5 分钟滞后，永久）。
   时间范围 ≤90 天时两者一致（汇总由同一批明细算出）；选「全部」时总览会小于图表，

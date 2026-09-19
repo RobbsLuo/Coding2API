@@ -1,0 +1,24 @@
+# Linux（非 systemd，或 systemd 但想把日志落独立文件）日志轮转
+#
+# 安装：
+#     sudo cp deploy/logrotate/coding2api /etc/logrotate.d/
+#     sudo logrotate -d /etc/logrotate.d/coding2api    # 干跑校验
+#
+# 路径按实际部署改（systemd 版见 deploy/systemd/coding2api.service，
+# 那条路线用 journald 自带轮转，不需要本文件）。
+#
+# 注意：本配置依赖应用把日志写到 stdout/stderr 后被重定向到该文件，
+# 而不是应用自己写文件——见 src/webapp/logging.py 的说明。
+# 因此必须配合 copytruncate（进程持有 fd 时 rename 不会让它换文件）：
+#     >> /var/log/coding2api/app.log 这种重定向下，用 copytruncate 最稳。
+
+/var/log/coding2api/*.log {
+    daily
+    rotate 7
+    maxsize 10M
+    missingok
+    notifempty
+    compress
+    delaycompress
+    copytruncate
+}

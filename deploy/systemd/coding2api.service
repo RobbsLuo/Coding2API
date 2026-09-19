@@ -1,0 +1,57 @@
+# systemd unit 模板（Linux 生产部署）
+#
+# 安装：
+#     sudo useradd --system --home /opt/coding2api coding2api
+#     sudo cp deploy/systemd/coding2api.service /etc/systemd/system/
+#     sudo systemctl daemon-reload && sudo systemctl enable --now coding2api
+#     journalctl -u coding2api -f        # 看日志
+#
+# 日志：走 journald（StandardOutput=journal），journald 自带容量轮转，
+# 无需 logrotate。全局限额在 /etc/systemd/journald.conf：
+#     SystemMaxUse=500M
+#     SystemMaxFileSize=50M
+# 也可按 unit 限制：
+#     sudo systemctl edit coding2api
+#     [Service]
+#     LogRateLimitIntervalSec=30s
+#     LogRateLimitBurst=1000
+#
+# 注意：应用只写 stdout/stderr，不自己写文件、不自己轮转
+# （见 src/webapp/logging.py 的原因说明）。
+
+[Unit]
+Description=Coding2API — CodeBuddy / TRAE SOLO 统一 OpenAI 兼容出口
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=coding2api
+Group=coding2api
+WorkingDirectory=/opt/coding2api
+
+# 必填：凭证列加密密钥。放独立文件（权限 600，属主 coding2api），
+# 不要写在本 unit 里，否则 systemctl cat 会把密钥暴露给任何用户。
+EnvironmentFile=/opt/coding2api/.env
+Environment=HOST=127.0.0.1
+Environment=PORT=8000
+Environment=DATA_DIR=/opt/coding2api/data
+
+ExecStart=/opt/coding2api/.venv/bin/python -m uvicorn src.main:build_app --factory
+Restart=always
+RestartSec=5
+
+# 日志交给 journald（自带轮转）
+StandardOutput=journal
+StandardError=journal
+
+# 安全加固：只需要写 data/ 与读 secrets/
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/coding2api/data
+ReadOnlyPaths=/opt/coding2api/secrets
+
+[Install]
+WantedBy=multi-user.target
