@@ -75,6 +75,9 @@ CREATE TABLE IF NOT EXISTS usage_hourly (
     ok_count      INTEGER NOT NULL DEFAULT 0,
     input_tokens  INTEGER NOT NULL DEFAULT 0,
     output_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+    cached_tokens INTEGER NOT NULL DEFAULT 0,      -- 命中缓存的输入 token 之和
+    cached_known  INTEGER NOT NULL DEFAULT 0,      -- 上报过 cached_tokens 的条数（=0 时该值不可信）
     credit_sum    REAL,
     credit_known  INTEGER NOT NULL DEFAULT 0,
     latency_sum   INTEGER NOT NULL DEFAULT 0,

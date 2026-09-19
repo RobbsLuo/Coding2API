@@ -52,48 +52,61 @@ class StatsQuery:
 
     def overview(self, *, username: str | None = None, provider: str | None = None,
                  since: int | None = None) -> dict[str, Any]:
-        """总览。admin 传 username=None 看全局；普通用户只看自己。"""
-        where, params = self._where(username=username, provider=provider, since=since)
+        """总览。admin 传 username=None 看全局；普通用户只看自己。
+
+        数据源是 `usage_hourly`（与 timeline/model-timeline 同源）：
+        明细只留 90 天，读明细会让选「全部」时总览小于图表；小时汇总永久保留。
+        代价：最近 ≤5 分钟未进汇总的请求不计入（retention 每 5 分钟 rollup），
+        刷新一次即可。延迟类均值统一按 `ok_count` 归一（与图表同口径）。
+        """
+        where, params = self._where(username=username, provider=provider,
+                                    since=since, since_col="hour_utc")
 
         row = self._db.connect().execute(
             f"""
-            SELECT COUNT(*) AS requests,
-                   COALESCE(SUM(ok), 0) AS ok_count,
+            SELECT COALESCE(SUM(requests), 0) AS requests,
+                   COALESCE(SUM(ok_count), 0) AS ok_count,
                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
                    COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
                    SUM(cached_tokens) AS cached_tokens,
-                   SUM(CASE WHEN cached_tokens IS NULL THEN 0 ELSE 1 END) AS cached_known,
-                   SUM(credit) AS credit_sum,
-                   SUM(CASE WHEN credit IS NULL THEN 0 ELSE 1 END) AS credit_known,
-                   COALESCE(AVG(latency_ms), 0) AS avg_latency,
-                   COALESCE(AVG(ttfb_ms), 0) AS avg_ttfb
-            FROM usage_events {where}
+                   SUM(cached_known) AS cached_known,
+                   SUM(credit_sum) AS credit_sum,
+                   SUM(credit_known) AS credit_known,
+                   SUM(latency_sum) AS latency_sum,
+                   SUM(ttfb_sum) AS ttfb_sum
+            FROM usage_hourly {where}
             """, params).fetchone()
         requests = row["requests"] or 0
+        ok_count = row["ok_count"] or 0
+        # 均值口径：只除成功请求（失败请求的 latency 会拉偏"典型耗时"，
+        # 且与图表 latency_sum/ok_count 同一致），无成功则 None
         return {
             "requests": requests,
-            "ok_count": row["ok_count"],
-            "success_rate": (row["ok_count"] / requests) if requests else None,
+            "ok_count": ok_count,
+            "success_rate": (ok_count / requests) if requests else None,
             "input_tokens": row["input_tokens"],
             "output_tokens": row["output_tokens"],
             "reasoning_tokens": row["reasoning_tokens"],
             # 缓存命中：任一明细上报过才可信，否则 None（前端显示 —）
             "cached_tokens": row["cached_tokens"] if row["cached_known"] else None,
             "credit": row["credit_sum"] if row["credit_known"] else None,
-            "avg_latency_ms": round(row["avg_latency"]) if requests else None,
-            "avg_ttfb_ms": round(row["avg_ttfb"]) if requests else None,
+            "avg_latency_ms": round(row["latency_sum"] / ok_count) if ok_count else None,
+            "avg_ttfb_ms": round(row["ttfb_sum"] / ok_count) if ok_count else None,
         }
 
     def by_provider(self, *, username: str | None = None,
                     since: int | None = None) -> list[dict[str, Any]]:
-        where, params = self._where(username=username, since=since)
+        """按渠道聚合（同样读小时汇总，与总览/图表同源）。"""
+        where, params = self._where(username=username, since=since, since_col="hour_utc")
         rows = self._db.connect().execute(
             f"""
-            SELECT provider, COUNT(*) AS requests, COALESCE(SUM(ok), 0) AS ok_count,
+            SELECT provider, COALESCE(SUM(requests), 0) AS requests,
+                   COALESCE(SUM(ok_count), 0) AS ok_count,
                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
-                   COALESCE(SUM(output_tokens), 0) AS output_tokens, SUM(credit) AS credit_sum
-            FROM usage_events {where} GROUP BY provider ORDER BY provider
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   SUM(credit_sum) AS credit_sum
+            FROM usage_hourly {where} GROUP BY provider ORDER BY provider
             """, params).fetchall()
         return [
             {"provider": row["provider"], "requests": row["requests"],

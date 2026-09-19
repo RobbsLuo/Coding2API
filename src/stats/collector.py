@@ -109,6 +109,47 @@ class StatsCollector:
                  event.output_tokens, event.reasoning_tokens, event.cached_tokens, event.credit,
                  event.latency_ms, event.ttfb_ms),
             )
+            # 当前小时增量累加：总览/图表都读小时表，不能等 5 分钟一轮的
+            # retention rollup 才可见（否则刚发生的请求统计页面显示 0）。
+            # 增量累加与全量重算等价：rollup 后续会把这一小时算成同样的值。
+            self._bump_hourly(conn, event)
+
+    @staticmethod
+    def _bump_hourly(conn, event: UsageEvent) -> None:
+        """把一条明细增量累加进所属小时行（同 key 则累加，不存在则插入）。"""
+        conn.execute(
+            """
+            INSERT INTO usage_hourly (hour_utc, username, provider, model, requests, ok_count,
+                                      input_tokens, output_tokens, reasoning_tokens,
+                                      cached_tokens, cached_known,
+                                      credit_sum, credit_known, latency_sum, ttfb_sum)
+            VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(hour_utc, username, provider, model) DO UPDATE SET
+                requests = requests + 1,
+                ok_count = ok_count + excluded.ok_count,
+                input_tokens = input_tokens + excluded.input_tokens,
+                output_tokens = output_tokens + excluded.output_tokens,
+                reasoning_tokens = reasoning_tokens + excluded.reasoning_tokens,
+                cached_tokens = cached_tokens + excluded.cached_tokens,
+                cached_known = cached_known + excluded.cached_known,
+                credit_sum = COALESCE(credit_sum, 0) + excluded.credit_sum,
+                credit_known = credit_known + excluded.credit_known,
+                latency_sum = latency_sum + excluded.latency_sum,
+                ttfb_sum = ttfb_sum + excluded.ttfb_sum
+            """,
+            # NULL 一律折成 0 参与累加：列定义是 NOT NULL DEFAULT 0，
+            # `x + NULL` 会交出 NULL，把整行污染掉
+            ((event.ts // 3600) * 3600, event.username, event.provider, event.model,
+             int(event.ok),
+             event.input_tokens or 0, event.output_tokens or 0,
+             event.reasoning_tokens or 0,
+             event.cached_tokens or 0,
+             0 if event.cached_tokens is None else 1,
+             event.credit or 0.0,
+             0 if event.credit is None else 1,
+             (event.latency_ms or 0) if event.ok else 0,
+             (event.ttfb_ms or 0) if event.ok else 0),
+        )
 
     def purge_expired(self, retention_days: int = 90, now: int | None = None) -> int:
         """明细保留 90 天；小时汇总永久（PROPOSAL §8）。
@@ -139,13 +180,18 @@ class StatsCollector:
             cursor = conn.execute(
                 """
                 INSERT INTO usage_hourly (hour_utc, username, provider, model, requests, ok_count,
-                                          input_tokens, output_tokens, credit_sum, credit_known,
-                                          latency_sum, ttfb_sum)
+                                          input_tokens, output_tokens, reasoning_tokens,
+                                          cached_tokens, cached_known,
+                                          credit_sum, credit_known, latency_sum, ttfb_sum)
                 SELECT (ts / 3600) * 3600 AS hour_utc, username, provider, model,
                        COUNT(*), SUM(ok),
                        COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-                       SUM(credit), SUM(CASE WHEN credit IS NULL THEN 0 ELSE 1 END),
-                       COALESCE(SUM(latency_ms), 0), COALESCE(SUM(ttfb_ms), 0)
+                       COALESCE(SUM(reasoning_tokens), 0),
+                       COALESCE(SUM(cached_tokens), 0),
+                       SUM(CASE WHEN cached_tokens IS NULL THEN 0 ELSE 1 END),
+                       COALESCE(SUM(credit), 0), SUM(CASE WHEN credit IS NULL THEN 0 ELSE 1 END),
+                       COALESCE(SUM(CASE WHEN ok = 1 THEN latency_ms END), 0),
+                       COALESCE(SUM(CASE WHEN ok = 1 THEN ttfb_ms END), 0)
                 FROM usage_events WHERE (? IS NULL OR ts >= ?)
                 GROUP BY hour_utc, username, provider, model
                 ON CONFLICT(hour_utc, username, provider, model) DO UPDATE SET
@@ -153,6 +199,9 @@ class StatsCollector:
                     ok_count = excluded.ok_count,
                     input_tokens = excluded.input_tokens,
                     output_tokens = excluded.output_tokens,
+                    reasoning_tokens = excluded.reasoning_tokens,
+                    cached_tokens = excluded.cached_tokens,
+                    cached_known = excluded.cached_known,
                     credit_sum = excluded.credit_sum,
                     credit_known = excluded.credit_known,
                     latency_sum = excluded.latency_sum,

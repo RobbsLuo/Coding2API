@@ -26,6 +26,7 @@ import argparse
 import sqlite3
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -77,13 +78,23 @@ def sync_hourly(conn) -> None:
 
 
 class _DbAdapter:
-    """把裸连接包装成 Database.connect() 的形态（rollup 只用这一个方法）。"""
+    """把裸连接包装成 Database 的形态（rollup 只用 connect/transaction）。"""
 
     def __init__(self, conn) -> None:
         self._conn = conn
 
     def connect(self):
         return self._conn
+
+    @contextmanager
+    def transaction(self):
+        """与 Database.transaction 同语义：正常提交、异常回滚。"""
+        try:
+            yield self._conn
+        except BaseException:
+            self._conn.rollback()
+            raise
+        self._conn.commit()
 
 
 def backup(db_path: Path) -> Path:

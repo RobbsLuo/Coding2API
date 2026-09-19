@@ -78,8 +78,8 @@ coding2api/
 │   │   ├── retention.py         # 每 5 分钟：小时汇总重算（幂等）+ 90 天前明细清理
 │   │   └── runner.py            # 后台任务调度，接入应用生命周期
 │   ├── stats/
-│   │   ├── collector.py         # usage_events 写入（脱敏）
-│   │   └── query.py             # overview / by-provider / events 查询（events JOIN credentials 带凭证昵称）
+│   │   ├── collector.py         # usage_events 写入（脱敏）+ 小时汇总双写/重算
+│   │   └── query.py             # overview / by-provider / timeline / events 查询（前者读小时汇总，events JOIN credentials 带凭证昵称）
 │   └── api/
 │       ├── deps.py              # Services 容器 + require_api_key / session / csrf 依赖
 │       ├── chat.py              # POST /v1/chat/completions
@@ -286,7 +286,12 @@ class Scheduler:
 | 额度探测（quota_probe.py） | 启动立即跑一轮（不节流） + 每 `QUOTA_PROBE_MINUTES`（默认 60）分钟 | 探测上游剩余额度 → `credentials.quota_*` / `quota_expiry_ladder` / `health` 写回 |
 | token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token |
 | 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态，重启重建）；失败凭证持续重试，同账号多凭证共享一次 |
-| 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，最新小时滞后 ≤5 分钟）+ 90 天前明细清理 |
+| 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理 |
+
+**清理切点必顶对齐到小时边界**（`purge_expired`）。这不是保守取值而是正确性要求：
+`rollup_hourly` 对整行是 REPLACE 语义，只有保证「仍有明细的小时保有全部明细」
+重算才精确；若把边界小时只删一半，下一轮 rollup 会把汇总行覆盖成剩下那一半，
+被删部分永久丢失（明细已不在）。代价：明细最多多留 1 小时。
 
 ---
 
@@ -360,6 +365,14 @@ fixture 断言两个方向：**解析正确**（样本 → 期望 Event）与**�
 - **手写 SQL 而非 ORM**：8 张表规模下 ORM 收益为负
 - **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + PUBLIC_BASE_URL
 - **v1 无 Anthropic**（Q8=A）：Event 层已预留，v1.1 只加 `compat/anthropic/` 适配器
+- **统计一律以 `usage_hourly` 为准**：`overview` / `by_provider` / `timeline` /
+  `model-timeline` 均读小时汇总，只有 `events`（逐请求明细）读 `usage_events`。
+  统一口径是为了让选「全部」时总览与图表同值（明细只留 90 天，汇总永久）
+- **小时汇总双写**：`record()` 写入明细的同时增量累加当前小时行，所以新请求
+  立即可见于统计页（不依赖 5 分钟一轮的 rollup）；`rollup_hourly` 仍每 5 分钟
+  全量重算作对账，两者结果一致（幂等）
+- **延迟均值只算成功请求**：分子 `SUM(latency_ms WHERE ok=1)` 与分母 `ok_count`
+  配对；失败请求的耗时不能拉偏「典型耗时」（与图表口径一致）
 - **两套数据源共存（已知不一致）**：`overview` / `by_provider` 读 `usage_events`（即时，
   仅覆盖 90 天明细），`timeline` / `model-timeline` 读 `usage_hourly`（≤5 分钟滞后，永久）。
   时间范围 ≤90 天时两者一致（汇总由同一批明细算出）；选「全部」时总览会小于图表，

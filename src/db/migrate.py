@@ -16,7 +16,7 @@ from importlib import resources
 SCHEMA_NAME = "schema.sql"
 
 # 当前 schema 版本。新增列/表、删表时 +1，并在下方对应元组里补增量。
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -26,6 +26,11 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
      "ttfb_sum INTEGER NOT NULL DEFAULT 0"),  # 首字延迟聚合（图表维度，老库补 0）
     ("credentials",
      "quota_expiry_ladder TEXT"),  # 到期阶梯 JSON：选号按窗口内到期积分排序
+    # 总览改为读小时汇总后，这两项也必须能在小时表里聚合（老库历史行补 0，
+    # 历史小时的数值无法回填：明细已不在，只能接受旧时段显示 0）
+    ("usage_hourly", "reasoning_tokens INTEGER NOT NULL DEFAULT 0"),
+    ("usage_hourly", "cached_tokens INTEGER NOT NULL DEFAULT 0"),
+    ("usage_hourly", "cached_known INTEGER NOT NULL DEFAULT 0"),
 )
 
 # 已废弃的表：schema.sql 里已删定义，但老库里可能还留着，必须显式清理。

@@ -1099,6 +1099,53 @@ def test_stats_rollup_is_idempotent(stats):
     assert total == 1
 
 
+def test_overview_matches_timeline_beyond_retention_window(stats):
+    """超过 90 天的时段：总览与图表必须同值（同读小时汇总）。
+
+    此前总览读 usage_events（90 天）、图表读 usage_hourly（永久），
+    选「全部」时同屏两个数字矛盾：明细被清理后总览缩水、图表不变。
+    """
+    collector, query = stats
+    now = int(time.time())
+    old = now - 200 * 86400               # 已超出 90 天明细保留期
+    for ts in (old, now):
+        collector.record(username="u", provider="trae", model="m", ok=True,
+                         input_tokens=5, now=ts)
+    RetentionTask(collector, retention_days=90).run_once()
+    assert query.overview(username="u")["requests"] == 2          # 含已过期的老明细
+    assert sum(p["trae"] for p in query.timeline(username="u")) == 2
+
+
+def test_overview_reasoning_and_cached_aggregate_from_hourly(stats):
+    """小时表带上 reasoning/cached 后，总览仍能给准确值（与明细同源）。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     input_tokens=100, reasoning_tokens=7, cached_tokens=40)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     input_tokens=50, reasoning_tokens=3)     # 未上报 cached
+    collected = query.overview(username="u")
+    assert collected["reasoning_tokens"] == 10
+    assert collected["cached_tokens"] == 40      # 只有上报过的那条计入
+    assert collected["input_tokens"] == 150
+    # 未上报过 cached 的时段 → None，不能当成 0
+    collector.record(username="v", provider="trae", model="m", ok=True)
+    assert query.overview(username="v")["cached_tokens"] is None
+
+
+def test_overview_latency_averages_only_successful_requests(stats):
+    """均值口径与图表一致：除以 ok_count，失败请求不拉偏「典型耗时」。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     latency_ms=100, ttfb_ms=30)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     latency_ms=300, ttfb_ms=50)
+    collector.record(username="u", provider="trae", model="m", ok=False,
+                     error_type="upstream_error", latency_ms=900, ttfb_ms=900)
+    overview = query.overview(username="u")
+    assert overview["avg_latency_ms"] == 200    # (100+300)/2，失败那条不计入
+    assert overview["avg_ttfb_ms"] == 40
+
+
 def test_stats_overview_since_filter(stats):
     collector, query = stats
     collector.record(username="u", provider="trae", model="m", ok=True, now=1000)
@@ -1107,7 +1154,7 @@ def test_stats_overview_since_filter(stats):
 
 
 def test_stats_hourly_rolls_via_retention(stats):
-    """record 不写汇总；5 分钟一轮的 retention 滚动后最新小时才上趋势图。"""
+    """record 即时累加汇总（总览/图表不必等一轮 retention）；rollup 幂等不双计。"""
     collector, query = stats
     collector.record(username="u", provider="trae", model="m", ok=True, now=1_700_003_600)
     collector.record(username="u", provider="trae", model="m", ok=False,
@@ -1115,8 +1162,10 @@ def test_stats_hourly_rolls_via_retention(stats):
     collector.record(username="u", provider="codebuddy", model="m", ok=True,
                      now=1_700_003_602, input_tokens=7, output_tokens=3,
                      credit=0.5, latency_ms=100)
-    # 实时累加已撤销：滚动前最新小时尚不在趋势图
-    assert query.timeline(username="u", since=1_700_000_000) == []
+    # 增量累加：最新小时立即可见（不需等 5 分钟一轮的 rollup）
+    points = query.timeline(username="u", since=1_700_000_000)
+    assert len(points) == 1 and points[0]["trae"] == 2 and points[0]["codebuddy"] == 1
+    # 全量重算与该小时的增量值一致（幂等，不双计）
     RetentionTask(collector, retention_days=90).run_once()
     points = query.timeline(username="u", since=1_700_000_000)
     assert len(points) == 1 and points[0]["trae"] == 2 and points[0]["codebuddy"] == 1
@@ -1674,6 +1723,9 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
             latency_sum INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (hour_utc, username, provider, model))
     """)
+    # 该表内已有一行历史汇总：补列后必须保留，新列取默认 0
+    conn.execute("INSERT INTO usage_hourly (hour_utc, username, provider, model, requests) "
+                 "VALUES (1, 'u', 'trae', 'm', 5)")
     # 旧版 credentials：无 quota_expiry_ladder 列（到期排序指标升级前的结构）
     conn.execute("""
         CREATE TABLE credentials (
@@ -1696,6 +1748,12 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     assert "cached_tokens" in events_columns
     hourly_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(usage_hourly)")}
     assert "ttfb_sum" in hourly_columns
+    # 总览改读小时汇总后新增的三列（老库历史行补 0，数值无法回填）
+    assert {"reasoning_tokens", "cached_tokens", "cached_known"} <= hourly_columns
+    legacy_hourly = db.connect().execute(
+        "SELECT requests, reasoning_tokens, cached_known FROM usage_hourly "
+        "WHERE hour_utc = 1").fetchone()
+    assert tuple(legacy_hourly) == (5, 0, 0)      # 历史汇总保留，新列取默认
     cred_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
     assert "quota_expiry_ladder" in cred_columns
     # 废弃表被 _MIGRATION_DROPS 清理（schema.sql 删定义对老库无效）
@@ -1714,7 +1772,7 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     db.connect().execute(
         "INSERT INTO usage_hourly (hour_utc, username, provider, model, requests,"
-        " ok_count, ttfb_sum) VALUES (1, 'u', 'trae', 'm', 1, 1, 120)")
+        " ok_count, ttfb_sum) VALUES (2, 'u', 'trae', 'm', 1, 1, 120)")
     db.connect().commit()
     apply_schema(db.connect())                          # 二次执行不抛错
     db.close()
