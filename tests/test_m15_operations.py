@@ -1049,6 +1049,26 @@ def test_stats_overview_empty_and_filters(stats):
     assert query.by_provider() == []
 
 
+def test_purge_keeps_partially_populated_hour_intact(stats):
+    """边界小时不得被删一半：否则下一轮 rollup 把汇总行覆盖成缩小值。
+
+    rollup 对整行是 REPLACE 语义，purge 只删已完全过期的小时（切点向上
+    对齐到小时边界），保证「仍有明细的小时保有全部明细」。
+    """
+    collector, _query = stats
+    now = int(time.time())
+    hour = (now // 3600) * 3600
+    # 同一小时内两条明细：早的已过期（200 天前同一小时），晚的还在
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     input_tokens=100, now=hour - 200 * 86400 + 1)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     input_tokens=10, now=hour + 1)
+    RetentionTask(collector, retention_days=90).run_once()
+    row = collector._db.connect().execute(
+        "SELECT SUM(input_tokens) AS t, SUM(requests) AS r FROM usage_hourly").fetchone()
+    assert (row["t"], row["r"]) == (110, 2)      # 两条都在，未被截断
+
+
 def test_stats_retention_and_rollup(stats):
     collector, query = stats
     collector.record(username="u", provider="trae", model="m", ok=True, input_tokens=5,

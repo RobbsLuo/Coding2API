@@ -111,8 +111,17 @@ class StatsCollector:
             )
 
     def purge_expired(self, retention_days: int = 90, now: int | None = None) -> int:
-        """明细保留 90 天；小时汇总永久（PROPOSAL §8）。"""
-        cutoff = int(now if now is not None else time.time()) - retention_days * 86400
+        """明细保留 90 天；小时汇总永久（PROPOSAL §8）。
+
+        切点向上对齐到小时边界：只删**整个小时都已过期**的明细。
+        这不是保守取值而是正确性要求——`rollup_hourly` 对整行用 REPLACE
+        语义，只有保证「仍有明细的小时保有全部明细」，重算才精确；
+        若把边界小时只删一半，下一轮 rollup 会把汇总行覆盖为剩下的那一半，
+        永久丢掉被删部分（已过期明细无法再从明细找回）。
+        代价：明细最多多留 1 小时。
+        """
+        raw_cutoff = int(now if now is not None else time.time()) - retention_days * 86400
+        cutoff = (raw_cutoff // 3600 + 1) * 3600
         with self._db.transaction() as conn:
             cursor = conn.execute("DELETE FROM usage_events WHERE ts < ?", (cutoff,))
         return cursor.rowcount
@@ -122,6 +131,9 @@ class StatsCollector:
 
         默认汇总全部明细：小时汇总要永久保留，不能因为「只看最近 N 小时」
         而丢掉历史数据。需要增量时由调用方显式传 since。
+
+        整行 REPLACE 语义要求「有明细的小时保有全部明细」——
+        `purge_expired` 按整小时删除来保这个前提（见其 docstring）。
         """
         with self._db.transaction() as conn:
             cursor = conn.execute(
