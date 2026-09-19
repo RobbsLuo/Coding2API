@@ -27,6 +27,7 @@ from src.provider.codebuddy.checkin import (
     CodeBuddyCheckin,
     checkin_scope_key,
     parse_checkin_response,
+    parse_checkin_status,
 )
 from src.provider.codebuddy.client import CodeBuddyCredential, CodeBuddyProvider
 from src.provider.codebuddy.events import UpstreamProtocolViolation
@@ -597,7 +598,106 @@ def test_parse_checkin_response_rejects_non_object(body):
 
 def test_checkin_scope_key_normalizes():
     assert checkin_scope_key("https://e/", "u") == "https://e|u"
-    assert checkin_scope_key("https://e", "") == "https://e|"
+    # 身份未知时必须返回空串：返回 "endpoint|" 会让所有该渠道凭证算出同一个
+    # scope，签到任务只签第一个账号（实测两个 CB 凭证 account_uid/user_id 都是空）
+    assert checkin_scope_key("https://e", "") == ""
+    assert checkin_scope_key("https://e", "   ") == ""
+
+
+def test_parse_checkin_status_extracts_fields():
+    """状态解析：字段齐全时逐项取出，类型归一。"""
+    status = parse_checkin_status({"code": 0, "msg": "OK", "data": {
+        "active": True, "today_checked_in": True, "streak_days": 4,
+        "today_credit": 100, "total_credits": 400, "is_streak_day": False,
+        "activity_name": "高校新生攻略"}})
+    assert status.active is True and status.today_checked_in is True
+    assert status.streak_days == 4 and status.today_credit == 100.0
+    assert status.total_credits == 400.0 and status.activity_name == "高校新生攻略"
+    assert status.is_streak_day is False
+    assert status.to_dict()["streak_days"] == 4
+
+
+@pytest.mark.parametrize("field", ["streak_days", "today_credit", "total_credits"])
+@pytest.mark.parametrize("value", [None, "x", True, float("inf")])
+def test_parse_checkin_status_tolerates_bad_optional_fields(field, value):
+    """可选数值字段缺失/非法/非有限 → None，绝不抛异常（展示字段不能拖垮签到）。"""
+    status = parse_checkin_status({"code": 0, "data": {"active": True, field: value}})
+    assert getattr(status, field) is None
+
+
+def test_parse_checkin_status_rejects_bad_envelope():
+    """code 非 0、缺 data、非对象：一律显式报错，不静默当「未签到」。"""
+    for body in ("junk", [1], {"code": 1, "msg": "boom"}, {"code": 0},
+                 {"code": 0, "data": []}, {"data": {"active": True}}):
+        with pytest.raises(UpstreamProtocolViolation):
+            parse_checkin_status(body)
+
+
+async def test_checkin_fetch_status_error_paths():
+    """状态接口：401/403 与 5xx 抛异常；非 JSON 也抛（不能当空状态吞掉）。"""
+    async def unauthorized(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"code": 401})
+
+    client = CodeBuddyCheckin("https://e", client=_refresh_client(unauthorized))
+    with pytest.raises(UpstreamProtocolViolation):
+        await client.fetch_status(CodeBuddyCredential(bearer_token="t"))
+    await client.aclose()
+
+    async def server_error(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, content=b"boom")
+
+    client2 = CodeBuddyCheckin("https://e", client=_refresh_client(server_error))
+    with pytest.raises(UpstreamProtocolViolation):
+        await client2.fetch_status(CodeBuddyCredential(bearer_token="t"))
+    await client2.aclose()
+
+    async def html(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>")
+
+    client3 = CodeBuddyCheckin("https://e", client=_refresh_client(html))
+    with pytest.raises(UpstreamProtocolViolation):
+        await client3.fetch_status(CodeBuddyCredential(bearer_token="t"))
+    await client3.aclose()
+
+
+async def test_checkin_claim_failure_skips_status_lookup():
+    """领取失败（业务码非 0）时不做状态回查：失败结论已完整，多余请求只会拖时间。"""
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, json={"code": 5, "msg": "boom"})
+
+    client = CodeBuddyCheckin("https://e", client=_refresh_client(handler))
+    result = await client.claim(CodeBuddyCredential(bearer_token="t"))
+    assert result.ok is False and result.status is None
+    assert len(calls) == 1                              # 只有 daily-checkin 一次请求
+    await client.aclose()
+
+
+async def test_checkin_claim_attaches_status_and_ignores_status_failure():
+    """领取成功后回查状态；回查失败不能推翻「已领取」的既成事实。"""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("checkin-activity-status"):
+            return httpx.Response(200, json={"code": 0, "data": {
+                "active": True, "today_checked_in": True, "streak_days": 5}})
+        return httpx.Response(200, json={"code": 0, "data": {"credit": 100}})
+
+    client = CodeBuddyCheckin("https://e", client=_refresh_client(handler))
+    result = await client.claim(CodeBuddyCredential(bearer_token="t"))
+    assert result.ok and result.status is not None
+    assert result.status.streak_days == 5
+    await client.aclose()
+
+    async def status_boom(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("checkin-activity-status"):
+            return httpx.Response(500, content=b"boom")
+        return httpx.Response(200, json={"code": 0, "data": {"credit": 100}})
+
+    client2 = CodeBuddyCheckin("https://e", client=_refresh_client(status_boom))
+    result2 = await client2.claim(CodeBuddyCredential(bearer_token="t"))
+    assert result2.ok and result2.credit == 100 and result2.status is None
+    await client2.aclose()
 
 
 async def test_checkin_claim():
@@ -774,6 +874,36 @@ async def test_quota_probe_uses_pacer(repo):
     turns.clear()
     await task.run_once(apply_pacing=False)
     assert turns == []
+
+
+async def test_checkin_empty_scope_falls_back_to_credential_id(repo):
+    """身份未知（provider 返回空 scope）时绝不共享：两个账号必须各签一次。
+
+    回归用例：CB 的 OAuth 凭证实测 account_uid / user_id 都是空串，
+    共享 `endpoint|` 会让第二个凭证被 seen 集合永久跳过，且没有任何报错。
+    """
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "a"})
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "b"})
+
+    class AnonymousProvider:
+        id = "codebuddy"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def checkin(self, _data):
+            self.calls += 1
+            return CheckinResult(ok=True, credit=100)
+
+        def checkin_scope(self, _data):
+            return ""        # 身份未知
+
+    provider = AnonymousProvider()
+    task = CheckinTask(credentials, {"codebuddy": provider})
+    report = await task.run_once()
+    assert report.attempted == 2 and report.succeeded == 2 and report.skipped == 0
+    assert provider.calls == 2
 
 
 async def test_checkin_dedupes_same_upstream_account(repo):
@@ -1607,6 +1737,51 @@ def test_checkin_endpoint_reports_result(admin_client):
     app.state.executor._deps.providers["codebuddy"] = Stub()
     body = client.post(f"/api/credentials/{credential_id}/checkin").json()
     assert body["ok"] is True and body["credit"] == 12.0
+    assert body["status"] is None                     # 无状态能力的渠道返回 null
+
+
+def test_checkin_endpoint_passes_status_through(admin_client):
+    """provider 回填 status 时原样透传（前端靠它显示连续天数）。"""
+    app, client = admin_client
+    credential_id = app.state.credentials.add(provider="codebuddy",
+                                              credential_data={"bearer_token": "t"})
+
+    class Stub:
+        endpoint = "https://e"
+
+        async def checkin(self, _data):
+            return CheckinResult(ok=True, credit=100.0,
+                                 status={"streak_days": 4, "today_checked_in": True})
+
+    app.state.executor._deps.providers["codebuddy"] = Stub()
+    body = client.post(f"/api/credentials/{credential_id}/checkin").json()
+    assert body["status"] == {"streak_days": 4, "today_checked_in": True}
+
+
+def test_checkin_status_endpoint(admin_client):
+    """只读状态端点：有能力的渠道返回状态，无能力/不存在的凭证 400。"""
+    app, client = admin_client
+    credential_id = app.state.credentials.add(provider="codebuddy",
+                                              credential_data={"bearer_token": "t"})
+
+    class Stub:
+        endpoint = "https://e"
+
+        async def checkin_status(self, _data):
+            return {"active": True, "streak_days": 7}
+
+    app.state.executor._deps.providers["codebuddy"] = Stub()
+    assert client.get(f"/api/credentials/{credential_id}/checkin").json() == {
+        "status": {"active": True, "streak_days": 7}}
+
+    # 没有 checkin_status 能力的渠道 → 稳定可读的错误
+    app.state.executor._deps.providers["codebuddy"] = type("Bare", (), {"endpoint": "https://e"})()
+    rejected = client.get(f"/api/credentials/{credential_id}/checkin")
+    assert rejected.status_code == 400
+    assert "checkin status" in rejected.text
+
+    # 凭证不存在同样 400
+    assert client.get("/api/credentials/cred_missing/checkin").status_code == 400
 
 
 def test_account_endpoints_with_stub_provider(admin_client):
@@ -1992,6 +2167,47 @@ async def test_provider_checkin_and_scope_roundtrip():
     result = await provider.checkin({"bearer_token": "t", "account_uid": "a"})
     assert result.ok and result.credit == 3.0
     assert provider.checkin_scope({"bearer_token": "t", "user_id": "u"}).endswith("|u")
+
+
+async def test_provider_checkin_status_and_anonymous_scope():
+    """checkin_status 只读状态；身份未知时 scope 返回空串（交由任务回落凭证 ID）。"""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/checkin-activity-status")
+        return httpx.Response(200, json={"code": 0, "data": {
+            "active": True, "today_checked_in": True, "streak_days": 7,
+            "today_credit": 100, "total_credits": 700,
+            "activity_name": "高校新生攻略", "is_streak_day": True}})
+
+    provider = CodeBuddyProvider(client=_refresh_client_provider(handler))
+    status = await provider.checkin_status({"bearer_token": "t"})
+    assert status["streak_days"] == 7 and status["today_checked_in"] is True
+    assert status["activity_name"] == "高校新生攻略"
+    # 空身份 → 空串（不是 "https://e|"，否则所有 CB 凭证会共用同一 scope）
+    assert provider.checkin_scope({"bearer_token": "t"}) == ""
+
+
+async def test_provider_checkin_without_status_keeps_none():
+    """领取失败（无状态回填）时 provider 不构造 status（中立层保持 None）。"""
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 5, "msg": "boom"})
+
+    provider = CodeBuddyProvider(client=_refresh_client_provider(handler))
+    result = await provider.checkin({"bearer_token": "t"})
+    assert result.ok is False and result.status is None
+
+
+async def test_provider_checkin_returns_status_dict():
+    """provider.checkin 把私有 CheckinStatus 降级成 dict 透传（中立层不认具体类型）。"""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("checkin-activity-status"):
+            return httpx.Response(200, json={"code": 0, "data": {
+                "active": True, "today_checked_in": True, "streak_days": 3}})
+        return httpx.Response(200, json={"code": 0, "data": {"credit": 100}})
+
+    provider = CodeBuddyProvider(client=_refresh_client_provider(handler))
+    result = await provider.checkin({"bearer_token": "t"})
+    assert result.ok and isinstance(result.status, dict)
+    assert result.status["streak_days"] == 3
 
 
 async def test_poll_pending_returns_status_pending(admin_client):

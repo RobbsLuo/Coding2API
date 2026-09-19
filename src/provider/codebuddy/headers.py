@@ -29,6 +29,7 @@ EP_TOKEN_REFRESH = "/v2/plugin/auth/token/refresh"
 EP_USER_RESOURCE = "/v2/billing/meter/get-user-resource"
 EP_ENTERPRISE_USAGE = "/v2/billing/meter/get-enterprise-user-usage"
 EP_DAILY_CHECKIN = "/billing/meter/daily-checkin"
+EP_CHECKIN_STATUS = "/billing/meter/checkin-activity-status"
 
 CODEBUDDY_IDE_VERSION = "1.42.0"
 

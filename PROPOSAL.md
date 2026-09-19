@@ -66,7 +66,12 @@
 - 认证：`POST /v2/plugin/auth/state?platform=CLI` → 拿 `authUrl`/`state` → 轮询 `POST /v2/plugin/auth/token?state=...`（设备码模式）
 - 账号切换：`/v2/plugin/login/account`、`/v2/plugin/accounts`
 - 额度：个人版 `POST /v2/billing/meter/get-user-resource`（`CycleCapacity*Precise`），企业版 `POST /v2/billing/meter/get-enterprise-user-usage`（`credit` 已用、`limitNum` 总额）
-- 签到：`POST /billing/meter/daily-checkin`
+- 签到：`POST /billing/meter/daily-checkin`；状态：`POST /billing/meter/checkin-activity-status`（连续天数 / 今日是否已签）
+- **成长中心**（逆向自 WorkBuddy 桌面端，前缀 `/v2/activity/growth`，仅 CodeBuddy 有）：
+  只读 `buddy/travel/status`、`buddy/travel/config`、`tasks`、`streak`、`redeem/summary`、`lottery/chances`、`buddy/quota`、`energy`；
+  写入 `buddy/travel/claim`、`buddy/travel/depart`、`tasks/accept`、`makeup-cards/use`、`redeem`、`lottery/draw`、`buddy/open`
+- 鉴权头与聊天一致（`Authorization` + `X-User-Id` + `X-Domain`）；成长中心实测可用项目内的 OAuth bearer 凭证直连，无需桌面端凭据文件
+- **凭证身份可能为空**：OAuth 登录路径下上游账号接口未回填 `account_uid`/`user_id`（实测发生），签到/成长中心的同账号隔离必须回落到 `credential_id`,否则第二个账号会被静默跳过
 - 请求头需 `X-Domain`、`X-User-Id`、`X-Enterprise-Id`、`X-Department-Info`（部门名须 UTF-8 百分号编码）
 
 ### 3.2 TRAE SOLO（字节）
@@ -208,6 +213,7 @@ v1 只接 OpenAI 出口，但上游 SSE 解析到「中立事件」这一步独�
 - **API Key 存摘要**：SHA-256，明文仅创建时返回一次
 - **凭证加密列**：`data_enc` 走 Fernet，调度状态（`health` / `cooling_until` / `err_count` / `pinned` / `quota_expiry_ladder`）落库，进程重启不丢冷却状态与到期阶梯
 - **用量脱敏**：`usage_events`（明细 90 天）+ `usage_hourly`（小时汇总永久），`credit` 可空仅辅助展示
+- **成长中心**：`growth_events` 只存汇总行（一轮一行人话汇报 + 积分/能量/连签 + trigger），不存活动内部数据结构；`credentials.growth_last_run_at/growth_last_result` 供列表直接显示
 - 签到去重与模型列表缓存均进程内实现，不进库
 
 DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见 [TECHNICAL.md §7](TECHNICAL.md)。
@@ -224,7 +230,7 @@ DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见
 
 外部（API Key 鉴权）：`POST /v1/chat/completions`（流式 + 非流式）、`GET /v1/models`（扁平模型名 + `providers` 字段）、`GET /v1/user/balance`（DeepSeek 兼容余额，读探测缓存聚合，不实时打上游）、`GET /health`。
 
-管理台（会话 Cookie）：凭证管理、API Key 管理、用量统计、Playground 等，admin 管凭证与全量统计，普通用户仅见自己的数据。回调（无鉴权，TRAE 浏览器 302 不带 key）：`GET /authorize`。
+管理台（会话 Cookie）：凭证管理、API Key 管理、用量统计、Playground 等，admin 管凭证与全量统计，普通用户仅见自己的数据。凭证运维端点含 `POST /api/credentials/{id}/checkin`（签到）、`GET|POST /api/credentials/{id}/growth`（成长中心状态与手动执行，仅 CodeBuddy）。回调（无鉴权，TRAE 浏览器 302 不带 key）：`GET /authorize`。
 
 实现以代码为准，使用说明见 [README.md](README.md)。
 
@@ -288,6 +294,12 @@ Copyright (c) 2026
 - codebuddy2api - https://github.com/IceeAn/codebuddy2api
   Copyright (c) 2026 An! - MIT License
   （提供 CodeBuddy 上游协议、凭证管理、脱敏统计的设计参考）
+
+- workbuddy-auto-signin - https://github.com/88lin/workbuddy-auto-signin
+  Copyright (c) 2026 88lin - MIT License
+  （提供 CodeBuddy 成长中心与签到接口的逆向结论与运行经验：端点路径、
+   client_token 规则、/redeem 传天数、4xx 业务规则不算失败、
+   时间预算与退避重试的教训）
 
 - trae2api-web - https://github.com/connectedGraph/trae2api-web
   Copyright (c) 2026 connectedGraph - MIT License

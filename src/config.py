@@ -48,6 +48,11 @@ class Settings(BaseSettings):
 
     # 后台任务
     quota_probe_minutes: int = 60
+    # 成长中心（仅 CodeBuddy 有）：一轮领取的周期，以及是否允许不可逆动作
+    # （抽奖/连登兑换/开 Buddy 盲盒/消耗补登卡）。这些动作无法撤销，
+    # 需要保守部署时可关闭：关闭后仍会领取旅行礼物与任务奖励。
+    growth_interval_minutes: int = 60
+    growth_irreversible_actions: bool = True
     pacer_min_seconds: float = 5
     pacer_max_seconds: float = 20
     # CodeBuddy 聊天最小间隔：腾讯频率风控（11128）在连续快速请求时触发，

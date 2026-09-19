@@ -11,6 +11,11 @@ Copyright (c) 2026 Hongsheng Luo (Robbs)
   Copyright (c) 2026 connectedGraph - MIT License
   （提供 TRAE SOLO 上游协议、账号池冷却状态机的设计参考）
 
+- workbuddy-auto-signin - https://github.com/88lin/workbuddy-auto-signin
+  Copyright (c) 2026 88lin - MIT License
+  （提供 CodeBuddy 成长中心与签到接口的逆向结论与运行经验：端点路径、
+   client_token 规则、/redeem 传天数、4xx 业务规则不算失败、时间预算与退避重试的教训）
+
   其上游：
   - xueyue33/codebuddy2api - https://github.com/xueyue33/codebuddy2api
   - Sliverkiss/traework2api - https://github.com/Sliverkiss/traework2api

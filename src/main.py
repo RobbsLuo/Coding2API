@@ -31,7 +31,7 @@ from .config import Settings, load_settings, validate_endpoint_allowed
 from .db.conn import Database
 from .db.crypto import CredentialCipher
 from .db.migrate import apply_schema
-from .db.repo import ApiKeyRepository, CredentialRepository
+from .db.repo import ApiKeyRepository, CredentialRepository, GrowthRepository
 from .engine.affinity import ConversationAffinity
 from .engine.executor import Executor, ExecutorDeps
 from .engine.scheduler import Scheduler
@@ -117,6 +117,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     apply_schema(db.connect())
     cipher = CredentialCipher(config.app_secret)
     credentials = CredentialRepository(db, cipher)
+    growth_events = GrowthRepository(db)
     api_keys = ApiKeyRepository(db)
     store = users if users is not None else _load_users(settings=config)
     chat_pacer = (
@@ -154,7 +155,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     @asynccontextmanager
     async def lifespan(app_: FastAPI):
         services_ = app_.state.services
-        runner = build_runner(credentials, registry, app_.state.stats_collector, config)
+        runner = build_runner(credentials, registry, app_.state.stats_collector, config,
+                              growth_events=app_.state.growth_events)
         app_.state.task_runner = runner
         await runner.start()
         # 预热模型别名表（动态拉取失败仅记日志，不阻塞启动）；force 绕过 TTL
@@ -184,6 +186,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.api_keys = api_keys
     app.state.executor = executor
     app.state.stats_collector = stats_collector
+    app.state.growth_events = growth_events
     app.state.stats_query = StatsQuery(db)
     app.state.upstream_auth = _upstream_auth(registry, config)
     app.state.pending_probes = []
@@ -222,6 +225,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     services = Services(
         settings=config,
         credentials=credentials,
+        growth_events=growth_events,
         api_keys=api_keys,
         executor=executor,
         registry=registry,

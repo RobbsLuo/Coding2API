@@ -11,7 +11,8 @@
 - **OpenAI 兼容出口**：`/v1/chat/completions`（流式 + 非流式）、`/v1/models`、`/v1/user/balance`（DeepSeek 兼容余额查询）
 - **统一调度**：扁平模型名按健康度自动选号，`模型@渠道` 强制指定；三态健康度 + 分级冷却自动避开坏号；积分 36h 内即将到期多者优先（先用掉，避免过期浪费；管理台凭证列表直接显示每个账号的到期积分）；同一对话多轮请求粘住同一凭证（对话进行中不换号，出错才轮换）
 - **公共凭证池**：admin 集中维护、全员共享；按人统计用量
-- **完整凭证运维**：设备码登录、多账号切换、额度探测、每日签到、token 预刷新；凭证加密入库（`APP_SECRET`）
+- **完整凭证运维**：设备码登录、多账号切换、额度探测、每日签到（含连续天数）、token 预刷新；凭证加密入库（`APP_SECRET`）
+- **成长中心**（仅 CodeBuddy）：自动领 Buddy 旅行礼物、派 Buddy、领取新任务与任务奖、断登补登、连登奖励兑换、开盲盒、能量开 Buddy 盲盒；不可逆动作可用 `GROWTH_IRREVERSIBLE_ACTIONS=false` 一键关停；管理台可手动执行并查看每轮逐条结果
 - **脱敏统计**：不存对话内容；明细 90 天、小时汇总永久；按人/渠道/模型可视化
 - **管理台安全加固**：登录限流、CSRF 校验、请求体上限、Host 白名单
 
@@ -98,7 +99,14 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 
 ## 后台任务
 
-额度探测、token 预刷新、每日签到、明细清理由 `TaskRunner` 自动调度（失败互不影响），周期见 TECHNICAL.md §6.1。
+额度探测、token 预刷新、每日签到、成长中心、明细清理由 `TaskRunner` 自动调度（失败互不影响），周期见 TECHNICAL.md §6.1。
+
+成长中心仅 CodeBuddy 有：自动领取 Buddy 旅行礼物、派 Buddy 出发、领取新任务与任务奖、
+断登补登、连登奖励兑换、开盲盒、能量开 Buddy 盲盒。Buddy 旅行 1–4 小时回来一次，
+所以周期默认 60 分钟（`GROWTH_INTERVAL_MINUTES`），回来就领、不把礼物压到第二天。
+抽奖 / 连登兑换 / 开 Buddy 盲盒 / 消耗补登卡属于**不可逆动作**，设
+`GROWTH_IRREVERSIBLE_ACTIONS=false` 可全部跳过（仍会领旅行礼物与任务奖励）。
+管理台凭证列表的「成长中心」列显示每个账号最近一轮的结果，行内菜单可手动执行一次。
 
 ## 配置
 
@@ -115,6 +123,8 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 | `USERS_FILE` | `secrets/users.txt` | 用户文件路径（`config.py` 的 `users_file`） |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |
+| `GROWTH_INTERVAL_MINUTES` | `60` | 成长中心（仅 CodeBuddy）一轮领取的周期；下限 5 分钟 |
+| `GROWTH_IRREVERSIBLE_ACTIONS` | `true` | 是否允许成长中心的不可逆动作：抽奖、连登兑换、开 Buddy 盲盒、消耗补登卡。`false` 时仍会领取旅行礼物与任务奖励 |
 | `QUOTA_EXPIRY_WINDOW_SECONDS` | `129600` | 到期排序窗口：把距到期 ≤ 该秒数的积分加总，多的账号先用（避免积分过期浪费）；`≤0` 关闭，退回纯健康度排序 |
 | `CONVERSATION_STICKY_SECONDS` | `3600` | 会话粘性 TTL：同一对话（消息前缀延续）多轮请求固定用同一凭证（手动 pin 的凭证优先，粘性让位）；凭证出错仍会轮换，成功后重新粘定；`≤0` 关闭 |
 | `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*` | 模型列表黑名单（仅影响列表展示） |

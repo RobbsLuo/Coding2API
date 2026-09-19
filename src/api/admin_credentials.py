@@ -1,4 +1,4 @@
-"""管理台凭证运维：CRUD / toggle / pin / probe / checkin / 账号切换。
+"""管理台凭证运维：CRUD / toggle / pin / probe / checkin / 成长中心 / 账号切换。
 
 探测失败原因翻译（describe_probe_failure）在此，因为只有这里返回探测结果。
 """
@@ -157,7 +157,59 @@ def create_router(services: Services) -> APIRouter:
         # already_checked_in 必须透传：前端靠它区分「刚签到」与「今天已签过」
         return {"ok": result.ok, "credit": result.credit, "code": result.code,
                 "message": result.message,
-                "already_checked_in": result.already_checked_in}
+                "already_checked_in": result.already_checked_in,
+                # 渠道可选的活动状态（连续天数/今日积分）；无此能力的渠道为 None
+                "status": result.status}
+
+    @router.get("/api/credentials/{credential_id}/checkin")
+    async def checkin_status(credential_id: str,
+                             principal=Depends(principal_from_request)):
+        """只读查询签到状态（连续天数 / 今日是否已签）；不产生任何写入。"""
+        require_admin(principal)
+        provider_id = credentials.provider_of(credential_id)
+        provider = registry.get(provider_id or "")
+        data = credentials.credential_data(credential_id)
+        if provider is None or data is None or not hasattr(provider, "checkin_status"):
+            raise InvalidRequest("credential does not support checkin status")
+        return {"status": await provider.checkin_status(data)}
+
+    @router.get("/api/credentials/{credential_id}/growth")
+    async def growth_history(credential_id: str, limit: int = 20,
+                             principal=Depends(principal_from_request)):
+        """成长中心历史：最近几轮的一行汇报（仅 CodeBuddy 有该活动）。"""
+        require_admin(principal)
+        if services.credentials.provider_of(credential_id) is None:
+            raise InvalidRequest("credential not found")
+        return {"events": services.growth_events.recent(credential_id, limit=limit)}
+
+    @router.post("/api/credentials/{credential_id}/growth")
+    async def run_growth(credential_id: str,
+                         _csrf: None = Depends(csrf_protected),
+                         principal=Depends(principal_from_request)):
+        """手动跑一轮成长中心：与定时任务同一条路径，结果同样落库。
+
+        不可逆动作（抽奖/兑换/开盲盒/补登卡）遵循与定时任务相同的配置开关：
+        手动入口不另设开关，否则「保守部署」只挡得住定时任务。
+        """
+        require_admin(principal)
+        provider_id = credentials.provider_of(credential_id)
+        provider = registry.get(provider_id or "")
+        data = credentials.credential_data(credential_id)
+        growth = getattr(provider, "growth", None)
+        if provider is None or data is None or growth is None:
+            raise InvalidRequest("credential does not support growth center")
+        result = await growth(
+            data, allow_irreversible=services.settings.growth_irreversible_actions)
+        credentials.save_growth_result(credential_id, result.report)
+        services.growth_events.record(credential_id=credential_id, result=result,
+                                      trigger="manual")
+        logger.info("管理员 %s 手动执行成长中心 %s（ok=%s）", principal.username,
+                    credential_id, result.ok)
+        return {"ok": result.ok, "report": result.report, "credit": result.credit,
+                "energy": result.energy, "streak_days": result.streak_days,
+                "session_dead": result.session_dead,
+                "steps": [{"name": step.name, "status": step.status, "detail": step.detail,
+                           "credit": step.credit} for step in result.steps]}
 
     @router.get("/api/credentials/{credential_id}/accounts")
     async def list_credential_accounts(credential_id: str,

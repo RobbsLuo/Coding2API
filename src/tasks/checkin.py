@@ -48,7 +48,10 @@ class CheckinTask:
             if provider is None or data is None or checkin_scope is None:
                 report.skipped += 1
                 continue
-            scope = checkin_scope(data)
+            # 身份未知（provider 返回空 scope）时绝不共享：共享会让第二个账号被
+            # 永久跳过（空 scope 相同 → seen 去重命中），代价是漏签一个号且无任何
+            # 报错。回落到 credential_id 最坏只是多签一次，上游签到幂等（返回 ALREADY）。
+            scope = checkin_scope(data) or f"credential|{candidate.credential_id}"
             done_key = self._done_key(day, scope)
             if done_key in self._done_scopes:
                 report.skipped += 1                      # 当日已签到成功，不再调上游

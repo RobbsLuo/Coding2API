@@ -7,9 +7,9 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import ClassVar, Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, runtime_checkable
 
 
 class EventKind(StrEnum):
@@ -116,6 +116,67 @@ class CheckinResult:
     code: int | None = None
     message: str = ""
     already_checked_in: bool = False
+    # 渠道可选回填的活动状态（CB 有；TRAE 为 None 或仅回填部分字段）。
+    # 用 dict 而非具体类型：这是 provider 私有形状，中立层不该认识它。
+    status: Any | None = None
+
+
+@dataclass(slots=True)
+class CheckinStatus:
+    """签到活动状态。全字段可缺失：上游改版时不该因此报错。"""
+
+    active: bool = False
+    today_checked_in: bool = False
+    streak_days: int | None = None
+    today_credit: float | None = None
+    total_credits: float | None = None
+    activity_name: str = ""
+    is_streak_day: bool = False
+
+
+class StepStatus(StrEnum):
+    """成长中心单步结果。区分 skipped（无事可做）与 failed（需要人看）。"""
+
+    DONE = "done"
+    IDLE = "idle"        # 无事可做（Buddy 还在路上 / 名额用完）——不是错误
+    SKIPPED = "skipped"  # 渠道不支持 / 配置关闭
+    FAILED = "failed"
+
+
+@dataclass(slots=True)
+class GrowthStep:
+    """成长中心一个子步骤的结果；detail 是给人看的一句中文。"""
+
+    name: str
+    status: StepStatus
+    detail: str = ""
+    credit: float | None = None
+
+
+@dataclass(slots=True)
+class GrowthResult:
+    """成长中心一轮的结果。
+
+    session_dead 必须与 failed 区分：前者要重新登录（调度器硬禁用），
+    后者只是这一轮没领到。二者混同会让接口坏了却当成登录过期。
+    """
+
+    ok: bool = True
+    steps: list[GrowthStep] = field(default_factory=list)
+    credit: float | None = None        # 本轮累计获得积分
+    energy: int | None = None
+    streak_days: int | None = None
+    report: str = ""                   # 一行中文汇报（存 events 表 / 直接展示）
+    session_dead: bool = False
+
+    @property
+    def gained(self) -> bool:
+        """本轮是否有实质收获（决定要不要落库）。"""
+        return any(step.status == StepStatus.DONE for step in self.steps)
+
+    @property
+    def failed(self) -> list[GrowthStep]:
+        return [step for step in self.steps if step.status == StepStatus.FAILED]
 
 
 @dataclass(slots=True)

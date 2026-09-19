@@ -131,6 +131,15 @@ class CredentialRepository:
             conn.execute("UPDATE credentials SET quota_probed_at = ?, health = NULL WHERE id = ?",
                          (int(now if now is not None else time.time()), credential_id))
 
+    def save_growth_result(self, credential_id: str, report: str,
+                           now: int | None = None) -> None:
+        """记下成长中心最近一轮的汇报（列表页直接显示，不查 events 表）。"""
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE credentials SET growth_last_run_at = ?, growth_last_result = ? "
+                "WHERE id = ?",
+                (int(now if now is not None else time.time()), report, credential_id))
+
     # ------------------------------------------------------------- 读取
 
     def candidates(self, providers: Iterable[str] | None = None,
@@ -184,7 +193,8 @@ class CredentialRepository:
         rows = self._db.connect().execute(
             "SELECT id, provider, nickname, enabled, disabled, disabled_reason, pinned, "
             "health, cooling_until, err_count, quota_remaining, quota_total, quota_cycle_end, "
-            "quota_probed_at, created_at, added_by, quota_expiry_ladder "
+            "quota_probed_at, growth_last_run_at, growth_last_result, created_at, added_by, "
+            "quota_expiry_ladder "
             "FROM credentials ORDER BY created_at").fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
@@ -237,3 +247,39 @@ class ApiKeyRepository:
             cursor = conn.execute(
                 "DELETE FROM api_keys WHERE id = ? AND username = ?", (key_id, username))
         return cursor.rowcount > 0
+
+
+class GrowthRepository:
+    """成长中心运行记录（growth_events）。
+
+    只存汇总行，不存对话/奖励明细：一轮一行 report 文本足够回答
+    「这个号昨天领到了什么」，也避免把活动内部数据结构固化进 schema。
+    """
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def record(self, *, credential_id: str, result, trigger: str = "auto",
+               now: int | None = None) -> str:
+        event_id = _new_id("growth")
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO growth_events (id, credential_id, ts, ok, session_dead, "
+                "report, credit, energy, streak_days, trigger) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (event_id, credential_id, int(now if now is not None else time.time()),
+                 1 if result.ok else 0, 1 if result.session_dead else 0,
+                 result.report, result.credit, result.energy, result.streak_days, trigger),
+            )
+        return event_id
+
+    def latest_for(self, credential_id: str) -> dict[str, Any] | None:
+        row = self._db.connect().execute(
+            "SELECT * FROM growth_events WHERE credential_id = ? ORDER BY ts DESC LIMIT 1",
+            (credential_id,)).fetchone()
+        return dict(row) if row else None
+
+    def recent(self, credential_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        rows = self._db.connect().execute(
+            "SELECT * FROM growth_events WHERE credential_id = ? ORDER BY ts DESC LIMIT ?",
+            (credential_id, max(1, limit))).fetchall()
+        return [dict(row) for row in rows]

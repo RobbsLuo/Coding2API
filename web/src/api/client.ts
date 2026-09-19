@@ -2,7 +2,10 @@ import type {
   ApiKey,
   ApiKeyCreated,
   CheckinResult,
+  CheckinStatus,
   CredentialsResponse,
+  GrowthEvent,
+  GrowthRunResult,
   ModelInfo,
   ProbeResult,
   ProviderStats,
@@ -78,6 +81,12 @@ export const api = {
     request<ProbeResult>(`/api/credentials/${id}/probe`, { method: "POST" }),
   checkinCredential: (id: string) =>
     request<CheckinResult>(`/api/credentials/${id}/checkin`, { method: "POST" }),
+  checkinStatus: (id: string) =>
+    request<{ status: CheckinStatus }>(`/api/credentials/${id}/checkin`),
+  runGrowth: (id: string) =>
+    request<GrowthRunResult>(`/api/credentials/${id}/growth`, { method: "POST" }),
+  growthHistory: (id: string) =>
+    request<{ events: GrowthEvent[] }>(`/api/credentials/${id}/growth`),
 
   // ------------------------------------------------------------ 渠道登录
   upstreamStart: (provider: string) =>

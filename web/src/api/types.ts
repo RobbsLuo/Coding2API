@@ -31,6 +31,10 @@ export interface Credential {
   /** 调度窗口内即将到期的积分（与选号排序同源）；无到期信息的渠道为 null */
   quota_expiring_credits: number | null;
   quota_probed_at: number | null;
+  /** 成长中心最近一轮执行时间（仅 CodeBuddy；老库升级前为 null） */
+  growth_last_run_at: number | null;
+  /** 该轮一行中文汇报 */
+  growth_last_result: string | null;
   created_at: number;
   added_by: string | null;
 }
@@ -171,6 +175,55 @@ export interface ProbeResult {
   detail?: string;
 }
 
+export interface CheckinStatus {
+  active: boolean;
+  today_checked_in: boolean;
+  /** 连续签到天数；渠道不给时为 null */
+  streak_days: number | null;
+  /** 今日/累计积分；渠道不给时为 null */
+  today_credit: number | null;
+  total_credits: number | null;
+  activity_name: string;
+  is_streak_day: boolean;
+}
+
+/** 成长中心单步结果：done=有收获；idle=无事可做（不是错误）；skipped=开关关闭；failed 才是问题 */
+export type GrowthStepStatus = "done" | "idle" | "skipped" | "failed";
+
+export interface GrowthStepResult {
+  name: string;
+  status: GrowthStepStatus;
+  detail: string;
+  credit: number | null;
+}
+
+export interface GrowthRunResult {
+  ok: boolean;
+  /** 一行中文汇报 */
+  report: string;
+  credit: number | null;
+  energy: number | null;
+  streak_days: number | null;
+  /** 登录态失效：需要重新登录桌面端 */
+  session_dead: boolean;
+  steps: GrowthStepResult[];
+}
+
+/** 成长中心运行记录（growth_events 表一行） */
+export interface GrowthEvent {
+  id: string;
+  credential_id: string;
+  ts: number;
+  ok: 0 | 1;
+  session_dead: 0 | 1;
+  report: string;
+  credit: number | null;
+  energy: number | null;
+  streak_days: number | null;
+  /** auto=定时任务；manual=管理台手动执行 */
+  trigger: string;
+}
+
 export interface CheckinResult {
   ok: boolean;
   credit: number | null;
@@ -178,6 +231,8 @@ export interface CheckinResult {
   message: string;
   /** 渠道把「已签到」返回成 400 + code=10001，这不是错误 */
   already_checked_in: boolean;
+  /** 渠道可选回填的活动状态（CodeBuddy 有；TRAE 为 null） */
+  status: CheckinStatus | null;
 }
 
 export interface ModelInfo {

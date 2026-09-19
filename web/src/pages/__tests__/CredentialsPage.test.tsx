@@ -495,3 +495,105 @@ describe("渠道登录入口", () => {
     expect(screen.queryByTestId("start-login-trae")).not.toBeInTheDocument();
   });
 });
+
+describe("CredentialsPage 成长中心", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const GROWTH_BODY = {
+    ok: true,
+    report: "领旅行礼物：咖啡馆 带回 10 积分（能量 18，本次 +共 10 积分）",
+    credit: 10,
+    energy: 18,
+    streak_days: null,
+    session_dead: false,
+    steps: [
+      { name: "领旅行礼物", status: "done", detail: "咖啡馆 带回 10 积分", credit: 10 },
+      { name: "Buddy 旅行中", status: "idle", detail: "书店，约 1 小时后回", credit: null },
+      { name: "开盲盒", status: "skipped", detail: "不可逆动作已关闭", credit: null },
+    ],
+  };
+
+  // mockFetch 按 URL 子串顺序匹配：growth 的路径也含 "/api/credentials"，
+  // 因此必须把 "/growth" 放在前面，否则会被列表路由吞掉。
+  function growthRoutes(credential: Record<string, unknown>, growth: unknown) {
+    return {
+      "/growth": growth,
+      "/api/credentials": listBody([credential]),
+    };
+  }
+
+  it("TRAE 凭证没有成长中心入口（该渠道无此活动）", async () => {
+    mockFetch({ "/api/credentials": listBody([makeCredential({ provider: "trae" })]) });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    expect(screen.queryByRole("menuitem", { name: "成长中心" })).not.toBeInTheDocument();
+    expect(screen.getByRole("menuitem", { name: "签到" })).toBeInTheDocument();
+  });
+
+  it("CodeBuddy 手动执行成长中心：展示逐条结果并区分「未执行/已关闭」", async () => {
+    mockFetch(growthRoutes(
+      makeCredential({ provider: "codebuddy", growth_last_result: "上一轮：无可领取项" }),
+      GROWTH_BODY,
+    ));
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    // 列表列先显示上一轮结果
+    expect(screen.getByTestId("growth-cred_1")).toHaveTextContent("上一轮：无可领取项");
+
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "成长中心" }));
+
+    const panel = await screen.findByTestId("growth-result");
+    expect(panel).toHaveTextContent("领旅行礼物");
+    const steps = within(panel).getAllByTestId("growth-step");
+    expect(steps).toHaveLength(3);
+    expect(steps[0]).toHaveTextContent("已领取领旅行礼物：咖啡馆 带回 10 积分");
+    // idle 与 skipped 都不是失败，用中性文案
+    expect(steps[1]).toHaveTextContent("未执行Buddy 旅行中");
+    expect(steps[2]).toHaveTextContent("已关闭开盲盒");
+  });
+
+  it("没有成长中心记录时列表列显示占位符", async () => {
+    mockFetch({ "/api/credentials": listBody([makeCredential({ provider: "codebuddy" })]) });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    expect(screen.queryByTestId("growth-cred_1")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("row-cred_1")).getByText("—")).toBeInTheDocument();
+  });
+
+  it("登录态失效单独提示重新登录（不能与普通失败混同）", async () => {
+    mockFetch(growthRoutes(
+      makeCredential({ provider: "codebuddy" }),
+      { ...GROWTH_BODY, ok: false, session_dead: true,
+        report: "登录态已失效，请重新登录",
+        steps: [{ name: "查旅行状态", status: "failed",
+                  detail: "登录态已失效", credit: null }] },
+    ));
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "成长中心" }));
+
+    const panel = await screen.findByTestId("growth-result");
+    expect(panel).toHaveTextContent("需重新登录该渠道");
+    expect(within(panel).getByTestId("growth-step")).toHaveTextContent("失败查旅行状态");
+  });
+
+  it("成长中心执行失败时展示错误且不显示结果面板", async () => {
+    mockFetch(growthRoutes(
+      makeCredential({ provider: "codebuddy" }),
+      () => jsonResponse({ error: { code: "upstream_unavailable", message: "上游不可用" } }, 502),
+    ));
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "成长中心" }));
+
+    expect(await screen.findByTestId("credentials-error")).toHaveTextContent("上游不可用");
+    expect(screen.queryByTestId("growth-result")).not.toBeInTheDocument();
+  });
+});

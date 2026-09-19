@@ -55,7 +55,9 @@ coding2api/
 │   │   │   ├── credential.py    # 凭证类型与解析
 │   │   │   ├── headers.py       # 上游技术常量与请求头构造
 │   │   │   ├── oauth.py         # 设备码轮询
-│   │   │   ├── checkin.py       # 签到
+│   │   │   ├── checkin.py       # 签到 + 签到状态（连续天数）
+│   │   │   ├── growth.py        # 成长中心协议层：15 个端点的请求与解析
+│   │   │   ├── growth_runner.py # 成长中心编排：7 类领取的顺序与失败判定
 │   │   │   └── refresh.py       # token 刷新 + 多账号切换
 │   │   ├── trae/
 │   │   │   ├── client.py        # SOLO 上游 + 双 httpx 客户端 + 额度探测
@@ -80,6 +82,7 @@ coding2api/
 │   │   ├── pacer.py             # 全局节流器（PACER_MIN/MAX 随机区间）
 │   │   ├── quota_probe.py       # 启动立即跑一轮 + 每 QUOTA_PROBE_MINUTES 分钟探测
 │   │   ├── checkin.py           # 全天每 10 分钟签到；成功即当日封账该凭证
+│   │   ├── growth.py            # 成长中心（仅 CB）：GROWTH_INTERVAL_MINUTES 一轮，落 growth_events
 │   │   ├── refresh.py           # 每 60 分钟；REFRESH_SKEW_HOURS 窗口内预刷新
 │   │   ├── retention.py         # 每 5 分钟：小时汇总重算（幂等）+ 90 天前明细清理
 │   │   └── runner.py            # 后台任务调度，接入应用生命周期
@@ -92,7 +95,7 @@ coding2api/
 │       ├── models.py            # GET /v1/models（动态拉取 + 黑名单 + 缓存兑底 + 元数据）
 │       ├── balance.py           # GET /v1/user/balance（DeepSeek 兼容余额，读探测缓存聚合）
 │       ├── authorize.py         # GET /authorize（TRAE 回调落点）
-│       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin / 账号切换
+│       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin / 成长中心 / 账号切换
 │       ├── admin_keys.py        # API Key CRUD
 │       ├── admin_stats.py       # 统计查询（overview / by-provider / timeline / model-timeline）
 │       ├── admin_auth.py        # 登录 / 登出 / 会话；上游登录 start/poll/cancel
@@ -292,6 +295,26 @@ class Scheduler:
 | 额度探测（quota_probe.py） | 启动立即跑一轮（不节流） + 每 `QUOTA_PROBE_MINUTES`（默认 60）分钟 | 探测上游剩余额度 → `credentials.quota_*` / `quota_expiry_ladder` / `health` 写回 |
 | token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token |
 | 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态，重启重建）；失败凭证持续重试，同账号多凭证共享一次 |
+| 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5 分钟） | 仅 CodeBuddy：领旅行礼物 / 派 Buddy / 领取新任务 / 领任务奖 / 断登补登 / 连登兑换 / 开盲盒 / Buddy 盲盒；结果落 `growth_events` + 回写 `credentials.growth_last_result` |
+
+**签到 / 成长中心的「同账号」隔离键**：`checkin_scope(data) or f"credential|{credential_id}"`。
+provider 在身份未知时返回空串（CB 的 `checkin_scope_key` 在 `account_uid` 与
+`user_id` 都为空时返回 `""`），任务层必须回落到 `credential_id`。这不是保守取值：
+共享空 scope 会让第二个账号被 `seen` 集合永久跳过，表现为「只有第一个凭证被自动签到」，
+且没有任何报错。回落到凭证 ID 最坏只是多签一次（上游签到幂等，返回 ALREADY）。
+
+**成长中心的失败判定**（三层分开，勿合并）：
+- 协议层（`growth.py`）：非 2xx 抛 `GrowthRejected`；业务码非 0 / 缺 data / 非 JSON 抛
+  `UpstreamProtocolViolation`（HTTP 200 也可能是失败，只看状态码会把失败当成功）
+- 编排层（`growth_runner.py`）：4xx 业务规则（名额用完、未解锁、抽奖没次数、
+  能量不足）记为 `IDLE` 而非 `FAILED`；5xx 与协议违规记 `FAILED`；401/403 立即置
+  `session_dead` 并停止后续请求（再打只会一路 401）
+- 结论：`failed 且 gained=False` 才算整体失败。部分成功仍是成功——上游某个接口抖动
+  不该让「今天领到 300 积分」变成一张红牌，否则定时任务天天报红，真故障被淹没
+
+不可逆动作（抽奖 / 连登兑换 / 开 Buddy 盲盒 / 消耗补登卡）由
+`GROWTH_IRREVERSIBLE_ACTIONS` 总开关控制，**手动入口与定时任务读同一个开关**——
+否则「保守部署」只挡得住定时任务。
 | 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理 |
 
 **清理切点必顶对齐到小时边界**（`purge_expired`）。这不是保守取值而是正确性要求：

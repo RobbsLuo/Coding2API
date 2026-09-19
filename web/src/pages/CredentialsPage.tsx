@@ -7,6 +7,7 @@ import {
   Pin,
   Power,
   RefreshCw,
+  Sparkles,
   Trash2,
 } from "lucide-react";
 import { api } from "../api/client";
@@ -36,7 +37,7 @@ import {
   STATE_LABEL,
   STATE_TONE,
 } from "../api/display";
-import type { Credential, Provider } from "../api/types";
+import type { Credential, GrowthRunResult, Provider } from "../api/types";
 import {
   Badge,
   Button,
@@ -58,6 +59,27 @@ import {
 const PROVIDERS: Provider[] = ["codebuddy", "trae"];
 const PROVIDER_LABEL: Record<Provider, string> = { codebuddy: "CodeBuddy", trae: "TRAE" };
 
+/** 成长中心步骤状态的人话标签；idle 不是失败（无事可做），必须与 failed 分开显示。 */
+const GROWTH_STEP_LABEL: Record<GrowthRunResult["steps"][number]["status"], string> = {
+  done: "已领取",
+  idle: "未执行",
+  skipped: "已关闭",
+  failed: "失败",
+};
+
+const GROWTH_STEP_TONE: Record<GrowthRunResult["steps"][number]["status"], string> = {
+  done: "text-ok",
+  idle: "text-muted-foreground",
+  skipped: "text-muted-foreground",
+  failed: "text-danger",
+};
+
+/** 一句话汇报：登录失效要单独提示「重新登录」，不能与普通失败混同。 */
+function growthNotice(result: GrowthRunResult): string {
+  if (result.session_dead) return "登录态已失效，请重新登录该渠道";
+  return result.report || (result.ok ? "成长中心执行完成" : "成长中心执行未完全成功");
+}
+
 interface Actions {
   revive: (credential: Credential) => void;
   toggle: (credential: Credential) => void;
@@ -65,6 +87,7 @@ interface Actions {
   remove: (credential: Credential) => void;
   probe: (credential: Credential) => void;
   checkin: (credential: Credential) => void;
+  growth: (credential: Credential) => void;
 }
 
 export function CredentialsPage() {
@@ -78,6 +101,8 @@ export function CredentialsPage() {
   // 每个渠道各自可能有进行中的登录（CodeBuddy 轮询 / TRAE 回调）
   const [loginProviders, setLoginProviders] = useState<Provider[]>([]);
   const [probeDetail, setProbeDetail] = useState<string | null>(null);
+  // 成长中心最近一轮：展示逐步结果（一句话汇报看不出哪一步没做成）
+  const [growthResult, setGrowthResult] = useState<GrowthRunResult | null>(null);
 
   const credentials = data?.credentials ?? [];
   const expiryWindow = data?.expiry_window_seconds ?? 0;
@@ -154,14 +179,17 @@ export function CredentialsPage() {
         setNotice(null);
         try {
           const result = await api.checkinCredential(credential.id);
+          // 渠道可选回填的活动状态：连续天数/今日积分（TRAE 为 null，拼接自动跳过）
+          const streak = result.status?.streak_days ?? null;
+          const tail = streak === null ? "" : `（连续 ${streak} 天）`;
           if (result.ok && result.already_checked_in) {
             // 渠道把「已签到」返回成 HTTP 400 + code=10001，这不是错误
-            setNotice(result.message || "今天已签到，请明天再来");
+            setNotice(`${result.message || "今天已签到，请明天再来"}${tail}`);
           } else if (result.ok) {
             setNotice(
-              result.credit === null
+              (result.credit === null
                 ? "签到成功"
-                : `签到成功，获得 ${formatNumber(result.credit)} 积分`,
+                : `签到成功，获得 ${formatNumber(result.credit)} 积分`) + tail,
             );
           } else {
             setNotice(
@@ -171,6 +199,22 @@ export function CredentialsPage() {
           await refresh();
         } catch (caught) {
           setError(caught instanceof Error ? caught.message : "签到失败");
+        } finally {
+          setBusy(false);
+        }
+      })(),
+    growth: (credential) =>
+      void (async () => {
+        setBusy(true);
+        setError(null);
+        setNotice(null);
+        try {
+          const result = await api.runGrowth(credential.id);
+          setGrowthResult(result);
+          setNotice(growthNotice(result));
+          await refresh();
+        } catch (caught) {
+          setError(caught instanceof Error ? caught.message : "成长中心执行失败");
         } finally {
           setBusy(false);
         }
@@ -283,6 +327,29 @@ export function CredentialsPage() {
           </Notice>
         </div>
       )}
+      {growthResult && (
+        <div data-testid="growth-result">
+          <Notice tone={growthResult.ok ? "ok" : "danger"}>
+            <div className="font-medium">成长中心：{growthResult.report}</div>
+            <ul className="mt-1 space-y-0.5 text-xs text-muted-foreground">
+              {growthResult.steps.map((step, index) => (
+                <li key={`${step.name}-${index}`} data-testid="growth-step">
+                  <span className={GROWTH_STEP_TONE[step.status]}>
+                    {GROWTH_STEP_LABEL[step.status]}
+                  </span>
+                  {step.name}
+                  {step.detail && `：${step.detail}`}
+                </li>
+              ))}
+            </ul>
+            {growthResult.session_dead && (
+              <div className="mt-1 text-xs">
+                登录态已失效，需重新登录该渠道后才能继续领取。
+              </div>
+            )}
+          </Notice>
+        </div>
+      )}
 
       <Panel title="凭证池">
         {credentials.length === 0 ? (
@@ -296,6 +363,7 @@ export function CredentialsPage() {
                 <TableHead><span className="inline-flex items-center gap-1">状态<ColumnHint text="可用/冷却中/已禁用/已关闭/额度耗尽；冷却中到期自动恢复。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">健康度<ColumnHint text="剩余积分占比三态：已知百分比 / 未探测 / 已耗尽。未探测≠已耗尽，点「探测」可重试。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期积分行＝调度窗口内即将过期、会被优先消耗的额度。" /></span></TableHead>
+                <TableHead><span className="inline-flex items-center gap-1">成长中心<ColumnHint text="仅 CodeBuddy：最近一轮成长中心（旅行礼物/任务/连登兑换/盲盒）的领取结果与时间，由定时任务或手动执行写入。" /></span></TableHead>
                 {isAdmin && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测：查剩余额度；签到：领当日积分；指定：设为优先；停用/删除：移出调度或移除。" /></span></TableHead>}
               </TableRow>
             </TableHeader>
@@ -455,6 +523,18 @@ function Row({
           探测于 {formatTime(credential.quota_probed_at)}
         </div>
       </TableCell>
+      <TableCell className="text-xs text-muted-foreground">
+        {credential.growth_last_result ? (
+          <div data-testid={`growth-${credential.id}`}>
+            {credential.growth_last_result}
+            <div className="text-muted-foreground">
+              {formatTime(credential.growth_last_run_at)}
+            </div>
+          </div>
+        ) : (
+          <span>—</span>
+        )}
+      </TableCell>
       {isAdmin && (
         <TableCell>
           <div className="flex items-center justify-end gap-1">
@@ -492,6 +572,11 @@ function Row({
                   <DropdownMenuItem onSelect={() => actions.checkin(credential)}>
                     <CalendarCheck className="size-4" /> 签到
                   </DropdownMenuItem>
+                  {credential.provider === "codebuddy" && (
+                    <DropdownMenuItem onSelect={() => actions.growth(credential)}>
+                      <Sparkles className="size-4" /> 成长中心
+                    </DropdownMenuItem>
+                  )}
                   <DropdownMenuSeparator />
                   {credential.disabled === 1 && (
                     <DropdownMenuItem onSelect={() => actions.revive(credential)}>

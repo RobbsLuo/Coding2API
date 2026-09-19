@@ -39,6 +39,8 @@ CREATE TABLE IF NOT EXISTS credentials (
     quota_cycle_end  INTEGER,                      -- 最早到期 epoch；TRAE 为 NULL
     quota_expiry_ladder TEXT,                      -- 到期阶梯 JSON [[epoch, 剩余积分]]；TRAE 为 NULL
     quota_probed_at  INTEGER,
+    growth_last_run_at INTEGER,                    -- 成长中心最近一轮执行时间（仅 CodeBuddy）
+    growth_last_result TEXT,                       -- 该轮一行中文汇报
     created_at       INTEGER NOT NULL,
     added_by         TEXT                          -- 应用层校验存在于 users.txt
 );
@@ -84,3 +86,21 @@ CREATE TABLE IF NOT EXISTS usage_hourly (
     ttfb_sum      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (hour_utc, username, provider, model)
 );
+
+-- 成长中心运行记录（仅 CodeBuddy 有该活动）。
+-- 不建明细子表：一轮的 7 类领取合并成一行 report 文本（人话），
+-- 界面直接展示，也便于「今天这个号到底领到了什么」一句话回答。
+CREATE TABLE IF NOT EXISTS growth_events (
+    id             TEXT PRIMARY KEY,
+    credential_id  TEXT NOT NULL,
+    ts             INTEGER NOT NULL,
+    ok             INTEGER NOT NULL,
+    session_dead   INTEGER NOT NULL DEFAULT 0,   -- 登录态失效：需要重新登录（硬禁用）
+    report         TEXT NOT NULL DEFAULT '',     -- 一行中文汇报
+    credit         REAL,                         -- 本轮累计获得积分（可缺）
+    energy         INTEGER,
+    streak_days    INTEGER,
+    trigger        TEXT NOT NULL DEFAULT 'auto'  -- auto=定时 | manual=管理台手动
+);
+
+CREATE INDEX IF NOT EXISTS idx_growth_cred_ts ON growth_events(credential_id, ts);

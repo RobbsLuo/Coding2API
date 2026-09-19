@@ -18,7 +18,7 @@ import httpx
 
 from ...engine.sse import iter_frames
 from ...provider import base
-from ...provider.base import ErrKind, Event, Model, Quota
+from ...provider.base import ErrKind, Event, GrowthResult, Model, Quota
 from . import events as cb_events
 from .credential import CodeBuddyCredential, parse_credential
 from .events import UpstreamProtocolViolation
@@ -408,6 +408,7 @@ def _cycle_end_epoch(value: Any) -> int | None:
 
 _CHECKIN_CACHE: dict[int, object] = {}
 _REFRESH_CACHE: dict[int, object] = {}
+_GROWTH_CACHE: dict[int, object] = {}
 
 
 def _cached_checkin(client: CodeBuddyClient):
@@ -418,6 +419,17 @@ def _cached_checkin(client: CodeBuddyClient):
     if cached is None:
         cached = CodeBuddyCheckin(client.endpoint, client=client._short)
         _CHECKIN_CACHE[key] = cached
+    return cached
+
+
+def _cached_growth(client: CodeBuddyClient):
+    from .growth import CodeBuddyGrowth
+
+    key = id(client)
+    cached = _GROWTH_CACHE.get(key)
+    if cached is None:
+        cached = CodeBuddyGrowth(client.endpoint, client=client._short)
+        _GROWTH_CACHE[key] = cached
     return cached
 
 
@@ -491,7 +503,8 @@ class CodeBuddyProvider:
         """释放内部 HTTP 连接池与 OAuth 客户端。"""
         await self.client.aclose()
         for cached in (_CHECKIN_CACHE.pop(id(self.client), None),
-                       _REFRESH_CACHE.pop(id(self.client), None)):
+                       _REFRESH_CACHE.pop(id(self.client), None),
+                       _GROWTH_CACHE.pop(id(self.client), None)):
             closer = getattr(cached, "aclose", None)
             if callable(closer):
                 await closer()
@@ -504,10 +517,39 @@ class CodeBuddyProvider:
         client = _cached_checkin(self.client)
         credential = CodeBuddyCredential.from_dict(credential_data)
         result = await client.claim(credential)
+        # status 是 provider 私有 dict（CheckinStatus.to_dict）；中立层只透传
+        if result.status is not None:
+            result.status = result.status.to_dict()
         return result
 
+    async def checkin_status(self, credential_data: dict) -> dict:
+        """仅查签到状态（管理台展示连续天数，不产生任何写入）。"""
+        client = _cached_checkin(self.client)
+        credential = CodeBuddyCredential.from_dict(credential_data)
+        status = await client.fetch_status(credential)
+        return status.to_dict()
+
+    async def growth(self, credential_data: dict, *,
+                     allow_irreversible: bool = True) -> GrowthResult:
+        """成长中心一轮：领礼物 / 派 Buddy / 任务 / 补登 / 连登兑换 / 抽奖 / Buddy 盲盒。
+
+        allow_irreversible=False 时跳过不可逆动作（抽奖/兑换/开盲盒/补登卡消耗），
+        只做可逆的查询与领取（礼物、任务奖）——给「只想保守跑」的部署留开关。
+        """
+        from .growth_runner import GrowthRunner
+
+        credential = CodeBuddyCredential.from_dict(credential_data)
+        runner = GrowthRunner(_cached_growth(self.client),
+                              allow_irreversible=allow_irreversible)
+        return await runner.run(credential)
+
     def checkin_scope(self, credential_data: dict) -> str:
-        """签到隔离键：endpoint + X-User-Id（AGENTS.md 约束）。"""
+        """签到隔离键：endpoint + X-User-Id；身份未知时返回空串（调用方回落到凭证 ID）。
+
+        OAuth 路径拿不到 account_uid / user_id 时（上游账号接口未回填，实测发生），
+        返回空串比返回 "endpoint|" 安全：后者会让所有 CB 凭证算出同一个 scope，
+        签到任务的 seen 集合只跑第一个账号。
+        """
         from .checkin import checkin_scope_key
 
         credential = CodeBuddyCredential.from_dict(credential_data)
