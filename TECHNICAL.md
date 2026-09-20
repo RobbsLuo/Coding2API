@@ -312,6 +312,33 @@ provider 在身份未知时返回空串（CB 的 `checkin_scope_key` 在 `accoun
 - 结论：`failed 且 gained=False` 才算整体失败。部分成功仍是成功——上游某个接口抖动
   不该让「今天领到 300 积分」变成一张红牌，否则定时任务天天报红，真故障被淹没
 
+**任务契约是五态，不是三态**（2026-09 桌面端成长中心 H5 `growthSpace` chunk 读出，
+被上游改版坑过一次，勿按直觉回退）：
+
+| accept_status | 该做什么 |
+|---|---|
+| `not_accepted` | **接单**（进度从这一刻才开始计） |
+| `accepted` / `in_progress` | 什么都不做（等用户完成） |
+| `completed` | **领奖** |
+| `claimed` | 跳过 |
+
+- 接单：`POST /tasks/accept`，body 是**复数数组** `{"task_codes": [...]}`；旧的单数
+  `{"task_code": x}` 在新服务端一律 400。逐条结果在 `data.results`，失败（如
+  `prerequisite not met: first_buddy`）必须上报
+- 领奖：`POST /tasks/{task_code}/claim`（body 空），**不再走 accept**；回包
+  `already_claimed` 为真时不重复计分
+- 把 `not_accepted` 当成「已接单」跳过，会让所有新任务永远既不接单也不领奖
+  （实测一个账号积压 5 个任务共 650 积分未领）
+
+**连登兑换的 `tier` 是档位标识**（`"7d"` / `"14d"` / `"28d"`），权威来源是
+`GET /streak` 的 `redemption_status.tiers[].tier`。传天数或档位名分别得到
+`invalid request` / `unknown tier`。实发字段是 `*_granted`
+（`credit_granted` / `energy_granted` …），读裸 `credit` 恒为空、会漏计全部兑换所得。
+
+**403 不总是登录失效**：未解锁档位返回 403 + 「连续登录天数不足」，必须先于
+session 判定处理，否则整轮成长中心会被误报成「登录态已失效」并中止。
+只有 401/403 且不是「天数不足」才置 `session_dead`。
+
 不可逆动作（抽奖 / 连登兑换 / 开 Buddy 盲盒 / 消耗补登卡）由
 `GROWTH_IRREVERSIBLE_ACTIONS` 总开关控制，**手动入口与定时任务读同一个开关**——
 否则「保守部署」只挡得住定时任务。开关只挡「消耗」，不挡「查询」：

@@ -23,13 +23,22 @@ from .events import UpstreamProtocolViolation
 from .growth import (
     CodeBuddyGrowth,
     GrowthRejected,
+    GrowthTaskItem,
     dig,
+    is_tier_locked,
     is_unknown_tier,
+    parse_reward,
 )
 
-# 连登兑换三档：tier 传天数（实测传档位名会 400 unknown tier）
-REDEEM_TIERS: tuple[tuple[str, str, int], ...] = (
-    ("starter", "入门", 7), ("advanced", "进阶", 14), ("legendary", "巅峰", 28))
+# 连登兑换三档：(档位标识, /redeem/summary 的状态字段前缀, 展示名, 天数)
+# tier 传**档位标识** "7d"/"14d"/"28d"；天数只用于兜底重试时退回旧写法。
+REDEEM_TIERS: tuple[tuple[str, str, str, int], ...] = (
+    ("7d", "starter", "入门", 7),
+    ("14d", "advanced", "进阶", 14),
+    ("28d", "legendary", "巅峰", 28))
+
+# 接单一次提交多少个 task_code：上游收数组，分批只是为了别把 body 撑大
+ACCEPT_BATCH_SIZE = 20
 
 # 每轮最多用掉几张补登卡。卡稀缺（上限 4 张）且该写路径未被真实响应验证过，
 # 一轮只花一张：猜错形状也只错一次。
@@ -157,34 +166,69 @@ class GrowthRunner:
 
     async def _tasks(self, credential: CodeBuddyCredential,
                      result: GrowthResult) -> bool:
-        """2. 领取新任务 + 领任务奖。放在抽奖前：任务送的抽奖机会马上能用上。"""
+        """2. 接单（复数数组）+ 领奖（独立端点）。放在抽奖前：任务送的抽奖机会马上能用上。
+
+        契约（2026-09 桌面端 H5 growthSpace，勿按直觉改）：
+        - accept_status 五态：not_accepted | accepted | in_progress | completed | claimed
+        - 接单 POST /tasks/accept {"task_codes": [...]}（单数形式一律 400）
+        - 领奖 POST /tasks/{code}/claim（不再走 accept）
+        """
         try:
             tasks = await self._client.tasks(credential)
         except Exception as error:  # noqa: BLE001
             return self._note_error(result, "查任务列表", error)
-        for task in tasks:
-            if task.accept_status == "claimed" or task.locked:
-                continue
-            # claiming=True 才是「领奖」；未领取的任务即使进度已达标也只当「接单」，
-            # 因为这一 POST 大概率只是接单而非发奖，按领奖上报会把没到账的积分算进来
-            claiming = bool(task.completed and task.accept_status)
-            if not task.completed and task.accept_status:
-                continue          # 已接单未完成 —— 等用户做完，不重复领取
+        if not await self._accept_pending(credential, result, tasks):
+            return False
+        return await self._claim_completed(credential, result, tasks)
+
+    async def _accept_pending(self, credential: CodeBuddyCredential, result: GrowthResult,
+                              tasks: list[GrowthTaskItem]) -> bool:
+        """接单：一批提交多个 task_code；逐条读 results，失败必须报出来。"""
+        pending = [task.task_code for task in tasks if task.needs_accept and task.task_code]
+        titles = {task.task_code: task.title for task in tasks}
+        for start in range(0, len(pending), ACCEPT_BATCH_SIZE):
+            batch = pending[start:start + ACCEPT_BATCH_SIZE]
             try:
-                credit, energy = await self._client.accept_task(credential, task.task_code)
+                results = await self._client.accept_tasks(credential, batch)
             except Exception as error:  # noqa: BLE001
-                if not self._note_error(result, f"任务「{task.title}」", error):
+                return self._note_error(result, "接单", error)
+            for item in results:
+                code = item.get("task_code")
+                title = titles.get(code, code)
+                if item.get("status") == "error":
+                    message = str(item.get("message") or "未说明原因")
+                    result.steps.append(GrowthStep(
+                        "领取任务", StepStatus.FAILED, f"「{title}」失败：{message}"))
+                else:
+                    result.steps.append(GrowthStep(
+                        "领取任务", StepStatus.DONE, f"「{title}」（进度开始计）"))
+        return True
+
+    async def _claim_completed(self, credential: CodeBuddyCredential, result: GrowthResult,
+                               tasks: list[GrowthTaskItem]) -> bool:
+        """领奖：只有 accept_status == completed 才发，走独立端点。"""
+        for task in tasks:
+            if not task.needs_claim:
+                continue
+            try:
+                body = await self._client.claim_task(credential, task.task_code)
+            except Exception as error:  # noqa: BLE001
+                if not self._note_error(result, "领任务奖", error,
+                                        detail=f"「{task.title}」"):
                     return False
                 continue
-            if claiming:
-                got = credit if credit is not None else (task.reward_credit or 0.0)
-                self._add_credit(result, got)
+            if dig(body, "already_claimed"):
+                # 重复领奖不算错，但绝不能重复计分
                 result.steps.append(GrowthStep(
-                    "领任务奖", StepStatus.DONE,
-                    f"「{task.title}」+{_fmt(got)} 积分", credit=got))
-            else:
-                result.steps.append(GrowthStep(
-                    "领取任务", StepStatus.DONE, f"「{task.title}」（进度开始计）"))
+                    "领任务奖", StepStatus.IDLE, f"「{task.title}」已领过"))
+                continue
+            credit, energy = parse_reward(body)
+            got = credit if credit is not None else (task.reward_credit or 0.0)
+            self._add_credit(result, got)
+            extra = f" +{_fmt(energy)} 能量" if energy else ""
+            result.steps.append(GrowthStep(
+                "领任务奖", StepStatus.DONE,
+                f"「{task.title}」+{_fmt(got)} 积分{extra}", credit=got))
         return True
 
     async def _makeup(self, credential: CodeBuddyCredential,
@@ -230,30 +274,38 @@ class GrowthRunner:
         except Exception as error:  # noqa: BLE001
             self._note_error(result, "查连登兑换", error)
             return
-        for tier, label, days in REDEEM_TIERS:
-            status = summary.get(tier)
+        for tier, status_key, label, days in REDEEM_TIERS:
+            status = summary.get(status_key)
             # 字段缺失或已领/未解锁一律跳过：接口改版时不该对三档无脑 POST
             if not status or status in ("claimed", "locked"):
                 continue
             try:
-                credit, energy = await self._client.redeem(credential, days)
+                credit, energy = await self._client.redeem(credential, tier)
             except GrowthRejected as error:
+                # 403「连登天数不足」= 档位未解锁，是常态而非故障；必须先于 session
+                # 判定处理：401/403 一律当登录失效会让未解锁档把整轮成长中心误报成
+                # 「登录态已失效」并中止。
+                if is_tier_locked(error):
+                    result.steps.append(GrowthStep(
+                        "连登兑换", StepStatus.IDLE, f"「{label}」未解锁（连登天数不足）"))
+                    continue
                 if is_unknown_tier(error):
-                    # 参数校验阶段的 400：服务端没兑换任何东西，换档位名再试是安全的
+                    # 参数校验阶段的 400：服务端没兑换任何东西，退回天数再试是安全的
                     try:
-                        credit, energy = await self._client.redeem(credential, tier)
+                        credit, energy = await self._client.redeem(credential, days)
                     except Exception as retry_error:  # noqa: BLE001
-                        if not self._note_error(result, f"连登兑换「{label}」", retry_error):
+                        if not self._note_error(result, "连登兑换", retry_error,
+                                                detail=f"「{label}」"):
                             return
                         continue
-                elif not self._note_error(result, f"连登兑换「{label}」", error):
+                elif not self._note_error(result, "连登兑换", error, detail=f"「{label}」"):
                     return
                 else:
                     continue
             except Exception as error:  # noqa: BLE001
                 # 走到这里不可能是 session 失效（GrowthRejected 已被上面的分支接住），
                 # 所以记为失败后继续下一档即可
-                self._note_error(result, f"连登兑换「{label}」", error)
+                self._note_error(result, "连登兑换", error, detail=f"「{label}」")
                 continue
             self._add_credit(result, credit)
             result.steps.append(GrowthStep(
@@ -328,7 +380,7 @@ class GrowthRunner:
             result.credit = (result.credit or 0.0) + float(value)
 
     def _note_error(self, result: GrowthResult, label: str, error: Exception,
-                    *, extra_fail: bool = False) -> bool:
+                    *, extra_fail: bool = False, detail: str = "") -> bool:
         """记录一步失败；返回 False 表示必须停止（session 失效）。
 
         只有 5xx / 协议违规算「需要人关注」的失败。4xx 业务规则（名额用完、未解锁、
@@ -338,11 +390,13 @@ class GrowthRunner:
             result.session_dead = True
             result.ok = False
             result.report = "登录态已失效，请重新登录"
-            result.steps.append(GrowthStep(label, StepStatus.FAILED, "登录态已失效"))
+            result.steps.append(GrowthStep(
+                label, StepStatus.FAILED, f"{detail}登录态已失效" if detail else "登录态已失效"))
             return False
         attention = extra_fail or _needs_attention(error)
+        text = f"{detail}{_describe(error)}" if detail else _describe(error)
         result.steps.append(GrowthStep(
-            label, StepStatus.FAILED if attention else StepStatus.IDLE, _describe(error)))
+            label, StepStatus.FAILED if attention else StepStatus.IDLE, text))
         return True
 
 

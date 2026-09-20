@@ -36,6 +36,7 @@ EP_TRAVEL_CLAIM = f"{GROWTH_PREFIX}/buddy/travel/claim"
 EP_TRAVEL_DEPART = f"{GROWTH_PREFIX}/buddy/travel/depart"
 EP_TASKS = f"{GROWTH_PREFIX}/tasks"
 EP_TASK_ACCEPT = f"{GROWTH_PREFIX}/tasks/accept"
+TASK_CLAIM_SUFFIX = "/claim"
 EP_STREAK = f"{GROWTH_PREFIX}/streak"
 EP_MAKEUP_USE = f"{GROWTH_PREFIX}/makeup-cards/use"
 EP_REDEEM_SUMMARY = f"{GROWTH_PREFIX}/redeem/summary"
@@ -152,10 +153,14 @@ class TravelLocation:
 
 @dataclass(slots=True)
 class GrowthTaskItem:
-    """活动任务。accept_status 三态：空/未领取 → accepted 进行中 → claimed 已领奖。
+    """活动任务。
 
-    进度只在「领取任务」之后才计，所以未领取的任务必须先 POST accept 一次，
-    否则它永远完不成。
+    accept_status 是**五态**（2026-09 桌面端 H5 契约，勿按三态猜）：
+    not_accepted | accepted | in_progress | completed | claimed
+
+    `not_accepted` 是「未接单」而不是「已接单」——按三态直觉把它当非空字符串
+    跳过，会让所有新任务永远既不接单也不领奖（实测有账号积压 650 积分未领）。
+    进度只在接单之后才计分，所以接单是必做的一步。
     """
 
     task_code: Any = None
@@ -170,6 +175,16 @@ class GrowthTaskItem:
     @property
     def completed(self) -> bool:
         return self.progress_current >= (self.progress_target or 1)
+
+    @property
+    def needs_accept(self) -> bool:
+        """是否需要接单：只有 not_accepted（空字符串是字段缺失，同样当未接单）。"""
+        return not self.locked and self.accept_status in ("", "not_accepted")
+
+    @property
+    def needs_claim(self) -> bool:
+        """是否需要领奖：只有 completed 才发奖，走独立端点。"""
+        return not self.locked and self.accept_status == "completed"
 
 
 def parse_travel_status(data: dict[str, Any]) -> TravelStatus:
@@ -275,6 +290,18 @@ def parse_reward(body: Any) -> tuple[float | None, float | None]:
     return credit, energy
 
 
+def parse_granted(body: Any) -> tuple[float | None, float | None]:
+    """兑换响应专用：实发字段是 *_granted。
+
+    先读 *_granted，读不到才回落到裸字段（接口改版方向未知，两边都兜）。
+    """
+    credit = _finite_float(dig(body, "credit_granted"))
+    energy = _finite_float(dig(body, "energy_granted"))
+    if credit is None and energy is None:
+        return parse_reward(body)
+    return credit, energy
+
+
 # ------------------------------------------------------------------ 客户端
 
 
@@ -361,11 +388,31 @@ class CodeBuddyGrowth:
         return await self._request("POST", EP_TRAVEL_DEPART, credential,
                                    {"location_id": location_id})
 
-    async def accept_task(self, credential: CodeBuddyCredential,
-                          task_code: Any) -> tuple[float | None, float | None]:
+    async def accept_tasks(self, credential: CodeBuddyCredential,
+                           task_codes: list[Any]) -> list[dict[str, Any]]:
+        """批量接单。上游只收复数数组 {\"task_codes\": [...]}。
+
+        旧的单数 {\"task_code\": x} 在新服务端一律 400 invalid request（2026-09 契约）；
+        逐条结果在 data.results 里，接单失败（如 prerequisite not met）必须回原文，
+        静默吞掉的话接口坏了也没人知道。
+        """
         data = await self._request("POST", EP_TASK_ACCEPT, credential,
-                                   {"task_code": task_code})
-        return parse_reward(data)
+                                   {"task_codes": list(task_codes)})
+        results = data.get("results")
+        if isinstance(results, list):
+            return [item for item in results if isinstance(item, dict)]
+        # 上游没给逐条结果时，整体成功即视为全部成功（不编造具体错误）
+        return [{"task_code": code, "status": "ok"} for code in task_codes]
+
+    async def claim_task(self, credential: CodeBuddyCredential,
+                         task_code: Any) -> dict[str, Any]:
+        """领奖：独立端点 POST /tasks/{task_code}/claim，body 空。
+
+        旧版把 /tasks/accept 当领奖用（同样 400）。回包的 already_claimed 为真
+        时不能重复计分。
+        """
+        return await self._request("POST", f"{EP_TASKS}/{task_code}{TASK_CLAIM_SUFFIX}",
+                                   credential, {})
 
     async def use_makeup_card(self, credential: CodeBuddyCredential,
                               target_date: str) -> int | None:
@@ -380,9 +427,18 @@ class CodeBuddyGrowth:
 
     async def redeem(self, credential: CodeBuddyCredential,
                      tier: Any) -> tuple[float | None, float | None]:
+        """兑换：tier 是**档位标识字符串**（"7d"/"14d"/"28d"）。
+
+        实测传 "starter" / 7 / "7" 分别得到 unknown tier / invalid request，
+        只有 "7d" 会 200（2026-09 issue #6）。权威来源是 GET /streak 的
+        redemption_status.tiers[].tier。
+
+        实发字段是 *_granted（credit_granted / energy_granted / cards_granted /
+        chances_granted）；读 credit 恒为空，会把兑换所得全部漏计。
+        """
         data = await self._request("POST", EP_REDEEM, credential,
                                    {"tier": tier, "client_token": client_token()})
-        return parse_reward(data)
+        return parse_granted(data)
 
     async def draw_lottery(self, credential: CodeBuddyCredential) -> dict[str, Any]:
         return await self._request("POST", EP_LOTTERY_DRAW, credential,
@@ -421,3 +477,14 @@ def is_unknown_tier(error: GrowthRejected) -> bool:
     message = error.message.lower()
     return "tier" in message and ("unknown" in message or "invalid" in message
                                   or "unsupported" in message)
+
+
+def is_tier_locked(error: GrowthRejected) -> bool:
+    """未解锁档位：403 + 「连续登录天数不足」——这是常态，不是故障。
+
+    必须**先于** session 失效判定处理：401/403 一律当登录失效的话，未解锁档位会
+    让整轮成长中心误报「登录态已失效」并直接中止（2026-09 issue #6 的教训）。
+    """
+    if error.status != 403:
+        return False
+    return "不足" in error.message

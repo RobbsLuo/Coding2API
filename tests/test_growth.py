@@ -36,10 +36,13 @@ from src.provider.codebuddy.growth import (
     EP_TRAVEL_STATUS,
     CodeBuddyGrowth,
     GrowthRejected,
+    GrowthTaskItem,
     as_int,
     client_token,
     dig,
+    is_tier_locked,
     is_unknown_tier,
+    parse_granted,
     parse_redeem_summary,
     parse_reward,
     parse_streak,
@@ -48,6 +51,7 @@ from src.provider.codebuddy.growth import (
     parse_travel_status,
 )
 from src.provider.codebuddy.growth_runner import (
+    ACCEPT_BATCH_SIZE,
     MAKEUP_MAX_PER_RUN,
     GrowthRunner,
     _eta,
@@ -288,21 +292,27 @@ async def test_growth_client_writes_send_expected_payloads():
     credential = CodeBuddyCredential(bearer_token="t")
     assert await client.claim_travel(credential, 277990) == (10.0, 5.0)
     await client.depart(credential, 1)
-    assert await client.accept_task(credential, "t1") == (10.0, 5.0)
+    # 接单是复数数组（2026-09 契约）：单数形式在新服务端一律 400
+    assert await client.accept_tasks(credential, ["t1", "t2"]) == [
+        {"task_code": "t1", "status": "ok"}, {"task_code": "t2", "status": "ok"}]
+    claimed = await client.claim_task(credential, "t3")
+    assert claimed["credit"] == 10 and claimed["prize_name"] == "冰箱贴"
     assert await client.use_makeup_card(credential, "2026-09-01") == 1
-    assert await client.redeem(credential, 7) == (10.0, 5.0)
+    assert await client.redeem(credential, "7d") == (10.0, 5.0)
     await client.draw_lottery(credential)
     await client.open_buddy(credential, 2)
     paths = [path for path, _payload in payloads]
-    assert paths == [EP_TRAVEL_CLAIM, EP_TRAVEL_DEPART, EP_TASK_ACCEPT, EP_MAKEUP_USE,
+    assert paths == [EP_TRAVEL_CLAIM, EP_TRAVEL_DEPART, EP_TASK_ACCEPT,
+                     f"{EP_TASKS}/t3/claim", EP_MAKEUP_USE,
                      EP_REDEEM, EP_LOTTERY_DRAW, EP_BUDDY_OPEN]
     by_path = dict(payloads)
     assert by_path[EP_TRAVEL_CLAIM] == {"record_id": 277990}
     assert by_path[EP_TRAVEL_DEPART] == {"location_id": 1}
-    assert by_path[EP_TASK_ACCEPT] == {"task_code": "t1"}
+    assert by_path[EP_TASK_ACCEPT] == {"task_codes": ["t1", "t2"]}   # 复数数组
+    assert by_path[f"{EP_TASKS}/t3/claim"] == {}                      # 领奖 body 空
     assert by_path[EP_MAKEUP_USE]["target_date"] == "2026-09-01"
     assert by_path[EP_MAKEUP_USE]["client_token"].startswith("u-")
-    assert by_path[EP_REDEEM]["tier"] == 7          # 天数，不是档位名
+    assert by_path[EP_REDEEM]["tier"] == "7d"       # 档位标识，不是天数
     assert by_path[EP_BUDDY_OPEN]["count"] == 2
     await client.aclose()
 
@@ -398,11 +408,13 @@ async def test_runner_full_happy_path_collects_every_reward():
                 "location": {"name": "咖啡馆", "duration_hours": 3}}})
         if path == EP_TASKS:
             return httpx.Response(200, json={"code": 0, "data": {"tasks": [
-                {"task_code": "t_new", "title": "新任务", "accept_status": "",
-                 "progress": {"current": 0, "target": 1}},
-                {"task_code": "t_done", "title": "已完成", "accept_status": "accepted",
-                 "progress": {"current": 1, "target": 1}, "reward_credit": 50}]}})
+                {"task_code": "t_new", "title": "新任务", "accept_status": "not_accepted"},
+                {"task_code": "t_done", "title": "已完成", "accept_status": "completed",
+                 "reward_credit": 50}]}})
         if path == EP_TASK_ACCEPT:
+            return httpx.Response(200, json={"code": 0, "data": {"results": [
+                {"task_code": "t_new", "status": "ok"}]}})
+        if path.endswith("/t_done/claim"):
             return httpx.Response(200, json={"code": 0, "data": {"credit": 50}})
         if path == EP_STREAK:
             return httpx.Response(200, json={"code": 0, "data": {
@@ -439,8 +451,8 @@ async def test_runner_full_happy_path_collects_every_reward():
 
     assert details["领旅行礼物"].detail == "咖啡馆 带回 8 积分"
     assert details["派 Buddy"].detail == "去咖啡馆（3 小时后回）"
-    assert details["领取任务"].detail == "「新任务」（进度开始计）"
-    assert details["领任务奖"].credit == 50.0
+    assert done("领取任务").detail == "「新任务」（进度开始计）"
+    assert done("领任务奖").credit == 50.0
     assert details["连登兑换"].detail == "「入门」+0 积分 +2 能量"
     assert done("开盲盒").detail == "冰箱贴（实物奖，需到成长中心填写收件信息）"
     assert done("Buddy 盲盒").detail == "×1（小猫）"
@@ -516,15 +528,14 @@ async def test_runner_task_failure_is_recorded_per_task():
             return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
         if request.url.path == EP_TASKS:
             return httpx.Response(200, json={"code": 0, "data": {"tasks": [
-                {"task_code": "t1", "title": "坏任务", "accept_status": ""},
-                {"task_code": "t2", "title": "好任务", "accept_status": ""}]}})
+                {"task_code": "t1", "title": "坏任务", "accept_status": "not_accepted"},
+                {"task_code": "t2", "title": "好任务", "accept_status": "not_accepted"}]}})
         if request.url.path == EP_TASK_ACCEPT:
-            import json as _json
-
-            code = _json.loads(request.content)["task_code"]
-            if code == "t1":
-                return httpx.Response(500, content=b"boom")
-            return httpx.Response(200, json={"code": 0, "data": {}})
+            # 上游逐条报错：一条 error 一条 ok，整轮不该因此被判死
+            return httpx.Response(200, json={"code": 0, "data": {"results": [
+                {"task_code": "t1", "status": "error",
+                 "message": "prerequisite not met: first_buddy"},
+                {"task_code": "t2", "status": "ok"}]}})
         return httpx.Response(200, json={"code": 0, "data": {}})
 
     result = await _run(handler)
@@ -605,7 +616,7 @@ async def test_runner_makeup_failure_stops_and_card_balance_zero_skips():
 
 
 async def test_runner_redeem_retries_with_tier_name_on_unknown_tier():
-    """/redeem 收天数；若上游改成只认档位名，退档位名重试（参数校验阶段，安全）。"""
+    """tier 传档位标识 "7d"；被判 unknown tier 时退回天数重试（参数校验阶段，安全）。"""
     tiers: list[object] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
@@ -625,13 +636,14 @@ async def test_runner_redeem_retries_with_tier_name_on_unknown_tier():
 
             tier = _json.loads(request.content)["tier"]
             tiers.append(tier)
-            if isinstance(tier, int):
+            # 模拟「接口改回收天数」：档位标识被拒，退化成天数才成功
+            if isinstance(tier, str):
                 return httpx.Response(400, json={"code": 400, "msg": "unknown tier"})
-            return httpx.Response(200, json={"code": 0, "data": {"credit": 2}})
+            return httpx.Response(200, json={"code": 0, "data": {"credit_granted": 2}})
         return httpx.Response(200, json={"code": 0, "data": {}})
 
     result = await _run(handler)
-    assert tiers == [7, "starter"]                   # 先天数，失败后退档位名
+    assert tiers == ["7d", 7]                        # 先档位标识，失败后退天数
     assert any(step.name == "连登兑换" and step.status == StepStatus.DONE
                for step in result.steps)
 
@@ -660,7 +672,7 @@ async def test_runner_redeem_business_rejection_and_hard_failure():
         return httpx.Response(200, json={"code": 0, "data": {}})
 
     result = await _run(rejected)
-    assert tiers == [7]                              # 业务拒绝不重试
+    assert tiers == ["7d"]                           # 业务拒绝不重试
     assert result.ok is True                         # 也不算硬失败
 
     async def broken(request: httpx.Request) -> httpx.Response:
@@ -868,9 +880,9 @@ async def test_runner_irreversible_switch_skips_dangerous_actions():
             return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
         if request.url.path == EP_TASKS:
             return httpx.Response(200, json={"code": 0, "data": {"tasks": [
-                {"task_code": "t", "title": "任务", "accept_status": "accepted",
-                 "progress": {"current": 1, "target": 1}}]}})
-        if request.url.path == EP_TASK_ACCEPT:
+                {"task_code": "t", "title": "任务", "accept_status": "completed",
+                 "reward_credit": 5}]}})
+        if request.url.path.endswith("/t/claim"):
             return httpx.Response(200, json={"code": 0, "data": {"credit": 5}})
         return httpx.Response(200, json={"code": 0, "data": {"balance": 5}})
 
@@ -1591,6 +1603,7 @@ async def test_growth_client_close_is_noop_without_pool():
 async def test_runner_skips_claimed_and_unfinished_tasks():
     """已领奖/锁定/已接单未完成三类任务都必须跳过（不重复请求上游）。"""
     accepts: list[object] = []
+    claims: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         import json as _json
@@ -1605,14 +1618,21 @@ async def test_runner_skips_claimed_and_unfinished_tasks():
                 {"task_code": "t_locked", "title": "锁定", "accept_status": "", "locked": True},
                 {"task_code": "t_doing", "title": "进行中", "accept_status": "accepted",
                  "progress": {"current": 1, "target": 3}},
-                {"task_code": "t_new", "title": "新任务", "accept_status": ""}]}})
+                {"task_code": "t_progress", "title": "进行中2",
+                 "accept_status": "in_progress"},
+                {"task_code": "t_new", "title": "新任务", "accept_status": "not_accepted"},
+                {"task_code": "t_done", "title": "已完成", "accept_status": "completed"}]}})
         if request.url.path == EP_TASK_ACCEPT:
-            accepts.append(_json.loads(request.content)["task_code"])
-            return httpx.Response(200, json={"code": 0, "data": {}})
+            accepts.extend(_json.loads(request.content)["task_codes"])
+            return httpx.Response(200, json={"code": 0, "data": {"results": []}})
+        if request.url.path.endswith("/claim"):
+            claims.append(request.url.path)
         return httpx.Response(200, json={"code": 0, "data": {}})
 
     result = await _run(handler)
-    assert accepts == ["t_new"]                     # 只有未领取的任务被接单
+    # 只有 not_accepted 被接单；accepted/in_progress/claimed/locked 都不碰
+    assert accepts == ["t_new"]
+    assert claims == ["/v2/activity/growth/tasks/t_done/claim"]   # 只有 completed 领奖
     assert result.ok is True
 
 
@@ -1665,13 +1685,13 @@ async def test_runner_redeem_unexpected_error_continues_to_next_tier():
         if request.url.path == EP_REDEEM:
             tier = _json.loads(request.content)["tier"]
             tiers.append(tier)
-            if tier == 7:
+            if tier == "7d":
                 raise httpx.ConnectError("no route")
-            return httpx.Response(200, json={"code": 0, "data": {"credit": 50}})
+            return httpx.Response(200, json={"code": 0, "data": {"credit_granted": 50}})
         return httpx.Response(200, json={"code": 0, "data": {}})
 
     result = await _run(handler)
-    assert tiers == [7, 14]                          # 第一档网络异常后仍尝试第二档
+    assert tiers == ["7d", "14d"]                    # 第一档网络异常后仍尝试第二档
     assert result.credit == 50.0
 
 
@@ -1725,7 +1745,7 @@ async def test_runner_redeem_session_dead_stops_round():
 
     result = await _run(handler)
     assert result.session_dead is True
-    assert tiers == [7]                              # 401 后不再尝试进阶档
+    assert tiers == ["7d"]                           # 401 后不再尝试进阶档
 
 
 async def test_runner_depart_without_duration_omits_eta():
@@ -1744,3 +1764,417 @@ async def test_runner_depart_without_duration_omits_eta():
     step = next(step for step in result.steps if step.name == "派 Buddy")
     assert step.detail == "去咖啡馆"
     assert "?" not in step.detail
+
+
+# --------------------------------------------------------------- 新契约补充
+
+def test_task_item_five_state_semantics():
+    """accept_status 五态：not_accepted 必须接单，completed 才能领奖。
+
+    回归：三态假设下 `not_accepted` 被当成「已接单」跳过，实测有账号积压
+    5 个任务共 650 积分既没接单也没领奖。
+    """
+    def item(status: str, locked: bool = False) -> GrowthTaskItem:
+        return GrowthTaskItem(task_code="t", accept_status=status, locked=locked)
+
+    assert item("not_accepted").needs_accept is True
+    assert item("").needs_accept is True                 # 字段缺失同样当未接单
+    assert item("accepted").needs_accept is False
+    assert item("in_progress").needs_accept is False
+    assert item("completed").needs_accept is False
+    assert item("claimed").needs_accept is False
+    assert item("not_accepted", locked=True).needs_accept is False
+
+    assert item("completed").needs_claim is True
+    assert item("claimed").needs_claim is False
+    assert item("accepted").needs_claim is False
+    assert item("completed", locked=True).needs_claim is False
+
+
+def test_parse_tasks_reads_five_states_from_fixture():
+    """真实五态夹具：19 个任务的形状（含 not_accepted 与 accepted 并存）。"""
+    tasks = parse_tasks({"tasks": [
+        {"task_code": "a", "title": "未接单", "accept_status": "not_accepted",
+         "progress": None, "reward_credit": 300},
+        {"task_code": "b", "title": "进行中", "accept_status": "accepted",
+         "progress": {"current": 0, "target": 1}},
+        {"task_code": "c", "title": "已完成", "accept_status": "completed"},
+        {"task_code": "d", "title": "已领", "accept_status": "claimed"},
+    ]})
+    assert [t.accept_status for t in tasks] == [
+        "not_accepted", "accepted", "completed", "claimed"]
+    assert tasks[0].needs_accept is True and tasks[0].reward_credit == 300.0
+    assert tasks[2].needs_claim is True
+
+
+def test_parse_granted_prefers_granted_fields():
+    """兑换实发字段是 *_granted；读裸 credit 会把兑换所得全部漏计。"""
+    assert parse_granted({"credit_granted": 50, "energy_granted": 3}) == (50.0, 3.0)
+    # 只给一个 *_granted 也照用（不为空的那个回落裸字段）
+    assert parse_granted({"credit_granted": 50}) == (50.0, None)
+    # 两个都缺 → 回落裸字段（接口改版方向未知，两边都兜）
+    assert parse_granted({"credit": 7, "energy": 2}) == (7.0, 2.0)
+    assert parse_granted({}) == (None, None)
+
+
+def test_is_tier_locked_only_for_403_with_message():
+    """403 + 「天数不足」= 未解锁（常态）；其他 403/401 仍按登录失效处理。"""
+    assert is_tier_locked(GrowthRejected(403, "连续登录天数不足")) is True
+    assert is_tier_locked(GrowthRejected(403, "连登天数不足")) is True
+    assert is_tier_locked(GrowthRejected(403, "")) is False
+    assert is_tier_locked(GrowthRejected(403, "forbidden")) is False
+    assert is_tier_locked(GrowthRejected(401, "天数不足")) is False
+    assert is_tier_locked(GrowthRejected(400, "天数不足")) is False
+
+
+async def test_runner_tier_locked_is_idle_not_session_dead():
+    """未解锁档位 403 必须当常态：不能误报「登录态已失效」也不能中止整轮。
+
+    回归：401/403 一律当 session 失效的话，未解锁档会让整轮成长中心被判死。
+    """
+    calls: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_ARRIVED)
+        if request.url.path == EP_TRAVEL_CLAIM:
+            return httpx.Response(200, json={"code": 0, "data": {"credit": 10}})
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": []}})
+        if request.url.path == EP_STREAK:
+            return httpx.Response(200, json=STREAK_BODY)
+        if request.url.path == EP_REDEEM_SUMMARY:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "starter_status": "available"}})
+        if request.url.path == EP_REDEEM:
+            return httpx.Response(403, json={"code": 403, "msg": "连续登录天数不足"})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    assert result.session_dead is False
+    assert result.ok is True and result.gained is True       # 礼物已领到，仍是成功
+    locked = [s for s in result.steps if s.name == "连登兑换"]
+    assert locked[0].status == StepStatus.IDLE
+    assert "连登天数不足" in locked[0].detail
+    # 未解锁不该中止：后续的抽奖查询仍被执行
+    assert EP_LOTTERY_CHANCES in calls
+
+
+async def test_runner_accept_batches_and_reports_per_item_errors():
+    """接单分批提交 + 逐条读 results（失败必须报出来，不静默）。"""
+    batches: list[list] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": [
+                {"task_code": f"t{i}", "title": f"任务{i}",
+                 "accept_status": "not_accepted"} for i in range(25)]}})
+        if request.url.path == EP_TASK_ACCEPT:
+            batch = _json.loads(request.content)["task_codes"]
+            batches.append(batch)
+            return httpx.Response(200, json={"code": 0, "data": {"results": [
+                {"task_code": code,
+                 "status": "error" if code == "t0" else "ok",
+                 "message": "prerequisite not met: first_buddy" if code == "t0" else None}
+                for code in batch]}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    assert [len(b) for b in batches] == [ACCEPT_BATCH_SIZE, 25 - ACCEPT_BATCH_SIZE]
+    failed = [s for s in result.steps if s.status == StepStatus.FAILED]
+    assert len(failed) == 1 and "prerequisite not met" in failed[0].detail
+    assert sum(1 for s in result.steps if s.status == StepStatus.DONE) == 24
+
+
+async def test_runner_accept_falls_back_when_results_missing():
+    """上游没给 results 时按整体状态判断，不编造具体错误。"""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": [
+                {"task_code": "t1", "title": "任务1", "accept_status": "not_accepted"}]}})
+        if request.url.path == EP_TASK_ACCEPT:
+            return httpx.Response(200, json={"code": 0, "data": {}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    assert any(s.name == "领取任务" and s.status == StepStatus.DONE for s in result.steps)
+
+
+async def test_runner_accept_http_failure_is_recorded():
+    """接单整体失败（5xx）记失败，但不阻塞独立的领奖操作。
+
+    接单与领奖是两个独立端点，且领奖走 accept_status==completed（与接单无关）；
+    一次接单故障不该让已经能领的奖励烂在账上。
+    """
+    claims: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": [
+                {"task_code": "t1", "title": "任务1", "accept_status": "not_accepted"},
+                {"task_code": "t2", "title": "任务2", "accept_status": "completed"}]}})
+        if request.url.path == EP_TASK_ACCEPT:
+            return httpx.Response(500, content=b"boom")
+        if request.url.path.endswith("/claim"):
+            claims.append(request.url.path)
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    assert any(s.name == "接单" and s.status == StepStatus.FAILED for s in result.steps)
+    assert claims == ["/v2/activity/growth/tasks/t2/claim"]   # 领奖照常进行
+
+
+async def test_runner_claim_already_claimed_is_idle_and_not_counted():
+    """已领过（already_claimed）不能重复计分。"""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": [
+                {"task_code": "t1", "title": "已完成", "accept_status": "completed",
+                 "reward_credit": 300}]}})
+        if request.url.path.endswith("/t1/claim"):
+            return httpx.Response(200, json={"code": 0, "data": {
+                "already_claimed": True, "credit": 300}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    assert result.credit is None                 # 没重复计分
+    step = next(s for s in result.steps if s.name == "领任务奖")
+    assert step.status == StepStatus.IDLE and "已领过" in step.detail
+
+
+async def test_runner_claim_failure_is_recorded_and_continues():
+    """单条领奖失败记失败，不影响后续任务。"""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": [
+                {"task_code": "bad", "title": "坏", "accept_status": "completed"},
+                {"task_code": "good", "title": "好", "accept_status": "completed",
+                 "reward_credit": 100}]}})
+        if request.url.path.endswith("/bad/claim"):
+            return httpx.Response(500, content=b"boom")
+        if request.url.path.endswith("/good/claim"):
+            return httpx.Response(200, json={"code": 0, "data": {"credit": 100}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    failed = [s for s in result.steps if s.status == StepStatus.FAILED]
+    # 步骤名保持稳定（"领任务奖"），任务名在 detail 里 —— 前端按 name 归组渲染
+    assert len(failed) == 1 and failed[0].name == "领任务奖"
+    assert "「坏」" in failed[0].detail and "HTTP 500" in failed[0].detail
+    assert result.credit == 100.0                # 好的那条照常计分
+
+
+async def test_runner_claim_session_dead_stops_round():
+    """领奖遇 401 → 停止整轮（后续任务不再尝试）。"""
+    claims: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": [
+                {"task_code": "t1", "title": "一", "accept_status": "completed"},
+                {"task_code": "t2", "title": "二", "accept_status": "completed"}]}})
+        if request.url.path.endswith("/claim"):
+            claims.append(request.url.path)
+            return httpx.Response(401, json={"code": 401, "msg": "过期"})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    assert result.session_dead is True
+    assert len(claims) == 1          # 第一个 401 后不再打第二个
+
+
+async def test_runner_redeem_retry_session_dead_stops_round():
+    """兜底重试（退天数）遇 401 → 置 session_dead 并停止整轮。"""
+    tiers: list[object] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": []}})
+        if request.url.path == EP_STREAK:
+            return httpx.Response(200, json=STREAK_BODY)
+        if request.url.path == EP_REDEEM_SUMMARY:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "starter_status": "available", "advanced_status": "available"}})
+        if request.url.path == EP_REDEEM:
+            tier = _json.loads(request.content)["tier"]
+            tiers.append(tier)
+            if isinstance(tier, str):
+                return httpx.Response(400, json={"code": 400, "msg": "unknown tier"})
+            return httpx.Response(401, json={"code": 401, "msg": "过期"})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    assert result.session_dead is True
+    assert tiers == ["7d", 7]        # 重试一次后判定失效，不再试进阶档
+
+
+async def test_runner_redeem_non_tier_business_error_continues():
+    """非 tier 的 400 业务拒绝（未解锁）→ 记 IDLE 不算失败，继续下一档。"""
+    tiers: list[object] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": []}})
+        if request.url.path == EP_STREAK:
+            return httpx.Response(200, json=STREAK_BODY)
+        if request.url.path == EP_REDEEM_SUMMARY:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "starter_status": "available", "advanced_status": "available"}})
+        if request.url.path == EP_REDEEM:
+            tier = _json.loads(request.content)["tier"]
+            tiers.append(tier)
+            if tier == "7d":
+                return httpx.Response(400, json={"code": 400, "msg": "invalid request"})
+            return httpx.Response(200, json={"code": 0, "data": {"credit_granted": 50}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    assert tiers == ["7d", "14d"]        # 第一档业务拒绝后仍尝试第二档
+    assert result.ok is True and result.credit == 50.0
+    steps = [s for s in result.steps if s.name == "连登兑换"]
+    assert steps[0].status == StepStatus.IDLE and "invalid request" in steps[0].detail
+    assert steps[1].status == StepStatus.DONE and steps[1].credit == 50.0
+
+
+async def test_runner_redeem_non_tier_error_is_idle_then_continues():
+    """非 tier 的 400（未解锁）记 IDLE 不算失败，且继续尝试下一档。
+
+    覆盖 elif 分支（GrowthRejected 但既非 tier_locked 也非 unknown_tier）。
+    """
+    tiers: list[object] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": []}})
+        if request.url.path == EP_STREAK:
+            return httpx.Response(200, json=STREAK_BODY)
+        if request.url.path == EP_REDEEM_SUMMARY:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "starter_status": "available", "advanced_status": "available"}})
+        if request.url.path == EP_REDEEM:
+            tier = _json.loads(request.content)["tier"]
+            tiers.append(tier)
+            if tier == "7d":
+                return httpx.Response(400, json={"code": 400, "msg": "未解锁"})
+            return httpx.Response(200, json={"code": 0, "data": {"credit_granted": 50}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    assert tiers == ["7d", "14d"]
+    assert result.ok is True and result.credit == 50.0
+    steps = [s for s in result.steps if s.name == "连登兑换"]
+    assert steps[0].status == StepStatus.IDLE
+    assert steps[0].detail == "「入门」未解锁（HTTP 400）"
+    assert steps[1].status == StepStatus.DONE and steps[1].credit == 50.0
+
+
+async def test_runner_redeem_direct_401_stops_round():
+    """兑换首次就 401（未经兜底重试）→ 置 session_dead 并停止整轮。"""
+    tiers: list[object] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": []}})
+        if request.url.path == EP_STREAK:
+            return httpx.Response(200, json=STREAK_BODY)
+        if request.url.path == EP_REDEEM_SUMMARY:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "starter_status": "available", "advanced_status": "available"}})
+        if request.url.path == EP_REDEEM:
+            tiers.append(_json.loads(request.content)["tier"])
+            return httpx.Response(401, json={"code": 401, "msg": "登录过期"})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    assert result.session_dead is True
+    assert tiers == ["7d"]           # 401 后不再尝试下一档
+
+
+async def test_runner_redeem_retry_non_session_error_continues():
+    """兜底重试（退天数）后遇普通失败 → 记失败并继续下一档，不中止整轮。"""
+    tiers: list[object] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": []}})
+        if request.url.path == EP_STREAK:
+            return httpx.Response(200, json=STREAK_BODY)
+        if request.url.path == EP_REDEEM_SUMMARY:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "starter_status": "available", "advanced_status": "available"}})
+        if request.url.path == EP_REDEEM:
+            tier = _json.loads(request.content)["tier"]
+            tiers.append(tier)
+            if isinstance(tier, str):
+                return httpx.Response(400, json={"code": 400, "msg": "unknown tier"})
+            if tier == 7:
+                return httpx.Response(500, content=b"boom")   # 重试仍是普通失败
+            return httpx.Response(200, json={"code": 0, "data": {"credit_granted": 50}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    # 两档都先试档位标识、被判 unknown tier 后退天数（第二档重试成功）
+    assert tiers == ["7d", 7, "14d", 14]
+    assert result.session_dead is False
+    assert result.credit == 50.0
+    steps = [s for s in result.steps if s.name == "连登兑换"]
+    assert steps[0].status == StepStatus.FAILED and "HTTP 500" in steps[0].detail
