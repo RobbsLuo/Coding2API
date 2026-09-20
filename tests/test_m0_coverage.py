@@ -209,3 +209,75 @@ def test_database_skips_mkdir_for_bare_filename(tmp_path, monkeypatch):
     apply_schema(database.connect())
     assert (tmp_path / "bare.sqlite3").exists()
     database.close()
+
+
+# --------------------------------------------------------- 单一版本源
+
+def test_app_version_reads_pyproject():
+    """版本号从 pyproject.toml 读取（唯一真源），与 tag 同源。"""
+    import tomllib
+
+    from src.version import app_version
+
+    with open("pyproject.toml", "rb") as handle:
+        expected = tomllib.load(handle)["project"]["version"]
+    assert app_version() == expected
+    # 带 v 前缀的 tag 去掉 v 后应与之一致（发布流程靠这个对齐）
+    assert expected.count(".") == 2 and not expected.startswith("v")
+
+
+def test_app_version_falls_back_when_pyproject_missing(monkeypatch, tmp_path):
+    """读不到 pyproject 时回落到常量，绝不抛异常（版本号不该让服务起不来）。"""
+    import src.version as version_module
+
+    monkeypatch.setattr(version_module, "_PYPROJECT", tmp_path / "nope.toml")
+    version_module.app_version.cache_clear()
+    try:
+        assert version_module.app_version() == version_module.FALLBACK_VERSION
+    finally:
+        version_module.app_version.cache_clear()
+
+
+def test_app_version_falls_back_on_corrupt_pyproject(monkeypatch, tmp_path):
+    """pyproject 内容损坏（非法 TOML）同样回落，不抛异常。"""
+    import src.version as version_module
+
+    broken = tmp_path / "pyproject.toml"
+    broken.write_text("this is not = = toml", encoding="utf-8")
+    monkeypatch.setattr(version_module, "_PYPROJECT", broken)
+    version_module.app_version.cache_clear()
+    try:
+        assert version_module.app_version() == version_module.FALLBACK_VERSION
+    finally:
+        version_module.app_version.cache_clear()
+
+
+def test_app_version_falls_back_on_missing_or_blank_field(monkeypatch, tmp_path):
+    """缺 [project].version、版本为空串、version 非字符串 → 全部回落。"""
+    import src.version as version_module
+
+    for content in ('[project]\nname = "x"\n',
+                    '[project]\nversion = ""\n',
+                    '[project]\nversion = 123\n'):
+        broken = tmp_path / "pyproject.toml"
+        broken.write_text(content, encoding="utf-8")
+        monkeypatch.setattr(version_module, "_PYPROJECT", broken)
+        version_module.app_version.cache_clear()
+        try:
+            assert version_module.app_version() == version_module.FALLBACK_VERSION
+        finally:
+            version_module.app_version.cache_clear()
+
+
+def test_app_version_is_cached():
+    """重复调用只解析一次（lru_cache）。"""
+    from src.version import app_version
+
+    assert app_version() is app_version()
+
+
+def test_openapi_reports_app_version():
+    """FastAPI 的 version 必须来自单一版本源（此前硬编码 0.1.0 会与 tag 漂移）。"""
+    from src.main import app_version
+
+    assert app_version()  # 可调用且非空（main 里的 import 绑定没断）

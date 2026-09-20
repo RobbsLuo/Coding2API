@@ -42,6 +42,7 @@ from .stats.collector import StatsCollector
 from .stats.query import StatsQuery
 from .tasks.pacer import Pacer
 from .tasks.runner import build_runner
+from .version import app_version
 from .webapp import limits as _limits
 from .webapp import static as _static
 from .webapp.handlers import register_exception_handlers
@@ -177,7 +178,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                     await closer()
             db.close()
 
-    app = FastAPI(title="Coding2API", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="Coding2API", version=app_version(), lifespan=lifespan)
     # BodySizeLimitMiddleware 必须在最外层：FastAPI.add_middleware 会把后加
     # 的包在更外层，所以它在最后添加（见 build_app 末尾）。
     app.state.settings = config

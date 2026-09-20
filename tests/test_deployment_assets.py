@@ -273,3 +273,43 @@ def test_webapp_logging_module_does_not_open_files():
     assert "RotatingFileHandler" not in src
     assert "FileHandler" not in src
     assert "StreamHandler" in src
+
+
+def test_version_is_single_sourced_everywhere():
+    """版本号必须处处一致：pyproject（真源）/ 前端 / 回落常量 / README / publish 示例。
+
+    此前这些位置各写一遍，升版必漏——`/openapi.json` 会报出与镜像 tag 不同的
+    版本，排查问题时误导。这条测试就是防止再漂移。
+    """
+    import json
+    import re
+    import tomllib
+    from pathlib import Path
+
+    from src.version import FALLBACK_VERSION, app_version
+
+    root = Path(__file__).resolve().parent.parent
+    with (root / "pyproject.toml").open("rb") as handle:
+        canonical = tomllib.load(handle)["project"]["version"]
+    assert app_version() == canonical
+
+    package_json = json.loads((root / "web" / "package.json").read_text(encoding="utf-8"))
+    assert package_json["version"] == canonical, "web/package.json 版本未同步"
+
+    assert canonical == FALLBACK_VERSION, "src/version.py 回落值未同步"
+
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    pulls = re.findall(r"coding2api:v(\d+\.\d+\.\d+)", readme)
+    assert pulls, "README 里找不到带版本的 docker pull 示例"
+    assert set(pulls) == {canonical}, "README 的 docker pull 示例版本未同步"
+
+    publish = (root / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
+    examples = re.findall(r"如 v(\d+\.\d+\.\d+)", publish)
+    assert set(examples) == {canonical}, "publish.yml 的示例版本未同步"
+
+    # 源码里不得再出现硬编码的版本号（除了单一版本源自己的回落常量）
+    for path in (root / "src").rglob("*.py"):
+        if path.name == "version.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert f'version="{canonical}"' not in text, f"{path} 硬编码了版本号"

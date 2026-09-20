@@ -1,6 +1,6 @@
 [project]
 name = "coding2api"
-version = "0.1.0"
+version = "0.1.1"
 description = "把 CodeBuddy 与 TRAE SOLO 上游通道统一封装为 OpenAI 兼容 API"
 readme = "README.md"
 requires-python = ">=3.12"
