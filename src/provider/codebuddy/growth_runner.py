@@ -151,6 +151,16 @@ class GrowthRunner:
         location = locations[0]
         try:
             data = await self._client.depart(credential, location.id)
+        except GrowthRejected as error:
+            if _is_no_buddy(error):
+                # 还没有 Buddy 时派出必然失败——这是账号状态而非故障，而且与其他
+                # 17 个任务的 first_buddy 是同一个根因，说一遍就够（不刷屏、不算失败）
+                result.steps.append(GrowthStep(
+                    "派 Buddy", StepStatus.IDLE, "尚未领取 Buddy（在客户端新建任务并发起对话）",
+                    reportable=True))
+                return
+            self._note_error(result, "派 Buddy", error)
+            return
         except Exception as error:  # noqa: BLE001
             self._note_error(result, "派 Buddy", error)
             return
@@ -183,9 +193,21 @@ class GrowthRunner:
 
     async def _accept_pending(self, credential: CodeBuddyCredential, result: GrowthResult,
                               tasks: list[GrowthTaskItem]) -> bool:
-        """接单：一批提交多个 task_code；逐条读 results，失败必须报出来。"""
+        """接单：一批提交多个 task_code，逐条读 results。
+
+        失败要分三类对待，**不是**一律记 FAILED：
+        - `prerequisite not met: <code>`：前置任务未完成。这是常态（新账号全部任务都
+          被 first_buddy 门住），而且**众多任务共享同一个前置条件**——逐条报会让报告
+          变成十几行同样的噪音，掩盖「其实只需做一件事」。按原因归并成一条汇总。
+        - `task does not require acceptance`：上游说这个任务不需要接单，是**正常应答**
+          而非失败（此前当失败报，误导用户以为出了问题）。
+        - 其余：真正需要人看的失败，逐条报出。
+        """
         pending = [task.task_code for task in tasks if task.needs_accept and task.task_code]
         titles = {task.task_code: task.title for task in tasks}
+        accepted = 0
+        blocked: dict[str, list[str]] = {}          # 前置条件 → 受影响的标题
+        others: list[tuple[str, str]] = []          # (标题, 上游原文)
         for start in range(0, len(pending), ACCEPT_BATCH_SIZE):
             batch = pending[start:start + ACCEPT_BATCH_SIZE]
             try:
@@ -195,13 +217,31 @@ class GrowthRunner:
             for item in results:
                 code = item.get("task_code")
                 title = titles.get(code, code)
-                if item.get("status") == "error":
-                    message = str(item.get("message") or "未说明原因")
-                    result.steps.append(GrowthStep(
-                        "领取任务", StepStatus.FAILED, f"「{title}」失败：{message}"))
-                else:
+                if item.get("status") != "error":
+                    accepted += 1
                     result.steps.append(GrowthStep(
                         "领取任务", StepStatus.DONE, f"「{title}」（进度开始计）"))
+                    continue
+                message = str(item.get("message") or "未说明原因")
+                if _prerequisite_of(message):
+                    blocked.setdefault(_prerequisite_of(message) or "", []).append(title)
+                elif "does not require acceptance" in message:
+                    # 正常应答：该任务不需要接单，不用管它（下一步会照常尝试领奖）
+                    continue
+                else:
+                    others.append((title, message))
+        if accepted:
+            result.steps.append(GrowthStep(
+                "接单完成", StepStatus.DONE, f"共 {accepted} 个任务开始计进度"))
+        for reason, titles_blocked in blocked.items():
+            # reportable=True：这是用户需要知道并去处理的事，不能被摘要过滤掉
+            result.steps.append(GrowthStep(
+                "接单受阻", StepStatus.IDLE,
+                f"{len(titles_blocked)} 个任务需先完成「{_prerequisite_label(reason)}」"
+                f"（在官方客户端操作后自动解除）", reportable=True))
+        for title, message in others:
+            result.steps.append(GrowthStep(
+                "领取任务", StepStatus.FAILED, f"「{title}」失败：{message}"))
         return True
 
     async def _claim_completed(self, credential: CodeBuddyCredential, result: GrowthResult,
@@ -422,10 +462,17 @@ def _fmt(value: Any) -> str:
     return str(int(number)) if number.is_integer() else f"{number:g}"
 
 
+def _in_report(step) -> bool:
+    """该步是否进一行汇报：显式声明优先，否则 DONE/FAILED 默认进。"""
+    if step.reportable is not None:
+        return step.reportable
+    return step.status in (StepStatus.DONE, StepStatus.FAILED)
+
+
 def _report(result: GrowthResult) -> str:
     """一行中文汇报（存 events 表 / 直接展示给用户）。"""
     parts = [f"{step.name}：{step.detail}" if step.detail else step.name
-             for step in result.steps if step.status in (StepStatus.DONE, StepStatus.FAILED)]
+             for step in result.steps if _in_report(step)]
     if not parts:
         parts = ["成长中心无可领取项"]
     tail = []
@@ -439,3 +486,32 @@ def _report(result: GrowthResult) -> str:
     if result.credit:
         tail.append(f"本次 +共 {_fmt(result.credit)} 积分")
     return "；".join(parts) + (f"（{'，'.join(tail)}）" if tail else "")
+
+# 前置条件在 tasks/accept 的 results 里以 "prerequisite not met: <task_code>" 出现。
+# 已知的前置任务展示名（接口不给标题时回落成 task_code 本身）。
+_PREREQUISITE_LABELS = {"first_buddy": "领取一只 Buddy（在客户端新建任务并发起对话）"}
+
+
+def _is_no_buddy(error: GrowthRejected) -> bool:
+    """派出 Buddy 是否因为「还没有 Buddy」被拒——账号状态，不是故障。
+
+    上游对这种前置缺失回 400 + `no active buddy`。当故障记会让新账号的报告里
+    混进一条并不需要处理的"失败"，而它与 17 个任务的 first_buddy 是同一根因。
+    """
+    return error.status == 400 and "buddy" in error.message.lower()
+
+
+def _prerequisite_of(message: str) -> str | None:
+    """从失败消息里取出前置任务 code；不是前置条件问题则返回 None。"""
+    marker = "prerequisite not met:"
+    lowered = message.lower()
+    if marker not in lowered:
+        return None
+    return message[lowered.index(marker) + len(marker):].strip().split()[0].strip(".,;") \
+        if message[lowered.index(marker) + len(marker):].strip() else ""
+
+
+def _prerequisite_label(reason: str) -> str:
+    """前置条件的可读标签：接口只给 task_code，这里补一句用户该做什么。"""
+    return _PREREQUISITE_LABELS.get(reason, reason)
+

@@ -145,12 +145,20 @@ class StepStatus(StrEnum):
 
 @dataclass(slots=True)
 class GrowthStep:
-    """成长中心一个子步骤的结果；detail 是给人看的一句中文。"""
+    """成长中心一个子步骤的结果；detail 是给人看的一句中文。
+
+    reportable 控制该步是否进「一行汇报」：汇报是用户看的摘要，必须只含
+    用户**能据此行动**的信息（领到什么、哪里出错了、需要他去做什么）。
+    默认只收 DONE 与 FAILED；IDLE 里若有需要用户动手的事项（如「N 个任务
+    需先在客户端完成前置任务」），显式置 reportable=True 带进汇报——
+    否则用户只会看到「接单完成 共 1 个」，看不到还有 17 个被门住。
+    """
 
     name: str
     status: StepStatus
     detail: str = ""
     credit: float | None = None
+    reportable: bool | None = None      # None=按 status 判定（DONE/FAILED 进）
 
 
 @dataclass(slots=True)

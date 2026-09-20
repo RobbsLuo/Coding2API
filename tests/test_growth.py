@@ -531,7 +531,7 @@ async def test_runner_task_failure_is_recorded_per_task():
                 {"task_code": "t1", "title": "坏任务", "accept_status": "not_accepted"},
                 {"task_code": "t2", "title": "好任务", "accept_status": "not_accepted"}]}})
         if request.url.path == EP_TASK_ACCEPT:
-            # 上游逐条报错：一条 error 一条 ok，整轮不该因此被判死
+            # 上游逐条报错：一条前置条件未满足（常态）、一条 ok
             return httpx.Response(200, json={"code": 0, "data": {"results": [
                 {"task_code": "t1", "status": "error",
                  "message": "prerequisite not met: first_buddy"},
@@ -539,10 +539,13 @@ async def test_runner_task_failure_is_recorded_per_task():
         return httpx.Response(200, json={"code": 0, "data": {}})
 
     result = await _run(handler)
-    assert "坏任务" in result.report and "好任务" in result.report
-    # 5xx 记失败，但同一轮「好任务」成功了 → 整体仍算成功（一条接口抖动不该判整轮死）
-    assert len(result.failed) == 1
+    assert "接单受阻" in result.report and "好任务" in result.report
+    # 前置条件未满足是常态（不记 FAILED），同一轮「好任务」接单成功
+    assert result.failed == []
     assert result.ok is True and result.gained is True
+    blocked = next(s for s in result.steps if s.name == "接单受阻")
+    assert blocked.status == StepStatus.IDLE
+    assert "领取一只 Buddy" in blocked.detail   # 前置条件给了可读说明
 
 
 async def test_runner_makeup_uses_one_card_and_reports_leftover():
@@ -1890,9 +1893,13 @@ async def test_runner_accept_batches_and_reports_per_item_errors():
 
     result = await _run(handler)
     assert [len(b) for b in batches] == [ACCEPT_BATCH_SIZE, 25 - ACCEPT_BATCH_SIZE]
-    failed = [s for s in result.steps if s.status == StepStatus.FAILED]
-    assert len(failed) == 1 and "prerequisite not met" in failed[0].detail
-    assert sum(1 for s in result.steps if s.status == StepStatus.DONE) == 24
+    # t0 是前置条件未满足：归并成一条汇总，不是逐条 FAILED 刷屏
+    assert result.failed == []
+    blocked = [s for s in result.steps if s.name == "接单受阻"]
+    assert len(blocked) == 1 and "1 个任务" in blocked[0].detail
+    # 24 个任务接单成功：每条各一条 DONE + 一条「接单完成」汇总
+    assert sum(1 for s in result.steps if s.name == "领取任务") == 24
+    assert any(s.name == "接单完成" and "24 个" in s.detail for s in result.steps)
 
 
 async def test_runner_accept_falls_back_when_results_missing():
@@ -2178,3 +2185,144 @@ async def test_runner_redeem_retry_non_session_error_continues():
     assert result.credit == 50.0
     steps = [s for s in result.steps if s.name == "连登兑换"]
     assert steps[0].status == StepStatus.FAILED and "HTTP 500" in steps[0].detail
+
+
+async def test_runner_accept_classifies_three_kinds_of_results():
+    """接单结果分三类：正常应答（不需要接单）/ 前置条件受阻 / 真失败。"""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": [
+                {"task_code": "ok1", "title": "好任务", "accept_status": "not_accepted"},
+                {"task_code": "no_accept", "title": "不需要接单",
+                 "accept_status": "not_accepted"},
+                {"task_code": "gated1", "title": "受门控甲", "accept_status": "not_accepted"},
+                {"task_code": "gated2", "title": "受门控乙", "accept_status": "not_accepted"},
+                {"task_code": "broken", "title": "真坏了", "accept_status": "not_accepted"}]}})
+        if request.url.path == EP_TASK_ACCEPT:
+            return httpx.Response(200, json={"code": 0, "data": {"results": [
+                {"task_code": "ok1", "status": "ok"},
+                # 正常应答：该任务不需要接单，既不算成功也不算失败（不刷屏）
+                {"task_code": "no_accept", "status": "error",
+                 "message": "task does not require acceptance"},
+                # 两个任务共享同一前置条件 → 归并成一条
+                {"task_code": "gated1", "status": "error",
+                 "message": "prerequisite not met: first_buddy"},
+                {"task_code": "gated2", "status": "error",
+                 "message": "prerequisite not met: first_buddy"},
+                # 真正需要人看的失败
+                {"task_code": "broken", "status": "error", "message": "服务端拒绝"}]}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    names = [s.name for s in result.steps]
+    # 「不需要接单」不产生任何步骤（不当失败、不当成功）
+    assert "「不需要接单」" not in result.report
+    # 「领取任务」只出现 1 次（ok1）；「真坏了」走的是 FAILED 且 detail 带原文，
+    # 「不需要接单」不产生步骤
+    done_tasks = [s for s in result.steps
+                  if s.name == "领取任务" and s.status == StepStatus.DONE]
+    assert len(done_tasks) == 1 and "好任务" in done_tasks[0].detail
+    # 同一前置条件的两个任务归并成一条，且进汇报
+    blocked = [s for s in result.steps if s.name == "接单受阻"]
+    assert len(blocked) == 1 and "2 个任务" in blocked[0].detail
+    assert blocked[0].reportable is True
+    assert "接单受阻" in result.report
+    # 真失败逐条报，并让整轮失败（无成功领取时不伪装成功）
+    assert any(s.name == "领取任务" and s.status == StepStatus.FAILED
+               and "服务端拒绝" in s.detail for s in result.steps)
+    assert result.ok is True            # ok1 接单成功 → 部分成功仍算成功
+    assert "接单完成" in names           # 有接单成功的汇总行
+
+
+def test_prerequisite_of_handles_empty_and_unknown_reasons():
+    """前置条件解析的边界：消息截断、未知 code、大小写。"""
+    from src.provider.codebuddy.growth_runner import _prerequisite_label, _prerequisite_of
+
+    assert _prerequisite_of("prerequisite not met: first_buddy") == "first_buddy"
+    assert _prerequisite_of("PREREQUISITE NOT MET: some_task.") == "some_task"
+    assert _prerequisite_of("prerequisite not met:") == ""      # 有标记无原因
+    assert _prerequisite_of("task does not require acceptance") is None
+    assert _prerequisite_of("") is None
+    # 未知前置条件回落成 code 本身（不编造说明）
+    assert _prerequisite_label("mystery_task") == "mystery_task"
+    assert "客户端" in _prerequisite_label("first_buddy")
+
+
+async def test_runner_depart_without_buddy_is_idle_and_reportable():
+    """还没有 Buddy 时派出失败 → 记为 IDLE 且进汇报（账号状态，不是故障）。
+
+    回归：此前记成 FAILED 并带上「（HTTP 400）」，让新账号的报告里混进一条
+    并不需要处理的"失败"，而它与其他任务的 first_buddy 是同一个根因。
+    """
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "locations": [{"id": 1, "name": "咖啡馆"}]}})
+        if request.url.path == EP_TRAVEL_DEPART:
+            return httpx.Response(400, json={"code": 400, "msg": "no active buddy"})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": []}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    step = next(s for s in result.steps if s.name == "派 Buddy")
+    assert step.status == StepStatus.IDLE
+    assert "尚未领取 Buddy" in step.detail and "HTTP" not in step.detail
+    assert "派 Buddy" in result.report        # 用户需要知道去客户端领 Buddy
+    assert result.ok is True
+
+
+async def test_runner_depart_other_business_rejection_still_idle_not_failure():
+    """其他 4xx（如每日名额用完）仍按业务态处理，不误报成故障。"""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "locations": [{"id": 1, "name": "咖啡馆"}]}})
+        if request.url.path == EP_TRAVEL_DEPART:
+            return httpx.Response(400, json={"code": 400, "msg": "daily limit reached"})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": []}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    step = next(s for s in result.steps if s.name == "派 Buddy")
+    assert step.status == StepStatus.IDLE and "daily limit reached" in step.detail
+    assert result.ok is True
+
+
+def test_is_no_buddy_matches_only_buddy_rejections():
+    """「还没有 Buddy」的识别：只看 400 + buddy 关键字。"""
+    from src.provider.codebuddy.growth_runner import _is_no_buddy
+
+    assert _is_no_buddy(GrowthRejected(400, "no active buddy")) is True
+    assert _is_no_buddy(GrowthRejected(400, "No Active Buddy")) is True
+    assert _is_no_buddy(GrowthRejected(400, "daily limit reached")) is False
+    assert _is_no_buddy(GrowthRejected(500, "no active buddy")) is False
+
+
+async def test_runner_depart_unexpected_exception_is_recorded():
+    """派出遇到非 HTTP 异常（网络中断）→ 记失败，不被 no_buddy 分支吞掉。"""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "locations": [{"id": 1, "name": "咖啡馆"}]}})
+        if request.url.path == EP_TRAVEL_DEPART:
+            raise httpx.ConnectError("no route to host")
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": []}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler)
+    step = next(s for s in result.steps if s.name == "派 Buddy")
+    assert step.status == StepStatus.FAILED and "ConnectError" in step.detail
+    assert result.ok is False

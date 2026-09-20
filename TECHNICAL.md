@@ -312,6 +312,21 @@ provider 在身份未知时返回空串（CB 的 `checkin_scope_key` 在 `accoun
 - 结论：`failed 且 gained=False` 才算整体失败。部分成功仍是成功——上游某个接口抖动
   不该让「今天领到 300 积分」变成一张红牌，否则定时任务天天报红，真故障被淹没
 
+**接单失败要分三类，不能一律记 FAILED**（实测一个新账号的报告里刷出 17 条
+`prerequisite not met: first_buddy`，把「其实只需做一件事」淹没了）：
+
+| 上游返回 | 处置 |
+|---|---|
+| `prerequisite not met: <task_code>` | 前置任务未完成。**按原因归并成一条**并标 `reportable=True`（用户需要知道去做什么），记 IDLE 不算失败 |
+| `task does not require acceptance` | 正常应答（该任务不需要接单），**不产生任何步骤** |
+| 其余 | 逐条记 FAILED（真需要人看的失败） |
+
+`GrowthStep.reportable` 控制该步是否进「一行汇报」：默认只收 DONE/FAILED，
+但 IDLE 里若有**用户需要动手**的事项（前置任务受阻、尚未领取 Buddy）必须显式
+置 True 带进汇报——否则用户只看到「接单完成 共 1 个」，看不到还有 17 个被门住。
+
+同理，`no active buddy`（400）是账号状态（新账号还没 Buddy）而非故障，记 IDLE。
+
 **任务契约是五态，不是三态**（2026-09 桌面端成长中心 H5 `growthSpace` chunk 读出，
 被上游改版坑过一次，勿按直觉回退）：
 
