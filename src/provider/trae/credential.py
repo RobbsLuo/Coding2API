@@ -87,23 +87,31 @@ def parse_credential(raw: bytes | dict[str, Any]) -> TraeCredential:
     return credential
 
 
-# 签到设备标识：必须是 **16 位纯数字**。用 hex32（登录 URL 里的 machine/device id）
-# 调 claim 会稳定得到 9074「当前参与用户太多」——这个码看起来像限流，实际是设备
-# 标识格式不符（实测：hex32 → 9074，16 位数字 / 随机 hex → code:0；空串 → 9004）。
-# 派生规则来自公开逆向（trae2api-more 的 CheckinDeviceID）：sha256(identity) 取模
-# 10^16 后补零成 16 位；generation > 0 时把代数并入摘要，用于 9074 时轮换设备。
-_CHECKIN_DEVICE_MODULUS = 10 ** 16
+# 签到设备标识：x-device-id 需要是**数字串**且**不能复用**。
+#
+# 这一段被推翻过两次，把观测数据留在这里，避免再凭单次对照下结论：
+#   同一账号 claim 结果（✓=code:0，✗=9074）：
+#     登录 deviceId(hex32)  → ✗        派生 16 位数字 → ✗（4 次全失败）
+#     随机 16 位数字        → ✓        登录 machineId(hex32) → ✗
+#     空串                  → 9004 参数错误
+#   **一旦某个账号当天签到成功，之后任何 device_id 都返回 code:0**（幂等），
+#   所以「成功」必须配合 status.checked_in 判断，否则会得出诸如「hex32 能过」
+#   这类错误结论。
+#
+# 结论：9074 与 device_id 的具体取值关系未确定（数字串是必要条件，非充分条件）。
+# 因此不猜格式，改为「每次 claim 生成一个新的随机数字串 + 9074 退避重试」：
+# 成熟实现（trae2api-more / auto-checkin-hub）同样把 9074 当限流退避，
+# 退避节奏 60→120→240→480s 封顶。
+_CHECKIN_DEVICE_DIGITS = 16
 
 
-def checkin_device_id(identity: str, generation: int = 0) -> str:
-    """派生签到的 X-Device-Id：16 位纯数字，由账号身份确定性地导出。
+def new_checkin_device_id() -> str:
+    """生成一个全新的签到设备 ID：16 位数字串。
 
-    identity 为空时返回空串（调用方会退回凭证自带的 device_id）。
+    每次调用都不同——设备号复用是 9074 的可疑诱因之一（观测：派生值即
+    「同 uid 永远同样的号」，用久后连续失败；换成没用过的号当次即成功）。
+    不持久化：设备号只是签到 API 的校验参数，上游按 uid 记账，换号不影响发放。
     """
-    import hashlib
+    import secrets
 
-    if not identity:
-        return ""
-    material = identity if generation <= 0 else f"{identity}#gen{generation}"
-    digest = hashlib.sha256(material.encode("utf-8")).digest()
-    return f"{int.from_bytes(digest, 'big') % _CHECKIN_DEVICE_MODULUS:016d}"
+    return f"{secrets.randbelow(10 ** _CHECKIN_DEVICE_DIGITS):0{_CHECKIN_DEVICE_DIGITS}d}"

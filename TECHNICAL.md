@@ -62,7 +62,7 @@ coding2api/
 │   │   ├── trae/
 │   │   │   ├── client.py        # SOLO 上游 + 双 httpx 客户端 + 额度探测
 │   │   │   ├── events.py        # 自定义 SSE → Event
-│   │   │   ├── credential.py    # 凭证解析（嵌套/扁平）+ 原子写回 + 签到设备号派生
+│   │   │   ├── credential.py    # 凭证解析（嵌套/扁平）+ 原子写回 + 签到设备号生成
 │   │   │   └── callback.py      # 登录 URL 构造 + 回调解析
 │   │   └── fixtures/            # fixture 清单
 │   │       ├── codebuddy/*.sse

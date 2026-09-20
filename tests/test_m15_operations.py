@@ -3349,9 +3349,45 @@ async def test_trae_checkin_claim_soft_failure_and_success_paths():
 
 
 
-async def test_trae_checkin_client_returns_soft_failure_after_all_generations():
-    """所有代次设备号都 9074 → 如实返回软失败（不误报成功、不无限重试）。"""
-    from src.provider.trae.client import TraeClient
+async def test_trae_checkin_retries_9074_with_fresh_device_ids():
+    """9074 按限流处理：一轮内换新设备号重试；全失败才返回软失败。
+
+    回归背景：9074 曾被误判为「设备号格式不符」，改成确定性派生值——结果对新
+    账号连续失败（同一设备号复用）。现在每次尝试都用全新设备号。
+    """
+    from src.provider.trae.client import TraeClient, TraeProvider
+
+    device_ids: list[str] = []
+    claims: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        device_ids.append(request.headers.get("x-device-id", ""))
+        if request.url.path.endswith("status"):
+            return httpx.Response(200, json={"checked_in": False, "credits": 150,
+                                             "enable": True, "code": 0})
+        claims.append(request.headers.get("x-device-id", ""))
+        if len(claims) < 2:
+            return httpx.Response(200, json={"code": 9074, "message": "当前参与用户太多"})
+        return httpx.Response(200, json={"code": 0})
+
+    import httpx as _httpx
+    transport = _httpx.MockTransport(handler)
+    client = TraeClient(stream_client=_httpx.AsyncClient(transport=transport, timeout=None),
+                        short_client=_httpx.AsyncClient(transport=transport, timeout=None))
+    result = await TraeProvider(client=client).checkin({"bearer_token": "t", "uid": "u"})
+    assert result.ok is True and result.code == 0
+    assert len(claims) == 2
+    assert claims[0] != claims[1], "重试必须换新设备号"
+    assert all(d.isdigit() and len(d) == 16 for d in device_ids)
+    # 每次尝试（status + claim [+ 成功后的回查]）内部必须用同一个设备号：
+    # 轮次1 = status + claim（用号 A）；轮次2 = status + claim + 回查（用号 B）
+    assert set(device_ids[:2]) == {claims[0]}
+    assert set(device_ids[2:]) == {claims[1]}
+
+
+async def test_trae_checkin_gives_up_after_all_attempts():
+    """所有尝试都 9074 → 如实返回最后一次的软失败，不伪装成功、不无限重试。"""
+    from src.provider.trae.client import CHECKIN_DEVICE_GENERATIONS, TraeClient, TraeProvider
 
     claims: list[str] = []
 
@@ -3366,14 +3402,11 @@ async def test_trae_checkin_client_returns_soft_failure_after_all_generations():
     transport = _httpx.MockTransport(handler)
     client = TraeClient(stream_client=_httpx.AsyncClient(transport=transport, timeout=None),
                         short_client=_httpx.AsyncClient(transport=transport, timeout=None))
-    from src.provider.trae.client import CHECKIN_DEVICE_GENERATIONS, TraeProvider
-
-    provider = TraeProvider(client=client)
-    result = await provider.checkin({"bearer_token": "t", "device_id": "d", "uid": "u"})
+    result = await TraeProvider(client=client).checkin({"bearer_token": "t", "uid": "u"})
     assert result.ok is False and result.code == 9074
     assert "当前参与用户太多" in result.message
-    assert len(claims) == CHECKIN_DEVICE_GENERATIONS      # 每代各试一次就收手
-    assert len(set(claims)) == CHECKIN_DEVICE_GENERATIONS  # 每次换设备号
+    assert len(claims) == CHECKIN_DEVICE_GENERATIONS
+    assert len(set(claims)) == CHECKIN_DEVICE_GENERATIONS       # 每次都是新设备号
 
 
 async def test_trae_checkin_not_enabled_short_circuits():
@@ -3400,15 +3433,14 @@ async def test_trae_checkin_not_enabled_short_circuits():
     assert claims == []
 
 
-def test_checkin_device_id_is_deterministic_and_generation_sensitive():
-    """设备号派生：确定性、16 位数字、按代次变化、身份为空返回空串。"""
-    from src.provider.trae.credential import checkin_device_id
+def test_new_checkin_device_id_is_fresh_numeric_string():
+    """签到设备号：16 位数字串，且每次都是新的（复用是 9074 的可疑诱因）。
 
-    first = checkin_device_id("u1")
-    assert first == checkin_device_id("u1")               # 确定性（重试不会换号）
-    assert first.isdigit() and len(first) == 16
-    assert checkin_device_id("u1", 0) == first            # gen0 等价
-    assert checkin_device_id("u1", 1) != first            # 代次不同则设备号不同
-    assert checkin_device_id("u2") != first
-    assert checkin_device_id("", 0) == ""
-    assert checkin_device_id("u1", -1) == first           # 负代次按 0 处理
+    历史教训：此处曾断言「由 uid 确定性派生」——那是单次对照得出的错误结论
+    （派生值对第二个账号连续 4 次 9074，而随机新值当次成功）。不要改回确定性派生。
+    """
+    from src.provider.trae.credential import new_checkin_device_id
+
+    ids = {new_checkin_device_id() for _ in range(50)}
+    assert len(ids) == 50, "设备号必须每次不同"
+    assert all(i.isdigit() and len(i) == 16 for i in ids)

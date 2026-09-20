@@ -21,7 +21,6 @@ from src.provider.trae.client import (
     TraeCredential,
     prepare_body,
 )
-from src.provider.trae.credential import checkin_device_id
 from src.provider.trae.events import UpstreamProtocolViolation
 from tests.conftest import SECRET
 
@@ -251,17 +250,18 @@ def test_ug_headers_carry_region_and_auth():
     assert headers["X-Machine-Id"] == "m"
     assert headers["X-Uid"] == "u"
     assert "X-Cloudide-Token" not in headers
-    # X-Device-Id 必须是 16 位纯数字：凭证自带的 hex32 会让 claim 返回 9074
-    # （实测 hex32 → 9074，16 位数字 → code:0），所以默认用派生值而非 device_id
-    assert headers["X-Device-Id"] == checkin_device_id("u", 0)
-    assert headers["X-Device-Id"].isdigit() and len(headers["X-Device-Id"]) == 16
-    # 显式传入时以传入值为准（供 9074 轮换代次使用）
+    # 未显式传入时自动生成 16 位数字串，且每次不同（设备号复用是 9074 的可疑诱因）
+    auto = ug_headers(TraeCredential(access_token="a", uid="u"))["X-Device-Id"]
+    assert auto.isdigit() and len(auto) == 16
+    assert auto != ug_headers(TraeCredential(access_token="a", uid="u"))["X-Device-Id"]
+    # 显式传入数字串时以传入值为准（同一轮 status/claim 必须配对使用同一个）
     assert ug_headers(TraeCredential(access_token="a", uid="u"),
                       device_id="123")["X-Device-Id"] == "123"
-    # uid 为空 → 退回凭证自带的 device_id
-    assert ug_headers(TraeCredential(access_token="a", device_id="d"))["X-Device-Id"] == "d"
-    # 两者都空 → 不带该头（上游会返回 9004，不会静默当成有效请求）
-    assert "X-Device-Id" not in ug_headers(TraeCredential(access_token="a"))
+    # 非数字串（如凭证自带的 hex32 device_id）不直接透传，回落为新生成值：
+    # 拿登录 URL 的 hex32 调 claim 会得到 9074
+    fallback = ug_headers(TraeCredential(access_token="a", uid="u",
+                                         device_id="d" * 32))["X-Device-Id"]
+    assert fallback != "d" * 32 and fallback.isdigit() and len(fallback) == 16
 
 
 async def test_client_aclose_is_idempotent():
@@ -711,8 +711,9 @@ async def test_trae_checkin_status_and_claim_use_ug_headers():
         # httpx 内部存储全小写
         assert headers.get("x-user-region") == "CN"
         assert headers.get("authorization") == "Cloud-IDE-JWT a"
-        # 设备头是隐藏必填项；值必须是 16 位数字（hex32 会触发 9074）
-        assert headers.get("x-device-id") == checkin_device_id("u", 0)
+        # 设备头是隐藏必填项；每次请求生成新的 16 位数字串
+        assert headers.get("x-device-id", "").isdigit()
+        assert len(headers.get("x-device-id", "")) == 16
         assert headers.get("x-machine-id") == "m"
         assert headers.get("x-uid") == "u"
 

@@ -31,7 +31,7 @@ from .callback import (
     new_machine_identity,
     parse_callback_url,
 )
-from .credential import TraeCredential, checkin_device_id, parse_credential
+from .credential import TraeCredential, new_checkin_device_id, parse_credential
 from .events import (
     AGENT_HOST,
     APP_ID,
@@ -236,13 +236,12 @@ def ug_headers(credential: TraeCredential, *, device_id: str = "") -> dict[str, 
     """签到/积分端点头（api.trae.cn）。
 
     设备头是签到 API 的隐藏必填项（论坛实测 topic/180147）：缺 X-Device-Id 时
-    status 直接返回 9004（参数错误）。
+    status 直接返回 9004（参数错误）。取值需要是数字串，且**不宜复用**——两者
+    的观测依据见 credential.new_checkin_device_id 的注释。
 
-    **X-Device-Id 必须是 16 位纯数字**。用凭证自带的 deviceId（登录 URL 用的
-    hex32）调 claim 会稳定得到 9074「当前参与用户太多」——这个码看起来像限流，
-    实际是设备标识格式不符（实测：hex32 → 9074；16 位数字 / 随机 hex → code:0；
-    空串 → 9004）。默认取 `checkin_device_id(uid)` 的派生值，调用方可在 9074 时
-    传入轮换后的代次值。
+    未显式传入时每次生成一个新的数字串；调用方需要同一设备号跨请求一致时
+    （如 9074 后原样重试）才自行传入。传入非数字串时回落为新生成值：
+    凭证自带的 deviceId 是登录 URL 用的 hex32，拿它调 claim 会得到 9074。
     """
     headers = {
         "Content-Type": "application/json",
@@ -254,9 +253,8 @@ def ug_headers(credential: TraeCredential, *, device_id: str = "") -> dict[str, 
     # machine_id 保持登录时那一对（它不是签到的校验项，换掉反而可能与登录态不匹配）
     if credential.machine_id:
         headers["X-Machine-Id"] = credential.machine_id
-    effective = device_id or checkin_device_id(credential.uid) or credential.device_id
-    if effective:
-        headers["X-Device-Id"] = effective
+    effective = device_id if device_id.isdigit() else new_checkin_device_id()
+    headers["X-Device-Id"] = effective
     if credential.uid:
         headers["X-Uid"] = credential.uid
     return headers
@@ -398,11 +396,11 @@ class TraeClient:
         return Quota(remaining=max(0.0, limit - used), total=limit, probed_at=int(time.time()))
 
     async def fetch_checkin_status(self, credential: TraeCredential,
-                                   *, generation: int = 0) -> dict[str, Any]:
+                                   *, device_id: str = "") -> dict[str, Any]:
         """checkin_credits/status：checked_in / credits / enable。"""
         data = await self._post_json(
             f"{self.ug_host}{trae_events.EP_CHECKIN_STATUS}", {},
-            ug_headers(credential, device_id=checkin_device_id(credential.uid, generation)))
+            ug_headers(credential, device_id=device_id))
         return {
             "checked_in": bool(data.get("checked_in")),
             "credits": data.get("credits"),
@@ -410,11 +408,11 @@ class TraeClient:
         }
 
     async def claim_checkin(self, credential: TraeCredential,
-                            *, generation: int = 0) -> dict[str, Any] | None:
+                            *, device_id: str = "") -> dict[str, Any] | None:
         """checkin_credits/claim：领取当日积分。"""
         return await self._post_json(
             f"{self.ug_host}{trae_events.EP_CHECKIN_CLAIM}", {},
-            ug_headers(credential, device_id=checkin_device_id(credential.uid, generation)))
+            ug_headers(credential, device_id=device_id))
 
     async def refresh_token(self, credential: TraeCredential) -> TraeCredential:
         """ExchangeToken；失败不改写原凭证字段。"""
@@ -618,34 +616,37 @@ class TraeProvider:
         上游没有独立的「已签到」错误码，status.checked_in 就是已签语义。
         claim 可能返回 HTTP 200 + 业务码非 0 的软失败，必须解析 code，否则会误报成功。
 
-        9074「当前参与用户太多」**不是限流，而是设备标识格式不符**（实测：hex32
-        → 9074，16 位数字 → success）。默认已经用派生的 16 位数字设备号，所以
-        正常不该再遇到；这里保留一次轮换代次重试，应对「派生值恰好在服务端侧不可用」
-        这种未知情况（同账号换设备号不影响领取结果，上游按 uid 记账）。
+        9074「当前参与用户太多」按**限流**处理：它是这几个渠道里最不确定的一环
+        （观测数据见 credential.new_checkin_device_id），成熟实现都做退避重试，
+        而不是去猜设备号格式。本方法一轮内最多试 `CHECKIN_DEVICE_GENERATIONS`
+        次、每次换一个全新设备号（设备号复用是 9074 的可疑诱因），仍失败则如实
+        返回软失败——后台任务按失败计数、当日不封账，下一轮（10 分钟）再试，
+        与上游的分钟级退避窗口自然错开。
         """
         credential = TraeCredential.from_dict(credential_data)
-        for generation in range(CHECKIN_DEVICE_GENERATIONS):
-            status = await self.client.fetch_checkin_status(
-                credential, generation=generation)
+        last: CheckinResult | None = None
+        for _ in range(CHECKIN_DEVICE_GENERATIONS):
+            # 同一个设备号贯穿本轮的 status 与 claim：两者是配对的校验参数
+            device_id = new_checkin_device_id()
+            status = await self.client.fetch_checkin_status(credential, device_id=device_id)
             if status["checked_in"]:
                 return CheckinResult(ok=True, credit=None, message="今天已签到",
                                      already_checked_in=True)
             if not status["enable"]:
                 return CheckinResult(ok=False, message="当前账号不可签到")
-            claim = await self.client.claim_checkin(credential, generation=generation)
+            claim = await self.client.claim_checkin(credential, device_id=device_id)
             code = claim.get("code")
             if code in (0, None):
                 # 领取成功 → 回查 status 带回当前积分总额
                 latest = await self.client.fetch_checkin_status(
-                    credential, generation=generation)
+                    credential, device_id=device_id)
                 return CheckinResult(ok=True, credit=latest.get("credits"), code=0)
-            if code == 9074 and generation + 1 < CHECKIN_DEVICE_GENERATIONS:
-                continue          # 换一个派生设备号再试（同账号其它代次）
             # 软失败：不抛异常（后台任务按失败计数，当日不封账，下轮重试）
-            return CheckinResult(ok=False, code=int(code),
+            last = CheckinResult(ok=False, code=int(code),
                                  message=str(claim.get("message") or "claim 失败"))
-        # 循环必然在每轮内返回；保留兜底让静态检查满意
-        return CheckinResult(ok=False, message="签到未完成")  # pragma: no cover
+        # 所有尝试都失败：返回最后一次的真实原因（不伪装成功）
+        return last if last is not None else CheckinResult(  # pragma: no cover
+            ok=False, message="签到未完成")
 
     # ------------------------------------------------- callback 轨道（Q17=C）
 
