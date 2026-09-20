@@ -314,7 +314,17 @@ provider 在身份未知时返回空串（CB 的 `checkin_scope_key` 在 `accoun
 
 不可逆动作（抽奖 / 连登兑换 / 开 Buddy 盲盒 / 消耗补登卡）由
 `GROWTH_IRREVERSIBLE_ACTIONS` 总开关控制，**手动入口与定时任务读同一个开关**——
-否则「保守部署」只挡得住定时任务。
+否则「保守部署」只挡得住定时任务。开关只挡「消耗」，不挡「查询」：
+`/streak` 是只读接口，关掉开关时仍要打（否则连签展示会静默变成 `null`）。
+
+**两个 `streak_days` 不是同一个数**（实测同一天分别是 5 与 1），不要合并展示：
+
+| 来源 | 字段 | 含义 |
+|---|---|---|
+| 签到接口 `checkin-activity-status` | `streak_days` | 每日签到连签（签到日历的天数） |
+| 成长中心 `/v2/activity/growth/streak` | `streak.days` | 活动连签，决定 7/14/28 天兑换档的解锁（`next_tier_remaining`） |
+
+成长中心的汇报文案用「活动连签 N 天」显式限定来源，避免被误读成签到连签。
 | 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理 |
 
 **清理切点必顶对齐到小时边界**（`purge_expired`）。这不是保守取值而是正确性要求：

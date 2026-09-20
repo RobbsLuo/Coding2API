@@ -221,7 +221,7 @@ def test_report_summarizes_steps_and_tail():
     report = _report(result)
     assert "领旅行礼物" in report and "开盲盒" in report
     assert "Buddy 旅行中" not in report          # idle 不进汇报（无事发生）
-    assert "能量 18" in report and "连签 4 天" in report and "+共 10 积分" in report
+    assert "能量 18" in report and "活动连签 4 天" in report and "+共 10 积分" in report
     assert _report(GrowthResult()) == "成长中心无可领取项"
 
 
@@ -878,7 +878,8 @@ async def test_runner_irreversible_switch_skips_dangerous_actions():
     assert EP_LOTTERY_CHANCES not in called and EP_LOTTERY_DRAW not in called
     assert EP_REDEEM_SUMMARY not in called and EP_REDEEM not in called
     assert EP_BUDDY_QUOTA not in called and EP_BUDDY_OPEN not in called
-    assert EP_MAKEUP_USE not in called and EP_STREAK not in called
+    # /streak 是只读查询，必须照打（否则关闭不可逆动作的部署静默丢掉连签展示）
+    assert EP_MAKEUP_USE not in called and EP_STREAK in called
     # 可逆的仍要做：礼物 + 任务奖
     assert result.credit == 15.0
     skipped = {step.name for step in result.steps if step.status == StepStatus.SKIPPED}
@@ -1000,18 +1001,14 @@ async def test_runner_energy_and_streak_display_failures_are_silent():
             return httpx.Response(500, content=b"boom")
         return httpx.Response(200, json={"code": 0, "data": {}})
 
-    # 关闭不可逆动作时不会查连登状态；能量查询失败必须静默
-    result = await _run(handler, allow_irreversible=False)
-    assert result.energy is None
-    assert result.credit == 10.0
-    assert result.ok is True
-    assert not any(step.status == StepStatus.FAILED for step in result.steps)
-
-    # 开启不可逆动作时，连登状态 500 记失败；但已有成功的领取 → 整体仍成功
-    result2 = await _run(handler, allow_irreversible=True)
-    assert any(step.name == "查连登状态" and step.status == StepStatus.FAILED
-               for step in result2.steps)
-    assert result2.ok is True and result2.gained is True
+    # 能量查询失败必须静默；连登状态 500 记失败，但已有成功的领取 → 整体仍成功
+    for allow in (True, False):
+        result = await _run(handler, allow_irreversible=allow)
+        assert result.energy is None
+        assert result.credit == 10.0
+        assert result.ok is True and result.gained is True
+        assert any(step.name == "查连登状态" and step.status == StepStatus.FAILED
+                   for step in result.steps)
 
 
 async def test_runner_buddy_box_reports_default_name_and_gain_flags():
@@ -1530,6 +1527,32 @@ async def test_runner_redeem_unexpected_exception_is_attention():
     assert result.ok is False
     assert any("连登兑换" in step.name and step.status == StepStatus.FAILED
                for step in result.steps)
+
+
+async def test_runner_reads_streak_even_with_irreversible_disabled():
+    """回归：关闭不可逆动作时仍要拿回连签天数（只读查询不该被开关挡住）。"""
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_TRAVEL_STATUS:
+            return httpx.Response(200, json=TRAVEL_IDLE)
+        if request.url.path == EP_TRAVEL_CONFIG:
+            return httpx.Response(200, json={"code": 0, "data": {"locations": []}})
+        if request.url.path == EP_TASKS:
+            return httpx.Response(200, json={"code": 0, "data": {"tasks": []}})
+        if request.url.path == EP_STREAK:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "streak": {"days": 5, "makeup_dates": ["2026-09-01"]},
+                "makeup_cards": {"balance": 2}}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    result = await _run(handler, allow_irreversible=False)
+    assert result.streak_days == 5
+    # 标签必须限定来源：签到接口的 streak_days 是另一个数（实测同一天 5 vs 1）
+    assert "活动连签 5 天" in result.report
+    # 补登仍被开关挡住，只是展示值不再丢
+    assert any(step.name == "补登" and step.status == StepStatus.SKIPPED
+               for step in result.steps)
+    assert not any(step.name == "补登" and step.status == StepStatus.DONE
+                   for step in result.steps)
 
 
 async def test_runner_makeup_leftover_branch_and_missing_card_balance():

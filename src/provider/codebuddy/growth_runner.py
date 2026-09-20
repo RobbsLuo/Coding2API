@@ -189,16 +189,20 @@ class GrowthRunner:
 
     async def _makeup(self, credential: CodeBuddyCredential,
                       result: GrowthResult) -> None:
-        """3. 补登卡：断登自动补一天，保住连登。放在连登兑换之前（补登改变连登天数）。"""
-        if not self._allow_irreversible:
-            result.steps.append(GrowthStep("补登", StepStatus.SKIPPED, "不可逆动作已关闭"))
-            return
+        """3. 补登卡：断登自动补一天，保住连登。放在连登兑换之前（补登改变连登天数）。
+
+        查 /streak 是纯只读操作，与「要不要消耗补登卡」无关：开关关闭时只跳过消耗，
+        连签天数仍要拿回来。把两者写在一起会让关闭不可逆动作的部署静默丢掉连签展示。
+        """
         try:
             streak = await self._client.streak(credential)
         except Exception as error:  # noqa: BLE001
             self._note_error(result, "查连登状态", error)
             return
         result.streak_days = streak.days
+        if not self._allow_irreversible:
+            result.steps.append(GrowthStep("补登", StepStatus.SKIPPED, "不可逆动作已关闭"))
+            return
         if streak.makeup_cards <= 0 or not streak.makeup_dates:
             return
         for target in streak.makeup_dates[:min(streak.makeup_cards, MAKEUP_MAX_PER_RUN)]:
@@ -374,7 +378,10 @@ def _report(result: GrowthResult) -> str:
     if result.energy is not None:
         tail.append(f"能量 {result.energy}")
     if result.streak_days is not None:
-        tail.append(f"连签 {result.streak_days} 天")
+        # 这是成长中心自己的连签（决定 7/14/28 天兑换档解锁），与签到接口的
+        # streak_days 是两个数（实测同一天分别是 1 与 5）。两者都叫「连签」会让人
+        # 以为其中一个算错了，所以这里显式限定来源。
+        tail.append(f"活动连签 {result.streak_days} 天")
     if result.credit:
         tail.append(f"本次 +共 {_fmt(result.credit)} 积分")
     return "；".join(parts) + (f"（{'，'.join(tail)}）" if tail else "")
