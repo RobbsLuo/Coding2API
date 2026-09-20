@@ -18,10 +18,10 @@
 | Q8 | 协议出口 | v1 仅 OpenAI；v1.1 加 Anthropic |
 | Q9 | 存储 | SQLite，schema 重新设计，凭证入加密列 |
 | Q10 | 配额 | 不做配额，只做按人统计 |
-| Q11 | 前端范围 | 中等 6 页（无设置页，配置走 env） |
+| Q11 | 前端范围 | 中等 6 页：Dashboard / 凭证 / API Key / 统计 / Playground / 登录（无设置页，配置走 env） |
 | Q12 | 调度策略 | 统一健康度 + 到期积分指标 + 冷却状态机，保留手动 pin |
 | Q13 | Anthropic | v1.1，架构预留中立事件层 |
-| Q14 | 测试 | 核心路径 100%，其余 70%，契约测试优先 |
+| Q14 | 测试 | 全量 100%（行 + 分支），契约测试优先 |
 | Q15/Q26 | 健康度归一化 | 剩余积分百分比，跨 provider 可比 |
 | Q16 | 抽象边界 | 细接口：Provider 只管发请求 + 解析 + 分类错误 |
 | Q17 | 登录 | 双轨（CB 轮询 / TRAE 回调），前端统一状态机 |
@@ -87,7 +87,7 @@
   也返回 `code:0 success`（幂等），实测此时 `status.credits` 前后都是 150、`checked_in` 已是 true。
   用「claim 返回 0」判断成功会把「什么都没发生」报成成功（本项目曾据此得出错误结论并返工）。
   正确判定：`checked_in` 为真且回查 `credits` 确有增加。CB 侧同规矩（`code=0` 且 `credit` 是有限数值）
-- **签到 9074 按限流处理（不猜设备号格式）**：观测到的是「数字串是必要条件、非充分条件」——同一账号 hex32 与确定性派生值失败、随机新数字串成功；`X-Device-Id` 空串返回 9004（参数错误）。取值需为数字串且不宜复用，本项目每次 claim 生成新的 16 位数字串并做少量重试，其余交给上一层的 10 分钟周期。**注意：某账号当天签到成功后，任何 device_id 的 claim 都会返回 `code:0`（幂等）**，所以判断成功必须看 `status.checked_in`，否则极易得出错误结论（本项目为此返工过一次）
+- **签到 9074 按设备标识处理（不猜设备号格式）**：观测到的是「数字串是必要条件、非充分条件」——同一账号 hex32 与确定性派生值失败、随机新数字串成功；`X-Device-Id` 空串返回 9004（参数错误）。取值需为数字串且不宜复用，本项目每次 claim 生成新的 16 位数字串，一轮内最多换号重试 2 次（`CHECKIN_ATTEMPTS`），其余交给上一层的 10 分钟周期。**注意：某账号当天签到成功后，任何 device_id 的 claim 都会返回 `code:0`（幂等）**，所以判断成功必须看 `status.checked_in`，否则极易得出错误结论（本项目为此返工过一次）
 - SSE 事件序列：`metadata` → `timing_cost` → `output`×N → `extra_info` → `token_usage` → `done`
 - `token_usage` 含缓存字段 `cache_read_input_tokens` / `cache_creation_input_tokens`（未命中为 0，非缺失），映射为统计的 `cached_tokens`；**无 per-request credit**
 - 错误码 `1005` = 权益不足；仅流式，非流式需聚合
@@ -138,7 +138,7 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 ### 4.3 调度器（Q12=B + Q26 + Q31）
 
-统一实现，两个 provider 共用：手动 pin 优先 → 过滤 healthy → 到期积分多者优先（把 `quota_expiry_ladder` 中距到期 ≤ `QUOTA_EXPIRY_WINDOW_SECONDS`、默认 36h 的积分加总）→ 按健康度三态排序（`known 降序 > unknown > exhausted`）→ 无可用返回 None。到期指标让快过期的积分先用掉，避免白丢；冷却与错误累计规则见 [TECHNICAL.md §6](TECHNICAL.md)。
+统一实现，两个 provider 共用：手动 pin 优先（粘性让位，见下） → 会话粘性命中且可选时直接复用（不排序） → 过滤 healthy → 到期积分多者优先（把 `quota_expiry_ladder` 中距到期 ≤ `QUOTA_EXPIRY_WINDOW_SECONDS`、默认 36h 的积分加总）→ 按健康度三态排序（`known 降序 > unknown > exhausted`；同分按 `credential_id` 稳定）→ 无可用返回 None。到期指标让快过期的积分先用掉，避免白丢；冷却与错误累计规则见 [TECHNICAL.md §6](TECHNICAL.md)，会话粘性见下文。
 
 **为什么是「窗口内积分总量」而不是「是否即将过期」（Q31）**。实测 CodeBuddy 的额度不是一个整块周期，而是几十个各自独立到期的小包（每日 100 积分 × N，`get-user-resource` 一次返回 30~36 个套餐），这决定了三个取舍：
 
@@ -221,7 +221,7 @@ v1 只接 OpenAI 出口，但上游 SSE 解析到「中立事件」这一步独�
 - **用户不建表**：`users.txt`（PBKDF2）是唯一源，路径走 `USERS_FILE`（`config.py` 的 `users_file`，默认 `secrets/users.txt`），角色走 `ADMIN_USERNAMES` env；`api_keys.username` 由应用层校验存在性，不加外键
 - **API Key 存摘要**：SHA-256，明文仅创建时返回一次
 - **凭证加密列**：`data_enc` 走 Fernet，调度状态（`health` / `cooling_until` / `err_count` / `pinned` / `quota_expiry_ladder`）落库，进程重启不丢冷却状态与到期阶梯
-- **用量脱敏**：`usage_events`（明细 90 天）+ `usage_hourly`（小时汇总永久），`credit` 可空仅辅助展示
+- **用量脱敏**：`usage_events`（明细 90 天）+ `usage_hourly`（小时汇总永久），`credit`/`cached_tokens` 可空仅辅助展示
 - **成长中心**：`growth_events` 只存汇总行（一轮一行人话汇报 + 积分/能量/连签 + trigger），不存活动内部数据结构；`credentials.growth_last_run_at/growth_last_result` 供列表直接显示
 - 签到去重与模型列表缓存均进程内实现，不进库
 

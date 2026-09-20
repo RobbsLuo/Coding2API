@@ -129,6 +129,14 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 | `CONVERSATION_STICKY_SECONDS` | `3600` | 会话粘性 TTL：同一对话（消息前缀延续）多轮请求固定用同一凭证（手动 pin 的凭证优先，粘性让位）；凭证出错仍会轮换，成功后重新粘定；`≤0` 关闭 |
 | `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*` | 模型列表黑名单（仅影响列表展示） |
 | `ALLOWED_HOSTS` | 空 | Host 白名单，防 DNS rebinding |
+| `CODEBUDDY_API_ENDPOINT` | `https://copilot.tencent.com` | CodeBuddy 上游地址；改动时必须同时把它加入 `CODEBUDDY_ALLOWED_ENDPOINTS` |
+| `CODEBUDDY_ALLOWED_ENDPOINTS` | 官方两站（见 compose） | 上游端点白名单，真实 Token 只发往白名单内地址 |
+| `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CodeBuddy 聊天最小间隔（秒），避开腾讯频率风控（11128）；`0` 关闭 |
+| `REFRESH_SKEW_HOURS` | `24` | token 到期前该小时数窗口内预刷新 |
+| `PACER_MIN_SECONDS` / `PACER_MAX_SECONDS` | `5` / `20` | 全局节流器随机等待区间（秒） |
+| `LOG_LEVEL` | `INFO` | 日志级别；审计日志是 INFO 级，调到 `WARNING` 会一并关掉 |
+| `DUMP_REQUEST_BODIES` | `false` | 诊断：把 `/v1` 原始请求体落盘到 `data/dumps/`（**含对话内容**，仅排查用） |
+| `HOST` / `PORT` | `127.0.0.1` / `8000` | 监听地址与端口（compose 默认 `0.0.0.0`，`PORT` 同时决定宿主机映射端口） |
 
 ## 部署注意
 
@@ -197,7 +205,7 @@ pnpm build
 
 ## 状态
 
-M0–M3 全部完成，`main` 分支可运行。
+M0–M3 及后续迭代（运维化、成长中心自动化、额度包明细）全部完成，当前版本 v0.1.2，`main` 分支可运行。
 
 ## 授权协议
 

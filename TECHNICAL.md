@@ -8,8 +8,8 @@ PROPOSAL.md 定方向，本文档定实现。每个模块标注来源决策（Q 
 
 | 层 | 选型 | 版本 | 决策 |
 |---|---|---|---|
-| 运行时 | Python | 3.14（≥3.12） | Q2 |
-| 包管理 | uv（venv + pyproject.toml + uv.lock） | 本机 0.12.12 | T-Q1 |
+| 运行时 | Python | 3.14（要求 ≥3.12，`requires-python`） | Q2 |
+| 包管理 | uv（venv + pyproject.toml + uv.lock） | 本机 0.12.x | T-Q1 |
 | Web | FastAPI + Uvicorn | 最新稳定 | Q2=A |
 | 配置 | pydantic-settings | 最新稳定 | T-Q3 |
 | HTTP | httpx 双客户端（流式/短请求分离） | 0.28.1 | T-Q4 |
@@ -102,6 +102,7 @@ coding2api/
 │       ├── playground.py        # 会话调试端点（无需 API Key）
 │       └── streaming.py         # SSE 流包装（长空隙插心跳帧）
 ├── web/                         # React 前端（M2）
+├── deploy/                      # newsyslog / logrotate / systemd 配置模板
 ├── tests/
 ├── Dockerfile / docker-compose.yml  # 仓库根（compose build context 依赖根目录）
 ├── NOTICE / LICENSE / README.md（中文）/ README.en.md
@@ -111,7 +112,7 @@ coding2api/
 
 ## 3. 核心类型定义
 
-### 3.1 中立事件层（engine/provider/base.py，Q13=B 预留）
+### 3.1 中立事件层（provider/base.py，Q13=B 预留）
 
 ```python
 class EventKind(StrEnum):
@@ -137,6 +138,7 @@ class Usage:
     input_tokens: int | None = None
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
+    cached_tokens: int | None = None  # 输入中命中缓存的 token（TRAE cache_read 映射；缺省 None）
     credit: float | None = None    # 上游可选字段，两边都经常为 None
 ```
 
@@ -198,36 +200,31 @@ class Provider(Protocol):
     id: ClassVar[str]
 
     # 凭证生命周期（上游协议私有，必然在 provider 内）
-    def start_auth(self) -> AuthSession: ...            # flow=poll|callback
-    def poll_auth(self, state: str) -> AuthResult | None: ...
-    def complete_callback(self, url: str) -> AuthResult: ...  # 仅 trae
-    def import_credential(self, raw: dict) -> Credential: ...
-    def refresh(self, cred: DecryptedCred) -> None: ...
-
-    # 可选能力（CB 独有：多账号切换）
-    def list_accounts(self, cred: DecryptedCred) -> list[Account]: ...
-    def switch_account(self, cred: DecryptedCred, account_id: str) -> None: ...
+    def start_auth(self, callback_url: str) -> AuthSession: ...   # flow=poll|callback
+    def poll_auth(self, state: str) -> AuthResult | None: ...     # 仅 poll 轨道
+    def complete_callback(self, raw_url: str, state: str) -> AuthResult: ...  # 仅 TRAE
+    def import_credential(self, raw: dict) -> dict: ...
+    def refresh(self, credential_data: dict) -> dict: ...
 
     # 额度探测（调度器依赖：健康度 + 到期阶梯）
-    async def probe_quota(self, cred: DecryptedCred) -> Quota: ...
+    async def probe_quota(self, credential_data: dict) -> Quota: ...
 
-    # 执行
-    def stream_chat(self, cred: DecryptedCred, req: ChatRequest) -> AsyncIterator[Event]: ...
+    # 执行与分类
+    async def stream_chat(self, credential_data: dict, payload: dict, model: str) -> AsyncIterator[Event]: ...
     def classify(self, status: int, body: bytes) -> ErrKind: ...
-
-    # 运维
-    def checkin(self, cred: DecryptedCred) -> CheckinResult: ...
-    def list_models(self, cred: DecryptedCred) -> list[Model]: ...
+    def list_models(self, credential_data: dict) -> list[Model]: ...
 ```
 
 约定：
-- `DecryptedCred` = db 取出 `data_enc` → Fernet 解密后的 dataclass；provider 不接触 sqlite
+- 凭证在引擎与 provider 之间以 dict 传递（解密后的 `data_enc`）；`credential_from`
+  等能力把 dict 还原为 provider 私有 dataclass，provider 不接触 sqlite
 - `stream_chat` 只产出 `Event`，产出前先做 HTTP 状态码检查；`classify` 由 executor 调用
 - 可选能力**不实现即不定义**（不是抛 `NotImplementedError`）：调用方用
   `getattr`/`hasattr` 探测，缺失时返回 400「该凭证不支持此操作」，而不是 500。
   当前可选集：`start_auth`/`poll_auth`（仅支持 poll 的 provider 才有）、
   `complete_callback`（仅 TRAE）、`list_accounts`/`switch_account`（仅 CodeBuddy）、
-  `credential_from`/`checkin_scope`（刷新与签到任务的能力探测）
+  `credential_from`/`checkin_scope`（刷新与签到任务的能力探测）、
+  `checkin`/`checkin_status`（签到）、`growth`（成长中心，仅 CodeBuddy）、`host`（展示用）
 - 两个 provider 共用 `engine/sse.py` 的帧解析器（SSE 规范层），事件语义各自映射
 
 ---
@@ -275,7 +272,8 @@ class Scheduler:
     COOLDOWN = {ErrKind.PLAN: 12h, ErrKind.SOFT: 60s, ErrKind.OTHER: 10m}
     ERR_THRESHOLD = 3          # 连续 OTHER 错误 → 冷却
 
-    def select(self, model: str, tried: set[str]) -> DecryptedCredRef | None: ...
+    def select(self, candidates, tried: set[str], now: int) -> str | None: ...
+    # candidates: Iterable[Candidate]（引擎层已按模型收窄）；返回 credential_id
     def note_success(self, cred_id: str) -> None: ...
     def note_error(self, cred_id: str, kind: ErrKind) -> None: ...
     def pin(self, credential_id: str | None) -> None: ...
@@ -297,6 +295,7 @@ class Scheduler:
 | token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token |
 | 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态，重启重建）；失败凭证持续重试，同账号多凭证共享一次 |
 | 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5 分钟） | 仅 CodeBuddy：领旅行礼物 / 派 Buddy / 领取新任务 / 领任务奖 / 断登补登 / 连登兑换 / 开盲盒 / Buddy 盲盒；结果落 `growth_events` + 回写 `credentials.growth_last_result` |
+| 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理 |
 
 **签到 / 成长中心的「同账号」隔离键**：`checkin_scope(data) or f"credential|{credential_id}"`。
 provider 在身份未知时返回空串（CB 的 `checkin_scope_key` 在 `account_uid` 与
@@ -409,8 +408,6 @@ session 判定处理，否则整轮成长中心会被误报成「登录态已失
 `today` 字段是实时的，操作完立刻变）。`score` 由活动类操作与客户端使用共同驱动，
 计算口径未公开；**与积分无关，不参与调度决策**——不要为了刷它去伪造客户端行为
 （H5 条款明禁「模拟器/脚本篡改数据」，处罚是取消资格并追回已发礼品）。
-| 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理 |
-
 **清理切点必顶对齐到小时边界**（`purge_expired`）。这不是保守取值而是正确性要求：
 `rollup_hourly` 对整行是 REPLACE 语义，只有保证「仍有明细的小时保有全部明细」
 重算才精确；若把边界小时只删一半，下一轮 rollup 会把汇总行覆盖成剩下那一半，
@@ -446,7 +443,7 @@ session 判定处理，否则整轮成长中心会被误报成「登录态已失
 
 ## 7. 数据库（T-Q2 定稿）
 
-DDL 以 src/db/schema.sql 为准（users.txt 为用户唯一源、无 users 表、凭证加密列、usage_events.credit 可空），补充实现细节：
+DDL 以 src/db/schema.sql 为准（users.txt 为用户唯一源、无 users 表、凭证加密列、usage_events.credit/cached_tokens 可空），补充实现细节：
 
 ```sql
 -- conn.py 打开时执行
@@ -471,9 +468,12 @@ PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users.txt 无表）
 | provider 事件映射 | 100% | fixture：真实 SSE 样本 → Event 断言 |
 | OpenAI 协议适配 | 100% | 流式/非流式/工具调用 fixture |
 | OAuth/回调解析 | 100% | fixture：真实回调 URL/state 响应 |
-| HTTP 客户端 | ~ | respx mock 状态码 + body → classify 断言 |
-| 统计/查询 | 70% | sqlite 内存库集成 |
-| 其余 | ≥70% | — |
+| HTTP 客户端 | 100% | respx mock 状态码 + body → classify 断言 |
+| 统计/查询 | 100% | sqlite 内存库集成 |
+| 其余 | 100% | — |
+
+**全量 100%（行 + 分支）是硬门槛**：CI 里 `pytest --cov-fail-under=100`，
+新增/修改的代码必须带测试，覆盖率缺口一律补测试解决，不用 pragma/排除达标。
 
 fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文、思考、工具调用、错误码与额度）。
 
@@ -485,12 +485,13 @@ fixture 断言两个方向：**解析正确**（样本 → 期望 Event）与**�
 
 - **同步 sqlite3 而非 aiosqlite**（T-Q2）：本地微秒级操作，asyncio 封装开销大于收益
 - **双 httpx 客户端**（T-Q4）：聊天流 read=None 防长流截断；短请求总超时 30s 防悬挂；共享 `trust_env=False`
-- **手写 SQL 而非 ORM**：8 张表规模下 ORM 收益为负
+- **手写 SQL 而非 ORM**：5 张表规模下 ORM 收益为负
 - **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + PUBLIC_BASE_URL
 - **v1 无 Anthropic**（Q8=A）：Event 层已预留，v1.1 只加 `compat/anthropic/` 适配器
 - **统计一律以 `usage_hourly` 为准**：`overview` / `by_provider` / `timeline` /
   `model-timeline` 均读小时汇总，只有 `events`（逐请求明细）读 `usage_events`。
-  统一口径是为了让选「全部」时总览与图表同值（明细只留 90 天，汇总永久）
+  统一口径是为了让选「全部」时总览与图表同值（明细只留 90 天，汇总永久）。
+  代价：最近 ≤5 分钟未进汇总的请求不计入，刷新一次即可
 - **小时汇总双写**：`record()` 写入明细的同时增量累加当前小时行，所以新请求
   立即可见于统计页（不依赖 5 分钟一轮的 rollup）；`rollup_hourly` 仍每 5 分钟
   全量重算作对账，两者结果一致（幂等）
@@ -506,8 +507,3 @@ fixture 断言两个方向：**解析正确**（样本 → 期望 Event）与**�
   `WARNING` 且无 handler，导致 `logging.getLogger(__name__)` 的 INFO 静默丢失。
   生产路径 `uvicorn src.main:build_app --factory` 不经过 `run()`，
   所以配置必须挂在 `build_app`（幂等，见 `src/webapp/logging.py`）
-- **两套数据源共存（已知不一致）**：`overview` / `by_provider` 读 `usage_events`（即时，
-  仅覆盖 90 天明细），`timeline` / `model-timeline` 读 `usage_hourly`（≤5 分钟滞后，永久）。
-  时间范围 ≤90 天时两者一致（汇总由同一批明细算出）；选「全部」时总览会小于图表，
-  因为超过 90 天的明细已被清理、只剩小时汇总。修法已列入待办（把总览也切到小时表），
-  但会引入 ≤5 分钟延迟，待定。
