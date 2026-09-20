@@ -3387,7 +3387,7 @@ async def test_trae_checkin_retries_9074_with_fresh_device_ids():
 
 async def test_trae_checkin_gives_up_after_all_attempts():
     """所有尝试都 9074 → 如实返回最后一次的软失败，不伪装成功、不无限重试。"""
-    from src.provider.trae.client import CHECKIN_DEVICE_GENERATIONS, TraeClient, TraeProvider
+    from src.provider.trae.client import CHECKIN_ATTEMPTS, TraeClient, TraeProvider
 
     claims: list[str] = []
 
@@ -3405,8 +3405,8 @@ async def test_trae_checkin_gives_up_after_all_attempts():
     result = await TraeProvider(client=client).checkin({"bearer_token": "t", "uid": "u"})
     assert result.ok is False and result.code == 9074
     assert "当前参与用户太多" in result.message
-    assert len(claims) == CHECKIN_DEVICE_GENERATIONS
-    assert len(set(claims)) == CHECKIN_DEVICE_GENERATIONS       # 每次都是新设备号
+    assert len(claims) == CHECKIN_ATTEMPTS
+    assert len(set(claims)) == CHECKIN_ATTEMPTS       # 每次都是新设备号
 
 
 async def test_trae_checkin_not_enabled_short_circuits():

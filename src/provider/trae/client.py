@@ -50,8 +50,9 @@ from .events import (
     UpstreamProtocolViolation,
 )
 
-# 9074 时的设备号轮换次数（同账号换不同的派生设备号，上游按 uid 记账不影响发放）
-CHECKIN_DEVICE_GENERATIONS = 3
+# 9074 时一轮内的尝试次数（每次换一个全新设备号）。不做更多：9074 无法在本轮内
+# 穷尽解决，而后台任务每 10 分钟一轮，与上游的分钟级退避窗口自然错开。
+CHECKIN_ATTEMPTS = 2
 STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
 SHORT_TIMEOUT = httpx.Timeout(30.0)
 
@@ -618,14 +619,14 @@ class TraeProvider:
 
         9074「当前参与用户太多」按**限流**处理：它是这几个渠道里最不确定的一环
         （观测数据见 credential.new_checkin_device_id），成熟实现都做退避重试，
-        而不是去猜设备号格式。本方法一轮内最多试 `CHECKIN_DEVICE_GENERATIONS`
+        而不是去猜设备号格式。本方法一轮内最多试 `CHECKIN_ATTEMPTS`
         次、每次换一个全新设备号（设备号复用是 9074 的可疑诱因），仍失败则如实
         返回软失败——后台任务按失败计数、当日不封账，下一轮（10 分钟）再试，
         与上游的分钟级退避窗口自然错开。
         """
         credential = TraeCredential.from_dict(credential_data)
         last: CheckinResult | None = None
-        for _ in range(CHECKIN_DEVICE_GENERATIONS):
+        for _ in range(CHECKIN_ATTEMPTS):
             # 同一个设备号贯穿本轮的 status 与 claim：两者是配对的校验参数
             device_id = new_checkin_device_id()
             status = await self.client.fetch_checkin_status(credential, device_id=device_id)
