@@ -565,6 +565,34 @@ describe("CredentialsPage 成长中心", () => {
     expect(within(screen.getByTestId("row-cred_1")).getByText("—")).toBeInTheDocument();
   });
 
+  it("长汇报单行截断展示，鼠标悬浮显示完整内容", async () => {
+    const longReport =
+      "领取任务：「体验「设计创意模式」」失败：prerequisite not met: first_buddy；" +
+      "领取任务：「探索优秀灵感」失败：prerequisite not met: first_buddy；接单受阻：" +
+      "17 个任务需先完成「领取一只 Buddy（在客户端新建任务并发起对话）」";
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ provider: "codebuddy", growth_last_result: longReport }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const cell = screen.getByTestId("growth-cred_1");
+    // 单元格内是截断的单行样式（truncate），不是把整段挤成多行撑高表格
+    const truncated = within(cell).getByText(longReport);
+    expect(truncated.className).toContain("truncate");
+
+    // 悬浮后完整内容出现在 tooltip 里（radix 会把内容同时挂到 trigger 的 aria 描述）
+    await userEvent.hover(cell);
+    const tip = await screen.findByRole("tooltip");
+    expect(tip).toHaveTextContent("17 个任务需先完成");
+    expect(tip).toHaveTextContent("prerequisite not met: first_buddy");
+    // 提示层要能换行显示长文本，否则多行内容会横向溢出
+    expect(tip.className).toContain("whitespace-normal");
+    await userEvent.unhover(cell);
+  });
+
   it("登录态失效单独提示重新登录（不能与普通失败混同）", async () => {
     mockFetch(growthRoutes(
       makeCredential({ provider: "codebuddy" }),

@@ -14,6 +14,7 @@ import { api } from "../api/client";
 import { useSessionContext } from "../Layout";
 import { useCredentials, useQueryClient } from "../api/hooks";
 import { HelpBlock } from "../components/HelpBlock";
+import { LongTextTip } from "../components/Tip";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
 import { ColumnHint } from "../components/Tip";
@@ -525,12 +526,15 @@ function Row({
       </TableCell>
       <TableCell className="text-xs text-muted-foreground">
         {credential.growth_last_result ? (
-          <div data-testid={`growth-${credential.id}`}>
-            {credential.growth_last_result}
-            <div className="text-muted-foreground">
-              {formatTime(credential.growth_last_run_at)}
+          // 汇报可能很长（多步领取串成一行）：限宽单行截断，hover 看全文
+          <LongTextTip content={credential.growth_last_result}>
+            <div data-testid={`growth-${credential.id}`} className="max-w-[22rem]">
+              <div className="truncate">{credential.growth_last_result}</div>
+              <div className="text-muted-foreground">
+                {formatTime(credential.growth_last_run_at)}
+              </div>
             </div>
-          </div>
+          </LongTextTip>
         ) : (
           <span>—</span>
         )}
