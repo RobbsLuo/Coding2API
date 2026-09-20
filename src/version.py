@@ -14,7 +14,7 @@ from functools import lru_cache
 from pathlib import Path
 
 # 回落值：仅在读不到 pyproject.toml 时使用。升版时与 pyproject 一起改。
-FALLBACK_VERSION = "0.1.1"
+FALLBACK_VERSION = "0.1.2"
 
 # 相对本文件定位项目根：src/version.py → 上一级即项目根
 _PYPROJECT = Path(__file__).resolve().parent.parent / "pyproject.toml"
