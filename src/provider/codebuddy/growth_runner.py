@@ -432,10 +432,10 @@ def _report(result: GrowthResult) -> str:
     if result.energy is not None:
         tail.append(f"能量 {result.energy}")
     if result.streak_days is not None:
-        # 这是成长中心自己的连签（决定 7/14/28 天兑换档解锁），与签到接口的
-        # streak_days 是两个数（实测同一天分别是 1 与 5）。两者都叫「连签」会让人
-        # 以为其中一个算错了，所以这里显式限定来源。
-        tail.append(f"活动连签 {result.streak_days} 天")
+        # 「连登」是官方术语（H5 规则：按「连续登录且使用」的天数计，含 1 天容忍
+        # 窗口，故这个值 = 实际使用天数 + 1）。与签到接口的 streak_days 是两个数
+        # （实测同一天 1 vs 5），用「连登」而非「连签」以示区分。
+        tail.append(f"连登 {result.streak_days} 天")
     if result.credit:
         tail.append(f"本次 +共 {_fmt(result.credit)} 积分")
     return "；".join(parts) + (f"（{'，'.join(tail)}）" if tail else "")

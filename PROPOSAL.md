@@ -72,7 +72,7 @@
   写入 `buddy/travel/claim`、`buddy/travel/depart`、`tasks/accept`、`makeup-cards/use`、`redeem`、`lottery/draw`、`buddy/open`
 - 鉴权头与聊天一致（`Authorization` + `X-User-Id` + `X-Domain`）；成长中心实测可用项目内的 OAuth bearer 凭证直连，无需桌面端凭据文件
 - 成长中心任务契约（2026-09）：`accept_status` 五态；接单 `POST /tasks/accept` 收 `{"task_codes": [...]}`（单数一律 400）；领奖 `POST /tasks/{code}/claim`；`/redeem` 的 `tier` 是档位标识 `"7d"/"14d"/"28d"`，实发字段是 `*_granted`
-- **活跃热力墙（heatmap）只计官方客户端行为**：实测桌面端发一句话 → `today.score` 由 0 变 2；同期我们转发 42 次 API 请求不计分。`score` 与积分无关，不参与调度决策
+- **活跃热力墙 / 连登天数只计官方客户端行为**（H5 规则原文：连登天数按「当前日期前连续登录且使用的天数」计，含 1 天容忍窗口，每月清零）：实测桌面端发一句话 → `today.score` 由 0 变 2、`streak.days` 由 1 变 2；同期我们转发 42 次 API 请求两者都不动。热力墙分档 无活跃/轻度/中度/高效/极高 = score 0 / 1-10 / 11-30 / 31-60 / >60，每日 02:00 批算。与积分无关，不参与调度决策
 - **凭证身份可能为空**：OAuth 登录路径下上游账号接口未回填 `account_uid`/`user_id`（实测发生），签到/成长中心的同账号隔离必须回落到 `credential_id`,否则第二个账号会被静默跳过
 - 请求头需 `X-Domain`、`X-User-Id`、`X-Enterprise-Id`、`X-Department-Info`（部门名须 UTF-8 百分号编码）
 

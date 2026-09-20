@@ -225,7 +225,7 @@ def test_report_summarizes_steps_and_tail():
     report = _report(result)
     assert "领旅行礼物" in report and "开盲盒" in report
     assert "Buddy 旅行中" not in report          # idle 不进汇报（无事发生）
-    assert "能量 18" in report and "活动连签 4 天" in report and "+共 10 积分" in report
+    assert "能量 18" in report and "连登 4 天" in report and "+共 10 积分" in report
     assert _report(GrowthResult()) == "成长中心无可领取项"
 
 
@@ -1558,8 +1558,8 @@ async def test_runner_reads_streak_even_with_irreversible_disabled():
 
     result = await _run(handler, allow_irreversible=False)
     assert result.streak_days == 5
-    # 标签必须限定来源：签到接口的 streak_days 是另一个数（实测同一天 5 vs 1）
-    assert "活动连签 5 天" in result.report
+    # 用官方术语「连登」：与签到接口的 streak_days 是两个数（同一天 1 vs 5）
+    assert "连登 5 天" in result.report
     # 补登仍被开关挡住，只是展示值不再丢
     assert any(step.name == "补登" and step.status == StepStatus.SKIPPED
                for step in result.steps)
