@@ -83,6 +83,7 @@
 - 认证：浏览器登录 → 302 回调 `/authorize` → `ExchangeToken` → `GetUserInfo`
 - Token 刷新：`POST /cloudide/api/v3/trae/oauth/ExchangeToken`（refreshToken 轮换）
 - 签到：`/trae/api/v2/ug/checkin_credits/{status,claim}`；额度：`/trae/api/v2/pay/ide_user_ent_usage`
+- **签到设备头 `X-Device-Id` 必须是 16 位纯数字**：用登录 URL 那套 hex32 deviceId 调 claim 会稳定返回 `9074 当前参与用户太多`——看着像限流，实际是设备标识格式不符。实测对照：hex32 → 9074；16 位数字 / 随机 hex → `code:0`；空串 → 9004。本项目的取法是 sha256(uid[#genN]) mod 10^16 补零（确定性，重试不会换号），9074 时换代次再试
 - SSE 事件序列：`metadata` → `timing_cost` → `output`×N → `extra_info` → `token_usage` → `done`
 - `token_usage` 含缓存字段 `cache_read_input_tokens` / `cache_creation_input_tokens`（未命中为 0，非缺失），映射为统计的 `cached_tokens`；**无 per-request credit**
 - 错误码 `1005` = 权益不足；仅流式，非流式需聚合

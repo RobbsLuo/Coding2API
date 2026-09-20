@@ -31,7 +31,7 @@ from .callback import (
     new_machine_identity,
     parse_callback_url,
 )
-from .credential import TraeCredential, parse_credential
+from .credential import TraeCredential, checkin_device_id, parse_credential
 from .events import (
     AGENT_HOST,
     APP_ID,
@@ -50,6 +50,8 @@ from .events import (
     UpstreamProtocolViolation,
 )
 
+# 9074 时的设备号轮换次数（同账号换不同的派生设备号，上游按 uid 记账不影响发放）
+CHECKIN_DEVICE_GENERATIONS = 3
 STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
 SHORT_TIMEOUT = httpx.Timeout(30.0)
 
@@ -230,12 +232,17 @@ def solo_headers(credential: TraeCredential, *, stream: bool = True) -> dict[str
     return headers
 
 
-def ug_headers(credential: TraeCredential) -> dict[str, str]:
-    """签到/积分端点头（api.trae.cn）。对照原实现 UgHeaders。
+def ug_headers(credential: TraeCredential, *, device_id: str = "") -> dict[str, str]:
+    """签到/积分端点头（api.trae.cn）。
 
-    论坛实测（topic/180147）：设备头是签到 API 的隐藏必填项。
-    缺 X-Machine-Id / X-Device-Id 时 status 直接返回 9004（参数错误）；
-    补齐后请求格式正确，只剩 9074（服务器繁忙/限流）。uid 对应 auth.userId。
+    设备头是签到 API 的隐藏必填项（论坛实测 topic/180147）：缺 X-Device-Id 时
+    status 直接返回 9004（参数错误）。
+
+    **X-Device-Id 必须是 16 位纯数字**。用凭证自带的 deviceId（登录 URL 用的
+    hex32）调 claim 会稳定得到 9074「当前参与用户太多」——这个码看起来像限流，
+    实际是设备标识格式不符（实测：hex32 → 9074；16 位数字 / 随机 hex → code:0；
+    空串 → 9004）。默认取 `checkin_device_id(uid)` 的派生值，调用方可在 9074 时
+    传入轮换后的代次值。
     """
     headers = {
         "Content-Type": "application/json",
@@ -244,10 +251,12 @@ def ug_headers(credential: TraeCredential) -> dict[str, str]:
         "Authorization": f"Cloud-IDE-JWT {credential.access_token}",
         "X-User-Region": "CN",
     }
+    # machine_id 保持登录时那一对（它不是签到的校验项，换掉反而可能与登录态不匹配）
     if credential.machine_id:
         headers["X-Machine-Id"] = credential.machine_id
-    if credential.device_id:
-        headers["X-Device-Id"] = credential.device_id
+    effective = device_id or checkin_device_id(credential.uid) or credential.device_id
+    if effective:
+        headers["X-Device-Id"] = effective
     if credential.uid:
         headers["X-Uid"] = credential.uid
     return headers
@@ -388,20 +397,24 @@ class TraeClient:
             used += float(pack_used) if isinstance(pack_used, (int, float)) else 0.0
         return Quota(remaining=max(0.0, limit - used), total=limit, probed_at=int(time.time()))
 
-    async def fetch_checkin_status(self, credential: TraeCredential) -> dict[str, Any]:
+    async def fetch_checkin_status(self, credential: TraeCredential,
+                                   *, generation: int = 0) -> dict[str, Any]:
         """checkin_credits/status：checked_in / credits / enable。"""
         data = await self._post_json(
-            f"{self.ug_host}{trae_events.EP_CHECKIN_STATUS}", {}, ug_headers(credential))
+            f"{self.ug_host}{trae_events.EP_CHECKIN_STATUS}", {},
+            ug_headers(credential, device_id=checkin_device_id(credential.uid, generation)))
         return {
             "checked_in": bool(data.get("checked_in")),
             "credits": data.get("credits"),
             "enable": bool(data.get("enable")),
         }
 
-    async def claim_checkin(self, credential: TraeCredential) -> dict[str, Any] | None:
+    async def claim_checkin(self, credential: TraeCredential,
+                            *, generation: int = 0) -> dict[str, Any] | None:
         """checkin_credits/claim：领取当日积分。"""
         return await self._post_json(
-            f"{self.ug_host}{trae_events.EP_CHECKIN_CLAIM}", {}, ug_headers(credential))
+            f"{self.ug_host}{trae_events.EP_CHECKIN_CLAIM}", {},
+            ug_headers(credential, device_id=checkin_device_id(credential.uid, generation)))
 
     async def refresh_token(self, credential: TraeCredential) -> TraeCredential:
         """ExchangeToken；失败不改写原凭证字段。"""
@@ -603,25 +616,36 @@ class TraeProvider:
         """TRAE 签到：先查状态，未签且可签才领取。
 
         上游没有独立的「已签到」错误码，status.checked_in 就是已签语义。
-        claim 可能返回 HTTP 200 + 业务码非 0 的软失败（如实测 9074
-        「当前参与用户太多」），必须解析 code，否则会误报成功。
+        claim 可能返回 HTTP 200 + 业务码非 0 的软失败，必须解析 code，否则会误报成功。
+
+        9074「当前参与用户太多」**不是限流，而是设备标识格式不符**（实测：hex32
+        → 9074，16 位数字 → success）。默认已经用派生的 16 位数字设备号，所以
+        正常不该再遇到；这里保留一次轮换代次重试，应对「派生值恰好在服务端侧不可用」
+        这种未知情况（同账号换设备号不影响领取结果，上游按 uid 记账）。
         """
         credential = TraeCredential.from_dict(credential_data)
-        status = await self.client.fetch_checkin_status(credential)
-        if status["checked_in"]:
-            return CheckinResult(ok=True, credit=None, message="今天已签到",
-                                 already_checked_in=True)
-        if not status["enable"]:
-            return CheckinResult(ok=False, message="当前账号不可签到")
-        claim = await self.client.claim_checkin(credential)  # _post_json 保证 dict
-        code = claim.get("code")
-        if code not in (0, None):
+        for generation in range(CHECKIN_DEVICE_GENERATIONS):
+            status = await self.client.fetch_checkin_status(
+                credential, generation=generation)
+            if status["checked_in"]:
+                return CheckinResult(ok=True, credit=None, message="今天已签到",
+                                     already_checked_in=True)
+            if not status["enable"]:
+                return CheckinResult(ok=False, message="当前账号不可签到")
+            claim = await self.client.claim_checkin(credential, generation=generation)
+            code = claim.get("code")
+            if code in (0, None):
+                # 领取成功 → 回查 status 带回当前积分总额
+                latest = await self.client.fetch_checkin_status(
+                    credential, generation=generation)
+                return CheckinResult(ok=True, credit=latest.get("credits"), code=0)
+            if code == 9074 and generation + 1 < CHECKIN_DEVICE_GENERATIONS:
+                continue          # 换一个派生设备号再试（同账号其它代次）
             # 软失败：不抛异常（后台任务按失败计数，当日不封账，下轮重试）
             return CheckinResult(ok=False, code=int(code),
                                  message=str(claim.get("message") or "claim 失败"))
-        # 领取成功 → 回查 status 带回当前积分总额
-        latest = await self.client.fetch_checkin_status(credential)
-        return CheckinResult(ok=True, credit=latest.get("credits"), code=0)
+        # 循环必然在每轮内返回；保留兜底让静态检查满意
+        return CheckinResult(ok=False, message="签到未完成")  # pragma: no cover
 
     # ------------------------------------------------- callback 轨道（Q17=C）
 

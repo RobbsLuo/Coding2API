@@ -3314,9 +3314,11 @@ async def test_trae_checkin_claim_soft_failure_and_success_paths():
     from src.provider.trae.client import TraeClient, TraeProvider
 
     seen: list[str] = []
+    device_ids: list[str] = []
 
     async def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request.url.path)
+        device_ids.append(request.headers.get("x-device-id", ""))
         if request.url.path.endswith("status"):
             # 只有第二次（成功的）claim 之后才算已签
             checked = len([p for p in seen if p.endswith("claim")]) >= 2
@@ -3335,12 +3337,78 @@ async def test_trae_checkin_claim_soft_failure_and_success_paths():
     client = TraeClient(stream_client=_httpx.AsyncClient(transport=transport, timeout=None),
                         short_client=_httpx.AsyncClient(transport=transport, timeout=None))
     provider = TraeProvider(client=client)
-    data = {"bearer_token": "t", "device_id": "d"}
+    data = {"bearer_token": "t", "device_id": "d", "uid": "u"}
 
+    # 单轮内 9074 会轮换代次设备号重试，所以一轮就应成功；期间用的都是 16 位数字
     first = await provider.checkin(data)
-    assert not first.ok and first.code == 9074
-    assert "当前参与用户太多" in first.message
+    assert first.ok and first.code == 0 and first.credit == 200
+    # gen0: status + claim(9074)；gen1: status + claim(成功) + 回查 status
+    assert len(device_ids) == 5
+    assert len(set(device_ids)) == 2     # 轮换过一次设备号
+    assert all(d.isdigit() and len(d) == 16 for d in device_ids)
 
-    second = await provider.checkin(data)
-    assert second.ok and second.code == 0 and second.credit == 200
 
+
+async def test_trae_checkin_client_returns_soft_failure_after_all_generations():
+    """所有代次设备号都 9074 → 如实返回软失败（不误报成功、不无限重试）。"""
+    from src.provider.trae.client import TraeClient
+
+    claims: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("status"):
+            return httpx.Response(200, json={"checked_in": False, "credits": 150,
+                                             "enable": True, "code": 0})
+        claims.append(request.headers.get("x-device-id", ""))
+        return httpx.Response(200, json={"code": 9074, "message": "当前参与用户太多"})
+
+    import httpx as _httpx
+    transport = _httpx.MockTransport(handler)
+    client = TraeClient(stream_client=_httpx.AsyncClient(transport=transport, timeout=None),
+                        short_client=_httpx.AsyncClient(transport=transport, timeout=None))
+    from src.provider.trae.client import CHECKIN_DEVICE_GENERATIONS, TraeProvider
+
+    provider = TraeProvider(client=client)
+    result = await provider.checkin({"bearer_token": "t", "device_id": "d", "uid": "u"})
+    assert result.ok is False and result.code == 9074
+    assert "当前参与用户太多" in result.message
+    assert len(claims) == CHECKIN_DEVICE_GENERATIONS      # 每代各试一次就收手
+    assert len(set(claims)) == CHECKIN_DEVICE_GENERATIONS  # 每次换设备号
+
+
+async def test_trae_checkin_not_enabled_short_circuits():
+    """enable=False → 直接返回不可签到，不发 claim。"""
+    from src.provider.trae.client import TraeClient
+
+    claims: list[str] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("status"):
+            return httpx.Response(200, json={"checked_in": False, "credits": 0,
+                                             "enable": False, "code": 0})
+        claims.append(request.url.path)
+        return httpx.Response(200, json={"code": 0})
+
+    import httpx as _httpx
+    transport = _httpx.MockTransport(handler)
+    client = TraeClient(stream_client=_httpx.AsyncClient(transport=transport, timeout=None),
+                        short_client=_httpx.AsyncClient(transport=transport, timeout=None))
+    from src.provider.trae.client import TraeProvider
+
+    result = await TraeProvider(client=client).checkin({"bearer_token": "t", "uid": "u"})
+    assert result.ok is False and result.message == "当前账号不可签到"
+    assert claims == []
+
+
+def test_checkin_device_id_is_deterministic_and_generation_sensitive():
+    """设备号派生：确定性、16 位数字、按代次变化、身份为空返回空串。"""
+    from src.provider.trae.credential import checkin_device_id
+
+    first = checkin_device_id("u1")
+    assert first == checkin_device_id("u1")               # 确定性（重试不会换号）
+    assert first.isdigit() and len(first) == 16
+    assert checkin_device_id("u1", 0) == first            # gen0 等价
+    assert checkin_device_id("u1", 1) != first            # 代次不同则设备号不同
+    assert checkin_device_id("u2") != first
+    assert checkin_device_id("", 0) == ""
+    assert checkin_device_id("u1", -1) == first           # 负代次按 0 处理

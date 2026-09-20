@@ -21,6 +21,7 @@ from src.provider.trae.client import (
     TraeCredential,
     prepare_body,
 )
+from src.provider.trae.credential import checkin_device_id
 from src.provider.trae.events import UpstreamProtocolViolation
 from tests.conftest import SECRET
 
@@ -247,10 +248,20 @@ def test_ug_headers_carry_region_and_auth():
                                         machine_id="m", uid="u"))
     assert headers["Authorization"] == "Cloud-IDE-JWT a"
     assert headers["X-User-Region"] == "CN"
-    assert headers["X-Device-Id"] == "d"
     assert headers["X-Machine-Id"] == "m"
     assert headers["X-Uid"] == "u"
     assert "X-Cloudide-Token" not in headers
+    # X-Device-Id 必须是 16 位纯数字：凭证自带的 hex32 会让 claim 返回 9074
+    # （实测 hex32 → 9074，16 位数字 → code:0），所以默认用派生值而非 device_id
+    assert headers["X-Device-Id"] == checkin_device_id("u", 0)
+    assert headers["X-Device-Id"].isdigit() and len(headers["X-Device-Id"]) == 16
+    # 显式传入时以传入值为准（供 9074 轮换代次使用）
+    assert ug_headers(TraeCredential(access_token="a", uid="u"),
+                      device_id="123")["X-Device-Id"] == "123"
+    # uid 为空 → 退回凭证自带的 device_id
+    assert ug_headers(TraeCredential(access_token="a", device_id="d"))["X-Device-Id"] == "d"
+    # 两者都空 → 不带该头（上游会返回 9004，不会静默当成有效请求）
+    assert "X-Device-Id" not in ug_headers(TraeCredential(access_token="a"))
 
 
 async def test_client_aclose_is_idempotent():
@@ -700,8 +711,8 @@ async def test_trae_checkin_status_and_claim_use_ug_headers():
         # httpx 内部存储全小写
         assert headers.get("x-user-region") == "CN"
         assert headers.get("authorization") == "Cloud-IDE-JWT a"
-        # 论坛实测（topic/180147）：设备头是签到 API 的隐藏必填项
-        assert headers.get("x-device-id") == "d"
+        # 设备头是隐藏必填项；值必须是 16 位数字（hex32 会触发 9074）
+        assert headers.get("x-device-id") == checkin_device_id("u", 0)
         assert headers.get("x-machine-id") == "m"
         assert headers.get("x-uid") == "u"
 
