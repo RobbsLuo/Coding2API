@@ -83,6 +83,10 @@
 - 认证：浏览器登录 → 302 回调 `/authorize` → `ExchangeToken` → `GetUserInfo`
 - Token 刷新：`POST /cloudide/api/v3/trae/oauth/ExchangeToken`（refreshToken 轮换）
 - 签到：`/trae/api/v2/ug/checkin_credits/{status,claim}`；额度：`/trae/api/v2/pay/ide_user_ent_usage`
+- **签到成功必须"确认到账"，不能只看领取接口的返回码**：TRAE 的 `claim` 对当天已签过的账号
+  也返回 `code:0 success`（幂等），实测此时 `status.credits` 前后都是 150、`checked_in` 已是 true。
+  用「claim 返回 0」判断成功会把「什么都没发生」报成成功（本项目曾据此得出错误结论并返工）。
+  正确判定：`checked_in` 为真且回查 `credits` 确有增加。CB 侧同规矩（`code=0` 且 `credit` 是有限数值）
 - **签到 9074 按限流处理（不猜设备号格式）**：观测到的是「数字串是必要条件、非充分条件」——同一账号 hex32 与确定性派生值失败、随机新数字串成功；`X-Device-Id` 空串返回 9004（参数错误）。取值需为数字串且不宜复用，本项目每次 claim 生成新的 16 位数字串并做少量重试，其余交给上一层的 10 分钟周期。**注意：某账号当天签到成功后，任何 device_id 的 claim 都会返回 `code:0`（幂等）**，所以判断成功必须看 `status.checked_in`，否则极易得出错误结论（本项目为此返工过一次）
 - SSE 事件序列：`metadata` → `timing_cost` → `output`×N → `extra_info` → `token_usage` → `done`
 - `token_usage` 含缓存字段 `cache_read_input_tokens` / `cache_creation_input_tokens`（未命中为 0，非缺失），映射为统计的 `cached_tokens`；**无 per-request credit**

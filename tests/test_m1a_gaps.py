@@ -744,22 +744,65 @@ async def test_trae_provider_checkin_disabled_reports_not_ok():
 
 
 async def test_trae_provider_checkin_claims_when_eligible():
-    """未签且可签 → 调 claim 并成功。"""
+    """未签且可签 → claim → 回查确认积分增加才算成功。"""
     paths: list[str] = []
+    status_calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal status_calls
         paths.append(request.url.path)
         if request.url.path.endswith("checkin_credits/status"):
-            return httpx.Response(200, json={"checked_in": False, "credits": 0,
-                                             "enable": True})
-        return httpx.Response(200, json={"credits": 500})
+            status_calls += 1
+            # 领取前未签、余额 150；claim 之后回查：已签且余额 +200
+            return httpx.Response(200, json={
+                "checked_in": status_calls > 1, "enable": True,
+                "credits": 350 if status_calls > 1 else 150})
+        return httpx.Response(200, json={"code": 0})
 
     from src.provider.trae.client import TraeProvider
 
     provider = TraeProvider(client=_trae_client(handler))
     result = await provider.checkin({"accessToken": "a"})
     assert result.ok is True and result.already_checked_in is False
+    assert result.credit == 350 and "200" in result.message
     assert any(p.endswith("checkin_credits/claim") for p in paths)
+    # 必须回查确认；不能只凭 claim 的 code:0——已签账号的 claim 也返回 0
+    assert status_calls == 2
+
+
+async def test_trae_checkin_claim_ok_without_credit_delta_is_failure():
+    """claim 说成功但回查没涨积分 → 报失败（不把幂等 code:0 当成功）。"""
+    status_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal status_calls
+        if request.url.path.endswith("checkin_credits/status"):
+            status_calls += 1
+            # 前后都是未签、余额不变（服务端什么都没做）
+            return httpx.Response(200, json={"checked_in": False, "enable": True,
+                                             "credits": 150})
+        return httpx.Response(200, json={"code": 0})
+
+    from src.provider.trae.client import TraeProvider
+
+    provider = TraeProvider(client=_trae_client(handler))
+    result = await provider.checkin({"accessToken": "a"})
+    assert result.ok is False
+    assert "未确认积分到账" in result.message
+
+
+async def test_trae_checkin_credit_delta_edge_cases():
+    """增量计算：字段缺失/布尔/非有限值一律返回 None（按未确认处理）。"""
+    from src.provider.trae.client import _credit_delta
+
+    assert _credit_delta(100, 300) == 200.0
+    assert _credit_delta(100, 100) == 0.0
+    assert _credit_delta(None, 100) is None
+    assert _credit_delta(100, None) is None
+    assert _credit_delta(True, 100) is None
+    assert _credit_delta(100, False) is None
+    assert _credit_delta(float("inf"), 100) is None
+    assert _credit_delta("100", 200) is None
 
 
 def test_trae_checkin_scope_uses_uid():

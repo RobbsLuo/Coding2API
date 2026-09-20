@@ -3363,8 +3363,11 @@ async def test_trae_checkin_retries_9074_with_fresh_device_ids():
     async def handler(request: httpx.Request) -> httpx.Response:
         device_ids.append(request.headers.get("x-device-id", ""))
         if request.url.path.endswith("status"):
-            return httpx.Response(200, json={"checked_in": False, "credits": 150,
-                                             "enable": True, "code": 0})
+            # 只有第二次 claim 成功后才算已签、余额才涨（回查确认靠这个）
+            done = len(claims) >= 2
+            return httpx.Response(200, json={
+                "checked_in": done, "credits": 350 if done else 150,
+                "enable": True, "code": 0})
         claims.append(request.headers.get("x-device-id", ""))
         if len(claims) < 2:
             return httpx.Response(200, json={"code": 9074, "message": "当前参与用户太多"})
@@ -3376,6 +3379,7 @@ async def test_trae_checkin_retries_9074_with_fresh_device_ids():
                         short_client=_httpx.AsyncClient(transport=transport, timeout=None))
     result = await TraeProvider(client=client).checkin({"bearer_token": "t", "uid": "u"})
     assert result.ok is True and result.code == 0
+    assert result.credit == 350
     assert len(claims) == 2
     assert claims[0] != claims[1], "重试必须换新设备号"
     assert all(d.isdigit() and len(d) == 16 for d in device_ids)

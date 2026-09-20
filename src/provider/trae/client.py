@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -612,16 +613,22 @@ class TraeProvider:
         return f"trae|{credential_data.get('uid', '')}"
 
     async def checkin(self, credential_data: dict) -> CheckinResult:
-        """TRAE 签到：先查状态，未签且可签才领取。
+        """TRAE 签到：查状态 → 未签才领 → **回查确认积分到账**。
 
-        上游没有独立的「已签到」错误码，status.checked_in 就是已签语义。
-        claim 可能返回 HTTP 200 + 业务码非 0 的软失败，必须解析 code，否则会误报成功。
+        判定纪律（吃过亏，勿简化）：claim 返回 `code:0` **不能**当作领取成功。
+        当天已签过的账号，任何 device_id 的 claim 都返回 `code:0`（幂等），
+        仅凭它判断会把「什么都没发生」报成成功。唯一可信的确认方式是回查
+        `status.credits`：它来自上游的余额字段，只有它变了才发现得了。
 
-        9074「当前参与用户太多」按**限流**处理：它是这几个渠道里最不确定的一环
-        （观测数据见 credential.new_checkin_device_id），成熟实现都做退避重试，
-        而不是去猜设备号格式。本方法一轮内最多试 `CHECKIN_ATTEMPTS`
-        次、每次换一个全新设备号（设备号复用是 9074 的可疑诱因），仍失败则如实
-        返回软失败——后台任务按失败计数、当日不封账，下一轮（10 分钟）再试，
+        因此成功的判定分两种，都很明确：
+        - 调用前就 `checked_in=True` → 今日已签（`already_checked_in`）
+        - claim 后回查 `checked_in=True` 且 **`credits` 比 claim 前增加**
+          → 真正领到（`credit` 为本次增量）
+        claim 说成功但回查没有增量、也没有 `checked_in` → 如实报失败，不伪装。
+
+        9074「当前参与用户太多」按限流处理（观测数据见 credential 模块注释）；
+        一轮内最多试 `CHECKIN_ATTEMPTS` 次，每次换一个全新设备号（设备号复用是
+        9074 的可疑诱因），仍失败则返回软失败——后台任务 10 分钟一轮，
         与上游的分钟级退避窗口自然错开。
         """
         credential = TraeCredential.from_dict(credential_data)
@@ -629,22 +636,29 @@ class TraeProvider:
         for _ in range(CHECKIN_ATTEMPTS):
             # 同一个设备号贯穿本轮的 status 与 claim：两者是配对的校验参数
             device_id = new_checkin_device_id()
-            status = await self.client.fetch_checkin_status(credential, device_id=device_id)
-            if status["checked_in"]:
+            before = await self.client.fetch_checkin_status(credential, device_id=device_id)
+            if before["checked_in"]:
                 return CheckinResult(ok=True, credit=None, message="今天已签到",
                                      already_checked_in=True)
-            if not status["enable"]:
+            if not before["enable"]:
                 return CheckinResult(ok=False, message="当前账号不可签到")
             claim = await self.client.claim_checkin(credential, device_id=device_id)
             code = claim.get("code")
-            if code in (0, None):
-                # 领取成功 → 回查 status 带回当前积分总额
-                latest = await self.client.fetch_checkin_status(
-                    credential, device_id=device_id)
-                return CheckinResult(ok=True, credit=latest.get("credits"), code=0)
-            # 软失败：不抛异常（后台任务按失败计数，当日不封账，下轮重试）
-            last = CheckinResult(ok=False, code=int(code),
-                                 message=str(claim.get("message") or "claim 失败"))
+            if code not in (0, None):
+                # 软失败：不抛异常（后台任务按失败计数，当日不封账，下轮重试）
+                last = CheckinResult(ok=False, code=int(code),
+                                     message=str(claim.get("message") or "claim 失败"))
+                continue
+            # claim 说成功 → 必须回查确认，不能直接采信
+            after = await self.client.fetch_checkin_status(credential, device_id=device_id)
+            gained = _credit_delta(before["credits"], after["credits"])
+            if after["checked_in"] and gained is not None:
+                return CheckinResult(ok=True, credit=after["credits"], code=0,
+                                     message=f"签到成功 +{gained}")
+            last = CheckinResult(
+                ok=False, code=0,
+                message=("领取接口返回成功，但回查未确认积分到账"
+                         f"（{before['credits']} → {after['credits']}）"))
         # 所有尝试都失败：返回最后一次的真实原因（不伪装成功）
         return last if last is not None else CheckinResult(  # pragma: no cover
             ok=False, message="签到未完成")
@@ -701,3 +715,20 @@ class TraeProvider:
                 enterprise_id=credential.enterprise_id,
                 nickname=nickname or credential.nickname)
         return credential.to_dict()
+
+def _credit_delta(before: Any, after: Any) -> float | None:
+    """积分增量：两个值都是有限数字时返回 after - before，否则 None。
+
+    上游这两种情况都会出现：字段缺失、以及用 0 表示「不知道」。任一侧不可用就
+    返回 None，由调用方按「未确认到账」处理——宁可报需要人看一眼，也不要把
+    不确定当成成功。
+    """
+    if not isinstance(before, (int, float)) or not isinstance(after, (int, float)):
+        return None
+    if isinstance(before, bool) or isinstance(after, bool):
+        return None
+    left, right = float(before), float(after)
+    if not (math.isfinite(left) and math.isfinite(right)):
+        return None
+    return right - left
+
