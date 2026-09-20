@@ -375,7 +375,13 @@ class TraeClient:
         )
 
     async def fetch_quota(self, credential: TraeCredential) -> Quota:
-        """ide_user_ent_usage：remain = limit - used；多权益包求和。"""
+        """ide_user_ent_usage：remain = limit - used；多权益包求和。
+
+        同时保留每个权益包的名称/额度/已用/到期，供管理台展示奖励积分明细
+        （它们各自独立到期，汇总数字看不出是哪些包、什么时候过期）。
+        注意只填充展示用的 packages，不填 expiry_ladder：后者是选号排序
+        指标，TRAE 按设计无周期概念（保持 None 不变）。
+        """
         data = await self._post_json(
             f"{self.ug_host}/trae/api/v2/pay/ide_user_ent_usage", {},
             ug_headers(credential),
@@ -385,6 +391,7 @@ class TraeClient:
             raise UpstreamProtocolViolation("quota response missing pack list")
         limit = 0.0
         used = 0.0
+        packages: list[dict[str, Any]] = []
         for pack in packs:
             if not isinstance(pack, dict):
                 continue
@@ -395,7 +402,14 @@ class TraeClient:
             pack_used = (pack.get("usage") or {}).get("credits_amount")
             limit += float(pack_limit)
             used += float(pack_used) if isinstance(pack_used, (int, float)) else 0.0
-        return Quota(remaining=max(0.0, limit - used), total=limit, probed_at=int(time.time()))
+            packages.append({
+                "name": _pack_name(pack),
+                "total": float(pack_limit),
+                "used": float(pack_used) if isinstance(pack_used, (int, float)) else 0.0,
+                "end": _pack_end(pack),
+            })
+        return Quota(remaining=max(0.0, limit - used), total=limit,
+                     packages=packages or None, probed_at=int(time.time()))
 
     async def fetch_checkin_status(self, credential: TraeCredential,
                                    *, device_id: str = "") -> dict[str, Any]:
@@ -468,6 +482,30 @@ class TraeClient:
 def _normalize_epoch(value: int) -> int:
     """上游可能返回毫秒；>1e12 视为毫秒。"""
     return value // 1000 if value > 1_000_000_000_000 else value
+
+
+def _pack_name(pack: dict[str, Any]) -> str:
+    """权益包名称：优先 package_extra 的具体包名，逐级回落到描述。
+
+    实测三种都有：福利积分（package_name）/ 每月登录积分（group_name）/
+    老用户福利（display_desc）。全部缺失时给空串，展示层会跳过名称列。
+    """
+    base = pack.get("entitlement_base_info") or {}
+    extra = (base.get("product_extra") or {}).get("package_extra") or {}
+    for candidate in (extra.get("package_name"), pack.get("group_name"),
+                      pack.get("display_desc")):
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return ""
+
+
+def _pack_end(pack: dict[str, Any]) -> int | None:
+    """权益包到期时间（epoch）。取不到返回 None，展示层显示「—」。"""
+    base = pack.get("entitlement_base_info") or {}
+    for candidate in (base.get("end_time"), pack.get("expire_time")):
+        if isinstance(candidate, (int, float)) and candidate > 0:
+            return _normalize_epoch(int(candidate))
+    return None
 
 
 class UpstreamHTTPError(base.UpstreamHTTPError):

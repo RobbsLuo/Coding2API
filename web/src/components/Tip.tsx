@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { CircleHelp } from "lucide-react";
+import { cn } from "cn";
 import {
   Tooltip,
   TooltipContent,
@@ -27,14 +28,22 @@ export function Tip({ content, children }: { content: ReactNode; children: React
  * 与 Tip 的区别：Tip 的 content 是短语义提示（固定 max-w-xs），而这里要展示
  * 可能是几行的完整文本（如成长中心的一行汇报），需要更宽的弹层与自动换行。
  */
-export function LongTextTip({ content, children }: { content: ReactNode; children: ReactNode }) {
+export function LongTextTip({ content, children, className }: {
+  content: ReactNode;
+  children: ReactNode;
+  /** 追加到弹层容器：调用方可放宽宽度 / 禁止折行；沿用 cn 合并，后者覆盖默认值 */
+  className?: string;
+}) {
   return (
     <TooltipProvider>
       <Tooltip>
         <TooltipTrigger asChild>{children}</TooltipTrigger>
         <TooltipContent
           sideOffset={4}
-          className="max-w-sm items-start whitespace-normal break-words text-left"
+          className={cn(
+            "max-w-sm items-start whitespace-normal break-words text-left",
+            className,
+          )}
         >
           {content}
         </TooltipContent>

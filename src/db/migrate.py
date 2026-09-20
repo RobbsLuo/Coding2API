@@ -16,7 +16,7 @@ from importlib import resources
 SCHEMA_NAME = "schema.sql"
 
 # 当前 schema 版本。新增列/表、删表时 +1，并在下方对应元组里补增量。
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -34,6 +34,9 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # 成长中心最近一次运行结果（列表页直接显示，不必再查 events 表）
     ("credentials", "growth_last_run_at INTEGER"),
     ("credentials", "growth_last_result TEXT"),
+    # 额度包明细（展示用，含包名）：与选号指标 quota_expiry_ladder 分开，
+    # 避免为管理台展示改动调度排序行为
+    ("credentials", "quota_packages TEXT"),
 )
 
 # 已废弃的表：schema.sql 里已删定义，但老库里可能还留着，必须显式清理。

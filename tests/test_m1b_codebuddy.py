@@ -443,6 +443,44 @@ async def test_fetch_personal_quota_expiry_ladder_filters_packages():
     assert quota.cycle_end == _cycle_end_epoch(_days(3))
 
 
+async def test_fetch_personal_quota_packages_include_names_and_usage():
+    """展示明细比调度阶梯宽：已用完但仍有效的包要显示（管理员想知道哪包空了），
+    但「已过期且已用完」的历史残留不堆进列表。与 ladder 互不影响。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        accounts = [
+            # 未过期 + 有余额 → 进明细，也进阶梯
+            {"Status": 0, "PackageName": "CodeBuddy个人体验版",
+             "CycleCapacitySizePrecise": "500", "CycleCapacityRemainPrecise": "100",
+             "CycleEndTime": _days(2)},
+            # 未过期但已用完 → 只进明细（展示“已用完”），不进阶梯
+            {"Status": 0, "PackageName": "已用完的包",
+             "CycleCapacitySizePrecise": "100", "CycleCapacityRemainPrecise": "0",
+             "CycleEndTime": _days(3)},
+            # 已过期但还有余额 → 只进明细（展示“浪费了”），不进阶梯
+            {"Status": 0, "PackageName": "已过期有余额",
+             "CycleCapacitySizePrecise": "100", "CycleCapacityRemainPrecise": "50",
+             "CycleEndTime": _days(-1)},
+            # 已过期 + 已用完 → 两边都不进（历史残留）
+            {"Status": 0, "PackageName": "历史残留",
+             "CycleCapacitySizePrecise": "100", "CycleCapacityRemainPrecise": "0",
+             "CycleEndTime": _days(-2)},
+            # 无到期时间但还有余额 → 进明细，end 为 None
+            {"Status": 0, "PackageName": "无到期",
+             "CycleCapacitySizePrecise": "100", "CycleCapacityRemainPrecise": "10"},
+        ]
+        return httpx.Response(200, json=_quota_body(accounts))
+
+    quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
+    assert [item["name"] for item in quota.packages] == [
+        "CodeBuddy个人体验版", "已用完的包", "已过期有余额", "无到期"]
+    assert quota.packages[0] == {"name": "CodeBuddy个人体验版", "total": 500.0,
+                                 "used": 400.0, "end": _cycle_end_epoch(_days(2))}
+    assert quota.packages[1]["used"] == 100.0      # 已用完
+    assert quota.packages[3]["end"] is None        # 无到期信息
+    # 调度阶梯不受展示口径影响：已过期的包不进阶梯（只收未过期 + 有余额）
+    assert quota.expiry_ladder == [(_cycle_end_epoch(_days(2)), 100.0)]
+
+
 async def test_fetch_personal_quota_cycle_end_none_when_all_packages_expired():
     """套餐全部过期（积分已作废）时不给出过去的到期点。"""
     def handler(_request: httpx.Request) -> httpx.Response:

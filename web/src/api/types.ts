@@ -10,6 +10,16 @@ export type Provider = "codebuddy" | "trae";
 /** 健康度三态：null = 未探测；-1 = 已耗尽；0-100 = 已知剩余百分比。 */
 export type Health = number | null;
 
+/** 额度包明细（管理台悬浮展示）：各渠道的积分/权益包。 */
+export interface QuotaPackage {
+  /** 包名：CodeBuddy 为 PackageName；TRAE 为福利积分/每月登录赠送/签到奖励等，可能为空 */
+  name: string;
+  total: number;
+  used: number;
+  /** 到期 epoch；无到期信息为 null */
+  end: number | null;
+}
+
 export interface Credential {
   id: string;
   provider: Provider;
@@ -30,6 +40,10 @@ export interface Credential {
   quota_cycle_end: number | null;
   /** 调度窗口内即将到期的积分（与选号排序同源）；无到期信息的渠道为 null */
   quota_expiring_credits: number | null;
+  /** 套餐到期阶梯 [[到期 epoch, 该套餐剩余积分]]，仅 CodeBuddy；TRAE 为 null */
+  quota_expiry_ladder: [number, number][] | null;
+  /** 额度包明细（含包名，仅供展示）；未探测或上游未提供时为 null */
+  quota_packages: QuotaPackage[] | null;
   quota_probed_at: number | null;
   /** 成长中心最近一轮执行时间（仅 CodeBuddy；老库升级前为 null） */
   growth_last_run_at: number | null;

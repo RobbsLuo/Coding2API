@@ -184,6 +184,7 @@ class CodeBuddyClient:
         remaining = 0.0
         cycle_end: int | None = None
         ladder: list[tuple[int, float]] = []
+        packages: list[dict[str, Any]] = []
         for account in accounts:
             if not isinstance(account, dict) or account.get("Status") != 0:
                 continue
@@ -194,6 +195,16 @@ class CodeBuddyClient:
             total += package_total
             remaining += package_remaining
             end = _cycle_end_epoch(account.get("CycleEndTime"))
+            # 展示明细：比调度阶梯（下面的 ladder）宽——已用完但仍有效的包
+            # 也要显示。但「已过期且已用完」的包既不携带积分也不可能再被
+            # 消耗，只是上游的历史残留，不堆进弹层。
+            if package_remaining > 0 or (end is not None and end > now_epoch):
+                packages.append({
+                    "name": str(account.get("PackageName") or ""),
+                    "total": package_total,
+                    "used": max(0.0, package_total - package_remaining),
+                    "end": end,
+                })
             # 一个账号常有几十个套餐各自独立到期（每日 100 积分 × N）。
             # 上游会把已过期套餐一起返回，所以 end > now 才有效；已用完的包
             # （剩余 0）不携带积分。两类都不进入到期排序。
@@ -207,7 +218,8 @@ class CodeBuddyClient:
         if official is not None:
             remaining = official
         return Quota(remaining=remaining, total=total, cycle_end=cycle_end,
-                     expiry_ladder=ladder, probed_at=int(time.time()))
+                     expiry_ladder=ladder, packages=packages or None,
+                     probed_at=int(time.time()))
 
     async def _fetch_enterprise_quota(self, credential: CodeBuddyCredential) -> Quota:
         data = await self._post_json(f"{self.endpoint}{EP_ENTERPRISE_USAGE}", {}, credential)

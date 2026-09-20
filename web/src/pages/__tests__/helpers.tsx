@@ -76,6 +76,8 @@ export function makeCredential(overrides: Record<string, unknown> = {}) {
     quota_total: 100,
     quota_cycle_end: null,
     quota_expiring_credits: null,
+    quota_expiry_ladder: null,
+    quota_packages: null,
     quota_probed_at: 1_700_000_000,
     growth_last_run_at: null,
     growth_last_result: null,

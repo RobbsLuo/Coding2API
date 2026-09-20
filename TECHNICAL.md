@@ -175,6 +175,7 @@ class Quota:
     total: float | None = None
     cycle_end: int | None = None      # 最早到期 epoch（CB 多包各自独立）；TRAE None
     expiry_ladder: list[tuple[int, float]] | None = None  # [(到期 epoch, 该包剩余积分)]
+    packages: list[dict] | None = None  # [{"name","total","used","end"}]，仅展示
     probed_at: int | None = None
     probe_failed: bool = False
 
@@ -292,7 +293,7 @@ class Scheduler:
 
 | 任务 | 周期 | 行为 |
 |---|---|---|
-| 额度探测（quota_probe.py） | 启动立即跑一轮（不节流） + 每 `QUOTA_PROBE_MINUTES`（默认 60）分钟 | 探测上游剩余额度 → `credentials.quota_*` / `quota_expiry_ladder` / `health` 写回 |
+| 额度探测（quota_probe.py） | 启动立即跑一轮（不节流） + 每 `QUOTA_PROBE_MINUTES`（默认 60）分钟 | 探测上游剩余额度 → `credentials.quota_*` / `quota_expiry_ladder` / `quota_packages` / `health` 写回 |
 | token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token |
 | 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态，重启重建）；失败凭证持续重试，同账号多凭证共享一次 |
 | 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5 分钟） | 仅 CodeBuddy：领旅行礼物 / 派 Buddy / 领取新任务 / 领任务奖 / 断登补登 / 连登兑换 / 开盲盒 / Buddy 盲盒；结果落 `growth_events` + 回写 `credentials.growth_last_result` |

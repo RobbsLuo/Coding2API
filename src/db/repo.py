@@ -44,6 +44,29 @@ def _ladder_value(text: str | None) -> list[tuple[int, float]] | None:
     return ladder
 
 
+def _packages_text(packages: list[dict[str, Any]] | None) -> str | None:
+    """额度包明细落库；无明细写 NULL。
+
+    与 _ladder_text 分开：阶梯是选号指标，这里是纯展示数据（带包名）。
+    """
+    if not packages:
+        return None
+    return json.dumps(packages, ensure_ascii=False)
+
+
+def _packages_value(text: str | None) -> list[dict[str, Any]] | None:
+    """读回额度包明细。脏数据/历史空值一律当「无明细」，不让展示层崩掉。"""
+    if not text:
+        return None
+    try:
+        items = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(items, list):
+        return None
+    return [item for item in items if isinstance(item, dict)]
+
+
 class CredentialRepository:
     def __init__(self, db, cipher: CredentialCipher) -> None:
         self._db = db
@@ -119,10 +142,12 @@ class CredentialRepository:
         with self._db.transaction() as conn:
             conn.execute(
                 "UPDATE credentials SET quota_remaining = ?, quota_total = ?, "
-                "quota_cycle_end = ?, quota_expiry_ladder = ?, quota_probed_at = ?, health = ? "
+                "quota_cycle_end = ?, quota_expiry_ladder = ?, quota_packages = ?, "
+                "quota_probed_at = ?, health = ? "
                 "WHERE id = ?",
                 (quota.remaining, quota.total, quota.cycle_end,
-                 _ladder_text(quota.expiry_ladder), quota.probed_at,
+                 _ladder_text(quota.expiry_ladder), _packages_text(quota.packages),
+                 quota.probed_at,
                  health_score(quota), credential_id),
             )
 
@@ -187,20 +212,22 @@ class CredentialRepository:
         """管理台列表：绝不返回明文凭证。
 
         附 `quota_expiring_credits`（窗口内即将到期的积分，与调度排序同源口径）；
-        渠道无到期信息（TRAE）为 None，展示层据此隐藏该行。
+        附 `quota_expiry_ladder`（套餐到期阶梯，[[epoch, 剩余积分]]，仅 CodeBuddy）；
+        渠道无到期信息（TRAE）两者都为 None，展示层据此隐藏。
         """
         now = int(now or time.time())
         rows = self._db.connect().execute(
             "SELECT id, provider, nickname, enabled, disabled, disabled_reason, pinned, "
             "health, cooling_until, err_count, quota_remaining, quota_total, quota_cycle_end, "
             "quota_probed_at, growth_last_run_at, growth_last_result, created_at, added_by, "
-            "quota_expiry_ladder "
+            "quota_expiry_ladder, quota_packages "
             "FROM credentials ORDER BY created_at").fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
             rec = dict(row)
             ladder = _ladder_value(row["quota_expiry_ladder"])
-            rec.pop("quota_expiry_ladder", None)
+            rec["quota_expiry_ladder"] = ladder
+            rec["quota_packages"] = _packages_value(row["quota_packages"])
             rec["quota_expiring_credits"] = (
                 None if ladder is None else expiring_credits(ladder, expiring_window, now))
             out.append(rec)

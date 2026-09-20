@@ -88,6 +88,10 @@ class Quota:
     # 到期阶梯 [(到期 epoch, 该套餐剩余积分)]：选号按"窗口内即将到期积分"排序。
     # 只有按包独立到期的渠道（CodeBuddy）有值；TRAE 无周期概念为 None。
     expiry_ladder: list[tuple[int, float]] | None = None
+    # 额度明细包：[{"name", "total", "used", "end"}]，仅用于展示。
+    # 与 expiry_ladder 分开存：后者是调度排序指标（TRAE 刻意为 None），
+    # 塞入纯展示数据会改变选号行为，且其结构装不下名称。
+    packages: list[dict[str, Any]] | None = None
     probed_at: int | None = None
     probe_failed: bool = False
 

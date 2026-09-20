@@ -28,6 +28,25 @@ from tests.conftest import SECRET
 
 # ------------------------------------------------------------------ repo
 
+def test_repo_packages_tolerates_missing_and_dirty_values():
+    """额度包明读写：空值写 NULL，NULL/坏 JSON/非列表一律当「无明细」，
+    非 dict 的元素（上游结构变动的残留）要滤掉，展示层不能崩。"""
+    from src.db.repo import _packages_text, _packages_value
+
+    assert _packages_text(None) is None
+    assert _packages_text([]) is None
+    # ensure_ascii=False：中文包名不转义成 \\uXXXX
+    assert "福利积分" in _packages_text([{"name": "福利积分"}])
+    assert json.loads(_packages_text([{"name": "福利积分", "total": 2000.0}])) == [
+        {"name": "福利积分", "total": 2000.0}]
+
+    assert _packages_value(None) is None
+    assert _packages_value("") is None
+    assert _packages_value("{not json") is None
+    assert _packages_value('{"not": "a list"}') is None
+    assert _packages_value('[{"name": "a"}, "junk", 7, null]') == [{"name": "a"}]
+
+
 @pytest.fixture()
 def repo(tmp_path):
     db = Database(tmp_path / "r.sqlite3")
@@ -43,7 +62,10 @@ def test_repo_update_paths(repo):
     assert credentials.credential_data(credential_id) == {"accessToken": "b"}
 
     credentials.save_quota(credential_id, Quota(remaining=5, total=10, cycle_end=123,
-                                                expiry_ladder=[(123, 5.0)], probed_at=1))
+                                                expiry_ladder=[(123, 5.0)],
+                                                packages=[{"name": "福利积分", "total": 2000.0,
+                                                           "used": 0.0, "end": 123}],
+                                                probed_at=1))
     assert credentials.candidates()[0].health == 50
     assert credentials.candidates()[0].cycle_end == 123
     assert credentials.candidates()[0].expiry_ladder == [(123, 5.0)]

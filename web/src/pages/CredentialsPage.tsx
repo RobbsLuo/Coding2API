@@ -14,10 +14,9 @@ import { api } from "../api/client";
 import { useSessionContext } from "../Layout";
 import { useCredentials, useQueryClient } from "../api/hooks";
 import { HelpBlock } from "../components/HelpBlock";
-import { LongTextTip } from "../components/Tip";
+import { ColumnHint, LongTextTip } from "../components/Tip";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
-import { ColumnHint } from "../components/Tip";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -59,6 +58,11 @@ import {
 
 const PROVIDERS: Provider[] = ["codebuddy", "trae"];
 const PROVIDER_LABEL: Record<Provider, string> = { codebuddy: "CodeBuddy", trae: "TRAE" };
+
+/** 套餐到期日：只要日期，时分秒对"哪个包先过期"没用。 */
+function packageExpiry(epoch: number | null): string {
+  return epoch === null ? "—" : new Date(epoch * 1000).toLocaleDateString("zh-CN");
+}
 
 /** 成长中心步骤状态的人话标签；idle 不是失败（无事可做），必须与 failed 分开显示。 */
 const GROWTH_STEP_LABEL: Record<GrowthRunResult["steps"][number]["status"], string> = {
@@ -455,6 +459,54 @@ export function CredentialsPage() {
   );
 }
 
+/** 额度包明细：一个账号常有几十个各自独立到期的积分/权益包，
+ * 汇总（剩余/总量）看不出"哪些包、什么时候过期"。表格里只留一个
+ * 「套餐 N 个」，鼠标悬浮才弹出完整明细——几十行不能挤进单元格。
+ * 无明细（未探测/上游未提供）时不渲染。
+ */
+function PackageLadder({ credential }: { credential: Credential }) {
+  const packages = credential.quota_packages ?? [];
+  if (packages.length === 0) return null;
+  // 展示按到期升序：快过期的排最前（无到期信息的排最后）
+  const ordered = [...packages].sort(
+    (left, right) => (left.end ?? Infinity) - (right.end ?? Infinity),
+  );
+  return (
+    <LongTextTip
+      // 明细行（包名 + 剩余/总量 + 已用 + 到期）比默认 max-w-sm 宽得多，
+      // 用窄弹层会每行折成两三行；这里放宽并禁止折行，超出视口时内层横向滚动。
+      className="max-w-[90vw] whitespace-nowrap"
+      content={
+        <div
+          data-testid={`packages-${credential.id}`}
+          className="max-h-[70vh] max-w-full overflow-x-auto overflow-y-auto pr-1"
+        >
+          <div className="mb-1 font-medium">
+            额度包 {packages.length} 个（按到期先后）
+          </div>
+          <ul className="space-y-0.5">
+            {ordered.map((item, index) => (
+              <li key={`${item.name}-${item.end}-${index}`} data-testid={`package-${credential.id}`}>
+                {item.name ? `${item.name}：` : ""}
+                剩 {formatNumber(item.total - item.used)} / {formatNumber(item.total)}
+                {item.used > 0 && `（已用 ${formatNumber(item.used)}）`}
+                · {packageExpiry(item.end)} 到期
+              </li>
+            ))}
+          </ul>
+        </div>
+      }
+    >
+      <button
+        type="button"
+        className="cursor-help text-left underline decoration-dotted underline-offset-2"
+        data-testid={`packages-toggle-${credential.id}`}
+      >
+        套餐 {packages.length} 个
+      </button>
+    </LongTextTip>
+  );
+}
 function Row({
   credential,
   now,
@@ -520,6 +572,7 @@ function Row({
           </div>
         )}
         <div className="text-muted-foreground">{quotaSemantics(credential)}</div>
+        <PackageLadder credential={credential} />
         <div className="text-muted-foreground">
           探测于 {formatTime(credential.quota_probed_at)}
         </div>

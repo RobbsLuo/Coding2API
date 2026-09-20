@@ -1931,18 +1931,24 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     assert tuple(legacy_hourly) == (5, 0, 0)      # 历史汇总保留，新列取默认
     cred_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
     assert "quota_expiry_ladder" in cred_columns
+    # 额度包明细（展示用）也是本次新增列
+    assert "quota_packages" in cred_columns
     # 废弃表被 _MIGRATION_DROPS 清理（schema.sql 删定义对老库无效）
     tables = {row[0] for row in db.connect().execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert "checkins" not in tables and "model_cache" not in tables
     # 补列后可写入、可读出
     db.connect().execute(
-        "INSERT INTO credentials (id, provider, data_enc, quota_expiry_ladder, created_at) "
-        "VALUES ('cred_1', 'codebuddy', 'x', '[[123, 100.0]]', 1)")
+        "INSERT INTO credentials (id, provider, data_enc, quota_expiry_ladder, quota_packages,"
+        " created_at) VALUES ('cred_1', 'codebuddy', 'x', '[[123, 100.0]]',"
+        " '[{\"name\": \"福利积分\"}]', 1)")
     db.connect().commit()
     assert db.connect().execute(
         "SELECT quota_expiry_ladder FROM credentials WHERE id = 'cred_1'").fetchone()[0] == \
         "[[123, 100.0]]"
+    assert json.loads(db.connect().execute(
+        "SELECT quota_packages FROM credentials WHERE id = 'cred_1'").fetchone()[0]) == \
+        [{"name": "福利积分"}]
     # schema 版本推进到位；补列后新聚合可写
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     db.connect().execute(
@@ -2337,7 +2343,7 @@ def test_credentials_endpoint_exposes_admin_flag(tmp_path):
 
 
 def test_credentials_endpoint_exposes_expiring_credits(tmp_path):
-    """到期指标随列表下发（与调度排序同源）；无周期信息为 None，原始阶梯不外泄。"""
+    """到期指标随列表下发（与调度排序同源）；无周期信息为 None，套餐阶梯同源下发。"""
     from src.db.repo import _ladder_text
 
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
@@ -2353,16 +2359,23 @@ def test_credentials_endpoint_exposes_expiring_credits(tmp_path):
         ladder = _ladder_text([(now + 3600, 100.0), (now + 999_999, 50.0)])
         conn = repo._db.connect()
         conn.execute(
-            "UPDATE credentials SET quota_expiry_ladder = ? WHERE id = ?",
-            (ladder, ids["codebuddy"]))
+            "UPDATE credentials SET quota_expiry_ladder = ?, quota_packages = ? WHERE id = ?",
+            (ladder, json.dumps([{"name": "福利积分", "total": 2000.0, "used": 0.0,
+                                  "end": now + 3600}]), ids["codebuddy"]))
         conn.commit()
         body = client.get("/api/credentials").json()
 
     rows = {row["provider"]: row for row in body["credentials"]}
     assert body["expiry_window_seconds"] == settings.quota_expiry_window_seconds
     assert rows["codebuddy"]["quota_expiring_credits"] == 100.0
+    assert rows["codebuddy"]["quota_expiry_ladder"] == [
+        [now + 3600, 100.0], [now + 999_999, 50.0]]
     assert rows["trae"]["quota_expiring_credits"] is None
-    assert "quota_expiry_ladder" not in rows["codebuddy"]
+    assert rows["trae"]["quota_expiry_ladder"] is None
+    # 额度包明细（展示用）同样随列表下发；无明细的渠道为 None
+    assert rows["codebuddy"]["quota_packages"] == [
+        {"name": "福利积分", "total": 2000.0, "used": 0.0, "end": now + 3600}]
+    assert rows["trae"]["quota_packages"] is None
     # 窗口关闭 → 0 而不是 None，展示层据此隐藏该行
     closed = {row["provider"]: row for row in repo.list_all(
         expiring_window=0, now=now)}

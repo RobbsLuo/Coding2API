@@ -565,6 +565,41 @@ async def test_fetch_quota_skips_zero_and_bad_packs():
 
     quota = await _client(handler).fetch_quota(TraeCredential(access_token="a"))
     assert quota.total == 10 and quota.remaining == 10
+    # 只落入有额度的那个包，且名称缺失时给空串（而不是 None）
+    assert quota.packages == [{"name": "", "total": 10.0, "used": 0.0, "end": None}]
+
+
+async def test_fetch_quota_collects_pack_details():
+    """奖励积分列表：包名逐级回落，到期取 end_time/expire_time，
+    已用缺失当 0；同时**不能**填 expiry_ladder（TRAE 无周期概念，
+    填了会改变选号排序）。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"user_entitlement_pack_list": [
+            # 完整字段：package_extra.package_name 优先
+            {"entitlement_base_info": {
+                "quota": {"credits_limit": 2000},
+                "end_time": 1791708834,
+                "product_extra": {"package_extra": {"package_name": "福利积分"}}},
+             "display_desc": "老用户福利", "usage": {}},
+            # 无 package_name → 回落 group_name；无 end_time → 回落 expire_time
+            {"entitlement_base_info": {"quota": {"credits_limit": 500}},
+             "group_name": "每月登录积分", "expire_time": 1790783999,
+             "usage": {"credits_amount": 76.564}},
+            # 无 group_name → 回落 display_desc；无到期 → None
+            {"entitlement_base_info": {"quota": {"credits_limit": 150},
+                                      "product_extra": {"package_extra": {}}},
+             "display_desc": "签到奖励", "usage": {"credits_amount": "bad"}},
+        ]})
+
+    quota = await _client(handler).fetch_quota(TraeCredential(access_token="a"))
+    assert quota.total == 2650 and quota.remaining == 2650 - 76.564
+    assert quota.packages == [
+        {"name": "福利积分", "total": 2000.0, "used": 0.0, "end": 1791708834},
+        {"name": "每月登录积分", "total": 500.0, "used": 76.564, "end": 1790783999},
+        {"name": "签到奖励", "total": 150.0, "used": 0.0, "end": None},
+    ]
+    # 调度指标保持 None：TRAE 不是按包独立到期，不参与"快过期优先"
+    assert quota.expiry_ladder is None
 
 
 async def test_fetch_quota_rejects_missing_list():

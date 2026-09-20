@@ -73,6 +73,63 @@ describe("CredentialsPage", () => {
     expect(shown[0]).toHaveTextContent("100 积分将在");
   });
 
+  it("额度包明细：单元格只留「套餐 N 个」，悬浮弹出按到期升序的完整明细", async () => {
+    const day = Math.floor(Date.now() / 1000) + 86400;
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({
+          id: "cb",
+          provider: "codebuddy",
+          // 故意逆序 + 一个无到期时间：有到期的按先后排，无到期的排最后
+          quota_packages: [
+            { name: "签到奖励", total: 150, used: 0, end: day + 200_000 },
+            { name: "福利积分", total: 2000, used: 0, end: day },
+            { name: "每月登录", total: 500, used: 76.564, end: day + 100_000 },
+            { name: "无到期包", total: 100, used: 10, end: null },
+          ],
+        }),
+        makeCredential({ id: "tr", provider: "trae", quota_packages: null }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    // 无明细 → 不渲染触发元素
+    expect(screen.queryByTestId("packages-toggle-tr")).not.toBeInTheDocument();
+    // 表格里只有一行触发元素，不把几十个包撑进单元格
+    const toggle = screen.getByTestId("packages-toggle-cb");
+    expect(toggle).toHaveTextContent("套餐 4 个");
+    expect(screen.queryByTestId("package-cb")).not.toBeInTheDocument();
+
+    await userEvent.hover(toggle);
+    const tip = await screen.findByRole("tooltip");
+    const items = within(tip).getAllByTestId("package-cb");
+    expect(items).toHaveLength(4);
+    // 按到期升序：最近到期的「福利积分」排第一，无到期时间的「无到期包」排最后
+    expect(items[0]).toHaveTextContent("福利积分");
+    expect(items[0]).toHaveTextContent("2,000");
+    expect(items[1]).toHaveTextContent("每月登录");
+    expect(items[1]).toHaveTextContent("已用 76.56");
+    expect(items[3]).toHaveTextContent("无到期包");
+    expect(items[3]).toHaveTextContent("— 到期");
+    // 明细行很长：弹层要放宽且不折行（默认 max-w-sm + 换行会把每行挤成两三行）
+    expect(tip.className).toContain("max-w-[90vw]");
+    expect(tip.className).toContain("whitespace-nowrap");
+    await userEvent.unhover(toggle);
+  });
+
+  it("无额度包明细（未探测或 TRAE）时不显示套餐触发元素", async () => {
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ id: "empty", provider: "codebuddy", quota_packages: [] }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    expect(screen.queryByTestId("packages-toggle-empty")).not.toBeInTheDocument();
+  });
+
   it("启用/停用调用 toggle 接口", async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
