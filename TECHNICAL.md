@@ -65,6 +65,7 @@ coding2api/
 │   │   │   ├── events.py        # 自定义 SSE → Event
 │   │   │   ├── credential.py    # 凭证解析（嵌套/扁平）+ 原子写回 + 签到设备号生成
 │   │   │   └── callback.py      # 登录 URL 构造 + 回调解析
+│   │   ├── token_expiry.py      # access token 到期提取（显式 expires_at → JWT exp 回落，B3.3）
 │   │   └── fixtures/            # fixture 清单
 │   │       ├── codebuddy/*.sse
 │   │       └── trae/*.sse
@@ -443,6 +444,68 @@ UI 与日志都必须明示「DB 覆盖 .env」，否则用户改 `.env` 不生�
 
 ---
 
+### 3.9 token 到期展示与预警（B3.3）
+
+**问题**：凭证池里 access token 什么时候过期，管理台此前完全看不到；只有 token 真的失效、
+上游回 401、凭证被硬禁用（`disabled=1`）才会在列表里暴露成一个红色状态，而那时已经
+无法接对话流量了。`revive` 只清禁用标记、不补刷新，凭证也无法自愈。
+
+**到期时间的来源**（实测结论，决定了实现，不能只读凭证字段）：
+
+| 渠道 | 凭证 JSON 的 `expires_at` | 实际可靠来源 |
+|---|---|---|
+| TRAE | 有值（= access token 的 JWT `exp`） | 凭证字段即可 |
+| CodeBuddy | **恒为 0**：OAuth 登录与刷新响应都不带 `expires_at`/`created_at`/`expires_in` | 只能从 bearer token 的 JWT `exp` 解析 |
+
+三个 CodeBuddy 凭证实测 `expires_at` 全为 0，而它们的 bearer token 都是 JWT、带权威 `exp`。
+若严格只读凭证字段，预警对**全部** CodeBuddy 凭证名存实亡；更糟的是
+`CodeBuddyCredential.needs_refresh` 首行要求 `expires_at > 0`，于是 CodeBuddy 的 token
+**从来不预刷新**——这正是本批顺带修掉的真实故障。
+
+**实现**：`provider/token_expiry.py`（渠道中立，刻意不 import provider 子模块，否则
+`provider.codebuddy.events → engine.sse` 会被拖进 `db` 层）：
+
+- `credential_token_times(data)`：返回 `(签发, 到期)` 两个 epoch。到期优先显式
+  `expires_at`/`expiresAt`，缺失/非法时遍历可能的 token 键（`bearer_token`/`accessToken`/…）
+  解析 JWT `exp`；签发时间只来自 JWT `iat`（上游不会单独回传）。两者各自拿不到时返回
+  **0 = 未知**。**不猜本地 TTL**——捏造的到期时间会让管理台显示假预警，比不显示更糟；
+  拿回填时刻冒充 `iat` 同样不行（那是「我们什么时候写的」，不是「上游什么时候签发的」）。
+- `credential_expiry(data)`：上面的到期分量（预刷新判定与兼容入口）。
+- `jwt_times(token)` / `jwt_expiry(token)`：只 base64url 解码不验签（签名由上游校验，这里
+  仅用于展示与预刷新判定）；非 JWT / 结构异常 / claim 非法一律 0。
+- `normalize_epoch()`：毫秒时间戳归一（TRAE 原先的私有 `_normalize_epoch` 收敛到这里，
+  两渠道共用一份实现）。
+
+**落库**：`credentials` 新增两列（`SCHEMA_VERSION` 10 → 11，走 `_MIGRATION_COLUMNS`）：
+
+- `token_expires_at`：`add()` 与 `save_credential_data()` 都写回，值来自
+  `credential_token_times()`。**JWT 派生值不写回凭证 JSON**——否则刷新换到新 token 后旧派生值
+  会残留成「权威」到期时间。
+- `token_issued_at`：access token 的签发 epoch（JWT `iat`）。它既是「最后续期」的展示值，
+  也是进度条的满量程（见下）。拿不到时写 0。
+
+**老库升级不批量回填**：全池解密会拖慢启动，改在列表读到时按需从 `data_enc` 派生
+（`_token_times_from_blob()`，解密/解析失败返回 `(0, 0)` 而不是让整个列表崩掉）；一旦写回就
+只读列值，不再每次都付一次解密开销（`NULL` = 老库未回填 → 派生；`0` = 已确认未知 → 不重复解密）。
+
+**读路径**：`list_all()` 只下发绝对 epoch（`token_expires_at` / `token_issued_at`），
+**不代前端算剩余秒数**——服务端算好的「剩余」不会随页面 tick 更新，而且会与冷却时长各用
+一套口径。剩余时间、预警判定、进度条宽度全部由前端 `tokenExpiryView()` 用同一个时钟现算，
+阈值由 `TOKEN_EXPIRY_WARNING_SECONDS` 经列表接口下发。
+
+**进度条量纲是 token 自己的寿命**（`exp - iat`），不是固定窗口：实测 CodeBuddy 的 token
+寿命 50+ 天、TRAE 约 12 天，用固定量程（比如 24h）会把前者永远画成满格，看不出消耗。
+拿不到 `iat` 时不画条、只给数字，而不是拿一个假量程充数。
+
+**展示纪律**：剩余时间必须与「最后续期」一起给。只剩 3 天看着像快挂了，但若最后续期是
+两分钟前，那只是刚拿到的新 token 里剩下的部分；只剩 3 天且续期在十天前才是真的没人管。
+只看剩余天数会把两种情况读反。未知到期整块不渲染，**绝不当成已过期**。
+
+**接口**：`GET /api/credentials` 响应新增 `token_expiry_warning_seconds`；每条凭证新增
+`token_expires_at` 与 `token_issued_at`（均为 0 表示未知）。
+
+---
+
 ## 4. Provider 协议（Q16=A 细接口）
 
 ```python
@@ -576,7 +639,8 @@ class Scheduler:
 | 任务 | 周期 | 行为 |
 |---|---|---|
 | 额度探测（quota_probe.py） | 启动立即跑一轮（不节流） + 每 `QUOTA_PROBE_MINUTES`（默认 60）分钟 | 探测上游剩余额度 → `credentials.quota_*` / `quota_expiry_ladder` / `quota_packages` / `health` 写回 |
-| token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token |
+| token 到期（token_expiry.py） | —（读路径，非任务） | 从凭证显式 `expires_at` 或 access token 的 JWT `exp` 派生到期时间，写 `credentials.token_expires_at`；供管理台展示与预刷新判定（见 §3.9） |
+| token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token；到期时间取凭证显式 `expires_at`，缺失回落 access token 的 JWT `exp`（CodeBuddy 实测无显式字段，见 §3.9） |
 | 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态，重启重建）；失败凭证持续重试，同账号多凭证共享一次 |
 | 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5 分钟） | 仅 CodeBuddy：领旅行礼物 / 派 Buddy / 领取新任务 / 领任务奖 / 断登补登 / 连登兑换 / 开盲盒 / Buddy 盲盒；结果落 `growth_events` + 回写 `credentials.growth_last_result` |
 | 活跃上报（activity.py，默认关闭） | 每 10 分钟醒一次，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点，北京时间）窗口内执行 | 仅 CodeBuddy：补发一条 `chat_request_send` 续连登；按「endpoint + userId」隔离，当日封账；成功落一行 `growth_events` |

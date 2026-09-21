@@ -40,6 +40,7 @@
 | Q32 | Responses 出口 | v1 只做 `chat/completions` 子集：`POST /v1/responses` 与 chat 共用同一 executor，出口 translator 可注入；`include`/`store`/`previous_response_id` 按 Codex CLI 实测取舍（见 TECHNICAL §3.7） |
 | Q33 | 凭证暂停语义 | 复用现有 `enabled`（不新增 `manual_disabled` 列）：`enabled=0` 实测已只摘对话流量，后台任务（签到/刷新/成长/探测）只认 `disabled`；UI 文案统一为「暂停/取消暂停」以区别于系统禁用后的「恢复」（见计划 B3.1 实测收窄） |
 | Q34 | 运行时配置热更 | **推翻 Q11 的「无设置页」**：新增 `runtime_settings` 表 + `RuntimeSettings` 覆盖层 + 管理台第 7 页「运行时配置」。白名单 13 项（默认模型 / 模型黑名单 / 到期两个窗口 / 会话粘性 TTL / 成长不可逆开关 / 成长与探测周期 / 两个节流窗口 / CB 聊天最小间隔 / 活跃上报开关与时点）改完立即生效，无需重启；**DB 覆盖值优先于 .env**，UI 与日志明示，可「恢复默认」清掉覆盖。启动期项（密钥 / 端口 / 数据目录 / 上游白名单）不进白名单——它们决定进程如何启动，运行期改只会让内存与磁盘静默分叉 |
+| Q35 | token 到期展示与预警 | `credentials` 增列 `token_expires_at` / `token_issued_at`（`SCHEMA_VERSION` 10→11）。到期时间优先取凭证显式 `expires_at`，缺失/非法时回落到 access token 的 **JWT `exp`**；签发时间取 JWT `iat`（新增渠道中立的 `provider/token_expiry.py`）——**实测 CodeBuddy 的 token 响应（OAuth 登录与刷新）不带任何到期字段**，只看 `expires_at` 会恒为 0，既让管理台看不到到期、也让 `needs_refresh` 永不触发（token 过期即被 401 硬禁用，且 revive 不自愈）。两边都取不到时为 0 = 未知，**不猜本地 TTL**。进度条满量程取 token 自身寿命（`exp - iat`），拿不到 `iat` 就不画条。老库不批量回填：列表读到时按需从密文派生，写回后走列值 |
 
 ## 2. 目标与非目标
 
@@ -241,6 +242,7 @@ v1 只接 OpenAI 出口，但上游 SSE 解析到「中立事件」这一步独�
 - **凭证加密列**：`data_enc` 走 Fernet，调度状态（`health` / `cooling_until` / `err_count` / `pinned` / `quota_expiry_ladder`）落库，进程重启不丢冷却状态与到期阶梯
 - **用量脱敏**：`usage_events`（明细 90 天）+ `usage_hourly`（小时汇总永久），`credit`/`cached_tokens` 可空仅辅助展示
 - **成长中心**：`growth_events` 只存汇总行（一轮一行人话汇报 + 积分/能量/连签 + trigger），不存活动内部数据结构；`credentials.growth_last_run_at/growth_last_result` 供列表直接显示；活跃上报（B1.7）复用该表记一行，不新增表
+- **token 到期**（Q35）：`credentials.token_expires_at`（显式 `expires_at` 优先，缺失回落 access token 的 JWT `exp`；0 = 未知）与 `token_issued_at`（JWT `iat`，即最后续期；0 = 未知）。二者必须一起展示——剩余天数会被刷新拉满，单看会读反；进度条满量程也取二者之差。派生逻辑在渠道中立的 `provider/token_expiry.py`，**不猜本地 TTL**
 - 签到去重与模型列表缓存均进程内实现，不进库
 
 DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见 [TECHNICAL.md §7](TECHNICAL.md)。

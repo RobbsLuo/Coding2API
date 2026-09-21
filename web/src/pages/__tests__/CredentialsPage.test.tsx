@@ -9,6 +9,7 @@ const READER = { username: "guest", is_admin: false } as const;
 function listBody(credentials: unknown[], isAdmin = true) {
   return { credentials, expiry_window_seconds: 129600,
             expiry_secondary_window_seconds: 604800,
+            token_expiry_warning_seconds: 3600,
             viewer: isAdmin ? "root" : "guest", is_admin: isAdmin };
 }
 
@@ -773,5 +774,85 @@ describe("CredentialsPage 成长中心", () => {
 
     expect(await screen.findByTestId("credentials-error")).toHaveTextContent("上游不可用");
     expect(screen.queryByTestId("growth-result")).not.toBeInTheDocument();
+  });
+
+  // --------------------------------------------------------- B3.3 token 到期
+  it("token 接近到期：进度条 + 剩余时间 + 最后续期，标红预警", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ id: "soon", token_expires_at: now + 600,
+                         token_issued_at: now - 30 * 86400 + 600 }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const cell = screen.getByTestId("token-expiry-soon");
+    expect(cell).toHaveTextContent("token 剩余 10 分钟");
+    expect(cell).toHaveTextContent("即将到期");
+    expect(cell).toHaveTextContent("最后续期");
+    // 寿命 30 天只剩 600 秒 → 进度条几乎见底
+    const bar = screen.getByTestId("token-expiry-bar-soon");
+    expect(Number.parseFloat(bar.style.width)).toBeLessThan(2);
+  });
+
+  it("token 到期时间未知（0）时不渲染整块，绝不当成已过期", async () => {
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ id: "unknown", token_expires_at: 0, token_issued_at: 0 }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    expect(screen.queryByTestId("token-expiry-unknown")).not.toBeInTheDocument();
+  });
+
+  it("拿不到签发时间时只给数字不画进度条（不知道寿命就别伪造量程）", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ id: "noiat", token_expires_at: now + 30 * 86400,
+                         token_issued_at: 0 }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const cell = screen.getByTestId("token-expiry-noiat");
+    expect(cell).toHaveTextContent("token 剩余 30.0 天");
+    expect(cell).not.toHaveTextContent("最后续期");
+    expect(screen.queryByTestId("token-expiry-bar-noiat")).not.toBeInTheDocument();
+  });
+
+  it("token 已过期时明确显示「已过期」", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ id: "dead", token_expires_at: now - 60,
+                         token_issued_at: now - 30 * 86400 }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    expect(screen.getByTestId("token-expiry-dead")).toHaveTextContent("token 已过期");
+  });
+
+  it("阈值之外的 token 只显示剩余时间，不显示预警措辞", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ id: "fresh", token_expires_at: now + 30 * 86400,
+                         token_issued_at: now }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const cell = screen.getByTestId("token-expiry-fresh");
+    expect(cell).toHaveTextContent("token 剩余 30.0 天");
+    expect(cell).not.toHaveTextContent("即将到期");
   });
 });

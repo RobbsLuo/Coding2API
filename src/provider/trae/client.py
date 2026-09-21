@@ -24,6 +24,7 @@ from ...provider.base import (
     Model,
     Quota,
 )
+from ...provider.token_expiry import normalize_epoch
 from . import events as trae_events
 from .callback import (
     CallbackInfo,
@@ -448,7 +449,7 @@ class TraeClient:
         expires_raw = result.get("TokenExpireAt")
         expires_at = credential.expires_at
         if isinstance(expires_raw, (int, float)) and expires_raw > 0:
-            expires_at = _normalize_epoch(int(expires_raw))
+            expires_at = normalize_epoch(int(expires_raw))
         elif isinstance(result.get("TokenExpireDuration"), (int, float)):
             expires_at = int(time.time()) + int(result["TokenExpireDuration"])
         return TraeCredential(
@@ -502,11 +503,6 @@ def _trae_supports_reasoning(config: dict[str, Any]) -> bool | None:
     return None
 
 
-def _normalize_epoch(value: int) -> int:
-    """上游可能返回毫秒；>1e12 视为毫秒。"""
-    return value // 1000 if value > 1_000_000_000_000 else value
-
-
 def _pack_name(pack: dict[str, Any]) -> str:
     """权益包名称：优先 package_extra 的具体包名，逐级回落到描述。
 
@@ -527,7 +523,7 @@ def _pack_end(pack: dict[str, Any]) -> int | None:
     base = pack.get("entitlement_base_info") or {}
     for candidate in (base.get("end_time"), pack.get("expire_time")):
         if isinstance(candidate, (int, float)) and candidate > 0:
-            return _normalize_epoch(int(candidate))
+            return normalize_epoch(int(candidate))
     return None
 
 

@@ -61,6 +61,9 @@ def create_router(services: Services) -> APIRouter:
                     expiring_window=window, expiring_secondary_window=secondary),
                 "expiry_window_seconds": window,
                 "expiry_secondary_window_seconds": secondary,
+                # 到期预警阈值（B3.3）：前端进度条与 <1h 红字同源，避免两处各写一个数
+                "token_expiry_warning_seconds":
+                    services.settings.token_expiry_warning_seconds,
                 "viewer": principal.username,
                 "is_admin": principal.is_admin}
 

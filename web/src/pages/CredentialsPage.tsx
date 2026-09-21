@@ -39,8 +39,10 @@ import {
   quotaSemantics,
   STATE_LABEL,
   STATE_TONE,
+  tokenExpiryView,
 } from "../api/display";
 import type { Credential, GrowthRunResult, Provider } from "../api/types";
+import type { TokenExpiryView } from "../api/display";
 import {
   Badge,
   Button,
@@ -116,6 +118,7 @@ export function CredentialsPage() {
   const credentials = data?.credentials ?? [];
   const expiryWindow = data?.expiry_window_seconds ?? 0;
   const expirySecondaryWindow = data?.expiry_secondary_window_seconds ?? 0;
+  const tokenWarning = data?.token_expiry_warning_seconds ?? 0;
   const isAdmin = data?.is_admin ?? false;
   const now = Date.now() / 1000;
 
@@ -405,6 +408,7 @@ export function CredentialsPage() {
                   now={now}
                   expiryWindow={expiryWindow}
                   expirySecondaryWindow={expirySecondaryWindow}
+                  tokenWarning={tokenWarning}
                   isAdmin={isAdmin}
                   busy={busy}
                   confirming={confirmDelete === credential.id}
@@ -557,11 +561,54 @@ function ModelCooldownList({ credential, now }: { credential: Credential; now: n
   );
 }
 
+/**
+ * access token 到期展示（B3.3）。
+ *
+ * 为什么同时给「剩余」和「最后续期」：只剩 3 天看起来像快挂了，但如果两分钟前
+ * 刚续期过，那其实是刚拿到的 30 天里剩下的部分；反过来只剩 3 天且最后续期是
+ * 十天前，才是真的没人管。单看剩余天数会把这两种情况读反，两个一起给才读得对。
+ *
+ * 进度条量纲是 token 自己的寿命（`exp - iat`）；拿不到 iat 时不画条，只给数字。
+ * 到期时间未知（后端 0）时整块不渲染：渠道没给到期信息不等于马上过期。
+ */
+function TokenExpiry({
+  credential,
+  view,
+}: {
+  credential: Credential;
+  view: TokenExpiryView;
+}) {
+  if (view.remaining === null) return null;
+  const barTone = view.tone === "danger" ? "bg-destructive"
+    : view.tone === "warn" ? "bg-warn"
+    : "bg-ok";
+  return (
+    <div className="mt-1" data-testid={`token-expiry-${credential.id}`}>
+      {view.percent !== null && (
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+          <div
+            className={`h-full rounded-full transition-all ${barTone}`}
+            style={{ width: `${view.percent}%` }}
+            data-testid={`token-expiry-bar-${credential.id}`}
+          />
+        </div>
+      )}
+      <div className={view.expiring ? "text-destructive" : "text-muted-foreground"}>
+        token {view.remaining <= 0 ? "已过期" : `剩余 ${view.label}`}
+        {view.expiring && view.remaining > 0 && "，即将到期"}
+        {credential.token_issued_at > 0 &&
+          ` · 最后续期 ${formatTime(credential.token_issued_at)}`}
+      </div>
+    </div>
+  );
+}
+
 function Row({
   credential,
   now,
   expiryWindow,
   expirySecondaryWindow,
+  tokenWarning,
   isAdmin,
   busy,
   confirming,
@@ -572,6 +619,7 @@ function Row({
   now: number;
   expiryWindow: number;
   expirySecondaryWindow: number;
+  tokenWarning: number;
   isAdmin: boolean;
   busy: boolean;
   confirming: boolean;
@@ -592,6 +640,8 @@ function Row({
   const health = healthView(credential.health);
   const state = credentialState(credential, now);
   const cooldown = cooldownRemaining(credential.cooling_until, now);
+  const tokenExpiry = tokenExpiryView(
+    credential.token_expires_at, credential.token_issued_at, tokenWarning, now);
 
   return (
     <TableRow data-testid={`row-${credential.id}`}>
@@ -644,6 +694,7 @@ function Row({
         <div className="text-muted-foreground">
           探测于 {formatTime(credential.quota_probed_at)}
         </div>
+        <TokenExpiry credential={credential} view={tokenExpiry} />
       </TableCell>
       <TableCell className="text-xs text-muted-foreground">
         {credential.growth_last_result ? (

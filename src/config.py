@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     # 对话进行中不换号（避免上游风控与丢失上游提示词缓存）；凭证出错仍会
     # 正常轮换，成功后重新粘定。≤0 关闭粘性
     conversation_sticky_seconds: int = 3600
+    # token 到期预警阈值（秒）：access token 剩余时间低于该值时管理台标红。
+    # 展示阈值，不参与调度；与 REFRESH_SKEW_HOURS 分开——预刷新窗口是「何时
+    # 续期」，这里是「何时该看」。
+    token_expiry_warning_seconds: int = 3600
 
     # 后台任务
     quota_probe_minutes: int = 60

@@ -18,7 +18,9 @@ SCHEMA_NAME = "schema.sql"
 # 当前 schema 版本。新增列/表、删表时 +1，并在下方对应元组里补增量。
 # 10：新增 runtime_settings 表（B3.2 运行时配置热更新）。新增表只需进
 # schema.sql（CREATE TABLE IF NOT EXISTS 对老库同样生效），无需迁移动作。
-SCHEMA_VERSION = 10
+# 11：credentials 新增 token_expires_at / token_issued_at（B3.3
+# token 到期展示与预警）。
+SCHEMA_VERSION = 11
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -39,6 +41,10 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # 额度包明细（展示用，含包名）：与选号指标 quota_expiry_ladder 分开，
     # 避免为管理台展示改动调度排序行为
     ("credentials", "quota_packages TEXT"),
+    # access token 签发/到期时间（B3.3）：上游显式 expires_at 缺失时回落
+    # JWT 的 iat/exp；NULL=老库未回填（列表读到按需派生），0=确实未知
+    ("credentials", "token_expires_at INTEGER"),
+    ("credentials", "token_issued_at INTEGER"),
 )
 
 # 已废弃的表：schema.sql 里已删定义，但老库里可能还留着，必须显式清理。

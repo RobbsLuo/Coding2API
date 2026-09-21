@@ -60,6 +60,10 @@ export interface Credential {
   /** 生效中的模型级冷却（模型级限流/负缓存）；无则为空数组 */
   model_cooldowns: ModelCooldown[];
   quota_probed_at: number | null;
+  /** access token 到期 epoch（秒）；0 = 未知（渠道没给到期信息，也可能是 JWT 不可解析） */
+  token_expires_at: number;
+  /** access token 签发 epoch（秒，JWT iat）；0 = 未知。进度条满量程 = 它到到期时间的间隔 */
+  token_issued_at: number;
   /** 成长中心最近一轮执行时间（仅 CodeBuddy；老库升级前为 null） */
   growth_last_run_at: number | null;
   /** 该轮一行中文汇报 */
@@ -171,6 +175,8 @@ export interface CredentialsResponse {
   expiry_window_seconds: number;
   /** 调度次到期排序窗口（秒）；主窗口打平时才参与排序 */
   expiry_secondary_window_seconds: number;
+  /** token 到期预警阈值（秒）：剩余低于它时前端标红 */
+  token_expiry_warning_seconds: number;
   viewer: string;
   is_admin: boolean;
 }

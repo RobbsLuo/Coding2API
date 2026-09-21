@@ -12,7 +12,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from ..auth.api_key import digest_api_key, generate_api_key, preview_api_key
-from ..db.crypto import CredentialCipher
+from ..db.crypto import CredentialCipher, CredentialDecryptError
 from ..engine.scheduler import (
     Candidate,
     ErrorOutcome,
@@ -21,6 +21,7 @@ from ..engine.scheduler import (
     expiry_windows,
 )
 from ..provider.base import Quota, health_score
+from ..provider.token_expiry import credential_token_times
 
 
 def _new_id(prefix: str) -> str:
@@ -73,6 +74,24 @@ def _packages_value(text: str | None) -> list[dict[str, Any]] | None:
     return [item for item in items if isinstance(item, dict)]
 
 
+def _token_times_from_blob(
+    data_enc: bytes | None, cipher: CredentialCipher,
+) -> tuple[int, int]:
+    """从凭证密文派生 `(签发, 到期)`；解密/解析失败返回 (0, 0)。
+
+    老库升级后两列都为 NULL：本列写回前不做一次性回填（解密全池会拖慢启动），
+    改在列表读到时按需派生。写回后（导入 / 预刷新 / 账号切换）直接走列值，
+    不再解密，避免每次列表都付一次密码学开销。
+    """
+    if not data_enc:
+        return 0, 0
+    try:
+        data = json.loads(cipher.decrypt(data_enc).decode("utf-8"))
+    except (CredentialDecryptError, ValueError, UnicodeDecodeError):
+        return 0, 0
+    return credential_token_times(data) if isinstance(data, dict) else (0, 0)
+
+
 class CredentialRepository:
     def __init__(self, db, cipher: CredentialCipher) -> None:
         self._db = db
@@ -84,12 +103,14 @@ class CredentialRepository:
             added_by: str = "", now: int | None = None) -> str:
         credential_id = _new_id("cred")
         payload = json.dumps(credential_data, ensure_ascii=False).encode("utf-8")
+        created = int(now if now is not None else time.time())
+        issued_at, expires_at = credential_token_times(credential_data)
         with self._db.transaction() as conn:
             conn.execute(
-                "INSERT INTO credentials (id, provider, nickname, data_enc, created_at, added_by) "
-                "VALUES (?,?,?,?,?,?)",
+                "INSERT INTO credentials (id, provider, nickname, data_enc, created_at, added_by, "
+                "token_expires_at, token_issued_at) VALUES (?,?,?,?,?,?,?,?)",
                 (credential_id, provider, nickname, self._cipher.encrypt(payload),
-                 int(now if now is not None else time.time()), added_by),
+                 created, added_by, expires_at, issued_at),
             )
         return credential_id
 
@@ -194,10 +215,23 @@ class CredentialRepository:
         return {row["model"]: row["cooling_until"] for row in rows}
 
     def save_credential_data(self, credential_id: str, credential_data: dict) -> None:
+        """写回凭证 JSON，并同步 access token 的签发/到期时间。
+
+        两个值都由凭证 JSON 派生（显式 `expires_at` 优先，回落 JWT 的 `iat`/`exp`）：
+        上游没给到期信息时写 0（未知），管理台据此隐藏进度条，而不是显示假到期。
+
+        为什么必须同时给签发时间：剩余天数会被刷新拉满，单看「还剩几天」会把
+        「刚续期」读成「永远不会过期」；而且进度条需要一个满量程，只有 token
+        自己的寿命（`exp - iat`）才是对的量纲，拿固定值会把 50 天的 token 画成
+        永远满格。签发时间取 JWT 的 `iat`（上游不会单独回传），拿不到就是 0。
+        """
         payload = json.dumps(credential_data, ensure_ascii=False).encode("utf-8")
+        issued_at, expires_at = credential_token_times(credential_data)
         with self._db.transaction() as conn:
-            conn.execute("UPDATE credentials SET data_enc = ? WHERE id = ?",
-                         (self._cipher.encrypt(payload), credential_id))
+            conn.execute(
+                "UPDATE credentials SET data_enc = ?, token_expires_at = ?, "
+                "token_issued_at = ? WHERE id = ?",
+                (self._cipher.encrypt(payload), expires_at, issued_at, credential_id))
 
     def save_quota(self, credential_id: str, quota: Quota) -> None:
         with self._db.transaction() as conn:
@@ -292,13 +326,17 @@ class CredentialRepository:
         附 `quota_expiry_ladder`（套餐到期阶梯，[[epoch, 剩余积分]]，仅 CodeBuddy）；
         渠道无到期信息（TRAE）三者都为 None，展示层据此隐藏。
         附 `model_cooldowns`（model → 截止 epoch），只在模型级限流/负缓存时非空。
+        附 `token_expires_at` / `token_issued_at`（B3.3 token 到期展示）：只下发
+        绝对 epoch，剩余时间与预警阈值判定交给展示层用同一个时钟现算——否则
+        服务端算好的「剩余秒数」不会随页面 tick 更新，两处口径还会漂移。
+        到期时间未知时为 0（展示层隐藏，绝不当成已过期）。
         """
         now = int(now or time.time())
         rows = self._db.connect().execute(
             "SELECT id, provider, nickname, enabled, disabled, disabled_reason, pinned, "
             "health, cooling_until, err_count, quota_remaining, quota_total, quota_cycle_end, "
             "quota_probed_at, growth_last_run_at, growth_last_result, created_at, added_by, "
-            "quota_expiry_ladder, quota_packages "
+            "quota_expiry_ladder, quota_packages, data_enc, token_expires_at, token_issued_at "
             "FROM credentials ORDER BY created_at").fetchall()
         cooling_rows = self._db.connect().execute(
             "SELECT credential_id, model, cooling_until, hits, reason "
@@ -311,6 +349,16 @@ class CredentialRepository:
         out: list[dict[str, Any]] = []
         for row in rows:
             rec = dict(row)
+            # data_enc 只用于派生 token 时间，绝不进响应
+            data_enc = rec.pop("data_enc", None)
+            # NULL = 老库升级后从未写回（按需从密文派生）；0 = 已写回但确实未知，
+            # 不重复解密（否则每刷新一次列表就为同一批无从得知的凭证白解一遍）。
+            if row["token_expires_at"] is None:
+                issued_at, expires_at = _token_times_from_blob(data_enc, self._cipher)
+            else:
+                issued_at, expires_at = row["token_issued_at"] or 0, row["token_expires_at"]
+            rec["token_expires_at"] = expires_at
+            rec["token_issued_at"] = issued_at
             ladder = _ladder_value(row["quota_expiry_ladder"])
             rec["quota_expiry_ladder"] = ladder
             rec["quota_packages"] = _packages_value(row["quota_packages"])

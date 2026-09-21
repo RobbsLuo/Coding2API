@@ -124,6 +124,25 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 与状态列的「已禁用」不同——那是渠道判定会话失效后的系统禁用，需要重新登录后用
 「恢复」解除。同一个开关也存在于 `POST /api/credentials/{id}/toggle`。
 
+### token 到期展示
+
+凭证列表的额度列给每个账号画一条 access token 剩余时间进度条，并标注**最后续期
+时间**和到期预警。两者必须一起看：只剩 3 天看着像快挂了，但如果两分钟前刚续期，那只是
+刚拿到的新 token 里剩下的部分；反过来只剩 3 天且续期是十天前，才是真的没人管。
+只看剩余天数会把这两种情况读反。
+
+到期时间优先取上游显式给的 `expires_at`，缺失时回落到 access token 的 JWT `exp`——
+**实测 CodeBuddy 的 token 响应（OAuth 登录与刷新）不带任何到期字段**，只看 `expires_at`
+会恒为 0，这里正是靠 JWT 回落补上的（否则 CodeBuddy 的 token 预刷新永远不会触发，
+只能等过期后被上游 401 硬禁用）。最后续期时间取 JWT 的 `iat`。
+
+进度条的满量程是 **token 自己的寿命**（`exp - iat`），不是固定窗口：实测 CodeBuddy 的
+token 寿命 50+ 天、TRAE 约 12 天，用固定量程会把前者永远画成满格，看不出消耗。拿不到
+`iat` 时不画条、只给数字。
+
+两边都拿不到时显示为未知并隐藏整块，**不猜本地 TTL**——否则管理台会显示一个凭空捏造的
+到期预警。剩余时间低于 `TOKEN_EXPIRY_WARNING_SECONDS`（默认 1 小时）时标红。
+
 ## 后台任务
 
 额度探测、token 预刷新、每日签到、成长中心、明细清理由 `TaskRunner` 自动调度（失败互不影响），周期见 TECHNICAL.md §6.1。
@@ -180,7 +199,8 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `CODEBUDDY_ALLOWED_ENDPOINTS` | 官方两站（见 compose） | 上游端点白名单，真实 Token 只发往白名单内地址 |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CodeBuddy 聊天最小间隔（秒），与 TRAE 共享节流；`0` 关闭 |
 | `CODEBUDDY_SANITIZE_CHANNEL_MARKERS` | `true` | 出站 `system`/`assistant` 正文命中「伪装其他厂商官方客户端」指纹串时替换为占位符（上游 11128 内容风控：换号无效、会话带入即持续报错）；只改出站副本，客户端历史不受影响；`false` 关闭（见 TECHNICAL.md §3.2） |
-| `REFRESH_SKEW_HOURS` | `24` | token 到期前该小时数窗口内预刷新 |
+| `REFRESH_SKEW_HOURS` | `24` | token 到期前该小时数窗口内预刷新。到期时间取凭证显式 `expires_at`，缺失时回落 access token 的 JWT `exp`（CodeBuddy 实测不带显式到期字段） |
+| `TOKEN_EXPIRY_WARNING_SECONDS` | `3600` | 管理台 token 到期预警阈值：剩余低于该值时标红；`≤0` 关闭预警（仍显示剩余时间）。纯展示，不参与调度 |
 | `PACER_MIN_SECONDS` / `PACER_MAX_SECONDS` | `5` / `20` | 全局节流器随机等待区间（秒） |
 | `LOG_LEVEL` | `INFO` | 日志级别；审计日志是 INFO 级，调到 `WARNING` 会一并关掉 |
 | `DUMP_REQUEST_BODIES` | `false` | 诊断：把 `/v1` 原始请求体落盘到 `data/dumps/`（**含对话内容**，仅排查用） |

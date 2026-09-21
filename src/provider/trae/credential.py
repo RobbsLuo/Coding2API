@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from ..token_expiry import credential_expiry
 from .events import UpstreamProtocolViolation
 
 
@@ -25,11 +26,21 @@ class TraeCredential:
     enterprise_id: str = ""
     nickname: str = ""
 
+    def token_expires_at(self) -> int:
+        """access token 到期 epoch（秒）：显式 expiresAt 缺失时回落 JWT `exp`。
+
+        与 CodeBuddy 同一套回落（TRAE 的 expiresAt 实测一直是真实值，
+        这里只在导入脏凭证/上游省略该字段时兜底）。
+        """
+        return credential_expiry(self.to_dict())
+
     def needs_refresh(self, skew_seconds: int, now: int | None = None) -> bool:
-        if self.expires_at <= 0:
+        # 到期未知 → True（保守刷新；见 test_credential_needs_refresh）
+        expires_at = self.token_expires_at()
+        if expires_at <= 0:
             return True
         current = int(now if now is not None else time.time())
-        return current + skew_seconds >= self.expires_at
+        return current + skew_seconds >= expires_at
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -46,6 +57,9 @@ class TraeCredential:
             uid=str(raw.get("uid") or ""),
             access_token=str(raw.get("accessToken") or raw.get("access_token") or ""),
             refresh_token=str(raw.get("refreshToken") or raw.get("refresh_token") or ""),
+            # 只存上游显式给出的 expiresAt；JWT 派生值走 token_expires_at()，
+            # 不落回 JSON——否则刷新换到新 token 后旧派生值会残留成「权威」到期
+            # （与 CodeBuddy 同一纪律，两个渠道该字段的语义必须一致）。
             expires_at=int(raw.get("expiresAt") or raw.get("expires_at") or 0),
             domain=str(raw.get("domain") or "trae.cn"),
             api_host=str(raw.get("apiHost") or raw.get("api_host") or ""),

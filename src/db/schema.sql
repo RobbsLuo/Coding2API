@@ -40,6 +40,8 @@ CREATE TABLE IF NOT EXISTS credentials (
     quota_expiry_ladder TEXT,                      -- 到期阶梯 JSON [[epoch, 剩余积分]]；TRAE 为 NULL
     quota_packages   TEXT,                      -- 额度包明细 JSON [{"name","total","used","end"}]，仅展示
     quota_probed_at  INTEGER,
+    token_expires_at INTEGER,                   -- access token 到期 epoch；NULL=老库未回填，0=未知
+    token_issued_at  INTEGER,                   -- access token 签发 epoch（JWT iat）：进度条满量程与「最后续期」
     growth_last_run_at INTEGER,                    -- 成长中心最近一轮执行时间（仅 CodeBuddy）
     growth_last_result TEXT,                       -- 该轮一行中文汇报
     created_at       INTEGER NOT NULL,

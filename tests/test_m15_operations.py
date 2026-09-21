@@ -3703,3 +3703,364 @@ def test_credentials_endpoint_exposes_model_cooldowns(tmp_path):
                                      hits=1, reason="model")}))
         rows = client.get("/api/credentials").json()["credentials"]
     assert [row["model"] for row in rows[0]["model_cooldowns"]] == ["glm-5.2"]
+
+
+# --------------------------------------------------------------- B3.3 token 到期
+
+
+def _jwt(exp: int, *, iat: int | None = None,
+         header: dict | None = None, payload_extra: dict | None = None) -> str:
+    """构造测试用 JWT（不签名；本地只解码不验签）。"""
+    body: dict = {"exp": exp}
+    if iat is not None:
+        body["iat"] = iat
+    body.update(payload_extra or {})
+    return f"{_b64(header or {'alg': 'RS256', 'typ': 'JWT'})}.{_b64(body)}.sig"
+
+
+def _b64(obj: object) -> str:
+    """base64url 编码任意可 JSON 序列化对象（含数组，用于负例）。"""
+    import base64
+
+    return base64.urlsafe_b64encode(json.dumps(obj).encode("utf-8")).decode("ascii").rstrip("=")
+
+
+def test_jwt_expiry_decodes_exp():
+    """JWT payload 的 exp 是可用的到期来源；非 JWT / 坏结构一律 0。"""
+    from src.provider.token_expiry import jwt_expiry
+
+    assert jwt_expiry(_jwt(1794389367)) == 1794389367
+    # 毫秒时间戳归一
+    assert jwt_expiry(_jwt(1794389367000)) == 1794389367
+    # 非 JWT、段数不足、payload 非 base64、payload 非对象、exp 非法
+    assert jwt_expiry("not-a-jwt") == 0
+    assert jwt_expiry("a.b") == 0
+    assert jwt_expiry("h.!!!.s") == 0
+    # payload 是合法 base64 但不是 JSON 对象（数组）→ 0
+    assert jwt_expiry(f"h.{_b64([1, 2])}.s") == 0
+    assert jwt_expiry(_jwt(0)) == 0
+    assert jwt_expiry(_jwt(True)) == 0
+    assert jwt_expiry(_jwt("soon")) == 0      # type: ignore[arg-type]
+    assert jwt_expiry(12345) == 0             # type: ignore[arg-type]
+    # 缺 payload 段（"a..c"）也要挡住，不能把空串当 JSON 解
+    assert jwt_expiry("a..c") == 0
+
+
+def test_jwt_times_decodes_iat_and_exp():
+    """`(iat, exp)` 一起取：进度条要 iat 当满量程，缺它就只能退化（见 display）。"""
+    from src.provider.token_expiry import jwt_times
+
+    token = _jwt(1794389367, iat=1793189367)
+    assert jwt_times(token) == (1793189367, 1794389367)
+    # iat 缺失 / 非法 → 0（而 exp 照常给），两者互不拖累
+    assert jwt_times(_jwt(1794389367)) == (0, 1794389367)
+    assert jwt_times(_jwt(1794389367, iat=0)) == (0, 1794389367)
+    assert jwt_times(_jwt(1794389367, iat=True)) == (0, 1794389367)
+    assert jwt_times(_jwt(1794389367, iat="x")) == (0, 1794389367)  # type: ignore[arg-type]
+    # 毫秒时间戳归一（两个 claim 各自归一）
+    assert jwt_times(_jwt(1794389367000, iat=1793189367000)) == (1793189367, 1794389367)
+    # 非 JWT / 坏结构 → (0, 0)
+    assert jwt_times("not-a-jwt") == (0, 0)
+    assert jwt_times("a..c") == (0, 0)
+    assert jwt_times(f"h.{_b64([1, 2])}.s") == (0, 0)
+    assert jwt_times(12345) == (0, 0)         # type: ignore[arg-type]
+
+
+
+def test_credential_expiry_prefers_explicit_then_jwt():
+    """显式 expires_at 优先；缺失才回落 JWT exp；两者都没有 → 0（未知）。"""
+    from src.provider.token_expiry import credential_expiry
+
+    token = _jwt(1794389367)
+    assert credential_expiry({"expires_at": 100}) == 100
+    assert credential_expiry({"expiresAt": 200}) == 200
+    # 显式值为 0 / 非数字 → 视作缺失，回落 JWT
+    assert credential_expiry({"expires_at": 0, "bearer_token": token}) == 1794389367
+    assert credential_expiry({"expires_at": True, "accessToken": token}) == 1794389367
+    assert credential_expiry({"access_token": token}) == 1794389367
+    assert credential_expiry({"token": token}) == 1794389367
+    # 无任何 token / 键值类型不对 → 0，绝不猜本地 TTL
+    assert credential_expiry({}) == 0
+    assert credential_expiry({"bearer_token": None}) == 0
+    assert credential_expiry({"bearer_token": "plain-token"}) == 0
+    assert credential_expiry([]) == 0         # type: ignore[arg-type]
+
+
+def test_credential_token_times_pairs_issued_with_expiry():
+    """签发时间只来自 JWT `iat`：上游不单独回传，拿不到就是 0（绝不拿回填时刻冒充）。"""
+    from src.provider.token_expiry import credential_token_times
+
+    token = _jwt(1794389367, iat=1793189367)
+    # 显式 expires_at 优先；iat 仍从 JWT 取（两者不同源，各取所长）
+    assert credential_token_times(
+        {"expires_at": 100, "bearer_token": token}) == (1793189367, 100)
+    assert credential_token_times(
+        {"expiresAt": 200, "accessToken": token}) == (1793189367, 200)
+    # 无显式值 → 到期回落 JWT exp
+    assert credential_token_times({"bearer_token": token}) == (1793189367, 1794389367)
+    # 无 iat 的 JWT：到期照给，签发时间未知 → 0
+    assert credential_token_times({"bearer_token": _jwt(42)}) == (0, 42)
+    # 非 JWT 的明文 token / 没有 token 字段 → 全 0（不猜）
+    assert credential_token_times({"bearer_token": "plain"}) == (0, 0)
+    assert credential_token_times({"expires_at": 7}) == (0, 7)
+    assert credential_token_times({"bearer_token": None}) == (0, 0)
+    assert credential_token_times([]) == (0, 0)   # type: ignore[arg-type]
+    # 高优先键是明文、低优先键才是 JWT → 继续找，别丢签发时间
+    assert credential_token_times(
+        {"bearer_token": "plain", "token": token}) == (1793189367, 1794389367)
+    # 高优先键是坏 JWT 也一样跳过
+    assert credential_token_times(
+        {"bearer_token": _jwt(0), "access_token": token}) == (1793189367, 1794389367)
+
+
+
+def test_codebuddy_token_expiry_falls_back_to_jwt():
+    """实测 CB 的 token 响应不带到期字段：必须回落到 JWT exp，否则预刷新永不触发。"""
+    token = _jwt(int(time.time()) + 50 * 86400)
+    credential = CodeBuddyCredential.from_dict(
+        {"bearer_token": token, "refresh_token": "r", "auth_source": "oauth"})
+    assert credential.expires_at == 0                       # JSON 里确实没有显式值
+    assert credential.token_expires_at() == jwt_expiry_of(token)
+    # 预刷新：进入 24h 窗口才 True，早于此 False（修复前恒 False）
+    assert credential.needs_refresh(24 * 3600) is False
+    assert credential.needs_refresh(50 * 86400) is True
+    # 显式 expires_at 仍然优先于 JWT
+    explicit = CodeBuddyCredential.from_dict(
+        {"bearer_token": token, "refresh_token": "r", "expires_at": 12345})
+    assert explicit.token_expires_at() == 12345
+
+
+def test_codebuddy_token_expiry_unknown_is_not_expired():
+    """拿不到到期时间 → 过期未知，不刷新（none 分支），绝不猜本地 TTL。"""
+    credential = CodeBuddyCredential.from_dict(
+        {"bearer_token": "plain", "refresh_token": "r", "auth_source": "oauth"})
+    assert credential.token_expires_at() == 0
+    assert credential.needs_refresh(0) is False
+    # bearer-only 手动凭证永不刷新（AGENTS.md），即便 token 里带 exp
+    manual = CodeBuddyCredential.from_dict({"bearer_token": _jwt(1), "refresh_token": "r"})
+    assert manual.needs_refresh(999_999_999) is False
+
+
+def test_trae_token_expiry_summary_and_jwt_fallback():
+    """TRAE 侧同一口径：`expires_at` 只存显式值，缺失时由派生方法回落 JWT exp。"""
+    from src.provider.trae.credential import TraeCredential
+
+    token = _jwt(int(time.time()) + 10 * 86400)
+    plain = TraeCredential.from_dict({"accessToken": token, "expiresAt": 0})
+    # 显式字段缺失/为 0 → 仍存 0（JWT 派生值不进字段，避免写回后变「权威」）
+    assert plain.expires_at == 0
+    assert plain.token_expires_at() > time.time() + 9 * 86400
+    explicit = TraeCredential.from_dict({"accessToken": token, "expiresAt": 12345})
+    assert explicit.expires_at == 12345
+    # 刷新写回时 to_dict() 只带显式值，JWT 派生值不会残留在 JSON 里
+    assert plain.to_dict()["expiresAt"] == 0
+    # 完全拿不到到期时间：TRAE 保守刷新（既有契约）
+    unknown = TraeCredential.from_dict({"accessToken": "plain-token"})
+    assert unknown.expires_at == 0
+    assert unknown.token_expires_at() == 0
+    assert unknown.needs_refresh(3600) is True
+
+
+def jwt_expiry_of(token: str) -> int:
+    from src.provider.token_expiry import jwt_expiry
+
+    return jwt_expiry(token)
+
+
+def test_repo_persists_token_times_on_add_and_save(tmp_path):
+    """add / save_credential_data 都写回 token_expires_at 与 token_issued_at。"""
+    db = Database(tmp_path / "t.sqlite3")
+    apply_schema(db.connect())
+    credentials = CredentialRepository(db, CredentialCipher(SECRET))
+    now = int(time.time())
+    token = _jwt(now + 30 * 86400, iat=now)
+    cid = credentials.add(provider="codebuddy",
+                          credential_data={"bearer_token": token}, now=now)
+    stored = db.connect().execute(
+        "SELECT token_expires_at, token_issued_at FROM credentials WHERE id = ?",
+        (cid,)).fetchone()
+    assert tuple(stored) == (now + 30 * 86400, now)
+    # 刷新写回：两个时间一并推进（旧值被替换，不残留成「权威」到期）
+    rotated = _jwt(now + 60 * 86400 + 100, iat=now + 100)
+    credentials.save_credential_data(cid, {"bearer_token": rotated})
+    assert tuple(db.connect().execute(
+        "SELECT token_expires_at, token_issued_at FROM credentials WHERE id = ?",
+        (cid,)).fetchone()) == (now + 60 * 86400 + 100, now + 100)
+    # 上游没给任何到期信息 → 写 0（未知），不得猜本地 TTL
+    unknown = credentials.add(provider="codebuddy",
+                              credential_data={"bearer_token": "plain"}, now=now)
+    assert tuple(db.connect().execute(
+        "SELECT token_expires_at, token_issued_at FROM credentials WHERE id = ?",
+        (unknown,)).fetchone()) == (0, 0)
+    db.close()
+
+
+def test_list_all_derives_token_times_from_legacy_rows(tmp_path):
+    """老库升级后两列为 NULL：列表读到时按需从密文派生。"""
+    db = Database(tmp_path / "t.sqlite3")
+    apply_schema(db.connect())
+    credentials = CredentialRepository(db, CredentialCipher(SECRET))
+    now = int(time.time())
+    token = _jwt(now + 5 * 86400, iat=now)
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": token},
+                          now=now)
+    # 模拟升级前写入的行：两列都清空（迁移只加列，不回填）
+    db.connect().execute(
+        "UPDATE credentials SET token_expires_at = NULL, token_issued_at = NULL WHERE id = ?",
+        (cid,))
+    db.connect().commit()
+    row = credentials.list_all(now=now)[0]
+    assert row["token_expires_at"] == now + 5 * 86400
+    assert row["token_issued_at"] == now
+    # data_enc 绝不进响应
+    assert "data_enc" not in row
+    db.close()
+
+
+
+def test_list_all_token_expiry_unknown_stays_zero(tmp_path):
+    """到期时间未知写 0：只下发绝对值，剩余时间与预警由前端同一时钟现算。"""
+    db = Database(tmp_path / "t.sqlite3")
+    apply_schema(db.connect())
+    credentials = CredentialRepository(db, CredentialCipher(SECRET))
+    now = int(time.time())
+    known = credentials.add(provider="codebuddy",
+                            credential_data={"bearer_token": _jwt(now + 600)}, now=now)
+    unknown = credentials.add(provider="codebuddy",
+                              credential_data={"bearer_token": "plain"}, now=now)
+    rows = {row["id"]: row for row in credentials.list_all(now=now)}
+    assert rows[known]["token_expires_at"] == now + 600
+    # 未知 = 0，展示层据此隐藏（绝不当成已过期）
+    assert rows[unknown]["token_expires_at"] == 0
+    assert rows[unknown]["token_issued_at"] == 0
+    # 列表只给绝对值，不替前端算剩余时间（服务端算好的不会随 tick 更新）
+    assert "token_remaining_seconds" not in rows[known]
+    assert "token_expiring" not in rows[known]
+    db.close()
+
+
+def test_token_times_from_blob_tolerates_bad_ciphertext(tmp_path):
+    """密文损坏 / 空值不得让列表整体崩掉（返回 (0, 0) = 未知）。"""
+    from src.db.crypto import CredentialCipher
+    from src.db.repo import _token_times_from_blob
+
+    cipher = CredentialCipher(SECRET)
+    assert _token_times_from_blob(None, cipher) == (0, 0)
+    assert _token_times_from_blob(b"", cipher) == (0, 0)
+    assert _token_times_from_blob(b"not-a-fernet-token", cipher) == (0, 0)
+    # 解密成功但内容不是 JSON 对象
+    assert _token_times_from_blob(cipher.encrypt(b"[1, 2]"), cipher) == (0, 0)
+    assert _token_times_from_blob(cipher.encrypt(b"not json"), cipher) == (0, 0)
+    # 正常载荷：两列一起给出
+    payload = json.dumps({"bearer_token": _jwt(200, iat=100)}).encode("utf-8")
+    assert _token_times_from_blob(cipher.encrypt(payload), cipher) == (100, 200)
+
+
+
+def test_credentials_endpoint_exposes_token_expiry(tmp_path):
+    """端到端：/api/credentials 下发 token 签发/到期秒数与预警阈值。"""
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root", TOKEN_EXPIRY_WARNING_SECONDS=7200)
+    app = build_app(settings)
+    with TestClient(app) as client:
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+        repo = app.state.credentials
+        now = int(time.time())
+        repo.add(provider="codebuddy",
+                 credential_data={"bearer_token": _jwt(now + 600, iat=now)}, now=now)
+        repo.add(provider="trae", credential_data={"accessToken": "plain"}, now=now)
+        body = client.get("/api/credentials").json()
+    assert body["token_expiry_warning_seconds"] == 7200
+    rows = {row["provider"]: row for row in body["credentials"]}
+    assert rows["codebuddy"]["token_expires_at"] > now
+    assert rows["codebuddy"]["token_issued_at"] == now
+    # 未知到期下发 0（展示层隐藏），不是 0 之外的哨兵值
+    assert rows["trae"]["token_expires_at"] == 0
+    assert rows["trae"]["token_issued_at"] == 0
+
+
+def test_refresh_task_refreshes_codebuddy_without_explicit_expiry(tmp_path):
+    """回归：CB 凭证只有 JWT exp 时也要被预刷新（修复前 needs_refresh 恒 False）。
+
+    这是 B3.3 顺带修掉的真实故障：token 到期后上游 401 → DEAD 硬禁用，
+    而 revive 不会补刷新，凭证无法自愈。
+    """
+    import asyncio
+
+    from src.tasks.refresh import RefreshTask
+
+    db = Database(tmp_path / "t.sqlite3")
+    apply_schema(db.connect())
+    credentials = CredentialRepository(db, CredentialCipher(SECRET))
+    now = int(time.time())
+    expiring = credentials.add(provider="codebuddy", now=now, credential_data={
+        "bearer_token": _jwt(now + 3600), "refresh_token": "r", "auth_source": "oauth"})
+    fresh = credentials.add(provider="codebuddy", now=now, credential_data={
+        "bearer_token": _jwt(now + 40 * 86400), "refresh_token": "r",
+        "auth_source": "oauth"})
+    unknown = credentials.add(provider="codebuddy", now=now, credential_data={
+        "bearer_token": "plain", "refresh_token": "r", "auth_source": "oauth"})
+
+    refreshed_ids: list[str] = []
+
+    class Provider:
+        id = "codebuddy"
+
+        def credential_from(self, data):
+            return CodeBuddyCredential.from_dict(data)
+
+        async def refresh(self, data):
+            refreshed_ids.append(data["bearer_token"])
+            return {"bearer_token": _jwt(now + 90 * 86400, iat=now), "refresh_token": "r",
+                    "auth_source": "oauth"}
+
+    task = RefreshTask(credentials, {"codebuddy": Provider()}, skew_seconds=24 * 3600,
+                       now=lambda: now)
+    report = asyncio.run(task.run_once())
+    assert report.attempted == 1 and report.succeeded == 1
+    assert len(refreshed_ids) == 1
+    # 只有进入窗口的那条被刷新，到期时间与签发时间都推进
+    row = db.connect().execute(
+        "SELECT token_expires_at, token_issued_at FROM credentials WHERE id = ?",
+        (expiring,)).fetchone()
+    assert tuple(row) == (now + 90 * 86400, now)
+    untouched = db.connect().execute(
+        "SELECT token_expires_at FROM credentials WHERE id = ?", (fresh,)).fetchone()[0]
+    assert untouched == now + 40 * 86400
+    # 到期时间未知的凭证不刷新（未知不等于紧急，避免每轮空打上游）
+    assert db.connect().execute(
+        "SELECT token_expires_at FROM credentials WHERE id = ?",
+        (unknown,)).fetchone()[0] == 0
+    db.close()
+
+
+def test_legacy_db_upgrade_adds_token_columns(tmp_path):
+    """老库升级：credentials 无 token 两列时幂等补列。"""
+    db = Database(tmp_path / "legacy.sqlite3")
+    conn = sqlite3.connect(db.path)
+    conn.execute("""
+        CREATE TABLE credentials (
+            id TEXT PRIMARY KEY, provider TEXT NOT NULL, data_enc BLOB NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1, disabled INTEGER NOT NULL DEFAULT 0,
+            disabled_reason TEXT, pinned INTEGER NOT NULL DEFAULT 0,
+            health INTEGER, cooling_until INTEGER, err_count INTEGER NOT NULL DEFAULT 0,
+            quota_remaining REAL, quota_total REAL, quota_cycle_end INTEGER,
+            quota_probed_at INTEGER, created_at INTEGER NOT NULL, added_by TEXT)
+    """)
+    conn.commit()
+    conn.close()
+    apply_schema(db.connect())
+    columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
+    assert {"token_expires_at", "token_issued_at"} <= columns
+    # 补列后可写可读，ver 推进
+    db.connect().execute(
+        "INSERT INTO credentials (id, provider, data_enc, token_expires_at,"
+        " token_issued_at, created_at) VALUES ('cred_x', 'codebuddy', 'x', 123, 100, 1)")
+    db.connect().commit()
+    assert tuple(db.connect().execute(
+        "SELECT token_expires_at, token_issued_at FROM credentials WHERE id = 'cred_x'"
+    ).fetchone()) == (123, 100)
+    from src.db.migrate import SCHEMA_VERSION
+
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    db.close()

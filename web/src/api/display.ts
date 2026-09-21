@@ -75,6 +75,50 @@ export function cooldownRemaining(coolingUntil: number | null, now = Date.now() 
   return Math.max(0, Math.ceil(coolingUntil - now));
 }
 
+export interface TokenExpiryView {
+  /** 剩余秒数；到期时间未知（0）时为 null */
+  remaining: number | null;
+  /** 是否处于预警窗口（剩余 < 阈值；已过期为 0） */
+  expiring: boolean;
+  label: string;
+  /** 进度条宽度百分比 0-100；寿命未知（没有 iat）时为 null */
+  percent: number | null;
+  tone: "ok" | "warn" | "danger";
+}
+
+/**
+ * token 到期展示：剩余时间与预警都在前端按同一个时钟现算。
+ *
+ * 后端只给绝对 `token_expires_at` / `token_issued_at`——服务端算好的「剩余
+ * 秒数」不会随页面 tick 更新，而且阈值判定会与冷却时长各用一套口径。
+ *
+ * 进度条的量纲是 **token 自己的寿命**（`exp - iat`），不是固定窗口：
+ * CodeBuddy 的 token 实测寿命 50+ 天、TRAE 约 12 天，用固定量程会把前者永远
+ * 画成满格，看不出消耗。拿不到 iat 时 `percent` 为 null，只给数字不画条，
+ * 而不是拿一个假量程充数。
+ *
+ * `token_expires_at` 为 0 表示**未知**（渠道没给到期信息）：此时全部为 null，
+ * 展示层隐藏而非显示成已过期，否则拿不到到期时间会误报成红色预警。
+ */
+export function tokenExpiryView(
+  expiresAt: number | null | undefined,
+  issuedAt: number | null | undefined,
+  warningSeconds: number,
+  now = Date.now() / 1000,
+): TokenExpiryView {
+  if (!expiresAt || expiresAt <= 0) {
+    return { remaining: null, expiring: false, label: "—", percent: null, tone: "ok" };
+  }
+  const remaining = Math.max(0, Math.floor(expiresAt - now));
+  const expiring = warningSeconds > 0 && remaining <= warningSeconds;
+  const tone = remaining <= 0 ? "danger" : expiring ? "warn" : "ok";
+  const lifespan = issuedAt && issuedAt > 0 ? expiresAt - issuedAt : 0;
+  const percent = lifespan > 0
+    ? Math.max(0, Math.min(100, (remaining / lifespan) * 100))
+    : null;
+  return { remaining, expiring, label: formatDuration(remaining), percent, tone };
+}
+
 export type CredentialState =
   | "ready"
   | "cooling"

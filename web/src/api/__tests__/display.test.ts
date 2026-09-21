@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { expiringQuotaLabel, formatChartValue } from "../display";
+import { expiringQuotaLabel, formatChartValue, tokenExpiryView } from "../display";
 
 describe("formatChartValue", () => {
   it("请求次数：紧凑数字 + 单位（次）", () => {
@@ -40,5 +40,63 @@ describe("expiringQuotaLabel", () => {
     expect(expiringQuotaLabel(null, 604800, "secondary")).toBeNull();
     expect(expiringQuotaLabel(100, 0, "secondary")).toBeNull();
     expect(expiringQuotaLabel(0, 604800, "secondary")).toBeNull();
+  });
+});
+describe("tokenExpiryView", () => {
+  const now = 1_700_000_000;
+  const DAY = 86400;
+
+  it("到期时间未知（0）→ 全部为 null，不预警", () => {
+    const view = tokenExpiryView(0, now, 3600, now);
+    expect(view.remaining).toBeNull();
+    expect(view.expiring).toBe(false);
+    expect(view.percent).toBeNull();
+    expect(tokenExpiryView(null, now, 3600, now).remaining).toBeNull();
+    expect(tokenExpiryView(undefined, now, 3600, now).remaining).toBeNull();
+  });
+
+  it("进入阈值窗口 → 预警且 tone=warn；进度条按 token 自身寿命算", () => {
+    // 寿命 30 天，只剩 600 秒 → 几乎见底
+    const view = tokenExpiryView(now + 600, now - 30 * DAY + 600, 3600, now);
+    expect(view.remaining).toBe(600);
+    expect(view.expiring).toBe(true);
+    expect(view.tone).toBe("warn");
+    expect(view.percent).toBeCloseTo((600 / (30 * DAY)) * 100, 5);
+  });
+
+  it("阈值外不预警，tone=ok", () => {
+    const view = tokenExpiryView(now + 30 * DAY, now, 3600, now);
+    expect(view.expiring).toBe(false);
+    expect(view.tone).toBe("ok");
+    expect(view.label).toBe("30.0 天");
+    // 刚续期 → 满格
+    expect(view.percent).toBe(100);
+  });
+
+  it("已过期 → 剩余归零、tone=danger（仍算预警）", () => {
+    const view = tokenExpiryView(now - 60, now - 30 * DAY, 3600, now);
+    expect(view.remaining).toBe(0);
+    expect(view.expiring).toBe(true);
+    expect(view.tone).toBe("danger");
+    expect(view.percent).toBe(0);
+  });
+
+  it("阈值 ≤0 关闭预警（仍给剩余时间）", () => {
+    const view = tokenExpiryView(now + 600, now, 0, now);
+    expect(view.remaining).toBe(600);
+    expect(view.expiring).toBe(false);
+  });
+
+  it("拿不到签发时间 → 不画进度条（percent=null），只给剩余时间", () => {
+    // 没有 iat 就不知道 token 寿命；拿固定量程会把 50 天的 token 永远画成满格
+    expect(tokenExpiryView(now + 600, 0, 3600, now).percent).toBeNull();
+    expect(tokenExpiryView(now + 600, null, 3600, now).percent).toBeNull();
+    expect(tokenExpiryView(now + 600, undefined, 3600, now).percent).toBeNull();
+    // 签发时间晚于到期时间（脏数据）→ 寿命 ≤0，同样不画条而不是画负宽度
+    expect(tokenExpiryView(now + 600, now + 900, 3600, now).percent).toBeNull();
+  });
+
+  it("进度条上限 100%（剩余超过寿命时，如时钟偏差）", () => {
+    expect(tokenExpiryView(now + 400 * DAY, now, 3600, now).percent).toBe(100);
   });
 });

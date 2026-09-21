@@ -7,6 +7,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from ..token_expiry import credential_expiry
 from .events import UpstreamProtocolViolation
 
 
@@ -30,12 +31,28 @@ class CodeBuddyCredential:
     def is_oauth(self) -> bool:
         return self.auth_source == "oauth"
 
+    def token_expires_at(self) -> int:
+        """access token 到期 epoch（秒）：显式 expires_at 缺失时回落 JWT `exp`。
+
+        实测 CodeBuddy 的 token 响应（OAuth 登录与刷新）都不带 `expires_at` /
+        `created_at` / `expires_in`，只看 `expires_at` 会得到恒为 0 的未知值，
+        预刷新永不触发——token 过期后被上游 401 硬禁用，而 revive 不自愈。
+        """
+        return credential_expiry(self.to_dict())
+
     def needs_refresh(self, skew_seconds: int, now: int | None = None) -> bool:
-        """只有 OAuth 凭证参与刷新；bearer-only 手动凭证永不刷新（AGENTS.md）。"""
-        if not self.is_oauth or not self.refresh_token or self.expires_at <= 0:
+        """只有 OAuth 凭证参与刷新；bearer-only 手动凭证永不刷新（AGENTS.md）。
+
+        到期时间取 `token_expires_at()`（含 JWT 回落），不能直接用 `expires_at`：
+        后者对 CodeBuddy 恒为 0，会让预刷新永不触发。
+        """
+        if not self.is_oauth or not self.refresh_token:
+            return False
+        expires_at = self.token_expires_at()
+        if expires_at <= 0:
             return False
         current = int(now if now is not None else time.time())
-        return current + skew_seconds >= self.expires_at
+        return current + skew_seconds >= expires_at
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -59,6 +76,8 @@ class CodeBuddyCredential:
             enterprise_id=str(raw.get("enterprise_id") or ""),
             department_full_name=str(raw.get("department_full_name") or ""),
             refresh_token=str(raw.get("refresh_token") or ""),
+            # 只存上游显式给出的 expires_at；JWT 派生值走 token_expires_at()，
+            # 不落回 JSON——否则刷新换到新 token 后旧派生值会残留成「权威」到期。
             expires_at=int(raw.get("expires_at") or 0),
             auth_source=source if source in ("manual", "oauth") else "unknown",
             quota_probe_mode="enterprise"
