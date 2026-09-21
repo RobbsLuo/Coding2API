@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import time
 
 import pytest
 
@@ -18,11 +19,17 @@ from src.auth.users import (
 from src.config import Settings, validate_endpoint_allowed
 from src.db.crypto import CredentialCipher, CredentialDecryptError, derive_key
 from src.engine.scheduler import (
+    BLOCKED_BASE_SECONDS,
+    BLOCKED_MAX_SECONDS,
     EXPIRY_WINDOW_SECONDS,
+    MODEL_COOLDOWN_MAX_SECONDS,
+    MODEL_COOLDOWN_SECONDS,
     PLAN_COOLDOWN_SECONDS,
     SOFT_COOLDOWN_SECONDS,
     Candidate,
+    ModelCooldown,
     Scheduler,
+    next_credit_reset,
 )
 from src.provider.base import (
     EXHAUSTED,
@@ -351,3 +358,123 @@ def test_candidate_is_selectable_boundaries():
     c = cand(cooling_until=NOW + 1)
     assert not c.is_selectable(NOW)
     assert c.is_selectable(NOW + 2)
+
+
+# ------------------------------------------- 校验 1：模型级冷却与新增错误类
+
+def _with_model_cooldown(candidate, model, *, cooling_until, hits=1, reason="model"):
+    return Candidate(**{**candidate.__dict__,
+                        "model_cooldowns": {model: ModelCooldown(
+                            cooling_until=cooling_until, hits=hits, reason=reason)}})
+
+
+def test_model_cooldown_only_blocks_that_model():
+    """模型级冷却不影响同凭证的其他模型（6004 的核心语义）。"""
+    cooled = _with_model_cooldown(cand(), "glm-5.2", cooling_until=NOW + 100)
+    assert not cooled.is_selectable(NOW, "glm-5.2")
+    assert cooled.is_selectable(NOW, "kimi-k2")
+    assert cooled.is_selectable(NOW, None)          # 不传模型：只校验账号级
+    # 冷却到期后可再用
+    assert cooled.is_selectable(NOW + 101, "glm-5.2")
+
+
+def test_model_cooling_until_lookup_edges():
+    assert cand().model_cooling_until("glm-5.2") is None      # 无冷却表
+    assert cand().model_cooling_until(None) is None           # 无模型名
+    cooled = _with_model_cooldown(cand(), "glm-5.2", cooling_until=NOW + 5)
+    assert cooled.model_cooling_until("glm-5.2") == NOW + 5
+    assert cooled.model_cooling_until("other") is None        # 表里没有该模型
+
+
+def test_model_cooldown_first_hit_uses_base_duration():
+    s = Scheduler()
+    out = s.note_error(cand(), ErrKind.MODEL, NOW, model="glm-5.2")
+    entry = out.model_cooldowns["glm-5.2"]
+    assert (entry.cooling_until, entry.hits, entry.reason) == (
+        NOW + MODEL_COOLDOWN_SECONDS, 1, "model")
+    # 模型级条目不得顺带写账号级冷却
+    assert out.cooling_until is None and not out.disabled
+
+
+def test_model_cooldown_escalates_and_caps():
+    s = Scheduler()
+    existing = _with_model_cooldown(cand(), "m", cooling_until=NOW, hits=1)
+    out = s.note_error(existing, ErrKind.MODEL, NOW, model="m")
+    assert out.model_cooldowns["m"].cooling_until == NOW + 2 * MODEL_COOLDOWN_SECONDS
+    # hits 很大时封顶，不能无限翻倍
+    huge = _with_model_cooldown(cand(), "m", cooling_until=NOW, hits=99)
+    capped = s.note_error(huge, ErrKind.MODEL, NOW, model="m")
+    assert capped.model_cooldowns["m"].cooling_until == NOW + MODEL_COOLDOWN_MAX_SECONDS
+
+
+def test_model_cooldown_without_model_degrades_to_soft():
+    """流内错误没带模型名时不能写孤儿记录，退化为账号级软冷却。"""
+    out = Scheduler().note_error(cand(), ErrKind.MODEL, NOW, model=None)
+    assert out.cooling_until == NOW + SOFT_COOLDOWN_SECONDS
+    assert out.model_cooldowns is None
+
+
+def test_blocked_backoff_escalates_and_caps():
+    s = Scheduler()
+    first = s.note_error(cand(), ErrKind.BLOCKED, NOW, model="m")
+    assert first.model_cooldowns["m"].cooling_until == NOW + BLOCKED_BASE_SECONDS
+    assert first.model_cooldowns["m"].reason == "blocked"
+    second = s.note_error(
+        _with_model_cooldown(cand(), "m", cooling_until=NOW, hits=1, reason="blocked"),
+        ErrKind.BLOCKED, NOW, model="m")
+    assert second.model_cooldowns["m"].cooling_until == NOW + 2 * BLOCKED_BASE_SECONDS
+    huge = s.note_error(
+        _with_model_cooldown(cand(), "m", cooling_until=NOW, hits=99, reason="blocked"),
+        ErrKind.BLOCKED, NOW, model="m")
+    assert huge.model_cooldowns["m"].cooling_until == NOW + BLOCKED_MAX_SECONDS
+
+
+def test_model_cooldown_switching_reason_restarts_hits():
+    """限流 与 negative cache 的退避基数不同：换原因必须重新计数。"""
+    s = Scheduler()
+    limited = _with_model_cooldown(cand(), "m", cooling_until=NOW, hits=3, reason="model")
+    out = s.note_error(limited, ErrKind.BLOCKED, NOW, model="m")
+    assert out.model_cooldowns["m"] == ModelCooldown(
+        cooling_until=NOW + BLOCKED_BASE_SECONDS, hits=1, reason="blocked")
+
+
+def test_note_error_request_kind_is_zero_action():
+    """请求级错误不冷却、不累计（累计到阈值同样会冷却，等于变相惩罚）。"""
+    out = Scheduler().note_error(cand(err_count=2), ErrKind.REQUEST, NOW)
+    assert (out.cooling_until, out.err_count, out.disabled) == (None, 2, False)
+    assert out.model_cooldowns is None
+
+
+def test_note_error_credit_cools_until_next_4am():
+    """余额不足：冷却到次日签到时刻，而不是固定 12h。"""
+    out = Scheduler().note_error(cand(), ErrKind.CREDIT, NOW)
+    assert out.cooling_until == next_credit_reset(NOW)
+    assert out.cooling_until > NOW and out.err_count == 0
+
+
+@pytest.mark.parametrize(("hour", "expected_offset_days"), [
+    (0, 0),     # 凌晨 00:00：等当天签到，不必跨天
+    (3, 0),
+    (4, 1),     # 04:00 起算次日
+    (23, 1),
+])
+def test_next_credit_reset_boundaries(hour, expected_offset_days):
+    local = time.localtime(NOW)
+    today_4am = int(time.mktime((local.tm_year, local.tm_mon, local.tm_mday,
+                                 4, 0, 0, 0, 0, -1)))
+    now_at_hour = today_4am + (hour - 4) * 3600
+    expected = today_4am + expected_offset_days * 86400
+    assert next_credit_reset(now_at_hour) == expected
+
+
+def test_select_skips_model_cooled_credential_when_filtered():
+    """端到端：调用方按模型过滤后，被冷却的凭证不再被选中，换模型仍最优。"""
+    s = Scheduler()
+    a, b = cand("a", health=90), cand("b", health=10)
+    cooled_a = _with_model_cooldown(a, "glm-5.2", cooling_until=NOW + 100)
+    usable = [c for c in (cooled_a, b) if c.is_selectable(NOW, "glm-5.2")]
+    assert [c.credential_id for c in usable] == ["b"]
+    assert s.select(usable, set(), NOW) == "b"
+    # 同一份候选换模型：a 的模型级冷却不生效，健康度更高者胜出
+    usable = [c for c in (cooled_a, b) if c.is_selectable(NOW, "kimi-k2")]
+    assert s.select(usable, set(), NOW) == "a"

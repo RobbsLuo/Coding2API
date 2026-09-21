@@ -278,7 +278,7 @@ async def test_stream_disconnect_after_done_records_success():
             yield Event(kind=EventKind.FINISH, finish_reason="stop")
 
     class Creds(_FakeCredentials):
-        def save_success(self, credential_id):
+        def save_success(self, credential_id, *, model=None):
             successes.append(credential_id)
 
     executor = Executor(ExecutorDeps(
@@ -352,7 +352,7 @@ async def test_stream_done_disconnect_without_credential(monkeypatch):
             yield Event(kind=EventKind.FINISH, finish_reason="stop")
 
     class Creds(_FakeCredentials):
-        def save_success(self, credential_id):
+        def save_success(self, credential_id, *, model=None):
             successes.append(credential_id)
 
     executor = Executor(ExecutorDeps(
@@ -641,7 +641,7 @@ class _FakeCredentials:
     def credential_data(self, credential_id):
         return self.data
 
-    def save_success(self, credential_id):
+    def save_success(self, credential_id, *, model=None):
         pass
 
     def save_error(self, credential_id, outcome):  # pragma: no cover

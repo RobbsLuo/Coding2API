@@ -285,6 +285,7 @@ def test_usage_ignores_boolean_and_non_numeric_values():
 @pytest.mark.parametrize(("status", "expected"), [
     (401, ErrKind.DEAD), (403, ErrKind.DEAD), (404, ErrKind.SOFT), (429, ErrKind.SOFT),
     (500, ErrKind.OTHER), (400, ErrKind.INVALID), (200, ErrKind.OTHER),
+    (402, ErrKind.CREDIT),
 ])
 def test_classify_status(status, expected):
     assert cb_events.classify_status(status) is expected
@@ -296,6 +297,43 @@ def test_classify_body_markers():
     assert cb_events.classify_status(401, fixture("error-401.json").encode()) is ErrKind.DEAD
     assert cb_events.classify_error_code(1005) is ErrKind.PLAN
     assert cb_events.classify_error_code(500) is ErrKind.OTHER
+
+
+@pytest.mark.parametrize(("status", "body", "expected"), [
+    # 余额不足：402 或 body 里的 14018（credits exhausted）
+    (402, b'{"code": 14018, "msg": "credits exhausted"}', ErrKind.CREDIT),
+    (429, b'{"code": 14018}', ErrKind.CREDIT),
+    # 权益耗尽（1005）与余额不足是两种语义：前者 12h，后者等签到
+    (400, b'{"code": 1005}', ErrKind.PLAN),
+    # 模型级限流：429 + 6004 只冷却触发模型，不是账号级 SOFT
+    (429, b'{"code": 6004, "msg": "model quota exceeded"}', ErrKind.MODEL),
+    # 「该后端无此模型」：(账号, 模型) 负缓存
+    (400, b'{"code": 11102}', ErrKind.BLOCKED),
+    (404, b'{"code": 11102}', ErrKind.BLOCKED),
+    # 请求级错误：不罚号，仍换号（请求体坏 / 上下文超限 / 图片无效）
+    (400, b'{"code": 11101}', ErrKind.REQUEST),
+    (400, b'{"code": 500, "msg": "Unmarshal chat params failed"}', ErrKind.REQUEST),
+    (400, b'{"code": 11115, "msg": "prompt is too long"}', ErrKind.REQUEST),
+    (400, b'{"code": 11135, "msg": "Invalid image data"}', ErrKind.REQUEST),
+    # 裸数字不误伤：111020 不是 11102（要求带 "code": 键值形态）
+    (400, b'{"trace": 1110201}', ErrKind.INVALID),
+    (400, b'{"code": 111020}', ErrKind.INVALID),
+    # 嵌套信封：业务码在内层，按集合成员判断不漏
+    (400, b'{"code": 0, "data": {"code": 11102}}', ErrKind.BLOCKED),
+    (404, b"not json at all", ErrKind.SOFT),
+    (500, b'{"code": 9999}', ErrKind.OTHER),
+])
+def test_classify_status_business_codes(status, body, expected):
+    assert cb_events.classify_status(status, body) is expected
+
+
+@pytest.mark.parametrize(("code", "expected"), [
+    (14018, ErrKind.CREDIT), (6004, ErrKind.MODEL), (11102, ErrKind.BLOCKED),
+    (11101, ErrKind.REQUEST), (11115, ErrKind.REQUEST), (11135, ErrKind.REQUEST),
+    (None, ErrKind.OTHER),
+])
+def test_classify_error_code_business_codes(code, expected):
+    assert cb_events.classify_error_code(code) is expected
 
 
 # ------------------------------------------------------------- 客户端
@@ -1730,3 +1768,133 @@ def test_clean_history_tool_calls_removes_dirty_and_orphans(tmp_path):
     assert body4["messages"][0]["role"] == "assistant"
     assert body4["messages"][0]["content"] == "文本"
     assert "tool_calls" not in body4["messages"][0]
+
+
+# ------------------------------------------- 模型级冷却的端到端行为（B1.1）
+
+def _model_cooldown_rows(db):
+    return [tuple(row) for row in db.connect().execute(
+        "SELECT credential_id, model, hits, reason FROM credential_model_cooldowns"
+    ).fetchall()]
+
+
+async def test_stream_6004_cools_only_that_model(dual_repo):
+    """429 + 6004：只写 (凭证, 模型) 条目，账号级冷却保持为空。"""
+    from src.provider.base import Event
+
+    repo, db = dual_repo
+    cred_id = repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+
+    async def gen(_cred, _payload, _model):
+        yield Event(kind=EventKind.ERROR, error_code=6004, error_message="model quota")
+
+    class P:
+        id = "codebuddy"
+        stream_chat = staticmethod(gen)
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": P()}, credentials=repo,
+        scheduler=Scheduler(max_rotate=1), default_model="glm-5.2"))
+    frames = [f async for f in executor.stream(_request(), username="u")]
+    assert any(b"error" in f for f in frames)
+
+    account = db.connect().execute(
+        "SELECT cooling_until, err_count FROM credentials").fetchone()
+    assert tuple(account) == (None, 0)                   # 账号未被冷却
+    assert _model_cooldown_rows(db) == [(cred_id, "glm-5.2", 1, "model")]
+
+
+async def test_stream_11102_blocks_account_model_pair(dual_repo):
+    """11102「该后端无此模型」→ negative cache，且换号能继续服务。"""
+    from src.provider.base import Event
+
+    repo, db = dual_repo
+    blocked_id = repo.add(provider="codebuddy", credential_data={"bearer_token": "b"})
+    healthy_id = repo.add(provider="codebuddy", credential_data={"bearer_token": "h"})
+    # 让被负缓存的凭证先被选中（pin 优先）
+    db.connect().execute("UPDATE credentials SET pinned = 1 WHERE id = ?", (blocked_id,))
+    db.connect().commit()
+
+    class P:
+        id = "codebuddy"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream_chat(self, cred, _payload, _model):
+            self.calls += 1
+            if cred["bearer_token"] == "b":
+                yield Event(kind=EventKind.ERROR, error_code=11102,
+                            error_message="no such model")
+                return
+            yield Event(kind=EventKind.CONTENT, content="ok")
+            yield Event(kind=EventKind.FINISH, finish_reason="stop")
+
+    provider = P()
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": provider}, credentials=repo,
+        scheduler=Scheduler(), default_model="glm-5.2"))
+    frames = [f async for f in executor.stream(_request(), username="u")]
+    assert any(b"ok" in f for f in frames)                # 第二个凭证接住
+    assert _model_cooldown_rows(db) == [(blocked_id, "glm-5.2", 1, "blocked")]
+    # 该凭证的其他模型不受影响
+    assert repo.candidates()[0].model_cooldowns is not None
+    assert repo.candidates()[1].model_cooldowns is None
+    assert healthy_id != blocked_id
+
+
+async def test_stream_11101_request_error_does_not_touch_credential(dual_repo):
+    """请求级错误（11101 请求体坏）：不冷却、不累计，但仍换号重试。
+
+    err_count 预置为 2（阈值 3）：若请求级错误被当成普通错误累计，
+    第三次就会触发熔断冷却，健康凭证被踢出池——这正是要防的误伤。
+    """
+    from src.engine.scheduler import ErrorOutcome
+    from src.provider.base import Event
+
+    repo, db = dual_repo
+    for token in ("a", "b", "c"):
+        cred_id = repo.add(provider="codebuddy", credential_data={"bearer_token": token})
+        repo.save_error(cred_id, ErrorOutcome(err_count=2))
+
+    calls = {"n": 0}
+
+    class P:
+        id = "codebuddy"
+
+        async def stream_chat(self, _cred, _payload, _model):
+            calls["n"] += 1
+            yield Event(kind=EventKind.ERROR, error_code=11101,
+                        error_message="Unmarshal chat params failed")
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": P()}, credentials=repo,
+        scheduler=Scheduler(max_rotate=3), default_model="glm-5.2"))
+    frames = [f async for f in executor.stream(_request(), username="u")]
+    assert any(b"error" in f for f in frames)
+    assert calls["n"] == 3                               # 换号重试到上限，不是原地放弃
+
+    rows = db.connect().execute(
+        "SELECT cooling_until, err_count FROM credentials").fetchall()
+    assert [tuple(row) for row in rows] == [(None, 2)] * 3   # 原样保留：没冷却也没累计
+    assert _model_cooldown_rows(db) == []
+
+
+async def test_complete_402_cools_until_next_credit_reset(dual_repo):
+    """402 余额不足：非流式路径冷到次日签到时刻（不是固定 12h）。"""
+    from src.engine.scheduler import next_credit_reset
+
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+
+    class PaymentRequired(Exception):
+        def kind(self):
+            return ErrKind.CREDIT
+
+    executor, _trae, codebuddy = _dual_executor(repo, GOOD, [[PaymentRequired()]])
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(_request())
+
+    cooling_until = db.connect().execute(
+        "SELECT cooling_until FROM credentials").fetchone()["cooling_until"]
+    assert cooling_until == next_credit_reset(int(time.time()))

@@ -20,6 +20,17 @@ export interface QuotaPackage {
   end: number | null;
 }
 
+/** 一条 (凭证, 模型) 级冷却：模型级限流或「该渠道无此模型」负缓存。 */
+export interface ModelCooldown {
+  model: string;
+  /** 冷却截止 epoch */
+  cooling_until: number;
+  /** 连续命中次数（退避升级用） */
+  hits: number;
+  /** "model" = 模型级限流；"blocked" = 该账号无此模型的负缓存 */
+  reason: string;
+}
+
 export interface Credential {
   id: string;
   provider: Provider;
@@ -44,6 +55,8 @@ export interface Credential {
   quota_expiry_ladder: [number, number][] | null;
   /** 额度包明细（含包名，仅供展示）；未探测或上游未提供时为 null */
   quota_packages: QuotaPackage[] | null;
+  /** 生效中的模型级冷却（模型级限流/负缓存）；无则为空数组 */
+  model_cooldowns: ModelCooldown[];
   quota_probed_at: number | null;
   /** 成长中心最近一轮执行时间（仅 CodeBuddy；老库升级前为 null） */
   growth_last_run_at: number | null;

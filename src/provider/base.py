@@ -6,6 +6,7 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -22,13 +23,33 @@ class EventKind(StrEnum):
 
 
 class ErrKind(StrEnum):
-    """错误分类 → 冷却时长（Q12=B）。"""
+    """错误分类 → 冷却时长（Q12=B）。
 
-    PLAN = "plan"      # 权益耗尽 → 12h
+    分类的粒度决定冷却的作用域：账号级（PLAN/SOFT/DEAD/OTHER）与
+    模型级（MODEL/BLOCKED）必须分开，否则单个模型打满会连累同账号的
+    其他模型（实测 6004 只冷却触发的那个模型）。
+    """
+
+    PLAN = "plan"      # 权益耗尽（1005）→ 12h 长冷却
+    # 余额不足（402 / 14018）：等签到恢复，冷却到次日 04:00 而非固定时长
+    CREDIT = "credit"
     SOFT = "soft"      # 限流/404 → 60s，不累计错误数
     DEAD = "dead"      # session 失效 → 硬禁用
     OTHER = "other"    # 其他 4xx/5xx → 累计，连续 3 次 → 10m
     INVALID = "invalid"  # 请求无效（如模型不存在）→ 不冷却凭证，直接 400 回客户端
+    # 模型级限流（6004）：只冷却触发的那个模型，切其他模型立即可用
+    MODEL = "model"
+    # 该后端无此模型（11102）：(账号, 模型) 负缓存，重试无意义
+    BLOCKED = "blocked"
+    # 请求级错误（请求体坏 11101 / 上下文超限 11115 / 图片无效 11135）：
+    # 不是账号的问题，不冷却、不累计；仍会换号重试
+    REQUEST = "request"
+
+
+# 冷却作用域是「(凭证, 模型)」而非整个凭证的错误类别。
+# 账号级冷却必须显式清空模型级条目（见 scheduler.note_error），
+# 否则上一次模型级限流的豁免会泄漏到本次账号级冷却上（换模型错误绕过）。
+MODEL_SCOPED_KINDS = frozenset({ErrKind.MODEL, ErrKind.BLOCKED})
 
 
 def body_hint(body: bytes, limit: int = 160) -> str:
@@ -38,6 +59,23 @@ def body_hint(body: bytes, limit: int = 160) -> str:
     text = body.decode("utf-8", errors="replace")
     text = " ".join(text.split())
     return text[:limit]
+
+
+_BUSINESS_CODE_RE = re.compile(r'"code"\s*:\s*(-?\d+)')
+
+
+def business_codes(text: str) -> frozenset[int]:
+    """提取 body 里的全部 `"code": N` 业务码（两个上游共用这个信封形状）。
+
+    返回集合而非「第一个」：响应可能嵌套多层 envelope（`{"code":0,"data":
+    {"code":11102}}`），按出现顺序取首个会漏掉真正的业务码，按集合成员判断
+    才与状态码分支的优先级组合出确定结果。
+
+    不搜裸数字：时间戳、流水号里也会出现 11102 这类片段，直接 substring
+    匹配会把无关响应判成模型错误（例如 `"code":111020` 含有 `11102`）。
+    只认 `"code":` 键值形态，且要求整个数字 token 相等。
+    """
+    return frozenset(int(match) for match in _BUSINESS_CODE_RE.findall(text))
 
 
 class UpstreamHTTPError(Exception):

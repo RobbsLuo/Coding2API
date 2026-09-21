@@ -25,6 +25,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import {
+  activeModelCooldowns,
   credentialState,
   cooldownRemaining,
   expiringQuotaLabel,
@@ -32,6 +33,7 @@ import {
   formatNumber,
   formatTime,
   healthView,
+  modelCooldownLabel,
   probeFailureLabel,
   quotaSemantics,
   STATE_LABEL,
@@ -452,6 +454,7 @@ export function CredentialsPage() {
           { term: "额度下方的时间语义", where: "额度列", meaning: "CodeBuddy 是「本周期剩余，<日期> 重置」；TRAE 是「账户剩余（单调递减）」。两者单位都是积分，但重置行为不同。" },
           { term: "探测 / 签到", where: "操作列", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（每天 9 点系统自动签到）。" },
           { term: "指定 / 停用 / 删除", where: "操作列", meaning: "指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。停用：临时移出调度池不删数据。删除：彻底移除凭证。" },
+          { term: "模型避让（额度列下方）", where: "额度列", meaning: "某个模型在该账号上限流（6004）或该账号无此模型（11102）时只避让这一个模型——整条凭证仍参与调度，换其他模型立刻可用。模型限流按 10 分钟起指数退避，最长 2 小时；「无此模型」按 6 小时起，最长 24 小时。" },
         ]}
       />
 
@@ -507,6 +510,27 @@ function PackageLadder({ credential }: { credential: Credential }) {
     </LongTextTip>
   );
 }
+/** 生效中的模型级冷却（6004 模型限流 / 11102 该账号无此模型）。
+ *
+ * 与账号级「冷却中」状态是两回事：整条凭证仍可用，只是这些模型被避开。
+ * 不展示会让人以为模型挂了或在池子里乱试。
+ */
+function ModelCooldownList({ credential, now }: { credential: Credential; now: number }) {
+  const items = activeModelCooldowns(credential, now);
+  if (items.length === 0) return null;
+  return (
+    <div className="text-warn" data-testid={`model-cooldowns-${credential.id}`}>
+      {items.map((item) => (
+        <div key={item.model}>
+          模型 {item.model}：{modelCooldownLabel(item)}，
+          {formatDuration(Math.round(item.cooling_until - now))}后重试
+          {item.hits > 1 && `（连续 ${item.hits} 次）`}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function Row({
   credential,
   now,
@@ -573,6 +597,7 @@ function Row({
         )}
         <div className="text-muted-foreground">{quotaSemantics(credential)}</div>
         <PackageLadder credential={credential} />
+        <ModelCooldownList credential={credential} now={now} />
         <div className="text-muted-foreground">
           探测于 {formatTime(credential.quota_probed_at)}
         </div>

@@ -129,7 +129,7 @@ def build_runner(credentials, providers: dict, stats_collector, config,
         growth=growth,
         refresh=RefreshTask(credentials, providers, skew_seconds=config.refresh_skew_hours * 3600,
                             now=lambda: int(time.time())),
-        retention=RetentionTask(stats_collector),
+        retention=RetentionTask(stats_collector, credentials=credentials),
         quota_probe_minutes=config.quota_probe_minutes,
         growth_interval_minutes=config.growth_interval_minutes,
     )

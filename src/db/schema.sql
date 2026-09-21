@@ -105,3 +105,20 @@ CREATE TABLE IF NOT EXISTS growth_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_growth_cred_ts ON growth_events(credential_id, ts);
+
+-- (凭证, 模型) 级冷却：模型级限流（6004）与「该后端无此模型」（11102）负缓存。
+--
+-- 必须与 credentials.cooling_until 分开：6004 只影响触发的那个模型，
+-- 写进账号级冷却会让同账号的其他模型一起不可用（实测语义）。
+-- hits 供指数退避（模型冷却翻倍封顶 2h；负缓存 6h→24h）。
+CREATE TABLE IF NOT EXISTS credential_model_cooldowns (
+    credential_id  TEXT NOT NULL,
+    model          TEXT NOT NULL,
+    cooling_until  INTEGER NOT NULL,
+    hits           INTEGER NOT NULL DEFAULT 0,
+    reason         TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (credential_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_cooling_until
+    ON credential_model_cooldowns(cooling_until);

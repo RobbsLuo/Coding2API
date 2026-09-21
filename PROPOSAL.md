@@ -138,7 +138,9 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 ### 4.3 调度器（Q12=B + Q26 + Q31）
 
-统一实现，两个 provider 共用：手动 pin 优先（粘性让位，见下） → 会话粘性命中且可选时直接复用（不排序） → 过滤 healthy → 到期积分多者优先（把 `quota_expiry_ladder` 中距到期 ≤ `QUOTA_EXPIRY_WINDOW_SECONDS`、默认 36h 的积分加总）→ 按健康度三态排序（`known 降序 > unknown > exhausted`；同分按 `credential_id` 稳定）→ 无可用返回 None。到期指标让快过期的积分先用掉，避免白丢；冷却与错误累计规则见 [TECHNICAL.md §6](TECHNICAL.md)，会话粘性见下文。
+统一实现，两个 provider 共用：手动 pin 优先（粘性让位，见下） → 会话粘性命中且可选时直接复用（不排序） → 过滤 healthy（含**模型级**避让：逐凭证按自己所属上游的原始模型名查 (凭证, 模型) 冷却表，见 [TECHNICAL.md §6.2](TECHNICAL.md#62-模型级冷却b11)） → 到期积分多者优先（把 `quota_expiry_ladder` 中距到期 ≤ `QUOTA_EXPIRY_WINDOW_SECONDS`、默认 36h 的积分加总）→ 按健康度三态排序（`known 降序 > unknown > exhausted`；同分按 `credential_id` 稳定）→ 无可用返回 None。到期指标让快过期的积分先用掉，避免白丢；冷却与错误累计规则见 [TECHNICAL.md §6](TECHNICAL.md)，会话粘性见下文。
+
+**为什么冷却要分「账号级」与「模型级」两层**。上游的拒绝语义并不都是账号级问题：`429 + 6004` 是「这个模型在当前账号上用超了」，`400/404 + 11102` 是「当前账号没有这个模型」。把它们一律记成账号级冷却，会让一次模型级限流把整个账号踢出池（同账号的其他模型明明可用），而把 `11102` 丢掉不管又会让坏组合被反复选中。因此账号级继续写 `credentials.cooling_until`，模型级另建 `credential_model_cooldowns`；账号级冷却出现时清空该凭证的模型级条目，防「切模型」绕过账号级限制。业务码识别只认 `"code": N` 键值形态，不搜裸数字（`"code":111020` 含 `11102` 子串）。
 
 **为什么是「窗口内积分总量」而不是「是否即将过期」（Q31）**。实测 CodeBuddy 的额度不是一个整块周期，而是几十个各自独立到期的小包（每日 100 积分 × N，`get-user-resource` 一次返回 30~36 个套餐），这决定了三个取舍：
 

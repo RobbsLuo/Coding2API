@@ -130,7 +130,7 @@ class FakeRepo:
         return ({"id": credential_id} if any(c.credential_id == credential_id
                                              for c in self.rows) else None)
 
-    def save_success(self, credential_id):
+    def save_success(self, credential_id, *, model=None):
         self.successes.append(credential_id)
 
     def save_error(self, credential_id, outcome):

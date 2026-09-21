@@ -412,6 +412,36 @@ def test_event_kind_helper_covers_1005_and_other():
     assert _event_kind(Event(kind=EventKind.ERROR, error_code=500)) is ErrKind.OTHER
 
 
+@pytest.mark.parametrize(("code", "expected"), [
+    (1005, ErrKind.PLAN),
+    (14018, ErrKind.CREDIT),
+    (4001, ErrKind.INVALID),
+    (6004, ErrKind.MODEL),
+    (11102, ErrKind.BLOCKED),
+    (11101, ErrKind.REQUEST),
+    (11115, ErrKind.REQUEST),
+    (11135, ErrKind.REQUEST),
+    (None, ErrKind.OTHER),
+])
+def test_event_kind_covers_all_provider_business_codes(code, expected):
+    """流内码映射必须与 provider 的 classify_error_code 一致（4001 是 TRAE 私有码）。
+
+    这是防漂移：两侧各写一份映射，改了一处忘了另一处就会让同一业务码
+    在 HTTP 路径和流内路径下得到不同冷却语义。
+    """
+    from src.engine.executor import _event_kind
+    from src.provider.codebuddy import events as cb_events
+    from src.provider.trae import events as trae_events
+
+    event = Event(kind=EventKind.ERROR, error_code=code)
+    assert _event_kind(event) is expected
+    if code is None:
+        return
+    classifier = (trae_events.classify_error_code if code == 4001
+                  else cb_events.classify_error_code)
+    assert classifier(code) is expected
+
+
 async def test_iter_frames_final_buffer_without_newline_is_flushed():
     """末行无换行符 → feed_line(buffer) 分支（sse 87）。"""
     from src.engine.sse import iter_frames

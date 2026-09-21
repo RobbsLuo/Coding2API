@@ -165,13 +165,14 @@ def test_error_fixtures_classify_plan_and_other():
     plan = trae_events.parse_frame(parse_frames(fixture("error-1005.sse"))[0])
     other = trae_events.parse_frame(parse_frames(fixture("error-param.sse"))[0])
     assert plan.error_code == 1005 and trae_events.classify_error_code(1005) is ErrKind.PLAN
-    assert other.error_code == 4001 and trae_events.classify_error_code(4001) is ErrKind.OTHER
+    # 4001 = 参数/模型不可用：流内与 HTTP 两条路径都必须判 INVALID（跳过该上游）
+    assert other.error_code == 4001 and trae_events.classify_error_code(4001) is ErrKind.INVALID
     assert trae_events.classify_error_code(None) is ErrKind.OTHER
 
 
 @pytest.mark.parametrize(("status", "expected"), [
     (401, ErrKind.DEAD), (404, ErrKind.SOFT), (429, ErrKind.SOFT),
-    (500, ErrKind.OTHER), (400, ErrKind.INVALID),
+    (500, ErrKind.OTHER), (400, ErrKind.INVALID), (402, ErrKind.CREDIT),
 ])
 def test_classify_status(status, expected):
     assert trae_events.classify_status(status) is expected
@@ -179,6 +180,27 @@ def test_classify_status(status, expected):
 
 def test_classify_status_detects_1005_in_body():
     assert trae_events.classify_status(400, b'{"code": 1005}') is ErrKind.PLAN
+
+
+@pytest.mark.parametrize(("status", "body", "expected"), [
+    (402, b"", ErrKind.CREDIT),
+    (400, b'{"code": 14018}', ErrKind.CREDIT),
+    (400, b'{"code": 11102}', ErrKind.BLOCKED),
+    (404, b'{"code": 11102}', ErrKind.BLOCKED),
+    (429, b'{"code": 6004}', ErrKind.MODEL),
+    (429, b'{"code": 500}', ErrKind.SOFT),
+    (500, b'{"code": 14018}', ErrKind.CREDIT),      # 业务码优先于状态码
+])
+def test_classify_status_business_codes(status, body, expected):
+    assert trae_events.classify_status(status, body) is expected
+
+
+@pytest.mark.parametrize(("code", "expected"), [
+    (1005, ErrKind.PLAN), (14018, ErrKind.CREDIT), (6004, ErrKind.MODEL),
+    (4001, ErrKind.INVALID), (None, ErrKind.OTHER),
+])
+def test_classify_error_code_mapping(code, expected):
+    assert trae_events.classify_error_code(code) is expected
 
 
 # ---------------------------------------------------------- 凭证与 payload

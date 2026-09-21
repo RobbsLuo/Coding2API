@@ -11,7 +11,7 @@ import json
 from typing import Any
 
 from ...engine.sse import SSEFrame
-from ...provider.base import ErrKind, Event, EventKind, Usage
+from ...provider.base import ErrKind, Event, EventKind, Usage, body_hint, business_codes
 
 
 class UpstreamProtocolViolation(ValueError):
@@ -134,20 +134,63 @@ def _usage(raw: dict[str, Any]) -> Usage:
     )
 
 
+_MODEL_RATE_LIMIT_CODE = 6004       # 该模型用量超限 → 模型级软冷却
+_MODEL_BLOCKED_CODE = 11102         # 该后端无此模型 → (账号, 模型) 负缓存
+_CREDITS_EXHAUSTED_CODE = 14018     # 积分耗尽 → 冷却到次日签到
+_PLAN_EXHAUSTED_CODE = 1005         # 权益/套餐耗尽
+# 请求级错误（不是账号的问题）：请求体坏 / 上下文超限 / 图片无效
+_REQUEST_LEVEL_CODES = frozenset({11101, 11115, 11135})
+_BAD_PARAMS_PHRASE = "unmarshal chat params failed"
+
+
 def classify_status(status: int, body: bytes = b"") -> ErrKind:
-    """HTTP 状态码 + body 分类（1005 = 权益不足）。"""
-    compact = body.decode("utf-8", errors="replace").replace(" ", "").lower()
-    if '"code":1005' in compact or ("1005" in compact and "plan" in compact):
+    """HTTP 状态码 + body 业务码分类。
+
+    判定顺序即优先级，改动前先确认没把更具体的一类遮住（6004 与 429
+    的先后就是一处：6004 只冷却触发模型，落进 SOFT 会误伤整个账号）：
+
+    * 402 / 14018 → 余额不足（冷却到次日 04:00，等签到恢复）
+    * 1005 → 权益耗尽（12h 长冷却）
+    * 11102「该后端无此模型」→ (账号, 模型) 负缓存（400/404 形态）
+    * 401/403 → session 失效（硬禁用）
+    * 404 → 软冷却，不累计错误数
+    * 429 + 6004 → 模型级限流；429 其他 → 账号级软限流
+    * 400 + 11101/11115/11135 → 请求级错误：不罚号，但仍换号
+    * 400 其他 → 请求无效（模型不存在等），不冷却凭证
+    """
+    codes = business_codes(body.decode("utf-8", errors="replace"))
+    if status == 402 or _CREDITS_EXHAUSTED_CODE in codes:
+        return ErrKind.CREDIT
+    if _PLAN_EXHAUSTED_CODE in codes:
         return ErrKind.PLAN
-    if status == 400:
-        # 请求无效（如模型不存在）是客户端错误，冷却凭证只会误伤健康凭证
-        return ErrKind.INVALID
+    if status in (400, 404) and _MODEL_BLOCKED_CODE in codes:
+        return ErrKind.BLOCKED
     if status in (401, 403):
         return ErrKind.DEAD
-    if status in (404, 429):
+    if status == 404:
         return ErrKind.SOFT
+    if status == 429:
+        return ErrKind.MODEL if _MODEL_RATE_LIMIT_CODE in codes else ErrKind.SOFT
+    if status == 400:
+        if (codes & _REQUEST_LEVEL_CODES
+                or _BAD_PARAMS_PHRASE in body_hint(body).lower()):
+            # 发给上游的 body 有问题：换号也大概率一样，但不罚号（仍轮转试一次）
+            return ErrKind.REQUEST
+        # 请求无效（如模型不存在）是客户端错误，冷却凭证只会误伤健康凭证
+        return ErrKind.INVALID
     return ErrKind.OTHER
 
 
 def classify_error_code(code: int | None) -> ErrKind:
-    return ErrKind.PLAN if code == 1005 else ErrKind.OTHER
+    """流内 error 事件的业务码（与 classify_status 同一套语义）。"""
+    if code == _PLAN_EXHAUSTED_CODE:
+        return ErrKind.PLAN
+    if code == _CREDITS_EXHAUSTED_CODE:
+        return ErrKind.CREDIT
+    if code == _MODEL_RATE_LIMIT_CODE:
+        return ErrKind.MODEL
+    if code == _MODEL_BLOCKED_CODE:
+        return ErrKind.BLOCKED
+    if code in _REQUEST_LEVEL_CODES:
+        return ErrKind.REQUEST
+    return ErrKind.OTHER

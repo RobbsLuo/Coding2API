@@ -12,7 +12,7 @@ import json
 from typing import Any
 
 from ...engine.sse import SSEFrame
-from ...provider.base import ErrKind, Event, EventKind, Usage
+from ...provider.base import ErrKind, Event, EventKind, Usage, business_codes
 
 # 有下游语义的事件名；其余（metadata/timing_cost/progress_notice/…）一律跳过。
 # 实测 progress_notice 的 data 可能不是 JSON 对象，提前短路避免误判协议违规。
@@ -188,24 +188,42 @@ def parse_all_events(frame: SSEFrame) -> list[Event]:
 
 
 def classify_error_code(code: int | None) -> ErrKind:
-    """流内错误码分类：1005 = 权益不足 → PLAN。"""
+    """流内错误码分类。
+
+    TRAE 侧未观测到 6004/11102，但两侧共用同一套 ErrKind 语义；
+    这里只把「明确等价」的码映射过去，不臆造未观测的码。
+
+    4001 = 参数/模型不可用（实测原文 "the param is invalid"）：换凭证没用，
+    跳过该上游 —— 与 classify_status 的 400 分支同一结论。
+    """
     if code == 1005:
         return ErrKind.PLAN
+    if code == 14018:
+        return ErrKind.CREDIT
+    if code == 6004:
+        return ErrKind.MODEL
+    if code == 4001:
+        return ErrKind.INVALID
     return ErrKind.OTHER
 
 
 def classify_status(status: int, body: bytes = b"") -> ErrKind:
-    """HTTP 状态码分类。1005 出现在 body 时同样按 PLAN 处理。"""
-    text = body.decode("utf-8", errors="replace")
-    if '"code":1005' in text.replace(" ", ""):
+    """HTTP 状态码分类（与 CodeBuddy 侧同序，见其 classify_status 的说明）。"""
+    codes = business_codes(body.decode("utf-8", errors="replace"))
+    if status == 402 or 14018 in codes:
+        return ErrKind.CREDIT
+    if 1005 in codes:
         return ErrKind.PLAN
-    if status == 400:
-        # 请求无效（如模型不存在）是客户端错误，冷却凭证只会误伤健康凭证
-        return ErrKind.INVALID
+    if status in (400, 404) and 11102 in codes:
+        return ErrKind.BLOCKED
     if status == 401:
         return ErrKind.DEAD
-    if status in (404, 429):
+    if status == 404:
         return ErrKind.SOFT
-    if status >= 400:
-        return ErrKind.OTHER
+    if status == 429:
+        return ErrKind.MODEL if 6004 in codes else ErrKind.SOFT
+    if status == 400:
+        # 4001 = TRAE 的参数/模型不可用（实测 "the param is invalid"）：
+        # 换凭证没用 → 跳过该上游；其余 400 同样按请求无效处理
+        return ErrKind.INVALID
     return ErrKind.OTHER

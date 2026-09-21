@@ -130,6 +130,34 @@ describe("CredentialsPage", () => {
     expect(screen.queryByTestId("packages-toggle-empty")).not.toBeInTheDocument();
   });
 
+  it("模型级冷却：只写「该模型被避让」，并显示剩余时间与命中次数", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({
+          id: "cb",
+          provider: "codebuddy",
+          // 未过期（限流）与已过期（不该上屏）
+          model_cooldowns: [
+            { model: "glm-5.2", cooling_until: now + 300, hits: 2, reason: "model" },
+            { model: "stale", cooling_until: now - 300, hits: 1, reason: "model" },
+          ],
+        }),
+        makeCredential({ id: "plain", provider: "trae", model_cooldowns: [] }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const block = screen.getByTestId("model-cooldowns-cb");
+    expect(block).toHaveTextContent("glm-5.2");
+    expect(block).toHaveTextContent("其它模型不受影响");
+    expect(block).toHaveTextContent("连续 2 次");
+    expect(block).not.toHaveTextContent("stale");
+    // 无冷却条目的凭证不渲染该区块
+    expect(screen.queryByTestId("model-cooldowns-plain")).not.toBeInTheDocument();
+  });
+
   it("启用/停用调用 toggle 接口", async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);

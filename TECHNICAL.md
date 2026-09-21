@@ -151,22 +151,38 @@ JSON 非对象/字段类型不对仍然抛 `UpstreamProtocolViolation`，不退�
 
 ```python
 class ErrKind(StrEnum):
-    PLAN = "plan"        # 权益耗尽 → 冷却 12h
+    PLAN = "plan"        # 权益耗尽（1005）→ 冷却 12h
+    CREDIT = "credit"    # 余额不足（402/14018）→ 冷却到次日 04:00（等签到恢复）
     SOFT = "soft"        # 限流/404 → 冷却 60s，不累计错误数
     DEAD = "dead"        # session 失效 → 硬禁用 disabled=1
     OTHER = "other"      # 其他 4xx/5xx → 累计，连续 3 次 → 冷却 10m
     INVALID = "invalid"  # 请求无效（模型不存在等）→ 不冷却凭证，跳过该上游；全拒 → 400
+    MODEL = "model"      # 该模型用量超限（429+6004）→ 只冷却 (凭证, 模型)，10m 起翻倍封顶 2h
+    BLOCKED = "blocked"  # 该账号无此模型（400/404+11102）→ (凭证, 模型) 负缓存，6h 起翻倍封顶 24h
+    REQUEST = "request"  # 请求级错误（11101/11115/11135）→ 零动作：不冷却、不累计，仅换号
 ```
+
+`MODEL_SCOPED_KINDS = {MODEL, BLOCKED}`：这两类只写 `credential_model_cooldowns`
+（见 §6.2），不碰账号级 `cooling_until`，因此同账号的其他模型仍可选。反之账号级冷却
+出现时会清空该凭证的模型级条目——否则「切模型」能绕过账号级限流。
 
 | 上游信号 | CB | TRAE | ErrKind |
 |---|---|---|---|
 | 权益耗尽 | `code=1005`/plan 相关 | `"code":1005` | PLAN |
-| 限流 | 429 | 429 | SOFT |
+| 余额不足 | 402 / `code=14018` | 402 / `code=14018` | CREDIT |
+| 模型级限流 | 429 + `code=6004` | 429 + `code=6004` | MODEL |
+| 该账号无此模型 | 400/404 + `code=11102` | 400/404 + `code=11102` | BLOCKED |
+| 请求级错误 | 400 + 11101/`Unmarshal chat params failed`/11115/11135 | — | REQUEST |
+| 限流 | 429（无 6004） | 429（无 6004） | SOFT |
 | 不存在 | 404 | 404 | SOFT |
-| 会话失效 | 401/403 | 401 + login 标记 | DEAD |
+| 会话失效 | 401/403 | 401 | DEAD |
 | 服务端错误 | 5xx | 5xx | OTHER |
-| 请求自身无效 | 400 | 400 | INVALID |
-| 流内错误事件 | SSE error 事件 | `event:error` code=1005→PLAN | 同上映射 |
+| 请求自身无效 | 400 | 400（含 4001） | INVALID |
+| 流内错误事件 | SSE error 事件 | `event:error` 业务码 | 同上映射（`executor._event_kind`） |
+
+业务码一律从 `"code": N` 键值形态提取（`provider.base.business_codes`），不搜裸数字：
+`"code":111020` 含 `11102` 子串，裸匹配会把无关响应判成模型错误。判定顺序即优先级，
+`429+6004` 必须先于 `429`、`402/14018` 必须先于状态码兜底（见 `classify_status` docstring）。
 
 ### 3.3 三态健康度（Q26/A）
 
@@ -236,21 +252,25 @@ class Provider(Protocol):
   1. deps.require_api_key：摘要查 api_keys 表 → username
   2. request.py：校验 body → ChatRequest；model_resolver 解析候选集
      - "glm-5.2" → 两 provider 都可能；"glm-5.2@trae" → 仅 trae；auto/空 → DEFAULT_MODEL
-  3. 选号（executor._pick → scheduler.select）：
+  3. 选号（executor._select → scheduler.select）：
      a. 候选 = 注册表中支持该模型的 provider（模型目录能证明归属时先收窄，见 _narrow_providers）
-     b. 会话粘性：存在可选的 pinned 凭证时跳过（pin 优先），否则指纹命中的
+     b. 模型级冷却过滤：逐凭证按**自己所属上游的原始模型名**查 (凭证, 模型) 冷却表，
+        被模型级限流/负缓存的凭证本次跳过（同账号其他模型不受影响，见 §6.2）
+     c. 会话粘性：存在可选的 pinned 凭证时跳过（pin 优先），否则指纹命中的
         凭证仍可选时直接复用，不参与排序（CONVERSATION_STICKY_SECONDS，≤0 关闭）
-     c. pin 优先：pinned 凭证属于候选 provider 且 healthy → 直接用
-     d. 过滤 healthy（enabled=1, disabled=0, 非冷却中）
-     e. 到期积分排序：把 quota_expiry_ladder 中「距到期 ≤ QUOTA_EXPIRY_WINDOW_SECONDS」
+     d. pin 优先：pinned 凭证属于候选 provider 且 healthy → 直接用
+     e. 过滤 healthy（enabled=1, disabled=0, 非冷却中）
+     f. 到期积分排序：把 quota_expiry_ladder 中「距到期 ≤ QUOTA_EXPIRY_WINDOW_SECONDS」
         （默认 36h）的积分加总，多的先用（避免积分过期浪费）；无周期信息
         （TRAE/企业版）计 0 分；窗口 ≤0 时全员 0 分，等于关闭该指标
-     f. 到期积分相同时按 health 三态排序取最高分；同分按 credential_id 稳定
+     g. 到期积分相同时按 health 三态排序取最高分；同分按 credential_id 稳定
   4. executor：解密凭证 → provider.stream_chat()
      - 上游 HTTP ≥400 → classify → scheduler.note_error → tried 加入 → 回到 3（最多 3 次轮换）
      - 流内 Event.ERROR → 同上映射 → 注入 OpenAI SSE 错误帧 + 冷却 + 轮换
      - 上游 400（INVALID，如模型不存在）不冷却凭证，跳过该上游全部凭证；
        全部拒绝时 400 invalid_request（未知模型名 ≡ 无上游提供，不走 503）
+     - REQUEST 类（11101/11115/11135）换号但不落库：既不能冷却也不能累计
+       （累计到阈值同样会触发熔断），否则会顺手把已有的 cooling_until 写成 NULL
   5. response.py：Event → OpenAI chunk（流式）或聚合（非流式）
      - 首块补 role:assistant；上游无 index 的 tool_calls 补稳定 index
   6. stats.collector：写 usage_events（username/provider/model/tokens/latency/ttfb/ok；latency=端到端耗时，ttfb=首字延迟）
@@ -282,6 +302,23 @@ class Scheduler:
 状态全部落 `credentials` 表（`cooling_until` / `err_count` / `health` / `disabled` / `quota_expiry_ladder`），进程重启不丢冷却状态。写路径无应用层锁：并发写靠 SQLite WAL + `busy_timeout=5000` 串行化；每个写方法走 `Database.transaction()` 上下文（正常提交、异常回滚），不再散落 `connect()/commit()` 样板。
 
 到期积分只算一处：`expiring_credits()`。选号走 `Candidate.expiry_credits()`，管理台列表走 `GET /api/credentials` 的 `quota_expiring_credits`（窗口值随响应返回 `expiry_window_seconds`），两处共用同一实现，界面数字与选号顺序不会漂移；渠道无到期信息时返回 `null`（不显示），窗口关闭或确实无积分临近过期时返回 `0`（同样不显示）。
+
+### 6.2 模型级冷却（B1.1）
+
+`credential_model_cooldowns(credential_id, model, cooling_until, hits, reason)` 按
+**(凭证, 模型)** 独立建表——账号级 `cooling_until` 放不下「同账号其他模型仍可用」这层语义。
+
+- 登记的名字是**该凭证所属上游的原始模型名**：`executor._model_scope(provider_id, model)`
+  在每次选号与记账时按凭证自己的 provider 解析（CB 与 TRAE 的大小写变体不同，用归一名会漏判）
+- 选号路径：`executor._select` 逐凭证过滤 `c.is_selectable(now, 该凭证的模型名)`，
+  再交给 `Scheduler.select`（后者不再管模型作用域，它拿不到 provider→模型名 的映射）
+- 退避：`MODEL` 基数 10m 起翻倍、封顶 2h；`BLOCKED` 6h 起翻倍、封顶 24h。换 reason
+  重新计数（两者的基数与封顶不同，沿用对方的 hits 会得到第三种时长）
+- 清除：`save_success(..., model=)` 只删 `reason='blocked'`（模型限流按上游重置，
+  成功一次不代表限制解除）；`revive` / 删除凭证 / 账号级冷却出现都清模型条目
+- 回流：留存任务每轮 `purge_expired_model_cooldowns()` 回收过期行；管理台列表只下发
+  未过期条目（`model_cooldowns`）
+- 无模型名可归因时（流内事件未带 model）退化为账号级 SOFT，不写孤儿记录
 
 ---
 
@@ -455,6 +492,8 @@ PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users.txt 无表）
 - 连接：`threading.local()` 每线程一个 `sqlite3.Connection(row_factory=sqlite3.Row)`；引擎与 FastAPI 线程池各自持有自己的连接。写入统一走 `Database.transaction()`（`conn.commit()` / 异常 `rollback()`），没有应用层写锁，并发由 SQLite 自身串行化（WAL + `busy_timeout=5000` 下短写足够）
 - 加密：`Fernet(base64.urlsafe_b64encode(sha256(APP_SECRET).digest()))`；APP_SECRET 丢失 = 凭证全部不可解，只能重录（Q13 已明示）
 - migration：启动时读 `schema.sql` 逐条 `CREATE TABLE IF NOT EXISTS`（只加不改，列注释可改）；新增列写进 `migrate._MIGRATION_COLUMNS` 走 `ALTER TABLE ... ADD COLUMN`（重复列名忽略，老库幂等补列），删表写进 `migrate._MIGRATION_DROPS` 走 `DROP TABLE IF EXISTS`（`CREATE TABLE IF NOT EXISTS` 对老库无效，不给删会遗留死表），同时 `SCHEMA_VERSION + 1`，版本记在 `PRAGMA user_version`
+  - 新增**表**（如 `credential_model_cooldowns`）不需要 `_MIGRATION_COLUMNS`：`CREATE TABLE IF NOT EXISTS` 对老库同样执行，建表即完成迁移；只需 `SCHEMA_VERSION + 1` 并补一条老库升级测试
+  - 删除凭证时显式清理其模型级冷却行（无外键级联），否则重建同 id 凭证会继承旧的模型冷却
 
 ---
 

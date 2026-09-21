@@ -207,16 +207,15 @@ class Executor:
                             "上游 %s 流内错误（凭证 %s，kind=%s）: code=%s %s",
                             provider_id, credential_id, kind,
                             event.error_code, event.error_message)
-                        outcome = self._deps.scheduler.note_error(
-                            self._candidate(credential_id), kind, int(time.time()))
-                        self._deps.credentials.save_error(credential_id, outcome)
+                        self._note_upstream_error(credential_id, kind, provider_id, target.model)
                         last_error = UpstreamStreamError(event)
                         break
                     for frame in state.translator.translate(event):
                         state.mark_first_byte()
                         yield frame
                 else:
-                    self._deps.credentials.save_success(credential_id)
+                    self._deps.credentials.save_success(
+                        credential_id, model=self._model_scope(provider_id, target.model))
                     self._remember(request, state.username, credential_id)
                     self._record_success(target, state, provider_id, credential_id)
                     for frame in state.translator.finish():
@@ -238,9 +237,7 @@ class Executor:
                 else:
                     logger.warning("上游 %s 错误（凭证 %s，kind=%s）: %s",
                                    provider_id, credential_id, kind, error)
-                    outcome = self._deps.scheduler.note_error(
-                        self._candidate(credential_id), kind, int(time.time()))
-                    self._deps.credentials.save_error(credential_id, outcome)
+                    self._note_upstream_error(credential_id, kind, provider_id, target.model)
                     last_error = error
             if not self._deps.scheduler.should_rotate(tried):
                 if last_kind is ErrKind.INVALID:
@@ -343,7 +340,7 @@ class Executor:
                 else:
                     logger.warning("上游 %s 错误（凭证 %s，kind=%s）: %s",
                                    provider_id, credential_id, kind, error)
-                    self._record_error(credential_id, kind)
+                    self._note_upstream_error(credential_id, kind, provider_id, target.model)
                     last_error = error
             else:
                 try:
@@ -361,10 +358,11 @@ class Executor:
                         last_error, last_kind = error, ErrKind.INVALID
                         self._skip_provider(provider_id, tried)
                     else:
-                        self._record_error(credential_id, kind)
+                        self._note_upstream_error(credential_id, kind, provider_id, target.model)
                         last_error = error
                 else:
-                    self._deps.credentials.save_success(credential_id)
+                    self._deps.credentials.save_success(
+                        credential_id, model=self._model_scope(provider_id, target.model))
                     self._remember(request, username, credential_id)
                     usage = result.get("usage") or {}
                     self._deps.record(
@@ -403,16 +401,7 @@ class Executor:
 
     def _pick(self, target: ModelTarget, tried: set[str],
               affinity_id: str | None = None):
-        # 区分两种情况：模型所属 provider 完全没注册（400）vs 注册了但没有可用凭证（503）
-        registered = [pid for pid in self._narrow_providers(target)
-                      if pid in self._deps.providers]
-        if not registered:
-            raise NoProviderForModel(f"no provider registered for model {target.model!r}")
-        candidates = self._deps.credentials.candidates(registered)
-        if not candidates:
-            return None
-        credential_id = (self._sticky(candidates, tried, affinity_id)
-                         or self._deps.scheduler.select(candidates, tried, int(time.time())))
+        credential_id = self._select(target, tried, affinity_id)
         if credential_id is None:
             return None
         credential_data = self._deps.credentials.credential_data(credential_id)
@@ -432,6 +421,9 @@ class Executor:
         手动 pin 优先于粘性（PROPOSAL §4.3「手动 pin 优先 → 过滤 healthy →
         到期积分」）：管理员显式指定了凭证时，粘性不得把它顶掉，否则"指定"
         在对话中途失效且无处可见。
+
+        入参 candidates 已由 `_select` 按模型作用域过滤过，这里不再重查
+        模型级冷却——传归一模型名进来会与按上游原始名登记的冷却表对不上。
         """
         if affinity_id is None or affinity_id in tried:
             return None
@@ -469,10 +461,50 @@ class Executor:
                 return candidate
         raise NoHealthyCredential(f"credential {credential_id} disappeared")
 
-    def _record_error(self, credential_id: str, kind: ErrKind) -> None:
+    def _select(self, target: ModelTarget, tried: set[str],
+                affinity_id: str | None = None) -> str | None:
+        """按模型收窄候选 → 过滤该模型上被冷却的凭证 → 粘性/pin/排序选号。
+
+        模型冷却按凭证所属上游的原始模型名登记（见 `_model_scope`），
+        因此逐凭证查自己的那份名字：同一账号在不同上游的大小写可能不同。
+        未命中冷却时查询恒为空，代价可忽略。
+        """
+        registered = [pid for pid in self._narrow_providers(target)
+                      if pid in self._deps.providers]
+        if not registered:
+            raise NoProviderForModel(f"no provider registered for model {target.model!r}")
+        candidates = self._deps.credentials.candidates(registered)
+        if not candidates:
+            return None
+        now = int(time.time())
+        usable = [
+            c for c in candidates
+            if c.is_selectable(now, self._model_scope(c.provider, target.model))
+        ]
+        if not usable:
+            return None
+        return (self._sticky(usable, tried, affinity_id)
+                or self._deps.scheduler.select(usable, tried, now))
+
+    def _note_upstream_error(self, credential_id: str, kind: ErrKind,
+                             provider_id: str, model: str) -> None:
+        """对一次上游错误作出反应：记账 + 落库，REQUEST 类零动作。
+
+        请求级错误（11101 请求体坏 / 11115 上下文超限 / 11135 图片无效）
+        不是账号的问题：冷却或累计错误数都会在阈值处把健康凭证踢掉。
+        也绝不落库——save_error 会把已有 cooling_until 写成 NULL，
+        等于顺手解掉别的错误留下的冷却。调用方只换号重试。
+        """
+        if kind is ErrKind.REQUEST:
+            return
         outcome = self._deps.scheduler.note_error(
-            self._candidate(credential_id), kind, int(time.time()))
+            self._candidate(credential_id), kind, int(time.time()),
+            model=self._model_scope(provider_id, model))
         self._deps.credentials.save_error(credential_id, outcome)
+
+    def _model_scope(self, provider_id: str, model: str) -> str:
+        """冷却表登记的模型名：用上游原始名（与 provider 实际调用的名字一致）。"""
+        return self._upstream_model(provider_id, model)
 
 
 @dataclass(slots=True)
@@ -504,12 +536,26 @@ def _elapsed_ms(started: float, end: float | None = None) -> int:
 
 
 def _event_kind(event: Event) -> ErrKind:
-    if event.error_code == 1005:
-        return ErrKind.PLAN
-    if event.error_code == 4001:
-        # TRAE 流内 4001 = 参数/模型不可用：换凭证也没用，跳过该上游
-        return ErrKind.INVALID
-    return ErrKind.OTHER
+    """流内 error 事件的业务码 → ErrKind。
+
+    与 provider 的 `classify_error_code` 同源，但这里再走一遍是因为
+    流内事件只带 code 不带 HTTP 状态；两侧映射必须保持一致。
+    """
+    return _PROVIDER_EVENT_KINDS.get(event.error_code, ErrKind.OTHER)
+
+
+# 流内错误码 → ErrKind。INVALID（4001）来自 TRAE 实测；其余来自 CodeBuddy
+# 业务码语义（见 codebuddy/events.py 的 classify_status 说明）。
+_PROVIDER_EVENT_KINDS: dict[int, ErrKind] = {
+    1005: ErrKind.PLAN,       # 权益耗尽
+    14018: ErrKind.CREDIT,    # 余额不足 → 等签到
+    4001: ErrKind.INVALID,    # TRAE 参数/模型不可用 → 跳过该上游
+    6004: ErrKind.MODEL,      # 模型级限流 → 只冷却该模型
+    11102: ErrKind.BLOCKED,   # 该账号无此模型 → 负缓存
+    11101: ErrKind.REQUEST,   # 请求体坏 → 不罚号
+    11115: ErrKind.REQUEST,   # 上下文超限 → 不罚号
+    11135: ErrKind.REQUEST,   # 图片无效 → 不罚号
+}
 
 
 def _classify(error: Exception) -> ErrKind | None:
@@ -544,11 +590,13 @@ def _reject_message(model: str, last_error: Exception | None,
 
 
 def _error_type_for(kind: ErrKind) -> str:
-    if kind is ErrKind.PLAN:
+    """ErrKind → 受控的统计失败类型（web/src/api/display.ts 同步维护）。"""
+    if kind in (ErrKind.PLAN, ErrKind.CREDIT, ErrKind.MODEL):
+        # MODEL 是模型级限流，展示口径同为额度类；冷却作用域差异在 schema 层
         return "rate_limit"
     if kind is ErrKind.DEAD:
         return "credential_unavailable"
-    if kind is ErrKind.INVALID:
+    if kind in (ErrKind.INVALID, ErrKind.BLOCKED, ErrKind.REQUEST):
         return "invalid_request"
     return "upstream_error"
 

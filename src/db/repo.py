@@ -13,7 +13,7 @@ from typing import Any
 
 from ..auth.api_key import digest_api_key, generate_api_key, preview_api_key
 from ..db.crypto import CredentialCipher
-from ..engine.scheduler import Candidate, ErrorOutcome, expiring_credits
+from ..engine.scheduler import Candidate, ErrorOutcome, ModelCooldown, expiring_credits
 from ..provider.base import Quota, health_score
 
 
@@ -90,6 +90,10 @@ class CredentialRepository:
     def delete(self, credential_id: str) -> bool:
         with self._db.transaction() as conn:
             cursor = conn.execute("DELETE FROM credentials WHERE id = ?", (credential_id,))
+            # 模型级冷却没有外键级联，凭证删除后必须显式清理，
+            # 否则重建同 id 凭证会继承旧的模型冷却（残留行还会拖慢留存清理）
+            conn.execute("DELETE FROM credential_model_cooldowns WHERE credential_id = ?",
+                         (credential_id,))
         return cursor.rowcount > 0
 
     def set_enabled(self, credential_id: str, enabled: bool) -> bool:
@@ -109,16 +113,37 @@ class CredentialRepository:
         """解除硬禁用（session 死亡）与冷却，允许凭证重新参与调度。
 
         没有这个入口时，凭证一旦因 session 失效被硬禁用就只能删除重建，
-        重新登录后也无法复用同一条记录。
+        重新登录后也无法复用同一条记录。模型级冷却一并清空：管理员显式
+        「恢复」的意图包含该凭证的全部冷却状态。
         """
         with self._db.transaction() as conn:
             cursor = conn.execute(
                 "UPDATE credentials SET disabled = 0, disabled_reason = NULL, "
                 "cooling_until = NULL, err_count = 0 WHERE id = ?", (credential_id,))
+            conn.execute("DELETE FROM credential_model_cooldowns WHERE credential_id = ?",
+                         (credential_id,))
         return cursor.rowcount > 0
 
     def save_error(self, credential_id: str, outcome: ErrorOutcome) -> None:
+        """落库一次错误结果。
+
+        `outcome.model_cooldowns` 非空表示模型级冷却：只写 (凭证, 模型) 表，
+        不动账号级 cooling_until；反之账号级冷却会清空该凭证的模型级条目
+        （账号级限流不允许被「切模型」绕过）。
+        """
         with self._db.transaction() as conn:
+            if outcome.model_cooldowns:
+                for model, entry in outcome.model_cooldowns.items():
+                    conn.execute(
+                        "INSERT INTO credential_model_cooldowns "
+                        "(credential_id, model, cooling_until, hits, reason) "
+                        "VALUES (?,?,?,?,?) "
+                        "ON CONFLICT(credential_id, model) DO UPDATE SET "
+                        "cooling_until = excluded.cooling_until, hits = excluded.hits, "
+                        "reason = excluded.reason",
+                        (credential_id, model, entry.cooling_until, entry.hits,
+                         entry.reason))
+                return
             if outcome.disabled:
                 conn.execute(
                     "UPDATE credentials SET disabled = 1, disabled_reason = ?, err_count = 0, "
@@ -127,10 +152,40 @@ class CredentialRepository:
                 conn.execute(
                     "UPDATE credentials SET cooling_until = ?, err_count = ? WHERE id = ?",
                     (outcome.cooling_until, outcome.err_count, credential_id))
+            if outcome.cooling_until is not None:
+                conn.execute("DELETE FROM credential_model_cooldowns WHERE credential_id = ?",
+                             (credential_id,))
 
-    def save_success(self, credential_id: str) -> None:
+    def save_success(self, credential_id: str, *, model: str | None = None) -> None:
+        """成功：清账号级错误累计；`model` 命中负缓存条目时一并清除。
+
+        模型级**限流**（6004）冷却不清除——它对齐上游的重置墙钟，成功一次
+        不代表限流已解除；只有 11102 负缓存（reason 以 blocked 标记）才清。
+        """
         with self._db.transaction() as conn:
             conn.execute("UPDATE credentials SET err_count = 0 WHERE id = ?", (credential_id,))
+            if model:
+                conn.execute(
+                    "DELETE FROM credential_model_cooldowns "
+                    "WHERE credential_id = ? AND model = ? AND reason = ?",
+                    (credential_id, model, "blocked"))
+
+    def purge_expired_model_cooldowns(self, now: int | None = None) -> int:
+        """删除已过期的 (凭证, 模型) 冷却行（留存任务每轮调用）。"""
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "DELETE FROM credential_model_cooldowns WHERE cooling_until <= ?",
+                (int(now if now is not None else time.time()),))
+        return cursor.rowcount
+
+    def model_cooldowns_for(self, credential_id: str,
+                            now: int | None = None) -> dict[str, int]:
+        """该凭证仍在生效的模型级冷却（model → 截止 epoch），供管理台展示。"""
+        rows = self._db.connect().execute(
+            "SELECT model, cooling_until FROM credential_model_cooldowns "
+            "WHERE credential_id = ? AND cooling_until > ?",
+            (credential_id, int(now if now is not None else time.time()))).fetchall()
+        return {row["model"]: row["cooling_until"] for row in rows}
 
     def save_credential_data(self, credential_id: str, credential_data: dict) -> None:
         payload = json.dumps(credential_data, ensure_ascii=False).encode("utf-8")
@@ -179,6 +234,19 @@ class CredentialRepository:
             "SELECT id, provider, health, cooling_until, disabled, enabled, err_count, pinned, "
             "quota_cycle_end, quota_expiry_ladder FROM credentials").fetchall()
         allowed = set(providers) if providers is not None else None
+        # 模型级冷却整表读一次（表很小：只在模型限流/负缓存时才有行），
+        # 按凭证聚合后挂到 Candidate 上；每选一次号查一次库会抵消选号的开销优势。
+        # reason 必须一起读：note_error 靠它判断「换了原因就重新计数」，
+        # 漏读会让 blocked 的 hits 每次从 1 重来（6h 退避永远不升级）。
+        cooling_rows = self._db.connect().execute(
+            "SELECT credential_id, model, cooling_until, hits, reason "
+            "FROM credential_model_cooldowns"
+        ).fetchall()
+        by_credential: dict[str, dict[str, ModelCooldown]] = {}
+        for cooling in cooling_rows:
+            by_credential.setdefault(cooling["credential_id"], {})[cooling["model"]] = (
+                ModelCooldown(cooling_until=cooling["cooling_until"], hits=cooling["hits"],
+                              reason=cooling["reason"]))
         result = [
             Candidate(
                 credential_id=row["id"], provider=row["provider"], health=row["health"],
@@ -186,6 +254,7 @@ class CredentialRepository:
                 enabled=bool(row["enabled"]), err_count=row["err_count"],
                 pinned=bool(row["pinned"]), cycle_end=row["quota_cycle_end"],
                 expiry_ladder=_ladder_value(row["quota_expiry_ladder"]),
+                model_cooldowns=by_credential.get(row["id"]),
             )
             for row in rows if allowed is None or row["provider"] in allowed
         ]
@@ -214,6 +283,7 @@ class CredentialRepository:
         附 `quota_expiring_credits`（窗口内即将到期的积分，与调度排序同源口径）；
         附 `quota_expiry_ladder`（套餐到期阶梯，[[epoch, 剩余积分]]，仅 CodeBuddy）；
         渠道无到期信息（TRAE）两者都为 None，展示层据此隐藏。
+        附 `model_cooldowns`（model → 截止 epoch），只在模型级限流/负缓存时非空。
         """
         now = int(now or time.time())
         rows = self._db.connect().execute(
@@ -222,6 +292,14 @@ class CredentialRepository:
             "quota_probed_at, growth_last_run_at, growth_last_result, created_at, added_by, "
             "quota_expiry_ladder, quota_packages "
             "FROM credentials ORDER BY created_at").fetchall()
+        cooling_rows = self._db.connect().execute(
+            "SELECT credential_id, model, cooling_until, hits, reason "
+            "FROM credential_model_cooldowns WHERE cooling_until > ?", (now,)).fetchall()
+        cooling: dict[str, list[dict[str, Any]]] = {}
+        for item in cooling_rows:
+            cooling.setdefault(item["credential_id"], []).append(
+                {"model": item["model"], "cooling_until": item["cooling_until"],
+                 "hits": item["hits"], "reason": item["reason"]})
         out: list[dict[str, Any]] = []
         for row in rows:
             rec = dict(row)
@@ -230,6 +308,7 @@ class CredentialRepository:
             rec["quota_packages"] = _packages_value(row["quota_packages"])
             rec["quota_expiring_credits"] = (
                 None if ladder is None else expiring_credits(ladder, expiring_window, now))
+            rec["model_cooldowns"] = cooling.get(row["id"], [])
             out.append(rec)
         return out
 

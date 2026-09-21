@@ -16,7 +16,7 @@ from importlib import resources
 SCHEMA_NAME = "schema.sql"
 
 # 当前 schema 版本。新增列/表、删表时 +1，并在下方对应元组里补增量。
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (

@@ -5,7 +5,7 @@
  * 展示层必须区分它们，否则探测失败会被误读成「没额度」。
  */
 
-import type { Credential, Health, ProbeFailureReason } from "../api/types";
+import type { Credential, Health, ModelCooldown, ProbeFailureReason } from "../api/types";
 
 export type HealthKind = "known" | "unknown" | "exhausted";
 
@@ -97,6 +97,23 @@ export const STATE_TONE: Record<CredentialState, HealthView["tone"]> = {
   off: "muted",
   exhausted: "danger",
 };
+
+/** 生效中的模型级冷却（过期条目不上屏）。按剩余时长升序，最紧要的排最前。 */
+export function activeModelCooldowns(
+  credential: Credential,
+  now = Date.now() / 1000,
+): ModelCooldown[] {
+  return [...(credential.model_cooldowns ?? [])]
+    .filter((item) => item.cooling_until > now)
+    .sort((left, right) => left.cooling_until - right.cooling_until);
+}
+
+/** 模型级冷却的说明：显式写出「其它模型不受影响」，否则用户会以为账号被限。 */
+export function modelCooldownLabel(item: ModelCooldown): string {
+  return item.reason === "blocked"
+    ? "该账号无此模型，已避让"
+    : "该模型限流（其它模型不受影响）";
+}
 
 export function formatDuration(seconds: number): string {
   if (seconds <= 0) return "—";

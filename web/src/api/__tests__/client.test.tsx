@@ -7,11 +7,13 @@ import { App } from "../../App";
 import { Layout } from "../../Layout";
 import { api, ApiError } from "../client";
 import {
+  activeModelCooldowns,
   credentialState,
   formatDuration,
   formatNumber,
   formatTime,
   healthView,
+  modelCooldownLabel,
   probeFailureLabel,
   usageErrorLabel,
   quotaSemantics,
@@ -226,6 +228,30 @@ describe("display helpers", () => {
     expect(formatTime(1_700_000_000)).not.toBe("—");
     expect(formatNumber(null)).toBe("—");
     expect(formatNumber(1234)).toBe("1,234");
+  });
+
+  it("模型级冷却只展示生效中的条目，按剩余时长升序", () => {
+    const now = 1_000_000;
+    const credential = makeCredential({
+      model_cooldowns: [
+        { model: "late", cooling_until: now + 600, hits: 1, reason: "model" },
+        { model: "stale", cooling_until: now - 600, hits: 1, reason: "model" },
+        { model: "soon", cooling_until: now + 60, hits: 2, reason: "blocked" },
+      ],
+    });
+    expect(activeModelCooldowns(credential as never, now).map((item) => item.model)).toEqual([
+      "soon",
+      "late",
+    ]);
+    // 无冷却（老后端不返回该字段）时为空数组，不抛错
+    expect(activeModelCooldowns(makeCredential() as never, now)).toEqual([]);
+  });
+
+  it("模型冷却文案区分「模型限流」与「该账号无此模型」", () => {
+    expect(modelCooldownLabel(
+      { model: "m", cooling_until: 1, hits: 1, reason: "model" })).toContain("其它模型不受影响");
+    expect(modelCooldownLabel(
+      { model: "m", cooling_until: 1, hits: 1, reason: "blocked" })).toContain("无此模型");
   });
 });
 

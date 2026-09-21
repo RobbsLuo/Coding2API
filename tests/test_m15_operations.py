@@ -20,6 +20,7 @@ from src.db.crypto import CredentialCipher
 from src.db.migrate import apply_schema
 from src.db.repo import CredentialRepository
 from src.engine.executor import NoHealthyCredential
+from src.engine.scheduler import ErrorOutcome
 from src.main import build_app
 from src.provider.base import ErrKind, Event, EventKind, Quota, Usage
 from src.provider.codebuddy.checkin import (
@@ -1937,6 +1938,8 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     tables = {row[0] for row in db.connect().execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert "checkins" not in tables and "model_cache" not in tables
+    # 新增表（(凭证, 模型) 冷却）也由启动时的 schema.sql 全量补建
+    assert "credential_model_cooldowns" in tables
     # 补列后可写入、可读出
     db.connect().execute(
         "INSERT INTO credentials (id, provider, data_enc, quota_expiry_ladder, quota_packages,"
@@ -3461,3 +3464,197 @@ def test_new_checkin_device_id_is_fresh_numeric_string():
     ids = {new_checkin_device_id() for _ in range(50)}
     assert len(ids) == 50, "设备号必须每次不同"
     assert all(i.isdigit() and len(i) == 16 for i in ids)
+
+
+# ------------------------------------------------- (凭证, 模型) 级冷却持久化
+
+def test_repo_persists_model_cooldowns_separately_from_account(repo):
+    """模型级冷却只写独立表：账号级 cooling_until 必须保持为空。"""
+    from src.engine.scheduler import ModelCooldown
+
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.save_error(cid, ErrorOutcome(
+        err_count=0, model_cooldowns={"glm-5.2": ModelCooldown(
+            cooling_until=9999, hits=1, reason="model")}))
+
+    candidate = credentials.candidates()[0]
+    assert candidate.cooling_until is None            # 账号级未被污染
+    assert not candidate.is_selectable(1000, "glm-5.2")
+    assert candidate.is_selectable(1000, "kimi-k2")   # 其他模型仍可用
+    assert credentials.model_cooldowns_for(cid, now=1000) == {"glm-5.2": 9999}
+
+
+def test_repo_model_cooldown_upsert_escalates_hits(repo):
+    """同 (凭证, 模型) 反复命中时原地升级 hits，不产生多行。"""
+    from src.engine.scheduler import ModelCooldown
+
+    credentials, db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.save_error(cid, ErrorOutcome(model_cooldowns={
+        "m": ModelCooldown(cooling_until=100, hits=1, reason="model")}))
+    credentials.save_error(cid, ErrorOutcome(model_cooldowns={
+        "m": ModelCooldown(cooling_until=200, hits=2, reason="model")}))
+    rows = db.connect().execute(
+        "SELECT cooling_until, hits, reason FROM credential_model_cooldowns").fetchall()
+    assert [(r["cooling_until"], r["hits"], r["reason"]) for r in rows] == [(200, 2, "model")]
+
+
+def test_repo_candidates_carry_reason_so_backoff_escalates(repo):
+    """candidates() 必须把 reason 一并发出来，否则 blocked 退避永远停在 6h。
+
+    note_error 用 reason 判断「是否同一原因」；漏读会让每次都被当成换了原因
+    而把 hits 重置为 1，6h→12h→24h 的升级形同虚设。
+    """
+    from src.engine.scheduler import Scheduler
+
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    scheduler = Scheduler()
+    now = 1_000_000
+
+    def note(**kw):
+        candidate = credentials.candidates()[0]
+        outcome = scheduler.note_error(candidate, ErrKind.BLOCKED, now,
+                                       model="glm-5.2", **kw)
+        credentials.save_error(cid, outcome)
+        return outcome.model_cooldowns["glm-5.2"]
+
+    first = note()
+    assert (first.hits, first.reason) == (1, "blocked")
+    assert credentials.candidates()[0].model_cooldowns["glm-5.2"].reason == "blocked"
+    second = note()
+    assert second.hits == 2 and second.cooling_until == now + 12 * 3600
+    third = note()
+    assert third.hits == 3 and third.cooling_until == now + 24 * 3600
+
+
+def test_repo_account_cooldown_clears_model_entries(repo):
+    """账号级冷却必须清空模型级条目：否则「切模型」能绕过账号级限流。"""
+    from src.engine.scheduler import ModelCooldown
+
+    credentials, db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.save_error(cid, ErrorOutcome(model_cooldowns={
+        "m": ModelCooldown(cooling_until=9999, hits=1)}))
+    credentials.save_error(cid, ErrorOutcome(cooling_until=8888, err_count=0))
+    assert db.connect().execute(
+        "SELECT COUNT(*) AS c FROM credential_model_cooldowns").fetchone()["c"] == 0
+
+
+def test_repo_save_success_clears_blocked_only(repo):
+    """成功清除 negative cache，但不清 6004 模型级限流（对齐上游重置）。"""
+    from src.engine.scheduler import ModelCooldown
+
+    credentials, db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.save_error(cid, ErrorOutcome(model_cooldowns={
+        "blocked-model": ModelCooldown(cooling_until=9999, hits=1, reason="blocked"),
+        "limited-model": ModelCooldown(cooling_until=9999, hits=1, reason="model")}))
+    credentials.save_success(cid, model="blocked-model")
+    remaining = {r["model"] for r in db.connect().execute(
+        "SELECT model FROM credential_model_cooldowns").fetchall()}
+    assert remaining == {"limited-model"}
+    # 不传 model 时不做任何模型级清理
+    credentials.save_success(cid)
+    assert db.connect().execute(
+        "SELECT COUNT(*) AS c FROM credential_model_cooldowns").fetchone()["c"] == 1
+
+
+def test_repo_revive_and_delete_clear_model_cooldowns(repo):
+    from src.engine.scheduler import ModelCooldown
+
+    credentials, db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.save_error(cid, ErrorOutcome(model_cooldowns={
+        "m": ModelCooldown(cooling_until=9999, hits=1)}))
+    assert credentials.revive(cid) is True
+    count = db.connect().execute(
+        "SELECT COUNT(*) AS c FROM credential_model_cooldowns").fetchone()["c"]
+    assert count == 0
+    # 再次写入后删除凭证：残留行必须一并清掉（重建同 id 不应继承旧冷却）
+    credentials.save_error(cid, ErrorOutcome(model_cooldowns={
+        "m": ModelCooldown(cooling_until=9999, hits=1)}))
+    assert credentials.delete(cid) is True
+    assert db.connect().execute(
+        "SELECT COUNT(*) AS c FROM credential_model_cooldowns").fetchone()["c"] == 0
+
+
+def test_repo_purges_only_expired_model_cooldowns(repo):
+    from src.engine.scheduler import ModelCooldown
+
+    credentials, db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.save_error(cid, ErrorOutcome(model_cooldowns={
+        "old": ModelCooldown(cooling_until=500, hits=1),
+        "fresh": ModelCooldown(cooling_until=5000, hits=1)}))
+    assert credentials.purge_expired_model_cooldowns(now=1000) == 1
+    names = {r["model"] for r in db.connect().execute(
+        "SELECT model FROM credential_model_cooldowns").fetchall()}
+    assert names == {"fresh"}
+
+
+def test_repo_model_cooldowns_for_skips_expired(repo):
+    from src.engine.scheduler import ModelCooldown
+
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.save_error(cid, ErrorOutcome(model_cooldowns={
+        "old": ModelCooldown(cooling_until=500, hits=1),
+        "fresh": ModelCooldown(cooling_until=5000, hits=1)}))
+    assert credentials.model_cooldowns_for(cid, now=1000) == {"fresh": 5000}
+
+
+def test_retention_task_purges_expired_model_cooldowns(repo):
+    """留存任务顺带回收过期冷却行；未注入凭证仓储时该计数为 0。"""
+    from src.engine.scheduler import ModelCooldown
+
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.save_error(cid, ErrorOutcome(model_cooldowns={
+        "m": ModelCooldown(cooling_until=int(time.time()) - 10, hits=1)}))
+    collector = StatsCollector(_db)
+    report = RetentionTask(collector, credentials=credentials).run_once()
+    assert report["expired_coolings"] == 1
+    # 不传 credentials（旧调用方）时不报错，计数为 0
+    assert RetentionTask(collector).run_once()["expired_coolings"] == 0
+
+
+def test_list_all_exposes_model_cooldowns(tmp_path):
+    """管理台列表带出生效中的模型冷却（过期行不下发）。"""
+    from src.engine.scheduler import ModelCooldown
+
+    db = Database(tmp_path / "t.sqlite3")
+    apply_schema(db.connect())
+    credentials = CredentialRepository(db, CredentialCipher(SECRET))
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    now = int(time.time())
+    credentials.save_error(cid, ErrorOutcome(model_cooldowns={
+        "fresh": ModelCooldown(cooling_until=now + 600, hits=2, reason="blocked")}))
+    credentials.save_error(cid, ErrorOutcome(model_cooldowns={
+        "stale": ModelCooldown(cooling_until=now - 600, hits=1)}))
+    row = credentials.list_all(now=now)[0]
+    assert row["model_cooldowns"] == [
+        {"model": "fresh", "cooling_until": now + 600, "hits": 2, "reason": "blocked"}]
+    assert CredentialRepository(
+        db, CredentialCipher(SECRET)).list_all(now=now)[0]["model_cooldowns"] == row[
+            "model_cooldowns"]
+    db.close()
+
+
+def test_credentials_endpoint_exposes_model_cooldowns(tmp_path):
+    """端到端：模型级冷却经 /api/credentials 下发（前端据此展示）。"""
+    from src.engine.scheduler import ModelCooldown
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings)
+    with TestClient(app) as client:
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+        repo = app.state.credentials
+        cid = repo.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+        repo.save_error(cid, ErrorOutcome(model_cooldowns={
+            "glm-5.2": ModelCooldown(cooling_until=int(time.time()) + 600,
+                                     hits=1, reason="model")}))
+        rows = client.get("/api/credentials").json()["credentials"]
+    assert [row["model"] for row in rows[0]["model_cooldowns"]] == ["glm-5.2"]
