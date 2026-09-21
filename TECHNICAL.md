@@ -527,6 +527,14 @@ fixture 断言两个方向：**解析正确**（样本 → 期望 Event）与**�
 - **手写 SQL 而非 ORM**：5 张表规模下 ORM 收益为负
 - **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + PUBLIC_BASE_URL
 - **v1 无 Anthropic**（Q8=A）：Event 层已预留，v1.1 只加 `compat/anthropic/` 适配器
+- **不做 reasoning 注入 / effort 档位映射**（原 B1.2，实测后取消）：原计划打算对「强制推理模型族」注入
+  `thinking` + `reasoning_effort` 并回填历史 `reasoning_content`，实测前提不成立——
+  （1）客户端已自带 `reasoning_effort`（只有 `low`/`medium`）且上游直接接受，不存在「未做档位映射」的问题；
+  （2）客户端已回传历史 `reasoning_content` 且上游接受，不存在「客户端丢弃」；
+  （3）原计划的默认模型清单（`deepseek-v4-pro`/`glm-5.1` 等）与实际在用的模型命名无关，且 `glm-5.1` 在本项目
+  `MODEL_BLOCKLIST` 里，硬编码白名单会空转；
+  （4）真要做「客户端丢弃时回填」必须服务端存对话内容，与 §8 脱敏纪律（不存提示词/回答/会话内容）冲突。
+  参考实现 IceeAn/codebuddy2api 走的是相反取向（对白名单模型强制 `reasoning_effort=max` 覆盖客户端），属单来源且会改写客户端意图，不采纳
 - **统计一律以 `usage_hourly` 为准**：`overview` / `by_provider` / `timeline` /
   `model-timeline` 均读小时汇总，只有 `events`（逐请求明细）读 `usage_events`。
   统一口径是为了让选「全部」时总览与图表同值（明细只留 90 天，汇总永久）。

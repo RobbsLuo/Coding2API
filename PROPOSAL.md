@@ -75,6 +75,8 @@
 - **活跃度的驱动来源（实测，勿凭单次实验下结论）**：活动类操作（领取成长中心奖励等）**计入**——两天无桌面端使用、仅差别在有无领取动作，`score` 就从 0 变 5；而纯 `/v2/chat/completions` 对话**不计入**（3 次完整对话后 `today.score` 与 `updated_at` 均不动）。连登天数含 1 天容忍窗口（H5 规则原文：按「连续登录且使用的天数」计，每月清零）。热力墙分档 = score 0 / 1-10 / 11-30 / 31-60 / >60，每日 02:00 批算。**与积分无关，不参与调度决策；不实现伪造客户端行为**（H5 条款明禁模拟器/脚本篡改数据，处罚为取消资格并追回已发礼品）
 - **凭证身份可能为空**：OAuth 登录路径下上游账号接口未回填 `account_uid`/`user_id`（实测发生），签到/成长中心的同账号隔离必须回落到 `credential_id`,否则第二个账号会被静默跳过
 - 请求头需 `X-Domain`、`X-User-Id`、`X-Enterprise-Id`、`X-Department-Info`（部门名须 UTF-8 百分号编码）
+- **reasoning 字段当前直接透传，不做注入也不剥离**（实测 71 份真实请求 dump）：客户端自己会带 `reasoning_effort`（69/71，只有 `low`/`medium` 两档，非推理模型如 `hy3` 不带），也会在历史 assistant 消息里回传 `reasoning_content`（51/71，含带 `tool_calls` 的消息），上游原样接受（`deepseek-v4.1-flash` 4260 次请求 99.6% 成功）。因此既不需要「effort 档位映射」，也不存在「客户端丢弃 reasoning_content」这一前提；`enable_thinking` 只在客户端未给时补 `true`
+- **CB 的 usage 不回 `reasoning_tokens`**（实测恒为 0：`deepseek-v4.1-flash` 289 万 output tokens / reasoning_tokens 全 0），TRAE 侧正常回（`qwen-3.7-plus` 单请求 6~114）。统计页 CB 的思考 token 恒显示 0 属上游口径差异，不是采集丢失
 
 ### 3.2 TRAE SOLO（字节）
 
@@ -91,6 +93,7 @@
 - SSE 事件序列：`metadata` → `timing_cost` → `output`×N → `extra_info` → `token_usage` → `done`
 - `token_usage` 含缓存字段 `cache_read_input_tokens` / `cache_creation_input_tokens`（未命中为 0，非缺失），映射为统计的 `cached_tokens`；**无 per-request credit**
 - 错误码 `1005` = 权益不足；仅流式，非流式需聚合
+- **接受客户端传来的 `reasoning_effort`**（实测透传 `low`/`medium` 均 200 且正常出流，`reasoning_tokens` 有值）：不认 `thinking` 对象，也无需服务端补注入；`developer` 角色上游不认（静默空流），已归一为 `system`
 
 ### 3.3 冲突与陷阱
 
