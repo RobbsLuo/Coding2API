@@ -28,10 +28,17 @@ describe("expiringQuotaLabel", () => {
     expect(expiringQuotaLabel(25.5, 3600)).toBe("25.5 积分将在 1.0 小时内过期");
   });
 
+  it("次窗口措辞区分开，避免两行同句式分不出优先级", () => {
+    expect(expiringQuotaLabel(140, 604800, "secondary")).toBe("7.0 天内共 140 积分将过期");
+  });
+
   it("无到期信息、窗口关闭或零积分时不展示", () => {
     expect(expiringQuotaLabel(null, 129600)).toBeNull();
     expect(expiringQuotaLabel(100, undefined)).toBeNull();
     expect(expiringQuotaLabel(100, 0)).toBeNull();
     expect(expiringQuotaLabel(0, 129600)).toBeNull();
+    expect(expiringQuotaLabel(null, 604800, "secondary")).toBeNull();
+    expect(expiringQuotaLabel(100, 0, "secondary")).toBeNull();
+    expect(expiringQuotaLabel(0, 604800, "secondary")).toBeNull();
   });
 });

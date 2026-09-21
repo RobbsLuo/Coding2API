@@ -372,10 +372,13 @@ class Provider(Protocol):
         CONVERSATION_STICKY_SECONDS，≤0 关闭）
      d. pin 优先：pinned 凭证属于候选 provider 且 healthy → 直接用
      e. 过滤 healthy（enabled=1, disabled=0, 非冷却中）
-     f. 到期积分排序：把 quota_expiry_ladder 中「距到期 ≤ QUOTA_EXPIRY_WINDOW_SECONDS」
-        （默认 36h）的积分加总，多的先用（避免积分过期浪费）；无周期信息
-        （TRAE/企业版）计 0 分；窗口 ≤0 时全员 0 分，等于关闭该指标
-     g. 到期积分相同时按 health 三态排序取最高分；同分按 credential_id 稳定
+     f. 到期积分排序（两级字典序）：把 quota_expiry_ladder 中「距到期 ≤
+        QUOTA_EXPIRY_WINDOW_SECONDS」（默认 36h）的积分加总，多的先用；打平
+        （含都为 0）再比「距到期 ≤ QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS」
+        （默认 7 天）的积分（避免积分过期浪费）；无周期信息
+        （TRAE/企业版）计 0 分；主窗口 ≤0 时次窗口一并失效（expiry_windows()
+        统一折算），等于关闭整套到期指标
+     g. 两级到期积分都相同时按 health 三态排序取最高分；同分按 credential_id 稳定
   4. executor：解密凭证 → provider.stream_chat()
      - 上游 HTTP ≥400 → classify → scheduler.note_error → tried 加入 → 回到 3（最多 3 次轮换）
      - 流内 Event.ERROR → 同上映射 → 注入 OpenAI SSE 错误帧 + 冷却 + 轮换
@@ -400,7 +403,8 @@ class Provider(Protocol):
 ```python
 class Scheduler:
     MAX_ROTATE = 3
-    EXPIRY_WINDOW = 36h          # 到期积分排序窗口，QUOTA_EXPIRY_WINDOW_SECONDS 覆盖；≤0 关闭
+    EXPIRY_WINDOW = 36h          # 主到期排序窗口，QUOTA_EXPIRY_WINDOW_SECONDS 覆盖；≤0 关闭整套
+    SECONDARY_EXPIRY_WINDOW = 7d # 次到期排序窗口（主窗口打平时才比较），QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS 覆盖
     COOLDOWN = {ErrKind.PLAN: 12h, ErrKind.SOFT: 60s, ErrKind.OTHER: 10m}
     ERR_THRESHOLD = 3          # 连续 OTHER 错误 → 冷却
 
@@ -413,7 +417,7 @@ class Scheduler:
 
 状态全部落 `credentials` 表（`cooling_until` / `err_count` / `health` / `disabled` / `quota_expiry_ladder`），进程重启不丢冷却状态。写路径无应用层锁：并发写靠 SQLite WAL + `busy_timeout=5000` 串行化；每个写方法走 `Database.transaction()` 上下文（正常提交、异常回滚），不再散落 `connect()/commit()` 样板。
 
-到期积分只算一处：`expiring_credits()`。选号走 `Candidate.expiry_credits()`，管理台列表走 `GET /api/credentials` 的 `quota_expiring_credits`（窗口值随响应返回 `expiry_window_seconds`），两处共用同一实现，界面数字与选号顺序不会漂移；渠道无到期信息时返回 `null`（不显示），窗口关闭或确实无积分临近过期时返回 `0`（同样不显示）。
+到期积分只算一处：`expiring_credits()`。选号走 `Candidate.expiry_credits()`（主/次两级窗口各调一次），管理台列表走 `GET /api/credentials` 的 `quota_expiring_credits` 与 `quota_expiring_credits_secondary`（两个窗口值随响应返回 `expiry_window_seconds` / `expiry_secondary_window_seconds`），两处共用同一实现与同一个 `expiry_windows()` 折算（主窗口 ≤0 时两级一起失效），界面数字与选号顺序不会漂移；渠道无到期信息时返回 `null`（不显示），窗口关闭或确实无积分临近过期时返回 `0`（同样不显示）。管理台只在主窗口无数字时才渲染次窗口那一行（次窗口是主窗口的超集，主窗口有值时重复展示没有信息量）。
 
 ### 6.2 模型级冷却（B1.1）
 

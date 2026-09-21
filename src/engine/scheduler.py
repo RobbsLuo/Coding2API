@@ -26,9 +26,12 @@ BLOCKED_MAX_SECONDS = 24 * 3600
 BLOCKED_SHIFT_MAX = 2
 # 「余额不足」（402 / 14018）硬冷却的目标时刻：次日 04:00（签到任务全天恢复）
 CREDIT_RESET_HOUR = 4
-# 到期排序窗口：把「距到期 ≤ 该时长」的积分加总，作为选号排序指标（多者先用）
+# 主到期排序窗口：把「距到期 ≤ 该时长」的积分加总，作为选号第一排序指标（多者先用）
 # CodeBuddy 是每日 100 积分 × N 的小包，36h 覆盖今天与后天的到期点
 EXPIRY_WINDOW_SECONDS = 36 * 3600
+# 次要到期排序窗口：仅当主指标打平（最常见的是都为 0）时才启用，避免只看 36h
+# 而漏掉一周内仍会过期的积分。7 天覆盖 CodeBuddy 一个完整的小包到期周期
+SECONDARY_EXPIRY_WINDOW_SECONDS = 7 * 86400
 
 
 def expiring_credits(
@@ -46,6 +49,19 @@ def expiring_credits(
         amount for expiring_at, amount in ladder
         if now < expiring_at <= now + window_seconds
     )
+
+
+def expiry_windows(primary: int, secondary: int) -> tuple[int, int]:
+    """生效的主/次到期窗口：主窗口 ≤0 视为关闭整套到期排序，次窗口一并归零。
+
+    两级是同一条排序链的两档，主窗口是总开关；若不联动，只关主窗口时
+    次窗口仍会单独排序，「关闭到期指标」的既有语义就被悄悄改掉了。
+    选号（Scheduler）与管理台展示（list_all）共用此函数，界面数字与
+    选号顺序不会漂移。
+    """
+    if primary <= 0:
+        return 0, 0
+    return primary, secondary
 
 
 @dataclass(frozen=True)
@@ -152,10 +168,12 @@ class Scheduler:
         soft_cooldown: int = SOFT_COOLDOWN_SECONDS,
         other_cooldown: int = OTHER_COOLDOWN_SECONDS,
         expiry_window: int = EXPIRY_WINDOW_SECONDS,
+        secondary_expiry_window: int = SECONDARY_EXPIRY_WINDOW_SECONDS,
     ) -> None:
         self.max_rotate = max_rotate
         self.err_threshold = err_threshold
-        self.expiry_window = expiry_window
+        self.expiry_window, self.secondary_expiry_window = expiry_windows(
+            expiry_window, secondary_expiry_window)
         self._cooldowns = {
             ErrKind.PLAN: plan_cooldown,
             ErrKind.SOFT: soft_cooldown,
@@ -168,9 +186,12 @@ class Scheduler:
                now: int) -> str | None:
         """返回应使用的 credential_id；无可用的返回 None。
 
-        排序规则：pin 优先 → 窗口内即将到期积分多者优先 → known 降序
-        → unknown → exhausted 垫底。到期积分优先于健康度：快过期的先用掉，
-        避免白丢；到期积分相同时才比健康度。
+        排序规则：pin 优先 → 主窗口（36h）内即将到期积分多者优先 → 次窗口
+        （7 天）内即将到期积分多者优先 → known 降序 → unknown → exhausted
+        垫底。到期积分优先于健康度：快过期的先用掉，避免白丢；两级窗口
+        按字典序比较，主窗口打平（含都为 0）时才轮到次窗口，再打平才比
+        健康度。主窗口 ≤0 视为关闭整套到期排序（次窗口一并归零，见
+        `expiry_windows`），此时退回纯健康度排序。
 
         模型级冷却的过滤由调用方在候选集上完成（executor._select）：
         每个候选要按**自己所属上游**的原始模型名查冷却表，选号器不掌握
@@ -186,6 +207,7 @@ class Scheduler:
         chosen = sorted(
             pinned or pool,
             key=lambda c: (-c.expiry_credits(now, self.expiry_window),
+                           -c.expiry_credits(now, self.secondary_expiry_window),
                            _rank(c.health), -(_health_value(c.health)), c.credential_id),
         )
         return chosen[0].credential_id

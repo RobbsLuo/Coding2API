@@ -13,7 +13,13 @@ from typing import Any
 
 from ..auth.api_key import digest_api_key, generate_api_key, preview_api_key
 from ..db.crypto import CredentialCipher
-from ..engine.scheduler import Candidate, ErrorOutcome, ModelCooldown, expiring_credits
+from ..engine.scheduler import (
+    Candidate,
+    ErrorOutcome,
+    ModelCooldown,
+    expiring_credits,
+    expiry_windows,
+)
 from ..provider.base import Quota, health_score
 
 
@@ -276,13 +282,15 @@ class CredentialRepository:
         return json.loads(plaintext.decode("utf-8"))
 
     def list_all(
-        self, *, expiring_window: int = 0, now: int | None = None,
+        self, *, expiring_window: int = 0, expiring_secondary_window: int = 0,
+        now: int | None = None,
     ) -> list[dict[str, Any]]:
         """管理台列表：绝不返回明文凭证。
 
-        附 `quota_expiring_credits`（窗口内即将到期的积分，与调度排序同源口径）；
+        附 `quota_expiring_credits`（主窗口内即将到期的积分，与调度排序第一级同源）；
+        附 `quota_expiring_credits_secondary`（次窗口，主窗口打平时才参与排序的第二级）；
         附 `quota_expiry_ladder`（套餐到期阶梯，[[epoch, 剩余积分]]，仅 CodeBuddy）；
-        渠道无到期信息（TRAE）两者都为 None，展示层据此隐藏。
+        渠道无到期信息（TRAE）三者都为 None，展示层据此隐藏。
         附 `model_cooldowns`（model → 截止 epoch），只在模型级限流/负缓存时非空。
         """
         now = int(now or time.time())
@@ -306,8 +314,12 @@ class CredentialRepository:
             ladder = _ladder_value(row["quota_expiry_ladder"])
             rec["quota_expiry_ladder"] = ladder
             rec["quota_packages"] = _packages_value(row["quota_packages"])
+            primary, secondary = expiry_windows(expiring_window, expiring_secondary_window)
             rec["quota_expiring_credits"] = (
-                None if ladder is None else expiring_credits(ladder, expiring_window, now))
+                None if ladder is None else expiring_credits(ladder, primary, now))
+            rec["quota_expiring_credits_secondary"] = (
+                None if ladder is None
+                else expiring_credits(ladder, secondary, now))
             rec["model_cooldowns"] = cooling.get(row["id"], [])
             out.append(rec)
         return out

@@ -8,6 +8,7 @@ const READER = { username: "guest", is_admin: false } as const;
 
 function listBody(credentials: unknown[], isAdmin = true) {
   return { credentials, expiry_window_seconds: 129600,
+            expiry_secondary_window_seconds: 604800,
             viewer: isAdmin ? "root" : "guest", is_admin: isAdmin };
 }
 
@@ -71,6 +72,55 @@ describe("CredentialsPage", () => {
     const shown = screen.getAllByTestId("quota-expiring");
     expect(shown).toHaveLength(1);
     expect(shown[0]).toHaveTextContent("100 积分将在");
+  });
+
+  it("主窗口为空时展示次窗口（7 天）到期积分，措辞与主窗口区分", async () => {
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({
+          id: "week", provider: "codebuddy", health: 50,
+          quota_expiring_credits: 0, quota_expiring_credits_secondary: 140,
+        }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    expect(screen.queryByTestId("quota-expiring")).not.toBeInTheDocument();
+    const secondary = screen.getAllByTestId("quota-expiring-secondary");
+    expect(secondary).toHaveLength(1);
+    expect(secondary[0]).toHaveTextContent("7.0 天内共 140 积分将过期");
+  });
+
+  it("主窗口有数字时不重复渲染次窗口（次窗口是主窗口的超集）", async () => {
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({
+          id: "both", provider: "codebuddy", health: 50,
+          quota_expiring_credits: 100, quota_expiring_credits_secondary: 140,
+        }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    expect(screen.getAllByTestId("quota-expiring")).toHaveLength(1);
+    expect(screen.queryByTestId("quota-expiring-secondary")).not.toBeInTheDocument();
+  });
+
+  it("次窗口关闭或无到期信息时不渲染第二行", async () => {
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ id: "trae2", provider: "trae", health: 50,
+                         quota_expiring_credits: null,
+                         quota_expiring_credits_secondary: null }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    expect(screen.queryByTestId("quota-expiring")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("quota-expiring-secondary")).not.toBeInTheDocument();
   });
 
   it("额度包明细：单元格只留「套餐 N 个」，悬浮弹出按到期升序的完整明细", async () => {

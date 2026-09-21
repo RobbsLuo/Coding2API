@@ -115,6 +115,7 @@ export function CredentialsPage() {
 
   const credentials = data?.credentials ?? [];
   const expiryWindow = data?.expiry_window_seconds ?? 0;
+  const expirySecondaryWindow = data?.expiry_secondary_window_seconds ?? 0;
   const isAdmin = data?.is_admin ?? false;
   const now = Date.now() / 1000;
 
@@ -388,7 +389,7 @@ export function CredentialsPage() {
                 <TableHead>渠道</TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">状态<ColumnHint text="可用/冷却中/已禁用/已关闭/额度耗尽；冷却中到期自动恢复。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">健康度<ColumnHint text="剩余积分占比三态：已知百分比 / 未探测 / 已耗尽。未探测≠已耗尽，点「探测」可重试。" /></span></TableHead>
-                <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期积分行＝调度窗口内即将过期、会被优先消耗的额度。" /></span></TableHead>
+                <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期积分行＝调度窗口内即将过期、会被优先消耗的额度；主窗口（36h）打平时才比较次窗口（7 天）。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">成长中心<ColumnHint text="仅 CodeBuddy：最近一轮成长中心（旅行礼物/任务/连登兑换/盲盒）的领取结果与时间，由定时任务或手动执行写入。" /></span></TableHead>
                 {isAdmin && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测：查剩余额度；签到：领当日积分；指定：设为优先；停用/删除：移出调度或移除。" /></span></TableHead>}
               </TableRow>
@@ -400,6 +401,7 @@ export function CredentialsPage() {
                   credential={credential}
                   now={now}
                   expiryWindow={expiryWindow}
+                  expirySecondaryWindow={expirySecondaryWindow}
                   isAdmin={isAdmin}
                   busy={busy}
                   confirming={confirmDelete === credential.id}
@@ -471,6 +473,7 @@ export function CredentialsPage() {
           { term: "健康度：百分比", where: "健康度列", meaning: "剩余积分占总积分的比例，调度器优先选数值高的。" },
           { term: "健康度：未探测到额度", where: "健康度列", meaning: "探测失败或渠道没返回额度信息。注意它不是「已耗尽」——点「探测」可重新获取。" },
           { term: "额度下方的时间语义", where: "额度列", meaning: "CodeBuddy 是「本周期剩余，<日期> 重置」；TRAE 是「账户剩余（单调递减）」。两者单位都是积分，但重置行为不同。" },
+          { term: "到期积分（两行）", where: "额度列", meaning: "选号先比 36 小时内会过期的积分，多的先用；都相同（常见的是都为 0）时再比 7 天内会过期的积分。主窗口已有数字就只显示那一行，次窗口只在主窗口为空时才出现。" },
           { term: "探测 / 签到", where: "操作列", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（每天 9 点系统自动签到）。" },
           { term: "指定 / 停用 / 删除", where: "操作列", meaning: "指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。停用：临时移出调度池不删数据。删除：彻底移除凭证。" },
           { term: "模型避让（额度列下方）", where: "额度列", meaning: "某个模型在该账号上限流（6004）或该账号无此模型（11102）时只避让这一个模型——整条凭证仍参与调度，换其他模型立刻可用。模型限流按 10 分钟起指数退避，最长 2 小时；「无此模型」按 6 小时起，最长 24 小时。" },
@@ -555,6 +558,7 @@ function Row({
   credential,
   now,
   expiryWindow,
+  expirySecondaryWindow,
   isAdmin,
   busy,
   confirming,
@@ -564,6 +568,7 @@ function Row({
   credential: Credential;
   now: number;
   expiryWindow: number;
+  expirySecondaryWindow: number;
   isAdmin: boolean;
   busy: boolean;
   confirming: boolean;
@@ -571,6 +576,16 @@ function Row({
   actions: Actions;
 }) {
   const expiring = expiringQuotaLabel(credential.quota_expiring_credits, expiryWindow);
+  // 次窗口只在主窗口没有可展示内容时才渲染：7 天窗口是 36h 的超集，
+  // 主窗口已有数字时再列一行只会重复。它的作用是解释「36h 内没有
+  // 到期积分、但一周内会过期」的账号为何仍被优先选中。
+  const expiringSecondary = expiring
+    ? null
+    : expiringQuotaLabel(
+        credential.quota_expiring_credits_secondary,
+        expirySecondaryWindow,
+        "secondary",
+      );
   const health = healthView(credential.health);
   const state = credentialState(credential, now);
   const cooldown = cooldownRemaining(credential.cooling_until, now);
@@ -613,6 +628,11 @@ function Row({
         {expiring && (
           <div className="text-warn" data-testid="quota-expiring">
             {expiring}
+          </div>
+        )}
+        {expiringSecondary && (
+          <div className="text-warn/80" data-testid="quota-expiring-secondary">
+            {expiringSecondary}
           </div>
         )}
         <div className="text-muted-foreground">{quotaSemantics(credential)}</div>

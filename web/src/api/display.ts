@@ -52,14 +52,22 @@ export function quotaSemantics(credential: Credential): string {
  *
  * 返回 null 表示「不值得展示」：渠道没有到期信息（TRAE → 后端回 null），
  * 或窗口关闭 / 确实没有积分临近过期（后端回 0）。只有关键的 0 需要藏起来。
+ *
+ * 主/次两个窗口共用一个函数：措辞区分开，否则两行同样的句式看不出
+ * 谁是第一优先级（主窗口 36h 打平时才轮到次窗口 7 天）。
  */
 export function expiringQuotaLabel(
   credits: number | null | undefined,
   windowSeconds: number | undefined,
+  wording: "primary" | "secondary" = "primary",
 ): string | null {
   if (credits === null || credits === undefined) return null;
   if (credits <= 0 || !windowSeconds || windowSeconds <= 0) return null;
-  return `${formatNumber(credits)} 积分将在 ${formatDuration(windowSeconds)}内过期`;
+  const amount = formatNumber(credits);
+  const window = formatDuration(windowSeconds);
+  return wording === "secondary"
+    ? `${window}内共 ${amount} 积分将过期`
+    : `${amount} 积分将在 ${window}内过期`;
 }
 
 export function cooldownRemaining(coolingUntil: number | null, now = Date.now() / 1000): number {

@@ -2359,7 +2359,8 @@ def test_credentials_endpoint_exposes_expiring_credits(tmp_path):
         repo.add(provider="trae", credential_data={"token": "x"})
         ids = {row["provider"]: row["id"] for row in repo.list_all()}
         now = int(time.time())
-        ladder = _ladder_text([(now + 3600, 100.0), (now + 999_999, 50.0)])
+        ladder = _ladder_text([(now + 3600, 100.0), (now + 3 * 86400, 40.0),
+                               (now + 999_999, 50.0)])
         conn = repo._db.connect()
         conn.execute(
             "UPDATE credentials SET quota_expiry_ladder = ?, quota_packages = ? WHERE id = ?",
@@ -2370,19 +2371,30 @@ def test_credentials_endpoint_exposes_expiring_credits(tmp_path):
 
     rows = {row["provider"]: row for row in body["credentials"]}
     assert body["expiry_window_seconds"] == settings.quota_expiry_window_seconds
+    assert body["expiry_secondary_window_seconds"] == \
+        settings.quota_expiry_secondary_window_seconds
     assert rows["codebuddy"]["quota_expiring_credits"] == 100.0
+    # 次窗口是 36h 窗口的超集：主窗口已含的包也计入（这里 100 + 40）
+    assert rows["codebuddy"]["quota_expiring_credits_secondary"] == 140.0
     assert rows["codebuddy"]["quota_expiry_ladder"] == [
-        [now + 3600, 100.0], [now + 999_999, 50.0]]
+        [now + 3600, 100.0], [now + 3 * 86400, 40.0], [now + 999_999, 50.0]]
     assert rows["trae"]["quota_expiring_credits"] is None
+    assert rows["trae"]["quota_expiring_credits_secondary"] is None
     assert rows["trae"]["quota_expiry_ladder"] is None
     # 额度包明细（展示用）同样随列表下发；无明细的渠道为 None
     assert rows["codebuddy"]["quota_packages"] == [
         {"name": "福利积分", "total": 2000.0, "used": 0.0, "end": now + 3600}]
     assert rows["trae"]["quota_packages"] is None
-    # 窗口关闭 → 0 而不是 None，展示层据此隐藏该行
+    # 窗口关闭 → 0 而不是 None，展示层据此隐藏该行（两级窗口各自独立）
     closed = {row["provider"]: row for row in repo.list_all(
         expiring_window=0, now=now)}
     assert closed["codebuddy"]["quota_expiring_credits"] == 0.0
+    assert closed["codebuddy"]["quota_expiring_credits_secondary"] == 0.0
+    secondary_closed = {row["provider"]: row for row in repo.list_all(
+        expiring_window=settings.quota_expiry_window_seconds,
+        expiring_secondary_window=0, now=now)}
+    assert secondary_closed["codebuddy"]["quota_expiring_credits"] == 100.0
+    assert secondary_closed["codebuddy"]["quota_expiring_credits_secondary"] == 0.0
 
 
 # ------------------------------------------------------- 前端静态资源服务
@@ -2602,6 +2614,29 @@ async def test_stream_expiry_window_zero_keeps_health_order(repo):
         pass
 
     assert collector.events[-1]["credential_id"] == steady_id
+
+
+async def test_stream_secondary_expiry_breaks_tie(repo):
+    """两级窗口贯通到真实选号：36h 内都没到期积分时，7 天内会过期者优先。"""
+    credentials, _db = repo
+    steady_id = credentials.add(provider="codebuddy", credential_data={"bearer_token": "s"})
+    week_id = credentials.add(provider="codebuddy", credential_data={"bearer_token": "w"})
+    now = int(time.time())
+    credentials.save_quota(steady_id, Quota(remaining=95, total=100, probed_at=now))
+    credentials.save_quota(week_id, Quota(remaining=50, total=100,
+                                          expiry_ladder=[(now + 3 * 86400, 140.0)],
+                                          probed_at=now))
+    collector = RecordingCollector()
+    executor = _exec_with_stats(repo, [GOOD_EVENTS], collector)
+
+    from src.compat.openai.request import parse_chat_request
+
+    async for _ in executor.stream(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}], "stream": True}),
+            username="alice"):
+        pass
+
+    assert collector.events[-1]["credential_id"] == week_id
 
 
 async def test_stream_records_failure_when_credentials_exhausted(repo):

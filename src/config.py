@@ -39,8 +39,11 @@ class Settings(BaseSettings):
     default_model: str = "glm-5.2"
     refresh_skew_hours: int = 24
     # 到期排序窗口：把「距到期 ≤ 该秒数」的积分加总，作为选号第一排序指标（多者先用）；
-    # CodeBuddy 是每日 100 积分 × N 的小包；≤0 关闭该指标，退回纯健康度排序
+    # CodeBuddy 是每日 100 积分 × N 的小包；≤0 关闭整套到期排序（次窗口一并失效）
     quota_expiry_window_seconds: int = 36 * 3600
+    # 次要到期排序窗口：主窗口打平（含都为 0）时才比较，7 天覆盖一个完整的小包
+    # 到期周期，避免只看 36h 而漏掉一周内仍会过期的积分；≤0 关闭该级
+    quota_expiry_secondary_window_seconds: int = 7 * 86400
     # 会话粘性 TTL（秒）：同一对话（消息前缀延续）的多轮请求固定用同一凭证，
     # 对话进行中不换号（避免上游风控与丢失上游提示词缓存）；凭证出错仍会
     # 正常轮换，成功后重新粘定。≤0 关闭粘性

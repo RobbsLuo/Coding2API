@@ -24,6 +24,7 @@ from .api import (
     chat,
     models,
     playground,
+    responses,
 )
 from .api.deps import Services
 from .auth.throttle import LoginThrottle
@@ -143,7 +144,9 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     stats_collector = StatsCollector(db)
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
                                      scheduler=Scheduler(
-                                         expiry_window=config.quota_expiry_window_seconds),
+                                         expiry_window=config.quota_expiry_window_seconds,
+                                         secondary_expiry_window=(
+                                             config.quota_expiry_secondary_window_seconds)),
                                      default_model=config.default_model,
                                      stats=stats_collector,
                                      max_auto_continues=config.auto_continue_max,
@@ -262,6 +265,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.include_router(admin_keys.create_router(services))
     app.include_router(admin_stats.create_router(services))
     app.include_router(chat.create_router(services))
+    app.include_router(responses.create_router(services))
     app.include_router(models.create_router(services))
     app.include_router(balance.create_router(services))
     app.include_router(playground.create_router(services))

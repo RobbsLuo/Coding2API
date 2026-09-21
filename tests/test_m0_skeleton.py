@@ -25,6 +25,7 @@ from src.engine.scheduler import (
     MODEL_COOLDOWN_MAX_SECONDS,
     MODEL_COOLDOWN_SECONDS,
     PLAN_COOLDOWN_SECONDS,
+    SECONDARY_EXPIRY_WINDOW_SECONDS,
     SOFT_COOLDOWN_SECONDS,
     Candidate,
     ModelCooldown,
@@ -51,6 +52,7 @@ def test_settings_defaults_and_admin_set():
     assert s.admin_set == frozenset({"alice", "bob"})
     assert s.default_model == "glm-5.2"
     assert s.quota_expiry_window_seconds == EXPIRY_WINDOW_SECONDS
+    assert s.quota_expiry_secondary_window_seconds == SECONDARY_EXPIRY_WINDOW_SECONDS
     assert s.is_admin("alice") and not s.is_admin("carol")
 
 
@@ -266,11 +268,15 @@ def test_select_expiry_window_boundaries():
     """恰好窗口内算到期；超过窗口或已过期（探测滞后）都不计入。"""
     steady = cand("steady", health=95)
     at_edge = cand("at_edge", health=5, expiry_ladder=[(NOW + EXPIRY_WINDOW_SECONDS, 100.0)])
+    # 「超过主窗口」在 36h 外仍落在次窗口（7 天）内，所以按次窗口计分优先于健康度
     beyond = cand("beyond", health=5,
                   expiry_ladder=[(NOW + EXPIRY_WINDOW_SECONDS + 1, 100.0)])
+    past_secondary = cand("far", health=5, expiry_ladder=[
+        (NOW + SECONDARY_EXPIRY_WINDOW_SECONDS + 1, 100.0)])
     stale = cand("stale", health=5, expiry_ladder=[(NOW - 1, 100.0)])
     assert Scheduler().select([steady, at_edge], set(), NOW) == "at_edge"
-    assert Scheduler().select([steady, beyond], set(), NOW) == "steady"
+    assert Scheduler().select([steady, beyond], set(), NOW) == "beyond"
+    assert Scheduler().select([steady, past_secondary], set(), NOW) == "steady"
     assert Scheduler().select([steady, stale], set(), NOW) == "steady"
     # 只按落在窗口内的包累加，窗口外的包不计
     mixed = cand("mixed", health=5, expiry_ladder=[(NOW + 600, 100.0),
@@ -291,6 +297,49 @@ def test_select_expiry_window_zero_disables_metric():
                      cand("burn", health=5,
                           expiry_ladder=[(NOW + 600, 100.0)])], set(), NOW) == "steady"
     assert cand("burn", expiry_ladder=[(NOW + 600, 100.0)]).expiry_credits(NOW, 0) == 0.0
+    # 主窗口是总开关：关掉它时次窗口一并失效，不能偷偷用 7 天窗口排序
+    assert s.secondary_expiry_window == 0
+    week = cand("week", health=5, expiry_ladder=[(NOW + 3 * 86400, 100.0)])
+    assert s.select([cand("steady", health=95), week], set(), NOW) == "steady"
+
+
+def test_select_secondary_expiry_breaks_primary_tie():
+    """两级字典序：36h 打平（都为 0）时，比 7 天内会过期的积分，多者优先。"""
+    week = cand("week", health=50,
+                expiry_ladder=[(NOW + 3 * 86400, 200.0)])       # 36h 外、7 天内
+    steady = cand("steady", health=95)
+    assert Scheduler().select([steady, week], set(), NOW) == "week"
+
+
+def test_select_primary_expiry_wins_over_secondary():
+    """主窗口优先于次窗口：36h 内有 1 分也胜过 7 天内 1000 分。"""
+    soon = cand("soon", health=5, expiry_ladder=[(NOW + 600, 1.0)])
+    week = cand("week", health=95, expiry_ladder=[(NOW + 3 * 86400, 1000.0)])
+    assert Scheduler().select([week, soon], set(), NOW) == "soon"
+
+
+def test_select_secondary_window_boundaries_and_zero_disables():
+    """次窗口边界：恰好 7 天计入，超过不计入，已过期不计入。"""
+    steady = cand("steady", health=95)
+    at_edge = cand("at_edge", health=5, expiry_ladder=[
+        (NOW + SECONDARY_EXPIRY_WINDOW_SECONDS, 100.0)])
+    beyond = cand("beyond", health=5, expiry_ladder=[
+        (NOW + SECONDARY_EXPIRY_WINDOW_SECONDS + 1, 100.0)])
+    stale = cand("stale", health=5, expiry_ladder=[(NOW - 1, 100.0)])
+    assert Scheduler().select([steady, at_edge], set(), NOW) == "at_edge"
+    assert Scheduler().select([steady, beyond], set(), NOW) == "steady"
+    assert Scheduler().select([steady, stale], set(), NOW) == "steady"
+    # 二级窗口同样可关闭（≤0）：关闭后退回健康度排序
+    s = Scheduler(secondary_expiry_window=0)
+    burning_week = cand("week", health=5, expiry_ladder=[(NOW + 3 * 86400, 100.0)])
+    assert s.select([steady, burning_week], set(), NOW) == "steady"
+
+
+def test_select_secondary_tie_falls_back_to_health():
+    """两级都打平才比健康度，再过才按 credential_id 稳定。"""
+    week_a = cand("a", health=10, expiry_ladder=[(NOW + 3 * 86400, 100.0)])
+    week_b = cand("b", health=90, expiry_ladder=[(NOW + 3 * 86400, 100.0)])
+    assert Scheduler().select([week_a, week_b], set(), NOW) == "b"
 
 
 def test_select_pinned_still_wins_over_expiry_metric():
