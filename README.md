@@ -126,7 +126,7 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 | `GROWTH_INTERVAL_MINUTES` | `60` | 成长中心（仅 CodeBuddy）一轮领取的周期；下限 5 分钟 |
 | `GROWTH_IRREVERSIBLE_ACTIONS` | `true` | 是否允许成长中心的不可逆动作：抽奖、连登兑换、开 Buddy 盲盒、消耗补登卡。`false` 时仍会领取旅行礼物与任务奖励 |
 | `QUOTA_EXPIRY_WINDOW_SECONDS` | `129600` | 到期排序窗口：把距到期 ≤ 该秒数的积分加总，多的账号先用（避免积分过期浪费）；`≤0` 关闭，退回纯健康度排序 |
-| `CONVERSATION_STICKY_SECONDS` | `3600` | 会话粘性 TTL：同一对话（消息前缀延续）多轮请求固定用同一凭证（手动 pin 的凭证优先，粘性让位）；凭证出错仍会轮换，成功后重新粘定；`≤0` 关闭 |
+| `CONVERSATION_STICKY_SECONDS` | `3600` | 会话粘性 TTL：优先按请求体显式会话标识（`conversation_id`/`conversationId`/`prompt_cache_key`，metadata 或顶层），无则回落消息前缀指纹，多轮请求固定用同一凭证（手动 pin 的凭证优先，粘性让位）；带 `user_id` 时不派生前缀兜底键（避免并行对话误钉同一号）；凭证出错仍会轮换，成功后重新粘定；`≤0` 关闭 |
 | `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*` | 模型列表黑名单（仅影响列表展示） |
 | `ALLOWED_HOSTS` | 空 | Host 白名单，防 DNS rebinding |
 | `CODEBUDDY_API_ENDPOINT` | `https://copilot.tencent.com` | CodeBuddy 上游地址；改动时必须同时把它加入 `CODEBUDDY_ALLOWED_ENDPOINTS` |

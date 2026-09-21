@@ -144,7 +144,7 @@ class Executor:
         state = _StreamState(translator=StreamTranslator(target.model),
                              started=time.monotonic(), username=username)
         if self._deps.affinity is not None:
-            state.affinity_id = self._deps.affinity.pin_for(request.messages, username)
+            state.affinity_id = self._deps.affinity.pin_for(request.raw, username)
         try:
             async for frame in self._stream_loop(request, target, state):
                 yield frame
@@ -315,7 +315,7 @@ class Executor:
         # 首事件时刻：上游响应的第一个事件（TTFE，非流式的首字延迟）；跨重试只记最早一次
         first_event_at: float | None = None
         # 会话粘性：对话上一轮用过哪个凭证，本轮优先复用
-        affinity_id = (self._deps.affinity.pin_for(request.messages, username)
+        affinity_id = (self._deps.affinity.pin_for(request.raw, username)
                        if self._deps.affinity is not None else None)
 
         while True:
@@ -417,7 +417,7 @@ class Executor:
     def _remember(self, request: ChatRequest, username: str, credential_id: str) -> None:
         """成功后把本对话粘到实际服务的凭证（轮换降级后随之换粘）。"""
         if self._deps.affinity is not None:
-            self._deps.affinity.remember(request.messages, username, credential_id)
+            self._deps.affinity.remember(request.raw, username, credential_id)
 
     def _pick(self, target: ModelTarget, tried: set[str],
               affinity_id: str | None = None):

@@ -70,7 +70,7 @@ coding2api/
 │   ├── engine/
 │   │   ├── scheduler.py         # 选号 + 冷却状态机 + pin
 │   │   ├── executor.py          # 请求执行 + 轮换重试 + 统计埋点
-│   │   ├── affinity.py          # 会话粘性：对话前缀指纹 → 固定凭证（CONVERSATION_STICKY_SECONDS）
+│   │   ├── affinity.py          # 会话粘性：显式会话标识 / 对话前缀指纹 → 固定凭证（CONVERSATION_STICKY_SECONDS，B1.5）
 │   │   ├── model_resolver.py    # "glm-5.2" | "glm-5.2@trae" | auto → 候选集
 │   │   └── sse.py               # SSE 帧解析（跨 provider 共用）
 │   ├── compat/
@@ -300,8 +300,11 @@ class Provider(Protocol):
      a. 候选 = 注册表中支持该模型的 provider（模型目录能证明归属时先收窄，见 _narrow_providers）
      b. 模型级冷却过滤：逐凭证按**自己所属上游的原始模型名**查 (凭证, 模型) 冷却表，
         被模型级限流/负缓存的凭证本次跳过（同账号其他模型不受影响，见 §6.2）
-     c. 会话粘性：存在可选的 pinned 凭证时跳过（pin 优先），否则指纹命中的
-        凭证仍可选时直接复用，不参与排序（CONVERSATION_STICKY_SECONDS，≤0 关闭）
+     c. 会话粘性：存在可选的 pinned 凭证时跳过（pin 优先），否则粘性命中的
+        凭证仍可选时直接复用，不参与排序。粘性键优先取请求体显式会话标识
+        （`conversation_id`/`conversationId`/`prompt_cache_key`，metadata 或顶层），
+        无则回落消息前缀指纹；带 `user_id` 时不派生前缀兜底键（B1.5；
+        CONVERSATION_STICKY_SECONDS，≤0 关闭）
      d. pin 优先：pinned 凭证属于候选 provider 且 healthy → 直接用
      e. 过滤 healthy（enabled=1, disabled=0, 非冷却中）
      f. 到期积分排序：把 quota_expiry_ladder 中「距到期 ≤ QUOTA_EXPIRY_WINDOW_SECONDS」
