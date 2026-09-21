@@ -159,7 +159,7 @@ class ErrKind(StrEnum):
     INVALID = "invalid"  # 请求无效（模型不存在等）→ 不冷却凭证，跳过该上游；全拒 → 400
     MODEL = "model"      # 该模型用量超限（429+6004）→ 只冷却 (凭证, 模型)，10m 起翻倍封顶 2h
     BLOCKED = "blocked"  # 该账号无此模型（400/404+11102）→ (凭证, 模型) 负缓存，6h 起翻倍封顶 24h
-    REQUEST = "request"  # 请求级错误（11101/11115/11135）→ 零动作：不冷却、不累计，仅换号
+    REQUEST = "request"  # 请求级错误（11101/11115/11128/11135）→ 零动作：不冷却、不累计，仅换号
 ```
 
 `MODEL_SCOPED_KINDS = {MODEL, BLOCKED}`：这两类只写 `credential_model_cooldowns`
@@ -173,6 +173,12 @@ class ErrKind(StrEnum):
 | 模型级限流 | 429 + `code=6004` | 429 + `code=6004` | MODEL |
 | 该账号无此模型 | 400/404 + `code=11102` | 400/404 + `code=11102` | BLOCKED |
 | 请求级错误 | 400 + 11101/`Unmarshal chat params failed`/11115/11135 | — | REQUEST |
+
+> 400 + `11128`（`Illegal API invocation from an unapproved channel`）也归 REQUEST：
+> 实测是窗口型瞬时渠道风控（同凭证同时刻换模型即成功、同 (凭证, 模型) 秒级交替
+> 成功/失败、窗口内自愈），不是凭证或模型问题。曾误落 INVALID → 跳过上游全部
+> 凭证、零重试直接 400（`invalid_request`），是 deepseek-v4.1-flash / glm-5.3-flash
+> 报「not available on any configured upstream」的根因。
 | 限流 | 429（无 6004） | 429（无 6004） | SOFT |
 | 不存在 | 404 | 404 | SOFT |
 | 会话失效 | 401/403 | 401 | DEAD |
@@ -269,7 +275,7 @@ class Provider(Protocol):
      - 流内 Event.ERROR → 同上映射 → 注入 OpenAI SSE 错误帧 + 冷却 + 轮换
      - 上游 400（INVALID，如模型不存在）不冷却凭证，跳过该上游全部凭证；
        全部拒绝时 400 invalid_request（未知模型名 ≡ 无上游提供，不走 503）
-     - REQUEST 类（11101/11115/11135）换号但不落库：既不能冷却也不能累计
+     - REQUEST 类（11101/11115/11128/11135）换号但不落库：既不能冷却也不能累计
        （累计到阈值同样会触发熔断），否则会顺手把已有的 cooling_until 写成 NULL
   5. response.py：Event → OpenAI chunk（流式）或聚合（非流式）
      - 首块补 role:assistant；上游无 index 的 tool_calls 补稳定 index

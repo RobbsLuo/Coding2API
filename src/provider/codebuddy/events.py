@@ -138,8 +138,12 @@ _MODEL_RATE_LIMIT_CODE = 6004       # 该模型用量超限 → 模型级软冷�
 _MODEL_BLOCKED_CODE = 11102         # 该后端无此模型 → (账号, 模型) 负缓存
 _CREDITS_EXHAUSTED_CODE = 14018     # 积分耗尽 → 冷却到次日签到
 _PLAN_EXHAUSTED_CODE = 1005         # 权益/套餐耗尽
-# 请求级错误（不是账号的问题）：请求体坏 / 上下文超限 / 图片无效
-_REQUEST_LEVEL_CODES = frozenset({11101, 11115, 11135})
+# 请求级错误（不是账号的问题）：请求体坏 / 上下文超限 / 图片无效 / 渠道风控。
+# 11128「Illegal API invocation from an unapproved channel」实测是窗口型瞬时
+# 拦截：同凭证同时刻换模型即可成功、同 (凭证, 模型) 秒级交替成功/失败、窗口
+# 内自愈，绝不是凭证或模型的问题。归请求级 → 零动作、仅换号重试。
+# （若归 INVALID，executor 会跳过该上游全部凭证、零重试直接 400）
+_REQUEST_LEVEL_CODES = frozenset({11101, 11115, 11128, 11135})
 _BAD_PARAMS_PHRASE = "unmarshal chat params failed"
 
 
@@ -155,7 +159,7 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
     * 401/403 → session 失效（硬禁用）
     * 404 → 软冷却，不累计错误数
     * 429 + 6004 → 模型级限流；429 其他 → 账号级软限流
-    * 400 + 11101/11115/11135 → 请求级错误：不罚号，但仍换号
+    * 400 + 11101/11115/11128/11135 → 请求级错误：不罚号，但仍换号
     * 400 其他 → 请求无效（模型不存在等），不冷却凭证
     """
     codes = business_codes(body.decode("utf-8", errors="replace"))

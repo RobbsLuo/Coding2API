@@ -490,8 +490,9 @@ class Executor:
                              provider_id: str, model: str) -> None:
         """对一次上游错误作出反应：记账 + 落库，REQUEST 类零动作。
 
-        请求级错误（11101 请求体坏 / 11115 上下文超限 / 11135 图片无效）
-        不是账号的问题：冷却或累计错误数都会在阈值处把健康凭证踢掉。
+        请求级错误（11101 请求体坏 / 11115 上下文超限 / 11128 渠道风控 /
+        11135 图片无效）不是账号的问题：冷却或累计错误数都会在阈值处把健康
+        凭证踢掉。
         也绝不落库——save_error 会把已有 cooling_until 写成 NULL，
         等于顺手解掉别的错误留下的冷却。调用方只换号重试。
         """
@@ -554,6 +555,7 @@ _PROVIDER_EVENT_KINDS: dict[int, ErrKind] = {
     11102: ErrKind.BLOCKED,   # 该账号无此模型 → 负缓存
     11101: ErrKind.REQUEST,   # 请求体坏 → 不罚号
     11115: ErrKind.REQUEST,   # 上下文超限 → 不罚号
+    11128: ErrKind.REQUEST,   # 渠道风控（瞬时，窗口内自愈）→ 换号重试，不罚号
     11135: ErrKind.REQUEST,   # 图片无效 → 不罚号
 }
 

@@ -420,6 +420,7 @@ def test_event_kind_helper_covers_1005_and_other():
     (11102, ErrKind.BLOCKED),
     (11101, ErrKind.REQUEST),
     (11115, ErrKind.REQUEST),
+    (11128, ErrKind.REQUEST),
     (11135, ErrKind.REQUEST),
     (None, ErrKind.OTHER),
 ])

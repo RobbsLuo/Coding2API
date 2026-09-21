@@ -310,10 +310,13 @@ def test_classify_body_markers():
     # 「该后端无此模型」：(账号, 模型) 负缓存
     (400, b'{"code": 11102}', ErrKind.BLOCKED),
     (404, b'{"code": 11102}', ErrKind.BLOCKED),
-    # 请求级错误：不罚号，仍换号（请求体坏 / 上下文超限 / 图片无效）
+    # 请求级错误：不罚号，仍换号（请求体坏 / 上下文超限 / 渠道风控 / 图片无效）
     (400, b'{"code": 11101}', ErrKind.REQUEST),
     (400, b'{"code": 500, "msg": "Unmarshal chat params failed"}', ErrKind.REQUEST),
     (400, b'{"code": 11115, "msg": "prompt is too long"}', ErrKind.REQUEST),
+    # 渠道风控（瞬时，窗口内自愈）：曾误落 INVALID → 零重试直接 400，实测误伤
+    (400, b'{"code": 11128, "msg": "Illegal API invocation from an unapproved channel"}',
+     ErrKind.REQUEST),
     (400, b'{"code": 11135, "msg": "Invalid image data"}', ErrKind.REQUEST),
     # 裸数字不误伤：111020 不是 11102（要求带 "code": 键值形态）
     (400, b'{"trace": 1110201}', ErrKind.INVALID),
@@ -329,7 +332,8 @@ def test_classify_status_business_codes(status, body, expected):
 
 @pytest.mark.parametrize(("code", "expected"), [
     (14018, ErrKind.CREDIT), (6004, ErrKind.MODEL), (11102, ErrKind.BLOCKED),
-    (11101, ErrKind.REQUEST), (11115, ErrKind.REQUEST), (11135, ErrKind.REQUEST),
+    (11101, ErrKind.REQUEST), (11115, ErrKind.REQUEST), (11128, ErrKind.REQUEST),
+    (11135, ErrKind.REQUEST),
     (None, ErrKind.OTHER),
 ])
 def test_classify_error_code_business_codes(code, expected):
@@ -1285,6 +1289,11 @@ def _http_400() -> Exception:
     return UpstreamHTTPError(400, b'{"code":1002,"msg":"model not found"}')
 
 
+# 真实上游 400 响应体（渠道风控；实测见 TECHNICAL.md §3.2）
+_CB_11128_BODY = (
+    b'{"code":11128,"msg":"Illegal API invocation from an unapproved channel"}')
+
+
 async def test_invalid_skips_provider_and_falls_back_to_next(dual_repo):
     """CB 400（不认识模型）→ 跳过 CB，TRAE 成功接住；凭证零冷却。"""
     repo, db = dual_repo
@@ -1877,6 +1886,47 @@ async def test_stream_11101_request_error_does_not_touch_credential(dual_repo):
     rows = db.connect().execute(
         "SELECT cooling_until, err_count FROM credentials").fetchall()
     assert [tuple(row) for row in rows] == [(None, 2)] * 3   # 原样保留：没冷却也没累计
+    assert _model_cooldown_rows(db) == []
+
+
+async def test_http_400_11128_rotates_instead_of_skipping_provider(dual_repo):
+    """渠道风控 11128（400）→ REQUEST：换号重试，不是跳过上游直接 400。
+
+    修复前 11128 落 INVALID：_skip_provider 把该上游全部凭证塞进 tried，
+    should_rotate 立即为假，第一条请求就以 invalid_request 400 收尾（零重试）。
+    回归证据：真实日志里同凭证同时刻换模型即成功、同 (凭证, 模型) 秒级交替
+    成功/失败，属于瞬时风控而非模型/凭证问题。
+    """
+    repo, db = dual_repo
+    first = repo.add(provider="codebuddy", credential_data={"bearer_token": "a"})
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "b"})
+    db.connect().execute("UPDATE credentials SET pinned = 1 WHERE id = ?", (first,))
+
+    class P:
+        id = "codebuddy"
+
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream_chat(self, _cred, _payload, _model):
+            self.calls += 1
+            if self.calls == 1:
+                raise UpstreamHTTPError(400, _CB_11128_BODY)
+            for event in GOOD:
+                yield event
+
+    provider = P()
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": provider}, credentials=repo,
+        scheduler=Scheduler(max_rotate=3), default_model="glm-5.2"))
+
+    result = await executor.complete(_request(), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert provider.calls == 2                     # 换到第二个凭证重试成功
+
+    rows = db.connect().execute(
+        "SELECT cooling_until, err_count, disabled FROM credentials").fetchall()
+    assert [tuple(row) for row in rows] == [(None, 0, 0)] * 2   # 两个凭证都零惩罚
     assert _model_cooldown_rows(db) == []
 
 
