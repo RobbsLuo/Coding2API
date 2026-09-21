@@ -69,7 +69,7 @@ export function DashboardPage() {
         <Metric label="冷却中" value={formatNumber(counts.cooling)} tone="warn" icon={<Timer className="size-4" />} />
         <Metric label="已禁用" value={formatNumber(counts.disabled)} icon={<Ban className="size-4" />} />
         <Metric label="额度耗尽" value={formatNumber(counts.exhausted)} tone="danger" icon={<BatteryLow className="size-4" />} />
-        <Metric label="已关闭" value={formatNumber(counts.off)} icon={<ToggleLeft className="size-4" />} />
+        <Metric label="已暂停" value={formatNumber(counts.off)} icon={<ToggleLeft className="size-4" />} />
       </section>
 
       <Panel title="健康度三态分布">

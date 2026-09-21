@@ -25,6 +25,7 @@ upstream channels, with a shared credential pool, unified scheduling, and per-us
 - **Usage charts**: request trends by upstream, per-model trends (Top N), and per-upstream breakdown, all labeled with official brand logos
 - **Hardened admin surface**: login rate limiting (global/IP/username + PBKDF2 concurrency cap), CSRF checks on writes, request body limits, security headers, Host allowlist
 - **Model catalog hygiene**: `MODEL_BLOCKLIST` filters placeholder/legacy models; cached model list as fallback when upstreams fail; credit rates and token limits passed through to `/v1/models` and the Playground
+- **Per-credential pause**: the admin credential menu's "Pause" removes one credential from *chat traffic only* — quota probing, token refresh, daily check-in, growth-center and activity-report tasks keep running (they only honor the system hard-disable `disabled`). Unlike "Disabled", which means the upstream rejected the session and requires re-login plus "Restore"
 
 ## Quick start
 

@@ -94,7 +94,10 @@ export const STATE_LABEL: Record<CredentialState, string> = {
   ready: "可用",
   cooling: "冷却中",
   disabled: "已禁用",
-  off: "已关闭",
+  // 「已暂停」= enabled=0（管理员软开关）：只摘出对话流量，签到 / token
+  // 刷新 / 成长中心 / 额度探测照常跑（实测：tasks 只检查 disabled，不检查
+  // enabled）。用「暂停」而非「停用/关闭」，避免被读成整条凭证停摆。
+  off: "已暂停",
   exhausted: "额度耗尽",
 };
 

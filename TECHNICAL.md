@@ -449,7 +449,9 @@ class Provider(Protocol):
         无则回落消息前缀指纹；带 `user_id` 时不派生前缀兜底键（B1.5；
         CONVERSATION_STICKY_SECONDS，≤0 关闭）
      d. pin 优先：pinned 凭证属于候选 provider 且 healthy → 直接用
-     e. 过滤 healthy（enabled=1, disabled=0, 非冷却中）
+     e. 过滤 healthy（enabled=1, disabled=0, 非冷却中）。注意 enabled=0（管理台
+        「暂停」）只作用于本条对话选号路径：后台任务（签到 / token 刷新 /
+        成长中心 / 额度探测）只检查 disabled，因此暂停期间照常运行
      f. 到期积分排序（两级字典序）：把 quota_expiry_ladder 中「距到期 ≤
         QUOTA_EXPIRY_WINDOW_SECONDS」（默认 36h）的积分加总，多的先用；打平
         （含都为 0）再比「距到期 ≤ QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS」

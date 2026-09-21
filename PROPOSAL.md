@@ -38,6 +38,7 @@
 | Q30 | License | MIT + NOTICE 三方溯源，不做自更新 |
 | Q31 | 到期积分排序 | 两级字典序：主窗口（36h）+ 次窗口（7 天）内到期积分总量依次做排序键（均 env 可配）；落库到期阶梯而非单一日期 |
 | Q32 | Responses 出口 | v1 只做 `chat/completions` 子集：`POST /v1/responses` 与 chat 共用同一 executor，出口 translator 可注入；`include`/`store`/`previous_response_id` 按 Codex CLI 实测取舍（见 TECHNICAL §3.7） |
+| Q33 | 凭证暂停语义 | 复用现有 `enabled`（不新增 `manual_disabled` 列）：`enabled=0` 实测已只摘对话流量，后台任务（签到/刷新/成长/探测）只认 `disabled`；UI 文案统一为「暂停/取消暂停」以区别于系统禁用后的「恢复」（见计划 B3.1 实测收窄） |
 
 ## 2. 目标与非目标
 

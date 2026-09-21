@@ -35,7 +35,7 @@ export interface Credential {
   id: string;
   provider: Provider;
   nickname: string;
-  /** 用户软开关 */
+  /** 软开关：1=参与对话选号；0=暂停（只摘对话流量，后台任务照常） */
   enabled: 0 | 1;
   /** session 死亡硬禁用 */
   disabled: 0 | 1;

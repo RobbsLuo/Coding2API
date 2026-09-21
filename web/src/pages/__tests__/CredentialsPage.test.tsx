@@ -208,7 +208,7 @@ describe("CredentialsPage", () => {
     expect(screen.queryByTestId("model-cooldowns-plain")).not.toBeInTheDocument();
   });
 
-  it("启用/停用调用 toggle 接口", async () => {
+  it("暂停/取消暂停调用 toggle 接口", async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/toggle")) return jsonResponse({ ok: true });
@@ -219,7 +219,7 @@ describe("CredentialsPage", () => {
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
     await userEvent.click(screen.getByTestId("actions-cred_1"));
-    await userEvent.click(screen.getByRole("menuitem", { name: "停用" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "暂停" }));
 
     await waitFor(() =>
       expect(fetchSpy).toHaveBeenCalledWith(
