@@ -6,6 +6,7 @@ import {
   MoreHorizontal,
   Pin,
   Power,
+  Radio,
   RefreshCw,
   Sparkles,
   Trash2,
@@ -95,6 +96,7 @@ interface Actions {
   probe: (credential: Credential) => void;
   checkin: (credential: Credential) => void;
   growth: (credential: Credential) => void;
+  activity: (credential: Credential) => void;
 }
 
 export function CredentialsPage() {
@@ -222,6 +224,23 @@ export function CredentialsPage() {
           await refresh();
         } catch (caught) {
           setError(caught instanceof Error ? caught.message : "成长中心执行失败");
+        } finally {
+          setBusy(false);
+        }
+      })(),
+    activity: (credential) =>
+      void (async () => {
+        setBusy(true);
+        setError(null);
+        setNotice(null);
+        try {
+          const result = await api.reportActivity(credential.id);
+          setNotice(result.ok
+            ? "活跃上报成功（已补发一条对话事件）"
+            : `活跃上报失败：${result.message || "未知原因"}`);
+          await refresh();
+        } catch (caught) {
+          setError(caught instanceof Error ? caught.message : "活跃上报失败");
         } finally {
           setBusy(false);
         }
@@ -455,6 +474,7 @@ export function CredentialsPage() {
           { term: "探测 / 签到", where: "操作列", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（每天 9 点系统自动签到）。" },
           { term: "指定 / 停用 / 删除", where: "操作列", meaning: "指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。停用：临时移出调度池不删数据。删除：彻底移除凭证。" },
           { term: "模型避让（额度列下方）", where: "额度列", meaning: "某个模型在该账号上限流（6004）或该账号无此模型（11102）时只避让这一个模型——整条凭证仍参与调度，换其他模型立刻可用。模型限流按 10 分钟起指数退避，最长 2 小时；「无此模型」按 6 小时起，最长 24 小时。" },
+          { term: "成长中心 / 活跃上报", where: "操作列", meaning: "成长中心：手动跑一轮成长中心领取（与定时任务同一条路径）。活跃上报：手动补发一条对话事件以续上「连登天数」——默认关闭的定时任务不做，这里仅供部署后验证；官方条款禁止脚本篡改活动数据，开启/使用前请自行评估账号风险。" },
         ]}
       />
 
@@ -657,6 +677,11 @@ function Row({
                   {credential.provider === "codebuddy" && (
                     <DropdownMenuItem onSelect={() => actions.growth(credential)}>
                       <Sparkles className="size-4" /> 成长中心
+                    </DropdownMenuItem>
+                  )}
+                  {credential.provider === "codebuddy" && (
+                    <DropdownMenuItem onSelect={() => actions.activity(credential)}>
+                      <Radio className="size-4" /> 活跃上报
                     </DropdownMenuItem>
                   )}
                   <DropdownMenuSeparator />

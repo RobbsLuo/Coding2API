@@ -236,6 +236,12 @@ export interface GrowthRunResult {
   steps: GrowthStepResult[];
 }
 
+/** 活跃上报（B1.7）单次结果 */
+export interface ActivityReportResult {
+  ok: boolean;
+  message: string;
+}
+
 /** 成长中心运行记录（growth_events 表一行） */
 export interface GrowthEvent {
   id: string;

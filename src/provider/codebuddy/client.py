@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from .activity import ActivityResult
     from .checkin import CheckinResult
 
 import httpx
@@ -502,6 +503,7 @@ def _cycle_end_epoch(value: Any) -> int | None:
 _CHECKIN_CACHE: dict[int, object] = {}
 _REFRESH_CACHE: dict[int, object] = {}
 _GROWTH_CACHE: dict[int, object] = {}
+_ACTIVITY_CACHE: dict[int, object] = {}
 
 
 def _cached_checkin(client: CodeBuddyClient):
@@ -523,6 +525,17 @@ def _cached_growth(client: CodeBuddyClient):
     if cached is None:
         cached = CodeBuddyGrowth(client.endpoint, client=client._short)
         _GROWTH_CACHE[key] = cached
+    return cached
+
+
+def _cached_activity(client: CodeBuddyClient):
+    from .activity import CodeBuddyActivity
+
+    key = id(client)
+    cached = _ACTIVITY_CACHE.get(key)
+    if cached is None:
+        cached = CodeBuddyActivity(client.endpoint, client=client._short)
+        _ACTIVITY_CACHE[key] = cached
     return cached
 
 
@@ -597,7 +610,8 @@ class CodeBuddyProvider:
         await self.client.aclose()
         for cached in (_CHECKIN_CACHE.pop(id(self.client), None),
                        _REFRESH_CACHE.pop(id(self.client), None),
-                       _GROWTH_CACHE.pop(id(self.client), None)):
+                       _GROWTH_CACHE.pop(id(self.client), None),
+                       _ACTIVITY_CACHE.pop(id(self.client), None)):
             closer = getattr(cached, "aclose", None)
             if callable(closer):
                 await closer()
@@ -635,6 +649,38 @@ class CodeBuddyProvider:
         runner = GrowthRunner(_cached_growth(self.client),
                               allow_irreversible=allow_irreversible)
         return await runner.run(credential)
+
+    async def activity(self, credential_data: dict) -> ActivityResult:
+        """活跃上报一条 chat_request_send（B1.7，可选，默认关闭）。
+
+        只发一条：与官方「单日一次对话」等价。userId 必填，缺失直接判失败。
+        """
+        from .activity import resolve_user_id
+
+        credential = CodeBuddyCredential.from_dict(credential_data)
+        if not resolve_user_id(credential):
+            from .activity import ActivityResult
+
+            return ActivityResult(ok=False,
+                                  message="无法确定账号 userId（凭证与 token 均无）")
+        client = _cached_activity(self.client)
+        return await client.report_chat(credential)
+
+    def activity_scope(self, credential_data: dict) -> str:
+        """活跃上报隔离键：endpoint + userId（回落 JWT sub）。
+
+        与 checkin_scope 不同：签到用 account_uid/user_id（本网关实测为空，
+        会回落到 credential_id），而上报的 userId 可从 JWT sub 取到，故同账号
+        多凭证能正确共享「每天一次」。身份都取不到时返回空串，由调用方回落到
+        credential_id（最坏多报一次，上游按天去重）。
+        """
+        from .activity import resolve_user_id
+
+        credential = CodeBuddyCredential.from_dict(credential_data)
+        user_id = resolve_user_id(credential)
+        if not user_id:
+            return ""
+        return f"{self.client.endpoint.rstrip('/')}|{user_id}"
 
     def checkin_scope(self, credential_data: dict) -> str:
         """签到隔离键：endpoint + X-User-Id；身份未知时返回空串（调用方回落到凭证 ID）。

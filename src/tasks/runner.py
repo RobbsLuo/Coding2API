@@ -14,6 +14,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+from .activity import ActivityTask
 from .checkin import CheckinTask
 from .growth import GrowthTask
 from .pacer import Pacer
@@ -33,6 +34,7 @@ class TaskRunner:
         quota_probe: QuotaProbeTask,
     checkin: CheckinTask,
     growth: GrowthTask | None = None,
+    activity: ActivityTask | None = None,
     refresh: RefreshTask,
     retention: RetentionTask,
     quota_probe_minutes: int = 60,
@@ -43,6 +45,7 @@ class TaskRunner:
         self._quota_probe = quota_probe
         self._checkin = checkin
         self._growth = growth
+        self._activity = activity
         self._refresh = refresh
         self._retention = retention
         self._quota_interval = max(60, quota_probe_minutes * 60)
@@ -51,6 +54,9 @@ class TaskRunner:
         self._growth_interval = max(300, growth_interval_minutes * 60)
         self._refresh_interval = max(60, refresh_interval_minutes * 60)
         self._retention_interval = max(60, retention_interval_minutes * 60)
+        # 活跃上报：每 10 分钟醒一次看时点（due() 只在配置小时窗口内放行），
+        # 而不是整点只醒一次——服务恰在整点重启会整天漏报
+        self._activity_interval = 600
         self._tasks: list[asyncio.Task[None]] = []
 
     async def start(self) -> None:
@@ -65,6 +71,8 @@ class TaskRunner:
         ]
         if self._growth is not None:
             loops.append(("成长中心", self._sync_growth, self._growth_interval))
+        if self._activity is not None:
+            loops.append(("活跃上报", self._sync_activity, self._activity_interval))
         for name, runner, interval in loops:
             self._tasks.append(asyncio.create_task(self._loop(name, runner, interval)))
 
@@ -72,6 +80,13 @@ class TaskRunner:
         """成长中心一轮：领礼物 / 派 Buddy / 任务 / 补登 / 兑换 / 抽奖 / 盲盒。"""
         assert self._growth is not None
         return await self._growth.run_once()
+
+    async def _sync_activity(self) -> object:
+        """活跃上报：仅配置小时窗口内执行，成功凭证当日封账（run_once 内跳过）。"""
+        assert self._activity is not None
+        if not self._activity.due():
+            return None
+        return await self._activity.run_once()
 
     async def _sync_checkin(self) -> object:
         """全天每 10 分钟一轮；成功凭证当日封账（run_once 内跳过），失败凭证持续重试。"""
@@ -116,6 +131,7 @@ def build_runner(credentials, providers: dict, stats_collector, config,
 
     growth_events 为 None 时（老调用方/测试）不装配成长中心任务：没有落库目标
     就跑起来只会把结果丢掉；生产路径（main.py）总是传入。
+    活跃上报（B1.7）默认关闭：只有 activity_report_enabled=True 才装配。
     """
     pacer = Pacer(config.pacer_min_seconds, config.pacer_max_seconds)
     growth = None
@@ -123,10 +139,15 @@ def build_runner(credentials, providers: dict, stats_collector, config,
         growth = GrowthTask(credentials, providers, growth_events,
                             allow_irreversible=config.growth_irreversible_actions,
                             pacer=pacer)
+    activity = None
+    if config.activity_report_enabled:
+        activity = ActivityTask(credentials, providers, events=growth_events,
+                                hour=config.activity_report_hour)
     return TaskRunner(
         quota_probe=QuotaProbeTask(credentials, providers, pacer),
         checkin=CheckinTask(credentials, providers),
         growth=growth,
+        activity=activity,
         refresh=RefreshTask(credentials, providers, skew_seconds=config.refresh_skew_hours * 3600,
                             now=lambda: int(time.time())),
         retention=RetentionTask(stats_collector, credentials=credentials),

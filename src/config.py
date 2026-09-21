@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # 需要保守部署时可关闭：关闭后仍会领取旅行礼物与任务奖励。
     growth_interval_minutes: int = 60
     growth_irreversible_actions: bool = True
+    # 活跃上报（B1.7，仅 CodeBuddy）：默认关闭。给账号补发一条对话事件，续上
+    # 成长中心连登天数/活跃地图，与积分、调度无关。官方条款禁止脚本篡改活动
+    # 数据（处罚为取消资格并追回礼品），开启前请评估账号风险；上游改版即失效。
+    activity_report_enabled: bool = False
+    activity_report_hour: int = 10          # 本地（北京）时间整点窗口内执行一次
     pacer_min_seconds: float = 5
     pacer_max_seconds: float = 20
     # CodeBuddy 聊天最小间隔：与 TRAE 共享的最小请求间隔，避开两渠道各自的

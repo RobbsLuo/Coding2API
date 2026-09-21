@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends
 
 from ..auth.rbac import require_admin
 from ..compat.openai.request import InvalidRequest
+from ..provider.base import GrowthResult, GrowthStep, StepStatus
 from .deps import Services, csrf_protected, principal_from_request
 
 logger = logging.getLogger(__name__)
@@ -210,6 +211,34 @@ def create_router(services: Services) -> APIRouter:
                 "session_dead": result.session_dead,
                 "steps": [{"name": step.name, "status": step.status, "detail": step.detail,
                            "credit": step.credit} for step in result.steps]}
+
+    @router.post("/api/credentials/{credential_id}/activity")
+    async def run_activity(credential_id: str,
+                           _csrf: None = Depends(csrf_protected),
+                           principal=Depends(principal_from_request)):
+        """手动补发一条活跃上报（B1.7）：与定时任务同一条路径。
+
+        独立于 activity_report_enabled 开关：定时任务默认关闭不影响管理员在
+        管理台手动补报一次（用途就是部署后验证闭环）。结果记一行 growth_events。
+        """
+        require_admin(principal)
+        provider_id = credentials.provider_of(credential_id)
+        provider = registry.get(provider_id or "")
+        data = credentials.credential_data(credential_id)
+        activity = getattr(provider, "activity", None)
+        if provider is None or data is None or activity is None:
+            raise InvalidRequest("credential does not support activity report")
+        result = await activity(data)
+        if result.ok:
+            detail = result.message or "已上报一条对话事件"
+            services.growth_events.record(
+                credential_id=credential_id, trigger="manual",
+                result=GrowthResult(
+                    report=f"活跃上报：{detail}",
+                    steps=[GrowthStep("活跃上报", StepStatus.DONE, detail)]))
+        logger.info("管理员 %s 手动活跃上报 %s（ok=%s）", principal.username,
+                    credential_id, result.ok)
+        return {"ok": result.ok, "message": result.message}
 
     @router.get("/api/credentials/{credential_id}/accounts")
     async def list_credential_accounts(credential_id: str,

@@ -20,6 +20,10 @@ services:
       # （抽奖/连登兑换/开 Buddy 盲盒/消耗补登卡）
       GROWTH_INTERVAL_MINUTES: ${GROWTH_INTERVAL_MINUTES:-60}
       GROWTH_IRREVERSIBLE_ACTIONS: ${GROWTH_IRREVERSIBLE_ACTIONS:-true}
+      # 活跃上报（B1.7，仅 CodeBuddy，默认关闭）：补发一条对话事件续连登；
+      # 官方条款禁止脚本篡改活动数据，开启前请自行评估账号风险
+      ACTIVITY_REPORT_ENABLED: ${ACTIVITY_REPORT_ENABLED:-false}
+      ACTIVITY_REPORT_HOUR: ${ACTIVITY_REPORT_HOUR:-10}
       # 到期排序窗口（秒）：把距到期 ≤ 该值的积分加总，多的账号先用；≤0 关闭
       QUOTA_EXPIRY_WINDOW_SECONDS: ${QUOTA_EXPIRY_WINDOW_SECONDS:-129600}
       # 会话粘性 TTL（秒）：同一对话多轮请求固定用同一凭证；≤0 关闭

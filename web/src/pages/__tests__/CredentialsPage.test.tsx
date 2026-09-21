@@ -615,7 +615,22 @@ describe("CredentialsPage 成长中心", () => {
     await settle();
     await userEvent.click(screen.getByTestId("actions-cred_1"));
     expect(screen.queryByRole("menuitem", { name: "成长中心" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menuitem", { name: "活跃上报" })).not.toBeInTheDocument();
     expect(screen.getByRole("menuitem", { name: "签到" })).toBeInTheDocument();
+  });
+
+  it("CodeBuddy 手动活跃上报：成功/失败各自给出人话反馈", async () => {
+    mockFetch({
+      "/activity": { ok: false, message: "无法确定账号 userId" },
+      "/api/credentials": listBody([makeCredential({ provider: "codebuddy" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "活跃上报" }));
+    expect(await screen.findByTestId("credentials-notice")).toHaveTextContent(
+      "活跃上报失败：无法确定账号 userId",
+    );
   });
 
   it("CodeBuddy 手动执行成长中心：展示逐条结果并区分「未执行/已关闭」", async () => {

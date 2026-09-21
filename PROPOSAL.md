@@ -72,7 +72,8 @@
   写入 `buddy/travel/claim`、`buddy/travel/depart`、`tasks/accept`、`makeup-cards/use`、`redeem`、`lottery/draw`、`buddy/open`
 - 鉴权头与聊天一致（`Authorization` + `X-User-Id` + `X-Domain`）；成长中心实测可用项目内的 OAuth bearer 凭证直连，无需桌面端凭据文件
 - 成长中心任务契约（2026-09）：`accept_status` 五态；接单 `POST /tasks/accept` 收 `{"task_codes": [...]}`（单数一律 400）；领奖 `POST /tasks/{code}/claim`；`/redeem` 的 `tier` 是档位标识 `"7d"/"14d"/"28d"`，实发字段是 `*_granted`
-- **活跃度的驱动来源（实测，勿凭单次实验下结论）**：活动类操作（领取成长中心奖励等）**计入**——两天无桌面端使用、仅差别在有无领取动作，`score` 就从 0 变 5；而纯 `/v2/chat/completions` 对话**不计入**（3 次完整对话后 `today.score` 与 `updated_at` 均不动）。连登天数含 1 天容忍窗口（H5 规则原文：按「连续登录且使用的天数」计，每月清零）。热力墙分档 = score 0 / 1-10 / 11-30 / 31-60 / >60，每日 02:00 批算。**与积分无关，不参与调度决策；不实现伪造客户端行为**（H5 条款明禁模拟器/脚本篡改数据，处罚为取消资格并追回已发礼品）
+- **活跃度的驱动来源（实测，勿凭单次实验下结论）**：活动类操作（领取成长中心奖励等）**计入**——两天无桌面端使用、仅差别在有无领取动作，`score` 就从 0 变 5；而纯 `/v2/chat/completions` 对话**不计入**（3 次完整对话后 `today.score` 与 `updated_at` 均不动）。连登天数含 1 天容忍窗口（H5 规则原文：按「连续登录且使用的天数」计，每月清零）。热力墙分档 = score 0 / 1-10 / 11-30 / 31-60 / >60，每日 02:00 批算。**与积分无关，不参与调度决策**
+- **活跃上报（B1.7，默认关闭）**：`POST /v2/report`（与聊天同基址），body 为 `[chatRequestSendEvent]`（`eventCode=chat_request_send`，全字段），`userId` 必填——缺失时上游 HTTP 200 `code:0` 但静默丢弃（连登不变）。OAuth 凭证 `account_uid`/`user_id` 实测为空，回落 bearer JWT 的 `sub`。实测一条即点亮连登（1→2）。**默认关闭**：H5 条款明禁模拟器/脚本篡改数据，处罚为取消资格并追回已发礼品；事件形状依赖上游实现、改版即失效，不作为可靠性功能
 - **凭证身份可能为空**：OAuth 登录路径下上游账号接口未回填 `account_uid`/`user_id`（实测发生），签到/成长中心的同账号隔离必须回落到 `credential_id`,否则第二个账号会被静默跳过
 - 请求头需 `X-Domain`、`X-User-Id`、`X-Enterprise-Id`、`X-Department-Info`（部门名须 UTF-8 百分号编码）
 - **reasoning 字段当前直接透传，不做注入也不剥离**（实测 71 份真实请求 dump）：客户端自己会带 `reasoning_effort`（69/71，只有 `low`/`medium` 两档，非推理模型如 `hy3` 不带），也会在历史 assistant 消息里回传 `reasoning_content`（51/71，含带 `tool_calls` 的消息），上游原样接受（`deepseek-v4.1-flash` 4260 次请求 99.6% 成功）。因此既不需要「effort 档位映射」，也不存在「客户端丢弃 reasoning_content」这一前提；`enable_thinking` 只在客户端未给时补 `true`
@@ -235,7 +236,7 @@ v1 只接 OpenAI 出口，但上游 SSE 解析到「中立事件」这一步独�
 - **API Key 存摘要**：SHA-256，明文仅创建时返回一次
 - **凭证加密列**：`data_enc` 走 Fernet，调度状态（`health` / `cooling_until` / `err_count` / `pinned` / `quota_expiry_ladder`）落库，进程重启不丢冷却状态与到期阶梯
 - **用量脱敏**：`usage_events`（明细 90 天）+ `usage_hourly`（小时汇总永久），`credit`/`cached_tokens` 可空仅辅助展示
-- **成长中心**：`growth_events` 只存汇总行（一轮一行人话汇报 + 积分/能量/连签 + trigger），不存活动内部数据结构；`credentials.growth_last_run_at/growth_last_result` 供列表直接显示
+- **成长中心**：`growth_events` 只存汇总行（一轮一行人话汇报 + 积分/能量/连签 + trigger），不存活动内部数据结构；`credentials.growth_last_run_at/growth_last_result` 供列表直接显示；活跃上报（B1.7）复用该表记一行，不新增表
 - 签到去重与模型列表缓存均进程内实现，不进库
 
 DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见 [TECHNICAL.md §7](TECHNICAL.md)。

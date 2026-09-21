@@ -6,6 +6,7 @@ import type {
   CredentialsResponse,
   GrowthEvent,
   GrowthRunResult,
+  ActivityReportResult,
   ModelInfo,
   ProbeResult,
   ProviderStats,
@@ -87,6 +88,8 @@ export const api = {
     request<GrowthRunResult>(`/api/credentials/${id}/growth`, { method: "POST" }),
   growthHistory: (id: string) =>
     request<{ events: GrowthEvent[] }>(`/api/credentials/${id}/growth`),
+  reportActivity: (id: string) =>
+    request<ActivityReportResult>(`/api/credentials/${id}/activity`, { method: "POST" }),
 
   // ------------------------------------------------------------ 渠道登录
   upstreamStart: (provider: string) =>

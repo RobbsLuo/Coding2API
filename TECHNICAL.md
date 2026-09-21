@@ -291,6 +291,31 @@ model/messages/tools/stream/stream_options/store/reasoning_effort）**未观测�
 `*-lkeap`（两边清单零命中，无从核实）、`aquila` / `sagitta` /
 `seed-code-pro-0430`（TRAE 实测均正常 chat，虽名字可疑但可用）。
 
+### 3.6 活跃上报（B1.7，默认关闭）
+
+CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端对话事件；账号只被网关
+自动调用时会断连登。`ACTIVITY_REPORT_ENABLED=true` 时 `src/tasks/activity.py` 每天在
+`ACTIVITY_REPORT_HOUR`（默认 10 点，北京时间）整点窗口内，为每个上游账号补发**一条**
+`chat_request_send`；按「endpoint + userId」隔离，当日成功即封账（内存态），失败下轮
+重试。协议在 `src/provider/codebuddy/activity.py`。
+
+实测（2026-09-21，直连 CN 上游，端到端点亮连登 1→2）：
+
+| 项 | 实测结论 |
+|---|---|
+| 端点 | `POST {endpoint}/v2/report`（与聊天同基址 `copilot.tencent.com`），HTTP 200 `{"code":0,"msg":"OK"}` |
+| 请求体 | **事件数组** `[chatRequestEvent]`（非单对象），`eventCode=chat_request_send`，全字段形状（36 键） |
+| `userId` | **必填**。缺失时上游 HTTP 200 `code:0` 但**静默丢弃**（连登不变，实测复现） |
+| userId 来源 | OAuth 凭证的 `user_id`/`account_uid` 实测**为空**（上游账号接口未回填），回落 bearer JWT 的 `sub`（36 位 UUID，实测有效）；取不到则跳过，绝不编造 |
+| `X-User-Id` | 与 body `userId` 同时带上（body 是必要项；头补一份更稳） |
+| 频率 | 每号每天 1 条即可，不做多时点高频上报 |
+
+**刻意不做**：计划原拟的「三套客户端指纹」（CLI / 桌面 / Web+小程序）。实测现有
+CLI 指纹（`build_headers`）即可被接受，无需切换身份；多套指纹只增加失败面。
+
+**风险声明**：官方活动条款禁止模拟器/脚本篡改活动数据（处罚为取消资格并追回礼品）。
+默认关闭；事件名与形状依赖上游实现，改版即失效，**不作为可靠性功能**。
+
 ---
 
 ## 4. Provider 协议（Q16=A 细接口）
@@ -419,6 +444,7 @@ class Scheduler:
 | token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token |
 | 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态，重启重建）；失败凭证持续重试，同账号多凭证共享一次 |
 | 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5 分钟） | 仅 CodeBuddy：领旅行礼物 / 派 Buddy / 领取新任务 / 领任务奖 / 断登补登 / 连登兑换 / 开盲盒 / Buddy 盲盒；结果落 `growth_events` + 回写 `credentials.growth_last_result` |
+| 活跃上报（activity.py，默认关闭） | 每 10 分钟醒一次，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点，北京时间）窗口内执行 | 仅 CodeBuddy：补发一条 `chat_request_send` 续连登；按「endpoint + userId」隔离，当日封账；成功落一行 `growth_events` |
 | 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理 |
 
 **签到 / 成长中心的「同账号」隔离键**：`checkin_scope(data) or f"credential|{credential_id}"`。

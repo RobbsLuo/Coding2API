@@ -108,6 +108,23 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 `GROWTH_IRREVERSIBLE_ACTIONS=false` 可全部跳过（仍会领旅行礼物与任务奖励）。
 管理台凭证列表的「成长中心」列显示每个账号最近一轮的结果，行内菜单可手动执行一次。
 
+### 活跃上报（可选，默认关闭）
+
+CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端对话事件。若账号长期
+只被本网关自动调用（没有真实客户端对话），连登会断。`ACTIVITY_REPORT_ENABLED=true`
+时，后台任务每天在 `ACTIVITY_REPORT_HOUR`（默认 10 点）所在的整点窗口内，为每个
+账号补发**一条** `chat_request_send` 事件，续上连登——与积分、调度无关，上报失败
+不影响任何聊天请求。管理台凭证行内菜单也可手动补报一次（不受该开关影响）。
+
+> ⚠️ **风险与限制**：官方活动条款禁止使用模拟器/脚本篡改活动数据，处罚为**取消
+> 资格并追回已发礼品**。本功能默认关闭，开启前请自行评估账号风险。上报的事件名与
+> 请求形状依赖上游实现，**上游改版即失效**，不承诺任何收益。因此它**不作为可靠性
+> 功能**，也不接收依赖「产品内真实功能使用」的任务。
+>
+> 实测（2026-09-21）：上游对缺少 `userId` 的上报返回 HTTP 200 `{"code":0}` 但
+> **静默丢弃**（连登不变）。本网关的 OAuth 凭证 `user_id`/`account_uid` 可能为空，
+> 此时从 bearer JWT 的 `sub` 取 userId，缺失则跳过（绝不编造）。
+
 ## 配置
 
 常用项如下；完整的可配置项见 `src/config.py`（权威），且**每一个都已透传到 `docker-compose.yml`**——`.env` 里写这些变量即可生效（compose 的 `.env` 只做插值，未透传的变量不会进容器）。
@@ -125,6 +142,8 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |
 | `GROWTH_INTERVAL_MINUTES` | `60` | 成长中心（仅 CodeBuddy）一轮领取的周期；下限 5 分钟 |
 | `GROWTH_IRREVERSIBLE_ACTIONS` | `true` | 是否允许成长中心的不可逆动作：抽奖、连登兑换、开 Buddy 盲盒、消耗补登卡。`false` 时仍会领取旅行礼物与任务奖励 |
+| `ACTIVITY_REPORT_ENABLED` | `false` | 活跃上报（仅 CodeBuddy）：每天为账号补发一条对话事件续连登。**默认关闭**——官方条款禁止脚本篡改活动数据（处罚为取消资格并追回礼品），上游改版即失效，不作为可靠性功能（见上文「活跃上报」） |
+| `ACTIVITY_REPORT_HOUR` | `10` | 活跃上报的本地（北京）时间整点窗口；仅在 `ACTIVITY_REPORT_ENABLED=true` 时生效 |
 | `QUOTA_EXPIRY_WINDOW_SECONDS` | `129600` | 到期排序窗口：把距到期 ≤ 该秒数的积分加总，多的账号先用（避免积分过期浪费）；`≤0` 关闭，退回纯健康度排序 |
 | `CONVERSATION_STICKY_SECONDS` | `3600` | 会话粘性 TTL：优先按请求体显式会话标识（`conversation_id`/`conversationId`/`prompt_cache_key`，metadata 或顶层），无则回落消息前缀指纹，多轮请求固定用同一凭证（手动 pin 的凭证优先，粘性让位）；带 `user_id` 时不派生前缀兜底键（避免并行对话误钉同一号）；凭证出错仍会轮换，成功后重新粘定；`≤0` 关闭 |
 | `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,hunyuan-image-*` | 模型列表黑名单（fnmatch，仅影响列表展示，直连指定不受影响）；默认值按两边上游实测清单补入内部/不可用模型（`default` 零内容、`hunyuan-image-*` 400 11103），刻意不含 `*-volc` 与 `aquila`/`sagitta`/`seed-code-pro-0430`（实测可正常 chat）（见 TECHNICAL.md §3.5） |
