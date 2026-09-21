@@ -146,6 +146,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                          expiry_window=config.quota_expiry_window_seconds),
                                      default_model=config.default_model,
                                      stats=stats_collector,
+                                     max_auto_continues=config.auto_continue_max,
                                      affinity=ConversationAffinity(
                                          ttl_seconds=config.conversation_sticky_seconds),
                                      upstream_model_name=lambda provider_id, model_name: (

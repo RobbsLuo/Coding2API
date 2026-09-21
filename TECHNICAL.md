@@ -223,6 +223,34 @@ def health(q: Quota | None) -> HealthScore:
 
 调度排序：`known DESC > unknown（中性参与）> exhausted(-1)`。
 
+### 3.4 截断续写（B1.4，按实测收窄）
+
+上游以 `finish_reason == "length"` 结束本轮流时，同凭证自动续写，最多
+`AUTO_CONTINUE_MAX`（默认 10，0 关闭）。实现在 `src/engine/continuation.py`
+的 `ContinuationStream`：包装上游事件流，截断则追加「已产出正文（含
+reasoning）+ 续写指令」重发，并把输出上限两键归零（否则在同一处再次截断），
+跨轮累计 usage，末端补发一条累计 usage + 最后一轮真实 `finish_reason`。
+做成事件流包装器而非 executor 内重跑，凭证固定、轮换/记账/统计零改动。
+
+**为什么不实现已批准计划里的其余三类判据**（2026-09-21 直连上游实测，
+36+ 请求，交错中性对照排除频率窗口假因）：
+
+| 判据 | 实测结论 |
+|---|---|
+| 仅 reasoning 无正文 | 真实存在，但**只在客户端下发 `max_tokens` 时**出现：glm-5.3-flash `max_tokens` 8/24/64 → content=0 / reasoning=33/96/307，`finish_reason=length`。生产路径（PI 等）只发 `reasoning_effort`，不发任何 max 键；本网关也不做 max 键映射 → 该形态在生产不可达。凭空加启发式会把「模型就是想空回」误判成截断 |
+| 空正文无工具调用 | 本机 5744 条统计 **0 例**，无证据 |
+| 代码块未闭合 | 纯启发式，**无任何实测支撑**，不做 |
+
+另两条实测事实（影响 `length` 可观测性）：
+- `max_completion_tokens` 被 CB 上游**完全忽略**（`=1` 仍出 59 tokens，无该键
+  亦同）；`max_tokens` 才生效（精确截断 + `length`）；两键同发时后者胜出。
+  TRAE 对两个键**都不生效**（80/80/80 字符）。
+- CB 的 `usage.reasoning_tokens` 恒为 `None`（口径差异，见 §3.1）；
+  `enable_thinking: false` 被上游**忽略**（仍产 reasoning 且计入 `max_tokens`）。
+
+参考实现（IceeAn/codebuddy2api）只**统计** `finish_reason`，**不实现**续写，
+故本项无照搬蓝本，全部依据上述直连实测。
+
 ---
 
 ## 4. Provider 协议（Q16=A 细接口）

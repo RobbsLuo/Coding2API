@@ -18,6 +18,7 @@ from ..compat.openai.response import (
 )
 from ..db.repo import CredentialRepository
 from ..provider.base import ErrKind, Event, EventKind
+from .continuation import ContinuationStream
 from .model_resolver import ModelTarget, resolve
 from .scheduler import Scheduler
 
@@ -49,6 +50,9 @@ class ExecutorDeps:
     # 会话粘性（ConversationAffinity）；None 表示关闭。对话进行中固定用原
     # 凭证，出错才轮换，成功后重新粘定实际服务的凭证
     affinity: Any | None = None
+    # 截断续写上限（B1.4）：上游 finish_reason=length 时同凭证续写，最多该次数；
+    # 0 关闭。续写在事件流包装器内完成，不参与凭证轮换
+    max_auto_continues: int = 0
 
     def record(self, **fields: Any) -> None:
         """统计写入失败绝不能影响聊天响应。"""
@@ -185,8 +189,8 @@ class Executor:
             state.provider, state.credential_id = provider_id or "-", credential_id
             tried.add(credential_id)
             try:
-                async for event in self._deps.providers[provider_id].stream_chat(
-                    credential_data, request.raw, self._upstream_model(provider_id, target.model)
+                async for event in self._stream_source(
+                    provider_id, credential_data, request.raw, target.model,
                 ):
                     if event.kind is EventKind.ERROR:
                         kind = _event_kind(event)
@@ -256,6 +260,22 @@ class Executor:
                 yield _unavailable_frame(last_error)
                 return
 
+    def _stream_source(self, provider_id: str, credential_data: dict[str, Any],
+                       payload: dict[str, Any], model: str) -> AsyncIterator[Event]:
+        """上游事件流入口；开启截断续写时包一层（B1.4）。
+
+        续写在包装器内固定用同一凭证续发请求，因此凭证轮换/记账/统计
+        逻辑完全不需要感知它——executor 只会看到一条更长的流。
+        """
+        upstream_model = self._upstream_model(provider_id, model)
+        stream = self._deps.providers[provider_id].stream_chat(
+            credential_data, payload, upstream_model)
+        if self._deps.max_auto_continues <= 0:
+            return stream
+        return ContinuationStream(
+            self._deps.providers[provider_id], credential_data, payload,
+            upstream_model, max_continues=self._deps.max_auto_continues)
+
     def _record_success(self, target: ModelTarget, state: _StreamState,
                         provider_id: str, credential_id: str) -> None:
         state.recorded = True
@@ -318,8 +338,8 @@ class Executor:
             last_provider, last_credential = provider_id or "-", credential_id
             events: list[Event] = []
             try:
-                async for event in self._deps.providers[provider_id].stream_chat(
-                    credential_data, request.raw, self._upstream_model(provider_id, target.model)
+                async for event in self._stream_source(
+                    provider_id, credential_data, request.raw, target.model,
                 ):
                     if first_event_at is None:
                         first_event_at = time.monotonic()

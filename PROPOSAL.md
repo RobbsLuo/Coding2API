@@ -77,6 +77,7 @@
 - 请求头需 `X-Domain`、`X-User-Id`、`X-Enterprise-Id`、`X-Department-Info`（部门名须 UTF-8 百分号编码）
 - **reasoning 字段当前直接透传，不做注入也不剥离**（实测 71 份真实请求 dump）：客户端自己会带 `reasoning_effort`（69/71，只有 `low`/`medium` 两档，非推理模型如 `hy3` 不带），也会在历史 assistant 消息里回传 `reasoning_content`（51/71，含带 `tool_calls` 的消息），上游原样接受（`deepseek-v4.1-flash` 4260 次请求 99.6% 成功）。因此既不需要「effort 档位映射」，也不存在「客户端丢弃 reasoning_content」这一前提；`enable_thinking` 只在客户端未给时补 `true`
 - **CB 的 usage 不回 `reasoning_tokens`**（实测恒为 0：`deepseek-v4.1-flash` 289 万 output tokens / reasoning_tokens 全 0），TRAE 侧正常回（`qwen-3.7-plus` 单请求 6~114）。统计页 CB 的思考 token 恒显示 0 属上游口径差异，不是采集丢失
+- **输出上限键名不对称**（2026-09-21 直连实测）：CB 上游**完全忽略 `max_completion_tokens`**（`=1` 仍出 59 tokens，无该键亦同），只认 `max_tokens`（精确截断 + `finish_reason=length`），两键同发时后者胜出；TRAE 对两个键**都不生效**。本网关不做键映射，客户端限额原样透传——因此若客户端只发 `max_completion_tokens`，输出**不会被截断**。`enable_thinking: false` 亦被上游忽略（仍产 reasoning 并计入 `max_tokens`）
 
 ### 3.2 TRAE SOLO（字节）
 

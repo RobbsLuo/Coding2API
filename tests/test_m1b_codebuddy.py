@@ -23,7 +23,7 @@ from src.engine.executor import Executor, ExecutorDeps, NoHealthyCredential
 from src.engine.scheduler import Scheduler
 from src.engine.sse import parse_frames
 from src.main import build_app
-from src.provider.base import ErrKind, Event, EventKind
+from src.provider.base import ErrKind, Event, EventKind, Usage
 from src.provider.codebuddy import events as cb_events
 from src.provider.codebuddy.client import (
     DEFAULT_MODELS,
@@ -739,6 +739,77 @@ class Boom(Exception):
 
     def kind(self) -> ErrKind:
         return self._kind
+
+
+# ------------------------------------------------- 截断续写装配（B1.4）
+
+@pytest.mark.asyncio
+async def test_executor_auto_continues_on_length_same_credential(dual_repo):
+    """finish_reason=length → 同凭证续写；executor 只看到一条更长的事件流。"""
+    credentials, db = dual_repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "b"})
+    truncated = [Event(kind=EventKind.CONTENT, content="part1"),
+                 Event(kind=EventKind.USAGE, usage=Usage(input_tokens=7,
+                                                         output_tokens=3)),
+                 Event(kind=EventKind.FINISH, finish_reason="length")]
+    completed = [Event(kind=EventKind.CONTENT, content="part2"),
+                 Event(kind=EventKind.USAGE, usage=Usage(input_tokens=2,
+                                                         output_tokens=4)),
+                 Event(kind=EventKind.FINISH, finish_reason="stop")]
+    provider = DualProvider("codebuddy", [truncated, completed])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": provider}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2", max_auto_continues=10))
+    result = await executor.complete(_request("glm-5.2"))
+    assert result["choices"][0]["message"]["content"] == "part1part2"
+    assert result["choices"][0]["finish_reason"] == "stop"
+    assert provider.calls == 2                       # 同凭证两次请求
+    # 累计用量：input 7+2、output 3+4
+    assert result["usage"]["prompt_tokens"] == 9
+    assert result["usage"]["completion_tokens"] == 7
+    # 只用一个凭证，未发生轮换
+    assert len(credentials.candidates(["codebuddy"])) == 1
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_executor_auto_continue_disabled(dual_repo):
+    """max_auto_continues=0（默认）：length 原样透传，不续写。"""
+    credentials, db = dual_repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "b"})
+    truncated = [Event(kind=EventKind.CONTENT, content="part1"),
+                 Event(kind=EventKind.FINISH, finish_reason="length")]
+    provider = DualProvider("codebuddy", [truncated])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": provider}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2"))
+    result = await executor.complete(_request("glm-5.2"))
+    assert result["choices"][0]["message"]["content"] == "part1"
+    assert result["choices"][0]["finish_reason"] == "length"
+    assert provider.calls == 1
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_executor_stream_auto_continue_emits_single_finish(dual_repo):
+    """流式续写：客户端只看到一条流、一个 finish_reason 与一条 [DONE]。"""
+    credentials, db = dual_repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "b"})
+    truncated = [Event(kind=EventKind.CONTENT, content="a"),
+                 Event(kind=EventKind.FINISH, finish_reason="length")]
+    completed = [Event(kind=EventKind.CONTENT, content="b"),
+                 Event(kind=EventKind.FINISH, finish_reason="stop")]
+    provider = DualProvider("codebuddy", [truncated, completed])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": provider}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2", max_auto_continues=10))
+    frames = [f async for f in executor.stream(_request("glm-5.2"), username="u")]
+    joined = b"".join(frames).decode()
+    assert joined.count("data: [DONE]") == 1
+    assert '"finish_reason": "stop"' in joined
+    assert '"finish_reason": "length"' not in joined
+    assert provider.calls == 2
+    db.close()
 
 
 async def test_dual_provider_same_model_routes_and_fails_over(dual_repo):

@@ -69,6 +69,10 @@ class Settings(BaseSettings):
     model_blocklist: str = "custom_model_*,*sub*agent*,summary,browser_use_*"
     # 诊断：把 /v1 入口的原始请求体落到 data/dumps/（排查客户端差异用）
     dump_request_bodies: bool = False
+    # 截断续写（B1.4）：上游以 finish_reason=length 截断时，同凭证自动续写，
+    # 最多该次数后收尾；0 关闭。仅 length 触发（其余"空正文/代码块未闭合"
+    # 判据经实测无支撑，未实现，见 TECHNICAL.md §3.4）
+    auto_continue_max: int = 10
 
     @cached_property
     def admin_set(self) -> frozenset[str]:
