@@ -38,6 +38,9 @@ services:
       # 才会真正进容器；漏透传会让 .env 里的设置静默失效（无任何报错）。
       # Host 白名单（防 DNS rebinding）；空 = 本地回环 + PUBLIC_BASE_URL 主机
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
+      # 是否采信 X-Forwarded-For 判定来源 IP（API Key 的 allowed_ips 用）。
+      # 默认 false；仅在本服务前恰好一层受信反代时开启，否则客户端可伪造。
+      TRUST_PROXY: ${TRUST_PROXY:-false}
       # 上游端点白名单（逗号分隔）；改 CODEBUDDY_API_ENDPOINT 时必须同时含它
       CODEBUDDY_ALLOWED_ENDPOINTS: ${CODEBUDDY_ALLOWED_ENDPOINTS:-https://copilot.tencent.com,https://www.codebuddy.ai}
       # CodeBuddy 聊天最小间隔（秒）：与 TRAE 共享节流，0 关闭

@@ -4261,3 +4261,45 @@ def test_legacy_db_upgrade_adds_credit_events_table(tmp_path):
 
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     db.close()
+
+
+# ------------------------------------------------------- B3.5 多 Key 出口
+
+def test_legacy_db_upgrade_adds_api_key_policy_columns(tmp_path):
+    """老库升级：api_keys 无 provider_binding / allowed_ips 时幂等补列。
+
+    两列都是 `NOT NULL DEFAULT ''`：补列后老 Key 立刻恢复「不限定渠道、
+    不限制来源 IP」的原行为，不需要回填。
+    """
+    db = Database(tmp_path / "legacy.sqlite3")
+    conn = sqlite3.connect(db.path)
+    conn.execute("""
+        CREATE TABLE api_keys (
+            id TEXT PRIMARY KEY, username TEXT NOT NULL, name TEXT NOT NULL DEFAULT '',
+            key_digest TEXT NOT NULL UNIQUE, preview TEXT NOT NULL,
+            created_at INTEGER NOT NULL, last_used_at INTEGER)
+    """)
+    # 老库里已有一条 Key：补列后必须保留且取默认空串
+    conn.execute("INSERT INTO api_keys (id, username, key_digest, preview, created_at) "
+                 "VALUES ('key_old', 'root', 'digest', 'sk-…old', 1)")
+    conn.commit()
+    conn.close()
+
+    apply_schema(db.connect())
+    columns = {row[1] for row in db.connect().execute("PRAGMA table_info(api_keys)")}
+    assert {"provider_binding", "allowed_ips"} <= columns
+    legacy = db.connect().execute(
+        "SELECT provider_binding, allowed_ips FROM api_keys WHERE id = 'key_old'").fetchone()
+    assert tuple(legacy) == ("", "")
+    # 补列后可写可读；ver 推进
+    db.connect().execute(
+        "UPDATE api_keys SET provider_binding = 'trae', allowed_ips = '10.0.0.0/8' "
+        "WHERE id = 'key_old'")
+    db.connect().commit()
+    assert tuple(db.connect().execute(
+        "SELECT provider_binding, allowed_ips FROM api_keys WHERE id = 'key_old'").fetchone()
+    ) == ("trae", "10.0.0.0/8")
+    from src.db.migrate import SCHEMA_VERSION
+
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    db.close()

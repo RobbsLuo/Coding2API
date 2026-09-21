@@ -121,7 +121,7 @@ describe("api client", () => {
     await api.probeCredential("c1");
     await api.checkinCredential("c1");
     await api.apiKeys();
-    await api.createApiKey("n");
+    await api.createApiKey({ name: "n", provider_binding: "trae", allowed_ips: "10.0.0.0/8" });
     await api.deleteApiKey("k1");
     await api.statsByProvider("alice", 5);
     await api.logout();

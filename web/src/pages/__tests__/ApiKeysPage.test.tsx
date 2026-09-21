@@ -10,6 +10,8 @@ const KEY = {
   preview: "sk-…Ab3d",
   created_at: 1_700_000_000,
   last_used_at: null,
+  provider_binding: "",
+  allowed_ips: "",
 };
 
 describe("ApiKeysPage", () => {
@@ -129,6 +131,62 @@ describe("ApiKeysPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "删除" }));
     await userEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(screen.getByRole("button", { name: "删除" })).toBeInTheDocument();
+  });
+
+  it("展示渠道绑定与 IP 白名单，空值给出「自动 / 不限制」", async () => {
+    const scoped = { ...KEY, id: "key_2", provider_binding: "trae", allowed_ips: "203.0.113.9/32" };
+    mockFetch({ "/api/api-keys": { api_keys: [KEY, scoped] } });
+    renderPage(<ApiKeysPage />);
+    await settle();
+
+    expect(screen.getByTestId("key-binding-key_1")).toHaveTextContent("自动");
+    expect(screen.getByTestId("key-ips-key_1")).toHaveTextContent("不限制");
+    expect(screen.getByTestId("key-binding-key_2")).toHaveTextContent("TRAE");
+    expect(screen.getByTestId("key-ips-key_2")).toHaveTextContent("203.0.113.9/32");
+  });
+
+  it("创建时把渠道绑定与 IP 白名单一起提交", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url === "/api/api-keys" && init?.method === "POST") {
+          calls.push({ url, body: JSON.parse(String(init.body)) });
+          return jsonResponse({ ...KEY, provider_binding: "codebuddy", allowed_ips: "10.0.0.0/8", api_key: "sk-x" });
+        }
+        return jsonResponse({ api_keys: [] });
+      }),
+    );
+    renderPage(<ApiKeysPage />);
+    await settle();
+
+    await userEvent.type(screen.getByTestId("key-name"), "ci");
+    await userEvent.selectOptions(screen.getByTestId("key-binding"), "codebuddy");
+    await userEvent.type(screen.getByTestId("key-allowed-ips"), "10.0.0.0/8");
+    await userEvent.click(screen.getByRole("button", { name: "创建" }));
+
+    await screen.findByTestId("new-key-plaintext");
+    expect(calls).toEqual([
+      { url: "/api/api-keys", body: { name: "ci", provider_binding: "codebuddy", allowed_ips: "10.0.0.0/8" } },
+    ]);
+  });
+
+  it("创建失败时提示检查绑定与白名单格式", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          return jsonResponse({ error: { message: "bad" } }, 400);
+        }
+        return jsonResponse({ api_keys: [] });
+      }),
+    );
+    renderPage(<ApiKeysPage />);
+    await settle();
+
+    await userEvent.click(screen.getByRole("button", { name: "创建" }));
+    expect(await screen.findByText(/请检查渠道绑定与 IP 白名单格式/)).toBeInTheDocument();
   });
 });
 

@@ -80,6 +80,10 @@ export interface ApiKey {
   preview: string;
   created_at: number;
   last_used_at: number | null;
+  /** 绑定的渠道（codebuddy | trae）；空串 = 自动 */
+  provider_binding: string;
+  /** 来源 IP 白名单（规范化后的 IP/CIDR 逗号分隔）；空串 = 不限制 */
+  allowed_ips: string;
 }
 
 /** 创建成功时才有明文（只返回一次） */

@@ -71,9 +71,12 @@ def register_exception_handlers(app: FastAPI) -> None:
                             content=error_payload(str(error), "invalid_request", 400))
 
     @app.exception_handler(ForbiddenError)
-    async def _forbidden(_request, _error: ForbiddenError):
+    async def _forbidden(_request, error: ForbiddenError):
+        # 沿用异常自带文案：除了 rbac 的 "admin only"，/v1 出口还会因 API Key
+        # 的 IP 白名单拒绝请求（B3.5），统一回 "admin only" 会误导调用方。
         return JSONResponse(status_code=403,
-                            content=error_payload("admin only", "forbidden", 403))
+                            content=error_payload(str(error) or "admin only",
+                                                  "forbidden", 403))
 
     @app.exception_handler(CsrfRejectedError)
     async def _csrf_rejected(_request, _error: CsrfRejectedError):

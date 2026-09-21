@@ -24,7 +24,7 @@ from ..compat.responses.response import (
     ResponsesStreamTranslator,
     completion_to_response,
 )
-from .deps import Services, api_key_user, read_json_body
+from .deps import ApiKeyPrincipal, Services, api_key_user, read_json_body
 from .streaming import with_keepalive
 
 
@@ -33,18 +33,23 @@ def create_router(services: Services) -> APIRouter:
     executor = services.executor
 
     @router.post("/v1/responses")
-    async def responses(request: Request, user: str = Depends(api_key_user)):
+    async def responses(request: Request,
+                         principal: ApiKeyPrincipal = Depends(api_key_user)):
         body = await read_json_body(request)
         chat_request = parse_responses_request(body)
+        binding = principal.provider_binding
         if chat_request.stream:
             # 与 chat 出口同样的前置校验：在 200 响应头发出前拒绝不可能成功的请求
-            target = executor.preflight(chat_request)
+            target = executor.preflight(chat_request, binding)
             translator = ResponsesStreamTranslator(target.model)
             return StreamingResponse(
-                with_keepalive(executor.stream_guarded(chat_request, username=user,
-                                                       translator=translator)),
+                with_keepalive(executor.stream_guarded(chat_request,
+                                                       username=principal.username,
+                                                       translator=translator,
+                                                       provider_binding=binding)),
                 media_type="text/event-stream")
-        completion = await executor.complete(chat_request, username=user)
+        completion = await executor.complete(chat_request, username=principal.username,
+                                             provider_binding=binding)
         return JSONResponse(completion_to_response(completion,
                                                    created_at=int(time.time())))
 

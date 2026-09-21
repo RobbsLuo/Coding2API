@@ -116,8 +116,44 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 
 池内凭证从未探测成功时 `balance_known` 为 `false`（余额未知，不是 0）。管理台右上角「功能说明」按钮可随时查各功能入口。
 
-### 暂停单个凭证
+### 池健康检查
 
+`GET /health` 只回 `{"status":"ok"}`（进程存活，适合容器存活探针）；`GET /healthz`
+额外给出凭证池计数，供外部监控在池子耗尽时提前告警——那是「服务活着但用不了」的
+状态，存活探针看不出来。两个端点都不鉴权。
+
+```json
+{
+  "status": "ok",
+  "service": "coding2api",
+  "version": "0.1.2",
+  "credentials": {"total": 5, "ready": 4, "cooling": 1, "paused": 0, "disabled": 0}
+}
+```
+
+五类计数互斥且合计 = `total`：`ready` 为当前可被调度选中的凭证（`disabled` /
+`paused` / `cooling` 依次优先归入各自桶，与调度器同一口径）。`ready=0` 时对话请求
+会直接返回 503，值得配置告警。
+
+### API Key 的渠道绑定与来源 IP 白名单
+
+创建 Key 时可以限定它只能走某个渠道、只能从某些 IP 调用，适合「按出口分发 Key」：
+一个 Key 给团队用，另一个只给某台服务器 / 某个客户端。
+
+- **渠道绑定**：选 CodeBuddy 或 TRAE 后，该 Key 的请求只在对应渠道的凭证里选号；
+  请求的模型属于另一渠道时直接 400 并指出实际归属（不会静默改道，也不会白打一次
+  上游）。留空 = 自动（默认，跨渠道选健康凭证）。`模型@渠道` 的强制指定与绑定冲突
+  时同样 400。
+- **来源 IP 白名单**：逗号分隔的 IP 或 CIDR（如 `203.0.113.9,10.0.0.0/8`），留空 =
+  不限制。写入时会校验并规范化（`10.0.0.1` 存为 `10.0.0.1/32`），非法值当场 400。
+  来源 IP 不在白名单内时返回 403。
+
+**默认不采信 `X-Forwarded-For`**（该头由客户端可写，信它等于白名单形同虚设）。
+只有在 `TRUST_PROXY=true` 时才按 XFF 判定，且取**最后一个**条目——那是紧邻本服务的
+受信代理实际看到的地址。因此该开关只适用于「本服务前面恰好一层受信反代」的部署；
+多层反代或直连请保持默认 `false`。
+
+### 暂停单个凭证
 凭证列表行内菜单的「暂停」只把该凭证摘出**对话流量**：后台的额度探测、token
 预刷新、每日签到、成长中心、活跃上报照常运行（这些任务只认系统硬禁用 `disabled`）。
 适合「这个号先别接聊天、但积分还要继续领」的场景；「取消暂停」立即放回池子。
@@ -206,6 +242,7 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `CONVERSATION_STICKY_SECONDS` | `3600` | 会话粘性 TTL：优先按请求体显式会话标识（`conversation_id`/`conversationId`/`prompt_cache_key`，metadata 或顶层），无则回落消息前缀指纹，多轮请求固定用同一凭证（手动 pin 的凭证优先，粘性让位）；带 `user_id` 时不派生前缀兜底键（避免并行对话误钉同一号）；凭证出错仍会轮换，成功后重新粘定；`≤0` 关闭 |
 | `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,hunyuan-image-*` | 模型列表黑名单（fnmatch，仅影响列表展示，直连指定不受影响）；默认值按两边上游实测清单补入内部/不可用模型（`default` 零内容、`hunyuan-image-*` 400 11103），刻意不含 `*-volc` 与 `aquila`/`sagitta`/`seed-code-pro-0430`（实测可正常 chat）（见 TECHNICAL.md §3.5） |
 | `ALLOWED_HOSTS` | 空 | Host 白名单，防 DNS rebinding |
+| `TRUST_PROXY` | `false` | 是否采信 `X-Forwarded-For` 判定 API Key 的来源 IP（`allowed_ips` 白名单用）。默认关闭——该头由客户端可写；仅在「本服务前恰好一层受信反代」时开启，届时取 XFF 最后一个条目（见上文「API Key 的渠道绑定与来源 IP 白名单」） |
 | `CODEBUDDY_API_ENDPOINT` | `https://copilot.tencent.com` | CodeBuddy 上游地址；改动时必须同时把它加入 `CODEBUDDY_ALLOWED_ENDPOINTS` |
 | `CODEBUDDY_ALLOWED_ENDPOINTS` | 官方两站（见 compose） | 上游端点白名单，真实 Token 只发往白名单内地址 |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CodeBuddy 聊天最小间隔（秒），与 TRAE 共享节流；`0` 关闭 |

@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     # Host 白名单（防 DNS rebinding）：逗号分隔；空 = 本地默认 + PUBLIC_BASE_URL 主机
     allowed_hosts: str = ""
+    # 是否采信 X-Forwarded-For 判定来源 IP（API Key 的 allowed_ips 白名单用）。
+    # 默认 false：XFF 由客户端可写，直连部署下信它等于白名单形同虚设。
+    # 仅在「本服务前面恰好一层受信反代」时开启，届时取 XFF 最后一个条目。
+    trust_proxy: bool = False
 
     # 上游（白名单内的地址才可接收真实 Token）
     codebuddy_api_endpoint: str = _CODEBUDDY_CN

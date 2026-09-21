@@ -19,7 +19,7 @@ from typing import Any
 from fastapi import APIRouter, Depends
 
 from ..provider.base import Model
-from .deps import Services, api_key_user
+from .deps import ApiKeyPrincipal, Services, api_key_user
 
 logger = logging.getLogger(__name__)
 
@@ -145,7 +145,7 @@ def create_router(services: Services) -> APIRouter:
     router = APIRouter()
 
     @router.get("/v1/models")
-    async def list_v1_models(_user: str = Depends(api_key_user)):
+    async def list_v1_models(_principal: ApiKeyPrincipal = Depends(api_key_user)):
         return await list_models(services)
 
     return router

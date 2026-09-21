@@ -114,10 +114,41 @@ class Executor:
             return model
         return self._deps.upstream_model_name(provider_id, model)
 
-    def resolve_target(self, request: ChatRequest) -> ModelTarget:
-        return resolve(request.model, live(self._deps.default_model)())
+    def resolve_target(self, request: ChatRequest,
+                       provider_binding: str | None = None) -> ModelTarget:
+        target = resolve(request.model, live(self._deps.default_model)())
+        return self._apply_binding(target, provider_binding)
 
-    def preflight(self, request: ChatRequest) -> ModelTarget:
+    def _apply_binding(self, target: ModelTarget,
+                       binding: str | None) -> ModelTarget:
+        """按 API Key 的渠道绑定收窄候选上游（B3.5）。
+
+        绑定是 Key 的策略，不是请求参数：它把候选固定到该渠道，并把
+        `forced` 置真（跳过模型目录收窄，因为归属已在此校验判断过）。
+
+        模型确实属于别的渠道时给 400 而不是让它落到「无可用凭证」503——
+        前者是「你请求错了」，后者读起来像服务坏了。目录未就绪（拉取失败）
+        时不做归属判断，保守放行给下游选号，避免用缓存外的信息误拒。
+        """
+        if not binding:
+            return target
+        if target.forced and target.providers != (binding,):
+            raise InvalidRequest(
+                f"model {target.model!r} is bound to provider {target.providers[0]!r} "
+                f"but this api key is restricted to {binding!r}")
+        aliases = self._deps.model_aliases
+        if aliases:
+            lower = target.model.lower()
+            known = tuple(pid for pid in aliases if lower in aliases.get(pid, {}))
+            if known and binding not in known:
+                raise InvalidRequest(
+                    f"model {target.model!r} is not available on provider {binding!r} "
+                    f"(this api key is bound to {binding!r}; provided by "
+                    f"{', '.join(sorted(known))})")
+        return ModelTarget(model=target.model, providers=(binding,), forced=True)
+
+    def preflight(self, request: ChatRequest,
+                  provider_binding: str | None = None) -> ModelTarget:
         """流式路由建立 StreamingResponse 之前的前置校验。
 
         生成器体内的异常发生在响应头（200）已发出之后，只能表现为连接被
@@ -125,13 +156,14 @@ class Executor:
         的错误（未知 provider、模型不属于任何已注册上游）必须在返回
         StreamingResponse 之前抛给异常处理器，才能得到正确的 400。
         """
-        target = self.resolve_target(request)
+        target = self.resolve_target(request, provider_binding)
         if not [pid for pid in self._narrow_providers(target) if pid in self._deps.providers]:
             raise NoProviderForModel(f"no provider registered for model {target.model!r}")
         return target
 
     async def stream_guarded(self, request: ChatRequest, *, username: str = "unknown",
-                             translator: StreamSink | None = None) -> AsyncIterator[bytes]:
+                             translator: StreamSink | None = None,
+                             provider_binding: str | None = None) -> AsyncIterator[bytes]:
         """流式出口的最终兜底：任何逃逸异常都转成 SSE 错误帧。
 
         没有这一层时，未预期的异常（如凭证在轮换中途被删除）会让连接
@@ -139,7 +171,8 @@ class Executor:
         """
         try:
             async for frame in self.stream(request, username=username,
-                                           translator=translator):
+                                           translator=translator,
+                                           provider_binding=provider_binding):
                 yield frame
         except (GeneratorExit, asyncio.CancelledError):
             raise                          # 客户端断开：已由 stream() 记账
@@ -148,7 +181,8 @@ class Executor:
             yield _stream_error_frame(translator, "internal server error", "internal_error")
 
     async def stream(self, request: ChatRequest, *, username: str = "unknown",
-                     translator: StreamSink | None = None) -> AsyncIterator[bytes]:
+                     translator: StreamSink | None = None,
+                     provider_binding: str | None = None) -> AsyncIterator[bytes]:
         """流式执行；上游错误按分类冷却并换号，最多 3 次。
 
         客户端中途断开时（生成器被关闭 / 任务被取消）把已产生的用量
@@ -159,7 +193,7 @@ class Executor:
         回调后立即关闭连接是正常收尾（SSE 流在 [DONE] 发出到结束帧
         more_body=False 之间有一拍竞态，框架会把它当断开），按成功记账。
         """
-        target = self.resolve_target(request)
+        target = self.resolve_target(request, provider_binding)
         state = _StreamState(translator=translator or StreamTranslator(target.model),
                              started=time.monotonic(), username=username)
         if self._deps.affinity is not None:
@@ -325,10 +359,10 @@ class Executor:
             output_tokens=_usage_field(usage, "output_tokens"),
             ttfb_ms=state.ttfb_ms(), latency_ms=_elapsed_ms(state.started))
 
-    async def complete(self, request: ChatRequest, *, username: str = "unknown"
-                       ) -> dict[str, Any]:
+    async def complete(self, request: ChatRequest, *, username: str = "unknown",
+                       provider_binding: str | None = None) -> dict[str, Any]:
         """非流式：聚合同一执行路径的事件。流内错误会触发换号重试。"""
-        target = self.resolve_target(request)
+        target = self.resolve_target(request, provider_binding)
         tried: set[str] = set()
         last_error: Exception | None = None
         last_kind: ErrKind | None = None

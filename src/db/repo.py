@@ -364,6 +364,28 @@ class CredentialRepository:
             "SELECT provider FROM credentials WHERE id = ?", (credential_id,)).fetchone()
         return row["provider"] if row else None
 
+    def pool_counts(self, now: int | None = None) -> dict[str, int]:
+        """池健康计数（/healthz）：四类互斥且合计等于 total。
+
+        口径直接复用调度器的 `Candidate.is_selectable`（不带模型过滤 = 池级
+        视角），而不是另写一份 SQL——两处口径一旦分叉，健康检查会报出与
+        实际选号不一致的「可用数」。判定优先级：disabled → paused → cooling
+        → ready，与调度器一致（禁用/暂停优先于冷却）。
+        """
+        moment = int(now if now is not None else time.time())
+        counts = {"total": 0, "ready": 0, "cooling": 0, "paused": 0, "disabled": 0}
+        for candidate in self.candidates():
+            counts["total"] += 1
+            if candidate.disabled:
+                counts["disabled"] += 1
+            elif not candidate.enabled:
+                counts["paused"] += 1
+            elif not candidate.is_selectable(moment):
+                counts["cooling"] += 1
+            else:
+                counts["ready"] += 1
+        return counts
+
     def credential_data(self, credential_id: str) -> dict[str, Any] | None:
         row = self._db.connect().execute(
             "SELECT data_enc FROM credentials WHERE id = ?", (credential_id,)).fetchone()
@@ -434,34 +456,47 @@ class ApiKeyRepository:
     def __init__(self, db) -> None:
         self._db = db
 
-    def create(self, username: str, name: str = "", now: int | None = None) -> dict[str, Any]:
+    def create(self, username: str, name: str = "", now: int | None = None,
+               *, provider_binding: str = "", allowed_ips: str = "") -> dict[str, Any]:
         plaintext = generate_api_key()
         key_id = _new_id("key")
         created_at = int(now if now is not None else time.time())
         with self._db.transaction() as conn:
             conn.execute(
-                "INSERT INTO api_keys (id, username, name, key_digest, preview, created_at) "
-                "VALUES (?,?,?,?,?,?)",
+                "INSERT INTO api_keys (id, username, name, key_digest, preview, created_at, "
+                "provider_binding, allowed_ips) VALUES (?,?,?,?,?,?,?,?)",
                 (key_id, username, name, digest_api_key(plaintext), preview_api_key(plaintext),
-                 created_at),
+                 created_at, provider_binding, allowed_ips),
             )
         return {"id": key_id, "username": username, "name": name, "api_key": plaintext,
-                "preview": preview_api_key(plaintext), "created_at": created_at}
+                "preview": preview_api_key(plaintext), "created_at": created_at,
+                "provider_binding": provider_binding, "allowed_ips": allowed_ips}
 
-    def verify(self, api_key: str) -> str | None:
+    def authenticate(self, api_key: str) -> dict[str, Any] | None:
+        """校验 Key 并返回其策略行（含 provider_binding / allowed_ips）。
+
+        命中即刷新 last_used_at：所有出口鉴权都走这里，避免再散落一处
+        「用了 Key 但没记最后使用时间」。返回 None 表示 Key 不存在。
+        """
         digest = digest_api_key(api_key)
         row = self._db.connect().execute(
-            "SELECT id, username FROM api_keys WHERE key_digest = ?", (digest,)).fetchone()
+            "SELECT id, username, provider_binding, allowed_ips FROM api_keys "
+            "WHERE key_digest = ?", (digest,)).fetchone()
         if row is None:
             return None
         with self._db.transaction() as conn:
             conn.execute("UPDATE api_keys SET last_used_at = ? WHERE id = ?",
                          (int(time.time()), row["id"]))
-        return row["username"]
+        return dict(row)
+
+    def verify(self, api_key: str) -> str | None:
+        row = self.authenticate(api_key)
+        return row["username"] if row else None
 
     def list_for(self, username: str) -> list[dict[str, Any]]:
         rows = self._db.connect().execute(
-            "SELECT id, username, name, preview, created_at, last_used_at FROM api_keys "
+            "SELECT id, username, name, preview, created_at, last_used_at, "
+            "provider_binding, allowed_ips FROM api_keys "
             "WHERE username = ? ORDER BY created_at", (username,)).fetchall()
         return [dict(row) for row in rows]
 

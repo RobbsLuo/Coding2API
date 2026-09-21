@@ -16,7 +16,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
-from .deps import Services, api_key_user
+from .deps import ApiKeyPrincipal, Services, api_key_user
 
 
 def _credential_usable(row: dict[str, Any]) -> bool:
@@ -72,7 +72,7 @@ def create_router(services: Services) -> APIRouter:
     router = APIRouter()
 
     @router.get("/v1/user/balance")
-    async def user_balance(_user: str = Depends(api_key_user)):
+    async def user_balance(_principal: ApiKeyPrincipal = Depends(api_key_user)):
         return balance_payload(services)
 
     return router

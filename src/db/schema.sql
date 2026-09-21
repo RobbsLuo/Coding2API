@@ -19,7 +19,11 @@ CREATE TABLE IF NOT EXISTS api_keys (
     key_digest    TEXT NOT NULL UNIQUE,
     preview       TEXT NOT NULL,
     created_at    INTEGER NOT NULL,
-    last_used_at  INTEGER
+    last_used_at  INTEGER,
+    -- B3.5 多 Key 出口：绑定渠道（codebuddy | trae | ''=自动）与来源 IP
+    -- 白名单（逗号分隔 IP/CIDR，''=不限制）。空值即老库/未设置时的原行为。
+    provider_binding TEXT NOT NULL DEFAULT '',
+    allowed_ips   TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS credentials (

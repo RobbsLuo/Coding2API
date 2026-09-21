@@ -276,6 +276,17 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     async def health():
         return {"status": "ok"}
 
+    @app.get("/healthz")
+    async def healthz():
+        """池健康：进程存活 + 凭证池四类计数（互斥，合计 = total）。
+
+        `/health` 只回答「进程还在吗」，适合做容器存活探针；`/healthz` 额外
+        暴露可用凭证数，供外部监控在池子耗尽（ready=0）时提前告警——那是
+        服务「活着但用不了」的状态，存活探针看不出来。
+        """
+        return {"status": "ok", "service": "coding2api", "version": app_version(),
+                "credentials": services.credentials.pool_counts()}
+
     # 路由挂载（src/api 各模块；静态资源最后注册，catch-all 会匹配所有路径）
     app.include_router(admin_auth.create_router(services))
     app.include_router(admin_credentials.create_router(services))

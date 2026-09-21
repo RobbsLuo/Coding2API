@@ -22,7 +22,9 @@ SCHEMA_NAME = "schema.sql"
 # token 到期展示与预警）。
 # 12：新增 credit_events 表（B3.4 积分变动流水）。新增表只需进
 # schema.sql（CREATE TABLE IF NOT EXISTS 对老库同样生效），无需迁移动作。
-SCHEMA_VERSION = 12
+# 13：api_keys 新增 provider_binding / allowed_ips（B3.5 多 Key 出口：
+# 渠道绑定与来源 IP 白名单）；两者默认 ''，老库补列后行为不变。
+SCHEMA_VERSION = 13
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -47,6 +49,9 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # JWT 的 iat/exp；NULL=老库未回填（列表读到按需派生），0=确实未知
     ("credentials", "token_expires_at INTEGER"),
     ("credentials", "token_issued_at INTEGER"),
+    # 多 Key 出口（B3.5）：空串 = 不限制，老库补列后与补列前行为一致
+    ("api_keys", "provider_binding TEXT NOT NULL DEFAULT ''"),
+    ("api_keys", "allowed_ips TEXT NOT NULL DEFAULT ''"),
 )
 
 # 已废弃的表：schema.sql 里已删定义，但老库里可能还留着，必须显式清理。

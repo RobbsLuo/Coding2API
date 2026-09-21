@@ -42,6 +42,7 @@
 | Q34 | 运行时配置热更 | **推翻 Q11 的「无设置页」**：新增 `runtime_settings` 表 + `RuntimeSettings` 覆盖层 + 管理台第 7 页「运行时配置」。白名单 13 项（默认模型 / 模型黑名单 / 到期两个窗口 / 会话粘性 TTL / 成长不可逆开关 / 成长与探测周期 / 两个节流窗口 / CB 聊天最小间隔 / 活跃上报开关与时点）改完立即生效，无需重启；**DB 覆盖值优先于 .env**，UI 与日志明示，可「恢复默认」清掉覆盖。启动期项（密钥 / 端口 / 数据目录 / 上游白名单）不进白名单——它们决定进程如何启动，运行期改只会让内存与磁盘静默分叉 |
 | Q35 | token 到期展示与预警 | `credentials` 增列 `token_expires_at` / `token_issued_at`（`SCHEMA_VERSION` 10→11）。到期时间优先取凭证显式 `expires_at`，缺失/非法时回落到 access token 的 **JWT `exp`**；签发时间取 JWT `iat`（新增渠道中立的 `provider/token_expiry.py`）——**实测 CodeBuddy 的 token 响应（OAuth 登录与刷新）不带任何到期字段**，只看 `expires_at` 会恒为 0，既让管理台看不到到期、也让 `needs_refresh` 永不触发（token 过期即被 401 硬禁用，且 revive 不自愈）。两边都取不到时为 0 = 未知，**不猜本地 TTL**。进度条满量程取 token 自身寿命（`exp - iat`），拿不到 `iat` 就不画条。老库不批量回填：列表读到时按需从密文派生，写回后走列值 |
 | Q36 | 积分变动流水 | 新增 `credit_events` 表（`SCHEMA_VERSION` 11→12），在额度探测写回的**同一事务**里比对余额、只增记一条。**计划原文要求 `source` 标注来源（签到/成长/对话），但实测三类证据都拿不到真实归因**：diff 只能看到区间净变化，这段区间里签到、成长领取与对话消耗可能同时发生；`growth_events` 无积分快照；上游接口本就不打日志。故 `source` **改为只表达归因已知度**——`observed`（常规探测区间）/ `sync`（首次建立基线），另加 `window_start` 记录变化覆盖时段，前端文案一律说「净变化」而非「签到 +N」。余额未变不记（避免每轮 0 行淹没）；任一端未知仍记但 `delta` 为空（「变未知」是该追的异常，绝不量化成 0）。保留期与 `usage_events` 一致（90 天） |
+| Q37 | 池健康与多 Key 出口 | `GET /healthz` 返回 `{status, service, version, credentials:{total,ready,cooling,paused,disabled}}`（保留 `GET /health` 作纯存活探针）：`ready` 复用调度器的 `Candidate.is_selectable` 口径，五类互斥且合计 = total——**计划原文只列 4 类**，但项目已明确区分「系统禁用」与「用户暂停」（见 Q33/B3.1），少一类会让计数对不上，故补 `paused`。`api_keys` 增 `provider_binding`（`codebuddy`/`trae`/空=自动）与 `allowed_ips`（逗号分隔 IP/CIDR，空=不限制），`SCHEMA_VERSION` 12→13；`deps.api_key_user` 升级为返回 `ApiKeyPrincipal`（用户名 + 绑定），并**在鉴权当场**判定来源 IP。IP 白名单**默认不信 `X-Forwarded-For`**（客户端可写），仅 `TRUST_PROXY=true` 时采信，且取 XFF **最后一个**条目（`$proxy_add_x_forwarded_for` 语义下那是紧邻受信代理所见地址）——因此只适用于「本服务前恰好一层受信反代」的部署。绑定渠道在 `executor` 收窄候选上游：模型归属别家渠道时 400 并给出实际归属，目录未就绪时保守放行。**不做**每 Key 配额/多租户（与 Q10 冲突） |
 
 ## 2. 目标与非目标
 
@@ -259,7 +260,7 @@ DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见
 
 ## 7. API 契约
 
-外部（API Key 鉴权）：`POST /v1/chat/completions`（流式 + 非流式）、`POST /v1/responses`（Responses API，Codex CLI；与 chat 共用同一调度/选号/统计链路）、`GET /v1/models`（扁平模型名 + `providers` 字段）、`GET /v1/user/balance`（DeepSeek 兼容余额，读探测缓存聚合，不实时打上游）、`GET /health`。
+外部（API Key 鉴权）：`POST /v1/chat/completions`（流式 + 非流式）、`POST /v1/responses`（Responses API，Codex CLI；与 chat 共用同一调度/选号/统计链路）、`GET /v1/models`（扁平模型名 + `providers` 字段）、`GET /v1/user/balance`（DeepSeek 兼容余额，读探测缓存聚合，不实时打上游）、`GET /health`（纯存活）、`GET /healthz`（存活 + 凭证池计数，无鉴权）。
 
 管理台（会话 Cookie）：凭证管理、API Key 管理、用量统计、Playground 等，admin 管凭证与全量统计，普通用户仅见自己的数据。凭证运维端点含 `POST /api/credentials/{id}/checkin`（签到）、`GET|POST /api/credentials/{id}/growth`（成长中心状态与手动执行，仅 CodeBuddy）。回调（无鉴权，TRAE 浏览器 302 不带 key）：`GET /authorize`。
 

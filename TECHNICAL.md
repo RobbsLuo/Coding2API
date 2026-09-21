@@ -88,6 +88,8 @@ coding2api/
 │   │   ├── refresh.py           # 每 60 分钟；REFRESH_SKEW_HOURS 窗口内预刷新
 │   │   ├── retention.py         # 每 5 分钟：小时汇总重算（幂等）+ 90 天前明细 / 积分流水清理
 │   │   └── runner.py            # 后台任务调度，接入应用生命周期
+│   ├── auth/
+│   │   └── access.py            # API Key 来源 IP 白名单解析/判定（B3.5，纯函数）
 │   ├── stats/
 │   │   ├── collector.py         # usage_events 写入（脱敏）+ 小时汇总双写/重算
 │   │   └── query.py             # overview / by-provider / timeline / events 查询（前者读小时汇总，events JOIN credentials 带凭证昵称）
@@ -99,7 +101,7 @@ coding2api/
 │       ├── balance.py           # GET /v1/user/balance（DeepSeek 兼容余额，读探测缓存聚合）
 │       ├── authorize.py         # GET /authorize（TRAE 回调落点）
 │       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin / 成长中心 / 账号切换
-│       ├── admin_keys.py        # API Key CRUD
+│       ├── admin_keys.py        # API Key CRUD（含渠道绑定 / IP 白名单校验，B3.5）
 │       ├── admin_settings.py    # 运行时配置：GET 快照 / PUT 覆盖（admin + CSRF，B3.2）
 │       ├── admin_stats.py       # 统计查询（overview / by-provider / timeline / model-timeline）
 │       ├── admin_auth.py        # 登录 / 登出 / 会话；上游登录 start/poll/cancel
@@ -541,6 +543,56 @@ UI 与日志都必须明示「DB 覆盖 .env」，否则用户改 `.env` 不生�
 
 **保留**：`RetentionTask` 按 `usage_events` 同一保留期（90 天）回收，报告里体现为
 `purged_credit_events`。
+
+---
+
+### 3.11 池健康与多 Key 出口（B3.5）
+
+**`GET /healthz`**：返回 `{status, service, version, credentials:{total, ready, cooling,
+paused, disabled}}`，无鉴权；`GET /health` 保留为纯存活探针。两者分工明确——存活探针
+回答「进程还在吗」，`/healthz` 额外回答「凭证池还能用吗」，而 `ready=0` 是「活着但
+用不了」的状态，存活探针看不出来，需要在监控侧单独告警。
+
+计数**复用调度器的 `Candidate.is_selectable`**（`CredentialRepository.pool_counts`），
+不另写 SQL——两套口径一旦分叉，健康检查会报出与实际选号不符的「可用数」。五类互斥、
+合计 = `total`，判定优先级 `disabled → paused → cooling → ready`（与调度器一致：系统
+禁用/用户暂停优先于冷却）。计划原文只列 4 类，补 `paused` 是因为项目已明确区分
+「系统禁用」与「用户暂停」（Q33/B3.1），少一类计数就对不上。
+
+**多 Key 出口**：`api_keys` 增两列（`SCHEMA_VERSION` 12→13）：
+
+| 列 | 取值 | 空值语义 |
+|---|---|---|
+| `provider_binding` | `codebuddy` / `trae` | 空 = 自动（跨渠道选健康凭证，原行为） |
+| `allowed_ips` | 逗号分隔 IP/CIDR | 空 = 不限制来源 IP |
+
+来源 IP 判定在 `deps.api_key_user`（鉴权**当场**判掉，不往上传递）：
+
+- **默认不采信 `X-Forwarded-For`**：该头由客户端可写，信它等于白名单形同虚设。
+  只有 `TRUST_PROXY=true` 才采信，且取**最后一个**条目——`$proxy_add_x_forwarded_for`
+  语义下那是紧邻的受信代理实际看到的地址，而第一个条目是客户端自己写的。
+  因此该开关只适用于「本服务前恰好一层受信反代」，多层或直连必须保持关闭。
+- 策略是纯函数（`auth/access.py`，不依赖框架）：写入时用 `normalize_allowed_ips`
+  校验并规范化（`10.0.0.1` → `10.0.0.1/32`），非法值 400；读取路径宽松解析，脏条目
+  丢弃，若整份白名单一条都解析不出则**拒绝**（fail closed，不因脏数据敞开）。
+- 白名单命中失败返回 **403**（`forbidden`）——Key 本身有效，是来源不被允许；
+  与 401「凭证无效」区分，便于调用方排查。
+- `api_key_user` 由「返回用户名」升级为返回 `ApiKeyPrincipal(username, key_id,
+  provider_binding)`（4 处出口调用同步调整）。`ApiKeyRepository.verify` 保留为
+  只回用户名的薄封装，避免破坏既有调用方。
+
+**渠道绑定的执行**在 `Executor._apply_binding`（`resolve_target` 内），与 `@provider`
+强制指定共用收窄路径：
+
+- 绑定把候选固定为该渠道并置 `forced`（跳过模型目录收窄，归属已在此判定）。
+- 模型目录能证明模型属于别家渠道 → 400 并给出实际归属；这比落到「无可用凭证」
+  503 更准确——前者是「你请求错了」，后者读起来像服务坏了。
+- 请求里 `@provider` 与绑定冲突 → 400，绝不静默改道。
+- 目录未就绪（拉取失败）时不做归属判断，保守放行给下游选号，避免用缓存外的
+  信息误拒。
+- 流式同样生效：`preflight` 带绑定，冲突在 200 响应头发出前就 400。
+
+**不做**每 Key 配额/多租户（与 Q10「不做配额」冲突）。
 
 ---
 

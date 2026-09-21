@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..compat.openai.request import parse_chat_request
-from .deps import Services, api_key_user, read_json_body
+from .deps import ApiKeyPrincipal, Services, api_key_user, read_json_body
 from .streaming import with_keepalive
 
 # dump 目录最多保留的文件数：诊断开关长期开着时不能无限侵占磁盘
@@ -43,17 +43,23 @@ def create_router(services: Services) -> APIRouter:
     settings = services.settings
 
     @router.post("/v1/chat/completions")
-    async def chat_completions(request: Request, user: str = Depends(api_key_user)):
+    async def chat_completions(request: Request,
+                               principal: ApiKeyPrincipal = Depends(api_key_user)):
         body = await read_json_body(request)
         if settings.dump_request_bodies:
             dump_request_body(Path(settings.data_dir), body)
         chat_request = parse_chat_request(body)
+        binding = principal.provider_binding
         if chat_request.stream:
             # 前置校验：在 200 响应头发出前拒绝不可能成功的请求
-            executor.preflight(chat_request)
+            executor.preflight(chat_request, binding)
             return StreamingResponse(
-                with_keepalive(executor.stream_guarded(chat_request, username=user)),
+                with_keepalive(executor.stream_guarded(chat_request,
+                                                       username=principal.username,
+                                                       provider_binding=binding)),
                 media_type="text/event-stream")
-        return JSONResponse(await executor.complete(chat_request, username=user))
+        return JSONResponse(await executor.complete(chat_request,
+                                                    username=principal.username,
+                                                    provider_binding=binding))
 
     return router

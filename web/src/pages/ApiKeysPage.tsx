@@ -13,6 +13,7 @@ import {
   Input,
   Notice,
   Panel,
+  Select,
   Table,
   TableBody,
   TableCell,
@@ -20,6 +21,19 @@ import {
   TableHeader,
   TableRow,
 } from "../ui";
+
+/** 渠道绑定的下拉选项：值与后端 KNOWN_PROVIDERS 对齐，空串 = 自动。 */
+export const PROVIDER_BINDING_OPTIONS = [
+  { value: "", label: "自动（不限定渠道）" },
+  { value: "codebuddy", label: "CodeBuddy" },
+  { value: "trae", label: "TRAE" },
+];
+
+/** 列表里展示绑定渠道：空串 → 「自动」 */
+export function providerBindingLabel(binding: string | null | undefined): string {
+  if (!binding) return "自动";
+  return PROVIDER_BINDING_OPTIONS.find((o) => o.value === binding)?.label ?? binding;
+}
 
 /** OpenAI 兼容入口的 Base URL：本服务地址 + /v1 */
 export const openaiBaseUrl = (): string => `${window.location.origin}/v1`;
@@ -189,6 +203,8 @@ export function ApiKeysPage() {
   const { data, isLoading } = useApiKeys();
   const client = useQueryClient();
   const [name, setName] = useState("");
+  const [binding, setBinding] = useState("");
+  const [allowedIps, setAllowedIps] = useState("");
   const [created, setCreated] = useState<ApiKeyCreated | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -200,13 +216,19 @@ export function ApiKeysPage() {
     event.preventDefault();
     setError(null);
     try {
-      const result = await api.createApiKey(name);
+      const result = await api.createApiKey({
+        name,
+        provider_binding: binding,
+        allowed_ips: allowedIps.trim(),
+      });
       setCreated(result);
       setName("");
+      setBinding("");
+      setAllowedIps("");
       setCopied(false);
       await client.invalidateQueries({ queryKey: ["admin"] });
     } catch {
-      setError("创建失败");
+      setError("创建失败：请检查渠道绑定与 IP 白名单格式");
     }
   };
 
@@ -245,6 +267,33 @@ export function ApiKeysPage() {
                 data-testid="key-name"
                 placeholder="例如 laptop"
                 onChange={(event) => setName(event.target.value)}
+              />
+            </Field>
+          </div>
+          <div className="w-52">
+            <Field label="渠道绑定">
+              <Select
+                value={binding}
+                data-testid="key-binding"
+                onChange={(event) => setBinding(event.target.value)}
+              >
+                {PROVIDER_BINDING_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+          <div className="w-72">
+            {/* 提示写进 label 而不是 Field 的 hint：hint 会把该字段撑高，
+                与同排其它控件在 items-end 下对不齐输入框 */}
+            <Field label="来源 IP 白名单（逗号分隔 IP/CIDR，留空不限制）">
+              <Input
+                value={allowedIps}
+                data-testid="key-allowed-ips"
+                placeholder="例如 203.0.113.9,10.0.0.0/8"
+                onChange={(event) => setAllowedIps(event.target.value)}
               />
             </Field>
           </div>
@@ -289,6 +338,8 @@ export function ApiKeysPage() {
               <TableRow>
                 <TableHead>名称</TableHead>
                 <TableHead>Key</TableHead>
+                <TableHead>渠道</TableHead>
+                <TableHead>来源 IP</TableHead>
                 <TableHead>创建时间</TableHead>
                 <TableHead>最后使用</TableHead>
                 <TableHead className="text-right">操作</TableHead>
@@ -299,6 +350,12 @@ export function ApiKeysPage() {
                 <TableRow key={key.id}>
                   <TableCell>{key.name || "—"}</TableCell>
                   <TableCell className="font-mono text-xs">{key.preview}</TableCell>
+                  <TableCell className="text-xs" data-testid={`key-binding-${key.id}`}>
+                    {providerBindingLabel(key.provider_binding)}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs" data-testid={`key-ips-${key.id}`}>
+                    {key.allowed_ips || "不限制"}
+                  </TableCell>
                   <TableCell className="text-xs">{formatTime(key.created_at)}</TableCell>
                   <TableCell className="text-xs">
                     {key.last_used_at ? formatTime(key.last_used_at) : "从未使用"}

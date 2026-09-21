@@ -15,8 +15,9 @@ from typing import Any
 
 from fastapi import Request
 
+from ..auth.access import client_ip, ip_allowed
 from ..auth.csrf import check_csrf
-from ..auth.rbac import Principal, UnauthorizedError
+from ..auth.rbac import ForbiddenError, Principal, UnauthorizedError
 from ..auth.session import verify_session_token
 from ..auth.throttle import LoginThrottle
 from ..compat.openai.request import InvalidRequest
@@ -83,18 +84,37 @@ async def principal_from_request(request: Request) -> Principal:
                      is_admin=services.settings.is_admin(username))
 
 
-async def api_key_user(request: Request) -> str:
-    """Bearer API Key → username（外部 /v1 端点）。"""
+@dataclass(frozen=True)
+class ApiKeyPrincipal:
+    """外部 /v1 出口的鉴权结果：归属用户 + 该 Key 的访问策略（B3.5）。
+
+    返回结构体而不是裸用户名，是因为出口需要 `provider_binding` 去收窄
+    候选上游；IP 白名单在鉴权当场就判掉，不往上传递。
+    """
+
+    username: str
+    key_id: str
+    provider_binding: str = ""      # '' = 不限定渠道
+
+
+async def api_key_user(request: Request) -> ApiKeyPrincipal:
+    """Bearer API Key → 归属用户与访问策略（外部 /v1 端点）。"""
     services = get_services(request)
     header = request.headers.get("authorization", "")
     prefix = "Bearer "
     if not header.lower().startswith(prefix.lower()):
         raise UnauthorizedError("missing api key")
-    username = services.api_keys.verify(header[len(prefix):].strip())
+    record = services.api_keys.authenticate(header[len(prefix):].strip())
     # 用户被删除后旧 Key 永久有效，必须同样校验
-    if not username or not services.users.has(username):
+    if not record or not services.users.has(record["username"]):
         raise UnauthorizedError("invalid api key")
-    return username
+    source = client_ip(request.client.host if request.client else None,
+                       request.headers.get("x-forwarded-for"),
+                       trust_proxy=bool(services.settings.trust_proxy))
+    if not ip_allowed(source, record.get("allowed_ips") or ""):
+        raise ForbiddenError("source ip not allowed for this api key")
+    return ApiKeyPrincipal(username=record["username"], key_id=record["id"],
+                           provider_binding=record.get("provider_binding") or "")
 
 
 async def csrf_protected(request: Request) -> None:
