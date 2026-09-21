@@ -350,7 +350,9 @@ class TraeClient:
         倍率在 display_contact_config（JSON 字符串）里：
         consumption_rate.enable 且有 data.rate 时才可信。
         """
-        display = config.get("display_config") or {}
+        display = config.get("display_config")
+        if not isinstance(display, dict):
+            display = {}
         credit_rate: float | None = None
         contact = config.get("display_contact_config")
         if isinstance(contact, str) and contact:
@@ -372,6 +374,10 @@ class TraeClient:
             name=str(display.get("display_name") or ""),
             credit_rate=credit_rate,
             max_input_tokens=max_input,
+            supports_reasoning=_trae_supports_reasoning(config),
+            # TRAE 的 reasoning_effort_config 只有 support_thinking 布尔，
+            # 无档位信息 → default_effort 保持 None（透传 None 优于编造）
+            default_effort=None,
         )
 
     async def fetch_quota(self, credential: TraeCredential) -> Quota:
@@ -477,6 +483,23 @@ class TraeClient:
         if not isinstance(data, dict):
             raise UpstreamProtocolViolation(f"unexpected response shape from {url}")
         return data
+
+
+def _trae_supports_reasoning(config: dict[str, Any]) -> bool | None:
+    """TRAE 侧推理能力判定（B1.6，实测两处上游字段）。
+
+    优先 `display_config.model_capability == "reasoning_model"`；缺失时回落
+    `reasoning_effort_config.support_thinking`。两者都不可信时返回 None。
+    """
+    display = config.get("display_config")
+    if isinstance(display, dict):
+        capability = display.get("model_capability")
+        if isinstance(capability, str) and capability:
+            return capability == "reasoning_model"
+    effort = config.get("reasoning_effort_config")
+    if isinstance(effort, dict) and isinstance(effort.get("support_thinking"), bool):
+        return effort["support_thinking"]
+    return None
 
 
 def _normalize_epoch(value: int) -> int:

@@ -14,7 +14,7 @@ services:
       CODEBUDDY_API_ENDPOINT: ${CODEBUDDY_API_ENDPOINT:-https://copilot.tencent.com}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-glm-5.2}
       # 模型列表黑名单（fnmatch glob，逗号分隔，完全替换语义）
-      MODEL_BLOCKLIST: ${MODEL_BLOCKLIST:-custom_model_*,*sub*agent*,summary,browser_use_*}
+      MODEL_BLOCKLIST: ${MODEL_BLOCKLIST:-custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,hunyuan-image-*}
       QUOTA_PROBE_MINUTES: ${QUOTA_PROBE_MINUTES:-60}
       # 成长中心（仅 CodeBuddy）：一轮领取周期，以及是否允许不可逆动作
       # （抽奖/连登兑换/开 Buddy 盲盒/消耗补登卡）

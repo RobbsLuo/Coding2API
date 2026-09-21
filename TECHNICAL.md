@@ -251,6 +251,46 @@ reasoning）+ 续写指令」重发，并把输出上限两键归零（否则在
 参考实现（IceeAn/codebuddy2api）只**统计** `finish_reason`，**不实现**续写，
 故本项无照搬蓝本，全部依据上述直连实测。
 
+### 3.5 会话粘性键（B1.5）与模型元数据/黑名单（B1.6）
+
+**会话粘性键**（`src/engine/affinity.py`，详见 [PROPOSAL.md 会话粘性](PROPOSAL.md)）：
+键优先级 `conversation_id` > `conversationId` > `prompt_cache_key`（同键名先
+`metadata` 对象再请求体顶层）→ 无显式标识时回落「用户名 + 消息增量前缀指纹」；
+请求体带 `user_id`（顶层或 `metadata` 内）时不派生兜底键。键名核实状态：
+`prompt_cache_key` 是 OpenAI 官方顶层参数、`metadata.user_id` 是 Anthropic
+Messages API 官方字段（均已核实）；`conversation_id`/`conversationId`/顶层
+`user_id` 非两家标准键，本机 71 份真实请求 dump（PI 客户端，顶层键仅
+model/messages/tools/stream/stream_options/store/reasoning_effort）**未观测到**，
+作为网关兼容探测接受（命中即用、未命中无害）。
+
+**模型元数据**（B1.6，2026-09-21 两边上游模型配置接口实测）：
+两边上游都直接给出推理元数据，网关透传为 `/v1/models` 的 OpenAI 额外字段：
+
+| 字段 | CB 来源 | TRAE 来源 | 实测取值 |
+|---|---|---|---|
+| `supports_reasoning` | `supportsReasoning` | `display_config.model_capability`（`reasoning_model`→true、`chat_model`→false），缺失回落 `reasoning_effort_config.support_thinking` | true / false / null |
+| `default_effort` | `reasoning.effort` | 无对应字段（`reasoning_effort_config` 只有 `support_thinking` 布尔） | CB: `high` / `medium`，TRAE 恒为 null |
+
+已批准计划里另一字段 `supported_efforts`（可接受档位集合）**不实现**：上游只给
+「该模型的默认档位」，不给档位清单，凭空枚举 ChatGPT 三档属编造（与 §3.4 同一
+取舍原则）。CB 的 `onlyReasoning`/`canDisableThinking` 同样**不透传**——语义未经
+核实。逐字段补缺语义不变（双上游同名模型先到先填、后到只补 None）。
+
+**黑名单默认值**（`MODEL_BLOCKLIST`，fnmatch glob，只影响列表展示、直连不受影响）：
+在原有 `custom_model_*` / `*sub*agent*` / `summary` / `browser_use_*` 之外，按实测
+补入三类**确认不可用**的上游噪音模型：
+
+| 模式 | 命中实例 | 实测结论 |
+|---|---|---|
+| `default` | CB `default` | HTTP 200 但**零内容**（不可用于 chat） |
+| `hunyuan-image-*` | CB `hunyuan-image-alpha`、`-edit` | HTTP 400 `11103`「Backend [hunyuan-stream] is not supported」 |
+| `file_search_agent` | TRAE `file_search_agent` | HTTP 200 但错误 `3003`「model service is unavailable」+ 零内容（`*sub*agent*` 不含 "sub" 故漏网） |
+
+**刻意不加**（推翻了计划原拟的噪音名，全部直连实测）：
+`*-volc`（`deepseek-v3-2-volc` 实测正常 chat）、`codewise-*` / `completion-*` /
+`*-lkeap`（两边清单零命中，无从核实）、`aquila` / `sagitta` /
+`seed-code-pro-0430`（TRAE 实测均正常 chat，虽名字可疑但可用）。
+
 ---
 
 ## 4. Provider 协议（Q16=A 细接口）

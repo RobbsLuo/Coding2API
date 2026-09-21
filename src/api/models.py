@@ -29,7 +29,8 @@ MODEL_LIST_TTL_SECONDS = 300
 
 # 响应透传的元数据字段（Model → OpenAI 额外字段）
 _META_FIELDS = ("credit_rate", "max_input_tokens", "max_output_tokens",
-                "supports_images", "supports_tool_call")
+                "supports_images", "supports_tool_call",
+                "supports_reasoning", "default_effort")
 
 
 def _blocked(model_id: str, patterns: tuple[str, ...]) -> bool:

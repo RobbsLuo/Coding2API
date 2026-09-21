@@ -349,6 +349,8 @@ class CodeBuddyClient:
                 max_output_tokens=_int_field(item.get("maxOutputTokens")),
                 supports_images=_bool_field(item.get("supportsImages")),
                 supports_tool_call=_bool_field(item.get("supportsToolCall")),
+                supports_reasoning=_bool_field(item.get("supportsReasoning")),
+                default_effort=_effort_field(item.get("reasoning")),
             ))
         if not models:
             raise UpstreamProtocolViolation("config returned no valid model ids")
@@ -392,6 +394,18 @@ def _int_field(value: object) -> int | None:
 
 def _bool_field(value: object) -> bool | None:
     return value if isinstance(value, bool) else None
+
+
+def _effort_field(value: object) -> str | None:
+    """CB 模型条目的 `reasoning` 对象 → 默认档位（实测只有 effort 字段）。
+
+    上游给 `{"effort": "high"|"medium", "summary": "auto"}`；缺失或类型不符
+    返回 None（透传 None 比编造档位诚实）。
+    """
+    if not isinstance(value, dict):
+        return None
+    effort = value.get("effort")
+    return effort if isinstance(effort, str) and effort else None
 
 
 def _extract_accounts(body: dict[str, Any]) -> list[Any]:

@@ -955,8 +955,9 @@ def test_models_cache_used_when_fetch_fails(tmp_path):
 
 
 def test_models_blocklist_filters_noise_and_old(tmp_path):
-    """默认黑名单滤非用户模型（custom_model_*/subagent/summary），
-    MODEL_BLOCKLIST 覆盖后可再滤老模型；直连指定不受列表过滤影响。"""
+    """默认黑名单滤非用户模型（custom_model_*/subagent/summary/file_search_agent/
+    default/hunyuan-image-*），MODEL_BLOCKLIST 覆盖后可再滤老模型；
+    直连指定不受列表过滤影响。"""
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
 
     class NoisyProvider:
@@ -967,7 +968,9 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
 
             return [Model(id="glm-5.2"), Model(id="kimi-k2.6"),
                     Model(id="custom_model_claude"),
-                    Model(id="explore_sub_agent_v13"), Model(id="summary")]
+                    Model(id="explore_sub_agent_v13"), Model(id="summary"),
+                    Model(id="file_search_agent"), Model(id="default"),
+                    Model(id="hunyuan-image-alpha")]
 
         def import_credential(self, raw):
             return raw
@@ -977,11 +980,24 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
     with TestClient(app) as client:
         ids = {item["id"] for item in client.get(
             "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]}
-    # 默认黑名单：噪音全滤，老模型默认保留（是否滤由配置决定）
+    # 默认黑名单：噪音全滤（实测内部/不可用模型），老模型默认保留（是否滤由配置决定）
     assert "custom_model_claude" not in ids
     assert "explore_sub_agent_v13" not in ids
     assert "summary" not in ids
+    assert "file_search_agent" not in ids
+    assert "default" not in ids
+    assert "hunyuan-image-alpha" not in ids
     assert {"glm-5.2", "kimi-k2.6"} <= ids
+
+    # 覆盖黑名单：额外滤老模型（完全替换语义，需重写噪音规则）
+    settings2 = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                         MODEL_BLOCKLIST="custom_model_*,*sub*agent*,summary,kimi-k2.6")
+    app2 = build_app(settings2, providers={"trae": NoisyProvider()})
+    key2 = app2.state.api_keys.create("root")["api_key"]
+    with TestClient(app2) as client:
+        ids2 = {item["id"] for item in client.get(
+            "/v1/models", headers={"Authorization": f"Bearer {key2}"}).json()["data"]}
+    assert "kimi-k2.6" not in ids2 and "glm-5.2" in ids2
 
     # 覆盖黑名单：额外滤老模型（完全替换语义，需重写噪音规则）
     settings2 = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
@@ -1022,6 +1038,38 @@ def test_models_by_provider_rates_when_dual_upstream(tmp_path):
     assert item["credit_rate"] == 0.29          # 合并值：先到先填
     assert item["by_provider"] == {"codebuddy": {"credit_rate": 0.29},
                                    "trae": {"credit_rate": 0.17}}
+
+
+def test_models_passthrough_reasoning_metadata(tmp_path):
+    """B1.6：supports_reasoning / default_effort 随条目透传，且逐字段补缺。"""
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return self._models
+
+        def import_credential(self, raw):
+            return raw
+
+    from src.provider.base import Model
+
+    app = build_app(settings, providers={
+        # trae 只给能力标志，codebuddy 补上默认档位（先到先填、后到补 None）
+        "trae": Stub("trae", [Model(id="glm-5.3", supports_reasoning=True)]),
+        "codebuddy": Stub("codebuddy", [Model(id="glm-5.3", supports_reasoning=True,
+                                              default_effort="medium")]),
+    })
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        item = next(m for m in client.get("/v1/models", headers={
+            "Authorization": f"Bearer {key}"}).json()["data"]
+            if m["id"] == "glm-5.3")
+    assert item["supports_reasoning"] is True
+    assert item["default_effort"] == "medium"
 
 
 def test_codebuddy_import_via_api(tmp_path):
@@ -1199,13 +1247,19 @@ async def test_fetch_models_parses_config_and_caches():
 
 
 async def test_fetch_models_parses_metadata():
-    """模型元数据解析：倍率（credits 字符串）/ token 上限 / 支持性。"""
+    """模型元数据解析：倍率（credits 字符串）/ token 上限 / 支持性 / 推理档位。"""
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"code": 0, "data": {"models": [
             {"id": "default", "name": "Default", "credits": "x2.00 credits",
              "maxInputTokens": 200000, "maxOutputTokens": 24000,
              "supportsImages": False, "supportsToolCall": True},
             {"id": "glm-5.3", "credits": "bad-format"},
+            {"id": "kimi-k3", "supportsReasoning": True,
+             "reasoning": {"effort": "medium", "summary": "auto"}},
+            {"id": "no-effort", "supportsReasoning": False,
+             "reasoning": {"summary": "auto"}},
+            {"id": "bad-reasoning", "reasoning": "not-a-dict"},
+            {"id": "bad-effort", "reasoning": {"effort": 7}},
         ]}})
 
     models = await _client(handler).fetch_models(CodeBuddyCredential(bearer_token="t"))
@@ -1214,8 +1268,19 @@ async def test_fetch_models_parses_metadata():
     assert models[0].max_output_tokens == 24000
     assert models[0].supports_images is False
     assert models[0].supports_tool_call is True
+    # 未提供推理元数据 → 留空
+    assert models[0].supports_reasoning is None
+    assert models[0].default_effort is None
     # 格式不符 → 留空，不影响条目
     assert models[1].credit_rate is None
+    # reasoning.effort → 默认档位；supportsReasoning → 能力标志
+    assert models[2].supports_reasoning is True
+    assert models[2].default_effort == "medium"
+    assert models[3].supports_reasoning is False
+    assert models[3].default_effort is None
+    # reasoning 非 dict / effort 非字符串 → 一律留空（不编造）
+    assert models[4].default_effort is None
+    assert models[5].default_effort is None
 
 
 @pytest.mark.parametrize("body", [

@@ -241,6 +241,11 @@ class Model:
     max_output_tokens: int | None = None
     supports_images: bool | None = None
     supports_tool_call: bool | None = None
+    # 推理元数据（B1.6）：两边上游的模型配置接口都直接给出，有则透传
+    supports_reasoning: bool | None = None
+    # 上游为该模型配置的默认档位（CB: reasoning.effort ∈ {high, medium}；
+    # TRAE 的 reasoning_effort_config 只有 support_thinking 布尔，无档位，为 None）
+    default_effort: str | None = None
 
 
 @dataclass(slots=True)

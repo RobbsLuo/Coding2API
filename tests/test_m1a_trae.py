@@ -540,11 +540,12 @@ async def test_client_fetch_models_and_quota():
 
 
 async def test_client_fetch_models_metadata():
-    """倍率（display_contact_config.consumption_rate）与上下文窗口透传。"""
+    """倍率 / 上下文窗口 / 推理能力透传。"""
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"config_info_list": [
             {"config_name": "Doubao-Seed-Evolving",
-             "display_config": {"display_name": "Seed-Evolving"},
+             "display_config": {"display_name": "Seed-Evolving",
+                                "model_capability": "reasoning_model"},
              "context_window_tokens": {"dev": 256000},
              "display_contact_config": json.dumps({
                  "consumption_rate": {"enable": True, "data": {"rate": 0.08}}})},
@@ -555,16 +556,48 @@ async def test_client_fetch_models_metadata():
             {"config_name": "kimi-k3",
              "display_config": {"display_name": "K3"},
              "display_contact_config": json.dumps({
-                 "consumption_rate": {"enable": True, "data": {"rate": "oops"}}})},
+                 "consumption_rate": {"enable": True, "data": {"rate": "oops"}}}),
+             "reasoning_effort_config": {"support_thinking": False}},
         ]})
 
     models = await _client(handler).fetch_models(TraeCredential(access_token="a"))
     assert models[0].credit_rate == 0.08
     assert models[0].max_input_tokens == 256000
+    assert models[0].supports_reasoning is True
+    # TRAE 无档位清单可核实 → 不编造默认档位
+    assert models[0].default_effort is None
     # 坏数据 → 字段留空，不影响条目
     assert models[1].credit_rate is None and models[1].max_input_tokens is None
+    # 能力字段缺失 → 回落 reasoning_effort_config.support_thinking
+    assert models[1].supports_reasoning is None
+    assert models[2].supports_reasoning is False
     # rate 非数值同样留空
     assert models[2].credit_rate is None
+
+
+async def test_trae_supports_reasoning_branches():
+    """能力判定的优先级与回落：capability 优先，其次 support_thinking。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"config_info_list": [
+            # capability 非空字符串 → 不以 support_thinking 为准
+            {"config_name": "c1", "display_config": {"model_capability": "chat_model"},
+             "reasoning_effort_config": {"support_thinking": True}},
+            # capability 为空串 → 掉到 support_thinking
+            {"config_name": "c2", "display_config": {"model_capability": ""},
+             "reasoning_effort_config": {"support_thinking": True}},
+            # display_config 非 dict → 掉到 support_thinking
+            {"config_name": "c3", "display_config": "oops",
+             "reasoning_effort_config": {"support_thinking": True}},
+            # support_thinking 非布尔 → None
+            {"config_name": "c4", "reasoning_effort_config": {"support_thinking": "yes"}},
+            # reasoning_effort_config 非 dict → None
+            {"config_name": "c5", "reasoning_effort_config": ["oops"]},
+            # 全部缺失 → None
+            {"config_name": "c6"},
+        ]})
+
+    models = await _client(handler).fetch_models(TraeCredential(access_token="a"))
+    assert [m.supports_reasoning for m in models] == [False, True, True, None, None, None]
 
 
 @pytest.mark.parametrize("payload", [

@@ -66,7 +66,17 @@ class Settings(BaseSettings):
     # 模型列表黑名单（fnmatch glob，逗号分隔）：滤掉非用户模型与老模型，
     # 只影响 /v1/models 与 playground 列表，直连指定不受影响。
     # 覆盖此值时为完全替换（含默认噪音规则），增删请重写全量。
-    model_blocklist: str = "custom_model_*,*sub*agent*,summary,browser_use_*"
+    # B1.6 实测（2026-09-21，两边上游真实清单）补入的内部/不可用模型：
+    #   custom_model_* / *sub*agent* / summary / browser_use_* / file_search_agent
+    #   为上游内部或代理模型（chat 报 3003 / 非用户模型）
+    #   default 实测 HTTP 200 但零内容（不可用于 chat）
+    #   hunyuan-image-* 实测 HTTP 400 11103「backend is not supported」
+    # 刻意不加的：*-volc（deepseek-v3-2-volc 实测正常 chat）、aquila/sagitta/
+    #   seed-code-pro-0430（TRAE 实测均正常 chat）
+    model_blocklist: str = (
+        "custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,"
+        "default,hunyuan-image-*"
+    )
     # 诊断：把 /v1 入口的原始请求体落到 data/dumps/（排查客户端差异用）
     dump_request_bodies: bool = False
     # 截断续写（B1.4）：上游以 finish_reason=length 截断时，同凭证自动续写，
