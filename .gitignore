@@ -33,6 +33,9 @@ web/build/
 # 本地服务日志（nohup uvicorn）
 logs/
 
+# 本地文档目录（不入库）
+docs/
+
 # 前端
 web/node_modules/
 web/dist/
