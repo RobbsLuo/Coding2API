@@ -234,7 +234,16 @@ class CredentialRepository:
                 (self._cipher.encrypt(payload), expires_at, issued_at, credential_id))
 
     def save_quota(self, credential_id: str, quota: Quota) -> None:
+        """写回额度，并顺带记一条积分变动流水（B3.4）。
+
+        流水必须在同一事务里与前值比较：分两次读改写会与并发探测交错，
+        记出「before 是别人写过的值」的错行。因此这里先取旧余额，
+        再在同一个事务里 UPDATE + INSERT。
+        """
         with self._db.transaction() as conn:
+            previous = conn.execute(
+                "SELECT quota_remaining, quota_probed_at FROM credentials WHERE id = ?",
+                (credential_id,)).fetchone()
             conn.execute(
                 "UPDATE credentials SET quota_remaining = ?, quota_total = ?, "
                 "quota_cycle_end = ?, quota_expiry_ladder = ?, quota_packages = ?, "
@@ -245,6 +254,54 @@ class CredentialRepository:
                  quota.probed_at,
                  health_score(quota), credential_id),
             )
+            self._record_credit_event(conn, credential_id, quota,
+                                      previous=previous)
+
+    @staticmethod
+    def _record_credit_event(conn, credential_id: str, quota: Quota, *,
+                             previous) -> None:
+        """比对前后余额写一条 credit_events；无变化或无法量化时不写。
+
+        只记「有信息量」的行：
+        - 首次探测（没有 previous 行）→ source=sync，只是建立基线；
+          此时 delta 为空，因为「从无到有」不是一次真实的积分变动。
+        - 余额未变 → 不写。否则每轮探测都落一行 0，表会被噪声淹没。
+        - 任一端为 NULL（探测失败后的未知）→ delta 记空但**仍记行**：
+          「余额从 100 变成未知」本身就是值得追的异常。
+
+        绝不写「签到 +5」这类归因：上游不打日志，diff 看不到分数是谁加的
+        （见 schema.sql 的表注释）。
+        """
+        if previous is None:       # 凭证已被并发删除：不补记，避免悬挂行
+            return
+        before = previous["quota_remaining"]
+        after = quota.remaining
+        if before is None:
+            # 没有对照基线：只记「基线已建立」，不算积分数。
+            # 连本次值都没有（两端皆未知）→ 什么也没学到，不写。
+            if after is None:
+                return
+            conn.execute(
+                "INSERT INTO credit_events (id, credential_id, ts, window_start, "
+                "before, after, delta, source) VALUES (?,?,?,?,?,?,?,'sync')",
+                (_new_id("credit"), credential_id, quota.probed_at, None,
+                 None, after, None))
+            return
+        if after is not None and float(before) == float(after):
+            return
+        # 浮点噪声护栏：余额来自上游 JSON 的浮点运算，两次「没变」也可能差
+        # 1e-13 这种量级。不挡的话会记出一堆 delta≈0 的假变动行。
+        epsilon = 1e-9
+        if after is not None and abs(float(after) - float(before)) < epsilon:
+            return
+        # 落库前按 epsilon 量级收敛：7.229999999999563 这种值直接展示会给
+        # 「这数怎么这么脏」的印象，而 1e-9 位上的差异本来就不是真变化。
+        delta = None if after is None else round(float(after) - float(before), 6)
+        conn.execute(
+            "INSERT INTO credit_events (id, credential_id, ts, window_start, "
+            "before, after, delta, source) VALUES (?,?,?,?,?,?,?,'observed')",
+            (_new_id("credit"), credential_id, quota.probed_at,
+             previous["quota_probed_at"], before, after, delta))
 
     def mark_probe_failed(self, credential_id: str, now: int | None = None) -> None:
         with self._db.transaction() as conn:
@@ -449,6 +506,33 @@ class GrowthRepository:
             "SELECT * FROM growth_events WHERE credential_id = ? ORDER BY ts DESC LIMIT ?",
             (credential_id, max(1, limit))).fetchall()
         return [dict(row) for row in rows]
+
+
+class CreditEventRepository:
+    """积分变动流水（credit_events）：只读查询，写入在 save_quota 事务内完成。
+
+    读侧独立成仓储（与 GrowthRepository 同形），写入刻意不放在这里：
+    流水必须与额度 UPDATE 同事务才能拿到正确的 before（见
+    CredentialRepository._record_credit_event）。
+    """
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def recent(self, credential_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """倒序返回变动记录；limit 收敛到 [1, 200] 防止一次拉爆前端。"""
+        rows = self._db.connect().execute(
+            "SELECT * FROM credit_events WHERE credential_id = ? "
+            "ORDER BY ts DESC, id DESC LIMIT ?",
+            (credential_id, max(1, min(200, limit)))).fetchall()
+        return [dict(row) for row in rows]
+
+    def prune(self, *, keep_days: int, now: int | None = None) -> int:
+        """删除超过保留期的流水（与 usage_events 同一保留策略入口）。"""
+        cutoff = int(now if now is not None else time.time()) - keep_days * 86400
+        with self._db.transaction() as conn:
+            cursor = conn.execute("DELETE FROM credit_events WHERE ts < ?", (cutoff,))
+        return cursor.rowcount
 
 
 class RuntimeSettingsRepository:

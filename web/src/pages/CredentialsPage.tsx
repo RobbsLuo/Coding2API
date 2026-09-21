@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import {
   CalendarCheck,
   Database,
   HeartPulse,
+  History,
   MoreHorizontal,
   Pin,
   Power,
@@ -27,6 +28,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import {
   activeModelCooldowns,
+  CREDIT_SOURCE_LABEL,
+  creditEventLabel,
   credentialState,
   cooldownRemaining,
   expiringQuotaLabel,
@@ -41,7 +44,7 @@ import {
   STATE_TONE,
   tokenExpiryView,
 } from "../api/display";
-import type { Credential, GrowthRunResult, Provider } from "../api/types";
+import type { Credential, CreditEvent, GrowthRunResult, Provider } from "../api/types";
 import type { TokenExpiryView } from "../api/display";
 import {
   Badge,
@@ -99,6 +102,7 @@ interface Actions {
   checkin: (credential: Credential) => void;
   growth: (credential: Credential) => void;
   activity: (credential: Credential) => void;
+  credits: (credential: Credential) => void;
 }
 
 export function CredentialsPage() {
@@ -114,6 +118,12 @@ export function CredentialsPage() {
   const [probeDetail, setProbeDetail] = useState<string | null>(null);
   // 成长中心最近一轮：展示逐步结果（一句话汇报看不出哪一步没做成）
   const [growthResult, setGrowthResult] = useState<GrowthRunResult | null>(null);
+  // 积分记录抽屉：一次只开一个（同一行内展开，不弹层——
+  // 表格行本身就是最好的上下文，弹层会遮掉额度列）
+  const [creditEvents, setCreditEvents] = useState<{
+    credentialId: string;
+    events: CreditEvent[];
+  } | null>(null);
 
   const credentials = data?.credentials ?? [];
   const expiryWindow = data?.expiry_window_seconds ?? 0;
@@ -233,6 +243,21 @@ export function CredentialsPage() {
           setError(caught instanceof Error ? caught.message : "成长中心执行失败");
         } finally {
           setBusy(false);
+        }
+      })(),
+    // 只读：开关抽屉不写任何状态，因此不复用 run()（那个会清 notice 并刷新列表）
+    credits: (credential) =>
+      void (async () => {
+        if (creditEvents?.credentialId === credential.id) {
+          setCreditEvents(null);
+          return;
+        }
+        setError(null);
+        try {
+          const result = await api.creditEvents(credential.id);
+          setCreditEvents({ credentialId: credential.id, events: result.events });
+        } catch (caught) {
+          setError(caught instanceof Error ? caught.message : "积分记录读取失败");
         }
       })(),
     activity: (credential) =>
@@ -402,19 +427,31 @@ export function CredentialsPage() {
             </TableHeader>
             <TableBody>
               {credentials.map((credential) => (
-                <Row
-                  key={credential.id}
-                  credential={credential}
-                  now={now}
-                  expiryWindow={expiryWindow}
-                  expirySecondaryWindow={expirySecondaryWindow}
-                  tokenWarning={tokenWarning}
-                  isAdmin={isAdmin}
-                  busy={busy}
-                  confirming={confirmDelete === credential.id}
-                  onConfirmDelete={setConfirmDelete}
-                  actions={actions}
-                />
+                <Fragment key={credential.id}>
+                  <Row
+                    credential={credential}
+                    now={now}
+                    expiryWindow={expiryWindow}
+                    expirySecondaryWindow={expirySecondaryWindow}
+                    tokenWarning={tokenWarning}
+                    isAdmin={isAdmin}
+                    busy={busy}
+                    confirming={confirmDelete === credential.id}
+                    onConfirmDelete={setConfirmDelete}
+                    actions={actions}
+                  />
+                  {creditEvents?.credentialId === credential.id && (
+                    <TableRow data-testid={`credit-row-${credential.id}`}>
+                      <TableCell colSpan={isAdmin ? 7 : 6} className="p-0">
+                        <CreditDrawer
+                          credentialId={credential.id}
+                          events={creditEvents.events}
+                          onClose={() => actions.credits(credential)}
+                        />
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </Fragment>
               ))}
             </TableBody>
           </Table>
@@ -643,6 +680,8 @@ function Row({
   const tokenExpiry = tokenExpiryView(
     credential.token_expires_at, credential.token_issued_at, tokenWarning, now);
 
+  // 抽屉由调用方渲染成**独立的下一行**（见 TableBody）：塞进本行的最后一个单元格
+  // 只会挤在「操作」列里——同行内的 colSpan 不生效，整行高度会被拉坏。
   return (
     <TableRow data-testid={`row-${credential.id}`}>
       <TableCell>
@@ -745,6 +784,9 @@ function Row({
                   <DropdownMenuItem onSelect={() => actions.probe(credential)}>
                     <RefreshCw className="size-4" /> 探测
                   </DropdownMenuItem>
+                  <DropdownMenuItem onSelect={() => actions.credits(credential)}>
+                    <History className="size-4" /> 积分记录
+                  </DropdownMenuItem>
                   <DropdownMenuItem onSelect={() => actions.checkin(credential)}>
                     <CalendarCheck className="size-4" /> 签到
                   </DropdownMenuItem>
@@ -786,6 +828,84 @@ function Row({
         </TableCell>
       )}
     </TableRow>
+  );
+}
+
+/**
+ * 积分记录抽屉（B3.4）：同一行内展开，不弹层。
+ *
+ * 语义纪律：这里展示的是**两次额度探测之间的净变化**，不是动作归因。上游
+ * 签到/成长接口不打日志，diff 看不到分数是谁加的，所以文案一律说「净变化」，
+ * 只有归因已知度（observed/sync）。把净变化说成「签到获得」就是拿猜测当事实。
+ */
+function CreditDrawer({
+  credentialId,
+  events,
+  onClose,
+}: {
+  credentialId: string;
+  events: CreditEvent[];
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="mt-4 rounded-lg border border-border/60 bg-muted/30 p-3"
+      data-testid={`credit-drawer-${credentialId}`}
+    >
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-sm font-medium">
+          积分记录
+          <span className="ml-2 text-xs text-muted-foreground">
+            两次额度探测之间的净变化（非动作归因）
+          </span>
+        </div>
+        <Button size="sm" variant="ghost" onClick={onClose} data-testid="credit-drawer-close">
+          关闭
+        </Button>
+      </div>
+      {events.length === 0 ? (
+        <Empty data-testid="credit-drawer-empty">
+          还没有记录。余额变化会在下一轮额度探测时写入（首次探测只建立基线）。
+        </Empty>
+      ) : (
+        <Table data-testid="credit-drawer-table">
+          <TableHeader>
+            <TableRow>
+              <TableHead>观测时间</TableHead>
+              <TableHead>区间起点</TableHead>
+              <TableHead>变化</TableHead>
+              <TableHead>说明</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {events.map((event) => (
+              <TableRow key={event.id} data-testid={`credit-event-${event.id}`}>
+                <TableCell className="text-xs">{formatTime(event.ts)}</TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {event.window_start ? formatTime(event.window_start) : "—"}
+                </TableCell>
+                <TableCell
+                  className={`text-xs ${
+                    event.delta === null
+                      ? "text-muted-foreground"
+                      : event.delta > 0
+                        ? "text-ok"
+                        : event.delta < 0
+                          ? "text-warn"
+                          : "text-muted-foreground"
+                  }`}
+                >
+                  {creditEventLabel(event)}
+                </TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {CREDIT_SOURCE_LABEL[event.source] ?? event.source}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+    </div>
   );
 }
 

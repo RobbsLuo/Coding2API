@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { expiringQuotaLabel, formatChartValue, tokenExpiryView } from "../display";
+import { expiringQuotaLabel, formatChartValue, creditEventLabel, tokenExpiryView } from "../display";
 
 describe("formatChartValue", () => {
   it("请求次数：紧凑数字 + 单位（次）", () => {
@@ -98,5 +98,29 @@ describe("tokenExpiryView", () => {
 
   it("进度条上限 100%（剩余超过寿命时，如时钟偏差）", () => {
     expect(tokenExpiryView(now + 400 * DAY, now, 3600, now).percent).toBe(100);
+  });
+});
+
+describe("creditEventLabel", () => {
+  it("净增加：带符号 + 前后对照", () => {
+    expect(creditEventLabel({ delta: 15, before: 100, after: 115, source: "observed" }))
+      .toBe("+15（100 → 115）");
+  });
+
+  it("净减少：如实给负数（对话消耗等）", () => {
+    expect(creditEventLabel({ delta: -5, before: 110, after: 105, source: "observed" }))
+      .toBe("-5（110 → 105）");
+  });
+
+  it("首次建立基线：只说基线值，不算积分", () => {
+    expect(creditEventLabel({ delta: null, before: null, after: 100, source: "sync" }))
+      .toBe("基线 100");
+  });
+
+  it("变化无法量化：说「变为未知」，绝不渲染成 0 的变动量", () => {
+    const label = creditEventLabel({ delta: null, before: 100, after: null, source: "observed" });
+    expect(label).toBe("由 100 变为未知");
+    // 不能出现「±0（… → …）」这种「把未知当成没变」的读法
+    expect(label).not.toMatch(/[+-]0/);
   });
 });

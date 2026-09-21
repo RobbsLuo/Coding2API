@@ -267,6 +267,22 @@ export interface GrowthEvent {
   trigger: string;
 }
 
+/** 积分变动流水（B3.4）：两次额度探测之间的**净变化**，不是动作归因。 */
+export interface CreditEvent {
+  id: string;
+  credential_id: string;
+  /** 观测时刻（本次探测写回时间） */
+  ts: number;
+  /** 变化覆盖起点（上次成功探测时刻）；首次建立基线时为 null */
+  window_start: number | null;
+  before: number | null;
+  after: number | null;
+  /** after - before；两端任一未知时为 null（不猜成 0） */
+  delta: number | null;
+  /** observed=两次探测间净变化；sync=首次建立基线（无对照） */
+  source: string;
+}
+
 export interface CheckinResult {
   ok: boolean;
   credit: number | null;

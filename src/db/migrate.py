@@ -20,7 +20,9 @@ SCHEMA_NAME = "schema.sql"
 # schema.sql（CREATE TABLE IF NOT EXISTS 对老库同样生效），无需迁移动作。
 # 11：credentials 新增 token_expires_at / token_issued_at（B3.3
 # token 到期展示与预警）。
-SCHEMA_VERSION = 11
+# 12：新增 credit_events 表（B3.4 积分变动流水）。新增表只需进
+# schema.sql（CREATE TABLE IF NOT EXISTS 对老库同样生效），无需迁移动作。
+SCHEMA_VERSION = 12
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (

@@ -108,6 +108,30 @@ CREATE TABLE IF NOT EXISTS growth_events (
 
 CREATE INDEX IF NOT EXISTS idx_growth_cred_ts ON growth_events(credential_id, ts);
 
+-- 积分变动流水（B3.4）：额度探测写回时比对余额，只增记一条。
+--
+-- 为什么靠 diff：签到 / 成长中心的上游接口普遍不打日志，拿不到「这次动作
+-- 加了多少分」。所以本表记的是**两次探测之间的净变化**，不是动作归因——
+-- source 只表达归因已知度（observed=常规探测区间 / sync=首次建立基线），
+-- 绝不写「签到 +5」这种上游并未告知的结论。
+--
+-- before/after 可空：只在两端都拿得到数值时才记 delta；任一为 NULL 时
+-- 本行说明「变化无法量化」（如探测失败后恢复），不猜 0。
+CREATE TABLE IF NOT EXISTS credit_events (
+    id             TEXT PRIMARY KEY,
+    credential_id  TEXT NOT NULL,
+    ts             INTEGER NOT NULL,             -- 观测时刻（本次探测写回时间）
+    window_start   INTEGER,                      -- 变化覆盖起点（上次成功探测时刻）
+    before         REAL,                         -- 上次观测余额（可空）
+    after          REAL,                         -- 本次观测余额（可空）
+    delta          REAL,                         -- after - before，仅两端可算时非空
+    source         TEXT NOT NULL DEFAULT 'observed'
+                   -- observed=两次探测间净变化 | sync=首次建立基线（无对照）
+);
+
+CREATE INDEX IF NOT EXISTS idx_credit_events_cred_ts
+    ON credit_events(credential_id, ts);
+
 -- (凭证, 模型) 级冷却：模型级限流（6004）与「该后端无此模型」（11102）负缓存。
 --
 -- 必须与 credentials.cooling_until 分开：6004 只影响触发的那个模型，

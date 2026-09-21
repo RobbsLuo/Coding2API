@@ -190,6 +190,20 @@ def create_router(services: Services) -> APIRouter:
             raise InvalidRequest("credential not found")
         return {"events": services.growth_events.recent(credential_id, limit=limit)}
 
+    @router.get("/api/credentials/{credential_id}/credit-events")
+    async def credit_events(credential_id: str, limit: int = 20,
+                            principal=Depends(principal_from_request)):
+        """积分变动流水：两次额度探测之间的净变化（倒序）。
+
+        刻意不返回「来源」枚举：上游不打日志，diff 看到的只是区间净变化，
+        写「签到 +5」就是把猜测当事实。source 只表达归因已知度
+        （observed=常规区间 / sync=首次建立基线）。
+        """
+        require_admin(principal)
+        if services.credentials.provider_of(credential_id) is None:
+            raise InvalidRequest("credential not found")
+        return {"events": services.credit_events.recent(credential_id, limit=limit)}
+
     @router.post("/api/credentials/{credential_id}/growth")
     async def run_growth(credential_id: str,
                          _csrf: None = Depends(csrf_protected),

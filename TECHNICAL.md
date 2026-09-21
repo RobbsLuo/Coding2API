@@ -86,7 +86,7 @@ coding2api/
 │   │   ├── checkin.py           # 全天每 10 分钟签到；成功即当日封账该凭证
 │   │   ├── growth.py            # 成长中心（仅 CB）：GROWTH_INTERVAL_MINUTES 一轮，落 growth_events
 │   │   ├── refresh.py           # 每 60 分钟；REFRESH_SKEW_HOURS 窗口内预刷新
-│   │   ├── retention.py         # 每 5 分钟：小时汇总重算（幂等）+ 90 天前明细清理
+│   │   ├── retention.py         # 每 5 分钟：小时汇总重算（幂等）+ 90 天前明细 / 积分流水清理
 │   │   └── runner.py            # 后台任务调度，接入应用生命周期
 │   ├── stats/
 │   │   ├── collector.py         # usage_events 写入（脱敏）+ 小时汇总双写/重算
@@ -504,6 +504,44 @@ UI 与日志都必须明示「DB 覆盖 .env」，否则用户改 `.env` 不生�
 **接口**：`GET /api/credentials` 响应新增 `token_expiry_warning_seconds`；每条凭证新增
 `token_expires_at` 与 `token_issued_at`（均为 0 表示未知）。
 
+### 3.10 积分变动流水（B3.4）
+
+**要解决的问题**：签到 / 成长中心 / 对话都会改余额，但上游这些接口**不打日志**，
+拿不到「这次动作加了多少分」。管理台此前只能看到「当前剩余」这一张快照。
+
+**做法：在额度探测写回时比对余额，只增记一条**（`credit_events`）。写入刻意放在
+`save_quota` 的**同一个事务**里：分两次读改写会与并发探测交错，记出「before 是别人
+写过的值」的错行。
+
+**归因纪律（本批最重要的取舍）**：diff 只能看到 `[上次探测, 本次探测]` 区间的**净变化**。
+这段区间里签到、成长领取与对话消耗可能同时发生，diff 无法区分谁贡献了多少。所以
+`source` 列**只表达归因已知度**，不写来源枚举：
+
+- `observed` = 两次探测之间的净变化（delta 可为正、负，或为 NULL）
+- `sync` = 首次建立基线，没有对照（delta 为 NULL，不是「+0」）
+
+前端配套文案一律说「净变化」，不写「签到 +5」——那等于把猜测当事实。
+
+**只记有信息量的行**（否则表会被噪声淹没）：
+
+| 情形 | 是否记 | 理由 |
+|---|---|---|
+| 首次探测（无对照） | 记（`sync`），`delta` 为 NULL | 「从无到有」不是一次真实的积分变动 |
+| 余额未变 | **不记** | 否则每轮探测落一行 0 |
+| 余额变化 | 记（`observed`），`delta = after - before` | 正负都如实记 |
+| 任一端未知 | 记，`delta` 为 NULL | 「余额变未知」本身是该追的异常，绝不量化成 0 |
+| 两端都未知 | **不记** | 什么也没学到 |
+| 凭证被并发删除 | **不记** | 避免悬挂行 |
+
+`window_start` 记的是**上次探测时刻**（不是「上次有变动」）：中间那次没变化但同样
+观测过，区间必须从最近一次观测算起，否则会把一段无人观测的时间也算进去。
+
+**接口**：`GET /api/credentials/{id}/credit-events?limit=20`（管理员；未知凭证 400
+而不是空列表，避免拼错 id 时看起来「没有记录」）。前端为凭证行内的「积分记录」抽屉。
+
+**保留**：`RetentionTask` 按 `usage_events` 同一保留期（90 天）回收，报告里体现为
+`purged_credit_events`。
+
 ---
 
 ## 4. Provider 协议（Q16=A 细接口）
@@ -644,7 +682,7 @@ class Scheduler:
 | 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态，重启重建）；失败凭证持续重试，同账号多凭证共享一次 |
 | 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5 分钟） | 仅 CodeBuddy：领旅行礼物 / 派 Buddy / 领取新任务 / 领任务奖 / 断登补登 / 连登兑换 / 开盲盒 / Buddy 盲盒；结果落 `growth_events` + 回写 `credentials.growth_last_result` |
 | 活跃上报（activity.py，默认关闭） | 每 10 分钟醒一次，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点，北京时间）窗口内执行 | 仅 CodeBuddy：补发一条 `chat_request_send` 续连登；按「endpoint + userId」隔离，当日封账；成功落一行 `growth_events` |
-| 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理 |
+| 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理；顺带按同期限回收 `credit_events`（见 §3.10） |
 
 **签到 / 成长中心的「同账号」隔离键**：`checkin_scope(data) or f"credential|{credential_id}"`。
 provider 在身份未知时返回空串（CB 的 `checkin_scope_key` 在 `account_uid` 与

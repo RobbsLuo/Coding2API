@@ -194,6 +194,34 @@ export function formatCompact(value: number | null | undefined): string {
   return value.toLocaleString("zh-CN", { notation: "compact", maximumFractionDigits: 1 });
 }
 
+/** 积分变动流水的说明列（B3.4）：只表达归因已知度，不谎称来源。 */
+export const CREDIT_SOURCE_LABEL: Record<string, string> = {
+  observed: "两次探测间净变化",
+  sync: "首次建立基线",
+};
+
+/**
+ * 一条积分流水的摘要文案。
+ *
+ * 为什么不说「签到 +5」：上游签到/成长接口不打日志，探测 diff 只能看到区间
+ * 净变化，这段区间里可能同时发生签到、成长领取与对话消耗。把净变化写成
+ * 某个动作的成果就是拿猜测当事实，所以这里只说「净变化」多少。
+ */
+export function creditEventLabel(event: {
+  delta: number | null;
+  before: number | null;
+  after: number | null;
+  source: string;
+}): string {
+  if (event.source === "sync") return `基线 ${formatNumber(event.after)}`;
+  if (event.delta === null) {
+    // 任一端未知：变化无法量化。绝不当成 0，否则「余额变未知」会被读成「没变」
+    return `由 ${formatNumber(event.before)} 变为未知`;
+  }
+  const sign = event.delta > 0 ? "+" : "";
+  return `${sign}${formatNumber(event.delta)}（${formatNumber(event.before)} → ${formatNumber(event.after)}）`;
+}
+
 /** 时长展示（耗时 / 首字延迟共用）：≥1s 以 s 计（保留 1 位小数、去尾零），否则 ms。 */
 export function formatLatency(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return "—";

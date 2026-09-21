@@ -164,11 +164,14 @@ class TaskRunner:
 
 
 def build_runner(credentials, providers: dict, stats_collector, config,
-                 growth_events=None) -> TaskRunner:
+                 growth_events=None, credit_events=None) -> TaskRunner:
     """按配置装配后台任务（Pacer 由两个 provider 共享）。
 
     growth_events 为 None 时（老调用方/测试）不装配成长中心任务：没有落库目标
     就跑起来只会把结果丢掉；生产路径（main.py）总是传入。
+
+    credit_events 同理：为 None 时保留流水清理不启用（表仍会随探测增长，
+    但不影响功能；生产路径总是传入）。
 
     B3.2 热更：`config` 既可以是启动期快照 `Settings`，也可以是
     `RuntimeSettings` 覆盖层。装配时所有「可热更项」必须传**零参 lambda**，
@@ -194,7 +197,8 @@ def build_runner(credentials, providers: dict, stats_collector, config,
         activity=activity,
         refresh=RefreshTask(credentials, providers, skew_seconds=config.refresh_skew_hours * 3600,
                             now=lambda: int(time.time())),
-        retention=RetentionTask(stats_collector, credentials=credentials),
+        retention=RetentionTask(stats_collector, credentials=credentials,
+                                credit_events=credit_events),
         quota_probe_minutes=lambda: config.quota_probe_minutes,
         growth_interval_minutes=lambda: config.growth_interval_minutes,
         activity_enabled=lambda: config.activity_report_enabled,

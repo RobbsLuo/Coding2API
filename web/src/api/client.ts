@@ -4,6 +4,7 @@ import type {
   CheckinResult,
   CheckinStatus,
   CredentialsResponse,
+  CreditEvent,
   GrowthEvent,
   GrowthRunResult,
   ActivityReportResult,
@@ -89,6 +90,8 @@ export const api = {
     request<GrowthRunResult>(`/api/credentials/${id}/growth`, { method: "POST" }),
   growthHistory: (id: string) =>
     request<{ events: GrowthEvent[] }>(`/api/credentials/${id}/growth`),
+  creditEvents: (id: string) =>
+    request<{ events: CreditEvent[] }>(`/api/credentials/${id}/credit-events`),
   reportActivity: (id: string) =>
     request<ActivityReportResult>(`/api/credentials/${id}/activity`, { method: "POST" }),
 

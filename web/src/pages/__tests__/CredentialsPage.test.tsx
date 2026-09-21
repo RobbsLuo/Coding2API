@@ -855,4 +855,88 @@ describe("CredentialsPage 成长中心", () => {
     expect(cell).toHaveTextContent("token 剩余 30.0 天");
     expect(cell).not.toHaveTextContent("即将到期");
   });
+
+  // --------------------------------------------------------- B3.4 积分记录
+  it("积分记录抽屉：展示净变化与区间起点，并说明不是动作归因", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    mockFetch({
+      // credit-events 路径也含 "/api/credentials"，必须放在列表路由前
+      "/credit-events": { events: [
+        { id: "cre_2", credential_id: "cred_1", ts: now, window_start: now - 600,
+          before: 100, after: 115, delta: 15, source: "observed" },
+        { id: "cre_1", credential_id: "cred_1", ts: now - 600, window_start: null,
+          before: null, after: 100, delta: null, source: "sync" },
+      ] },
+      "/api/credentials": listBody([makeCredential({ id: "cred_1" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "积分记录" }));
+
+    const drawer = await screen.findByTestId("credit-drawer-cred_1");
+    // 说「净变化」，不说「签到获得」——上游不打日志，归因是猜的
+    expect(drawer).toHaveTextContent("两次额度探测之间的净变化（非动作归因）");
+    // 抽屉必须是独立的表格行：塞进凭证行内部只会挤在「操作」列里
+    // （同行内 colSpan 不生效），这个断言就是防那次布局事故复发
+    const drawerRow = screen.getByTestId("credit-row-cred_1");
+    expect(drawerRow.tagName).toBe("TR");
+    expect(drawerRow).not.toBe(screen.getByTestId("row-cred_1"));
+    expect(within(drawerRow).getByTestId("credit-drawer-cred_1")).toBeInTheDocument();
+    // :scope > td：抽屉内部还有一张表格，直接按 role 查会匹配到里面那些单元格
+    expect(drawerRow.querySelector(":scope > td")).toHaveAttribute("colspan", "7");
+    expect(within(drawer).getByTestId("credit-event-cre_2")).toHaveTextContent(
+      "+15（100 → 115）",
+    );
+    expect(within(drawer).getByTestId("credit-event-cre_1")).toHaveTextContent("基线 100");
+    expect(within(drawer).getByTestId("credit-event-cre_1")).toHaveTextContent(
+      "首次建立基线",
+    );
+  });
+
+  it("积分记录抽屉：变化无法量化时如实说「变为未知」，不显示成 0", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    mockFetch({
+      "/credit-events": { events: [
+        { id: "cre_x", credential_id: "cred_1", ts: now, window_start: now - 60,
+          before: 100, after: null, delta: null, source: "observed" },
+      ] },
+      "/api/credentials": listBody([makeCredential({ id: "cred_1" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "积分记录" }));
+
+    const cell = await screen.findByTestId("credit-event-cre_x");
+    expect(cell).toHaveTextContent("由 100 变为未知");
+    // 变化列绝不能渲染成一个 0（会被读成「没有变化」）
+    const changeCell = cell.querySelector("td:nth-child(3)");
+    expect(changeCell?.textContent).toBe("由 100 变为未知");
+  });
+
+  it("积分记录抽屉：无记录给出去哪看说明，并可关闭/再开", async () => {
+    mockFetch({
+      "/credit-events": { events: [] },
+      "/api/credentials": listBody([makeCredential({ id: "cred_1" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "积分记录" }));
+    const drawer = await screen.findByTestId("credit-drawer-cred_1");
+    expect(within(drawer).getByTestId("credit-drawer-empty")).toHaveTextContent(
+      "下一轮额度探测时写入",
+    );
+
+    await userEvent.click(screen.getByTestId("credit-drawer-close"));
+    expect(screen.queryByTestId("credit-drawer-cred_1")).not.toBeInTheDocument();
+
+    // 再次点菜单可重新打开（不是一次性开关）
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "积分记录" }));
+    expect(await screen.findByTestId("credit-drawer-cred_1")).toBeInTheDocument();
+  });
 });

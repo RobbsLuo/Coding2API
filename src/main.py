@@ -36,6 +36,7 @@ from .db.migrate import apply_schema
 from .db.repo import (
     ApiKeyRepository,
     CredentialRepository,
+    CreditEventRepository,
     GrowthRepository,
     RuntimeSettingsRepository,
 )
@@ -130,6 +131,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     cipher = CredentialCipher(config.app_secret)
     credentials = CredentialRepository(db, cipher)
     growth_events = GrowthRepository(db)
+    credit_events = CreditEventRepository(db)
     api_keys = ApiKeyRepository(db)
     store = users if users is not None else _load_users(settings=config)
     # 聊天节流器存「取值器」而不是快照：管理台改最小间隔后立即生效。
@@ -174,7 +176,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         services_ = app_.state.services
         # 传 runtime（而非 env 快照）：后台循环的热更值每轮现读覆盖层。
         runner = build_runner(credentials, registry, app_.state.stats_collector, runtime,
-                              growth_events=app_.state.growth_events)
+                              growth_events=app_.state.growth_events,
+                              credit_events=credit_events)
         app_.state.task_runner = runner
         await runner.start()
         # 预热模型别名表（动态拉取失败仅记日志，不阻塞启动）；force 绕过 TTL
@@ -247,6 +250,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         settings=runtime,
         credentials=credentials,
         growth_events=growth_events,
+        credit_events=credit_events,
         api_keys=api_keys,
         executor=executor,
         registry=registry,

@@ -21,7 +21,12 @@ from ..auth.session import verify_session_token
 from ..auth.throttle import LoginThrottle
 from ..compat.openai.request import InvalidRequest
 from ..config import Settings
-from ..db.repo import ApiKeyRepository, CredentialRepository, GrowthRepository
+from ..db.repo import (
+    ApiKeyRepository,
+    CredentialRepository,
+    CreditEventRepository,
+    GrowthRepository,
+)
 from ..engine.executor import Executor
 from ..runtime_settings import RuntimeSettings
 from ..stats.query import StatsQuery
@@ -41,6 +46,7 @@ class Services:
     settings: Settings | RuntimeSettings
     credentials: CredentialRepository
     growth_events: GrowthRepository
+    credit_events: CreditEventRepository
     api_keys: ApiKeyRepository
     executor: Executor
     registry: dict[str, Any]
