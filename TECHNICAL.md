@@ -184,6 +184,8 @@ class ErrKind(StrEnum):
 > 会话一旦把指纹写进历史，后续每轮（含压缩请求本身）都持续 11128。
 > 处理：出站前 `sanitize_channel_markers` 把指纹替换为占位符
 > （`CODEBUDDY_SANITIZE_CHANNEL_MARKERS=false` 关闭），客户端会话历史不受影响。
+> `content` 为文本块列表（`[{"type": "text", ...}]`）时逐块处理：2026-09-21
+> 直证块形态指纹同样触发 11128，替换占位符后通过。
 > 曾误落 INVALID → 跳过上游全部凭证、零重试直接 400（`invalid_request`），是
 > deepseek-v4.1-flash / glm-5.3-flash 报「not available on any configured
 > upstream」的根因。

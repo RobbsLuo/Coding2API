@@ -92,14 +92,25 @@ def _clean_history_tool_calls(body: dict[str, Any]) -> None:
     ]
 
 
+def _neutralize_text(text: str) -> tuple[str, int]:
+    """单段正文的中和：返回（替换后文本, 命中处数）。"""
+    hits = 0
+    for marker in CHANNEL_MARKERS:
+        if marker in text:
+            hits += text.count(marker)
+            text = text.replace(marker, _CHANNEL_MARKER_STANDIN)
+    return text, hits
+
+
 def sanitize_channel_markers(body: dict[str, Any]) -> int:
     """中和出站 system/assistant 正文里的「伪装其他厂商官方客户端」指纹。
 
     上游内容风控（11128 Illegal API invocation）对该类指纹整单拒绝：
     与凭证无关（换号无效）、确定性复现、user/tool 角色 / tool_calls 参数 /
     reasoning 均不触发，仅 system/assistant 的 content 命中（2026-09 实测，
-    见 TECHNICAL.md §3.2）。只改写出站副本，客户端会话历史保持原样。
-    返回替换处数（用于日志与测试）。
+    见 TECHNICAL.md §3.2）。content 为文本块列表（{"type": "text", ...}）
+    时逐块处理——块形态指纹同样触发（2026-09-21 直证）。只改写出站副本，
+    客户端会话历史保持原样。返回替换处数（用于日志与测试）。
     """
     messages = body.get("messages")
     if not isinstance(messages, list):
@@ -111,15 +122,20 @@ def sanitize_channel_markers(body: dict[str, Any]) -> int:
         if message.get("role") not in ("system", "assistant"):
             continue
         content = message.get("content")
-        if not isinstance(content, str) or not content:
-            continue
-        replaced = content
-        for marker in CHANNEL_MARKERS:
-            if marker in replaced:
-                replaced_total += replaced.count(marker)
-                replaced = replaced.replace(marker, _CHANNEL_MARKER_STANDIN)
-        if replaced != content:
-            message["content"] = replaced
+        if isinstance(content, str):
+            replaced, hits = _neutralize_text(content)
+            if hits:
+                replaced_total += hits
+                message["content"] = replaced
+        elif isinstance(content, list):
+            for block in content:
+                if not (isinstance(block, dict) and block.get("type") == "text"
+                        and isinstance(block.get("text"), str)):
+                    continue
+                replaced, hits = _neutralize_text(block["text"])
+                if hits:
+                    replaced_total += hits
+                    block["text"] = replaced
     return replaced_total
 
 
