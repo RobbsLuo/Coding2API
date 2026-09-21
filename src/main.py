@@ -132,7 +132,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     registry = providers if providers is not None else {
         "trae": TraeProvider(pacer=chat_pacer),
         "codebuddy": CodeBuddyProvider(
-            client=CodeBuddyClient(endpoint=_codebuddy_endpoint(config)), pacer=chat_pacer),
+            client=CodeBuddyClient(
+                endpoint=_codebuddy_endpoint(config),
+                sanitize_markers=config.codebuddy_sanitize_channel_markers,
+            ), pacer=chat_pacer),
     }
     # provider → {小写模型名: 上游原始 id}；api/models.list_models 拉取后就地更新，
     # executor 发请求前把归一名映射回各上游的原始大小写

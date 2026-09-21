@@ -175,10 +175,18 @@ class ErrKind(StrEnum):
 | 请求级错误 | 400 + 11101/`Unmarshal chat params failed`/11115/11135 | — | REQUEST |
 
 > 400 + `11128`（`Illegal API invocation from an unapproved channel`）也归 REQUEST：
-> 实测是窗口型瞬时渠道风控（同凭证同时刻换模型即成功、同 (凭证, 模型) 秒级交替
-> 成功/失败、窗口内自愈），不是凭证或模型问题。曾误落 INVALID → 跳过上游全部
-> 凭证、零重试直接 400（`invalid_request`），是 deepseek-v4.1-flash / glm-5.3-flash
-> 报「not available on any configured upstream」的根因。
+> 实测主因是**内容风控**——`system`/`assistant` 消息正文出现「伪装其他厂商官方
+> 客户端」的指纹串时整单拒绝（已确认 3 条：Claude Code 系统提示的身份声明行、
+> 其 billing 头字段名、其 git 上下文行；完整清单见 `client.py` 的
+> `CHANNEL_MARKERS`，此处刻意不写原文以免污染阅读本文件的 agent 会话）。
+> 特征：与凭证无关（换号无效）、确定性复现（非时间窗）、`user`/`tool` 角色、
+> `tool_calls` 参数与 reasoning 均不触发，仅这两个角色的 `content` 命中；
+> 会话一旦把指纹写进历史，后续每轮（含压缩请求本身）都持续 11128。
+> 处理：出站前 `sanitize_channel_markers` 把指纹替换为占位符
+> （`CODEBUDDY_SANITIZE_CHANNEL_MARKERS=false` 关闭），客户端会话历史不受影响。
+> 曾误落 INVALID → 跳过上游全部凭证、零重试直接 400（`invalid_request`），是
+> deepseek-v4.1-flash / glm-5.3-flash 报「not available on any configured
+> upstream」的根因。
 | 限流 | 429（无 6004） | 429（无 6004） | SOFT |
 | 不存在 | 404 | 404 | SOFT |
 | 会话失效 | 401/403 | 401 | DEAD |

@@ -6,6 +6,7 @@ OAuth 轮询、企业额度、多账号切换在 M1.5。
 
 from __future__ import annotations
 
+import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -38,6 +39,15 @@ SHORT_TIMEOUT = httpx.Timeout(30.0)
 DEFAULT_MODELS: tuple[str, ...] = ("glm-5.2", "deepseek-v4-pro")
 EP_CONFIG = "/v3/config"
 MODEL_CACHE_TTL_SECONDS = 600
+
+# 上游内容风控（11128）已确认的指纹串：出现在 system/assistant 消息正文
+# （含行中）即整单拒绝。清单来自 2026-09 对真实上游的确定性复现实验。
+CHANNEL_MARKERS: tuple[str, ...] = (
+    "You are Claude Code, Anthropic's official CLI for Claude.",
+    "x-anthropic-billing-header",
+    "Main branch (you will usually use this for PRs):",
+)
+_CHANNEL_MARKER_STANDIN = "[external-client-identity]"
 
 
 
@@ -82,6 +92,37 @@ def _clean_history_tool_calls(body: dict[str, Any]) -> None:
     ]
 
 
+def sanitize_channel_markers(body: dict[str, Any]) -> int:
+    """中和出站 system/assistant 正文里的「伪装其他厂商官方客户端」指纹。
+
+    上游内容风控（11128 Illegal API invocation）对该类指纹整单拒绝：
+    与凭证无关（换号无效）、确定性复现、user/tool 角色 / tool_calls 参数 /
+    reasoning 均不触发，仅 system/assistant 的 content 命中（2026-09 实测，
+    见 TECHNICAL.md §3.2）。只改写出站副本，客户端会话历史保持原样。
+    返回替换处数（用于日志与测试）。
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return 0
+    replaced_total = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") not in ("system", "assistant"):
+            continue
+        content = message.get("content")
+        if not isinstance(content, str) or not content:
+            continue
+        replaced = content
+        for marker in CHANNEL_MARKERS:
+            if marker in replaced:
+                replaced_total += replaced.count(marker)
+                replaced = replaced.replace(marker, _CHANNEL_MARKER_STANDIN)
+        if replaced != content:
+            message["content"] = replaced
+    return replaced_total
+
+
 def build_headers(credential: CodeBuddyCredential, endpoint: str, *,
                   quota_only: bool = False) -> dict[str, str]:
     """头构造统一入口：X-Domain 与 Host 由同一 endpoint 派生。"""
@@ -100,10 +141,12 @@ class CodeBuddyClient:
         endpoint: str = CN_ENDPOINT,
         stream_client: httpx.AsyncClient | None = None,
         short_client: httpx.AsyncClient | None = None,
+        sanitize_markers: bool = True,
     ) -> None:
         self.endpoint = endpoint
         self._stream_client = stream_client
         self._short_client = short_client
+        self.sanitize_markers = sanitize_markers
 
     @property
     def _stream(self) -> httpx.AsyncClient:
@@ -138,6 +181,14 @@ class CodeBuddyClient:
             for message in messages:
                 if isinstance(message, dict) and message.get("role") == "developer":
                     message["role"] = "system"
+        # 会话正文里的伪装客户端指纹同样触发 11128 内容风控（换号无效），
+        # 出站前中和；只指出现在 system/assistant 的 content
+        if self.sanitize_markers:
+            sanitized = sanitize_channel_markers(body)
+            if sanitized:
+                logging.getLogger(__name__).warning(
+                    "出站消息命中伪装客户端指纹，已中和 %s 处（上游 11128 内容风控）",
+                    sanitized)
         # 官方 CLI 请求的标准特征字段；缺失会被渠道风控判定非官方调用（11128）
         body.setdefault("enable_thinking", True)
         stream_options = body.get("stream_options")

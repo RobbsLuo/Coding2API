@@ -55,9 +55,14 @@ class Settings(BaseSettings):
     growth_irreversible_actions: bool = True
     pacer_min_seconds: float = 5
     pacer_max_seconds: float = 20
-    # CodeBuddy 聊天最小间隔：腾讯频率风控（11128）在连续快速请求时触发，
-    # 实测 ≥5s 间隔稳定避开；0 关闭节流
+    # CodeBuddy 聊天最小间隔：与 TRAE 共享的最小请求间隔，避开两渠道各自的
+    # 频率风控；0 关闭节流。（注意 11128 主因是内容指纹风控，见
+    # codebuddy_sanitize_channel_markers 与 TECHNICAL.md §3.2，调间隔救不了）
     codebuddy_chat_min_interval: float = 5
+    # 内容风控自愈（11128）：出站 system/assistant 正文命中「伪装其他厂商
+    # 官方客户端」指纹串时替换为占位符（客户端会话历史不受影响）。该拦截
+    # 与凭证无关、换号无效，会话一旦带入指纹将持续 11128；false 关闭
+    codebuddy_sanitize_channel_markers: bool = True
     # 模型列表黑名单（fnmatch glob，逗号分隔）：滤掉非用户模型与老模型，
     # 只影响 /v1/models 与 playground 列表，直连指定不受影响。
     # 覆盖此值时为完全替换（含默认噪音规则），增删请重写全量。

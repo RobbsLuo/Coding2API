@@ -32,8 +32,10 @@ services:
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
       # 上游端点白名单（逗号分隔）；改 CODEBUDDY_API_ENDPOINT 时必须同时含它
       CODEBUDDY_ALLOWED_ENDPOINTS: ${CODEBUDDY_ALLOWED_ENDPOINTS:-https://copilot.tencent.com,https://www.codebuddy.ai}
-      # CodeBuddy 聊天最小间隔（秒）：腾讯频率风控，0 关闭
+      # CodeBuddy 聊天最小间隔（秒）：与 TRAE 共享节流，0 关闭
       CODEBUDDY_CHAT_MIN_INTERVAL: ${CODEBUDDY_CHAT_MIN_INTERVAL:-5}
+      # 11128 内容风控自愈：中和出站正文里的伪装客户端指纹，false 关闭
+      CODEBUDDY_SANITIZE_CHANNEL_MARKERS: ${CODEBUDDY_SANITIZE_CHANNEL_MARKERS:-true}
       # token 预刷新窗口（小时）
       REFRESH_SKEW_HOURS: ${REFRESH_SKEW_HOURS:-24}
       # 全局节流器随机区间（秒）
