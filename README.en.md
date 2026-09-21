@@ -10,7 +10,7 @@ upstream channels, with a shared credential pool, unified scheduling, and per-us
 
 ## Features
 
-- **OpenAI-compatible surface**: `/v1/chat/completions` (streaming and non-streaming), `/v1/models`, `/v1/user/balance` (DeepSeek-compatible balance query)
+- **OpenAI-compatible surface**: `/v1/chat/completions` (streaming and non-streaming), `/v1/responses` (Responses API, for the Codex CLI), `/v1/models`, `/v1/user/balance` (DeepSeek-compatible balance query)
 - **Two upstreams, one model namespace**: flat model names auto-route — credits expiring within the window first, then health; `model@provider` pins an upstream
 - **DeepSeek-compatible balance query**: `GET /v1/user/balance` aggregates the pool's probed quotas, so clients like Cherry Studio / cc-switch can display remaining credits
 - **CodeBuddy growth-center automation** (CodeBuddy only): claims Buddy travel gifts, departs Buddy, accepts/claims tasks, streak redemption, lottery and blind boxes; irreversible actions can be switched off via `GROWTH_IRREVERSIBLE_ACTIONS=false`
@@ -47,6 +47,22 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 Point any OpenAI-compatible client at `http://127.0.0.1:8000/v1`.
+
+### Responses API (Codex CLI)
+
+`POST /v1/responses` serves a Responses subset for clients that only speak the Responses API, such as the [Codex CLI](https://github.com/openai/codex). It shares the same credential selection, cooldown, rotation, accounting, and session affinity as `/v1/chat/completions`; only the inbound mapping and outbound translation differ (see [`TECHNICAL.md` §3.7](TECHNICAL.md), in Chinese):
+
+```bash
+export CODING2API_KEY=sk-your-key
+codex -c "model_providers.coding2api={ name='coding2api', base_url='http://127.0.0.1:8000/v1', wire_api='responses', env_key='CODING2API_KEY' }" \
+      -c model_provider=coding2api \
+      -c model='glm-5.2' \
+      'your task'
+```
+
+Streaming text, reasoning summaries, function tool calls, and `finish_reason=length` → `response.incomplete` are supported. `store=true`, `previous_response_id`, and Responses-only tools (`web_search`, `computer`, `custom`, …) are rejected with an explicit 400 rather than silently degraded. `include=["reasoning.encrypted_content"]`, which Codex always sends, is accepted and ignored.
+
+> Verification boundary: no Codex CLI was available on the development machine. Wire shapes come from the official `openai` Python SDK types and were validated end-to-end using that SDK as the client, plus a smoke test against the real upstream. No end-to-end run with the actual Codex CLI has been performed.
 
 ## Documentation
 

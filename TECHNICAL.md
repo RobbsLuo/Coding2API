@@ -92,6 +92,7 @@ coding2api/
 │   └── api/
 │       ├── deps.py              # Services 容器 + require_api_key / session / csrf 依赖
 │       ├── chat.py              # POST /v1/chat/completions
+│       ├── responses.py         # POST /v1/responses（Responses/Codex CLI 出口）
 │       ├── models.py            # GET /v1/models（动态拉取 + 黑名单 + 缓存兑底 + 元数据）
 │       ├── balance.py           # GET /v1/user/balance（DeepSeek 兼容余额，读探测缓存聚合）
 │       ├── authorize.py         # GET /authorize（TRAE 回调落点）
@@ -316,6 +317,79 @@ CLI 指纹（`build_headers`）即可被接受，无需切换身份；多套指�
 **风险声明**：官方活动条款禁止模拟器/脚本篡改活动数据（处罚为取消资格并追回礼品）。
 默认关闭；事件名与形状依赖上游实现，改版即失效，**不作为可靠性功能**。
 
+### 3.7 Responses 出口（B2.1，Codex CLI）
+
+`POST /v1/responses`：`src/api/responses.py`（端点）+ `src/compat/responses/request.py`
+（入站映射）+ `src/compat/responses/response.py`（出站翻译）。与 `/v1/chat/completions`
+**共用同一个 executor**，选号 / 冷却 / 轮换 / 记账 / 会话粘性全部零改动；引擎侧唯一
+改动是 `Executor.stream(..., translator=...)` 注入缝——出口形状由 translator 决定，
+引擎不再硬编码 chat 形状的 SSE 帧（`_stream_error_frame` 缺失时回落 chat 帧）。
+
+字段形状**全部取自官方 `openai` Python SDK（3.x）由 OpenAI OpenAPI 生成的类型定义**，
+并用该 SDK 作客户端做端到端契约验证（该 SDK 是 OpenAI 自己的解析实现，比手写断言权威）；
+不凭记忆写。
+
+**入站映射**（Responses → 内部 chat 载荷）：
+
+| Responses | chat |
+|---|---|
+| `instructions` | 首条 `system` 消息 |
+| `input` 字符串 | `user` 消息 |
+| `input[].type=message`（`input_text`/`output_text` part） | `messages[]`；`developer` 角色改写为 `system` |
+| `input[].type=function_call` | assistant 消息的 `tool_calls[]` |
+| `input[].type=function_call_output` | `tool` 消息 |
+| `input[].type=reasoning` | assistant 消息的 `reasoning_content`（仅明文部分） |
+| `tools[].type=function`（**扁平** `{name, description, parameters}`） | 嵌套 `{type:function, function:{...}}` |
+| `tool_choice` 字符串 / `{type:function,name}` | 同名 / 嵌套形式 |
+| `max_output_tokens` | `max_tokens`（CB 上游只认这个键，§3.4） |
+| `reasoning.effort` | `reasoning_effort` |
+| `temperature` / `top_p` / `parallel_tool_calls` / `prompt_cache_key` / `text.verbosity` | 同名透传 |
+
+**出站事件序列**（流式）：
+
+```
+response.created
+response.output_item.added            (message / reasoning / function_call)
+response.content_part.added           (output_text)
+response.output_text.delta × N
+response.output_text.done
+response.content_part.done
+response.output_item.done
+response.completed | response.incomplete
+```
+
+思考内容用独立 `reasoning` item + `response.reasoning_summary_text.delta/.done`
+（不混进正文）；工具调用用 `function_call` item + `response.function_call_arguments.delta/.done`。
+**Responses 协议没有 `[DONE]` 哨兵**，终止事件本身就是流结束（`done_sent` 与之对齐，
+供 executor 区分「正常收尾」与「中途断开」）。流式已完成后再来的 FINISH/ERROR 一律忽略，
+不重复发终止事件。`finish_reason=length` → `response.incomplete`
+（`incomplete_details.reason=max_output_tokens`），`content_filter` 同理；其余为 `completed`。
+流内错误（executor 拦不到的那类，如全凭证拒绝模型）以 `response.failed` 表达，
+并把错误码映射成 Codex CLI 认识的取值（`no_healthy_credential` → `server_is_overloaded`，
+见 `codex-rs/codex-api/src/sse/responses.rs` 的分类表）。
+
+**按实测收窄已批准计划**（2026-09-21 核 `openai/codex` 源码 + 官方 SDK 端到端）：
+
+| 计划原文 | 实测 | 落地 |
+|---|---|---|
+| `include` → 400 | Codex CLI **每轮必带** `include=["reasoning.encrypted_content"]`（`codex-rs/core/src/client.rs`） | 400 会把主客户端直接打死：改为**接受并忽略**该值（本网关不产加密推理内容），其他 `include` 值才 400 |
+| `previous_response_id` → 400 | Codex HTTP 路径**不发**该字段（`ResponsesApiRequest` 无此字段） | 保持 400（本网关无状态） |
+| `store=true` → 400 | Codex 恒发 `store=false` | 保持 400（`false` 放行） |
+
+**客户端取证结论**（`openai/codex`，非本机实测）：Codex CLI 按 SSE 的 `event:` 行
+（而非 `data.type`）分派事件，所以两个字段都必须发；`response.completed.response`
+在它那边是**强类型解析**（`id` 必填、`usage` 含 `input_tokens`/`output_tokens`/`total_tokens`），
+解析失败即整轮报错——故 `response` 对象按官方必填字段完整发出。
+Codex 回传的历史里 `reasoning`/`compaction` 只有密文、没有 chat 等价物，
+**有意无损丢弃**（不是静默降级：不影响回答质量，仅不再回传），其余 Responses 私有
+item 类型（`local_shell_call`/`custom_tool_call` 等）显式 400。
+
+**验证状态**：本机无 Codex CLI、无 Responses 参考实现，故以官方 `openai` SDK
+（`responses.create(stream=True/False)`，含工具调用）作权威客户端跑通全部契约，
+并对**真实 CB 上游**冒烟（流式 / 非流式 / 工具调用三条，模型 `deepseek-v4-pro`），
+另用按 `codex-rs` 源码构造的真实请求体核对入站映射。**未经真实 Codex CLI 端到端验证**，
+剩余风险：客户端行为细节（如 reasoning item 无 `encrypted_content` 时的降级路径）。
+
 ---
 
 ## 4. Provider 协议（Q16=A 细接口）
@@ -355,6 +429,10 @@ class Provider(Protocol):
 ---
 
 ## 5. 请求时序（chat completions 主链路）
+
+`POST /v1/responses` 与本节同链路：`responses/request.py` 先把 Responses 请求体映射成
+等价的 `ChatRequest`（`raw` 为 chat 形状），其后选号 / 轮换 / 记账 / 粘性完全一致；
+出口侧由注入的 translator 决定 SSE 形状（§3.7）。
 
 ```
 客户端 → POST /v1/chat/completions (Bearer sk-)
@@ -644,6 +722,12 @@ fixture 断言两个方向：**解析正确**（样本 → 期望 Event）与**�
 - **手写 SQL 而非 ORM**：5 张表规模下 ORM 收益为负
 - **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + PUBLIC_BASE_URL
 - **v1 无 Anthropic**（Q8=A）：Event 层已预留，v1.1 只加 `compat/anthropic/` 适配器
+- **Responses 出口只做 Codex CLI 用到的子集**（Q32，详见 §3.7）：不做 `store=true` /
+  `previous_response_id`（服务端无状态，不假装支持）；`include=["reasoning.encrypted_content"]`
+  按实测接受并忽略——Codex CLI 每轮必带，400 会直接打死主客户端；流式终止事件用
+  `response.completed` / `response.incomplete` / `response.failed`，**不发 `[DONE]`**
+  （Responses 协议无该哨兵）。形状全部取自官方 `openai` SDK 类型并用其作客户端验证，
+  对真实 CB 上游冒烟过；**未经真实 Codex CLI 端到端验证**（本机无 CLI）
 - **不做 reasoning 注入 / effort 档位映射**（原 B1.2，实测后取消）：原计划打算对「强制推理模型族」注入
   `thinking` + `reasoning_effort` 并回填历史 `reasoning_content`，实测前提不成立——
   （1）客户端已自带 `reasoning_effort`（只有 `low`/`medium`）且上游直接接受，不存在「未做档位映射」的问题；

@@ -37,6 +37,7 @@
 | Q29 | 文档 | 中文为主 + 英文 README |
 | Q30 | License | MIT + NOTICE 三方溯源，不做自更新 |
 | Q31 | 到期积分排序 | 两级字典序：主窗口（36h）+ 次窗口（7 天）内到期积分总量依次做排序键（均 env 可配）；落库到期阶梯而非单一日期 |
+| Q32 | Responses 出口 | v1 只做 `chat/completions` 子集：`POST /v1/responses` 与 chat 共用同一 executor，出口 translator 可注入；`include`/`store`/`previous_response_id` 按 Codex CLI 实测取舍（见 TECHNICAL §3.7） |
 
 ## 2. 目标与非目标
 
@@ -252,7 +253,7 @@ DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见
 
 ## 7. API 契约
 
-外部（API Key 鉴权）：`POST /v1/chat/completions`（流式 + 非流式）、`GET /v1/models`（扁平模型名 + `providers` 字段）、`GET /v1/user/balance`（DeepSeek 兼容余额，读探测缓存聚合，不实时打上游）、`GET /health`。
+外部（API Key 鉴权）：`POST /v1/chat/completions`（流式 + 非流式）、`POST /v1/responses`（Responses API，Codex CLI；与 chat 共用同一调度/选号/统计链路）、`GET /v1/models`（扁平模型名 + `providers` 字段）、`GET /v1/user/balance`（DeepSeek 兼容余额，读探测缓存聚合，不实时打上游）、`GET /health`。
 
 管理台（会话 Cookie）：凭证管理、API Key 管理、用量统计、Playground 等，admin 管凭证与全量统计，普通用户仅见自己的数据。凭证运维端点含 `POST /api/credentials/{id}/checkin`（签到）、`GET|POST /api/credentials/{id}/growth`（成长中心状态与手动执行，仅 CodeBuddy）。回调（无鉴权，TRAE 浏览器 302 不带 key）：`GET /authorize`。
 

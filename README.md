@@ -8,7 +8,7 @@
 
 ## 特性
 
-- **OpenAI 兼容出口**：`/v1/chat/completions`（流式 + 非流式）、`/v1/models`、`/v1/user/balance`（DeepSeek 兼容余额查询）
+- **OpenAI 兼容出口**：`/v1/chat/completions`（流式 + 非流式）、`/v1/responses`（Responses API，Codex CLI）、`/v1/models`、`/v1/user/balance`（DeepSeek 兼容余额查询）
 - **统一调度**：扁平模型名按健康度自动选号，`模型@渠道` 强制指定；三态健康度 + 分级冷却自动避开坏号；模型级限流/「该渠道无此模型」只避让那一个模型，同账号其他模型立刻可用（管理台额度列下方直接显示当前避让的模型与剩余时间）；积分 36h 内即将到期多者优先（先用掉，避免过期浪费；36h 打平时再比 7 天内将过期的积分，两级字典序；管理台凭证列表直接显示每个账号的到期积分，悬浮可看逐个额度包明细）；同一对话多轮请求粘住同一凭证（对话进行中不换号，出错才轮换）
 - **公共凭证池**：admin 集中维护、全员共享；按人统计用量
 - **完整凭证运维**：设备码登录、多账号切换、额度探测、每日签到（含连续天数）、token 预刷新；凭证加密入库（`APP_SECRET`）
@@ -76,6 +76,25 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 `模型@渠道` 强制指定上游（如 `glm-5.2@trae`），不写则自动选健康渠道。
 
 任意 OpenAI 兼容客户端可直接接入（Base URL `http://127.0.0.1:8000/v1`、Key 用 `sk-...`、模型名以 `GET /v1/models` 为准）；「Playground」页用登录会话直接测试，无需 API Key。
+
+### Responses API（Codex CLI）
+
+`POST /v1/responses` 提供 Responses 子集，供 [Codex CLI](https://github.com/openai/codex) 这类只走 Responses 的客户端接入。与 `/v1/chat/completions` 共用同一套选号 / 冷却 / 轮换 / 统计与会话粘性，只换入站映射与出口翻译（实现与取舍见 [TECHNICAL.md §3.7](TECHNICAL.md)）：
+
+```bash
+export CODING2API_KEY=sk-你的key
+codex -c "model_providers.coding2api={ name='coding2api', base_url='http://127.0.0.1:8000/v1', wire_api='responses', env_key='CODING2API_KEY' }" \
+      -c model_provider=coding2api \
+      -c model='glm-5.2' \
+      '你的任务'
+```
+
+（`-c key=value` 覆盖配置的写法与字段名取自 Codex 仓库自带的
+`codex-rs/responses-api-proxy/README.md`，非凭记忆。）
+
+支持文本、流式正文、思考摘要（`reasoning` item）、函数工具调用与 `finish_reason=length` → `response.incomplete`。**不支持**：`store=true`、`previous_response_id`（服务端无状态，不假装支持）、Responses 私有工具（`web_search` / `computer` / `custom` 等）；这些一律显式 400，不静默降级。`include=["reasoning.encrypted_content"]`（Codex 每轮必带）接受但忽略——本网关不产加密推理内容。
+
+> 验证边界：本机无 Codex CLI，协议形状取自官方 `openai` SDK 类型并以其为客户端跑通全部契约，另对真实上游冒烟；未经真实 Codex CLI 端到端验证。
 
 ### 余额查询
 

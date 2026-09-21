@@ -22,6 +22,12 @@ from .errors import UpstreamStreamError
 ROLE_CHUNK = {"role": "assistant", "content": ""}
 
 
+def _error_frame(message: str, code: str) -> bytes:
+    """chat 出口的错误帧：`data: {"error": ...}` + `[DONE]`。"""
+    payload = {"error": {"message": message, "type": "api_error", "code": code}}
+    return format_openai_frame(json.dumps(payload, ensure_ascii=False)) + SSE_DONE
+
+
 def _chunk(model: str, delta: dict[str, Any], *,
            finish_reason: str | None = None) -> dict[str, Any]:
     return {
@@ -129,6 +135,10 @@ class StreamTranslator:
         只为保活。
         """
         return SSE_COMMENT
+
+    def error_frame(self, message: str, code: str) -> bytes:
+        """出口错误帧（形状随协议不同，由各出口的 translator 决定）。"""
+        return _error_frame(message, code)
 
     def _close(self, finish_reason: str) -> Iterator[bytes]:
         yield format_openai_frame(json.dumps(

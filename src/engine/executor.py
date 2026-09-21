@@ -6,9 +6,9 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 from ..compat.openai.errors import UpstreamStreamError
 from ..compat.openai.request import ChatRequest, InvalidRequest
@@ -17,12 +17,29 @@ from ..compat.openai.response import (
     aggregate,
 )
 from ..db.repo import CredentialRepository
-from ..provider.base import ErrKind, Event, EventKind
+from ..provider.base import ErrKind, Event, EventKind, Usage
 from .continuation import ContinuationStream
 from .model_resolver import ModelTarget, resolve
 from .scheduler import Scheduler
 
 logger = logging.getLogger(__name__)
+
+
+class StreamSink(Protocol):
+    """出口形状的注入缝：把中立 `Event` 翻成某个协议的 SSE 帧。
+
+    默认实现是 chat 出口的 `StreamTranslator`；`/v1/responses` 注入自己的
+    实现，从而复用同一套选号 / 轮换 / 记账（见 TECHNICAL §3.7）。
+    """
+
+    usage: Usage | None
+    done_sent: bool
+
+    def translate(self, event: Event) -> Iterator[bytes]: ...
+
+    def finish(self) -> Iterator[bytes]: ...
+
+    def error_frame(self, message: str, code: str) -> bytes: ...
 
 
 class NoHealthyCredential(Exception):
@@ -112,24 +129,25 @@ class Executor:
             raise NoProviderForModel(f"no provider registered for model {target.model!r}")
         return target
 
-    async def stream_guarded(self, request: ChatRequest, *, username: str = "unknown"
-                             ) -> AsyncIterator[bytes]:
+    async def stream_guarded(self, request: ChatRequest, *, username: str = "unknown",
+                             translator: StreamSink | None = None) -> AsyncIterator[bytes]:
         """流式出口的最终兜底：任何逃逸异常都转成 SSE 错误帧。
 
         没有这一层时，未预期的异常（如凭证在轮换中途被删除）会让连接
         静默断开，客户端无法区分"空回复"与"服务出错"。
         """
         try:
-            async for frame in self.stream(request, username=username):
+            async for frame in self.stream(request, username=username,
+                                           translator=translator):
                 yield frame
         except (GeneratorExit, asyncio.CancelledError):
             raise                          # 客户端断开：已由 stream() 记账
         except Exception as error:  # noqa: BLE001 - 流已开始，只能以错误帧收尾
             logger.exception("流式响应失败: %s", error)
-            yield _error_frame("internal server error", "internal_error")
+            yield _stream_error_frame(translator, "internal server error", "internal_error")
 
-    async def stream(self, request: ChatRequest, *, username: str = "unknown"
-                     ) -> AsyncIterator[bytes]:
+    async def stream(self, request: ChatRequest, *, username: str = "unknown",
+                     translator: StreamSink | None = None) -> AsyncIterator[bytes]:
         """流式执行；上游错误按分类冷却并换号，最多 3 次。
 
         客户端中途断开时（生成器被关闭 / 任务被取消）把已产生的用量
@@ -141,7 +159,7 @@ class Executor:
         more_body=False 之间有一拍竞态，框架会把它当断开），按成功记账。
         """
         target = self.resolve_target(request)
-        state = _StreamState(translator=StreamTranslator(target.model),
+        state = _StreamState(translator=translator or StreamTranslator(target.model),
                              started=time.monotonic(), username=username)
         if self._deps.affinity is not None:
             state.affinity_id = self._deps.affinity.pin_for(request.raw, username)
@@ -172,7 +190,7 @@ class Executor:
             if pick is None:
                 if last_kind is ErrKind.INVALID:
                     # 所有候选上游都拒绝了该模型：400 语义而非 503
-                    yield _error_frame(
+                    yield state.translator.error_frame(
                         _reject_message(target.model, last_error,
                                         self._suggestions(target.model)),
                         "invalid_request")
@@ -182,7 +200,8 @@ class Executor:
                     credential_id=state.credential_id, model=target.model, ok=False,
                     error_type="no_healthy_credential",
                     latency_ms=_elapsed_ms(state.started))
-                yield _unavailable_frame(last_error)
+                yield state.translator.error_frame(
+                    _unavailable_message(last_error), "no_healthy_credential")
                 return
             credential_id, credential_data = pick
             provider_id = self._deps.credentials.provider_of(credential_id)
@@ -246,7 +265,7 @@ class Executor:
             if not self._deps.scheduler.should_rotate(tried):
                 if last_kind is ErrKind.INVALID:
                     # 流已开始（200 已发出），以 invalid_request 错误帧结束
-                    yield _error_frame(
+                    yield state.translator.error_frame(
                         _reject_message(target.model, last_error,
                                         self._suggestions(target.model)),
                         "invalid_request")
@@ -257,7 +276,8 @@ class Executor:
                     credential_id=credential_id, model=target.model, ok=False,
                     error_type=_error_type_for(kind) if kind else "upstream_protocol",
                     latency_ms=_elapsed_ms(state.started))
-                yield _unavailable_frame(last_error)
+                yield state.translator.error_frame(
+                    _unavailable_message(last_error), "no_healthy_credential")
                 return
 
     def _stream_source(self, provider_id: str, credential_data: dict[str, Any],
@@ -532,7 +552,7 @@ class Executor:
 class _StreamState:
     """流式轮换过程中需要跨尝试保留的状态（统计用）。"""
 
-    translator: StreamTranslator
+    translator: StreamSink
     started: float
     username: str
     provider: str = "-"
@@ -588,12 +608,20 @@ def _classify(error: Exception) -> ErrKind | None:
     return None
 
 
-def _unavailable_frame(last_error: Exception | None) -> bytes:
-    """503 帧：带上最后一次错误便于排查（Q21=C 扁平路由下这是唯一线索）。"""
+def _unavailable_message(last_error: Exception | None) -> str:
+    """503 文案：带上最后一次错误便于排查（Q21=C 扁平路由下这是唯一线索）。"""
     message = "all credentials unavailable"
     if last_error is not None:
         message += f": {last_error}"
-    return _error_frame(message, "no_healthy_credential")
+    return message
+
+
+def _stream_error_frame(translator: StreamSink | None, message: str, code: str) -> bytes:
+    """流已开始后的错误帧；形状由出口的 translator 决定（chat / Responses）。"""
+    builder = getattr(translator, "error_frame", None)
+    if callable(builder):
+        return builder(message, code)
+    return _error_frame(message, code)
 
 
 def _usage_field(usage: object, name: str) -> object:
