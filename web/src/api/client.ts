@@ -16,6 +16,7 @@ import type {
   TimelinePoint,
   ModelTimelineResponse,
   StatsEventsResponse,
+  SettingsResponse,
   UpstreamAuthPoll,
   UpstreamAuthStart,
 } from "./types";
@@ -110,6 +111,11 @@ export const api = {
   createApiKey: (name: string) =>
     request<ApiKeyCreated>("/api/api-keys", { method: "POST", ...json({ name }) }),
   deleteApiKey: (id: string) => request<{ ok: boolean }>(`/api/api-keys/${id}`, { method: "DELETE" }),
+
+  // ------------------------------------------------------------ 运行时配置
+  settings: () => request<SettingsResponse>("/api/settings"),
+  updateSettings: (values: Record<string, unknown>) =>
+    request<SettingsResponse>("/api/settings", { method: "PUT", ...json({ values }) }),
 
   // ---------------------------------------------------------------- 统计
   statsOverview: (username?: string, since?: number) =>

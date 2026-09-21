@@ -34,6 +34,8 @@ import json
 import time
 from typing import Any
 
+from ..config import live
+
 # 请求体里的显式会话标识键名，按优先级排列（前两个等价，客户端实现不一）
 _EXPLICIT_KEYS: tuple[str, ...] = ("conversation_id", "conversationId", "prompt_cache_key")
 
@@ -88,10 +90,17 @@ class ConversationAffinity:
     """会话键 → 凭证的粘性表（单事件循环内使用，无需加锁）。"""
 
     def __init__(self, *, ttl_seconds: int, max_entries: int = 512) -> None:
-        self.ttl_seconds = ttl_seconds
+        # TTL 可热更（B3.2）：存取值器，每次读写读当前值。存量条目记录的
+        # 是「写入时的到期时刻」，调小 TTL 后旧条目按原到期时刻失效，
+        # 不会因热更而突然全部作废（更不违背用户预期）。
+        self._ttl_seconds = live(ttl_seconds)
         self.max_entries = max_entries
         # fingerprint_hex → (credential_id, expires_at)；dict 保持插入序，供淘汰
         self._entries: dict[str, tuple[str, float]] = {}
+
+    @property
+    def ttl_seconds(self) -> int:
+        return int(self._ttl_seconds())
 
     # ------------------------------------------------------------ 对外接口
 

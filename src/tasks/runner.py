@@ -14,6 +14,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 
+from ..config import live
 from .activity import ActivityTask
 from .checkin import CheckinTask
 from .growth import GrowthTask
@@ -37,10 +38,11 @@ class TaskRunner:
     activity: ActivityTask | None = None,
     refresh: RefreshTask,
     retention: RetentionTask,
-    quota_probe_minutes: int = 60,
-    growth_interval_minutes: int = 60,
-    refresh_interval_minutes: int = 60,
-    retention_interval_minutes: int = 5,
+    quota_probe_minutes: int | Callable[[], int] = 60,
+    growth_interval_minutes: int | Callable[[], int] = 60,
+    refresh_interval_minutes: int | Callable[[], int] = 60,
+    retention_interval_minutes: int | Callable[[], int] = 5,
+    activity_enabled: Callable[[], bool] | None = None,
 ) -> None:
         self._quota_probe = quota_probe
         self._checkin = checkin
@@ -48,31 +50,57 @@ class TaskRunner:
         self._activity = activity
         self._refresh = refresh
         self._retention = retention
-        self._quota_interval = max(60, quota_probe_minutes * 60)
-        # 成长中心请求量比签到大一个量级（一轮 7 类领取），间隔下限设 5 分钟：
-        # 比这更密只会撞上游风控，而 Buddy 旅行最快 1 小时才回来
-        self._growth_interval = max(300, growth_interval_minutes * 60)
-        self._refresh_interval = max(60, refresh_interval_minutes * 60)
-        self._retention_interval = max(60, retention_interval_minutes * 60)
+        # 周期可热更（B3.2）：存取值器，每轮 sleep 前读当前值（否则改配置
+        # 要等到下一次重启才生效）。下限与业务语义同前，不变。
+        self._quota_probe_minutes = live(quota_probe_minutes)
+        self._growth_minutes = live(growth_interval_minutes)
+        self._refresh_minutes = live(refresh_interval_minutes)
+        self._retention_minutes = live(retention_interval_minutes)
+        # 活跃上报是否启用也可热更：装配时恒建对象（构造成本为零），
+        # 每轮由 _sync_activity 问一次，关着时是 no-op。
+        self._activity_enabled = activity_enabled or (lambda: activity is not None)
         # 活跃上报：每 10 分钟醒一次看时点（due() 只在配置小时窗口内放行），
         # 而不是整点只醒一次——服务恰在整点重启会整天漏报
         self._activity_interval = 600
         self._tasks: list[asyncio.Task[None]] = []
 
+    @property
+    def _quota_interval(self) -> float:
+        return max(60, int(self._quota_probe_minutes()) * 60)
+
+    @property
+    def _growth_interval(self) -> float:
+        # 成长中心请求量比签到大一个量级（一轮 7 类领取），间隔下限设 5 分钟：
+        # 比这更密只会撞上游风控，而 Buddy 旅行最快 1 小时才回来
+        return max(300, int(self._growth_minutes()) * 60)
+
+    @property
+    def _refresh_interval(self) -> float:
+        return max(60, int(self._refresh_minutes()) * 60)
+
+    @property
+    def _retention_interval(self) -> float:
+        return max(60, int(self._retention_minutes()) * 60)
+
     async def start(self) -> None:
         """启动所有周期任务；首轮额度探测立即执行（不节流）。"""
         await self._guarded(self._quota_probe.run_once(apply_pacing=False),
                             "启动额度探测")
-        loops: list[tuple[str, Callable[[], Awaitable[object]], float]] = [
-            ("额度探测", lambda: self._quota_probe.run_once(), self._quota_interval),
-            ("token 预刷新", self._refresh.run_once, self._refresh_interval),
-            ("明细清理", self._sync_retention, self._retention_interval),
-            ("每日签到", self._sync_checkin, 600),  # 全天每 10 分钟签到一次（成功凭证当日封账）
+        loops: list[tuple[str, Callable[[], Awaitable[object]],
+                          Callable[[], float]]] = [
+            ("额度探测", lambda: self._quota_probe.run_once(),
+             lambda: self._quota_interval),
+            ("token 预刷新", self._refresh.run_once,
+             lambda: self._refresh_interval),
+            ("明细清理", self._sync_retention,
+             lambda: self._retention_interval),
+            ("每日签到", self._sync_checkin, lambda: 600.0),  # 全天每 10 分钟签到一次
         ]
         if self._growth is not None:
-            loops.append(("成长中心", self._sync_growth, self._growth_interval))
+            loops.append(("成长中心", self._sync_growth, lambda: self._growth_interval))
         if self._activity is not None:
-            loops.append(("活跃上报", self._sync_activity, self._activity_interval))
+            loops.append(("活跃上报", self._sync_activity,
+                          lambda: float(self._activity_interval)))
         for name, runner, interval in loops:
             self._tasks.append(asyncio.create_task(self._loop(name, runner, interval)))
 
@@ -82,8 +110,13 @@ class TaskRunner:
         return await self._growth.run_once()
 
     async def _sync_activity(self) -> object:
-        """活跃上报：仅配置小时窗口内执行，成功凭证当日封账（run_once 内跳过）。"""
+        """活跃上报：仅启用且处于配置小时窗口内才执行，成功凭证当日封账。
+
+        「是否启用」每轮现读（B3.2）：关掉再打开不需要重启，也不必重建循环。
+        """
         assert self._activity is not None
+        if not self._activity_enabled():
+            return None
         if not self._activity.due():
             return None
         return await self._activity.run_once()
@@ -98,10 +131,15 @@ class TaskRunner:
         return self._retention.run_once()
 
     async def _loop(self, name: str, runner: Callable[[], Awaitable[object]],
-                    interval: float) -> None:
+                    interval: float | Callable[[], float]) -> None:
+        """周期循环：间隔在每次 sleep 前重新求值（B3.2 热更周期）。
+
+        传标量等价于固定周期（测试与一次性任务仍这么用）。
+        """
+        delay = live(interval)
         while True:
             try:
-                await asyncio.sleep(interval)
+                await asyncio.sleep(delay())
             except asyncio.CancelledError:
                 raise
             await self._guarded(runner(), name)
@@ -131,18 +169,24 @@ def build_runner(credentials, providers: dict, stats_collector, config,
 
     growth_events 为 None 时（老调用方/测试）不装配成长中心任务：没有落库目标
     就跑起来只会把结果丢掉；生产路径（main.py）总是传入。
-    活跃上报（B1.7）默认关闭：只有 activity_report_enabled=True 才装配。
+
+    B3.2 热更：`config` 既可以是启动期快照 `Settings`，也可以是
+    `RuntimeSettings` 覆盖层。装配时所有「可热更项」必须传**零参 lambda**，
+    后台循环每轮读当前值——否则改周期/开关都要等重启，热更就名存实亡。
+    注意不能写成 `live(config.x)`：那会立刻求值一次再包成常量，
+    对 `Settings` 无害、对覆盖层则等于没热更。
     """
-    pacer = Pacer(config.pacer_min_seconds, config.pacer_max_seconds)
+    pacer = Pacer(lambda: config.pacer_min_seconds,
+                  lambda: config.pacer_max_seconds)
     growth = None
     if growth_events is not None:
         growth = GrowthTask(credentials, providers, growth_events,
-                            allow_irreversible=config.growth_irreversible_actions,
+                            allow_irreversible=lambda: config.growth_irreversible_actions,
                             pacer=pacer)
-    activity = None
-    if config.activity_report_enabled:
-        activity = ActivityTask(credentials, providers, events=growth_events,
-                                hour=config.activity_report_hour)
+    # 活跃上报恒建对象（构造成本为零），是否真的跑由每条循环现读的开关决定：
+    # 只有对象先存在，管理台才能把默认关闭的它热开到不需要重启。
+    activity = ActivityTask(credentials, providers, events=growth_events,
+                            hour=lambda: config.activity_report_hour)
     return TaskRunner(
         quota_probe=QuotaProbeTask(credentials, providers, pacer),
         checkin=CheckinTask(credentials, providers),
@@ -151,6 +195,7 @@ def build_runner(credentials, providers: dict, stats_collector, config,
         refresh=RefreshTask(credentials, providers, skew_seconds=config.refresh_skew_hours * 3600,
                             now=lambda: int(time.time())),
         retention=RetentionTask(stats_collector, credentials=credentials),
-        quota_probe_minutes=config.quota_probe_minutes,
-        growth_interval_minutes=config.growth_interval_minutes,
+        quota_probe_minutes=lambda: config.quota_probe_minutes,
+        growth_interval_minutes=lambda: config.growth_interval_minutes,
+        activity_enabled=lambda: config.activity_report_enabled,
     )

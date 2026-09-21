@@ -18,6 +18,7 @@ import logging
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
+from ..config import live
 from ..db.repo import CredentialRepository, GrowthRepository
 from ..provider.base import GrowthResult, GrowthStep, StepStatus
 from . import TaskReport
@@ -37,9 +38,19 @@ class ActivityTask:
         self._credentials = credentials
         self._providers = providers
         self._events = events
-        self._hour = hour
+        # 上报时点可热更（B3.2）：存取值器，due() 每次读当前值
+        self._hour_source = live(hour)
         self._now = now
         self._done_scopes: set[str] = set()
+
+    @property
+    def _hour(self) -> int:
+        """生效的上报小时；赋值等价于「换成这个固定值」（测试与旧调用方沿用）。"""
+        return int(self._hour_source())
+
+    @_hour.setter
+    def _hour(self, value: int) -> None:
+        self._hour_source = live(value)
 
     def _current(self) -> datetime:
         if self._now is not None:

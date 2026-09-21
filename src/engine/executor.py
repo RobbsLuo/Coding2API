@@ -16,6 +16,7 @@ from ..compat.openai.response import (
     StreamTranslator,
     aggregate,
 )
+from ..config import live
 from ..db.repo import CredentialRepository
 from ..provider.base import ErrKind, Event, EventKind, Usage
 from .continuation import ContinuationStream
@@ -114,7 +115,7 @@ class Executor:
         return self._deps.upstream_model_name(provider_id, model)
 
     def resolve_target(self, request: ChatRequest) -> ModelTarget:
-        return resolve(request.model, self._deps.default_model)
+        return resolve(request.model, live(self._deps.default_model)())
 
     def preflight(self, request: ChatRequest) -> ModelTarget:
         """流式路由建立 StreamingResponse 之前的前置校验。
@@ -290,11 +291,13 @@ class Executor:
         upstream_model = self._upstream_model(provider_id, model)
         stream = self._deps.providers[provider_id].stream_chat(
             credential_data, payload, upstream_model)
-        if self._deps.max_auto_continues <= 0:
+        # 续写上限可热更（B3.2）：0 表示关闭，每次请求读当前值
+        max_continues = int(live(self._deps.max_auto_continues)())
+        if max_continues <= 0:
             return stream
         return ContinuationStream(
             self._deps.providers[provider_id], credential_data, payload,
-            upstream_model, max_continues=self._deps.max_auto_continues)
+            upstream_model, max_continues=max_continues)
 
     def _record_success(self, target: ModelTarget, state: _StreamState,
                         provider_id: str, credential_id: str) -> None:

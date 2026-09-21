@@ -23,6 +23,7 @@ from ..compat.openai.request import InvalidRequest
 from ..config import Settings
 from ..db.repo import ApiKeyRepository, CredentialRepository, GrowthRepository
 from ..engine.executor import Executor
+from ..runtime_settings import RuntimeSettings
 from ..stats.query import StatsQuery
 
 SESSION_COOKIE = "coding2api_session"
@@ -37,7 +38,7 @@ class Services:
     统一迁移会扩大改动面而无实际收益。
     """
 
-    settings: Settings
+    settings: Settings | RuntimeSettings
     credentials: CredentialRepository
     growth_events: GrowthRepository
     api_keys: ApiKeyRepository

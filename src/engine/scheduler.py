@@ -10,6 +10,7 @@ import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from ..config import live
 from ..provider.base import MODEL_SCOPED_KINDS, ErrKind
 
 PLAN_COOLDOWN_SECONDS = 12 * 3600
@@ -172,13 +173,26 @@ class Scheduler:
     ) -> None:
         self.max_rotate = max_rotate
         self.err_threshold = err_threshold
-        self.expiry_window, self.secondary_expiry_window = expiry_windows(
-            expiry_window, secondary_expiry_window)
+        # 到期窗口可热更（B3.2）：存「取值器」而不是快照，每次选号读当前值。
+        # expiry_windows 的归一化（主窗口 ≤0 → 次窗口一并归零）必须同步在
+        # 读取时做，否则热更把主窗口改成 0、次窗口仍会单独参与排序。
+        self._expiry_window = live(expiry_window)
+        self._secondary_expiry_window = live(secondary_expiry_window)
         self._cooldowns = {
             ErrKind.PLAN: plan_cooldown,
             ErrKind.SOFT: soft_cooldown,
             ErrKind.OTHER: other_cooldown,
         }
+
+    @property
+    def expiry_window(self) -> int:
+        """生效的主窗口（含归一化）；只读，供展示与测试断言。"""
+        return expiry_windows(self._expiry_window(), self._secondary_expiry_window())[0]
+
+    @property
+    def secondary_expiry_window(self) -> int:
+        """生效的次窗口；主窗口 ≤0 时恒为 0（与 expiry_windows 同口径）。"""
+        return expiry_windows(self._expiry_window(), self._secondary_expiry_window())[1]
 
     # ---------------------------------------------------------------- 选号
 
@@ -204,10 +218,12 @@ class Scheduler:
         if not pool:
             return None
         pinned = [c for c in pool if c.pinned]
+        primary, secondary = expiry_windows(
+            self._expiry_window(), self._secondary_expiry_window())
         chosen = sorted(
             pinned or pool,
-            key=lambda c: (-c.expiry_credits(now, self.expiry_window),
-                           -c.expiry_credits(now, self.secondary_expiry_window),
+            key=lambda c: (-c.expiry_credits(now, primary),
+                           -c.expiry_credits(now, secondary),
                            _rank(c.health), -(_health_value(c.health)), c.credential_id),
         )
         return chosen[0].credential_id

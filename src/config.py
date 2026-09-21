@@ -5,7 +5,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from functools import cached_property
+from typing import Any
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -124,3 +126,15 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
 def validate_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
     """上游地址必须落在白名单内，否则拒绝发出真实 Token（PROPOSAL §8）。"""
     return endpoint.strip() in settings.allowed_endpoints
+
+
+def live(value: Any) -> Callable[[], Any]:
+    """把「标量或零参 callable」统一成取当前值的零参 callable（B3.2）。
+
+    热更消费方（调度器 / 节流器 / 后台任务 / 执行器）持有的都是这个封装：
+    生产装配传零参 lambda 实时读运行时覆盖层，测试仍可传标量。两条路径
+    共用同一套逻辑，不必为「可热更」把每个构造点都改成传 callable。
+    """
+    if callable(value):
+        return value
+    return lambda: value

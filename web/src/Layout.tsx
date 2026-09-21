@@ -6,6 +6,7 @@ import {
   KeyRound,
   LayoutDashboard,
   Menu,
+  SlidersHorizontal,
   TerminalSquare,
 } from "lucide-react";
 import type { SessionInfo } from "./api/types";
@@ -20,12 +21,22 @@ import { ThemeToggle } from "./components/ThemeToggle";
 import { UserMenu } from "./components/UserMenu";
 import { cn } from "@/lib/utils";
 
-const NAV = [
+interface NavItem {
+  to: string;
+  label: string;
+  icon: typeof LayoutDashboard;
+  end?: boolean;
+  adminOnly?: boolean;
+}
+
+const NAV: NavItem[] = [
   { to: "/", label: "池仪表盘", icon: LayoutDashboard, end: true },
   { to: "/credentials", label: "凭证管理", icon: Database },
   { to: "/api-keys", label: "API Key", icon: KeyRound },
   { to: "/stats", label: "用量统计", icon: BarChart3 },
   { to: "/playground", label: "Playground", icon: TerminalSquare },
+  // 仅管理员可见的写入口（页面自身也会被后端 403 挡住，这里只是不误导）
+  { to: "/settings", label: "运行时配置", icon: SlidersHorizontal, adminOnly: true },
 ];
 
 /** 品牌标记：多路渠道管道汇聚进单一出口（Coding2API 的产品故事）。 */
@@ -53,6 +64,8 @@ export function Layout({ session }: { session: SessionInfo }) {
     await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
     window.location.href = "/login";
   };
+  // 非管理员看不到「运行时配置」：写接口是 admin-only，露出入口只会误导
+  const nav = NAV.filter((item) => !item.adminOnly || session.is_admin);
 
   return (
     <div className="flex min-h-full flex-col">
@@ -71,7 +84,7 @@ export function Layout({ session }: { session: SessionInfo }) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-52">
-              {NAV.map((item) => (
+              {nav.map((item) => (
                 <DropdownMenuItem key={item.to} asChild>
                   <NavLink to={item.to} end={item.end} className="cursor-pointer">
                     {({ isActive }) => (
@@ -95,7 +108,7 @@ export function Layout({ session }: { session: SessionInfo }) {
             Coding2API
           </span>
           <nav className="hidden flex-1 gap-1 sm:flex">
-            {NAV.map((item) => (
+            {nav.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}

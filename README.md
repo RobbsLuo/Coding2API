@@ -187,6 +187,19 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `AUTO_CONTINUE_MAX` | `10` | 上游以 `finish_reason=length` 截断时同凭证自动续写的最多次数；`0` 关闭（见 TECHNICAL.md §3.4） |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | 监听地址与端口（compose 默认 `0.0.0.0`，`PORT` 同时决定宿主机映射端口） |
 
+### 管理台热更（运行时配置）
+
+上表中带「可热更」语义的 13 项可以不改 `.env`、不重启，直接在管理台「运行时配置」页修改：
+
+`DEFAULT_MODEL`、`MODEL_BLOCKLIST`、`QUOTA_EXPIRY_WINDOW_SECONDS`、`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`、`CONVERSATION_STICKY_SECONDS`、`GROWTH_IRREVERSIBLE_ACTIONS`、`GROWTH_INTERVAL_MINUTES`、`QUOTA_PROBE_MINUTES`、`CODEBUDDY_CHAT_MIN_INTERVAL`、`PACER_MIN_SECONDS`、`PACER_MAX_SECONDS`、`ACTIVITY_REPORT_ENABLED`、`ACTIVITY_REPORT_HOUR`。
+
+要点：
+
+- **优先级 `DB 覆盖值 > .env`**：改过之后 .env 对该项不再生效，页面会标「DB 覆盖」；「恢复默认」删掉覆盖行，才重新回落 .env。日志同步记录是谁改的。
+- 值存 `runtime_settings` 表（纯 key/value），新增可热更项不需要迁移；白名单外的 key、非法类型/越界值在写入前被拒，读取时坏行跳过并记警告。
+- 启动期项（`APP_SECRET` / `PORT` / `DATA_DIR` / `USERS_FILE` / 上游端点白名单）**不在**白名单，改它们仍需重启：它们决定进程如何启动，运行期变更只会让内存与磁盘静默分叉。
+- 接口：`GET /api/settings` 读快照，`PUT /api/settings` 写（admin + CSRF），body 形如 `{"values": {"QUOTA_PROBE_MINUTES 对应的 key": 15}}`，传 `null` 表示恢复默认。
+
 ## 部署注意
 
 - **挂载目录属主**：容器内以 uid 1001（`appuser`）运行，`./data` 与 `./secrets`

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 
+from ..config import live
 from ..db.repo import CredentialRepository, GrowthRepository
 from . import TaskReport
 from .pacer import Pacer
@@ -26,8 +27,19 @@ class GrowthTask:
         self._credentials = credentials
         self._providers = providers
         self._events = events
-        self._allow_irreversible = allow_irreversible
+        # 不可逆动作开关可热更（B3.2）：每轮读当前值，改配置当轮生效
+        self._allow_source = live(allow_irreversible)
         self._pacer = pacer
+
+    @property
+    def _allow_irreversible(self) -> bool:
+        """生效的开关；每轮现读，改运行时配置当轮生效。"""
+        return bool(self._allow_source())
+
+    @property
+    def allow_irreversible(self) -> bool:
+        """不可逆动作开关的当前生效值（每轮读取，故改名保留公开入口）。"""
+        return self._allow_irreversible
 
     async def run_once(self, *, trigger: str = "auto") -> TaskReport:
         report = TaskReport()
@@ -57,7 +69,7 @@ class GrowthTask:
             if self._pacer is not None:
                 await self._pacer.wait_turn()
             try:
-                result = await growth(data, allow_irreversible=self._allow_irreversible)
+                result = await growth(data, allow_irreversible=self.allow_irreversible)
             except Exception as error:  # noqa: BLE001 - 一个凭证失败不拖累其余
                 logger.warning("growth failed for %s: %s", candidate.credential_id, error)
                 report.failed += 1

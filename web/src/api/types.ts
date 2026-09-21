@@ -278,3 +278,29 @@ export interface ModelInfo {
   owned_by: string;
   providers: Provider[];
 }
+
+/**
+ * 一条可热更运行时配置（GET/PUT /api/settings）。
+ *
+ * 关键语义：`value` 是**当前生效值**（DB 覆盖 > .env），`default` 是 .env
+ * 默认值，`overridden` 表示该项正被 DB 覆盖。界面必须同时展示这三个，
+ * 否则用户改了 .env 却发现不生效，会以为是 bug——实际是 DB 覆盖在起作用。
+ */
+export interface RuntimeSetting {
+  key: string;
+  /** 对应的环境变量名（大写），供用户对照 .env */
+  env_name: string;
+  label: string;
+  description: string;
+  /** "int" | "float" | "bool" | "str"（后端类型名） */
+  kind: string;
+  value: string | number | boolean;
+  default: string | number | boolean;
+  overridden: boolean;
+}
+
+export interface SettingsResponse {
+  settings: RuntimeSetting[];
+  /** 被 DB 覆盖的项数（0 表示全部来自 .env） */
+  overridden: number;
+}

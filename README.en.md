@@ -26,6 +26,7 @@ upstream channels, with a shared credential pool, unified scheduling, and per-us
 - **Hardened admin surface**: login rate limiting (global/IP/username + PBKDF2 concurrency cap), CSRF checks on writes, request body limits, security headers, Host allowlist
 - **Model catalog hygiene**: `MODEL_BLOCKLIST` filters placeholder/legacy models; cached model list as fallback when upstreams fail; credit rates and token limits passed through to `/v1/models` and the Playground
 - **Per-credential pause**: the admin credential menu's "Pause" removes one credential from *chat traffic only* — quota probing, token refresh, daily check-in, growth-center and activity-report tasks keep running (they only honor the system hard-disable `disabled`). Unlike "Disabled", which means the upstream rejected the session and requires re-login plus "Restore"
+- **Runtime-configurable settings**: 13 settings (default model, model blocklist, both expiry windows, conversation-sticky TTL, irreversible growth actions, growth/probe intervals, both pacer bounds, CodeBuddy chat interval, activity-report toggle/hour) can be changed from the admin UI's *Runtime settings* page and take effect immediately — no restart. **DB overrides win over `.env`**; the page marks each row as "DB override" and offers "Reset to default" to fall back to `.env`. Startup-only knobs (`APP_SECRET`, `PORT`, `DATA_DIR`, allowlists) are deliberately excluded
 
 ## Quick start
 

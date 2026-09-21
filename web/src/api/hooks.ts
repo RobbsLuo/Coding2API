@@ -37,6 +37,13 @@ export function useApiKeys(username?: string) {
   });
 }
 
+export function useSettings(username?: string) {
+  return useQuery({
+    queryKey: adminKey(username, "settings"),
+    queryFn: api.settings,
+  });
+}
+
 export function useStatsOverview(username?: string, target?: string, since?: number) {
   return useQuery({
     queryKey: adminKey(username, "stats-overview", target, since),

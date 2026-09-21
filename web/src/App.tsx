@@ -10,6 +10,7 @@ const DashboardPage = lazy(() => import("./pages/DashboardPage").then(m => ({ de
 const ApiKeysPage = lazy(() => import("./pages/ApiKeysPage").then(m => ({ default: m.ApiKeysPage })));
 const StatsPage = lazy(() => import("./pages/StatsPage").then(m => ({ default: m.StatsPage })));
 const PlaygroundPage = lazy(() => import("./pages/PlaygroundPage").then(m => ({ default: m.PlaygroundPage })));
+const SettingsPage = lazy(() => import("./pages/SettingsPage").then(m => ({ default: m.SettingsPage })));
 
 export function App() {
   const session = useSession();
@@ -37,6 +38,7 @@ export function App() {
           <Route path="/api-keys" element={<ApiKeysPage />} />
           <Route path="/stats" element={<StatsPage />} />
           <Route path="/playground" element={<PlaygroundPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

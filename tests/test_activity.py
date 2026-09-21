@@ -369,6 +369,11 @@ def test_activity_task_day_key_is_cn_local():
 # ---------------------------------------------------------- 配置装配
 
 def test_build_runner_activity_toggle(tmp_path):
+    """活跃上报恒建对象，开关只决定跑不跑（B3.2 起可热更）。
+
+    以前是「关闭就不装配」，那样管理台把开关打开后必须重启才生效；现在
+    对象总在，`_sync_activity` 每轮现读开关。
+    """
     from src.tasks.runner import build_runner
 
     db = Database(str(tmp_path / "runner.sqlite3"))
@@ -380,12 +385,39 @@ def test_build_runner_activity_toggle(tmp_path):
 
     off = build_runner(repo, {}, _Collector(), Settings(
         _env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path)))
-    assert off._activity is None  # noqa: SLF001
+    assert off._activity is not None            # noqa: SLF001 - 恒建对象
+    assert off._activity_enabled() is False     # noqa: SLF001 - 默认关闭
     on = build_runner(repo, {}, _Collector(), Settings(
         _env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
         ACTIVITY_REPORT_ENABLED="true", ACTIVITY_REPORT_HOUR="7"))
-    assert on._activity is not None  # noqa: SLF001
-    assert on._activity._hour == 7  # noqa: SLF001
+    assert on._activity is not None             # noqa: SLF001
+    assert on._activity_enabled() is True       # noqa: SLF001
+    assert on._activity._hour == 7              # noqa: SLF001
+
+
+async def test_runner_sync_activity_skips_when_disabled(activity_repo):
+    """开关关闭时 _sync_activity 是 no-op，即使正处在配置小时窗口内。"""
+    from src.tasks.activity import ActivityTask as _ActivityTask
+    from src.tasks.checkin import CheckinTask
+    from src.tasks.quota_probe import QuotaProbeTask
+    from src.tasks.refresh import RefreshTask
+    from src.tasks.retention import RetentionTask
+    from src.tasks.runner import TaskRunner
+
+    _add(activity_repo)
+    provider = _FakeProvider()
+    activity = _ActivityTask(activity_repo, {"codebuddy": provider}, hour=10)
+    activity._now = _cn(10, 5)                  # 窗口内
+    runner = TaskRunner(
+        quota_probe=QuotaProbeTask(activity_repo, {"codebuddy": provider}, None),
+        checkin=CheckinTask(activity_repo, {"codebuddy": provider}),
+        activity=activity,
+        refresh=RefreshTask(activity_repo, {"codebuddy": provider}, skew_seconds=3600),
+        retention=RetentionTask(_NullCollector()),
+        activity_enabled=lambda: False,
+    )
+    assert await runner._sync_activity() is None      # noqa: SLF001 - 开关关
+    assert provider.calls == 0
 
 
 async def test_runner_sync_activity_respects_hour_window(activity_repo):

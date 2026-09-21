@@ -401,3 +401,39 @@ class GrowthRepository:
             "SELECT * FROM growth_events WHERE credential_id = ? ORDER BY ts DESC LIMIT ?",
             (credential_id, max(1, limit))).fetchall()
         return [dict(row) for row in rows]
+
+
+class RuntimeSettingsRepository:
+    """运行时配置覆盖（runtime_settings）：只存管理台改过的 key。
+
+    纯 key/value/updated_at 三列，不在这里做类型校验——白名单与取值范围
+    属于 `src/runtime_settings.py`（配置语义），仓储只负责存取。这样新增一个
+    可热更项不需要改 schema，与「表结构只加不改」的纪律一致。
+    """
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def load(self) -> dict[str, str]:
+        rows = self._db.connect().execute(
+            "SELECT key, value FROM runtime_settings").fetchall()
+        return {row["key"]: row["value"] for row in rows}
+
+    def set(self, key: str, value: str, now: int | None = None) -> None:
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO runtime_settings (key, value, updated_at) VALUES (?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
+                "updated_at = excluded.updated_at",
+                (key, value, int(now if now is not None else time.time())),
+            )
+
+    def delete(self, key: str) -> None:
+        with self._db.transaction() as conn:
+            conn.execute("DELETE FROM runtime_settings WHERE key = ?", (key,))
+
+    def updated_at(self) -> dict[str, int]:
+        """key → 最近一次修改时间（界面显示「何时改的」）。"""
+        rows = self._db.connect().execute(
+            "SELECT key, updated_at FROM runtime_settings").fetchall()
+        return {row["key"]: row["updated_at"] for row in rows}

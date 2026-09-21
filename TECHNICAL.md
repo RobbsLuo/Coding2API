@@ -27,7 +27,8 @@ coding2api/
 ├── pyproject.toml               # uv 项目；[tool.pytest.ini_options] 设 coverage 目标
 ├── src/
 │   ├── main.py                  # FastAPI 组装、lifespan、路由挂载（只做接线）
-│   ├── config.py                # pydantic-settings：README「配置」全部 env
+│   ├── config.py                # pydantic-settings：README「配置」全部 env；live() 归一化标量/取值器
+│   ├── runtime_settings.py      # 运行时配置覆盖层（B3.2）：DB 覆盖 > env，白名单 + 校验 + snapshot
 │   ├── webapp/                  # HTTP 边缘层（横切关注点，与业务装配分开）
 │   │   ├── limits.py            # 请求体上限 ASGI 中间件（登录 8KB / 其余 16MB）
 │   │   ├── security.py          # Host 白名单 + 安全响应头（CSP/nosniff）
@@ -98,6 +99,7 @@ coding2api/
 │       ├── authorize.py         # GET /authorize（TRAE 回调落点）
 │       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin / 成长中心 / 账号切换
 │       ├── admin_keys.py        # API Key CRUD
+│       ├── admin_settings.py    # 运行时配置：GET 快照 / PUT 覆盖（admin + CSRF，B3.2）
 │       ├── admin_stats.py       # 统计查询（overview / by-provider / timeline / model-timeline）
 │       ├── admin_auth.py        # 登录 / 登出 / 会话；上游登录 start/poll/cancel
 │       ├── playground.py        # 会话调试端点（无需 API Key）
@@ -389,6 +391,55 @@ item 类型（`local_shell_call`/`custom_tool_call` 等）显式 400。
 并对**真实 CB 上游**冒烟（流式 / 非流式 / 工具调用三条，模型 `deepseek-v4-pro`），
 另用按 `codex-rs` 源码构造的真实请求体核对入站映射。**未经真实 Codex CLI 端到端验证**，
 剩余风险：客户端行为细节（如 reasoning item 无 `encrypted_content` 时的降级路径）。
+
+---
+
+### 3.8 运行时配置热更（B3.2，推翻 Q11「无设置页」）
+
+**问题**：12+ 项运行期语义的配置（默认模型、到期窗口、节流区间、后台周期、活跃上报开关）此前只在
+`build_app` 启动时读一次并烘焙进对象（`Scheduler(...)`、`Pacer(...)`、`growth_interval_minutes=...`），
+改一项要重启整个进程；管理台没有任何入口。
+
+**分层**（这是设计核心，不是实现细节）：
+
+| 类别 | 例子 | 位置 | 变更方式 |
+|---|---|---|---|
+| 启动期不可变项 | `APP_SECRET` / `HOST` / `PORT` / `DATA_DIR` / `USERS_FILE` / `CODEBUDDY_ALLOWED_ENDPOINTS` | `config.Settings`（frozen） | 改 env + 重启；**不进白名单**，管理台改不了 |
+| 运行时可覆盖项 | 见 `runtime_settings.HOT_SETTINGS`（13 项） | `RuntimeSettings` 覆盖层 | 管理台改，立即生效 |
+
+启动期项之所以拒绝热更：它们决定进程如何启动（监听地址、加密密钥、上游白名单），
+运行期变更只会让「当前进程」与「磁盘配置」静默分叉，而分叉后的行为无法从任一处推断。
+
+**生效优先级**：`runtime_settings` 表（DB 覆盖）> `.env`（默认值来源）。
+覆盖行只有被管理台改过的 key；「恢复默认」= 删除该行，不是写入 env 当前值。
+UI 与日志都必须明示「DB 覆盖 .env」，否则用户改 `.env` 不生效会当成 bug。
+
+**读取机制**：`RuntimeSettings` 对热更 key 返回覆盖值，其余属性 `__getattr__` 透明委托给
+`Settings`——调用方仍写 `settings.default_model`，不必感知覆盖层。覆盖值在内存缓存，
+写入后 `reload()` 刷新；读取路径不查库（每次选号/建请求都查库的开销远超热更省的收益）。
+
+**消费端**：`config.live(value)` 把「标量或零参 callable」统一成取值器。生产装配传
+`lambda: runtime.xxx`（每次读当前值），测试与一次性任务仍传标量。已接线的热更点：
+
+- `Scheduler.expiry_window` / `secondary_expiry_window`：读取时跑 `expiry_windows()`
+  归一化（主窗口 ≤0 → 次窗口一并归零），避免只热更主窗口导致次窗口单独排序
+- `ConversationAffinity.ttl_seconds`：存量条目按写入时的到期时刻失效，调小 TTL 不会让旧条目突然作废
+- `Pacer.min/max_seconds`：校验从构造期挪到读取期（覆盖层把下限改到上限之上只能在用时拒绝），
+  但构造时仍校验一次尽早失败
+- `Executor`：`default_model` / `max_auto_continues` 每次请求现读
+- `GrowthTask.allow_irreversible`：每轮现读
+- `TaskRunner` 周期（探测/成长/刷新/清理）与活跃上报开关、时点：每轮 `sleep` 前现读
+- 活跃上报改为**恒建对象**（构造成本为零），由 `TaskRunner._activity_enabled` callable 每轮 gate：
+  只有对象先存在，管理台才能把默认关闭的它热开到不需要重启
+
+**校验**：白名单外 key 直接拒绝；类型（`int`/`float`/`bool`/`str`）与范围（min/max）在写入前校验；
+跨字段组合（`pacer_min ≤ pacer_max`）用「这一批写完之后」的对端值比较，校验失败则整批不落库
+（半新半旧的组合比拒绝更糟）。表里的坏行（白名单外/类型非法）在读取时跳过并记警告——
+一行坏数据不能让服务起不来。
+
+**接口**：`GET /api/settings`（admin）返回 `snapshot()`（`key`/`env_name`/`label`/`description`/
+`kind`/`value`/`default`/`overridden`）+ 覆盖计数；`PUT /api/settings`（admin + CSRF）body
+`{"values": {key: 标量 | null}}`，`null` 表示恢复默认。写操作记审计日志（谁改了哪些 key）。
 
 ---
 

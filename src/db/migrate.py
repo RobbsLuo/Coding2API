@@ -16,7 +16,9 @@ from importlib import resources
 SCHEMA_NAME = "schema.sql"
 
 # 当前 schema 版本。新增列/表、删表时 +1，并在下方对应元组里补增量。
-SCHEMA_VERSION = 9
+# 10：新增 runtime_settings 表（B3.2 运行时配置热更新）。新增表只需进
+# schema.sql（CREATE TABLE IF NOT EXISTS 对老库同样生效），无需迁移动作。
+SCHEMA_VERSION = 10
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (

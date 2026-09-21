@@ -1940,6 +1940,8 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     assert "checkins" not in tables and "model_cache" not in tables
     # 新增表（(凭证, 模型) 冷却）也由启动时的 schema.sql 全量补建
     assert "credential_model_cooldowns" in tables
+    # 运行时配置覆盖表（B3.2）同样是「只加表、不加列」，老库升级后必须存在且可写
+    assert "runtime_settings" in tables
     # 补列后可写入、可读出
     db.connect().execute(
         "INSERT INTO credentials (id, provider, data_enc, quota_expiry_ladder, quota_packages,"
@@ -1952,6 +1954,14 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     assert json.loads(db.connect().execute(
         "SELECT quota_packages FROM credentials WHERE id = 'cred_1'").fetchone()[0]) == \
         [{"name": "福利积分"}]
+    # 运行时配置覆盖表：补建后可写入读出（老库升级后管理台立刻可用）
+    db.connect().execute(
+        "INSERT INTO runtime_settings (key, value, updated_at) "
+        "VALUES ('quota_probe_minutes', '15', 1)")
+    db.connect().commit()
+    stored = db.connect().execute(
+        "SELECT value FROM runtime_settings WHERE key = 'quota_probe_minutes'").fetchone()[0]
+    assert stored == "15"
     # schema 版本推进到位；补列后新聚合可写
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     db.connect().execute(

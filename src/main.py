@@ -18,6 +18,7 @@ from .api import (
     admin_auth,
     admin_credentials,
     admin_keys,
+    admin_settings,
     admin_stats,
     authorize,
     balance,
@@ -32,13 +33,19 @@ from .config import Settings, load_settings, validate_endpoint_allowed
 from .db.conn import Database
 from .db.crypto import CredentialCipher
 from .db.migrate import apply_schema
-from .db.repo import ApiKeyRepository, CredentialRepository, GrowthRepository
+from .db.repo import (
+    ApiKeyRepository,
+    CredentialRepository,
+    GrowthRepository,
+    RuntimeSettingsRepository,
+)
 from .engine.affinity import ConversationAffinity
 from .engine.executor import Executor, ExecutorDeps
 from .engine.scheduler import Scheduler
 from .provider.codebuddy.client import CodeBuddyClient, CodeBuddyProvider
 from .provider.codebuddy.oauth import CodeBuddyOAuth
 from .provider.trae.client import TraeProvider
+from .runtime_settings import load_runtime_settings
 from .stats.collector import StatsCollector
 from .stats.query import StatsQuery
 from .tasks.pacer import Pacer
@@ -117,17 +124,19 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     configure_logging(config.log_level)
     db = Database(config.db_path)
     apply_schema(db.connect())
+    # 运行时配置覆盖层（B3.2）：热更键读 DB 覆盖值，其余透明委托给 env 快照。
+    # 必须在 apply_schema 之后构造——新库的 runtime_settings 表由上面建好。
+    runtime = load_runtime_settings(config, RuntimeSettingsRepository(db))
     cipher = CredentialCipher(config.app_secret)
     credentials = CredentialRepository(db, cipher)
     growth_events = GrowthRepository(db)
     api_keys = ApiKeyRepository(db)
     store = users if users is not None else _load_users(settings=config)
-    chat_pacer = (
-        None
-        if config.codebuddy_chat_min_interval <= 0
-        else Pacer(config.codebuddy_chat_min_interval,
-                   config.codebuddy_chat_min_interval)
-    )
+    # 聊天节流器存「取值器」而不是快照：管理台改最小间隔后立即生效。
+    # 必须传 lambda 而不是 live(runtime.x)——后者会当场求值一次再包成常量，
+    # 对 RuntimeSettings 就等于没热更。0 表示关闭，由 Pacer.disabled 处理。
+    chat_pacer = Pacer(lambda: runtime.codebuddy_chat_min_interval,
+                       lambda: runtime.codebuddy_chat_min_interval)
     # TRAE/CB 共享同一 pacer：两渠道请求共同保持最小间隔，
     # 避开各自的频率风控（CB 11128 / TRAE 流内错误）
     registry = providers if providers is not None else {
@@ -144,14 +153,14 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     stats_collector = StatsCollector(db)
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
                                      scheduler=Scheduler(
-                                         expiry_window=config.quota_expiry_window_seconds,
-                                         secondary_expiry_window=(
-                                             config.quota_expiry_secondary_window_seconds)),
-                                     default_model=config.default_model,
+                                         expiry_window=lambda: runtime.quota_expiry_window_seconds,
+                                         secondary_expiry_window=lambda: (
+                                             runtime.quota_expiry_secondary_window_seconds)),
+                                     default_model=lambda: runtime.default_model,
                                      stats=stats_collector,
                                      max_auto_continues=config.auto_continue_max,
                                      affinity=ConversationAffinity(
-                                         ttl_seconds=config.conversation_sticky_seconds),
+                                         ttl_seconds=lambda: runtime.conversation_sticky_seconds),
                                      upstream_model_name=lambda provider_id, model_name: (
                                          model_aliases.get(provider_id, {}).get(
                                              model_name.lower(), model_name)
@@ -163,7 +172,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     @asynccontextmanager
     async def lifespan(app_: FastAPI):
         services_ = app_.state.services
-        runner = build_runner(credentials, registry, app_.state.stats_collector, config,
+        # 传 runtime（而非 env 快照）：后台循环的热更值每轮现读覆盖层。
+        runner = build_runner(credentials, registry, app_.state.stats_collector, runtime,
                               growth_events=app_.state.growth_events)
         app_.state.task_runner = runner
         await runner.start()
@@ -189,6 +199,9 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # BodySizeLimitMiddleware 必须在最外层：FastAPI.add_middleware 会把后加
     # 的包在更外层，所以它在最后添加（见 build_app 末尾）。
     app.state.settings = config
+    # 热更覆盖层单独挂一份：管理台写完后要能立刻拿到新的 snapshot，
+    # 同时避免把「进程启动时的 env 快照」和「当前生效值」混为一谈。
+    app.state.runtime_settings = runtime
     app.state.users = store
     app.state.credentials = credentials
     app.state.api_keys = api_keys
@@ -231,7 +244,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         task.add_done_callback(lambda done: _forget_task(done, app.state.pending_probes))
 
     services = Services(
-        settings=config,
+        settings=runtime,
         credentials=credentials,
         growth_events=growth_events,
         api_keys=api_keys,
@@ -263,6 +276,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.include_router(admin_auth.create_router(services))
     app.include_router(admin_credentials.create_router(services))
     app.include_router(admin_keys.create_router(services))
+    app.include_router(admin_settings.create_router(services))
     app.include_router(admin_stats.create_router(services))
     app.include_router(chat.create_router(services))
     app.include_router(responses.create_router(services))

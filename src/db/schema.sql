@@ -122,3 +122,16 @@ CREATE TABLE IF NOT EXISTS credential_model_cooldowns (
 
 CREATE INDEX IF NOT EXISTS idx_model_cooling_until
     ON credential_model_cooldowns(cooling_until);
+
+-- 运行时配置覆盖（B3.2）：只存「管理台改过」的 key，未出现的 key 回落 env。
+--
+-- 为什么单独建表而不是加列到别的表：键集合随版本演进（新增可热更项不
+-- 需要迁移），且 key/value 都是文本，值的类型与取值范围由
+-- src/runtime_settings.py 的 HOT_SETTINGS 白名单校验——表本身不做约束，
+-- 白名单外/类型非法的行在读取时被忽略并记日志，不让一行坏数据把服务拖崩。
+-- 注意：这里存的是**覆盖意图**，不是权威值；env 仍是默认值来源。
+CREATE TABLE IF NOT EXISTS runtime_settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,        -- 统一以文本存储，读时按白名单类型解析
+    updated_at  INTEGER NOT NULL
+);
