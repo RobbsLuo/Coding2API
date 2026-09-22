@@ -38,12 +38,12 @@
 | Q30 | License | MIT + NOTICE 三方溯源，不做自更新 |
 | Q31 | 到期积分排序 | 两级字典序：主窗口（36h）+ 次窗口（7 天）内到期积分总量依次做排序键（均 env 可配）；落库到期阶梯而非单一日期 |
 | Q32 | Responses 出口 | v1 只做 `chat/completions` 子集：`POST /v1/responses` 与 chat 共用同一 executor，出口 translator 可注入；`include`/`store`/`previous_response_id` 按 Codex CLI 实测取舍（见 TECHNICAL §3.7） |
-| Q33 | 凭证暂停语义 | 复用现有 `enabled`（不新增 `manual_disabled` 列）：`enabled=0` 实测已只摘对话流量，后台任务（签到/刷新/成长/探测）只认 `disabled`；UI 文案统一为「暂停/取消暂停」以区别于系统禁用后的「恢复」（见计划 B3.1 实测收窄） |
-| Q34 | 运行时配置热更 | **推翻 Q11 的「无设置页」**：新增 `runtime_settings` 表 + `RuntimeSettings` 覆盖层 + 管理台配置页（Q38 后与后台任务运行态合并为「任务与配置」页，是导航中的第 6 项 / 管理员专属）。白名单 13 项（默认模型 / 模型黑名单 / 到期两个窗口 / 会话粘性 TTL / 成长不可逆开关 / 成长与探测周期 / 两个节流窗口 / CB 聊天最小间隔 / 活跃上报开关与时点）改完立即生效，无需重启；**DB 覆盖值优先于 .env**，UI 与日志明示，可「恢复默认」清掉覆盖。启动期项（密钥 / 端口 / 数据目录 / 上游白名单）不进白名单——它们决定进程如何启动，运行期改只会让内存与磁盘静默分叉。**B4 修正**：「立即生效」原先对模型黑名单不成立——模型列表缓存存的是过滤后结果，改完最长 300s（`MODEL_LIST_TTL_SECONDS`）才反映，且被滤模型会从失败兜底缓存复活；现缓存改存未过滤表、过滤在每个出口现做，前端保存后失效 `playground-models` 查询。 |
-| Q35 | token 到期展示与预警 | `credentials` 增列 `token_expires_at` / `token_issued_at`（`SCHEMA_VERSION` 10→11）。到期时间优先取凭证显式 `expires_at`，缺失/非法时回落到 access token 的 **JWT `exp`**；签发时间取 JWT `iat`（新增渠道中立的 `provider/token_expiry.py`）——**实测 CodeBuddy 的 token 响应（OAuth 登录与刷新）不带任何到期字段**，只看 `expires_at` 会恒为 0，既让管理台看不到到期、也让 `needs_refresh` 永不触发（token 过期即被 401 硬禁用，且 revive 不自愈）。两边都取不到时为 0 = 未知，**不猜本地 TTL**。展示为独立「token 剩余」列，只给剩余时间；**进度条与「最后续期」最初的设计已移除**（两渠道 token 寿命 55 天 vs 14 天，同一条无可比性；`iat` 需二次推理才有意义，不值一行），`iat` 仍落库供诊断。老库不批量回填：列表读到时按需从密文派生，写回后走列值 |
-| Q36 | 积分变动流水 | 新增 `credit_events` 表（`SCHEMA_VERSION` 11→12），在额度探测写回的**同一事务**里比对余额、只增记一条。**计划原文要求 `source` 标注来源（签到/成长/对话），但实测三类证据都拿不到真实归因**：diff 只能看到区间净变化，这段区间里签到、成长领取与对话消耗可能同时发生；`growth_events` 无积分快照；上游接口本就不打日志。故 `source` **改为只表达归因已知度**——`observed`（常规探测区间）/ `sync`（首次建立基线），另加 `window_start` 记录变化覆盖时段，前端文案一律说「净变化」而非「签到 +N」。余额未变不记（避免每轮 0 行淹没）；任一端未知仍记但 `delta` 为空（「变未知」是该追的异常，绝不量化成 0）。保留期与 `usage_events` 一致（90 天） |
-| Q37 | 池健康与多 Key 出口 | `GET /healthz` 返回 `{status, service, version, credentials:{total,ready,cooling,paused,disabled}}`（保留 `GET /health` 作纯存活探针）：`ready` 复用调度器的 `Candidate.is_selectable` 口径，五类互斥且合计 = total——**计划原文只列 4 类**，但项目已明确区分「系统禁用」与「用户暂停」（见 Q33/B3.1），少一类会让计数对不上，故补 `paused`。`api_keys` 增 `provider_binding`（`codebuddy`/`trae`/空=自动）与 `allowed_ips`（逗号分隔 IP/CIDR，空=不限制），`SCHEMA_VERSION` 12→13；`deps.api_key_user` 升级为返回 `ApiKeyPrincipal`（用户名 + 绑定），并**在鉴权当场**判定来源 IP。IP 白名单**默认不信 `X-Forwarded-For`**（客户端可写），仅 `TRUST_PROXY=true` 时采信，且取 XFF **最后一个**条目（`$proxy_add_x_forwarded_for` 语义下那是紧邻受信代理所见地址）——因此只适用于「本服务前恰好一层受信反代」的部署。绑定渠道在 `executor` 收窄候选上游：模型归属别家渠道时 400 并给出实际归属，目录未就绪时保守放行。**不做**每 Key 配额/多租户（与 Q10 冲突） |
-| Q38 | 后台任务可视化（「任务与配置」页） | 管理台原「运行时配置」页与后台任务**合并**为一页：13 项配置按 `HotSetting.task` 归属进任务卡片（卡片 = 运行态 + 该任务的可热更项），无归属的进「网关与调度」区；新增 `GET /api/tasks`（admin）下发 6 类任务的运行态，前端 30s 自动刷新。**运行态只存进程内、不落库**（`tasks/status.py`）：任务状态是「本进程内谁跑过」，重启归零比编造一条重启前记录更诚实，也省掉新表 + 保留期清理 + 老库迁移；因此**无 schema 变更**。**no-op 轮次不入账**（返回 `None` 表示未到点/未开启）——否则签到会显示成「刚刚跑过」而当天其实没签；异常入账（`last_error`），否则「一直在失败」会显示成「尚未执行」。周期与开关取**当前生效值**（热更后刷新即变），不是装配快照 |
+| Q33 | 凭证暂停语义 | 复用现有 `enabled`（不新增 `manual_disabled` 列）：实测 `enabled=0` 只摘对话流量，后台任务（签到/刷新/成长/探测）只认 `disabled`；UI 文案统一为「暂停/取消暂停」以区别于系统禁用后的「恢复」（见计划 B3.1） |
+| Q34 | 运行时配置热更 | **推翻 Q11 的「无设置页」**：新增 `runtime_settings` 表 + `RuntimeSettings` 覆盖层 + 管理台配置页（Q38 后与后台任务合并为「任务与配置」，导航第 6 项、管理员专属）。白名单 13 项改完立即生效，无需重启；**DB 覆盖值优先于 .env**，UI 与日志明示，可「恢复默认」。启动期项（密钥 / 端口 / 数据目录 / 上游白名单）不进白名单——它们决定进程如何启动，运行期改只会让内存与磁盘静默分叉。**B4 修正**：模型黑名单原先「改完最长 300s 才生效」（列表缓存存的是过滤后结果，且被滤模型会从失败兜底缓存复活）；现缓存改存未过滤表、过滤在每个出口现做 |
+| Q35 | token 到期展示与预警 | `credentials` 增列 `token_expires_at` / `token_issued_at`（`SCHEMA_VERSION` 10→11）。到期优先取显式 `expires_at`，缺失/非法时回落 access token 的 **JWT `exp`**；签发时间取 JWT `iat`（新增渠道中立的 `provider/token_expiry.py`）。**实测 CodeBuddy 的 token 响应（OAuth 登录与刷新）不带任何到期字段**，只看 `expires_at` 会恒为 0，既让管理台看不到到期，也让 `needs_refresh` 永不触发（只能等 401 硬禁用）。两边都取不到时为 0 = 未知，**不猜本地 TTL**。展示为独立「token 剩余」列；**进度条与「最后续期」的最初设计已移除**（两渠道寿命 55 天 vs 14 天无可比性），`iat` 仍落库供诊断。老库不批量回填，列表读到时按需从密文派生 |
+| Q36 | 积分变动流水 | 新增 `credit_events` 表（`SCHEMA_VERSION` 11→12），在额度探测写回的**同一事务**里比对余额、只增记一条。**计划原要求 `source` 标注来源（签到/成长/对话），但实测三类证据都拿不到真实归因**：diff 只见区间净变化，其间签到、成长领取与对话消耗可能同时发生。故 `source` **改为只表达归因已知度**（`observed` / `sync`），另加 `window_start` 记变化覆盖时段，前端一律说「净变化」而非「签到 +N」。余额未变不记；任一端未知仍记但 `delta` 为空（绝不量化成 0）。保留期同 `usage_events`（90 天） |
+| Q37 | 池健康与多 Key 出口 | `GET /healthz` 返回 `{status, service, version, credentials:{total,ready,cooling,paused,disabled}}`（保留 `GET /health` 作纯存活探针）：`ready` 复用调度器 `Candidate.is_selectable` 口径，五类互斥且合计 = total——**计划原文只列 4 类**，但项目已区分「系统禁用」与「用户暂停」（Q33），少一类会让计数对不上，故补 `paused`。`api_keys` 增 `provider_binding`（`codebuddy`/`trae`/空 = 自动）与 `allowed_ips`（`SCHEMA_VERSION` 12→13）；`deps.api_key_user` 升级为返回 `ApiKeyPrincipal`，并**在鉴权当场**判定来源 IP。IP 白名单**默认不信 `X-Forwarded-For`**（客户端可写），仅 `TRUST_PROXY=true` 时采信且取 XFF **最后一个**条目，故只适用于「本服务前恰好一层受信反代」。绑定渠道在 `executor` 收窄候选上游：模型归属别家渠道时 400 并给出实际归属，目录未就绪时保守放行。**不做**每 Key 配额 / 多租户（与 Q10 冲突） |
+| Q38 | 后台任务可视化（「任务与配置」页） | 管理台原「运行时配置」页与后台任务**合并**：13 项配置按 `HotSetting.task` 归属进任务卡片，无归属的进「网关与调度」区；新增 `GET /api/tasks`（admin）下发 6 类任务运行态，前端 30s 刷新。**运行态只存进程内、不落库**（`tasks/status.py`）：重启归零比编造重启前记录更诚实，也省掉新表 + 保留期清理 + 老库迁移，**无 schema 变更**。**no-op 轮次不入账**（返回 `None` = 未到点 / 未开启），否则签到会显示成「刚刚跑过」而当天其实没签；异常入账（`last_error`），否则「一直在失败」会显示成「尚未执行」。周期与开关取**当前生效值**，不是装配快照 |
 
 ## 2. 目标与非目标
 
@@ -74,35 +74,28 @@
 - 账号切换：`/v2/plugin/login/account`、`/v2/plugin/accounts`
 - 额度：个人版 `POST /v2/billing/meter/get-user-resource`（`CycleCapacity*Precise`），企业版 `POST /v2/billing/meter/get-enterprise-user-usage`（`credit` 已用、`limitNum` 总额）
 - 签到：`POST /billing/meter/daily-checkin`；状态：`POST /billing/meter/checkin-activity-status`（连续天数 / 今日是否已签）
-- **成长中心**（逆向自 WorkBuddy 桌面端，前缀 `/v2/activity/growth`，仅 CodeBuddy 有）：
-  只读 `buddy/travel/status`、`buddy/travel/config`、`tasks`、`streak`、`redeem/summary`、`lottery/chances`、`buddy/quota`、`energy`；
-  写入 `buddy/travel/claim`、`buddy/travel/depart`、`tasks/accept`、`makeup-cards/use`、`redeem`、`lottery/draw`、`buddy/open`
-- 鉴权头与聊天一致（`Authorization` + `X-User-Id` + `X-Domain`）；成长中心实测可用项目内的 OAuth bearer 凭证直连，无需桌面端凭据文件
-- 成长中心任务契约（2026-09）：`accept_status` 五态；接单 `POST /tasks/accept` 收 `{"task_codes": [...]}`（单数一律 400）；领奖 `POST /tasks/{code}/claim`；`/redeem` 的 `tier` 是档位标识 `"7d"/"14d"/"28d"`，实发字段是 `*_granted`
-- **活跃度的驱动来源（实测，勿凭单次实验下结论）**：活动类操作（领取成长中心奖励等）**计入**——两天无桌面端使用、仅差别在有无领取动作，`score` 就从 0 变 5；而纯 `/v2/chat/completions` 对话**不计入**（3 次完整对话后 `today.score` 与 `updated_at` 均不动）。连登天数含 1 天容忍窗口（H5 规则原文：按「连续登录且使用的天数」计，每月清零）。热力墙分档 = score 0 / 1-10 / 11-30 / 31-60 / >60，每日 02:00 批算。**与积分无关，不参与调度决策**
-- **活跃上报（B1.7，默认关闭）**：`POST /v2/report`（与聊天同基址），body 为 `[chatRequestSendEvent]`（`eventCode=chat_request_send`，全字段），`userId` 必填——缺失时上游 HTTP 200 `code:0` 但静默丢弃（连登不变）。OAuth 凭证 `account_uid`/`user_id` 实测为空，回落 bearer JWT 的 `sub`。实测一条即点亮连登（1→2）。**默认关闭**：H5 条款明禁模拟器/脚本篡改数据，处罚为取消资格并追回已发礼品；事件形状依赖上游实现、改版即失效，不作为可靠性功能
-- **凭证身份可能为空**：OAuth 登录路径下上游账号接口未回填 `account_uid`/`user_id`（实测发生），签到/成长中心的同账号隔离必须回落到 `credential_id`,否则第二个账号会被静默跳过
+- **成长中心**（逆向自 WorkBuddy 桌面端，前缀 `/v2/activity/growth`）：只读 `buddy/travel/status`、`buddy/travel/config`、`tasks`、`streak`、`redeem/summary`、`lottery/chances`、`buddy/quota`、`energy`；写入 `buddy/travel/claim`、`buddy/travel/depart`、`tasks/accept`、`/tasks/{code}/claim`、`makeup-cards/use`、`redeem`、`lottery/draw`、`buddy/open`。契约为 `accept_status` 五态、`/tasks/accept` 收复数数组 `{"task_codes": [...]}`（单数一律 400）、`/redeem` 的 `tier` 是档位标识（`"7d"/"14d"/"28d"`）、实发字段 `*_granted`（细节与坑见 [TECHNICAL.md §6.2](TECHNICAL.md)）
+- 鉴权头与聊天一致（`Authorization` + `X-User-Id` + `X-Domain`）；实测可用项目内的 OAuth bearer 凭证直连成长中心，无需桌面端凭据文件
+- **活跃度驱动来源**（实测）：活动类操作（领取成长中心奖励等）**计入**（两天无桌面端使用、仅差别在有无领取动作，`score` 从 0 变 5），纯 `/v2/chat/completions` 对话**不计入**（3 次完整对话后 `today.score` 与 `updated_at` 均不动）。连登天数含 1 天容忍窗口，每月清零；热力墙按 score 分 5 档，每日 02:00 批算。**与积分无关，不参与调度决策**（数据见 [TECHNICAL.md §6.2](TECHNICAL.md)）
+- **活跃上报（B1.7，默认关闭）**：`POST /v2/report`，body 为事件数组（`eventCode=chat_request_send`），`userId` 必填——缺失时上游 HTTP 200 `code:0` 但静默丢弃。OAuth 凭证 `account_uid`/`user_id` 实测为空，回落 bearer JWT 的 `sub`；实测一条即点亮连登（1→2）。风险与开关语义见 [README.md](README.md)（条款明禁脚本篡改；事件形状改版即失效，不作为可靠性功能）
+- **凭证身份可能为空**：OAuth 路径下上游账号接口未回填 `account_uid`/`user_id`（实测），签到 / 成长中心的同账号隔离必须回落到 `credential_id`，否则第二个账号会被静默跳过
 - 请求头需 `X-Domain`、`X-User-Id`、`X-Enterprise-Id`、`X-Department-Info`（部门名须 UTF-8 百分号编码）
-- **reasoning 字段当前直接透传，不做注入也不剥离**（实测 71 份真实请求 dump）：客户端自己会带 `reasoning_effort`（69/71，只有 `low`/`medium` 两档，非推理模型如 `hy3` 不带），也会在历史 assistant 消息里回传 `reasoning_content`（51/71，含带 `tool_calls` 的消息），上游原样接受（`deepseek-v4.1-flash` 4260 次请求 99.6% 成功）。因此既不需要「effort 档位映射」，也不存在「客户端丢弃 reasoning_content」这一前提；`enable_thinking` 只在客户端未给时补 `true`
-- **CB 的 usage 不回 `reasoning_tokens`**（实测恒为 0：`deepseek-v4.1-flash` 289 万 output tokens / reasoning_tokens 全 0），TRAE 侧正常回（`qwen-3.7-plus` 单请求 6~114）。统计页 CB 的思考 token 恒显示 0 属上游口径差异，不是采集丢失
-- **输出上限键名不对称**（2026-09-21 直连实测）：CB 上游**完全忽略 `max_completion_tokens`**（`=1` 仍出 59 tokens，无该键亦同），只认 `max_tokens`（精确截断 + `finish_reason=length`），两键同发时后者胜出；TRAE 对两个键**都不生效**。本网关不做键映射，客户端限额原样透传——因此若客户端只发 `max_completion_tokens`，输出**不会被截断**。`enable_thinking: false` 亦被上游忽略（仍产 reasoning 并计入 `max_tokens`）
+- **reasoning 字段直接透传，不注入也不剥离**（实测 71 份真实 dump）：客户端自带 `reasoning_effort`（69/71，仅 `low`/`medium`，非推理模型如 `hy3` 不带）并在历史 assistant 消息里回传 `reasoning_content`（51/71，含带 `tool_calls` 的消息），上游原样接受（`deepseek-v4.1-flash` 4260 次请求 99.6% 成功）。故无需「effort 档位映射」，也不存在「客户端丢弃 reasoning_content」的前提；`enable_thinking` 只在客户端未给时补 `true`
+- **CB 的 usage 不回 `reasoning_tokens`**（实测恒为 0：`deepseek-v4.1-flash` 289 万 output tokens / reasoning_tokens 全 0），TRAE 侧正常回（`qwen-3.7-plus` 单请求 6~114）。统计页 CB 的思考 token 恒为 0 属上游口径差异，不是采集丢失
+- **输出上限键名不对称**（2026-09-21 直连实测）：CB 上游**完全忽略 `max_completion_tokens`**（`=1` 仍出 59 tokens），只认 `max_tokens`（精确截断 + `finish_reason=length`），两键同发时后者胜出；TRAE 对两个键**都不生效**。本网关不做键映射，客户端限额原样透传——若客户端只发 `max_completion_tokens`，输出不会被截断；`enable_thinking: false` 亦被上游忽略（细节见 [TECHNICAL.md §3.4](TECHNICAL.md)）
 
 ### 3.2 TRAE SOLO（字节）
 
 - Agent Host `https://trae-api-cn.mchost.guru`、UG Host `https://api.trae.cn`、OAuth Host `https://api.trae.com.cn`
 - 聊天：`POST /api/agent/v3/llm_utils_chat`；模型：`POST /api/ide/v1/get_detail_param`
-- 认证：浏览器登录 → 302 回调 `/authorize` → `ExchangeToken` → `GetUserInfo`
-- Token 刷新：`POST /cloudide/api/v3/trae/oauth/ExchangeToken`（refreshToken 轮换）
+- 认证：浏览器登录 → 302 回调 `/authorize` → `ExchangeToken` → `GetUserInfo`；刷新 `POST /cloudide/api/v3/trae/oauth/ExchangeToken`（refreshToken 轮换）
 - 签到：`/trae/api/v2/ug/checkin_credits/{status,claim}`；额度：`/trae/api/v2/pay/ide_user_ent_usage`
-- **签到成功必须"确认到账"，不能只看领取接口的返回码**：TRAE 的 `claim` 对当天已签过的账号
-  也返回 `code:0 success`（幂等），实测此时 `status.credits` 前后都是 150、`checked_in` 已是 true。
-  用「claim 返回 0」判断成功会把「什么都没发生」报成成功（本项目曾据此得出错误结论并返工）。
-  正确判定：`checked_in` 为真且回查 `credits` 确有增加。CB 侧同规矩（`code=0` 且 `credit` 是有限数值）
-- **签到 9074 按设备标识处理（不猜设备号格式）**：观测到的是「数字串是必要条件、非充分条件」——同一账号 hex32 与确定性派生值失败、随机新数字串成功；`X-Device-Id` 空串返回 9004（参数错误）。取值需为数字串且不宜复用，本项目每次 claim 生成新的 16 位数字串，一轮内最多换号重试 2 次（`CHECKIN_ATTEMPTS`），其余交给上一层的 10 分钟周期。**注意：某账号当天签到成功后，任何 device_id 的 claim 都会返回 `code:0`（幂等）**，所以判断成功必须看 `status.checked_in`，否则极易得出错误结论（本项目为此返工过一次）
+- **签到成功必须「确认到账」，不能只看返回码**：`claim` 对当天已签过的账号也返回 `code:0 success`（幂等），此时 `status.credits` 前后不变、`checked_in` 已是 true。用「claim 返回 0」判断会把「什么都没发生」报成成功（本项目曾据此返工）。正确判定：`checked_in` 为真且回查 `credits` 确有增加；CB 侧同规矩（`code=0` 且 `credit` 是有限数值）
+- **签到 9074 按设备标识处理**：数字串是必要条件、非充分条件（同账号 hex32 与确定性派生值失败、随机新数字串成功）；`X-Device-Id` 空串返回 9004。本项目每次 claim 生成新的 16 位数字串，一轮内最多换号重试 2 次（`CHECKIN_ATTEMPTS`），其余交给 10 分钟周期。**注意**：某账号当天签到成功后，任何 device_id 的 claim 都会返回 `code:0`（幂等），所以必须看 `status.checked_in` 判断成功
 - SSE 事件序列：`metadata` → `timing_cost` → `output`×N → `extra_info` → `token_usage` → `done`
 - `token_usage` 含缓存字段 `cache_read_input_tokens` / `cache_creation_input_tokens`（未命中为 0，非缺失），映射为统计的 `cached_tokens`；**无 per-request credit**
 - 错误码 `1005` = 权益不足；仅流式，非流式需聚合
-- **接受客户端传来的 `reasoning_effort`**（实测透传 `low`/`medium` 均 200 且正常出流，`reasoning_tokens` 有值）：不认 `thinking` 对象，也无需服务端补注入；`developer` 角色上游不认（静默空流），已归一为 `system`
+- **接受客户端传来的 `reasoning_effort`**（实测透传 `low`/`medium` 均 200 且正常出流）：不认 `thinking` 对象，也无需服务端注入；`developer` 角色上游不认（静默空流），已归一为 `system`
 
 ### 3.3 冲突与陷阱
 
@@ -150,31 +143,39 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 ### 4.3 调度器（Q12=B + Q26 + Q31）
 
-统一实现，两个 provider 共用：手动 pin 优先（粘性让位，见下） → 会话粘性命中且可选时直接复用（不排序） → 过滤 healthy（含**模型级**避让：逐凭证按自己所属上游的原始模型名查 (凭证, 模型) 冷却表，见 [TECHNICAL.md §6.1](TECHNICAL.md#61-模型级冷却b11)） → 到期积分两级字典序：先比主窗口（`QUOTA_EXPIRY_WINDOW_SECONDS`，默认 36h）内即将到期的积分，打平（含都为 0）再比次窗口（`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`，默认 7 天）内即将到期的积分 → 按健康度三态排序（`known 降序 > unknown > exhausted`；同分按 `credential_id` 稳定）→ 无可用返回 None。到期指标让快过期的积分先用掉，避免白丢；冷却与错误累计规则见 [TECHNICAL.md §6](TECHNICAL.md)，会话粘性见下文。
+统一实现，两个 provider 共用。选号优先级：
 
-**为什么冷却要分「账号级」与「模型级」两层**。上游的拒绝语义并不都是账号级问题：`429 + 6004` 是「这个模型在当前账号上用超了」，`400/404 + 11102` 是「当前账号没有这个模型」。把它们一律记成账号级冷却，会让一次模型级限流把整个账号踢出池（同账号的其他模型明明可用），而把 `11102` 丢掉不管又会让坏组合被反复选中。因此账号级继续写 `credentials.cooling_until`，模型级另建 `credential_model_cooldowns`；账号级冷却出现时清空该凭证的模型级条目，防「切模型」绕过账号级限制。业务码识别只认 `"code": N` 键值形态，不搜裸数字（`"code":111020` 含 `11102` 子串）。
+1. **手动 pin 优先**（粘性让位，见下）
+2. **会话粘性命中且可选**时直接复用，不参与排序
+3. 过滤 healthy，含**模型级**避让：逐凭证按自己所属上游的原始模型名查 (凭证, 模型) 冷却表（见 [TECHNICAL.md §6.1](TECHNICAL.md#61-模型级冷却b11)）
+4. **到期积分两级字典序**：先比主窗口（`QUOTA_EXPIRY_WINDOW_SECONDS`，默认 36h）内将过期的积分，打平（含都为 0）再比次窗口（`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`，默认 7 天）内将过期的积分
+5. **健康度三态排序**：`known` 降序 > `unknown` > `exhausted`，同分按 `credential_id` 稳定
 
-**为什么是「窗口内积分总量」而不是「是否即将过期」（Q31）**。实测 CodeBuddy 的额度不是一个整块周期，而是几十个各自独立到期的小包（每日 100 积分 × N，`get-user-resource` 一次返回 30~36 个套餐），这决定了三个取舍：
+无可用返回 None。到期指标让快过期的积分先用掉，避免白丢；冷却与错误累计规则见 [TECHNICAL.md §6](TECHNICAL.md)。
 
-- **只存一个日期没有区分度**：各账号的「最早到期」经常落在同一天同一时刻，布尔分组退化成健康度排序。改成统计窗口内的到期积分总量，账号之间才有可比的高低。
-- **落库到期阶梯而非预计算数字**：窗口是运行时参数，存 `[(到期 epoch, 该包剩余积分)]` 后，改 `QUOTA_EXPIRY_WINDOW_SECONDS` / `QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS` 立刻生效，不必等下一轮探测。
-- **过滤条件必须是 `end > now`**：上游会把已过期套餐一起返回（`PackageEndTimeRangeBegin` 过滤的是套餐有效期，不是积分周期），不过滤的话「最早到期」永远是过去的时间，指标恒为 0；已用完的包（剩余 0）同样排除，它不携带积分。
-- **两级窗口而非一个**：只比 36h 会出现大量账号指标同为 0（36h 内没有包到期），此时排序退化成健康度，一周内本该先用掉的积分反而没人管。因此主窗口打平后**再比一次**更宽的 7 天窗口（`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`），同级内仍是积分多者优先；两级都是 0 才轮到健康度。次窗口只在主窗口打平时起作用，主窗口有分时它不参与，因此不会把「36h 内该先烧的」压下去。
+**为什么冷却分「账号级」与「模型级」两层**。上游的拒绝语义并不都是账号级问题：`429 + 6004` 是「这个模型在当前账号上用超了」，`400/404 + 11102` 是「当前账号没有这个模型」。一律记成账号级冷却，会让一次模型级限流把整个账号踢出池（同账号其他模型明明可用）；而丢掉 `11102` 不管，坏组合又会被反复选中。因此账号级继续写 `credentials.cooling_until`，模型级另建 `credential_model_cooldowns`；账号级冷却出现时清空该凭证的模型级条目，防「切模型」绕过账号级限制。业务码识别只认 `"code": N` 键值形态，不搜裸数字（`"code":111020` 含 `11102` 子串）。
+
+**为什么是「窗口内积分总量」而不是「是否即将过期」（Q31）**。实测 CodeBuddy 的额度不是一个整块周期，而是几十个各自独立到期的小包（每日 100 积分 × N，`get-user-resource` 一次返回 30~36 个套餐）。由此定下四个取舍：
+
+- **只存一个日期没有区分度**：各账号的「最早到期」经常落在同一天同一时刻，布尔分组退化成健康度排序；统计窗口内的到期积分总量，账号之间才有可比的高低。
+- **落库到期阶梯而非预计算数字**：窗口是运行时参数，存 `[(到期 epoch, 该包剩余积分)]` 后，改窗口阈值立刻生效，不必等下一轮探测。
+- **过滤条件必须是 `end > now`**：上游会把已过期套餐一起返回（`PackageEndTimeRangeBegin` 过滤的是套餐有效期，不是积分周期），不过滤则「最早到期」永远是过去时间、指标恒为 0；已用完的包（剩余 0）同样排除，它不携带积分。
+- **两级窗口而非一个**：只比 36h 会出现大量账号指标同为 0（36h 内没有包到期），排序退化成健康度，一周内本该先用掉的积分反而没人管。故主窗口打平后再比更宽的 7 天窗口，同级内仍是积分多者优先；两级都是 0 才轮到健康度。次窗口只在主窗口打平时参与，不会把「36h 内该先烧的」压下去。
 
 窗口 `≤0` 等于关闭整套到期排序（主窗口是总开关，次窗口一并归零，`expiry_windows()` 统一折算），退回纯健康度排序；TRAE 无周期概念，恒为 0 分。
 
-**展示与调度指标分开存**（`quota_packages` vs `quota_expiry_ladder`）。管理台需要在凭证行上展开"这个账号有哪些额度包、各自什么时候到期、用了多少"，而 `quota_expiry_ladder` 是为选号设计的指标：结构只有 `[到期, 剩余]` 装不下包名，且 TRAE 必须保持 `None`（填了就会改变选号行为）。因此另存一列 `quota_packages`（`[{"name","total","used","end"}]`，JSON）供管理台悬浮展示：只有展示需要的数据，调度一行不动。两边口径差异也保留：阶梯只收「未过期 + 有余额」的包，而展示明细额外包含「已过期但还有余额」（提醒浪费）与「已用完但仍有效」的包。
+**展示与调度指标分开存**（`quota_packages` vs `quota_expiry_ladder`）。管理台要展开「这个账号有哪些额度包、各自何时到期、用了多少」，而 `quota_expiry_ladder` 是选号指标：结构只有 `[到期, 剩余]`，装不下包名，且 TRAE 必须保持 `None`（填了会改变选号行为）。故另存一列 `quota_packages`（`[{"name","total","used","end"}]`，JSON）仅供展示，调度一行不动。口径差异也保留：阶梯只收「未过期 + 有余额」的包，展示明细额外含「已过期但仍有余额」（提醒浪费）与「已用完但仍有效」的包。
 
 **会话粘性**（调度前置一步）。OpenAI 协议本身无会话概念，客户端「对话」的识别按可靠性分两级（B1.5）：
 
-1. **显式会话标识**：`conversation_id` / `conversationId` / `prompt_cache_key`（`metadata` 对象内或请求体顶层），客户端直接给出会话身份，消息被裁剪也能粘住。
-2. **回落：消息增量前缀指纹**：以上一轮的完整 messages 为前缀再追加，据此定位上一轮实际服务的凭证。
+1. **显式会话标识**：`conversation_id` / `conversationId` / `prompt_cache_key`（`metadata` 内或请求体顶层）——客户端直接给出会话身份，消息被裁剪也能粘住。
+2. **回落：消息增量前缀指纹**：以上一轮完整 messages 为前缀再追加，据此定位上一轮实际服务的凭证。
 
-TTL（`CONVERSATION_STICKY_SECONDS`，默认 1h，≤0 关闭）内固定复用，不再按到期积分/健康度重排——对话中途换号会触发上游风控并丢掉上游侧的提示词缓存。请求体带 `user_id`（顶层或 `metadata` 内）时**不派生**第 2 级兜底键：同一用户的并行对话消息前缀可能相同，派生兜底键会把它们误钉到同一凭证。
+TTL（`CONVERSATION_STICKY_SECONDS`，默认 1h，≤0 关闭）内固定复用，不再按到期积分 / 健康度重排——对话中途换号会触发上游风控并丢掉上游侧提示词缓存。请求体带 `user_id`（顶层或 `metadata` 内）时**不派生**第 2 级兜底键：同一用户的并行对话消息前缀可能相同，派生会把它们误钉到同一凭证。
 
 > 键名核实状态：`prompt_cache_key`（OpenAI 官方顶层参数）与 `metadata.user_id`（Anthropic Messages API 官方字段）已核实；`conversation_id`/`conversationId`/顶层 `user_id` 非两家标准键，属客户端惯用约定，本机 71 份真实 dump（PI 客户端）中**未观测到**，作为兼容探测接受（命中即用、未命中无害）。
 
-优先级：**手动 pin 优先于粘性**。存在可选（enabled、未禁用、未冷却）的 pinned 凭证时粘性让位，否则管理员显式「指定」会在对话中途无形失效。粘住的凭证报错仍走正常轮换，成功后重新粘到实际服务的凭证。指纹链掺入用户名，防不同用户的相同消息数组串到同一凭证；条目纯内存，重启后丢粘性只影响一轮选号。
+**手动 pin 优先于粘性**：存在可选（enabled、未禁用、未冷却）的 pinned 凭证时粘性让位，否则管理员显式「指定」会在对话中途无形失效。粘住的凭证报错仍走正常轮换，成功后重新粘到实际服务的凭证。指纹链掺入用户名，防不同用户的相同消息数组串到同一凭证；条目纯内存，重启后丢粘性只影响一轮选号。
 
 **健康度归一化**（Q26 核心）。两者都是积分制，但周期语义不同：
 
@@ -191,11 +192,11 @@ def health(q) -> HealthScore:   # known(0-100) | unknown | exhausted
     return clamp(round(q.remaining / q.total * 100), 0, 100)
 ```
 
-**为什么必须三态**：CB 允许 bearer-only 手动凭证（无额度信息），探测失败也会发生。若把未知当成 0 分，这类凭证在有健康号时永远轮不到——探测失败被误判为「没额度」。`unknown` 排在 known 之后但仍参与调度；`exhausted` 才是真正的垫底。
+**为什么必须三态**：CB 允许 bearer-only 手动凭证（无额度信息），探测失败也会发生。把未知当成 0 分，这类凭证在有健康号时永远轮不到——探测失败被误判成「没额度」。`unknown` 排在 known 之后但仍参与调度；`exhausted` 才真正垫底。
 
 **展示层必须标注周期语义**：CB 是「本周期剩余（到期回满）」，TRAE 是「账户剩余（单调递减）」；`unknown` 显示为「未探测到额度」。
 
-**credit 不可作为统计核心指标**：两边上游的 SSE 都不保证返回 per-request credit（CB 的 `usage.credit` 是可选字段，样本中基本不出现；TRAE 只有 `token_usage`）。健康度的唯一可靠来源是额度探测接口的 `remaining`；统计页 credit 只做辅助展示，主指标是 token。
+**credit 不可作为统计核心指标**：两边上游的 SSE 都不保证返回 per-request credit（CB 的 `usage.credit` 是可选字段、样本中基本不出现；TRAE 只有 `token_usage`）。健康度的唯一可靠来源是额度探测接口的 `remaining`；统计页 credit 只做辅助展示，主指标是 token。
 
 ### 4.4 模型名解析（Q21=C + Q27=A）
 
@@ -242,15 +243,13 @@ v1 只接 OpenAI 出口，但上游 SSE 解析到「中立事件」这一步独�
 
 - **用户不建表**：`users.txt`（PBKDF2）是唯一源，路径走 `USERS_FILE`（`config.py` 的 `users_file`，默认 `secrets/users.txt`），角色走 `ADMIN_USERNAMES` env；`api_keys.username` 由应用层校验存在性，不加外键
 - **API Key 存摘要**：SHA-256，明文仅创建时返回一次
-- **凭证加密列**：`data_enc` 走 Fernet，调度状态（`health` / `cooling_until` / `err_count` / `pinned` / `quota_expiry_ladder`）落库，进程重启不丢冷却状态与到期阶梯
-- **用量脱敏**：`usage_events`（明细 90 天）+ `usage_hourly`（小时汇总永久），`credit`/`cached_tokens` 可空仅辅助展示
-- **成长中心**：`growth_events` 只存汇总行（一轮一行人话汇报 + 积分/能量/连签 + trigger），不存活动内部数据结构；`credentials.growth_last_run_at/growth_last_result` 供列表直接显示；活跃上报（B1.7）复用该表记一行，不新增表
-- **token 到期**（Q35）：`credentials.token_expires_at`（显式 `expires_at` 优先，缺失回落 access token 的 JWT `exp`；0 = 未知）与 `token_issued_at`（JWT `iat`，即最后续期；0 = 未知，仅落库供诊断）。展示层只给「token 剩余」一列——进度条与「最后续期」已移除（两渠道寿命 55 天 vs 14 天无可比量纲；`iat` 需与剩余天数一起看才有意义，不值一行）。派生逻辑在渠道中立的 `provider/token_expiry.py`，**不猜本地 TTL**
-- **积分流水**（Q36）：`credit_events` 记两次额度探测之间的净变化（含 `window_start` 覆盖区间与归因已知度 `source`）；**不是动作归因**——上游不打日志，diff 分不出分数是谁加的。保留期同 `usage_events`（90 天）
+- **凭证加密列**：`data_enc` 走 Fernet；调度状态（`health` / `cooling_until` / `err_count` / `pinned` / `quota_expiry_ladder`）落库，重启不丢冷却状态与到期阶梯
+- **用量脱敏**：`usage_events`（明细 90 天）+ `usage_hourly`（小时汇总永久），`credit`/`cached_tokens` 可空、仅辅助展示
+- **成长中心**：`growth_events` 只存汇总行（一轮一行人话汇报 + 积分/能量/连签 + trigger），不存活动内部结构；`credentials.growth_last_run_at`/`growth_last_result` 供列表直接显示；活跃上报（B1.7）复用该表记一行，不新增表
+- **token 到期**（Q35）：`credentials.token_expires_at`（显式 `expires_at` 优先，缺失回落 JWT `exp`；0 = 未知）与 `token_issued_at`（JWT `iat`，仅落库供诊断）。派生逻辑在渠道中立的 `provider/token_expiry.py`，**不猜本地 TTL**
+- **积分流水**（Q36）：`credit_events` 记两次额度探测之间的净变化（含 `window_start` 与归因已知度 `source`）；**不是动作归因**——上游不打日志，diff 分不出分数是谁加的。保留期同 `usage_events`（90 天）
 - 签到去重与模型列表缓存均进程内实现，不进库
-- **后台任务运行态**（Q38）同样进程内、**不建表**：「上次运行 / 最近结果」只描述本进程，
-  重启归零是诚实语义；落库要新表 + 保留期清理 + 老库迁移，而跨重启的历史价值有限
-  （业务留痕已有 `growth_events` / `credit_events` / `usage_events`）
+- **后台任务运行态**（Q38）同样进程内、**不建表**：跨重启的历史价值有限（业务留痕已有 `growth_events` / `credit_events` / `usage_events`），落库反而要新表 + 保留期清理 + 老库迁移
 
 DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见 [TECHNICAL.md §7](TECHNICAL.md)。
 
@@ -264,9 +263,9 @@ DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见
 
 ## 7. API 契约
 
-外部（API Key 鉴权）：`POST /v1/chat/completions`（流式 + 非流式）、`POST /v1/responses`（Responses API，Codex CLI；与 chat 共用同一调度/选号/统计链路）、`GET /v1/models`（扁平模型名 + `providers` 字段）、`GET /v1/user/balance`（DeepSeek 兼容余额，读探测缓存聚合，不实时打上游）、`GET /health`（纯存活）、`GET /healthz`（存活 + 凭证池计数，无鉴权）。
+外部（API Key 鉴权）：`POST /v1/chat/completions`（流式 + 非流式）、`POST /v1/responses`（Responses 子集，Codex CLI；与 chat 共用同一调度 / 选号 / 统计链路）、`GET /v1/models`（扁平模型名 + `providers` 字段）、`GET /v1/user/balance`（DeepSeek 兼容余额，读探测缓存聚合，不实时打上游）、`GET /health`（纯存活）、`GET /healthz`（存活 + 凭证池计数，无鉴权）。
 
-管理台（会话 Cookie）：凭证管理、API Key 管理、用量统计、Playground 等，admin 管凭证与全量统计，普通用户仅见自己的数据。凭证运维端点含 `POST /api/credentials/{id}/checkin`（签到）、`GET|POST /api/credentials/{id}/growth`（成长中心状态与手动执行，仅 CodeBuddy）。回调（无鉴权，TRAE 浏览器 302 不带 key）：`GET /authorize`。
+管理台（会话 Cookie）：凭证管理、API Key 管理、用量统计、Playground、任务与配置（admin-only），admin 管凭证与全量统计，普通用户仅见自己的数据。凭证运维端点含 `POST /api/credentials/{id}/checkin`（签到）、`GET|POST /api/credentials/{id}/growth`（成长中心状态与手动执行，仅 CodeBuddy）；运行时配置与任务运行态走 `GET|PUT /api/settings` + `GET /api/tasks`。回调（无鉴权，TRAE 浏览器 302 不带 key）：`GET /authorize`。
 
 实现以代码为准，使用说明见 [README.md](README.md)。
 
@@ -276,24 +275,20 @@ DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见
 
 - 上游 endpoint 白名单：**只接受明确配置的地址**，真实 Token 绝不转发到未授权站点
   - CodeBuddy：`CODEBUDDY_API_ENDPOINT` 启动时强制校验，不在白名单直接失败
-  - TRAE：凭证 JSON 里的 `apiHost` 是用户可控输入，导入时按官方地址白名单校验，
-    不在白名单直接拒绝；旧库里已存的越界 `apiHost` 在刷新/取用户信息前退回官方地址
-    （校验在 `TraeClient` 内部，不只 HTTP 边界）
+  - TRAE：凭证 JSON 里的 `apiHost` 是用户可控输入，导入时按官方地址白名单校验，不在白名单直接拒绝；旧库里已存的越界 `apiHost` 在刷新 / 取用户信息前退回官方地址（校验在 `TraeClient` 内部，不只 HTTP 边界）
 - TLS 校验默认开启，公网部署必须保持
 - Host / Origin 白名单，CSP `frame-ancestors`
 - 登录三级限流（全局 / IP / 用户名）+ PBKDF2 并发上限
-- 请求体上限 16MB，登录接口 8KB（ASGI 层按实际字节计数，`chunked` 不能绕过）
-- API Key 仅存摘要，明文只在创建时返回一次
-- 凭证内容加密入库，密钥走 `APP_SECRET` env；**密钥丢失 = 已存凭证全部不可解，只能重录**，不做密钥轮换
-  - `APP_SECRET` 最短 16 字符，弱密钥拒绝启动
-  - 解密失败返回可行动错误码 `credential_decrypt_failed`，不暴露裸 500
+- 请求体上限 16MB、登录接口 8KB（ASGI 层按实际字节计数，`chunked` 不能绕过）
+- API Key 仅存摘要，明文只在创建时返回一次；可按 Key 限定渠道绑定与来源 IP 白名单（见 [README.md](README.md)）
+- 凭证内容加密入库，密钥走 `APP_SECRET`：最短 16 字符，弱密钥拒绝启动；**丢失 = 已存凭证全部不可解，只能重录**，不做密钥轮换。解密失败返回可行动错误码 `credential_decrypt_failed`，不暴露裸 500
 - 管理台会话 Cookie `SameSite=Lax` + 写操作自定义头校验（CSRF，含 logout）
-- 会话与 API Key 除签名/摘要外**校验用户仍存在于 users.txt**：删用户即失效
+- 会话与 API Key 除签名 / 摘要外**校验用户仍存在于 users.txt**：删用户即失效
 - 未匹配的 `/api`、`/v1` 路径返回 JSON 404（不落到 SPA 的 200 + HTML）
 - 日志脱敏：不打印 Token、完整请求体
 - 审计：凭证增删改、pin、账号切换写 INFO 日志（含操作人）
 
-不做的：mTLS、IP 白名单（交给反向代理）。审计日志只覆盖凭证管理写操作，不做全量请求审计（统计表已是脱敏的请求级记录）。
+不做的：mTLS；**面向管理台与端口的** IP 限制（交给反向代理）。注意与上文的 API Key 来源 IP 白名单区分——后者是应用层能力，已内建。审计只覆盖凭证管理写操作，不做全量请求审计（统计表已是脱敏的请求级记录）。
 
 env 完整清单见 [README.md「配置」](README.md)（以 `src/config.py` 为准）。
 
