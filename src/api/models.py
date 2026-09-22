@@ -5,6 +5,10 @@
 （冷启动无缓存时才退化为跳过该上游）。
 另按 MODEL_BLOCKLIST（fnmatch glob）过滤非用户模型与老模型，
 只影响列表展示；直连指定被滤模型不受影响。
+
+**缓存存的是未过滤列表，过滤在每个出口现做**：MODEL_BLOCKLIST 是可热更项
+（Q34「改完立即生效」），若把过滤结果存进缓存，改完黑名单要等 TTL（300s）
+才反映到 Playground，且被滤掉的模型在 TTL 内会从「兜底缓存」里复活。
 元数据（消耗倍率 / token 上限 / 支持性）随条目透传，双上游同名模型
 逐字段补缺（先到先填，后到只补 None）。
 """
@@ -86,6 +90,13 @@ def _entry_response(entry: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _visible(models_by_lower: dict[str, Model],
+             patterns: tuple[str, ...]) -> dict[str, Model]:
+    """按当前黑名单过滤一个上游的模型表（缓存里存的是未过滤的原始表）。"""
+    return {lower: model for lower, model in models_by_lower.items()
+            if not _blocked(model.id, patterns)}
+
+
 async def list_models(services: Services, *, force: bool = False) -> dict:
     """跨上游拉取并合并模型列表。
 
@@ -95,10 +106,12 @@ async def list_models(services: Services, *, force: bool = False) -> dict:
     某上游拉取失败时用上次成功的缓存兜底，而不是让该上游从列表里消失。
 
     force=False（默认）时 TTL 内直接复用刚才的结果；启动预热传 force=True。
+    黑名单在每个出口现算（缓存不做过滤），因此改完黑名单下一次调用立即生效。
     """
     aliases: dict[str, dict[str, str]] = {}
     grouped: dict[str, dict[str, Any]] = {}   # 小写名 → {canonical, providers, meta}
     cache = services.model_list_cache
+    patterns = services.settings.blocklist_patterns
     now = time.monotonic()
     for provider_id, provider in services.registry.items():
         fetched_at = services.model_list_fetched_at.get(provider_id)
@@ -106,7 +119,8 @@ async def list_models(services: Services, *, force: bool = False) -> dict:
                  and fetched_at is not None
                  and now - fetched_at < MODEL_LIST_TTL_SECONDS)
         if fresh and not force:
-            _merge_provider(grouped, aliases, provider_id, cache[provider_id])
+            _merge_provider(grouped, aliases, provider_id,
+                            _visible(cache[provider_id], patterns))
             continue
         # 用该上游的一个可用凭证拉取（凭证有归属，模型列表是账号级的）
         # selectable_only：硬禁用/用户关闭的凭证取不到数据，只会白失败
@@ -121,15 +135,16 @@ async def list_models(services: Services, *, force: bool = False) -> dict:
             cached = cache.get(provider_id)
             if cached:
                 logger.warning("模型列表获取失败 %s，使用上次缓存: %s", provider_id, error)
-                _merge_provider(grouped, aliases, provider_id, cached)
+                _merge_provider(grouped, aliases, provider_id,
+                                _visible(cached, patterns))
             else:
                 logger.warning("模型列表获取失败 %s: %s", provider_id, error)
             continue
-        patterns = services.settings.blocklist_patterns
-        models_by_lower = {model.id.lower(): model for model in models
-                           if not _blocked(model.id, patterns)}
-        _merge_provider(grouped, aliases, provider_id, models_by_lower)
-        # 成功 → 更新该上游缓存（下次失败时兜底）
+        models_by_lower = {model.id.lower(): model for model in models}
+        _merge_provider(grouped, aliases, provider_id,
+                        _visible(models_by_lower, patterns))
+        # 成功 → 更新该上游缓存（下次失败时兜底）。存未过滤表：过滤在出口现做，
+        # 否则黑名单热更后缓存里仍是被滤前的旧结果（最长 TTL 才生效）。
         cache[provider_id] = models_by_lower
         services.model_list_fetched_at[provider_id] = time.monotonic()
     # 就地更新（executor 的映射闭包引用同一个 dict 对象）

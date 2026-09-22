@@ -59,6 +59,8 @@ class Services:
     schedule_probe: Callable[[str], None]
     # 模型列表缓存：provider_id → {小写模型名: Model}（含元数据）。
     # list_models 成功时更新，某上游拉取失败时用缓存兜底（v1/models 稳定返回）。
+    # **存未过滤的原始表**：MODEL_BLOCKLIST 是可热更项，过滤在每个出口现做，
+    # 否则改完黑名单要等 TTL（300s）才生效、被滤模型还会从兜底缓存复活。
     model_list_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
     # 上次成功拉取时间（monotonic）：TTL 内的请求直接用缓存，
     # 避免客户端频繁调 /v1/models 时上游被打成大。

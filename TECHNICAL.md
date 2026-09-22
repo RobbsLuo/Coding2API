@@ -298,6 +298,14 @@ model/messages/tools/stream/stream_options/store/reasoning_effort）**未观测�
 `*-lkeap`（两边清单零命中，无从核实）、`aquila` / `sagitta` /
 `seed-code-pro-0430`（TRAE 实测均正常 chat，虽名字可疑但可用）。
 
+**黑名单热更与列表缓存（B4 修正）**：`MODEL_BLOCKLIST` 是热更项（Q34「改完立即
+生效」），但 `list_models` 的 `model_list_cache` 原先存的是**过滤后**的结果，导致
+改完黑名单最长要等 `MODEL_LIST_TTL_SECONDS`（300s）才反映到 Playground，且被滤掉的
+模型在 TTL 内会从「上游失败兜底缓存」里复活。现在缓存只存**未过滤的原始表**，过滤
+在每个出口现做（`_visible()`，命中缓存、成功拉取、失败兜底三条路径都过一遍）；前端
+保存设置后显式 `invalidateQueries(["playground-models"])`，因此热更在黑名单与列表
+两条缓存上都是立即生效，不依赖 TTL 过期。
+
 ### 3.6 活跃上报（B1.7，默认关闭）
 
 CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端对话事件；账号只被网关

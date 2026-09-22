@@ -14,6 +14,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from src.auth.session import create_session_token
 from src.config import Settings
 from src.db.conn import Database
 from src.db.crypto import CredentialCipher
@@ -1025,6 +1026,58 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
         ids2 = {item["id"] for item in client.get(
             "/v1/models", headers={"Authorization": f"Bearer {key2}"}).json()["data"]}
     assert "kimi-k2.6" not in ids2 and "glm-5.2" in ids2
+
+
+def test_models_blocklist_hot_reload_applies_without_waiting_for_ttl(tmp_path):
+    """MODEL_BLOCKLIST 热更后下一次 /v1/models 立即过滤，不受 TTL 缓存影响。
+
+    回归点：缓存若存过滤后的结果，TTL（300s）内改黑名单不会生效，且被滤掉的
+    模型会从「失败兜底缓存」里复活。现在缓存存未过滤表，过滤在出口现做。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+
+    class StubTrae:
+        id = "trae"
+        fail = False
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            if self.fail:
+                raise RuntimeError("upstream down")
+            return [Model(id="glm-5.2"), Model(id="kimi-k2.6")]
+
+        def import_credential(self, raw):
+            return raw
+
+    provider = StubTrae()
+    app = build_app(settings, providers={"trae": provider})
+    key = app.state.api_keys.create("root")["api_key"]
+    auth = {"Authorization": f"Bearer {key}"}
+    with TestClient(app) as client:
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+        first = client.get("/v1/models", headers=auth).json()["data"]
+        assert {item["id"] for item in first} == {"glm-5.2", "kimi-k2.6"}
+        # 缓存存的是**未过滤**表（两条都在），否则热更在 TTL 内无法生效
+        assert set(app.state.services.model_list_cache["trae"]) == {"glm-5.2", "kimi-k2.6"}
+
+        # TTL 未过（刚拉过），此时改黑名单
+        client.put("/api/settings", json={"values": {"model_blocklist": "kimi-k2.6"}},
+                   headers={"Referer": "http://testserver/"})
+        second = client.get("/v1/models", headers=auth).json()["data"]
+        assert {item["id"] for item in second} == {"glm-5.2"}   # 立即生效
+
+        # 上游随后失败：兜底缓存也不能让被滤模型复活
+        provider.fail = True
+        third = client.get("/v1/models", headers=auth).json()["data"]
+        assert {item["id"] for item in third} == {"glm-5.2"}
+
+        # 清空黑名单（'' 与 null 等价 = 恢复默认）：被滤模型立刻回来
+        client.put("/api/settings", json={"values": {"model_blocklist": ""}},
+                   headers={"Referer": "http://testserver/"})
+        fourth = client.get("/v1/models", headers=auth).json()["data"]
+        assert {item["id"] for item in fourth} == {"glm-5.2", "kimi-k2.6"}
 
 
 def test_models_by_provider_rates_when_dual_upstream(tmp_path):

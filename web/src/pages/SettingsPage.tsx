@@ -231,6 +231,9 @@ export function SettingsPage() {
       setNotice(`已保存 ${dirty.length} 项，立即生效（DB 覆盖 .env）。`);
       setDrafts({});
       await refresh();
+      // 黑名单/默认模型改了要立刻反映到 Playground：那里自带列表缓存
+      // （queryKey ["playground-models"]，TTL 内不会重取），不失效会显示旧列表。
+      await client.invalidateQueries({ queryKey: ["playground-models"] });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "保存失败");
     } finally {

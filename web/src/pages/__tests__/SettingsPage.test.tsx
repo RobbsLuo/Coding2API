@@ -1,4 +1,5 @@
 import { screen, waitFor, within } from "@testing-library/react";
+import { useQuery } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsPage } from "../SettingsPage";
 import { jsonResponse, mockFetch, renderPage, settle, userEvent } from "./helpers";
@@ -312,6 +313,38 @@ describe("SettingsPage", () => {
     await userEvent.click(screen.getByTestId("save-settings"));
 
     expect(await screen.findByTestId("settings-error")).toHaveTextContent("不能大于");
+  });
+
+  it("保存设置后失效 Playground 模型缓存（黑名单/默认模型改动立即反映）", async () => {
+    const modelsCalls = { count: 0 };
+    function ModelsProbe() {
+      // 模拟 PlaygroundPage 的列表查询（同一 queryKey）
+      useQuery({
+        queryKey: ["playground-models"],
+        queryFn: async () => {
+          modelsCalls.count += 1;
+          return { object: "list", data: [] };
+        },
+      });
+      return null;
+    }
+
+    mockAll();
+    renderPage(
+      <>
+        <ModelsProbe />
+        <SettingsPage />
+      </>,
+    );
+    await settle();
+    await waitFor(() => expect(modelsCalls.count).toBe(1));
+
+    const input = screen.getByTestId("input-quota_probe_minutes");
+    await userEvent.clear(input);
+    await userEvent.type(input, "15");
+    await userEvent.click(screen.getByTestId("save-settings"));
+
+    await waitFor(() => expect(modelsCalls.count).toBe(2));
   });
 
   it("空列表给出提示", async () => {
