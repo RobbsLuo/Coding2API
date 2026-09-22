@@ -44,7 +44,7 @@
           "cb",
           "trae"
         ],
-        "note": "签到、额度探测与 token 预刷新经 provider 客户端触达上游。"
+        "note": "签到、额度探测、token 预刷新、成长中心、活跃上报与明细清理经 provider 客户端触达上游，运行态汇总到「任务与配置」页。"
       }
     ]
   },
@@ -68,7 +68,7 @@
       "id": "admin-ui",
       "type": "frontend",
       "label": "React 管理台",
-      "sublabel": "凭证 / Key / 仪表盘",
+      "sublabel": "凭证 / 统计 / 任务与配置",
       "pos": [
         260,
         70
@@ -109,8 +109,8 @@
     {
       "id": "openai",
       "type": "backend",
-      "label": "OpenAI 协议层",
-      "sublabel": "/v1/chat/completions",
+      "label": "OpenAI 协议出口",
+      "sublabel": "chat/completions + responses",
       "pos": [
         260,
         280
@@ -125,7 +125,7 @@
       "id": "engine",
       "type": "backend",
       "label": "执行引擎",
-      "sublabel": "调度器 + 冷却状态机",
+      "sublabel": "选号 + 冷却状态机 + 粘性/续写",
       "pos": [
         500,
         280
@@ -140,7 +140,7 @@
       "id": "cb",
       "type": "backend",
       "label": "CodeBuddy Provider",
-      "sublabel": "OAuth / 额度 / 签到",
+      "sublabel": "OAuth / 额度 / 签到 / 成长",
       "pos": [
         760,
         150
@@ -154,7 +154,7 @@
       "id": "bg",
       "type": "backend",
       "label": "后台任务",
-      "sublabel": "签到 / 探测 / 刷新",
+      "sublabel": "探测 / 签到 / 成长 / 清理",
       "pos": [
         760,
         280
@@ -211,7 +211,7 @@
       "id": "db",
       "type": "database",
       "label": "SQLite",
-      "sublabel": "加密凭证 + 脱敏统计",
+      "sublabel": "加密凭证 + 统计 + 配置",
       "pos": [
         500,
         520
@@ -220,7 +220,7 @@
         140,
         64
       ],
-      "tag": "WAL"
+      "tag": "WAL · 8 表"
     }
   ],
   "boundaries": [
@@ -394,26 +394,26 @@
       "dot": "cyan",
       "title": "对外契约",
       "items": [
-        "OpenAI 兼容：/v1/chat/completions + /v1/models",
-        "扁平模型名 + model@provider 后缀强制指定上游",
-        "非流式请求由服务端聚合 SSE 后返回"
+        "/v1/chat/completions、/v1/responses",
+        "/v1/models + 黑名单；/v1/user/balance",
+        "/healthz 池健康、model@provider 选上游"
       ]
     },
     {
       "dot": "emerald",
       "title": "调度与弹性",
       "items": [
-        "三态健康度：known / unknown / exhausted",
-        "三级冷却：权益耗尽 12h、限流 60s、连续错误 10m",
-        "单请求最多轮换 3 个凭证，流内错误注入 SSE"
+        "选号：pin → 粘性 → 到期积分 → 三态健康度",
+        "模型级冷却隔离到单个模型，不牵连整条凭证",
+        "6 个后台任务汇总进「任务与配置」页"
       ]
     },
     {
       "dot": "rose",
       "title": "数据与安全",
       "items": [
-        "SQLite WAL：凭证加密列、API Key 摘要、脱敏统计",
-        "统计不存提示词 / Token，明细保留 90 天"
+        "SQLite WAL 8 表；13 项配置热更（DB 覆盖 .env）",
+        "API Key 摘要 + 渠道绑定 / IP 白名单；明细留 90 天"
       ]
     }
   ]
