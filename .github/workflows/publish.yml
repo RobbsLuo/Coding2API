@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '要打的版本号（如 v0.1.2，留空则跳过）'
+        description: '要打的版本号（如 v0.2.0，留空则跳过）'
         required: false
         default: ''
 
