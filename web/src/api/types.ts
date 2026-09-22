@@ -323,10 +323,41 @@ export interface RuntimeSetting {
   value: string | number | boolean;
   default: string | number | boolean;
   overridden: boolean;
+  /** 所属后台任务 key（见 TaskStatus.key）；null = 网关/调度等非任务配置 */
+  task: string | null;
 }
 
 export interface SettingsResponse {
   settings: RuntimeSetting[];
   /** 被 DB 覆盖的项数（0 表示全部来自 .env） */
   overridden: number;
+}
+
+/**
+ * 一个后台任务的运行态（GET /api/tasks，进程内、重启归零）。
+ *
+ * `last_*` 只描述**真实执行**：签到未到点这类 no-op 轮次不覆盖它们，否则
+ * 「上次执行」会谎报成刚刚跑过，而当天其实一次都没签。`interval_seconds`
+ * 是当前生效值（热更后立刻反映）。
+ */
+export interface TaskStatus {
+  key: string;
+  name: string;
+  description: string;
+  interval_seconds: number;
+  /** 开关类任务（目前只有活跃上报）的当前状态；其余恒为 true */
+  enabled: boolean;
+  /** 本进程内真实执行过的轮数（no-op 不计） */
+  runs: number;
+  last_started_at: number | null;
+  last_finished_at: number | null;
+  last_ok: boolean | null;
+  last_report: Record<string, unknown> | null;
+  last_error: string | null;
+}
+
+export interface TasksResponse {
+  tasks: TaskStatus[];
+  /** 服务端当前时间（epoch 秒）：算「距今多久」用服务端时钟，避免浏览器偏移 */
+  server_time: number;
 }

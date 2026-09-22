@@ -25,5 +25,10 @@ Copyright (c) 2026 Hongsheng Luo (Robbs)
   - xueyue33/codebuddy2api - https://github.com/xueyue33/codebuddy2api
   - Sliverkiss/traework2api - https://github.com/Sliverkiss/traework2api
 
+- workbuddy-manager - https://github.com/ithtelab/workbuddy-manager
+  （提供后台任务可视化页面的设计参考：任务清单 + 最近一次运行结果 + 自动刷新；
+    其核心教训——容器重建即丢、需要采集落库——正是本项目选择「进程内运行态、
+    不新增表」并明确「重启归零」的对照依据）
+
 本项目的代码为独立实现，不复制上述项目的源代码。
 上游服务的协议细节来自对客户端行为的观察，不属于上述项目的版权范围。

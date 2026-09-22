@@ -169,6 +169,42 @@ export function formatTime(epoch: number | null | undefined): string {
   return new Date(epoch * 1000).toLocaleString("zh-CN", { hour12: false });
 }
 
+/**
+ * 相对时间（「刚刚 / 12 分钟前 / 3 小时后」），后台任务运行态用。
+ *
+ * `now` 默认取浏览器时钟；调用方传服务端时钟可避免浏览器偏移把刚跑完的
+ * 任务显示成几小时前。未来时间给「后」，未知给破折号。
+ */
+export function formatAgo(epoch: number | null | undefined, now = Date.now() / 1000): string {
+  if (!epoch) return "—";
+  const seconds = Math.floor(epoch - now);
+  if (Math.abs(seconds) < 10) return "刚刚";
+  const label = formatDuration(Math.abs(seconds));
+  return seconds > 0 ? `${label}后` : `${label}前`;
+}
+
+/** 任务报告字段的展示名；未知字段回落到原始 key（后端加字段前端不炸）。 */
+export const TASK_REPORT_LABEL: Record<string, string> = {
+  attempted: "尝试",
+  succeeded: "成功",
+  failed: "失败",
+  skipped: "跳过",
+  rolled_up: "汇总小时",
+  purged: "清理明细",
+  expired_coolings: "回收冷却",
+  purged_credit_events: "回收流水",
+  result: "返回",
+};
+
+/** 把 report 字典渲染成一行「成功 3 · 失败 1」；空/未知都不隐藏。 */
+export function taskReportLabel(report: Record<string, unknown> | null): string {
+  if (!report) return "—";
+  const parts = Object.entries(report).map(
+    ([key, value]) => `${TASK_REPORT_LABEL[key] ?? key} ${String(value)}`,
+  );
+  return parts.length ? parts.join(" · ") : "无明细";
+}
+
 export function formatNumber(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
   return value.toLocaleString("zh-CN");

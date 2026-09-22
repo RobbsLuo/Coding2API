@@ -87,6 +87,7 @@ coding2api/
 │   │   ├── growth.py            # 成长中心（仅 CB）：GROWTH_INTERVAL_MINUTES 一轮，落 growth_events
 │   │   ├── refresh.py           # 每 60 分钟；REFRESH_SKEW_HOURS 窗口内预刷新
 │   │   ├── retention.py         # 每 5 分钟：小时汇总重算（幂等）+ 90 天前明细 / 积分流水清理
+│   │   ├── status.py            # 任务清单 + 进程内运行态（B4）：真实执行才入账，重启归零
 │   │   └── runner.py            # 后台任务调度，接入应用生命周期
 │   ├── auth/
 │   │   └── access.py            # API Key 来源 IP 白名单解析/判定（B3.5，纯函数）
@@ -102,7 +103,7 @@ coding2api/
 │       ├── authorize.py         # GET /authorize（TRAE 回调落点）
 │       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin / 成长中心 / 账号切换
 │       ├── admin_keys.py        # API Key CRUD（含渠道绑定 / IP 白名单校验，B3.5）
-│       ├── admin_settings.py    # 运行时配置：GET 快照 / PUT 覆盖（admin + CSRF，B3.2）
+│       ├── admin_settings.py    # 运行时配置：GET 快照 / PUT 覆盖（admin + CSRF，B3.2）+ GET /api/tasks 任务运行态（B4）
 │       ├── admin_stats.py       # 统计查询（overview / by-provider / timeline / model-timeline）
 │       ├── admin_auth.py        # 登录 / 登出 / 会话；上游登录 start/poll/cancel
 │       ├── playground.py        # 会话调试端点（无需 API Key）
@@ -441,8 +442,12 @@ UI 与日志都必须明示「DB 覆盖 .env」，否则用户改 `.env` 不生�
 一行坏数据不能让服务起不来。
 
 **接口**：`GET /api/settings`（admin）返回 `snapshot()`（`key`/`env_name`/`label`/`description`/
-`kind`/`value`/`default`/`overridden`）+ 覆盖计数；`PUT /api/settings`（admin + CSRF）body
+`kind`/`value`/`default`/`overridden`/`task`）+ 覆盖计数；`PUT /api/settings`（admin + CSRF）body
 `{"values": {key: 标量 | null}}`，`null` 表示恢复默认。写操作记审计日志（谁改了哪些 key）。
+
+`snapshot()` 里新增的 `task` 是**配置项 → 后台任务 key** 的归属（`HotSetting.task`，`null` = 网关/
+调度项）。它只用于管理台把配置归到任务卡片下（§3.12），不参与任何运行时语义——前端不硬编码
+key 列表，后端加任务或改归属不需要改前端。
 
 ---
 
@@ -598,6 +603,53 @@ paused, disabled}}`，无鉴权；`GET /health` 保留为纯存活探针。两�
 
 ---
 
+### 3.12 后台任务可视化（B4，「任务与配置」页）
+
+**问题**：`TaskRunner` 跑着 6 类循环（额度探测 / token 预刷新 / 每日签到 / 成长中心 /
+活跃上报 / 明细清理），但除了失败时的一行 `logger.warning`，没有任何地方能看到
+「上次什么时候跑的、结果如何」，也没有端点暴露。运维只能翻 launchd 日志。
+
+**上一轮的调研结论**：项目内**不存在**后台任务页（无 `TasksPage`、无 `/api/tasks`，
+git 全历史与文档均无），所以这不是「找回旧页面」而是新增；同类项目
+（ithtelab/workbuddy-manager）的做法是「任务记录页 + 30s 自动刷新 + 单次 200 条上限」，
+其关键教训是**容器重建即丢、必须采集落库**。
+
+**本项目的选择：只做进程内运行态，不落库**（PROPOSAL Q38）。理由：
+
+- 任务状态回答的是「**这次进程活着的时候**谁跑过、结果如何」。重启本身意味着任务刚
+  被重新调度，显示「本次启动以来未运行」比捞出一条重启前的旧记录更诚实。
+- 落库要新增表 + 保留期清理 + 老库迁移；而跨重启的历史价值有限（真正的业务留痕已有
+  `growth_events` / `credit_events` / `usage_events`）。
+- 代价明确写进 UI：卡片只显示本进程内的运行，不承诺「历史记录」。
+
+**记录口径（核心语义，容易退化）**：`_guarded` 在任务返回 `None` 时**不入账**。
+`sleep` 到点但 `due()=False`（签到当天已签、活跃上报未到窗口/未开启）是 no-op，
+若把它当成一次成功执行，页面会显示「签到 3 分钟前刚跑过」——而当天其实**一次都没签**。
+因此：`TaskRun` 只在真实执行（返回非 `None`）或抛异常时写入；异常也入账（`last_error`），
+否则「一直在失败」会被显示成「尚未执行」。计数 `runs` 同样只涨真实执行。
+
+**任务清单与归属**：`tasks/status.py` 的 `TASK_SPECS` 是静态描述（key / 名称 / 一句话说明），
+与 `TaskRunner.start()` 里建立的循环一一对应；周期与开关是**运行时现算**
+（`TaskRunner.task_status()` 读热更值），不是装配快照——改完配置刷新页面就该看到新周期。
+未装配的任务（测试或降级时不传 growth/activity）不出现在清单里，避免展示「永远不跑」的卡片。
+
+配置项一侧用 `HotSetting.task`（§3.8）表达归属，前端据此把配置塞进对应任务卡片；
+无归属（`default_model` / 黑名单 / 到期窗口 / 粘性 / 两个 pacer / CB 聊天间隔）归入
+「网关与调度」区。两处通过 `TASK_BY_KEY` 交叉校验（测试保证 `task` 指向真实任务 key）。
+
+**接口**：`GET /api/tasks`（admin）返回 `{tasks: [...], server_time}`。每条含
+`key`/`name`/`description`/`interval_seconds`/`enabled`/`runs`/`last_started_at`/
+`last_finished_at`/`last_ok`/`last_report`/`last_error`。带 `server_time` 是为了让前端
+用**服务端时钟**算「距今多久」——浏览器时钟偏移会把刚跑完的任务显示成几小时前。
+`app.state.task_runner` 不存在时（未进 lifespan）返回空列表而不是 500。
+
+**前端**：导航与页头从「运行时配置」改为「任务与配置」，`SettingsPage` 重组为
+任务卡片区（运行态 + 该任务的配置项，复用 `SettingRow`）+ 网关区；`useTasks`
+以 `refetchInterval: 30_000` 自动刷新（运行态是随时间变化的观测量，手动刷新会让人
+以为任务停了），`/api/settings` 不自动刷新（配置改动由用户触发）。
+
+---
+
 ## 4. Provider 协议（Q16=A 细接口）
 
 ```python
@@ -727,6 +779,10 @@ class Scheduler:
 ## 6.1 后台任务（tasks/）
 
 `TaskRunner`（runner.py）每类任务一个独立 asyncio 循环，失败只记日志不拖垮服务；间隔有安全下限，避免打爆上游。所有对外 HTTP 请求经 `pacer.py` 全局节流。
+
+每个任务最近一次**真实执行**（时间 / 结果 / 错误 / 轮数）记在进程内
+（`status.py` 的 `TaskStatusStore`），由 `GET /api/tasks` 下发给管理台「任务与配置」页；
+no-op 轮次不入账，重启归零——见 §3.12。
 
 | 任务 | 周期 | 行为 |
 |---|---|---|

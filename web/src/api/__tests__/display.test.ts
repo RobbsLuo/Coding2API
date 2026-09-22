@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { expiringQuotaLabel, formatChartValue, creditEventLabel, tokenExpiryView } from "../display";
+import {
+  creditEventLabel,
+  expiringQuotaLabel,
+  formatAgo,
+  formatChartValue,
+  taskReportLabel,
+  tokenExpiryView,
+} from "../display";
 
 describe("formatChartValue", () => {
   it("请求次数：紧凑数字 + 单位（次）", () => {
@@ -110,5 +117,37 @@ describe("creditEventLabel", () => {
     expect(label).toBe("由 100 变为未知");
     // 不能出现「±0（… → …）」这种「把未知当成没变」的读法
     expect(label).not.toMatch(/[+-]0/);
+  });
+});
+
+describe("formatAgo", () => {
+  const NOW = 1_700_000_000;
+
+  it("十秒内算「刚刚」，往前用「前」、往后用「后」", () => {
+    expect(formatAgo(NOW - 3, NOW)).toBe("刚刚");
+    expect(formatAgo(NOW + 3, NOW)).toBe("刚刚");
+    expect(formatAgo(NOW - 120, NOW)).toBe("2 分钟前");
+    expect(formatAgo(NOW - 7200, NOW)).toBe("2.0 小时前");
+    expect(formatAgo(NOW + 3600, NOW)).toBe("1.0 小时后");
+  });
+
+  it("缺失时间给破折号，而不是「刚刚」", () => {
+    expect(formatAgo(null, NOW)).toBe("—");
+    expect(formatAgo(undefined, NOW)).toBe("—");
+    expect(formatAgo(0, NOW)).toBe("—");
+  });
+});
+
+describe("taskReportLabel", () => {
+  it("已知字段用中文名，未知字段保留原 key（后端加字段前端不炸）", () => {
+    expect(taskReportLabel({ attempted: 2, succeeded: 1, skipped: 1 }))
+      .toBe("尝试 2 · 成功 1 · 跳过 1");
+    expect(taskReportLabel({ rolled_up: 3, purged: 1 })).toBe("汇总小时 3 · 清理明细 1");
+    expect(taskReportLabel({ brand_new: 7 })).toBe("brand_new 7");
+  });
+
+  it("无报告给破折号；空对象说「无明细」而不是空白", () => {
+    expect(taskReportLabel(null)).toBe("—");
+    expect(taskReportLabel({})).toBe("无明细");
   });
 });

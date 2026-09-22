@@ -44,6 +44,20 @@ export function useSettings(username?: string) {
   });
 }
 
+/**
+ * 后台任务运行态：30 秒自动刷新。
+ *
+ * 任务状态是「随时间变化」的观测量（上次执行距现在多久、这一轮跑没跑），
+ * 手动刷新会让人以为任务停了。settings 不刷：配置改动由用户自己触发。
+ */
+export function useTasks(username?: string) {
+  return useQuery({
+    queryKey: adminKey(username, "tasks"),
+    queryFn: api.tasks,
+    refetchInterval: 30_000,
+  });
+}
+
 export function useStatsOverview(username?: string, target?: string, since?: number) {
   return useQuery({
     queryKey: adminKey(username, "stats-overview", target, since),

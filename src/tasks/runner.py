@@ -13,6 +13,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
+from typing import Any
 
 from ..config import live
 from .activity import ActivityTask
@@ -22,6 +23,7 @@ from .pacer import Pacer
 from .quota_probe import QuotaProbeTask
 from .refresh import RefreshTask
 from .retention import RetentionTask
+from .status import TASK_SPECS, TaskStatusStore
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,7 @@ class TaskRunner:
     refresh_interval_minutes: int | Callable[[], int] = 60,
     retention_interval_minutes: int | Callable[[], int] = 5,
     activity_enabled: Callable[[], bool] | None = None,
+    status: TaskStatusStore | None = None,
 ) -> None:
         self._quota_probe = quota_probe
         self._checkin = checkin
@@ -63,6 +66,9 @@ class TaskRunner:
         # 而不是整点只醒一次——服务恰在整点重启会整天漏报
         self._activity_interval = 600
         self._tasks: list[asyncio.Task[None]] = []
+        # 进程内运行态（管理台「任务与配置」页）：共享实例由 build_app 注入，
+        # 未注入时自建（测试与一次性装配直接构造 TaskRunner）。
+        self.status = status or TaskStatusStore()
 
     @property
     def _quota_interval(self) -> float:
@@ -85,24 +91,26 @@ class TaskRunner:
     async def start(self) -> None:
         """启动所有周期任务；首轮额度探测立即执行（不节流）。"""
         await self._guarded(self._quota_probe.run_once(apply_pacing=False),
-                            "启动额度探测")
-        loops: list[tuple[str, Callable[[], Awaitable[object]],
+                            "启动额度探测", key="quota_probe")
+        loops: list[tuple[str, str, Callable[[], Awaitable[object]],
                           Callable[[], float]]] = [
-            ("额度探测", lambda: self._quota_probe.run_once(),
+            ("quota_probe", "额度探测", lambda: self._quota_probe.run_once(),
              lambda: self._quota_interval),
-            ("token 预刷新", self._refresh.run_once,
+            ("refresh", "token 预刷新", self._refresh.run_once,
              lambda: self._refresh_interval),
-            ("明细清理", self._sync_retention,
+            ("retention", "明细清理", self._sync_retention,
              lambda: self._retention_interval),
-            ("每日签到", self._sync_checkin, lambda: 600.0),  # 全天每 10 分钟签到一次
+            ("checkin", "每日签到", self._sync_checkin, lambda: 600.0),  # 全天每 10 分钟签到一次
         ]
         if self._growth is not None:
-            loops.append(("成长中心", self._sync_growth, lambda: self._growth_interval))
+            loops.append(("growth", "成长中心", self._sync_growth,
+                          lambda: self._growth_interval))
         if self._activity is not None:
-            loops.append(("活跃上报", self._sync_activity,
+            loops.append(("activity", "活跃上报", self._sync_activity,
                           lambda: float(self._activity_interval)))
-        for name, runner, interval in loops:
-            self._tasks.append(asyncio.create_task(self._loop(name, runner, interval)))
+        for key, name, runner, interval in loops:
+            self._tasks.append(asyncio.create_task(
+                self._loop(name, runner, interval, key=key)))
 
     async def _sync_growth(self) -> object:
         """成长中心一轮：领礼物 / 派 Buddy / 任务 / 补登 / 兑换 / 抽奖 / 盲盒。"""
@@ -131,7 +139,8 @@ class TaskRunner:
         return self._retention.run_once()
 
     async def _loop(self, name: str, runner: Callable[[], Awaitable[object]],
-                    interval: float | Callable[[], float]) -> None:
+                    interval: float | Callable[[], float],
+                    key: str | None = None) -> None:
         """周期循环：间隔在每次 sleep 前重新求值（B3.2 热更周期）。
 
         传标量等价于固定周期（测试与一次性任务仍这么用）。
@@ -142,17 +151,76 @@ class TaskRunner:
                 await asyncio.sleep(delay())
             except asyncio.CancelledError:
                 raise
-            await self._guarded(runner(), name)
+            await self._guarded(runner(), name, key=key)
 
-    async def _guarded(self, awaitable: Awaitable[object], name: str) -> bool:
+    async def _guarded(self, awaitable: Awaitable[object], name: str,
+                       key: str | None = None) -> bool:
+        """跑一轮并吞掉异常（后台任务不能拖垮服务）。
+
+        `key` 给出时把「真实执行」记进运行态：返回 None 表示本轮 no-op
+        （签到未到点 / 活跃上报未启用），不覆盖上一次结果——否则页面会显示
+        「签到刚刚跑过」，而当天其实一次都没签。
+        """
+        started = time.time()
         try:
-            await awaitable
-            return True
+            result = await awaitable
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - 后台任务不能拖垮服务
             logger.warning("后台任务「%s」失败: %s", name, error)
+            if key is not None:
+                self.status.record(key, started_at=started, ok=False,
+                                   report=None, error=str(error))
             return False
+        if key is not None and result is not None:
+            self.status.record(key, started_at=started, ok=True,
+                               report=_as_report(result), error=None)
+        return True
+
+    def task_status(self) -> list[dict[str, Any]]:
+        """管理台「任务与配置」页：每个已装配任务的上次真跑 + 当前周期/开关。
+
+        周期与开关是**当前生效值**（热更后立刻反映），不是装配时的快照。
+        """
+        items: list[dict[str, Any]] = []
+        for spec in TASK_SPECS:
+            if spec.key == "growth" and self._growth is None:
+                continue
+            if spec.key == "activity" and self._activity is None:
+                continue
+            run = self.status.get(spec.key)
+            items.append({
+                "key": spec.key,
+                "name": spec.name,
+                "description": spec.description,
+                "interval_seconds": self._interval_seconds(spec.key),
+                "enabled": self._task_enabled(spec.key),
+                "runs": self.status.runs(spec.key),
+                "last_started_at": run.started_at if run is not None else None,
+                "last_finished_at": run.finished_at if run is not None else None,
+                "last_ok": run.ok if run is not None else None,
+                "last_report": run.report if run is not None else None,
+                "last_error": run.error if run is not None else None,
+            })
+        return items
+
+    def _interval_seconds(self, key: str) -> float:
+        if key == "quota_probe":
+            return self._quota_interval
+        if key == "refresh":
+            return self._refresh_interval
+        if key == "checkin":
+            return 600.0            # 全天每 10 分钟检查一次，与 _loop 装配一致
+        if key == "growth":
+            return self._growth_interval
+        if key == "activity":
+            return float(self._activity_interval)
+        return self._retention_interval
+
+    def _task_enabled(self, key: str) -> bool:
+        if key == "activity":
+            return bool(self._activity_enabled())
+        return True
 
     async def stop(self) -> None:
         for task in self._tasks:
@@ -163,8 +231,25 @@ class TaskRunner:
         self._tasks.clear()
 
 
+def _as_report(result: object) -> dict[str, Any]:
+    """任务返回值 → JSON 可序列化摘要。
+
+    `TaskReport` 有 `as_dict()`；清理任务直接返回 dict；其它形态（含 None 之外
+    的自定义对象）只记 `{"result": repr}`，保证运行态一定能落成 JSON。
+    """
+    as_dict = getattr(result, "as_dict", None)
+    if callable(as_dict):
+        report = as_dict()
+        if isinstance(report, dict):
+            return report
+    if isinstance(result, dict):
+        return result
+    return {"result": repr(result)}
+
+
 def build_runner(credentials, providers: dict, stats_collector, config,
-                 growth_events=None, credit_events=None) -> TaskRunner:
+                 growth_events=None, credit_events=None,
+                 status: TaskStatusStore | None = None) -> TaskRunner:
     """按配置装配后台任务（Pacer 由两个 provider 共享）。
 
     growth_events 为 None 时（老调用方/测试）不装配成长中心任务：没有落库目标
@@ -202,4 +287,5 @@ def build_runner(credentials, providers: dict, stats_collector, config,
         quota_probe_minutes=lambda: config.quota_probe_minutes,
         growth_interval_minutes=lambda: config.growth_interval_minutes,
         activity_enabled=lambda: config.activity_report_enabled,
+        status=status,
     )

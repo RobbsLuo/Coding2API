@@ -18,6 +18,7 @@ import type {
   ModelTimelineResponse,
   StatsEventsResponse,
   SettingsResponse,
+  TasksResponse,
   UpstreamAuthPoll,
   UpstreamAuthStart,
 } from "./types";
@@ -119,6 +120,8 @@ export const api = {
   settings: () => request<SettingsResponse>("/api/settings"),
   updateSettings: (values: Record<string, unknown>) =>
     request<SettingsResponse>("/api/settings", { method: "PUT", ...json({ values }) }),
+  /** 后台任务运行态（进程内）：与 /api/settings 同页展示。 */
+  tasks: () => request<TasksResponse>("/api/tasks"),
 
   // ---------------------------------------------------------------- 统计
   statsOverview: (username?: string, since?: number) =>

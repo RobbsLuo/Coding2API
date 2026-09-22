@@ -43,6 +43,7 @@ class HotSetting:
     description: str
     minimum: float | None = None
     maximum: float | None = None
+    task: str | None = None             # 所属后台任务 key（见 tasks/status.py）；None=网关/调度配置
 
     @property
     def env_name(self) -> str:
@@ -68,12 +69,13 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "同一对话的多轮请求固定用同一凭证；≤0 关闭粘性。"),
     HotSetting("growth_irreversible_actions", bool, "成长中心不可逆动作",
                "是否允许抽奖 / 连登兑换 / 开盲盒 / 消耗补登卡。关闭后仍会领取"
-               "旅行礼物与任务奖励。"),
+               "旅行礼物与任务奖励。", task="growth"),
     HotSetting("growth_interval_minutes", int, "成长中心周期（分钟）",
                "成长中心后台任务的一轮间隔；下限 5 分钟（更密只会撞上游风控）。",
-               minimum=0),
+               minimum=0, task="growth"),
     HotSetting("quota_probe_minutes", int, "额度探测周期（分钟）",
-               "后台额度探测的一轮间隔；下限 1 分钟。", minimum=0),
+               "后台额度探测的一轮间隔；下限 1 分钟。", minimum=0,
+               task="quota_probe"),
     HotSetting("codebuddy_chat_min_interval", float, "CodeBuddy 聊天最小间隔（秒）",
                "与 TRAE 共享的最小请求间隔（0 关闭）；改小会显著提高风控概率。",
                minimum=0.0),
@@ -83,11 +85,11 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "后台任务相邻上游请求的最大间隔，必须不小于下限。", minimum=0.0),
     HotSetting("activity_report_enabled", bool, "活跃上报",
                "是否为 CodeBuddy 账号补发对话事件以续连连登天数。官方条款禁止"
-               "脚本篡改活动数据，开启前请自行评估账号风险。"),
+               "脚本篡改活动数据，开启前请自行评估账号风险。", task="activity"),
     # 与开关配对：开着但时点不对等于没开，只热更开关会让用户以为改坏了。
     HotSetting("activity_report_hour", int, "活跃上报时点（0-23）",
                "本地（北京）时间整点窗口；该小时内每 10 分钟检查一次，每号每天"
-               "最多补发一条。", minimum=0, maximum=23),
+               "最多补发一条。", minimum=0, maximum=23, task="activity"),
 )
 
 HOT_BY_KEY: dict[str, HotSetting] = {item.key: item for item in HOT_SETTINGS}
@@ -294,6 +296,8 @@ class RuntimeSettings:
                 "value": self.get(spec.key),
                 "default": self.env_value(spec.key),
                 "overridden": self.is_overridden(spec.key),
+                # 所属后台任务（管理台据此把配置归到任务卡片下）；None = 网关/调度项
+                "task": spec.task,
             }
             for spec in HOT_SETTINGS
         ]

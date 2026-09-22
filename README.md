@@ -188,6 +188,8 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 ## 后台任务
 
 额度探测、token 预刷新、每日签到、成长中心、明细清理由 `TaskRunner` 自动调度（失败互不影响），周期见 TECHNICAL.md §6.1。
+每类任务最近一次执行的时间、结果与错误可在管理台**「任务与配置」页**查看（与可热更配置同页，30 秒自动刷新）；
+该运行态只存在于**本次进程**内，重启归零。
 
 成长中心仅 CodeBuddy 有：自动领取 Buddy 旅行礼物、派 Buddy 出发、领取新任务与任务奖、
 断登补登、连登奖励兑换、开盲盒、能量开 Buddy 盲盒。Buddy 旅行 1–4 小时回来一次，
@@ -250,9 +252,9 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `AUTO_CONTINUE_MAX` | `10` | 上游以 `finish_reason=length` 截断时同凭证自动续写的最多次数；`0` 关闭（见 TECHNICAL.md §3.4） |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | 监听地址与端口（compose 默认 `0.0.0.0`，`PORT` 同时决定宿主机映射端口） |
 
-### 管理台热更（运行时配置）
+### 管理台热更（「任务与配置」页）
 
-上表中带「可热更」语义的 13 项可以不改 `.env`、不重启，直接在管理台「运行时配置」页修改：
+上表中带「可热更」语义的 13 项可以不改 `.env`、不重启，直接在管理台「任务与配置」页修改：
 
 `DEFAULT_MODEL`、`MODEL_BLOCKLIST`、`QUOTA_EXPIRY_WINDOW_SECONDS`、`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`、`CONVERSATION_STICKY_SECONDS`、`GROWTH_IRREVERSIBLE_ACTIONS`、`GROWTH_INTERVAL_MINUTES`、`QUOTA_PROBE_MINUTES`、`CODEBUDDY_CHAT_MIN_INTERVAL`、`PACER_MIN_SECONDS`、`PACER_MAX_SECONDS`、`ACTIVITY_REPORT_ENABLED`、`ACTIVITY_REPORT_HOUR`。
 
@@ -262,6 +264,12 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 - 值存 `runtime_settings` 表（纯 key/value），新增可热更项不需要迁移；白名单外的 key、非法类型/越界值在写入前被拒，读取时坏行跳过并记警告。
 - 启动期项（`APP_SECRET` / `PORT` / `DATA_DIR` / `USERS_FILE` / 上游端点白名单）**不在**白名单，改它们仍需重启：它们决定进程如何启动，运行期变更只会让内存与磁盘静默分叉。
 - 接口：`GET /api/settings` 读快照，`PUT /api/settings` 写（admin + CSRF），body 形如 `{"values": {"QUOTA_PROBE_MINUTES 对应的 key": 15}}`，传 `null` 表示恢复默认。
+- 该页同时展示**后台任务运行态**：6 类任务（额度探测 / token 预刷新 / 每日签到 / 成长中心 /
+  活跃上报 / 明细清理）的周期、上次执行时间、最近一轮结果与错误。配置项按所属任务分组
+  进卡片，其余（默认模型、黑名单、到期窗口、节流等）在「网关与调度」区。
+- 运行态是**进程内**的（`GET /api/tasks`，admin，页面每 30 秒自动刷新）：只显示「本次启动以来」
+  跑过没有，**重启归零**，不落库也不保留历史。未到点/未开启的轮次不算一次执行——
+  否则签到会显示成「刚刚跑过」，而当天其实一次都没签。
 
 ## 部署注意
 

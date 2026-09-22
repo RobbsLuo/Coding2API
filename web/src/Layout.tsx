@@ -36,7 +36,7 @@ const NAV: NavItem[] = [
   { to: "/stats", label: "用量统计", icon: BarChart3 },
   { to: "/playground", label: "Playground", icon: TerminalSquare },
   // 仅管理员可见的写入口（页面自身也会被后端 403 挡住，这里只是不误导）
-  { to: "/settings", label: "运行时配置", icon: SlidersHorizontal, adminOnly: true },
+  { to: "/settings", label: "任务与配置", icon: SlidersHorizontal, adminOnly: true },
 ];
 
 /** 品牌标记：多路渠道管道汇聚进单一出口（Coding2API 的产品故事）。 */
@@ -64,7 +64,7 @@ export function Layout({ session }: { session: SessionInfo }) {
     await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
     window.location.href = "/login";
   };
-  // 非管理员看不到「运行时配置」：写接口是 admin-only，露出入口只会误导
+  // 非管理员看不到「任务与配置」：写接口是 admin-only，露出入口只会误导
   const nav = NAV.filter((item) => !item.adminOnly || session.is_admin);
 
   return (
