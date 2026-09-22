@@ -8,15 +8,19 @@ PROPOSAL.md 定方向，本文档定实现。每个模块标注来源决策（Q 
 
 | 层 | 选型 | 版本 | 决策 |
 |---|---|---|---|
-| 运行时 | Python | 3.14（要求 ≥3.12，`requires-python`） | Q2 |
+| 运行时 | Python | 3.12（本机 3.12.14；`requires-python >=3.12`，CI/Dockerfile 均 3.12） | Q2 |
 | 包管理 | uv（venv + pyproject.toml + uv.lock） | 本机 0.12.x | T-Q1 |
-| Web | FastAPI + Uvicorn | 最新稳定 | Q2=A |
-| 配置 | pydantic-settings | 最新稳定 | T-Q3 |
+| Web | FastAPI + Uvicorn | 0.141 / 0.52 | Q2=A |
+| 配置 | pydantic-settings | 2.15 | T-Q3 |
 | HTTP | httpx 双客户端（流式/短请求分离） | 0.28.1 | T-Q4 |
 | 数据库 | 标准库 sqlite3（WAL）+ 手写 SQL | 内置 | T-Q2 |
-| 加密 | cryptography Fernet（凭证列） | 50.x | T-Q2 |
-| 测试 | pytest + pytest-cov + respx + 文件化 fixture | respx 0.23.1 | T-Q5 |
-| 前端 | React 19.3 + Tailwind 4.3 + shadcn/ui 4.21 + @lobehub/icons + Vite | 已核实 | Q5 |
+| 加密 | cryptography Fernet（凭证列） | 50.0 | T-Q2 |
+| 测试 | pytest + pytest-cov + respx + 文件化 fixture | pytest 9.1 / respx 0.23.1 | T-Q5 |
+| 前端 | React 19 + Tailwind 4 + shadcn/ui + @lobehub/icons + Vite 7 | 已核实（实例版本见 `web/package.json`） | Q5 |
+
+> 上表是**选型定稿**；具体小版本随依赖更新漂移，实际以 `pyproject.toml` /
+> `uv.lock` / `web/package.json` 为准。仅当**主版本或兼容边界**（如
+> `requires-python`、Node 主版本）变化时才需要回改本表。
 
 ---
 
@@ -29,10 +33,11 @@ coding2api/
 │   ├── main.py                  # FastAPI 组装、lifespan、路由挂载（只做接线）
 │   ├── config.py                # pydantic-settings：README「配置」全部 env；live() 归一化标量/取值器
 │   ├── runtime_settings.py      # 运行时配置覆盖层（B3.2）：DB 覆盖 > env，白名单 + 校验 + snapshot
+│   ├── version.py               # 版本号（pyproject.toml 为唯一真源，读不到回落常量）
 │   ├── webapp/                  # HTTP 边缘层（横切关注点，与业务装配分开）
 │   │   ├── limits.py            # 请求体上限 ASGI 中间件（登录 8KB / 其余 16MB）
 │   │   ├── security.py          # Host 白名单 + 安全响应头（CSP/nosniff）
-│   │   ├── handlers.py          # 异常 → HTTP 响应（稳定错误码，TECHNICAL §6.5）
+│   │   ├── handlers.py          # 异常 → HTTP 响应（稳定错误码，TECHNICAL §6.3）
 │   │   ├── logging.py           # root logger 配置（审计/上游日志落 stderr）
 │   │   └── static.py            # 前端产物定位 + SPA catch-all
 │   ├── db/
@@ -43,11 +48,12 @@ coding2api/
 │   │   └── crypto.py            # Fernet：APP_SECRET → key derive → encrypt/decrypt
 │   ├── auth/
 │   │   ├── users.py             # users.txt 解析（username:PBKDF2），hash_password.py CLI
-│   │   ├── session.py           # 会话 Cookie 签发/校验（itsdangerous 或手写 HMAC）
+│   │   ├── session.py           # 会话 Cookie 签发/校验（手写 HMAC，不落库）
 │   │   ├── api_key.py           # sk- 生成（secrets）、SHA-256 摘要存储、常量时间校验
-│   │   ├── csrf.py             # 写操作 CSRF 校验（自定义头 / 同源 Origin）
-│   │   └── throttle.py         # 登录限流（三级窗口 + PBKDF2 并发上限）
-│   │   └── rbac.py              # ADMIN_USERNAMES 判定；require_admin 依赖
+│   │   ├── csrf.py              # 写操作 CSRF 校验（自定义头 / 同源 Origin）
+│   │   ├── throttle.py          # 登录限流（三级窗口 + PBKDF2 并发上限）
+│   │   ├── rbac.py              # ADMIN_USERNAMES 判定；require_admin 依赖
+│   │   └── access.py            # API Key 来源 IP 白名单解析/判定（B3.5，纯函数）
 │   ├── provider/
 │   │   ├── base.py              # Provider 协议、Event、ErrKind、Quota、HealthScore
 │   │   ├── codebuddy/
@@ -57,6 +63,7 @@ coding2api/
 │   │   │   ├── headers.py       # 上游技术常量与请求头构造
 │   │   │   ├── oauth.py         # 设备码轮询
 │   │   │   ├── checkin.py       # 签到 + 签到状态（连续天数）
+│   │   │   ├── activity.py      # 活跃上报协议层（B1.7，/v2/report）
 │   │   │   ├── growth.py        # 成长中心协议层：15 个端点的请求与解析
 │   │   │   ├── growth_runner.py # 成长中心编排：7 类领取的顺序与失败判定
 │   │   │   └── refresh.py       # token 刷新 + 多账号切换
@@ -73,24 +80,27 @@ coding2api/
 │   │   ├── scheduler.py         # 选号 + 冷却状态机 + pin
 │   │   ├── executor.py          # 请求执行 + 轮换重试 + 统计埋点
 │   │   ├── affinity.py          # 会话粘性：显式会话标识 / 对话前缀指纹 → 固定凭证（CONVERSATION_STICKY_SECONDS，B1.5）
+│   │   ├── continuation.py      # 截断续写：finish_reason=length 时同凭证续写（AUTO_CONTINUE_MAX，B1.4）
 │   │   ├── model_resolver.py    # "glm-5.2" | "glm-5.2@trae" | auto → 候选集
 │   │   └── sse.py               # SSE 帧解析（跨 provider 共用）
 │   ├── compat/
-│   │   └── openai/
-│   │       ├── request.py       # ChatRequest 校验 + 上游 payload 构造
-│   │       ├── response.py      # 流式 chunk 生成 + 非流式聚合
-│   │       └── errors.py        # OpenAI error shape
+│   │   ├── openai/
+│   │   │   ├── request.py       # ChatRequest 校验 + 上游 payload 构造
+│   │   │   ├── response.py      # 流式 chunk 生成 + 非流式聚合
+│   │   │   └── errors.py        # OpenAI error shape
+│   │   └── responses/           # Responses 出口（B2.1，Codex CLI）
+│   │       ├── request.py       # Responses → ChatRequest 入站映射
+│   │       └── response.py      # Event → Responses SSE（response.* 终止事件）
 │   ├── tasks/
 │   │   ├── pacer.py             # 全局节流器（PACER_MIN/MAX 随机区间）
 │   │   ├── quota_probe.py       # 启动立即跑一轮 + 每 QUOTA_PROBE_MINUTES 分钟探测
 │   │   ├── checkin.py           # 全天每 10 分钟签到；成功即当日封账该凭证
 │   │   ├── growth.py            # 成长中心（仅 CB）：GROWTH_INTERVAL_MINUTES 一轮，落 growth_events
+│   │   ├── activity.py          # 活跃上报（仅 CB，默认关闭）：窗口内补发一条对话事件
 │   │   ├── refresh.py           # 每 60 分钟；REFRESH_SKEW_HOURS 窗口内预刷新
 │   │   ├── retention.py         # 每 5 分钟：小时汇总重算（幂等）+ 90 天前明细 / 积分流水清理
 │   │   ├── status.py            # 任务清单 + 进程内运行态（B4）：真实执行才入账，重启归零
 │   │   └── runner.py            # 后台任务调度，接入应用生命周期
-│   ├── auth/
-│   │   └── access.py            # API Key 来源 IP 白名单解析/判定（B3.5，纯函数）
 │   ├── stats/
 │   │   ├── collector.py         # usage_events 写入（脱敏）+ 小时汇总双写/重算
 │   │   └── query.py             # overview / by-provider / timeline / events 查询（前者读小时汇总，events JOIN credentials 带凭证昵称）
@@ -98,7 +108,7 @@ coding2api/
 │       ├── deps.py              # Services 容器 + require_api_key / session / csrf 依赖
 │       ├── chat.py              # POST /v1/chat/completions
 │       ├── responses.py         # POST /v1/responses（Responses/Codex CLI 出口）
-│       ├── models.py            # GET /v1/models（动态拉取 + 黑名单 + 缓存兑底 + 元数据）
+│       ├── models.py            # GET /v1/models（动态拉取 + 黑名单 + 缓存兜底 + 元数据）
 │       ├── balance.py           # GET /v1/user/balance（DeepSeek 兼容余额，读探测缓存聚合）
 │       ├── authorize.py         # GET /authorize（TRAE 回调落点）
 │       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin / 成长中心 / 账号切换
@@ -110,6 +120,7 @@ coding2api/
 │       └── streaming.py         # SSE 流包装（长空隙插心跳帧）
 ├── web/                         # React 前端（M2）
 ├── deploy/                      # newsyslog / logrotate / systemd 配置模板
+├── diagrams/                    # 架构图（HTML + 源 JSON）
 ├── tests/
 ├── Dockerfile / docker-compose.yml  # 仓库根（compose build context 依赖根目录）
 ├── NOTICE / LICENSE / README.md（中文）/ README.en.md
@@ -170,7 +181,7 @@ class ErrKind(StrEnum):
 ```
 
 `MODEL_SCOPED_KINDS = {MODEL, BLOCKED}`：这两类只写 `credential_model_cooldowns`
-（见 §6.2），不碰账号级 `cooling_until`，因此同账号的其他模型仍可选。反之账号级冷却
+（见 §6.1），不碰账号级 `cooling_until`，因此同账号的其他模型仍可选。反之账号级冷却
 出现时会清空该凭证的模型级条目——否则「切模型」能绕过账号级限流。
 
 | 上游信号 | CB | TRAE | ErrKind |
@@ -708,7 +719,7 @@ class Provider(Protocol):
   3. 选号（executor._select → scheduler.select）：
      a. 候选 = 注册表中支持该模型的 provider（模型目录能证明归属时先收窄，见 _narrow_providers）
      b. 模型级冷却过滤：逐凭证按**自己所属上游的原始模型名**查 (凭证, 模型) 冷却表，
-        被模型级限流/负缓存的凭证本次跳过（同账号其他模型不受影响，见 §6.2）
+        被模型级限流/负缓存的凭证本次跳过（同账号其他模型不受影响，见 §6.1）
      c. 会话粘性：存在可选的 pinned 凭证时跳过（pin 优先），否则粘性命中的
         凭证仍可选时直接复用，不参与排序。粘性键优先取请求体显式会话标识
         （`conversation_id`/`conversationId`/`prompt_cache_key`，metadata 或顶层），
@@ -765,7 +776,7 @@ class Scheduler:
 
 到期积分只算一处：`expiring_credits()`。选号走 `Candidate.expiry_credits()`（主/次两级窗口各调一次），管理台列表走 `GET /api/credentials` 的 `quota_expiring_credits` 与 `quota_expiring_credits_secondary`（两个窗口值随响应返回 `expiry_window_seconds` / `expiry_secondary_window_seconds`），两处共用同一实现与同一个 `expiry_windows()` 折算（主窗口 ≤0 时两级一起失效），界面数字与选号顺序不会漂移；渠道无到期信息时返回 `null`（不显示），窗口关闭或确实无积分临近过期时返回 `0`（同样不显示）。管理台只在主窗口无数字时才渲染次窗口那一行（次窗口是主窗口的超集，主窗口有值时重复展示没有信息量）。
 
-### 6.2 模型级冷却（B1.1）
+### 6.1 模型级冷却（B1.1）
 
 `credential_model_cooldowns(credential_id, model, cooling_until, hits, reason)` 按
 **(凭证, 模型)** 独立建表——账号级 `cooling_until` 放不下「同账号其他模型仍可用」这层语义。
@@ -784,7 +795,7 @@ class Scheduler:
 
 ---
 
-## 6.1 后台任务（tasks/）
+### 6.2 后台任务（tasks/）
 
 `TaskRunner`（runner.py）每类任务一个独立 asyncio 循环，失败只记日志不拖垮服务；间隔有安全下限，避免打爆上游。所有对外 HTTP 请求经 `pacer.py` 全局节流。
 
@@ -920,7 +931,7 @@ session 判定处理，否则整轮成长中心会被误报成「登录态已失
 
 ---
 
-## 6.5 面向用户的错误语义
+### 6.3 面向用户的错误语义
 
 管理端点返回的失败原因必须是**稳定的机器可读枚举**，不能是 Python 异常类名。
 类名是实现细节：用户既判断不出问题，也不知道下一步做什么，而且重构时会漂移。
@@ -948,7 +959,7 @@ session 判定处理，否则整轮成长中心会被误报成「登录态已失
 
 ## 7. 数据库（T-Q2 定稿）
 
-DDL 以 src/db/schema.sql 为准（users.txt 为用户唯一源、无 users 表、凭证加密列、usage_events.credit/cached_tokens 可空），补充实现细节：
+DDL 以 src/db/schema.sql 为准（users.txt 为用户唯一源、无 users 表、凭证加密列、usage_events.credit/cached_tokens 可空）。当前 `SCHEMA_VERSION = 13`，共 8 张表：`api_keys` / `credentials` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `runtime_settings`。补充实现细节：
 
 ```sql
 -- conn.py 打开时执行
@@ -992,7 +1003,7 @@ fixture 断言两个方向：**解析正确**（样本 → 期望 Event）与**�
 
 - **同步 sqlite3 而非 aiosqlite**（T-Q2）：本地微秒级操作，asyncio 封装开销大于收益
 - **双 httpx 客户端**（T-Q4）：聊天流 read=None 防长流截断；短请求总超时 30s 防悬挂；共享 `trust_env=False`
-- **手写 SQL 而非 ORM**：5 张表规模下 ORM 收益为负
+- **手写 SQL 而非 ORM**：8 张表规模下 ORM 收益为负
 - **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + PUBLIC_BASE_URL
 - **v1 无 Anthropic**（Q8=A）：Event 层已预留，v1.1 只加 `compat/anthropic/` 适配器
 - **Responses 出口只做 Codex CLI 用到的子集**（Q32，详见 §3.7）：不做 `store=true` /

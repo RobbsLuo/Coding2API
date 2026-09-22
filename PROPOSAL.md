@@ -39,7 +39,7 @@
 | Q31 | 到期积分排序 | 两级字典序：主窗口（36h）+ 次窗口（7 天）内到期积分总量依次做排序键（均 env 可配）；落库到期阶梯而非单一日期 |
 | Q32 | Responses 出口 | v1 只做 `chat/completions` 子集：`POST /v1/responses` 与 chat 共用同一 executor，出口 translator 可注入；`include`/`store`/`previous_response_id` 按 Codex CLI 实测取舍（见 TECHNICAL §3.7） |
 | Q33 | 凭证暂停语义 | 复用现有 `enabled`（不新增 `manual_disabled` 列）：`enabled=0` 实测已只摘对话流量，后台任务（签到/刷新/成长/探测）只认 `disabled`；UI 文案统一为「暂停/取消暂停」以区别于系统禁用后的「恢复」（见计划 B3.1 实测收窄） |
-| Q34 | 运行时配置热更 | **推翻 Q11 的「无设置页」**：新增 `runtime_settings` 表 + `RuntimeSettings` 覆盖层 + 管理台第 7 页（Q38 后更名为「任务与配置」，与后台任务运行态同页）。白名单 13 项（默认模型 / 模型黑名单 / 到期两个窗口 / 会话粘性 TTL / 成长不可逆开关 / 成长与探测周期 / 两个节流窗口 / CB 聊天最小间隔 / 活跃上报开关与时点）改完立即生效，无需重启；**DB 覆盖值优先于 .env**，UI 与日志明示，可「恢复默认」清掉覆盖。启动期项（密钥 / 端口 / 数据目录 / 上游白名单）不进白名单——它们决定进程如何启动，运行期改只会让内存与磁盘静默分叉。**B4 修正**：「立即生效」原先对模型黑名单不成立——模型列表缓存存的是过滤后结果，改完最长 300s（`MODEL_LIST_TTL_SECONDS`）才反映，且被滤模型会从失败兜底缓存复活；现缓存改存未过滤表、过滤在每个出口现做，前端保存后失效 `playground-models` 查询。 |
+| Q34 | 运行时配置热更 | **推翻 Q11 的「无设置页」**：新增 `runtime_settings` 表 + `RuntimeSettings` 覆盖层 + 管理台配置页（Q38 后与后台任务运行态合并为「任务与配置」页，是导航中的第 6 项 / 管理员专属）。白名单 13 项（默认模型 / 模型黑名单 / 到期两个窗口 / 会话粘性 TTL / 成长不可逆开关 / 成长与探测周期 / 两个节流窗口 / CB 聊天最小间隔 / 活跃上报开关与时点）改完立即生效，无需重启；**DB 覆盖值优先于 .env**，UI 与日志明示，可「恢复默认」清掉覆盖。启动期项（密钥 / 端口 / 数据目录 / 上游白名单）不进白名单——它们决定进程如何启动，运行期改只会让内存与磁盘静默分叉。**B4 修正**：「立即生效」原先对模型黑名单不成立——模型列表缓存存的是过滤后结果，改完最长 300s（`MODEL_LIST_TTL_SECONDS`）才反映，且被滤模型会从失败兜底缓存复活；现缓存改存未过滤表、过滤在每个出口现做，前端保存后失效 `playground-models` 查询。 |
 | Q35 | token 到期展示与预警 | `credentials` 增列 `token_expires_at` / `token_issued_at`（`SCHEMA_VERSION` 10→11）。到期时间优先取凭证显式 `expires_at`，缺失/非法时回落到 access token 的 **JWT `exp`**；签发时间取 JWT `iat`（新增渠道中立的 `provider/token_expiry.py`）——**实测 CodeBuddy 的 token 响应（OAuth 登录与刷新）不带任何到期字段**，只看 `expires_at` 会恒为 0，既让管理台看不到到期、也让 `needs_refresh` 永不触发（token 过期即被 401 硬禁用，且 revive 不自愈）。两边都取不到时为 0 = 未知，**不猜本地 TTL**。展示为独立「token 剩余」列，只给剩余时间；**进度条与「最后续期」最初的设计已移除**（两渠道 token 寿命 55 天 vs 14 天，同一条无可比性；`iat` 需二次推理才有意义，不值一行），`iat` 仍落库供诊断。老库不批量回填：列表读到时按需从密文派生，写回后走列值 |
 | Q36 | 积分变动流水 | 新增 `credit_events` 表（`SCHEMA_VERSION` 11→12），在额度探测写回的**同一事务**里比对余额、只增记一条。**计划原文要求 `source` 标注来源（签到/成长/对话），但实测三类证据都拿不到真实归因**：diff 只能看到区间净变化，这段区间里签到、成长领取与对话消耗可能同时发生；`growth_events` 无积分快照；上游接口本就不打日志。故 `source` **改为只表达归因已知度**——`observed`（常规探测区间）/ `sync`（首次建立基线），另加 `window_start` 记录变化覆盖时段，前端文案一律说「净变化」而非「签到 +N」。余额未变不记（避免每轮 0 行淹没）；任一端未知仍记但 `delta` 为空（「变未知」是该追的异常，绝不量化成 0）。保留期与 `usage_events` 一致（90 天） |
 | Q37 | 池健康与多 Key 出口 | `GET /healthz` 返回 `{status, service, version, credentials:{total,ready,cooling,paused,disabled}}`（保留 `GET /health` 作纯存活探针）：`ready` 复用调度器的 `Candidate.is_selectable` 口径，五类互斥且合计 = total——**计划原文只列 4 类**，但项目已明确区分「系统禁用」与「用户暂停」（见 Q33/B3.1），少一类会让计数对不上，故补 `paused`。`api_keys` 增 `provider_binding`（`codebuddy`/`trae`/空=自动）与 `allowed_ips`（逗号分隔 IP/CIDR，空=不限制），`SCHEMA_VERSION` 12→13；`deps.api_key_user` 升级为返回 `ApiKeyPrincipal`（用户名 + 绑定），并**在鉴权当场**判定来源 IP。IP 白名单**默认不信 `X-Forwarded-For`**（客户端可写），仅 `TRUST_PROXY=true` 时采信，且取 XFF **最后一个**条目（`$proxy_add_x_forwarded_for` 语义下那是紧邻受信代理所见地址）——因此只适用于「本服务前恰好一层受信反代」的部署。绑定渠道在 `executor` 收窄候选上游：模型归属别家渠道时 400 并给出实际归属，目录未就绪时保守放行。**不做**每 Key 配额/多租户（与 Q10 冲突） |
@@ -150,7 +150,7 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 ### 4.3 调度器（Q12=B + Q26 + Q31）
 
-统一实现，两个 provider 共用：手动 pin 优先（粘性让位，见下） → 会话粘性命中且可选时直接复用（不排序） → 过滤 healthy（含**模型级**避让：逐凭证按自己所属上游的原始模型名查 (凭证, 模型) 冷却表，见 [TECHNICAL.md §6.2](TECHNICAL.md#62-模型级冷却b11)） → 到期积分两级字典序：先比主窗口（`QUOTA_EXPIRY_WINDOW_SECONDS`，默认 36h）内即将到期的积分，打平（含都为 0）再比次窗口（`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`，默认 7 天）内即将到期的积分 → 按健康度三态排序（`known 降序 > unknown > exhausted`；同分按 `credential_id` 稳定）→ 无可用返回 None。到期指标让快过期的积分先用掉，避免白丢；冷却与错误累计规则见 [TECHNICAL.md §6](TECHNICAL.md)，会话粘性见下文。
+统一实现，两个 provider 共用：手动 pin 优先（粘性让位，见下） → 会话粘性命中且可选时直接复用（不排序） → 过滤 healthy（含**模型级**避让：逐凭证按自己所属上游的原始模型名查 (凭证, 模型) 冷却表，见 [TECHNICAL.md §6.1](TECHNICAL.md#61-模型级冷却b11)） → 到期积分两级字典序：先比主窗口（`QUOTA_EXPIRY_WINDOW_SECONDS`，默认 36h）内即将到期的积分，打平（含都为 0）再比次窗口（`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`，默认 7 天）内即将到期的积分 → 按健康度三态排序（`known 降序 > unknown > exhausted`；同分按 `credential_id` 稳定）→ 无可用返回 None。到期指标让快过期的积分先用掉，避免白丢；冷却与错误累计规则见 [TECHNICAL.md §6](TECHNICAL.md)，会话粘性见下文。
 
 **为什么冷却要分「账号级」与「模型级」两层**。上游的拒绝语义并不都是账号级问题：`429 + 6004` 是「这个模型在当前账号上用超了」，`400/404 + 11102` 是「当前账号没有这个模型」。把它们一律记成账号级冷却，会让一次模型级限流把整个账号踢出池（同账号的其他模型明明可用），而把 `11102` 丢掉不管又会让坏组合被反复选中。因此账号级继续写 `credentials.cooling_until`，模型级另建 `credential_model_cooldowns`；账号级冷却出现时清空该凭证的模型级条目，防「切模型」绕过账号级限制。业务码识别只认 `"code": N` 键值形态，不搜裸数字（`"code":111020` 含 `11102` 子串）。
 
@@ -317,34 +317,21 @@ M0 骨架 → M1a TRAE → M1b CB 基础 → M1.5 CB 完整化 → M2 前端 →
 | 模型 ID 撞车导致路由错误 | 中 | 扁平名 + `@provider` 后门；统计行强制带 provider 字段 |
 | 积分语义混淆（周期 vs 余额） | 低 | 健康分仅用于调度；展示层标注周期语义 |
 | 容器环境特殊（Apple container，无 compose） | 低 | Dockerfile 本地构建验证；compose 靠 CI 验证 |
-| License 溯源不全 | 中 | NOTICE 列明四个项目的署名与协议 |
+| License 溯源不全 | 中 | NOTICE 列明 5 个参考项目（含各自上游共 7 条来源）的署名与协议 |
 
 ## 12. NOTICE 三方溯源
 
-```
-Coding2API
-Copyright (c) 2026
+署名清单以仓库根目录的 [`NOTICE`](NOTICE) 为唯一真源（本文件不再复制一份，
+避免两处各自漂移）。当前列出的参考项目：
 
-本项目从零实现，但在设计与实现上参考了以下项目：
+| 项目 | 借鉴方向 |
+|---|---|
+| [IceeAn/codebuddy2api](https://github.com/IceeAn/codebuddy2api) | CodeBuddy 上游协议、凭证管理、脱敏统计 |
+| [connectedGraph/trae2api-web](https://github.com/connectedGraph/trae2api-web) | TRAE SOLO 上游协议、账号池冷却状态机 |
+| [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) | 成长中心与签到接口的逆向结论与运行经验 |
+| [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) | 活跃上报 `/v2/report` 的协议形状与实测结论 |
+| [ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) | 后台任务可视化页面的设计参考 |
 
-- codebuddy2api - https://github.com/IceeAn/codebuddy2api
-  Copyright (c) 2026 An! - MIT License
-  （提供 CodeBuddy 上游协议、凭证管理、脱敏统计的设计参考）
-
-- workbuddy-auto-signin - https://github.com/88lin/workbuddy-auto-signin
-  Copyright (c) 2026 88lin - MIT License
-  （提供 CodeBuddy 成长中心与签到接口的逆向结论与运行经验：端点路径、
-   client_token 规则、/redeem 传天数、4xx 业务规则不算失败、
-   时间预算与退避重试的教训）
-
-- trae2api-web - https://github.com/connectedGraph/trae2api-web
-  Copyright (c) 2026 connectedGraph - MIT License
-  （提供 TRAE SOLO 上游协议、账号池冷却状态机的设计参考）
-
-  其上游：
-  - xueyue33/codebuddy2api - https://github.com/xueyue33/codebuddy2api
-  - Sliverkiss/traework2api - https://github.com/Sliverkiss/traework2api
-
-本项目的代码为独立实现，不复制上述项目的源代码。
-上游服务的协议细节来自对客户端行为的观察，不属于上述项目的版权范围。
-```
+均为 MIT License，完整版权行与「其上游」子项见 `NOTICE`。本项目的代码为独立实现，
+不复制上述项目的源代码；上游服务的协议细节来自对客户端行为的观察，不属于上述项目
+的版权范围。
