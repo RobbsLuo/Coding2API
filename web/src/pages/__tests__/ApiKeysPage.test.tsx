@@ -209,8 +209,10 @@ describe("OpenAI 客户端接入面板", () => {
       `curl ${window.location.origin}/v1/user/balance`,
     );
     expect(screen.getByTestId("example-balance-curl")).toHaveTextContent("sk-…");
+    // Responses 端点在此列出，示例默认折叠
+    expect(screen.getByTestId("example-details-responses")).toHaveTextContent("/responses");
+    expect(screen.getByTestId("openai-entry")).toHaveTextContent("Codex CLI");
   });
-
   it("创建 Key 后示例自动带入真实 Key", async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -231,6 +233,9 @@ describe("OpenAI 客户端接入面板", () => {
     });
     expect(screen.getByTestId("example-python")).toHaveTextContent('api_key="sk-real-key"');
     expect(screen.getByTestId("example-balance-curl")).toHaveTextContent("sk-real-key");
+    expect(screen.getByTestId("example-responses")).toHaveTextContent(
+      "export CODING2API_KEY=sk-real-key",
+    );
   });
 });
 
@@ -263,5 +268,31 @@ it("余额端点示例同样默认折叠，展开后可复制 curl", async () =>
   expect(writeText).toHaveBeenCalledWith(
     `curl ${window.location.origin}/v1/user/balance \\
   -H "Authorization: Bearer sk-…"`,
+  );
+});
+
+it("Responses 端点示例默认折叠，展开后可复制 Codex CLI 配置", async () => {
+  const writeText = vi.fn(async () => undefined);
+  vi.stubGlobal("navigator", { clipboard: { writeText } });
+  mockFetch({ "/api/api-keys": { api_keys: [] } });
+  renderPage(<ApiKeysPage />);
+  await settle();
+
+  const details = screen.getByTestId("example-details-responses") as HTMLDetailsElement;
+  expect(details.open).toBe(false);
+  // <details> 关闭时子节点仍在 DOM 里，只是不可见
+  expect(screen.getByTestId("example-responses")).not.toBeVisible();
+
+  await userEvent.click(details.querySelector("summary")!);
+  expect(details.open).toBe(true);
+  expect(screen.getByTestId("example-responses")).toBeVisible();
+  expect(screen.getByTestId("example-responses")).toHaveTextContent("wire_api='responses'");
+  expect(screen.getByTestId("example-responses")).toHaveTextContent(
+    `base_url='${window.location.origin}/v1'`,
+  );
+
+  await userEvent.click(screen.getByTestId("copy-responses"));
+  expect(writeText).toHaveBeenCalledWith(
+    expect.stringContaining("export CODING2API_KEY=sk-…"),
   );
 });

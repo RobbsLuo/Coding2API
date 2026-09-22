@@ -43,6 +43,7 @@ export function openaiExamples(baseUrl: string, apiKey: string): {
   curl: string;
   python: string;
   balance: string;
+  responses: string;
 } {
   const key = apiKey || "sk-…";
   return {
@@ -64,6 +65,12 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)`,
     balance: `curl ${baseUrl}/user/balance \\
   -H "Authorization: Bearer ${key}"`,
+    // Codex CLI 用 env_key 引用环境变量名（不是 Key 本身），故先 export 再引用
+    responses: `export CODING2API_KEY=${key}
+codex -c "model_providers.coding2api={ name='coding2api', base_url='${baseUrl}', wire_api='responses', env_key='CODING2API_KEY' }" \\
+      -c model_provider=coding2api \\
+      -c model='glm-5.2' \\
+      '你的任务'`,
   };
 }
 
@@ -187,12 +194,26 @@ function OpenAIEntry({ apiKey }: { apiKey: string }) {
             </EndpointRow>
           </li>
           <li>
+            <EndpointRow method="POST" path={`${baseUrl}/responses`} description="Responses 子集（供 Codex CLI 接入）" testid="example-details-responses">
+              <CodeExample label="Codex CLI 配置" text={examples.responses} copied={copied === "responses"} onCopy={() => void copy("responses", examples.responses)} testid="example-responses" copyTestid="copy-responses" />
+            </EndpointRow>
+          </li>
+          <li>
             <Badge>GET</Badge> <code>{baseUrl}/models</code>　模型列表
           </li>
         </ul>
         <Notice tone="muted">
           任何兼容 OpenAI 协议的客户端（ChatGPT Next Web、LobeChat、Cursor 等）
           都可以按上面的 Base URL + API Key 接入。模型名从 /v1/models 获取。
+        </Notice>
+        <Notice tone="muted">
+          {/* 整段包一层 span：ShadAlert 是 grid 容器，直接放多个行内元素会被拆成多行 */}
+          <span>
+            <code>POST /v1/responses</code> 只实现 Codex CLI 用到的子集，与{" "}
+            <code>/v1/chat/completions</code> 共用同一套选号、冷却、轮换与会话粘性。
+            <code>store=true</code>、<code>previous_response_id</code> 与{" "}
+            <code>web_search</code> 等服务端私有工具会被显式拒绝（400），不静默降级。
+          </span>
         </Notice>
       </div>
     </Panel>
