@@ -1017,16 +1017,6 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
             "/v1/models", headers={"Authorization": f"Bearer {key2}"}).json()["data"]}
     assert "kimi-k2.6" not in ids2 and "glm-5.2" in ids2
 
-    # 覆盖黑名单：额外滤老模型（完全替换语义，需重写噪音规则）
-    settings2 = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
-                         MODEL_BLOCKLIST="custom_model_*,*sub*agent*,summary,kimi-k2.6")
-    app2 = build_app(settings2, providers={"trae": NoisyProvider()})
-    key2 = app2.state.api_keys.create("root")["api_key"]
-    with TestClient(app2) as client:
-        ids2 = {item["id"] for item in client.get(
-            "/v1/models", headers={"Authorization": f"Bearer {key2}"}).json()["data"]}
-    assert "kimi-k2.6" not in ids2 and "glm-5.2" in ids2
-
 
 def test_models_blocklist_hot_reload_applies_without_waiting_for_ttl(tmp_path):
     """MODEL_BLOCKLIST 热更后下一次 /v1/models 立即过滤，不受 TTL 缓存影响。
