@@ -423,7 +423,7 @@ export function CredentialsPage() {
                 <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期积分行＝调度窗口内即将过期、会被优先消耗的额度；主窗口（36h）打平时才比较次窗口（7 天）。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">token 剩余<ColumnHint text="access token 距离到期还有多久，取自凭证本身（为 0 表示渠道未给到期信息，显示 —）。预刷新任务每小时检查一次，进入 24 小时窗口即自动续期；「已过期」意味着上游会拒绝该凭证，需重新登录。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">成长中心<ColumnHint text="仅 CodeBuddy：最近一轮成长中心（旅行礼物/任务/连登兑换/盲盒）的领取结果与时间，由定时任务或手动执行写入。" /></span></TableHead>
-                {isAdmin && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测：查剩余额度；签到：领当日积分；指定：设为优先；暂停/删除：摘对话流量或移除。" /></span></TableHead>}
+                {isAdmin && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测/签到：行内常驻按钮。更多操作（⋯）：积分记录、指定、暂停/恢复、删除。指定：设为优先；暂停/删除：摘对话流量或移除。" /></span></TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -521,8 +521,8 @@ export function CredentialsPage() {
           { term: "到期积分（两行）", where: "额度列", meaning: "选号先比 36 小时内会过期的积分，多的先用；都相同（常见的是都为 0）时再比 7 天内会过期的积分。主窗口已有数字就只显示那一行，次窗口只在主窗口为空时才出现。" },
           { term: "套餐 N 个（额度首行右侧）", where: "额度列", meaning: "该账号当前生效的额度包个数。鼠标悬浮看每个包的名字、剩余/总量、已用与到期日（按到期先后）。未探测或渠道未返回明细时不显示。" },
           { term: "token 剩余", where: "token 剩余列", meaning: "该凭证 access token 距离到期还有多久。预刷新任务每小时跑一次，进入 24 小时窗口会自动续期，所以正常情况下看到的是长寿命（TRAE 约 14 天、CodeBuddy 约 55 天）递减。显示「已过期」时上游会拒绝该凭证，需重新登录；显示「—」表示渠道未提供到期信息。" },
-          { term: "探测 / 签到", where: "操作列", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（每天 9 点系统自动签到）。" },
-          { term: "指定 / 暂停 / 删除", where: "操作列", meaning: "指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。暂停：只摘出对话流量不删数据（签到 / 刷新 / 探测不受影响）。删除：彻底移除凭证。" },
+          { term: "探测 / 签到", where: "操作列（常驻按钮）", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（每天 9 点系统自动签到）。两者是高频动作，直接显示在行内，不藏在「更多操作」菜单里。" },
+          { term: "更多操作（⋯）", where: "操作列", meaning: "积分记录：看该凭证两次探测之间的净变化。指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。暂停：只摘出对话流量不删数据（签到 / 刷新 / 探测不受影响）。删除：彻底移除凭证。CodeBuddy 另有成长中心 / 恢复 / 活跃上报。" },
           { term: "模型避让（额度列下方）", where: "额度列", meaning: "某个模型在该账号上限流（6004）或该账号无此模型（11102）时只避让这一个模型——整条凭证仍参与调度，换其他模型立刻可用。模型限流按 10 分钟起指数退避，最长 2 小时；「无此模型」按 6 小时起，最长 24 小时。" },
           { term: "成长中心 / 活跃上报", where: "操作列", meaning: "成长中心：手动跑一轮成长中心领取（与定时任务同一条路径）。活跃上报：手动补发一条对话事件以续上「连登天数」——默认关闭的定时任务不做，这里仅供部署后验证；官方条款禁止脚本篡改活动数据，开启/使用前请自行评估账号风险。" },
         ]}
@@ -764,61 +764,77 @@ function Row({
                 </Button>
               </>
             ) : (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    aria-label="操作"
-                    disabled={busy}
-                    data-testid={`actions-${credential.id}`}
-                  >
-                    <MoreHorizontal />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="end" className="w-44">
-                  <DropdownMenuItem onSelect={() => actions.probe(credential)}>
-                    <RefreshCw className="size-4" /> 探测
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => actions.credits(credential)}>
-                    <History className="size-4" /> 积分记录
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => actions.checkin(credential)}>
-                    <CalendarCheck className="size-4" /> 签到
-                  </DropdownMenuItem>
-                  {credential.provider === "codebuddy" && (
-                    <DropdownMenuItem onSelect={() => actions.growth(credential)}>
-                      <Sparkles className="size-4" /> 成长中心
+              <>
+                {/* 探测 / 签到是高频日常动作，从「更多」菜单提出来常驻，
+                    少一次点击；其余低频动作仍收在菜单里。 */}
+                <Button
+                  size="sm"
+                  variant="default"
+                  disabled={busy}
+                  data-testid={`probe-${credential.id}`}
+                  onClick={() => actions.probe(credential)}
+                >
+                  <RefreshCw className="size-3.5" /> 探测
+                </Button>
+                <Button
+                  size="sm"
+                  variant="default"
+                  disabled={busy}
+                  data-testid={`checkin-${credential.id}`}
+                  onClick={() => actions.checkin(credential)}
+                >
+                  <CalendarCheck className="size-3.5" /> 签到
+                </Button>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      size="icon"
+                      variant="ghost"
+                      aria-label="更多操作"
+                      disabled={busy}
+                      data-testid={`actions-${credential.id}`}
+                    >
+                      <MoreHorizontal />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-44">
+                    <DropdownMenuItem onSelect={() => actions.credits(credential)}>
+                      <History className="size-4" /> 积分记录
                     </DropdownMenuItem>
-                  )}
-                  {credential.provider === "codebuddy" && (
-                    <DropdownMenuItem onSelect={() => actions.activity(credential)}>
-                      <Radio className="size-4" /> 活跃上报
+                    {credential.provider === "codebuddy" && (
+                      <DropdownMenuItem onSelect={() => actions.growth(credential)}>
+                        <Sparkles className="size-4" /> 成长中心
+                      </DropdownMenuItem>
+                    )}
+                    {credential.provider === "codebuddy" && (
+                      <DropdownMenuItem onSelect={() => actions.activity(credential)}>
+                        <Radio className="size-4" /> 活跃上报
+                      </DropdownMenuItem>
+                    )}
+                    <DropdownMenuSeparator />
+                    {credential.disabled === 1 && (
+                      <DropdownMenuItem onSelect={() => actions.revive(credential)}>
+                        <HeartPulse className="size-4" /> 恢复
+                      </DropdownMenuItem>
+                    )}
+                    <DropdownMenuItem onSelect={() => actions.toggle(credential)}>
+                      {/* 「取消暂停」而非「恢复」：菜单里 disabled=1 那条已叫「恢复」
+                          （revive，解除 session 死亡硬禁用），两者撞名会误操作 */}
+                      <Power className="size-4" /> {credential.enabled === 1 ? "暂停" : "取消暂停"}
                     </DropdownMenuItem>
-                  )}
-                  <DropdownMenuSeparator />
-                  {credential.disabled === 1 && (
-                    <DropdownMenuItem onSelect={() => actions.revive(credential)}>
-                      <HeartPulse className="size-4" /> 恢复
+                    <DropdownMenuItem onSelect={() => actions.pin(credential)}>
+                      <Pin className="size-4" /> {credential.pinned === 1 ? "取消指定" : "指定"}
                     </DropdownMenuItem>
-                  )}
-                  <DropdownMenuItem onSelect={() => actions.toggle(credential)}>
-                    {/* 「取消暂停」而非「恢复」：菜单里 disabled=1 那条已叫「恢复」
-                        （revive，解除 session 死亡硬禁用），两者撞名会误操作 */}
-                    <Power className="size-4" /> {credential.enabled === 1 ? "暂停" : "取消暂停"}
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onSelect={() => actions.pin(credential)}>
-                    <Pin className="size-4" /> {credential.pinned === 1 ? "取消指定" : "指定"}
-                  </DropdownMenuItem>
-                  <DropdownMenuSeparator />
-                  <DropdownMenuItem
-                    onSelect={() => onConfirmDelete(credential.id)}
-                    className="text-destructive focus:text-destructive focus:bg-destructive/10"
-                  >
-                    <Trash2 className="size-4" /> 删除
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      onSelect={() => onConfirmDelete(credential.id)}
+                      className="text-destructive focus:text-destructive focus:bg-destructive/10"
+                    >
+                      <Trash2 className="size-4" /> 删除
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </>
             )}
           </div>
         </TableCell>
