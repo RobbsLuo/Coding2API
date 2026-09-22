@@ -421,6 +421,7 @@ export function CredentialsPage() {
                 <TableHead><span className="inline-flex items-center gap-1">状态<ColumnHint text="可用/冷却中/已禁用/已暂停/额度耗尽；已暂停只摘对话流量，签到/刷新/探测照常；冷却中到期自动恢复。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">健康度<ColumnHint text="剩余积分占比三态：已知百分比 / 未探测 / 已耗尽。未探测≠已耗尽，点「探测」可重试。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期积分行＝调度窗口内即将过期、会被优先消耗的额度；主窗口（36h）打平时才比较次窗口（7 天）。" /></span></TableHead>
+                <TableHead><span className="inline-flex items-center gap-1">token 剩余<ColumnHint text="access token 距离到期还有多久，取自凭证本身（为 0 表示渠道未给到期信息，显示 —）。预刷新任务每小时检查一次，进入 24 小时窗口即自动续期；「已过期」意味着上游会拒绝该凭证，需重新登录。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">成长中心<ColumnHint text="仅 CodeBuddy：最近一轮成长中心（旅行礼物/任务/连登兑换/盲盒）的领取结果与时间，由定时任务或手动执行写入。" /></span></TableHead>
                 {isAdmin && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测：查剩余额度；签到：领当日积分；指定：设为优先；暂停/删除：摘对话流量或移除。" /></span></TableHead>}
               </TableRow>
@@ -442,7 +443,7 @@ export function CredentialsPage() {
                   />
                   {creditEvents?.credentialId === credential.id && (
                     <TableRow data-testid={`credit-row-${credential.id}`}>
-                      <TableCell colSpan={isAdmin ? 7 : 6} className="p-0">
+                      <TableCell colSpan={isAdmin ? 8 : 7} className="p-0">
                         <CreditDrawer
                           credentialId={credential.id}
                           events={creditEvents.events}
@@ -519,6 +520,7 @@ export function CredentialsPage() {
           { term: "额度下方的时间语义", where: "额度列", meaning: "CodeBuddy 是「本周期剩余，<日期> 重置」；TRAE 是「账户剩余（单调递减）」。两者单位都是积分，但重置行为不同。" },
           { term: "到期积分（两行）", where: "额度列", meaning: "选号先比 36 小时内会过期的积分，多的先用；都相同（常见的是都为 0）时再比 7 天内会过期的积分。主窗口已有数字就只显示那一行，次窗口只在主窗口为空时才出现。" },
           { term: "套餐 N 个（额度首行右侧）", where: "额度列", meaning: "该账号当前生效的额度包个数。鼠标悬浮看每个包的名字、剩余/总量、已用与到期日（按到期先后）。未探测或渠道未返回明细时不显示。" },
+          { term: "token 剩余", where: "token 剩余列", meaning: "该凭证 access token 距离到期还有多久。预刷新任务每小时跑一次，进入 24 小时窗口会自动续期，所以正常情况下看到的是长寿命（TRAE 约 14 天、CodeBuddy 约 55 天）递减。显示「已过期」时上游会拒绝该凭证，需重新登录；显示「—」表示渠道未提供到期信息。" },
           { term: "探测 / 签到", where: "操作列", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（每天 9 点系统自动签到）。" },
           { term: "指定 / 暂停 / 删除", where: "操作列", meaning: "指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。暂停：只摘出对话流量不删数据（签到 / 刷新 / 探测不受影响）。删除：彻底移除凭证。" },
           { term: "模型避让（额度列下方）", where: "额度列", meaning: "某个模型在该账号上限流（6004）或该账号无此模型（11102）时只避让这一个模型——整条凭证仍参与调度，换其他模型立刻可用。模型限流按 10 分钟起指数退避，最长 2 小时；「无此模型」按 6 小时起，最长 24 小时。" },
@@ -602,12 +604,15 @@ function ModelCooldownList({ credential, now }: { credential: Credential; now: n
 /**
  * access token 到期展示（B3.3）。
  *
- * 为什么同时给「剩余」和「最后续期」：只剩 3 天看起来像快挂了，但如果两分钟前
- * 刚续期过，那其实是刚拿到的 30 天里剩下的部分；反过来只剩 3 天且最后续期是
- * 十天前，才是真的没人管。单看剩余天数会把这两种情况读反，两个一起给才读得对。
+ * 只说一件事：还剩多久。进度条与「最后续期」都不给：
+ * - 进度条的量纲是 token 自己的寿命（`exp - iat`），两个渠道分别是 55 天和
+ *   14 天，同一根条在不同渠道间没有可比性；而「还剩几天」本身已经回答了
+ *   调度关心的唯一问题。
+ * - 「最后续期」需要读者自己拿它与剩余天数做二次推理（刚续期 vs 没人管），
+ *   属于解释性信息，不该占表格里的一行。
  *
- * 进度条量纲是 token 自己的寿命（`exp - iat`）；拿不到 iat 时不画条，只给数字。
- * 到期时间未知（后端 0）时整块不渲染：渠道没给到期信息不等于马上过期。
+ * 到期时间未知（后端 0）时显示「—」（与「成长中心」列一致）：渠道没给到期
+ * 信息不等于马上过期，但也确实无可展示。
  */
 function TokenExpiry({
   credential,
@@ -616,27 +621,14 @@ function TokenExpiry({
   credential: Credential;
   view: TokenExpiryView;
 }) {
-  if (view.remaining === null) return null;
-  const barTone = view.tone === "danger" ? "bg-destructive"
-    : view.tone === "warn" ? "bg-warn"
-    : "bg-ok";
+  if (view.remaining === null) return <span className="text-muted-foreground">—</span>;
   return (
-    <div className="mt-1" data-testid={`token-expiry-${credential.id}`}>
-      {view.percent !== null && (
-        <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
-          <div
-            className={`h-full rounded-full transition-all ${barTone}`}
-            style={{ width: `${view.percent}%` }}
-            data-testid={`token-expiry-bar-${credential.id}`}
-          />
-        </div>
-      )}
-      <div className={view.expiring ? "text-destructive" : "text-muted-foreground"}>
-        token {view.remaining <= 0 ? "已过期" : `剩余 ${view.label}`}
-        {view.expiring && view.remaining > 0 && "，即将到期"}
-        {credential.token_issued_at > 0 &&
-          ` · 最后续期 ${formatTime(credential.token_issued_at)}`}
-      </div>
+    <div
+      className={view.expiring ? "text-destructive" : "text-muted-foreground"}
+      data-testid={`token-expiry-${credential.id}`}
+    >
+      {view.remaining <= 0 ? "已过期" : view.label}
+      {view.expiring && view.remaining > 0 && "，即将到期"}
     </div>
   );
 }
@@ -679,7 +671,7 @@ function Row({
   const state = credentialState(credential, now);
   const cooldown = cooldownRemaining(credential.cooling_until, now);
   const tokenExpiry = tokenExpiryView(
-    credential.token_expires_at, credential.token_issued_at, tokenWarning, now);
+    credential.token_expires_at, tokenWarning, now);
 
   // 抽屉由调用方渲染成**独立的下一行**（见 TableBody）：塞进本行的最后一个单元格
   // 只会挤在「操作」列里——同行内的 colSpan 不生效，整行高度会被拉坏。
@@ -735,6 +727,8 @@ function Row({
         )}
         <div className="text-muted-foreground">{quotaSemantics(credential)}</div>
         <ModelCooldownList credential={credential} now={now} />
+      </TableCell>
+      <TableCell className="text-xs">
         <TokenExpiry credential={credential} view={tokenExpiry} />
       </TableCell>
       <TableCell className="text-xs text-muted-foreground">

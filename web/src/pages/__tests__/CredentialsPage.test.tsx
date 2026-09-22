@@ -726,7 +726,9 @@ describe("CredentialsPage 成长中心", () => {
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
     expect(screen.queryByTestId("growth-cred_1")).not.toBeInTheDocument();
-    expect(within(screen.getByTestId("row-cred_1")).getByText("—")).toBeInTheDocument();
+    // 成长中心是第 6 列（0-based 5）；token 剩余列同为「—」，不能按文本全局查
+    const row = screen.getByTestId("row-cred_1");
+    expect(row.children[5]).toHaveTextContent("—");
   });
 
   it("长汇报单行截断展示，鼠标悬浮显示完整内容", async () => {
@@ -790,7 +792,7 @@ describe("CredentialsPage 成长中心", () => {
   });
 
   // --------------------------------------------------------- B3.3 token 到期
-  it("token 接近到期：进度条 + 剩余时间 + 最后续期，标红预警", async () => {
+  it("token 接近到期：独立一列只显示剩余时间，标红预警", async () => {
     const now = Math.floor(Date.now() / 1000);
     mockFetch({
       "/api/credentials": listBody([
@@ -802,15 +804,29 @@ describe("CredentialsPage 成长中心", () => {
     await settle();
 
     const cell = screen.getByTestId("token-expiry-soon");
-    expect(cell).toHaveTextContent("token 剩余 10 分钟");
+    expect(cell).toHaveTextContent("10 分钟");
     expect(cell).toHaveTextContent("即将到期");
-    expect(cell).toHaveTextContent("最后续期");
-    // 寿命 30 天只剩 600 秒 → 进度条几乎见底
-    const bar = screen.getByTestId("token-expiry-bar-soon");
-    expect(Number.parseFloat(bar.style.width)).toBeLessThan(2);
+    // 表头有独立列名
+    expect(screen.getByText("token 剩余")).toBeInTheDocument();
   });
 
-  it("token 到期时间未知（0）时不渲染整块，绝不当成已过期", async () => {
+  it("token 剩余列不渲染进度条与「最后续期」", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ id: "soon", token_expires_at: now + 600,
+                         token_issued_at: now - 30 * 86400 + 600 }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    expect(screen.queryByTestId("token-expiry-bar-soon")).not.toBeInTheDocument();
+    const row = screen.getByTestId("row-soon");
+    expect(within(row).queryByText(/最后续期/)).not.toBeInTheDocument();
+  });
+
+  it("token 到期时间未知（0）时该格显示 —，绝不当成已过期", async () => {
     mockFetch({
       "/api/credentials": listBody([
         makeCredential({ id: "unknown", token_expires_at: 0, token_issued_at: 0 }),
@@ -819,24 +835,12 @@ describe("CredentialsPage 成长中心", () => {
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
 
-    expect(screen.queryByTestId("token-expiry-unknown")).not.toBeInTheDocument();
-  });
-
-  it("拿不到签发时间时只给数字不画进度条（不知道寿命就别伪造量程）", async () => {
-    const now = Math.floor(Date.now() / 1000);
-    mockFetch({
-      "/api/credentials": listBody([
-        makeCredential({ id: "noiat", token_expires_at: now + 30 * 86400,
-                         token_issued_at: 0 }),
-      ]),
-    });
-    renderPage(<CredentialsPage />, ADMIN);
-    await settle();
-
-    const cell = screen.getByTestId("token-expiry-noiat");
-    expect(cell).toHaveTextContent("token 剩余 30.0 天");
-    expect(cell).not.toHaveTextContent("最后续期");
-    expect(screen.queryByTestId("token-expiry-bar-noiat")).not.toBeInTheDocument();
+    const row = screen.getByTestId("row-unknown");
+    expect(within(row).queryByTestId("token-expiry-unknown")).not.toBeInTheDocument();
+    expect(within(row).queryByText("已过期")).not.toBeInTheDocument();
+    // 与其他空白列一致：显示占位符而不是留空
+    const tokenCell = row.children[5];
+    expect(tokenCell).toHaveTextContent("—");
   });
 
   it("token 已过期时明确显示「已过期」", async () => {
@@ -850,7 +854,7 @@ describe("CredentialsPage 成长中心", () => {
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
 
-    expect(screen.getByTestId("token-expiry-dead")).toHaveTextContent("token 已过期");
+    expect(screen.getByTestId("token-expiry-dead")).toHaveTextContent("已过期");
   });
 
   it("阈值之外的 token 只显示剩余时间，不显示预警措辞", async () => {
@@ -865,7 +869,7 @@ describe("CredentialsPage 成长中心", () => {
     await settle();
 
     const cell = screen.getByTestId("token-expiry-fresh");
-    expect(cell).toHaveTextContent("token 剩余 30.0 天");
+    expect(cell).toHaveTextContent("30.0 天");
     expect(cell).not.toHaveTextContent("即将到期");
   });
 
@@ -898,7 +902,7 @@ describe("CredentialsPage 成长中心", () => {
     expect(drawerRow).not.toBe(screen.getByTestId("row-cred_1"));
     expect(within(drawerRow).getByTestId("credit-drawer-cred_1")).toBeInTheDocument();
     // :scope > td：抽屉内部还有一张表格，直接按 role 查会匹配到里面那些单元格
-    expect(drawerRow.querySelector(":scope > td")).toHaveAttribute("colspan", "7");
+    expect(drawerRow.querySelector(":scope > td")).toHaveAttribute("colspan", "8");
     expect(within(drawer).getByTestId("credit-event-cre_2")).toHaveTextContent(
       "+15（100 → 115）",
     );

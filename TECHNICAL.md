@@ -483,8 +483,8 @@ UI 与日志都必须明示「DB 覆盖 .env」，否则用户改 `.env` 不生�
 - `token_expires_at`：`add()` 与 `save_credential_data()` 都写回，值来自
   `credential_token_times()`。**JWT 派生值不写回凭证 JSON**——否则刷新换到新 token 后旧派生值
   会残留成「权威」到期时间。
-- `token_issued_at`：access token 的签发 epoch（JWT `iat`）。它既是「最后续期」的展示值，
-  也是进度条的满量程（见下）。拿不到时写 0。
+- `token_issued_at`：access token 的签发 epoch（JWT `iat`，即「最后续期」）。当前仅落库
+  供诊断，不在列表展示（见下「展示纪律」）。拿不到时写 0。
 
 **老库升级不批量回填**：全池解密会拖慢启动，改在列表读到时按需从 `data_enc` 派生
 （`_token_times_from_blob()`，解密/解析失败返回 `(0, 0)` 而不是让整个列表崩掉）；一旦写回就
@@ -492,16 +492,18 @@ UI 与日志都必须明示「DB 覆盖 .env」，否则用户改 `.env` 不生�
 
 **读路径**：`list_all()` 只下发绝对 epoch（`token_expires_at` / `token_issued_at`），
 **不代前端算剩余秒数**——服务端算好的「剩余」不会随页面 tick 更新，而且会与冷却时长各用
-一套口径。剩余时间、预警判定、进度条宽度全部由前端 `tokenExpiryView()` 用同一个时钟现算，
+一套口径。剩余时间与预警判定由前端 `tokenExpiryView()` 用同一个时钟现算，
 阈值由 `TOKEN_EXPIRY_WARNING_SECONDS` 经列表接口下发。
 
-**进度条量纲是 token 自己的寿命**（`exp - iat`），不是固定窗口：实测 CodeBuddy 的 token
-寿命 50+ 天、TRAE 约 12 天，用固定量程（比如 24h）会把前者永远画成满格，看不出消耗。
-拿不到 `iat` 时不画条、只给数字，而不是拿一个假量程充数。
+**进度条已移除**（原设计：满量程取 `exp - iat`）。理由：两个渠道的 token 寿命相差近四倍
+（CodeBuddy 实测 55 天、TRAE 14 天），同一根条在同一张表里没有可比性；而「还剩多久」本身
+已经回答了调度关心的唯一问题。`tokenExpiryView()` 仍返回 `percent`（接口未变、测试仍在覆盖），
+只是展示层不再使用。
 
-**展示纪律**：剩余时间必须与「最后续期」一起给。只剩 3 天看着像快挂了，但若最后续期是
-两分钟前，那只是刚拿到的新 token 里剩下的部分；只剩 3 天且续期在十天前才是真的没人管。
-只看剩余天数会把两种情况读反。未知到期整块不渲染，**绝不当成已过期**。
+**展示纪律**：只给「剩余时间」一个数。曾同时展示「最后续期」（JWT `iat`），但那要求读者
+自己拿两个数做二次推理（刚续期 vs 没人管），属于解释性信息，不该占表格里的一行；`iat` 仍
+落库（`token_issued_at`），需要时可用于诊断。到期未知（0）时该单元格显示 `—`，
+**绝不当成已过期**。
 
 **接口**：`GET /api/credentials` 响应新增 `token_expiry_warning_seconds`；每条凭证新增
 `token_expires_at` 与 `token_issued_at`（均为 0 表示未知）。

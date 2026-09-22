@@ -59,6 +59,9 @@ def _clear_model_cache():
     from src.provider.codebuddy.client import _MODEL_CACHE
 
     _MODEL_CACHE.clear()
+    # `_days()` 的基准时刻同理：按测试重置，避免整套跑时基准越来越旧
+    global _DAYS_BASE
+    _DAYS_BASE = None
     yield
     _MODEL_CACHE.clear()
 
@@ -430,8 +433,22 @@ async def test_fetch_personal_quota_prefers_precise_over_plain():
     assert quota.cycle_end is not None
 
 
+_DAYS_BASE: float | None = None
+
+
 def _days(offset: int) -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(time.time() + offset * 3600))
+    """相对基准时刻的偏移，返回上游格式的时间串（有符号，负数=过去）。
+
+    基准时刻在**首次调用时固定**（`_days` 会被调用多次：构造 payload 一次、
+    断言里再算一次）。若每次现取 `time.time()`，两者跨过整秒就会差 1 秒，
+    `quota.expiry_ladder == [(_cycle_end_epoch(_days(3)), 40.0)]` 这类等值
+    断言会随机翻红——带覆盖率跑（更慢）时尤其容易命中。
+    偏移量都是小时级，基准固定后与真实 now 的漂移可忽略。
+    """
+    global _DAYS_BASE
+    if _DAYS_BASE is None:
+        _DAYS_BASE = time.time()
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(_DAYS_BASE + offset * 3600))
 
 
 async def test_fetch_personal_quota_cycle_end_is_earliest_not_expired():
