@@ -17,6 +17,7 @@ import { UsageChart } from "../components/UsageChart";
 import type { Provider, UsageEventRow } from "../api/types";
 import {
   Button,
+  Card,
   Empty,
   Metric,
   Panel,
@@ -107,10 +108,10 @@ export function StatsPage() {
         <p className="sr-only">载入中…</p>
         <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
           {Array.from({ length: 4 }).map((_, index) => (
-            <div key={index} className="rounded-xl border border-border p-4">
+            <Card key={index} size="sm" className="gap-0 p-4">
               <Skeleton className="h-3 w-14" />
               <Skeleton className="mt-2 h-6 w-12" />
-            </div>
+            </Card>
           ))}
         </div>
       </div>
@@ -381,14 +382,14 @@ export function StatsPage() {
         )}
       </Panel>
 
-      <div className="flex flex-col gap-1 rounded-lg border border-border bg-card px-3 py-2.5 text-xs text-muted-foreground">
+      <Notice tone="muted" className="items-start gap-1 px-3 py-2.5 text-xs">
         <p>
           隐私：不保存提示词、回答、请求头、Token、工具参数与原始错误体；逐请求明细保留 90 天，小时汇总永久保留；按 API Key 归属用户统计。
         </p>
         <p>
           credit 为渠道可选字段，经常不返回；健康度只依赖额度探测接口，主指标是 token 数。
         </p>
-      </div>
+      </Notice>
     </div>
   );
 }

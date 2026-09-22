@@ -1,9 +1,9 @@
 import { Fragment, useState } from "react";
 import {
+  ArrowDownIcon,
   CalendarCheck,
   Database,
   HeartPulse,
-  History,
   MoreHorizontal,
   Pin,
   Power,
@@ -49,6 +49,7 @@ import type { TokenExpiryView } from "../api/display";
 import {
   Badge,
   Button,
+  Card,
   Empty,
   Field,
   Input,
@@ -420,10 +421,10 @@ export function CredentialsPage() {
                 <TableHead>渠道</TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">状态<ColumnHint text="可用/冷却中/已禁用/已暂停/额度耗尽；已暂停只摘对话流量，签到/刷新/探测照常；冷却中到期自动恢复。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">健康度<ColumnHint text="剩余积分占比三态：已知百分比 / 未探测 / 已耗尽。未探测≠已耗尽，点「探测」可重试。" /></span></TableHead>
-                <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期积分行＝调度窗口内即将过期、会被优先消耗的额度；主窗口（36h）打平时才比较次窗口（7 天）。" /></span></TableHead>
+                <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期积分行＝调度窗口内即将过期、会被优先消耗的额度；主窗口（36h）打平时才比较次窗口（7 天）。数字后的下箭头展开该凭证的积分记录（两次额度探测之间的净变化）。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">token 剩余<ColumnHint text="access token 距离到期还有多久，取自凭证本身（为 0 表示渠道未给到期信息，显示 —）。预刷新任务每小时检查一次，进入 24 小时窗口即自动续期；「已过期」意味着上游会拒绝该凭证，需重新登录。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">成长中心<ColumnHint text="仅 CodeBuddy：最近一轮成长中心（旅行礼物/任务/连登兑换/盲盒）的领取结果与时间，由定时任务或手动执行写入。" /></span></TableHead>
-                {isAdmin && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测/签到：行内常驻按钮。更多操作（⋯）：积分记录、指定、暂停/恢复、删除。指定：设为优先；暂停/删除：摘对话流量或移除。" /></span></TableHead>}
+                {isAdmin && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测/签到：行内常驻按钮。更多操作（⋯）：指定、暂停/恢复、删除。指定：设为优先；暂停/删除：摘对话流量或移除。积分记录入口在额度列数字后的下箭头。" /></span></TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -438,6 +439,7 @@ export function CredentialsPage() {
                     isAdmin={isAdmin}
                     busy={busy}
                     confirming={confirmDelete === credential.id}
+                    creditsOpen={creditEvents?.credentialId === credential.id}
                     onConfirmDelete={setConfirmDelete}
                     actions={actions}
                   />
@@ -520,9 +522,10 @@ export function CredentialsPage() {
           { term: "额度下方的时间语义", where: "额度列", meaning: "CodeBuddy 是「本周期剩余，<日期> 重置」；TRAE 是「账户剩余（单调递减）」。两者单位都是积分，但重置行为不同。" },
           { term: "到期积分（两行）", where: "额度列", meaning: "选号先比 36 小时内会过期的积分，多的先用；都相同（常见的是都为 0）时再比 7 天内会过期的积分。主窗口已有数字就只显示那一行，次窗口只在主窗口为空时才出现。" },
           { term: "套餐 N 个（额度首行右侧）", where: "额度列", meaning: "该账号当前生效的额度包个数。鼠标悬浮看每个包的名字、剩余/总量、已用与到期日（按到期先后）。未探测或渠道未返回明细时不显示。" },
+          { term: "积分记录（额度数字后的下箭头）", where: "额度列", meaning: "点开该凭证两次额度探测之间的净变化。下箭头表示「在本行内展开」而非弹层：展开后箭头翻转，再点一次收起。仅管理员视图显示。" },
           { term: "token 剩余", where: "token 剩余列", meaning: "该凭证 access token 距离到期还有多久。预刷新任务每小时跑一次，进入 24 小时窗口会自动续期，所以正常情况下看到的是长寿命（TRAE 约 14 天、CodeBuddy 约 55 天）递减。显示「已过期」时上游会拒绝该凭证，需重新登录；显示「—」表示渠道未提供到期信息。" },
           { term: "探测 / 签到", where: "操作列（常驻按钮）", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（后台每 10 分钟检查一次，当天成功即封账，失败持续重试，不受时刻限制）。两者是高频动作，直接显示在行内，不藏在「更多操作」菜单里。" },
-          { term: "更多操作（⋯）", where: "操作列", meaning: "积分记录：看该凭证两次探测之间的净变化。指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。暂停：只摘出对话流量不删数据（签到 / 刷新 / 探测不受影响）。删除：彻底移除凭证。CodeBuddy 另有成长中心 / 恢复 / 活跃上报。" },
+          { term: "更多操作（⋯）", where: "操作列", meaning: "指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。暂停：只摘出对话流量不删数据（签到 / 刷新 / 探测不受影响）。删除：彻底移除凭证。CodeBuddy 另有成长中心 / 恢复 / 活跃上报。" },
           { term: "模型避让（额度列下方）", where: "额度列", meaning: "某个模型在该账号上限流（6004）或该账号无此模型（11102）时只避让这一个模型——整条凭证仍参与调度，换其他模型立刻可用。模型限流按 10 分钟起指数退避，最长 2 小时；「无此模型」按 6 小时起，最长 24 小时。" },
           { term: "成长中心 / 活跃上报", where: "操作列", meaning: "成长中心：手动跑一轮成长中心领取（与定时任务同一条路径）。活跃上报：手动补发一条对话事件以续上「连登天数」——默认关闭的定时任务不做，这里仅供部署后验证；官方条款禁止脚本篡改活动数据，开启/使用前请自行评估账号风险。" },
         ]}
@@ -570,13 +573,14 @@ function PackageLadder({ credential }: { credential: Credential }) {
         </div>
       }
     >
-      <button
+      <Button
         type="button"
-        className="cursor-help text-left underline decoration-dotted underline-offset-2"
+        variant="link"
+        className="h-auto cursor-help px-0 text-left text-xs decoration-dotted underline-offset-2"
         data-testid={`packages-toggle-${credential.id}`}
       >
         套餐 {packages.length} 个
-      </button>
+      </Button>
     </LongTextTip>
   );
 }
@@ -642,6 +646,7 @@ function Row({
   isAdmin,
   busy,
   confirming,
+  creditsOpen,
   onConfirmDelete,
   actions,
 }: {
@@ -653,6 +658,7 @@ function Row({
   isAdmin: boolean;
   busy: boolean;
   confirming: boolean;
+  creditsOpen: boolean;
   onConfirmDelete: (id: string | null) => void;
   actions: Actions;
 }) {
@@ -710,8 +716,37 @@ function Row({
       </TableCell>
       <TableCell className="text-xs">
         <div className="flex flex-wrap items-baseline gap-x-2">
-          <span>
-            {formatNumber(credential.quota_remaining)} / {formatNumber(credential.quota_total)}
+          {/* 数字与积分记录入口同处一个 inline-flex：按钮跟数字做行内居中对齐，
+              而不是与整行 baseline 对齐（图标按钮没有文字基线，会明显偏低）。 */}
+          <span className="inline-flex items-center gap-1">
+            <span>
+              {formatNumber(credential.quota_remaining)} / {formatNumber(credential.quota_total)}
+            </span>
+            {/* 积分记录入口紧贴它要解释的数字：曾经在「更多操作」菜单里，
+                打开前看不到任何余额上下文。下箭头是行内展开语义（非弹层），
+                展开后箭头翻转。仅管理员可用——接口本身就是管理员权限。 */}
+            {isAdmin && (
+              <Button
+                // 项目封装的 Button：variant="default" 即 shadcn 的 outline
+                variant="default"
+                size="icon"
+                aria-label="积分记录"
+                aria-expanded={creditsOpen}
+                title="积分记录：两次额度探测之间的净变化"
+                data-testid={`credits-${credential.id}`}
+                onClick={() => actions.credits(credential)}
+                // 与数字同处一个 inline-flex items-center：图标按钮没有文字基线，
+                // 靠 baseline 对齐会明显偏低。不要再加 translate 微调——按钮
+                // 中心与数字墨迹中心实测只差 0.26px（12px 字号），属亚像素。
+                className={`size-4 shrink-0 ${
+                  creditsOpen ? "text-foreground" : "text-muted-foreground"
+                }`}
+              >
+                <ArrowDownIcon
+                  className={`size-2 transition-transform ${creditsOpen ? "rotate-180" : ""}`}
+                />
+              </Button>
+            )}
           </span>
           <PackageLadder credential={credential} />
         </div>
@@ -798,9 +833,6 @@ function Row({
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-44">
-                    <DropdownMenuItem onSelect={() => actions.credits(credential)}>
-                      <History className="size-4" /> 积分记录
-                    </DropdownMenuItem>
                     {credential.provider === "codebuddy" && (
                       <DropdownMenuItem onSelect={() => actions.growth(credential)}>
                         <Sparkles className="size-4" /> 成长中心
@@ -860,8 +892,8 @@ function CreditDrawer({
   onClose: () => void;
 }) {
   return (
-    <div
-      className="mt-4 rounded-lg border border-border/60 bg-muted/30 p-3"
+    <Card
+      className="mt-4 gap-0 bg-muted/30 p-3 ring-border/60"
       data-testid={`credit-drawer-${credentialId}`}
     >
       <div className="mb-2 flex items-center justify-between">
@@ -917,7 +949,7 @@ function CreditDrawer({
           </TableBody>
         </Table>
       )}
-    </div>
+    </Card>
   );
 }
 

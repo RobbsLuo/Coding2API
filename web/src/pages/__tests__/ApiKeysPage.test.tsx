@@ -244,10 +244,10 @@ it("调用示例默认折叠，点击端点行展开", async () => {
   renderPage(<ApiKeysPage />);
   await settle();
 
-  const details = screen.getByTestId("example-details") as HTMLDetailsElement;
-  expect(details.open).toBe(false);
-  await userEvent.click(details.querySelector("summary")!);
-  expect(details.open).toBe(true);
+  const trigger = screen.getByTestId("example-details-trigger");
+  expect(trigger).toHaveAttribute("data-state", "closed");
+  await userEvent.click(trigger);
+  expect(trigger).toHaveAttribute("data-state", "open");
   expect(screen.getByTestId("example-curl")).toBeVisible();
 });
 
@@ -258,10 +258,10 @@ it("余额端点示例同样默认折叠，展开后可复制 curl", async () =>
   renderPage(<ApiKeysPage />);
   await settle();
 
-  const details = screen.getByTestId("example-details-balance") as HTMLDetailsElement;
-  expect(details.open).toBe(false);
-  await userEvent.click(details.querySelector("summary")!);
-  expect(details.open).toBe(true);
+  const trigger = screen.getByTestId("example-details-balance-trigger");
+  expect(trigger).toHaveAttribute("data-state", "closed");
+  await userEvent.click(trigger);
+  expect(trigger).toHaveAttribute("data-state", "open");
 
   const copy = screen.getByTestId("copy-balance-curl");
   await userEvent.click(copy);
@@ -278,13 +278,16 @@ it("Responses 端点示例默认折叠，展开后可复制 Codex CLI 配置", a
   renderPage(<ApiKeysPage />);
   await settle();
 
-  const details = screen.getByTestId("example-details-responses") as HTMLDetailsElement;
-  expect(details.open).toBe(false);
-  // <details> 关闭时子节点仍在 DOM 里，只是不可见
-  expect(screen.getByTestId("example-responses")).not.toBeVisible();
+  const trigger = screen.getByTestId("example-details-responses-trigger");
+  expect(trigger).toHaveAttribute("data-state", "closed");
+  // 折叠时子节点仍在 DOM 里（forceMount），靠 data-state 控制可见性
+  expect(screen.getByTestId("example-responses").closest("[data-state]")).toHaveAttribute(
+    "data-state",
+    "closed",
+  );
 
-  await userEvent.click(details.querySelector("summary")!);
-  expect(details.open).toBe(true);
+  await userEvent.click(trigger);
+  expect(trigger).toHaveAttribute("data-state", "open");
   expect(screen.getByTestId("example-responses")).toBeVisible();
   expect(screen.getByTestId("example-responses")).toHaveTextContent("wire_api='responses'");
   expect(screen.getByTestId("example-responses")).toHaveTextContent(

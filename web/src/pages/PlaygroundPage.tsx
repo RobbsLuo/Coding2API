@@ -12,7 +12,7 @@ import { useSessionContext } from "../Layout";
 import { HelpBlock } from "../components/HelpBlock";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
-import { Button, Empty, Field, Notice, Panel, Select, Textarea } from "../ui";
+import { Button, Card, Checkbox, Empty, Field, Label, Notice, Panel, Select, Textarea } from "../ui";
 
 interface ModelInfo {
   id: string;
@@ -259,8 +259,9 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
             selectedInfo.max_output_tokens !== undefined ||
             selectedInfo.supports_images !== undefined ||
             selectedInfo.supports_tool_call !== undefined) && (
-            <div
-              className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border bg-muted/40 px-3 py-2 text-xs text-muted-foreground"
+            <Card
+              size="sm"
+              className="flex flex-row flex-wrap items-center gap-x-4 gap-y-1 bg-muted/40 px-3 py-2 text-xs text-muted-foreground ring-border"
               data-testid="model-meta"
             >
               {/* 渠道：品牌 logo 标注，多渠道全部显示 */}
@@ -326,7 +327,7 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                     : <X className="size-3.5 text-destructive" />}
                 </span>
               )}
-            </div>
+            </Card>
           )}
           {modelsQuery.isFetching && (
             <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -343,16 +344,14 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
               onChange={(event) => setPrompt(event.target.value)}
             />
           </Field>
-          <label className="flex w-fit cursor-pointer select-none items-center gap-2 text-sm">
-            <input
-              type="checkbox"
+          <Label className="w-fit cursor-pointer gap-2 text-sm font-normal">
+            <Checkbox
               checked={stream}
-              className="size-4 accent-primary"
               data-testid="stream-toggle"
-              onChange={(event) => setStream(event.target.checked)}
+              onCheckedChange={(value) => setStream(value === true)}
             />
             流式输出
-          </label>
+          </Label>
           <Button type="submit" variant="primary" disabled={busy} data-testid="send-request" className="gap-1.5">
             {busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
             {busy ? "请求中…" : "发送"}
@@ -388,15 +387,16 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
             </pre>
           </div>
           {usage && (
-            <div
-              className="mt-3 rounded-lg border border-border bg-muted/40 px-3 py-2 font-mono text-xs text-muted-foreground"
+            <Card
+              size="sm"
+              className="mt-3 gap-0 bg-muted/40 px-3 py-2 font-mono text-xs text-muted-foreground ring-border"
               data-testid="playground-usage"
             >
               <pre className="whitespace-pre-wrap">{JSON.stringify(usage, null, 2)}</pre>
               <div className="mt-1 font-sans">
                 credit 为渠道可选字段，经常不返回；健康度只依赖额度探测接口。
               </div>
-            </div>
+            </Card>
           )}
         </Panel>
       )}

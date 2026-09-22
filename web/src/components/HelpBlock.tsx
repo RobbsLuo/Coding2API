@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Button, Panel } from "../ui";
+import { Button, Card, Panel } from "../ui";
 
 export interface HelpEntry {
   term: string;
@@ -31,13 +31,13 @@ export function HelpBlock({ title, entries }: { title: string; entries: HelpEntr
       {open ? (
         <dl className="space-y-2.5">
           {entries.map((entry) => (
-            <div key={entry.term} className="rounded-lg border border-border px-3 py-2">
+            <Card key={entry.term} size="sm" className="gap-0 px-3 py-2 text-xs">
               <dt className="font-medium">{entry.term}</dt>
               <dd className="mt-0.5 text-xs text-muted-foreground">
                 位置：{entry.where}
                 <div className="mt-1 text-foreground">{entry.meaning}</div>
               </dd>
-            </div>
+            </Card>
           ))}
         </dl>
       ) : (

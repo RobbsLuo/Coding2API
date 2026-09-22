@@ -7,7 +7,7 @@ import { useQueryClient, useSettings, useTasks } from "../api/hooks";
 import { useSessionContext } from "../Layout";
 import type { RuntimeSetting, TaskStatus } from "../api/types";
 import { PageHeader } from "../components/PageHeader";
-import { Badge, Button, Empty, Field, Input, Notice, Panel, Select } from "../ui";
+import { Badge, Button, Card, Empty, Field, Input, Notice, Panel, Select } from "../ui";
 
 /** 前端只做「文本 → 待提交标量」的粗转；范围/组合校验以后端为准。 */
 function toInputValue(setting: RuntimeSetting): string {
@@ -131,8 +131,8 @@ function TaskCard({
         ? "正常"
         : "尚未执行";
   return (
-    <div
-      className="mb-3 rounded-lg border border-border p-4 last:mb-0"
+    <Card
+      className="mb-3 gap-0 p-4 last:mb-0"
       data-testid={`task-${task.key}`}
     >
       <div className="flex flex-wrap items-center gap-2">
@@ -174,7 +174,7 @@ function TaskCard({
           无可热更配置（周期固定，见上方说明）。
         </p>
       )}
-    </div>
+    </Card>
   );
 }
 

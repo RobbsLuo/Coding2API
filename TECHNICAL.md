@@ -448,7 +448,7 @@ response.completed | response.incomplete
 
 `window_start` 记的是**上次探测时刻**（不是「上次有变动」）：中间那次没变化但同样观测过，区间必须从最近一次观测算起，否则会把一段无人观测的时间也算进去。
 
-**接口**：`GET /api/credentials/{id}/credit-events?limit=20`（管理员；未知凭证 400 而不是空列表，避免拼错 id 时看起来「没有记录」）。前端为凭证行内的「积分记录」抽屉。
+**接口**：`GET /api/credentials/{id}/credit-events?limit=20`（管理员；未知凭证 400 而不是空列表，避免拼错 id 时看起来「没有记录」）。前端入口是凭证**额度**列数字后的下箭头，展开为该行内独立的「积分记录」抽屉。
 
 **保留**：`RetentionTask` 按 `usage_events` 同一保留期（90 天）回收，报告里体现为 `purged_credit_events`。
 

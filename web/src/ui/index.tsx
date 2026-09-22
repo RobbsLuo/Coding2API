@@ -27,6 +27,13 @@ import {
 // 控件 re-export shadcn 标准件（Label 同时本地用于 Field）
 export { Input } from "@/components/ui/input";
 export { Textarea } from "@/components/ui/textarea";
+export { Checkbox } from "@/components/ui/checkbox";
+export { Card } from "@/components/ui/card";
+export {
+  Collapsible,
+  CollapsibleTrigger,
+  CollapsibleContent,
+} from "@/components/ui/collapsible";
 export {
   Label,
   Skeleton,
@@ -41,7 +48,7 @@ export {
 
 // ================================================================ Button
 // 旧变体映射到 shadcn：primary(实底)→default；default(描边)→outline；danger→destructive
-type ButtonVariant = "default" | "primary" | "danger" | "ghost";
+type ButtonVariant = "default" | "primary" | "danger" | "ghost" | "link";
 type ButtonSize = "sm" | "md" | "icon";
 
 const VARIANT_MAP = {
@@ -49,6 +56,7 @@ const VARIANT_MAP = {
   primary: "default",
   danger: "destructive",
   ghost: "ghost",
+  link: "link",
 } as const;
 
 const SIZE_MAP = { sm: "sm", md: "default", icon: "icon-sm" } as const;
@@ -203,7 +211,15 @@ export function Tabs({
 
 // ================================================================ Notice (Alert)
 
-export function Notice({ tone = "muted", children }: { tone?: Tone; children: ReactNode }) {
+export function Notice({
+  tone = "muted",
+  className,
+  children,
+}: {
+  tone?: Tone;
+  className?: string;
+  children: ReactNode;
+}) {
   const cls: Record<Tone, string> = {
     ok: "border-ok/30 bg-ok/10 text-ok",
     warn: "border-warn/40 bg-warn/15 text-warn",
@@ -214,7 +230,7 @@ export function Notice({ tone = "muted", children }: { tone?: Tone; children: Re
   return (
     <ShadAlert
       variant={tone === "danger" ? "destructive" : "default"}
-      className={cn("items-center", cls[tone])}
+      className={cn("items-center", cls[tone], className)}
     >
       {children}
     </ShadAlert>

@@ -42,6 +42,8 @@ describe("CredentialsPage", () => {
 
     expect(screen.getByTestId("readonly-banner")).toHaveTextContent("只读模式");
     expect(screen.queryByTestId("actions-cred_1")).not.toBeInTheDocument();
+    // 积分记录也要藏：它只藏入口，后端仍会 403，但只读视图不该给出可点假象
+    expect(screen.queryByTestId("credits-cred_1")).not.toBeInTheDocument();
     expect(screen.queryByTestId("import-submit")).not.toBeInTheDocument();
     expect(screen.queryByTestId("start-login")).not.toBeInTheDocument();
   });
@@ -151,10 +153,12 @@ describe("CredentialsPage", () => {
     const toggle = screen.getByTestId("packages-toggle-cb");
     expect(toggle).toHaveTextContent("套餐 4 个");
     expect(screen.queryByTestId("package-cb")).not.toBeInTheDocument();
-    // 「套餐 N 个」跟在首行「剩余 / 总量」右侧（同一个 flex 容器）
+    // 「套餐 N 个」与首行「剩余 / 总量」同处一行的 flex 容器；
+    // 数字那侧多包了一层 inline-flex（对齐积分记录图标按钮），所以要上溯一层
     const row = screen.getByTestId("row-cb");
     const quotaSpan = within(row).getByText("62 / 100");
-    expect(quotaSpan.parentElement).toBe(toggle.parentElement);
+    expect(quotaSpan.parentElement?.parentElement).toBe(toggle.parentElement);
+    expect(toggle.parentElement).toHaveClass("flex-wrap");
 
     await userEvent.hover(toggle);
     const tip = await screen.findByRole("tooltip");
@@ -882,17 +886,43 @@ describe("CredentialsPage 成长中心", () => {
         { id: "cre_1", credential_id: "cred_1", ts: now - 600, window_start: null,
           before: null, after: 100, delta: null, source: "sync" },
       ] },
-      "/api/credentials": listBody([makeCredential({ id: "cred_1" })]),
+      "/api/credentials": listBody([
+        makeCredential({
+          id: "cred_1",
+          quota_remaining: 4872.77,
+          quota_total: 4950,
+          // 放一个额度包：用它锚定「积分记录箭头排在额度包之前」的相对顺序
+          quota_packages: [{ name: "福利积分", total: 100, used: 0, end: null }],
+        }),
+      ]),
     });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
 
-    await userEvent.click(screen.getByTestId("actions-cred_1"));
-    await userEvent.click(screen.getByRole("menuitem", { name: "积分记录" }));
+    await userEvent.click(screen.getByTestId("credits-cred_1"));
 
     const drawer = await screen.findByTestId("credit-drawer-cred_1");
     // 说「净变化」，不说「签到获得」——上游不打日志，归因是猜的
     expect(drawer).toHaveTextContent("两次额度探测之间的净变化（非动作归因）");
+    // 入口是额度列数字后的下箭头：它是「行内展开」不是弹层，
+    // aria-expanded 与箭头翻转同步反映展开态。
+    const toggle = screen.getByTestId("credits-cred_1");
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+    expect(toggle.querySelector("svg")).toHaveClass("rotate-180");
+    // 位置锁死在积分数字正后方（「套餐 N 个」之前），不是排在行尾；
+    // 且与数字同在一个 inline-flex items-center 容器里——图标按钮没有文字
+    // 基线，跟整行 baseline 对齐会明显偏低。
+    const quotaLine = toggle.parentElement as HTMLElement;
+    expect(quotaLine).toHaveClass("items-center");
+    // 不要自作聪明加 translate 补偿：实测「数字字形 4」的墨迹中心与箭头墨迹
+    // 中心完全重合（都在 267.144px）。之前那次「偏低」其实是多余的
+    // translate-y-0.5 自己造成的。这里用计算样式断言，静止时不允许有位移
+    //（按钮基础样式自带 active:translate-y-px 的按下反馈，不属于对齐补偿）。
+    expect(getComputedStyle(toggle).transform).toBe("none");
+    expect(quotaLine.parentElement?.children[1]).toHaveTextContent("套餐");
+    expect(quotaLine.firstElementChild).toHaveTextContent("4,872.77 / 4,950");
+    expect(quotaLine.children[1]).toBe(toggle);
+    expect(quotaLine.parentElement).toHaveTextContent("4,872.77 / 4,950");
     // 抽屉必须是独立的表格行：塞进凭证行内部只会挤在「操作」列里
     // （同行内 colSpan 不生效），这个断言就是防那次布局事故复发
     const drawerRow = screen.getByTestId("credit-row-cred_1");
@@ -921,8 +951,7 @@ describe("CredentialsPage 成长中心", () => {
     });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
-    await userEvent.click(screen.getByTestId("actions-cred_1"));
-    await userEvent.click(screen.getByRole("menuitem", { name: "积分记录" }));
+    await userEvent.click(screen.getByTestId("credits-cred_1"));
 
     const cell = await screen.findByTestId("credit-event-cre_x");
     expect(cell).toHaveTextContent("由 100 变为未知");
@@ -939,19 +968,22 @@ describe("CredentialsPage 成长中心", () => {
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
 
-    await userEvent.click(screen.getByTestId("actions-cred_1"));
-    await userEvent.click(screen.getByRole("menuitem", { name: "积分记录" }));
+    await userEvent.click(screen.getByTestId("credits-cred_1"));
     const drawer = await screen.findByTestId("credit-drawer-cred_1");
     expect(within(drawer).getByTestId("credit-drawer-empty")).toHaveTextContent(
       "下一轮额度探测时写入",
     );
 
+    // 关闭后箭头转回朝下
     await userEvent.click(screen.getByTestId("credit-drawer-close"));
     expect(screen.queryByTestId("credit-drawer-cred_1")).not.toBeInTheDocument();
+    expect(screen.getByTestId("credits-cred_1")).toHaveAttribute("aria-expanded", "false");
+    expect(screen.getByTestId("credits-cred_1").querySelector("svg")).not.toHaveClass(
+      "rotate-180",
+    );
 
-    // 再次点菜单可重新打开（不是一次性开关）
-    await userEvent.click(screen.getByTestId("actions-cred_1"));
-    await userEvent.click(screen.getByRole("menuitem", { name: "积分记录" }));
+    // 再次点箭头可重新打开（不是一次性开关）
+    await userEvent.click(screen.getByTestId("credits-cred_1"));
     expect(await screen.findByTestId("credit-drawer-cred_1")).toBeInTheDocument();
   });
 });

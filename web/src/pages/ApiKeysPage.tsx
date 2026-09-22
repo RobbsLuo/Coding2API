@@ -8,6 +8,9 @@ import type { ApiKeyCreated } from "../api/types";
 import {
   Badge,
   Button,
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
   Empty,
   Field,
   Input,
@@ -126,7 +129,7 @@ function CodeExample({
   );
 }
 
-/** 折叠的端点行：summary 显示方法与说明，展开后可复制调用示例 */
+/** 折叠的端点行：trigger 显示方法与说明，展开后可复制调用示例 */
 function EndpointRow({
   method,
   path,
@@ -140,17 +143,28 @@ function EndpointRow({
   children: React.ReactNode;
   testid: string;
 }) {
+  const [open, setOpen] = useState(false);
   return (
-    <details data-testid={testid} className="group rounded-lg border border-border px-3 py-2 [&_summary::-webkit-details-marker]:hidden">
-      <summary className="flex cursor-pointer select-none items-center flex-wrap gap-2">
+    <Collapsible
+      open={open}
+      onOpenChange={setOpen}
+      data-testid={testid}
+      className="group rounded-lg border border-border px-3 py-2"
+    >
+      <CollapsibleTrigger
+        data-testid={`${testid}-trigger`}
+        className="flex w-full cursor-pointer select-none flex-wrap items-center gap-2"
+      >
         <Badge>{method}</Badge> <code>{path}</code>
         <span>{description}</span>
-        <span className="ml-auto inline-flex items-center gap-1 text-muted-foreground group-open:hidden">
+        <span className="ml-auto inline-flex items-center gap-1 text-muted-foreground group-data-[state=open]:hidden">
           <Plus className="size-3" />调用示例
         </span>
-      </summary>
-      <div className="mt-3 space-y-3">{children}</div>
-    </details>
+      </CollapsibleTrigger>
+      <CollapsibleContent forceMount className="mt-3 space-y-3 data-[state=closed]:hidden">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
