@@ -144,6 +144,83 @@ def test_ci_workflow_paths_match_repository():
     assert "--cov-fail-under=100" in workflow
 
 
+# -------------------------------------------------─ macOS launchd 部署产物
+
+LAUNCHD_TEMPLATE = ROOT / "deploy" / "launchd" / "com.coding2api.plist"
+BUILD_WEB = ROOT / "scripts" / "build-web.sh"
+LAUNCHD_SERVER = ROOT / "scripts" / "launchd-server.sh"
+
+
+def test_launchd_template_exists_and_is_valid_plist():
+    """仓库必须留一份 plist 模板：只放在 ~/Library/LaunchAgents 里不可复现。"""
+    import plistlib
+
+    assert LAUNCHD_TEMPLATE.is_file(), "缺少 deploy/launchd 下的 plist 模板"
+    with LAUNCHD_TEMPLATE.open("rb") as handle:
+        data = plistlib.load(handle)
+    assert data["Label"] == "com.coding2api"
+    assert data["RunAtLoad"] is True
+    assert data["KeepAlive"] is True
+    # 日志路径必须与本机 plist / newsyslog 规则一致（改一处漏一处最难查）
+    assert data["StandardOutPath"].endswith("logs/launchd.out.log")
+    assert data["StandardErrorPath"].endswith("logs/launchd.err.log")
+
+
+def test_launchd_template_starts_via_wrapper_not_bare_uvicorn():
+    """入口必须是 wrapper：它负责先构建前端产物。
+
+    后端在 / 直接服务 web/dist，裸 uvicorn 会让首次部署拿到 503
+    「管理台前端尚未构建」。
+    """
+    import plistlib
+
+    with LAUNCHD_TEMPLATE.open("rb") as handle:
+        args = plistlib.load(handle)["ProgramArguments"]
+    assert args[-1].endswith("scripts/launchd-server.sh"), args
+    assert "uvicorn" not in args, "uvicorn 应写在 wrapper 里，便于构建失败时不阻断"
+
+
+def test_launchd_server_uses_exec_so_keepalive_tracks_the_real_process():
+    """uvicorn 必须用 exec 替换脚本进程。
+
+    否则 launchd 监管的是 bash，kickstart -k 的 SIGTERM 打到 bash，
+    真正的 uvicorn 会变成孤儿继续占着 8000 端口。
+    """
+    text = LAUNCHD_SERVER.read_text(encoding="utf-8")
+    assert re.search(r"^exec ", text, re.MULTILINE), "缺少 exec，信号无法直达 uvicorn"
+
+
+def test_launchd_server_does_not_abort_when_build_fails():
+    """构建失败不得阻断启动。
+
+    plist 是 KeepAlive + ThrottleInterval=10：若脚本在构建失败时退出，
+    launchd 会每 10 秒重拉一次 → 无限循环刷日志、烧 CPU。这里锁定
+    「build 结果被判断后继续，而不是 set -e 直接退出」。
+    """
+    text = LAUNCHD_SERVER.read_text(encoding="utf-8")
+    # 不能用 set -e：会让 build-web 的非零退出码直接终止脚本
+    assert "set -e" not in text, "wrapper 不能开 set -e，构建失败会中断启动"
+    assert "if ! " in text and "build-web.sh" in text
+
+
+def test_build_web_resolves_pnpm_outside_login_shell():
+    """build-web 必须自己解析 node/pnpm 路径。
+
+    launchd 不读 shell rc，PATH 只有 plist 里的系统目录；本机 pnpm 装在
+    nvm 下，直接调 `pnpm` 会 command not found。
+    """
+    text = BUILD_WEB.read_text(encoding="utf-8")
+    assert ".nvm" in text, "未处理 nvm：launchd 环境下会找不到 pnpm"
+    assert "--frozen-lockfile" in text, "依赖安装必须按 lockfile，与 CI 一致"
+
+
+def test_build_web_is_executable():
+    """两个脚本都必须有执行位，否则 plist 启动会 permission denied。"""
+    for script in (BUILD_WEB, LAUNCHD_SERVER):
+        assert script.is_file()
+        assert script.stat().st_mode & 0o111, f"{script.name} 没有执行位"
+
+
 # ------------------------------------------------- 探测失败原因的分类
 
 def test_describe_probe_failure_maps_http_status_to_actionable_reason():

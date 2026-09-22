@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.coding2api</string>
+
+    <!-- 入口是 wrapper 而不是直接 uvicorn：启动前先构建前端产物
+         （后端在 http://127.0.0.1:8000/ 直接服务 web/dist，见
+         src/webapp/static.py）。构建失败不阻断启动的取舍见
+         scripts/launchd-server.sh 顶部说明。 -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/robbs/Develpment/PartTimeJob/coding2api/scripts/launchd-server.sh</string>
+    </array>
+
+    <!-- .env 用相对路径读取，必须切到项目根 -->
+    <key>WorkingDirectory</key>
+    <string>/Users/robbs/Develpment/PartTimeJob/coding2api</string>
+
+    <!-- 登录时自动启动 -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <!-- 进程退出/崩溃后自动拉起 -->
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/robbs/Develpment/PartTimeJob/coding2api/logs/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/robbs/Develpment/PartTimeJob/coding2api/logs/launchd.err.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- PATH 只有系统目录：本机 pnpm 装在 nvm 下，由
+             scripts/build-web.sh 自行解析后追加，不在这里写死。 -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>

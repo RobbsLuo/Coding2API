@@ -236,6 +236,23 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 
 - **时区**：镜像默认 `TZ=Asia/Shanghai`；如需其它时区显式覆盖 `TZ`。
 
+### macOS（launchd）
+
+仓库在 `deploy/launchd/com.coding2api.plist` 留了一份模板（本机实际运行的 plist 一旦丢失就无法复现）。它把后端交给 launchd 常驻，并按后端 `:8000` 直接服务前端产物。
+
+```bash
+cp deploy/launchd/com.coding2api.plist ~/Library/LaunchAgents/
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.coding2api.plist   # 装载
+launchctl kickstart -k gui/$(id -u)/com.coding2api                            # 重启
+launchctl bootout gui/$(id -u)/com.coding2api                                 # 卸载
+```
+
+入口是 `scripts/launchd-server.sh`（不是裸 uvicorn），它先跑 `scripts/build-web.sh` 构建前端，再 `exec` 起后端：
+
+- **后端在 `http://127.0.0.1:8000/` 直接服务 `web/dist`**（`src/webapp/static.py` 用 `FileResponse` 每次请求现读磁盘），所以**构建完刷新即可，无需重启后端**；`localhost:5173` 是 Vite 开发态（HMR），两者可并存。
+- **构建失败不阻断启动**：plist 是 `KeepAlive` + `ThrottleInterval=10`，若构建失败就退出，launchd 会每 10 秒重拉一次变成死循环。脚本改为「构建失败 → 警告 → 用既有产物继续起服务」。
+- **pnpm 装在 nvm 下**：launchd 不读 shell rc，PATH 只有 plist 里的系统目录，`build-web.sh` 会自己从 `~/.nvm/alias/default` 解析出 node/pnpm 路径。手动构建用 `./scripts/build-web.sh`（`--force` 强制重建）。
+
 ## 日志
 
 应用只写 **stdout / stderr**，不自己写文件也不自己轮转（原因见 [`src/webapp/logging.py`](src/webapp/logging.py) 顶部说明）：三种部署形态采集方式不同，但都靠这两个 fd 对接，轮转交给各自的平台工具。因此**日志自己不会停止增长**——按下面对应形态配一次即可。
