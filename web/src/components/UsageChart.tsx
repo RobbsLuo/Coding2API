@@ -7,8 +7,11 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { formatChartValue } from "../api/display";
+import { formatAxisValue, formatChartValue, METRIC_AXIS_UNIT } from "../api/display";
 import type { TimelinePoint } from "../api/types";
+
+/** Y 轴宽度：容下紧凑刻度（如「1500万」「850 ms」）。 */
+const Y_AXIS_WIDTH = 56;
 
 /** 请求量时间序列曲线（recharts）。点少时仍画满可用宽度，不加插值。 */
 export function UsageChart({ points, metric }: { points: TimelinePoint[]; metric?: string }) {
@@ -21,11 +24,13 @@ export function UsageChart({ points, metric }: { points: TimelinePoint[]; metric
       hour: "2-digit",
     }),
   }));
+  // 单位标签只对不自带单位的指标（计数 / token）显示；耗时/首字的刻度已含 ms/s
+  const axisUnit = METRIC_AXIS_UNIT[metric ?? "requests"];
 
   return (
     <div className="h-64 w-full">
       <ResponsiveContainer width="100%" height="100%">
-        <AreaChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+        <AreaChart data={data} margin={{ top: 32, right: 12, left: 0, bottom: 0 }}>
           <defs>
             <linearGradient id="gcodebuddy" x1="0" y1="0" x2="0" y2="1">
               <stop offset="0%" stopColor="var(--chart-1)" stopOpacity={0.25} />
@@ -47,10 +52,22 @@ export function UsageChart({ points, metric }: { points: TimelinePoint[]; metric
           />
           <YAxis
             allowDecimals={false}
-            width={36}
+            width={Y_AXIS_WIDTH}
             tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
             tickLine={false}
             axisLine={false}
+            tickFormatter={(value) => formatAxisValue(Number(value), metric ?? "requests")}
+            label={
+              axisUnit
+                ? {
+                    value: axisUnit,
+                    position: "top",
+                    angle: 0,
+                    offset: 13,
+                    style: { fontSize: 11, fill: "var(--muted-foreground)", textAnchor: "middle" },
+                  }
+                : undefined
+            }
           />
           <Tooltip
             contentStyle={{

@@ -264,6 +264,33 @@ export function formatChartValue(value: number, metric: string): string {
   }
 }
 
+/**
+ * Y 轴刻度文案。
+ *
+ * 为什么不复用 `formatChartValue`：轴宽有限，hover 才需要带单位
+ * （`1500万 (tokens)`）。轴刻度直接渲染原始数字时会渲染 `15000000`
+ * （8 个字符 ≈ 55px），超出轴宽后被裁掉左侧，看起来像缺了一位。
+ *
+ * - 计数 / token：紧凑格式（`1500万`），单位交给轴顶的 `METRIC_AXIS_UNIT` 写一次
+ * - 耗时 / 首字：复用 `formatLatency`，与 hover 完全同口径（`850 ms` / `8.2 s`），
+ *   刻度自带单位所以不再另标
+ */
+export function formatAxisValue(value: number, metric: string): string {
+  if (metric === "ttfb" || metric === "latency") {
+    return formatLatency(value);
+  }
+  return formatCompact(value);
+}
+
+/**
+ * 图表 Y 轴单位文案，写在轴顶（刻度本身不带单位，避免每格重复）。
+ *
+ * 耗时 / 首字不出现在这里：它们的刻度自带 `ms` / `s`，再标一次是啰嗦。
+ */
+export const METRIC_AXIS_UNIT: Record<string, string> = {
+  requests: "次",
+  tokens: "tokens",
+};
 
 /** 统计明细的失败类型（线值，来自后端 CONTROLLED_ERROR_TYPES）。
  *  注意与 ProbeFailureReason 不是同一套：那是探测失败，这是请求失败。 */

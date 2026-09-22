@@ -9,7 +9,7 @@ import {
   YAxis,
 } from "recharts";
 import type { ModelTimelinePoint } from "../api/types";
-import { formatChartValue } from "../api/display";
+import { formatAxisValue, formatChartValue, METRIC_AXIS_UNIT } from "../api/display";
 
 const COLORS = [
   "var(--chart-1)",
@@ -19,6 +19,9 @@ const COLORS = [
   "var(--chart-5)",
   "var(--primary)",
 ];
+
+/** Y 轴宽度：容下紧凑刻度（如「1500万」「850 ms」）。 */
+const Y_AXIS_WIDTH = 56;
 
 /** 按模型指标趋势：每小时各 Top N 模型一条曲线（recharts）。 */
 export function ModelTrendChart({
@@ -39,11 +42,13 @@ export function ModelTrendChart({
       hour: "2-digit",
     }),
   }));
+  // 单位标签只对不自带单位的指标（计数 / token）显示；耗时/首字的刻度已含 ms/s
+  const axisUnit = METRIC_AXIS_UNIT[metric ?? "requests"];
 
   return (
     <div className="h-64 w-full" data-testid="model-trend-chart">
       <ResponsiveContainer width="100%" height="100%">
-        <LineChart data={data} margin={{ top: 8, right: 12, left: 0, bottom: 0 }}>
+        <LineChart data={data} margin={{ top: 32, right: 12, left: 0, bottom: 0 }}>
           <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
           <XAxis
             dataKey="time"
@@ -55,10 +60,22 @@ export function ModelTrendChart({
           />
           <YAxis
             allowDecimals={false}
-            width={36}
+            width={Y_AXIS_WIDTH}
             tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
             tickLine={false}
             axisLine={false}
+            tickFormatter={(value) => formatAxisValue(Number(value), metric ?? "requests")}
+            label={
+              axisUnit
+                ? {
+                    value: axisUnit,
+                    position: "top",
+                    angle: 0,
+                    offset: 13,
+                    style: { fontSize: 11, fill: "var(--muted-foreground)", textAnchor: "middle" },
+                  }
+                : undefined
+            }
           />
           <Tooltip
             contentStyle={{

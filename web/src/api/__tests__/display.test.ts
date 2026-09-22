@@ -3,7 +3,9 @@ import {
   creditEventLabel,
   expiringQuotaLabel,
   formatAgo,
+  formatAxisValue,
   formatChartValue,
+  METRIC_AXIS_UNIT,
   taskReportLabel,
   tokenExpiryView,
 } from "../display";
@@ -26,6 +28,26 @@ describe("formatChartValue", () => {
 
   it("未知指标回退请求次数", () => {
     expect(formatChartValue(12, "bogus")).toBe("12 (次)");
+  });
+});
+
+describe("formatAxisValue", () => {
+  it("计数 / token：紧凑格式且不带单位（单位交给轴顶 label）", () => {
+    expect(formatAxisValue(600, "requests")).toBe("600");
+    expect(formatAxisValue(15000000, "tokens")).toBe("1500万");
+    expect(formatAxisValue(12, "bogus")).toBe("12");
+  });
+
+  it("耗时 / 首字：复用 formatLatency，刻度自带 ms/s", () => {
+    expect(formatAxisValue(850, "latency")).toBe("850 ms");
+    expect(formatAxisValue(22000, "ttfb")).toBe("22 s");
+  });
+
+  it("轴顶单位映射：耗时/首字不重复标单位", () => {
+    expect(METRIC_AXIS_UNIT.requests).toBe("次");
+    expect(METRIC_AXIS_UNIT.tokens).toBe("tokens");
+    expect(METRIC_AXIS_UNIT.latency).toBeUndefined();
+    expect(METRIC_AXIS_UNIT.ttfb).toBeUndefined();
   });
 });
 
