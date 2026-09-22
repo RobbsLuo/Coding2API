@@ -151,6 +151,10 @@ describe("CredentialsPage", () => {
     const toggle = screen.getByTestId("packages-toggle-cb");
     expect(toggle).toHaveTextContent("套餐 4 个");
     expect(screen.queryByTestId("package-cb")).not.toBeInTheDocument();
+    // 「套餐 N 个」跟在首行「剩余 / 总量」右侧（同一个 flex 容器）
+    const row = screen.getByTestId("row-cb");
+    const quotaSpan = within(row).getByText("62 / 100");
+    expect(quotaSpan.parentElement).toBe(toggle.parentElement);
 
     await userEvent.hover(toggle);
     const tip = await screen.findByRole("tooltip");
@@ -179,6 +183,15 @@ describe("CredentialsPage", () => {
     await settle();
 
     expect(screen.queryByTestId("packages-toggle-empty")).not.toBeInTheDocument();
+  });
+
+  it("额度列不再显示「探测于」时间戳", async () => {
+    mockFetch({ "/api/credentials": listBody([makeCredential({ id: "cb" })]) });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const row = screen.getByTestId("row-cb");
+    expect(within(row).queryByText(/探测于/)).not.toBeInTheDocument();
   });
 
   it("模型级冷却：只写「该模型被避让」，并显示剩余时间与命中次数", async () => {

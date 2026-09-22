@@ -518,6 +518,7 @@ export function CredentialsPage() {
           { term: "健康度：未探测到额度", where: "健康度列", meaning: "探测失败或渠道没返回额度信息。注意它不是「已耗尽」——点「探测」可重新获取。" },
           { term: "额度下方的时间语义", where: "额度列", meaning: "CodeBuddy 是「本周期剩余，<日期> 重置」；TRAE 是「账户剩余（单调递减）」。两者单位都是积分，但重置行为不同。" },
           { term: "到期积分（两行）", where: "额度列", meaning: "选号先比 36 小时内会过期的积分，多的先用；都相同（常见的是都为 0）时再比 7 天内会过期的积分。主窗口已有数字就只显示那一行，次窗口只在主窗口为空时才出现。" },
+          { term: "套餐 N 个（额度首行右侧）", where: "额度列", meaning: "该账号当前生效的额度包个数。鼠标悬浮看每个包的名字、剩余/总量、已用与到期日（按到期先后）。未探测或渠道未返回明细时不显示。" },
           { term: "探测 / 签到", where: "操作列", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（每天 9 点系统自动签到）。" },
           { term: "指定 / 暂停 / 删除", where: "操作列", meaning: "指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。暂停：只摘出对话流量不删数据（签到 / 刷新 / 探测不受影响）。删除：彻底移除凭证。" },
           { term: "模型避让（额度列下方）", where: "额度列", meaning: "某个模型在该账号上限流（6004）或该账号无此模型（11102）时只避让这一个模型——整条凭证仍参与调度，换其他模型立刻可用。模型限流按 10 分钟起指数退避，最长 2 小时；「无此模型」按 6 小时起，最长 24 小时。" },
@@ -530,9 +531,9 @@ export function CredentialsPage() {
 }
 
 /** 额度包明细：一个账号常有几十个各自独立到期的积分/权益包，
- * 汇总（剩余/总量）看不出"哪些包、什么时候过期"。表格里只留一个
- * 「套餐 N 个」，鼠标悬浮才弹出完整明细——几十行不能挤进单元格。
- * 无明细（未探测/上游未提供）时不渲染。
+ * 汇总（剩余/总量）看不出"哪些包、什么时候过期"。表格里只在首行
+ * 「剩余 / 总量」右侧留一个「套餐 N 个」，鼠标悬浮才弹出完整明细——
+ * 几十行不能挤进单元格。无明细（未探测/上游未提供）时不渲染。
  */
 function PackageLadder({ credential }: { credential: Credential }) {
   const packages = credential.quota_packages ?? [];
@@ -716,7 +717,12 @@ function Row({
         )}
       </TableCell>
       <TableCell className="text-xs">
-        {formatNumber(credential.quota_remaining)} / {formatNumber(credential.quota_total)}
+        <div className="flex flex-wrap items-baseline gap-x-2">
+          <span>
+            {formatNumber(credential.quota_remaining)} / {formatNumber(credential.quota_total)}
+          </span>
+          <PackageLadder credential={credential} />
+        </div>
         {expiring && (
           <div className="text-warn" data-testid="quota-expiring">
             {expiring}
@@ -728,11 +734,7 @@ function Row({
           </div>
         )}
         <div className="text-muted-foreground">{quotaSemantics(credential)}</div>
-        <PackageLadder credential={credential} />
         <ModelCooldownList credential={credential} now={now} />
-        <div className="text-muted-foreground">
-          探测于 {formatTime(credential.quota_probed_at)}
-        </div>
         <TokenExpiry credential={credential} view={tokenExpiry} />
       </TableCell>
       <TableCell className="text-xs text-muted-foreground">
