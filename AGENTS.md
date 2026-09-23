@@ -10,6 +10,12 @@
 - 前端（web/）：`pnpm exec tsc --noEmit` + `pnpm exec vitest run` + `pnpm build`
 - 注意平台差异：本地 macOS 通过不代表 CI（ubuntu-latest）通过；平台相关分支
   （platform.system/machine 等）必须用 monkeypatch 测全所有分支
+- **测试不得依赖本地 `.env`**：本地 `.env` 会补上 `APP_SECRET` 等必填项，CI 没有。
+  构造 `Settings` 必须显式传值；验证时临时移走 `.env` 再跑全量（B5 首条 CI 即栽于此）
+- **重启本地服务后才算验证完成**：改 `src/` 必须重启 launchd 服务
+  （`launchctl kickstart -k gui/$(id -u)/com.coding2api`），只改前端则重新构建即可。
+  否则会出现「新前端 + 旧后端」错配：新端点 404，前端弹出与真实原因无关的兜底文案
+  （B5 上线时「创建用户失败」的真实原因是后端进程还跑着迁移前的代码）
 
 ## GitHub Actions（硬约束）
 

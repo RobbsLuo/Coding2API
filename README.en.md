@@ -77,6 +77,36 @@ Streaming text, reasoning summaries, function tool calls, and `finish_reason=len
 
 > Verification boundary: no Codex CLI was available on the development machine. Wire shapes come from the official `openai` Python SDK types and were validated end-to-end using that SDK as the client, plus a smoke test against the real upstream. No end-to-end run with the actual Codex CLI has been performed.
 
+## Upgrading
+
+**Restart the process after changing anything under `src/`.** The backend loads routes and
+assembly at startup only; `launchd` / systemd / Docker restart a process when it *exits* —
+`KeepAlive` is not a hot reload. The frontend is different: the backend serves `web/dist`
+with `FileResponse`, reading from disk on every request, so a rebuild just needs a browser
+refresh.
+
+Updating them independently produces a **new frontend against an old backend**. The page
+loads (static files are current) but new endpoints fail: the old process has no such route,
+unmatched `/api/*` returns a JSON `404`, and the client collapses that into a generic error
+with an unrelated message. This happened on the B5 rollout — creating a user reported
+"username may already exist, or the role is invalid" when the real cause was `/api/users`
+being a `404` because the running process predated the migration (the old DB still had
+`PRAGMA user_version` = 13 and no `users` table).
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.coding2api   # macOS (launchd)
+docker compose up -d --force-recreate                # Docker / compose
+sudo systemctl restart coding2api                    # systemd
+
+# Confirm the upgrade took effect
+sqlite3 data/coding2api.sqlite3 "PRAGMA user_version;"        # expect 14
+curl -s -o /dev/null -w '%{http_code}\n' .../api/users        # expect 401; 404 = old backend
+```
+
+Schema upgrades are additive — `users` / `audit_events` are new tables and existing rows
+(credentials, usage) are preserved. The restart performs the migration and bootstrap in one
+step. Details in [`TECHNICAL.md` §6.4](TECHNICAL.md) (Chinese).
+
 ## Documentation
 
 Detailed documentation is written in Chinese:

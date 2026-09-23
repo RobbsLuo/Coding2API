@@ -763,6 +763,29 @@ class Scheduler:
 
 未识别的 `reason` 必须回退到 `unknown_error`，不得透传原始字符串。
 
+### 6.4 部署与升级：重启是必须的
+
+**静态产物与进程内代码的刷新方式不同**，这是 B5 上线时踩过的坑：
+
+- **前端**：后端对 `web/dist` 用 `FileResponse` **每次请求现读磁盘**，所以重新构建后刷新浏览器即生效，无需重启。
+- **后端**：`src/` 下的一切（路由、依赖、`build_app` 装配）只在**进程启动时**装载。`launchd` / systemd / docker 都只在进程**退出**时重新拉起，**不监听源码变化**——`KeepAlive` 不是热重载。
+
+两者可以独立更新，于是会出现 **「新前端 + 旧后端」**的错配：页面能打开（静态文件是新的），但新端点全部失败。旧后端没有该路由，未匹配的 `/api/*` 按约定返回 JSON `404`（`webapp/static.py` 的 SPA catch-all 排除 `/api` 与 `/v1`），前端把它归一成**无 `message` 的通用失败**，最后弹出与实际原因无关的兜底文案。
+
+B5 的实际症状值得记住：新建用户报「用户名可能已存在，或角色非法」，真实原因是 `/api/users` 在旧进程里 `404`（连路由都没有），而不是重名或角色非法。老库此时 `PRAGMA user_version` 仍是 13、没有 `users` 表——**一条能立刻证伪/证实的检查**。
+
+**诊断顺序**（先确认版本，再查业务）：
+
+```bash
+sqlite3 data/coding2api.sqlite3 "PRAGMA user_version;"        # 期望 14
+curl -s -o /dev/null -w '%{http_code}\n' .../api/users        # 期望 401，404 = 旧后端
+grep 账号引导 logs/launchd.err.log | tail -2                  # 引导只跑一次
+```
+
+**结论**：改 `src/` 必须重启进程；改 `web/` 只需重新构建。升级 schema 时重启同时完成迁移与引导（bootstrap 幂等）。
+
+---
+
 ## 7. 数据库（T-Q2 定稿）
 
 DDL 以 `src/db/schema.sql` 为准（users 为账号唯一源、users.txt 仅引导导入、凭证加密列、`usage_events.credit`/`cached_tokens` 可空）。当前 `SCHEMA_VERSION = 14`，共 10 张表：`api_keys` / `credentials` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `runtime_settings`。补充实现细节：
@@ -779,6 +802,7 @@ PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users 与 api_keys 
 - migration：启动时读 `schema.sql` 逐条 `CREATE TABLE IF NOT EXISTS`（只加不改）；新增列写进 `migrate._MIGRATION_COLUMNS` 走 `ALTER TABLE ... ADD COLUMN`（重复列名忽略，老库幂等补列），删表写进 `migrate._MIGRATION_DROPS` 走 `DROP TABLE IF EXISTS`（`CREATE TABLE IF NOT EXISTS` 对老库无效，不删会遗留死表），同时 `SCHEMA_VERSION + 1`，版本记在 `PRAGMA user_version`
   - 新增**表**不需要 `_MIGRATION_COLUMNS`：`CREATE TABLE IF NOT EXISTS` 对老库同样执行，建表即完成迁移，只需 `SCHEMA_VERSION + 1` 并补一条老库升级测试
   - 删除凭证时显式清理其模型级冷却行（无外键级联），否则重建同 id 凭证会继承旧的模型冷却
+- **升级只在启动时发生**：迁移与 bootstrap 都挂在 `build_app` 里，所以「改了 schema 但没重启」＝老库 + 新前端，同样落入 §6.4 的错配。用户表 `users` 是老库上的**新增表**，走上面那条「不需要 `_MIGRATION_COLUMNS`」的路径（13 → 14 实测：5 条凭证、9509 条明细原样保留）
 
 ---
 
@@ -794,6 +818,8 @@ PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users 与 api_keys 
 | 其余 | 100% | — |
 
 **全量 100%（行 + 分支）是硬门槛**：CI 里 `pytest --cov-fail-under=100`，新增/修改的代码必须带测试，缺口一律补测试解决，不用 pragma / 排除达标。
+
+**测试不得依赖本地 `.env`**：CI 从不带 `.env`，而本地 `.env` 会经 pydantic-settings 补上 `APP_SECRET` 等必填项。任何构造 `Settings()` 的测试都要**显式传值**（`Settings(_env_file=None, APP_SECRET=...)` 或 `setenv`），否则本地绿、CI 红。B5 的第一条 CI 就栽在这里：`test_resolve_db_path_defaults_to_settings` 只设了 `DATA_DIR`，靠本地 `.env` 里的 `APP_SECRET` 才构造成功。**验证手法**：临时把 `.env` 移走再跑全量，通过才算数。
 
 fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文、思考、工具调用、错误码与额度），断言两个方向：**解析正确**（样本 → 期望 Event）与**不静默**（畸形样本 → `UpstreamProtocolViolation`）。
 
