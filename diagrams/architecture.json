@@ -13,7 +13,7 @@
     "views": [
       {
         "id": "request-path",
-        "label": "请求主链路",
+        "label": "请求面",
         "focus": [
           "clients",
           "openai",
@@ -31,20 +31,32 @@
         "focus": [
           "admin-ui",
           "admin-api",
+          "identity",
           "engine",
           "db"
         ],
-        "note": "React 管理台经管理 API 同进程调用引擎，状态落 SQLite。"
+        "note": "React 管理台经会话鉴权与三角色 RBAC 进入管理 API，同进程调用引擎，状态落 SQLite。"
       },
       {
         "id": "background",
-        "label": "后台任务",
+        "label": "后台面",
         "focus": [
           "bg",
           "cb",
           "trae"
         ],
         "note": "签到、额度探测、token 预刷新、成长中心、活跃上报与明细清理经 provider 客户端触达上游，运行态汇总到「任务与配置」页。"
+      },
+      {
+        "id": "identity-plane",
+        "label": "账号与权限",
+        "focus": [
+          "identity",
+          "admin-ui",
+          "admin-api",
+          "db"
+        ],
+        "note": "管理面身份来自 users 表：会话 Cookie 校验签名与 epoch，角色每请求现读 DB；登录与账号变动写审计。"
       }
     ]
   },
@@ -68,7 +80,7 @@
       "id": "admin-ui",
       "type": "frontend",
       "label": "React 管理台",
-      "sublabel": "凭证 / 统计 / 任务与配置",
+      "sublabel": "凭证 / 用户 / 统计 / 配置",
       "pos": [
         260,
         70
@@ -82,7 +94,7 @@
       "id": "admin-api",
       "type": "backend",
       "label": "管理 API",
-      "sublabel": "/api/* 会话 Cookie",
+      "sublabel": "/api/* · 会话 + RBAC",
       "pos": [
         500,
         70
@@ -91,6 +103,21 @@
         140,
         64
       ]
+    },
+    {
+      "id": "identity",
+      "type": "security",
+      "label": "账号与权限",
+      "sublabel": "三角色 · 会话 epoch",
+      "pos": [
+        760,
+        70
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "RBAC"
     },
     {
       "id": "clients",
@@ -235,6 +262,7 @@
         "trae",
         "admin-ui",
         "admin-api",
+        "identity",
         "db"
       ]
     }
@@ -387,6 +415,15 @@
           250
         ]
       ]
+    },
+    {
+      "id": "admin-api-to-identity",
+      "from": "admin-api",
+      "to": "identity",
+      "label": "RBAC 校验",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "left"
     }
   ],
   "cards": [
@@ -412,8 +449,9 @@
       "dot": "rose",
       "title": "数据与安全",
       "items": [
-        "SQLite WAL 10 表；13 项配置热更（DB 覆盖 .env）",
-        "三角色账号 + 审计留痕；API Key 摘要 + IP 白名单"
+        "SQLite WAL 10 表；13 项配置热更",
+        "三角色 RBAC + 会话 epoch 吊销；审计留痕",
+        "凭证加密 + 统计脱敏；API Key 摘要"
       ]
     }
   ]
