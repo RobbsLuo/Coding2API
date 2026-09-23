@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { NavLink, Outlet, useOutletContext } from "react-router-dom";
 import {
   BarChart3,
@@ -6,8 +7,10 @@ import {
   KeyRound,
   LayoutDashboard,
   Menu,
+  ScrollText,
   SlidersHorizontal,
   TerminalSquare,
+  UsersRound,
 } from "lucide-react";
 import type { SessionInfo } from "./api/types";
 import { Button } from "./components/ui/button";
@@ -17,6 +20,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "./components/ui/dropdown-menu";
+import { ChangePasswordDialog } from "./components/ChangePasswordDialog";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { UserMenu } from "./components/UserMenu";
 import { cn } from "@/lib/utils";
@@ -35,7 +39,9 @@ const NAV: NavItem[] = [
   { to: "/api-keys", label: "API Key", icon: KeyRound },
   { to: "/stats", label: "用量统计", icon: BarChart3 },
   { to: "/playground", label: "Playground", icon: TerminalSquare },
-  // 仅管理员可见的写入口（页面自身也会被后端 403 挡住，这里只是不误导）
+  // 仅管理员可见（页面自身也会被后端 403 挡住，这里只是不误导）
+  { to: "/users", label: "用户管理", icon: UsersRound, adminOnly: true },
+  { to: "/audit", label: "审计日志", icon: ScrollText, adminOnly: true },
   { to: "/settings", label: "任务与配置", icon: SlidersHorizontal, adminOnly: true },
 ];
 
@@ -60,11 +66,12 @@ export function BrandMark({ className }: { className?: string }) {
 }
 
 export function Layout({ session }: { session: SessionInfo }) {
+  const [changingPassword, setChangingPassword] = useState(false);
   const logout = async () => {
     await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
     window.location.href = "/login";
   };
-  // 非管理员看不到「任务与配置」：写接口是 admin-only，露出入口只会误导
+  // 非管理员看不到用户管理/审计/配置：写接口是 admin-only，露出入口只会误导
   const nav = NAV.filter((item) => !item.adminOnly || session.is_admin);
 
   return (
@@ -144,7 +151,8 @@ export function Layout({ session }: { session: SessionInfo }) {
           <ThemeToggle />
           <UserMenu
             username={session.username}
-            isAdmin={session.is_admin}
+            role={session.role}
+            onChangePassword={() => setChangingPassword(true)}
             onLogout={logout}
           />
         </div>
@@ -155,6 +163,9 @@ export function Layout({ session }: { session: SessionInfo }) {
       <footer className="mx-auto w-full max-w-7xl px-4 py-4 text-xs text-muted-foreground sm:px-6">
         Coding2API · 仅供学习研究，未做安全审计
       </footer>
+      {changingPassword && (
+        <ChangePasswordDialog onCancel={() => setChangingPassword(false)} />
+      )}
     </div>
   );
 }

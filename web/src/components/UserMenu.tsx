@@ -1,4 +1,4 @@
-import { ChevronDown, LogOut, UserRound } from "lucide-react";
+import { ChevronDown, KeyRound, LogOut, UserRound } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -8,18 +8,20 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Button } from "../ui";
+import { ROLE_LABELS, type Role } from "../api/types";
 
-/** 用户菜单：合并「用户名/角色信息」与「退出」为单个下拉。 */
+/** 用户菜单：合并「用户名/角色信息」与「改密 / 退出」为单个下拉。 */
 export function UserMenu({
   username,
-  isAdmin,
+  role,
+  onChangePassword,
   onLogout,
 }: {
   username: string;
-  isAdmin: boolean;
+  role: Role;
+  onChangePassword: () => void;
   onLogout: () => void;
 }) {
-  const role = isAdmin ? "管理员" : "只读";
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -31,10 +33,18 @@ export function UserMenu({
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-48">
         <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
-          {username} · {role}
+          {username} · {ROLE_LABELS[role]}
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={onLogout} className="cursor-pointer">
+        <DropdownMenuItem
+          data-testid="menu-change-password"
+          onSelect={onChangePassword}
+          className="cursor-pointer"
+        >
+          <KeyRound className="mr-2 size-4" />
+          修改密码
+        </DropdownMenuItem>
+        <DropdownMenuItem data-testid="menu-logout" onSelect={onLogout} className="cursor-pointer">
           <LogOut className="mr-2 size-4" />
           退出
         </DropdownMenuItem>

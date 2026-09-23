@@ -1,8 +1,9 @@
-import { Check, Copy, KeyRound, Plus, Trash2 } from "lucide-react";
+import { Check, ChevronDown, Copy, KeyRound, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api/client";
 import { useApiKeys, useQueryClient } from "../api/hooks";
 import { formatTime } from "../api/display";
+import { cn } from "../lib/utils";
 import { PageHeader } from "../components/PageHeader";
 import type { ApiKeyCreated } from "../api/types";
 import {
@@ -168,11 +169,14 @@ function EndpointRow({
   );
 }
 
-/** OpenAI 客户端接入面板：Base URL + 端点 + 可复制的示例 */
+/** OpenAI 客户端接入面板：Base URL + 端点 + 可复制的示例。
+ *  折叠交互与「模型与渠道调度说明」(HelpBlock) 一致：卡片 header 的「说明 / 收起」
+ *  按钮切换内容，不引入动画。 */
 function OpenAIEntry({ apiKey }: { apiKey: string }) {
   const baseUrl = openaiBaseUrl();
   const examples = openaiExamples(baseUrl, apiKey);
   const [copied, setCopied] = useState<string | null>(null);
+  const [open, setOpen] = useState(false);
 
   const copy = async (label: string, text: string) => {
     await navigator.clipboard.writeText(text);
@@ -180,56 +184,70 @@ function OpenAIEntry({ apiKey }: { apiKey: string }) {
   };
 
   return (
-    <Panel title="OpenAI 客户端接入">
-      <div className="space-y-4 text-sm" data-testid="openai-entry">
-        <div>
-          <div className="mb-1 text-xs text-muted-foreground">Base URL</div>
-          <div className="flex items-center gap-2">
-            <code
-              data-testid="openai-base-url"
-              className="flex-1 truncate rounded-lg border border-input bg-muted/40 px-3 py-2 font-mono text-xs transition-colors hover:border-ring"
-            >
-              {baseUrl}
-            </code>
-            <CopyButton label={copied === "url" ? "已复制" : "复制"} onCopy={() => void copy("url", baseUrl)} />
+    <Panel
+      title="OpenAI 客户端接入"
+      action={
+        <Button size="sm" variant="ghost" data-testid="openai-entry-toggle" onClick={() => setOpen((value) => !value)}>
+          <ChevronDown className={cn("size-4 transition-transform", open && "rotate-180")} />
+          {open ? "收起" : "说明"}
+        </Button>
+      }
+    >
+      {open ? (
+        <div className="space-y-4 text-sm" data-testid="openai-entry">
+          <div>
+            <div className="mb-1 text-xs text-muted-foreground">Base URL</div>
+            <div className="flex items-center gap-2">
+              <code
+                data-testid="openai-base-url"
+                className="flex-1 truncate rounded-lg border border-input bg-muted/40 px-3 py-2 font-mono text-xs transition-colors hover:border-ring"
+              >
+                {baseUrl}
+              </code>
+              <CopyButton label={copied === "url" ? "已复制" : "复制"} onCopy={() => void copy("url", baseUrl)} />
+            </div>
           </div>
+          <ul className="space-y-1 text-xs text-muted-foreground">
+            <li>
+              {/* 示例默认折叠：点开端点行查看 curl / SDK 调用方式 */}
+              <EndpointRow method="POST" path={`${baseUrl}/chat/completions`} description="对话补全（流式 / 非流式）" testid="example-details">
+                <CodeExample label="curl 示例" text={examples.curl} copied={copied === "curl"} onCopy={() => void copy("curl", examples.curl)} testid="example-curl" copyTestid="copy-curl" />
+                <CodeExample label="OpenAI Python SDK" text={examples.python} copied={copied === "python"} onCopy={() => void copy("python", examples.python)} testid="example-python" copyTestid="copy-python" />
+              </EndpointRow>
+            </li>
+            <li>
+              <EndpointRow method="GET" path={`${baseUrl}/user/balance`} description="余额查询（上游额度，DeepSeek 兼容结构）" testid="example-details-balance">
+                <CodeExample label="curl 示例" text={examples.balance} copied={copied === "balance"} onCopy={() => void copy("balance", examples.balance)} testid="example-balance-curl" copyTestid="copy-balance-curl" />
+              </EndpointRow>
+            </li>
+            <li>
+              <EndpointRow method="POST" path={`${baseUrl}/responses`} description="Responses 子集（供 Codex CLI 接入）" testid="example-details-responses">
+                <CodeExample label="Codex CLI 配置" text={examples.responses} copied={copied === "responses"} onCopy={() => void copy("responses", examples.responses)} testid="example-responses" copyTestid="copy-responses" />
+              </EndpointRow>
+            </li>
+            <li>
+              <Badge>GET</Badge> <code>{baseUrl}/models</code>　模型列表
+            </li>
+          </ul>
+          <Notice tone="muted">
+            任何兼容 OpenAI 协议的客户端（ChatGPT Next Web、LobeChat、Cursor 等）
+            都可以按上面的 Base URL + API Key 接入。模型名从 /v1/models 获取。
+          </Notice>
+          <Notice tone="muted">
+            {/* 整段包一层 span：ShadAlert 是 grid 容器，直接放多个行内元素会被拆成多行 */}
+            <span>
+              <code>POST /v1/responses</code> 只实现 Codex CLI 用到的子集，与{" "}
+              <code>/v1/chat/completions</code> 共用同一套选号、冷却、轮换与会话粘性。
+              <code>store=true</code>、<code>previous_response_id</code> 与{" "}
+              <code>web_search</code> 等服务端私有工具会被显式拒绝（400），不静默降级。
+            </span>
+          </Notice>
         </div>
-        <ul className="space-y-1 text-xs text-muted-foreground">
-          <li>
-            {/* 示例默认折叠：点开端点行查看 curl / SDK 调用方式 */}
-            <EndpointRow method="POST" path={`${baseUrl}/chat/completions`} description="对话补全（流式 / 非流式）" testid="example-details">
-              <CodeExample label="curl 示例" text={examples.curl} copied={copied === "curl"} onCopy={() => void copy("curl", examples.curl)} testid="example-curl" copyTestid="copy-curl" />
-              <CodeExample label="OpenAI Python SDK" text={examples.python} copied={copied === "python"} onCopy={() => void copy("python", examples.python)} testid="example-python" copyTestid="copy-python" />
-            </EndpointRow>
-          </li>
-          <li>
-            <EndpointRow method="GET" path={`${baseUrl}/user/balance`} description="余额查询（上游额度，DeepSeek 兼容结构）" testid="example-details-balance">
-              <CodeExample label="curl 示例" text={examples.balance} copied={copied === "balance"} onCopy={() => void copy("balance", examples.balance)} testid="example-balance-curl" copyTestid="copy-balance-curl" />
-            </EndpointRow>
-          </li>
-          <li>
-            <EndpointRow method="POST" path={`${baseUrl}/responses`} description="Responses 子集（供 Codex CLI 接入）" testid="example-details-responses">
-              <CodeExample label="Codex CLI 配置" text={examples.responses} copied={copied === "responses"} onCopy={() => void copy("responses", examples.responses)} testid="example-responses" copyTestid="copy-responses" />
-            </EndpointRow>
-          </li>
-          <li>
-            <Badge>GET</Badge> <code>{baseUrl}/models</code>　模型列表
-          </li>
-        </ul>
-        <Notice tone="muted">
-          任何兼容 OpenAI 协议的客户端（ChatGPT Next Web、LobeChat、Cursor 等）
-          都可以按上面的 Base URL + API Key 接入。模型名从 /v1/models 获取。
-        </Notice>
-        <Notice tone="muted">
-          {/* 整段包一层 span：ShadAlert 是 grid 容器，直接放多个行内元素会被拆成多行 */}
-          <span>
-            <code>POST /v1/responses</code> 只实现 Codex CLI 用到的子集，与{" "}
-            <code>/v1/chat/completions</code> 共用同一套选号、冷却、轮换与会话粘性。
-            <code>store=true</code>、<code>previous_response_id</code> 与{" "}
-            <code>web_search</code> 等服务端私有工具会被显式拒绝（400），不静默降级。
-          </span>
-        </Notice>
-      </div>
+      ) : (
+        <p className="text-sm text-muted-foreground">
+          展开查看 Base URL、端点列表与可复制的接入示例。
+        </p>
+      )}
     </Panel>
   );
 }

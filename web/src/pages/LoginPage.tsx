@@ -72,7 +72,7 @@ export function LoginPage() {
           </div>
         </Panel>
         <p className="mt-4 text-center text-xs text-muted-foreground">
-          用户来自 <code>secrets/users.txt</code>，使用 <code>scripts/hash_password.py</code> 添加。
+          账号由管理员在「用户管理」中创建，你会收到一次性激活链接来自设密码。
         </p>
       </form>
     </div>

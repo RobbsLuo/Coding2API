@@ -44,6 +44,42 @@ export function useSettings(username?: string) {
   });
 }
 
+/** 用户列表（admin only）。改动后由 useUserMutation 统一失效。 */
+export function useUsers(username?: string) {
+  return useQuery({
+    queryKey: adminKey(username, "users"),
+    queryFn: api.users,
+  });
+}
+
+/** 审计流水（admin only）。筛选条件进 query key，切筛选即重新取数。 */
+export function useAudit(
+  username?: string,
+  filters: { actor?: string; action?: string; limit?: number; offset?: number } = {},
+) {
+  return useQuery({
+    queryKey: adminKey(username, "audit", filters.actor ?? "", filters.action ?? "",
+                       filters.limit ?? 100, filters.offset ?? 0),
+    queryFn: () => api.audit(filters),
+  });
+}
+
+/** 用户写操作：成功后失效用户列表（角色/启用状态改变了）。 */
+export function useUserMutation<TArgs, TResult>(
+  mutationFn: (args: TArgs) => Promise<TResult>,
+  username?: string,
+) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn,
+    onSuccess: () => {
+      void client.invalidateQueries({ queryKey: adminKey(username, "users") });
+      // 动到自己（改密/改角色）时会话信息也变了，一并刷新
+      void client.invalidateQueries({ queryKey: ["session"] });
+    },
+  });
+}
+
 /**
  * 后台任务运行态：30 秒自动刷新。
  *

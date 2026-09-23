@@ -1,6 +1,9 @@
 import type {
   ApiKey,
   ApiKeyCreated,
+  ActivationDescribe,
+  ActivationIssued,
+  AuditResponse,
   CheckinResult,
   CheckinStatus,
   CredentialsResponse,
@@ -11,6 +14,7 @@ import type {
   ModelInfo,
   ProbeResult,
   ProviderStats,
+  Role,
   SessionInfo,
   StatsMetric,
   StatsOverview,
@@ -21,6 +25,7 @@ import type {
   TasksResponse,
   UpstreamAuthPoll,
   UpstreamAuthStart,
+  UserRow,
 } from "./types";
 
 export class ApiError extends Error {
@@ -65,6 +70,50 @@ export const api = {
     request<SessionInfo>("/api/auth/login", { method: "POST", ...json({ username, password }) }),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
   session: () => request<SessionInfo>("/api/auth/session"),
+  /** 自助改密：成功后后端换发 Cookie（epoch 已变），无需再登录。 */
+  changePassword: (currentPassword: string, newPassword: string) =>
+    request<{ ok: boolean }>("/api/auth/password", {
+      method: "POST",
+      ...json({ current_password: currentPassword, new_password: newPassword }),
+    }),
+
+  // ------------------------------------------------------------ 账号激活
+  /** 校验一次性令牌，返回待激活用户名（无需登录）。 */
+  activation: (token: string) =>
+    request<ActivationDescribe>(`/api/auth/activate${query({ token })}`),
+  /** 用令牌自设密码完成激活。 */
+  activate: (token: string, password: string) =>
+    request<{ ok: boolean; username: string }>("/api/auth/activate", {
+      method: "POST",
+      ...json({ token, password }),
+    }),
+
+  // ------------------------------------------------------------ 用户管理
+  users: () => request<{ users: UserRow[] }>("/api/users"),
+  createUser: (username: string, role: Role) =>
+    request<ActivationIssued>("/api/users", { method: "POST", ...json({ username, role }) }),
+  updateUserRole: (username: string, role: Role) =>
+    request<{ ok: boolean }>(`/api/users/${encodeURIComponent(username)}`, {
+      method: "PATCH",
+      ...json({ role }),
+    }),
+  disableUser: (username: string) =>
+    request<{ ok: boolean }>(`/api/users/${encodeURIComponent(username)}/disable`, {
+      method: "POST",
+    }),
+  enableUser: (username: string) =>
+    request<{ ok: boolean }>(`/api/users/${encodeURIComponent(username)}/enable`, {
+      method: "POST",
+    }),
+  resetUserPassword: (username: string) =>
+    request<ActivationIssued>(
+      `/api/users/${encodeURIComponent(username)}/reset-password`,
+      { method: "POST" },
+    ),
+
+  // ---------------------------------------------------------------- 审计
+  audit: (filters: { actor?: string; action?: string; limit?: number; offset?: number } = {}) =>
+    request<AuditResponse>(`/api/audit${query(filters)}`),
 
   // ---------------------------------------------------------------- 凭证
   credentials: () => request<CredentialsResponse>("/api/credentials"),

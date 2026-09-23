@@ -13,13 +13,33 @@ export function makeClient() {
   });
 }
 
+/**
+ * 测试会话：只需给 username（+ 可选的升级字段）。
+ *
+ * B5 给 SessionInfo 加了 role / must_change_password，历史上几十处调用点
+ * 只传 `{ username, is_admin }`。这里按 is_admin 推导 role 并补默认值，
+ * 避免为了两个新字段去改所有测试（也顺带让老测试继续验证向后兼容）。
+ */
+export type TestSession = Pick<SessionInfo, "username"> &
+  Partial<Omit<SessionInfo, "username">>;
+
+export function fullSession(session: TestSession): SessionInfo {
+  const { role, ...rest } = session;
+  return {
+    must_change_password: false,
+    is_admin: rest.is_admin ?? false,
+    ...rest,
+    role: role ?? (session.is_admin ? "admin" : "viewer"),
+  } as SessionInfo;
+}
+
 /** 在 Layout 下渲染页面，让 useSessionContext 拿到会话。 */
-export function renderPage(ui: ReactNode, session: SessionInfo = { username: "root", is_admin: true }) {
+export function renderPage(ui: ReactNode, session: TestSession = { username: "root", is_admin: true }) {
   return render(
     <QueryClientProvider client={makeClient()}>
       <MemoryRouter initialEntries={["/page"]}>
         <Routes>
-          <Route element={<Layout session={session} />}>
+          <Route element={<Layout session={fullSession(session)} />}>
             <Route path="/page" element={ui} />
           </Route>
         </Routes>
@@ -28,11 +48,11 @@ export function renderPage(ui: ReactNode, session: SessionInfo = { username: "ro
   );
 }
 
-/** 独立渲染（登录页不需要 Layout）。 */
-export function renderStandalone(ui: ReactNode) {
+/** 独立渲染（登录页/激活页不需要 Layout）。 */
+export function renderStandalone(ui: ReactNode, path = "/") {
   return render(
     <QueryClientProvider client={makeClient()}>
-      <MemoryRouter>{ui}</MemoryRouter>
+      <MemoryRouter initialEntries={[path]}>{ui}</MemoryRouter>
     </QueryClientProvider>,
   );
 }

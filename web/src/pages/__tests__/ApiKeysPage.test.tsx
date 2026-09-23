@@ -195,6 +195,7 @@ describe("OpenAI 客户端接入面板", () => {
     mockFetch({ "/api/api-keys": { api_keys: [] } });
     renderPage(<ApiKeysPage />);
     await settle();
+    await openOpenAIEntry();
 
     const baseUrl = screen.getByTestId("openai-base-url").textContent;
     expect(baseUrl).toBe(`${window.location.origin}/v1`);
@@ -225,6 +226,7 @@ describe("OpenAI 客户端接入面板", () => {
     vi.stubGlobal("fetch", fetchSpy);
     renderPage(<ApiKeysPage />);
     await settle();
+    await openOpenAIEntry();
 
     await userEvent.type(screen.getByTestId("key-name"), "test");
     await userEvent.click(screen.getByRole("button", { name: "创建" }));
@@ -243,6 +245,7 @@ it("调用示例默认折叠，点击端点行展开", async () => {
   mockFetch({ "/api/api-keys": { api_keys: [] } });
   renderPage(<ApiKeysPage />);
   await settle();
+  await openOpenAIEntry();
 
   const trigger = screen.getByTestId("example-details-trigger");
   expect(trigger).toHaveAttribute("data-state", "closed");
@@ -257,6 +260,7 @@ it("余额端点示例同样默认折叠，展开后可复制 curl", async () =>
   mockFetch({ "/api/api-keys": { api_keys: [] } });
   renderPage(<ApiKeysPage />);
   await settle();
+  await openOpenAIEntry();
 
   const trigger = screen.getByTestId("example-details-balance-trigger");
   expect(trigger).toHaveAttribute("data-state", "closed");
@@ -277,6 +281,7 @@ it("Responses 端点示例默认折叠，展开后可复制 Codex CLI 配置", a
   mockFetch({ "/api/api-keys": { api_keys: [] } });
   renderPage(<ApiKeysPage />);
   await settle();
+  await openOpenAIEntry();
 
   const trigger = screen.getByTestId("example-details-responses-trigger");
   expect(trigger).toHaveAttribute("data-state", "closed");
@@ -298,4 +303,28 @@ it("Responses 端点示例默认折叠，展开后可复制 Codex CLI 配置", a
   expect(writeText).toHaveBeenCalledWith(
     expect.stringContaining("export CODING2API_KEY=sk-…"),
   );
+});
+
+/** 展开「OpenAI 客户端接入」面板（默认收起，与 HelpBlock 一致）。 */
+async function openOpenAIEntry() {
+  await userEvent.click(screen.getByTestId("openai-entry-toggle"));
+}
+
+it("面板默认收起，点「说明」展开、点「收起」收拢", async () => {
+  mockFetch({ "/api/api-keys": { api_keys: [] } });
+  renderPage(<ApiKeysPage />);
+  await settle();
+
+  const toggle = screen.getByTestId("openai-entry-toggle");
+  expect(toggle).toHaveTextContent("说明");
+  expect(screen.queryByTestId("openai-entry")).not.toBeInTheDocument();
+
+  await userEvent.click(toggle);
+  expect(toggle).toHaveTextContent("收起");
+  expect(screen.getByTestId("openai-entry")).toBeVisible();
+  expect(screen.getByTestId("openai-base-url")).toBeVisible();
+
+  await userEvent.click(toggle);
+  expect(toggle).toHaveTextContent("说明");
+  expect(screen.queryByTestId("openai-entry")).not.toBeInTheDocument();
 });

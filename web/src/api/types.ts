@@ -168,9 +168,73 @@ export interface StatsEventsResponse {
   next_before: number | null;
 }
 
+/** 三角色（B5）：与后端 src/auth/rbac.py 的 ROLE_* 字面量一致。 */
+export type Role = "admin" | "operator" | "viewer";
+
+export const ROLE_LABELS: Record<Role, string> = {
+  admin: "管理员",
+  operator: "操作员",
+  viewer: "只读",
+};
+
+export const ROLE_OPTIONS: { value: Role; label: string }[] = [
+  { value: "admin", label: "管理员" },
+  { value: "operator", label: "操作员" },
+  { value: "viewer", label: "只读" },
+];
+
 export interface SessionInfo {
   username: string;
   is_admin: boolean;
+  role: Role;
+  /** 首登/被重置后必须改密：为 true 时前端弹不可关闭的改密对话框 */
+  must_change_password: boolean;
+}
+
+/** 管理台用户（GET /api/users 的一行）。**绝不包含密码哈希**。 */
+export interface UserRow {
+  username: string;
+  role: Role;
+  enabled: boolean;
+  must_change_password: boolean;
+  created_at: number;
+  updated_at: number;
+  created_by: string | null;
+  /** 是否有待使用的一次性激活令牌（摘要本身不会下发） */
+  pending_activation: boolean;
+}
+
+/** 创建/重置用户时返回：明文令牌只出现这一次。 */
+export interface ActivationIssued {
+  username: string;
+  activate_token: string;
+  expires_at: number;
+  role?: Role;
+}
+
+/** 审计流水一行（audit_events 表）。 */
+export interface AuditEvent {
+  id: string;
+  ts: number;
+  actor: string;
+  action: string;
+  target: string | null;
+  detail: string;
+  ip: string | null;
+  ok: 0 | 1;
+}
+
+export interface AuditResponse {
+  events: AuditEvent[];
+  /** 可选的 action 枚举（与后端 src/audit/actions.py 同源） */
+  actions: string[];
+  /** action → 中文标签 */
+  labels: Record<string, string>;
+}
+
+export interface ActivationDescribe {
+  username: string;
+  valid: boolean;
 }
 
 export interface CredentialsResponse {
