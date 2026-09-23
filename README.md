@@ -287,19 +287,16 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 
 典型症状：管理台页面能打开（前端产物本就是静态文件，浏览器直接拿新的），但调用新端点全部失败——旧后端没有该路由，未匹配的 `/api/*` 按约定返回 JSON `404`，前端把它当成通用失败，于是弹出与实际原因无关的提示。B5 上线时就踩过：`/api/users` 在旧进程里返回 `404`，新建用户报「用户名可能已存在，或角色非法」，而真正原因是**服务跑的还是迁移前的代码**（老库 `PRAGMA user_version` 仍是 13、没有 `users` 表）。
 
-前端不需要重启的原因见下文（后端每次请求现读 `web/dist`）；**后端代码不是**——`launchd`/systemd/docker 都只在进程退出时重新拉起，不监听源码变化。
+前端不需要重启的原因见下文（后端每次请求现读 `web/dist`）；**后端代码不是**——进程管理器只在进程**退出**时重新拉起，不监听源码变化。
 
 ```bash
-# macOS（launchd）
-launchctl kickstart -k gui/$(id -u)/com.coding2api
-
 # Docker / compose
 docker compose up -d --force-recreate
 
 # systemd
 sudo systemctl restart coding2api
 
-# 裸跑：Ctrl-C 后重新执行启动命令
+# 裸跑 / 其他进程管理器：按你自己的方式重启该进程
 ```
 
 **确认升级已生效**（先查版本，再查路由）：
@@ -309,38 +306,29 @@ sudo systemctl restart coding2api
 sqlite3 data/coding2api.sqlite3 "PRAGMA user_version; SELECT username, role, enabled FROM users;"
 # 2) 路由存在：期望 401（未登录），404 = 旧后端进程
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
-# 3) 启动日志里能看到引导结果（日志路径见下文「日志」）
+# 3) 启动日志里能看到引导结果（日志位置见下文「日志」）
 ```
 
-### macOS（launchd）
+### 前端产物与后端在同一端口
 
-仓库在 `deploy/launchd/com.coding2api.plist` 留了一份模板，把后端交给 launchd 常驻，并按后端 `:8000` 直接服务前端产物。**模板里的绝对路径需要按你的实际部署位置修改**（`ProgramArguments`、`WorkingDirectory`、两个日志 `Standard*Path` 共四处）。
+后端会把前端产物放在 `/` 直接服务（`src/webapp/static.py` 每次请求现读磁盘），因此**只改前端时构建完刷新即可，无需重启后端**；`localhost:5173` 是 Vite 开发态（HMR），两者可并存。**这条只对前端成立**——改了 `src/` 下的后端代码必须重启进程（见上一节）。
+
+`scripts/build-web.sh` 是构建入口，会自动处理「依赖未装」与「node 不在 PATH」两类常见情况：
 
 ```bash
-cp deploy/launchd/com.coding2api.plist ~/Library/LaunchAgents/
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.coding2api.plist   # 装载
-launchctl kickstart -k gui/$(id -u)/com.coding2api                            # 重启
-launchctl bootout gui/$(id -u)/com.coding2api                                 # 卸载
+./scripts/build-web.sh            # 仅在产物过期时构建
+./scripts/build-web.sh --force    # 无条件重建
 ```
 
-入口是 `scripts/launchd-server.sh`（不是裸 uvicorn），它先跑 `scripts/build-web.sh` 构建前端，再 `exec` 起后端：
-
-- **后端在 `http://127.0.0.1:8000/` 直接服务 `web/dist`**（`src/webapp/static.py` 用 `FileResponse` 每次请求现读磁盘），所以只改前端时**构建完刷新即可，无需重启后端**；`localhost:5173` 是 Vite 开发态（HMR），两者可并存。**注意这条只对前端成立**——改了 `src/` 下的后端代码必须重启进程（见上文「升级后必须重启后端」）。
-- **构建失败不阻断启动**：plist 是 `KeepAlive` + `ThrottleInterval=10`，若构建失败就退出，launchd 会每 10 秒重拉一次变成死循环。脚本改为「构建失败 → 警告 → 用既有产物继续起服务」。
-- **pnpm 常装在 nvm 下**：launchd 不读 shell rc，PATH 只有 plist 里的系统目录，`build-web.sh` 会自己从 `~/.nvm/alias/default` 解析出 node/pnpm 路径（非 nvm 安装则回落到 PATH）。手动构建用 `./scripts/build-web.sh`（`--force` 强制重建）。
-
-> **本机环境（不进仓库）**：当前开发机的路径、工具版本、端口、日志位置与特有操作记在
-> `docs/local-environment.md`——该目录已在 `.gitignore` 中，克隆仓库的人不会有这个文件，
-> 需要时照上面的结构自建一份即可。
+> **部署相关操作记在本地文档**：当前开发机的进程管理方式（启动 / 重启 / 日志位置）、路径与工具版本等，见 `docs/local-environment.md`。该目录已在 `.gitignore` 中，**克隆仓库的人不会有这个文件**，按自己的部署方式自建即可。
 
 ## 日志
 
-应用只写 **stdout / stderr**，不自己写文件也不自己轮转（原因见 [`src/webapp/logging.py`](src/webapp/logging.py) 顶部说明）：三种部署形态采集方式不同，但都靠这两个 fd 对接，轮转交给各自的平台工具。因此**日志自己不会停止增长**——按下面对应形态配一次即可。
+应用只写 **stdout / stderr**，不自己写文件也不自己轮转（原因见 [`src/webapp/logging.py`](src/webapp/logging.py) 顶部说明）：部署形态不同、采集方式不同，但都靠这两个 fd 对接，轮转交给各自的平台工具。因此**日志自己不会停止增长**——按下面对应形态配一次即可。
 
 | 部署形态 | 日志到哪 | 轮转机制 | 需做什么 |
 |---|---|---|---|
 | **Docker / compose** | `docker logs coding2api` | json-file 驱动（已在 compose 配好 `10m × 5`） | **无需操作** |
-| **macOS（launchd）** | `logs/launchd.{out,err}.log` | 系统自带 `newsyslog` | 跑一次 `./scripts/install-newsyslog.sh`（需 sudo） |
 | **Linux（systemd）** | `journalctl -u coding2api` | journald 自带 | **无需操作**（模板见 `deploy/systemd/`） |
 | **Linux（非 systemd）** | 重定向到 `/var/log/coding2api/*.log` | `logrotate` | `sudo cp deploy/logrotate/coding2api /etc/logrotate.d/` |
 | **裸跑**（`uv run python -m src.main`） | 终端 stderr | 无 | 自己重定向并自备轮转 |
@@ -348,12 +336,6 @@ launchctl bootout gui/$(id -u)/com.coding2api                                 # 
 级别用 `LOG_LEVEL`（默认 `INFO`）。**审计日志（登录、账号变动、凭证增删改 / pin / 账号切换）是 INFO 级**，调到 `WARNING` 会把它一并关掉。
 
 ```bash
-# macOS：装轮转规则（单文件超 10MB 转，留 7 份，bzip2 压缩）
-./scripts/install-newsyslog.sh
-./scripts/install-newsyslog.sh --uninstall   # 卸载
-
-# 看日志
-tail -f logs/launchd.err.log          # macOS
 docker logs -f coding2api             # 容器
 journalctl -u coding2api -f           # systemd
 ```

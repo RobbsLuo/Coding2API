@@ -125,9 +125,9 @@ coding2api/
 ├── audit/
 │   └── actions.py               # 审计动作常量 + 中文标签（B5）
 ├── web/                         # React 前端
-├── deploy/                      # newsyslog / logrotate / systemd 模板
+├── deploy/                      # 各部署形态的模板（systemd / logrotate 等）
 ├── diagrams/                    # 架构图（HTML + 源 JSON）
-├── scripts/                     # hash_password / create_user / cleanup_invalid_stats / install-newsyslog
+├── scripts/                     # hash_password / create_user / cleanup_invalid_stats / 部署与运维脚本
 ├── tests/
 ├── Dockerfile / docker-compose.yml  # 仓库根（compose build context 依赖根目录）
 ├── NOTICE / LICENSE / README.md（中文）/ README.en.md
@@ -494,7 +494,7 @@ response.completed | response.incomplete
 
 ### 3.12 后台任务可视化（B4，「任务与配置」页）
 
-**问题**：`TaskRunner` 跑着 6 类循环（额度探测 / token 预刷新 / 每日签到 / 成长中心 / 活跃上报 / 明细清理），但除失败时一行 `logger.warning`，没有任何地方能看到「上次何时跑的、结果如何」，也没有端点暴露。运维只能翻 launchd 日志。
+**问题**：`TaskRunner` 跑着 6 类循环（额度探测 / token 预刷新 / 每日签到 / 成长中心 / 活跃上报 / 明细清理），但除失败时一行 `logger.warning`，没有任何地方能看到「上次何时跑的、结果如何」，也没有端点暴露。运维只能翻服务日志。
 
 **上一轮调研结论**：项目内**不存在**后台任务页（无 `TasksPage`、无 `/api/tasks`，git 全历史与文档均无），所以这不是「找回旧页面」而是新增；同类项目（ithtelab/workbuddy-manager）的做法是「任务记录页 + 30s 自动刷新 + 单次 200 条上限」，关键教训是**容器重建即丢、必须采集落库**。
 
@@ -768,7 +768,7 @@ class Scheduler:
 **静态产物与进程内代码的刷新方式不同**，这是 B5 上线时踩过的坑：
 
 - **前端**：后端对 `web/dist` 用 `FileResponse` **每次请求现读磁盘**，所以重新构建后刷新浏览器即生效，无需重启。
-- **后端**：`src/` 下的一切（路由、依赖、`build_app` 装配）只在**进程启动时**装载。`launchd` / systemd / docker 都只在进程**退出**时重新拉起，**不监听源码变化**——`KeepAlive` 不是热重载。
+- **后端**：`src/` 下的一切（路由、依赖、`build_app` 装配）只在**进程启动时**装载。进程管理器只在进程**退出**时重新拉起，**不监听源码变化**——保活策略不是热重载。
 
 两者可以独立更新，于是会出现 **「新前端 + 旧后端」**的错配：页面能打开（静态文件是新的），但新端点全部失败。旧后端没有该路由，未匹配的 `/api/*` 按约定返回 JSON `404`（`webapp/static.py` 的 SPA catch-all 排除 `/api` 与 `/v1`），前端把它归一成**无 `message` 的通用失败**，最后弹出与实际原因无关的兜底文案。
 
@@ -781,7 +781,7 @@ B5 的实际症状值得记住：新建用户报「用户名可能已存在，�
 sqlite3 data/coding2api.sqlite3 "PRAGMA user_version; SELECT username, role, enabled FROM users;"
 # 2) 路由存在：期望 401（未登录），404 = 旧后端进程
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
-# 3) 引导日志（路径随部署形态而定，见 README「日志」）
+# 3) 引导日志（路径随部署形态而定）
 ```
 
 **结论**：改 `src/` 必须重启进程；改 `web/` 只需重新构建。升级 schema 时重启同时完成迁移与引导（bootstrap 幂等）：`users` / `audit_events` 为**新增表**，凭证与统计原样保留（不删列、不重建表）。
@@ -839,5 +839,5 @@ fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文�
 - **统计一律以 `usage_hourly` 为准**：`overview` / `by_provider` / `timeline` / `model-timeline` 均读小时汇总，只有 `events`（逐请求明细）读 `usage_events`。统一口径是为了让选「全部」时总览与图表同值（明细只留 90 天，汇总永久）。代价：最近 ≤5 分钟未进汇总的请求不计入，刷新一次即可
 - **小时汇总双写**：`record()` 写明细的同时增量累加当前小时行，新请求立即可见于统计页（不依赖 5 分钟一轮的 rollup）；`rollup_hourly` 仍每 5 分钟全量重算作对账，两者结果一致（幂等）
 - **延迟均值只算成功请求**：分子 `SUM(latency_ms WHERE ok=1)` 与分母 `ok_count` 配对；失败请求的耗时不能拉偏「典型耗时」（与图表口径一致）
-- **应用日志只写 stderr，轮转交给平台**：不在应用内开文件、不用 `RotatingFileHandler`。三种部署形态（launchd / systemd / docker）采集方式不同但都靠 stdout/stderr 对接；应用自己写文件会与平台轮转争抢同一文件，容器里还会写进镜像层（重启即丢且 `docker logs` 看不到）。各自配置见 `deploy/` 与 compose 的 `logging` 段
+- **应用日志只写 stderr，轮转交给平台**：不在应用内开文件、不用 `RotatingFileHandler`。各部署形态（systemd / docker 等）采集方式不同但都靠 stdout/stderr 对接；应用自己写文件会与平台轮转争抢同一文件，容器里还会写进镜像层（重启即丢且 `docker logs` 看不到）。各自配置见 `deploy/` 与 compose 的 `logging` 段
 - **必须在 `build_app` 里配 root logger**：uvicorn 默认 `LOGGING_CONFIG` 只配 `uvicorn` / `uvicorn.access`（`propagate=false`），**从不配 root**；root 默认 `WARNING` 且无 handler，导致 `logging.getLogger(__name__)` 的 INFO 静默丢失。生产路径 `uvicorn src.main:build_app --factory` 不经过 `run()`，所以配置必须挂在 `build_app`（幂等，见 `src/webapp/logging.py`）

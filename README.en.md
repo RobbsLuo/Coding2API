@@ -80,10 +80,10 @@ Streaming text, reasoning summaries, function tool calls, and `finish_reason=len
 ## Upgrading
 
 **Restart the process after changing anything under `src/`.** The backend loads routes and
-assembly at startup only; `launchd` / systemd / Docker restart a process when it *exits* —
-`KeepAlive` is not a hot reload. The frontend is different: the backend serves `web/dist`
-with `FileResponse`, reading from disk on every request, so a rebuild just needs a browser
-refresh.
+assembly at startup only; the process manager restarts a process when it *exits* —
+a keep-alive policy is not a hot reload. The frontend is different: the backend serves
+`web/dist` with `FileResponse`, reading from disk on every request, so a rebuild just needs
+a browser refresh.
 
 Updating them independently produces a **new frontend against an old backend**. The page
 loads (static files are current) but new endpoints fail: the old process has no such route,
@@ -94,7 +94,6 @@ being a `404` because the running process predated the migration (the old DB sti
 `PRAGMA user_version` = 13 and no `users` table).
 
 ```bash
-launchctl kickstart -k gui/$(id -u)/com.coding2api   # macOS (launchd)
 docker compose up -d --force-recreate                # Docker / compose
 sudo systemctl restart coding2api                    # systemd
 
