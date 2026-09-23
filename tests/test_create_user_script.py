@@ -150,6 +150,15 @@ def test_missing_or_blank_username_rejected(argv, db_path):
 
 
 def test_resolve_db_path_defaults_to_settings(tmp_path, monkeypatch):
+    # APP_SECRET 必须显式给：CI 无 .env，只设 DATA_DIR 会让 Settings 构造失败
+    monkeypatch.setenv("APP_SECRET", "test-secret-0123456789")
     monkeypatch.setenv("DATA_DIR", str(tmp_path / "custom"))
     path = SCRIPT_MODULE.resolve_db_path(None)
     assert path == tmp_path / "custom" / "coding2api.sqlite3"
+
+
+def test_resolve_db_path_explicit_wins(tmp_path, monkeypatch):
+    """--db 优先，完全不碰 Settings（无 APP_SECRET 也能跑）。"""
+    monkeypatch.delenv("APP_SECRET", raising=False)
+    explicit = tmp_path / "elsewhere.sqlite3"
+    assert SCRIPT_MODULE.resolve_db_path(str(explicit)) == explicit
