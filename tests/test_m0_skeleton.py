@@ -160,7 +160,7 @@ def test_users_file_invalid_line(tmp_path):
 
 def test_session_roundtrip_and_expiry():
     token = session_mod.create_session_token("alice", "sec", issued_at=1000, ttl_seconds=60)
-    assert session_mod.verify_session_token(token, "sec", now=1030) == "alice"
+    assert session_mod.verify_session_token(token, "sec", now=1030) == ("alice", 0)
     assert session_mod.verify_session_token(token, "sec", now=2000) is None
     assert session_mod.verify_session_token(token, "wrong", now=1030) is None
 

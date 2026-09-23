@@ -24,7 +24,9 @@ SCHEMA_NAME = "schema.sql"
 # schema.sql（CREATE TABLE IF NOT EXISTS 对老库同样生效），无需迁移动作。
 # 13：api_keys 新增 provider_binding / allowed_ips（B3.5 多 Key 出口：
 # 渠道绑定与来源 IP 白名单）；两者默认 ''，老库补列后行为不变。
-SCHEMA_VERSION = 13
+# 14：新增 users / audit_events 表（B5 账号管理体系）。新增表只需进
+# schema.sql（CREATE TABLE IF NOT EXISTS 对老库同样生效），无需迁移动作。
+SCHEMA_VERSION = 14
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (

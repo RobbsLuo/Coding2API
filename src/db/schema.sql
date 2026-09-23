@@ -9,7 +9,9 @@
 -- 注：不建 checkins / model_cache 表——签到去重由 CheckinTask 的当日作用域
 -- 集合实现（上游 status 为准），模型列表是进程内 TTL 缓存，重启即重建。
 
--- 用户不建表：users.txt（PBKDF2）是唯一源，角色走 ADMIN_USERNAMES env。
+-- 用户建表（B5）：users.txt（PBKDF2）降级为「引导输入」，启动时一次性导入，
+-- 之后 DB 是唯一权威源。ADMIN_USERNAMES env 降级为「引导期角色来源 + 防锁死
+-- 兑回」，不再参与每请求鉴权。
 -- api_keys.username 由应用层校验存在性，不加外键。
 
 CREATE TABLE IF NOT EXISTS api_keys (
@@ -49,7 +51,7 @@ CREATE TABLE IF NOT EXISTS credentials (
     growth_last_run_at INTEGER,                    -- 成长中心最近一轮执行时间（仅 CodeBuddy）
     growth_last_result TEXT,                       -- 该轮一行中文汇报
     created_at       INTEGER NOT NULL,
-    added_by         TEXT                          -- 应用层校验存在于 users.txt
+    added_by         TEXT                          -- 应用层校验存在于 users 表
 );
 
 CREATE INDEX IF NOT EXISTS idx_credentials_provider ON credentials(provider);
@@ -165,3 +167,52 @@ CREATE TABLE IF NOT EXISTS runtime_settings (
     value       TEXT NOT NULL,        -- 统一以文本存储，读时按白名单类型解析
     updated_at  INTEGER NOT NULL
 );
+
+-- 管理台用户账号（B5）。启动时由 users.txt 导入一次，之后本表是唯一权威源。
+--
+-- 为什么建表：users.txt 只能手工编辑 + 重启才生效，做不到「禁用立即踢会话」
+-- 「改角色即时生效」「登录与操作留痕」。本表把身份变成可运维的数据。
+--
+-- 两个安全相关的列需要解释：
+--   session_epoch  会话吊销。签名 Cookie 不落库，无法逐条作废，于是改密/禁用/
+--                  改角色时 +1；Cookie 里带上签发时的 epoch，每请求比对，
+--                  不等即 401。代价是这几个动作会让该用户所有会话重新登录
+--                  ——这是有意的：降级必须立刻可信。
+--   must_change_password  首登强制改密。为 1 时除放行清单外的端点全部 403。
+CREATE TABLE IF NOT EXISTS users (
+    username             TEXT PRIMARY KEY,
+    password_hash        TEXT NOT NULL,           -- 复用 users.txt 的 PBKDF2 格式
+    role                 TEXT NOT NULL DEFAULT 'viewer',  -- admin | operator | viewer
+    enabled              INTEGER NOT NULL DEFAULT 1,
+    must_change_password INTEGER NOT NULL DEFAULT 0,
+    session_epoch        INTEGER NOT NULL DEFAULT 0,
+    -- 一次性激活令牌（B5）：只存摘要，明文仅在创建响应里回显一次，与 API Key 同一心智模型。
+    -- 用户带 token 访问 /activate 自设密码；成功即清空。NULL = 无待激活令牌。
+    activation_digest    TEXT,
+    activation_expires_at INTEGER,
+    created_at           INTEGER NOT NULL,
+    updated_at           INTEGER NOT NULL,
+    created_by           TEXT                     -- 建号者用户名；引导导入为 NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_role_enabled ON users(role, enabled);
+CREATE INDEX IF NOT EXISTS idx_users_activation ON users(activation_digest);
+
+-- 审计流水（B5）：登录、账号变动、凭证写操作。
+--
+-- 为什么单独建表而不是只打日志：日志会滚动丢失、无法按 actor 过滤、也不能在
+-- 管理台展示。detail 只放可读短句，绝不写密码 / 令牌 / 凭证明文。
+-- 失败登录同样入库（ok=0）——「谁在什么时候试了谁的账号」正是审计的价值。
+CREATE TABLE IF NOT EXISTS audit_events (
+    id      TEXT PRIMARY KEY,
+    ts      INTEGER NOT NULL,
+    actor   TEXT NOT NULL,                        -- 操作者；失败登录为被尝试的用户名
+    action  TEXT NOT NULL,                        -- 见 src/audit/actions.py 枚举
+    target  TEXT,                                 -- 被动方（用户名 / 凭证 id）
+    detail  TEXT NOT NULL DEFAULT '',
+    ip      TEXT,
+    ok      INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
+CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_events(actor, ts);

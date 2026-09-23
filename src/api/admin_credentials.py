@@ -9,7 +9,15 @@ import logging
 
 from fastapi import APIRouter, Depends
 
-from ..auth.rbac import require_admin
+from ..audit.actions import (
+    ACTION_CREDENTIAL_DELETE,
+    ACTION_CREDENTIAL_IMPORT,
+    ACTION_CREDENTIAL_PIN,
+    ACTION_CREDENTIAL_REVIVE,
+    ACTION_CREDENTIAL_SWITCH_ACCOUNT,
+    ACTION_CREDENTIAL_TOGGLE,
+)
+from ..auth.rbac import require_operator
 from ..compat.openai.request import InvalidRequest
 from ..provider.base import GrowthResult, GrowthStep, StepStatus
 from .deps import Services, csrf_protected, principal_from_request
@@ -71,7 +79,7 @@ def create_router(services: Services) -> APIRouter:
     async def import_credential(payload: dict,
                                 _csrf: None = Depends(csrf_protected),
                                 principal=Depends(principal_from_request)):
-        require_admin(principal)
+        require_operator(principal)
         provider_id = str(payload.get("provider") or "")
         if provider_id not in registry:
             raise InvalidRequest(f"unknown provider {provider_id!r}")
@@ -83,6 +91,8 @@ def create_router(services: Services) -> APIRouter:
                                         added_by=principal.username)
         logger.info("管理员 %s 新增凭证 %s（上游 %s）", principal.username, credential_id,
                     provider_id)
+        services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_IMPORT,
+                              target=credential_id, detail=f"上游 {provider_id}")
         schedule_probe(credential_id)
         return {"id": credential_id}
 
@@ -90,11 +100,14 @@ def create_router(services: Services) -> APIRouter:
     async def toggle_credential(credential_id: str, payload: dict,
                                 _csrf: None = Depends(csrf_protected),
                                 principal=Depends(principal_from_request)):
-        require_admin(principal)
+        require_operator(principal)
         if not credentials.set_enabled(credential_id, bool(payload.get("enabled", True))):
             raise InvalidRequest("credential not found")
         logger.info("管理员 %s 开关凭证 %s -> %s", principal.username, credential_id,
                     payload.get("enabled", True))
+        services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_TOGGLE,
+                              target=credential_id,
+                              detail=f"enabled={bool(payload.get('enabled', True))}")
         return {"ok": True}
 
     @router.post("/api/credentials/{credential_id}/revive")
@@ -102,37 +115,44 @@ def create_router(services: Services) -> APIRouter:
                                 _csrf: None = Depends(csrf_protected),
                                 principal=Depends(principal_from_request)):
         """解除硬禁用/冷却，让重新登录后的凭证回到池子。"""
-        require_admin(principal)
+        require_operator(principal)
         if not credentials.revive(credential_id):
             raise InvalidRequest("credential not found")
         logger.info("管理员 %s 恢复了凭证 %s", principal.username, credential_id)
+        services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_REVIVE,
+                              target=credential_id)
         return {"ok": True}
 
     @router.post("/api/credentials/pin")
     async def pin_credential(payload: dict,
                              _csrf: None = Depends(csrf_protected),
                              principal=Depends(principal_from_request)):
-        require_admin(principal)
+        require_operator(principal)
         pin = payload.get("credential_id")
         credentials.set_pinned(pin)
         logger.info("管理员 %s 固定凭证 %s", principal.username, pin)
+        services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_PIN,
+                              target=pin if isinstance(pin, str) else None,
+                              detail=f"pinned={pin!r}")
         return {"ok": True}
 
     @router.delete("/api/credentials/{credential_id}")
     async def delete_credential(credential_id: str,
                                 _csrf: None = Depends(csrf_protected),
                                 principal=Depends(principal_from_request)):
-        require_admin(principal)
+        require_operator(principal)
         if not credentials.delete(credential_id):
             raise InvalidRequest("credential not found")
         logger.info("管理员 %s 删除凭证 %s", principal.username, credential_id)
+        services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_DELETE,
+                              target=credential_id)
         return {"ok": True}
 
     @router.post("/api/credentials/{credential_id}/probe")
     async def probe_credential(credential_id: str,
                                _csrf: None = Depends(csrf_protected),
                                principal=Depends(principal_from_request)):
-        require_admin(principal)
+        require_operator(principal)
         provider_id = credentials.provider_of(credential_id)
         provider = registry.get(provider_id or "")
         data = credentials.credential_data(credential_id)
@@ -153,7 +173,7 @@ def create_router(services: Services) -> APIRouter:
     async def checkin_credential(credential_id: str,
                                  _csrf: None = Depends(csrf_protected),
                                  principal=Depends(principal_from_request)):
-        require_admin(principal)
+        require_operator(principal)
         provider_id = credentials.provider_of(credential_id)
         provider = registry.get(provider_id or "")
         data = credentials.credential_data(credential_id)
@@ -173,7 +193,7 @@ def create_router(services: Services) -> APIRouter:
     async def checkin_status(credential_id: str,
                              principal=Depends(principal_from_request)):
         """只读查询签到状态（连续天数 / 今日是否已签）；不产生任何写入。"""
-        require_admin(principal)
+        require_operator(principal)
         provider_id = credentials.provider_of(credential_id)
         provider = registry.get(provider_id or "")
         data = credentials.credential_data(credential_id)
@@ -185,7 +205,7 @@ def create_router(services: Services) -> APIRouter:
     async def growth_history(credential_id: str, limit: int = 20,
                              principal=Depends(principal_from_request)):
         """成长中心历史：最近几轮的一行汇报（仅 CodeBuddy 有该活动）。"""
-        require_admin(principal)
+        require_operator(principal)
         if services.credentials.provider_of(credential_id) is None:
             raise InvalidRequest("credential not found")
         return {"events": services.growth_events.recent(credential_id, limit=limit)}
@@ -199,7 +219,7 @@ def create_router(services: Services) -> APIRouter:
         写「签到 +5」就是把猜测当事实。source 只表达归因已知度
         （observed=常规区间 / sync=首次建立基线）。
         """
-        require_admin(principal)
+        require_operator(principal)
         if services.credentials.provider_of(credential_id) is None:
             raise InvalidRequest("credential not found")
         return {"events": services.credit_events.recent(credential_id, limit=limit)}
@@ -213,7 +233,7 @@ def create_router(services: Services) -> APIRouter:
         不可逆动作（抽奖/兑换/开盲盒/补登卡）遵循与定时任务相同的配置开关：
         手动入口不另设开关，否则「保守部署」只挡得住定时任务。
         """
-        require_admin(principal)
+        require_operator(principal)
         provider_id = credentials.provider_of(credential_id)
         provider = registry.get(provider_id or "")
         data = credentials.credential_data(credential_id)
@@ -242,7 +262,7 @@ def create_router(services: Services) -> APIRouter:
         独立于 activity_report_enabled 开关：定时任务默认关闭不影响管理员在
         管理台手动补报一次（用途就是部署后验证闭环）。结果记一行 growth_events。
         """
-        require_admin(principal)
+        require_operator(principal)
         provider_id = credentials.provider_of(credential_id)
         provider = registry.get(provider_id or "")
         data = credentials.credential_data(credential_id)
@@ -264,7 +284,7 @@ def create_router(services: Services) -> APIRouter:
     @router.get("/api/credentials/{credential_id}/accounts")
     async def list_credential_accounts(credential_id: str,
                                        principal=Depends(principal_from_request)):
-        require_admin(principal)
+        require_operator(principal)
         provider_id = credentials.provider_of(credential_id)
         provider = registry.get(provider_id or "")
         data = credentials.credential_data(credential_id)
@@ -278,7 +298,7 @@ def create_router(services: Services) -> APIRouter:
     async def select_credential_account(credential_id: str, payload: dict,
                                         _csrf: None = Depends(csrf_protected),
                                         principal=Depends(principal_from_request)):
-        require_admin(principal)
+        require_operator(principal)
         provider_id = credentials.provider_of(credential_id)
         provider = registry.get(provider_id or "")
         data = credentials.credential_data(credential_id)
@@ -288,6 +308,10 @@ def create_router(services: Services) -> APIRouter:
         credentials.save_credential_data(credential_id, switched)
         logger.info("管理员 %s 切换凭证 %s 账号 -> %s", principal.username, credential_id,
                     payload.get("account_id"))
+        services.audit.record(actor=principal.username,
+                              action=ACTION_CREDENTIAL_SWITCH_ACCOUNT,
+                              target=credential_id,
+                              detail=f"账号 -> {payload.get('account_id')}")
         # 账号切换后额度对应的是新账号，必须重探测而不是沿用旧值
         schedule_probe(credential_id)
         return {"switched": True}

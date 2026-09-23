@@ -13,7 +13,13 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 
 from ..auth.csrf import CsrfRejectedError
-from ..auth.rbac import ForbiddenError, UnauthorizedError
+from ..auth.rbac import (
+    ForbiddenError,
+    LastAdminError,
+    PasswordChangeRequiredError,
+    SelfTargetError,
+    UnauthorizedError,
+)
 from ..auth.throttle import ThrottledError
 from ..compat.openai.errors import error_payload
 from ..compat.openai.request import InvalidRequest
@@ -77,6 +83,25 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=403,
                             content=error_payload(str(error) or "admin only",
                                                   "forbidden", 403))
+
+    @app.exception_handler(LastAdminError)
+    async def _last_admin(_request, error: LastAdminError):
+        """防锁死：不能移除最后一个活跃 admin（400 而非 403，「请求本身非法」）。"""
+        return JSONResponse(status_code=400,
+                            content=error_payload(str(error), "last_admin", 400))
+
+    @app.exception_handler(SelfTargetError)
+    async def _self_target(_request, error: SelfTargetError):
+        """防自锁：不能对自己降级/禁用。"""
+        return JSONResponse(status_code=400,
+                            content=error_payload(str(error), "self_target", 400))
+
+    @app.exception_handler(PasswordChangeRequiredError)
+    async def _password_change_required(_request, _error: PasswordChangeRequiredError):
+        """首登未改密：前端据此弹不可关闭的改密对话框（B5）。"""
+        return JSONResponse(status_code=403,
+                            content=error_payload("password change required",
+                                                  "password_change_required", 403))
 
     @app.exception_handler(CsrfRejectedError)
     async def _csrf_rejected(_request, _error: CsrfRejectedError):

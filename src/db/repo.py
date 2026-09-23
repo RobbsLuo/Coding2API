@@ -604,3 +604,183 @@ class RuntimeSettingsRepository:
         rows = self._db.connect().execute(
             "SELECT key, updated_at FROM runtime_settings").fetchall()
         return {row["key"]: row["updated_at"] for row in rows}
+
+
+class UserRepository:
+    """管理台用户账号（users，B5）。
+
+    本仓储**返回整行**（含 password_hash / activation_digest），因为
+    `DbUserStore` 需要它们做校验。对外 API 必须显式挑选字段——绝不要把这里的
+    dict 直接塞进响应体（测试 `test_users_never_leak_hash` 守住这条）。
+
+    角色取值不在这里校验：合法值属于 `src/auth/rbac.py`（权限语义），
+    仓储只负责存取，与 RuntimeSettingsRepository 的分工一致。
+    """
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def get(self, username: str) -> dict[str, Any] | None:
+        row = self._db.connect().execute(
+            "SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        return dict(row) if row else None
+
+    def list_all(self) -> list[dict[str, Any]]:
+        """按用户名排序的完整行；展示层负责剔除敏感列。"""
+        rows = self._db.connect().execute(
+            "SELECT * FROM users ORDER BY username").fetchall()
+        return [dict(row) for row in rows]
+
+    def list_usernames(self) -> tuple[str, ...]:
+        rows = self._db.connect().execute(
+            "SELECT username FROM users ORDER BY username").fetchall()
+        return tuple(row["username"] for row in rows)
+
+    def create(self, username: str, password_hash: str, *, role: str = "viewer",
+               enabled: bool = True, must_change_password: bool = False,
+               created_by: str | None = None, activation_digest: str | None = None,
+               activation_expires_at: int | None = None, now: int | None = None) -> None:
+        timestamp = int(now if now is not None else time.time())
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO users (username, password_hash, role, enabled, "
+                "must_change_password, session_epoch, activation_digest, "
+                "activation_expires_at, created_at, updated_at, created_by) "
+                "VALUES (?,?,?,?,?,0,?,?,?,?,?)",
+                (username, password_hash, role, 1 if enabled else 0,
+                 1 if must_change_password else 0, activation_digest,
+                 activation_expires_at, timestamp, timestamp, created_by),
+            )
+
+    def upsert_imported(self, username: str, password_hash: str, *,
+                        now: int | None = None) -> bool:
+        """导入 users.txt 用：已存在的用户不动（不覆盖已改过的密码/角色）。
+
+        返回 True 表示确实插入了新行。幂等——重复启动不会重复导入。
+        """
+        published = self.get(username)
+        if published is not None:
+            return False
+        self.create(username, password_hash, role="viewer", created_by=None, now=now)
+        return True
+
+    def update_role(self, username: str, role: str, *, bump_epoch: bool = True,
+                    now: int | None = None) -> bool:
+        """改角色。默认 bump epoch：降级必须立刻踢掉旧会话。"""
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE users SET role = ?, session_epoch = session_epoch + ?, "
+                "updated_at = ? WHERE username = ?",
+                (role, 1 if bump_epoch else 0,
+                 int(now if now is not None else time.time()), username),
+            )
+        return cursor.rowcount > 0
+
+    def set_enabled(self, username: str, enabled: bool, *,
+                    now: int | None = None) -> bool:
+        """启用/禁用。禁用必须 bump epoch，否则已登录会话还能用到 Cookie 过期。"""
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE users SET enabled = ?, session_epoch = session_epoch + 1, "
+                "updated_at = ? WHERE username = ?",
+                (1 if enabled else 0,
+                 int(now if now is not None else time.time()), username),
+            )
+        return cursor.rowcount > 0
+
+    def set_password(self, username: str, password_hash: str, *,
+                     must_change_password: bool = False, now: int | None = None) -> bool:
+        """改密：bump epoch（踢掉其他会话）并清掉一次性激活令牌。"""
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE users SET password_hash = ?, must_change_password = ?, "
+                "session_epoch = session_epoch + 1, activation_digest = NULL, "
+                "activation_expires_at = NULL, updated_at = ? WHERE username = ?",
+                (password_hash, 1 if must_change_password else 0,
+                 int(now if now is not None else time.time()), username),
+            )
+        return cursor.rowcount > 0
+
+    def set_activation_token(self, username: str, digest: str, expires_at: int, *,
+                             now: int | None = None) -> bool:
+        """挂一次性激活令牌（登录前使用，故**不** bump epoch）。"""
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE users SET activation_digest = ?, activation_expires_at = ?, "
+                "updated_at = ? WHERE username = ?",
+                (digest, expires_at, int(now if now is not None else time.time()), username),
+            )
+        return cursor.rowcount > 0
+
+    def find_by_activation(self, digest: str) -> dict[str, Any] | None:
+        """按令牌摘要定位用户（/activate 用）。不校验过期——调用方比 now。"""
+        row = self._db.connect().execute(
+            "SELECT * FROM users WHERE activation_digest = ?", (digest,)).fetchone()
+        return dict(row) if row else None
+
+    def delete(self, username: str) -> bool:
+        with self._db.transaction() as conn:
+            cursor = conn.execute("DELETE FROM users WHERE username = ?", (username,))
+        return cursor.rowcount > 0
+
+    def count_active_admins(self) -> int:
+        """活跃 admin 数：防锁死判定（0 即无权可依）。"""
+        row = self._db.connect().execute(
+            "SELECT COUNT(*) AS n FROM users WHERE role = 'admin' AND enabled = 1"
+        ).fetchone()
+        return int(row["n"])
+
+
+class AuditRepository:
+    """审计流水（audit_events，B5）。
+
+    写入刻意不在这里做「业务校验」：调用方负责保证 detail 不含密码/令牌。
+    `prune` 与 usage_events 同保留策略入口，由 RetentionTask 调用。
+    """
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def record(self, *, actor: str, action: str, target: str | None = None,
+               detail: str = "", ip: str | None = None, ok: bool = True,
+               now: int | None = None) -> str:
+        event_id = _new_id("audit")
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO audit_events (id, ts, actor, action, target, detail, ip, ok) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (event_id, int(now if now is not None else time.time()), actor, action,
+                 target, detail, ip, 1 if ok else 0),
+            )
+        return event_id
+
+    def query(self, *, actor: str | None = None, action: str | None = None,
+              since: int | None = None, before: int | None = None,
+              limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        """按 ts 倒序；limit 收敛到 [1, 500]，offset 非负。"""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if actor:
+            clauses.append("actor = ?")
+            params.append(actor)
+        if action:
+            clauses.append("action = ?")
+            params.append(action)
+        if since is not None:
+            clauses.append("ts >= ?")
+            params.append(int(since))
+        if before is not None:
+            clauses.append("ts < ?")
+            params.append(int(before))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.extend((max(1, min(500, limit)), max(0, offset)))
+        rows = self._db.connect().execute(
+            f"SELECT * FROM audit_events {where} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?",
+            tuple(params)).fetchall()
+        return [dict(row) for row in rows]
+
+    def prune(self, *, keep_days: int, now: int | None = None) -> int:
+        cutoff = int(now if now is not None else time.time()) - keep_days * 86400
+        with self._db.transaction() as conn:
+            cursor = conn.execute("DELETE FROM audit_events WHERE ts < ?", (cutoff,))
+        return cursor.rowcount

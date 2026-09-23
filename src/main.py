@@ -11,15 +11,19 @@ import asyncio
 import contextlib
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 
 from .api import (
+    activate,
+    admin_audit,
     admin_auth,
     admin_credentials,
     admin_keys,
     admin_settings,
     admin_stats,
+    admin_users,
     authorize,
     balance,
     chat,
@@ -35,10 +39,12 @@ from .db.crypto import CredentialCipher
 from .db.migrate import apply_schema
 from .db.repo import (
     ApiKeyRepository,
+    AuditRepository,
     CredentialRepository,
     CreditEventRepository,
     GrowthRepository,
     RuntimeSettingsRepository,
+    UserRepository,
 )
 from .engine.affinity import ConversationAffinity
 from .engine.executor import Executor, ExecutorDeps
@@ -133,7 +139,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     growth_events = GrowthRepository(db)
     credit_events = CreditEventRepository(db)
     api_keys = ApiKeyRepository(db)
-    store = users if users is not None else _load_users(settings=config)
+    user_repo = UserRepository(db)
+    audit = AuditRepository(db)
+    store = users if users is not None else _load_users(
+        settings=config, user_repo=user_repo)
     # 聊天节流器存「取值器」而不是快照：管理台改最小间隔后立即生效。
     # 必须传 lambda 而不是 live(runtime.x)——后者会当场求值一次再包成常量，
     # 对 RuntimeSettings 就等于没热更。0 表示关闭，由 Pacer.disabled 处理。
@@ -206,6 +215,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 同时避免把「进程启动时的 env 快照」和「当前生效值」混为一谈。
     app.state.runtime_settings = runtime
     app.state.users = store
+    app.state.user_repo = user_repo
+    app.state.audit = audit
     app.state.credentials = credentials
     app.state.api_keys = api_keys
     app.state.executor = executor
@@ -255,6 +266,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         executor=executor,
         registry=registry,
         users=store,
+        user_repo=user_repo,
+        audit=audit,
         stats_query=app.state.stats_query,
         login_throttle=app.state.login_throttle,
         upstream_auth=app.state.upstream_auth,
@@ -293,6 +306,9 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.include_router(admin_keys.create_router(services))
     app.include_router(admin_settings.create_router(services))
     app.include_router(admin_stats.create_router(services))
+    app.include_router(admin_users.create_router(services))
+    app.include_router(admin_audit.create_router(services))
+    app.include_router(activate.create_router(services))
     app.include_router(chat.create_router(services))
     app.include_router(responses.create_router(services))
     app.include_router(models.create_router(services))
@@ -317,11 +333,29 @@ def _upstream_auth(registry: dict, settings: Settings) -> dict:
     return flows
 
 
-def _load_users(*, settings: Settings):
-    """用户文件是唯一用户源（PROPOSAL §5）。启动时必须存在且至少一个有效用户。"""
-    from .auth.users import UsersFileStore
+def _load_users(*, settings: Settings, user_repo):
+    """构造 DB 用户存储并完成引导（B5）。
 
-    store = UsersFileStore(settings.users_file)
+    引导把 users.txt + ADMIN_USERNAMES 的职责交接给 SQLite（见
+    auth/bootstrap.py）；文件缺失不再是致命错误——只要库里已有用户就能启动，
+    这让「部署时忘了挂 users.txt」不再等于服务不可用。
+    """
+    from .auth.bootstrap import bootstrap_users
+    from .auth.users import DbUserStore, UsersFileError, UsersFileStore
+
+    store = DbUserStore(user_repo)
+    file_store = None
+    path = settings.users_file
+    if Path(path).is_file():
+        try:
+            file_store = UsersFileStore(path)
+            file_store.validate()
+        except UsersFileError:
+            # 文件存在但格式非法/无用户：当作「没有文件」，让库里的用户说了算；
+            # 真正的死局（库也为空）由 bootstrap 第 3 步统一报错。
+            file_store = None
+    bootstrap_users(settings, user_repo, file_store=file_store,
+                    log=lambda msg, *args: logger.info(msg, *args))
     store.validate()
     return store
 

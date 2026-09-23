@@ -17,22 +17,39 @@ from fastapi import Request
 
 from ..auth.access import client_ip, ip_allowed
 from ..auth.csrf import check_csrf
-from ..auth.rbac import ForbiddenError, Principal, UnauthorizedError
-from ..auth.session import verify_session_token
+from ..auth.rbac import (
+    ROLE_ADMIN,
+    ForbiddenError,
+    PasswordChangeRequiredError,  # noqa: F401 - 对外经 deps 暴露，handlers 引用
+    Principal,
+    UnauthorizedError,
+)
+from ..auth.session import SESSION_COOKIE, verify_session_token
 from ..auth.throttle import LoginThrottle
 from ..compat.openai.request import InvalidRequest
 from ..config import Settings
 from ..db.repo import (
     ApiKeyRepository,
+    AuditRepository,
     CredentialRepository,
     CreditEventRepository,
     GrowthRepository,
+    UserRepository,
 )
 from ..engine.executor import Executor
 from ..runtime_settings import RuntimeSettings
 from ..stats.query import StatsQuery
 
-SESSION_COOKIE = "coding2api_session"
+# 首登强制改密（must_change_password=1）时放行的端点，精确白名单。
+#
+# 刻意不用 `/api/auth/*` 通配：`/api/auth/upstream/start|poll|cancel` 正是
+# 「建上游凭证」的写操作，恰恰是最该在改密前拦住的。这里只放行三件必需的事：
+# 看会话（前端据此判断）、改密本身、登出。
+PASSWORD_CHANGE_ALLOWLIST = frozenset({
+    ("GET", "/api/auth/session"),
+    ("POST", "/api/auth/password"),
+    ("POST", "/api/auth/logout"),
+})
 
 
 @dataclass
@@ -51,12 +68,16 @@ class Services:
     api_keys: ApiKeyRepository
     executor: Executor
     registry: dict[str, Any]
-    users: Any                                  # UsersFileStore
+    users: Any                                  # DbUserStore
     stats_query: StatsQuery
     login_throttle: LoginThrottle
     upstream_auth: dict[str, Any]
     model_aliases: dict[str, dict[str, str]]
     schedule_probe: Callable[[str], None]
+    # 用户仓储（B5）：用户管理端点直接读写行，不经过 DbUserStore（后者只做鉴权读）。
+    user_repo: UserRepository
+    # 审计流水（B5）：登录/账号变动/凭证写操作。
+    audit: AuditRepository
     # 模型列表缓存：provider_id → {小写模型名: Model}（含元数据）。
     # list_models 成功时更新，某上游拉取失败时用缓存兜底（v1/models 稳定返回）。
     # **存未过滤的原始表**：MODEL_BLOCKLIST 是可热更项，过滤在每个出口现做，
@@ -74,16 +95,39 @@ def get_services(request: Request) -> Services:
 async def principal_from_request(request: Request) -> Principal:
     """会话 Cookie → Principal（管理台内部端点）。
 
-    除签名与过期外还要确认用户仍存在于 users.txt：删除用户后旧会话
-    最长还能再用 12 小时，属于权限撤销漏洞（cookie 是无状态签名）。
+    四道校验，缺一不可：
+    1. 签名与过期（`verify_session_token`）。
+    2. 用户仍存在**且未禁用**—— cookie 无状态，删除/禁用后不查库会让旧会话
+       继续可用到过期为止（权限撤销漏洞）。
+    3. 会话 epoch 与 DB 一致——改密/禁用/改角色后旧 Cookie 立即失效。
+       缺 `ep` 的老 Cookie 按 0 处理（升级平滑），因此引导期签发的 Cookie
+       仍然有效。
+    4. 角色从 DB 现读，不进 Cookie——降级立即生效。
     """
     services = get_services(request)
     token = request.cookies.get(SESSION_COOKIE, "")
-    username = verify_session_token(token, services.settings.app_secret)
-    if not username or not services.users.has(username):
+    verified = verify_session_token(token, services.settings.app_secret)
+    if verified is None:
         raise UnauthorizedError("session missing or expired")
-    return Principal(username=username,
-                     is_admin=services.settings.is_admin(username))
+    username, epoch = verified
+    if not services.users.is_active(username):
+        raise UnauthorizedError("session missing or expired")
+    if services.users.session_epoch(username) != epoch:
+        raise UnauthorizedError("session missing or expired")
+    role = services.users.role_of(username)
+    principal = Principal(username=username, is_admin=role == ROLE_ADMIN, role=role)
+    if services.users.must_change_password(username):
+        _enforce_password_change(request)
+    return principal
+
+
+def _enforce_password_change(request: Request) -> None:
+    """首登强制改密：只放行白名单端点，其余 403。"""
+    route = request.scope.get("route")
+    path = getattr(route, "path", request.url.path)
+    if (request.method, path) in PASSWORD_CHANGE_ALLOWLIST:
+        return
+    raise PasswordChangeRequiredError("password change required")
 
 
 @dataclass(frozen=True)
@@ -107,8 +151,8 @@ async def api_key_user(request: Request) -> ApiKeyPrincipal:
     if not header.lower().startswith(prefix.lower()):
         raise UnauthorizedError("missing api key")
     record = services.api_keys.authenticate(header[len(prefix):].strip())
-    # 用户被删除后旧 Key 永久有效，必须同样校验
-    if not record or not services.users.has(record["username"]):
+    # 用户被删除或禁用后旧 Key 必须立即失效（同会话 Cookie 的理由）
+    if not record or not services.users.is_active(record["username"]):
         raise UnauthorizedError("invalid api key")
     source = client_ip(request.client.host if request.client else None,
                        request.headers.get("x-forwarded-for"),
