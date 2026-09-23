@@ -47,12 +47,13 @@ coding2api/
 │   │   ├── repo.py              # 凭证 / API Key 持久化（手写 SQL）
 │   │   └── crypto.py            # Fernet：APP_SECRET → key derive → encrypt/decrypt
 │   ├── auth/
-│   │   ├── users.py             # users.txt 解析（username:PBKDF2）；hash_password.py CLI
-│   │   ├── session.py           # 会话 Cookie 签发/校验（手写 HMAC，不落库）
+│   │   ├── users.py             # UserStore 抽象：DbUserStore（SQLite，B5）/ UsersFileStore（users.txt 导入）
+│   │   ├── bootstrap.py         # 启动引导：users.txt 一次性导入 → ADMIN_USERNAMES 引导提权 → 无活跃 admin 报错
+│   │   ├── session.py           # 会话 Cookie 签发/校验（手写 HMAC，不落库；payload 带 session_epoch）
 │   │   ├── api_key.py           # sk- 生成、SHA-256 摘要存储、常量时间校验
 │   │   ├── csrf.py              # 写操作 CSRF 校验（自定义头 / 同源 Origin）
 │   │   ├── throttle.py          # 登录限流（三级窗口 + PBKDF2 并发上限）
-│   │   ├── rbac.py              # ADMIN_USERNAMES 判定；require_admin 依赖
+│   │   ├── rbac.py              # 三角色（admin/operator/viewer）+ require_admin/require_operator
 │   │   └── access.py            # API Key 来源 IP 白名单（B3.5，纯函数）
 │   ├── provider/
 │   │   ├── base.py              # Provider 协议、Event、ErrKind、Quota、HealthScore
@@ -114,14 +115,19 @@ coding2api/
 │       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin / 成长 / 账号切换
 │       ├── admin_keys.py        # API Key CRUD（渠道绑定 / IP 白名单，B3.5）
 │       ├── admin_settings.py    # GET/PUT /api/settings（B3.2）+ GET /api/tasks（B4）
+│       ├── admin_users.py       # 用户管理（B5）：list/create/patch/disable/enable/reset-password
+│       ├── admin_audit.py       # GET /api/audit 审计查询（B5）
+│       ├── activate.py          # 一次性令牌激活流（B5）：GET/POST /api/auth/activate
 │       ├── admin_stats.py       # 统计查询
-│       ├── admin_auth.py        # 登录 / 登出 / 会话；上游登录 start/poll/cancel
+│       ├── admin_auth.py        # 登录 / 登出 / 会话 / 自助改密；上游登录 start/poll/cancel
 │       ├── playground.py        # 会话调试端点（无需 API Key）
 │       └── streaming.py         # SSE 流包装（长空隙插心跳帧）
+├── audit/
+│   └── actions.py               # 审计动作常量 + 中文标签（B5）
 ├── web/                         # React 前端
 ├── deploy/                      # newsyslog / logrotate / systemd 模板
 ├── diagrams/                    # 架构图（HTML + 源 JSON）
-├── scripts/                     # hash_password / install-newsyslog
+├── scripts/                     # hash_password / create_user / cleanup_invalid_stats / install-newsyslog
 ├── tests/
 ├── Dockerfile / docker-compose.yml  # 仓库根（compose build context 依赖根目录）
 ├── NOTICE / LICENSE / README.md（中文）/ README.en.md
@@ -506,6 +512,30 @@ response.completed | response.incomplete
 
 ---
 
+### 3.13 用户账号体系（B5，Q39）
+
+**问题**：原设计（Q18）只有「admin + 普通用户」两档、用户源是 `secrets/users.txt`、角色靠 `ADMIN_USERNAMES` env 判定。三处痛点：（1）角色粒度不够——「能管凭证但管不了配置」无档可放；（2）改用户要登机器改文件、还得重启进程；（3）谁在什么时候登录、改了哪个账号毫无留痕。凭证池已经有完整的写操作，但「谁在什么时候动了它」查不到。
+
+**数据源迁移**：新增 `users` 与 `audit_events` 两表（`SCHEMA_VERSION` 13→14，`schema.sql` 只加不改，新表不需要 `_MIGRATION_COLUMNS`）。`users.txt` 不删、降级为**一次性引导导入**——启动时 `bootstrap` 把文件里的用户以 `viewer` 身份插入（`upsert_imported`，已存在的用户名**不覆盖**，幂等），日志明示「已导入 N 个用户」。这给了老部署一条平滑路径：原有账号与密码照常可用，只是角色默认最保守；也给了回滚余地。
+
+**三层引导（`auth/bootstrap.py`）**：① 导入 `users.txt`；② 把 `ADMIN_USERNAMES` 里点名的用户提权为 `admin`（这个 env 只剩**引导期**语义——DB 里已有角色后就不再是权威来源，否则「管理台降级某人 + env 还写着他」会互相打架）；③ **仍无活跃 admin 则启动失败**，消息给出两条恢复路径（补 `users.txt` 重启 / 跑 `scripts/create_user.py`）。防锁死的最后一层在这里收口。
+
+**角色**：`admin` / `operator` / `viewer`（`rbac.py`）。`require_admin` 管用户管理与配置（`admin_auth` / `admin_settings` / `admin_users` / `admin_audit`），`require_operator` 管凭证写操作（`admin_credentials` 的全部分支）。`Principal` 保留 `is_admin` 位置不动（既有 32 处 `Depends(principal_from_request)` 与前端 `is_admin` 字段零改动），`role` 追加为第三字段，`is_operator` 是派生 property（`is_admin or role == "operator"`）——升级时只动判定，不动调用面。
+
+**会话吊销不建会话表**：`users.session_epoch` 进签名 Cookie 的 `ep` 声明（`build_session_token`/`verify_session_token` 返回 `(username, epoch)`）。改密、降级、禁用/启用、硬删一律 `session_epoch + 1`，`principal_from_request` 每请求比一次，旧 Cookie 当场失效。**角色不进 Cookie，每请求现读 DB**——把角色塞进已签名的 Cookie 会让降级延迟到 Cookie 过期才生效，与「降级必须立即可信」直接冲突。向后兼容：老 Cookie 无 `ep` 按 0 处理（不是拒绝），显式给了非法值（非整数）才拒绝。
+
+**一次性激活令牌**（S7）：管理台建号/重置密码时先写一个随机占位密码 + 32 字节 URL-safe 令牌，库里只存 SHA-256 摘要 + 过期时间（TTL 24h），明文只在创建/重置的响应里回显一次，前端拼成 `/activate?token=...` 链接由管理员带外转交。用户在 `/activate` 自设密码即完成激活（`set_password` 顺手清掉摘要，天然一次性）。项目没有邮件设施，这是「不出现管理员已知的共享密码」的最优解，心智模型与「API Key 明文仅一次」一致。
+
+**首登强制改密**：被重置的用户 `must_change_password=1`。`principal_from_request` 用**精确白名单**（`GET /api/auth/session`、`POST /api/auth/password`、`POST /api/auth/logout`）放行，其余端点返回 403 `password_change_required`；前端在 `App` 层看到 `must_change_password` 就直接只渲染不可关闭的改密对话框。用精确清单而不是 `/api/auth/*` 通配，是为了不给未来新增的 auth 端点意外开门。
+
+**审计**：`audit_events(id, ts, actor, action, target, detail, ip, ok)`，动作常量集中在 `audit/actions.py`（含中文标签，供前端筛选下拉）。覆盖登录成功/失败、账号建/激活/改角色/启停/改密/重置/硬删、凭证的导入/删除/启停/pin/复活/切换账号。**绝不记密码或令牌明文**（`detail` 只放角色名一类非敏感说明，测试 `test_users_never_leak_hash` 之外另有专项断言）。保留期与 `usage_events` 同入口，由 `RetentionTask` 统一裁剪。
+
+**防锁死**：三层。Web 端 `_guard_last_admin`（**排在自我检查之前**——操作者必是活跃 admin，所以「活跃 admin 数为 1」时那唯一一个就是自己；顺序反了守卫就是死代码）+ `SelfTargetError`（有同伴时不许对自己降级/禁用）；CLI 端删最后活跃 admin 拒绝；bootstrap 无活跃 admin 启动失败。硬删只在 `scripts/create_user.py --delete --force`——UI 故意不暴露 `DELETE`，因为 `usage_events.username` 是裸文本无外键，硬删会留下永远查不到用户名的孤儿统计，而「停用账号」的实际需求已被禁用完全覆盖。
+
+**已知偏差**：审计写入放在业务写之后、不是字面意义的「同一事务」。SQLite 单机场景下两者之间的进程崩溃概率极低，代价是可能丢一条审计而业务已生效（不会反过来）；换独立事务的收益不抵多一次写事务的复杂度。
+
+---
+
 ## 4. Provider 协议（Q16=A 细接口）
 
 ```python
@@ -735,13 +765,13 @@ class Scheduler:
 
 ## 7. 数据库（T-Q2 定稿）
 
-DDL 以 `src/db/schema.sql` 为准（users.txt 为用户唯一源、无 users 表、凭证加密列、`usage_events.credit`/`cached_tokens` 可空）。当前 `SCHEMA_VERSION = 13`，共 8 张表：`api_keys` / `credentials` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `runtime_settings`。补充实现细节：
+DDL 以 `src/db/schema.sql` 为准（users 为账号唯一源、users.txt 仅引导导入、凭证加密列、`usage_events.credit`/`cached_tokens` 可空）。当前 `SCHEMA_VERSION = 14`，共 10 张表：`api_keys` / `credentials` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `runtime_settings`。补充实现细节：
 
 ```sql
 -- conn.py 打开时执行
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
-PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users.txt 无表）
+PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users 与 api_keys 仍在应用层校验）
 ```
 
 - 连接：`threading.local()` 每线程一个 `sqlite3.Connection(row_factory=sqlite3.Row)`，引擎与 FastAPI 线程池各持自己的连接。写入统一走 `Database.transaction()`（`commit()` / 异常 `rollback()`），无应用层写锁，并发由 SQLite 串行化（WAL + `busy_timeout=5000` 下短写足够）
@@ -773,7 +803,7 @@ fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文�
 
 - **同步 sqlite3 而非 aiosqlite**（T-Q2）：本地微秒级操作，asyncio 封装开销大于收益
 - **双 httpx 客户端**（T-Q4）：聊天流 `read=None` 防长流截断；短请求总超时 30s 防悬挂；共享 `trust_env=False`
-- **手写 SQL 而非 ORM**：8 张表规模下 ORM 收益为负
+- **手写 SQL 而非 ORM**：10 张表规模下 ORM 收益为负
 - **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + `PUBLIC_BASE_URL`
 - **v1 无 Anthropic**（Q8=A）：Event 层已预留，v1.1 只加 `compat/anthropic/` 适配器
 - **Responses 出口只做 Codex CLI 用到的子集**（Q32，详见 §3.7）：不做 `store=true` / `previous_response_id`（服务端无状态，不假装支持）；`include=["reasoning.encrypted_content"]` 按实测接受并忽略——Codex CLI 每轮必带，400 会直接打死主客户端；流式终止用 `response.completed` / `response.incomplete` / `response.failed`，**不发 `[DONE]`**（Responses 协议无该哨兵）。形状取自官方 `openai` SDK 类型并用其作客户端验证，对真实 CB 上游冒烟过；**未经真实 Codex CLI 端到端验证**（本机无 CLI）

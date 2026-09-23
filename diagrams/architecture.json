@@ -211,7 +211,7 @@
       "id": "db",
       "type": "database",
       "label": "SQLite",
-      "sublabel": "加密凭证 + 统计 + 配置",
+      "sublabel": "账号 + 加密凭证 + 统计 + 审计",
       "pos": [
         500,
         520
@@ -220,7 +220,7 @@
         140,
         64
       ],
-      "tag": "WAL · 8 表"
+      "tag": "WAL · 10 表"
     }
   ],
   "boundaries": [
@@ -412,8 +412,8 @@
       "dot": "rose",
       "title": "数据与安全",
       "items": [
-        "SQLite WAL 8 表；13 项配置热更（DB 覆盖 .env）",
-        "API Key 摘要 + 渠道绑定 / IP 白名单；明细留 90 天"
+        "SQLite WAL 10 表；13 项配置热更（DB 覆盖 .env）",
+        "三角色账号 + 审计留痕；API Key 摘要 + IP 白名单"
       ]
     }
   ]

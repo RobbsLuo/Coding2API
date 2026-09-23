@@ -25,7 +25,7 @@
 | Q15/Q26 | 健康度归一化 | 剩余积分百分比，跨 provider 可比 |
 | Q16 | 抽象边界 | 细接口：Provider 只管发请求 + 解析 + 分类错误 |
 | Q17 | 登录 | 双轨（CB 轮询 / TRAE 回调），前端统一状态机 |
-| Q18 | 权限 | 单 admin + 普通用户，admin 管凭证 |
+| Q18 | 权限 | 三角色 `admin` / `operator` / `viewer`（B5 由「单 admin + 普通用户」升级，见 Q39）：admin 管用户与配置，operator 管凭证，viewer 只读 |
 | Q19 | 交付顺序 | 串行：骨架 → TRAE → CB 基础 → CB 完整化 |
 | Q21 | 模型名 | 扁平，自动路由 |
 | Q22 | 数据迁移 | 不迁移，全新开始 |
@@ -44,6 +44,7 @@
 | Q36 | 积分变动流水 | 新增 `credit_events` 表（`SCHEMA_VERSION` 11→12），在额度探测写回的**同一事务**里比对余额、只增记一条。**计划原要求 `source` 标注来源（签到/成长/对话），但实测三类证据都拿不到真实归因**：diff 只见区间净变化，其间签到、成长领取与对话消耗可能同时发生。故 `source` **改为只表达归因已知度**（`observed` / `sync`），另加 `window_start` 记变化覆盖时段，前端一律说「净变化」而非「签到 +N」。余额未变不记；任一端未知仍记但 `delta` 为空（绝不量化成 0）。保留期同 `usage_events`（90 天） |
 | Q37 | 池健康与多 Key 出口 | `GET /healthz` 返回 `{status, service, version, credentials:{total,ready,cooling,paused,disabled}}`（保留 `GET /health` 作纯存活探针）：`ready` 复用调度器 `Candidate.is_selectable` 口径，五类互斥且合计 = total——**计划原文只列 4 类**，但项目已区分「系统禁用」与「用户暂停」（Q33），少一类会让计数对不上，故补 `paused`。`api_keys` 增 `provider_binding`（`codebuddy`/`trae`/空 = 自动）与 `allowed_ips`（`SCHEMA_VERSION` 12→13）；`deps.api_key_user` 升级为返回 `ApiKeyPrincipal`，并**在鉴权当场**判定来源 IP。IP 白名单**默认不信 `X-Forwarded-For`**（客户端可写），仅 `TRUST_PROXY=true` 时采信且取 XFF **最后一个**条目，故只适用于「本服务前恰好一层受信反代」。绑定渠道在 `executor` 收窄候选上游：模型归属别家渠道时 400 并给出实际归属，目录未就绪时保守放行。**不做**每 Key 配额 / 多租户（与 Q10 冲突） |
 | Q38 | 后台任务可视化（「任务与配置」页） | 管理台原「运行时配置」页与后台任务**合并**：13 项配置按 `HotSetting.task` 归属进任务卡片，无归属的进「网关与调度」区；新增 `GET /api/tasks`（admin）下发 6 类任务运行态，前端 30s 刷新。**运行态只存进程内、不落库**（`tasks/status.py`）：重启归零比编造重启前记录更诚实，也省掉新表 + 保留期清理 + 老库迁移，**无 schema 变更**。**no-op 轮次不入账**（返回 `None` = 未到点 / 未开启），否则签到会显示成「刚刚跑过」而当天其实没签；异常入账（`last_error`），否则「一直在失败」会显示成「尚未执行」。周期与开关取**当前生效值**，不是装配快照 |
+| Q39 | 用户账号体系（B5） | **用户从 `users.txt` 迁入 SQLite**（`users` + `audit_events` 两表，`SCHEMA_VERSION` 13→14）：`users.txt` 降级为**一次性引导导入**（首个 admin 仍可用 `scripts/hash_password.py` 或新 `scripts/create_user.py` 建），老文件不删、可作为回滚；`ADMIN_USERNAMES` 只标**引导期**提权。三角色（S1）：`admin` 管用户与配置、`operator` 管凭证写操作、`viewer` 只读。会话吊销（S3）不建会话表，用 `users.session_epoch` 进签名 Cookie 的 `ep`——改密/降级/禁用/硬删一律 bump，**角色每请求现读 DB**，不进 Cookie。删除语义（S6）：**禁用是主路径**（可逆、保住用量归属），硬删只在 `scripts/create_user.py --delete --force`；管理台故意不暴露 `DELETE`。建号/重置（S7）走**一次性激活令牌** + `/activate` 自设密码，明文仅响应回显一次、库里只存 SHA-256 摘要（无邮件设施下的最优解，与「API Key 明文仅一次」同一心智模型）。审计（S8）：登录 + 账号变动 + 凭证写操作入 `audit_events`，**绝不记密码/令牌明文**。防锁死三层：Web 端 self_target + last-admin 守卫，CLI 端删最后活跃 admin 拒绝，bootstrap 无活跃 admin 直接启动失败 |
 
 ## 2. 目标与非目标
 
@@ -241,7 +242,7 @@ v1 只接 OpenAI 出口，但上游 SSE 解析到「中立事件」这一步独�
 
 ## 5. 数据模型
 
-- **用户不建表**：`users.txt`（PBKDF2）是唯一源，路径走 `USERS_FILE`（`config.py` 的 `users_file`，默认 `secrets/users.txt`），角色走 `ADMIN_USERNAMES` env；`api_keys.username` 由应用层校验存在性，不加外键
+- **用户建表**（B5，Q39）：`users`（PBKDF2 密码哈希 + `role` + `enabled` + `must_change_password` + `session_epoch` + 一次性激活令牌摘要）与 `audit_events`（登录/账号变动/凭证写操作）是唯一源。`users.txt` 仅在启动时**一次性导入**（已存在的用户名不覆盖，幂等），路径仍走 `USERS_FILE`（`config.py` 的 `users_file`，默认 `secrets/users.txt`）；角色改由 `users.role` 决定，`ADMIN_USERNAMES` 只剩引导期提权作用。`api_keys.username` 仍由应用层校验存在性，不加外键
 - **API Key 存摘要**：SHA-256，明文仅创建时返回一次
 - **凭证加密列**：`data_enc` 走 Fernet；调度状态（`health` / `cooling_until` / `err_count` / `pinned` / `quota_expiry_ladder`）落库，重启不丢冷却状态与到期阶梯
 - **用量脱敏**：`usage_events`（明细 90 天）+ `usage_hourly`（小时汇总永久），`credit`/`cached_tokens` 可空、仅辅助展示
@@ -265,7 +266,7 @@ DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见
 
 外部（API Key 鉴权）：`POST /v1/chat/completions`（流式 + 非流式）、`POST /v1/responses`（Responses 子集，Codex CLI；与 chat 共用同一调度 / 选号 / 统计链路）、`GET /v1/models`（扁平模型名 + `providers` 字段）、`GET /v1/user/balance`（DeepSeek 兼容余额，读探测缓存聚合，不实时打上游）、`GET /health`（纯存活）、`GET /healthz`（存活 + 凭证池计数，无鉴权）。
 
-管理台（会话 Cookie）：凭证管理、API Key 管理、用量统计、Playground、任务与配置（admin-only），admin 管凭证与全量统计，普通用户仅见自己的数据。凭证运维端点含 `POST /api/credentials/{id}/checkin`（签到）、`GET|POST /api/credentials/{id}/growth`（成长中心状态与手动执行，仅 CodeBuddy）；运行时配置与任务运行态走 `GET|PUT /api/settings` + `GET /api/tasks`。回调（无鉴权，TRAE 浏览器 302 不带 key）：`GET /authorize`。
+管理台（会话 Cookie）：凭证管理、API Key 管理、用量统计、Playground、用户管理（admin-only）、审计日志（admin-only）、任务与配置（admin-only）。admin 管用户、配置与凭证，operator 管凭证写操作（含导入/删除），viewer 只读；用量统计按角色决定是否展示全量。账号端点：`GET|POST /api/users`、`PATCH /api/users/{username}`、`POST /api/users/{username}/{disable|enable|reset-password}`（**不提供 DELETE**，硬删走 CLI）；自助改密 `POST /api/auth/password`；无鉴权的一次性激活流 `GET|POST /api/auth/activate`；审计查询 `GET /api/audit`。凭证运维端点含 `POST /api/credentials/{id}/checkin`（签到）、`GET|POST /api/credentials/{id}/growth`（成长中心状态与手动执行，仅 CodeBuddy）；运行时配置与任务运行态走 `GET|PUT /api/settings` + `GET /api/tasks`。回调（无鉴权，TRAE 浏览器 302 不带 key）：`GET /authorize`。
 
 实现以代码为准，使用说明见 [README.md](README.md)。
 
@@ -283,12 +284,12 @@ DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见
 - API Key 仅存摘要，明文只在创建时返回一次；可按 Key 限定渠道绑定与来源 IP 白名单（见 [README.md](README.md)）
 - 凭证内容加密入库，密钥走 `APP_SECRET`：最短 16 字符，弱密钥拒绝启动；**丢失 = 已存凭证全部不可解，只能重录**，不做密钥轮换。解密失败返回可行动错误码 `credential_decrypt_failed`，不暴露裸 500
 - 管理台会话 Cookie `SameSite=Lax` + 写操作自定义头校验（CSRF，含 logout）
-- 会话与 API Key 除签名 / 摘要外**校验用户仍存在于 users.txt**：删用户即失效
+- 会话与 API Key 除签名 / 摘要外**校验用户仍存在、启用且会话 epoch 一致**（B5）：删用户、禁用、改角色或改密码（bump epoch）都会让已签发的 Cookie 当场失效
 - 未匹配的 `/api`、`/v1` 路径返回 JSON 404（不落到 SPA 的 200 + HTML）
 - 日志脱敏：不打印 Token、完整请求体
-- 审计：凭证增删改、pin、账号切换写 INFO 日志（含操作人）
+- 审计：凭证增删改、pin、账号切换、登录与账号变动写 INFO 日志（含操作人）；**绝不记密码/令牌明文**
 
-不做的：mTLS；**面向管理台与端口的** IP 限制（交给反向代理）。注意与上文的 API Key 来源 IP 白名单区分——后者是应用层能力，已内建。审计只覆盖凭证管理写操作，不做全量请求审计（统计表已是脱敏的请求级记录）。
+不做的：mTLS；**面向管理台与端口的** IP 限制（交给反向代理）。注意与上文的 API Key 来源 IP 白名单区分——后者是应用层能力，已内建。审计覆盖登录、账号变动与凭证管理写操作，不做全量请求审计（统计表已是脱敏的请求级记录）。
 
 env 完整清单见 [README.md「配置」](README.md)（以 `src/config.py` 为准）。
 

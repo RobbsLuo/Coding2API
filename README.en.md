@@ -17,6 +17,7 @@ upstream channels, with a shared credential pool, unified scheduling, and per-us
 - **Cached-token accounting**: TRAE's `cache_read_input_tokens` / `cache_creation_input_tokens` are mapped to per-request `cached_tokens` and surfaced in stats
 - **Three-state health + tiered cooldowns**: quota exhausted 12h, rate-limited 60s, consecutive errors 10m, dead session disabled; model-scoped limits sideline only that model
 - **Shared credential pool**: admins maintain credentials, everyone shares them; usage tracked per user
+- **Three-role accounts**: `admin` / `operator` / `viewer` stored in SQLite. New users get a one-time activation link to set their own password (no shared initial secret) and must change an admin-reset password on first login; changing a role or disabling an account revokes its sessions immediately. Logins and write operations are audited
 - **Credential automation**: device-code login, account switching, quota probing, daily check-in (with streak), token pre-refresh, growth-center jobs (CodeBuddy only: travel gifts, Buddy dispatch, task accept/claim, streak redemption, lottery, blind boxes; irreversible steps off via `GROWTH_IRREVERSIBLE_ACTIONS=false`)
 - **Per-credential pause**: "Pause" removes one credential from *chat traffic only* — probing, refresh, check-in, growth and activity tasks keep running (they honor only the system hard-disable `disabled`). Distinct from "Disabled", which means the upstream rejected the session and needs re-login + "Restore"
 - **Activity reporting** (CodeBuddy only, **off by default**): `ACTIVITY_REPORT_ENABLED=true` posts one chat-activity event per account per day to keep the growth-center streak alive. The upstream needs a `userId` and silently drops reports without one (HTTP 200 `{"code":0}`, streak unchanged); when the credential has no `user_id`, the gateway falls back to the bearer JWT `sub`. Upstream-internal and may break without notice — not a reliability feature (terms forbid scripted tampering: disqualification + clawback)
@@ -34,10 +35,11 @@ upstream channels, with a shared credential pool, unified scheduling, and per-us
 
 ```bash
 uv sync
-uv run python scripts/hash_password.py admin          # prompts for a password
+# Create the first admin (add the rest from the "Users" page later)
+uv run python scripts/create_user.py admin --role admin
 cd web && pnpm install && pnpm build && cd ..
 
-APP_SECRET="pick-a-random-string" ADMIN_USERNAMES=admin \
+APP_SECRET="pick-a-random-string" \
   uv run python -m uvicorn src.main:build_app --factory --port 8000
 ```
 
@@ -51,6 +53,13 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 Point any OpenAI-compatible client at `http://127.0.0.1:8000/v1`.
+
+> `scripts/create_user.py` writes directly to SQLite (`--db`, or `DATA_DIR`; default
+> `data/coding2api.sqlite3`). On startup, an existing `secrets/users.txt` is imported
+> once (existing usernames are never overwritten), and `ADMIN_USERNAMES` promotes the
+> named users to `admin`. Both are **bootstrap-only** afterwards — day-to-day user and
+> role management happens on the *Users* page. See [`README.md`](README.md) (Chinese)
+> for the role matrix, activation flow, and the audit log.
 
 ### Responses API (Codex CLI)
 

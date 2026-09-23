@@ -13,6 +13,7 @@
 - **到期积分优先消化**：主窗口 36h 内将过期的积分多者先用（避免过期浪费），打平再比 7 天窗口；管理台凭证列表显示到期积分与逐个额度包明细
 - **会话粘性**：同一对话多轮粘住同一凭证，出错才轮换
 - **公共凭证池**：admin 集中维护、全员共享；按人统计用量
+- **三角色账号体系**：`admin` / `operator` / `viewer`，用户存 SQLite；一次性激活链接自设密码（无共享初始密码）、首登强制改密、改角色/停用即时吊销会话；登录与写操作留审计
 - **完整凭证运维**：设备码登录、多账号切换、额度探测、每日签到（含连续天数）、token 预刷新；凭证加密入库（`APP_SECRET`）
 - **成长中心**（仅 CodeBuddy）：自动领 Buddy 旅行礼物、派 Buddy、领取新任务与任务奖、断登补登、连登奖励兑换、开盲盒、能量开 Buddy 盲盒；不可逆动作可用 `GROWTH_IRREVERSIBLE_ACTIONS=false` 关停；管理台可手动执行并查看逐条结果
 - **脱敏统计**：不存对话内容；明细 90 天、小时汇总永久；按人/渠道/模型可视化
@@ -28,13 +29,59 @@ Python 3.12+、[uv](https://docs.astral.sh/uv/)、Node.js 24+ 与 pnpm 10+（仅
 
 ```bash
 uv sync
-uv run python scripts/hash_password.py admin   # 创建管理台用户（交互输入密码）
+# 建首个管理员（之后都在管理台「用户管理」里加人）
+uv run python scripts/create_user.py admin --role admin
 cd web && pnpm install && pnpm build && cd ..
-APP_SECRET="换成你自己的随机字符串" ADMIN_USERNAMES=admin \
+APP_SECRET="换成你自己的随机字符串" \
   uv run python -m uvicorn src.main:build_app --factory --port 8000
 ```
 
 打开 <http://127.0.0.1:8000> 登录管理台。
+
+> `scripts/create_user.py` 直接写 SQLite（`--db` 或 `DATA_DIR`，默认 `data/coding2api.sqlite3`）。
+> 老部署若已有 `secrets/users.txt`，启动时会自动导入一次（已存在的用户不覆盖），
+> 也可继续用 `scripts/hash_password.py` 写文件作引导。
+
+## 用户与角色
+
+账号存在 SQLite 的 `users` 表里，管理台「用户管理」页（仅管理员可见）负责日常增删改。
+
+三档角色：
+
+| 角色 | 能做什么 |
+|---|---|
+| `admin` | 用户管理、任务与配置、凭证读写、全部统计、审计日志 |
+| `operator` | 凭证读写（含导入 / 删除 / 启停 / 签到 / 成长 / 切换账号）、全部统计 |
+| `viewer` | 只读：看仪表盘、凭证列表、统计与 Playground |
+
+**加人**：管理员在「用户管理」填用户名 + 角色，创建后得到**一次性激活链接**（有效 24 小时，只显示这一次）。把链接通过可信渠道发给本人，对方打开 `/activate` 自设密码即可登录——系统里不存在「管理员知道但用户不知道」的初始密码。忘记密码同理：点「重置密码」生成新链接。
+
+**改角色 / 停用**：都是即时生效——改角色或停用会立刻作废该账号已签发的所有会话 Cookie（重新登录即可）。停用是默认的「删人」方式（可逆，用量统计仍归属该用户名）；**硬删只在 CLI**（`scripts/create_user.py <用户名> --delete --force`），因为硬删会让 `usage_events` 里留下查不到用户名的孤儿记录。
+
+**自助改密**：右上角用户菜单 →「修改密码」，需要当前密码。
+
+**防锁死**：不能停用/降级**最后一个活跃管理员**，也不能对自己降级或停用——否则下一次请求就没人能管了。要交接权限，先加另一个 `admin` 再降自己。
+
+**CLI 兜底**（无 Web 场景 / 全部管理员失联时）：
+
+```bash
+python3 scripts/create_user.py alice --role admin   # 交互输入密码
+python3 scripts/create_user.py --list
+python3 scripts/create_user.py alice --delete --force   # 硬删，不可逆
+python3 scripts/create_user.py --db data/x.sqlite3 ...  # 指定库
+```
+
+`ADMIN_USERNAMES` 与 `secrets/users.txt` 只在**引导期**起作用（首个管理员、老部署升级）：启动时把 `users.txt` 里的用户导入 DB（已存在的用户名不覆盖），再把 `ADMIN_USERNAMES` 点名的人提权为 `admin`；此后两者都不再是角色来源。
+
+## 审计
+
+「审计日志」页（仅管理员可见）记录登录与写操作，可按操作者与动作筛选、分页查看：
+
+- **登录**：成功与失败都记（失败登录留痕正是审计的价值——「谁在什么时候试了哪个账号」）
+- **账号变动**：新建、激活、改角色、禁用/启用、改密、重置密码、硬删
+- **凭证写操作**：导入、删除、启停、指定（pin）、复活、切换账号
+
+每条含时间、操作者、动作、对象、说明与来源 IP。**审计记录绝不包含密码或令牌明文**（一次性激活令牌的明文只在创建响应里出现一次，库里只有 SHA-256 摘要）。保留期与请求明细一致（默认 90 天），由后台清理任务统一裁剪。
 
 ### Docker
 
@@ -43,14 +90,12 @@ APP_SECRET="换成你自己的随机字符串" ADMIN_USERNAMES=admin \
 ```bash
 cat > .env <<'EOF'
 APP_SECRET=换成你自己的随机字符串
-ADMIN_USERNAMES=admin
 PUBLIC_BASE_URL=http://127.0.0.1:8000
 EOF
 docker compose build
-mkdir -p secrets
-docker compose run --rm --entrypoint python coding2api scripts/hash_password.py admin \
-  --output /app/secrets/users.txt
 docker compose up -d
+# 建首个管理员（容器内执行；之后在管理台加人，无需再进容器）
+docker compose exec coding2api python scripts/create_user.py admin --role admin
 ```
 
 拉取 GHCR 镜像（推荐，跳过本地构建）：
@@ -182,10 +227,10 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `APP_SECRET` | **必填** | 凭证加密密钥，≥16 字符；丢失 = 凭证全部作废，无密钥轮换 |
-| `ADMIN_USERNAMES` | 空 | 管理员用户名，逗号分隔；空则全员只读 |
+| `ADMIN_USERNAMES` | 空 | **仅引导期**：逗号分隔的用户名，首次启动时被提权为 `admin`。DB 里已有角色后不再生效——日常改角色在管理台「用户管理」页做（见下文「用户与角色」） |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | 浏览器可达地址；TRAE 登录回调依赖它 |
 | `DEFAULT_MODEL` | `glm-5.2` | 模型为空/`auto` 时的默认 |
-| `USERS_FILE` | `secrets/users.txt` | 用户文件路径（`config.py` 的 `users_file`） |
+| `USERS_FILE` | `secrets/users.txt` | **仅引导期**：老式用户文件路径，启动时一次性导入 SQLite（已存在的用户名不覆盖，幂等）。账号唯一源是 `users` 表 |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |
 | `GROWTH_INTERVAL_MINUTES` | `60` | 成长中心（仅 CodeBuddy）一轮领取的周期；下限 5 分钟 |
@@ -312,8 +357,9 @@ M0–M3 及后续迭代全部完成，`main` 分支可运行，当前版本 v0.2
 - **B2 协议出口**：`/v1/responses`（Codex CLI 子集）；Anthropic `/v1/messages` **暂不做**（当前无 Claude Code 场景，架构已预留中立事件层，后续按需补）
 - **B3 运维**：凭证暂停语义、运行时配置热更、token 到期展示、积分变动流水、池健康 `/healthz` + 多 Key 出口/IP 绑定
 - **B4 任务可视化**：后台任务运行态并入「任务与配置」页；模型黑名单热更延迟修复
+- **B5 账号体系**：用户从 `users.txt` 迁入 SQLite、三角色 RBAC、会话吊销（epoch）、一次性令牌激活 + 首登强制改密、用户管理页、审计日志页、硬删降为 CLI
 
-规划与实测收窄的完整记录见 `PROPOSAL.md`（Q32–Q38）与 `TECHNICAL.md`（§3.4–§3.12、§6.1–§6.3）。
+规划与实测收窄的完整记录见 `PROPOSAL.md`（Q32–Q39）与 `TECHNICAL.md`（§3.4–§3.13、§6.1–§6.3）。
 
 ## 授权协议
 
