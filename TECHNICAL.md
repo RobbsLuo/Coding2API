@@ -8,8 +8,8 @@ PROPOSAL.md 定方向，本文档定实现。每个模块标注来源决策（Q 
 
 | 层 | 选型 | 版本 | 决策 |
 |---|---|---|---|
-| 运行时 | Python | 3.12（本机 3.12.14；`requires-python >=3.12`，CI/Dockerfile 均 3.12） | Q2 |
-| 包管理 | uv（venv + pyproject.toml + uv.lock） | 本机 0.12.x | T-Q1 |
+| 运行时 | Python | 3.12（`requires-python >=3.12`，CI/Dockerfile 均 3.12） | Q2 |
+| 包管理 | uv（venv + pyproject.toml + uv.lock） | 锁定版本见 `uv.lock` | T-Q1 |
 | Web | FastAPI + Uvicorn | 0.141 / 0.52 | Q2=A |
 | 配置 | pydantic-settings | 2.15 | T-Q3 |
 | HTTP | httpx 双客户端（流式/短请求分离） | 0.28.1 | T-Q4 |
@@ -241,7 +241,7 @@ def health(q: Quota | None) -> HealthScore:
 | 判据 | 实测结论 |
 |---|---|
 | 仅 reasoning 无正文 | 真实存在，但**只在客户端下发 `max_tokens` 时**出现：glm-5.3-flash `max_tokens` 8/24/64 → content=0 / reasoning=33/96/307，`finish_reason=length`。生产路径（PI 等）只发 `reasoning_effort`、不发任何 max 键，本网关也不做 max 键映射 → 该形态在生产不可达。凭空加启发式会把「模型就是想空回」误判成截断 |
-| 空正文无工具调用 | 本机 5744 条统计 **0 例**，无证据 |
+| 空正文无工具调用 | 开发环境 5744 条统计 **0 例**，无证据 |
 | 代码块未闭合 | 纯启发式，**无任何实测支撑**，不做 |
 
 另两条实测事实（影响 `length` 可观测性）：`max_completion_tokens` 被 CB 上游**完全忽略**（`=1` 仍出 59 tokens）；`max_tokens` 才生效（精确截断 + `length`）；两键同发时后者胜出；TRAE 对两个键**都不生效**（80/80/80 字符）。CB 的 `usage.reasoning_tokens` 恒为 `None`（口径差异，见 §3.1）；`enable_thinking: false` 被上游**忽略**（仍产 reasoning 且计入 `max_tokens`）。
@@ -250,7 +250,7 @@ def health(q: Quota | None) -> HealthScore:
 
 ### 3.5 会话粘性键（B1.5）与模型元数据/黑名单（B1.6）
 
-**会话粘性键**（`src/engine/affinity.py`，详见 [PROPOSAL.md 会话粘性](PROPOSAL.md)）：键优先级 `conversation_id` > `conversationId` > `prompt_cache_key`（同键名先 `metadata` 对象再请求体顶层）→ 无显式标识时回落「用户名 + 消息增量前缀指纹」；请求体带 `user_id`（顶层或 `metadata` 内）时不派生兜底键。键名核实：`prompt_cache_key` 是 OpenAI 官方顶层参数、`metadata.user_id` 是 Anthropic Messages API 官方字段；`conversation_id`/`conversationId`/顶层 `user_id` 非两家标准键，本机 71 份真实 dump（PI 客户端）**未观测到**，作为兼容探测接受（命中即用、未命中无害）。
+**会话粘性键**（`src/engine/affinity.py`，详见 [PROPOSAL.md 会话粘性](PROPOSAL.md)）：键优先级 `conversation_id` > `conversationId` > `prompt_cache_key`（同键名先 `metadata` 对象再请求体顶层）→ 无显式标识时回落「用户名 + 消息增量前缀指纹」；请求体带 `user_id`（顶层或 `metadata` 内）时不派生兜底键。键名核实：`prompt_cache_key` 是 OpenAI 官方顶层参数、`metadata.user_id` 是 Anthropic Messages API 官方字段；`conversation_id`/`conversationId`/顶层 `user_id` 非两家标准键，开发环境 71 份真实 dump（PI 客户端）**未观测到**，作为兼容探测接受（命中即用、未命中无害）。
 
 **模型元数据**（B1.6，2026-09-21 两边模型配置接口实测）：两边上游都直接给出推理元数据，网关透传为 `/v1/models` 的 OpenAI 额外字段：
 
@@ -357,9 +357,9 @@ response.completed | response.incomplete
 | `previous_response_id` → 400 | Codex HTTP 路径**不发**该字段（`ResponsesApiRequest` 无此字段） | 保持 400（本网关无状态） |
 | `store=true` → 400 | Codex 恒发 `store=false` | 保持 400（`false` 放行） |
 
-**客户端取证结论**（`openai/codex`，非本机实测）：Codex CLI 按 SSE 的 `event:` 行（而非 `data.type`）分派事件，所以两个字段都必须发；`response.completed.response` 在它那边是**强类型解析**（`id` 必填、`usage` 含 `input_tokens`/`output_tokens`/`total_tokens`），解析失败即整轮报错——故 `response` 对象按官方必填字段完整发出。Codex 回传的历史里 `reasoning`/`compaction` 只有密文、没有 chat 等价物，**有意无损丢弃**（不是静默降级：不影响回答质量，仅不再回传），其余 Responses 私有 item 类型（`local_shell_call`/`custom_tool_call` 等）显式 400。
+**客户端取证结论**（`openai/codex`，非开发环境实测）：Codex CLI 按 SSE 的 `event:` 行（而非 `data.type`）分派事件，所以两个字段都必须发；`response.completed.response` 在它那边是**强类型解析**（`id` 必填、`usage` 含 `input_tokens`/`output_tokens`/`total_tokens`），解析失败即整轮报错——故 `response` 对象按官方必填字段完整发出。Codex 回传的历史里 `reasoning`/`compaction` 只有密文、没有 chat 等价物，**有意无损丢弃**（不是静默降级：不影响回答质量，仅不再回传），其余 Responses 私有 item 类型（`local_shell_call`/`custom_tool_call` 等）显式 400。
 
-**验证状态**：本机无 Codex CLI、无 Responses 参考实现，故以官方 `openai` SDK（`responses.create(stream=True/False)`，含工具调用）作权威客户端跑通全部契约，并对**真实 CB 上游**冒烟（流式 / 非流式 / 工具调用三条，模型 `deepseek-v4-pro`），另用按 `codex-rs` 源码构造的真实请求体核对入站映射。**未经真实 Codex CLI 端到端验证**，剩余风险：客户端行为细节（如 reasoning item 无 `encrypted_content` 时的降级路径）。
+**验证状态**：开发环境无 Codex CLI、无 Responses 参考实现，故以官方 `openai` SDK（`responses.create(stream=True/False)`，含工具调用）作权威客户端跑通全部契约，并对**真实 CB 上游**冒烟（流式 / 非流式 / 工具调用三条，模型 `deepseek-v4-pro`），另用按 `codex-rs` 源码构造的真实请求体核对入站映射。**未经真实 Codex CLI 端到端验证**，剩余风险：客户端行为细节（如 reasoning item 无 `encrypted_content` 时的降级路径）。
 
 ---
 
@@ -777,12 +777,14 @@ B5 的实际症状值得记住：新建用户报「用户名可能已存在，�
 **诊断顺序**（先确认版本，再查业务）：
 
 ```bash
-sqlite3 data/coding2api.sqlite3 "PRAGMA user_version;"        # 期望 14
-curl -s -o /dev/null -w '%{http_code}\n' .../api/users        # 期望 401，404 = 旧后端
-grep 账号引导 logs/launchd.err.log | tail -2                  # 引导只跑一次
+# 1) schema 版本已迁移（期望 14）且账号已导入
+sqlite3 data/coding2api.sqlite3 "PRAGMA user_version; SELECT username, role, enabled FROM users;"
+# 2) 路由存在：期望 401（未登录），404 = 旧后端进程
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
+# 3) 引导日志（路径随部署形态而定，见 README「日志」）
 ```
 
-**结论**：改 `src/` 必须重启进程；改 `web/` 只需重新构建。升级 schema 时重启同时完成迁移与引导（bootstrap 幂等）。
+**结论**：改 `src/` 必须重启进程；改 `web/` 只需重新构建。升级 schema 时重启同时完成迁移与引导（bootstrap 幂等）：`users` / `audit_events` 为**新增表**，凭证与统计原样保留（不删列、不重建表）。
 
 ---
 
@@ -832,7 +834,7 @@ fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文�
 - **手写 SQL 而非 ORM**：10 张表规模下 ORM 收益为负
 - **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + `PUBLIC_BASE_URL`
 - **v1 无 Anthropic**（Q8=A）：Event 层已预留，v1.1 只加 `compat/anthropic/` 适配器
-- **Responses 出口只做 Codex CLI 用到的子集**（Q32，详见 §3.7）：不做 `store=true` / `previous_response_id`（服务端无状态，不假装支持）；`include=["reasoning.encrypted_content"]` 按实测接受并忽略——Codex CLI 每轮必带，400 会直接打死主客户端；流式终止用 `response.completed` / `response.incomplete` / `response.failed`，**不发 `[DONE]`**（Responses 协议无该哨兵）。形状取自官方 `openai` SDK 类型并用其作客户端验证，对真实 CB 上游冒烟过；**未经真实 Codex CLI 端到端验证**（本机无 CLI）
+- **Responses 出口只做 Codex CLI 用到的子集**（Q32，详见 §3.7）：不做 `store=true` / `previous_response_id`（服务端无状态，不假装支持）；`include=["reasoning.encrypted_content"]` 按实测接受并忽略——Codex CLI 每轮必带，400 会直接打死主客户端；流式终止用 `response.completed` / `response.incomplete` / `response.failed`，**不发 `[DONE]`**（Responses 协议无该哨兵）。形状取自官方 `openai` SDK 类型并用其作客户端验证，对真实 CB 上游冒烟过；**未经真实 Codex CLI 端到端验证**（开发环境无 CLI）
 - **不做 reasoning 注入 / effort 档位映射**（原 B1.2，实测后取消）：原计划对「强制推理模型族」注入 `thinking` + `reasoning_effort` 并回填历史 `reasoning_content`，实测前提不成立——（1）客户端已自带 `reasoning_effort`（仅 `low`/`medium`）且上游直接接受；（2）客户端已回传历史 `reasoning_content` 且上游接受；（3）原计划的默认模型清单与实际在用命名无关，且 `glm-5.1` 在 `MODEL_BLOCKLIST` 里，硬编码白名单会空转；（4）真要做「客户端丢弃时回填」必须服务端存对话内容，与脱敏纪律冲突。参考实现 IceeAn/codebuddy2api 走相反取向（对白名单模型强制 `reasoning_effort=max` 覆盖客户端），属单来源且会改写客户端意图，不采纳
 - **统计一律以 `usage_hourly` 为准**：`overview` / `by_provider` / `timeline` / `model-timeline` 均读小时汇总，只有 `events`（逐请求明细）读 `usage_events`。统一口径是为了让选「全部」时总览与图表同值（明细只留 90 天，汇总永久）。代价：最近 ≤5 分钟未进汇总的请求不计入，刷新一次即可
 - **小时汇总双写**：`record()` 写明细的同时增量累加当前小时行，新请求立即可见于统计页（不依赖 5 分钟一轮的 rollup）；`rollup_hourly` 仍每 5 分钟全量重算作对账，两者结果一致（幂等）

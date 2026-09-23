@@ -98,14 +98,14 @@ launchctl kickstart -k gui/$(id -u)/com.coding2api   # macOS (launchd)
 docker compose up -d --force-recreate                # Docker / compose
 sudo systemctl restart coding2api                    # systemd
 
-# Confirm the upgrade took effect
-sqlite3 data/coding2api.sqlite3 "PRAGMA user_version;"        # expect 14
-curl -s -o /dev/null -w '%{http_code}\n' .../api/users        # expect 401; 404 = old backend
+# Confirm the upgrade took effect (check the version first, then the routes)
+sqlite3 data/coding2api.sqlite3 "PRAGMA user_version;"                     # expect 14
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users   # expect 401; 404 = old backend
 ```
 
 Schema upgrades are additive — `users` / `audit_events` are new tables and existing rows
 (credentials, usage) are preserved. The restart performs the migration and bootstrap in one
-step. Details in [`TECHNICAL.md` §6.4](TECHNICAL.md) (Chinese).
+step. Details in [`TECHNICAL.md` §6.4](TECHNICAL.md) and [`README.md`](README.md) (Chinese).
 
 ## Documentation
 

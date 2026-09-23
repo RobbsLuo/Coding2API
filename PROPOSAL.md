@@ -174,7 +174,7 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 TTL（`CONVERSATION_STICKY_SECONDS`，默认 1h，≤0 关闭）内固定复用，不再按到期积分 / 健康度重排——对话中途换号会触发上游风控并丢掉上游侧提示词缓存。请求体带 `user_id`（顶层或 `metadata` 内）时**不派生**第 2 级兜底键：同一用户的并行对话消息前缀可能相同，派生会把它们误钉到同一凭证。
 
-> 键名核实状态：`prompt_cache_key`（OpenAI 官方顶层参数）与 `metadata.user_id`（Anthropic Messages API 官方字段）已核实；`conversation_id`/`conversationId`/顶层 `user_id` 非两家标准键，属客户端惯用约定，本机 71 份真实 dump（PI 客户端）中**未观测到**，作为兼容探测接受（命中即用、未命中无害）。
+> 键名核实状态：`prompt_cache_key`（OpenAI 官方顶层参数）与 `metadata.user_id`（Anthropic Messages API 官方字段）已核实；`conversation_id`/`conversationId`/顶层 `user_id` 非两家标准键，属客户端惯用约定，开发环境 71 份真实 dump（PI 客户端）中**未观测到**，作为兼容探测接受（命中即用、未命中无害）。
 
 **手动 pin 优先于粘性**：存在可选（enabled、未禁用、未冷却）的 pinned 凭证时粘性让位，否则管理员显式「指定」会在对话中途无形失效。粘住的凭证报错仍走正常轮换，成功后重新粘到实际服务的凭证。指纹链掺入用户名，防不同用户的相同消息数组串到同一凭证；条目纯内存，重启后丢粘性只影响一轮选号。
 

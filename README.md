@@ -140,7 +140,7 @@ codex -c "model_providers.coding2api={ name='coding2api', base_url='http://127.0
 
 支持文本、流式正文、思考摘要（`reasoning` item）、函数工具调用与 `finish_reason=length` → `response.incomplete`。**不支持** `store=true`、`previous_response_id`（服务端无状态，不假装支持）、Responses 私有工具（`web_search` / `computer` / `custom` 等）——一律显式 400，不静默降级。`include=["reasoning.encrypted_content"]`（Codex 每轮必带）接受但忽略，本网关不产加密推理内容。
 
-> 验证边界：本机无 Codex CLI；协议形状取自官方 `openai` SDK 类型并以其为客户端跑通全部契约，另对真实上游冒烟，未经真实 Codex CLI 端到端验证。
+> 验证边界：开发环境无 Codex CLI；协议形状取自官方 `openai` SDK 类型并以其为客户端跑通全部契约，另对真实上游冒烟，未经真实 Codex CLI 端到端验证。
 
 ### 余额查询
 
@@ -302,22 +302,19 @@ sudo systemctl restart coding2api
 # 裸跑：Ctrl-C 后重新执行启动命令
 ```
 
-**升级老部署（含 user_version 13 → 14）时的确认清单**：
+**确认升级已生效**（先查版本，再查路由）：
 
 ```bash
-# 1) 版本已迁移（应为 14）与账号已导入
+# 1) schema 版本已迁移（期望 14）且账号已导入
 sqlite3 data/coding2api.sqlite3 "PRAGMA user_version; SELECT username, role, enabled FROM users;"
-# 2) 路由存在：应返回 401（未登录）而不是 404
+# 2) 路由存在：期望 401（未登录），404 = 旧后端进程
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
-# 3) 启动日志里能看到引导结果
-grep 账号引导 logs/launchd.err.log | tail -2
+# 3) 启动日志里能看到引导结果（日志路径见下文「日志」）
 ```
-
-升级是**只加不改**的：`users` / `audit_events` 为新增表，凭证与统计原样保留（不删列、不重建表）。首次启动会把 `USERS_FILE` 里的用户导入一次（已存在的用户名不覆盖），再把 `ADMIN_USERNAMES` 点名者提权为 `admin`——**这一步只做一次**，此后角色只在管理台「用户管理」页改。
 
 ### macOS（launchd）
 
-仓库在 `deploy/launchd/com.coding2api.plist` 留了一份模板（本机实际运行的 plist 一旦丢失就无法复现）。它把后端交给 launchd 常驻，并按后端 `:8000` 直接服务前端产物。
+仓库在 `deploy/launchd/com.coding2api.plist` 留了一份模板，把后端交给 launchd 常驻，并按后端 `:8000` 直接服务前端产物。**模板里的绝对路径需要按你的实际部署位置修改**（`ProgramArguments`、`WorkingDirectory`、两个日志 `Standard*Path` 共四处）。
 
 ```bash
 cp deploy/launchd/com.coding2api.plist ~/Library/LaunchAgents/
@@ -330,7 +327,11 @@ launchctl bootout gui/$(id -u)/com.coding2api                                 # 
 
 - **后端在 `http://127.0.0.1:8000/` 直接服务 `web/dist`**（`src/webapp/static.py` 用 `FileResponse` 每次请求现读磁盘），所以只改前端时**构建完刷新即可，无需重启后端**；`localhost:5173` 是 Vite 开发态（HMR），两者可并存。**注意这条只对前端成立**——改了 `src/` 下的后端代码必须重启进程（见上文「升级后必须重启后端」）。
 - **构建失败不阻断启动**：plist 是 `KeepAlive` + `ThrottleInterval=10`，若构建失败就退出，launchd 会每 10 秒重拉一次变成死循环。脚本改为「构建失败 → 警告 → 用既有产物继续起服务」。
-- **pnpm 装在 nvm 下**：launchd 不读 shell rc，PATH 只有 plist 里的系统目录，`build-web.sh` 会自己从 `~/.nvm/alias/default` 解析出 node/pnpm 路径。手动构建用 `./scripts/build-web.sh`（`--force` 强制重建）。
+- **pnpm 常装在 nvm 下**：launchd 不读 shell rc，PATH 只有 plist 里的系统目录，`build-web.sh` 会自己从 `~/.nvm/alias/default` 解析出 node/pnpm 路径（非 nvm 安装则回落到 PATH）。手动构建用 `./scripts/build-web.sh`（`--force` 强制重建）。
+
+> **本机环境（不进仓库）**：当前开发机的路径、工具版本、端口、日志位置与特有操作记在
+> `docs/local-environment.md`——该目录已在 `.gitignore` 中，克隆仓库的人不会有这个文件，
+> 需要时照上面的结构自建一份即可。
 
 ## 日志
 
