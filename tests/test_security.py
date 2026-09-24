@@ -215,14 +215,17 @@ def test_hsts_absent_for_http_deployment(app):
 
 
 def test_docs_disabled_by_default(app):
-    """默认不开 docs：openapi schema 绝不对外（/docs 与 /openapi.json 由
-    SPA catch-all 接住返回前端壳，无 API 结构泄漏）。"""
+    """默认不开 docs：openapi schema 绝不对外。
+
+    /docs 与 /openapi.json 的具体落点随环境不同（本地有 web/dist 时由 SPA
+    catch-all 接住返回前端壳；CI 无 dist 时是 503 引导页），但共同不变量是：
+    任何路径都不会吐出 OpenAPI schema 或 Swagger UI。
+    """
     _app, client = app
     for path in ("/docs", "/openapi.json"):
         response = client.get(path)
-        assert response.status_code == 200
-        assert "text/html" in response.headers["content-type"]
         assert '"openapi"' not in response.text
+        assert "swagger" not in response.text.lower()
 
 
 def test_docs_opt_in(tmp_path):
