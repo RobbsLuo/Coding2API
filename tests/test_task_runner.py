@@ -381,3 +381,52 @@ async def test_checkin_task_soft_failure_retries_same_day(repo, monkeypatch):
     report2 = await task.run_once(now=now)
     assert report2.succeeded == 1 and report2.failed == 0
     assert any(key.startswith(f"{task._day_key(now)}:") for key in task._done_scopes)
+
+
+class RecordingPacer:
+    """记录 wait_turn 调用次数的 Pacer 替身。"""
+
+    def __init__(self) -> None:
+        self.turns = 0
+
+    async def wait_turn(self) -> None:
+        self.turns += 1
+
+
+class TaskProvider(StubProvider):
+    """可成功签到/刷新的最小 provider 桩。"""
+
+    def __init__(self) -> None:
+        self.refresh_calls = 0
+        self.checkin_calls = 0
+
+    async def checkin(self, _data):
+        from src.provider.base import CheckinResult
+
+        self.checkin_calls += 1
+        return CheckinResult(ok=True)
+
+    async def refresh(self, data):
+        self.refresh_calls += 1
+        return {**data, "bearer_token": "NEW"}
+
+
+async def test_refresh_and_checkin_pace_upstream_calls(repo):
+    """refresh/checkin 与 quota_probe/growth 共用 Pacer：每次触上游前 wait_turn，
+    不绕开全局频率风控对策。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={
+        "bearer_token": "old", "refresh_token": "RT", "auth_source": "oauth",
+        "expires_at": 1_000_100})
+    pacer = RecordingPacer()
+    provider = TaskProvider()
+    refresh = RefreshTask(credentials, {"codebuddy": provider}, skew_seconds=3600,
+                          now=lambda: 1_000_000, pacer=pacer)
+    checkin = CheckinTask(credentials, {"codebuddy": provider}, pacer=pacer)
+
+    refresh_report = await refresh.run_once()
+    checkin_report = await checkin.run_once()
+
+    assert refresh_report.succeeded == 1 and provider.refresh_calls == 1
+    assert checkin_report.succeeded == 1 and provider.checkin_calls == 1
+    assert pacer.turns == 2

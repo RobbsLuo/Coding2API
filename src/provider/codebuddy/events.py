@@ -183,18 +183,3 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
         # 请求无效（如模型不存在）是客户端错误，冷却凭证只会误伤健康凭证
         return ErrKind.INVALID
     return ErrKind.OTHER
-
-
-def classify_error_code(code: int | None) -> ErrKind:
-    """流内 error 事件的业务码（与 classify_status 同一套语义）。"""
-    if code == _PLAN_EXHAUSTED_CODE:
-        return ErrKind.PLAN
-    if code == _CREDITS_EXHAUSTED_CODE:
-        return ErrKind.CREDIT
-    if code == _MODEL_RATE_LIMIT_CODE:
-        return ErrKind.MODEL
-    if code == _MODEL_BLOCKED_CODE:
-        return ErrKind.BLOCKED
-    if code in _REQUEST_LEVEL_CODES:
-        return ErrKind.REQUEST
-    return ErrKind.OTHER

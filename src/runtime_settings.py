@@ -41,9 +41,13 @@ class HotSetting:
     kind: type                          # int | float | bool | str
     label: str
     description: str
-    minimum: float | None = None
+    minimum: float | None = None        # 写入校验下限（管理台/env 写入时拦截）
     maximum: float | None = None
     task: str | None = None             # 所属后台任务 key（见 tasks/status.py）；None=网关/调度配置
+    # 生效下限（读时钳制）：存量覆盖值可能低于现行下限（旧版 minimum 更宽时
+    # 写入），读路径直接钳到 floor 自愈——否则 UI 回显写入值、实际跑钳制值，
+    # 两者静默分叉。floor ≥ minimum 恒成立。
+    floor: float | None = None
 
     @property
     def env_name(self) -> str:
@@ -72,10 +76,10 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "旅行礼物与任务奖励。", task="growth"),
     HotSetting("growth_interval_minutes", int, "成长中心周期（分钟）",
                "成长中心后台任务的一轮间隔；下限 5 分钟（更密只会撞上游风控）。",
-               minimum=0, task="growth"),
+               minimum=5, task="growth", floor=5),
     HotSetting("quota_probe_minutes", int, "额度探测周期（分钟）",
-               "后台额度探测的一轮间隔；下限 1 分钟。", minimum=0,
-               task="quota_probe"),
+               "后台额度探测的一轮间隔；下限 1 分钟。", minimum=1,
+               task="quota_probe", floor=1),
     HotSetting("codebuddy_chat_min_interval", float, "CodeBuddy 聊天最小间隔（秒）",
                "与 TRAE 共享的最小请求间隔（0 关闭）；改小会显著提高风控概率。",
                minimum=0.0),
@@ -222,11 +226,13 @@ class RuntimeSettings:
         self._overrides = loaded
 
     def get(self, key: str) -> Any:
-        """生效值：DB 覆盖 > env 默认。未知 key 直接回落 Settings 属性。"""
+        """生效值：DB 覆盖 > env 默认；低于生效下限的存量值钳到 floor。"""
         raw = self._overrides.get(key)
-        if raw is not None:
-            return parse_value(key, raw)
-        return getattr(self._base, key)
+        value = parse_value(key, raw) if raw is not None else getattr(self._base, key)
+        spec = HOT_BY_KEY.get(key)
+        if spec is not None and spec.floor is not None and value < spec.floor:
+            return spec.floor
+        return value
 
     def is_overridden(self, key: str) -> bool:
         return key in self._overrides

@@ -300,8 +300,6 @@ def test_classify_body_markers():
     assert cb_events.classify_status(400, fixture("error-1005.json").encode()) is ErrKind.PLAN
     assert cb_events.classify_status(400, b'{"code": 1005, "plan": "x"}') is ErrKind.PLAN
     assert cb_events.classify_status(401, fixture("error-401.json").encode()) is ErrKind.DEAD
-    assert cb_events.classify_error_code(1005) is ErrKind.PLAN
-    assert cb_events.classify_error_code(500) is ErrKind.OTHER
 
 
 @pytest.mark.parametrize(("status", "body", "expected"), [
@@ -333,16 +331,6 @@ def test_classify_body_markers():
 ])
 def test_classify_status_business_codes(status, body, expected):
     assert cb_events.classify_status(status, body) is expected
-
-
-@pytest.mark.parametrize(("code", "expected"), [
-    (14018, ErrKind.CREDIT), (6004, ErrKind.MODEL), (11102, ErrKind.BLOCKED),
-    (11101, ErrKind.REQUEST), (11115, ErrKind.REQUEST), (11128, ErrKind.REQUEST),
-    (11135, ErrKind.REQUEST),
-    (None, ErrKind.OTHER),
-])
-def test_classify_error_code_business_codes(code, expected):
-    assert cb_events.classify_error_code(code) is expected
 
 
 # ------------------------------------------------------------- 客户端
@@ -1800,7 +1788,8 @@ async def test_stream_inner_4001_yields_invalid_frame(dual_repo, caplog):
 
     async def gen(_cred, _payload, _model):
         calls["n"] += 1
-        yield Event(kind=EventKind.ERROR, error_code=4001, error_message="param invalid")
+        yield Event(kind=EventKind.ERROR, error_code=4001, error_message="param invalid",
+                    error_kind=ErrKind.INVALID)
 
     class P:
         id = "codebuddy"
@@ -1860,7 +1849,8 @@ async def test_trae_4001_falls_through_to_codebuddy(dual_repo, caplog):
 
         async def stream_chat(self, _cred, _payload, _model):
             self.calls += 1
-            yield Event(kind=EventKind.ERROR, error_code=4001, error_message="param")
+            yield Event(kind=EventKind.ERROR, error_code=4001, error_message="param",
+                        error_kind=ErrKind.INVALID)
 
     class CbOk:
         id = "codebuddy"
@@ -2212,7 +2202,8 @@ async def test_stream_6004_cools_only_that_model(dual_repo):
     cred_id = repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
 
     async def gen(_cred, _payload, _model):
-        yield Event(kind=EventKind.ERROR, error_code=6004, error_message="model quota")
+        yield Event(kind=EventKind.ERROR, error_code=6004, error_message="model quota",
+                    error_kind=ErrKind.MODEL)
 
     class P:
         id = "codebuddy"
@@ -2251,7 +2242,7 @@ async def test_stream_11102_blocks_account_model_pair(dual_repo):
             self.calls += 1
             if cred["bearer_token"] == "b":
                 yield Event(kind=EventKind.ERROR, error_code=11102,
-                            error_message="no such model")
+                            error_message="no such model", error_kind=ErrKind.BLOCKED)
                 return
             yield Event(kind=EventKind.CONTENT, content="ok")
             yield Event(kind=EventKind.FINISH, finish_reason="stop")
@@ -2291,7 +2282,8 @@ async def test_stream_11101_request_error_does_not_touch_credential(dual_repo):
         async def stream_chat(self, _cred, _payload, _model):
             calls["n"] += 1
             yield Event(kind=EventKind.ERROR, error_code=11101,
-                        error_message="Unmarshal chat params failed")
+                        error_message="Unmarshal chat params failed",
+                        error_kind=ErrKind.REQUEST)
 
     executor = Executor(ExecutorDeps(
         providers={"codebuddy": P()}, credentials=repo,

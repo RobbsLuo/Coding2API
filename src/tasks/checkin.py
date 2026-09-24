@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 from ..db.repo import CredentialRepository
 from . import TaskReport
+from .pacer import Pacer
 
 logger = logging.getLogger(__name__)
 
@@ -16,10 +17,12 @@ class CheckinTask:
     """每日签到：按「endpoint + X-User-Id」隔离，同账号多凭证共享一次。"""
 
     def __init__(self, credentials: CredentialRepository, providers: dict,
-                 *, on_success: Callable[[str], None] | None = None) -> None:
+                 *, on_success: Callable[[str], None] | None = None,
+                 pacer: Pacer | None = None) -> None:
         self._credentials = credentials
         self._providers = providers
         self._on_success = on_success
+        self._pacer = pacer
         self._done_scopes: set[str] = set()
 
     def due(self, *, now: time.struct_time | None = None) -> bool:
@@ -61,6 +64,10 @@ class CheckinTask:
                 continue
             seen.add(scope)
             report.attempted += 1
+            # 签到一轮含 status+claim+回查三次上游调用，与 quota_probe/growth
+            # 共用同一 Pacer，避免绕开全局频率风控对策
+            if self._pacer is not None:
+                await self._pacer.wait_turn()
             try:
                 result = await provider.checkin(data)
             except Exception as error:  # noqa: BLE001

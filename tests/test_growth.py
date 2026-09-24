@@ -1450,9 +1450,9 @@ async def test_provider_growth_delegates_to_runner_and_closes_pool():
     result = await provider.growth({"bearer_token": "t"}, allow_irreversible=False)
     assert result.ok is True and result.energy == 3
     assert _cached_growth(client) is _cached_growth(client)
-    assert id(client) in _GROWTH_CACHE
+    assert client in _GROWTH_CACHE
     await provider.aclose()
-    assert id(client) not in _GROWTH_CACHE
+    assert client not in _GROWTH_CACHE
 
 
 # --------------------------------------------------------------- 未覆盖分支收尾

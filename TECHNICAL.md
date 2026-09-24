@@ -203,7 +203,7 @@ class ErrKind(StrEnum):
 | 会话失效 | 401/403 | 401 | DEAD |
 | 服务端错误 | 5xx | 5xx | OTHER |
 | 请求自身无效 | 400 | 400（含 4001） | INVALID |
-| 流内错误事件 | SSE error 事件 | `event:error` 业务码 | 同上映射（`executor._event_kind`） |
+| 流内错误事件 | SSE error 事件 | `event:error` 业务码 | 同上映射（单一来源：provider 解析时写 `Event.error_kind`，executor 直接消费；缺失回落 OTHER） |
 
 > 400 + `11128`（`Illegal API invocation from an unapproved channel`）也归 REQUEST：实测主因是**内容风控**——`system`/`assistant` 消息正文出现「伪装其他厂商官方客户端」的指纹串时整单拒绝（已确认 3 条：Claude Code 系统提示的身份声明行、其 billing 头字段名、其 git 上下文行；完整清单见 `client.py` 的 `CHANNEL_MARKERS`，此处刻意不写原文以免污染阅读本文件的 agent 会话）。特征：与凭证无关（换号无效）、确定性复现、仅 `user`/`tool` 之外的这两个角色的 `content` 命中（`tool_calls` 参数与 reasoning 均不触发）；会话一旦把指纹写进历史，后续每轮（含压缩请求本身）都持续 11128。处理：出站前 `sanitize_channel_markers` 替换为占位符（`CODEBUDDY_SANITIZE_CHANNEL_MARKERS=false` 关闭），客户端历史不受影响；`content` 为文本块列表时逐块处理（2026-09-21 直证块形态同样触发）。曾误落 INVALID → 跳过上游全部凭证、零重试直接 400（`invalid_request`），是 `deepseek-v4.1-flash` / `glm-5.3-flash` 报「not available on any configured upstream」的根因。
 

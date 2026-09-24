@@ -9,6 +9,7 @@ from __future__ import annotations
 import copy
 import logging
 import time
+import weakref
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -507,53 +508,52 @@ def _cycle_end_epoch(value: Any) -> int | None:
     return None
 
 
-_CHECKIN_CACHE: dict[int, object] = {}
-_REFRESH_CACHE: dict[int, object] = {}
-_GROWTH_CACHE: dict[int, object] = {}
-_ACTIVITY_CACHE: dict[int, object] = {}
+# 任务客户端缓存：弱引用挂 client——用 id(client) 作键时，client 被 GC 后
+# id 复用会让新实例命中旧缓存对象（旧连接池/endpoint），且未走 aclose 的
+# client 会在缓存里永远驻留
+_CHECKIN_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_REFRESH_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_GROWTH_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+_ACTIVITY_CACHE: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 
 def _cached_checkin(client: CodeBuddyClient):
     from .checkin import CodeBuddyCheckin
 
-    key = id(client)
-    cached = _CHECKIN_CACHE.get(key)
+    cached = _CHECKIN_CACHE.get(client)
     if cached is None:
         cached = CodeBuddyCheckin(client.endpoint, client=client._short)
-        _CHECKIN_CACHE[key] = cached
+        _CHECKIN_CACHE[client] = cached
     return cached
 
 
 def _cached_growth(client: CodeBuddyClient):
     from .growth import CodeBuddyGrowth
 
-    key = id(client)
-    cached = _GROWTH_CACHE.get(key)
+    cached = _GROWTH_CACHE.get(client)
     if cached is None:
         cached = CodeBuddyGrowth(client.endpoint, client=client._short)
-        _GROWTH_CACHE[key] = cached
+        _GROWTH_CACHE[client] = cached
     return cached
 
 
 def _cached_activity(client: CodeBuddyClient):
     from .activity import CodeBuddyActivity
 
-    key = id(client)
-    cached = _ACTIVITY_CACHE.get(key)
+    cached = _ACTIVITY_CACHE.get(client)
     if cached is None:
         cached = CodeBuddyActivity(client.endpoint, client=client._short)
-        _ACTIVITY_CACHE[key] = cached
+        _ACTIVITY_CACHE[client] = cached
     return cached
 
 
 def _cached_refresh(client: CodeBuddyClient):
     from .refresh import CodeBuddyRefresh
 
-    key = id(client)
-    cached = _REFRESH_CACHE.get(key)
+    cached = _REFRESH_CACHE.get(client)
     if cached is None:
         cached = CodeBuddyRefresh(client.endpoint, client=client._short)
-        _REFRESH_CACHE[key] = cached
+        _REFRESH_CACHE[client] = cached
     return cached
 
 
@@ -615,10 +615,10 @@ class CodeBuddyProvider:
     async def aclose(self) -> None:
         """释放内部 HTTP 连接池与 OAuth 客户端。"""
         await self.client.aclose()
-        for cached in (_CHECKIN_CACHE.pop(id(self.client), None),
-                       _REFRESH_CACHE.pop(id(self.client), None),
-                       _GROWTH_CACHE.pop(id(self.client), None),
-                       _ACTIVITY_CACHE.pop(id(self.client), None)):
+        for cached in (_CHECKIN_CACHE.pop(self.client, None),
+                       _REFRESH_CACHE.pop(self.client, None),
+                       _GROWTH_CACHE.pop(self.client, None),
+                       _ACTIVITY_CACHE.pop(self.client, None)):
             closer = getattr(cached, "aclose", None)
             if callable(closer):
                 await closer()

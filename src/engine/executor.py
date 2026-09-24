@@ -208,7 +208,7 @@ class Executor:
                 yield frame
         except (GeneratorExit, asyncio.CancelledError):
             if not state.recorded and (state.translator.usage is not None
-                                       or state._first_byte_at is not None):
+                                       or state.ttfb_ms() is not None):
                 if state.translator.done_sent:
                     # [DONE] 已产出：客户端收尾断开，按成功记账（tokens 如实记录）
                     if state.credential_id is not None:
@@ -633,27 +633,11 @@ def _elapsed_ms(started: float, end: float | None = None) -> int:
 
 
 def _event_kind(event: Event) -> ErrKind:
-    """流内 error 事件的业务码 → ErrKind。
+    """流内 error 事件的业务分类：provider 解析时已定（Event.error_kind）。
 
-    与 provider 的 `classify_error_code` 同源，但这里再走一遍是因为
-    流内事件只带 code 不带 HTTP 状态；两侧映射必须保持一致。
+    缺失（无码事件 / 测试桩未带分类）按 OTHER 处理。
     """
-    return _PROVIDER_EVENT_KINDS.get(event.error_code, ErrKind.OTHER)
-
-
-# 流内错误码 → ErrKind。INVALID（4001）来自 TRAE 实测；其余来自 CodeBuddy
-# 业务码语义（见 codebuddy/events.py 的 classify_status 说明）。
-_PROVIDER_EVENT_KINDS: dict[int, ErrKind] = {
-    1005: ErrKind.PLAN,       # 权益耗尽
-    14018: ErrKind.CREDIT,    # 余额不足 → 等签到
-    4001: ErrKind.INVALID,    # TRAE 参数/模型不可用 → 跳过该上游
-    6004: ErrKind.MODEL,      # 模型级限流 → 只冷却该模型
-    11102: ErrKind.BLOCKED,   # 该账号无此模型 → 负缓存
-    11101: ErrKind.REQUEST,   # 请求体坏 → 不罚号
-    11115: ErrKind.REQUEST,   # 上下文超限 → 不罚号
-    11128: ErrKind.REQUEST,   # 渠道风控（瞬时，窗口内自愈）→ 换号重试，不罚号
-    11135: ErrKind.REQUEST,   # 图片无效 → 不罚号
-}
+    return event.error_kind if event.error_kind is not None else ErrKind.OTHER
 
 
 def _classify(error: Exception) -> ErrKind | None:

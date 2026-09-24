@@ -277,11 +277,11 @@ def build_runner(credentials, providers: dict, stats_collector, config,
                             hour=lambda: config.activity_report_hour)
     return TaskRunner(
         quota_probe=QuotaProbeTask(credentials, providers, pacer),
-        checkin=CheckinTask(credentials, providers),
+        checkin=CheckinTask(credentials, providers, pacer=pacer),
         growth=growth,
         activity=activity,
         refresh=RefreshTask(credentials, providers, skew_seconds=config.refresh_skew_hours * 3600,
-                            now=lambda: int(time.time())),
+                            now=lambda: int(time.time()), pacer=pacer),
         retention=RetentionTask(stats_collector, credentials=credentials,
                                 credit_events=credit_events),
         quota_probe_minutes=lambda: config.quota_probe_minutes,

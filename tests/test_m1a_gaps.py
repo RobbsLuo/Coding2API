@@ -111,10 +111,11 @@ async def test_stream_unknown_error_propagates(tmp_path):
 
 
 async def test_stream_inline_error_frame_classified_as_plan(tmp_path):
-    """流内 1005 → PLAN 长冷却（_event_kind 分支）。"""
+    """流内 1005（带 error_kind）→ PLAN 长冷却。"""
     credentials, db = _repo(tmp_path)
     credentials.add(provider="trae", credential_data={"accessToken": "a"})
-    provider = _Provider([[Event(kind=EventKind.ERROR, error_code=1005)],
+    provider = _Provider([[Event(kind=EventKind.ERROR, error_code=1005,
+                                 error_kind=ErrKind.PLAN)],
                           [Event(kind=EventKind.ERROR, error_code=500)]])
     executor = _executor(credentials, provider)
     chunks = [c async for c in executor.stream(parse_chat_request(
@@ -405,42 +406,27 @@ def test_pick_returns_none_when_all_cooling(tmp_path):
     db.close()
 
 
-def test_event_kind_helper_covers_1005_and_other():
+def test_event_kind_helper_prefers_event_and_falls_back_to_other():
+    """流内错误分类的单一来源是 Event.error_kind：provider 解析时定好，
+    executor 不再维护第二份 code→kind 映射（两份必然漂移）；缺失回落 OTHER。"""
     from src.engine.executor import _event_kind
 
-    assert _event_kind(Event(kind=EventKind.ERROR, error_code=1005)) is ErrKind.PLAN
+    assert _event_kind(Event(kind=EventKind.ERROR,
+                             error_code=1005, error_kind=ErrKind.PLAN)) is ErrKind.PLAN
     assert _event_kind(Event(kind=EventKind.ERROR, error_code=500)) is ErrKind.OTHER
 
 
-@pytest.mark.parametrize(("code", "expected"), [
-    (1005, ErrKind.PLAN),
-    (14018, ErrKind.CREDIT),
-    (4001, ErrKind.INVALID),
-    (6004, ErrKind.MODEL),
-    (11102, ErrKind.BLOCKED),
-    (11101, ErrKind.REQUEST),
-    (11115, ErrKind.REQUEST),
-    (11128, ErrKind.REQUEST),
-    (11135, ErrKind.REQUEST),
-    (None, ErrKind.OTHER),
-])
-def test_event_kind_covers_all_provider_business_codes(code, expected):
-    """流内码映射必须与 provider 的 classify_error_code 一致（4001 是 TRAE 私有码）。
-
-    这是防漂移：两侧各写一份映射，改了一处忘了另一处就会让同一业务码
-    在 HTTP 路径和流内路径下得到不同冷却语义。
-    """
-    from src.engine.executor import _event_kind
-    from src.provider.codebuddy import events as cb_events
+def test_trae_parse_attaches_error_kind():
+    """TRAE error 帧解析时即带分类（4001 → INVALID）。"""
+    from src.engine.sse import SSEFrame
     from src.provider.trae import events as trae_events
 
-    event = Event(kind=EventKind.ERROR, error_code=code)
-    assert _event_kind(event) is expected
-    if code is None:
-        return
-    classifier = (trae_events.classify_error_code if code == 4001
-                  else cb_events.classify_error_code)
-    assert classifier(code) is expected
+    frame = SSEFrame(event="error", data=json.dumps({"code": 4001, "message": "bad param"}))
+    event = trae_events.parse_frame(frame)
+    assert event is not None and event.error_kind is ErrKind.INVALID
+    unknown = trae_events.parse_frame(
+        SSEFrame(event="error", data=json.dumps({"code": 424242})))
+    assert unknown is not None and unknown.error_kind is ErrKind.OTHER
 
 
 async def test_iter_frames_final_buffer_without_newline_is_flushed():
@@ -1068,10 +1054,11 @@ async def test_stream_finish_frames_yielded_when_upstream_never_sent_done():
 
 
 def test_stream_error_4001_is_invalid_not_other():
-    """TRAE 流内 4001 → INVALID（跳过上游不冷却凭证）。"""
+    """TRAE 流内 4001 → INVALID 的分类在解析时定（见 test_trae_parse_attaches_error_kind），
+    executor 侧消费 Event.error_kind；此处守的是 missing 时回落 OTHER。"""
     from src.engine.executor import _event_kind
     from src.provider.base import ErrKind, Event, EventKind
 
-    assert _event_kind(Event(kind=EventKind.ERROR, error_code=4001)) is ErrKind.INVALID
-    assert _event_kind(Event(kind=EventKind.ERROR, error_code=1005)) is ErrKind.PLAN
-    assert _event_kind(Event(kind=EventKind.ERROR, error_code=500)) is ErrKind.OTHER
+    assert _event_kind(Event(kind=EventKind.ERROR, error_code=4001)) is ErrKind.OTHER
+    assert _event_kind(Event(kind=EventKind.ERROR, error_code=4001,
+                             error_kind=ErrKind.INVALID)) is ErrKind.INVALID

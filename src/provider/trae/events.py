@@ -72,10 +72,13 @@ def parse_frame(frame: SSEFrame) -> Event | None:
     if name == "error":
         code = payload.get("code")
         message = payload.get("message")
+        normalized_code = code if isinstance(code, int) and not isinstance(code, bool) else None
         return Event(
             kind=EventKind.ERROR,
-            error_code=code if isinstance(code, int) and not isinstance(code, bool) else None,
+            error_code=normalized_code,
             error_message=message if isinstance(message, str) else None,
+            # 分类在解析时定死（单一来源）；executor 直接消费
+            error_kind=classify_error_code(normalized_code),
         )
     # name ∈ KNOWN_EVENT_NAMES，上面分支已穷尽；防御未来新增名字漏写分支
     raise UpstreamProtocolViolation(  # pragma: no cover

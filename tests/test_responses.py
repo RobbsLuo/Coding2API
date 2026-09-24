@@ -25,7 +25,7 @@ from src.compat.responses.response import (
 )
 from src.config import Settings
 from src.main import build_app
-from src.provider.base import Event, EventKind, Quota, Usage
+from src.provider.base import ErrKind, Event, EventKind, Quota, Usage
 from tests.conftest import SECRET
 
 
@@ -711,7 +711,8 @@ def test_stream_midway_rejection_emits_failed_event(tmp_path):
     class Rejecting(_Provider):
         async def stream_chat(self, credential_data, payload, model):
             yield Event(kind=EventKind.ERROR, error_code=4001,
-                        error_message="model not available")
+                        error_message="model not available",
+                        error_kind=ErrKind.INVALID)
 
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")

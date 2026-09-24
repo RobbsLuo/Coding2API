@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 from ..db.repo import CredentialRepository
 from . import TaskReport
+from .pacer import Pacer
 
 logger = logging.getLogger(__name__)
 
@@ -16,11 +17,13 @@ class RefreshTask:
     """token 预刷新：只处理进入 refresh_skew 窗口的凭证。"""
 
     def __init__(self, credentials: CredentialRepository, providers: dict,
-                 *, skew_seconds: int, now: Callable[[], int] | None = None) -> None:
+                 *, skew_seconds: int, now: Callable[[], int] | None = None,
+                 pacer: Pacer | None = None) -> None:
         self._credentials = credentials
         self._providers = providers
         self.skew_seconds = skew_seconds
         self._now = now or (lambda: int(time.time()))
+        self._pacer = pacer
 
     async def run_once(self) -> TaskReport:
         report = TaskReport()
@@ -38,6 +41,10 @@ class RefreshTask:
                 report.skipped += 1
                 continue
             report.attempted += 1
+            # 与 quota_probe/growth 共用同一 Pacer：ExchangeToken 同样是
+            # 打上游的写请求，不过节流会绕开全局频率风控对策
+            if self._pacer is not None:
+                await self._pacer.wait_turn()
             try:
                 refreshed = await provider.refresh(data)
             except Exception as error:  # noqa: BLE001

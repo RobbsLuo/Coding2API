@@ -114,6 +114,9 @@ class Event:
     finish_reason: str | None = None
     error_code: int | None = None
     error_message: str | None = None
+    # 流内 error 事件的业务分类：provider 解析时按自己的错误码语义定好，
+    # executor 不再维护第二份 code→kind 映射（两份必然漂移）
+    error_kind: ErrKind | None = None
 
 
 @dataclass(slots=True)

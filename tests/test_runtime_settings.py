@@ -73,6 +73,26 @@ def test_hot_settings_keys_unique_and_env_names_derived():
 def test_parse_value_parses_each_supported_kind():
     assert parse_value("quota_probe_minutes", "15") == 15
     assert parse_value("pacer_min_seconds", "2.5") == 2.5
+
+
+def test_floor_clamps_env_value_and_stale_override_is_dropped():
+    """生效下限（floor）与写入下限（minimum）双保险：
+
+    - env 值低于 floor（如旧部署 env=1）→ 读路径钳到 floor，UI 回显与
+      实际运行是同一套数字；
+    - 旧版（minimum 更宽时）写入的越界覆盖行 → reload 按非法行丢弃回落
+      env 默认，并记警告日志；
+    - 新写入越下限 → 直接拒绝。
+    """
+    runtime = RuntimeSettings(_base(growth_interval_minutes=1), MemoryStore())
+    assert runtime.get("growth_interval_minutes") == 5
+    assert runtime.growth_interval_minutes == 5
+    stale = RuntimeSettings(_base(), MemoryStore({"growth_interval_minutes": "1"}))
+    assert stale.get("growth_interval_minutes") == 60
+    with pytest.raises(InvalidSetting):
+        runtime.set("growth_interval_minutes", 1)
+    with pytest.raises(InvalidSetting):
+        runtime.set("quota_probe_minutes", 0)
     assert parse_value("activity_report_enabled", "yes") is True
     assert parse_value("activity_report_enabled", "off") is False
     assert parse_value("default_model", "glm-5.2") == "glm-5.2"
