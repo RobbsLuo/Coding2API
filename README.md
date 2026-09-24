@@ -232,7 +232,7 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `DEFAULT_MODEL` | `glm-5.2` | 模型为空/`auto` 时的默认 |
 | `USERS_FILE` | `secrets/users.txt` | **仅引导期**：老式用户文件路径，启动时一次性导入 SQLite（已存在的用户名不覆盖，幂等）。账号唯一源是 `users` 表 |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |
-| `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期 |
+| `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期（下限 1 分钟） |
 | `GROWTH_INTERVAL_MINUTES` | `60` | 成长中心（仅 CodeBuddy）一轮领取的周期；下限 5 分钟 |
 | `GROWTH_IRREVERSIBLE_ACTIONS` | `true` | 是否允许成长中心的不可逆动作：抽奖、连登兑换、开 Buddy 盲盒、消耗补登卡。`false` 时仍会领取旅行礼物与任务奖励 |
 | `ACTIVITY_REPORT_ENABLED` | `false` | 活跃上报（仅 CodeBuddy）：每天为账号补发一条对话事件续连登。**默认关闭**——官方条款禁止脚本篡改活动数据（处罚为取消资格并追回礼品），上游改版即失效，不作为可靠性功能（见上文「活跃上报」） |
@@ -242,7 +242,7 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `CONVERSATION_STICKY_SECONDS` | `3600` | 会话粘性 TTL：优先按请求体显式会话标识（`conversation_id`/`conversationId`/`prompt_cache_key`，metadata 或顶层），无则回落消息前缀指纹，多轮请求固定用同一凭证（手动 pin 的凭证优先，粘性让位）；带 `user_id` 时不派生前缀兜底键（避免并行对话误钉同一号）；凭证出错仍会轮换，成功后重新粘定；`≤0` 关闭 |
 | `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,hunyuan-image-*` | 模型列表黑名单（fnmatch，仅影响列表展示，直连指定不受影响）；默认值按两边上游实测清单补入内部/不可用模型（`default` 零内容、`hunyuan-image-*` 400 11103），刻意不含 `*-volc` 与 `aquila`/`sagitta`/`seed-code-pro-0430`（实测可正常 chat）（见 TECHNICAL.md §3.5） |
 | `ALLOWED_HOSTS` | 空 | Host 白名单，防 DNS rebinding |
-| `TRUST_PROXY` | `false` | 是否采信 `X-Forwarded-For` 判定 API Key 的来源 IP（`allowed_ips` 白名单用）。默认关闭——该头由客户端可写；仅在「本服务前恰好一层受信反代」时开启，届时取 XFF 最后一个条目（见上文「API Key 的渠道绑定与来源 IP 白名单」） |
+| `TRUST_PROXY` | `false` | 是否采信 `X-Forwarded-For` 判定来源 IP（API Key 的 `allowed_ips` 白名单、登录限流与审计共用同一解析）。默认关闭——该头由客户端可写；仅在「本服务前恰好一层受信反代」时开启，届时取 XFF 最后一个条目（见上文「API Key 的渠道绑定与来源 IP 白名单」） |
 | `CODEBUDDY_API_ENDPOINT` | `https://copilot.tencent.com` | CodeBuddy 上游地址；改动时必须同时把它加入 `CODEBUDDY_ALLOWED_ENDPOINTS` |
 | `CODEBUDDY_ALLOWED_ENDPOINTS` | 官方两站（见 compose） | 上游端点白名单，真实 Token 只发往白名单内地址 |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CodeBuddy 聊天最小间隔（秒），与 TRAE 共享节流；`0` 关闭 |

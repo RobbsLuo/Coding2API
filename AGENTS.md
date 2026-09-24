@@ -6,7 +6,11 @@
 
 - 后端：`uv run ruff check src tests scripts` + `uv run pytest -q --cov=src --cov-report=term --cov-fail-under=100`
   - 行/分支覆盖率 100% 是硬门槛；新增/修改的代码必须带测试，覆盖率缺口一律补测试解决，
-    禁止用 pragma/排除来"达标"
+    禁止用 pragma/排除给「该测没测」的业务分支达标。允许的例外（必须带注释说明为何不可达）：
+    - src/：「按构造不可达」的防御兜底——`__main__` 入口、协议演进防御分支、前置 return
+      已排除的死分支
+    - tests/：测试替身实现了宽于本用例所需的接口方法（注释「由 XX 调用 / 本用例不调用」）
+  - 平台差异分支不用 pragma，必须 monkeypatch 测全（见下条）
 - 前端（web/）：`pnpm exec tsc --noEmit` + `pnpm exec vitest run` + `pnpm build`
 - 注意平台差异：本地 macOS 通过不代表 CI（ubuntu-latest）通过；平台相关分支
   （platform.system/machine 等）必须用 monkeypatch 测全所有分支

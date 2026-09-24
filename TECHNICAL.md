@@ -475,7 +475,7 @@ response.completed | response.incomplete
 
 来源 IP 判定在 `deps.api_key_user`（鉴权**当场**判掉，不往上传递）：
 
-- **默认不采信 `X-Forwarded-For`**：该头由客户端可写，信它等于白名单形同虚设。只有 `TRUST_PROXY=true` 才采信，且取**最后一个**条目——`$proxy_add_x_forwarded_for` 语义下那是紧邻的受信代理实际看到的地址，第一个条目是客户端自己写的。故该开关只适用于「本服务前恰好一层受信反代」，多层或直连必须保持关闭。
+- **默认不采信 `X-Forwarded-For`**：该头由客户端可写，信它等于白名单形同虚设。只有 `TRUST_PROXY=true` 才采信，且取**最后一个**条目——`$proxy_add_x_forwarded_for` 语义下那是紧邻的受信代理实际看到的地址，第一个条目是客户端自己写的。故该开关只适用于「本服务前恰好一层受信反代」，多层或直连必须保持关闭。登录限流/审计与 API Key 的 IP 白名单共用同一解析（`deps.request_ip`）：反代部署下若限流拿裸对端地址，全站请求会共享同一个限流桶、审计里全是代理 IP。
 - 策略是纯函数（`auth/access.py`，不依赖框架）：写入时用 `normalize_allowed_ips` 校验并规范化（`10.0.0.1` → `10.0.0.1/32`），非法值 400；读取路径宽松解析，脏条目丢弃，整份白名单一条都解析不出则**拒绝**（fail closed，不因脏数据敞开）。
 - 白名单命中失败返回 **403**（`forbidden`）——Key 本身有效，是来源不被允许；与 401「凭证无效」区分，便于调用方排查。
 - `api_key_user` 由「返回用户名」升级为返回 `ApiKeyPrincipal(username, key_id, provider_binding)`（4 处出口调用同步调整）。`ApiKeyRepository.verify` 保留为只回用户名的薄封装。
@@ -832,7 +832,7 @@ fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文�
 - **同步 sqlite3 而非 aiosqlite**（T-Q2）：本地微秒级操作，asyncio 封装开销大于收益
 - **双 httpx 客户端**（T-Q4）：聊天流 `read=None` 防长流截断；短请求总超时 30s 防悬挂；共享 `trust_env=False`。非流式路径由引擎聚合同一流式上游（无独立 HTTP），悬挂兜底是引擎层的聚合整体超时（`UPSTREAM_COMPLETE_TIMEOUT_SECONDS`，默认 600s，超时按瞬态错误换号重试）
 - **手写 SQL 而非 ORM**：10 张表规模下 ORM 收益为负
-- **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + `PUBLIC_BASE_URL`
+- **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + `PUBLIC_BASE_URL`。`/authorize` 无鉴权（浏览器 302 不带 key），防滥用靠两条：无进行中登录一律拒绝；待完成登录有 600s TTL（长期挂着的 pending 会被同网络任何人用自己的 refreshToken 完成兑换——凭证入池、归属记为发起登录的管理员）。`app.state` 只保留 pending 的 state，不驻留含 refreshToken 的完整回调 URL
 - **v1 无 Anthropic**（Q8=A）：Event 层已预留，v1.1 只加 `compat/anthropic/` 适配器
 - **Responses 出口只做 Codex CLI 用到的子集**（Q32，详见 §3.7）：不做 `store=true` / `previous_response_id`（服务端无状态，不假装支持）；`include=["reasoning.encrypted_content"]` 按实测接受并忽略——Codex CLI 每轮必带，400 会直接打死主客户端；流式终止用 `response.completed` / `response.incomplete` / `response.failed`，**不发 `[DONE]`**（Responses 协议无该哨兵）。形状取自官方 `openai` SDK 类型并用其作客户端验证，对真实 CB 上游冒烟过；**未经真实 Codex CLI 端到端验证**（开发环境无 CLI）
 - **不做 reasoning 注入 / effort 档位映射**（原 B1.2，实测后取消）：原计划对「强制推理模型族」注入 `thinking` + `reasoning_effort` 并回填历史 `reasoning_content`，实测前提不成立——（1）客户端已自带 `reasoning_effort`（仅 `low`/`medium`）且上游直接接受；（2）客户端已回传历史 `reasoning_content` 且上游接受；（3）原计划的默认模型清单与实际在用命名无关，且 `glm-5.1` 在 `MODEL_BLOCKLIST` 里，硬编码白名单会空转；（4）真要做「客户端丢弃时回填」必须服务端存对话内容，与脱敏纪律冲突。参考实现 IceeAn/codebuddy2api 走相反取向（对白名单模型强制 `reasoning_effort=max` 覆盖客户端），属单来源且会改写客户端意图，不采纳
