@@ -196,6 +196,82 @@ def test_security_headers_present(app):
     assert response.headers["content-security-policy"] == "frame-ancestors 'none'"
 
 
+def test_hsts_only_for_https_deployments(tmp_path):
+    """HSTS 仅 https 部署下发：明文场景发了无意义，还会预锁本地 http 访问。"""
+    https_app = build_app(Settings(
+        _env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+        ADMIN_USERNAMES="root", PUBLIC_BASE_URL="https://gw.example.com"))
+    with TestClient(https_app) as client:
+        assert client.get("/health").headers["strict-transport-security"] \
+            .startswith("max-age=")
+
+
+def test_hsts_absent_for_http_deployment(app):
+    _app, client = app
+    assert "strict-transport-security" not in client.get("/health").headers
+
+
+# ------------------------------------------------------------ 文档端点开关
+
+
+def test_docs_disabled_by_default(app):
+    """默认不开 docs：openapi schema 绝不对外（/docs 与 /openapi.json 由
+    SPA catch-all 接住返回前端壳，无 API 结构泄漏）。"""
+    _app, client = app
+    for path in ("/docs", "/openapi.json"):
+        response = client.get(path)
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+        assert '"openapi"' not in response.text
+
+
+def test_docs_opt_in(tmp_path):
+    application = build_app(Settings(
+        _env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+        ADMIN_USERNAMES="root", ENABLE_DOCS=True))
+    with TestClient(application) as client:
+        assert client.get("/docs").status_code == 200
+        assert client.get("/openapi.json").status_code == 200
+
+
+# ------------------------------------------------------------ 登录入口加固
+
+
+def test_login_ip_respects_trusted_proxy(tmp_path):
+    """反代部署（trust_proxy=true）下，登录审计按 XFF 最后条目取来源 IP；
+    限流桶因此按真实客户端分桶，而不是全站共享代理地址一个桶。"""
+    from src.audit.actions import ACTION_LOGIN_FAILURE
+    from src.db.repo import AuditRepository
+
+    application = build_app(Settings(
+        _env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+        ADMIN_USERNAMES="root", TRUST_PROXY=True))
+    headers = {"X-Forwarded-For": "203.0.113.7, 198.51.100.9"}
+    with TestClient(application) as client:
+        assert client.post("/api/auth/login",
+                           json={"username": "root", "password": "bad"},
+                           headers=headers).status_code == 401
+        audit = AuditRepository(application.state.services.audit._db)
+        rows = audit.query(action=ACTION_LOGIN_FAILURE, limit=1)
+    assert rows and rows[0]["ip"] == "198.51.100.9"
+
+
+def test_login_csrf_rejected_with_session_cookie_and_cross_origin(admin_client):
+    """login CSRF：带会话 cookie 的跨站登录请求一并拦截；无 cookie 的
+    登录（curl / 首次登录）不受影响（由 csrf_protected 的跳过逻辑保证）。"""
+    response = admin_client.post(
+        "/api/auth/login", json={"username": "root", "password": "bad"},
+        headers={"Origin": "http://evil.example.com"})
+    assert response.status_code == 403
+
+
+def test_login_without_cookie_skips_csrf(app):
+    _app, client = app
+    # 无会话 cookie：非浏览器客户端直接放行到密码校验（401 而非 403）
+    assert client.post("/api/auth/login",
+                       json={"username": "root", "password": "bad"}).status_code == 401
+
+
 # ------------------------------------------------------------- Host 白名单
 
 

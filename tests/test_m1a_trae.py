@@ -1135,7 +1135,19 @@ def test_authorize_rejects_callback_without_pending_login(client):
     response = client.get("/authorize?refreshToken=RT")
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request"
-    assert "refreshToken=RT" in client.app.state.last_callback_url
+
+
+def test_authorize_expires_stale_pending_login(client):
+    """待完成登录有 TTL：/authorize 无鉴权，长期挂着的 pending 会被同网络
+    任何人用自己的 refreshToken 完成兑换（凭证塞进池子）。过期即作废。"""
+    import time as _time
+
+    client.app.state.pending_callback_state = "machine:device"
+    client.app.state.pending_callback_at = _time.monotonic() - 601
+    response = client.get("/authorize?refreshToken=RT")
+    assert response.status_code == 400
+    assert "expired" in response.json()["error"]["message"]
+    assert client.app.state.pending_callback_state is None
 
 
 def test_prepare_body_stringifies_tool_parameters():

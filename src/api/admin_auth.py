@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
@@ -19,7 +21,7 @@ from ..auth.session import create_session_token
 from ..auth.users import create_password_hash, verify_password
 from ..compat.openai.request import InvalidRequest
 from ..config import Settings
-from .deps import SESSION_COOKIE, Services, csrf_protected, principal_from_request
+from .deps import SESSION_COOKIE, Services, csrf_protected, principal_from_request, request_ip
 
 MIN_PASSWORD_LENGTH = 8
 ACTIVATION_TTL_SECONDS = 24 * 3600
@@ -52,10 +54,14 @@ def create_router(services: Services) -> APIRouter:
     router = APIRouter()
 
     @router.post("/api/auth/login")
-    async def login(request: Request, payload: dict):
+    async def login(request: Request, payload: dict,
+                    _csrf: None = Depends(csrf_protected)):
+        # CSRF 校验对登录同样生效（login CSRF：跨站请求可把受害者登录到
+        # 攻击者账号）；无会话 cookie 的请求会被 csrf_protected 跳过，
+        # 因此 curl / 首次登录不受影响。
         username = str(payload.get("username") or "")
         password = str(payload.get("password") or "")
-        ip = request.client.host if request.client else ""
+        ip = request_ip(request, services.settings)
         throttle = services.login_throttle
         # 哈希前先卡全局/IP 窗口：PBKDF2（600k 迭代）是 CPU 密集操作，
         # 不限流的话无效尝试就能占满线程池（DoS）。
@@ -117,7 +123,7 @@ def create_router(services: Services) -> APIRouter:
         services.audit.record(actor=principal.username,
                               action=ACTION_USER_PASSWORD_CHANGE,
                               target=principal.username,
-                              ip=request.client.host if request.client else None)
+                              ip=request_ip(request, services.settings) or None)
         # 改密会 bump epoch：换发一张新 Cookie，否则本次请求返回后自己也被登出。
         response = JSONResponse({"ok": True})
         role = services.users.role_of(principal.username) or ""
@@ -142,6 +148,7 @@ def create_router(services: Services) -> APIRouter:
                 raise InvalidRequest(f"provider {provider_id!r} does not support login")
             session = builder(resolve_public_callback_url(services.settings))
             request.app.state.pending_callback_state = session.state
+            request.app.state.pending_callback_at = time.monotonic()
             request.app.state.pending_callback_user = principal.username
             # 回调轨道没有本地轮询：登录结果由 /authorize 落库后由前端查凭证列表
         return {"flow": session.flow, "state": session.state, "auth_url": session.auth_url,

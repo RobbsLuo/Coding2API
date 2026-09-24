@@ -209,7 +209,12 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                     await closer()
             db.close()
 
-    app = FastAPI(title="Coding2API", version=app_version(), lifespan=lifespan)
+    app = FastAPI(title="Coding2API", version=app_version(), lifespan=lifespan,
+                  # API 结构不对外暴露：匿名可拉全量端点清单等于送侦察图。
+                  # 本地调试需要 Swagger 时 ENABLE_DOCS=true 显式打开。
+                  redoc_url=None,
+                  docs_url="/docs" if config.enable_docs else None,
+                  openapi_url="/openapi.json" if config.enable_docs else None)
     # BodySizeLimitMiddleware 必须在最外层：FastAPI.add_middleware 会把后加
     # 的包在更外层，所以它在最后添加（见 build_app 末尾）。
     app.state.settings = config

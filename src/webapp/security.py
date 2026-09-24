@@ -51,4 +51,8 @@ async def security_middleware(request: Request, call_next):
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    if request.app.state.settings.public_base_url.startswith("https://"):
+        # 仅 https 部署下发 HSTS：明文部署发了无意义，还会预锁本地 http 访问
+        response.headers.setdefault("Strict-Transport-Security",
+                                    "max-age=31536000; includeSubDomains")
     return response

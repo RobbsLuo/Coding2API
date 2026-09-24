@@ -92,6 +92,17 @@ def get_services(request: Request) -> Services:
     return request.app.state.services
 
 
+def request_ip(request: Request, settings: Settings | RuntimeSettings) -> str:
+    """来源 IP 统一入口：受信反代（trust_proxy）取 XFF 最后条目，否则取对端。
+
+    限流与审计必须走这里与 api_key_user 同源：反代部署下拿裸对端地址，
+    全站请求会共享同一个 IP 限流桶（互相锁死），审计里也全是代理 IP。
+    """
+    return client_ip(request.client.host if request.client else None,
+                     request.headers.get("x-forwarded-for"),
+                     trust_proxy=bool(settings.trust_proxy))
+
+
 async def principal_from_request(request: Request) -> Principal:
     """会话 Cookie → Principal（管理台内部端点）。
 
@@ -154,9 +165,7 @@ async def api_key_user(request: Request) -> ApiKeyPrincipal:
     # 用户被删除或禁用后旧 Key 必须立即失效（同会话 Cookie 的理由）
     if not record or not services.users.is_active(record["username"]):
         raise UnauthorizedError("invalid api key")
-    source = client_ip(request.client.host if request.client else None,
-                       request.headers.get("x-forwarded-for"),
-                       trust_proxy=bool(services.settings.trust_proxy))
+    source = request_ip(request, services.settings)
     if not ip_allowed(source, record.get("allowed_ips") or ""):
         raise ForbiddenError("source ip not allowed for this api key")
     return ApiKeyPrincipal(username=record["username"], key_id=record["id"],
