@@ -367,6 +367,16 @@ export interface ModelInfo {
   object: string;
   owned_by: string;
   providers: Provider[];
+  /** 以下为可选元数据：上游提供才透传（见 src/api/models.py 的 _META_FIELDS） */
+  credit_rate?: number;
+  max_input_tokens?: number;
+  max_output_tokens?: number;
+  supports_images?: boolean;
+  supports_tool_call?: boolean;
+  supports_reasoning?: boolean;
+  default_effort?: number;
+  /** 双上游都提供同一模型时才有：按渠道的倍率差异 */
+  by_provider?: Record<string, { credit_rate?: number }>;
 }
 
 /**

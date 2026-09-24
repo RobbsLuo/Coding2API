@@ -607,8 +607,9 @@ describe("渠道登录入口", () => {
     vi.useRealTimers();
   });
 
-  it("取消登录会调用 cancel 接口并移除挂起状态", async () => {
-    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+  it("取消登录会取消当前流程（不再重新 start）并移除挂起状态", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
       const url = String(input);
       if (url.includes("/upstream/start")) {
         return jsonResponse({ flow: "poll", state: "res-2",
@@ -629,8 +630,42 @@ describe("渠道登录入口", () => {
     await waitFor(() =>
       expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("/upstream/cancel"))).toBe(true),
     );
+    // cancel 用的是 startLogin 记下的 state；不应为拿 state 再开一次登录
+    expect(fetchSpy.mock.calls.filter(([url]) => String(url).includes("/upstream/start")).length)
+      .toBe(1);
+    const cancelCall = fetchSpy.mock.calls.find(([url]) => String(url).includes("/upstream/cancel"));
+    expect(String(cancelCall?.[1]?.body)).toContain("res-2");
     expect(screen.queryByTestId("cancel-login-codebuddy")).not.toBeInTheDocument();
     expect(screen.getByTestId("start-login-codebuddy")).toBeInTheDocument();
+  });
+
+  it("页面卸载会停掉登录轮询", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let pollCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/upstream/poll")) {
+        pollCalls += 1;
+        return jsonResponse({ status: "pending" });
+      }
+      if (url.includes("/upstream/start")) {
+        return jsonResponse({ flow: "poll", state: "s", auth_url: "https://a", interval: 3 });
+      }
+      return jsonResponse(listBody([]));
+    }));
+    vi.stubGlobal("open", () => null);
+
+    const page = renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("start-login-codebuddy"));
+    await screen.findByTestId("cancel-login-codebuddy");
+    await vi.advanceTimersByTimeAsync(7000);
+    const callsAtUnmount = pollCalls;
+
+    page.unmount();
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(pollCalls).toBe(callsAtUnmount);      // 卸载后不再轮询
+    vi.useRealTimers();
   });
 
   it("非管理员看不到登录入口", async () => {

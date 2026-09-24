@@ -1,4 +1,4 @@
-import { Fragment, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import {
   ArrowDownIcon,
   CalendarCheck,
@@ -116,6 +116,16 @@ export function CredentialsPage() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   // 每个渠道各自可能有进行中的登录（CodeBuddy 轮询 / TRAE 回调）
   const [loginProviders, setLoginProviders] = useState<Provider[]>([]);
+  // 进行中的登录：state 用于 cancel 精确取消**那一次**流程（重新 start 拿
+  // state 会凭空开一个新登录），timer 用于卸载/取消时清掉轮询
+  const loginStatesRef = useRef<Partial<Record<Provider, string>>>({});
+  const loginTimersRef = useRef<Partial<Record<Provider, number>>>({});
+  // 页面卸载时清掉所有登录轮询，防止跨页面的僵尸 interval
+  useEffect(() => () => {
+    Object.values(loginTimersRef.current).forEach((timer) => {
+      if (timer !== undefined) window.clearInterval(timer);
+    });
+  }, []);
   const [probeDetail, setProbeDetail] = useState<string | null>(null);
   // 成长中心最近一轮：展示逐步结果（一句话汇报看不出哪一步没做成）
   const [growthResult, setGrowthResult] = useState<GrowthRunResult | null>(null);
@@ -282,18 +292,24 @@ export function CredentialsPage() {
 
   const startLogin = async (provider: Provider) => {
     setError(null);
-    setNotice(null);
-    // 先同步开一个占位窗口：window.open 若在 await 之后才调用，
+    setNotice(null);    // 先同步开一个占位窗口：window.open 若在 await 之后才调用，
     // 会脱离用户手势上下文而被浏览器弹窗拦截。
     const popup = window.open("", "_blank");
     try {
       const started = await api.upstreamStart(provider);
+      loginStatesRef.current[provider] = started.state;
       if (started.auth_url && popup && !popup.closed) {
         popup.location.href = started.auth_url;
       } else if (popup) {
         popup.close();                         // 失败时关掉空白占位窗
       }
       setLoginProviders((previous) => [...new Set([...previous, provider])]);
+
+      const stopPolling = () => {
+        window.clearInterval(loginTimersRef.current[provider]);
+        delete loginTimersRef.current[provider];
+        setLoginProviders((previous) => previous.filter((item) => item !== provider));
+      };
 
       if (started.flow === "callback") {
         // TRAE：浏览器完成授权后 302 回本服务的 /authorize，那里直接落库。
@@ -304,11 +320,11 @@ export function CredentialsPage() {
         const timer = window.setInterval(async () => {
           const after = (await api.credentials()).credentials.length;
           if (after > baseline || Date.now() > deadline) {
-            window.clearInterval(timer);
-            setLoginProviders((previous) => previous.filter((item) => item !== provider));
+            stopPolling();
             setNotice(after > baseline ? "登录成功，凭证已保存。" : "授权超时，请重新发起登录。");
           }
         }, 3000);
+        loginTimersRef.current[provider] = timer;
         return;
       }
 
@@ -318,17 +334,16 @@ export function CredentialsPage() {
         try {
           const result = await api.upstreamPoll(provider, started.state);
           if (result.status === "success") {
-            window.clearInterval(timer);
-            setLoginProviders((previous) => previous.filter((item) => item !== provider));
+            stopPolling();
             setNotice("登录成功，凭证已保存。");
             await refresh();
           }
         } catch {
-          window.clearInterval(timer);
-          setLoginProviders((previous) => previous.filter((item) => item !== provider));
+          stopPolling();
           setError("登录轮询失败，请重试。");
         }
       }, interval);
+      loginTimersRef.current[provider] = timer;
     } catch (caught) {
       // 启动失败：关掉占位窗口，并把授权地址给出来让用户手动打开
       popup?.close();
@@ -338,9 +353,17 @@ export function CredentialsPage() {
 
   const cancelLogin = async (provider: Provider) => {
     setError(null);
+    // 用 startLogin 记下的 state 取消**当前**那次流程；
+    // 并停掉对应的凭证列表轮询。
+    const state = loginStatesRef.current[provider];
+    const timer = loginTimersRef.current[provider];
+    if (timer !== undefined) {
+      window.clearInterval(timer);
+      delete loginTimersRef.current[provider];
+    }
+    delete loginStatesRef.current[provider];
     try {
-      const started = await api.upstreamStart(provider).catch(() => null);
-      if (started) await api.upstreamCancel(provider, started.state).catch(() => undefined);
+      if (state) await api.upstreamCancel(provider, state).catch(() => undefined);
     } finally {
       setLoginProviders((previous) => previous.filter((item) => item !== provider));
       setNotice("已取消登录。");

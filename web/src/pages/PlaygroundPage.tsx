@@ -9,23 +9,11 @@ import {
   X,
 } from "lucide-react";
 import { useSessionContext } from "../Layout";
+import type { ModelInfo } from "../api/types";
 import { HelpBlock } from "../components/HelpBlock";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
 import { Button, Card, Checkbox, Empty, Field, Label, Notice, Panel, Select, Textarea } from "../ui";
-
-interface ModelInfo {
-  id: string;
-  object: string;
-  owned_by: string;
-  providers: string[];
-  credit_rate?: number;
-  max_input_tokens?: number;
-  max_output_tokens?: number;
-  supports_images?: boolean;
-  supports_tool_call?: boolean;
-  by_provider?: Record<string, { credit_rate?: number }>;
-}
 
 const PROVIDER_LABEL: Record<string, string> = {
   codebuddy: "CodeBuddy",
