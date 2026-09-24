@@ -830,7 +830,7 @@ fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文�
 ## 9. 已知取舍备忘
 
 - **同步 sqlite3 而非 aiosqlite**（T-Q2）：本地微秒级操作，asyncio 封装开销大于收益
-- **双 httpx 客户端**（T-Q4）：聊天流 `read=None` 防长流截断；短请求总超时 30s 防悬挂；共享 `trust_env=False`
+- **双 httpx 客户端**（T-Q4）：聊天流 `read=None` 防长流截断；短请求总超时 30s 防悬挂；共享 `trust_env=False`。非流式路径由引擎聚合同一流式上游（无独立 HTTP），悬挂兜底是引擎层的聚合整体超时（`UPSTREAM_COMPLETE_TIMEOUT_SECONDS`，默认 600s，超时按瞬态错误换号重试）
 - **手写 SQL 而非 ORM**：10 张表规模下 ORM 收益为负
 - **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + `PUBLIC_BASE_URL`
 - **v1 无 Anthropic**（Q8=A）：Event 层已预留，v1.1 只加 `compat/anthropic/` 适配器

@@ -245,6 +245,29 @@ def test_prepare_body_rewrites_openai_shape():
     assert body["messages"][0]["content"] == [{"type": "text", "text": "hi"}]
 
 
+def test_prepare_body_mutations_do_not_leak_into_payload():
+    """出站改写绝不穿透回 payload：会话粘性用请求原文算指纹，穿透即粘性失效。"""
+    import copy
+
+    payload = {
+        "messages": [
+            {"role": "developer", "content": "plan"},
+            {"role": "assistant", "content": None,
+             "tool_calls": [{"id": "c1", "type": "function", "function": {}}]},
+            {"role": "user", "content": "hi"},
+        ],
+        "tools": [{"type": "function",
+                   "function": {"name": "bash", "parameters": {"type": "object"}}}],
+    }
+    snapshot = copy.deepcopy(payload)
+    body = prepare_body(payload, "m")
+
+    assert payload == snapshot                       # 原文未被改写
+    assert body["messages"][0]["role"] == "system"   # 出站确实发生改写
+    assert body["messages"][1]["content"] == [{"type": "text", "text": "hi"}]
+    assert body["tools"][0]["function"]["parameters"] == '{"type": "object"}'
+
+
 def test_prepare_body_keeps_array_content_and_skips_non_dict():
     body = prepare_body({"messages": [
         {"role": "user", "content": [{"type": "text", "text": "x"}]},

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -71,6 +72,10 @@ class ExecutorDeps:
     # 截断续写上限（B1.4）：上游 finish_reason=length 时同凭证续写，最多该次数；
     # 0 关闭。续写在事件流包装器内完成，不参与凭证轮换
     max_auto_continues: int = 0
+    # 非流式聚合整体超时（秒）：流式路径有心跳与 read=None 兜底，非流式
+    # 聚合没有——上游连接半开停滞会让请求无限悬挂并占住凭证。超时按瞬态
+    # 错误（SOFT：短冷却不累计）换号重试；≤0 关闭
+    complete_timeout_seconds: float = 600
 
     def record(self, **fields: Any) -> None:
         """统计写入失败绝不能影响聊天响应。"""
@@ -395,12 +400,26 @@ class Executor:
             last_provider, last_credential = provider_id or "-", credential_id
             events: list[Event] = []
             try:
-                async for event in self._stream_source(
-                    provider_id, credential_data, request.raw, target.model,
-                ):
-                    if first_event_at is None:
-                        first_event_at = time.monotonic()
-                    events.append(event)
+                # 聚合整体超时兜底（见 ExecutorDeps.complete_timeout_seconds）
+                async with (asyncio.timeout(self._deps.complete_timeout_seconds)
+                            if self._deps.complete_timeout_seconds > 0
+                            else contextlib.nullcontext()):
+                    async for event in self._stream_source(
+                        provider_id, credential_data, request.raw, target.model,
+                    ):
+                        if first_event_at is None:
+                            first_event_at = time.monotonic()
+                        events.append(event)
+            except TimeoutError:
+                logger.warning(
+                    "上游 %s 非流式聚合超过 %ss（凭证 %s，按瞬态错误换号）",
+                    provider_id, self._deps.complete_timeout_seconds, credential_id)
+                self._note_upstream_error(credential_id, ErrKind.SOFT,
+                                          provider_id, target.model)
+                last_error = UpstreamStreamError(Event(
+                    kind=EventKind.ERROR,
+                    error_message=(f"upstream complete timed out after "
+                                   f"{self._deps.complete_timeout_seconds}s")))
             except Exception as error:  # noqa: BLE001
                 kind = _classify(error)
                 if kind is None:

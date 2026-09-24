@@ -253,6 +253,7 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `LOG_LEVEL` | `INFO` | 日志级别；审计日志是 INFO 级，调到 `WARNING` 会一并关掉 |
 | `DUMP_REQUEST_BODIES` | `false` | 诊断：把 `/v1` 原始请求体落盘到 `data/dumps/`（**含对话内容**，仅排查用） |
 | `AUTO_CONTINUE_MAX` | `10` | 上游以 `finish_reason=length` 截断时同凭证自动续写的最多次数；`0` 关闭（见 TECHNICAL.md §3.4） |
+| `UPSTREAM_COMPLETE_TIMEOUT_SECONDS` | `600` | 非流式聚合整体超时（秒）：上游连接半开停滞会让非流式请求无限悬挂并占住凭证，超时按瞬态错误换号重试（流式路径有心跳兜底不受影响）；`≤0` 关闭 |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | 监听地址与端口（compose 默认 `0.0.0.0`，`PORT` 同时决定宿主机映射端口） |
 
 ### 管理台热更（「任务与配置」页）

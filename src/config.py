@@ -101,6 +101,9 @@ class Settings(BaseSettings):
     # 最多该次数后收尾；0 关闭。仅 length 触发（其余"空正文/代码块未闭合"
     # 判据经实测无支撑，未实现，见 TECHNICAL.md §3.4）
     auto_continue_max: int = 10
+    # 非流式聚合整体超时（秒）：上游只支持流式，非流式由引擎聚合；上游连接
+    # 半开停滞会让请求无限悬挂并占住凭证。超时按瞬态错误换号重试；≤0 关闭
+    upstream_complete_timeout_seconds: int = 600
 
     @cached_property
     def admin_set(self) -> frozenset[str]:

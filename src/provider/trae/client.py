@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import time
@@ -82,6 +83,10 @@ def prepare_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
     - tools/tool_choice 归一化
     """
     body: dict[str, Any] = dict(payload)
+    # 出站改写只作用于副本：浅拷贝与请求原文共享 messages 内层 dict，
+    # developer→system 的原地改写会穿透回 request.raw；会话粘性（pin_for /
+    # remember）两侧都必须看同一份原文，穿透会让指纹链失配、粘性静默失效
+    body["messages"] = copy.deepcopy(body.get("messages"))
     body["stream"] = True
     body["function"] = FUNCTION
     body["config_name"] = model

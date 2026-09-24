@@ -56,6 +56,7 @@ services:
       DUMP_REQUEST_BODIES: ${DUMP_REQUEST_BODIES:-false}
       # 截断续写：上游 finish_reason=length 时同凭证自动续写的最多次数；0 关闭
       AUTO_CONTINUE_MAX: ${AUTO_CONTINUE_MAX:-10}
+      UPSTREAM_COMPLETE_TIMEOUT_SECONDS: ${UPSTREAM_COMPLETE_TIMEOUT_SECONDS:-600}
       # 服务监听地址（容器内必须 0.0.0.0 才能被映射访问）
       HOST: ${HOST:-0.0.0.0}
       PORT: ${PORT:-8000}

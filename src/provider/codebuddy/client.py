@@ -6,6 +6,7 @@ OAuth 轮询、企业额度、多账号切换在 M1.5。
 
 from __future__ import annotations
 
+import copy
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -188,6 +189,12 @@ class CodeBuddyClient:
                           model: str) -> AsyncIterator[Event]:
         """上游只支持流式；非流式由调用方聚合。"""
         body = dict(payload)
+        # 出站改写只作用于副本：浅拷贝与请求原文共享 messages 内层 dict，
+        # 下面的原地改写（developer→system / 指纹中和 / 脏 tool_call 清理）
+        # 会穿透回 request.raw；而会话粘性在改写前后都用请求原文算指纹
+        # （pin_for / remember），穿透会让指纹链失配、粘性静默失效
+        # （B1.5 目标场景恰是带 developer 角色的对话）
+        body["messages"] = copy.deepcopy(body.get("messages"))
         body["model"] = model
         body["stream"] = True
         _clean_history_tool_calls(body)

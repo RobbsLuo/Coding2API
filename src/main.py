@@ -170,6 +170,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                      default_model=lambda: runtime.default_model,
                                      stats=stats_collector,
                                      max_auto_continues=config.auto_continue_max,
+                                     complete_timeout_seconds=(
+                                         config.upstream_complete_timeout_seconds),
                                      affinity=ConversationAffinity(
                                          ttl_seconds=lambda: runtime.conversation_sticky_seconds),
                                      upstream_model_name=lambda provider_id, model_name: (

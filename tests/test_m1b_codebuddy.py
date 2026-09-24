@@ -1888,6 +1888,71 @@ async def test_trae_4001_falls_through_to_codebuddy(dual_repo, caplog):
     assert rows == [(0, None), (0, None)]       # TRAE 4001 不冷却
 
 
+async def test_complete_timeout_rotates_to_next_credential(dual_repo):
+    """非流式聚合超时：按瞬态错误（SOFT）换号重试，请求不悬挂。"""
+    import asyncio
+
+    class SlowFirst:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def stream_chat(self, _cred, _payload, _model):
+            self.calls += 1
+            if self.calls > 1:
+                yield Event(kind=EventKind.CONTENT, content="ok")
+                yield Event(kind=EventKind.FINISH, finish_reason="stop")
+                return
+            yield Event(kind=EventKind.CONTENT, content="x")
+            await asyncio.Event().wait()    # 首次调用模拟半开停滞的连接
+
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "a"})
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "b"})
+    slow = SlowFirst()
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": slow}, credentials=repo,
+        scheduler=Scheduler(), default_model="m", complete_timeout_seconds=0.05))
+
+    result = await executor.complete(_request(), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert slow.calls == 2
+    # 超时按 SOFT 处理：短冷却，不累计 err_count（不罚死号）
+    rows = [tuple(r) for r in db.connect().execute(
+        "SELECT err_count FROM credentials ORDER BY id")]
+    assert rows == [(0,), (0,)]
+
+
+async def test_complete_timeout_without_rotation_raises_unavailable(dual_repo):
+    """无号可换时聚合超时以 503 语义收尾（NoHealthyCredential）。"""
+    import asyncio
+
+    class AlwaysSlow:
+        async def stream_chat(self, _cred, _payload, _model):
+            yield Event(kind=EventKind.CONTENT, content="x")
+            await asyncio.Event().wait()
+
+    repo, _ = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "a"})
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": AlwaysSlow()}, credentials=repo,
+        scheduler=Scheduler(), default_model="m", complete_timeout_seconds=0.05))
+
+    with pytest.raises(NoHealthyCredential, match="timed out"):
+        await executor.complete(_request(), username="u")
+
+
+async def test_complete_timeout_zero_disables_backstop(dual_repo):
+    """≤0 关闭兜底：请求正常完成（覆盖关闭分支）。"""
+    repo, _ = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "a"})
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": DualProvider("codebuddy", [GOOD])},
+        credentials=repo, scheduler=Scheduler(), default_model="glm-5.2",
+        complete_timeout_seconds=0))
+    result = await executor.complete(_request(), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+
+
 async def test_stream_chat_normalizes_developer_role():
     """PI 的 developer 角色归一为 system（腾讯实测 developer → 11128）。"""
     import json as _json
@@ -1906,6 +1971,41 @@ async def test_stream_chat_normalizes_developer_role():
     _ = [e async for e in provider.stream_chat({"bearer_token": "t"}, payload, "m")]
     roles = [m["role"] for m in captured["body"]["messages"]]
     assert roles == ["system", "user"]
+
+
+async def test_stream_chat_mutations_do_not_leak_into_payload():
+    """出站改写（developer→system / 指纹中和 / 脏 tool_call 清理）绝不穿透回
+    payload：executor 的会话粘性在改写前后都用请求原文算指纹（pin_for /
+    remember），穿透会让指纹链失配、粘性静默失效。"""
+    import copy
+
+    from src.provider.codebuddy.client import CHANNEL_MARKERS
+
+    captured: dict = {}
+
+    def capture_handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.read())
+        return httpx.Response(200, text=fixture("chat-basic.sse"))
+
+    provider = CodeBuddyProvider(client=_client(capture_handler))
+    payload = {"messages": [
+        {"role": "developer", "content": f"plan. {CHANNEL_MARKERS[0]}"},
+        {"role": "assistant", "content": [{"type": "text",
+                                           "text": CHANNEL_MARKERS[1]}]},
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": "c1", "type": "function", "function": {}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": "x"},
+        {"role": "user", "content": "hi"},
+    ]}
+    snapshot = copy.deepcopy(payload)
+    _ = [e async for e in provider.stream_chat({"bearer_token": "t"}, payload, "m")]
+
+    assert payload == snapshot
+    # 出站体确实发生了全部三类改写（测试有效性自证）
+    outbound = json.dumps(captured["body"], ensure_ascii=False)
+    assert captured["body"]["messages"][0]["role"] == "system"
+    assert CHANNEL_MARKERS[0] not in outbound and CHANNEL_MARKERS[1] not in outbound
+    assert len(captured["body"]["messages"]) == 3    # 脏 assistant 与悬空 tool 被清
 
 
 def test_blank_noise_tool_call_is_dropped_but_argument_shards_kept():
