@@ -288,11 +288,15 @@ class CodeBuddyClient:
                 continue
             cycle_end = end if cycle_end is None else min(cycle_end, end)
             ladder.append((end, package_remaining))
-        # 官方界面同口径：TotalDosage 是上游服务端汇总的剩余，优先于逐包累加
-        # （各包 Precise 小数累加会与界面显示差零点几）。
-        official = _total_dosage(body)
-        if official is not None:
-            remaining = official
+        # remaining 一律取逐包 `CycleCapacityRemain`（Precise 优先）之和，**不**
+        # 用响应顶层的 `TotalDosage`。实测（2026-09-28，三个真实账号）：
+        #   TotalDosage = Σ(size − CapacityUsed)，而 CapacityUsed 是「上周期」
+        #   口径——本周期消耗记在 CycleCapacityUsed/CycleCapacityRemain，故
+        #   TotalDosage 在一整个周期内不变，无法反映实时余额（曾出现
+        #   remaining == total、健康度恒 100、credit_events 不再记录）。
+        #   它与本函数已算出的逐包 remaining 基准不同，会与 expiry_ladder /
+        #   quota_packages / 管理台明细自相矛盾。PROPOSAL §4.3 的口径也是
+        #   CycleCapacityRemainPrecise。
         return Quota(remaining=remaining, total=total, cycle_end=cycle_end,
                      expiry_ladder=ladder, packages=packages or None,
                      probed_at=int(time.time()))
@@ -454,19 +458,6 @@ def _extract_accounts(body: dict[str, Any]) -> list[Any]:
             if isinstance(holder, dict) and path[-1] in holder:
                 return []
     raise UpstreamProtocolViolation("quota response missing Accounts")
-
-
-def _total_dosage(body: dict[str, Any]) -> float | None:
-    """上游官方汇总剩余（data.Response.Data.TotalDosage）。
-
-    官方界面同口径；逐包 Precise 累加会因各包小数精度与界面差零点几。
-    """
-    node: Any = body
-    for key in ("data", "Response", "Data"):
-        node = node.get(key) if isinstance(node, dict) else None
-    if not isinstance(node, dict):
-        return None
-    return _number(node.get("TotalDosage"))
 
 
 def _cycle_capacity(account: dict[str, Any], field: str) -> float:

@@ -198,6 +198,8 @@ TTL（`CONVERSATION_STICKY_SECONDS`，默认 1h，≤0 关闭）内固定复用�
 | 总量 | `CycleCapacitySizePrecise` | `credits_limit` |
 | 周期 | `CycleStartTime`/`CycleEndTime` | 无（单调余额） |
 
+> **不要用响应顶层的 `TotalDosage`**（2026-09-28 线上修复）：实测三个真实账号，`TotalDosage = Σ(size − CapacityUsed)`，而 `CapacityUsed` 是**上周期**口径；本周期消耗记在 `CycleCapacityUsed`/`CycleCapacityRemain`。因此 `TotalDosage` 在整个周期内不变，且基准与按 `size` 累加的 `total` 不一致（会出现 `remaining == total`、健康度恒 100、`credit_events` 停止记录）。`remaining` 一律取逐包 `CycleCapacityRemainPrecise` 之和，与到期阶梯、额度明细同源。
+
 ```python
 def health(q) -> HealthScore:   # known(0-100) | unknown | exhausted
     if q is None or q.probe_failed: return "unknown"

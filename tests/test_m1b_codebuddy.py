@@ -381,25 +381,39 @@ async def test_fetch_personal_quota_parses_real_nested_response():
         return httpx.Response(200, text=fixture("quota-personal.json"))
 
     quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
-    # fixture 是脱敏后的真实响应：两个 Status=0 的套餐（累加 5500 / 5267.5），
-    # 但 TotalDosage 是脱敏前的官方汇总值 9070——优先取官方口径，不逐包累加。
+    # fixture 是脱敏后的真实响应：两个 Status=0 的套餐（累加 total 5500），
+    # remaining 取逐包 CycleCapacityRemainPrecise 之和（500 + 4767.50000158）。
+    # 响应顶层另有 TotalDosage=9070，**必须忽略**：它大于按 size 累加的 total，
+    # 是「上周期」口径、不随本周期消耗变化，采用它会让 remaining == total、
+    # 健康度恒 100（2026-09-28 线上事故）。
     assert quota.total == 5500.0
-    assert quota.remaining == 9070.0
+    assert quota.remaining == pytest.approx(5267.50000158)
     assert quota.cycle_end is not None
     assert quota.probe_failed is False
 
 
-@pytest.mark.parametrize(("body", "expected"), [
-    ({"data": None}, None),                                # data 非 dict
-    ({"data": {"Response": {"Data": {"TotalDosage": 9070}}}}, 9070.0),
-    ({"data": {"Response": {"Data": {"TotalDosage": "3344.5"}}}}, 3344.5),
-    ({"data": {"Response": {"Data": {}}}}, None),         # 缺失 → 回退累加
-    ({"data": {"Response": {"Data": {"TotalDosage": "x"}}}}, None),  # 非数字
-])
-def test_total_dosage_extracts_official_remaining(body, expected):
-    from src.provider.codebuddy.client import _total_dosage
+async def test_total_dosage_is_ignored_in_favor_of_per_package_remaining():
+    """回归：响应里的 TotalDosage 是陈旧的上周期口径，绝不能覆盖逐包剩余。
 
-    assert _total_dosage(body) == expected
+    构造一个 TotalDosage 与逐包和明显不同的响应，断言 remaining 取逐包口径。
+    """
+    body = {"code": 0, "msg": "OK", "data": {"Response": {"Data": {
+        "TotalDosage": 9070,
+        "Accounts": [
+            {"Status": 0, "CycleCapacitySizePrecise": "500",
+             "CycleCapacityRemainPrecise": "480"},
+            {"Status": 0, "CycleCapacitySizePrecise": "100",
+             "CycleCapacityRemainPrecise": "60"},
+        ],
+    }}}}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body)
+
+    quota = await _client(handler).fetch_quota(CodeBuddyCredential(bearer_token="t"))
+    assert quota.total == 600.0
+    assert quota.remaining == 540.0            # 480 + 60，而非 TotalDosage=9070
+    assert quota.remaining < quota.total       # 消耗可见，健康度不再恒 100
 
 
 async def test_fetch_personal_quota_prefers_precise_over_plain():

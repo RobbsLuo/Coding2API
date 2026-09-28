@@ -232,6 +232,8 @@ def health(q: Quota | None) -> HealthScore:
 
 调度排序：`known DESC > unknown（中性参与）> exhausted(-1)`。
 
+**CB `remaining` 的取值口径**（2026-09-28 线上修复）：个人版额度探测一律取逐包 `CycleCapacityRemainPrecise` 之和，**不得**用响应顶层的 `TotalDosage`。实测三个真实账号证明 `TotalDosage = Σ(size − CapacityUsed)`，`CapacityUsed` 是上周期口径（本周期消耗记在 `CycleCapacityUsed`），故该字段整周期不变、且基准与按 `size` 累加的 `total` 不同——采用它会出现 `remaining == total`、健康度恒 100、`credit_events` 停止记录，并与到期阶梯 / 额度明细自相矛盾。企业版仍走 `limitNum - credit`（另一接口，无此问题）。
+
 ### 3.4 截断续写（B1.4，按实测收窄）
 
 上游以 `finish_reason == "length"` 结束本轮流时，同凭证自动续写，最多 `AUTO_CONTINUE_MAX`（默认 10，0 关闭）。实现在 `src/engine/continuation.py` 的 `ContinuationStream`：包装上游事件流，截断则追加「已产出正文（含 reasoning）+ 续写指令」重发，并把输出上限两键归零（否则在同一处再次截断），跨轮累计 usage，末端补发一条累计 usage + 最后一轮真实 `finish_reason`。做成事件流包装器而非 executor 内重跑：凭证固定，轮换 / 记账 / 统计零改动。
