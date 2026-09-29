@@ -291,8 +291,11 @@ class ZenClient:
             if (isinstance(model_id, str) and model_id
                     and model_id.lower().endswith(self.free_suffix)):
                 owner = item.get("owned_by")
+                # 免费层不消耗额度：显式给 0（而非 None），让列表 UI 显示 x0，
+                # 排序时也天然排在最省的一档。
                 candidates.append(Model(id=model_id,
-                                        name=owner if isinstance(owner, str) else ""))
+                                        name=owner if isinstance(owner, str) else "",
+                                        credit_rate=0.0))
         if not candidates:
             raise zen_events.UpstreamProtocolViolation("models api returned no free candidates")
         alive = await self._probe_alive([model.id for model in candidates])

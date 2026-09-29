@@ -399,6 +399,8 @@ async def test_fetch_models_keeps_only_live_free_candidates():
     assert [m.id for m in models] == ["alpha-free", "GAMMA-FREE", "no-owner-free"]
     assert models[0].name == "opencode"
     assert models[2].name == ""
+    # 免费层显式标 0 倍率（列表 UI 显示 x0，排序时也排最省的一档）
+    assert all(m.credit_rate == 0.0 for m in models)
 
 
 async def test_fetch_models_custom_suffix_and_probe_network_error():

@@ -581,6 +581,8 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **判活结果缓存（`MODELS_CACHE_TTL_SECONDS`，30 分钟）**：探活是模型列表链路里最贵的一步（逐个真发一次推理，总耗时等于最慢那个，实测 12–15s），而免费模型增删很慢。故 `fetch_models` 缓存判活集，TTL 取 30 分钟、比服务层的 `MODEL_LIST_TTL_SECONDS`（300s）长一档：服务层每 5 分钟到期重拉列表时直接复用判活结果，只有超过 30 分钟才真的重探。代价是免费模型下线后最多多留 30 分钟（选中收到 400/401，按无效请求处理，不会误冷却凭证）。
 
+**免费模型显式 x0 倍率**：免费层不消耗额度，`fetch_models` 给每个存活候选 `credit_rate=0.0`（而非 `None`）。这样列表 UI 显示 `x0`、Playground 的默认选中（取最小倍率）与排序都把免费模型排在最省一档；若留 `None`，UI 会当作「无倍率」不显示，也和「免费」这个事实不符。
+
 **401 不算凭证失效**：Zen 无凭证，401（`Missing API key.`）只说明**该模型需要付费 key**，不是虚拟凭证失效。故 zen 的 `classify_status(401)` / `classify_error_code(401)` 归 `ErrKind.INVALID`（跳过该渠道并回 400），不归 `DEAD`——否则一次 `模型@zen` 强制付费模型就会把整条 zen 渠道硬禁用，只能重启复活。模型列表已不含付费模型，此分支只兜底强制指定的情形。
 
 **统计时间序列泛化**：`stats/query.py::timeline()` 原先把 `codebuddy`/`trae` 两列写死在 SQL 的 `CASE WHEN` 里。改为按 `(hour_utc, provider)` 分组、Python 侧 pivot：渠道集合动态取自数据（新增渠道无需改 SQL），某渠道在该小时无数据时补 0（同一批点的键集合一致，前端不会断线）。渠道按名排序，恰为 `codebuddy`/`trae`/`zen` 字典序，**无 zen 数据时旧契约不变**。前端对应地按 points 的键动态生成曲线（`UsageChart.chartProviders`），颜色随渠道稳定（`--chart-1/3/4`）。
