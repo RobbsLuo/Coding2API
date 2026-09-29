@@ -31,6 +31,7 @@ free tier coding-agent upstreams, with a shared credential pool, unified schedul
 - **Privacy-preserving stats**: never stores prompts, completions, headers, tokens, or tool arguments; 90-day detail, permanent hourly rollups; charts by upstream and model (Top N trends, official brand logos)
 - **Hardened admin surface**: login rate limiting (global/IP/username + PBKDF2 concurrency cap), CSRF checks on writes, body limits, security headers, Host allowlist
 - **Model catalog hygiene**: `MODEL_BLOCKLIST` filters placeholder/legacy models; cached list as fallback when upstreams fail; credit rates and token limits passed through to `/v1/models` and the Playground
+- **Credential-gated catalog**: `/v1/models` and the Playground model list only merge channels that currently have a usable credential (not paused, not hard-disabled) — never-connected channels do not show phantom models, and pausing/failing a channel drops its models until it comes back
 
 ## Quick start
 
@@ -55,6 +56,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 Point any OpenAI-compatible client at `http://127.0.0.1:8000/v1`.
 
+The model list is **credential-gated**: only channels that currently have a usable credential (not paused, not session-expired) are fetched and shown, so a channel you never connected never shows phantom models. A cold start lists only `zen` (its virtual credential is seeded); connecting CodeBuddy / TRAE brings their models in on the next list request. Pausing a channel or losing its credentials temporarily hides its models until it recovers.
+
 `model@provider` pins an upstream (`glm-5.2@trae`, `mimo-v2.5-free@zen`); bare model names route automatically.
 
 ### OpenCode Zen free tier
@@ -63,7 +66,7 @@ The `zen` channel bridges the **free models** at [opencode.ai/zen](https://openc
 
 Worth knowing:
 
-- **No credentials**: Zen needs no token. The `OpenCode Zen` pool row is a virtual placeholder (so scheduling, cooldown, and stats work as usual); its quota column reads "free tier (no quota API)". It **re-seeds on restart after deletion** — to disable it permanently, *pause* it instead of deleting.
+- **No credentials**: Zen needs no token. The `OpenCode Zen` pool row is a virtual placeholder (so scheduling, cooldown, and stats work as usual); its quota column reads "free tier (no quota API)". It **re-seeds on restart after deletion** — to disable it permanently, *pause* it instead of deleting. Pausing also hides zen's models from the list until you resume.
 - **Free-tier gate**: the upstream wants to believe it is talking to the official client (UA version, session header, `stream:true`, `tools` containing `bash`/`read`). The gateway satisfies this for you; the injected `bash`/`read` are empty shells, and if the model actually calls them those tool calls are filtered from the response so you never see functions you did not declare. If *you* declare `bash`/`read`, they pass through untouched.
 - **The upstream changes**: both the gate threshold and the free list may move. Tune the UA version with `ZEN_OPENCODE_VERSION`; change the endpoint with `ZEN_API_ENDPOINT` (must be inside `ZEN_ALLOWED_ENDPOINTS`).
 - **No quota API**: health stays "quota unknown" (unknown ≠ exhausted).

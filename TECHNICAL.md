@@ -112,7 +112,7 @@ coding2api/
 │       ├── deps.py              # Services 容器 + require_api_key / session / csrf 依赖
 │       ├── chat.py              # POST /v1/chat/completions
 │       ├── responses.py         # POST /v1/responses
-│       ├── models.py            # GET /v1/models（动态拉取 + 黑名单 + 元数据）
+│       ├── models.py            # GET /v1/models（按渠道凭证加载 + 动态拉取 + 黑名单 + 元数据）
 │       ├── balance.py           # GET /v1/user/balance（读探测缓存聚合）
 │       ├── authorize.py         # GET /authorize（TRAE 回调落点）
 │       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin / 成长 / 账号切换
@@ -266,7 +266,7 @@ def health(q: Quota | None) -> HealthScore:
 | `supports_reasoning` | `supportsReasoning` | `display_config.model_capability`（`reasoning_model`→true、`chat_model`→false），缺失回落 `reasoning_effort_config.support_thinking` | true / false / null |
 | `default_effort` | `reasoning.effort` | 无对应字段（`reasoning_effort_config` 只有 `support_thinking` 布尔） | CB: `high` / `medium`；TRAE 恒 null |
 
-`supported_efforts`（可接受档位集合）**不实现**：上游只给「默认档位」，不给档位清单，凭空枚举 ChatGPT 三档属编造（同 §3.4 原则）。CB 的 `onlyReasoning`/`canDisableThinking` 同样**不透传**——语义未经核实。逐字段补缺（双上游同名模型先到先填、后到只补 None）。
+`supported_efforts`（可接受档位集合）**不实现**：上游只给「默认档位」，不给档位清单，凭空枚举 ChatGPT 三档属编造（同 §3.4 原则）。CB 的 `onlyReasoning`/`canDisableThinking` 同样**不透传**——语义未经核实。逐字段补缺（多上游同名模型先到先填、后到只补 None）。
 
 **黑名单默认值**（`MODEL_BLOCKLIST`，fnmatch glob，只影响列表展示、直连不受影响）：在原有 `custom_model_*` / `*sub*agent*` / `summary` / `browser_use_*` 之外，按实测补入三类**确认不可用**的噪音模型：
 
@@ -623,7 +623,7 @@ class Provider(Protocol):
 客户端 → POST /v1/chat/completions (Bearer sk-)
   1. deps.require_api_key：摘要查 api_keys 表 → username
   2. request.py：校验 body → ChatRequest；model_resolver 解析候选集
-     - "glm-5.2" → 两 provider 都可能；"glm-5.2@trae" → 仅 trae；auto/空 → DEFAULT_MODEL
+     - "glm-5.2" → 各 provider 都可能；"glm-5.2@trae" → 仅 trae；auto/空 → DEFAULT_MODEL
   3. 选号（executor._select → scheduler.select）：
      a. 候选 = 注册表中支持该模型的 provider（目录能证明归属时先收窄，_narrow_providers）
      b. 模型级冷却过滤：逐凭证按**自己所属上游的原始模型名**查 (凭证, 模型) 冷却表，
