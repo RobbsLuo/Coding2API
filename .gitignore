@@ -36,6 +36,12 @@ logs/
 # 本地文档目录（不入库）
 docs/
 
+# archify 生成的校验证据（本地复现即可，不入库）
+diagrams/*.visual-check.*
+diagrams/*.browser-check.json
+diagrams/*.finalize*.json
+diagrams/*.delivery.json
+
 # 前端
 web/node_modules/
 web/dist/
