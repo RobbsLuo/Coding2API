@@ -427,6 +427,7 @@ def test_every_hot_setting_is_read_lazily_not_baked_at_startup(admin_app):
         "default_model": "kimi-k3",
         "codebuddy_chat_min_interval": 12.5,
         "zen_chat_min_interval": 7.5,
+        "kilo_chat_min_interval": 4.5,
         "pacer_min_seconds": 3,
         "pacer_max_seconds": 8,
         "quota_probe_minutes": 33,
@@ -454,6 +455,13 @@ def test_every_hot_setting_is_read_lazily_not_baked_at_startup(admin_app):
     assert zen_pacer.min_seconds == 7.5
     assert zen_pacer.max_seconds == 7.5
     assert zen_pacer.allow_concurrent is True
+    # kilo 同样独立 pacer：与 zen / CB / TRAE 互不共享
+    kilo_pacer = app.state.services.registry["kilo"].pacer
+    assert kilo_pacer is not app.state.services.registry["codebuddy"].pacer
+    assert kilo_pacer is not zen_pacer
+    assert kilo_pacer.min_seconds == 4.5
+    assert kilo_pacer.max_seconds == 4.5
+    assert kilo_pacer.allow_concurrent is True
     # 后台任务周期与开关
     assert runner._quota_interval == 33 * 60        # noqa: SLF001
     assert runner._growth_interval == 9 * 60        # noqa: SLF001
@@ -482,3 +490,21 @@ def test_zen_pacer_is_independent_and_disabled_by_default(admin_app):
     client.put("/api/settings", json={"values": {"zen_chat_min_interval": 2}})
     assert zen.min_seconds == 2 and zen.max_seconds == 2   # 热更不烘焙
     assert cb.min_seconds == 5                             # 改 zen 不影响 CB/TRAE
+
+
+def test_kilo_pacer_is_independent_and_disabled_by_default(admin_app):
+    """kilo 与 zen 一样是匿名免费层：独立 pacer、默认不节流，不与 CB/TRAE 共享。"""
+    app, client = admin_app
+    registry = app.state.services.registry  # type: ignore[attr-defined]
+    kilo = registry["kilo"].pacer
+    cb = registry["codebuddy"].pacer
+    assert kilo is not cb                                 # 不共享
+    assert kilo is not registry["trae"].pacer
+    assert kilo is not registry["zen"].pacer
+    assert kilo.disabled is True                          # 默认 0 → 不节流
+    assert app.state.runtime_settings.kilo_chat_min_interval == 0
+
+    client.put("/api/settings", json={"values": {"kilo_chat_min_interval": 3}})
+    assert kilo.min_seconds == 3 and kilo.max_seconds == 3  # 热更不烘焙
+    assert cb.min_seconds == 5                              # 改 kilo 不影响 CB/TRAE
+    assert registry["zen"].pacer.disabled is True           # 也不影响 zen

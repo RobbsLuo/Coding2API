@@ -88,6 +88,9 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "zen 匿名免费层专用节流（0 关闭，默认）。与 CodeBuddy/TRAE 各自"
                "独立、不共享——共享会让 zen 请求排在 CB/TRAE 之后空等最小间隔。",
                minimum=0.0),
+    HotSetting("kilo_chat_min_interval", float, "Kilo 聊天最小间隔（秒）",
+               "Kilo 匿名免费层专用节流（0 关闭，默认）。与 zen / CodeBuddy / TRAE"
+               "各自独立，不共享。", minimum=0.0),
     HotSetting("pacer_min_seconds", float, "后台任务节流下限（秒）",
                "后台任务相邻上游请求的最小间隔；0 关闭节流。", minimum=0.0),
     HotSetting("pacer_max_seconds", float, "后台任务节流上限（秒）",
@@ -363,6 +366,10 @@ class RuntimeSettings:
     @property
     def zen_chat_min_interval(self) -> float:
         return float(self.get("zen_chat_min_interval"))
+
+    @property
+    def kilo_chat_min_interval(self) -> float:
+        return float(self.get("kilo_chat_min_interval"))
 
     @property
     def pacer_min_seconds(self) -> float:

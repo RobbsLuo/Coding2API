@@ -32,6 +32,7 @@ export const PROVIDER_BINDING_OPTIONS = [
   { value: "codebuddy", label: "CodeBuddy" },
   { value: "trae", label: "TRAE" },
   { value: "zen", label: "OpenCode Zen" },
+  { value: "kilo", label: "Kilo Gateway" },
 ];
 
 /** 列表里展示绑定渠道：空串 → 「自动」 */

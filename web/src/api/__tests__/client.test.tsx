@@ -186,6 +186,11 @@ describe("display helpers", () => {
     const balance = quotaSemantics(makeCredential({
       provider: "trae", quota_cycle_end: null }) as never);
     expect(balance).toBe("账户剩余（单调递减）");
+
+    // Kilo 与 Zen 同为免费层：无额度接口
+    const kilo = quotaSemantics(makeCredential({
+      provider: "kilo", quota_cycle_end: null }) as never);
+    expect(kilo).toBe("免费层（无额度接口）");
   });
 
   it("凭证状态机覆盖全部状态", () => {

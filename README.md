@@ -1,6 +1,6 @@
 # Coding2API
 
-把 **CodeBuddy**、**TRAE SOLO** 与 **OpenCode Zen** 免费层三个上游渠道，统一封装为 OpenAI 兼容 API，
+把 **CodeBuddy**、**TRAE SOLO**、**OpenCode Zen** 与 **Kilo Gateway** 四个上游渠道，统一封装为 OpenAI 兼容 API，
 提供公共凭证池、统一调度与按人用量统计。
 
 > [!WARNING]
@@ -12,6 +12,7 @@
 - **统一调度**：扁平模型名按健康度自动选号，`模型@渠道` 强制指定；三态健康度 + 分级冷却避开坏号。模型级限流或「该渠道无此模型」只避让那一个模型，同账号其他模型立刻可用
 - **模型列表按渠道凭证加载**：`/v1/models` 与 Playground 只展示**当前有可用凭证**的渠道（未暂停、未会话失效）；从未接入的渠道不出现幽灵模型，暂停或凭证失效时其模型暂时消失，恢复即回来
 - **OpenCode Zen 免费层**（第三个渠道）：`opencode.ai/zen` 的免费模型接成 `zen` 渠道，标准 OpenAI 协议、无需登录；上游清单混着付费模型且无免费标记，本服务按 `-free` 后缀收窄候选再逐个探活，**只展示匿名真正可用的免费模型**（每次动态拉取并探活，判活结果按 30 分钟缓存以避开每 5 分钟重探一次的开销，不设静态白名单；免费模型显式标注 **x0 倍率**）；请求侧自动满足免费层门禁，响应侧过滤门禁注入的伪工具调用。无凭证概念——池里一条虚拟凭证让它和其它渠道一样可调度、可暂停、可统计
+- **Kilo Gateway 免费层**（第四个渠道）：`api.kilo.ai/api/gateway` 的免费模型接成 `kilo` 渠道，**标准 OpenAI 协议**（`/chat/completions` + `/models`），无需登录、无门禁伪装；上游 `/models` 每个条目带权威 `isFree` 布尔（实测 395 个模型中 17 个为 true），据此直接过滤免费集，**不做探活**（探活会白耗本就极小的免费配额且结果不稳定）；上游增删自动跟随，不设静态白名单；免费模型显式标注 **x0 倍率**。同为无凭证渠道——池里一条虚拟凭证即可调度/暂停/统计
 - **到期积分优先消化**：主窗口 36h 内将过期的积分多者先用（避免过期浪费），打平再比 7 天窗口；管理台凭证列表显示到期积分与逐个额度包明细
 - **会话粘性**：同一对话多轮粘住同一凭证，出错才轮换
 - **公共凭证池**：admin 集中维护、全员共享；按人统计用量
@@ -111,7 +112,7 @@ docker compose pull
 
 ## 使用
 
-1. 「凭证管理」添加凭证：CodeBuddy 走设备码登录（或粘贴 `{"token":"..."}`）；TRAE 粘贴凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（凭证里的 `apiHost` 只接受官方地址，其他值会被拒绝导入）。OpenCode Zen 无需添加——启动时自动出现一条 `OpenCode Zen` 虚拟凭证（若被删除，可在同一面板点「添加 OpenCode Zen」补回）
+1. 「凭证管理」添加凭证：CodeBuddy 走设备码登录（或粘贴 `{"token":"..."}`）；TRAE 粘贴凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（凭证里的 `apiHost` 只接受官方地址，其他值会被拒绝导入）。OpenCode Zen / Kilo Gateway 无需添加——启动时自动出现一条对应虚拟凭证（若被删除，可在同一面板点「添加 OpenCode Zen」/「添加 Kilo Gateway」补回）
 2. 「API Key」创建 `sk-...`（明文仅显示一次）
 3. 调用：
 
@@ -137,6 +138,18 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 - **无凭证**：Zen 不需要 Token。凭证池里那条 `OpenCode Zen` 是虚拟占位行（让调度 / 冷却 / 统计照常工作），额度列显示「免费层（无额度接口）」。它**删除后重启会复活**，也可在「凭证管理 → 登录渠道账号」点「添加 OpenCode Zen」立即补回——要永久停用请点「暂停」，不要删除。暂停它也会让 zen 模型暂时从模型列表消失。
 - **免费层门禁**：上游要求伪装成官方客户端（UA 版本、会话头、`stream:true`、tools 含 `bash`/`read`）。本服务自动满足；门禁注入的 `bash`/`read` 是空壳，若模型真去调用它们，回包里的这类 tool_call 会被过滤掉，不会泄漏给你没声明过的函数。你自己声明了 `bash`/`read` 时则原样透传。
 - **上游会改**：门禁阈值与免费清单都可能变。UA 版本用 `ZEN_OPENCODE_VERSION` 可调；端点用 `ZEN_API_ENDPOINT`（须在 `ZEN_ALLOWED_ENDPOINTS` 内）。付费模型即使强制 `模型@zen` 也只会报「不可用」，不会拖垮渠道。
+- **无额度接口**：健康度恒为「未探测到额度」（未知 ≠ 耗尽）。
+
+### Kilo Gateway 免费层
+
+`kilo` 渠道接的是 [Kilo Gateway](https://kilo.ai)（`api.kilo.ai/api/gateway`）的**免费模型**，无需账号或登录。它对外是**标准 OpenAI 兼容协议**（`/chat/completions` + `/models`），既无私有信封也无门禁伪装；上游 `/models` 每个条目带权威 `isFree` 布尔（实测 395 个模型中 17 个为 true），本服务**据此直接过滤**免费集，**不做探活**——探活会白耗本就极小的免费配额，且结果随上游免费池波动不稳定。免费模型显式标 **x0**；用 `模型@kilo` 强制指定，或由调度器自动路由。
+
+几点要知道：
+
+- **无凭证**：Kilo 不需要 Token。凭证池里那条 `Kilo Gateway` 是虚拟占位行（让调度 / 冷却 / 统计照常工作），额度列显示「免费层（无额度接口）」。它**删除后重启会复活**，也可在「凭证管理 → 登录渠道账号」点「添加 Kilo Gateway」立即补回——要永久停用请点「暂停」，不要删除。暂停它也会让 kilo 模型暂时从模型列表消失。
+- **无探活**：免费集完全由上游 `isFree` 决定，上游增删免费模型自动跟随，不维护静态白名单。
+- **额度与限流**：免费层额度很小（网关级约 200 请求/小时/IP），且免费池实为 OpenRouter 免费池的转发（上游 429 报错原文含 `limit_source: openrouter_shared_capacity`），会随上游池波动。上游 429 由引擎按软冷却自动换模型重试；本服务不自建熔断。
+- **上游会改**：端点用 `KILO_API_ENDPOINT`（须在 `KILO_ALLOWED_ENDPOINTS` 内）。付费模型即使强制 `模型@kilo` 也只会报「不可用」，不会拖垮渠道。
 - **无额度接口**：健康度恒为「未探测到额度」（未知 ≠ 耗尽）。
 
 ### Responses API（Codex CLI）
@@ -196,7 +209,7 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 
 创建 Key 时可限定它只能走某个渠道、只能从某些 IP 调用，适合「按出口分发 Key」：一个给团队用，另一个只给某台服务器或某个客户端。
 
-- **渠道绑定**：选 CodeBuddy / TRAE / OpenCode Zen 后，该 Key 只在对应渠道的凭证里选号；模型属于另一渠道时直接 400 并指出实际归属（不静默改道，也不白打一次上游）。留空 = 自动（默认，跨渠道选健康凭证）。`模型@渠道` 与绑定冲突时同样 400。
+- **渠道绑定**：选 CodeBuddy / TRAE / OpenCode Zen / Kilo Gateway 后，该 Key 只在对应渠道的凭证里选号；模型属于另一渠道时直接 400 并指出实际归属（不静默改道，也不白打一次上游）。留空 = 自动（默认，跨渠道选健康凭证）。`模型@渠道` 与绑定冲突时同样 400。
 - **来源 IP 白名单**：逗号分隔的 IP 或 CIDR（如 `203.0.113.9,10.0.0.0/8`），留空 = 不限制。写入时校验并规范化（`10.0.0.1` 存为 `10.0.0.1/32`），非法值当场 400；来源不在白名单内返回 403。
 
 **默认不采信 `X-Forwarded-For`**（客户端可写，信它等于白名单形同虚设）。仅 `TRUST_PROXY=true` 时按 XFF 判定，且取**最后一个**条目（紧邻本服务的受信代理实际看到的地址）。故该开关只适用于「本服务前恰好一层受信反代」；多层反代或直连请保持默认 `false`。
@@ -205,7 +218,7 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 
 凭证列表行内菜单的「暂停」只把该凭证摘出**对话流量**：后台的额度探测、token 预刷新、每日签到、成长中心、活跃上报照常运行（这些任务只认系统硬禁用 `disabled`）。适合「先不接聊天、但积分继续领」；「取消暂停」立即放回池子。与状态列的「已禁用」不同——那是渠道判定会话失效后的系统禁用，需重新登录后用「恢复」解除。同一开关也在 `POST /api/credentials/{id}/toggle`。
 
-> OpenCode Zen 是唯一没有凭证的渠道，池里是一条虚拟占位行。**暂停它是永久停用的唯一方式**——删除后下次启动会被种子重新补上，也可在「登录渠道账号」面板点「添加 OpenCode Zen」立即补回。
+> OpenCode Zen / Kilo Gateway 是没有凭证的渠道，池里是一条虚拟占位行。**暂停它是永久停用的唯一方式**——删除后下次启动会被种子重新补上，也可在「登录渠道账号」面板点「添加 OpenCode Zen」/「添加 Kilo Gateway」立即补回。
 
 暂停也会把该渠道从模型列表里摘掉（见「使用」一节的按凭证加载）：模型列表只展示能接通的渠道，所以暂停后 Playground 与 `GET /v1/models` 不再列出它的模型，取消暂停即回来。
 
@@ -215,7 +228,7 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 
 - **从未接入**的渠道不会出现「幽灵模型」（此前无凭证也会调上游，CodeBuddy/TRAE 回退静态表，把打不通的模型也列出来）；
 - **全部暂停 / 凭证失效**时该渠道模型暂时消失，恢复或补一条凭证后立刻回来；
-- 冷启动默认只有 `zen`（自带虚拟凭证），接入 CodeBuddy / TRAE 后下一次列表请求即纳入；
+- 冷启动默认只有 `zen` / `kilo`（自带虚拟凭证），接入 CodeBuddy / TRAE 后下一次列表请求即纳入；
 - 冷却中的凭证仍算「有凭证」——渠道只是暂时限流，列表不跟着闪没。
 
 这是展示口径：直连指定一个被滤掉的模型名仍照常发起（能不能成功由调度器决定）。
@@ -278,8 +291,11 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `ZEN_API_ENDPOINT` | `https://opencode.ai` | OpenCode Zen 上游地址；改动时必须同时把它加入 `ZEN_ALLOWED_ENDPOINTS`（Zen 不带真实 Token，白名单仅防误配） |
 | `ZEN_ALLOWED_ENDPOINTS` | `https://opencode.ai` | Zen 端点白名单 |
 | `ZEN_OPENCODE_VERSION` | `1.18.0` | 门禁伪装用的 `opencode/<version>` UA 版本；上游阈值上移时改这里（低于阈值会被 426 拒绝） |
+| `KILO_API_ENDPOINT` | `https://api.kilo.ai/api/gateway` | Kilo Gateway 上游地址；改动时必须同时把它加入 `KILO_ALLOWED_ENDPOINTS`（Kilo 不带真实 Token，白名单仅防误配） |
+| `KILO_ALLOWED_ENDPOINTS` | `https://api.kilo.ai/api/gateway` | Kilo 端点白名单 |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB/TRAE 聊天节流器的最小间隔（秒）：按凭证分桶、**桶内允许并发**（同渠道同模型并发不排队、立即发出），只在同凭证「上一请求已结束、紧接着又来一个」的顺序连发时补足间隔；`0` 关闭 |
 | `ZEN_CHAT_MIN_INTERVAL` | `0` | Zen 聊天最小间隔（秒），独立于 CB/TRAE 的节流器，默认关闭。zen 是匿名免费层、无账号级频率风控；若与 CB/TRAE 共享，zen 会排在它们之后空等满 5s（并发/连发时每个请求 +5s），故不共享 |
+| `KILO_CHAT_MIN_INTERVAL` | `0` | Kilo 聊天最小间隔（秒），独立于 zen / CB/TRAE 的节流器，默认关闭。同为匿名免费层，与 zen 各自独立、互不排队 |
 | `CODEBUDDY_SANITIZE_CHANNEL_MARKERS` | `true` | 出站 `system`/`assistant` 正文命中「伪装其他厂商官方客户端」指纹串时替换为占位符（上游 11128 内容风控：换号无效、会话带入即持续报错）；只改出站副本，客户端历史不受影响；`false` 关闭（见 TECHNICAL.md §3.2） |
 | `REFRESH_SKEW_HOURS` | `24` | token 到期前该小时数窗口内预刷新。到期时间取凭证显式 `expires_at`，缺失时回落 access token 的 JWT `exp`（CodeBuddy 实测不带显式到期字段） |
 | `TOKEN_EXPIRY_WARNING_SECONDS` | `3600` | 管理台 token 到期预警阈值：剩余低于该值时标红；`≤0` 关闭预警（仍显示剩余时间）。纯展示，不参与调度 |
@@ -293,9 +309,9 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 
 ### 管理台热更（「任务与配置」页）
 
-上表中带「可热更」语义的 14 项可不改 `.env`、不重启，直接在管理台「任务与配置」页修改：
+上表中带「可热更」语义的 15 项可不改 `.env`、不重启，直接在管理台「任务与配置」页修改：
 
-`DEFAULT_MODEL`、`MODEL_BLOCKLIST`、`QUOTA_EXPIRY_WINDOW_SECONDS`、`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`、`CONVERSATION_STICKY_SECONDS`、`GROWTH_IRREVERSIBLE_ACTIONS`、`GROWTH_INTERVAL_MINUTES`、`QUOTA_PROBE_MINUTES`、`CODEBUDDY_CHAT_MIN_INTERVAL`、`ZEN_CHAT_MIN_INTERVAL`、`PACER_MIN_SECONDS`、`PACER_MAX_SECONDS`、`ACTIVITY_REPORT_ENABLED`、`ACTIVITY_REPORT_HOUR`。
+`DEFAULT_MODEL`、`MODEL_BLOCKLIST`、`QUOTA_EXPIRY_WINDOW_SECONDS`、`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`、`CONVERSATION_STICKY_SECONDS`、`GROWTH_IRREVERSIBLE_ACTIONS`、`GROWTH_INTERVAL_MINUTES`、`QUOTA_PROBE_MINUTES`、`CODEBUDDY_CHAT_MIN_INTERVAL`、`ZEN_CHAT_MIN_INTERVAL`、`KILO_CHAT_MIN_INTERVAL`、`PACER_MIN_SECONDS`、`PACER_MAX_SECONDS`、`ACTIVITY_REPORT_ENABLED`、`ACTIVITY_REPORT_HOUR`。
 
 要点：
 

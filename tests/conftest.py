@@ -44,18 +44,28 @@ def users_file(users_file_path, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def zen_models_offline(monkeypatch, request):
-    """除 test_zen 外，一律不真连 Zen 上游。
+    """除 test_zen / test_kilo 外，一律不真连 Zen / Kilo 上游。
 
-    任何 `build_app()` 的启动预热都会调 `ZenClient.fetch_models`，而它现在会
-    对免费候选逐个发探活请求（真跑一次模型推理）；不拦住的话每个用到真实装配
-    的用例都会发十几次外网请求，又慢又依赖外网。Zen 的真实逻辑（含探活各分支）
-    由 `tests/test_zen.py` 用 MockTransport 全覆盖，这里只给它一个固定的小名单。
+    任何 `build_app()` 的启动预热都会调 `ZenClient.fetch_models`（它会逐个
+    探活免费模型，真跑一次推理）与 `KiloClient.fetch_models`（真打外网清单）；
+    不拦住的话每个用到真实装配的用例都会发外网请求，又慢又依赖外网。两条渠道
+    的真实逻辑由 `tests/test_zen.py` / `tests/test_kilo.py` 用 MockTransport
+    全覆盖，这里只给它们各一个固定的小名单。
     """
-    if request.node.path.name == "test_zen.py":
-        return
-    from src.provider.zen.client import Model, ZenClient
+    name = request.node.path.name
+    from src.provider.base import Model as _Model
 
-    async def fake_fetch_models(self) -> list[Model]:
-        return [Model(id="offline-free", name="opencode")]
+    if name != "test_zen.py":
+        from src.provider.zen.client import ZenClient
 
-    monkeypatch.setattr(ZenClient, "fetch_models", fake_fetch_models)
+        async def fake_zen_models(self) -> list[_Model]:
+            return [_Model(id="offline-free", name="opencode")]
+
+        monkeypatch.setattr(ZenClient, "fetch_models", fake_zen_models)
+    if name != "test_kilo.py":
+        from src.provider.kilo.client import KiloClient
+
+        async def fake_kilo_models(self) -> list[_Model]:
+            return [_Model(id="kilo-offline/free", name="Kilo (offline)")]
+
+        monkeypatch.setattr(KiloClient, "fetch_models", fake_kilo_models)

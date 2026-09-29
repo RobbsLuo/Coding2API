@@ -1,5 +1,6 @@
 import CodeBuddyColor from "@lobehub/icons/es/CodeBuddy/components/Color";
 import CodeBuddyMono from "@lobehub/icons/es/CodeBuddy/components/Mono";
+import KiloCodeMono from "@lobehub/icons/es/KiloCode/components/Mono";
 import OpenCodeMono from "@lobehub/icons/es/OpenCode/components/Mono";
 import TraeColor from "@lobehub/icons/es/Trae/components/Color";
 import TraeMono from "@lobehub/icons/es/Trae/components/Mono";
@@ -12,6 +13,8 @@ const BRAND: Record<string, { Main: BrandComp; Color: BrandComp }> = {
   trae: { Main: TraeMono, Color: TraeColor },
   // Zen 无独立彩色版：OpenCode 品牌 Mono 同时充当两态
   zen: { Main: OpenCodeMono, Color: OpenCodeMono },
+  // Kilo 同理，@lobehub/icons 只提供 Mono（无 Color 变体）
+  kilo: { Main: KiloCodeMono, Color: KiloCodeMono },
 };
 
 /**

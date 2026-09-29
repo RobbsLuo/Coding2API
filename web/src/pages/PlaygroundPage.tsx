@@ -237,6 +237,7 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                   <option value="codebuddy">CodeBuddy</option>
                   <option value="trae">TRAE</option>
                   <option value="zen">OpenCode Zen</option>
+                  <option value="kilo">Kilo Gateway</option>
                 </Select>
               </Field>
           </div>

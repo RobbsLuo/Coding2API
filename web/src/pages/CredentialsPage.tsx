@@ -141,6 +141,8 @@ export function CredentialsPage() {
   // 用户在凭证页删除后不会自动回来，这里给一个一键补回的入口，
   // 免得必须重启服务（见 README「OpenCode Zen 免费层」）。
   const hasZen = credentials.some((item) => item.provider === "zen");
+  // Kilo Gateway 同为无凭证免费层（同 zen）：删除虚拟占位行后也留一键补回。
+  const hasKilo = credentials.some((item) => item.provider === "kilo");
   const expiryWindow = data?.expiry_window_seconds ?? 0;
   const expirySecondaryWindow = data?.expiry_secondary_window_seconds ?? 0;
   const tokenWarning = data?.token_expiry_warning_seconds ?? 0;
@@ -536,12 +538,26 @@ export function CredentialsPage() {
               >
                 {hasZen ? "OpenCode Zen 已添加" : "添加 OpenCode Zen"}
               </Button>
+              <Button
+                size="sm"
+                variant="default"
+                data-testid="add-kilo"
+                disabled={busy || hasKilo}
+                onClick={() =>
+                  void run(
+                    () => api.importCredential("kilo", {}, "Kilo Gateway"),
+                    "已添加 Kilo Gateway 免费渠道。",
+                  )
+                }
+              >
+                {hasKilo ? "Kilo Gateway 已添加" : "添加 Kilo Gateway"}
+              </Button>
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
               CodeBuddy 走设备码轮询（本页自动轮询渠道）；TRAE 走浏览器回调
               （授权后由 <code>/authorize</code> 直接落库，本页轮询凭证列表检测完成）。
-              也可以直接粘贴凭证 JSON 导入。OpenCode Zen 免费层无需凭证/登录，
-              删除其虚拟凭证后点上方按钮即可补回（要永久停用请改用「暂停」）。
+              也可以直接粘贴凭证 JSON 导入。OpenCode Zen / Kilo Gateway 免费层无需
+              凭证/登录，删除其虚拟凭证后点上方按钮即可补回（要永久停用请改用「暂停」）。
             </p>
           </Panel>
           <ImportPanel
@@ -851,8 +867,8 @@ function Row({
                 >
                   <RefreshCw className="size-3.5" /> 探测
                 </Button>
-                {/* zen 免费层没有签到概念（provider 未实现 checkin，点了只会 400） */}
-                {credential.provider !== "zen" && (
+                {/* zen / kilo 免费层没有签到概念（provider 未实现 checkin，点了只会 400） */}
+                {credential.provider !== "zen" && credential.provider !== "kilo" && (
                   <Button
                     size="sm"
                     variant="default"

@@ -76,6 +76,9 @@ coding2api/
 │   │   ├── zen/
 │   │   │   ├── client.py        # Zen 上游 + 免费层门禁伪装 + 注入工具回包过滤 + ZenProvider
 │   │   │   └── events.py        # 标准 OpenAI SSE → Event（无私有信封）
+│   │   ├── kilo/
+│   │   │   ├── client.py        # Kilo 上游（标准 OpenAI，无门禁）+ isFree 过滤（不探活）+ KiloProvider
+│   │   │   └── events.py        # 标准 OpenAI SSE → Event（delta.reasoning 思考通道）
 │   │   ├── token_expiry.py      # 到期提取：显式 expires_at → JWT exp 回落（B3.3）
 │   │   └── fixtures/            # 真实样本
 │   │       ├── codebuddy/*.sse
@@ -525,7 +528,7 @@ response.completed | response.incomplete
 
 **任务清单与归属**：`tasks/status.py` 的 `TASK_SPECS` 是静态描述（key / 名称 / 一句话说明），与 `TaskRunner.start()` 建立的循环一一对应；周期与开关**运行时现算**（`TaskRunner.task_status()` 读热更值），不是装配快照——改完配置刷新页面就该看到新周期。未装配的任务（测试或降级时不传 growth/activity）不出现在清单里，避免展示「永远不跑」的卡片。
 
-配置项一侧用 `HotSetting.task`（§3.8）表达归属，前端据此把配置塞进对应任务卡片；无归属（`default_model` / 黑名单 / 到期窗口 / 粘性 / 两个 pacer / CB 聊天间隔 / Zen 聊天间隔）归入「网关与调度」区。两处通过 `TASK_BY_KEY` 交叉校验（测试保证 `task` 指向真实任务 key）。
+配置项一侧用 `HotSetting.task`（§3.8）表达归属，前端据此把配置塞进对应任务卡片；无归属（`default_model` / 黑名单 / 到期窗口 / 粘性 / 两个 pacer / CB 聊天间隔 / Zen 聊天间隔 / Kilo 聊天间隔）归入「网关与调度」区。两处通过 `TASK_BY_KEY` 交叉校验（测试保证 `task` 指向真实任务 key）。
 
 **接口**：`GET /api/tasks`（admin）返回 `{tasks: [...], server_time}`。每条含 `key`/`name`/`description`/`interval_seconds`/`enabled`/`runs`/`last_started_at`/`last_finished_at`/`last_ok`/`last_report`/`last_error`。带 `server_time` 是为了让前端用**服务端时钟**算「距今多久」——浏览器时钟偏移会把刚跑完的任务显示成几小时前。`app.state.task_runner` 不存在时（未进 lifespan）返回空列表而不是 500。
 
@@ -591,6 +594,22 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 ---
 
+### 3.15 Kilo Gateway 免费层渠道（Q46）
+
+**为什么能接、且比 Zen 更薄**：Kilo Gateway（`api.kilo.ai/api/gateway`）对外是**标准 OpenAI 兼容协议**（`/chat/completions` + `/models`），既无私有信封，也**没有 Zen 那种门禁伪装**——不需要伪造 UA / session / tools，`prepare_body` 只做标准 OpenAI 请求体处理（深拷贝 messages、强制 `stream:true`、写死 model）。因此 `provider/kilo/events.py` 与 Zen 一样薄，唯一区别是**思考字段在 `delta.reasoning`**（Zen 是 `reasoning_content`），另带 `reasoning_details` 结构，忽略即可。`parse_all_events` 同样要处理「最后一段正文/思考与 `finish_reason` 同帧」，并额外补 usage（Kilo 的 `usage` 常与收尾 `choices` 同帧）。
+
+**免费模型有权威标记、故不做探活（与 Zen 相反）**：`/models` 每个条目带 `isFree` 布尔（实测 2026-09-29 共 395 个模型、17 个 `isFree=true`，含 `kilo-auto/free`、`stealth/space-bunny-alpha`、`openrouter/free` 等**无 `:free` 后缀**者）。故直接按 `isFree is True` 过滤，**不做探活**——探活会真发一次推理，白耗本就极小的免费配额（网关级约 200 req/h/IP），且结果随上游免费池（实为 OpenRouter 免费池转发）波动不稳定；`isFree` 已足够权威。无静态白名单，上游增删免费模型自动跟随；过滤结果为空时抛协议错，让 `/v1/models` 用上次成功的缓存兜底（冷启动无缓存才退化为不展示 kilo）。`fetch_models` 同时是引擎登记模型归属的来源，过滤后扁平名请求不会再被路由到 kilo 的付费模型上。元数据（`name` / `context_length` / `top_provider.max_completion_tokens` / `supported_parameters` 含 `tools` / `architecture.input_modalities` 含 `image`）透传为中立 `Model`；免费模型显式标 **x0 倍率**（`credit_rate=0.0`）。
+
+**虚拟凭证行**（同 Zen）：Kilo 无凭证、无额度接口。池里种一条空凭证（`credential_data={}`，`added_by="system"`），复用现有调度 / 冷却 / 统计 / 会话粘性；`probe_quota` 恒返回 `Quota(probe_failed=True)` → `health_score` 返回 `None`（**未知**，不是 `EXHAUSTED=-1`）。种子幂等，**用户删除后重启会复活**，永久停用请用「暂停」。只为默认装配路径种子（测试注入自定义 registry 时不多出凭证行）。
+
+**错误分类（同 Zen 口径）**：401→`INVALID`（无凭证，401 只表示该模型需要付费 key/BYOK，归 `DEAD` 会因一次强制付费模型请求硬禁用整条渠道）、429→`SOFT`（软冷却换模型）、400/404/422→`INVALID`、403→`REQUEST`。**限流交引擎软冷却处理，本包不自建熔断**：上游 429 报错自报限额来自 OpenRouter 共享池（`limit_source: openrouter_shared_capacity`），证实免费池实为转发。
+
+**独立 pacer（同 Zen）**：`KILO_CHAT_MIN_INTERVAL`（热更项，默认 0 = 不节流）走独立 `Pacer`，与 zen / CB / TRAE 互不排队；`stream_chat` 在 `finally` 里 `pacer.release("kilo")` 归还并发名额。
+
+**前端**：`Provider` 联合类型加 `"kilo"`；`PROVIDER_LABEL`/`PROVIDER_ABBR`（`KL`）/`PROVIDER_CHART_COLOR`（`--chart-2`）在 `providers.ts` 补齐；`ProviderIcon` 用 `@lobehub/icons` 的 KiloCode **Mono**（该品牌同样无 Color 版）。凭证页对 kilo 隐藏「签到」按钮，并提供「添加 Kilo Gateway」一键补回入口（同 zen）；API Key 渠道绑定与 Playground 强制渠道下拉都补 `kilo` 选项；`quotaSemantics` 对 kilo 显示「免费层（无额度接口）」。
+
+---
+
 ## 4. Provider 协议（Q16=A 细接口）
 
 ```python
@@ -623,9 +642,10 @@ class Provider(Protocol):
   `complete_callback`（仅 TRAE）、`list_accounts`/`switch_account`（仅 CodeBuddy）、
   `credential_from`/`checkin_scope`（刷新与签到任务的能力探测）、
   `checkin`/`checkin_status`（签到）、`growth`（成长中心，仅 CodeBuddy）、`host`（展示用）
-- 三个 provider 共用 `engine/sse.py` 的帧解析器（SSE 规范层），事件语义各自映射
-- Zen 是最「薄」的 provider：标准 OpenAI SSE，故 `events.py` 无需私有信封解析；
-  渠道私有的只有免费层门禁伪装与注入工具回包过滤（见 §3.14）。它**只实现**
+- 四个 provider 共用 `engine/sse.py` 的帧解析器（SSE 规范层），事件语义各自映射
+- Zen 与 Kilo 是最「薄」的两个 provider：标准 OpenAI SSE，故 `events.py` 无需私有
+  信封解析。Zen 渠道私有的只有免费层门禁伪装与注入工具回包过滤（见 §3.14）；Kilo
+  连门禁都没有，渠道私有的只有 `isFree` 免费模型过滤（见 §3.15）。两者都**只实现**
   `import_credential`/`classify`/`probe_quota`/`list_models`/`stream_chat`/`aclose`，
   签到 / 成长 / 刷新一律靠「方法缺失」自然跳过
 

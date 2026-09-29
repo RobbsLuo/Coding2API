@@ -15,6 +15,8 @@ describe("渠道展示元数据", () => {
     expect(providerLabel("trae")).toBe("TRAE");
     expect(providerLabel("zen")).toBe("OpenCode Zen");
     expect(providerAbbr("zen")).toBe("OC");
+    expect(providerLabel("kilo")).toBe("Kilo Gateway");
+    expect(providerAbbr("kilo")).toBe("KL");
   });
 
   it("未知渠道回落为原始 id，颜色用兜底色", () => {
@@ -25,7 +27,7 @@ describe("渠道展示元数据", () => {
 
   it("每个已知渠道都有标签、缩写与专属配色（三者对齐）", () => {
     const providers = Object.keys(PROVIDER_LABEL);
-    expect(providers.sort()).toEqual(["codebuddy", "trae", "zen"]);
+    expect(providers.sort()).toEqual(["codebuddy", "kilo", "trae", "zen"]);
     for (const provider of providers) {
       expect(PROVIDER_ABBR[provider as keyof typeof PROVIDER_ABBR]).toBeTruthy();
       expect(

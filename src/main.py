@@ -37,6 +37,7 @@ from .config import (
     Settings,
     load_settings,
     validate_endpoint_allowed,
+    validate_kilo_endpoint_allowed,
     validate_zen_endpoint_allowed,
 )
 from .db.conn import Database
@@ -56,6 +57,7 @@ from .engine.executor import Executor, ExecutorDeps
 from .engine.scheduler import Scheduler
 from .provider.codebuddy.client import CodeBuddyClient, CodeBuddyProvider
 from .provider.codebuddy.oauth import CodeBuddyOAuth
+from .provider.kilo.client import KiloClient, KiloProvider
 from .provider.trae.client import TraeProvider
 from .provider.zen.client import ZenClient, ZenProvider
 from .runtime_settings import load_runtime_settings
@@ -118,18 +120,38 @@ def _zen_endpoint(config: Settings) -> str:
     return endpoint
 
 
-def _seed_zen_credential(credentials: CredentialRepository) -> None:
-    """确保池里有一条 zen 虚拟凭证（幂等）。
+def _kilo_endpoint(config: Settings) -> str:
+    """解析 Kilo 端点并强制白名单校验（防把请求发往未授权主机）。"""
+    endpoint = config.kilo_api_endpoint.strip()
+    if not validate_kilo_endpoint_allowed(endpoint, config):
+        raise ValueError(
+            f"KILO_API_ENDPOINT {endpoint!r} is not in KILO_ALLOWED_ENDPOINTS")
+    return endpoint
 
-    Zen 免费层无凭证概念，但调度/冷却/统计全部按 credentials 行工作；
-    没有这条占位行，zen 永远不会被选为候选。启动时若发现没有会补上；
-    用户在凭证页删除后，也可点「添加 OpenCode Zen」立即补回（走通用导入端点）。
-    要永久停用请用「暂停」而不是删除。
+
+def _seed_free_credential(credentials: CredentialRepository, *, provider: str,
+                          nickname: str) -> None:
+    """确保池里有一条无凭证渠道的虚拟凭证（幂等）。
+
+    无凭证渠道（Zen / Kilo）没有凭证概念，但调度/冷却/统计全部按
+    credentials 行工作；没有这条占位行，该渠道永远不会被选为候选。启动时
+    若发现没有会补上；用户在凭证页删除后，也可点「添加 …」立即补回（走通用
+    导入端点）。要永久停用请用「暂停」而不是删除。
     """
-    if credentials.candidates(["zen"]):
+    if credentials.candidates([provider]):
         return
-    credentials.add(provider="zen", credential_data={}, nickname="OpenCode Zen",
+    credentials.add(provider=provider, credential_data={}, nickname=nickname,
                     added_by="system")
+
+
+def _seed_zen_credential(credentials: CredentialRepository) -> None:
+    """确保池里有一条 zen 虚拟凭证（幂等）。"""
+    _seed_free_credential(credentials, provider="zen", nickname="OpenCode Zen")
+
+
+def _seed_kilo_credential(credentials: CredentialRepository) -> None:
+    """确保池里有一条 kilo 虚拟凭证（幂等）。"""
+    _seed_free_credential(credentials, provider="kilo", nickname="Kilo Gateway")
 
 
 def _similar_models(name: str, aliases: dict[str, dict[str, str]],
@@ -194,6 +216,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     zen_pacer = Pacer(lambda: runtime.zen_chat_min_interval,
                       lambda: runtime.zen_chat_min_interval,
                       allow_concurrent=True)
+    # kilo 同样独立一个 pacer：同为匿名免费层，与 zen / CB / TRAE 互不排队。
+    kilo_pacer = Pacer(lambda: runtime.kilo_chat_min_interval,
+                       lambda: runtime.kilo_chat_min_interval,
+                       allow_concurrent=True)
     registry = providers if providers is not None else {
         "trae": TraeProvider(pacer=chat_pacer),
         "codebuddy": CodeBuddyProvider(
@@ -205,11 +231,15 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             client=ZenClient(host=_zen_endpoint(config),
                              version=config.zen_opencode_version),
             pacer=zen_pacer),
+        "kilo": KiloProvider(
+            client=KiloClient(host=_kilo_endpoint(config)),
+            pacer=kilo_pacer),
     }
-    # 默认装配路径（生产）才种子 zen 虚拟凭证：测试注入自定义 registry 时
-    # 不应凭空多出一条无对应 provider 的凭证行。
+    # 默认装配路径（生产）才种子无凭证渠道的虚拟凭证：测试注入自定义 registry
+    # 时不应凭空多出一条无对应 provider 的凭证行。
     if providers is None:
         _seed_zen_credential(credentials)
+        _seed_kilo_credential(credentials)
     # provider → {小写模型名: 上游原始 id}；api/models.list_models 拉取后就地更新，
     # executor 发请求前把归一名映射回各上游的原始大小写
     model_aliases: dict[str, dict[str, str]] = {}

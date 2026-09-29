@@ -1221,6 +1221,7 @@ def test_codebuddy_import_via_api(tmp_path):
         listed = client.get("/api/credentials").json()["credentials"]
         assert any(row["provider"] == "codebuddy" for row in listed)
         assert any(row["provider"] == "zen" for row in listed)  # 启动即种子
+        assert any(row["provider"] == "kilo" for row in listed)  # 启动即种子
         bad = client.post("/api/credentials", json={"provider": "codebuddy",
                                                     "credential": {}})
         assert bad.status_code == 400

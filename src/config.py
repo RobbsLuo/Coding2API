@@ -48,6 +48,10 @@ class Settings(BaseSettings):
     zen_api_endpoint: str = "https://opencode.ai"
     zen_allowed_endpoints: str = "https://opencode.ai"
     zen_opencode_version: str = "1.18.0"
+    # Kilo Gateway 免费层：标准 OpenAI 协议、无门禁、无凭证，端点白名单同样
+    # 只为防误配。免费模型由上游 `isFree` 标记识别（见 provider/kilo/client.py）。
+    kilo_api_endpoint: str = "https://api.kilo.ai/api/gateway"
+    kilo_allowed_endpoints: str = "https://api.kilo.ai/api/gateway"
 
     # 路由与调度
     default_model: str = "glm-5.2"
@@ -92,6 +96,9 @@ class Settings(BaseSettings):
     # zen 排在 CB/TRAE 后面会白白等满最小间隔（并发/连发时每个请求 +5s）。
     # 若上游对匿名免费层限流，可在此调大。
     zen_chat_min_interval: float = 0
+    # Kilo 聊天最小间隔：同为匿名免费层（网关级 200 req/h/IP），默认 0。
+    # 与 zen 各自独立：两条免费渠道互不排队。
+    kilo_chat_min_interval: float = 0
     # 内容风控自愈（11128）：出站 system/assistant 正文命中「伪装其他厂商
     # 官方客户端」指纹串时替换为占位符（客户端会话历史不受影响）。该拦截
     # 与凭证无关、换号无效，会话一旦带入指纹将持续 11128；false 关闭
@@ -134,6 +141,11 @@ class Settings(BaseSettings):
                      if e.strip())
 
     @cached_property
+    def kilo_allowed(self) -> tuple[str, ...]:
+        return tuple(e.strip().rstrip("/") for e in self.kilo_allowed_endpoints.split(",")
+                     if e.strip())
+
+    @cached_property
     def blocklist_patterns(self) -> tuple[str, ...]:
         return tuple(p.strip() for p in self.model_blocklist.split(",") if p.strip())
 
@@ -162,6 +174,11 @@ def validate_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
 def validate_zen_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
     """Zen 端点白名单校验（防误配；Zen 不携带真实 Token，风险面小于 CB）。"""
     return endpoint.strip().rstrip("/") in settings.zen_allowed
+
+
+def validate_kilo_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
+    """Kilo 端点白名单校验（防误配；Kilo 不携带真实 Token，风险面小于 CB）。"""
+    return endpoint.strip().rstrip("/") in settings.kilo_allowed
 
 
 def live(value: Any) -> Callable[[], Any]:

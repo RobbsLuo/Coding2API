@@ -704,6 +704,42 @@ describe("渠道登录入口", () => {
     expect(button).toHaveTextContent("OpenCode Zen 已添加");
   });
 
+  it("管理员可一键补回 Kilo Gateway（删除后渠道不丢）", async () => {
+    const spy = mockFetch({
+      "/api/credentials": listBody([makeCredential({ id: "cb", provider: "codebuddy" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const button = screen.getByTestId("add-kilo");
+    expect(button).toHaveTextContent("添加 Kilo Gateway");
+    expect(button).not.toBeDisabled();
+
+    await userEvent.click(button);
+    await waitFor(() => {
+      const posted = spy.mock.calls.find(
+        ([url, init]) =>
+          String(url).includes("/api/credentials") && init?.method === "POST",
+      );
+      expect(posted).toBeTruthy();
+      expect(String(posted?.[1]?.body)).toContain('"kilo"');
+    });
+    expect(await screen.findByTestId("credentials-notice"))
+      .toHaveTextContent("已添加 Kilo Gateway");
+  });
+
+  it("已有 Kilo Gateway 凭证时按钮禁用，避免重复占位", async () => {
+    mockFetch({
+      "/api/credentials": listBody([makeCredential({ id: "k", provider: "kilo" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const button = screen.getByTestId("add-kilo");
+    expect(button).toBeDisabled();
+    expect(button).toHaveTextContent("Kilo Gateway 已添加");
+  });
+
   it("非管理员看不到登录入口", async () => {
     mockFetch({ "/api/credentials": listBody([], false) });
     renderPage(<CredentialsPage />, READER);
@@ -711,6 +747,7 @@ describe("渠道登录入口", () => {
     expect(screen.queryByTestId("start-login-codebuddy")).not.toBeInTheDocument();
     expect(screen.queryByTestId("start-login-trae")).not.toBeInTheDocument();
     expect(screen.queryByTestId("add-zen")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("add-kilo")).not.toBeInTheDocument();
   });
 });
 

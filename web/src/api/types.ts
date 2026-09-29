@@ -5,7 +5,7 @@
  * 各页面只依赖本文件，不要各自猜测字段名。
  */
 
-export type Provider = "codebuddy" | "trae" | "zen";
+export type Provider = "codebuddy" | "trae" | "zen" | "kilo";
 
 /** 健康度三态：null = 未探测；-1 = 已耗尽；0-100 = 已知剩余百分比。 */
 export type Health = number | null;

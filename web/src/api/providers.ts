@@ -11,6 +11,7 @@ export const PROVIDER_LABEL: Record<Provider, string> = {
   codebuddy: "CodeBuddy",
   trae: "TRAE",
   zen: "OpenCode Zen",
+  kilo: "Kilo Gateway",
 };
 
 /** 模型下拉里的渠道缩写（如 `CB x0.29`）。 */
@@ -18,6 +19,7 @@ export const PROVIDER_ABBR: Record<Provider, string> = {
   codebuddy: "CB",
   trae: "TR",
   zen: "OC",
+  kilo: "KL",
 };
 
 /**
@@ -30,6 +32,7 @@ export const PROVIDER_CHART_COLOR: Record<Provider, string> = {
   codebuddy: "var(--chart-1)",
   trae: "var(--chart-3)",
   zen: "var(--chart-4)",
+  kilo: "var(--chart-2)",
 };
 
 /** 未知渠道（老数据/未来渠道）的兜底色。 */

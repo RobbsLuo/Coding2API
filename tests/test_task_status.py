@@ -311,9 +311,9 @@ def test_tasks_returns_runtime_snapshot(admin_app):
     probe = next(item for item in body["tasks"] if item["key"] == "quota_probe")
     assert probe["name"] == "额度探测"
     assert probe["interval_seconds"] == 3600.0
-    assert probe["last_ok"] is True            # 启动首轮探测（zen 虚拟凭证）也是真实执行
+    assert probe["last_ok"] is True            # 启动首轮探测（zen/kilo 虚拟凭证）也是真实执行
     assert probe["last_report"] == {
-        "attempted": 1, "succeeded": 1, "failed": 0, "skipped": 0}
+        "attempted": 2, "succeeded": 2, "failed": 0, "skipped": 0}
     assert probe["runs"] == 1
     assert "description" in probe
 

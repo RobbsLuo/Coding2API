@@ -30,14 +30,14 @@ export function healthView(health: Health): HealthView {
 
 /**
  * 周期语义：CodeBuddy 的额度随周期重置，TRAE 是单调递减的账户余额，
- * Zen 走免费层、上游没有额度接口（探测恒为「未知」）。
+ * Zen / Kilo 走免费层、上游没有额度接口（探测恒为「未知」）。
  *
  * 判定依据是**渠道类型**，不是 quota_cycle_end 是否存在：
  * CodeBuddy 未探测时 cycle_end 同样是 null，而按 cycle_end 推断会把它
  * 错标成 TRAE 的「账户剩余（单调递减）」。
  */
 export function quotaSemantics(credential: Credential): string {
-  if (credential.provider === "zen") {
+  if (credential.provider === "zen" || credential.provider === "kilo") {
     return "免费层（无额度接口）";
   }
   if (credential.provider !== "codebuddy") {
