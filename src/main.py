@@ -151,6 +151,14 @@ def _forget_task(task: asyncio.Task, pending: list) -> None:
         pending.remove(task)
 
 
+async def _warm_model_list(services) -> None:
+    """后台预热模型列表 / 别名表：失败仅记日志，绝不影响启动与聊天。"""
+    try:
+        await models.list_models(services, force=True)
+    except Exception as error:  # noqa: BLE001 - 预热失败不阻断服务
+        logger.warning("启动预热模型列表失败: %s", error)
+
+
 def build_app(settings: Settings | None = None, *, providers: dict | None = None,
               users: object | None = None) -> FastAPI:
     config = settings or load_settings()
@@ -228,15 +236,21 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                               credit_events=credit_events)
         app_.state.task_runner = runner
         await runner.start()
-        # 预热模型别名表（动态拉取失败仅记日志，不阻塞启动）；force 绕过 TTL
-        try:
-            await models.list_models(services_, force=True)
-        except Exception as error:  # noqa: BLE001
-            logger.warning("启动预热模型列表失败: %s", error)
+        # 预热模型别名表：放后台跑（force 绕过 TTL）。
+        # 不内联 await 的原因：zen 免费层探活最慢的模型可占十几秒，内联会让应用
+        # 在这段时间里不响应 /health，容器存活探针可能误判；动态拉取失败仅记日志。
+        app_.state.model_warmup_task = asyncio.create_task(_warm_model_list(services_))
+        # 让预热任务先跑一步：失败时日志立即落盘（成功与否都不阻塞下面 yield）。
+        await asyncio.sleep(0)
         try:
             yield
         finally:
             await runner.stop()
+            warmup = getattr(app_.state, "model_warmup_task", None)
+            if warmup is not None and not warmup.done():
+                warmup.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await warmup
             for task in app_.state.pending_probes:
                 task.cancel()
             app_.state.pending_probes.clear()

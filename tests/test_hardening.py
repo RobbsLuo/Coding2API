@@ -839,6 +839,79 @@ def test_models_cache_fallback_when_ttl_expired(settings):
     assert [m["id"] for m in response.json()["data"]] == ["glm-5.2"]
 
 
+def test_models_failure_is_negatively_cached(settings):
+    """拉取失败也刷 TTL 时间戳：TTL 内不再重试（有缓存用缓存，无缓存跳过）。"""
+
+    class Flaky:
+        id = "trae"
+        attempts = 0
+
+        async def list_models(self, credential_data):
+            type(self).attempts += 1
+            raise RuntimeError("upstream down")
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    app = build_app(settings, providers={"trae": Flaky()})
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    services = app.state.services
+    key = app.state.api_keys.create("root")["api_key"]
+    auth = {"Authorization": f"Bearer {key}"}
+    with TestClient(app) as c:
+        first = c.get("/v1/models", headers=auth)
+        second = c.get("/v1/models", headers=auth)
+    assert first.status_code == 200 and first.json()["data"] == []
+    assert second.json()["data"] == []
+    assert Flaky.attempts == 1                       # 第二次命中负缓存，没重试
+    assert services.model_list_fetched_at["trae"] is not None
+
+    # 清掉尝试时间戳（模拟 TTL 过期）→ 重新尝试
+    services.model_list_fetched_at.clear()
+    with TestClient(app) as c:
+        c.get("/v1/models", headers=auth)
+    assert Flaky.attempts == 2
+
+
+def test_models_failure_keeps_cache_for_ttl(settings):
+    """失败后 TTL 内用缓存兜底且不重试；TTL 过期才再次尝试。"""
+
+    class Flaky:
+        id = "trae"
+        fail = False
+        attempts = 0
+
+        async def list_models(self, credential_data):
+            type(self).attempts += 1
+            if self.fail:
+                raise RuntimeError("upstream down")
+            return [Model(id="glm-5.2")]
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    provider = Flaky()
+    app = build_app(settings, providers={"trae": provider})
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    services = app.state.services
+    key = app.state.api_keys.create("root")["api_key"]
+    auth = {"Authorization": f"Bearer {key}"}
+    with TestClient(app) as c:
+        first = c.get("/v1/models", headers=auth)
+        assert [m["id"] for m in first.json()["data"]] == ["glm-5.2"]
+        assert Flaky.attempts == 1
+
+        provider.fail = True
+        services.model_list_fetched_at.clear()       # 模拟 TTL 过期 → 触发重试并失败
+        second = c.get("/v1/models", headers=auth)
+        assert [m["id"] for m in second.json()["data"]] == ["glm-5.2"]
+        assert Flaky.attempts == 2
+
+        third = c.get("/v1/models", headers=auth)    # 失败后的 TTL 内：不再重试
+        assert [m["id"] for m in third.json()["data"]] == ["glm-5.2"]
+        assert Flaky.attempts == 2
+
+
 @pytest.mark.asyncio
 async def test_disconnect_with_bytes_but_no_usage_still_recorded():
     """已吐字节但上游未给 usage 时，断开也要记账（ttfb 分支）。"""

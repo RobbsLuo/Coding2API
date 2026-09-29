@@ -7,7 +7,9 @@
 
 带服务层缓存：某上游拉取成功后把归一结果写入 services.model_list_cache；
 下次该上游拉取失败时用缓存兜底，保证 /v1/models 稳定返回完整列表
-（冷启动无缓存时才退化为跳过该上游）。
+（冷启动无缓存时才退化为跳过该上游）。TTL 记的是**上次尝试**时间（成功或
+失败都记）：失败不记时间戳的话，上游一次抖动就会让其后每次 /v1/models 都
+重跑一遍拉取（zen 探活最慢可占十几秒），把列表请求打成一串超时。
 另按 MODEL_BLOCKLIST（fnmatch glob）过滤非用户模型与老模型，
 只影响列表展示；直连指定被滤模型不受影响。
 
@@ -34,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 # 模型列表 TTL：TTL 内直接复用上次结果。客户端（IDE/Playground）打开面板
 # 就会调 /v1/models，无 TTL 时每次都会向上游真实发起请求。
+# 时间戳记「上次尝试」（含失败）：失败也进 TTL，否则一次抖动之后每次请求
+# 都会重试，zen 探活的十几秒会叠加成一串慢请求。
 MODEL_LIST_TTL_SECONDS = 300
 
 # 响应透传的元数据字段（Model → OpenAI 额外字段）
@@ -143,12 +147,14 @@ async def list_models(services: Services, *, force: bool = False) -> dict:
         if provider_id not in connected:
             continue
         fetched_at = services.model_list_fetched_at.get(provider_id)
-        fresh = (cache.get(provider_id)
-                 and fetched_at is not None
-                 and now - fetched_at < MODEL_LIST_TTL_SECONDS)
-        if fresh and not force:
-            _merge_provider(grouped, aliases, provider_id,
-                            _visible(cache[provider_id], patterns))
+        # TTL 按「上次尝试」计（失败也刷新）：有缓存就继续用缓存，没缓存就跳过，
+        # 两种情况都不再打上游，避免上游抖动时每次请求都重跑一遍拉取。
+        if (not force and fetched_at is not None
+                and now - fetched_at < MODEL_LIST_TTL_SECONDS):
+            cached = cache.get(provider_id)
+            if cached:
+                _merge_provider(grouped, aliases, provider_id,
+                                _visible(cached, patterns))
             continue
         # 用该上游的一个可用凭证拉取（凭证有归属，模型列表是账号级的）
         # selectable_only：硬禁用/用户关闭的凭证取不到数据，只会白失败
@@ -160,6 +166,8 @@ async def list_models(services: Services, *, force: bool = False) -> dict:
         try:
             models = await provider.list_models(credential_data)
         except Exception as error:  # noqa: BLE001 - 单上游失败不影响其他
+            # 失败也记时间戳（负缓存）：TTL 内不再重试，有缓存用缓存、无缓存跳过。
+            services.model_list_fetched_at[provider_id] = time.monotonic()
             cached = cache.get(provider_id)
             if cached:
                 logger.warning("模型列表获取失败 %s，使用上次缓存: %s", provider_id, error)

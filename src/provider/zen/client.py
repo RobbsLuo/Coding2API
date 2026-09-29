@@ -69,6 +69,13 @@ PROBE_CONCURRENCY = 12
 PROBE_TIMEOUT = 20.0
 # 探活用最小请求（真发一次流式对话；只看响应头，不读 body）。
 PROBE_PROMPT = "hi"
+# 探活结果缓存时长（秒）：探活是整条模型列表链路里最贵的一步——逐个真发一次
+# 推理，首字最慢的模型可占十几秒，而总耗时等于最慢那个。免费模型的增删却很慢，
+# 所以缓存判活结果，比服务层的 MODEL_LIST_TTL_SECONDS（300s）长一档：服务层每
+# 5 分钟到期重拉一次，此处直接复用上次判活集，只有超过本 TTL 才真的重探。
+# 代价：免费模型下线后，最多多留在列表里 30 分钟（选中会 400/401，由引擎按
+# 无效请求处理，不会误冷却凭证）。
+MODELS_CACHE_TTL_SECONDS = 1800.0
 
 # 流式无总超时防长流截断；短请求 30s 防悬挂（与 TRAE 同策略）
 STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
@@ -194,12 +201,16 @@ class ZenClient:
         host: str = ZEN_HOST,
         version: str = MIN_OPENCODE_VERSION,
         free_suffix: str = FREE_MODEL_SUFFIX,
+        models_cache_ttl: float = MODELS_CACHE_TTL_SECONDS,
         stream_client: httpx.AsyncClient | None = None,
         short_client: httpx.AsyncClient | None = None,
     ) -> None:
         self.host = host.rstrip("/")
         self.version = version
         self.free_suffix = free_suffix
+        self.models_cache_ttl = models_cache_ttl
+        # 上次判活的 (monotonic 时间, 模型表)；TTL 内直接复用，不再重探。
+        self._models_cache: tuple[float, list[Model]] | None = None
         self._stream_client = stream_client
         self._short_client = short_client
 
@@ -253,7 +264,14 @@ class ZenClient:
         再逐个探活，只有真正匿名可用的才对下游可见：
         `fetch_models` 的结果同时也是引擎登记模型归属的来源，过滤后扁平名
         请求不会再被路由到 zen 的付费模型上（否则 401 会误伤虚拟凭证）。
+
+        判活集按 `models_cache_ttl` 缓存：服务层每 300s 到期重拉一次列表，此处
+        直接复用上次判活结果，避免每 5 分钟就把十几个免费候选重探一遍。
         """
+        if self._models_cache is not None:
+            cached_at, cached_models = self._models_cache
+            if time.monotonic() - cached_at < self.models_cache_ttl:
+                return list(cached_models)
         response = await self._short().get(
             f"{self.host}{EP_MODELS}", headers=gate_headers(version=self.version))
         if response.status_code >= 400:
@@ -283,6 +301,7 @@ class ZenClient:
             # 全部探活失败：多半是上游整体故障而非真的没有免费模型，
             # 抛出让上层用上次成功的缓存兜底，避免 zen 从列表里消失。
             raise zen_events.UpstreamProtocolViolation("no free model passed liveness probe")
+        self._models_cache = (time.monotonic(), list(models))
         return models
 
     async def _probe_alive(self, model_ids: list[str]) -> set[str]:

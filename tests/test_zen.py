@@ -428,6 +428,46 @@ async def test_fetch_models_probe_timeout_is_unavailable(monkeypatch):
         await _client(handler).fetch_models()
 
 
+async def test_fetch_models_reuses_probe_result_within_ttl():
+    """判活结果在 models_cache_ttl 内复用：服务层每 300s 重拉列表不会重探上游。"""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == EP_MODELS:
+            return httpx.Response(200, json={"data": [
+                {"id": "a-free", "owned_by": "opencode"}]})
+        assert request.url.path == EP_CHAT
+        return httpx.Response(200, text="")
+
+    client = _client(handler)
+    first = await client.fetch_models()
+    assert [m.id for m in first] == ["a-free"]
+    upstream_calls = len(calls)              # 一次清单 + 一次探活
+    assert upstream_calls == 2
+
+    second = await client.fetch_models()
+    assert [m.id for m in second] == ["a-free"]
+    assert len(calls) == upstream_calls      # 命中判活缓存，没再打上游
+
+
+async def test_fetch_models_cache_expiry_reprobes():
+    """超过 models_cache_ttl（此处设为 0）后重新拉清单并重探。"""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == EP_MODELS:
+            return httpx.Response(200, json={"data": [{"id": "a-free"}]})
+        return httpx.Response(200, text="")
+
+    client = _client(handler, models_cache_ttl=0)
+    await client.fetch_models()
+    assert len(calls) == 2
+    await client.fetch_models()
+    assert len(calls) == 4
+
+
 async def test_fetch_models_errors():
     def http_error(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(502, content=b"bad gateway")
