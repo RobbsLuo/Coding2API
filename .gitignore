@@ -16,6 +16,8 @@ secrets/
 *.sqlite3-wal
 *.sqlite3-shm
 .env
+.env.*
+!.env.example
 
 # Node / 前端构建产物
 node_modules/
@@ -32,15 +34,18 @@ web/build/
 
 # 本地服务日志（nohup uvicorn）
 logs/
+nohup.out
 
 # 本地文档目录（不入库）
 docs/
 
-# archify 生成的校验证据（本地复现即可，不入库）
+# archify 生成的校验证据（本地复现即可，不入库；
+# delivery 除 .delivery.json 外还有 -pending/-lock 及目录锁）
 diagrams/*.visual-check.*
 diagrams/*.browser-check.json
 diagrams/*.finalize*.json
-diagrams/*.delivery.json
+diagrams/*.delivery*.json
+diagrams/.archify-delivery-lock.json
 
 # 前端
 web/node_modules/
