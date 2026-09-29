@@ -52,9 +52,14 @@ jobs:
           # 否则 SQLite 打不开、服务崩溃重启，health 永远不通
           sudo chown -R 1001:1001 data secrets
           docker build -t coding2api:ci .
-          printf 'ci:%s\n' "$(docker run --rm coding2api:ci python -c 'from src.auth.users import create_password_hash;print(create_password_hash("cipw"))')" > secrets/users.txt
-          APP_SECRET=ci-placeholder-secret docker compose up -d
-          for _ in $(seq 1 30); do
+          # 用户名必须是 admin：compose 的 ADMIN_USERNAMES 默认 admin，
+          # B5 引导要求至少一个活跃 admin，否则启动直接 Traceback。
+          printf 'admin:%s\n' "$(docker run --rm coding2api:ci python -c 'from src.auth.users import create_password_hash;print(create_password_hash("cipw"))')" > secrets/users.txt
+          # --build 必须带：否则 compose 会去 registry 拉 image: 指向的已发布镜像，
+          # 测的就不是本次构建的代码了（曾因此长期静默通过）。
+          APP_SECRET=ci-placeholder-secret docker compose up -d --build
+          # 120s：启动预热会真连上游拉模型列表（zen 免费层还要逐个探活）。
+          for _ in $(seq 1 60); do
             if curl -fsS http://127.0.0.1:8000/health >/dev/null; then break; fi
             sleep 2
           done

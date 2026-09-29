@@ -144,6 +144,21 @@ def test_ci_workflow_paths_match_repository():
     assert "--cov-fail-under=100" in workflow
 
 
+def test_ci_compose_job_builds_fresh_image_with_admin_user():
+    """compose job 必须真跑本次构建的镜像，且用户文件里要有 admin。
+
+    两个坑都曾静默通过：
+    * compose 同时写了 `build:` 与 `image:`，`up` 不带 `--build` 时会去
+      registry 拉 `image:` 指向的已发布镜像 —— 测的不是本次代码；
+    * B5 引导要求至少一个活跃 admin，而 compose 的 ADMIN_USERNAMES 默认
+      `admin`，users.txt 建 `ci` 会直接启动失败。
+    """
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "docker compose up -d --build" in workflow, "compose up 必须 --build"
+    assert "printf 'admin:" in workflow, "users.txt 必须建 admin 用户"
+    assert "printf 'ci:" not in workflow
+
+
 # -------------------------------------------------─ macOS launchd 部署产物
 
 LAUNCHD_TEMPLATE = ROOT / "deploy" / "launchd" / "com.coding2api.plist"
