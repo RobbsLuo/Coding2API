@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # 上游（白名单内的地址才可接收真实 Token）
     codebuddy_api_endpoint: str = _CODEBUDDY_CN
     codebuddy_allowed_endpoints: str = f"{_CODEBUDDY_CN},{_CODEBUDDY_INTL}"
+    # OpenCode Zen 免费层：端点固定，UA 版本是门禁的一部分（<阈值 → 426）。
+    # Zen 无凭证、不携带任何用户 Token，端点的白名单校验只为防误配。
+    zen_api_endpoint: str = "https://opencode.ai"
+    zen_allowed_endpoints: str = "https://opencode.ai"
+    zen_opencode_version: str = "1.18.0"
 
     # 路由与调度
     default_model: str = "glm-5.2"
@@ -117,6 +122,11 @@ class Settings(BaseSettings):
         return tuple(e.strip() for e in self.codebuddy_allowed_endpoints.split(",") if e.strip())
 
     @cached_property
+    def zen_allowed(self) -> tuple[str, ...]:
+        return tuple(e.strip().rstrip("/") for e in self.zen_allowed_endpoints.split(",")
+                     if e.strip())
+
+    @cached_property
     def blocklist_patterns(self) -> tuple[str, ...]:
         return tuple(p.strip() for p in self.model_blocklist.split(",") if p.strip())
 
@@ -140,6 +150,11 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
 def validate_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
     """上游地址必须落在白名单内，否则拒绝发出真实 Token（PROPOSAL §8）。"""
     return endpoint.strip() in settings.allowed_endpoints
+
+
+def validate_zen_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
+    """Zen 端点白名单校验（防误配；Zen 不携带真实 Token，风险面小于 CB）。"""
+    return endpoint.strip().rstrip("/") in settings.zen_allowed
 
 
 def live(value: Any) -> Callable[[], Any]:

@@ -161,7 +161,8 @@ def test_healthz_reports_pool_counts(client):
     assert body["status"] == "ok" and body["service"] == "coding2api"
     assert body["version"]
     counts = body["credentials"]
-    assert counts == {"total": 0, "ready": 0, "cooling": 0, "paused": 0, "disabled": 0}
+    # 默认装配会种子一条 zen 虚拟凭证（可选中 → ready）
+    assert counts == {"total": 1, "ready": 1, "cooling": 0, "paused": 0, "disabled": 0}
     # 老端点保留
     assert client.get("/health").json() == {"status": "ok"}
 
@@ -187,7 +188,8 @@ def test_healthz_counts_partition_the_pool(tmp_path):
     conn.close()
     with TestClient(app) as http:
         counts = http.get("/healthz").json()["credentials"]
-    assert counts == {"total": 4, "ready": 1, "cooling": 1, "paused": 1,
+    # 4 条 trae + 种子的一条 zen（ready）
+    assert counts == {"total": 5, "ready": 2, "cooling": 1, "paused": 1,
                       "disabled": 1}
 
 

@@ -13,10 +13,9 @@ import type { Credential } from "../api/types";
 import { Badge, Empty, Metric, Panel, Skeleton } from "../ui";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
+import { providerLabel } from "../api/providers";
 import { cn } from "@/lib/utils";
 import { Ban, BatteryLow, CheckCircle2, Database, LayoutDashboard, Timer, ToggleLeft } from "lucide-react";
-
-const PROVIDER_LABEL: Record<string, string> = { codebuddy: "CodeBuddy", trae: "TRAE" };
 
 export function DashboardPage() {
   const { data, isLoading } = useCredentials();
@@ -135,7 +134,7 @@ export function DashboardPage() {
                   <span className="size-1.5 rounded-full bg-warn" />
                   {item.nickname || item.id.slice(0, 12)}
                   <span className="text-xs text-muted-foreground">
-                    {PROVIDER_LABEL[item.provider]}
+                    {providerLabel(item.provider)}
                   </span>
                 </span>
                 <span className="text-xs font-medium text-warn">
@@ -191,7 +190,7 @@ function CredentialRow({ credential, now }: { credential: Credential; now: numbe
         <span className="flex min-w-0 items-center gap-1.5">
           <ProviderIcon provider={credential.provider} size={14} />
           <span className="shrink-0 text-xs text-muted-foreground">
-            {PROVIDER_LABEL[credential.provider]}
+            {providerLabel(credential.provider)}
           </span>
           <span className="truncate font-medium">
             {credential.nickname || credential.id.slice(0, 12)}

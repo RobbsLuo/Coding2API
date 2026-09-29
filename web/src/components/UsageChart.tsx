@@ -8,10 +8,30 @@ import {
   YAxis,
 } from "recharts";
 import { formatAxisValue, formatChartValue, METRIC_AXIS_UNIT } from "../api/display";
+import { providerChartColor, providerLabel } from "../api/providers";
 import type { TimelinePoint } from "../api/types";
 
 /** Y 轴宽度：容下紧凑刻度（如「1500万」「850 ms」）。 */
 const Y_AXIS_WIDTH = 56;
+
+/** 时间序列点的保留键（不是渠道名），其余键都当作渠道序列。 */
+const NON_PROVIDER_KEYS = new Set(["hour", "time"]);
+
+/**
+ * 从数据点里收集出现过的渠道名（稳定排序）。
+ *
+ * 渠道集合动态取自后端返回的键：新增渠道时后端数据一变，图例与曲线自动
+ * 跟上，不需要在前端再维护一份渠道清单。
+ */
+export function chartProviders(points: TimelinePoint[]): string[] {
+  const seen = new Set<string>();
+  for (const point of points) {
+    for (const key of Object.keys(point)) {
+      if (!NON_PROVIDER_KEYS.has(key)) seen.add(key);
+    }
+  }
+  return [...seen].sort();
+}
 
 /** 请求量时间序列曲线（recharts）。点少时仍画满可用宽度，不加插值。 */
 export function UsageChart({ points, metric }: { points: TimelinePoint[]; metric?: string }) {
@@ -26,20 +46,19 @@ export function UsageChart({ points, metric }: { points: TimelinePoint[]; metric
   }));
   // 单位标签只对不自带单位的指标（计数 / token）显示；耗时/首字的刻度已含 ms/s
   const axisUnit = METRIC_AXIS_UNIT[metric ?? "requests"];
+  const providers = chartProviders(points);
 
   return (
-    <div className="h-64 w-full">
+    <div className="h-64 w-full" data-testid="usage-chart">
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart data={data} margin={{ top: 32, right: 12, left: 0, bottom: 0 }}>
           <defs>
-            <linearGradient id="gcodebuddy" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--chart-1)" stopOpacity={0.25} />
-              <stop offset="100%" stopColor="var(--chart-1)" stopOpacity={0} />
-            </linearGradient>
-            <linearGradient id="gtrae" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="var(--chart-3)" stopOpacity={0.25} />
-              <stop offset="100%" stopColor="var(--chart-3)" stopOpacity={0} />
-            </linearGradient>
+            {providers.map((provider) => (
+              <linearGradient key={provider} id={`g-${provider}`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor={providerChartColor(provider)} stopOpacity={0.25} />
+                <stop offset="100%" stopColor={providerChartColor(provider)} stopOpacity={0} />
+              </linearGradient>
+            ))}
           </defs>
           <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" vertical={false} />
           <XAxis
@@ -80,24 +99,18 @@ export function UsageChart({ points, metric }: { points: TimelinePoint[]; metric
             labelStyle={{ fontWeight: 600 }}
             formatter={(value, name) => [formatChartValue(Number(value), metric ?? "requests"), name]}
           />
-          <Area
-            type="monotone"
-            dataKey="codebuddy"
-            name="CodeBuddy"
-            stroke="var(--chart-1)"
-            strokeWidth={2}
-            fill="url(#gcodebuddy)"
-            isAnimationActive={false}
-          />
-          <Area
-            type="monotone"
-            dataKey="trae"
-            name="TRAE"
-            stroke="var(--chart-3)"
-            strokeWidth={2}
-            fill="url(#gtrae)"
-            isAnimationActive={false}
-          />
+          {providers.map((provider) => (
+            <Area
+              key={provider}
+              type="monotone"
+              dataKey={provider}
+              name={providerLabel(provider)}
+              stroke={providerChartColor(provider)}
+              strokeWidth={2}
+              fill={`url(#g-${provider})`}
+              isAnimationActive={false}
+            />
+          ))}
         </AreaChart>
       </ResponsiveContainer>
     </div>

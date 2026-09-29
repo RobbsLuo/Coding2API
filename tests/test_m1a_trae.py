@@ -328,7 +328,7 @@ def test_prepare_body_keeps_valid_tool_calls():
 # ------------------------------------------------------------ 模型解析
 
 def test_resolve_flat_auto_and_forced():
-    assert resolve("glm-5.2", "d").providers == ("codebuddy", "trae")
+    assert resolve("glm-5.2", "d").providers == ("codebuddy", "trae", "zen")
     assert resolve("", "glm-5.2").model == "glm-5.2"
     assert resolve("auto", "glm-5.2").model == "glm-5.2"
     assert resolve(None, "glm-5.2").model == "glm-5.2"

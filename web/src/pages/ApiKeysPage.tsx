@@ -31,6 +31,7 @@ export const PROVIDER_BINDING_OPTIONS = [
   { value: "", label: "自动（不限定渠道）" },
   { value: "codebuddy", label: "CodeBuddy" },
   { value: "trae", label: "TRAE" },
+  { value: "zen", label: "OpenCode Zen" },
 ];
 
 /** 列表里展示绑定渠道：空串 → 「自动」 */

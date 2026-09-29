@@ -1,6 +1,6 @@
 # Coding2API
 
-把 **CodeBuddy** 与 **TRAE SOLO** 两个 coding agent 渠道，统一封装为 OpenAI 兼容 API，
+把 **CodeBuddy**、**TRAE SOLO** 与 **OpenCode Zen** 免费层三个上游渠道，统一封装为 OpenAI 兼容 API，
 提供公共凭证池、统一调度与按人用量统计。
 
 > [!WARNING]
@@ -10,6 +10,7 @@
 
 - **OpenAI 兼容出口**：`/v1/chat/completions`（流式 + 非流式）、`/v1/responses`（Codex CLI）、`/v1/models`、`/v1/user/balance`（DeepSeek 兼容余额）
 - **统一调度**：扁平模型名按健康度自动选号，`模型@渠道` 强制指定；三态健康度 + 分级冷却避开坏号。模型级限流或「该渠道无此模型」只避让那一个模型，同账号其他模型立刻可用
+- **OpenCode Zen 免费层**（第三个渠道）：`opencode.ai/zen` 的免费模型接成 `zen` 渠道，标准 OpenAI 协议、无需登录；上游清单混着付费模型且无免费标记，本服务按 `-free` 后缀收窄候选再逐个探活，**只展示匿名真正可用的免费模型**（每次动态拉取并探活，不设静态白名单）；请求侧自动满足免费层门禁，响应侧过滤门禁注入的伪工具调用。无凭证概念——池里一条虚拟凭证让它和其它渠道一样可调度、可暂停、可统计
 - **到期积分优先消化**：主窗口 36h 内将过期的积分多者先用（避免过期浪费），打平再比 7 天窗口；管理台凭证列表显示到期积分与逐个额度包明细
 - **会话粘性**：同一对话多轮粘住同一凭证，出错才轮换
 - **公共凭证池**：admin 集中维护、全员共享；按人统计用量
@@ -109,7 +110,7 @@ docker compose pull
 
 ## 使用
 
-1. 「凭证管理」添加凭证：CodeBuddy 走设备码登录（或粘贴 `{"token":"..."}`）；TRAE 粘贴凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（凭证里的 `apiHost` 只接受官方地址，其他值会被拒绝导入）
+1. 「凭证管理」添加凭证：CodeBuddy 走设备码登录（或粘贴 `{"token":"..."}`）；TRAE 粘贴凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（凭证里的 `apiHost` 只接受官方地址，其他值会被拒绝导入）。OpenCode Zen 无需添加——启动时自动出现一条 `OpenCode Zen` 虚拟凭证
 2. 「API Key」创建 `sk-...`（明文仅显示一次）
 3. 调用：
 
@@ -120,9 +121,20 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"glm-5.2","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-`模型@渠道` 强制指定上游（如 `glm-5.2@trae`），不写则自动选健康渠道。
+`模型@渠道` 强制指定上游（如 `glm-5.2@trae`、`mimo-v2.5-free@zen`），不写则自动选健康渠道。
 
 任意 OpenAI 兼容客户端可直接接入（Base URL `http://127.0.0.1:8000/v1`、Key 用 `sk-...`、模型名以 `GET /v1/models` 为准）；「Playground」页用登录会话直接测试，无需 API Key。
+
+### OpenCode Zen 免费层
+
+`zen` 渠道接的是 [opencode.ai/zen](https://opencode.ai) 的**免费模型**，无需账号或登录。上游模型清单里混着付费模型且不带免费标记，本服务按 `-free` 后缀收窄候选、再逐个探活，**只把匿名真正可用的免费模型**放进 `GET /v1/models`（每次动态拉取并探活，不维护静态白名单）；用 `模型@zen` 强制指定，或由调度器自动路由。
+
+几点要知道：
+
+- **无凭证**：Zen 不需要 Token。凭证池里那条 `OpenCode Zen` 是虚拟占位行（让调度 / 冷却 / 统计照常工作），额度列显示「免费层（无额度接口）」。它**删除后重启会复活**——要永久停用请点「暂停」，不要删除。
+- **免费层门禁**：上游要求伪装成官方客户端（UA 版本、会话头、`stream:true`、tools 含 `bash`/`read`）。本服务自动满足；门禁注入的 `bash`/`read` 是空壳，若模型真去调用它们，回包里的这类 tool_call 会被过滤掉，不会泄漏给你没声明过的函数。你自己声明了 `bash`/`read` 时则原样透传。
+- **上游会改**：门禁阈值与免费清单都可能变。UA 版本用 `ZEN_OPENCODE_VERSION` 可调；端点用 `ZEN_API_ENDPOINT`（须在 `ZEN_ALLOWED_ENDPOINTS` 内）。付费模型即使强制 `模型@zen` 也只会报「不可用」，不会拖垮渠道。
+- **无额度接口**：健康度恒为「未探测到额度」（未知 ≠ 耗尽）。
 
 ### Responses API（Codex CLI）
 
@@ -181,7 +193,7 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 
 创建 Key 时可限定它只能走某个渠道、只能从某些 IP 调用，适合「按出口分发 Key」：一个给团队用，另一个只给某台服务器或某个客户端。
 
-- **渠道绑定**：选 CodeBuddy 或 TRAE 后，该 Key 只在对应渠道的凭证里选号；模型属于另一渠道时直接 400 并指出实际归属（不静默改道，也不白打一次上游）。留空 = 自动（默认，跨渠道选健康凭证）。`模型@渠道` 与绑定冲突时同样 400。
+- **渠道绑定**：选 CodeBuddy / TRAE / OpenCode Zen 后，该 Key 只在对应渠道的凭证里选号；模型属于另一渠道时直接 400 并指出实际归属（不静默改道，也不白打一次上游）。留空 = 自动（默认，跨渠道选健康凭证）。`模型@渠道` 与绑定冲突时同样 400。
 - **来源 IP 白名单**：逗号分隔的 IP 或 CIDR（如 `203.0.113.9,10.0.0.0/8`），留空 = 不限制。写入时校验并规范化（`10.0.0.1` 存为 `10.0.0.1/32`），非法值当场 400；来源不在白名单内返回 403。
 
 **默认不采信 `X-Forwarded-For`**（客户端可写，信它等于白名单形同虚设）。仅 `TRUST_PROXY=true` 时按 XFF 判定，且取**最后一个**条目（紧邻本服务的受信代理实际看到的地址）。故该开关只适用于「本服务前恰好一层受信反代」；多层反代或直连请保持默认 `false`。
@@ -189,6 +201,8 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 ### 暂停单个凭证
 
 凭证列表行内菜单的「暂停」只把该凭证摘出**对话流量**：后台的额度探测、token 预刷新、每日签到、成长中心、活跃上报照常运行（这些任务只认系统硬禁用 `disabled`）。适合「先不接聊天、但积分继续领」；「取消暂停」立即放回池子。与状态列的「已禁用」不同——那是渠道判定会话失效后的系统禁用，需重新登录后用「恢复」解除。同一开关也在 `POST /api/credentials/{id}/toggle`。
+
+> OpenCode Zen 是唯一没有凭证的渠道，池里是一条虚拟占位行。**暂停它是永久停用的唯一方式**——删除后下次启动会被种子重新补上。
 
 ### token 到期展示
 
@@ -245,6 +259,9 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `TRUST_PROXY` | `false` | 是否采信 `X-Forwarded-For` 判定来源 IP（API Key 的 `allowed_ips` 白名单、登录限流与审计共用同一解析）。默认关闭——该头由客户端可写；仅在「本服务前恰好一层受信反代」时开启，届时取 XFF 最后一个条目（见上文「API Key 的渠道绑定与来源 IP 白名单」） |
 | `CODEBUDDY_API_ENDPOINT` | `https://copilot.tencent.com` | CodeBuddy 上游地址；改动时必须同时把它加入 `CODEBUDDY_ALLOWED_ENDPOINTS` |
 | `CODEBUDDY_ALLOWED_ENDPOINTS` | 官方两站（见 compose） | 上游端点白名单，真实 Token 只发往白名单内地址 |
+| `ZEN_API_ENDPOINT` | `https://opencode.ai` | OpenCode Zen 上游地址；改动时必须同时把它加入 `ZEN_ALLOWED_ENDPOINTS`（Zen 不带真实 Token，白名单仅防误配） |
+| `ZEN_ALLOWED_ENDPOINTS` | `https://opencode.ai` | Zen 端点白名单 |
+| `ZEN_OPENCODE_VERSION` | `1.18.0` | 门禁伪装用的 `opencode/<version>` UA 版本；上游阈值上移时改这里（低于阈值会被 426 拒绝） |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CodeBuddy 聊天最小间隔（秒），与 TRAE 共享节流；`0` 关闭 |
 | `CODEBUDDY_SANITIZE_CHANNEL_MARKERS` | `true` | 出站 `system`/`assistant` 正文命中「伪装其他厂商官方客户端」指纹串时替换为占位符（上游 11128 内容风控：换号无效、会话带入即持续报错）；只改出站副本，客户端历史不受影响；`false` 关闭（见 TECHNICAL.md §3.2） |
 | `REFRESH_SKEW_HOURS` | `24` | token 到期前该小时数窗口内预刷新。到期时间取凭证显式 `expires_at`，缺失时回落 access token 的 JWT `exp`（CodeBuddy 实测不带显式到期字段） |

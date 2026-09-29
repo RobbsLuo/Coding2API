@@ -1,7 +1,7 @@
 # Coding2API
 
-Unified OpenAI-compatible gateway for the **CodeBuddy** and **TRAE SOLO** coding-agent
-upstream channels, with a shared credential pool, unified scheduling, and per-user usage stats.
+Unified OpenAI-compatible gateway for the **CodeBuddy**, **TRAE SOLO**, and **OpenCode Zen**
+free tier coding-agent upstreams, with a shared credential pool, unified scheduling, and per-user usage stats.
 
 > [!WARNING]
 > This project bridges reverse-engineered third-party endpoints and is intended for study
@@ -11,7 +11,8 @@ upstream channels, with a shared credential pool, unified scheduling, and per-us
 ## Features
 
 - **OpenAI-compatible surface**: `/v1/chat/completions` (streaming + non-streaming), `/v1/responses` (for the Codex CLI), `/v1/models`, `/v1/user/balance` (DeepSeek-compatible)
-- **Two upstreams, one flat model namespace**: auto-routed by expiring credits, then health; `model@provider` pins an upstream
+- **Three upstreams, one flat model namespace**: auto-routed by expiring credits, then health; `model@provider` pins an upstream
+- **OpenCode Zen free tier** (third channel, `zen`): the free models at `opencode.ai/zen`, standard OpenAI protocol, no login. The upstream list mixes in paid models with no free/paid marker, so the gateway narrows by the `-free` suffix and probes each candidate, exposing **only the free models that actually answer anonymously** (fetched and probed live every time, no static allowlist). Requests automatically satisfy the free-tier gate; responses have the gate's injected pseudo-tool calls filtered out. Zen has no credentials — one virtual pool row lets it be scheduled, paused, and counted like any other channel.
 - **Expiry-aware scheduling**: among credits expiring within `QUOTA_EXPIRY_WINDOW_SECONDS` (default 36h), the largest balance is burned first; ties fall to `QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS` (default 7 days), so near-expiry quota is not wasted
 - **Conversation stickiness**: a multi-turn conversation keeps one credential and only rotates on error. Identified by an explicit id when the client sends one (`conversation_id` / `conversationId` / `prompt_cache_key`, top-level or in `metadata`), otherwise by a message-prefix fingerprint. Pinned credentials always win
 - **Cached-token accounting**: TRAE's `cache_read_input_tokens` / `cache_creation_input_tokens` are mapped to per-request `cached_tokens` and surfaced in stats
@@ -19,7 +20,7 @@ upstream channels, with a shared credential pool, unified scheduling, and per-us
 - **Shared credential pool**: admins maintain credentials, everyone shares them; usage tracked per user
 - **Three-role accounts**: `admin` / `operator` / `viewer` stored in SQLite. New users get a one-time activation link to set their own password (no shared initial secret) and must change an admin-reset password on first login; changing a role or disabling an account revokes its sessions immediately. Logins and write operations are audited
 - **Credential automation**: device-code login, account switching, quota probing, daily check-in (with streak), token pre-refresh, growth-center jobs (CodeBuddy only: travel gifts, Buddy dispatch, task accept/claim, streak redemption, lottery, blind boxes; irreversible steps off via `GROWTH_IRREVERSIBLE_ACTIONS=false`)
-- **Per-credential pause**: "Pause" removes one credential from *chat traffic only* — probing, refresh, check-in, growth and activity tasks keep running (they honor only the system hard-disable `disabled`). Distinct from "Disabled", which means the upstream rejected the session and needs re-login + "Restore"
+- **Per-credential pause**: "Pause" removes one credential from *chat traffic only* — probing, refresh, check-in, growth and activity tasks keep running (they honor only the system hard-disable `disabled`). Distinct from "Disabled", which means the upstream rejected the session and needs re-login + "Restore". OpenCode Zen is the one credential-less channel: pausing its virtual row is the only way to disable it permanently — deleting it just re-seeds on restart
 - **Activity reporting** (CodeBuddy only, **off by default**): `ACTIVITY_REPORT_ENABLED=true` posts one chat-activity event per account per day to keep the growth-center streak alive. The upstream needs a `userId` and silently drops reports without one (HTTP 200 `{"code":0}`, streak unchanged); when the credential has no `user_id`, the gateway falls back to the bearer JWT `sub`. Upstream-internal and may break without notice — not a reliability feature (terms forbid scripted tampering: disqualification + clawback)
 - **Pool health endpoint**: `GET /healthz` returns `{status, service, version, credentials:{total,ready,cooling,paused,disabled}}` (unauthenticated) so monitors can alert when the pool is exhausted (`ready=0`: alive but unusable). `GET /health` stays a pure liveness probe. Buckets are mutually exclusive and sum to `total`, using the scheduler's own "selectable" rule
 - **Per-key routing policy**: a key can be bound to one provider (`provider_binding`) and/or restricted by source IP (`allowed_ips`, comma-separated IP/CIDR, empty = unrestricted). A bound key requesting a model owned by the other provider gets a 400 naming the real owner. IPs are checked at auth time; `X-Forwarded-For` is **ignored by default** and only honored with `TRUST_PROXY=true`, using the *last* entry (fits exactly one trusted reverse proxy). No per-key quotas / multi-tenancy
@@ -53,6 +54,19 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ```
 
 Point any OpenAI-compatible client at `http://127.0.0.1:8000/v1`.
+
+`model@provider` pins an upstream (`glm-5.2@trae`, `mimo-v2.5-free@zen`); bare model names route automatically.
+
+### OpenCode Zen free tier
+
+The `zen` channel bridges the **free models** at [opencode.ai/zen](https://opencode.ai) — no account or login required. The upstream list mixes paid models in with no free/paid marker, so the gateway narrows candidates by the `-free` suffix and then probes each one, exposing in `GET /v1/models` only the free models that actually answer anonymously (fetched and probed live every time, no static allowlist). Then use `model@zen`, or let the scheduler route to them automatically.
+
+Worth knowing:
+
+- **No credentials**: Zen needs no token. The `OpenCode Zen` pool row is a virtual placeholder (so scheduling, cooldown, and stats work as usual); its quota column reads "free tier (no quota API)". It **re-seeds on restart after deletion** — to disable it permanently, *pause* it instead of deleting.
+- **Free-tier gate**: the upstream wants to believe it is talking to the official client (UA version, session header, `stream:true`, `tools` containing `bash`/`read`). The gateway satisfies this for you; the injected `bash`/`read` are empty shells, and if the model actually calls them those tool calls are filtered from the response so you never see functions you did not declare. If *you* declare `bash`/`read`, they pass through untouched.
+- **The upstream changes**: both the gate threshold and the free list may move. Tune the UA version with `ZEN_OPENCODE_VERSION`; change the endpoint with `ZEN_API_ENDPOINT` (must be inside `ZEN_ALLOWED_ENDPOINTS`).
+- **No quota API**: health stays "quota unknown" (unknown ≠ exhausted).
 
 > `scripts/create_user.py` writes directly to SQLite (`--db`, or `DATA_DIR`; default
 > `data/coding2api.sqlite3`). On startup, an existing `secrets/users.txt` is imported

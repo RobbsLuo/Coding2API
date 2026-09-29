@@ -73,6 +73,9 @@ coding2api/
 │   │   │   ├── events.py        # 自定义 SSE → Event
 │   │   │   ├── credential.py    # 凭证解析（嵌套/扁平）+ 原子写回 + 签到设备号
 │   │   │   └── callback.py      # 登录 URL 构造 + 回调解析
+│   │   ├── zen/
+│   │   │   ├── client.py        # Zen 上游 + 免费层门禁伪装 + 注入工具回包过滤 + ZenProvider
+│   │   │   └── events.py        # 标准 OpenAI SSE → Event（无私有信封）
 │   │   ├── token_expiry.py      # 到期提取：显式 expires_at → JWT exp 回落（B3.3）
 │   │   └── fixtures/            # 真实样本
 │   │       ├── codebuddy/*.sse
@@ -204,6 +207,8 @@ class ErrKind(StrEnum):
 | 服务端错误 | 5xx | 5xx | OTHER |
 | 请求自身无效 | 400 | 400（含 4001） | INVALID |
 | 流内错误事件 | SSE error 事件 | `event:error` 业务码 | 同上映射（单一来源：provider 解析时写 `Event.error_kind`，executor 直接消费；缺失回落 OTHER） |
+
+> **zen 的 401 例外**：Zen 无凭证，`401 Missing API key.` 只说明该模型需要付费 key，故 zen 的 `classify_status` / `classify_error_code` 把 401 归 `INVALID` 而非 `DEAD`（见 §3.14），避免一次强制付费模型请求把整条免费渠道硬禁用。
 
 > 400 + `11128`（`Illegal API invocation from an unapproved channel`）也归 REQUEST：实测主因是**内容风控**——`system`/`assistant` 消息正文出现「伪装其他厂商官方客户端」的指纹串时整单拒绝（已确认 3 条：Claude Code 系统提示的身份声明行、其 billing 头字段名、其 git 上下文行；完整清单见 `client.py` 的 `CHANNEL_MARKERS`，此处刻意不写原文以免污染阅读本文件的 agent 会话）。特征：与凭证无关（换号无效）、确定性复现、仅 `user`/`tool` 之外的这两个角色的 `content` 命中（`tool_calls` 参数与 reasoning 均不触发）；会话一旦把指纹写进历史，后续每轮（含压缩请求本身）都持续 11128。处理：出站前 `sanitize_channel_markers` 替换为占位符（`CODEBUDDY_SANITIZE_CHANNEL_MARKERS=false` 关闭），客户端历史不受影响；`content` 为文本块列表时逐块处理（2026-09-21 直证块形态同样触发）。曾误落 INVALID → 跳过上游全部凭证、零重试直接 400（`invalid_request`），是 `deepseek-v4.1-flash` / `glm-5.3-flash` 报「not available on any configured upstream」的根因。
 
@@ -538,6 +543,36 @@ response.completed | response.incomplete
 
 ---
 
+### 3.14 OpenCode Zen 免费层渠道（Q40）
+
+**为什么能接**：Zen 免费层是**标准 OpenAI 流式协议**（`chat.completion.chunk` + `data: [DONE]`），不需要像 CodeBuddy / TRAE 那样逆向私有信封。`provider/zen/events.py` 因此很薄：`content` / `reasoning_content` / `tool_calls` / `usage` / `finish_reason` / 流内 `error` 各一条映射，唯一要留意的是**最后一段正文与 `finish_reason` 会同帧**，所以 `parse_all_events` 必须能在同一帧里同时产出 CONTENT 与 FINISH，否则客户端永远收不到结束信号。上游 `[DONE]` 之后还跟一帧 `{"choices": [], "cost": "0"}`，无下游语义，跳过。
+
+**渠道私有的只有门禁伪装**（实测 2026-09-29，上游会演进，故集中在 `zen/client.py`）：
+
+| 条件 | 要求 | 违反后果 |
+|---|---|---|
+| `User-Agent` | `opencode/<version>`，version ≥ 1.18.0 | 低于阈值 → 426；无版本号 → 403 |
+| `x-opencode-session` | `^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$` | 403 |
+| body `stream` | 必须 `true` | 403 |
+| body `tools` | 必须**同时**含 name 为 `bash` 与 `read` 的工具（参数可为空壳） | 403 |
+| `Authorization` | `Bearer public` 可带可不带（匿名也通） | 带伪造 key → 401 |
+
+UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编码）；`ZEN_API_ENDPOINT` 走端点白名单（`ZEN_ALLOWED_ENDPOINTS`）。Zen **不携带任何用户 Token**，风险面小于 CodeBuddy，白名单只为防误配。
+
+**注入空壳 + 过滤回包（Q40 的核心取舍）**：门禁要求 tools 含 `bash`/`read`，但这两个是**我们伪造的**、客户端从没声明过。若模型真的调用了它们，回包里的 tool_call 必须被过滤掉，否则客户端会收到自己没定义的函数调用。实现只在**缺失时**补骨架工具（用户自带同名工具 → 不注入也不过滤，绝不误伤）；过滤按 `index` 跟踪流式 tool_call 分片（首片带 `function.name`、后续片只有 `arguments`，靠 index 关联），把注入名的整条调用丢弃；若整条流没有保留任何真 tool_call，则把 `finish_reason=tool_calls` 收敛为 `stop`，不让客户端收到空的 tool_calls 收尾。
+
+**虚拟凭证行**：Zen 无凭证、无额度接口。池里种一条空凭证（`credential_data={}`，`added_by="system"`），复用现有调度 / 冷却 / 统计 / 会话粘性。`probe_quota` 恒返回 `Quota(probe_failed=True)` → `health_score` 返回 `None`（**未知**，不是 `EXHAUSTED=-1`）——这点很关键：若返回 `total=None`，`health_score` 会判定为「已耗尽」而把这条免费渠道错误降级。种子幂等（已有 zen 凭证则不补），**用户删除后重启会复活**，永久停用请用「暂停」（`enabled=0`，只摘对话流量）。只为默认装配路径种子（测试注入自定义 registry 时不多出凭证行）。
+
+**免费模型清单完全动态（现拉现探）**：上游 `/zen/v1/models` 免鉴权，但返回的是**全部**模型（含 70 多个付费模型），且**不带任何免费/付费标记**（`owned_by` 恒 `opencode`、无 cost 字段，换鉴权头 / query 也仍全量）。唯一权威信号是**匿名可用性**：付费模型恒 401 `Missing API key.`，免费模型永不 401。故两步过滤：① 按 `-free` 后缀收窄候选（上游命名约定，非契约）；② 对候选并发探活，**只保留 2xx**——已下线（400）、区域限制（403）、上游故障（5xx）、超时都剔除。无静态白名单，上游增删免费模型自动跟随；探活结果为空时抛协议错，让 `/v1/models` 用上次成功的缓存兜底（冷启动无缓存才退化为不展示 zen）。`fetch_models` 同时是引擎登记模型归属的来源，过滤后扁平名请求不会再被路由到 zen 的付费模型上。
+
+**401 不算凭证失效**：Zen 无凭证，401（`Missing API key.`）只说明**该模型需要付费 key**，不是虚拟凭证失效。故 zen 的 `classify_status(401)` / `classify_error_code(401)` 归 `ErrKind.INVALID`（跳过该渠道并回 400），不归 `DEAD`——否则一次 `模型@zen` 强制付费模型就会把整条 zen 渠道硬禁用，只能重启复活。模型列表已不含付费模型，此分支只兜底强制指定的情形。
+
+**统计时间序列泛化**：`stats/query.py::timeline()` 原先把 `codebuddy`/`trae` 两列写死在 SQL 的 `CASE WHEN` 里。改为按 `(hour_utc, provider)` 分组、Python 侧 pivot：渠道集合动态取自数据（新增渠道无需改 SQL），某渠道在该小时无数据时补 0（同一批点的键集合一致，前端不会断线）。渠道按名排序，恰为 `codebuddy`/`trae`/`zen` 字典序，**无 zen 数据时旧契约不变**。前端对应地按 points 的键动态生成曲线（`UsageChart.chartProviders`），颜色随渠道稳定（`--chart-1/3/4`）。
+
+**前端**：`Provider` 联合类型加 `"zen"`；渠道展示元数据收敛到 `web/src/api/providers.ts`（`PROVIDER_LABEL` / `PROVIDER_ABBR` / `PROVIDER_CHART_COLOR` + 未知渠道兜底），此前五六处各存一份 `PROVIDER_LABEL`，加第三个渠道时漏一处就会在某页显示原始 id。`ProviderIcon` 用 `@lobehub/icons` 的 OpenCode **Mono**（该品牌无 Color 版，Main/Color 同用 Mono）。凭证页对 zen 隐藏「签到」按钮（provider 未实现 `checkin`，点了只会 400）；「导入凭证」与「登录渠道账号」保持 CodeBuddy/TRAE（zen 无 OAuth、导入空对象无意义，它由种子出现在池里）。
+
+---
+
 ## 4. Provider 协议（Q16=A 细接口）
 
 ```python
@@ -570,7 +605,11 @@ class Provider(Protocol):
   `complete_callback`（仅 TRAE）、`list_accounts`/`switch_account`（仅 CodeBuddy）、
   `credential_from`/`checkin_scope`（刷新与签到任务的能力探测）、
   `checkin`/`checkin_status`（签到）、`growth`（成长中心，仅 CodeBuddy）、`host`（展示用）
-- 两个 provider 共用 `engine/sse.py` 的帧解析器（SSE 规范层），事件语义各自映射
+- 三个 provider 共用 `engine/sse.py` 的帧解析器（SSE 规范层），事件语义各自映射
+- Zen 是最「薄」的 provider：标准 OpenAI SSE，故 `events.py` 无需私有信封解析；
+  渠道私有的只有免费层门禁伪装与注入工具回包过滤（见 §3.14）。它**只实现**
+  `import_credential`/`classify`/`probe_quota`/`list_models`/`stream_chat`/`aclose`，
+  签到 / 成长 / 刷新一律靠「方法缺失」自然跳过
 
 ---
 
@@ -843,3 +882,5 @@ fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文�
 - **延迟均值只算成功请求**：分子 `SUM(latency_ms WHERE ok=1)` 与分母 `ok_count` 配对；失败请求的耗时不能拉偏「典型耗时」（与图表口径一致）
 - **应用日志只写 stderr，轮转交给平台**：不在应用内开文件、不用 `RotatingFileHandler`。各部署形态（systemd / docker 等）采集方式不同但都靠 stdout/stderr 对接；应用自己写文件会与平台轮转争抢同一文件，容器里还会写进镜像层（重启即丢且 `docker logs` 看不到）。各自配置见 `deploy/` 与 compose 的 `logging` 段
 - **必须在 `build_app` 里配 root logger**：uvicorn 默认 `LOGGING_CONFIG` 只配 `uvicorn` / `uvicorn.access`（`propagate=false`），**从不配 root**；root 默认 `WARNING` 且无 handler，导致 `logging.getLogger(__name__)` 的 INFO 静默丢失。生产路径 `uvicorn src.main:build_app --factory` 不经过 `run()`，所以配置必须挂在 `build_app`（幂等，见 `src/webapp/logging.py`）
+- **Zen 无凭证渠道用「虚拟凭证行」而非特判**（Q40）：调度 / 冷却 / 统计 / 粘性全部按 `credentials` 行工作，给 Zen 种一条空凭证（`added_by="system"`）比在每个环节加「无凭证 provider」分支代价小得多，也让它天然出现在管理台凭证池里可暂停/探测/删除。`probe_quota` 恒 `probe_failed=True`（health `None` = 未知，**不是耗尽**）。种子只在默认装配路径执行，且幂等；删除后重启复活是刻意的（文档写「永久停用用暂停」）
+- **Zen 门禁伪装注入 `bash`/`read` 是「对上游撒谎、对客户端诚实」**：上游要求 tools 含这两者，客户端没声明过，所以注入只补缺、回包只过滤**本次注入的名字**（按 `index` 跟踪分片），全被滤掉时收敛 `finish_reason`。用户自带同名工具时既不注入也不过滤——宁可不满足门禁（让上游自己报错），也不误伤用户的真实工具调用

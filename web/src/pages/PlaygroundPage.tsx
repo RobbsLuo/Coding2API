@@ -14,11 +14,7 @@ import { HelpBlock } from "../components/HelpBlock";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
 import { Button, Card, Checkbox, Empty, Field, Label, Notice, Panel, Select, Textarea } from "../ui";
-
-const PROVIDER_LABEL: Record<string, string> = {
-  codebuddy: "CodeBuddy",
-  trae: "TRAE",
-};
+import { providerAbbr, providerLabel } from "../api/providers";
 
 /** 模型排序用倍率：多渠道取各渠道最小倍率；无倍率视为最大（排最后）。 */
 function modelRate(item: ModelInfo): number | undefined {
@@ -72,7 +68,7 @@ export function PlaygroundPage() {
   const fetched = modelsQuery.data ?? [];
 
   // 每个模型的受控值：单渠道模型带 @provider（该组选项即强制指定），
-  // 双渠道模型用裸 id（走自动路由）。派生选中时必须用同一套值，
+  // 多渠道模型用裸 id（走自动路由）。派生选中时必须用同一套值，
   // 否则受控值与任何 option 都对不上，select 会显示为空。
   const valueOf = (item: { id: string; providers: string[] }): string =>
     item.providers.length === 1 ? `${item.id}@${item.providers[0]}` : item.id;
@@ -83,39 +79,40 @@ export function PlaygroundPage() {
     models.find((item) => item.value === selectedModel) ??
     models.find((item) => item.value === selectedModel.split("@")[0]);
 
-  // option 文本里的倍率标记：双渠道一律按渠道逐个标注（相同倍率也各自
+  // option 文本里的倍率标记：多渠道一律按渠道逐个标注（相同倍率也各自
   // 写出；只有一个渠道有倍率时只标那个渠道）；单渠道带渠道缩写。
-const CHANNEL_ABBR: Record<string, string> = { codebuddy: "CB", trae: "TR" };
-
 const rateLabel = (item: ModelInfo, provider?: string): string => {
   const byProvider = item.by_provider;
   const multi = item.providers && item.providers.length > 1;
   if (multi && byProvider && Object.keys(byProvider).length > 0) {
-    const parts = (["codebuddy", "trae"] as const)
+    const parts = item.providers
       .map((pid) => {
         const rate = byProvider[pid]?.credit_rate;
-        return rate === undefined ? null : `${CHANNEL_ABBR[pid] ?? pid} x${rate}`;
+        return rate === undefined ? null : `${providerAbbr(pid)} x${rate}`;
       })
       .filter(Boolean);
     if (parts.length) return parts.join("/");
   }
   if (item.credit_rate !== undefined) {
-    const abbr = provider ? `${CHANNEL_ABBR[provider] ?? provider} ` : "";
+    const abbr = provider ? `${providerAbbr(provider)} ` : "";
     return `${abbr}x${item.credit_rate}`;
   }
   return "";
 };
   const dualSource = models.filter((item) => item.providers.length > 1);
-  const onlyCodebuddy = models.filter(
-    (item) => item.providers.length === 1 && item.providers[0] === "codebuddy",
-  );
-  const onlyTrae = models.filter(
-    (item) => item.providers.length === 1 && item.providers[0] === "trae",
-  );
+  // 单渠道模型按渠道分组；分组顺序沿用模型列表首次出现的顺序，渠道集合动态
+  const groups: [string, typeof models][] = [];
+  for (const item of models) {
+    if (item.providers.length !== 1) continue;
+    const pid = item.providers[0];
+    let group = groups.find(([name]) => name === pid);
+    if (!group) {
+      group = [pid, []];
+      groups.push(group);
+    }
+    group[1].push(item);
+  }
   void valueOf;
-  const groups: [string, typeof onlyCodebuddy][] = [];
-  if (onlyCodebuddy.length) groups.push(["codebuddy", onlyCodebuddy]);
-  if (onlyTrae.length) groups.push(["trae", onlyTrae]);
 
   const send = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -175,7 +172,7 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
       <HelpBlock
         title="模型与渠道调度说明"
         entries={[
-          { term: "模型名 model@provider", where: "模型 · 强制指定渠道", meaning: "默认 glm-5.2 由调度器在两个渠道间自动选健康的；写 glm-5.2@trae 则只走 TRAE，glm-5.2@codebuddy 只走 CodeBuddy。" },
+          { term: "模型名 model@provider", where: "模型 · 强制指定渠道", meaning: "默认 glm-5.2 由调度器在可用渠道间自动选健康的；写 glm-5.2@trae 则只走 TRAE，写 模型@zen 只走 OpenCode Zen。" },
         ]}
       />
 
@@ -192,9 +189,9 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                   onChange={(event) => setModel(event.target.value)}
                 >
                   <option value="">选择模型…</option>
-                  {/* 双渠道可用的模型置顶：默认调度即可覆盖 */}
+                  {/* 多渠道可用的模型置顶：默认调度即可覆盖 */}
                   {dualSource.length > 0 && (
-                    <optgroup label="双渠道（自动调度）">
+                    <optgroup label="多渠道（自动调度）">
                       {dualSource.map((item) => {
                         const rate = rateLabel(item);
                         return (
@@ -206,7 +203,7 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                     </optgroup>
                   )}
                   {groups.map(([provider, items]) => (
-                    <optgroup key={provider} label={`仅 ${PROVIDER_LABEL[provider]}`}>
+                    <optgroup key={provider} label={`仅 ${providerLabel(provider)}`}>
                       {items.map((item) => {
                         const rate = rateLabel(item, provider);
                         return (
@@ -227,7 +224,7 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                   )}
                 </Select>
               </Field>
-              <Field label="强制指定渠道" hint="双渠道模型可用；单渠道模型始终固定">
+              <Field label="强制指定渠道" hint="多渠道模型可用；单渠道模型始终固定">
                 <Select
                   value={selectedModel.includes("@") ? selectedModel.split("@")[1] : ""}
                   data-testid="provider-pin"
@@ -239,6 +236,7 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                   <option value="">自动路由</option>
                   <option value="codebuddy">CodeBuddy</option>
                   <option value="trae">TRAE</option>
+                  <option value="zen">OpenCode Zen</option>
                 </Select>
               </Field>
           </div>
@@ -261,7 +259,7 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                     className="inline-flex items-center gap-1 font-medium text-foreground"
                   >
                     <ProviderIcon provider={pid} size={13} />
-                    {PROVIDER_LABEL[pid] ?? pid}
+                    {providerLabel(pid)}
                   </span>
                 ))}
               </span>

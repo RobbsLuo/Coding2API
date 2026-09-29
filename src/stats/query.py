@@ -120,32 +120,35 @@ class StatsQuery:
                  since: int | None = None, metric: str = "requests") -> list[dict[str, Any]]:
         """按小时的指标时间序列（usage_hourly 聚合，跨 model 汇总）。
 
-        每点包含 codebuddy / trae 两个渠道的指标值（按 metric 变化：
-        请求数 / 总 token / 平均耗时 ms / 平均首字延迟 ms），供前端绘制曲线。
-        返回结构 {hour, codebuddy, trae} 恒定，指标语义随 metric 参数切换。
+        每个点含当日出现过的各渠道指标值（按 metric 变化：请求数 / 总 token /
+        平均耗时 ms / 平均首字延迟 ms），供前端绘制曲线。渠道集合动态取自
+        数据（新增渠道无需改 SQL），返回结构形如 {hour, codebuddy, trae, zen}；
+        某渠道在该小时没有数据时补 0，保证同一批点的键集合一致，前端画线不
+        会因缺键断线。
         """
-        expr, as_mean = self._metric_sql(metric)
+        expr, _as_mean = self._metric_sql(metric)
         where, params = self._where(username=username, since=since, since_col="hour_utc")
         rows = self._db.connect().execute(
             f"""
-            SELECT hour_utc,
-                   COALESCE(SUM(CASE WHEN provider = 'codebuddy' THEN {expr} ELSE 0 END), 0)
-                   AS codebuddy,
-                   COALESCE(SUM(CASE WHEN provider = 'trae' THEN {expr} ELSE 0 END), 0)
-                   AS trae,
-                   COALESCE(SUM(CASE WHEN provider = 'codebuddy' THEN ok_count ELSE 0 END), 0)
-                   AS codebuddy_ok,
-                   COALESCE(SUM(CASE WHEN provider = 'trae' THEN ok_count ELSE 0 END), 0)
-                   AS trae_ok
+            SELECT hour_utc, provider,
+                   SUM({expr}) AS value, SUM(ok_count) AS ok_count
             FROM usage_hourly {where}
-            GROUP BY hour_utc
+            GROUP BY hour_utc, provider
             ORDER BY hour_utc
             """, params).fetchall()
+        raw: dict[int, dict[str, Any]] = {}
+        providers: set[str] = set()
+        for row in rows:
+            hour = row["hour_utc"]
+            provider = row["provider"]
+            providers.add(provider)
+            raw.setdefault(hour, {})[provider] = self._metric_value(
+                metric, row["value"], row["ok_count"])
+        # 渠道按名排序（codebuddy / trae / zen 恰好字典序）：同一批点的键顺序稳定
+        ordered = sorted(providers)
         return [
-            {"hour": row["hour_utc"],
-             "codebuddy": self._metric_value(metric, row["codebuddy"], row["codebuddy_ok"]),
-             "trae": self._metric_value(metric, row["trae"], row["trae_ok"])}
-            for row in rows
+            {"hour": hour, **{p: raw[hour].get(p, 0) for p in ordered}}
+            for hour in sorted(raw)
         ]
 
     def events(self, *, username: str | None = None, since: int | None = None,

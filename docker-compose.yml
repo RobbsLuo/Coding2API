@@ -43,6 +43,11 @@ services:
       TRUST_PROXY: ${TRUST_PROXY:-false}
       # 上游端点白名单（逗号分隔）；改 CODEBUDDY_API_ENDPOINT 时必须同时含它
       CODEBUDDY_ALLOWED_ENDPOINTS: ${CODEBUDDY_ALLOWED_ENDPOINTS:-https://copilot.tencent.com,https://www.codebuddy.ai}
+      # OpenCode Zen 免费层端点与其白名单（Zen 无凭证；白名单仅防误配）
+      ZEN_API_ENDPOINT: ${ZEN_API_ENDPOINT:-https://opencode.ai}
+      ZEN_ALLOWED_ENDPOINTS: ${ZEN_ALLOWED_ENDPOINTS:-https://opencode.ai}
+      # Zen 门禁要求的 UA 版本（低于上游阈值会被 426 拒绝）
+      ZEN_OPENCODE_VERSION: ${ZEN_OPENCODE_VERSION:-1.18.0}
       # CodeBuddy 聊天最小间隔（秒）：与 TRAE 共享节流，0 关闭
       CODEBUDDY_CHAT_MIN_INTERVAL: ${CODEBUDDY_CHAT_MIN_INTERVAL:-5}
       # 11128 内容风控自愈：中和出站正文里的伪装客户端指纹，false 关闭

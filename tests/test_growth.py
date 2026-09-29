@@ -1314,7 +1314,8 @@ def test_growth_endpoints_run_and_history(tmp_path):
         assert history[0]["report"] == "领旅行礼物：+42 积分"
 
         # 列表携带最近一次结果，界面不必再查一次 events
-        listed = client.get("/api/credentials").json()["credentials"][0]
+        listed = next(row for row in client.get("/api/credentials").json()["credentials"]
+                      if row["provider"] == "codebuddy")
         assert listed["growth_last_result"] == "领旅行礼物：+42 积分"
 
         # TRAE 不支持成长中心 → 稳定可读的错误

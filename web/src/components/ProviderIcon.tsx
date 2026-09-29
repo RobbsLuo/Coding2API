@@ -1,5 +1,6 @@
 import CodeBuddyColor from "@lobehub/icons/es/CodeBuddy/components/Color";
 import CodeBuddyMono from "@lobehub/icons/es/CodeBuddy/components/Mono";
+import OpenCodeMono from "@lobehub/icons/es/OpenCode/components/Mono";
 import TraeColor from "@lobehub/icons/es/Trae/components/Color";
 import TraeMono from "@lobehub/icons/es/Trae/components/Mono";
 import type { ComponentType } from "react";
@@ -9,6 +10,8 @@ type BrandComp = ComponentType<{ size?: number | string; className?: string }>;
 const BRAND: Record<string, { Main: BrandComp; Color: BrandComp }> = {
   codebuddy: { Main: CodeBuddyMono, Color: CodeBuddyColor },
   trae: { Main: TraeMono, Color: TraeColor },
+  // Zen 无独立彩色版：OpenCode 品牌 Mono 同时充当两态
+  zen: { Main: OpenCodeMono, Color: OpenCodeMono },
 };
 
 /**

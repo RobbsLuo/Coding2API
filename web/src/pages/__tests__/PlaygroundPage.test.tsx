@@ -114,7 +114,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     // 无倍率数据：默认选中回退列表第一个
     expect((select as HTMLSelectElement).value).toBe("glm-5.2");
     const groups = [...select.querySelectorAll("optgroup")].map((g) => g.label);
-    expect(groups).toContain("双渠道（自动调度）");
+    expect(groups).toContain("多渠道（自动调度）");
     expect(spy.mock.calls.some(([url]) => String(url).includes("/api/playground/models"))).toBe(true);
     expect(spy.mock.calls.some(([url]) => String(url).includes("/v1/models"))).toBe(false);
   });
@@ -367,8 +367,8 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     );
     expect(groups).toContainEqual(["仅 CodeBuddy", ["deepseek-v4-pro@codebuddy"]]);
     expect(groups).toContainEqual(["仅 TRAE", ["kimi-k3@trae"]]);
-    // 双渠道模型保留原值（不带 @），走自动路由
-    const dualGroup = select.querySelector('optgroup[label="双渠道（自动调度）"]');
+    // 多渠道模型保留原值（不带 @），走自动路由
+    const dualGroup = select.querySelector('optgroup[label="多渠道（自动调度）"]');
     expect(dualGroup).not.toBeNull();
     expect(dualGroup!.querySelector("option")?.value).toBe("glm-5.2");
   });

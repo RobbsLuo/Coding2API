@@ -33,7 +33,12 @@ from .api import (
 )
 from .api.deps import Services
 from .auth.throttle import LoginThrottle
-from .config import Settings, load_settings, validate_endpoint_allowed
+from .config import (
+    Settings,
+    load_settings,
+    validate_endpoint_allowed,
+    validate_zen_endpoint_allowed,
+)
 from .db.conn import Database
 from .db.crypto import CredentialCipher
 from .db.migrate import apply_schema
@@ -52,6 +57,7 @@ from .engine.scheduler import Scheduler
 from .provider.codebuddy.client import CodeBuddyClient, CodeBuddyProvider
 from .provider.codebuddy.oauth import CodeBuddyOAuth
 from .provider.trae.client import TraeProvider
+from .provider.zen.client import ZenClient, ZenProvider
 from .runtime_settings import load_runtime_settings
 from .stats.collector import StatsCollector
 from .stats.query import StatsQuery
@@ -101,6 +107,28 @@ def _codebuddy_endpoint(config: Settings) -> str:
         raise ValueError(
             f"CODEBUDDY_API_ENDPOINT {endpoint!r} is not in CODEBUDDY_ALLOWED_ENDPOINTS")
     return endpoint
+
+
+def _zen_endpoint(config: Settings) -> str:
+    """解析 Zen 端点并强制白名单校验（防把请求发往未授权主机）。"""
+    endpoint = config.zen_api_endpoint.strip()
+    if not validate_zen_endpoint_allowed(endpoint, config):
+        raise ValueError(
+            f"ZEN_API_ENDPOINT {endpoint!r} is not in ZEN_ALLOWED_ENDPOINTS")
+    return endpoint
+
+
+def _seed_zen_credential(credentials: CredentialRepository) -> None:
+    """确保池里有一条 zen 虚拟凭证（幂等）。
+
+    Zen 免费层无凭证概念，但调度/冷却/统计全部按 credentials 行工作；
+    没有这条占位行，zen 永远不会被选为候选。用户删除后重启会重新补上，
+    要永久停用请用「暂停」而不是删除。
+    """
+    if credentials.candidates(["zen"]):
+        return
+    credentials.add(provider="zen", credential_data={}, nickname="OpenCode Zen",
+                    added_by="system")
 
 
 def _similar_models(name: str, aliases: dict[str, dict[str, str]],
@@ -157,7 +185,15 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                 endpoint=_codebuddy_endpoint(config),
                 sanitize_markers=config.codebuddy_sanitize_channel_markers,
             ), pacer=chat_pacer),
+        "zen": ZenProvider(
+            client=ZenClient(host=_zen_endpoint(config),
+                             version=config.zen_opencode_version),
+            pacer=chat_pacer),
     }
+    # 默认装配路径（生产）才种子 zen 虚拟凭证：测试注入自定义 registry 时
+    # 不应凭空多出一条无对应 provider 的凭证行。
+    if providers is None:
+        _seed_zen_credential(credentials)
     # provider → {小写模型名: 上游原始 id}；api/models.list_models 拉取后就地更新，
     # executor 发请求前把归一名映射回各上游的原始大小写
     model_aliases: dict[str, dict[str, str]] = {}

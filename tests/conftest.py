@@ -40,3 +40,22 @@ def users_file(users_file_path, monkeypatch):
     # 这里提供 env 是为了让每个测试的库在 bootstrap 时把 root 提权。
     monkeypatch.setenv("ADMIN_USERNAMES", "root")
     return users_file_path
+
+
+@pytest.fixture(autouse=True)
+def zen_models_offline(monkeypatch, request):
+    """除 test_zen 外，一律不真连 Zen 上游。
+
+    任何 `build_app()` 的启动预热都会调 `ZenClient.fetch_models`，而它现在会
+    对免费候选逐个发探活请求（真跑一次模型推理）；不拦住的话每个用到真实装配
+    的用例都会发十几次外网请求，又慢又依赖外网。Zen 的真实逻辑（含探活各分支）
+    由 `tests/test_zen.py` 用 MockTransport 全覆盖，这里只给它一个固定的小名单。
+    """
+    if request.node.path.name == "test_zen.py":
+        return
+    from src.provider.zen.client import Model, ZenClient
+
+    async def fake_fetch_models(self) -> list[Model]:
+        return [Model(id="offline-free", name="opencode")]
+
+    monkeypatch.setattr(ZenClient, "fetch_models", fake_fetch_models)

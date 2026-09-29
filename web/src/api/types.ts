@@ -5,7 +5,7 @@
  * 各页面只依赖本文件，不要各自猜测字段名。
  */
 
-export type Provider = "codebuddy" | "trae";
+export type Provider = "codebuddy" | "trae" | "zen";
 
 /** 健康度三态：null = 未探测；-1 = 已耗尽；0-100 = 已知剩余百分比。 */
 export type Health = number | null;
@@ -124,8 +124,8 @@ export type StatsMetric = "requests" | "tokens" | "latency" | "ttfb";
 export interface TimelinePoint {
   /** UTC 秒，对齐到小时起点 */
   hour: number;
-  codebuddy: number;
-  trae: number;
+  /** 各渠道指标值（渠道名为动态键：codebuddy / trae / zen…） */
+  [provider: string]: number;
 }
 
 /** 按模型趋势：每小时各 Top N 模型的指标值（模型名为动态键）。 */

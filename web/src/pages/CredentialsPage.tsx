@@ -45,6 +45,7 @@ import {
   tokenExpiryView,
 } from "../api/display";
 import type { Credential, CreditEvent, GrowthRunResult, Provider } from "../api/types";
+import { PROVIDER_LABEL } from "../api/providers";
 import type { TokenExpiryView } from "../api/display";
 import {
   Badge,
@@ -66,7 +67,6 @@ import {
 } from "../ui";
 
 const PROVIDERS: Provider[] = ["codebuddy", "trae"];
-const PROVIDER_LABEL: Record<Provider, string> = { codebuddy: "CodeBuddy", trae: "TRAE" };
 
 /** 套餐到期日：只要日期，时分秒对"哪个包先过期"没用。 */
 function packageExpiry(epoch: number | null): string {
@@ -733,9 +733,6 @@ function Row({
       </TableCell>
       <TableCell>
         <Badge tone={health.tone}>{health.label}</Badge>
-        {health.kind === "unknown" && (
-          <span className="ml-2 text-xs text-muted-foreground">探测失败或未提供</span>
-        )}
       </TableCell>
       <TableCell className="text-xs">
         <div className="flex flex-wrap items-baseline gap-x-2">
@@ -834,15 +831,18 @@ function Row({
                 >
                   <RefreshCw className="size-3.5" /> 探测
                 </Button>
-                <Button
-                  size="sm"
-                  variant="default"
-                  disabled={busy}
-                  data-testid={`checkin-${credential.id}`}
-                  onClick={() => actions.checkin(credential)}
-                >
-                  <CalendarCheck className="size-3.5" /> 签到
-                </Button>
+                {/* zen 免费层没有签到概念（provider 未实现 checkin，点了只会 400） */}
+                {credential.provider !== "zen" && (
+                  <Button
+                    size="sm"
+                    variant="default"
+                    disabled={busy}
+                    data-testid={`checkin-${credential.id}`}
+                    onClick={() => actions.checkin(credential)}
+                  >
+                    <CalendarCheck className="size-3.5" /> 签到
+                  </Button>
+                )}
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>
                     <Button

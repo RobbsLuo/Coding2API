@@ -1477,7 +1477,8 @@ def test_stats_endpoints_scope_by_principal(admin_client):
     assert client.get("/api/stats/by-provider").json()["providers"][0]["requests"] == 2
     timeline = client.get("/api/stats/timeline").json()
     assert timeline["points"]
-    assert list(timeline["points"][0].keys()) == ["hour", "codebuddy", "trae"]
+    # 渠道列动态取自数据（本用例只写了 trae），不再固定为两渠道
+    assert list(timeline["points"][0].keys()) == ["hour", "trae"]
 
 
 def test_stats_endpoints_restrict_non_admin(tmp_path):
@@ -1700,7 +1701,8 @@ def test_upstream_auth_poll_success_persists_credential(admin_client):
                        json={"provider": "codebuddy", "state": reservation}).json()
     assert body["status"] == "success"
     assert "token" not in json.dumps(body).lower()
-    assert app.state.credentials.list_all()[0]["provider"] == "codebuddy"
+    assert any(row["provider"] == "codebuddy"
+               for row in app.state.credentials.list_all())
 
 
 def test_probe_endpoint_marks_failed_on_provider_error(admin_client):
@@ -2883,7 +2885,7 @@ def test_import_triggers_immediate_probe(admin_client):
             break
         time.sleep(0.02)
     assert probed == ["called"]
-    health = app.state.credentials.candidates()[0].health
+    health = next(c for c in app.state.credentials.candidates(["codebuddy"])).health
     assert health == 70
     assert credential_id
 
@@ -3759,7 +3761,8 @@ def test_credentials_endpoint_exposes_model_cooldowns(tmp_path):
             "glm-5.2": ModelCooldown(cooling_until=int(time.time()) + 600,
                                      hits=1, reason="model")}))
         rows = client.get("/api/credentials").json()["credentials"]
-    assert [row["model"] for row in rows[0]["model_cooldowns"]] == ["glm-5.2"]
+    codebuddy = next(row for row in rows if row["provider"] == "codebuddy")
+    assert [row["model"] for row in codebuddy["model_cooldowns"]] == ["glm-5.2"]
 
 
 # --------------------------------------------------------------- B3.3 token 到期

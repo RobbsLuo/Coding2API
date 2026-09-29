@@ -13,8 +13,9 @@ import { Notice } from "../ui";
 import { ModelTrendChart } from "../components/ModelTrendChart";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
-import { UsageChart } from "../components/UsageChart";
-import type { Provider, UsageEventRow } from "../api/types";
+import { UsageChart, chartProviders } from "../components/UsageChart";
+import { providerLabel } from "../api/providers";
+import type { UsageEventRow } from "../api/types";
 import {
   Button,
   Card,
@@ -46,8 +47,6 @@ const METRICS = [
   { value: "latency", label: "耗时", icon: <Timer className="size-3.5" /> },
   { value: "ttfb", label: "首字延迟", icon: <Gauge className="size-3.5" /> },
 ];
-
-const PROVIDER_LABEL: Record<Provider, string> = { codebuddy: "CodeBuddy", trae: "TRAE" };
 
 /** 明细分页的可选每页条数。 */
 const PAGE_SIZES = [10, 20, 50, 100];
@@ -195,15 +194,13 @@ export function StatsPage() {
 
       <section className="grid gap-4 lg:grid-cols-2">
         <Panel title="请求量趋势" action={
-          <div className="flex items-center gap-3 text-xs text-muted-foreground">
-            <span className="inline-flex items-center gap-1.5">
-              <ProviderIcon provider="codebuddy" size={12} />
-              CodeBuddy
-            </span>
-            <span className="inline-flex items-center gap-1.5">
-              <ProviderIcon provider="trae" size={12} />
-              TRAE
-            </span>
+          <div className="flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+            {chartProviders(timeline.data?.points ?? []).map((provider) => (
+              <span key={provider} className="inline-flex items-center gap-1.5">
+                <ProviderIcon provider={provider} size={12} />
+                {providerLabel(provider)}
+              </span>
+            ))}
           </div>
         }>
           {(timeline.data?.points.length ?? 0) === 0 ? (
@@ -253,7 +250,7 @@ export function StatsPage() {
                   <TableCell>
                     <span className="inline-flex items-center gap-1.5">
                       <ProviderIcon provider={row.provider} size={13} />
-                      {PROVIDER_LABEL[row.provider] ?? row.provider}
+                      {providerLabel(row.provider)}
                     </span>
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{formatNumber(row.requests)}</TableCell>
@@ -322,8 +319,8 @@ export function StatsPage() {
                     {session.is_admin && <TableCell>{row.username}</TableCell>}
                     <TableCell>
                       <span className="inline-flex items-center gap-1.5">
-                        <ProviderIcon provider={row.provider as Provider} size={13} />
-                        {PROVIDER_LABEL[row.provider as Provider] ?? row.provider}
+                        <ProviderIcon provider={row.provider} size={13} />
+                        {providerLabel(row.provider)}
                       </span>
                     </TableCell>
                     <TableCell className="max-w-40 truncate" title={row.credential_name ?? row.credential_id ?? undefined}>
