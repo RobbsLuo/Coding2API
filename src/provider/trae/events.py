@@ -85,19 +85,33 @@ def parse_frame(frame: SSEFrame) -> Event | None:
         f"unhandled known event {name!r}")
 
 
+def _is_blank_solo_tool_call(fn: dict) -> bool:
+    """无 name 且 arguments 为空（None / 空串 / 空 JSON 串 / 空对象）的噪声增量。
+
+    正常分片续块无 name 但带实际 arguments，必须保留（否则客户端按
+    index 拼出的参数 JSON 被截断）；空名且空参才是真正的噪声调用。
+    """
+    if str(fn.get("name") or "").strip():
+        return False
+    args = fn.get("arguments")
+    return args in (None, "", "{}", {})
+
+
 def _normalize_solo_tool_call(item: Any) -> dict | None:
     """SOLO tool_call → OpenAI 形状。
 
     上游流里的 tool_call 用 function_call{name, arguments}（SOLO 协议），
-    客户端契约是 OpenAI 的 function{name, arguments}。缺失/无 name 的
-    条目丢弃（客户端无法执行）。
+    客户端契约是 OpenAI 的 function{name, arguments}。工具调用按 index 分片：
+    首片带 name，后续片只有 arguments 增量——**无 name 但有实际 arguments 的
+    续片必须保留**（丢弃会让客户端拿到截断的 JSON 参数 → 工具执行报错 →
+    原样重试同一轮 → 死循环）。只丢弃无 name 且 arguments 为空的噪声条目。
     """
     if not isinstance(item, dict):
         return None
     fn = item.get("function_call")
     if not isinstance(fn, dict):
         fn = item.get("function")
-    if not isinstance(fn, dict) or not str(fn.get("name") or "").strip():
+    if not isinstance(fn, dict) or _is_blank_solo_tool_call(fn):
         return None
     out = {k: v for k, v in item.items() if k not in ("function", "function_call")}
     out["function"] = fn
@@ -105,7 +119,7 @@ def _normalize_solo_tool_call(item: Any) -> dict | None:
 
 
 def _named_tool_calls(tool_calls: list) -> list:
-    """归一为 OpenAI 形状并剔除无 name 的条目。"""
+    """归一为 OpenAI 形状，剔除空名空参噪声（保留无 name 的参数续片）。"""
     out = []
     for tc in tool_calls:
         normalized = _normalize_solo_tool_call(tc)

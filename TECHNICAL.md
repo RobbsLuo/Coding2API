@@ -175,6 +175,14 @@ class Usage:
 「解析失败不静默」（PROPOSAL §11 风险清单）针对的是**已知事件的畸形数据**：归一集内的事件
 JSON 非对象/字段类型不对仍然抛 `UpstreamProtocolViolation`，不退回默认值。
 
+**TRAE tool_call 分片续块必须保留（Q42）**：TRAE 上游工具调用按 `index` 分片，首片带
+`function_call.name`、后续片只有 `arguments` 增量且**没有 name**。`_normalize_solo_tool_call`
+把 SOLO 的 `function_call{name,arguments}` 归一为 OpenAI `function{name,arguments}` 时，
+只丢「无 name **且** arguments 为空」的噪声（`_is_blank_solo_tool_call`）——带实际 arguments
+的续片保留，交由下游 `ToolIndexState` 按 index 合并。若按「无 name 即丢弃」过滤，续片全被
+吃掉，客户端拼出截断 JSON → 工具报错 → 原样重试同轮 → 死循环（issue #1）。CodeBuddy/Zen
+的 `_is_blank_tool_call` 是同一判据。
+
 ### 3.2 错误分类（决定冷却时长，Q12=B）
 
 ```python

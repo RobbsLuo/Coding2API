@@ -1296,6 +1296,40 @@ def test_parse_all_events_non_dict_tool_call_entry_skipped():
     kinds = [e.kind for e in trae_events.parse_all_events(empty)]
     assert EventKind.TOOL_CALLS not in kinds
 
+
+def test_tool_call_argument_fragments_are_preserved_and_merged():
+    """分片流：首片带 name，续片只有 arguments 增量——续片必须保留。
+
+    回归：此前无 name 的条目被一律丢弃，客户端聚合出截断的 JSON 参数，
+    工具执行报错后原样重试同一轮（死循环）。
+    """
+    frames = [
+        trae_events.SSEFrame(event="output", data=(
+            '{"tool_calls":[{"id":"call_a","type":"function","index":0,'
+            '"function_call":{"name":"get_weather","arguments":"{\\"city\\":"}}]}')),
+        trae_events.SSEFrame(event="output", data=(
+            '{"tool_calls":[{"index":0,"function_call":{"arguments":"\\"北京\\"}"}}]}')),
+    ]
+    events = [e for f in frames for e in trae_events.parse_all_events(f)]
+    assert [e.kind for e in events] == [EventKind.TOOL_CALLS, EventKind.TOOL_CALLS]
+    # 续片无 name 但保留 arguments，归一为 OpenAI function 形状
+    assert events[1].tool_calls == [{"index": 0, "function": {"arguments": '"北京"}'}}]
+    merged = aggregate(events, "m")["choices"][0]["message"]["tool_calls"]
+    assert merged[0]["function"] == {
+        "name": "get_weather", "arguments": '{"city":"北京"}'}
+
+
+@pytest.mark.parametrize("arguments", [None, "", "{}", {}])
+def test_blank_nameless_tool_call_is_dropped(arguments):
+    """无 name 且 arguments 为空（None/空串/空 JSON 串/空对象）的噪声整条丢弃。"""
+    payload = json.dumps({"tool_calls": [
+        {"id": "n", "function_call": {"name": "", "arguments": arguments}}],
+        "response": "x"})
+    events = trae_events.parse_all_events(
+        trae_events.SSEFrame(event="output", data=payload))
+    assert EventKind.TOOL_CALLS not in [e.kind for e in events]
+
+
 def test_trae_usage_cached_tokens():
     """TRAE usage：details 路径 + 顶层兜底 + TRAE 官方字段 + 缺省 None。"""
     from src.provider.trae.events import SSEFrame
