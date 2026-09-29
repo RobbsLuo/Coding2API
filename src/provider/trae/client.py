@@ -556,6 +556,13 @@ def resolve_oauth_host(credential: TraeCredential, oauth_host: str) -> str:
     return host if host in ALLOWED_OAUTH_HOSTS else oauth_host
 
 
+def _pacer_key(credential: TraeCredential) -> str:
+    """聊天节流桶键：uid 优先，取不到时退到 access token。"""
+    from ...tasks.pacer import stable_key
+
+    return stable_key("trae", credential.uid or credential.access_token)
+
+
 @dataclass(slots=True)
 class TraeProvider:
     """Provider 协议实现（细接口，Q16=A）。"""
@@ -657,10 +664,16 @@ class TraeProvider:
                           model: str) -> AsyncIterator[Event]:
         """引擎调用入口：dict 凭证 → 上游流 → 中立事件。"""
         credential = TraeCredential.from_dict(credential_data)
+        key = _pacer_key(credential)
         if self.pacer is not None:
-            await self.pacer.wait_turn()
-        async for event in self.client.stream_chat(credential, payload, model):
-            yield event
+            await self.pacer.wait_turn(key)
+        try:
+            async for event in self.client.stream_chat(credential, payload, model):
+                yield event
+        finally:
+            # 并发模式必须归还名额，否则该凭证被当成永远在途而失去节流
+            if self.pacer is not None:
+                self.pacer.release(key)
 
     async def refresh(self, credential_data: dict) -> dict:
         refreshed = await self.client.refresh_token(TraeCredential.from_dict(credential_data))

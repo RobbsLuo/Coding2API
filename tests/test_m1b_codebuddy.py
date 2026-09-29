@@ -38,6 +38,7 @@ from src.provider.codebuddy.client import (
 )
 from src.provider.codebuddy.events import UpstreamProtocolViolation
 from src.provider.codebuddy.headers import QUOTA_RANGE_END, encode_department, host_of
+from src.tasks.pacer import stable_key
 from tests.conftest import SECRET
 
 FIXTURES = Path(__file__).parent.parent / "src" / "provider" / "fixtures" / "codebuddy"
@@ -1813,8 +1814,11 @@ async def test_chat_pacer_throttles_and_can_be_disabled():
     waited = []
 
     class FakePacer:
-        async def wait_turn(self):
-            waited.append(_time.monotonic())
+        async def wait_turn(self, key=None):
+            waited.append((key, _time.monotonic()))
+
+        def release(self, key=None):
+            pass
 
     async def stream_ok(cred, payload, model):
         yield GOOD[0]
@@ -1825,8 +1829,11 @@ async def test_chat_pacer_throttles_and_can_be_disabled():
                 yield ev
 
     provider = CodeBuddyProvider(client=FakeClient(), pacer=FakePacer())
-    events = [e async for e in provider.stream_chat({"bearer_token": "t"}, {}, "m")]
+    events = [e async for e in provider.stream_chat(
+        {"bearer_token": "t", "account_uid": "acct-1"}, {}, "m")]
     assert events and waited
+    # 桶键按凭证身份派生，而不是空键
+    assert waited[0][0] == stable_key("codebuddy", "acct-1")
 
     provider2 = CodeBuddyProvider(client=FakeClient(), pacer=None)
     waited.clear()

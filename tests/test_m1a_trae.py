@@ -51,6 +51,7 @@ from src.provider.trae.client import (
     prepare_body,
 )
 from src.provider.trae.events import UpstreamProtocolViolation
+from src.tasks.pacer import stable_key
 from tests.conftest import SECRET
 
 FIXTURES = Path(__file__).parent.parent / "src" / "provider" / "fixtures" / "trae"
@@ -1205,16 +1206,21 @@ async def test_trae_pacer_wait_and_disable():
     waited = []
 
     class FakePacer:
-        async def wait_turn(self):
-            waited.append(_time.monotonic())
+        async def wait_turn(self, key=None):
+            waited.append((key, _time.monotonic()))
+
+        def release(self, key=None):
+            pass
 
     class FakeClient:
         async def stream_chat(self, cred, payload, model):
             yield Event(kind=EventKind.CONTENT, content="ok")
 
     provider = TraeProvider(client=FakeClient(), pacer=FakePacer())
-    events = [e async for e in provider.stream_chat({"accessToken": "a"}, {}, "m")]
+    events = [e async for e in provider.stream_chat({"accessToken": "a", "uid": "u1"}, {}, "m")]
     assert events and waited
+    # 桶键按账号身份派生，而不是空键
+    assert waited[0][0] == stable_key("trae", "u1")
 
     provider2 = TraeProvider(client=FakeClient(), pacer=None)
     waited.clear()

@@ -183,14 +183,17 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 聊天节流器存「取值器」而不是快照：管理台改最小间隔后立即生效。
     # 必须传 lambda 而不是 live(runtime.x)——后者会当场求值一次再包成常量，
     # 对 RuntimeSettings 就等于没热更。0 表示关闭，由 Pacer.disabled 处理。
+    # allow_concurrent：按凭证分桶并在桶内放行并发（同渠道同模型并发不再被
+    # 逐级 +interval 串行化，实测 3 并发 TTFB 1.5/6.7/11.5s → 齐平）。
     chat_pacer = Pacer(lambda: runtime.codebuddy_chat_min_interval,
-                       lambda: runtime.codebuddy_chat_min_interval)
-    # TRAE/CB 共享同一 pacer：两渠道请求共同保持最小间隔，
-    # 避开各自的频率风控（CB 11128 / TRAE 流内错误）
+                       lambda: runtime.codebuddy_chat_min_interval,
+                       allow_concurrent=True)
+    # TRAE/CB 共享同一 pacer 实例，但桶键带渠道前缀 + 凭证身份，彼此不互堵。
     # zen 单独一个 pacer：zen 是匿名免费层，没有账号级频率风控，共享只会让
     # zen 请求排在 CB/TRAE 之后空等满最小间隔（连发/并发时每个 +5s，实测）。
     zen_pacer = Pacer(lambda: runtime.zen_chat_min_interval,
-                      lambda: runtime.zen_chat_min_interval)
+                      lambda: runtime.zen_chat_min_interval,
+                      allow_concurrent=True)
     registry = providers if providers is not None else {
         "trae": TraeProvider(pacer=chat_pacer),
         "codebuddy": CodeBuddyProvider(

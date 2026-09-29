@@ -573,8 +573,11 @@ async def test_provider_stream_chat_with_and_without_pacer():
         def __init__(self) -> None:
             self.turns = 0
 
-        async def wait_turn(self) -> None:
+        async def wait_turn(self, key=None) -> None:
             self.turns += 1
+
+        def release(self, key=None) -> None:
+            pass
 
     pacer = Pacer()
     provider = ZenProvider(client=_client(handler), pacer=pacer)

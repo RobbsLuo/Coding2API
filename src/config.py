@@ -81,9 +81,11 @@ class Settings(BaseSettings):
     activity_report_hour: int = 10          # 本地（北京）时间整点窗口内执行一次
     pacer_min_seconds: float = 5
     pacer_max_seconds: float = 20
-    # CodeBuddy 聊天最小间隔：与 TRAE 共享的最小请求间隔，避开两渠道各自的
-    # 频率风控；0 关闭节流。（注意 11128 主因是内容指纹风控，见
-    # codebuddy_sanitize_channel_markers 与 TECHNICAL.md §3.2，调间隔救不了）
+    # CodeBuddy 聊天最小间隔：同渠道同凭证的「顺序连发」之间的最小请求间隔，
+    # 避开频率风控；0 关闭节流。按凭证分桶、桶内允许并发：同渠道同模型的
+    # 并发请求不再被逐级串行化（旧实现把它们推到 +5s、+10s）；只有上一请求
+    # 已结束、紧接着又来一个时才补足间隔。（注意 11128 主因是内容指纹风控，
+    # 见 codebuddy_sanitize_channel_markers 与 TECHNICAL.md §3.2，调间隔救不了）
     codebuddy_chat_min_interval: float = 5
     # Zen 聊天最小间隔：zen 是匿名免费层，没有 CB/TRAE 那种账号级频率风控，
     # 默认 0（不节流）。刻意**不**与 codebuddy_chat_min_interval 共享 pacer：

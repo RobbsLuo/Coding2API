@@ -552,6 +552,14 @@ _MODEL_CACHE: dict[tuple[str, str], tuple[float, list[Model]]] = {}
 CODEBUDDY_IDE_VERSION = "1.42.0"
 
 
+def _pacer_key(credential: CodeBuddyCredential) -> str:
+    """聊天节流桶键：账号身份优先，取不到时退到 token（同账号多凭证共桶）。"""
+    from ...tasks.pacer import stable_key
+
+    return stable_key("codebuddy", credential.account_uid or credential.user_id
+                      or credential.bearer_token)
+
+
 class UpstreamHTTPError(base.UpstreamHTTPError):
     """CodeBuddy 上游非 2xx；kind() 走 CB 的 1005/400 规则。"""
 
@@ -593,10 +601,16 @@ class CodeBuddyProvider:
     async def stream_chat(self, credential_data: dict, payload: dict,
                           model: str) -> AsyncIterator[Event]:
         credential = CodeBuddyCredential.from_dict(credential_data)
+        key = _pacer_key(credential)
         if self.pacer is not None:
-            await self.pacer.wait_turn()
-        async for event in self.client.stream_chat(credential, payload, model):
-            yield event
+            await self.pacer.wait_turn(key)
+        try:
+            async for event in self.client.stream_chat(credential, payload, model):
+                yield event
+        finally:
+            # 并发模式必须归还名额，否则该凭证被当成永远在途而失去节流
+            if self.pacer is not None:
+                self.pacer.release(key)
 
     def host(self) -> str:
         return host_of(self.client.endpoint)

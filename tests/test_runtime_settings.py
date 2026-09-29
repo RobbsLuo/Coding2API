@@ -442,9 +442,10 @@ def test_every_hot_setting_is_read_lazily_not_baked_at_startup(admin_app):
     assert deps.default_model() == "kimi-k3"
     # 调度器与粘性 TTL
     assert deps.affinity.ttl_seconds == 99
-    # 聊天节流器：CB/TRAE 共享同一个 Pacer
+    # 聊天节流器：CB/TRAE 共享同一个 Pacer 实例，但按凭证分桶、桶内允许并发
     assert app.state.services.registry["codebuddy"].pacer.min_seconds == 12.5
     assert app.state.services.registry["codebuddy"].pacer.max_seconds == 12.5
+    assert app.state.services.registry["codebuddy"].pacer.allow_concurrent is True
     assert app.state.services.registry["trae"].pacer is \
         app.state.services.registry["codebuddy"].pacer
     # zen 独立 pacer：默认不节流，也不与 CB/TRAE 共享（共享会让 zen 空等）
@@ -452,6 +453,7 @@ def test_every_hot_setting_is_read_lazily_not_baked_at_startup(admin_app):
     assert zen_pacer is not app.state.services.registry["codebuddy"].pacer
     assert zen_pacer.min_seconds == 7.5
     assert zen_pacer.max_seconds == 7.5
+    assert zen_pacer.allow_concurrent is True
     # 后台任务周期与开关
     assert runner._quota_interval == 33 * 60        # noqa: SLF001
     assert runner._growth_interval == 9 * 60        # noqa: SLF001

@@ -81,7 +81,8 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "后台额度探测的一轮间隔；下限 1 分钟。", minimum=1,
                task="quota_probe", floor=1),
     HotSetting("codebuddy_chat_min_interval", float, "CodeBuddy 聊天最小间隔（秒）",
-               "与 TRAE 共享的最小请求间隔（0 关闭）；改小会显著提高风控概率。",
+               "同渠道同凭证顺序连发的最小请求间隔（0 关闭）；按凭证分桶、桶内"
+               "允许并发，故同渠道同模型的并发请求不会被串行化。",
                minimum=0.0),
     HotSetting("zen_chat_min_interval", float, "Zen 聊天最小间隔（秒）",
                "zen 匿名免费层专用节流（0 关闭，默认）。与 CodeBuddy/TRAE 各自"

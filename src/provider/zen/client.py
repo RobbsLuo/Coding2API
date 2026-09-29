@@ -379,9 +379,13 @@ class ZenProvider:
     async def stream_chat(self, credential_data: dict, payload: dict,
                           model: str) -> AsyncIterator[Event]:
         if self.pacer is not None:
-            await self.pacer.wait_turn()
-        async for event in self.client.stream_chat(payload, model):
-            yield event
+            await self.pacer.wait_turn("zen")
+        try:
+            async for event in self.client.stream_chat(payload, model):
+                yield event
+        finally:
+            if self.pacer is not None:
+                self.pacer.release("zen")
 
     async def aclose(self) -> None:
         await self.client.aclose()

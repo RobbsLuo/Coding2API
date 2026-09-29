@@ -42,7 +42,7 @@ from src.stats.collector import StatsCollector
 from src.stats.query import StatsQuery
 from src.tasks import TaskReport
 from src.tasks.checkin import CheckinTask
-from src.tasks.pacer import Pacer
+from src.tasks.pacer import Pacer, stable_key
 from src.tasks.quota_probe import QuotaProbeTask
 from src.tasks.refresh import RefreshTask
 from src.tasks.retention import RetentionTask
@@ -102,6 +102,100 @@ async def test_pacer_skips_sleep_when_elapsed_exceeds_interval():
     clock["t"] = 100.0
     await pacer.wait_turn()
     assert slept == []
+
+
+# ------------------------------------------------- Pacer（并发模式：按凭证分桶）
+
+async def test_pacer_concurrent_allows_same_bucket_parallelism():
+    """同桶已有在途请求时直接放行：这是「同渠道同模型并发不并行」的修复点。"""
+    slept: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    clock = {"t": 0.0}
+    pacer = Pacer(5, 5, allow_concurrent=True, sleep=fake_sleep,
+                  now=lambda: clock["t"])
+    assert pacer.allow_concurrent is True
+    await pacer.wait_turn("codebuddy:acct")      # 首请求：不睡
+    await pacer.wait_turn("codebuddy:acct")      # 在途 → 直接放行
+    await pacer.wait_turn("codebuddy:acct")
+    assert slept == []
+    pacer.release("codebuddy:acct")
+    pacer.release("codebuddy:acct")
+    pacer.release("codebuddy:acct")
+
+
+async def test_pacer_concurrent_spaces_sequential_starts():
+    """桶空闲后「紧接着又来一个」才补足最小间隔。"""
+    slept: list[float] = []
+    clock = {"t": 0.0}
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock["t"] += seconds
+
+    pacer = Pacer(5, 5, allow_concurrent=True, sleep=fake_sleep,
+                  now=lambda: clock["t"])
+    await pacer.wait_turn("k")
+    pacer.release("k")                           # 上一请求结束
+    await pacer.wait_turn("k")                   # 紧接又来一个 → 补 5s
+    assert slept == [5.0]
+
+
+async def test_pacer_concurrent_buckets_are_independent():
+    """不同凭证分属不同桶：一个账号在途不拖住另一个账号。"""
+    slept: list[float] = []
+    clock = {"t": 0.0}
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        clock["t"] += seconds
+
+    pacer = Pacer(5, 5, allow_concurrent=True, sleep=fake_sleep,
+                  now=lambda: clock["t"])
+    await pacer.wait_turn("a")
+    pacer.release("a")
+    await pacer.wait_turn("b")                   # 独立桶：不睡
+    assert slept == []
+
+
+async def test_pacer_concurrent_disabled_and_missing_key_are_noops():
+    """0 关闭时不占名额；空 key 与 release 多余调用都不炸。"""
+    pacer = Pacer(0, 0, allow_concurrent=True)
+    assert pacer.disabled is True
+    await pacer.wait_turn("k")
+    pacer.release("k")
+    pacer.release()                              # 多余 release（默认空桶）
+    # 关闭态下再严格模式校准一次：严格模式 release 是空操作
+    strict = Pacer(5, 5, allow_concurrent=False)
+    assert strict.allow_concurrent is False
+    strict.release("k")
+    await strict.wait_turn("k")
+
+
+async def test_pacer_concurrent_skips_when_interval_already_elapsed():
+    """桶空闲且距上次开始已超过间隔：不睡。"""
+    slept: list[float] = []
+    clock = {"t": 0.0}
+
+    async def fake_sleep(seconds: float) -> None:
+        slept.append(seconds)
+
+    pacer = Pacer(5, 5, allow_concurrent=True, sleep=fake_sleep,
+                  now=lambda: clock["t"])
+    await pacer.wait_turn("k")
+    pacer.release("k")
+    clock["t"] = 100.0
+    await pacer.wait_turn("k")
+    assert slept == []
+
+
+def test_stable_key_degrades_to_provider_when_identity_missing():
+    assert stable_key("codebuddy", None) == "codebuddy"
+    assert stable_key("trae", "") == "trae"
+    assert stable_key("codebuddy", "acct-1") == stable_key("codebuddy", "acct-1")
+    assert stable_key("codebuddy", "acct-1") != stable_key("trae", "acct-1")
 
 
 def test_task_report_dict():

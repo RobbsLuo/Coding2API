@@ -708,7 +708,9 @@ class Scheduler:
 
 ### 6.2 后台任务（tasks/）
 
-`TaskRunner`（runner.py）每类任务一个独立 asyncio 循环，失败只记日志不拖垮服务；间隔有安全下限，避免打爆上游。所有对外 HTTP 请求经 `pacer.py` 全局节流。
+`TaskRunner`（runner.py）每类任务一个独立 asyncio 循环，失败只记日志不拖垮服务；间隔有安全下限，避免打爆上游。所有对外 HTTP 请求经 `pacer.py` 节流。
+
+`Pacer` 有两种模式（见 §Q45）：后台任务用**严格模式**（默认，单锁串行化跨任务/跨凭证的相邻请求）；聊天用**并发模式**（`allow_concurrent=True`），按「渠道 + 凭证身份」分桶并在桶内放行并发——同渠道同模型的并发请求不再被逐级 +interval 串行化，只有同凭证「上一请求已结束、紧接着又来一个」的顺序连发才补足最小间隔。请求结束由 provider `stream_chat` 的 `finally` 调 `release(key)` 归还名额。
 
 每个任务最近一次**真实执行**（时间 / 结果 / 错误 / 轮数）记在进程内（`status.py` 的 `TaskStatusStore`），由 `GET /api/tasks` 下发给管理台「任务与配置」页；no-op 轮次不入账，重启归零——见 §3.12。
 
