@@ -446,7 +446,8 @@ def test_callback_accepts_upper_case_keys():
 
 # ------------------------------------------------------------- main app
 
-def test_models_endpoint_lists_all_registered_providers(tmp_path):
+def test_models_endpoint_lists_connected_providers(tmp_path):
+    """模型列表按渠道凭证加载：有凭证的渠道才合并进列表（Q41）。"""
     from src.config import Settings
     from src.provider.base import Model
 
@@ -470,6 +471,8 @@ def test_models_endpoint_lists_all_registered_providers(tmp_path):
 
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
     app = build_app(settings, providers={"codebuddy": TwoProviders(), "trae": TraeStub()})
+    app.state.credentials.add(provider="codebuddy", credential_data={"token": "a"})
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
     key = app.state.api_keys.create("root")["api_key"]
     from fastapi.testclient import TestClient
 

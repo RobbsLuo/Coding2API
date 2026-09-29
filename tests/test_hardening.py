@@ -432,6 +432,8 @@ def test_models_endpoint_reuses_cache_within_ttl(settings):
             return raw
 
     app = build_app(settings, providers={"trae": Provider()})
+    # 没凭证的渠道不参与模型列表（Q41），故先接入一条凭证
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
     key = app.state.api_keys.create("root")["api_key"]
     with TestClient(app) as c:
         for _ in range(3):
@@ -718,6 +720,7 @@ def test_models_endpoint_falls_back_to_cache(settings):
 
     provider = Flaky()
     app = build_app(settings, providers={"trae": provider})
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
     services = app.state.services
     key = app.state.api_keys.create("root")["api_key"]
     with TestClient(app) as c:
@@ -742,6 +745,7 @@ def test_models_endpoint_logs_when_no_cache(settings):
             return raw
 
     app = build_app(settings, providers={"trae": Broken()})
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
     key = app.state.api_keys.create("root")["api_key"]
     with TestClient(app) as c:
         response = c.get("/v1/models", headers={"Authorization": f"Bearer {key}"})
@@ -825,6 +829,7 @@ def test_models_cache_fallback_when_ttl_expired(settings):
 
     provider = Flaky()
     app = build_app(settings, providers={"trae": provider})
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
     key = app.state.api_keys.create("root")["api_key"]
     with TestClient(app) as c:
         c.get("/v1/models", headers={"Authorization": f"Bearer {key}"})

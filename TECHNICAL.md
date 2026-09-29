@@ -280,6 +280,8 @@ def health(q: Quota | None) -> HealthScore:
 
 **黑名单热更与列表缓存（B4 修正）**：`MODEL_BLOCKLIST` 是热更项，但 `list_models` 的 `model_list_cache` 原先存**过滤后**结果，导致改完最长要等 `MODEL_LIST_TTL_SECONDS`（300s）才反映到 Playground，且被滤模型在 TTL 内会从「上游失败兜底缓存」复活。现在缓存只存**未过滤原始表**，过滤在每个出口现做（`_visible()`，命中缓存 / 成功拉取 / 失败兜底三条路径都过一遍）；前端保存后显式 `invalidateQueries(["playground-models"])`，因此黑名单与列表两条缓存都立即生效，不依赖 TTL 过期。
 
+**按凭证加载（Q41）**：`list_models` 先用 `credential_providers()` 求「当前有可用凭证」的渠道集合（`candidates(selectable_only=True)`：未暂停、未硬禁用；冷却中的仍算有凭证，避免限流时列表闪没），循环里 `provider_id not in connected` 直接 `continue`——**没凭证的渠道不读缓存、不拉上游、不展示**。此前无凭证也会 `list_models({})`，CB/TRAE 回退静态表、zen 匿名拉取，于是在只接了部分渠道时列表里出现打不通的幽灵模型；启动预热也因此不再对无凭证渠道白打上游。zen 自带虚拟凭证，不受影响。
+
 ### 3.6 活跃上报（B1.7，默认关闭）
 
 CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端对话事件；账号只被网关

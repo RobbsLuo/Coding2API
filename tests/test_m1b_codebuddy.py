@@ -914,6 +914,9 @@ def test_default_registry_contains_both_providers(tmp_path):
         "trae": TraeStub(),
         "codebuddy": FailingCB(),
     })
+    # 模型列表按渠道凭证加载：接入凭证后该渠道才参与（Q41）
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    app.state.credentials.add(provider="codebuddy", credential_data={"token": "b"})
     key = app.state.api_keys.create("root")["api_key"]
     with TestClient(app) as client:
         data = client.get("/v1/models",
@@ -921,6 +924,65 @@ def test_default_registry_contains_both_providers(tmp_path):
     by_id = {item["id"]: item["providers"] for item in data}
     # CB 的 list_models 抛错 → 该上游被跳过（不拖垮整个列表），TRAE 正常返回
     assert by_id["glm-5.2"] == ["trae"]
+
+
+def test_models_endpoint_skips_providers_without_credentials(tmp_path):
+    """Q41：模型列表按渠道凭证加载——没凭证的渠道既不拉取也不展示。
+
+    冷启动只有一个渠道接入时，另一个渠道的 list_models 根本不该被调用，
+    Playground / `/v1/models` 也不应出现它的模型。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+    calls: list[str] = []
+
+    class Stub:
+        def __init__(self, pid: str, model: str):
+            self.id = pid
+            self._model = model
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            calls.append(self.id)
+            return [Model(id=self._model)]
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    app = build_app(settings, providers={
+        "trae": Stub("trae", "trae-only"),
+        "codebuddy": Stub("codebuddy", "cb-only"),
+    })
+    # 只接 TRAE，CodeBuddy 无凭证
+    trae_id = app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    key = app.state.api_keys.create("root")["api_key"]
+    auth = {"Authorization": f"Bearer {key}"}
+    with TestClient(app) as client:
+        ids = {m["id"] for m in client.get("/v1/models", headers=auth).json()["data"]}
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+        playground = {m["id"] for m in client.get("/api/playground/models").json()["data"]}
+        assert ids == {"trae-only"}
+        assert playground == {"trae-only"}
+        assert "codebuddy" not in calls              # CodeBuddy 未被拉取
+
+        # 暂停唯一凭证 → 该渠道在列表里消失（不展示打不通的渠道）
+        app.state.credentials.set_enabled(trae_id, False)
+        assert client.get("/v1/models", headers=auth).json()["data"] == []
+
+        # 恢复 → 立刻回到列表
+        app.state.credentials.set_enabled(trae_id, True)
+        assert {m["id"] for m in client.get(
+            "/v1/models", headers=auth).json()["data"]} == {"trae-only"}
+
+        # 硬禁用（会话失效）同样不展示；补一条新凭证立刻恢复
+        from src.engine.scheduler import ErrorOutcome
+
+        app.state.credentials.save_error(trae_id, ErrorOutcome(disabled=True))
+        assert client.get("/v1/models", headers=auth).json()["data"] == []
+        app.state.credentials.add(provider="trae", credential_data={"accessToken": "b"})
+        assert {m["id"] for m in client.get(
+            "/v1/models", headers=auth).json()["data"]} == {"trae-only"}
+    assert "codebuddy" not in calls
 
 
 def test_models_cache_used_when_fetch_fails(tmp_path):
@@ -952,6 +1014,9 @@ def test_models_cache_used_when_fetch_fails(tmp_path):
 
     trae = FlakyTrae()
     app = build_app(settings, providers={"trae": trae, "codebuddy": FailingCB()})
+    # CB 有凭证才会被尝试拉取（进而触发失败回退）；TRAE 同理（Q41）
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    app.state.credentials.add(provider="codebuddy", credential_data={"token": "b"})
     key = app.state.api_keys.create("root")["api_key"]
     auth = {"Authorization": f"Bearer {key}"}
     with TestClient(app) as client:
@@ -996,6 +1061,7 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
             return raw
 
     app = build_app(settings, providers={"trae": NoisyProvider()})
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
     key = app.state.api_keys.create("root")["api_key"]
     with TestClient(app) as client:
         ids = {item["id"] for item in client.get(
@@ -1013,6 +1079,7 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
     settings2 = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                          MODEL_BLOCKLIST="custom_model_*,*sub*agent*,summary,kimi-k2.6")
     app2 = build_app(settings2, providers={"trae": NoisyProvider()})
+    app2.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
     key2 = app2.state.api_keys.create("root")["api_key"]
     with TestClient(app2) as client:
         ids2 = {item["id"] for item in client.get(
@@ -1045,6 +1112,7 @@ def test_models_blocklist_hot_reload_applies_without_waiting_for_ttl(tmp_path):
 
     provider = StubTrae()
     app = build_app(settings, providers={"trae": provider})
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
     key = app.state.api_keys.create("root")["api_key"]
     auth = {"Authorization": f"Bearer {key}"}
     with TestClient(app) as client:
@@ -1091,6 +1159,8 @@ def test_models_by_provider_rates_when_dual_upstream(tmp_path):
 
     app = build_app(settings, providers={
         "codebuddy": Stub("codebuddy", 0.29), "trae": Stub("trae", 0.17)})
+    app.state.credentials.add(provider="codebuddy", credential_data={"token": "a"})
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "b"})
     key = app.state.api_keys.create("root")["api_key"]
     with TestClient(app) as client:
         item = next(m for m in client.get("/v1/models", headers={
@@ -1125,6 +1195,8 @@ def test_models_passthrough_reasoning_metadata(tmp_path):
         "codebuddy": Stub("codebuddy", [Model(id="glm-5.3", supports_reasoning=True,
                                               default_effort="medium")]),
     })
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    app.state.credentials.add(provider="codebuddy", credential_data={"token": "b"})
     key = app.state.api_keys.create("root")["api_key"]
     with TestClient(app) as client:
         item = next(m for m in client.get("/v1/models", headers={

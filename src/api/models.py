@@ -1,5 +1,10 @@
 """模型列表：动态拉取 + 归一合并，供 /v1/models 与 playground 共用。
 
+**按凭证加载**：只处理「当前有可用凭证（selectable，即未暂停且未硬禁用）」
+的渠道——从未接入、全部暂停或会话失效的渠道**既不拉取也不展示**，避免把
+根本打不通的上游模型混进列表。冷启动时只有 zen（自带虚拟凭证）在列，等用户
+在管理台接入 CodeBuddy / TRAE 后，下一次列表请求（该渠道无缓存）才会拉取。
+
 带服务层缓存：某上游拉取成功后把归一结果写入 services.model_list_cache；
 下次该上游拉取失败时用缓存兜底，保证 /v1/models 稳定返回完整列表
 （冷启动无缓存时才退化为跳过该上游）。
@@ -97,6 +102,20 @@ def _visible(models_by_lower: dict[str, Model],
             if not _blocked(model.id, patterns)}
 
 
+def credential_providers(services: Services) -> set[str]:
+    """当前有可用凭证（selectable）的渠道集合。
+
+    `list_models` 用它决定「哪些渠道该出现在模型列表里」：没有可用凭证的
+    渠道既不值得拉模型（只会白打上游/回退静态表），也不该对外展示——
+    用户没接入或自己暂停了，就不该在 Playground / `/v1/models` 里看到它。
+
+    口径与调度器一致（`selectable_only=True`：未暂停、未硬禁用）；冷却中的
+    凭证仍算「有凭证」——渠道接了只是暂时限流，模型列表不该跟着闪没。
+    """
+    return {row.provider
+            for row in services.credentials.candidates(selectable_only=True)}
+
+
 async def list_models(services: Services, *, force: bool = False) -> dict:
     """跨上游拉取并合并模型列表。
 
@@ -105,6 +124,10 @@ async def list_models(services: Services, *, force: bool = False) -> dict:
     providers 取并集；同时记录各上游的原始 id 供执行时映射。
     某上游拉取失败时用上次成功的缓存兜底，而不是让该上游从列表里消失。
 
+    只遍历「当前有可用凭证」的渠道（见 `credential_providers`）：没接入 /
+    全部暂停 / 会话失效的渠道不拉取也不展示，所以冷启动只有 zen（自带虚拟
+    凭证），接入 CodeBuddy / TRAE 后下一次请求才把它们拉进来。
+
     force=False（默认）时 TTL 内直接复用刚才的结果；启动预热传 force=True。
     黑名单在每个出口现算（缓存不做过滤），因此改完黑名单下一次调用立即生效。
     """
@@ -112,8 +135,13 @@ async def list_models(services: Services, *, force: bool = False) -> dict:
     grouped: dict[str, dict[str, Any]] = {}   # 小写名 → {canonical, providers, meta}
     cache = services.model_list_cache
     patterns = services.settings.blocklist_patterns
+    connected = credential_providers(services)
     now = time.monotonic()
     for provider_id, provider in services.registry.items():
+        # 没凭证的渠道直接跳过：不拉取、不展示。已接入的渠道即使本次拉取失败，
+        # 也会走下面的缓存兜底，不会因为一次抖动就从列表消失。
+        if provider_id not in connected:
+            continue
         fetched_at = services.model_list_fetched_at.get(provider_id)
         fresh = (cache.get(provider_id)
                  and fetched_at is not None
