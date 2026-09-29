@@ -20,8 +20,10 @@
           "engine",
           "cb",
           "trae",
+          "zen",
           "cb-up",
-          "trae-up"
+          "trae-up",
+          "zen-up"
         ],
         "note": "客户端请求经协议层规范化，由执行引擎选号后流式转发到上游。"
       },
@@ -207,6 +209,21 @@
       ]
     },
     {
+      "id": "zen",
+      "type": "backend",
+      "label": "OpenCode Zen Provider",
+      "sublabel": "免费层 · 虚拟凭证",
+      "pos": [
+        760,
+        540
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "免费层"
+    },
+    {
       "id": "cb-up",
       "type": "external",
       "label": "CodeBuddy 上游",
@@ -228,6 +245,20 @@
       "pos": [
         980,
         410
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "zen-up",
+      "type": "external",
+      "label": "OpenCode Zen 上游",
+      "sublabel": "opencode.ai/zen",
+      "pos": [
+        980,
+        540
       ],
       "size": [
         140,
@@ -260,6 +291,7 @@
         "cb",
         "bg",
         "trae",
+        "zen",
         "admin-ui",
         "admin-api",
         "identity",
@@ -318,6 +350,23 @@
       ]
     },
     {
+      "id": "engine-to-zen",
+      "from": "engine",
+      "to": "zen",
+      "fromSide": "right",
+      "toSide": "left",
+      "via": [
+        [
+          720,
+          312
+        ],
+        [
+          720,
+          572
+        ]
+      ]
+    },
+    {
       "id": "cb-to-cbup",
       "from": "cb",
       "to": "cb-up",
@@ -328,6 +377,13 @@
       "id": "trae-to-traeup",
       "from": "trae",
       "to": "trae-up",
+      "label": "SSE",
+      "variant": "emphasis"
+    },
+    {
+      "id": "zen-to-zenup",
+      "from": "zen",
+      "to": "zen-up",
       "label": "SSE",
       "variant": "emphasis"
     },
@@ -432,8 +488,8 @@
       "title": "对外契约",
       "items": [
         "/v1/chat/completions、/v1/responses",
-        "/v1/models + 黑名单；/v1/user/balance",
-        "/healthz 池健康、model@provider 选上游"
+        "/v1/models 按渠道凭证加载 + 黑名单",
+        "/v1/user/balance、/healthz 池健康"
       ]
     },
     {
@@ -442,7 +498,7 @@
       "items": [
         "选号：pin → 粘性 → 到期积分 → 三态健康度",
         "模型级冷却隔离到单个模型，不牵连整条凭证",
-        "6 个后台任务汇总进「任务与配置」页"
+        "三渠道同池调度；6 个后台任务汇总「任务与配置」"
       ]
     },
     {
