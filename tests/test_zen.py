@@ -19,6 +19,7 @@ from src.provider.zen.client import (
     EP_CHAT,
     EP_MODELS,
     MIN_OPENCODE_VERSION,
+    Model,
     UpstreamHTTPError,
     ZenClient,
     ZenProvider,
@@ -614,3 +615,44 @@ async def test_build_app_seeds_zen_and_resolves_forced_route(tmp_path):
         closer = getattr(provider, "aclose", None)
         if callable(closer):
             await closer()
+
+
+def test_zen_credential_can_be_restored_after_delete(tmp_path, monkeypatch):
+    """管理台删除 zen 虚拟凭证后，可用「添加 OpenCode Zen」从 UI 补回（无需重启）。
+
+    回归背景：种子只在 build_app 跑一次，用户删掉凭证后 /v1/models 就再也
+    没有 zen；前端「登录渠道账号」面板提供的一键补回走通用导入端点
+    （provider=zen 时 import_credential 忽略入参、落空对象），这条链路必须稳定。
+    """
+    from fastapi.testclient import TestClient
+
+    from src.auth.session import create_session_token
+    from src.config import Settings
+    from src.main import build_app
+    from tests.conftest import SECRET
+
+    async def fake_fetch_models(self):
+        return [Model(id="offline-free", name="opencode")]
+
+    # TestClient 进 lifespan 会预热模型列表（真连上游），这里保持离线。
+    monkeypatch.setattr(ZenClient, "fetch_models", fake_fetch_models)
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings)
+    with TestClient(app) as client:
+        credentials = app.state.credentials
+        seeded = credentials.candidates(["zen"])
+        assert len(seeded) == 1
+        assert credentials.delete(seeded[0].credential_id)          # 模拟管理台删除
+        assert credentials.candidates(["zen"]) == []
+
+        client.cookies.set("coding2api_session",
+                           create_session_token("root", SECRET))
+        created = client.post("/api/credentials",
+                              json={"provider": "zen", "credential": {},
+                                    "nickname": "OpenCode Zen"})
+        assert created.status_code == 200
+        credential_id = created.json()["id"]
+        restored = credentials.candidates(["zen"])
+        assert [row.credential_id for row in restored] == [credential_id]
+        assert credentials.credential_data(credential_id) == {}

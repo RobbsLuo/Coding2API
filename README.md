@@ -110,7 +110,7 @@ docker compose pull
 
 ## 使用
 
-1. 「凭证管理」添加凭证：CodeBuddy 走设备码登录（或粘贴 `{"token":"..."}`）；TRAE 粘贴凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（凭证里的 `apiHost` 只接受官方地址，其他值会被拒绝导入）。OpenCode Zen 无需添加——启动时自动出现一条 `OpenCode Zen` 虚拟凭证
+1. 「凭证管理」添加凭证：CodeBuddy 走设备码登录（或粘贴 `{"token":"..."}`）；TRAE 粘贴凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（凭证里的 `apiHost` 只接受官方地址，其他值会被拒绝导入）。OpenCode Zen 无需添加——启动时自动出现一条 `OpenCode Zen` 虚拟凭证（若被删除，可在同一面板点「添加 OpenCode Zen」补回）
 2. 「API Key」创建 `sk-...`（明文仅显示一次）
 3. 调用：
 
@@ -131,7 +131,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 几点要知道：
 
-- **无凭证**：Zen 不需要 Token。凭证池里那条 `OpenCode Zen` 是虚拟占位行（让调度 / 冷却 / 统计照常工作），额度列显示「免费层（无额度接口）」。它**删除后重启会复活**——要永久停用请点「暂停」，不要删除。
+- **无凭证**：Zen 不需要 Token。凭证池里那条 `OpenCode Zen` 是虚拟占位行（让调度 / 冷却 / 统计照常工作），额度列显示「免费层（无额度接口）」。它**删除后重启会复活**，也可在「凭证管理 → 登录渠道账号」点「添加 OpenCode Zen」立即补回——要永久停用请点「暂停」，不要删除。
 - **免费层门禁**：上游要求伪装成官方客户端（UA 版本、会话头、`stream:true`、tools 含 `bash`/`read`）。本服务自动满足；门禁注入的 `bash`/`read` 是空壳，若模型真去调用它们，回包里的这类 tool_call 会被过滤掉，不会泄漏给你没声明过的函数。你自己声明了 `bash`/`read` 时则原样透传。
 - **上游会改**：门禁阈值与免费清单都可能变。UA 版本用 `ZEN_OPENCODE_VERSION` 可调；端点用 `ZEN_API_ENDPOINT`（须在 `ZEN_ALLOWED_ENDPOINTS` 内）。付费模型即使强制 `模型@zen` 也只会报「不可用」，不会拖垮渠道。
 - **无额度接口**：健康度恒为「未探测到额度」（未知 ≠ 耗尽）。
@@ -202,7 +202,7 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 
 凭证列表行内菜单的「暂停」只把该凭证摘出**对话流量**：后台的额度探测、token 预刷新、每日签到、成长中心、活跃上报照常运行（这些任务只认系统硬禁用 `disabled`）。适合「先不接聊天、但积分继续领」；「取消暂停」立即放回池子。与状态列的「已禁用」不同——那是渠道判定会话失效后的系统禁用，需重新登录后用「恢复」解除。同一开关也在 `POST /api/credentials/{id}/toggle`。
 
-> OpenCode Zen 是唯一没有凭证的渠道，池里是一条虚拟占位行。**暂停它是永久停用的唯一方式**——删除后下次启动会被种子重新补上。
+> OpenCode Zen 是唯一没有凭证的渠道，池里是一条虚拟占位行。**暂停它是永久停用的唯一方式**——删除后下次启动会被种子重新补上，也可在「登录渠道账号」面板点「添加 OpenCode Zen」立即补回。
 
 ### token 到期展示
 

@@ -137,6 +137,10 @@ export function CredentialsPage() {
   } | null>(null);
 
   const credentials = data?.credentials ?? [];
+  // OpenCode Zen 无凭证：池里只有一条虚拟占位行，正常由服务启动时种子。
+  // 用户在凭证页删除后不会自动回来，这里给一个一键补回的入口，
+  // 免得必须重启服务（见 README「OpenCode Zen 免费层」）。
+  const hasZen = credentials.some((item) => item.provider === "zen");
   const expiryWindow = data?.expiry_window_seconds ?? 0;
   const expirySecondaryWindow = data?.expiry_secondary_window_seconds ?? 0;
   const tokenWarning = data?.token_expiry_warning_seconds ?? 0;
@@ -388,6 +392,7 @@ export function CredentialsPage() {
         <div data-testid="first-run-hint">
           <Notice tone="muted">
             还没有凭证。用下方「登录渠道账号」完成 CodeBuddy / TRAE 授权，或直接粘贴凭证 JSON 导入；
+            OpenCode Zen 免费层点「添加 OpenCode Zen」即可。
             凭证表下方的「凭证状态与操作说明」可查看各状态和按钮的含义。
           </Notice>
         </div>
@@ -517,11 +522,26 @@ export function CredentialsPage() {
                   </Button>
                 );
               })}
+              <Button
+                size="sm"
+                variant="default"
+                data-testid="add-zen"
+                disabled={busy || hasZen}
+                onClick={() =>
+                  void run(
+                    () => api.importCredential("zen", {}, "OpenCode Zen"),
+                    "已添加 OpenCode Zen 免费渠道。",
+                  )
+                }
+              >
+                {hasZen ? "OpenCode Zen 已添加" : "添加 OpenCode Zen"}
+              </Button>
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
               CodeBuddy 走设备码轮询（本页自动轮询渠道）；TRAE 走浏览器回调
               （授权后由 <code>/authorize</code> 直接落库，本页轮询凭证列表检测完成）。
-              也可以直接粘贴凭证 JSON 导入。
+              也可以直接粘贴凭证 JSON 导入。OpenCode Zen 免费层无需凭证/登录，
+              删除其虚拟凭证后点上方按钮即可补回（要永久停用请改用「暂停」）。
             </p>
           </Panel>
           <ImportPanel

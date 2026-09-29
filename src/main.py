@@ -122,7 +122,8 @@ def _seed_zen_credential(credentials: CredentialRepository) -> None:
     """确保池里有一条 zen 虚拟凭证（幂等）。
 
     Zen 免费层无凭证概念，但调度/冷却/统计全部按 credentials 行工作；
-    没有这条占位行，zen 永远不会被选为候选。用户删除后重启会重新补上，
+    没有这条占位行，zen 永远不会被选为候选。启动时若发现没有会补上；
+    用户在凭证页删除后，也可点「添加 OpenCode Zen」立即补回（走通用导入端点）。
     要永久停用请用「暂停」而不是删除。
     """
     if credentials.candidates(["zen"]):
