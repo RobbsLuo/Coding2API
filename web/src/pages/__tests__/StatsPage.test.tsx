@@ -79,7 +79,7 @@ describe("StatsPage", () => {
     expect(screen.getByTestId("stats-page")).toHaveTextContent("120");
     // 成功率并入请求数卡片 hint；Token 三项并入 Token 消耗卡片
     expect(screen.getByText("成功率 95.0%")).toBeInTheDocument();
-    expect(screen.getByText(/输入 1000（命中 400 · 未命中 600） · 输出 2000 · 推理 300/))
+    expect(screen.getByText(/输入 1000（命中 400 · 未命中 600） · 输出 2000 · 推理 300 · 缓存命中率 40.0%/))
       .toBeInTheDocument();
     expect(screen.getByText(/首字延迟 220 ms/)).toBeInTheDocument();
     expect(screen.getByTestId("provider-table")).toHaveTextContent("CodeBuddy");
@@ -114,7 +114,7 @@ describe("StatsPage", () => {
 
     // 总消耗 8013579 → 801.4万；分项 123456 → 12.3万、7890123 → 789万
     expect(screen.getByText("801.4万")).toBeInTheDocument();
-    expect(screen.getByText(/输入 12.3万（命中 — · 未命中 —） · 输出 789万 · 推理 300/))
+    expect(screen.getByText(/输入 12.3万（命中 — · 未命中 —） · 输出 789万 · 推理 300 · 缓存命中率 —/))
       .toBeInTheDocument();
   });
 

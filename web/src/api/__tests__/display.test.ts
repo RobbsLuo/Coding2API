@@ -4,6 +4,7 @@ import {
   expiringQuotaLabel,
   formatAgo,
   formatAxisValue,
+  formatCacheRate,
   formatChartValue,
   formatCredit,
   METRIC_AXIS_UNIT,
@@ -28,6 +29,27 @@ describe("formatCredit", () => {
     expect(formatCredit(5.25, true)).toBe("≈5.25");
     expect(formatCredit(5.25, 1)).toBe("≈5.25");
     expect(formatCredit(0, true)).toBe("≈0");
+  });
+});
+
+describe("formatCacheRate", () => {
+  it("命中 / 输入，保留 1 位百分比", () => {
+    expect(formatCacheRate(400, 1000)).toBe("40.0%");
+    expect(formatCacheRate(1, 3)).toBe("33.3%");
+    expect(formatCacheRate(0, 1000)).toBe("0.0%");
+    expect(formatCacheRate(1000, 1000)).toBe("100.0%");
+  });
+
+  it("缓存未上报或输入为 0 → —（不拿 0 冒充 0%）", () => {
+    expect(formatCacheRate(null, 1000)).toBe("—");
+    expect(formatCacheRate(undefined, 1000)).toBe("—");
+    expect(formatCacheRate(10, null)).toBe("—");
+    expect(formatCacheRate(10, 0)).toBe("—");
+    expect(formatCacheRate(0, 0)).toBe("—");
+  });
+
+  it("命中超过输入时按 100% 截断（避免 >100% 怪值）", () => {
+    expect(formatCacheRate(1500, 1000)).toBe("100.0%");
   });
 });
 

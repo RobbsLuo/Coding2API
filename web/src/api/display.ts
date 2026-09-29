@@ -234,6 +234,22 @@ export function formatCompact(value: number | null | undefined): string {
 }
 
 /**
+ * 缓存命中率：命中 token ÷ 输入 token。
+ *
+ * 输入为 0 或缓存未上报时返回 `—`——不能算比率，也不该拿 0 冒充「0%」。
+ * 命中理论上不会超过输入，超出时按 100% 截断，避免出现 >100% 的怪值。
+ */
+export function formatCacheRate(
+  cached: number | null | undefined,
+  input: number | null | undefined,
+): string {
+  if (cached === null || cached === undefined) return "—";
+  if (input === null || input === undefined || input <= 0) return "—";
+  const percent = Math.min(100, Math.max(0, (cached / input) * 100));
+  return `${percent.toFixed(1)}%`;
+}
+
+/**
  * Credit 展示：null 显示 —；推算值（TRAE 无上游积分，按官方单价折算）前置
  * ≈ 表示约等于，提醒是估算而非上游回传的真实扣费。
  */

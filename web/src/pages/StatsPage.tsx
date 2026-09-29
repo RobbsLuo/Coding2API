@@ -8,7 +8,7 @@ import {
   useStatsOverview,
   useStatsTimeline,
 } from "../api/hooks";
-import { formatCompact, formatCredit, formatLatency, formatNumber, formatTime, usageErrorLabel } from "../api/display";
+import { formatCacheRate, formatCompact, formatCredit, formatLatency, formatNumber, formatTime, usageErrorLabel } from "../api/display";
 import { Notice } from "../ui";
 import { ModelTrendChart } from "../components/ModelTrendChart";
 import { PageHeader } from "../components/PageHeader";
@@ -132,7 +132,8 @@ export function StatsPage() {
       : formatCompact(stats.input_tokens - cached);
   const tokenHint =
     `输入 ${formatCompact(stats?.input_tokens)}（命中 ${hitText} · 未命中 ${missText}）`
-    + ` · 输出 ${formatCompact(stats?.output_tokens)} · 推理 ${formatCompact(stats?.reasoning_tokens)}`;
+    + ` · 输出 ${formatCompact(stats?.output_tokens)} · 推理 ${formatCompact(stats?.reasoning_tokens)}`
+    + ` · 缓存命中率 ${formatCacheRate(cached, stats?.input_tokens)}`;
 
   return (
     <div className="space-y-6" data-testid="stats-page">
@@ -380,7 +381,7 @@ export function StatsPage() {
           隐私：不保存提示词、回答、请求头、Token、工具参数与原始错误体；逐请求明细保留 90 天，小时汇总永久保留；按 API Key 归属用户统计。
         </p>
         <p>
-          credit 为渠道可选字段，经常不返回；TRAE 上游不给单请求积分，带 ≈ 的数值是按官方单价折算的估算值（CodeBuddy 为上游返回的真值）。健康度只依赖额度探测接口，主指标是 token 数。
+          credit 为渠道可选字段，经常不返回；TRAE 上游不给单请求积分，带 ≈ 的数值是按官方单价折算的估算值（CodeBuddy 为上游返回的真值）。健康度只依赖额度探测接口，主指标是 token 数。缓存命中率 = 命中 token ÷ 输入 token，仅在上报过缓存时展示。
         </p>
       </Notice>
     </div>
