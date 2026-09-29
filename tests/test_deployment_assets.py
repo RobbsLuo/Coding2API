@@ -181,6 +181,63 @@ def test_launchd_template_exists_and_is_valid_plist():
     assert data["StandardErrorPath"].endswith("logs/launchd.err.log")
 
 
+def test_launchd_template_uses_portable_placeholder_not_local_path():
+    """部署模板不得写死开发机绝对路径，否则克隆到别处不可用。"""
+    text = LAUNCHD_TEMPLATE.read_text(encoding="utf-8")
+    assert PROJECT_ROOT_TOKEN in text, "plist 模板应用 __PROJECT_ROOT__ 占位符"
+    home_marker = "/" + "Users" + "/"
+    assert home_marker not in text, "plist 模板混入了开发机家目录路径"
+
+
+def test_deploy_templates_contain_no_personal_absolute_paths():
+    """全仓库不得混入开发机的个人家目录路径（macOS 的 Users、Linux 的 home）。
+
+    这类路径只在开发机成立，进仓库后别人无法复现；需要绝对路径的场景
+    （launchd / newsyslog 不展开环境变量）改用 __PROJECT_ROOT__ 占位符，
+    由 scripts/install-*.sh 在安装时渲染。
+    """
+    import subprocess
+
+    personal_markers = ("/" + "Users" + "/", "/" + "home" + "/")
+    try:
+        listed = subprocess.run(
+            ["git", "ls-files"],
+            cwd=ROOT, check=True, capture_output=True, text=True,
+        ).stdout.split()
+    except (OSError, subprocess.CalledProcessError):  # pragma: no cover - 非 git 检出
+        pytest.skip("非 git 检出，跳过")
+
+    offenders = []
+    for rel in listed:
+        try:
+            text = (ROOT / rel).read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for marker in personal_markers:
+            if marker in text:
+                offenders.append(rel)
+                break
+    assert not offenders, f"仓库混入开发机绝对路径: {offenders}"
+
+
+def test_launchd_install_script_renders_placeholder():
+    """安装脚本必须渲染占位符并写到 LaunchAgents。"""
+    script = ROOT / "scripts" / "install-launchd.sh"
+    assert script.is_file()
+    assert script.stat().st_mode & 0o111, "安装脚本没有执行位"
+    body = script.read_text(encoding="utf-8")
+    assert PROJECT_ROOT_TOKEN in body, "脚本必须替换 __PROJECT_ROOT__"
+    assert "Library/LaunchAgents" in body
+    assert "--uninstall" in body
+
+
+def test_newsyslog_install_script_renders_placeholders():
+    """newsyslog 安装脚本必须同时替换路径与属主占位符。"""
+    body = (ROOT / "scripts" / "install-newsyslog.sh").read_text(encoding="utf-8")
+    assert PROJECT_ROOT_TOKEN in body, "脚本必须替换 __PROJECT_ROOT__"
+    assert LOG_OWNER_TOKEN in body, "脚本必须替换 __LOG_OWNER__"
+
+
 def test_launchd_template_starts_via_wrapper_not_bare_uvicorn():
     """入口必须是 wrapper：它负责先构建前端产物。
 
@@ -280,6 +337,22 @@ LOGROTATE = ROOT / "deploy" / "logrotate" / "coding2api"
 SYSTEMD_UNIT = ROOT / "deploy" / "systemd" / "coding2api.service"
 LAUNCHD_PLIST = Path.home() / "Library" / "LaunchAgents" / "com.coding2api.plist"
 
+# 部署模板里的占位符（安装脚本渲染成实际值，见 scripts/install-*.sh）。
+# 模板不得写死开发机路径，否则克隆到别处就不可用。
+PROJECT_ROOT_TOKEN = "__PROJECT_ROOT__"
+LOG_OWNER_TOKEN = "__LOG_OWNER__"
+
+
+def _render_template(text: str) -> str:
+    """按安装脚本的口径替换占位符，供测试还原「安装后」的文件内容。"""
+    import grp
+    import os
+    import pwd
+
+    owner = f"{pwd.getpwuid(os.getuid()).pw_name}:{grp.getgrgid(os.getgid()).gr_name}"
+    return text.replace(PROJECT_ROOT_TOKEN, str(ROOT)).replace(LOG_OWNER_TOKEN, owner)
+
+
 
 def test_compose_limits_docker_log_growth():
     """json-file 驱动默认无上限，会把宿主磁盘写满——必须显式限额。"""
@@ -291,16 +364,24 @@ def test_compose_limits_docker_log_growth():
 
 def test_newsyslog_rule_matches_launchd_plist_paths():
     """轮转路径必须与 launchd 实际写的文件一致，否则规则永远不生效。"""
-    text = NEWSYSLOG.read_text(encoding="utf-8")
-    paths = [line.split()[0] for line in text.splitlines()
+    # 模板对模板：两处用的是同一个 __PROJECT_ROOT__ 占位符，渲染后必须一致
+    template = NEWSYSLOG.read_text(encoding="utf-8")
+    plist_template = LAUNCHD_TEMPLATE.read_text(encoding="utf-8")
+    template_paths = [line.split()[0] for line in template.splitlines()
+                      if line.strip() and not line.startswith("#")]
+    assert template_paths, "newsyslog 模板里没有有效条目"
+    for path in template_paths:
+        assert path in plist_template, f"newsyslog 模板里的 {path} 不在 launchd 模板中"
+
+    # 渲染后与本机实际安装的 plist 对齐（CI 上没有安装文件则跳过）
+    paths = [line.split()[0] for line in _render_template(template).splitlines()
              if line.strip() and not line.startswith("#")]
-    assert paths, "newsyslog 规则里没有有效条目"
     if LAUNCHD_PLIST.is_file():
         plist = LAUNCHD_PLIST.read_text(encoding="utf-8")
         for path in paths:
             assert path in plist, f"newsyslog 规则里的 {path} 不在 launchd plist 中"
-    # 每条规则必须有 8 个字段（路径 属主 权限 份数 大小 时间 标志）
-    for line in text.splitlines():
+    # 每条规则必须有 7 个字段（路径 属主 权限 份数 大小 时间 标志）
+    for line in _render_template(template).splitlines():
         if line.strip() and not line.startswith("#"):
             assert len(line.split()) == 7, f"newsyslog 字段数不对（需 7 列）: {line}"
 
@@ -339,7 +420,7 @@ def test_newsyslog_owner_matches_actual_log_owner():
     本机日志由 launchd 以当前用户身份写入，规则写成 root:wheel 就永远不会
     轮转（newsyslog 静默跳过），是很容易埋下的坑。
     """
-    text = NEWSYSLOG.read_text(encoding="utf-8")
+    text = _render_template(NEWSYSLOG.read_text(encoding="utf-8"))
     entries = [line.split() for line in text.splitlines()
                if line.strip() and not line.startswith("#")]
     assert entries

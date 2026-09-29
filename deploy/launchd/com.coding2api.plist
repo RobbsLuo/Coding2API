@@ -1,5 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 模板：绝对路径写成 __PROJECT_ROOT__ 占位符，避免把开发机的路径带进仓库。
+     安装时用 scripts/install-launchd.sh 渲染成本机路径，写入
+     ~/Library/LaunchAgents/com.coding2api.plist 并加载。
+     launchd 不展开 $HOME / 环境变量，路径必须是绝对路径，所以只能安装时替换。 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
@@ -12,12 +16,12 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/robbs/Develpment/PartTimeJob/coding2api/scripts/launchd-server.sh</string>
+        <string>__PROJECT_ROOT__/scripts/launchd-server.sh</string>
     </array>
 
     <!-- .env 用相对路径读取，必须切到项目根 -->
     <key>WorkingDirectory</key>
-    <string>/Users/robbs/Develpment/PartTimeJob/coding2api</string>
+    <string>__PROJECT_ROOT__</string>
 
     <!-- 登录时自动启动 -->
     <key>RunAtLoad</key>
@@ -31,9 +35,9 @@
     <integer>10</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/robbs/Develpment/PartTimeJob/coding2api/logs/launchd.out.log</string>
+    <string>__PROJECT_ROOT__/logs/launchd.out.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/robbs/Develpment/PartTimeJob/coding2api/logs/launchd.err.log</string>
+    <string>__PROJECT_ROOT__/logs/launchd.err.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
