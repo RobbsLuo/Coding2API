@@ -50,6 +50,8 @@ services:
       ZEN_OPENCODE_VERSION: ${ZEN_OPENCODE_VERSION:-1.18.0}
       # CodeBuddy 聊天最小间隔（秒）：与 TRAE 共享节流，0 关闭
       CODEBUDDY_CHAT_MIN_INTERVAL: ${CODEBUDDY_CHAT_MIN_INTERVAL:-5}
+      # Zen 聊天最小间隔（秒）：独立节流器，0（默认）关闭
+      ZEN_CHAT_MIN_INTERVAL: ${ZEN_CHAT_MIN_INTERVAL:-0}
       # 11128 内容风控自愈：中和出站正文里的伪装客户端指纹，false 关闭
       CODEBUDDY_SANITIZE_CHANNEL_MARKERS: ${CODEBUDDY_SANITIZE_CHANNEL_MARKERS:-true}
       # token 预刷新窗口（小时）

@@ -85,6 +85,11 @@ class Settings(BaseSettings):
     # 频率风控；0 关闭节流。（注意 11128 主因是内容指纹风控，见
     # codebuddy_sanitize_channel_markers 与 TECHNICAL.md §3.2，调间隔救不了）
     codebuddy_chat_min_interval: float = 5
+    # Zen 聊天最小间隔：zen 是匿名免费层，没有 CB/TRAE 那种账号级频率风控，
+    # 默认 0（不节流）。刻意**不**与 codebuddy_chat_min_interval 共享 pacer：
+    # zen 排在 CB/TRAE 后面会白白等满最小间隔（并发/连发时每个请求 +5s）。
+    # 若上游对匿名免费层限流，可在此调大。
+    zen_chat_min_interval: float = 0
     # 内容风控自愈（11128）：出站 system/assistant 正文命中「伪装其他厂商
     # 官方客户端」指纹串时替换为占位符（客户端会话历史不受影响）。该拦截
     # 与凭证无关、换号无效，会话一旦带入指纹将持续 11128；false 关闭

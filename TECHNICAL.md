@@ -393,7 +393,7 @@ response.completed | response.incomplete
 | 类别 | 例子 | 位置 | 变更方式 |
 |---|---|---|---|
 | 启动期不可变项 | `APP_SECRET` / `HOST` / `PORT` / `DATA_DIR` / `USERS_FILE` / `CODEBUDDY_ALLOWED_ENDPOINTS` | `config.Settings`（frozen） | 改 env + 重启；**不进白名单**，管理台改不了 |
-| 运行时可覆盖项 | 见 `runtime_settings.HOT_SETTINGS`（13 项） | `RuntimeSettings` 覆盖层 | 管理台改，立即生效 |
+| 运行时可覆盖项 | 见 `runtime_settings.HOT_SETTINGS`（14 项） | `RuntimeSettings` 覆盖层 | 管理台改，立即生效 |
 
 启动期项拒绝热更的原因：它们决定进程如何启动（监听地址、加密密钥、上游白名单），运行期变更只会让「当前进程」与「磁盘配置」静默分叉，而分叉后的行为无法从任一处推断。
 
@@ -525,7 +525,7 @@ response.completed | response.incomplete
 
 **任务清单与归属**：`tasks/status.py` 的 `TASK_SPECS` 是静态描述（key / 名称 / 一句话说明），与 `TaskRunner.start()` 建立的循环一一对应；周期与开关**运行时现算**（`TaskRunner.task_status()` 读热更值），不是装配快照——改完配置刷新页面就该看到新周期。未装配的任务（测试或降级时不传 growth/activity）不出现在清单里，避免展示「永远不跑」的卡片。
 
-配置项一侧用 `HotSetting.task`（§3.8）表达归属，前端据此把配置塞进对应任务卡片；无归属（`default_model` / 黑名单 / 到期窗口 / 粘性 / 两个 pacer / CB 聊天间隔）归入「网关与调度」区。两处通过 `TASK_BY_KEY` 交叉校验（测试保证 `task` 指向真实任务 key）。
+配置项一侧用 `HotSetting.task`（§3.8）表达归属，前端据此把配置塞进对应任务卡片；无归属（`default_model` / 黑名单 / 到期窗口 / 粘性 / 两个 pacer / CB 聊天间隔 / Zen 聊天间隔）归入「网关与调度」区。两处通过 `TASK_BY_KEY` 交叉校验（测试保证 `task` 指向真实任务 key）。
 
 **接口**：`GET /api/tasks`（admin）返回 `{tasks: [...], server_time}`。每条含 `key`/`name`/`description`/`interval_seconds`/`enabled`/`runs`/`last_started_at`/`last_finished_at`/`last_ok`/`last_report`/`last_error`。带 `server_time` 是为了让前端用**服务端时钟**算「距今多久」——浏览器时钟偏移会把刚跑完的任务显示成几小时前。`app.state.task_runner` 不存在时（未进 lifespan）返回空列表而不是 500。
 

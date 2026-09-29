@@ -187,6 +187,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                        lambda: runtime.codebuddy_chat_min_interval)
     # TRAE/CB 共享同一 pacer：两渠道请求共同保持最小间隔，
     # 避开各自的频率风控（CB 11128 / TRAE 流内错误）
+    # zen 单独一个 pacer：zen 是匿名免费层，没有账号级频率风控，共享只会让
+    # zen 请求排在 CB/TRAE 之后空等满最小间隔（连发/并发时每个 +5s，实测）。
+    zen_pacer = Pacer(lambda: runtime.zen_chat_min_interval,
+                      lambda: runtime.zen_chat_min_interval)
     registry = providers if providers is not None else {
         "trae": TraeProvider(pacer=chat_pacer),
         "codebuddy": CodeBuddyProvider(
@@ -197,7 +201,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         "zen": ZenProvider(
             client=ZenClient(host=_zen_endpoint(config),
                              version=config.zen_opencode_version),
-            pacer=chat_pacer),
+            pacer=zen_pacer),
     }
     # 默认装配路径（生产）才种子 zen 虚拟凭证：测试注入自定义 registry 时
     # 不应凭空多出一条无对应 provider 的凭证行。

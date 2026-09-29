@@ -426,6 +426,7 @@ def test_every_hot_setting_is_read_lazily_not_baked_at_startup(admin_app):
     client.put("/api/settings", json={"values": {
         "default_model": "kimi-k3",
         "codebuddy_chat_min_interval": 12.5,
+        "zen_chat_min_interval": 7.5,
         "pacer_min_seconds": 3,
         "pacer_max_seconds": 8,
         "quota_probe_minutes": 33,
@@ -441,9 +442,16 @@ def test_every_hot_setting_is_read_lazily_not_baked_at_startup(admin_app):
     assert deps.default_model() == "kimi-k3"
     # 调度器与粘性 TTL
     assert deps.affinity.ttl_seconds == 99
-    # 聊天节流器（provider 共享同一个 Pacer）
+    # 聊天节流器：CB/TRAE 共享同一个 Pacer
     assert app.state.services.registry["codebuddy"].pacer.min_seconds == 12.5
     assert app.state.services.registry["codebuddy"].pacer.max_seconds == 12.5
+    assert app.state.services.registry["trae"].pacer is \
+        app.state.services.registry["codebuddy"].pacer
+    # zen 独立 pacer：默认不节流，也不与 CB/TRAE 共享（共享会让 zen 空等）
+    zen_pacer = app.state.services.registry["zen"].pacer
+    assert zen_pacer is not app.state.services.registry["codebuddy"].pacer
+    assert zen_pacer.min_seconds == 7.5
+    assert zen_pacer.max_seconds == 7.5
     # 后台任务周期与开关
     assert runner._quota_interval == 33 * 60        # noqa: SLF001
     assert runner._growth_interval == 9 * 60        # noqa: SLF001
@@ -452,3 +460,23 @@ def test_every_hot_setting_is_read_lazily_not_baked_at_startup(admin_app):
     # 模型黑名单基于生效值重算（不是 Settings 的 cached_property）
     assert runtime.blocklist_patterns == ("foo*",)
     assert app.state.services.settings.blocklist_patterns == ("foo*",)
+
+
+def test_zen_pacer_is_independent_and_disabled_by_default(admin_app):
+    """回归：zen 曾与 CB/TRAE 共用 pacer，默认 5s。
+
+    后果是 zen 请求排在 CB/TRAE 之后要空等满最小间隔（连发/并发时每个 +5s），
+    而 zen 是匿名免费层、没有账号级频率风控，节流纯属自伤。
+    """
+    app, client = admin_app
+    registry = app.state.services.registry  # type: ignore[attr-defined]
+    zen = registry["zen"].pacer
+    cb = registry["codebuddy"].pacer
+    assert zen is not cb                                  # 不共享
+    assert zen is not registry["trae"].pacer
+    assert zen.disabled is True                           # 默认 0 → 不节流
+    assert app.state.runtime_settings.zen_chat_min_interval == 0
+
+    client.put("/api/settings", json={"values": {"zen_chat_min_interval": 2}})
+    assert zen.min_seconds == 2 and zen.max_seconds == 2   # 热更不烘焙
+    assert cb.min_seconds == 5                             # 改 zen 不影响 CB/TRAE
