@@ -391,8 +391,12 @@ class TraeClient:
 
         同时保留每个权益包的名称/额度/已用/到期，供管理台展示奖励积分明细
         （它们各自独立到期，汇总数字看不出是哪些包、什么时候过期）。
-        注意只填充展示用的 packages，不填 expiry_ladder：后者是选号排序
-        指标，TRAE 按设计无周期概念（保持 None 不变）。
+
+        `expiry_ladder` 也一并填充：实测 TRAE 的权益包**确实各自独立到期**
+        （每月登录积分按月、签到奖励各有到期日），不是「无周期概念」。只填
+        展示用的 packages 会让「到期积分」行恒为空，快过期的积分拿不到优先
+        消耗——这正是调度该避免的白丢。口径与 CodeBuddy 一致：阶梯只收
+        「未过期 + 有余额」的包（已过期积分作废、已用完的包不携带积分）。
         """
         data = await self._post_json(
             f"{self.ug_host}/trae/api/v2/pay/ide_user_ent_usage", {},
@@ -401,8 +405,10 @@ class TraeClient:
         packs = data.get("user_entitlement_pack_list")
         if not isinstance(packs, list):
             raise UpstreamProtocolViolation("quota response missing pack list")
+        now_epoch = time.time()
         limit = 0.0
         used = 0.0
+        ladder: list[tuple[int, float]] = []
         packages: list[dict[str, Any]] = []
         for pack in packs:
             if not isinstance(pack, dict):
@@ -412,16 +418,25 @@ class TraeClient:
             if not isinstance(pack_limit, (int, float)) or pack_limit <= 0:
                 continue
             pack_used = (pack.get("usage") or {}).get("credits_amount")
+            used_value = float(pack_used) if isinstance(pack_used, (int, float)) else 0.0
+            balance = max(0.0, float(pack_limit) - used_value)
+            end = _pack_end(pack)
             limit += float(pack_limit)
-            used += float(pack_used) if isinstance(pack_used, (int, float)) else 0.0
+            used += used_value
             packages.append({
                 "name": _pack_name(pack),
                 "total": float(pack_limit),
-                "used": float(pack_used) if isinstance(pack_used, (int, float)) else 0.0,
-                "end": _pack_end(pack),
+                "used": used_value,
+                "end": end,
             })
+            # 到期阶梯（选号指标）：上游会把已过期/已用完的包一起返回，
+            # 不排除则「最早到期」永远指向过去、指标恒为 0。
+            if end is None or end <= now_epoch or balance <= 0:
+                continue
+            ladder.append((end, balance))
         return Quota(remaining=max(0.0, limit - used), total=limit,
-                     packages=packages or None, probed_at=int(time.time()))
+                     expiry_ladder=ladder, packages=packages or None,
+                     probed_at=int(now_epoch))
 
     async def fetch_checkin_status(self, credential: TraeCredential,
                                    *, device_id: str = "") -> dict[str, Any]:

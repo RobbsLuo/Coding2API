@@ -42,7 +42,7 @@ def expiring_credits(
 ) -> float:
     """窗口内即将到期的积分：`now < 到期 <= now + window` 的各包剩余之和。
 
-    窗口 ≤0 或无阶梯（TRAE 无周期概念）为 0。调度排序与管理台展示共用此口径。
+    窗口 ≤0 或无阶梯（渠道无到期信息）为 0。调度排序与管理台展示共用此口径。
     """
     if not ladder or window_seconds <= 0:
         return 0
@@ -118,7 +118,7 @@ class Candidate:
     enabled: bool = True
     err_count: int = 0
     pinned: bool = False
-    cycle_end: int | None = None       # 额度最早到期（epoch）；无周期概念的渠道为 None
+    cycle_end: int | None = None       # 额度最早到期（epoch）；无到期信息的渠道为 None
     expiry_ladder: list[tuple[int, float]] | None = None  # [(到期 epoch, 该包剩余积分)]
     # (凭证, 模型) 冷却表：model → ModelCooldown。模型级限流只写这里，
     # 不写 cooling_until，因此同账号的其他模型仍然可选
@@ -127,7 +127,7 @@ class Candidate:
     def expiry_credits(self, now: int, window: int) -> float:
         """窗口内即将到期的积分总量（不含已过期与已用完的包）。
 
-        窗口 ≤ 0 或渠道无周期概念时恒为 0，选号退回健康度排序。
+        窗口 ≤ 0 或渠道无到期信息时恒为 0，选号退回健康度排序。
         """
         return expiring_credits(self.expiry_ladder, window, now)
 

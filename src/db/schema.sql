@@ -42,8 +42,8 @@ CREATE TABLE IF NOT EXISTS credentials (
     err_count        INTEGER NOT NULL DEFAULT 0,
     quota_remaining  REAL,
     quota_total      REAL,
-    quota_cycle_end  INTEGER,                      -- 最早到期 epoch；TRAE 为 NULL
-    quota_expiry_ladder TEXT,                      -- 到期阶梯 JSON [[epoch, 剩余积分]]；TRAE 为 NULL
+    quota_cycle_end  INTEGER,                      -- 最早到期 epoch；渠道无此信息为 NULL
+    quota_expiry_ladder TEXT,                      -- 到期阶梯 JSON [[epoch, 剩余积分]]；无到期信息为 NULL
     quota_packages   TEXT,                      -- 额度包明细 JSON [{"name","total","used","end"}]，仅展示
     quota_probed_at  INTEGER,
     token_expires_at INTEGER,                   -- access token 到期 epoch；NULL=老库未回填，0=未知

@@ -232,7 +232,7 @@ class ErrKind(StrEnum):
 class Quota:
     remaining: float | None = None
     total: float | None = None
-    cycle_end: int | None = None      # 最早到期 epoch（CB 多包各自独立）；TRAE None
+    cycle_end: int | None = None      # 最早到期 epoch；无到期信息为 None
     expiry_ladder: list[tuple[int, float]] | None = None  # [(到期 epoch, 该包剩余积分)]
     packages: list[dict] | None = None  # [{"name","total","used","end"}]，仅展示
     probed_at: int | None = None
@@ -672,8 +672,9 @@ class Provider(Protocol):
         只作用于本条对话路径：后台任务只检查 disabled，暂停期间照常运行
      e. 到期积分排序（两级字典序）：quota_expiry_ladder 中「距到期 ≤ 主窗口」
         （QUOTA_EXPIRY_WINDOW_SECONDS，默认 36h）的积分加总，多的先用；打平再比
-        次窗口（默认 7 天）；无周期信息（TRAE/企业版）计 0；主窗口 ≤0 时次窗口
-        一并失效（expiry_windows() 统一折算）
+        次窗口（默认 7 天）；渠道无到期信息（如 CB 企业版）计 0；主窗口 ≤0 时次窗口
+        一并失效（expiry_windows() 统一折算）。CodeBuddy 与 TRAE 都按包独立到期，
+        均落阶梯参与此排序
      f. 两级到期积分都相同时按 health 三态取最高分；同分按 credential_id 稳定
   4. executor：解密凭证 → provider.stream_chat()
      - 上游 HTTP ≥400 → classify → scheduler.note_error → tried 加入 → 回到 3（最多 3 次）
@@ -712,6 +713,8 @@ class Scheduler:
 状态全部落 `credentials` 表（`cooling_until` / `err_count` / `health` / `disabled` / `quota_expiry_ladder`），进程重启不丢冷却状态。写路径无应用层锁：并发写靠 SQLite WAL + `busy_timeout=5000` 串行化；每个写方法走 `Database.transaction()` 上下文（正常提交、异常回滚），不再散落 `connect()/commit()` 样板。
 
 到期积分只算一处：`expiring_credits()`。选号走 `Candidate.expiry_credits()`（主/次两级窗口各调一次），管理台列表走 `GET /api/credentials` 的 `quota_expiring_credits` 与 `quota_expiring_credits_secondary`（两个窗口值随响应返回 `expiry_window_seconds` / `expiry_secondary_window_seconds`），两处共用同一实现与同一个 `expiry_windows()` 折算（主窗口 ≤0 时两级一起失效），界面数字与选号顺序不会漂移；渠道无到期信息时返回 `null`（不显示），窗口关闭或确实无积分临近过期时返回 `0`（同样不显示）。管理台只在主窗口无数字时才渲染次窗口那一行（次窗口是主窗口的超集，主窗口有值时重复展示没有信息量）。
+
+> **TRAE 也落 `quota_expiry_ladder`**（2026-09-30 修正）：早期按「TRAE 无周期概念」只填展示用 `quota_packages`、`expiry_ladder` 恒 `None`，表现为两列数字恒为空。实测 `ide_user_ent_usage` 的权益包各自独立到期（每月登录积分按月、签到奖励各有到期日），与 CodeBuddy 同构，故两列同时填、口径统一为「未过期 + 有余额」。`quota_cycle_end`（单值「最早到期」）TRAE 仍为 `NULL`：TRAE 各包未必共享一个重置点，而阶梯已表达「哪些包何时到期」，无需再挑一个单值。
 
 ### 6.1 模型级冷却（B1.1）
 

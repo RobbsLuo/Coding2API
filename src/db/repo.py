@@ -36,7 +36,7 @@ def _ladder_text(ladder: list[tuple[int, float]] | None) -> str | None:
 
 
 def _ladder_value(text: str | None) -> list[tuple[int, float]] | None:
-    """读回到期阶梯。缺失、迁移前的空值或历史脏数据一律当「无周期概念」，
+    """读回到期阶梯。缺失、迁移前的空值或历史脏数据一律当「无到期信息」，
     不能让一行坏数据把整个选号流程拖崩。"""
     if not text:
         return None
@@ -402,8 +402,8 @@ class CredentialRepository:
 
         附 `quota_expiring_credits`（主窗口内即将到期的积分，与调度排序第一级同源）；
         附 `quota_expiring_credits_secondary`（次窗口，主窗口打平时才参与排序的第二级）；
-        附 `quota_expiry_ladder`（套餐到期阶梯，[[epoch, 剩余积分]]，仅 CodeBuddy）；
-        渠道无到期信息（TRAE）三者都为 None，展示层据此隐藏。
+        附 `quota_expiry_ladder`（套餐到期阶梯，[[epoch, 剩余积分]]，按包独立到期的渠道）；
+        渠道无到期信息时三者都为 None，展示层据此隐藏。
         附 `model_cooldowns`（model → 截止 epoch），只在模型级限流/负缓存时非空。
         附 `token_expires_at` / `token_issued_at`（B3.3 token 到期展示）：只下发
         绝对 epoch，剩余时间与预警阈值判定交给展示层用同一个时钟现算——否则

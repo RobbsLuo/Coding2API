@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -649,9 +650,12 @@ async def test_fetch_quota_skips_zero_and_bad_packs():
 
 
 async def test_fetch_quota_collects_pack_details():
-    """奖励积分列表：包名逐级回落，到期取 end_time/expire_time，
-    已用缺失当 0；同时**不能**填 expiry_ladder（TRAE 无周期概念，
-    填了会改变选号排序）。"""
+    """奖励积分列表：包名逐级回落，到期取 end_time/expire_time，已用缺失当 0。
+
+    TRAE 的权益包**各自独立到期**（每月登录积分按月、签到奖励各有到期日），
+    因此 expiry_ladder 也要填：阶梯只收「未过期 + 有余额」的包，与展示明细
+    同源；无到期信息的包（无 end）不进阶梯，否则选号会失去可比口径。
+    """
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"user_entitlement_pack_list": [
             # 完整字段：package_extra.package_name 优先
@@ -677,8 +681,37 @@ async def test_fetch_quota_collects_pack_details():
         {"name": "每月登录积分", "total": 500.0, "used": 76.564, "end": 1790783999},
         {"name": "签到奖励", "total": 150.0, "used": 0.0, "end": None},
     ]
-    # 调度指标保持 None：TRAE 不是按包独立到期，不参与"快过期优先"
-    assert quota.expiry_ladder is None
+    # 阶梯按包顺序收「未过期 + 有余额」：剩余 = 额度 - 已用；无到期的包不进
+    assert quota.expiry_ladder == [(1791708834, 2000.0), (1790783999, 500.0 - 76.564)]
+
+
+async def test_fetch_quota_expiry_ladder_filters_expired_and_empty_packs():
+    """到期阶梯口径：已过期（积分作废）与已用完（不携带积分）的包都排除，
+    与 CodeBuddy 一致；只收未过期且有余额的包。"""
+    now = time.time()
+    future = int(now) + 3600
+    past = int(now) - 3600
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"user_entitlement_pack_list": [
+            # 未过期 + 有余额 → 进阶梯
+            {"entitlement_base_info": {"quota": {"credits_limit": 100},
+                                       "end_time": future},
+             "usage": {"credits_amount": 30}},
+            # 未过期但已用完（剩余 0）→ 不进阶梯
+            {"entitlement_base_info": {"quota": {"credits_limit": 100},
+                                       "end_time": future},
+             "usage": {"credits_amount": 100}},
+            # 已过期但仍有余额（积分作废）→ 不进阶梯
+            {"entitlement_base_info": {"quota": {"credits_limit": 100},
+                                       "end_time": past},
+             "usage": {"credits_amount": 10}},
+        ]})
+
+    quota = await _client(handler).fetch_quota(TraeCredential(access_token="a"))
+    assert quota.expiry_ladder == [(future, 70.0)]
+    # 展示明细仍保留全部三个包（含已过期有余额的浪费提醒）
+    assert len(quota.packages) == 3
 
 
 async def test_fetch_quota_rejects_missing_list():
