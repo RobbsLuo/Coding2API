@@ -22,11 +22,13 @@ from ...provider.base import (
     CheckinResult,
     ErrKind,
     Event,
+    EventKind,
     Model,
     Quota,
 )
 from ...provider.token_expiry import normalize_epoch
 from . import events as trae_events
+from . import pricing
 from .callback import (
     CallbackInfo,
     build_login_url,
@@ -210,6 +212,23 @@ def _stringify_tool_parameters(body: dict[str, Any]) -> None:
     body["tools"] = normalized
 
 
+def _fill_estimated_credit(event: Event, model: str) -> None:
+    """USAGE 事件补推算积分：上游不给单请求积分，按官方单价折算并标 estimated。
+
+    只在该事件确实带 token 且未携带上游 credit 时补（上游将来若返回真值，
+    不覆盖）。模型未收录时 pricing 返回 None，保持 credit 为 None。
+    """
+    usage = event.usage
+    if event.kind is not EventKind.USAGE or usage is None or usage.credit is not None:
+        return
+    credit = pricing.estimate_credit(
+        model, input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+        cached_tokens=usage.cached_tokens)
+    if credit is not None:
+        usage.credit = credit
+        usage.credit_estimated = True
+
+
 def solo_headers(credential: TraeCredential, *, stream: bool = True) -> dict[str, str]:
     """聊天/模型端点头（agent host）。逐项对照原实现 SOLOHeaders（实测必须）。"""
     token = credential.access_token
@@ -326,6 +345,7 @@ class TraeClient:
                 raise UpstreamHTTPError(response.status_code, raw)
             async for frame in iter_frames(response.aiter_bytes()):
                 for event in trae_events.parse_all_events(frame):
+                    _fill_estimated_credit(event, model)
                     yield event
 
     # ---------------------------------------------------------- 短请求接口

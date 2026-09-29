@@ -12,6 +12,7 @@ import {
   formatDuration,
   formatNumber,
   formatTime,
+  hasQuotaProbe,
   healthView,
   modelCooldownLabel,
   probeFailureLabel,
@@ -157,8 +158,8 @@ describe("api client", () => {
 });
 
 describe("display helpers", () => {
-  it("健康度三态互不混淆", () => {
-    expect(healthView(null)).toMatchObject({ kind: "unknown", label: "未探测到额度", tone: "muted" });
+  it("健康度四态互不混淆", () => {
+    expect(healthView(null)).toMatchObject({ kind: "unknown", label: "未探测", tone: "muted" });
     expect(healthView(-1)).toMatchObject({ kind: "exhausted", label: "已耗尽", tone: "danger" });
     expect(healthView(0)).toMatchObject({ kind: "known", percent: 0, tone: "danger" });
     expect(healthView(30)).toMatchObject({ kind: "known", tone: "warn" });
@@ -167,6 +168,17 @@ describe("display helpers", () => {
 
   it("undefined 也视为未探测", () => {
     expect(healthView(undefined as unknown as null).kind).toBe("unknown");
+  });
+
+  it("免费层（zen / kilo）的 null 归「无探测」，付费渠道归「未探测」", () => {
+    expect(healthView(null, "zen")).toMatchObject({ kind: "noprobe", label: "无探测" });
+    expect(healthView(null, "kilo")).toMatchObject({ kind: "noprobe", label: "无探测" });
+    expect(healthView(null, "codebuddy")).toMatchObject({ kind: "unknown", label: "未探测" });
+    // 已知额度不受渠道影响
+    expect(healthView(62, "zen")).toMatchObject({ kind: "known", label: "62%" });
+    expect(hasQuotaProbe("zen")).toBe(false);
+    expect(hasQuotaProbe("kilo")).toBe(false);
+    expect(hasQuotaProbe("trae")).toBe(true);
   });
 
   it("周期语义按渠道类型判定，而不是看 cycle_end 是否存在", () => {

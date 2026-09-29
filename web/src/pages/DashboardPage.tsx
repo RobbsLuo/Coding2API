@@ -30,11 +30,11 @@ export function DashboardPage() {
     off: 0,
     exhausted: 0,
   };
-  const healthTally = { known: 0, unknown: 0, exhausted: 0 };
+  const healthTally = { known: 0, unknown: 0, noprobe: 0, exhausted: 0 };
 
   for (const credential of credentials) {
     counts[credentialState(credential, now)] += 1;
-    healthTally[healthView(credential.health).kind] += 1;
+    healthTally[healthView(credential.health, credential.provider).kind] += 1;
   }
 
   const cooling = credentials.filter((item) => credentialState(item, now) === "cooling");
@@ -58,7 +58,7 @@ export function DashboardPage() {
     <div className="space-y-6" data-testid="dashboard">
       <PageHeader
         title="池仪表盘"
-        description="凭证池整体健康与配额概况：健康度按剩余积分占比三态统计，切换标签页可对凭证进行维护。"
+        description="凭证池整体健康与配额概况：健康度按剩余积分占比四态统计（已知 / 未探测 / 无探测 / 已耗尽），切换标签页可对凭证进行维护。"
         icon={<LayoutDashboard className="size-5" />}
       />
 
@@ -71,7 +71,7 @@ export function DashboardPage() {
         <Metric label="已暂停" value={formatNumber(counts.off)} icon={<ToggleLeft className="size-4" />} />
       </section>
 
-      <Panel title="健康度三态分布">
+      <Panel title="健康度四态分布">
         <div className="flex h-2 w-full overflow-hidden rounded-full bg-muted">
           {healthTally.known > 0 && (
             <div
@@ -83,6 +83,12 @@ export function DashboardPage() {
             <div
               className="bg-warn transition-all"
               style={{ width: `${(healthTally.unknown / Math.max(1, credentials.length)) * 100}%` }}
+            />
+          )}
+          {healthTally.noprobe > 0 && (
+            <div
+              className="bg-muted-foreground/40 transition-all"
+              style={{ width: `${(healthTally.noprobe / Math.max(1, credentials.length)) * 100}%` }}
             />
           )}
           {healthTally.exhausted > 0 && (
@@ -99,7 +105,11 @@ export function DashboardPage() {
           </span>
           <span data-testid="health-unknown" className="inline-flex items-center gap-1.5 text-muted-foreground">
             <span className="size-2 rounded-full bg-warn" />
-            未探测到额度：<strong>{healthTally.unknown}</strong>
+            未探测：<strong>{healthTally.unknown}</strong>
+          </span>
+          <span data-testid="health-noprobe" className="inline-flex items-center gap-1.5 text-muted-foreground">
+            <span className="size-2 rounded-full bg-muted-foreground/40" />
+            无探测：<strong>{healthTally.noprobe}</strong>
           </span>
           <span data-testid="health-exhausted" className="inline-flex items-center gap-1.5 text-destructive">
             <span className="size-2 rounded-full bg-destructive" />
@@ -107,7 +117,8 @@ export function DashboardPage() {
           </span>
         </div>
         <p className="mt-2 text-xs text-muted-foreground">
-          「未探测到额度」表示探测失败或渠道未提供额度信息，与「已耗尽」含义不同，不应互相替代。
+          「未探测」表示探测失败或渠道未提供额度信息，与「已耗尽」含义不同，不应互相替代；
+          「无探测」是 OpenCode Zen / Kilo Gateway 免费层——上游没有额度接口，探也没用。
         </p>
       </Panel>
 
@@ -164,7 +175,7 @@ function SkeletonMetricGrid() {
 }
 
 function CredentialRow({ credential, now }: { credential: Credential; now: number }) {
-  const health = healthView(credential.health);
+  const health = healthView(credential.health, credential.provider);
   const state = credentialState(credential, now);
   // 配额使用率（已用 %）：total>0 时才有意义，否则不展示
   const quotaTotal = credential.quota_total ?? 0;

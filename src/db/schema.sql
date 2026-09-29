@@ -70,6 +70,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
     reasoning_tokens INTEGER,
     cached_tokens    INTEGER,                  -- 输入中命中缓存的 token（上游可选，NULL=未上报）
     credit           REAL,                     -- 上游可选字段，两边都经常为 NULL
+    credit_estimated INTEGER NOT NULL DEFAULT 0,  -- credit 是否本服务推算（1=推算，展示标 ≈）
     latency_ms       INTEGER,             -- 端到端耗时（排队+首字+生成），非网络延迟
     ttfb_ms          INTEGER              -- 首字延迟（请求开始到首个内容帧）
 );
@@ -91,6 +92,7 @@ CREATE TABLE IF NOT EXISTS usage_hourly (
     cached_known  INTEGER NOT NULL DEFAULT 0,      -- 上报过 cached_tokens 的条数（=0 时该值不可信）
     credit_sum    REAL,
     credit_known  INTEGER NOT NULL DEFAULT 0,
+    credit_estimated_known INTEGER NOT NULL DEFAULT 0,  -- 其中推算值条数（>0 时该值标 ≈）
     latency_sum   INTEGER NOT NULL DEFAULT 0,
     ttfb_sum      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (hour_utc, username, provider, model)

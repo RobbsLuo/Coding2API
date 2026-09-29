@@ -55,6 +55,7 @@ class UsageEvent:
     reasoning_tokens: int | None
     cached_tokens: int | None
     credit: float | None
+    credit_estimated: bool
     latency_ms: int | None
     ttfb_ms: int | None
 
@@ -77,6 +78,7 @@ class StatsCollector:
         reasoning_tokens: int | None = None,
         cached_tokens: int | None = None,
         credit: float | None = None,
+        credit_estimated: bool = False,
         latency_ms: int | None = None,
         ttfb_ms: int | None = None,
         now: int | None = None,
@@ -96,6 +98,8 @@ class StatsCollector:
             reasoning_tokens=_int_or_none(reasoning_tokens),
             cached_tokens=_int_or_none(cached_tokens),
             credit=_float_or_none(credit),
+            # 只有确实记下 credit 时才可能标推算：credit 为 None 的推算标记无意义
+            credit_estimated=bool(credit_estimated) and _float_or_none(credit) is not None,
             latency_ms=_int_or_none(latency_ms),
             ttfb_ms=_int_or_none(ttfb_ms),
         )
@@ -103,11 +107,12 @@ class StatsCollector:
             conn.execute(
                 "INSERT INTO usage_events (id, ts, username, provider, credential_id, model, "
                 "ok, error_type, input_tokens, output_tokens, reasoning_tokens, cached_tokens, "
-                "credit, latency_ms, ttfb_ms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "credit, credit_estimated, latency_ms, ttfb_ms) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (event.id, event.ts, event.username, event.provider, event.credential_id,
                  event.model, int(event.ok), event.error_type, event.input_tokens,
                  event.output_tokens, event.reasoning_tokens, event.cached_tokens, event.credit,
-                 event.latency_ms, event.ttfb_ms),
+                 int(event.credit_estimated), event.latency_ms, event.ttfb_ms),
             )
             # 当前小时增量累加：总览/图表都读小时表，不能等 5 分钟一轮的
             # retention rollup 才可见（否则刚发生的请求统计页面显示 0）。
@@ -122,8 +127,9 @@ class StatsCollector:
             INSERT INTO usage_hourly (hour_utc, username, provider, model, requests, ok_count,
                                       input_tokens, output_tokens, reasoning_tokens,
                                       cached_tokens, cached_known,
-                                      credit_sum, credit_known, latency_sum, ttfb_sum)
-            VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?)
+                                      credit_sum, credit_known, credit_estimated_known,
+                                      latency_sum, ttfb_sum)
+            VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(hour_utc, username, provider, model) DO UPDATE SET
                 requests = requests + 1,
                 ok_count = ok_count + excluded.ok_count,
@@ -134,6 +140,7 @@ class StatsCollector:
                 cached_known = cached_known + excluded.cached_known,
                 credit_sum = COALESCE(credit_sum, 0) + excluded.credit_sum,
                 credit_known = credit_known + excluded.credit_known,
+                credit_estimated_known = credit_estimated_known + excluded.credit_estimated_known,
                 latency_sum = latency_sum + excluded.latency_sum,
                 ttfb_sum = ttfb_sum + excluded.ttfb_sum
             """,
@@ -147,6 +154,7 @@ class StatsCollector:
              0 if event.cached_tokens is None else 1,
              event.credit or 0.0,
              0 if event.credit is None else 1,
+             1 if event.credit_estimated else 0,
              (event.latency_ms or 0) if event.ok else 0,
              (event.ttfb_ms or 0) if event.ok else 0),
         )
@@ -182,7 +190,8 @@ class StatsCollector:
                 INSERT INTO usage_hourly (hour_utc, username, provider, model, requests, ok_count,
                                           input_tokens, output_tokens, reasoning_tokens,
                                           cached_tokens, cached_known,
-                                          credit_sum, credit_known, latency_sum, ttfb_sum)
+                                          credit_sum, credit_known, credit_estimated_known,
+                                          latency_sum, ttfb_sum)
                 SELECT (ts / 3600) * 3600 AS hour_utc, username, provider, model,
                        COUNT(*), SUM(ok),
                        COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
@@ -190,6 +199,7 @@ class StatsCollector:
                        COALESCE(SUM(cached_tokens), 0),
                        SUM(CASE WHEN cached_tokens IS NULL THEN 0 ELSE 1 END),
                        COALESCE(SUM(credit), 0), SUM(CASE WHEN credit IS NULL THEN 0 ELSE 1 END),
+                       SUM(CASE WHEN credit_estimated = 1 AND credit IS NOT NULL THEN 1 ELSE 0 END),
                        COALESCE(SUM(CASE WHEN ok = 1 THEN latency_ms END), 0),
                        COALESCE(SUM(CASE WHEN ok = 1 THEN ttfb_ms END), 0)
                 FROM usage_events WHERE (? IS NULL OR ts >= ?)
@@ -204,6 +214,7 @@ class StatsCollector:
                     cached_known = excluded.cached_known,
                     credit_sum = excluded.credit_sum,
                     credit_known = excluded.credit_known,
+                    credit_estimated_known = excluded.credit_estimated_known,
                     latency_sum = excluded.latency_sum,
                     ttfb_sum = excluded.ttfb_sum
                 """, (since, since))

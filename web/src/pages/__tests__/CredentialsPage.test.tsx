@@ -18,11 +18,12 @@ describe("CredentialsPage", () => {
     vi.unstubAllGlobals();
   });
 
-  it("渲染凭证列表与三态健康度", async () => {
+  it("渲染凭证列表与四态健康度（免费层 null 归「无探测」）", async () => {
     mockFetch({
       "/api/credentials": listBody([
         makeCredential({ id: "a", health: 62 }),
-        makeCredential({ id: "b", nickname: "未探测号", health: null }),
+        makeCredential({ id: "b", nickname: "未探测号", health: null, provider: "trae" }),
+        makeCredential({ id: "d", nickname: "免费层号", health: null, provider: "zen" }),
         makeCredential({ id: "c", nickname: "耗尽号", health: -1 }),
       ]),
     });
@@ -31,7 +32,8 @@ describe("CredentialsPage", () => {
 
     const table = screen.getByTestId("credentials-table");
     expect(within(table).getByText("62%")).toBeInTheDocument();
-    expect(within(table).getByText("未探测到额度")).toBeInTheDocument();
+    expect(within(table).getByText("未探测")).toBeInTheDocument();
+    expect(within(table).getByText("无探测")).toBeInTheDocument();
     expect(within(table).getByText("已耗尽")).toBeInTheDocument();
   });
 
@@ -198,7 +200,7 @@ describe("CredentialsPage", () => {
     expect(within(row).queryByText(/探测于/)).not.toBeInTheDocument();
   });
 
-  it("模型级冷却：只写「该模型被避让」，并显示剩余时间与命中次数", async () => {
+  it("模型级冷却：表格里只留警告图标，hover 才展开明细", async () => {
     const now = Math.floor(Date.now() / 1000);
     mockFetch({
       "/api/credentials": listBody([
@@ -217,13 +219,22 @@ describe("CredentialsPage", () => {
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
 
-    const block = screen.getByTestId("model-cooldowns-cb");
+    // 明细不常驻表格：不 hover 时单元格里没有冷却文案，只有一个警告图标
+    expect(screen.queryByTestId("model-cooldowns-cb")).not.toBeInTheDocument();
+    const icon = screen.getByTestId("model-cooldown-icon-cb");
+    const row = screen.getByTestId("row-cb");
+    expect(within(row).queryByText(/模型 glm-5\.2/)).not.toBeInTheDocument();
+
+    await userEvent.hover(icon);
+    const block = await screen.findByTestId("model-cooldowns-cb");
     expect(block).toHaveTextContent("glm-5.2");
     expect(block).toHaveTextContent("其它模型不受影响");
     expect(block).toHaveTextContent("连续 2 次");
     expect(block).not.toHaveTextContent("stale");
-    // 无冷却条目的凭证不渲染该区块
-    expect(screen.queryByTestId("model-cooldowns-plain")).not.toBeInTheDocument();
+    await userEvent.unhover(icon);
+
+    // 无冷却条目的凭证不渲染图标
+    expect(screen.queryByTestId("model-cooldown-icon-plain")).not.toBeInTheDocument();
   });
 
   it("暂停/取消暂停调用 toggle 接口", async () => {
@@ -702,6 +713,10 @@ describe("渠道登录入口", () => {
     const button = screen.getByTestId("add-zen");
     expect(button).toBeDisabled();
     expect(button).toHaveTextContent("OpenCode Zen 已添加");
+    // 免费层无额度接口、无额度探测：积分记录 / 探测 / 签到入口都不该出现
+    expect(screen.queryByTestId("credits-z")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("probe-z")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("checkin-z")).not.toBeInTheDocument();
   });
 
   it("管理员可一键补回 Kilo Gateway（删除后渠道不丢）", async () => {
@@ -738,6 +753,9 @@ describe("渠道登录入口", () => {
     const button = screen.getByTestId("add-kilo");
     expect(button).toBeDisabled();
     expect(button).toHaveTextContent("Kilo Gateway 已添加");
+    expect(screen.queryByTestId("credits-k")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("probe-k")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("checkin-k")).not.toBeInTheDocument();
   });
 
   it("非管理员看不到登录入口", async () => {

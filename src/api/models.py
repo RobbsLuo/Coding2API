@@ -18,6 +18,11 @@
 才反映到 Playground，且被滤掉的模型在 TTL 内会从「兜底缓存」里复活。
 元数据（消耗倍率 / token 上限 / 支持性）随条目透传，双上游同名模型
 逐字段补缺（先到先填，后到只补 None）。
+
+**展示顺序**：CodeBuddy / TRAE 的模型排在前面（`_PROVIDER_RANK`：
+codebuddy 0 → trae 1 → 其他 2），组内仍按模型名字典序；多渠道模型按
+其最高优先级渠道归位（含 CB 即进第一段，含 TR 即进第二段）。仅影响
+`/v1/models` 与 Playground 的展示顺序，不影响调度选号。
 """
 
 from __future__ import annotations
@@ -44,6 +49,22 @@ MODEL_LIST_TTL_SECONDS = 300
 _META_FIELDS = ("credit_rate", "max_input_tokens", "max_output_tokens",
                 "supports_images", "supports_tool_call",
                 "supports_reasoning", "default_effort")
+
+# 展示排序权重：CodeBuddy / TRAE 优先，其余渠道（zen / kilo 等）在后；
+# 多渠道模型取所有渠道里的最小权重（含 CB 即进第一段）。
+_PROVIDER_RANK = {"codebuddy": 0, "trae": 1}
+_UNRANKED_PROVIDER = 2
+
+
+def _sort_key(entry: dict[str, Any]) -> tuple[int, str]:
+    """展示排序键：渠道优先级升序，同级按模型名（canonical）字典序。
+
+    合并后的条目至少有一个渠道（providers 由 `_merge_provider` 逐个 add），
+    故 min() 不会作用于空集合。
+    """
+    rank = min(_PROVIDER_RANK.get(pid, _UNRANKED_PROVIDER)
+               for pid in entry["providers"])
+    return rank, entry["canonical"]
 
 
 def _blocked(model_id: str, patterns: tuple[str, ...]) -> bool:
@@ -134,6 +155,7 @@ async def list_models(services: Services, *, force: bool = False) -> dict:
 
     force=False（默认）时 TTL 内直接复用刚才的结果；启动预热传 force=True。
     黑名单在每个出口现算（缓存不做过滤），因此改完黑名单下一次调用立即生效。
+    输出顺序按 `_sort_key`：CB / TR 渠道的模型优先，其余渠道在后。
     """
     aliases: dict[str, dict[str, str]] = {}
     grouped: dict[str, dict[str, Any]] = {}   # 小写名 → {canonical, providers, meta}
@@ -188,7 +210,7 @@ async def list_models(services: Services, *, force: bool = False) -> dict:
     services.model_aliases.update(aliases)
     return {"object": "list", "data": [
         _entry_response(entry)
-        for entry in sorted(grouped.values(), key=lambda e: e["canonical"])
+        for entry in sorted(grouped.values(), key=_sort_key)
     ]}
 
 

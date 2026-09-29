@@ -1,13 +1,15 @@
 /**
- * 健康度三态与配额周期语义的展示规则（全站共用）。
+ * 健康度四态与配额周期语义的展示规则（全站共用）。
  *
  * 后端把「未探测 / 已耗尽 / 已知剩余百分比」编码为 null / -1 / 0-100，
- * 展示层必须区分它们，否则探测失败会被误读成「没额度」。
+ * 展示层必须区分它们，否则探测失败会被误读成「没额度」。null 还要再分两种：
+ * 免费层（zen / kilo）上游根本没有额度接口，「探也没用」，与「该探但没探到」
+ * 是两回事——前者不该提示用户去点「探测」。
  */
 
 import type { Credential, Health, ModelCooldown, ProbeFailureReason } from "../api/types";
 
-export type HealthKind = "known" | "unknown" | "exhausted";
+export type HealthKind = "known" | "unknown" | "noprobe" | "exhausted";
 
 export interface HealthView {
   kind: HealthKind;
@@ -17,9 +19,21 @@ export interface HealthView {
   tone: "ok" | "warn" | "danger" | "muted";
 }
 
-export function healthView(health: Health): HealthView {
+/** 该渠道是否有额度探测：免费层（zen / kilo）上游没有额度接口，探也没用。 */
+export function hasQuotaProbe(provider: string): boolean {
+  return provider !== "zen" && provider !== "kilo";
+}
+
+/**
+ * 健康度视图。`provider` 决定 null 落到「未探测」还是「无探测」：
+ * 省略时按「未探测」处理（仅用于不关心渠道的旧调用点）。
+ */
+export function healthView(health: Health, provider?: string): HealthView {
   if (health === null || health === undefined) {
-    return { kind: "unknown", percent: null, label: "未探测到额度", tone: "muted" };
+    if (provider !== undefined && !hasQuotaProbe(provider)) {
+      return { kind: "noprobe", percent: null, label: "无探测", tone: "muted" };
+    }
+    return { kind: "unknown", percent: null, label: "未探测", tone: "muted" };
   }
   if (health < 0) {
     return { kind: "exhausted", percent: 0, label: "已耗尽", tone: "danger" };
@@ -217,6 +231,19 @@ export function formatNumber(value: number | null | undefined): string {
 export function formatCompact(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";
   return value.toLocaleString("zh-CN", { notation: "compact", maximumFractionDigits: 1 });
+}
+
+/**
+ * Credit 展示：null 显示 —；推算值（TRAE 无上游积分，按官方单价折算）前置
+ * ≈ 表示约等于，提醒是估算而非上游回传的真实扣费。
+ */
+export function formatCredit(
+  value: number | null | undefined,
+  estimated?: boolean | number | null,
+): string {
+  if (value === null || value === undefined) return "—";
+  const text = formatNumber(Number(value.toFixed(2)));
+  return estimated ? `≈${text}` : text;
 }
 
 /** 积分变动流水的说明列（B3.4）：只表达归因已知度，不谎称来源。 */

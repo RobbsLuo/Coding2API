@@ -188,3 +188,8 @@ async def test_usage_accumulation_with_missing_fields():
     assert merged.output_tokens == 6
     assert merged.credit == 0.5
     assert merged.reasoning_tokens is None
+    assert merged.credit_estimated is False
+    # 任一轮为推算值 → 合并结果整体标推算（TRAE 每轮都推算，语义一致）
+    est = _add_usage(base, Usage(input_tokens=1, credit=0.2, credit_estimated=True))
+    assert est.credit_estimated is True
+    assert _add_usage(est, Usage(input_tokens=1, credit=0.1)).credit_estimated is True

@@ -26,7 +26,9 @@ SCHEMA_NAME = "schema.sql"
 # 渠道绑定与来源 IP 白名单）；两者默认 ''，老库补列后行为不变。
 # 14：新增 users / audit_events 表（B5 账号管理体系）。新增表只需进
 # schema.sql（CREATE TABLE IF NOT EXISTS 对老库同样生效），无需迁移动作。
-SCHEMA_VERSION = 14
+# 15：usage_events 新增 credit_estimated（credit 是否本服务推算）；usage_hourly
+# 新增 credit_estimated_known（其中推算值条数），老库补 0=全部非推算。
+SCHEMA_VERSION = 15
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -54,6 +56,9 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # 多 Key 出口（B3.5）：空串 = 不限制，老库补列后与补列前行为一致
     ("api_keys", "provider_binding TEXT NOT NULL DEFAULT ''"),
     ("api_keys", "allowed_ips TEXT NOT NULL DEFAULT ''"),
+    # 积分推算（TRAE 上游不给单请求积分）：老库补 0=历史行全按非推算处理
+    ("usage_events", "credit_estimated INTEGER NOT NULL DEFAULT 0"),
+    ("usage_hourly", "credit_estimated_known INTEGER NOT NULL DEFAULT 0"),
 )
 
 # 已废弃的表：schema.sql 里已删定义，但老库里可能还留着，必须显式清理。

@@ -73,6 +73,7 @@ class StatsQuery:
                    SUM(cached_known) AS cached_known,
                    SUM(credit_sum) AS credit_sum,
                    SUM(credit_known) AS credit_known,
+                   SUM(credit_estimated_known) AS credit_estimated_known,
                    SUM(latency_sum) AS latency_sum,
                    SUM(ttfb_sum) AS ttfb_sum
             FROM usage_hourly {where}
@@ -91,6 +92,8 @@ class StatsQuery:
             # 缓存命中：任一明细上报过才可信，否则 None（前端显示 —）
             "cached_tokens": row["cached_tokens"] if row["cached_known"] else None,
             "credit": row["credit_sum"] if row["credit_known"] else None,
+            # 汇总 credit 中含推算值时标 ≈（全部渠道任一为推算即标，保守）
+            "credit_estimated": bool(row["credit_estimated_known"]),
             "avg_latency_ms": round(row["latency_sum"] / ok_count) if ok_count else None,
             "avg_ttfb_ms": round(row["ttfb_sum"] / ok_count) if ok_count else None,
         }
@@ -105,14 +108,17 @@ class StatsQuery:
                    COALESCE(SUM(ok_count), 0) AS ok_count,
                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
-                   SUM(credit_sum) AS credit_sum
+                   SUM(credit_sum) AS credit_sum,
+                   SUM(credit_known) AS credit_known,
+                   SUM(credit_estimated_known) AS credit_estimated_known
             FROM usage_hourly {where} GROUP BY provider ORDER BY provider
             """, params).fetchall()
         return [
             {"provider": row["provider"], "requests": row["requests"],
              "ok_count": row["ok_count"],
              "input_tokens": row["input_tokens"], "output_tokens": row["output_tokens"],
-             "credit": row["credit_sum"]}
+             "credit": row["credit_sum"] if row["credit_known"] else None,
+             "credit_estimated": bool(row["credit_estimated_known"])}
             for row in rows
         ]
 
@@ -164,7 +170,7 @@ class StatsQuery:
             f"""
             SELECT e.rowid, e.ts, e.username, e.provider, e.credential_id, e.model,
                    e.ok, e.error_type, e.input_tokens, e.output_tokens,
-                   e.reasoning_tokens, e.cached_tokens, e.credit, e.latency_ms,
+                   e.reasoning_tokens, e.cached_tokens, e.credit, e.credit_estimated, e.latency_ms,
                    e.ttfb_ms, c.nickname AS credential_name
             FROM usage_events e
             LEFT JOIN credentials c ON c.id = e.credential_id

@@ -988,6 +988,49 @@ async def test_executor_stream_success_frames(repo):
     assert b'"hi"' in chunks[0]                      # 首帧即带 role + content
 
 
+async def test_executor_records_estimated_credit_flag(repo):
+    """执行引擎把 provider 的 credit_estimated 标记带进统计明细。"""
+    from src.stats.collector import StatsCollector
+
+    credentials, _keys, db = repo
+    add_credential(credentials)
+    collector = StatsCollector(db)
+    usage = Usage(1000, 200, 0, credit=0.05, credit_estimated=True)
+    script = [[Event(kind=EventKind.CONTENT, content="hi"),
+               Event(kind=EventKind.USAGE, usage=usage),
+               Event(kind=EventKind.FINISH, finish_reason="stop")]]
+    executor = Executor(ExecutorDeps(
+        providers={"trae": FakeProvider(script)}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2", stats=collector))
+    chunks = [c async for c in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
+    assert chunks[-1] == SSE_DONE
+    row = db.connect().execute(
+        "SELECT credit, credit_estimated FROM usage_events").fetchone()
+    assert row["credit"] == 0.05 and row["credit_estimated"] == 1
+
+
+async def test_executor_complete_records_credit_and_flag(repo):
+    """非流式路径同样把 USAGE 事件的 credit / 推算标记写进统计（否则整条漏掉）。"""
+    from src.stats.collector import StatsCollector
+
+    credentials, _keys, db = repo
+    add_credential(credentials)
+    collector = StatsCollector(db)
+    usage = Usage(1000, 200, 0, credit=0.07, credit_estimated=True)
+    script = [[Event(kind=EventKind.CONTENT, content="ok"),
+               Event(kind=EventKind.USAGE, usage=usage),
+               Event(kind=EventKind.FINISH, finish_reason="stop")]]
+    executor = Executor(ExecutorDeps(
+        providers={"trae": FakeProvider(script)}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2", stats=collector))
+    await executor.complete(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}]}))
+    row = db.connect().execute(
+        "SELECT credit, credit_estimated FROM usage_events").fetchone()
+    assert row["credit"] == 0.07 and row["credit_estimated"] == 1
+
+
 async def test_executor_rotates_on_http_error(repo):
     add_credential(repo[0], nickname="first")
     add_credential(repo[0], nickname="second")
@@ -1398,3 +1441,108 @@ def test_trae_usage_cached_tokens():
     frame = SSEFrame(event="token_usage", data='{"prompt_tokens":9}')
     assert trae_events.parse_frame(frame).usage.cached_tokens is None
 
+
+
+# --------------------------------------------------- TRAE 单请求积分推算
+
+def test_pricing_estimate_credit_official_formula():
+    """官方公式：积分 = (输入−缓存)×输入价 + 输出×输出价 + 缓存×缓存价（积分/百万）。"""
+    from src.provider.trae import pricing
+
+    # qwen-3.7-plus 官方 2/8/0.4 元/百万，×40 = 80/320/16 积分/百万，无折扣
+    assert pricing.estimate_credit(
+        "qwen-3.7-plus", input_tokens=1_000_000, output_tokens=0) == 80.0
+    assert pricing.estimate_credit(
+        "qwen-3.7-plus", input_tokens=0, output_tokens=1_000_000) == 320.0
+    # 缓存命中的部分按缓存价计，不再按输入价计
+    assert pricing.estimate_credit(
+        "qwen-3.7-plus", input_tokens=1_000_000, output_tokens=0,
+        cached_tokens=1_000_000) == 16.0
+    # 混合：输入 1M 其中 0.5M 命中 + 输出 0.5M
+    assert pricing.estimate_credit(
+        "qwen-3.7-plus", input_tokens=1_000_000, output_tokens=500_000,
+        cached_tokens=500_000) == round((500_000 * 80 + 500_000 * 320 + 500_000 * 16) / 1e6, 4)
+
+
+def test_pricing_measured_discount_applied():
+    """实测折扣模型：官方价 × 折扣（glm 0.675、deepseek-v4.1-flash 0.35）。"""
+    from src.provider.trae import pricing
+
+    # glm-5.2 官方 8/28 元 → 320/1120，×0.675 = 216/756
+    assert pricing.estimate_credit(
+        "glm-5.2", input_tokens=1_000_000, output_tokens=0) == 216.0
+    assert pricing.estimate_credit(
+        "glm-5.2", input_tokens=0, output_tokens=1_000_000) == 756.0
+    # deepseek-v4.1-flash 官方 2/8 → 80/320，×0.35 = 28/112
+    assert pricing.estimate_credit(
+        "deepseek-v4.1-flash", input_tokens=1_000_000, output_tokens=0) == 28.0
+    assert pricing.effective_prices("deepseek-v4.1-flash") == (28.0, 112.0, 0.56)
+
+
+def test_pricing_unknown_model_and_missing_input():
+    """未收录模型 / 缺输入 token → None（不推算，展示层保持 —）。"""
+    from src.provider.trae import pricing
+
+    assert pricing.effective_prices("sagitta") is None
+    assert pricing.estimate_credit("sagitta", input_tokens=100, output_tokens=10) is None
+    assert pricing.estimate_credit("glm-5.2", input_tokens=None, output_tokens=10) is None
+    # bool 不是合法 token 数（int 子类陷阱）
+    assert pricing.estimate_credit("glm-5.2", input_tokens=True, output_tokens=1) is None
+
+
+def test_pricing_cached_clamped_and_missing_output():
+    """缓存 > 输入时按输入截断；输出缺失按 0；缓存缺失按 0。"""
+    from src.provider.trae import pricing
+
+    assert pricing.estimate_credit(
+        "glm-5.2", input_tokens=1_000_000, output_tokens=0,
+        cached_tokens=9_999_999) == 216.0 * 0.25   # 全命中按缓存价 54/百万
+    assert pricing.estimate_credit(
+        "glm-5.2", input_tokens=1_000_000, output_tokens=None) == 216.0
+    assert pricing.estimate_credit(
+        "glm-5.2", input_tokens=1_000_000, output_tokens=0,
+        cached_tokens=True) == 216.0               # bool 缓存值视为缺失
+
+
+def test_fill_estimated_credit_only_when_missing():
+    """USAGE 事件补推算：有上游 credit 不覆盖；非 USAGE 不动；未收录模型不动。"""
+    from src.provider.trae.client import _fill_estimated_credit
+
+    upstream = Event(kind=EventKind.USAGE, usage=Usage(
+        input_tokens=1_000_000, output_tokens=0, credit=99.0))
+    _fill_estimated_credit(upstream, "glm-5.2")
+    assert upstream.usage.credit == 99.0
+    assert upstream.usage.credit_estimated is False
+
+    content = Event(kind=EventKind.CONTENT, content="hi")
+    _fill_estimated_credit(content, "glm-5.2")
+    assert content.usage is None
+
+    no_usage = Event(kind=EventKind.USAGE, usage=None)
+    _fill_estimated_credit(no_usage, "glm-5.2")
+    assert no_usage.usage is None
+
+    unknown = Event(kind=EventKind.USAGE, usage=Usage(input_tokens=10, output_tokens=1))
+    _fill_estimated_credit(unknown, "sagitta")
+    assert unknown.usage.credit is None
+    assert unknown.usage.credit_estimated is False
+
+    filled = Event(kind=EventKind.USAGE, usage=Usage(input_tokens=1_000_000, output_tokens=0))
+    _fill_estimated_credit(filled, "glm-5.2")
+    assert filled.usage.credit == 216.0
+    assert filled.usage.credit_estimated is True
+
+
+async def test_client_stream_chat_fills_estimated_credit():
+    """端到端：上游 token_usage 无积分 → 客户端流出来的 USAGE 带推算值 + 标记。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=(
+            'event:token_usage\n'
+            'data:{"prompt_tokens":21,"completion_tokens":142,"reasoning_tokens":135}\n\n'
+            'event:done\ndata:{"finish_reason":"stop"}\n\n'))
+
+    events = [e async for e in _client(handler).stream_chat(
+        TraeCredential(access_token="a"), {"messages": []}, "glm-5.2")]
+    usage = next(e.usage for e in events if e.kind is EventKind.USAGE)
+    assert usage.credit is not None
+    assert usage.credit_estimated is True

@@ -15,14 +15,15 @@ const OVERVIEW = {
   reasoning_tokens: 300,
   cached_tokens: 400,
   credit: 12.5,
+  credit_estimated: false,
   avg_latency_ms: 850,
   avg_ttfb_ms: 220,
 };
 
 const PROVIDERS = {
   providers: [
-    { provider: "trae", requests: 70, ok_count: 68, input_tokens: 600, output_tokens: 1200, credit: null },
-    { provider: "codebuddy", requests: 50, ok_count: 46, input_tokens: 400, output_tokens: 800, credit: 12.5 },
+    { provider: "trae", requests: 70, ok_count: 68, input_tokens: 600, output_tokens: 1200, credit: 5.25, credit_estimated: true },
+    { provider: "codebuddy", requests: 50, ok_count: 46, input_tokens: 400, output_tokens: 800, credit: 12.5, credit_estimated: false },
   ],
 };
 
@@ -42,11 +43,11 @@ const EVENTS_PAGE1 = {
     { rowid: 3, ts: BASE_TS + 200, username: "root", provider: "codebuddy", model: "glm-5.2",
       credential_id: "cred_abc123", credential_name: "主账号",
       ok: 1, error_type: null, input_tokens: 120, output_tokens: 480, cached_tokens: 90,
-      credit: 0.35, latency_ms: 8200, ttfb_ms: 2400 },
+      credit: 0.35, credit_estimated: 0, latency_ms: 8200, ttfb_ms: 2400 },
     { rowid: 2, ts: BASE_TS + 100, username: "root", provider: "trae", model: "deepseek-v4",
       credential_id: null, credential_name: null,
       ok: 0, error_type: "rate_limit", input_tokens: null, output_tokens: null, cached_tokens: null,
-      credit: null, latency_ms: 460, ttfb_ms: 120 },
+      credit: null, credit_estimated: 0, latency_ms: 460, ttfb_ms: 120 },
   ],
   next_before: 2,
 };
@@ -55,7 +56,7 @@ const EVENTS_PAGE2 = {
   events: [
     { rowid: 1, ts: BASE_TS, username: "root", provider: "trae", model: "kimi-k3",
       ok: 1, error_type: null, input_tokens: 5, output_tokens: 9, cached_tokens: null,
-      credit: null, latency_ms: 300, ttfb_ms: 150 },
+      credit: null, credit_estimated: 0, latency_ms: 300, ttfb_ms: 150 },
   ],
   next_before: null,
 };
@@ -119,8 +120,11 @@ describe("StatsPage", () => {
 
   it("credit 为 null 时显示占位符而非 0", async () => {
     mockFetch({
-      "/api/stats/overview": { ...OVERVIEW, credit: null },
-      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/overview": { ...OVERVIEW, credit: null, credit_estimated: false },
+      "/api/stats/by-provider": { providers: [
+        { provider: "trae", requests: 70, ok_count: 68, input_tokens: 600, output_tokens: 1200,
+          credit: null, credit_estimated: false },
+      ] },
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_EMPTY,
     });
@@ -133,6 +137,26 @@ describe("StatsPage", () => {
     expect(row).toHaveTextContent("—");
     // 总览未探测到 credit
     expect(screen.getByText("Credit 消耗").closest("[data-slot=card]")).toHaveTextContent("—");
+  });
+
+  it("推算 credit 显示 ≈ 前缀（TRAE 无上游积分）", async () => {
+    mockFetch({
+      "/api/stats/overview": { ...OVERVIEW, credit: 5.25, credit_estimated: true },
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    // 总览卡片与按渠道表对推算值都标 ≈
+    expect(screen.getByText("Credit 消耗").closest("[data-slot=card]")).toHaveTextContent("≈5.25");
+    const table = screen.getByTestId("provider-table");
+    const traeRow = within(table).getAllByText("TRAE")[0].closest("tr")!;
+    expect(traeRow).toHaveTextContent("≈5.25");
+    const cbRow = within(table).getAllByText("CodeBuddy")[0].closest("tr")!;
+    expect(cbRow).toHaveTextContent("12.5");
+    expect(cbRow).not.toHaveTextContent("≈12.5");
   });
 
   it("成功率与延迟缺失时显示占位符", async () => {
@@ -216,6 +240,36 @@ describe("StatsPage", () => {
         String(url).includes("metric=tokens"))).toBe(true),
     );
     expect(screen.getByTestId("metric-tabs-tokens")).toHaveAttribute("aria-selected", "true");
+  });
+
+  it("请求明细：推算 credit 标 ≈，真实 credit 不标", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": {
+        events: [
+          { rowid: 2, ts: BASE_TS + 100, username: "root", provider: "trae",
+            model: "deepseek-v4.1-flash", credential_id: null, credential_name: null,
+            ok: 1, error_type: null, input_tokens: 1000, output_tokens: 200,
+            cached_tokens: null, credit: 0.05, credit_estimated: 1,
+            latency_ms: 400, ttfb_ms: 120 },
+          { rowid: 1, ts: BASE_TS, username: "root", provider: "codebuddy",
+            model: "glm-5.2", credential_id: null, credential_name: null,
+            ok: 1, error_type: null, input_tokens: 10, output_tokens: 5,
+            cached_tokens: null, credit: 1.5, credit_estimated: 0,
+            latency_ms: 300, ttfb_ms: 150 },
+        ],
+        next_before: null,
+      },
+    });
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    const table = screen.getByTestId("events-table");
+    expect(within(table).getByText("≈0.05")).toBeInTheDocument();
+    expect(within(table).getByText("1.5")).toBeInTheDocument();
+    expect(within(table).queryByText("≈1.5")).not.toBeInTheDocument();
   });
 
   it("请求明细面板渲染成功与失败状态，管理员见用户列", async () => {

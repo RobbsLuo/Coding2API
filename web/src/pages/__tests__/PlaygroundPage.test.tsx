@@ -373,6 +373,26 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(dualGroup!.querySelector("option")?.value).toBe("glm-5.2");
   });
 
+  it("单渠道分组按 CB → TR → 其余排序，不随模型列表首次出现顺序", async () => {
+    const mixed = {
+      object: "list",
+      data: [
+        // zen 先出现，但展示分组应排到最后
+        { id: "aaa-zen", object: "model", owned_by: "x", providers: ["zen"] },
+        { id: "kimi-k3", object: "model", owned_by: "x", providers: ["trae"] },
+        { id: "deepseek-v4-pro", object: "model", owned_by: "x",
+          providers: ["codebuddy"] },
+      ],
+    };
+    mockFetch({ "/api/playground/models": mixed });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    const select = screen.getByTestId("model-select");
+    const labels = [...select.querySelectorAll("optgroup")].map((g) => g.label);
+    expect(labels).toEqual(["仅 CodeBuddy", "仅 TRAE", "仅 OpenCode Zen"]);
+  });
+
   it("没有可用模型时 select 为空", async () => {
     mockFetch({ "/api/playground/models": { object: "list", data: [] } });
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });

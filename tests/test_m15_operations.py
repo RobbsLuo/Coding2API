@@ -1237,6 +1237,54 @@ def test_stats_credit_is_null_when_never_known(stats):
     collector, query = stats
     collector.record(username="u", provider="trae", model="m", ok=True)
     assert query.overview(username="u")["credit"] is None
+    assert query.overview(username="u")["credit_estimated"] is False
+
+
+def test_stats_estimated_credit_flag_flows_through(stats):
+    """推算积分：明细标 1、总览/按渠道标 ≈、events 带标记；无 credit 的推算标记被丢弃。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="deepseek-v4.1-flash", ok=True,
+                     input_tokens=1000, output_tokens=200, credit=0.05,
+                     credit_estimated=True)
+    collector.record(username="u", provider="codebuddy", model="glm-5.2", ok=True,
+                     input_tokens=10, output_tokens=5, credit=1.5)
+    # credit 缺失时推算标记无意义，落库应为 0
+    collector.record(username="u", provider="trae", model="glm-5.2", ok=True,
+                     credit_estimated=True)
+
+    overview = query.overview(username="u")
+    assert overview["credit"] == 1.55
+    assert overview["credit_estimated"] is True
+
+    rows = {row["provider"]: row for row in query.by_provider(username="u")}
+    assert rows["trae"]["credit_estimated"] is True
+    assert rows["codebuddy"]["credit_estimated"] is False
+
+    events = query.events(username="u")["events"]
+    by_model = {e["model"]: e for e in events}
+    assert by_model["deepseek-v4.1-flash"]["credit_estimated"] == 1
+    assert by_model["glm-5.2"]["credit_estimated"] == 0
+    # 只有真值 credit 的渠道不标推算
+    collector.record(username="v", provider="codebuddy", model="m", ok=True, credit=2.0)
+    assert query.overview(username="v")["credit_estimated"] is False
+    assert query.by_provider(username="v")[0]["credit_estimated"] is False
+
+
+def test_stats_rollup_preserves_estimated_known(stats):
+    """retention rollup 重算小时汇总时保留 credit_estimated_known。"""
+    collector, query = stats
+    now = int(time.time())
+    collector.record(username="u", provider="trae", model="m", ok=True, credit=0.05,
+                     credit_estimated=True, now=now)
+    collector.record(username="u", provider="trae", model="m", ok=True, credit=0.10,
+                     credit_estimated=True, now=now)
+    collector.record(username="u", provider="trae", model="m", ok=True, credit=0.20,
+                     now=now)
+    collector.rollup_hourly(since=now - 10)
+    row = query._db.connect().execute(
+        "SELECT credit_estimated_known, credit_known FROM usage_hourly").fetchone()
+    assert row["credit_estimated_known"] == 2
+    assert row["credit_known"] == 3
 
 
 def test_stats_normalizes_model_and_error_type(stats):
@@ -2018,14 +2066,20 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     apply_schema(db.connect())
     events_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(usage_events)")}
     assert "cached_tokens" in events_columns
+    # 积分推算标记（TRAE 无上游积分）：老库补 0=历史行全按非推算处理
+    assert "credit_estimated" in events_columns
     hourly_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(usage_hourly)")}
     assert "ttfb_sum" in hourly_columns
+    assert "credit_estimated_known" in hourly_columns
     # 总览改读小时汇总后新增的三列（老库历史行补 0，数值无法回填）
     assert {"reasoning_tokens", "cached_tokens", "cached_known"} <= hourly_columns
     legacy_hourly = db.connect().execute(
         "SELECT requests, reasoning_tokens, cached_known FROM usage_hourly "
         "WHERE hour_utc = 1").fetchone()
     assert tuple(legacy_hourly) == (5, 0, 0)      # 历史汇总保留，新列取默认
+    legacy_est = db.connect().execute(
+        "SELECT credit_estimated_known FROM usage_hourly WHERE hour_utc = 1").fetchone()
+    assert legacy_est[0] == 0                     # 老库历史行按非推算
     cred_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
     assert "quota_expiry_ladder" in cred_columns
     # 额度包明细（展示用）也是本次新增列

@@ -350,6 +350,7 @@ class Executor:
             reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
             cached_tokens=_usage_field(usage, "cached_tokens"),
             credit=_usage_field(usage, "credit"),
+            credit_estimated=bool(_usage_field(usage, "credit_estimated")),
             ttfb_ms=state.ttfb_ms(), latency_ms=_elapsed_ms(state.started))
 
     def _record_disconnect(self, target: ModelTarget, state: _StreamState) -> None:
@@ -461,6 +462,11 @@ class Executor:
                         credential_id, model=self._model_scope(provider_id, target.model))
                     self._remember(request, username, credential_id)
                     usage = result.get("usage") or {}
+                    # credit 不在对外响应里（客户端不需要，见 compat 出口），
+                    # 但统计要记：从 USAGE 事件取，非流式路径否则会整条漏掉
+                    usage_event = next(
+                        (e.usage for e in events
+                         if e.kind is EventKind.USAGE and e.usage is not None), None)
                     self._deps.record(
                         username=username, provider=provider_id,
                         credential_id=credential_id, model=target.model, ok=True,
@@ -470,6 +476,9 @@ class Executor:
                         .get("reasoning_tokens"),
                         cached_tokens=(usage.get("prompt_tokens_details") or {})
                         .get("cached_tokens"),
+                        credit=(usage_event.credit if usage_event else None),
+                        credit_estimated=bool(usage_event.credit_estimated)
+                        if usage_event else False,
                         ttfb_ms=(int((first_event_at - started) * 1000)
                                  if first_event_at is not None else None),
                         latency_ms=int((time.monotonic() - started) * 1000))

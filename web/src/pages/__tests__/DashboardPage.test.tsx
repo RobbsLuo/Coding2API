@@ -12,16 +12,18 @@ describe("DashboardPage", () => {
     expect(screen.getByTestId("dashboard")).toBeInTheDocument();
     expect(screen.getByTestId("no-cooling")).toBeInTheDocument();
     expect(screen.getByTestId("health-known")).toHaveTextContent("已知剩余：0");
-    expect(screen.getByTestId("health-unknown")).toHaveTextContent("未探测到额度：0");
+    expect(screen.getByTestId("health-unknown")).toHaveTextContent("未探测：0");
+    expect(screen.getByTestId("health-noprobe")).toHaveTextContent("无探测：0");
     expect(screen.getByTestId("health-exhausted")).toHaveTextContent("已耗尽：0");
   });
 
-  it("区分健康度三态：已知 / 未探测 / 已耗尽", async () => {
+  it("区分健康度四态：已知 / 未探测 / 无探测 / 已耗尽", async () => {
     mockFetch({
       "/api/credentials": {
         credentials: [
           makeCredential({ id: "a", health: 62 }),
-          makeCredential({ id: "b", health: null }),
+          makeCredential({ id: "b", health: null, provider: "trae" }),
+          makeCredential({ id: "d", health: null, provider: "zen" }),
           makeCredential({ id: "c", health: -1 }),
         ],
         viewer: "root",
@@ -32,17 +34,19 @@ describe("DashboardPage", () => {
     await settle();
 
     expect(screen.getByTestId("health-known")).toHaveTextContent("已知剩余：1");
-    expect(screen.getByTestId("health-unknown")).toHaveTextContent("未探测到额度：1");
+    expect(screen.getByTestId("health-unknown")).toHaveTextContent("未探测：1");
+    expect(screen.getByTestId("health-noprobe")).toHaveTextContent("无探测：1");
     expect(screen.getByTestId("health-exhausted")).toHaveTextContent("已耗尽：1");
-    // 未探测必须与已耗尽文案不同
-    expect(screen.getByText("未探测到额度")).toBeInTheDocument();
+    // 未探测 / 无探测 / 已耗尽三种文案互不相同
+    expect(screen.getByText("未探测")).toBeInTheDocument();
+    expect(screen.getByText("无探测")).toBeInTheDocument();
     expect(screen.getByText("已耗尽")).toBeInTheDocument();
   });
 
   it("未探测失败不会被当成额度为 0", async () => {
     mockFetch({
       "/api/credentials": {
-        credentials: [makeCredential({ health: null })],
+        credentials: [makeCredential({ health: null, provider: "trae" })],
         viewer: "root",
         is_admin: true,
       },
@@ -50,7 +54,7 @@ describe("DashboardPage", () => {
     renderPage(<DashboardPage />);
     await settle();
     expect(screen.queryByText("已耗尽")).not.toBeInTheDocument();
-    expect(screen.getAllByText("未探测到额度").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("未探测").length).toBeGreaterThan(0);
   });
 
   it("冷却中的账号显示剩余时间与原因", async () => {

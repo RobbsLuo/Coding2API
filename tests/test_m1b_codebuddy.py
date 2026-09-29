@@ -1173,6 +1173,76 @@ def test_models_by_provider_rates_when_dual_upstream(tmp_path):
                                    "trae": {"credit_rate": 0.17}}
 
 
+def test_models_list_orders_cb_then_trae_first(tmp_path):
+    """展示顺序：CB → TR → 其余渠道，组内按模型名字典序。
+
+    多渠道模型按最高优先级渠道归位（含 CB 即进第一段）；这是纯展示排序，
+    不影响调度选号（`model_resolver` 的 KNOWN_PROVIDERS 顺序）。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, ids: list[str]):
+            self.id = pid
+            self._ids = ids
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            return [Model(id=model_id) for model_id in self._ids]
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    app = build_app(settings, providers={
+        # 故意让 zen 的模型名字典序最小、CB 的最大，证明排序按渠道权重而非名字
+        "codebuddy": Stub("codebuddy", ["z-cb", "a-cb"]),
+        "trae": Stub("trae", ["m-trae"]),
+        "zen": Stub("zen", ["aaa-zen"]),
+    })
+    for provider_id in ("codebuddy", "trae", "zen"):
+        app.state.credentials.add(provider=provider_id, credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        ids = [item["id"] for item in client.get(
+            "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]]
+    assert ids == ["a-cb", "z-cb", "m-trae", "aaa-zen"]
+
+
+def test_models_list_orders_dual_provider_by_highest_rank(tmp_path):
+    """多渠道模型按最高优先级渠道归位：含 CB 进第一段，仅 TR 的进第二段。"""
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, ids: list[str]):
+            self.id = pid
+            self._ids = ids
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            return [Model(id=model_id) for model_id in self._ids]
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    app = build_app(settings, providers={
+        # cb-only 与 trae-only 同名 → 合并为多渠道，含 CB 归第一段
+        "codebuddy": Stub("codebuddy", ["shared", "cb-only"]),
+        "trae": Stub("trae", ["shared", "trae-only"]),
+    })
+    app.state.credentials.add(provider="codebuddy", credential_data={"t": "a"})
+    app.state.credentials.add(provider="trae", credential_data={"t": "b"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        data = client.get("/v1/models", headers={
+            "Authorization": f"Bearer {key}"}).json()["data"]
+    # shared（含 CB）与 cb-only 同段、按名排序；trae-only 进第二段
+    assert [item["id"] for item in data] == ["cb-only", "shared", "trae-only"]
+    assert next(item for item in data if item["id"] == "shared")["providers"] == [
+        "codebuddy", "trae"]
+
+
 def test_models_passthrough_reasoning_metadata(tmp_path):
     """B1.6：supports_reasoning / default_effort 随条目透传，且逐字段补缺。"""
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))

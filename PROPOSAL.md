@@ -111,7 +111,7 @@
 |---|---|---|
 | 模型 ID 撞车 | 两边都有 `glm-5.2`、`DeepSeek-V4-Pro` | 扁平名 + 健康度路由 + `@provider` 后缀 |
 | 积分语义不同 | CB 有周期会重置；TRAE 是单调余额 | 健康分统一为百分比，展示层标注周期语义 |
-| credit 可得性 | CB 有 per-request；TRAE 只有账户总额 | 统计表 credit 字段 nullable |
+| credit 可得性 | CB 有 per-request；TRAE 只有账户总额 | 统计表 credit 字段 nullable；TRAE 按官方单价推算并标 `credit_estimated`，展示加 ≈ |
 | 登录机制 | CB 轮询（后端出网）；TRAE 回调（浏览器可达） | 双轨，回调统一走主端口 |
 | 媒体/工具 | 两边 SSE 都含工具调用 | v1 透传，不做语义转换 |
 
@@ -237,6 +237,7 @@ def health(q) -> HealthScore:   # known(0-100) | unknown | exhausted
 - `@` 后缀的 provider 不存在 → 400
 - TRAE 动态模型拉取失败 → 回退内置静态模型表，失败负缓存 5 分钟
 - **列表只按渠道凭证加载**（Q41）：`/v1/models` 与 `/api/playground/models` 只合并「当前有可用凭证」的渠道，未接入 / 全部暂停 / 会话失效的渠道不拉取也不展示；列表是展示口径，直连已滤模型不受影响
+- **列表展示顺序**：CodeBuddy / TRAE 的模型排前（`_PROVIDER_RANK`：codebuddy 0 → trae 1 → 其余 2），组内按模型名字典序，多渠道模型按最高优先级渠道归位；Playground 分组与「强制指定渠道」下拉按同一顺序（`PROVIDER_ORDER`）。纯展示排序，不影响调度选号
 
 ### 4.5 登录双轨（Q17=C）
 

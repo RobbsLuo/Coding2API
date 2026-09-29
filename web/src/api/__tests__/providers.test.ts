@@ -4,9 +4,11 @@ import {
   PROVIDER_ABBR,
   PROVIDER_CHART_COLOR,
   PROVIDER_LABEL,
+  PROVIDER_ORDER,
   providerAbbr,
   providerChartColor,
   providerLabel,
+  providerRank,
 } from "../providers";
 
 describe("渠道展示元数据", () => {
@@ -34,5 +36,16 @@ describe("渠道展示元数据", () => {
         PROVIDER_CHART_COLOR[provider as keyof typeof PROVIDER_CHART_COLOR],
       ).toMatch(/^var\(--chart-\d\)$/);
     }
+  });
+
+  it("展示顺序 CB → TR → 其余，未知渠道排在已知渠道之后", () => {
+    expect(PROVIDER_ORDER.slice(0, 2)).toEqual(["codebuddy", "trae"]);
+    // PROVIDER_ORDER 覆盖全部已知渠道，与 PROVIDER_LABEL 对齐
+    expect([...PROVIDER_ORDER].sort()).toEqual(Object.keys(PROVIDER_LABEL).sort());
+    expect(providerRank("codebuddy")).toBe(0);
+    expect(providerRank("trae")).toBe(1);
+    expect(providerRank("zen")).toBeGreaterThan(providerRank("trae"));
+    expect(providerRank("kilo")).toBeGreaterThan(providerRank("trae"));
+    expect(providerRank("future")).toBe(PROVIDER_ORDER.length);
   });
 });

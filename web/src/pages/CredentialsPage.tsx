@@ -11,6 +11,7 @@ import {
   RefreshCw,
   Sparkles,
   Trash2,
+  TriangleAlert,
 } from "lucide-react";
 import { api } from "../api/client";
 import { useSessionContext } from "../Layout";
@@ -450,7 +451,7 @@ export function CredentialsPage() {
                 <TableHead>昵称</TableHead>
                 <TableHead>渠道</TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">状态<ColumnHint text="可用/冷却中/已禁用/已暂停/额度耗尽；已暂停只摘对话流量，签到/刷新/探测照常；冷却中到期自动恢复。" /></span></TableHead>
-                <TableHead><span className="inline-flex items-center gap-1">健康度<ColumnHint text="剩余积分占比三态：已知百分比 / 未探测 / 已耗尽。未探测≠已耗尽，点「探测」可重试。" /></span></TableHead>
+                <TableHead><span className="inline-flex items-center gap-1">健康度<ColumnHint text="剩余积分占比四态：已知百分比 / 未探测 / 无探测 / 已耗尽。未探测＝探测失败或渠道未给额度信息（点「探测」可重试），≠已耗尽；无探测＝免费层上游根本没有额度接口，探也没用。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期积分行＝调度窗口内即将过期、会被优先消耗的额度；主窗口（36h）打平时才比较次窗口（7 天）。数字后的下箭头展开该凭证的积分记录（两次额度探测之间的净变化）。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">token 剩余<ColumnHint text="access token 距离到期还有多久，取自凭证本身（为 0 表示渠道未给到期信息，显示 —）。预刷新任务每小时检查一次，进入 24 小时窗口即自动续期；「已过期」意味着上游会拒绝该凭证，需重新登录。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">成长中心<ColumnHint text="仅 CodeBuddy：最近一轮成长中心（旅行礼物/任务/连登兑换/盲盒）的领取结果与时间，由定时任务或手动执行写入。" /></span></TableHead>
@@ -577,15 +578,16 @@ export function CredentialsPage() {
           { term: "已禁用", where: "状态列", meaning: "渠道判定会话失效，凭证已永久停止使用；删除后重新登录该账号即可。" },
           { term: "已暂停", where: "状态列", meaning: "管理员手动暂停（软开关）：只把该凭证摘出对话流量，签到 / token 刷新 / 成长中心 / 额度探测照常运行；随时可以取消暂停。" },
           { term: "健康度：百分比", where: "健康度列", meaning: "剩余积分占总积分的比例，调度器优先选数值高的。" },
-          { term: "健康度：未探测到额度", where: "健康度列", meaning: "探测失败或渠道没返回额度信息。注意它不是「已耗尽」——点「探测」可重新获取。" },
+          { term: "健康度：未探测", where: "健康度列", meaning: "探测失败或渠道没返回额度信息。注意它不是「已耗尽」——点「探测」可重新获取。" },
+          { term: "健康度：无探测", where: "健康度列", meaning: "OpenCode Zen / Kilo Gateway 免费层：上游没有额度接口，探测没有意义，因此不提供「探测」按钮，健康度恒为「无探测」。" },
           { term: "额度下方的时间语义", where: "额度列", meaning: "CodeBuddy 是「本周期剩余，<日期> 重置」；TRAE 是「账户剩余（单调递减）」。两者单位都是积分，但重置行为不同。" },
           { term: "到期积分（两行）", where: "额度列", meaning: "选号先比 36 小时内会过期的积分，多的先用；都相同（常见的是都为 0）时再比 7 天内会过期的积分。主窗口已有数字就只显示那一行，次窗口只在主窗口为空时才出现。" },
           { term: "套餐 N 个（额度首行右侧）", where: "额度列", meaning: "该账号当前生效的额度包个数。鼠标悬浮看每个包的名字、剩余/总量、已用与到期日（按到期先后）。未探测或渠道未返回明细时不显示。" },
-          { term: "积分记录（额度数字后的下箭头）", where: "额度列", meaning: "点开该凭证两次额度探测之间的净变化。下箭头表示「在本行内展开」而非弹层：展开后箭头翻转，再点一次收起。仅管理员视图显示。" },
+          { term: "积分记录（额度数字后的下箭头）", where: "额度列", meaning: "点开该凭证两次额度探测之间的净变化。下箭头表示「在本行内展开」而非弹层：展开后箭头翻转，再点一次收起。仅管理员视图显示。OpenCode Zen / Kilo Gateway 免费层没有额度探测，恒无记录，因此不显示该入口。" },
           { term: "token 剩余", where: "token 剩余列", meaning: "该凭证 access token 距离到期还有多久。预刷新任务每小时跑一次，进入 24 小时窗口会自动续期，所以正常情况下看到的是长寿命（TRAE 约 14 天、CodeBuddy 约 55 天）递减。显示「已过期」时上游会拒绝该凭证，需重新登录；显示「—」表示渠道未提供到期信息。" },
-          { term: "探测 / 签到", where: "操作列（常驻按钮）", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（后台每 10 分钟检查一次，当天成功即封账，失败持续重试，不受时刻限制）。两者是高频动作，直接显示在行内，不藏在「更多操作」菜单里。" },
+          { term: "探测 / 签到", where: "操作列（常驻按钮）", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（后台每 10 分钟检查一次，当天成功即封账，失败持续重试，不受时刻限制）。两者是高频动作，直接显示在行内，不藏在「更多操作」菜单里。OpenCode Zen / Kilo Gateway 免费层两者都不显示：上游无额度接口（探测恒失败）、未实现签到（点了只会 400）。" },
           { term: "更多操作（⋯）", where: "操作列", meaning: "指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。暂停：只摘出对话流量不删数据（签到 / 刷新 / 探测不受影响）。删除：彻底移除凭证。CodeBuddy 另有成长中心 / 恢复 / 活跃上报。" },
-          { term: "模型避让（额度列下方）", where: "额度列", meaning: "某个模型在该账号上限流（6004）或该账号无此模型（11102）时只避让这一个模型——整条凭证仍参与调度，换其他模型立刻可用。模型限流按 10 分钟起指数退避，最长 2 小时；「无此模型」按 6 小时起，最长 24 小时。" },
+          { term: "模型避让（额度数字右侧的警告图标）", where: "额度列", meaning: "某个模型在该账号上限流（6004）或该账号无此模型（11102）时只避让这一个模型——整条凭证仍参与调度，换其他模型立刻可用。模型限流按 10 分钟起指数退避，最长 2 小时；「无此模型」按 6 小时起，最长 24 小时。避让的模型清单不常驻表格，鼠标悬浮该图标查看具体模型、剩余时间与连续命中次数。" },
           { term: "成长中心 / 活跃上报", where: "操作列", meaning: "成长中心：手动跑一轮成长中心领取（与定时任务同一条路径）。活跃上报：手动补发一条对话事件以续上「连登天数」——默认关闭的定时任务不做，这里仅供部署后验证；官方条款禁止脚本篡改活动数据，开启/使用前请自行评估账号风险。" },
         ]}
       />
@@ -646,21 +648,34 @@ function PackageLadder({ credential }: { credential: Credential }) {
 /** 生效中的模型级冷却（6004 模型限流 / 11102 该账号无此模型）。
  *
  * 与账号级「冷却中」状态是两回事：整条凭证仍可用，只是这些模型被避开。
- * 不展示会让人以为模型挂了或在池子里乱试。
+ * 表格里只留一个警告图标，具体是哪些模型、还剩多久、连续几次都在 hover 里——
+ * 逐条铺开会把额度列撑成好几行（限流时往往同时避让多个模型）。
  */
 function ModelCooldownList({ credential, now }: { credential: Credential; now: number }) {
   const items = activeModelCooldowns(credential, now);
   if (items.length === 0) return null;
   return (
-    <div className="text-warn" data-testid={`model-cooldowns-${credential.id}`}>
-      {items.map((item) => (
-        <div key={item.model}>
-          模型 {item.model}：{modelCooldownLabel(item)}，
-          {formatDuration(Math.round(item.cooling_until - now))}后重试
-          {item.hits > 1 && `（连续 ${item.hits} 次）`}
+    <LongTextTip
+      content={
+        <div className="space-y-0.5" data-testid={`model-cooldowns-${credential.id}`}>
+          {items.map((item) => (
+            <div key={item.model}>
+              模型 {item.model}：{modelCooldownLabel(item)}，
+              {formatDuration(Math.round(item.cooling_until - now))}后重试
+              {item.hits > 1 && `（连续 ${item.hits} 次）`}
+            </div>
+          ))}
         </div>
-      ))}
-    </div>
+      }
+    >
+      <span
+        className="inline-flex cursor-help items-center text-warn"
+        data-testid={`model-cooldown-icon-${credential.id}`}
+        aria-label={`模型避让 ${items.length} 个`}
+      >
+        <TriangleAlert className="size-3.5" />
+      </span>
+    </LongTextTip>
   );
 }
 
@@ -732,7 +747,7 @@ function Row({
         expirySecondaryWindow,
         "secondary",
       );
-  const health = healthView(credential.health);
+  const health = healthView(credential.health, credential.provider);
   const state = credentialState(credential, now);
   const cooldown = cooldownRemaining(credential.cooling_until, now);
   const tokenExpiry = tokenExpiryView(
@@ -780,8 +795,10 @@ function Row({
             </span>
             {/* 积分记录入口紧贴它要解释的数字：曾经在「更多操作」菜单里，
                 打开前看不到任何余额上下文。下箭头是行内展开语义（非弹层），
-                展开后箭头翻转。仅管理员可用——接口本身就是管理员权限。 */}
-            {isAdmin && (
+                展开后箭头翻转。仅管理员可用——接口本身就是管理员权限。
+                zen / kilo 免费层没有额度接口、也没有额度探测，积分记录恒为空，
+                入口只会给出「无记录」的空抽屉，直接不渲染。 */}
+            {isAdmin && credential.provider !== "zen" && credential.provider !== "kilo" && (
               <Button
                 // 项目封装的 Button：variant="default" 即 shadcn 的 outline
                 variant="default"
@@ -803,6 +820,7 @@ function Row({
                 />
               </Button>
             )}
+            <ModelCooldownList credential={credential} now={now} />
           </span>
           <PackageLadder credential={credential} />
         </div>
@@ -817,7 +835,6 @@ function Row({
           </div>
         )}
         <div className="text-muted-foreground">{quotaSemantics(credential)}</div>
-        <ModelCooldownList credential={credential} now={now} />
       </TableCell>
       <TableCell className="text-xs">
         <TokenExpiry credential={credential} view={tokenExpiry} />
@@ -857,27 +874,30 @@ function Row({
             ) : (
               <>
                 {/* 探测 / 签到是高频日常动作，从「更多」菜单提出来常驻，
-                    少一次点击；其余低频动作仍收在菜单里。 */}
-                <Button
-                  size="sm"
-                  variant="default"
-                  disabled={busy}
-                  data-testid={`probe-${credential.id}`}
-                  onClick={() => actions.probe(credential)}
-                >
-                  <RefreshCw className="size-3.5" /> 探测
-                </Button>
-                {/* zen / kilo 免费层没有签到概念（provider 未实现 checkin，点了只会 400） */}
+                    少一次点击；其余低频动作仍收在菜单里。
+                    zen / kilo 免费层两个都没有意义：上游无额度接口（探测恒失败）、
+                    未实现签到（点了只会 400），一起藏掉，只留「更多操作」。 */}
                 {credential.provider !== "zen" && credential.provider !== "kilo" && (
-                  <Button
-                    size="sm"
-                    variant="default"
-                    disabled={busy}
-                    data-testid={`checkin-${credential.id}`}
-                    onClick={() => actions.checkin(credential)}
-                  >
-                    <CalendarCheck className="size-3.5" /> 签到
-                  </Button>
+                  <>
+                    <Button
+                      size="sm"
+                      variant="default"
+                      disabled={busy}
+                      data-testid={`probe-${credential.id}`}
+                      onClick={() => actions.probe(credential)}
+                    >
+                      <RefreshCw className="size-3.5" /> 探测
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="default"
+                      disabled={busy}
+                      data-testid={`checkin-${credential.id}`}
+                      onClick={() => actions.checkin(credential)}
+                    >
+                      <CalendarCheck className="size-3.5" /> 签到
+                    </Button>
+                  </>
                 )}
                 <DropdownMenu>
                   <DropdownMenuTrigger asChild>

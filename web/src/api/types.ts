@@ -7,7 +7,9 @@
 
 export type Provider = "codebuddy" | "trae" | "zen" | "kilo";
 
-/** 健康度三态：null = 未探测；-1 = 已耗尽；0-100 = 已知剩余百分比。 */
+/** 健康度三态：null = 未探测；-1 = 已耗尽；0-100 = 已知剩余百分比。
+ * 展示层把 null 再分成「未探测」（付费渠道探测失败）与「无探测」（zen/kilo
+ * 免费层上游没有额度接口）——调度口径不变，仍按 null 排在 known 之后。 */
 export type Health = number | null;
 
 /** 额度包明细（管理台悬浮展示）：各渠道的积分/权益包。 */
@@ -102,6 +104,8 @@ export interface StatsOverview {
   cached_tokens: number | null;
   /** 渠道可选字段，两边都经常为 null */
   credit: number | null;
+  /** credit 是否为推算值（TRAE 无上游积分，按官方单价折算），展示加 ≈ */
+  credit_estimated: boolean;
   /** 平均端到端耗时（排队 + 首字 + 生成），非网络延迟 */
   avg_latency_ms: number | null;
   /** 平均首字延迟（TTFB）：请求开始到首个内容帧，接近真实体感延迟 */
@@ -115,6 +119,8 @@ export interface ProviderStats {
   input_tokens: number;
   output_tokens: number;
   credit: number | null;
+  /** credit 是否为推算值（含推算即为 true），展示加 ≈ */
+  credit_estimated: boolean;
 }
 
 /** 图表指标：请求次数 / token 消耗 / 平均耗时 / 平均首字延迟。 */
@@ -156,6 +162,8 @@ export interface UsageEventRow {
   output_tokens: number | null;
   cached_tokens: number | null;
   credit: number | null;
+  /** credit 是否为推算值（TRAE 无上游积分，按官方单价折算），展示加 ≈ */
+  credit_estimated: number;
   /** 端到端耗时（排队 + 首字 + 生成），非网络延迟 */
   latency_ms: number | null;
   /** 首字延迟（TTFB）：请求开始到首个内容帧；无帧（如预热失败）时为 null */

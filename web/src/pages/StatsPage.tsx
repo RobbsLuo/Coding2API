@@ -8,7 +8,7 @@ import {
   useStatsOverview,
   useStatsTimeline,
 } from "../api/hooks";
-import { formatCompact, formatLatency, formatNumber, formatTime, usageErrorLabel } from "../api/display";
+import { formatCompact, formatCredit, formatLatency, formatNumber, formatTime, usageErrorLabel } from "../api/display";
 import { Notice } from "../ui";
 import { ModelTrendChart } from "../components/ModelTrendChart";
 import { PageHeader } from "../components/PageHeader";
@@ -172,12 +172,8 @@ export function StatsPage() {
         />
         <Metric
           label="Credit 消耗"
-          value={
-            stats?.credit === null || stats?.credit === undefined
-              ? "—"
-              : formatNumber(Number(stats.credit.toFixed(2)))
-          }
-          hint="渠道可选字段，可能不返回"
+          value={formatCredit(stats?.credit, stats?.credit_estimated)}
+          hint="渠道可选字段，可能不返回；≈ 为按官方单价推算"
           icon={<CreditCard className="size-4" />}
         />
       </section>
@@ -258,7 +254,7 @@ export function StatsPage() {
                   <TableCell className="text-right tabular-nums">{formatCompact(row.input_tokens)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatCompact(row.output_tokens)}</TableCell>
                   <TableCell className="text-right tabular-nums">
-                    {row.credit === null ? "—" : formatNumber(Number(row.credit.toFixed(2)))}
+                    {formatCredit(row.credit, row.credit_estimated)}
                   </TableCell>
                 </TableRow>
               ))}
@@ -332,7 +328,7 @@ export function StatsPage() {
                     <TableCell className="text-right tabular-nums">{formatCompact(row.output_tokens)}</TableCell>
                     <TableCell className="text-right tabular-nums">{formatCompact(row.cached_tokens)}</TableCell>
                     <TableCell className="text-right tabular-nums">
-                      {row.credit === null ? "—" : formatNumber(Number(row.credit.toFixed(2)))}
+                      {formatCredit(row.credit, row.credit_estimated)}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{formatLatency(row.ttfb_ms)}</TableCell>
                     <TableCell className="text-right tabular-nums">{formatLatency(row.latency_ms)}</TableCell>
@@ -384,7 +380,7 @@ export function StatsPage() {
           隐私：不保存提示词、回答、请求头、Token、工具参数与原始错误体；逐请求明细保留 90 天，小时汇总永久保留；按 API Key 归属用户统计。
         </p>
         <p>
-          credit 为渠道可选字段，经常不返回；健康度只依赖额度探测接口，主指标是 token 数。
+          credit 为渠道可选字段，经常不返回；TRAE 上游不给单请求积分，带 ≈ 的数值是按官方单价折算的估算值（CodeBuddy 为上游返回的真值）。健康度只依赖额度探测接口，主指标是 token 数。
         </p>
       </Notice>
     </div>

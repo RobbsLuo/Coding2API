@@ -103,6 +103,9 @@ class Usage:
     reasoning_tokens: int | None = None
     cached_tokens: int | None = None   # 输入中命中缓存的 token（上游可选，缺省 None）
     credit: float | None = None   # 上游可选字段，两边都经常为 None
+    # credit 是否为本服务推算（TRAE 上游不给单请求积分，按官方单价折算）。
+    # True 时展示层标 ≈；上游真给 credit 的渠道恒为 False。
+    credit_estimated: bool = False
 
 
 @dataclass(slots=True)

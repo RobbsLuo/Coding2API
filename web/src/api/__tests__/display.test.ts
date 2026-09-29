@@ -5,10 +5,31 @@ import {
   formatAgo,
   formatAxisValue,
   formatChartValue,
+  formatCredit,
   METRIC_AXIS_UNIT,
   taskReportLabel,
   tokenExpiryView,
 } from "../display";
+
+describe("formatCredit", () => {
+  it("null/undefined 显示占位符", () => {
+    expect(formatCredit(null)).toBe("—");
+    expect(formatCredit(undefined)).toBe("—");
+  });
+
+  it("真实值直接展示（保留 2 位）", () => {
+    expect(formatCredit(12.5)).toBe("12.5");
+    expect(formatCredit(0.349)).toBe("0.35");
+    expect(formatCredit(12.5, false)).toBe("12.5");
+    expect(formatCredit(12.5, 0)).toBe("12.5");
+  });
+
+  it("推算值前置 ≈（boolean 与 0/1 都识别）", () => {
+    expect(formatCredit(5.25, true)).toBe("≈5.25");
+    expect(formatCredit(5.25, 1)).toBe("≈5.25");
+    expect(formatCredit(0, true)).toBe("≈0");
+  });
+});
 
 describe("formatChartValue", () => {
   it("请求次数：紧凑数字 + 单位（次）", () => {

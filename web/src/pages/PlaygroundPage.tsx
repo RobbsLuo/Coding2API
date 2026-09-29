@@ -14,7 +14,7 @@ import { HelpBlock } from "../components/HelpBlock";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
 import { Button, Card, Checkbox, Empty, Field, Label, Notice, Panel, Select, Textarea } from "../ui";
-import { providerAbbr, providerLabel } from "../api/providers";
+import { PROVIDER_ORDER, providerAbbr, providerLabel, providerRank } from "../api/providers";
 
 /** 模型排序用倍率：多渠道取各渠道最小倍率；无倍率视为最大（排最后）。 */
 function modelRate(item: ModelInfo): number | undefined {
@@ -100,7 +100,7 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
   return "";
 };
   const dualSource = models.filter((item) => item.providers.length > 1);
-  // 单渠道模型按渠道分组；分组顺序沿用模型列表首次出现的顺序，渠道集合动态
+  // 单渠道模型按渠道分组；分组顺序按 providerRank，渠道集合动态
   const groups: [string, typeof models][] = [];
   for (const item of models) {
     if (item.providers.length !== 1) continue;
@@ -112,6 +112,9 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
     }
     group[1].push(item);
   }
+  // 渠道顺序按 providerRank（CB → TR → 其余），与后端 /v1/models 的排序对齐；
+  // 不用首次出现顺序，否则模型列表顺序变化会连带把下拉分组顺序打乱。
+  groups.sort(([left], [right]) => providerRank(left) - providerRank(right));
   void valueOf;
 
   const send = async (event: React.FormEvent) => {
@@ -234,10 +237,10 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                   }}
                 >
                   <option value="">自动路由</option>
-                  <option value="codebuddy">CodeBuddy</option>
-                  <option value="trae">TRAE</option>
-                  <option value="zen">OpenCode Zen</option>
-                  <option value="kilo">Kilo Gateway</option>
+                  {/* 顺序与模型下拉一致（CB → TR → 其余），单一来源 PROVIDER_ORDER */}
+                  {PROVIDER_ORDER.map((pid) => (
+                    <option key={pid} value={pid}>{providerLabel(pid)}</option>
+                  ))}
                 </Select>
               </Field>
           </div>

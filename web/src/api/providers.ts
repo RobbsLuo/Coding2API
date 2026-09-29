@@ -38,6 +38,20 @@ export const PROVIDER_CHART_COLOR: Record<Provider, string> = {
 /** 未知渠道（老数据/未来渠道）的兜底色。 */
 export const FALLBACK_CHART_COLOR = "var(--chart-5)";
 
+/**
+ * 模型列表 / 下拉的渠道展示顺序：CodeBuddy、TRAE 优先，其余渠道在后。
+ *
+ * 与后端 `/v1/models` 的排序权重（`src/api/models.py` 的 `_PROVIDER_RANK`）
+ * 对齐——Playground 的分组顺序因此与接口返回的 data 顺序一致。
+ */
+export const PROVIDER_ORDER: Provider[] = ["codebuddy", "trae", "zen", "kilo"];
+
+/** 渠道排序权重；未知渠道排在已知渠道之后。 */
+export function providerRank(provider: string): number {
+  const index = PROVIDER_ORDER.indexOf(provider as Provider);
+  return index === -1 ? PROVIDER_ORDER.length : index;
+}
+
 export function providerLabel(provider: string): string {
   return PROVIDER_LABEL[provider as Provider] ?? provider;
 }
