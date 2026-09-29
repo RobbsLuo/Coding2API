@@ -1533,6 +1533,73 @@ def test_fill_estimated_credit_only_when_missing():
     assert filled.usage.credit_estimated is True
 
 
+def _insert_event(db, *, id, ts, provider, model, input_tokens, output_tokens,
+                  cached_tokens=None, credit=None, credit_estimated=0):
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO usage_events (id, ts, username, provider, credential_id, model, ok,"
+            " input_tokens, output_tokens, cached_tokens, credit, credit_estimated)"
+            " VALUES (?,?,?,?,?,?,1,?,?,?,?,?)",
+            (id, ts, "u", provider, None, model, input_tokens, output_tokens,
+             cached_tokens, credit, credit_estimated))
+
+
+def test_backfill_estimated_credit_fills_history(repo):
+    """历史 trae 明细补推算：只动 credit 为 NULL 的 trae 行，幂等。"""
+    from src.provider.trae.backfill import backfill_estimated_credit
+
+    _db = repo[2]
+    base = 1_700_000_000
+    # 待补：glm-5.2 输入 1M → 216 积分
+    _insert_event(_db, id="a", ts=base, provider="trae", model="glm-5.2",
+                  input_tokens=1_000_000, output_tokens=0)
+    # 未收录模型：保持 NULL
+    _insert_event(_db, id="b", ts=base, provider="trae", model="sagitta",
+                  input_tokens=10, output_tokens=1)
+    # 非 trae 渠道：不碰
+    _insert_event(_db, id="c", ts=base, provider="codebuddy", model="glm-5.2",
+                  input_tokens=1_000_000, output_tokens=0)
+    # 已有真值：不覆盖
+    _insert_event(_db, id="d", ts=base, provider="trae", model="glm-5.2",
+                  input_tokens=1_000_000, output_tokens=0,
+                  credit=9.9, credit_estimated=0)
+
+    assert backfill_estimated_credit(_db) == 1
+    rows = {r["id"]: r for r in _db.connect().execute(
+        "SELECT id, credit, credit_estimated FROM usage_events")}
+    assert (rows["a"]["credit"], rows["a"]["credit_estimated"]) == (216.0, 1)
+    assert rows["b"]["credit"] is None and rows["b"]["credit_estimated"] == 0
+    assert rows["c"]["credit"] is None
+    assert (rows["d"]["credit"], rows["d"]["credit_estimated"]) == (9.9, 0)
+
+    assert backfill_estimated_credit(_db) == 0        # 幂等：补过即跳过
+
+
+def test_backfill_estimated_credit_rolls_up_hourly(repo):
+    """回填后重算小时汇总，credit_sum / credit_estimated_known 跟着变。"""
+    from src.provider.trae.backfill import backfill_estimated_credit
+    from src.stats.collector import StatsCollector
+
+    _db = repo[2]
+    base = 1_700_000_000
+    _insert_event(_db, id="a", ts=base, provider="trae", model="glm-5.2",
+                  input_tokens=1_000_000, output_tokens=0)
+    collector = StatsCollector(_db)
+    collector.rollup_hourly()
+    before = _db.connect().execute(
+        "SELECT credit_sum, credit_known, credit_estimated_known FROM usage_hourly"
+    ).fetchone()
+    assert (before["credit_sum"], before["credit_known"]) == (0.0, 0)
+
+    assert backfill_estimated_credit(_db) == 1
+    collector.rollup_hourly()
+    after = _db.connect().execute(
+        "SELECT credit_sum, credit_known, credit_estimated_known FROM usage_hourly"
+    ).fetchone()
+    assert after["credit_sum"] == 216.0
+    assert after["credit_known"] == 1 and after["credit_estimated_known"] == 1
+
+
 async def test_client_stream_chat_fills_estimated_credit():
     """端到端：上游 token_usage 无积分 → 客户端流出来的 USAGE 带推算值 + 标记。"""
     def handler(_request: httpx.Request) -> httpx.Response:
