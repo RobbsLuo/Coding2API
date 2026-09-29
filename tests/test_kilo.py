@@ -8,12 +8,13 @@ Kilo 与 Zen 同为无凭证免费层，但无门禁伪装、免费模型由 `is
 from __future__ import annotations
 
 import json
+import time
 
 import httpx
 import pytest
 
 from src.engine.sse import SSEFrame
-from src.provider.base import ErrKind, EventKind
+from src.provider.base import ErrKind, Event, EventKind
 from src.provider.kilo import events as kilo_events
 from src.provider.kilo.client import (
     EP_CHAT,
@@ -153,7 +154,8 @@ def test_parse_frame_error_envelope_int_code():
     event = kilo_events.parse_frame(frame({"error": {"code": 429, "message": "slow"}}))
     assert event is not None and event.kind is EventKind.ERROR
     assert event.error_code == 429 and event.error_message == "slow"
-    assert event.error_kind is ErrKind.SOFT
+    # 429 是模型级限流（OpenRouter 共享池点名模型），只冷却触发的模型
+    assert event.error_kind is ErrKind.MODEL
 
 
 def test_parse_frame_error_envelope_string_code_and_missing_message():
@@ -241,17 +243,26 @@ def test_classify_status_maps_each_branch():
     # 401 只代表「该模型需要付费 key」，不是虚拟凭证失效；归 DEAD 会因一次
     # 强制 @kilo 的付费模型请求把整条渠道硬禁用。
     assert kilo_events.classify_status(401) is ErrKind.INVALID
-    assert kilo_events.classify_status(429) is ErrKind.SOFT
+    # 429 是模型级限流（OpenRouter 共享池），不是账号级软冷却
+    assert kilo_events.classify_status(429) is ErrKind.MODEL
     assert kilo_events.classify_status(400) is ErrKind.INVALID
     assert kilo_events.classify_status(404) is ErrKind.INVALID
     assert kilo_events.classify_status(422) is ErrKind.INVALID
     assert kilo_events.classify_status(403) is ErrKind.REQUEST
+    # 上游 provider 瞬时不可用（实测 503 no endpoints available）也是模型级，
+    # 不能累计成账号级 OTHER（3 次 → 整条渠道 10m）
+    assert kilo_events.classify_status(502) is ErrKind.MODEL
+    assert kilo_events.classify_status(503) is ErrKind.MODEL
+    assert kilo_events.classify_status(504) is ErrKind.MODEL
     assert kilo_events.classify_status(500) is ErrKind.OTHER
 
 
 def test_classify_error_code_maps_each_branch():
     assert kilo_events.classify_error_code(401) is ErrKind.INVALID
-    assert kilo_events.classify_error_code(429) is ErrKind.SOFT
+    assert kilo_events.classify_error_code(429) is ErrKind.MODEL
+    assert kilo_events.classify_error_code(502) is ErrKind.MODEL
+    assert kilo_events.classify_error_code(503) is ErrKind.MODEL
+    assert kilo_events.classify_error_code(504) is ErrKind.MODEL
     assert kilo_events.classify_error_code(400) is ErrKind.INVALID
     assert kilo_events.classify_error_code(404) is ErrKind.INVALID
     assert kilo_events.classify_error_code(422) is ErrKind.INVALID
@@ -304,7 +315,7 @@ async def test_stream_chat_raises_classified_http_error():
 
     with pytest.raises(UpstreamHTTPError) as caught:
         [e async for e in _client(handler).stream_chat({"messages": []}, "m")]
-    assert caught.value.kind() is ErrKind.SOFT
+    assert caught.value.kind() is ErrKind.MODEL
 
 
 def test_upstream_http_error_exposes_status_and_kind():
@@ -469,7 +480,7 @@ def test_provider_import_credential_is_empty():
 
 
 def test_provider_classify_delegates():
-    assert KiloProvider().classify(429, b"") is ErrKind.SOFT
+    assert KiloProvider().classify(429, b"") is ErrKind.MODEL
 
 
 def test_provider_default_client_and_id():
@@ -649,3 +660,60 @@ def test_kilo_credential_can_be_restored_after_delete(tmp_path, monkeypatch):
         restored = credentials.candidates(["kilo"])
         assert [row.credential_id for row in restored] == [credential_id]
         assert credentials.credential_data(credential_id) == {}
+
+
+# ------------------------------------------- 429 模型级冷却端到端（Q46 修正）
+
+async def test_stream_429_cools_only_that_model(tmp_path):
+    """上游 429（OpenRouter 共享池点名模型）只冷却该模型，不连累整条 kilo 渠道。
+
+    回归：429 曾判账号级 SOFT，单虚拟凭证下会把整条渠道冷却 60s，客户端
+    收到 `all credentials unavailable`。改为模型级后账号级冷却保持为空，
+    同渠道其他免费模型仍可选。
+    """
+    from src.compat.openai.request import parse_chat_request
+    from src.db.conn import Database
+    from src.db.crypto import CredentialCipher
+    from src.db.migrate import apply_schema
+    from src.db.repo import CredentialRepository
+    from src.engine.executor import Executor, ExecutorDeps
+    from src.engine.scheduler import Scheduler
+    from tests.conftest import SECRET
+
+    db = Database(tmp_path / "kilo429.sqlite3")
+    apply_schema(db.connect())
+    repo = CredentialRepository(db, CredentialCipher(SECRET))
+    repo.add(provider="kilo", credential_data={})
+
+    async def gen(_cred, _payload, model):
+        if model == "qwen/qwen3.8-27b:free":
+            raise UpstreamHTTPError(429, b'{"error":{"code":429}}')
+        yield Event(kind=EventKind.CONTENT, content="ok")
+        yield Event(kind=EventKind.FINISH, finish_reason="stop")
+
+    class P:
+        id = "kilo"
+        stream_chat = staticmethod(gen)
+
+    executor = Executor(ExecutorDeps(
+        providers={"kilo": P()}, credentials=repo,
+        scheduler=Scheduler(max_rotate=1), default_model="qwen/qwen3.8-27b:free"))
+
+    request = parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}]})   # model 缺省 → default
+    frames = [f async for f in executor.stream(request, username="u")]
+    assert any(b"no_healthy_credential" in f for f in frames)
+
+    account = db.connect().execute(
+        "SELECT cooling_until, err_count FROM credentials").fetchone()
+    assert tuple(account) == (None, 0)                   # 账号未被冷却
+    cooldowns = [tuple(row) for row in db.connect().execute(
+        "SELECT model, hits, reason FROM credential_model_cooldowns").fetchall()]
+    assert cooldowns == [("qwen/qwen3.8-27b:free", 1, "model")]
+
+    # 同渠道其他模型仍可选（模型级冷却只锁触发模型）
+    now = int(time.time())
+    row = repo.candidates(["kilo"])[0]
+    assert row.is_selectable(now, "stealth/space-bunny-alpha")
+    assert not row.is_selectable(now, "qwen/qwen3.8-27b:free")
+    db.close()

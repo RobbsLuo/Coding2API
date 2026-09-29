@@ -187,14 +187,23 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
       跳过该渠道而不是冷却虚拟凭证；
     * 401 → INVALID：Kilo 匿名即可用免费模型，401 只说明该模型需要付费
       key（或 BYOK），归 DEAD 会因一次强制付费模型请求把整条渠道硬禁用；
-    * 429 → SOFT：网关级 200 req/h/IP 或上游 OpenRouter 共享池限流，
-      软冷却 60s 后换模型重试；
+    * 429 → MODEL：实测（2026-09-30）免费池是 OpenRouter 共享池转发，
+      429 报错原文点名具体模型（`<model> is temporarily rate-limited
+      upstream`，`limit_source: upstream_provider_shared_pool`），且同一
+      时刻其他免费模型仍可用——是**模型级**限流而非渠道级。归账号级 SOFT
+      会因单模型拥塞把整条 kilo 渠道冷却 60s（单虚拟凭证下即「all
+      credentials unavailable」），违背「模型级限流不连累同账号其他模型」
+      的两层冷却原则（对齐 CB/TRAE 的 `429+6004 → MODEL`）；
+    * 502/503/504 → MODEL：上游 provider 瞬时不可用（实测 2026-09-30 同一
+      模型 429 消退后转 503 `no endpoints available`，**同一时刻其他免费
+      模型仍 200**，仍是模型级）。归 OTHER 会累计 3 次后冷却整条渠道 10m，
+      与 429 同样的单凭证连累问题；故按模型级处理。
     * 403 → REQUEST（请求级，不罚号）。
     """
     if status == 401:
         return ErrKind.INVALID
-    if status == 429:
-        return ErrKind.SOFT
+    if status in (429, 502, 503, 504):
+        return ErrKind.MODEL
     if status in (400, 404, 422):
         return ErrKind.INVALID
     if status == 403:
@@ -203,11 +212,15 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
 
 
 def classify_error_code(code: int | None) -> ErrKind:
-    """流内错误码 → 错误分类（仅 int 码；字符串码走 OTHER）。"""
+    """流内错误码 → 错误分类（仅 int 码；字符串码走 OTHER）。
+
+    429 / 502/503/504 同 `classify_status`：模型级（限流 / 上游 provider
+    瞬时不可用，实测都点名模型且不连累其他免费模型）。
+    """
     if code == 401:
         return ErrKind.INVALID
-    if code == 429:
-        return ErrKind.SOFT
+    if code in (429, 502, 503, 504):
+        return ErrKind.MODEL
     if code in (400, 404, 422):
         return ErrKind.INVALID
     if code == 403:

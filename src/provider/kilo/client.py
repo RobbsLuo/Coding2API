@@ -11,9 +11,11 @@
   `isFree` 决定，上游增删自动跟随。
 
 链路层：`/api/gateway/models` 与 `/api/gateway/chat/completions`，匿名即可
-（免费模型无需 Authorization）。上游在 429 报错里自报限额来自 OpenRouter
-共享池（`limit_source: openrouter_shared_capacity`），故限流按不可控处理，
-交给引擎软冷却换模型，本包不自建熔断。
+（免费模型无需 Authorization）。上游 429 自报限额来自 OpenRouter 共享池
+（`limit_source: upstream_provider_shared_pool`）并**点名具体模型**，429 消退
+后同一模型还会转 503 `no endpoints available`；两种情况下实测同一时刻其他
+免费模型仍 200——故 429 与 502/503/504 都归模型级冷却，只锁触发模型，交给
+引擎按 `MODEL` 处理，本包不自建熔断。
 """
 
 from __future__ import annotations

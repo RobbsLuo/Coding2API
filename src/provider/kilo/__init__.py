@@ -12,6 +12,7 @@ Kilo Gateway（`api.kilo.ai/api/gateway`）对外是**标准 OpenAI 兼容协议
 
 实测（2026-09-29）：免费模型匿名可用（无需 key）；上游限流按 **200 请求/小时/IP**
 （网关级），且免费池实为 OpenRouter 免费池的转发（429 报错原文含
-`limit_source: openrouter_shared_capacity`），故免费模型会随 OpenRouter 池
-波动——上游 429 由引擎按 `SOFT` 软冷却触发换模型，本包不自建熔断。
+`limit_source: upstream_provider_shared_pool`），故免费模型会随 OpenRouter 池
+波动——上游 429 与 502/503/504 归 **模型级**冷却（实测都点名具体模型、且
+同一时刻其他免费模型仍可用），只锁触发模型、不连累整条渠道；本包不自建熔断。
 """

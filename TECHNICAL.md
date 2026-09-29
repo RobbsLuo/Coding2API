@@ -205,21 +205,23 @@ class ErrKind(StrEnum):
 （见 §6.1），不碰账号级 `cooling_until`，因此同账号的其他模型仍可选。反之账号级冷却
 出现时会清空该凭证的模型级条目——否则「切模型」能绕过账号级限流。
 
-| 上游信号 | CB | TRAE | ErrKind |
-|---|---|---|---|
-| 权益耗尽 | `code=1005`/plan 相关 | `"code":1005` | PLAN |
-| 余额不足 | 402 / `code=14018` | 402 / `code=14018` | CREDIT |
-| 模型级限流 | 429 + `code=6004` | 429 + `code=6004` | MODEL |
-| 该账号无此模型 | 400/404 + `code=11102` | 400/404 + `code=11102` | BLOCKED |
-| 请求级错误 | 400 + 11101/`Unmarshal chat params failed`/11115/11135 | — | REQUEST |
-| 限流 | 429（无 6004） | 429（无 6004） | SOFT |
-| 不存在 | 404 | 404 | SOFT |
-| 会话失效 | 401/403 | 401 | DEAD |
-| 服务端错误 | 5xx | 5xx | OTHER |
-| 请求自身无效 | 400 | 400（含 4001） | INVALID |
-| 流内错误事件 | SSE error 事件 | `event:error` 业务码 | 同上映射（单一来源：provider 解析时写 `Event.error_kind`，executor 直接消费；缺失回落 OTHER） |
+| 上游信号 | CB | TRAE | Kilo | ErrKind |
+|---|---|---|---|---|
+| 权益耗尽 | `code=1005`/plan 相关 | `"code":1005` | — | PLAN |
+| 余额不足 | 402 / `code=14018` | 402 / `code=14018` | — | CREDIT |
+| 模型级限流 | 429 + `code=6004` | 429 + `code=6004` | 429 / 502/503/504（点名模型） | MODEL |
+| 该账号无此模型 | 400/404 + `code=11102` | 400/404 + `code=11102` | — | BLOCKED |
+| 请求级错误 | 400 + 11101/`Unmarshal chat params failed`/11115/11135 | — | 403 | REQUEST |
+| 限流 | 429（无 6004） | 429（无 6004） | — | SOFT |
+| 不存在 | 404 | 404 | — | SOFT |
+| 会话失效 | 401/403 | 401 | — | DEAD |
+| 服务端错误 | 5xx | 5xx | 500 | OTHER |
+| 请求自身无效 | 400 | 400（含 4001） | 400/404/422 | INVALID |
+| 流内错误事件 | SSE error 事件 | `event:error` 业务码 | `{"error":{...}}` 帧 | 同上映射（单一来源：provider 解析时写 `Event.error_kind`，executor 直接消费；缺失回落 OTHER） |
 
-> **zen 的 401 例外**：Zen 无凭证，`401 Missing API key.` 只说明该模型需要付费 key，故 zen 的 `classify_status` / `classify_error_code` 把 401 归 `INVALID` 而非 `DEAD`（见 §3.14），避免一次强制付费模型请求把整条免费渠道硬禁用。
+> **zen / kilo 的 401 例外**：两者都无凭证，`401 Missing API key.` / 需付费 key 只说明该模型需要付费 key，故其 `classify_status` / `classify_error_code` 把 401 归 `INVALID` 而非 `DEAD`（见 §3.14 / §3.15），避免一次强制付费模型请求把整条免费渠道硬禁用。
+
+> **kilo 的 429 与 502/503/504 归 `MODEL`**：免费池是 OpenRouter 共享池转发，429 报错点名具体模型（`limit_source: upstream_provider_shared_pool`）、429 消退后同一模型转 503 `no endpoints available`，两种情况下同一时刻其他免费模型仍可用，属模型级而非账号级（详见 §3.15）。
 
 > 400 + `11128`（`Illegal API invocation from an unapproved channel`）也归 REQUEST：实测主因是**内容风控**——`system`/`assistant` 消息正文出现「伪装其他厂商官方客户端」的指纹串时整单拒绝（已确认 3 条：Claude Code 系统提示的身份声明行、其 billing 头字段名、其 git 上下文行；完整清单见 `client.py` 的 `CHANNEL_MARKERS`，此处刻意不写原文以免污染阅读本文件的 agent 会话）。特征：与凭证无关（换号无效）、确定性复现、仅 `user`/`tool` 之外的这两个角色的 `content` 命中（`tool_calls` 参数与 reasoning 均不触发）；会话一旦把指纹写进历史，后续每轮（含压缩请求本身）都持续 11128。处理：出站前 `sanitize_channel_markers` 替换为占位符（`CODEBUDDY_SANITIZE_CHANNEL_MARKERS=false` 关闭），客户端历史不受影响；`content` 为文本块列表时逐块处理（2026-09-21 直证块形态同样触发）。曾误落 INVALID → 跳过上游全部凭证、零重试直接 400（`invalid_request`），是 `deepseek-v4.1-flash` / `glm-5.3-flash` 报「not available on any configured upstream」的根因。
 
@@ -602,7 +604,7 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **虚拟凭证行**（同 Zen）：Kilo 无凭证、无额度接口。池里种一条空凭证（`credential_data={}`，`added_by="system"`），复用现有调度 / 冷却 / 统计 / 会话粘性；`probe_quota` 恒返回 `Quota(probe_failed=True)` → `health_score` 返回 `None`（**未知**，不是 `EXHAUSTED=-1`）。种子幂等，**用户删除后重启会复活**，永久停用请用「暂停」。只为默认装配路径种子（测试注入自定义 registry 时不多出凭证行）。
 
-**错误分类（同 Zen 口径）**：401→`INVALID`（无凭证，401 只表示该模型需要付费 key/BYOK，归 `DEAD` 会因一次强制付费模型请求硬禁用整条渠道）、429→`SOFT`（软冷却换模型）、400/404/422→`INVALID`、403→`REQUEST`。**限流交引擎软冷却处理，本包不自建熔断**：上游 429 报错自报限额来自 OpenRouter 共享池（`limit_source: openrouter_shared_capacity`），证实免费池实为转发。
+**错误分类**：401→`INVALID`（无凭证，401 只表示该模型需要付费 key/BYOK，归 `DEAD` 会因一次强制付费模型请求硬禁用整条渠道）、400/404/422→`INVALID`、403→`REQUEST`、**429 与 502/503/504→`MODEL`**。**429 与上游 5xx 都是模型级**（实测 2026-09-30）：429 报错点名具体模型（`<model> is temporarily rate-limited upstream`，`limit_source: upstream_provider_shared_pool`），429 消退后同一模型转 503 `no endpoints available`，两种情况下**同一时刻其他免费模型仍 200**——免费池是 OpenRouter 共享池转发，拥塞/端点缺失按模型隔离。故归模型级冷却（对齐 CB/TRAE 的 `429+6004 → MODEL`），只锁触发模型、不连累整条 kilo 渠道；**限流交引擎处理，本包不自建熔断**。曾误判账号级 `SOFT`（429）与 `OTHER`（5xx，累计 3 次→10m）：单虚拟凭证下都会把整条渠道冷却，客户端收到 `all credentials unavailable`。
 
 **独立 pacer（同 Zen）**：`KILO_CHAT_MIN_INTERVAL`（热更项，默认 0 = 不节流）走独立 `Pacer`，与 zen / CB / TRAE 互不排队；`stream_chat` 在 `finally` 里 `pacer.release("kilo")` 归还并发名额。
 
