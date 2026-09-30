@@ -28,9 +28,11 @@ from src.provider.codearts.client import (
     BENEFIT_SEED,
     CodeArtsClient,
     UpstreamHTTPError,
+    _credit_rate,
     _flatten_content,
     _legacy_blocks,
     _models_from_items,
+    _parse_ratio,
     chat_headers,
     derive_chat_id,
     new_chat_id,
@@ -629,20 +631,44 @@ def test_client_legacy_blocks_and_flatten():
 
 def test_client_models_from_items_and_helpers():
     assert _models_from_items("nope", benefit=False) == []
+    # 内置：credit[].ratio_display → credit_rate；福利：不带 credit → None。
     models = _models_from_items([
         "junk", {},
-        {"model_id": "a", "model_name": "A", "contextWindow": 8000, "maxTokens": 100},
+        {"model_id": "a", "model_name": "A", "contextWindow": 8000, "maxTokens": 100,
+         "credit": [{"ratio_display": "0.7x", "ratio": "0.05"}]},
         {"modelId": "b", "display_name": "B", "max_input_tokens": 900},
-    ], benefit=True)
+    ], benefit=False)
     assert [m.id for m in models] == ["a", "b"]
-    assert models[0].credit_rate == 0.0 and models[0].max_input_tokens == 8000
+    assert models[0].credit_rate == 0.7 and models[0].max_input_tokens == 8000
     assert models[0].max_output_tokens == 100
+    assert models[1].credit_rate is None          # 无 credit → 不猜
+    benefit_models = _models_from_items([
+        {"model_id": "c", "name": "C", "credit": [{"ratio_display": "0.7x"}]}],
+        benefit=True)
+    assert benefit_models[0].credit_rate is None  # 福利走每日 token 池，不打倍率
     none_models = _models_from_items([
         {"model_id": "c", "name": 5, "context_window": True, "max_tokens": -1}],
         benefit=False)
     assert none_models[0].name == "c" and none_models[0].credit_rate is None
     assert none_models[0].max_input_tokens is None
     assert none_models[0].max_output_tokens is None
+
+
+def test_client_credit_rate_and_ratio_parsing():
+    # 多档取首条；缺 ratio_display 时继续找下一个可解析项
+    assert _credit_rate([{"ratio": "0.05"}, {"ratio_display": "0.32x"}]) == 0.32
+    assert _credit_rate([{"ratio_display": "0.7x"}]) == 0.7
+    assert _credit_rate([1]) is None              # 非 dict 档位跳过
+    assert _credit_rate("nope") is None
+    assert _credit_rate([]) is None
+    # 纯数字 / 无 x 后缀 / 布尔 / 非数字串 / 非法小数
+    assert _parse_ratio("0.7") == 0.7
+    assert _parse_ratio(0.5) == 0.5
+    assert _parse_ratio("1.25x") == 1.25
+    assert _parse_ratio(True) is None
+    assert _parse_ratio("x0.7") is None
+    assert _parse_ratio("0.7.1") is None
+    assert _parse_ratio(None) is None
 
 
 def test_client_parse_balance_variants():
@@ -657,6 +683,35 @@ def test_client_parse_balance_variants():
                               "expire_time": 1700000001})
     assert tolerant.remaining == 3 and tolerant.cycle_end == 1700000001
     assert parse_balance({"quota": 0}).probe_failed is False
+    # 真实每日池形状（2026-09-30 实测）：按 daily_token_limit 算当日剩余
+    noon = 1_780_300_800  # 任意时刻；到期点断言不依赖具体时区
+    daily = parse_balance({"result": {
+        "total_quota": 10000000, "total_balance": 9998868, "used_amount": 1132,
+        "daily_token_limit": 10000000, "daily_tokens_used": 1132,
+        "monthly_token_limit": 0, "expire_time": 0}}, now=noon)
+    assert daily.total == 10000000 and daily.remaining == 9998868
+    assert daily.probe_failed is False
+    assert daily.probed_at == noon
+    # 到期点＝下一个本地 0 点，当日剩余进到期阶梯 → 调度器「快过期的先用」优先消耗
+    midnight = time.localtime(daily.cycle_end)
+    assert (midnight.tm_hour, midnight.tm_min, midnight.tm_sec) == (0, 0, 0)
+    assert noon < daily.cycle_end <= noon + 86400
+    assert daily.expiry_ladder == [(daily.cycle_end, 9998868)]
+    # 当日用尽 → 剩余 0（不是负数），健康度会判「已耗尽」；空池不进到期排序
+    drained = parse_balance({"daily_token_limit": 100,
+                             "daily_tokens_used": 250}, now=noon)
+    assert drained.remaining == 0 and drained.total == 100
+    assert drained.cycle_end == daily.cycle_end and drained.expiry_ladder is None
+    # daily_token_limit 为 0/缺失时退化到通用键（含新补的 total_balance/used_amount）
+    generic = parse_balance({"total_quota": 500, "used_amount": 40}, now=noon)
+    assert generic.total == 500 and generic.remaining == 460
+    # 通用形状没有可靠的每日重置时间 → 不登记到期阶梯，也不伪造 cycle_end
+    assert generic.expiry_ladder is None and generic.cycle_end is None
+    fallback = parse_balance({"result": {"total_balance": 900, "total_quota": 1000}})
+    assert fallback.total == 1000 and fallback.remaining == 900
+    # daily_tokens_used 缺失时按 0 处理 → 剩余等于额度
+    assert parse_balance({"daily_token_limit": 10},
+                         now=noon).remaining == 10
 
 
 def test_client_upstream_error_kind():

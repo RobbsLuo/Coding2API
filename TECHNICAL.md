@@ -311,7 +311,11 @@ def health(q: Quota | None) -> HealthScore:
 
 **失败也进 TTL（负缓存）**：`model_list_fetched_at` 记的是**上次尝试**时间（成功或失败都刷新），TTL（300s）内不再打上游——有缓存就继续用缓存，没缓存就跳过该渠道。此前只在成功时记时间戳，上游一次抖动（尤其 zen 探活的十几秒）会让其后**每次** `/v1/models` 都重跑一遍拉取，把列表请求打成一串超时。
 
-**展示顺序（CB / TR 优先）**：合并后按 `_sort_key(entry)` 排序——渠道权重 `_PROVIDER_RANK`（codebuddy 0 → trae 1 → qoder 2 → codearts 3 → 其余 4，未知名 4），多渠道条目取 `min` 权重（含 CB 即进第一段、含 TR 进第二段），同级再按 canonical 名字典序。原实现是纯名字典序。Playground 改用 `web/src/components/ModelPicker.tsx`：渠道筛选 chips、分组列表（多渠道置顶 + 单渠道按渠道分组）与「强制指定渠道」都走 `web/src/api/providers.ts` 的 `PROVIDER_ORDER` / `providerRank`，与后端权重对齐；分组顺序不再依赖模型列表的首次出现顺序。「强制指定渠道」只列当前模型**真实可用**的渠道（此前固定列全部渠道，能选出上游打不通的 `model@provider`）。仅影响展示顺序，调度选号（`model_resolver` 的 `KNOWN_PROVIDERS` 顺序）不变。
+**展示顺序（CB / TR 优先）**：合并后按 `_sort_key(entry)` 排序——渠道权重 `_PROVIDER_RANK`（codebuddy 0 → trae 1 → qoder 2 → codearts 3 → 其余 4，未知名 4），多渠道条目取 `min` 权重（含 CB 即进第一段、含 TR 进第二段），同级再按对外 id 字典序。原实现是纯名字典序。Playground 改用 `web/src/components/ModelPicker.tsx`：渠道筛选 chips、分组列表（多渠道置顶 + 单渠道按渠道分组）与「强制指定渠道」都走 `web/src/api/providers.ts` 的 `PROVIDER_ORDER` / `providerRank`，与后端权重对齐；分组顺序不再依赖模型列表的首次出现顺序。「强制指定渠道」只列当前模型**真实可用**的渠道（此前固定列全部渠道，能选出上游打不通的 `model@provider`）。仅影响展示顺序，调度选号（`model_resolver` 的 `KNOWN_PROVIDERS` 顺序）不变。
+
+**合并键按可读名（2026-09-30）**：CodeBuddy / TRAE / Qoder / CodeArts 四条渠道**按人类可读名（`Model.name` 小写）合并**，而非上游 id——同一模型在各渠道的内部代号互不相同（Qoder `kmodel_latest` = TRAE `kimi-k3` = CodeBuddy `kimi-k3-1`），只有名字能对齐（`_merge_key`）。zen / kilo 排除在外：它们的 `name` 不是模型名（zen 恒 `opencode`、kilo 是长标题），按名合并会把无关模型误并成一条。同一渠道内重名（CodeBuddy `hy4-preview` / `hy4-preview-x` 都叫「Hy4 preview」）时冲突项退回上游 id，否则其中一个会被同键覆盖而消失。
+
+**对外 id 与请求名的分离**（`_finalize`）：多渠道真正并到一起的条目，对外 id（`/v1/models` 的 `id`、选择器里的值）取**可读名小写**（`kimi-k3` / `qwen3.7-max`）；单渠道条目仍用**上游原始 id**（Qoder `kmodel_latest` 原样展示，避免无谓改名）。无论对外 id 是什么，转发到某渠道时一律经 `services.model_aliases` 映射回**该渠道自己登记的原 id**（`aliases["qoder"]["kimi-k3"] = "kmodel_latest"`，由 `executor.upstream_model_name` 消费）；原 id 与可读名两条键都登记，用户按原 id 直连或按可读名直连都能落到对应渠道。同渠道重名项与 zen 等非名合并渠道不登记可读名键，避免歧义别名。
 
 **启动预热不再阻塞启动**：`lifespan` 把预热丢给后台任务 `_warm_model_list`（`force=True` 绕过 TTL），不再在 `yield` 前 `await`——zen 最慢的探活可占十几秒，内联会让应用在这段时间里不响应 `/health`，容器存活探针可能误判。预热失败仅记日志；关机时取消在途任务。
 
@@ -636,11 +640,15 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **模型发现**：`GET {gateway}/algo/api/v2/model/list?Encode=1`，**必须带整套 COSY 签名头**（签名 body 为 `qoder_encode("")`）。裸 GET（无 COSY 头）会 403，带头用 POST/PUT 会被上游 400「Request method ... not supported」拒绝，故方法固定 GET。这是本渠道最容易踩的坑：一度误判为 POST（把「裸 GET 403」当成方法问题），导致清单拉取恒 400、Qoder 模型在 Playground 完全不可见。
 
-**签到与国际版差异**：`/sash/api/v1/me/daily-check-in/{status,claim}`。`claim` 对当日已签账号返回 HTTP 409 或 `result=="ALREADY_CLAIMED"` → 归一为 `already_checked_in=True`（不是失败）。**国际版该端点 404**：`checkin` 归为「本区域无此接口」的 skipped（`ok=False` 但不算失败），避免国际版账号每天报一次假失败。
+清单条目带 `key`（内部代号，如 `qmodel_38max`）与 `display_name`（人类可读名，如 `Qwen3.8-Max`）：`id` 用 `key`（用于 `model@qoder` 直连与请求转发），`name` 用 `display_name`（前端展示，否则用户只看到代号；跨渠道按可读名合并见 §3.1「合并键按可读名」）。**`price_factor` 即「Credit 消耗倍率」**——官方文档明确该倍率来自服务端模型列表的 `price_factor`（docs.qoder.com/zh/cli/model 的「Credit 消耗倍率」表脚注），与全站 `credit_rate` 同义（越小越省），故直接映射：免费模型上游给 `0.0`，正好显示「免费」。注意它是**相对倍率**，不是每次任务的固定积分。
+
+**签到（2026-10 起为活动制）**：上游已把每日签到从 `/sash/api/v1/me/daily-check-in/{status,claim}` 迁移到通用活动 campaign。旧 status 接口现在返回 `status=="DISABLED"`（等于永远不发奖，这正是「显示签到成功但积分不涨」的根因）；新协议是 `GET /sash/api/v1/me/campaigns`（**必须带 `Cosy-ClientType: 10`**，否则上游静默返回 `campaigns:[]`）→ 筛 `actionType=="CLAIM_BENEFIT"` 且 `claimStatus=="CLAIMABLE"`（`VIEW_DETAILS` 等展示位也是 `CLAIMABLE`，不筛 actionType 会领错活动）→ `POST /sash/api/v1/me/campaigns/{campaignId}/claim`（同样带 `Cosy-ClientType: 10`）。claim 响应 `replayed:true` 是幂等重放、`status=="BLOCKED" && failureCode=="SAME_PERSON_ALREADY_CLAIMED"` 是同一自然人已领，两者都归一为 `already_checked_in=True`（否则 `CheckinTask` 每 10 分钟无谓重试）；其它 `BLOCKED` 才是真失败。**新协议不提供连续天数**，`streak_days` 恒为 `None`（前端据此不显示）。仅当活动制接口本身 404/405/410 时才整体回退旧的 `daily-check-in` 流程（旧 `claim` 的 409 / `ALREADY_CLAIMED` 仍归一为已签）；活动制与旧接口都不可用才算「本区域无此接口」，记为 skipped（`ok=False` 但不算失败）——**国际版该端点 404**，避免国际版账号每天报一次假失败。
 
 **额度**：`GET {openapi}/api/v2/quota/usage` 的 `userQuota` + `addOnQuota` 合成 `remaining`/`total`，`cycle_end` 取最早 `expiresAt`。
 
 **节点白名单**：`QODER_ALLOWED_ENDPOINTS` 同时含国内 openapi+gateway 与国际版；`_qoder_endpoint` 启动时校验，防止把带签名的请求发往未授权主机。`QODER_CHAT_MIN_INTERVAL`（热更项，默认 5s）走独立 pacer，与其余渠道互不排队。
+
+**上游节点故障归类（Q50）**：Qoder 会把**自身推理节点故障**也包成 400——实测（2026-09-30）免费模型 `qfmodel` 被路由到 `oa_qwen-plus-main` 节点后持续返回 `{"code":"400","message":"[FAIL]node:… msg:Execution failed: null"}`（HTTP 与信封 `statusCodeValue` 都是 400），而同批其他模型正常出流。这与「模型不存在 / 请求无效」的 400 语义完全不同：换凭证不解决但会自愈。故 `classify_error_code` 对 400/404/422 增加**响应体判据**：命中 `NODE_FAILURE_MARKERS = ("[FAIL]node:", "Execution failed")` → `ErrKind.MODEL`（模型级瞬时冷却：只锁 (凭证, 模型)，不再当 `INVALID` 直接 400），否则维持 `INVALID`。`classify_status(status, body)` 与信封解析（`client._decode_frame` 传入 `envelope.body`）都已带 body。安全前提：探测未知模型名（乱码/空串）上游既不返回 ERROR 也不带该标记，真「模型不存在」不含该标记，故识别不会误伤。配套 executor：耗尽轮换且**全部候选都因该模型处于模型级冷却**时（`_all_model_cooled`——逐个候选要求「账号级可选 + 该模型上不可选」），503 文案由 `all credentials unavailable` 改为 `model 'x' temporarily unavailable on upstream`（可附相近模型建议），错误码仍是 `no_healthy_credential`。
 
 ### 3.17 CodeArts 渠道（Q48）
 
@@ -652,7 +660,11 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **SSE 帧（2026-09-30 抓真实流核实）**：逐行 `data:` JSON（`data:` 行间有空行；也有不带 `data:` 前缀的裸 JSON 行），最后由 `data:[DONE]` 结束。**v2 `/api/v2/chat/completions` 实测是标准 OpenAI chunk**：`{"choices":[{"delta":{"content":…,"reasoning_content":…,"tool_calls":…},"finish_reason":…}]}`，增量在 `delta`（**不是**累计全文），收尾帧 `choices:[]` + `usage` 单独给 token 数；带 `tool_stream:true` 时工具调用分片在 `delta.tool_calls`。旧形状（逆向记录 §5 / legacy `/v1/chat/chat`）则是 `{"text":"<累计全文>"}`（替换语义，用 `TextSnapshot` 做差）+ 结束帧 `{"text":"[DONE]","error_code":"0"}`。解析器**两种形状同时兼容**，按字段分派。错误有两条路：HTTP 非 2xx，或流内 `error_code`（形如 `ChatAgent.*` / `TM.00001041`，HTTP 仍 200）。
 
-**无每日签到**：免费额度**按月重置**，上游没有每日签到接口。因此本渠道**不实现 `checkin`**（`checkin_scope` 也一并省略，后台签到任务自动跳过它）；「保活」由 token 自动 refresh 承担。福利模型发现（`{opengw}/api/v1/gateway/config`）与 Token 领取（`POST /api/v1/benefit/claim`，幂等）在探测时顺带完成。
+**无每日签到**：额度是**每日 token 池**（实测 2026-09-30：`GET {opengw}/api/v1/user/tokens/balance` 返回 `daily_token_limit` 1000 万 / `daily_tokens_used`；官方口径「每日千万 Token 免费领，当日 0 点清零、不累计」），上游没有每日签到接口。因此本渠道**不实现 `checkin`**（`checkin_scope` 也一并省略，后台签到任务自动跳过它）；「保活」由 token 自动 refresh 承担。`parse_balance` 有 `daily_token_limit` 时按**当日**口径算剩余（`total=daily_token_limit`、`remaining=daily_token_limit - daily_tokens_used`），拿不到该字段才退化到 `total_quota`/`total_balance`/`used_amount` 等通用键。福利模型发现（`{opengw}/api/v1/gateway/config`）与 Token 领取（`POST /api/v1/benefit/claim`，幂等）在探测时顺带完成。
+
+**优先消耗（用完即弃）**：当日没用完的额度 0 点清零、不累计，所以该池必须**先用掉**。`parse_balance` 把它登记成与 CodeBuddy/TRAE 同构的 `expiry_ladder`：到期点＝次日本地 0 点（上游不返回重置时间戳，按服务端时区推算，见 `_next_local_midnight`）、金额＝当日剩余。这样调度器「窗口内即将到期额度多者先用」的一级指标恒把 CodeArts（1000 万量级）排在其它渠道之前——只要它还有额度就先走它，用尽（`remaining=0`，`expiry_ladder` 为空 → 指标归 0，健康度也归 0）则自然回落其它渠道。副作用：CodeArts 阶梯是 **token**、其余渠道是积分，跨渠道比较的是原始数值，量级差使 CodeArts 实际长期占据优先；这正是「每日池先用」的预期行为，管理台展示层用 `quotaUnit()` 把单位标成 token 而非积分。
+
+**倍率（`credit_rate`）**：内置模型 `GET {snap}/v1/model/builtin` 的每个条目带 `credit[]`，其中 `ratio_display`（如 `"0.7x"`、`"0.32x"`）是官方对外展示的消耗倍率，取首档作为本渠道 `credit_rate`（`_parse_ratio` 容忍 `0.7x`/`0.7`/`0.7` 三种写法）。**福利模型不给倍率**（`credit_rate=None`）：它走每日免费 token 池、上游不返回该字段，标 `0.0` 会被前端渲染成 zen/kilo 式的「免费」，而它实际消耗每日额度、用尽即不可用。
 
 **登录**：OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens`（authorization_code）换 `{access_key_id, secret_access_key, security_token, expiration, refresh_token}`，DPoP 私钥随 credential 一起生成并加密入库。**门户把授权码 302 回 `http://127.0.0.1:{port}/oauth/callback`——这是用户本机地址，服务端监听不到**；因此本渠道不用 poll 轨道，而是「paste 轨道」：前端展示授权页后，让用户把浏览器地址栏里那条打不开的回调链接粘回，走 `POST /api/auth/upstream/complete` 由服务端用 code + 登录时登记的 PKCE `code_verifier`/DPoP 私钥换 token。（上游另有 `GET {snap-manager}/v1/login/ticket` 兜底轮询通道，但服务端取到时被回「无效 ticketId」，故不采用。）
 
@@ -720,11 +732,11 @@ class Provider(Protocol):
         无则回落消息前缀指纹；带 user_id 时不派生前缀兜底键（B1.5）
      d. 过滤 healthy（enabled=1, disabled=0, 非冷却中）。enabled=0（管理台「暂停」）
         只作用于本条对话路径：后台任务只检查 disabled，暂停期间照常运行
-     e. 到期积分排序（两级字典序）：quota_expiry_ladder 中「距到期 ≤ 主窗口」
-        （QUOTA_EXPIRY_WINDOW_SECONDS，默认 36h）的积分加总，多的先用；打平再比
+     e. 到期额度排序（两级字典序）：quota_expiry_ladder 中「距到期 ≤ 主窗口」
+        （QUOTA_EXPIRY_WINDOW_SECONDS，默认 36h）的额度加总，多的先用；打平再比
         次窗口（默认 7 天）；渠道无到期信息（如 CB 企业版）计 0；主窗口 ≤0 时次窗口
         一并失效（expiry_windows() 统一折算）。CodeBuddy 与 TRAE 都按包独立到期，
-        均落阶梯参与此排序
+        CodeArts 按每日池（到期点＝次日 0 点），三者均落阶梯参与此排序
      f. 两级到期积分都相同时按 health 三态取最高分；同分按 credential_id 稳定
   4. executor：解密凭证 → provider.stream_chat()
      - 上游 HTTP ≥400 → classify → scheduler.note_error → tried 加入 → 回到 3（最多 3 次）
@@ -766,6 +778,8 @@ class Scheduler:
 
 > **TRAE 也落 `quota_expiry_ladder`**（2026-09-30 修正）：早期按「TRAE 无周期概念」只填展示用 `quota_packages`、`expiry_ladder` 恒 `None`，表现为两列数字恒为空。实测 `ide_user_ent_usage` 的权益包各自独立到期（每月登录积分按月、签到奖励各有到期日），与 CodeBuddy 同构，故两列同时填、口径统一为「未过期 + 有余额」。`quota_cycle_end`（单值「最早到期」）TRAE 仍为 `NULL`：TRAE 各包未必共享一个重置点，而阶梯已表达「哪些包何时到期」，无需再挑一个单值。
 
+> **CodeArts 也落 `quota_expiry_ladder`**（2026-09-30）：每日 1000 万 token 池 0 点清零、不累计，属「用完即弃」，必须优先消耗。`parse_balance` 登记阶梯 `[(次日本地 0 点, 当日剩余)]`，一级排序即把它排在其它渠道之前（金额 1000 万量级）。单位是 token（非积分），前端 `quotaUnit()` 据此换词。
+
 ### 6.1 模型级冷却（B1.1）
 
 `credential_model_cooldowns(credential_id, model, cooling_until, hits, reason)` 按 **(凭证, 模型)** 独立建表——账号级 `cooling_until` 放不下「同账号其他模型仍可用」这层语义。
@@ -776,6 +790,8 @@ class Scheduler:
 - 清除：`save_success(..., model=)` 只删 `reason='blocked'`（模型限流按上游重置，成功一次不代表限制解除）；`revive` / 删除凭证 / 账号级冷却出现都清模型条目
 - 回流：留存任务每轮 `purge_expired_model_cooldowns()` 回收过期行；管理台列表只下发未过期条目（`model_cooldowns`）
 - 无模型名可归因时（流内事件未带 model）退化为账号级 SOFT，不写孤儿记录
+
+**进入模型级冷却的来源不止「模型限流」**：Qoder 会把自身节点故障包成 400（`[FAIL]node:…Execution failed`），Q50 把它归 `MODEL`（见 §3.16），同样只锁该模型、换模型立即可用。耗尽轮换时若**所有候选都只因该模型的模型级冷却被排除**（`executor._all_model_cooled`：逐候选要求账号级 `is_selectable(now)` 为真、带模型名 `is_selectable(now, scope)` 为假），503 文案用 `_model_cooled_message`（`model 'x' temporarily unavailable on upstream`）而非 `all credentials unavailable`——避免把「换个模型就好」误导成「整池凭证挂了」；账号级冷却 / 禁用、还有可用候选、无候选三种情况都回落通用文案。
 
 ---
 

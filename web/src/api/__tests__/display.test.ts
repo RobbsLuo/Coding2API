@@ -8,6 +8,7 @@ import {
   formatChartValue,
   formatCredit,
   METRIC_AXIS_UNIT,
+  quotaUnit,
   taskReportLabel,
   tokenExpiryView,
 } from "../display";
@@ -104,6 +105,13 @@ describe("expiringQuotaLabel", () => {
     expect(expiringQuotaLabel(140, 604800, "secondary")).toBe("7.0 天内共 140 积分将过期");
   });
 
+  it("CodeArts 的阶梯是 token，按单位参数覆盖措辞", () => {
+    expect(expiringQuotaLabel(9998868, 3600, "primary", "token"))
+      .toBe("9,998,868 token将在 1.0 小时内过期");
+    expect(expiringQuotaLabel(140, 604800, "secondary", "token"))
+      .toBe("7.0 天内共 140 token将过期");
+  });
+
   it("无到期信息、窗口关闭或零积分时不展示", () => {
     expect(expiringQuotaLabel(null, 129600)).toBeNull();
     expect(expiringQuotaLabel(100, undefined)).toBeNull();
@@ -112,6 +120,14 @@ describe("expiringQuotaLabel", () => {
     expect(expiringQuotaLabel(null, 604800, "secondary")).toBeNull();
     expect(expiringQuotaLabel(100, 0, "secondary")).toBeNull();
     expect(expiringQuotaLabel(0, 604800, "secondary")).toBeNull();
+  });
+});
+
+describe("quotaUnit", () => {
+  it("CodeArts 是 token，其余渠道是积分", () => {
+    expect(quotaUnit("codearts")).toBe("token");
+    expect(quotaUnit("codebuddy")).toBe("积分");
+    expect(quotaUnit("trae")).toBe("积分");
   });
 });
 describe("tokenExpiryView", () => {

@@ -477,4 +477,31 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     await screen.findByTestId("model-picker");
     expect(screen.getByText("没有匹配的模型")).toBeInTheDocument();
   });
+
+  it("展示上游人类可读名（Qoder 代号 id 显示为 Qwen3.8-Max）", async () => {
+    const QODER = {
+      object: "list",
+      data: [
+        { id: "qmodel_38max", object: "model", owned_by: "Coding2API",
+          name: "Qwen3.8-Max", providers: ["qoder"] },
+        { id: "dmodel", object: "model", owned_by: "Coding2API",
+          providers: ["qoder"] },   // 无 name：回退显示 id
+      ],
+    };
+    mockFetch({ "/api/playground/models": QODER });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    // 有 name：主名显示可读名，副行保留内部 id（便于 model@provider 直连）
+    const row = screen.getByTestId("model-option-qmodel_38max@qoder");
+    expect(row).toHaveTextContent("Qwen3.8-Max");
+    expect(row).toHaveTextContent("qmodel_38max");
+    // 无 name：直接用 id 当主名
+    expect(screen.getByTestId("model-option-dmodel@qoder")).toHaveTextContent("dmodel");
+
+    // 搜索按可读名也能命中
+    await userEvent.type(screen.getByTestId("model-search"), "qwen");
+    expect(screen.getByTestId("model-option-qmodel_38max@qoder")).toBeInTheDocument();
+    expect(screen.queryByTestId("model-option-dmodel@qoder")).not.toBeInTheDocument();
+  });
 });

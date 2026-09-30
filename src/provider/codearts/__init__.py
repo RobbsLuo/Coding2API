@@ -6,7 +6,7 @@
    token）；凭证是 OAuth PKCE 换来的**临时 AK/SK**，带 `expiration`。
 2. **refresh_token 一次性且与 client_id + DPoP 私钥绑定**，刷新必须回写新
    refresh_token；这把「保活」变成了凭证生命周期里的一等公民。
-3. **没有每日签到接口**（免费额度按月重置，逆向记录 §6）。对应能力由
+3. **没有每日签到接口**（额度为每日 token 池、0 点清零，逆向记录 §6）。对应能力由
    「临时凭证到期前自动 refresh」承担，见 `client.probe_quota` 的保活分支，
    故本 provider **不实现 checkin**（任务侧靠 getattr 探测自然跳过）。
 4. **SSE 不是标准分隔**（逐行 `data:`、无空行），且 `text` 是**累计全文**，

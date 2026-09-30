@@ -27,11 +27,12 @@ BLOCKED_MAX_SECONDS = 24 * 3600
 BLOCKED_SHIFT_MAX = 2
 # 「余额不足」（402 / 14018）硬冷却的目标时刻：次日 04:00（签到任务全天恢复）
 CREDIT_RESET_HOUR = 4
-# 主到期排序窗口：把「距到期 ≤ 该时长」的积分加总，作为选号第一排序指标（多者先用）
-# CodeBuddy 是每日 100 积分 × N 的小包，36h 覆盖今天与后天的到期点
+# 主到期排序窗口：把「距到期 ≤ 该时长」的额度加总，作为选号第一排序指标（多者先用）
+# CodeBuddy 是每日 100 积分 × N 的小包，36h 覆盖今天与后天的到期点；
+# CodeArts 的每日 token 池 0 点清零，到期点始终落在该窗口内（故只要有额度就先烧它）
 EXPIRY_WINDOW_SECONDS = 36 * 3600
 # 次要到期排序窗口：仅当主指标打平（最常见的是都为 0）时才启用，避免只看 36h
-# 而漏掉一周内仍会过期的积分。7 天覆盖 CodeBuddy 一个完整的小包到期周期
+# 而漏掉一周内仍会过期的额度。7 天覆盖 CodeBuddy 一个完整的小包到期周期
 SECONDARY_EXPIRY_WINDOW_SECONDS = 7 * 86400
 
 
@@ -40,9 +41,10 @@ def expiring_credits(
     window_seconds: int,
     now: int,
 ) -> float:
-    """窗口内即将到期的积分：`now < 到期 <= now + window` 的各包剩余之和。
+    """窗口内即将到期的额度：`now < 到期 <= now + window` 的各包剩余之和。
 
     窗口 ≤0 或无阶梯（渠道无到期信息）为 0。调度排序与管理台展示共用此口径。
+    单位随渠道（CodeBuddy/TRAE/Qoder 是积分、CodeArts 是 token），排序只比数值。
     """
     if not ladder or window_seconds <= 0:
         return 0
@@ -119,7 +121,7 @@ class Candidate:
     err_count: int = 0
     pinned: bool = False
     cycle_end: int | None = None       # 额度最早到期（epoch）；无到期信息的渠道为 None
-    expiry_ladder: list[tuple[int, float]] | None = None  # [(到期 epoch, 该包剩余积分)]
+    expiry_ladder: list[tuple[int, float]] | None = None  # [(到期 epoch, 该包剩余额度)]
     # (凭证, 模型) 冷却表：model → ModelCooldown。模型级限流只写这里，
     # 不写 cooling_until，因此同账号的其他模型仍然可选
     model_cooldowns: Mapping[str, ModelCooldown] | None = None
@@ -200,9 +202,9 @@ class Scheduler:
                now: int) -> str | None:
         """返回应使用的 credential_id；无可用的返回 None。
 
-        排序规则：pin 优先 → 主窗口（36h）内即将到期积分多者优先 → 次窗口
-        （7 天）内即将到期积分多者优先 → known 降序 → unknown → exhausted
-        垫底。到期积分优先于健康度：快过期的先用掉，避免白丢；两级窗口
+        排序规则：pin 优先 → 主窗口（36h）内即将到期额度多者优先 → 次窗口
+        （7 天）内即将到期额度多者优先 → known 降序 → unknown → exhausted
+        垫底。到期额度优先于健康度：快过期的先用掉，避免白丢；两级窗口
         按字典序比较，主窗口打平（含都为 0）时才轮到次窗口，再打平才比
         健康度。主窗口 ≤0 视为关闭整套到期排序（次窗口一并归零，见
         `expiry_windows`），此时退回纯健康度排序。

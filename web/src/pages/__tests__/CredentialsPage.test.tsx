@@ -79,6 +79,23 @@ describe("CredentialsPage", () => {
     expect(shown[0]).toHaveTextContent("100 积分将在");
   });
 
+  it("CodeArts 的到期额度按 token 展示（每日池，0 点清零）", async () => {
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({
+          id: "ca", provider: "codearts", health: 100,
+          quota_expiring_credits: 9998868,
+        }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const shown = screen.getAllByTestId("quota-expiring");
+    expect(shown).toHaveLength(1);
+    expect(shown[0]).toHaveTextContent("9,998,868 token将在");
+  });
+
   it("主窗口为空时展示次窗口（7 天）到期积分，措辞与主窗口区分", async () => {
     mockFetch({
       "/api/credentials": listBody([

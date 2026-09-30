@@ -618,44 +618,182 @@ def _status_payload(status: str, *, last: int | None = None) -> dict:
     return payload
 
 
-async def test_checkin_already_claimed_today():
+def _campaign(campaign_id: str = "c-1", *, action: str = "CLAIM_BENEFIT",
+              status: str = "CLAIMABLE", amount: object = 100,
+              kind: object = "CREDITS") -> dict:
+    benefit: dict = {}
+    if kind is not None:
+        benefit["kind"] = kind
+    if amount is not None:
+        benefit["amount"] = amount
+    return {"campaignId": campaign_id, "campaignKey": "act-1",
+            "actionType": action, "claimStatus": status, "benefit": benefit}
+
+
+def _campaigns(*items: dict) -> dict:
+    return {"showCampaign": bool(items), "campaigns": list(items)}
+
+
+def _assert_campaign_headers(request: httpx.Request) -> None:
+    assert request.headers["Cosy-ClientType"] == qoder_events.COSY_CLIENT_TYPE
+
+
+async def test_checkin_campaign_claims_and_reports_credit():
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        _assert_campaign_headers(request)
+        paths.append(request.url.path)
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(200, json=_campaigns(_campaign("abc-123")))
+        assert request.url.path == "/sash/api/v1/me/campaigns/abc-123/claim"
+        return httpx.Response(200, json={
+            "status": "CLAIMED", "replayed": False, "benefit": {"amount": 100},
+            "expiresAt": "2026-10-30T00:00:00Z"})
+
+    result = await handler_for(handler).checkin(cred())
+    assert result.ok is True and result.already_checked_in is False
+    assert result.credit == 100.0 and result.code == 0
+    assert result.message == "签到成功"
+    # 新协议不提供连续天数：不编造 0，置 None 交前端隐藏
+    assert result.status is not None and result.status.streak_days is None
+    assert result.status.today_credit == 100
+    assert paths == [qoder_events.EP_CAMPAIGNS,
+                     "/sash/api/v1/me/campaigns/abc-123/claim"]
+
+
+async def test_checkin_campaign_already_claimed_needs_no_claim():
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return httpx.Response(200, json=_campaigns(
+            _campaign(status="CLAIMED")))
+
+    result = await handler_for(handler).checkin(cred())
+    assert result.ok is True and result.already_checked_in is True
+    assert result.message == "今日已签到"
+    assert paths == [qoder_events.EP_CAMPAIGNS]
+
+
+async def test_checkin_campaign_skips_view_details_and_picks_claimable():
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(200, json=_campaigns(
+                _campaign("detail-1", action="VIEW_DETAILS"),
+                _campaign("reward-9"),
+            ))
+        # 必须领到 CLAIM_BENEFIT 那条，而不是展示位
+        assert request.url.path == "/sash/api/v1/me/campaigns/reward-9/claim"
+        return httpx.Response(200, json={
+            "status": "CLAIMED", "replayed": False, "benefit": {"amount": 100}})
+
+    result = await handler_for(handler).checkin(cred())
+    assert result.ok is True and result.credit == 100.0
+
+
+async def test_checkin_campaign_replayed_and_same_person_are_already():
+    def replayed(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(200, json=_campaigns(_campaign()))
+        return httpx.Response(200, json={"status": "CLAIMED", "replayed": True,
+                                         "benefit": {"amount": 100}})
+
+    result = await handler_for(replayed).checkin(cred())
+    assert result.ok is True and result.already_checked_in is True
+
+    def same_person(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(200, json=_campaigns(_campaign()))
+        return httpx.Response(200, json={
+            "status": "BLOCKED", "failureCode": "SAME_PERSON_ALREADY_CLAIMED"})
+
+    blocked = await handler_for(same_person).checkin(cred())
+    assert blocked.ok is True and blocked.already_checked_in is True
+
+    def blocked_other(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(200, json=_campaigns(_campaign()))
+        return httpx.Response(200, json={"status": "BLOCKED",
+                                         "failureCode": "RATE_LIMITED"})
+
+    rejected = await handler_for(blocked_other).checkin(cred())
+    assert rejected.ok is False and rejected.already_checked_in is False
+    assert "RATE_LIMITED" in rejected.message
+
+
+async def test_checkin_campaign_no_claimable_and_abnormal_benefit():
+    def empty(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_campaigns())
+
+    inactive = await handler_for(empty).checkin(cred())
+    assert inactive.ok is True and inactive.already_checked_in is False
+    assert inactive.message == "官方签到活动未开放"
+    assert inactive.status is not None and inactive.status.active is False
+
+    def claimable_but_disabled(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=_campaigns(
+            _campaign(status="DISABLED")))
+
+    nothing = await handler_for(claimable_but_disabled).checkin(cred())
+    assert nothing.ok is True
+    assert nothing.message == "今日暂无可领取的签到奖励"
+
+    def abnormal(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(200, json=_campaigns(_campaign()))
+        return httpx.Response(200, json={"status": "CLAIMED"})   # 无 benefit
+
+    weird = await handler_for(abnormal).checkin(cred())
+    assert weird.ok is True and weird.credit is None
+    assert weird.message == "签到成功（活动响应异常）"
+
+
+async def test_checkin_legacy_fallback_when_campaigns_unavailable():
+    """活动制接口 404 → 整体回退旧 daily-check-in 流程。"""
     now = int(time.time())
     paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         paths.append(request.url.path)
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(404, content=b"not found")
+        assert request.url.path == qoder_events.EP_CHECKIN_STATUS
         return httpx.Response(200, json=_status_payload("CLAIMED", last=now))
 
     result = await handler_for(handler).checkin(cred())
     assert result.ok is True and result.already_checked_in is True
-    assert result.message == "今日已签到"
-    assert paths == [qoder_events.EP_CHECKIN_STATUS]
+    assert result.status is not None and result.status.streak_days == 3
+    assert paths == [qoder_events.EP_CAMPAIGNS, qoder_events.EP_CHECKIN_STATUS]
 
 
-async def test_checkin_claimable_claims_and_reports_credit():
-    def handler(request: httpx.Request) -> httpx.Response:
+async def test_checkin_legacy_fallback_claim_paths():
+    def claimable(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(410)
         if request.url.path == qoder_events.EP_CHECKIN_STATUS:
             return httpx.Response(200, json=_status_payload("CLAIMABLE"))
         assert request.url.path == qoder_events.EP_CHECKIN_CLAIM
         return httpx.Response(200, json={"success": True, "rewardCredits": 120})
 
-    result = await handler_for(handler).checkin(cred())
-    assert result.ok is True and result.already_checked_in is False
-    assert result.credit == 120.0
+    result = await handler_for(claimable).checkin(cred())
+    assert result.ok is True and result.credit == 120.0
     assert result.status is not None and result.status.streak_days == 3
 
-
-async def test_checkin_conflict_and_result_marker_are_already_claimed():
     def conflict(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(405)
         if request.url.path == qoder_events.EP_CHECKIN_STATUS:
             return httpx.Response(200, json=_status_payload("CLAIMABLE"))
         return httpx.Response(409, content=b'{"result":"ALREADY_CLAIMED"}')
 
-    result = await handler_for(conflict).checkin(cred())
-    assert result.ok is True and result.already_checked_in is True
-    assert result.code == 409
+    conflicted = await handler_for(conflict).checkin(cred())
+    assert conflicted.ok is True and conflicted.already_checked_in is True
+    assert conflicted.code == 409
 
     def marker(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(404)
         if request.url.path == qoder_events.EP_CHECKIN_STATUS:
             return httpx.Response(200, json=_status_payload("CLAIMABLE"))
         return httpx.Response(200, json={"result": "ALREADY_CLAIMED"})
@@ -665,7 +803,9 @@ async def test_checkin_conflict_and_result_marker_are_already_claimed():
 
 async def test_checkin_unavailable_region_is_not_an_error():
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == qoder_events.EP_CHECKIN_STATUS
+        # 活动制与旧接口都不存在：才算本区域无签到
+        assert request.url.path in (qoder_events.EP_CAMPAIGNS,
+                                    qoder_events.EP_CHECKIN_STATUS)
         return httpx.Response(404, content=b"not found")
 
     result = await handler_for(handler).checkin(cred(realm="intl"))
@@ -674,8 +814,10 @@ async def test_checkin_unavailable_region_is_not_an_error():
     assert 404 in CHECKIN_UNAVAILABLE_STATUS
 
 
-async def test_checkin_failure_paths():
+async def test_checkin_legacy_failure_paths():
     def inactive(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(404)
         return httpx.Response(200, json=_status_payload("DISABLED"))
 
     inactive_result = await handler_for(inactive).checkin(cred())
@@ -683,6 +825,8 @@ async def test_checkin_failure_paths():
     assert inactive_result.message == "官方签到活动未开放"
 
     def server_error(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(404)
         if request.url.path == qoder_events.EP_CHECKIN_STATUS:
             return httpx.Response(200, json=_status_payload("CLAIMABLE"))
         return httpx.Response(500, content=b"boom")
@@ -691,6 +835,8 @@ async def test_checkin_failure_paths():
         await handler_for(server_error).checkin(cred())
 
     def rejected(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(404)
         if request.url.path == qoder_events.EP_CHECKIN_STATUS:
             return httpx.Response(200, json=_status_payload("CLAIMABLE"))
         return httpx.Response(200, json={"success": False, "error": "denied",
@@ -700,22 +846,31 @@ async def test_checkin_failure_paths():
     assert failed.ok is False and failed.code == 7 and failed.message == "denied"
 
 
+async def test_checkin_campaign_http_server_error_propagates():
+    """活动制接口非 404 类错误不吞（不误判成「本区域无签到」）。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"boom")
+
+    with pytest.raises(UpstreamHTTPError):
+        await handler_for(handler).checkin(cred())
+
+
 async def test_checkin_status_query_and_provider_wrapper():
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=_status_payload("CLAIMED",
-                                                        last=int(time.time())))
+        return httpx.Response(200, json=_campaigns(_campaign(status="CLAIMED")))
 
     status, unavailable = await handler_for(handler).fetch_checkin_status(cred())
     assert unavailable == "" and status is not None
-    assert status.today_checked_in is True and status.streak_days == 3
+    assert status.today_checked_in is True and status.streak_days is None
     payload = status_to_dict(status)
     assert payload["today_checked_in"] is True
+    assert payload["streak_days"] is None
     assert payload["activity_name"] == "Qoder 每日签到"
 
     from src.provider.qoder import QoderProvider
 
     provider = QoderProvider(client=handler_for(handler))
-    assert (await provider.checkin_status({})).get("streak_days") == 3
+    assert (await provider.checkin_status({}))["streak_days"] is None
     await provider.aclose()
 
 
@@ -729,6 +884,61 @@ async def test_checkin_status_unavailable_returns_inactive_status():
     status = await provider.checkin_status({})
     assert status["active"] is False and status["today_checked_in"] is False
     await provider.aclose()
+
+
+async def test_checkin_legacy_status_server_error_propagates():
+    """活动制 404 回退后，旧状态接口的非 404 错误不吞。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(404)
+        return httpx.Response(500, content=b"boom")
+
+    with pytest.raises(UpstreamHTTPError):
+        await handler_for(handler).fetch_checkin_status(cred())
+
+
+def test_campaign_helpers_edges():
+    # campaigns 缺失 / 非列表 → 无可领项
+    assert qoder_events.checkin_campaign({}) is None
+    assert qoder_events.checkin_campaign({"campaigns": "x"}) is None
+    # 非 dict 项 + 无可领状态 / 缺 campaignId 的项都被跳过
+    assert qoder_events.checkin_campaign({"campaigns": [
+        1,
+        {"actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMED"},
+        {"actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMABLE",
+         "campaignId": ""},
+    ]}) is None
+    picked = qoder_events.checkin_campaign({"campaigns": [
+        3,
+        {"actionType": "CLAIM_BENEFIT", "claimStatus": "CLAIMABLE",
+         "campaignId": "x"},
+    ]})
+    assert picked is not None and picked["campaignId"] == "x"
+
+    # benefit 解析：非 CREDITS 的 kind 不当积分；kind 缺失按 CREDITS
+    assert qoder_events.campaign_claim_credit(
+        {"benefit": {"kind": "CREDITS", "amount": 5}}) == 5.0
+    assert qoder_events.campaign_claim_credit(
+        {"benefit": {"kind": "RATE", "amount": 5}}) is None
+    assert qoder_events.campaign_claim_credit({"benefit": {}}) is None
+    assert qoder_events._campaign_amount(
+        {"benefit": {"kind": "RATE", "amount": 5}}) is None
+
+    # 状态解析：campaigns 非列表 → 未开放；CLAIMABLE 存在 → 未签
+    inactive = qoder_events.checkin_status_from_campaigns({"campaigns": 1})
+    assert inactive.active is False and inactive.today_checked_in is False
+    mixed = qoder_events.checkin_status_from_campaigns(
+        _campaigns(_campaign(status="CLAIMED"), _campaign("c-2")))
+    assert mixed.today_checked_in is False and mixed.active is True
+
+    # claim_already_done：replayed / BLOCKED 同自然人 / 其它
+    assert qoder_events.claim_already_done({"replayed": True}) is True
+    assert qoder_events.claim_already_done(
+        {"status": "BLOCKED",
+         "failureCode": "SAME_PERSON_ALREADY_CLAIMED"}) is True
+    assert qoder_events.claim_already_done(
+        {"status": "BLOCKED", "failureCode": "RATE_LIMITED"}) is False
+    assert qoder_events.claim_already_done({"status": "CLAIMED"}) is False
 
 
 # ---------------------------------------------------------------- 刷新
@@ -1236,6 +1446,22 @@ def test_classify_error_code_full_table():
     assert qoder_events.classify_error_code(None) is ErrKind.OTHER
 
 
+def test_node_failure_400_is_model_scoped_transient():
+    """上游把自身节点故障包成 400：归模型级瞬时故障，不能当「模型不存在」。"""
+    body = ('{"code":"400","message":"[FAIL]node:oa_qwen-plus-main '
+            'msg:Execution failed: null"}')
+    assert qoder_events.is_node_failure(body) is True
+    assert qoder_events.is_node_failure("model not found") is False
+
+    # 字符串与 bytes 两种入参都支持（信封走 str，HTTP body 走 bytes）
+    assert qoder_events.classify_error_code(400, body) is ErrKind.MODEL
+    assert qoder_events.classify_error_code(400, body.encode()) is ErrKind.MODEL
+    assert qoder_events.classify_error_code(404, body) is ErrKind.MODEL
+    # 普通 400（无节点故障标记）仍是 INVALID
+    assert qoder_events.classify_error_code(400, "bad request") is ErrKind.INVALID
+    assert qoder_events.classify_status(400, body.encode()) is ErrKind.MODEL
+
+
 def test_to_status_variants():
     assert qoder_events._to_status(None) == 200
     assert qoder_events._to_status(True) == 502
@@ -1296,6 +1522,28 @@ def test_first_choice_error_paths():
 def test_parse_models_requires_chat_list():
     with pytest.raises(UpstreamProtocolViolation, match="missing chat list"):
         qoder_events.parse_models({"chat": "x"})
+
+
+def test_parse_models_maps_price_factor_to_credit_rate():
+    """`price_factor` 即官方「Credit 消耗倍率」，映射为 credit_rate。
+
+    来源：docs.qoder.com/zh/cli/model 的「Credit 消耗倍率」表脚注明说
+    「表中倍率来自当前服务端模型列表的 price_factor」。免费模型上游给
+    0.0（显示「免费」）；缺失或非数值时留 None，不编造。
+    """
+    models = qoder_events.parse_models({"chat": [
+        {"key": "qmodel_38max", "display_name": "Qwen3.8-Max", "price_factor": 0.2},
+        {"key": "qfmodel", "display_name": "Qwen3.8-Flash", "price_factor": 0.0},
+        {"key": "nofactor"},                          # 无 price_factor → None
+        {"key": "badfactor", "price_factor": "x"},    # 非数值 → None
+        {"key": "boolfactor", "price_factor": True},  # 布尔不算数值 → None
+    ]})
+    by_id = {m.id: m for m in models}
+    assert by_id["qmodel_38max"].credit_rate == 0.2
+    assert by_id["qfmodel"].credit_rate == 0.0        # 免费
+    assert by_id["nofactor"].credit_rate is None
+    assert by_id["badfactor"].credit_rate is None
+    assert by_id["boolfactor"].credit_rate is None
 
 
 def test_usage_cached_tokens_fallback():
@@ -1393,9 +1641,10 @@ async def test_provider_checkin_and_status_without_client_pacer():
     from src.provider.qoder import QoderProvider
 
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == qoder_events.EP_CHECKIN_STATUS:
-            return httpx.Response(200, json=_status_payload("CLAIMABLE"))
-        return httpx.Response(200, json={"success": True, "rewardCredits": 5})
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(200, json=_campaigns(_campaign("p-1")))
+        return httpx.Response(200, json={"status": "CLAIMED", "replayed": False,
+                                         "benefit": {"amount": 5}})
 
     provider = QoderProvider(client=handler_for(handler))     # pacer=None
     result = await provider.checkin(cred().to_dict())

@@ -44,7 +44,8 @@ export function healthView(health: Health, provider?: string): HealthView {
 
 /**
  * 周期语义：CodeBuddy 的额度随周期重置，TRAE 是单调递减的账户余额，
- * Zen / Kilo 走免费层、上游没有额度接口（探测恒为「未知」）。
+ * Zen / Kilo 走免费层、上游没有额度接口（探测恒为「未知」），
+ * CodeArts 是**每日 token 池**（当日 0 点清零、不累计）。
  *
  * 判定依据是**渠道类型**，不是 quota_cycle_end 是否存在：
  * CodeBuddy 未探测时 cycle_end 同样是 null，而按 cycle_end 推断会把它
@@ -58,8 +59,12 @@ export function quotaSemantics(credential: Credential): string {
   if (credential.provider === "trae") {
     return "账户剩余（单调递减）";
   }
-  // CodeBuddy / Qoder / CodeArts 均随周期重置（Qoder 每日额度可累积、
-  // CodeArts 免费额度按月重置）；未探测到重置时间时退化为本周期口径。
+  // CodeArts 是每日 1000 万免费 token，当日 0 点清零——上游不给重置时间戳，
+  // 固定按时段描述，不能退化成「本周期剩余」的通用口径。
+  if (credential.provider === "codearts") {
+    return "每日 Token 额度（当日 0 点清零）";
+  }
+  // CodeBuddy / Qoder 随周期重置；未探测到重置时间时退化为本周期口径。
   if (!credential.quota_cycle_end) {
     return "本周期剩余（未探测到重置时间）";
   }
@@ -68,26 +73,39 @@ export function quotaSemantics(credential: Credential): string {
 }
 
 /**
- * 到期指标：调度窗口内即将到期的积分（后端与选号排序同源计算）。
+ * 额度单位：CodeArts 的额度阶梯是 **token**（每日 1000 万 token 池），
+ * 其余按期重置/单调递减的渠道口径是「积分」。展示「到期额度」时据此换单位。
+ */
+export function quotaUnit(provider: string): string {
+  return provider === "codearts" ? "token" : "积分";
+}
+
+/**
+ * 到期指标：调度窗口内即将到期的额度（后端与选号排序同源计算）。
  *
  * 返回 null 表示「不值得展示」：渠道没有到期信息（TRAE → 后端回 null），
- * 或窗口关闭 / 确实没有积分临近过期（后端回 0）。只有关键的 0 需要藏起来。
+ * 或窗口关闭 / 确实没有额度临近过期（后端回 0）。只有关键的 0 需要藏起来。
  *
  * 主/次两个窗口共用一个函数：措辞区分开，否则两行同样的句式看不出
  * 谁是第一优先级（主窗口 36h 打平时才轮到次窗口 7 天）。
+ *
+ * `unit` 默认「积分」（CodeBuddy / TRAE / Qoder 的口径）；CodeArts 的阶梯是
+ * **token**（每日 1000 万 token 池，0 点清零），传 `quotaUnit(provider)` 覆盖，
+ * 否则会把 token 数标成积分。
  */
 export function expiringQuotaLabel(
   credits: number | null | undefined,
   windowSeconds: number | undefined,
   wording: "primary" | "secondary" = "primary",
+  unit = "积分",
 ): string | null {
   if (credits === null || credits === undefined) return null;
   if (credits <= 0 || !windowSeconds || windowSeconds <= 0) return null;
   const amount = formatNumber(credits);
   const window = formatDuration(windowSeconds);
   return wording === "secondary"
-    ? `${window}内共 ${amount} 积分将过期`
-    : `${amount} 积分将在 ${window}内过期`;
+    ? `${window}内共 ${amount} ${unit}将过期`
+    : `${amount} ${unit}将在 ${window}内过期`;
 }
 
 export function cooldownRemaining(coolingUntil: number | null, now = Date.now() / 1000): number {

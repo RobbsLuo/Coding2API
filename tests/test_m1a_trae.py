@@ -656,18 +656,24 @@ async def test_fetch_quota_collects_pack_details():
     TRAE 的权益包**各自独立到期**（每月登录积分按月、签到奖励各有到期日），
     因此 expiry_ladder 也要填：阶梯只收「未过期 + 有余额」的包，与展示明细
     同源；无到期信息的包（无 end）不进阶梯，否则选号会失去可比口径。
+
+    到期时刻按当前时钟相对计算：写死绝对 epoch 会随时间流逝突然过期
+    （本用例曾用固定时间戳，次日即假失败）。
     """
+    end_first = int(time.time()) + 30 * 86400
+    end_second = int(time.time()) + 10 * 86400
+
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"user_entitlement_pack_list": [
             # 完整字段：package_extra.package_name 优先
             {"entitlement_base_info": {
                 "quota": {"credits_limit": 2000},
-                "end_time": 1791708834,
+                "end_time": end_first,
                 "product_extra": {"package_extra": {"package_name": "福利积分"}}},
              "display_desc": "老用户福利", "usage": {}},
             # 无 package_name → 回落 group_name；无 end_time → 回落 expire_time
             {"entitlement_base_info": {"quota": {"credits_limit": 500}},
-             "group_name": "每月登录积分", "expire_time": 1790783999,
+             "group_name": "每月登录积分", "expire_time": end_second,
              "usage": {"credits_amount": 76.564}},
             # 无 group_name → 回落 display_desc；无到期 → None
             {"entitlement_base_info": {"quota": {"credits_limit": 150},
@@ -678,12 +684,12 @@ async def test_fetch_quota_collects_pack_details():
     quota = await _client(handler).fetch_quota(TraeCredential(access_token="a"))
     assert quota.total == 2650 and quota.remaining == 2650 - 76.564
     assert quota.packages == [
-        {"name": "福利积分", "total": 2000.0, "used": 0.0, "end": 1791708834},
-        {"name": "每月登录积分", "total": 500.0, "used": 76.564, "end": 1790783999},
+        {"name": "福利积分", "total": 2000.0, "used": 0.0, "end": end_first},
+        {"name": "每月登录积分", "total": 500.0, "used": 76.564, "end": end_second},
         {"name": "签到奖励", "total": 150.0, "used": 0.0, "end": None},
     ]
     # 阶梯按包顺序收「未过期 + 有余额」：剩余 = 额度 - 已用；无到期的包不进
-    assert quota.expiry_ladder == [(1791708834, 2000.0), (1790783999, 500.0 - 76.564)]
+    assert quota.expiry_ladder == [(end_first, 2000.0), (end_second, 500.0 - 76.564)]
 
 
 async def test_fetch_quota_expiry_ladder_filters_expired_and_empty_packs():

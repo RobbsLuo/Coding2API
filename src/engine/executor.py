@@ -108,6 +108,42 @@ class Executor:
         except Exception:  # noqa: BLE001 - 建议失败不影响主错误
             return None
 
+    def _unavailable_text(self, target: ModelTarget, last_error: Exception | None) -> str:
+        """耗尽轮换后的 503 文案。
+
+        若该模型在所有候选凭证上都处于**模型级**冷却（上游限流或上游节点
+        故障，如 Qoder 的 `[FAIL]node:…Execution failed`），给出「模型暂时
+        不可用」的文案而不是误导性的「凭证不可用」——账号本身是好的，换个
+        模型立即可用。
+        """
+        if self._all_model_cooled(target):
+            return _model_cooled_message(target.model, last_error,
+                                         self._suggestions(target.model))
+        return _unavailable_message(last_error)
+
+    def _all_model_cooled(self, target: ModelTarget) -> bool:
+        """候选凭证是否**全部**因该模型的模型级冷却而不可选（账号本身可选）。
+
+        只认模型级冷却：账号级冷却/禁用属于「凭证不可用」，不能冒充模型故障。
+        用于把两种耗尽的文案区分开（见 `_unavailable_text`）。
+
+        调用点在 `_pick` 返回 None 之后，此时 `_select` 已保证至少注册了一个
+        上游（全无注册时它会先抛 NoProviderForModel），故无需再判空上游。
+        """
+        registered = [pid for pid in self._narrow_providers(target)
+                      if pid in self._deps.providers]
+        candidates = self._deps.credentials.candidates(registered)
+        if not candidates:
+            return False
+        now = int(time.time())
+        for candidate in candidates:
+            scope = self._model_scope(candidate.provider, target.model)
+            if candidate.is_selectable(now, scope):
+                return False                        # 还有可用候选（只是都试过了）
+            if not candidate.is_selectable(now):    # 账号级原因 → 非模型故障
+                return False
+        return True
+
     def _skip_provider(self, provider_id: str, tried: set[str]) -> None:
         """INVALID 后跳过该上游：把它的全部凭证都标记为已试。"""
         for candidate in self._deps.credentials.candidates([provider_id]):
@@ -241,7 +277,7 @@ class Executor:
                     error_type="no_healthy_credential",
                     latency_ms=_elapsed_ms(state.started))
                 yield state.translator.error_frame(
-                    _unavailable_message(last_error), "no_healthy_credential")
+                    self._unavailable_text(target, last_error), "no_healthy_credential")
                 return
             credential_id, credential_data = pick
             provider_id = self._deps.credentials.provider_of(credential_id)
@@ -317,7 +353,7 @@ class Executor:
                     error_type=_error_type_for(kind) if kind else "upstream_protocol",
                     latency_ms=_elapsed_ms(state.started))
                 yield state.translator.error_frame(
-                    _unavailable_message(last_error), "no_healthy_credential")
+                    self._unavailable_text(target, last_error), "no_healthy_credential")
                 return
 
     def _stream_source(self, provider_id: str, credential_data: dict[str, Any],
@@ -393,8 +429,7 @@ class Executor:
                     model=target.model, ok=False, error_type="no_healthy_credential",
                     latency_ms=int((time.monotonic() - started) * 1000))
                 raise NoHealthyCredential(
-                    f"all credentials unavailable: {last_error}" if last_error
-                    else "all credentials unavailable")
+                    self._unavailable_text(target, last_error))
             credential_id, credential_data = pick
             tried.add(credential_id)
             provider_id = self._deps.credentials.provider_of(credential_id)
@@ -494,8 +529,7 @@ class Executor:
                     error_type=_error_type_for(kind) if kind else "upstream_protocol",
                     latency_ms=int((time.monotonic() - started) * 1000))
                 raise NoHealthyCredential(
-                    f"all credentials unavailable: {last_error}" if last_error
-                    else "all credentials unavailable")
+                    self._unavailable_text(target, last_error))
 
     # -------------------------------------------------------------- 内部
 
@@ -662,6 +696,22 @@ def _unavailable_message(last_error: Exception | None) -> str:
     message = "all credentials unavailable"
     if last_error is not None:
         message += f": {last_error}"
+    return message
+
+
+def _model_cooled_message(model: str, last_error: Exception | None,
+                          suggestions: list[str] | None = None) -> str:
+    """模型级冷却耗尽候选时的 503 文案（账号没问题，只是这个模型暂不可用）。
+
+    与 `_unavailable_message`（凭证整体不可用）区分：上游把该模型限流或
+    其执行节点故障时，冷却只锁这一个模型，换模型即可用——提示要指着模型。
+    """
+    message = (f"model {model!r} temporarily unavailable on upstream "
+               f"(cooling down; retry later or use another model)")
+    if last_error is not None:
+        message += f": {last_error}"
+    if suggestions:
+        message += f" (similar available models: {', '.join(suggestions)})"
     return message
 
 

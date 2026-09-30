@@ -1211,6 +1211,131 @@ def test_models_name_passthrough_backfill_and_omit(tmp_path):
     assert "name" not in data["anon"]                     # 无名字不产出空字段
 
 
+def test_models_merge_by_readable_name_across_channels(tmp_path):
+    """CB/TRAE/Qoder 同名不同 id 的模型并成一条，对外 id 用可读名小写。
+
+    各渠道同一模型内部代号互不相同（`kimi-k3-1` / `kimi-k3` /
+    `kmodel_latest`），只有可读名能对齐；请求转发到某渠道时再经别名表
+    换回该渠道自己的原 id（Qoder 仍发 `kmodel_latest`）。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return list(self._models)
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    from src.provider.base import Model
+
+    app = build_app(settings, providers={
+        "codebuddy": Stub("codebuddy",
+                          [Model(id="kimi-k3-1", name="Kimi-K3", credit_rate=0.3)]),
+        "trae": Stub("trae", [Model(id="kimi-k3", name="Kimi-K3", credit_rate=0.2)]),
+        "qoder": Stub("qoder",
+                      [Model(id="kmodel_latest", name="Kimi-K3", credit_rate=1.4)]),
+    })
+    for provider_id in ("codebuddy", "trae", "qoder"):
+        app.state.credentials.add(provider=provider_id, credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        data = client.get("/v1/models", headers={
+            "Authorization": f"Bearer {key}"}).json()["data"]
+
+    assert [m["id"] for m in data] == ["kimi-k3"]          # 三渠道并成一条
+    entry = data[0]
+    assert entry["providers"] == ["codebuddy", "qoder", "trae"]
+    assert entry["by_provider"] == {"codebuddy": {"credit_rate": 0.3},
+                                    "qoder": {"credit_rate": 1.4},
+                                    "trae": {"credit_rate": 0.2}}
+    # 别名表：对外 id 与原 id 都能映射回各渠道自己的上游 id
+    aliases = app.state.services.model_aliases
+    assert aliases["qoder"]["kimi-k3"] == "kmodel_latest"
+    assert aliases["qoder"]["kmodel_latest"] == "kmodel_latest"
+    assert aliases["codebuddy"]["kimi-k3"] == "kimi-k3-1"
+    assert aliases["trae"]["kimi-k3"] == "kimi-k3"
+
+
+def test_models_name_merge_excludes_zen_and_colliding_names(tmp_path):
+    """zen 的 `name` 不是模型名（恒 `opencode`）不参与名合并；同渠道重名退回 id。
+
+    否则 zen 的多个模型会被并成一条，CodeBuddy 的 `hy4-preview` /
+    `hy4-preview-x`（都叫「Hy4 preview」）也会互相覆盖而丢一个。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return list(self._models)
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    from src.provider.base import Model
+
+    app = build_app(settings, providers={
+        "zen": Stub("zen", [Model(id="longcat-2.5-preview-free", name="opencode"),
+                            Model(id="mimo-v2.5-free", name="opencode")]),
+        "codebuddy": Stub("codebuddy", [Model(id="hy4-preview", name="Hy4 preview"),
+                                        Model(id="hy4-preview-x",
+                                              name="Hy4 preview")]),
+    })
+    for provider_id in ("zen", "codebuddy"):
+        app.state.credentials.add(provider=provider_id, credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        ids = {m["id"] for m in client.get(
+            "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]}
+    assert ids == {"longcat-2.5-preview-free", "mimo-v2.5-free",
+                   "hy4-preview", "hy4-preview-x"}
+    # 重名未按名入键：不得留下「hy4 preview」这种指向其中一个的歧义别名
+    assert "hy4 preview" not in app.state.services.model_aliases["codebuddy"]
+
+
+def test_models_name_merge_single_channel_keeps_raw_id(tmp_path):
+    """单渠道条目对外仍用上游原 id（Qoder `kmodel_latest`）；可读名也能直连。
+
+    只有多条渠道真正并到一起时才改用可读名——单渠道保持原 id，避免无谓
+    改名；但可读名同样登记为别名，用户按 `Kimi-K3` 也能落到该渠道。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return list(self._models)
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    from src.provider.base import Model
+
+    app = build_app(settings, providers={
+        "qoder": Stub("qoder", [Model(id="kmodel_latest", name="Kimi-K3")]),
+    })
+    app.state.credentials.add(provider="qoder", credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        data = client.get("/v1/models", headers={
+            "Authorization": f"Bearer {key}"}).json()["data"]
+    assert [m["id"] for m in data] == ["kmodel_latest"]
+    assert data[0]["name"] == "Kimi-K3"
+    aliases = app.state.services.model_aliases
+    assert aliases["qoder"]["kmodel_latest"] == "kmodel_latest"
+    assert aliases["qoder"]["kimi-k3"] == "kmodel_latest"    # 可读名也可直连
+
 
 def test_models_list_orders_cb_then_trae_first(tmp_path):
     """展示顺序：CB → TR → 其余渠道，组内按模型名字典序。

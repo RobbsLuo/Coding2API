@@ -9,9 +9,12 @@
 * **模型发现** `GET {snap}/v1/model/builtin`（`Agent-Type: PromptCenter`）
   + `GET {benefit}/api/v1/gateway/config` 两路合并；福利是按账号授予的，
   因此「哪些模型该带 benefit 头」按 **uid** 分别记账，不跨账号共享。
-* **额度** `GET {benefit}/api/v1/user/tokens/balance`；CodeArts 没有签到接口
-  （免费额度按月重置），本客户端用「临时凭证到期前自动 refresh」承担保活，
-  见 `probe_quota` 的 `refresh_skew`。
+* **额度** `GET {benefit}/api/v1/user/tokens/balance`，单位是 **token**：免费
+  额度为**每日 1000 万 token、当日 0 点清零**（官方「每日千万 Token 免费领」），
+  不是按月的套餐积分。**当日没用完即作废**，故 `parse_balance` 把当日剩余登记成
+  到期点＝次日 0 点的 `expiry_ladder`，让调度器「快过期的先用」把 CodeArts 排在
+  其它渠道之前。CodeArts 没有签到接口，本客户端用「临时凭证到期前自动
+  refresh」承担保活，见 `probe_quota` 的 `refresh_skew`。
 
 签名不是 bearer：`x-auth-token` 传 STS security_token 会被 APIG 拒
 （`APIG.0301 decrypt token fail`），真正的凭据是 AK/SK 签名（+ X-Security-Token）。
@@ -23,6 +26,7 @@ import copy
 import hashlib
 import json
 import logging
+import re
 import secrets
 import time
 from collections.abc import AsyncIterator
@@ -395,8 +399,8 @@ class CodeArtsClient:
                           refresh_skew: int = 0) -> Quota:
         """额度余额；`refresh_skew` > 0 时先做一次「到期前保活刷新」。
 
-        CodeArts 没有每日签到接口，免费额度按月重置，故用临时凭证的自动续期
-        承担保活：凭证进入刷新窗口时先刷一次，把 401 → DEAD 硬禁用这条链路
+        CodeArts 没有每日签到接口，额度是**每日 token 池**（当日 0 点清零），
+        故用临时凭证的自动续期承担保活：凭证进入刷新窗口时先刷一次，把 401 → DEAD 硬禁用这条链路
         掐掉。刷新失败不阻断额度探测（余额接口用的还是旧凭证，可能仍然有效）。
         """
         if refresh_skew > 0 and credential.needs_refresh(refresh_skew):
@@ -476,7 +480,13 @@ class CodeArtsClient:
 
 
 def _models_from_items(items: Any, *, benefit: bool) -> list[Model]:
-    """模型条目（内置/福利两种形状）→ 中立 Model；畸形条目跳过。"""
+    """模型条目（内置/福利两种形状）→ 中立 Model；畸形条目跳过。
+
+    倍率：内置条目带 `credit[]`，其中 `ratio_display`（如 `"0.7x"`）是官方对外
+    展示的消耗倍率，取首条可解析项作为本渠道 `credit_rate`。福利条目来自每日
+    免费 token 池、上游不给该字段，保持 `None`（**不**冒充 zen/kilo 的 x0「免费」
+    ——它消耗的是每日 token 额度，额度用尽即不可用）。
+    """
     if not isinstance(items, list):
         return []
     models: list[Model] = []
@@ -490,13 +500,47 @@ def _models_from_items(items: Any, *, benefit: bool) -> list[Model]:
             id=model_id,
             name=_first_str(item, ("model_name", "modelName", "name", "display_name"))
             or model_id,
-            credit_rate=0.0 if benefit else None,
+            credit_rate=None if benefit else _credit_rate(item.get("credit")),
             max_input_tokens=_first_int(item, ("context_window", "contextWindow",
                                                "max_input_tokens")),
             max_output_tokens=_first_int(item, ("max_tokens", "maxTokens",
                                                 "max_output_tokens")),
         ))
     return models
+
+
+def _credit_rate(credit: Any) -> float | None:
+    """内置条目的 `credit[]` → 消耗倍率（`ratio_display` 形如 `"0.7x"`）。
+
+    多档（按上下文长度分段计费）时取首条：同一模型的各档倍率一致，取哪档都一样。
+    上游换成纯数字或去掉了 `x` 后缀时按同义处理；取不到返回 None（不猜）。
+    """
+    if not isinstance(credit, list):
+        return None
+    for tier in credit:
+        if not isinstance(tier, dict):
+            continue
+        rate = _parse_ratio(tier.get("ratio_display"))
+        if rate is not None:
+            return rate
+    return None
+
+
+def _parse_ratio(value: Any) -> float | None:
+    """`"0.7x"` / `"0.7"` / `0.7` → 0.7；其余返回 None。"""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    match = _RATIO_RE.match(value.strip())
+    if match is None:
+        return None
+    return float(match.group(1))
+
+
+_RATIO_RE = re.compile(r"^([0-9]+(?:\.[0-9]+)?)x?$")
 
 
 def _first_str(item: dict[str, Any], keys: tuple[str, ...]) -> str:
@@ -515,27 +559,63 @@ def _first_int(item: dict[str, Any], keys: tuple[str, ...]) -> int | None:
     return None
 
 
-def parse_balance(data: dict[str, Any]) -> Quota:
+def parse_balance(data: dict[str, Any], *, now: int | None = None) -> Quota:
     """`/api/v1/user/tokens/balance` 响应 → Quota。
 
-    余额字段名上游未在逆向记录里写明，故按候选键宽容解析（`result` 信封优先）；
-    全部取不到时返回 `probe_failed=True`（**未知**），绝不返回
-    `total=None, remaining=None` 被判「已耗尽」。
+    上游实际返回的是**每日免费 token 池**（实测 2026-09-30）：
+    `daily_token_limit` / `daily_tokens_used`（+ 等价的 `total_quota` /
+    `total_balance` / `used_amount`）。官方口径是「每日 1000 万 token、当日 0 点
+    清零」，故有 `daily_token_limit` 时一律按**当日**口径算剩余，而不是拿可能
+    代表套餐的 `total_quota` 冒充。
+
+    每日池同时是**用完即弃**：当日没用完的额度 0 点清零、不累计。故这里按与
+    CodeBuddy/TRAE 相同的口径登记 `expiry_ladder`（到期点＝次日 0 点、金额＝
+    当日剩余），让调度器的「窗口内即将到期额度多者先用」把 CodeArts 排在其它
+    渠道之前——否则每天会白丢一个用不完的 1000 万池。
+
+    没有每日字段时退化为键名宽容解析（套餐/月度形状或旧字段），此时不登记
+    到期阶梯（无可靠重置时间）；全部取不到时返回 `probe_failed=True`（**未知**），
+    绝不返回 `total=None, remaining=None` 被判「已耗尽」。
     """
+    stamp = int(time.time()) if now is None else now
     result = data.get("result")
     result = result if isinstance(result, dict) else data
+    cycle_end = _first_epoch(result, ("cycle_end", "expire_time", "expires_at",
+                                      "reset_time", "next_reset_time"))
+    daily_limit = _first_number(result, ("daily_token_limit",))
+    if daily_limit is not None and daily_limit > 0:
+        daily_used = _first_number(result, ("daily_tokens_used",)) or 0.0
+        remaining = max(0.0, daily_limit - daily_used)
+        reset = _next_local_midnight(stamp)
+        # 已用尽（remaining=0）不携带可消耗额度，不进到期排序（对空包排第一没意义）
+        ladder = [(reset, remaining)] if remaining > 0 else None
+        return Quota(remaining=remaining, total=daily_limit, cycle_end=reset,
+                     expiry_ladder=ladder, probed_at=stamp)
     remaining = _first_number(result, ("remaining", "remaining_tokens", "tokens_balance",
-                                      "balance", "available", "available_tokens"))
-    total = _first_number(result, ("total", "total_tokens", "quota", "total_balance"))
-    used = _first_number(result, ("used", "used_tokens", "consumed", "used_balance"))
+                                       "balance", "available", "available_tokens",
+                                       "total_balance"))
+    total = _first_number(result, ("total", "total_tokens", "quota", "total_quota"))
+    used = _first_number(result, ("used", "used_tokens", "consumed", "used_balance",
+                                  "used_amount"))
     if remaining is None and total is not None and used is not None:
         remaining = max(0.0, total - used)
     if remaining is None and total is None:
-        return Quota(probe_failed=True, probed_at=int(time.time()))
-    cycle_end = _first_epoch(result, ("cycle_end", "expire_time", "expires_at",
-                                      "reset_time", "next_reset_time"))
+        return Quota(probe_failed=True, probed_at=stamp)
     return Quota(remaining=remaining, total=total, cycle_end=cycle_end,
-                 probed_at=int(time.time()))
+                 probed_at=stamp)
+
+
+def _next_local_midnight(now: int) -> int:
+    """距 `now` 最近的下一个本地 0 点（epoch）。
+
+    CodeArts 每日池在**当日 0 点**清零、不累计，上游不返回重置时间戳，故按服务端
+    本地时区（部署为 Asia/Shanghai）推算。与 `scheduler.next_credit_reset` 同口径：
+    用 `time.localtime` / `time.mktime` 走系统时区，保证调度窗口与「0 点清零」一致。
+    """
+    local = time.localtime(now)
+    midnight = time.mktime((local.tm_year, local.tm_mon, local.tm_mday,
+                            0, 0, 0, 0, 0, -1))
+    return int(midnight) + 86400
 
 
 def _first_number(obj: dict[str, Any], keys: tuple[str, ...]) -> float | None:

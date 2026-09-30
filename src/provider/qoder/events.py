@@ -15,7 +15,9 @@ Qoder 与 CodeBuddy / TRAE 的关键差异在这一层：
 
 错误分类沿用本项目中立层（`provider.base.ErrKind`）语义；Qoder 没有观测到
 CB/TRAE 那套 `1005/6004/11102` 业务码，信封里的 `statusCodeValue` 本身就是
-HTTP 状态语义，故按状态码分类。
+HTTP 状态语义，故按状态码分类。唯一例外：上游会把**自身节点执行故障**也包成
+400（`[FAIL]node:… msg:Execution failed`），这类按 `NODE_FAILURE_MARKERS` 识别后
+归模型级瞬时故障（`ErrKind.MODEL`），见 `classify_error_code`。
 """
 
 from __future__ import annotations
@@ -98,6 +100,25 @@ EP_QUOTA = "/api/v2/quota/usage"
 EP_PLAN = "/api/v2/user/plan"
 EP_CHECKIN_STATUS = "/sash/api/v1/me/daily-check-in/status"
 EP_CHECKIN_CLAIM = "/sash/api/v1/me/daily-check-in/claim"
+# 活动制签到（2026-10 起）：上游把每日签到改造成通用 campaign，旧的
+# daily-check-in 接口在当前国内版返回 `status: DISABLED`（等于永远不发奖）。
+# 查询/领取都必须带 `Cosy-ClientType: 10`，否则上游**静默**返回空 campaign 列表
+# （HTTP 200 `{"campaigns":[]}`，实测），看似「活动未开放」实则被降级。
+EP_CAMPAIGNS = "/sash/api/v1/me/campaigns"
+EP_CAMPAIGN_CLAIM = "/sash/api/v1/me/campaigns/{campaign_id}/claim"
+COSY_CLIENT_TYPE = "10"
+
+# 活动制签到的语义标记（实测国内版 2026-10）：
+# `actionType` 区分活动种类（`CLAIM_BENEFIT` 才是可领奖励；`VIEW_DETAILS` 等
+# 只是展示位，claimStatus 也会是 CLAIMABLE，必须过滤掉，否则会去领错活动）。
+# `claimStatus` 为 CLAIMABLE/CLAIMED；`BLOCKED` + `SAME_PERSON_ALREADY_CLAIMED`
+# 表示同一自然人（实名的不同账号）已领过，本账号今日无法再领。
+ACTION_CLAIM_BENEFIT = "CLAIM_BENEFIT"
+CLAIM_STATUS_CLAIMABLE = "CLAIMABLE"
+CLAIM_STATUS_CLAIMED = "CLAIMED"
+CLAIM_STATUS_BLOCKED = "BLOCKED"
+CLAIM_BLOCKED_SAME_PERSON = "SAME_PERSON_ALREADY_CLAIMED"
+CHECKIN_ACTIVITY_NAME = "Qoder 每日签到"
 
 # 推理网关端点（COSY 签名；path 部分进签名，query 不进）
 EP_CHAT_PATH = "/algo/api/v2/service/pro/sse/agent_chat_generation"
@@ -114,6 +135,13 @@ DEFAULT_USER_TYPE = "personal_professional_trial"
 
 # 上游主动吊销离线会话的标记：命中则刷新无意义，需要重新登录。
 SESSION_DEAD_MARKERS = ("TOKEN_EXPIRE", "12153", "Offline user session not found")
+
+# 上游把**自身节点故障**包装成 400 的标记。实测（2026-09-30）免费模型 qfmodel
+# 被路由到 `oa_qwen-plus-main` 节点后持续返回
+# `{"code":"400","message":"[FAIL]node:… msg:Execution failed: null"}`（HTTP 与
+# 信封 statusCodeValue 都是 400）。这与「模型不存在 / 请求无效」的 400 语义
+# 完全不同：换凭证不解决问题但会自愈，必须归为模型级瞬时冷却而非 INVALID。
+NODE_FAILURE_MARKERS = ("[FAIL]node:", "Execution failed")
 
 # 信封内层 delta 的空占位键（只在取值为空/假时才剔除，非空值一律保留）。
 NOISE_KEYS = ("extra_fields", "refusal", "reasoning_content")
@@ -153,7 +181,12 @@ def is_session_dead(text: str) -> bool:
     return any(marker in text for marker in SESSION_DEAD_MARKERS)
 
 
-def classify_error_code(code: int | None) -> ErrKind:
+def is_node_failure(text: str) -> bool:
+    """响应体是否为「上游节点故障」包装的 400（见 `NODE_FAILURE_MARKERS`）。"""
+    return any(marker in text for marker in NODE_FAILURE_MARKERS)
+
+
+def classify_error_code(code: int | None, body: bytes | str = b"") -> ErrKind:
     """状态/信封码 → ErrKind（401/403 的会话失效细节由 `classify_status` 补全）。
 
     * 402 → 余额不足（等签到恢复）
@@ -161,6 +194,9 @@ def classify_error_code(code: int | None) -> ErrKind:
     * 418/500/502/503/504 → SOFT：上游把自身故障包装成 418/5xx，属瞬时类，
       短冷却换号即可，不该累计成「连续 3 次 → 10m」
     * 400/404/422 → INVALID：请求/模型无效，换凭证没用，跳过该渠道
+    * 400 且报文命中 `NODE_FAILURE_MARKERS` → MODEL：上游节点执行失败（如
+      qfmodel 的 `[FAIL]node:… Execution failed`），属**模型级瞬时**故障，
+      只冷却该模型、换模型立即可用，不能当成「模型不存在」直接 400
     """
     if code == 402:
         return ErrKind.CREDIT
@@ -171,7 +207,8 @@ def classify_error_code(code: int | None) -> ErrKind:
     if code in (418, 500, 502, 503, 504):
         return ErrKind.SOFT
     if code in (400, 404, 422):
-        return ErrKind.INVALID
+        text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
+        return ErrKind.MODEL if is_node_failure(text) else ErrKind.INVALID
     return ErrKind.OTHER
 
 
@@ -184,7 +221,7 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
     """
     if status in (401, 403) and not is_session_dead(body.decode("utf-8", errors="replace")):
         return ErrKind.SOFT
-    return classify_error_code(status)
+    return classify_error_code(status, body)
 
 
 # ---------------------------------------------------------------------------
@@ -387,7 +424,10 @@ def _opt_epoch(value: Any) -> int | None:
 def parse_models(payload: dict[str, Any]) -> list[Model]:
     """模型清单 → 中立 Model：`payload["chat"]` 每项 `key`/`display_name`。
 
-    元数据（视觉/工具/推理/上下文）上游给了就透传，缺失留 None（不编造）。
+    元数据（视觉/工具/推理/上下文/倍率）上游给了就透传，缺失留 None（不编造）。
+    `price_factor` 即官方文档的「Credit 消耗倍率」，与全站 `credit_rate` 同义
+    （docs.qoder.com/zh/cli/model：「表中倍率来自当前服务端模型列表的
+    price_factor」），故直接映射——免费模型上游给 0.0，正好显示「免费」。
     """
     chat = payload.get("chat")
     if not isinstance(chat, list):
@@ -403,6 +443,7 @@ def parse_models(payload: dict[str, Any]) -> list[Model]:
         models.append(Model(
             id=key,
             name=display if isinstance(display, str) else "",
+            credit_rate=_opt_float(item.get("price_factor")),
             max_input_tokens=_opt_int(item.get("max_input_tokens")),
             supports_images=_opt_bool(item.get("is_vl")),
             supports_tool_call=_opt_bool(item.get("supportsToolCall")),
@@ -461,6 +502,9 @@ def checkin_status_from(payload: dict[str, Any], *, now: int) -> CheckinStatus:
 
     `today_checked_in` 必须同时满足 status==CLAIMED **且** lastClaimedAt 是
     今天：status 会停留在 CLAIMED，单看它会把昨天签过的号误判成今天已签。
+
+    旧协议回退用。当前国内版此接口返回 `status: DISABLED`（活动已迁移，
+    见 `checkin_status_from_campaigns`），故只在活动制接口不可用时才走这里。
     """
     status = str(payload.get("status") or "")
     return CheckinStatus(
@@ -470,5 +514,101 @@ def checkin_status_from(payload: dict[str, Any], *, now: int) -> CheckinStatus:
         streak_days=_opt_int(payload.get("currentStreakDays")),
         today_credit=_opt_float(payload.get("rewardCredits")),
         total_credits=_opt_float(payload.get("totalRewardCredits")),
-        activity_name="Qoder 每日签到",
+        activity_name=CHECKIN_ACTIVITY_NAME,
     )
+
+
+def checkin_campaign(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """`GET /me/campaigns` → 签到活动的可领项（无则 None）。
+
+    只认 `actionType == CLAIM_BENEFIT` 且 `claimStatus == CLAIMABLE` 的活动：
+    `VIEW_DETAILS` 之类展示位 claimStatus 也是 CLAIMABLE，不筛 actionType 会去
+    领错活动。`campaignId` 必须是非空字符串，否则无法构造 claim URL。
+    """
+    campaigns = payload.get("campaigns")
+    if not isinstance(campaigns, list):
+        return None
+    for item in campaigns:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("actionType") or "") != ACTION_CLAIM_BENEFIT:
+            continue
+        if str(item.get("claimStatus") or "") != CLAIM_STATUS_CLAIMABLE:
+            continue
+        campaign_id = item.get("campaignId")
+        if isinstance(campaign_id, str) and campaign_id:
+            return item
+    return None
+
+
+def checkin_status_from_campaigns(payload: dict[str, Any]) -> CheckinStatus:
+    """活动制签到状态 → 中立 CheckinStatus。
+
+    新协议**不提供**连续天数，`streak_days` 恒为 None（前端据此不显示），
+    不编造 0 或沿用旧接口的残留值。
+
+    `today_checked_in`：列表里存在签到活动且 `claimStatus == CLAIMED` 即当今日
+    已领。新协议的 CLAIMED 只在**当日**窗口内出现（campaignId/startAt/endAt
+    每日轮换，实测次日换新 id 并回到 CLAIMABLE），因此不需要像旧接口那样再按
+    `lastClaimedAt` 比对日期。若同时存在 CLAIMABLE 的签到活动，说明今日可领，
+    即使另有历史 CLAIMED 项也不判已签。
+    """
+    campaigns = payload.get("campaigns")
+    items = [item for item in campaigns if isinstance(item, dict)] \
+        if isinstance(campaigns, list) else []
+    checkin_items = [item for item in items
+                     if str(item.get("actionType") or "") == ACTION_CLAIM_BENEFIT]
+    if not checkin_items:
+        # 没有签到类活动：可能未登录/未开放。empty 列表与 campaigns 缺失同义，
+        # `active=False` 会被 CheckinTask 当成「不重试」（见 client.checkin）。
+        return CheckinStatus(active=False, activity_name=CHECKIN_ACTIVITY_NAME)
+    claimed = any(str(item.get("claimStatus") or "") == CLAIM_STATUS_CLAIMED
+                  for item in checkin_items)
+    claimable = any(str(item.get("claimStatus") or "") == CLAIM_STATUS_CLAIMABLE
+                    for item in checkin_items)
+    credit = next((_campaign_amount(item) for item in checkin_items
+                   if _campaign_amount(item) is not None), None)
+    return CheckinStatus(
+        active=True,
+        today_checked_in=claimed and not claimable,
+        streak_days=None,
+        today_credit=credit,
+        activity_name=CHECKIN_ACTIVITY_NAME,
+    )
+
+
+def _campaign_amount(item: dict[str, Any]) -> float | None:
+    """活动 `benefit.amount`（CREDITS 类）→ float；非 CREDITS/非数值返回 None。"""
+    return _benefit_credit(_obj(item.get("benefit")))
+
+
+def campaign_claim_credit(payload: dict[str, Any]) -> float | None:
+    """claim 响应 → 发放积分数（`benefit.amount`）；非 CREDITS/缺失返回 None。"""
+    return _benefit_credit(_obj(payload.get("benefit")))
+
+
+def _benefit_credit(benefit: dict[str, Any]) -> float | None:
+    """`benefit` → 积分数量。
+
+    `kind` 缺失时按 CREDITS 处理（claim 响应的 `benefit` 实测只含 `amount`，
+    不带 `kind`）；`kind` 明确为非 CREDITS 时返回 None，不把其它奖励当积分。
+    """
+    kind = benefit.get("kind")
+    if isinstance(kind, str) and kind and kind != "CREDITS":
+        return None
+    return _opt_float(benefit.get("amount"))
+
+
+def claim_already_done(payload: dict[str, Any]) -> bool:
+    """claim 响应是否表示「今日已领」。
+
+    * `replayed: true`：重复领取（幂等重放），等价已领；
+    * `status == BLOCKED` 且 `failureCode == SAME_PERSON_ALREADY_CLAIMED`：
+      同一自然人（实名下不同账号）已领，本账号今日无法再领——归一为已领而
+      非失败，否则 CheckinTask 每 10 分钟重试一次、永远失败。
+    """
+    if payload.get("replayed") is True:
+        return True
+    if str(payload.get("status") or "") == CLAIM_STATUS_BLOCKED:
+        return str(payload.get("failureCode") or "") == CLAIM_BLOCKED_SAME_PERSON
+    return False

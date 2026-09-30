@@ -11,8 +11,13 @@
   带头后用 POST/PUT 会被上游 400「Request method ... not supported」拒绝，故
   方法固定 GET（本渠道最容易踩的坑，`events.MODELS_SIGN_PLAIN` 记着这个事实）。
 * **openapi 业务端点**（纯 Bearer，无 COSY 签名）：额度 `/api/v2/quota/usage`、
-  签到 `/sash/api/v1/me/daily-check-in/{status,claim}`、刷新
+  活动制签到 `/sash/api/v1/me/campaigns` + `/sash/api/v1/me/campaigns/{id}/claim`、
+  旧签到 `/sash/api/v1/me/daily-check-in/{status,claim}`（回退）、刷新
   `/api/v1/deviceToken/refresh`、身份 `/api/v1/userinfo`。
+
+签到自 2026-10 起改为**活动制**：旧的 `daily-check-in` 接口返回
+`status: DISABLED`，上游只在通用 campaign 里发奖。活动制请求必须带
+`Cosy-ClientType: 10`，否则上游静默返回空列表（见 `events.EP_CAMPAIGNS`）。
 
 区域由**凭证**推断（`detect_realm_from_domain` + 显式 realm），推理主机候选来自
 `events.gateway_candidates`（国际版 api1→api2→api3 故障切换）；主机切换不影响
@@ -43,6 +48,8 @@ from . import events as qoder_events
 from .cosy import CosySession, CosySessionCache, qoder_encode
 from .credential import QoderCredential, merge_refreshed
 from .events import (
+    EP_CAMPAIGN_CLAIM,
+    EP_CAMPAIGNS,
     EP_CHAT,
     EP_CHECKIN_CLAIM,
     EP_CHECKIN_STATUS,
@@ -60,9 +67,12 @@ logger = logging.getLogger(__name__)
 STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=10.0, pool=10.0)
 SHORT_TIMEOUT = httpx.Timeout(30.0)
 
-# 本区域无签到接口的 HTTP 状态（国际版实测 404；405/410 同义）
+# 本区域无签到接口的 HTTP 状态（国际版实测 404；405/410 同义）。活动制与旧接口
+# 共用：两者都不可用才算「本区域无签到」。
 CHECKIN_UNAVAILABLE_STATUS = (404, 405, 410)
 CHECKIN_ALREADY_CLAIMED = "ALREADY_CLAIMED"
+# 活动制签到请求头：缺它上游静默返回空 campaign 列表（实测，见 events.EP_CAMPAIGNS）
+CAMPAIGN_HEADERS = {"Cosy-ClientType": qoder_events.COSY_CLIENT_TYPE}
 MODEL_CACHE_TTL_SECONDS = 600
 
 # 上游 body 里的会话失效标记（刷新无意义，需重新登录）
@@ -252,7 +262,7 @@ class QoderClient:
         if envelope is None:
             return []
         if envelope.status != 200:
-            kind = qoder_events.classify_error_code(envelope.status)
+            kind = qoder_events.classify_error_code(envelope.status, envelope.body)
             return [Event(kind=EventKind.ERROR, error_code=envelope.status,
                           error_message=envelope.body[:200], error_kind=kind)]
         if envelope.body == "[DONE]":
@@ -321,26 +331,52 @@ class QoderClient:
     async def checkin(self, credential: QoderCredential) -> CheckinResult:
         """签到三态：已签（今日）/ 新签成功 / 本区域无此接口（国际版 404）。
 
+        自 2026-10 起上游是**活动制**：优先走 `/me/campaigns`（必须带
+        `Cosy-ClientType: 10`）→ 筛可领的 `CLAIM_BENEFIT` → claim。活动制接口
+        本身不可用（404/405/410）时才整体回退旧的 `daily-check-in` 流程，避免
+        上游彻底下线旧接口后签到直接失败。
+
         「本区域无此接口」归一成 `ok=False` 但带明确 message 的结果——
         `CheckinResult` 没有 skipped 位，`ok=True` 会被 CheckinTask 当成功
         封账（当天不再重试），而 `ok=True, already_checked_in=False` 又会让
         管理台把「无接口」显示成「刚签到」。调用方（管理台）靠 message 区分。
         """
-        status, unavailable = await self.fetch_checkin_status(credential)
+        try:
+            data = await self._get_json(
+                f"{self.host}{EP_CAMPAIGNS}", credential,
+                extra_headers=CAMPAIGN_HEADERS)
+        except UpstreamHTTPError as error:
+            if error.status not in CHECKIN_UNAVAILABLE_STATUS:
+                raise
+            return await self._legacy_checkin(credential)
+        status = qoder_events.checkin_status_from_campaigns(data)
+        if status.today_checked_in:
+            return CheckinResult(ok=True, already_checked_in=True,
+                                 message="今日已签到", status=status)
+        campaign = qoder_events.checkin_campaign(data)
+        if campaign is None:
+            # 有签到活动但今日无可领项（如已领/同自然人已领）：不重试
+            message = ("官方签到活动未开放" if not status.active
+                       else "今日暂无可领取的签到奖励")
+            return CheckinResult(ok=True, message=message, status=status)
+        return await self._claim_campaign(credential, status, campaign)
+
+    async def _legacy_checkin(self, credential: QoderCredential) -> CheckinResult:
+        """旧 `daily-check-in/{status,claim}` 流程（活动制接口不可用时的回退）。"""
+        status, unavailable = await self._legacy_checkin_status(credential)
         if unavailable:
             return CheckinResult(ok=False, message=unavailable, status=None)
         if status is not None and status.today_checked_in:
             return CheckinResult(ok=True, already_checked_in=True,
                                  message="今日已签到", status=status)
         if status is not None and not status.active:
-            # 活动未开放（DISABLED 等）：不发无意义的 claim
             return CheckinResult(ok=True, message="官方签到活动未开放", status=status)
-        return await self._claim_checkin(credential, status)
+        return await self._claim_legacy_checkin(credential, status)
 
-    async def fetch_checkin_status(
+    async def _legacy_checkin_status(
         self, credential: QoderCredential,
     ) -> tuple[CheckinStatus | None, str]:
-        """签到状态；返回 `(status, 不可用原因)`。
+        """旧 `daily-check-in/status`；返回 `(status, 不可用原因)`。
 
         接口不存在（404/405/410）返回 `(None, 原因)`——国际版实测如此，
         这是「本区域没有该活动」而不是错误。
@@ -354,8 +390,48 @@ class QoderClient:
             raise
         return qoder_events.checkin_status_from(data, now=self._now()), ""
 
-    async def _claim_checkin(self, credential: QoderCredential,
-                             status: CheckinStatus | None) -> CheckinResult:
+    async def fetch_checkin_status(
+        self, credential: QoderCredential,
+    ) -> tuple[CheckinStatus | None, str]:
+        """签到状态；返回 `(status, 不可用原因)`。优先活动制，回退旧接口。"""
+        try:
+            data = await self._get_json(
+                f"{self.host}{EP_CAMPAIGNS}", credential,
+                extra_headers=CAMPAIGN_HEADERS)
+        except UpstreamHTTPError as error:
+            if error.status not in CHECKIN_UNAVAILABLE_STATUS:
+                raise
+            return await self._legacy_checkin_status(credential)
+        return qoder_events.checkin_status_from_campaigns(data), ""
+
+    async def _claim_campaign(self, credential: QoderCredential,
+                              status: CheckinStatus | None,
+                              campaign: dict[str, Any]) -> CheckinResult:
+        """活动制 claim：`POST /me/campaigns/{id}/claim`（带 Cosy-ClientType）。
+
+        上游响应不区分「重放/同自然人已领」与「新领」时都算成功（`ok=True`）：
+        `replayed:true` 是幂等重放，`BLOCKED/SAME_PERSON_ALREADY_CLAIMED` 是同一
+        自然人已领——两者归一为「今日已签」，否则 CheckinTask 会每 10 分钟无谓重试。
+        """
+        campaign_id = str(campaign.get("campaignId") or "")
+        url = f"{self.host}{EP_CAMPAIGN_CLAIM.format(campaign_id=campaign_id)}"
+        data = await self._post_json(url, {}, credential,
+                                     extra_headers=CAMPAIGN_HEADERS)
+        if qoder_events.claim_already_done(data):
+            return CheckinResult(ok=True, already_checked_in=True,
+                                 message="今日已签到", status=status)
+        if str(data.get("status") or "") == qoder_events.CLAIM_STATUS_BLOCKED:
+            # 明确被拒（非「同一自然人已领」）：真实失败，交给重试/人工处理
+            reason = str(data.get("failureCode") or "BLOCKED")
+            return CheckinResult(ok=False, message=f"领取被拒（{reason}）",
+                                 status=status)
+        reward = qoder_events.campaign_claim_credit(data)
+        message = "签到成功" if reward is not None else "签到成功（活动响应异常）"
+        return CheckinResult(ok=True, credit=reward, code=0,
+                             message=message, status=status)
+
+    async def _claim_legacy_checkin(self, credential: QoderCredential,
+                                    status: CheckinStatus | None) -> CheckinResult:
         url = f"{self.host}{EP_CHECKIN_CLAIM}"
         try:
             data = await self._post_json(url, {}, credential)
@@ -408,14 +484,23 @@ class QoderClient:
         return refreshed.to_dict()
     # --------------------------------------------------------------- 内部
 
-    async def _get_json(self, url: str, credential: QoderCredential) -> dict[str, Any]:
-        response = await self._short.get(url, headers=build_openapi_headers(credential))
+    async def _get_json(self, url: str, credential: QoderCredential, *,
+                        extra_headers: dict[str, str] | None = None,
+                        ) -> dict[str, Any]:
+        headers = build_openapi_headers(credential)
+        if extra_headers:
+            headers.update(extra_headers)
+        response = await self._short.get(url, headers=headers)
         return _parse_json_response(response, url)
 
     async def _post_json(self, url: str, payload: dict[str, Any],
                          credential: QoderCredential, *,
-                         skip_auth: bool = False) -> dict[str, Any]:
+                         skip_auth: bool = False,
+                         extra_headers: dict[str, str] | None = None,
+                         ) -> dict[str, Any]:
         headers = build_openapi_headers(credential)
+        if extra_headers:
+            headers.update(extra_headers)
         if skip_auth:
             # 刷新时代入的 access token 可能已失效，带上它会让上游先判 401；
             # 刷新端点只认 refresh_token，无需 Authorization。

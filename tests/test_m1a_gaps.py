@@ -406,6 +406,101 @@ def test_pick_returns_none_when_all_cooling(tmp_path):
     db.close()
 
 
+def _model_cool(credentials, credential_id, model, *, reason="model"):
+    """给某凭证写入一个未过期的模型级冷却条目。"""
+    import time
+
+    from src.engine.scheduler import ErrorOutcome, ModelCooldown
+
+    entry = ModelCooldown(cooling_until=int(time.time()) + 600, hits=1, reason=reason)
+    credentials.save_error(credential_id, ErrorOutcome(model_cooldowns={model: entry}))
+
+
+def test_unavailable_text_prefers_model_scoped_wording(tmp_path):
+    """所有候选都因该模型的模型级冷却而不可用时，文案指向模型而非凭证。"""
+    from src.engine.model_resolver import resolve
+
+    credentials, db = _repo(tmp_path)
+    credential_id = credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    _model_cool(credentials, credential_id, "glm-5.2")
+    executor = Executor(ExecutorDeps(
+        providers={"trae": _Provider([GOOD])}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2",
+        model_suggestions=lambda _name: ["other-model"]))
+    target = resolve("glm-5.2", "glm-5.2")
+    assert executor._all_model_cooled(target) is True
+    # 带 last_error：附在文案尾部便于排查
+    text = executor._unavailable_text(target, RuntimeError("boom"))
+    assert "temporarily unavailable on upstream" in text
+    assert "boom" in text
+    # 无 last_error：不带冒号细节；建议始终附上
+    text = executor._unavailable_text(target, None)
+    assert "temporarily unavailable on upstream" in text
+    assert "all credentials unavailable" not in text
+    assert "other-model" in text
+    db.close()
+
+
+def test_unavailable_text_falls_back_for_account_level(tmp_path):
+    """账号级冷却 / 无候选 / 还有可用候选时，回落到通用「凭证不可用」文案。"""
+    from src.engine.model_resolver import resolve
+
+    credentials, db = _repo(tmp_path)
+    credential_id = credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    target = resolve("glm-5.2", "glm-5.2")
+    executor = _executor(credentials, _Provider([GOOD]))
+
+    # 还有可用候选
+    assert executor._all_model_cooled(target) is False
+    assert "all credentials unavailable" in executor._unavailable_text(target, None)
+
+    # 账号级冷却（模型级视角不可选，但不是模型故障）
+    import time as _time
+
+    from src.engine.scheduler import Scheduler
+    credentials.save_error(
+        credential_id, Scheduler().note_error(credentials.candidates()[0],
+                                              ErrKind.SOFT, int(_time.time())))
+    assert executor._all_model_cooled(target) is False
+    db.close()
+
+
+def test_unavailable_text_no_candidates(tmp_path):
+    """没有任何凭证时不算模型故障（复用通用文案）。"""
+    from src.engine.model_resolver import resolve
+
+    credentials, db = _repo(tmp_path)
+    executor = _executor(credentials, _Provider([GOOD]))
+    assert executor._all_model_cooled(resolve("glm-5.2", "glm-5.2")) is False
+    db.close()
+
+async def test_stream_model_level_fault_message(tmp_path):
+    """上游模型级故障耗尽轮换 → 503 文案指明是模型暂时不可用（非凭证）。"""
+    credentials, db = _repo(tmp_path)
+    credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    executor = _executor(credentials, _Provider([[
+        Event(kind=EventKind.ERROR, error_code=429,
+              error_message="[FAIL]node:x Execution failed", error_kind=ErrKind.MODEL)]]))
+    chunks = [c async for c in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
+    assert b"temporarily unavailable on upstream" in chunks[-1]
+    db.close()
+
+
+async def test_complete_model_level_fault_message(tmp_path):
+    """非流式同样给出模型级文案。"""
+    credentials, db = _repo(tmp_path)
+    credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    executor = _executor(credentials, _Provider([[
+        Event(kind=EventKind.ERROR, error_code=429,
+              error_message="[FAIL]node:x Execution failed", error_kind=ErrKind.MODEL)]]))
+    with pytest.raises(NoHealthyCredential) as caught:
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+    assert "temporarily unavailable on upstream" in str(caught.value)
+    db.close()
+
+
 def test_event_kind_helper_prefers_event_and_falls_back_to_other():
     """流内错误分类的单一来源是 Event.error_kind：provider 解析时定好，
     executor 不再维护第二份 code→kind 映射（两份必然漂移）；缺失回落 OTHER。"""

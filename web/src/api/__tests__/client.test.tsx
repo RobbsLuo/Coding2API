@@ -207,16 +207,16 @@ describe("display helpers", () => {
       provider: "kilo", quota_cycle_end: null }) as never);
     expect(kilo).toBe("免费层（无额度接口）");
 
-    // Qoder / CodeArts 与 CodeBuddy 同属周期重置（未探测到重置时间时退化口径）
+    // Qoder 与 CodeBuddy 同属周期重置（未探测到重置时间时退化口径）
     const qoder = quotaSemantics(makeCredential({
       provider: "qoder", quota_cycle_end: null }) as never);
     expect(qoder).toContain("本周期剩余");
     expect(qoder).not.toContain("单调递减");
 
+    // CodeArts 是每日 token 池（0 点清零），不看 cycle_end，也不套用周期口径
     const codearts = quotaSemantics(makeCredential({
       provider: "codearts", quota_cycle_end: 1_800_000_000 }) as never);
-    expect(codearts).toContain("本周期剩余，");
-    expect(codearts).toContain("重置");
+    expect(codearts).toBe("每日 Token 额度（当日 0 点清零）");
 
     // 国际版 Qoder 无旧签到接口，但额度语义不变（不在此断言）
   });
