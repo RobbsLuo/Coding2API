@@ -529,13 +529,39 @@ describe("CredentialsPage", () => {
 
 
 describe("渠道登录入口", () => {
-  it("两个渠道都能发起登录", async () => {
+  it("四个渠道都能发起登录", async () => {
     mockFetch({ "/api/credentials": listBody([]) });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
 
     expect(screen.getByTestId("start-login-codebuddy")).toHaveTextContent("登录 CodeBuddy");
     expect(screen.getByTestId("start-login-trae")).toHaveTextContent("登录 TRAE");
+    expect(screen.getByTestId("start-login-qoder")).toHaveTextContent("登录 Qoder");
+    expect(screen.getByTestId("start-login-codearts")).toHaveTextContent("登录 CodeArts");
+  });
+
+  it("CodeArts 无签到接口：只显示探测、不显示签到", async () => {
+    mockFetch({
+      "/api/credentials": listBody([makeCredential({ id: "ca", provider: "codearts" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    expect(screen.getByTestId("probe-ca")).toBeInTheDocument();
+    expect(screen.queryByTestId("checkin-ca")).not.toBeInTheDocument();
+    // 有额度接口 → 积分记录入口保留
+    expect(screen.getByTestId("credits-ca")).toBeInTheDocument();
+  });
+
+  it("Qoder 有签到接口：探测与签到都显示", async () => {
+    mockFetch({
+      "/api/credentials": listBody([makeCredential({ id: "qd", provider: "qoder" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    expect(screen.getByTestId("probe-qd")).toBeInTheDocument();
+    expect(screen.getByTestId("checkin-qd")).toBeInTheDocument();
   });
 
   it("CodeBuddy 走 poll：打开授权页并轮询渠道", async () => {

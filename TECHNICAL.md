@@ -79,6 +79,20 @@ coding2api/
 │   │   ├── kilo/
 │   │   │   ├── client.py        # Kilo 上游（标准 OpenAI，无门禁）+ isFree 过滤（不探活）+ KiloProvider
 │   │   │   └── events.py        # 标准 OpenAI SSE → Event（delta.reasoning 思考通道）
+│   │   ├── qoder/
+│   │   │   ├── cosy.py          # COSY：自定义 Base64、AES/RSA、签名与会话头缓存
+│   │   │   ├── client.py        # Qoder 上游 + 信封 SSE 解包 + 额度/签到 + QoderProvider
+│   │   │   ├── events.py        # 信封 SSE → 内层 chunk → Event；状态/业务码分类
+│   │   │   ├── credential.py    # 凭证类型与解析（realm/组织/到期）
+│   │   │   └── auth.py          # 设备码 PKCE 登录（start/poll）
+│   │   ├── codearts/
+│   │   │   ├── signer.py        # 华为云 SDK-HMAC-SHA256（纯函数，便于固定向量测试）
+│   │   │   ├── dpop.py          # ES256/P-256 DPoP JWS（cryptography，低 S 归一化）
+│   │   │   ├── client.py        # CodeArts 上游 + 累计全文 SSE 还原 + 福利/余额 + Provider
+│   │   │   ├── events.py        # 累计全文 SSE → 增量 Event；状态/业务码分类
+│   │   │   ├── credential.py    # 凭证类型与解析（AK/SK/STS/DPoP/refresh）
+│   │   │   ├── auth.py          # OAuth2 PKCE 登录（authorize URL + 换 token）
+│   │   │   └── oauth.py         # poll 轨道适配：ticket 轮询登录（AuthStateStore/start/poll）
 │   │   ├── token_expiry.py      # 到期提取：显式 expires_at → JWT exp 回落（B3.3）
 │   │   └── fixtures/            # 真实样本
 │   │       ├── codebuddy/*.sse
@@ -297,7 +311,7 @@ def health(q: Quota | None) -> HealthScore:
 
 **失败也进 TTL（负缓存）**：`model_list_fetched_at` 记的是**上次尝试**时间（成功或失败都刷新），TTL（300s）内不再打上游——有缓存就继续用缓存，没缓存就跳过该渠道。此前只在成功时记时间戳，上游一次抖动（尤其 zen 探活的十几秒）会让其后**每次** `/v1/models` 都重跑一遍拉取，把列表请求打成一串超时。
 
-**展示顺序（CB / TR 优先）**：合并后按 `_sort_key(entry)` 排序——渠道权重 `_PROVIDER_RANK`（codebuddy 0 → trae 1 → 其余 2，未知名 2），多渠道条目取 `min` 权重（含 CB 即进第一段、含 TR 进第二段），同级再按 canonical 名字典序。原实现是纯名字典序。Playground 的 `groups` 排序与「强制指定渠道」下拉改用 `web/src/api/providers.ts` 的 `PROVIDER_ORDER` / `providerRank`，与后端权重对齐；分组顺序不再依赖模型列表的首次出现顺序。仅影响展示顺序，调度选号（`model_resolver` 的 `KNOWN_PROVIDERS` 顺序）不变。
+**展示顺序（CB / TR 优先）**：合并后按 `_sort_key(entry)` 排序——渠道权重 `_PROVIDER_RANK`（codebuddy 0 → trae 1 → qoder 2 → codearts 3 → 其余 4，未知名 4），多渠道条目取 `min` 权重（含 CB 即进第一段、含 TR 进第二段），同级再按 canonical 名字典序。原实现是纯名字典序。Playground 改用 `web/src/components/ModelPicker.tsx`：渠道筛选 chips、分组列表（多渠道置顶 + 单渠道按渠道分组）与「强制指定渠道」都走 `web/src/api/providers.ts` 的 `PROVIDER_ORDER` / `providerRank`，与后端权重对齐；分组顺序不再依赖模型列表的首次出现顺序。「强制指定渠道」只列当前模型**真实可用**的渠道（此前固定列全部渠道，能选出上游打不通的 `model@provider`）。仅影响展示顺序，调度选号（`model_resolver` 的 `KNOWN_PROVIDERS` 顺序）不变。
 
 **启动预热不再阻塞启动**：`lifespan` 把预热丢给后台任务 `_warm_model_list`（`force=True` 绕过 TTL），不再在 `yield` 前 `await`——zen 最慢的探活可占十几秒，内联会让应用在这段时间里不响应 `/health`，容器存活探针可能误判。预热失败仅记日志；关机时取消在途任务。
 
@@ -611,6 +625,38 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 **独立 pacer（同 Zen）**：`KILO_CHAT_MIN_INTERVAL`（热更项，默认 0 = 不节流）走独立 `Pacer`，与 zen / CB / TRAE 互不排队；`stream_chat` 在 `finally` 里 `pacer.release("kilo")` 归还并发名额。
 
 **前端**：`Provider` 联合类型加 `"kilo"`；`PROVIDER_LABEL`/`PROVIDER_ABBR`（`KL`）/`PROVIDER_CHART_COLOR`（`--chart-2`）在 `providers.ts` 补齐；`ProviderIcon` 用 `@lobehub/icons` 的 KiloCode **Mono**（该品牌同样无 Color 版）。凭证页对 kilo 隐藏「签到」按钮，并提供「添加 Kilo Gateway」一键补回入口（同 zen）；API Key 渠道绑定与 Playground 强制渠道下拉都补 `kilo` 选项；`quotaSemantics` 对 kilo 显示「免费层（无额度接口）」。
+
+### 3.16 Qoder 渠道（Q47）
+
+**与 zen/kilo 的本质区别**：Qoder 是**真实账号渠道**，凭证必须登录获得、加密入库，走与 CB 相同的设备码轮询登录轨道（`/api/auth/upstream/{start,poll,cancel}`），但**不种虚拟凭证**——没有 token 就是不可用。
+
+**私有 COSY 协议**：推理 `POST {gateway}/algo/api/v2/service/pro/sse/agent_chat_generation`。请求体不是 JSON，而是**自定义 Base64 变体**（三段轮转 + 自定义字母表 + `=`→`$`）；认证不是标准 Bearer，而是 `Authorization: Bearer COSY.<payload_b64>.<md5sig>` 加上整套 `cosy-*` 头。签名串为 `md5(payload_b64 + "\n" + cosy_key + "\n" + date + "\n" + body + "\n" + path)`（`path` 去掉 `/algo` 前缀）：`payload` 是键排序紧凑 JSON `{cosyVersion,ideVersion,info,requestId,version}`；`cosy_key` 由临时 AES 密钥经服务端 RSA 公钥加密得到，`info` 是该临时密钥 AES-128-CBC 加密的身份 JSON。密码学复用项目已有 `cryptography`（AES-128-CBC + RSA PKCS1v15），**不移植参考仓库的手写纯 Python 实现**。`cosy-machineid`/`cosy-machinetoken` 按 `uid` 稳定派生（同一账号长期同一虚拟设备，避免随机机器码触发风控）。
+
+**信封式 SSE**：响应每行是 `data:{"headers":…,"body":"<内层 OpenAI chunk>","statusCodeValue":200}`——即**外层信封包内层 chunk**。解析器逐帧解出 `body`，`body=="[DONE]"` 结束，`statusCodeValue != 200` 判上游错误。内层仍是标准 OpenAI chunk，故事件映射与 kilo 近似（`clean_chunk` 顺带剔除网关补的空噪声 delta）。
+
+**模型发现**：`POST {gateway}/algo/api/v2/model/list?Encode=1`，**签名 body 必须是 `qoder_encode("")` 且请求必须带同款 body**（B 服务端校验签名与 body 一致，裸 GET 会 403）。这与常规「GET 列表」不同，是本渠道最容易踩的坑。
+
+**签到与国际版差异**：`/sash/api/v1/me/daily-check-in/{status,claim}`。`claim` 对当日已签账号返回 HTTP 409 或 `result=="ALREADY_CLAIMED"` → 归一为 `already_checked_in=True`（不是失败）。**国际版该端点 404**：`checkin` 归为「本区域无此接口」的 skipped（`ok=False` 但不算失败），避免国际版账号每天报一次假失败。
+
+**额度**：`GET {openapi}/api/v2/quota/usage` 的 `userQuota` + `addOnQuota` 合成 `remaining`/`total`，`cycle_end` 取最早 `expiresAt`。
+
+**节点白名单**：`QODER_ALLOWED_ENDPOINTS` 同时含国内 openapi+gateway 与国际版；`_qoder_endpoint` 启动时校验，防止把带签名的请求发往未授权主机。`QODER_CHAT_MIN_INTERVAL`（热更项，默认 5s）走独立 pacer，与其余渠道互不排队。
+
+### 3.17 CodeArts 渠道（Q48）
+
+**与其余五条都不同**：CodeArts 既不是标准 OpenAI、也不是 COSY 那种「自定义 body + 信封 SSE」，而是**华为云签名体系 + 累计全文 SSE**。
+
+**SDK-HMAC-SHA256 签名**：鉴权用 AK/SK + `X-Security-Token`。`Authorization: SDK-HMAC-SHA256 Access=<AK>, SignedHeaders=…, Signature=…`。三处与常见 HMAC 不同、必须逐字节对齐：signedHeaders 是**请求全部头**（小写、字典序）；CanonicalURI **每个路径段单独 percent-encode 且末尾补 `/`**；payload hash 取 `X-Sdk-Content-Sha256`。`signer.py` 写成纯函数以便固定向量测试。参考实现是 Go（`signer.go`），本项目用标准库 `hmac`/`hashlib` 重写。
+
+**DPoP 令牌刷新（刚性约束）**：`POST {sts}/v1/oauth2/tokens` `grant_type=refresh_token` 需带 **DPoP(ES256/P-256) JWS**。refresh_token 与 `client_id=codearts-agent` + DPoP 私钥**三者绑定、一次性**——刷新成功必须把返回的新 `refresh_token` 回写凭证（`RefreshTask` 先落库再同步账号，正好满足）。ES256 用 `cryptography`（`ec.SECP256R1` + `ECDSA(SHA256)`，**低 S 归一化**），不移植 Go/手写 ECDSA。
+
+**累计全文 SSE**：上游逐行 `data:` JSON（**没有空行分隔**，部分行无 `event:` 前缀），`text` 字段是**累计全文（替换语义，非增量）**——每帧都带从头到尾的完整文本。解析层按「新帧 text 以旧帧为前缀」时的差量产出 CONTENT 事件，对客户端透明为增量流；结束帧 `{"text":"[DONE]","error_code":"0"}`，错误 `error_code` 形如 `ChatAgent.*`。
+
+**无每日签到**：免费额度**按月重置**，上游没有每日签到接口。因此本渠道**不实现 `checkin`**（`checkin_scope` 也一并省略，后台签到任务自动跳过它）；「保活」由 token 自动 refresh 承担。福利模型发现（`{opengw}/api/v1/gateway/config`）与 Token 领取（`POST /api/v1/benefit/claim`，幂等）在探测时顺带完成。
+
+**登录**：OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens`（authorization_code）换 `{access_key_id, secret_access_key, security_token, expiration, refresh_token}`，DPoP 私钥随 credential 一起生成并加密入库。同为 poll 轨道。
+
+**节点白名单**：`CODEARTS_ALLOWED_ENDPOINTS` 含 snap 引擎、STS、福利网关、门户四个主机；AK/SK 签名请求只发往白名单。`CODEARTS_CHAT_MIN_INTERVAL`（热更项，默认 5s）独立 pacer。
 
 ---
 

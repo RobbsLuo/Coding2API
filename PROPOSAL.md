@@ -1,6 +1,6 @@
 # Coding2API 立项决策
 
-把 CodeBuddy、TRAE SOLO、OpenCode Zen 与 Kilo Gateway 四个上游通道，统一封装为 OpenAI 兼容 API，并提供公共凭证池、统一调度与按人用量统计。
+把 CodeBuddy、TRAE SOLO、OpenCode Zen、Kilo Gateway、Qoder 与 CodeArts 六个上游通道，统一封装为 OpenAI 兼容 API，并提供公共凭证池、统一调度与按人用量统计。
 
 > 本文档记录立项决策与可行性核实。实现细节见 [TECHNICAL.md](TECHNICAL.md)，使用与部署见 [README.md](README.md)。
 
@@ -52,12 +52,14 @@
 | Q44 | Zen 独立聊天节流（不再与 CB/TRAE 共享 pacer） | 原先 zen 的 `ZenProvider(pacer=chat_pacer)` 与 CodeBuddy/TRAE 共用同一个全局 pacer（`codebuddy_chat_min_interval`，默认 5s，min=max=5 → 固定 5s）。该 pacer 的存在理由是避开 CB 11128 / TRAE 流内错误的**账号级频率风控**，而 zen 是匿名免费层、无账号、无此类约束。共享的后果是**自伤式延迟**：任何 CB/TRAE 请求刚发出，紧随的 zen 请求就要在 pacer 里空等满 5s 才打上游；单一用户连发或 IDE 并发多个 zen 请求时，第 2、3 个请求 TTFB 实测 +5s、+10s（并发 3 个 zen：9.2s / 13.5s / 18.1s，去掉节流后应基本齐平）。实测确认**不是网络问题**：首 token 直连与走本机代理（127.0.0.1:7897）互有胜负、无稳定收益（`GET /models` 直连 0.29s vs 代理 0.60s；chat TTFB 直连 ≈ 代理），故不引入代理。改为 zen 用独立 `Pacer`，新增热更项 `ZEN_CHAT_MIN_INTERVAL`（默认 **0** = 不节流）；仍保留可调旋钮，若上游日后对匿名层限流可调大。CB/TRAE 继续共享原 pacer，互不影响。无 schema 变更 |
 | Q45 | 聊天节流按凭证分桶并允许桶内并发（同渠道同模型并发不再串行台阶） | Q44 给 zen 拆了独立 pacer 后，CB/TRAE 的 `chat_pacer` 仍是**一把全局 `asyncio.Lock` + 单个 `_last_started`**：任何两个请求（哪怕不同账号、不同模型）都串行排队，后到者按 `interval - elapsed` 补足等待。实测 3 个并发 CB 请求 TTFB ≈ 1.55 / 6.71 / 11.47s（正好 +5s、+10s 台阶）；把间隔热更为 0 后 6 并发 TTFB ≈ 1.48–1.84s、总 1.84s → 延迟完全来自节流排队而非上游。**关键**：并发请求常被会话粘性/健康度排序收敛到**同一个凭证**（DB 里 6 条并发全部命中 `cred_75e8edcf`），所以只按凭证分桶、桶内继续排队并不能解决，必须同时允许桶内并发。改为 `Pacer(min, max, *, allow_concurrent=False)`：`allow_concurrent=True`（仅聊天 pacer）时按桶（渠道前缀 + 凭证身份摘要）维护**在途计数**——同桶已有在途请求则新请求**立即放行**，只有桶空闲、且距上次请求开始不足最小间隔时才补足等待（即只有「上一请求已结束、紧接着又来一个」的顺序连发才节流）。请求结束由 provider `stream_chat` 的 `finally` 调 `pacer.release(key)` 归还名额（async generator 被提前关闭时依赖 asyncio 的 asyncgen finalize，延迟归还只会让节流略松、不会误排队）。`allow_concurrent=False`（后台任务 pacer）保持原严格串行语义不变。桶键用 `stable_key(provider, identity)`：CB 取 `account_uid or user_id or bearer_token`、TRAE 取 `uid or access_token`、zen 用渠道常量；`identity` 缺失回落该渠道单桶。CB/TRAE 仍共享同一 pacer 实例，但桶键带渠道前缀 + 身份摘要，彼此不互堵；`CODEBUDDY_CHAT_MIN_INTERVAL` 语义从「跨渠道全局间隔」变为「同渠道同凭证的顺序连发间隔」（默认 5s 不变）。无 schema 变更 |
 | Q46 | Kilo Gateway 免费层（第四渠道 `kilo`） | 把 [Kilo Gateway](https://kilo.ai)（`api.kilo.ai/api/gateway`）免费层接成第四个 provider（`KNOWN_PROVIDERS` 加 `"kilo"`，**无 schema 变更**）。**协议是标准 OpenAI 兼容**（`/chat/completions` + `/models`），既无私有信封也无门禁伪装——与 Zen 的关键差异正在此：Zen 要伪造 UA/session/tools 并过滤伪工具调用，Kilo 完全不需要。**免费模型有权威标记**：`/models` 每个条目带 `isFree` 布尔（实测 2026-09-29 共 395 个模型、17 个 `isFree=true`，含 `kilo-auto/free`、`stealth/space-bunny-alpha`、`openrouter/free` 等无 `:free` 后缀者），据此**直接过滤**免费集——**不做探活**（与 Zen 相反）：探活会真发一次推理、白耗本就极小的免费配额（网关级约 200 req/h/IP），且结果随上游免费池波动不稳定，`isFree` 已足够权威。免费模型显式标 **x0 倍率**（`credit_rate=0.0`）；`name`/`context_length`/`top_provider.max_completion_tokens`/`supported_parameters`（含 `tools`）/`architecture.input_modalities`（含 `image`）透传为中立 `Model` 元数据。思考字段是 **`delta.reasoning`**（**不是** Zen 的 `reasoning_content`）。**凭证模型用虚拟凭证行**（同 Zen）：Kilo 无凭证/无额度接口，池里种一条空凭证复用现有调度/冷却/统计（`probe_quota` 恒 `probe_failed=True` → health NULL「未知」，**不是耗尽**）；删除后重启复活，也可在凭证页「登录渠道账号」点「添加 Kilo Gateway」立即补回，永久停用请用「暂停」。**错误分类**：401→`INVALID`（无凭证，401 只表示该模型需要付费 key/BYOK，避免强制付费模型硬禁用整条渠道）、400/404/422→`INVALID`、403→`REQUEST`、**429 与 502/503/504→`MODEL`（模型级冷却）**。429 与上游 5xx 归模型级而非账号级：实测（2026-09-30）429 报错点名具体模型（`<model> is temporarily rate-limited upstream`，`limit_source: upstream_provider_shared_pool`），429 消退后同一模型转 503 `no endpoints available`，两种情况下**同一时刻其他免费模型仍 200**——免费池实为 OpenRouter 共享池转发，拥塞/端点缺失按模型隔离，归账号级会因单模型问题把整条 kilo 渠道冷却（429→60s；5xx 累计 3 次→10m；单虚拟凭证下均即 `all credentials unavailable`）。对齐 CB/TRAE 的 `429+6004 → MODEL` 口径。限流交引擎处理，**本包不自建熔断**。新增 `KILO_API_ENDPOINT` / `KILO_ALLOWED_ENDPOINTS`（端点白名单，Kilo 不带真实 Token）/ `KILO_CHAT_MIN_INTERVAL`（热更项，独立 pacer、默认 0 = 不节流，与 zen / CB / TRAE 互不排队） |
+| Q47 | Qoder（阿里，第五渠道 `qoder`） | 把 [Qoder](https://qoder.com) 接成第五个 provider（`KNOWN_PROVIDERS` 加 `"qoder"`，**无 schema 变更**）。**真实账号渠道**（区别于 zen/kilo 的匿名免费层），走设备码 PKCE 登录，凭证入加密列。协议为私有 COSY：推理 `POST {gateway}/algo/api/v2/service/pro/sse/agent_chat_generation`，body 用**自定义 Base64 变体**编码（三段轮转 + 自定义字母表 + `=`→`$`），头为整套 `cosy-*`，`Authorization: Bearer COSY.<payload_b64>.<md5sig>`，`x-model-key` 路由；签名为 `md5(payload_b64 \n cosy_key \n date \n body \n path)`（`path` 去 `/algo` 前缀，payload 为键排序紧凑 JSON），`cosy_key`/`info` 由临时 AES 密钥经服务端 RSA 公钥加密而来。响应是**信封式 SSE**（`data:{"headers":…,"body":"<内层 chunk>","statusCodeValue":200}`，`body=="[DONE]"` 结束，非 200 判上游错误）。模型发现 `POST {gateway}/algo/api/v2/model/list?Encode=1`（**签名 body 必须是 `qoder_encode("")` 且请求带同款 body**，裸 GET 403）。额度 `GET {openapi}/api/v2/quota/usage`（`userQuota`+`addOnQuota`），套餐 `/api/v2/user/plan`。签到 `/sash/api/v1/me/daily-check-in/{status,claim}`（409/`ALREADY_CLAIMED` → 已签；**国际版该端点 404 → 视为本区域无此接口，不算错误**）。域：CN `openapi.qoder.com.cn`/`gateway.qoder.com.cn`；Intl `openapi.qoder.sh`/`api1.qoder.sh`。密码学复用项目已有 `cryptography`（不移植参考仓库的手写纯 Python 实现）。新增 `QODER_API_ENDPOINT`（openapi）/`QODER_ALLOWED_ENDPOINTS`（含国内 openapi+gateway 与国际版）/`QODER_CHAT_MIN_INTERVAL`（热更项，独立 pacer、默认 5s） |
+| Q48 | CodeArts（华为云码道，第六渠道 `codearts`） | 把 [华为云 CodeArts](https://codearts.huaweicloud.com) 的盘古引擎接成第六个 provider（`KNOWN_PROVIDERS` 加 `"codearts"`，**无 schema 变更**）。**真实账号渠道**，走 OAuth2 PKCE 登录换 STS，凭证入加密列。推理 `POST /api/v2/chat/completions`（福利模型追加头 `maas_type: benefit`）；鉴权为华为云 **`SDK-HMAC-SHA256`**（AK/SK + `X-Security-Token`，signedHeaders=请求全部头小写排序，CanonicalURI 每段 encode 且**末尾补 `/`**，payload hash 取 `X-Sdk-Content-Sha256`）。**令牌刷新与 `client_id=codearts-agent` + DPoP 私钥三者绑定、一次性**：`POST {sts}/v1/oauth2/tokens` `grant_type=refresh_token` + **DPoP(ES256/P-256)**，刷后**必须回写新 `refresh_token`**（DPoP 低 S 归一化用 `cryptography` 实现，不移植 Go/手写 ECDSA）。模型：内置 `GET {snap}/v1/model/builtin`（头 `Agent-Type: PromptCenter`）+ 福利 `GET {opengw}/api/v1/gateway/config`；领取 `POST {opengw}/api/v1/benefit/claim`（幂等，启动/定时保活）；余额 `GET {opengw}/api/v1/user/tokens/balance`。SSE 为**逐行 `data:` JSON**（无空行），`text` 字段是**累计全文（替换语义，非增量）**，结束 `{"text":"[DONE]","error_code":"0"}`，错误 `error_code` 形如 `ChatAgent.*`。**CodeArts 没有每日签到接口**（免费额度按月重置），故不实现 `checkin`，签到语义由 token 自动 refresh 续期承担。新增 `CODEARTS_API_ENDPOINT` / `CODEARTS_ALLOWED_ENDPOINTS`（snap 引擎 + STS + 福利网关 + 门户）/ `CODEARTS_CHAT_MIN_INTERVAL`（热更项，独立 pacer、默认 5s） |
 
 ## 2. 目标与非目标
 
 ### 目标
 
-- 单一 OpenAI 兼容端点，后面挂 CodeBuddy、TRAE、OpenCode Zen 与 Kilo Gateway 四个上游
+- 单一 OpenAI 兼容端点，后面挂 CodeBuddy、TRAE、OpenCode Zen、Kilo Gateway、Qoder 与 CodeArts 六个上游
 - 凭证由 admin 集中维护，全员共享，调度器自动挑健康的号
 - 按人统计用量（请求数、成功率、token、耗时与首字延迟）
 - 上游死亡自动冷却，不反复踩死号
@@ -66,7 +68,7 @@
 ### 非目标（明确不做）
 
 - **不做配额/限流**：上游是订阅制通道，成本不随 token 线性增长；10 人规模靠统计页可见性约束滥用
-- **不做通用 provider 网关**：只支持 CodeBuddy / TRAE / OpenCode Zen / Kilo Gateway 这几个明确接入的上游，硬编码，不做插件系统
+- **不做通用 provider 网关**：只支持 CodeBuddy / TRAE / OpenCode Zen / Kilo Gateway / Qoder / CodeArts 这几个明确接入的上游，硬编码，不做插件系统
 - **v1 不做 Anthropic 协议**
 - **不做旧项目数据迁移**
 - **不做自更新脚本**
@@ -106,6 +108,36 @@
 - **接受客户端传来的 `reasoning_effort`**（实测透传 `low`/`medium` 均 200 且正常出流）：不认 `thinking` 对象，也无需服务端注入；`developer` 角色上游不认（静默空流），已归一为 `system`
 
 ### 3.3 冲突与陷阱
+
+| 问题 | 事实 | 对策 |
+|---|---|---|
+| 模型 ID 撞车 | 六边都有 `glm-5.2`、`DeepSeek-V4-Pro`、`kimi-k3` 等 | 扁平名 + 健康度路由 + `@provider` 后缀 |
+| 积分语义不同 | CB/Qoder/CodeArts 有周期会重置；TRAE 是单调余额 | 健康分统一为百分比，展示层标注周期语义 |
+| credit 可得性 | CB 有 per-request；TRAE 只有账户总额；Qoder/CodeArts 走会话额度 | 统计表 credit 字段 nullable；TRAE 按官方单价推算并标 `credit_estimated`，展示加 ≈ |
+| 登录机制 | CB/Qoder/CodeArts 轮询（后端出网）；TRAE 回调 | 双轨，回调统一走主端口 |
+| 媒体/工具 | 各边 SSE 都含工具调用 | v1 透传，不做语义转换 |
+
+### 3.3 Qoder（阿里，第五渠道 `qoder`）
+
+- 域：国内 `openapi.qoder.com.cn` / 网关 `gateway.qoder.com.cn`；国际 `openapi.qoder.sh` / `api1.qoder.sh`（回落 api2/api3）
+- 聊天：`POST {gateway}/algo/api/v2/service/pro/sse/agent_chat_generation`，**只支持流式**（信封 SSE），非流式需本地聚合
+- 登录：**设备码 PKCE（S256）** —— `{website}/device/selectAccounts` 生成 challenge/nonce → 轮询 `GET {openapi}/api/v1/deviceToken/poll`（404/202 = 待授权）→ `POST /api/v1/deviceToken/refresh` 续期 → `GET /api/v1/userinfo` 补 `uid`/昵称/组织
+- 模型：`POST {gateway}/algo/api/v2/model/list?Encode=1`；签名 body 必须是 `qoder_encode("")` 且请求要带同款 body，裸 GET 403
+- 额度：`GET {openapi}/api/v2/quota/usage`（`userQuota` + `addOnQuota`）；套餐 `GET /api/v2/user/plan`
+- 签到：`/sash/api/v1/me/daily-check-in/{status,claim}`；HTTP 409 / `ALREADY_CLAIMED` = 当日已签（幂等，不是错误）；**国际版该端点 404 → 视为本区域无此接口**，`checkin` 归为 skipped 而非 failed
+- 签名：自定义 Base64 变体（三段轮转 + 自定义字母表 + `=`→`$`）；`Authorization: Bearer COSY.<payload_b64>.<md5sig>`；整套 `cosy-*` 请求头（含稳定派生的 `cosy-machineid`/`cosy-machinetoken`）
+
+### 3.4 CodeArts（华为云码道，第六渠道 `codearts`）
+
+- 域：snap 引擎 `snap-access.cn-north-4.myhuaweicloud.com`；STS `sts.cn-north-4.myhuaweicloud.com`；福利网关 `opengw.developer.huaweicloud.com`；门户 `codearts.huaweicloud.com`
+- 聊天：`POST /api/v2/chat/completions`（福利模型追加头 `maas_type: benefit`），SSE 逐行 `data:` JSON，`text` 为**累计全文（替换语义）**
+- 登录：OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens`（authorization_code）换 AK/SK/security_token/refresh_token
+- 刷新：`POST {sts}/v1/oauth2/tokens`（`grant_type=refresh_token` + **DPoP ES256/P-256**）；**refresh_token 与 `client_id=codearts-agent` + DPoP 私钥三者绑定、一次性、刷后必须回写**
+- 鉴权：华为云 **`SDK-HMAC-SHA256`**（`Authorization: SDK-HMAC-SHA256 Access=<AK>, SignedHeaders=…, Signature=…`）
+- 模型：内置 `GET {snap}/v1/model/builtin`（头 `Agent-Type: PromptCenter`）；福利 `GET {opengw}/api/v1/gateway/config`；领取 `POST /api/v1/benefit/claim`（幂等）；余额 `GET /api/v1/user/tokens/balance`
+- **无每日签到接口**（免费额度按月重置）：不实现 `checkin`，保活语义由 token 自动 refresh 承担
+
+### 3.5 冲突与陷阱
 
 | 问题 | 事实 | 对策 |
 |---|---|---|
@@ -377,6 +409,8 @@ M0 骨架 → M1a TRAE → M1b CB 基础 → M1.5 CB 完整化 → M2 前端 →
 | [88lin/workbuddy-auto-signin](https://github.com/88lin/workbuddy-auto-signin) | 成长中心与签到接口的逆向结论与运行经验 |
 | [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) | 活跃上报 `/v2/report` 的协议形状与实测结论 |
 | [ithtelab/workbuddy-manager](https://github.com/ithtelab/workbuddy-manager) | 后台任务可视化页面的设计参考 |
+| [shuishuipingan/qoder2api-hub](https://github.com/shuishuipingan/qoder2api-hub) | Qoder COSY 签名、自定义 Base64、信封 SSE、设备码登录、签到与额度 |
+| [HITZY2002/codearts2api](https://github.com/HITZY2002/codearts2api) | CodeArts SDK-HMAC-SHA256、DPoP(ES256) 刷新、累计全文 SSE、福利模型 |
 
 均为 MIT License，完整版权行与「其上游」子项见 `NOTICE`。本项目的代码为独立实现，
 不复制上述项目的源代码；上游服务的协议细节来自对客户端行为的观察，不属于上述项目

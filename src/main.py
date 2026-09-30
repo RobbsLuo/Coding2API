@@ -36,8 +36,10 @@ from .auth.throttle import LoginThrottle
 from .config import (
     Settings,
     load_settings,
+    validate_codearts_endpoint_allowed,
     validate_endpoint_allowed,
     validate_kilo_endpoint_allowed,
+    validate_qoder_endpoint_allowed,
     validate_zen_endpoint_allowed,
 )
 from .db.conn import Database
@@ -55,9 +57,16 @@ from .db.repo import (
 from .engine.affinity import ConversationAffinity
 from .engine.executor import Executor, ExecutorDeps
 from .engine.scheduler import Scheduler
+from .provider.codearts import CodeArtsProvider
+from .provider.codearts.client import CodeArtsClient
+from .provider.codearts.oauth import CodeArtsOAuth
 from .provider.codebuddy.client import CodeBuddyClient, CodeBuddyProvider
 from .provider.codebuddy.oauth import CodeBuddyOAuth
 from .provider.kilo.client import KiloClient, KiloProvider
+from .provider.qoder import QoderProvider
+from .provider.qoder.auth import QoderOAuth
+from .provider.qoder.client import QoderClient
+from .provider.qoder.events import detect_realm_from_domain
 from .provider.trae.client import TraeProvider
 from .provider.zen.client import ZenClient, ZenProvider
 from .runtime_settings import load_runtime_settings
@@ -126,6 +135,33 @@ def _kilo_endpoint(config: Settings) -> str:
     if not validate_kilo_endpoint_allowed(endpoint, config):
         raise ValueError(
             f"KILO_API_ENDPOINT {endpoint!r} is not in KILO_ALLOWED_ENDPOINTS")
+    return endpoint
+
+
+def _qoder_host(config: Settings) -> str:
+    """解析 Qoder openapi 端点并强制白名单校验。"""
+    endpoint = config.qoder_api_endpoint.strip()
+    if not validate_qoder_endpoint_allowed(endpoint, config):
+        raise ValueError(
+            f"QODER_API_ENDPOINT {endpoint!r} is not in QODER_ALLOWED_ENDPOINTS")
+    return endpoint
+
+
+def _qoder_gateway(config: Settings) -> str:
+    """解析 Qoder 推理网关端点并强制白名单校验。"""
+    endpoint = config.qoder_gateway_endpoint.strip()
+    if not validate_qoder_endpoint_allowed(endpoint, config):
+        raise ValueError(
+            f"QODER_GATEWAY_ENDPOINT {endpoint!r} is not in QODER_ALLOWED_ENDPOINTS")
+    return endpoint
+
+
+def _codearts_endpoint(config: Settings) -> str:
+    """解析 CodeArts 端点并强制白名单校验。"""
+    endpoint = config.codearts_api_endpoint.strip()
+    if not validate_codearts_endpoint_allowed(endpoint, config):
+        raise ValueError(
+            f"CODEARTS_API_ENDPOINT {endpoint!r} is not in CODEARTS_ALLOWED_ENDPOINTS")
     return endpoint
 
 
@@ -220,6 +256,14 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     kilo_pacer = Pacer(lambda: runtime.kilo_chat_min_interval,
                        lambda: runtime.kilo_chat_min_interval,
                        allow_concurrent=True)
+    # Qoder / CodeArts 是真实账号渠道，上游按账号频控；各自独立 pacer，
+    # 与其余渠道互不排队（同渠道同凭证共桶、桶内允许并发）。
+    qoder_pacer = Pacer(lambda: runtime.qoder_chat_min_interval,
+                        lambda: runtime.qoder_chat_min_interval,
+                        allow_concurrent=True)
+    codearts_pacer = Pacer(lambda: runtime.codearts_chat_min_interval,
+                           lambda: runtime.codearts_chat_min_interval,
+                           allow_concurrent=True)
     registry = providers if providers is not None else {
         "trae": TraeProvider(pacer=chat_pacer),
         "codebuddy": CodeBuddyProvider(
@@ -234,6 +278,13 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         "kilo": KiloProvider(
             client=KiloClient(host=_kilo_endpoint(config)),
             pacer=kilo_pacer),
+        "qoder": QoderProvider(
+            client=QoderClient(host=_qoder_host(config),
+                               gateway=_qoder_gateway(config)),
+            pacer=qoder_pacer),
+        "codearts": CodeArtsProvider(
+            client=CodeArtsClient(endpoint=_codearts_endpoint(config)),
+            pacer=codearts_pacer),
     }
     # 默认装配路径（生产）才种子无凭证渠道的虚拟凭证：测试注入自定义 registry
     # 时不应凭空多出一条无对应 provider 的凭证行。
@@ -419,12 +470,24 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
 
 
 def _upstream_auth(registry: dict, settings: Settings) -> dict:
-    """返回支持 poll 轨道的 provider 的 OAuth 实现（当前仅 CodeBuddy）。"""
+    """返回支持 poll 轨道的 provider 的 OAuth 实现。
+
+    CodeBuddy 走设备码轮询；Qoder 走设备码 PKCE（区域由 openapi 主机推导）；
+    CodeArts 走门户 ticket 轮询（token 响应直接给临时 AK/SK，无本地回调）。
+    """
     flows: dict = {}
     codebuddy = registry.get("codebuddy")
     endpoint = getattr(getattr(codebuddy, "client", None), "endpoint", None)
     if endpoint is not None:
         flows["codebuddy"] = CodeBuddyOAuth(endpoint)
+    qoder = registry.get("qoder")
+    host = getattr(getattr(qoder, "client", None), "host", None)
+    if host is not None:
+        flows["qoder"] = QoderOAuth(detect_realm_from_domain(host))
+    codearts = registry.get("codearts")
+    login = getattr(getattr(codearts, "client", None), "login", None)
+    if login is not None:
+        flows["codearts"] = CodeArtsOAuth(login)
     return flows
 
 

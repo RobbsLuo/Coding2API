@@ -12,6 +12,8 @@ export const PROVIDER_LABEL: Record<Provider, string> = {
   trae: "TRAE",
   zen: "OpenCode Zen",
   kilo: "Kilo Gateway",
+  qoder: "Qoder",
+  codearts: "CodeArts",
 };
 
 /** 模型下拉里的渠道缩写（如 `CB x0.29`）。 */
@@ -20,6 +22,8 @@ export const PROVIDER_ABBR: Record<Provider, string> = {
   trae: "TR",
   zen: "OC",
   kilo: "KL",
+  qoder: "QD",
+  codearts: "CA",
 };
 
 /**
@@ -33,6 +37,8 @@ export const PROVIDER_CHART_COLOR: Record<Provider, string> = {
   trae: "var(--chart-3)",
   zen: "var(--chart-4)",
   kilo: "var(--chart-2)",
+  qoder: "var(--chart-5)",
+  codearts: "var(--chart-6)",
 };
 
 /** 未知渠道（老数据/未来渠道）的兜底色。 */
@@ -44,7 +50,7 @@ export const FALLBACK_CHART_COLOR = "var(--chart-5)";
  * 与后端 `/v1/models` 的排序权重（`src/api/models.py` 的 `_PROVIDER_RANK`）
  * 对齐——Playground 的分组顺序因此与接口返回的 data 顺序一致。
  */
-export const PROVIDER_ORDER: Provider[] = ["codebuddy", "trae", "zen", "kilo"];
+export const PROVIDER_ORDER: Provider[] = ["codebuddy", "trae", "zen", "kilo", "qoder", "codearts"];
 
 /** 渠道排序权重；未知渠道排在已知渠道之后。 */
 export function providerRank(provider: string): number {

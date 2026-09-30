@@ -20,9 +20,9 @@
 逐字段补缺（先到先填，后到只补 None）。
 
 **展示顺序**：CodeBuddy / TRAE 的模型排在前面（`_PROVIDER_RANK`：
-codebuddy 0 → trae 1 → 其他 2），组内仍按模型名字典序；多渠道模型按
-其最高优先级渠道归位（含 CB 即进第一段，含 TR 即进第二段）。仅影响
-`/v1/models` 与 Playground 的展示顺序，不影响调度选号。
+codebuddy 0 → trae 1 → qoder 2 → codearts 3 → 其他 4），组内仍按模型名字典序；
+多渠道模型按其最高优先级渠道归位（含 CB 即进第一段，含 TR 即进第二段）。
+仅影响 `/v1/models` 与 Playground 的展示顺序，不影响调度选号。
 """
 
 from __future__ import annotations
@@ -52,8 +52,8 @@ _META_FIELDS = ("credit_rate", "max_input_tokens", "max_output_tokens",
 
 # 展示排序权重：CodeBuddy / TRAE 优先，其余渠道（zen / kilo 等）在后；
 # 多渠道模型取所有渠道里的最小权重（含 CB 即进第一段）。
-_PROVIDER_RANK = {"codebuddy": 0, "trae": 1}
-_UNRANKED_PROVIDER = 2
+_PROVIDER_RANK = {"codebuddy": 0, "trae": 1, "qoder": 2, "codearts": 3}
+_UNRANKED_PROVIDER = 4
 
 
 def _sort_key(entry: dict[str, Any]) -> tuple[int, str]:

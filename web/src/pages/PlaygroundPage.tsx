@@ -3,7 +3,7 @@ import { useState } from "react";
 import {
   Check,
   Loader2,
-  RefreshCw,
+  Pin,
   Send,
   TerminalSquare,
   X,
@@ -13,34 +13,9 @@ import type { ModelInfo } from "../api/types";
 import { HelpBlock } from "../components/HelpBlock";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
-import { Button, Card, Checkbox, Empty, Field, Label, Notice, Panel, Select, Textarea } from "../ui";
-import { PROVIDER_ORDER, providerAbbr, providerLabel, providerRank } from "../api/providers";
-
-/** 模型排序用倍率：多渠道取各渠道最小倍率；无倍率视为最大（排最后）。 */
-function modelRate(item: ModelInfo): number | undefined {
-  const byProvider = item.by_provider;
-  if (byProvider && Object.keys(byProvider).length > 0) {
-    const rates = Object.values(byProvider)
-      .map((entry) => entry.credit_rate)
-      .filter((rate): rate is number => rate !== undefined);
-    if (rates.length) return Math.min(...rates);
-  }
-  return item.credit_rate;
-}
-
-/** 默认选中：倍率最小的模型；全部无倍率时回退列表第一个。 */
-function pickDefaultValue(models: (ModelInfo & { value: string })[]): string {
-  let best: (ModelInfo & { value: string }) | null = null;
-  let bestRate = Infinity;
-  for (const item of models) {
-    const rate = modelRate(item);
-    if (rate !== undefined && rate < bestRate) {
-      bestRate = rate;
-      best = item;
-    }
-  }
-  return (best ?? models[0])?.value ?? "";
-}
+import { ModelPicker, modelValue, pickDefaultModel, providerRate } from "../components/ModelPicker";
+import { Button, Card, Checkbox, Empty, Field, Label, Notice, Panel, Textarea } from "../ui";
+import { providerLabel, providerRank } from "../api/providers";
 
 /** 通过会话鉴权的内部端点取数据，不需要用户自己造 API Key。 */
 async function fetchPlaygroundModels(signal?: AbortSignal) {
@@ -68,54 +43,20 @@ export function PlaygroundPage() {
   const fetched = modelsQuery.data ?? [];
 
   // 每个模型的受控值：单渠道模型带 @provider（该组选项即强制指定），
-  // 多渠道模型用裸 id（走自动路由）。派生选中时必须用同一套值，
-  // 否则受控值与任何 option 都对不上，select 会显示为空。
-  const valueOf = (item: { id: string; providers: string[] }): string =>
-    item.providers.length === 1 ? `${item.id}@${item.providers[0]}` : item.id;
-  const models = fetched.map((item) => ({ ...item, value: valueOf(item) }));
-  const selectedModel = model || pickDefaultValue(models);
+  // 多渠道模型用裸 id（走自动路由）。
+  const models = fetched.map((item) => ({ ...item, value: modelValue(item) }));
+  const selectedModel = model || pickDefaultModel(models);
   // 选中模型的元数据：优先精确匹配 value，退化为按小写基础名匹配
   const selectedInfo =
     models.find((item) => item.value === selectedModel) ??
     models.find((item) => item.value === selectedModel.split("@")[0]);
 
-  // option 文本里的倍率标记：多渠道一律按渠道逐个标注（相同倍率也各自
-  // 写出；只有一个渠道有倍率时只标那个渠道）；单渠道带渠道缩写。
-const rateLabel = (item: ModelInfo, provider?: string): string => {
-  const byProvider = item.by_provider;
-  const multi = item.providers && item.providers.length > 1;
-  if (multi && byProvider && Object.keys(byProvider).length > 0) {
-    const parts = item.providers
-      .map((pid) => {
-        const rate = byProvider[pid]?.credit_rate;
-        return rate === undefined ? null : `${providerAbbr(pid)} x${rate}`;
-      })
-      .filter(Boolean);
-    if (parts.length) return parts.join("/");
-  }
-  if (item.credit_rate !== undefined) {
-    const abbr = provider ? `${providerAbbr(provider)} ` : "";
-    return `${abbr}x${item.credit_rate}`;
-  }
-  return "";
-};
-  const dualSource = models.filter((item) => item.providers.length > 1);
-  // 单渠道模型按渠道分组；分组顺序按 providerRank，渠道集合动态
-  const groups: [string, typeof models][] = [];
-  for (const item of models) {
-    if (item.providers.length !== 1) continue;
-    const pid = item.providers[0];
-    let group = groups.find(([name]) => name === pid);
-    if (!group) {
-      group = [pid, []];
-      groups.push(group);
-    }
-    group[1].push(item);
-  }
-  // 渠道顺序按 providerRank（CB → TR → 其余），与后端 /v1/models 的排序对齐；
-  // 不用首次出现顺序，否则模型列表顺序变化会连带把下拉分组顺序打乱。
-  groups.sort(([left], [right]) => providerRank(left) - providerRank(right));
-  void valueOf;
+  // 强制指定渠道：只列该模型**真实可用**的渠道，避免选出上游打不通的
+  // model@provider。单渠道模型只有一个选项（始终固定）。
+  const selectedProviders = selectedInfo
+    ? [...selectedInfo.providers].sort((left, right) => providerRank(left) - providerRank(right))
+    : [];
+  const pinnedProvider = selectedModel.includes("@") ? selectedModel.split("@")[1] : "";
 
   const send = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -181,69 +122,54 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
 
       <Panel title="请求">
         <form onSubmit={send} className="space-y-3">
-          <div className="grid items-start gap-3 sm:grid-cols-[minmax(0,20rem)_minmax(0,16rem)]">
-              <Field
-                label="模型"
-                hint="自动选健康渠道；写 model@provider 可强制指定"
-              >
-                <Select
-                  value={selectedModel}
-                  data-testid="model-select"
-                  onChange={(event) => setModel(event.target.value)}
+          <Field label="模型" hint="多渠道模型默认自动调度；需要时可在下方强制指定渠道">
+            <ModelPicker
+              models={models}
+              value={selectedModel}
+              onChange={setModel}
+              loading={modelsQuery.isFetching}
+            />
+          </Field>
+
+          {selectedProviders.length > 1 && (
+            <Field label="强制指定渠道" hint="仅对当前模型可用的渠道生效">
+              <div className="flex flex-wrap items-center gap-2" data-testid="provider-pin">
+                <button
+                  type="button"
+                  data-testid="provider-pin-auto"
+                  aria-pressed={pinnedProvider === ""}
+                  onClick={() => setModel(selectedModel.split("@")[0])}
+                  className={
+                    "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors "
+                    + (pinnedProvider === ""
+                      ? "border-primary/40 bg-primary/10 text-primary"
+                      : "border-border text-muted-foreground hover:text-foreground")
+                  }
                 >
-                  <option value="">选择模型…</option>
-                  {/* 多渠道可用的模型置顶：默认调度即可覆盖 */}
-                  {dualSource.length > 0 && (
-                    <optgroup label="多渠道（自动调度）">
-                      {dualSource.map((item) => {
-                        const rate = rateLabel(item);
-                        return (
-                          <option key={item.id} value={item.id}>
-                            {item.id}（自动路由{rate ? ` · ${rate}` : ""}）
-                          </option>
-                        );
-                      })}
-                    </optgroup>
-                  )}
-                  {groups.map(([provider, items]) => (
-                    <optgroup key={provider} label={`仅 ${providerLabel(provider)}`}>
-                      {items.map((item) => {
-                        const rate = rateLabel(item, provider);
-                        return (
-                          <option key={item.id} value={item.value}>
-                            {item.id}{rate ? ` · ${rate}` : ""}
-                          </option>
-                        );
-                      })}
-                    </optgroup>
-                  ))}
-                  {/* model@provider 组合不在原始列表里，必须补合成选项，
-                      否则 React 会把 select 渲染成无选中项。
-                      单渠道模型的 value 本身带 @provider 且已在列表里，
-                      不重复合成，避免下拉显示成「xxx@trae（强制指定）」。 */}
-                  {selectedModel.includes("@") &&
-                    !models.some((item) => item.value === selectedModel) && (
-                    <option value={selectedModel}>{selectedModel}（强制指定）</option>
-                  )}
-                </Select>
-              </Field>
-              <Field label="强制指定渠道" hint="多渠道模型可用；单渠道模型始终固定">
-                <Select
-                  value={selectedModel.includes("@") ? selectedModel.split("@")[1] : ""}
-                  data-testid="provider-pin"
-                  onChange={(event) => {
-                    const base = selectedModel.split("@")[0];
-                    setModel(event.target.value ? `${base}@${event.target.value}` : base);
-                  }}
-                >
-                  <option value="">自动路由</option>
-                  {/* 顺序与模型下拉一致（CB → TR → 其余），单一来源 PROVIDER_ORDER */}
-                  {PROVIDER_ORDER.map((pid) => (
-                    <option key={pid} value={pid}>{providerLabel(pid)}</option>
-                  ))}
-                </Select>
-              </Field>
-          </div>
+                  自动路由
+                </button>
+                {selectedProviders.map((provider) => (
+                  <button
+                    key={provider}
+                    type="button"
+                    data-testid={`provider-pin-${provider}`}
+                    aria-pressed={pinnedProvider === provider}
+                    onClick={() => setModel(`${selectedModel.split("@")[0]}@${provider}`)}
+                    className={
+                      "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors "
+                      + (pinnedProvider === provider
+                        ? "border-primary/40 bg-primary/10 text-primary"
+                        : "border-border text-muted-foreground hover:text-foreground")
+                    }
+                  >
+                    <ProviderIcon provider={provider} size={13} />
+                    {providerLabel(provider)}
+                  </button>
+                ))}
+              </div>
+            </Field>
+          )}
+
           {selectedInfo && (selectedInfo.credit_rate !== undefined ||
             selectedInfo.max_input_tokens !== undefined ||
             selectedInfo.max_output_tokens !== undefined ||
@@ -267,10 +193,10 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                   </span>
                 ))}
               </span>
-              {/* 倍率：多渠道且各不相同则按渠道分别显示 */}
-              {selectedInfo.providers && selectedInfo.providers.length > 1 && selectedInfo.by_provider ? (
+              {/* 倍率：多渠道按渠道分别显示；单渠道用合并值 */}
+              {selectedInfo.providers && selectedInfo.providers.length > 1 ? (
                 selectedInfo.providers.map((pid) => {
-                  const rate = selectedInfo.by_provider?.[pid]?.credit_rate;
+                  const rate = providerRate(selectedInfo, pid);
                   return rate === undefined ? null : (
                     <span key={pid} className="inline-flex items-center gap-1">
                       <ProviderIcon provider={pid} size={13} />
@@ -317,14 +243,15 @@ const rateLabel = (item: ModelInfo, provider?: string): string => {
                     : <X className="size-3.5 text-destructive" />}
                 </span>
               )}
+              {pinnedProvider && (
+                <span className="inline-flex items-center gap-1 text-primary">
+                  <Pin className="size-3.5" />
+                  已强制 {providerLabel(pinnedProvider)}
+                </span>
+              )}
             </Card>
           )}
-          {modelsQuery.isFetching && (
-            <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-              <RefreshCw className="size-3 animate-spin" />
-              载入模型中…
-            </span>
-          )}
+
           <Field label="提示词">
             <Textarea
               rows={4}

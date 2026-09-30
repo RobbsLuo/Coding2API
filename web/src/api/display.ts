@@ -54,9 +54,12 @@ export function quotaSemantics(credential: Credential): string {
   if (credential.provider === "zen" || credential.provider === "kilo") {
     return "免费层（无额度接口）";
   }
-  if (credential.provider !== "codebuddy") {
+  // TRAE 是单调递减的账户余额（上游无周期重置）
+  if (credential.provider === "trae") {
     return "账户剩余（单调递减）";
   }
+  // CodeBuddy / Qoder / CodeArts 均随周期重置（Qoder 每日额度可累积、
+  // CodeArts 免费额度按月重置）；未探测到重置时间时退化为本周期口径。
   if (!credential.quota_cycle_end) {
     return "本周期剩余（未探测到重置时间）";
   }

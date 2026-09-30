@@ -1,7 +1,11 @@
 import CodeBuddyColor from "@lobehub/icons/es/CodeBuddy/components/Color";
 import CodeBuddyMono from "@lobehub/icons/es/CodeBuddy/components/Mono";
+import HuaweiCloudColor from "@lobehub/icons/es/HuaweiCloud/components/Color";
+import HuaweiCloudMono from "@lobehub/icons/es/HuaweiCloud/components/Mono";
 import KiloCodeMono from "@lobehub/icons/es/KiloCode/components/Mono";
 import OpenCodeMono from "@lobehub/icons/es/OpenCode/components/Mono";
+import QoderColor from "@lobehub/icons/es/Qoder/components/Color";
+import QoderMono from "@lobehub/icons/es/Qoder/components/Mono";
 import TraeColor from "@lobehub/icons/es/Trae/components/Color";
 import TraeMono from "@lobehub/icons/es/Trae/components/Mono";
 import type { ComponentType } from "react";
@@ -15,6 +19,9 @@ const BRAND: Record<string, { Main: BrandComp; Color: BrandComp }> = {
   zen: { Main: OpenCodeMono, Color: OpenCodeMono },
   // Kilo 同理，@lobehub/icons 只提供 Mono（无 Color 变体）
   kilo: { Main: KiloCodeMono, Color: KiloCodeMono },
+  qoder: { Main: QoderMono, Color: QoderColor },
+  // CodeArts 无独立图标，用母公司 HuaweiCloud 品牌图标
+  codearts: { Main: HuaweiCloudMono, Color: HuaweiCloudColor },
 };
 
 /**

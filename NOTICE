@@ -30,5 +30,13 @@ Copyright (c) 2026 Hongsheng Luo (Robbs)
     其核心教训——容器重建即丢、需要采集落库——正是本项目选择「进程内运行态、
     不新增表」并明确「重启归零」的对照依据）
 
+- qoder2api-hub - https://github.com/shuishuipingan/qoder2api-hub
+  （提供 Qoder 上游 COSY 签名的协议结论：自定义 Base64 变体、AES/RSA 密钥
+    交换、信封式 SSE 解包、设备码 PKCE 登录、签到与额度接口形状）
+
+- codearts2api - https://github.com/HITZY2002/codearts2api
+  （提供华为云 CodeArts 上游的逆向记录与实现参考：SDK-HMAC-SHA256 签名、
+    DPoP(ES256) 令牌刷新、累计全文 SSE 语义、福利模型发现与领取）
+
 本项目的代码为独立实现，不复制上述项目的源代码。
 上游服务的协议细节来自对客户端行为的观察，不属于上述项目的版权范围。

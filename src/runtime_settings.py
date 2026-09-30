@@ -91,6 +91,12 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("kilo_chat_min_interval", float, "Kilo 聊天最小间隔（秒）",
                "Kilo 匿名免费层专用节流（0 关闭，默认）。与 zen / CodeBuddy / TRAE"
                "各自独立，不共享。", minimum=0.0),
+    HotSetting("qoder_chat_min_interval", float, "Qoder 聊天最小间隔（秒）",
+               "Qoder 真实账号渠道专用节流（默认 5s，0 关闭）。与其余渠道各自"
+               "独立，不共享。", minimum=0.0),
+    HotSetting("codearts_chat_min_interval", float, "CodeArts 聊天最小间隔（秒）",
+               "CodeArts 真实账号渠道专用节流（默认 5s，0 关闭）。与其余渠道各自"
+               "独立，不共享。", minimum=0.0),
     HotSetting("pacer_min_seconds", float, "后台任务节流下限（秒）",
                "后台任务相邻上游请求的最小间隔；0 关闭节流。", minimum=0.0),
     HotSetting("pacer_max_seconds", float, "后台任务节流上限（秒）",
@@ -370,6 +376,14 @@ class RuntimeSettings:
     @property
     def kilo_chat_min_interval(self) -> float:
         return float(self.get("kilo_chat_min_interval"))
+
+    @property
+    def qoder_chat_min_interval(self) -> float:
+        return float(self.get("qoder_chat_min_interval"))
+
+    @property
+    def codearts_chat_min_interval(self) -> float:
+        return float(self.get("codearts_chat_min_interval"))
 
     @property
     def pacer_min_seconds(self) -> float:

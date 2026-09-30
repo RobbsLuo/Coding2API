@@ -33,6 +33,8 @@ export const PROVIDER_BINDING_OPTIONS = [
   { value: "trae", label: "TRAE" },
   { value: "zen", label: "OpenCode Zen" },
   { value: "kilo", label: "Kilo Gateway" },
+  { value: "qoder", label: "Qoder" },
+  { value: "codearts", label: "CodeArts" },
 ];
 
 /** 列表里展示绑定渠道：空串 → 「自动」 */

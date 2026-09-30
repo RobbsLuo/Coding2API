@@ -67,7 +67,18 @@ import {
   Textarea,
 } from "../ui";
 
-const PROVIDERS: Provider[] = ["codebuddy", "trae"];
+/** 支持「登录渠道账号」按钮 / 导入下拉的渠道（有 poll 轨道或需人工导入的渠道）。 */
+const PROVIDERS: Provider[] = ["codebuddy", "trae", "qoder", "codearts"];
+
+/** 无每日签到的渠道：CodeArts 上游没有签到接口（免费额度按月重置）。 */
+function supportsCheckin(provider: Credential["provider"]): boolean {
+  return provider !== "codearts";
+}
+
+/** 无额度接口的匿名免费层：探测与积分记录都无意义。 */
+function supportsQuotaProbe(provider: Credential["provider"]): boolean {
+  return provider !== "zen" && provider !== "kilo";
+}
 
 /** 套餐到期日：只要日期，时分秒对"哪个包先过期"没用。 */
 function packageExpiry(epoch: number | null): string {
@@ -556,9 +567,10 @@ export function CredentialsPage() {
             </div>
             <p className="mt-2 text-xs text-muted-foreground">
               CodeBuddy 走设备码轮询（本页自动轮询渠道）；TRAE 走浏览器回调
-              （授权后由 <code>/authorize</code> 直接落库，本页轮询凭证列表检测完成）。
-              也可以直接粘贴凭证 JSON 导入。OpenCode Zen / Kilo Gateway 免费层无需
-              凭证/登录，删除其虚拟凭证后点上方按钮即可补回（要永久停用请改用「暂停」）。
+              （授权后由 <code>/authorize</code> 直接落库，本页轮询凭证列表检测完成）；
+              Qoder 走设备码登录；CodeArts 走 OAuth2 授权码登录。也可以直接粘贴凭证
+              JSON 导入。OpenCode Zen / Kilo Gateway 免费层无需凭证/登录，删除其虚拟
+              凭证后点上方按钮即可补回（要永久停用请改用「暂停」）。
             </p>
           </Panel>
           <ImportPanel
@@ -585,7 +597,7 @@ export function CredentialsPage() {
           { term: "套餐 N 个（额度首行右侧）", where: "额度列", meaning: "该账号当前生效的额度包个数。鼠标悬浮看每个包的名字、剩余/总量、已用与到期日（按到期先后）。未探测或渠道未返回明细时不显示。" },
           { term: "积分记录（额度数字后的下箭头）", where: "额度列", meaning: "点开该凭证两次额度探测之间的净变化。下箭头表示「在本行内展开」而非弹层：展开后箭头翻转，再点一次收起。仅管理员视图显示。OpenCode Zen / Kilo Gateway 免费层没有额度探测，恒无记录，因此不显示该入口。" },
           { term: "token 剩余", where: "token 剩余列", meaning: "该凭证 access token 距离到期还有多久。预刷新任务每小时跑一次，进入 24 小时窗口会自动续期，所以正常情况下看到的是长寿命（TRAE 约 14 天、CodeBuddy 约 55 天）递减。显示「已过期」时上游会拒绝该凭证，需重新登录；显示「—」表示渠道未提供到期信息。" },
-          { term: "探测 / 签到", where: "操作列（常驻按钮）", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（后台每 10 分钟检查一次，当天成功即封账，失败持续重试，不受时刻限制）。两者是高频动作，直接显示在行内，不藏在「更多操作」菜单里。OpenCode Zen / Kilo Gateway 免费层两者都不显示：上游无额度接口（探测恒失败）、未实现签到（点了只会 400）。" },
+          { term: "探测 / 签到", where: "操作列（常驻按钮）", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（后台每 10 分钟检查一次，当天成功即封账，失败持续重试，不受时刻限制）。两者是高频动作，直接显示在行内，不藏在「更多操作」菜单里。OpenCode Zen / Kilo Gateway 免费层两者都不显示：上游无额度接口（探测恒失败）、未实现签到（点了只会 400）。CodeArts 只显示「探测」（上游无每日签到接口，免费额度按月重置）。" },
           { term: "更多操作（⋯）", where: "操作列", meaning: "指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。暂停：只摘出对话流量不删数据（签到 / 刷新 / 探测不受影响）。删除：彻底移除凭证。CodeBuddy 另有成长中心 / 恢复 / 活跃上报。" },
           { term: "模型避让（额度数字右侧的警告图标）", where: "额度列", meaning: "某个模型在该账号上限流（6004）或该账号无此模型（11102）时只避让这一个模型——整条凭证仍参与调度，换其他模型立刻可用。模型限流按 10 分钟起指数退避，最长 2 小时；「无此模型」按 6 小时起，最长 24 小时。避让的模型清单不常驻表格，鼠标悬浮该图标查看具体模型、剩余时间与连续命中次数。" },
           { term: "成长中心 / 活跃上报", where: "操作列", meaning: "成长中心：手动跑一轮成长中心领取（与定时任务同一条路径）。活跃上报：手动补发一条对话事件以续上「连登天数」——默认关闭的定时任务不做，这里仅供部署后验证；官方条款禁止脚本篡改活动数据，开启/使用前请自行评估账号风险。" },
@@ -798,7 +810,7 @@ function Row({
                 展开后箭头翻转。仅管理员可用——接口本身就是管理员权限。
                 zen / kilo 免费层没有额度接口、也没有额度探测，积分记录恒为空，
                 入口只会给出「无记录」的空抽屉，直接不渲染。 */}
-            {isAdmin && credential.provider !== "zen" && credential.provider !== "kilo" && (
+            {isAdmin && supportsQuotaProbe(credential.provider) && (
               <Button
                 // 项目封装的 Button：variant="default" 即 shadcn 的 outline
                 variant="default"
@@ -875,9 +887,9 @@ function Row({
               <>
                 {/* 探测 / 签到是高频日常动作，从「更多」菜单提出来常驻，
                     少一次点击；其余低频动作仍收在菜单里。
-                    zen / kilo 免费层两个都没有意义：上游无额度接口（探测恒失败）、
-                    未实现签到（点了只会 400），一起藏掉，只留「更多操作」。 */}
-                {credential.provider !== "zen" && credential.provider !== "kilo" && (
+                    zen / kilo 免费层探测无意义（上游无额度接口，探测恒失败）；
+                    CodeArts 无签到接口（免费额度按月重置），只藏签到、保留探测。 */}
+                {supportsQuotaProbe(credential.provider) && (
                   <>
                     <Button
                       size="sm"
@@ -888,15 +900,17 @@ function Row({
                     >
                       <RefreshCw className="size-3.5" /> 探测
                     </Button>
-                    <Button
-                      size="sm"
-                      variant="default"
-                      disabled={busy}
-                      data-testid={`checkin-${credential.id}`}
-                      onClick={() => actions.checkin(credential)}
-                    >
-                      <CalendarCheck className="size-3.5" /> 签到
-                    </Button>
+                    {supportsCheckin(credential.provider) && (
+                      <Button
+                        size="sm"
+                        variant="default"
+                        disabled={busy}
+                        data-testid={`checkin-${credential.id}`}
+                        onClick={() => actions.checkin(credential)}
+                      >
+                        <CalendarCheck className="size-3.5" /> 签到
+                      </Button>
+                    )}
                   </>
                 )}
                 <DropdownMenu>

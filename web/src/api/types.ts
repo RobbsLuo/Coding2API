@@ -5,7 +5,7 @@
  * 各页面只依赖本文件，不要各自猜测字段名。
  */
 
-export type Provider = "codebuddy" | "trae" | "zen" | "kilo";
+export type Provider = "codebuddy" | "trae" | "zen" | "kilo" | "qoder" | "codearts";
 
 /** 健康度三态：null = 未探测；-1 = 已耗尽；0-100 = 已知剩余百分比。
  * 展示层把 null 再分成「未探测」（付费渠道探测失败）与「无探测」（zen/kilo

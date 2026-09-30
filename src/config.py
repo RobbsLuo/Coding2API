@@ -52,6 +52,25 @@ class Settings(BaseSettings):
     # 只为防误配。免费模型由上游 `isFree` 标记识别（见 provider/kilo/client.py）。
     kilo_api_endpoint: str = "https://api.kilo.ai/api/gateway"
     kilo_allowed_endpoints: str = "https://api.kilo.ai/api/gateway"
+    # Qoder（阿里，COSY 私有协议）：真实账号渠道，端点白名单防止误把带 COSY
+    # 签名的请求发往未授权主机。默认取国内版；国际版改这两个值并把国际版域名
+    # 一并加入白名单。推理走 gateway.*，额度/登录走 openapi.*。
+    qoder_api_endpoint: str = "https://openapi.qoder.com.cn"
+    qoder_gateway_endpoint: str = "https://gateway.qoder.com.cn"
+    qoder_allowed_endpoints: str = (
+        "https://openapi.qoder.com.cn,https://gateway.qoder.com.cn,"
+        "https://openapi.qoder.sh,https://api1.qoder.sh"
+    )
+    # CodeArts（华为云码道 / snap-access 盘古引擎）：AK/SK 签名渠道。白名单
+    # 必须含 snap 引擎（推理/令牌）、STS（refresh）、福利网关（模型/领取/余额）
+    # 与门户（PKCE 授权页）四个主机。
+    codearts_api_endpoint: str = "https://snap-access.cn-north-4.myhuaweicloud.com"
+    codearts_allowed_endpoints: str = (
+        "https://snap-access.cn-north-4.myhuaweicloud.com,"
+        "https://sts.cn-north-4.myhuaweicloud.com,"
+        "https://opengw.developer.huaweicloud.com,"
+        "https://codearts.huaweicloud.com"
+    )
 
     # 路由与调度
     default_model: str = "glm-5.2"
@@ -99,6 +118,11 @@ class Settings(BaseSettings):
     # Kilo 聊天最小间隔：同为匿名免费层（网关级 200 req/h/IP），默认 0。
     # 与 zen 各自独立：两条免费渠道互不排队。
     kilo_chat_min_interval: float = 0
+    # Qoder 聊天最小间隔：真实账号渠道，上游有账号级频率风控，默认 5s
+    # （对齐 CodeBuddy）。与 CB/TRAE/zen/kilo 各自独立，互不排队。
+    qoder_chat_min_interval: float = 5
+    # CodeArts 聊天最小间隔：真实账号渠道，默认 5s；独立节流器。
+    codearts_chat_min_interval: float = 5
     # 内容风控自愈（11128）：出站 system/assistant 正文命中「伪装其他厂商
     # 官方客户端」指纹串时替换为占位符（客户端会话历史不受影响）。该拦截
     # 与凭证无关、换号无效，会话一旦带入指纹将持续 11128；false 关闭
@@ -146,6 +170,16 @@ class Settings(BaseSettings):
                      if e.strip())
 
     @cached_property
+    def qoder_allowed(self) -> tuple[str, ...]:
+        return tuple(e.strip().rstrip("/") for e in self.qoder_allowed_endpoints.split(",")
+                     if e.strip())
+
+    @cached_property
+    def codearts_allowed(self) -> tuple[str, ...]:
+        return tuple(e.strip().rstrip("/") for e in self.codearts_allowed_endpoints.split(",")
+                     if e.strip())
+
+    @cached_property
     def blocklist_patterns(self) -> tuple[str, ...]:
         return tuple(p.strip() for p in self.model_blocklist.split(",") if p.strip())
 
@@ -179,6 +213,16 @@ def validate_zen_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
 def validate_kilo_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
     """Kilo 端点白名单校验（防误配；Kilo 不携带真实 Token，风险面小于 CB）。"""
     return endpoint.strip().rstrip("/") in settings.kilo_allowed
+
+
+def validate_qoder_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
+    """Qoder 端点白名单校验（防把带 COSY 签名的请求发往未授权主机）。"""
+    return endpoint.strip().rstrip("/") in settings.qoder_allowed
+
+
+def validate_codearts_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
+    """CodeArts 端点白名单校验（防把 AK/SK 签名请求发往未授权主机）。"""
+    return endpoint.strip().rstrip("/") in settings.codearts_allowed
 
 
 def live(value: Any) -> Callable[[], Any]:

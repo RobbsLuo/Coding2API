@@ -179,6 +179,9 @@ describe("display helpers", () => {
     expect(hasQuotaProbe("zen")).toBe(false);
     expect(hasQuotaProbe("kilo")).toBe(false);
     expect(hasQuotaProbe("trae")).toBe(true);
+    // Qoder / CodeArts 都有额度接口，属「需探测」
+    expect(hasQuotaProbe("qoder")).toBe(true);
+    expect(hasQuotaProbe("codearts")).toBe(true);
   });
 
   it("周期语义按渠道类型判定，而不是看 cycle_end 是否存在", () => {
@@ -203,6 +206,19 @@ describe("display helpers", () => {
     const kilo = quotaSemantics(makeCredential({
       provider: "kilo", quota_cycle_end: null }) as never);
     expect(kilo).toBe("免费层（无额度接口）");
+
+    // Qoder / CodeArts 与 CodeBuddy 同属周期重置（未探测到重置时间时退化口径）
+    const qoder = quotaSemantics(makeCredential({
+      provider: "qoder", quota_cycle_end: null }) as never);
+    expect(qoder).toContain("本周期剩余");
+    expect(qoder).not.toContain("单调递减");
+
+    const codearts = quotaSemantics(makeCredential({
+      provider: "codearts", quota_cycle_end: 1_800_000_000 }) as never);
+    expect(codearts).toContain("本周期剩余，");
+    expect(codearts).toContain("重置");
+
+    // 国际版 Qoder 无旧签到接口，但额度语义不变（不在此断言）
   });
 
   it("凭证状态机覆盖全部状态", () => {

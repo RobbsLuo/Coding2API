@@ -1,0 +1,473 @@
+"""Qoder（阿里，COSY 私有协议）区域常量、错误分类与信封 SSE 解包。
+
+Qoder 与 CodeBuddy / TRAE 的关键差异在这一层：
+
+* **双区域**：国内 `openapi.qoder.com.cn` / `gateway.qoder.com.cn`，国际
+  `openapi.qoder.sh` / `api1.qoder.sh`（官方客户端还有 api2/api3 故障切换）。
+  区域由凭证域名推断，推理主机候选见 `gateway_candidates`。
+* **信封式 SSE**：上游不是标准 OpenAI 流，每行是一个外层信封
+  `data:{"headers":…,"body":"<内层 OpenAI chunk>","statusCodeValue":200}`；
+  `body=="[DONE]"` 结束；`statusCodeValue != 200` 是**流内错误**（HTTP 可能
+  仍是 200）。解包在 `decode_envelope` / `parse_inner_chunk`。
+* **空噪声 delta**：上游会给 delta 塞 `extra_fields` / `refusal` /
+  空 `reasoning_content` / 空 `tool_calls` 等占位，`clean_delta` 统一剔除，
+  避免把「什么都没说」的帧当成内容转发给客户端。
+
+错误分类沿用本项目中立层（`provider.base.ErrKind`）语义；Qoder 没有观测到
+CB/TRAE 那套 `1005/6004/11102` 业务码，信封里的 `statusCodeValue` 本身就是
+HTTP 状态语义，故按状态码分类。
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from dataclasses import dataclass
+from typing import Any
+
+from ...engine.sse import SSEFrame
+from ...provider.base import (
+    CheckinStatus,
+    ErrKind,
+    Event,
+    EventKind,
+    Model,
+    Quota,
+    Usage,
+)
+from ..token_expiry import normalize_epoch
+
+# ---------------------------------------------------------------------------
+# 区域常量（逆向自官方桌面/CLI 客户端；签名只覆盖 path，切主机不影响校验）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class RealmConfig:
+    """一个区域的上游地址与登录参数。"""
+
+    name: str
+    openapi: str
+    gateway: str
+    website: str
+    client_id: str
+    redirect_uri: str
+    domain: str
+    user_agent: str
+    gateway_fallbacks: tuple[str, ...] = ()
+    send_client_id: bool = True
+    send_redirect_uri: bool = False
+    nonce_dashed: bool = False
+
+
+REALM_CONFIGS: dict[str, RealmConfig] = {
+    "cn": RealmConfig(
+        name="国内版 (China)",
+        openapi="https://openapi.qoder.com.cn",
+        gateway="https://gateway.qoder.com.cn",
+        website="https://qoder.com.cn",
+        client_id="1c5e33e1-364d-4ce6-b02c-acaa81274a5c",
+        redirect_uri="qoder-work-cn://",
+        domain="qoder.com.cn",
+        user_agent="QoderWork/1.1.64",
+        send_redirect_uri=True,
+        nonce_dashed=True,
+    ),
+    "intl": RealmConfig(
+        name="国际版 (Global)",
+        openapi="https://openapi.qoder.sh",
+        gateway="https://api1.qoder.sh",
+        website="https://qoder.com",
+        client_id="e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb",
+        redirect_uri="qoder://aicoding.aicoding-agent/login-success",
+        domain="qoder.com",
+        user_agent="Qoder/1.1.64",
+        gateway_fallbacks=("https://api2.qoder.sh", "https://api3.qoder.sh"),
+        send_redirect_uri=False,
+        nonce_dashed=False,
+    ),
+}
+
+DEFAULT_REALM = "cn"
+
+# openapi 业务端点（纯 Bearer，无 COSY 签名）
+EP_DEVICE_POLL = "/api/v1/deviceToken/poll"
+EP_DEVICE_REFRESH = "/api/v1/deviceToken/refresh"
+EP_USERINFO = "/api/v1/userinfo"
+EP_QUOTA = "/api/v2/quota/usage"
+EP_PLAN = "/api/v2/user/plan"
+EP_CHECKIN_STATUS = "/sash/api/v1/me/daily-check-in/status"
+EP_CHECKIN_CLAIM = "/sash/api/v1/me/daily-check-in/claim"
+
+# 推理网关端点（COSY 签名；path 部分进签名，query 不进）
+EP_CHAT_PATH = "/algo/api/v2/service/pro/sse/agent_chat_generation"
+EP_CHAT = EP_CHAT_PATH + "?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
+EP_MODELS = "/algo/api/v2/model/list?Encode=1"
+
+# 模型清单接口的**签名 body**：服务端校验签名与请求体一致，裸 GET 会 403，
+# 必须用同一个 qoder_encode("") 既签名又作为请求体发出。
+MODELS_SIGN_PLAIN = b""
+
+CLIENT_UA = "Go-http-client/2.0"
+DEFAULT_USER_TYPE = "personal_professional_trial"
+
+# 上游主动吊销离线会话的标记：命中则刷新无意义，需要重新登录。
+SESSION_DEAD_MARKERS = ("TOKEN_EXPIRE", "12153", "Offline user session not found")
+
+# 信封内层 delta 的空占位键（只在取值为空/假时才剔除，非空值一律保留）。
+NOISE_KEYS = ("extra_fields", "refusal", "reasoning_content")
+
+
+class UpstreamProtocolViolation(ValueError):
+    """上游事件违反可映射的结构约束（不静默吞掉）。"""
+
+
+def get_realm_config(realm: str) -> RealmConfig:
+    """未知区域回落国内版（宁可打错区域也不崩）。"""
+    return REALM_CONFIGS.get(realm) or REALM_CONFIGS[DEFAULT_REALM]
+
+
+def detect_realm_from_domain(domain: str) -> str:
+    """按域名推断区域：`*.qoder.sh` / `qoder.com`（非 `.com.cn`）为国际版。"""
+    value = str(domain or "").lower()
+    if "qoder.sh" in value:
+        return "intl"
+    if "qoder.com" in value and "qoder.com.cn" not in value:
+        return "intl"
+    return "cn"
+
+
+def gateway_candidates(realm: str) -> list[str]:
+    """该区域的推理主机候选（主选 + 官方故障切换域名，去重保序）。"""
+    config = get_realm_config(realm)
+    hosts = [config.gateway]
+    for host in config.gateway_fallbacks:
+        if host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def is_session_dead(text: str) -> bool:
+    """响应体是否带「会话已失效」标记（TOKEN_EXPIRE / 12153 / Offline user session）。"""
+    return any(marker in text for marker in SESSION_DEAD_MARKERS)
+
+
+def classify_error_code(code: int | None) -> ErrKind:
+    """状态/信封码 → ErrKind（401/403 的会话失效细节由 `classify_status` 补全）。
+
+    * 402 → 余额不足（等签到恢复）
+    * 429 → 模型级限流（上游频控点名具体模型，换模型立即可用）
+    * 418/500/502/503/504 → SOFT：上游把自身故障包装成 418/5xx，属瞬时类，
+      短冷却换号即可，不该累计成「连续 3 次 → 10m」
+    * 400/404/422 → INVALID：请求/模型无效，换凭证没用，跳过该渠道
+    """
+    if code == 402:
+        return ErrKind.CREDIT
+    if code in (401, 403):
+        return ErrKind.DEAD
+    if code == 429:
+        return ErrKind.MODEL
+    if code in (418, 500, 502, 503, 504):
+        return ErrKind.SOFT
+    if code in (400, 404, 422):
+        return ErrKind.INVALID
+    return ErrKind.OTHER
+
+
+def classify_status(status: int, body: bytes = b"") -> ErrKind:
+    """HTTP 状态码分类。
+
+    401/403 只有**明确带会话失效标记**时才归 DEAD（硬禁用）；否则按 SOFT
+    短冷却轮换——实测 Qoder 的 401/403 多数是上游瞬时/风控抖动，直接硬禁用
+    会把可自愈的凭证打进冷宫。
+    """
+    if status in (401, 403) and not is_session_dead(body.decode("utf-8", errors="replace")):
+        return ErrKind.SOFT
+    return classify_error_code(status)
+
+
+# ---------------------------------------------------------------------------
+# 信封式 SSE 解包
+# ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class Envelope:
+    """外层信封：`statusCodeValue`（缺省按 200）+ 内层 `body` 字符串。"""
+
+    status: int
+    body: str
+
+
+def _to_status(value: Any) -> int:
+    """信封 statusCodeValue → int（可能是 int 或数字字符串；异常回 502）。"""
+    if value is None:
+        return 200
+    if isinstance(value, bool):
+        return 502
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return 502
+    return 502
+
+
+def decode_envelope(frame: SSEFrame) -> Envelope | None:
+    """单帧 → Envelope；空帧/无 body 的正常心跳返回 None。
+
+    顶层 `[DONE]`（部分网关不带信封直接发）也归一成 `Envelope(200, "[DONE]")`，
+    由调用方负责收尾，避免走到 JSON 解析报协议违规。
+    """
+    data = frame.data.strip()
+    if not data:
+        return None
+    if data == "[DONE]":
+        return Envelope(status=200, body="[DONE]")
+    try:
+        outer = json.loads(data)
+    except json.JSONDecodeError as error:
+        raise UpstreamProtocolViolation("unparsable Qoder SSE envelope") from error
+    if not isinstance(outer, dict):
+        raise UpstreamProtocolViolation("Qoder SSE envelope is not an object")
+    status = _to_status(outer.get("statusCodeValue"))
+    body = outer.get("body")
+    if not isinstance(body, str):
+        if status == 200:
+            return None
+        return Envelope(status=status, body=json.dumps(outer, ensure_ascii=False))
+    return Envelope(status=status, body=body)
+
+
+def _load_body(body: str) -> dict[str, Any]:
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError as error:
+        raise UpstreamProtocolViolation("unparsable Qoder inner chunk") from error
+    if not isinstance(payload, dict):
+        raise UpstreamProtocolViolation("Qoder inner chunk is not an object")
+    return payload
+
+
+def clean_delta(delta: dict[str, Any]) -> dict[str, Any]:
+    """剔除 delta 里的空噪声字段（只删假值，非空值一律保留）。
+
+    `reasoning_content` 是真实思考内容（DeepSeek 族多轮一致性依赖它），
+    只有在为空时才删——它不是无条件噪声。
+    """
+    cleaned = dict(delta)
+    for key in NOISE_KEYS:
+        if key in cleaned and not cleaned[key]:
+            cleaned.pop(key)
+    calls = cleaned.get("tool_calls")
+    if isinstance(calls, list) and not calls:
+        cleaned.pop("tool_calls")
+    function_call = cleaned.get("function_call")
+    if function_call is not None and _is_blank_function_call(function_call):
+        cleaned.pop("function_call")
+    return cleaned
+
+
+def _is_blank_function_call(function_call: Any) -> bool:
+    """无 name 且 arguments 为空的噪声调用（有实际参数的续片必须保留）。"""
+    if not isinstance(function_call, dict):
+        return not function_call
+    if str(function_call.get("name") or "").strip():
+        return False
+    return function_call.get("arguments") in (None, "", "", {})
+
+
+def _is_blank_tool_call(call: dict[str, Any]) -> bool:
+    function = call.get("function")
+    return _is_blank_function_call(function if isinstance(function, dict) else function)
+
+
+def _tool_calls(delta: dict[str, Any]) -> list[dict[str, Any]]:
+    """delta 里的工具调用：OpenAI `tool_calls` 数组 + 旧式单数 `function_call`。"""
+    calls: list[dict[str, Any]] = []
+    raw = delta.get("tool_calls")
+    if isinstance(raw, list):
+        calls.extend(call for call in raw
+                     if isinstance(call, dict) and not _is_blank_tool_call(call))
+    function_call = delta.get("function_call")
+    if isinstance(function_call, dict) and not _is_blank_function_call(function_call):
+        calls.append({"type": "function", "function": function_call})
+    return calls
+
+
+def _first_choice(payload: dict[str, Any]) -> dict[str, Any] | None:
+    choices = payload.get("choices")
+    if choices is None:
+        return None
+    if not isinstance(choices, list):
+        raise UpstreamProtocolViolation("choices is not an array")
+    if not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, dict):
+        raise UpstreamProtocolViolation("choices[0] is not an object")
+    return first
+
+
+def parse_inner_chunk(body: str) -> list[Event]:
+    """内层 OpenAI chunk → 中立事件（一帧可同时给正文/思考/工具/usage/finish）。"""
+    payload = _load_body(body)
+    events: list[Event] = []
+    choice = _first_choice(payload)
+    delta: dict[str, Any] = {}
+    finish_reason: str | None = None
+    if choice is not None:
+        raw_delta = choice.get("delta")
+        delta = clean_delta(raw_delta if isinstance(raw_delta, dict) else {})
+        raw_finish = choice.get("finish_reason")
+        finish_reason = raw_finish if isinstance(raw_finish, str) and raw_finish else None
+
+    calls = _tool_calls(delta)
+    if calls:
+        events.append(Event(kind=EventKind.TOOL_CALLS, tool_calls=calls))
+    content = delta.get("content")
+    if isinstance(content, str) and content:
+        events.append(Event(kind=EventKind.CONTENT, content=content))
+    reasoning = delta.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning:
+        events.append(Event(kind=EventKind.REASONING, content=reasoning))
+    usage = payload.get("usage")
+    if isinstance(usage, dict):
+        events.append(Event(kind=EventKind.USAGE, usage=_usage(usage)))
+    if finish_reason is not None:
+        events.append(Event(kind=EventKind.FINISH, finish_reason=finish_reason))
+    return events
+
+
+def _usage(raw: dict[str, Any]) -> Usage:
+    def as_int(key: str) -> int | None:
+        value = raw.get(key)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    details = raw.get("prompt_tokens_details")
+    cached = (details or {}).get("cached_tokens") if isinstance(details, dict) else None
+    if not isinstance(cached, int) or isinstance(cached, bool):
+        cached = as_int("cached_tokens")
+    return Usage(
+        input_tokens=as_int("prompt_tokens"),
+        output_tokens=as_int("completion_tokens"),
+        reasoning_tokens=as_int("reasoning_tokens"),
+        cached_tokens=cached,
+    )
+
+
+# ---------------------------------------------------------------------------
+# 模型清单 / 额度 / 签到解析
+# ---------------------------------------------------------------------------
+
+
+def _opt_int(value: Any) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _opt_bool(value: Any) -> bool | None:
+    return value if isinstance(value, bool) else None
+
+
+def _opt_float(value: Any) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(
+        value, bool) else None
+
+
+def _opt_epoch(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    epoch = normalize_epoch(int(value))
+    return epoch if epoch > 0 else None
+
+
+def parse_models(payload: dict[str, Any]) -> list[Model]:
+    """模型清单 → 中立 Model：`payload["chat"]` 每项 `key`/`display_name`。
+
+    元数据（视觉/工具/推理/上下文）上游给了就透传，缺失留 None（不编造）。
+    """
+    chat = payload.get("chat")
+    if not isinstance(chat, list):
+        raise UpstreamProtocolViolation("models response missing chat list")
+    models: list[Model] = []
+    for item in chat:
+        if not isinstance(item, dict):
+            continue
+        key = item.get("key")
+        if not isinstance(key, str) or not key:
+            continue
+        display = item.get("display_name")
+        models.append(Model(
+            id=key,
+            name=display if isinstance(display, str) else "",
+            max_input_tokens=_opt_int(item.get("max_input_tokens")),
+            supports_images=_opt_bool(item.get("is_vl")),
+            supports_tool_call=_opt_bool(item.get("supportsToolCall")),
+            supports_reasoning=_opt_bool(item.get("is_reasoning")),
+        ))
+    if not models:
+        raise UpstreamProtocolViolation("models api returned no usable models")
+    return models
+
+
+def _obj(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _num(source: dict[str, Any], key: str) -> float:
+    value = source.get(key)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return 0.0
+
+
+def parse_quota(payload: dict[str, Any], *, now: int) -> Quota:
+    """`/api/v2/quota/usage` → Quota：基础额度 + 赠送/签到额度求和。
+
+    明细包只作展示（各自独立到期，汇总数字看不出是哪些包），`cycle_end`
+    取 `expiresAt`（毫秒自动归一）。
+    """
+    base = _obj(payload.get("userQuota"))
+    addon = _obj(payload.get("addOnQuota"))
+    remaining = _num(base, "remaining") + _num(addon, "remaining")
+    total = _num(base, "total") + _num(addon, "total")
+    end = _opt_epoch(payload.get("expiresAt"))
+    packages = [
+        {"name": "基础额度", "total": _num(base, "total"),
+         "used": _num(base, "used"), "end": end},
+        {"name": "赠送额度", "total": _num(addon, "total"),
+         "used": _num(addon, "used"), "end": end},
+    ]
+    return Quota(remaining=max(0.0, remaining), total=total, cycle_end=end,
+                 packages=packages, probed_at=now)
+
+
+def _claimed_today(value: Any, now: int) -> bool:
+    """lastClaimedAt（epoch，毫秒自动归一）是否落在服务器本地「今天」。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    epoch = normalize_epoch(int(value))
+    if epoch <= 0:
+        return False
+    return (time.strftime("%Y-%m-%d", time.localtime(epoch))
+            == time.strftime("%Y-%m-%d", time.localtime(now)))
+
+
+def checkin_status_from(payload: dict[str, Any], *, now: int) -> CheckinStatus:
+    """签到状态接口 → 中立 CheckinStatus（字段缺失一律按默认，不报错）。
+
+    `today_checked_in` 必须同时满足 status==CLAIMED **且** lastClaimedAt 是
+    今天：status 会停留在 CLAIMED，单看它会把昨天签过的号误判成今天已签。
+    """
+    status = str(payload.get("status") or "")
+    return CheckinStatus(
+        active=status in ("CLAIMABLE", "CLAIMED"),
+        today_checked_in=status == "CLAIMED" and _claimed_today(
+            payload.get("lastClaimedAt"), now),
+        streak_days=_opt_int(payload.get("currentStreakDays")),
+        today_credit=_opt_float(payload.get("rewardCredits")),
+        total_credits=_opt_float(payload.get("totalRewardCredits")),
+        activity_name="Qoder 每日签到",
+    )

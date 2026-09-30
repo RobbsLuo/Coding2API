@@ -25,12 +25,13 @@ function sseStream(frames: string[]): ReadableStream<Uint8Array> {
   });
 }
 
-/** 等模型数据真正到达（select 有值），而不是只等元素出现。 */
+/** 等模型数据真正到达（列表里出现第一行模型），而不是只等容器出现。 */
 async function waitForModelLoaded() {
   await waitFor(
     () => {
-      const select = screen.getByTestId("model-select") as HTMLSelectElement;
-      if (!select.value) throw new Error("模型尚未载入");
+      if (!document.querySelector('[data-testid^="model-option-"]')) {
+        throw new Error("模型尚未载入");
+      }
     },
     { timeout: 3000 },
   );
@@ -76,14 +77,14 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     await waitForModelLoaded();
 
     // 默认选中倍率最小的模型（DeepSeek 单渠道 TRAE x0.08 < glm-5.2 的 0.17）
-    expect((screen.getByTestId("model-select") as HTMLSelectElement).value)
-      .toBe("DeepSeek-V4-Flash-Official@trae");
+    expect(screen.getByTestId("model-option-DeepSeek-V4-Flash-Official@trae"))
+      .toHaveAttribute("aria-selected", "true");
     const meta = screen.getByTestId("model-meta");
     expect(meta).toHaveTextContent("x0.08");
     expect(meta).not.toHaveTextContent("x0.29");
 
     // 切到双渠道模型：渠道 icon 标注全部显示 + 倍率按渠道分别显示
-    await userEvent.selectOptions(screen.getByTestId("model-select"), "glm-5.2");
+    await userEvent.click(screen.getByTestId("model-option-glm-5.2"));
     const meta2 = screen.getByTestId("model-meta");
     expect(meta2).toHaveTextContent("CodeBuddy");
     expect(meta2).toHaveTextContent("TRAE");
@@ -96,8 +97,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(meta2).not.toHaveTextContent("✓");
 
     // 切到单渠道模型：倍率不按渠道拆分，显示合并值
-    await userEvent.selectOptions(screen.getByTestId("model-select"),
-      "DeepSeek-V4-Flash-Official@trae");
+    await userEvent.click(screen.getByTestId("model-option-DeepSeek-V4-Flash-Official@trae"));
     const meta3 = screen.getByTestId("model-meta");
     expect(meta3).toHaveTextContent("x0.08");
     expect(meta3).not.toHaveTextContent("x0.29");
@@ -108,18 +108,14 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await waitForModelLoaded();
 
-    const select = screen.getByTestId("model-select");
-    // 双渠道模型出现在「自动路由」分组
-    expect(select).toHaveTextContent("glm-5.2");
-    // 无倍率数据：默认选中回退列表第一个
-    expect((select as HTMLSelectElement).value).toBe("glm-5.2");
-    const groups = [...select.querySelectorAll("optgroup")].map((g) => g.label);
-    expect(groups).toContain("多渠道（自动调度）");
+    // 双渠道模型出现在「自动调度」分组，且默认选中（无倍率数据回退第一个）
+    expect(screen.getByTestId("model-option-glm-5.2")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("model-section-auto")).toHaveTextContent("多渠道（自动调度）");
     expect(spy.mock.calls.some(([url]) => String(url).includes("/api/playground/models"))).toBe(true);
     expect(spy.mock.calls.some(([url]) => String(url).includes("/v1/models"))).toBe(false);
   });
 
-  it("模型 option 文本带消耗倍率（双渠道按渠道标注）", async () => {
+  it("模型列表每行展示全部渠道徽章与各自倍率", async () => {
     const RATED_MODELS = {
       object: "list",
       data: [
@@ -129,7 +125,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
           by_provider: { codebuddy: { credit_rate: 0.29 }, trae: { credit_rate: 0.17 } },
         },
         {
-          id: "DeepSeek-V4-Flash-Official", object: "model", owned_by: "Coding2API",
+          id: "kimi-k3", object: "model", owned_by: "Coding2API",
           providers: ["trae"], credit_rate: 0.08,
         },
         { id: "no-rate", object: "model", owned_by: "Coding2API", providers: ["trae"] },
@@ -139,30 +135,22 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await waitForModelLoaded();
 
-    const options = [...screen.getByTestId("model-select").querySelectorAll("option")];
-    const textOf = (value: string) =>
-      options.find((o) => o.value === value)?.textContent ?? "";
-    // 双渠道：渠道缩写 + 各自倍率
-    expect(textOf("glm-5.2")).toBe("glm-5.2（自动路由 · CB x0.29/TR x0.17）");
-    // 单渠道：optgroup 已标渠道，仍带渠道缩写 + 倍率
-    expect(textOf("DeepSeek-V4-Flash-Official@trae")).toBe(
-      "DeepSeek-V4-Flash-Official · TR x0.08");
-    // 无倍率数据：不追加任何标记
-    expect(textOf("no-rate@trae")).toBe("no-rate");
-
-    // 双渠道倍率相同：两个渠道都要写出来
-    // 双渠道只有一个渠道返回倍率：只标那个渠道，不裸显数字
+    const dual = screen.getByTestId("model-option-glm-5.2");
+    expect(dual).toHaveTextContent("CodeBuddy");
+    expect(dual).toHaveTextContent("x0.29");
+    expect(dual).toHaveTextContent("TRAE");
+    expect(dual).toHaveTextContent("x0.17");
+    // 单渠道：徽章带渠道名与合并倍率
+    expect(screen.getByTestId("model-option-kimi-k3@trae")).toHaveTextContent("x0.08");
+    // 无倍率数据：只显示渠道，不显示倍率
+    expect(screen.getByTestId("model-option-no-rate@trae")).toHaveTextContent("TRAE");
+    expect(screen.getByTestId("model-option-no-rate@trae")).not.toHaveTextContent("x");
   });
 
-  it("双渠道倍率相同或缺失时，渠道标注规则", async () => {
+  it("多渠道缺细分倍率时只标注有倍率的渠道，不裸显合并值", async () => {
     const EDGE_MODELS = {
       object: "list",
       data: [
-        {
-          id: "same-rate", object: "model", owned_by: "Coding2API",
-          providers: ["codebuddy", "trae"], credit_rate: 0.5,
-          by_provider: { codebuddy: { credit_rate: 0.5 }, trae: { credit_rate: 0.5 } },
-        },
         {
           id: "one-sided", object: "model", owned_by: "Coding2API",
           providers: ["codebuddy", "trae"], credit_rate: 0.29,
@@ -174,11 +162,41 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await waitForModelLoaded();
 
-    const options = [...screen.getByTestId("model-select").querySelectorAll("option")];
-    const textOf = (value: string) =>
-      options.find((o) => o.value === value)?.textContent ?? "";
-    expect(textOf("same-rate")).toBe("same-rate（自动路由 · CB x0.5/TR x0.5）");
-    expect(textOf("one-sided")).toBe("one-sided（自动路由 · CB x0.29）");
+    const row = screen.getByTestId("model-option-one-sided");
+    expect(row).toHaveTextContent("CodeBuddy");
+    expect(row).toHaveTextContent("x0.29");
+    expect(row).toHaveTextContent("TRAE");
+    // TRAE 没有细分倍率：不拿合并值冒充，因此整行只有一个 x
+    expect(row.textContent?.match(/x/g)).toHaveLength(1);
+  });
+
+  it("渠道筛选与搜索收敛列表", async () => {
+    const mixed = {
+      object: "list",
+      data: [
+        { id: "glm-5.2", object: "model", owned_by: "x", providers: ["codebuddy", "trae"] },
+        { id: "kimi-k3", object: "model", owned_by: "x", providers: ["trae"] },
+      ],
+    };
+    mockFetch({ "/api/playground/models": mixed });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    // 「多渠道」筛选只留多渠道模型
+    await userEvent.click(screen.getByTestId("model-filter-auto"));
+    expect(screen.getByTestId("model-option-glm-5.2")).toBeInTheDocument();
+    expect(screen.queryByTestId("model-option-kimi-k3@trae")).not.toBeInTheDocument();
+
+    // 恢复全部后按关键词搜索（大小写不敏感）
+    await userEvent.click(screen.getByTestId("model-filter-all"));
+    await userEvent.type(screen.getByTestId("model-search"), "KIMI");
+    expect(screen.getByTestId("model-option-kimi-k3@trae")).toBeInTheDocument();
+    expect(screen.queryByTestId("model-option-glm-5.2")).not.toBeInTheDocument();
+
+    // 无匹配时给出空态
+    await userEvent.clear(screen.getByTestId("model-search"));
+    await userEvent.type(screen.getByTestId("model-search"), "zzz");
+    expect(screen.getByText("没有匹配的模型")).toBeInTheDocument();
   });
 
   it("模型加载失败时给出提示", async () => {
@@ -187,16 +205,45 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(await screen.findByTestId("playground-error")).toHaveTextContent("模型列表加载失败");
   });
 
-  it("强制指定渠道生成 model@provider，恢复自动路由去掉后缀", async () => {
-    mockFetch({ "/api/playground/models": MODELS });
+  it("强制指定渠道只列该模型可用渠道，生成 model@provider 并可恢复自动路由", async () => {
+    const calls: { url: string; init?: RequestInit }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push({ url, init });
+        if (url.includes("/api/playground/models")) return jsonResponse(MODELS);
+        return jsonResponse({ choices: [{ message: { content: "ok" } }] });
+      }),
+    );
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await waitForModelLoaded();
 
-    await userEvent.selectOptions(screen.getByTestId("provider-pin"), "trae");
-    expect(screen.getByTestId("model-select")).toHaveValue("glm-5.2@trae");
+    // 多渠道模型：两个渠道 chip + 自动路由
+    expect(screen.getByTestId("provider-pin-codebuddy")).toBeInTheDocument();
+    expect(screen.getByTestId("provider-pin-trae")).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("provider-pin-trae"));
+    expect(screen.getByTestId("provider-pin-trae")).toHaveAttribute("aria-pressed", "true");
 
-    await userEvent.selectOptions(screen.getByTestId("provider-pin"), "");
-    expect(screen.getByTestId("model-select")).toHaveValue("glm-5.2");
+    await fillPromptAndSend("hi");
+    const chat = calls.find((item) => item.url.includes("/api/playground/chat/completions"));
+    expect(JSON.parse(chat!.init!.body as string).model).toBe("glm-5.2@trae");
+
+    await userEvent.click(screen.getByTestId("provider-pin-auto"));
+    expect(screen.getByTestId("provider-pin-auto")).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("单渠道模型不显示强制指定渠道控件", async () => {
+    const single = {
+      object: "list",
+      data: [
+        { id: "kimi-k3", object: "model", owned_by: "x", providers: ["trae"] },
+      ],
+    };
+    mockFetch({ "/api/playground/models": single });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+    expect(screen.queryByTestId("provider-pin")).not.toBeInTheDocument();
   });
 
   it("非流式请求展示回答与 usage，请求体与用量归属正确", async () => {
@@ -361,16 +408,14 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await waitForModelLoaded();
 
-    const select = screen.getByTestId("model-select");
-    const groups = [...select.querySelectorAll("optgroup")].map(
-      (group) => [group.label, [...group.querySelectorAll("option")].map((o) => o.value)],
-    );
-    expect(groups).toContainEqual(["仅 CodeBuddy", ["deepseek-v4-pro@codebuddy"]]);
-    expect(groups).toContainEqual(["仅 TRAE", ["kimi-k3@trae"]]);
-    // 多渠道模型保留原值（不带 @），走自动路由
-    const dualGroup = select.querySelector('optgroup[label="多渠道（自动调度）"]');
-    expect(dualGroup).not.toBeNull();
-    expect(dualGroup!.querySelector("option")?.value).toBe("glm-5.2");
+    const auto = screen.getByTestId("model-section-auto");
+    expect(auto).toHaveTextContent("多渠道（自动调度）");
+    expect(screen.getByTestId("model-section-codebuddy")).toHaveTextContent("仅 CodeBuddy");
+    expect(screen.getByTestId("model-section-trae")).toHaveTextContent("仅 TRAE");
+    // 多渠道模型保留裸值（走自动路由），单渠道带 @provider
+    expect(screen.getByTestId("model-option-glm-5.2")).toBeInTheDocument();
+    expect(screen.getByTestId("model-option-deepseek-v4-pro@codebuddy")).toBeInTheDocument();
+    expect(screen.getByTestId("model-option-kimi-k3@trae")).toBeInTheDocument();
   });
 
   it("单渠道分组按 CB → TR → 其余排序，不随模型列表首次出现顺序", async () => {
@@ -388,15 +433,15 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await waitForModelLoaded();
 
-    const select = screen.getByTestId("model-select");
-    const labels = [...select.querySelectorAll("optgroup")].map((g) => g.label);
+    const labels = [...document.querySelectorAll('[data-testid^="model-section-"]')]
+      .map((node) => node.textContent);
     expect(labels).toEqual(["仅 CodeBuddy", "仅 TRAE", "仅 OpenCode Zen"]);
   });
 
-  it("没有可用模型时 select 为空", async () => {
+  it("没有可用模型时给出空态", async () => {
     mockFetch({ "/api/playground/models": { object: "list", data: [] } });
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
-    await screen.findByTestId("model-select");
-    expect((screen.getByTestId("model-select") as HTMLSelectElement).value).toBe("");
+    await screen.findByTestId("model-picker");
+    expect(screen.getByText("没有匹配的模型")).toBeInTheDocument();
   });
 });
