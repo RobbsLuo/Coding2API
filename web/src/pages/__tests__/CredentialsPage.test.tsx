@@ -644,6 +644,52 @@ describe("渠道登录入口", () => {
     vi.useRealTimers();
   });
 
+  it("CodeArts 走 paste：展示粘贴框，提交回调链接完成登录", async () => {
+    const opened: string[] = [];
+    vi.stubGlobal("open", () => {
+      const win = { closed: false, location: { href: "" } };
+      Object.defineProperty(win.location, "href", {
+        set: (value: string) => opened.push(value),
+        get: () => opened[opened.length - 1] ?? "",
+      });
+      return win;
+    });
+    let completed = false;
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/upstream/start")) {
+        return jsonResponse({
+          flow: "paste",
+          state: "res-paste",
+          auth_url: "https://codearts.example/authorize?x=1",
+          interval: null,
+        });
+      }
+      if (url.includes("/upstream/complete")) {
+        completed = String(init?.body).includes("http://127.0.0.1:12800/oauth/callback?code=abc");
+        return jsonResponse({ status: "success", credential_id: "cred_new" });
+      }
+      return jsonResponse(listBody([]));
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("start-login-codearts"));
+
+    expect(opened).toEqual(["https://codearts.example/authorize?x=1"]);
+    // 不自动轮询渠道：改为弹出粘贴框
+    expect(fetchSpy.mock.calls.some(([url]) => String(url).includes("/upstream/poll")))
+      .toBe(false);
+    const input = await screen.findByTestId("paste-callback-input");
+    await userEvent.type(input, "http://127.0.0.1:12800/oauth/callback?code=abc&state=ignored");
+    await userEvent.click(screen.getByTestId("paste-callback-submit"));
+
+    expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("登录成功");
+    expect(completed).toBe(true);
+    expect(screen.queryByTestId("paste-callback")).not.toBeInTheDocument();
+  });
+
   it("取消登录会取消当前流程（不再重新 start）并移除挂起状态", async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;

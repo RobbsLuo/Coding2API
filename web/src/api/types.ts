@@ -375,6 +375,8 @@ export interface ModelInfo {
   object: string;
   owned_by: string;
   providers: Provider[];
+  /** 上游人类可读名（Qoder 的 `Qwen3.8-Max`）；缺失时前端回退显示 id */
+  name?: string;
   /** 以下为可选元数据：上游提供才透传（见 src/api/models.py 的 _META_FIELDS） */
   credit_rate?: number;
   max_input_tokens?: number;

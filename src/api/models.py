@@ -17,7 +17,9 @@
 （Q34「改完立即生效」），若把过滤结果存进缓存，改完黑名单要等 TTL（300s）
 才反映到 Playground，且被滤掉的模型在 TTL 内会从「兜底缓存」里复活。
 元数据（消耗倍率 / token 上限 / 支持性）随条目透传，双上游同名模型
-逐字段补缺（先到先填，后到只补 None）。
+逐字段补缺（先到先填，后到只补 None）。`name`（上游人类可读名，如
+Qoder 的 `Qwen3.8-Max`）同样按「先到的非空名」透传，供前端展示——否则
+只能显示 `qmodel_38max` 这类内部代号。
 
 **展示顺序**：CodeBuddy / TRAE 的模型排在前面（`_PROVIDER_RANK`：
 codebuddy 0 → trae 1 → qoder 2 → codearts 3 → 其他 4），组内仍按模型名字典序；
@@ -45,8 +47,9 @@ logger = logging.getLogger(__name__)
 # 都会重试，zen 探活的十几秒会叠加成一串慢请求。
 MODEL_LIST_TTL_SECONDS = 300
 
-# 响应透传的元数据字段（Model → OpenAI 额外字段）
-_META_FIELDS = ("credit_rate", "max_input_tokens", "max_output_tokens",
+# 响应透传的元数据字段（Model → OpenAI 额外字段）。`name` 放在最前：
+# 上游人类可读名（Qoder 的 `Qwen3.8-Max`），前端优先展示它而非内部代号。
+_META_FIELDS = ("name", "credit_rate", "max_input_tokens", "max_output_tokens",
                 "supports_images", "supports_tool_call",
                 "supports_reasoning", "default_effort")
 
@@ -96,7 +99,9 @@ def _merge_provider(grouped: dict[str, dict[str, Any]],
         provider_meta = {key: getattr(model, key) for key in _META_FIELDS}
         entry["provider_meta"][provider_id] = provider_meta
         for key in _META_FIELDS:
-            if meta[key] is None:
+            # 空串按「未填」处理（`name`/`default_effort` 缺省为 ""）：先到的
+            # 上游没名字时，后续有名字的上游仍能补上，而不是被空串占住。
+            if meta[key] is None or meta[key] == "":
                 meta[key] = provider_meta[key]
 
 
@@ -109,7 +114,10 @@ def _entry_response(entry: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {
         "id": entry["canonical"], "object": "model", "owned_by": "Coding2API",
         "providers": sorted(entry["providers"]),
-        **{key: value for key, value in entry["meta"].items() if value is not None},
+        # 空串按「无该字段」处理：`name`/`default_effort` 未提供时是 ""，
+        # 透传空串会让前端显示空模型名或多余的 `default_effort: ""`。
+        **{key: value for key, value in entry["meta"].items()
+           if value is not None and value != ""},
     }
     if len(entry["providers"]) > 1:
         by_provider = {pid: {"credit_rate": meta["credit_rate"]}

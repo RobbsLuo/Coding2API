@@ -97,14 +97,26 @@ export function filterOptions(models: PickableModel[]): { value: string; label: 
   return options;
 }
 
-/** 单条是否通过搜索 + 渠道筛选（"all" 不限；"auto" 只留多渠道）。 */
+/** 单条是否通过搜索 + 渠道筛选（"all" 不限；"auto" 只留多渠道）。
+ *
+ * 搜索同时匹配 id（`qmodel_38max`）与人类可读名（`Qwen3.8-Max`），
+ * 用户按任一种都能找到模型。
+ */
 export function matchesFilter(item: PickableModel, query: string, filter: string): boolean {
   if (filter === "auto" && item.providers.length < 2) return false;
   if (filter !== "all" && filter !== "auto" && !(item.providers as string[]).includes(filter)) {
     return false;
   }
   const needle = query.trim().toLowerCase();
-  return needle === "" || item.id.toLowerCase().includes(needle);
+  return needle === ""
+    || item.id.toLowerCase().includes(needle)
+    || (item.name ?? "").toLowerCase().includes(needle);
+}
+
+/** 展示用主名：优上游人类可读名，缺失时回退内部 id。 */
+export function displayName(item: { id: string; name?: string }): string {
+  const name = (item.name ?? "").trim();
+  return name === "" ? item.id : name;
 }
 
 /** 渠道徽章的展示顺序（CB → TR → 其余），与全站展示顺序一致。 */
@@ -174,7 +186,16 @@ function ModelRow({
         >
           {selected && <Check className="size-3" />}
         </span>
-        <span className="truncate font-mono text-sm font-semibold">{item.id}</span>
+        <span className="min-w-0 flex-1">
+          {/* 主名用上游人类可读名（Qwen3.8-Max）；与内部 id 不同时补一行小字 id，
+              否则用户无法用 id 直连指定。 */}
+          <span className="block truncate text-sm font-semibold">{displayName(item)}</span>
+          {displayName(item) !== item.id && (
+            <span className="block truncate font-mono text-[11px] text-muted-foreground">
+              {item.id}
+            </span>
+          )}
+        </span>
         {multi && (
           <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
             自动调度
@@ -265,7 +286,14 @@ export function ModelPicker({
           className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-primary/40 bg-primary/[0.06] px-3 py-2"
         >
           <span className="text-[11px] font-medium text-muted-foreground">当前选择</span>
-          <span className="font-mono text-sm font-semibold">{selectedItem.id}</span>
+          <span className="flex flex-col">
+            <span className="text-sm font-semibold">{displayName(selectedItem)}</span>
+            {displayName(selectedItem) !== selectedItem.id && (
+              <span className="font-mono text-[11px] text-muted-foreground">
+                {selectedItem.id}
+              </span>
+            )}
+          </span>
           {sortProviders(selectedItem.providers).map((provider) => (
             <ChannelPill
               key={provider}

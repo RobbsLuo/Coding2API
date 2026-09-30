@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ModelInfo } from "../../api/types";
 import {
   buildSections,
+  displayName,
   filterOptions,
   matchesFilter,
   modelRate,
@@ -140,5 +141,20 @@ describe("matchesFilter", () => {
     expect(matchesFilter(dual, "GLM", "all")).toBe(true);
     expect(matchesFilter(dual, "kimi", "all")).toBe(false);
     expect(matchesFilter(dual, "  ", "all")).toBe(true);
+  });
+
+  it("也按人类可读名搜索（Qoder 代号 id + 可读名）", () => {
+    const qoder = pickable({ id: "qmodel_38max", name: "Qwen3.8-Max", providers: ["qoder"] });
+    expect(matchesFilter(qoder, "qwen", "all")).toBe(true);      // 按 name 命中
+    expect(matchesFilter(qoder, "38max", "all")).toBe(true);     // 按 id 命中
+    expect(matchesFilter(qoder, "deepseek", "all")).toBe(false);
+  });
+});
+
+describe("displayName", () => {
+  it("优先上游人类可读名；缺失或空白时回退 id", () => {
+    expect(displayName({ id: "qmodel_38max", name: "Qwen3.8-Max" })).toBe("Qwen3.8-Max");
+    expect(displayName({ id: "dmodel" })).toBe("dmodel");
+    expect(displayName({ id: "dmodel", name: "   " })).toBe("dmodel");
   });
 });

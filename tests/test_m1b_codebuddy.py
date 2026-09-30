@@ -1173,6 +1173,45 @@ def test_models_by_provider_rates_when_dual_upstream(tmp_path):
                                    "trae": {"credit_rate": 0.17}}
 
 
+def test_models_name_passthrough_backfill_and_omit(tmp_path):
+    """`name`（上游人类可读名）透传给前端；空名不占位、不产出空字段。
+
+    Qoder 的 id 是 `qmodel_38max` 这类内部代号，仅显示 id 用户无法识别；
+    上游 `display_name` 经 `Model.name` 透传后前端才有的可读名。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return list(self._models)
+
+        def import_credential(self, raw):
+            return raw
+
+    from src.provider.base import Model
+
+    # codebuddy 先到但没名字（""），trae 后到有名字 → 名字应被补上；
+    # 单渠道、完全没名字的模型不应产出空的 "name" 字段。
+    app = build_app(settings, providers={
+        "codebuddy": Stub("codebuddy", [Model(id="shared", name="")]),
+        "trae": Stub("trae", [Model(id="shared", name="Shared Display"),
+                              Model(id="anon")]),
+    })
+    app.state.credentials.add(provider="codebuddy", credential_data={"token": "a"})
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "b"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        data = {m["id"]: m for m in client.get("/v1/models", headers={
+            "Authorization": f"Bearer {key}"}).json()["data"]}
+    assert data["shared"]["name"] == "Shared Display"     # 空名被后者补齐
+    assert "name" not in data["anon"]                     # 无名字不产出空字段
+
+
+
 def test_models_list_orders_cb_then_trae_first(tmp_path):
     """展示顺序：CB → TR → 其余渠道，组内按模型名字典序。
 
