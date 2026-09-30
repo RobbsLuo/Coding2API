@@ -88,8 +88,8 @@ coding2api/
 │   │   ├── codearts/
 │   │   │   ├── signer.py        # 华为云 SDK-HMAC-SHA256（纯函数，便于固定向量测试）
 │   │   │   ├── dpop.py          # ES256/P-256 DPoP JWS（cryptography，低 S 归一化）
-│   │   │   ├── client.py        # CodeArts 上游 + 累计全文 SSE 还原 + 福利/余额 + Provider
-│   │   │   ├── events.py        # 累计全文 SSE → 增量 Event；状态/业务码分类
+│   │   │   ├── client.py        # CodeArts 上游 + 私有 SSE 还原（OpenAI chunk/累计全文双形状）+ 福利/余额 + Provider
+│   │   │   ├── events.py        # SSE → 增量 Event（支持 OpenAI chunk 与累计全文两形状）；状态/业务码分类
 │   │   │   ├── credential.py    # 凭证类型与解析（AK/SK/STS/DPoP/refresh）
 │   │   │   ├── auth.py          # OAuth2 PKCE 登录（authorize URL + 换 token）
 │   │   │   └── oauth.py         # 登录适配：回调链接粘贴换 token（AuthStateStore/start/complete_callback）
@@ -644,13 +644,13 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 ### 3.17 CodeArts 渠道（Q48）
 
-**与其余五条都不同**：CodeArts 既不是标准 OpenAI、也不是 COSY 那种「自定义 body + 信封 SSE」，而是**华为云签名体系 + 累计全文 SSE**。
+**与其余五条都不同**：CodeArts 既不是标准 OpenAI、也不是 COSY 那种「自定义 body + 信封 SSE」，而是**华为云签名体系 + 私有 SSE 帧**。
 
 **SDK-HMAC-SHA256 签名**：鉴权用 AK/SK + `X-Security-Token`。`Authorization: SDK-HMAC-SHA256 Access=<AK>, SignedHeaders=…, Signature=…`。三处与常见 HMAC 不同、必须逐字节对齐：signedHeaders 是**请求全部头**（小写、字典序）；CanonicalURI **每个路径段单独 percent-encode 且末尾补 `/`**；payload hash 取 `X-Sdk-Content-Sha256`。`signer.py` 写成纯函数以便固定向量测试。参考实现是 Go（`signer.go`），本项目用标准库 `hmac`/`hashlib` 重写。
 
 **DPoP 令牌刷新（刚性约束）**：`POST {sts}/v1/oauth2/tokens` `grant_type=refresh_token` 需带 **DPoP(ES256/P-256) JWS**。refresh_token 与 `client_id=codearts-agent` + DPoP 私钥**三者绑定、一次性**——刷新成功必须把返回的新 `refresh_token` 回写凭证（`RefreshTask` 先落库再同步账号，正好满足）。ES256 用 `cryptography`（`ec.SECP256R1` + `ECDSA(SHA256)`，**低 S 归一化**），不移植 Go/手写 ECDSA。
 
-**累计全文 SSE**：上游逐行 `data:` JSON（**没有空行分隔**，部分行无 `event:` 前缀），`text` 字段是**累计全文（替换语义，非增量）**——每帧都带从头到尾的完整文本。解析层按「新帧 text 以旧帧为前缀」时的差量产出 CONTENT 事件，对客户端透明为增量流；结束帧 `{"text":"[DONE]","error_code":"0"}`，错误 `error_code` 形如 `ChatAgent.*`。
+**SSE 帧（2026-09-30 抓真实流核实）**：逐行 `data:` JSON（`data:` 行间有空行；也有不带 `data:` 前缀的裸 JSON 行），最后由 `data:[DONE]` 结束。**v2 `/api/v2/chat/completions` 实测是标准 OpenAI chunk**：`{"choices":[{"delta":{"content":…,"reasoning_content":…,"tool_calls":…},"finish_reason":…}]}`，增量在 `delta`（**不是**累计全文），收尾帧 `choices:[]` + `usage` 单独给 token 数；带 `tool_stream:true` 时工具调用分片在 `delta.tool_calls`。旧形状（逆向记录 §5 / legacy `/v1/chat/chat`）则是 `{"text":"<累计全文>"}`（替换语义，用 `TextSnapshot` 做差）+ 结束帧 `{"text":"[DONE]","error_code":"0"}`。解析器**两种形状同时兼容**，按字段分派。错误有两条路：HTTP 非 2xx，或流内 `error_code`（形如 `ChatAgent.*` / `TM.00001041`，HTTP 仍 200）。
 
 **无每日签到**：免费额度**按月重置**，上游没有每日签到接口。因此本渠道**不实现 `checkin`**（`checkin_scope` 也一并省略，后台签到任务自动跳过它）；「保活」由 token 自动 refresh 承担。福利模型发现（`{opengw}/api/v1/gateway/config`）与 Token 领取（`POST /api/v1/benefit/claim`，幂等）在探测时顺带完成。
 

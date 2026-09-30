@@ -76,7 +76,7 @@ def _client(handler, **kw) -> CodeArtsClient:
 
 
 def _sse(*payloads: object) -> str:
-    """CodeArts SSE：逐行 `data:`，**没有空行**。"""
+    """CodeArts SSE：逐行 `data:`（真实流每行后有空行，逐行读取两者皆可）。"""
     return "".join(f"data: {json.dumps(p)}\n" for p in payloads)
 
 
@@ -685,14 +685,42 @@ async def test_client_lazy_pools_and_aclose():
     await CodeArtsClient().aclose()                      # 两侧都没创建 → 不报错
 
 
-async def test_client_stream_chat_snapshot_semantics_and_done():
+async def test_client_stream_chat_openai_chunks_and_done():
+    """v2 实测形状：标准 OpenAI chunk + `data:[DONE]`。"""
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == codearts_events.EP_CHAT_V2
         assert request.url.host == "snap.test"
         body = json.loads(request.content)
         assert body["stream"] is True and body["messages"][0]["content"] == "x"
+        assert body["tool_stream"] is True
         assert request.headers["Authorization"].startswith("SDK-HMAC-SHA256 ")
         assert codearts_events.HEADER_MAAS_TYPE not in request.headers
+        return httpx.Response(200, text=_sse(
+            {"choices": [{"index": 0, "delta": {"role": "assistant",
+                                                "reasoning_content": ""},
+                           "finish_reason": None}], "usage": None},
+            {"choices": [{"index": 0, "delta": {"content": "",
+                                                "reasoning_content": "想"},
+                           "finish_reason": None}], "usage": None},
+            {"choices": [{"index": 0, "delta": {"content": "好"},
+                           "finish_reason": None}], "usage": None},
+            {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+             "usage": None},
+            {"choices": [], "usage": {"prompt_tokens": 35, "completion_tokens": 45}},
+        ) + "data:[DONE]\n")
+
+    events = [e async for e in _client(handler).stream_chat(
+        _cred(), {"messages": [{"role": "user", "content": "x"}]}, "m")]
+    assert [e.content for e in events if e.kind is EventKind.CONTENT] == ["好"]
+    assert [e.content for e in events if e.kind is EventKind.REASONING] == ["想"]
+    assert events[-2].kind is EventKind.USAGE
+    assert events[-2].usage.input_tokens == 35
+    assert events[-2].usage.output_tokens == 45
+
+
+async def test_client_stream_chat_snapshot_semantics_and_done():
+    """旧形状（累计 `text`）仍兼容：快照做差 + `{"text":"[DONE]"}` 结束。"""
+    def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=_sse(
             {"text": "He"},                                  # 增量 He
             {"text": "Hello"},                               # 前缀 → 增量 llo
@@ -1070,6 +1098,48 @@ def test_events_parse_line_content_finish_reasoning_usage():
     usage = codearts_events.parse_line(
         '{"prompt_tokens": 3, "completion_tokens": 4}', snapshot)
     assert usage[0].kind is EventKind.USAGE and usage[0].usage.input_tokens == 3
+
+
+def test_events_parse_line_openai_chunk_shape():
+    """v2 端点实测：标准 OpenAI chunk（delta + finish_reason + usage）。"""
+    snapshot = codearts_events.TextSnapshot()
+    delta = codearts_events.parse_line(
+        '{"choices":[{"index":0,"delta":{"reasoning_content":"r"},'
+        '"finish_reason":null}],"usage":null}', snapshot)
+    assert [e.kind for e in delta] == [EventKind.REASONING]
+    assert delta[0].content == "r"
+
+    merged = codearts_events.parse_line(
+        '{"choices":[{"delta":{"content":"好"},"finish_reason":"stop"}]}', snapshot)
+    assert [e.kind for e in merged] == [EventKind.CONTENT, EventKind.FINISH]
+    assert merged[0].content == "好" and merged[1].finish_reason == "stop"
+
+    # 收尾帧 choices 为空、usage 单独给出 → 仍要保留 usage
+    tail = codearts_events.parse_line(
+        '{"choices":[],"usage":{"prompt_tokens":35,"completion_tokens":45}}', snapshot)
+    assert [e.kind for e in tail] == [EventKind.USAGE]
+    assert tail[0].usage.input_tokens == 35 and tail[0].usage.output_tokens == 45
+
+    # 空 delta / 非对象 choice / 空 tool_calls：不产内容事件
+    assert codearts_events.parse_line(
+        '{"choices":[{"delta":{"content":""}}]}', snapshot) == []
+    assert codearts_events.parse_line(
+        '{"choices":[5,{"delta":null}]}', snapshot) == []
+    assert codearts_events.parse_line(
+        '{"choices":[{"delta":{"tool_calls":[]}}]}', snapshot) == []
+    tool = codearts_events.parse_line(
+        '{"choices":[{"delta":{"tool_calls":[{"id":"t"}]}}]}', snapshot)
+    assert tool[0].kind is EventKind.TOOL_CALLS and tool[0].tool_calls == [{"id": "t"}]
+
+
+def test_events_parse_line_done_sentinel():
+    """`data:[DONE]` 是流结束哨兵（非 JSON），必须识别而不是当坏 JSON 抛错。"""
+    snapshot = codearts_events.TextSnapshot()
+    events = codearts_events.parse_line("[DONE]", snapshot)
+    assert len(events) == 1
+    assert events[0].kind is EventKind.FINISH and events[0].finish_reason == "stop"
+    # `iter_data_lines` 要原样把它吐出来（不能被当成无载荷行丢掉）
+    assert codearts_events._data_payload("data:[DONE]") == "[DONE]"  # noqa: SLF001
 
 
 def test_events_parse_line_embedded_error_code():

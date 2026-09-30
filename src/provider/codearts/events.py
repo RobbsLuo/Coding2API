@@ -1,18 +1,20 @@
 """CodeArts（华为云码道 / snap-access 盘古引擎）SSE → 中立事件映射。
 
-上游 SSE 与其它渠道都不一样：**逐行 `data:` JSON，没有空行分隔**（逆向记录 §5）。
-因此不能用 `engine.sse` 的 `FrameAssembler`——那个要等空行才成帧，CodeArts 的流
-会一直缓冲到连接结束才吐出唯一一帧，等于没有流式。本模块自带逐行读取器
-`iter_data_lines`。
+上游用**逐行 `data:` JSON + `data:[DONE]` 结束**（标准 OpenAI 流式形状），
+不能用 `engine.sse` 的 `FrameAssembler`——那个要等空行才成帧，且不会识别
+`[DONE]` 语义。本模块自带逐行读取器 `iter_data_lines`（与 SSE 帧的不同点：
+本引擎的 `data:` 行之间**有空行**，逐行读取天然把它当空行跳过）。
 
-帧语义（逆向记录 §5，实测）：
+帧语义（2026-09-30 抓真实流核实）：
 
-* 快照帧 `{"text":"<当前完整文本>","prompt_tokens":..,"completion_tokens":..}`：
-  `text` 是**累计全文**，不是增量 → 用 `TextSnapshot` 转成增量（替换语义）。
-* 增量帧 `{"delta":{"content":...,"reasoning_content":...}}`（is_delta_response）。
-* 结束帧 `{"text":"[DONE]","error_code":"0"}`。
-* 错误帧 `{"text":"[DONE]","error_code":"ChatAgent.00001001","error_msg":...}`：
-  HTTP 仍是 200，错误内嵌在流里（上游排队/TPM/未注册模型都走这条路）。
+* **v2 `/api/v2/chat/completions`（实际走的路径）是标准 OpenAI chunk**：
+  `{"choices":[{"delta":{"content":..,"reasoning_content":..},"finish_reason":..}]}`，
+  增量在 `delta`（**不是**累计全文），收尾帧带 `usage`，最后 `data:[DONE]`。
+* 旧形状（legacy §4 或早期记录）：`{"text":"<当前完整文本>"}` 是**累计全文**，
+  用 `TextSnapshot` 转成增量（替换语义）；结束帧 `{"text":"[DONE]","error_code":"0"}`。
+  解析器两种形状同时兼容，按字段是否存在分派。
+* 错误帧：HTTP 仍是 200，错误内嵌在流里（`error_code` 形如
+  `ChatAgent.00001001` / `TM.00001041`），上游排队/TPM/未注册模型都走这条路。
 
 CodeArts 的业务码是**字符串**（`ChatAgent.00001001`），而中立 `Event.error_code`
 只有 int 槽位，故原始码进 `error_message`，分类进 `error_kind`。
@@ -93,7 +95,7 @@ class TextSnapshot:
 
 
 async def iter_data_lines(chunks: AsyncIterator[bytes]) -> AsyncIterator[str]:
-    """字节流 → 逐行 `data:` 载荷（无空行分隔，不能复用 SSEFrame 状态机）。
+    """字节流 → 逐行 `data:` 载荷（也有空行分隔，逐行读取天然跳过它们）。
 
     增量 UTF-8 解码，避免多字节字符被块边界切断后变成替换字符。
     """
@@ -112,7 +114,10 @@ async def iter_data_lines(chunks: AsyncIterator[bytes]) -> AsyncIterator[str]:
 
 
 def _data_payload(line: str) -> str:
-    """一行 → JSON 载荷；无下游语义的行（事件名/编号/注释/空行）返回空串。"""
+    """一行 → JSON 载荷；无下游语义的行（事件名/编号/注释/空行）返回空串。
+
+    `data:[DONE]` 是流结束哨兵（非 JSON），原样保留给 `parse_line` 识别。
+    """
     text = line.strip()
     if text.startswith("data:"):
         return text[5:].strip()
@@ -122,7 +127,9 @@ def _data_payload(line: str) -> str:
 
 
 def parse_line(line: str, snapshot: TextSnapshot) -> list[Event]:
-    """一行 JSON 载荷 → 中立事件列表（同帧可能同时带全文与 usage）。"""
+    """一行载荷 → 中立事件列表（同帧可能同时带正文/思考/usage/finish）。"""
+    if line.strip() == DONE_TEXT:
+        return [Event(kind=EventKind.FINISH, finish_reason="stop")]
     try:
         payload = json.loads(line)
     except json.JSONDecodeError as error:
@@ -142,36 +149,78 @@ def _events_from_payload(payload: dict[str, Any], snapshot: TextSnapshot) -> lis
                       error_kind=classify_error_code(error_code))]
 
     events: list[Event] = []
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices:
+        # 标准 OpenAI chunk（v2 端点实测形状）：增量在 choices[].delta。
+        events.extend(_events_from_choices(choices))
     text = payload.get("text")
     if isinstance(text, str):
+        # 旧形状：`text` 是累计全文 → 用快照做差。
         if text == DONE_TEXT:
             events.append(Event(kind=EventKind.FINISH, finish_reason="stop"))
         else:
             delta = snapshot.delta(text)
             if delta:
                 events.append(Event(kind=EventKind.CONTENT, content=delta))
-
     delta_payload = payload.get("delta")
     if isinstance(delta_payload, dict):
-        content = delta_payload.get("content")
-        if isinstance(content, str) and content:
-            events.append(Event(kind=EventKind.CONTENT, content=content))
-        reasoning = delta_payload.get("reasoning_content")
-        if isinstance(reasoning, str) and reasoning:
-            events.append(Event(kind=EventKind.REASONING, content=reasoning))
+        # 旧形状的独立 delta 帧。
+        events.extend(_delta_events(delta_payload))
+    # usage 可能在收尾帧（choices 为空）单独给出，故在顶层统一取。
+    usage_object = payload.get("usage")
+    if isinstance(usage_object, dict):
+        events.append(Event(kind=EventKind.USAGE, usage=_usage_object(usage_object)))
+    else:
+        usage = _usage(payload)                      # 旧形状：token 数平铺在顶层
+        if usage is not None:
+            events.append(Event(kind=EventKind.USAGE, usage=usage))
+    return events
 
-    usage = _usage(payload)
-    if usage is not None:
-        events.append(Event(kind=EventKind.USAGE, usage=usage))
+
+def _events_from_choices(choices: list[Any]) -> list[Event]:
+    events: list[Event] = []
+    for choice in choices:
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if isinstance(delta, dict):
+            events.extend(_delta_events(delta))
+        finish_reason = choice.get("finish_reason")
+        if isinstance(finish_reason, str) and finish_reason:
+            events.append(Event(kind=EventKind.FINISH, finish_reason=finish_reason))
+    return events
+
+
+def _delta_events(delta: dict[str, Any]) -> list[Event]:
+    """增量块 → 内容 / 思考 / 工具调用事件（空串与非字符串一律忽略）。"""
+    events: list[Event] = []
+    tool_calls = delta.get("tool_calls")
+    if isinstance(tool_calls, list):
+        kept = [call for call in tool_calls if isinstance(call, dict)]
+        if kept:
+            events.append(Event(kind=EventKind.TOOL_CALLS, tool_calls=kept))
+    content = delta.get("content")
+    if isinstance(content, str) and content:
+        events.append(Event(kind=EventKind.CONTENT, content=content))
+    reasoning = delta.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning:
+        events.append(Event(kind=EventKind.REASONING, content=reasoning))
     return events
 
 
 def _usage(payload: dict[str, Any]) -> Usage | None:
+    """旧形状：token 数平铺在顶层。"""
     input_tokens = _as_int(payload.get("prompt_tokens"))
     output_tokens = _as_int(payload.get("completion_tokens"))
     if input_tokens is None and output_tokens is None:
         return None
     return Usage(input_tokens=input_tokens, output_tokens=output_tokens)
+
+
+def _usage_object(usage: dict[str, Any]) -> Usage:
+    """标准 OpenAI `usage` 对象（v2 收尾帧）。"""
+    return Usage(input_tokens=_as_int(usage.get("prompt_tokens")),
+                 output_tokens=_as_int(usage.get("completion_tokens")))
 
 
 def _as_int(value: Any) -> int | None:
