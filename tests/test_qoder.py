@@ -485,12 +485,17 @@ async def test_decoded_envelope_protocol_violation_propagates():
 
 # ------------------------------------------------------------ 模型发现
 
-async def test_fetch_models_signs_and_sends_same_body():
+async def test_fetch_models_signs_get_and_sends_no_body():
+    """模型清单端点只接受 GET：带 COSY 签名头、请求体为空。
+
+    实测（2026-09-30）带头 POST 会被上游 400「Request method 'POST' not
+    supported」拒绝，故断言方法为 GET 且无请求体。
+    """
     seen: dict = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["method"] = request.method
-        seen["body"] = request.content.decode("ascii")
+        seen["body"] = request.content
         seen["auth"] = request.headers["authorization"]
         seen["key"] = request.headers["cosy-key"]
         seen["date"] = request.headers["cosy-date"]
@@ -508,8 +513,8 @@ async def test_fetch_models_signs_and_sends_same_body():
     client = handler_for(handler)
     models = await client.fetch_models(cred())
     sign_body = qoder_encode(qoder_events.MODELS_SIGN_PLAIN)
-    assert seen["method"] == "POST"
-    assert seen["body"] == sign_body                    # 请求体与签名 body 同一串
+    assert seen["method"] == "GET"
+    assert seen["body"] == b""                           # GET 无请求体
     assert seen["key"] == client.sessions.get(cred()).cosy_key
     expected = hashlib.md5("\n".join([
         seen["auth"].split(".")[1], seen["key"], seen["date"], sign_body,

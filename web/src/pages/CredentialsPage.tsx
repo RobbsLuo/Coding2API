@@ -139,6 +139,10 @@ export function CredentialsPage() {
     });
   }, []);
   const [probeDetail, setProbeDetail] = useState<string | null>(null);
+  // 粘贴回调完成登录（CodeArts）：服务端无法监听 127.0.0.1 回调端口，
+  // 用户把门户回跳地址粘回来，由服务端用 code 换 token。
+  const [pasteProvider, setPasteProvider] = useState<Provider | null>(null);
+  const [pasteUrl, setPasteUrl] = useState("");
   // 成长中心最近一轮：展示逐步结果（一句话汇报看不出哪一步没做成）
   const [growthResult, setGrowthResult] = useState<GrowthRunResult | null>(null);
   // 积分记录抽屉：一次只开一个（同一行内展开，不弹层——
@@ -346,6 +350,19 @@ export function CredentialsPage() {
         return;
       }
 
+      if (started.flow === "paste") {
+        // CodeArts：门户把 code 302 回 127.0.0.1 回调端口，服务端不监听，
+        // 改为让用户把浏览器地址栏里的整条回调链接粘回来，服务端换 token。
+        stopPolling();
+        setPasteProvider(provider);
+        setPasteUrl("");
+        setNotice(
+          "已在新标签页打开华为云授权页。授权后会跳到一个打不开的本地地址（127.0.0.1），"
+          + "把地址栏里的整条链接复制粘贴到下方即可完成登录。",
+        );
+        return;
+      }
+
       setNotice("已在新标签页打开授权页，完成后此页会自动检测。");
       const interval = (started.interval ?? 5) * 1000;
       const timer = window.setInterval(async () => {
@@ -380,11 +397,40 @@ export function CredentialsPage() {
       delete loginTimersRef.current[provider];
     }
     delete loginStatesRef.current[provider];
+    if (pasteProvider === provider) {
+      setPasteProvider(null);
+      setPasteUrl("");
+    }
     try {
       if (state) await api.upstreamCancel(provider, state).catch(() => undefined);
     } finally {
       setLoginProviders((previous) => previous.filter((item) => item !== provider));
       setNotice("已取消登录。");
+    }
+  };
+
+  const completeLogin = async () => {
+    if (!pasteProvider) return;
+    const state = loginStatesRef.current[pasteProvider];
+    if (!state) {
+      setError("登录会话已失效，请重新发起登录。");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setNotice(null);
+    try {
+      await api.upstreamComplete(pasteProvider, state, pasteUrl.trim());
+      delete loginStatesRef.current[pasteProvider];
+      setLoginProviders((previous) => previous.filter((item) => item !== pasteProvider));
+      setPasteProvider(null);
+      setPasteUrl("");
+      setNotice("登录成功，凭证已保存。");
+      await refresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "登录失败，请检查粘贴的链接。");
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -568,10 +614,42 @@ export function CredentialsPage() {
             <p className="mt-2 text-xs text-muted-foreground">
               CodeBuddy 走设备码轮询（本页自动轮询渠道）；TRAE 走浏览器回调
               （授权后由 <code>/authorize</code> 直接落库，本页轮询凭证列表检测完成）；
-              Qoder 走设备码登录；CodeArts 走 OAuth2 授权码登录。也可以直接粘贴凭证
+              Qoder 走设备码登录；CodeArts 走 OAuth2 授权码登录（授权后把浏览器
+              地址栏里打不开的 127.0.0.1 回调链接粘回下方）。也可以直接粘贴凭证
               JSON 导入。OpenCode Zen / Kilo Gateway 免费层无需凭证/登录，删除其虚拟
               凭证后点上方按钮即可补回（要永久停用请改用「暂停」）。
             </p>
+            {pasteProvider && (
+              <div className="mt-4 space-y-2" data-testid="paste-callback">
+                <Field label={`${PROVIDER_LABEL[pasteProvider]} 授权回调链接`}>
+                  <Input
+                    data-testid="paste-callback-input"
+                    value={pasteUrl}
+                    onChange={(event) => setPasteUrl(event.target.value)}
+                    placeholder="http://127.0.0.1:12800/oauth/callback?code=…&state=…"
+                  />
+                </Field>
+                <div className="flex items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    data-testid="paste-callback-submit"
+                    disabled={busy || pasteUrl.trim().length === 0}
+                    onClick={() => void completeLogin()}
+                  >
+                    完成登录
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    data-testid="paste-callback-cancel"
+                    onClick={() => void cancelLogin(pasteProvider)}
+                  >
+                    取消
+                  </Button>
+                </div>
+              </div>
+            )}
           </Panel>
           <ImportPanel
             busy={busy}

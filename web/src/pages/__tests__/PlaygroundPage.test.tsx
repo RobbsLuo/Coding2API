@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PlaygroundPage } from "../PlaygroundPage";
 import { jsonResponse, mockFetch, renderPage, userEvent } from "./helpers";
@@ -54,7 +54,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(screen.queryByTestId("playground-key")).not.toBeInTheDocument();
   });
 
-  it("默认选中倍率最小的模型；选中后展示渠道与元数据，双渠道倍率按渠道显示", async () => {
+  it("默认选中倍率最小的模型；选中后展示上限与能力，双渠道倍率在选择器里按渠道显示", async () => {
     const META_MODELS = {
       object: "list",
       data: [
@@ -79,17 +79,21 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     // 默认选中倍率最小的模型（DeepSeek 单渠道 TRAE x0.08 < glm-5.2 的 0.17）
     expect(screen.getByTestId("model-option-DeepSeek-V4-Flash-Official@trae"))
       .toHaveAttribute("aria-selected", "true");
-    const meta = screen.getByTestId("model-meta");
-    expect(meta).toHaveTextContent("x0.08");
-    expect(meta).not.toHaveTextContent("x0.29");
+    // 「当前选择」条展示渠道与倍率（渠道/倍率不再挤在能力元数据卡里）
+    const current = screen.getByTestId("model-current");
+    expect(current).toHaveTextContent("DeepSeek-V4-Flash-Official");
+    expect(current).toHaveTextContent("x0.08");
+    expect(screen.getByTestId("model-meta")).toHaveTextContent("256,000");
 
-    // 切到双渠道模型：渠道 icon 标注全部显示 + 倍率按渠道分别显示
+    // 切到双渠道模型：当前选择条与列表行都按渠道分别标注倍率
     await userEvent.click(screen.getByTestId("model-option-glm-5.2"));
+    const current2 = screen.getByTestId("model-current");
+    expect(current2).toHaveTextContent("CodeBuddy");
+    expect(current2).toHaveTextContent("TRAE");
+    expect(current2).toHaveTextContent("x0.29");
+    expect(current2).toHaveTextContent("x0.17");
+    expect(current2).toHaveTextContent("自动路由");
     const meta2 = screen.getByTestId("model-meta");
-    expect(meta2).toHaveTextContent("CodeBuddy");
-    expect(meta2).toHaveTextContent("TRAE");
-    expect(meta2).toHaveTextContent("x0.29");
-    expect(meta2).toHaveTextContent("x0.17");
     expect(meta2).toHaveTextContent("200,000");
     expect(meta2).toHaveTextContent("图片");
     expect(meta2.querySelector("svg.lucide-check")).toBeInTheDocument();
@@ -98,9 +102,8 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
 
     // 切到单渠道模型：倍率不按渠道拆分，显示合并值
     await userEvent.click(screen.getByTestId("model-option-DeepSeek-V4-Flash-Official@trae"));
-    const meta3 = screen.getByTestId("model-meta");
-    expect(meta3).toHaveTextContent("x0.08");
-    expect(meta3).not.toHaveTextContent("x0.29");
+    expect(screen.getByTestId("model-current")).toHaveTextContent("x0.08");
+    expect(screen.getByTestId("model-current")).not.toHaveTextContent("x0.17");
   });
 
   it("自动载入模型列表并展示可选渠道，请求走会话端点", async () => {
@@ -140,11 +143,18 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(dual).toHaveTextContent("x0.29");
     expect(dual).toHaveTextContent("TRAE");
     expect(dual).toHaveTextContent("x0.17");
+    expect(dual.querySelector('[data-testid="channel-pill-codebuddy"]')).toBeInTheDocument();
+    expect(dual.querySelector('[data-testid="channel-pill-trae"]')).toBeInTheDocument();
     // 单渠道：徽章带渠道名与合并倍率
-    expect(screen.getByTestId("model-option-kimi-k3@trae")).toHaveTextContent("x0.08");
-    // 无倍率数据：只显示渠道，不显示倍率
-    expect(screen.getByTestId("model-option-no-rate@trae")).toHaveTextContent("TRAE");
-    expect(screen.getByTestId("model-option-no-rate@trae")).not.toHaveTextContent("x");
+    const single = screen.getByTestId("model-option-kimi-k3@trae");
+    expect(single).toHaveTextContent("TRAE");
+    expect(single).toHaveTextContent("x0.08");
+    // 无倍率数据：只显示渠道徽章，不显示倍率
+    const noRate = screen.getByTestId("model-option-no-rate@trae");
+    expect(noRate).toHaveTextContent("TRAE");
+    // 无倍率数据：渠道徽章里没有倍率块（免费/「x」数字）
+    expect(noRate.querySelector('[data-testid="channel-pill-trae"]')).toBeInTheDocument();
+    expect(noRate.textContent).not.toMatch(/x\d|免费/);
   });
 
   it("多渠道缺细分倍率时只标注有倍率的渠道，不裸显合并值", async () => {
@@ -199,6 +209,27 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(screen.getByText("没有匹配的模型")).toBeInTheDocument();
   });
 
+  it("免费模型（x0）的倍率块显示「免费」，单渠道当前选择条不打自动路由标", async () => {
+    const FREE_MODELS = {
+      object: "list",
+      data: [
+        {
+          id: "kilo-auto/free", object: "model", owned_by: "Coding2API",
+          providers: ["kilo"], credit_rate: 0,
+        },
+      ],
+    };
+    mockFetch({ "/api/playground/models": FREE_MODELS });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    const current = screen.getByTestId("model-current");
+    expect(current).toHaveTextContent("kilo-auto/free");
+    expect(within(current).getByTestId("channel-pill-kilo")).toHaveTextContent("免费");
+    // 单渠道模型不显示「自动路由」标
+    expect(current).not.toHaveTextContent("自动路由");
+  });
+
   it("模型加载失败时给出提示", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({ error: { message: "nope" } }, 401)));
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
@@ -224,6 +255,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(screen.getByTestId("provider-pin-trae")).toBeInTheDocument();
     await userEvent.click(screen.getByTestId("provider-pin-trae"));
     expect(screen.getByTestId("provider-pin-trae")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("model-current")).toHaveTextContent("已强制 TRAE");
 
     await fillPromptAndSend("hi");
     const chat = calls.find((item) => item.url.includes("/api/playground/chat/completions"));
@@ -231,6 +263,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
 
     await userEvent.click(screen.getByTestId("provider-pin-auto"));
     expect(screen.getByTestId("provider-pin-auto")).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByTestId("model-current")).toHaveTextContent("自动路由");
   });
 
   it("单渠道模型不显示强制指定渠道控件", async () => {

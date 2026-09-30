@@ -41,6 +41,23 @@ def _settings(**overrides) -> Settings:
     return Settings(**defaults)  # type: ignore[arg-type]
 
 
+@pytest.fixture()
+def admin_client(tmp_path):
+    """带 admin 会话的 TestClient（局部定义：本文件不复用他处 fixture）。"""
+    from fastapi.testclient import TestClient
+
+    from src.auth.session import create_session_token
+    from src.main import build_app
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings)
+    client = TestClient(app)
+    client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+    with client:
+        yield app, client
+
+
 # --------------------------------------------------------------- Settings 字段
 
 def test_qoder_defaults_and_allowed_parsing():
@@ -175,7 +192,7 @@ def test_upstream_auth_registers_qoder_and_codearts_tracks():
 
 
 async def test_codearts_oauth_start_poll_and_cancel_loop():
-    """CodeArts poll 轨道：start 出 auth_url，ticket 未就绪时 pending，就绪后落库。"""
+    """CodeArts poll 轨道：start 出 auth_url（flow=paste），poll 就绪后落库。"""
     import httpx
 
     from src.provider.codearts import auth as codearts_auth
@@ -200,7 +217,10 @@ async def test_codearts_oauth_start_poll_and_cancel_loop():
         client=client, store=AuthStateStore())
     try:
         session = await oauth.start("alice")
-        assert session.flow == "poll" and session.auth_url.startswith("https://portal.test/authorize?")
+        # CodeArts 门户走回调通道，ticket 轮询对服务端无效 → flow=paste
+        assert session.flow == "paste"
+        assert session.auth_url.startswith("https://portal.test/authorize?")
+        assert session.interval is None
         result = await oauth.poll(session.state, "alice")
         assert result is not None
         assert result.credential_data["access_key_id"] == "ak"
@@ -280,3 +300,194 @@ async def test_codearts_oauth_store_and_client_edge_branches():
     finally:
         await client.aclose()
         await oauth.aclose()
+
+
+# ------------------------------------------------- CodeArts 粘贴回调完成登录
+
+
+def test_extract_authorization_code_accepts_url_query_and_bare_code():
+    from src.provider.codearts.oauth import extract_authorization_code
+
+    assert extract_authorization_code(
+        "http://127.0.0.1:12800/oauth/callback?code=abc123&state=xyz") == "abc123"
+    assert extract_authorization_code("code=abc123&state=xyz") == "abc123"
+    assert extract_authorization_code("abc123") == "abc123"
+    assert extract_authorization_code("") == ""
+    assert extract_authorization_code("http://127.0.0.1/cb?state=only") == ""
+
+
+async def test_codearts_oauth_complete_callback_exchanges_code():
+    """粘贴回调链接 → exchange_code 换 token → 落库扁平凭证。"""
+    import httpx
+
+    from src.provider.codearts import auth as codearts_auth
+    from src.provider.codearts.oauth import CodeArtsOAuth
+
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(str(request.url))
+        assert request.url.path.endswith("/v1/oauth2/tokens")
+        return httpx.Response(200, json={
+            "user_name": "alice", "user_id": "u1", "refresh_token": "rt",
+            "credentials": {"access_key_id": "ak", "secret_access_key": "sk",
+                            "security_token": "st",
+                            "expiration": "2030-01-01T00:00:00Z"}})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+    oauth = CodeArtsOAuth(codearts_auth.LoginConfig(portal_host="https://portal.test"),
+                          client=client)
+    try:
+        started = await oauth.start("alice")
+        result = await oauth.complete_callback(
+            "http://127.0.0.1:12800/oauth/callback?code=THE_CODE&state=ignored",
+            started.state, "alice")
+        assert result.credential_data["access_key_id"] == "ak"
+        assert result.credential_data["dpop_private_jwk"]
+        # 已消费：再次完成报错
+        with pytest.raises(ValueError, match="unknown or consumed"):
+            await oauth.complete_callback("http://x/cb?code=c", started.state, "alice")
+    finally:
+        await client.aclose()
+        await oauth.aclose()
+    assert seen, "exchange_code should have hit the token endpoint"
+
+
+async def test_codearts_oauth_complete_callback_missing_code():
+    import httpx
+
+    from src.provider.codearts import auth as codearts_auth
+    from src.provider.codearts.oauth import CodeArtsOAuth
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(
+        lambda request: httpx.Response(200, json={})), timeout=None)
+    oauth = CodeArtsOAuth(codearts_auth.LoginConfig(portal_host="https://portal.test"),
+                          client=client)
+    try:
+        started = await oauth.start("alice")
+        with pytest.raises(ValueError, match="missing the authorization code"):
+            await oauth.complete_callback("http://127.0.0.1/cb?state=only",
+                                          started.state, "alice")
+    finally:
+        await client.aclose()
+        await oauth.aclose()
+
+
+async def test_codearts_oauth_poll_ticket_error_becomes_protocol_violation():
+    """ticket 通道被判无效（上游 400）→ 受控 ProtocolViolation（不是裸 500）。"""
+    import httpx
+
+    from src.provider.codearts import auth as codearts_auth
+    from src.provider.codearts.oauth import CodeArtsOAuth
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error_code": "TM.00001001",
+                                         "error_msg": "无效ticketId: deadbeef"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+    oauth = CodeArtsOAuth(codearts_auth.LoginConfig(portal_host="https://portal.test"),
+                          client=client)
+    try:
+        started = await oauth.start("alice")
+        with pytest.raises(ValueError, match="TM.00001001"):
+            await oauth.poll(started.state, "alice")
+    finally:
+        await client.aclose()
+        await oauth.aclose()
+
+
+async def test_codearts_oauth_complete_callback_exchange_error_is_controlled():
+    """exchange_code 被上游拒（400）→ 受控 ProtocolViolation（不是裸 500）。"""
+    import httpx
+
+    from src.provider.codearts import auth as codearts_auth
+    from src.provider.codearts.oauth import CodeArtsOAuth
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, content=b'{"error_code":"STS5.1806","error_msg":"bad code"}')
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+    oauth = CodeArtsOAuth(codearts_auth.LoginConfig(portal_host="https://portal.test"),
+                          client=client)
+    try:
+        started = await oauth.start("alice")
+        with pytest.raises(ValueError, match="STS5.1806"):
+            await oauth.complete_callback("http://127.0.0.1/cb?code=abc",
+                                          started.state, "alice")
+    finally:
+        await client.aclose()
+        await oauth.aclose()
+
+
+def test_upstream_auth_complete_endpoint_registered_and_guarded(admin_client):
+    """粘贴完成端点：非支持渠道 400，admin 可调用（用伪造 oauth 验证落库路径）。"""
+    from src.provider.base import AuthResult
+
+    app, client = admin_client
+
+    class _FakeOAuth:
+        def __init__(self):
+            from src.provider.codebuddy.oauth import AuthStateStore
+
+            self.store = AuthStateStore()
+            self.state = self.store.begin("root", "upstream")
+
+        async def complete_callback(self, url, state, username):
+            assert url == "http://127.0.0.1/cb?code=abc"
+            return AuthResult(credential_data={"access_key_id": "ak",
+                                               "secret_access_key": "sk",
+                                               "security_token": "st"},
+                              nickname="alice")
+
+    fake = _FakeOAuth()
+    app.state.upstream_auth["codearts"] = fake
+    app.state.services.upstream_auth["codearts"] = fake
+    response = client.post("/api/auth/upstream/complete", json={
+        "provider": "codearts", "state": fake.state, "url": "http://127.0.0.1/cb?code=abc"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "success"
+    # 未注册该能力的渠道 → 400
+    assert client.post("/api/auth/upstream/complete", json={
+        "provider": "unknown", "state": "x", "url": "y"}).status_code == 400
+
+
+def test_upstream_auth_violations_map_to_400(admin_client):
+    """qoder/codearts 的 UpstreamProtocolViolation 必须映射成受控 400 而非 500。"""
+    from src.provider.codearts.events import (
+        UpstreamProtocolViolation as CodeArtsViolation,
+    )
+    from src.provider.qoder.events import (
+        UpstreamProtocolViolation as QoderViolation,
+    )
+
+    app, client = admin_client
+
+    class _QoderOAuth:
+        store = None
+
+        async def poll(self, state, username):
+            raise QoderViolation("qoder bad state")
+
+        async def complete_callback(self, url, state, username):
+            raise QoderViolation("qoder bad callback")
+
+    class _CodeArtsOAuth:
+        store = None
+
+        async def poll(self, state, username):
+            raise CodeArtsViolation("codearts bad state")
+
+        async def complete_callback(self, url, state, username):
+            raise CodeArtsViolation("codearts bad callback")
+
+    app.state.upstream_auth["qoder"] = _QoderOAuth()
+    app.state.services.upstream_auth["qoder"] = app.state.upstream_auth["qoder"]
+    app.state.upstream_auth["codearts"] = _CodeArtsOAuth()
+    app.state.services.upstream_auth["codearts"] = app.state.upstream_auth["codearts"]
+
+    qoder = client.post("/api/auth/upstream/poll",
+                        json={"provider": "qoder", "state": "s"})
+    assert qoder.status_code == 400
+    codearts = client.post("/api/auth/upstream/complete", json={
+        "provider": "codearts", "state": "s", "url": "u"})
+    assert codearts.status_code == 400

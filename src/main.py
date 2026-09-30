@@ -346,6 +346,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                 closer = getattr(provider, "aclose", None)
                 if callable(closer):
                     await closer()
+            for oauth in getattr(app_.state, "upstream_auth", {}).values():
+                closer = getattr(oauth, "aclose", None)
+                if callable(closer):
+                    await closer()
             db.close()
 
     app = FastAPI(title="Coding2API", version=app_version(), lifespan=lifespan,

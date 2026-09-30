@@ -6,9 +6,10 @@
   —— 请求体是自定义 Base64 变体，头是整套 `cosy-*`；响应是**信封式 SSE**
   （`data:{"headers":…,"body":"<内层 chunk>","statusCodeValue":200}`），
   解包在 `events.decode_envelope` / `parse_inner_chunk`。
-* **模型发现** `GET {gateway}/algo/api/v2/model/list?Encode=1` —— 签名 body 与
-  请求体必须是同一个 `qoder_encode(b"")`：服务端校验签名与请求体一致，裸 GET
-  会 403（本渠道最容易踩的坑，`events.MODELS_SIGN_PLAIN` 记着这个事实）。
+* **模型发现** `GET {gateway}/algo/api/v2/model/list?Encode=1` —— **必须**带整套
+  COSY 签名头（签名 body 为 `qoder_encode(b"")`）；不带头的裸 GET 会 403，而
+  带头后用 POST/PUT 会被上游 400「Request method ... not supported」拒绝，故
+  方法固定 GET（本渠道最容易踩的坑，`events.MODELS_SIGN_PLAIN` 记着这个事实）。
 * **openapi 业务端点**（纯 Bearer，无 COSY 签名）：额度 `/api/v2/quota/usage`、
   签到 `/sash/api/v1/me/daily-check-in/{status,claim}`、刷新
   `/api/v1/deviceToken/refresh`、身份 `/api/v1/userinfo`。
@@ -261,9 +262,14 @@ class QoderClient:
     # ------------------------------------------------------------ 模型发现
 
     async def fetch_models(self, credential: QoderCredential) -> list[Model]:
-        """`POST {gateway}{EP_MODELS}`，签名 body 与请求体同为 `qoder_encode("")`。
+        """`GET {gateway}{EP_MODELS}`，仍需带整套 COSY 签名头（含签名 body）。
 
-        上游要求签名与请求体一致；用 GET 裸请求会 403，故方法固定 POST。
+        实测（2026-09-30，国内版）：模型清单端点**只接受 GET**——带 COSY 签名头
+        的 POST/PUT 会被上游以 400「Request method 'POST' not supported」拒绝。
+        之前误判为 POST：所谓「裸 GET 会 403」是**不带 COSY 头**时的现象，带上
+        `Authorization: Bearer COSY.<payload>.<sig>` 后 GET 正常 200 返回清单。
+        签名仍覆盖 `qoder_encode("")`（与请求体一致），headers 里去掉
+        x-model-key / x-model-source（清单是账号级、不针对单个模型）。
         清单按 realm 缓存 10 分钟（模型只能由有凭证的调用方拉到，故缓存键含
         凭证区域而非 token）。
         """
@@ -282,8 +288,7 @@ class QoderClient:
                                       sse=False, accept="application/json")
             headers["content-type"] = "application/json"
             try:
-                response = await self._short.post(url, content=sign_body.encode("utf-8"),
-                                                 headers=headers)
+                response = await self._short.get(url, headers=headers)
                 if response.status_code >= 400:
                     raise UpstreamHTTPError(response.status_code, response.content)
                 payload = response.json()

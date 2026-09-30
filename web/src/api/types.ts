@@ -258,7 +258,7 @@ export interface CredentialsResponse {
 }
 
 export interface UpstreamAuthStart {
-  flow: "poll" | "callback";
+  flow: "poll" | "callback" | "paste";
   state: string;
   auth_url: string | null;
   interval: number | null;

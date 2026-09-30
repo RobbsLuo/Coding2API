@@ -15,6 +15,7 @@ from __future__ import annotations
 import secrets
 import time
 from dataclasses import dataclass
+from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
@@ -24,9 +25,34 @@ from .auth import LoginConfig, LoginSession
 from .events import UpstreamProtocolViolation
 
 AUTH_STATE_TTL_SECONDS = 600
-# 官方插件会挑一个本地空闲端口并真的监听；本服务走 ticket 轮询，不监听，
-# 用一个固定占位端口即可（门户只把它原样拼进 redirect_uri）。
+# 官方插件会挑一个本地空闲端口并真的监听；本服务走「粘贴回调链接」通道，
+# 不监听，用一个固定占位端口即可（门户只把它原样拼进 redirect_uri，换 token
+# 时也要原样回传，故两端必须一致）。
 DEFAULT_CALLBACK_PORT = 12800
+
+
+def _token_error_message(error: Exception) -> str:
+    """令牌端点错误 → 用户可读文案（带上游原文，便于定位）。"""
+    body = getattr(error, "body", b"") or b""
+    text = body.decode("utf-8", errors="replace").strip()
+    return f"CodeArts token exchange rejected: {text[:200]}" if text \
+        else "CodeArts token exchange rejected"
+
+
+def extract_authorization_code(raw: str) -> str:
+    """从粘贴内容里取授权码。
+
+    接受三种输入：完整回调 URL（`http://127.0.0.1:12800/oauth/callback?code=…`）、
+    只截取的 query 串（`code=…&state=…`）、以及用户只复制的裸 code 值。
+    """
+    value = (raw or "").strip()
+    if not value:
+        return ""
+    if "://" not in value and "code=" not in value and "?" not in value:
+        return value                                     # 裸 code
+    query = urlsplit(value).query if "://" in value or "?" in value else value
+    codes = parse_qs(query).get("code") or []
+    return codes[0].strip() if codes else ""
 
 
 @dataclass
@@ -100,11 +126,15 @@ class CodeArtsOAuth:
             await self._client.aclose()
 
     async def start(self, username: str) -> AuthSession:
-        """生成 PKCE/ticket/DPoP 私钥并登记 state（不触达上游，纯本地构造）。"""
+        """生成 PKCE/ticket/DPoP 私钥并登记 state（不触达上游，纯本地构造）。
+
+        flow="paste"：门户把 code 302 回 `127.0.0.1:{port}`（服务端不监听），
+        前端因此展示「粘贴回调链接」入口，走 `/upstream/complete` 由服务端换 token。
+        """
         session = codearts_auth.new_login_session(self.config, port=self.port)
         reservation = self.store.begin(username, session)
-        return AuthSession(flow="poll", state=reservation,
-                           auth_url=session.auth_url, interval=5,
+        return AuthSession(flow="paste", state=reservation,
+                           auth_url=session.auth_url, interval=None,
                            callback_url=None)
 
     async def poll(self, auth_state: str, username: str) -> AuthResult | None:
@@ -112,11 +142,44 @@ class CodeArtsOAuth:
         session = self.store.session(auth_state, username)
         if session is None:
             raise UpstreamProtocolViolation("unknown or consumed auth state")
-        tokens = await codearts_auth.poll_ticket(
-            self._http, self.config,
-            ticket_id=session.ticket_id, secret=session.secret)
+        try:
+            tokens = await codearts_auth.poll_ticket(
+                self._http, self.config,
+                ticket_id=session.ticket_id, secret=session.secret)
+        except codearts_auth.TokenEndpointError as error:
+            # ticket 通道对服务端常被判「无效 ticketId」——门户实际走回调通道，
+            # 这里把上游原文转成受控 400，提示用户改走「粘贴回调链接」。
+            raise UpstreamProtocolViolation(_token_error_message(error)) from error
         if not tokens:
             return None                              # 等待用户在门户授权
+        return self._finish(auth_state, username, tokens, session)
+
+    async def complete_callback(self, raw_url: str, auth_state: str,
+                                username: str) -> AuthResult:
+        """用浏览器回跳链接里的 `code` 换 token（服务端无法监听 127.0.0.1 回调）。
+
+        门户授权完成后浏览器会跳到 `http://127.0.0.1:{port}/oauth/callback?code=…`；
+        本服务不监听该端口，用户把整条地址（或其中 code）粘回来即可。PKCE
+        `code_verifier` 与 DPoP 私钥取自 start 时登记的会话，保证与授权一致。
+        """
+        session = self.store.session(auth_state, username)
+        if session is None:
+            raise UpstreamProtocolViolation("unknown or consumed auth state")
+        code = extract_authorization_code(raw_url)
+        if not code:
+            raise UpstreamProtocolViolation(
+                "callback URL is missing the authorization code")
+        try:
+            exchange = await codearts_auth.exchange_code(
+                self._http, self.config, code=code,
+                code_verifier=session.code_verifier, port=self.port,
+                dpop_private_jwk=session.dpop_private_jwk)
+        except codearts_auth.TokenEndpointError as error:
+            raise UpstreamProtocolViolation(_token_error_message(error)) from error
+        return self._finish(auth_state, username, exchange.tokens, session)
+
+    def _finish(self, auth_state: str, username: str, tokens: dict,
+                session: LoginSession) -> AuthResult:
         credential_data = codearts_auth.credential_data_from_tokens(
             tokens, session.dpop_private_jwk)
         if not self.store.consume(auth_state, username):

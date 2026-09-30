@@ -104,8 +104,9 @@ EP_CHAT_PATH = "/algo/api/v2/service/pro/sse/agent_chat_generation"
 EP_CHAT = EP_CHAT_PATH + "?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1"
 EP_MODELS = "/algo/api/v2/model/list?Encode=1"
 
-# 模型清单接口的**签名 body**：服务端校验签名与请求体一致，裸 GET 会 403，
-# 必须用同一个 qoder_encode("") 既签名又作为请求体发出。
+# 模型清单接口的**签名 body**：服务端校验签名与请求体一致，必须用同一个
+# `qoder_encode("")` 参与签名；方法必须是 GET——带头 POST/PUT 会 400，不带头
+# 裸 GET 会 403。
 MODELS_SIGN_PLAIN = b""
 
 CLIENT_UA = "Go-http-client/2.0"

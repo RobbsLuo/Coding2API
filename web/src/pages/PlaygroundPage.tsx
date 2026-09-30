@@ -3,7 +3,6 @@ import { useState } from "react";
 import {
   Check,
   Loader2,
-  Pin,
   Send,
   TerminalSquare,
   X,
@@ -13,7 +12,7 @@ import type { ModelInfo } from "../api/types";
 import { HelpBlock } from "../components/HelpBlock";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
-import { ModelPicker, modelValue, pickDefaultModel, providerRate } from "../components/ModelPicker";
+import { ModelPicker, modelValue, pickDefaultModel } from "../components/ModelPicker";
 import { Button, Card, Checkbox, Empty, Field, Label, Notice, Panel, Textarea } from "../ui";
 import { providerLabel, providerRank } from "../api/providers";
 
@@ -170,8 +169,7 @@ export function PlaygroundPage() {
             </Field>
           )}
 
-          {selectedInfo && (selectedInfo.credit_rate !== undefined ||
-            selectedInfo.max_input_tokens !== undefined ||
+          {selectedInfo && (selectedInfo.max_input_tokens !== undefined ||
             selectedInfo.max_output_tokens !== undefined ||
             selectedInfo.supports_images !== undefined ||
             selectedInfo.supports_tool_call !== undefined) && (
@@ -180,39 +178,7 @@ export function PlaygroundPage() {
               className="flex flex-row flex-wrap items-center gap-x-4 gap-y-1 bg-muted/40 px-3 py-2 text-xs text-muted-foreground ring-border"
               data-testid="model-meta"
             >
-              {/* 渠道：品牌 logo 标注，多渠道全部显示 */}
-              <span className="inline-flex items-center gap-1.5">
-                渠道
-                {(selectedInfo.providers ?? []).map((pid) => (
-                  <span
-                    key={pid}
-                    className="inline-flex items-center gap-1 font-medium text-foreground"
-                  >
-                    <ProviderIcon provider={pid} size={13} />
-                    {providerLabel(pid)}
-                  </span>
-                ))}
-              </span>
-              {/* 倍率：多渠道按渠道分别显示；单渠道用合并值 */}
-              {selectedInfo.providers && selectedInfo.providers.length > 1 ? (
-                selectedInfo.providers.map((pid) => {
-                  const rate = providerRate(selectedInfo, pid);
-                  return rate === undefined ? null : (
-                    <span key={pid} className="inline-flex items-center gap-1">
-                      <ProviderIcon provider={pid} size={13} />
-                      倍率 <span className="font-medium tabular-nums text-foreground">x{rate}</span>
-                    </span>
-                  );
-                })
-              ) : (
-                selectedInfo.credit_rate !== undefined && (
-                  <span>
-                    消耗倍数 <span className="font-medium tabular-nums text-foreground">
-                      x{selectedInfo.credit_rate}
-                    </span>
-                  </span>
-                )
-              )}
+              {/* 渠道与倍率由模型选择器的「当前选择」条展示，这里只补齐能力/上限 */}
               {selectedInfo.max_input_tokens !== undefined && (
                 <span>
                   最大输入 <span className="font-medium tabular-nums text-foreground">
@@ -241,12 +207,6 @@ export function PlaygroundPage() {
                   {selectedInfo.supports_tool_call
                     ? <Check className="size-3.5 text-ok" />
                     : <X className="size-3.5 text-destructive" />}
-                </span>
-              )}
-              {pinnedProvider && (
-                <span className="inline-flex items-center gap-1 text-primary">
-                  <Pin className="size-3.5" />
-                  已强制 {providerLabel(pinnedProvider)}
                 </span>
               )}
             </Card>

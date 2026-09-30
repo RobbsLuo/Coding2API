@@ -185,4 +185,29 @@ def create_router(services: Services) -> APIRouter:
         cancelled = oauth.store.cancel(str(payload.get("state") or ""), principal.username)
         return {"cancelled": cancelled}
 
+    @router.post("/api/auth/upstream/complete")
+    async def upstream_auth_complete(payload: dict,
+                                     _csrf: None = Depends(csrf_protected),
+                                     principal=Depends(principal_from_request)):
+        """粘贴回调链接完成登录（CodeArts 等回调落不到本服务的渠道）。
+
+        用户把门户回跳地址（`http://127.0.0.1:{port}/oauth/callback?code=…`）
+        粘回来，服务端用其中的 code + start 时登记的 PKCE 私钥换 token，
+        与 `poll` 一样直接落库、不回传 token。
+        """
+        require_admin(principal)
+        provider_id = str(payload.get("provider") or "")
+        oauth = services.upstream_auth.get(provider_id)
+        completer = getattr(oauth, "complete_callback", None)
+        if oauth is None or not callable(completer):
+            raise InvalidRequest(
+                f"provider {provider_id!r} does not support callback completion")
+        result = await completer(str(payload.get("url") or ""),
+                                 str(payload.get("state") or ""), principal.username)
+        credential_id = services.credentials.add(
+            provider=provider_id, credential_data=result.credential_data,
+            nickname=result.nickname, added_by=principal.username)
+        services.schedule_probe(credential_id)
+        return {"status": "success", "credential_id": credential_id}
+
     return router

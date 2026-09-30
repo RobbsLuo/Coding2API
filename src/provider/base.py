@@ -256,7 +256,8 @@ class Model:
 
 @dataclass(slots=True)
 class AuthSession:
-    """flow=poll 用 auth_url/interval；flow=callback 用 callback_url。Q17=C 双轨。"""
+    """登录轨道（Q17=C）：poll 出 auth_url/interval；callback 出 callback_url；
+    paste 出 auth_url 但需用户把回调链接粘回（服务端无法监听本机回环端口）。"""
 
     flow: str                       # "poll" | "callback"
     state: str

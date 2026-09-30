@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
-import { RefreshCw, Search } from "lucide-react";
+import { Check, RefreshCw, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { ModelInfo } from "../api/types";
-import { providerLabel, providerRank } from "../api/providers";
+import { providerChartColor, providerLabel, providerRank } from "../api/providers";
 import { ProviderIcon } from "./ProviderIcon";
 import { Input } from "../ui";
 
@@ -107,6 +107,39 @@ export function matchesFilter(item: PickableModel, query: string, filter: string
   return needle === "" || item.id.toLowerCase().includes(needle);
 }
 
+/** 渠道徽章的展示顺序（CB → TR → 其余），与全站展示顺序一致。 */
+function sortProviders(providers: string[]): string[] {
+  return [...providers].sort((left, right) => providerRank(left) - providerRank(right));
+}
+
+/**
+ * 品牌着色渠道徽章：底/边/字都取自该渠道的图表主色，渠道一眼可辨。
+ *
+ * 倍率作为其内的加粗数字块单独强调（`x0.29`；免费额度显示「免费」）。
+ */
+function ChannelPill({ provider, rate }: { provider: string; rate?: number }) {
+  const color = providerChartColor(provider);
+  return (
+    <span
+      data-testid={`channel-pill-${provider}`}
+      className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold"
+      style={{
+        borderColor: `color-mix(in oklch, ${color} 45%, transparent)`,
+        backgroundColor: `color-mix(in oklch, ${color} 14%, transparent)`,
+        color,
+      }}
+    >
+      <ProviderIcon provider={provider} size={13} />
+      {providerLabel(provider)}
+      {rate !== undefined && (
+        <span className="rounded bg-background/70 px-1 font-bold tabular-nums">
+          {rate === 0 ? "免费" : `x${rate}`}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function ModelRow({
   item,
   selected,
@@ -116,10 +149,8 @@ function ModelRow({
   selected: boolean;
   onSelect: () => void;
 }) {
-  // 渠道徽章顺序与全局展示顺序一致（CB → TR → 其余）
-  const providers = [...item.providers].sort(
-    (left, right) => providerRank(left) - providerRank(right),
-  );
+  const providers = sortProviders(item.providers);
+  const multi = item.providers.length > 1;
   return (
     <button
       type="button"
@@ -128,37 +159,43 @@ function ModelRow({
       data-testid={`model-option-${item.value}`}
       onClick={onSelect}
       className={cn(
-        "flex w-full flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border px-2.5 py-1.5 text-left transition-colors",
-        selected ? "border-primary/40 bg-primary/10" : "border-transparent hover:bg-muted/60",
+        "flex w-full flex-col gap-1.5 rounded-xl border px-3 py-2 text-left transition-colors",
+        selected
+          ? "border-primary/60 bg-primary/[0.08] ring-1 ring-primary/30"
+          : "border-border bg-card hover:border-primary/30 hover:bg-muted/50",
       )}
     >
-      <span className="truncate font-mono text-xs">{item.id}</span>
-      <span className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
-        {providers.map((provider) => {
-          const rate = providerRate(item, provider);
-          return (
-            <span
-              key={provider}
-              className="inline-flex items-center gap-1 text-[11px] text-muted-foreground"
-            >
-              <ProviderIcon provider={provider} size={12} />
-              {providerLabel(provider)}
-              {rate !== undefined && (
-                <span className="font-medium tabular-nums text-foreground">x{rate}</span>
-              )}
-            </span>
-          );
-        })}
+      <span className="flex items-center gap-2">
+        <span
+          className={cn(
+            "flex size-4 shrink-0 items-center justify-center rounded-full",
+            selected ? "bg-primary text-primary-foreground" : "border border-border",
+          )}
+        >
+          {selected && <Check className="size-3" />}
+        </span>
+        <span className="truncate font-mono text-sm font-semibold">{item.id}</span>
+        {multi && (
+          <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+            自动调度
+          </span>
+        )}
+      </span>
+      <span className="flex flex-wrap items-center gap-1.5 pl-6">
+        {providers.map((provider) => (
+          <ChannelPill key={provider} provider={provider} rate={providerRate(item, provider)} />
+        ))}
       </span>
     </button>
   );
 }
 
 /**
- * 可视化模型选择器：搜索框 + 渠道筛选 chips + 分组列表。
+ * 可视化模型选择器：搜索框 + 渠道筛选 chips + 品牌着色的模型卡片列表。
  *
  * 每行展示模型名与该模型可用的**全部渠道徽章**及各自倍率，多渠道模型因此
- * 一眼可辨；单渠道模型归入「仅 XX」分组。选中值语义见 `modelValue`。
+ * 一眼可辨；单渠道模型归入「仅 XX」分组。顶部常驻「当前选择」条，滚动时
+ * 也能看清选中项。选中值语义见 `modelValue`。
  */
 export function ModelPicker({
   models,
@@ -183,6 +220,10 @@ export function ModelPicker({
   // 强制指定渠道后值为 `id@provider`（没有对应行），高亮其基础模型行，
   // 否则列表看起来像什么都没选中。
   const baseValue = value.includes("@") ? value.split("@")[0] : value;
+  const pinnedProvider = value.includes("@") ? value.split("@")[1] : "";
+  const selectedItem =
+    models.find((item) => item.value === value) ??
+    models.find((item) => item.id === baseValue);
 
   return (
     <div className="space-y-3" data-testid="model-picker">
@@ -208,8 +249,8 @@ export function ModelPicker({
               className={cn(
                 "rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
                 filter === option.value
-                  ? "border-primary/40 bg-primary/10 text-primary"
-                  : "border-border text-muted-foreground hover:text-foreground",
+                  ? "border-primary bg-primary text-primary-foreground"
+                  : "border-border text-muted-foreground hover:border-primary/40 hover:text-foreground",
               )}
             >
               {option.label}
@@ -218,23 +259,56 @@ export function ModelPicker({
         </div>
       </div>
 
+      {selectedItem && (
+        <div
+          data-testid="model-current"
+          className="flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-lg border border-primary/40 bg-primary/[0.06] px-3 py-2"
+        >
+          <span className="text-[11px] font-medium text-muted-foreground">当前选择</span>
+          <span className="font-mono text-sm font-semibold">{selectedItem.id}</span>
+          {sortProviders(selectedItem.providers).map((provider) => (
+            <ChannelPill
+              key={provider}
+              provider={provider}
+              rate={providerRate(selectedItem, provider)}
+            />
+          ))}
+          {pinnedProvider && (
+            <span className="rounded-md bg-primary/15 px-1.5 py-0.5 text-[11px] font-semibold text-primary">
+              已强制 {providerLabel(pinnedProvider)}
+            </span>
+          )}
+          {!pinnedProvider && selectedItem.providers.length > 1 && (
+            <span className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+              自动路由
+            </span>
+          )}
+        </div>
+      )}
+
       <div
         role="listbox"
         data-testid="model-list"
-        className="max-h-72 space-y-3 overflow-y-auto pr-1"
+        className="max-h-80 space-y-4 overflow-y-auto pr-1"
       >
         {sections.length === 0 ? (
           <p className="py-6 text-center text-sm text-muted-foreground">没有匹配的模型</p>
         ) : (
           sections.map((section) => (
             <div key={section.key}>
-              <div
-                data-testid={`model-section-${section.key}`}
-                className="mb-1 text-[11px] font-medium tracking-wide text-muted-foreground"
-              >
-                {section.label}
+              <div className="mb-1.5 flex items-center gap-2">
+                <span className="h-3.5 w-1 rounded-full bg-primary/60" />
+                <span
+                  data-testid={`model-section-${section.key}`}
+                  className="text-xs font-semibold text-foreground"
+                >
+                  {section.label}
+                </span>
+                <span className="text-[11px] text-muted-foreground">
+                  {section.items.length} 个
+                </span>
               </div>
-              <div className="space-y-1">
+              <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
                 {section.items.map((item) => (
                   <ModelRow
                     key={item.value}

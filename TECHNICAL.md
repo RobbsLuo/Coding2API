@@ -92,7 +92,7 @@ coding2api/
 │   │   │   ├── events.py        # 累计全文 SSE → 增量 Event；状态/业务码分类
 │   │   │   ├── credential.py    # 凭证类型与解析（AK/SK/STS/DPoP/refresh）
 │   │   │   ├── auth.py          # OAuth2 PKCE 登录（authorize URL + 换 token）
-│   │   │   └── oauth.py         # poll 轨道适配：ticket 轮询登录（AuthStateStore/start/poll）
+│   │   │   └── oauth.py         # 登录适配：回调链接粘贴换 token（AuthStateStore/start/complete_callback）
 │   │   ├── token_expiry.py      # 到期提取：显式 expires_at → JWT exp 回落（B3.3）
 │   │   └── fixtures/            # 真实样本
 │   │       ├── codebuddy/*.sse
@@ -139,7 +139,7 @@ coding2api/
 │       ├── admin_audit.py       # GET /api/audit 审计查询（B5）
 │       ├── activate.py          # 一次性令牌激活流（B5）：GET/POST /api/auth/activate
 │       ├── admin_stats.py       # 统计查询
-│       ├── admin_auth.py        # 登录 / 登出 / 会话 / 自助改密；上游登录 start/poll/cancel
+│       ├── admin_auth.py        # 登录 / 登出 / 会话 / 自助改密；上游登录 start/poll/complete/cancel
 │       ├── playground.py        # 会话调试端点（无需 API Key）
 │       └── streaming.py         # SSE 流包装（长空隙插心跳帧）
 ├── audit/
@@ -634,7 +634,7 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **信封式 SSE**：响应每行是 `data:{"headers":…,"body":"<内层 OpenAI chunk>","statusCodeValue":200}`——即**外层信封包内层 chunk**。解析器逐帧解出 `body`，`body=="[DONE]"` 结束，`statusCodeValue != 200` 判上游错误。内层仍是标准 OpenAI chunk，故事件映射与 kilo 近似（`clean_chunk` 顺带剔除网关补的空噪声 delta）。
 
-**模型发现**：`POST {gateway}/algo/api/v2/model/list?Encode=1`，**签名 body 必须是 `qoder_encode("")` 且请求必须带同款 body**（B 服务端校验签名与 body 一致，裸 GET 会 403）。这与常规「GET 列表」不同，是本渠道最容易踩的坑。
+**模型发现**：`GET {gateway}/algo/api/v2/model/list?Encode=1`，**必须带整套 COSY 签名头**（签名 body 为 `qoder_encode("")`）。裸 GET（无 COSY 头）会 403，带头用 POST/PUT 会被上游 400「Request method ... not supported」拒绝，故方法固定 GET。这是本渠道最容易踩的坑：一度误判为 POST（把「裸 GET 403」当成方法问题），导致清单拉取恒 400、Qoder 模型在 Playground 完全不可见。
 
 **签到与国际版差异**：`/sash/api/v1/me/daily-check-in/{status,claim}`。`claim` 对当日已签账号返回 HTTP 409 或 `result=="ALREADY_CLAIMED"` → 归一为 `already_checked_in=True`（不是失败）。**国际版该端点 404**：`checkin` 归为「本区域无此接口」的 skipped（`ok=False` 但不算失败），避免国际版账号每天报一次假失败。
 
@@ -654,7 +654,7 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **无每日签到**：免费额度**按月重置**，上游没有每日签到接口。因此本渠道**不实现 `checkin`**（`checkin_scope` 也一并省略，后台签到任务自动跳过它）；「保活」由 token 自动 refresh 承担。福利模型发现（`{opengw}/api/v1/gateway/config`）与 Token 领取（`POST /api/v1/benefit/claim`，幂等）在探测时顺带完成。
 
-**登录**：OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens`（authorization_code）换 `{access_key_id, secret_access_key, security_token, expiration, refresh_token}`，DPoP 私钥随 credential 一起生成并加密入库。同为 poll 轨道。
+**登录**：OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens`（authorization_code）换 `{access_key_id, secret_access_key, security_token, expiration, refresh_token}`，DPoP 私钥随 credential 一起生成并加密入库。**门户把授权码 302 回 `http://127.0.0.1:{port}/oauth/callback`——这是用户本机地址，服务端监听不到**；因此本渠道不用 poll 轨道，而是「paste 轨道」：前端展示授权页后，让用户把浏览器地址栏里那条打不开的回调链接粘回，走 `POST /api/auth/upstream/complete` 由服务端用 code + 登录时登记的 PKCE `code_verifier`/DPoP 私钥换 token。（上游另有 `GET {snap-manager}/v1/login/ticket` 兜底轮询通道，但服务端取到时被回「无效 ticketId」，故不采用。）
 
 **节点白名单**：`CODEARTS_ALLOWED_ENDPOINTS` 含 snap 引擎、STS、福利网关、门户四个主机；AK/SK 签名请求只发往白名单。`CODEARTS_CHAT_MIN_INTERVAL`（热更项，默认 5s）独立 pacer。
 

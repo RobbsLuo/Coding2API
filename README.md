@@ -114,7 +114,7 @@ docker compose pull
 
 ## 使用
 
-1. 「凭证管理」添加凭证：CodeBuddy 走设备码登录（或粘贴 `{"token":"..."}`）；TRAE 粘贴凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（凭证里的 `apiHost` 只接受官方地址，其他值会被拒绝导入）；Qoder 走设备码登录；CodeArts 走 OAuth2 授权码登录。OpenCode Zen / Kilo Gateway 无需添加——启动时自动出现一条对应虚拟凭证（若被删除，可在同一面板点「添加 OpenCode Zen」/「添加 Kilo Gateway」补回）
+1. 「凭证管理」添加凭证：CodeBuddy 走设备码登录（或粘贴 `{"token":"..."}`）；TRAE 粘贴凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（凭证里的 `apiHost` 只接受官方地址，其他值会被拒绝导入）；Qoder 走设备码登录；CodeArts 走 OAuth2 授权码登录（授权后把打不开的本地回调链接粘回页面）。OpenCode Zen / Kilo Gateway 无需添加——启动时自动出现一条对应虚拟凭证（若被删除，可在同一面板点「添加 OpenCode Zen」/「添加 Kilo Gateway」补回）
 2. 「API Key」创建 `sk-...`（明文仅显示一次）
 3. 调用：
 
@@ -166,7 +166,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ### CodeArts（真实账号）
 
-`codearts` 渠道接的是 [华为云 CodeArts](https://codearts.huaweicloud.com)，**需要真实账号**：在「凭证管理 → 登录渠道账号」点「登录 CodeArts」，完成 OAuth2 授权后由服务端换取 STS 凭证（AK/SK + security_token + refresh_token + DPoP 私钥）并加密入库。
+`codearts` 渠道接的是 [华为云 CodeArts](https://codearts.huaweicloud.com)，**需要真实账号**：在「凭证管理 → 登录渠道账号」点「登录 CodeArts」，浏览器完成 OAuth2 授权后会跳到一个打不开的本地地址（`http://127.0.0.1:12800/oauth/callback?code=…`）——把地址栏里的**整条链接复制粘贴**到页面出现的输入框里，由服务端换取 STS 凭证（AK/SK + security_token + refresh_token + DPoP 私钥）并加密入库。
 
 几点要知道：
 
