@@ -257,9 +257,9 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 积分 =（输入 token − 缓存命中 token）× 输入单价 + 输出 token × 输出单价 + 缓存命中 token × 缓存单价
 ```
 
-单价取自 TRAE 官方「模型价格参考表」（元/百万 token），按实测换算常数折成积分/百万；部分模型带账号/限时/闲时折扣，已按实测值内置。推算逻辑与单价表集中在 `src/provider/trae/pricing.py`，官方调价或活动变更后改这一处即可。未收录的模型**不推算**（显示 `—`，不拿错误单价凑数）。推算值随明细落库（`usage_events.credit_estimated`），总览与按渠道表只要含推算值就标 `≈`。
+单价取自 TRAE 官方「模型价格参考表」（元/百万 token），按实测换算常数折成积分/百万；部分模型带账号/限时/闲时折扣，已按实测值内置。**缓存命中价可能与刊例差很多**（如 DeepSeek-V4.1-Flash 刊例 0.04 元/M、实测有效 ≈0.07，且该模型缓存占输入 ≈99%），凡实测与「刊例 × 折扣」不符的模型走实测覆盖表，别直接套刊例。推算逻辑、单价与实测覆盖都集中在 `src/provider/trae/pricing.py`，官方调价或活动变更后改这一处即可。未收录的模型**不推算**（显示 `—`，不拿错误单价凑数）。推算值随明细落库（`usage_events.credit_estimated`），总览与按渠道表只要含推算值就标 `≈`。
 
-改动上线前已落库的 TRAE 历史明细（`credit` 为 NULL）用一次性脚本补齐：`python3 scripts/backfill_trae_credit.py`（预览）/ `--apply`（备份后写库，幂等：只补 NULL 且模型已收录的行，已有真值不覆盖），补完顺带重算小时汇总，让 `≈` 覆盖全部时间范围；之后新请求走正常路径，无需再回填。明细只留 90 天，更早的小时汇总无法再推算。
+TRAE 历史明细（`credit` 为 NULL）用脚本补齐，单价表调整后也用同一脚本**重算**旧推算值：`python3 scripts/backfill_trae_credit.py`（预览）/ `--apply`（备份后写库）。处理范围是「`credit` 为 NULL 或 `credit_estimated=1`」的 trae 行——上游真值（`credit_estimated=0`）不覆盖，值未变化的不重写（幂等，重跑返回 0）；补完顺带重算小时汇总，让 `≈` 覆盖全部时间范围。明细只留 90 天，更早的小时汇总无法再推算。
 
 ### 用量统计里的缓存命中率
 

@@ -1465,18 +1465,35 @@ def test_pricing_estimate_credit_official_formula():
 
 
 def test_pricing_measured_discount_applied():
-    """实测折扣模型：官方价 × 折扣（glm 0.675、deepseek-v4.1-flash 0.35）。"""
+    """实测折扣模型：官方价 × 折扣（glm-5.2 输入/输出/缓存一致 0.675）。"""
     from src.provider.trae import pricing
 
-    # glm-5.2 官方 8/28 元 → 320/1120，×0.675 = 216/756
+    # glm-5.2 官方 8/28/2 元 → 320/1120/80，×0.675 = 216/756/54
     assert pricing.estimate_credit(
         "glm-5.2", input_tokens=1_000_000, output_tokens=0) == 216.0
     assert pricing.estimate_credit(
         "glm-5.2", input_tokens=0, output_tokens=1_000_000) == 756.0
-    # deepseek-v4.1-flash 官方 2/8 → 80/320，×0.35 = 28/112
+    assert pricing.effective_prices("glm-5.2") == (216.0, 756.0, 54.0)
+
+
+def test_pricing_measured_effective_override():
+    """实测有效价覆盖：deepseek-v4.1-flash 缓存价是刊例的 ~5 倍，用实测值。"""
+    from src.provider.trae import pricing
+
+    # 刊例 2/8/0.04 元/M 会给出缓存价 0.56；实测有效价是 2.8（≈0.07 元/M）
+    assert pricing.effective_prices("deepseek-v4.1-flash") == (28.0, 112.0, 2.8)
     assert pricing.estimate_credit(
         "deepseek-v4.1-flash", input_tokens=1_000_000, output_tokens=0) == 28.0
-    assert pricing.effective_prices("deepseek-v4.1-flash") == (28.0, 112.0, 0.56)
+    assert pricing.estimate_credit(
+        "deepseek-v4.1-flash", input_tokens=0, output_tokens=1_000_000) == 112.0
+    # 全命中按缓存价 2.8/百万，而不是刊例的 0.56
+    assert pricing.estimate_credit(
+        "deepseek-v4.1-flash", input_tokens=1_000_000, output_tokens=0,
+        cached_tokens=1_000_000) == 2.8
+    # 大小写 / 空白归一后同样命中覆盖
+    assert pricing.effective_prices("  DeepSeek-V4.1-Flash ") == (28.0, 112.0, 2.8)
+    # doubao-seed-2.1-pro 也走覆盖（实测约为刊例 0.104）
+    assert pricing.effective_prices("Doubao-Seed-2.1-Pro") == (24.87, 124.4, 4.93)
 
 
 def test_pricing_unknown_model_and_missing_input():
@@ -1545,7 +1562,7 @@ def _insert_event(db, *, id, ts, provider, model, input_tokens, output_tokens,
 
 
 def test_backfill_estimated_credit_fills_history(repo):
-    """历史 trae 明细补推算：只动 credit 为 NULL 的 trae 行，幂等。"""
+    """历史 trae 明细补推算：只动 credit 为 NULL / credit_estimated=1 的 trae 行，幂等。"""
     from src.provider.trae.backfill import backfill_estimated_credit
 
     _db = repo[2]
@@ -1573,6 +1590,35 @@ def test_backfill_estimated_credit_fills_history(repo):
     assert (rows["d"]["credit"], rows["d"]["credit_estimated"]) == (9.9, 0)
 
     assert backfill_estimated_credit(_db) == 0        # 幂等：补过即跳过
+
+
+def test_backfill_estimated_credit_recomputes_stale_estimates(repo):
+    """单价表调整后，旧推算值（credit_estimated=1）重算；上游真值不动。"""
+    from src.provider.trae.backfill import backfill_estimated_credit
+
+    _db = repo[2]
+    base = 1_700_000_000
+    # 旧推算：deepseek-v4.1-flash 按老缓存价 0.56 算出的 0.56，需刷新为 28.0
+    _insert_event(_db, id="a", ts=base, provider="trae", model="deepseek-v4.1-flash",
+                  input_tokens=1_000_000, output_tokens=0,
+                  credit=0.56, credit_estimated=1)
+    # 已是最新推算：不动
+    _insert_event(_db, id="b", ts=base, provider="trae", model="glm-5.2",
+                  input_tokens=1_000_000, output_tokens=0,
+                  credit=216.0, credit_estimated=1)
+    # 上游真值：不动
+    _insert_event(_db, id="c", ts=base, provider="trae", model="deepseek-v4.1-flash",
+                  input_tokens=1_000_000, output_tokens=0,
+                  credit=9.9, credit_estimated=0)
+
+    assert backfill_estimated_credit(_db) == 1
+    rows = {r["id"]: r for r in _db.connect().execute(
+        "SELECT id, credit, credit_estimated FROM usage_events")}
+    assert (rows["a"]["credit"], rows["a"]["credit_estimated"]) == (28.0, 1)
+    assert (rows["b"]["credit"], rows["b"]["credit_estimated"]) == (216.0, 1)
+    assert (rows["c"]["credit"], rows["c"]["credit_estimated"]) == (9.9, 0)
+
+    assert backfill_estimated_credit(_db) == 0        # 重算后值稳定，再次执行无更新
 
 
 def test_backfill_estimated_credit_rolls_up_hourly(repo):

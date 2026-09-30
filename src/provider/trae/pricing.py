@@ -16,13 +16,19 @@
   minimax-m3 2.1 → 84、step-5-preview 输出 20 → 800，四个模型一致。
 - 部分模型有账号身份 / 限时活动 / 闲时折扣（官方「内置模型限时折扣」页），
   实测有效价低于刊例价，见 `MEASURED_DISCOUNT`。
+- **缓存命中价可能与刊例差很多**：DeepSeek-V4.1-Flash 刊例缓存价 0.04 元/M，
+  但账号实测有效价 ≈0.07 元/M（2.8 积分/M），差约 5 倍；该模型缓存占输入
+  ≈99%，按刊例会把整体积分低估约一半。这类偏差走 `MEASURED_CACHE_CNY`。
 
 未收录的模型返回 None（不推算，展示层仍显示 `—`），避免用错误单价误导。
 单价与折扣会随官方调价 / 活动变化，改动集中在本模块。
 
 换算常数与折扣的实测方法见 `scripts/probe_trae_credit_rate.py`：对同一凭证
 串行「探额度 → 发一次最小对话 → 再探额度」，用两次额度差除以 token 数即可
-反推出该模型的积分 / 百万，多模型多轮拟合 R²≈1 即得本表。
+反推出该模型的积分 / 百万，多模型多轮拟合 R²≈1 即得本表。**缓存价**可用同一
+凭证发两轮相同大 prompt（第二轮命中缓存）单独测；也可用生产 `credit_events`
+的余额差对 `usage_events` 的 token 做反解（见 `scripts/probe_trae_credit_rate.py`
+说明），两条独立路径互相印证。
 """
 
 from __future__ import annotations
@@ -60,12 +66,27 @@ CREDITS_PER_YUAN = 40.0
 
 # 实测有效折扣（官方价 × 40 × 折扣 = 实测积分 / 百万）。折扣随账号身份、
 # 限时活动、闲时时段变化，非固定值；未列出的模型按 1.0（无折扣）。
-#   - glm-5.2 / glm-5.3：会员专属补贴，实测 0.675
-#   - deepseek-v4.1-flash：闲时 5 折（探测时处于闲时时段），实测 0.35
+#   - glm-5.2 / glm-5.3：会员专属补贴，实测 0.675（输入/输出/缓存一致）
 MEASURED_DISCOUNT: dict[str, float] = {
     "glm-5.2": 0.675,
     "glm-5.3": 0.675,
-    "deepseek-v4.1-flash": 0.35,
+}
+
+# 实测有效价覆盖（积分 / 百万 token）：当「刊例价 × 40 × 折扣」与账号实测不符
+# 时直接给实测值。列在这里的模型不再走 `MEASURED_DISCOUNT`。
+#   - deepseek-v4.1-flash：刊例 (2, 8, 0.04) 元/M；账号实测有效价 ≈ (0.70, 2.80,
+#     0.07) 元/M = 积分 (28, 112, 2.8)。输入/输出与「闲时 0.35 折」吻合，但
+#     缓存命中价是刊例的 ~1.75 倍（0.07 vs 0.04）。该模型缓存占输入 ≈99%，
+#     按刊例缓存价会把整体积分低估约一半（实测：全量 229 → 449）。
+#     两条独立路径印证：① 同凭证发两轮相同大 prompt，第二轮命中缓存反解
+#     2.80；② 生产 credit_events 余额差对 usage_events token 反解，38 个窗口
+#     中位数恰好 2.800。
+#   - doubao-seed-2.1-pro：刊例 (6, 30, 1.2) 元/M；账号实测有效价 ≈ (0.62,
+#     3.11, 0.123) 元/M = 积分 (24.87, 124.4, 4.93)，约为刊例的 0.104（三档
+#     同比例，两轮独立探测一致）。数值可疑但稳定，先按实测；若后续对不上再复核。
+MEASURED_EFFECTIVE_OVERRIDE: dict[str, tuple[float, float, float]] = {
+    "deepseek-v4.1-flash": (28.0, 112.0, 2.8),
+    "doubao-seed-2.1-pro": (24.87, 124.4, 4.93),
 }
 
 # 积分保留到 4 位小数：计费量子为 0.0004，4 位足够，避免浮点长尾。
@@ -73,8 +94,14 @@ _QUANTUM = 4
 
 
 def effective_prices(model: str) -> tuple[float, float, float] | None:
-    """模型 → 实际积分单价 (输入, 输出, 缓存命中) / 百万 token；未收录返回 None。"""
+    """模型 → 实际积分单价 (输入, 输出, 缓存命中) / 百万 token；未收录返回 None。
+
+    优先级：实测有效价覆盖 > 刊例价 × 40 × 实测折扣 > 刊例价 × 40。
+    """
     key = model.strip().lower()
+    override = MEASURED_EFFECTIVE_OVERRIDE.get(key)
+    if override is not None:
+        return override
     entry = LIST_PRICES_CNY.get(key)
     if entry is None:
         return None

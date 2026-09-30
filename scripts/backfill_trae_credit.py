@@ -7,9 +7,10 @@
 让统计页的 `≈` 覆盖全部时间范围。
 
 判定（保守）：
-  - 只处理 `provider='trae' AND credit IS NULL` 的明细；
-  - 模型在单价表内才推算，未收录的保持 NULL（展示层仍显示 `—`）；
-  - 已有 credit 的行不覆盖（保留上游真值）。
+  - 处理 `provider='trae'` 且 `credit IS NULL`（历史明细，补齐）或
+    `credit_estimated=1`（本服务旧推算值，单价表调整后重算）的行；
+  - 模型在单价表内才推算，未收录的保持原样（展示层仍显示 `—`）；
+  - 上游真值（`credit_estimated=0`）不覆盖；值未变化的行也不重写。
 
 补完明细后全量重算 `usage_hourly`（幂等 upsert），使汇总的 `credit_sum` /
 `credit_estimated_known` 与明细一致。汇总永久保留、明细只留 90 天，所以更早
@@ -38,21 +39,30 @@ from src.provider.trae.backfill import backfill_estimated_credit  # noqa: E402
 from src.stats.collector import StatsCollector  # noqa: E402
 
 
-def pending(conn) -> list[tuple[str, int, float]]:
-    """待补行列表：(model, 条数, 合计推算积分)，只含模型已收录的行。"""
+def pending(conn) -> list[tuple[str, int, float, int]]:
+    """待处理行列表：(model, 条数, 合计推算积分, 其中重算条数)，只含模型已收录的行。
+
+    「重算」指 `credit_estimated = 1` 的旧推算值（单价表调整后需刷新）；
+    其余为 `credit IS NULL` 的历史明细。
+    """
     counts: dict[str, list] = {}
-    for model, input_tokens, output_tokens, cached_tokens in conn.execute(
-            "SELECT model, input_tokens, output_tokens, cached_tokens FROM usage_events "
-            "WHERE provider = 'trae' AND credit IS NULL"):
-        credit = pricing.estimate_credit(
+    for model, input_tokens, output_tokens, cached_tokens, credit, estimated in conn.execute(
+            "SELECT model, input_tokens, output_tokens, cached_tokens, credit, "
+            "credit_estimated FROM usage_events WHERE provider = 'trae' "
+            "AND (credit IS NULL OR credit_estimated = 1)"):
+        new = pricing.estimate_credit(
             model, input_tokens=input_tokens, output_tokens=output_tokens,
             cached_tokens=cached_tokens)
-        if credit is None:
+        if new is None:
             continue
-        entry = counts.setdefault(model, [0, 0.0])
+        if credit is not None and credit == new:
+            continue  # 已是最新，无需处理
+        entry = counts.setdefault(model, [0, 0.0, 0])
         entry[0] += 1
-        entry[1] += credit
-    return [(model, count, total) for model, (count, total) in sorted(counts.items())]
+        entry[1] += new
+        if estimated:
+            entry[2] += 1
+    return [(model, c, t, r) for model, (c, t, r) in sorted(counts.items())]
 
 
 class _DbAdapter:
@@ -103,13 +113,14 @@ def main(argv: list[str] | None = None) -> int:
     conn = database.connect()
     todo = pending(conn)
     if not todo:
-        print("没有需要补的 TRAE 历史明细")
+        print("没有需要处理的 TRAE 历史明细")
         return 0
-    for model, count, total in todo:
-        print(f"  {model:<28} x{count:<5} ≈{total:.4f}")
-    total_rows = sum(count for _, count, _ in todo)
-    total_credit = sum(credit for _, _, credit in todo)
-    print(f"共 {total_rows} 条明细待补，合计 ≈{total_credit:.4f} 积分")
+    for model, count, total, recompute in todo:
+        note = f"（其中重算 {recompute}）" if recompute else ""
+        print(f"  {model:<28} x{count:<5} ≈{total:.4f}{note}")
+    total_rows = sum(count for _, count, _, _ in todo)
+    total_credit = sum(credit for _, _, credit, _ in todo)
+    print(f"共 {total_rows} 条明细待处理，合计 ≈{total_credit:.4f} 积分")
 
     if not args.apply:
         print("预览模式，未修改数据库；确认无误后加 --apply 执行")
@@ -118,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
     target = backup(db_path)
     updated = backfill_estimated_credit(_DbAdapter(conn))
     StatsCollector(_DbAdapter(conn)).rollup_hourly()
-    print(f"已补 {updated} 条明细，小时汇总已重算（备份: {target}）")
+    print(f"已处理 {updated} 条明细，小时汇总已重算（备份: {target}）")
     return 0
 
 
