@@ -16,7 +16,7 @@ from ..audit.actions import (
     ACTION_LOGIN_SUCCESS,
     ACTION_USER_PASSWORD_CHANGE,
 )
-from ..auth.rbac import ROLE_ADMIN, UnauthorizedError, require_admin
+from ..auth.rbac import ROLE_ADMIN, ROLE_OPERATOR, UnauthorizedError, require_admin
 from ..auth.session import create_session_token
 from ..auth.users import create_password_hash, verify_password
 from ..compat.openai.request import InvalidRequest
@@ -82,6 +82,7 @@ def create_router(services: Services) -> APIRouter:
         must_change = services.users.must_change_password(username)
         response = JSONResponse({"username": username,
                                  "is_admin": role == ROLE_ADMIN,
+                                 "is_operator": role in (ROLE_ADMIN, ROLE_OPERATOR),
                                  "role": role,
                                  "must_change_password": must_change})
         issue_session(response, services, username, role=role,
@@ -98,6 +99,7 @@ def create_router(services: Services) -> APIRouter:
     @router.get("/api/auth/session")
     async def session_info(principal=Depends(principal_from_request)):
         return {"username": principal.username, "is_admin": principal.is_admin,
+                "is_operator": principal.is_operator,
                 "role": principal.role,
                 "must_change_password": services.users.must_change_password(
                     principal.username)}

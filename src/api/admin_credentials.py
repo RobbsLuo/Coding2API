@@ -81,7 +81,10 @@ def create_router(services: Services) -> APIRouter:
                 "token_expiry_warning_seconds":
                     services.settings.token_expiry_warning_seconds,
                 "viewer": principal.username,
-                "is_admin": principal.is_admin}
+                "is_admin": principal.is_admin,
+                # 凭证写门槛（admin 或 operator）：前端据此决定是否显示
+                # 导入/启停/删除等写操作，与后端 require_operator 同一口径。
+                "is_operator": principal.is_operator}
 
     @router.post("/api/credentials")
     async def import_credential(payload: dict,

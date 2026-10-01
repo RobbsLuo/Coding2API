@@ -595,7 +595,7 @@ response.completed | response.incomplete
 
 **三层引导（`auth/bootstrap.py`）**：① 导入 `users.txt`；② 把 `ADMIN_USERNAMES` 里点名的用户提权为 `admin`（这个 env 只剩**引导期**语义——DB 里已有角色后就不再是权威来源，否则「管理台降级某人 + env 还写着他」会互相打架）；③ **仍无活跃 admin 则启动失败**，消息给出两条恢复路径（补 `users.txt` 重启 / 跑 `scripts/create_user.py`）。防锁死的最后一层在这里收口。
 
-**角色**：`admin` / `operator` / `viewer`（`rbac.py`）。`require_admin` 管用户管理与配置（`admin_auth` / `admin_settings` / `admin_users` / `admin_audit`），`require_operator` 管凭证写操作（`admin_credentials` 的全部分支）。`Principal` 保留 `is_admin` 位置不动（既有 32 处 `Depends(principal_from_request)` 与前端 `is_admin` 字段零改动），`role` 追加为第三字段，`is_operator` 是派生 property（`is_admin or role == "operator"`）——升级时只动判定，不动调用面。
+**角色**：`admin` / `operator` / `viewer`（`rbac.py`）。`require_admin` 管用户管理与配置（`admin_auth` / `admin_settings` / `admin_users` / `admin_audit`），`require_operator` 管凭证写操作（`admin_credentials` 的全部分支）。`Principal` 保留 `is_admin` 位置不动（既有 32 处 `Depends(principal_from_request)` 与前端 `is_admin` 字段零改动），`role` 追加为第三字段，`is_operator` 是派生 property（`is_admin or role == "operator"`）——升级时只动判定，不动调用面。**统计口径**同样以 `is_operator` 为界：`admin_stats._scope` 让 admin 与 operator 传 `username` 生效（默认 `None` = 全量），viewer 恒回落到本人——凭证运维者需要看自己维护渠道的整体健康，与 README 角色表的「全部统计」一致。登录 / 会话响应的 `is_operator` 是同一 property 的透出，供前端决定凭证页写 UI 与统计页用户列可见性（此前前端只认 `is_admin`，operator 被误降为只读）。
 
 **会话吊销不建会话表**：`users.session_epoch` 进签名 Cookie 的 `ep` 声明（`build_session_token`/`verify_session_token` 返回 `(username, epoch)`）。改密、降级、禁用/启用、硬删一律 `session_epoch + 1`，`principal_from_request` 每请求比一次，旧 Cookie 当场失效。**角色不进 Cookie，每请求现读 DB**——把角色塞进已签名的 Cookie 会让降级延迟到 Cookie 过期才生效，与「降级必须立即可信」直接冲突。向后兼容：老 Cookie 无 `ep` 按 0 处理（不是拒绝），显式给了非法值（非整数）才拒绝。
 
@@ -844,9 +844,9 @@ class Scheduler:
 | token 到期（token_expiry.py） | —（读路径，非任务） | 从显式 `expires_at` 或 JWT `exp` 派生到期时间，写 `credentials.token_expires_at`（§3.9） |
 | token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token；到期时间同上（CB 实测无显式字段） |
 | 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态）；失败持续重试 |
-| 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5） | 仅 CodeBuddy：8 类领取；结果落 `growth_events` + 回写 `credentials.growth_last_result` |
+| 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5） | 仅 CodeBuddy：7 类领取；结果落 `growth_events` + 回写 `credentials.growth_last_result` |
 | 活跃上报（activity.py，默认关闭） | 每 10 分钟醒一次，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点，北京时间）窗口内执行 | 仅 CodeBuddy：补发一条 `chat_request_send` 续连登；按「endpoint + userId」隔离、当日封账；成功落一行 `growth_events` |
-| 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理；同期限回收 `credit_events`（§3.10） |
+| 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理；同期限回收 `credit_events`（§3.10）与 `audit_events`（§3.13） |
 | 模型目录刷新（`api/models.py::list_models`，注入式） | 每 `MODEL_CATALOG_MINUTES`（默认 30，下限 5） | 兜底重拉各渠道模型表（走同一条 `list_models`：TTL 门禁 + 逐渠道 publish + 落盘快照）。周期 30 分钟是跟着 zen 免费模型判活缓存（`MODELS_CACHE_TTL_SECONDS`，30 分钟）对齐——更密不会让 zen 多探一次，只是白打其余渠道的 `/models` |
 
 **模型目录刷新为什么是「注入协程」而不是一个 tasks 模块**：`tasks/` 不 import `api/`（反向依赖会把 HTTP 层拖进后台任务），所以 `TaskRunner` 接的是 `model_catalog: Callable[[], Awaitable[object]] | None`，由 `main.lifespan` 闭包注入；`None`（老调用方 / 测试）时不装配这条循环，管理台也不展示这张卡片——与 growth / activity 的处理一致。

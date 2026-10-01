@@ -355,6 +355,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         runner = build_runner(credentials, registry, app_.state.stats_collector, runtime,
                               growth_events=app_.state.growth_events,
                               credit_events=credit_events,
+                              audit=audit,
                               model_catalog=_refresh_model_catalog)
         app_.state.task_runner = runner
         await runner.start()

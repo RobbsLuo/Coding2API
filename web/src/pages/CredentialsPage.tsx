@@ -163,7 +163,8 @@ export function CredentialsPage() {
   const expiryWindow = data?.expiry_window_seconds ?? 0;
   const expirySecondaryWindow = data?.expiry_secondary_window_seconds ?? 0;
   const tokenWarning = data?.token_expiry_warning_seconds ?? 0;
-  const isAdmin = data?.is_admin ?? false;
+  // 写门槛是 admin 或 operator（与后端 require_operator 同口径）；viewer 只读。
+  const canWrite = data?.is_operator ?? false;
   const now = Date.now() / 1000;
 
   const refresh = () => client.invalidateQueries({ queryKey: ["admin"] });
@@ -444,12 +445,12 @@ export function CredentialsPage() {
         description="凭证是调度池里可被选中的渠道账号。登录渠道授权或粘贴 JSON 导入后，可在此探测剩余额度、签到或启停。"
         icon={<Database className="size-5" />}
       />
-      {!isAdmin && (
+      {!canWrite && (
         <div data-testid="readonly-banner">
-          <Notice tone="muted">只读模式：仅管理员可以导入、启停或删除凭证。</Notice>
+          <Notice tone="muted">只读模式：仅管理员与操作员可以导入、启停或删除凭证。</Notice>
         </div>
       )}
-      {credentials.length === 0 && isAdmin && (
+      {credentials.length === 0 && canWrite && (
         <div data-testid="first-run-hint">
           <Notice tone="muted">
             还没有凭证。用下方「登录渠道账号」完成 CodeBuddy / TRAE 授权，或直接粘贴凭证 JSON 导入；
@@ -513,7 +514,7 @@ export function CredentialsPage() {
                 <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期额度行＝调度窗口内即将过期、会被优先消耗的额度；主窗口（36h）打平时才比较次窗口（7 天）。CodeArts 的额度是 token（每日 1000 万池、0 点清零），其余渠道是积分。数字后的下箭头展开该凭证的积分记录（两次额度探测之间的净变化）。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">token 剩余<ColumnHint text="access token 距离到期还有多久，取自凭证本身（为 0 表示渠道未给到期信息，显示 —）。预刷新任务每小时检查一次，进入 24 小时窗口即自动续期；「已过期」意味着上游会拒绝该凭证，需重新登录。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">成长中心<ColumnHint text="仅 CodeBuddy：最近一轮成长中心（旅行礼物/任务/连登兑换/盲盒）的领取结果与时间，由定时任务或手动执行写入。" /></span></TableHead>
-                {isAdmin && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测/签到：行内常驻按钮。更多操作（⋯）：指定、暂停/恢复、删除。指定：设为优先；暂停/删除：摘对话流量或移除。积分记录入口在额度列数字后的下箭头。" /></span></TableHead>}
+                {canWrite && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测/签到：行内常驻按钮。更多操作（⋯）：指定、暂停/恢复、删除。指定：设为优先；暂停/删除：摘对话流量或移除。积分记录入口在额度列数字后的下箭头。" /></span></TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -525,7 +526,7 @@ export function CredentialsPage() {
                     expiryWindow={expiryWindow}
                     expirySecondaryWindow={expirySecondaryWindow}
                     tokenWarning={tokenWarning}
-                    isAdmin={isAdmin}
+                    canWrite={canWrite}
                     busy={busy}
                     confirming={confirmDelete === credential.id}
                     creditsOpen={creditEvents?.credentialId === credential.id}
@@ -534,7 +535,7 @@ export function CredentialsPage() {
                   />
                   {creditEvents?.credentialId === credential.id && (
                     <TableRow data-testid={`credit-row-${credential.id}`}>
-                      <TableCell colSpan={isAdmin ? 8 : 7} className="p-0">
+                      <TableCell colSpan={canWrite ? 8 : 7} className="p-0">
                         <CreditDrawer
                           credentialId={credential.id}
                           events={creditEvents.events}
@@ -550,7 +551,7 @@ export function CredentialsPage() {
         )}
       </Panel>
 
-      {isAdmin && (
+      {canWrite && (
         <div className="grid gap-6 lg:grid-cols-2" data-testid="add-credentials">
           <Panel title="登录渠道账号">
             <div className="flex flex-wrap items-center gap-3">
@@ -808,7 +809,7 @@ function Row({
   expiryWindow,
   expirySecondaryWindow,
   tokenWarning,
-  isAdmin,
+  canWrite,
   busy,
   confirming,
   creditsOpen,
@@ -820,7 +821,7 @@ function Row({
   expiryWindow: number;
   expirySecondaryWindow: number;
   tokenWarning: number;
-  isAdmin: boolean;
+  canWrite: boolean;
   busy: boolean;
   confirming: boolean;
   creditsOpen: boolean;
@@ -888,10 +889,10 @@ function Row({
             </span>
             {/* 积分记录入口紧贴它要解释的数字：曾经在「更多操作」菜单里，
                 打开前看不到任何余额上下文。下箭头是行内展开语义（非弹层），
-                展开后箭头翻转。仅管理员可用——接口本身就是管理员权限。
+                展开后箭头翻转。仅 admin/operator 可用——接口本身就是该门槛。
                 zen / kilo 免费层没有额度接口、也没有额度探测，积分记录恒为空，
                 入口只会给出「无记录」的空抽屉，直接不渲染。 */}
-            {isAdmin && supportsQuotaProbe(credential.provider) && (
+            {canWrite && supportsQuotaProbe(credential.provider) && (
               <Button
                 // 项目封装的 Button：variant="default" 即 shadcn 的 outline
                 variant="default"
@@ -947,7 +948,7 @@ function Row({
           <span>—</span>
         )}
       </TableCell>
-      {isAdmin && (
+      {canWrite && (
         <TableCell>
           <div className="flex items-center justify-end gap-1">
             {confirming ? (

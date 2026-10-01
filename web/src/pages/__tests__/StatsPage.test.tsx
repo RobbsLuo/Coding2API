@@ -298,6 +298,19 @@ describe("StatsPage", () => {
     expect(screen.getByTestId("events-next")).toBeEnabled();
   });
 
+  it("运维角色看全量统计，用户列与管理员一致可见", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": EVENTS_PAGE1,
+    });
+    renderPage(<StatsPage />, { ...READER, is_operator: true, role: "operator" });
+    await settle();
+
+    expect(within(screen.getByTestId("events-table")).getByText("用户")).toBeInTheDocument();
+  });
+
   it("请求明细分页：下一页按 before 取数，上一页回退，换每页数量重置", async () => {
     const fetchSpy = mockFetch({
       "/api/stats/overview": OVERVIEW,

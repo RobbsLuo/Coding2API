@@ -148,6 +148,42 @@ def test_operator_can_write_credentials_but_not_users(tmp_path, monkeypatch):
         assert client.get("/api/audit").status_code == 403
 
 
+def test_operator_write_flag_and_full_stats_scope(tmp_path, monkeypatch):
+    """operator 的凭证写门槛与全量统计（回归 §review）。
+
+    修复前前端只认 is_admin，operator 在管理台被当只读，与 README 角色表不符；
+    统计口径也把 operator 与 viewer 一并限定为「只看自己」，与「全部统计」矛盾。
+    """
+    app = _app(tmp_path, monkeypatch, users=[
+        ("root", "rootpw", ROLE_ADMIN, True),
+        ("op", "oppw", ROLE_OPERATOR, True),
+    ])
+    with TestClient(app) as client:
+        _login(client, "op", "oppw")
+        creds = client.get("/api/credentials").json()
+        assert creds["is_admin"] is False and creds["is_operator"] is True
+        session = client.get("/api/auth/session").json()
+        assert session["is_operator"] is True and session["is_admin"] is False
+        # 统计不过滤到本人：operator 看全量（viewer 才只看自己）
+        overview = client.get("/api/stats/overview", params={"username": "someone-else"})
+        assert overview.status_code == 200
+
+
+def test_stats_scope_operator_vs_viewer():
+    """_scope：admin/operator 传 username 生效，viewer 恒回落到本人。"""
+    from src.api.admin_stats import _scope
+    from src.auth.rbac import Principal
+
+    admin = Principal("root", True, ROLE_ADMIN)
+    operator = Principal("op", False, ROLE_OPERATOR)
+    viewer = Principal("guest", False, ROLE_VIEWER)
+    assert _scope(admin, "alice") == "alice"
+    assert _scope(operator, "alice") == "alice"
+    assert _scope(operator, None) is None
+    assert _scope(viewer, "alice") == "guest"
+    assert _scope(viewer, None) == "guest"
+
+
 # --------------------------------------------------------------- 防锁死
 
 def test_cannot_demote_last_active_admin(tmp_path, monkeypatch):

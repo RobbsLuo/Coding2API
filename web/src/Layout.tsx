@@ -30,7 +30,8 @@ interface NavItem {
   label: string;
   icon: typeof LayoutDashboard;
   end?: boolean;
-  adminOnly?: boolean;
+  /** 仅 admin 可见/可达；operator 与 viewer 都不显示（它们管理 API 均为 admin-only） */
+  adminNav?: boolean;
 }
 
 const NAV: NavItem[] = [
@@ -40,9 +41,9 @@ const NAV: NavItem[] = [
   { to: "/stats", label: "用量统计", icon: BarChart3 },
   { to: "/playground", label: "Playground", icon: TerminalSquare },
   // 仅管理员可见（页面自身也会被后端 403 挡住，这里只是不误导）
-  { to: "/users", label: "用户管理", icon: UsersRound, adminOnly: true },
-  { to: "/audit", label: "审计日志", icon: ScrollText, adminOnly: true },
-  { to: "/settings", label: "任务与配置", icon: SlidersHorizontal, adminOnly: true },
+  { to: "/users", label: "用户管理", icon: UsersRound, adminNav: true },
+  { to: "/audit", label: "审计日志", icon: ScrollText, adminNav: true },
+  { to: "/settings", label: "任务与配置", icon: SlidersHorizontal, adminNav: true },
 ];
 
 /** 品牌标记：多路渠道管道汇聚进单一出口（Coding2API 的产品故事）。 */
@@ -72,7 +73,7 @@ export function Layout({ session }: { session: SessionInfo }) {
     window.location.href = "/login";
   };
   // 非管理员看不到用户管理/审计/配置：写接口是 admin-only，露出入口只会误导
-  const nav = NAV.filter((item) => !item.adminOnly || session.is_admin);
+  const nav = NAV.filter((item) => !item.adminNav || session.is_admin);
 
   return (
     <div className="flex min-h-full flex-col">

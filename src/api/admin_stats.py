@@ -9,8 +9,12 @@ from .deps import Services, principal_from_request
 
 
 def _scope(principal: Principal, username: str | None) -> str | None:
-    """admin 传 username 可查全局/指定人；普通用户永远只能看自己。"""
-    return username if principal.is_admin else principal.username
+    """admin/operator 传 username 可查全局/指定人；viewer 永远只能看自己。
+
+    operator 是「凭证运维」角色，按 PROPOSAL §4.7 与 README 的角色表应能看
+    全量统计（否则看不到自己维护的渠道整体健康）；viewer 才是严格自负。
+    """
+    return username if principal.is_operator else principal.username
 
 
 def create_router(services: Services) -> APIRouter:

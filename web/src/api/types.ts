@@ -194,6 +194,8 @@ export const ROLE_OPTIONS: { value: Role; label: string }[] = [
 export interface SessionInfo {
   username: string;
   is_admin: boolean;
+  /** 凭证写门槛（admin 或 operator）：决定凭证页写操作与全量统计是否可见 */
+  is_operator: boolean;
   role: Role;
   /** 首登/被重置后必须改密：为 true 时前端弹不可关闭的改密对话框 */
   must_change_password: boolean;
@@ -255,6 +257,8 @@ export interface CredentialsResponse {
   token_expiry_warning_seconds: number;
   viewer: string;
   is_admin: boolean;
+  /** 凭证写门槛（admin 或 operator）：与后端 require_operator 同口径 */
+  is_operator: boolean;
 }
 
 export interface UpstreamAuthStart {

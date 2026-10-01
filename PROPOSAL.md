@@ -318,9 +318,9 @@ v1 只接 OpenAI 出口，但上游 SSE 解析到「中立事件」这一步独�
 
 | 角色 | 能做什么 | 判定依赖 | 典型用途 |
 |---|---|---|---|
-| `admin` | 用户管理、运行时配置、凭证全部写操作 | `require_admin` | 维护者 |
-| `operator` | 凭证写操作（导入 / 删除 / 启停 / pin / 切换账号 / 签到 / 成长） | `require_operator` | 日常运维 |
-| `viewer` | 只读（含统计与审计查看） | 无（登录即可） | 观察者 |
+| `admin` | 用户管理、运行时配置、凭证写操作、全量统计、审计日志 | `require_admin` | 维护者 |
+| `operator` | 凭证写操作（导入 / 删除 / 启停 / pin / 切换账号 / 签到 / 成长）、全量统计 | `require_operator` | 日常运维 |
+| `viewer` | 只读（看仪表盘、凭证列表、自己的统计、Playground；审计为 admin-only） | 无（登录即可） | 观察者 |
 
 **鉴权链**（每个管理面请求）：签名 Cookie（HMAC，payload 带用户名与 `session_epoch`）→ 用户仍存在且启用 → epoch 与 DB 一致 → 角色现读 DB。四者缺一即 401；**角色不进 Cookie**，所以降级立即生效，不必等 Cookie 过期。
 

@@ -292,7 +292,7 @@ describe("display helpers", () => {
 describe("Layout", () => {
   it("管理员用户菜单显示角色与退出，且导航全量", async () => {
     renderWithProviders(<Layout session={{
-      username: "root", is_admin: true, role: "admin", must_change_password: false,
+      username: "root", is_operator: true, is_admin: true, role: "admin", must_change_password: false,
     }} />);
     // 导航始终可见
     expect(screen.getByText("凭证管理")).toBeInTheDocument();
@@ -309,7 +309,7 @@ describe("Layout", () => {
 
   it("普通用户展开用户菜单显示只读标记", async () => {
     renderWithProviders(<Layout session={{
-      username: "guest", is_admin: false, role: "viewer", must_change_password: false,
+      username: "guest", is_operator: false, is_admin: false, role: "viewer", must_change_password: false,
     }} />);
     await userEvent.click(screen.getByRole("button", { name: "用户菜单" }));
     const menu = await screen.findByRole("menu");
@@ -318,7 +318,7 @@ describe("Layout", () => {
 
   it("操作员角色显示操作员，且看不到管理员导航", async () => {
     renderWithProviders(<Layout session={{
-      username: "op", is_admin: false, role: "operator", must_change_password: false,
+      username: "op", is_operator: true, is_admin: false, role: "operator", must_change_password: false,
     }} />);
     // 凭证管理对操作员可见
     expect(screen.getByText("凭证管理")).toBeInTheDocument();
@@ -332,7 +332,7 @@ describe("Layout", () => {
 
   it("管理员可见用户管理与审计入口", () => {
     renderWithProviders(<Layout session={{
-      username: "root", is_admin: true, role: "admin", must_change_password: false,
+      username: "root", is_operator: true, is_admin: true, role: "admin", must_change_password: false,
     }} />);
     expect(screen.getByText("用户管理")).toBeInTheDocument();
     expect(screen.getByText("审计日志")).toBeInTheDocument();
@@ -340,7 +340,7 @@ describe("Layout", () => {
 
   it("用户菜单可打开修改密码对话框", async () => {
     renderWithProviders(<Layout session={{
-      username: "root", is_admin: true, role: "admin", must_change_password: false,
+      username: "root", is_operator: true, is_admin: true, role: "admin", must_change_password: false,
     }} />);
     await userEvent.click(screen.getByRole("button", { name: "用户菜单" }));
     await userEvent.click(await screen.findByTestId("menu-change-password"));
@@ -392,7 +392,7 @@ describe("App 路由守卫", () => {
       "fetch",
       vi.fn(async () =>
         new Response(JSON.stringify({
-          username: "alice", is_admin: false, role: "operator", must_change_password: true,
+          username: "alice", is_operator: true, is_admin: false, role: "operator", must_change_password: true,
         }), { status: 200 }),
       ),
     );

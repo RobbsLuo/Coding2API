@@ -24,12 +24,16 @@ export type TestSession = Pick<SessionInfo, "username"> &
   Partial<Omit<SessionInfo, "username">>;
 
 export function fullSession(session: TestSession): SessionInfo {
-  const { role, ...rest } = session;
+  const { role, is_operator, ...rest } = session;
+  const resolvedRole = role ?? (session.is_admin ? "admin" : "viewer");
   return {
     must_change_password: false,
     is_admin: rest.is_admin ?? false,
     ...rest,
-    role: role ?? (session.is_admin ? "admin" : "viewer"),
+    role: resolvedRole,
+    // 未显式给 is_operator 时按角色推导（admin/operator 可写），
+    // 让老测试继续只传 { username, is_admin } 即可。
+    is_operator: is_operator ?? (Boolean(rest.is_admin) || resolvedRole === "operator"),
   } as SessionInfo;
 }
 

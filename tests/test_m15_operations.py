@@ -2546,6 +2546,7 @@ def test_login_success_sets_httponly_cookie(tmp_path):
                                json={"username": "root", "password": "rootpw"})
         assert response.status_code == 200
         assert response.json() == {"username": "root", "is_admin": True,
+                                   "is_operator": True,
                                    "role": "admin", "must_change_password": False}
         cookie = response.headers["set-cookie"]
         assert "httponly" in cookie.lower() and "samesite=lax" in cookie.lower()
@@ -2649,6 +2650,7 @@ def test_credentials_endpoint_exposes_admin_flag(tmp_path):
         client.post("/api/auth/login", json={"username": "guest", "password": "guestpw"})
         body = client.get("/api/credentials").json()
         assert body["viewer"] == "guest" and body["is_admin"] is False
+        assert body["is_operator"] is False
 
 
 def test_credentials_endpoint_exposes_expiring_credits(tmp_path):
@@ -3961,6 +3963,23 @@ def test_retention_task_purges_expired_model_cooldowns(repo):
     assert report["expired_coolings"] == 1
     # 不传 credentials（旧调用方）时不报错，计数为 0
     assert RetentionTask(collector).run_once()["expired_coolings"] == 0
+
+
+def test_retention_task_prunes_audit_events(repo):
+    """留存任务按保留期回收审计流水；未注入时计数为 0（README「审计保留 90 天」）。"""
+    from src.db.repo import AuditRepository
+
+    _credentials, db = repo
+    audit = AuditRepository(db)
+    # 两条都远在过去；retention_days=0 → cutoff=当前时刻，两条都 < cutoff 即被删
+    audit.record(actor="root", action="login.success", now=100)
+    audit.record(actor="root", action="login.failure", now=200)
+    collector = StatsCollector(db)
+    report = RetentionTask(collector, retention_days=0, audit=audit).run_once()
+    assert report["purged_audit"] == 2
+    assert audit.query() == []
+    # 不传 audit（旧调用方）时不报错，计数为 0
+    assert RetentionTask(collector).run_once()["purged_audit"] == 0
 
 
 def test_list_all_exposes_model_cooldowns(tmp_path):

@@ -5,12 +5,15 @@ import { jsonResponse, makeCredential, mockFetch, renderPage, settle, userEvent 
 
 const ADMIN = { username: "root", is_admin: true } as const;
 const READER = { username: "guest", is_admin: false } as const;
+// 运维角色：能写凭证但非管理员（is_operator 由后端按 role 派生）
+const OPERATOR = { username: "op", is_admin: false, role: "operator" } as const;
 
-function listBody(credentials: unknown[], isAdmin = true) {
+function listBody(credentials: unknown[], isAdmin = true, isOperator = isAdmin) {
   return { credentials, expiry_window_seconds: 129600,
             expiry_secondary_window_seconds: 604800,
             token_expiry_warning_seconds: 3600,
-            viewer: isAdmin ? "root" : "guest", is_admin: isAdmin };
+            viewer: isAdmin ? "root" : "guest", is_admin: isAdmin,
+            is_operator: isOperator };
 }
 
 describe("CredentialsPage", () => {
@@ -48,6 +51,17 @@ describe("CredentialsPage", () => {
     expect(screen.queryByTestId("credits-cred_1")).not.toBeInTheDocument();
     expect(screen.queryByTestId("import-submit")).not.toBeInTheDocument();
     expect(screen.queryByTestId("start-login")).not.toBeInTheDocument();
+  });
+
+  it("运维角色（非管理员）可见写操作，与后端 require_operator 同口径", async () => {
+    mockFetch({ "/api/credentials": listBody([makeCredential()], false, true) });
+    renderPage(<CredentialsPage />, OPERATOR);
+    await settle();
+
+    expect(screen.queryByTestId("readonly-banner")).not.toBeInTheDocument();
+    expect(screen.getByTestId("actions-cred_1")).toBeInTheDocument();
+    expect(screen.getByTestId("credits-cred_1")).toBeInTheDocument();
+    expect(screen.getByTestId("import-submit")).toBeInTheDocument();
   });
 
   it("冷却中的凭证显示剩余时间", async () => {

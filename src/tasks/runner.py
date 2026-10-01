@@ -276,7 +276,7 @@ def _as_report(result: object) -> dict[str, Any]:
 
 
 def build_runner(credentials, providers: dict, stats_collector, config,
-                 growth_events=None, credit_events=None,
+                 growth_events=None, credit_events=None, audit=None,
                  model_catalog: Callable[[], Awaitable[object]] | None = None,
                  status: TaskStatusStore | None = None) -> TaskRunner:
     """按配置装配后台任务（Pacer 由两个 provider 共享）。
@@ -286,6 +286,9 @@ def build_runner(credentials, providers: dict, stats_collector, config,
 
     credit_events 同理：为 None 时保留流水清理不启用（表仍会随探测增长，
     但不影响功能；生产路径总是传入）。
+
+    audit 同理：为 None 时不清理审计流水（表仍会随登录/写操作增长；
+    生产路径总是传入）。
 
     model_catalog 同理：None 时不装配模型目录刷新循环（老调用方与测试保持
     原行为）；生产路径传入「跑一轮 list_models」的协程。
@@ -315,7 +318,7 @@ def build_runner(credentials, providers: dict, stats_collector, config,
         refresh=RefreshTask(credentials, providers, skew_seconds=config.refresh_skew_hours * 3600,
                             now=lambda: int(time.time()), pacer=pacer),
         retention=RetentionTask(stats_collector, credentials=credentials,
-                                credit_events=credit_events),
+                                credit_events=credit_events, audit=audit),
         quota_probe_minutes=lambda: config.quota_probe_minutes,
         growth_interval_minutes=lambda: config.growth_interval_minutes,
         model_catalog=model_catalog,

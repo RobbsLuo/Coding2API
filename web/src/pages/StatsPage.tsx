@@ -139,7 +139,7 @@ export function StatsPage() {
     <div className="space-y-6" data-testid="stats-page">
       <PageHeader
         title="用量统计"
-        description="按时间范围查看请求量、成功率与 token 消耗；数据按 API Key 归属用户统计，普通用户只能看自己。"
+        description="按时间范围查看请求量、成功率与 token 消耗；数据按 API Key 归属用户统计，管理员与操作员可看全量，只读用户只能看自己。"
         icon={<BarChart3 className="size-5" />}
       />
 
@@ -294,7 +294,7 @@ export function StatsPage() {
               <TableHeader>
                 <TableRow>
                   <TableHead>时间</TableHead>
-                  {session.is_admin && <TableHead>用户</TableHead>}
+                  {session.is_operator && <TableHead>用户</TableHead>}
                   <TableHead>渠道</TableHead>
                   <TableHead>凭证</TableHead>
                   <TableHead>模型</TableHead>
@@ -313,7 +313,7 @@ export function StatsPage() {
                     <TableCell className="whitespace-nowrap tabular-nums">
                       {formatTime(row.ts)}
                     </TableCell>
-                    {session.is_admin && <TableCell>{row.username}</TableCell>}
+                    {session.is_operator && <TableCell>{row.username}</TableCell>}
                     <TableCell>
                       <span className="inline-flex items-center gap-1.5">
                         <ProviderIcon provider={row.provider} size={13} />

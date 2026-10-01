@@ -435,8 +435,8 @@ def test_login_response_exposes_role_and_flag(tmp_path, monkeypatch):
     with TestClient(app) as client:
         body = client.post("/api/auth/login",
                            json={"username": "op", "password": "oppw"}).json()
-        assert body == {"username": "op", "is_admin": False, "role": ROLE_OPERATOR,
-                        "must_change_password": True}
+        assert body == {"username": "op", "is_admin": False, "is_operator": True,
+                        "role": ROLE_OPERATOR, "must_change_password": True}
     db.close()
 
 
