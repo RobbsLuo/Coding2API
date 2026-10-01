@@ -1023,21 +1023,21 @@ def test_models_cache_used_when_fetch_fails(tmp_path):
     with TestClient(app) as client:
         # 第一次：拉取成功，缓存写入
         first = client.get("/v1/models", headers=auth).json()["data"]
-        assert {item["id"] for item in first} == {"glm-5.2", "DeepSeek-V4-Flash"}
+        assert {item["id"] for item in first} == {"glm-5.2", "deepseek-v4-flash"}
         cached_keys = app.state.services.model_list_cache["trae"].keys()
         assert cached_keys == {"glm-5.2", "deepseek-v4-flash"}
 
         # 第二次：拉取失败 → 用缓存兜底，列表不缺模型
         trae.fail = True
         second = client.get("/v1/models", headers=auth).json()["data"]
-        assert {item["id"] for item in second} == {"glm-5.2", "DeepSeek-V4-Flash"}
+        assert {item["id"] for item in second} == {"glm-5.2", "deepseek-v4-flash"}
         assert {item["id"] for item in second} and all(
             item["providers"] == ["trae"] for item in second)
 
         # 恢复后重新拉取成功，缓存刷新
         trae.fail = False
         third = client.get("/v1/models", headers=auth).json()["data"]
-        assert {item["id"] for item in third} == {"glm-5.2", "DeepSeek-V4-Flash"}
+        assert {item["id"] for item in third} == {"glm-5.2", "deepseek-v4-flash"}
 
 
 def test_models_blocklist_filters_noise_and_old(tmp_path):
@@ -1086,6 +1086,51 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
         ids2 = {item["id"] for item in client.get(
             "/v1/models", headers={"Authorization": f"Bearer {key2}"}).json()["data"]}
     assert "kimi-k2.6" not in ids2 and "glm-5.2" in ids2
+
+
+def test_models_blocklist_matches_normalized_id_and_display_name(tmp_path):
+    """黑名单按**归一后的对外写法**匹配：归一键、展示名都能命中。
+
+    对外 id 改为归一键后，用户照列表里看到的名字写黑名单必须生效——
+    按 zen 归一键 `longcat-2.5-preview`、展示名 `MiMo V2.5` 都能滤掉；
+    Qoder 的原代号 `kmodel_latest` 归一键是展示名派生的 `kimi-k3`，按
+    `kimi-k3` 也能滤。同时老口径（原代号 `custom_model_*`）仍生效。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        MODEL_BLOCKLIST="longcat-2.5-preview,MiMo V2.5,kimi-k3,"
+                                        "custom_model_*")
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return list(self._models)
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    from src.provider.base import Model
+
+    app = build_app(settings, providers={
+        "zen": Stub("zen", [Model(id="longcat-2.5-preview-free",
+                                  name="LongCat 2.5 Preview"),
+                            Model(id="mimo-v2.5-free", name="MiMo V2.5")]),
+        "qoder": Stub("qoder", [Model(id="kmodel_latest", name="Kimi-K3"),
+                                Model(id="custom_model_claude")]),
+    })
+    for provider_id in ("zen", "qoder"):
+        app.state.credentials.add(provider=provider_id, credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        ids = {item["id"] for item in client.get(
+            "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]}
+    # 归一键 / 展示名 / 原代号三种写法命中即滤
+    assert "longcat-2.5-preview" not in ids
+    assert "mimo-v2.5" not in ids
+    assert "kimi-k3" not in ids
+    assert ids == set()
 
 
 def test_models_blocklist_hot_reload_applies_without_waiting_for_ttl(tmp_path):
@@ -1306,8 +1351,9 @@ def test_models_name_merge_includes_zen_and_guards_colliding_names(tmp_path):
     with TestClient(app) as client:
         ids = {m["id"] for m in client.get(
             "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]}
-    # zen 单渠道：对外 id 仍是原 id，展示名是清洗后的可读名
-    assert ids == {"longcat-2.5-preview-free", "mimo-v2.5-free",
+    # 对外 id 一律是归一键：zen 的 free 尾缀被去掉；CB 重名条目因退回原代号
+    # （展示名不唯一）也保持原 id。
+    assert ids == {"longcat-2.5-preview", "mimo-v2.5",
                    "hy4-preview", "hy4-preview-x"}
     # 重名未按名入键：不得留下指向其中一个的歧义名字别名。两个原 id 各自
     # 映射回自己是正确的（用户按原 id 直连仍要能定位到本渠道）。
@@ -1315,11 +1361,11 @@ def test_models_name_merge_includes_zen_and_guards_colliding_names(tmp_path):
         "hy4-preview": "hy4-preview", "hy4-preview-x": "hy4-preview-x"}
 
 
-def test_models_name_merge_single_channel_keeps_raw_id(tmp_path):
-    """单渠道条目对外仍用上游原 id（Qoder `kmodel_latest`）；展示名也能直连。
+def test_models_single_channel_outward_id_is_normalized(tmp_path):
+    """单渠道条目的对外 id 也是归一键（Qoder `kmodel_latest` → `kimi-k3`）。
 
-    只有多条渠道真正并到一起时才改用归一键——单渠道保持原 id，避免无谓
-    改名；展示名同样登记为别名，用户按 `Kimi K3` / `kimi-k3` 也能落到该渠道。
+    原代号只留在别名表与 `by_provider.raw_id`，转发时换回；用户按原代号直连
+    仍能命中。
     """
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
 
@@ -1344,12 +1390,12 @@ def test_models_name_merge_single_channel_keeps_raw_id(tmp_path):
     with TestClient(app) as client:
         data = client.get("/v1/models", headers={
             "Authorization": f"Bearer {key}"}).json()["data"]
-    assert [m["id"] for m in data] == ["kmodel_latest"]
-    assert data[0]["name"] == "Kimi K3"                    # 展示名统一清洗
+    assert [m["id"] for m in data] == ["kimi-k3"]      # 对外 id 用归一键
+    assert data[0]["name"] == "Kimi K3"                # 展示名统一清洗
     aliases = app.state.services.model_aliases
-    assert aliases["qoder"]["kmodel_latest"] == "kmodel_latest"
-    assert aliases["qoder"]["kimi-k3"] == "kmodel_latest"   # 归一后的名字键
-    assert aliases["qoder"]["kimi k3"] == "kmodel_latest"   # 原样的展示名也能直连
+    assert aliases["qoder"]["kimi-k3"] == "kmodel_latest"    # 对外 id → 原代号
+    assert aliases["qoder"]["kmodel_latest"] == "kmodel_latest"  # 原代号也能直连
+    assert aliases["qoder"]["kimi k3"] == "kmodel_latest"    # 原样的展示名也能直连
 
 
 def test_models_name_merge_cross_channel_via_normalized_key(tmp_path):
@@ -1379,7 +1425,7 @@ def test_models_name_merge_cross_channel_via_normalized_key(tmp_path):
         # 归一到同一键（`longcat-2.5-preview`）→ 并成一条，对外 id 用该键
         "zen": Stub("zen", [Model(id="longcat-2.5-preview-free", name="")]),
         "trae": Stub("trae", [Model(id="longcat-2.5-preview", name="")]),
-        # kilo 的 `kilo-auto/free` 归一到 `kilo-auto`，单渠道仍用原 id 对外
+        # kilo 的 `kilo-auto/free` 归一到 `kilo-auto`，单渠道对外 id 用归一键
         "kilo": Stub("kilo", [Model(id="kilo-auto/free", name="")]),
     })
     for provider_id in ("zen", "trae", "kilo"):
@@ -1389,7 +1435,7 @@ def test_models_name_merge_cross_channel_via_normalized_key(tmp_path):
         data = {m["id"]: m for m in client.get(
             "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]}
 
-    assert set(data) == {"longcat-2.5-preview", "kilo-auto/free"}
+    assert set(data) == {"longcat-2.5-preview", "kilo-auto"}
     merged = data["longcat-2.5-preview"]
     assert merged["providers"] == ["trae", "zen"]
     assert merged["name"] == "LongCat 2.5 Preview"
@@ -1400,7 +1446,7 @@ def test_models_name_merge_cross_channel_via_normalized_key(tmp_path):
     aliases = app.state.services.model_aliases
     assert aliases["zen"]["longcat-2.5-preview"] == "longcat-2.5-preview-free"
     assert aliases["zen"]["longcat-2.5-preview-free"] == "longcat-2.5-preview-free"
-    # kilo 单渠道：对外 id 是原 id，但归一后的键也能直连到同一渠道
+    # kilo 单渠道：对外 id 是归一键，原代号仍可直连
     assert aliases["kilo"]["kilo-auto"] == "kilo-auto/free"
     assert aliases["kilo"]["kilo-auto/free"] == "kilo-auto/free"
 
@@ -1437,7 +1483,7 @@ def test_models_sentinel_names_not_merged_across_channels(tmp_path):
     with TestClient(app) as client:
         data = [m for m in client.get(
             "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]]
-    assert {m["id"] for m in data} == {"kilo-auto/free", "auto"}
+    assert {m["id"] for m in data} == {"kilo-auto", "auto"}
     assert all(len(m["providers"]) == 1 for m in data)   # 各渠道单列
 
 
@@ -1493,12 +1539,11 @@ def test_models_outward_id_disambiguated_on_collision(tmp_path):
     assert aliases["zen"]["glm-5"] == "glm-5"
 
 
-def test_models_outward_id_triple_collision_falls_back_to_group_key():
-    """三方撞车、全部候选被占 → 用归一键兜底（`_disambiguate` 的 `for...else`）。
+def test_models_outward_id_collision_falls_back_to_channel_suffix():
+    """对外 id 撞车且候选被占时，依次退回「原代号归一键 → 加渠道名后缀」。
 
-    entry 的对外 id、主渠道原 id、归一形式全被先定稿的条目占掉时，退回
-    构造唯一的归一键，保证对外 id 有值。真实构造里归一键按组唯一、不会与
-    已有 id 重复，这里只验证「走到兜底分支」。
+    entry 的对外 id 与主渠道原代号归一键都被先定稿的条目占掉时，退回加渠道名
+    后缀的候选，保证对外 id 唯一。
     """
     from src.api.models import _disambiguate
 
@@ -1506,11 +1551,29 @@ def test_models_outward_id_triple_collision_falls_back_to_group_key():
         {"id": "x", "key": "kx", "providers": ["p1"], "raw_ids": {"p1": "x"}},
         {"id": "y", "key": "ky", "providers": ["p2"], "raw_ids": {"p2": "y"}},
         {"id": "k4", "key": "k4", "providers": ["p3"], "raw_ids": {"p3": "k4"}},
-        # id/原 id/归一形式全被占（x、y、k4）：只能走 else 兜底
-        {"id": "x", "key": "k4", "providers": ["p1"], "raw_ids": {"p1": "y"}},
+        # id（x）与主渠道原代号归一（y）都被占：退回 `y-p1`
+        {"id": "x", "key": "k9", "providers": ["p1"], "raw_ids": {"p1": "y"}},
     ]
     _disambiguate(entries)
-    assert [e["id"] for e in entries] == ["x", "y", "k4", "k4"]
+    assert [e["id"] for e in entries] == ["x", "y", "k4", "y-p1"]
+
+
+def test_models_outward_id_collision_falls_back_to_numeric_suffix():
+    """候选全被占时追加数字后缀（`_unique_suffix` 兜底），保证对外 id 唯一。"""
+    from src.api.models import _disambiguate
+
+    entries = [
+        {"id": "x", "key": "kx", "providers": ["p1"], "raw_ids": {"p1": "x"}},
+        {"id": "y", "key": "ky", "providers": ["p2"], "raw_ids": {"p2": "y"}},
+        {"id": "y-p1", "key": "kz", "providers": ["p3"],
+         "raw_ids": {"p3": "y-p1"}},
+        {"id": "x-2", "key": "kw", "providers": ["p4"],
+         "raw_ids": {"p4": "x-2"}},
+        # 候选 x / y / y-p1 与后缀 x-2 全被占 → 用 x-3 兜底
+        {"id": "x", "key": "k9", "providers": ["p1"], "raw_ids": {"p1": "y"}},
+    ]
+    _disambiguate(entries)
+    assert [e["id"] for e in entries] == ["x", "y", "y-p1", "x-2", "x-3"]
 
 
 def test_models_list_orders_cb_then_trae_first(tmp_path):
