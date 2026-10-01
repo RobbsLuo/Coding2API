@@ -21,6 +21,7 @@ from src.db.crypto import CredentialCipher, CredentialDecryptError, derive_key
 from src.engine.scheduler import (
     BLOCKED_BASE_SECONDS,
     BLOCKED_MAX_SECONDS,
+    CONCURRENCY_COOLDOWN_SECONDS,
     EXPIRY_WINDOW_SECONDS,
     MODEL_COOLDOWN_MAX_SECONDS,
     MODEL_COOLDOWN_SECONDS,
@@ -459,6 +460,54 @@ def test_model_cooldown_escalates_and_caps():
 def test_model_cooldown_without_model_degrades_to_soft():
     """流内错误没带模型名时不能写孤儿记录，退化为账号级软冷却。"""
     out = Scheduler().note_error(cand(), ErrKind.MODEL, NOW, model=None)
+    assert out.cooling_until == NOW + SOFT_COOLDOWN_SECONDS
+    assert out.model_cooldowns is None
+
+
+def test_concurrency_cooldown_is_short_and_fixed():
+    """并发打满（TM.00001041）固定短冷却、不翻倍：在途排空即恢复。
+
+    一次打满锁 10min（MODEL 基数）太久；60s 覆盖在途排空（实测最大 38s）
+    加余量。重复打满只重 armed，不 escalates。
+    """
+    s = Scheduler()
+    out = s.note_error(cand(), ErrKind.CONCURRENCY, NOW, model="deepseek-v4.1-flash")
+    entry = out.model_cooldowns["deepseek-v4.1-flash"]
+    assert (entry.cooling_until, entry.hits, entry.reason) == (
+        NOW + CONCURRENCY_COOLDOWN_SECONDS, 1, "concurrency")
+    assert CONCURRENCY_COOLDOWN_SECONDS == 60
+    # 模型级条目不得顺带写账号级冷却
+    assert out.cooling_until is None and not out.disabled
+    # 重复打满：hits 累计（可观测），时长仍固定、不翻倍
+    again = s.note_error(
+        _with_model_cooldown(cand(), "deepseek-v4.1-flash", cooling_until=NOW,
+                             hits=1, reason="concurrency"),
+        ErrKind.CONCURRENCY, NOW, model="deepseek-v4.1-flash")
+    entry = again.model_cooldowns["deepseek-v4.1-flash"]
+    assert (entry.cooling_until, entry.hits) == (NOW + CONCURRENCY_COOLDOWN_SECONDS, 2)
+    # hits 很大也不翻倍封顶
+    huge = s.note_error(
+        _with_model_cooldown(cand(), "deepseek-v4.1-flash", cooling_until=NOW,
+                             hits=99, reason="concurrency"),
+        ErrKind.CONCURRENCY, NOW, model="deepseek-v4.1-flash")
+    assert huge.model_cooldowns["deepseek-v4.1-flash"].cooling_until == (
+        NOW + CONCURRENCY_COOLDOWN_SECONDS)
+
+
+def test_concurrency_cooldown_reason_switch_resets_hits():
+    """原因切换重新计数：MODEL 6004 的 hits 不能带到并发短冷却里。"""
+    s = Scheduler()
+    out = s.note_error(
+        _with_model_cooldown(cand(), "m", cooling_until=NOW, hits=5, reason="model"),
+        ErrKind.CONCURRENCY, NOW, model="m")
+    entry = out.model_cooldowns["m"]
+    assert (entry.hits, entry.reason) == (1, "concurrency")
+    assert entry.cooling_until == NOW + CONCURRENCY_COOLDOWN_SECONDS
+
+
+def test_concurrency_cooldown_without_model_degrades_to_soft():
+    """并发错误没带模型名时同样退化为账号级软冷却。"""
+    out = Scheduler().note_error(cand(), ErrKind.CONCURRENCY, NOW, model=None)
     assert out.cooling_until == NOW + SOFT_COOLDOWN_SECONDS
     assert out.model_cooldowns is None
 

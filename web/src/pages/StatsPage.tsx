@@ -381,7 +381,7 @@ export function StatsPage() {
           隐私：不保存提示词、回答、请求头、Token、工具参数与原始错误体；逐请求明细保留 90 天，小时汇总永久保留；按 API Key 归属用户统计。
         </p>
         <p>
-          credit 为渠道可选字段，经常不返回；TRAE 上游不给单请求积分，带 ≈ 的数值是按官方单价折算；CodeArts 福利模型按每日 token 池 1:1 扣减，带 ≈ 的值＝输入+输出 token（CodeBuddy 为上游返回的真值）。健康度只依赖额度探测接口，主指标是 token 数。缓存命中率 = 命中 token ÷ 输入 token，仅在上报过缓存时展示。
+          credit 为渠道可选字段，经常不返回；TRAE 上游不给单请求积分，带 ≈ 的数值是按官方单价折算；CodeArts 福利模型按每日 token 池 1:1 扣减后折成积分（1 积分 = 10000 token），带 ≈ 的值即该请求折算后的积分（CodeBuddy 为上游返回的真值）。健康度只依赖额度探测接口，主指标是 token 数。缓存命中率 = 命中 token ÷ 输入 token，仅在上报过缓存时展示。
         </p>
       </Notice>
     </div>

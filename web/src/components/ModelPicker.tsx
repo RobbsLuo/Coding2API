@@ -97,10 +97,20 @@ export function filterOptions(models: PickableModel[]): { value: string; label: 
   return options;
 }
 
-/** 单条是否通过搜索 + 渠道筛选（"all" 不限；"auto" 只留多渠道）。
+/** 该渠道实际请求的 key（raw key）：展示在渠道徽章的 tooltip 上。
  *
- * 搜索同时匹配 id（`qmodel_38max`）与人类可读名（`Qwen3.8-Max`），
- * 用户按任一种都能找到模型。
+ * 对外 id 是归一后的（多渠道条目甚至会用展示名），而转发时发的是各渠道自己
+ * 的原 key（`kilo-auto/free` / `kmodel_latest`）——排障时需要看见后者。
+ */
+function providerRawId(item: ModelInfo, provider: string): string | undefined {
+  return item.by_provider?.[provider]?.raw_id;
+}
+
+/**
+ * 单条是否通过搜索 + 渠道筛选（"all" 不限；"auto" 只留多渠道）。
+ *
+ * 搜索同时匹配对外 id（`kimi-k3`）、展示名（`Kimi K3`）与各渠道原 key
+ * （`kilo-auto/free` / `kmodel_latest`），用户按任一种都能找到模型。
  */
 export function matchesFilter(item: PickableModel, query: string, filter: string): boolean {
   if (filter === "auto" && item.providers.length < 2) return false;
@@ -108,12 +118,19 @@ export function matchesFilter(item: PickableModel, query: string, filter: string
     return false;
   }
   const needle = query.trim().toLowerCase();
-  return needle === ""
-    || item.id.toLowerCase().includes(needle)
-    || (item.name ?? "").toLowerCase().includes(needle);
+  if (needle === "") return true;
+  if (item.id.toLowerCase().includes(needle)) return true;
+  if ((item.name ?? "").toLowerCase().includes(needle)) return true;
+  return item.providers.some((provider) =>
+    (providerRawId(item, provider) ?? "").toLowerCase().includes(needle));
 }
 
-/** 展示用主名：优上游人类可读名，缺失时回退内部 id。 */
+/**
+ * 展示用主名：后端已统一清洗过的 `name`，缺失时回退内部 id。
+ *
+ * 清洗在后端做（`src/provider/naming.py`），前端不再按渠道猜怎么美化——
+ * 六条渠道同一口径，`Kimi K3` / `LongCat 2.5 Preview` 都直接可展示。
+ */
 export function displayName(item: { id: string; name?: string }): string {
   const name = (item.name ?? "").trim();
   return name === "" ? item.id : name;
@@ -128,12 +145,22 @@ function sortProviders(providers: string[]): string[] {
  * 品牌着色渠道徽章：底/边/字都取自该渠道的图表主色，渠道一眼可辨。
  *
  * 倍率作为其内的加粗数字块单独强调（`x0.29`；免费额度显示「免费」）。
+ * `rawId` 非空时作为 tooltip：该渠道实际请求的 key。
  */
-function ChannelPill({ provider, rate }: { provider: string; rate?: number }) {
+function ChannelPill({
+  provider,
+  rate,
+  rawId,
+}: {
+  provider: string;
+  rate?: number;
+  rawId?: string;
+}) {
   const color = providerChartColor(provider);
   return (
     <span
       data-testid={`channel-pill-${provider}`}
+      title={rawId}
       className="inline-flex items-center gap-1 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold"
       style={{
         borderColor: `color-mix(in oklch, ${color} 45%, transparent)`,
@@ -204,7 +231,12 @@ function ModelRow({
       </span>
       <span className="flex flex-wrap items-center gap-1.5 pl-6">
         {providers.map((provider) => (
-          <ChannelPill key={provider} provider={provider} rate={providerRate(item, provider)} />
+          <ChannelPill
+            key={provider}
+            provider={provider}
+            rate={providerRate(item, provider)}
+            rawId={providerRawId(item, provider)}
+          />
         ))}
       </span>
     </button>
@@ -299,6 +331,7 @@ export function ModelPicker({
               key={provider}
               provider={provider}
               rate={providerRate(selectedItem, provider)}
+              rawId={providerRawId(selectedItem, provider)}
             />
           ))}
           {pinnedProvider && (

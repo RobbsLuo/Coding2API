@@ -93,6 +93,7 @@ coding2api/
 │   │   │   ├── credential.py    # 凭证类型与解析（AK/SK/STS/DPoP/refresh）
 │   │   │   ├── auth.py          # OAuth2 PKCE 登录（authorize URL + 换 token）
 │   │   │   └── oauth.py         # 登录适配：回调链接粘贴换 token（AuthStateStore/start/complete_callback）
+│   │   ├── naming.py             # 模型名归一（六渠道统一三字段：raw_id / 归一键 / 展示名）
 │   │   ├── token_expiry.py      # 到期提取：显式 expires_at → JWT exp 回落（B3.3）
 │   │   └── fixtures/            # 真实样本
 │   │       ├── codebuddy/*.sse
@@ -311,11 +312,33 @@ def health(q: Quota | None) -> HealthScore:
 
 **失败也进 TTL（负缓存）**：`model_list_fetched_at` 记的是**上次尝试**时间（成功或失败都刷新），TTL（300s）内不再打上游——有缓存就继续用缓存，没缓存就跳过该渠道。此前只在成功时记时间戳，上游一次抖动（尤其 zen 探活的十几秒）会让其后**每次** `/v1/models` 都重跑一遍拉取，把列表请求打成一串超时。
 
-**展示顺序（CB / TR 优先）**：合并后按 `_sort_key(entry)` 排序——渠道权重 `_PROVIDER_RANK`（codebuddy 0 → trae 1 → qoder 2 → codearts 3 → 其余 4，未知名 4），多渠道条目取 `min` 权重（含 CB 即进第一段、含 TR 进第二段），同级再按对外 id 字典序。原实现是纯名字典序。Playground 改用 `web/src/components/ModelPicker.tsx`：渠道筛选 chips、分组列表（多渠道置顶 + 单渠道按渠道分组）与「强制指定渠道」都走 `web/src/api/providers.ts` 的 `PROVIDER_ORDER` / `providerRank`，与后端权重对齐；分组顺序不再依赖模型列表的首次出现顺序。「强制指定渠道」只列当前模型**真实可用**的渠道（此前固定列全部渠道，能选出上游打不通的 `model@provider`）。仅影响展示顺序，调度选号（`model_resolver` 的 `KNOWN_PROVIDERS` 顺序）不变。
+**逐渠道增量 publish（2026-10-01）**：别名表原先在 `list_models` **末尾**统一 `clear()+update()`，于是被最慢的渠道拖着——zen 的 `fetch_models` 要逐个免费模型真发探活（实测 12–15s），这段时间里别名表是空的，`executor._narrow_providers` 拿不到归属就按「全部渠道」保守放行，扁平名请求真实打一轮不认该模型的上游（实测 CodeBuddy 对 kilo 免费模型回 `11102 service info not found`、TRAE 回 `4001`，各留下 (凭证,模型) 负缓存与 `invalid_request` 统计）。现在每拉完一条渠道就 `publish_aliases()` 一次（从 `model_list_cache` 重建 + 就地更新，executor 的闭包引用同一个 dict），不再等最慢的那条。合并逻辑收敛到 `merged_entries()`：缓存兜底 / TTL 复用 / 落盘恢复三条路径共用同一段代码，行为一致。
 
-**合并键按可读名（2026-09-30）**：CodeBuddy / TRAE / Qoder / CodeArts 四条渠道**按人类可读名（`Model.name` 小写）合并**，而非上游 id——同一模型在各渠道的内部代号互不相同（Qoder `kmodel_latest` = TRAE `kimi-k3` = CodeBuddy `kimi-k3-1`），只有名字能对齐（`_merge_key`）。zen / kilo 排除在外：它们的 `name` 不是模型名（zen 恒 `opencode`、kilo 是长标题），按名合并会把无关模型误并成一条。同一渠道内重名（CodeBuddy `hy4-preview` / `hy4-preview-x` 都叫「Hy4 preview」）时冲突项退回上游 id，否则其中一个会被同键覆盖而消失。
+**落盘快照（2026-10-01，`src/api/model_catalog.py`）**：进程内缓存重启即丢，代价是两处——启动到预热跑完之间别名表为空（就是上面那个扇出），以及某渠道拉取失败时连兜底都没有、模型从 `/v1/models` 整体消失。故每次成功拉取后把**未过滤原始表**原子写进 `DATA_DIR/model_catalog.json`（tmp + `os.replace`，格式 `{"version":1,"providers":{pid:{"saved_at":…,"models":[…]}}}`，序列化字段取 `dataclasses.fields(Model)`，新增字段自动带上、未知键忽略）。启动时 `main._restore_model_list` **同步**读回并立即 publish 别名表（`restore_model_catalog`，零上游请求、异常只记日志），预热退化为纯后台刷新；恢复出来的 zen 免费集顺带回填 `ZenClient.seed_models_cache`，重启不必再逐个真发探活。三条纪律：① 落盘/读回一律宽容（损坏、版本不符、字段缺失、记录非 dict 只丢该渠道，`saved_at` 超 7 天整条丢弃）；② 存原始表不过滤（黑名单热更要立即生效）；③ 恢复只覆盖「已注册且当前有可用凭证」的渠道——用户暂停的渠道不因快照复活。
 
-**对外 id 与请求名的分离**（`_finalize`）：多渠道真正并到一起的条目，对外 id（`/v1/models` 的 `id`、选择器里的值）取**可读名小写**（`kimi-k3` / `qwen3.7-max`）；单渠道条目仍用**上游原始 id**（Qoder `kmodel_latest` 原样展示，避免无谓改名）。无论对外 id 是什么，转发到某渠道时一律经 `services.model_aliases` 映射回**该渠道自己登记的原 id**（`aliases["qoder"]["kimi-k3"] = "kmodel_latest"`，由 `executor.upstream_model_name` 消费）；原 id 与可读名两条键都登记，用户按原 id 直连或按可读名直连都能落到对应渠道。同渠道重名项与 zen 等非名合并渠道不登记可读名键，避免歧义别名。
+**展示顺序（CB / TR 优先）**：合并后按 `_sort_key(entry)` 排序——渠道权重 `_PROVIDER_RANK`（codebuddy 0 → trae 1 → qoder 2 → codearts 3 → 其余 4，未知名 4），多渠道条目取 `min` 权重（含 CB 即进第一段、含 TR 进第二段），同级再按**归一键**字典序（不是对外 id：`_sort_key` 要在 `_finalize` 之前跑，此时对外 id 尚未算出，而 `_disambiguate` 需要一个确定顺序决定撞 id 时谁保留）。原实现是纯名字典序。Playground 改用 `web/src/components/ModelPicker.tsx`：渠道筛选 chips、分组列表（多渠道置顶 + 单渠道按渠道分组）与「强制指定渠道」都走 `web/src/api/providers.ts` 的 `PROVIDER_ORDER` / `providerRank`，与后端权重对齐；分组顺序不再依赖模型列表的首次出现顺序。「强制指定渠道」只列当前模型**真实可用**的渠道（此前固定列全部渠道，能选出上游打不通的 `model@provider`）。仅影响展示顺序，调度选号（`model_resolver` 的 `KNOWN_PROVIDERS` 顺序）不变。
+
+**命名三字段与归一键（2026-10-01，取代此前「按可读名合并」的分渠道口径）**：六条渠道（codebuddy / trae / zen / kilo / qoder / codearts）的每个模型统一成三个字段，规则集中在渠道中立的 `src/provider/naming.py`（纯函数，不 import 任何 provider 子模块）：
+
+| 字段 | 函数 | 例 |
+|---|---|---|
+| 原代号 `raw_id`（渠道请求 key，**永不改动**） | — | `kmodel_latest`、`kilo-auto/free`、`longcat-2.5-preview-free` |
+| 归一键（合并键 / 多渠道对外 id） | `normalize_model_key` | `kilo-auto`、`longcat-2.5-preview`、`nemotron-3-ultra` |
+| 展示名 `name` | `display_model_name` | `LongCat 2.5 Preview`、`Qwen3.8 Max` |
+
+`normalize_model_key` 剥掉两类上游噪声，再 slug 化（空格/下划线/冒号/括号 → 连字符、小写）。**免费标记**是可用性命名约定、不是模型名的一部分，实测四种形态（2026-10-01，Kilo 一家占三种）：尾缀 `-free`/`_free`（Zen `longcat-2.5-preview-free`）、路径段 `.../free`（`kilo-auto/free`）、冒号尾缀 `:free`（`poolside/laguna-s-2.1:free`）、展示名里的括号词 `(free)`（`NVIDIA: Nemotron 3 Ultra (free)`）。**命名空间前缀**不是模型身份的一部分：路径式 `厂商/模型`（`nvidia/nemotron-3-ultra-550b-a55b:free`、`stealth/space-bunny-alpha`）取**最后一段**，冒号式 `厂商: 模型`（Kilo 展示名 `NVIDIA: ...`，要求冒号后有空白）削掉前缀。只删「整段 / 整词 free」（`freeplay` / `freeball` 这类内嵌形式不动）。点号**不是**分隔（`glm-5.2` 压成 `glm-5-2` 就换了模型）；非 ASCII 字母数字保留（上游名可能有中文后缀，「Kimi K3 长尾」压掉会与「Kimi K3」撞成同一个键）。剥完只剩 free 噪声时回退原串小写，调用方据此回退展示原 id，不产出空键。
+
+`display_model_name` 清洗上游可读名（`Qwen3.8-Max` → `Qwen3.8 Max`、`Hy4 preview` → `Hy4 Preview`、`NVIDIA: Nemotron 3 Ultra (free)` → `Nemotron 3 Ultra`）或直接由 id 派生；品牌与缩写按表纠正（机械 title-case 会把 `DeepSeek`/`MiMo`/`GLM`/`GPT` 写成 `Deepseek`/`Mimo`/`Glm`/`Gpt`）。**幂等**：Zen 的 `pretty_model_name` 现为该函数的薄封装（可换 `free_suffix`），清洗结果再洗一遍不变，故各渠道 client 自行派生过 name 的不会被中心层破坏。
+
+**合并键 = 归一键，六渠道统一**（`_merge_key`）：同一模型在各渠道的内部代号互不相同（Qoder `kmodel_latest` = TRAE `kimi-k3-1` = CodeBuddy `kimi-k3`），纯 id 规则无法对齐，只能靠展示名——归一键就是展示名再 slug 化，故两条路径永远同源。zen / kilo 现在也参与合并（原先排除是因为它们的展示名与别家不同源）：两条免费渠道各用不同命名约定与**不同 id 规格**——Zen 的 id 是 `nemotron-3-ultra-free`，Kilo 的是 `nvidia/nemotron-3-ultra-550b-a55b:free`（带厂商前缀与参数规格后缀），id 对不上；但两边上游展示名都清洗成「Nemotron 3 Ultra」，故走展示名时能并成一条。
+
+**哨兵名不跨渠道合并**（`_SENTINEL_LABELS` = `auto` / `default`）：这些是各上游自己的「自动路由 / 默认模型」占位，语义只在本渠道内成立。Kilo 的 `kilo-auto/free`（上游名 `Auto Free`）与 Qoder 的 `auto` 都归一成 `auto`，却是完全不同的东西；合并会把请求错误路由到别的上游，故退回原 id 的归一键、各自单列。
+
+**同渠道内归一键重复 → 退回原 id 的归一键**（`_merge_key` 返回 `(键, 是否按名入键)`，第二个值由它自己判定，不事后拿 `键 == 归一展示名` 反推：CodeBuddy 的 `hy4-preview` 与其展示名「Hy4 Preview」归一后同键，反推会误当成「按名入键」进而登记歧义别名）。该渠道也不登记歧义的名字别名。
+
+**对外 id 与请求名的分离**（`_finalize` / `_disambiguate` / `_register_aliases`）：多渠道真正并到一起的条目，对外 id（`/v1/models` 的 `id`、选择器里的值）取**展示名的归一键**（`kimi-k3` / `qwen3.8-max`）；单渠道条目仍用**上游原始 id**（Qoder `kmodel_latest`、Kilo 的 `kilo-auto/free` 原样，避免无谓改名与破坏历史配置）。`by_provider.{渠道}.raw_id` 透出各渠道原代号（前端渠道徽章的 tooltip、搜索都用到）。无论对外 id 是什么，转发到某渠道时一律经 `services.model_aliases` 映射回该渠道自己登记的原 id；原 id、展示名、展示名的 slug 形式三条键都登记。
+
+**对外 id 撞车的消歧**：多渠道归一键可能撞上另一单渠道条目的原 id（TRAE 的 `glm-5` 归一键 `glm-5`，而另一渠道恰有原 id 就叫 `glm-5` 的单渠道模型），两条 entry 共用一个 id 会让前端 `key` 与别名表互相覆盖。`_disambiguate` 按 `_sort_key` 序保留先到者，后者按 `_fallback_ids` 取第一个未占用候选：主渠道原 id → 该 id 的归一形式 → 归一键（`grouped` 的字典键，按构造唯一，最后一道兜底）。
 
 **启动预热不再阻塞启动**：`lifespan` 把预热丢给后台任务 `_warm_model_list`（`force=True` 绕过 TTL），不再在 `yield` 前 `await`——zen 最慢的探活可占十几秒，内联会让应用在这段时间里不响应 `/health`，容器存活探针可能误判。预热失败仅记日志；关机时取消在途任务。
 
@@ -602,7 +625,7 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **虚拟凭证行**：Zen 无凭证、无额度接口。池里种一条空凭证（`credential_data={}`，`added_by="system"`），复用现有调度 / 冷却 / 统计 / 会话粘性。`probe_quota` 恒返回 `Quota(probe_failed=True)` → `health_score` 返回 `None`（**未知**，不是 `EXHAUSTED=-1`）——这点很关键：若返回 `total=None`，`health_score` 会判定为「已耗尽」而把这条免费渠道错误降级。种子幂等（已有 zen 凭证则不补），**用户删除后重启会复活**，永久停用请用「暂停」（`enabled=0`，只摘对话流量）。只为默认装配路径种子（测试注入自定义 registry 时不多出凭证行）。
 
-**免费模型清单完全动态（现拉现探）**：上游 `/zen/v1/models` 免鉴权，但返回的是**全部**模型（含 70 多个付费模型），且**不带任何免费/付费标记**（`owned_by` 恒 `opencode`、无 cost 字段，换鉴权头 / query 也仍全量）。唯一权威信号是**匿名可用性**：付费模型恒 401 `Missing API key.`，免费模型永不 401。故两步过滤：① 按 `-free` 后缀收窄候选（上游命名约定，非契约）；② 对候选并发探活，**只保留 2xx**——已下线（400）、区域限制（403）、上游故障（5xx）、超时都剔除。无静态白名单，上游增删免费模型自动跟随；探活结果为空时抛协议错，让 `/v1/models` 用上次成功的缓存兜底（冷启动无缓存才退化为不展示 zen）。`fetch_models` 同时是引擎登记模型归属的来源，过滤后扁平名请求不会再被路由到 zen 的付费模型上。
+**免费模型清单完全动态（现拉现探）**：上游 `/zen/v1/models` 免鉴权，但返回的是**全部**模型（含 70 多个付费模型），且**不带任何免费/付费标记**（`owned_by` 恒 `opencode`——那是厂商名不是模型名，展示名改由 `pretty_model_name`（= `provider/naming.py` 的薄封装）从 id 派生；亦无 cost 字段，换鉴权头 / query 也仍全量）。唯一权威信号是**匿名可用性**：付费模型恒 401 `Missing API key.`，免费模型永不 401。故两步过滤：① 按 `-free` 后缀收窄候选（上游命名约定，非契约）；② 对候选并发探活，**只保留 2xx**——已下线（400）、区域限制（403）、上游故障（5xx）、超时都剔除。无静态白名单，上游增删免费模型自动跟随；探活结果为空时抛协议错，让 `/v1/models` 用上次成功的缓存兜底（冷启动无缓存才退化为不展示 zen）。`fetch_models` 同时是引擎登记模型归属的来源，过滤后扁平名请求不会再被路由到 zen 的付费模型上。
 
 **判活结果缓存（`MODELS_CACHE_TTL_SECONDS`，30 分钟）**：探活是模型列表链路里最贵的一步（逐个真发一次推理，总耗时等于最慢那个，实测 12–15s），而免费模型增删很慢。故 `fetch_models` 缓存判活集，TTL 取 30 分钟、比服务层的 `MODEL_LIST_TTL_SECONDS`（300s）长一档：服务层每 5 分钟到期重拉列表时直接复用判活结果，只有超过 30 分钟才真的重探。代价是免费模型下线后最多多留 30 分钟（选中收到 400/401，按无效请求处理，不会误冷却凭证）。
 
@@ -660,19 +683,21 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **SSE 帧（2026-09-30 抓真实流核实）**：逐行 `data:` JSON（`data:` 行间有空行；也有不带 `data:` 前缀的裸 JSON 行），最后由 `data:[DONE]` 结束。**v2 `/api/v2/chat/completions` 实测是标准 OpenAI chunk**：`{"choices":[{"delta":{"content":…,"reasoning_content":…,"tool_calls":…},"finish_reason":…}]}`，增量在 `delta`（**不是**累计全文），收尾帧 `choices:[]` + `usage` 单独给 token 数；带 `tool_stream:true` 时工具调用分片在 `delta.tool_calls`。旧形状（逆向记录 §5 / legacy `/v1/chat/chat`）则是 `{"text":"<累计全文>"}`（替换语义，用 `TextSnapshot` 做差）+ 结束帧 `{"text":"[DONE]","error_code":"0"}`。解析器**两种形状同时兼容**，按字段分派。错误有两条路：HTTP 非 2xx，或流内 `error_code`（形如 `ChatAgent.*` / `TM.00001041`，HTTP 仍 200）。
 
-**无每日签到**：额度是**每日 token 池**（实测 2026-09-30：`GET {opengw}/api/v1/user/tokens/balance` 返回 `daily_token_limit` 1000 万 / `daily_tokens_used`；官方口径「每日千万 Token 免费领，当日 0 点清零、不累计」），上游没有每日签到接口。因此本渠道**不实现 `checkin`**（`checkin_scope` 也一并省略，后台签到任务自动跳过它）；「保活」由 token 自动 refresh 承担——且**只由 `RefreshTask` 承担**（先落库再同步）：`refresh_token` 是一次性的，额度探测等旁路若也顺手刷新，同一个 token 会被两处各消费一次，后到的报 `the refresh token has been used`，且旁路刷新结果不落库、库里 token 被烧成废票（实测由此把渠道打成 `APIG.0602 security token has expired`）。`probe_quota` 因此改为**只读余额**，不再保活刷新。`parse_balance` 有 `daily_token_limit` 时按**当日**口径算剩余（`total=daily_token_limit`、`remaining=daily_token_limit - daily_tokens_used`），拿不到该字段才退化到 `total_quota`/`total_balance`/`used_amount` 等通用键。福利模型发现（`{opengw}/api/v1/gateway/config`）与 Token 领取（`POST /api/v1/benefit/claim`，幂等）在探测时顺带完成。
+**无每日签到**：额度是**每日 token 池**（实测 2026-09-30：`GET {opengw}/api/v1/user/tokens/balance` 返回 `daily_token_limit` 1000 万 / `daily_tokens_used`；官方口径「每日千万 Token 免费领，当日 0 点清零、不累计」），上游没有每日签到接口。因此本渠道**不实现 `checkin`**（`checkin_scope` 也一并省略，后台签到任务自动跳过它）；「保活」由 token 自动 refresh 承担——且**只由 `RefreshTask` 承担**（先落库再同步）：`refresh_token` 是一次性的，额度探测等旁路若也顺手刷新，同一个 token 会被两处各消费一次，后到的报 `the refresh token has been used`，且旁路刷新结果不落库、库里 token 被烧成废票（实测由此把渠道打成 `APIG.0602 security token has expired`）。`probe_quota` 因此改为**只读余额**，不再保活刷新。`parse_balance` 有 `daily_token_limit` 时按**当日**口径算剩余（`remaining = daily_token_limit - daily_tokens_used`），拿不到该字段才退化到 `total_quota`/`total_balance`/`used_amount` 等通用键；**上游数值是 token，落库前统一折成「积分」**（见下条）。福利模型发现（`{opengw}/api/v1/gateway/config`）与 Token 领取（`POST /api/v1/benefit/claim`，幂等）在探测时顺带完成。
 
-**优先消耗（用完即弃）**：当日没用完的额度 0 点清零、不累计，所以该池必须**先用掉**。`parse_balance` 把它登记成与 CodeBuddy/TRAE 同构的 `expiry_ladder`：到期点＝次日本地 0 点（上游不返回重置时间戳，按服务端时区推算，见 `_next_local_midnight`）、金额＝当日剩余。这样调度器「窗口内即将到期额度多者先用」的一级指标恒把 CodeArts（1000 万量级）排在其它渠道之前——只要它还有额度就先走它，用尽（`remaining=0`，`expiry_ladder` 为空 → 指标归 0，健康度也归 0）则自然回落其它渠道。副作用：CodeArts 阶梯是 **token**、其余渠道是积分，跨渠道比较的是原始数值，量级差使 CodeArts 实际长期占据优先；这正是「每日池先用」的预期行为，管理台展示层用 `quotaUnit()` 把单位标成 token 而非积分。
+**单位折算（token → 积分，2026-10-01）**：上游余额是千万量级的 token，直接展示既难看、也让「窗口内到期额度多者先用」拿它跟其它渠道的几百积分硬比（CodeArts 恒占优）。故本服务统一口径：**每日池满额 1000 万 token ≡ 1000 积分，1 积分 = 10000 token**，定义只在 `src/provider/codearts/units.py`（`TOKENS_PER_CREDIT` / `tokens_to_credits`）。折算发生在两处，保证余额、额度、到期阶梯、单请求扣池同单位：`parse_balance` 折 `remaining`/`total`/`expiry_ladder`，`_fill_estimated_credit` 折单请求 `credit`。改动前已落库的历史数据（凭证额度、`usage_events.credit`、`usage_hourly.credit_sum`、`credit_events` 变动）由一次性脚本 `scripts/convert_codearts_credit_unit.py`（默认预览、`--apply` 才写并先备份）折算；除数是常量、除法不可逆，脚本**只能跑一次**。
+
+**优先消耗（用完即弃）**：当日没用完的额度 0 点清零、不累计，所以该池必须**先用掉**。`parse_balance` 把它登记成与 CodeBuddy/TRAE 同构的 `expiry_ladder`：到期点＝次日本地 0 点（上游不返回重置时间戳，按服务端时区推算，见 `_next_local_midnight`）、金额＝当日剩余。这样调度器「窗口内即将到期额度多者先用」的一级指标恒把 CodeArts（每日池满额 1000 积分）排在其它渠道之前——只要它还有额度就先走它，用尽（`remaining=0`，`expiry_ladder` 为空 → 指标归 0，健康度也归 0）则自然回落其它渠道。金额已折成积分，与其余渠道同单位，展示层不再需要按渠道换单位。
 
 **倍率（`credit_rate`）**：内置模型 `GET {snap}/v1/model/builtin` 的每个条目带 `credit[]`，其中 `ratio_display`（如 `"0.7x"`、`"0.32x"`）是官方对外展示的消耗倍率，取首档作为本渠道 `credit_rate`（`_parse_ratio` 容忍 `0.7x`/`0.7`/`0.7` 三种写法）。**福利模型不给倍率**（`credit_rate=None`）：它走每日免费 token 池、上游不返回该字段，标 `0.0` 会被前端渲染成 zen/kilo 式的「免费」，而它实际消耗每日额度、用尽即不可用。
 
-**单请求扣池（`credit`，2026-10-01）**：福利模型虽然不给倍率，但**确实消耗每日池**，故单请求用量不能留空。上游 usage 只给 token 数、不带额度字段，而福利模型实测按每日 token 池 **1:1** 扣减（`credit_events` 反解：一条输入 32 + 输出 694 = 726 token 的请求，池余额恰好 −726），故 `_fill_estimated_credit` 在流式事件上把 `credit` 补成「输入 + 输出 token」并标 `credit_estimated`（统计页加 ≈）。**只补福利模型**：内置模型不扣这条每日池（它走 `credit[]` 的付费倍率），补了会把 token 数误当池消耗。因此同一渠道内 `credit` 的字段语义随模型分档——福利＝token 池消耗、内置＝上游真值（若返回）。上游将来直接回传 `credit` 时不覆盖。
+**单请求扣池（`credit`，2026-10-01）**：福利模型虽然不给倍率，但**确实消耗每日池**，故单请求用量不能留空。上游 usage 只给 token 数、不带额度字段，而福利模型实测按每日 token 池 **1:1** 扣减（`credit_events` 反解：一条输入 32 + 输出 694 = 726 token 的请求，池余额恰好 −726），故 `_fill_estimated_credit` 在流式事件上把 `credit` 补成「输入 + 输出 token 折成的积分」（1 积分 = 10000 token）并标 `credit_estimated`（统计页加 ≈）。**只补福利模型**：内置模型不扣这条每日池（它走 `credit[]` 的付费倍率），补了会把 token 数误当池消耗。因此同一渠道内 `credit` 的字段语义随模型分档——福利＝每日池积分消耗、内置＝上游真值（若返回）。上游将来直接回传 `credit` 时不覆盖。
 
-**登录**：OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens`（authorization_code）换 `{access_key_id, secret_access_key, security_token, expiration, refresh_token}`，DPoP 私钥随 credential 一起生成并加密入库。**门户把授权码 302 回 `http://127.0.0.1:{port}/oauth/callback`——这是用户本机地址，服务端监听不到**；因此本渠道不用 poll 轨道，而是「paste 轨道」：前端展示授权页后，让用户把浏览器地址栏里那条打不开的回调链接粘回，走 `POST /api/auth/upstream/complete` 由服务端用 code + 登录时登记的 PKCE `code_verifier`/DPoP 私钥换 token。（上游另有 `GET {snap-manager}/v1/login/ticket` 兜底轮询通道，但服务端取到时被回「无效 ticketId」，故不采用。）
+**登录**：OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens`（authorization_code）换 `{access_key_id, secret_access_key, security_token, expiration, refresh_token}`，DPoP 私钥随 credential 一起生成并加密入库。**门户把授权码 302 回 `http://127.0.0.1:{port}/oauth/callback`——这是用户本机地址，服务端监听不到**；因此本渠道不用 poll 轨道，而是「paste 轨道」：前端展示授权页后，让用户把浏览器地址栏里那条打不开的回调链接粘回，走 `POST /api/auth/upstream/complete` 由服务端用 code + 登录时登记的 PKCE `code_verifier`/DPoP 私钥换 token。（上游另有 `GET {snap-manager}/v1/login/ticket` 兜底轮询通道，但服务端取到时被回「无效 ticketId」，故不采用。）**登录后补身份**：token 响应通常不带用户名，`CodeArtsOAuth._finish` 用签名身份接口（`caller_identity`，按区域不可用时回落 `current_user`）尽力补 `uid`/`user_name`/`nickname`（只补缺失项）；失败不阻断登录，昵称为空时统计明细的凭证列回退凭证 id 前缀。
 
 **节点白名单**：`CODEARTS_ALLOWED_ENDPOINTS` 含 snap 引擎、STS、福利网关、门户四个主机；AK/SK 签名请求只发往白名单。`CODEARTS_CHAT_MIN_INTERVAL`（热更项，默认 5s）独立 pacer。
 
-**并发上限（2026-10-01，`CODEARTS_MAX_CONCURRENCY`）**：上游对**每账号并发会话数**有硬限（实测 3），超出的请求直接 `HTTP 400` + `TM.00001041 并发会话数已达上限(3个)`。此前聊天 pacer 声明 `allow_concurrent=True` 但**无上限**（桶内来多少放多少），第 4 个起全部撞 400；又因 `classify_status` 只在 429 分支查 `00001041`，这些 400 被判成 `INVALID`（换号也没用、且不冷却），与客户端重试叠成风暴——2026-09-30 23:17 至 10-01 07:40 共 135 次，整体失败率约 77%。修复两处：`Pacer` 增按桶在途上限 `max_concurrency`（满则挂起等 `release` 让位；0/None 保持旧行为），CodeArts pacer 装配 `lambda: runtime.codearts_max_concurrency`（热更项，默认 3）；`classify_status` 把 400/429 带并发/限流标记（`00001041`/`tpm`/`并发`/`rate limit`/`throttl`）统一判成 `MODEL`（可重试 503），与流内 `classify_error_code('TM.00001041')` 一致。
+**并发上限（2026-10-01，`CODEARTS_MAX_CONCURRENCY`）**：上游对**每账号并发会话数**有硬限（实测 3），超出的请求直接 `HTTP 400` + `TM.00001041 并发会话数已达上限(3个)`。此前聊天 pacer 声明 `allow_concurrent=True` 但**无上限**（桶内来多少放多少），第 4 个起全部撞 400；又因 `classify_status` 只在 429 分支查 `00001041`，这些 400 被判成 `INVALID`（换号也没用、且不冷却），与客户端重试叠成风暴——2026-09-30 23:17 至 10-01 07:40 共 135 次，整体失败率约 77%。修复两处：`Pacer` 增按桶在途上限 `max_concurrency`（满则挂起等 `release` 让位；0/None 保持旧行为），CodeArts pacer 装配 `lambda: runtime.codearts_max_concurrency`（热更项，默认 3）；`classify_status` 把 400/429 带并发/限流标记判成可重试的限流（与流内 `classify_error_code` 同判法；后续拆成两种类型，见本段末尾）：并发打满（`00001041`/`并发`）判 `CONCURRENCY`（固定 60s 模型级短冷却，不翻倍），其余（`tpm`/`429`/`rate limit`/`throttl`）判 `MODEL`。背景：打满是瞬态信号（在途排空即恢复，实测平均 9s、最大 38s），套 `MODEL` 的 600s 起步、翻倍到 2h 会把一次瞬态打满变成 10min 起的长时间不可用。
 
 ---
 
@@ -782,7 +807,7 @@ class Scheduler:
 
 > **TRAE 也落 `quota_expiry_ladder`**（2026-09-30 修正）：早期按「TRAE 无周期概念」只填展示用 `quota_packages`、`expiry_ladder` 恒 `None`，表现为两列数字恒为空。实测 `ide_user_ent_usage` 的权益包各自独立到期（每月登录积分按月、签到奖励各有到期日），与 CodeBuddy 同构，故两列同时填、口径统一为「未过期 + 有余额」。`quota_cycle_end`（单值「最早到期」）TRAE 仍为 `NULL`：TRAE 各包未必共享一个重置点，而阶梯已表达「哪些包何时到期」，无需再挑一个单值。
 
-> **CodeArts 也落 `quota_expiry_ladder`**（2026-09-30）：每日 1000 万 token 池 0 点清零、不累计，属「用完即弃」，必须优先消耗。`parse_balance` 登记阶梯 `[(次日本地 0 点, 当日剩余)]`，一级排序即把它排在其它渠道之前（金额 1000 万量级）。单位是 token（非积分），前端 `quotaUnit()` 据此换词。
+> **CodeArts 也落 `quota_expiry_ladder`**（2026-09-30）：每日池 0 点清零、不累计，属「用完即弃」，必须优先消耗。`parse_balance` 登记阶梯 `[(次日本地 0 点, 当日剩余)]`，一级排序即把它排在其它渠道之前。金额已是积分口径（1000 万 token 折 1000 积分），与其余渠道同单位。
 
 ### 6.1 模型级冷却（B1.1）
 

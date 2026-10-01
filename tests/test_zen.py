@@ -382,7 +382,7 @@ async def test_fetch_models_keeps_only_live_free_candidates():
                 {"id": "beta-free", "owned_by": "opencode"},   # 探活 401（付费/需 key）→ 剔除
                 {"id": "GAMMA-FREE"},                          # 大写后缀也认，探活 200 → 保留
                 {"id": "delta-free"},                          # 探活 400（已下线）→ 剔除
-                {"id": "no-owner-free"},                       # owned_by 缺失 → name ""
+                {"id": "no-owner-free"},                       # owned_by 缺失也照样派生出名字
                 "junk",                                        # 非 dict 跳过
                 {"id": ""},                                    # 空 id 跳过
                 {"id": 123},                                   # 非字符串 id 跳过
@@ -397,10 +397,39 @@ async def test_fetch_models_keeps_only_live_free_candidates():
 
     models = await _client(handler).fetch_models()
     assert [m.id for m in models] == ["alpha-free", "GAMMA-FREE", "no-owner-free"]
-    assert models[0].name == "opencode"
-    assert models[2].name == ""
+    # 展示名从 id 派生，不用上游 `owned_by`（恒为 "opencode"，会让所有模型同名）
+    assert [m.name for m in models] == ["Alpha", "Gamma", "No Owner"]
     # 免费层显式标 0 倍率（列表 UI 显示 x0，排序时也排最省的一档）
     assert all(m.credit_rate == 0.0 for m in models)
+
+
+def test_pretty_model_name_derives_readable_name():
+    """展示名派生规则：去免费后缀 + 品牌/缩写按官方写法 + 数字段原样。"""
+    from src.provider.zen.client import pretty_model_name
+
+    assert pretty_model_name("longcat-2.5-preview-free") == "LongCat 2.5 Preview"
+    assert pretty_model_name("mimo-v2.6-flash-free") == "MiMo V2.6 Flash"
+    assert pretty_model_name("nemotron-3.5-lightning-free") == "Nemotron 3.5 Lightning"
+    assert pretty_model_name("deepseek-v4.1-flash-free") == "DeepSeek V4.1 Flash"
+    assert pretty_model_name("glm-5-free") == "GLM 5"
+    assert pretty_model_name("qwen3.8-max") == "Qwen3.8 Max"     # 字母+数字同段
+    assert pretty_model_name("space-bunny-free") == "Space Bunny"
+    assert pretty_model_name("kimi-k2.7-code-free") == "Kimi K2.7 Code"
+    assert pretty_model_name("qmodel_vl_free", free_suffix="_free") == "Qmodel VL"
+    assert pretty_model_name("big-pickle") == "Big Pickle"       # 无后缀：付费档也走这条
+    assert pretty_model_name("-free") == ""                      # 去掉后缀后为空 → 前端回退 id
+    assert pretty_model_name("gpt-5", free_suffix="") == "GPT 5"  # 后缀置空：按原 id 切
+
+
+def test_pretty_model_name_plain_numeric_segment():
+    """纯数字/符号段（无字母部分）原样保留，不被 title-case 破坏。
+
+    分段美化逻辑与其余渠道共用（`provider.naming`），zen 只留薄封装。
+    """
+    from src.provider.naming import _pretty_segment
+
+    assert _pretty_segment("2.5") == "2.5"
+    assert _pretty_segment("3") == "3"
 
 
 async def test_fetch_models_custom_suffix_and_probe_network_error():
@@ -468,6 +497,25 @@ async def test_fetch_models_cache_expiry_reprobes():
     assert len(calls) == 2
     await client.fetch_models()
     assert len(calls) == 4
+
+
+async def test_seed_models_cache_only_fills_empty_cache():
+    """回填判活缓存：空名单不填；本进程已判活过的不被跨重启快照覆盖。"""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == EP_MODELS:
+            return httpx.Response(200, json={"data": [{"id": "a-free"}]})
+        return httpx.Response(200, text="")
+
+    client = _client(handler)
+    client.seed_models_cache([])                    # 空名单：无从回填
+    assert [m.id for m in await client.fetch_models()] == ["a-free"]
+    seeded = client.seed_models_cache([Model(id="stale-free")])
+    assert seeded is None
+    assert [m.id for m in await client.fetch_models()] == ["a-free"]  # 仍是本进程那份
+    assert len(calls) == 2
 
 
 async def test_fetch_models_errors():
@@ -677,7 +725,7 @@ def test_zen_credential_can_be_restored_after_delete(tmp_path, monkeypatch):
     from tests.conftest import SECRET
 
     async def fake_fetch_models(self):
-        return [Model(id="offline-free", name="opencode")]
+        return [Model(id="offline-free", name="Offline")]
 
     # TestClient 进 lifespan 会预热模型列表（真连上游），这里保持离线。
     monkeypatch.setattr(ZenClient, "fetch_models", fake_fetch_models)

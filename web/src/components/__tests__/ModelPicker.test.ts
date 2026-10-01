@@ -143,17 +143,35 @@ describe("matchesFilter", () => {
     expect(matchesFilter(dual, "  ", "all")).toBe(true);
   });
 
-  it("也按人类可读名搜索（Qoder 代号 id + 可读名）", () => {
-    const qoder = pickable({ id: "qmodel_38max", name: "Qwen3.8-Max", providers: ["qoder"] });
+  it("也按展示名搜索（后端已清洗：Qwen3.8-Max → Qwen3.8 Max）", () => {
+    const qoder = pickable({ id: "qmodel_38max", name: "Qwen3.8 Max", providers: ["qoder"] });
     expect(matchesFilter(qoder, "qwen", "all")).toBe(true);      // 按 name 命中
     expect(matchesFilter(qoder, "38max", "all")).toBe(true);     // 按 id 命中
     expect(matchesFilter(qoder, "deepseek", "all")).toBe(false);
   });
+
+  it("也按各渠道原 key 搜索（对外 id 与实际请求 key 不同）", () => {
+    // 多渠道条目对外 id 是展示名的归一键，与各渠道实际发的 key 不同
+    const merged = pickable({
+      id: "longcat-2.5-preview",
+      name: "LongCat 2.5 Preview",
+      providers: ["zen", "trae"],
+      by_provider: {
+        zen: { raw_id: "longcat-2.5-preview-free" },
+        trae: { raw_id: "longcat-2.5-preview" },
+      },
+    });
+    expect(matchesFilter(merged, "-free", "all")).toBe(true);    // 按 zen 的原 key 命中
+    expect(matchesFilter(merged, "longcat", "all")).toBe(true);  // 按对外 id 命中
+    expect(matchesFilter(merged, "mimo", "all")).toBe(false);
+    // 无 by_provider 的条目按 id/name 匹配，不因缺 raw_id 而报错
+    expect(matchesFilter(pickable({ id: "kilo-auto/free", providers: ["kilo"] }), "kilo", "all")).toBe(true);
+  });
 });
 
 describe("displayName", () => {
-  it("优先上游人类可读名；缺失或空白时回退 id", () => {
-    expect(displayName({ id: "qmodel_38max", name: "Qwen3.8-Max" })).toBe("Qwen3.8-Max");
+  it("直接用后端清洗过的展示名；缺失或空白时回退 id", () => {
+    expect(displayName({ id: "qmodel_38max", name: "Qwen3.8 Max" })).toBe("Qwen3.8 Max");
     expect(displayName({ id: "dmodel" })).toBe("dmodel");
     expect(displayName({ id: "dmodel", name: "   " })).toBe("dmodel");
   });

@@ -40,8 +40,8 @@ import {
   healthView,
   modelCooldownLabel,
   probeFailureLabel,
+  QUOTA_UNIT,
   quotaSemantics,
-  quotaUnit,
   STATE_LABEL,
   STATE_TONE,
   tokenExpiryView,
@@ -671,8 +671,8 @@ export function CredentialsPage() {
           { term: "健康度：百分比", where: "健康度列", meaning: "剩余积分占总积分的比例，调度器优先选数值高的。" },
           { term: "健康度：未探测", where: "健康度列", meaning: "探测失败或渠道没返回额度信息。注意它不是「已耗尽」——点「探测」可重新获取。" },
           { term: "健康度：无探测", where: "健康度列", meaning: "OpenCode Zen / Kilo Gateway 免费层：上游没有额度接口，探测没有意义，因此不提供「探测」按钮，健康度恒为「无探测」。" },
-          { term: "额度下方的时间语义", where: "额度列", meaning: "CodeBuddy 是「本周期剩余，<日期> 重置」；TRAE 是「账户剩余（单调递减）」；CodeArts 是「每日 Token 额度（当日 0 点清零）」。三者单位不同（CodeArts 是 token），重置行为也不同。" },
-          { term: "到期额度（两行）", where: "额度列", meaning: "选号先比 36 小时内会过期的额度，多的先用；都相同（常见的是都为 0）时再比 7 天内会过期的额度。主窗口已有数字就只显示那一行，次窗口只在主窗口为空时才出现。单位随渠道：CodeArts 是 token（每日 1000 万 token 池、0 点清零，故其当日剩余始终在窗口内、总被优先消耗），其余渠道是积分。" },
+          { term: "额度下方的时间语义", where: "额度列", meaning: "CodeBuddy 是「本周期剩余，<日期> 重置」；TRAE 是「账户剩余（单调递减）」；CodeArts 是「每日积分额度（当日 0 点清零）」。单位统一为积分，重置行为不同。" },
+          { term: "到期额度（两行）", where: "额度列", meaning: "选号先比 36 小时内会过期的额度，多的先用；都相同（常见的是都为 0）时再比 7 天内会过期的额度。主窗口已有数字就只显示那一行，次窗口只在主窗口为空时才出现。单位统一为积分：CodeArts 的每日池（上游 1000 万 token 折 1000 积分、0 点清零）当日剩余始终在窗口内、总被优先消耗。" },
           { term: "套餐 N 个（额度首行右侧）", where: "额度列", meaning: "该账号当前生效的额度包个数。鼠标悬浮看每个包的名字、剩余/总量、已用与到期日（按到期先后）。未探测或渠道未返回明细时不显示。" },
           { term: "积分记录（额度数字后的下箭头）", where: "额度列", meaning: "点开该凭证两次额度探测之间的净变化。下箭头表示「在本行内展开」而非弹层：展开后箭头翻转，再点一次收起。仅管理员视图显示。OpenCode Zen / Kilo Gateway 免费层没有额度探测，恒无记录，因此不显示该入口。" },
           { term: "token 剩余", where: "token 剩余列", meaning: "该凭证 access token 距离到期还有多久。预刷新任务每小时跑一次，进入 24 小时窗口会自动续期，所以正常情况下看到的是长寿命（TRAE 约 14 天、CodeBuddy 约 55 天）递减。显示「已过期」时上游会拒绝该凭证，需重新登录；显示「—」表示渠道未提供到期信息。" },
@@ -827,9 +827,8 @@ function Row({
   onConfirmDelete: (id: string | null) => void;
   actions: Actions;
 }) {
-  const unit = quotaUnit(credential.provider);
   const expiring = expiringQuotaLabel(
-    credential.quota_expiring_credits, expiryWindow, "primary", unit);
+    credential.quota_expiring_credits, expiryWindow, "primary", QUOTA_UNIT);
   // 次窗口只在主窗口没有可展示内容时才渲染：7 天窗口是 36h 的超集，
   // 主窗口已有数字时再列一行只会重复。它的作用是解释「36h 内没有
   // 到期积分、但一周内会过期」的账号为何仍被优先选中。
@@ -839,7 +838,7 @@ function Row({
         credential.quota_expiring_credits_secondary,
         expirySecondaryWindow,
         "secondary",
-        unit,
+        QUOTA_UNIT,
       );
   const health = healthView(credential.health, credential.provider);
   const state = credentialState(credential, now);

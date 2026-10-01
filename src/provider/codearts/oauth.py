@@ -12,9 +12,11 @@
 
 from __future__ import annotations
 
+import logging
 import secrets
 import time
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
@@ -23,6 +25,11 @@ from ...provider.base import AuthResult, AuthSession
 from . import auth as codearts_auth
 from .auth import LoginConfig, LoginSession
 from .events import UpstreamProtocolViolation
+
+if TYPE_CHECKING:
+    from .client import CodeArtsClient
+
+logger = logging.getLogger(__name__)
 
 AUTH_STATE_TTL_SECONDS = 600
 # 官方插件会挑一个本地空闲端口并真的监听；本服务走「粘贴回调链接」通道，
@@ -108,11 +115,16 @@ class AuthStateStore:
 class CodeArtsOAuth:
     def __init__(self, config: LoginConfig, *, port: int = DEFAULT_CALLBACK_PORT,
                  client: httpx.AsyncClient | None = None,
-                 store: AuthStateStore | None = None) -> None:
+                 store: AuthStateStore | None = None,
+                 identity_client: CodeArtsClient | None = None) -> None:
         self.config = config
         self.port = port
         self.store = store or AuthStateStore()
         self._client = client
+        # 登录后补账号身份（uid/user_name/nickname）的签名客户端：token 响应
+        # 通常不带用户名，不补则凭证昵称为空、统计明细的凭证列空白。生产装配
+        # 由 main 传入 provider 的 client；None = 跳过补身份（旧行为）。
+        self._identity_client = identity_client
 
     @property
     def _http(self) -> httpx.AsyncClient:
@@ -152,7 +164,7 @@ class CodeArtsOAuth:
             raise UpstreamProtocolViolation(_token_error_message(error)) from error
         if not tokens:
             return None                              # 等待用户在门户授权
-        return self._finish(auth_state, username, tokens, session)
+        return await self._finish(auth_state, username, tokens, session)
 
     async def complete_callback(self, raw_url: str, auth_state: str,
                                 username: str) -> AuthResult:
@@ -176,13 +188,51 @@ class CodeArtsOAuth:
                 dpop_private_jwk=session.dpop_private_jwk)
         except codearts_auth.TokenEndpointError as error:
             raise UpstreamProtocolViolation(_token_error_message(error)) from error
-        return self._finish(auth_state, username, exchange.tokens, session)
+        return await self._finish(auth_state, username, exchange.tokens, session)
 
-    def _finish(self, auth_state: str, username: str, tokens: dict,
-                session: LoginSession) -> AuthResult:
+    async def _finish(self, auth_state: str, username: str, tokens: dict,
+                      session: LoginSession) -> AuthResult:
         credential_data = codearts_auth.credential_data_from_tokens(
             tokens, session.dpop_private_jwk)
+        await self._fill_identity(credential_data)
         if not self.store.consume(auth_state, username):
             raise UpstreamProtocolViolation("auth state was consumed concurrently")
         return AuthResult(credential_data=credential_data,
                           nickname=str(credential_data.get("nickname") or ""))
+
+    async def _fill_identity(self, credential_data: dict) -> None:
+        """登录后尽力补齐账号身份（uid/user_name/nickname），就地改写。
+
+        token 响应通常不带用户名（`credential_data_from_tokens` 的 user_name
+        回落随之落空），不补则凭证昵称为空、统计明细的凭证列空白。身份接口
+        失败（区域限制/网络抖动）**不阻断登录**：只记警告，昵称缺失时展示层
+        回退凭证 id 前缀。
+        """
+        client = self._identity_client
+        if client is None:
+            return
+        from .credential import CodeArtsCredential
+
+        credential = CodeArtsCredential.from_dict(credential_data)
+        identity: tuple[str, str, str] | None = None
+        for fetch in (client.caller_identity, client.current_user):
+            try:
+                identity = await fetch(credential)
+            except Exception as error:
+                # caller_identity 只在部分区域可用，失败就换 current_user；
+                # 两个都失败才放弃（登录本身不受影响）。
+                logger.warning("CodeArts 登录后补身份失败 %s: %s",
+                               getattr(fetch, "__name__", "?"), error)
+            else:
+                break
+        if identity is None:
+            return
+        uid, name, domain_id = identity
+        # 只补缺失项：token 自带的身份优先（与 merge_refreshed / TRAE 同口径），
+        # 身份接口只负责把「响应里没有」的名字捡回来，不改写已有值。
+        credential.uid = credential.uid or uid
+        credential.user_name = credential.user_name or name
+        credential.domain_id = credential.domain_id or domain_id
+        if not credential.nickname:
+            credential.nickname = credential.user_name
+        credential_data.update(credential.to_dict())

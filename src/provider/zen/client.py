@@ -29,7 +29,7 @@ from typing import Any
 import httpx
 
 from ...engine.sse import iter_frames
-from ...provider import base
+from ...provider import base, naming
 from ...provider.base import (
     ErrKind,
     Event,
@@ -49,7 +49,8 @@ MIN_OPENCODE_VERSION = "1.18.0"
 REQUIRED_TOOLS: tuple[str, ...] = ("bash", "read")
 
 # 免费模型判定：上游 `/zen/v1/models` 返回**全部**模型（含付费）且不带任何
-# 免费/付费标记（`owned_by` 恒为 `opencode`，无 cost 字段），换鉴权头 / query
+# 免费/付费标记（`owned_by` 恒为 `opencode`——它是厂商名不是模型名，故展示名
+# 另由 id 派生，见 `pretty_model_name`；亦无 cost 字段），换鉴权头 / query
 # 也仍是全量；models.dev 之类的第三方目录又与上游实际可用集不同步。
 # 唯一权威信号是**匿名可用性**：付费模型恒 401 AuthError（`Missing API key.`），
 # 免费模型永不 401。
@@ -103,6 +104,26 @@ def gate_headers(*, version: str = MIN_OPENCODE_VERSION,
         # 的请求路由到别的鉴权分支）
         "Authorization": "Bearer public",
     }
+
+
+# 展示名从上游 id 派生（上游 `/zen/v1/models` 只有 `id`/`owned_by`，后者恒为
+# `opencode`、不是模型名，直接透传会让 Zen 所有模型在列表里都叫「opencode」）。
+# 归一与清洗规则与其余五条渠道共用 `provider.naming`，zen 只保留一个薄封装：
+# 上游 free 档用 `-free` 命名，免费后缀只是可用性命名约定（同一模型的付费档
+# 没有该后缀），不是模型名的一部分，故展示时去掉。id 去掉后缀后为空时返回
+# 空串，由前端回退展示 id。
+def pretty_model_name(model_id: str,
+                      free_suffix: str = FREE_MODEL_SUFFIX) -> str:
+    """上游 id → 人类可读名（`longcat-2.5-preview-free` → `LongCat 2.5 Preview`）。
+
+    `free_suffix` 可换（如 `_free`）以对齐自定义后缀：此时把后缀先剥掉再走
+    通用清洗，否则通用规则只认 `-free` / `_free` 之外还会残留分隔符。
+    """
+    stem = model_id
+    suffix = free_suffix.lower()
+    if suffix and stem.lower().endswith(suffix):
+        stem = stem[: -len(suffix)]
+    return naming.display_model_name(stem)
 
 
 def _empty_tool(name: str) -> dict[str, Any]:
@@ -224,6 +245,19 @@ class ZenClient:
             self._short_client = httpx.AsyncClient(timeout=SHORT_TIMEOUT, trust_env=False)
         return self._short_client
 
+    def seed_models_cache(self, models: list[Model]) -> None:
+        """用落盘目录回填判活集缓存：重启后不必再逐个真发探活（12–15s）。
+
+        只在「本进程还没判活过」时回填（`_models_cache is None`）：进程内已经
+        判活过就说明表是新鲜的，不能被一份跨重启的快照覆盖成旧的。回填后按
+        `models_cache_ttl`（30 分钟）自然过期，届时重新探活。
+
+        代价与既有的 30 分钟判活缓存同量级：上游免费集变更最多滞后一个 TTL，
+        下游表现是选中已下线模型收到 400/401（按无效请求处理，不罚凭证）。
+        """
+        if models and self._models_cache is None:
+            self._models_cache = (time.monotonic(), list(models))
+
     async def aclose(self) -> None:
         for client in (self._stream_client, self._short_client):
             if client is not None:
@@ -290,11 +324,13 @@ class ZenClient:
             model_id = item.get("id")
             if (isinstance(model_id, str) and model_id
                     and model_id.lower().endswith(self.free_suffix)):
-                owner = item.get("owned_by")
+                # 上游 `owned_by` 恒为 `opencode`（不是模型名），展示名一律从
+                # id 派生，否则 Zen 所有模型在列表里都叫「opencode」。
                 # 免费层不消耗额度：显式给 0（而非 None），让列表 UI 显示 x0，
                 # 排序时也天然排在最省的一档。
                 candidates.append(Model(id=model_id,
-                                        name=owner if isinstance(owner, str) else "",
+                                        name=pretty_model_name(model_id,
+                                                                self.free_suffix),
                                         credit_rate=0.0))
         if not candidates:
             raise zen_events.UpstreamProtocolViolation("models api returned no free candidates")

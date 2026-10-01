@@ -15,7 +15,7 @@ from src.config import Settings
 from src.engine.executor import Executor, ExecutorDeps, NoHealthyCredential
 from src.engine.scheduler import Scheduler
 from src.main import build_app
-from src.provider.base import ErrKind, Event, EventKind, Model
+from src.provider.base import ErrKind, Event, EventKind, Model, Usage
 from src.provider.trae.client import (
     TraeClient,
     TraeCredential,
@@ -133,6 +133,45 @@ async def test_complete_rotates_then_exhausts(tmp_path):
         await executor.complete(parse_chat_request(
             {"messages": [{"role": "user", "content": "hi"}]}))
     assert "upstream" in str(caught.value)          # last_error 被拼进消息
+    db.close()
+
+
+async def test_complete_takes_credit_from_last_usage_frame(tmp_path):
+    """上游每帧都带 usage 时，记账取**最后一个** USAGE 事件。
+
+    CodeArts v2 实测每个 chunk 都带 usage：前置帧是 0/0 占位、只有收尾帧是真值
+    （`{in:35, out:99}`）。取第一个 USAGE 会把积分记成空/0，统计页于是出现
+    「有 token 却没积分」的记录。末尾优先同时与 `aggregate()` 和流式路径
+    （`translator.usage`）同语义：落库的 usage 与对外响应的 usage 同源。
+    """
+    credentials, db = _repo(tmp_path)
+    credentials.add(provider="trae", credential_data={"accessToken": "a"})
+
+    class _Stats:
+        def __init__(self) -> None:
+            self.rows: list[dict] = []
+
+        def record(self, **fields) -> None:  # noqa: ANN003
+            self.rows.append(fields)
+
+    stats = _Stats()
+    provider = _Provider([[
+        Event(kind=EventKind.USAGE, usage=Usage()),                  # 空占位帧
+        Event(kind=EventKind.CONTENT, content="hi"),
+        Event(kind=EventKind.USAGE, usage=Usage(input_tokens=0, output_tokens=0)),
+        Event(kind=EventKind.USAGE, usage=Usage(input_tokens=35, output_tokens=99,
+                                                 credit=0.0134, credit_estimated=True)),
+        Event(kind=EventKind.FINISH, finish_reason="stop"),
+    ]])
+    executor = Executor(ExecutorDeps(
+        providers={"trae": provider}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2", stats=stats))
+    await executor.complete(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}]}))
+    assert len(stats.rows) == 1
+    assert stats.rows[0]["credit"] == 0.0134
+    assert stats.rows[0]["credit_estimated"] is True
+    assert stats.rows[0]["input_tokens"] == 35
     db.close()
 
 

@@ -43,6 +43,20 @@ def users_file(users_file_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def data_dir(tmp_path, monkeypatch):
+    """把「没显式传 DATA_DIR」的 Settings 隔离到 tmp_path。
+
+    模型目录快照（Q53：`DATA_DIR/model_catalog.json`）是**默认值 `./data` 也会
+    真写盘**的一处产物。不隔离的话，任何用默认 DATA_DIR 建 app 的用例会往仓库
+    `data/` 写一份测试版模型表，覆盖生产快照——表现为本地服务重启后只恢复了测试
+    里那两三个渠道（实测踩过：快照里只剩 codebuddy + trae）。显式传 DATA_DIR 的
+    用例（含全部 build_app 用例）不受影响：pydantic 显式参数优先于 env。
+    """
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    return tmp_path
+
+
+@pytest.fixture(autouse=True)
 def zen_models_offline(monkeypatch, request):
     """除 test_zen / test_kilo 外，一律不真连 Zen / Kilo 上游。
 

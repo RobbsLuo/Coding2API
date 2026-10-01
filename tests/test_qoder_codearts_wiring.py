@@ -216,6 +216,9 @@ def test_upstream_auth_registers_qoder_and_codearts_tracks():
     flows = _upstream_auth(registry, _settings())
     assert isinstance(flows["qoder"], QoderOAuth)
     assert isinstance(flows["codearts"], CodeArtsOAuth)
+    # 登录补身份复用 provider 的签名客户端：登录时 token 响应不带用户名，
+    # 不补则凭证昵称为空、统计明细的凭证列空白
+    assert flows["codearts"]._identity_client is registry["codearts"].client
     # 未注册的渠道不产生轨道（防御：registry 缺 key 时不应抛）
     assert _upstream_auth({}, _settings()) == {}
 
@@ -380,6 +383,122 @@ async def test_codearts_oauth_complete_callback_exchanges_code():
         await client.aclose()
         await oauth.aclose()
     assert seen, "exchange_code should have hit the token endpoint"
+
+
+class _IdentityClient:
+    """登录补身份的替身：caller_identity / current_user 各可配返回值或异常。"""
+
+    def __init__(self, *, caller=("u1", "robbsluo", "d1"), caller_error=None,
+                 current=("u1", "robbsluo", "d1"), current_error=None) -> None:
+        self._caller = caller
+        self._caller_error = caller_error
+        self._current = current
+        self._current_error = current_error
+        self.calls: list[str] = []
+
+    async def caller_identity(self, _credential):
+        self.calls.append("caller_identity")
+        if self._caller_error is not None:
+            raise self._caller_error
+        return self._caller
+
+    async def current_user(self, _credential):
+        self.calls.append("current_user")
+        if self._current_error is not None:
+            raise self._current_error
+        return self._current
+
+
+def _exchange_tokens(*, user_name="", user_id=""):
+    return {"user_name": user_name, "user_id": user_id, "refresh_token": "rt",
+            "credentials": {"access_key_id": "ak", "secret_access_key": "sk",
+                            "security_token": "st",
+                            "expiration": "2030-01-01T00:00:00Z"}}
+
+
+async def test_codearts_oauth_complete_fills_identity_when_tokens_lack_name():
+    """token 响应不带用户名 → 登录后用签名身份接口补 uid/user_name/nickname。"""
+    import httpx
+
+    from src.provider.codearts import auth as codearts_auth
+    from src.provider.codearts.oauth import CodeArtsOAuth
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json=_exchange_tokens()))
+    client = httpx.AsyncClient(transport=transport, timeout=None)
+    identity = _IdentityClient()
+    oauth = CodeArtsOAuth(codearts_auth.LoginConfig(portal_host="https://portal.test"),
+                          client=client, identity_client=identity)
+    try:
+        started = await oauth.start("alice")
+        result = await oauth.complete_callback(
+            "http://127.0.0.1:12800/oauth/callback?code=THE_CODE",
+            started.state, "alice")
+        assert result.nickname == "robbsluo"
+        assert result.credential_data["uid"] == "u1"
+        assert result.credential_data["user_name"] == "robbsluo"
+        assert result.credential_data["nickname"] == "robbsluo"
+    finally:
+        await client.aclose()
+        await oauth.aclose()
+    assert identity.calls == ["caller_identity"]  # 第一个成功就不再试第二个
+
+
+async def test_codearts_oauth_identity_falls_back_to_current_user():
+    """caller_identity 按区域不可用 → 换 current_user；token 自带名则不覆盖。"""
+    import httpx
+
+    from src.provider.base import UpstreamHTTPError
+    from src.provider.codearts import auth as codearts_auth
+    from src.provider.codearts.oauth import CodeArtsOAuth
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json=_exchange_tokens(
+            user_name="alice", user_id="u0")))
+    client = httpx.AsyncClient(transport=transport, timeout=None)
+    identity = _IdentityClient(caller_error=UpstreamHTTPError(400, b"APIGW.0101"))
+    oauth = CodeArtsOAuth(codearts_auth.LoginConfig(portal_host="https://portal.test"),
+                          client=client, identity_client=identity)
+    try:
+        started = await oauth.start("alice")
+        result = await oauth.complete_callback(
+            "http://127.0.0.1:12800/oauth/callback?code=THE_CODE",
+            started.state, "alice")
+        # token 自带的身份优先，只补缺失项（身份接口的 u1 不覆盖 u0）
+        assert result.nickname == "alice"
+        assert result.credential_data["user_name"] == "alice"
+        assert result.credential_data["uid"] == "u0"
+    finally:
+        await client.aclose()
+        await oauth.aclose()
+    assert identity.calls == ["caller_identity", "current_user"]
+
+
+async def test_codearts_oauth_identity_failure_does_not_block_login():
+    """两个身份接口都失败 → 登录照常成功，昵称为空（展示层回退 id 前缀）。"""
+    import httpx
+
+    from src.provider.base import UpstreamHTTPError
+    from src.provider.codearts import auth as codearts_auth
+    from src.provider.codearts.oauth import CodeArtsOAuth
+
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, json=_exchange_tokens()))
+    client = httpx.AsyncClient(transport=transport, timeout=None)
+    identity = _IdentityClient(caller_error=UpstreamHTTPError(400, b"no"),
+                               current_error=UpstreamHTTPError(500, b"no"))
+    oauth = CodeArtsOAuth(codearts_auth.LoginConfig(portal_host="https://portal.test"),
+                          client=client, identity_client=identity)
+    try:
+        started = await oauth.start("alice")
+        result = await oauth.complete_callback(
+            "http://127.0.0.1:12800/oauth/callback?code=THE_CODE",
+            started.state, "alice")
+        assert result.nickname == ""
+        assert result.credential_data["access_key_id"] == "ak"
+    finally:
+        await client.aclose()
+        await oauth.aclose()
 
 
 async def test_codearts_oauth_complete_callback_missing_code():

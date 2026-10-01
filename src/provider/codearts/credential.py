@@ -83,8 +83,10 @@ class CodeArtsCredential:
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> CodeArtsCredential:
+        # token 响应用 `user_id`（见 merge_refreshed），落库形态用 `uid`：都认，
+        # 否则登录时 uid 被丢掉（昵称/节流桶只能回落 AK）。
         return cls(
-            uid=str(raw.get("uid") or ""),
+            uid=str(raw.get("uid") or raw.get("user_id") or ""),
             user_name=str(raw.get("user_name") or raw.get("userName") or ""),
             access_key_id=str(raw.get("access_key_id") or raw.get("accessKeyId") or ""),
             secret_access_key=str(

@@ -9,11 +9,13 @@
 * **模型发现** `GET {snap}/v1/model/builtin`（`Agent-Type: PromptCenter`）
   + `GET {benefit}/api/v1/gateway/config` 两路合并；福利是按账号授予的，
   因此「哪些模型该带 benefit 头」按 **uid** 分别记账，不跨账号共享。
-* **额度** `GET {benefit}/api/v1/user/tokens/balance`，单位是 **token**：免费
+* **额度** `GET {benefit}/api/v1/user/tokens/balance`，上游单位是 **token**：免费
   额度为**每日 1000 万 token、当日 0 点清零**（官方「每日千万 Token 免费领」），
   不是按月的套餐积分。**当日没用完即作废**，故 `parse_balance` 把当日剩余登记成
   到期点＝次日 0 点的 `expiry_ladder`，让调度器「快过期的先用」把 CodeArts 排在
-  其它渠道之前。CodeArts 没有签到接口，临时凭证的续期由
+  其它渠道之前。上游 token 由 `units` 统一折成「积分」（1 积分 = 10000 token，
+  每日池满额 = 1000 积分），与其它渠道同口径，见该模块。CodeArts 没有签到接口，
+  临时凭证的续期由
   `tasks.refresh.RefreshTask` 独占（先落库再同步）；额度探测只读余额，
   绝不在此刷新一次性 refresh_token，见 `probe_quota`。
 
@@ -41,7 +43,7 @@ from ...provider.base import Event, EventKind, Model, Quota
 from ...provider.token_expiry import normalize_epoch
 from . import auth as codearts_auth
 from . import events as codearts_events
-from . import signer
+from . import signer, units
 from .credential import CodeArtsCredential, merge_refreshed
 from .events import (
     AGENT_TYPE_PROMPT_CENTER,
@@ -485,7 +487,7 @@ def _models_from_items(items: Any, *, benefit: bool) -> list[Model]:
     展示的消耗倍率，取首条可解析项作为本渠道 `credit_rate`。福利条目来自每日
     免费 token 池、上游不给该字段，保持 `None`（**不**冒充 zen/kilo 的 x0「免费」
     ——它消耗的是每日 token 额度，额度用尽即不可用）。福利模型的单请求扣池
-    改在 usage 事件上按 token 1:1 推算，见 `_fill_estimated_credit`。
+    改在 usage 事件上按 token 1:1 推算并折成积分，见 `_fill_estimated_credit`。
     """
     if not isinstance(items, list):
         return []
@@ -510,12 +512,14 @@ def _models_from_items(items: Any, *, benefit: bool) -> list[Model]:
 
 
 def _fill_estimated_credit(event: Event, *, benefit: bool) -> None:
-    """福利模型 USAGE 事件补记**推算额度消耗**（单位：token）。
+    """福利模型 USAGE 事件补记**推算额度消耗**（单位：积分）。
 
     CodeArts 上游的 usage 只给 token 数、不带单请求额度字段，而福利模型实测
     按每日 token 池 **1:1** 扣减（`credit_events` 反解：一条输入 32 + 输出 694
     = 726 token 的请求，池余额恰好 −726），故本服务按「输入 + 输出 token」推算
-    该请求的额度消耗并标 `credit_estimated`（展示层加 ≈）。
+    该请求的额度消耗并标 `credit_estimated`（展示层加 ≈）。上游 token 经 `units`
+    折成积分（1 积分 = 10000 token），与每日池余额同口径——否则统计页的
+    `credit` 会是 token 量级、与额度单位对不上。
 
     只补福利模型：内置模型不扣这条每日 token 池（它走 `credit[]` 的付费倍率），
     补了会把 token 数当成池消耗。上游将来若直接回传 `credit` 则不覆盖；
@@ -527,7 +531,8 @@ def _fill_estimated_credit(event: Event, *, benefit: bool) -> None:
         return
     if usage.input_tokens is None and usage.output_tokens is None:
         return
-    usage.credit = float((usage.input_tokens or 0) + (usage.output_tokens or 0))
+    usage.credit = units.tokens_to_credits(
+        float((usage.input_tokens or 0) + (usage.output_tokens or 0)))
     usage.credit_estimated = True
 
 
@@ -582,7 +587,7 @@ def _first_int(item: dict[str, Any], keys: tuple[str, ...]) -> int | None:
 
 
 def parse_balance(data: dict[str, Any], *, now: int | None = None) -> Quota:
-    """`/api/v1/user/tokens/balance` 响应 → Quota。
+    """`/api/v1/user/tokens/balance` 响应 → Quota（单位：积分）。
 
     上游实际返回的是**每日免费 token 池**（实测 2026-09-30）：
     `daily_token_limit` / `daily_tokens_used`（+ 等价的 `total_quota` /
@@ -590,10 +595,15 @@ def parse_balance(data: dict[str, Any], *, now: int | None = None) -> Quota:
     清零」，故有 `daily_token_limit` 时一律按**当日**口径算剩余，而不是拿可能
     代表套餐的 `total_quota` 冒充。
 
+    上游数值是 **token**、量级达千万，直接落库既难看也与其它渠道（几百积分）
+    不可比，故这里经 `units.tokens_to_credits` 统一折成「积分」（1 积分 =
+    10000 token，每日池满额 = 1000 积分）；余额、额度与到期阶梯一律按积分口径，
+    与 `_fill_estimated_credit` 的单请求扣池同单位。
+
     每日池同时是**用完即弃**：当日没用完的额度 0 点清零、不累计。故这里按与
     CodeBuddy/TRAE 相同的口径登记 `expiry_ladder`（到期点＝次日 0 点、金额＝
-    当日剩余），让调度器的「窗口内即将到期额度多者先用」把 CodeArts 排在其它
-    渠道之前——否则每天会白丢一个用不完的 1000 万池。
+    当日剩余积分），让调度器的「窗口内即将到期额度多者先用」把 CodeArts 排在
+    其它渠道之前——否则每天会白丢一个用不完的 1000 分池。
 
     没有每日字段时退化为键名宽容解析（套餐/月度形状或旧字段），此时不登记
     到期阶梯（无可靠重置时间）；全部取不到时返回 `probe_failed=True`（**未知**），
@@ -607,11 +617,12 @@ def parse_balance(data: dict[str, Any], *, now: int | None = None) -> Quota:
     daily_limit = _first_number(result, ("daily_token_limit",))
     if daily_limit is not None and daily_limit > 0:
         daily_used = _first_number(result, ("daily_tokens_used",)) or 0.0
-        remaining = max(0.0, daily_limit - daily_used)
+        remaining = units.tokens_to_credits(max(0.0, daily_limit - daily_used))
+        total = units.tokens_to_credits(daily_limit)
         reset = _next_local_midnight(stamp)
         # 已用尽（remaining=0）不携带可消耗额度，不进到期排序（对空包排第一没意义）
         ladder = [(reset, remaining)] if remaining > 0 else None
-        return Quota(remaining=remaining, total=daily_limit, cycle_end=reset,
+        return Quota(remaining=remaining, total=total, cycle_end=reset,
                      expiry_ladder=ladder, probed_at=stamp)
     remaining = _first_number(result, ("remaining", "remaining_tokens", "tokens_balance",
                                        "balance", "available", "available_tokens",
@@ -623,8 +634,13 @@ def parse_balance(data: dict[str, Any], *, now: int | None = None) -> Quota:
         remaining = max(0.0, total - used)
     if remaining is None and total is None:
         return Quota(probe_failed=True, probed_at=stamp)
-    return Quota(remaining=remaining, total=total, cycle_end=cycle_end,
-                 probed_at=stamp)
+    return Quota(remaining=_opt_credits(remaining), total=_opt_credits(total),
+                 cycle_end=cycle_end, probed_at=stamp)
+
+
+def _opt_credits(tokens: float | None) -> float | None:
+    """可空的 token 额度 → 积分；None 原样返回（区分「未提供」与「0」）。"""
+    return None if tokens is None else units.tokens_to_credits(tokens)
 
 
 def _next_local_midnight(now: int) -> int:

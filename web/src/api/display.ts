@@ -45,7 +45,7 @@ export function healthView(health: Health, provider?: string): HealthView {
 /**
  * 周期语义：CodeBuddy 的额度随周期重置，TRAE 是单调递减的账户余额，
  * Zen / Kilo 走免费层、上游没有额度接口（探测恒为「未知」），
- * CodeArts 是**每日 token 池**（当日 0 点清零、不累计）。
+ * CodeArts 是**每日积分池**（上游 1000 万 token 折 1000 积分，当日 0 点清零、不累计）。
  *
  * 判定依据是**渠道类型**，不是 quota_cycle_end 是否存在：
  * CodeBuddy 未探测时 cycle_end 同样是 null，而按 cycle_end 推断会把它
@@ -59,10 +59,10 @@ export function quotaSemantics(credential: Credential): string {
   if (credential.provider === "trae") {
     return "账户剩余（单调递减）";
   }
-  // CodeArts 是每日 1000 万免费 token，当日 0 点清零——上游不给重置时间戳，
-  // 固定按时段描述，不能退化成「本周期剩余」的通用口径。
+  // CodeArts 是每日 1000 积分池（上游 1000 万 token 折成，1 积分 = 10000 token），
+  // 当日 0 点清零——上游不给重置时间戳，固定按时段描述，不能退化成「本周期剩余」。
   if (credential.provider === "codearts") {
-    return "每日 Token 额度（当日 0 点清零）";
+    return "每日积分额度（当日 0 点清零）";
   }
   // CodeBuddy / Qoder 随周期重置；未探测到重置时间时退化为本周期口径。
   if (!credential.quota_cycle_end) {
@@ -73,12 +73,11 @@ export function quotaSemantics(credential: Credential): string {
 }
 
 /**
- * 额度单位：CodeArts 的额度阶梯是 **token**（每日 1000 万 token 池），
- * 其余按期重置/单调递减的渠道口径是「积分」。展示「到期额度」时据此换单位。
+ * 额度单位统一为「积分」：CodeArts 上游的 token 已在后端折成积分
+ * （1 积分 = 10000 token，见 `src/provider/codearts/units.py`），
+ * 与 CodeBuddy / TRAE / Qoder 同口径，展示层不再需要按渠道换单位。
  */
-export function quotaUnit(provider: string): string {
-  return provider === "codearts" ? "token" : "积分";
-}
+export const QUOTA_UNIT = "积分";
 
 /**
  * 到期指标：调度窗口内即将到期的额度（后端与选号排序同源计算）。
@@ -89,9 +88,7 @@ export function quotaUnit(provider: string): string {
  * 主/次两个窗口共用一个函数：措辞区分开，否则两行同样的句式看不出
  * 谁是第一优先级（主窗口 36h 打平时才轮到次窗口 7 天）。
  *
- * `unit` 默认「积分」（CodeBuddy / TRAE / Qoder 的口径）；CodeArts 的阶梯是
- * **token**（每日 1000 万 token 池，0 点清零），传 `quotaUnit(provider)` 覆盖，
- * 否则会把 token 数标成积分。
+ * `unit` 默认「积分」，全渠道同口径（CodeArts 的 token 已在后端折成积分）。
  */
 export function expiringQuotaLabel(
   credits: number | null | undefined,

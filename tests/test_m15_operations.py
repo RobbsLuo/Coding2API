@@ -2315,10 +2315,15 @@ def test_stats_events_include_credential_name(repo):
     collector.record(username="u", provider="trae", model="m", ok=True)  # 无凭证
     assert credentials.delete(ghost_id) is True
 
+    blank_id = credentials.add(provider="codearts", credential_data={}, nickname="")
+    collector.record(username="u", provider="codearts", model="m", ok=True,
+                     credential_id=blank_id)
+
     rows = {e["credential_id"]: e for e in query.events()["events"]}
     assert rows[keep_id]["credential_name"] == "主号"
     assert rows[ghost_id]["credential_name"] is None        # 已删除 → 回退
     assert rows[None]["credential_name"] is None            # 无凭证
+    assert rows[blank_id]["credential_name"] is None        # 空昵称 → 同回退
 
 
 def test_stats_events_endpoint_scope_and_clamp(admin_client):
@@ -3028,6 +3033,8 @@ def test_error_type_mapping_covers_all_kinds():
     from src.provider.base import ErrKind
 
     assert _error_type_for(ErrKind.PLAN) == "rate_limit"
+    assert _error_type_for(ErrKind.MODEL) == "rate_limit"
+    assert _error_type_for(ErrKind.CONCURRENCY) == "rate_limit"
     assert _error_type_for(ErrKind.DEAD) == "credential_unavailable"
     assert _error_type_for(ErrKind.SOFT) == "upstream_error"
     assert _error_type_for(ErrKind.OTHER) == "upstream_error"

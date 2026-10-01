@@ -673,10 +673,11 @@ def test_client_credit_rate_and_ratio_parsing():
 
 
 def test_client_fill_estimated_credit_benefit_and_guards():
-    # 福利模型：输入 + 输出 token = 每日池消耗，标推算值（上游不给该字段）
+    # 福利模型：输入 + 输出 token 折成积分（1 积分 = 10000 token）后标推算值
     event = Event(kind=EventKind.USAGE, usage=Usage(input_tokens=32, output_tokens=694))
     _fill_estimated_credit(event, benefit=True)
-    assert event.usage.credit == 726 and event.usage.credit_estimated is True
+    assert event.usage.credit == pytest.approx(726 / 10000)
+    assert event.usage.credit_estimated is True
     # 上游将来真回传 credit → 不覆盖
     upstream = Event(kind=EventKind.USAGE,
                      usage=Usage(input_tokens=1, output_tokens=2, credit=9.5))
@@ -697,50 +698,73 @@ def test_client_fill_estimated_credit_benefit_and_guards():
     # 只给一半 token 也照算（另一侧按 0）
     half = Event(kind=EventKind.USAGE, usage=Usage(output_tokens=5))
     _fill_estimated_credit(half, benefit=True)
-    assert half.usage.credit == 5 and half.usage.credit_estimated is True
+    assert half.usage.credit == pytest.approx(5 / 10000)
+    assert half.usage.credit_estimated is True
 
 
 def test_client_parse_balance_variants():
+    # 上游是 token、本服务折成积分（1 积分 = 10000 token）：余额/额度/阶梯同口径
     assert parse_balance({}).probe_failed is True
     direct = parse_balance({"total": 100, "used": 30})
-    assert direct.remaining == 70 and direct.total == 100
+    assert direct.remaining == pytest.approx(70 / 10000)
+    assert direct.total == pytest.approx(100 / 10000)
     envelope = parse_balance({"result": {"remaining": 5, "total": 10,
                                          "cycle_end": 1700000000}})
-    assert envelope.remaining == 5 and envelope.cycle_end == 1700000000
+    assert envelope.remaining == pytest.approx(5 / 10000)
+    assert envelope.cycle_end == 1700000000
     # bool 不算数字；残缺键回落下一个候选
     tolerant = parse_balance({"remaining": True, "balance": 3, "cycle_end": -1,
                               "expire_time": 1700000001})
-    assert tolerant.remaining == 3 and tolerant.cycle_end == 1700000001
+    assert tolerant.remaining == pytest.approx(3 / 10000)
+    assert tolerant.cycle_end == 1700000001
     assert parse_balance({"quota": 0}).probe_failed is False
-    # 真实每日池形状（2026-09-30 实测）：按 daily_token_limit 算当日剩余
+    # 真实每日池形状（2026-09-30 实测）：按 daily_token_limit 算当日剩余，再折积分
     noon = 1_780_300_800  # 任意时刻；到期点断言不依赖具体时区
     daily = parse_balance({"result": {
         "total_quota": 10000000, "total_balance": 9998868, "used_amount": 1132,
         "daily_token_limit": 10000000, "daily_tokens_used": 1132,
         "monthly_token_limit": 0, "expire_time": 0}}, now=noon)
-    assert daily.total == 10000000 and daily.remaining == 9998868
+    # 每日池满额 1000 万 token ≡ 1000 积分；剩余 9998868 token ≡ 999.8868 积分
+    assert daily.total == pytest.approx(1000.0)
+    assert daily.remaining == pytest.approx(999.8868)
     assert daily.probe_failed is False
     assert daily.probed_at == noon
     # 到期点＝下一个本地 0 点，当日剩余进到期阶梯 → 调度器「快过期的先用」优先消耗
     midnight = time.localtime(daily.cycle_end)
     assert (midnight.tm_hour, midnight.tm_min, midnight.tm_sec) == (0, 0, 0)
     assert noon < daily.cycle_end <= noon + 86400
-    assert daily.expiry_ladder == [(daily.cycle_end, 9998868)]
+    assert daily.expiry_ladder == [(daily.cycle_end, pytest.approx(999.8868))]
     # 当日用尽 → 剩余 0（不是负数），健康度会判「已耗尽」；空池不进到期排序
     drained = parse_balance({"daily_token_limit": 100,
                              "daily_tokens_used": 250}, now=noon)
-    assert drained.remaining == 0 and drained.total == 100
+    assert drained.remaining == 0 and drained.total == pytest.approx(0.01)
     assert drained.cycle_end == daily.cycle_end and drained.expiry_ladder is None
     # daily_token_limit 为 0/缺失时退化到通用键（含新补的 total_balance/used_amount）
     generic = parse_balance({"total_quota": 500, "used_amount": 40}, now=noon)
-    assert generic.total == 500 and generic.remaining == 460
+    assert generic.total == pytest.approx(500 / 10000)
+    assert generic.remaining == pytest.approx(460 / 10000)
     # 通用形状没有可靠的每日重置时间 → 不登记到期阶梯，也不伪造 cycle_end
     assert generic.expiry_ladder is None and generic.cycle_end is None
     fallback = parse_balance({"result": {"total_balance": 900, "total_quota": 1000}})
-    assert fallback.total == 1000 and fallback.remaining == 900
+    assert fallback.total == pytest.approx(0.1)
+    assert fallback.remaining == pytest.approx(0.09)
     # daily_tokens_used 缺失时按 0 处理 → 剩余等于额度
     assert parse_balance({"daily_token_limit": 10},
-                         now=noon).remaining == 10
+                         now=noon).remaining == pytest.approx(10 / 10000)
+
+
+def test_units_tokens_to_credits():
+    from src.provider.codearts.units import (
+        DAILY_POOL_CREDITS,
+        DAILY_POOL_TOKENS,
+        TOKENS_PER_CREDIT,
+        tokens_to_credits,
+    )
+
+    assert TOKENS_PER_CREDIT == 10_000
+    assert tokens_to_credits(DAILY_POOL_TOKENS) == DAILY_POOL_CREDITS == 1000
+    assert tokens_to_credits(0) == 0
+    assert tokens_to_credits(726) == pytest.approx(0.0726)
 
 
 def test_client_upstream_error_kind():
@@ -836,7 +860,7 @@ async def test_client_stream_chat_benefit_header_and_embedded_error():
 
 
 async def test_client_stream_chat_benefit_usage_records_pool_credit():
-    """福利模型收尾帧的 usage → 补推算扣池额度（token 1:1），标 estimated。"""
+    """福利模型收尾帧的 usage → 补推算扣池额度（token 1:1 后折积分），标 estimated。"""
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers[codearts_events.HEADER_MAAS_TYPE] == (
             codearts_events.MAAS_BENEFIT)
@@ -850,7 +874,8 @@ async def test_client_stream_chat_benefit_usage_records_pool_credit():
         "deepseek-v4-flash-0731")]
     usage = next(e for e in events if e.kind is EventKind.USAGE).usage
     assert usage.input_tokens == 32 and usage.output_tokens == 694
-    assert usage.credit == 726 and usage.credit_estimated is True
+    assert usage.credit == pytest.approx(726 / 10000)
+    assert usage.credit_estimated is True
 
 
 async def test_client_stream_chat_legacy_and_http_error():
@@ -963,7 +988,8 @@ async def test_client_claim_benefit_and_quota_and_identity():
     client = _client(handler)
     assert (await client.claim_benefit(_cred()))["result"]["claimed"] is True
     quota = await client.probe_quota(_cred())
-    assert quota.remaining == 42 and quota.total == 100
+    assert quota.remaining == pytest.approx(42 / 10000)
+    assert quota.total == pytest.approx(100 / 10000)
     assert await client.caller_identity(_cred()) == ("pid", "carol", "acc")
     assert await client.current_user(_cred()) == ("u", "n", "d")
 
@@ -994,7 +1020,7 @@ async def test_client_probe_quota_never_refreshes_even_in_window():
     expiring = _cred(refresh_token="rt", dpop_private_jwk=jwk,
                      expiration=int(time.time()) + 5)
     quota = await client.probe_quota(expiring)
-    assert sts_calls == 0 and quota.remaining == 7
+    assert sts_calls == 0 and quota.remaining == pytest.approx(7 / 10000)
 
 
 async def test_client_refresh_token_rotates_via_sts():
@@ -1088,7 +1114,7 @@ async def test_provider_list_models_refresh_and_probe_quota():
     refreshed = await provider.refresh({"access_key_id": "AK", "secret_access_key": "SK",
                                         "refresh_token": "rt", "dpop_private_jwk": _jwk()})
     assert refreshed["access_key_id"] == "AK2"
-    assert (await provider.probe_quota({})).remaining == 9
+    assert (await provider.probe_quota({})).remaining == pytest.approx(9 / 10000)
     await provider.aclose()
 
 
@@ -1272,7 +1298,7 @@ def test_events_classify_error_code_branches():
     assert classify("   ") is ErrKind.OTHER
     assert classify("InferHub.002002009.404") is ErrKind.BLOCKED
     assert classify("InferHub.4004.200 benefit not found") is ErrKind.BLOCKED
-    assert classify("TM.00001041") is ErrKind.MODEL
+    assert classify("TM.00001041") is ErrKind.CONCURRENCY
     assert classify("tpm limit") is ErrKind.MODEL
     assert classify("1005 quota") is ErrKind.PLAN
     assert classify("APIG.0301 decrypt token fail") is ErrKind.DEAD
@@ -1288,14 +1314,15 @@ def test_events_classify_status_branches():
     assert classify(404, b"model is not registered") is ErrKind.BLOCKED
     assert classify(401, b"") is ErrKind.DEAD
     assert classify(404, b"") is ErrKind.SOFT
-    assert classify(429, b"00001041") is ErrKind.MODEL
+    assert classify(429, b"00001041") is ErrKind.CONCURRENCY
     assert classify(429, b"slow down") is ErrKind.SOFT
-    # 并发会话超限实测走 HTTP 400（不是 429）：必须判成可重试的 MODEL，
-    # 否则落 INVALID → 换号也没用、还不冷却（77% 失败率主因之一）。
+    # 并发会话超限实测走 HTTP 400（不是 429）：必须判成可重试的 CONCURRENCY，
+    # 否则落 INVALID → 换号也没用、还不冷却（77% 失败率主因之一）；
+    # 且不能套 MODEL 的翻倍退避（一次打满锁 10min 太久，在途排空即恢复）。
     throttle_body = ('{"error_code":"TM.00001041",'
                      '"error_msg":"并发会话数已达上限(3个)，请关闭部分会话后重试。"}'
                      ).encode()
-    assert classify(400, throttle_body) is ErrKind.MODEL
+    assert classify(400, throttle_body) is ErrKind.CONCURRENCY
     assert classify(400, b"rate limit exceeded") is ErrKind.MODEL
     assert classify(400, b"bad request") is ErrKind.INVALID
     assert classify(500, b"boom") is ErrKind.OTHER

@@ -21,6 +21,11 @@ MAX_ROTATE = 3
 # 模型级限流（6004）软冷却基数与封顶（有界指数退避）
 MODEL_COOLDOWN_SECONDS = 600
 MODEL_COOLDOWN_MAX_SECONDS = 2 * 3600
+# 并发会话打满（CodeArts TM.00001041）固定短冷却：它是「在途满了」的瞬态信号，
+# 不是额度耗尽——在途请求排空即恢复（实测 CodeArts 平均 9s、最大 38s），60s
+# 覆盖排空加余量。刻意**不翻倍**：重复打满说明持续高并发，重 armed 60s 即可；
+# 套 MODEL 的 600s 起步、翻倍到 2h 会把一次瞬态打满变成 10min 起的长时间不可用。
+CONCURRENCY_COOLDOWN_SECONDS = 60
 # 「该后端无此模型」（11102）负缓存：6h 起，翻倍封顶 24h
 BLOCKED_BASE_SECONDS = 6 * 3600
 BLOCKED_MAX_SECONDS = 24 * 3600
@@ -29,7 +34,8 @@ BLOCKED_SHIFT_MAX = 2
 CREDIT_RESET_HOUR = 4
 # 主到期排序窗口：把「距到期 ≤ 该时长」的额度加总，作为选号第一排序指标（多者先用）
 # CodeBuddy 是每日 100 积分 × N 的小包，36h 覆盖今天与后天的到期点；
-# CodeArts 的每日 token 池 0 点清零，到期点始终落在该窗口内（故只要有额度就先烧它）
+# CodeArts 的每日积分池（1000 万 token 折 1000 积分）0 点清零，到期点始终落在该窗口内
+# （故只要有额度就先烧它）
 EXPIRY_WINDOW_SECONDS = 36 * 3600
 # 次要到期排序窗口：仅当主指标打平（最常见的是都为 0）时才启用，避免只看 36h
 # 而漏掉一周内仍会过期的额度。7 天覆盖 CodeBuddy 一个完整的小包到期周期
@@ -44,7 +50,7 @@ def expiring_credits(
     """窗口内即将到期的额度：`now < 到期 <= now + window` 的各包剩余之和。
 
     窗口 ≤0 或无阶梯（渠道无到期信息）为 0。调度排序与管理台展示共用此口径。
-    单位随渠道（CodeBuddy/TRAE/Qoder 是积分、CodeArts 是 token），排序只比数值。
+    单位统一为积分（CodeArts 的上游 token 已在解析层折成积分），排序只比数值。
     """
     if not ladder or window_seconds <= 0:
         return 0
@@ -245,7 +251,8 @@ class Scheduler:
         CREDIT  → 冷却到次日 04:00（余额不足，等签到恢复）
         SOFT    → 短冷却，不累计 err_count（防雪崩）
         OTHER   → 累计，达到阈值 → 中冷却
-        MODEL / BLOCKED → 只写 (凭证, 模型) 条目，不动账号级状态；
+        MODEL / BLOCKED / CONCURRENCY → 只写 (凭证, 模型) 条目，不动账号级状态；
+                           其中 CONCURRENCY 用固定短冷却，不翻倍
                           账号级冷却出现时清空模型级条目（防豁免泄漏）
         REQUEST → 零动作：不是账号的问题，换号但绝不惩罚凭证
         """
@@ -264,14 +271,23 @@ class Scheduler:
                 # 宁可保守也不要写一条影响不到任何选号的孤儿记录
                 return ErrorOutcome(cooling_until=now + self._cooldowns[ErrKind.SOFT],
                                     err_count=candidate.err_count)
-            reason = "blocked" if kind is ErrKind.BLOCKED else "model"
+            if kind is ErrKind.BLOCKED:
+                reason = "blocked"
+            elif kind is ErrKind.CONCURRENCY:
+                reason = "concurrency"
+            else:
+                reason = "model"
             existing = (candidate.model_cooldowns or {}).get(model)
             # 换了原因就重新计数：限流与「无此模型」的退避基数/封顶完全不同，
             # 沿用对方的 hits 会得到既非 600s 也非 6h 的第三种时长
             hits = (existing.hits + 1
                     if existing is not None and existing.reason == reason else 1)
-            duration = (blocked_backoff_duration(hits) if kind is ErrKind.BLOCKED
-                        else model_cooldown_duration(hits))
+            # 并发打满固定短冷却、不翻倍：在途排空即恢复，重复打满重 armed 即可
+            if kind is ErrKind.CONCURRENCY:
+                duration = CONCURRENCY_COOLDOWN_SECONDS
+            else:
+                duration = (blocked_backoff_duration(hits) if kind is ErrKind.BLOCKED
+                            else model_cooldown_duration(hits))
             return ErrorOutcome(err_count=candidate.err_count,
                                 model_cooldowns={model: ModelCooldown(
                                     cooling_until=now + duration, hits=hits,

@@ -72,10 +72,14 @@ DONE_TEXT = "[DONE]"
 # `InferHub.002002009.404 model is not registered` / `InferHub.4004.200
 # benefit not found` 均来自逆向记录 §7 实测原文。
 _MODEL_ABSENT_MARKERS = ("002002009", "not registered", "4004.200", "benefit not found")
-# 模型级限流：上游点名当前模型/会话（`TM.00001041`、TPM、并发会话）。
-_MODEL_THROTTLE_MARKERS = ("00001041", "tpm", "429", "并发会话", "rate limit", "throttl")
+# 并发会话打满：上游点名「在途满了」（`TM.00001041`、并发），排空即恢复，
+# 走固定短冷却的 CONCURRENCY，不套 MODEL 的翻倍退避（一次打满锁 10min 太久）。
+_CONCURRENCY_MARKERS = ("00001041", "并发")
+# 模型级限流：上游点名当前模型（TPM、429 等），配额类限流恢复慢，走 MODEL。
+_MODEL_THROTTLE_MARKERS = ("tpm", "429", "rate limit", "throttl")
 # HTTP 状态码侧的限流/并发标记。与流内业务码不同，这里判的是**响应体文本**：
-# 上游把并发超限放在 HTTP 400（不是 429），命中即应算可重试的模型级限流。
+# 上游把并发超限放在 HTTP 400（不是 429），命中即应算可重试的限流。
+# 并发与否的区分见 _CONCURRENCY_MARKERS（先判并发，再判模型级限流）。
 _STATUS_THROTTLE_MARKERS = ("00001041", "tpm", "并发", "rate limit", "throttl")
 # 结构性噪声行（心跳、被截断的裸括号）：整行只有空白与 `[]:,`，无 JSON 语义。
 # `_data_payload` 会放行 `{`/`[` 开头的行，实测上游偶发只发一个括号的心跳。
@@ -255,6 +259,8 @@ def classify_error_code(code: str | None) -> ErrKind:
         return ErrKind.OTHER
     if any(marker in text for marker in _MODEL_ABSENT_MARKERS):
         return ErrKind.BLOCKED
+    if any(marker in text for marker in _CONCURRENCY_MARKERS):
+        return ErrKind.CONCURRENCY
     if any(marker in text for marker in _MODEL_THROTTLE_MARKERS):
         return ErrKind.MODEL
     if "1005" in text or "quota" in text or "insufficient" in text:
@@ -285,10 +291,13 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
     if status == 404:
         return ErrKind.SOFT
     # 限流/并发会话标记：HTTP 400 与 429 都可能承载（实测并发超限走 400 +
-    # `TM.00001041`）。统一判为模型级限流，避免 400 落进 INVALID → 换号重试
-    # 也没用、且不触发冷却（与流内 classify_error_code 的 TM.00001041 一致）。
+    # `TM.00001041`）。统一判为可重试的限流，避免 400 落进 INVALID → 换号重试
+    # 也没用、且不触发冷却（与流内 classify_error_code 一致）；其中并发打满
+    # 另判 CONCURRENCY（固定短冷却），不套 MODEL 的翻倍退避。
     if status in (400, 429) and any(
             m in lowered for m in _STATUS_THROTTLE_MARKERS):
+        if any(m in lowered for m in _CONCURRENCY_MARKERS):
+            return ErrKind.CONCURRENCY
         return ErrKind.MODEL
     if status == 429:
         return ErrKind.SOFT

@@ -213,10 +213,10 @@ describe("display helpers", () => {
     expect(qoder).toContain("本周期剩余");
     expect(qoder).not.toContain("单调递减");
 
-    // CodeArts 是每日 token 池（0 点清零），不看 cycle_end，也不套用周期口径
+    // CodeArts 是每日积分池（0 点清零），不看 cycle_end，也不套用周期口径
     const codearts = quotaSemantics(makeCredential({
       provider: "codearts", quota_cycle_end: 1_800_000_000 }) as never);
-    expect(codearts).toBe("每日 Token 额度（当日 0 点清零）");
+    expect(codearts).toBe("每日积分额度（当日 0 点清零）");
 
     // 国际版 Qoder 无旧签到接口，但额度语义不变（不在此断言）
   });

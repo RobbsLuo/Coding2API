@@ -1169,8 +1169,10 @@ def test_models_by_provider_rates_when_dual_upstream(tmp_path):
             if m["id"] == "glm-5.2")
     assert item["providers"] == ["codebuddy", "trae"]
     assert item["credit_rate"] == 0.29          # 合并值：先到先填
-    assert item["by_provider"] == {"codebuddy": {"credit_rate": 0.29},
-                                   "trae": {"credit_rate": 0.17}}
+    # by_provider 同时给出各渠道的 raw_id（渠道请求 key）与倍率
+    assert item["by_provider"] == {
+        "codebuddy": {"raw_id": "glm-5.2", "credit_rate": 0.29},
+        "trae": {"raw_id": "glm-5.2", "credit_rate": 0.17}}
 
 
 def test_models_name_passthrough_backfill_and_omit(tmp_path):
@@ -1194,12 +1196,12 @@ def test_models_name_passthrough_backfill_and_omit(tmp_path):
 
     from src.provider.base import Model
 
-    # codebuddy 先到但没名字（""），trae 后到有名字 → 名字应被补上；
-    # 单渠道、完全没名字的模型不应产出空的 "name" 字段。
+    # 上游没给可读名时（name=""）展示名从 id 现派生，两条渠道同 id 自然并成一条。
+    # id 本身是纯 free 噪声（`free`）时派生不出名字，才不产出空的 "name" 字段。
     app = build_app(settings, providers={
-        "codebuddy": Stub("codebuddy", [Model(id="shared", name="")]),
-        "trae": Stub("trae", [Model(id="shared", name="Shared Display"),
-                              Model(id="anon")]),
+        "codebuddy": Stub("codebuddy", [Model(id="shared-model", name="")]),
+        "trae": Stub("trae", [Model(id="shared-model", name="Shared Model"),
+                              Model(id="free")]),
     })
     app.state.credentials.add(provider="codebuddy", credential_data={"token": "a"})
     app.state.credentials.add(provider="trae", credential_data={"accessToken": "b"})
@@ -1207,12 +1209,13 @@ def test_models_name_passthrough_backfill_and_omit(tmp_path):
     with TestClient(app) as client:
         data = {m["id"]: m for m in client.get("/v1/models", headers={
             "Authorization": f"Bearer {key}"}).json()["data"]}
-    assert data["shared"]["name"] == "Shared Display"     # 空名被后者补齐
-    assert "name" not in data["anon"]                     # 无名字不产出空字段
+    assert set(data) == {"shared-model", "free"}       # 同 id 并成一条
+    assert data["shared-model"]["name"] == "Shared Model"  # 取上游名并清洗
+    assert "name" not in data["free"]                  # 派生不出名字则留空
 
 
 def test_models_merge_by_readable_name_across_channels(tmp_path):
-    """CB/TRAE/Qoder 同名不同 id 的模型并成一条，对外 id 用可读名小写。
+    """CB/TRAE/Qoder 同名不同 id 的模型并成一条，对外 id 用展示名的归一键。
 
     各渠道同一模型内部代号互不相同（`kimi-k3-1` / `kimi-k3` /
     `kmodel_latest`），只有可读名能对齐；请求转发到某渠道时再经别名表
@@ -1250,9 +1253,12 @@ def test_models_merge_by_readable_name_across_channels(tmp_path):
     assert [m["id"] for m in data] == ["kimi-k3"]          # 三渠道并成一条
     entry = data[0]
     assert entry["providers"] == ["codebuddy", "qoder", "trae"]
-    assert entry["by_provider"] == {"codebuddy": {"credit_rate": 0.3},
-                                    "qoder": {"credit_rate": 1.4},
-                                    "trae": {"credit_rate": 0.2}}
+    assert entry["name"] == "Kimi K3"      # 展示名清洗后与对外 id 同源
+    # by_provider 带各渠道 raw_id（渠道请求 key，永不改动）与倍率
+    assert entry["by_provider"] == {
+        "codebuddy": {"raw_id": "kimi-k3-1", "credit_rate": 0.3},
+        "qoder": {"raw_id": "kmodel_latest", "credit_rate": 1.4},
+        "trae": {"raw_id": "kimi-k3", "credit_rate": 0.2}}
     # 别名表：对外 id 与原 id 都能映射回各渠道自己的上游 id
     aliases = app.state.services.model_aliases
     assert aliases["qoder"]["kimi-k3"] == "kmodel_latest"
@@ -1261,11 +1267,15 @@ def test_models_merge_by_readable_name_across_channels(tmp_path):
     assert aliases["trae"]["kimi-k3"] == "kimi-k3"
 
 
-def test_models_name_merge_excludes_zen_and_colliding_names(tmp_path):
-    """zen 的 `name` 不是模型名（恒 `opencode`）不参与名合并；同渠道重名退回 id。
+def test_models_name_merge_includes_zen_and_guards_colliding_names(tmp_path):
+    """六条渠道统一按归一键合并；同渠道内归一键重复的退回原 id。
 
-    否则 zen 的多个模型会被并成一条，CodeBuddy 的 `hy4-preview` /
-    `hy4-preview-x`（都叫「Hy4 preview」）也会互相覆盖而丢一个。
+    清洗规则统一后，zen 由 id 派生的名字（`LongCat 2.5 Preview` → `longcat-2.5-
+    preview`）也能与其它渠道对齐，故不再排除在名合并之外——原先排除是因为
+    派生名与别家不同源，现在同源了。
+
+    仍要挡住同渠道重名：CodeBuddy 的 `hy4-preview` / `hy4-preview-x`（都叫
+    「Hy4 Preview」）若都按名入键，其中一个会被同键覆盖而消失。
     """
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
 
@@ -1283,8 +1293,9 @@ def test_models_name_merge_excludes_zen_and_colliding_names(tmp_path):
     from src.provider.base import Model
 
     app = build_app(settings, providers={
-        "zen": Stub("zen", [Model(id="longcat-2.5-preview-free", name="opencode"),
-                            Model(id="mimo-v2.5-free", name="opencode")]),
+        "zen": Stub("zen", [Model(id="longcat-2.5-preview-free",
+                                  name="LongCat 2.5 Preview"),
+                            Model(id="mimo-v2.5-free", name="MiMo V2.5")]),
         "codebuddy": Stub("codebuddy", [Model(id="hy4-preview", name="Hy4 preview"),
                                         Model(id="hy4-preview-x",
                                               name="Hy4 preview")]),
@@ -1295,17 +1306,20 @@ def test_models_name_merge_excludes_zen_and_colliding_names(tmp_path):
     with TestClient(app) as client:
         ids = {m["id"] for m in client.get(
             "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]}
+    # zen 单渠道：对外 id 仍是原 id，展示名是清洗后的可读名
     assert ids == {"longcat-2.5-preview-free", "mimo-v2.5-free",
                    "hy4-preview", "hy4-preview-x"}
-    # 重名未按名入键：不得留下「hy4 preview」这种指向其中一个的歧义别名
-    assert "hy4 preview" not in app.state.services.model_aliases["codebuddy"]
+    # 重名未按名入键：不得留下指向其中一个的歧义名字别名。两个原 id 各自
+    # 映射回自己是正确的（用户按原 id 直连仍要能定位到本渠道）。
+    assert app.state.services.model_aliases["codebuddy"] == {
+        "hy4-preview": "hy4-preview", "hy4-preview-x": "hy4-preview-x"}
 
 
 def test_models_name_merge_single_channel_keeps_raw_id(tmp_path):
-    """单渠道条目对外仍用上游原 id（Qoder `kmodel_latest`）；可读名也能直连。
+    """单渠道条目对外仍用上游原 id（Qoder `kmodel_latest`）；展示名也能直连。
 
-    只有多条渠道真正并到一起时才改用可读名——单渠道保持原 id，避免无谓
-    改名；但可读名同样登记为别名，用户按 `Kimi-K3` 也能落到该渠道。
+    只有多条渠道真正并到一起时才改用归一键——单渠道保持原 id，避免无谓
+    改名；展示名同样登记为别名，用户按 `Kimi K3` / `kimi-k3` 也能落到该渠道。
     """
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
 
@@ -1331,10 +1345,172 @@ def test_models_name_merge_single_channel_keeps_raw_id(tmp_path):
         data = client.get("/v1/models", headers={
             "Authorization": f"Bearer {key}"}).json()["data"]
     assert [m["id"] for m in data] == ["kmodel_latest"]
-    assert data[0]["name"] == "Kimi-K3"
+    assert data[0]["name"] == "Kimi K3"                    # 展示名统一清洗
     aliases = app.state.services.model_aliases
     assert aliases["qoder"]["kmodel_latest"] == "kmodel_latest"
-    assert aliases["qoder"]["kimi-k3"] == "kmodel_latest"    # 可读名也可直连
+    assert aliases["qoder"]["kimi-k3"] == "kmodel_latest"   # 归一后的名字键
+    assert aliases["qoder"]["kimi k3"] == "kmodel_latest"   # 原样的展示名也能直连
+
+
+def test_models_name_merge_cross_channel_via_normalized_key(tmp_path):
+    """清洗规则统一后 zen/kilo 也能与其它渠道并成一条。
+
+    zen 的展示名原本由 id 本地派生、kilo 的是短标签，两条渠道都被排除在按名
+    合并之外。现在归一规则对六条渠道一致：zen 的免费档尾缀与 TRAE 同名模型的
+    id 归一到同一个键，kilo 的命名空间路径段也一样。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return list(self._models)
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    from src.provider.base import Model
+
+    app = build_app(settings, providers={
+        # zen 的免费档 `longcat-2.5-preview-free` 与 TRAE 的 `longcat-2.5-preview`
+        # 归一到同一键（`longcat-2.5-preview`）→ 并成一条，对外 id 用该键
+        "zen": Stub("zen", [Model(id="longcat-2.5-preview-free", name="")]),
+        "trae": Stub("trae", [Model(id="longcat-2.5-preview", name="")]),
+        # kilo 的 `kilo-auto/free` 归一到 `kilo-auto`，单渠道仍用原 id 对外
+        "kilo": Stub("kilo", [Model(id="kilo-auto/free", name="")]),
+    })
+    for provider_id in ("zen", "trae", "kilo"):
+        app.state.credentials.add(provider=provider_id, credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        data = {m["id"]: m for m in client.get(
+            "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]}
+
+    assert set(data) == {"longcat-2.5-preview", "kilo-auto/free"}
+    merged = data["longcat-2.5-preview"]
+    assert merged["providers"] == ["trae", "zen"]
+    assert merged["name"] == "LongCat 2.5 Preview"
+    # 请求转发时仍发各渠道自己的原 key（raw key 永不改动）
+    assert merged["by_provider"] == {
+        "trae": {"raw_id": "longcat-2.5-preview"},
+        "zen": {"raw_id": "longcat-2.5-preview-free"}}
+    aliases = app.state.services.model_aliases
+    assert aliases["zen"]["longcat-2.5-preview"] == "longcat-2.5-preview-free"
+    assert aliases["zen"]["longcat-2.5-preview-free"] == "longcat-2.5-preview-free"
+    # kilo 单渠道：对外 id 是原 id，但归一后的键也能直连到同一渠道
+    assert aliases["kilo"]["kilo-auto"] == "kilo-auto/free"
+    assert aliases["kilo"]["kilo-auto/free"] == "kilo-auto/free"
+
+
+def test_models_sentinel_names_not_merged_across_channels(tmp_path):
+    """哨兵名（`auto` / `default`）不跨渠道合并，各自单列。
+
+    kilo 的 `kilo-auto/free`（上游名 `Auto Free`）与 Qoder 的 `auto` 都归一成
+    `auto`，但一个是 kilo 的自动路由、一个是 Qoder 的默认模型，语义只在本渠道
+    内成立。若合并，调度会把请求错误地路由到另一个上游。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return list(self._models)
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    from src.provider.base import Model
+
+    app = build_app(settings, providers={
+        "kilo": Stub("kilo", [Model(id="kilo-auto/free", name="Auto Free")]),
+        "qoder": Stub("qoder", [Model(id="auto", name="Auto")]),
+    })
+    for provider_id in ("kilo", "qoder"):
+        app.state.credentials.add(provider=provider_id, credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        data = [m for m in client.get(
+            "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]]
+    assert {m["id"] for m in data} == {"kilo-auto/free", "auto"}
+    assert all(len(m["providers"]) == 1 for m in data)   # 各渠道单列
+
+
+def test_models_outward_id_disambiguated_on_collision(tmp_path):
+    """对外 id 撞车时后来者退回原 id，保证对外 id 全局唯一。
+
+    多渠道条目的对外 id 取展示名归一键，可能与另一条单渠道条目的原 id 撞上
+    （这里 TRAE 的 `glm-5` 归一键 `glm-5`，而 kilo 有个原 id 就叫 `glm-5` 的
+    模型）。撞车时两条 entry 会共用一个 id，前端选择器的 key 与别名表都会
+    互相覆盖，故后来的那条退回自己的原 id。保留谁按渠道优先级：TRAE 优先于
+    未排名的 kilo。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return list(self._models)
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    from src.provider.base import Model
+
+    app = build_app(settings, providers={
+        # trae（rank 1）多渠道条目归一键为 `glm-5`
+        "trae": Stub("trae", [Model(id="glm", name="GLM 5")]),
+        "zen": Stub("zen", [Model(id="glm-5", name="GLM 5")]),
+        # kilo（未排名，靠后）单渠道条目的原 id 恰好也是 `glm-5` → 撞车
+        "kilo": Stub("kilo", [Model(id="glm-5", name="Orphan GLM")]),
+    })
+    for provider_id in ("trae", "zen", "kilo"):
+        app.state.credentials.add(provider=provider_id, credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        data = {m["id"]: m for m in client.get(
+            "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]}
+
+    assert len(data) == 2
+    # trae(rank 1) + zen 并成一条、保留归一键 glm-5；kilo 靠后，原 id 也撞上
+    # → 换成归一后的展示名
+    merged = data["glm-5"]
+    assert merged["providers"] == ["trae", "zen"]
+    disambiguated = data["orphan-glm"]
+    assert disambiguated["providers"] == ["kilo"]
+    # 别名表按渠道隔离：kilo 的模型只能发 kilo 的原 id
+    aliases = app.state.services.model_aliases
+    assert aliases["kilo"]["orphan-glm"] == "glm-5"
+    assert aliases["trae"]["glm-5"] == "glm"
+    assert aliases["zen"]["glm-5"] == "glm-5"
+
+
+def test_models_outward_id_triple_collision_falls_back_to_group_key():
+    """三方撞车、全部候选被占 → 用归一键兜底（`_disambiguate` 的 `for...else`）。
+
+    entry 的对外 id、主渠道原 id、归一形式全被先定稿的条目占掉时，退回
+    构造唯一的归一键，保证对外 id 有值。真实构造里归一键按组唯一、不会与
+    已有 id 重复，这里只验证「走到兜底分支」。
+    """
+    from src.api.models import _disambiguate
+
+    entries = [
+        {"id": "x", "key": "kx", "providers": ["p1"], "raw_ids": {"p1": "x"}},
+        {"id": "y", "key": "ky", "providers": ["p2"], "raw_ids": {"p2": "y"}},
+        {"id": "k4", "key": "k4", "providers": ["p3"], "raw_ids": {"p3": "k4"}},
+        # id/原 id/归一形式全被占（x、y、k4）：只能走 else 兜底
+        {"id": "x", "key": "k4", "providers": ["p1"], "raw_ids": {"p1": "y"}},
+    ]
+    _disambiguate(entries)
+    assert [e["id"] for e in entries] == ["x", "y", "k4", "k4"]
 
 
 def test_models_list_orders_cb_then_trae_first(tmp_path):

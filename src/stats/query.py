@@ -171,7 +171,7 @@ class StatsQuery:
             SELECT e.rowid, e.ts, e.username, e.provider, e.credential_id, e.model,
                    e.ok, e.error_type, e.input_tokens, e.output_tokens,
                    e.reasoning_tokens, e.cached_tokens, e.credit, e.credit_estimated, e.latency_ms,
-                   e.ttfb_ms, c.nickname AS credential_name
+                   e.ttfb_ms, NULLIF(c.nickname, '') AS credential_name
             FROM usage_events e
             LEFT JOIN credentials c ON c.id = e.credential_id
             {where}

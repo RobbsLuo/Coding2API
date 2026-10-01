@@ -498,9 +498,13 @@ class Executor:
                     self._remember(request, username, credential_id)
                     usage = result.get("usage") or {}
                     # credit 不在对外响应里（客户端不需要，见 compat 出口），
-                    # 但统计要记：从 USAGE 事件取，非流式路径否则会整条漏掉
+                    # 但统计要记：从 USAGE 事件取，非流式路径否则会整条漏掉。
+                    # 取**最后一个**而非第一个：CodeArts v2 每个 chunk 都带 usage，
+                    # 前面的帧是 0/0 或空占位、只有收尾帧是真值，取第一个会让积分
+                    # 记成空/0。末尾优先与流式路径（translator.usage）和
+                    # `aggregate()` 同语义，落库的 usage 与对外响应才同源。
                     usage_event = next(
-                        (e.usage for e in events
+                        (e.usage for e in reversed(events)
                          if e.kind is EventKind.USAGE and e.usage is not None), None)
                     self._deps.record(
                         username=username, provider=provider_id,
@@ -740,8 +744,9 @@ def _reject_message(model: str, last_error: Exception | None,
 
 def _error_type_for(kind: ErrKind) -> str:
     """ErrKind → 受控的统计失败类型（web/src/api/display.ts 同步维护）。"""
-    if kind in (ErrKind.PLAN, ErrKind.CREDIT, ErrKind.MODEL):
-        # MODEL 是模型级限流，展示口径同为额度类；冷却作用域差异在 schema 层
+    if kind in (ErrKind.PLAN, ErrKind.CREDIT, ErrKind.MODEL, ErrKind.CONCURRENCY):
+        # MODEL / CONCURRENCY 都是模型级限流，展示口径同为额度类；
+        # 冷却作用域与时长差异在 schema 层
         return "rate_limit"
     if kind is ErrKind.DEAD:
         return "credential_unavailable"

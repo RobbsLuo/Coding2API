@@ -7,7 +7,8 @@
 --
 
 -- 注：不建 checkins / model_cache 表——签到去重由 CheckinTask 的当日作用域
--- 集合实现（上游 status 为准），模型列表是进程内 TTL 缓存，重启即重建。
+-- 集合实现（上游 status 为准）；模型列表是「进程内 TTL 缓存 + DATA_DIR 落盘
+-- 快照（model_catalog.json）」，不占表（见 src/api/model_catalog.py）。
 
 -- 用户建表（B5）：users.txt（PBKDF2）降级为「引导输入」，启动时一次性导入，
 -- 之后 DB 是唯一权威源。ADMIN_USERNAMES env 降级为「引导期角色来源 + 防锁死

@@ -217,6 +217,14 @@ async def _warm_model_list(services) -> None:
         logger.warning("启动预热模型列表失败: %s", error)
 
 
+def _restore_model_list(services) -> None:
+    """启动时同步回灌落盘模型目录：失败仅记日志（缓存是加速手段，不是必需项）。"""
+    try:
+        models.restore_model_catalog(services)
+    except Exception as error:  # noqa: BLE001 - 恢复失败不阻断服务
+        logger.warning("恢复落盘模型目录失败: %s", error)
+
+
 def build_app(settings: Settings | None = None, *, providers: dict | None = None,
               users: object | None = None) -> FastAPI:
     config = settings or load_settings()
@@ -325,6 +333,11 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                               credit_events=credit_events)
         app_.state.task_runner = runner
         await runner.start()
+        # 落盘目录回灌（同步、零上游请求）：别名表立刻可用，扁平名请求马上就能
+        # 把候选收窄到真正持有该模型的渠道。放在预热之前——否则启动到预热跑完
+        # 这段时间里别名表是空的，请求会按全部渠道扇出，真实打一轮不认该模型的
+        # 上游（CodeBuddy 11102 / TRAE 4001）。读取失败只丢缓存，见 model_catalog。
+        _restore_model_list(services_)
         # 预热模型别名表：放后台跑（force 绕过 TTL）。
         # 不内联 await 的原因：zen 免费层探活最慢的模型可占十几秒，内联会让应用
         # 在这段时间里不响应 /health，容器存活探针可能误判；动态拉取失败仅记日志。
@@ -490,9 +503,12 @@ def _upstream_auth(registry: dict, settings: Settings) -> dict:
     if host is not None:
         flows["qoder"] = QoderOAuth(detect_realm_from_domain(host))
     codearts = registry.get("codearts")
-    login = getattr(getattr(codearts, "client", None), "login", None)
+    client = getattr(codearts, "client", None)
+    login = getattr(client, "login", None)
     if login is not None:
-        flows["codearts"] = CodeArtsOAuth(login)
+        # 登录后补账号身份：token 响应不带用户名，不补则凭证昵称为空、
+        # 统计明细的凭证列空白。复用 provider 的签名客户端，不另建连接池。
+        flows["codearts"] = CodeArtsOAuth(login, identity_client=client)
     return flows
 
 

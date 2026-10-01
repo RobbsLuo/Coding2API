@@ -376,7 +376,11 @@ export interface ModelInfo {
   object: string;
   owned_by: string;
   providers: Provider[];
-  /** 上游人类可读名（Qoder 的 `Qwen3.8-Max`）；缺失时前端回退显示 id */
+  /**
+   * 展示名（后端已统一清洗：`Kimi K3` / `LongCat 2.5 Preview`）。
+   * 上游没给可读名时由 id 派生；连派生都不出（id 本身是 `free` 之类噪声）
+   * 才缺失，此时前端回退显示 id。
+   */
   name?: string;
   /** 以下为可选元数据：上游提供才透传（见 src/api/models.py 的 _META_FIELDS） */
   credit_rate?: number;
@@ -386,8 +390,8 @@ export interface ModelInfo {
   supports_tool_call?: boolean;
   supports_reasoning?: boolean;
   default_effort?: number;
-  /** 双上游都提供同一模型时才有：按渠道的倍率差异 */
-  by_provider?: Record<string, { credit_rate?: number }>;
+  /** 多渠道模型才有：按渠道给出倍率与**该渠道实际请求的 key**（raw key 永不改动） */
+  by_provider?: Record<string, { credit_rate?: number; raw_id?: string }>;
 }
 
 /**

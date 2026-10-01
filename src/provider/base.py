@@ -39,6 +39,9 @@ class ErrKind(StrEnum):
     INVALID = "invalid"  # 请求无效（如模型不存在）→ 不冷却凭证，直接 400 回客户端
     # 模型级限流（6004）：只冷却触发的那个模型，切其他模型立即可用
     MODEL = "model"
+    # 并发会话打满（CodeArts TM.00001041）：在途排空即恢复，用固定短冷却，
+    # 不套 MODEL 的翻倍退避（一次打满锁 10min 起、翻倍到 2h 太久，见 scheduler）。
+    CONCURRENCY = "concurrency"
     # 该后端无此模型（11102）：(账号, 模型) 负缓存，重试无意义
     BLOCKED = "blocked"
     # 请求级错误（请求体坏 11101 / 上下文超限 11115 / 渠道风控 11128 /
@@ -49,7 +52,7 @@ class ErrKind(StrEnum):
 # 冷却作用域是「(凭证, 模型)」而非整个凭证的错误类别。
 # 账号级冷却必须显式清空模型级条目（见 scheduler.note_error），
 # 否则上一次模型级限流的豁免会泄漏到本次账号级冷却上（换模型错误绕过）。
-MODEL_SCOPED_KINDS = frozenset({ErrKind.MODEL, ErrKind.BLOCKED})
+MODEL_SCOPED_KINDS = frozenset({ErrKind.MODEL, ErrKind.BLOCKED, ErrKind.CONCURRENCY})
 
 
 def body_hint(body: bytes, limit: int = 160) -> str:
