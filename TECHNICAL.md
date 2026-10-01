@@ -147,7 +147,7 @@ coding2api/
 │   └── actions.py               # 审计动作常量 + 中文标签（B5）
 ├── web/                         # React 前端
 ├── deploy/                      # 各部署形态的模板（systemd / logrotate 等）
-├── diagrams/                    # 架构图 / 请求时序图（HTML 成品 + 源 JSON）
+├── diagrams/                    # 架构图 / 请求时序图 / 调度状态机（HTML 成品 + 源 JSON）
 ├── scripts/                     # hash_password / create_user / cleanup_invalid_stats / 部署与运维脚本
 ├── tests/
 ├── Dockerfile / docker-compose.yml  # 仓库根（compose build context 依赖根目录）
@@ -793,6 +793,8 @@ class Provider(Protocol):
 ---
 
 ## 6. 调度器规格（Q12=B + Q26 + Q31）
+
+> 本节状态机（账号级 / 模型级冷却 + pin / paused / DEAD）的可视化版本：[`diagrams/coding2api-credential-lifecycle.html`](diagrams/coding2api-credential-lifecycle.html)（源 `diagrams/credential-lifecycle.json`）。
 
 ```python
 class Scheduler:
