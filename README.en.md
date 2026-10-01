@@ -137,6 +137,7 @@ Detailed documentation is written in Chinese:
 | [`PROPOSAL.md`](PROPOSAL.md) | Design decisions, scope, feasibility findings, risks |
 | [`TECHNICAL.md`](TECHNICAL.md) | Stack, module specs, provider protocol, request flow, testing |
 | [`diagrams/coding2api-architecture.html`](diagrams/coding2api-architecture.html) | Architecture diagram |
+| [`diagrams/coding2api-request-sequence.html`](diagrams/coding2api-request-sequence.html) | Request main-chain sequence diagram |
 
 ## License
 

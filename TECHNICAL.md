@@ -147,7 +147,7 @@ coding2api/
 │   └── actions.py               # 审计动作常量 + 中文标签（B5）
 ├── web/                         # React 前端
 ├── deploy/                      # 各部署形态的模板（systemd / logrotate 等）
-├── diagrams/                    # 架构图（HTML + 源 JSON）
+├── diagrams/                    # 架构图 / 请求时序图（HTML 成品 + 源 JSON）
 ├── scripts/                     # hash_password / create_user / cleanup_invalid_stats / 部署与运维脚本
 ├── tests/
 ├── Dockerfile / docker-compose.yml  # 仓库根（compose build context 依赖根目录）
@@ -749,6 +749,8 @@ class Provider(Protocol):
 ---
 
 ## 5. 请求时序（chat completions 主链路）
+
+> 本节的可视化版本：[`diagrams/coding2api-request-sequence.html`](diagrams/coding2api-request-sequence.html)（源 `diagrams/request-sequence.json`，含鉴权 / 选号 / 转发 / 失败轮换四段）。
 
 `POST /v1/responses` 与本节同链路：`responses/request.py` 先把 Responses 请求体映射成等价的 `ChatRequest`（`raw` 为 chat 形状），其后选号 / 轮换 / 记账 / 粘性完全一致；出口侧由注入的 translator 决定 SSE 形状（§3.7）。
 

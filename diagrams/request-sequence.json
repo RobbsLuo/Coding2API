@@ -1,0 +1,438 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "coding2api 请求主链路",
+    "locale": "zh-CN",
+    "output": "diagrams/coding2api-request-sequence.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:RobbsLuo/Coding2API.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "1b3c5db689695c5a2a9c843919ec537562110857"
+    }
+  },
+  "participants": [
+    {
+      "id": "client",
+      "type": "external",
+      "label": "客户端",
+      "sublabel": "OpenCode / Cline"
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "协议出口",
+      "sublabel": "/v1/chat/completions",
+      "sources": [
+        {
+          "path": "src/api/chat.py",
+          "line": 45,
+          "label": "chat_completions"
+        },
+        {
+          "path": "src/api/streaming.py",
+          "line": 15,
+          "label": "with_keepalive"
+        }
+      ]
+    },
+    {
+      "id": "auth",
+      "type": "security",
+      "label": "鉴权",
+      "sublabel": "API Key + IP 白名单",
+      "sources": [
+        {
+          "path": "src/api/deps.py",
+          "line": 157,
+          "label": "api_key_user"
+        },
+        {
+          "path": "src/auth/api_key.py",
+          "line": 16,
+          "label": "digest_api_key"
+        }
+      ]
+    },
+    {
+      "id": "engine",
+      "type": "backend",
+      "label": "执行引擎",
+      "sublabel": "选号 / 轮换 / 记账",
+      "sources": [
+        {
+          "path": "src/engine/executor.py",
+          "line": 224,
+          "label": "stream"
+        },
+        {
+          "path": "src/engine/executor.py",
+          "line": 607,
+          "label": "_select"
+        }
+      ]
+    },
+    {
+      "id": "sched",
+      "type": "backend",
+      "label": "调度器",
+      "sublabel": "冷却 / 到期 / 粘性",
+      "sources": [
+        {
+          "path": "src/engine/scheduler.py",
+          "line": 207,
+          "label": "select"
+        },
+        {
+          "path": "src/engine/scheduler.py",
+          "line": 245,
+          "label": "note_error"
+        }
+      ]
+    },
+    {
+      "id": "store",
+      "type": "database",
+      "label": "SQLite",
+      "sublabel": "WAL · 10 张表",
+      "sources": [
+        {
+          "path": "src/db/repo.py",
+          "line": 322,
+          "label": "candidates"
+        },
+        {
+          "path": "src/db/repo.py",
+          "line": 186,
+          "label": "save_success"
+        },
+        {
+          "path": "src/stats/collector.py",
+          "line": 67,
+          "label": "record"
+        }
+      ]
+    },
+    {
+      "id": "provider",
+      "type": "backend",
+      "label": "渠道适配",
+      "sublabel": "stream_chat",
+      "sources": [
+        {
+          "path": "src/provider/base.py",
+          "line": 297,
+          "label": "Provider"
+        },
+        {
+          "path": "src/provider/codebuddy/client.py",
+          "line": 601,
+          "label": "stream_chat"
+        }
+      ]
+    },
+    {
+      "id": "upstream",
+      "type": "external",
+      "label": "上游",
+      "sublabel": "六家渠道 · SSE"
+    }
+  ],
+  "segments": [
+    {
+      "from": 150,
+      "to": 290,
+      "label": "接入与鉴权"
+    },
+    {
+      "from": 305,
+      "to": 470,
+      "label": "选号（按模型收窄 + 冷却过滤 + 排序）"
+    },
+    {
+      "from": 485,
+      "to": 730,
+      "label": "流式转发与回传"
+    },
+    {
+      "from": 745,
+      "to": 880,
+      "label": "路由失败 → 冷却轮换"
+    }
+  ],
+  "messages": [
+    {
+      "id": "chat-request",
+      "from": "client",
+      "to": "api",
+      "y": 180,
+      "label": "POST /v1/chat/completions",
+      "variant": "emphasis"
+    },
+    {
+      "id": "key-check",
+      "from": "api",
+      "to": "auth",
+      "y": 210,
+      "label": "api_key_user（Bearer）",
+      "variant": "security"
+    },
+    {
+      "id": "key-lookup",
+      "from": "auth",
+      "to": "store",
+      "y": 240,
+      "label": "摘要查 api_keys + IP 白名单",
+      "variant": "security"
+    },
+    {
+      "id": "principal",
+      "from": "store",
+      "to": "auth",
+      "y": 268,
+      "label": "username + provider_binding",
+      "variant": "return"
+    },
+    {
+      "id": "preflight",
+      "from": "api",
+      "to": "engine",
+      "y": 320,
+      "label": "parse → preflight",
+      "variant": "emphasis"
+    },
+    {
+      "id": "candidates",
+      "from": "engine",
+      "to": "store",
+      "y": 350,
+      "label": "候选凭证（按模型收窄）",
+      "variant": "default"
+    },
+    {
+      "id": "candidate-rows",
+      "from": "store",
+      "to": "engine",
+      "y": 380,
+      "label": "candidates",
+      "variant": "return"
+    },
+    {
+      "id": "select",
+      "from": "engine",
+      "to": "sched",
+      "y": 410,
+      "label": "select（粘性 / pin / 到期 / 健康度）",
+      "variant": "emphasis"
+    },
+    {
+      "id": "selected",
+      "from": "sched",
+      "to": "engine",
+      "y": 440,
+      "label": "credential_id",
+      "variant": "return"
+    },
+    {
+      "id": "decrypt",
+      "from": "engine",
+      "to": "store",
+      "y": 510,
+      "label": "解密凭证 credential_data",
+      "variant": "default"
+    },
+    {
+      "id": "credential-data",
+      "from": "store",
+      "to": "engine",
+      "y": 540,
+      "label": "credential_data",
+      "variant": "return"
+    },
+    {
+      "id": "stream-chat",
+      "from": "engine",
+      "to": "provider",
+      "y": 570,
+      "label": "stream_chat(payload, model)",
+      "variant": "emphasis"
+    },
+    {
+      "id": "upstream-post",
+      "from": "provider",
+      "to": "upstream",
+      "y": 600,
+      "label": "POST 上游 · SSE",
+      "variant": "emphasis"
+    },
+    {
+      "id": "upstream-stream",
+      "from": "upstream",
+      "to": "provider",
+      "y": 630,
+      "label": "SSE 事件流",
+      "variant": "return"
+    },
+    {
+      "id": "events",
+      "from": "provider",
+      "to": "engine",
+      "y": 660,
+      "label": "Event（正文 / 思考 / 工具）",
+      "variant": "return"
+    },
+    {
+      "id": "openai-chunk",
+      "from": "engine",
+      "to": "api",
+      "y": 690,
+      "label": "OpenAI chunk",
+      "variant": "return"
+    },
+    {
+      "id": "sse-out",
+      "from": "api",
+      "to": "client",
+      "y": 720,
+      "label": "SSE data: chunk … [DONE]",
+      "variant": "return"
+    },
+    {
+      "id": "upstream-error",
+      "from": "provider",
+      "to": "engine",
+      "y": 760,
+      "label": "Event.ERROR / HTTP ≥400",
+      "variant": "return"
+    },
+    {
+      "id": "note-error",
+      "from": "engine",
+      "to": "sched",
+      "y": 790,
+      "label": "note_error(kind) → 冷却",
+      "variant": "dashed"
+    },
+    {
+      "id": "persist-error",
+      "from": "engine",
+      "to": "store",
+      "y": 820,
+      "label": "save_error（cooling_until / err_count）",
+      "variant": "dashed"
+    },
+    {
+      "id": "rotate",
+      "from": "sched",
+      "to": "engine",
+      "y": 850,
+      "label": "should_rotate → 换号（≤3）",
+      "variant": "dashed"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "client",
+      "from": 175,
+      "to": 740,
+      "type": "external"
+    },
+    {
+      "participant": "api",
+      "from": 175,
+      "to": 740,
+      "type": "backend"
+    },
+    {
+      "participant": "auth",
+      "from": 205,
+      "to": 275,
+      "type": "security"
+    },
+    {
+      "participant": "engine",
+      "from": 320,
+      "to": 860,
+      "type": "backend"
+    },
+    {
+      "participant": "sched",
+      "from": 405,
+      "to": 455,
+      "type": "backend"
+    },
+    {
+      "participant": "sched",
+      "from": 785,
+      "to": 855,
+      "type": "backend"
+    },
+    {
+      "participant": "store",
+      "from": 235,
+      "to": 272,
+      "type": "database"
+    },
+    {
+      "participant": "store",
+      "from": 345,
+      "to": 385,
+      "type": "database"
+    },
+    {
+      "participant": "store",
+      "from": 505,
+      "to": 545,
+      "type": "database"
+    },
+    {
+      "participant": "store",
+      "from": 815,
+      "to": 830,
+      "type": "database"
+    },
+    {
+      "participant": "provider",
+      "from": 565,
+      "to": 775,
+      "type": "backend"
+    },
+    {
+      "participant": "upstream",
+      "from": 595,
+      "to": 665,
+      "type": "external"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "主链路",
+      "items": [
+        "Bearer sk- 经 api_key_user 摘要查表，IP 白名单在鉴权当场判掉",
+        "model_resolver 解析候选集：扁平名全渠扇出，@provider 锁定单渠",
+        "选号顺序：pin 优先 → 会话粘性 → 到期额度 → 三态健康度"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "失败轮换",
+      "items": [
+        "上游 ≥400 经 classify 归类后 note_error，冷却状态落 SQLite",
+        "INVALID（模型不存在）不冷却凭证，跳过该上游全部凭证，全拒返回 400",
+        "REQUEST 类换号不落库：既不冷却也不累计，避免误伤健康凭证"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "流式与记账",
+      "items": [
+        "Event → OpenAI chunk（流式）或聚合（非流式），首块补 role:assistant",
+        "stats.collector 写 usage_events：tokens / latency / ttfb / ok",
+        "note_success 清 err_count，并把本对话重新粘到实际服务的凭证"
+      ]
+    }
+  ]
+}
