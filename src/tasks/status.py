@@ -43,6 +43,9 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
              "按配置时点为 CodeBuddy 账号补发对话事件；关闭时每轮都是 no-op。"),
     TaskSpec("retention", "明细清理",
              "小时汇总 + 90 天明细清理，顺带回收过期冷却与积分流水。"),
+    TaskSpec("model_catalog", "模型目录刷新",
+             "兜底重拉各渠道模型表：没有它，列表只在有人访问 /v1/models 或 "
+             "Playground 时才刷新，纯 API 用法的部署会让归属表与落盘快照变陈旧。"),
 )
 
 TASK_BY_KEY: dict[str, TaskSpec] = {spec.key: spec for spec in TASK_SPECS}

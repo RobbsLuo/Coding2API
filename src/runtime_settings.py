@@ -80,6 +80,11 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("quota_probe_minutes", int, "额度探测周期（分钟）",
                "后台额度探测的一轮间隔；下限 1 分钟。", minimum=1,
                task="quota_probe", floor=1),
+    HotSetting("model_catalog_minutes", int, "模型目录刷新周期（分钟）",
+               "后台兜底刷新各渠道模型表的间隔；没有它，模型列表只在有人调 "
+               "/v1/models 或 Playground 时才刷新，纯 API 用法的部署会让"
+               "「模型→渠道」归属表与落盘快照一起变陈旧。下限 5 分钟。",
+               minimum=5, task="model_catalog", floor=5),
     HotSetting("codebuddy_chat_min_interval", float, "CodeBuddy 聊天最小间隔（秒）",
                "同渠道同凭证顺序连发的最小请求间隔（0 关闭）；按凭证分桶、桶内"
                "允许并发，故同渠道同模型的并发请求不会被串行化。",
@@ -368,6 +373,10 @@ class RuntimeSettings:
     @property
     def quota_probe_minutes(self) -> int:
         return int(self.get("quota_probe_minutes"))
+
+    @property
+    def model_catalog_minutes(self) -> int:
+        return int(self.get("model_catalog_minutes"))
 
     @property
     def codebuddy_chat_min_interval(self) -> float:

@@ -16,6 +16,9 @@ services:
       # 模型列表黑名单（fnmatch glob，逗号分隔，完全替换语义）
       MODEL_BLOCKLIST: ${MODEL_BLOCKLIST:-custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,hunyuan-image-*}
       QUOTA_PROBE_MINUTES: ${QUOTA_PROBE_MINUTES:-60}
+      # 模型目录兜底刷新周期（分钟）：没有它，模型表只在有人调 /v1/models 时
+      # 才刷新，纯 API 用法的部署会让「模型→渠道」归属表与落盘快照变陈旧
+      MODEL_CATALOG_MINUTES: ${MODEL_CATALOG_MINUTES:-30}
       # 成长中心（仅 CodeBuddy）：一轮领取周期，以及是否允许不可逆动作
       # （抽奖/连登兑换/开 Buddy 盲盒/消耗补登卡）
       GROWTH_INTERVAL_MINUTES: ${GROWTH_INTERVAL_MINUTES:-60}

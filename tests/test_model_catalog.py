@@ -25,7 +25,12 @@ from src.api.model_catalog import (
     load_catalog,
     save_catalog,
 )
-from src.api.models import merged_entries, publish_aliases, restore_model_catalog
+from src.api.models import (
+    list_models,
+    merged_entries,
+    publish_aliases,
+    restore_model_catalog,
+)
 from src.config import Settings
 from src.main import _restore_model_list, build_app
 from src.provider.base import Model
@@ -296,3 +301,65 @@ def test_restore_failure_is_logged_not_raised(settings, caplog):
     with caplog.at_level("WARNING"):
         _restore_model_list(services)
     assert any("恢复落盘模型目录失败" in r.getMessage() for r in caplog.records)
+
+
+# ------------------------------------------------------- 后台兜底刷新循环
+
+
+def test_lifespan_wires_periodic_model_catalog_refresh(settings):
+    """装配了兜底刷新循环：管理台能看到它，默认周期 30 分钟（对齐 zen 判活 TTL）。"""
+    app = _app_with(settings, {"kilo": _StubProvider("kilo", [Model(id="kilo-m")])})
+    with TestClient(app):
+        status = {item["key"]: item for item in app.state.task_runner.task_status()}
+    assert status["model_catalog"]["interval_seconds"] == 1800
+    assert status["model_catalog"]["enabled"] is True
+
+
+@pytest.mark.asyncio
+async def test_periodic_refresh_reports_only_model_count(settings):
+    """一轮刷新只把条目数报进运行态——整份列表有几百条，管理台渲染不动。"""
+    provider = _StubProvider("kilo", [Model(id="kilo-m"), Model(id="kilo-n")])
+    app = _app_with(settings, {"kilo": provider})
+    async with app.router.lifespan_context(app):
+        runner = app.state.task_runner
+        assert await runner._guarded(runner._model_catalog(), "模型目录刷新",
+                                     key="model_catalog")
+        run = runner.status.get("model_catalog")
+        assert run.ok is True and run.report == {"models": 2}
+        # 走的是同一条 list_models 路径：缓存已更新、别名表已 publish
+        assert set(app.state.services.model_aliases["kilo"]) >= {"kilo-m", "kilo-n"}
+
+
+def test_build_runner_without_refresh_keeps_task_hidden(settings, tmp_path):
+    """不注入刷新协程时不装配这条循环（老调用方/测试保持原行为）。"""
+    from src.config import Settings
+    from src.db.conn import Database
+    from src.db.crypto import CredentialCipher
+    from src.db.migrate import apply_schema
+    from src.db.repo import CredentialRepository
+    from src.tasks.runner import build_runner
+
+    db = Database(str(tmp_path / "c.sqlite3"))
+    apply_schema(db.connect())
+    credentials = CredentialRepository(db, CredentialCipher(SECRET))
+    config = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                      MODEL_CATALOG_MINUTES=1)
+    runner = build_runner(credentials, {}, None, config)
+    keys = {item["key"] for item in runner.task_status()}
+    assert "model_catalog" not in keys
+    # 下限 5 分钟：配 1 分钟也只按 5 分钟跑（更密只是白打各渠道 /models）
+    assert runner._model_catalog_interval == 300
+
+
+def test_list_models_serializes_concurrent_callers(settings):
+    """HTTP 出口与后台刷新并发时串行化：同一条渠道只打一次上游。"""
+    provider = _StubProvider("kilo", [Model(id="kilo-m")])
+    app = _app_with(settings, {"kilo": provider})
+    services = app.state.services
+
+    async def scenario():
+        await asyncio.gather(list_models(services), list_models(services))
+
+    asyncio.run(scenario())
+    assert provider.calls == 1
+    assert "kilo-m" in services.model_aliases["kilo"]

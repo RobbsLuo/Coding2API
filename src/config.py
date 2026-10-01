@@ -92,6 +92,12 @@ class Settings(BaseSettings):
 
     # 后台任务
     quota_probe_minutes: int = 60
+    # 模型目录兜底刷新周期（分钟）：没有它，模型列表只在有人调 /v1/models /
+    # Playground 时才按 TTL 刷新——纯 API 用法的部署（客户端自己缓存了模型
+    # 列表）会让别名表与落盘快照一起变陈旧。取 30 分钟是跟着 zen 免费模型判活
+    # 缓存（30 分钟）对齐：再密也不会让 zen 多探活一次，只是白打其余渠道的
+    # /models。
+    model_catalog_minutes: int = 30
     # 成长中心（仅 CodeBuddy 有）：一轮领取的周期，以及是否允许不可逆动作
     # （抽奖/连登兑换/开 Buddy 盲盒/消耗补登卡）。这些动作无法撤销，
     # 需要保守部署时可关闭：关闭后仍会领取旅行礼物与任务奖励。

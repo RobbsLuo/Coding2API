@@ -336,9 +336,13 @@ def health(q: Quota | None) -> HealthScore:
 
 **同渠道内归一键重复 → 退回原 id 的归一键**（`_merge_key` 返回 `(键, 是否按名入键)`，第二个值由它自己判定，不事后拿 `键 == 归一展示名` 反推：CodeBuddy 的 `hy4-preview` 与其展示名「Hy4 Preview」归一后同键，反推会误当成「按名入键」进而登记歧义别名）。该渠道也不登记歧义的名字别名。
 
-**对外 id 与请求名的分离**（`_finalize` / `_disambiguate` / `_register_aliases`）：多渠道真正并到一起的条目，对外 id（`/v1/models` 的 `id`、选择器里的值）取**展示名的归一键**（`kimi-k3` / `qwen3.8-max`）；单渠道条目仍用**上游原始 id**（Qoder `kmodel_latest`、Kilo 的 `kilo-auto/free` 原样，避免无谓改名与破坏历史配置）。`by_provider.{渠道}.raw_id` 透出各渠道原代号（前端渠道徽章的 tooltip、搜索都用到）。无论对外 id 是什么，转发到某渠道时一律经 `services.model_aliases` 映射回该渠道自己登记的原 id；原 id、展示名、展示名的 slug 形式三条键都登记。
+**对外 id 一律是归一键**（`_finalize` / `_disambiguate` / `_register_aliases`）：所有条目（单渠道、多渠道、兜底）的对外 id（`/v1/models` 的 `id`、选择器里的值）都是去掉 free 标记与厂商前缀后的干净 slug——与前端展示一致，六条渠道一个口径。多渠道取最短展示名的归一键（`kimi-k3` / `qwen3.8-max`）；单渠道取该条展示名的归一键（zen `longcat-2.5-preview-free` → `longcat-2.5-preview`、Qoder `kmodel_latest` → `kimi-k3`）；兜底/哨兵条目取**原代号的归一键**（Kilo `kilo-auto/free` → `kilo-auto`）。
 
-**对外 id 撞车的消歧**：多渠道归一键可能撞上另一单渠道条目的原 id（TRAE 的 `glm-5` 归一键 `glm-5`，而另一渠道恰有原 id 就叫 `glm-5` 的单渠道模型），两条 entry 共用一个 id 会让前端 `key` 与别名表互相覆盖。`_disambiguate` 按 `_sort_key` 序保留先到者，后者按 `_fallback_ids` 取第一个未占用候选：主渠道原 id → 该 id 的归一形式 → 归一键（`grouped` 的字典键，按构造唯一，最后一道兜底）。
+**原代号不在对外 id 里露面**，但请求转发时一律经 `services.model_aliases` 映射回**该渠道自己登记的原代号**（`aliases["qoder"]["kimi-k3"] = "kmodel_latest"`，由 `executor.upstream_model_name` 消费）；别名为每渠道登记三条键——对外 id、原代号、展示名（原样与 slug 形式），故用户按任一种写法都能直连命中。`by_provider.{渠道}.raw_id` 把各渠道原代号透给前端（渠道徽章的 tooltip、搜索都用到）。
+
+**对外 id 撞车的消歧**（`_disambiguate`）：兜底/哨兵条目用原代号归一键，可能恰好等于另一条正常条目的展示名归一键（TRAE 的 `glm-5` 归一键 `glm-5`，而另一渠道恰有原代号归一键就叫 `glm-5` 的哨兵条目），两条 entry 共用一个 id 会让前端 `key` 与别名表互相覆盖。`_disambiguate` 按 `_sort_key` 序保留先到者，后者按 `_fallback_ids` 依次取：原代号归一键 → 加渠道名后缀 → 数字后缀（`_unique_suffix`）。
+
+**兜底/哨兵条目用渠道限定键隔离**（`_merge_key` 的 `_scoped_key` = `渠道\0归一原代号`）：展示名重复、缺失或是哨兵名（`auto` / `default`）时，绝不跨渠道合并——但这些条目**对外 id 仍是原代号的归一键**（不是限定键），限定键只在 `grouped` 内部用于分组。
 
 **启动预热不再阻塞启动**：`lifespan` 把预热丢给后台任务 `_warm_model_list`（`force=True` 绕过 TTL），不再在 `yield` 前 `await`——zen 最慢的探活可占十几秒，内联会让应用在这段时间里不响应 `/health`，容器存活探针可能误判。预热失败仅记日志；关机时取消在途任务。
 
@@ -841,6 +845,13 @@ class Scheduler:
 | 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5） | 仅 CodeBuddy：8 类领取；结果落 `growth_events` + 回写 `credentials.growth_last_result` |
 | 活跃上报（activity.py，默认关闭） | 每 10 分钟醒一次，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点，北京时间）窗口内执行 | 仅 CodeBuddy：补发一条 `chat_request_send` 续连登；按「endpoint + userId」隔离、当日封账；成功落一行 `growth_events` |
 | 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理；同期限回收 `credit_events`（§3.10） |
+| 模型目录刷新（`api/models.py::list_models`，注入式） | 每 `MODEL_CATALOG_MINUTES`（默认 30，下限 5） | 兜底重拉各渠道模型表（走同一条 `list_models`：TTL 门禁 + 逐渠道 publish + 落盘快照）。周期 30 分钟是跟着 zen 免费模型判活缓存（`MODELS_CACHE_TTL_SECONDS`，30 分钟）对齐——更密不会让 zen 多探一次，只是白打其余渠道的 `/models` |
+
+**模型目录刷新为什么是「注入协程」而不是一个 tasks 模块**：`tasks/` 不 import `api/`（反向依赖会把 HTTP 层拖进后台任务），所以 `TaskRunner` 接的是 `model_catalog: Callable[[], Awaitable[object]] | None`，由 `main.lifespan` 闭包注入；`None`（老调用方 / 测试）时不装配这条循环，管理台也不展示这张卡片——与 growth / activity 的处理一致。
+
+**并发保护**：HTTP 出口（`/v1/models`、Playground）与这条后台循环都会调 `list_models`，两者不串行就会同时对同一条渠道打上游（zen 那次是十几秒的真推理），后到的拿到的还是同一份数据。故 `api/models.py` 里 `list_models` 整段持模块级 `asyncio.Lock`。锁的粒度是「整次列表刷新」而非单渠道：跨渠道合并与别名表 publish 需要看到一致的全集。
+
+**没有它会烂在哪**（推断，非实测故障）：模型表只在有人访问列表时才按 TTL 更新，纯 API 用法的部署（客户端自己缓存了模型列表）会让「模型 → 渠道」归属表与落盘快照一起变陈旧——上游新增的模型不认识 → 扁平名请求按全部渠道扇出、各渠道回 11102/4001，并给每个凭证写上 6 小时起步的 (凭证, 模型) 负缓存；停机超过 `MAX_AGE_SECONDS`（7 天）后落盘快照也会被直接丢弃，退回「启动窗口无归属」的老行为。
 
 **签到 / 成长中心的「同账号」隔离键**：`checkin_scope(data) or f"credential|{credential_id}"`。provider 在身份未知时返回空串（CB 的 `checkin_scope_key` 在 `account_uid` 与 `user_id` 都为空时返回 `""`），任务层必须回落到 `credential_id`。这不是保守取值：共享空 scope 会让第二个账号被 `seen` 集合永久跳过，表现为「只有第一个凭证被自动签到」且没有任何报错；回落到凭证 ID 最坏只是多签一次（上游签到幂等，返回 ALREADY）。
 

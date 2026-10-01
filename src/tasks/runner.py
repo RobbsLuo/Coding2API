@@ -40,10 +40,15 @@ class TaskRunner:
     activity: ActivityTask | None = None,
     refresh: RefreshTask,
     retention: RetentionTask,
+    # 模型目录兜底刷新：注入「跑一轮」的协程而不是任务对象——真正的活是
+    # api.models.list_models（要 services 与 provider registry），tasks 层
+    # 不该反向依赖 api 层。由 main 装配时传入；None 表示不装配这条循环。
+    model_catalog: Callable[[], Awaitable[object]] | None = None,
     quota_probe_minutes: int | Callable[[], int] = 60,
     growth_interval_minutes: int | Callable[[], int] = 60,
     refresh_interval_minutes: int | Callable[[], int] = 60,
     retention_interval_minutes: int | Callable[[], int] = 5,
+    model_catalog_minutes: int | Callable[[], int] = 30,
     activity_enabled: Callable[[], bool] | None = None,
     status: TaskStatusStore | None = None,
 ) -> None:
@@ -53,12 +58,14 @@ class TaskRunner:
         self._activity = activity
         self._refresh = refresh
         self._retention = retention
+        self._model_catalog = model_catalog
         # 周期可热更（B3.2）：存取值器，每轮 sleep 前读当前值（否则改配置
         # 要等到下一次重启才生效）。下限与业务语义同前，不变。
         self._quota_probe_minutes = live(quota_probe_minutes)
         self._growth_minutes = live(growth_interval_minutes)
         self._refresh_minutes = live(refresh_interval_minutes)
         self._retention_minutes = live(retention_interval_minutes)
+        self._model_catalog_minutes = live(model_catalog_minutes)
         # 活跃上报是否启用也可热更：装配时恒建对象（构造成本为零），
         # 每轮由 _sync_activity 问一次，关着时是 no-op。
         self._activity_enabled = activity_enabled or (lambda: activity is not None)
@@ -88,6 +95,12 @@ class TaskRunner:
     def _retention_interval(self) -> float:
         return max(60, int(self._retention_minutes()) * 60)
 
+    @property
+    def _model_catalog_interval(self) -> float:
+        # 下限 5 分钟与热更项 minimum 对齐：更密只是白打各渠道的 /models，
+        # 而 zen 的免费模型判活本身就有 30 分钟缓存，再密也不会多探一次。
+        return max(300, int(self._model_catalog_minutes()) * 60)
+
     async def start(self) -> None:
         """启动所有周期任务；首轮额度探测与 token 预刷新都立即执行（不节流）。
 
@@ -116,6 +129,9 @@ class TaskRunner:
         if self._activity is not None:
             loops.append(("activity", "活跃上报", self._sync_activity,
                           lambda: float(self._activity_interval)))
+        if self._model_catalog is not None:
+            loops.append(("model_catalog", "模型目录刷新", self._model_catalog,
+                          lambda: self._model_catalog_interval))
         for key, name, runner, interval in loops:
             self._tasks.append(asyncio.create_task(
                 self._loop(name, runner, interval, key=key)))
@@ -196,6 +212,8 @@ class TaskRunner:
                 continue
             if spec.key == "activity" and self._activity is None:
                 continue
+            if spec.key == "model_catalog" and self._model_catalog is None:
+                continue
             run = self.status.get(spec.key)
             items.append({
                 "key": spec.key,
@@ -223,6 +241,8 @@ class TaskRunner:
             return self._growth_interval
         if key == "activity":
             return float(self._activity_interval)
+        if key == "model_catalog":
+            return self._model_catalog_interval
         return self._retention_interval
 
     def _task_enabled(self, key: str) -> bool:
@@ -257,6 +277,7 @@ def _as_report(result: object) -> dict[str, Any]:
 
 def build_runner(credentials, providers: dict, stats_collector, config,
                  growth_events=None, credit_events=None,
+                 model_catalog: Callable[[], Awaitable[object]] | None = None,
                  status: TaskStatusStore | None = None) -> TaskRunner:
     """按配置装配后台任务（Pacer 由两个 provider 共享）。
 
@@ -265,6 +286,9 @@ def build_runner(credentials, providers: dict, stats_collector, config,
 
     credit_events 同理：为 None 时保留流水清理不启用（表仍会随探测增长，
     但不影响功能；生产路径总是传入）。
+
+    model_catalog 同理：None 时不装配模型目录刷新循环（老调用方与测试保持
+    原行为）；生产路径传入「跑一轮 list_models」的协程。
 
     B3.2 热更：`config` 既可以是启动期快照 `Settings`，也可以是
     `RuntimeSettings` 覆盖层。装配时所有「可热更项」必须传**零参 lambda**，
@@ -294,6 +318,8 @@ def build_runner(credentials, providers: dict, stats_collector, config,
                                 credit_events=credit_events),
         quota_probe_minutes=lambda: config.quota_probe_minutes,
         growth_interval_minutes=lambda: config.growth_interval_minutes,
+        model_catalog=model_catalog,
+        model_catalog_minutes=lambda: config.model_catalog_minutes,
         activity_enabled=lambda: config.activity_report_enabled,
         status=status,
     )

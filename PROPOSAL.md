@@ -61,6 +61,8 @@
 
 | Q53 | 模型目录落盘快照 + 逐渠道增量 publish（修「启动窗口扁平名扇出」） | 实测故障（2026-10-01 12:03）：重启后请求 `stealth/space-bunny-alpha`（kilo 免费层唯一持有）却先打了 CodeBuddy/TRAE/CodeArts——日志 `codebuddy 400 11102 model [stealth/space-bunny-alpha] service info not found` / `trae 4001 param is invalid`。根因不在选号逻辑：模型 → 渠道归属表 `services.model_aliases` 只在 `list_models` **末尾**统一 publish，而启动预热里 zen 的 `fetch_models` 要逐个免费模型真发探活（12–15s），窗口期内 `executor._narrow_providers` 拿不到归属就按「全部渠道」保守放行。附带第二个洞：进程内缓存重启即丢，某渠道拉取失败时连兜底都没了（qoder/codearts 拉不通期间模型整体从 `/v1/models` 消失）。两处一并解决：**①** `list_models` 每拉完一条渠道就 `publish_aliases()`（从 `model_list_cache` 重建 + 就地更新，合并逻辑收敛到 `merged_entries()`，缓存兜底/TTL 复用/落盘恢复三条路径共用）；**②** 新模块 `src/api/model_catalog.py`：成功拉取后把**未过滤原始表**原子写 `DATA_DIR/model_catalog.json`（tmp + `os.replace`，`{"version":1,"providers":{pid:{"saved_at":…,"models":[…]}}}`，字段取 `dataclasses.fields(Model)`），启动时 `main._restore_model_list` **同步**读回并立即 publish（零上游请求，异常只记日志），预热退化为纯后台刷新；恢复出的 zen 免费集回填 `ZenClient.seed_models_cache`，重启不再逐个真发探活。纪律：落盘/读回一律宽容（损坏、版本不符、字段缺失、非 dict 记录只丢该渠道，`saved_at` 超 `MAX_AGE_SECONDS`=7 天整条丢弃）；存原始表不过滤（`MODEL_BLOCKLIST` 热更要立即生效）；恢复只覆盖「已注册且当前有可用凭证」的渠道（用户暂停的渠道不因快照复活）。**不建表**（沿用被废弃的 `model_cache` 表教训：这份数据可丢、可重建，落 `DATA_DIR` 文件而非 schema），无配置项变更 |
 
+| Q54 | 模型目录兜底刷新后台任务（`MODEL_CATALOG_MINUTES`，默认 30） | Q53 落盘快照解决了「重启那一刻别名表为空」，但刷新仍然**只由访问驱动**：`list_models` 只在有人调 `/v1/models` / Playground 时按 TTL（300s）跑。纯 API 用法的部署（客户端自己缓存了模型列表）会让归属表与快照一起变陈旧，三处会烂：① 上游新增模型时别名表无归属 → 扁平名请求按全部渠道扇出，各渠道回 11102/4001，并给每个凭证写 6 小时起步的 (凭证, 模型) 负缓存（`_note_upstream_error` → BLOCKED）；② 停机超 `MAX_AGE_SECONDS`（7 天）后快照被丢弃，退回 Q53 之前的行为；③ 模型下线后旧归属仍在（代价最小，有负缓存兜底）。故新增第 7 条后台循环 `model_catalog`，跑的就是同一条 `list_models`（TTL 门禁 + 逐渠道 publish + 落盘快照都复用，不另写一套）。三条设计约束：**① 注入而非新模块**——`tasks/` 不 import `api/`，故 `TaskRunner` 接 `Callable[[], Awaitable[object]] | None`，由 `main.lifespan` 闭包注入，`None` 时不装配也不展示卡片（与 growth / activity 同处理）；运行态只回报 `{"models": N}`，整份列表有几百条不能塞进管理台。**② 周期 30 分钟、下限 5**——与 zen 免费模型判活缓存 `MODELS_CACHE_TTL_SECONDS`（1800s）对齐，再密也不会让 zen 多探一次，只是白打其余渠道的 `/models`。**③ `list_models` 整段加模块级 `asyncio.Lock`**——HTTP 出口与后台循环并发时不串行会对同一条渠道重复打上游（zen 那次是十几秒真推理）；锁粒度取「整次刷新」而非单渠道，因为跨渠道合并与别名表 publish 需要一致全集。新增热更项 `model_catalog_minutes`（下限 5）+ compose 透传；无 schema 变更 |
+
 ## 2. 目标与非目标
 
 ### 目标
@@ -294,7 +296,7 @@ def health(q) -> HealthScore:   # known(0-100) | unknown | exhausted
 要点：
 
 - **合并键 = 归一键**，六条渠道一视同仁。同一模型在各渠道的内部代号互不相同（Qoder `kmodel_latest` = TRAE `kimi-k3-1`），纯 id 规则无法对齐，只能靠展示名；zen / kilo 现在也参与合并——两条免费渠道各用不同命名约定（Zen 尾缀 `-free`、Kilo `厂商/模型:free` 与 `厂商: 模型` 展示名），清洗后收敛到同一个键。**哨兵名**（`auto` / `default`）是各上游自己的「自动路由 / 默认模型」占位，语义只在本渠道内成立，故排除在跨渠道合并之外（否则 Kilo 的 `kilo-auto/free` 会与 Qoder 的 `auto` 误并）
-- **`/v1/models` 的对外 `id`**：多渠道条目取归一键，**单渠道保留上游原 `id`**（与历史配置一致）；`by_provider.{渠道}.raw_id` 透出各渠道原代号。请求时原代号、展示名、归一键三种写法都能命中（别名表双向登记）
+- **`/v1/models` 的对外 `id` 一律是归一键**（`kimi-k3` / `longcat-2.5-preview` / `kilo-auto`），去 free/去前缀、六渠道一个口径；`by_provider.{渠道}.raw_id` 透出各渠道原代号。原代号只用于转发（经别名表换回），用户按原代号、展示名、归一键三种写法都能命中
 - **同渠道内归一键重复**（CodeBuddy 的 `hy4-preview` / `hy4-preview-x` 都叫「Hy4 Preview」）→ 冲突项退回原 id 的归一键，否则其中一个会被同键覆盖而消失；该渠道不登记歧义的名字别名
 - **对外 id 撞车**（多渠道归一键 = 另一单渠道条目的原 id）→ 后来者按「主渠道原 id → 其归一形式 → 归一键」依次取未占用的，保证对外 id 全局唯一
 - **清洗幂等**：各渠道 client 自行派生过 name 的（Zen）不会被二次清洗破坏

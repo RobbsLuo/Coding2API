@@ -327,17 +327,32 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     @asynccontextmanager
     async def lifespan(app_: FastAPI):
         services_ = app_.state.services
+        # 落盘目录回灌（同步、零上游请求）：别名表立刻可用，扁平名请求马上就能
+        # 把候选收窄到真正持有该模型的渠道。放在最前面（runner 与预热之前）——
+        # 否则启动到预热跑完这段时间里别名表是空的，请求会按全部渠道扇出，
+        # 真实打一轮不认该模型的上游（CodeBuddy 11102 / TRAE 4001）。
+        # 读取失败只丢缓存，见 model_catalog。
+        _restore_model_list(services_)
+
+        async def _refresh_model_catalog() -> dict[str, int]:
+            """后台兜底刷新模型目录一轮。
+
+            只回报条目数：整份列表有几百条，塞进任务运行态会被管理台原样渲染。
+            没有这条循环时，模型表只在有人调 `/v1/models` / Playground 时按 TTL
+            刷新——纯 API 用法的部署（客户端自己缓存了列表）会让归属表与落盘
+            快照一起变陈旧：上游新增的模型不认识 → 扁平名请求扇出，各渠道回
+            11102/4001 并写上 6 小时起步的 (凭证, 模型) 负缓存。
+            """
+            result = await models.list_models(services_)
+            return {"models": len(result.get("data") or [])}
+
         # 传 runtime（而非 env 快照）：后台循环的热更值每轮现读覆盖层。
         runner = build_runner(credentials, registry, app_.state.stats_collector, runtime,
                               growth_events=app_.state.growth_events,
-                              credit_events=credit_events)
+                              credit_events=credit_events,
+                              model_catalog=_refresh_model_catalog)
         app_.state.task_runner = runner
         await runner.start()
-        # 落盘目录回灌（同步、零上游请求）：别名表立刻可用，扁平名请求马上就能
-        # 把候选收窄到真正持有该模型的渠道。放在预热之前——否则启动到预热跑完
-        # 这段时间里别名表是空的，请求会按全部渠道扇出，真实打一轮不认该模型的
-        # 上游（CodeBuddy 11102 / TRAE 4001）。读取失败只丢缓存，见 model_catalog。
-        _restore_model_list(services_)
         # 预热模型别名表：放后台跑（force 绕过 TTL）。
         # 不内联 await 的原因：zen 免费层探活最慢的模型可占十几秒，内联会让应用
         # 在这段时间里不响应 /health，容器存活探针可能误判；动态拉取失败仅记日志。

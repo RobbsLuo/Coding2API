@@ -27,18 +27,18 @@ qoder / codearts）的每个模型统一成三个字段，规则见
 `provider.naming`：
 
 1. **raw_id**：渠道请求时真正发的 key，**永不改动**。各渠道内部代号互不相同
-   （Qoder `kmodel_latest` = TRAE `kimi-k3-1`），也可能带命名空间前缀
-   （kilo 的 `kilo-auto/free`、`stealth/space-bunny-alpha`）。
-2. **归一键**（`normalize_model_key`）：剥掉上游的可用性噪声（免费档的
-   `-free` / 路径段 `free`）与命名空间前缀，再 slug 化——`kilo-auto`、
-   `longcat-2.5-preview`。**合并键**与多渠道条目对外 id 都用它。
+   （Qoder `kmodel_latest` = TRAE `kimi-k3-1`），也可能带厂商命名空间前缀
+   （kilo 的 `kilo-auto/free`、`nvidia/nemotron-3-ultra-550b-a55b:free`）。
+2. **归一键**（`normalize_model_key`）：剥掉免费标记（尾缀 `-free`/`_free`/
+   `:free`、路径段 `free`、括号词 `(free)`）与厂商命名空间前缀，再 slug 化
+   ——`kilo-auto`、`longcat-2.5-preview`。**合并键与全部条目的对外 id 都用它**。
 3. **展示名**（`display_model_name`）：清洗后的可读文本 `LongCat 2.5
    Preview`。上游给了可读名就用它（Qoder `Qwen3.8-Max` → `Qwen3.8 Max`），
    没有就从 id 现派生（zen / kilo 多数如此）；品牌与缩写按表纠正大小写。
 
 同渠道内归一键重复（CodeBuddy 的 `hy4-preview` / `hy4-preview-x` 都叫
-「Hy4 Preview」）时冲突项退回原 id 的归一键，否则其中一个会被同键覆盖
-而消失；对外 id 撞车时同理退回原 id（见 `_disambiguate`）。
+「Hy4 Preview」）时冲突项用渠道限定键隔离（**不**跨渠道合并），对外 id 取
+原代号的归一键；对外 id 真撞车时再依次退回（见 `_disambiguate`）。
 
 **合并键**：统一按归一键（= 清洗后展示名再 slug 化）合并，六条渠道一视同仁
 ——原先 zen / kilo 被排除在按名合并之外，现在清洗规则一致后它们能与其它
@@ -49,11 +49,12 @@ qoder / codearts）的每个模型统一成三个字段，规则见
 会与 Qoder 的 `auto` 误并、把请求路由到别的上游。除此之外仍要防同渠道重名
 （CodeBuddy 的 `hy4-preview` / `hy4-preview-x`，见 `_merge_key`）。
 
-**单渠道条目仍用上游原始 id**（Qoder `kmodel_latest`、kilo
-`kilo-auto/free` 原样），只在多条渠道真正并到一起时才改用归一键。无论对外
-id 是什么，**请求转发到某渠道时一律映射回该渠道自己登记的原 id**，映射表见
-`services.model_aliases`，由 `executor.upstream_model_name` 消费。
-`by_provider.{pid}.raw_id` 把每渠道的原 id 一并透给前端。
+**对外 id 一律是归一键**（去 free / 去厂商前缀的 slug）：`kimi-k3`、
+`longcat-2.5-preview`、`kilo-auto`，六条渠道一个口径。原代号不在对外 id 里
+露面，但**请求转发到某渠道时一律映射回该渠道自己登记的原代号**，映射表见
+`services.model_aliases`，由 `executor.upstream_model_name` 消费；
+`by_provider.{pid}.raw_id` 把每渠道的原代号一并透给前端。用户按原代号、
+展示名、归一键三种写法都能直连命中。
 
 **展示顺序**：CodeBuddy / TRAE 的模型排在前面（`_PROVIDER_RANK`：
 codebuddy 0 → trae 1 → qoder 2 → codearts 3 → 其他 4），组内仍按模型名字典序；
@@ -63,6 +64,7 @@ codebuddy 0 → trae 1 → qoder 2 → codearts 3 → 其他 4），组内仍按
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from fnmatch import fnmatch
@@ -82,6 +84,10 @@ logger = logging.getLogger(__name__)
 # 时间戳记「上次尝试」（含失败）：失败也进 TTL，否则一次抖动之后每次请求
 # 都会重试，zen 探活的十几秒会叠加成一串慢请求。
 MODEL_LIST_TTL_SECONDS = 300
+
+# 拉取串行锁：模块级单锁（一次只有一个进程内的列表刷新在跑）。调用方有 HTTP
+# 出口与后台兜底刷新两处，不串行就会同时打同一条渠道的上游。
+_refresh_lock = asyncio.Lock()
 
 # 响应透传的元数据字段（Model → OpenAI 额外字段）。`name` 放在最前：
 # 上游人类可读名（Qoder 的 `Qwen3.8-Max`），前端优先展示它而非内部代号。
@@ -127,12 +133,35 @@ def _sort_key(entry: dict[str, Any]) -> tuple[int, str]:
     return rank, entry["key"]
 
 
-def _blocked(model_id: str, patterns: tuple[str, ...]) -> bool:
-    return any(fnmatch(model_id, pattern) or fnmatch(model_id.lower(), pattern)
+def _block_names(model: Model) -> tuple[str, ...]:
+    """一个模型可供黑名单匹配的全部写法。
+
+    对外 id 改为归一键后，用户照列表里看到的**归一键 / 展示名**写黑名单
+    （`kimi-k3`、`Kimi K3`）也必须命中；同时保留按上游**原代号**写的老规则
+    （默认值里的 `custom_model_*` / `browser_use_*` 带下划线，归一键把下划线
+    换成连字符后并不命中，只有原代号能匹配）。故四种写法都参与：
+
+    * 原代号（`kmodel_latest`、`custom_model_claude`）；
+    * 原代号的归一键（兜底/哨兵条目的对外 id，Kilo `kilo-auto/free` → `kilo-auto`）；
+    * 展示名（`Kimi K3`）；
+    * 展示名的归一键（正常条目的对外 id，`kimi-k3`）。
+    """
+    label = _model_label(model)
+    names = {model.id, normalize_model_key(model.id), label,
+             normalize_model_key(label)}
+    names.discard("")   # 清洗后退化的空名不参与匹配（否则 `*` 会命中空串）
+    return tuple(names)
+
+
+def _blocked(model: Model, patterns: tuple[str, ...]) -> bool:
+    """该模型是否命中黑名单：任一种对外写法命中任一 glob 即滤。"""
+    return any(fnmatch(name, pattern) or fnmatch(name.lower(), pattern)
+               for name in _block_names(model)
                for pattern in patterns)
 
 
 def _merge_key(model: Model,
+               provider_id: str,
                duplicate_labels: set[str]) -> tuple[str, bool]:
     """一个模型计入哪个合并键，以及是否按展示名入的键。
 
@@ -149,7 +178,7 @@ def _merge_key(model: Model,
     归一键是展示名再 slug 化（`Kimi-K3` → `kimi-k3`），因此两条路径永远同源，
     不会出现「名字对不上但 id 相同」的漏合并。
 
-    以下情况退回上游 id 的归一键：
+    以下情况用**渠道限定键**（`渠道\\0归一原 id`）隔离，绝不跨渠道合并：
 
     * 归一键在本渠道内重复（如 CodeBuddy 的 `hy4-preview` / `hy4-preview-x`
       都叫「Hy4 preview」）——否则其中一个会被同键覆盖而消失；
@@ -159,15 +188,23 @@ def _merge_key(model: Model,
       跨渠道合并会把请求错误地路由到别的上游（kilo 的 `kilo-auto/free` 与
       Qoder 的 `auto` 都归一成 `auto`，却完全不是同一个东西）。
 
-    除哨兵外一律不退回原 id：原 id 是各渠道内部代号，跨渠道根本对不上，退回
-    等于放弃合并（`kmodel_latest` 就永远无法与 `kimi-k3` 对齐了）。
+    除上述三种外一律不退回原 id：原 id 是各渠道内部代号，跨渠道根本对不上，
+    退回等于放弃合并（`kmodel_latest` 就永远无法与 `kimi-k3` 对齐了）。
     """
     label_key = normalize_model_key(_model_label(model))
     if not label_key or label_key in duplicate_labels:
-        return normalize_model_key(model.id), False
+        return _scoped_key(provider_id, model.id), False
     if label_key in _SENTINEL_LABELS:
-        return normalize_model_key(model.id), False
+        return _scoped_key(provider_id, model.id), False
     return label_key, True
+
+
+def _scoped_key(provider_id: str, raw_id: str) -> str:
+    """渠道限定的合并键：只用于隔离，不作为对外 id（见 `_finalize`）。
+
+    `\\0` 不会出现在任何上游 id 里，故限定键与普通归一键永不冲突。
+    """
+    return f"{provider_id}\x00{normalize_model_key(raw_id)}"
 
 
 def _merge_provider(grouped: dict[str, dict[str, Any]],
@@ -189,11 +226,12 @@ def _merge_provider(grouped: dict[str, dict[str, Any]],
         label_counts[label_key] = label_counts.get(label_key, 0) + 1
     duplicate_labels = {key for key, count in label_counts.items() if count > 1}
     for model in models_by_lower.values():
-        key, name_keyed = _merge_key(model, duplicate_labels)
+        key, name_keyed = _merge_key(model, provider_id, duplicate_labels)
         entry = grouped.setdefault(key, {"key": key, "providers": set(),
                                          "meta": dict.fromkeys(_META_FIELDS),
                                          "provider_meta": {}, "raw_ids": {},
-                                         "labels": set(), "name_keyed": set()})
+                                         "labels": set(), "name_keyed": set(),
+                                         "scoped": "\x00" in key})
         entry["providers"].add(provider_id)
         entry["raw_ids"][provider_id] = model.id
         # 展示名按渠道各自记一份清洗后的文本：不同渠道给的名字详略不同
@@ -219,41 +257,53 @@ def _merge_provider(grouped: dict[str, dict[str, Any]],
 def _finalize(entry: dict[str, Any]) -> None:
     """定稿一个合并组：算出对外 id 与展示名。
 
-    对外 id（`_sort_key` 与前端选择器里的值）：
+    对外 id（`/v1/models` 的 `id`、前端选择器里的值）**一律是归一键**，
+    去掉 free 标记与厂商前缀后的干净 slug——与前端展示一致，六条渠道一个口径：
 
-    * 多渠道真正并到一起时用**展示名的归一键**（`kimi-k3` / `qwen3.8-max`），
-      与前端展示一致；取最短的名字（`Kimi K3` 优先于 `Kimi K3 长尾`）；
-    * 单渠道条目仍用**上游原始 id**（Qoder `kmodel_latest` 原样，kilo 的
-      `kilo-auto/free` 原样），用户按原 id 直连、与历史记录一致。
+    * 多渠道真正并到一起时取最短展示名的归一键（`Kimi K3` 优先于
+      `Kimi K3 长尾`），如 `kimi-k3` / `qwen3.8-max`；
+    * 单渠道条目取该条展示名的归一键（zen `longcat-2.5-preview-free` →
+      `longcat-2.5-preview`、Qoder `kmodel_latest` → `kimi-k3`）；
+    * **兜底/哨兵条目**（展示名重复、缺失，或 `auto`/`default` 这类只在本渠道
+      内成立的占位）取**原代号的归一键**（kilo `kilo-auto/free` → `kilo-auto`），
+      与其它渠道的同类条目天然区分。
 
     展示名同步为清洗后的文本：上游给的可读名优先（Qoder 的 `Qwen3.8-Max`
-    → `Qwen3.8 Max`），没有就由 id 现派生。六条渠道一个口径，前端不再需要
-    按渠道猜怎么美化。
+    → `Qwen3.8 Max`），没有就由 id 现派生。
+
+    原代号不在对外 id 里露面，但**请求转发时一律经别名表换回**（见
+    `_register_aliases`），用户按原代号直连仍能命中；`by_provider.{渠道}.raw_id`
+    把每渠道原代号透给前端。
     """
     providers = sorted(entry["providers"])
     labels = entry["labels"]
+    raw = entry["raw_ids"][providers[0]]
     if len(providers) > 1 and labels:
         representative = min(labels, key=lambda label: (len(label), label.lower()))
         entry["id"] = normalize_model_key(representative)
         entry["meta"]["name"] = representative
+        return
+    # 单渠道：展示名清洗后作为展示名；对外 id 走归一键。
+    representative = min(labels, key=len) if labels else ""
+    entry["meta"]["name"] = representative
+    if entry["scoped"] or not representative:
+        # 兜底/哨兵条目：展示名只在渠道内成立，用原代号的归一键当对外 id
+        entry["id"] = normalize_model_key(raw)
     else:
-        entry["id"] = entry["raw_ids"][providers[0]]
-        # 单渠道也统一给清洗后的展示名；连清洗结果都为空（上游名就是 `free`
-        # 之类）才留空，由前端回退 id。
-        entry["meta"]["name"] = min(labels, key=len) if labels else ""
+        entry["id"] = normalize_model_key(representative)
 
 
 def _disambiguate(entries: list[dict[str, Any]]) -> None:
-    """把对外 id 撞车的那组退回原 id，保证对外 id 全局唯一。
+    """保证对外 id 全局唯一：撞车时后者退回原代号的归一键。
 
-    对外 id 有两个来源：多渠道条目取展示名归一键、单渠道条目取原 id，二者
-    可能撞上（TRAE 的 `glm-5` 归一键 `glm-5`，而另一渠道恰好有个原 id 就叫
-    `glm-5` 的单渠道模型）。撞车时两条 entry 会共用一个 id，前端选择器的
-    `key` 与别名表都会互相覆盖。
+    对外 id 都取归一键，多数情况天然唯一（同一模型的不同渠道写法会并成一条）；
+    但仍可能撞：兜底/哨兵条目用**原代号的归一键**，可能恰好等于另一条正常
+    条目的展示名归一键。撞车时两条 entry 共用一个 id 会让前端选择器的 `key`
+    与别名表互相覆盖。
 
     保留先定稿的那个（同 `_sort_key` 序，靠前的渠道优先），把后来的换成
-    `_fallback_ids` 里的第一个未占用候选：主渠道原 id → 该 id 的归一形式 →
-    归一键（grouped 的字典键，按构造唯一，最后一道兜底）。
+    `_fallback_ids` 里的第一个未占用候选；全都被占则追加渠道名，再不行加数字
+    后缀，保证一定唯一。
     """
     taken: set[str] = set()
     for entry in entries:
@@ -263,20 +313,28 @@ def _disambiguate(entries: list[dict[str, Any]]) -> None:
                 taken.add(candidate.lower())
                 break
         else:
-            # 三个候选全被占：归一键（grouped 的字典键）按构造唯一，作为最后
-            # 一道兜底，保证对外 id 唯一。
-            entry["id"] = entry["key"]
-            taken.add(entry["key"])
+            entry["id"] = _unique_suffix(entry["id"], taken)
+            taken.add(entry["id"].lower())
+
+
+def _unique_suffix(base: str, taken: set[str]) -> str:
+    """`base` 已被占用时追加数字后缀直到唯一（最后一道兜底）。"""
+    index = 2
+    while f"{base}-{index}".lower() in taken:
+        index += 1
+    return f"{base}-{index}"
 
 
 def _fallback_ids(entry: dict[str, Any]) -> list[str]:
     """撞 id 时的候选替换值，按优先级排列。
 
-    先退回该组的主渠道原 id（用户最熟悉的那个 key），再退回归一后的展示名
-    （组内 key 本身唯一，仅当它已作为别的组的对外 id 用掉时才轮到）。
+    主候选是主渠道原代号的归一键（用户最熟悉的 key），其次再带上渠道名后缀
+    （两个渠道的原代号归一键相同时区分）。
     """
-    primary = entry["raw_ids"][sorted(entry["providers"])[0]]
-    return [primary, normalize_model_key(primary), entry["key"]]
+    providers = sorted(entry["providers"])
+    primary = entry["raw_ids"][providers[0]]
+    normalized = normalize_model_key(primary)
+    return [normalized, f"{normalized}-{providers[0]}"]
 
 
 def _register_aliases(entries: list[dict[str, Any]],
@@ -350,7 +408,7 @@ def _visible(models_by_lower: dict[str, Model],
              patterns: tuple[str, ...]) -> dict[str, Model]:
     """按当前黑名单过滤一个上游的模型表（缓存里存的是未过滤的原始表）。"""
     return {lower: model for lower, model in models_by_lower.items()
-            if not _blocked(model.id, patterns)}
+            if not _blocked(model, patterns)}
 
 
 def credential_providers(services: Services) -> set[str]:
@@ -488,25 +546,30 @@ async def list_models(services: Services, *, force: bool = False) -> dict:
     不认该模型的上游。
     黑名单在每个出口现算（缓存不做过滤），因此改完黑名单下一次调用立即生效。
     输出顺序按 `_sort_key`：CB / TR 渠道的模型优先，其余渠道在后。
+
+    整段串行化（`_refresh_lock`）：调用方有 HTTP 出口与后台兜底刷新两处，
+    两者都无锁时会同时对同一条渠道打上游（zen 那次就是十几秒的真推理），
+    后到的那个拿到的还是同一份数据，纯属白打一遍。
     """
-    connected = credential_providers(services)
-    now = time.monotonic()
-    for provider_id, provider in services.registry.items():
-        # 没凭证的渠道直接跳过：不拉取、不展示。已接入的渠道即使本次拉取失败，
-        # 也会走缓存兜底，不会因为一次抖动就从列表里消失。
-        if provider_id not in connected:
-            continue
-        if not _needs_refresh(services, provider_id, force=force, now=now):
-            continue
-        await _refresh_provider(services, provider_id, provider)
-        publish_aliases(services, connected)
-    entries = merged_entries(services, connected)
-    aliases = _build_aliases(entries)
-    # 就地更新（executor 的映射闭包引用同一个 dict 对象）
-    services.model_aliases.clear()
-    services.model_aliases.update(aliases)
-    return {"object": "list", "data": [_entry_response(entry)
-                                      for entry in entries]}
+    async with _refresh_lock:
+        connected = credential_providers(services)
+        now = time.monotonic()
+        for provider_id, provider in services.registry.items():
+            # 没凭证的渠道直接跳过：不拉取、不展示。已接入的渠道即使本次拉取失败，
+            # 也会走缓存兜底，不会因为一次抖动就从列表里消失。
+            if provider_id not in connected:
+                continue
+            if not _needs_refresh(services, provider_id, force=force, now=now):
+                continue
+            await _refresh_provider(services, provider_id, provider)
+            publish_aliases(services, connected)
+        entries = merged_entries(services, connected)
+        aliases = _build_aliases(entries)
+        # 就地更新（executor 的映射闭包引用同一个 dict 对象）
+        services.model_aliases.clear()
+        services.model_aliases.update(aliases)
+        return {"object": "list", "data": [_entry_response(entry)
+                                          for entry in entries]}
 
 
 def create_router(services: Services) -> APIRouter:
