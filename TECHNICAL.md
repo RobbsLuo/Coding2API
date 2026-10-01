@@ -308,6 +308,8 @@ def health(q: Quota | None) -> HealthScore:
 
 **黑名单热更与列表缓存（B4 修正）**：`MODEL_BLOCKLIST` 是热更项，但 `list_models` 的 `model_list_cache` 原先存**过滤后**结果，导致改完最长要等 `MODEL_LIST_TTL_SECONDS`（300s）才反映到 Playground，且被滤模型在 TTL 内会从「上游失败兜底缓存」复活。现在缓存只存**未过滤原始表**，过滤在每个出口现做（`_visible()`，命中缓存 / 成功拉取 / 失败兜底三条路径都过一遍）；前端保存后显式 `invalidateQueries(["playground-models"])`，因此黑名单与列表两条缓存都立即生效，不依赖 TTL 过期。
 
+**黑名单按归一后的对外写法匹配（2026-10）**：对外 id 改为归一键后，过滤若只比对上游原代号，用户照列表里看到的**归一键 / 展示名**写黑名单就会失效。`_blocked` 改为对 `_block_names(model)` 的四种写法取并集匹配：原代号（`kmodel_latest`）、原代号的归一键（兜底/哨兵条目的对外 id，`kilo-auto/free` → `kilo-auto`）、展示名（`Kimi K3`）、展示名的归一键（正常条目的对外 id，`kimi-k3`）。保留原代号是因为默认规则带下划线（`custom_model_*` / `browser_use_*`），归一键把下划线换成连字符后并不命中，只有原代号能匹配。清洗后退化为空的名字不参与匹配（否则 `*` 会命中空串）。
+
 **按凭证加载（Q41）**：`list_models` 先用 `credential_providers()` 求「当前有可用凭证」的渠道集合（`candidates(selectable_only=True)`：未暂停、未硬禁用；冷却中的仍算有凭证，避免限流时列表闪没），循环里 `provider_id not in connected` 直接 `continue`——**没凭证的渠道不读缓存、不拉上游、不展示**。此前无凭证也会 `list_models({})`，CB/TRAE 回退静态表、zen 匿名拉取，于是在只接了部分渠道时列表里出现打不通的幽灵模型；启动预热也因此不再对无凭证渠道白打上游。zen 自带虚拟凭证，不受影响。
 
 **失败也进 TTL（负缓存）**：`model_list_fetched_at` 记的是**上次尝试**时间（成功或失败都刷新），TTL（300s）内不再打上游——有缓存就继续用缓存，没缓存就跳过该渠道。此前只在成功时记时间戳，上游一次抖动（尤其 zen 探活的十几秒）会让其后**每次** `/v1/models` 都重跑一遍拉取，把列表请求打成一串超时。

@@ -49,16 +49,12 @@ _NAMESPACE_PREFIX = re.compile(r"^[^:\s][^:]*:\s+")
 # 形式不会被误伤。比较忽略大小写。
 _TRAILING_FREE = re.compile(r"(?:[\s\-_:]+free|\s*[([]\s*free\s*[)\]])$",
                             re.IGNORECASE)
-# 前导的厂商命名空间：`NVIDIA: Nemotron 3 Ultra` → `Nemotron 3 Ultra`。
-# 要求冒号后有空白（`Vendor: Model` 形态），避免误伤 `a:b` 这类无空格写法。
-_LEADING_NAMESPACE = re.compile(r"^[^:\s][^:]*:\s+")
 # 展示分段里独立的 free 词（`(free)` 摘括号后成 `free`）：整段丢弃。
 _FREE_WORD = re.compile(r"^free$", re.IGNORECASE)
 
 # 展示名与归一键之间的分隔符集合：连字符 / 下划线 / 空白。点号**不是**分隔
 # ——`glm-5.2` / `qwen3.8` 的版本号靠它区分，压成 `glm-5-2` 就换了模型。
 _SEGMENT_SEP = re.compile(r"[-_\s]+")
-_SEP_RUN = _SEGMENT_SEP
 # 归一键里剔除的杂字符：括号（kilo 的 `Kilo (offline)`）等包裹符号。点号与
 # 加号保留（版本号 / `qwen3.8-max+`）；非 ASCII 字母数字保留（上游名可能有
 # 中文后缀，如「Kimi K3 长尾」——压掉会与「Kimi K3」撞成同一个键）。归一键要
@@ -151,7 +147,7 @@ def normalize_model_key(raw: str) -> str:
     「拿不到干净名字」并回退展示原始 id，而不是产出空 id。
     """
     cleaned = _strip_noise(raw.strip())
-    slug = _SEP_RUN.sub("-", _JUNK_CHARS.sub("-", cleaned)).strip("-").lower()
+    slug = _SEGMENT_SEP.sub("-", _JUNK_CHARS.sub("-", cleaned)).strip("-").lower()
     return slug or raw.strip().lower()
 
 

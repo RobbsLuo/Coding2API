@@ -14,7 +14,9 @@ publish 别名表——否则启动预热跑完之前别名表是空的，扁平
 失败都记）：失败不记时间戳的话，上游一次抖动就会让其后每次 /v1/models 都
 重跑一遍拉取（zen 探活最慢可占十几秒），把列表请求打成一串超时。
 另按 MODEL_BLOCKLIST（fnmatch glob）过滤非用户模型与老模型，
-只影响列表展示；直连指定被滤模型不受影响。
+只影响列表展示；直连指定被滤模型不受影响。模式按**归一后的对外写法**匹配
+（原代号、原代号的归一键、展示名、展示名的归一键四种写法任一命中即滤，见
+`_block_names`），用户照列表里看到的归一键 / 展示名写也能生效。
 
 **缓存存的是未过滤列表，过滤在每个出口现做**：MODEL_BLOCKLIST 是可热更项
 （Q34「改完立即生效」），若把过滤结果存进缓存，改完黑名单要等 TTL（300s）
@@ -154,8 +156,12 @@ def _block_names(model: Model) -> tuple[str, ...]:
 
 
 def _blocked(model: Model, patterns: tuple[str, ...]) -> bool:
-    """该模型是否命中黑名单：任一种对外写法命中任一 glob 即滤。"""
-    return any(fnmatch(name, pattern) or fnmatch(name.lower(), pattern)
+    """该模型是否命中黑名单：任一种对外写法命中任一 glob 即滤。
+
+    两边都忽略大小写：用户照展示名写（`Kimi K3`）与照归一键写（`kimi-k3`）
+    应等价命中，不能只把被匹配方转小写、模式原样比对（`Kimi-K3` 会漏）。
+    """
+    return any(fnmatch(name.lower(), pattern.lower())
                for name in _block_names(model)
                for pattern in patterns)
 

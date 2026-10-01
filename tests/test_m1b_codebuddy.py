@@ -1089,16 +1089,17 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
 
 
 def test_models_blocklist_matches_normalized_id_and_display_name(tmp_path):
-    """黑名单按**归一后的对外写法**匹配：归一键、展示名都能命中。
+    """黑名单按**归一后的对外写法**匹配，且两边忽略大小写。
 
     对外 id 改为归一键后，用户照列表里看到的名字写黑名单必须生效——
-    按 zen 归一键 `longcat-2.5-preview`、展示名 `MiMo V2.5` 都能滤掉；
-    Qoder 的原代号 `kmodel_latest` 归一键是展示名派生的 `kimi-k3`，按
-    `kimi-k3` 也能滤。同时老口径（原代号 `custom_model_*`）仍生效。
+    按 zen 归一键 `longcat-2.5-preview`、展示名派生的 `KIMI-K3`（**大小写
+    与展示名不同**）都能滤掉；Qoder 的原代号 `kmodel_latest` 归一后是
+    `kimi-k3`，故 `KIMI-K3`（忽略大小写）命中。同时老口径（原代号
+    `custom_model_claude`）仍生效。未被列入的 `MiMo V2.5` 照常保留。
     """
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
-                        MODEL_BLOCKLIST="longcat-2.5-preview,MiMo V2.5,kimi-k3,"
-                                        "custom_model_*")
+                        MODEL_BLOCKLIST="KIMI-K3,longcat-2.5-preview,"
+                                        "custom_model_claude")
 
     class Stub:
         def __init__(self, pid: str, models):
@@ -1126,11 +1127,10 @@ def test_models_blocklist_matches_normalized_id_and_display_name(tmp_path):
     with TestClient(app) as client:
         ids = {item["id"] for item in client.get(
             "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]}
-    # 归一键 / 展示名 / 原代号三种写法命中即滤
+    # 归一键 / 展示名（大小写混合）/ 原代号三种写法命中即滤
     assert "longcat-2.5-preview" not in ids
-    assert "mimo-v2.5" not in ids
     assert "kimi-k3" not in ids
-    assert ids == set()
+    assert ids == {"mimo-v2.5"}   # 未列入黑名单的保留
 
 
 def test_models_blocklist_hot_reload_applies_without_waiting_for_ttl(tmp_path):

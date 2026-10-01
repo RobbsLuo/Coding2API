@@ -139,6 +139,9 @@ class Settings(BaseSettings):
     codebuddy_sanitize_channel_markers: bool = True
     # 模型列表黑名单（fnmatch glob，逗号分隔）：滤掉非用户模型与老模型，
     # 只影响 /v1/models 与 playground 列表，直连指定不受影响。
+    # 模式按**归一后的对外写法**匹配（见 api/models.py::_block_names）：原代号、
+    # 原代号的归一键、展示名、展示名的归一键四种写法任一命中即滤——用户照列表
+    # 里看到的 `kimi-k3` / `Kimi K3` 写就能生效，老规则按原代号写也仍生效。
     # 覆盖此值时为完全替换（含默认噪音规则），增删请重写全量。
     # B1.6 实测（2026-09-21，两边上游真实清单）补入的内部/不可用模型：
     #   custom_model_* / *sub*agent* / summary / browser_use_* / file_search_agent
