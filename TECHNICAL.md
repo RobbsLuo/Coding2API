@@ -447,7 +447,7 @@ response.completed | response.incomplete
 | 类别 | 例子 | 位置 | 变更方式 |
 |---|---|---|---|
 | 启动期不可变项 | `APP_SECRET` / `HOST` / `PORT` / `DATA_DIR` / `USERS_FILE` / `CODEBUDDY_ALLOWED_ENDPOINTS` | `config.Settings`（frozen） | 改 env + 重启；**不进白名单**，管理台改不了 |
-| 运行时可覆盖项 | 见 `runtime_settings.HOT_SETTINGS`（14 项） | `RuntimeSettings` 覆盖层 | 管理台改，立即生效 |
+| 运行时可覆盖项 | 见 `runtime_settings.HOT_SETTINGS`（19 项） | `RuntimeSettings` 覆盖层 | 管理台改，立即生效 |
 
 启动期项拒绝热更的原因：它们决定进程如何启动（监听地址、加密密钥、上游白名单），运行期变更只会让「当前进程」与「磁盘配置」静默分叉，而分叉后的行为无法从任一处推断。
 
@@ -569,7 +569,7 @@ response.completed | response.incomplete
 
 ### 3.12 后台任务可视化（B4，「任务与配置」页）
 
-**问题**：`TaskRunner` 跑着 6 类循环（额度探测 / token 预刷新 / 每日签到 / 成长中心 / 活跃上报 / 明细清理），但除失败时一行 `logger.warning`，没有任何地方能看到「上次何时跑的、结果如何」，也没有端点暴露。运维只能翻服务日志。
+**问题**：`TaskRunner` 跑着 7 类循环（额度探测 / token 预刷新 / 每日签到 / 成长中心 / 活跃上报 / 明细清理 / 模型目录刷新），但除失败时一行 `logger.warning`，没有任何地方能看到「上次何时跑的、结果如何」，也没有端点暴露。运维只能翻服务日志。
 
 **上一轮调研结论**：项目内**不存在**后台任务页（无 `TasksPage`、无 `/api/tasks`，git 全历史与文档均无），所以这不是「找回旧页面」而是新增；同类项目（ithtelab/workbuddy-manager）的做法是「任务记录页 + 30s 自动刷新 + 单次 200 条上限」，关键教训是**容器重建即丢、必须采集落库**。
 
@@ -970,7 +970,7 @@ B5 的实际症状值得记住：新建用户报「用户名可能已存在，�
 **诊断顺序**（先确认版本，再查业务）：
 
 ```bash
-# 1) schema 版本已迁移（期望 14）且账号已导入
+# 1) schema 版本已迁移（期望 15）且账号已导入
 sqlite3 data/coding2api.sqlite3 "PRAGMA user_version; SELECT username, role, enabled FROM users;"
 # 2) 路由存在：期望 401（未登录），404 = 旧后端进程
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
@@ -983,7 +983,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
 
 ## 7. 数据库（T-Q2 定稿）
 
-DDL 以 `src/db/schema.sql` 为准（users 为账号唯一源、users.txt 仅引导导入、凭证加密列、`usage_events.credit`/`cached_tokens` 可空）。当前 `SCHEMA_VERSION = 14`，共 10 张表：`api_keys` / `credentials` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `runtime_settings`。补充实现细节：
+DDL 以 `src/db/schema.sql` 为准（users 为账号唯一源、users.txt 仅引导导入、凭证加密列、`usage_events.credit`/`cached_tokens` 可空）。当前 `SCHEMA_VERSION = 15`，共 10 张表：`api_keys` / `credentials` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `runtime_settings`。补充实现细节：
 
 ```sql
 -- conn.py 打开时执行

@@ -18,7 +18,7 @@
 | Q8 | 协议出口 | v1 仅 OpenAI；v1.1 加 Anthropic |
 | Q9 | 存储 | SQLite，schema 重新设计，凭证入加密列 |
 | Q10 | 配额 | 不做配额，只做按人统计 |
-| Q11 | 前端范围 | Dashboard / 凭证 / API Key / 统计 / Playground / 任务与配置 / 登录（Q34 推翻「无设置页」：13 项可热更配置走管理台，其余配置仍走 env；Q38 把该页与后台任务合并，页名「任务与配置」） |
+| Q11 | 前端范围 | Dashboard / 凭证 / API Key / 统计 / Playground / 任务与配置 / 登录（Q34 推翻「无设置页」：19 项可热更配置走管理台，其余配置仍走 env；Q38 把该页与后台任务合并，页名「任务与配置」） |
 | Q12 | 调度策略 | 统一健康度 + 到期积分指标 + 冷却状态机，保留手动 pin |
 | Q13 | Anthropic | v1.1，架构预留中立事件层 |
 | Q14 | 测试 | 全量 100%（行 + 分支），契约测试优先 |
@@ -39,11 +39,11 @@
 | Q31 | 到期积分排序 | 两级字典序：主窗口（36h）+ 次窗口（7 天）内到期积分总量依次做排序键（均 env 可配）；落库到期阶梯而非单一日期 |
 | Q32 | Responses 出口 | v1 只做 `chat/completions` 子集：`POST /v1/responses` 与 chat 共用同一 executor，出口 translator 可注入；`include`/`store`/`previous_response_id` 按 Codex CLI 实测取舍（见 TECHNICAL §3.7） |
 | Q33 | 凭证暂停语义 | 复用现有 `enabled`（不新增 `manual_disabled` 列）：实测 `enabled=0` 只摘对话流量，后台任务（签到/刷新/成长/探测）只认 `disabled`；UI 文案统一为「暂停/取消暂停」以区别于系统禁用后的「恢复」（见计划 B3.1） |
-| Q34 | 运行时配置热更 | **推翻 Q11 的「无设置页」**：新增 `runtime_settings` 表 + `RuntimeSettings` 覆盖层 + 管理台配置页（Q38 后与后台任务合并为「任务与配置」，导航第 6 项、管理员专属）。白名单 13 项改完立即生效，无需重启；**DB 覆盖值优先于 .env**，UI 与日志明示，可「恢复默认」。启动期项（密钥 / 端口 / 数据目录 / 上游白名单）不进白名单——它们决定进程如何启动，运行期改只会让内存与磁盘静默分叉。**B4 修正**：模型黑名单原先「改完最长 300s 才生效」（列表缓存存的是过滤后结果，且被滤模型会从失败兜底缓存复活）；现缓存改存未过滤表、过滤在每个出口现做（过滤按归一后的对外写法匹配：原代号、其归一键、展示名、展示名归一键四种任一命中即滤） |
+| Q34 | 运行时配置热更 | **推翻 Q11 的「无设置页」**：新增 `runtime_settings` 表 + `RuntimeSettings` 覆盖层 + 管理台配置页（Q38 后与后台任务合并为「任务与配置」，导航第 6 项、管理员专属）。白名单 19 项改完立即生效，无需重启；**DB 覆盖值优先于 .env**，UI 与日志明示，可「恢复默认」。启动期项（密钥 / 端口 / 数据目录 / 上游白名单）不进白名单——它们决定进程如何启动，运行期改只会让内存与磁盘静默分叉。**B4 修正**：模型黑名单原先「改完最长 300s 才生效」（列表缓存存的是过滤后结果，且被滤模型会从失败兜底缓存复活）；现缓存改存未过滤表、过滤在每个出口现做（过滤按归一后的对外写法匹配：原代号、其归一键、展示名、展示名归一键四种任一命中即滤） |
 | Q35 | token 到期展示与预警 | `credentials` 增列 `token_expires_at` / `token_issued_at`（`SCHEMA_VERSION` 10→11）。到期优先取显式 `expires_at`，缺失/非法时回落 access token 的 **JWT `exp`**；签发时间取 JWT `iat`（新增渠道中立的 `provider/token_expiry.py`）。**实测 CodeBuddy 的 token 响应（OAuth 登录与刷新）不带任何到期字段**，只看 `expires_at` 会恒为 0，既让管理台看不到到期，也让 `needs_refresh` 永不触发（只能等 401 硬禁用）。两边都取不到时为 0 = 未知，**不猜本地 TTL**。展示为独立「token 剩余」列；**进度条与「最后续期」的最初设计已移除**（两渠道寿命 55 天 vs 14 天无可比性），`iat` 仍落库供诊断。老库不批量回填，列表读到时按需从密文派生 |
 | Q36 | 积分变动流水 | 新增 `credit_events` 表（`SCHEMA_VERSION` 11→12），在额度探测写回的**同一事务**里比对余额、只增记一条。**计划原要求 `source` 标注来源（签到/成长/对话），但实测三类证据都拿不到真实归因**：diff 只见区间净变化，其间签到、成长领取与对话消耗可能同时发生。故 `source` **改为只表达归因已知度**（`observed` / `sync`），另加 `window_start` 记变化覆盖时段，前端一律说「净变化」而非「签到 +N」。余额未变不记；任一端未知仍记但 `delta` 为空（绝不量化成 0）。保留期同 `usage_events`（90 天） |
 | Q37 | 池健康与多 Key 出口 | `GET /healthz` 返回 `{status, service, version, credentials:{total,ready,cooling,paused,disabled}}`（保留 `GET /health` 作纯存活探针）：`ready` 复用调度器 `Candidate.is_selectable` 口径，五类互斥且合计 = total——**计划原文只列 4 类**，但项目已区分「系统禁用」与「用户暂停」（Q33），少一类会让计数对不上，故补 `paused`。`api_keys` 增 `provider_binding`（`codebuddy`/`trae`/空 = 自动）与 `allowed_ips`（`SCHEMA_VERSION` 12→13）；`deps.api_key_user` 升级为返回 `ApiKeyPrincipal`，并**在鉴权当场**判定来源 IP。IP 白名单**默认不信 `X-Forwarded-For`**（客户端可写），仅 `TRUST_PROXY=true` 时采信且取 XFF **最后一个**条目，故只适用于「本服务前恰好一层受信反代」。绑定渠道在 `executor` 收窄候选上游：模型归属别家渠道时 400 并给出实际归属，目录未就绪时保守放行。**不做**每 Key 配额 / 多租户（与 Q10 冲突） |
-| Q38 | 后台任务可视化（「任务与配置」页） | 管理台原「运行时配置」页与后台任务**合并**：13 项配置按 `HotSetting.task` 归属进任务卡片，无归属的进「网关与调度」区；新增 `GET /api/tasks`（admin）下发 6 类任务运行态，前端 30s 刷新。**运行态只存进程内、不落库**（`tasks/status.py`）：重启归零比编造重启前记录更诚实，也省掉新表 + 保留期清理 + 老库迁移，**无 schema 变更**。**no-op 轮次不入账**（返回 `None` = 未到点 / 未开启），否则签到会显示成「刚刚跑过」而当天其实没签；异常入账（`last_error`），否则「一直在失败」会显示成「尚未执行」。周期与开关取**当前生效值**，不是装配快照 |
+| Q38 | 后台任务可视化（「任务与配置」页） | 管理台原「运行时配置」页与后台任务**合并**：19 项配置按 `HotSetting.task` 归属进任务卡片，无归属的进「网关与调度」区；新增 `GET /api/tasks`（admin）下发 7 类任务运行态，前端 30s 刷新。**运行态只存进程内、不落库**（`tasks/status.py`）：重启归零比编造重启前记录更诚实，也省掉新表 + 保留期清理 + 老库迁移，**无 schema 变更**。**no-op 轮次不入账**（返回 `None` = 未到点 / 未开启），否则签到会显示成「刚刚跑过」而当天其实没签；异常入账（`last_error`），否则「一直在失败」会显示成「尚未执行」。周期与开关取**当前生效值**，不是装配快照 |
 | Q39 | 用户账号体系（B5） | **用户从 `users.txt` 迁入 SQLite**（`users` + `audit_events` 两表，`SCHEMA_VERSION` 13→14）：`users.txt` 降级为**一次性引导导入**（首个 admin 仍可用 `scripts/hash_password.py` 或新 `scripts/create_user.py` 建），老文件不删、可作为回滚；`ADMIN_USERNAMES` 只标**引导期**提权。三角色（S1）：`admin` 管用户与配置、`operator` 管凭证写操作、`viewer` 只读。会话吊销（S3）不建会话表，用 `users.session_epoch` 进签名 Cookie 的 `ep`——改密/降级/禁用/硬删一律 bump，**角色每请求现读 DB**，不进 Cookie。删除语义（S6）：**禁用是主路径**（可逆、保住用量归属），硬删只在 `scripts/create_user.py --delete --force`；管理台故意不暴露 `DELETE`。建号/重置（S7）走**一次性激活令牌** + `/activate` 自设密码，明文仅响应回显一次、库里只存 SHA-256 摘要（无邮件设施下的最优解，与「API Key 明文仅一次」同一心智模型）。审计（S8）：登录 + 账号变动 + 凭证写操作入 `audit_events`，**绝不记密码/令牌明文**。防锁死三层：Web 端 self_target + last-admin 守卫，CLI 端删最后活跃 admin 拒绝，bootstrap 无活跃 admin 直接启动失败 |
 | Q40 | OpenCode Zen 免费层（第三渠道 `zen`） | 把 `opencode.ai/zen` 免费层接成第三个 provider（`KNOWN_PROVIDERS` 加 `"zen"`，**无 schema 变更**）。**协议是标准 OpenAI SSE，不逆向**：无需私有信封解析，唯一渠道私有的是**免费层门禁伪装**——UA `opencode/<version>`（≥1.18.0，低于阈值 426、无版本号 403）、`x-opencode-session`（`ses_` + 12 hex + 14 base62）、body `stream:true`、body `tools` 必须**同时**含 `bash` 与 `read`。门禁要求的这两个工具客户端从未声明过，故**注入空壳 + 过滤回包**：只在缺失时补骨架工具，模型若真的调用注入名（含按 `index` 跟踪的流式分片）则整条丢弃，且该流无其他真 tool_call 时把 `finish_reason` 收敛为 `stop`（用户自带同名工具时不注入、不过滤）。**展示名从 id 派生**：上游 `/zen/v1/models` 不返回任何模型名字段（只有 `id` 与 `owned_by`，后者恒为厂商名 `opencode`，直接透传会让 Zen 所有模型在列表里都叫「opencode」），故 `pretty_model_name` 去免费后缀后按段 title-case 并修正品牌/缩写写法（`longcat-2.5-preview-free` → `LongCat 2.5 Preview`；2026-10-01 起该函数为渠道中立的 `provider/naming.py` 的薄封装，六渠道共用同一套清洗规则）。**凭证模型用虚拟凭证行**：Zen 无凭证/无额度接口，池里种一条空凭证复用现有调度/冷却/统计（`probe_quota` 恒 `probe_failed=True` → health NULL「未知」，**不是耗尽**）；删除后重启复活，也可在凭证页「登录渠道账号」点「添加 OpenCode Zen」立即补回（复用通用导入端点），永久停用请用「暂停」。**免费模型清单完全动态（现拉现探）**：上游 `/zen/v1/models` 免鉴权但返回全部模型（含 70 多个付费模型）且**不带任何免费标记**（`owned_by` 恒 `opencode`、无 cost 字段）。唯一权威信号是匿名可用性（付费恒 401 `Missing API key.`）。故两步过滤：按 `-free` 后缀收窄候选 → 并发探活只保留 2xx（下线 400 / 区域 403 / 故障 5xx / 超时全剔除）。无静态白名单，上游增删自动跟随；候选全灭时抛错让 `/v1/models` 用缓存兜底。判活结果按 30 分钟缓存（`MODELS_CACHE_TTL_SECONDS`），避免服务层每 300s 重拉列表就重探一轮。免费模型显式标 **x0 倍率**（`credit_rate=0.0`），列表 UI 显示 x0 且排序时排最省一档。zen 的 401 归 `INVALID` 而非 `DEAD`（无凭证，401 只表示该模型需要付费 key），避免强制付费模型把整条渠道硬禁用。`timeline()` 从硬编码两列改为按 `(hour, provider)` 动态 pivot（键名 `codebuddy`/`trae` 不变，无 zen 数据时旧契约不变）。新增 `ZEN_API_ENDPOINT` / `ZEN_ALLOWED_ENDPOINTS`（端点白名单，Zen 不带真实 Token）/ `ZEN_OPENCODE_VERSION`（门禁 UA 版本，上游改阈值时改 env） |
 | Q41 | 模型列表按渠道凭证加载 | `/v1/models` 与 `/api/playground/models` 只合并「当前有可用凭证」的渠道（`candidates(selectable_only=True)`：未暂停、未硬禁用）——**从未接入 / 全部暂停 / 会话失效的渠道既不拉取上游也不展示**，避免把根本打不通的渠道模型混进列表（此前无凭证也调用 `list_models({})`，CB/TRAE 回退静态表、zen 匿名拉取，导致幽灵模型）。判定在缓存分支之前：没凭证就不读缓存也不合并；冷却中的凭证仍算「有凭证」，渠道接了只是暂时限流，列表不跟着闪没。冷启动只有 zen（自带虚拟凭证）在列，接入 CB/TRAE 后下一次列表请求（该渠道无缓存）才拉取；由此启动预热也不再对无凭证渠道白打上游。渠道重新接入后若缓存仍在 TTL 内则直接复用，不重复打上游 |
@@ -54,13 +54,11 @@
 | Q46 | Kilo Gateway 免费层（第四渠道 `kilo`） | 把 [Kilo Gateway](https://kilo.ai)（`api.kilo.ai/api/gateway`）免费层接成第四个 provider（`KNOWN_PROVIDERS` 加 `"kilo"`，**无 schema 变更**）。**协议是标准 OpenAI 兼容**（`/chat/completions` + `/models`），既无私有信封也无门禁伪装——与 Zen 的关键差异正在此：Zen 要伪造 UA/session/tools 并过滤伪工具调用，Kilo 完全不需要。**免费模型有权威标记**：`/models` 每个条目带 `isFree` 布尔（实测 2026-09-29 共 395 个模型、17 个 `isFree=true`，含 `kilo-auto/free`、`stealth/space-bunny-alpha`、`openrouter/free` 等无 `:free` 后缀者），据此**直接过滤**免费集——**不做探活**（与 Zen 相反）：探活会真发一次推理、白耗本就极小的免费配额（网关级约 200 req/h/IP），且结果随上游免费池波动不稳定，`isFree` 已足够权威。免费模型显式标 **x0 倍率**（`credit_rate=0.0`）；`name`/`context_length`/`top_provider.max_completion_tokens`/`supported_parameters`（含 `tools`）/`architecture.input_modalities`（含 `image`）透传为中立 `Model` 元数据。思考字段是 **`delta.reasoning`**（**不是** Zen 的 `reasoning_content`）。**凭证模型用虚拟凭证行**（同 Zen）：Kilo 无凭证/无额度接口，池里种一条空凭证复用现有调度/冷却/统计（`probe_quota` 恒 `probe_failed=True` → health NULL「未知」，**不是耗尽**）；删除后重启复活，也可在凭证页「登录渠道账号」点「添加 Kilo Gateway」立即补回，永久停用请用「暂停」。**错误分类**：401→`INVALID`（无凭证，401 只表示该模型需要付费 key/BYOK，避免强制付费模型硬禁用整条渠道）、400/404/422→`INVALID`、403→`REQUEST`、**429 与 502/503/504→`MODEL`（模型级冷却）**。429 与上游 5xx 归模型级而非账号级：实测（2026-09-30）429 报错点名具体模型（`<model> is temporarily rate-limited upstream`，`limit_source: upstream_provider_shared_pool`），429 消退后同一模型转 503 `no endpoints available`，两种情况下**同一时刻其他免费模型仍 200**——免费池实为 OpenRouter 共享池转发，拥塞/端点缺失按模型隔离，归账号级会因单模型问题把整条 kilo 渠道冷却（429→60s；5xx 累计 3 次→10m；单虚拟凭证下均即 `all credentials unavailable`）。对齐 CB/TRAE 的 `429+6004 → MODEL` 口径。限流交引擎处理，**本包不自建熔断**。新增 `KILO_API_ENDPOINT` / `KILO_ALLOWED_ENDPOINTS`（端点白名单，Kilo 不带真实 Token）/ `KILO_CHAT_MIN_INTERVAL`（热更项，独立 pacer、默认 0 = 不节流，与 zen / CB / TRAE 互不排队） |
 | Q47 | Qoder（阿里，第五渠道 `qoder`） | 把 [Qoder](https://qoder.com) 接成第五个 provider（`KNOWN_PROVIDERS` 加 `"qoder"`，**无 schema 变更**）。**真实账号渠道**（区别于 zen/kilo 的匿名免费层），走设备码 PKCE 登录，凭证入加密列。协议为私有 COSY：推理 `POST {gateway}/algo/api/v2/service/pro/sse/agent_chat_generation`，body 用**自定义 Base64 变体**编码（三段轮转 + 自定义字母表 + `=`→`$`），头为整套 `cosy-*`，`Authorization: Bearer COSY.<payload_b64>.<md5sig>`，`x-model-key` 路由；签名为 `md5(payload_b64 \n cosy_key \n date \n body \n path)`（`path` 去 `/algo` 前缀，payload 为键排序紧凑 JSON），`cosy_key`/`info` 由临时 AES 密钥经服务端 RSA 公钥加密而来。响应是**信封式 SSE**（`data:{"headers":…,"body":"<内层 chunk>","statusCodeValue":200}`，`body=="[DONE]"` 结束，非 200 判上游错误）。模型发现 `GET {gateway}/algo/api/v2/model/list?Encode=1`（**必须带整套 COSY 签名头**，签名 body 为 `qoder_encode("")`；裸 GET 403、带头 POST/PUT 400，故固定 GET）。额度 `GET {openapi}/api/v2/quota/usage`（`userQuota`+`addOnQuota`），套餐 `/api/v2/user/plan`。签到 `/sash/api/v1/me/daily-check-in/{status,claim}`（409/`ALREADY_CLAIMED` → 已签；**国际版该端点 404 → 视为本区域无此接口，不算错误**）。域：CN `openapi.qoder.com.cn`/`gateway.qoder.com.cn`；Intl `openapi.qoder.sh`/`api1.qoder.sh`。密码学复用项目已有 `cryptography`（不移植参考仓库的手写纯 Python 实现）。新增 `QODER_API_ENDPOINT`（openapi）/`QODER_ALLOWED_ENDPOINTS`（含国内 openapi+gateway 与国际版）/`QODER_CHAT_MIN_INTERVAL`（热更项，独立 pacer、默认 5s） |
 | Q48 | CodeArts（华为云码道，第六渠道 `codearts`） | 把 [华为云 CodeArts](https://codearts.huaweicloud.com) 的盘古引擎接成第六个 provider（`KNOWN_PROVIDERS` 加 `"codearts"`，**无 schema 变更**）。**真实账号渠道**，走 OAuth2 PKCE 登录换 STS，凭证入加密列。推理 `POST /api/v2/chat/completions`（福利模型追加头 `maas_type: benefit`）；鉴权为华为云 **`SDK-HMAC-SHA256`**（AK/SK + `X-Security-Token`，signedHeaders=请求全部头小写排序，CanonicalURI 每段 encode 且**末尾补 `/`**，payload hash 取 `X-Sdk-Content-Sha256`）。**令牌刷新与 `client_id=codearts-agent` + DPoP 私钥三者绑定、一次性**：`POST {sts}/v1/oauth2/tokens` `grant_type=refresh_token` + **DPoP(ES256/P-256)**，刷后**必须回写新 `refresh_token`**（DPoP 低 S 归一化用 `cryptography` 实现，不移植 Go/手写 ECDSA）。模型：内置 `GET {snap}/v1/model/builtin`（头 `Agent-Type: PromptCenter`）+ 福利 `GET {opengw}/api/v1/gateway/config`；领取 `POST {opengw}/api/v1/benefit/claim`（幂等，启动/定时保活）；余额 `GET {opengw}/api/v1/user/tokens/balance`。SSE 为**逐行 `data:` JSON**（v2 实测为标准 OpenAI chunk：`choices[].delta` + `data:[DONE]`；旧形状/legacy 才是累计全文 `text`，用快照做差），错误 `error_code` 形如 `ChatAgent.*`。**CodeArts 没有每日签到接口**（额度为每日 1000 万免费 token、当日 0 点清零、用完即弃），故不实现 `checkin`，签到语义由 token 自动 refresh 续期承担（且只由 `RefreshTask` 独占轮转，一次性 `refresh_token` 不得被额度探测等旁路顺手消费）；当日剩余登记为「次日本地 0 点到期」的 `expiry_ladder`，调度器据此优先消耗（用尽自动回落）。**福利模型单请求扣池计费**：福利模型虽不给倍率（`credit_rate=None`），但实测按每日池 1:1 扣减（输入 32 + 输出 694 = 726 token → 池余额 −726），故上游 usage 缺额度字段时按「输入 + 输出 token」补 `credit` 并标 `credit_estimated`（统计页加 ≈；**2026-10-01 起该值再折成积分**，见 Q52）；内置模型不扣该池、不补。**并发上限**：上游硬限每账号并发会话数 3，超出即 `400 TM.00001041`，故 CodeArts pacer 在 `allow_concurrent` 之上加在途上限（`CODEARTS_MAX_CONCURRENCY`，热更、默认 3；`classify_status` 把带限流标记的 400/429 统一判成可重试的 `MODEL`）。新增 `CODEARTS_API_ENDPOINT` / `CODEARTS_ALLOWED_ENDPOINTS`（snap 引擎 + STS + 福利网关 + 门户）/ `CODEARTS_CHAT_MIN_INTERVAL`（热更项，独立 pacer、默认 5s）/ `CODEARTS_MAX_CONCURRENCY`（热更项，默认 3） |
-| Q49 | 模型列表按可读名合并 + 请求名与上游 id 分离（Qoder `display_name` 归一） | 六条渠道里 CB/TR/Qoder/CodeArts 对**同一模型**的内部 id 互不相同——Qoder `kmodel_latest`、TRAE `kimi-k3`、CodeBuddy `kimi-k3-1` 其实是同一个 Kimi-K3，此前各占一行、用户看到三个「模型」。`/v1/models` 与 Playground 改为**按人类可读名（`Model.name` 小写）合并**（`_merge_key`）：多渠道并成一条、对外 `id` 取可读名小写（`kimi-k3`/`qwen3.7-max`）并附 `name` 字段；**单渠道条目仍用上游原 id**（Qoder `kmodel_latest` 原样展示，避免无谓改名）。**关键约束**：无论对外 id 叫什么，真正转发到某渠道时一律经 `services.model_aliases` 换回**该渠道自己登记的原 id**（`aliases["qoder"]["kimi-k3"]="kmodel_latest"`，由 `executor.upstream_model_name` 消费）；原 id 与可读名两条键都登记，用户按原 id 直连或按可读名直连都能落到对应渠道。zen/kilo 的 `name` 不是上游模型名（zen 由 id 本地派生、kilo 是长标题），**排除在名合并之外**（否则会把无关模型误并成一条）；同渠道内重名（CodeBuddy `hy4-preview`/`hy4-preview-x` 都叫「Hy4 preview」）时冲突项退回上游 id，否则其中一个会被同键覆盖而消失。Qoder 侧配套：`parse_models` 把清单的 `display_name` 透传为 `name`、把 `price_factor`（即官方「Credit 消耗倍率」）映射为 `credit_rate`（免费模型上游给 `0.0` → 显示「免费」）。无 schema / 配置变更。**2026-10-01 已被 §4.4.1「模型名三字段」取代**：zen/kilo 不再排除（清洗规则统一后与其它渠道同源），合并键改为归一键，且新增对外 id 撞车消歧 |
+| Q49 | 模型列表按可读名合并 + 请求名与上游 id 分离（Qoder `display_name` 归一） | 首次引入「对外合并名 ≠ 上游原 id」：`/v1/models` 按可读名合并同一模型、对外 `id` 用可读名小写，转发时经 `services.model_aliases` 换回各渠道登记的原 id（`executor.upstream_model_name` 消费）；Qoder `parse_models` 把 `display_name` 透传为 `name`、`price_factor` 映射为 `credit_rate`。**2026-10-01 已被 §4.4.1「模型名三字段」取代**：合并键由「可读名小写」改为归一键，zen/kilo 不再排除，并新增对外 id 撞车消歧；`§4.4.1` 与 [TECHNICAL.md §3.5](TECHNICAL.md) 为准 |
 | Q50 | Qoder 上游节点故障归类模型级瞬时（不误判模型不存在） | Qoder 会把**自身推理节点故障**也包成 400 返回：实测（2026-09-30）免费模型 `qfmodel`（展示名 Qwen3.8-Flash，`price_factor=0.0`）被路由到 `oa_qwen-plus-main` 节点后持续返回 `{"code":"400","message":"[FAIL]node:… msg:Execution failed: null"}`（HTTP 与信封 `statusCodeValue` 均为 400），同批其他模型正常出流——即上游节点挂了，不是请求/模型无效。原分类把 400 一律归 `INVALID`（换凭证没用、跳过该渠道），文案落成误导性的 `all credentials unavailable`。改为：`classify_error_code` 增加响应体判据——400/404/422 命中 `NODE_FAILURE_MARKERS = ("[FAIL]node:", "Execution failed")` 时归 **`ErrKind.MODEL`**（模型级瞬时冷却：只锁该 (凭证, 模型)，同渠道其他模型照常可用，自动路由暂避），否则维持 `INVALID`。安全前提：探测未知模型名（乱码/空串）上游均**不**返回 ERROR、真「模型不存在」也不带该标记，故识别不会误伤。配套 executor 文案：耗尽轮换且**所有候选都因该模型处于模型级冷却**时（`_all_model_cooled`），503 改说「model `x` temporarily unavailable on upstream（换模型即可用）」而不是「凭证不可用」；错误码仍 `no_healthy_credential`（前端已映射）。无 schema / 配置变更 |
 | Q51 | 探测失败原因分类按基类分派 + 网络不可达单列（修 Qoder 误报 unknown_error） | 故障背景：Qoder 探测恒报 `unknown_error`，前端只显示「未知错误」，但实测根因是**网络层连不上**（`httpx.ConnectTimeout`，2026-10-01 本机 CN 端点 `openapi.qoder.com.cn` TLS 握手超时、`qoder.com.cn` 直连超时；国际版 `openapi.qoder.sh` 则 401 可达）。原 `describe_probe_failure` **逐渠道硬编码** `(CodeBuddyHTTPError, TraeHTTPError)` 与两家 `UpstreamProtocolViolation`，于是 Qoder/zen/kilo/codearts 的 `UpstreamHTTPError`（401/403/429/5xx）与协议违规全落 `unknown_error`；`httpx` 的 `ConnectTimeout`/`ConnectError` 也不是内置 `TimeoutError` 子类，同样落 `unknown_error`。改为**按基类分派**：所有渠道 `UpstreamHTTPError` 已继承 `base.UpstreamHTTPError`、`UpstreamProtocolViolation` 收归 `base`（各渠道 `events.py` 改为 `from provider.base import UpstreamProtocolViolation`，删除各自重复定义），故新增渠道自动被覆盖；另新增原因是 **`network_unreachable`**（`httpx.ConnectError`/`ConnectTimeout`/其余 `TransportError`/`OSError`）与既有 `upstream_timeout`（已连上但读超时，`httpx.TimeoutException`）区分——前者动作是「检查本机网络或代理」，后者是「重试」。Qoder `fetch_models` 主机全灭时也按异常类型区分：传输层失败抛 `base.UpstreamTransportError`（→`network_unreachable`），解析失败才是协议违规（→`upstream_response_invalid`），不再一律报「响应格式不符」误导用户查上游改版。`webapp/handlers.py` 的 4 个重复 `UpstreamProtocolViolation` 异常处理器收敛为 1 个。无 schema / 配置变更 |
 | Q52 | CodeArts 额度单位由 token 折成积分 | 上游余额是每日免费 **token** 池（1000 万量级），直接展示既难看、也让「窗口内到期额度多者先用」拿它跟其它渠道的几百积分硬比（CodeArts 恒占优）。统一口径：**每日池满额 1000 万 token ≡ 1000 积分，1 积分 = 10000 token**，常量与换算只在 `src/provider/codearts/units.py`（`TOKENS_PER_CREDIT` / `tokens_to_credits`）。`parse_balance` 折 `remaining`/`total`/`expiry_ladder`，`_fill_estimated_credit` 折单请求 `credit`，保证额度、到期阶梯、单请求扣池同单位；前端 `quotaUnit()` 取消按渠道换词、统一「积分」（`display.QUOTA_UNIT`），CodeArts 的 `quotaSemantics` 文案随之改为「每日积分额度（当日 0 点清零）」。改动前已落库的**历史数据**（`credentials` 的额度/阶梯/额度包、`usage_events.credit`、`usage_hourly.credit_sum`、codearts 凭证的 `credit_events` 变动）由一次性脚本 `scripts/convert_codearts_credit_unit.py` 折算（默认预览、`--apply` 才写且先备份；除法不可逆，**只能跑一次**），新增模块 `src/provider/codearts/backfill.py` 承载折算逻辑。无 schema / 配置变更 |
-
 | Q53 | 模型目录落盘快照 + 逐渠道增量 publish（修「启动窗口扁平名扇出」） | 实测故障（2026-10-01 12:03）：重启后请求 `stealth/space-bunny-alpha`（kilo 免费层唯一持有）却先打了 CodeBuddy/TRAE/CodeArts——日志 `codebuddy 400 11102 model [stealth/space-bunny-alpha] service info not found` / `trae 4001 param is invalid`。根因不在选号逻辑：模型 → 渠道归属表 `services.model_aliases` 只在 `list_models` **末尾**统一 publish，而启动预热里 zen 的 `fetch_models` 要逐个免费模型真发探活（12–15s），窗口期内 `executor._narrow_providers` 拿不到归属就按「全部渠道」保守放行。附带第二个洞：进程内缓存重启即丢，某渠道拉取失败时连兜底都没了（qoder/codearts 拉不通期间模型整体从 `/v1/models` 消失）。两处一并解决：**①** `list_models` 每拉完一条渠道就 `publish_aliases()`（从 `model_list_cache` 重建 + 就地更新，合并逻辑收敛到 `merged_entries()`，缓存兜底/TTL 复用/落盘恢复三条路径共用）；**②** 新模块 `src/api/model_catalog.py`：成功拉取后把**未过滤原始表**原子写 `DATA_DIR/model_catalog.json`（tmp + `os.replace`，`{"version":1,"providers":{pid:{"saved_at":…,"models":[…]}}}`，字段取 `dataclasses.fields(Model)`），启动时 `main._restore_model_list` **同步**读回并立即 publish（零上游请求，异常只记日志），预热退化为纯后台刷新；快照的 `saved_at` 随表交回并折进 `model_list_fetched_at`（快照不只是数据，还带新鲜度），因此预热只补「无快照 / 超 TTL」的渠道，不把刚恢复的表重拉一遍（kilo 实测一次 10–22s、zen 探活 12–15s），也无须再向渠道客户端注入回填钩子。纪律：落盘/读回一律宽容（原子写已排除半截写，故读回整份文件一个 `try`，解析不了就当没有缓存；`saved_at` 超 `MAX_AGE_SECONDS`=7 天整条丢弃；条目级只丢自己那个模型）；存原始表不过滤（`MODEL_BLOCKLIST` 热更要立即生效）；恢复只覆盖「已注册且当前有可用凭证」的渠道（用户暂停的渠道不因快照复活）。**不建表**（沿用被废弃的 `model_cache` 表教训：这份数据可丢、可重建，落 `DATA_DIR` 文件而非 schema），无配置项变更 |
-
 | Q54 | 模型目录兜底刷新后台任务（`MODEL_CATALOG_MINUTES`，默认 30） | Q53 落盘快照解决了「重启那一刻别名表为空」，但刷新仍然**只由访问驱动**：`list_models` 只在有人调 `/v1/models` / Playground 时按 TTL（300s）跑。纯 API 用法的部署（客户端自己缓存了模型列表）会让归属表与快照一起变陈旧，三处会烂：① 上游新增模型时别名表无归属 → 扁平名请求按全部渠道扇出，各渠道回 11102/4001，并给每个凭证写 6 小时起步的 (凭证, 模型) 负缓存（`_note_upstream_error` → BLOCKED）；② 停机超 `MAX_AGE_SECONDS`（7 天）后快照被丢弃，退回 Q53 之前的行为；③ 模型下线后旧归属仍在（代价最小，有负缓存兜底）。故新增第 7 条后台循环 `model_catalog`，跑的就是同一条 `list_models`（TTL 门禁 + 逐渠道 publish + 落盘快照都复用，不另写一套）。三条设计约束：**① 注入而非新模块**——`tasks/` 不 import `api/`，故 `TaskRunner` 接 `Callable[[], Awaitable[object]] | None`，由 `main.lifespan` 闭包注入，`None` 时不装配也不展示卡片（与 growth / activity 同处理）；运行态只回报 `{"models": N}`，整份列表有几百条不能塞进管理台。**② 周期 30 分钟、下限 5**——与 zen 免费模型判活缓存 `MODELS_CACHE_TTL_SECONDS`（1800s）对齐，再密也不会让 zen 多探一次，只是白打其余渠道的 `/models`。**③ `list_models` 整段加模块级 `asyncio.Lock`**——HTTP 出口与后台循环并发时不串行会对同一条渠道重复打上游（zen 那次是十几秒真推理）；锁粒度取「整次刷新」而非单渠道，因为跨渠道合并与别名表 publish 需要一致全集。新增热更项 `model_catalog_minutes`（下限 5）+ compose 透传；无 schema 变更 |
 
 ## 2. 目标与非目标
@@ -115,16 +113,6 @@
 - 错误码 `1005` = 权益不足；仅流式，非流式需聚合
 - **接受客户端传来的 `reasoning_effort`**（实测透传 `low`/`medium` 均 200 且正常出流）：不认 `thinking` 对象，也无需服务端注入；`developer` 角色上游不认（静默空流），已归一为 `system`
 
-### 3.3 冲突与陷阱
-
-| 问题 | 事实 | 对策 |
-|---|---|---|
-| 模型 ID 撞车 | 六边都有 `glm-5.2`、`DeepSeek-V4-Pro`、`kimi-k3` 等 | 扁平名 + 健康度路由 + `@provider` 后缀 |
-| 积分语义不同 | CB/Qoder/CodeArts 有周期会重置；TRAE 是单调余额 | 健康分统一为百分比，展示层标注周期语义 |
-| credit 可得性 | CB 有 per-request；TRAE 只有账户总额；Qoder/CodeArts 走会话额度 | 统计表 credit 字段 nullable；TRAE 按官方单价、CodeArts 福利模型按每日池 1:1 扣减推算并标 `credit_estimated`，展示加 ≈ |
-| 登录机制 | CB/Qoder/CodeArts 轮询（后端出网）；TRAE 回调 | 双轨，回调统一走主端口 |
-| 媒体/工具 | 各边 SSE 都含工具调用 | v1 透传，不做语义转换 |
-
 ### 3.3 Qoder（阿里，第五渠道 `qoder`）
 
 - 域：国内 `openapi.qoder.com.cn` / 网关 `gateway.qoder.com.cn`；国际 `openapi.qoder.sh` / `api1.qoder.sh`（回落 api2/api3）
@@ -151,11 +139,11 @@
 
 | 问题 | 事实 | 对策 |
 |---|---|---|
-| 模型 ID 撞车 | 两边都有 `glm-5.2`、`DeepSeek-V4-Pro` | 扁平名 + 健康度路由 + `@provider` 后缀 |
-| 积分语义不同 | CB 有周期会重置；TRAE 是单调余额 | 健康分统一为百分比，展示层标注周期语义 |
-| credit 可得性 | CB 有 per-request；TRAE 只有账户总额 | 统计表 credit 字段 nullable；TRAE 按官方单价推算并标 `credit_estimated`，展示加 ≈ |
-| 登录机制 | CB 轮询（后端出网）；TRAE 回调（浏览器可达） | 双轨，回调统一走主端口 |
-| 媒体/工具 | 两边 SSE 都含工具调用 | v1 透传，不做语义转换 |
+| 模型 ID 撞车 | 六边都有 `glm-5.2`、`DeepSeek-V4-Pro`、`kimi-k3` 等 | 扁平名 + 归一键合并 + 健康度路由 + `@provider` 后缀 |
+| 积分语义不同 | CB/Qoder/CodeArts 有周期会重置；TRAE 是单调余额 | 健康分统一为百分比，展示层标注周期语义 |
+| credit 可得性 | CB 有 per-request；TRAE 只有账户总额；Qoder/CodeArts 走会话额度 | 统计表 credit 字段 nullable；TRAE 按官方单价、CodeArts 福利模型按每日池 1:1 扣减推算并标 `credit_estimated`，展示加 ≈ |
+| 登录机制 | CB/Qoder/CodeArts 轮询（后端出网）；TRAE 回调 | 双轨，回调统一走主端口 |
+| 媒体/工具 | 各边 SSE 都含工具调用 | v1 透传，不做语义转换 |
 
 ## 4. 架构
 
@@ -182,8 +170,9 @@
 ║ 用户管理 · 审计 · 凭证运维 · API Key · 统计 · 任务与配置             ║
 ╚══════════════════════════════════════════════════════════════════════╝
 
-╔═ 后台面 ═══ 无 HTTP 入口 · 6 类循环 ═════════════════════════════════╗
+╔═ 后台面 ═══ 无 HTTP 入口 · 7 类循环 ═════════════════════════════════╗
 ║ 额度探测 · token 预刷新 · 每日签到 · 成长中心 · 活跃上报 · 明细清理  ║
+║ · 模型目录刷新                                                       ║
 ║       └──────────▶ Provider 客户端 ──────────▶ 上游                  ║
 ╚══════════════════════════════════════════════════════════════════════╝
                     │ 三面共享
@@ -194,7 +183,7 @@
 
 - **请求面**面向外部客户端，鉴权是 **API Key**（SHA-256 摘要 + 来源 IP 白名单 + 渠道绑定）；链路「协议层 → 执行引擎 → Provider」全程无状态、可并发。它不知道「人」是谁，只认 Key 的归属用户（用于按人统计）。
 - **管理面**面向浏览器，鉴权是**签名会话 Cookie + 三角色 RBAC**（Q18/Q39，见 §4.7）；角色每请求现读 DB，改密 / 降级 / 禁用立即吊销。管理与请求**共用同一个执行引擎与仓储**，不做成独立服务——2–10 人自托管实例里，进程隔离只换来部署复杂度。
-- **后台面**没有 HTTP 入口，由 `TaskRunner` 起 6 类循环（[TECHNICAL.md §6.2](TECHNICAL.md)），与请求面**共用 Provider 客户端与节流器**：各渠道的风控按最小间隔生效，不能因为「后台签到」与「前台对话」是两条代码路径就各发各的。
+- **后台面**没有 HTTP 入口，由 `TaskRunner` 起 7 类循环（[TECHNICAL.md §6.2](TECHNICAL.md)），与请求面**共用 Provider 客户端与节流器**：各渠道的风控按最小间隔生效，不能因为「后台签到」与「前台对话」是两条代码路径就各发各的。
 - **三面共享一份 SQLite**（WAL + `busy_timeout=5000`）：账号、加密凭证、统计与审计同库，因此升级只需重启**一个**进程（[TECHNICAL.md §6.4](TECHNICAL.md)）。
 
 两个鉴权面互不替代：API Key 进不了管理台，会话 Cookie 也进不了 `/v1`（各自独立依赖，见 [TECHNICAL.md §2](TECHNICAL.md) 的 `deps.py`）。
@@ -290,16 +279,12 @@ def health(q) -> HealthScore:   # known(0-100) | unknown | exhausted
 | 字段 | 规则 | 例 |
 |---|---|---|
 | **原代号**（`raw_id`） | 渠道请求时真正发的 key，**永不改动**；转发时经 `services.model_aliases` 换回 | `kmodel_latest`、`kilo-auto/free` |
-| **归一键**（`normalize_model_key`） | 剥掉免费标记（尾缀 `-free`/`_free`、路径段 `free`、冒号尾缀 `:free`、括号词 `(free)`）与命名空间前缀（`厂商/模型` 取末段、`厂商: 模型` 削前缀），再 slug 化 | `kilo-auto`、`longcat-2.5-preview` |
+| **归一键**（`normalize_model_key`） | 剥掉免费标记（`-free`/`_free`/`:free`/路径段 `free`/括号词 `(free)`）与命名空间前缀（`厂商/模型` 取末段、`厂商: 模型` 削前缀），再 slug 化 | `kilo-auto`、`longcat-2.5-preview` |
 | **展示名**（`display_model_name`） | 清洗后的可读文本；上游可读名优先，无则由原代号派生；品牌/缩写按官方写法纠正 | `LongCat 2.5 Preview`、`Qwen3.8 Max` |
 
-要点：
+要点：**合并键 = 归一键**（六渠道统一，靠展示名对齐各渠道互不相同的内部代号；zen/kilo 也参与）；**`/v1/models` 对外 `id` 一律是归一键**，原代号只进 `by_provider.{渠道}.raw_id` 并用于转发，用户按原代号 / 展示名 / 归一键三种写法都能命中；**哨兵名**（`auto` / `default`）语义只在本渠道内成立，不跨渠道合并；同渠道内归一键重复、或对外 id 撞车时按序退回原 id 归一键 / 加后缀。
 
-- **合并键 = 归一键**，六条渠道一视同仁。同一模型在各渠道的内部代号互不相同（Qoder `kmodel_latest` = TRAE `kimi-k3-1`），纯 id 规则无法对齐，只能靠展示名；zen / kilo 现在也参与合并——两条免费渠道各用不同命名约定（Zen 尾缀 `-free`、Kilo `厂商/模型:free` 与 `厂商: 模型` 展示名），清洗后收敛到同一个键。**哨兵名**（`auto` / `default`）是各上游自己的「自动路由 / 默认模型」占位，语义只在本渠道内成立，故排除在跨渠道合并之外（否则 Kilo 的 `kilo-auto/free` 会与 Qoder 的 `auto` 误并）
-- **`/v1/models` 的对外 `id` 一律是归一键**（`kimi-k3` / `longcat-2.5-preview` / `kilo-auto`），去 free/去前缀、六渠道一个口径；`by_provider.{渠道}.raw_id` 透出各渠道原代号。原代号只用于转发（经别名表换回），用户按原代号、展示名、归一键三种写法都能命中
-- **同渠道内归一键重复**（CodeBuddy 的 `hy4-preview` / `hy4-preview-x` 都叫「Hy4 Preview」）→ 冲突项退回原 id 的归一键，否则其中一个会被同键覆盖而消失；该渠道不登记歧义的名字别名
-- **对外 id 撞车**（多渠道归一键 = 另一单渠道条目的原 id）→ 后来者按「主渠道原 id → 其归一形式 → 归一键」依次取未占用的，保证对外 id 全局唯一
-- **清洗幂等**：各渠道 client 自行派生过 name 的（Zen）不会被二次清洗破坏
+清洗规则、合并 / 消歧 / 别名登记与黑名单匹配的完整实现见 [TECHNICAL.md §3.5](TECHNICAL.md)。
 
 ### 4.5 登录双轨（Q17=C）
 
@@ -363,7 +348,7 @@ v1 只接 OpenAI 出口，但上游 SSE 解析到「中立事件」这一步独�
 - 签到去重与模型列表缓存均进程内实现，不进库
 - **后台任务运行态**（Q38）同样进程内、**不建表**：跨重启的历史价值有限（业务留痕已有 `growth_events` / `credit_events` / `usage_events`），落库反而要新表 + 保留期清理 + 老库迁移
 
-DDL 以 [src/db/schema.sql](../src/db/schema.sql) 为准，补充实现细节见 [TECHNICAL.md §7](TECHNICAL.md)。
+DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，补充实现细节见 [TECHNICAL.md §7](TECHNICAL.md)。
 
 **脱敏纪律**（继承 CB）：不存提示词、回答、请求头、Token、工具参数、原始错误体、会话 ID。
 
