@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import pathlib
 import time
 
 import pytest
@@ -26,6 +27,7 @@ from src.api.model_catalog import (
     save_catalog,
 )
 from src.api.models import (
+    MODEL_LIST_TTL_SECONDS,
     list_models,
     merged_entries,
     publish_aliases,
@@ -78,10 +80,11 @@ def test_save_and_load_roundtrip(tmp_path):
 
     loaded = load_catalog(str(tmp_path))
     assert list(loaded) == ["kilo"]
-    model = loaded["kilo"]["stealth/space-bunny-alpha"]
-    assert model == Model(id="stealth/space-bunny-alpha", name="Space Bunny Alpha",
-                          credit_rate=0.0, max_input_tokens=131072,
-                          supports_tool_call=True)
+    saved_at, table = loaded["kilo"]
+    assert 0 <= time.time() - saved_at < 5          # 新鲜度一起带回（TTL 播种要用）
+    assert table["stealth/space-bunny-alpha"] == Model(
+        id="stealth/space-bunny-alpha", name="Space Bunny Alpha",
+        credit_rate=0.0, max_input_tokens=131072, supports_tool_call=True)
 
 
 def test_save_skips_empty_tables_and_creates_dir(tmp_path):
@@ -114,7 +117,7 @@ def test_load_broken_json_returns_empty(tmp_path, caplog):
 
 
 def test_load_version_mismatch_is_ignored(tmp_path, caplog):
-    """未来版本/非 dict 载荷：不猜，直接忽略。"""
+    """未来版本：不猜，直接忽略。"""
     path = tmp_path / CATALOG_FILENAME
     path.write_text(json.dumps({"version": 999, "providers": {"kilo": {}}}),
                     encoding="utf-8")
@@ -122,32 +125,24 @@ def test_load_version_mismatch_is_ignored(tmp_path, caplog):
         assert load_catalog(str(tmp_path)) == {}
     assert any("模型目录版本不匹配" in r.getMessage() for r in caplog.records)
 
-    path.write_text(json.dumps([1, 2, 3]), encoding="utf-8")
+
+def test_load_skips_expired_snapshot(tmp_path):
+    """超龄快照整条丢弃：停机很久的部署不该拿几天前的目录发请求。"""
+    payload = {"version": 1, "providers": {"kilo": {
+        "saved_at": time.time() - MAX_AGE_SECONDS - 1,
+        "models": [{"id": "old"}]}}}
+    (tmp_path / CATALOG_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
     assert load_catalog(str(tmp_path)) == {}
 
 
-def test_load_drops_broken_records_but_keeps_good_ones(tmp_path):
-    """逐渠道宽容：坏记录只丢自己那条渠道，其余照常用（kilo 归属最需要它）。"""
-    payload = {
-        "version": 1,
-        "providers": {
-            "kilo": {"saved_at": time.time(), "models": [{"id": "m", "unknown": 1}]},
-            "trae": {"saved_at": time.time(), "models": "not-a-list"},
-            "zen": {"saved_at": time.time(), "models": [{"no_id": True}, "junk",
-                                                       {"id": ""}]},
-            "qoder": {"saved_at": "not-a-number", "models": [{"id": "q"}]},
-            "codearts": {"saved_at": time.time() - MAX_AGE_SECONDS - 1,
-                         "models": [{"id": "old"}]},
-            "trae2": "not-a-record",
-        },
-    }
+def test_load_tolerates_unknown_fields_and_bad_items(tmp_path):
+    """条目级宽容（免得一个坏模型带走整表）；文件级损坏则整体丢弃。"""
+    payload = {"version": 1, "providers": {"kilo": {
+        "saved_at": time.time(),
+        "models": [{"id": "m", "unknown": 1}, {"no_id": True}, "junk"]}}}
     (tmp_path / CATALOG_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+    assert load_catalog(str(tmp_path))["kilo"][1] == {"m": Model(id="m")}
 
-    loaded = load_catalog(str(tmp_path))
-    assert list(loaded) == ["kilo"]
-    # 未知字段被忽略，老快照缺的字段走 dataclass 默认值
-    assert loaded["kilo"]["m"] == Model(id="m")
-    # providers 不是 dict（旧版本/手改文件）时整体退化为空
     (tmp_path / CATALOG_FILENAME).write_text(
         json.dumps({"version": 1, "providers": 7}), encoding="utf-8")
     assert load_catalog(str(tmp_path)) == {}
@@ -180,8 +175,8 @@ def test_restore_publishes_aliases_without_touching_upstream(settings):
     assert provider.calls == 0
 
 
-def test_startup_keeps_restored_aliases_when_warmup_fails(settings):
-    """预热（上游全挂）失败也不影响已恢复的别名表——这正是落盘的意义。"""
+def test_startup_uses_snapshot_even_when_upstream_is_down(settings):
+    """快照新鲜时预热压根不打上游：上游挂着也不影响别名表（落盘的意义）。"""
 
     class Broken(_StubProvider):
         async def list_models(self, credential_data):
@@ -195,7 +190,25 @@ def test_startup_keeps_restored_aliases_when_warmup_fails(settings):
     with TestClient(app):
         services = app.state.services
         assert services.model_aliases["kilo"]["kilo-only/free"] == "kilo-only/free"
-        assert provider.calls == 1              # 预热确实打过上游并失败
+        assert provider.calls == 0              # 快照年龄在 TTL 内，预热不重拉
+
+
+def test_startup_refetches_snapshot_older_than_ttl(settings):
+    """快照超 TTL 则照常重拉（kilo 实测一次 10–22s，refresh 后别名跟着更新）。"""
+    payload = {"version": 1, "providers": {"kilo": {
+        "saved_at": time.time() - MODEL_LIST_TTL_SECONDS - 1,
+        "models": [{"id": "old-free"}]}}}
+    (pathlib.Path(settings.data_dir) / CATALOG_FILENAME).write_text(
+        json.dumps(payload), encoding="utf-8")
+
+    provider = _StubProvider("kilo", [Model(id="kilo-only/free", name="Kilo Only",
+                                            credit_rate=0.0)])
+    app = _app_with(settings, {"kilo": provider})
+    with TestClient(app):
+        aliases = app.state.services.model_aliases
+        assert provider.calls == 1
+        assert "old-free" not in aliases.get("kilo", {})
+        assert "kilo-only/free" in aliases["kilo"]
 
 
 def test_startup_skips_unregistered_and_credential_less_channels(settings, caplog):
@@ -210,35 +223,6 @@ def test_startup_skips_unregistered_and_credential_less_channels(settings, caplo
         assert app.state.services.model_list_cache == {}
         assert app.state.services.model_aliases == {}
     assert not any("恢复模型目录" in r.getMessage() for r in caplog.records)
-
-
-def test_restore_seeds_zen_probe_cache(settings):
-    """恢复出的 zen 免费集回填判活缓存：重启后预热不再逐个真发探活。"""
-
-    class _Seeded:
-        id = "zen"
-        client = None
-        seeded: list = []
-
-        async def list_models(self, credential_data):  # pragma: no cover - 不该被调
-            raise AssertionError("restore 阶段不该打上游")
-
-        def import_credential(self, raw):  # pragma: no cover - 由凭证导入调用
-            return raw
-
-    provider = _Seeded()
-    seeded: list[Model] = []
-
-    class _Client:
-        def seed_models_cache(self, models):
-            seeded.extend(models)
-
-    provider.client = _Client()
-    save_catalog(settings.data_dir, {"zen": {"big-pickle-free": Model(
-        id="big-pickle-free", name="Big Pickle", credit_rate=0.0)}})
-    app = _app_with(settings, {"zen": provider}, credential_providers=("zen",))
-    with TestClient(app):
-        assert [m.id for m in seeded] == ["big-pickle-free"]
 
 
 def test_aliases_published_per_provider_before_slow_channel_finishes(settings):
@@ -271,9 +255,7 @@ def test_aliases_published_per_provider_before_slow_channel_finishes(settings):
 
 
 async def _list_models(services):
-    from src.api.models import list_models
-
-    return await list_models(services, force=True)
+    return await list_models(services)
 
 
 def test_publish_aliases_skips_channel_without_credentials(settings):

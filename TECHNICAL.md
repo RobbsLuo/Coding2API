@@ -316,7 +316,7 @@ def health(q: Quota | None) -> HealthScore:
 
 **逐渠道增量 publish（2026-10-01）**：别名表原先在 `list_models` **末尾**统一 `clear()+update()`，于是被最慢的渠道拖着——zen 的 `fetch_models` 要逐个免费模型真发探活（实测 12–15s），这段时间里别名表是空的，`executor._narrow_providers` 拿不到归属就按「全部渠道」保守放行，扁平名请求真实打一轮不认该模型的上游（实测 CodeBuddy 对 kilo 免费模型回 `11102 service info not found`、TRAE 回 `4001`，各留下 (凭证,模型) 负缓存与 `invalid_request` 统计）。现在每拉完一条渠道就 `publish_aliases()` 一次（从 `model_list_cache` 重建 + 就地更新，executor 的闭包引用同一个 dict），不再等最慢的那条。合并逻辑收敛到 `merged_entries()`：缓存兜底 / TTL 复用 / 落盘恢复三条路径共用同一段代码，行为一致。
 
-**落盘快照（2026-10-01，`src/api/model_catalog.py`）**：进程内缓存重启即丢，代价是两处——启动到预热跑完之间别名表为空（就是上面那个扇出），以及某渠道拉取失败时连兜底都没有、模型从 `/v1/models` 整体消失。故每次成功拉取后把**未过滤原始表**原子写进 `DATA_DIR/model_catalog.json`（tmp + `os.replace`，格式 `{"version":1,"providers":{pid:{"saved_at":…,"models":[…]}}}`，序列化字段取 `dataclasses.fields(Model)`，新增字段自动带上、未知键忽略）。启动时 `main._restore_model_list` **同步**读回并立即 publish 别名表（`restore_model_catalog`，零上游请求、异常只记日志），预热退化为纯后台刷新；恢复出来的 zen 免费集顺带回填 `ZenClient.seed_models_cache`，重启不必再逐个真发探活。三条纪律：① 落盘/读回一律宽容（损坏、版本不符、字段缺失、记录非 dict 只丢该渠道，`saved_at` 超 7 天整条丢弃）；② 存原始表不过滤（黑名单热更要立即生效）；③ 恢复只覆盖「已注册且当前有可用凭证」的渠道——用户暂停的渠道不因快照复活。
+**落盘快照（2026-10-01，`src/api/model_catalog.py`）**：进程内缓存重启即丢，代价是两处——启动到预热跑完之间别名表为空（就是上面那个扇出），以及某渠道拉取失败时连兜底都没有、模型从 `/v1/models` 整体消失。故每次成功拉取后把**未过滤原始表**原子写进 `DATA_DIR/model_catalog.json`（tmp + `os.replace`，格式 `{"version":1,"providers":{pid:{"saved_at":…,"models":[…]}}}`，序列化字段取 `dataclasses.fields(Model)`，新增字段自动带上、未知键忽略）。启动时 `main._restore_model_list` **同步**读回并立即 publish 别名表（`restore_model_catalog`，零上游请求、异常只记日志），预热退化为纯后台刷新；快照的 `saved_at` 随表交回、折进 `model_list_fetched_at`，因此预热（TTL 门禁）不会把刚恢复的表重拉一遍——kilo 实测一次 10–22s、zen 一次探活 12–15s。三条纪律：① 落盘/读回一律宽容（损坏、版本不符、字段缺失、记录非 dict 只丢该渠道，`saved_at` 超 7 天整条丢弃）；② 存原始表不过滤（黑名单热更要立即生效）；③ 恢复只覆盖「已注册且当前有可用凭证」的渠道——用户暂停的渠道不因快照复活。
 
 **展示顺序（CB / TR 优先）**：合并后按 `_sort_key(entry)` 排序——渠道权重 `_PROVIDER_RANK`（codebuddy 0 → trae 1 → qoder 2 → codearts 3 → 其余 4，未知名 4），多渠道条目取 `min` 权重（含 CB 即进第一段、含 TR 进第二段），同级再按**归一键**字典序（不是对外 id：`_sort_key` 要在 `_finalize` 之前跑，此时对外 id 尚未算出，而 `_disambiguate` 需要一个确定顺序决定撞 id 时谁保留）。原实现是纯名字典序。Playground 改用 `web/src/components/ModelPicker.tsx`：渠道筛选 chips、分组列表（多渠道置顶 + 单渠道按渠道分组）与「强制指定渠道」都走 `web/src/api/providers.ts` 的 `PROVIDER_ORDER` / `providerRank`，与后端权重对齐；分组顺序不再依赖模型列表的首次出现顺序。「强制指定渠道」只列当前模型**真实可用**的渠道（此前固定列全部渠道，能选出上游打不通的 `model@provider`）。仅影响展示顺序，调度选号（`model_resolver` 的 `KNOWN_PROVIDERS` 顺序）不变。
 
@@ -346,7 +346,7 @@ def health(q: Quota | None) -> HealthScore:
 
 **兜底/哨兵条目用渠道限定键隔离**（`_merge_key` 的 `_scoped_key` = `渠道\0归一原代号`）：展示名重复、缺失或是哨兵名（`auto` / `default`）时，绝不跨渠道合并——但这些条目**对外 id 仍是原代号的归一键**（不是限定键），限定键只在 `grouped` 内部用于分组。
 
-**启动预热不再阻塞启动**：`lifespan` 把预热丢给后台任务 `_warm_model_list`（`force=True` 绕过 TTL），不再在 `yield` 前 `await`——zen 最慢的探活可占十几秒，内联会让应用在这段时间里不响应 `/health`，容器存活探针可能误判。预热失败仅记日志；关机时取消在途任务。
+**启动预热不再阻塞启动**：`lifespan` 把预热丢给后台任务 `_warm_model_list`（走 TTL 门禁，快照新鲜的渠道不重拉），不再在 `yield` 前 `await`——zen 最慢的探活可占十几秒，内联会让应用在这段时间里不响应 `/health`，容器存活探针可能误判。预热失败仅记日志；关机时取消在途任务。
 
 ### 3.6 活跃上报（B1.7，默认关闭）
 

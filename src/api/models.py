@@ -448,16 +448,20 @@ def merged_entries(services: Services, connected: set[str]) -> list[dict[str, An
     return sorted(grouped.values(), key=_sort_key)
 
 
+def _publish(services: Services, entries: list[dict[str, Any]]) -> None:
+    """定稿好的条目 → 就地更新别名表（executor 的闭包引用同一个 dict 对象）。"""
+    services.model_aliases.clear()
+    services.model_aliases.update(_build_aliases(entries))
+
+
 def publish_aliases(services: Services, connected: set[str]) -> None:
-    """按当前缓存表重建别名表并就地 publish（executor 的闭包引用同一个 dict）。
+    """按当前缓存表重建别名表并就地 publish。
 
     **逐渠道增量调用**（见 `list_models`）：某渠道拉完就 publish，不必等最慢的
     zen 探活（十几秒）——那段时间里已拉好的渠道本该已经能收窄候选，否则扁平名
     请求会按「全部渠道」扇出，真实打一轮不认这个模型的上游。
     """
-    # 就地更新（executor 的映射闭包引用同一个 dict 对象）
-    services.model_aliases.clear()
-    services.model_aliases.update(_build_aliases(merged_entries(services, connected)))
+    _publish(services, merged_entries(services, connected))
 
 
 async def _refresh_provider(services: Services, provider_id: str, provider: Any) -> None:
@@ -488,16 +492,13 @@ async def _refresh_provider(services: Services, provider_id: str, provider: Any)
     save_catalog(services.settings.data_dir, services.model_list_cache)
 
 
-def _needs_refresh(services: Services, provider_id: str, *, force: bool,
-                   now: float) -> bool:
+def _needs_refresh(services: Services, provider_id: str, *, now: float) -> bool:
     """该渠道是否需要（重新）打上游。
 
-    TTL 按「上次尝试」计（失败也刷新）：TTL 内一律不打上游——有缓存就用缓存、
-    没缓存就跳过，避免上游抖动时每次 `/v1/models` 都重跑一遍拉取（zen 探活的
-    十几秒会叠加成一串慢请求）。
+    TTL 按「上次尝试」计（失败也刷新，restore 也播种）：TTL 内一律不打上游
+    ——有缓存就用缓存、没缓存就跳过，避免上游抖动时每次 `/v1/models` 都重跑
+    一遍拉取（zen 探活的十几秒会叠加成一串慢请求）。
     """
-    if force:
-        return True
     fetched_at = services.model_list_fetched_at.get(provider_id)
     return fetched_at is None or now - fetched_at >= MODEL_LIST_TTL_SECONDS
 
@@ -509,23 +510,24 @@ def restore_model_catalog(services: Services) -> int:
     启动窗口」：这段时间里扁平名请求无法收窄候选，会真实打一轮不认这个模型的
     上游（CodeBuddy 11102 / TRAE 4001）。
 
-    恢复出来的 zen 免费集顺带回填客户端的判活缓存（`seed_models_cache`），
-    否则重启后预热仍要逐个真发探活（12–15s）——而目录里已经有这个答案了。
+    同时把快照年龄折进 `model_list_fetched_at`：快照不只是数据，还带新鲜度。
+    不播种的话 TTL 时间戳是空的，启动预热（`_needs_refresh` 见无时间戳即刷新）
+    会把刚恢复的表全量重拉一遍——kilo 实测 10–22s、zen 探活 12–15s，白花。
 
     返回恢复的渠道数（供日志/测试）。
     """
     connected = credential_providers(services)
     restored = 0
-    for provider_id, table in load_catalog(services.settings.data_dir).items():
+    now = time.time()
+    for provider_id, (saved_at, table) in load_catalog(
+            services.settings.data_dir, now=now).items():
         # 未注册的渠道（换过的装配）与没有可用凭证的渠道都不恢复：目录里的
         # 快照不该让「用户已暂停的渠道」重新出现在模型列表里。
         if provider_id not in services.registry or provider_id not in connected:
             continue
         services.model_list_cache[provider_id] = table
-        seeder = getattr(getattr(services.registry[provider_id], "client", None),
-                         "seed_models_cache", None)
-        if callable(seeder):
-            seeder(list(table.values()))
+        services.model_list_fetched_at[provider_id] = (
+            time.monotonic() - max(0.0, now - saved_at))
         restored += 1
     if restored:
         publish_aliases(services, connected)
@@ -533,7 +535,7 @@ def restore_model_catalog(services: Services) -> int:
     return restored
 
 
-async def list_models(services: Services, *, force: bool = False) -> dict:
+async def list_models(services: Services) -> dict:
     """跨上游拉取并合并模型列表。
 
     同一模型在各渠道的内部代号互不相同（Qoder `kmodel_latest` = TRAE
@@ -546,7 +548,9 @@ async def list_models(services: Services, *, force: bool = False) -> dict:
     全部暂停 / 会话失效的渠道不拉取也不展示，所以冷启动只有 zen / kilo（自带
     虚拟凭证），接入 CodeBuddy / TRAE 后下一次请求才把它们拉进来。
 
-    force=False（默认）时 TTL 内直接复用缓存；启动预热传 force=True。
+    TTL 内直接复用缓存（`model_list_fetched_at`，落盘恢复时按快照年龄播种）；
+    启动预热、后台兜底刷新、HTTP 出口走的都是这一条，没有「强制刷新」旁路
+    ——预热要的就是「该拉的拉」，有快照的渠道等 TTL 到期即可。
     **每拉完一条渠道就 publish 一次别名表**（`publish_aliases`），不等最慢的
     那条（zen 探活十几秒）——否则这段时间里别名表空着，扁平名请求会扇出到
     不认该模型的上游。
@@ -565,15 +569,12 @@ async def list_models(services: Services, *, force: bool = False) -> dict:
             # 也会走缓存兜底，不会因为一次抖动就从列表里消失。
             if provider_id not in connected:
                 continue
-            if not _needs_refresh(services, provider_id, force=force, now=now):
+            if not _needs_refresh(services, provider_id, now=now):
                 continue
             await _refresh_provider(services, provider_id, provider)
             publish_aliases(services, connected)
         entries = merged_entries(services, connected)
-        aliases = _build_aliases(entries)
-        # 就地更新（executor 的映射闭包引用同一个 dict 对象）
-        services.model_aliases.clear()
-        services.model_aliases.update(aliases)
+        _publish(services, entries)
         return {"object": "list", "data": [_entry_response(entry)
                                           for entry in entries]}
 

@@ -499,25 +499,6 @@ async def test_fetch_models_cache_expiry_reprobes():
     assert len(calls) == 4
 
 
-async def test_seed_models_cache_only_fills_empty_cache():
-    """回填判活缓存：空名单不填；本进程已判活过的不被跨重启快照覆盖。"""
-    calls: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(request.url.path)
-        if request.url.path == EP_MODELS:
-            return httpx.Response(200, json={"data": [{"id": "a-free"}]})
-        return httpx.Response(200, text="")
-
-    client = _client(handler)
-    client.seed_models_cache([])                    # 空名单：无从回填
-    assert [m.id for m in await client.fetch_models()] == ["a-free"]
-    seeded = client.seed_models_cache([Model(id="stale-free")])
-    assert seeded is None
-    assert [m.id for m in await client.fetch_models()] == ["a-free"]  # 仍是本进程那份
-    assert len(calls) == 2
-
-
 async def test_fetch_models_errors():
     def http_error(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(502, content=b"bad gateway")

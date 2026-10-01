@@ -210,9 +210,14 @@ def _forget_task(task: asyncio.Task, pending: list) -> None:
 
 
 async def _warm_model_list(services) -> None:
-    """后台预热模型列表 / 别名表：失败仅记日志，绝不影响启动与聊天。"""
+    """后台预热模型列表 / 别名表：失败仅记日志，绝不影响启动与聊天。
+
+    不强制刷新：`restore_model_catalog` 已按快照年龄播种 TTL，这里只补「没有
+    快照 / 快照已超 TTL」的渠道。刚恢复的表被立刻重拉一遍纯属白花（kilo 实测
+    10–22s、zen 探活 12–15s），而预热本来就是后台跑的，不抢这个时间。
+    """
     try:
-        await models.list_models(services, force=True)
+        await models.list_models(services)
     except Exception as error:  # noqa: BLE001 - 预热失败不阻断服务
         logger.warning("启动预热模型列表失败: %s", error)
 

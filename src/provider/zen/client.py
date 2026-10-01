@@ -245,19 +245,6 @@ class ZenClient:
             self._short_client = httpx.AsyncClient(timeout=SHORT_TIMEOUT, trust_env=False)
         return self._short_client
 
-    def seed_models_cache(self, models: list[Model]) -> None:
-        """用落盘目录回填判活集缓存：重启后不必再逐个真发探活（12–15s）。
-
-        只在「本进程还没判活过」时回填（`_models_cache is None`）：进程内已经
-        判活过就说明表是新鲜的，不能被一份跨重启的快照覆盖成旧的。回填后按
-        `models_cache_ttl`（30 分钟）自然过期，届时重新探活。
-
-        代价与既有的 30 分钟判活缓存同量级：上游免费集变更最多滞后一个 TTL，
-        下游表现是选中已下线模型收到 400/401（按无效请求处理，不罚凭证）。
-        """
-        if models and self._models_cache is None:
-            self._models_cache = (time.monotonic(), list(models))
-
     async def aclose(self) -> None:
         for client in (self._stream_client, self._short_client):
             if client is not None:
