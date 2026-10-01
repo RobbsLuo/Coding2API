@@ -15,6 +15,7 @@ const SETTINGS = [
     default: 60,
     overridden: false,
     task: "quota_probe",
+    group: null,
   },
   {
     key: "pacer_max_seconds",
@@ -26,6 +27,7 @@ const SETTINGS = [
     default: 20,
     overridden: true,
     task: null,
+    group: "pacer",
   },
   {
     key: "activity_report_enabled",
@@ -37,7 +39,16 @@ const SETTINGS = [
     default: false,
     overridden: false,
     task: "activity",
+    group: null,
   },
+];
+
+/** 后端下发的网关卡组（顺序即展示顺序）。 */
+const GROUPS = [
+  { value: "routing", label: "模型路由" },
+  { value: "affinity", label: "选号与会话" },
+  { value: "channels", label: "渠道节流" },
+  { value: "pacer", label: "后台任务节流" },
 ];
 
 const SERVER_TIME = 1_700_000_000;
@@ -88,7 +99,8 @@ const TASKS = {
 };
 
 /** GET 返回体：mockFetch 每次按值 new Response，避免 body 被消费一次后拿不到。 */
-const body = () => JSON.parse(JSON.stringify({ settings: SETTINGS, overridden: 1 }));
+const body = () =>
+  JSON.parse(JSON.stringify({ settings: SETTINGS, overridden: 1, groups: GROUPS }));
 const tasksBody = () => JSON.parse(JSON.stringify(TASKS));
 
 /** 统一 fetch mock：GET 分派 settings/tasks，PUT 交给调用方断言。 */
@@ -107,10 +119,15 @@ function withSettings(settings: unknown[]) {
   const spy = vi.fn(async (input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input.toString();
     if (url.includes("/api/tasks")) return jsonResponse(tasksBody());
-    return jsonResponse({ settings, overridden: 0 });
+    return jsonResponse({ settings, overridden: 0, groups: GROUPS });
   });
   vi.stubGlobal("fetch", spy);
   return spy;
+}
+
+/** 切换到某个 tab（testId = settings-tabs-<任务 key | gateway-<分组> | settings-other>）。 */
+async function switchTab(testId: string) {
+  await userEvent.click(screen.getByTestId(testId));
 }
 
 describe("SettingsPage", () => {
@@ -123,28 +140,49 @@ describe("SettingsPage", () => {
     renderPage(<SettingsPage />);
     await settle();
 
+    // 默认落在第一个任务 tab（额度探测）
     expect(screen.getByTestId("setting-quota_probe_minutes")).toBeInTheDocument();
-    expect(screen.getByTestId("setting-pacer_max_seconds")).toBeInTheDocument();
-    expect(screen.getByTestId("setting-activity_report_enabled")).toBeInTheDocument();
-
-    expect(screen.getByTestId("source-pacer_max_seconds")).toHaveTextContent("DB 覆盖");
     expect(screen.getByTestId("source-quota_probe_minutes")).toHaveTextContent("来自 .env");
+
+    await switchTab("settings-tabs-gateway-pacer");
+    expect(screen.getByTestId("setting-pacer_max_seconds")).toBeInTheDocument();
+    expect(screen.getByTestId("source-pacer_max_seconds")).toHaveTextContent("DB 覆盖");
     expect(screen.getByTestId("default-pacer_max_seconds")).toHaveTextContent("20");
+
+    await switchTab("settings-tabs-activity");
+    expect(screen.getByTestId("setting-activity_report_enabled")).toBeInTheDocument();
   });
 
-  it("配置按后端下发的归属进任务卡片，无归属的进网关区", async () => {
+  it("每个任务一个 tab，配置按后端下发的归属进各自 tab，无归属的按网关卡组进 tab", async () => {
     mockAll();
     renderPage(<SettingsPage />);
     await settle();
 
+    // 额度探测 tab：只有它自己的配置
     const probe = screen.getByTestId("task-quota_probe");
     expect(within(probe).getByTestId("setting-quota_probe_minutes")).toBeInTheDocument();
+    expect(within(probe).queryByTestId("setting-pacer_max_seconds")).not.toBeInTheDocument();
+
+    await switchTab("settings-tabs-activity");
     expect(
       within(screen.getByTestId("task-activity")).getByTestId("setting-activity_report_enabled"),
     ).toBeInTheDocument();
-    // 节流项不属于任何任务：不能出现在任务卡片里
-    expect(within(probe).queryByTestId("setting-pacer_max_seconds")).not.toBeInTheDocument();
+
+    // 节流项不属于任何任务：只在「后台任务节流」这个网关 tab 出现
+    await switchTab("settings-tabs-gateway-pacer");
     expect(screen.getByTestId("setting-pacer_max_seconds")).toBeInTheDocument();
+    expect(screen.queryByTestId("task-quota_probe")).not.toBeInTheDocument();
+  });
+
+  it("网关卡组按后端下发拆成多个一级 tab，空分组不出 tab", async () => {
+    mockAll();
+    renderPage(<SettingsPage />);
+    await settle();
+
+    // 有配置项的 pacer 分组有 tab；routing / affinity / channels 当前无配置项，不出现
+    expect(screen.getByRole("tab", { name: "后台任务节流" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "模型路由" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "渠道节流" })).not.toBeInTheDocument();
   });
 
   it("任务卡片展示周期、上次执行相对时间与最近结果", async () => {
@@ -152,6 +190,7 @@ describe("SettingsPage", () => {
     renderPage(<SettingsPage />);
     await settle();
 
+    // 默认落在第一个任务 tab（额度探测）
     expect(screen.getByTestId("task-interval-quota_probe")).toHaveTextContent("1.0 小时");
     expect(screen.getByTestId("task-last-quota_probe")).toHaveTextContent("2 分钟前");
     expect(screen.getByTestId("task-report-quota_probe")).toHaveTextContent(
@@ -163,6 +202,7 @@ describe("SettingsPage", () => {
     mockAll();
     renderPage(<SettingsPage />);
     await settle();
+    await switchTab("settings-tabs-checkin");
 
     const checkin = screen.getByTestId("task-checkin");
     expect(checkin).toHaveTextContent("上次失败");
@@ -173,6 +213,7 @@ describe("SettingsPage", () => {
     mockAll();
     renderPage(<SettingsPage />);
     await settle();
+    await switchTab("settings-tabs-activity");
 
     const activity = screen.getByTestId("task-activity");
     expect(activity).toHaveTextContent("已关闭");
@@ -183,6 +224,7 @@ describe("SettingsPage", () => {
     mockAll();
     renderPage(<SettingsPage />);
     await settle();
+    await switchTab("settings-tabs-checkin");
 
     expect(screen.getByTestId("task-noconfig-checkin")).toHaveTextContent("无可热更配置");
   });
@@ -199,25 +241,46 @@ describe("SettingsPage", () => {
     await settle();
 
     expect(screen.getByTestId("no-tasks")).toBeInTheDocument();
+    // 有内容的网关 tab 仍在
+    expect(screen.getByTestId("setting-pacer_max_seconds")).toBeInTheDocument();
+    // 任务归属项因任务清单不可用落到「其他」，不会被吞掉
+    await switchTab("settings-tabs-settings-other");
     expect(screen.getByTestId("setting-quota_probe_minutes")).toBeInTheDocument();
   });
 
-  it("全部配置都有任务归属时不渲染网关区清单", async () => {
-    withSettings(SETTINGS.filter((setting) => setting.task !== null));
+  it("归属对不上的配置项落进「其他」tab，不会被吞掉", async () => {
+    // task 指向一个未装配的任务、且无有效分组 → 兜底进「其他」
+    withSettings([
+      ...SETTINGS,
+      {
+        key: "orphan_setting",
+        env_name: "ORPHAN_SETTING",
+        label: "孤儿配置",
+        description: "归属既非任务也非网关卡组。",
+        kind: "int",
+        value: 1,
+        default: 1,
+        overridden: false,
+        task: "ghost_task",
+        group: null,
+      },
+    ]);
     renderPage(<SettingsPage />);
     await settle();
 
-    expect(screen.queryByTestId("setting-pacer_max_seconds")).not.toBeInTheDocument();
-    expect(screen.getByTestId("no-gateway-settings")).toBeInTheDocument();
+    await switchTab("settings-tabs-settings-other");
+    expect(screen.getByTestId("setting-orphan_setting")).toBeInTheDocument();
+    expect(screen.queryByTestId("task-quota_probe")).not.toBeInTheDocument();
   });
 
   it("布尔项用下拉选择，数字项用输入框", async () => {
     mockAll();
     renderPage(<SettingsPage />);
     await settle();
-
-    expect(screen.getByTestId("input-activity_report_enabled").tagName).toBe("SELECT");
     expect(screen.getByTestId("input-quota_probe_minutes").tagName).toBe("INPUT");
+
+    await switchTab("settings-tabs-activity");
+    expect(screen.getByTestId("input-activity_report_enabled").tagName).toBe("SELECT");
   });
 
   it("没有改动时保存按钮禁用", async () => {
@@ -243,6 +306,9 @@ describe("SettingsPage", () => {
     const input = screen.getByTestId("input-quota_probe_minutes");
     await userEvent.clear(input);
     await userEvent.type(input, "15");
+
+    // 换到另一个任务的 tab 再改，草稿跨 tab 保留，保存按钮统一汇总
+    await switchTab("settings-tabs-activity");
     await userEvent.selectOptions(screen.getByTestId("input-activity_report_enabled"), "true");
 
     expect(screen.getByTestId("dirty-count")).toHaveTextContent("2 项待保存");
@@ -265,6 +331,7 @@ describe("SettingsPage", () => {
 
     renderPage(<SettingsPage />);
     await settle();
+    await switchTab("settings-tabs-gateway-pacer");
     await userEvent.click(screen.getByTestId("reset-pacer_max_seconds"));
 
     expect(await screen.findByTestId("settings-notice")).toHaveTextContent("恢复 .env 默认值");
@@ -276,6 +343,8 @@ describe("SettingsPage", () => {
     await settle();
 
     expect(screen.getByTestId("reset-quota_probe_minutes")).toBeDisabled();
+
+    await switchTab("settings-tabs-gateway-pacer");
     expect(screen.getByTestId("reset-pacer_max_seconds")).toBeEnabled();
   });
 

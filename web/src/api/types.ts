@@ -418,12 +418,22 @@ export interface RuntimeSetting {
   overridden: boolean;
   /** 所属后台任务 key（见 TaskStatus.key）；null = 网关/调度等非任务配置 */
   task: string | null;
+  /** task 为 null 时的网关卡组 key（见 SettingsResponse.groups）；task 非空时为 null */
+  group: string | null;
+}
+
+/** 网关卡组（后端下发顺序与文案），用于把无任务归属的项拆成一级 tab。 */
+export interface SettingsGroup {
+  value: string;
+  label: string;
 }
 
 export interface SettingsResponse {
   settings: RuntimeSetting[];
   /** 被 DB 覆盖的项数（0 表示全部来自 .env） */
   overridden: number;
+  /** 无任务归属配置项的分组表（顺序即展示顺序） */
+  groups: SettingsGroup[];
 }
 
 /**

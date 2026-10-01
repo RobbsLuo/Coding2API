@@ -467,9 +467,9 @@ response.completed | response.incomplete
 
 **校验**：白名单外 key 直接拒绝；类型（`int`/`float`/`bool`/`str`）与范围（min/max）在写入前校验；跨字段组合（`pacer_min ≤ pacer_max`）用「这一批写完之后」的对端值比较，校验失败则整批不落库（半新半旧的组合比拒绝更糟）。表里的坏行（白名单外/类型非法）在读取时跳过并记警告——一行坏数据不能让服务起不来。
 
-**接口**：`GET /api/settings`（admin）返回 `snapshot()`（`key`/`env_name`/`label`/`description`/`kind`/`value`/`default`/`overridden`/`task`）+ 覆盖计数；`PUT /api/settings`（admin + CSRF）body `{"values": {key: 标量 | null}}`，`null` 表示恢复默认。写操作记审计日志（谁改了哪些 key）。
+**接口**：`GET /api/settings`（admin）返回 `snapshot()`（`key`/`env_name`/`label`/`description`/`kind`/`value`/`default`/`overridden`/`task`/`group`）+ 覆盖计数 + 网关卡组表 `groups`；`PUT /api/settings`（admin + CSRF）body `{"values": {key: 标量 | null}}`，`null` 表示恢复默认。写操作记审计日志（谁改了哪些 key）。
 
-`snapshot()` 里的 `task` 是**配置项 → 后台任务 key** 的归属（`HotSetting.task`，`null` = 网关/调度项）。它只用于管理台把配置归到任务卡片下（§3.12），不参与运行时语义——前端不硬编码 key 列表，后端加任务或改归属不需要改前端。
+`snapshot()` 里的 `task` 是**配置项 → 后台任务 key** 的归属（`HotSetting.task`，`null` = 非任务项），`group` 是**非任务项 → 网关卡组 key** 的归属（`HotSetting.group`，`GATEWAY_GROUPS` 定义分组顺序与标签）。两者都只用于管理台的下发归属（§3.12），不参与运行时语义——前端不硬编码 key 列表，后端加任务 / 改归属 / 加配置项不需要改前端。不变量：每项**要么**属于一个任务（`task` 非空、`group` 为空），**要么**落在一个网关卡组（`group` 在 `GATEWAY_GROUPS` 内）；两者互斥且都有归属，测试（`test_grouping_is_partitioned_between_tasks_and_gateway_groups`）守住，否则前端会漏渲染该配置项。
 
 ---
 
@@ -579,11 +579,11 @@ response.completed | response.incomplete
 
 **任务清单与归属**：`tasks/status.py` 的 `TASK_SPECS` 是静态描述（key / 名称 / 一句话说明），与 `TaskRunner.start()` 建立的循环一一对应；周期与开关**运行时现算**（`TaskRunner.task_status()` 读热更值），不是装配快照——改完配置刷新页面就该看到新周期。未装配的任务（测试或降级时不传 growth/activity）不出现在清单里，避免展示「永远不跑」的卡片。
 
-配置项一侧用 `HotSetting.task`（§3.8）表达归属，前端据此把配置塞进对应任务卡片；无归属（`default_model` / 黑名单 / 到期窗口 / 粘性 / 两个 pacer / CB 聊天间隔 / Zen 聊天间隔 / Kilo 聊天间隔）归入「网关与调度」区。两处通过 `TASK_BY_KEY` 交叉校验（测试保证 `task` 指向真实任务 key）。
+配置项一侧用 `HotSetting.task`（§3.8）表达归属，前端据此把配置塞进对应任务 tab；无任务归属的项用 `HotSetting.group` 归入四个网关卡组（`GATEWAY_GROUPS`：模型路由 / 选号与会话 / 渠道节流 / 后台任务节流），各自一个一级 tab。两处通过 `TASK_BY_KEY` / `GATEWAY_GROUPS` 交叉校验（测试保证 `task` 指向真实任务 key、非任务项的 `group` 落在已定义的网关卡组内）。
 
 **接口**：`GET /api/tasks`（admin）返回 `{tasks: [...], server_time}`。每条含 `key`/`name`/`description`/`interval_seconds`/`enabled`/`runs`/`last_started_at`/`last_finished_at`/`last_ok`/`last_report`/`last_error`。带 `server_time` 是为了让前端用**服务端时钟**算「距今多久」——浏览器时钟偏移会把刚跑完的任务显示成几小时前。`app.state.task_runner` 不存在时（未进 lifespan）返回空列表而不是 500。
 
-**前端**：导航与页头从「运行时配置」改为「任务与配置」，`SettingsPage` 重组为任务卡片区（运行态 + 该任务的配置项，复用 `SettingRow`）+ 网关区；`useTasks` 以 `refetchInterval: 30_000` 自动刷新（运行态是随时间变化的观测量，手动刷新会让人以为任务停了），`/api/settings` 不自动刷新（配置改动由用户触发）。
+**前端**：导航与页头从「运行时配置」改为「任务与配置」，`SettingsPage` 用一排 tabs 控制信息量：每个任务一个 tab（该任务运行态 + 配置项，复用 `SettingRow`），无任务归属的配置按后端下发的网关卡组各占一个 tab（模型路由 / 选号与会话 / 渠道节流 / 后台任务节流）；一屏只呈现一块，避免 7 张卡片 + 全部配置项铺满整页。没有配置项的分组不出 tab；归属对不上的项落进「其他」tab，绝不吞掉配置。保存按钮与「N 项待保存」常驻面板顶部，草稿跨 tab 保留、一次提交全部改动。`useTasks` 以 `refetchInterval: 30_000` 自动刷新（运行态是随时间变化的观测量，手动刷新会让人以为任务停了），`/api/settings` 不自动刷新（配置改动由用户触发）。
 
 ---
 

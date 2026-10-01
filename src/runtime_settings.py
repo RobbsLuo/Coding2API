@@ -44,6 +44,7 @@ class HotSetting:
     minimum: float | None = None        # 写入校验下限（管理台/env 写入时拦截）
     maximum: float | None = None
     task: str | None = None             # 所属后台任务 key（见 tasks/status.py）；None=网关/调度配置
+    group: str | None = None            # task 为 None 时的分组 key（见 GATEWAY_GROUPS）
     # 生效下限（读时钳制）：存量覆盖值可能低于现行下限（旧版 minimum 更宽时
     # 写入），读路径直接钳到 floor 自愈——否则 UI 回显写入值、实际跑钳制值，
     # 两者静默分叉。floor ≥ minimum 恒成立。
@@ -54,23 +55,38 @@ class HotSetting:
         return self.key.upper()
 
 
+# 无任务归属的配置项（`task is None`）在管理台里的分组：key → 界面上的一级 tab
+# 名。顺序即前端展示顺序；分组归属与标签由后端定义，前端不硬编码 key 列表，
+# 后端加项/改归属不用动前端。留空的分组不渲染。
+GATEWAY_GROUPS: tuple[tuple[str, str], ...] = (
+    ("routing", "模型路由"),
+    ("affinity", "选号与会话"),
+    ("channels", "渠道节流"),
+    ("pacer", "后台任务节流"),
+)
+
+
 # 首批可热更清单。刻意不含上游端点、端口、密钥这类启动期项（见模块 docstring）。
 HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("default_model", str, "默认模型",
-               "请求未指定 model（或为 auto/空）时使用的模型名。"),
+               "请求未指定 model（或为 auto/空）时使用的模型名。",
+               group="routing"),
     HotSetting("model_blocklist", str, "模型黑名单",
                "fnmatch glob，逗号分隔；只影响 /v1/models 与 Playground 列表，"
-               "直连指定不受影响。留空表示不过滤。"),
+               "直连指定不受影响。留空表示不过滤。",
+               group="routing"),
     HotSetting("quota_expiry_window_seconds", int, "到期积分主窗口（秒）",
                "把「距到期 ≤ 该秒数」的积分加总作为选号第一排序指标；"
-               "≤0 关闭整套到期排序（次窗口一并失效）。", minimum=0),
+               "≤0 关闭整套到期排序（次窗口一并失效）。", minimum=0,
+               group="affinity"),
     # 次窗口是主窗口的配对项：选号按 (主, 次) 字典序比较，只热更主窗口而
     # 次窗口留在 env，会让管理台展示与调度器用两套数字。一并对齐。
     HotSetting("quota_expiry_secondary_window_seconds", int, "到期积分次窗口（秒）",
                "主窗口打平（含都为 0）时才参与比较；主窗口 ≤0 时本项自动失效。",
-               minimum=0),
+               minimum=0, group="affinity"),
     HotSetting("conversation_sticky_seconds", int, "会话粘性 TTL（秒）",
-               "同一对话的多轮请求固定用同一凭证；≤0 关闭粘性。"),
+               "同一对话的多轮请求固定用同一凭证；≤0 关闭粘性。",
+               group="affinity"),
     HotSetting("growth_irreversible_actions", bool, "成长中心不可逆动作",
                "是否允许抽奖 / 连登兑换 / 开盲盒 / 消耗补登卡。关闭后仍会领取"
                "旅行礼物与任务奖励。", task="growth"),
@@ -88,28 +104,31 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("codebuddy_chat_min_interval", float, "CodeBuddy 聊天最小间隔（秒）",
                "同渠道同凭证顺序连发的最小请求间隔（0 关闭）；按凭证分桶、桶内"
                "允许并发，故同渠道同模型的并发请求不会被串行化。",
-               minimum=0.0),
+               minimum=0.0, group="channels"),
     HotSetting("zen_chat_min_interval", float, "Zen 聊天最小间隔（秒）",
                "zen 匿名免费层专用节流（0 关闭，默认）。与 CodeBuddy/TRAE 各自"
                "独立、不共享——共享会让 zen 请求排在 CB/TRAE 之后空等最小间隔。",
-               minimum=0.0),
+               minimum=0.0, group="channels"),
     HotSetting("kilo_chat_min_interval", float, "Kilo 聊天最小间隔（秒）",
                "Kilo 匿名免费层专用节流（0 关闭，默认）。与 zen / CodeBuddy / TRAE"
-               "各自独立，不共享。", minimum=0.0),
+               "各自独立，不共享。", minimum=0.0, group="channels"),
     HotSetting("qoder_chat_min_interval", float, "Qoder 聊天最小间隔（秒）",
                "Qoder 真实账号渠道专用节流（默认 5s，0 关闭）。与其余渠道各自"
-               "独立，不共享。", minimum=0.0),
+               "独立，不共享。", minimum=0.0, group="channels"),
     HotSetting("codearts_chat_min_interval", float, "CodeArts 聊天最小间隔（秒）",
                "CodeArts 真实账号渠道专用节流（默认 5s，0 关闭）。与其余渠道各自"
-               "独立，不共享。", minimum=0.0),
+               "独立，不共享。", minimum=0.0, group="channels"),
     HotSetting("codearts_max_concurrency", int, "CodeArts 每账号并发上限",
                "CodeArts 上游硬限每账号并发会话数 3，超限请求直接 400 "
                "TM.00001041（实测 77% 失败率主因）。默认 3 对齐上游；0 关闭上限"
-               "（回到「有在途即放行」，会再次击穿）。", minimum=0),
+               "（回到「有在途即放行」，会再次击穿）。", minimum=0,
+               group="channels"),
     HotSetting("pacer_min_seconds", float, "后台任务节流下限（秒）",
-               "后台任务相邻上游请求的最小间隔；0 关闭节流。", minimum=0.0),
+               "后台任务相邻上游请求的最小间隔；0 关闭节流。", minimum=0.0,
+               group="pacer"),
     HotSetting("pacer_max_seconds", float, "后台任务节流上限（秒）",
-               "后台任务相邻上游请求的最大间隔，必须不小于下限。", minimum=0.0),
+               "后台任务相邻上游请求的最大间隔，必须不小于下限。", minimum=0.0,
+               group="pacer"),
     HotSetting("activity_report_enabled", bool, "活跃上报",
                "是否为 CodeBuddy 账号补发对话事件以续连连登天数。官方条款禁止"
                "脚本篡改活动数据，开启前请自行评估账号风险。", task="activity"),
@@ -327,6 +346,8 @@ class RuntimeSettings:
                 "overridden": self.is_overridden(spec.key),
                 # 所属后台任务（管理台据此把配置归到任务卡片下）；None = 网关/调度项
                 "task": spec.task,
+                # task 为 None 时的分组 key（见 GATEWAY_GROUPS）；前端据此分一级 tab
+                "group": spec.group,
             }
             for spec in HOT_SETTINGS
         ]

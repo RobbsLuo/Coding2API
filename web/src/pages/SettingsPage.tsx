@@ -7,7 +7,13 @@ import { useQueryClient, useSettings, useTasks } from "../api/hooks";
 import { useSessionContext } from "../Layout";
 import type { RuntimeSetting, TaskStatus } from "../api/types";
 import { PageHeader } from "../components/PageHeader";
-import { Badge, Button, Card, Empty, Field, Input, Notice, Panel, Select } from "../ui";
+import { Badge, Button, Card, Empty, Field, Input, Notice, Panel, Select, Tabs } from "../ui";
+
+/** 网关卡在 tabs 里的值：加前缀避免与任务 key 撞车（如任务与分组同名）。 */
+const groupTabValue = (key: string) => `gateway-${key}`;
+
+/** 兜底 tab：归属对不上（task 指向未装配任务、后端留空 group）的项都进这里。 */
+const OTHER_TAB = "settings-other";
 
 /** 前端只做「文本 → 待提交标量」的粗转；范围/组合校验以后端为准。 */
 function toInputValue(setting: RuntimeSetting): string {
@@ -64,7 +70,8 @@ function SettingRow({
         </div>
         <div className="flex items-end gap-2">
           <div className="w-44">
-            <Field label="生效值">
+            {/* 输入控件的可读名称：Field 的 label 未与控件 id 关联，读屏拿不到「生效值」属于哪一项 */}
+            <Field label={`${setting.label} 生效值`}>
               {setting.kind === "bool" ? (
                 <Select
                   value={draft}
@@ -187,6 +194,7 @@ export function SettingsPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [activeTab, setActiveTab] = useState<string | null>(null);
 
   const settings = useMemo(() => data?.settings ?? [], [data]);
   const tasks = useMemo(() => tasksQuery.data?.tasks ?? [], [tasksQuery.data]);
@@ -208,13 +216,37 @@ export function SettingsPage() {
   );
   const invalid = dirty.filter((setting) => !isSubmittable(setting, drafts[setting.key]));
 
-  // 任务归属：拿到运行态的任务才有卡片；其余（含 task 指向未装配任务）归入调度区，
-  // 这样「后端暂未跑某个任务」不会把配置项藏起来。
+  // 一屏只展示一块：每个后台任务一个 tab（运行态 + 自己的配置），无任务归属的配置
+  // 按后端下发的网关卡组各占一个 tab。归属对不上的项落进「其他」，绝不吞掉配置。
+  const groups = useMemo(() => data?.groups ?? [], [data]);
   const taskKeys = new Set(tasks.map((task) => task.key));
-  const owned = (key: string) => settings.filter((setting) => setting.task === key);
-  const ungrouped = settings.filter(
-    (setting) => !setting.task || !taskKeys.has(setting.task),
-  );
+  const assignTab = (setting: RuntimeSetting) => {
+    if (setting.task && taskKeys.has(setting.task)) return setting.task;
+    if (groups.some((group) => group.value === setting.group)) {
+      return groupTabValue(setting.group as string);
+    }
+    return OTHER_TAB;
+  };
+
+  const tabOptions = [
+    ...tasks.map((task) => ({ value: task.key, label: task.name })),
+    // 只列出「确实有配置项」的网关卡组，避免点开是空页
+    ...groups
+      .filter((group) => settings.some((s) => assignTab(s) === groupTabValue(group.value)))
+      .map((group) => ({ value: groupTabValue(group.value), label: group.label })),
+  ];
+  if (settings.some((setting) => assignTab(setting) === OTHER_TAB)) {
+    tabOptions.push({ value: OTHER_TAB, label: "其他" });
+  }
+
+  const active =
+    activeTab && tabOptions.some((option) => option.value === activeTab)
+      ? activeTab
+      : tabOptions[0]?.value;
+  const activeTask = tasks.find((task) => task.key === active);
+  const activeGroupLabel =
+    tabOptions.find((option) => option.value === active)?.label ?? "未归属配置";
+  const activeRows = settings.filter((setting) => assignTab(setting) === active);
 
   const refresh = () => client.invalidateQueries({ queryKey: ["admin"] });
 
@@ -303,17 +335,17 @@ export function SettingsPage() {
         }
       >
         {error && (
-          <div className="mb-3" data-testid="settings-error">
+          <div className="mb-3" data-testid="settings-error" role="alert">
             <Notice tone="danger">{error}</Notice>
           </div>
         )}
         {notice && (
-          <div className="mb-3" data-testid="settings-notice">
+          <div className="mb-3" data-testid="settings-notice" role="status">
             <Notice tone="ok">{notice}</Notice>
           </div>
         )}
         {invalid.length > 0 && (
-          <div className="mb-3" data-testid="settings-invalid">
+          <div className="mb-3" data-testid="settings-invalid" role="alert">
             <Notice tone="danger">
               有 {invalid.length} 项填写不合法（不能为空或非数字），请先修正。
             </Notice>
@@ -325,37 +357,46 @@ export function SettingsPage() {
           <Empty data-testid="no-settings">没有可热更配置</Empty>
         ) : (
           <>
-            <h3 className="text-xs font-semibold tracking-wide text-muted-foreground">
-              后台任务
-            </h3>
-            <div className="mt-2">
-              {tasksQuery.isLoading ? (
-                <Empty>载入中…</Empty>
-              ) : tasks.length === 0 ? (
-                <p className="text-xs text-muted-foreground" data-testid="no-tasks">
-                  拿不到任务运行态（调度尚未启动或接口不可用）；下面按配置项直接列出。
-                </p>
-              ) : (
-                tasks.map((task) => (
-                  <TaskCard
-                    key={task.key}
-                    task={task}
-                    serverTime={serverTime}
-                    rows={owned(task.key).map(renderSetting)}
-                  />
-                ))
-              )}
-            </div>
-
-            <h3 className="mt-5 text-xs font-semibold tracking-wide text-muted-foreground">
-              网关与调度
-            </h3>
-            {ungrouped.length > 0 ? (
-              ungrouped.map(renderSetting)
-            ) : (
-              <p className="text-xs text-muted-foreground" data-testid="no-gateway-settings">
-                没有未归属任务的配置项。
+            {!tasksQuery.isLoading && tasks.length === 0 && (
+              <p className="mb-4 text-xs text-muted-foreground" data-testid="no-tasks">
+                拿不到任务运行态（调度尚未启动或接口不可用）；下面按配置项直接列出。
               </p>
+            )}
+
+            {tasksQuery.isLoading ? (
+              <Empty>载入中…</Empty>
+            ) : (
+              <>
+                <div className="mb-4 overflow-x-auto pb-1">
+                  <Tabs
+                    value={active ?? ""}
+                    options={tabOptions}
+                    onChange={setActiveTab}
+                    testId="settings-tabs"
+                  />
+                </div>
+
+                {activeTask ? (
+                  <TaskCard
+                    task={activeTask}
+                    serverTime={serverTime}
+                    rows={activeRows.map(renderSetting)}
+                  />
+                ) : (
+                  <>
+                    <h3 className="text-xs font-semibold tracking-wide text-muted-foreground">
+                      {activeGroupLabel}
+                    </h3>
+                    {activeRows.length > 0 ? (
+                      activeRows.map(renderSetting)
+                    ) : (
+                      <p className="text-xs text-muted-foreground" data-testid="no-gateway-settings">
+                        这里没有配置项。
+                      </p>
+                    )}
+                  </>
+                )}
+              </>
             )}
           </>
         )}

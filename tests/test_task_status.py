@@ -348,6 +348,10 @@ def test_settings_snapshot_carries_task_owner(tmp_path):
     assert by_key["growth_interval_minutes"]["task"] == "growth"
     assert by_key["activity_report_enabled"]["task"] == "activity"
     assert by_key["default_model"]["task"] is None
+    # 无任务归属的项带网关卡组，供前端分一级 tab
+    assert by_key["default_model"]["group"] == "routing"
+    assert by_key["codebuddy_chat_min_interval"]["group"] == "channels"
+    assert by_key["quota_probe_minutes"]["group"] is None
 
 
 def test_build_runner_accepts_shared_status_store(repo):

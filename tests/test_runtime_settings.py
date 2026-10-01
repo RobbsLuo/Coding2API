@@ -16,6 +16,7 @@ from src.db.conn import Database
 from src.db.migrate import apply_schema
 from src.db.repo import RuntimeSettingsRepository
 from src.runtime_settings import (
+    GATEWAY_GROUPS,
     HOT_BY_KEY,
     HOT_SETTINGS,
     InvalidSetting,
@@ -66,6 +67,26 @@ def test_hot_settings_keys_unique_and_env_names_derived():
     for item in HOT_SETTINGS:
         assert item.env_name == item.key.upper()
         assert item.label and item.description
+
+
+def test_gateway_groups_are_named_and_unique():
+    keys = [key for key, _ in GATEWAY_GROUPS]
+    assert len(keys) == len(set(keys))
+    for _key, label in GATEWAY_GROUPS:
+        assert label
+
+
+def test_grouping_is_partitioned_between_tasks_and_gateway_groups():
+    """每项要么属于一个任务，要么落在一个网关卡组；两者互斥且都有归属。
+
+    否则前端渲染时会把这道配置项整个漏掉（既不在任务 tab，也不在任何网关 tab）。
+    """
+    group_keys = {key for key, _ in GATEWAY_GROUPS}
+    for item in HOT_SETTINGS:
+        if item.task is not None:
+            assert item.group is None, item.key
+        else:
+            assert item.group in group_keys, item.key
 
 
 # ------------------------------------------------------------ 值解析与校验
