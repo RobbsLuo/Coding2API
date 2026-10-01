@@ -35,6 +35,7 @@ from ...provider.base import (
     EventKind,
     Model,
     Quota,
+    UpstreamProtocolViolation,
     Usage,
 )
 from ..token_expiry import normalize_epoch
@@ -146,9 +147,6 @@ NODE_FAILURE_MARKERS = ("[FAIL]node:", "Execution failed")
 # 信封内层 delta 的空占位键（只在取值为空/假时才剔除，非空值一律保留）。
 NOISE_KEYS = ("extra_fields", "refusal", "reasoning_content")
 
-
-class UpstreamProtocolViolation(ValueError):
-    """上游事件违反可映射的结构约束（不静默吞掉）。"""
 
 
 def get_realm_config(realm: str) -> RealmConfig:

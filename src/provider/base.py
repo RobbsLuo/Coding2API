@@ -96,6 +96,24 @@ class UpstreamHTTPError(Exception):
         return self.classify_status(self.status, self.body)
 
 
+class UpstreamProtocolViolation(ValueError):
+    """上游响应违反可映射的结构约束（非 JSON / 字段缺失 / 形状不符）。
+
+    响应结构解析失败**不静默吞掉**。各渠道 `events.py` 现统一 `from
+    provider.base import UpstreamProtocolViolation` 复用本类——此前每家有
+    一份同名类，导致「按类型翻译探测失败原因」只能逐个渠道硬编码。
+    """
+
+
+class UpstreamTransportError(ConnectionError):
+    """上游请求在传输层失败（连接超时 / DNS / 连接被拒 / 读超时）。
+
+    只承载**原始传输异常**（`httpx.TransportError` 等），由各渠道客户端在
+    请求处捕获后 `raise ... from error` 抛出，好让上层按类型翻译成可操作
+    的原因（network_unreachable），而不是让 `httpx` 私有异常泄漏到翻译层。
+    """
+
+
 @dataclass(slots=True)
 class Usage:
     input_tokens: int | None = None
@@ -103,7 +121,7 @@ class Usage:
     reasoning_tokens: int | None = None
     cached_tokens: int | None = None   # 输入中命中缓存的 token（上游可选，缺省 None）
     credit: float | None = None   # 上游可选字段，两边都经常为 None
-    # credit 是否为本服务推算（TRAE 上游不给单请求积分，按官方单价折算）。
+    # credit 是否为本服务推算（TRAE 按官方单价、CodeArts 福利模型按每日 token 池 1:1）。
     # True 时展示层标 ≈；上游真给 credit 的渠道恒为 False。
     credit_estimated: bool = False
 

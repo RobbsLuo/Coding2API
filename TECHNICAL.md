@@ -660,15 +660,19 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **SSE 帧（2026-09-30 抓真实流核实）**：逐行 `data:` JSON（`data:` 行间有空行；也有不带 `data:` 前缀的裸 JSON 行），最后由 `data:[DONE]` 结束。**v2 `/api/v2/chat/completions` 实测是标准 OpenAI chunk**：`{"choices":[{"delta":{"content":…,"reasoning_content":…,"tool_calls":…},"finish_reason":…}]}`，增量在 `delta`（**不是**累计全文），收尾帧 `choices:[]` + `usage` 单独给 token 数；带 `tool_stream:true` 时工具调用分片在 `delta.tool_calls`。旧形状（逆向记录 §5 / legacy `/v1/chat/chat`）则是 `{"text":"<累计全文>"}`（替换语义，用 `TextSnapshot` 做差）+ 结束帧 `{"text":"[DONE]","error_code":"0"}`。解析器**两种形状同时兼容**，按字段分派。错误有两条路：HTTP 非 2xx，或流内 `error_code`（形如 `ChatAgent.*` / `TM.00001041`，HTTP 仍 200）。
 
-**无每日签到**：额度是**每日 token 池**（实测 2026-09-30：`GET {opengw}/api/v1/user/tokens/balance` 返回 `daily_token_limit` 1000 万 / `daily_tokens_used`；官方口径「每日千万 Token 免费领，当日 0 点清零、不累计」），上游没有每日签到接口。因此本渠道**不实现 `checkin`**（`checkin_scope` 也一并省略，后台签到任务自动跳过它）；「保活」由 token 自动 refresh 承担。`parse_balance` 有 `daily_token_limit` 时按**当日**口径算剩余（`total=daily_token_limit`、`remaining=daily_token_limit - daily_tokens_used`），拿不到该字段才退化到 `total_quota`/`total_balance`/`used_amount` 等通用键。福利模型发现（`{opengw}/api/v1/gateway/config`）与 Token 领取（`POST /api/v1/benefit/claim`，幂等）在探测时顺带完成。
+**无每日签到**：额度是**每日 token 池**（实测 2026-09-30：`GET {opengw}/api/v1/user/tokens/balance` 返回 `daily_token_limit` 1000 万 / `daily_tokens_used`；官方口径「每日千万 Token 免费领，当日 0 点清零、不累计」），上游没有每日签到接口。因此本渠道**不实现 `checkin`**（`checkin_scope` 也一并省略，后台签到任务自动跳过它）；「保活」由 token 自动 refresh 承担——且**只由 `RefreshTask` 承担**（先落库再同步）：`refresh_token` 是一次性的，额度探测等旁路若也顺手刷新，同一个 token 会被两处各消费一次，后到的报 `the refresh token has been used`，且旁路刷新结果不落库、库里 token 被烧成废票（实测由此把渠道打成 `APIG.0602 security token has expired`）。`probe_quota` 因此改为**只读余额**，不再保活刷新。`parse_balance` 有 `daily_token_limit` 时按**当日**口径算剩余（`total=daily_token_limit`、`remaining=daily_token_limit - daily_tokens_used`），拿不到该字段才退化到 `total_quota`/`total_balance`/`used_amount` 等通用键。福利模型发现（`{opengw}/api/v1/gateway/config`）与 Token 领取（`POST /api/v1/benefit/claim`，幂等）在探测时顺带完成。
 
 **优先消耗（用完即弃）**：当日没用完的额度 0 点清零、不累计，所以该池必须**先用掉**。`parse_balance` 把它登记成与 CodeBuddy/TRAE 同构的 `expiry_ladder`：到期点＝次日本地 0 点（上游不返回重置时间戳，按服务端时区推算，见 `_next_local_midnight`）、金额＝当日剩余。这样调度器「窗口内即将到期额度多者先用」的一级指标恒把 CodeArts（1000 万量级）排在其它渠道之前——只要它还有额度就先走它，用尽（`remaining=0`，`expiry_ladder` 为空 → 指标归 0，健康度也归 0）则自然回落其它渠道。副作用：CodeArts 阶梯是 **token**、其余渠道是积分，跨渠道比较的是原始数值，量级差使 CodeArts 实际长期占据优先；这正是「每日池先用」的预期行为，管理台展示层用 `quotaUnit()` 把单位标成 token 而非积分。
 
 **倍率（`credit_rate`）**：内置模型 `GET {snap}/v1/model/builtin` 的每个条目带 `credit[]`，其中 `ratio_display`（如 `"0.7x"`、`"0.32x"`）是官方对外展示的消耗倍率，取首档作为本渠道 `credit_rate`（`_parse_ratio` 容忍 `0.7x`/`0.7`/`0.7` 三种写法）。**福利模型不给倍率**（`credit_rate=None`）：它走每日免费 token 池、上游不返回该字段，标 `0.0` 会被前端渲染成 zen/kilo 式的「免费」，而它实际消耗每日额度、用尽即不可用。
 
+**单请求扣池（`credit`，2026-10-01）**：福利模型虽然不给倍率，但**确实消耗每日池**，故单请求用量不能留空。上游 usage 只给 token 数、不带额度字段，而福利模型实测按每日 token 池 **1:1** 扣减（`credit_events` 反解：一条输入 32 + 输出 694 = 726 token 的请求，池余额恰好 −726），故 `_fill_estimated_credit` 在流式事件上把 `credit` 补成「输入 + 输出 token」并标 `credit_estimated`（统计页加 ≈）。**只补福利模型**：内置模型不扣这条每日池（它走 `credit[]` 的付费倍率），补了会把 token 数误当池消耗。因此同一渠道内 `credit` 的字段语义随模型分档——福利＝token 池消耗、内置＝上游真值（若返回）。上游将来直接回传 `credit` 时不覆盖。
+
 **登录**：OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens`（authorization_code）换 `{access_key_id, secret_access_key, security_token, expiration, refresh_token}`，DPoP 私钥随 credential 一起生成并加密入库。**门户把授权码 302 回 `http://127.0.0.1:{port}/oauth/callback`——这是用户本机地址，服务端监听不到**；因此本渠道不用 poll 轨道，而是「paste 轨道」：前端展示授权页后，让用户把浏览器地址栏里那条打不开的回调链接粘回，走 `POST /api/auth/upstream/complete` 由服务端用 code + 登录时登记的 PKCE `code_verifier`/DPoP 私钥换 token。（上游另有 `GET {snap-manager}/v1/login/ticket` 兜底轮询通道，但服务端取到时被回「无效 ticketId」，故不采用。）
 
 **节点白名单**：`CODEARTS_ALLOWED_ENDPOINTS` 含 snap 引擎、STS、福利网关、门户四个主机；AK/SK 签名请求只发往白名单。`CODEARTS_CHAT_MIN_INTERVAL`（热更项，默认 5s）独立 pacer。
+
+**并发上限（2026-10-01，`CODEARTS_MAX_CONCURRENCY`）**：上游对**每账号并发会话数**有硬限（实测 3），超出的请求直接 `HTTP 400` + `TM.00001041 并发会话数已达上限(3个)`。此前聊天 pacer 声明 `allow_concurrent=True` 但**无上限**（桶内来多少放多少），第 4 个起全部撞 400；又因 `classify_status` 只在 429 分支查 `00001041`，这些 400 被判成 `INVALID`（换号也没用、且不冷却），与客户端重试叠成风暴——2026-09-30 23:17 至 10-01 07:40 共 135 次，整体失败率约 77%。修复两处：`Pacer` 增按桶在途上限 `max_concurrency`（满则挂起等 `release` 让位；0/None 保持旧行为），CodeArts pacer 装配 `lambda: runtime.codearts_max_concurrency`（热更项，默认 3）；`classify_status` 把 400/429 带并发/限流标记（`00001041`/`tpm`/`并发`/`rate limit`/`throttl`）统一判成 `MODEL`（可重试 503），与流内 `classify_error_code('TM.00001041')` 一致。
 
 ---
 
@@ -906,6 +910,7 @@ class Scheduler:
 | `upstream_rejected` | 其他 4xx | 检查账号状态 |
 | `upstream_response_invalid` | 响应结构不符 | 可能是官方接口变更 |
 | `upstream_timeout` | 请求超时 | 重试 |
+| `network_unreachable` | 连不上渠道服务器（DNS / 连接被拒 / 建连超时 / TLS 中断） | 检查本机网络或代理，确认渠道域名可达 |
 | `unknown_error` | 未归类 | 查 `detail` |
 
 `detail` 保留原始错误摘要**仅供排查**，界面不得把它当作主提示展示。

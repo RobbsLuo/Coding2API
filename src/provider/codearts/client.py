@@ -13,8 +13,9 @@
   额度为**每日 1000 万 token、当日 0 点清零**（官方「每日千万 Token 免费领」），
   不是按月的套餐积分。**当日没用完即作废**，故 `parse_balance` 把当日剩余登记成
   到期点＝次日 0 点的 `expiry_ladder`，让调度器「快过期的先用」把 CodeArts 排在
-  其它渠道之前。CodeArts 没有签到接口，本客户端用「临时凭证到期前自动
-  refresh」承担保活，见 `probe_quota` 的 `refresh_skew`。
+  其它渠道之前。CodeArts 没有签到接口，临时凭证的续期由
+  `tasks.refresh.RefreshTask` 独占（先落库再同步）；额度探测只读余额，
+  绝不在此刷新一次性 refresh_token，见 `probe_quota`。
 
 签名不是 bearer：`x-auth-token` 传 STS security_token 会被 APIG 拒
 （`APIG.0301 decrypt token fail`），真正的凭据是 AK/SK 签名（+ X-Security-Token）。
@@ -36,7 +37,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from ...provider import base
-from ...provider.base import Event, Model, Quota
+from ...provider.base import Event, EventKind, Model, Quota
 from ...provider.token_expiry import normalize_epoch
 from . import auth as codearts_auth
 from . import events as codearts_events
@@ -315,6 +316,7 @@ class CodeArtsClient:
                 raise UpstreamHTTPError(response.status_code, body_bytes)
             async for line in codearts_events.iter_data_lines(response.aiter_bytes()):
                 for event in codearts_events.parse_line(line, snapshot):
+                    _fill_estimated_credit(event, benefit=benefit)
                     yield event
 
     # ------------------------------------------------------------ 模型发现
@@ -395,19 +397,16 @@ class CodeArtsClient:
         except (UpstreamHTTPError, UpstreamProtocolViolation) as error:
             logger.warning("CodeArts 福利自动领取失败: %s", error)
 
-    async def probe_quota(self, credential: CodeArtsCredential, *,
-                          refresh_skew: int = 0) -> Quota:
-        """额度余额；`refresh_skew` > 0 时先做一次「到期前保活刷新」。
+    async def probe_quota(self, credential: CodeArtsCredential) -> Quota:
+        """额度余额（只读，不刷新）。
 
-        CodeArts 没有每日签到接口，额度是**每日 token 池**（当日 0 点清零），
-        故用临时凭证的自动续期承担保活：凭证进入刷新窗口时先刷一次，把 401 → DEAD 硬禁用这条链路
-        掐掉。刷新失败不阻断额度探测（余额接口用的还是旧凭证，可能仍然有效）。
+        CodeArts 没有每日签到接口，额度是**每日 token 池**（当日 0 点清零）。
+        临时凭证的续期**不在**这里做：refresh_token 是一次性的，必须由
+        `tasks.refresh.RefreshTask`（先落库再同步）独占轮转。若此处顺手刷新，
+        一个 refresh_token 会被两个地方各消费一次，后到的报
+        `the refresh token has been used`，且此处刷新结果不落库、DB 里的
+        token 被烧成废票——实测由此把整条渠道打成 APIG.0602 硬失效。
         """
-        if refresh_skew > 0 and credential.needs_refresh(refresh_skew):
-            try:
-                credential = await self.refresh_token(credential)
-            except Exception as error:  # noqa: BLE001 - 保活失败不阻断余额探测
-                logger.warning("CodeArts 保活刷新失败（继续用旧凭证探测额度）: %s", error)
         url = f"{self.benefit_host}{EP_TOKEN_BALANCE}"
         data = await self._get_json(url, credential, short_headers())
         return parse_balance(data)
@@ -485,7 +484,8 @@ def _models_from_items(items: Any, *, benefit: bool) -> list[Model]:
     倍率：内置条目带 `credit[]`，其中 `ratio_display`（如 `"0.7x"`）是官方对外
     展示的消耗倍率，取首条可解析项作为本渠道 `credit_rate`。福利条目来自每日
     免费 token 池、上游不给该字段，保持 `None`（**不**冒充 zen/kilo 的 x0「免费」
-    ——它消耗的是每日 token 额度，额度用尽即不可用）。
+    ——它消耗的是每日 token 额度，额度用尽即不可用）。福利模型的单请求扣池
+    改在 usage 事件上按 token 1:1 推算，见 `_fill_estimated_credit`。
     """
     if not isinstance(items, list):
         return []
@@ -507,6 +507,28 @@ def _models_from_items(items: Any, *, benefit: bool) -> list[Model]:
                                                 "max_output_tokens")),
         ))
     return models
+
+
+def _fill_estimated_credit(event: Event, *, benefit: bool) -> None:
+    """福利模型 USAGE 事件补记**推算额度消耗**（单位：token）。
+
+    CodeArts 上游的 usage 只给 token 数、不带单请求额度字段，而福利模型实测
+    按每日 token 池 **1:1** 扣减（`credit_events` 反解：一条输入 32 + 输出 694
+    = 726 token 的请求，池余额恰好 −726），故本服务按「输入 + 输出 token」推算
+    该请求的额度消耗并标 `credit_estimated`（展示层加 ≈）。
+
+    只补福利模型：内置模型不扣这条每日 token 池（它走 `credit[]` 的付费倍率），
+    补了会把 token 数当成池消耗。上游将来若直接回传 `credit` 则不覆盖；
+    两个 token 都没有时不猜（保持 None）。
+    """
+    usage = event.usage
+    if (not benefit or event.kind is not EventKind.USAGE or usage is None
+            or usage.credit is not None):
+        return
+    if usage.input_tokens is None and usage.output_tokens is None:
+        return
+    usage.credit = float((usage.input_tokens or 0) + (usage.output_tokens or 0))
+    usage.credit_estimated = True
 
 
 def _credit_rate(credit: Any) -> float | None:

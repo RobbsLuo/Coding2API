@@ -271,7 +271,8 @@ export function formatCacheRate(
 }
 
 /**
- * Credit 展示：null 显示 —；推算值（TRAE 无上游积分，按官方单价折算）前置
+ * Credit 展示：null 显示 —；推算值（TRAE 按官方单价折算、CodeArts 福利模型按
+ * 每日池 1:1 折算）前置
  * ≈ 表示约等于，提醒是估算而非上游回传的真实扣费。
  */
 export function formatCredit(
@@ -395,6 +396,7 @@ export const PROBE_FAILURE_LABEL: Record<ProbeFailureReason, string> = {
   upstream_rejected: "渠道拒绝了这次请求",
   upstream_response_invalid: "渠道响应格式与预期不符，可能是官方接口变更",
   upstream_timeout: "渠道响应超时",
+  network_unreachable: "连不上渠道服务器，检查本机网络或代理",
   unknown_error: "未知错误",
 };
 

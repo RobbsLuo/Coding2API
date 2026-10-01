@@ -14,7 +14,7 @@
 - **OpenCode Zen 免费层**（第三个渠道）：`opencode.ai/zen` 的免费模型接成 `zen` 渠道，标准 OpenAI 协议、无需登录；上游清单混着付费模型且无免费标记，本服务按 `-free` 后缀收窄候选再逐个探活，**只展示匿名真正可用的免费模型**（每次动态拉取并探活，判活结果按 30 分钟缓存以避开每 5 分钟重探一次的开销，不设静态白名单；免费模型显式标注 **x0 倍率**）；请求侧自动满足免费层门禁，响应侧过滤门禁注入的伪工具调用。无凭证概念——池里一条虚拟凭证让它和其它渠道一样可调度、可暂停、可统计
 - **Kilo Gateway 免费层**（第四个渠道）：`api.kilo.ai/api/gateway` 的免费模型接成 `kilo` 渠道，**标准 OpenAI 协议**（`/chat/completions` + `/models`），无需登录、无门禁伪装；上游 `/models` 每个条目带权威 `isFree` 布尔（实测 395 个模型中 17 个为 true），据此直接过滤免费集，**不做探活**（探活会白耗本就极小的免费配额且结果不稳定）；上游增删自动跟随，不设静态白名单；免费模型显式标注 **x0 倍率**。同为无凭证渠道——池里一条虚拟凭证即可调度/暂停/统计
 - **Qoder**（第五个渠道）：[Qoder](https://qoder.com) 接成 `qoder` 渠道，**真实账号渠道**，设备码 PKCE 登录后复用公共凭证池；上游是私有 COSY 协议（自定义 Base64 + 信封式 SSE），本服务负责签名与解包，对外仍是标准 OpenAI；支持额度探测与每日签到（积分可累积）
-- **CodeArts**（第六个渠道）：[华为云 CodeArts](https://codearts.huaweicloud.com) 盘古引擎接成 `codearts` 渠道，**真实账号渠道**，OAuth2 PKCE 登录换 STS（AK/SK 签名 + DPoP 刷新）；上游是累计全文 SSE，本服务负责签名与还原为增量事件；支持额度探测与福利 Token 领取。**该渠道没有每日签到接口**，额度是**每日 1000 万免费 token（当日 0 点清零、不累计）**，保活由 token 自动刷新承担
+- **CodeArts**（第六个渠道）：[华为云 CodeArts](https://codearts.huaweicloud.com) 盘古引擎接成 `codearts` 渠道，**真实账号渠道**，OAuth2 PKCE 登录换 STS（AK/SK 签名 + DPoP 刷新）；上游是累计全文 SSE，本服务负责签名与还原为增量事件；支持额度探测与福利 Token 领取。**该渠道没有每日签到接口**，额度是**每日 1000 万免费 token（当日 0 点清零、不累计）**，保活由 token 自动刷新承担；福利模型不给倍率但**按每日池 1:1 扣减**，故请求按「输入+输出 token」记入统计的 credit（标 ≈ 推算）
 - **到期额度优先消化**：主窗口 36h 内将过期的额度多者先用（避免过期浪费），打平再比 7 天窗口；管理台凭证列表显示到期额度与逐个额度包明细。CodeArts 的每日 token 池 0 点清零、用完即弃，同样落此阶梯，故只要它还有额度就会被优先消耗；额度单位随渠道（CodeArts 是 token，其余是积分）
 - **会话粘性**：同一对话多轮粘住同一凭证，出错才轮换
 - **公共凭证池**：admin 集中维护、全员共享；按人统计用量
@@ -178,7 +178,7 @@ CodeBuddy / TRAE / Qoder / CodeArts 上**同一个模型**的内部代号互不�
 - **优先消耗**：每日池用完即弃，故当日剩余被登记为「次日本地 0 点到期」的到期额度，调度器会优先把它排在其它渠道之前——只要 CodeArts 还有额度就先走它，用尽后自动回落。管理台「额度」列对此显示为 token（其余渠道是积分）。
 - **签名**：上游要求华为云 `SDK-HMAC-SHA256`（AK/SK + `X-Security-Token`）。白名单 `CODEARTS_ALLOWED_ENDPOINTS` 必须含 snap 引擎、STS、福利网关与门户四个主机；改 `CODEARTS_API_ENDPOINT` 时同步调整。
 - **累计全文 SSE**：上游流式 `text` 是**累计全文（替换语义）**而非增量，本服务在解析层还原为增量事件，对客户端透明。
-- **节流**：真实账号渠道，默认 `CODEARTS_CHAT_MIN_INTERVAL=5`（独立节流器），可在「任务与配置」热更。
+- **节流与并发**：真实账号渠道，默认 `CODEARTS_CHAT_MIN_INTERVAL=5`（独立节流器）；上游硬限**每账号并发会话数 3**，故 pacer 另配在途上限 `CODEARTS_MAX_CONCURRENCY=3`（超出即 `400 TM.00001041`）。两者均可在「任务与配置」热更。
 
 ### Responses API（Codex CLI）
 
@@ -349,6 +349,7 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `KILO_CHAT_MIN_INTERVAL` | `0` | Kilo 聊天最小间隔（秒），独立于 zen / CB/TRAE 的节流器，默认关闭。同为匿名免费层，与 zen 各自独立、互不排队 |
 | `QODER_CHAT_MIN_INTERVAL` | `5` | Qoder 聊天最小间隔（秒），独立节流器（真实账号渠道，上游有账号级频率风控）；`0` 关闭 |
 | `CODEARTS_CHAT_MIN_INTERVAL` | `5` | CodeArts 聊天最小间隔（秒），独立节流器（真实账号渠道）；`0` 关闭 |
+| `CODEARTS_MAX_CONCURRENCY` | `3` | CodeArts 每账号**在途并发上限**（热更项）。上游硬限每账号并发会话数 3，超出即 `400 TM.00001041`；桶内名额满时请求挂起直到有请求结束；`0` 关闭上限（回到「有在途即放行」，会再次击穿） |
 | `CODEBUDDY_SANITIZE_CHANNEL_MARKERS` | `true` | 出站 `system`/`assistant` 正文命中「伪装其他厂商官方客户端」指纹串时替换为占位符（上游 11128 内容风控：换号无效、会话带入即持续报错）；只改出站副本，客户端历史不受影响；`false` 关闭（见 TECHNICAL.md §3.2） |
 | `REFRESH_SKEW_HOURS` | `24` | token 到期前该小时数窗口内预刷新。到期时间取凭证显式 `expires_at`，缺失时回落 access token 的 JWT `exp`（CodeBuddy 实测不带显式到期字段） |
 | `TOKEN_EXPIRY_WARNING_SECONDS` | `3600` | 管理台 token 到期预警阈值：剩余低于该值时标红；`≤0` 关闭预警（仍显示剩余时间）。纯展示，不参与调度 |

@@ -11,6 +11,11 @@
   实测被推到 +5s、+10s。只有当桶里没有在途请求、且距上次请求开始不足最小
   间隔时才补足等待，用来错开「一个接一个」的顺序连发。按凭证分桶而非全局
   单桶：一个账号在途不该拖住另一个账号（频率风控是账号级的）。
+
+并发模式还可叠加**按桶在途上限**（`max_concurrency`）：达到上限时新请求
+不直接放行，而是等到有请求 `release` 让出名额。上游对「并发会话数」有硬
+上限（CodeArts 每账号 3），无上限放行会把第 4 个起全部打成 400 并发超限。
+0/None 表示不限（保持旧行为）。
 """
 
 from __future__ import annotations
@@ -41,6 +46,7 @@ class Pacer:
 
     def __init__(self, min_seconds: float, max_seconds: float, *,
                  allow_concurrent: bool = False,
+                 max_concurrency: int | Callable[[], int] = 0,
                  sleep: Callable[[float], Awaitable[None]] | None = None,
                  now: Callable[[], float] | None = None) -> None:
         # 上下限可热更（B3.2）：存取值器，每次计间隔读当前值。校验必须放在
@@ -53,12 +59,20 @@ class Pacer:
         self._now = now or time.monotonic
         self._random = random.Random(0)          # 确定性：测试可复现
         self._allow_concurrent = allow_concurrent
+        # 按桶在途上限（0 = 不限）：CodeArts 每账号并发会话数有限，超限即 400。
+        # 存取值器而非快照：上限可热更。用同步的 Event.set 唤醒等待者而非
+        # 信号量——信号量创建后无法安全改容，热更上限时会给错名额。
+        if not callable(max_concurrency) and max_concurrency < 0:
+            raise ValueError("pacer max_concurrency must be non-negative")
+        self._max_concurrency = live(max_concurrency)
         self._lock = asyncio.Lock()
         # 严格模式：全局单桶
         self._last_started: float | None = None
         # 并发模式：桶 → 上次（预留）开始时刻 / 在途计数
         self._bucket_started: dict[str, float] = {}
         self._inflight: dict[str, int] = {}
+        # 并发模式 + 上限：名额让出时置位，挂起的请求醒来重查是否有空位
+        self._wake = asyncio.Event()
 
     def _validate(self) -> tuple[float, float]:
         low, high = self.min_seconds, self.max_seconds
@@ -84,6 +98,12 @@ class Pacer:
     def allow_concurrent(self) -> bool:
         return self._allow_concurrent
 
+    @property
+    def max_concurrency(self) -> int:
+        """当前在途上限；0/负 = 不限（每次现读，支持热更）。"""
+        limit = int(self._max_concurrency())
+        return limit if limit > 0 else 0
+
     def next_interval(self) -> float:
         low, high = self._validate()
         if low == 0 and high == 0:
@@ -92,14 +112,40 @@ class Pacer:
             return low
         return self._random.uniform(low, high)
 
+    def _capped(self) -> bool:
+        """并发模式且配了在途上限——只有这种组合需要排队等名额。"""
+        return self._allow_concurrent and self.max_concurrency > 0
+
+    def _reserve(self, bucket: str) -> float:
+        """**调用方须持 `_lock`**：登记一次在途并返回本次需补足的间隔秒数。
+
+        同桶已有在途 → 并发放行、无需补间隔（返回 0）；否则预留开始时刻
+        （睡醒后才是真正开始），后续同桶请求据此算间隔。
+        """
+        if self._inflight.get(bucket, 0) > 0:
+            self._inflight[bucket] += 1
+            return 0.0
+        current = self._now()
+        interval = self.next_interval()
+        started = self._bucket_started.get(bucket)
+        remaining = 0.0
+        if started is not None:
+            remaining = interval - (current - started)
+            if remaining < 0:
+                remaining = 0.0
+        self._bucket_started[bucket] = current + remaining
+        self._inflight[bucket] = 1
+        return remaining
+
     async def wait_turn(self, key: str | None = None) -> None:
         """取得一个节流 turn；只有即将真正调用上游时才应调用。
 
         并发模式下返回即视为「已占用一个在途名额」，调用方必须在请求结束后
         用同一 key 调 `release` 归还，否则该桶会被当成永远有请求在途而失去
-        节流（见模块 docstring）。
+        节流（见模块 docstring）。配了 `max_concurrency` 时，名额满会让新
+        请求在此挂起，直到有 `release` 让位。
         """
-        if self.disabled:
+        if self.disabled and not self._capped():
             return
         if not self._allow_concurrent:
             async with self._lock:
@@ -112,24 +158,27 @@ class Pacer:
                 self._last_started = self._now()
             return
         bucket = key or ""
-        async with self._lock:
-            if self._inflight.get(bucket, 0) > 0:
-                # 同桶已有请求在途：并发放行，不再排队
-                self._inflight[bucket] += 1
-                return
-            current = self._now()
-            interval = self.next_interval()
-            started = self._bucket_started.get(bucket)
-            remaining = 0.0
-            if started is not None:
-                remaining = interval - (current - started)
-                if remaining < 0:
-                    remaining = 0.0
-            # 预留开始时刻：睡醒后才是真正开始，后续同桶请求据此计算间隔
-            self._bucket_started[bucket] = current + remaining
-            self._inflight[bucket] = 1
-        if remaining > 0:
-            await self._sleep(remaining)
+        remaining = 0.0
+        reserved = False
+        try:
+            while True:
+                async with self._lock:
+                    limit = self.max_concurrency
+                    if not limit or self._inflight.get(bucket, 0) < limit:
+                        remaining = self._reserve(bucket)
+                        reserved = True
+                        break
+                    # 名额已满：清事件后到锁外等待，release 会 set 唤醒。
+                    self._wake.clear()
+                await self._wake.wait()
+            if remaining > 0:
+                await self._sleep(remaining)
+        except BaseException:
+            # 未成功「占用」就退出（取消 / 间隔校验异常）：把名额还回去，
+            # 否则该桶的名额会永久少一个（最终把渠道卡死）。
+            if reserved:
+                self.release(bucket)
+            raise
 
     def release(self, key: str | None = None) -> None:
         """并发模式归还一个在途名额；严格模式与多余的 release 都是空操作。"""
@@ -141,3 +190,6 @@ class Pacer:
             self._inflight[bucket] = count - 1
         elif count == 1:
             del self._inflight[bucket]
+        else:
+            return                            # 多余释放：不虚增名额
+        self._wake.set()                      # 唤醒可能正等这个名额的请求

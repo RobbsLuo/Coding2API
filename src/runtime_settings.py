@@ -97,6 +97,10 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("codearts_chat_min_interval", float, "CodeArts 聊天最小间隔（秒）",
                "CodeArts 真实账号渠道专用节流（默认 5s，0 关闭）。与其余渠道各自"
                "独立，不共享。", minimum=0.0),
+    HotSetting("codearts_max_concurrency", int, "CodeArts 每账号并发上限",
+               "CodeArts 上游硬限每账号并发会话数 3，超限请求直接 400 "
+               "TM.00001041（实测 77% 失败率主因）。默认 3 对齐上游；0 关闭上限"
+               "（回到「有在途即放行」，会再次击穿）。", minimum=0),
     HotSetting("pacer_min_seconds", float, "后台任务节流下限（秒）",
                "后台任务相邻上游请求的最小间隔；0 关闭节流。", minimum=0.0),
     HotSetting("pacer_max_seconds", float, "后台任务节流上限（秒）",
@@ -384,6 +388,10 @@ class RuntimeSettings:
     @property
     def codearts_chat_min_interval(self) -> float:
         return float(self.get("codearts_chat_min_interval"))
+
+    @property
+    def codearts_max_concurrency(self) -> int:
+        return int(self.get("codearts_max_concurrency"))
 
     @property
     def pacer_min_seconds(self) -> float:

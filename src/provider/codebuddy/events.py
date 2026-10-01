@@ -11,11 +11,15 @@ import json
 from typing import Any
 
 from ...engine.sse import SSEFrame
-from ...provider.base import ErrKind, Event, EventKind, Usage, body_hint, business_codes
-
-
-class UpstreamProtocolViolation(ValueError):
-    """上游事件违反可映射的结构约束。"""
+from ...provider.base import (
+    ErrKind,
+    Event,
+    EventKind,
+    UpstreamProtocolViolation,
+    Usage,
+    body_hint,
+    business_codes,
+)
 
 
 def _is_blank_tool_call(tc: dict) -> bool:

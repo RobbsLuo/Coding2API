@@ -104,7 +104,7 @@ export interface StatsOverview {
   cached_tokens: number | null;
   /** 渠道可选字段，两边都经常为 null */
   credit: number | null;
-  /** credit 是否为推算值（TRAE 无上游积分，按官方单价折算），展示加 ≈ */
+  /** credit 是否为推算值（TRAE 按官方单价、CodeArts 福利模型按每日池 1:1），展示加 ≈ */
   credit_estimated: boolean;
   /** 平均端到端耗时（排队 + 首字 + 生成），非网络延迟 */
   avg_latency_ms: number | null;
@@ -162,7 +162,7 @@ export interface UsageEventRow {
   output_tokens: number | null;
   cached_tokens: number | null;
   credit: number | null;
-  /** credit 是否为推算值（TRAE 无上游积分，按官方单价折算），展示加 ≈ */
+  /** credit 是否为推算值（TRAE 按官方单价、CodeArts 福利模型按每日池 1:1），展示加 ≈ */
   credit_estimated: number;
   /** 端到端耗时（排队 + 首字 + 生成），非网络延迟 */
   latency_ms: number | null;
@@ -277,6 +277,7 @@ export type ProbeFailureReason =
   | "upstream_rejected"
   | "upstream_response_invalid"
   | "upstream_timeout"
+  | "network_unreachable"
   | "unknown_error";
 
 export interface ProbeResult {

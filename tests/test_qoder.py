@@ -575,6 +575,17 @@ async def test_fetch_models_errors_and_host_fallback():
     assert [m.id for m in await client.fetch_models(cred())] == ["m"]
     await client.aclose()
 
+    # 所有主机都传输失败 → UpstreamTransportError（可翻译成网络不可达），
+    # 而不是协议违规（「响应格式不符」会误导用户去查上游改版）
+    def all_down(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=request)
+
+    from src.provider.base import UpstreamTransportError
+
+    with pytest.raises(UpstreamTransportError):
+        await handler_for(all_down, gateway_fallbacks=("https://gw1.test",
+                                                       "https://gw2.test")).fetch_models(cred())
+
 
 # ---------------------------------------------------------------- 额度
 

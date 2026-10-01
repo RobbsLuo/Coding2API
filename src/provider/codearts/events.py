@@ -24,11 +24,19 @@ from __future__ import annotations
 
 import codecs
 import json
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
-from ...provider.base import ErrKind, Event, EventKind, Usage, business_codes
+from ...provider.base import (
+    ErrKind,
+    Event,
+    EventKind,
+    UpstreamProtocolViolation,
+    Usage,
+    business_codes,
+)
 
 # 上游技术常量（逆向记录 §2/§3/§7，勿改）
 SNAP_ENGINE_HOST = "https://snap-access.cn-north-4.myhuaweicloud.com"
@@ -59,9 +67,6 @@ AGENT_TYPE_PROMPT_CENTER = "PromptCenter"
 DONE_TEXT = "[DONE]"
 
 
-class UpstreamProtocolViolation(ValueError):
-    """上游违反可映射的结构约束（不静默吞掉）。"""
-
 
 # 该账号用不了这个模型（重试无意义）→ (账号, 模型) 负缓存。
 # `InferHub.002002009.404 model is not registered` / `InferHub.4004.200
@@ -69,6 +74,12 @@ class UpstreamProtocolViolation(ValueError):
 _MODEL_ABSENT_MARKERS = ("002002009", "not registered", "4004.200", "benefit not found")
 # 模型级限流：上游点名当前模型/会话（`TM.00001041`、TPM、并发会话）。
 _MODEL_THROTTLE_MARKERS = ("00001041", "tpm", "429", "并发会话", "rate limit", "throttl")
+# HTTP 状态码侧的限流/并发标记。与流内业务码不同，这里判的是**响应体文本**：
+# 上游把并发超限放在 HTTP 400（不是 429），命中即应算可重试的模型级限流。
+_STATUS_THROTTLE_MARKERS = ("00001041", "tpm", "并发", "rate limit", "throttl")
+# 结构性噪声行（心跳、被截断的裸括号）：整行只有空白与 `[]:,`，无 JSON 语义。
+# `_data_payload` 会放行 `{`/`[` 开头的行，实测上游偶发只发一个括号的心跳。
+_SSE_NOISE_RE = re.compile(r"^[\s{}\[\]:,]*$")
 
 
 @dataclass(slots=True)
@@ -128,10 +139,15 @@ def _data_payload(line: str) -> str:
 
 def parse_line(line: str, snapshot: TextSnapshot) -> list[Event]:
     """一行载荷 → 中立事件列表（同帧可能同时带正文/思考/usage/finish）。"""
-    if line.strip() == DONE_TEXT:
+    text = line.strip()
+    if text == DONE_TEXT:
         return [Event(kind=EventKind.FINISH, finish_reason="stop")]
+    if _SSE_NOISE_RE.match(text):
+        # 心跳 / 被截断的裸括号行：无可映射语义，跳过而不是让整条响应以
+        # unparsable 失败（那会把一次心跳升级成 500，实测发生过）。
+        return []
     try:
-        payload = json.loads(line)
+        payload = json.loads(text)
     except json.JSONDecodeError as error:
         raise UpstreamProtocolViolation("unparsable CodeArts SSE data") from error
     if not isinstance(payload, dict):
@@ -268,9 +284,14 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
         return ErrKind.DEAD
     if status == 404:
         return ErrKind.SOFT
+    # 限流/并发会话标记：HTTP 400 与 429 都可能承载（实测并发超限走 400 +
+    # `TM.00001041`）。统一判为模型级限流，避免 400 落进 INVALID → 换号重试
+    # 也没用、且不触发冷却（与流内 classify_error_code 的 TM.00001041 一致）。
+    if status in (400, 429) and any(
+            m in lowered for m in _STATUS_THROTTLE_MARKERS):
+        return ErrKind.MODEL
     if status == 429:
-        return ErrKind.MODEL if any(
-            m in lowered for m in ("00001041", "tpm", "并发")) else ErrKind.SOFT
+        return ErrKind.SOFT
     if status == 400:
         return ErrKind.INVALID
     return ErrKind.OTHER

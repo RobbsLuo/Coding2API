@@ -12,7 +12,14 @@ import json
 from typing import Any
 
 from ...engine.sse import SSEFrame
-from ...provider.base import ErrKind, Event, EventKind, Usage, business_codes
+from ...provider.base import (
+    ErrKind,
+    Event,
+    EventKind,
+    UpstreamProtocolViolation,
+    Usage,
+    business_codes,
+)
 
 # 有下游语义的事件名；其余（metadata/timing_cost/progress_notice/…）一律跳过。
 # 实测 progress_notice 的 data 可能不是 JSON 对象，提前短路避免误判协议违规。
@@ -36,9 +43,6 @@ EP_USER_INFO = "/cloudide/api/v3/trae/GetUserInfo"
 EP_CHECKIN_STATUS = "/trae/api/v2/ug/checkin_credits/status"
 EP_CHECKIN_CLAIM = "/trae/api/v2/ug/checkin_credits/claim"
 
-
-class UpstreamProtocolViolation(ValueError):
-    """上游事件违反可映射的结构约束（不静默吞掉）。"""
 
 
 def parse_frame(frame: SSEFrame) -> Event | None:

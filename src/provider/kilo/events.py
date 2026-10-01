@@ -24,11 +24,13 @@ import json
 from typing import Any
 
 from ...engine.sse import SSEFrame
-from ...provider.base import ErrKind, Event, EventKind, Usage
-
-
-class UpstreamProtocolViolation(ValueError):
-    """上游事件违反可映射的结构约束。"""
+from ...provider.base import (
+    ErrKind,
+    Event,
+    EventKind,
+    UpstreamProtocolViolation,
+    Usage,
+)
 
 
 def parse_frame(frame: SSEFrame) -> Event | None:

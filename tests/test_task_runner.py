@@ -91,6 +91,37 @@ async def test_runner_start_runs_initial_probe_without_pacing(repo):
         await runner.stop()
 
 
+async def test_runner_start_refreshes_expiring_credentials(repo):
+    """启动首轮刷新必须立即执行。
+
+    CodeArts 的一次性 refresh_token 现在只由 RefreshTask 轮转（额度探测不再
+    保活）。循环体是先睡后跑，若重启时凭证已落在到期窗口而不能抢先刷，就会
+    带病服务到下一轮（60 分钟），期间聊天 401 会被硬禁用。
+    """
+    import time as _time
+
+    credentials, db = repo
+    credentials.add(provider="codebuddy", credential_data={
+        "bearer_token": "old", "refresh_token": "RT", "auth_source": "oauth",
+        "expires_at": int(_time.time()) + 10})
+    provider = TaskProvider()
+    collector = StatsCollector(db)
+    runner = TaskRunner(
+        quota_probe=QuotaProbeTask(credentials, {"codebuddy": provider}, None),
+        checkin=CheckinTask(credentials, {"codebuddy": provider}),
+        refresh=RefreshTask(credentials, {"codebuddy": provider}, skew_seconds=3600),
+        retention=RetentionTask(collector),
+        quota_probe_minutes=60,
+    )
+    await runner.start()
+    try:
+        assert provider.refresh_calls == 1
+        assert credentials.credential_data(
+            credentials.candidates()[0].credential_id)["bearer_token"] == "NEW"
+    finally:
+        await runner.stop()
+
+
 async def test_runner_stop_cancels_all_loops(repo):
     provider = StubProvider()
     runner, _collector = _runner(repo, provider)

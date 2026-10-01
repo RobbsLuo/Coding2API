@@ -243,6 +243,7 @@ describe("display helpers", () => {
   it("探测失败原因有中文文案，且未知值有兜底", () => {
     expect(probeFailureLabel("credential_rejected")).toContain("重新登录");
     expect(probeFailureLabel("upstream_unavailable")).toContain("与本账号凭证无关");
+    expect(probeFailureLabel("network_unreachable")).toContain("连不上渠道服务器");
     expect(probeFailureLabel(undefined)).toBe("未知错误");
     expect(probeFailureLabel("something_new" as never)).toBe("未知错误");
   });

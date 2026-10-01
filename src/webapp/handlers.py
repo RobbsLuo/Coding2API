@@ -26,16 +26,7 @@ from ..compat.openai.request import InvalidRequest
 from ..db.crypto import CredentialDecryptError
 from ..engine.executor import NoHealthyCredential, NoProviderForModel
 from ..engine.model_resolver import UnknownModelError
-from ..provider.codearts.events import (
-    UpstreamProtocolViolation as CodeArtsProtocolViolation,
-)
-from ..provider.codebuddy.events import (
-    UpstreamProtocolViolation as CodeBuddyProtocolViolation,
-)
-from ..provider.qoder.events import (
-    UpstreamProtocolViolation as QoderProtocolViolation,
-)
-from ..provider.trae.events import UpstreamProtocolViolation
+from ..provider.base import UpstreamProtocolViolation
 
 logger = logging.getLogger(__name__)
 
@@ -64,21 +55,6 @@ def register_exception_handlers(app: FastAPI) -> None:
 
     @app.exception_handler(UpstreamProtocolViolation)
     async def _bad_credential(_request, error: UpstreamProtocolViolation):
-        return JSONResponse(status_code=400,
-                            content=error_payload(str(error), "invalid_credential", 400))
-
-    @app.exception_handler(CodeBuddyProtocolViolation)
-    async def _bad_codebuddy_credential(_request, error: CodeBuddyProtocolViolation):
-        return JSONResponse(status_code=400,
-                            content=error_payload(str(error), "invalid_credential", 400))
-
-    @app.exception_handler(CodeArtsProtocolViolation)
-    async def _bad_codearts_credential(_request, error: CodeArtsProtocolViolation):
-        return JSONResponse(status_code=400,
-                            content=error_payload(str(error), "invalid_credential", 400))
-
-    @app.exception_handler(QoderProtocolViolation)
-    async def _bad_qoder_credential(_request, error: QoderProtocolViolation):
         return JSONResponse(status_code=400,
                             content=error_payload(str(error), "invalid_credential", 400))
 

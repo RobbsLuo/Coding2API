@@ -89,9 +89,17 @@ class TaskRunner:
         return max(60, int(self._retention_minutes()) * 60)
 
     async def start(self) -> None:
-        """启动所有周期任务；首轮额度探测立即执行（不节流）。"""
+        """启动所有周期任务；首轮额度探测与 token 预刷新都立即执行（不节流）。
+
+        首轮刷新必须抢先跑：循环体是先睡后跑，而 CodeArts 的一次性
+        refresh_token 现在只由 RefreshTask 轮转（额度探测不再保活）。服务重启时
+        若凭证已落在到期窗口，不抢先刷就会带病服务到下一轮（60 分钟），期间
+        聊天 401 会被硬禁用。
+        """
         await self._guarded(self._quota_probe.run_once(apply_pacing=False),
                             "启动额度探测", key="quota_probe")
+        await self._guarded(self._refresh.run_once(),
+                            "启动 token 预刷新", key="refresh")
         loops: list[tuple[str, str, Callable[[], Awaitable[object]],
                           Callable[[], float]]] = [
             ("quota_probe", "额度探测", lambda: self._quota_probe.run_once(),

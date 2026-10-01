@@ -127,6 +127,35 @@ def test_qoder_codearts_min_intervals_are_hot():
     assert runtime.codearts_chat_min_interval == 2.5
 
 
+def test_codearts_max_concurrency_is_hot():
+    """CodeArts 每账号并发上限可热更：默认 3（对齐上游硬限），0 = 关闭上限。"""
+    assert "codearts_max_concurrency" in HOT_BY_KEY
+    runtime = RuntimeSettings(_settings(), _MemoryStore())
+    assert runtime.codearts_max_concurrency == 3
+    runtime.set("codearts_max_concurrency", 0)
+    assert runtime.codearts_max_concurrency == 0
+    runtime.set("codearts_max_concurrency", 8)
+    assert runtime.codearts_max_concurrency == 8
+
+
+def test_codearts_max_concurrency_rejects_negative():
+    from src.runtime_settings import InvalidSetting
+
+    runtime = RuntimeSettings(_settings(), _MemoryStore())
+    with pytest.raises(InvalidSetting):
+        runtime.set("codearts_max_concurrency", -1)
+
+
+def test_main_wires_codearts_concurrency_cap(admin_client):
+    """装配层必须把上限接到 CodeArts pacer，且读数实时跟随热更覆盖。"""
+    app, _client = admin_client
+    pacer = app.state.services.registry["codearts"].pacer
+    assert pacer.allow_concurrent is True
+    assert pacer.max_concurrency == 3        # 对齐上游每账号硬限
+    app.state.services.settings.set("codearts_max_concurrency", 0)
+    assert pacer.max_concurrency == 0        # 热更 0 = 关闭上限
+
+
 def test_qoder_codearts_min_intervals_reject_negative():
     from src.runtime_settings import InvalidSetting
 

@@ -123,6 +123,10 @@ class Settings(BaseSettings):
     qoder_chat_min_interval: float = 5
     # CodeArts 聊天最小间隔：真实账号渠道，默认 5s；独立节流器。
     codearts_chat_min_interval: float = 5
+    # CodeArts 每账号在途并发上限：上游硬限「并发会话数 3」，超限的请求直接
+    # 400 TM.00001041 并发超限（实测 77% 失败率的主因）。默认 3 对齐上游；
+    # 0 关闭上限（回到「有在途就放行」，会再次击穿）。可热更。
+    codearts_max_concurrency: int = 3
     # 内容风控自愈（11128）：出站 system/assistant 正文命中「伪装其他厂商
     # 官方客户端」指纹串时替换为占位符（客户端会话历史不受影响）。该拦截
     # 与凭证无关、换号无效，会话一旦带入指纹将持续 11128；false 关闭

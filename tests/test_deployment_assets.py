@@ -296,9 +296,14 @@ def test_build_web_is_executable():
 # ------------------------------------------------- 探测失败原因的分类
 
 def test_describe_probe_failure_maps_http_status_to_actionable_reason():
-    """探测失败原因必须可操作，不能是 Python 类名。"""
+    """探测失败原因必须可操作，不能是 Python 类名。
+
+    按基类分派，故 CB / TRAE / Qoder 的 `UpstreamHTTPError` 走同一分支
+    （Qoder 此前未被覆盖，401/403 会被误报成 unknown_error）。
+    """
     from src.api.admin_credentials import describe_probe_failure
     from src.provider.codebuddy.client import UpstreamHTTPError as CBHTTP
+    from src.provider.qoder.client import UpstreamHTTPError as QoderHTTP
     from src.provider.trae.client import UpstreamHTTPError as TraeHTTP
 
     assert describe_probe_failure(CBHTTP(401, b"")) == "credential_rejected"
@@ -306,17 +311,40 @@ def test_describe_probe_failure_maps_http_status_to_actionable_reason():
     assert describe_probe_failure(TraeHTTP(429, b"")) == "rate_limited"
     assert describe_probe_failure(TraeHTTP(503, b"")) == "upstream_unavailable"
     assert describe_probe_failure(TraeHTTP(400, b"")) == "upstream_rejected"
+    assert describe_probe_failure(QoderHTTP(401, b"")) == "credential_rejected"
+    assert describe_probe_failure(QoderHTTP(400, b"")) == "upstream_rejected"
 
 
 def test_describe_probe_failure_maps_protocol_violation():
     from src.api.admin_credentials import describe_probe_failure
+    from src.provider.base import UpstreamProtocolViolation
     from src.provider.codebuddy.events import (
         UpstreamProtocolViolation as CBViolation,
+    )
+    from src.provider.qoder.events import (
+        UpstreamProtocolViolation as QoderViolation,
     )
     from src.provider.trae.events import UpstreamProtocolViolation as TraeViolation
 
     assert describe_probe_failure(CBViolation("x")) == "upstream_response_invalid"
     assert describe_probe_failure(TraeViolation("x")) == "upstream_response_invalid"
+    assert describe_probe_failure(QoderViolation("x")) == "upstream_response_invalid"
+    # 全渠道共用同一基类：新增渠道自动被覆盖
+    assert isinstance(QoderViolation("x"), UpstreamProtocolViolation)
+
+
+def test_describe_probe_failure_maps_transport_errors_to_network_unreachable():
+    """连不上渠道（DNS / 连接被拒 / 建连超时）必须区别于「响应超时」。"""
+    import httpx
+
+    from src.api.admin_credentials import describe_probe_failure
+    from src.provider.base import UpstreamTransportError
+
+    assert describe_probe_failure(httpx.ConnectError("boom")) == "network_unreachable"
+    assert describe_probe_failure(httpx.ConnectTimeout("boom")) == "network_unreachable"
+    assert describe_probe_failure(UpstreamTransportError("boom")) == "network_unreachable"
+    # 已连上但读超时 → 超时（不是「网络不可达」）
+    assert describe_probe_failure(httpx.ReadTimeout("boom")) == "upstream_timeout"
 
 
 def test_describe_probe_failure_handles_timeout_and_unknown():

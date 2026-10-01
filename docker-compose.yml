@@ -72,6 +72,8 @@ services:
       # Qoder / CodeArts 聊天最小间隔（秒）：真实账号渠道，独立节流器
       QODER_CHAT_MIN_INTERVAL: ${QODER_CHAT_MIN_INTERVAL:-5}
       CODEARTS_CHAT_MIN_INTERVAL: ${CODEARTS_CHAT_MIN_INTERVAL:-5}
+      # CodeArts 每账号在途并发上限（上游硬限会话数 3）；0 关闭上限
+      CODEARTS_MAX_CONCURRENCY: ${CODEARTS_MAX_CONCURRENCY:-3}
       # 11128 内容风控自愈：中和出站正文里的伪装客户端指纹，false 关闭
       CODEBUDDY_SANITIZE_CHANNEL_MARKERS: ${CODEBUDDY_SANITIZE_CHANNEL_MARKERS:-true}
       # token 预刷新窗口（小时）

@@ -5,6 +5,7 @@ fixture 结构来自 codebuddy2api 的 codebuddy_oauth.py / credential_checkin.p
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import time
@@ -189,6 +190,89 @@ async def test_pacer_concurrent_skips_when_interval_already_elapsed():
     clock["t"] = 100.0
     await pacer.wait_turn("k")
     assert slept == []
+
+
+# ------------------------------------------- Pacer（并发模式：按桶在途上限）
+
+async def test_pacer_max_concurrency_blocks_until_release():
+    """名额满时新请求挂起，直到有请求 release 让位（CodeArts 每账号 3 并发）。"""
+    pacer = Pacer(0, 0, allow_concurrent=True, max_concurrency=2)
+    await pacer.wait_turn("k")
+    await pacer.wait_turn("k")
+    assert pacer.max_concurrency == 2
+    third = asyncio.create_task(pacer.wait_turn("k"))
+    await asyncio.sleep(0)                # 让 third 跑到「等名额」处
+    assert not third.done()               # 名额满 → 挂起
+    pacer.release("k")                    # 让出一个名额
+    await asyncio.wait_for(third, timeout=1)
+    pacer.release("k")
+    pacer.release("k")
+    assert pacer._inflight == {}
+
+
+async def test_pacer_max_concurrency_zero_is_unlimited():
+    """0 = 关闭上限，保持旧行为（桶内并发放行）。"""
+    pacer = Pacer(0, 0, allow_concurrent=True, max_concurrency=0)
+    for _ in range(10):
+        await pacer.wait_turn("k")
+    assert pacer.max_concurrency == 0
+    for _ in range(10):
+        pacer.release("k")
+
+
+async def test_pacer_max_concurrency_reads_live_limit():
+    """上限存取值器：运行中放宽对后续让位立即生效（热更）。"""
+    limit = {"n": 1}
+    pacer = Pacer(0, 0, allow_concurrent=True, max_concurrency=lambda: limit["n"])
+    await pacer.wait_turn("k")
+    assert pacer.max_concurrency == 1
+    blocked = asyncio.create_task(pacer.wait_turn("k"))
+    await asyncio.sleep(0)
+    assert not blocked.done()
+    limit["n"] = 3                         # 热更放宽
+    pacer.release("k")                     # 现有请求结束 → 唤醒等待者
+    await asyncio.wait_for(blocked, timeout=1)
+    pacer.release("k")
+
+
+async def test_pacer_max_concurrency_cancelled_waiter_does_not_leak():
+    """等待名额时被取消：不占用名额，桶回到干净状态。"""
+    pacer = Pacer(0, 0, allow_concurrent=True, max_concurrency=1)
+    await pacer.wait_turn("k")
+    waiter = asyncio.create_task(pacer.wait_turn("k"))
+    await asyncio.sleep(0)
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    pacer.release("k")
+    assert pacer._inflight == {}
+    await pacer.wait_turn("k")             # 名额未泄漏，可再次取得
+    pacer.release("k")
+
+
+async def test_pacer_max_concurrency_cancel_during_interval_sleep_rolls_back():
+    """预留名额后、补间隔睡眠中被取消：名额必须归还，否则该桶永久少一个。"""
+    gate = asyncio.Event()
+    clock = {"t": 0.0}
+
+    async def blocking_sleep(_seconds: float) -> None:
+        await gate.wait()
+
+    pacer = Pacer(5, 5, allow_concurrent=True, max_concurrency=1,
+                  sleep=blocking_sleep, now=lambda: clock["t"])
+    await pacer.wait_turn("k")             # 首次：不睡
+    pacer.release("k")                     # 桶空闲，但距上次开始 0s
+    task = asyncio.create_task(pacer.wait_turn("k"))
+    await asyncio.sleep(0)                 # 跑到补间隔睡眠处（已预留名额）
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert pacer._inflight == {}           # 名额已回滚
+
+
+def test_pacer_rejects_negative_max_concurrency():
+    with pytest.raises(ValueError):
+        Pacer(0, 0, allow_concurrent=True, max_concurrency=-1)
 
 
 def test_stable_key_degrades_to_provider_when_identity_missing():

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 
+import httpx
 from fastapi import APIRouter, Depends
 
 from ..audit.actions import (
@@ -30,16 +31,15 @@ def describe_probe_failure(error: Exception) -> str:
 
     不能直接暴露 Python 类名（如 UpstreamProtocolViolation）——那是实现细节，
     用户看到它既判断不出问题，也不知道下一步该做什么。
-    """
-    from ..provider.codebuddy.client import UpstreamHTTPError as CodeBuddyHTTPError
-    from ..provider.codebuddy.events import (
-        UpstreamProtocolViolation as CodeBuddyViolation,
-    )
-    from ..provider.trae.client import UpstreamHTTPError as TraeHTTPError
-    from ..provider.trae.events import UpstreamProtocolViolation as TraeViolation
 
-    http_errors = (CodeBuddyHTTPError, TraeHTTPError)
-    if isinstance(error, http_errors):
+    按**基类**分派：所有渠道的 `UpstreamHTTPError` 都继承
+    `provider.base.UpstreamHTTPError`，`UpstreamProtocolViolation` 也已收归
+    `provider.base`，故这里无需逐渠道 import——新增渠道自动被覆盖，不会像
+    早先那样只因漏 import 某家就退化成 `unknown_error`。
+    """
+    from ..provider.base import UpstreamHTTPError, UpstreamProtocolViolation
+
+    if isinstance(error, UpstreamHTTPError):
         status = getattr(error, "status", 0)
         if status in (401, 403):
             return "credential_rejected"      # 凭证失效，需要重新登录
@@ -48,10 +48,18 @@ def describe_probe_failure(error: Exception) -> str:
         if status >= 500:
             return "upstream_unavailable"     # 上游故障，与凭证无关
         return "upstream_rejected"            # 上游拒绝该请求
-    if isinstance(error, (CodeBuddyViolation, TraeViolation)):
+    if isinstance(error, UpstreamProtocolViolation):
         return "upstream_response_invalid"    # 响应结构不符，可能是上游改版
-    if isinstance(error, TimeoutError):
-        return "upstream_timeout"
+    if isinstance(error, (httpx.ConnectError, httpx.ConnectTimeout)):
+        # 连接阶段失败：DNS 解析失败 / 连不上域名 / 连接被拒 / 建连超时。
+        # 注意 `ConnectTimeout` 是 `TimeoutException` 而非 `ConnectError`
+        # 子类，故两类都要在这里列出。这是「网络不可达」，与「连上了但
+        # 读超时」的用户动作不同
+        return "network_unreachable"
+    if isinstance(error, (TimeoutError, httpx.TimeoutException)):
+        return "upstream_timeout"             # 已连上但响应超时
+    if isinstance(error, (httpx.TransportError, OSError)):
+        return "network_unreachable"          # 其余传输层失败（读中断 / TLS 中止）
     return "unknown_error"
 
 

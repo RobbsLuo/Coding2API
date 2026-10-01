@@ -20,7 +20,7 @@ import time
 import httpx
 import pytest
 
-from src.provider.base import ErrKind, EventKind
+from src.provider.base import ErrKind, Event, EventKind, Usage
 from src.provider.codearts import CodeArtsProvider, credential_key, dpop, signer
 from src.provider.codearts import auth as codearts_auth
 from src.provider.codearts import events as codearts_events
@@ -29,6 +29,7 @@ from src.provider.codearts.client import (
     CodeArtsClient,
     UpstreamHTTPError,
     _credit_rate,
+    _fill_estimated_credit,
     _flatten_content,
     _legacy_blocks,
     _models_from_items,
@@ -671,6 +672,34 @@ def test_client_credit_rate_and_ratio_parsing():
     assert _parse_ratio(None) is None
 
 
+def test_client_fill_estimated_credit_benefit_and_guards():
+    # 福利模型：输入 + 输出 token = 每日池消耗，标推算值（上游不给该字段）
+    event = Event(kind=EventKind.USAGE, usage=Usage(input_tokens=32, output_tokens=694))
+    _fill_estimated_credit(event, benefit=True)
+    assert event.usage.credit == 726 and event.usage.credit_estimated is True
+    # 上游将来真回传 credit → 不覆盖
+    upstream = Event(kind=EventKind.USAGE,
+                     usage=Usage(input_tokens=1, output_tokens=2, credit=9.5))
+    _fill_estimated_credit(upstream, benefit=True)
+    assert upstream.usage.credit == 9.5 and upstream.usage.credit_estimated is False
+    # 内置模型不扣每日池 → 不补
+    builtin = Event(kind=EventKind.USAGE, usage=Usage(input_tokens=1, output_tokens=2))
+    _fill_estimated_credit(builtin, benefit=False)
+    assert builtin.usage.credit is None and builtin.usage.credit_estimated is False
+    # 非 USAGE 事件 / 无 usage / 两个 token 都缺 → 都不猜
+    content = Event(kind=EventKind.CONTENT, content="x")
+    _fill_estimated_credit(content, benefit=True)
+    assert content.usage is None
+    _fill_estimated_credit(Event(kind=EventKind.USAGE), benefit=True)
+    empty = Event(kind=EventKind.USAGE, usage=Usage())
+    _fill_estimated_credit(empty, benefit=True)
+    assert empty.usage.credit is None
+    # 只给一半 token 也照算（另一侧按 0）
+    half = Event(kind=EventKind.USAGE, usage=Usage(output_tokens=5))
+    _fill_estimated_credit(half, benefit=True)
+    assert half.usage.credit == 5 and half.usage.credit_estimated is True
+
+
 def test_client_parse_balance_variants():
     assert parse_balance({}).probe_failed is True
     direct = parse_balance({"total": 100, "used": 30})
@@ -806,6 +835,24 @@ async def test_client_stream_chat_benefit_header_and_embedded_error():
     assert events[0].error_kind is ErrKind.OTHER
 
 
+async def test_client_stream_chat_benefit_usage_records_pool_credit():
+    """福利模型收尾帧的 usage → 补推算扣池额度（token 1:1），标 estimated。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers[codearts_events.HEADER_MAAS_TYPE] == (
+            codearts_events.MAAS_BENEFIT)
+        return httpx.Response(200, text=_sse(
+            {"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}],
+             "usage": {"prompt_tokens": 32, "completion_tokens": 694}},
+        ) + "data:[DONE]\n")
+
+    events = [e async for e in _client(handler).stream_chat(
+        _cred(), {"messages": [{"role": "user", "content": "x"}]},
+        "deepseek-v4-flash-0731")]
+    usage = next(e for e in events if e.kind is EventKind.USAGE).usage
+    assert usage.input_tokens == 32 and usage.output_tokens == 694
+    assert usage.credit == 726 and usage.credit_estimated is True
+
+
 async def test_client_stream_chat_legacy_and_http_error():
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.url.path == codearts_events.EP_CHAT
@@ -926,7 +973,13 @@ async def test_client_claim_benefit_and_quota_and_identity():
     assert await _client(urnless).caller_identity(_cred()) == ("p", "", "a")
 
 
-async def test_client_probe_quota_refreshes_in_window_and_survives_failure():
+async def test_client_probe_quota_never_refreshes_even_in_window():
+    """额度探测只读余额：即使凭证已在刷新窗口，也不得消费一次性 refresh_token。
+
+    刷新唯一归 `RefreshTask`（先落库再同步）。这里若刷新，会与 RefreshTask 抢
+    同一个一次性 token，后到的报 `the refresh token has been used` 且本处结果
+    不落库——实测由此把渠道打成硬失效。
+    """
     jwk = _jwk()
     sts_calls = 0
 
@@ -940,21 +993,8 @@ async def test_client_probe_quota_refreshes_in_window_and_survives_failure():
     client = _client(handler)
     expiring = _cred(refresh_token="rt", dpop_private_jwk=jwk,
                      expiration=int(time.time()) + 5)
-    quota = await client.probe_quota(expiring, refresh_skew=3600)
-    assert sts_calls == 1 and quota.remaining == 7
-    # 未进入窗口 → 不刷新
-    assert (await client.probe_quota(_cred(refresh_token="rt", dpop_private_jwk=jwk),
-                                     refresh_skew=3600)).remaining == 7
-    assert sts_calls == 1
-
-    def failing_sts(request: httpx.Request) -> httpx.Response:
-        if request.url.host == "sts.test":
-            return httpx.Response(500, content=b"sts down")
-        return httpx.Response(200, json={"total": 10, "used": 3})
-
-    failing = _client(failing_sts)
-    # 保活刷新失败不阻断余额探测（继续用旧凭证）
-    assert (await failing.probe_quota(expiring, refresh_skew=3600)).remaining == 7
+    quota = await client.probe_quota(expiring)
+    assert sts_calls == 0 and quota.remaining == 7
 
 
 async def test_client_refresh_token_rotates_via_sts():
@@ -1042,7 +1082,7 @@ async def test_provider_list_models_refresh_and_probe_quota():
             return httpx.Response(200, json=_token_response())
         return httpx.Response(200, json={"remaining": 9})
 
-    provider = CodeArtsProvider(client=_client(handler), refresh_skew_seconds=3600)
+    provider = CodeArtsProvider(client=_client(handler))
     models = await provider.list_models({})
     assert [m.id for m in models] == ["m1"]
     refreshed = await provider.refresh({"access_key_id": "AK", "secret_access_key": "SK",
@@ -1250,8 +1290,25 @@ def test_events_classify_status_branches():
     assert classify(404, b"") is ErrKind.SOFT
     assert classify(429, b"00001041") is ErrKind.MODEL
     assert classify(429, b"slow down") is ErrKind.SOFT
+    # 并发会话超限实测走 HTTP 400（不是 429）：必须判成可重试的 MODEL，
+    # 否则落 INVALID → 换号也没用、还不冷却（77% 失败率主因之一）。
+    throttle_body = ('{"error_code":"TM.00001041",'
+                     '"error_msg":"并发会话数已达上限(3个)，请关闭部分会话后重试。"}'
+                     ).encode()
+    assert classify(400, throttle_body) is ErrKind.MODEL
+    assert classify(400, b"rate limit exceeded") is ErrKind.MODEL
     assert classify(400, b"bad request") is ErrKind.INVALID
     assert classify(500, b"boom") is ErrKind.OTHER
+
+
+def test_events_parse_line_skips_structural_noise():
+    """心跳 / 被截断的裸括号行跳过，而不是让整条响应以 unparsable 失败。"""
+    snapshot = codearts_events.TextSnapshot()
+    assert codearts_events.parse_line("{", snapshot) == []
+    assert codearts_events.parse_line("  [  ", snapshot) == []
+    assert codearts_events.parse_line("", snapshot) == []
+    # 噪声跳过不吞真载荷
+    assert codearts_events.parse_line('{"text": "hi"}', snapshot)[0].content == "hi"
 
 
 async def test_events_iter_data_lines_skips_non_data_lines_only():

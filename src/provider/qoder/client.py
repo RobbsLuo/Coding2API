@@ -43,6 +43,7 @@ from ...provider.base import (
     EventKind,
     Model,
     Quota,
+    UpstreamTransportError,
 )
 from . import events as qoder_events
 from .cosy import CosySession, CosySessionCache, qoder_encode
@@ -310,7 +311,12 @@ class QoderClient:
                 continue
         if payload is None:
             # 循环里只吞传输/解析错（UpstreamHTTPError 会直接上抛），
-            # 走到这里说明所有主机都在传输层或 JSON 解析上失败。
+            # 走到这里说明所有主机都在传输层或 JSON 解析上失败。传输层失败
+            # 归 `UpstreamTransportError`（可翻译成 network_unreachable），
+            # 解析失败才是协议违规——两者的用户动作不同。
+            if isinstance(last_error, httpx.TransportError):
+                raise UpstreamTransportError(
+                    f"model list request failed: {last_error}") from last_error
             raise UpstreamProtocolViolation(
                 f"model list request failed: {last_error}") from last_error
         if not isinstance(payload, dict):
