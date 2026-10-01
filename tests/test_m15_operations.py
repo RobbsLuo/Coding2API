@@ -899,13 +899,21 @@ async def test_checkin_claim_error_paths():
         await client.claim(CodeBuddyCredential(bearer_token="t"))
     await client.aclose()
 
-    async def not_json(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=b"<html>")
+    async def rejected(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, content=b"nope")
 
-    client2 = CodeBuddyCheckin("https://e", client=_refresh_client(not_json))
+    client2 = CodeBuddyCheckin("https://e", client=_refresh_client(rejected))
     with pytest.raises(UpstreamProtocolViolation):
         await client2.claim(CodeBuddyCredential(bearer_token="t"))
     await client2.aclose()
+
+    async def not_json(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"<html>")
+
+    client3 = CodeBuddyCheckin("https://e", client=_refresh_client(not_json))
+    with pytest.raises(UpstreamProtocolViolation):
+        await client3.claim(CodeBuddyCredential(bearer_token="t"))
+    await client3.aclose()
 
 
 async def test_checkin_lazy_client_and_close():
@@ -1671,12 +1679,35 @@ def test_upstream_auth_rejects_non_admin(tmp_path):
                            json={"provider": "codebuddy"}).status_code == 403
 
 
+class _StubCodeBuddy:
+    """探测 / 签到桩 provider：本用例只验证端点接线，绝不出网。
+
+    V1 版本直接打真实上游（probe 容错 502、checkin 不设容错），CI 网络抖动时
+    checkin 收到 502 就会红——测试不得依赖网络，故注入确定性桩。
+    """
+
+    id = "codebuddy"
+
+    async def probe_quota(self, _data):
+        return Quota(remaining=7, total=10, probed_at=1)
+
+    async def checkin(self, _data):
+        return CheckinResult(ok=True, credit=5, code=0, message="ok")
+
+
 def test_credential_probe_and_checkin_endpoints(admin_client):
     app, client = admin_client
+    # 端点按 provider_id 现查 registry（同一 dict 对象），替换该条目即可隔离上游
+    app.state.services.registry["codebuddy"] = _StubCodeBuddy()
     credential_id = app.state.credentials.add(
         provider="codebuddy", credential_data={"bearer_token": "t", "account_uid": "u"})
-    assert client.post(f"/api/credentials/{credential_id}/probe").status_code in (200, 502)
-    assert client.post(f"/api/credentials/{credential_id}/checkin").status_code in (200, 400)
+    probe = client.post(f"/api/credentials/{credential_id}/probe")
+    assert probe.status_code == 200
+    assert probe.json()["probed"] is True
+    checkin = client.post(f"/api/credentials/{credential_id}/checkin")
+    assert checkin.status_code == 200
+    assert checkin.json() == {"ok": True, "credit": 5, "code": 0, "message": "ok",
+                              "already_checked_in": False, "status": None}
     assert client.post("/api/credentials/ghost/probe").status_code == 400
     assert client.post("/api/credentials/ghost/checkin").status_code == 400
 
