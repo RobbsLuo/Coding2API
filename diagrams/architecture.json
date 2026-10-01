@@ -4,12 +4,18 @@
   "meta": {
     "title": "coding2api 技术架构",
     "locale": "zh-CN",
-    "output": "coding2api-architecture.html",
+    "output": "diagrams/coding2api-architecture.html",
     "quality_profile": "showcase",
     "viewBox": [
-      1120,
-      640
+      1100,
+      860
     ],
+    "repository": {
+      "url": "git@github.com:RobbsLuo/Coding2API.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "fe3a85881d664b99cd19cc4db61c2aec9748df2a"
+    },
     "views": [
       {
         "id": "request-path",
@@ -18,14 +24,21 @@
           "clients",
           "openai",
           "engine",
+          "registry",
           "cb",
           "trae",
           "zen",
+          "kilo",
+          "qoder",
+          "codearts",
           "cb-up",
           "trae-up",
-          "zen-up"
+          "zen-up",
+          "kilo-up",
+          "qoder-up",
+          "codearts-up"
         ],
-        "note": "客户端请求经协议层规范化，由执行引擎选号后流式转发到上游。"
+        "note": "客户端请求经协议层规范化，由执行引擎按健康度与到期选号后流式转发到六家上游。"
       },
       {
         "id": "admin-plane",
@@ -44,10 +57,15 @@
         "label": "后台面",
         "focus": [
           "bg",
+          "registry",
           "cb",
-          "trae"
+          "trae",
+          "zen",
+          "kilo",
+          "qoder",
+          "codearts"
         ],
-        "note": "签到、额度探测、token 预刷新、成长中心、活跃上报与明细清理经 provider 客户端触达上游，运行态汇总到「任务与配置」页。"
+        "note": "7 类循环（额度探测 / 预刷新 / 签到 / 成长 / 活跃 / 明细清理 / 模型目录）与请求面共用同一 Provider 注册表，经各渠道客户端触达上游，运行态汇总到「任务与配置」页。"
       },
       {
         "id": "identity-plane",
@@ -58,7 +76,7 @@
           "admin-api",
           "db"
         ],
-        "note": "管理面身份来自 users 表：会话 Cookie 校验签名与 epoch，角色每请求现读 DB；登录与账号变动写审计。"
+        "note": "管理面身份来自 users 表：会话 Cookie 校验签名与 epoch，角色每请求现读 DB；登录、账号变动与凭证操作写审计。"
       }
     ]
   },
@@ -70,13 +88,25 @@
       "sublabel": "sk- 摘要校验",
       "pos": [
         20,
-        70
+        60
       ],
       "size": [
         140,
         64
       ],
-      "tag": "sk-"
+      "tag": "sk-",
+      "sources": [
+        {
+          "path": "src/auth/api_key.py",
+          "line": 16,
+          "label": "digest_api_key"
+        },
+        {
+          "path": "src/api/deps.py",
+          "line": 157,
+          "label": "api_key_user"
+        }
+      ]
     },
     {
       "id": "admin-ui",
@@ -84,12 +114,24 @@
       "label": "React 管理台",
       "sublabel": "凭证 / 用户 / 统计 / 配置",
       "pos": [
-        260,
-        70
+        248,
+        60
       ],
       "size": [
         140,
         64
+      ],
+      "sources": [
+        {
+          "path": "web/src/App.tsx",
+          "line": 23,
+          "label": "App"
+        },
+        {
+          "path": "web/src/Layout.tsx",
+          "line": 34,
+          "label": "adminNav"
+        }
       ]
     },
     {
@@ -98,12 +140,24 @@
       "label": "管理 API",
       "sublabel": "/api/* · 会话 + RBAC",
       "pos": [
-        500,
-        70
+        558,
+        60
       ],
       "size": [
         140,
         64
+      ],
+      "sources": [
+        {
+          "path": "src/api/deps.py",
+          "line": 106,
+          "label": "principal_from_request"
+        },
+        {
+          "path": "src/api/admin_credentials.py",
+          "line": 72,
+          "label": "GET /api/credentials"
+        }
       ]
     },
     {
@@ -112,14 +166,26 @@
       "label": "账号与权限",
       "sublabel": "三角色 · 会话 epoch",
       "pos": [
-        760,
-        70
+        808,
+        60
       ],
       "size": [
         140,
         64
       ],
-      "tag": "RBAC"
+      "tag": "RBAC",
+      "sources": [
+        {
+          "path": "src/auth/rbac.py",
+          "line": 23,
+          "label": "Principal"
+        },
+        {
+          "path": "src/auth/session.py",
+          "line": 38,
+          "label": "verify_session_token"
+        }
+      ]
     },
     {
       "id": "clients",
@@ -128,100 +194,289 @@
       "sublabel": "OpenCode / Cline 等",
       "pos": [
         20,
-        280
+        300
       ],
       "size": [
         140,
         64
+      ],
+      "sources": [
+        {
+          "path": "src/api/chat.py",
+          "line": 45,
+          "label": "/v1/chat/completions"
+        }
       ]
     },
     {
       "id": "openai",
       "type": "backend",
       "label": "OpenAI 协议出口",
-      "sublabel": "chat/completions + responses",
+      "sublabel": "chat + responses",
       "pos": [
-        260,
-        280
+        248,
+        300
       ],
       "size": [
         140,
         64
       ],
-      "tag": "FastAPI"
+      "tag": "FastAPI",
+      "sources": [
+        {
+          "path": "src/api/chat.py",
+          "line": 45
+        },
+        {
+          "path": "src/api/responses.py",
+          "line": 35
+        },
+        {
+          "path": "src/api/models.py",
+          "line": 585
+        }
+      ]
     },
     {
       "id": "engine",
       "type": "backend",
       "label": "执行引擎",
-      "sublabel": "选号 + 冷却状态机 + 粘性/续写",
+      "sublabel": "选号 + 冷却 + 粘性",
       "pos": [
-        500,
-        280
+        558,
+        300
       ],
       "size": [
         140,
         64
       ],
-      "tag": "三态健康度"
+      "tag": "三态健康度",
+      "sources": [
+        {
+          "path": "src/engine/executor.py",
+          "line": 90,
+          "label": "Executor"
+        },
+        {
+          "path": "src/engine/scheduler.py",
+          "line": 207,
+          "label": "Scheduler.select"
+        }
+      ]
     },
     {
-      "id": "cb",
+      "id": "registry",
       "type": "backend",
-      "label": "CodeBuddy Provider",
-      "sublabel": "OAuth / 额度 / 签到 / 成长",
+      "label": "Provider 适配层",
+      "sublabel": "registry · 六渠道",
       "pos": [
-        760,
-        150
+        558,
+        440
       ],
       "size": [
         140,
         64
+      ],
+      "tag": "6 渠道",
+      "sources": [
+        {
+          "path": "src/main.py",
+          "line": 281,
+          "label": "registry"
+        },
+        {
+          "path": "src/provider/base.py",
+          "line": 1,
+          "label": "Provider 协议"
+        }
+      ]
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "SQLite",
+      "sublabel": "账号 + 凭证 + 统计 + 审计",
+      "pos": [
+        248,
+        440
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "tag": "WAL · 10 表",
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 18,
+          "label": "api_keys"
+        },
+        {
+          "path": "src/db/migrate.py",
+          "line": 31,
+          "label": "SCHEMA_VERSION=15"
+        },
+        {
+          "path": "src/db/repo.py",
+          "line": 95,
+          "label": "CredentialRepository"
+        }
       ]
     },
     {
       "id": "bg",
       "type": "backend",
       "label": "后台任务",
-      "sublabel": "探测 / 签到 / 成长 / 清理",
+      "sublabel": "探测 / 签到 / 清理",
       "pos": [
-        760,
-        280
+        808,
+        440
       ],
       "size": [
         140,
         64
       ],
-      "tag": "节流器"
+      "tag": "7 类循环",
+      "sources": [
+        {
+          "path": "src/tasks/runner.py",
+          "line": 278,
+          "label": "build_runner"
+        },
+        {
+          "path": "src/tasks/status.py",
+          "line": 32,
+          "label": "TASK_SPECS"
+        }
+      ]
+    },
+    {
+      "id": "cb",
+      "type": "backend",
+      "label": "CodeBuddy",
+      "sublabel": "OAuth / 额度 / 签到",
+      "pos": [
+        190,
+        620
+      ],
+      "size": [
+        125,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/provider/codebuddy/client.py",
+          "line": 570,
+          "label": "CodeBuddyProvider"
+        }
+      ]
     },
     {
       "id": "trae",
       "type": "backend",
-      "label": "TRAE Provider",
+      "label": "TRAE",
       "sublabel": "回调 / 刷新 / 额度",
       "pos": [
-        760,
-        410
+        340,
+        620
       ],
       "size": [
-        140,
+        125,
         64
+      ],
+      "sources": [
+        {
+          "path": "src/provider/trae/client.py",
+          "line": 602,
+          "label": "TraeProvider"
+        }
       ]
     },
     {
       "id": "zen",
       "type": "backend",
-      "label": "OpenCode Zen Provider",
+      "label": "OpenCode Zen",
       "sublabel": "免费层 · 虚拟凭证",
       "pos": [
-        760,
-        540
+        490,
+        620
       ],
       "size": [
-        140,
+        125,
         64
       ],
-      "tag": "免费层"
+      "tag": "免费层",
+      "sources": [
+        {
+          "path": "src/provider/zen/client.py",
+          "line": 371,
+          "label": "ZenProvider"
+        }
+      ]
+    },
+    {
+      "id": "kilo",
+      "type": "backend",
+      "label": "Kilo Gateway",
+      "sublabel": "免费层 · 虚拟凭证",
+      "pos": [
+        640,
+        620
+      ],
+      "size": [
+        125,
+        64
+      ],
+      "tag": "免费层",
+      "sources": [
+        {
+          "path": "src/provider/kilo/client.py",
+          "line": 193,
+          "label": "KiloProvider"
+        }
+      ]
+    },
+    {
+      "id": "qoder",
+      "type": "backend",
+      "label": "Qoder",
+      "sublabel": "设备码 PKCE / COSY",
+      "pos": [
+        790,
+        620
+      ],
+      "size": [
+        125,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/provider/qoder/__init__.py",
+          "line": 67,
+          "label": "QoderProvider"
+        }
+      ]
+    },
+    {
+      "id": "codearts",
+      "type": "backend",
+      "label": "CodeArts",
+      "sublabel": "AK/SK 签名",
+      "pos": [
+        940,
+        620
+      ],
+      "size": [
+        125,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/provider/codearts/__init__.py",
+          "line": 45,
+          "label": "CodeArtsProvider"
+        }
+      ]
     },
     {
       "id": "cb-up",
@@ -229,12 +484,19 @@
       "label": "CodeBuddy 上游",
       "sublabel": "copilot.tencent.com",
       "pos": [
-        980,
-        150
+        190,
+        760
       ],
       "size": [
-        140,
+        125,
         64
+      ],
+      "sources": [
+        {
+          "path": "src/config.py",
+          "line": 14,
+          "label": "_CODEBUDDY_CN"
+        }
       ]
     },
     {
@@ -243,42 +505,104 @@
       "label": "TRAE 上游",
       "sublabel": "trae-api-cn.mchost.guru",
       "pos": [
-        980,
-        410
+        340,
+        760
       ],
       "size": [
-        140,
+        125,
         64
+      ],
+      "sources": [
+        {
+          "path": "src/provider/trae/client.py",
+          "line": 305,
+          "label": "AGENT_HOST"
+        }
       ]
     },
     {
       "id": "zen-up",
       "type": "external",
-      "label": "OpenCode Zen 上游",
+      "label": "Zen 上游",
       "sublabel": "opencode.ai/zen",
       "pos": [
-        980,
-        540
+        490,
+        760
       ],
       "size": [
-        140,
+        125,
         64
+      ],
+      "sources": [
+        {
+          "path": "src/config.py",
+          "line": 48,
+          "label": "zen_api_endpoint"
+        }
       ]
     },
     {
-      "id": "db",
-      "type": "database",
-      "label": "SQLite",
-      "sublabel": "账号 + 加密凭证 + 统计 + 审计",
+      "id": "kilo-up",
+      "type": "external",
+      "label": "Kilo 上游",
+      "sublabel": "api.kilo.ai/gateway",
       "pos": [
-        500,
-        520
+        640,
+        760
       ],
       "size": [
-        140,
+        125,
         64
       ],
-      "tag": "WAL · 10 表"
+      "sources": [
+        {
+          "path": "src/provider/kilo/client.py",
+          "line": 42,
+          "label": "KILO_HOST"
+        }
+      ]
+    },
+    {
+      "id": "qoder-up",
+      "type": "external",
+      "label": "Qoder 上游",
+      "sublabel": "openapi.qoder.com.cn",
+      "pos": [
+        790,
+        760
+      ],
+      "size": [
+        125,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/config.py",
+          "line": 58,
+          "label": "qoder_api_endpoint"
+        }
+      ]
+    },
+    {
+      "id": "codearts-up",
+      "type": "external",
+      "label": "CodeArts 上游",
+      "sublabel": "snap-access.myhuaweicloud",
+      "pos": [
+        940,
+        760
+      ],
+      "size": [
+        125,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/config.py",
+          "line": 67,
+          "label": "codearts_api_endpoint"
+        }
+      ]
     }
   ],
   "boundaries": [
@@ -288,10 +612,14 @@
       "wraps": [
         "openai",
         "engine",
+        "registry",
         "cb",
-        "bg",
         "trae",
         "zen",
+        "kilo",
+        "qoder",
+        "codearts",
+        "bg",
         "admin-ui",
         "admin-api",
         "identity",
@@ -315,54 +643,119 @@
       "label": "规范化"
     },
     {
-      "id": "engine-to-cb",
+      "id": "engine-to-registry",
       "from": "engine",
+      "to": "registry",
+      "label": "派发",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [
+        [
+          628.0,
+          410
+        ]
+      ]
+    },
+    {
+      "id": "registry-to-cb",
+      "from": "registry",
       "to": "cb",
-      "label": "健康度+到期选号",
-      "fromSide": "right",
-      "toSide": "left",
+      "label": "适配",
+      "fromSide": "bottom",
+      "toSide": "top",
       "via": [
         [
-          700,
-          312
+          628.0,
+          560
         ],
         [
-          700,
-          182
+          252.5,
+          560
         ]
       ]
     },
     {
-      "id": "engine-to-trae",
-      "from": "engine",
+      "id": "registry-to-trae",
+      "from": "registry",
       "to": "trae",
-      "fromSide": "right",
-      "toSide": "left",
+      "fromSide": "bottom",
+      "toSide": "top",
       "via": [
         [
-          745,
-          312
+          628.0,
+          560
         ],
         [
-          745,
-          442
+          402.5,
+          560
         ]
       ]
     },
     {
-      "id": "engine-to-zen",
-      "from": "engine",
+      "id": "registry-to-zen",
+      "from": "registry",
       "to": "zen",
-      "fromSide": "right",
-      "toSide": "left",
+      "fromSide": "bottom",
+      "toSide": "top",
       "via": [
         [
-          720,
-          312
+          628.0,
+          560
         ],
         [
-          720,
-          572
+          552.5,
+          560
+        ]
+      ]
+    },
+    {
+      "id": "registry-to-kilo",
+      "from": "registry",
+      "to": "kilo",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [
+        [
+          628.0,
+          560
+        ],
+        [
+          702.5,
+          560
+        ]
+      ]
+    },
+    {
+      "id": "registry-to-qoder",
+      "from": "registry",
+      "to": "qoder",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [
+        [
+          628.0,
+          560
+        ],
+        [
+          852.5,
+          560
+        ]
+      ]
+    },
+    {
+      "id": "registry-to-codearts",
+      "from": "registry",
+      "to": "codearts",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "via": [
+        [
+          628.0,
+          560
+        ],
+        [
+          1002.5,
+          560
         ]
       ]
     },
@@ -388,34 +781,34 @@
       "variant": "emphasis"
     },
     {
-      "id": "bg-to-cb",
-      "from": "bg",
-      "to": "cb",
-      "variant": "dashed",
-      "fromSide": "right",
-      "toSide": "bottom",
-      "via": [
-        [
-          940,
-          312
-        ],
-        [
-          940,
-          282
-        ],
-        [
-          830,
-          282
-        ]
-      ]
+      "id": "kilo-to-kiloup",
+      "from": "kilo",
+      "to": "kilo-up",
+      "label": "SSE",
+      "variant": "emphasis"
     },
     {
-      "id": "bg-to-trae",
+      "id": "qoder-to-qoderup",
+      "from": "qoder",
+      "to": "qoder-up",
+      "label": "SSE",
+      "variant": "emphasis"
+    },
+    {
+      "id": "codearts-to-codeartsup",
+      "from": "codearts",
+      "to": "codearts-up",
+      "label": "SSE",
+      "variant": "emphasis"
+    },
+    {
+      "id": "bg-to-registry",
       "from": "bg",
-      "to": "trae",
+      "to": "registry",
+      "label": "共享客户端",
       "variant": "dashed",
-      "fromSide": "bottom",
-      "toSide": "top"
+      "fromSide": "left",
+      "toSide": "right"
     },
     {
       "id": "engine-to-db",
@@ -425,17 +818,22 @@
       "variant": "dashed",
       "fromSide": "bottom",
       "toSide": "top",
-      "labelAt": [
-        590,
-        450
+      "via": [
+        [
+          628.0,
+          410
+        ],
+        [
+          318.0,
+          410
+        ]
       ]
     },
     {
       "id": "admin-ui-to-api",
       "from": "admin-ui",
       "to": "admin-api",
-      "label": "会话 Cookie",
-      "labelDy": 20
+      "label": "会话"
     },
     {
       "id": "admin-api-to-engine",
@@ -443,11 +841,7 @@
       "to": "engine",
       "label": "同进程调用",
       "fromSide": "bottom",
-      "toSide": "top",
-      "labelAt": [
-        610,
-        240
-      ]
+      "toSide": "top"
     },
     {
       "id": "auth-to-openai",
@@ -455,22 +849,8 @@
       "to": "openai",
       "label": "校验",
       "variant": "security",
-      "fromSide": "right",
-      "toSide": "top",
-      "via": [
-        [
-          210,
-          102
-        ],
-        [
-          210,
-          250
-        ],
-        [
-          330,
-          250
-        ]
-      ]
+      "fromSide": "bottom",
+      "toSide": "top"
     },
     {
       "id": "admin-api-to-identity",
@@ -498,15 +878,15 @@
       "items": [
         "选号：pin → 粘性 → 到期积分 → 三态健康度",
         "模型级冷却隔离到单个模型，不牵连整条凭证",
-        "三渠道同池调度；6 个后台任务汇总「任务与配置」"
+        "六渠道同池调度；7 类后台任务汇总「任务与配置」"
       ]
     },
     {
       "dot": "rose",
       "title": "数据与安全",
       "items": [
-        "SQLite WAL 10 表；13 项配置热更",
-        "三角色 RBAC + 会话 epoch 吊销；审计留痕",
+        "SQLite WAL 10 表；19 项配置热更",
+        "三角色 RBAC + 会话 epoch 吊销；审计留痕（90 天）",
         "凭证加密 + 统计脱敏；API Key 摘要"
       ]
     }
