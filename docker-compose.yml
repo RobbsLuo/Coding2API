@@ -77,6 +77,9 @@ services:
       CODEARTS_CHAT_MIN_INTERVAL: ${CODEARTS_CHAT_MIN_INTERVAL:-5}
       # CodeArts 每账号在途并发上限（上游硬限会话数 3）；0 关闭上限
       CODEARTS_MAX_CONCURRENCY: ${CODEARTS_MAX_CONCURRENCY:-3}
+      # CodeArts 账号滑动窗口（秒）：与上限组合成「窗口内最多启动 N 次」，
+      # 对齐上游「每账号每约 60s 最多 3 个会话」；0 关闭窗口口径
+      CODEARTS_REQUEST_WINDOW_SECONDS: ${CODEARTS_REQUEST_WINDOW_SECONDS:-60}
       # 11128 内容风控自愈：中和出站正文里的伪装客户端指纹，false 关闭
       CODEBUDDY_SANITIZE_CHANNEL_MARKERS: ${CODEBUDDY_SANITIZE_CHANNEL_MARKERS:-true}
       # token 预刷新窗口（小时）

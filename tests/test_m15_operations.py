@@ -282,6 +282,147 @@ def test_stable_key_degrades_to_provider_when_identity_missing():
     assert stable_key("codebuddy", "acct-1") != stable_key("trae", "acct-1")
 
 
+# --------------------------------------- Pacer（并发模式：滑动窗口口径）
+
+@pytest.mark.parametrize("bad", [-1, -0.5])
+def test_pacer_rejects_negative_window(bad):
+    with pytest.raises(ValueError):
+        Pacer(0, 0, allow_concurrent=True, max_concurrency=3,
+              window_seconds=bad)
+
+
+async def test_pacer_window_blocks_after_release_until_slot_expires():
+    """核心回归：打满窗口后，即使 release 让出在途名额，也不能立刻再发。
+
+    这正是 CodeArts「用了三次就限制」的上游口径——会话在流结束后仍滞留，
+    纯在途上限挡不住「3 个刚结束就再发 3 个」。
+    """
+    slept: list[float] = []
+    clock = {"t": 0.0}
+    gate = asyncio.Event()
+
+    async def gated_sleep(seconds: float) -> None:
+        slept.append(seconds)
+        await gate.wait()                        # 真正挂起，便于断言「仍在等」
+        clock["t"] += seconds
+
+    pacer = Pacer(0, 0, allow_concurrent=True, max_concurrency=3,
+                  window_seconds=60, sleep=gated_sleep, now=lambda: clock["t"])
+    assert pacer.window_seconds == 60
+
+    await pacer.wait_turn("k")                   # t=0，窗口 [0,3/60]
+    await pacer.wait_turn("k")
+    await pacer.wait_turn("k")
+    # 三个都结束、名额全归还——纯在途模式下第 4 个本该放行
+    pacer.release("k")
+    pacer.release("k")
+    pacer.release("k")
+
+    fourth = asyncio.create_task(pacer.wait_turn("k"))
+    await asyncio.sleep(0)
+    assert not fourth.done()                     # 窗口满 → 仍挂起
+    assert slept == [60.0]                       # 要等到最早一次启动滑出窗口
+    # 恢复由「最早一次启动滑出窗口」驱动：t=0 的启动在 t=60 过期。
+    gate.set()
+    await asyncio.wait_for(fourth, timeout=1)
+    assert clock["t"] == 60.0
+
+
+async def test_pacer_window_is_per_bucket():
+    """窗口按桶独立：一个账号窗口打满不影响另一个账号。"""
+    clock = {"t": 0.0}
+
+    async def fake_sleep(seconds: float) -> None:
+        clock["t"] += seconds
+
+    pacer = Pacer(0, 0, allow_concurrent=True, max_concurrency=1,
+                  window_seconds=60, sleep=fake_sleep, now=lambda: clock["t"])
+    await pacer.wait_turn("a")
+    pacer.release("a")
+    await pacer.wait_turn("b")                   # 独立桶：不睡
+    assert clock["t"] == 0.0
+
+
+async def test_pacer_window_cancel_rolls_back_start():
+    """窗口模式下、补最小间隔睡眠中被取消：不白占窗口配额。"""
+    gate = asyncio.Event()
+    clock = {"t": 0.0}
+
+    async def blocking_sleep(_seconds: float) -> None:
+        await gate.wait()
+
+    pacer = Pacer(5, 5, allow_concurrent=True, max_concurrency=3,
+                  window_seconds=60, sleep=blocking_sleep,
+                  now=lambda: clock["t"])
+    await pacer.wait_turn("k")                   # 首次不睡，登记窗口启动（t=0）
+    pacer.release("k")
+    clock["t"] = 1.0
+    task = asyncio.create_task(pacer.wait_turn("k"))  # 桶空闲 → 补 5s 睡眠
+    await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert pacer._inflight == {}
+    # t=1.0 那次未真正发起的登记已抹掉，只剩 t=0 的合法登记
+    assert pacer._starts == {"k": [0.0]}
+
+
+async def test_pacer_window_rollback_skips_pruned_registration():
+    """窗口登记在睡眠期间被别的等待者 prune 掉后取消：不因找不到而报错。"""
+    gate = asyncio.Event()
+    clock = {"t": 0.0}
+
+    async def blocking_sleep(_seconds: float) -> None:
+        await gate.wait()
+
+    pacer = Pacer(5, 5, allow_concurrent=True, max_concurrency=3,
+                  window_seconds=1, sleep=blocking_sleep,
+                  now=lambda: clock["t"])
+    await pacer.wait_turn("k")                   # t=0，登记 [0]
+    pacer.release("k")
+    clock["t"] = 0.5
+    task = asyncio.create_task(pacer.wait_turn("k"))  # 登记 [0, 0.5] 后补 4.5s 睡眠
+    await asyncio.sleep(0)
+    clock["t"] = 3.0                             # 窗口滑过 → 另一个等待者 prune 掉 0/0.5
+    await pacer.wait_turn("k")                   # 重新登记 [3]
+    pacer.release("k")
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert pacer._starts == {"k": [3.0]}         # 只抹掉自己的登记，不动别人的
+
+
+async def test_pacer_window_disabled_falls_back_to_inflight():
+    """window_seconds=0：退回纯在途口径，release 立即放行（旧行为）。"""
+    pacer = Pacer(0, 0, allow_concurrent=True, max_concurrency=1)
+    assert pacer.window_seconds == 0.0
+    await pacer.wait_turn("k")
+    releaser = asyncio.create_task(asyncio.sleep(0))
+    await releaser
+    pacer.release("k")
+    await asyncio.wait_for(pacer.wait_turn("k"), timeout=1)  # 立刻放行
+    pacer.release("k")
+
+
+async def test_pacer_window_reads_live_length():
+    """窗口长度存取值器：热更后立即影响过期判定。"""
+    clock = {"t": 0.0}
+    win = {"n": 60.0}
+
+    async def fake_sleep(seconds: float) -> None:
+        clock["t"] += seconds
+
+    pacer = Pacer(0, 0, allow_concurrent=True, max_concurrency=1,
+                  window_seconds=lambda: win["n"], sleep=fake_sleep,
+                  now=lambda: clock["t"])
+    await pacer.wait_turn("k")
+    pacer.release("k")
+    win["n"] = 5.0                               # 热更：缩短窗口
+    clock["t"] = 10.0                            # 原 60s 窗口下仍未过期
+    await asyncio.wait_for(pacer.wait_turn("k"), timeout=1)
+    pacer.release("k")
+
+
 def test_task_report_dict():
     report = TaskReport(attempted=3, succeeded=2, failed=1, skipped=4)
     assert report.as_dict() == {"attempted": 3, "succeeded": 2, "failed": 1, "skipped": 4}

@@ -707,6 +707,8 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **名额泄漏修复（2026-10-02）**：上一条引入的 `max_concurrency` 依赖 `release` 与 `wait_turn` 严格配对，而 `release` 在 provider `stream_chat` 的 `finally` 里——`async for ... break` **不关闭** async generator（CPython 只在耗尽 / 显式 `aclose()` / GC 的 asyncgen finalizer 时才跑 `finally`）。executor `_stream_loop` 遇 `EventKind.ERROR` 的两处 `break` 于是让名额推迟归还；轮换重试每次重新 `wait_turn`，`_inflight` 单调累积，满 3 后新请求在 `wait_turn` 无限阻塞——表现为**「用了三次就限制」而非「并发三」**（复现：3 次流内错误后 `inflight=3`，第 4 个请求永久阻塞）。注意这推翻了 Q45 的原始判断（「延迟归还只会让节流略松、不会误排队」）：`max_concurrency=0` 时泄漏确实只是变松，配上上限后泄漏即**永久丢失许可**。修复：`provider.base.aclose_stream` 统一关闭，`stream_guarded` / `stream` / `_stream_loop` / `complete` / `ContinuationStream.__aiter__` 五处提前结束消费处全部显式关闭上游流。回归测试 `tests/test_stream_slot_release.py`（10 例，旧代码上 6 例失败）。
 
+**节流窗口对齐上游口径（2026-10-02）**：泄漏修好后实测仍偶发 `TM.00001041`——排查确认上游限制的不是「同时在途 HTTP 数」而是「**每账号每约 60s 最多 3 个会话**」。证据（单账号、真实上游）：① 3 并发请求结束后、名额已全部归还，**紧接着**再发 3 个全部 400；② 打满 3 并发后每 6s 探一个单请求，直到约 **68s** 才恢复；③ 完全顺序（零并发）、每个请求都换全新 `httpx` client 并显式关闭，仍是前 3 个 OK、第 4 个起全 400；④ 间隔 30s 顺序发 6 个则 6/6 OK。即会话在 HTTP 流结束后仍滞留数十秒，纯在途上限（`max_concurrency`）挡不住「3 个刚结束就立刻再发 3 个」这类突发，`release` 一让位新请求就再次击穿。故 `Pacer` 增加**滑动窗口**口径：`window_seconds > 0` 时与 `max_concurrency` 组合成「同桶最近 `window_seconds` 秒内最多放行 N 次启动」，窗口内满额则挂起到最早一次启动滑出窗口（睡 `starts[0] + window_seconds - now`，醒来重查，`release` 只减在途计数、不提前让出窗口配额）。CodeArts pacer 装配 `window_seconds=lambda: runtime.codearts_request_window_seconds`（热更项，默认 60s；`0` 关闭窗口口径退回纯在途上限）。取 60s 是**实测下界**（68s 附近恢复，留少量余量）对上「每账号 3 会话」的保守对齐；代价是高频使用时账号吞吐降到约 3 次/分钟，超出部分排队而非报错。窗口模式配 `max_concurrency=0` 时不生效（退回纯放行）；`window_seconds` 与在途上限都保留，`0` 均可热更关闭。
+
 ---
 
 ## 4. Provider 协议（Q16=A 细接口）

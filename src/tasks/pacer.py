@@ -17,6 +17,14 @@
 上限（CodeArts 每账号 3），无上限放行会把第 4 个起全部打成 400 并发超限。
 0/None 表示不限（保持旧行为）。
 
+`window_seconds > 0` 时上限改用**滑动窗口**口径：同一个桶在最近
+`window_seconds` 秒内最多放行 `max_concurrency` 次请求启动。这是对齐
+CodeArts 实测行为的修正——它限制的不是「同时在途」，而是「每账号每约 60s
+最多 3 个会话」：会话在 HTTP 流结束后仍滞留数十秒（130s 打满 3 并发后，
+单请求直到约 68s 才恢复）。纯在途上限挡不住「3 个并发刚结束就立刻再发 3 个」
+这类突发。窗口模式下 `release` 不再让出窗口配额（配额按启动时刻自然滑出），
+但仍用于计数在途、维持最小间隔。
+
 **`max_concurrency > 0` 时 `release` 必须与 `wait_turn` 严格配对。**
 provider 在 `stream_chat` 的 `finally` 里归还名额，而 `async for ... break`
 不会关闭 async generator（CPython 只在耗尽 / 显式 `aclose()` / GC 的
@@ -55,6 +63,7 @@ class Pacer:
     def __init__(self, min_seconds: float, max_seconds: float, *,
                  allow_concurrent: bool = False,
                  max_concurrency: int | Callable[[], int] = 0,
+                 window_seconds: float | Callable[[], float] = 0,
                  sleep: Callable[[float], Awaitable[None]] | None = None,
                  now: Callable[[], float] | None = None) -> None:
         # 上下限可热更（B3.2）：存取值器，每次计间隔读当前值。校验必须放在
@@ -73,12 +82,19 @@ class Pacer:
         if not callable(max_concurrency) and max_concurrency < 0:
             raise ValueError("pacer max_concurrency must be non-negative")
         self._max_concurrency = live(max_concurrency)
+        # 滑动窗口长度（秒，0 = 关闭）：与 max_concurrency 组合成「窗口内启动
+        # 次数上限」。同样可热更。
+        if not callable(window_seconds) and window_seconds < 0:
+            raise ValueError("pacer window_seconds must be non-negative")
+        self._window = live(window_seconds)
         self._lock = asyncio.Lock()
         # 严格模式：全局单桶
         self._last_started: float | None = None
         # 并发模式：桶 → 上次（预留）开始时刻 / 在途计数
         self._bucket_started: dict[str, float] = {}
         self._inflight: dict[str, int] = {}
+        # 窗口模式：桶 → 落在当前窗口内的启动时刻（升序，用于滑动窗口计数）
+        self._starts: dict[str, list[float]] = {}
         # 并发模式 + 上限：名额让出时置位，挂起的请求醒来重查是否有空位
         self._wake = asyncio.Event()
 
@@ -112,6 +128,12 @@ class Pacer:
         limit = int(self._max_concurrency())
         return limit if limit > 0 else 0
 
+    @property
+    def window_seconds(self) -> float:
+        """当前滑动窗口长度；0/负 = 关闭窗口口径（每次现读，支持热更）。"""
+        value = float(self._window())
+        return value if value > 0 else 0.0
+
     def next_interval(self) -> float:
         low, high = self._validate()
         if low == 0 and high == 0:
@@ -123,6 +145,22 @@ class Pacer:
     def _capped(self) -> bool:
         """并发模式且配了在途上限——只有这种组合需要排队等名额。"""
         return self._allow_concurrent and self.max_concurrency > 0
+
+    def _windowed(self) -> bool:
+        """并发 + 在途上限 + 窗口三者齐备时才走滑动窗口口径。"""
+        return (self._allow_concurrent and self.max_concurrency > 0
+                and self.window_seconds > 0)
+
+    def _prune_starts(self, bucket: str, now: float) -> None:
+        """**调用方须持 `_lock`**：丢掉已经滑出窗口的启动时刻。"""
+        starts = self._starts.get(bucket)
+        if not starts:
+            return
+        cutoff = now - self.window_seconds
+        while starts and starts[0] <= cutoff:
+            starts.pop(0)
+        if not starts:
+            del self._starts[bucket]
 
     def _reserve(self, bucket: str) -> float:
         """**调用方须持 `_lock`**：登记一次在途并返回本次需补足的间隔秒数。
@@ -151,7 +189,8 @@ class Pacer:
         并发模式下返回即视为「已占用一个在途名额」，调用方必须在请求结束后
         用同一 key 调 `release` 归还，否则该桶会被当成永远有请求在途而失去
         节流（见模块 docstring）。配了 `max_concurrency` 时，名额满会让新
-        请求在此挂起，直到有 `release` 让位。
+        请求在此挂起，直到有 `release` 让位；再配了 `window_seconds` 时按
+        滑动窗口计数，窗口内启动次数满则挂起到最早一次启动滑出窗口。
         """
         if self.disabled and not self._capped():
             return
@@ -168,28 +207,57 @@ class Pacer:
         bucket = key or ""
         remaining = 0.0
         reserved = False
+        windowed_start: float | None = None
         try:
             while True:
+                window_wait = 0.0
                 async with self._lock:
+                    now = self._now()
                     limit = self.max_concurrency
-                    if not limit or self._inflight.get(bucket, 0) < limit:
+                    if self._windowed():
+                        self._prune_starts(bucket, now)
+                        starts = self._starts.get(bucket, [])
+                        if limit and len(starts) >= limit:
+                            # 窗口未过期：等到最早一次启动滑出窗口再重查。
+                            window_wait = starts[0] + self.window_seconds - now
+                            self._wake.clear()
+                        else:
+                            self._starts.setdefault(bucket, []).append(now)
+                            windowed_start = now
+                            remaining = self._reserve(bucket)
+                            reserved = True
+                    elif not limit or self._inflight.get(bucket, 0) < limit:
                         remaining = self._reserve(bucket)
                         reserved = True
+                    else:
+                        # 名额已满：清事件后到锁外等待，release 会 set 唤醒。
+                        self._wake.clear()
+                    if reserved:
                         break
-                    # 名额已满：清事件后到锁外等待，release 会 set 唤醒。
-                    self._wake.clear()
-                await self._wake.wait()
+                if window_wait > 0:
+                    await self._sleep(window_wait)
+                else:
+                    await self._wake.wait()
             if remaining > 0:
                 await self._sleep(remaining)
         except BaseException:
             # 未成功「占用」就退出（取消 / 间隔校验异常）：把名额还回去，
-            # 否则该桶的名额会永久少一个（最终把渠道卡死）。
+            # 否则该桶的名额会永久少一个（最终把渠道卡死）。窗口模式下还要
+            # 抹掉刚登记、并未真正发起的启动时刻，否则白占一个窗口配额。
             if reserved:
                 self.release(bucket)
+            if windowed_start is not None:
+                starts = self._starts.get(bucket)
+                if starts and windowed_start in starts:
+                    starts.remove(windowed_start)
             raise
 
     def release(self, key: str | None = None) -> None:
-        """并发模式归还一个在途名额；严格模式与多余的 release 都是空操作。"""
+        """并发模式归还一个在途名额；严格模式与多余的 release 都是空操作。
+
+        窗口模式下只减少在途计数、维持最小间隔；窗口配额由启动时刻自然滑出，
+        不因 `release` 提前让出（否则又退回纯在途口径，挡不住突发）。
+        """
         if not self._allow_concurrent:
             return
         bucket = key or ""

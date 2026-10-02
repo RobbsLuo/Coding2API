@@ -277,7 +277,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     codearts_pacer = Pacer(lambda: runtime.codearts_chat_min_interval,
                            lambda: runtime.codearts_chat_min_interval,
                            allow_concurrent=True,
-                           max_concurrency=lambda: runtime.codearts_max_concurrency)
+                           max_concurrency=lambda: runtime.codearts_max_concurrency,
+                           window_seconds=lambda: runtime.codearts_request_window_seconds)
     registry = providers if providers is not None else {
         "trae": TraeProvider(pacer=chat_pacer),
         "codebuddy": CodeBuddyProvider(

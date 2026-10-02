@@ -152,8 +152,11 @@ def test_main_wires_codearts_concurrency_cap(admin_client):
     pacer = app.state.services.registry["codearts"].pacer
     assert pacer.allow_concurrent is True
     assert pacer.max_concurrency == 3        # 对齐上游每账号硬限
+    assert pacer.window_seconds == 60        # 窗口口径：每账号每 60s 最多 3 次启动
     app.state.services.settings.set("codearts_max_concurrency", 0)
     assert pacer.max_concurrency == 0        # 热更 0 = 关闭上限
+    app.state.services.settings.set("codearts_request_window_seconds", 0)
+    assert pacer.window_seconds == 0.0       # 热更 0 = 关闭窗口口径
 
 
 def test_qoder_codearts_min_intervals_reject_negative():

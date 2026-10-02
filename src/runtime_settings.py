@@ -123,6 +123,11 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "TM.00001041（实测 77% 失败率主因）。默认 3 对齐上游；0 关闭上限"
                "（回到「有在途即放行」，会再次击穿）。", minimum=0,
                group="channels"),
+    HotSetting("codearts_request_window_seconds", float, "CodeArts 账号节流窗口（秒）",
+               "与「每账号并发上限」组合成滑动窗口：最近这么多秒内最多启动 N 次。"
+               "上游口径是「每账号每约 60s 最多 3 个会话」（会话在流结束后仍滞留"
+               "数十秒），纯在途上限挡不住突发，故默认 60s；0 关闭窗口口径。",
+               minimum=0.0, group="channels"),
     HotSetting("pacer_min_seconds", float, "后台任务节流下限（秒）",
                "后台任务相邻上游请求的最小间隔；0 关闭节流。", minimum=0.0,
                group="pacer"),
@@ -422,6 +427,10 @@ class RuntimeSettings:
     @property
     def codearts_max_concurrency(self) -> int:
         return int(self.get("codearts_max_concurrency"))
+
+    @property
+    def codearts_request_window_seconds(self) -> float:
+        return float(self.get("codearts_request_window_seconds"))
 
     @property
     def pacer_min_seconds(self) -> float:
