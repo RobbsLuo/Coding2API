@@ -352,7 +352,7 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `KILO_CHAT_MIN_INTERVAL` | `0` | Kilo 聊天最小间隔（秒），独立于 zen / CB/TRAE 的节流器，默认关闭。同为匿名免费层，与 zen 各自独立、互不排队 |
 | `QODER_CHAT_MIN_INTERVAL` | `5` | Qoder 聊天最小间隔（秒），独立节流器（真实账号渠道，上游有账号级频率风控）；`0` 关闭 |
 | `CODEARTS_CHAT_MIN_INTERVAL` | `5` | CodeArts 聊天最小间隔（秒），独立节流器（真实账号渠道）；`0` 关闭 |
-| `CODEARTS_MAX_CONCURRENCY` | `3` | CodeArts 每账号**在途并发上限**（热更项）。上游硬限每账号并发会话数 3，超出即 `400 TM.00001041`；桶内名额满时请求挂起直到有请求结束；`0` 关闭上限（回到「有在途即放行」，会再次击穿） |
+| `CODEARTS_MAX_CONCURRENCY` | `3` | CodeArts 每账号**在途并发上限**（热更项）。上游硬限每账号并发会话数 3，超出即 `400 TM.00001041`；桶内名额满时请求挂起直到有请求结束；`0` 关闭上限（回到「有在途即放行」，会再次击穿）。名额在每次尝试结束时**同步**归还，不依赖 GC |
 | `CODEBUDDY_SANITIZE_CHANNEL_MARKERS` | `true` | 出站 `system`/`assistant` 正文命中「伪装其他厂商官方客户端」指纹串时替换为占位符（上游 11128 内容风控：换号无效、会话带入即持续报错）；只改出站副本，客户端历史不受影响；`false` 关闭（见 TECHNICAL.md §3.2） |
 | `REFRESH_SKEW_HOURS` | `24` | token 到期前该小时数窗口内预刷新。到期时间取凭证显式 `expires_at`，缺失时回落 access token 的 JWT `exp`（CodeBuddy 实测不带显式到期字段） |
 | `TOKEN_EXPIRY_WARNING_SECONDS` | `3600` | 管理台 token 到期预警阈值：剩余低于该值时标红；`≤0` 关闭预警（仍显示剩余时间）。纯展示，不参与调度 |

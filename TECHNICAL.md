@@ -705,6 +705,8 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **并发上限（2026-10-01，`CODEARTS_MAX_CONCURRENCY`）**：上游对**每账号并发会话数**有硬限（实测 3），超出的请求直接 `HTTP 400` + `TM.00001041 并发会话数已达上限(3个)`。此前聊天 pacer 声明 `allow_concurrent=True` 但**无上限**（桶内来多少放多少），第 4 个起全部撞 400；又因 `classify_status` 只在 429 分支查 `00001041`，这些 400 被判成 `INVALID`（换号也没用、且不冷却），与客户端重试叠成风暴——2026-09-30 23:17 至 10-01 07:40 共 135 次，整体失败率约 77%。修复两处：`Pacer` 增按桶在途上限 `max_concurrency`（满则挂起等 `release` 让位；0/None 保持旧行为），CodeArts pacer 装配 `lambda: runtime.codearts_max_concurrency`（热更项，默认 3）；`classify_status` 把 400/429 带并发/限流标记判成可重试的限流（与流内 `classify_error_code` 同判法；后续拆成两种类型，见本段末尾）：并发打满（`00001041`/`并发`）判 `CONCURRENCY`（固定 60s 模型级短冷却，不翻倍），其余（`tpm`/`429`/`rate limit`/`throttl`）判 `MODEL`。背景：打满是瞬态信号（在途排空即恢复，实测平均 9s、最大 38s），套 `MODEL` 的 600s 起步、翻倍到 2h 会把一次瞬态打满变成 10min 起的长时间不可用。
 
+**名额泄漏修复（2026-10-02）**：上一条引入的 `max_concurrency` 依赖 `release` 与 `wait_turn` 严格配对，而 `release` 在 provider `stream_chat` 的 `finally` 里——`async for ... break` **不关闭** async generator（CPython 只在耗尽 / 显式 `aclose()` / GC 的 asyncgen finalizer 时才跑 `finally`）。executor `_stream_loop` 遇 `EventKind.ERROR` 的两处 `break` 于是让名额推迟归还；轮换重试每次重新 `wait_turn`，`_inflight` 单调累积，满 3 后新请求在 `wait_turn` 无限阻塞——表现为**「用了三次就限制」而非「并发三」**（复现：3 次流内错误后 `inflight=3`，第 4 个请求永久阻塞）。注意这推翻了 Q45 的原始判断（「延迟归还只会让节流略松、不会误排队」）：`max_concurrency=0` 时泄漏确实只是变松，配上上限后泄漏即**永久丢失许可**。修复：`provider.base.aclose_stream` 统一关闭，`stream_guarded` / `stream` / `_stream_loop` / `complete` / `ContinuationStream.__aiter__` 五处提前结束消费处全部显式关闭上游流。回归测试 `tests/test_stream_slot_release.py`（10 例，旧代码上 6 例失败）。
+
 ---
 
 ## 4. Provider 协议（Q16=A 细接口）

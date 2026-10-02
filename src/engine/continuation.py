@@ -24,7 +24,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from typing import Any
 
-from ..provider.base import Event, EventKind, Usage
+from ..provider.base import Event, EventKind, Usage, aclose_stream
 
 # 续写指令：要求直接接着写，不要复述或重来
 _CONTINUE_PROMPT = "Output limit reached. Continue exactly where you left off."
@@ -86,33 +86,40 @@ class ContinuationStream:
 
         source = self._provider.stream_chat(
             self._credential_data, self._payload, self._model)
-        while True:
-            async for event in source:
-                if event.kind is EventKind.FINISH:
-                    finish_reason = event.finish_reason
-                    continue
-                if event.kind is EventKind.USAGE:
-                    usage = _add_usage(usage, event.usage)
-                    continue
-                if event.kind is EventKind.CONTENT and event.content:
-                    content_parts.append(event.content)
-                elif event.kind is EventKind.REASONING and event.content:
-                    reasoning_parts.append(event.content)
-                yield event
+        # finally 覆盖「本生成器被提前关闭」的所有路径（executor 遇到流内错误
+        # break、换号重试、客户端断开）：`async for` 不会替我们关闭 source，
+        # 而 provider 的节流名额在它自己的 finally 里归还，不显式关闭就会
+        # 推迟到 GC，在 max_concurrency 下等于永久泄漏。
+        try:
+            while True:
+                async for event in source:
+                    if event.kind is EventKind.FINISH:
+                        finish_reason = event.finish_reason
+                        continue
+                    if event.kind is EventKind.USAGE:
+                        usage = _add_usage(usage, event.usage)
+                        continue
+                    if event.kind is EventKind.CONTENT and event.content:
+                        content_parts.append(event.content)
+                    elif event.kind is EventKind.REASONING and event.content:
+                        reasoning_parts.append(event.content)
+                    yield event
 
-            # 未截断 / 已达上限：按最后一轮的真实 finish_reason 收尾
-            if (not continues(finish_reason)
-                    or self.continues_done >= self._max_continues):
-                yield Event(kind=EventKind.USAGE, usage=usage)
-                yield Event(kind=EventKind.FINISH, finish_reason=finish_reason)
-                return
+                # 未截断 / 已达上限：按最后一轮的真实 finish_reason 收尾
+                if (not continues(finish_reason)
+                        or self.continues_done >= self._max_continues):
+                    yield Event(kind=EventKind.USAGE, usage=usage)
+                    yield Event(kind=EventKind.FINISH, finish_reason=finish_reason)
+                    return
 
-            self.continues_done += 1
-            self._payload = extend_payload(
-                self._payload, "".join(content_parts), "".join(reasoning_parts))
-            content_parts, reasoning_parts = [], []
-            source = self._provider.stream_chat(
-                self._credential_data, self._payload, self._model)
+                self.continues_done += 1
+                self._payload = extend_payload(
+                    self._payload, "".join(content_parts), "".join(reasoning_parts))
+                content_parts, reasoning_parts = [], []
+                source = self._provider.stream_chat(
+                    self._credential_data, self._payload, self._model)
+        finally:
+            await aclose_stream(source)
 
 
 def _add_usage(total: Usage, part: Usage | None) -> Usage:

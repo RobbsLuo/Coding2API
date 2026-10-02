@@ -19,7 +19,7 @@ from ..compat.openai.response import (
 )
 from ..config import live
 from ..db.repo import CredentialRepository
-from ..provider.base import ErrKind, Event, EventKind, Usage
+from ..provider.base import ErrKind, Event, EventKind, Usage, aclose_stream
 from .continuation import ContinuationStream
 from .model_resolver import ModelTarget, resolve
 from .scheduler import Scheduler
@@ -210,16 +210,21 @@ class Executor:
         没有这一层时，未预期的异常（如凭证在轮换中途被删除）会让连接
         静默断开，客户端无法区分"空回复"与"服务出错"。
         """
+        inner = self.stream(request, username=username,
+                            translator=translator,
+                            provider_binding=provider_binding)
         try:
-            async for frame in self.stream(request, username=username,
-                                           translator=translator,
-                                           provider_binding=provider_binding):
+            async for frame in inner:
                 yield frame
         except (GeneratorExit, asyncio.CancelledError):
             raise                          # 客户端断开：已由 stream() 记账
         except Exception as error:  # noqa: BLE001 - 流已开始，只能以错误帧收尾
             logger.exception("流式响应失败: %s", error)
             yield _stream_error_frame(translator, "internal server error", "internal_error")
+        finally:
+            # 同 stream()：break / 客户端断开都不会关闭内层流，必须显式关闭，
+            # 否则上游流的节流名额只能等 GC 回收
+            await aclose_stream(inner)
 
     async def stream(self, request: ChatRequest, *, username: str = "unknown",
                      translator: StreamSink | None = None,
@@ -239,8 +244,9 @@ class Executor:
                              started=time.monotonic(), username=username)
         if self._deps.affinity is not None:
             state.affinity_id = self._deps.affinity.pin_for(request.raw, username)
+        loop_source = self._stream_loop(request, target, state)
         try:
-            async for frame in self._stream_loop(request, target, state):
+            async for frame in loop_source:
                 yield frame
         except (GeneratorExit, asyncio.CancelledError):
             if not state.recorded and (state.translator.usage is not None
@@ -254,6 +260,12 @@ class Executor:
                 else:
                     self._record_disconnect(target, state)
             raise
+        finally:
+            # 客户端断开（GeneratorExit / CancelledError）时上面的 async for
+            # 不会关闭 _stream_loop，不显式关闭的话上游流的节流名额只能等
+            # GC 回收——生产路径靠 with_keepalive 取消 task 侥幸及时，换个调用
+            # 方就会攒满 max_concurrency 后永久阻塞
+            await aclose_stream(loop_source)
 
     async def _stream_loop(self, request: ChatRequest, target: ModelTarget,
                            state: _StreamState) -> AsyncIterator[bytes]:
@@ -283,10 +295,15 @@ class Executor:
             provider_id = self._deps.credentials.provider_of(credential_id)
             state.provider, state.credential_id = provider_id or "-", credential_id
             tried.add(credential_id)
+            # 显式持有迭代器并在 finally 里关闭：下面两处 `break`（流内错误）
+            # 只跳出 `async for`，不会关闭上游 async generator，provider 的
+            # 节流名额归还（pacer.release 在其 finally 里）会推迟到 GC。
+            # 轮换重试每次都要重新 wait_turn，泄漏累积到 max_concurrency 后
+            # 新请求永久阻塞——「用了三次就限制」。见 aclose_stream 注释。
+            iterator = self._stream_source(
+                provider_id, credential_data, request.raw, target.model).__aiter__()
             try:
-                async for event in self._stream_source(
-                    provider_id, credential_data, request.raw, target.model,
-                ):
+                async for event in iterator:
                     if event.kind is EventKind.ERROR:
                         kind = _event_kind(event)
                         if kind is ErrKind.INVALID:
@@ -338,6 +355,9 @@ class Executor:
                                    provider_id, credential_id, kind, error)
                     self._note_upstream_error(credential_id, kind, provider_id, target.model)
                     last_error = error
+            finally:
+                # break / 异常 / 客户端断开都走到这里：同步归还节流名额
+                await aclose_stream(iterator)
             if not self._deps.scheduler.should_rotate(tried):
                 if last_kind is ErrKind.INVALID:
                     # 流已开始（200 已发出），以 invalid_request 错误帧结束
@@ -435,14 +455,16 @@ class Executor:
             provider_id = self._deps.credentials.provider_of(credential_id)
             last_provider, last_credential = provider_id or "-", credential_id
             events: list[Event] = []
+            # 与 _stream_loop 同理：显式关闭上游流，让节流名额在每次尝试
+            # 结束时同步归还，不依赖 GC 的 asyncgen finalize
+            iterator = self._stream_source(
+                provider_id, credential_data, request.raw, target.model).__aiter__()
             try:
                 # 聚合整体超时兜底（见 ExecutorDeps.complete_timeout_seconds）
                 async with (asyncio.timeout(self._deps.complete_timeout_seconds)
                             if self._deps.complete_timeout_seconds > 0
                             else contextlib.nullcontext()):
-                    async for event in self._stream_source(
-                        provider_id, credential_data, request.raw, target.model,
-                    ):
+                    async for event in iterator:
                         if first_event_at is None:
                             first_event_at = time.monotonic()
                         events.append(event)
@@ -522,6 +544,8 @@ class Executor:
                                  if first_event_at is not None else None),
                         latency_ms=int((time.monotonic() - started) * 1000))
                     return result
+            finally:
+                await aclose_stream(iterator)
             if not self._deps.scheduler.should_rotate(tried):
                 if last_kind is ErrKind.INVALID:
                     raise InvalidRequest(_reject_message(

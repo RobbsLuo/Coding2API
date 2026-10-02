@@ -174,6 +174,59 @@ async def test_tool_calls_and_empty_reasoning_passthrough():
 
 
 @pytest.mark.asyncio
+async def test_continuation_closes_source_on_early_break():
+    """提前 break 时必须关闭内层 provider 流，否则节流名额（pacer.release
+    在 provider 的 finally 里）只能等 GC 归还——max_concurrency 下即永久泄漏。"""
+    closed: list[str] = []
+
+    class _ClosableProvider:
+        def stream_chat(self, credential_data, payload, model) -> AsyncIterator[Event]:
+            async def gen() -> AsyncIterator[Event]:
+                try:
+                    yield Event(kind=EventKind.CONTENT, content="part1")
+                    yield Event(kind=EventKind.FINISH, finish_reason="length")
+                finally:
+                    closed.append("closed")
+            return gen()
+
+    stream = ContinuationStream(_ClosableProvider(), {}, {"messages": []}, "m",
+                                max_continues=5)
+    # __aiter__ 每次返回一个新生成器，必须持有同一个才能关闭它
+    iterator = stream.__aiter__()
+    async for event in iterator:
+        if event.kind is EventKind.CONTENT:
+            break
+    # 显式关闭包装器（等价于 executor 遇错误 break / 客户端断开）
+    await iterator.aclose()
+    assert closed == ["closed"]
+
+
+@pytest.mark.asyncio
+async def test_continuation_tolerates_stream_without_aclose():
+    """provider 返回的流没有 aclose（如纯 AsyncIterator 替身）时跳过关闭，不报错。"""
+
+    class _PlainStream:
+        def __init__(self, events: list[Event]) -> None:
+            self._events = events
+
+        async def __aiter__(self):
+            for event in self._events:
+                yield event
+
+    class _PlainProvider:
+        def stream_chat(self, credential_data, payload, model):
+            return _PlainStream([Event(kind=EventKind.FINISH, finish_reason="stop")])
+
+    stream = ContinuationStream(_PlainProvider(), {}, {"messages": []}, "m",
+                                max_continues=2)
+    iterator = stream.__aiter__()
+    async for event in iterator:
+        if event.kind is EventKind.FINISH:
+            break
+    await iterator.aclose()                    # 不抛异常即通过
+
+
+@pytest.mark.asyncio
 async def test_usage_accumulation_with_missing_fields():
     from src.engine.continuation import _add_usage, _sum
 

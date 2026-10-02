@@ -81,6 +81,24 @@ def business_codes(text: str) -> frozenset[int]:
     return frozenset(int(match) for match in _BUSINESS_CODE_RE.findall(text))
 
 
+async def aclose_stream(stream: Any) -> None:
+    """关闭上游事件流，让 provider 的 `finally`（节流名额归还）**同步**执行。
+
+    `async for ... break` 不会关闭 async generator：CPython 只在生成器耗尽、
+    显式 `aclose()`、或被 GC 的 asyncgen finalizer 回收时才跑它的 `finally`。
+    依赖 GC 意味着名额归还时机不确定——这在 `max_concurrency > 0` 时不是
+    「节流变松」，而是**永久丢失许可**：桶停在满载，新请求在 `wait_turn`
+    无限阻塞，表现为「用了三次就限制」。
+
+    所以所有提前结束消费的地方（流内错误 break、换号重试、续写中途关闭、
+    客户端断开）都必须显式关闭。对没有 `aclose` 的流（纯 AsyncIterator
+    实现的测试替身）直接跳过。
+    """
+    aclose = getattr(stream, "aclose", None)
+    if aclose is not None:
+        await aclose()
+
+
 class UpstreamHTTPError(Exception):
     """上游非 2xx；两个 provider 共用同一形状（status + 原始 body）。
 

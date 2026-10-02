@@ -16,6 +16,14 @@
 不直接放行，而是等到有请求 `release` 让出名额。上游对「并发会话数」有硬
 上限（CodeArts 每账号 3），无上限放行会把第 4 个起全部打成 400 并发超限。
 0/None 表示不限（保持旧行为）。
+
+**`max_concurrency > 0` 时 `release` 必须与 `wait_turn` 严格配对。**
+provider 在 `stream_chat` 的 `finally` 里归还名额，而 `async for ... break`
+不会关闭 async generator（CPython 只在耗尽 / 显式 `aclose()` / GC 的
+asyncgen finalizer 时才跑 `finally`）。于是流内错误换号重试会让名额推迟归还
+甚至永久丢失：桶停在满载，新请求在 `wait_turn` 无限阻塞——表现为
+「用了三次就限制」而非「并发三」。因此所有提前结束消费上游流的地方都必须
+显式关闭它，见 `provider.base.aclose_stream`。
 """
 
 from __future__ import annotations
