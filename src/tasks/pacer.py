@@ -20,10 +20,10 @@
 `window_seconds > 0` 时上限改用**滑动窗口**口径：同一个桶在最近
 `window_seconds` 秒内最多放行 `max_concurrency` 次请求启动。这是对齐
 CodeArts 实测行为的修正——它限制的不是「同时在途」，而是「每账号每约 60s
-最多 3 个会话」：会话在 HTTP 流结束后仍滞留数十秒（130s 打满 3 并发后，
+最多 3 个会话」：会话在 HTTP 流结束后仍滞留数十秒（3 并发打满后，
 单请求直到约 68s 才恢复）。纯在途上限挡不住「3 个并发刚结束就立刻再发 3 个」
 这类突发。窗口模式下 `release` 不再让出窗口配额（配额按启动时刻自然滑出），
-但仍用于计数在途、维持最小间隔。
+但仍用于计数在途（在途满依旧挡新请求，长流超过窗口时靠它兜底）、维持最小间隔。
 
 **`max_concurrency > 0` 时 `release` 必须与 `wait_turn` 严格配对。**
 provider 在 `stream_chat` 的 `finally` 里归还名额，而 `async for ... break`
@@ -190,7 +190,8 @@ class Pacer:
         用同一 key 调 `release` 归还，否则该桶会被当成永远有请求在途而失去
         节流（见模块 docstring）。配了 `max_concurrency` 时，名额满会让新
         请求在此挂起，直到有 `release` 让位；再配了 `window_seconds` 时按
-        滑动窗口计数，窗口内启动次数满则挂起到最早一次启动滑出窗口。
+        滑动窗口计数，窗口内启动次数满则挂起到最早一次启动滑出窗口（在途
+        仍受 `max_concurrency` 上限约束，长流超过窗口时靠它兜底）。
         """
         if self.disabled and not self._capped():
             return
@@ -217,10 +218,14 @@ class Pacer:
                     if self._windowed():
                         self._prune_starts(bucket, now)
                         starts = self._starts.get(bucket, [])
-                        if limit and len(starts) >= limit:
-                            # 窗口未过期：等到最早一次启动滑出窗口再重查。
-                            window_wait = starts[0] + self.window_seconds - now
+                        window_full = len(starts) >= limit
+                        inflight_full = self._inflight.get(bucket, 0) >= limit
+                        if window_full or inflight_full:
                             self._wake.clear()
+                            # 窗口满 → 等到最早一次启动滑出窗口再重查；仅因
+                            # 在途满 → 等 release 唤醒（长流超过窗口时靠它兜底）。
+                            if window_full:
+                                window_wait = starts[0] + self.window_seconds - now
                         else:
                             self._starts.setdefault(bucket, []).append(now)
                             windowed_start = now

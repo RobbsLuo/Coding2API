@@ -392,6 +392,31 @@ async def test_pacer_window_rollback_skips_pruned_registration():
     assert pacer._starts == {"k": [3.0]}         # 只抹掉自己的登记，不动别人的
 
 
+async def test_pacer_window_inflight_guard_blocks_when_stream_outlives_window():
+    """长响应超过窗口时，在途闸门仍须挡住第 4 个（否则再撞 400）。
+
+    窗口只按「启动时刻」计数：若 N 个流存活时间 > window，它们的启动时刻会
+    滑出窗口，但 `_inflight` 仍为 N —— 此时必须靠在途上限兜底，等到有流
+    `release` 才放行。
+    """
+    clock = {"t": 0.0}
+    pacer = Pacer(0, 0, allow_concurrent=True, max_concurrency=2,
+                  window_seconds=1, now=lambda: clock["t"])
+
+    await pacer.wait_turn("k")                   # t=0，窗口/在途都占 1
+    await pacer.wait_turn("k")                   # t=0，占满（在途 2）
+    clock["t"] = 2.0                             # 两个流仍在途，但启动时刻已滑出窗口
+
+    fourth = asyncio.create_task(pacer.wait_turn("k"))
+    await asyncio.sleep(0)
+    assert not fourth.done()                     # 窗口空、在途满 → 仍挂起等 release
+    pacer.release("k")                           # 一个流结束
+    await asyncio.wait_for(fourth, timeout=1)    # 让位后立即放行
+    assert len(pacer._starts["k"]) == 1          # 新请求只登记自己的启动
+    pacer.release("k")
+    pacer.release("k")
+
+
 async def test_pacer_window_disabled_falls_back_to_inflight():
     """window_seconds=0：退回纯在途口径，release 立即放行（旧行为）。"""
     pacer = Pacer(0, 0, allow_concurrent=True, max_concurrency=1)
