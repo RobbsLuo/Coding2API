@@ -764,7 +764,11 @@ class Provider(Protocol):
   2. request.py：校验 body → ChatRequest；model_resolver 解析候选集
      - "glm-5.2" → 各 provider 都可能；"glm-5.2@trae" → 仅 trae；auto/空 → DEFAULT_MODEL
   3. 选号（executor._select → scheduler.select）：
-     a. 候选 = 注册表中支持该模型的 provider（目录能证明归属时先收窄，_narrow_providers）
+     a. 候选 = 注册表中支持该模型的 provider（目录能证明归属时先收窄，_narrow_providers）；
+        收窄后若**没有任何可用凭证**（目录陈旧/降级：某渠道新增了该模型但别名表未更新，
+        或该渠道模型列表回退了静态表而丢掉它），退回 target 的原始候选集再选一次——
+        宁可多打一次上游也不误报「无可用渠道」（CodeArts 无凭证 → 回落 CodeBuddy/TRAE）。
+        @provider 强制 / Key 绑定的候选本就是单一渠道，broader 不会更宽，强制语义不受影响
      b. 模型级冷却过滤：逐凭证按**自己所属上游的原始模型名**查 (凭证, 模型) 冷却表，
         被限流/负缓存的本次跳过（同账号其他模型不受影响，见 §6.1）
      c. 会话粘性：存在可选的 pinned 凭证时跳过（pin 优先），否则粘性命中且仍可选的

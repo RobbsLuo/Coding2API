@@ -640,18 +640,32 @@ class Executor:
                       if pid in self._deps.providers]
         if not registered:
             raise NoProviderForModel(f"no provider registered for model {target.model!r}")
-        candidates = self._deps.credentials.candidates(registered)
-        if not candidates:
-            return None
         now = int(time.time())
-        usable = [
-            c for c in candidates
-            if c.is_selectable(now, self._model_scope(c.provider, target.model))
-        ]
+        usable = self._selectable(self._deps.credentials.candidates(registered),
+                                  target, now)
+        if not usable:
+            # 收窄后的候选**全部不可用**，不能就此判「无可用渠道」：目录可能陈旧
+            # 或降级——某渠道新增了该模型但别名表还没更新（TTL 内），或该渠道
+            # 的模型列表回退了静态表而丢掉该模型。此时退回 target 的原始候选集
+            # 再试一次，让真正持有该模型且有可用凭证的渠道兜底（CodeArts 无凭证
+            # 时回落到 CodeBuddy/TRAE，而不是直接 503）。
+            # 强制/@绑定 的 target 候选本就是单一渠道，`broader` 不会更宽，
+            # 因此「强制指定出不回退」的语义不受影响。
+            broader = [pid for pid in target.providers if pid in self._deps.providers]
+            if len(broader) > len(registered):
+                usable = self._selectable(self._deps.credentials.candidates(broader),
+                                          target, now)
         if not usable:
             return None
         return (self._sticky(usable, tried, affinity_id)
                 or self._deps.scheduler.select(usable, tried, now))
+
+    def _selectable(self, candidates: list, target: ModelTarget, now: int) -> list:
+        """按「该凭证所属上游的原始模型名」过滤出当前可选的候选。"""
+        return [
+            c for c in candidates
+            if c.is_selectable(now, self._model_scope(c.provider, target.model))
+        ]
 
     def _note_upstream_error(self, credential_id: str, kind: ErrKind,
                              provider_id: str, model: str) -> None:

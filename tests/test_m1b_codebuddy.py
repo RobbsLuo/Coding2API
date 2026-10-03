@@ -2172,6 +2172,50 @@ async def test_narrowing_keeps_candidates_when_model_unknown_to_catalog(dual_rep
     assert trae.calls == 1 and cb.calls == 1
 
 
+async def test_narrowed_provider_without_usable_credential_falls_back(dual_repo):
+    """收窄后候选全部不可用 → 退回原始候选集兜底，不误报「无可用渠道」。
+
+    复现用户场景：某渠道的模型列表回退静态表丢掉了该模型，别名表里只剩另一个
+    渠道登记它，而该渠道又无可用凭证。此前直接 503 no_healthy；现在应回落到
+    真正持有该模型且有可用凭证的渠道（CodeArts 无凭证 → CodeBuddy/TRAE）。
+    """
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="trae", credential_data={"accessToken": "trae"})
+    # CodeBuddy 有凭证但被硬禁用：收窄到它之后没有任何可用候选
+    db.connect().execute("UPDATE credentials SET disabled = 1 WHERE provider = 'codebuddy'")
+    cb = _RejectProvider("codebuddy", [GOOD])
+    trae = _RejectProvider("trae", [GOOD])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb, "trae": trae}, credentials=repo,
+        scheduler=Scheduler(), default_model="deepseek-v4.1-flash",
+        # 陈旧/降级目录：只登记了 CodeBuddy，TRAE 被漏掉
+        model_aliases={"codebuddy": {"deepseek-v4.1-flash": "deepseek-v4.1-flash"}}))
+
+    result = await executor.complete(_request("deepseek-v4.1-flash"), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert (cb.calls, trae.calls) == (0, 1)
+
+
+async def test_forced_provider_without_usable_credential_keeps_narrowing(dual_repo):
+    """@provider 强制指定：该渠道无可用凭证也不回退（强制语义不被兜底削弱）。"""
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="trae", credential_data={"accessToken": "trae"})
+    db.connect().execute("UPDATE credentials SET disabled = 1 WHERE provider = 'codebuddy'")
+    cb = _RejectProvider("codebuddy", [GOOD])
+    trae = _RejectProvider("trae", [GOOD])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb, "trae": trae}, credentials=repo,
+        scheduler=Scheduler(), default_model="deepseek-v4.1-flash",
+        model_aliases={"codebuddy": {"deepseek-v4.1-flash": "deepseek-v4.1-flash"},
+                       "trae": {"deepseek-v4.1-flash": "deepseek-v4.1-flash"}}))
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(_request("deepseek-v4.1-flash@codebuddy"), username="u")
+    assert (cb.calls, trae.calls) == (0, 0)
+
+
 async def test_stream_rotate_exhausted_with_invalid_last_error(dual_repo):
     """流式 + 轮换耗尽时最后错误是 INVALID → invalid_request 帧（155-159）。"""
     import json as _json
