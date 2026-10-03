@@ -1118,6 +1118,49 @@ async def test_provider_list_models_refresh_and_probe_quota():
     await provider.aclose()
 
 
+async def test_provider_probe_quota_discovers_benefit_catalog_per_account():
+    """额度探测逐凭证跑，顺带补该账号自己的福利目录。
+
+    模型列表刷新只用 `candidates[0]` 一个凭证，其余账号的 uid 永不上册，
+    `is_benefit_model` 退回冷启动种子；种子装不下「按期授予」的福利模型
+    （如 `deepseek-v4.1-flash`），那些账号的请求就漏带 `maas_type: benefit`
+    头——请求照样 200，但每日 token 池不扣、credit 不记。探测遍历全部凭证，
+    正是补齐点。
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == codearts_events.EP_MODEL_BUILTIN:
+            return httpx.Response(200, json={"builtinModels": [{"id": "m1"}]})
+        if request.url.path == codearts_events.EP_BENEFIT_CONFIG:
+            return httpx.Response(200, json={"result": {"models": [
+                {"id": "deepseek-v4.1-flash"}]}})
+        if request.url.path == codearts_events.EP_BENEFIT_CLAIM:
+            return httpx.Response(200, json={"result": "ok"})
+        return httpx.Response(200, json={"remaining": 9})
+
+    provider = CodeArtsProvider(client=_client(handler))
+    data = {"uid": "u1", "access_key_id": "AK", "secret_access_key": "SK"}
+    assert (await provider.probe_quota(data)).remaining == pytest.approx(9 / 10000)
+    # 本账号目录已入册：种子外的新福利模型也判 True（否则漏带 benefit 头）。
+    assert provider.client.is_benefit_model(_cred(), "deepseek-v4.1-flash") is True
+    await provider.aclose()
+
+
+async def test_provider_probe_quota_keeps_balance_when_catalog_discovery_fails(caplog):
+    """目录发现失败必须降级：余额照常返回、只记 warning，不拖垮探测。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == codearts_events.EP_TOKEN_BALANCE:
+            return httpx.Response(200, json={"remaining": 9})
+        return httpx.Response(500, content=b"down")
+
+    provider = CodeArtsProvider(client=_client(handler))
+    with caplog.at_level("WARNING"):
+        quota = await provider.probe_quota(
+            {"uid": "u1", "access_key_id": "AK", "secret_access_key": "SK"})
+    assert quota.remaining == pytest.approx(9 / 10000)
+    assert any("福利目录刷新失败" in record.getMessage() for record in caplog.records)
+    await provider.aclose()
+
+
 async def test_provider_stream_chat_pacer_pairing_and_release_on_error():
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text=_sse({"text": "hi"}, {"text": "[DONE]"}))

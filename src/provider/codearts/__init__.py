@@ -84,8 +84,12 @@ class CodeArtsProvider:
 
     async def probe_quota(self, credential_data: dict) -> Quota:
         # 只读余额：刷新（一次性 refresh_token）唯一归 RefreshTask，见模块 docstring。
-        return await self.client.probe_quota(
-            CodeArtsCredential.from_dict(credential_data))
+        credential = CodeArtsCredential.from_dict(credential_data)
+        # 福利目录按 uid 记账，而模型列表刷新只用 candidates[0] 一个凭证——其余
+        # 账号永远不会入册、请求漏带 maas_type 头（不扣每日池）。额度探测逐凭证
+        # 遍历，顺带把本账号的福利目录补进册（best-effort，失败不影响余额）。
+        await self.client.refresh_benefit_catalog(credential)
+        return await self.client.probe_quota(credential)
 
     async def stream_chat(self, credential_data: dict, payload: dict,
                           model: str) -> AsyncIterator[Event]:

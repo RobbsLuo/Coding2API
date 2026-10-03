@@ -369,6 +369,21 @@ class CodeArtsClient:
                 f"benefit={benefit_error or ''})")
         return merged
 
+    async def refresh_benefit_catalog(self, credential: CodeArtsCredential) -> None:
+        """按账号补一轮福利目录发现（best-effort，失败保留上一轮）。
+
+        `_benefit_models` 按 uid 分别记账、不跨账号共享，但模型列表刷新只用
+        `candidates[0]` 那一个凭证拉取——其余账号永远不会入册，`is_benefit_model`
+        退回 `BENEFIT_SEED`。种子是账号无关的冷启动兜底，装不下「按期授予」的
+        福利模型（如 `deepseek-v4.1-flash`），于是那些账号的请求漏带
+        `maas_type: benefit` 头：请求照样 200，但每日 token 池不扣、credit 不记。
+        额度探测逐凭证遍历，这里顺带补齐（TECHNICAL「探测时顺带完成」）。
+        """
+        try:
+            await self.fetch_models(credential)
+        except Exception as error:  # noqa: BLE001 - 发现失败不得影响余额探测
+            logger.warning("CodeArts 福利目录刷新失败: %s", error)
+
     async def _fetch_builtin_models(self, credential: CodeArtsCredential) -> list[Model]:
         url = f"{self.endpoint}{EP_MODEL_BUILTIN}"
         data = await self._get_json(url, credential,
