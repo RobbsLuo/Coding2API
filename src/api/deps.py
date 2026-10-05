@@ -86,6 +86,12 @@ class Services:
     # 上次**尝试**拉取时间（monotonic，成功或失败都刷新）：TTL 内的请求不再打
     # 上游——有缓存用缓存，无缓存则跳过该渠道（负缓存）。
     model_list_fetched_at: dict[str, float] = field(default_factory=dict)
+    # stale-while-revalidate：正在后台刷新的渠道（`_schedule_refresh` 去重用，
+    # 同一渠道同一时刻只跑一个刷新任务）；任务句柄与 all-tasks 列表供 lifespan
+    # 关闭时取消，避免把 in-flight 的上游请求带出事件循环。
+    model_refreshing: set[str] = field(default_factory=set)
+    model_refresh_tasks: set[Any] = field(default_factory=set)
+    pending_model_refreshes: list[Any] = field(default_factory=list)
 
 
 def get_services(request: Request) -> Services:

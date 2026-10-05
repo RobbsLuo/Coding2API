@@ -170,6 +170,7 @@ export function UsersPage() {
                 value={username}
                 data-testid="new-user-name"
                 placeholder="例如 alice"
+                autoComplete="off"
                 onChange={(event) => setUsername(event.target.value)}
               />
             </Field>
@@ -195,13 +196,16 @@ export function UsersPage() {
           </Button>
         </form>
         {error && (
-          <div className="mt-3" data-testid="users-error">
+          <div className="mt-3" data-testid="users-error" role="alert">
             <Notice tone="danger">{error}</Notice>
           </div>
         )}
       </Panel>
 
-      {issued && <TokenCard issued={issued} onDismiss={() => setIssued(null)} />}
+      {/* 激活链接是一次性敏感信息：出现/消失对读屏要有感知 */}
+      <div aria-live="polite">
+        {issued && <TokenCard issued={issued} onDismiss={() => setIssued(null)} />}
+      </div>
 
       <Panel title="全部用户">
         {isLoading ? (

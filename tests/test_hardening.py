@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -873,6 +874,20 @@ def test_models_failure_is_negatively_cached(settings):
     assert Flaky.attempts == 2
 
 
+def _drain_model_refresh(client, services):
+    """等 stale-while-revalidate 的后台刷新跑完（否则调用计数断言会与事件循环赛跑）。"""
+    tasks = [t for t in services.pending_model_refreshes if not t.done()]
+    if not tasks:
+        return
+
+    async def _wait():
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    client.portal.call(_wait)
+
+
 def test_models_failure_keeps_cache_for_ttl(settings):
     """失败后 TTL 内用缓存兜底且不重试；TTL 过期才再次尝试。"""
 
@@ -905,6 +920,7 @@ def test_models_failure_keeps_cache_for_ttl(settings):
         services.model_list_fetched_at.clear()       # 模拟 TTL 过期 → 触发重试并失败
         second = c.get("/v1/models", headers=auth)
         assert [m["id"] for m in second.json()["data"]] == ["glm-5.2"]
+        _drain_model_refresh(c, services)            # SWR：重试在后台，等它跑完
         assert Flaky.attempts == 2
 
         third = c.get("/v1/models", headers=auth)    # 失败后的 TTL 内：不再重试

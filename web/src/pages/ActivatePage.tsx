@@ -77,7 +77,7 @@ export function ActivatePage() {
         </div>
         <Panel>
           {invalid ? (
-            <div data-testid="activate-invalid">
+            <div data-testid="activate-invalid" role="alert">
               <Notice tone="danger">
                 <span className="inline-flex items-center gap-1.5">
                   <TriangleAlert className="size-3.5" />
@@ -123,7 +123,7 @@ export function ActivatePage() {
                 />
               </Field>
               {error && (
-                <div data-testid="activate-error">
+                <div data-testid="activate-error" role="alert">
                   <Notice tone="danger">{error}</Notice>
                 </div>
               )}

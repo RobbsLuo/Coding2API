@@ -158,6 +158,7 @@ function EndpointRow({
     >
       <CollapsibleTrigger
         data-testid={`${testid}-trigger`}
+        aria-expanded={open}
         className="flex w-full cursor-pointer select-none flex-wrap items-center gap-2"
       >
         <Badge>{method}</Badge> <code>{path}</code>
@@ -191,7 +192,13 @@ function OpenAIEntry({ apiKey }: { apiKey: string }) {
     <Panel
       title="OpenAI 客户端接入"
       action={
-        <Button size="sm" variant="ghost" data-testid="openai-entry-toggle" onClick={() => setOpen((value) => !value)}>
+        <Button
+          size="sm"
+          variant="ghost"
+          data-testid="openai-entry-toggle"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
           <ChevronDown className={cn("size-4 transition-transform", open && "rotate-180")} />
           {open ? "收起" : "说明"}
         </Button>
@@ -359,30 +366,32 @@ export function ApiKeysPage() {
             创建
           </Button>
         </form>
-        {error && (
-          <div className="mt-3">
-            <Notice tone="danger">{error}</Notice>
-          </div>
-        )}
+        {/* 创建结果（成功/失败）无焦点变化，aria-live 让读屏可感知 */}
+        <div aria-live="polite">
+          {error && (
+            <div className="mt-3" role="alert">
+              <Notice tone="danger">{error}</Notice>
+            </div>
+          )}
+          {created && (
+            <Panel title="新 Key 已创建" className="mt-3">
+              <Notice tone="warn">此 Key 只会显示这一次，请立即复制保存；关闭后无法再次查看。</Notice>
+              <div className="mt-3 flex items-center gap-3">
+                <code
+                  data-testid="new-key-plaintext"
+                  className="flex-1 break-all rounded-lg border border-input bg-muted/40 px-3 py-2 font-mono text-xs"
+                >
+                  {created.api_key}
+                </code>
+                <CopyButton label={copied ? "已复制" : "复制"} onCopy={copy} />
+                <Button size="sm" variant="ghost" onClick={() => setCreated(null)}>
+                  我已保存
+                </Button>
+              </div>
+            </Panel>
+          )}
+        </div>
       </Panel>
-
-      {created && (
-        <Panel title="新 Key 已创建">
-          <Notice tone="warn">此 Key 只会显示这一次，请立即复制保存；关闭后无法再次查看。</Notice>
-          <div className="mt-3 flex items-center gap-3">
-            <code
-              data-testid="new-key-plaintext"
-              className="flex-1 break-all rounded-lg border border-input bg-muted/40 px-3 py-2 font-mono text-xs"
-            >
-              {created.api_key}
-            </code>
-            <CopyButton label={copied ? "已复制" : "复制"} onCopy={copy} />
-            <Button size="sm" variant="ghost" onClick={() => setCreated(null)}>
-              我已保存
-            </Button>
-          </div>
-        </Panel>
-      )}
 
       <Panel title="我的 API Key">
         {isLoading ? (

@@ -31,9 +31,10 @@ qoder / codearts）的每个模型统一成三个字段，规则见
 1. **raw_id**：渠道请求时真正发的 key，**永不改动**。各渠道内部代号互不相同
    （Qoder `kmodel_latest` = TRAE `kimi-k3-1`），也可能带厂商命名空间前缀
    （kilo 的 `kilo-auto/free`、`nvidia/nemotron-3-ultra-550b-a55b:free`）。
-2. **归一键**（`normalize_model_key`）：剥掉免费标记（尾缀 `-free`/`_free`/
-   `:free`、路径段 `free`、括号词 `(free)`）与厂商命名空间前缀，再 slug 化
-   ——`kilo-auto`、`longcat-2.5-preview`。**合并键与全部条目的对外 id 都用它**。
+2. **归一键**（`normalize_model_key`）：剥掉噪声标记（免费尾缀 `-free`/`_free`/
+   `:free`、路径段 `free`、括号词 `(free)`；新版标记 `-new` / `(new)`）与厂商
+   命名空间前缀，再 slug 化——`kilo-auto`、`longcat-2.5-preview`。
+   **合并键与全部条目的对外 id 都用它**。
 3. **展示名**（`display_model_name`）：清洗后的可读文本 `LongCat 2.5
    Preview`。上游给了可读名就用它（Qoder `Qwen3.8-Max` → `Qwen3.8 Max`），
    没有就从 id 现派生（zen / kilo 多数如此）；品牌与缩写按表纠正大小写。
@@ -67,6 +68,7 @@ codebuddy 0 → trae 1 → qoder 2 → codearts 3 → 其他 4），组内仍按
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from fnmatch import fnmatch
@@ -112,9 +114,9 @@ def _model_label(model: Model) -> str:
 
     上游给了可读名就用它（Qoder 的 `Qwen3.8-Max`、TRAE 的 `Kimi-K3`），没有就
     从 id 现派生（zen / kilo 多数如此）。两条路径都过 `display_model_name`，
-    把 free 标记、命名空间前缀与分隔符统一掉，得到 `Qwen3.8 Max` / `LongCat
-    2.5 Preview` 这类可直接展示的文本。清洗后为空（上游名就是 `free` 之类）
-    返回空串，调用方回退原始 id。
+    把 free 标记、新版标记、命名空间前缀与分隔符统一掉，得到 `Qwen3.8 Max` /
+    `LongCat 2.5 Preview` 这类可直接展示的文本。清洗后为空（上游名就是 `free`
+    之类）返回空串，调用方回退原始 id。
     """
     return display_model_name(model.name or model.id)
 
@@ -535,8 +537,98 @@ def restore_model_catalog(services: Services) -> int:
     return restored
 
 
+async def _refresh_providers(services: Services, connected: set[str]) -> None:
+    """同步拉取所有「需要刷新」的渠道，每拉完一条就 publish 一次别名表。
+
+    没凭证的渠道直接跳过：不拉取、不展示。已接入的渠道即使本次拉取失败，也会
+    走缓存兜底，不会因为一次抖动就从列表里消失。
+    **每拉完一条渠道就 publish**（`publish_aliases`），不等最慢的那条
+    （zen 探活十几秒）——否则这段时间里别名表空着，扁平名请求会扇出到不认该
+    模型的上游。整段串行化（`_refresh_lock`）：HTTP 出口与后台兜底刷新两处都
+    可能进来，无锁时会同时对同一条渠道打上游（zen 那次是十几秒真推理），后到
+    的拿到的还是同一份数据，纯属白打。
+    """
+    async with _refresh_lock:
+        now = time.monotonic()
+        for provider_id, provider in services.registry.items():
+            if provider_id not in connected:
+                continue
+            if not _needs_refresh(services, provider_id, now=now):
+                continue
+            await _refresh_provider(services, provider_id, provider)
+            publish_aliases(services, connected)
+
+
+def _schedule_refresh(services: Services, connected: set[str],
+                      stale: set[str]) -> None:
+    """把「过期渠道」的刷新丢到后台（去重 + 完成后自动摘除）。
+
+    HTTP 出口专用：**有缓存就直接返回旧列表**，把 zen 探活的十几秒从请求路径
+    挪走——此前 TTL 一过就同步重拉全部渠道，Playground 每次卡十几到三十秒。
+    代价是列表最多滞后一个 TTL：TTL 到期后的第一次请求仍回旧数据，后台刷新
+    完成、下一次请求才转新鲜。
+
+    去重：已有刷新在途就不再排新的（`model_refreshing`）；`_refresh_providers`
+    里还有 `_refresh_lock`，但那是「多请求串行化」，这里再挡一层避免同一渠道被
+    反复排队。任务句柄进 `model_refresh_tasks`，lifespan 关闭时统一取消。
+    """
+    if services.model_refreshing:
+        return
+    services.model_refreshing.update(stale)
+
+    async def run() -> None:
+        try:
+            await _refresh_providers(services, connected)
+        except Exception as error:  # noqa: BLE001 - 后台刷新失败只记日志
+            logger.warning("后台模型列表刷新失败: %s", error)
+        finally:
+            services.model_refreshing.difference_update(stale)
+
+    task = asyncio.create_task(run())
+    services.pending_model_refreshes.append(task)
+    services.model_refresh_tasks.add(task)
+
+    def _done(_task: asyncio.Task) -> None:
+        services.model_refresh_tasks.discard(_task)
+        with contextlib.suppress(ValueError):
+            services.pending_model_refreshes.remove(_task)
+
+    task.add_done_callback(_done)
+
+
+def _build_response(services: Services, connected: set[str]) -> dict:
+    """按当前缓存合并出响应（不碰上游），并就地 publish 别名表。"""
+    entries = merged_entries(services, connected)
+    _publish(services, entries)
+    return {"object": "list", "data": [_entry_response(entry)
+                                       for entry in entries]}
+
+
+async def serve_models(services: Services) -> dict:
+    """HTTP 出口（`/v1/models`、Playground）：先回旧列表，过期渠道后台刷。
+
+    stale-while-revalidate：TTL 到期不再把 zen 探活的十几秒压在请求上。只有某
+    渠道**一条缓存都没有**时（冷启动无落盘快照 / 新接入渠道）才同步等它一次
+    ——否则列表会缺一条渠道的模型。落盘快照恢复后几乎所有渠道都有缓存，故稳态
+    请求不再阻塞；代价是列表最多滞后一个 TTL（到期后第一次仍回旧数据，后台刷
+    新完成后下一次才转新鲜）。
+
+    后台刷新任务收敛在 `services.model_refresh_tasks` / `pending_model_refreshes`，
+    `model_refreshing` 去重，lifespan 关闭时统一取消。
+    """
+    connected = credential_providers(services)
+    stale = {provider_id for provider_id in connected
+             if _needs_refresh(services, provider_id, now=time.monotonic())}
+    if any(not services.model_list_cache.get(provider_id) for provider_id in stale):
+        # 无可回退模型（冷启动无快照 / 新接入渠道）：必须同步拉一次
+        await _refresh_providers(services, connected)
+    elif stale:
+        _schedule_refresh(services, connected, stale)
+    return _build_response(services, connected)
+
+
 async def list_models(services: Services) -> dict:
-    """跨上游拉取并合并模型列表。
+    """同步拉取并合并模型列表（供后台预热 / 兜底刷新循环）。
 
     同一模型在各渠道的内部代号互不相同（Qoder `kmodel_latest` = TRAE
     `kimi-k3-1` = CodeBuddy `kimi-k3`），大小写、连字符、free 后缀、命名空间
@@ -549,34 +641,17 @@ async def list_models(services: Services) -> dict:
     虚拟凭证），接入 CodeBuddy / TRAE 后下一次请求才把它们拉进来。
 
     TTL 内直接复用缓存（`model_list_fetched_at`，落盘恢复时按快照年龄播种）；
-    启动预热、后台兜底刷新、HTTP 出口走的都是这一条，没有「强制刷新」旁路
-    ——预热要的就是「该拉的拉」，有快照的渠道等 TTL 到期即可。
     **每拉完一条渠道就 publish 一次别名表**（`publish_aliases`），不等最慢的
     那条（zen 探活十几秒）——否则这段时间里别名表空着，扁平名请求会扇出到
-    不认该模型的上游。
-    黑名单在每个出口现算（缓存不做过滤），因此改完黑名单下一次调用立即生效。
-    输出顺序按 `_sort_key`：CB / TR 渠道的模型优先，其余渠道在后。
+    不认该模型的上游。黑名单在每个出口现算（缓存不做过滤），因此改完黑名单
+    下一次调用立即生效。输出顺序按 `_sort_key`：CB / TR 渠道的模型优先。
 
-    整段串行化（`_refresh_lock`）：调用方有 HTTP 出口与后台兜底刷新两处，
-    两者都无锁时会同时对同一条渠道打上游（zen 那次就是十几秒的真推理），
-    后到的那个拿到的还是同一份数据，纯属白打一遍。
+    整段串行化（`_refresh_lock`，见 `_refresh_providers`）。后台任务要的是
+    「真的刷新」，所以这条保持同步；HTTP 出口走 `serve_models`（SWR）。
     """
-    async with _refresh_lock:
-        connected = credential_providers(services)
-        now = time.monotonic()
-        for provider_id, provider in services.registry.items():
-            # 没凭证的渠道直接跳过：不拉取、不展示。已接入的渠道即使本次拉取失败，
-            # 也会走缓存兜底，不会因为一次抖动就从列表里消失。
-            if provider_id not in connected:
-                continue
-            if not _needs_refresh(services, provider_id, now=now):
-                continue
-            await _refresh_provider(services, provider_id, provider)
-            publish_aliases(services, connected)
-        entries = merged_entries(services, connected)
-        _publish(services, entries)
-        return {"object": "list", "data": [_entry_response(entry)
-                                          for entry in entries]}
+    connected = credential_providers(services)
+    await _refresh_providers(services, connected)
+    return _build_response(services, connected)
 
 
 def create_router(services: Services) -> APIRouter:

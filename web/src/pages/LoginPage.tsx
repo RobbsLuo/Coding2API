@@ -57,7 +57,7 @@ export function LoginPage() {
               />
             </label>
             {error && (
-              <div data-testid="login-error">
+              <div data-testid="login-error" role="alert">
                 <Notice tone="danger">
                   <span className="inline-flex items-center gap-1.5">
                     <TriangleAlert className="size-3.5" />

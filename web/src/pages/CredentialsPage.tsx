@@ -121,7 +121,9 @@ interface Actions {
 
 export function CredentialsPage() {
   const session = useSessionContext();
-  const { data, isLoading } = useCredentials(session.username);
+  // 30s 轮询：冷却倒计时 / token 剩余都是「随时间变化」的观测量，页面停留
+  // 时应自动刷新（与 Dashboard / useTasks 同口径）。
+  const { data, isLoading } = useCredentials(session.username, 30_000);
   const client = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -459,23 +461,26 @@ export function CredentialsPage() {
           </Notice>
         </div>
       )}
-      {error && (
-        <div data-testid="credentials-error">
-          <Notice tone="danger">{error}</Notice>
-        </div>
-      )}
-      {notice && (
-        <div data-testid="credentials-notice">
-          <Notice tone="ok">
-            {notice}
-            {probeDetail && (
-              <span className="ml-2 text-muted-foreground" data-testid="probe-detail">
-                原始错误：{probeDetail}
-              </span>
-            )}
-          </Notice>
-        </div>
-      )}
+      {/* 操作结果对读屏不可见（视觉横幅无焦点变化）：用 aria-live 播报 */}
+      <div aria-live="polite">
+        {error && (
+          <div data-testid="credentials-error">
+            <Notice tone="danger">{error}</Notice>
+          </div>
+        )}
+        {notice && (
+          <div data-testid="credentials-notice">
+            <Notice tone="ok">
+              {notice}
+              {probeDetail && (
+                <span className="ml-2 text-muted-foreground" data-testid="probe-detail">
+                  原始错误：{probeDetail}
+                </span>
+              )}
+            </Notice>
+          </div>
+        )}
+      </div>
       {growthResult && (
         <div data-testid="growth-result">
           <Notice tone={growthResult.ok ? "ok" : "danger"}>
@@ -510,7 +515,7 @@ export function CredentialsPage() {
                 <TableHead>昵称</TableHead>
                 <TableHead>渠道</TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">状态<ColumnHint text="可用/冷却中/已禁用/已暂停/额度耗尽；已暂停只摘对话流量，签到/刷新/探测照常；冷却中到期自动恢复。" /></span></TableHead>
-                <TableHead><span className="inline-flex items-center gap-1">健康度<ColumnHint text="剩余积分占比四态：已知百分比 / 未探测 / 无探测 / 已耗尽。未探测＝探测失败或渠道未给额度信息（点「探测」可重试），≠已耗尽；无探测＝免费层上游根本没有额度接口，探也没用。" /></span></TableHead>
+                <TableHead><span className="inline-flex items-center gap-1">健康度<ColumnHint text="剩余积分占比四态：已知百分比 / 未探测 / 无探测 / 已耗尽。未探测＝探测失败或渠道未给额度信息（点「探测」可重试），≠已耗尽；无探测＝免费层上游根本没有额度接口，探也没用。调度器优先选百分比高者，百分比打平时再用账户剩余积分多者。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期额度行＝调度窗口内即将过期、会被优先消耗的额度；主窗口（36h）打平时才比较次窗口（7 天）。CodeArts 的额度是 token（每日 1000 万池、0 点清零），其余渠道是积分。数字后的下箭头展开该凭证的积分记录（两次额度探测之间的净变化）。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">token 剩余<ColumnHint text="access token 距离到期还有多久，取自凭证本身（为 0 表示渠道未给到期信息，显示 —）。预刷新任务每小时检查一次，进入 24 小时窗口即自动续期；「已过期」意味着上游会拒绝该凭证，需重新登录。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">成长中心<ColumnHint text="仅 CodeBuddy：最近一轮成长中心（旅行礼物/任务/连登兑换/盲盒）的领取结果与时间，由定时任务或手动执行写入。" /></span></TableHead>
@@ -669,7 +674,7 @@ export function CredentialsPage() {
           { term: "冷却中（显示剩余时间）", where: "状态列", meaning: "渠道暂时拒绝（权益耗尽 12 小时、限流 60 秒、连续出错 10 分钟），到期自动恢复，无需手动操作。" },
           { term: "已禁用", where: "状态列", meaning: "渠道判定会话失效，凭证已永久停止使用；删除后重新登录该账号即可。" },
           { term: "已暂停", where: "状态列", meaning: "管理员手动暂停（软开关）：只把该凭证摘出对话流量，签到 / token 刷新 / 成长中心 / 额度探测照常运行；随时可以取消暂停。" },
-          { term: "健康度：百分比", where: "健康度列", meaning: "剩余积分占总积分的比例，调度器优先选数值高的。" },
+          { term: "健康度：百分比", where: "健康度列", meaning: "剩余积分占总积分的比例，调度器优先选数值高的；健康度打平时再用账户剩余积分多者。" },
           { term: "健康度：未探测", where: "健康度列", meaning: "探测失败或渠道没返回额度信息。注意它不是「已耗尽」——点「探测」可重新获取。" },
           { term: "健康度：无探测", where: "健康度列", meaning: "OpenCode Zen / Kilo Gateway 免费层：上游没有额度接口，探测没有意义，因此不提供「探测」按钮，健康度恒为「无探测」。" },
           { term: "额度下方的时间语义", where: "额度列", meaning: "CodeBuddy 是「本周期剩余，<日期> 重置」；TRAE 是「账户剩余（单调递减）」；CodeArts 是「每日积分额度（当日 0 点清零）」。单位统一为积分，重置行为不同。" },

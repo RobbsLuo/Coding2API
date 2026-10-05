@@ -92,14 +92,15 @@ export function Panel({
   action,
   children,
   className,
+  ...rest
 }: {
   title?: string;
   action?: ReactNode;
   children: ReactNode;
   className?: string;
-}) {
+} & React.HTMLAttributes<HTMLDivElement>) {
   return (
-    <Card className={cn("rounded-xl", className)}>
+    <Card className={cn("rounded-xl", className)} {...rest}>
       {(title || action) && (
         <CardHeader>
           {title && (

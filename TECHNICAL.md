@@ -110,9 +110,9 @@ coding2api/
 │   │   │   ├── request.py       # ChatRequest 校验 + 上游 payload 构造
 │   │   │   ├── response.py      # 流式 chunk 生成 + 非流式聚合
 │   │   │   └── errors.py        # OpenAI error shape
-│   │   └── responses/           # Responses 出口（B2.1，仅 Codex CLI 子集）
-│   │       ├── request.py       # Responses → ChatRequest 入站映射
-│   │       └── response.py      # Event → Responses SSE
+│   │   ├── responses/           # Responses 出口（B2.1，仅 Codex CLI 子集）
+│   │   │   ├── request.py       # Responses → ChatRequest 入站映射
+│   │   │   └── response.py      # Event → Responses SSE
 │   ├── tasks/
 │   │   ├── pacer.py             # 全局节流器（PACER_MIN/MAX 随机区间）
 │   │   ├── quota_probe.py       # 启动立即一轮 + 每 QUOTA_PROBE_MINUTES
@@ -313,6 +313,8 @@ def health(q: Quota | None) -> HealthScore:
 **按凭证加载（Q41）**：`list_models` 先用 `credential_providers()` 求「当前有可用凭证」的渠道集合（`candidates(selectable_only=True)`：未暂停、未硬禁用；冷却中的仍算有凭证，避免限流时列表闪没），循环里 `provider_id not in connected` 直接 `continue`——**没凭证的渠道不读缓存、不拉上游、不展示**。此前无凭证也会 `list_models({})`，CB/TRAE 回退静态表、zen 匿名拉取，于是在只接了部分渠道时列表里出现打不通的幽灵模型；启动预热也因此不再对无凭证渠道白打上游。zen 自带虚拟凭证，不受影响。
 
 **失败也进 TTL（负缓存）**：`model_list_fetched_at` 记的是**上次尝试**时间（成功或失败都刷新），TTL（300s）内不再打上游——有缓存就继续用缓存，没缓存就跳过该渠道。此前只在成功时记时间戳，上游一次抖动（尤其 zen 探活的十几秒）会让其后**每次** `/v1/models` 都重跑一遍拉取，把列表请求打成一串超时。
+
+**HTTP 出口 stale-while-revalidate（2026-10-04）**：TTL 到期后，`GET /v1/models` 与 `GET /api/playground/models` 都走新增的 `serve_models`：**有缓存就直接返回旧列表**，过期渠道丢给后台任务（`_schedule_refresh`）异步刷新。根因是此前 TTL 一过 HTTP 出口同步串行重拉全部渠道（实测逐渠道串行合计 30–31s，其中 zen 探活占 23s），Playground 每次打开都卡「载入模型中…」。两条纪律：① **某渠道一条缓存都没有时才同步等它**（冷启动无落盘快照 / 新接入渠道），否则列表会缺一条渠道的模型；落盘快照恢复后几乎所有渠道都有缓存，故稳态请求不再阻塞；② 后台刷新任务收敛在 `services.model_refresh_tasks` / `pending_model_refreshes`，`model_refreshing` 去重（同一渠道不在途才排），`lifespan` 关闭时逐个 `cancel()` + `await`，不把 in-flight 的上游请求带出事件循环。代价：列表最多滞后一个 TTL（TTL 到期后的第一次请求仍回旧数据，刷新完成后下一次才转新鲜）。后台预热（`_warm_model_list`）与兜底循环（每 `MODEL_CATALOG_MINUTES`）仍走同步 `list_models`，保证纯 API 部署也会真刷新。
 
 **逐渠道增量 publish（2026-10-01）**：别名表原先在 `list_models` **末尾**统一 `clear()+update()`，于是被最慢的渠道拖着——zen 的 `fetch_models` 要逐个免费模型真发探活（实测 12–15s），这段时间里别名表是空的，`executor._narrow_providers` 拿不到归属就按「全部渠道」保守放行，扁平名请求真实打一轮不认该模型的上游（实测 CodeBuddy 对 kilo 免费模型回 `11102 service info not found`、TRAE 回 `4001`，各留下 (凭证,模型) 负缓存与 `invalid_request` 统计）。现在每拉完一条渠道就 `publish_aliases()` 一次（从 `model_list_cache` 重建 + 就地更新，executor 的闭包引用同一个 dict），不再等最慢的那条。合并逻辑收敛到 `merged_entries()`：缓存兜底 / TTL 复用 / 落盘恢复三条路径共用同一段代码，行为一致。
 
@@ -782,7 +784,9 @@ class Provider(Protocol):
         次窗口（默认 7 天）；渠道无到期信息（如 CB 企业版）计 0；主窗口 ≤0 时次窗口
         一并失效（expiry_windows() 统一折算）。CodeBuddy 与 TRAE 都按包独立到期，
         CodeArts 按每日池（到期点＝次日 0 点），三者均落阶梯参与此排序
-     f. 两级到期积分都相同时按 health 三态取最高分；同分按 credential_id 稳定
+     f. 两级到期积分都相同时按 health 三态取最高分；health 同分时账户剩余积分
+        （quota_remaining）多者优先；仍同分按 credential_id 稳定。余额只作 health
+        的打平键，不会越级压过低健康度的高余额号
   4. executor：解密凭证 → provider.stream_chat()
      - 上游 HTTP ≥400 → classify → scheduler.note_error → tried 加入 → 回到 3（最多 3 次）
      - 流内 Event.ERROR → 同上映射 → 注入 OpenAI SSE 错误帧 + 冷却 + 轮换
@@ -863,7 +867,7 @@ class Scheduler:
 
 **模型目录刷新为什么是「注入协程」而不是一个 tasks 模块**：`tasks/` 不 import `api/`（反向依赖会把 HTTP 层拖进后台任务），所以 `TaskRunner` 接的是 `model_catalog: Callable[[], Awaitable[object]] | None`，由 `main.lifespan` 闭包注入；`None`（老调用方 / 测试）时不装配这条循环，管理台也不展示这张卡片——与 growth / activity 的处理一致。
 
-**并发保护**：HTTP 出口（`/v1/models`、Playground）与这条后台循环都会调 `list_models`，两者不串行就会同时对同一条渠道打上游（zen 那次是十几秒的真推理），后到的拿到的还是同一份数据。故 `api/models.py` 里 `list_models` 整段持模块级 `asyncio.Lock`。锁的粒度是「整次列表刷新」而非单渠道：跨渠道合并与别名表 publish 需要看到一致的全集。
+**并发保护**：HTTP 出口（`/v1/models` 同步、Playground 走 `refresh_pending_models`）与这条后台循环都会调 `list_models`，两者不串行就会同时对同一条渠道打上游（zen 那次是十几秒的真推理），后到的拿到的还是同一份数据。故 `api/models.py` 里 `_refresh_providers` 整段持模块级 `asyncio.Lock`。锁的粒度是「整次列表刷新」而非单渠道：跨渠道合并与别名表 publish 需要看到一致的全集。Playground 的后台刷新任务复用同一把锁，只是把等待从请求路径挪到后台。
 
 **没有它会烂在哪**（推断，非实测故障）：模型表只在有人访问列表时才按 TTL 更新，纯 API 用法的部署（客户端自己缓存了模型列表）会让「模型 → 渠道」归属表与落盘快照一起变陈旧——上游新增的模型不认识 → 扁平名请求按全部渠道扇出、各渠道回 11102/4001，并给每个凭证写上 6 小时起步的 (凭证, 模型) 负缓存；停机超过 `MAX_AGE_SECONDS`（7 天）后落盘快照也会被直接丢弃，退回「启动窗口无归属」的老行为。
 

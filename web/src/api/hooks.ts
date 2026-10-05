@@ -23,10 +23,13 @@ export function useSession() {
   });
 }
 
-export function useCredentials(username?: string) {
+export function useCredentials(username?: string, refetchIntervalMs?: number) {
   return useQuery<CredentialsResponse>({
     queryKey: adminKey(username, "credentials"),
     queryFn: api.credentials,
+    // 仪表盘/凭证页的冷却倒计时是「随时间变化」的观测量；页面停留时自动
+    // 刷新，其余调用点不传即为默认（不轮询）。
+    refetchInterval: refetchIntervalMs,
   });
 }
 

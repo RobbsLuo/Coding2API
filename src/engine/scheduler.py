@@ -126,6 +126,7 @@ class Candidate:
     enabled: bool = True
     err_count: int = 0
     pinned: bool = False
+    quota_remaining: float | None = None   # 账户剩余积分；同健康度平级时多者优先
     cycle_end: int | None = None       # 额度最早到期（epoch）；无到期信息的渠道为 None
     expiry_ladder: list[tuple[int, float]] | None = None  # [(到期 epoch, 该包剩余额度)]
     # (凭证, 模型) 冷却表：model → ModelCooldown。模型级限流只写这里，
@@ -210,10 +211,13 @@ class Scheduler:
 
         排序规则：pin 优先 → 主窗口（36h）内即将到期额度多者优先 → 次窗口
         （7 天）内即将到期额度多者优先 → known 降序 → unknown → exhausted
-        垫底。到期额度优先于健康度：快过期的先用掉，避免白丢；两级窗口
-        按字典序比较，主窗口打平（含都为 0）时才轮到次窗口，再打平才比
-        健康度。主窗口 ≤0 视为关闭整套到期排序（次窗口一并归零，见
-        `expiry_windows`），此时退回纯健康度排序。
+        垫底 → 健康度打平时**账户剩余积分多者优先**。到期额度优先于健康度：
+        快过期的先用掉，避免白丢；两级窗口按字典序比较，主窗口打平（含都为 0）
+        时才轮到次窗口，再打平才比健康度。剩余积分只作健康度的**打平键**，
+        不会越级把低健康度的高余额号顶上去（健康度是「剩余/总量」比例，
+        101% 也只是 100，同比例下多留些余额以备后用）。主窗口 ≤0 视为关闭
+        整套到期排序（次窗口一并归零，见 `expiry_windows`），此时退回纯健康度
+        排序。
 
         模型级冷却的过滤由调用方在候选集上完成（executor._select）：
         每个候选要按**自己所属上游**的原始模型名查冷却表，选号器不掌握
@@ -232,7 +236,8 @@ class Scheduler:
             pinned or pool,
             key=lambda c: (-c.expiry_credits(now, primary),
                            -c.expiry_credits(now, secondary),
-                           _rank(c.health), -(_health_value(c.health)), c.credential_id),
+                           _rank(c.health), -(_health_value(c.health)),
+                           -_remaining_value(c.quota_remaining), c.credential_id),
         )
         return chosen[0].credential_id
 
@@ -315,3 +320,12 @@ def _health_value(health: int | None) -> int:
     if health is None or health < 0:
         return 0
     return health
+
+
+def _remaining_value(remaining: float | None) -> float:
+    """健康度打平键：账户剩余积分，未知（None）归零排最后。
+
+    只比数值不比单位——到期排序已把 CodeArts 的 token 折成积分
+    （见 `expiring_credits`），此处沿用同一口径。
+    """
+    return remaining if remaining is not None else 0.0

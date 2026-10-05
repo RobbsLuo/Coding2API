@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..compat.openai.request import parse_chat_request
 from .deps import Services, csrf_protected, principal_from_request, read_json_body
-from .models import list_models
+from .models import serve_models
 from .streaming import with_keepalive
 
 
@@ -17,7 +17,9 @@ def create_router(services: Services) -> APIRouter:
 
     @router.get("/api/playground/models")
     async def playground_list_models(_principal=Depends(principal_from_request)):
-        return await list_models(services)
+        # 管理台入口用 stale-while-revalidate：先回缓存的旧列表，过期渠道后台刷，
+        # 不把 zen 探活的十几秒压在打开页面上。
+        return await serve_models(services)
 
     @router.post("/api/playground/chat/completions")
     async def playground_chat(request: Request,

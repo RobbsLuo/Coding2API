@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import pathlib
 import time
 
@@ -28,11 +29,14 @@ from src.api.model_catalog import (
 )
 from src.api.models import (
     MODEL_LIST_TTL_SECONDS,
+    _build_response,
     list_models,
     merged_entries,
     publish_aliases,
     restore_model_catalog,
+    serve_models,
 )
+from src.auth.session import create_session_token
 from src.config import Settings
 from src.main import _restore_model_list, build_app
 from src.provider.base import Model
@@ -345,3 +349,185 @@ def test_list_models_serializes_concurrent_callers(settings):
     asyncio.run(scenario())
     assert provider.calls == 1
     assert "kilo-m" in services.model_aliases["kilo"]
+
+
+# --------------------------------------- stale-while-revalidate（Playground 出口）
+
+
+def test_playground_serves_stale_list_and_refreshes_in_background(settings):
+    """TTL 过期但仍有缓存时：立刻回旧列表，后台异步刷新（不卡请求）。
+
+    回归点：此前 TTL 一过 HTTP 出口就同步重拉全部渠道，zen 探活十几秒全压在
+    Playground 打开请求上。
+    """
+    provider = _StubProvider("kilo", [Model(id="kilo-m")])
+    app = _app_with(settings, {"kilo": provider})
+    services = app.state.services
+    # 先拉一次填充缓存，再模拟 TTL 过期
+    asyncio.run(list_models(services))
+    assert provider.calls == 1
+    services.model_list_fetched_at.clear()
+
+    async def scenario():
+        response = await serve_models(services)   # 立刻返回旧列表
+        assert response["data"][0]["id"] == "kilo-m"
+        # 后台任务已排队（此刻可能还没跑完）
+        assert services.pending_model_refreshes
+        await asyncio.gather(*list(services.pending_model_refreshes))
+
+    asyncio.run(scenario())
+    assert provider.calls == 2                              # 后台补齐了一次
+    assert not services.model_refreshing                    # 刷新完释放
+    assert not services.model_refresh_tasks
+
+
+def test_playground_blocks_once_when_channel_has_no_cache(settings):
+    """某渠道无任何缓存（冷启动无快照 / 新接入）时同步等它，列表不缺模型。"""
+    provider = _StubProvider("kilo", [Model(id="kilo-m")])
+    app = _app_with(settings, {"kilo": provider})
+    services = app.state.services
+    assert services.model_list_cache == {}
+
+    response = asyncio.run(serve_models(services))
+    assert [m["id"] for m in response["data"]] == ["kilo-m"]
+    assert provider.calls == 1
+    assert not services.model_refreshing
+
+
+def test_playground_does_not_reschedule_while_refresh_in_flight(settings):
+    """刷新任务在途时，后续请求不再重复排队（`model_refreshing` 去重）。"""
+    release = asyncio.Event()
+
+    class Slow(_StubProvider):
+        async def list_models(self, credential_data):
+            self.calls += 1
+            await release.wait()
+            return list(self._models)
+
+    provider = Slow("kilo", [Model(id="kilo-m")])
+    app = _app_with(settings, {"kilo": provider})
+    services = app.state.services
+    services.model_list_cache["kilo"] = {"kilo-m": Model(id="kilo-m")}
+    services.model_list_fetched_at.pop("kilo", None)        # 过期
+
+    async def scenario():
+        await serve_models(services)
+        first = len(services.pending_model_refreshes)
+        await serve_models(services)              # 在途，去重
+        assert len(services.pending_model_refreshes) == first
+        release.set()
+        await asyncio.gather(*list(services.pending_model_refreshes))
+
+    asyncio.run(scenario())
+    assert provider.calls == 1
+
+
+def test_playground_background_refresh_survives_upstream_failure(settings):
+    """后台刷新抛错只记日志，不影响本次已返回的旧列表。"""
+    class Broken(_StubProvider):
+        async def list_models(self, credential_data):
+            self.calls += 1
+            raise RuntimeError("upstream down")
+
+    provider = Broken("kilo", [])
+    app = _app_with(settings, {"kilo": provider})
+    services = app.state.services
+    services.model_list_cache["kilo"] = {"kilo-m": Model(id="kilo-m")}
+    services.model_list_fetched_at.pop("kilo", None)
+
+    async def scenario():
+        response = await serve_models(services)
+        assert response["data"][0]["id"] == "kilo-m"
+        await asyncio.gather(*list(services.pending_model_refreshes),
+                             return_exceptions=True)
+
+    asyncio.run(scenario())
+    assert provider.calls == 1
+    assert not services.model_refreshing                    # 异常也释放去重标记
+
+
+def test_playground_background_refresh_logs_unexpected_error(settings, monkeypatch,
+                                                            caplog):
+    """后台刷新线程内出现未预期异常（如合并/publish 抛错）也只记日志。"""
+    from src.api import models as models_module
+
+    provider = _StubProvider("kilo", [Model(id="kilo-m")])
+    app = _app_with(settings, {"kilo": provider})
+    services = app.state.services
+    services.model_list_cache["kilo"] = {"kilo-m": Model(id="kilo-m")}
+    services.model_list_fetched_at.pop("kilo", None)
+
+    async def boom(_services, _connected):
+        raise RuntimeError("merge exploded")
+
+    monkeypatch.setattr(models_module, "_refresh_providers", boom)
+
+    with caplog.at_level(logging.WARNING):
+        async def scenario():
+            await serve_models(services)
+            await asyncio.gather(*list(services.pending_model_refreshes),
+                                 return_exceptions=True)
+
+        asyncio.run(scenario())
+
+    assert "后台模型列表刷新失败" in caplog.text
+    assert not services.model_refreshing                    # 异常也释放去重标记
+
+
+def test_list_response_filters_by_api_key_model_allowlist(settings):
+    """Key 级模型白名单在 `_build_response` 里现滤（列表与实际可用一致）。"""
+    provider = _StubProvider("kilo", [Model(id="glm-m"), Model(id="kilo-m")])
+    app = _app_with(settings, {"kilo": provider})
+    services = app.state.services
+    asyncio.run(list_models(services))            # 先填缓存（不碰上游的出口需要它）
+
+    full = _build_response(services, {"kilo"})
+    assert [m["id"] for m in full["data"]] == ["glm-m", "kilo-m"]
+
+    filtered = _build_response(services, {"kilo"}, allowed_models="glm-*")
+    assert [m["id"] for m in filtered["data"]] == ["glm-m"]
+
+
+def test_schedule_refresh_noop_without_stale_channels(settings):
+    """没有过期渠道时不排后台任务（`_schedule_refresh` 早退分支）。"""
+    provider = _StubProvider("kilo", [Model(id="kilo-m")])
+    app = _app_with(settings, {"kilo": provider})
+    services = app.state.services
+
+    async def scenario():
+        await list_models(services)                         # 缓存新鲜
+        await serve_models(services)
+        assert services.pending_model_refreshes == []
+
+    asyncio.run(scenario())
+    assert provider.calls == 1
+
+
+def test_lifespan_cancels_inflight_background_refresh(settings):
+    """关闭时取消在途的后台刷新，不把上游请求（zen 探活十几秒）带出事件循环。"""
+    class Slow:
+        id = "kilo"
+
+        async def list_models(self, credential_data):
+            await asyncio.sleep(60)                 # 永不自然返回：靠取消退场
+            return [Model(id="kilo-m")]             # pragma: no cover - 取消先到
+
+        def import_credential(self, raw):           # pragma: no cover - 未调用
+            return raw
+
+    app = build_app(settings, providers={"kilo": Slow()})
+    app.state.credentials.add(provider="kilo", credential_data={"accessToken": "a"})
+    services = app.state.services
+    # 预置新鲜缓存：预热不碰上游，把「在途刷新」留给本用例显式触发。
+    services.model_list_cache["kilo"] = {"kilo-m": Model(id="kilo-m")}
+    services.model_list_fetched_at["kilo"] = time.monotonic()
+
+    with TestClient(app) as client:
+        services.model_list_fetched_at.pop("kilo", None)     # 令其过期
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+        assert client.get("/api/playground/models").json()["data"]
+        assert services.model_refresh_tasks              # 后台刷新已排队
+
+    # 退出 with → lifespan 关闭：任务被取消并摘除（否则 await 会挂 60s）
+    assert services.model_refresh_tasks == set()
+    assert services.pending_model_refreshes == []

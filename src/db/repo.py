@@ -329,7 +329,7 @@ class CredentialRepository:
         """
         rows = self._db.connect().execute(
             "SELECT id, provider, health, cooling_until, disabled, enabled, err_count, pinned, "
-            "quota_cycle_end, quota_expiry_ladder FROM credentials").fetchall()
+            "quota_remaining, quota_cycle_end, quota_expiry_ladder FROM credentials").fetchall()
         allowed = set(providers) if providers is not None else None
         # 模型级冷却整表读一次（表很小：只在模型限流/负缓存时才有行），
         # 按凭证聚合后挂到 Candidate 上；每选一次号查一次库会抵消选号的开销优势。
@@ -350,6 +350,7 @@ class CredentialRepository:
                 cooling_until=row["cooling_until"], disabled=bool(row["disabled"]),
                 enabled=bool(row["enabled"]), err_count=row["err_count"],
                 pinned=bool(row["pinned"]), cycle_end=row["quota_cycle_end"],
+                quota_remaining=row["quota_remaining"],
                 expiry_ladder=_ladder_value(row["quota_expiry_ladder"]),
                 model_cooldowns=by_credential.get(row["id"]),
             )

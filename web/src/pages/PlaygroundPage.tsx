@@ -126,7 +126,7 @@ export function PlaygroundPage() {
               models={models}
               value={selectedModel}
               onChange={setModel}
-              loading={modelsQuery.isFetching}
+              loading={modelsQuery.isFetching && fetched.length === 0}
             />
           </Field>
 
@@ -237,13 +237,15 @@ export function PlaygroundPage() {
       </Panel>
 
       {(error || modelsQuery.error) && (
-        <div data-testid="playground-error">
+        <div data-testid="playground-error" role="alert">
           <Notice tone="danger">
             {error ?? "模型列表加载失败，请刷新重试"}
           </Notice>
         </div>
       )}
 
+      {/* 请求/流式响应无焦点变化：aria-live 让读屏可感知回答到达 */}
+      <div aria-live="polite">
       {(answer || reasoning) && (
         <Panel title="响应">
           {reasoning && (
@@ -277,6 +279,7 @@ export function PlaygroundPage() {
           )}
         </Panel>
       )}
+      </div>
 
       {!answer && !reasoning && !error && (
         <Empty>

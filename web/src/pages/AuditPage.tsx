@@ -109,7 +109,7 @@ export function AuditPage() {
         </form>
       </Panel>
 
-      <Panel title={`记录${data ? `（本页 ${events.length} 条）` : ""}`}>
+      <Panel title={`记录${data ? `（本页 ${events.length} 条）` : ""}`} aria-label="审计记录">
         {isLoading ? (
           <Empty>载入中…</Empty>
         ) : events.length === 0 ? (
@@ -135,8 +135,10 @@ export function AuditPage() {
                     </TableCell>
                     <TableCell className="text-xs">{event.actor}</TableCell>
                     <TableCell>
+                      {/* 失败动作对读屏不可见（颜色语义）：加「失败」文案 */}
                       <Badge tone={event.ok ? "muted" : "danger"}>
                         {labels[event.action] ?? event.action}
+                        {!event.ok && "（失败）"}
                       </Badge>
                     </TableCell>
                     <TableCell className="text-xs">{event.target ?? "—"}</TableCell>

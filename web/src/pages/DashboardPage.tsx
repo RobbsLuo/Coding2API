@@ -17,8 +17,14 @@ import { providerLabel } from "../api/providers";
 import { cn } from "@/lib/utils";
 import { Ban, BatteryLow, CheckCircle2, Database, LayoutDashboard, Timer, ToggleLeft } from "lucide-react";
 
+/** 冷却倒计时随时间流逝，30s 轮询足以让「剩余 59 分钟」这类文案保持可信。 */
+const DASHBOARD_REFETCH_MS = 30_000;
+
 export function DashboardPage() {
-  const { data, isLoading } = useCredentials();
+  // refetchInterval：冷却倒计时/健康度是「随时间变化」的观测量，页面停留时
+  // 应自动刷新（与 useTasks 的 30s 同口径）。
+  const { data, isLoading } = useCredentials(undefined, DASHBOARD_REFETCH_MS);
+
   const credentials = data?.credentials ?? [];
   const now = Date.now() / 1000;
 
@@ -62,7 +68,10 @@ export function DashboardPage() {
         icon={<LayoutDashboard className="size-5" />}
       />
 
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+      <section
+        aria-label="凭证状态统计"
+        className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6"
+      >
         <Metric label="凭证总数" value={formatNumber(counts.total)} icon={<Database className="size-4" />} />
         <Metric label="可用" value={formatNumber(counts.ready)} tone="ok" icon={<CheckCircle2 className="size-4" />} />
         <Metric label="冷却中" value={formatNumber(counts.cooling)} tone="warn" icon={<Timer className="size-4" />} />
@@ -72,7 +81,12 @@ export function DashboardPage() {
       </section>
 
       <Panel title="健康度四态分布">
-        <div className="flex h-2 w-full overflow-hidden rounded-full bg-muted">
+        {/* 纯色块拼条对读屏不可读：补一个汇总文本语义（图例已承载具体数值） */}
+        <div
+          role="img"
+          aria-label={`健康度分布：已知剩余 ${healthTally.known}，未探测 ${healthTally.unknown}，无探测 ${healthTally.noprobe}，已耗尽 ${healthTally.exhausted}`}
+          className="flex h-2 w-full overflow-hidden rounded-full bg-muted"
+        >
           {healthTally.known > 0 && (
             <div
               className="bg-ok transition-all"
@@ -191,6 +205,7 @@ function CredentialRow({ credential, now }: { credential: Credential; now: numbe
         : health.percent > 0
           ? "bg-warn"
           : "bg-destructive";
+  const noprobe = health.kind === "noprobe";
   return (
     <li
       className="rounded-xl bg-card p-3.5 ring-1 ring-border transition-colors hover:ring-primary/30"
@@ -226,7 +241,14 @@ function CredentialRow({ credential, now }: { credential: Credential; now: numbe
           </span>
         </div>
         <div className="mt-1.5 flex items-center gap-1.5">
-          <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted">
+          <div
+            className={cn(
+              "h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-muted",
+              // 无探测（免费层）时整条轨道降透明度，读作「该卡没有额度条」
+              // 而不是「额度为零」。
+              noprobe && "opacity-50",
+            )}
+          >
             {health.percent !== null && (
               <div
                 className={cn("h-full rounded-full transition-all", barTone)}

@@ -156,7 +156,10 @@ export function StatsPage() {
         </div>
       </Panel>
 
-      <section className="grid grid-cols-2 gap-3 md:grid-cols-4">
+      <section
+        aria-label="用量概览统计"
+        className="grid grid-cols-2 gap-3 md:grid-cols-4"
+      >
         <Metric label="请求数" value={formatNumber(stats?.requests)} tone="ok"
                 hint={`成功率 ${rateText}`} icon={<Activity className="size-4" />} />
         <Metric
@@ -236,6 +239,7 @@ export function StatsPage() {
                 <TableHead>渠道</TableHead>
                 <TableHead className="text-right">请求数</TableHead>
                 <TableHead className="text-right">成功数</TableHead>
+                <TableHead className="text-right">成功率</TableHead>
                 <TableHead className="text-right">输入 token</TableHead>
                 <TableHead className="text-right">输出 token</TableHead>
                 <TableHead className="text-right">Credit</TableHead>
@@ -252,6 +256,12 @@ export function StatsPage() {
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{formatNumber(row.requests)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatNumber(row.ok_count)}</TableCell>
+                  {/* 成功率：请求数为 0 无意义（不渲染 0% 冒充数据） */}
+                  <TableCell className="text-right tabular-nums" data-testid="provider-success-rate">
+                    {row.requests > 0
+                      ? `${((row.ok_count / row.requests) * 100).toFixed(1)}%`
+                      : "—"}
+                  </TableCell>
                   <TableCell className="text-right tabular-nums">{formatCompact(row.input_tokens)}</TableCell>
                   <TableCell className="text-right tabular-nums">{formatCompact(row.output_tokens)}</TableCell>
                   <TableCell className="text-right tabular-nums">

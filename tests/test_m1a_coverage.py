@@ -68,6 +68,7 @@ def test_repo_update_paths(repo):
                                                 probed_at=1))
     assert credentials.candidates()[0].health == 50
     assert credentials.candidates()[0].cycle_end == 123
+    assert credentials.candidates()[0].quota_remaining == 5
     assert credentials.candidates()[0].expiry_ladder == [(123, 5.0)]
 
     credentials.save_quota(credential_id, Quota(remaining=5, total=10, cycle_end=123,

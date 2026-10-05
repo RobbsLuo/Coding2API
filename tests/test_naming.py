@@ -54,11 +54,31 @@ class TestNormalizeModelKey:
         assert normalize_model_key("freeplay-2") == "freeplay-2"
         assert normalize_model_key("freeball") == "freeball"
 
+    def test_strips_new_suffix(self):
+        """新版标记只删整词尾缀，内嵌形式不动（`newest` 不是标记）。"""
+        assert normalize_model_key("ling-3.1-flash-new") == "ling-3.1-flash"
+        assert normalize_model_key("Ling 3.1 Flash (new)") == "ling-3.1-flash"
+        assert normalize_model_key("Kilo New") == "kilo"
+        assert normalize_model_key("gpt-newest") == "gpt-newest"
+        assert normalize_model_key("newson-2") == "newson-2"
+
+    def test_stacks_new_and_free_marks(self):
+        """标记可叠加：剥到最后一个为止，不能只去最外层一个。"""
+        assert normalize_model_key("model-new_free") == "model"
+        assert normalize_model_key(
+            "Ling 3.1 Flash (new) (free)") == "ling-3.1-flash"
+        assert normalize_model_key("a-new-free-new") == "a"
+
     def test_falls_back_to_raw_when_cleaning_empties_the_key(self):
-        """剥完只剩 free 噪声时回退原串小写，不能产出空键。"""
+        """剥完只剩噪声标记时回退原串小写，不能产出空键。"""
         assert normalize_model_key("-free") == "-free"
         assert normalize_model_key("free") == "free"
         assert normalize_model_key("free/free") == "free/free"
+        assert normalize_model_key("-new") == "-new"
+        assert normalize_model_key("new") == "new"
+        assert normalize_model_key("new/new") == "new/new"
+        # 只剩一对括号时 slug 化后为空，同样回退原串（不是产出空键）
+        assert normalize_model_key("(new)") == "(new)"
 
     def test_slugifies_whitespace_case_and_punctuation(self):
         """展示名转键：空格/下划线/括号压成连字符，全部小写。"""
@@ -132,12 +152,26 @@ class TestDisplayModelName:
         # 模型名里本来就有 free 的内嵌形式不误伤
         assert display_model_name("freeplay-2") == "Freeplay 2"
 
+    def test_strips_new_marker_from_display_name(self):
+        """kilo 新版标记 `(new)` 与厂商前缀一起削（实测 2026-10-05 形态）。"""
+        assert display_model_name(
+            "inclusionAI: Ling 3.1 Flash (new)") == "Ling 3.1 Flash"
+        assert display_model_name("ling-3.1-flash-new") == "Ling 3.1 Flash"
+        assert display_model_name("Kilo (new)") == "Kilo"
+        # 叠加 free 时仍要削干净
+        assert display_model_name(
+            "Ling 3.1 Flash (new) (free)") == "Ling 3.1 Flash"
+        # 内嵌形式不误伤
+        assert display_model_name("gpt-newest") == "GPT Newest"
+
     def test_pure_noise_yields_empty_name(self):
-        """名字整体就是 free 之类时返回空串，由调用方回退原始 id。"""
+        """名字整体就是 free / new 之类时返回空串，由调用方回退原始 id。"""
         assert display_model_name("free") == ""
         assert display_model_name("-free") == ""
         assert display_model_name("free/free") == ""
         assert display_model_name("   ") == ""
+        assert display_model_name("new") == ""
+        assert display_model_name("(new)") == ""
 
     def test_keeps_non_ascii_alnum(self):
         """中文后缀保留（`长尾` 与短名是不同模型，不能撞键）。"""
@@ -163,6 +197,17 @@ class TestCrossChannelAlignment:
         """zen 免费档尾缀只是可用性约定，与付费档同模型。"""
         assert normalize_model_key("deepseek-v4.1-flash-free") == "deepseek-v4.1-flash"
         assert display_model_name("deepseek-v4.1-flash-free") == "DeepSeek V4.1 Flash"
+
+    def test_new_marked_variant_aligns_with_unmarked_variant(self):
+        """新版标记与不带标记的写法对上是同一个键，不被拆成两条。
+
+        上游给新版模型打 `(new)` 标记，若不削，同一模型在「带标记」与
+        「不带标记」两个渠道写法下会归一成两个键、两条对外 id，用户得选对
+        才路由得通。
+        """
+        marked = normalize_model_key("inclusionAI: Ling 3.1 Flash (new)")
+        assert marked == normalize_model_key(display_model_name("Ling 3.1 Flash"))
+        assert marked == normalize_model_key("ling-3.1-flash-new")
 
     def test_zen_and_kilo_nemotron_align(self):
         """zen 与 kilo 的同一 Nemotron 模型：靠**上游展示名**对齐到同一个键。

@@ -237,6 +237,20 @@ def test_select_known_desc_then_unknown_then_exhausted():
     assert s.select([cand("dead", health=EXHAUSTED)], set(), NOW) == "dead"
 
 
+def test_select_health_tie_prefers_more_remaining():
+    """健康度一致时，账户剩余积分多者优先。"""
+    pool = [cand("low", health=95, quota_remaining=10.0),
+            cand("high", health=95, quota_remaining=90.0)]
+    assert Scheduler().select(pool, set(), NOW) == "high"
+    # 未知剩余（None）视为 0，排在已知余额之后
+    pool = [cand("unknown", health=95), cand("some", health=95, quota_remaining=1.0)]
+    assert Scheduler().select(pool, set(), NOW) == "some"
+    # 余额只作健康度的打平键，不越级压过低健康度
+    pool = [cand("healthier", health=90, quota_remaining=0.0),
+            cand("wealthier", health=80, quota_remaining=1000.0)]
+    assert Scheduler().select(pool, set(), NOW) == "healthier"
+
+
 def test_select_excludes_tried_and_disabled_and_cooling():
     s = Scheduler()
     pool = [cand("a", health=5), cand("b", health=9),

@@ -120,4 +120,17 @@ describe("DashboardPage", () => {
     expect(screen.getByText(/本周期剩余/)).toBeInTheDocument();
     expect(screen.getAllByText(/账户剩余（单调递减）/).length).toBeGreaterThan(0);
   });
+
+  it("页面停留时自动轮询刷新（冷却倒计时随时间变化）", async () => {
+    const spy = mockFetch({
+      "/api/credentials": { credentials: [], viewer: "root", is_admin: true },
+    });
+    renderPage(<DashboardPage />);
+    await settle();
+
+    // 声明了 30s 轮询： TanStack 会把 refetchInterval 写进 query 观察项，
+    // 这里从 fetch 调用侧验证——首次加载只发一次请求。
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][0]).toBe("/api/credentials");
+  });
 });

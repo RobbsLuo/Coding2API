@@ -375,6 +375,14 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                 warmup.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await warmup
+            # stale-while-revalidate 的后台刷新任务：不取消会把 in-flight 的
+            # 上游请求（zen 探活可占十几秒）带出事件循环，关闭变慢且报错。
+            for task in list(services_.model_refresh_tasks):
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            services_.model_refresh_tasks.clear()
+            services_.pending_model_refreshes.clear()
             for task in app_.state.pending_probes:
                 task.cancel()
             app_.state.pending_probes.clear()

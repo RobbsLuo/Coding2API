@@ -8,8 +8,8 @@
    `nvidia/nemotron-3-ultra-550b-a55b:free`），对外一律保留，由别名表在
    转发时换回去。
 2. **normalized key**（`normalize_model_key`）：同模型验证 / 合并键。
-   剥掉上游的可用性噪声（免费标记）与厂商命名空间前缀，slug 化成
-   `kilo-auto`、`longcat-2.5-preview`、`nemotron-3-ultra`。
+   剥掉上游的噪声标记（免费标记 `free`、新版标记 `new`）与厂商命名空间前缀，
+   slug 化成 `kilo-auto`、`longcat-2.5-preview`、`nemotron-3-ultra`。
 3. **display name**（`display_model_name`）：展示名。首字母大写、分隔符
    转空格、`LongCat 2.5 Preview`；品牌与缩写按表纠正大小写
    （机械 title-case 会把 `DeepSeek` 写成 `Deepseek`）。
@@ -34,6 +34,15 @@ import re
 #         展示名 `NVIDIA: Nemotron 3 Ultra (free)`（括号词）
 # 注：只删「整段 / 整词 free」，`freeplay` / `freeball` 这类内嵌形式不动。
 FREE_MARK = "free"
+# 新版标记：上游用它标记「这是新出的版本」（实测 2026-10-05，kilo 展示名
+# `inclusionAI: Ling 3.1 Flash (new)`），与 free 同性质——**新旧标记**、不是
+# 模型身份的一部分。不削的话归一键带 `-new` 尾缀，新旧两种写法（有的渠道带、
+# 有的不带）互相对不上，同一模型被拆成两条。
+NEW_MARK = "new"
+# 需要整体剥掉的噪声标记集合。两者都**只删整段 / 整词**，`freeplay` / `newson`
+# 这类内嵌形式不是标记，不能误伤。
+NOISE_MARKS: frozenset[str] = frozenset({FREE_MARK, NEW_MARK})
+_NOISE_MARK_ALT = "|".join(sorted(NOISE_MARKS))     # 正则用的 alternation
 
 # 命名空间前缀：上游两种写法都带厂商名——原代号的 `厂商/模型`（kilo 的
 # `nvidia/nemotron-3-ultra:free`、`stealth/space-bunny-alpha`）与展示名的
@@ -44,13 +53,14 @@ _PATH_SEP = "/"
 # 展示名的厂商前缀 `Vendor: `：冒号后**必须有空白**才算（`a:b` 不动，避免
 # 误伤 `qwen3.8:max` 这类无空格写法）。
 _NAMESPACE_PREFIX = re.compile(r"^[^:\s][^:]*:\s+")
-# 尾部的 free 标记：`-free`（zen）/ `_free` / `:free`（kilo）/ ` Free` /
-# `(free)`（kilo 展示名）。**必须有分隔符或括号**，故 `freeplay` 这类内嵌
-# 形式不会被误伤。比较忽略大小写。
-_TRAILING_FREE = re.compile(r"(?:[\s\-_:]+free|\s*[([]\s*free\s*[)\]])$",
-                            re.IGNORECASE)
-# 展示分段里独立的 free 词（`(free)` 摘括号后成 `free`）：整段丢弃。
-_FREE_WORD = re.compile(r"^free$", re.IGNORECASE)
+# 尾部的噪声标记：`-free`（zen）/ `_free` / `:free`（kilo）/ ` Free` /
+# `(free)`（kilo 展示名）/ `(new)`。**必须有分隔符或括号**，故 `freeplay` 这类
+# 内嵌形式不会被误伤。比较忽略大小写。
+_TRAILING_MARK = re.compile(
+    rf"(?:[\s\-_:]+(?:{_NOISE_MARK_ALT})|\s*[([]\s*(?:{_NOISE_MARK_ALT})"
+    rf"\s*[)\]])$", re.IGNORECASE)
+# 展示分段里独立的标记词（`(free)` 摘括号后成 `free`）：整段丢弃。
+_NOISE_MARK_WORD = re.compile(rf"^(?:{_NOISE_MARK_ALT})$", re.IGNORECASE)
 
 # 展示名与归一键之间的分隔符集合：连字符 / 下划线 / 空白。点号**不是**分隔
 # ——`glm-5.2` / `qwen3.8` 的版本号靠它区分，压成 `glm-5-2` 就换了模型。
@@ -97,19 +107,19 @@ def _pretty_segment(segment: str) -> str:
     return head + rest
 
 
-def _is_free_segment(segment: str) -> bool:
-    """该分段是否只是 free 标记本身。
+def _is_noise_segment(segment: str) -> bool:
+    """该分段是否只是噪声标记本身（`free` / `new`）。
 
-    连外层括号一起看（`(free)` / `[free]` 都算），故 kilo 展示名里的
-    「(free)」在摘括号后能被整段丢掉；而 `freeplay` 不是整词，不算。
+    连外层括号一起看（`(free)` / `[new]` 都算），故 kilo 展示名里的「(free)」
+    「(new)」在摘括号后能被整段丢掉；而 `freeplay` 不是整词，不算。
     """
-    return _FREE_WORD.match(segment.strip(_WRAPPERS).strip()) is not None
+    return _NOISE_MARK_WORD.match(segment.strip(_WRAPPERS).strip()) is not None
 
 
 def _strip_noise(value: str) -> str:
-    """去掉命名空间前缀与免费标记，留下模型名本体。
+    """去掉命名空间前缀与噪声标记（free / new），留下模型名本体。
 
-    上游的噪声共两类、四种形态（实测 2026-10-01，kilo 一家占三种）：
+    上游的噪声共三类、六种形态（实测 2026-10-01/05，kilo 一家就占四种）：
 
     * **命名空间前缀**，不是模型身份的一部分，留着会让同一模型在不同渠道
       因厂商写法不同而对不上：
@@ -122,26 +132,37 @@ def _strip_noise(value: str) -> str:
         - 尾缀 `-free` / `_free`（zen `longcat-2.5-preview-free`）/ `:free`
           （kilo `laguna-s-2.1:free`）/ ` Free` / `(free)`（kilo 展示名）
           → 尾部削掉。
+    * **新版标记**，同样只是新旧标记、不是模型身份的一部分：
+        - 尾缀 `-new`（kilo `ling-3.1-flash-new`）/ ` New` / `(new)`
+          （kilo 展示名 `inclusionAI: Ling 3.1 Flash (new)`）→ 尾部削掉。
+        - 不削则新旧两种写法对不上，同一模型在不同渠道会被拆成两条。
 
-    比较一律忽略大小写（上游有 `GAMMA-FREE` 这类写法）。剥完只剩 free 噪声
-    （`-free` / `free`）时返回空串，由调用方决定回退原 id —— 宁可显示原始
-    id，也不要给模型安一个叫「Free」的名字。
+    比较一律忽略大小写（上游有 `GAMMA-FREE` 这类写法）。剥完只剩标记噪声
+    （`-free` / `free` / `-new`）时返回空串，由调用方决定回退原 id —— 宁可显示
+    原始 id，也不要给模型安一个叫「Free」的名字。
     """
     parts = [part for part in value.split(_PATH_SEP)
-             if part.strip().lower() != FREE_MARK]
-    # 路径被 free 段占满（`free` / `free/free`）时没有模型名可取
+             if part.strip().lower() not in NOISE_MARKS]
+    # 路径被标记段占满（`free` / `free/free`）时没有模型名可取
     stem = parts[-1] if parts else ""
     stem = _NAMESPACE_PREFIX.sub("", stem)
-    return _TRAILING_FREE.sub("", stem)
+    # 循环削：标记可能叠加（kilo 展示名 `Vendor: Model (new) (free)`），单次
+    # sub 只去最外层一个，残留的那个会留在归一键里。
+    while True:
+        peeled = _TRAILING_MARK.sub("", stem)
+        if peeled == stem:
+            return stem
+        stem = peeled
 
 
 def normalize_model_key(raw: str) -> str:
-    """渠道原始 key → 归一键（去 free / 去命名空间前缀 / slug 化）。
+    """渠道原始 key → 归一键（去 free/new / 去命名空间前缀 / slug 化）。
 
     `kilo-auto/free` → `kilo-auto`，`stealth/space-bunny-alpha` →
     `space-bunny-alpha`，`longcat-2.5-preview-free` → `longcat-2.5-preview`，
-    `glm-5.2` → `glm-5.2`。多渠道合并后的对外 id 也由展示名经本函数得到，
-    故输出一定是 slug（小写、无空格），可直接当 API 的 model 值。
+    `Ling 3.1 Flash (new)` → `ling-3.1-flash`，`glm-5.2` → `glm-5.2`。
+    多渠道合并后的对外 id 也由展示名经本函数得到，故输出一定是 slug
+    （小写、无空格），可直接当 API 的 model 值。
 
     清洗后为空（`-free`、`   ` 这类退化 key）时回退原串小写，调用方据此判断
     「拿不到干净名字」并回退展示原始 id，而不是产出空 id。
@@ -155,16 +176,16 @@ def display_model_name(source: str) -> str:
     """原始 key 或上游可读名 → 展示名。
 
     `longcat-2.5-preview-free` → `LongCat 2.5 Preview`，`Qwen3.8-Max` →
-    `Qwen3.8 Max`，`Hy4 preview` → `Hy4 Preview`。上游没给名字时直接传 id，
-    同一条路径产出可用名。
+    `Qwen3.8 Max`，`Hy4 preview` → `Hy4 Preview`，`Ling 3.1 Flash (new)` →
+    `Ling 3.1 Flash`。上游没给名字时直接传 id，同一条路径产出可用名。
 
     清洗后为空（整个名字就是 `free` 之类）时返回 `""`，由调用方回退原始 id。
     """
-    # 括号里的 free 在摘括号后变成独立的一段（kilo 的 `Nemotron 3 Ultra
-    # (free)`），此处按段剔掉。`(free)` / `[free]` / ` Free` 都命中，而
-    # `freeplay` 这类内嵌形式不动。
+    # 括号里的标记在摘括号后变成独立的一段（kilo 的 `Nemotron 3 Ultra
+    # (free)` / `Ling 3.1 Flash (new)`），此处按段剔掉。`(free)` / `[free]` /
+    # ` Free` / `(new)` 都命中，而 `freeplay` / `newson` 这类内嵌形式不动。
     text = _strip_noise(source.strip())
     return " ".join(
         _pretty_segment(segment)
         for segment in _SEGMENT_SEP.split(text)
-        if segment and not _is_free_segment(segment))
+        if segment and not _is_noise_segment(segment))

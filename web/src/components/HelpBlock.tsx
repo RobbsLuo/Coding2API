@@ -20,7 +20,12 @@ export function HelpBlock({ title, entries }: { title: string; entries: HelpEntr
     <Panel
       title={title}
       action={
-        <Button size="sm" variant="ghost" onClick={() => setOpen((value) => !value)}>
+        <Button
+          size="sm"
+          variant="ghost"
+          aria-expanded={open}
+          onClick={() => setOpen((value) => !value)}
+        >
           <ChevronDown
             className={cn("size-4 transition-transform", open && "rotate-180")}
           />
