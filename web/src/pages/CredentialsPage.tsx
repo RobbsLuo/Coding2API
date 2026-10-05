@@ -389,7 +389,8 @@ export function CredentialsPage() {
                 <TableHead><span className="inline-flex items-center gap-1">状态 / 健康度<ColumnHint text="状态：可用/冷却中/已禁用/已暂停/额度耗尽；已暂停只摘对话流量，签到/刷新/探测照常；冷却中到期自动恢复。健康度：剩余积分占比四态（已知百分比/未探测/无探测/已耗尽）。未探测＝探测失败或渠道未给额度信息（点「探测」可重试），≠已耗尽；无探测＝免费层上游根本没有额度接口。调度器优先选百分比高者，打平时再用账户剩余积分多者。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期额度行＝调度窗口内即将过期、会被优先消耗的额度；主窗口（36h）打平时才比较次窗口（7 天）。CodeArts 的额度是 token（每日 1000 万池、0 点清零），其余渠道是积分。数字后的下箭头展开该凭证的积分记录（两次额度探测之间的净变化）。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">token 剩余<ColumnHint text="access token 距离到期还有多久，取自凭证本身（为 0 表示渠道未给到期信息，显示 —）。预刷新任务每小时检查一次，进入 24 小时窗口即自动续期；「已过期」意味着上游会拒绝该凭证，需重新登录。" /></span></TableHead>
-                {canWrite && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测/签到：行内常驻按钮。更多操作（⋯）：成长中心记录、指定、暂停/恢复、删除。CodeBuddy 专属的成长中心领取结果也从菜单里查看。积分记录入口在额度列数字后的下箭头。" /></span></TableHead>}
+                <TableHead><span className="inline-flex items-center gap-1">成长中心<ColumnHint text="仅 CodeBuddy：最近一轮成长中心（旅行礼物/任务/连登兑换/盲盒）的领取结果与时间，由定时任务或手动执行写入。汇报较长时单行截断，悬浮看全文。" /></span></TableHead>
+                {canWrite && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测/签到：行内常驻按钮。更多操作（⋯）：成长中心、活跃上报（均仅 CodeBuddy）、指定、暂停/恢复、删除。积分记录入口在额度列数字后的下箭头。" /></span></TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -410,7 +411,7 @@ export function CredentialsPage() {
                   />
                   {creditEvents?.credentialId === credential.id && (
                     <TableRow data-testid={`credit-row-${credential.id}`}>
-                      <TableCell colSpan={canWrite ? 5 : 4} className="p-0">
+                      <TableCell colSpan={canWrite ? 6 : 5} className="p-0">
                         <CreditDrawer
                           credentialId={credential.id}
                           events={creditEvents.events}
@@ -697,6 +698,21 @@ function Row({
       <TableCell className="text-xs">
         <TokenExpiry credential={credential} view={tokenExpiry} />
       </TableCell>
+      <TableCell className="text-xs text-muted-foreground">
+        {credential.growth_last_result ? (
+          // 汇报可能很长（多步领取串成一行）：限宽单行截断，hover 看全文
+          <LongTextTip content={credential.growth_last_result}>
+            <div data-testid={`growth-${credential.id}`} className="max-w-[22rem]">
+              <div className="truncate">{credential.growth_last_result}</div>
+              <div className="text-muted-foreground">
+                {formatTime(credential.growth_last_run_at)}
+              </div>
+            </div>
+          </LongTextTip>
+        ) : (
+          <span>—</span>
+        )}
+      </TableCell>
       {canWrite && (
         <TableCell>
           <div className="flex items-center justify-end gap-1">
@@ -760,9 +776,7 @@ function Row({
                     {credential.provider === "codebuddy" && (
                       <DropdownMenuItem
                         onSelect={() => actions.growth(credential)}
-                        title={credential.growth_last_result
-                          ? `最近一轮：${credential.growth_last_result}（${formatTime(credential.growth_last_run_at)}）`
-                          : "还没有成长中心记录"}
+                        title="手动跑一轮成长中心领取（与定时任务同一条路径）"
                       >
                         <Sparkles className="size-4" /> 成长中心
                       </DropdownMenuItem>

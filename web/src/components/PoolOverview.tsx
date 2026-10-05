@@ -35,21 +35,27 @@ export function PoolOverview({ credentials, now }: {
   }
 
   return (
-    <section className="space-y-3" data-testid="pool-overview">
+    <section
+      className="rounded-xl bg-card px-4 py-4 ring-1 ring-border"
+      data-testid="pool-overview"
+    >
+      <div className="mb-3 text-sm font-medium">池概况</div>
+      {/* 6 个状态统计块并进同一容器：去掉各自的 Card 边框/底色，只留分隔线，
+          整块读作一个「池概况」而不是 6 张互不相干的卡片。 */}
       <div
         aria-label="凭证状态统计"
-        className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6"
+        className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-6"
       >
-        <Metric label="凭证总数" value={formatNumber(counts.total)} icon={<Database className="size-4" />} />
-        <Metric label="可用" value={formatNumber(counts.ready)} tone="ok" icon={<CheckCircle2 className="size-4" />} />
-        <Metric label="冷却中" value={formatNumber(counts.cooling)} tone="warn" icon={<Timer className="size-4" />} />
-        <Metric label="已禁用" value={formatNumber(counts.disabled)} icon={<Ban className="size-4" />} />
-        <Metric label="额度耗尽" value={formatNumber(counts.exhausted)} tone="danger" icon={<BatteryLow className="size-4" />} />
-        <Metric label="已暂停" value={formatNumber(counts.off)} icon={<ToggleLeft className="size-4" />} />
+        <Metric label="凭证总数" value={formatNumber(counts.total)} icon={<Database className="size-4" />} className="border-0 bg-transparent py-0 ring-0" />
+        <Metric label="可用" value={formatNumber(counts.ready)} tone="ok" icon={<CheckCircle2 className="size-4" />} className="border-0 bg-transparent py-0 ring-0" />
+        <Metric label="冷却中" value={formatNumber(counts.cooling)} tone="warn" icon={<Timer className="size-4" />} className="border-0 bg-transparent py-0 ring-0" />
+        <Metric label="已禁用" value={formatNumber(counts.disabled)} icon={<Ban className="size-4" />} className="border-0 bg-transparent py-0 ring-0" />
+        <Metric label="额度耗尽" value={formatNumber(counts.exhausted)} tone="danger" icon={<BatteryLow className="size-4" />} className="border-0 bg-transparent py-0 ring-0" />
+        <Metric label="已暂停" value={formatNumber(counts.off)} icon={<ToggleLeft className="size-4" />} className="border-0 bg-transparent py-0 ring-0" />
       </div>
 
-      <div className="rounded-xl bg-card p-4 ring-1 ring-border">
-        <div className="mb-2 text-sm font-medium">健康度四态分布</div>
+      <div className="mt-4 border-t border-border pt-3">
+        <div className="mb-2 text-xs text-muted-foreground">健康度四态分布</div>
         {/* 纯色块拼条对读屏不可读：补一个汇总文本语义（图例已承载具体数值） */}
         <div
           role="img"

@@ -260,15 +260,18 @@ export function Metric({
   hint,
   tone,
   icon,
+  className,
 }: {
   label: string;
   value: ReactNode;
   hint?: string;
   tone?: "ok" | "danger" | "warn";
   icon?: ReactNode;
+  /** 覆写卡片外观：池概览把多块 Metric 并进同一容器时去掉各自的边框底色。 */
+  className?: string;
 }) {
   return (
-    <Card className="px-4 py-3">
+    <Card className={cn("px-4 py-3", className)}>
       <div className="flex items-center justify-between gap-2">
         <div className="text-xs text-muted-foreground">{label}</div>
         {icon && <span className="text-muted-foreground/80">{icon}</span>}
