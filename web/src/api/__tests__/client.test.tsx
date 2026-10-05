@@ -331,13 +331,17 @@ describe("Layout", () => {
     expect(await screen.findByRole("menu")).toHaveTextContent("op · 操作员");
   });
 
-  it("管理员可见用户管理与审计入口", () => {
+  it("管理员可在管理下拉中看到管理类入口", async () => {
     renderWithProviders(<Layout session={{
       username: "root", is_operator: true, is_admin: true, role: "admin", must_change_password: false,
     }} />);
-    expect(screen.getByText("用户管理")).toBeInTheDocument();
-    expect(screen.getByText("审计日志")).toBeInTheDocument();
-    expect(screen.getByText("运维告警")).toBeInTheDocument();
+    // 管理类入口收进「管理」下拉，需展开后断言
+    await userEvent.click(screen.getByRole("button", { name: /管理/ }));
+    const menu = await screen.findByRole("menu");
+    expect(menu).toHaveTextContent("用户管理");
+    expect(menu).toHaveTextContent("审计日志");
+    expect(menu).toHaveTextContent("运维告警");
+    expect(menu).toHaveTextContent("任务与配置");
   });
 
   it("用户菜单可打开修改密码对话框", async () => {

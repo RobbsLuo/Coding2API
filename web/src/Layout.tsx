@@ -1,14 +1,16 @@
 import { useState } from "react";
-import { NavLink, Outlet, useOutletContext } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useOutletContext } from "react-router-dom";
 import {
   BarChart3,
   BellRing,
+  ChevronDown,
   Database,
   Globe,
   KeyRound,
   LayoutDashboard,
   Menu,
   ScrollText,
+  ShieldCheck,
   SlidersHorizontal,
   TerminalSquare,
   UsersRound,
@@ -31,21 +33,23 @@ interface NavItem {
   label: string;
   icon: typeof LayoutDashboard;
   end?: boolean;
-  /** 仅 admin 可见/可达；operator 与 viewer 都不显示（它们管理 API 均为 admin-only） */
-  adminNav?: boolean;
 }
 
+/** 桌面端横向展示的一级导航（sm 及以上）。 */
 const NAV: NavItem[] = [
   { to: "/", label: "池仪表盘", icon: LayoutDashboard, end: true },
   { to: "/credentials", label: "凭证管理", icon: Database },
   { to: "/api-keys", label: "API Key", icon: KeyRound },
   { to: "/stats", label: "用量统计", icon: BarChart3 },
   { to: "/playground", label: "Playground", icon: TerminalSquare },
-  // 仅管理员可见（页面自身也会被后端 403 挡住，这里只是不误导）
-  { to: "/users", label: "用户管理", icon: UsersRound, adminNav: true },
-  { to: "/audit", label: "审计日志", icon: ScrollText, adminNav: true },
-  { to: "/alerts", label: "运维告警", icon: BellRing, adminNav: true },
-  { to: "/settings", label: "任务与配置", icon: SlidersHorizontal, adminNav: true },
+];
+
+/** 管理类页面：桌面端收进「管理」下拉，避免顶部菜单放不下；仅 admin 可见。 */
+const ADMIN_NAV: NavItem[] = [
+  { to: "/users", label: "用户管理", icon: UsersRound },
+  { to: "/audit", label: "审计日志", icon: ScrollText },
+  { to: "/alerts", label: "运维告警", icon: BellRing },
+  { to: "/settings", label: "任务与配置", icon: SlidersHorizontal },
 ];
 
 /** 品牌标记：多路渠道管道汇聚进单一出口（Coding2API 的产品故事）。 */
@@ -70,12 +74,13 @@ export function BrandMark({ className }: { className?: string }) {
 
 export function Layout({ session }: { session: SessionInfo }) {
   const [changingPassword, setChangingPassword] = useState(false);
+  const location = useLocation();
   const logout = async () => {
     await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
     window.location.href = "/login";
   };
   // 非管理员看不到用户管理/审计/配置：写接口是 admin-only，露出入口只会误导
-  const nav = NAV.filter((item) => !item.adminNav || session.is_admin);
+  const adminNav = session.is_admin ? ADMIN_NAV : [];
 
   return (
     <div className="flex min-h-full flex-col">
@@ -94,7 +99,7 @@ export function Layout({ session }: { session: SessionInfo }) {
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="start" className="w-52">
-              {nav.map((item) => (
+              {[...NAV, ...adminNav].map((item) => (
                 <DropdownMenuItem key={item.to} asChild>
                   <NavLink to={item.to} end={item.end} className="cursor-pointer">
                     {({ isActive }) => (
@@ -118,7 +123,7 @@ export function Layout({ session }: { session: SessionInfo }) {
             Coding2API
           </span>
           <nav className="hidden flex-1 gap-1 sm:flex">
-            {nav.map((item) => (
+            {NAV.map((item) => (
               <NavLink
                 key={item.to}
                 to={item.to}
@@ -140,6 +145,44 @@ export function Layout({ session }: { session: SessionInfo }) {
                 )}
               </NavLink>
             ))}
+            {adminNav.length > 0 && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    variant="ghost"
+                    className={cn(
+                      "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-normal sm:px-3",
+                      adminNav.some((item) => location.pathname.startsWith(item.to))
+                        ? "bg-primary/10 font-medium text-primary hover:bg-primary/10 hover:text-primary"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                    )}
+                  >
+                    <ShieldCheck className="size-4 shrink-0" />
+                    管理
+                    <ChevronDown className="size-3.5 shrink-0 opacity-60" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="start" className="w-52">
+                  {adminNav.map((item) => (
+                    <DropdownMenuItem key={item.to} asChild>
+                      <NavLink to={item.to} className="cursor-pointer">
+                        {({ isActive }) => (
+                          <span
+                            className={cn(
+                              "flex items-center gap-2.5",
+                              isActive && "font-medium text-primary",
+                            )}
+                          >
+                            <item.icon className="size-4" />
+                            {item.label}
+                          </span>
+                        )}
+                      </NavLink>
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
           </nav>
           <a
             href="https://github.com/RobbsLuo/coding2api"

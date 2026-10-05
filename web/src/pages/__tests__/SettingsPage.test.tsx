@@ -430,12 +430,17 @@ describe("SettingsPage", () => {
     mockAll();
     const view = renderPage(<SettingsPage />);
     await settle();
-    expect(await screen.findByRole("link", { name: /任务与配置/ })).toBeInTheDocument();
+    // 管理类入口收进「管理」下拉，触发按钮常显，展开后含「任务与配置」
+    await userEvent.click(screen.getByRole("button", { name: /管理/ }));
+    expect(
+      await screen.findByRole("menuitem", { name: /任务与配置/ }),
+    ).toBeInTheDocument();
 
     view.unmount();
     renderPage(<SettingsPage />, { username: "guest", is_admin: false });
+    // 非管理员不渲染「管理」下拉（汉堡菜单在测试视口下可见，故用 menuitem 精确匹配）
     await waitFor(() => {
-      expect(screen.queryByRole("link", { name: /任务与配置/ })).not.toBeInTheDocument();
+      expect(screen.queryByRole("menuitem", { name: /任务与配置/ })).not.toBeInTheDocument();
     });
   });
 });
