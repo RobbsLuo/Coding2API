@@ -14,7 +14,7 @@
       "url": "git@github.com:RobbsLuo/Coding2API.git",
       "provider": "github",
       "link_mode": "local-only",
-      "revision": "3cd5a6f94cf75ecb3a2478b1f72ab36adbfc3668"
+      "revision": "d10447ca278440d0d26c8b99733a96fb1d1f1661"
     },
     "views": [
       {
@@ -127,12 +127,12 @@
       "sources": [
         {
           "path": "web/src/App.tsx",
-          "line": 24,
+          "line": 23,
           "label": "App"
         },
         {
           "path": "web/src/Layout.tsx",
-          "line": 48,
+          "line": 46,
           "label": "ADMIN_NAV"
         }
       ]
