@@ -3,6 +3,7 @@ import type {
   ApiKeyCreated,
   ActivationDescribe,
   ActivationIssued,
+  AlertsResponse,
   AuditResponse,
   CheckinResult,
   CheckinStatus,
@@ -176,6 +177,8 @@ export const api = {
     request<SettingsResponse>("/api/settings", { method: "PUT", ...json({ values }) }),
   /** 后台任务运行态（进程内）：与 /api/settings 同页展示。 */
   tasks: () => request<TasksResponse>("/api/tasks"),
+  /** 运维告警记录（P1-7）：后台评估命中后落库，倒序回看。 */
+  alerts: () => request<AlertsResponse>("/api/alerts"),
 
   // ---------------------------------------------------------------- 统计
   statsOverview: (username?: string, since?: number) =>

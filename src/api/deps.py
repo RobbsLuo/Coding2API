@@ -30,6 +30,7 @@ from ..auth.throttle import LoginThrottle
 from ..compat.openai.request import InvalidRequest
 from ..config import Settings
 from ..db.repo import (
+    AlertRepository,
     ApiKeyRepository,
     AuditRepository,
     CredentialRepository,
@@ -79,6 +80,8 @@ class Services:
     user_repo: UserRepository
     # 审计流水（B5）：登录/账号变动/凭证写操作。
     audit: AuditRepository
+    # 运维告警事件（P1-7）：后台评估命中后落库，/api/alerts 回看。
+    alerts: AlertRepository
     # 模型列表缓存：provider_id → {小写模型名: Model}（含元数据）。
     # list_models 成功时更新，某上游拉取失败时用缓存兜底（v1/models 稳定返回）。
     # **存未过滤的原始表**：MODEL_BLOCKLIST 是可热更项，过滤在每个出口现做，

@@ -223,3 +223,25 @@ CREATE TABLE IF NOT EXISTS audit_events (
 
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_events(actor, ts);
+
+-- 运维告警事件（P1-7）：后台周期评估四类风险（池耗尽 / 任务连续失败 / token
+-- 临近到期 / 上游错误率骤升），命中即落一行，供管理台「站内告警记录」回看。
+--
+-- 为什么落库而不是像 TaskStatusStore 只留内存：告警的价值恰在「错过的那段
+-- 时间发生了什么」——夜里池子耗尽、某任务连挂几轮，运维醒来要能看见，而
+-- 任务 last-run 是进程内、重启就丢。保留期由 retention 任务按明细同一策略清理。
+-- (rule, scope) 是静默去重键：同一条告警在静默窗内不重复落库，避免每轮刷屏。
+CREATE TABLE IF NOT EXISTS alert_events (
+    id             TEXT PRIMARY KEY,
+    ts             INTEGER NOT NULL,
+    rule           TEXT NOT NULL,          -- pool_empty | task_failed | token_expiring | error_rate
+    severity       TEXT NOT NULL,          -- critical | warning
+    scope          TEXT NOT NULL DEFAULT '', -- 具体对象：pool / 任务 key / 凭证 id / 渠道
+    message        TEXT NOT NULL,
+    detail         TEXT NOT NULL DEFAULT '', -- JSON 补充数据（计数 / 到期时间等）
+    delivered      INTEGER NOT NULL DEFAULT 0, -- webhook 是否投递成功（0=未配置或失败）
+    delivery_error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_alert_ts ON alert_events(ts);
+CREATE INDEX IF NOT EXISTS idx_alert_rule_scope ON alert_events(rule, scope);

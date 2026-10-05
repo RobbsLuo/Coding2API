@@ -2,6 +2,7 @@ import { useState } from "react";
 import { NavLink, Outlet, useOutletContext } from "react-router-dom";
 import {
   BarChart3,
+  BellRing,
   Database,
   Globe,
   KeyRound,
@@ -43,6 +44,7 @@ const NAV: NavItem[] = [
   // 仅管理员可见（页面自身也会被后端 403 挡住，这里只是不误导）
   { to: "/users", label: "用户管理", icon: UsersRound, adminNav: true },
   { to: "/audit", label: "审计日志", icon: ScrollText, adminNav: true },
+  { to: "/alerts", label: "运维告警", icon: BellRing, adminNav: true },
   { to: "/settings", label: "任务与配置", icon: SlidersHorizontal, adminNav: true },
 ];
 

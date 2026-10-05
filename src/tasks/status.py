@@ -46,6 +46,9 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
     TaskSpec("model_catalog", "模型目录刷新",
              "兜底重拉各渠道模型表：没有它，列表只在有人访问 /v1/models 或 "
              "Playground 时才刷新，纯 API 用法的部署会让归属表与落盘快照变陈旧。"),
+    TaskSpec("alert", "运维告警",
+             "周期评估四类风险（池耗尽 / 任务连续失败 / token 临近到期 / 上游"
+             "错误率骤升），命中落站内记录并可推送 webhook；周期见「运维告警周期」。"),
 )
 
 TASK_BY_KEY: dict[str, TaskSpec] = {spec.key: spec for spec in TASK_SPECS}
@@ -73,15 +76,37 @@ class TaskStatusStore:
         self._now = now
         self._runs: dict[str, TaskRun] = {}
         self._counts: dict[str, int] = {}
+        # 连续失败计数（P1-7）：成功清零、失败 +1。只记真实执行——no-op 轮次
+        # 不调 record，不会误清也不会误增。
+        self._failure_streaks: dict[str, int] = {}
 
     def record(self, key: str, *, started_at: float, ok: bool,
                report: dict[str, Any] | None, error: str | None) -> None:
         self._runs[key] = TaskRun(started_at=started_at, finished_at=self._now(),
                                   ok=ok, report=report, error=error)
         self._counts[key] = self._counts.get(key, 0) + 1
+        if ok:
+            self._failure_streaks[key] = 0
+        else:
+            self._failure_streaks[key] = self._failure_streaks.get(key, 0) + 1
 
     def runs(self, key: str) -> int:
         return self._counts.get(key, 0)
+
+    def consecutive_failures(self, key: str) -> int:
+        """连续失败次数（P1-7 告警）：成功一轮即清零；从未失败返回 0。"""
+        return self._failure_streaks.get(key, 0)
+
+    def failing(self, threshold: int) -> list[tuple[str, int]]:
+        """连续失败达到阈值的任务 (key, streak)，按 key 排序稳定输出。
+
+        threshold ≤0 时视为规则关闭，恒返回空列表。只包含「已真跑过且连续
+        失败」的任务：从未运行的 key 不在 `_failure_streaks` 里，不会被误报。
+        """
+        if threshold <= 0:
+            return []
+        return sorted((key, streak) for key, streak in self._failure_streaks.items()
+                      if streak >= threshold)
 
     def get(self, key: str) -> TaskRun | None:
         return self._runs.get(key)

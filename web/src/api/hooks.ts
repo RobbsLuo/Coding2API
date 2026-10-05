@@ -67,6 +67,15 @@ export function useAudit(
   });
 }
 
+/** 运维告警记录（admin only）。轮询：告警是「刚刚发生了什么」，需要自己刷新。 */
+export function useAlerts(username?: string, refetchIntervalMs = 30_000) {
+  return useQuery({
+    queryKey: adminKey(username, "alerts"),
+    queryFn: api.alerts,
+    refetchInterval: refetchIntervalMs,
+  });
+}
+
 /** 用户写操作：成功后失效用户列表（角色/启用状态改变了）。 */
 export function useUserMutation<TArgs, TResult>(
   mutationFn: (args: TArgs) => Promise<TResult>,

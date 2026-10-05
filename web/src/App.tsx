@@ -15,6 +15,7 @@ const PlaygroundPage = lazy(() => import("./pages/PlaygroundPage").then(m => ({ 
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then(m => ({ default: m.SettingsPage })));
 const UsersPage = lazy(() => import("./pages/UsersPage").then(m => ({ default: m.UsersPage })));
 const AuditPage = lazy(() => import("./pages/AuditPage").then(m => ({ default: m.AuditPage })));
+const AlertsPage = lazy(() => import("./pages/AlertsPage").then(m => ({ default: m.AlertsPage })));
 
 const LOADING = (
   <div className="grid h-full place-items-center text-sm text-[var(--color-ink-muted)]">载入中…</div>
@@ -56,6 +57,7 @@ export function App() {
           <Route path="/playground" element={<PlaygroundPage />} />
           <Route path="/users" element={<UsersPage />} />
           <Route path="/audit" element={<AuditPage />} />
+          <Route path="/alerts" element={<AlertsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

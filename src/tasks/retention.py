@@ -17,15 +17,20 @@ class RetentionTask:
 
     `audit` 非 None 时按同一保留期清理审计流水：登录/写操作每笔一行，
     不回收同样会无界增长（README「审计」承诺保留期与请求明细一致）。
+
+    `alerts` 非 None 时按同一保留期清理运维告警：告警是周期性评估的产物，
+    长期无界增长会让「站内告警记录」越拉越慢。
     """
 
     def __init__(self, collector: StatsCollector, *, retention_days: int = 90,
-                 credentials=None, credit_events=None, audit=None) -> None:
+                 credentials=None, credit_events=None, audit=None,
+                 alerts=None) -> None:
         self._collector = collector
         self.retention_days = retention_days
         self._credentials = credentials
         self._credit_events = credit_events
         self._audit = audit
+        self._alerts = alerts
 
     def run_once(self) -> dict[str, int]:
         rolled = self._collector.rollup_hourly()
@@ -39,7 +44,11 @@ class RetentionTask:
         purged_audit = (
             self._audit.prune(keep_days=self.retention_days)
             if self._audit is not None else 0)
+        purged_alerts = (
+            self._alerts.prune(keep_days=self.retention_days)
+            if self._alerts is not None else 0)
         return {"rolled_up": rolled, "purged": purged,
                 "expired_coolings": expired_coolings,
                 "purged_credit_events": purged_credit_events,
-                "purged_audit": purged_audit}
+                "purged_audit": purged_audit,
+                "purged_alerts": purged_alerts}

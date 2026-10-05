@@ -325,6 +325,7 @@ describe("Layout", () => {
     // 用户管理/审计/配置为 admin-only
     expect(screen.queryByText("用户管理")).not.toBeInTheDocument();
     expect(screen.queryByText("审计日志")).not.toBeInTheDocument();
+    expect(screen.queryByText("运维告警")).not.toBeInTheDocument();
     expect(screen.queryByText("任务与配置")).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole("button", { name: "用户菜单" }));
     expect(await screen.findByRole("menu")).toHaveTextContent("op · 操作员");
@@ -336,6 +337,7 @@ describe("Layout", () => {
     }} />);
     expect(screen.getByText("用户管理")).toBeInTheDocument();
     expect(screen.getByText("审计日志")).toBeInTheDocument();
+    expect(screen.getByText("运维告警")).toBeInTheDocument();
   });
 
   it("用户菜单可打开修改密码对话框", async () => {

@@ -17,6 +17,7 @@ from typing import Any
 
 from ..config import live
 from .activity import ActivityTask
+from .alerting import AlertTask
 from .checkin import CheckinTask
 from .growth import GrowthTask
 from .pacer import Pacer
@@ -44,12 +45,16 @@ class TaskRunner:
     # api.models.list_models（要 services 与 provider registry），tasks 层
     # 不该反向依赖 api 层。由 main 装配时传入；None 表示不装配这条循环。
     model_catalog: Callable[[], Awaitable[object]] | None = None,
+    # 运维告警（P1-7）：None 表示不装配该循环（老调用方/测试保持原行为）。
+    alert: AlertTask | None = None,
     quota_probe_minutes: int | Callable[[], int] = 60,
     growth_interval_minutes: int | Callable[[], int] = 60,
     refresh_interval_minutes: int | Callable[[], int] = 60,
     retention_interval_minutes: int | Callable[[], int] = 5,
     model_catalog_minutes: int | Callable[[], int] = 30,
+    alert_interval_minutes: int | Callable[[], int] = 5,
     activity_enabled: Callable[[], bool] | None = None,
+    alert_enabled: Callable[[], bool] | None = None,
     status: TaskStatusStore | None = None,
 ) -> None:
         self._quota_probe = quota_probe
@@ -59,6 +64,7 @@ class TaskRunner:
         self._refresh = refresh
         self._retention = retention
         self._model_catalog = model_catalog
+        self._alert = alert
         # 周期可热更（B3.2）：存取值器，每轮 sleep 前读当前值（否则改配置
         # 要等到下一次重启才生效）。下限与业务语义同前，不变。
         self._quota_probe_minutes = live(quota_probe_minutes)
@@ -66,9 +72,12 @@ class TaskRunner:
         self._refresh_minutes = live(refresh_interval_minutes)
         self._retention_minutes = live(retention_interval_minutes)
         self._model_catalog_minutes = live(model_catalog_minutes)
+        self._alert_minutes = live(alert_interval_minutes)
         # 活跃上报是否启用也可热更：装配时恒建对象（构造成本为零），
         # 每轮由 _sync_activity 问一次，关着时是 no-op。
         self._activity_enabled = activity_enabled or (lambda: activity is not None)
+        # 运维告警同理由 AlertTask 自己问（关着时 run_once 返回 None）
+        self._alert_enabled = alert_enabled or (lambda: alert is not None)
         # 活跃上报：每 10 分钟醒一次看时点（due() 只在配置小时窗口内放行），
         # 而不是整点只醒一次——服务恰在整点重启会整天漏报
         self._activity_interval = 600
@@ -101,6 +110,12 @@ class TaskRunner:
         # 而 zen 的免费模型判活本身就有 30 分钟缓存，再密也不会多探一次。
         return max(300, int(self._model_catalog_minutes()) * 60)
 
+    @property
+    def _alert_interval(self) -> float:
+        # 下限 1 分钟：告警是「越早越好」的观测，但比 1 分钟更密只会让
+        # 每轮读池/统计的开销白花，而池与错误率不会在秒级翻转。
+        return max(60, int(self._alert_minutes()) * 60)
+
     async def start(self) -> None:
         """启动所有周期任务；首轮额度探测与 token 预刷新都立即执行（不节流）。
 
@@ -132,6 +147,9 @@ class TaskRunner:
         if self._model_catalog is not None:
             loops.append(("model_catalog", "模型目录刷新", self._model_catalog,
                           lambda: self._model_catalog_interval))
+        if self._alert is not None:
+            loops.append(("alert", "运维告警", self._sync_alert,
+                          lambda: self._alert_interval))
         for key, name, runner, interval in loops:
             self._tasks.append(asyncio.create_task(
                 self._loop(name, runner, interval, key=key)))
@@ -161,6 +179,15 @@ class TaskRunner:
 
     async def _sync_retention(self) -> object:
         return self._retention.run_once()
+
+    async def _sync_alert(self) -> object:
+        """运维告警一轮：评估四类规则、静默去重后落库 + 推送。
+
+        是否启用每轮现读（B3.2）：AlertTask.run_once 关着时返回 None，
+        `_guarded` 不记运行态——页面显示「未运行」，而不是「刚跑过」。
+        """
+        assert self._alert is not None
+        return await self._alert.run_once()
 
     async def _loop(self, name: str, runner: Callable[[], Awaitable[object]],
                     interval: float | Callable[[], float],
@@ -214,6 +241,8 @@ class TaskRunner:
                 continue
             if spec.key == "model_catalog" and self._model_catalog is None:
                 continue
+            if spec.key == "alert" and self._alert is None:
+                continue
             run = self.status.get(spec.key)
             items.append({
                 "key": spec.key,
@@ -243,11 +272,15 @@ class TaskRunner:
             return float(self._activity_interval)
         if key == "model_catalog":
             return self._model_catalog_interval
+        if key == "alert":
+            return self._alert_interval
         return self._retention_interval
 
     def _task_enabled(self, key: str) -> bool:
         if key == "activity":
             return bool(self._activity_enabled())
+        if key == "alert":
+            return bool(self._alert_enabled())
         return True
 
     async def stop(self) -> None:
@@ -278,6 +311,7 @@ def _as_report(result: object) -> dict[str, Any]:
 def build_runner(credentials, providers: dict, stats_collector, config,
                  growth_events=None, credit_events=None, audit=None,
                  model_catalog: Callable[[], Awaitable[object]] | None = None,
+                 alerts=None,
                  status: TaskStatusStore | None = None) -> TaskRunner:
     """按配置装配后台任务（Pacer 由两个 provider 共享）。
 
@@ -292,6 +326,9 @@ def build_runner(credentials, providers: dict, stats_collector, config,
 
     model_catalog 同理：None 时不装配模型目录刷新循环（老调用方与测试保持
     原行为）；生产路径传入「跑一轮 list_models」的协程。
+
+    alerts 同理：None 时不装配运维告警循环、也不清理告警记录（老调用方与测试
+    保持原行为；生产路径传入 AlertRepository）。
 
     B3.2 热更：`config` 既可以是启动期快照 `Settings`，也可以是
     `RuntimeSettings` 覆盖层。装配时所有「可热更项」必须传**零参 lambda**，
@@ -310,6 +347,22 @@ def build_runner(credentials, providers: dict, stats_collector, config,
     # 只有对象先存在，管理台才能把默认关闭的它热开到不需要重启。
     activity = ActivityTask(credentials, providers, events=growth_events,
                             hour=lambda: config.activity_report_hour)
+    # 运维告警与运行态共享同一个 TaskStatusStore：告警要读各任务的连续失败
+    # 计数，若自建 store 会永远读到 0（「任务连续失败」规则静默失效）。
+    status_store = status or TaskStatusStore()
+    alert = None
+    if alerts is not None:
+        alert = AlertTask(credentials, alerts, stats_collector,
+                          task_status=status_store,
+                          enabled=lambda: config.alert_enabled,
+                          webhook_url=lambda: config.alert_webhook_url,
+                          pool_ready_min=lambda: config.alert_pool_ready_min,
+                          task_failures=lambda: config.alert_task_failures,
+                          token_expiry_hours=lambda: config.alert_token_expiry_hours,
+                          error_rate_threshold=lambda: config.alert_error_rate_threshold,
+                          error_rate_min_requests=lambda: config.alert_error_rate_min_requests,
+                          error_rate_window_minutes=lambda: config.alert_error_rate_window_minutes,
+                          silence_minutes=lambda: config.alert_silence_minutes)
     return TaskRunner(
         quota_probe=QuotaProbeTask(credentials, providers, pacer),
         checkin=CheckinTask(credentials, providers, pacer=pacer),
@@ -318,11 +371,15 @@ def build_runner(credentials, providers: dict, stats_collector, config,
         refresh=RefreshTask(credentials, providers, skew_seconds=config.refresh_skew_hours * 3600,
                             now=lambda: int(time.time()), pacer=pacer),
         retention=RetentionTask(stats_collector, credentials=credentials,
-                                credit_events=credit_events, audit=audit),
+                                credit_events=credit_events, audit=audit,
+                                alerts=alerts),
         quota_probe_minutes=lambda: config.quota_probe_minutes,
         growth_interval_minutes=lambda: config.growth_interval_minutes,
         model_catalog=model_catalog,
         model_catalog_minutes=lambda: config.model_catalog_minutes,
+        alert=alert,
+        alert_interval_minutes=lambda: config.alert_interval_minutes,
         activity_enabled=lambda: config.activity_report_enabled,
-        status=status,
+        alert_enabled=lambda: config.alert_enabled,
+        status=status_store,
     )

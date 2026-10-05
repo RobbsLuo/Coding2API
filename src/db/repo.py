@@ -452,6 +452,36 @@ class CredentialRepository:
             out.append(rec)
         return out
 
+    def expiring_tokens(self, *, within_seconds: int, now: int | None = None,
+                        ) -> list[dict[str, Any]]:
+        """列出 access token 将在窗口内到期的凭证（P1-7 告警）。
+
+        只收「到期时间已知且落在 (moment, moment+within]」的行：
+        - `token_expires_at` 列 NULL（老库未写回）→ 从密文按需派生，与列表页
+          同源；派生不出（0）视为未知，不算「即将到期」；
+        - 0 = 上游确实没给到期信息，不当成已过期；
+        - 硬禁用（session 死亡）的凭证排除：它们本就要求重新登录，再报 token
+          到期没有额外价值。
+        """
+        if within_seconds <= 0:
+            return []
+        moment = int(now if now is not None else time.time())
+        deadline = moment + within_seconds
+        rows = self._db.connect().execute(
+            "SELECT id, provider, nickname, data_enc, token_expires_at "
+            "FROM credentials WHERE disabled = 0").fetchall()
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            if row["token_expires_at"] is None:
+                _issued, expires_at = _token_times_from_blob(row["data_enc"], self._cipher)
+            else:
+                expires_at = row["token_expires_at"]
+            if expires_at and moment < expires_at <= deadline:
+                out.append({"id": row["id"], "provider": row["provider"],
+                            "nickname": row["nickname"],
+                            "token_expires_at": expires_at})
+        return out
+
 
 class ApiKeyRepository:
     def __init__(self, db) -> None:
@@ -571,6 +601,55 @@ class CreditEventRepository:
         cutoff = int(now if now is not None else time.time()) - keep_days * 86400
         with self._db.transaction() as conn:
             cursor = conn.execute("DELETE FROM credit_events WHERE ts < ?", (cutoff,))
+        return cursor.rowcount
+
+
+class AlertRepository:
+    """运维告警事件（alert_events，P1-7）：落库 + 去重静默查询。
+
+    为什么独立仓储：告警是「管理台要回看的历史」，与凭证/统计无关；写入与
+    读取都由后台 AlertTask 与 /api/alerts 端点使用。静默去重靠
+    `last_ts(rule, scope)`——同一条告警在静默窗内不重复落库，避免周期性
+    评估把表刷屏。
+    """
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def record(self, *, rule: str, severity: str, scope: str, message: str,
+               detail: str = "", delivered: bool = False,
+               delivery_error: str | None = None,
+               now: int | None = None) -> str:
+        alert_id = _new_id("alert")
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO alert_events (id, ts, rule, severity, scope, message, "
+                "detail, delivered, delivery_error) VALUES (?,?,?,?,?,?,?,?,?)",
+                (alert_id, int(now if now is not None else time.time()), rule,
+                 severity, scope, message, detail, 1 if delivered else 0,
+                 delivery_error),
+            )
+        return alert_id
+
+    def recent(self, limit: int = 50) -> list[dict[str, Any]]:
+        """倒序返回最近告警；limit 收敛到 [1, 200] 防止一次拉爆前端。"""
+        rows = self._db.connect().execute(
+            "SELECT * FROM alert_events ORDER BY ts DESC, id DESC LIMIT ?",
+            (max(1, min(200, limit)),)).fetchall()
+        return [dict(row) for row in rows]
+
+    def last_ts(self, rule: str, scope: str) -> int | None:
+        """该 (规则, 对象) 最近一次落库时刻（静默去重用）；无记录返回 None。"""
+        row = self._db.connect().execute(
+            "SELECT MAX(ts) AS ts FROM alert_events WHERE rule = ? AND scope = ?",
+            (rule, scope)).fetchone()
+        return row["ts"] if row and row["ts"] is not None else None
+
+    def prune(self, *, keep_days: int, now: int | None = None) -> int:
+        """删除超过保留期的告警（与 usage_events / 审计同一保留策略入口）。"""
+        cutoff = int(now if now is not None else time.time()) - keep_days * 86400
+        with self._db.transaction() as conn:
+            cursor = conn.execute("DELETE FROM alert_events WHERE ts < ?", (cutoff,))
         return cursor.rowcount
 
 

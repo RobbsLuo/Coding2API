@@ -228,6 +228,11 @@ export const TASK_REPORT_LABEL: Record<string, string> = {
   purged: "清理明细",
   expired_coolings: "回收冷却",
   purged_credit_events: "回收流水",
+  purged_alerts: "回收告警",
+  evaluated: "评估",
+  fired: "命中",
+  suppressed: "静默",
+  delivered: "已推送",
   result: "返回",
 };
 
@@ -239,6 +244,14 @@ export function taskReportLabel(report: Record<string, unknown> | null): string 
   );
   return parts.length ? parts.join(" · ") : "无明细";
 }
+
+/** 运维告警规则的展示名；未知规则回落到原始 key（后端加规则前端不炸）。 */
+export const ALERT_RULE_LABEL: Record<string, string> = {
+  pool_empty: "凭证池耗尽",
+  task_failed: "后台任务连续失败",
+  token_expiring: "token 临近到期",
+  error_rate: "上游错误率骤升",
+};
 
 export function formatNumber(value: number | null | undefined): string {
   if (value === null || value === undefined) return "—";

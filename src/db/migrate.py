@@ -30,7 +30,10 @@ SCHEMA_NAME = "schema.sql"
 # 新增 credit_estimated_known（其中推算值条数），老库补 0=全部非推算。
 # 16：api_keys 新增 allowed_models / expires_at（P0-3 Key 细粒度策略：模型
 # 白名单与到期时间）；默认 '' / NULL，老库补列后行为不变（不限制、不过期）。
-SCHEMA_VERSION = 16
+# 17：新增 alert_events 表（P1-7 运维告警：四类规则命中即落一行，供管理台
+# 「站内告警记录」回看）。新增表只需进 schema.sql（CREATE TABLE IF NOT EXISTS
+# 对老库同样生效），无需迁移动作。
+SCHEMA_VERSION = 17
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (

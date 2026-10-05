@@ -159,6 +159,38 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("activity_report_hour", int, "活跃上报时点（0-23）",
                "本地（北京）时间整点窗口；该小时内每 10 分钟检查一次，每号每天"
                "最多补发一条。", minimum=0, maximum=23, task="activity"),
+    # 运维告警（P1-7）：全部归到「运维告警」任务卡片下——改阈值时人就在看
+    # 这个任务最近报了什么。webhook 留空 = 只留站内记录、不外推。
+    HotSetting("alert_enabled", bool, "运维告警开关",
+               "是否启用后台告警评估。关闭后不落站内记录也不推送 webhook。",
+               task="alert"),
+    HotSetting("alert_webhook_url", str, "告警 Webhook 地址",
+               "命中告警时 POST JSON 的地址，多个用逗号分隔；留空 = 只在管理台"
+               "留站内记录、不外推。", task="alert"),
+    HotSetting("alert_interval_minutes", int, "运维告警周期（分钟）",
+               "后台评估四类风险的一轮间隔；下限 1 分钟。", minimum=1,
+               task="alert", floor=1),
+    HotSetting("alert_silence_minutes", int, "告警静默窗（分钟）",
+               "同一条告警（规则 + 对象）在该窗口内只落库/推送一次，避免持续"
+               "状态每轮刷屏；0 关闭静默（每轮都报）。", minimum=0, task="alert"),
+    HotSetting("alert_pool_ready_min", int, "池耗尽阈值（可用数）",
+               "凭证池可用数少于该值时告警（服务活着但用不了）；0 关闭该规则。",
+               minimum=0, task="alert"),
+    HotSetting("alert_task_failures", int, "任务连续失败阈值",
+               "某后台任务连续失败达到该次数时告警（成功一轮清零）；0 关闭该规则。",
+               minimum=0, task="alert"),
+    HotSetting("alert_token_expiry_hours", int, "token 到期预警窗口（小时）",
+               "凭证 token 剩余时间少于该小时数时告警；0 关闭该规则。",
+               minimum=0, task="alert"),
+    HotSetting("alert_error_rate_threshold", float, "上游错误率阈值",
+               "统计窗内失败占比达到该值时告警；0 关闭该规则。", minimum=0.0,
+               maximum=1.0, task="alert"),
+    HotSetting("alert_error_rate_min_requests", int, "错误率最小样本数",
+               "统计窗内请求数少于该值时不判错误率（样本太小无意义）。",
+               minimum=1, task="alert"),
+    HotSetting("alert_error_rate_window_minutes", int, "错误率统计窗（分钟）",
+               "计算上游错误率的时间窗；0 表示只看当前瞬间（无样本，不触发）。",
+               minimum=0, task="alert"),
 )
 
 HOT_BY_KEY: dict[str, HotSetting] = {item.key: item for item in HOT_SETTINGS}
@@ -485,6 +517,48 @@ class RuntimeSettings:
     @property
     def activity_report_hour(self) -> int:
         return int(self.get("activity_report_hour"))
+
+    # ---------------------------------------------------------- 运维告警
+
+    @property
+    def alert_enabled(self) -> bool:
+        return bool(self.get("alert_enabled"))
+
+    @property
+    def alert_webhook_url(self) -> str:
+        return str(self.get("alert_webhook_url"))
+
+    @property
+    def alert_interval_minutes(self) -> int:
+        return int(self.get("alert_interval_minutes"))
+
+    @property
+    def alert_silence_minutes(self) -> int:
+        return int(self.get("alert_silence_minutes"))
+
+    @property
+    def alert_pool_ready_min(self) -> int:
+        return int(self.get("alert_pool_ready_min"))
+
+    @property
+    def alert_task_failures(self) -> int:
+        return int(self.get("alert_task_failures"))
+
+    @property
+    def alert_token_expiry_hours(self) -> int:
+        return int(self.get("alert_token_expiry_hours"))
+
+    @property
+    def alert_error_rate_threshold(self) -> float:
+        return float(self.get("alert_error_rate_threshold"))
+
+    @property
+    def alert_error_rate_min_requests(self) -> int:
+        return int(self.get("alert_error_rate_min_requests"))
+
+    @property
+    def alert_error_rate_window_minutes(self) -> int:
+        return int(self.get("alert_error_rate_window_minutes"))
 
     # ---------------------------------------------------------- 透明委托
 

@@ -144,6 +144,7 @@ coding2api/
 │       ├── admin_settings.py    # GET/PUT /api/settings（B3.2）+ GET /api/tasks（B4）
 │       ├── admin_users.py       # 用户管理（B5）：list/create/patch/disable/enable/reset-password
 │       ├── admin_audit.py       # GET /api/audit 审计查询（B5）
+│       ├── admin_alerts.py      # GET /api/alerts 运维告警回看（P1-7）
 │       ├── activate.py          # 一次性令牌激活流（B5）：GET/POST /api/auth/activate
 │       ├── admin_stats.py       # 统计查询
 │       ├── admin_auth.py        # 登录 / 登出 / 会话 / 自助改密；上游登录 start/poll/complete/cancel
@@ -455,7 +456,7 @@ response.completed | response.incomplete
 | 类别 | 例子 | 位置 | 变更方式 |
 |---|---|---|---|
 | 启动期不可变项 | `APP_SECRET` / `HOST` / `PORT` / `DATA_DIR` / `USERS_FILE` / `CODEBUDDY_ALLOWED_ENDPOINTS` | `config.Settings`（frozen） | 改 env + 重启；**不进白名单**，管理台改不了 |
-| 运行时可覆盖项 | 见 `runtime_settings.HOT_SETTINGS`（20 项） | `RuntimeSettings` 覆盖层 | 管理台改，立即生效 |
+| 运行时可覆盖项 | 见 `runtime_settings.HOT_SETTINGS`（35 项） | `RuntimeSettings` 覆盖层 | 管理台改，立即生效 |
 
 启动期项拒绝热更的原因：它们决定进程如何启动（监听地址、加密密钥、上游白名单），运行期变更只会让「当前进程」与「磁盘配置」静默分叉，而分叉后的行为无法从任一处推断。
 
@@ -591,7 +592,7 @@ response.completed | response.incomplete
 
 **接口**：`GET /api/tasks`（admin）返回 `{tasks: [...], server_time}`。每条含 `key`/`name`/`description`/`interval_seconds`/`enabled`/`runs`/`last_started_at`/`last_finished_at`/`last_ok`/`last_report`/`last_error`。带 `server_time` 是为了让前端用**服务端时钟**算「距今多久」——浏览器时钟偏移会把刚跑完的任务显示成几小时前。`app.state.task_runner` 不存在时（未进 lifespan）返回空列表而不是 500。
 
-**前端**：导航与页头从「运行时配置」改为「任务与配置」，`SettingsPage` 用一排 tabs 控制信息量：每个任务一个 tab（该任务运行态 + 配置项，复用 `SettingRow`），无任务归属的配置按后端下发的网关卡组各占一个 tab（模型路由 / 选号与会话 / 渠道节流 / 后台任务节流）；一屏只呈现一块，避免 7 张卡片 + 全部配置项铺满整页。没有配置项的分组不出 tab；归属对不上的项落进「其他」tab，绝不吞掉配置。保存按钮与「N 项待保存」常驻面板顶部，草稿跨 tab 保留、一次提交全部改动。`useTasks` 以 `refetchInterval: 30_000` 自动刷新（运行态是随时间变化的观测量，手动刷新会让人以为任务停了），`/api/settings` 不自动刷新（配置改动由用户触发）。
+**前端**：导航与页头从「运行时配置」改为「任务与配置」，`SettingsPage` 用一排 tabs 控制信息量：每个任务一个 tab（该任务运行态 + 配置项，复用 `SettingRow`），无任务归属的配置按后端下发的网关卡组各占一个 tab（模型路由 / 选号与会话 / 渠道节流 / 后台任务节流）；一屏只呈现一块，避免 8 张卡片 + 全部配置项铺满整页。没有配置项的分组不出 tab；归属对不上的项落进「其他」tab，绝不吞掉配置。保存按钮与「N 项待保存」常驻面板顶部，草稿跨 tab 保留、一次提交全部改动。`useTasks` 以 `refetchInterval: 30_000` 自动刷新（运行态是随时间变化的观测量，手动刷新会让人以为任务停了），`/api/settings` 不自动刷新（配置改动由用户触发）。
 
 ---
 
@@ -778,6 +779,37 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 ---
 
+### 3.22 运维告警（P1-7）
+
+**动机**：`/healthz` 的 `ready=0` 需要外部监控主动轮询；后台任务连挂、token 临近到期、上游错误率骤升这些风险没有任何出口。把四类风险在服务内部周期评估，命中落库 + 可选 webhook 推送，运维不必自己搭监控。
+
+**规则判定是纯函数**（`tasks/alerting.evaluate_alerts`）：不碰 IO，喂一份信号快照即可断言边界。阈值统一用「≤0 即关闭该规则」表达，不另设布尔开关——少一个字段就少一处「开关开着但阈值没配」的静默状态。
+
+| 规则 | 触发 | 信号来源 |
+|---|---|---|
+| `pool_empty`（critical） | `total>0` 且 `ready < ALERT_POOL_READY_MIN` | `CredentialRepository.pool_counts`（与 `/healthz` 同口径） |
+| `task_failed` | 某任务连续失败 ≥ `ALERT_TASK_FAILURES` | `TaskStatusStore.failing`（新增连续失败计数，成功一轮清零） |
+| `token_expiring` | token 剩余落在 `(now, now+ALERT_TOKEN_EXPIRY_HOURS]` | `CredentialRepository.expiring_tokens` |
+| `error_rate` | 窗内失败占比 ≥ `ALERT_ERROR_RATE_THRESHOLD` 且样本 ≥ `ALERT_ERROR_RATE_MIN_REQUESTS` | `StatsCollector.window_error_rate` |
+
+- `pool_empty` 取 `total>0`：池里一个凭证都没有是「没配」而非「耗尽」，不报。
+- `task_failed` 只列**真跑过且达阈值**的 key：从未运行的任务不在 `_failure_streaks` 里，不会被误报。
+- `token_expiring`：`token_expires_at` 列 NULL（老库未回填）时从密文按需派生（与列表页同源）；派生不出（0）视为未知、不算「即将到期」；硬禁用（session 死亡）凭证排除——它们本就要求重新登录。
+- `error_rate` 读 `usage_events` **明细**而非小时汇总：告警窗是分钟级（默认 15 分钟），小时粒度要么整点才更新、要么跨小时口径错乱。
+
+**投递（用户选定「Webhook + 站内」）**：
+
+- **站内**：每条命中落 `alert_events`（`SCHEMA_VERSION` 16→17，新表只进 `schema.sql`，`CREATE TABLE IF NOT EXISTS` 对老库同样生效，无需迁移动作），管理台「运维告警」页（admin-only `GET /api/alerts`）倒序回看。落库而非只留内存的理由与 `TaskStatusStore` 相反：告警的价值恰在「错过的那段时间发生了什么」——夜里池子耗尽、某任务连挂几轮，运维醒来要能看见；保留期由 `RetentionTask` 按明细同一策略（90 天）清理。
+- **Webhook**：配置 `ALERT_WEBHOOK_URL` 时逐地址 POST JSON（多个逗号分隔，全部成功才算 delivered）；留空只留站内记录。投递失败只记 `delivery_error`、绝不抛错——否则「webhook 挂了」会被误报成「告警任务连续失败」，制造假信号。
+
+**静默去重**：评估每 N 分钟一轮，而池耗尽 / token 到期这类状态会持续存在。同一 `(rule, scope)` 在 `ALERT_SILENCE_MINUTES` 窗内只落库 / 推送一次（`AlertRepository.last_ts` 判）；窗口过后仍命中再报一次（提醒还在）。没有静默窗就会每轮刷屏。
+
+**装配**：`AlertTask` 接入 `TaskRunner`（新增 `alert` 任务卡片），**与运行态共享同一个 `TaskStatusStore`**——若自建 store，「任务连续失败」规则会永远读到 0 而静默失效。10 个热更项全部归到「运维告警」卡片（`task="alert"`）。`AlertTask.run_once` 关闭时返回 `None`，`_guarded` 不记运行态（页面显示「未运行」而非「刚跑过」）。
+
+无 schema 迁移动作（新表），compose 透传 10 个 `ALERT_*`。
+
+---
+
 ## 4. Provider 协议（Q16=A 细接口）
 
 ```python
@@ -927,8 +959,9 @@ class Scheduler:
 | 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态）；失败持续重试 |
 | 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5） | 仅 CodeBuddy：7 类领取；结果落 `growth_events` + 回写 `credentials.growth_last_result` |
 | 活跃上报（activity.py，默认关闭） | 每 10 分钟醒一次，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点，北京时间）窗口内执行 | 仅 CodeBuddy：补发一条 `chat_request_send` 续连登；按「endpoint + userId」隔离、当日封账；成功落一行 `growth_events` |
-| 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理；同期限回收 `credit_events`（§3.10）与 `audit_events`（§3.13） |
+| 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理；同期限回收 `credit_events`（§3.10）、`audit_events`（§3.13）与 `alert_events`（§3.22） |
 | 模型目录刷新（`api/models.py::list_models`，注入式） | 每 `MODEL_CATALOG_MINUTES`（默认 30，下限 5） | 兜底重拉各渠道模型表（走同一条 `list_models`：TTL 门禁 + 逐渠道 publish + 落盘快照）。周期 30 分钟是跟着 zen 免费模型判活缓存（`MODELS_CACHE_TTL_SECONDS`，30 分钟）对齐——更密不会让 zen 多探一次，只是白打其余渠道的 `/models` |
+| 运维告警（alerting.py） | 每 `ALERT_INTERVAL_MINUTES`（默认 5，下限 1） | 评估四类风险（池耗尽 / 任务连续失败 / token 临近到期 / 上游错误率骤升），命中落 `alert_events` 并可选推送 webhook；同 `(规则, 对象)` 在静默窗内只报一次（§3.22） |
 
 **模型目录刷新为什么是「注入协程」而不是一个 tasks 模块**：`tasks/` 不 import `api/`（反向依赖会把 HTTP 层拖进后台任务），所以 `TaskRunner` 接的是 `model_catalog: Callable[[], Awaitable[object]] | None`，由 `main.lifespan` 闭包注入；`None`（老调用方 / 测试）时不装配这条循环，管理台也不展示这张卡片——与 growth / activity 的处理一致。
 

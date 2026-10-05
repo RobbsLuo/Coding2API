@@ -108,6 +108,22 @@ class Settings(BaseSettings):
     # 数据（处罚为取消资格并追回礼品），开启前请评估账号风险；上游改版即失效。
     activity_report_enabled: bool = False
     activity_report_hour: int = 10          # 本地（北京）时间整点窗口内执行一次
+    # 运维告警（P1-7）：周期评估四类风险，命中即落 alert_events 并可选推送
+    # webhook。webhook 留空 = 只留站内记录、不外推。
+    alert_enabled: bool = True
+    alert_webhook_url: str = ""
+    alert_interval_minutes: int = 5         # 评估周期（分钟），下限 1
+    alert_silence_minutes: int = 30         # 同一 (规则, 对象) 的静默窗（分钟）
+    # 池耗尽：ready 少于该值即告警（0 关闭该规则）
+    alert_pool_ready_min: int = 1
+    # 任务连续失败：连续失败达到该次数即告警（0 关闭该规则）
+    alert_task_failures: int = 3
+    # token 临近到期：剩余时间少于该小时数即告警（0 关闭该规则）
+    alert_token_expiry_hours: int = 24
+    # 上游错误率骤升：统计窗内失败占比超过该值、且样本数足够时告警（0 关闭）
+    alert_error_rate_threshold: float = 0.5
+    alert_error_rate_min_requests: int = 20
+    alert_error_rate_window_minutes: int = 15
     pacer_min_seconds: float = 5
     pacer_max_seconds: float = 20
     # CodeBuddy 聊天最小间隔：同渠道同凭证的「顺序连发」之间的最小请求间隔，

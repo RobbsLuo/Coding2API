@@ -17,6 +17,7 @@ from fastapi import FastAPI
 
 from .api import (
     activate,
+    admin_alerts,
     admin_audit,
     admin_auth,
     admin_credentials,
@@ -47,6 +48,7 @@ from .db.conn import Database
 from .db.crypto import CredentialCipher
 from .db.migrate import apply_schema
 from .db.repo import (
+    AlertRepository,
     ApiKeyRepository,
     AuditRepository,
     CredentialRepository,
@@ -251,6 +253,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     api_keys = ApiKeyRepository(db)
     user_repo = UserRepository(db)
     audit = AuditRepository(db)
+    alerts = AlertRepository(db)
     store = users if users is not None else _load_users(
         settings=config, user_repo=user_repo)
     # 聊天节流器存「取值器」而不是快照：管理台改最小间隔后立即生效。
@@ -361,6 +364,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                               growth_events=app_.state.growth_events,
                               credit_events=credit_events,
                               audit=audit,
+                              alerts=alerts,
                               model_catalog=_refresh_model_catalog)
         app_.state.task_runner = runner
         await runner.start()
@@ -466,6 +470,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         users=store,
         user_repo=user_repo,
         audit=audit,
+        alerts=alerts,
         stats_query=app.state.stats_query,
         login_throttle=app.state.login_throttle,
         upstream_auth=app.state.upstream_auth,
@@ -503,6 +508,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.include_router(admin_credentials.create_router(services))
     app.include_router(admin_keys.create_router(services))
     app.include_router(admin_settings.create_router(services))
+    app.include_router(admin_alerts.create_router(services))
     app.include_router(admin_stats.create_router(services))
     app.include_router(admin_users.create_router(services))
     app.include_router(admin_audit.create_router(services))

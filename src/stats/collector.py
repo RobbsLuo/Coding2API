@@ -159,6 +159,19 @@ class StatsCollector:
              (event.ttfb_ms or 0) if event.ok else 0),
         )
 
+    def window_error_rate(self, *, since: int) -> tuple[int, int]:
+        """近窗口内的 (请求数, 失败数)，供 P1-7 上游错误率告警。
+
+        读明细表 `usage_events` 而不是小时汇总：告警窗是分钟级（默认 15 分钟），
+        小时粒度要么整点才更新、要么跨小时口径错乱。明细只保留 90 天，而告警
+        只看最近几十分钟，不受保留期影响。
+        """
+        row = self._db.connect().execute(
+            "SELECT COUNT(*) AS requests, "
+            "COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS failed "
+            "FROM usage_events WHERE ts >= ?", (since,)).fetchone()
+        return int(row["requests"] or 0), int(row["failed"] or 0)
+
     def purge_expired(self, retention_days: int = 90, now: int | None = None) -> int:
         """明细保留 90 天；小时汇总永久（PROPOSAL §8）。
 

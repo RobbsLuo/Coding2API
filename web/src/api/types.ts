@@ -464,3 +464,25 @@ export interface TasksResponse {
   /** 服务端当前时间（epoch 秒）：算「距今多久」用服务端时钟，避免浏览器偏移 */
   server_time: number;
 }
+
+/** 一条运维告警记录（GET /api/alerts，落库、重启不丢）。 */
+export interface AlertEvent {
+  id: string;
+  ts: number;
+  /** pool_empty | task_failed | token_expiring | error_rate */
+  rule: string;
+  /** critical | warning */
+  severity: string;
+  /** 具体对象：pool / 任务 key / 凭证 id / 渠道 */
+  scope: string;
+  message: string;
+  /** JSON 字符串（后端原样存储），界面不解析 */
+  detail: string;
+  /** webhook 是否投递成功（0=未配置或失败） */
+  delivered: 0 | 1;
+  delivery_error: string | null;
+}
+
+export interface AlertsResponse {
+  alerts: AlertEvent[];
+}
