@@ -1,26 +1,19 @@
-import {
-  Ban,
-  BatteryLow,
-  CheckCircle2,
-  CircleMinus,
-  Database,
-  HelpCircle,
-  Timer,
-  ToggleLeft,
-} from "lucide-react";
+import { Ban, Timer, ToggleLeft } from "lucide-react";
 import { formatNumber, healthView, credentialState } from "../api/display";
 import type { Credential } from "../api/types";
-import { Metric } from "../ui";
 
 /**
- * 池概况：一张卡里说清「这个池现在能不能用」。
+ * 池概况：一条分布条 + 两行摘要，回答「这个池现在还剩多少能打的号」。
  *
- * 主轴是**健康度四态**（已知剩余 / 未探测 / 无探测 / 已耗尽），四态互斥且
- * 合计等于凭证总数——调度器就是按健康度选号的，所以它才是池的整体口径。
- * 「已耗尽」与旧版状态格里的「额度耗尽」是同一批凭证，不再重复计数。
+ * 主轴是**健康度四态**（可用 / 未探测 / 无探测 / 已耗尽），四态互斥且合计
+ * 等于凭证总数——调度器就是按健康度选号的，所以它才是池的整体口径。
+ * 「已耗尽」与旧版状态格里的「额度耗尽」是同一批凭证，不重复计数。
  *
- * 冷却中 / 已禁用 / 已暂停不是第四类健康度，而是叠加在上面的**不可用原因**，
- * 数量少、只看有没有，因此收成底部一行摘要，不与四态抢主视觉。
+ * 不再摆统计格：数字全在图例里（`可用 8 / 12`），再单列一遍是重复。
+ * 冷却中 / 已禁用 / 已暂停是叠加在四态之上的**不可用原因**，同样收进摘要行。
+ * 四态语义（未探测 vs 无探测的区别）由表格「状态 / 健康度」列头的
+ * ColumnHint 承载，这里不复述。
+ *
  * `now` 由调用方传入（凭证页已有 `Date.now()/1000`）。
  */
 export function PoolOverview({ credentials, now }: {
@@ -44,12 +37,10 @@ export function PoolOverview({ credentials, now }: {
       className="rounded-xl bg-card px-4 py-4 ring-1 ring-border"
       data-testid="pool-overview"
     >
-      <div className="mb-3 text-sm font-medium">池概况</div>
-
       {/* 分布条：一眼看出池里还有多少能打的号（比例 = 四态 / 总数） */}
       <div
         role="img"
-        aria-label={`健康度分布：已知剩余 ${healthTally.known}，未探测 ${healthTally.unknown}，无探测 ${healthTally.noprobe}，已耗尽 ${healthTally.exhausted}`}
+        aria-label={`健康度分布：可用 ${healthTally.known}，未探测 ${healthTally.unknown}，无探测 ${healthTally.noprobe}，已耗尽 ${healthTally.exhausted}，共 ${total} 个凭证`}
         className="flex h-2 w-full overflow-hidden rounded-full bg-muted"
       >
         {healthTally.known > 0 && (
@@ -78,38 +69,37 @@ export function PoolOverview({ credentials, now }: {
         )}
       </div>
 
-      {/* 四态 + 总数：无边框格子并进同一卡片（Metric 的 className 去掉 Card 外观） */}
-      <div
-        aria-label="凭证健康度统计"
-        className="mt-3 grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3 lg:grid-cols-5"
-      >
-        <div data-testid="pool-total" className="min-w-0">
-          <Metric label="凭证总数" value={formatNumber(total)} icon={<Database className="size-4" />} className="border-0 bg-transparent py-0 ring-0" />
-        </div>
-        <div data-testid="health-known" className="min-w-0">
-          <Metric label="可用" value={formatNumber(healthTally.known)} tone="ok" icon={<CheckCircle2 className="size-4" />} className="border-0 bg-transparent py-0 ring-0" />
-        </div>
-        <div data-testid="health-unknown" className="min-w-0">
-          <Metric label="未探测" value={formatNumber(healthTally.unknown)} tone="warn" icon={<HelpCircle className="size-4" />} className="border-0 bg-transparent py-0 ring-0" />
-        </div>
-        <div data-testid="health-noprobe" className="min-w-0">
-          <Metric label="无探测" value={formatNumber(healthTally.noprobe)} icon={<CircleMinus className="size-4" />} className="border-0 bg-transparent py-0 ring-0" />
-        </div>
-        <div data-testid="health-exhausted" className="min-w-0">
-          <Metric label="已耗尽" value={formatNumber(healthTally.exhausted)} tone="danger" icon={<BatteryLow className="size-4" />} className="border-0 bg-transparent py-0 ring-0" />
-        </div>
+      <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-sm">
+        <span data-testid="health-known" className="inline-flex items-center gap-1.5">
+          <span className="size-2 rounded-full bg-ok" />
+          可用 <strong>{healthTally.known}</strong>
+          <span className="text-muted-foreground">/ {formatNumber(total)}</span>
+        </span>
+        {healthTally.unknown > 0 && (
+          <span data-testid="health-unknown" className="inline-flex items-center gap-1.5 text-muted-foreground">
+            <span className="size-2 rounded-full bg-warn" />
+            未探测 <strong>{healthTally.unknown}</strong>
+          </span>
+        )}
+        {healthTally.noprobe > 0 && (
+          <span data-testid="health-noprobe" className="inline-flex items-center gap-1.5 text-muted-foreground">
+            <span className="size-2 rounded-full bg-muted-foreground/40" />
+            无探测 <strong>{healthTally.noprobe}</strong>
+          </span>
+        )}
+        {healthTally.exhausted > 0 && (
+          <span data-testid="health-exhausted" className="inline-flex items-center gap-1.5 text-destructive">
+            <span className="size-2 rounded-full bg-destructive" />
+            已耗尽 <strong>{healthTally.exhausted}</strong>
+          </span>
+        )}
+        {total === 0 && <span className="text-muted-foreground">池里还没有凭证</span>}
       </div>
 
-      <p className="mt-3 text-xs text-muted-foreground">
-        「未探测」＝探测失败或渠道未给额度信息（点行内「探测」可重试），≠已耗尽；
-        「无探测」是 OpenCode Zen / Kilo Gateway 免费层，上游没有额度接口，探也没用。
-        调度器优先选可用里剩余百分比高者，打平时再用账户剩余积分多者。
-      </p>
-
-      {/* 不可用原因摘要：与四态重叠（叠加状态），故不另起统计格 */}
+      {/* 不可用原因摘要：与四态重叠（叠加状态），全部为 0 时整块不渲染 */}
       {hasBlocked && (
         <div
-          className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 border-t border-border pt-3 text-xs text-muted-foreground"
+          className="mt-2 flex flex-wrap gap-x-5 gap-y-1.5 text-xs text-muted-foreground"
           data-testid="pool-blocked"
         >
           {blocked.cooling > 0 && (
