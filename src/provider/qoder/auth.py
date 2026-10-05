@@ -77,7 +77,11 @@ def _fallback_machine_id() -> str:
     if cached:
         return cached
     seed = f"{uuid.getnode()}:{os.getpid()}:qoder-machine"
-    value = hashlib.md5(seed.encode("utf-8")).hexdigest()
+    digest = hashlib.md5(seed.encode("utf-8")).hexdigest()
+    # 官方客户端的 machine_id 是带横线 UUID 形态（issue #3：无横线 32 位 hex
+    # 会被授权页判「参数无效」），回落值也拼成同形态。
+    value = "-".join((digest[:8], digest[8:12], digest[12:16],
+                      digest[16:20], digest[20:]))
     _fallback_machine_id._cached = value  # type: ignore[attr-defined]
     return value
 
@@ -93,7 +97,12 @@ def pkce_pair(verifier: str | None = None) -> tuple[str, str]:
 
 def build_auth_url(realm: str, *, challenge: str, nonce: str,
                    machine_id: str) -> str:
-    """按区域拼授权 URL（参数集差异见 events.RealmConfig 的 send_* 开关）。"""
+    """按区域拼授权 URL（参数集差异见 events.RealmConfig 的 send_* 开关）。
+
+    注：当前所有区域 `send_redirect_uri` 均为 False——官方客户端（CN CLI 1.1.32
+    / 国际桌面端）的授权链接都不带 redirect_uri（issue #3 取证）；开关保留供
+    上游参数变化时快速恢复（分支由 test_auth_url_redirect_uri_switch 覆盖）。
+    """
     config = get_realm_config(realm)
     query = {"challenge": challenge, "challenge_method": CHALLENGE_METHOD,
              "nonce": nonce}

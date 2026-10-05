@@ -63,11 +63,35 @@ def extract_authorization_code(raw: str) -> str:
     return codes[0].strip() if codes else ""
 
 
+def parse_first_stage_callback(raw: str) -> tuple[str, str]:
+    """识别「首次回调」（尚未登录门户）：返回 `(门户下发的 secret, 登录页 URL)`。
+
+    形态：`http://127.0.0.1/oauth/callback?secret=<hex64>&redirect=<门户登录页>`
+    （注意**没有 code**、没有 `:port`）。非该形态返回 `("", "")`：
+    带 code 的第二次回调、裸 code、任意其他链接都不算。
+    """
+    value = (raw or "").strip()
+    if not value or ("://" not in value and "?" not in value):
+        return "", ""
+    query = urlsplit(value).query if "://" in value or "?" in value else value
+    params = parse_qs(query)
+    if params.get("code"):
+        return "", ""                                    # 第二次回调，不算
+    secret = (params.get("secret") or [""])[0].strip()
+    redirect = (params.get("redirect") or [""])[0].strip()
+    if not secret or not redirect:
+        return "", ""
+    return secret, redirect
+
+
 @dataclass
 class _Reservation:
     username: str
     created_at: int
     session: LoginSession
+    # 门户首次回调下发的 secret（ticket 轮询必须用这份——本地生成的那份上游
+    # 不认，实测恒回「无效 ticketId」）；""=尚未收到首次回调。
+    portal_secret: str = ""
 
 
 class AuthStateStore:
@@ -91,10 +115,10 @@ class AuthStateStore:
         entry = self._entries.get(auth_state)
         return entry is not None and entry.username == username
 
-    def session(self, auth_state: str, username: str) -> LoginSession | None:
+    def session_entry(self, auth_state: str, username: str) -> _Reservation | None:
         if not self.owner(auth_state, username):
             return None
-        return self._entries[auth_state].session
+        return self._entries[auth_state]
 
     def consume(self, auth_state: str, username: str) -> bool:
         """消费：成功后该 state 不可再次轮询或重放。"""
@@ -152,14 +176,21 @@ class CodeArtsOAuth:
                            callback_url=None)
 
     async def poll(self, auth_state: str, username: str) -> AuthResult | None:
-        """返回 None 表示用户还没完成授权；成功后 state 被消费。"""
-        session = self.store.session(auth_state, username)
-        if session is None:
+        """返回 None 表示用户还没完成授权；成功后 state 被消费。
+
+        ticket 轮询必须用**门户首次回调下发的 secret**（本地生成的那份上游
+        不认）；没收到首次回调时仍按原样轮询——上游会对本地 secret 回
+        「无效 ticketId」，由调用方转成「改走粘贴回调链接」的提示。
+        """
+        reservation = self.store.session_entry(auth_state, username)
+        if reservation is None:
             raise UpstreamProtocolViolation("unknown or consumed auth state")
+        session = reservation.session
+        secret = reservation.portal_secret or session.secret
         try:
             tokens = await codearts_auth.poll_ticket(
                 self._http, self.config,
-                ticket_id=session.ticket_id, secret=session.secret)
+                ticket_id=session.ticket_id, secret=secret)
         except codearts_auth.TokenEndpointError as error:
             # ticket 通道对服务端常被判「无效 ticketId」——门户实际走回调通道，
             # 这里把上游原文转成受控 400，提示用户改走「粘贴回调链接」。
@@ -175,10 +206,22 @@ class CodeArtsOAuth:
         门户授权完成后浏览器会跳到 `http://127.0.0.1:{port}/oauth/callback?code=…`；
         本服务不监听该端口，用户把整条地址（或其中 code）粘回来即可。PKCE
         `code_verifier` 与 DPoP 私钥取自 start 时登记的会话，保证与授权一致。
+
+        例外：官方扩展在用户**尚未登录门户**时会先回调一次，只带
+        `secret` + `redirect`（无 code）——识别后给出「先去门户登录」的可行动
+        指引，并记下门户 secret 供后续 ticket 轮询使用。
         """
-        session = self.store.session(auth_state, username)
-        if session is None:
+        reservation = self.store.session_entry(auth_state, username)
+        if reservation is None:
             raise UpstreamProtocolViolation("unknown or consumed auth state")
+        session = reservation.session
+        portal_secret, login_url = parse_first_stage_callback(raw_url)
+        if portal_secret:
+            reservation.portal_secret = portal_secret
+            raise UpstreamProtocolViolation(
+                "这是门户登录前的首次回调（还没有 code）。请先在浏览器打开 "
+                f"{login_url} 完成华为云登录，浏览器会再次回调 127.0.0.1 并带上 "
+                "code，把那一条地址粘回来即可。")
         code = extract_authorization_code(raw_url)
         if not code:
             raise UpstreamProtocolViolation(

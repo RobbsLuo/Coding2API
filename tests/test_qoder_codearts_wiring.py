@@ -351,6 +351,96 @@ def test_extract_authorization_code_accepts_url_query_and_bare_code():
     assert extract_authorization_code("http://127.0.0.1/cb?state=only") == ""
 
 
+def test_parse_first_stage_callback_shapes():
+    """issue #4：首次回调 secret+redirect 识别；其他形态一律不算。"""
+    from src.provider.codearts.oauth import parse_first_stage_callback
+
+    secret, redirect = parse_first_stage_callback(
+        "http://127.0.0.1/oauth/callback?secret=" + "a" * 64
+        + "&redirect=https%3A%2F%2Fportal.test%2Flogin%3FauthorizationAvailable%3Dfalse")
+    assert secret == "a" * 64
+    assert redirect == "https://portal.test/login?authorizationAvailable=false"
+    # 带 code 的第二次回调不算
+    assert parse_first_stage_callback(
+        "http://127.0.0.1:12800/oauth/callback?code=c&state=s") == ("", "")
+    # 缺 redirect / 缺 secret / 裸 code / 空串都不算
+    assert parse_first_stage_callback("http://x/cb?secret=abc") == ("", "")
+    assert parse_first_stage_callback("http://x/cb?redirect=https%3A%2F%2Fx") == ("", "")
+    assert parse_first_stage_callback("barecode") == ("", "")
+    assert parse_first_stage_callback("") == ("", "")
+
+
+async def test_codearts_oauth_first_stage_callback_gives_guidance_and_portal_secret():
+    """issue #4：粘回首次回调 → 可行动指引（不是光秃秃缺 code）+ 记下门户 secret。"""
+    import httpx
+
+    from src.provider.codearts import auth as codearts_auth
+    from src.provider.codearts.oauth import CodeArtsOAuth
+
+    login_page = "https://portal.test/login?authorizationAvailable=false"
+    first_stage = ("http://127.0.0.1/oauth/callback?secret=" + "f" * 64
+                   + "&redirect=" + login_page.replace(":", "%3A")
+                   .replace("/", "%2F").replace("?", "%3F"))
+    seen_secret: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_secret.append(request.url.params.get("secret", ""))
+        return httpx.Response(400, json={"error_code": "TM.00001001",
+                                         "error_msg": "无效ticketId"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+    oauth = CodeArtsOAuth(codearts_auth.LoginConfig(portal_host="https://portal.test"),
+                          client=client)
+    try:
+        started = await oauth.start("alice")
+        with pytest.raises(ValueError) as exc_info:
+            await oauth.complete_callback(first_stage, started.state, "alice")
+        message = str(exc_info.value)
+        assert "首次回调" in message
+        assert login_page in message              # 指引里带解码后的登录页 URL
+        assert "code" in message
+        # state 未被消费，且后续 poll 用门户 secret（不是本地生成的）
+        poll_state = oauth.store.session_entry(started.state, "alice")
+        assert poll_state is not None
+        assert poll_state.portal_secret == "f" * 64
+        with pytest.raises(ValueError, match="TM.00001001"):
+            await oauth.poll(started.state, "alice")
+        assert seen_secret[-1] == "f" * 64
+    finally:
+        await client.aclose()
+        await oauth.aclose()
+
+
+async def test_codearts_oauth_poll_uses_local_secret_without_first_stage():
+    """未收到首次回调时 poll 仍用本地 secret（旧行为不变）。"""
+    import httpx
+
+    from src.provider.codearts import auth as codearts_auth
+    from src.provider.codearts.oauth import CodeArtsOAuth
+
+    seen_secret: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_secret.append(request.url.params.get("secret", ""))
+        return httpx.Response(400, json={"error_code": "TM.00001001",
+                                         "error_msg": "无效ticketId"})
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+    oauth = CodeArtsOAuth(codearts_auth.LoginConfig(portal_host="https://portal.test"),
+                          client=client)
+    try:
+        started = await oauth.start("alice")
+        entry = oauth.store.session_entry(started.state, "alice")
+        assert entry is not None
+        local_secret = entry.session.secret
+        with pytest.raises(ValueError, match="TM.00001001"):
+            await oauth.poll(started.state, "alice")
+        assert seen_secret[-1] == local_secret
+    finally:
+        await client.aclose()
+        await oauth.aclose()
+
+
 async def test_codearts_oauth_complete_callback_exchanges_code():
     """粘贴回调链接 → exchange_code 换 token → 落库扁平凭证。"""
     import httpx

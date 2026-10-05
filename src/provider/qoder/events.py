@@ -68,12 +68,16 @@ REALM_CONFIGS: dict[str, RealmConfig] = {
         name="国内版 (China)",
         openapi="https://openapi.qoder.com.cn",
         gateway="https://gateway.qoder.com.cn",
-        website="https://qoder.com.cn",
-        client_id="1c5e33e1-364d-4ce6-b02c-acaa81274a5c",
+        # website/client_id 取自官方 CN CLI @qodercn-ai/qoderclicn@1.1.32（issue #3
+        # 取证：旧值 qoder.com.cn + 旧 client_id 会被授权页判「参数无效」）；
+        # domain 保持 qoder.com.cn——它用于查找官方客户端 machine_id 落盘文件，勿改。
+        website="https://qoder.cn",
+        client_id="e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb",
         redirect_uri="qoder-work-cn://",
         domain="qoder.com.cn",
         user_agent="QoderWork/1.1.64",
-        send_redirect_uri=True,
+        # 官方 CN CLI 的授权链接不带 redirect_uri；带上会被授权页拒绝。
+        send_redirect_uri=False,
         nonce_dashed=True,
     ),
     "intl": RealmConfig(

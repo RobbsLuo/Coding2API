@@ -374,7 +374,7 @@ def test_openapi_headers_use_stable_device_ids():
     assert headers["X-Machine-ID"] == derive_id("u-1", "machine")
     assert headers["X-Session-ID"] == derive_id("u-1", "session")
     assert headers["User-Agent"] == qoder_events.CLIENT_UA
-    assert headers["Origin"].startswith("https://qoder.com.cn")
+    assert headers["Origin"].startswith("https://qoder.cn")
 
 
 def test_realm_for_and_session_dead_helpers():
@@ -1105,7 +1105,13 @@ async def test_client_lazy_clients_and_aclose():
 
 def test_realm_configs_and_gateway_candidates():
     cn = qoder_events.get_realm_config("cn")
-    assert cn.openapi.endswith("qoder.com.cn") and cn.send_redirect_uri is True
+    # issue #3：cn 授权页参数对齐官方 CN CLI 1.1.32（website/client_id 更新，
+    # 不带 redirect_uri）；domain 仍是 qoder.com.cn（找 machine_id 落盘文件用）
+    assert cn.website == "https://qoder.cn"
+    assert cn.client_id == "e883ade2-e6e3-4d6d-adf7-f92ceff5fdcb"
+    assert cn.send_redirect_uri is False
+    assert cn.domain == "qoder.com.cn"
+    assert cn.openapi.endswith("qoder.com.cn")
     assert cn.nonce_dashed is True
     intl = qoder_events.get_realm_config("intl")
     assert intl.send_redirect_uri is False and intl.nonce_dashed is False
@@ -1157,8 +1163,9 @@ async def test_oauth_start_and_poll_success():
     session = await oauth.start("root")
     assert session.flow == "poll" and session.interval == 5
     assert session.auth_url is not None
-    assert "qoder.com.cn/device/selectAccounts?" in session.auth_url
-    assert "client_id=" in session.auth_url and "redirect_uri=" in session.auth_url
+    assert "qoder.cn/device/selectAccounts?" in session.auth_url
+    assert "client_id=" in session.auth_url
+    assert "redirect_uri=" not in session.auth_url
     assert "machine_id=m-1" in session.auth_url
 
     result = await oauth.poll(session.state, "root")
@@ -1291,7 +1298,8 @@ def test_pkce_pair_shape_and_auth_url_realm_difference():
     assert fixed[0] == "abc"
     url = build_auth_url("cn", challenge="c", nonce="n", machine_id="m")
     assert "challenge=c" in url and "challenge_method=S256" in url
-    assert "client_id=" in url and "redirect_uri=qoder-work-cn" in url
+    assert "client_id=e883ade2" in url
+    assert "redirect_uri" not in url
     intl = build_auth_url("intl", challenge="c", nonce="n", machine_id="m")
     assert "redirect_uri" not in intl
     assert "client_id=e883ade2" in intl
@@ -1332,7 +1340,12 @@ def test_machine_id_skips_empty_and_reads_second_candidate(tmp_path, monkeypatch
 
 
 def test_fallback_machine_id_is_process_stable():
-    assert _fallback_machine_id() == _fallback_machine_id()
+    value = _fallback_machine_id()
+    assert value == _fallback_machine_id()
+    # issue #3：官方 machine_id 是带横线 UUID 形态，回落值必须同形态
+    parts = value.split("-")
+    assert [len(part) for part in parts] == [8, 4, 4, 4, 12]
+    assert all(ch in "0123456789abcdef-" for ch in value)
 
 
 def test_auth_url_without_client_id_and_build_variants():
@@ -1347,6 +1360,22 @@ def test_auth_url_without_client_id_and_build_variants():
     try:
         url = build_auth_url(realm, challenge="c", nonce="n", machine_id="m")
         assert "client_id" not in url and "machine_id" not in url
+    finally:
+        monkeypatch.undo()
+
+
+def test_auth_url_redirect_uri_switch():
+    # issue #3 后所有内置区域都不发 redirect_uri；开关分支用注入配置覆盖
+    # （上游参数若再变，改 RealmConfig 即可恢复）
+    config = qoder_events.RealmConfig(
+        name="legacy", openapi="https://o.test", gateway="https://g.test",
+        website="https://w.test", client_id="cid", redirect_uri="app://cb",
+        domain="d.test", user_agent="ua", send_redirect_uri=True)
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setitem(qoder_events.REALM_CONFIGS, "legacy", config)
+    try:
+        url = build_auth_url("legacy", challenge="c", nonce="n", machine_id="m")
+        assert "redirect_uri=app%3A%2F%2Fcb" in url
     finally:
         monkeypatch.undo()
 
