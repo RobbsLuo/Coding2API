@@ -579,7 +579,7 @@ response.completed | response.incomplete
 
 ### 3.12 后台任务可视化（B4，「任务与配置」页）
 
-**问题**：`TaskRunner` 跑着 7 类循环（额度探测 / token 预刷新 / 每日签到 / 成长中心 / 活跃上报 / 明细清理 / 模型目录刷新），但除失败时一行 `logger.warning`，没有任何地方能看到「上次何时跑的、结果如何」，也没有端点暴露。运维只能翻服务日志。
+**问题**：`TaskRunner` 跑着 8 类循环（额度探测 / token 预刷新 / 每日签到 / 成长中心 / 活跃上报 / 明细清理 / 模型目录刷新 / 运维告警），但除失败时一行 `logger.warning`，没有任何地方能看到「上次何时跑的、结果如何」，也没有端点暴露。运维只能翻服务日志。
 
 **上一轮调研结论**：项目内**不存在**后台任务页（无 `TasksPage`、无 `/api/tasks`，git 全历史与文档均无），所以这不是「找回旧页面」而是新增；同类项目（ithtelab/workbuddy-manager）的做法是「任务记录页 + 30s 自动刷新 + 单次 200 条上限」，关键教训是**容器重建即丢、必须采集落库**。
 
@@ -1114,7 +1114,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
 
 ## 7. 数据库（T-Q2 定稿）
 
-DDL 以 `src/db/schema.sql` 为准（users 为账号唯一源、users.txt 仅引导导入、凭证加密列、`usage_events.credit`/`cached_tokens` 可空）。当前 `SCHEMA_VERSION = 15`，共 10 张表：`api_keys` / `credentials` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `runtime_settings`。补充实现细节：
+DDL 以 `src/db/schema.sql` 为准（users 为账号唯一源、users.txt 仅引导导入、凭证加密列、`usage_events.credit`/`cached_tokens` 可空）。当前 `SCHEMA_VERSION = 17`，共 11 张表：`api_keys` / `credentials` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `runtime_settings` / `alert_events`。补充实现细节：
 
 ```sql
 -- conn.py 打开时执行
@@ -1155,9 +1155,9 @@ fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文�
 
 - **同步 sqlite3 而非 aiosqlite**（T-Q2）：本地微秒级操作，asyncio 封装开销大于收益
 - **双 httpx 客户端**（T-Q4）：聊天流 `read=None` 防长流截断；短请求总超时 30s 防悬挂；共享 `trust_env=False`。非流式路径由引擎聚合同一流式上游（无独立 HTTP），悬挂兜底是引擎层的聚合整体超时（`UPSTREAM_COMPLETE_TIMEOUT_SECONDS`，默认 600s，超时按瞬态错误换号重试）
-- **手写 SQL 而非 ORM**：10 张表规模下 ORM 收益为负
+- **手写 SQL 而非 ORM**：11 张表规模下 ORM 收益为负
 - **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + `PUBLIC_BASE_URL`。`/authorize` 无鉴权（浏览器 302 不带 key），防滥用靠两条：无进行中登录一律拒绝；待完成登录有 600s TTL（长期挂着的 pending 会被同网络任何人用自己的 refreshToken 完成兑换——凭证入池、归属记为发起登录的管理员）。`app.state` 只保留 pending 的 state，不驻留含 refreshToken 的完整回调 URL
-- **v1 无 Anthropic**（Q8=A）：Event 层已预留，v1.1 只加 `compat/anthropic/` 适配器
+- **Anthropic 出口已落地**（Q8 原定 v1.1，P0-1/Q59 实现）：`compat/anthropic/` + `api/messages.py` 提供 `POST /v1/messages` 与 `/v1/messages/count_tokens`，供只走 Anthropic 协议的客户端（Claude Code）接入，复用同一 `executor`（详见 §3.18）
 - **Responses 出口只做 Codex CLI 用到的子集**（Q32，详见 §3.7）：不做 `store=true` / `previous_response_id`（服务端无状态，不假装支持）；`include=["reasoning.encrypted_content"]` 按实测接受并忽略——Codex CLI 每轮必带，400 会直接打死主客户端；流式终止用 `response.completed` / `response.incomplete` / `response.failed`，**不发 `[DONE]`**（Responses 协议无该哨兵）。形状取自官方 `openai` SDK 类型并用其作客户端验证，对真实 CB 上游冒烟过；**未经真实 Codex CLI 端到端验证**（开发环境无 CLI）
 - **不做 reasoning 注入 / effort 档位映射**（原 B1.2，实测后取消）：原计划对「强制推理模型族」注入 `thinking` + `reasoning_effort` 并回填历史 `reasoning_content`，实测前提不成立——（1）客户端已自带 `reasoning_effort`（仅 `low`/`medium`）且上游直接接受；（2）客户端已回传历史 `reasoning_content` 且上游接受；（3）原计划的默认模型清单与实际在用命名无关，且 `glm-5.1` 在 `MODEL_BLOCKLIST` 里，硬编码白名单会空转；（4）真要做「客户端丢弃时回填」必须服务端存对话内容，与脱敏纪律冲突。参考实现 IceeAn/codebuddy2api 走相反取向（对白名单模型强制 `reasoning_effort=max` 覆盖客户端），属单来源且会改写客户端意图，不采纳
 - **统计一律以 `usage_hourly` 为准**：`overview` / `by_provider` / `timeline` / `model-timeline` 均读小时汇总，只有 `events`（逐请求明细）读 `usage_events`。统一口径是为了让选「全部」时总览与图表同值（明细只留 90 天，汇总永久）。代价：最近 ≤5 分钟未进汇总的请求不计入，刷新一次即可

@@ -7,14 +7,14 @@
     "output": "diagrams/coding2api-architecture.html",
     "quality_profile": "showcase",
     "viewBox": [
-      1100,
+      1200,
       860
     ],
     "repository": {
       "url": "git@github.com:RobbsLuo/Coding2API.git",
       "provider": "github",
       "link_mode": "local-only",
-      "revision": "fe3a85881d664b99cd19cc4db61c2aec9748df2a"
+      "revision": "3cd5a6f94cf75ecb3a2478b1f72ab36adbfc3668"
     },
     "views": [
       {
@@ -38,7 +38,7 @@
           "qoder-up",
           "codearts-up"
         ],
-        "note": "客户端请求经协议层规范化，由执行引擎按健康度与到期选号后流式转发到六家上游。"
+        "note": "客户端请求经协议层（chat / responses / messages）规范化，由执行引擎按健康度与到期选号后流式转发到六家上游。"
       },
       {
         "id": "admin-plane",
@@ -48,9 +48,10 @@
           "admin-api",
           "identity",
           "engine",
-          "db"
+          "db",
+          "alerts"
         ],
-        "note": "React 管理台经会话鉴权与三角色 RBAC 进入管理 API，同进程调用引擎，状态落 SQLite。"
+        "note": "React 管理台经会话鉴权与三角色 RBAC 进入管理 API，同进程调用引擎，状态落 SQLite；「运维告警」页只读回看 alert_events。"
       },
       {
         "id": "background",
@@ -63,9 +64,11 @@
           "zen",
           "kilo",
           "qoder",
-          "codearts"
+          "codearts",
+          "alerts",
+          "webhook"
         ],
-        "note": "7 类循环（额度探测 / 预刷新 / 签到 / 成长 / 活跃 / 明细清理 / 模型目录）与请求面共用同一 Provider 注册表，经各渠道客户端触达上游，运行态汇总到「任务与配置」页。"
+        "note": "8 类循环（额度探测 / 预刷新 / 签到 / 成长 / 活跃 / 明细清理 / 模型目录 / 运维告警）与请求面共用同一 Provider 注册表，经各渠道客户端触达上游，运行态汇总到「任务与配置」页。"
       },
       {
         "id": "identity-plane",
@@ -98,12 +101,12 @@
       "sources": [
         {
           "path": "src/auth/api_key.py",
-          "line": 16,
+          "line": 17,
           "label": "digest_api_key"
         },
         {
           "path": "src/api/deps.py",
-          "line": 157,
+          "line": 186,
           "label": "api_key_user"
         }
       ]
@@ -124,13 +127,13 @@
       "sources": [
         {
           "path": "web/src/App.tsx",
-          "line": 23,
+          "line": 24,
           "label": "App"
         },
         {
           "path": "web/src/Layout.tsx",
-          "line": 34,
-          "label": "adminNav"
+          "line": 48,
+          "label": "ADMIN_NAV"
         }
       ]
     },
@@ -150,7 +153,7 @@
       "sources": [
         {
           "path": "src/api/deps.py",
-          "line": 106,
+          "line": 116,
           "label": "principal_from_request"
         },
         {
@@ -203,7 +206,7 @@
       "sources": [
         {
           "path": "src/api/chat.py",
-          "line": 45,
+          "line": 47,
           "label": "/v1/chat/completions"
         }
       ]
@@ -211,8 +214,8 @@
     {
       "id": "openai",
       "type": "backend",
-      "label": "OpenAI 协议出口",
-      "sublabel": "chat + responses",
+      "label": "协议出口",
+      "sublabel": "OpenAI + Anthropic",
       "pos": [
         248,
         300
@@ -225,15 +228,15 @@
       "sources": [
         {
           "path": "src/api/chat.py",
-          "line": 45
+          "line": 47
         },
         {
           "path": "src/api/responses.py",
-          "line": 35
+          "line": 39
         },
         {
-          "path": "src/api/models.py",
-          "line": 585
+          "path": "src/api/messages.py",
+          "line": 46
         }
       ]
     },
@@ -254,13 +257,70 @@
       "sources": [
         {
           "path": "src/engine/executor.py",
-          "line": 90,
+          "line": 111,
           "label": "Executor"
         },
         {
           "path": "src/engine/scheduler.py",
-          "line": 207,
+          "line": 208,
           "label": "Scheduler.select"
+        },
+        {
+          "path": "src/engine/model_resolver.py",
+          "line": 38,
+          "label": "ordered_fallback_chain"
+        }
+      ]
+    },
+    {
+      "id": "alerts",
+      "type": "backend",
+      "label": "运维告警",
+      "sublabel": "四类风险 · 站内告警",
+      "pos": [
+        808,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/tasks/alerting.py",
+          "line": 73,
+          "label": "evaluate_alerts"
+        },
+        {
+          "path": "src/api/admin_alerts.py",
+          "line": 19,
+          "label": "GET /api/alerts"
+        },
+        {
+          "path": "src/db/schema.sql",
+          "line": 234,
+          "label": "alert_events"
+        }
+      ]
+    },
+    {
+      "id": "webhook",
+      "type": "external",
+      "label": "Webhook",
+      "sublabel": "告警推送（可选）",
+      "pos": [
+        1030,
+        300
+      ],
+      "size": [
+        140,
+        64
+      ],
+      "sources": [
+        {
+          "path": "src/tasks/alerting.py",
+          "line": 268,
+          "label": "webhook 投递"
         }
       ]
     },
@@ -268,7 +328,7 @@
       "id": "registry",
       "type": "backend",
       "label": "Provider 适配层",
-      "sublabel": "registry · 六渠道",
+      "sublabel": "六渠道 · 出站代理",
       "pos": [
         558,
         440
@@ -281,13 +341,18 @@
       "sources": [
         {
           "path": "src/main.py",
-          "line": 281,
+          "line": 291,
           "label": "registry"
         },
         {
           "path": "src/provider/base.py",
-          "line": 1,
+          "line": 315,
           "label": "Provider 协议"
+        },
+        {
+          "path": "src/provider/proxy.py",
+          "line": 53,
+          "label": "build_client"
         }
       ]
     },
@@ -304,7 +369,7 @@
         140,
         64
       ],
-      "tag": "WAL · 10 表",
+      "tag": "WAL · 11 表",
       "sources": [
         {
           "path": "src/db/schema.sql",
@@ -313,8 +378,8 @@
         },
         {
           "path": "src/db/migrate.py",
-          "line": 31,
-          "label": "SCHEMA_VERSION=15"
+          "line": 36,
+          "label": "SCHEMA_VERSION=17"
         },
         {
           "path": "src/db/repo.py",
@@ -327,7 +392,7 @@
       "id": "bg",
       "type": "backend",
       "label": "后台任务",
-      "sublabel": "探测 / 签到 / 清理",
+      "sublabel": "探测 / 签到 / 告警",
       "pos": [
         808,
         440
@@ -336,17 +401,22 @@
         140,
         64
       ],
-      "tag": "7 类循环",
+      "tag": "8 类循环",
       "sources": [
         {
           "path": "src/tasks/runner.py",
-          "line": 278,
+          "line": 311,
           "label": "build_runner"
         },
         {
           "path": "src/tasks/status.py",
           "line": 32,
           "label": "TASK_SPECS"
+        },
+        {
+          "path": "src/tasks/alerting.py",
+          "line": 142,
+          "label": "AlertTask"
         }
       ]
     },
@@ -366,7 +436,7 @@
       "sources": [
         {
           "path": "src/provider/codebuddy/client.py",
-          "line": 570,
+          "line": 573,
           "label": "CodeBuddyProvider"
         }
       ]
@@ -387,7 +457,7 @@
       "sources": [
         {
           "path": "src/provider/trae/client.py",
-          "line": 602,
+          "line": 605,
           "label": "TraeProvider"
         }
       ]
@@ -409,7 +479,7 @@
       "sources": [
         {
           "path": "src/provider/zen/client.py",
-          "line": 371,
+          "line": 374,
           "label": "ZenProvider"
         }
       ]
@@ -431,7 +501,7 @@
       "sources": [
         {
           "path": "src/provider/kilo/client.py",
-          "line": 193,
+          "line": 196,
           "label": "KiloProvider"
         }
       ]
@@ -514,8 +584,8 @@
       ],
       "sources": [
         {
-          "path": "src/provider/trae/client.py",
-          "line": 305,
+          "path": "src/provider/trae/events.py",
+          "line": 29,
           "label": "AGENT_HOST"
         }
       ]
@@ -557,7 +627,7 @@
       "sources": [
         {
           "path": "src/provider/kilo/client.py",
-          "line": 42,
+          "line": 43,
           "label": "KILO_HOST"
         }
       ]
@@ -620,6 +690,7 @@
         "qoder",
         "codearts",
         "bg",
+        "alerts",
         "admin-ui",
         "admin-api",
         "identity",
@@ -811,6 +882,23 @@
       "toSide": "right"
     },
     {
+      "id": "bg-to-alerts",
+      "from": "bg",
+      "to": "alerts",
+      "label": "评估",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "alerts-to-webhook",
+      "from": "alerts",
+      "to": "webhook",
+      "label": "webhook",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
       "id": "engine-to-db",
       "from": "engine",
       "to": "db",
@@ -867,7 +955,7 @@
       "dot": "cyan",
       "title": "对外契约",
       "items": [
-        "/v1/chat/completions、/v1/responses",
+        "/v1/chat/completions、/v1/responses、/v1/messages",
         "/v1/models 按渠道凭证加载 + 黑名单",
         "/v1/user/balance、/healthz 池健康"
       ]
@@ -877,15 +965,24 @@
       "title": "调度与弹性",
       "items": [
         "选号：pin → 粘性 → 到期积分 → 三态健康度",
-        "模型级冷却隔离到单个模型，不牵连整条凭证",
-        "六渠道同池调度；7 类后台任务汇总「任务与配置」"
+        "模型级冷却隔离到单个模型；跨渠道 fallback 兼容组（未出帧前回退）",
+        "六渠道同池调度；8 类后台任务汇总「任务与配置」"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "网络与告警",
+      "items": [
+        "按渠道出站代理 PROVIDER_PROXIES（HTTP/SOCKS5，可选，启动期）",
+        "运维告警四类风险 → alert_events + 可选 webhook",
+        "环境代理不采信（trust_env=False），只认显式配置"
       ]
     },
     {
       "dot": "rose",
       "title": "数据与安全",
       "items": [
-        "SQLite WAL 10 表；19 项配置热更",
+        "SQLite WAL 11 表；35 项配置热更",
         "三角色 RBAC + 会话 epoch 吊销；审计留痕（90 天）",
         "凭证加密 + 统计脱敏；API Key 摘要"
       ]
