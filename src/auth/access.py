@@ -1,4 +1,4 @@
-"""API Key 出口访问控制（B3.5）：来源 IP 白名单解析与判定。
+"""API Key 出口访问控制（B3.5 / P0-3）：来源 IP 白名单与模型白名单。
 
 放在 auth/ 而不是 api/：这里全是与框架无关的纯函数（输入输出都是字符串），
 deps 只负责取「对端地址」和「转发头」两个原始值，策略本身不碰 Request。
@@ -22,6 +22,11 @@ import ipaddress
 # 「自己用的几个出口 IP」设计的，不是给网段清单用的。（单条长度由
 # ipaddress 解析天然有界，无需再设字符总量上限。）
 MAX_IP_ENTRIES = 32
+
+# 单条 Key 的模型白名单条目数上限（同上：读路径每次请求都要遍历）。
+MAX_MODEL_ENTRIES = 128
+# 单条模型名长度上限（模型名很短，这里纯防脏数据）。
+MAX_MODEL_NAME_LENGTH = 128
 
 
 def split_entries(raw: str | None) -> list[str]:
@@ -86,6 +91,47 @@ def ip_allowed(client_ip: str, allowed_ips: str | None) -> bool:
     except ValueError:
         return False
     return any(address in network for network in networks)
+
+
+def normalize_allowed_models(raw: str | None) -> str:
+    """校验并规范化模型白名单；非法条目抛 ValueError（消息可直接回给用户）。
+
+    条目是 fnmatch glob（`glm-*`、`kimi-k3`），逗号分隔存储。匹配时对模型名
+    大小写不敏感（见 `model_allowed`），这里保留用户原始写法便于界面回显。
+    """
+    entries = split_entries(raw)
+    if len(entries) > MAX_MODEL_ENTRIES:
+        raise ValueError(f"allowed_models 最多 {MAX_MODEL_ENTRIES} 条")
+    normalized: list[str] = []
+    for entry in entries:
+        if len(entry) > MAX_MODEL_NAME_LENGTH:
+            raise ValueError(f"allowed_models 含过长的模型名: {entry!r}")
+        if entry.lower() not in (item.lower() for item in normalized):
+            normalized.append(entry)
+    return ",".join(normalized)
+
+
+def model_allowed(model: str | None, allowed_models: str | None, *,
+                  default_model: str = "") -> bool:
+    """请求模型是否被该 Key 的模型白名单放行；白名单为空 = 不限制（放行）。
+
+    `model` 为 `""`/`auto` 时用 `default_model` 判定：否则用户省略模型名就能
+    绕过白名单（引擎会把它解析成默认模型）。`model@provider` 形式的 `@` 后缀
+    不参与匹配（渠道由 provider_binding 管），但整体写法也允许被 glob 命中。
+    """
+    from fnmatch import fnmatch
+
+    patterns = [item.lower() for item in split_entries(allowed_models)]
+    if not patterns:
+        return True
+    name = (model or "").strip().lower()
+    if not name or name == "auto":
+        name = (default_model or "").strip().lower()
+    if not name or name == "auto":
+        return True                     # 没有可判定的模型名：交给引擎默认
+    base = name.split("@", 1)[0]
+    return any(fnmatch(base, pattern) or fnmatch(name, pattern)
+               for pattern in patterns)
 
 
 def client_ip(peer: str | None, forwarded_for: str | None, *,

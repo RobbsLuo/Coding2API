@@ -458,31 +458,34 @@ class ApiKeyRepository:
         self._db = db
 
     def create(self, username: str, name: str = "", now: int | None = None,
-               *, provider_binding: str = "", allowed_ips: str = "") -> dict[str, Any]:
+               *, provider_binding: str = "", allowed_ips: str = "",
+               allowed_models: str = "", expires_at: int | None = None) -> dict[str, Any]:
         plaintext = generate_api_key()
         key_id = _new_id("key")
         created_at = int(now if now is not None else time.time())
         with self._db.transaction() as conn:
             conn.execute(
                 "INSERT INTO api_keys (id, username, name, key_digest, preview, created_at, "
-                "provider_binding, allowed_ips) VALUES (?,?,?,?,?,?,?,?)",
+                "provider_binding, allowed_ips, allowed_models, expires_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (key_id, username, name, digest_api_key(plaintext), preview_api_key(plaintext),
-                 created_at, provider_binding, allowed_ips),
+                 created_at, provider_binding, allowed_ips, allowed_models, expires_at),
             )
         return {"id": key_id, "username": username, "name": name, "api_key": plaintext,
                 "preview": preview_api_key(plaintext), "created_at": created_at,
-                "provider_binding": provider_binding, "allowed_ips": allowed_ips}
+                "provider_binding": provider_binding, "allowed_ips": allowed_ips,
+                "allowed_models": allowed_models, "expires_at": expires_at}
 
     def authenticate(self, api_key: str) -> dict[str, Any] | None:
-        """校验 Key 并返回其策略行（含 provider_binding / allowed_ips）。
+        """校验 Key 并返回其策略行（含 provider_binding / allowed_ips / 策略）。
 
         命中即刷新 last_used_at：所有出口鉴权都走这里，避免再散落一处
         「用了 Key 但没记最后使用时间」。返回 None 表示 Key 不存在。
         """
         digest = digest_api_key(api_key)
         row = self._db.connect().execute(
-            "SELECT id, username, provider_binding, allowed_ips FROM api_keys "
-            "WHERE key_digest = ?", (digest,)).fetchone()
+            "SELECT id, username, provider_binding, allowed_ips, allowed_models, "
+            "expires_at FROM api_keys WHERE key_digest = ?", (digest,)).fetchone()
         if row is None:
             return None
         with self._db.transaction() as conn:
@@ -497,7 +500,7 @@ class ApiKeyRepository:
     def list_for(self, username: str) -> list[dict[str, Any]]:
         rows = self._db.connect().execute(
             "SELECT id, username, name, preview, created_at, last_used_at, "
-            "provider_binding, allowed_ips FROM api_keys "
+            "provider_binding, allowed_ips, allowed_models, expires_at FROM api_keys "
             "WHERE username = ? ORDER BY created_at", (username,)).fetchall()
         return [dict(row) for row in rows]
 

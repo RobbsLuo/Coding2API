@@ -596,15 +596,25 @@ def _schedule_refresh(services: Services, connected: set[str],
     task.add_done_callback(_done)
 
 
-def _build_response(services: Services, connected: set[str]) -> dict:
-    """按当前缓存合并出响应（不碰上游），并就地 publish 别名表。"""
+def _build_response(services: Services, connected: set[str],
+                    allowed_models: str = "") -> dict:
+    """按当前缓存合并出响应（不碰上游），并就地 publish 别名表。
+
+    `allowed_models` 非空时按该 Key 的模型白名单过滤展示（P0-3）：白名单是
+    Key 级策略，执行时的权威判定在出口（`model_allowed`），这里只是让
+    `/v1/models` 与 Key 实际能用的模型一致。
+    """
     entries = merged_entries(services, connected)
     _publish(services, entries)
+    if allowed_models:
+        from ..auth.access import model_allowed
+        entries = [entry for entry in entries
+                   if model_allowed(entry["id"], allowed_models)]
     return {"object": "list", "data": [_entry_response(entry)
                                        for entry in entries]}
 
 
-async def serve_models(services: Services) -> dict:
+async def serve_models(services: Services, allowed_models: str = "") -> dict:
     """HTTP 出口（`/v1/models`、Playground）：先回旧列表，过期渠道后台刷。
 
     stale-while-revalidate：TTL 到期不再把 zen 探活的十几秒压在请求上。只有某
@@ -624,7 +634,7 @@ async def serve_models(services: Services) -> dict:
         await _refresh_providers(services, connected)
     elif stale:
         _schedule_refresh(services, connected, stale)
-    return _build_response(services, connected)
+    return _build_response(services, connected, allowed_models)
 
 
 async def list_models(services: Services) -> dict:
@@ -658,7 +668,7 @@ def create_router(services: Services) -> APIRouter:
     router = APIRouter()
 
     @router.get("/v1/models")
-    async def list_v1_models(_principal: ApiKeyPrincipal = Depends(api_key_user)):
-        return await list_models(services)
+    async def list_v1_models(principal: ApiKeyPrincipal = Depends(api_key_user)):
+        return await serve_models(services, principal.allowed_models)
 
     return router

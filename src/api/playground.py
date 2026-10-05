@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..compat.openai.request import parse_chat_request
+from .context import apply_context_compression
 from .deps import Services, csrf_protected, principal_from_request, read_json_body
 from .models import serve_models
 from .streaming import with_keepalive
@@ -31,6 +32,7 @@ def create_router(services: Services) -> APIRouter:
         """
         body = await read_json_body(request)
         chat_request = parse_chat_request(body)
+        apply_context_compression(services, chat_request)
         if chat_request.stream:
             executor.preflight(chat_request)
             return StreamingResponse(

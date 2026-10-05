@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from ..auth.access import normalize_allowed_ips
+from ..auth.access import normalize_allowed_ips, normalize_allowed_models
 from ..compat.openai.request import InvalidRequest
 from ..engine.model_resolver import KNOWN_PROVIDERS
 from .deps import Services, csrf_protected, principal_from_request
@@ -27,6 +27,26 @@ def _parse_allowed_ips(raw: object) -> str:
         raise InvalidRequest(str(error)) from error
 
 
+def _parse_allowed_models(raw: object) -> str:
+    """校验并规范化模型白名单（fnmatch glob，逗号分隔，空 = 不限制）。"""
+    try:
+        return normalize_allowed_models(str(raw or ""))
+    except ValueError as error:
+        raise InvalidRequest(str(error)) from error
+
+
+def _parse_expires_at(raw: object) -> int | None:
+    """校验到期时间：null/空 = 永不过期；否则必须是正的 epoch 秒。"""
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise InvalidRequest("expires_at must be a unix timestamp in seconds or null")
+    value = int(raw)
+    if value <= 0:
+        raise InvalidRequest("expires_at must be a positive unix timestamp")
+    return value
+
+
 def create_router(services: Services) -> APIRouter:
     router = APIRouter()
     api_keys = services.api_keys
@@ -42,7 +62,9 @@ def create_router(services: Services) -> APIRouter:
         created = api_keys.create(
             principal.username, str(payload.get("name") or ""),
             provider_binding=_parse_binding(payload.get("provider_binding")),
-            allowed_ips=_parse_allowed_ips(payload.get("allowed_ips")))
+            allowed_ips=_parse_allowed_ips(payload.get("allowed_ips")),
+            allowed_models=_parse_allowed_models(payload.get("allowed_models")),
+            expires_at=_parse_expires_at(payload.get("expires_at")))
         return created          # 明文只在此返回一次
 
     @router.delete("/api/api-keys/{key_id}")

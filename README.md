@@ -8,7 +8,7 @@
 
 ## 特性
 
-- **OpenAI 兼容出口**：`/v1/chat/completions`（流式 + 非流式）、`/v1/responses`（Codex CLI）、`/v1/models`、`/v1/user/balance`（DeepSeek 兼容余额）
+- **OpenAI 兼容出口**：`/v1/chat/completions`（流式 + 非流式）、`/v1/responses`（Codex CLI）、`/v1/messages`（Anthropic / Claude Code）、`/v1/models`、`/v1/user/balance`（DeepSeek 兼容余额）
 - **六个上游渠道**：CodeBuddy、TRAE SOLO、OpenCode Zen、Kilo Gateway、Qoder、CodeArts——统一模型名、统一调度、统一统计
 - **统一调度**：扁平模型名按健康度自动选号，`模型@渠道` 强制指定；三态健康度 + 分级冷却避开坏号，健康度打平时**余额多者优先**。模型级限流或「该渠道无此模型」只避让那一个模型，同账号其他模型立刻可用
 - **到期额度优先消化**：主窗口 36h 内将过期的额度多者先用（避免过期浪费），打平再比 7 天窗口；额度单位统一为积分
@@ -208,6 +208,24 @@ codex -c "model_providers.coding2api={ name='coding2api', base_url='http://127.0
 
 > 验证边界：开发环境无 Codex CLI；协议形状取自官方 `openai` SDK 类型并以其为客户端跑通全部契约，另对真实上游冒烟，未经真实 Codex CLI 端到端验证。
 
+### Anthropic Messages API（Claude Code）
+
+`POST /v1/messages` 提供 Anthropic Messages 子集，供 [Claude Code](https://docs.anthropic.com/en/docs/claude-code) 这类只走 Anthropic 协议的客户端接入。与 `/v1/chat/completions` / `/v1/responses` 共用同一套选号 / 冷却 / 轮换 / 统计与会话粘性，只换入站映射与出口翻译（实现见 [TECHNICAL.md §3.18](TECHNICAL.md)）：
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8000
+export ANTHROPIC_AUTH_TOKEN=sk-你的key     # 或 ANTHROPIC_API_KEY（走 x-api-key 头）
+claude
+```
+
+- **鉴权**：`x-api-key`（`ANTHROPIC_API_KEY`）与 `Authorization: Bearer`（`ANTHROPIC_AUTH_TOKEN`）都接受。
+- **流式**：`message_start` → `content_block_start/delta/stop` → `message_delta`（含 `stop_reason` 与 usage）→ `message_stop`；Anthropic 协议无 `[DONE]` 哨兵，`message_stop` 即流结束。thinking 块在 `content_block_stop` 前补 `signature_delta`。
+- **非流式**：复用 `executor.complete` 后转换为 `message` 形状。
+- **`count_tokens`**：`POST /v1/messages/count_tokens` 本地估算输入 token（不转发上游，口径与上下文压缩共用）。
+- **不支持**：图片 / 文档块、Anthropic 服务端工具（`web_search` / `computer` 等）一律显式 400，不静默降级。
+
+> 验证边界：协议形状取自官方 `anthropic` Python SDK 类型并以其为客户端跑通全部契约，未经真实 Claude Code 端到端验证。
+
 ### 余额查询
 
 `GET /v1/user/balance` 兼容 DeepSeek 余额接口的响应形状，Bearer `sk-...` 鉴权，供 Cherry Studio / cc-switch 等客户端显示余额。余额来自凭证池的额度探测缓存（`QUOTA_PROBE_MINUTES` 周期刷新），按可用凭证汇总，单位为上游 credits：
@@ -243,12 +261,14 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 
 五类计数互斥且合计 = `total`，与调度器同一口径（`disabled` / `paused` / `cooling` 依次优先归入各自桶，其余为 `ready`）。`ready=0` 时对话请求直接返回 503，值得配置告警。
 
-### API Key 的渠道绑定与来源 IP 白名单
+### API Key 的渠道绑定、模型白名单、来源 IP 与到期时间
 
-创建 Key 时可限定它只能走某个渠道、只能从某些 IP 调用，适合「按出口分发 Key」：一个给团队用，另一个只给某台服务器或某个客户端。
+创建 Key 时可限定它只能走某个渠道、只能调用某些模型、只能从某些 IP 调用、在某时刻后失效，适合「按出口分发 Key」：一个给团队用，另一个只给某台服务器或某个客户端，再给试用者一个到期 Key。
 
 - **渠道绑定**：选 CodeBuddy / TRAE / OpenCode Zen / Kilo Gateway / Qoder / CodeArts 后，该 Key 只在对应渠道的凭证里选号；模型属于另一渠道时直接 400 并指出实际归属（不静默改道，也不白打一次上游）。留空 = 自动（默认，跨渠道选健康凭证）。`模型@渠道` 与绑定冲突时同样 400。
 - **来源 IP 白名单**：逗号分隔的 IP 或 CIDR（如 `203.0.113.9,10.0.0.0/8`），留空 = 不限制。写入时校验并规范化（`10.0.0.1` 存为 `10.0.0.1/32`），非法值当场 400；来源不在白名单内返回 403。
+- **模型白名单**：逗号分隔的模型名或 fnmatch glob（如 `glm-*,kimi-k3`），留空 = 不限制。匹配不区分大小写，`模型@渠道` 的后缀不参与匹配；命中之外的模型返回 400，`/v1/models` 也只列出白名单内的模型。
+- **到期时间**：epoch 秒（如 `expires_at`），留空 = 永不过期；到期后该 Key 立即 401（与「Key 不存在」统一文案，不泄露可枚举信息）。
 
 **默认不采信 `X-Forwarded-For`**（客户端可写，信它等于白名单形同虚设）。仅 `TRUST_PROXY=true` 时按 XFF 判定，且取**最后一个**条目（紧邻本服务的受信代理实际看到的地址）。故该开关只适用于「本服务前恰好一层受信反代」；多层反代或直连请保持默认 `false`。
 
@@ -364,6 +384,10 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `ENABLE_DOCS` | `false` | 是否暴露 `/docs` 与 `/openapi.json`（默认关闭：匿名可拉全量 API 结构）；本地调试需 Swagger 时置 `true` |
 | `DUMP_REQUEST_BODIES` | `false` | 诊断：把 `/v1` 原始请求体落盘到 `data/dumps/`（**含对话内容**，仅排查用） |
 | `AUTO_CONTINUE_MAX` | `10` | 上游以 `finish_reason=length` 截断时同凭证自动续写的最多次数；`0` 关闭（见 TECHNICAL.md §3.4） |
+| `CONTEXT_COMPRESS_ENABLED` | `true` | 按模型目录里的输入上限裁剪过长对话，避免撞上游硬限制（CodeBuddy `11115 prompt is too long`）。目录里查不到上限的模型不受影响（宁可不裁剪也不猜）。见 TECHNICAL.md §3.19 |
+| `CONTEXT_COMPRESS_RESERVE_TOKENS` | `4096` | 压缩预算里为模型回复预留的输出 token 数 |
+| `CONTEXT_COMPRESS_MIN_KEEP_MESSAGES` | `4` | 无论多长都保留的最近消息条数（保证当前这轮对话完整） |
+| `CONTEXT_COMPRESS_SAFETY_RATIO` | `0.95` | 按模型上限的百分比计算压缩预算，给 token 估算误差留余量 |
 | `UPSTREAM_COMPLETE_TIMEOUT_SECONDS` | `600` | 非流式聚合整体超时（秒）：上游连接半开停滞会让非流式请求无限悬挂并占住凭证，超时按瞬态错误换号重试（流式路径有心跳兜底不受影响）；`≤0` 关闭 |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | 监听地址与端口（compose 默认 `0.0.0.0`，`PORT` 同时决定宿主机映射端口） |
 
@@ -483,11 +507,12 @@ M0–M3 及后续迭代全部完成，`main` 分支可运行，当前版本 v0.2
 后续批次（B1–B4）已按批准计划落地：
 
 - **B1 请求质量**：错误分类细分 + 模型级冷却、出站指纹清洗（11128 内容风控）、截断续写、会话粘性键、模型元数据/黑名单
-- **B2 协议出口**：`/v1/responses`（Codex CLI 子集）；Anthropic `/v1/messages` **暂不做**（当前无 Claude Code 场景，架构已预留中立事件层，后续按需补）
+- **B2 协议出口**：`/v1/responses`（Codex CLI 子集）；Anthropic `/v1/messages`（Claude Code，含 `count_tokens`，见 P0-1）
 - **B3 运维**：凭证暂停语义、运行时配置热更、token 到期展示、积分变动流水、池健康 `/healthz` + 多 Key 出口/IP 绑定
 - **B4 任务可视化**：后台任务运行态并入「任务与配置」页；模型黑名单热更延迟修复
 - **B5 账号体系**：用户从 `users.txt` 迁入 SQLite、三角色 RBAC、会话吊销（epoch）、一次性令牌激活 + 首登强制改密、用户管理页、审计日志页、硬删降为 CLI
 - **B6 新渠道**：接入 **Qoder**（COSY 私有协议 + 设备码登录 + 签到/额度）与 **CodeArts**（华为云 SDK-HMAC 签名 + DPoP 刷新 + 累计全文 SSE + 福利领取）；`KNOWN_PROVIDERS` 扩到六个，展示排序、渠道绑定、前端图标与文档同步
+- **B7 竞品能力补齐（P0）**：Anthropic `/v1/messages` 出口（Claude Code）、上下文压缩（按模型目录输入上限裁剪过长对话）、API Key 模型白名单 + 到期时间（对比与迁移分档见 `docs/competitor-comparison.md`）
 
 规划与实测收窄的完整记录见 `PROPOSAL.md`（Q1–Q54）与 `TECHNICAL.md`（§3.1–§3.17、§6.1–§6.4）。
 

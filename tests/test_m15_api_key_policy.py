@@ -15,7 +15,9 @@ from src.auth.access import (
     MAX_IP_ENTRIES,
     client_ip,
     ip_allowed,
+    model_allowed,
     normalize_allowed_ips,
+    normalize_allowed_models,
     split_entries,
 )
 from src.auth.session import create_session_token
@@ -99,6 +101,47 @@ def test_client_ip_ignores_xff_unless_trusted():
     assert client_ip("127.0.0.1", " , ", trust_proxy=True) == "127.0.0.1"
 
 
+# ------------------------------------------------------- 模型白名单纯函数（P0-3）
+
+def test_normalize_allowed_models_trims_and_dedupes():
+    assert normalize_allowed_models(None) == ""
+    assert normalize_allowed_models("") == ""
+    assert normalize_allowed_models(" glm-* , kimi-k3 , GLM-* ") == "glm-*,kimi-k3"
+
+
+def test_normalize_allowed_models_rejects_overlong_and_too_many():
+    with pytest.raises(ValueError, match="过长"):
+        normalize_allowed_models("x" * 129)
+    many = ",".join(f"m{i}" for i in range(129))
+    with pytest.raises(ValueError, match="最多"):
+        normalize_allowed_models(many)
+    assert normalize_allowed_models(",".join(f"m{i}" for i in range(128))) != ""
+
+
+def test_model_allowed_empty_means_unrestricted():
+    assert model_allowed("glm-5.2", "") is True
+    assert model_allowed("glm-5.2", None) is True
+
+
+def test_model_allowed_matches_glob_case_insensitively():
+    assert model_allowed("glm-5.2", "glm-*") is True
+    assert model_allowed("GLM-5.2", "glm-*") is True
+    assert model_allowed("kimi-k3", "glm-*") is False
+    assert model_allowed("kimi-k3", "glm-*,kimi-k3") is True
+
+
+def test_model_allowed_handles_provider_suffix_and_default_model():
+    # @provider 后缀不参与匹配，但整体写法也允许被 glob 命中
+    assert model_allowed("glm-5.2@trae", "glm-5.2") is True
+    assert model_allowed("glm-5.2@trae", "glm-*") is True
+    # 省略模型名（空 / auto）时用默认模型判定，不能借空名绕过
+    assert model_allowed("", "glm-*", default_model="glm-5.2") is True
+    assert model_allowed("auto", "glm-*", default_model="kimi-k3") is False
+    # 没有可判定的模型名：交给引擎默认，放行
+    assert model_allowed("", "glm-*", default_model="") is True
+    assert model_allowed("auto", "glm-*") is True
+
+
 # ------------------------------------------------------------------- 仓储
 
 @pytest.fixture()
@@ -111,22 +154,29 @@ def keys(tmp_path):
 
 def test_repository_round_trips_policy_columns(keys):
     created = keys.create("alice", "laptop", provider_binding="trae",
-                          allowed_ips="10.0.0.0/8")
+                          allowed_ips="10.0.0.0/8",
+                          allowed_models="glm-*", expires_at=4_100_000_000)
     assert created["provider_binding"] == "trae"
     assert created["allowed_ips"] == "10.0.0.0/8"
+    assert created["allowed_models"] == "glm-*"
+    assert created["expires_at"] == 4_100_000_000
 
     row = keys.authenticate(created["api_key"])
     assert row == {"id": created["id"], "username": "alice",
-                   "provider_binding": "trae", "allowed_ips": "10.0.0.0/8"}
+                   "provider_binding": "trae", "allowed_ips": "10.0.0.0/8",
+                   "allowed_models": "glm-*", "expires_at": 4_100_000_000}
     listed = keys.list_for("alice")[0]
     assert listed["provider_binding"] == "trae"
     assert listed["allowed_ips"] == "10.0.0.0/8"
+    assert listed["allowed_models"] == "glm-*"
+    assert listed["expires_at"] == 4_100_000_000
 
 
 def test_repository_defaults_to_unrestricted(keys):
     created = keys.create("alice")
     row = keys.authenticate(created["api_key"])
     assert row["provider_binding"] == "" and row["allowed_ips"] == ""
+    assert row["allowed_models"] == "" and row["expires_at"] is None
     # verify 仍是「只回用户名」的薄封装（旧调用方契约）
     assert keys.verify(created["api_key"]) == "alice"
     assert keys.authenticate("sk-nope") is None
@@ -206,12 +256,71 @@ def test_create_key_rejects_bad_allowed_ips(client):
 
 
 def test_create_key_normalizes_and_lists_policy(client):
-    created = _create_key(client, provider_binding=" TRAE ", allowed_ips="10.0.0.1")
+    created = _create_key(client, provider_binding=" TRAE ", allowed_ips="10.0.0.1",
+                          allowed_models=" glm-* , kimi-k3 ", expires_at=4102444800)
     assert created["provider_binding"] == "trae"
     assert created["allowed_ips"] == "10.0.0.1/32"
+    assert created["allowed_models"] == "glm-*,kimi-k3"
+    assert created["expires_at"] == 4102444800
     listed = client.get("/api/api-keys").json()["api_keys"][0]
     assert listed["provider_binding"] == "trae"
     assert listed["allowed_ips"] == "10.0.0.1/32"
+    assert listed["allowed_models"] == "glm-*,kimi-k3"
+    assert listed["expires_at"] == 4102444800
+
+
+def test_create_key_rejects_bad_allowed_models(client):
+    response = client.post("/api/api-keys", json={"name": "t",
+                                                  "allowed_models": "x" * 200})
+    assert response.status_code == 400
+    assert "过长" in response.json()["error"]["message"]
+
+
+def test_create_key_rejects_bad_expires_at(client):
+    for bad in ("soon", 0, -5, True):
+        response = client.post("/api/api-keys", json={"name": "t", "expires_at": bad})
+        assert response.status_code == 400, bad
+        assert "expires_at" in response.json()["error"]["message"]
+
+
+def test_create_key_accepts_float_and_empty_expiry(client):
+    created = _create_key(client, expires_at=4102444800.9)
+    assert created["expires_at"] == 4102444800
+    assert _create_key(client, name="forever", expires_at="")["expires_at"] is None
+
+
+def test_model_allowlist_blocks_chat_and_responses(client):
+    key = _create_key(client, allowed_models="glm-*")["api_key"]
+    headers = {"Authorization": f"Bearer {key}"}
+    chat = client.post("/v1/chat/completions", headers=headers,
+                       json={"model": "kimi-k3", "messages": [{"role": "user",
+                                                               "content": "hi"}]})
+    assert chat.status_code == 400
+    assert "not allowed" in chat.json()["error"]["message"]
+    responses = client.post("/v1/responses", headers=headers,
+                            json={"model": "kimi-k3", "input": "hi"})
+    assert responses.status_code == 400
+    assert "not allowed" in responses.json()["error"]["message"]
+
+
+def test_expired_key_is_rejected(client):
+    key = _create_key(client, expires_at=1)["api_key"]
+    response = client.get("/v1/models", headers={"Authorization": f"Bearer {key}"})
+    assert response.status_code == 401
+    # 统一鉴权失败文案（不泄露「Key 存在但已过期」这类可枚举信息）
+    assert response.json()["error"]["code"] == "invalid_api_key"
+
+
+def test_key_expired_helper_boundaries():
+    from src.auth.api_key import key_expired
+
+    assert key_expired(None) is False
+    assert key_expired(0) is False
+    assert key_expired(100, now=99) is False
+    assert key_expired(100, now=100) is True      # 到期时刻本身算过期
+    assert key_expired(100, now=101) is True
+    # 不传 now 时用当前时间（取一个远过去的到期点必然过期）
+    assert key_expired(1) is True
 
 
 def test_allowed_ips_blocks_foreign_source(client):

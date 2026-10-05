@@ -16,6 +16,7 @@ from typing import Any
 from fastapi import Request
 
 from ..auth.access import client_ip, ip_allowed
+from ..auth.api_key import key_expired
 from ..auth.csrf import check_csrf
 from ..auth.rbac import (
     ROLE_ADMIN,
@@ -149,15 +150,34 @@ def _enforce_password_change(request: Request) -> None:
 
 @dataclass(frozen=True)
 class ApiKeyPrincipal:
-    """外部 /v1 出口的鉴权结果：归属用户 + 该 Key 的访问策略（B3.5）。
+    """外部 /v1 出口的鉴权结果：归属用户 + 该 Key 的访问策略（B3.5 / P0-3）。
 
     返回结构体而不是裸用户名，是因为出口需要 `provider_binding` 去收窄
-    候选上游；IP 白名单在鉴权当场就判掉，不往上传递。
+    候选上游、需要 `allowed_models` 去拒绝未授权模型；IP 白名单与到期时间
+    在鉴权当场就判掉，不往上传递。
     """
 
     username: str
     key_id: str
     provider_binding: str = ""      # '' = 不限定渠道
+    allowed_models: str = ""        # '' = 不限定模型（fnmatch glob，逗号分隔）
+
+
+def _api_key_principal(services: Services, request: Request,
+                       raw_key: str) -> ApiKeyPrincipal:
+    """校验裸 Key 文本并组装 Principal（Bearer 与 x-api-key 两条入口共用）。"""
+    record = services.api_keys.authenticate(raw_key)
+    # 用户被删除或禁用后旧 Key 必须立即失效（同会话 Cookie 的理由）
+    if not record or not services.users.is_active(record["username"]):
+        raise UnauthorizedError("invalid api key")
+    if key_expired(record.get("expires_at")):
+        raise UnauthorizedError("api key expired")
+    source = request_ip(request, services.settings)
+    if not ip_allowed(source, record.get("allowed_ips") or ""):
+        raise ForbiddenError("source ip not allowed for this api key")
+    return ApiKeyPrincipal(username=record["username"], key_id=record["id"],
+                           provider_binding=record.get("provider_binding") or "",
+                           allowed_models=record.get("allowed_models") or "")
 
 
 async def api_key_user(request: Request) -> ApiKeyPrincipal:
@@ -167,15 +187,20 @@ async def api_key_user(request: Request) -> ApiKeyPrincipal:
     prefix = "Bearer "
     if not header.lower().startswith(prefix.lower()):
         raise UnauthorizedError("missing api key")
-    record = services.api_keys.authenticate(header[len(prefix):].strip())
-    # 用户被删除或禁用后旧 Key 必须立即失效（同会话 Cookie 的理由）
-    if not record or not services.users.is_active(record["username"]):
-        raise UnauthorizedError("invalid api key")
-    source = request_ip(request, services.settings)
-    if not ip_allowed(source, record.get("allowed_ips") or ""):
-        raise ForbiddenError("source ip not allowed for this api key")
-    return ApiKeyPrincipal(username=record["username"], key_id=record["id"],
-                           provider_binding=record.get("provider_binding") or "")
+    return _api_key_principal(services, request, header[len(prefix):].strip())
+
+
+async def api_key_user_anthropic(request: Request) -> ApiKeyPrincipal:
+    """Anthropic 客户端鉴权：优先 `x-api-key`，其次 `Authorization: Bearer`。
+
+    Anthropic SDK / Claude Code 把 Key 放在 `x-api-key`（`ANTHROPIC_API_KEY`）
+    或 `Authorization: Bearer`（`ANTHROPIC_AUTH_TOKEN`）两处，两者都要认，
+    否则「Base URL 一改就 401」。
+    """
+    key = request.headers.get("x-api-key")
+    if key and key.strip():
+        return _api_key_principal(get_services(request), request, key.strip())
+    return await api_key_user(request)
 
 
 async def csrf_protected(request: Request) -> None:

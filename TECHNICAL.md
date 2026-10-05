@@ -103,6 +103,7 @@ coding2api/
 │   │   ├── executor.py          # 请求执行 + 轮换重试 + 统计埋点
 │   │   ├── affinity.py          # 会话粘性（CONVERSATION_STICKY_SECONDS，B1.5）
 │   │   ├── continuation.py      # 截断续写（AUTO_CONTINUE_MAX，B1.4）
+│   │   ├── compress.py          # 上下文压缩裁剪（P0-2，纯函数）
 │   │   ├── model_resolver.py    # "glm-5.2" | "glm-5.2@trae" | auto → 候选集
 │   │   └── sse.py               # SSE 帧解析（跨 provider 共用）
 │   ├── compat/
@@ -113,6 +114,9 @@ coding2api/
 │   │   ├── responses/           # Responses 出口（B2.1，仅 Codex CLI 子集）
 │   │   │   ├── request.py       # Responses → ChatRequest 入站映射
 │   │   │   └── response.py      # Event → Responses SSE
+│   │   └── anthropic/           # Anthropic Messages 出口（P0-1，Claude Code 子集）
+│   │       ├── request.py       # Messages → ChatRequest 入站映射
+│   │       └── response.py      # Event → Anthropic SSE
 │   ├── tasks/
 │   │   ├── pacer.py             # 全局节流器（PACER_MIN/MAX 随机区间）
 │   │   ├── quota_probe.py       # 启动立即一轮 + 每 QUOTA_PROBE_MINUTES
@@ -130,7 +134,9 @@ coding2api/
 │       ├── deps.py              # Services 容器 + require_api_key / session / csrf 依赖
 │       ├── chat.py              # POST /v1/chat/completions
 │       ├── responses.py         # POST /v1/responses
-│       ├── models.py            # GET /v1/models（按渠道凭证加载 + 动态拉取 + 黑名单 + 元数据）
+│       ├── messages.py          # POST /v1/messages + /v1/messages/count_tokens（P0-1）
+│       ├── context.py           # 请求入口的上下文压缩接线（P0-2）
+│       ├── models.py            # GET /v1/models（按渠道凭证加载 + 动态拉取 + 黑名单 + 元数据 + 模型白名单过滤）
 │       ├── balance.py           # GET /v1/user/balance（读探测缓存聚合）
 │       ├── authorize.py         # GET /authorize（TRAE 回调落点）
 │       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin / 成长 / 账号切换
@@ -710,6 +716,48 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 **名额泄漏修复（2026-10-02）**：上一条引入的 `max_concurrency` 依赖 `release` 与 `wait_turn` 严格配对，而 `release` 在 provider `stream_chat` 的 `finally` 里——`async for ... break` **不关闭** async generator（CPython 只在耗尽 / 显式 `aclose()` / GC 的 asyncgen finalizer 时才跑 `finally`）。executor `_stream_loop` 遇 `EventKind.ERROR` 的两处 `break` 于是让名额推迟归还；轮换重试每次重新 `wait_turn`，`_inflight` 单调累积，满 3 后新请求在 `wait_turn` 无限阻塞——表现为**「用了三次就限制」而非「并发三」**（复现：3 次流内错误后 `inflight=3`，第 4 个请求永久阻塞）。注意这推翻了 Q45 的原始判断（「延迟归还只会让节流略松、不会误排队」）：`max_concurrency=0` 时泄漏确实只是变松，配上上限后泄漏即**永久丢失许可**。修复：`provider.base.aclose_stream` 统一关闭，`stream_guarded` / `stream` / `_stream_loop` / `complete` / `ContinuationStream.__aiter__` 五处提前结束消费处全部显式关闭上游流。回归测试 `tests/test_stream_slot_release.py`（10 例，旧代码上 6 例失败）。
 
 **节流窗口对齐上游口径（2026-10-02）**：泄漏修好后实测仍偶发 `TM.00001041`——排查确认上游限制的不是「同时在途 HTTP 数」而是「**每账号每约 60s 最多 3 个会话**」。证据（单账号、真实上游）：① 3 并发请求结束后、名额已全部归还，**紧接着**再发 3 个全部 400；② 打满 3 并发后每 6s 探一个单请求，直到约 **68s** 才恢复；③ 完全顺序（零并发）、每个请求都换全新 `httpx` client 并显式关闭，仍是前 3 个 OK、第 4 个起全 400；④ 间隔 30s 顺序发 6 个则 6/6 OK。即会话在 HTTP 流结束后仍滞留数十秒，纯在途上限（`max_concurrency`）挡不住「3 个刚结束就立刻再发 3 个」这类突发，`release` 一让位新请求就再次击穿。故 `Pacer` 增加**滑动窗口**口径：`window_seconds > 0` 时与 `max_concurrency` 组合成「同桶最近 `window_seconds` 秒内最多放行 N 次启动」，窗口内满额则挂起到最早一次启动滑出窗口（睡 `starts[0] + window_seconds - now`，醒来重查，`release` 只减在途计数、不提前让出窗口配额）。CodeArts pacer 装配 `window_seconds=lambda: runtime.codearts_request_window_seconds`（热更项，默认 60s；`0` 关闭窗口口径退回纯在途上限）。取 60s 落在实测恢复区间（60.7–68.6s）的**下沿**（略偏激进，调大可更稳）；代价是高频使用时账号吞吐降到约 3 次/分钟，超出部分排队而非报错。窗口模式配 `max_concurrency=0` 时不生效（退回纯放行）；`window_seconds` 与在途上限都保留，`0` 均可热更关闭。窗口准入**同时**受窗口与在途两个闸门约束：窗口满则等到最早一次启动滑出，仅因在途满（长流超过窗口）则等 `release` 唤醒——否则长响应会绕过在途上限再次超发。
+
+### 3.18 Anthropic Messages 出口（P0-1，Claude Code）
+
+`POST /v1/messages`（流式 + 非流式）与 `POST /v1/messages/count_tokens`，供只走 Anthropic 协议的客户端（Claude Code）接入。与 `/v1/responses` 同一模式：新增 `compat/anthropic/{request,response}.py` + `api/messages.py`，**复用同一 `executor`**（选号 / 冷却 / 轮换 / 统计 / 会话粘性零改动），只换入站映射与出口翻译。
+
+**入站映射**（`request.py`，映射成内部 `ChatRequest.raw`，只实现 chat 子集）：
+- `system`（字符串或 text 块数组）→ 一条 `system` 消息，置于最前；空则丢弃。
+- `messages[].content` 为字符串时按角色直传；为块数组时：`text` → 文本、`tool_result` → `tool` 消息（`tool_use_id` → `tool_call_id`）、`image`/`document` → 显式 400。user 的连续块按类型**拆成多条**消息（文本与 tool_result 交替），assistant 的块**合并成一条**（`thinking` → `reasoning_content`、`tool_use` → `tool_calls`、`redacted_thinking` 丢弃）——与上游 chat 的消息模型对齐。
+- `tools[].input_schema` → `function.parameters`；`tool_choice`：`auto`/`none` 直传，`any` → `required`，`tool` → `{"type":"function",...}`；`stop_sequences` → `stop`；`max_tokens`/`temperature`/`top_p` 直传，`top_k` 丢弃（chat 无等价物）。
+
+**出口翻译**（`response.py`，实现 executor 的 `StreamSink` 协议）：`message_start` → `content_block_start`/`content_block_delta`/`content_block_stop`（文本 `text_delta`、思考 `thinking_delta`、工具 `input_json_delta`）→ `message_delta`（`stop_reason` + usage）→ `message_stop`。Anthropic 协议**没有 `[DONE]` 哨兵**，`message_stop` 即流结束；thinking 块在 `content_block_stop` 前补一个占位 `signature_delta`（客户端要求，本网关不产真签名）。错误用 `event: error`（`_error_type_for` 把上游错误码映射成 Anthropic 错误类型）。非流式 `completion_to_message` 复用 `executor.complete` 的输出形状转换。
+
+**鉴权**：`deps.api_key_user_anthropic` 先读 `x-api-key`（Anthropic SDK 的 `ANTHROPIC_API_KEY`），为空再回落 `Authorization: Bearer`（`ANTHROPIC_AUTH_TOKEN`），两者共用 `_api_key_principal`（含 IP / 过期 / 模型白名单判定）。客户端 Base URL 填到根（如 `http://127.0.0.1:8000`），SDK 自行拼 `/v1/messages`。
+
+`count_tokens` 用与上下文压缩同一套启发式估算本地计数（不转发上游），只保证量级正确。
+
+### 3.19 上下文压缩（P0-2）
+
+**动机**：上游对输入长度有硬限制（CodeBuddy `11115 prompt is too long: … tokens > … maximum`）。反代若原样转发，长会话（编码助手把整份文件塞进上下文）必然撞墙，客户端只看到裸的 400，而换号无意义（每个号上限一样）。
+
+**只做确定性的「估算 → 裁剪」**，不做「超限后压缩再重试」的放大路径（后者要把压缩塞进 executor 的轮换循环，放大倍率难控）。实现分两层：纯函数 `engine/compress.py` + API 层接线 `api/context.py`（在 chat / responses / messages / playground 四个入站处、解析之后、`preflight`/`complete` 之前调用）。
+
+- **token 估算**：中文 0.55 tok/字、数字 0.33、其他 0.25。刻意不用「3 字符 ≈ 1 token」的英文口径——它会把中文低估约 1.6 倍，于是「以为装得下、其实装不下」，压缩根本不触发。
+- **预算**：`模型上限 × safety_ratio − reserve_for_output`（给回复预留 + 给估算误差留余量）。
+- **裁剪**：`system` 永久保留（丢了会改变模型行为）；`assistant.tool_calls` 与其后连续的 `tool` 结果**同组同生共死**（只删一半会让上游报 tool_call_id 找不到）；至少保留最近 `min_keep_messages` 条；其外从最新往最老贪心回填（越新越重要，装不下就跳过看更老的）。裁剪后仍超限则截断最长的**非 system** 消息内容（留头尾 + 标记）。
+- **未知上限不压缩**：模型目录里查不到 `max_input_tokens` 时直接跳过——宁可不裁剪，也不拿一个猜的数字去砍用户上下文。故本功能对未知模型**零副作用**。
+- **多渠道取最小**：同名模型可能挂多个渠道、各自上限不同，`context_window_for` 取**最小值**（调度可能落到任一候选渠道，用最小上限裁剪才不会在最小的那个上撞 400）。
+
+热更项 `context_compress_enabled`（默认 true）/ `context_compress_reserve_tokens`（4096）/ `context_compress_min_keep_messages`（4）/ `context_compress_safety_ratio`（0.95）。
+
+### 3.20 API Key 模型白名单与到期时间（P0-3）
+
+在 B3.5 的「渠道绑定 + IP 白名单」之上再补两项 Key 级策略（**不做配额**，与 Q37 结论一致）：
+
+- `allowed_models TEXT NOT NULL DEFAULT ''`：fnmatch glob、逗号分隔、`''`=不限制。
+- `expires_at INTEGER`：epoch 秒、`NULL`=永不过期。
+
+`SCHEMA_VERSION` 15→16，`_MIGRATION_COLUMNS` 幂等补列（老库补列后行为不变）。策略纯函数在 `auth/access.py`（`normalize_allowed_models` 写入时校验规范化、`model_allowed` 读路径判定）；`ApiKeyPrincipal` 增 `allowed_models`；`deps._api_key_principal` 在鉴权当场判过期（过期与「Key 不存在」**统一 401 文案**，不泄露可枚举信息）。
+
+白名单在三个 /v1 出口（chat / responses / messages）解析后校验：省略模型名（空 / `auto`）时按 `default_model` 判定，**不能借空名绕过**；匹配大小写不敏感，`模型@渠道` 的后缀不参与匹配。`/v1/models` 也按白名单过滤展示，让列表与 Key 实际能用的模型一致。
+
+管理台 UI 暂未暴露这两个字段（可用 `POST /api/api-keys` 直接传 `allowed_models` / `expires_at`），后续按需补。
 
 ---
 

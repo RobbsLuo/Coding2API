@@ -11,7 +11,7 @@ credential pool, unified scheduling, and per-user usage stats.
 
 ## Features
 
-- **OpenAI-compatible surface**: `/v1/chat/completions` (streaming + non-streaming), `/v1/responses` (for the Codex CLI), `/v1/models`, `/v1/user/balance` (DeepSeek-compatible)
+- **OpenAI-compatible surface**: `/v1/chat/completions` (streaming + non-streaming), `/v1/responses` (for the Codex CLI), `/v1/messages` (Anthropic Messages / Claude Code), `/v1/models`, `/v1/user/balance` (DeepSeek-compatible)
 - **Six upstreams, one flat model namespace**: auto-routed by expiring credits, then health (ties broken by the larger remaining balance); `model@provider` pins an upstream
 - **OpenCode Zen free tier** (third channel, `zen`): the free models at `opencode.ai/zen`, standard OpenAI protocol, no login. The upstream list mixes in paid models with no free/paid marker, so the gateway narrows by the `-free` suffix and probes each candidate, exposing **only the free models that actually answer anonymously** (fetched and probed live, no static allowlist). Requests automatically satisfy the free-tier gate; responses have the gate's injected pseudo-tool calls filtered out. Zen has no credentials — one virtual pool row lets it be scheduled, paused, and counted like any other channel.
 - **Kilo Gateway free tier** (fourth channel, `kilo`): the free models at `api.kilo.ai/api/gateway`, standard OpenAI protocol, no login. Filtered by the authoritative per-model `isFree` flag (no probing, to conserve the small free quota); free models are marked **x0**. Same credential-less virtual-row model as Zen.
@@ -97,6 +97,24 @@ codex -c "model_providers.coding2api={ name='coding2api', base_url='http://127.0
 Streaming text, reasoning summaries, function tool calls, and `finish_reason=length` → `response.incomplete` are supported. `store=true`, `previous_response_id`, and Responses-only tools (`web_search`, `computer`, `custom`, …) are rejected with an explicit 400 rather than silently degraded. `include=["reasoning.encrypted_content"]`, which Codex always sends, is accepted and ignored.
 
 > Verification boundary: no Codex CLI was available on the development machine. Wire shapes come from the official `openai` Python SDK types and were validated end-to-end using that SDK as the client, plus a smoke test against the real upstream. No end-to-end run with the actual Codex CLI has been performed.
+
+### Anthropic Messages API (Claude Code)
+
+`POST /v1/messages` serves an Anthropic Messages subset for clients that only speak the Anthropic protocol, such as [Claude Code](https://docs.anthropic.com/en/docs/claude-code). It shares the same credential selection, cooldown, rotation, accounting, and session affinity; only the inbound mapping and outbound translation differ (see [`TECHNICAL.md` §3.18](TECHNICAL.md), in Chinese):
+
+```bash
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8000
+export ANTHROPIC_AUTH_TOKEN=sk-your-key     # or ANTHROPIC_API_KEY (sent via x-api-key)
+claude
+```
+
+- **Auth**: both `x-api-key` (`ANTHROPIC_API_KEY`) and `Authorization: Bearer` (`ANTHROPIC_AUTH_TOKEN`) are accepted.
+- **Streaming**: `message_start` → `content_block_start/delta/stop` → `message_delta` (with `stop_reason` and usage) → `message_stop`. Anthropic has no `[DONE]` sentinel; `message_stop` ends the stream. Thinking blocks get a placeholder `signature_delta` before `content_block_stop`.
+- **Non-streaming**: reuses `executor.complete` and reshapes the result.
+- **`count_tokens`**: `POST /v1/messages/count_tokens` estimates input tokens locally (never calls upstream; same heuristic as context compression).
+- **Not supported**: image/document blocks and Anthropic-only server tools (`web_search`, `computer`, …) are rejected with an explicit 400.
+
+> Verification boundary: wire shapes come from the official `anthropic` Python SDK types and were validated end-to-end using that SDK as the client. No end-to-end run with the actual Claude Code has been performed.
 
 ## Upgrading
 

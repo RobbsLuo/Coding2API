@@ -19,11 +19,14 @@ import time
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..auth.access import model_allowed
+from ..compat.openai.request import InvalidRequest
 from ..compat.responses.request import parse_responses_request
 from ..compat.responses.response import (
     ResponsesStreamTranslator,
     completion_to_response,
 )
+from .context import apply_context_compression
 from .deps import ApiKeyPrincipal, Services, api_key_user, read_json_body
 from .streaming import with_keepalive
 
@@ -31,12 +34,18 @@ from .streaming import with_keepalive
 def create_router(services: Services) -> APIRouter:
     router = APIRouter()
     executor = services.executor
+    settings = services.settings
 
     @router.post("/v1/responses")
     async def responses(request: Request,
                          principal: ApiKeyPrincipal = Depends(api_key_user)):
         body = await read_json_body(request)
         chat_request = parse_responses_request(body)
+        if not model_allowed(chat_request.model, principal.allowed_models,
+                             default_model=settings.default_model):
+            raise InvalidRequest(
+                f"model {chat_request.model!r} is not allowed for this api key")
+        apply_context_compression(services, chat_request)
         binding = principal.provider_binding
         if chat_request.stream:
             # 与 chat 出口同样的前置校验：在 200 响应头发出前拒绝不可能成功的请求

@@ -168,6 +168,15 @@ class Settings(BaseSettings):
     # 非流式聚合整体超时（秒）：上游只支持流式，非流式由引擎聚合；上游连接
     # 半开停滞会让请求无限悬挂并占住凭证。超时按瞬态错误换号重试；≤0 关闭
     upstream_complete_timeout_seconds: int = 600
+    # 上下文压缩（P0-2）：按模型目录里的输入上限裁剪过长对话，避免撞上游硬
+    # 限制（CodeBuddy 11115 prompt is too long）。enabled=false 完全关闭；
+    # 目录里查不到上限的模型不受影响（宁可不裁剪也不猜一个数字去砍上下文）。
+    # reserve=为模型回复预留的输出 token；safety_ratio=按上限的百分比留估算
+    # 余量；min_keep=无论多长都保留的最近消息条数。
+    context_compress_enabled: bool = True
+    context_compress_reserve_tokens: int = 4096
+    context_compress_min_keep_messages: int = 4
+    context_compress_safety_ratio: float = 0.95
 
     @cached_property
     def admin_set(self) -> frozenset[str]:

@@ -75,6 +75,19 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "fnmatch glob，逗号分隔；只影响 /v1/models 与 Playground 列表，"
                "直连指定不受影响。留空表示不过滤。",
                group="routing"),
+    HotSetting("context_compress_enabled", bool, "上下文压缩",
+               "按模型目录里的输入上限裁剪过长对话，避免撞上游硬限制"
+               "（CodeBuddy 11115 prompt is too long）。目录里查不到上限的模型"
+               "不受影响。", group="routing"),
+    HotSetting("context_compress_reserve_tokens", int, "上下文压缩：预留输出 token",
+               "压缩预算里为模型回复预留的输出 token 数。", minimum=0,
+               group="routing"),
+    HotSetting("context_compress_min_keep_messages", int, "上下文压缩：至少保留消息数",
+               "无论多长都保留的最近消息条数（保证当前这轮对话完整）。",
+               minimum=0, group="routing"),
+    HotSetting("context_compress_safety_ratio", float, "上下文压缩：安全系数",
+               "按模型上限的百分比计算压缩预算，给 token 估算误差留余量。",
+               minimum=0.0, maximum=1.0, group="routing"),
     HotSetting("quota_expiry_window_seconds", int, "到期积分主窗口（秒）",
                "把「距到期 ≤ 该秒数」的积分加总作为选号第一排序指标；"
                "≤0 关闭整套到期排序（次窗口一并失效）。", minimum=0,
@@ -383,6 +396,22 @@ class RuntimeSettings:
     @property
     def quota_expiry_secondary_window_seconds(self) -> int:
         return int(self.get("quota_expiry_secondary_window_seconds"))
+
+    @property
+    def context_compress_enabled(self) -> bool:
+        return bool(self.get("context_compress_enabled"))
+
+    @property
+    def context_compress_reserve_tokens(self) -> int:
+        return int(self.get("context_compress_reserve_tokens"))
+
+    @property
+    def context_compress_min_keep_messages(self) -> int:
+        return int(self.get("context_compress_min_keep_messages"))
+
+    @property
+    def context_compress_safety_ratio(self) -> float:
+        return float(self.get("context_compress_safety_ratio"))
 
     @property
     def conversation_sticky_seconds(self) -> int:

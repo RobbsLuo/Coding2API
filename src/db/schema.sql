@@ -26,7 +26,11 @@ CREATE TABLE IF NOT EXISTS api_keys (
     -- B3.5 多 Key 出口：绑定渠道（codebuddy | trae | ''=自动）与来源 IP
     -- 白名单（逗号分隔 IP/CIDR，''=不限制）。空值即老库/未设置时的原行为。
     provider_binding TEXT NOT NULL DEFAULT '',
-    allowed_ips   TEXT NOT NULL DEFAULT ''
+    allowed_ips   TEXT NOT NULL DEFAULT '',
+    -- P0-3 Key 细粒度策略：模型白名单（fnmatch glob，逗号分隔，''=不限制）
+    -- 与到期时间（epoch 秒，NULL=永不过期）。
+    allowed_models TEXT NOT NULL DEFAULT '',
+    expires_at    INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS credentials (

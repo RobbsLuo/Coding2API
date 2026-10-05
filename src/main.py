@@ -27,6 +27,7 @@ from .api import (
     authorize,
     balance,
     chat,
+    messages,
     models,
     playground,
     responses,
@@ -505,6 +506,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.include_router(activate.create_router(services))
     app.include_router(chat.create_router(services))
     app.include_router(responses.create_router(services))
+    app.include_router(messages.create_router(services))
     app.include_router(models.create_router(services))
     app.include_router(balance.create_router(services))
     app.include_router(playground.create_router(services))
