@@ -301,23 +301,11 @@ export function CredentialsPage() {
 
   return (
     <div className="space-y-6" data-testid="credentials-page">
-      <div className="flex items-start justify-between gap-4">
-        <PageHeader
-          title="凭证管理"
-          description="凭证是调度池里可被选中的渠道账号。登录渠道授权或粘贴 JSON 导入后，可在此探测剩余额度、签到或启停；顶部池概况按健康度四态说明这个池现在还剩多少能打的号。"
-          icon={<Database className="size-5" />}
-        />
-        {canWrite && (
-          <Button
-            variant="primary"
-            data-testid="open-add-dialog"
-            disabled={busy}
-            onClick={() => setAddOpen(true)}
-          >
-            <Plus className="size-4" /> 添加凭证
-          </Button>
-        )}
-      </div>
+      <PageHeader
+        title="凭证管理"
+        description="凭证是调度池里可被选中的渠道账号。登录渠道授权或粘贴 JSON 导入后，可在此探测剩余额度、签到或启停；顶部池概况按健康度四态说明这个池现在还剩多少能打的号。"
+        icon={<Database className="size-5" />}
+      />
       {/* 池概览（原「池仪表盘」页内容合并于此）：统计卡 + 健康度四态分布 */}
       <PoolOverview credentials={credentials} now={now} />
       {!canWrite && (
@@ -328,9 +316,9 @@ export function CredentialsPage() {
       {credentials.length === 0 && canWrite && (
         <div data-testid="first-run-hint">
           <Notice tone="muted">
-            还没有凭证。点右上角「添加凭证」登录渠道账号（CodeBuddy / TRAE / Qoder /
-            CodeArts），或直接粘贴凭证 JSON 导入；OpenCode Zen / Kilo Gateway
-            免费层在对话框里一键添加即可。
+            还没有凭证。点凭证池右上角「添加凭证」登录渠道账号（CodeBuddy / TRAE /
+            Qoder / CodeArts），或直接粘贴凭证 JSON 导入；OpenCode Zen / Kilo
+            Gateway 免费层在对话框里一键添加即可。
           </Notice>
         </div>
       )}
@@ -378,7 +366,20 @@ export function CredentialsPage() {
         </div>
       )}
 
-      <Panel title="凭证池">
+      <Panel
+        title="凭证池"
+        action={canWrite && (
+          <Button
+            size="sm"
+            variant="primary"
+            data-testid="open-add-dialog"
+            disabled={busy}
+            onClick={() => setAddOpen(true)}
+          >
+            <Plus className="size-4" /> 添加凭证
+          </Button>
+        )}
+      >
         {credentials.length === 0 ? (
           <Empty data-testid="no-credentials">还没有凭证</Empty>
         ) : (

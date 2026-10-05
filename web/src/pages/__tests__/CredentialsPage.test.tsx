@@ -68,7 +68,18 @@ describe("CredentialsPage", () => {
     expect(screen.getByTestId("actions-cred_1")).toBeInTheDocument();
     expect(screen.getByTestId("credits-cred_1")).toBeInTheDocument();
     // 导入入口收进对话框：按钮可见即代表可写（对话框内才有表单）
-    expect(screen.getByTestId("open-add-dialog")).toBeInTheDocument();
+    const addButton = screen.getByTestId("open-add-dialog");
+    expect(addButton).toBeInTheDocument();
+    // 按钮挂在「凭证池」面板的标题栏右侧，不在页头
+    const panel = screen.getByText("凭证池").closest("[data-slot='card']");
+    expect(panel).toContainElement(addButton);
+  });
+
+  it("只读用户看不到凭证池标题栏的添加按钮", async () => {
+    mockFetch({ "/api/credentials": listBody([makeCredential()], false, false) });
+    renderPage(<CredentialsPage />, READER);
+    await settle();
+    expect(screen.queryByTestId("open-add-dialog")).not.toBeInTheDocument();
   });
 
   it("冷却中的凭证显示剩余时间", async () => {
