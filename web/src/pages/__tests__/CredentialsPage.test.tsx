@@ -16,6 +16,12 @@ function listBody(credentials: unknown[], isAdmin = true, isOperator = isAdmin) 
             is_operator: isOperator };
 }
 
+/** 添加凭证收进对话框：需要操作的用例先点开。 */
+async function openAddDialog() {
+  await userEvent.click(screen.getByTestId("open-add-dialog"));
+  await screen.findByTestId("add-credential-dialog");
+}
+
 describe("CredentialsPage", () => {
   beforeEach(() => {
     vi.unstubAllGlobals();
@@ -61,7 +67,8 @@ describe("CredentialsPage", () => {
     expect(screen.queryByTestId("readonly-banner")).not.toBeInTheDocument();
     expect(screen.getByTestId("actions-cred_1")).toBeInTheDocument();
     expect(screen.getByTestId("credits-cred_1")).toBeInTheDocument();
-    expect(screen.getByTestId("import-submit")).toBeInTheDocument();
+    // 导入入口收进对话框：按钮可见即代表可写（对话框内才有表单）
+    expect(screen.getByTestId("open-add-dialog")).toBeInTheDocument();
   });
 
   it("冷却中的凭证显示剩余时间", async () => {
@@ -369,7 +376,9 @@ describe("CredentialsPage", () => {
     });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await openAddDialog();
 
+    await userEvent.click(screen.getByTestId("add-credential-tab-import"));
     await userEvent.type(screen.getByTestId("import-payload"), "not-json-at-all");
     await userEvent.click(screen.getByTestId("import-submit"));
 
@@ -389,6 +398,8 @@ describe("CredentialsPage", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await openAddDialog();
+    await userEvent.click(screen.getByTestId("add-credential-tab-import"));
     // 用 paste 写入 JSON，避开 userEvent.type 对花括号的转义语义
     const payload = screen.getByTestId("import-payload");
     await userEvent.click(payload);
@@ -560,10 +571,11 @@ describe("CredentialsPage", () => {
 
 
 describe("渠道登录入口", () => {
-  it("四个渠道都能发起登录", async () => {
+  it("四个渠道都能发起登录（对话框内）", async () => {
     mockFetch({ "/api/credentials": listBody([]) });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await openAddDialog();
 
     expect(screen.getByTestId("start-login-codebuddy")).toHaveTextContent("登录 CodeBuddy");
     expect(screen.getByTestId("start-login-trae")).toHaveTextContent("登录 TRAE");
@@ -629,6 +641,7 @@ describe("渠道登录入口", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await openAddDialog();
     await userEvent.click(screen.getByTestId("start-login-codebuddy"));
 
     expect(opened).toEqual(["https://auth.example/x"]);
@@ -665,6 +678,7 @@ describe("渠道登录入口", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await openAddDialog();
     await userEvent.click(screen.getByTestId("start-login-trae"));
     expect(await screen.findByTestId("cancel-login-trae")).toBeInTheDocument();
 
@@ -706,6 +720,7 @@ describe("渠道登录入口", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await openAddDialog();
     await userEvent.click(screen.getByTestId("start-login-codearts"));
 
     expect(opened).toEqual(["https://codearts.example/authorize?x=1"]);
@@ -737,6 +752,7 @@ describe("渠道登录入口", () => {
 
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await openAddDialog();
     await userEvent.click(screen.getByTestId("start-login-codebuddy"));
     await screen.findByTestId("cancel-login-codebuddy");
     await userEvent.click(screen.getByTestId("cancel-login-codebuddy"));
@@ -771,6 +787,7 @@ describe("渠道登录入口", () => {
 
     const page = renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await openAddDialog();
     await userEvent.click(screen.getByTestId("start-login-codebuddy"));
     await screen.findByTestId("cancel-login-codebuddy");
     await vi.advanceTimersByTimeAsync(7000);
@@ -788,6 +805,7 @@ describe("渠道登录入口", () => {
     });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await openAddDialog();
 
     const button = screen.getByTestId("add-zen");
     expect(button).toHaveTextContent("添加 OpenCode Zen");
@@ -812,6 +830,7 @@ describe("渠道登录入口", () => {
     });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await openAddDialog();
 
     const button = screen.getByTestId("add-zen");
     expect(button).toBeDisabled();
@@ -828,6 +847,7 @@ describe("渠道登录入口", () => {
     });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await openAddDialog();
 
     const button = screen.getByTestId("add-kilo");
     expect(button).toHaveTextContent("添加 Kilo Gateway");
@@ -852,6 +872,7 @@ describe("渠道登录入口", () => {
     });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await openAddDialog();
 
     const button = screen.getByTestId("add-kilo");
     expect(button).toBeDisabled();
@@ -937,11 +958,11 @@ describe("CredentialsPage 成长中心", () => {
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
 
-    // 列表列先显示上一轮结果
-    expect(screen.getByTestId("growth-cred_1")).toHaveTextContent("上一轮：无可领取项");
-
+    // 成长中心列已并入菜单：最近一轮记录悬浮在菜单项 title 上
     await userEvent.click(screen.getByTestId("actions-cred_1"));
-    await userEvent.click(screen.getByRole("menuitem", { name: "成长中心" }));
+    const item = screen.getByRole("menuitem", { name: "成长中心" });
+    expect(item.getAttribute("title")).toContain("上一轮：无可领取项");
+    await userEvent.click(item);
 
     const panel = await screen.findByTestId("growth-result");
     expect(panel).toHaveTextContent("领旅行礼物");
@@ -953,17 +974,18 @@ describe("CredentialsPage 成长中心", () => {
     expect(steps[2]).toHaveTextContent("已关闭开盲盒");
   });
 
-  it("没有成长中心记录时列表列显示占位符", async () => {
+  it("没有成长中心记录时菜单项悬浮给出说明（成长中心列已并入菜单）", async () => {
     mockFetch({ "/api/credentials": listBody([makeCredential({ provider: "codebuddy" })]) });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    // 行内不再有成长中心单元格，只保留菜单里的入口
     expect(screen.queryByTestId("growth-cred_1")).not.toBeInTheDocument();
-    // 成长中心是第 6 列（0-based 5）；token 剩余列同为「—」，不能按文本全局查
-    const row = screen.getByTestId("row-cred_1");
-    expect(row.children[5]).toHaveTextContent("—");
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    const item = screen.getByRole("menuitem", { name: "成长中心" });
+    expect(item).toHaveAttribute("title", "还没有成长中心记录");
   });
 
-  it("长汇报单行截断展示，鼠标悬浮显示完整内容", async () => {
+  it("成长中心菜单项悬浮显示最近一轮汇报（原列语义迁移）", async () => {
     const longReport =
       "领取任务：「体验「设计创意模式」」失败：prerequisite not met: first_buddy；" +
       "领取任务：「探索优秀灵感」失败：prerequisite not met: first_buddy；接单受阻：" +
@@ -976,19 +998,11 @@ describe("CredentialsPage 成长中心", () => {
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
 
-    const cell = screen.getByTestId("growth-cred_1");
-    // 单元格内是截断的单行样式（truncate），不是把整段挤成多行撑高表格
-    const truncated = within(cell).getByText(longReport);
-    expect(truncated.className).toContain("truncate");
-
-    // 悬浮后完整内容出现在 tooltip 里（radix 会把内容同时挂到 trigger 的 aria 描述）
-    await userEvent.hover(cell);
-    const tip = await screen.findByRole("tooltip");
-    expect(tip).toHaveTextContent("17 个任务需先完成");
-    expect(tip).toHaveTextContent("prerequisite not met: first_buddy");
-    // 提示层要能换行显示长文本，否则多行内容会横向溢出
-    expect(tip.className).toContain("whitespace-normal");
-    await userEvent.unhover(cell);
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    const item = screen.getByRole("menuitem", { name: "成长中心" });
+    expect(item.getAttribute("title")).toContain("最近一轮");
+    expect(item.getAttribute("title")).toContain("17 个任务需先完成");
+    expect(item.getAttribute("title")).toContain("prerequisite not met: first_buddy");
   });
 
   it("登录态失效单独提示重新登录（不能与普通失败混同）", async () => {
@@ -1070,8 +1084,8 @@ describe("CredentialsPage 成长中心", () => {
     const row = screen.getByTestId("row-unknown");
     expect(within(row).queryByTestId("token-expiry-unknown")).not.toBeInTheDocument();
     expect(within(row).queryByText("已过期")).not.toBeInTheDocument();
-    // 与其他空白列一致：显示占位符而不是留空
-    const tokenCell = row.children[5];
+    // 与其他空白列一致：显示占位符而不是留空（token 剩余现在是第 4 列，0-based 3）
+    const tokenCell = row.children[3];
     expect(tokenCell).toHaveTextContent("—");
   });
 
@@ -1160,7 +1174,7 @@ describe("CredentialsPage 成长中心", () => {
     expect(drawerRow).not.toBe(screen.getByTestId("row-cred_1"));
     expect(within(drawerRow).getByTestId("credit-drawer-cred_1")).toBeInTheDocument();
     // :scope > td：抽屉内部还有一张表格，直接按 role 查会匹配到里面那些单元格
-    expect(drawerRow.querySelector(":scope > td")).toHaveAttribute("colspan", "8");
+    expect(drawerRow.querySelector(":scope > td")).toHaveAttribute("colspan", "5");
     expect(within(drawer).getByTestId("credit-event-cre_2")).toHaveTextContent(
       "+15（100 → 115）",
     );

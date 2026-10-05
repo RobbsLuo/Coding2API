@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useState } from "react";
 import {
   ArrowDownIcon,
   CalendarCheck,
@@ -6,6 +6,7 @@ import {
   HeartPulse,
   MoreHorizontal,
   Pin,
+  Plus,
   Power,
   Radio,
   RefreshCw,
@@ -16,8 +17,8 @@ import {
 import { api } from "../api/client";
 import { useSessionContext } from "../Layout";
 import { useCredentials, useQueryClient } from "../api/hooks";
-import { HelpBlock } from "../components/HelpBlock";
 import { PoolOverview } from "../components/PoolOverview";
+import { AddCredentialDialog } from "../components/AddCredentialDialog";
 import { ColumnHint, LongTextTip } from "../components/Tip";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
@@ -47,7 +48,7 @@ import {
   STATE_TONE,
   tokenExpiryView,
 } from "../api/display";
-import type { Credential, CreditEvent, GrowthRunResult, Provider } from "../api/types";
+import type { Credential, CreditEvent, GrowthRunResult } from "../api/types";
 import { PROVIDER_LABEL } from "../api/providers";
 import type { TokenExpiryView } from "../api/display";
 import {
@@ -55,22 +56,15 @@ import {
   Button,
   Card,
   Empty,
-  Field,
-  Input,
   Notice,
   Panel,
-  Select,
   Table,
   TableBody,
   TableCell,
   TableHead,
   TableHeader,
   TableRow,
-  Textarea,
 } from "../ui";
-
-/** 支持「登录渠道账号」按钮 / 导入下拉的渠道（有 poll 轨道或需人工导入的渠道）。 */
-const PROVIDERS: Provider[] = ["codebuddy", "trae", "qoder", "codearts"];
 
 /** 无每日签到的渠道：CodeArts 上游没有签到接口（每日 token 额度，0 点清零）。 */
 function supportsCheckin(provider: Credential["provider"]): boolean {
@@ -123,30 +117,16 @@ interface Actions {
 export function CredentialsPage() {
   const session = useSessionContext();
   // 30s 轮询：冷却倒计时 / token 剩余都是「随时间变化」的观测量，页面停留
-  // 时应自动刷新（与 Dashboard / useTasks 同口径）。
+  // 时应自动刷新（与 useTasks 同口径）。
   const { data, isLoading } = useCredentials(session.username, 30_000);
   const client = useQueryClient();
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  // 每个渠道各自可能有进行中的登录（CodeBuddy 轮询 / TRAE 回调）
-  const [loginProviders, setLoginProviders] = useState<Provider[]>([]);
-  // 进行中的登录：state 用于 cancel 精确取消**那一次**流程（重新 start 拿
-  // state 会凭空开一个新登录），timer 用于卸载/取消时清掉轮询
-  const loginStatesRef = useRef<Partial<Record<Provider, string>>>({});
-  const loginTimersRef = useRef<Partial<Record<Provider, number>>>({});
-  // 页面卸载时清掉所有登录轮询，防止跨页面的僵尸 interval
-  useEffect(() => () => {
-    Object.values(loginTimersRef.current).forEach((timer) => {
-      if (timer !== undefined) window.clearInterval(timer);
-    });
-  }, []);
+  // 添加凭证对话框（登录渠道 / JSON 导入 / 免费层补回都收在里面）
+  const [addOpen, setAddOpen] = useState(false);
   const [probeDetail, setProbeDetail] = useState<string | null>(null);
-  // 粘贴回调完成登录（CodeArts）：服务端无法监听 127.0.0.1 回调端口，
-  // 用户把门户回跳地址粘回来，由服务端用 code 换 token。
-  const [pasteProvider, setPasteProvider] = useState<Provider | null>(null);
-  const [pasteUrl, setPasteUrl] = useState("");
   // 成长中心最近一轮：展示逐步结果（一句话汇报看不出哪一步没做成）
   const [growthResult, setGrowthResult] = useState<GrowthRunResult | null>(null);
   // 积分记录抽屉：一次只开一个（同一行内展开，不弹层——
@@ -158,8 +138,8 @@ export function CredentialsPage() {
 
   const credentials = data?.credentials ?? [];
   // OpenCode Zen 无凭证：池里只有一条虚拟占位行，正常由服务启动时种子。
-  // 用户在凭证页删除后不会自动回来，这里给一个一键补回的入口，
-  // 免得必须重启服务（见 README「OpenCode Zen 免费层」）。
+  // 用户在凭证页删除后不会自动回来，这里给一个一键补回的入口（收在
+  // 「添加凭证」对话框里），免得必须重启服务（见 README「OpenCode Zen 免费层」）。
   const hasZen = credentials.some((item) => item.provider === "zen");
   // Kilo Gateway 同为无凭证免费层（同 zen）：删除虚拟占位行后也留一键补回。
   const hasKilo = credentials.some((item) => item.provider === "kilo");
@@ -317,137 +297,27 @@ export function CredentialsPage() {
       })(),
   };
 
-  const startLogin = async (provider: Provider) => {
-    setError(null);
-    setNotice(null);    // 先同步开一个占位窗口：window.open 若在 await 之后才调用，
-    // 会脱离用户手势上下文而被浏览器弹窗拦截。
-    const popup = window.open("", "_blank");
-    try {
-      const started = await api.upstreamStart(provider);
-      loginStatesRef.current[provider] = started.state;
-      if (started.auth_url && popup && !popup.closed) {
-        popup.location.href = started.auth_url;
-      } else if (popup) {
-        popup.close();                         // 失败时关掉空白占位窗
-      }
-      setLoginProviders((previous) => [...new Set([...previous, provider])]);
-
-      const stopPolling = () => {
-        window.clearInterval(loginTimersRef.current[provider]);
-        delete loginTimersRef.current[provider];
-        setLoginProviders((previous) => previous.filter((item) => item !== provider));
-      };
-
-      if (started.flow === "callback") {
-        // TRAE：浏览器完成授权后 302 回本服务的 /authorize，那里直接落库。
-        // 前端无法轮询渠道，改为轮询凭证列表，出现新凭证即视为完成。
-        setNotice("已在新标签页打开授权页。完成授权后本页会自动刷新出凭证。");
-        const deadline = Date.now() + 5 * 60 * 1000;
-        const baseline = credentials.length;
-        const timer = window.setInterval(async () => {
-          const after = (await api.credentials()).credentials.length;
-          if (after > baseline || Date.now() > deadline) {
-            stopPolling();
-            setNotice(after > baseline ? "登录成功，凭证已保存。" : "授权超时，请重新发起登录。");
-          }
-        }, 3000);
-        loginTimersRef.current[provider] = timer;
-        return;
-      }
-
-      if (started.flow === "paste") {
-        // CodeArts：门户把 code 302 回 127.0.0.1 回调端口，服务端不监听，
-        // 改为让用户把浏览器地址栏里的整条回调链接粘回来，服务端换 token。
-        stopPolling();
-        setPasteProvider(provider);
-        setPasteUrl("");
-        setNotice(
-          "已在新标签页打开华为云授权页。授权后会跳到一个打不开的本地地址（127.0.0.1），"
-          + "把地址栏里的整条链接复制粘贴到下方即可完成登录。",
-        );
-        return;
-      }
-
-      setNotice("已在新标签页打开授权页，完成后此页会自动检测。");
-      const interval = (started.interval ?? 5) * 1000;
-      const timer = window.setInterval(async () => {
-        try {
-          const result = await api.upstreamPoll(provider, started.state);
-          if (result.status === "success") {
-            stopPolling();
-            setNotice("登录成功，凭证已保存。");
-            await refresh();
-          }
-        } catch {
-          stopPolling();
-          setError("登录轮询失败，请重试。");
-        }
-      }, interval);
-      loginTimersRef.current[provider] = timer;
-    } catch (caught) {
-      // 启动失败：关掉占位窗口，并把授权地址给出来让用户手动打开
-      popup?.close();
-      setError(caught instanceof Error ? caught.message : "无法启动登录流程");
-    }
-  };
-
-  const cancelLogin = async (provider: Provider) => {
-    setError(null);
-    // 用 startLogin 记下的 state 取消**当前**那次流程；
-    // 并停掉对应的凭证列表轮询。
-    const state = loginStatesRef.current[provider];
-    const timer = loginTimersRef.current[provider];
-    if (timer !== undefined) {
-      window.clearInterval(timer);
-      delete loginTimersRef.current[provider];
-    }
-    delete loginStatesRef.current[provider];
-    if (pasteProvider === provider) {
-      setPasteProvider(null);
-      setPasteUrl("");
-    }
-    try {
-      if (state) await api.upstreamCancel(provider, state).catch(() => undefined);
-    } finally {
-      setLoginProviders((previous) => previous.filter((item) => item !== provider));
-      setNotice("已取消登录。");
-    }
-  };
-
-  const completeLogin = async () => {
-    if (!pasteProvider) return;
-    const state = loginStatesRef.current[pasteProvider];
-    if (!state) {
-      setError("登录会话已失效，请重新发起登录。");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    setNotice(null);
-    try {
-      await api.upstreamComplete(pasteProvider, state, pasteUrl.trim());
-      delete loginStatesRef.current[pasteProvider];
-      setLoginProviders((previous) => previous.filter((item) => item !== pasteProvider));
-      setPasteProvider(null);
-      setPasteUrl("");
-      setNotice("登录成功，凭证已保存。");
-      await refresh();
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "登录失败，请检查粘贴的链接。");
-    } finally {
-      setBusy(false);
-    }
-  };
-
   if (isLoading) return <Empty>载入中…</Empty>;
 
   return (
     <div className="space-y-6" data-testid="credentials-page">
-      <PageHeader
-        title="凭证管理"
-        description="凭证是调度池里可被选中的渠道账号。登录渠道授权或粘贴 JSON 导入后，可在此探测剩余额度、签到或启停；顶部是池整体状态与健康度分布。"
-        icon={<Database className="size-5" />}
-      />
+      <div className="flex items-start justify-between gap-4">
+        <PageHeader
+          title="凭证管理"
+          description="凭证是调度池里可被选中的渠道账号。登录渠道授权或粘贴 JSON 导入后，可在此探测剩余额度、签到或启停；顶部是池整体状态与健康度分布。"
+          icon={<Database className="size-5" />}
+        />
+        {canWrite && (
+          <Button
+            variant="primary"
+            data-testid="open-add-dialog"
+            disabled={busy}
+            onClick={() => setAddOpen(true)}
+          >
+            <Plus className="size-4" /> 添加凭证
+          </Button>
+        )}
+      </div>
       {/* 池概览（原「池仪表盘」页内容合并于此）：统计卡 + 健康度四态分布 */}
       <PoolOverview credentials={credentials} now={now} />
       {!canWrite && (
@@ -458,9 +328,9 @@ export function CredentialsPage() {
       {credentials.length === 0 && canWrite && (
         <div data-testid="first-run-hint">
           <Notice tone="muted">
-            还没有凭证。用下方「登录渠道账号」完成 CodeBuddy / TRAE 授权，或直接粘贴凭证 JSON 导入；
-            OpenCode Zen 免费层点「添加 OpenCode Zen」即可。
-            凭证表下方的「凭证状态与操作说明」可查看各状态和按钮的含义。
+            还没有凭证。点右上角「添加凭证」登录渠道账号（CodeBuddy / TRAE / Qoder /
+            CodeArts），或直接粘贴凭证 JSON 导入；OpenCode Zen / Kilo Gateway
+            免费层在对话框里一键添加即可。
           </Notice>
         </div>
       )}
@@ -515,14 +385,11 @@ export function CredentialsPage() {
           <Table data-testid="credentials-table">
             <TableHeader>
               <TableRow>
-                <TableHead>昵称</TableHead>
-                <TableHead>渠道</TableHead>
-                <TableHead><span className="inline-flex items-center gap-1">状态<ColumnHint text="可用/冷却中/已禁用/已暂停/额度耗尽；已暂停只摘对话流量，签到/刷新/探测照常；冷却中到期自动恢复。" /></span></TableHead>
-                <TableHead><span className="inline-flex items-center gap-1">健康度<ColumnHint text="剩余积分占比四态：已知百分比 / 未探测 / 无探测 / 已耗尽。未探测＝探测失败或渠道未给额度信息（点「探测」可重试），≠已耗尽；无探测＝免费层上游根本没有额度接口，探也没用。调度器优先选百分比高者，百分比打平时再用账户剩余积分多者。" /></span></TableHead>
+                <TableHead><span className="inline-flex items-center gap-1">凭证<ColumnHint text="昵称 + 所属渠道；「已指定」表示调度器优先使用该凭证（全局唯一）。" /></span></TableHead>
+                <TableHead><span className="inline-flex items-center gap-1">状态 / 健康度<ColumnHint text="状态：可用/冷却中/已禁用/已暂停/额度耗尽；已暂停只摘对话流量，签到/刷新/探测照常；冷却中到期自动恢复。健康度：剩余积分占比四态（已知百分比/未探测/无探测/已耗尽）。未探测＝探测失败或渠道未给额度信息（点「探测」可重试），≠已耗尽；无探测＝免费层上游根本没有额度接口。调度器优先选百分比高者，打平时再用账户剩余积分多者。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期额度行＝调度窗口内即将过期、会被优先消耗的额度；主窗口（36h）打平时才比较次窗口（7 天）。CodeArts 的额度是 token（每日 1000 万池、0 点清零），其余渠道是积分。数字后的下箭头展开该凭证的积分记录（两次额度探测之间的净变化）。" /></span></TableHead>
                 <TableHead><span className="inline-flex items-center gap-1">token 剩余<ColumnHint text="access token 距离到期还有多久，取自凭证本身（为 0 表示渠道未给到期信息，显示 —）。预刷新任务每小时检查一次，进入 24 小时窗口即自动续期；「已过期」意味着上游会拒绝该凭证，需重新登录。" /></span></TableHead>
-                <TableHead><span className="inline-flex items-center gap-1">成长中心<ColumnHint text="仅 CodeBuddy：最近一轮成长中心（旅行礼物/任务/连登兑换/盲盒）的领取结果与时间，由定时任务或手动执行写入。" /></span></TableHead>
-                {canWrite && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测/签到：行内常驻按钮。更多操作（⋯）：指定、暂停/恢复、删除。指定：设为优先；暂停/删除：摘对话流量或移除。积分记录入口在额度列数字后的下箭头。" /></span></TableHead>}
+                {canWrite && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测/签到：行内常驻按钮。更多操作（⋯）：成长中心记录、指定、暂停/恢复、删除。CodeBuddy 专属的成长中心领取结果也从菜单里查看。积分记录入口在额度列数字后的下箭头。" /></span></TableHead>}
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -543,7 +410,7 @@ export function CredentialsPage() {
                   />
                   {creditEvents?.credentialId === credential.id && (
                     <TableRow data-testid={`credit-row-${credential.id}`}>
-                      <TableCell colSpan={canWrite ? 8 : 7} className="p-0">
+                      <TableCell colSpan={canWrite ? 5 : 4} className="p-0">
                         <CreditDrawer
                           credentialId={credential.id}
                           events={creditEvents.events}
@@ -560,138 +427,21 @@ export function CredentialsPage() {
       </Panel>
 
       {canWrite && (
-        <div className="grid gap-6 lg:grid-cols-2" data-testid="add-credentials">
-          <Panel title="登录渠道账号">
-            <div className="flex flex-wrap items-center gap-3">
-              {PROVIDERS.map((item) => {
-                const pending = loginProviders.includes(item);
-                return pending ? (
-                  <span key={item} className="inline-flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground">
-                      {PROVIDER_LABEL[item]} 登录中…
-                    </span>
-                    <Button
-                      size="sm"
-                      variant="danger"
-                      data-testid={`cancel-login-${item}`}
-                      onClick={() => void cancelLogin(item)}
-                    >
-                      取消登录
-                    </Button>
-                  </span>
-                ) : (
-                  <Button
-                    key={item}
-                    size="sm"
-                    variant="primary"
-                    data-testid={`start-login-${item}`}
-                    disabled={busy}
-                    onClick={() => void startLogin(item)}
-                  >
-                    登录 {PROVIDER_LABEL[item]}
-                  </Button>
-                );
-              })}
-              <Button
-                size="sm"
-                variant="default"
-                data-testid="add-zen"
-                disabled={busy || hasZen}
-                onClick={() =>
-                  void run(
-                    () => api.importCredential("zen", {}, "OpenCode Zen"),
-                    "已添加 OpenCode Zen 免费渠道。",
-                  )
-                }
-              >
-                {hasZen ? "OpenCode Zen 已添加" : "添加 OpenCode Zen"}
-              </Button>
-              <Button
-                size="sm"
-                variant="default"
-                data-testid="add-kilo"
-                disabled={busy || hasKilo}
-                onClick={() =>
-                  void run(
-                    () => api.importCredential("kilo", {}, "Kilo Gateway"),
-                    "已添加 Kilo Gateway 免费渠道。",
-                  )
-                }
-              >
-                {hasKilo ? "Kilo Gateway 已添加" : "添加 Kilo Gateway"}
-              </Button>
-            </div>
-            <p className="mt-2 text-xs text-muted-foreground">
-              CodeBuddy 走设备码轮询（本页自动轮询渠道）；TRAE 走浏览器回调
-              （授权后由 <code>/authorize</code> 直接落库，本页轮询凭证列表检测完成）；
-              Qoder 走设备码登录；CodeArts 走 OAuth2 授权码登录（授权后把浏览器
-              地址栏里打不开的 127.0.0.1 回调链接粘回下方）。也可以直接粘贴凭证
-              JSON 导入。OpenCode Zen / Kilo Gateway 免费层无需凭证/登录，删除其虚拟
-              凭证后点上方按钮即可补回（要永久停用请改用「暂停」）。
-            </p>
-            {pasteProvider && (
-              <div className="mt-4 space-y-2" data-testid="paste-callback">
-                <Field label={`${PROVIDER_LABEL[pasteProvider]} 授权回调链接`}>
-                  <Input
-                    data-testid="paste-callback-input"
-                    value={pasteUrl}
-                    onChange={(event) => setPasteUrl(event.target.value)}
-                    placeholder="http://127.0.0.1:12800/oauth/callback?code=…&state=…"
-                  />
-                </Field>
-                <div className="flex items-center gap-2">
-                  <Button
-                    size="sm"
-                    variant="primary"
-                    data-testid="paste-callback-submit"
-                    disabled={busy || pasteUrl.trim().length === 0}
-                    onClick={() => void completeLogin()}
-                  >
-                    完成登录
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="danger"
-                    data-testid="paste-callback-cancel"
-                    onClick={() => void cancelLogin(pasteProvider)}
-                  >
-                    取消
-                  </Button>
-                </div>
-              </div>
-            )}
-          </Panel>
-          <ImportPanel
-            busy={busy}
-            onImport={async (provider, credential, nickname) => {
-              await run(() => api.importCredential(provider, credential, nickname), "凭证已导入。");
-            }}
-          />
-        </div>
+        <AddCredentialDialog
+          open={addOpen}
+          onClose={() => setAddOpen(false)}
+          credentialCount={credentials.length}
+          hasZen={hasZen}
+          hasKilo={hasKilo}
+          onImported={(message) => {
+            setAddOpen(false);
+            setNotice(message);
+            void refresh();
+          }}
+          onNotice={setNotice}
+          onError={setError}
+        />
       )}
-
-      <HelpBlock
-        title="凭证状态与操作说明"
-        entries={[
-          { term: "可用", where: "状态列", meaning: "该凭证当前能被调度器选中处理请求。" },
-          { term: "冷却中（显示剩余时间）", where: "状态列", meaning: "渠道暂时拒绝（权益耗尽 12 小时、限流 60 秒、连续出错 10 分钟），到期自动恢复，无需手动操作。" },
-          { term: "已禁用", where: "状态列", meaning: "渠道判定会话失效，凭证已永久停止使用；删除后重新登录该账号即可。" },
-          { term: "已暂停", where: "状态列", meaning: "管理员手动暂停（软开关）：只把该凭证摘出对话流量，签到 / token 刷新 / 成长中心 / 额度探测照常运行；随时可以取消暂停。" },
-          { term: "健康度：百分比", where: "健康度列", meaning: "剩余积分占总积分的比例，调度器优先选数值高的；健康度打平时再用账户剩余积分多者。" },
-          { term: "健康度：未探测", where: "健康度列", meaning: "探测失败或渠道没返回额度信息。注意它不是「已耗尽」——点「探测」可重新获取。" },
-          { term: "健康度：无探测", where: "健康度列", meaning: "OpenCode Zen / Kilo Gateway 免费层：上游没有额度接口，探测没有意义，因此不提供「探测」按钮，健康度恒为「无探测」。" },
-          { term: "额度下方的时间语义", where: "额度列", meaning: "CodeBuddy 是「本周期剩余，<日期> 重置」；TRAE 是「账户剩余（单调递减）」；CodeArts 是「每日积分额度（当日 0 点清零）」。单位统一为积分，重置行为不同。" },
-          { term: "到期额度（两行）", where: "额度列", meaning: "选号先比 36 小时内会过期的额度，多的先用；都相同（常见的是都为 0）时再比 7 天内会过期的额度。主窗口已有数字就只显示那一行，次窗口只在主窗口为空时才出现。单位统一为积分：CodeArts 的每日池（上游 1000 万 token 折 1000 积分、0 点清零）当日剩余始终在窗口内、总被优先消耗。" },
-          { term: "套餐 N 个（额度首行右侧）", where: "额度列", meaning: "该账号当前生效的额度包个数。鼠标悬浮看每个包的名字、剩余/总量、已用与到期日（按到期先后）。未探测或渠道未返回明细时不显示。" },
-          { term: "积分记录（额度数字后的下箭头）", where: "额度列", meaning: "点开该凭证两次额度探测之间的净变化。下箭头表示「在本行内展开」而非弹层：展开后箭头翻转，再点一次收起。仅管理员视图显示。OpenCode Zen / Kilo Gateway 免费层没有额度探测，恒无记录，因此不显示该入口。" },
-          { term: "token 剩余", where: "token 剩余列", meaning: "该凭证 access token 距离到期还有多久。预刷新任务每小时跑一次，进入 24 小时窗口会自动续期，所以正常情况下看到的是长寿命（TRAE 约 14 天、CodeBuddy 约 55 天）递减。显示「已过期」时上游会拒绝该凭证，需重新登录；显示「—」表示渠道未提供到期信息。" },
-          { term: "探测 / 签到", where: "操作列（常驻按钮）", meaning: "探测：立即向渠道查询一次剩余额度。签到：领取当日积分（后台每 10 分钟检查一次，当天成功即封账，失败持续重试，不受时刻限制）。两者是高频动作，直接显示在行内，不藏在「更多操作」菜单里。OpenCode Zen / Kilo Gateway 免费层两者都不显示：上游无额度接口（探测恒失败）、未实现签到（点了只会 400）。CodeArts 只显示「探测」（上游无每日签到接口，额度为每日 token 池、0 点清零）。" },
-          { term: "更多操作（⋯）", where: "操作列", meaning: "指定：把该凭证设为优先使用的唯一凭证（全局只能指定一个）。暂停：只摘出对话流量不删数据（签到 / 刷新 / 探测不受影响）。删除：彻底移除凭证。CodeBuddy 另有成长中心 / 恢复 / 活跃上报。" },
-          { term: "模型避让（额度数字右侧的警告图标）", where: "额度列", meaning: "某个模型在该账号上限流（6004）或该账号无此模型（11102）时只避让这一个模型——整条凭证仍参与调度，换其他模型立刻可用。模型限流按 10 分钟起指数退避，最长 2 小时；「无此模型」按 6 小时起，最长 24 小时。避让的模型清单不常驻表格，鼠标悬浮该图标查看具体模型、剩余时间与连续命中次数。" },
-          { term: "成长中心 / 活跃上报", where: "操作列", meaning: "成长中心：手动跑一轮成长中心领取（与定时任务同一条路径）。活跃上报：手动补发一条对话事件以续上「连登天数」——默认关闭的定时任务不做，这里仅供部署后验证；官方条款禁止脚本篡改活动数据，开启/使用前请自行评估账号风险。" },
-        ]}
-      />
-
     </div>
   );
 }
@@ -860,32 +610,38 @@ function Row({
   return (
     <TableRow data-testid={`row-${credential.id}`}>
       <TableCell>
-        {credential.nickname || credential.id.slice(0, 12)}
-        {credential.pinned === 1 && (
-          <span className="ml-2">
-            <Badge tone="accent">已指定</Badge>
-          </span>
-        )}
-      </TableCell>
-      <TableCell className="text-xs">
-        <span className="inline-flex items-center gap-1.5">
-          <ProviderIcon provider={credential.provider} size={13} />
-          {PROVIDER_LABEL[credential.provider]}
-        </span>
-      </TableCell>
-      <TableCell>
-        <Badge tone={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
-        {state === "cooling" && (
-          <span className="ml-2 text-xs text-muted-foreground">{formatDuration(cooldown)}</span>
-        )}
-        {credential.disabled_reason && state === "disabled" && (
-          <span className="ml-2 text-xs text-muted-foreground">
-            {credential.disabled_reason}
-          </span>
-        )}
+        {/* 昵称 + 渠道合并成一列：渠道名做小字副行，省一列横向空间 */}
+        <div className="flex items-center gap-2">
+          <ProviderIcon provider={credential.provider} size={14} />
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="truncate font-medium">
+                {credential.nickname || credential.id.slice(0, 12)}
+              </span>
+              {credential.pinned === 1 && <Badge tone="accent">已指定</Badge>}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {PROVIDER_LABEL[credential.provider]}
+            </div>
+          </div>
+        </div>
       </TableCell>
       <TableCell>
-        <Badge tone={health.tone}>{health.label}</Badge>
+        {/* 状态 + 健康度合并成一列：两个 Badge 同行，附加说明换行小字 */}
+        <div className="space-y-1">
+          <div className="flex flex-wrap items-center gap-1.5">
+            <Badge tone={STATE_TONE[state]}>{STATE_LABEL[state]}</Badge>
+            <Badge tone={health.tone}>{health.label}</Badge>
+          </div>
+          {state === "cooling" && (
+            <div className="text-xs text-muted-foreground">{formatDuration(cooldown)}</div>
+          )}
+          {credential.disabled_reason && state === "disabled" && (
+            <div className="text-xs text-muted-foreground">
+              {credential.disabled_reason}
+            </div>
+          )}
+        </div>
       </TableCell>
       <TableCell className="text-xs">
         <div className="flex flex-wrap items-baseline gap-x-2">
@@ -940,21 +696,6 @@ function Row({
       </TableCell>
       <TableCell className="text-xs">
         <TokenExpiry credential={credential} view={tokenExpiry} />
-      </TableCell>
-      <TableCell className="text-xs text-muted-foreground">
-        {credential.growth_last_result ? (
-          // 汇报可能很长（多步领取串成一行）：限宽单行截断，hover 看全文
-          <LongTextTip content={credential.growth_last_result}>
-            <div data-testid={`growth-${credential.id}`} className="max-w-[22rem]">
-              <div className="truncate">{credential.growth_last_result}</div>
-              <div className="text-muted-foreground">
-                {formatTime(credential.growth_last_run_at)}
-              </div>
-            </div>
-          </LongTextTip>
-        ) : (
-          <span>—</span>
-        )}
       </TableCell>
       {canWrite && (
         <TableCell>
@@ -1017,7 +758,12 @@ function Row({
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-44">
                     {credential.provider === "codebuddy" && (
-                      <DropdownMenuItem onSelect={() => actions.growth(credential)}>
+                      <DropdownMenuItem
+                        onSelect={() => actions.growth(credential)}
+                        title={credential.growth_last_result
+                          ? `最近一轮：${credential.growth_last_result}（${formatTime(credential.growth_last_run_at)}）`
+                          : "还没有成长中心记录"}
+                      >
                         <Sparkles className="size-4" /> 成长中心
                       </DropdownMenuItem>
                     )}
@@ -1133,83 +879,5 @@ function CreditDrawer({
         </Table>
       )}
     </Card>
-  );
-}
-
-function ImportPanel({
-  busy,
-  onImport,
-}: {
-  busy: boolean;
-  onImport: (provider: Provider, credential: unknown, nickname: string) => Promise<void>;
-}) {
-  const [provider, setProvider] = useState<Provider>("codebuddy");
-  const [nickname, setNickname] = useState("");
-  const [raw, setRaw] = useState("");
-  const [localError, setLocalError] = useState<string | null>(null);
-
-  const submit = async (event: React.FormEvent) => {
-    event.preventDefault();
-    setLocalError(null);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      setLocalError('凭证必须是合法 JSON。CodeBuddy 可填 {"token":"..."}，TRAE 填完整凭证对象。');
-      return;
-    }
-    await onImport(provider, parsed, nickname);
-    setRaw("");
-    setNickname("");
-  };
-
-  return (
-    <Panel title="导入凭证">
-      <form onSubmit={submit} className="space-y-3">
-        <div className="flex flex-wrap gap-3">
-          <div className="w-40">
-            <Field label="渠道">
-              <Select
-                value={provider}
-                data-testid="import-provider"
-                onChange={(event) => setProvider(event.target.value as Provider)}
-              >
-                {PROVIDERS.map((item) => (
-                  <option key={item} value={item}>
-                    {PROVIDER_LABEL[item]}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          </div>
-          <div className="w-48">
-            <Field label="昵称（可选）">
-              <Input
-                value={nickname}
-                data-testid="import-nickname"
-                onChange={(event) => setNickname(event.target.value)}
-              />
-            </Field>
-          </div>
-        </div>
-        <Field
-          label="凭证 JSON"
-          hint='CodeBuddy：{"token":"..."}（也接受 access_token / bearer_token）；TRAE：{"accessToken":"...","uid":"...","refreshToken":"..."}'
-        >
-          <Textarea
-            rows={4}
-            value={raw}
-            data-testid="import-payload"
-            className="font-mono text-xs"
-            placeholder='{"token":"..."}'
-            onChange={(event) => setRaw(event.target.value)}
-          />
-        </Field>
-        {localError && <Notice tone="danger">{localError}</Notice>}
-        <Button type="submit" variant="primary" disabled={busy} data-testid="import-submit">
-          导入
-        </Button>
-      </form>
-    </Panel>
   );
 }
