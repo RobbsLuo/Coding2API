@@ -46,6 +46,8 @@ export function renderPage(ui: ReactNode, session: TestSession = { username: "ro
           <Route element={<Layout session={fullSession(session)} />}>
             <Route path="/page" element={ui} />
           </Route>
+          {/* Layout 顶部导航含指向「/」的链接（凭证管理是首页），缺这条路由会告警 */}
+          <Route path="/" element={ui} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,

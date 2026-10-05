@@ -8,7 +8,6 @@ import { LoginPage } from "./pages/LoginPage";
 
 // 路由级懒加载：recharts / 大页面不进首屏 chunk（900KB 单 chunk → 拆包）
 const CredentialsPage = lazy(() => import("./pages/CredentialsPage").then(m => ({ default: m.CredentialsPage })));
-const DashboardPage = lazy(() => import("./pages/DashboardPage").then(m => ({ default: m.DashboardPage })));
 const ApiKeysPage = lazy(() => import("./pages/ApiKeysPage").then(m => ({ default: m.ApiKeysPage })));
 const StatsPage = lazy(() => import("./pages/StatsPage").then(m => ({ default: m.StatsPage })));
 const PlaygroundPage = lazy(() => import("./pages/PlaygroundPage").then(m => ({ default: m.PlaygroundPage })));
@@ -50,8 +49,8 @@ export function App() {
       <Routes>
         <Route path="/login" element={<Navigate to="/" replace />} />
         <Route element={<Layout session={session.data} />}>
-          <Route path="/" element={<DashboardPage />} />
-          <Route path="/credentials" element={<CredentialsPage />} />
+          <Route path="/" element={<CredentialsPage />} />
+          <Route path="/credentials" element={<Navigate to="/" replace />} />
           <Route path="/api-keys" element={<ApiKeysPage />} />
           <Route path="/stats" element={<StatsPage />} />
           <Route path="/playground" element={<PlaygroundPage />} />

@@ -7,7 +7,6 @@ import {
   Database,
   Globe,
   KeyRound,
-  LayoutDashboard,
   Menu,
   ScrollText,
   ShieldCheck,
@@ -31,17 +30,16 @@ import { cn } from "@/lib/utils";
 interface NavItem {
   to: string;
   label: string;
-  icon: typeof LayoutDashboard;
+  icon: typeof Database;
   end?: boolean;
 }
 
-/** 桌面端横向展示的一级导航（sm 及以上）。 */
+/** 桌面端横向展示的一级导航（sm 及以上），按使用频率排序。 */
 const NAV: NavItem[] = [
-  { to: "/", label: "池仪表盘", icon: LayoutDashboard, end: true },
-  { to: "/credentials", label: "凭证管理", icon: Database },
-  { to: "/api-keys", label: "API Key", icon: KeyRound },
+  { to: "/", label: "凭证管理", icon: Database, end: true },
   { to: "/stats", label: "用量统计", icon: BarChart3 },
   { to: "/playground", label: "Playground", icon: TerminalSquare },
+  { to: "/api-keys", label: "API Key", icon: KeyRound },
 ];
 
 /** 管理类页面：桌面端收进「管理」下拉，避免顶部菜单放不下；仅 admin 可见。 */

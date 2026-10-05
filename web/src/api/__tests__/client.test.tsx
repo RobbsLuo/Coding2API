@@ -370,7 +370,7 @@ describe("App 路由守卫", () => {
     expect(await screen.findByTestId("login-username")).toBeInTheDocument();
   });
 
-  it("已登录时渲染仪表盘", async () => {
+  it("已登录时渲染凭证管理（首页）", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -384,7 +384,7 @@ describe("App 路由守卫", () => {
       }),
     );
     renderWithProviders(<App />);
-    expect(await screen.findByTestId("dashboard")).toBeInTheDocument();
+    expect(await screen.findByTestId("credentials-page")).toBeInTheDocument();
   });
 
   it("会话加载中显示载入提示", () => {

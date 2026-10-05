@@ -17,6 +17,7 @@ import { api } from "../api/client";
 import { useSessionContext } from "../Layout";
 import { useCredentials, useQueryClient } from "../api/hooks";
 import { HelpBlock } from "../components/HelpBlock";
+import { PoolOverview } from "../components/PoolOverview";
 import { ColumnHint, LongTextTip } from "../components/Tip";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderIcon } from "../components/ProviderIcon";
@@ -444,9 +445,11 @@ export function CredentialsPage() {
     <div className="space-y-6" data-testid="credentials-page">
       <PageHeader
         title="凭证管理"
-        description="凭证是调度池里可被选中的渠道账号。登录渠道授权或粘贴 JSON 导入后，可在此探测剩余额度、签到或启停。"
+        description="凭证是调度池里可被选中的渠道账号。登录渠道授权或粘贴 JSON 导入后，可在此探测剩余额度、签到或启停；顶部是池整体状态与健康度分布。"
         icon={<Database className="size-5" />}
       />
+      {/* 池概览（原「池仪表盘」页内容合并于此）：统计卡 + 健康度四态分布 */}
+      <PoolOverview credentials={credentials} now={now} />
       {!canWrite && (
         <div data-testid="readonly-banner">
           <Notice tone="muted">只读模式：仅管理员与操作员可以导入、启停或删除凭证。</Notice>
