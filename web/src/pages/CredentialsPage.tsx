@@ -304,7 +304,7 @@ export function CredentialsPage() {
       <div className="flex items-start justify-between gap-4">
         <PageHeader
           title="凭证管理"
-          description="凭证是调度池里可被选中的渠道账号。登录渠道授权或粘贴 JSON 导入后，可在此探测剩余额度、签到或启停；顶部是池整体状态与健康度分布。"
+          description="凭证是调度池里可被选中的渠道账号。登录渠道授权或粘贴 JSON 导入后，可在此探测剩余额度、签到或启停；顶部池概况按健康度四态说明这个池现在还剩多少能打的号。"
           icon={<Database className="size-5" />}
         />
         {canWrite && (
