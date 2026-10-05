@@ -177,6 +177,10 @@ class Settings(BaseSettings):
     context_compress_reserve_tokens: int = 4096
     context_compress_min_keep_messages: int = 4
     context_compress_safety_ratio: float = 0.95
+    # 跨渠道 fallback 链（P1-5）：请求模型在主渠道全部不可用时，按「兼容组」
+    # 依次回退到组内其他模型（组内成员自行带上 @渠道 或依赖目录收窄）。
+    # 格式 `组名=成员1,成员2;组名2=成员3`；留空 = 不启用（保持原行为）。
+    model_fallback_groups: str = ""
 
     @cached_property
     def admin_set(self) -> frozenset[str]:

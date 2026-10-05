@@ -21,7 +21,12 @@ from ..config import live
 from ..db.repo import CredentialRepository
 from ..provider.base import ErrKind, Event, EventKind, Usage, aclose_stream
 from .continuation import ContinuationStream
-from .model_resolver import ModelTarget, resolve
+from .model_resolver import (
+    ModelTarget,
+    UnknownModelError,
+    ordered_fallback_chain,
+    resolve,
+)
 from .scheduler import Scheduler
 
 logger = logging.getLogger(__name__)
@@ -52,6 +57,19 @@ class NoProviderForModel(Exception):
     pass
 
 
+class _ModelExhausted(Exception):
+    """流式当前模型在**产出任何响应帧之前**就用尽（回退链内部信号，不对外）。
+
+    带上收尾文案与错误码，供整条回退链都失败时用最后一个链项的 translator
+    产出终帧；避免在还有回退项时就把错误帧写给客户端。
+    """
+
+    def __init__(self, message: str, code: str) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
 @dataclass(slots=True)
 class ExecutorDeps:
     """注入点：provider 客户端、仓储、调度器、统计采集。"""
@@ -76,6 +94,9 @@ class ExecutorDeps:
     # 聚合没有——上游连接半开停滞会让请求无限悬挂并占住凭证。超时按瞬态
     # 错误（SOFT：短冷却不累计）换号重试；≤0 关闭
     complete_timeout_seconds: float = 600
+    # 跨渠道 fallback 兼容组（P1-5）：配置文本 → 组的解析值（dict）；None 表示
+    # 关闭。零参 callable 时每次请求现读（热更）。空 dict 与 None 等价（无组）。
+    fallback_groups: Any | None = None
 
     def record(self, **fields: Any) -> None:
         """统计写入失败绝不能影响聊天响应。"""
@@ -160,6 +181,77 @@ class Executor:
         target = resolve(request.model, live(self._deps.default_model)())
         return self._apply_binding(target, provider_binding)
 
+    def _fallback_chain(self, target: ModelTarget) -> tuple[ModelTarget, ...]:
+        """请求模型的回退链（P1-5）；未配置或未命中任何组时只有它自己。
+
+        兼容组 `fast=glm-4.6,glm-5`：组名只是入口别名（不进链），成员
+        `glm-4.6`/`glm-5` 才是候选模型。`@渠道` 强制指定与 API Key 渠道绑定
+        都表示「用户已把渠道钉死」，不参与跨渠道回退，直接返回原目标。
+
+        目录过滤（「兼容组白名单」，避免给不存在的模型白打一次上游）：目录可用
+        时剔除不在任何候选渠道登记的回退成员；目录未就绪时全部放行，交给执行层
+        兜底候选（与 `_apply_binding` 同方针）。链首若就是用户请求的那个模型，
+        无论目录是否认识都保留（那是明确的用户意图）。成员按名去重。
+        """
+        if target.forced:
+            return (target,)
+        raw = self._deps.fallback_groups
+        groups = live(raw)() if raw is not None else {}
+        if not groups:
+            return (target,)
+        chain = ordered_fallback_chain(target.model, groups)
+        if not chain:
+            return (target,)
+        resolved: list[ModelTarget] = []
+        seen: set[str] = set()
+        for name in chain:
+            # 链首若是原请求模型，沿用已解析的 target
+            if name.lower() == target.model.lower():
+                member = target
+            else:
+                try:
+                    member = resolve(name, name)
+                except UnknownModelError:
+                    logger.warning("兼容组成员 %r 含未知渠道，已跳过", name)
+                    continue
+            key = member.model.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            resolved.append(member)
+        if not resolved:
+            return (target,)
+        head_is_requested = resolved[0].model.lower() == target.model.lower()
+        head = resolved[0] if head_is_requested else None
+        rest = resolved[1:] if head_is_requested else resolved
+        filtered = [member for member in rest if self._fallback_allowed(member)]
+        if head is not None:
+            return (head, *filtered)
+        return tuple(filtered) or (target,)
+
+    @staticmethod
+    def _with_model(request: ChatRequest, model: str) -> ChatRequest:
+        """同一请求换模型（回退用）：模型名两处都要改——顶层字段与 raw。"""
+        if request.raw.get("model") == model and request.model == model:
+            return request
+        raw = dict(request.raw)
+        raw["model"] = model
+        return ChatRequest(model=model, messages=request.messages,
+                           stream=request.stream, raw=raw)
+
+    def _fallback_allowed(self, target: ModelTarget) -> bool:
+        """回退成员是否允许尝试：目录能确认它挂在候选渠道上，或目录未就绪。
+
+        目录未就绪（冷启动快照缺失 / 拉取失败）时**放行**交给执行层兜底候选，
+        与 `_apply_binding` 的保守策略一致；目录可用但该模型不在任何候选渠道
+        时跳过，避免对不存在的模型白打一次上游（这正是「兼容组白名单」的含义）。
+        """
+        aliases = self._deps.model_aliases
+        if not aliases:
+            return True
+        lower = target.model.lower()
+        return any(lower in aliases.get(pid, {}) for pid in target.providers)
+
     def _apply_binding(self, target: ModelTarget,
                        binding: str | None) -> ModelTarget:
         """按 API Key 的渠道绑定收窄候选上游（B3.5）。
@@ -196,11 +288,16 @@ class Executor:
         截断——客户端拿到空 body，误以为请求成功。凡是"请求本身不可能成功"
         的错误（未知 provider、模型不属于任何已注册上游）必须在返回
         StreamingResponse 之前抛给异常处理器，才能得到正确的 400。
+
+        回退链启用时按整条链判断：链首无注册上游但有回退项可用时放行，交给
+        `stream` 逐链项尝试（P1-5）。
         """
         target = self.resolve_target(request, provider_binding)
-        if not [pid for pid in self._narrow_providers(target) if pid in self._deps.providers]:
-            raise NoProviderForModel(f"no provider registered for model {target.model!r}")
-        return target
+        for attempt in self._fallback_chain(target):
+            if [pid for pid in self._narrow_providers(attempt)
+                    if pid in self._deps.providers]:
+                return target
+        raise NoProviderForModel(f"no provider registered for model {target.model!r}")
 
     async def stream_guarded(self, request: ChatRequest, *, username: str = "unknown",
                              translator: StreamSink | None = None,
@@ -231,6 +328,11 @@ class Executor:
                      provider_binding: str | None = None) -> AsyncIterator[bytes]:
         """流式执行；上游错误按分类冷却并换号，最多 3 次。
 
+        启用兼容组回退链（P1-5）时，**只有在当前链项还没产出任何响应帧之前**
+        才允许切到下一链项——已出帧后换模型会让客户端看到两个模型的混合输出。
+        每链项内部仍是完整的选号 / 冷却 / 轮换 / 粘性 / 统计路径；整条链都用尽
+        时用最后一个链项的 translator 产出终帧。
+
         客户端中途断开时（生成器被关闭 / 任务被取消）把已产生的用量
         记入统计，标记 client_disconnect：否则统计里的用量低于真实消耗，
         而断开是长回复场景下的常态。
@@ -240,45 +342,70 @@ class Executor:
         more_body=False 之间有一拍竞态，框架会把它当断开），按成功记账。
         """
         target = self.resolve_target(request, provider_binding)
+        chain = self._fallback_chain(target)
         state = _StreamState(translator=translator or StreamTranslator(target.model),
                              started=time.monotonic(), username=username)
         if self._deps.affinity is not None:
             state.affinity_id = self._deps.affinity.pin_for(request.raw, username)
-        loop_source = self._stream_loop(request, target, state)
-        try:
-            async for frame in loop_source:
-                yield frame
-        except (GeneratorExit, asyncio.CancelledError):
-            if not state.recorded and (state.translator.usage is not None
-                                       or state.ttfb_ms() is not None):
-                if state.translator.done_sent:
-                    # [DONE] 已产出：客户端收尾断开，按成功记账（tokens 如实记录）
-                    if state.credential_id is not None:
-                        self._deps.credentials.save_success(state.credential_id)
-                    self._record_success(target, state, state.provider,
-                                         state.credential_id or "-")
-                else:
-                    self._record_disconnect(target, state)
-            raise
-        finally:
-            # 客户端断开（GeneratorExit / CancelledError）时上面的 async for
-            # 不会关闭 _stream_loop，不显式关闭的话上游流的节流名额只能等
-            # GC 回收——生产路径靠 with_keepalive 取消 task 侥幸及时，换个调用
-            # 方就会攒满 max_concurrency 后永久阻塞
-            await aclose_stream(loop_source)
+        exhausted: _ModelExhausted | None = None
+        for attempt in chain:
+            if translator is None:
+                # 每链项自成一路出口（默认 chat 出口）：模型名随链项走。
+                # 注入的 translator（responses / anthropic）由调用方持有，
+                # 回退只在未出帧前发生，复用同一实例不会有半截状态。
+                state.translator = StreamTranslator(attempt.model)
+            loop_source = self._stream_loop(
+                self._with_model(request, attempt.model), attempt, state)
+            try:
+                async for frame in loop_source:
+                    yield frame
+            except _ModelExhausted as error:
+                exhausted = error
+                continue
+            except (GeneratorExit, asyncio.CancelledError):
+                if not state.recorded and (state.translator.usage is not None
+                                           or state.ttfb_ms() is not None):
+                    if state.translator.done_sent:
+                        # [DONE] 已产出：客户端收尾断开，按成功记账（tokens 如实记录）
+                        if state.credential_id is not None:
+                            self._deps.credentials.save_success(state.credential_id)
+                        self._record_success(attempt, state, state.provider,
+                                             state.credential_id or "-")
+                    else:
+                        self._record_disconnect(attempt, state)
+                raise
+            finally:
+                # 客户端断开（GeneratorExit / CancelledError）时上面的 async for
+                # 不会关闭 _stream_loop，不显式关闭的话上游流的节流名额只能等
+                # GC 回收——生产路径靠 with_keepalive 取消 task 侥幸及时，换个调用
+                # 方就会攒满 max_concurrency 后永久阻塞
+                await aclose_stream(loop_source)
+            return
+        # 链至少一项，循环里每项要么正常 return、要么抛 _ModelExhausted；能走到
+        # 这里说明整条链都在**未出帧前**用尽——用最后链项的 translator 收尾。
+        assert exhausted is not None
+        yield state.translator.error_frame(exhausted.message, exhausted.code)
 
     async def _stream_loop(self, request: ChatRequest, target: ModelTarget,
                            state: _StreamState) -> AsyncIterator[bytes]:
         tried: set[str] = set()
         last_error: Exception | None = None
         last_kind: ErrKind | None = None
+        # 本链项是否已向客户端出过响应帧：出了就绝不再换模型（半截输出不可回滚）
+        emitted = False
+
+        def terminal(message: str, code: str) -> bytes:
+            """终帧：本项未出帧时抛信号让外层试下一链项；已出帧则写错误帧收尾。"""
+            if not emitted:
+                raise _ModelExhausted(message, code)
+            return state.translator.error_frame(message, code)
 
         while True:
             pick = self._pick(target, tried, state.affinity_id)
             if pick is None:
                 if last_kind is ErrKind.INVALID:
                     # 所有候选上游都拒绝了该模型：400 语义而非 503
-                    yield state.translator.error_frame(
+                    yield terminal(
                         _reject_message(target.model, last_error,
                                         self._suggestions(target.model)),
                         "invalid_request")
@@ -288,8 +415,8 @@ class Executor:
                     credential_id=state.credential_id, model=target.model, ok=False,
                     error_type="no_healthy_credential",
                     latency_ms=_elapsed_ms(state.started))
-                yield state.translator.error_frame(
-                    self._unavailable_text(target, last_error), "no_healthy_credential")
+                yield terminal(self._unavailable_text(target, last_error),
+                               "no_healthy_credential")
                 return
             credential_id, credential_data = pick
             provider_id = self._deps.credentials.provider_of(credential_id)
@@ -328,6 +455,7 @@ class Executor:
                         break
                     for frame in state.translator.translate(event):
                         state.mark_first_byte()
+                        emitted = True
                         yield frame
                 else:
                     self._deps.credentials.save_success(
@@ -335,6 +463,7 @@ class Executor:
                     self._remember(request, state.username, credential_id)
                     self._record_success(target, state, provider_id, credential_id)
                     for frame in state.translator.finish():
+                        emitted = True
                         yield frame
                     return
             except Exception as error:  # noqa: BLE001 - 统一转为冷却或上抛
@@ -361,7 +490,7 @@ class Executor:
             if not self._deps.scheduler.should_rotate(tried):
                 if last_kind is ErrKind.INVALID:
                     # 流已开始（200 已发出），以 invalid_request 错误帧结束
-                    yield state.translator.error_frame(
+                    yield terminal(
                         _reject_message(target.model, last_error,
                                         self._suggestions(target.model)),
                         "invalid_request")
@@ -372,8 +501,8 @@ class Executor:
                     credential_id=credential_id, model=target.model, ok=False,
                     error_type=_error_type_for(kind) if kind else "upstream_protocol",
                     latency_ms=_elapsed_ms(state.started))
-                yield state.translator.error_frame(
-                    self._unavailable_text(target, last_error), "no_healthy_credential")
+                yield terminal(self._unavailable_text(target, last_error),
+                               "no_healthy_credential")
                 return
 
     def _stream_source(self, provider_id: str, credential_data: dict[str, Any],
@@ -423,8 +552,26 @@ class Executor:
 
     async def complete(self, request: ChatRequest, *, username: str = "unknown",
                        provider_binding: str | None = None) -> dict[str, Any]:
-        """非流式：聚合同一执行路径的事件。流内错误会触发换号重试。"""
+        """非流式：按兼容组回退链依次尝试，逐链项走完整的换号重试。
+
+        回退只在**整条链**都用尽时以最后一个链项的 503/400 收尾；单链项内部
+        的选号 / 冷却 / 轮换 / 会话粘性 / 统计全部沿用既有路径（P1-5）。
+        """
         target = self.resolve_target(request, provider_binding)
+        chain = self._fallback_chain(target)
+        last_error: Exception | None = None
+        for attempt in chain:
+            try:
+                return await self._complete_model(
+                    self._with_model(request, attempt.model), attempt, username)
+            except (NoHealthyCredential, InvalidRequest) as error:
+                last_error = error
+        assert last_error is not None          # 链至少一项，且必然以异常收尾否则已 return
+        raise last_error
+
+    async def _complete_model(self, request: ChatRequest, target: ModelTarget,
+                              username: str) -> dict[str, Any]:
+        """单个模型的非流式执行（原 complete 主体）。"""
         tried: set[str] = set()
         last_error: Exception | None = None
         last_kind: ErrKind | None = None

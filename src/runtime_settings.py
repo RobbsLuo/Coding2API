@@ -88,6 +88,11 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("context_compress_safety_ratio", float, "上下文压缩：安全系数",
                "按模型上限的百分比计算压缩预算，给 token 估算误差留余量。",
                minimum=0.0, maximum=1.0, group="routing"),
+    HotSetting("model_fallback_groups", str, "跨渠道 fallback 兼容组",
+               "请求模型在主渠道全部不可用时，按兼容组依次回退到组内其他模型。"
+               "格式 `组名=成员1,成员2;组名2=成员3`；成员可带 `@渠道` 固定回退渠道。"
+               "留空 = 不启用。回退会用尽该组（×3 轮换预算）后正常 503。",
+               group="routing"),
     HotSetting("quota_expiry_window_seconds", int, "到期积分主窗口（秒）",
                "把「距到期 ≤ 该秒数」的积分加总作为选号第一排序指标；"
                "≤0 关闭整套到期排序（次窗口一并失效）。", minimum=0,
@@ -379,6 +384,10 @@ class RuntimeSettings:
     @property
     def model_blocklist(self) -> str:
         return str(self.get("model_blocklist"))
+
+    @property
+    def model_fallback_groups(self) -> str:
+        return str(self.get("model_fallback_groups"))
 
     @property
     def blocklist_patterns(self) -> tuple[str, ...]:

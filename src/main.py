@@ -57,6 +57,7 @@ from .db.repo import (
 )
 from .engine.affinity import ConversationAffinity
 from .engine.executor import Executor, ExecutorDeps
+from .engine.model_resolver import parse_fallback_groups
 from .engine.scheduler import Scheduler
 from .provider.codearts import CodeArtsProvider
 from .provider.codearts.client import CodeArtsClient
@@ -329,6 +330,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                      ),
                                      model_suggestions=lambda name: _similar_models(
                                          name, model_aliases),
+                                     fallback_groups=lambda: parse_fallback_groups(
+                                         runtime.model_fallback_groups),
                                      model_aliases=model_aliases))
 
     @asynccontextmanager
