@@ -11,10 +11,8 @@ import { useSessionContext } from "../Layout";
 import type { ModelInfo } from "../api/types";
 import { HelpBlock } from "../components/HelpBlock";
 import { PageHeader } from "../components/PageHeader";
-import { ProviderIcon } from "../components/ProviderIcon";
 import { ModelPicker, modelValue, pickDefaultModel } from "../components/ModelPicker";
 import { Button, Card, Checkbox, Empty, Field, Label, Notice, Panel, Textarea } from "../ui";
-import { providerLabel, providerRank } from "../api/providers";
 
 /** 通过会话鉴权的内部端点取数据，不需要用户自己造 API Key。 */
 async function fetchPlaygroundModels(signal?: AbortSignal) {
@@ -49,13 +47,6 @@ export function PlaygroundPage() {
   const selectedInfo =
     models.find((item) => item.value === selectedModel) ??
     models.find((item) => item.value === selectedModel.split("@")[0]);
-
-  // 强制指定渠道：只列该模型**真实可用**的渠道，避免选出上游打不通的
-  // model@provider。单渠道模型只有一个选项（始终固定）。
-  const selectedProviders = selectedInfo
-    ? [...selectedInfo.providers].sort((left, right) => providerRank(left) - providerRank(right))
-    : [];
-  const pinnedProvider = selectedModel.includes("@") ? selectedModel.split("@")[1] : "";
 
   const send = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -121,53 +112,15 @@ export function PlaygroundPage() {
 
       <Panel title="请求">
         <form onSubmit={send} className="space-y-3">
-          <Field label="模型" hint="多渠道模型默认自动调度；需要时可在下方强制指定渠道">
+          <Field label="模型" hint="多渠道模型默认自动路由；可在「当前选择」条里强制指定渠道">
             <ModelPicker
               models={models}
               value={selectedModel}
               onChange={setModel}
+              onPin={setModel}
               loading={modelsQuery.isFetching && fetched.length === 0}
             />
           </Field>
-
-          {selectedProviders.length > 1 && (
-            <Field label="强制指定渠道" hint="仅对当前模型可用的渠道生效">
-              <div className="flex flex-wrap items-center gap-2" data-testid="provider-pin">
-                <button
-                  type="button"
-                  data-testid="provider-pin-auto"
-                  aria-pressed={pinnedProvider === ""}
-                  onClick={() => setModel(selectedModel.split("@")[0])}
-                  className={
-                    "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors "
-                    + (pinnedProvider === ""
-                      ? "border-primary/40 bg-primary/10 text-primary"
-                      : "border-border text-muted-foreground hover:text-foreground")
-                  }
-                >
-                  自动路由
-                </button>
-                {selectedProviders.map((provider) => (
-                  <button
-                    key={provider}
-                    type="button"
-                    data-testid={`provider-pin-${provider}`}
-                    aria-pressed={pinnedProvider === provider}
-                    onClick={() => setModel(`${selectedModel.split("@")[0]}@${provider}`)}
-                    className={
-                      "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors "
-                      + (pinnedProvider === provider
-                        ? "border-primary/40 bg-primary/10 text-primary"
-                        : "border-border text-muted-foreground hover:text-foreground")
-                    }
-                  >
-                    <ProviderIcon provider={provider} size={13} />
-                    {providerLabel(provider)}
-                  </button>
-                ))}
-              </div>
-            </Field>
-          )}
 
           {selectedInfo && (selectedInfo.max_input_tokens !== undefined ||
             selectedInfo.max_output_tokens !== undefined ||

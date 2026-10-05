@@ -189,7 +189,6 @@ function ModelRow({
   onSelect: () => void;
 }) {
   const providers = sortProviders(item.providers);
-  const multi = item.providers.length > 1;
   return (
     <button
       type="button"
@@ -198,38 +197,32 @@ function ModelRow({
       data-testid={`model-option-${item.value}`}
       onClick={onSelect}
       className={cn(
-        "flex w-full flex-col gap-1.5 rounded-xl border px-3 py-2 text-left transition-colors",
+        "flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left transition-colors",
         selected
           ? "border-primary/60 bg-primary/[0.08] ring-1 ring-primary/30"
           : "border-border bg-card hover:border-primary/30 hover:bg-muted/50",
       )}
     >
-      <span className="flex items-center gap-2">
-        <span
-          className={cn(
-            "flex size-4 shrink-0 items-center justify-center rounded-full",
-            selected ? "bg-primary text-primary-foreground" : "border border-border",
-          )}
-        >
-          {selected && <Check className="size-3" />}
-        </span>
-        <span className="min-w-0 flex-1">
-          {/* 主名用上游人类可读名（Qwen3.8-Max）；与内部 id 不同时补一行小字 id，
-              否则用户无法用 id 直连指定。 */}
-          <span className="block truncate text-sm font-semibold">{displayName(item)}</span>
-          {displayName(item) !== item.id && (
-            <span className="block truncate font-mono text-[11px] text-muted-foreground">
-              {item.id}
-            </span>
-          )}
-        </span>
-        {multi && (
-          <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-            自动调度
+      <span
+        className={cn(
+          "flex size-4 shrink-0 items-center justify-center rounded-full",
+          selected ? "bg-primary text-primary-foreground" : "border border-border",
+        )}
+      >
+        {selected && <Check className="size-3" />}
+      </span>
+      <span className="min-w-0 flex-1">
+        {/* 主名用上游人类可读名（Qwen3.8-Max）；与内部 id 不同时补一行小字 id，
+            否则用户无法用 id 直连指定。 */}
+        <span className="block truncate text-sm font-semibold">{displayName(item)}</span>
+        {displayName(item) !== item.id && (
+          <span className="block truncate font-mono text-[11px] text-muted-foreground">
+            {item.id}
           </span>
         )}
       </span>
-      <span className="flex flex-wrap items-center gap-1.5 pl-6">
+      {/* 渠道 + 倍率整体靠右：名称占满剩余空间，徽章组不折行 */}
+      <span className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
         {providers.map((provider) => (
           <ChannelPill
             key={provider}
@@ -254,11 +247,14 @@ export function ModelPicker({
   models,
   value,
   onChange,
+  onPin,
   loading,
 }: {
   models: PickableModel[];
   value: string;
   onChange: (value: string) => void;
+  /** 多渠道模型在「当前选择」条里强制指定渠道；不传则不显示该控件。 */
+  onPin?: (value: string) => void;
   loading?: boolean;
 }) {
   const [query, setQuery] = useState("");
@@ -326,20 +322,67 @@ export function ModelPicker({
               </span>
             )}
           </span>
-          {sortProviders(selectedItem.providers).map((provider) => (
-            <ChannelPill
-              key={provider}
-              provider={provider}
-              rate={providerRate(selectedItem, provider)}
-              rawId={providerRawId(selectedItem, provider)}
-            />
-          ))}
-          {pinnedProvider && (
-            <span className="rounded-md bg-primary/15 px-1.5 py-0.5 text-[11px] font-semibold text-primary">
-              已强制 {providerLabel(pinnedProvider)}
+          <span className="flex flex-wrap items-center gap-1.5">
+            {sortProviders(selectedItem.providers).map((provider) => (
+              <ChannelPill
+                key={provider}
+                provider={provider}
+                rate={providerRate(selectedItem, provider)}
+                rawId={providerRawId(selectedItem, provider)}
+              />
+            ))}
+          </span>
+          {/* 右侧统一区：多渠道放渠道指定控件，已强制时追加「已强制 XX」标；
+              单渠道模型 value 天然带 @provider，也走「已强制」标显示在右侧 */}
+          {((onPin && selectedItem.providers.length > 1) || pinnedProvider) && (
+            <span className="ml-auto flex flex-wrap items-center justify-end gap-1.5">
+              {onPin && selectedItem.providers.length > 1 && (
+                <>
+                  <span className="text-[11px] font-medium text-muted-foreground">渠道</span>
+                  <span className="flex flex-wrap items-center gap-1" data-testid="provider-pin">
+                    <button
+                      type="button"
+                      data-testid="provider-pin-auto"
+                      aria-pressed={pinnedProvider === ""}
+                      onClick={() => onPin(baseValue)}
+                      className={cn(
+                        "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors",
+                        pinnedProvider === ""
+                          ? "border-primary/40 bg-primary/10 text-primary"
+                          : "border-border text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      自动路由
+                    </button>
+                    {sortProviders(selectedItem.providers).map((provider) => (
+                      <button
+                        key={provider}
+                        type="button"
+                        data-testid={`provider-pin-${provider}`}
+                        aria-pressed={pinnedProvider === provider}
+                        onClick={() => onPin(`${baseValue}@${provider}`)}
+                        className={cn(
+                          "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors",
+                          pinnedProvider === provider
+                            ? "border-primary/40 bg-primary/10 text-primary"
+                            : "border-border text-muted-foreground hover:text-foreground",
+                        )}
+                      >
+                        <ProviderIcon provider={provider} size={11} />
+                        {providerLabel(provider)}
+                      </button>
+                    ))}
+                  </span>
+                </>
+              )}
+              {pinnedProvider && (
+                <span className="rounded-md bg-primary/15 px-1.5 py-0.5 text-[11px] font-semibold text-primary">
+                  已强制 {providerLabel(pinnedProvider)}
+                </span>
+              )}
             </span>
           )}
-          {!pinnedProvider && selectedItem.providers.length > 1 && (
+          {!pinnedProvider && !onPin && selectedItem.providers.length > 1 && (
             <span className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
               自动路由
             </span>
