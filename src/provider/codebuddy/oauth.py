@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from ...provider.base import AuthResult, AuthSession
+from ...provider.proxy import build_client
 from .credential import CodeBuddyCredential
 from .events import UpstreamProtocolViolation
 from .headers import EP_AUTH_STATE, EP_AUTH_TOKEN, EP_LOGIN_ACCOUNT, auth_start_headers, host_of
@@ -101,15 +102,17 @@ class AuthStateStore:
 
 class CodeBuddyOAuth:
     def __init__(self, endpoint: str, *, client: httpx.AsyncClient | None = None,
-                 store: AuthStateStore | None = None) -> None:
+                 store: AuthStateStore | None = None,
+                 proxy: str | None = None) -> None:
         self.endpoint = endpoint
         self.store = store or AuthStateStore()
         self._client = client
+        self._proxy = proxy
 
     @property
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0), trust_env=False)
+            self._client = build_client(timeout=httpx.Timeout(30.0), proxy=self._proxy)
         return self._client
 
     async def aclose(self) -> None:

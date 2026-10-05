@@ -12,7 +12,7 @@ PROPOSAL.md 定方向，本文档定实现。每个模块标注来源决策（Q 
 | 包管理 | uv（venv + pyproject.toml + uv.lock） | 锁定版本见 `uv.lock` | T-Q1 |
 | Web | FastAPI + Uvicorn | 0.141 / 0.52 | Q2=A |
 | 配置 | pydantic-settings | 2.15 | T-Q3 |
-| HTTP | httpx 双客户端（流式/短请求分离） | 0.28.1 | T-Q4 |
+| HTTP | httpx 双客户端（流式/短请求分离）；`httpx[socks]` 提供按渠道 SOCKS5 代理 | 0.28.1 / socksio 1.0 | T-Q4 |
 | 数据库 | 标准库 sqlite3（WAL）+ 手写 SQL | 内置 | T-Q2 |
 | 加密 | cryptography Fernet（凭证列） | 50.0 | T-Q2 |
 | 测试 | pytest + pytest-cov + respx + 文件化 fixture | pytest 9.1 / respx 0.23.1 | T-Q5 |
@@ -57,6 +57,7 @@ coding2api/
 │   │   └── access.py            # API Key 来源 IP 白名单（B3.5，纯函数）
 │   ├── provider/
 │   │   ├── base.py              # Provider 协议、Event、ErrKind、Quota、HealthScore
+│   │   ├── proxy.py             # 按渠道出站代理（P1-6）：解析 PROVIDER_PROXIES + build_client
 │   │   ├── codebuddy/
 │   │   │   ├── client.py        # 上游 HTTP + SSE 流 + 额度探测
 │   │   │   ├── events.py        # OpenAI 风格 SSE → Event
@@ -455,7 +456,7 @@ response.completed | response.incomplete
 
 | 类别 | 例子 | 位置 | 变更方式 |
 |---|---|---|---|
-| 启动期不可变项 | `APP_SECRET` / `HOST` / `PORT` / `DATA_DIR` / `USERS_FILE` / `CODEBUDDY_ALLOWED_ENDPOINTS` | `config.Settings`（frozen） | 改 env + 重启；**不进白名单**，管理台改不了 |
+| 启动期不可变项 | `APP_SECRET` / `HOST` / `PORT` / `DATA_DIR` / `USERS_FILE` / `CODEBUDDY_ALLOWED_ENDPOINTS` / `PROVIDER_PROXIES` | `config.Settings`（frozen） | 改 env + 重启；**不进白名单**，管理台改不了 |
 | 运行时可覆盖项 | 见 `runtime_settings.HOT_SETTINGS`（35 项） | `RuntimeSettings` 覆盖层 | 管理台改，立即生效 |
 
 启动期项拒绝热更的原因：它们决定进程如何启动（监听地址、加密密钥、上游白名单），运行期变更只会让「当前进程」与「磁盘配置」静默分叉，而分叉后的行为无法从任一处推断。
@@ -807,6 +808,22 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 **装配**：`AlertTask` 接入 `TaskRunner`（新增 `alert` 任务卡片），**与运行态共享同一个 `TaskStatusStore`**——若自建 store，「任务连续失败」规则会永远读到 0 而静默失效。10 个热更项全部归到「运维告警」卡片（`task="alert"`）。`AlertTask.run_once` 关闭时返回 `None`，`_guarded` 不记运行态（页面显示「未运行」而非「刚跑过」）。
 
 无 schema 迁移动作（新表），compose 透传 10 个 `ALERT_*`。
+
+---
+
+### 3.23 按渠道出站代理（P1-6）
+
+**动机**：某些渠道可能只在特定网络路径可达（区域限制 / 需经代理），而 `trust_env=False` 的既有约定让 `HTTP_PROXY` 等环境代理一律失效；需要一个**按渠道**、显式可控的出口。
+
+**配置**（`PROVIDER_PROXIES`，启动期项，默认 `""` 直连）：`渠道=代理URL;渠道2=代理URL2`，渠道取 `KNOWN_PROVIDERS`（`codebuddy/trae/zen/kilo/qoder/codearts`），协议 `http/https/socks5/socks5h`（SOCKS 由 `httpx[socks]` → `socksio` 提供）。
+
+- **纯函数层**（`provider/proxy.py`）：`parse_provider_proxies(raw, known)` **严格**解析——未知渠道 / 非法协议 / 缺 `=` / 空 URL 一律 `ValueError`，只忽略空段（容忍结尾 `;`），渠道名小写、重名后者覆盖。为什么严格而非宽容（对比 §3.21 fallback 组的宽容）：代理常带合规 / 隐私意图，「以为走了代理其实直连」是静默的安全问题，启动报错远好过静默直连。渠道集合由调用方传入，不硬编码。
+- **工厂层**：`build_client(timeout, proxy)` 统一构造 `httpx.AsyncClient(timeout=..., trust_env=False, proxy=proxy)`。`trust_env=False` 是既有约定（不吃环境代理，防部署环境全局代理意外劫持带 Token 的上游请求）；按渠道代理只经显式 `proxy=` 生效。
+- **注入点**：各 provider client（`TraeClient`/`CodeBuddyClient`/`ZenClient`/`KiloClient`/`QoderClient`/`CodeArtsClient`）与三个 OAuth 流（`CodeBuddyOAuth`/`QoderOAuth`/`CodeArtsOAuth`）增 `proxy` 参数，惰性构造 httpx 客户端时透传。`main.build_app` 在 provider 装配处、`_upstream_auth` 在 OAuth 装配处按渠道取值注入。
+- **覆盖面**：该渠道**全部**出站请求——聊天流、额度 / 模型拉取、后台任务（签到 / 成长 / 刷新 / 活跃上报：CodeBuddy 的这些子客户端复用 `client._short`，代理自动跟随）与 OAuth 登录。
+- **为什么启动期而非热更**：代理作用于连接池，运行中改值需重建在途连接池（涉及 6 个客户端 + 3 个 OAuth 流），风险与测试量都大；与上游端点同属启动期传输层配置（§3.1 端点是启动期）。
+
+无 schema 变更，compose 透传 `PROVIDER_PROXIES`；`tests/test_provider_proxy.py`（30 例）覆盖解析 / 工厂 / 6 客户端 + 3 OAuth 透传 / main 装配接线。
 
 ---
 

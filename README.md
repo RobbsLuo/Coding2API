@@ -190,6 +190,20 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 - **累计全文 SSE**：上游流式 `text` 是**累计全文（替换语义）**而非增量，本服务在解析层还原为增量事件，对客户端透明。
 - **节流与并发**：真实账号渠道，默认 `CODEARTS_CHAT_MIN_INTERVAL=5`（独立节流器）；上游硬限**每账号并发会话数 3**，故 pacer 另配在途上限 `CODEARTS_MAX_CONCURRENCY=3`。实测该限制更接近「每账号每约 60s 最多 3 个会话」（会话在流结束后仍滞留数十秒），故再叠加滑动窗口 `CODEARTS_REQUEST_WINDOW_SECONDS=60`，把突发也挡在 400 之前（`400 TM.00001041`）。均可在「任务与配置」热更。
 
+### 按渠道出站代理（可选）
+
+`PROVIDER_PROXIES` 给每个渠道单独指定出站代理，适合「某渠道需经代理才能访问」的场景：
+
+```
+PROVIDER_PROXIES="codebuddy=http://127.0.0.1:7890;qoder=socks5://127.0.0.1:1080"
+```
+
+- 格式 `渠道=代理URL;渠道2=代理URL2`，渠道取 `codebuddy/trae/zen/kilo/qoder/codearts`；协议支持 `http/https/socks5/socks5h`（SOCKS 由 `httpx[socks]` 提供）；留空 = 全部直连（默认，行为不变）。
+- 作用于该渠道**全部出站请求**：聊天流、额度/模型拉取、后台任务（签到/成长/刷新/活跃上报）与 OAuth 登录，都走同一代理。
+- **启动期项**：代理作用于连接池，改后需重启后端；不做管理台热更（与上游端点同类）。
+- **严格解析**：未知渠道 / 非法协议 / 缺 `=` 一律启动失败——代理常带合规/隐私意图，「以为走了代理其实直连」比启动报错更糟。
+- 环境变量里的 `HTTP_PROXY` 等一律**不采信**（`trust_env=False`，防部署环境的全局代理意外劫持带 Token 的上游请求）；只有这里显式配置才生效。
+
 ### Responses API（Codex CLI）
 
 `POST /v1/responses` 提供 Responses 子集，供 [Codex CLI](https://github.com/openai/codex) 这类只走 Responses 的客户端接入。与 `/v1/chat/completions` 共用同一套选号 / 冷却 / 轮换 / 统计与会话粘性，只换入站映射与出口翻译（实现与取舍见 [TECHNICAL.md §3.7](TECHNICAL.md)）：
@@ -379,6 +393,7 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `QODER_ALLOWED_ENDPOINTS` | 国内 openapi+gateway + 国际版（见 compose） | Qoder 端点白名单，带 COSY 签名的请求只发往白名单内地址 |
 | `CODEARTS_API_ENDPOINT` | `https://snap-access.cn-north-4.myhuaweicloud.com` | CodeArts snap 引擎地址；改动时必须同时把它加入 `CODEARTS_ALLOWED_ENDPOINTS` |
 | `CODEARTS_ALLOWED_ENDPOINTS` | snap 引擎 + STS + 福利网关 + 门户（见 compose） | CodeArts 端点白名单，AK/SK 签名请求只发往白名单内地址 |
+| `PROVIDER_PROXIES` | `""` | **按渠道出站代理**（启动期项，改后需重启）。格式 `渠道=代理URL;渠道2=代理URL2`，渠道取 `codebuddy/trae/zen/kilo/qoder/codearts`，协议支持 `http/https/socks5/socks5h`；留空 = 全部直连。作用于该渠道的聊天、额度/模型拉取、后台任务与 OAuth 登录全部出站请求（含 SOCKS5，依赖 `httpx[socks]`）。解析严格：未知渠道 / 非法协议 / 缺 `=` 一律启动失败，避免「以为走了代理其实直连」。`trust_env=False` 不受环境代理影响，只有这里显式配置才生效 |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB/TRAE 聊天节流器的最小间隔（秒）：按凭证分桶、**桶内允许并发**（同渠道同模型并发不排队、立即发出），只在同凭证「上一请求已结束、紧接着又来一个」的顺序连发时补足间隔；`0` 关闭 |
 | `ZEN_CHAT_MIN_INTERVAL` | `0` | Zen 聊天最小间隔（秒），独立于 CB/TRAE 的节流器，默认关闭。zen 是匿名免费层、无账号级频率风控；若与 CB/TRAE 共享，zen 会排在它们之后空等满 5s（并发/连发时每个请求 +5s），故不共享 |
 | `KILO_CHAT_MIN_INTERVAL` | `0` | Kilo 聊天最小间隔（秒），独立于 zen / CB/TRAE 的节流器，默认关闭。同为匿名免费层，与 zen 各自独立、互不排队 |
@@ -526,6 +541,7 @@ M0–M3 及后续迭代全部完成，`main` 分支可运行，当前版本 v0.2
 - **B7 竞品能力补齐（P0）**：Anthropic `/v1/messages` 出口（Claude Code）、上下文压缩（按模型目录输入上限裁剪过长对话）、API Key 模型白名单 + 到期时间（对比与迁移分档见 `docs/competitor-comparison.md`）
 - **B8 智能路由（P1）**：跨渠道 fallback 兼容组（`MODEL_FALLBACK_GROUPS`，主渠道全不可用时按组顺序回退、仅在未出帧前切换）
 - **B9 运维告警（P1）**：后台周期评估四类风险（凭证池耗尽 / 后台任务连续失败 / token 临近到期 / 上游错误率骤升），命中落 `alert_events` 并在管理台「运维告警」页回看，可选推送 webhook（`ALERT_WEBHOOK_URL`），同一告警在静默窗内只报一次
+- **B10 按渠道代理（P1）**：`PROVIDER_PROXIES` 为每个渠道单独指定出站代理（HTTP/SOCKS5），作用于该渠道全部出站请求（聊天 / 额度 / 模型 / 后台任务 / OAuth 登录）；留空直连，默认行为不变
 
 规划与实测收窄的完整记录见 `PROPOSAL.md`（Q1–Q54）与 `TECHNICAL.md`（§3.1–§3.17、§6.1–§6.4）。
 

@@ -59,7 +59,7 @@ from .db.repo import (
 )
 from .engine.affinity import ConversationAffinity
 from .engine.executor import Executor, ExecutorDeps
-from .engine.model_resolver import parse_fallback_groups
+from .engine.model_resolver import KNOWN_PROVIDERS, parse_fallback_groups
 from .engine.scheduler import Scheduler
 from .provider.codearts import CodeArtsProvider
 from .provider.codearts.client import CodeArtsClient
@@ -67,11 +67,12 @@ from .provider.codearts.oauth import CodeArtsOAuth
 from .provider.codebuddy.client import CodeBuddyClient, CodeBuddyProvider
 from .provider.codebuddy.oauth import CodeBuddyOAuth
 from .provider.kilo.client import KiloClient, KiloProvider
+from .provider.proxy import parse_provider_proxies
 from .provider.qoder import QoderProvider
 from .provider.qoder.auth import QoderOAuth
 from .provider.qoder.client import QoderClient
 from .provider.qoder.events import detect_realm_from_domain
-from .provider.trae.client import TraeProvider
+from .provider.trae.client import TraeClient, TraeProvider
 from .provider.zen.client import ZenClient, ZenProvider
 from .runtime_settings import load_runtime_settings
 from .stats.collector import StatsCollector
@@ -284,26 +285,35 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                            allow_concurrent=True,
                            max_concurrency=lambda: runtime.codearts_max_concurrency,
                            window_seconds=lambda: runtime.codearts_request_window_seconds)
+    # 按渠道出站代理（P1-6）：启动期解析一次，装配时注入到各 provider 的
+    # httpx client；运行中改值需重启（连接池已建立，见 provider/proxy.py）。
+    proxies = parse_provider_proxies(config.provider_proxies, KNOWN_PROVIDERS)
     registry = providers if providers is not None else {
-        "trae": TraeProvider(pacer=chat_pacer),
+        "trae": TraeProvider(
+            client=TraeClient(proxy=proxies.get("trae")), pacer=chat_pacer),
         "codebuddy": CodeBuddyProvider(
             client=CodeBuddyClient(
                 endpoint=_codebuddy_endpoint(config),
                 sanitize_markers=config.codebuddy_sanitize_channel_markers,
+                proxy=proxies.get("codebuddy"),
             ), pacer=chat_pacer),
         "zen": ZenProvider(
             client=ZenClient(host=_zen_endpoint(config),
-                             version=config.zen_opencode_version),
+                             version=config.zen_opencode_version,
+                             proxy=proxies.get("zen")),
             pacer=zen_pacer),
         "kilo": KiloProvider(
-            client=KiloClient(host=_kilo_endpoint(config)),
+            client=KiloClient(host=_kilo_endpoint(config),
+                              proxy=proxies.get("kilo")),
             pacer=kilo_pacer),
         "qoder": QoderProvider(
             client=QoderClient(host=_qoder_host(config),
-                               gateway=_qoder_gateway(config)),
+                               gateway=_qoder_gateway(config),
+                               proxy=proxies.get("qoder")),
             pacer=qoder_pacer),
         "codearts": CodeArtsProvider(
-            client=CodeArtsClient(endpoint=_codearts_endpoint(config)),
+            client=CodeArtsClient(endpoint=_codearts_endpoint(config),
+                                  proxy=proxies.get("codearts")),
             pacer=codearts_pacer),
     }
     # 默认装配路径（生产）才种子无凭证渠道的虚拟凭证：测试注入自定义 registry
@@ -535,21 +545,24 @@ def _upstream_auth(registry: dict, settings: Settings) -> dict:
     CodeArts 走门户 ticket 轮询（token 响应直接给临时 AK/SK，无本地回调）。
     """
     flows: dict = {}
+    proxies = parse_provider_proxies(settings.provider_proxies, KNOWN_PROVIDERS)
     codebuddy = registry.get("codebuddy")
     endpoint = getattr(getattr(codebuddy, "client", None), "endpoint", None)
     if endpoint is not None:
-        flows["codebuddy"] = CodeBuddyOAuth(endpoint)
+        flows["codebuddy"] = CodeBuddyOAuth(endpoint, proxy=proxies.get("codebuddy"))
     qoder = registry.get("qoder")
     host = getattr(getattr(qoder, "client", None), "host", None)
     if host is not None:
-        flows["qoder"] = QoderOAuth(detect_realm_from_domain(host))
+        flows["qoder"] = QoderOAuth(detect_realm_from_domain(host),
+                                    proxy=proxies.get("qoder"))
     codearts = registry.get("codearts")
     client = getattr(codearts, "client", None)
     login = getattr(client, "login", None)
     if login is not None:
         # 登录后补账号身份：token 响应不带用户名，不补则凭证昵称为空、
         # 统计明细的凭证列空白。复用 provider 的签名客户端，不另建连接池。
-        flows["codearts"] = CodeArtsOAuth(login, identity_client=client)
+        flows["codearts"] = CodeArtsOAuth(login, identity_client=client,
+                                          proxy=proxies.get("codearts"))
     return flows
 
 

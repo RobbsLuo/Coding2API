@@ -22,6 +22,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 
 from ...provider.base import AuthResult, AuthSession
+from ...provider.proxy import build_client
 from . import auth as codearts_auth
 from .auth import LoginConfig, LoginSession
 from .events import UpstreamProtocolViolation
@@ -116,7 +117,8 @@ class CodeArtsOAuth:
     def __init__(self, config: LoginConfig, *, port: int = DEFAULT_CALLBACK_PORT,
                  client: httpx.AsyncClient | None = None,
                  store: AuthStateStore | None = None,
-                 identity_client: CodeArtsClient | None = None) -> None:
+                 identity_client: CodeArtsClient | None = None,
+                 proxy: str | None = None) -> None:
         self.config = config
         self.port = port
         self.store = store or AuthStateStore()
@@ -125,12 +127,12 @@ class CodeArtsOAuth:
         # 通常不带用户名，不补则凭证昵称为空、统计明细的凭证列空白。生产装配
         # 由 main 传入 provider 的 client；None = 跳过补身份（旧行为）。
         self._identity_client = identity_client
+        self._proxy = proxy
 
     @property
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0),
-                                             trust_env=False)
+            self._client = build_client(timeout=httpx.Timeout(30.0), proxy=self._proxy)
         return self._client
 
     async def aclose(self) -> None:

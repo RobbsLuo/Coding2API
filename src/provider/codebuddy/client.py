@@ -23,6 +23,7 @@ import httpx
 from ...engine.sse import iter_frames
 from ...provider import base
 from ...provider.base import ErrKind, Event, GrowthResult, Model, Quota
+from ...provider.proxy import build_client
 from . import events as cb_events
 from .credential import CodeBuddyCredential, parse_credential
 from .events import UpstreamProtocolViolation
@@ -161,22 +162,24 @@ class CodeBuddyClient:
         stream_client: httpx.AsyncClient | None = None,
         short_client: httpx.AsyncClient | None = None,
         sanitize_markers: bool = True,
+        proxy: str | None = None,
     ) -> None:
         self.endpoint = endpoint
         self._stream_client = stream_client
         self._short_client = short_client
         self.sanitize_markers = sanitize_markers
+        self._proxy = proxy
 
     @property
     def _stream(self) -> httpx.AsyncClient:
         if self._stream_client is None:
-            self._stream_client = httpx.AsyncClient(timeout=STREAM_TIMEOUT, trust_env=False)
+            self._stream_client = build_client(timeout=STREAM_TIMEOUT, proxy=self._proxy)
         return self._stream_client
 
     @property
     def _short(self) -> httpx.AsyncClient:
         if self._short_client is None:
-            self._short_client = httpx.AsyncClient(timeout=SHORT_TIMEOUT, trust_env=False)
+            self._short_client = build_client(timeout=SHORT_TIMEOUT, proxy=self._proxy)
         return self._short_client
 
     async def aclose(self) -> None:

@@ -40,6 +40,7 @@ import httpx
 
 from ...provider import base
 from ...provider.base import Event, EventKind, Model, Quota
+from ...provider.proxy import build_client
 from ...provider.token_expiry import normalize_epoch
 from . import auth as codearts_auth
 from . import events as codearts_events
@@ -240,6 +241,7 @@ class CodeArtsClient:
         login: codearts_auth.LoginConfig | None = None,
         stream_client: httpx.AsyncClient | None = None,
         short_client: httpx.AsyncClient | None = None,
+        proxy: str | None = None,
     ) -> None:
         self.endpoint = endpoint.rstrip("/")
         self.benefit_host = benefit_host.rstrip("/")
@@ -251,20 +253,19 @@ class CodeArtsClient:
             sts_host=self.sts_host)
         self._stream_client = stream_client
         self._short_client = short_client
+        self._proxy = proxy
         # 每账号的福利目录（uid → 小写模型 id 集合）。整体替换、不跨账号共享：
         # 福利是按账号授予的，A 有 B 没有时判定依据必须是发起请求的那个账号。
         self._benefit_models: dict[str, frozenset[str]] = {}
 
     def _stream(self) -> httpx.AsyncClient:
         if self._stream_client is None:
-            self._stream_client = httpx.AsyncClient(timeout=STREAM_TIMEOUT,
-                                                    trust_env=False)
+            self._stream_client = build_client(timeout=STREAM_TIMEOUT, proxy=self._proxy)
         return self._stream_client
 
     def _short(self) -> httpx.AsyncClient:
         if self._short_client is None:
-            self._short_client = httpx.AsyncClient(timeout=SHORT_TIMEOUT,
-                                                   trust_env=False)
+            self._short_client = build_client(timeout=SHORT_TIMEOUT, proxy=self._proxy)
         return self._short_client
 
     async def aclose(self) -> None:

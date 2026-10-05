@@ -36,6 +36,7 @@ from ...provider.base import (
     Model,
     Quota,
 )
+from ...provider.proxy import build_client
 from . import events as kilo_events
 
 # 上游端点（公开事实，非用户可配置输入）
@@ -91,19 +92,21 @@ class KiloClient:
         host: str = KILO_HOST,
         stream_client: httpx.AsyncClient | None = None,
         short_client: httpx.AsyncClient | None = None,
+        proxy: str | None = None,
     ) -> None:
         self.host = host.rstrip("/")
         self._stream_client = stream_client
         self._short_client = short_client
+        self._proxy = proxy
 
     def _stream(self) -> httpx.AsyncClient:
         if self._stream_client is None:
-            self._stream_client = httpx.AsyncClient(timeout=STREAM_TIMEOUT, trust_env=False)
+            self._stream_client = build_client(timeout=STREAM_TIMEOUT, proxy=self._proxy)
         return self._stream_client
 
     def _short(self) -> httpx.AsyncClient:
         if self._short_client is None:
-            self._short_client = httpx.AsyncClient(timeout=SHORT_TIMEOUT, trust_env=False)
+            self._short_client = build_client(timeout=SHORT_TIMEOUT, proxy=self._proxy)
         return self._short_client
 
     async def aclose(self) -> None:

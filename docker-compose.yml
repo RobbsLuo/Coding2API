@@ -116,6 +116,8 @@ services:
       CONTEXT_COMPRESS_SAFETY_RATIO: ${CONTEXT_COMPRESS_SAFETY_RATIO:-0.95}
       # 跨渠道 fallback 兼容组：主渠道全不可用时按组回退到同义模型（留空关闭）
       MODEL_FALLBACK_GROUPS: ${MODEL_FALLBACK_GROUPS:-}
+      # 按渠道出站代理（启动期）：渠道=代理URL;渠道2=代理URL2，留空直连
+      PROVIDER_PROXIES: ${PROVIDER_PROXIES:-}
       ENABLE_DOCS: ${ENABLE_DOCS:-false}
       # 服务监听地址（容器内必须 0.0.0.0 才能被映射访问）
       HOST: ${HOST:-0.0.0.0}

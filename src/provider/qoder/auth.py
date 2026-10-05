@@ -30,6 +30,7 @@ from urllib.parse import urlencode
 import httpx
 
 from ...provider.base import AuthResult, AuthSession
+from ...provider.proxy import build_client
 from .credential import QoderCredential, credential_from_device
 from .events import (
     CLIENT_UA,
@@ -175,6 +176,7 @@ class QoderOAuth:
         website: str | None = None,
         ttl_seconds: int = AUTH_STATE_TTL_SECONDS,
         now: Any | None = None,
+        proxy: str | None = None,
     ) -> None:
         self.realm = realm
         config = get_realm_config(realm)
@@ -184,12 +186,12 @@ class QoderOAuth:
         self._machine_id = machine_id
         self._client = client
         self._now = now or (lambda: int(time.time()))
+        self._proxy = proxy
 
     @property
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0),
-                                             trust_env=False)
+            self._client = build_client(timeout=httpx.Timeout(30.0), proxy=self._proxy)
         return self._client
 
     async def aclose(self) -> None:

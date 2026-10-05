@@ -71,6 +71,10 @@ class Settings(BaseSettings):
         "https://opengw.developer.huaweicloud.com,"
         "https://codearts.huaweicloud.com"
     )
+    # 按渠道出站代理（P1-6，启动期项，见 provider/proxy.py）：格式
+    # `渠道=代理URL;渠道2=代理URL2`，协议 http/https/socks5/socks5h；留空 = 直连。
+    # 代理作用于连接池，运行中改值需重启，故不做热更。
+    provider_proxies: str = ""
 
     # 路由与调度
     default_model: str = "glm-5.2"

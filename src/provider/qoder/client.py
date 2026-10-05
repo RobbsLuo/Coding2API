@@ -45,6 +45,7 @@ from ...provider.base import (
     Quota,
     UpstreamTransportError,
 )
+from ...provider.proxy import build_client
 from . import events as qoder_events
 from .cosy import CosySession, CosySessionCache, qoder_encode
 from .credential import QoderCredential, merge_refreshed
@@ -175,6 +176,7 @@ class QoderClient:
         stream_client: httpx.AsyncClient | None = None,
         short_client: httpx.AsyncClient | None = None,
         now: Callable[[], int] | None = None,
+        proxy: str | None = None,
     ) -> None:
         self.host = host.rstrip("/")
         self.gateway = gateway.rstrip("/")
@@ -185,19 +187,18 @@ class QoderClient:
         self._short_client = short_client
         self._now = now or (lambda: int(time.time()))
         self._model_cache: dict[str, tuple[float, list[Model]]] = {}
+        self._proxy = proxy
 
     @property
     def _stream(self) -> httpx.AsyncClient:
         if self._stream_client is None:
-            self._stream_client = httpx.AsyncClient(timeout=STREAM_TIMEOUT,
-                                                    trust_env=False)
+            self._stream_client = build_client(timeout=STREAM_TIMEOUT, proxy=self._proxy)
         return self._stream_client
 
     @property
     def _short(self) -> httpx.AsyncClient:
         if self._short_client is None:
-            self._short_client = httpx.AsyncClient(timeout=SHORT_TIMEOUT,
-                                                   trust_env=False)
+            self._short_client = build_client(timeout=SHORT_TIMEOUT, proxy=self._proxy)
         return self._short_client
 
     async def aclose(self) -> None:
