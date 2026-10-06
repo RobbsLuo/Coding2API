@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Check, Copy, KeyRound, Plus, RefreshCw, UserRoundCheck, UserRoundX } from "lucide-react";
+import { Check, Copy, KeyRound, Plus, RefreshCw, UserRoundCheck, UserRoundX, X } from "lucide-react";
 import { api, ApiError } from "../api/client";
 import { formatTime } from "../api/display";
 import { useSessionContext } from "../Layout";
@@ -71,6 +71,8 @@ export function UsersPage() {
   const [issued, setIssued] = useState<ActivationIssued | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // 新建用户收进对话框（低频动作不常驻占屏），由「全部用户」右上角触发
+  const [createOpen, setCreateOpen] = useState(false);
 
   const create = useUserMutation(
     (args: { username: string; role: Role }) => api.createUser(args.username, args.role),
@@ -112,6 +114,7 @@ export function UsersPage() {
       setIssued(result);
       setUsername("");
       setRole("viewer");
+      setCreateOpen(false);
     } catch (caught) {
       report(caught, "创建失败：用户名可能已存在，或角色非法。");
     }
@@ -162,52 +165,35 @@ export function UsersPage() {
         icon={<KeyRound className="size-5" />}
       />
 
-      <Panel title="新建用户">
-        <form onSubmit={submitCreate} className="flex flex-wrap items-end gap-3">
-          <div className="w-56">
-            <Field label="用户名">
-              <Input
-                value={username}
-                data-testid="new-user-name"
-                placeholder="例如 alice"
-                autoComplete="off"
-                onChange={(event) => setUsername(event.target.value)}
-              />
-            </Field>
-          </div>
-          <div className="w-44">
-            <Field label="角色">
-              <Select
-                value={role}
-                data-testid="new-user-role"
-                onChange={(event) => setRole(event.target.value as Role)}
-              >
-                {ROLE_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          </div>
-          <Button type="submit" variant="primary" disabled={create.isPending || !username.trim()}>
-            <Plus className="mr-1 size-4" />
-            创建
-          </Button>
-        </form>
-        {error && (
-          <div className="mt-3" data-testid="users-error" role="alert">
-            <Notice tone="danger">{error}</Notice>
-          </div>
-        )}
-      </Panel>
+      {/* 表格操作（改角色/启停/重置）的错误：对话框收起时在页面级展示；
+          新建失败则在对话框内展示（见下方对话框），两者共用 users-error 测试位 */}
+      {!createOpen && error && (
+        <div data-testid="users-error" role="alert">
+          <Notice tone="danger">{error}</Notice>
+        </div>
+      )}
 
       {/* 激活链接是一次性敏感信息：出现/消失对读屏要有感知 */}
       <div aria-live="polite">
         {issued && <TokenCard issued={issued} onDismiss={() => setIssued(null)} />}
       </div>
 
-      <Panel title="全部用户">
+      <Panel
+        title="全部用户"
+        action={
+          <Button
+            size="sm"
+            variant="primary"
+            data-testid="open-create-user-dialog"
+            onClick={() => {
+              setError(null);
+              setCreateOpen(true);
+            }}
+          >
+            <Plus className="size-4" /> 新建用户
+          </Button>
+        }
+      >
         {isLoading ? (
           <Empty>载入中…</Empty>
         ) : users.length === 0 ? (
@@ -313,6 +299,76 @@ export function UsersPage() {
         角色：{ROLE_LABELS.admin} 可管理用户与配置；{ROLE_LABELS.operator}{" "}
         可增删凭证；{ROLE_LABELS.viewer} 只读。禁用、改角色与重置密码都会立即使其所有会话失效。
       </Notice>
+
+      {createOpen && (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4"
+          onClick={() => setCreateOpen(false)}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="新建用户"
+            data-testid="create-user-dialog"
+            onClick={(event) => event.stopPropagation()}
+            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-background p-5 shadow-lg"
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="flex items-center gap-2 text-sm font-semibold">
+                <Plus className="size-4 text-muted-foreground" />
+                新建用户
+              </h2>
+              <Button
+                size="icon"
+                variant="ghost"
+                aria-label="关闭"
+                data-testid="create-user-close"
+                onClick={() => setCreateOpen(false)}
+              >
+                <X className="size-4" />
+              </Button>
+            </div>
+            <form onSubmit={submitCreate} className="space-y-3">
+              <Field label="用户名">
+                <Input
+                  value={username}
+                  data-testid="new-user-name"
+                  placeholder="例如 alice"
+                  autoComplete="off"
+                  onChange={(event) => setUsername(event.target.value)}
+                />
+              </Field>
+              <Field label="角色">
+                <Select
+                  value={role}
+                  data-testid="new-user-role"
+                  onChange={(event) => setRole(event.target.value as Role)}
+                >
+                  {ROLE_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              {error && (
+                <div data-testid="users-error" role="alert">
+                  <Notice tone="danger">{error}</Notice>
+                </div>
+              )}
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="ghost" onClick={() => setCreateOpen(false)}>
+                  取消
+                </Button>
+                <Button type="submit" variant="primary" disabled={create.isPending || !username.trim()}>
+                  <Plus className="mr-1 size-4" />
+                  创建
+                </Button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -81,6 +81,7 @@ describe("UsersPage", () => {
     });
     renderPage(<UsersPage />, { username: "root", is_admin: true });
     await settle();
+    await openCreateUserDialog();
 
     await userEvent.type(screen.getByTestId("new-user-name"), "newbie");
     await userEvent.click(screen.getByRole("button", { name: /创建/ }));
@@ -104,6 +105,7 @@ describe("UsersPage", () => {
     });
     renderPage(<UsersPage />, { username: "root", is_admin: true });
     await settle();
+    await openCreateUserDialog();
     await userEvent.type(screen.getByTestId("new-user-name"), "alice");
     await userEvent.click(screen.getByRole("button", { name: /创建/ }));
     expect(await screen.findByTestId("users-error")).toHaveTextContent("创建失败");
@@ -205,4 +207,23 @@ describe("UsersPage", () => {
     await userEvent.click(screen.getByTestId("reset-alice"));
     expect(await screen.findByTestId("users-error")).toHaveTextContent("重置密码失败");
   });
+
+  it("新建用户收在对话框：右上角按钮打开，取消可关闭", async () => {
+    stubFetch({ "GET /api/users": () => jsonResponse(USERS) });
+    renderPage(<UsersPage />, { username: "root", is_admin: true });
+    await settle();
+
+    // 表单默认不在页面上，点右上角按钮才出现
+    expect(screen.queryByTestId("new-user-name")).not.toBeInTheDocument();
+    await openCreateUserDialog();
+
+    await userEvent.click(screen.getByTestId("create-user-close"));
+    expect(screen.queryByTestId("create-user-dialog")).not.toBeInTheDocument();
+  });
 });
+
+/** 打开「新建用户」对话框（由「全部用户」右上角按钮触发）。 */
+async function openCreateUserDialog() {
+  await userEvent.click(screen.getByTestId("open-create-user-dialog"));
+  expect(await screen.findByTestId("create-user-dialog")).toBeInTheDocument();
+}
