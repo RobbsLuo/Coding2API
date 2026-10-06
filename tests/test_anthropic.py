@@ -300,6 +300,22 @@ def test_parse_rejects_bad_max_tokens_and_stop_sequences():
         parse_messages_request(_body(stop_sequences="x"))
 
 
+def test_parse_rejects_out_of_range_and_non_finite_numbers():
+    """M4：负数/超大 max_tokens、NaN/Inf 采样参数在入站即 400，不透传给上游。"""
+    with pytest.raises(InvalidRequest, match="between 1 and"):
+        parse_messages_request(_body(max_tokens=-1))
+    with pytest.raises(InvalidRequest, match="between 1 and"):
+        parse_messages_request(_body(max_tokens=10**9))
+    with pytest.raises(InvalidRequest, match="must be a finite number"):
+        parse_messages_request(_body(temperature=float("nan")))
+    with pytest.raises(InvalidRequest, match="must be a number"):
+        parse_messages_request(_body(top_p="hot"))
+    with pytest.raises(InvalidRequest, match="temperature must be <="):
+        parse_messages_request(_body(temperature=99999))
+    with pytest.raises(InvalidRequest, match="array of strings"):
+        parse_messages_request(_body(stop_sequences=["ok", 1]))
+
+
 # --------------------------------------------------------------- 出口翻译
 
 def _drain(*events: Event, model: str = "glm-5.2") -> tuple[AnthropicStreamTranslator, list[str]]:

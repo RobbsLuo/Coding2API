@@ -241,9 +241,15 @@ class Scheduler:
         )
         return chosen[0].credential_id
 
-    def should_rotate(self, tried: set[str]) -> bool:
-        """还能继续换号吗（≤ max_rotate 次尝试）。"""
-        return len(tried) < self.max_rotate
+    def should_rotate(self, attempts: int) -> bool:
+        """还能继续换号吗（已真正尝试 < max_rotate 次）。
+
+        入参是**实际打过的凭证数**，不是 `tried` 集合大小：INVALID 时
+        `_skip_provider` 会把该上游全部凭证塞进 `tried`（只用于排除候选），
+        用集合大小当预算会让「一个不认模型的上游占满 3 个名额」，从而永远
+        试不到真正持有该模型的上游（H2）。
+        """
+        return attempts < self.max_rotate
 
     # ------------------------------------------------------------ 结果反馈
 

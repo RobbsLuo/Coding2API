@@ -74,7 +74,12 @@ export function Layout({ session }: { session: SessionInfo }) {
   const [changingPassword, setChangingPassword] = useState(false);
   const location = useLocation();
   const logout = async () => {
-    await fetch("/api/auth/logout", { method: "POST", credentials: "same-origin" });
+    await fetch("/api/auth/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      // CSRF 纵深：写请求带自定义头（与 api/client.ts 一致）
+      headers: { "X-Requested-With": "XMLHttpRequest" },
+    });
     window.location.href = "/login";
   };
   // 非管理员看不到用户管理/审计/配置：写接口是 admin-only，露出入口只会误导

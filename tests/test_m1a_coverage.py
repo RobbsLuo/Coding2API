@@ -414,6 +414,65 @@ def test_parse_frames_sync_handles_crlf():
     assert parse_frames("event: x\r\ndata: 1\r\n\r\n")[0].data == "1"
 
 
+def test_body_hint_truncates_with_marker():
+    """M1/M2：错误体摘要超限时明确标注截断，且单行化。"""
+    from src.provider.base import body_hint
+
+    assert body_hint(b"") == ""
+    assert body_hint(b"a\n b") == "a b"
+    hint = body_hint(b"x" * 5000)
+    assert hint.endswith("…[truncated]")
+    assert hint.startswith("x" * 100)
+
+
+async def test_read_body_bounded_stops_at_limit():
+    """M1：非 2xx 的错误体有界读取，避免超大 body 撑爆内存。"""
+    from src.provider.base import read_body_bounded
+
+    class FakeResponse:
+        def __init__(self, chunks):
+            self._chunks = chunks
+
+        async def aiter_bytes(self):
+            for chunk in self._chunks:
+                yield chunk
+
+    response = FakeResponse([b"a" * 10, b"b" * 10, b"c" * 10])
+    body = await read_body_bounded(response, limit=15)
+    assert body == b"a" * 10 + b"b" * 5       # 达到上限即停，不再读后续块
+
+    # 未超限时读完整
+    assert await read_body_bounded(FakeResponse([b"hi"]), limit=15) == b"hi"
+
+
+async def test_iter_frames_rejects_oversized_line(monkeypatch):
+    """M1：上游持续发不含换行的大块 → 单行缓冲设上限，达到即中止该流。"""
+    from src.engine import sse
+
+    monkeypatch.setattr(sse, "MAX_SSE_LINE_BYTES", 16)
+
+    async def gen():
+        yield b"data: " + b"x" * 100          # 无换行，超过上限
+
+    with pytest.raises(sse.SSEFrameTooLarge, match="SSE line exceeds"):
+        [f async for f in iter_frames(gen())]
+
+
+async def test_iter_frames_rejects_oversized_frame(monkeypatch):
+    """M1：endless `data:` 行且不给空行 → 单帧累积设上限。"""
+    from src.engine import sse
+
+    monkeypatch.setattr(sse, "MAX_SSE_FRAME_CHARS", 16)
+
+    async def gen():
+        # 每行都短，但同一帧里累积越过上限（中间没有空行成帧）
+        yield b"data: 111111111\n"
+        yield b"data: 222222222\n"
+
+    with pytest.raises(sse.SSEFrameTooLarge, match="frame exceeds"):
+        [f async for f in iter_frames(gen())]
+
+
 # --------------------------------------------------------------- callback
 
 def test_callback_with_double_encoded_user_info():

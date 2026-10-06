@@ -50,7 +50,13 @@ async def security_middleware(request: Request, call_next):
     response = await call_next(request)
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
-    response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    # CSP：除防嵌套外，补 object/base-uri/form-action 限制（L8 纵深防御）。
+    # 未加 script-src：index.html 用一段内联脚本在挂载前读取主题（避免暗色
+    # 白屏闪烁），收紧 script-src 需为其配 hash/nonce，收益与破坏面不成正比。
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; "
+        "form-action 'self'")
     if request.app.state.settings.public_base_url.startswith("https://"):
         # 仅 https 部署下发 HSTS：明文部署发了无意义，还会预锁本地 http 访问
         response.headers.setdefault("Strict-Transport-Security",

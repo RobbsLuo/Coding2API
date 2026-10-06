@@ -10,6 +10,18 @@ const LOGIN_PROVIDERS: Provider[] = ["codebuddy", "trae", "qoder", "codearts"];
 
 type TabValue = "login" | "import";
 
+/** 只允许 http(s) 授权地址：上游返回的 auth_url 若为 `javascript:` / `data:`
+ * 等被赋给弹窗 location 会在弹窗（继承本页 origin）执行脚本（M5）。 */
+function safeAuthUrl(raw: string | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * 添加凭证对话框：登录渠道 / JSON 导入两分区 + 免费层一键补回。
  *
@@ -82,13 +94,21 @@ export function AddCredentialDialog({
     // 先同步开一个占位窗口：window.open 若在 await 之后才调用，
     // 会脱离用户手势上下文而被浏览器弹窗拦截。
     const popup = window.open("", "_blank");
+    if (popup) popup.opener = null;               // 切断对管理台 window 的引用（M5）
     try {
       const started = await api.upstreamStart(provider);
       loginStatesRef.current[provider] = started.state;
-      if (started.auth_url && popup && !popup.closed) {
-        popup.location.href = started.auth_url;
-      } else if (popup) {
-        popup.close();                         // 失败时关掉空白占位窗
+      if (!started.auth_url) {
+        popup?.close();                        // 上游没给授权地址：关掉空白占位窗
+      } else {
+        const authUrl = safeAuthUrl(started.auth_url);
+        if (!authUrl) {
+          popup?.close();
+          delete loginStatesRef.current[provider];
+          onError("授权地址无效，已中止登录。");
+          return;
+        }
+        if (popup && !popup.closed) popup.location.href = authUrl;
       }
       setLoginProviders((previous) => [...new Set([...previous, provider])]);
 

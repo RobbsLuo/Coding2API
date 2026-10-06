@@ -51,7 +51,9 @@ def create_router(services: Services) -> APIRouter:
                            username: str | None = None, since: int | None = None,
                            before: int | None = None, limit: int = 50):
         # 明细保留 90 天；单页上限 200，防止一次拉爆
+        # 凭证昵称来自共享池：仅 admin/operator 可见（M7），viewer 只看自己的记录
         return stats_query.events(username=_scope(principal, username), since=since,
-                                  before=before, limit=max(1, min(limit, 200)))
+                                  before=before, limit=max(1, min(limit, 200)),
+                                  include_credential_name=principal.is_operator)
 
     return router

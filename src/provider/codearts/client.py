@@ -315,7 +315,7 @@ class CodeArtsClient:
         snapshot = codearts_events.TextSnapshot()
         async with self._stream().stream("POST", url, content=raw, headers=headers) as response:
             if response.status_code >= 400:
-                body_bytes = await response.aread()
+                body_bytes = await base.read_body_bounded(response)
                 raise UpstreamHTTPError(response.status_code, body_bytes)
             async for line in codearts_events.iter_data_lines(response.aiter_bytes()):
                 for event in codearts_events.parse_line(line, snapshot):

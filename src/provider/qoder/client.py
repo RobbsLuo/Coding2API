@@ -242,7 +242,8 @@ class QoderClient:
         async with self._stream.stream("POST", url, content=encoded.encode("utf-8"),
                                        headers=headers) as response:
             if response.status_code >= 400:
-                raise UpstreamHTTPError(response.status_code, await response.aread())
+                raise UpstreamHTTPError(response.status_code,
+                                        await base.read_body_bounded(response))
             async for frame in iter_frames(response.aiter_bytes()):
                 for event in self._decode_frame(frame):
                     yield event

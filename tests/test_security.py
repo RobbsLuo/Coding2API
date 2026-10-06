@@ -193,7 +193,9 @@ def test_security_headers_present(app):
     assert response.status_code == 200
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"
-    assert response.headers["content-security-policy"] == "frame-ancestors 'none'"
+    assert response.headers["content-security-policy"] == (
+        "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; "
+        "form-action 'self'")
 
 
 def test_hsts_only_for_https_deployments(tmp_path):

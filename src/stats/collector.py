@@ -6,6 +6,7 @@ credit 为上游可选字段，两边都经常为 None。
 
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from dataclasses import dataclass
@@ -244,5 +245,8 @@ def _float_or_none(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     numeric = float(value)
-    return numeric if numeric >= 0 else None
+    # 拒绝 NaN/Inf：它们会进 SQLite 聚合，合法行一旦被污染就再也回不来（L1）。
+    if not math.isfinite(numeric) or numeric < 0:
+        return None
+    return numeric
 

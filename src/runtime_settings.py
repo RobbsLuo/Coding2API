@@ -23,10 +23,12 @@
 from __future__ import annotations
 
 import logging
+import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
+from urllib.parse import urlparse
 
 from .config import Settings
 
@@ -208,6 +210,11 @@ def parse_value(key: str, raw: str) -> Any:
     return _coerce(spec, raw)
 
 
+# 字符串类热更项的字符上限（L7）：模型名/黑名单/webhook 地址都是短文本。
+# 取 64 KiB：远超任何合法配置，只拦粘贴事故级别的畸形写入。
+MAX_STRING_SETTING_LENGTH = 64 * 1024
+
+
 def _coerce(spec: HotSetting, raw: Any) -> Any:
     """按白名单类型解析并做范围校验（bool 必须先于 int 判断）。"""
     text = raw if isinstance(raw, str) else str(raw)
@@ -223,13 +230,46 @@ def _coerce(spec: HotSetting, raw: Any) -> Any:
     except (TypeError, ValueError) as error:
         raise InvalidSetting(
             f"{spec.key} 期望 {spec.kind.__name__}，收到 {raw!r}") from error
+    # NaN 与任何数比较都为 False，会同时绕过下面的 minimum / maximum；±inf 对
+    # 未设 maximum 的 float 项（各 *_chat_min_interval、pacer_min/max_seconds、
+    # codearts_request_window_seconds）也直接通过。非有限值一律拒——例如
+    # pacer_min_seconds=inf 会让 Pacer 持锁永久挂起、后台任务全卡死，
+    # *_chat_min_interval=nan 会静默关闭节流（见 tasks/pacer.py）。
+    if spec.kind is float and not math.isfinite(value):
+        raise InvalidSetting(f"{spec.key} 必须是有限数值，收到 {raw!r}")
     if spec.kind is str and not value.strip() and spec.key == "default_model":
         raise InvalidSetting("default_model 不能为空")
+    # 字符串类热更项设长度上限（L7）：模型名/黑名单/地址都是短文本，无上限时
+    # 一个粘贴事故就能把 MB 级文本写进 DB 并每请求读取。非字符串输入经 str()
+    # 强转（如 dict → "{'a': 1}"），上限同时也拦住这类畸形写入。
+    if spec.kind is str and len(value) > MAX_STRING_SETTING_LENGTH:
+        raise InvalidSetting(
+            f"{spec.key} 不能超过 {MAX_STRING_SETTING_LENGTH} 字符")
     if spec.minimum is not None and value < spec.minimum:
         raise InvalidSetting(f"{spec.key} 不能小于 {spec.minimum}")
     if spec.maximum is not None and value > spec.maximum:
         raise InvalidSetting(f"{spec.key} 不能大于 {spec.maximum}")
+    if spec.key == "alert_webhook_url":
+        _validate_webhook_urls(value)
     return value
+
+
+# 告警 webhook 只允许 http/https：地址由 admin 配置（受信边界），但仍不能是
+# `file:` / `javascript:` 等 scheme——它会被后台任务直接 httpx POST（M6）。
+WEBHOOK_SCHEMES = ("http", "https")
+MAX_WEBHOOK_ENTRIES = 16
+
+
+def _validate_webhook_urls(raw: str) -> None:
+    entries = [item.strip() for item in raw.split(",") if item.strip()]
+    if len(entries) > MAX_WEBHOOK_ENTRIES:
+        raise InvalidSetting(
+            f"alert_webhook_url 最多 {MAX_WEBHOOK_ENTRIES} 个地址")
+    for entry in entries:
+        scheme = urlparse(entry).scheme.lower()
+        if scheme not in WEBHOOK_SCHEMES:
+            raise InvalidSetting(
+                f"alert_webhook_url 只支持 http/https，收到 {entry!r}")
 
 
 def _parse_bool(text: str) -> bool:

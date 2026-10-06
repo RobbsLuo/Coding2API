@@ -85,4 +85,24 @@ describe("AddCredentialDialog", () => {
     expect(props.onImported).toHaveBeenCalledWith("登录成功，凭证已保存。");
     vi.useRealTimers();
   });
+
+  it("拒绝非 http(s) 授权地址，不对弹窗赋值（M5）", async () => {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/upstream/start")) {
+        return jsonResponse({ flow: "poll", state: "s",
+                              auth_url: "javascript:alert(1)", interval: 5 });
+      }
+      return jsonResponse({ credentials: [], viewer: "root", is_admin: true });
+    }));
+    const popup = { closed: false, close: vi.fn(), opener: {}, location: { href: "" } };
+    vi.stubGlobal("open", () => popup);
+    const props = renderDialog();
+    await userEvent.click(screen.getByTestId("start-login-codebuddy"));
+
+    expect(popup.location.href).toBe("");        // 恶意 scheme 绝不赋值
+    expect(popup.close).toHaveBeenCalled();
+    expect(popup.opener).toBeNull();             // opener 已切断
+    expect(props.onError).toHaveBeenCalledWith("授权地址无效，已中止登录。");
+  });
 });

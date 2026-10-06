@@ -116,6 +116,27 @@ async def test_continues_on_length_and_accumulates_usage():
 
 
 @pytest.mark.asyncio
+async def test_usage_reported_before_continuation_round():
+    """M3：每轮结束先补发一条累计 usage，客户端在第一轮后续写途中断开也能记账。"""
+    provider = _FakeProvider([
+        [Event(kind=EventKind.CONTENT, content="part1"),
+         Event(kind=EventKind.USAGE, usage=Usage(input_tokens=10, output_tokens=5)),
+         Event(kind=EventKind.FINISH, finish_reason="length")],
+        [Event(kind=EventKind.CONTENT, content="part2"),
+         Event(kind=EventKind.FINISH, finish_reason="stop")],
+    ])
+    stream = ContinuationStream(provider, {}, {"messages": []}, "m", max_continues=10)
+    seen: list[Usage] = []
+    async for event in stream:
+        if event.kind is EventKind.USAGE:
+            seen.append(event.usage)
+        if len(seen) == 1:            # 拿到第一轮累计 usage 就断开，模拟客户端中途退出
+            break
+    assert len(seen) == 1
+    assert seen[0].input_tokens == 10 and seen[0].output_tokens == 5
+
+
+@pytest.mark.asyncio
 async def test_continuation_stops_at_limit():
     rounds = [
         [Event(kind=EventKind.CONTENT, content=f"p{i}"),
@@ -151,8 +172,10 @@ async def test_reasoning_only_round_is_forwarded_and_continued():
     ])
     stream = ContinuationStream(provider, {}, {"messages": []}, "m", max_continues=5)
     events = await _collect(stream)
+    # 续写前先补发一条「已完成轮次」的累计 usage（M3：中途断开的记账依据），
+    # 之后是第二轮正文，最后再补一条终局累计 usage
     assert [e.kind for e in events if e.kind is not EventKind.FINISH] == [
-        EventKind.REASONING, EventKind.CONTENT, EventKind.USAGE]
+        EventKind.REASONING, EventKind.USAGE, EventKind.CONTENT, EventKind.USAGE]
     assert provider.payloads[1]["messages"][-2]["reasoning_content"] == "thinking"
 
 

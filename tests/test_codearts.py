@@ -111,6 +111,12 @@ def test_signer_canonical_headers_lowercases_and_sorts_all_headers():
     assert signed == "a;content-type;x-b"
 
 
+def test_signer_canonical_headers_strips_crlf():
+    """L5：头值里的 CR/LF 会破坏 canonical request 的换行结构，必须剥离。"""
+    canonical, _ = signer.canonical_headers({"A": "x\r\ny"})
+    assert canonical == "a:xy\n"
+
+
 def test_signer_fixed_vector_canonical_request_and_string_to_sign():
     payload = b'{"a":1}'
     payload_hash = signer.sha256_hex(payload)
@@ -1246,6 +1252,19 @@ async def test_events_iter_data_lines_multibyte_split_across_chunks():
     raw = "data: {\"text\": \"中文\"}\n".encode()
     lines = [line async for line in _lines([raw[:12], raw[12:]])]
     assert lines == ['{"text": "中文"}']
+
+
+async def test_events_iter_data_lines_rejects_oversized_line(monkeypatch):
+    """M1：CodeArts 行缓冲同样有上限，上游不吐换行时中止该流。"""
+    from src.engine import sse
+
+    monkeypatch.setattr(codearts_events, "MAX_DATA_LINE_CHARS", 8)
+
+    async def gen():
+        yield b"data: " + b"x" * 100
+
+    with pytest.raises(sse.SSEFrameTooLarge, match="CodeArts data line"):
+        [line async for line in codearts_events.iter_data_lines(gen())]
 
 
 def test_events_parse_line_content_finish_reasoning_usage():

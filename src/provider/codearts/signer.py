@@ -73,11 +73,21 @@ def canonical_query(raw_query: str) -> str:
 
 
 def canonical_headers(headers: Mapping[str, str]) -> tuple[str, str]:
-    """全部头 → (canonicalHeaders 文本, signedHeaders 分号串)。"""
-    lowered = {str(key).lower(): str(value) for key, value in headers.items()}
+    """全部头 → (canonicalHeaders 文本, signedHeaders 分号串)。
+
+    头值先去首尾空白并**剥离 CR/LF**（L5 纵深防御）：签名串以换行分隔字段，
+    值里混入换行会改变 canonical request 的结构；实际头值均来自本服务构造，
+    这里只作最后一道防线。
+    """
+    lowered = {str(key).lower(): _clean_header_value(value)
+               for key, value in headers.items()}
     keys = sorted(lowered)
-    canonical = "".join(f"{key}:{lowered[key].strip()}\n" for key in keys)
+    canonical = "".join(f"{key}:{lowered[key]}\n" for key in keys)
     return canonical, ";".join(keys)
+
+
+def _clean_header_value(value: object) -> str:
+    return str(value).replace("\r", "").replace("\n", "").strip()
 
 
 def canonical_request(method: str, path: str, raw_query: str,

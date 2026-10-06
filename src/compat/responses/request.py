@@ -24,7 +24,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..openai.request import ChatRequest, InvalidRequest
+from ..openai.request import (
+    MAX_OUTPUT_TOKENS,
+    MAX_TEMPERATURE,
+    ChatRequest,
+    InvalidRequest,
+    require_finite_number,
+    require_positive_int,
+)
 
 # Responses 里合法但本网关无法无损转成 chat 的 input item 类型。
 # 依据 openai/codex（codex-rs/protocol/src/models.rs 的 ResponseItem 与
@@ -268,14 +275,19 @@ def parse_responses_request(body: Any) -> ChatRequest:
             upstream["tools"] = mapped
     for key in ("temperature", "top_p"):
         if key in body:
-            upstream[key] = body[key]
+            value = require_finite_number(body[key], key)
+            if key == "temperature" and value > MAX_TEMPERATURE:
+                raise InvalidRequest(f"temperature must be <= {MAX_TEMPERATURE}")
+            upstream[key] = value
     if "tool_choice" in body:
         upstream["tool_choice"] = _map_tool_choice(body["tool_choice"])
     if isinstance(body.get("parallel_tool_calls"), bool):
         upstream["parallel_tool_calls"] = body["parallel_tool_calls"]
-    if isinstance(body.get("max_output_tokens"), int):
+    if "max_output_tokens" in body and body["max_output_tokens"] is not None:
         # CB 上游只认 max_tokens（max_completion_tokens 被忽略，TECHNICAL §3.4）
-        upstream["max_tokens"] = body["max_output_tokens"]
+        upstream["max_tokens"] = require_positive_int(
+            body["max_output_tokens"], "max_output_tokens",
+            maximum=MAX_OUTPUT_TOKENS)
     reasoning = body.get("reasoning")
     if isinstance(reasoning, dict) and isinstance(reasoning.get("effort"), str):
         upstream["reasoning_effort"] = reasoning["effort"]

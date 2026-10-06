@@ -159,6 +159,23 @@ def test_tool_choice_strings_pass_through():
         assert parsed.raw["tool_choice"] == value
 
 
+def test_rejects_non_finite_sampling_and_bad_max_output_tokens():
+    """M4：NaN/Inf 采样参数与越界 max_output_tokens 在入站即 400。"""
+    with pytest.raises(InvalidRequest, match="must be a finite number"):
+        parse_responses_request({"input": "hi", "temperature": float("inf")})
+    with pytest.raises(InvalidRequest, match="must be a number"):
+        parse_responses_request({"input": "hi", "top_p": "x"})
+    with pytest.raises(InvalidRequest, match="temperature must be <="):
+        parse_responses_request({"input": "hi", "temperature": 99999})
+    with pytest.raises(InvalidRequest, match="max_output_tokens"):
+        parse_responses_request({"input": "hi", "max_output_tokens": 0})
+    with pytest.raises(InvalidRequest, match="max_output_tokens"):
+        parse_responses_request({"input": "hi", "max_output_tokens": 10**9})
+    # bool 是 int 子类，不能当合法上限透传
+    with pytest.raises(InvalidRequest, match="max_output_tokens"):
+        parse_responses_request({"input": "hi", "max_output_tokens": True})
+
+
 def test_empty_tools_are_omitted():
     request = parse_responses_request({"input": "hi", "tools": []})
     assert "tools" not in request.raw

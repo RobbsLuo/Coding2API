@@ -405,4 +405,6 @@ it("创建 Key 收在对话框：右上角按钮打开，创建成功后展示�
   await userEvent.click(screen.getByRole("button", { name: "我已保存" }));
   expect(screen.queryByTestId("create-key-dialog")).not.toBeInTheDocument();
   expect(screen.queryByTestId("new-key-plaintext")).not.toBeInTheDocument();
+  // L3：关闭后明文从页面内存抹掉，接入面板不再残留该 Key
+  expect(screen.queryByText(/sk-dialog-key/)).not.toBeInTheDocument();
 });

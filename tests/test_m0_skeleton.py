@@ -369,10 +369,12 @@ def test_select_returns_none_when_empty():
 
 
 def test_should_rotate_respects_max():
+    # 入参是「实际尝试次数」而非 tried 集合大小：被 _skip_provider 排除、
+    # 从未打过的上游不能占满轮换预算（H2）。
     s = Scheduler(max_rotate=3)
-    assert s.should_rotate(set())
-    assert s.should_rotate({"a", "b"})
-    assert not s.should_rotate({"a", "b", "c"})
+    assert s.should_rotate(0)
+    assert s.should_rotate(2)
+    assert not s.should_rotate(3)
 
 
 def test_note_error_dead_disables():

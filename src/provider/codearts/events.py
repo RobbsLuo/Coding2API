@@ -29,6 +29,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from ...engine.sse import MAX_SSE_LINE_BYTES as MAX_DATA_LINE_CHARS
+from ...engine.sse import SSEFrameTooLarge
 from ...provider.base import (
     ErrKind,
     Event,
@@ -112,12 +114,16 @@ class TextSnapshot:
 async def iter_data_lines(chunks: AsyncIterator[bytes]) -> AsyncIterator[str]:
     """字节流 → 逐行 `data:` 载荷（也有空行分隔，逐行读取天然跳过它们）。
 
-    增量 UTF-8 解码，避免多字节字符被块边界切断后变成替换字符。
+    增量 UTF-8 解码，避免多字节字符被块边界切断后变成替换字符。单行缓冲设
+    上限：上游一直不吐换行时 buffer 会无界增长（同 engine/sse.py 的防护）。
     """
     decoder = codecs.getincrementaldecoder("utf-8")("strict")
     buffer = ""
     async for chunk in chunks:
         buffer += decoder.decode(chunk)
+        if len(buffer) > MAX_DATA_LINE_CHARS:
+            raise SSEFrameTooLarge(
+                f"CodeArts data line exceeds {MAX_DATA_LINE_CHARS} characters")
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
             payload = _data_payload(line)

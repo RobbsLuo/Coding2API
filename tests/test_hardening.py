@@ -84,6 +84,19 @@ def test_playground_malformed_json_body_is_400(client):
     assert response.status_code == 400
 
 
+def test_nan_json_body_is_400_not_passed_upstream(client):
+    """M4：JSON 里的 NaN/Infinity（Python 默认接受）必须 400，不能透传给上游。"""
+    key = client.post("/api/api-keys", json={"name": "t"}).json()["api_key"]
+    for literal in (b'{"messages":[1],"temperature":NaN}',
+                    b'{"messages":[1],"temperature":Infinity}'):
+        response = client.post(
+            "/v1/chat/completions", content=literal,
+            headers={"Authorization": f"Bearer {key}",
+                     "Content-Type": "application/json"})
+        assert response.status_code == 400
+        assert response.json()["error"]["code"] == "invalid_request"
+
+
 # --------------------------------------------------------- #3 请求体上限
 
 

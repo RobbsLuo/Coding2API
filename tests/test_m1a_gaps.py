@@ -132,7 +132,8 @@ async def test_complete_rotates_then_exhausts(tmp_path):
     with pytest.raises(NoHealthyCredential) as caught:
         await executor.complete(parse_chat_request(
             {"messages": [{"role": "user", "content": "hi"}]}))
-    assert "upstream" in str(caught.value)          # last_error 被拼进消息
+    # M2：只带受控标识（异常类名），不回显上游正文
+    assert "PlanError" in str(caught.value) and "exhausted" not in str(caught.value)
     db.close()
 
 
@@ -468,10 +469,11 @@ def test_unavailable_text_prefers_model_scoped_wording(tmp_path):
         model_suggestions=lambda _name: ["other-model"]))
     target = resolve("glm-5.2", "glm-5.2")
     assert executor._all_model_cooled(target) is True
-    # 带 last_error：附在文案尾部便于排查
+    # 带 last_error：只附受控标识（异常类名），不回显上游正文（M2）
     text = executor._unavailable_text(target, RuntimeError("boom"))
     assert "temporarily unavailable on upstream" in text
-    assert "boom" in text
+    assert "RuntimeError" in text
+    assert "boom" not in text
     # 无 last_error：不带冒号细节；建议始终附上
     text = executor._unavailable_text(target, None)
     assert "temporarily unavailable on upstream" in text
@@ -669,7 +671,7 @@ async def test_complete_rotation_exhausted_after_classified_error(tmp_path):
     with pytest.raises(NoHealthyCredential) as caught:
         await executor.complete(parse_chat_request(
             {"messages": [{"role": "user", "content": "hi"}]}))
-    assert "upstream" in str(caught.value)
+    assert "SoftError" in str(caught.value) and "rate limit" not in str(caught.value)
     db.close()
 
 
@@ -796,7 +798,7 @@ async def test_stream_rotation_budget_exhausted_with_last_error(tmp_path):
     executor = _executor(credentials, _Provider([[SoftError()]]), max_rotate=1)
     chunks = [c async for c in executor.stream(parse_chat_request(
         {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
-    assert b"upstream soft rate limit" in chunks[-1]
+    assert b"SoftError" in chunks[-1] and b"rate limit" not in chunks[-1]
     db.close()
 
 

@@ -389,6 +389,10 @@ class Executor:
     async def _stream_loop(self, request: ChatRequest, target: ModelTarget,
                            state: _StreamState) -> AsyncIterator[bytes]:
         tried: set[str] = set()
+        # 真正打过上游的次数（与 tried 分开）：INVALID 的 _skip_provider 会把
+        # 被跳过的上游全部凭证塞进 tried，但那些都没被尝试过，不能计入轮换预算
+        # ——否则一个不认模型的上游就能占满 max_rotate，永试不到别的上游（H2）。
+        attempts = 0
         last_error: Exception | None = None
         last_kind: ErrKind | None = None
         # 本链项是否已向客户端出过响应帧：出了就绝不再换模型（半截输出不可回滚）
@@ -422,6 +426,7 @@ class Executor:
             provider_id = self._deps.credentials.provider_of(credential_id)
             state.provider, state.credential_id = provider_id or "-", credential_id
             tried.add(credential_id)
+            attempts += 1
             # 显式持有迭代器并在 finally 里关闭：下面两处 `break`（流内错误）
             # 只跳出 `async for`，不会关闭上游 async generator，provider 的
             # 节流名额归还（pacer.release 在其 finally 里）会推迟到 GC。
@@ -487,7 +492,7 @@ class Executor:
             finally:
                 # break / 异常 / 客户端断开都走到这里：同步归还节流名额
                 await aclose_stream(iterator)
-            if not self._deps.scheduler.should_rotate(tried):
+            if not self._deps.scheduler.should_rotate(attempts):
                 if last_kind is ErrKind.INVALID:
                     # 流已开始（200 已发出），以 invalid_request 错误帧结束
                     yield terminal(
@@ -573,6 +578,9 @@ class Executor:
                               username: str) -> dict[str, Any]:
         """单个模型的非流式执行（原 complete 主体）。"""
         tried: set[str] = set()
+        # 真正打过的凭证数（与 tried 分开），理由同 _stream_loop：INVALID 的
+        # _skip_provider 把上游全部凭证塞进 tried 只为排除候选，不计轮换预算（H2）。
+        attempts = 0
         last_error: Exception | None = None
         last_kind: ErrKind | None = None
         started = time.monotonic()
@@ -599,6 +607,7 @@ class Executor:
                     self._unavailable_text(target, last_error))
             credential_id, credential_data = pick
             tried.add(credential_id)
+            attempts += 1
             provider_id = self._deps.credentials.provider_of(credential_id)
             last_provider, last_credential = provider_id or "-", credential_id
             events: list[Event] = []
@@ -693,7 +702,7 @@ class Executor:
                     return result
             finally:
                 await aclose_stream(iterator)
-            if not self._deps.scheduler.should_rotate(tried):
+            if not self._deps.scheduler.should_rotate(attempts):
                 if last_kind is ErrKind.INVALID:
                     raise InvalidRequest(_reject_message(
                         target.model, last_error, self._suggestions(target.model)))
@@ -880,11 +889,31 @@ def _classify(error: Exception) -> ErrKind | None:
     return None
 
 
+def _error_summary(error: Exception | None) -> str:
+    """对外错误文案里的错误标识：**只给受控分类，不回显上游正文**（M2）。
+
+    上游错误体可能包含上游内部 schema、请求回显，甚至（若上游回显请求头）
+    credential/token 片段；透传给任意 API 消费者等于信息泄露。完整正文只进
+    服务端日志（见各 provider 的 warning）。这里给调用方可据以行动的短标识：
+    HTTP 状态码 / 上游业务码 / 异常类名。
+    """
+    if error is None:
+        return ""
+    status = getattr(error, "status", None)
+    if isinstance(status, int) and status > 0:
+        return f"upstream status {status}"
+    code = getattr(error, "error_code", None)
+    if code:
+        return f"upstream code {code}"
+    return type(error).__name__
+
+
 def _unavailable_message(last_error: Exception | None) -> str:
-    """503 文案：带上最后一次错误便于排查（Q21=C 扁平路由下这是唯一线索）。"""
+    """503 文案：带上最后一次错误的**受控标识**便于排查（M2：不回显上游正文）。"""
     message = "all credentials unavailable"
-    if last_error is not None:
-        message += f": {last_error}"
+    summary = _error_summary(last_error)
+    if summary:
+        message += f": {summary}"
     return message
 
 
@@ -897,8 +926,9 @@ def _model_cooled_message(model: str, last_error: Exception | None,
     """
     message = (f"model {model!r} temporarily unavailable on upstream "
                f"(cooling down; retry later or use another model)")
-    if last_error is not None:
-        message += f": {last_error}"
+    summary = _error_summary(last_error)
+    if summary:
+        message += f": {summary}"
     if suggestions:
         message += f" (similar available models: {', '.join(suggestions)})"
     return message
@@ -919,8 +949,9 @@ def _usage_field(usage: object, name: str) -> object:
 
 def _reject_message(model: str, last_error: Exception | None,
                     suggestions: list[str] | None = None) -> str:
-    """所有上游都拒绝该模型时的 400 文案。"""
-    detail = f": {last_error}" if last_error is not None else ""
+    """所有上游都拒绝该模型时的 400 文案（M2：只带受控标识，不回显上游正文）。"""
+    summary = _error_summary(last_error)
+    detail = f": {summary}" if summary else ""
     message = f"model {model!r} not available on any configured upstream{detail}"
     if suggestions:
         message += f" (similar available models: {', '.join(suggestions)})"

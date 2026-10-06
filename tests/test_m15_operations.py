@@ -2082,6 +2082,18 @@ def test_stats_record_handles_negative_and_bool_tokens(stats):
     assert row["latency_ms"] is None and row["credit"] is None
 
 
+def test_stats_record_rejects_non_finite_credit(stats):
+    """L1：NaN/Inf 不进聚合（污染不可回滚），落库为 NULL。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     credit=float("inf"))
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     credit=float("nan"))
+    rows = query._db.connect().execute(
+        "SELECT credit FROM usage_events").fetchall()
+    assert [r["credit"] for r in rows] == [None, None]
+
+
 def test_stats_record_defaults_username_when_blank(stats):
     collector, query = stats
     collector.record(username="", provider="trae", model="m", ok=True)
@@ -2516,11 +2528,16 @@ def test_stats_events_include_credential_name(repo):
     collector.record(username="u", provider="codearts", model="m", ok=True,
                      credential_id=blank_id)
 
-    rows = {e["credential_id"]: e for e in query.events()["events"]}
+    rows = {e["credential_id"]: e for e in
+            query.events(include_credential_name=True)["events"]}
     assert rows[keep_id]["credential_name"] == "主号"
     assert rows[ghost_id]["credential_name"] is None        # 已删除 → 回退
     assert rows[None]["credential_name"] is None            # 无凭证
     assert rows[blank_id]["credential_name"] is None        # 空昵称 → 同回退
+
+    # M7：默认（viewer 口径）不暴露共享池昵称
+    default_rows = {e["credential_id"]: e for e in query.events()["events"]}
+    assert default_rows[keep_id]["credential_name"] is None
 
 
 def test_stats_events_endpoint_scope_and_clamp(admin_client):

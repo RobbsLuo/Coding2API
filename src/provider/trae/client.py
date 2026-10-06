@@ -344,7 +344,7 @@ class TraeClient:
             "POST", url, json=body, headers=solo_headers(credential),
         ) as response:
             if response.status_code >= 400:
-                raw = await response.aread()
+                raw = await base.read_body_bounded(response)
                 raise UpstreamHTTPError(response.status_code, raw)
             async for frame in iter_frames(response.aiter_bytes()):
                 for event in trae_events.parse_all_events(frame):

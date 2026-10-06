@@ -113,6 +113,10 @@ class ContinuationStream:
                     return
 
                 self.continues_done += 1
+                # 每轮结束先把**已完成轮次**的累计用量汇报一次（USAGE 事件不单独
+                # 成帧，只落进 translator.usage）：下一轮若客户端中途断开，记账
+                # 仍能拿到已跑完的用量，而不是退化成 0（M3）。
+                yield Event(kind=EventKind.USAGE, usage=usage)
                 self._payload = extend_payload(
                     self._payload, "".join(content_parts), "".join(reasoning_parts))
                 content_parts, reasoning_parts = [], []

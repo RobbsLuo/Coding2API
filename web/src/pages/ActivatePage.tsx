@@ -35,7 +35,11 @@ export function ActivatePage() {
     api
       .activation(token)
       .then((result) => {
-        if (!cancelled) setUsername(result.username);
+        if (cancelled) return;
+        setUsername(result.username);
+        // 令牌校验通过后立即从地址栏抹掉（L3）：留在 URL 会进浏览器历史、
+        // 可能随 Referer 外泄；此后的提交都从闭包里的 token 变量取，不依赖 URL。
+        window.history.replaceState(null, "", "/activate");
       })
       .catch(() => {
         if (!cancelled) setInvalid(true);

@@ -55,13 +55,39 @@ class ErrKind(StrEnum):
 MODEL_SCOPED_KINDS = frozenset({ErrKind.MODEL, ErrKind.BLOCKED, ErrKind.CONCURRENCY})
 
 
-def body_hint(body: bytes, limit: int = 160) -> str:
-    """上游错误响应体的单行摘要（进日志与错误文案，便于定位拒绝原因）。"""
+def body_hint(body: bytes, limit: int = 2048) -> str:
+    """上游错误响应体的单行摘要（进日志便于定位拒绝原因）。
+
+    上限默认 2048：错误信封（含嵌套 `data`）可能远超 160，截到 160 会把真正
+    的业务码/文案切掉；但也不能无界——`body` 大小本身由 BOUNDED_BODY_LIMIT
+    兜底（见 read_body_bounded）。超限时明确标注截断，避免被误读为完整响应。
+    """
     if not body:
         return ""
     text = body.decode("utf-8", errors="replace")
     text = " ".join(text.split())
-    return text[:limit]
+    if len(text) <= limit:
+        return text
+    return text[:limit] + "…[truncated]"
+
+
+# 错误响应体的读取上限：只用于生成可读诊断，超出部分丢弃。防止恶意/异常
+# 上游返回超大 body 时把代理进程读爆内存（错误路径本不需要完整正文）。
+BOUNDED_BODY_LIMIT = 256 * 1024
+
+
+async def read_body_bounded(response: Any, limit: int = BOUNDED_BODY_LIMIT) -> bytes:
+    """有界读取响应体：最多读 `limit` 字节即停止。
+
+    非 2xx 时的完整 `aread()` 无大小上限；上游（或中间盒）回一个超大 body
+    就会让每个失败请求都撑一次内存。这里只取够诊断的前缀。
+    """
+    collected = bytearray()
+    async for chunk in response.aiter_bytes():
+        collected.extend(chunk)
+        if len(collected) >= limit:
+            break
+    return bytes(collected[:limit])
 
 
 _BUSINESS_CODE_RE = re.compile(r'"code"\s*:\s*(-?\d+)')
@@ -111,6 +137,8 @@ class UpstreamHTTPError(Exception):
     def __init__(self, status: int, body: bytes) -> None:
         self.status = status
         self.body = body
+        # 异常文本里的 body 摘要只进服务端日志（executor 对这些异常打 warning）；
+        # 对外响应经 `_error_summary` 只取 status/受控标识，绝不回显上游正文（M2）。
         super().__init__(f"upstream http {status}: {body_hint(body)}")
 
     def kind(self) -> ErrKind:

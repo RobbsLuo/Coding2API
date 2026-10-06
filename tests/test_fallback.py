@@ -474,6 +474,48 @@ async def test_fallback_with_multiple_primary_credentials(repo):
     db.close()
 
 
+@pytest.mark.asyncio
+async def test_invalid_provider_with_many_creds_keeps_rotation_budget(repo):
+    """H2 回归：一个不认模型的上游即使凭证数 ≥ max_rotate，也只算「一次尝试」。
+
+    旧逻辑用 `tried` 集合大小当预算，`_skip_provider` 会把该上游全部凭证塞进
+    `tried`，一个上游就占满预算 → 直接 400，永远试不到真正持有该模型的
+    trae。修复后按真正打过的凭证数计预算，仍能轮到 trae。
+    """
+    credentials, db = repo
+    for token in ("a", "b", "c", "d"):      # 4 个凭证 > max_rotate(3)
+        _add(credentials, "codebuddy", token)
+    _add(credentials, "trae", "tr")
+    # pin codebuddy 保证它先被选中，从而真正走到「400 → 跳过 → trae 接住」路径
+    db.connect().execute("UPDATE credentials SET pinned = 1 WHERE provider = 'codebuddy'")
+    cb = ScriptedProvider("codebuddy", [INVALID])
+    tr = ScriptedProvider("trae", [GOOD])
+    executor = _executor({"codebuddy": cb, "trae": tr}, credentials, {})
+    result = await executor.complete(_request("glm-5.2"))
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert cb.calls == 1 and tr.calls == 1
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_provider_many_creds_stream_keeps_rotation_budget(repo):
+    """H2 流式路径同非流式：跳过的不认模型上游不占满轮换预算。"""
+    credentials, db = repo
+    for token in ("a", "b", "c", "d"):
+        _add(credentials, "codebuddy", token)
+    _add(credentials, "trae", "tr")
+    db.connect().execute("UPDATE credentials SET pinned = 1 WHERE provider = 'codebuddy'")
+    cb = ScriptedProvider("codebuddy", [INVALID])
+    tr = ScriptedProvider("trae", [GOOD])
+    executor = _executor({"codebuddy": cb, "trae": tr}, credentials, {})
+    frames = [f async for f in executor.stream(_request("glm-5.2"), username="u")]
+    joined = b"".join(frames).decode()
+    assert "ok" in joined
+    assert "error" not in joined
+    assert cb.calls == 1 and tr.calls == 1
+    db.close()
+
+
 class ModelAwareProvider:
     """只接受白名单里的模型，其余回 INVALID（贴近真实上游）。"""
 

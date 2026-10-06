@@ -385,7 +385,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，补充实现细节见 [T
   - CodeBuddy：`CODEBUDDY_API_ENDPOINT` 启动时强制校验，不在白名单直接失败
   - TRAE：凭证 JSON 里的 `apiHost` 是用户可控输入，导入时按官方地址白名单校验，不在白名单直接拒绝；旧库里已存的越界 `apiHost` 在刷新 / 取用户信息前退回官方地址（校验在 `TraeClient` 内部，不只 HTTP 边界）
 - TLS 校验默认开启，公网部署必须保持
-- Host / Origin 白名单，CSP `frame-ancestors`
+- Host / Origin 白名单，CSP `frame-ancestors`（另含 `object-src`/`base-uri`/`form-action` 限制）
 - 登录三级限流（全局 / IP / 用户名）+ PBKDF2 并发上限
 - 请求体上限 16MB、登录接口 8KB（ASGI 层按实际字节计数，`chunked` 不能绕过）
 - API Key 仅存摘要，明文只在创建时返回一次；可按 Key 限定渠道绑定与来源 IP 白名单（见 [README.md](README.md)）
@@ -395,6 +395,12 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，补充实现细节见 [T
 - 未匹配的 `/api`、`/v1` 路径返回 JSON 404（不落到 SPA 的 200 + HTML）
 - 日志脱敏：不打印 Token、完整请求体
 - 审计：凭证增删改、pin、账号切换、登录与账号变动写 INFO 日志（含操作人）；**绝不记密码/令牌明文**
+- 审计与统计的租户隔离：`/api/stats/events` 返回的**凭证昵称**取自全局共享池（常含邮箱/手机），仅 admin/operator 可见；viewer 即便只看自己的记录也不下发该字段
+- 错误响应不回流上游正文：`/v1` 与外层的错误文案只带受控标识（HTTP 状态码 / 上游业务码 / 异常类名），上游错误体摘要只进服务端日志
+- 热更配置（B3.2）写入即校验：float 拒 NaN/±inf（NaN 会同时绕过 min/max），字符串类有长度上限；告警 webhook 只接受 `http(s)` 地址
+- 入站解析把关：三个出站协议（OpenAI / Anthropic / Responses）在入口处拒绝越界/非法的数值字段（`max_tokens` ≤0 或超上限、`temperature`/`top_p` 为 NaN/Inf）与 JSON 里的 `NaN`/`Infinity`——不透传给上游、不污染凭证健康度与统计
+- 上游流解析有界：SSE 单行与单帧缓冲设上限，非 2xx 错误体有界读取（防恶意/异常上游用超大 body 撑爆内存）
+- OAuth 登录弹窗：后端返回的授权地址只允许 `http(s)` scheme，弹窗 `opener` 置空（防 `javascript:` / `data:` URL 在管理台 origin 执行脚本）
 - **部署契约**：前端产物改动后刷新即生效；**后端 `src/` 改动必须重启进程**——进程管理器只在进程退出时重拉，不监听源码，保活策略不是热重载。两者独立更新会产生「新前端 + 旧后端」错配（新端点 `404` → 前端报无关的兜底文案），故升级后必须重启（详见 [TECHNICAL.md §6.4](TECHNICAL.md) 与 [README.md「部署注意」](README.md)）
 
 不做的：mTLS；**面向管理台与端口的** IP 限制（交给反向代理）。注意与上文的 API Key 来源 IP 白名单区分——后者是应用层能力，已内建。审计覆盖登录、账号变动与凭证管理写操作，不做全量请求审计（统计表已是脱敏的请求级记录）。

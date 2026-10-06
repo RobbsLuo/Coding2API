@@ -718,6 +718,29 @@ def test_alert_settings_hot_update(tmp_path):
     db.close()
 
 
+def test_alert_webhook_rejects_non_http_scheme_and_too_many(tmp_path):
+    """M6：webhook 只接受 http/https，且条目数有上限。"""
+    import pytest
+
+    from src.db.repo import RuntimeSettingsRepository
+    from src.runtime_settings import InvalidSetting, load_runtime_settings
+
+    db = Database(tmp_path / "t.sqlite3")
+    apply_schema(db.connect())
+    base = Settings(_env_file=None, APP_SECRET=SECRET)
+    runtime = load_runtime_settings(base, RuntimeSettingsRepository(db))
+    for bad in ("file:///etc/passwd", "javascript:alert(1)", "ftp://x"):
+        with pytest.raises(InvalidSetting, match="只支持 http/https"):
+            runtime.set_many({"alert_webhook_url": bad})
+    too_many = ",".join(f"https://h{i}" for i in range(20))
+    with pytest.raises(InvalidSetting, match="最多"):
+        runtime.set_many({"alert_webhook_url": too_many})
+    # 逗号分隔的合法多地址通过
+    runtime.set_many({"alert_webhook_url": "https://a, http://b"})
+    assert runtime.alert_webhook_url == "https://a, http://b"
+    db.close()
+
+
 def test_alert_humanize_boundaries():
     """_humanize 三段分支都要走到（小时 / 分钟 / 秒）。"""
     from src.tasks.alerting import _humanize

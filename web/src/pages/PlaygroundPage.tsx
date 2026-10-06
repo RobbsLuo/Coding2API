@@ -58,7 +58,11 @@ export function PlaygroundPage() {
     try {
       const response = await fetch("/api/playground/chat/completions", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          // CSRF 纵深：写请求带自定义头（与 api/client.ts 一致）
+          "X-Requested-With": "XMLHttpRequest",
+        },
         credentials: "same-origin",
         body: JSON.stringify({
           model: selectedModel,

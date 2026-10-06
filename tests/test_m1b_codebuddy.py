@@ -2539,7 +2539,8 @@ async def test_complete_timeout_without_rotation_raises_unavailable(dual_repo):
         providers={"codebuddy": AlwaysSlow()}, credentials=repo,
         scheduler=Scheduler(), default_model="m", complete_timeout_seconds=0.05))
 
-    with pytest.raises(NoHealthyCredential, match="timed out"):
+    # M2：对外只给受控标识（异常类名），不回显内部错误正文；完整原因在服务端日志
+    with pytest.raises(NoHealthyCredential, match="UpstreamStreamError"):
         await executor.complete(_request(), username="u")
 
 

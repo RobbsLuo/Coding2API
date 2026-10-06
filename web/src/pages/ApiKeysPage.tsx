@@ -415,6 +415,10 @@ export function ApiKeysPage() {
   const closeCreate = () => {
     setCreateOpen(false);
     setError(null);
+    // 明文 Key 只应存在于创建确认弹窗的生命周期内（L3）：关闭即从 state 抹掉，
+    // 否则它会继续留在 OpenAI/Anthropic 接入面板与页面内存里，与「只显示一次」不符。
+    setCreated(null);
+    setCopied(false);
   };
 
   return (

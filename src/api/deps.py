@@ -217,8 +217,15 @@ async def read_json_body(request: Request) -> Any:
     FastAPI 把 `payload: dict` 声明在签名里时，解析失败会返回 422；
     但本项目的 /v1 与 playground 走原始 Request（需要透传任意字段），
     裸调 `request.json()` 会让 json.JSONDecodeError 冒泡成 500。
+
+    `parse_constant` 拒绝 `NaN` / `Infinity` / `-Infinity`（JSON 标准不允许，
+    但 Python json 默认接受）：这些值会经本服务重新序列化透传给上游，把
+    本应 400 的输入变成上游 4xx，污染凭证健康度与统计（M4）。
     """
+    def _reject_constant(token: str) -> Any:
+        raise InvalidRequest(f"JSON value {token} is not allowed")
+
     try:
-        return await request.json()
+        return json.loads(await request.body(), parse_constant=_reject_constant)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise InvalidRequest("request body is not valid JSON") from error

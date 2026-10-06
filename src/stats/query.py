@@ -158,20 +158,26 @@ class StatsQuery:
         ]
 
     def events(self, *, username: str | None = None, since: int | None = None,
-               before: int | None = None, limit: int = 50) -> dict[str, Any]:
+               before: int | None = None, limit: int = 50,
+               include_credential_name: bool = False) -> dict[str, Any]:
         """逐请求明细（新→旧，rowid 游标分页）。明细仅保留 90 天。
 
         rowid 即插入序，稳定且可比大小，游标翻页不漏不重；
         返回 next_before 供下一页取「rowid 更小」的记录，null 表示到底。
+
+        `include_credential_name`：凭证昵称取自**全局共享池**（常含邮箱/手机），
+        只对 admin/operator 返回；viewer 即便只看自己的记录也不该看到池里他人
+        凭证的昵称（M7）。
         """
         where, params = self._where(username=username, since=since, before=before,
                                     alias="e.")
+        name_expr = ("NULLIF(c.nickname, '')" if include_credential_name else "NULL")
         rows = self._db.connect().execute(
             f"""
             SELECT e.rowid, e.ts, e.username, e.provider, e.credential_id, e.model,
                    e.ok, e.error_type, e.input_tokens, e.output_tokens,
                    e.reasoning_tokens, e.cached_tokens, e.credit, e.credit_estimated, e.latency_ms,
-                   e.ttfb_ms, NULLIF(c.nickname, '') AS credential_name
+                   e.ttfb_ms, {name_expr} AS credential_name
             FROM usage_events e
             LEFT JOIN credentials c ON c.id = e.credential_id
             {where}

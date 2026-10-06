@@ -26,7 +26,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ..openai.request import ChatRequest, InvalidRequest
+from ..openai.request import (
+    MAX_OUTPUT_TOKENS,
+    MAX_TEMPERATURE,
+    ChatRequest,
+    InvalidRequest,
+    require_finite_number,
+)
 
 
 def _text_from_system(system: Any) -> str:
@@ -266,14 +272,22 @@ def parse_messages_request(body: Any) -> ChatRequest:
     if max_tokens is not None:
         if not isinstance(max_tokens, int) or isinstance(max_tokens, bool):
             raise InvalidRequest("max_tokens must be an integer")
+        if max_tokens <= 0 or max_tokens > MAX_OUTPUT_TOKENS:
+            raise InvalidRequest(
+                f"max_tokens must be between 1 and {MAX_OUTPUT_TOKENS}")
         upstream["max_tokens"] = max_tokens
     for key in ("temperature", "top_p"):
         if key in body:
-            upstream[key] = body[key]
+            value = require_finite_number(body[key], key)
+            if key == "temperature" and value > MAX_TEMPERATURE:
+                raise InvalidRequest(f"temperature must be <= {MAX_TEMPERATURE}")
+            upstream[key] = value
     stop_sequences = body.get("stop_sequences")
     if stop_sequences is not None:
         if not isinstance(stop_sequences, list):
             raise InvalidRequest("stop_sequences must be an array")
+        if not all(isinstance(item, str) for item in stop_sequences):
+            raise InvalidRequest("stop_sequences must be an array of strings")
         upstream["stop"] = stop_sequences
     tools = body.get("tools")
     if tools is not None:

@@ -2,12 +2,37 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
 
 class InvalidRequest(ValueError):
     pass
+
+
+# 采样参数与输出上限的宽松但有限的边界：本服务只做透传，上界只为拦住
+# 明显畸形的输入（NaN/Inf、负数、超大值），真正语义由上游裁决。
+MAX_TEMPERATURE = 1000.0
+MAX_OUTPUT_TOKENS = 4_000_000
+
+
+def require_finite_number(value: Any, name: str) -> float:
+    """数值字段校验：拒绝 bool、非数、NaN/Inf（M4）。"""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise InvalidRequest(f"{name} must be a number")
+    if not math.isfinite(value):
+        raise InvalidRequest(f"{name} must be a finite number")
+    return float(value)
+
+
+def require_positive_int(value: Any, name: str, *, maximum: int) -> int:
+    """正整数校验：拒绝 bool、非整数、≤0、超过上界（M4）。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise InvalidRequest(f"{name} must be an integer")
+    if value <= 0 or value > maximum:
+        raise InvalidRequest(f"{name} must be between 1 and {maximum}")
+    return value
 
 
 @dataclass(slots=True)

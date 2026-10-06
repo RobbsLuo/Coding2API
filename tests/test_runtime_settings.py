@@ -144,6 +144,51 @@ def test_parse_value_rejects_blank_default_model():
         parse_value("default_model", "   ")
 
 
+def test_parse_value_rejects_overlong_string_setting():
+    """L7：字符串类热更项有长度上限，拦住粘贴事故级别的写入。"""
+    from src.runtime_settings import MAX_STRING_SETTING_LENGTH
+
+    with pytest.raises(InvalidSetting, match="不能超过"):
+        parse_value("model_blocklist", "x" * (MAX_STRING_SETTING_LENGTH + 1))
+
+
+def test_error_summary_controlled_identifiers():
+    """M2：对外错误标识取自受控字段（status / error_code / 类名），不含正文。"""
+    from src.engine.executor import _error_summary
+
+    class WithStatus(Exception):
+        status = 502
+
+    class WithCode(Exception):
+        status = 0                    # 非正值不当作 status
+        error_code = 11102
+
+    assert _error_summary(None) == ""
+    assert _error_summary(WithStatus()) == "upstream status 502"
+    assert _error_summary(WithCode()) == "upstream code 11102"
+    assert _error_summary(RuntimeError("body-secret")) == "RuntimeError"
+
+
+@pytest.mark.parametrize("raw", ["nan", "inf", "-inf", "Infinity", "NaN"])
+def test_parse_value_rejects_non_finite_float(raw):
+    """NaN 与任何数比较都为 False，会同时绕过 min/max；±inf 对未设 maximum 的
+    float 项也直接通过。非有限值必须在写入前拒绝（H1）。
+    """
+    # pacer_min_seconds 无 upper bound，正是 nan/inf 原先能溜进去的一类
+    with pytest.raises(InvalidSetting, match="有限数值"):
+        parse_value("pacer_min_seconds", raw)
+    # 有 upper bound 的项同样拦（nan 绕过 max）
+    with pytest.raises(InvalidSetting, match="有限数值"):
+        parse_value("context_compress_safety_ratio", raw)
+
+
+def test_parse_value_rejects_non_finite_before_snapshot_reload(runtime):
+    """坏行（历史写入的 inf）在 reload 时被忽略，不会污染生效值（H1）。"""
+    runtime._store.set("pacer_min_seconds", "inf")
+    runtime.reload()
+    assert not runtime.is_overridden("pacer_min_seconds")
+
+
 def test_format_value_is_inverse_of_parse_value():
     assert format_value(True) == "true"
     assert format_value(False) == "false"

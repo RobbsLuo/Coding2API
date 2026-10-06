@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import hmac
 import json
 import time
 import uuid
@@ -348,7 +349,11 @@ class CosySessionCache:
         uid = str(getattr(credential, "uid", "") or "")
         key = uid or token[:16]
         hit = self._entries.get(key)
-        if hit is not None and hit[0] == token:
+        # 常量时间比较，避免缓存命中日志/时序侧信道（L4）。token 非协议秘密，
+        # 这里只是防御纵深；编码成 bytes 以免非 ASCII token 触发 compare_digest 的
+        # str 限制。
+        if hit is not None and hmac.compare_digest(hit[0].encode("utf-8"),
+                                                   token.encode("utf-8")):
             return hit[1]
         session = CosySession(
             uid=uid, access_token=token,
