@@ -1,6 +1,6 @@
 import { screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { ApiKeysPage } from "../ApiKeysPage";
+import { ApiKeysPage, parseExpiresAt } from "../ApiKeysPage";
 import { jsonResponse, mockFetch, renderPage, settle, userEvent } from "./helpers";
 
 const KEY = {
@@ -147,7 +147,7 @@ describe("ApiKeysPage", () => {
     expect(screen.getByTestId("key-ips-key_2")).toHaveTextContent("203.0.113.9/32");
   });
 
-  it("创建时把渠道绑定与 IP 白名单一起提交", async () => {
+  it("创建时把渠道绑定、IP 白名单、模型白名单与到期时间一起提交", async () => {
     const calls: Array<{ url: string; body: unknown }> = [];
     vi.stubGlobal(
       "fetch",
@@ -167,12 +167,50 @@ describe("ApiKeysPage", () => {
     await userEvent.type(screen.getByTestId("key-name"), "ci");
     await userEvent.selectOptions(screen.getByTestId("key-binding"), "codebuddy");
     await userEvent.type(screen.getByTestId("key-allowed-ips"), "10.0.0.0/8");
+    await userEvent.type(screen.getByTestId("key-allowed-models"), "glm-*");
+    // datetime-local 的 value 是本地时区；2026-01-02T03:04 在任意时区都解析为固定 epoch 秒
+    const expiresInput = screen.getByTestId("key-expires-at");
+    await userEvent.type(expiresInput, "2026-01-02T03:04");
     await userEvent.click(screen.getByRole("button", { name: "创建" }));
 
     await screen.findByTestId("new-key-plaintext");
     expect(calls).toEqual([
-      { url: "/api/api-keys", body: { name: "ci", provider_binding: "codebuddy", allowed_ips: "10.0.0.0/8" } },
+      {
+        url: "/api/api-keys",
+        body: {
+          name: "ci",
+          provider_binding: "codebuddy",
+          allowed_ips: "10.0.0.0/8",
+          allowed_models: "glm-*",
+          expires_at: Math.floor(new Date("2026-01-02T03:04").getTime() / 1000),
+        },
+      },
     ]);
+  });
+
+  it("列表展示模型白名单与到期时间，空值给出「不限制 / 永不过期」", async () => {
+    const scoped = {
+      ...KEY,
+      id: "key_2",
+      allowed_models: "glm-*,kimi-k3",
+      expires_at: 1_800_000_000,
+    };
+    mockFetch({ "/api/api-keys": { api_keys: [KEY, scoped] } });
+    renderPage(<ApiKeysPage />);
+    await settle();
+
+    expect(screen.getByTestId("key-models-key_1")).toHaveTextContent("不限制");
+    expect(screen.getByTestId("key-expires-key_1")).toHaveTextContent("永不过期");
+    expect(screen.getByTestId("key-models-key_2")).toHaveTextContent("glm-*,kimi-k3");
+    expect(screen.getByTestId("key-expires-key_2")).not.toHaveTextContent("永不过期");
+  });
+
+  it("parseExpiresAt：空串 → null，非法值抛错，合法值 → epoch 秒", () => {
+    expect(parseExpiresAt("   ")).toBeNull();
+    expect(() => parseExpiresAt("not-a-date")).toThrow();
+    expect(parseExpiresAt("2026-01-02T03:04")).toBe(
+      Math.floor(new Date("2026-01-02T03:04").getTime() / 1000),
+    );
   });
 
   it("创建失败时提示检查绑定与白名单格式", async () => {
@@ -190,7 +228,7 @@ describe("ApiKeysPage", () => {
     await openCreateDialog();
 
     await userEvent.click(screen.getByRole("button", { name: "创建" }));
-    expect(await screen.findByText(/请检查渠道绑定与 IP 白名单格式/)).toBeInTheDocument();
+    expect(await screen.findByText(/请检查渠道绑定、模型白名单、IP 白名单与到期时间格式/)).toBeInTheDocument();
   });
 });
 

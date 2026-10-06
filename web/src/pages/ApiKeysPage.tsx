@@ -5,6 +5,7 @@ import { useApiKeys, useQueryClient } from "../api/hooks";
 import { formatTime } from "../api/display";
 import { cn } from "../lib/utils";
 import { PageHeader } from "../components/PageHeader";
+import { PROVIDER_LABEL, PROVIDER_ORDER } from "../api/providers";
 import type { ApiKeyCreated } from "../api/types";
 import {
   Badge,
@@ -27,20 +28,25 @@ import {
 } from "../ui";
 
 /** 渠道绑定的下拉选项：值与后端 KNOWN_PROVIDERS 对齐，空串 = 自动。 */
-export const PROVIDER_BINDING_OPTIONS = [
+export const PROVIDER_BINDING_OPTIONS: { value: string; label: string }[] = [
   { value: "", label: "自动（不限定渠道）" },
-  { value: "codebuddy", label: "CodeBuddy" },
-  { value: "trae", label: "TRAE" },
-  { value: "zen", label: "OpenCode Zen" },
-  { value: "kilo", label: "Kilo Gateway" },
-  { value: "qoder", label: "Qoder" },
-  { value: "codearts", label: "CodeArts" },
+  // 渠道集合与展示名都来自 providers.ts 的单一来源，新增渠道不再改这里
+  ...PROVIDER_ORDER.map((provider) => ({ value: provider, label: PROVIDER_LABEL[provider] })),
 ];
 
 /** 列表里展示绑定渠道：空串 → 「自动」 */
 export function providerBindingLabel(binding: string | null | undefined): string {
   if (!binding) return "自动";
   return PROVIDER_BINDING_OPTIONS.find((o) => o.value === binding)?.label ?? binding;
+}
+
+/** `datetime-local` 值（本地时区的 `YYYY-MM-DDTHH:mm`）→ epoch 秒；空串 = 永不过期。 */
+export function parseExpiresAt(value: string): number | null {
+  const raw = value.trim();
+  if (!raw) return null;
+  const ms = new Date(raw).getTime();
+  if (!Number.isFinite(ms)) throw new Error("invalid expires_at");
+  return Math.floor(ms / 1000);
 }
 
 /** OpenAI 兼容入口的 Base URL：本服务地址 + /v1 */
@@ -366,6 +372,8 @@ export function ApiKeysPage() {
   const [name, setName] = useState("");
   const [binding, setBinding] = useState("");
   const [allowedIps, setAllowedIps] = useState("");
+  const [allowedModels, setAllowedModels] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
   const [created, setCreated] = useState<ApiKeyCreated | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -383,15 +391,19 @@ export function ApiKeysPage() {
         name,
         provider_binding: binding,
         allowed_ips: allowedIps.trim(),
+        allowed_models: allowedModels.trim(),
+        expires_at: parseExpiresAt(expiresAt),
       });
       setCreated(result);
       setName("");
       setBinding("");
       setAllowedIps("");
+      setAllowedModels("");
+      setExpiresAt("");
       setCopied(false);
       await client.invalidateQueries({ queryKey: ["admin"] });
     } catch {
-      setError("创建失败：请检查渠道绑定与 IP 白名单格式");
+      setError("创建失败：请检查渠道绑定、模型白名单、IP 白名单与到期时间格式");
     }
   };
 
@@ -456,6 +468,8 @@ export function ApiKeysPage() {
                 <TableHead>Key</TableHead>
                 <TableHead>渠道</TableHead>
                 <TableHead>来源 IP</TableHead>
+                <TableHead>模型白名单</TableHead>
+                <TableHead>到期</TableHead>
                 <TableHead>创建时间</TableHead>
                 <TableHead>最后使用</TableHead>
                 <TableHead className="text-right">操作</TableHead>
@@ -471,6 +485,12 @@ export function ApiKeysPage() {
                   </TableCell>
                   <TableCell className="font-mono text-xs" data-testid={`key-ips-${key.id}`}>
                     {key.allowed_ips || "不限制"}
+                  </TableCell>
+                  <TableCell className="font-mono text-xs" data-testid={`key-models-${key.id}`}>
+                    {key.allowed_models || "不限制"}
+                  </TableCell>
+                  <TableCell className="text-xs" data-testid={`key-expires-${key.id}`}>
+                    {key.expires_at ? formatTime(key.expires_at) : "永不过期"}
                   </TableCell>
                   <TableCell className="text-xs">{formatTime(key.created_at)}</TableCell>
                   <TableCell className="text-xs">
@@ -575,6 +595,22 @@ export function ApiKeysPage() {
                     data-testid="key-allowed-ips"
                     placeholder="例如 203.0.113.9,10.0.0.0/8"
                     onChange={(event) => setAllowedIps(event.target.value)}
+                  />
+                </Field>
+                <Field label="模型白名单（逗号分隔模型名或 glob，留空不限制）">
+                  <Input
+                    value={allowedModels}
+                    data-testid="key-allowed-models"
+                    placeholder="例如 glm-*,kimi-k3"
+                    onChange={(event) => setAllowedModels(event.target.value)}
+                  />
+                </Field>
+                <Field label="到期时间（留空永不过期）">
+                  <Input
+                    type="datetime-local"
+                    value={expiresAt}
+                    data-testid="key-expires-at"
+                    onChange={(event) => setExpiresAt(event.target.value)}
                   />
                 </Field>
                 {/* 创建结果（成功/失败）无焦点变化，aria-live 让读屏可感知 */}

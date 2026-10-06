@@ -128,7 +128,7 @@ class StatsQuery:
 
         每个点含当日出现过的各渠道指标值（按 metric 变化：请求数 / 总 token /
         平均耗时 ms / 平均首字延迟 ms），供前端绘制曲线。渠道集合动态取自
-        数据（新增渠道无需改 SQL），返回结构形如 {hour, codebuddy, trae, zen, kilo}；
+        数据（新增渠道无需改 SQL），返回结构形如 {hour, codebuddy, trae, qoder}；
         某渠道在该小时没有数据时补 0，保证同一批点的键集合一致，前端画线不
         会因缺键断线。
         """
@@ -150,7 +150,7 @@ class StatsQuery:
             providers.add(provider)
             raw.setdefault(hour, {})[provider] = self._metric_value(
                 metric, row["value"], row["ok_count"])
-        # 渠道按名排序（codebuddy / kilo / trae / zen 恰好字典序）：同一批点的键顺序稳定
+        # 渠道按名排序：同一批点的键顺序稳定（与渠道注册顺序无关）
         ordered = sorted(providers)
         return [
             {"hour": hour, **{p: raw[hour].get(p, 0) for p in ordered}}

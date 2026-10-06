@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import logging
 import time
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
-from ..compat.openai.errors import UpstreamStreamError
+from ..compat.openai.errors import UpstreamStreamError, stream_error_frame
 from ..compat.openai.request import ChatRequest, InvalidRequest
 from ..compat.openai.response import (
     StreamTranslator,
@@ -939,7 +938,7 @@ def _stream_error_frame(translator: StreamSink | None, message: str, code: str) 
     builder = getattr(translator, "error_frame", None)
     if callable(builder):
         return builder(message, code)
-    return _error_frame(message, code)
+    return stream_error_frame(message, code)
 
 
 def _usage_field(usage: object, name: str) -> object:
@@ -969,12 +968,5 @@ def _error_type_for(kind: ErrKind) -> str:
     if kind in (ErrKind.INVALID, ErrKind.BLOCKED, ErrKind.REQUEST):
         return "invalid_request"
     return "upstream_error"
-
-
-def _error_frame(message: str, code: str) -> bytes:
-    from ..engine.sse import SSE_DONE, format_openai_frame
-
-    payload = {"error": {"message": message, "type": "api_error", "code": code}}
-    return format_openai_frame(json.dumps(payload, ensure_ascii=False)) + SSE_DONE
 
 

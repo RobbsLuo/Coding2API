@@ -39,6 +39,7 @@ import {
   formatDuration,
   formatNumber,
   formatTime,
+  hasQuotaProbe,
   healthView,
   modelCooldownLabel,
   probeFailureLabel,
@@ -69,11 +70,6 @@ import {
 /** 无每日签到的渠道：CodeArts 上游没有签到接口（每日 token 额度，0 点清零）。 */
 function supportsCheckin(provider: Credential["provider"]): boolean {
   return provider !== "codearts";
-}
-
-/** 无额度接口的匿名免费层：探测与积分记录都无意义。 */
-function supportsQuotaProbe(provider: Credential["provider"]): boolean {
-  return provider !== "zen" && provider !== "kilo";
 }
 
 /** 套餐到期日：只要日期，时分秒对"哪个包先过期"没用。 */
@@ -658,7 +654,7 @@ function Row({
                 展开后箭头翻转。仅 admin/operator 可用——接口本身就是该门槛。
                 zen / kilo 免费层没有额度接口、也没有额度探测，积分记录恒为空，
                 入口只会给出「无记录」的空抽屉，直接不渲染。 */}
-            {canWrite && supportsQuotaProbe(credential.provider) && (
+            {canWrite && hasQuotaProbe(credential.provider) && (
               <Button
                 // 项目封装的 Button：variant="default" 即 shadcn 的 outline
                 variant="default"
@@ -737,7 +733,7 @@ function Row({
                     少一次点击；其余低频动作仍收在菜单里。
                     zen / kilo 免费层探测无意义（上游无额度接口，探测恒失败）；
                     CodeArts 无签到接口（每日 token 额度，0 点清零），只藏签到、保留探测。 */}
-                {supportsQuotaProbe(credential.provider) && (
+                {hasQuotaProbe(credential.provider) && (
                   <>
                     <Button
                       size="sm"

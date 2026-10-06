@@ -1551,12 +1551,13 @@ def test_blank_function_call_and_tool_calls_helpers():
 
 
 def test_first_choice_error_paths():
-    assert qoder_events._first_choice({}) is None
+    # first_choice 已抽到 provider/openai_chunk（多 provider 共用），经 qoder 命名空间仍可直达
+    assert qoder_events.first_choice({}) is None
     with pytest.raises(UpstreamProtocolViolation, match="not an array"):
-        qoder_events._first_choice({"choices": "x"})
-    assert qoder_events._first_choice({"choices": []}) is None
+        qoder_events.first_choice({"choices": "x"})
+    assert qoder_events.first_choice({"choices": []}) is None
     with pytest.raises(UpstreamProtocolViolation, match="choices\\[0\\]"):
-        qoder_events._first_choice({"choices": [1]})
+        qoder_events.first_choice({"choices": [1]})
 
 
 def test_parse_models_requires_chat_list():

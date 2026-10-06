@@ -82,10 +82,14 @@ export interface ApiKey {
   preview: string;
   created_at: number;
   last_used_at: number | null;
-  /** 绑定的渠道（codebuddy | trae）；空串 = 自动 */
+  /** 绑定的渠道（见 KNOWN_PROVIDERS 六渠道）；空串 = 自动 */
   provider_binding: string;
   /** 来源 IP 白名单（规范化后的 IP/CIDR 逗号分隔）；空串 = 不限制 */
   allowed_ips: string;
+  /** 模型白名单（fnmatch glob，逗号分隔）；空串 = 不限制 */
+  allowed_models: string;
+  /** 到期时间（epoch 秒）；null = 永不过期 */
+  expires_at: number | null;
 }
 
 /** 创建成功时才有明文（只返回一次） */

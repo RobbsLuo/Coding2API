@@ -27,6 +27,7 @@ from ...provider.base import (
     UpstreamProtocolViolation,
     Usage,
 )
+from ..openai_chunk import first_choice, is_blank_tool_call
 
 
 def parse_frame(frame: SSEFrame) -> Event | None:
@@ -42,7 +43,7 @@ def _event_from_payload(payload: dict[str, Any]) -> Event | None:
 
     优先级：tool_calls > 正文 > 思考 > 错误 > usage > finish。
     """
-    choice = _first_choice(payload)
+    choice = first_choice(payload)
     delta = choice.get("delta") if choice else None
     delta = delta if isinstance(delta, dict) else {}
     finish_reason = choice.get("finish_reason") if choice else None
@@ -52,7 +53,7 @@ def _event_from_payload(payload: dict[str, Any]) -> Event | None:
         # 无 name 且 arguments 为空的噪声调用（客户端聚合后显示
         # "Tool not found"）：正常分片块无 name 但带实际 arguments，必须保留。
         kept = [tc for tc in tool_calls
-                if isinstance(tc, dict) and not _is_blank_tool_call(tc)]
+                if isinstance(tc, dict) and not is_blank_tool_call(tc)]
         if kept:
             return Event(kind=EventKind.TOOL_CALLS, tool_calls=kept)
 
@@ -93,7 +94,7 @@ def parse_all_events(frame: SSEFrame) -> list[Event]:
     usage = payload.get("usage")
     if isinstance(usage, dict) and not has_usage:
         events.append(Event(kind=EventKind.USAGE, usage=_usage(usage)))
-    choice = _first_choice(payload)
+    choice = first_choice(payload)
     finish_reason = choice.get("finish_reason") if choice else None
     if isinstance(finish_reason, str) and finish_reason and not has_finish:
         events.append(Event(kind=EventKind.FINISH, finish_reason=finish_reason))
@@ -113,29 +114,6 @@ def _payload(frame: SSEFrame) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         raise UpstreamProtocolViolation("Zen SSE data is not an object")
     return payload
-
-
-def _is_blank_tool_call(tc: dict[str, Any]) -> bool:
-    """无 name 且 arguments 为空（None / "" / "{}" / {}）的噪声 tool_call。"""
-    function = tc.get("function")
-    function = function if isinstance(function, dict) else {}
-    if str(function.get("name") or "").strip():
-        return False
-    return function.get("arguments") in (None, "", "{}", {})
-
-
-def _first_choice(payload: dict[str, Any]) -> dict[str, Any] | None:
-    choices = payload.get("choices")
-    if choices is None:
-        return None
-    if not isinstance(choices, list):
-        raise UpstreamProtocolViolation("choices is not an array")
-    if not choices:
-        return None
-    first = choices[0]
-    if not isinstance(first, dict):
-        raise UpstreamProtocolViolation("choices[0] is not an object")
-    return first
 
 
 def _error_event(error: dict[str, Any]) -> Event:

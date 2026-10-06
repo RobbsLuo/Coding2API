@@ -167,7 +167,13 @@ export const api = {
 
   // ------------------------------------------------------------- API Key
   apiKeys: () => request<{ api_keys: ApiKey[] }>("/api/api-keys"),
-  createApiKey: (payload: { name: string; provider_binding?: string; allowed_ips?: string }) =>
+  createApiKey: (payload: {
+    name: string;
+    provider_binding?: string;
+    allowed_ips?: string;
+    allowed_models?: string;
+    expires_at?: number | null;
+  }) =>
     request<ApiKeyCreated>("/api/api-keys", { method: "POST", ...json(payload) }),
   deleteApiKey: (id: string) => request<{ ok: boolean }>(`/api/api-keys/${id}`, { method: "DELETE" }),
 

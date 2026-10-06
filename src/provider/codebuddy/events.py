@@ -20,16 +20,7 @@ from ...provider.base import (
     body_hint,
     business_codes,
 )
-
-
-def _is_blank_tool_call(tc: dict) -> bool:
-    """无 name 且 arguments 为空/{} 的噪声 tool_call（模型输出的空调用）。"""
-    fn = tc.get("function")
-    fn = fn if isinstance(fn, dict) else {}
-    if str(fn.get("name") or "").strip():
-        return False
-    args = fn.get("arguments")
-    return args in (None, "", "{}", {})
+from ..openai_chunk import first_choice, is_blank_tool_call
 
 
 def parse_frame(frame: SSEFrame) -> Event | None:
@@ -45,7 +36,7 @@ def parse_frame(frame: SSEFrame) -> Event | None:
     if not isinstance(payload, dict):
         raise UpstreamProtocolViolation("CodeBuddy SSE data is not an object")
 
-    choice = _first_choice(payload)
+    choice = first_choice(payload)
     delta = choice.get("delta") if choice else None
     delta = delta if isinstance(delta, dict) else {}
     finish_reason = choice.get("finish_reason") if choice else None
@@ -55,7 +46,7 @@ def parse_frame(frame: SSEFrame) -> Event | None:
         # 上游偶发噪声调用：无 name 且 arguments 为空/{}（客户端聚合后
         # 显示 "Tool not found"）。正常分片块无 name 但带实际 arguments，
         # 必须保留。空名噪声整条丢弃。
-        kept = [tc for tc in tool_calls if isinstance(tc, dict) and not _is_blank_tool_call(tc)]
+        kept = [tc for tc in tool_calls if isinstance(tc, dict) and not is_blank_tool_call(tc)]
         if kept:
             return Event(kind=EventKind.TOOL_CALLS, tool_calls=kept)
 
@@ -95,25 +86,11 @@ def parse_all_events(frame: SSEFrame) -> list[Event]:
     usage = payload.get("usage")
     if isinstance(usage, dict) and not has_usage:
         events.append(Event(kind=EventKind.USAGE, usage=_usage(usage)))
-    choice = _first_choice(payload)
+    choice = first_choice(payload)
     finish_reason = choice.get("finish_reason") if choice else None
     if isinstance(finish_reason, str) and finish_reason and not has_finish:
         events.append(Event(kind=EventKind.FINISH, finish_reason=finish_reason))
     return events
-
-
-def _first_choice(payload: dict[str, Any]) -> dict[str, Any] | None:
-    choices = payload.get("choices")
-    if choices is None:
-        return None
-    if not isinstance(choices, list):
-        raise UpstreamProtocolViolation("choices is not an array")
-    if not choices:
-        return None
-    first = choices[0]
-    if not isinstance(first, dict):
-        raise UpstreamProtocolViolation("choices[0] is not an object")
-    return first
 
 
 def _usage(raw: dict[str, Any]) -> Usage:

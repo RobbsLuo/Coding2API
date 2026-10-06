@@ -73,6 +73,8 @@ coding2api/
 │   │   │   ├── client.py        # SOLO 上游 + 额度探测
 │   │   │   ├── events.py        # 自定义 SSE → Event
 │   │   │   ├── credential.py    # 凭证解析（嵌套/扁平）+ 原子写回 + 签到设备号
+│   │   │   ├── pricing.py       # 单请求积分推算（上游 token_usage 不给积分）
+│   │   │   ├── backfill.py      # 历史明细推算积分回填 / 重算（scripts 复用）
 │   │   │   └── callback.py      # 登录 URL 构造 + 回调解析
 │   │   ├── zen/
 │   │   │   ├── client.py        # Zen 上游 + 免费层门禁伪装 + 注入工具回包过滤 + ZenProvider
@@ -92,10 +94,13 @@ coding2api/
 │   │   │   ├── client.py        # CodeArts 上游 + 私有 SSE 还原（OpenAI chunk/累计全文双形状）+ 福利/余额 + Provider
 │   │   │   ├── events.py        # SSE → 增量 Event（支持 OpenAI chunk 与累计全文两形状）；状态/业务码分类
 │   │   │   ├── credential.py    # 凭证类型与解析（AK/SK/STS/DPoP/refresh）
+│   │   │   ├── units.py         # 华为云「套餐/剩余量」单位与到期解析（纯函数）
+│   │   │   ├── backfill.py      # 历史 usage 回填（scripts/backfill_codearts_*.py 复用）
 │   │   │   ├── auth.py          # OAuth2 PKCE 登录（authorize URL + 换 token）
 │   │   │   └── oauth.py         # 登录适配：回调链接粘贴换 token（AuthStateStore/start/complete_callback）
 │   │   ├── naming.py             # 模型名归一（六渠道统一三字段：raw_id / 归一键 / 展示名）
 │   │   ├── token_expiry.py      # 到期提取：显式 expires_at → JWT exp 回落（B3.3）
+│   │   ├── openai_chunk.py      # 标准 OpenAI chunk 共享原语：choices 校验 + 空 tool_call 判定
 │   │   └── fixtures/            # 真实样本
 │   │       ├── codebuddy/*.sse
 │   │       └── trae/*.sse
@@ -126,6 +131,7 @@ coding2api/
 │   │   ├── activity.py          # 活跃上报（仅 CB，默认关闭）
 │   │   ├── refresh.py           # 每 60 分钟；REFRESH_SKEW_HOURS 窗口内预刷新
 │   │   ├── retention.py         # 每 5 分钟：小时汇总重算 + 90 天前明细清理
+│   │   ├── alerting.py          # 运维告警（P1-7）：四类规则评估 + webhook + 落库
 │   │   ├── status.py            # 任务清单 + 进程内运行态（B4）
 │   │   └── runner.py            # 后台任务调度，接入应用生命周期
 │   ├── stats/
@@ -138,10 +144,11 @@ coding2api/
 │       ├── messages.py          # POST /v1/messages + /v1/messages/count_tokens（P0-1）
 │       ├── context.py           # 请求入口的上下文压缩接线（P0-2）
 │       ├── models.py            # GET /v1/models（按渠道凭证加载 + 动态拉取 + 黑名单 + 元数据 + 模型白名单过滤）
+│       ├── model_catalog.py     # 模型目录落盘快照（跨重启）+ 别名预热
 │       ├── balance.py           # GET /v1/user/balance（读探测缓存聚合）
 │       ├── authorize.py         # GET /authorize（TRAE 回调落点）
 │       ├── admin_credentials.py # 凭证 CRUD / toggle / pin / probe / checkin / 成长 / 账号切换
-│       ├── admin_keys.py        # API Key CRUD（渠道绑定 / IP 白名单，B3.5）
+│       ├── admin_keys.py        # API Key CRUD（渠道绑定 / 模型白名单 / IP 白名单 / 到期时间）
 │       ├── admin_settings.py    # GET/PUT /api/settings（B3.2）+ GET /api/tasks（B4）
 │       ├── admin_users.py       # 用户管理（B5）：list/create/patch/disable/enable/reset-password
 │       ├── admin_audit.py       # GET /api/audit 审计查询（B5）
@@ -224,7 +231,7 @@ class ErrKind(StrEnum):
     REQUEST = "request"  # 请求级错误（11101/11115/11128/11135）→ 零动作：不冷却、不累计，仅换号
 ```
 
-`MODEL_SCOPED_KINDS = {MODEL, BLOCKED}`：这两类只写 `credential_model_cooldowns`
+`MODEL_SCOPED_KINDS = {MODEL, BLOCKED, CONCURRENCY}`：这三类只写 `credential_model_cooldowns`
 （见 §6.1），不碰账号级 `cooling_until`，因此同账号的其他模型仍可选。反之账号级冷却
 出现时会清空该凭证的模型级条目——否则「切模型」能绕过账号级限流。
 
@@ -555,7 +562,7 @@ response.completed | response.incomplete
 
 | 列 | 取值 | 空值语义 |
 |---|---|---|
-| `provider_binding` | `codebuddy` / `trae` | 空 = 自动（跨渠道选健康凭证，原行为） |
+| `provider_binding` | 见 `KNOWN_PROVIDERS`（六渠道，如 `codebuddy` / `trae` / `qoder`） | 空 = 自动（跨渠道选健康凭证，原行为） |
 | `allowed_ips` | 逗号分隔 IP/CIDR | 空 = 不限制来源 IP |
 
 来源 IP 判定在 `deps.api_key_user`（鉴权**当场**判掉，不往上传递）：
@@ -759,7 +766,7 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 白名单在三个 /v1 出口（chat / responses / messages）解析后校验：省略模型名（空 / `auto`）时按 `default_model` 判定，**不能借空名绕过**；匹配大小写不敏感，`模型@渠道` 的后缀不参与匹配。`/v1/models` 也按白名单过滤展示，让列表与 Key 实际能用的模型一致。
 
-管理台 UI 暂未暴露这两个字段（可用 `POST /api/api-keys` 直接传 `allowed_models` / `expires_at`），后续按需补。
+管理台「创建 API Key」对话框已暴露模型白名单与到期时间字段（`web/src/pages/ApiKeysPage.tsx`，`datetime-local` 输入 → epoch 秒）。
 
 ### 3.21 跨渠道 fallback 兼容组（P1-5）
 
@@ -864,7 +871,10 @@ class Provider(Protocol):
   `complete_callback`（仅 TRAE）、`list_accounts`/`switch_account`（仅 CodeBuddy）、
   `credential_from`/`checkin_scope`（刷新与签到任务的能力探测）、
   `checkin`/`checkin_status`（签到）、`growth`（成长中心，仅 CodeBuddy）、`host`（展示用）
-- 四个 provider 共用 `engine/sse.py` 的帧解析器（SSE 规范层），事件语义各自映射
+- 六个 provider 中，CodeBuddy / TRAE / Zen / Kilo / Qoder 共用 `engine/sse.py` 的帧
+  解析器（SSE 规范层），事件语义各自映射；CodeArts 的私有「累计全文」形状无法用
+  `FrameAssembler` 表达，自实现 `iter_data_lines`，只复用 `engine/sse` 的
+  `MAX_SSE_LINE_BYTES` / `SSEFrameTooLarge`（见 §3.17）
 - Zen 与 Kilo 是最「薄」的两个 provider：标准 OpenAI SSE，故 `events.py` 无需私有
   信封解析。Zen 渠道私有的只有免费层门禁伪装与注入工具回包过滤（见 §3.14）；Kilo
   连门禁都没有，渠道私有的只有 `isFree` 免费模型过滤（见 §3.15）。两者都**只实现**
@@ -956,7 +966,7 @@ class Scheduler:
 
 - 登记的名字是**该凭证所属上游的原始模型名**：每个 provider 各自把归一模型名映射成自己注册的原始 id（`_upstream_model(provider_id, model)`，未知则原样），因为 CB 与 TRAE 的注册名大小写变体不同，用归一名会漏判
 - 选号路径：`executor._select` 逐凭证过滤 `c.is_selectable(now, 该凭证的模型名)`，再交给 `Scheduler.select`；这里同时完成模型收窄、粘性命中与排序兜底（`_sticky(...) or scheduler.select(...)`）
-- 退避：`MODEL` 基数 10m 起翻倍、封顶 2h；`BLOCKED` 6h 起翻倍、封顶 24h。换 reason 重新计数（两者基数与封顶不同，沿用对方 hits 会得到第三种时长）
+- 退避：`MODEL` 基数 10m 起翻倍、封顶 2h；`BLOCKED` 6h 起翻倍、封顶 24h；`CONCURRENCY`（CodeArts 并发打满）固定 60s 短冷却、不翻倍（打满是瞬态信号）。换 reason 重新计数（基数与封顶不同，沿用对方 hits 会得到错误的第三种时长）
 - 清除：`save_success(..., model=)` 只删 `reason='blocked'`（模型限流按上游重置，成功一次不代表限制解除）；`revive` / 删除凭证 / 账号级冷却出现都清模型条目
 - 回流：留存任务每轮 `purge_expired_model_cooldowns()` 回收过期行；管理台列表只下发未过期条目（`model_cooldowns`）
 - 无模型名可归因时（流内事件未带 model）退化为账号级 SOFT，不写孤儿记录
@@ -1143,7 +1153,7 @@ PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users 与 api_keys 
 |---|---|---|
 | 调度器（到期指标/冷却/三态排序/轮换/pin） | 100% | 纯单元，注入假 provider |
 | 鉴权（users/apikey/session/rbac） | 100% | 单元 + FastAPI TestClient |
-| SSE 帧解析、provider 事件映射、OpenAI 协议适配、OAuth/回调解析 | 100% | fixture 契约测试（真实样本 → Event / 响应断言） |
+| SSE 帧解析、provider 事件映射、OpenAI 协议适配、OAuth/回调解析 | 100% | 单元 + 真实样本 fixture 契约测试（codebuddy / trae） |
 | HTTP 客户端 | 100% | respx mock 状态码 + body → classify 断言 |
 | 统计/查询 | 100% | sqlite 内存库集成 |
 | 其余 | 100% | — |
@@ -1152,7 +1162,7 @@ PRAGMA foreign_keys = ON;      -- api_keys 之外无外键（users 与 api_keys 
 
 **测试不得依赖本地 `.env`**：CI 从不带 `.env`，而本地 `.env` 会经 pydantic-settings 补上 `APP_SECRET` 等必填项。任何构造 `Settings()` 的测试都要**显式传值**（`Settings(_env_file=None, APP_SECRET=...)` 或 `setenv`），否则本地绿、CI 红。B5 的第一条 CI 就栽在这里：`test_resolve_db_path_defaults_to_settings` 只设了 `DATA_DIR`，靠本地 `.env` 里的 `APP_SECRET` 才构造成功。**验证手法**：临时把 `.env` 移走再跑全量，通过才算数。
 
-fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文、思考、工具调用、错误码与额度），断言两个方向：**解析正确**（样本 → 期望 Event）与**不静默**（畸形样本 → `UpstreamProtocolViolation`）。
+fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文、思考、工具调用、错误码与额度），断言两个方向：**解析正确**（样本 → 期望 Event）与**不静默**（畸形样本 → `UpstreamProtocolViolation`）。当前只有 codebuddy / trae 有落盘样本；zen / kilo / qoder / codearts 的协议已用逐帧单测覆盖（含畸形帧），但**尚未补真实样本文件**——需拿到上游实际抓包后按同一契约补，避免用合成样本冒充「真实样本」。
 
 ---
 

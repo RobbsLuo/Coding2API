@@ -38,6 +38,7 @@ from ...provider.base import (
     UpstreamProtocolViolation,
     Usage,
 )
+from ..openai_chunk import first_choice
 from ..token_expiry import normalize_epoch
 
 # ---------------------------------------------------------------------------
@@ -337,25 +338,11 @@ def _tool_calls(delta: dict[str, Any]) -> list[dict[str, Any]]:
     return calls
 
 
-def _first_choice(payload: dict[str, Any]) -> dict[str, Any] | None:
-    choices = payload.get("choices")
-    if choices is None:
-        return None
-    if not isinstance(choices, list):
-        raise UpstreamProtocolViolation("choices is not an array")
-    if not choices:
-        return None
-    first = choices[0]
-    if not isinstance(first, dict):
-        raise UpstreamProtocolViolation("choices[0] is not an object")
-    return first
-
-
 def parse_inner_chunk(body: str) -> list[Event]:
     """内层 OpenAI chunk → 中立事件（一帧可同时给正文/思考/工具/usage/finish）。"""
     payload = _load_body(body)
     events: list[Event] = []
-    choice = _first_choice(payload)
+    choice = first_choice(payload)
     delta: dict[str, Any] = {}
     finish_reason: str | None = None
     if choice is not None:
