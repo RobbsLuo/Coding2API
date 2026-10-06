@@ -18,6 +18,7 @@ import httpx
 from ...engine.sse import iter_frames
 from ...provider import base
 from ...provider.base import (
+    AuthFlow,
     AuthSession,
     CheckinResult,
     ErrKind,
@@ -773,6 +774,9 @@ class TraeProvider:
                 message=("领取接口返回成功，但回查未确认积分到账"
                          f"（{before['credits']} → {after['credits']}）"))
         # 所有尝试都失败：返回最后一次的真实原因（不伪装成功）
+        # 按构造不可达的兜底：进入本函数即至少有一次 checkin 尝试，循环体每次
+        # 失败都会写 last，故 last 恒非 None（AGENTS 允许的「前置 return 已排除
+        # 的死分支」例外）。
         return last if last is not None else CheckinResult(  # pragma: no cover
             ok=False, message="签到未完成")
 
@@ -790,7 +794,7 @@ class TraeProvider:
         """生成登录 URL。machine/device id 由调用方保管，落盘凭证必须复用同一对。"""
         machine_id, device_id = new_machine_identity()
         return AuthSession(
-            flow="callback", state=f"{machine_id}:{device_id}",
+            flow=AuthFlow.CALLBACK, state=f"{machine_id}:{device_id}",
             callback_url=callback_url,
             auth_url=build_login_url(callback_url, machine_id=machine_id,
                                      device_id=device_id),

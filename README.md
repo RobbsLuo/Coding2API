@@ -462,7 +462,7 @@ sudo systemctl restart coding2api
 **确认升级已生效**（先查版本，再查路由）：
 
 ```bash
-# 1) schema 版本已迁移（期望 15）且账号已导入
+# 1) schema 版本已迁移（期望 17）且账号已导入
 sqlite3 data/coding2api.sqlite3 "PRAGMA user_version; SELECT username, role, enabled FROM users;"
 # 2) 路由存在：期望 401（未登录），404 = 旧后端进程
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
@@ -538,7 +538,7 @@ M0–M3 及后续迭代全部完成，`main` 分支可运行，当前版本 v0.3
 - **B4 任务可视化**：后台任务运行态并入「任务与配置」页；模型黑名单热更延迟修复
 - **B5 账号体系**：用户从 `users.txt` 迁入 SQLite、三角色 RBAC、会话吊销（epoch）、一次性令牌激活 + 首登强制改密、用户管理页、审计日志页、硬删降为 CLI
 - **B6 新渠道**：接入 **Qoder**（COSY 私有协议 + 设备码登录 + 签到/额度）与 **CodeArts**（华为云 SDK-HMAC 签名 + DPoP 刷新 + 累计全文 SSE + 福利领取）；`KNOWN_PROVIDERS` 扩到六个，展示排序、渠道绑定、前端图标与文档同步
-- **B7 竞品能力补齐（P0）**：Anthropic `/v1/messages` 出口（Claude Code）、上下文压缩（按模型目录输入上限裁剪过长对话）、API Key 模型白名单 + 到期时间（对比与迁移分档见 `docs/competitor-comparison.md`）
+- **B7 竞品能力补齐（P0）**：Anthropic `/v1/messages` 出口（Claude Code）、上下文压缩（按模型目录输入上限裁剪过长对话）、API Key 模型白名单 + 到期时间（对比与迁移分档见本地存档 `docs/competitor-comparison.md`，该目录已 gitignore、克隆仓库不含此文件）
 - **B8 智能路由（P1）**：跨渠道 fallback 兼容组（`MODEL_FALLBACK_GROUPS`，主渠道全不可用时按组顺序回退、仅在未出帧前切换）
 - **B9 运维告警（P1）**：后台周期评估四类风险（凭证池耗尽 / 后台任务连续失败 / token 临近到期 / 上游错误率骤升），命中落 `alert_events` 并在管理台「运维告警」页回看，可选推送 webhook（`ALERT_WEBHOOK_URL`），同一告警在静默窗内只报一次
 - **B10 按渠道代理（P1）**：`PROVIDER_PROXIES` 为每个渠道单独指定出站代理（HTTP/SOCKS5），作用于该渠道全部出站请求（聊天 / 额度 / 模型 / 后台任务 / OAuth 登录）；留空直连，默认行为不变

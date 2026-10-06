@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from ...provider.base import AuthResult, AuthSession
+from ...provider.base import AuthFlow, AuthResult, AuthSession
 from ...provider.proxy import build_client
 from .credential import CodeBuddyCredential
 from .events import UpstreamProtocolViolation
@@ -139,7 +139,7 @@ class CodeBuddyOAuth:
             raise UpstreamProtocolViolation("auth response missing state")
         reservation = self.store.begin(username, upstream_state)
         return AuthSession(
-            flow="poll", state=reservation, auth_url=auth_url, interval=5,
+            flow=AuthFlow.POLL, state=reservation, auth_url=auth_url, interval=5,
             callback_url=None)
 
     async def poll(self, auth_state: str, username: str) -> AuthResult | None:

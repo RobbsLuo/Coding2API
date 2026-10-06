@@ -47,8 +47,10 @@ export const FALLBACK_CHART_COLOR = "var(--chart-5)";
 /**
  * 模型列表 / 下拉的渠道展示顺序：CodeBuddy、TRAE 优先，其余渠道在后。
  *
- * 与后端 `/v1/models` 的排序权重（`src/api/models.py` 的 `_PROVIDER_RANK`）
- * 对齐——Playground 的分组顺序因此与接口返回的 data 顺序一致。
+ * 注意：这**不是**后端 `/v1/models` 的排序权重（`src/api/models.py` 的
+ * `_PROVIDER_RANK` 把 zen/kilo 与 qoder/codearts 同归「其他 4」）。前端把
+ * zen/kilo 提到 qoder/codearts 之前是有意的 UI 取舍（免费渠道更常被翻），
+ * 因此 Playground 的分组顺序与接口返回的 data 顺序并不保证一致。
  */
 export const PROVIDER_ORDER: Provider[] = ["codebuddy", "trae", "zen", "kilo", "qoder", "codearts"];
 

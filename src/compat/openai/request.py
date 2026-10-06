@@ -60,4 +60,17 @@ def parse_chat_request(body: Any) -> ChatRequest:
     stream = body.get("stream", False)
     if not isinstance(stream, bool):
         raise InvalidRequest("stream must be a boolean")
-    return ChatRequest(model=model or "", messages=messages, stream=stream, raw=dict(body))
+    # 数值字段校验（M4）：NaN/Inf 由 read_json_body 拦在 JSON 层，但 `-1`/`true`
+    # 这类合法 JSON 仍会透传到上游、污染凭证健康度与统计；与 Anthropic /
+    # Responses 出口保持同一套边界。在 raw 副本上归一，不改动调用方 body。
+    raw = dict(body)
+    for key in ("temperature", "top_p"):
+        if key in raw:
+            value = require_finite_number(raw[key], key)
+            if key == "temperature" and value > MAX_TEMPERATURE:
+                raise InvalidRequest(f"temperature must be <= {MAX_TEMPERATURE}")
+            raw[key] = value
+    for key in ("max_tokens", "max_completion_tokens"):
+        if key in raw and raw[key] is not None:
+            require_positive_int(raw[key], key, maximum=MAX_OUTPUT_TOKENS)
+    return ChatRequest(model=model or "", messages=messages, stream=stream, raw=raw)

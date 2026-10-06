@@ -29,7 +29,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from ...provider.base import AuthResult, AuthSession
+from ...provider.base import AuthFlow, AuthResult, AuthSession
 from ...provider.proxy import build_client
 from .credential import QoderCredential, credential_from_device
 from .events import (
@@ -220,7 +220,7 @@ class QoderOAuth:
                                   machine_id=machine_id)
         reservation = self.store.begin(username, verifier=verifier, nonce=nonce,
                                        realm=self.realm, machine_id=machine_id)
-        return AuthSession(flow="poll", state=reservation, auth_url=auth_url,
+        return AuthSession(flow=AuthFlow.POLL, state=reservation, auth_url=auth_url,
                            interval=5, callback_url=None)
 
     async def poll(self, auth_state: str, username: str) -> AuthResult | None:

@@ -1239,3 +1239,24 @@ def test_translator_error_event_emits_error_frame():
     payload = json.loads(frames[0].decode().removeprefix("data: ").strip())
     assert payload["error"]["code"] == 1005
     assert payload["error"]["message"] == "no quota"
+
+
+def test_openai_chat_rejects_bad_numeric_fields():
+    """M4：OpenAI chat 出口与 Anthropic / Responses 用同一套数值边界，
+    合法 JSON 里的 `-1`/`true`/超上限不能透传给上游。"""
+    from src.compat.openai.request import InvalidRequest, parse_chat_request
+
+    base = {"messages": [{"role": "user", "content": "hi"}]}
+    for bad in ({"max_tokens": -1}, {"max_tokens": 0},
+                {"max_tokens": 10**9}, {"max_tokens": True},
+                {"max_completion_tokens": -5},
+                {"temperature": 99999}, {"top_p": "hot"},
+                {"temperature": float("nan")}):
+        with pytest.raises(InvalidRequest):
+            parse_chat_request({**base, **bad})
+    # 合法值原样保留（归一为 float 便于后续透传）
+    parsed = parse_chat_request({**base, "temperature": 0.3, "top_p": 0.9,
+                                 "max_tokens": 128})
+    assert parsed.raw["temperature"] == 0.3 and parsed.raw["max_tokens"] == 128
+    # 显式 null 上限视为未设置，不报错
+    assert parse_chat_request({**base, "max_tokens": None}).raw["max_tokens"] is None

@@ -21,7 +21,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
-from ...provider.base import AuthResult, AuthSession
+from ...provider.base import AuthFlow, AuthResult, AuthSession
 from ...provider.proxy import build_client
 from . import auth as codearts_auth
 from .auth import LoginConfig, LoginSession
@@ -171,7 +171,7 @@ class CodeArtsOAuth:
         """
         session = codearts_auth.new_login_session(self.config, port=self.port)
         reservation = self.store.begin(username, session)
-        return AuthSession(flow="paste", state=reservation,
+        return AuthSession(flow=AuthFlow.PASTE, state=reservation,
                            auth_url=session.auth_url, interval=None,
                            callback_url=None)
 

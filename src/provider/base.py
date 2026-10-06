@@ -7,7 +7,7 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, ClassVar, Protocol, runtime_checkable
@@ -321,12 +321,27 @@ class Model:
     default_effort: str | None = None
 
 
+class AuthFlow(StrEnum):
+    """登录轨道类型（Q17=C）。
+
+    - `poll`：前端轮询 `poll_auth`，服务端监听本机回环端口
+    - `callback`：浏览器 302 回本服务 `/authorize`（TRAE）
+    - `paste`：用户把回调链接粘回（服务端无法监听本机回环端口，如 CodeArts）
+
+    用枚举而非裸字符串：`"paste"` 曾被文档漏写，裸串让这类第三值悄悄漂移。
+    """
+
+    POLL = "poll"
+    CALLBACK = "callback"
+    PASTE = "paste"
+
+
 @dataclass(slots=True)
 class AuthSession:
     """登录轨道（Q17=C）：poll 出 auth_url/interval；callback 出 callback_url；
     paste 出 auth_url 但需用户把回调链接粘回（服务端无法监听本机回环端口）。"""
 
-    flow: str                       # "poll" | "callback"
+    flow: AuthFlow
     state: str
     auth_url: str | None = None
     interval: int | None = None
@@ -341,20 +356,29 @@ class AuthResult:
 
 @runtime_checkable
 class Provider(Protocol):
+    """全部 provider 共同实现的核心接口（TECHNICAL §4）。
+
+    `id` 是渠道标识；其余方法分三类：凭证生命周期、额度探测、执行与分类。
+    签名与 `TECHNICAL.md §4` 严格一致——两处定义漂移过一次（`start_auth`
+    参数、`complete_callback` 参数、缺失 `stream_chat`/`aclose`），此注释是
+    防止再次漂移的锚点：改这里必须同步改 §4。
+    """
+
     id: str
 
-    def start_auth(self) -> AuthSession: ...
+    # 凭证生命周期（上游协议私有，必然在 provider 内）
+    def start_auth(self, callback_url: str) -> AuthSession: ...
     def poll_auth(self, state: str) -> AuthResult | None: ...
-    def complete_callback(self, url: str) -> AuthResult: ...
+    async def complete_callback(self, raw_url: str, state: str) -> dict: ...
     def import_credential(self, raw: dict) -> dict: ...
     def refresh(self, credential_data: dict) -> dict: ...
+
+    # 额度探测（调度器依赖：健康度 + 到期阶梯）
     async def probe_quota(self, credential_data: dict) -> Quota: ...
+
+    # 执行与分类
+    async def stream_chat(self, credential_data: dict, payload: dict,
+                          model: str) -> AsyncIterator[Event]: ...
     def classify(self, status: int, body: bytes) -> ErrKind: ...
     def list_models(self, credential_data: dict) -> list[Model]: ...
-    def credential_from(self, credential_data: dict) -> Any:
-        """dict 凭证 → 渠道凭证对象（预刷新判定用）；无此能力的渠道可省略。
-
-        RefreshTask 的 `_needs_refresh` 依赖它；凭证对象上的 `needs_refresh`
-        负责把「到期时间未知」与「已进入窗口」区分开。
-        """
-        ...
+    async def aclose(self) -> None: ...

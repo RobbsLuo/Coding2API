@@ -831,12 +831,12 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 ```python
 class Provider(Protocol):
-    id: ClassVar[str]
+    id: str
 
     # 凭证生命周期（上游协议私有，必然在 provider 内）
-    def start_auth(self, callback_url: str) -> AuthSession: ...   # flow=poll|callback
+    def start_auth(self, callback_url: str) -> AuthSession: ...   # flow=poll|callback|paste
     def poll_auth(self, state: str) -> AuthResult | None: ...     # 仅 poll 轨道
-    def complete_callback(self, raw_url: str, state: str) -> AuthResult: ...  # 仅 TRAE
+    async def complete_callback(self, raw_url: str, state: str) -> dict: ...  # 仅 TRAE
     def import_credential(self, raw: dict) -> dict: ...
     def refresh(self, credential_data: dict) -> dict: ...
 
@@ -847,7 +847,12 @@ class Provider(Protocol):
     async def stream_chat(self, credential_data: dict, payload: dict, model: str) -> AsyncIterator[Event]: ...
     def classify(self, status: int, body: bytes) -> ErrKind: ...
     def list_models(self, credential_data: dict) -> list[Model]: ...
+    async def aclose(self) -> None: ...
 ```
+
+> 上表与 `src/provider/base.py` 的 `Provider` 协议严格一致；两处定义曾漂移
+> 过一次（`start_auth` 参数、`complete_callback` 参数、缺失 `stream_chat`/
+> `aclose`），改任一处必须同步另一处。
 
 约定：
 - 凭证在引擎与 provider 之间以 dict 传递（解密后的 `data_enc`）；`credential_from`
@@ -1101,7 +1106,7 @@ B5 的实际症状值得记住：新建用户报「用户名可能已存在，�
 **诊断顺序**（先确认版本，再查业务）：
 
 ```bash
-# 1) schema 版本已迁移（期望 15）且账号已导入
+# 1) schema 版本已迁移（期望 17）且账号已导入
 sqlite3 data/coding2api.sqlite3 "PRAGMA user_version; SELECT username, role, enabled FROM users;"
 # 2) 路由存在：期望 401（未登录），404 = 旧后端进程
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
