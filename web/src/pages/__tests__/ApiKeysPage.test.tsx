@@ -63,6 +63,7 @@ describe("ApiKeysPage", () => {
 
     renderPage(<ApiKeysPage />);
     await settle();
+    await openCreateDialog();
     await userEvent.type(screen.getByTestId("key-name"), "laptop");
     await userEvent.click(screen.getByRole("button", { name: "创建" }));
 
@@ -86,6 +87,7 @@ describe("ApiKeysPage", () => {
 
     renderPage(<ApiKeysPage />);
     await settle();
+    await openCreateDialog();
     await userEvent.click(screen.getByRole("button", { name: "创建" }));
     await screen.findByTestId("new-key-plaintext");
     // 新 Key 面板的复制按钮（页面上还有 Base URL/curl/Python 三处复制）
@@ -160,6 +162,7 @@ describe("ApiKeysPage", () => {
     );
     renderPage(<ApiKeysPage />);
     await settle();
+    await openCreateDialog();
 
     await userEvent.type(screen.getByTestId("key-name"), "ci");
     await userEvent.selectOptions(screen.getByTestId("key-binding"), "codebuddy");
@@ -184,6 +187,7 @@ describe("ApiKeysPage", () => {
     );
     renderPage(<ApiKeysPage />);
     await settle();
+    await openCreateDialog();
 
     await userEvent.click(screen.getByRole("button", { name: "创建" }));
     expect(await screen.findByText(/请检查渠道绑定与 IP 白名单格式/)).toBeInTheDocument();
@@ -213,6 +217,8 @@ describe("OpenAI 客户端接入面板", () => {
     // Responses 端点在此列出，示例默认折叠
     expect(screen.getByTestId("example-details-responses")).toHaveTextContent("/responses");
     expect(screen.getByTestId("openai-entry")).toHaveTextContent("Codex CLI");
+    // Anthropic 端点已拆到独立面板，OpenAI 面板不再包含
+    expect(screen.queryByTestId("example-details-messages")).not.toBeInTheDocument();
   });
   it("创建 Key 后示例自动带入真实 Key", async () => {
     const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -227,7 +233,7 @@ describe("OpenAI 客户端接入面板", () => {
     renderPage(<ApiKeysPage />);
     await settle();
     await openOpenAIEntry();
-
+    await openCreateDialog();
     await userEvent.type(screen.getByTestId("key-name"), "test");
     await userEvent.click(screen.getByRole("button", { name: "创建" }));
     await waitFor(() => {
@@ -238,6 +244,46 @@ describe("OpenAI 客户端接入面板", () => {
     expect(screen.getByTestId("example-responses")).toHaveTextContent(
       "export CODING2API_KEY=sk-real-key",
     );
+  });});
+
+describe("Anthropic 客户端接入面板", () => {
+  it("Base URL 填到根（SDK 自拼 /v1/messages），Claude Code 示例默认折叠", async () => {
+    mockFetch({ "/api/api-keys": { api_keys: [] } });
+    renderPage(<ApiKeysPage />);
+    await settle();
+    await userEvent.click(screen.getByTestId("anthropic-entry-toggle"));
+
+    expect(screen.getByTestId("anthropic-base-url")).toHaveTextContent(
+      String(window.location.origin),
+    );
+    expect(screen.getByTestId("example-details-messages")).toHaveTextContent("/v1/messages");
+    expect(screen.getByTestId("example-messages")).toHaveTextContent(
+      `export ANTHROPIC_BASE_URL=${window.location.origin}`,
+    );
+    expect(screen.getByTestId("example-messages")).toHaveTextContent("ANTHROPIC_AUTH_TOKEN=sk-…");
+  });
+
+  it("创建 Key 后 Claude Code 示例自动带入真实 Key", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url === "/api/api-keys" && init?.method === "POST") {
+        return jsonResponse({ ...KEY, api_key: "sk-real-key" });
+      }
+      if (url === "/api/api-keys") return jsonResponse({ api_keys: [] });
+      throw new Error(`未 mock: ${url}`);
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+    renderPage(<ApiKeysPage />);
+    await settle();
+    await userEvent.click(screen.getByTestId("anthropic-entry-toggle"));
+    await openCreateDialog();
+    await userEvent.type(screen.getByTestId("key-name"), "test");
+    await userEvent.click(screen.getByRole("button", { name: "创建" }));
+    await waitFor(() => {
+      expect(screen.getByTestId("example-messages")).toHaveTextContent(
+        "export ANTHROPIC_AUTH_TOKEN=sk-real-key",
+      );
+    });
   });
 });
 
@@ -310,6 +356,12 @@ async function openOpenAIEntry() {
   await userEvent.click(screen.getByTestId("openai-entry-toggle"));
 }
 
+/** 打开「创建 API Key」对话框（由「我的 API Key」右上角按钮触发）。 */
+async function openCreateDialog() {
+  await userEvent.click(screen.getByTestId("open-create-key-dialog"));
+  expect(await screen.findByTestId("create-key-dialog")).toBeInTheDocument();
+}
+
 it("面板默认收起，点「说明」展开、点「收起」收拢", async () => {
   mockFetch({ "/api/api-keys": { api_keys: [] } });
   renderPage(<ApiKeysPage />);
@@ -327,4 +379,30 @@ it("面板默认收起，点「说明」展开、点「收起」收拢", async (
   await userEvent.click(toggle);
   expect(toggle).toHaveTextContent("说明");
   expect(screen.queryByTestId("openai-entry")).not.toBeInTheDocument();
+});
+
+it("创建 Key 收在对话框：右上角按钮打开，创建成功后展示一次性明文，可关闭", async () => {
+  const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/api/api-keys" && init?.method === "POST") {
+      return jsonResponse({ ...KEY, api_key: "sk-dialog-key" });
+    }
+    return jsonResponse({ api_keys: [] });
+  });
+  vi.stubGlobal("fetch", fetchSpy);
+  renderPage(<ApiKeysPage />);
+  await settle();
+
+  // 表单默认不在页面上，点右上角按钮才出现
+  expect(screen.queryByTestId("key-name")).not.toBeInTheDocument();
+  await openCreateDialog();
+
+  await userEvent.type(screen.getByTestId("key-name"), "dialog");
+  await userEvent.click(screen.getByRole("button", { name: "创建" }));
+  expect(await screen.findByTestId("new-key-plaintext")).toHaveTextContent("sk-dialog-key");
+
+  // 「我已保存」关闭对话框
+  await userEvent.click(screen.getByRole("button", { name: "我已保存" }));
+  expect(screen.queryByTestId("create-key-dialog")).not.toBeInTheDocument();
+  expect(screen.queryByTestId("new-key-plaintext")).not.toBeInTheDocument();
 });

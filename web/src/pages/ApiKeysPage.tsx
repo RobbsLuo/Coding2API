@@ -1,4 +1,4 @@
-import { Check, ChevronDown, Copy, KeyRound, Plus, Trash2 } from "lucide-react";
+import { Check, ChevronDown, Copy, KeyRound, Plus, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import { api } from "../api/client";
 import { useApiKeys, useQueryClient } from "../api/hooks";
@@ -79,6 +79,19 @@ codex -c "model_providers.coding2api={ name='coding2api', base_url='${baseUrl}',
       -c model_provider=coding2api \\
       -c model='glm-5.2' \\
       '你的任务'`,
+  };
+}
+
+/** Anthropic 客户端接入的 Base URL：SDK 自己拼 /v1/messages，填到根 */
+export const anthropicBaseUrl = (): string => window.location.origin;
+
+/** Claude Code 接入示例；ANTHROPIC_AUTH_TOKEN 走 Bearer，ANTHROPIC_API_KEY 走 x-api-key */
+export function anthropicExamples(baseUrl: string, apiKey: string): { messages: string } {
+  const key = apiKey || "sk-…";
+  return {
+    messages: `export ANTHROPIC_BASE_URL=${baseUrl}
+export ANTHROPIC_AUTH_TOKEN=${key}
+claude`,
   };
 }
 
@@ -174,28 +187,26 @@ function EndpointRow({
   );
 }
 
-/** OpenAI 客户端接入面板：Base URL + 端点 + 可复制的示例。
- *  折叠交互与「模型与渠道调度说明」(HelpBlock) 一致：卡片 header 的「说明 / 收起」
- *  按钮切换内容，不引入动画。 */
-function OpenAIEntry({ apiKey }: { apiKey: string }) {
-  const baseUrl = openaiBaseUrl();
-  const examples = openaiExamples(baseUrl, apiKey);
-  const [copied, setCopied] = useState<string | null>(null);
+/** 客户端接入面板的公共骨架：折叠交互与「模型与渠道调度说明」(HelpBlock) 一致，
+ *  卡片 header 的「说明 / 收起」按钮切换内容，不引入动画。 */
+function ClientEntryPanel({
+  title,
+  testid,
+  children,
+}: {
+  title: string;
+  testid: string;
+  children: React.ReactNode;
+}) {
   const [open, setOpen] = useState(false);
-
-  const copy = async (label: string, text: string) => {
-    await navigator.clipboard.writeText(text);
-    setCopied(label);
-  };
-
   return (
     <Panel
-      title="OpenAI 客户端接入"
+      title={title}
       action={
         <Button
           size="sm"
           variant="ghost"
-          data-testid="openai-entry-toggle"
+          data-testid={`${testid}-toggle`}
           aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
         >
@@ -205,54 +216,8 @@ function OpenAIEntry({ apiKey }: { apiKey: string }) {
       }
     >
       {open ? (
-        <div className="space-y-4 text-sm" data-testid="openai-entry">
-          <div>
-            <div className="mb-1 text-xs text-muted-foreground">Base URL</div>
-            <div className="flex items-center gap-2">
-              <code
-                data-testid="openai-base-url"
-                className="flex-1 truncate rounded-lg border border-input bg-muted/40 px-3 py-2 font-mono text-xs transition-colors hover:border-ring"
-              >
-                {baseUrl}
-              </code>
-              <CopyButton label={copied === "url" ? "已复制" : "复制"} onCopy={() => void copy("url", baseUrl)} />
-            </div>
-          </div>
-          <ul className="space-y-1 text-xs text-muted-foreground">
-            <li>
-              {/* 示例默认折叠：点开端点行查看 curl / SDK 调用方式 */}
-              <EndpointRow method="POST" path={`${baseUrl}/chat/completions`} description="对话补全（流式 / 非流式）" testid="example-details">
-                <CodeExample label="curl 示例" text={examples.curl} copied={copied === "curl"} onCopy={() => void copy("curl", examples.curl)} testid="example-curl" copyTestid="copy-curl" />
-                <CodeExample label="OpenAI Python SDK" text={examples.python} copied={copied === "python"} onCopy={() => void copy("python", examples.python)} testid="example-python" copyTestid="copy-python" />
-              </EndpointRow>
-            </li>
-            <li>
-              <EndpointRow method="GET" path={`${baseUrl}/user/balance`} description="余额查询（上游额度，DeepSeek 兼容结构）" testid="example-details-balance">
-                <CodeExample label="curl 示例" text={examples.balance} copied={copied === "balance"} onCopy={() => void copy("balance", examples.balance)} testid="example-balance-curl" copyTestid="copy-balance-curl" />
-              </EndpointRow>
-            </li>
-            <li>
-              <EndpointRow method="POST" path={`${baseUrl}/responses`} description="Responses 子集（供 Codex CLI 接入）" testid="example-details-responses">
-                <CodeExample label="Codex CLI 配置" text={examples.responses} copied={copied === "responses"} onCopy={() => void copy("responses", examples.responses)} testid="example-responses" copyTestid="copy-responses" />
-              </EndpointRow>
-            </li>
-            <li>
-              <Badge>GET</Badge> <code>{baseUrl}/models</code>　模型列表
-            </li>
-          </ul>
-          <Notice tone="muted">
-            任何兼容 OpenAI 协议的客户端（ChatGPT Next Web、LobeChat、Cursor 等）
-            都可以按上面的 Base URL + API Key 接入。模型名从 /v1/models 获取。
-          </Notice>
-          <Notice tone="muted">
-            {/* 整段包一层 span：ShadAlert 是 grid 容器，直接放多个行内元素会被拆成多行 */}
-            <span>
-              <code>POST /v1/responses</code> 只实现 Codex CLI 用到的子集，与{" "}
-              <code>/v1/chat/completions</code> 共用同一套选号、冷却、轮换与会话粘性。
-              <code>store=true</code>、<code>previous_response_id</code> 与{" "}
-              <code>web_search</code> 等服务端私有工具会被显式拒绝（400），不静默降级。
-            </span>
-          </Notice>
+        <div className="space-y-4 text-sm" data-testid={testid}>
+          {children}
         </div>
       ) : (
         <p className="text-sm text-muted-foreground">
@@ -260,6 +225,138 @@ function OpenAIEntry({ apiKey }: { apiKey: string }) {
         </p>
       )}
     </Panel>
+  );
+}
+
+/** Base URL 行：代码框 + 复制按钮 */
+function BaseUrlRow({
+  baseUrl,
+  copied,
+  onCopy,
+  testid,
+}: {
+  baseUrl: string;
+  copied: boolean;
+  onCopy: () => void;
+  testid: string;
+}) {
+  return (
+    <div>
+      <div className="mb-1 text-xs text-muted-foreground">Base URL</div>
+      <div className="flex items-center gap-2">
+        <code
+          data-testid={testid}
+          className="flex-1 truncate rounded-lg border border-input bg-muted/40 px-3 py-2 font-mono text-xs transition-colors hover:border-ring"
+        >
+          {baseUrl}
+        </code>
+        <CopyButton label={copied ? "已复制" : "复制"} onCopy={onCopy} />
+      </div>
+    </div>
+  );
+}
+
+/** OpenAI 客户端接入面板：Base URL + 端点 + 可复制的示例。 */
+function OpenAIEntry({ apiKey }: { apiKey: string }) {
+  const baseUrl = openaiBaseUrl();
+  const examples = openaiExamples(baseUrl, apiKey);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const copy = async (label: string, text: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopied(label);
+  };
+
+  return (
+    <ClientEntryPanel title="OpenAI 客户端接入" testid="openai-entry">
+      <BaseUrlRow
+        baseUrl={baseUrl}
+        copied={copied === "url"}
+        onCopy={() => void copy("url", baseUrl)}
+        testid="openai-base-url"
+      />
+      <ul className="space-y-1 text-xs text-muted-foreground">
+        <li>
+          {/* 示例默认折叠：点开端点行查看 curl / SDK 调用方式 */}
+          <EndpointRow method="POST" path={`${baseUrl}/chat/completions`} description="对话补全（流式 / 非流式）" testid="example-details">
+            <CodeExample label="curl 示例" text={examples.curl} copied={copied === "curl"} onCopy={() => void copy("curl", examples.curl)} testid="example-curl" copyTestid="copy-curl" />
+            <CodeExample label="OpenAI Python SDK" text={examples.python} copied={copied === "python"} onCopy={() => void copy("python", examples.python)} testid="example-python" copyTestid="copy-python" />
+          </EndpointRow>
+        </li>
+        <li>
+          <EndpointRow method="GET" path={`${baseUrl}/user/balance`} description="余额查询（上游额度，DeepSeek 兼容结构）" testid="example-details-balance">
+            <CodeExample label="curl 示例" text={examples.balance} copied={copied === "balance"} onCopy={() => void copy("balance", examples.balance)} testid="example-balance-curl" copyTestid="copy-balance-curl" />
+          </EndpointRow>
+        </li>
+        <li>
+          <EndpointRow method="POST" path={`${baseUrl}/responses`} description="Responses 子集（供 Codex CLI 接入）" testid="example-details-responses">
+            <CodeExample label="Codex CLI 配置" text={examples.responses} copied={copied === "responses"} onCopy={() => void copy("responses", examples.responses)} testid="example-responses" copyTestid="copy-responses" />
+          </EndpointRow>
+        </li>
+        <li>
+          <Badge>GET</Badge> <code>{baseUrl}/models</code>　模型列表
+        </li>
+      </ul>
+      <Notice tone="muted">
+        任何兼容 OpenAI 协议的客户端（ChatGPT Next Web、LobeChat、Cursor 等）
+        都可以按上面的 Base URL + API Key 接入。模型名从 /v1/models 获取。
+      </Notice>
+      <Notice tone="muted">
+        {/* 整段包一层 span：ShadAlert 是 grid 容器，直接放多个行内元素会被拆成多行 */}
+        <span>
+          <code>POST /v1/responses</code> 只实现 Codex CLI 用到的子集，与{" "}
+          <code>/v1/chat/completions</code> 共用同一套选号、冷却、轮换与会话粘性。
+          <code>store=true</code>、<code>previous_response_id</code> 与{" "}
+          <code>web_search</code> 等服务端私有工具会被显式拒绝（400），不静默降级。
+        </span>
+      </Notice>
+    </ClientEntryPanel>
+  );
+}
+
+/** Anthropic 客户端接入面板：Claude Code 等只走 Anthropic 协议的客户端从这里抄配置。 */
+function AnthropicEntry({ apiKey }: { apiKey: string }) {
+  const baseUrl = anthropicBaseUrl();
+  const examples = anthropicExamples(baseUrl, apiKey);
+  const [copied, setCopied] = useState<string | null>(null);
+
+  const copy = async (label: string, text: string) => {
+    await navigator.clipboard.writeText(text);
+    setCopied(label);
+  };
+
+  return (
+    <ClientEntryPanel title="Anthropic 客户端接入" testid="anthropic-entry">
+      <BaseUrlRow
+        baseUrl={baseUrl}
+        copied={copied === "url"}
+        onCopy={() => void copy("url", baseUrl)}
+        testid="anthropic-base-url"
+      />
+      <ul className="space-y-1 text-xs text-muted-foreground">
+        <li>
+          <EndpointRow method="POST" path={`${baseUrl}/v1/messages`} description="对话补全（流式 / 非流式，SDK 自动拼接路径）" testid="example-details-messages">
+            <CodeExample label="Claude Code 配置" text={examples.messages} copied={copied === "messages"} onCopy={() => void copy("messages", examples.messages)} testid="example-messages" copyTestid="copy-messages" />
+          </EndpointRow>
+        </li>
+        <li>
+          <Badge>POST</Badge> <code>{baseUrl}/v1/messages/count_tokens</code>　输入 token 估算
+        </li>
+      </ul>
+      <Notice tone="muted">
+        Claude Code 等 Anthropic 协议客户端按上面的 Base URL + API Key 接入；
+        与 OpenAI 出口共用同一套 Key、选号、冷却、轮换与会话粘性。
+      </Notice>
+      <Notice tone="muted">
+        {/* 整段包一层 span：ShadAlert 是 grid 容器，直接放多个行内元素会被拆成多行 */}
+        <span>
+          鉴权同时接受 <code>x-api-key</code>（<code>ANTHROPIC_API_KEY</code>）与{" "}
+          <code>Authorization: Bearer</code>（<code>ANTHROPIC_AUTH_TOKEN</code>）。
+          只实现 Anthropic Messages 子集：图片 / 文档块与 Anthropic 服务端工具
+          （<code>web_search</code> / <code>computer</code> 等）一律显式 400，不静默降级。
+        </span>
+      </Notice>
+    </ClientEntryPanel>
   );
 }
 
@@ -273,6 +370,8 @@ export function ApiKeysPage() {
   const [confirming, setConfirming] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  // 创建 Key 收进对话框（低频动作不常驻占屏），由「我的 API Key」右上角触发
+  const [createOpen, setCreateOpen] = useState(false);
 
   const keys = data?.api_keys ?? [];
 
@@ -313,6 +412,11 @@ export function ApiKeysPage() {
     setCopied(true);
   };
 
+  const closeCreate = () => {
+    setCreateOpen(false);
+    setError(null);
+  };
+
   return (
     <div className="space-y-6" data-testid="api-keys-page">
       <PageHeader
@@ -321,79 +425,21 @@ export function ApiKeysPage() {
         icon={<KeyRound className="size-5" />}
       />
       <OpenAIEntry apiKey={created?.api_key ?? ""} />
+      <AnthropicEntry apiKey={created?.api_key ?? ""} />
 
-      <Panel title="创建 API Key">
-        <form onSubmit={create} className="flex flex-wrap items-end gap-3">
-          <div className="w-56">
-            <Field label="名称（可选）">
-              <Input
-                value={name}
-                data-testid="key-name"
-                placeholder="例如 laptop"
-                onChange={(event) => setName(event.target.value)}
-              />
-            </Field>
-          </div>
-          <div className="w-52">
-            <Field label="渠道绑定">
-              <Select
-                value={binding}
-                data-testid="key-binding"
-                onChange={(event) => setBinding(event.target.value)}
-              >
-                {PROVIDER_BINDING_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-          </div>
-          <div className="w-72">
-            {/* 提示写进 label 而不是 Field 的 hint：hint 会把该字段撑高，
-                与同排其它控件在 items-end 下对不齐输入框 */}
-            <Field label="来源 IP 白名单（逗号分隔 IP/CIDR，留空不限制）">
-              <Input
-                value={allowedIps}
-                data-testid="key-allowed-ips"
-                placeholder="例如 203.0.113.9,10.0.0.0/8"
-                onChange={(event) => setAllowedIps(event.target.value)}
-              />
-            </Field>
-          </div>
-          <Button type="submit" variant="primary">
-            <Plus className="mr-1 size-4" />
-            创建
+      <Panel
+        title="我的 API Key"
+        action={
+          <Button
+            size="sm"
+            variant="primary"
+            data-testid="open-create-key-dialog"
+            onClick={() => setCreateOpen(true)}
+          >
+            <Plus className="size-4" /> 创建 API Key
           </Button>
-        </form>
-        {/* 创建结果（成功/失败）无焦点变化，aria-live 让读屏可感知 */}
-        <div aria-live="polite">
-          {error && (
-            <div className="mt-3" role="alert">
-              <Notice tone="danger">{error}</Notice>
-            </div>
-          )}
-          {created && (
-            <Panel title="新 Key 已创建" className="mt-3">
-              <Notice tone="warn">此 Key 只会显示这一次，请立即复制保存；关闭后无法再次查看。</Notice>
-              <div className="mt-3 flex items-center gap-3">
-                <code
-                  data-testid="new-key-plaintext"
-                  className="flex-1 break-all rounded-lg border border-input bg-muted/40 px-3 py-2 font-mono text-xs"
-                >
-                  {created.api_key}
-                </code>
-                <CopyButton label={copied ? "已复制" : "复制"} onCopy={copy} />
-                <Button size="sm" variant="ghost" onClick={() => setCreated(null)}>
-                  我已保存
-                </Button>
-              </div>
-            </Panel>
-          )}
-        </div>
-      </Panel>
-
-      <Panel title="我的 API Key">
+        }
+      >
         {isLoading ? (
           <Empty>载入中…</Empty>
         ) : keys.length === 0 ? (
@@ -449,6 +495,106 @@ export function ApiKeysPage() {
           </Table>
         )}
       </Panel>
+
+      {/* 创建 Key 对话框：创建成功后仍停留在对话框内展示一次性明文，由用户主动关闭 */}
+      {createOpen && (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4"
+          onClick={closeCreate}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="创建 API Key"
+            data-testid="create-key-dialog"
+            onClick={(event) => event.stopPropagation()}
+            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-background p-5 shadow-lg"
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="flex items-center gap-2 text-sm font-semibold">
+                <Plus className="size-4 text-muted-foreground" />
+                创建 API Key
+              </h2>
+              <Button
+                size="icon"
+                variant="ghost"
+                aria-label="关闭"
+                data-testid="create-key-close"
+                onClick={closeCreate}
+              >
+                <X className="size-4" />
+              </Button>
+            </div>
+
+            {created ? (
+              <div aria-live="polite">
+                <Notice tone="warn">此 Key 只会显示这一次，请立即复制保存；关闭后无法再次查看。</Notice>
+                <div className="mt-3 flex items-center gap-3">
+                  <code
+                    data-testid="new-key-plaintext"
+                    className="flex-1 break-all rounded-lg border border-input bg-muted/40 px-3 py-2 font-mono text-xs"
+                  >
+                    {created.api_key}
+                  </code>
+                  <CopyButton label={copied ? "已复制" : "复制"} onCopy={copy} />
+                  <Button size="sm" variant="ghost" onClick={closeCreate}>
+                    我已保存
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <form onSubmit={create} className="space-y-3">
+                <Field label="名称（可选）">
+                  <Input
+                    value={name}
+                    data-testid="key-name"
+                    placeholder="例如 laptop"
+                    onChange={(event) => setName(event.target.value)}
+                  />
+                </Field>
+                <Field label="渠道绑定">
+                  <Select
+                    value={binding}
+                    data-testid="key-binding"
+                    onChange={(event) => setBinding(event.target.value)}
+                  >
+                    {PROVIDER_BINDING_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <Field label="来源 IP 白名单（逗号分隔 IP/CIDR，留空不限制）">
+                  <Input
+                    value={allowedIps}
+                    data-testid="key-allowed-ips"
+                    placeholder="例如 203.0.113.9,10.0.0.0/8"
+                    onChange={(event) => setAllowedIps(event.target.value)}
+                  />
+                </Field>
+                {/* 创建结果（成功/失败）无焦点变化，aria-live 让读屏可感知 */}
+                <div aria-live="polite">
+                  {error && (
+                    <div role="alert">
+                      <Notice tone="danger">{error}</Notice>
+                    </div>
+                  )}
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button type="button" variant="ghost" onClick={closeCreate}>
+                    取消
+                  </Button>
+                  <Button type="submit" variant="primary">
+                    <Plus className="mr-1 size-4" />
+                    创建
+                  </Button>
+                </div>
+              </form>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
