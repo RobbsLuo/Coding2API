@@ -178,6 +178,9 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     const nameBox = row.querySelector(".basis-32");
     expect(nameBox).toHaveClass("grow");
     expect(nameBox).toHaveTextContent("deepseek-v4.1-flash");
+    // 徽章组常驻右侧：换到下一行也贴右（ml-auto），不跑到左边
+    const pillBox = row.lastElementChild;
+    expect(pillBox).toHaveClass("ml-auto", "flex-wrap");
     for (const provider of ["codebuddy", "trae", "qoder", "codearts"]) {
       expect(row.querySelector(`[data-testid="channel-pill-${provider}"]`)).toBeInTheDocument();
     }

@@ -225,10 +225,10 @@ function ModelRow({
           </span>
         )}
       </span>
-      {/* 渠道 + 倍率整体靠右；单行放不下时整组换行（不挤压名称）。
-          保留默认 min-width:auto：独占一行时最多收缩到一个徽章的宽度，内层
-          flex-wrap 再自行折行，避免把单个徽章挤变形。 */}
-      <span className="flex flex-wrap items-center justify-end gap-1.5">
+      {/* 渠道 + 倍率常驻右侧：`ml-auto` 让徽章组无论与名称同行还是换到下一行
+          都贴右（不换行时名称 grow 已占满，效果相同；换行后若不加 ml-auto 会
+          落到左边）。换行后由内层 flex-wrap 自行折行。 */}
+      <span className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
         {providers.map((provider) => (
           <ChannelPill
             key={provider}
