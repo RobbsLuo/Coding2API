@@ -197,7 +197,7 @@ function ModelRow({
       data-testid={`model-option-${item.value}`}
       onClick={onSelect}
       className={cn(
-        "flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left transition-colors",
+        "flex w-full flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl border px-3 py-2 text-left transition-colors",
         selected
           ? "border-primary/60 bg-primary/[0.08] ring-1 ring-primary/30"
           : "border-border bg-card hover:border-primary/30 hover:bg-muted/50",
@@ -211,7 +211,11 @@ function ModelRow({
       >
         {selected && <Check className="size-3" />}
       </span>
-      <span className="min-w-0 flex-1">
+      {/* 名称占优：`basis-32`（8rem）给名称留出最低宽度，渠道徽章放不下时整组
+          换到下一行，而不是把名称挤成省略号（`deepseek-v4.1-flash` 有四条渠道，
+          挤到两列网格里名称只剩 0px）。实测 8rem≈「DeepSeek V4.1 Flash」一行所
+          需宽度：单/双渠道行在常见宽度仍单行，多渠道路由时名称先独占整行。 */}
+      <span className="min-w-0 grow basis-32">
         {/* 主名用上游人类可读名（Qwen3.8-Max）；与内部 id 不同时补一行小字 id，
             否则用户无法用 id 直连指定。 */}
         <span className="block truncate text-sm font-semibold">{displayName(item)}</span>
@@ -221,8 +225,10 @@ function ModelRow({
           </span>
         )}
       </span>
-      {/* 渠道 + 倍率整体靠右：名称占满剩余空间，徽章组不折行 */}
-      <span className="flex shrink-0 flex-wrap items-center justify-end gap-1.5">
+      {/* 渠道 + 倍率整体靠右；单行放不下时整组换行（不挤压名称）。
+          保留默认 min-width:auto：独占一行时最多收缩到一个徽章的宽度，内层
+          flex-wrap 再自行折行，避免把单个徽章挤变形。 */}
+      <span className="flex flex-wrap items-center justify-end gap-1.5">
         {providers.map((provider) => (
           <ChannelPill
             key={provider}

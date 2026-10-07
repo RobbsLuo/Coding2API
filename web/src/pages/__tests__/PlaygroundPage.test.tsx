@@ -157,6 +157,32 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(noRate.textContent).not.toMatch(/x\d|免费/);
   });
 
+  it("多渠道徽章不挤压模型名：整行允许换行、名称占弹性基础宽度", async () => {
+    const FOUR = {
+      object: "list",
+      data: [
+        {
+          id: "deepseek-v4.1-flash", object: "model", owned_by: "Coding2API",
+          providers: ["codebuddy", "trae", "qoder", "codearts"],
+        },
+      ],
+    };
+    mockFetch({ "/api/playground/models": FOUR });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    const row = screen.getByTestId("model-option-deepseek-v4.1-flash");
+    // 四渠道徽章排不下时整行换行，而不是把名称挤成省略号
+    expect(row).toHaveClass("flex-wrap");
+    // 名称块保持弹性基础宽度（basis-32），换行后独占整行
+    const nameBox = row.querySelector(".basis-32");
+    expect(nameBox).toHaveClass("grow");
+    expect(nameBox).toHaveTextContent("deepseek-v4.1-flash");
+    for (const provider of ["codebuddy", "trae", "qoder", "codearts"]) {
+      expect(row.querySelector(`[data-testid="channel-pill-${provider}"]`)).toBeInTheDocument();
+    }
+  });
+
   it("多渠道缺细分倍率时只标注有倍率的渠道，不裸显合并值", async () => {
     const EDGE_MODELS = {
       object: "list",
