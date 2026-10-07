@@ -1312,6 +1312,56 @@ def test_models_merge_by_readable_name_across_channels(tmp_path):
     assert aliases["trae"]["kimi-k3"] == "kimi-k3"
 
 
+def test_models_synonym_merges_qoder_deepseek_flash(tmp_path):
+    """Qoder 的 `DeepSeek-Flash` 与别家的 `DeepSeek-V4.1-Flash` 并成一条。
+
+    Qoder 上游名不带版本号（`dfmodel` 只叫 `DeepSeek-Flash`），归一键是
+    `deepseek-flash`，单靠清洗与 `DeepSeek-V4.1-Flash` 对不上；`MODEL_SYNONYMS`
+    把两者收敛到同一个规范键与规范展示名，请求 `deepseek-v4.1-flash` 也能
+    路由到 Qoder（经别名表换回原代号 `dfmodel`）。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return list(self._models)
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    from src.provider.base import Model
+
+    app = build_app(settings, providers={
+        "codebuddy": Stub("codebuddy", [Model(id="deepseek-v4.1-flash",
+                                              name="Deepseek-V4.1-Flash",
+                                              credit_rate=0.11)]),
+        "trae": Stub("trae", [Model(id="deepseek-v4.1-flash",
+                                    name="DeepSeek-V4.1-Flash", credit_rate=0.08)]),
+        "qoder": Stub("qoder", [Model(id="dfmodel", name="DeepSeek-Flash",
+                                      credit_rate=0.1)]),
+    })
+    for provider_id in ("codebuddy", "trae", "qoder"):
+        app.state.credentials.add(provider=provider_id, credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        data = client.get("/v1/models", headers={
+            "Authorization": f"Bearer {key}"}).json()["data"]
+
+    assert [m["id"] for m in data] == ["deepseek-v4.1-flash"]    # 三渠道并成一条
+    entry = data[0]
+    assert entry["providers"] == ["codebuddy", "qoder", "trae"]
+    assert entry["name"] == "DeepSeek V4.1 Flash"
+    assert entry["by_provider"]["qoder"] == {"raw_id": "dfmodel", "credit_rate": 0.1}
+    # 别名表：对外 id 与 Qoder 原代号都能映射到 dfmodel
+    aliases = app.state.services.model_aliases
+    assert aliases["qoder"]["deepseek-v4.1-flash"] == "dfmodel"
+    assert aliases["qoder"]["dfmodel"] == "dfmodel"
+
+
 def test_models_name_merge_includes_zen_and_guards_colliding_names(tmp_path):
     """六条渠道统一按归一键合并；同渠道内归一键重复的退回原 id。
 

@@ -21,6 +21,10 @@
 清洗对上游已给的可读名同样适用（Qoder 的 `Qwen3.8-Max` → `Qwen3.8 Max`），
 且**幂等**：对清洗结果再跑一次输出不变，故各渠道 client 自行派生过 name 的
 情况下也不会出现二次清洗的副作用。
+
+清洗之外还有一层**显式身份规范**（`MODEL_SYNONYMS`）：上游给同一模型起了不同
+名字（Qoder 的 `dfmodel` 只叫 `DeepSeek-Flash`，别家叫 `DeepSeek-V4.1-Flash`）
+时，规则对不上，须人工登记「异名 → 规范」，键与展示名一起收敛。
 """
 
 from __future__ import annotations
@@ -43,6 +47,21 @@ NEW_MARK = "new"
 # 这类内嵌形式不是标记，不能误伤。
 NOISE_MARKS: frozenset[str] = frozenset({FREE_MARK, NEW_MARK})
 _NOISE_MARK_ALT = "|".join(sorted(NOISE_MARKS))     # 正则用的 alternation
+
+# 「同模型异名」规范表：上游对同一模型给出不同名字（`DeepSeek-Flash` 与
+# `DeepSeek-V4.1-Flash` 是同一个 DeepSeek V4.1 Flash），仅靠清洗规则对不上，
+# 合并会把同一模型拆成两条、用户得选对渠道才路由得通。本表把「异名 → 规范」，
+# `normalize_model_key` 与 `display_model_name` 都过它，键与展示名一起收敛，
+# 合并在 `_merge_key` 层自然发生（无需改 `api/models.py`）。
+# 上游给的名字常常不带版本号（Qoder 的 `dfmodel` 只叫 `DeepSeek-Flash`），
+# 故映射是**身份声明**、由人工核实后登记；命中后一律走右侧的规范键与展示名。
+# 只登记已确认的同模型异名，不做模糊匹配（避免把 v4-flash 误并进 v4.1-flash）。
+MODEL_SYNONYMS: dict[str, tuple[str, str]] = {
+    # 异名归一键 → (规范归一键, 规范展示名)
+    "deepseek-flash": ("deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+}
+_SYNONYM_DISPLAY: dict[str, str] = {
+    key: display for key, (_, display) in MODEL_SYNONYMS.items()}
 
 # 命名空间前缀：上游两种写法都带厂商名——原代号的 `厂商/模型`（kilo 的
 # `nvidia/nemotron-3-ultra:free`、`stealth/space-bunny-alpha`）与展示名的
@@ -155,6 +174,15 @@ def _strip_noise(value: str) -> str:
         stem = peeled
 
 
+def _base_key(raw: str) -> str:
+    """剥噪声 + slug 化，**不过**同模型异名表（异名表要拿到这一步的原始键）。
+
+    清洗后为空（`-free`、`   ` 这类退化 key）时回退原串小写。
+    """
+    cleaned = _strip_noise(raw.strip())
+    return _SEGMENT_SEP.sub("-", _JUNK_CHARS.sub("-", cleaned)).strip("-").lower()
+
+
 def normalize_model_key(raw: str) -> str:
     """渠道原始 key → 归一键（去 free/new / 去命名空间前缀 / slug 化）。
 
@@ -166,10 +194,15 @@ def normalize_model_key(raw: str) -> str:
 
     清洗后为空（`-free`、`   ` 这类退化 key）时回退原串小写，调用方据此判断
     「拿不到干净名字」并回退展示原始 id，而不是产出空 id。
+
+    最后过「同模型异名」规范表（`MODEL_SYNONYMS`）：上游对同一模型给不同名
+    （Qoder `dfmodel` 只叫 `DeepSeek-Flash`，别家叫 `DeepSeek-V4.1-Flash`）时
+    收敛到同一个规范键，合并在 `api.models._merge_key` 层自然发生。
     """
-    cleaned = _strip_noise(raw.strip())
-    slug = _SEGMENT_SEP.sub("-", _JUNK_CHARS.sub("-", cleaned)).strip("-").lower()
-    return slug or raw.strip().lower()
+    slug = _base_key(raw)
+    slug = slug or raw.strip().lower()
+    canonical = MODEL_SYNONYMS.get(slug)
+    return canonical[0] if canonical else slug
 
 
 def display_model_name(source: str) -> str:
@@ -179,8 +212,16 @@ def display_model_name(source: str) -> str:
     `Qwen3.8 Max`，`Hy4 preview` → `Hy4 Preview`，`Ling 3.1 Flash (new)` →
     `Ling 3.1 Flash`。上游没给名字时直接传 id，同一条路径产出可用名。
 
+    同模型异名（`MODEL_SYNONYMS`）在清洗前先命中：上游把同一模型叫成
+    `DeepSeek-Flash` 时展示名与归一键一起收敛到 `DeepSeek V4.1 Flash` /
+    `deepseek-v4.1-flash`，否则归一键合并了、展示名却还是旧名，前端会显示
+    两个名字不一致。
+
     清洗后为空（整个名字就是 `free` 之类）时返回 `""`，由调用方回退原始 id。
     """
+    canonical = _SYNONYM_DISPLAY.get(_base_key(source))
+    if canonical:
+        return canonical
     # 括号里的标记在摘括号后变成独立的一段（kilo 的 `Nemotron 3 Ultra
     # (free)` / `Ling 3.1 Flash (new)`），此处按段剔掉。`(free)` / `[free]` /
     # ` Free` / `(new)` 都命中，而 `freeplay` / `newson` 这类内嵌形式不动。

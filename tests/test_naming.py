@@ -6,7 +6,11 @@
 全 free 路径）、上游已给的可读名。
 """
 
-from src.provider.naming import display_model_name, normalize_model_key
+from src.provider.naming import (
+    MODEL_SYNONYMS,
+    display_model_name,
+    normalize_model_key,
+)
 
 
 class TestNormalizeModelKey:
@@ -226,3 +230,32 @@ class TestCrossChannelAlignment:
         assert normalize_model_key(kilo_label) == "nemotron-3-ultra"
         assert normalize_model_key(kilo_label) == \
             normalize_model_key(display_model_name("nemotron-3-ultra-free"))
+
+    def test_synonym_table_collapses_upstream_aliases(self):
+        """同模型异名（`MODEL_SYNONYMS`）：Qoder `DeepSeek-Flash` = DeepSeek V4.1 Flash。
+
+        Qoder 的 `dfmodel` 上游名只叫 `DeepSeek-Flash`，不带版本号，单靠清洗
+        规则归一键是 `deepseek-flash`，与别家的 `deepseek-v4.1-flash` 对不上，
+        同一模型会被拆成两条（两个对外 id，用户得选对渠道才路由得通）。异名表
+        把键与展示名一起收敛到规范写法，合并在 `_merge_key` 层自然发生。
+        """
+        assert normalize_model_key("DeepSeek-Flash") == "deepseek-v4.1-flash"
+        assert normalize_model_key("dfmodel") == "dfmodel"      # 原代号未登记，不动
+        assert normalize_model_key("DeepSeek-Flash") == \
+            normalize_model_key("DeepSeek-V4.1-Flash")
+        # 展示名同源：合并后前端只看到一个规范名，不会键收敛了名却没收敛
+        assert display_model_name("DeepSeek-Flash") == "DeepSeek V4.1 Flash"
+        assert display_model_name("DeepSeek-Flash") == \
+            display_model_name("DeepSeek-V4.1-Flash")
+        # 不含版本号的异名收敛后仍与真正的 V4（非 4.1）区分
+        assert normalize_model_key("DeepSeek-Flash") != \
+            normalize_model_key("DeepSeek-V4-Flash")
+
+    def test_synonym_display_is_idempotent(self):
+        """规范展示名再洗一遍不变（幂等），否则中心层二次清洗会来回横跳。"""
+        canonical = display_model_name("DeepSeek-Flash")
+        assert display_model_name(canonical) == canonical
+        # 规范表的值必须自洽：键与名都能从规范写法本身得出
+        for alias, (key, display) in MODEL_SYNONYMS.items():
+            assert normalize_model_key(display) == key
+            assert normalize_model_key(alias) == key

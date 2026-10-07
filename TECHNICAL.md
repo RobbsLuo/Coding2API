@@ -351,6 +351,8 @@ def health(q: Quota | None) -> HealthScore:
 
 **合并键 = 归一键，六渠道统一**（`_merge_key`）：同一模型在各渠道的内部代号互不相同（Qoder `kmodel_latest` = TRAE `kimi-k3-1` = CodeBuddy `kimi-k3`），纯 id 规则无法对齐，只能靠展示名——归一键就是展示名再 slug 化，故两条路径永远同源。zen / kilo 现在也参与合并（原先排除是因为它们的展示名与别家不同源）：两条免费渠道各用不同命名约定与**不同 id 规格**——Zen 的 id 是 `nemotron-3-ultra-free`，Kilo 的是 `nvidia/nemotron-3-ultra-550b-a55b:free`（带厂商前缀与参数规格后缀），id 对不上；但两边上游展示名都清洗成「Nemotron 3 Ultra」，故走展示名时能并成一条。
 
+**同模型异名显式规范**（`MODEL_SYNONYMS`，2026-10-07）：光靠清洗规则对齐不了「上游给同一模型起了不带版本号的名字」——Qoder 的 `dfmodel` 上游名只叫 `DeepSeek-Flash`，归一键是 `deepseek-flash`，而 CodeBuddy/TRAE/CodeArts 都叫 `DeepSeek-V4.1-Flash`（归一键 `deepseek-v4.1-flash`），不登记就会把同一个 DeepSeek V4.1 Flash 拆成两条、用户得选对渠道才路由得通。表把「异名归一键 → (规范归一键, 规范展示名)」，`normalize_model_key` 与 `display_model_name` 都过它（键与展示名一起收敛，否则键并了、名还是旧名，前端显示不一致），合并在 `_merge_key` 层自然发生、无需改 `api/models.py`。**只登记人工核实的同模型异名，不做模糊匹配**（`deepseek-flash` 只收敛到 `deepseek-v4.1-flash`，不碰真正的 `deepseek-v4-flash`）。
+
 **哨兵名不跨渠道合并**（`_SENTINEL_LABELS` = `auto` / `default`）：这些是各上游自己的「自动路由 / 默认模型」占位，语义只在本渠道内成立。Kilo 的 `kilo-auto/free`（上游名 `Auto Free`）与 Qoder 的 `auto` 都归一成 `auto`，却是完全不同的东西；合并会把请求错误路由到别的上游，故退回原 id 的归一键、各自单列。
 
 **同渠道内归一键重复 → 退回原 id 的归一键**（`_merge_key` 返回 `(键, 是否按名入键)`，第二个值由它自己判定，不事后拿 `键 == 归一展示名` 反推：CodeBuddy 的 `hy4-preview` 与其展示名「Hy4 Preview」归一后同键，反推会误当成「按名入键」进而登记歧义别名）。该渠道也不登记歧义的名字别名。
