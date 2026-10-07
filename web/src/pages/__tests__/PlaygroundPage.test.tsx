@@ -157,7 +157,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(noRate.textContent).not.toMatch(/x\d|免费/);
   });
 
-  it("多渠道徽章不挤压模型名：整行允许换行、名称占弹性基础宽度", async () => {
+  it("多渠道徽章不挤压模型名：名称保底宽度、徽章在右侧折行", async () => {
     const FOUR = {
       object: "list",
       data: [
@@ -172,15 +172,15 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     await waitForModelLoaded();
 
     const row = screen.getByTestId("model-option-deepseek-v4.1-flash");
-    // 四渠道徽章排不下时整行换行，而不是把名称挤成省略号
-    expect(row).toHaveClass("flex-wrap");
-    // 名称块保持弹性基础宽度（basis-32），换行后独占整行
-    const nameBox = row.querySelector(".basis-32");
-    expect(nameBox).toHaveClass("grow");
+    // 整行不换行：徽章永远留在名称右侧，不整组掉到名称下方
+    expect(row).not.toHaveClass("flex-wrap");
+    // 名称保底宽度（min-w-40），四渠道也挤不成省略号
+    const nameBox = row.querySelector(".min-w-40");
+    expect(nameBox).toHaveClass("flex-1");
     expect(nameBox).toHaveTextContent("deepseek-v4.1-flash");
-    // 徽章组常驻右侧：换到下一行也贴右（ml-auto），不跑到左边
+    // 徽章组自身折行且在右侧区域内贴右（justify-end），不会跑到左边
     const pillBox = row.lastElementChild;
-    expect(pillBox).toHaveClass("ml-auto", "flex-wrap");
+    expect(pillBox).toHaveClass("flex-wrap", "justify-end");
     for (const provider of ["codebuddy", "trae", "qoder", "codearts"]) {
       expect(row.querySelector(`[data-testid="channel-pill-${provider}"]`)).toBeInTheDocument();
     }

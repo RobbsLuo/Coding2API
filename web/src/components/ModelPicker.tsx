@@ -197,7 +197,7 @@ function ModelRow({
       data-testid={`model-option-${item.value}`}
       onClick={onSelect}
       className={cn(
-        "flex w-full flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl border px-3 py-2 text-left transition-colors",
+        "flex w-full items-center gap-2 rounded-xl border px-3 py-2 text-left transition-colors",
         selected
           ? "border-primary/60 bg-primary/[0.08] ring-1 ring-primary/30"
           : "border-border bg-card hover:border-primary/30 hover:bg-muted/50",
@@ -211,11 +211,10 @@ function ModelRow({
       >
         {selected && <Check className="size-3" />}
       </span>
-      {/* 名称占优：`basis-32`（8rem）给名称留出最低宽度，渠道徽章放不下时整组
-          换到下一行，而不是把名称挤成省略号（`deepseek-v4.1-flash` 有四条渠道，
-          挤到两列网格里名称只剩 0px）。实测 8rem≈「DeepSeek V4.1 Flash」一行所
-          需宽度：单/双渠道行在常见宽度仍单行，多渠道路由时名称先独占整行。 */}
-      <span className="min-w-0 grow basis-32">
+      {/* 名称占优：`min-w-40`（10rem）给名称留出最低宽度，徽章再多也不会把名称
+          挤成省略号（`deepseek-v4.1-flash` 有四条渠道，曾被挤到 0px）。名称占
+          满剩余空间，`flex-1` 保证单/双渠道行名称仍很宽。 */}
+      <span className="min-w-40 flex-1" title={displayName(item)}>
         {/* 主名用上游人类可读名（Qwen3.8-Max）；与内部 id 不同时补一行小字 id，
             否则用户无法用 id 直连指定。 */}
         <span className="block truncate text-sm font-semibold">{displayName(item)}</span>
@@ -225,10 +224,10 @@ function ModelRow({
           </span>
         )}
       </span>
-      {/* 渠道 + 倍率常驻右侧：`ml-auto` 让徽章组无论与名称同行还是换到下一行
-          都贴右（不换行时名称 grow 已占满，效果相同；换行后若不加 ml-auto 会
-          落到左边）。换行后由内层 flex-wrap 自行折行。 */}
-      <span className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+      {/* 渠道 + 倍率常驻右侧：名称 `flex-1` 占满左侧后徽章组自然贴右；徽章组
+          自身 `flex-wrap`，多渠道放不下时**在右侧区域内折行**，而不是整组掉到
+          名称下方独占一行（内层 `justify-end` 让每行都贴右）。 */}
+      <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
         {providers.map((provider) => (
           <ChannelPill
             key={provider}
