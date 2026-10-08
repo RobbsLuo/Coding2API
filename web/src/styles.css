@@ -5,78 +5,117 @@
 
 @custom-variant dark (&:is(.dark *));
 
-/* 品牌语义色（单源）：页面旧引用 var(--color-*) 与 shadcn token 都映射到这里的变量 */
+/* ============================================================================
+ * Coding2API 设计 token（单一来源）
+ *
+ * 品牌语义色 + 三级表面 + 文字/描边 + 阴影 + 动效。
+ * 旧页面引用的 var(--color-*) 与 shadcn token 都映射到这里的变量，
+ * 因此改这里即可，不必动页面。设计规范见 design-system/coding2api/MASTER.md。
+ * ========================================================================== */
 :root {
   color-scheme: light;
-  --surface: oklch(0.982 0.004 255);
-  --panel: oklch(1 0 0);
-  --border-soft: oklch(0.918 0.006 255);
-  --ink: oklch(0.235 0.016 255);
-  --ink-muted: oklch(0.52 0.016 255);
-  /* 通道青绿：网关/接线面板气质，区别于 shadcn 默认蓝 */
-  --primary: oklch(0.52 0.12 185);
-  --ok: oklch(0.56 0.14 155);
-  --warn: oklch(0.6 0.15 65);
+
+  /* ---- 三级表面：层级靠明度梯度表达，不堆装饰 ---- */
+  --surface-sunken: oklch(0.968 0.004 252); /* 页面底 / 内嵌区 / 代码块 */
+  --surface: oklch(0.985 0.003 252);        /* 页面背景 */
+  --panel: oklch(1 0 0);                    /* 卡片 / 面板 */
+  --panel-raised: oklch(1 0 0);             /* 浮层 / 下拉 / 弹窗 */
+
+  --border-soft: oklch(0.912 0.006 256);
+  --ink: oklch(0.235 0.016 257);
+  --ink-muted: oklch(0.50 0.016 257);
+
+  /* 通道青绿：网关/接线面板气质，区别于 shadcn 默认蓝
+   * 亮色下语义色明度压到 ≥4.5:1（对白底），故比直觉更暗一档 */
+  --primary: oklch(0.52 0.13 190);
+  --ok: oklch(0.54 0.14 155);
+  --warn: oklch(0.566 0.15 65);
   --danger: oklch(0.55 0.21 25);
 
-  /* shadcn 主题 token → 引用品牌变量 */
+  /* ---- 阴影（亮色靠阴影表达层级；暗色靠明度，见 .dark）---- */
+  --elevation-sm: 0 1px 2px 0 oklch(0 0 0 / 0.05);
+  --elevation-md: 0 2px 8px -2px oklch(0 0 0 / 0.08), 0 1px 3px 0 oklch(0 0 0 / 0.05);
+  --elevation-lg: 0 12px 32px -12px oklch(0 0 0 / 0.18), 0 4px 12px -4px oklch(0 0 0 / 0.08);
+
+  /* ---- 动效时长（统一，尊重 reduced-motion）---- */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+
+  /* ---- shadcn 主题 token → 引用品牌变量 ---- */
   --background: var(--surface);
   --foreground: var(--ink);
   --card: var(--panel);
   --card-foreground: var(--ink);
-  --popover: var(--panel);
+  --popover: var(--panel-raised);
   --popover-foreground: var(--ink);
   --primary-foreground: oklch(0.99 0 0);
-  --secondary: oklch(0.96 0.006 255);
+  --secondary: oklch(0.958 0.006 256);
   --secondary-foreground: var(--ink);
-  --muted: oklch(0.958 0.006 255);
+  --muted: oklch(0.955 0.006 256);
   --muted-foreground: var(--ink-muted);
-  --accent: oklch(0.945 0.008 255);
+  --accent: oklch(0.945 0.008 256);
   --accent-foreground: var(--ink);
   --destructive: var(--danger);
   --border: var(--border-soft);
   --input: var(--border-soft);
-  --ring: oklch(0.62 0.10 185);
-  --radius: 0.625rem;
-  --chart-1: oklch(0.55 0.13 185);
-  --chart-2: oklch(0.6 0.15 155);
-  --chart-3: oklch(0.6 0.15 65);
+  --ring: oklch(0.62 0.11 190);
+  --radius: 0.75rem;
+  --chart-1: oklch(0.529 0.13 185);
+  --chart-2: oklch(0.536 0.15 155);
+  --chart-3: oklch(0.566 0.15 65);
   --chart-4: oklch(0.55 0.18 300);
   --chart-5: oklch(0.58 0.17 350);
-  --chart-6: oklch(0.6 0.14 250);
+  --chart-6: oklch(0.557 0.14 250);
 }
 
 .dark {
   color-scheme: dark;
-  --surface: oklch(0.17 0.012 258);
-    --panel: oklch(0.215 0.014 258);
-    --border-soft: oklch(0.295 0.014 258);
-    --ink: oklch(0.955 0.005 258);
-    --ink-muted: oklch(0.74 0.014 258);
-    --primary: oklch(0.74 0.12 185);
-    --ok: oklch(0.70 0.14 155);
-    --warn: oklch(0.78 0.13 70);
-    --danger: oklch(0.70 0.20 22);
 
-    --secondary: oklch(0.27 0.014 258);
-    --muted: oklch(0.26 0.014 258);
-    --accent: oklch(0.275 0.016 258);
-    --ring: oklch(0.66 0.10 185);
-    --chart-1: oklch(0.74 0.12 185);
-    --chart-2: oklch(0.70 0.14 155);
-    --chart-3: oklch(0.78 0.13 70);
-    --chart-4: oklch(0.70 0.17 300);
-    --chart-5: oklch(0.72 0.17 350);
-    --chart-6: oklch(0.72 0.14 250);
+  /* 暗色分层靠明度梯度：sunken < surface < panel < panel-raised */
+  --surface-sunken: oklch(0.145 0.012 258);
+  --surface: oklch(0.175 0.012 258);
+  --panel: oklch(0.215 0.013 258);
+  --panel-raised: oklch(0.245 0.014 258);
+
+  --border-soft: oklch(0.295 0.014 258);
+  --ink: oklch(0.955 0.005 258);
+  --ink-muted: oklch(0.74 0.014 258);
+
+  --primary: oklch(0.74 0.12 190);
+  /* 暗色主色偏亮，其上的文字用深色才够对比（白字对上 L0.74 只有 ~2:1） */
+  --primary-foreground: oklch(0.17 0.012 258);
+  --ok: oklch(0.70 0.14 155);
+  --warn: oklch(0.78 0.13 70);
+  --danger: oklch(0.70 0.20 22);
+
+  /* 暗色下阴影几乎不可见，加一档更深的对比，配合表面明度梯度 */
+  --elevation-sm: 0 1px 2px 0 oklch(0 0 0 / 0.4);
+  --elevation-md: 0 2px 8px -2px oklch(0 0 0 / 0.5), 0 1px 3px 0 oklch(0 0 0 / 0.35);
+  --elevation-lg: 0 12px 32px -12px oklch(0 0 0 / 0.7), 0 4px 12px -4px oklch(0 0 0 / 0.45);
+
+  --secondary: oklch(0.27 0.014 258);
+  --muted: oklch(0.26 0.014 258);
+  --accent: oklch(0.275 0.016 258);
+  --ring: oklch(0.66 0.11 190);
+  --chart-1: oklch(0.74 0.12 185);
+  --chart-2: oklch(0.70 0.14 155);
+  --chart-3: oklch(0.78 0.13 70);
+  --chart-4: oklch(0.70 0.17 300);
+  --chart-5: oklch(0.72 0.17 350);
+  --chart-6: oklch(0.72 0.14 250);
 }
 
 @theme inline {
+  /* 正文 Geist（已内置）；数字/ID/代码走系统等宽 */
   --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system, "PingFang SC",
     "Microsoft YaHei", sans-serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+
   /* 旧页面引用的 --color-* 全部映射回品牌变量，保持向后兼容 */
   --color-surface: var(--surface);
+  --color-surface-sunken: var(--surface-sunken);
   --color-panel: var(--panel);
+  --color-panel-raised: var(--panel-raised);
   --color-border-soft: var(--border-soft);
   --color-ink: var(--ink);
   --color-ink-muted: var(--ink-muted);
@@ -87,6 +126,14 @@
   --color-ok: var(--ok);
   --color-warn: var(--warn);
   --color-danger: var(--danger);
+
+  /* 语义色「文字」变体：把语义色往 ink 混 25%，用于彩色底(10~15% tint)上的文字，
+   * 保证文字/底色对比 ≥4.5:1（纯色号直接当文字在自身浅底上不够对比） */
+  --color-ok-ink: color-mix(in oklch, var(--ok) 75%, var(--ink));
+  --color-warn-ink: color-mix(in oklch, var(--warn) 75%, var(--ink));
+  --color-danger-ink: color-mix(in oklch, var(--danger) 75%, var(--ink));
+  --color-primary-ink: color-mix(in oklch, var(--primary) 75%, var(--ink));
+
   /* shadcn token 的 Tailwind 类映射 */
   --color-background: var(--background);
   --color-foreground: var(--foreground);
@@ -108,6 +155,12 @@
   --color-chart-4: var(--chart-4);
   --color-chart-5: var(--chart-5);
   --color-chart-6: var(--chart-6);
+
+  /* 阴影 token（覆盖 Tailwind 默认 shadow-*） */
+  --shadow-sm: var(--elevation-sm);
+  --shadow-md: var(--elevation-md);
+  --shadow-lg: var(--elevation-lg);
+
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -127,10 +180,60 @@ body,
     background: var(--background);
     color: var(--foreground);
     font-family: var(--font-sans);
+    font-size: 16px;
+    line-height: 1.5;
     -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
+
   * {
     border-color: var(--border);
     outline-color: color-mix(in oklch, var(--ring) 50%, transparent);
+  }
+
+  /* 键盘焦点一律可见（鼠标点击不显示，避免噪音） */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  ::selection {
+    background: color-mix(in oklch, var(--primary) 22%, transparent);
+  }
+
+  /* 细滚动条：贴合控制台气质，明暗两态各自取色 */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in oklch, var(--ink-muted) 35%, transparent) transparent;
+  }
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in oklch, var(--ink-muted) 30%, transparent);
+    border: 3px solid transparent;
+    border-radius: 9999px;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in oklch, var(--ink-muted) 55%, transparent);
+    background-clip: content-box;
+  }
+}
+
+/* 无障碍：用户要求减少动效时，关闭非必要过渡/动画 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

@@ -31,17 +31,26 @@ export function PoolOverview({ credentials, now }: {
   }
   const total = credentials.length;
   const hasBlocked = blocked.cooling + blocked.disabled + blocked.off > 0;
+  const availablePct = total > 0 ? Math.round((healthTally.known / total) * 100) : 0;
 
   return (
     <section
-      className="rounded-xl bg-card px-4 py-4 ring-1 ring-border"
+      className="rounded-xl bg-card px-4 py-4 shadow-sm ring-1 ring-border"
       data-testid="pool-overview"
     >
+      {/* 标题行：一眼读出「这个池现在还剩多少能打的号」 */}
+      <div className="mb-3 flex items-baseline justify-between gap-3">
+        <div className="text-sm font-semibold tracking-tight">池概况</div>
+        <div className="text-xs text-muted-foreground">
+          可用率 <span className="font-semibold tabular-nums text-foreground">{availablePct}%</span>
+        </div>
+      </div>
+
       {/* 分布条：一眼看出池里还有多少能打的号（比例 = 四态 / 总数） */}
       <div
         role="img"
         aria-label={`健康度分布：可用 ${healthTally.known}，未探测 ${healthTally.unknown}，无探测 ${healthTally.noprobe}，已耗尽 ${healthTally.exhausted}，共 ${total} 个凭证`}
-        className="flex h-2 w-full overflow-hidden rounded-full bg-muted"
+        className="flex h-2.5 w-full overflow-hidden rounded-full bg-muted"
       >
         {healthTally.known > 0 && (
           <div
@@ -72,25 +81,25 @@ export function PoolOverview({ credentials, now }: {
       <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-sm">
         <span data-testid="health-known" className="inline-flex items-center gap-1.5">
           <span className="size-2 rounded-full bg-ok" />
-          可用 <strong>{healthTally.known}</strong>
+          可用 <strong className="tabular-nums">{healthTally.known}</strong>
           <span className="text-muted-foreground">/ {formatNumber(total)}</span>
         </span>
         {healthTally.unknown > 0 && (
           <span data-testid="health-unknown" className="inline-flex items-center gap-1.5 text-muted-foreground">
             <span className="size-2 rounded-full bg-warn" />
-            未探测 <strong>{healthTally.unknown}</strong>
+            未探测 <strong className="tabular-nums">{healthTally.unknown}</strong>
           </span>
         )}
         {healthTally.noprobe > 0 && (
           <span data-testid="health-noprobe" className="inline-flex items-center gap-1.5 text-muted-foreground">
             <span className="size-2 rounded-full bg-muted-foreground/40" />
-            无探测 <strong>{healthTally.noprobe}</strong>
+            无探测 <strong className="tabular-nums">{healthTally.noprobe}</strong>
           </span>
         )}
         {healthTally.exhausted > 0 && (
           <span data-testid="health-exhausted" className="inline-flex items-center gap-1.5 text-destructive">
             <span className="size-2 rounded-full bg-destructive" />
-            已耗尽 <strong>{healthTally.exhausted}</strong>
+            已耗尽 <strong className="tabular-nums">{healthTally.exhausted}</strong>
           </span>
         )}
         {total === 0 && <span className="text-muted-foreground">池里还没有凭证</span>}
@@ -99,25 +108,25 @@ export function PoolOverview({ credentials, now }: {
       {/* 不可用原因摘要：与四态重叠（叠加状态），全部为 0 时整块不渲染 */}
       {hasBlocked && (
         <div
-          className="mt-2 flex flex-wrap gap-x-5 gap-y-1.5 text-xs text-muted-foreground"
+          className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 border-t border-border/70 pt-2.5 text-xs text-muted-foreground"
           data-testid="pool-blocked"
         >
           {blocked.cooling > 0 && (
             <span data-testid="blocked-cooling" className="inline-flex items-center gap-1.5 text-warn">
               <Timer className="size-3.5" />
-              冷却中 <strong>{blocked.cooling}</strong>
+              冷却中 <strong className="tabular-nums">{blocked.cooling}</strong>
             </span>
           )}
           {blocked.disabled > 0 && (
             <span data-testid="blocked-disabled" className="inline-flex items-center gap-1.5">
               <Ban className="size-3.5" />
-              已禁用 <strong>{blocked.disabled}</strong>
+              已禁用 <strong className="tabular-nums">{blocked.disabled}</strong>
             </span>
           )}
           {blocked.off > 0 && (
             <span data-testid="blocked-off" className="inline-flex items-center gap-1.5">
               <ToggleLeft className="size-3.5" />
-              已暂停 <strong>{blocked.off}</strong>
+              已暂停 <strong className="tabular-nums">{blocked.off}</strong>
             </span>
           )}
         </div>

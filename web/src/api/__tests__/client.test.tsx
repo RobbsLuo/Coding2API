@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
@@ -331,17 +331,28 @@ describe("Layout", () => {
     expect(await screen.findByRole("menu")).toHaveTextContent("op · 操作员");
   });
 
-  it("管理员可在管理下拉中看到管理类入口", async () => {
+  it("管理员可在侧边栏看到管理类入口", async () => {
     renderWithProviders(<Layout session={{
       username: "root", is_operator: true, is_admin: true, role: "admin", must_change_password: false,
     }} />);
-    // 管理类入口收进「管理」下拉，需展开后断言
-    await userEvent.click(screen.getByRole("button", { name: /管理/ }));
-    const menu = await screen.findByRole("menu");
-    expect(menu).toHaveTextContent("用户管理");
-    expect(menu).toHaveTextContent("审计日志");
-    expect(menu).toHaveTextContent("运维告警");
-    expect(menu).toHaveTextContent("任务与配置");
+    // 管理类入口直接展示在侧边栏「管理」分组下（不再收进下拉）
+    const nav = screen.getByRole("navigation", { name: "主导航" });
+    expect(within(nav).getByText("用户管理")).toBeInTheDocument();
+    expect(within(nav).getByText("审计日志")).toBeInTheDocument();
+    expect(within(nav).getByText("运维告警")).toBeInTheDocument();
+    expect(within(nav).getByText("任务与配置")).toBeInTheDocument();
+    // 仓库入口已移出侧栏，改到顶栏图标按钮
+    expect(within(nav).queryByText("项目仓库")).not.toBeInTheDocument();
+  });
+
+  it("项目仓库入口在顶栏，是带无障碍名的外链图标按钮", async () => {
+    renderWithProviders(<Layout session={{
+      username: "root", is_operator: true, is_admin: true, role: "admin", must_change_password: false,
+    }} />);
+    const link = screen.getByRole("link", { name: "项目仓库" });
+    expect(link).toHaveAttribute("href", "https://github.com/RobbsLuo/coding2api");
+    expect(link).toHaveAttribute("target", "_blank");
+    expect(link).toHaveAttribute("rel", "noopener noreferrer");
   });
 
   it("用户菜单可打开修改密码对话框", async () => {
@@ -351,6 +362,52 @@ describe("Layout", () => {
     await userEvent.click(screen.getByRole("button", { name: "用户菜单" }));
     await userEvent.click(await screen.findByTestId("menu-change-password"));
     expect(await screen.findByTestId("change-password-dialog")).toBeInTheDocument();
+  });
+
+  it("退出：POST /api/auth/logout 后跳登录页", async () => {
+    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ ok: true }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    vi.stubGlobal("location", { href: "/" });
+    renderWithProviders(<Layout session={{
+      username: "root", is_operator: true, is_admin: true, role: "admin", must_change_password: false,
+    }} />);
+    await userEvent.click(screen.getByRole("button", { name: "用户菜单" }));
+    await userEvent.click(await screen.findByTestId("menu-logout"));
+    await waitFor(() => expect(fetchSpy).toHaveBeenCalled());
+    const [url, init] = fetchSpy.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("/api/auth/logout");
+    expect((init.headers as Record<string, string>)["X-Requested-With"]).toBe("XMLHttpRequest");
+    expect((globalThis as { location: { href: string } }).location.href).toBe("/login");
+  });
+
+  it("移动端抽屉：汉堡打开导航，Esc 关闭", async () => {
+    renderWithProviders(<Layout session={{
+      username: "root", is_operator: true, is_admin: true, role: "admin", must_change_password: false,
+    }} />);
+    // 初始不渲染抽屉
+    expect(screen.queryByTestId("nav-drawer")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "打开导航菜单" }));
+    const drawer = screen.getByTestId("nav-drawer");
+    expect(within(drawer).getByText("任务与配置")).toBeInTheDocument();
+    // 抽屉里的关闭按钮
+    await userEvent.click(screen.getByRole("button", { name: "关闭导航" }));
+    await waitFor(() => expect(screen.queryByTestId("nav-drawer")).not.toBeInTheDocument());
+    // Esc 关闭
+    await userEvent.click(screen.getByRole("button", { name: "打开导航菜单" }));
+    expect(screen.getByTestId("nav-drawer")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() => expect(screen.queryByTestId("nav-drawer")).not.toBeInTheDocument());
+  });
+
+  it("移动端抽屉：点击遮罩关闭", async () => {
+    renderWithProviders(<Layout session={{
+      username: "root", is_operator: true, is_admin: true, role: "admin", must_change_password: false,
+    }} />);
+    await userEvent.click(screen.getByRole("button", { name: "打开导航菜单" }));
+    const drawer = screen.getByTestId("nav-drawer");
+    // 遮罩是抽屉的父容器，直接点父容器触发关闭
+    await userEvent.click(drawer.parentElement as HTMLElement);
+    await waitFor(() => expect(screen.queryByTestId("nav-drawer")).not.toBeInTheDocument());
   });
 });
 

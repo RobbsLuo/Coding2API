@@ -4,10 +4,11 @@ import { formatTime } from "../api/display";
 import { useAudit } from "../api/hooks";
 import { useSessionContext } from "../Layout";
 import { PageHeader } from "../components/PageHeader";
+import { PageSkeleton } from "../components/PageSkeleton";
 import {
   Badge,
   Button,
-  Empty,
+  EmptyState,
   Field,
   Input,
   Notice,
@@ -50,6 +51,7 @@ export function AuditPage() {
   return (
     <div className="space-y-6" data-testid="audit-page">
       <PageHeader
+        eyebrow="运维"
         title="审计日志"
         description="登录、账号变动与凭证写操作留痕。失败登录同样记录——「谁在什么时候试了哪个账号」正是审计的价值。日志绝不包含密码或令牌。"
         icon={<ScrollText className="size-5" />}
@@ -111,9 +113,14 @@ export function AuditPage() {
 
       <Panel title={`记录${data ? `（本页 ${events.length} 条）` : ""}`} aria-label="审计记录">
         {isLoading ? (
-          <Empty>载入中…</Empty>
+          <PageSkeleton variant="table" rows={6} />
         ) : events.length === 0 ? (
-          <Empty data-testid="no-audit">没有符合条件的记录</Empty>
+          <EmptyState
+            icon={<ScrollText className="size-5" />}
+            title="没有符合条件的记录"
+            description="调整上方筛选条件后再试，或清空筛选查看全部。"
+            data-testid="no-audit"
+          />
         ) : (
           <>
             <Table data-testid="audit-table">

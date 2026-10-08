@@ -21,6 +21,7 @@ import { PoolOverview } from "../components/PoolOverview";
 import { AddCredentialDialog } from "../components/AddCredentialDialog";
 import { ColumnHint, LongTextTip } from "../components/Tip";
 import { PageHeader } from "../components/PageHeader";
+import { PageSkeleton } from "../components/PageSkeleton";
 import { ProviderIcon } from "../components/ProviderIcon";
 import {
   DropdownMenu,
@@ -57,6 +58,7 @@ import {
   Button,
   Card,
   Empty,
+  EmptyState,
   Notice,
   Panel,
   Table,
@@ -293,11 +295,12 @@ export function CredentialsPage() {
       })(),
   };
 
-  if (isLoading) return <Empty>载入中…</Empty>;
+  if (isLoading) return <PageSkeleton variant="cards" />;
 
   return (
     <div className="space-y-6" data-testid="credentials-page">
       <PageHeader
+        eyebrow="控制台"
         title="凭证管理"
         description="凭证是调度池里可被选中的渠道账号。登录渠道授权或粘贴 JSON 导入后，可在此探测剩余额度、签到或启停；顶部池概况按健康度四态说明这个池现在还剩多少能打的号。"
         icon={<Database className="size-5" />}
@@ -377,7 +380,12 @@ export function CredentialsPage() {
         )}
       >
         {credentials.length === 0 ? (
-          <Empty data-testid="no-credentials">还没有凭证</Empty>
+          <EmptyState
+            icon={<Database className="size-5" />}
+            title="还没有凭证"
+            description="用右上角「添加凭证」登录渠道账号或导入凭证 JSON，即可让调度池开始工作。"
+            data-testid="no-credentials"
+          />
         ) : (
           <Table data-testid="credentials-table">
             <TableHeader>
@@ -613,7 +621,10 @@ function Row({
           <ProviderIcon provider={credential.provider} size={14} />
           <div className="min-w-0">
             <div className="flex items-center gap-2">
-              <span className="truncate font-medium">
+              <span
+                className="truncate font-medium"
+                title={credential.nickname || credential.id.slice(0, 12)}
+              >
                 {credential.nickname || credential.id.slice(0, 12)}
               </span>
               {credential.pinned === 1 && <Badge tone="accent">已指定</Badge>}
@@ -686,7 +697,7 @@ function Row({
           </div>
         )}
         {expiringSecondary && (
-          <div className="text-warn/80" data-testid="quota-expiring-secondary">
+          <div className="text-warn-ink" data-testid="quota-expiring-secondary">
             {expiringSecondary}
           </div>
         )}

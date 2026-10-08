@@ -106,6 +106,19 @@ describe("ChangePasswordDialog", () => {
     expect(onCancel).toHaveBeenCalled();
   });
 
+  it("自愿模式下 Esc 关闭", async () => {
+    const onCancel = vi.fn();
+    renderStandalone(<ChangePasswordDialog onCancel={onCancel} />);
+    await userEvent.keyboard("{Escape}");
+    expect(onCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("强制模式下 Esc 不关闭（无取消语义）", async () => {
+    renderStandalone(<ChangePasswordDialog required />);
+    await userEvent.keyboard("{Escape}");
+    expect(screen.getByTestId("change-password-dialog")).toBeInTheDocument();
+  });
+
   it("新密码不一致时报错、不发请求", async () => {
     const spy = vi.fn();
     vi.stubGlobal("fetch", spy);

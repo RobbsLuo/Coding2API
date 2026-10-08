@@ -220,6 +220,15 @@ describe("UsersPage", () => {
     await userEvent.click(screen.getByTestId("create-user-close"));
     expect(screen.queryByTestId("create-user-dialog")).not.toBeInTheDocument();
   });
+
+  it("新建用户对话框支持 Esc 关闭", async () => {
+    stubFetch({ "GET /api/users": () => jsonResponse(USERS) });
+    renderPage(<UsersPage />, { username: "root", is_admin: true });
+    await settle();
+    await openCreateUserDialog();
+    await userEvent.keyboard("{Escape}");
+    expect(screen.queryByTestId("create-user-dialog")).not.toBeInTheDocument();
+  });
 });
 
 /** 打开「新建用户」对话框（由「全部用户」右上角按钮触发）。 */

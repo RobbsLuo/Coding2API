@@ -6,11 +6,13 @@ import { useSessionContext } from "../Layout";
 import { useUserMutation, useUsers } from "../api/hooks";
 import type { ActivationIssued, Role, UserRow } from "../api/types";
 import { ROLE_LABELS, ROLE_OPTIONS } from "../api/types";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { PageHeader } from "../components/PageHeader";
+import { PageSkeleton } from "../components/PageSkeleton";
 import {
   Badge,
   Button,
-  Empty,
+  EmptyState,
   Field,
   Input,
   Notice,
@@ -73,6 +75,10 @@ export function UsersPage() {
   const [busy, setBusy] = useState<string | null>(null);
   // 新建用户收进对话框（低频动作不常驻占屏），由「全部用户」右上角触发
   const [createOpen, setCreateOpen] = useState(false);
+  const createDialogRef = useDialogFocus<HTMLDivElement>(
+    () => setCreateOpen(false),
+    createOpen,
+  );
 
   const create = useUserMutation(
     (args: { username: string; role: Role }) => api.createUser(args.username, args.role),
@@ -160,6 +166,7 @@ export function UsersPage() {
   return (
     <div className="space-y-6" data-testid="users-page">
       <PageHeader
+        eyebrow="管理"
         title="用户管理"
         description="创建账号、分配角色、停用或重置密码。新建账号会得到一次性激活链接，由本人自设密码——系统里不存在管理员已知的共享密码。"
         icon={<KeyRound className="size-5" />}
@@ -195,9 +202,14 @@ export function UsersPage() {
         }
       >
         {isLoading ? (
-          <Empty>载入中…</Empty>
+          <PageSkeleton variant="table" rows={6} />
         ) : users.length === 0 ? (
-          <Empty data-testid="no-users">还没有用户</Empty>
+          <EmptyState
+            icon={<KeyRound className="size-5" />}
+            title="还没有用户"
+            description="点右上角「新建用户」创建账号，系统会生成一次性激活链接由本人自设密码。"
+            data-testid="no-users"
+          />
         ) : (
           <Table data-testid="users-table">
             <TableHeader>
@@ -302,16 +314,17 @@ export function UsersPage() {
 
       {createOpen && (
         <div
-          className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4"
+          className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm"
           onClick={() => setCreateOpen(false)}
         >
           <div
+            ref={createDialogRef}
             role="dialog"
             aria-modal="true"
             aria-label="新建用户"
             data-testid="create-user-dialog"
             onClick={(event) => event.stopPropagation()}
-            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-background p-5 shadow-lg"
+            className="max-h-[90vh] w-full max-w-lg animate-in overflow-y-auto rounded-xl border border-border bg-card p-5 shadow-xl fade-in-0 zoom-in-95"
           >
             <div className="mb-4 flex items-center justify-between">
               <h2 className="flex items-center gap-2 text-sm font-semibold">

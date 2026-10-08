@@ -165,7 +165,8 @@ function ChannelPill({
       style={{
         borderColor: `color-mix(in oklch, ${color} 45%, transparent)`,
         backgroundColor: `color-mix(in oklch, ${color} 14%, transparent)`,
-        color,
+        // 文字往 ink 混 25%：纯渠道色在自身浅底上对比不足（≈3.1~4.4）
+        color: `color-mix(in oklch, ${color} 75%, var(--ink))`,
       }}
     >
       <ProviderIcon provider={provider} size={13} />
@@ -353,7 +354,7 @@ export function ModelPicker({
                       className={cn(
                         "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors",
                         pinnedProvider === ""
-                          ? "border-primary/40 bg-primary/10 text-primary"
+                          ? "border-primary/40 bg-primary/10 text-primary-ink"
                           : "border-border text-muted-foreground hover:text-foreground",
                       )}
                     >
@@ -369,7 +370,7 @@ export function ModelPicker({
                         className={cn(
                           "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition-colors",
                           pinnedProvider === provider
-                            ? "border-primary/40 bg-primary/10 text-primary"
+                            ? "border-primary/40 bg-primary/10 text-primary-ink"
                             : "border-border text-muted-foreground hover:text-foreground",
                         )}
                       >
@@ -381,7 +382,7 @@ export function ModelPicker({
                 </>
               )}
               {pinnedProvider && (
-                <span className="rounded-md bg-primary/15 px-1.5 py-0.5 text-[11px] font-semibold text-primary">
+                <span className="rounded-md bg-primary/15 px-1.5 py-0.5 text-[11px] font-semibold text-primary-ink">
                   已强制 {providerLabel(pinnedProvider)}
                 </span>
               )}

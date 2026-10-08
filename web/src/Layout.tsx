@@ -1,78 +1,51 @@
-import { useState } from "react";
-import { NavLink, Outlet, useLocation, useOutletContext } from "react-router-dom";
-import {
-  BarChart3,
-  BellRing,
-  ChevronDown,
-  Database,
-  Globe,
-  KeyRound,
-  Menu,
-  ScrollText,
-  ShieldCheck,
-  SlidersHorizontal,
-  TerminalSquare,
-  UsersRound,
-} from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Outlet, useLocation, useOutletContext } from "react-router-dom";
+import { GitBranch, Menu, X } from "lucide-react";
 import type { SessionInfo } from "./api/types";
 import { Button } from "./components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "./components/ui/dropdown-menu";
 import { ChangePasswordDialog } from "./components/ChangePasswordDialog";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { UserMenu } from "./components/UserMenu";
-import { cn } from "@/lib/utils";
+import { BrandMark, SidebarNav } from "./components/Sidebar";
+import { useDialogFocus } from "./hooks/useDialogFocus";
 
-interface NavItem {
-  to: string;
-  label: string;
-  icon: typeof Database;
-  end?: boolean;
-}
+// 兼容既有引用（登录页/激活页从 Layout 取品牌标记）
+export { BrandMark } from "./components/Sidebar";
 
-/** 桌面端横向展示的一级导航（sm 及以上），按使用频率排序。 */
-const NAV: NavItem[] = [
-  { to: "/", label: "凭证管理", icon: Database, end: true },
-  { to: "/stats", label: "用量统计", icon: BarChart3 },
-  { to: "/playground", label: "Playground", icon: TerminalSquare },
-  { to: "/api-keys", label: "API Key", icon: KeyRound },
-];
-
-/** 管理类页面：桌面端收进「管理」下拉，避免顶部菜单放不下；仅 admin 可见。 */
-const ADMIN_NAV: NavItem[] = [
-  { to: "/users", label: "用户管理", icon: UsersRound },
-  { to: "/audit", label: "审计日志", icon: ScrollText },
-  { to: "/alerts", label: "运维告警", icon: BellRing },
-  { to: "/settings", label: "任务与配置", icon: SlidersHorizontal },
-];
-
-/** 品牌标记：多路渠道管道汇聚进单一出口（Coding2API 的产品故事）。 */
-export function BrandMark({ className }: { className?: string }) {
+/** 品牌区：标记 + 字标。 */
+function Brand() {
   return (
-    <span
-      className={cn(
-        "grid place-items-center rounded-lg bg-primary text-primary-foreground",
-        className,
-      )}
-      aria-hidden
-    >
-      <svg viewBox="0 0 16 16" className="size-[60%]" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-        <path d="M2.5 3.5 6.5 8 2.5 12.5" />
-        <path d="M13.5 3.5 9.5 8l4 4.5" />
-        <path d="M6.5 8h4" />
-        <circle cx="8" cy="8" r="1.4" fill="currentColor" stroke="none" />
-      </svg>
+    <span className="flex min-w-0 items-center gap-2 font-semibold tracking-tight">
+      <BrandMark className="size-7" />
+      <span className="truncate">Coding2API</span>
     </span>
   );
 }
 
 export function Layout({ session }: { session: SessionInfo }) {
   const [changingPassword, setChangingPassword] = useState(false);
+  const [drawerOpen, setDrawerOpen] = useState(false);
   const location = useLocation();
+  const mainRef = useRef<HTMLElement>(null);
+  // 抽屉的 Esc 关闭 / 焦点陷阱 / 滚动锁由 hook 统一处理。
+  const drawerRef = useDialogFocus<HTMLDivElement>(() => setDrawerOpen(false), drawerOpen);
+
+  // 路由变化即关闭移动端抽屉（含浏览器前进/后退）
+  useEffect(() => {
+    setDrawerOpen(false);
+  }, [location.pathname]);
+
+  // 路由切换后把焦点移到主内容区：键盘/读屏用户不必再从顶栏重新 Tab 一遍。
+  // 首次挂载不抢焦点（避免页面加载就出现焦点环）。
+  const firstRender = useRef(true);
+  useEffect(() => {
+    if (firstRender.current) {
+      firstRender.current = false;
+      return;
+    }
+    mainRef.current?.focus();
+  }, [location.pathname]);
+
   const logout = async () => {
     await fetch("/api/auth/logout", {
       method: "POST",
@@ -82,136 +55,90 @@ export function Layout({ session }: { session: SessionInfo }) {
     });
     window.location.href = "/login";
   };
-  // 非管理员看不到用户管理/审计/配置：写接口是 admin-only，露出入口只会误导
-  const adminNav = session.is_admin ? ADMIN_NAV : [];
 
   return (
-    <div className="flex min-h-full flex-col">
-      <header className="sticky top-0 z-20 border-b border-border bg-[color:color-mix(in_oklch,var(--background)_88%,transparent)] backdrop-blur">
-        <div className="mx-auto flex w-full max-w-7xl items-center gap-2 px-3 py-2.5 sm:gap-4 sm:px-6">
-          {/* 移动端导航：汉堡下拉，替代横向导航图标（sm 以下空间不足） */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
+    <div className="flex min-h-full bg-[var(--surface)]">
+      {/* 顶栏：全尺寸一致（汉堡仅移动端可见），账号与主题常驻右侧 */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <header className="sticky top-0 z-20 flex h-14 items-center gap-2 border-b border-border bg-[color:color-mix(in_oklch,var(--background)_88%,transparent)] px-3 backdrop-blur sm:px-5">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="lg:hidden"
+            aria-label="打开导航菜单"
+            aria-expanded={drawerOpen}
+            onClick={() => setDrawerOpen(true)}
+          >
+            <Menu />
+          </Button>
+          <Brand />
+          <div className="ml-auto flex items-center gap-1">
+            <Button variant="ghost" size="icon" asChild>
+              <a
+                href="https://github.com/RobbsLuo/coding2api"
+                target="_blank"
+                rel="noopener noreferrer"
+                aria-label="项目仓库"
+                title="项目仓库"
+              >
+                <GitBranch />
+              </a>
+            </Button>
+            <ThemeToggle />
+            <UserMenu
+              username={session.username}
+              role={session.role}
+              onChangePassword={() => setChangingPassword(true)}
+              onLogout={logout}
+            />
+          </div>
+        </header>
+
+        {/* 主体：桌面左侧导航栏 + 内容区（同一网格） */}
+        <div className="mx-auto flex w-full max-w-[100rem] flex-1 items-start gap-6 px-3 py-6 sm:px-5 lg:px-8">
+          <aside className="sticky top-20 hidden max-h-[calc(100vh-6rem)] w-52 shrink-0 self-start lg:flex lg:flex-col">
+            <SidebarNav session={session} />
+          </aside>
+          <div className="flex min-w-0 flex-1 flex-col">
+            <main ref={mainRef} tabIndex={-1} className="flex-1 focus:outline-none">
+              <Outlet context={session} />
+            </main>
+            <footer className="pt-6 pb-2 text-xs text-muted-foreground">
+              Coding2API · 仅供学习研究，未做安全审计
+            </footer>
+          </div>
+        </div>
+      </div>
+
+      {/* 移动端抽屉导航 */}
+      {drawerOpen && (
+        <div className="fixed inset-0 z-50 flex lg:hidden" onClick={() => setDrawerOpen(false)}>
+          <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" aria-hidden />
+          <div
+            ref={drawerRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label="导航菜单"
+            data-testid="nav-drawer"
+            onClick={(event) => event.stopPropagation()}
+            className="relative flex h-full w-64 max-w-[80vw] flex-col border-r border-border bg-card shadow-lg"
+          >
+            <div className="flex h-14 items-center justify-between gap-2 border-b border-border px-4">
+              <Brand />
               <Button
                 variant="ghost"
                 size="icon"
-                className="sm:hidden"
-                aria-label="打开导航菜单"
+                aria-label="关闭导航"
+                onClick={() => setDrawerOpen(false)}
               >
-                <Menu />
+                <X />
               </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="w-52">
-              {[...NAV, ...adminNav].map((item) => (
-                <DropdownMenuItem key={item.to} asChild>
-                  <NavLink to={item.to} end={item.end} className="cursor-pointer">
-                    {({ isActive }) => (
-                      <span
-                        className={cn(
-                          "flex items-center gap-2.5",
-                          isActive && "font-medium text-primary",
-                        )}
-                      >
-                        <item.icon className="size-4" />
-                        {item.label}
-                      </span>
-                    )}
-                  </NavLink>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-          <span className="flex min-w-0 items-center gap-2 font-semibold tracking-tight">
-            <BrandMark className="size-7" />
-            Coding2API
-          </span>
-          <nav className="hidden flex-1 gap-1 sm:flex">
-            {NAV.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                className={({ isActive }) =>
-                  cn(
-                    "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm transition-colors sm:px-3",
-                    isActive
-                      ? "bg-primary/10 font-medium text-primary"
-                      : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                  )
-                }
-              >
-                {() => (
-                  <>
-                    <item.icon className="size-4 shrink-0" />
-                    <span>{item.label}</span>
-                  </>
-                )}
-              </NavLink>
-            ))}
-            {adminNav.length > 0 && (
-              <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    className={cn(
-                      "flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm font-normal sm:px-3",
-                      adminNav.some((item) => location.pathname.startsWith(item.to))
-                        ? "bg-primary/10 font-medium text-primary hover:bg-primary/10 hover:text-primary"
-                        : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                    )}
-                  >
-                    <ShieldCheck className="size-4 shrink-0" />
-                    管理
-                    <ChevronDown className="size-3.5 shrink-0 opacity-60" />
-                  </Button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent align="start" className="w-52">
-                  {adminNav.map((item) => (
-                    <DropdownMenuItem key={item.to} asChild>
-                      <NavLink to={item.to} className="cursor-pointer">
-                        {({ isActive }) => (
-                          <span
-                            className={cn(
-                              "flex items-center gap-2.5",
-                              isActive && "font-medium text-primary",
-                            )}
-                          >
-                            <item.icon className="size-4" />
-                            {item.label}
-                          </span>
-                        )}
-                      </NavLink>
-                    </DropdownMenuItem>
-                  ))}
-                </DropdownMenuContent>
-              </DropdownMenu>
-            )}
-          </nav>
-          <a
-            href="https://github.com/RobbsLuo/coding2api"
-            target="_blank"
-            rel="noopener noreferrer"
-            aria-label="项目仓库"
-            title="项目仓库"
-            className="grid size-8 place-items-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            <Globe className="size-4" />
-          </a>
-          <ThemeToggle />
-          <UserMenu
-            username={session.username}
-            role={session.role}
-            onChangePassword={() => setChangingPassword(true)}
-            onLogout={logout}
-          />
+            </div>
+            <SidebarNav session={session} onNavigate={() => setDrawerOpen(false)} />
+          </div>
         </div>
-      </header>
-      <main className="mx-auto w-full max-w-7xl flex-1 px-4 py-6 sm:px-6">
-        <Outlet context={session} />
-      </main>
-      <footer className="mx-auto w-full max-w-7xl px-4 py-4 text-xs text-muted-foreground sm:px-6">
-        Coding2API · 仅供学习研究，未做安全审计
-      </footer>
+      )}
+
       {changingPassword && (
         <ChangePasswordDialog onCancel={() => setChangingPassword(false)} />
       )}

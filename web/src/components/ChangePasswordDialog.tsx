@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { KeyRound, TriangleAlert } from "lucide-react";
 import { api, ApiError } from "../api/client";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { Button, Field, Input, Notice } from "../ui";
 
 /** 后端要求的最短密码长度（与 src/api/admin_auth.py 的 MIN_PASSWORD_LENGTH 一致）。 */
@@ -29,6 +30,8 @@ export function ChangePasswordDialog({
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  // 强制改密时不可取消：不传 onDismiss，Esc 也不关闭。
+  const dialogRef = useDialogFocus<HTMLFormElement>(required ? undefined : onCancel);
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -57,14 +60,15 @@ export function ChangePasswordDialog({
   };
 
   return (
-    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4">
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm">
       <form
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="修改密码"
         data-testid="change-password-dialog"
         onSubmit={submit}
-        className="w-full max-w-sm rounded-xl border border-border bg-background p-5 shadow-lg"
+        className="w-full max-w-sm animate-in rounded-xl border border-border bg-card p-5 shadow-xl fade-in-0 zoom-in-95"
       >
         <div className="mb-4 flex items-center gap-2">
           <KeyRound className="size-4 text-muted-foreground" />

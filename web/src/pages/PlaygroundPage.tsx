@@ -102,6 +102,7 @@ export function PlaygroundPage() {
   return (
     <div className="space-y-6" data-testid="playground-page">
       <PageHeader
+        eyebrow="控制台"
         title="Playground"
         description="用登录会话直接测试模型调度，无需 API Key；请求会走与外部 API 相同的调度与统计，用量计入当前用户。"
         icon={<TerminalSquare className="size-5" />}

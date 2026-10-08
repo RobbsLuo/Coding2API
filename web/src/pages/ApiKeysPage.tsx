@@ -4,7 +4,9 @@ import { api } from "../api/client";
 import { useApiKeys, useQueryClient } from "../api/hooks";
 import { formatTime } from "../api/display";
 import { cn } from "../lib/utils";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { PageHeader } from "../components/PageHeader";
+import { PageSkeleton } from "../components/PageSkeleton";
 import { PROVIDER_LABEL, PROVIDER_ORDER } from "../api/providers";
 import type { ApiKeyCreated } from "../api/types";
 import {
@@ -13,7 +15,7 @@ import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-  Empty,
+  EmptyState,
   Field,
   Input,
   Notice,
@@ -433,9 +435,12 @@ export function ApiKeysPage() {
     setCopied(false);
   };
 
+  const createDialogRef = useDialogFocus<HTMLDivElement>(closeCreate, createOpen);
+
   return (
     <div className="space-y-6" data-testid="api-keys-page">
       <PageHeader
+        eyebrow="控制台"
         title="API Key 管理"
         description="创建外部客户端（ChatGPT Next Web、LobeChat、Cursor 等）接入用的 Key，协议与 OpenAI 兼容。Key 仅在创建时完整显示一次，请立即保存；用量按 Key 归属用户统计。"
         icon={<KeyRound className="size-5" />}
@@ -457,9 +462,14 @@ export function ApiKeysPage() {
         }
       >
         {isLoading ? (
-          <Empty>载入中…</Empty>
+          <PageSkeleton variant="table" rows={4} />
         ) : keys.length === 0 ? (
-          <Empty data-testid="no-keys">还没有 API Key</Empty>
+          <EmptyState
+            icon={<KeyRound className="size-5" />}
+            title="还没有 API Key"
+            description="点右上角「创建 API Key」生成一个，复制到外部客户端即可接入。"
+            data-testid="no-keys"
+          />
         ) : (
           <Table data-testid="keys-table">
             <TableHeader>
@@ -523,16 +533,17 @@ export function ApiKeysPage() {
       {/* 创建 Key 对话框：创建成功后仍停留在对话框内展示一次性明文，由用户主动关闭 */}
       {createOpen && (
         <div
-          className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4"
+          className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm"
           onClick={closeCreate}
         >
           <div
+            ref={createDialogRef}
             role="dialog"
             aria-modal="true"
             aria-label="创建 API Key"
             data-testid="create-key-dialog"
             onClick={(event) => event.stopPropagation()}
-            className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-background p-5 shadow-lg"
+            className="max-h-[90vh] w-full max-w-lg animate-in overflow-y-auto rounded-xl border border-border bg-card p-5 shadow-xl fade-in-0 zoom-in-95"
           >
             <div className="mb-4 flex items-center justify-between">
               <h2 className="flex items-center gap-2 text-sm font-semibold">

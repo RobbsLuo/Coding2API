@@ -7,7 +7,8 @@ import { useQueryClient, useSettings, useTasks } from "../api/hooks";
 import { useSessionContext } from "../Layout";
 import type { RuntimeSetting, TaskStatus } from "../api/types";
 import { PageHeader } from "../components/PageHeader";
-import { Badge, Button, Card, Empty, Field, Input, Notice, Panel, Select, Tabs } from "../ui";
+import { PageSkeleton } from "../components/PageSkeleton";
+import { Badge, Button, Card, EmptyState, Field, Input, Notice, Panel, Select, Tabs } from "../ui";
 
 /** 网关卡在 tabs 里的值：加前缀避免与任务 key 撞车（如任务与分组同名）。 */
 const groupTabValue = (key: string) => `gateway-${key}`;
@@ -303,6 +304,7 @@ export function SettingsPage() {
   return (
     <div className="space-y-6" data-testid="settings-page">
       <PageHeader
+        eyebrow="管理"
         title="任务与配置"
         description="后台任务最近跑得怎么样、下一次什么时候跑，和它自己的周期/开关放在一起；这里改的值存进数据库并立即生效，无需重启。"
         icon={<SlidersHorizontal className="size-5" />}
@@ -352,9 +354,14 @@ export function SettingsPage() {
           </div>
         )}
         {isLoading ? (
-          <Empty>载入中…</Empty>
+          <PageSkeleton variant="table" rows={5} />
         ) : settings.length === 0 ? (
-          <Empty data-testid="no-settings">没有可热更配置</Empty>
+          <EmptyState
+            icon={<SlidersHorizontal className="size-5" />}
+            title="没有可热更配置"
+            description="当前没有可在线调整的配置项。"
+            data-testid="no-settings"
+          />
         ) : (
           <>
             {!tasksQuery.isLoading && tasks.length === 0 && (
@@ -364,7 +371,7 @@ export function SettingsPage() {
             )}
 
             {tasksQuery.isLoading ? (
-              <Empty>载入中…</Empty>
+              <PageSkeleton variant="table" rows={4} />
             ) : (
               <>
                 <div className="mb-4 overflow-x-auto pb-1">

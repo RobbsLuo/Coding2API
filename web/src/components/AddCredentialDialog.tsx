@@ -3,6 +3,7 @@ import { Plus, X } from "lucide-react";
 import { api } from "../api/client";
 import { PROVIDER_LABEL } from "../api/providers";
 import type { Provider } from "../api/types";
+import { useDialogFocus } from "../hooks/useDialogFocus";
 import { Button, Field, Input, Notice, Select, Tabs, Textarea } from "../ui";
 
 /** 支持「登录渠道账号」按钮 / JSON 导入下拉的渠道（有 poll 轨道或需人工导入的渠道）。 */
@@ -79,6 +80,14 @@ export function AddCredentialDialog({
       if (timer !== undefined) window.clearInterval(timer);
     });
   }, []);
+
+  // TRAE 登录中不能关：授权完成的检测靠这里的凭证列表轮询，关了就停。
+  const requestClose = () => {
+    if (loginProviders.includes("trae")) return;
+    onClose();
+  };
+  // 对话框焦点管理：Esc/遮罩关闭都走 requestClose（TRAE 登录中会自我拦截）。
+  const dialogRef = useDialogFocus<HTMLDivElement>(requestClose, open);
 
   if (!open) return null;
 
@@ -234,24 +243,19 @@ export function AddCredentialDialog({
     }
   };
 
-  const requestClose = () => {
-    // TRAE 登录中不能关：授权完成的检测靠这里的凭证列表轮询，关了就停。
-    if (loginProviders.includes("trae")) return;
-    onClose();
-  };
-
   return (
     <div
-      className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4"
+      className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm"
       onClick={requestClose}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-label="添加凭证"
         data-testid="add-credential-dialog"
         onClick={(event) => event.stopPropagation()}
-        className="max-h-[90vh] w-full max-w-lg overflow-y-auto rounded-xl border border-border bg-background p-5 shadow-lg"
+        className="max-h-[90vh] w-full max-w-lg animate-in overflow-y-auto rounded-xl border border-border bg-card p-5 shadow-xl fade-in-0 zoom-in-95"
       >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="flex items-center gap-2 text-sm font-semibold">

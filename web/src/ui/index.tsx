@@ -8,7 +8,6 @@ import {
   CardAction,
   CardContent,
   CardHeader,
-  CardTitle,
 } from "@/components/ui/card";
 import { Alert as ShadAlert } from "@/components/ui/alert";
 
@@ -86,6 +85,7 @@ export function Button({
 }
 
 // ================================================================ Panel (Card)
+// 卡片是页面里最主要的表面：默认 raised 观感（ring + 阴影），header 与内容分离。
 
 export function Panel({
   title,
@@ -94,17 +94,19 @@ export function Panel({
   className,
   ...rest
 }: {
-  title?: string;
+  title?: ReactNode;
   action?: ReactNode;
   children: ReactNode;
   className?: string;
 } & React.HTMLAttributes<HTMLDivElement>) {
   return (
-    <Card className={cn("rounded-xl", className)} {...rest}>
+    <Card className={cn("rounded-xl shadow-sm", className)} {...rest}>
       {(title || action) && (
-        <CardHeader>
+        <CardHeader className="border-b border-border/70 pb-3">
           {title && (
-            <CardTitle className="text-sm font-semibold tracking-wide">{title}</CardTitle>
+            <h2 className="text-sm font-semibold tracking-tight text-foreground">
+              {title}
+            </h2>
           )}
           <CardAction>{action}</CardAction>
         </CardHeader>
@@ -115,20 +117,39 @@ export function Panel({
 }
 
 // ================================================================ Badge
-// 语义色调(ok/warn/danger/muted/accent)在 shadcn Badge 基础上用颜色类扩展
+// 语义色调(ok/warn/danger/muted/accent)：柔和底色 + 强调文字，不用重描边。
 type Tone = "ok" | "warn" | "danger" | "muted" | "accent";
 
 const TONE_CLASS: Record<Tone, string> = {
-  ok: "border-ok/30 bg-ok/10 text-ok",
-  warn: "border-warn/40 bg-warn/15 text-warn",
-  danger: "border-destructive/30 bg-destructive/10 text-destructive",
-  muted: "border-transparent bg-secondary text-secondary-foreground",
-  accent: "border-primary/30 bg-primary/10 text-primary",
+  ok: "bg-ok/12 text-ok-ink ring-1 ring-inset ring-ok/25",
+  warn: "bg-warn/15 text-warn-ink ring-1 ring-inset ring-warn/30",
+  danger: "bg-destructive/12 text-danger-ink ring-1 ring-inset ring-destructive/25",
+  muted: "bg-secondary text-secondary-foreground",
+  accent: "bg-primary/12 text-primary-ink ring-1 ring-inset ring-primary/25",
 };
 
-export function Badge({ tone = "muted", children }: { tone?: Tone; children: ReactNode }) {
+/** 色调 → 状态点颜色（Badge `dot` 形态用）。 */
+const TONE_DOT: Record<Tone, string> = {
+  ok: "bg-ok",
+  warn: "bg-warn",
+  danger: "bg-destructive",
+  muted: "bg-muted-foreground/60",
+  accent: "bg-primary",
+};
+
+export function Badge({
+  tone = "muted",
+  dot = false,
+  children,
+}: {
+  tone?: Tone;
+  /** 前置状态圆点：与文字并用（颜色不单独表意）。 */
+  dot?: boolean;
+  children: ReactNode;
+}) {
   return (
-    <ShadBadge variant="outline" className={cn(TONE_CLASS[tone])}>
+    <ShadBadge variant="outline" className={cn("border-transparent", TONE_CLASS[tone])}>
+      {dot && <span className={cn("size-1.5 rounded-full", TONE_DOT[tone])} aria-hidden />}
       {children}
     </ShadBadge>
   );
@@ -149,7 +170,7 @@ export function Field({
     <div className="space-y-1.5">
       <Label className="text-xs font-medium text-muted-foreground">{label}</Label>
       {children}
-      {hint && <p className="text-xs text-muted-foreground">{hint}</p>}
+      {hint && <p className="text-xs leading-relaxed text-muted-foreground">{hint}</p>}
     </div>
   );
 }
@@ -172,7 +193,7 @@ export function Select({ className, ...props }: React.SelectHTMLAttributes<HTMLS
 }
 
 // ================================================================ Tabs (Segmented)
-// 轻量分段切换（非 radix Tab）：一排互斥按钮，选中项白底浮起。适用少量平级选项（如时间范围）。
+// 轻量分段切换（非 radix Tab）：一排互斥按钮，选中项浮起 + 主色指示。
 
 export function Tabs({
   value,
@@ -186,7 +207,11 @@ export function Tabs({
   testId?: string;
 }) {
   return (
-    <div role="tablist" data-testid={testId} className="inline-flex items-center gap-0.5 rounded-lg bg-muted p-0.5">
+    <div
+      role="tablist"
+      data-testid={testId}
+      className="inline-flex items-center gap-0.5 rounded-lg border border-border/70 bg-muted/60 p-0.5"
+    >
       {options.map((option) => (
         <button
           key={option.value}
@@ -198,7 +223,7 @@ export function Tabs({
           className={cn(
             "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
             option.value === value
-              ? "bg-background text-foreground shadow-sm"
+              ? "bg-background text-foreground shadow-sm ring-1 ring-border/60"
               : "text-muted-foreground hover:text-foreground",
           )}
         >
@@ -222,11 +247,11 @@ export function Notice({
   children: ReactNode;
 }) {
   const cls: Record<Tone, string> = {
-    ok: "border-ok/30 bg-ok/10 text-ok",
-    warn: "border-warn/40 bg-warn/15 text-warn",
-    danger: "border-destructive/30 bg-destructive/10 text-destructive",
-    muted: "border-border bg-muted text-muted-foreground",
-    accent: "border-primary/35 bg-primary/10 text-primary",
+    ok: "border-ok/30 bg-ok/10 text-ok-ink",
+    warn: "border-warn/40 bg-warn/12 text-warn-ink",
+    danger: "border-destructive/30 bg-destructive/10 text-danger-ink",
+    muted: "border-border bg-muted/50 text-muted-foreground",
+    accent: "border-primary/35 bg-primary/10 text-primary-ink",
   };
   return (
     <ShadAlert
@@ -238,17 +263,56 @@ export function Notice({
   );
 }
 
-// ================================================================ Empty
+// ================================================================ Empty / EmptyState
 
+/** 兼容旧调用的单行空态（表格内、抽屉内等紧凑场景）。 */
 export function Empty({
   children,
   ...rest
 }: { children: ReactNode } & React.HTMLAttributes<HTMLParagraphElement>) {
   return (
-    <p {...rest} className="flex items-center justify-center gap-2 py-8 text-center text-sm text-muted-foreground">
+    <p
+      {...rest}
+      className="flex items-center justify-center gap-2 py-8 text-center text-sm text-muted-foreground"
+    >
       <Inbox className="size-4 shrink-0" />
       {children}
     </p>
+  );
+}
+
+/** 整块空态：图标 + 标题 + 描述 + 可选操作，用于页面/面板级「还没有内容」。 */
+export function EmptyState({
+  icon,
+  title,
+  description,
+  action,
+  className,
+  ...rest
+}: {
+  icon?: ReactNode;
+  title: string;
+  description?: ReactNode;
+  action?: ReactNode;
+  className?: string;
+} & React.HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div
+      {...rest}
+      className={cn(
+        "flex flex-col items-center justify-center gap-2 px-6 py-12 text-center",
+        className,
+      )}
+    >
+      <span className="grid size-11 place-items-center rounded-full bg-muted text-muted-foreground">
+        {icon ?? <Inbox className="size-5" />}
+      </span>
+      <div className="text-sm font-medium text-foreground">{title}</div>
+      {description && (
+        <p className="max-w-md text-xs leading-relaxed text-muted-foreground">{description}</p>
+      )}
+      {action && <div className="mt-1">{action}</div>}
+    </div>
   );
 }
 
@@ -271,14 +335,18 @@ export function Metric({
   className?: string;
 }) {
   return (
-    <Card className={cn("px-4 py-3", className)}>
+    <Card className={cn("gap-0 px-4 py-3.5 shadow-sm", className)}>
       <div className="flex items-center justify-between gap-2">
-        <div className="text-xs text-muted-foreground">{label}</div>
-        {icon && <span className="text-muted-foreground/80">{icon}</span>}
+        <div className="text-xs font-medium text-muted-foreground">{label}</div>
+        {icon && (
+          <span className="grid size-7 place-items-center rounded-lg bg-muted text-muted-foreground">
+            {icon}
+          </span>
+        )}
       </div>
       <div
         className={cn(
-          "mt-1 text-2xl font-bold tracking-tight tabular-nums",
+          "mt-2 text-2xl leading-none font-bold tracking-tight tabular-nums",
           tone === "ok" && "text-ok",
           tone === "danger" && "text-destructive",
           tone === "warn" && "text-warn",
@@ -286,7 +354,9 @@ export function Metric({
       >
         {value}
       </div>
-      {hint && <div className="mt-0.5 text-xs text-muted-foreground">{hint}</div>}
+      {hint && (
+        <div className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{hint}</div>
+      )}
     </Card>
   );
 }

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { ShieldCheck, TriangleAlert } from "lucide-react";
 import { api, ApiError } from "../api/client";
-import { BrandMark } from "../Layout";
+import { BrandMark } from "../components/Sidebar";
 import { Button, Field, Input, Notice, Panel } from "../ui";
 
 /** 与后端 src/api/admin_auth.py 的 MIN_PASSWORD_LENGTH 一致。 */
@@ -72,14 +72,14 @@ export function ActivatePage() {
   };
 
   return (
-    <div className="grid min-h-full place-items-center bg-[color:color-mix(in_oklch,var(--accent)_4%,var(--background))] px-6">
+    <div className="grid min-h-full place-items-center bg-[var(--surface-sunken)] px-6 py-12">
       <div className="w-full max-w-sm" data-testid="activate-page">
         <div className="mb-6 text-center">
           <BrandMark className="mx-auto mb-3 size-12 rounded-xl" />
           <h1 className="text-xl font-semibold tracking-tight">激活账号</h1>
           <p className="mt-1 text-xs text-muted-foreground">设置你的密码以启用账号</p>
         </div>
-        <Panel>
+        <Panel className="shadow-md">
           {invalid ? (
             <div data-testid="activate-invalid" role="alert">
               <Notice tone="danger">

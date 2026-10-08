@@ -446,3 +446,12 @@ it("创建 Key 收在对话框：右上角按钮打开，创建成功后展示�
   // L3：关闭后明文从页面内存抹掉，接入面板不再残留该 Key
   expect(screen.queryByText(/sk-dialog-key/)).not.toBeInTheDocument();
 });
+
+it("创建 Key 对话框支持 Esc 关闭", async () => {
+  mockFetch({ "/api/api-keys": { api_keys: [] } });
+  renderPage(<ApiKeysPage />);
+  await settle();
+  await openCreateDialog();
+  await userEvent.keyboard("{Escape}");
+  expect(screen.queryByTestId("create-key-dialog")).not.toBeInTheDocument();
+});

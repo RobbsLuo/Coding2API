@@ -105,4 +105,11 @@ describe("AddCredentialDialog", () => {
     expect(popup.opener).toBeNull();             // opener 已切断
     expect(props.onError).toHaveBeenCalledWith("授权地址无效，已中止登录。");
   });
+
+  it("Esc 关闭对话框（无登录进行中时）", async () => {
+    const props = renderDialog();
+    expect(screen.getByTestId("add-credential-dialog")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
 });

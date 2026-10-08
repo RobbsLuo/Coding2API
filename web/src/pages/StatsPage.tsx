@@ -12,18 +12,17 @@ import { formatCacheRate, formatCompact, formatCredit, formatLatency, formatNumb
 import { Notice } from "../ui";
 import { ModelTrendChart } from "../components/ModelTrendChart";
 import { PageHeader } from "../components/PageHeader";
+import { PageSkeleton } from "../components/PageSkeleton";
 import { ProviderIcon } from "../components/ProviderIcon";
 import { UsageChart, chartProviders } from "../components/UsageChart";
 import { providerLabel } from "../api/providers";
 import type { UsageEventRow } from "../api/types";
 import {
   Button,
-  Card,
   Empty,
   Metric,
   Panel,
   Select,
-  Skeleton,
   Table,
   TableBody,
   TableCell,
@@ -103,16 +102,8 @@ export function StatsPage() {
 
   if (overview.isLoading) {
     return (
-      <div className="space-y-6" data-testid="stats-page">
-        <p className="sr-only">载入中…</p>
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          {Array.from({ length: 4 }).map((_, index) => (
-            <Card key={index} size="sm" className="gap-0 p-4">
-              <Skeleton className="h-3 w-14" />
-              <Skeleton className="mt-2 h-6 w-12" />
-            </Card>
-          ))}
-        </div>
+      <div data-testid="stats-page">
+        <PageSkeleton variant="chart" rows={4} />
       </div>
     );
   }
@@ -138,6 +129,7 @@ export function StatsPage() {
   return (
     <div className="space-y-6" data-testid="stats-page">
       <PageHeader
+        eyebrow="控制台"
         title="用量统计"
         description="按时间范围查看请求量、成功率与 token 消耗；数据按 API Key 归属用户统计，管理员与操作员可看全量，只读用户只能看自己。"
         icon={<BarChart3 className="size-5" />}

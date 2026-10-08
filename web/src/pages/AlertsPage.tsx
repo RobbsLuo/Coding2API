@@ -3,9 +3,10 @@ import { ALERT_RULE_LABEL, formatTime } from "../api/display";
 import { useAlerts } from "../api/hooks";
 import { useSessionContext } from "../Layout";
 import { PageHeader } from "../components/PageHeader";
+import { PageSkeleton } from "../components/PageSkeleton";
 import {
   Badge,
-  Empty,
+  EmptyState,
   Notice,
   Panel,
   Table,
@@ -33,6 +34,7 @@ export function AlertsPage() {
   return (
     <div className="space-y-6" data-testid="alerts-page">
       <PageHeader
+        eyebrow="运维"
         title="运维告警"
         description="后台周期评估四类风险：凭证池耗尽、后台任务连续失败、token 临近到期、上游错误率骤升。命中即落库并可选推送 webhook；同一条告警在静默窗内只记一次。"
         icon={<BellRing className="size-5" />}
@@ -43,9 +45,14 @@ export function AlertsPage() {
         aria-label="告警记录"
       >
         {isLoading ? (
-          <Empty>载入中…</Empty>
+          <PageSkeleton variant="table" rows={5} />
         ) : alerts.length === 0 ? (
-          <Empty data-testid="no-alerts">暂无告警记录</Empty>
+          <EmptyState
+            icon={<BellRing className="size-5" />}
+            title="暂无告警记录"
+            description="后台任务评估命中风险后会在此落库；一切正常时这里保持空白。"
+            data-testid="no-alerts"
+          />
         ) : (
           <Table data-testid="alerts-table">
             <TableHeader>
@@ -61,11 +68,11 @@ export function AlertsPage() {
             <TableBody>
               {alerts.map((alert) => (
                 <TableRow key={alert.id} data-testid={`alert-row-${alert.id}`}>
-                  <TableCell className="whitespace-nowrap text-xs">
+                  <TableCell className="whitespace-nowrap text-xs tabular-nums">
                     {formatTime(alert.ts)}
                   </TableCell>
                   <TableCell>
-                    <Badge tone={severityTone(alert.severity)}>
+                    <Badge tone={severityTone(alert.severity)} dot>
                       {alert.severity === "critical" ? "严重" : "警告"}
                     </Badge>
                   </TableCell>
@@ -76,7 +83,9 @@ export function AlertsPage() {
                   <TableCell className="text-xs">{alert.message}</TableCell>
                   <TableCell>
                     {alert.delivered === 1 ? (
-                      <Badge tone="ok">已推送</Badge>
+                      <Badge tone="ok" dot>
+                        已推送
+                      </Badge>
                     ) : (
                       <Badge tone="muted">
                         {alert.delivery_error ? "推送失败" : "站内"}
