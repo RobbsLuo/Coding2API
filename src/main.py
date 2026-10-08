@@ -62,6 +62,7 @@ from .engine.affinity import ConversationAffinity
 from .engine.executor import Executor, ExecutorDeps
 from .engine.model_resolver import KNOWN_PROVIDERS, parse_fallback_groups
 from .engine.scheduler import Scheduler
+from .pricing import fetch_prices, load_prices, save_prices
 from .provider.codearts import CodeArtsProvider
 from .provider.codearts.client import CodeArtsClient
 from .provider.codearts.oauth import CodeArtsOAuth
@@ -228,6 +229,22 @@ async def _warm_model_list(services) -> None:
         logger.warning("启动预热模型列表失败: %s", error)
 
 
+async def _warm_price_table(refresh, table: dict) -> None:
+    """后台补价表：仅在**没有落盘快照**时立即拉一次。
+
+    有快照就交给周期性任务——models.dev 是数 MB 公开大表，刚恢复就重拉纯属
+    白花；但没有快照（首次部署 / 快照损坏）时若不补，费用要等到下一轮
+    `PRICE_CATALOG_MINUTES`（默认每日）才可用，期间全显示 —。放后台跑不阻塞
+    启动；失败仅记日志（费用显示 — 而已，不影响聊天）。
+    """
+    if table:
+        return
+    try:
+        await refresh()
+    except Exception as error:  # noqa: BLE001 - 预热失败不阻断服务
+        logger.warning("启动预热价表失败: %s", error)
+
+
 def _restore_model_list(services) -> None:
     """启动时同步回灌落盘模型目录：失败仅记日志（缓存是加速手段，不是必需项）。"""
     try:
@@ -328,7 +345,16 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 模型目录原始表的**同一引用**交给 executor（credit_rate 查询）与 Services
     # （list_models 缓存）——这里先建空 dict，Services 装配时直接挂它
     model_cache: dict[str, dict[str, Any]] = {}
-    stats_collector = StatsCollector(db)
+    # 费用价表（models.dev 刊例价，USD/百万 token）：启动时同步读回落盘快照
+    # （零上游请求），后台 price_catalog 循环再周期刷新。同一份 dict 引用交给
+    # StatsCollector，刷新时就地替换后新写入的明细立即用上新价。
+    price_table: dict[str, tuple[float, float, float]] = {}
+    try:
+        price_table.update(load_prices(config.data_dir))
+    except Exception as error:  # noqa: BLE001 - 价表是加速手段，失败不阻断服务
+        logger.warning("恢复落盘价表失败: %s", error)
+    stats_collector = StatsCollector(
+        db, prices=lambda: price_table, usd_cny_rate=lambda: runtime.usd_cny_rate)
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
                                      scheduler=Scheduler(
                                          expiry_window=lambda: runtime.quota_expiry_window_seconds,
@@ -376,19 +402,38 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             result = await models.list_models(services_)
             return {"models": len(result.get("data") or [])}
 
+        async def _refresh_price_catalog() -> dict[str, int]:
+            """后台刷新价表一轮：拉 models.dev → 落盘 → 就地换入。
+
+            就地替换（clear + update）而不是重新绑定变量：StatsCollector 持有
+            的是这份 dict 的引用，换引用会让它读到旧表。返回条目数供运行态展示
+            （整张表几百条，不透传原始数据）。
+            """
+            table = await fetch_prices(config.models_dev_url)
+            if not table:
+                raise RuntimeError("models.dev 返回空价表")
+            price_table.clear()
+            price_table.update(table)
+            save_prices(config.data_dir, price_table)
+            return {"models": len(price_table)}
+
         # 传 runtime（而非 env 快照）：后台循环的热更值每轮现读覆盖层。
         runner = build_runner(credentials, registry, app_.state.stats_collector, runtime,
                               growth_events=app_.state.growth_events,
                               credit_events=credit_events,
                               audit=audit,
                               alerts=alerts,
-                              model_catalog=_refresh_model_catalog)
+                              model_catalog=_refresh_model_catalog,
+                              price_catalog=_refresh_price_catalog)
         app_.state.task_runner = runner
         await runner.start()
         # 预热模型别名表：放后台跑（force 绕过 TTL）。
         # 不内联 await 的原因：zen 免费层探活最慢的模型可占十几秒，内联会让应用
         # 在这段时间里不响应 /health，容器存活探针可能误判；动态拉取失败仅记日志。
         app_.state.model_warmup_task = asyncio.create_task(_warm_model_list(services_))
+        # 价表同理：仅在无落盘快照时后台补拉一次，避免首次部署费用空窗到下一轮。
+        app_.state.price_warmup_task = asyncio.create_task(
+            _warm_price_table(_refresh_price_catalog, price_table))
         # 让预热任务先跑一步：失败时日志立即落盘（成功与否都不阻塞下面 yield）。
         await asyncio.sleep(0)
         try:
@@ -400,6 +445,11 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                 warmup.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await warmup
+            price_warmup = getattr(app_.state, "price_warmup_task", None)
+            if price_warmup is not None and not price_warmup.done():
+                price_warmup.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await price_warmup
             # stale-while-revalidate 的后台刷新任务：不取消会把 in-flight 的
             # 上游请求（zen 探活可占十几秒）带出事件循环，关闭变慢且报错。
             for task in list(services_.model_refresh_tasks):
@@ -446,6 +496,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.pending_probes = []
     app.state.model_aliases = model_aliases
     app.state.model_list_cache = model_cache
+    app.state.price_table = price_table
     app.state.pending_callback_state = None
     app.state.pending_callback_user = None
     app.state.login_throttle = LoginThrottle()

@@ -76,6 +76,10 @@ CREATE TABLE IF NOT EXISTS usage_events (
     cached_tokens    INTEGER,                  -- 输入中命中缓存的 token（上游可选，NULL=未上报）
     credit           REAL,                     -- 上游可选字段，两边都经常为 NULL
     credit_estimated INTEGER NOT NULL DEFAULT 0,  -- credit 是否本服务推算（1=推算，展示标 ≈）
+    -- 费用估算（models.dev 刊例价 × 当时汇率，写入时定值）：NULL=未匹配到定价或未上报 token。
+    -- 两列同生同灭；历史行不随汇率/价表变化而重算。
+    cost_usd         REAL,
+    cost_cny         REAL,
     latency_ms       INTEGER,             -- 端到端耗时（排队+首字+生成），非网络延迟
     ttfb_ms          INTEGER              -- 首字延迟（请求开始到首个内容帧）
 );
@@ -98,6 +102,11 @@ CREATE TABLE IF NOT EXISTS usage_hourly (
     credit_sum    REAL,
     credit_known  INTEGER NOT NULL DEFAULT 0,
     credit_estimated_known INTEGER NOT NULL DEFAULT 0,  -- 其中推算值条数（>0 时该值标 ≈）
+    -- 费用估算聚合：USD/CNY 两列由同一条明细同时写入，故共用一个 cost_known 计数；
+    -- cost_known=0 时两列不可信（该小时没有任何可定价明细），查询回 None。
+    cost_usd_sum  REAL,
+    cost_cny_sum  REAL,
+    cost_known    INTEGER NOT NULL DEFAULT 0,
     latency_sum   INTEGER NOT NULL DEFAULT 0,
     ttfb_sum      INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (hour_utc, username, provider, model)

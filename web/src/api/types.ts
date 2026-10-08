@@ -110,6 +110,10 @@ export interface StatsOverview {
   credit: number | null;
   /** credit 是否为推算值（TRAE 按官方单价、CodeArts 福利模型按每日池 1:1），展示加 ≈ */
   credit_estimated: boolean;
+  /** 费用估算（USD，models.dev 刊例价 × token）；无可定价明细时为 null（显示 —） */
+  cost_usd: number | null;
+  /** 费用估算（CNY，按当时汇率折算）；与 cost_usd 同生同灭 */
+  cost_cny: number | null;
   /** 平均端到端耗时（排队 + 首字 + 生成），非网络延迟 */
   avg_latency_ms: number | null;
   /** 平均首字延迟（TTFB）：请求开始到首个内容帧，接近真实体感延迟 */
@@ -125,10 +129,14 @@ export interface ProviderStats {
   credit: number | null;
   /** credit 是否为推算值（含推算即为 true），展示加 ≈ */
   credit_estimated: boolean;
+  /** 费用估算（USD）；该渠道无可定价明细时为 null */
+  cost_usd: number | null;
+  /** 费用估算（CNY） */
+  cost_cny: number | null;
 }
 
-/** 图表指标：请求次数 / token 消耗 / 平均耗时 / 平均首字延迟。 */
-export type StatsMetric = "requests" | "tokens" | "latency" | "ttfb";
+/** 图表指标：请求次数 / token 消耗 / 费用 / 平均耗时 / 平均首字延迟。 */
+export type StatsMetric = "requests" | "tokens" | "cost" | "latency" | "ttfb";
 
 /** 小时粒度时间序列点（usage_hourly 聚合，跨 model 汇合）。值语义随 metric 变化。 */
 export interface TimelinePoint {
@@ -168,6 +176,10 @@ export interface UsageEventRow {
   credit: number | null;
   /** credit 是否为推算值（TRAE 按官方单价、CodeArts 福利模型按每日池 1:1），展示加 ≈ */
   credit_estimated: number;
+  /** 费用估算（USD，models.dev 刊例价）；未匹配到定价或未上报 token 时为 null */
+  cost_usd: number | null;
+  /** 费用估算（CNY，按写入时汇率折算）；与 cost_usd 同生同灭 */
+  cost_cny: number | null;
   /** 端到端耗时（排队 + 首字 + 生成），非网络延迟 */
   latency_ms: number | null;
   /** 首字延迟（TTFB）：请求开始到首个内容帧；无帧（如预热失败）时为 null */

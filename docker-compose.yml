@@ -22,6 +22,11 @@ services:
       # 模型目录兜底刷新周期（分钟）：没有它，模型表只在有人调 /v1/models 时
       # 才刷新，纯 API 用法的部署会让「模型→渠道」归属表与落盘快照变陈旧
       MODEL_CATALOG_MINUTES: ${MODEL_CATALOG_MINUTES:-30}
+      # 价表刷新周期（分钟）+ 费用估算汇率：价表来自 models.dev（USD/百万
+      # token），后台周期拉取并落盘；汇率只影响之后写入的费用
+      PRICE_CATALOG_MINUTES: ${PRICE_CATALOG_MINUTES:-1440}
+      USD_CNY_RATE: ${USD_CNY_RATE:-6.70}
+      MODELS_DEV_URL: ${MODELS_DEV_URL:-https://models.dev/api.json}
       # 成长中心（仅 CodeBuddy）：一轮领取周期，以及是否允许不可逆动作
       # （抽奖/连登兑换/开 Buddy 盲盒/消耗补登卡）
       GROWTH_INTERVAL_MINUTES: ${GROWTH_INTERVAL_MINUTES:-60}

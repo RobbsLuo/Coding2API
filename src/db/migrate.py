@@ -33,7 +33,10 @@ SCHEMA_NAME = "schema.sql"
 # 17：新增 alert_events 表（P1-7 运维告警：四类规则命中即落一行，供管理台
 # 「站内告警记录」回看）。新增表只需进 schema.sql（CREATE TABLE IF NOT EXISTS
 # 对老库同样生效），无需迁移动作。
-SCHEMA_VERSION = 17
+# 18：usage_events 新增 cost_usd / cost_cny，usage_hourly 新增 cost_usd_sum /
+# cost_cny_sum / cost_known（费用估算：models.dev 刊例价 × 当时汇率，写入时定值）。
+# 老库补列后历史行费用为 NULL（显示 —），不随汇率/价表变化重算。
+SCHEMA_VERSION = 18
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -68,6 +71,13 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # 老库补列后与补列前行为一致
     ("api_keys", "allowed_models TEXT NOT NULL DEFAULT ''"),
     ("api_keys", "expires_at INTEGER"),
+    # 费用估算（models.dev 刊例价 × 当时汇率）：老库补列后历史费用为 NULL。
+    # usage_hourly 的 cost_known=0 表示该小时没有可定价明细，聚合值不可信。
+    ("usage_events", "cost_usd REAL"),
+    ("usage_events", "cost_cny REAL"),
+    ("usage_hourly", "cost_usd_sum REAL"),
+    ("usage_hourly", "cost_cny_sum REAL"),
+    ("usage_hourly", "cost_known INTEGER NOT NULL DEFAULT 0"),
 )
 
 # 已废弃的表：schema.sql 里已删定义，但老库里可能还留着，必须显式清理。

@@ -224,5 +224,5 @@ def test_schema_v14_adds_users_and_audit_tables(tmp_path):
         "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"users", "audit_events"} <= tables
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 17
+    assert SCHEMA_VERSION == 18
     db.close()

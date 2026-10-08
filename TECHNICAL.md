@@ -135,8 +135,10 @@ coding2api/
 │   │   ├── status.py            # 任务清单 + 进程内运行态（B4）
 │   │   └── runner.py            # 后台任务调度，接入应用生命周期
 │   ├── stats/
+│   │   ├── backfill.py          # 历史费用一次性回填/重算（scripts/backfill_cost.py）
 │   │   ├── collector.py         # usage_events 写入（脱敏）+ 小时汇总双写/重算
 │   │   └── query.py             # overview / by-provider / timeline / model-timeline / events
+│   ├── pricing.py               # models.dev 刊例价表 + 单请求费用估算（USD→CNY）
 │   └── api/
 │       ├── deps.py              # Services 容器 + require_api_key / session / csrf 依赖
 │       ├── chat.py              # POST /v1/chat/completions
@@ -1023,9 +1025,10 @@ class Scheduler:
 | 活跃上报（activity.py，默认关闭） | 每 10 分钟醒一次，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点，北京时间）窗口内执行 | 仅 CodeBuddy：补发一条 `chat_request_send` 续连登；按「endpoint + userId」隔离、当日封账；成功落一行 `growth_events` |
 | 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理；同期限回收 `credit_events`（§3.10）、`audit_events`（§3.13）与 `alert_events`（§3.22） |
 | 模型目录刷新（`api/models.py::list_models`，注入式） | 每 `MODEL_CATALOG_MINUTES`（默认 30，下限 5） | 兜底重拉各渠道模型表（走同一条 `list_models`：TTL 门禁 + 逐渠道 publish + 落盘快照）。周期 30 分钟是跟着 zen 免费模型判活缓存（`MODELS_CACHE_TTL_SECONDS`，30 分钟）对齐——更密不会让 zen 多探一次，只是白打其余渠道的 `/models` |
+| 价表刷新（`pricing.fetch_prices`，注入式） | 每 `PRICE_CATALOG_MINUTES`（默认 1440，下限 60） | 拉 `models.dev/api.json` → `build_price_table` → 落盘 `DATA_DIR/model_prices.json` + 就地换入 `StatsCollector` 持有的同一份 dict。上游价格变动很少，默认每日一次；返回空表视为失败（保留旧表），异常由 `_guarded` 记日志不影响聊天 |
 | 运维告警（alerting.py） | 每 `ALERT_INTERVAL_MINUTES`（默认 5，下限 1） | 评估四类风险（池耗尽 / 任务连续失败 / token 临近到期 / 上游错误率骤升），命中落 `alert_events` 并可选推送 webhook；同 `(规则, 对象)` 在静默窗内只报一次（§3.22） |
 
-**模型目录刷新为什么是「注入协程」而不是一个 tasks 模块**：`tasks/` 不 import `api/`（反向依赖会把 HTTP 层拖进后台任务），所以 `TaskRunner` 接的是 `model_catalog: Callable[[], Awaitable[object]] | None`，由 `main.lifespan` 闭包注入；`None`（老调用方 / 测试）时不装配这条循环，管理台也不展示这张卡片——与 growth / activity 的处理一致。
+**模型目录刷新为什么是「注入协程」而不是一个 tasks 模块**：`tasks/` 不 import `api/`（反向依赖会把 HTTP 层拖进后台任务），所以 `TaskRunner` 接的是 `model_catalog: Callable[[], Awaitable[object]] | None`，由 `main.lifespan` 闭包注入；`None`（老调用方 / 测试）时不装配这条循环，管理台也不展示这张卡片——与 growth / activity 的处理一致。**价表刷新同理**（`price_catalog`）：`tasks/` 不依赖 `pricing` / `httpx`，由 `main` 注入「拉取 + 落盘 + 换表」的协程。
 
 **并发保护**：HTTP 出口（`/v1/models` 同步、Playground 走 `refresh_pending_models`）与这条后台循环都会调 `list_models`，两者不串行就会同时对同一条渠道打上游（zen 那次是十几秒的真推理），后到的拿到的还是同一份数据。故 `api/models.py` 里 `_refresh_providers` 整段持模块级 `asyncio.Lock`。锁的粒度是「整次列表刷新」而非单渠道：跨渠道合并与别名表 publish 需要看到一致的全集。Playground 的后台刷新任务复用同一把锁，只是把等待从请求路径挪到后台。
 
@@ -1159,7 +1162,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
 
 ## 7. 数据库（T-Q2 定稿）
 
-DDL 以 `src/db/schema.sql` 为准（users 为账号唯一源、users.txt 仅引导导入、凭证加密列、`usage_events.credit`/`cached_tokens` 可空）。当前 `SCHEMA_VERSION = 17`，共 11 张表：`api_keys` / `credentials` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `runtime_settings` / `alert_events`。补充实现细节：
+DDL 以 `src/db/schema.sql` 为准（users 为账号唯一源、users.txt 仅引导导入、凭证加密列、`usage_events.credit`/`cached_tokens`/`cost_usd`/`cost_cny` 可空）。当前 `SCHEMA_VERSION = 18`，共 11 张表：`api_keys` / `credentials` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `runtime_settings` / `alert_events`。补充实现细节：
 
 ```sql
 -- conn.py 打开时执行
@@ -1208,6 +1211,7 @@ fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文�
 - **统计一律以 `usage_hourly` 为准**：`overview` / `by_provider` / `timeline` / `model-timeline` 均读小时汇总，只有 `events`（逐请求明细）读 `usage_events`。统一口径是为了让选「全部」时总览与图表同值（明细只留 90 天，汇总永久）。代价：最近 ≤5 分钟未进汇总的请求不计入，刷新一次即可
 - **TRAE credit 为推算值**（`credit_estimated`）：TRAE 上游 `token_usage` 只给 token 数、不给单请求积分，故按官方计费公式（`(输入−缓存)×输入价 + 输出×输出价 + 缓存×缓存价`，单价为积分/百万，见 `src/provider/trae/pricing.py`）折算；明细存 `usage_events.credit_estimated`，小时汇总存 `credit_estimated_known`（推算条数），展示层对推算值加 `≈`。CodeBuddy 的 credit 是上游真值，恒不标推算。单价表与折扣会随官方调价/活动变化，改动集中在 pricing 模块。**缓存命中价要单独实测**：DeepSeek-V4.1-Flash 刊例缓存价 0.04 元/M，账号实测有效 ≈0.07 元/M（2.8 积分/M），且该模型缓存占输入 ≈99%，按刊例会把整体积分低估约一半（2026-09-30 修正，全量 229→449）；这类与「刊例 × 折扣」不符的模型走 `pricing.MEASURED_EFFECTIVE_OVERRIDE`。**回填 / 重算**：上线前的 TRAE 明细 `credit` 为 NULL，单价表调整后旧推算值也会过期，都用 `scripts/backfill_trae_credit.py --apply` 处理——范围是「`credit` 为 NULL 或 `credit_estimated=1`」的 trae 行，上游真值（`credit_estimated=0`）与值未变化的行不动（幂等），复用 `src/provider/trae/backfill.py`，补完重算小时汇总；之后新请求走正常路径。明细 90 天后清理，更早的小时汇总不再推算
 - **小时汇总双写**：`record()` 写明细的同时增量累加当前小时行，新请求立即可见于统计页（不依赖 5 分钟一轮的 rollup）；`rollup_hourly` 仍每 5 分钟全量重算作对账，两者结果一致（幂等）
+- **费用估算（`cost_usd` / `cost_cny`，2026-10）**：统计页的费用不是上游真实扣费，而是「token × 公开刊例价」的估算。价表来自 `https://models.dev/api.json`（每模型 `cost.input` / `cost.output` / `cost.cache_read`，**USD / 百万 token**），逻辑集中在 `src/pricing.py`：`build_price_table` 把原始 JSON 压成 `{model.id.lower(): (input, output, cache_read)}`，同一 id 挂在多个 provider 下时**优先原厂**（`canonical_model_id` 前缀 == provider id），否则取 `input` 价最高者（避开 0 价套餐）；`cache_read` 缺失按 `input` 原价计（不打折也不免费）。`estimate_cost_usd` 公式为 `(输入−命中)×输入价 + 命中×缓存价 + 输出×输出价`（缓存夹到 `[0, 输入]`），输入 token 缺失或模型未收录一律回 `None`。**写入时定值**：`StatsCollector` 在 `record()` 里按**当时**的价表与汇率算好 `usage_events.cost_usd` / `cost_cny` 落库，历史行不随价表/汇率变化重算（与 credit 推算同一心智）。**聚合口径**：`usage_hourly` 加 `cost_usd_sum` / `cost_cny_sum` / `cost_known`，两列由同一条明细同时写入故共用 `cost_known` 计数；查询侧 `cost_known=0`（该小时/渠道没有任何可定价明细）回 `None`，展示为 `—` 而不是 0——费用天然是**下限**（未收录的模型不计）。**汇率**是热更项 `USD_CNY_RATE`（默认 6.70），只影响之后写入的行；价表由后台任务 `price_catalog`（`PRICE_CATALOG_MINUTES`，默认每日、下限 60 分钟）周期拉取并落盘 `DATA_DIR/model_prices.json`，启动时同步回灌（零上游请求），失败只记日志。**无快照时**（首次部署 / 快照损坏）启动另起一个后台预热任务（`_warm_price_table`，不阻塞 `/health`）立即补拉一次，否则费用要空窗到下一轮（最长一日）；已有快照则不重拉。老库升级补这五列后历史行费用为 `NULL`（显示 `—`）；用 `scripts/backfill_cost.py --apply`（默认预览、写库前备份、幂等）按当前价表与生效汇率一次性补齐 / 重算全部明细并重算小时汇总——口径是「按今天重估」而非还原每笔当时的真实花费
 - **延迟均值只算成功请求**：分子 `SUM(latency_ms WHERE ok=1)` 与分母 `ok_count` 配对；失败请求的耗时不能拉偏「典型耗时」（与图表口径一致）
 - **应用日志只写 stderr，轮转交给平台**：不在应用内开文件、不用 `RotatingFileHandler`。各部署形态（systemd / docker 等）采集方式不同但都靠 stdout/stderr 对接；应用自己写文件会与平台轮转争抢同一文件，容器里还会写进镜像层（重启即丢且 `docker logs` 看不到）。各自配置见 `deploy/` 与 compose 的 `logging` 段
 - **必须在 `build_app` 里配 root logger**：uvicorn 默认 `LOGGING_CONFIG` 只配 `uvicorn` / `uvicorn.access`（`propagate=false`），**从不配 root**；root 默认 `WARNING` 且无 handler，导致 `logging.getLogger(__name__)` 的 INFO 静默丢失。生产路径 `uvicorn src.main:build_app --factory` 不经过 `run()`，所以配置必须挂在 `build_app`（幂等，见 `src/webapp/logging.py`）

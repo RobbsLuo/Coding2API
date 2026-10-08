@@ -45,6 +45,9 @@ class TaskRunner:
     # api.models.list_models（要 services 与 provider registry），tasks 层
     # 不该反向依赖 api 层。由 main 装配时传入；None 表示不装配这条循环。
     model_catalog: Callable[[], Awaitable[object]] | None = None,
+    # 价表刷新：同样注入「跑一轮」的协程（真正的活是 pricing.fetch_prices +
+    # 落盘 + 换入价表），tasks 层不依赖 pricing/httpx。None 表示不装配。
+    price_catalog: Callable[[], Awaitable[object]] | None = None,
     # 运维告警（P1-7）：None 表示不装配该循环（老调用方/测试保持原行为）。
     alert: AlertTask | None = None,
     quota_probe_minutes: int | Callable[[], int] = 60,
@@ -52,6 +55,7 @@ class TaskRunner:
     refresh_interval_minutes: int | Callable[[], int] = 60,
     retention_interval_minutes: int | Callable[[], int] = 5,
     model_catalog_minutes: int | Callable[[], int] = 30,
+    price_catalog_minutes: int | Callable[[], int] = 1440,
     alert_interval_minutes: int | Callable[[], int] = 5,
     activity_enabled: Callable[[], bool] | None = None,
     alert_enabled: Callable[[], bool] | None = None,
@@ -64,6 +68,7 @@ class TaskRunner:
         self._refresh = refresh
         self._retention = retention
         self._model_catalog = model_catalog
+        self._price_catalog = price_catalog
         self._alert = alert
         # 周期可热更（B3.2）：存取值器，每轮 sleep 前读当前值（否则改配置
         # 要等到下一次重启才生效）。下限与业务语义同前，不变。
@@ -72,6 +77,7 @@ class TaskRunner:
         self._refresh_minutes = live(refresh_interval_minutes)
         self._retention_minutes = live(retention_interval_minutes)
         self._model_catalog_minutes = live(model_catalog_minutes)
+        self._price_catalog_minutes = live(price_catalog_minutes)
         self._alert_minutes = live(alert_interval_minutes)
         # 活跃上报是否启用也可热更：装配时恒建对象（构造成本为零），
         # 每轮由 _sync_activity 问一次，关着时是 no-op。
@@ -111,6 +117,12 @@ class TaskRunner:
         return max(300, int(self._model_catalog_minutes()) * 60)
 
     @property
+    def _price_catalog_interval(self) -> float:
+        # 下限 60 分钟与热更项 minimum 对齐：models.dev 是公开大表（数 MB），
+        # 上游价格变动很少，更密只是白拉一遍。
+        return max(3600, int(self._price_catalog_minutes()) * 60)
+
+    @property
     def _alert_interval(self) -> float:
         # 下限 1 分钟：告警是「越早越好」的观测，但比 1 分钟更密只会让
         # 每轮读池/统计的开销白花，而池与错误率不会在秒级翻转。
@@ -147,6 +159,9 @@ class TaskRunner:
         if self._model_catalog is not None:
             loops.append(("model_catalog", "模型目录刷新", self._model_catalog,
                           lambda: self._model_catalog_interval))
+        if self._price_catalog is not None:
+            loops.append(("price_catalog", "价表刷新", self._price_catalog,
+                          lambda: self._price_catalog_interval))
         if self._alert is not None:
             loops.append(("alert", "运维告警", self._sync_alert,
                           lambda: self._alert_interval))
@@ -241,6 +256,8 @@ class TaskRunner:
                 continue
             if spec.key == "model_catalog" and self._model_catalog is None:
                 continue
+            if spec.key == "price_catalog" and self._price_catalog is None:
+                continue
             if spec.key == "alert" and self._alert is None:
                 continue
             run = self.status.get(spec.key)
@@ -272,6 +289,8 @@ class TaskRunner:
             return float(self._activity_interval)
         if key == "model_catalog":
             return self._model_catalog_interval
+        if key == "price_catalog":
+            return self._price_catalog_interval
         if key == "alert":
             return self._alert_interval
         return self._retention_interval
@@ -311,6 +330,7 @@ def _as_report(result: object) -> dict[str, Any]:
 def build_runner(credentials, providers: dict, stats_collector, config,
                  growth_events=None, credit_events=None, audit=None,
                  model_catalog: Callable[[], Awaitable[object]] | None = None,
+                 price_catalog: Callable[[], Awaitable[object]] | None = None,
                  alerts=None,
                  status: TaskStatusStore | None = None) -> TaskRunner:
     """按配置装配后台任务（Pacer 由两个 provider 共享）。
@@ -326,6 +346,9 @@ def build_runner(credentials, providers: dict, stats_collector, config,
 
     model_catalog 同理：None 时不装配模型目录刷新循环（老调用方与测试保持
     原行为）；生产路径传入「跑一轮 list_models」的协程。
+
+    price_catalog 同理：None 时不装配价表刷新循环；生产路径传入「拉 models.dev
+    + 落盘 + 换入价表」的协程。
 
     alerts 同理：None 时不装配运维告警循环、也不清理告警记录（老调用方与测试
     保持原行为；生产路径传入 AlertRepository）。
@@ -378,6 +401,8 @@ def build_runner(credentials, providers: dict, stats_collector, config,
         growth_interval_minutes=lambda: config.growth_interval_minutes,
         model_catalog=model_catalog,
         model_catalog_minutes=lambda: config.model_catalog_minutes,
+        price_catalog=price_catalog,
+        price_catalog_minutes=lambda: config.price_catalog_minutes,
         alert=alert,
         alert_interval_minutes=lambda: config.alert_interval_minutes,
         activity_enabled=lambda: config.activity_report_enabled,

@@ -10,6 +10,8 @@ METRIC_COLUMNS: dict[str, str] = {
     "tokens": "input_tokens + output_tokens",
     "latency": "latency_sum",      # 均值由调用方除以 ok_count
     "ttfb": "ttfb_sum",            # 同上
+    # 费用默认口径是人民币（与本模块展示一致）；仅含可定价明细的小时才有值。
+    "cost": "cost_cny_sum",
 }
 
 
@@ -22,10 +24,17 @@ class StatsQuery:
         expr = METRIC_COLUMNS.get(metric, "requests")
         return expr, metric in ("latency", "ttfb")
 
-    def _metric_value(self, metric: str, expr_value, ok_count) -> Any:
-        """把 SQL 原始值按 metric 归一：均值类除以 ok_count，无成功则 0。"""
+    def _metric_value(self, metric: str, expr_value, ok_count, cost_known: int = 0) -> Any:
+        """把 SQL 原始值按 metric 归一：均值类除以 ok_count，无成功则 0。
+
+        费用是**部分可定价**的：某小时/模型若一条明细都没匹配到价表
+        （`cost_known=0`），聚合值只是 0，直接展示会被读成「免费」；这里回 None
+        让前端显示 —。只要有一条可定价，就按可定价部分求和（宁可少算不虚报）。
+        """
         if metric in ("latency", "ttfb"):
             return round(expr_value / ok_count) if ok_count else 0
+        if metric == "cost" and not cost_known:
+            return None
         return expr_value
 
     @staticmethod
@@ -74,6 +83,9 @@ class StatsQuery:
                    SUM(credit_sum) AS credit_sum,
                    SUM(credit_known) AS credit_known,
                    SUM(credit_estimated_known) AS credit_estimated_known,
+                   SUM(cost_usd_sum) AS cost_usd_sum,
+                   SUM(cost_cny_sum) AS cost_cny_sum,
+                   SUM(cost_known) AS cost_known,
                    SUM(latency_sum) AS latency_sum,
                    SUM(ttfb_sum) AS ttfb_sum
             FROM usage_hourly {where}
@@ -94,6 +106,9 @@ class StatsQuery:
             "credit": row["credit_sum"] if row["credit_known"] else None,
             # 汇总 credit 中含推算值时标 ≈（全部渠道任一为推算即标，保守）
             "credit_estimated": bool(row["credit_estimated_known"]),
+            # 费用：只统计匹配到定价的明细（cost_known 条数>0 才可信）
+            "cost_usd": row["cost_usd_sum"] if row["cost_known"] else None,
+            "cost_cny": row["cost_cny_sum"] if row["cost_known"] else None,
             "avg_latency_ms": round(row["latency_sum"] / ok_count) if ok_count else None,
             "avg_ttfb_ms": round(row["ttfb_sum"] / ok_count) if ok_count else None,
         }
@@ -110,7 +125,10 @@ class StatsQuery:
                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
                    SUM(credit_sum) AS credit_sum,
                    SUM(credit_known) AS credit_known,
-                   SUM(credit_estimated_known) AS credit_estimated_known
+                   SUM(credit_estimated_known) AS credit_estimated_known,
+                   SUM(cost_usd_sum) AS cost_usd_sum,
+                   SUM(cost_cny_sum) AS cost_cny_sum,
+                   SUM(cost_known) AS cost_known
             FROM usage_hourly {where} GROUP BY provider ORDER BY provider
             """, params).fetchall()
         return [
@@ -118,7 +136,9 @@ class StatsQuery:
              "ok_count": row["ok_count"],
              "input_tokens": row["input_tokens"], "output_tokens": row["output_tokens"],
              "credit": row["credit_sum"] if row["credit_known"] else None,
-             "credit_estimated": bool(row["credit_estimated_known"])}
+             "credit_estimated": bool(row["credit_estimated_known"]),
+             "cost_usd": row["cost_usd_sum"] if row["cost_known"] else None,
+             "cost_cny": row["cost_cny_sum"] if row["cost_known"] else None}
             for row in rows
         ]
 
@@ -137,7 +157,8 @@ class StatsQuery:
         rows = self._db.connect().execute(
             f"""
             SELECT hour_utc, provider,
-                   SUM({expr}) AS value, SUM(ok_count) AS ok_count
+                   SUM({expr}) AS value, SUM(ok_count) AS ok_count,
+                   SUM(cost_known) AS cost_known
             FROM usage_hourly {where}
             GROUP BY hour_utc, provider
             ORDER BY hour_utc
@@ -149,7 +170,7 @@ class StatsQuery:
             provider = row["provider"]
             providers.add(provider)
             raw.setdefault(hour, {})[provider] = self._metric_value(
-                metric, row["value"], row["ok_count"])
+                metric, row["value"], row["ok_count"], row["cost_known"])
         # 渠道按名排序：同一批点的键顺序稳定（与渠道注册顺序无关）
         ordered = sorted(providers)
         return [
@@ -176,7 +197,8 @@ class StatsQuery:
             f"""
             SELECT e.rowid, e.ts, e.username, e.provider, e.credential_id, e.model,
                    e.ok, e.error_type, e.input_tokens, e.output_tokens,
-                   e.reasoning_tokens, e.cached_tokens, e.credit, e.credit_estimated, e.latency_ms,
+                   e.reasoning_tokens, e.cached_tokens, e.credit, e.credit_estimated,
+                   e.cost_usd, e.cost_cny, e.latency_ms,
                    e.ttfb_ms, {name_expr} AS credential_name
             FROM usage_events e
             LEFT JOIN credentials c ON c.id = e.credential_id
@@ -204,7 +226,8 @@ class StatsQuery:
         rows = self._db.connect().execute(
             f"""
             SELECT hour_utc, model, SUM(requests) AS requests,
-                   SUM({expr}) AS value, SUM(ok_count) AS ok_count
+                   SUM({expr}) AS value, SUM(ok_count) AS ok_count,
+                   SUM(cost_known) AS cost_known
             FROM usage_hourly {where}
             GROUP BY hour_utc, model
             ORDER BY hour_utc
@@ -218,7 +241,7 @@ class StatsQuery:
                 hours.append(hour)
             totals[model] = totals.get(model, 0) + row["requests"]
             series.setdefault(model, {})[hour] = (
-                self._metric_value(metric, row["value"], row["ok_count"]))
+                self._metric_value(metric, row["value"], row["ok_count"], row["cost_known"]))
         # Top N 模型：按总量降序；总量相同按名字稳定排序
         top_models = sorted(totals, key=lambda m: (-totals[m], m))[:top]
         points = [

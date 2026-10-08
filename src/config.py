@@ -170,6 +170,12 @@ class Settings(BaseSettings):
     # 3 个会话」——会话在 HTTP 流结束后仍滞留数十秒（打满 3 并发后，单请求
     # 直到约 68s 才恢复）。0 关闭窗口口径，退回纯在途上限。可热更。
     codearts_request_window_seconds: float = 60
+    # 费用估算（models.dev 刊例价，USD/百万 token）：人民币汇率（1 USD = 该值 CNY）
+    # 与价表刷新周期（分钟）。汇率是运行时热更项（见 HOT_SETTINGS），价表来源
+    # 是公开只读端点，无需密钥。
+    usd_cny_rate: float = 6.70
+    price_catalog_minutes: int = 1440      # 价表刷新周期（分钟）：默认每日一次
+    models_dev_url: str = "https://models.dev/api.json"
     # 内容风控自愈（11128）：出站 system/assistant 正文命中「伪装其他厂商
     # 官方客户端」指纹串时替换为占位符（客户端会话历史不受影响）。该拦截
     # 与凭证无关、换号无效，会话一旦带入指纹将持续 11128；false 关闭

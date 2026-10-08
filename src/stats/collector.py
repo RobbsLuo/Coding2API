@@ -2,15 +2,23 @@
 
 纪律（PROPOSAL §8）：不存提示词、回答、请求头、Token、工具参数、原始错误体、会话 ID。
 credit 为上游可选字段，两边都经常为 None。
+费用（cost_usd / cost_cny）是**估算**：models.dev 刊例价 × 写入时的汇率，不是上游
+真实扣费；两列同生同灭，匹配不到定价时为 None（界面显示 —）。
 """
 
 from __future__ import annotations
 
+import logging
 import math
 import time
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
+
+from ..pricing import PriceTable, estimate_cost_usd, to_cny
+
+logger = logging.getLogger(__name__)
 
 CONTROLLED_ERROR_TYPES = frozenset({
     # 实际会写入的取值（与 executor / api 层的 error_type 一一对应）：
@@ -57,13 +65,44 @@ class UsageEvent:
     cached_tokens: int | None
     credit: float | None
     credit_estimated: bool
+    cost_usd: float | None
+    cost_cny: float | None
     latency_ms: int | None
     ttfb_ms: int | None
 
 
 class StatsCollector:
-    def __init__(self, db) -> None:
+    def __init__(self, db, *,
+                 prices: Callable[[], Mapping[str, tuple[float, float, float]]] | None = None,
+                 usd_cny_rate: Callable[[], float] | None = None) -> None:
+        """`prices` / `usd_cny_rate` 是零参取值器（热更：每写一条现读当前价表
+        与汇率）。两者都缺省为 None = 不估算费用（既有测试与老装配保持原行为，
+        cost 两列恒为 NULL）。
+        """
         self._db = db
+        self._prices = prices
+        self._usd_cny_rate = usd_cny_rate
+
+    def _cost(self, model: str, *, input_tokens: int | None,
+              output_tokens: int | None,
+              cached_tokens: int | None) -> tuple[float | None, float | None]:
+        """按写入时的价表与汇率估算 (cost_usd, cost_cny)；无法定价则 (None, None)。
+
+        估算异常绝不能影响聊天统计：取值器/换算任何抛出都降级为无费用。
+        """
+        if self._prices is None or self._usd_cny_rate is None:
+            return None, None
+        try:
+            table: PriceTable = dict(self._prices())
+            usd = estimate_cost_usd(
+                table, model, input_tokens=input_tokens,
+                output_tokens=output_tokens, cached_tokens=cached_tokens)
+            if usd is None:
+                return None, None
+            return usd, to_cny(usd, self._usd_cny_rate())
+        except Exception as error:  # noqa: BLE001 - 定价失败不影响统计写入
+            logger.warning("费用估算失败（model=%s）: %s", model, error)
+            return None, None
 
     def record(
         self,
@@ -85,13 +124,18 @@ class StatsCollector:
         now: int | None = None,
     ) -> None:
         """写入单条脱敏明细。失败不应影响聊天响应（调用方捕获）。"""
+        safe_model = _safe_model(model)
+        cost_usd, cost_cny = self._cost(
+            safe_model, input_tokens=_int_or_none(input_tokens),
+            output_tokens=_int_or_none(output_tokens),
+            cached_tokens=_int_or_none(cached_tokens))
         event = UsageEvent(
             id=f"evt_{uuid.uuid4().hex[:16]}",
             ts=int(now if now is not None else time.time()),
             username=username or "unknown",
             provider=provider,
             credential_id=credential_id,
-            model=_safe_model(model),
+            model=safe_model,
             ok=bool(ok),
             error_type=_normalize_error_type(error_type),
             input_tokens=_int_or_none(input_tokens),
@@ -101,6 +145,8 @@ class StatsCollector:
             credit=_float_or_none(credit),
             # 只有确实记下 credit 时才可能标推算：credit 为 None 的推算标记无意义
             credit_estimated=bool(credit_estimated) and _float_or_none(credit) is not None,
+            cost_usd=cost_usd,
+            cost_cny=cost_cny,
             latency_ms=_int_or_none(latency_ms),
             ttfb_ms=_int_or_none(ttfb_ms),
         )
@@ -108,12 +154,13 @@ class StatsCollector:
             conn.execute(
                 "INSERT INTO usage_events (id, ts, username, provider, credential_id, model, "
                 "ok, error_type, input_tokens, output_tokens, reasoning_tokens, cached_tokens, "
-                "credit, credit_estimated, latency_ms, ttfb_ms) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "credit, credit_estimated, cost_usd, cost_cny, latency_ms, ttfb_ms) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (event.id, event.ts, event.username, event.provider, event.credential_id,
                  event.model, int(event.ok), event.error_type, event.input_tokens,
                  event.output_tokens, event.reasoning_tokens, event.cached_tokens, event.credit,
-                 int(event.credit_estimated), event.latency_ms, event.ttfb_ms),
+                 int(event.credit_estimated), event.cost_usd, event.cost_cny,
+                 event.latency_ms, event.ttfb_ms),
             )
             # 当前小时增量累加：总览/图表都读小时表，不能等 5 分钟一轮的
             # retention rollup 才可见（否则刚发生的请求统计页面显示 0）。
@@ -129,8 +176,9 @@ class StatsCollector:
                                       input_tokens, output_tokens, reasoning_tokens,
                                       cached_tokens, cached_known,
                                       credit_sum, credit_known, credit_estimated_known,
+                                      cost_usd_sum, cost_cny_sum, cost_known,
                                       latency_sum, ttfb_sum)
-            VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(hour_utc, username, provider, model) DO UPDATE SET
                 requests = requests + 1,
                 ok_count = ok_count + excluded.ok_count,
@@ -142,6 +190,9 @@ class StatsCollector:
                 credit_sum = COALESCE(credit_sum, 0) + excluded.credit_sum,
                 credit_known = credit_known + excluded.credit_known,
                 credit_estimated_known = credit_estimated_known + excluded.credit_estimated_known,
+                cost_usd_sum = COALESCE(cost_usd_sum, 0) + excluded.cost_usd_sum,
+                cost_cny_sum = COALESCE(cost_cny_sum, 0) + excluded.cost_cny_sum,
+                cost_known = cost_known + excluded.cost_known,
                 latency_sum = latency_sum + excluded.latency_sum,
                 ttfb_sum = ttfb_sum + excluded.ttfb_sum
             """,
@@ -156,6 +207,9 @@ class StatsCollector:
              event.credit or 0.0,
              0 if event.credit is None else 1,
              1 if event.credit_estimated else 0,
+             event.cost_usd or 0.0,
+             event.cost_cny or 0.0,
+             0 if event.cost_usd is None else 1,
              (event.latency_ms or 0) if event.ok else 0,
              (event.ttfb_ms or 0) if event.ok else 0),
         )
@@ -205,6 +259,7 @@ class StatsCollector:
                                           input_tokens, output_tokens, reasoning_tokens,
                                           cached_tokens, cached_known,
                                           credit_sum, credit_known, credit_estimated_known,
+                                          cost_usd_sum, cost_cny_sum, cost_known,
                                           latency_sum, ttfb_sum)
                 SELECT (ts / 3600) * 3600 AS hour_utc, username, provider, model,
                        COUNT(*), SUM(ok),
@@ -214,6 +269,8 @@ class StatsCollector:
                        SUM(CASE WHEN cached_tokens IS NULL THEN 0 ELSE 1 END),
                        COALESCE(SUM(credit), 0), SUM(CASE WHEN credit IS NULL THEN 0 ELSE 1 END),
                        SUM(CASE WHEN credit_estimated = 1 AND credit IS NOT NULL THEN 1 ELSE 0 END),
+                       COALESCE(SUM(cost_usd), 0), COALESCE(SUM(cost_cny), 0),
+                       SUM(CASE WHEN cost_usd IS NULL THEN 0 ELSE 1 END),
                        COALESCE(SUM(CASE WHEN ok = 1 THEN latency_ms END), 0),
                        COALESCE(SUM(CASE WHEN ok = 1 THEN ttfb_ms END), 0)
                 FROM usage_events WHERE (? IS NULL OR ts >= ?)
@@ -229,6 +286,9 @@ class StatsCollector:
                     credit_sum = excluded.credit_sum,
                     credit_known = excluded.credit_known,
                     credit_estimated_known = excluded.credit_estimated_known,
+                    cost_usd_sum = excluded.cost_usd_sum,
+                    cost_cny_sum = excluded.cost_cny_sum,
+                    cost_known = excluded.cost_known,
                     latency_sum = excluded.latency_sum,
                     ttfb_sum = excluded.ttfb_sum
                 """, (since, since))

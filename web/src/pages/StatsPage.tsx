@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Activity, BarChart3, Coins, CreditCard, Gauge, Timer } from "lucide-react";
+import { Activity, BarChart3, Coins, CreditCard, Gauge, Timer, Wallet } from "lucide-react";
 import { useSessionContext } from "../Layout";
 import {
   useStatsByProvider,
@@ -8,7 +8,7 @@ import {
   useStatsOverview,
   useStatsTimeline,
 } from "../api/hooks";
-import { formatCacheRate, formatCompact, formatCredit, formatLatency, formatNumber, formatTime, usageErrorLabel } from "../api/display";
+import { formatCacheRate, formatCompact, formatCredit, formatLatency, formatMoney, formatNumber, formatTime, usageErrorLabel } from "../api/display";
 import { Notice } from "../ui";
 import { ModelTrendChart } from "../components/ModelTrendChart";
 import { PageHeader } from "../components/PageHeader";
@@ -43,6 +43,7 @@ const RANGES = [
 const METRICS = [
   { value: "requests", label: "请求次数", icon: <BarChart3 className="size-3.5" /> },
   { value: "tokens", label: "Token", icon: <Coins className="size-3.5" /> },
+  { value: "cost", label: "费用", icon: <Wallet className="size-3.5" /> },
   { value: "latency", label: "耗时", icon: <Timer className="size-3.5" /> },
   { value: "ttfb", label: "首字延迟", icon: <Gauge className="size-3.5" /> },
 ];
@@ -150,7 +151,7 @@ export function StatsPage() {
 
       <section
         aria-label="用量概览统计"
-        className="grid grid-cols-2 gap-3 md:grid-cols-4"
+        className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5"
       >
         <Metric label="请求数" value={formatNumber(stats?.requests)} tone="ok"
                 hint={`成功率 ${rateText}`} icon={<Activity className="size-4" />} />
@@ -171,6 +172,12 @@ export function StatsPage() {
           value={formatCredit(stats?.credit, stats?.credit_estimated)}
           hint="渠道可选字段，可能不返回；≈ 为推算值（TRAE 按单价、CodeArts 福利模型按每日池）"
           icon={<CreditCard className="size-4" />}
+        />
+        <Metric
+          label="费用（估算）"
+          value={formatMoney(stats?.cost_cny, "CNY")}
+          hint={`美元 ${formatMoney(stats?.cost_usd, "USD")} · 按 models.dev 刊例价折算，未匹配定价的请求不计`}
+          icon={<Wallet className="size-4" />}
         />
       </section>
 
@@ -235,6 +242,7 @@ export function StatsPage() {
                 <TableHead className="text-right">输入 token</TableHead>
                 <TableHead className="text-right">输出 token</TableHead>
                 <TableHead className="text-right">Credit</TableHead>
+                <TableHead className="text-right">费用</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -258,6 +266,10 @@ export function StatsPage() {
                   <TableCell className="text-right tabular-nums">{formatCompact(row.output_tokens)}</TableCell>
                   <TableCell className="text-right tabular-nums">
                     {formatCredit(row.credit, row.credit_estimated)}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums"
+                             title={`美元 ${formatMoney(row.cost_usd, "USD")}`}>
+                    {formatMoney(row.cost_cny, "CNY")}
                   </TableCell>
                 </TableRow>
               ))}
@@ -305,6 +317,7 @@ export function StatsPage() {
                   <TableHead className="text-right">输出</TableHead>
                   <TableHead className="text-right">命中</TableHead>
                   <TableHead className="text-right">Credit</TableHead>
+                  <TableHead className="text-right">费用</TableHead>
                   <TableHead className="text-right">首字延迟</TableHead>
                   <TableHead className="text-right">耗时</TableHead>
                 </TableRow>
@@ -332,6 +345,10 @@ export function StatsPage() {
                     <TableCell className="text-right tabular-nums">{formatCompact(row.cached_tokens)}</TableCell>
                     <TableCell className="text-right tabular-nums">
                       {formatCredit(row.credit, row.credit_estimated)}
+                    </TableCell>
+                    <TableCell className="text-right tabular-nums"
+                               title={`美元 ${formatMoney(row.cost_usd, "USD")}`}>
+                      {formatMoney(row.cost_cny, "CNY")}
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{formatLatency(row.ttfb_ms)}</TableCell>
                     <TableCell className="text-right tabular-nums">{formatLatency(row.latency_ms)}</TableCell>
@@ -384,6 +401,9 @@ export function StatsPage() {
         </p>
         <p>
           credit 为渠道可选字段，经常不返回；TRAE 上游不给单请求积分，带 ≈ 的数值是按官方单价折算；CodeArts 福利模型按每日 token 池 1:1 扣减后折成积分（1 积分 = 10000 token），带 ≈ 的值即该请求折算后的积分（CodeBuddy 为上游返回的真值）。健康度只依赖额度探测接口，主指标是 token 数。缓存命中率 = 命中 token ÷ 输入 token，仅在上报过缓存时展示。
+        </p>
+        <p>
+          费用为估算：按 models.dev 的模型刊例价（USD / 百万 token）与本服务写入时生效的美元汇率折算，展示人民币、括号内为美元；不是上游真实扣费，未匹配到定价的模型不计入（显示 —）。汇率可在「任务与配置」页热更，仅影响之后写入的请求，历史费用不重算。
         </p>
       </Notice>
     </div>

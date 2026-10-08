@@ -7,6 +7,7 @@ import {
   formatCacheRate,
   formatChartValue,
   formatCredit,
+  formatMoney,
   METRIC_AXIS_UNIT,
   QUOTA_UNIT,
   taskReportLabel,
@@ -30,6 +31,25 @@ describe("formatCredit", () => {
     expect(formatCredit(5.25, true)).toBe("≈5.25");
     expect(formatCredit(5.25, 1)).toBe("≈5.25");
     expect(formatCredit(0, true)).toBe("≈0");
+  });
+});
+
+describe("formatMoney", () => {
+  it("null/undefined 显示占位符（未匹配定价或未上报 token）", () => {
+    expect(formatMoney(null)).toBe("—");
+    expect(formatMoney(undefined)).toBe("—");
+  });
+
+  it("人民币为主、美元可切；默认前置 ≈ 标明是估算", () => {
+    expect(formatMoney(12.34, "CNY")).toBe("≈¥12.34");
+    expect(formatMoney(1.84, "USD")).toBe("≈$1.84");
+    expect(formatMoney(12.34, "CNY", false)).toBe("¥12.34");
+  });
+
+  it("小额自适应小数位，不把零点几厘抹成 0", () => {
+    expect(formatMoney(0.0042, "CNY", false)).toBe("¥0.0042");
+    expect(formatMoney(0.5, "CNY", false)).toBe("¥0.5");
+    expect(formatMoney(3, "CNY", false)).toBe("¥3");
   });
 });
 
@@ -70,6 +90,10 @@ describe("formatChartValue", () => {
     expect(formatChartValue(8200, "ttfb")).toBe("8.2 s");
   });
 
+  it("费用：人民币金额 + 单位（元）", () => {
+    expect(formatChartValue(12.34, "cost")).toBe("¥12.34 (元)");
+  });
+
   it("未知指标回退请求次数", () => {
     expect(formatChartValue(12, "bogus")).toBe("12 (次)");
   });
@@ -87,9 +111,15 @@ describe("formatAxisValue", () => {
     expect(formatAxisValue(22000, "ttfb")).toBe("22 s");
   });
 
+  it("费用：保留两位小数（不用万/亿紧凑格式）", () => {
+    expect(formatAxisValue(12.34, "cost")).toBe("12.34");
+    expect(formatAxisValue(1500.5, "cost")).toBe("1,500.5");
+  });
+
   it("轴顶单位映射：耗时/首字不重复标单位", () => {
     expect(METRIC_AXIS_UNIT.requests).toBe("次");
     expect(METRIC_AXIS_UNIT.tokens).toBe("tokens");
+    expect(METRIC_AXIS_UNIT.cost).toBe("元");
     expect(METRIC_AXIS_UNIT.latency).toBeUndefined();
     expect(METRIC_AXIS_UNIT.ttfb).toBeUndefined();
   });
