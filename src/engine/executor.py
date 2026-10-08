@@ -7,7 +7,7 @@ import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from ..compat.openai.errors import UpstreamStreamError, stream_error_frame
@@ -83,6 +83,11 @@ class ExecutorDeps:
     # provider → {小写模型名: 上游原始 id}；api/models.list_models 拉取后就地更新。
     # 用于把独有模型的候选上游收窄到真正登记了它的上游，避免白打一次请求
     model_aliases: dict[str, dict[str, str]] | None = None
+    # provider → {小写原始 id: Model}：模型目录原始表（api/models 的进程内缓存）。
+    # 与 model_aliases 一起构成「对外 id → 渠道 → 倍率」查询，供调度器的
+    # 免费优先档（候选中存在 x0 渠道时优先选它）注入 credit_rate；None / 空
+    # 表示目录未就绪，倍率未知，调度退回原排序（向后兼容）。
+    model_list_cache: dict[str, dict[str, Any]] | None = None
     # 会话粘性（ConversationAffinity）；None 表示关闭。对话进行中固定用原
     # 凭证，出错才轮换，成功后重新粘定实际服务的凭证
     affinity: Any | None = None
@@ -777,6 +782,29 @@ class Executor:
             if pid in self._deps.providers and lower in aliases.get(pid, {}))
         return known or target.providers
 
+    def _model_rates(self, target: ModelTarget) -> dict[str, float | None]:
+        """候选渠道请求**当前模型**的消耗倍率（provider_id → credit_rate）。
+
+        数据源是模型目录（`services.model_list_cache` 的原始表，渠道原 id 经
+        别名表换回）。目录里查不到的渠道（该模型不在其登记表 / 目录未就绪 /
+        上游没给倍率）记 None——调度端未知倍率不参与免费优先，与 0（确认
+        免费）严格区分。免费渠道（zen / kilo）的条目显式标 0.0。
+        """
+        aliases = self._deps.model_aliases
+        cache = self._deps.model_list_cache
+        if not aliases or not cache:
+            return {}
+        lower = target.model.lower()
+        rates: dict[str, float | None] = {}
+        for pid in target.providers:
+            raw = aliases.get(pid, {}).get(lower)
+            if raw is None:
+                continue
+            model = cache.get(pid, {}).get(raw.lower())
+            if model is not None:
+                rates[pid] = model.credit_rate
+        return rates
+
     def _candidate(self, credential_id: str):
         for candidate in self._deps.credentials.candidates():
             if candidate.credential_id == credential_id:
@@ -816,10 +844,22 @@ class Executor:
                 or self._deps.scheduler.select(usable, tried, now))
 
     def _selectable(self, candidates: list, target: ModelTarget, now: int) -> list:
-        """按「该凭证所属上游的原始模型名」过滤出当前可选的候选。"""
-        return [
+        """按「该凭证所属上游的原始模型名」过滤出当前可选的候选。
+
+        顺手把**当前模型**的消耗倍率按渠道注进候选快照（free-tier 优先档的
+        数据源，见 Scheduler.select）。按目标过滤后的最终集合注入一次即可，
+        兜底重选（broader）走同一条路自然带上。
+        """
+        rates = self._model_rates(target)
+        selected = [
             c for c in candidates
             if c.is_selectable(now, self._model_scope(c.provider, target.model))
+        ]
+        if not rates:
+            return selected
+        return [
+            replace(c, credit_rate=rates[c.provider]) if c.provider in rates else c
+            for c in selected
         ]
 
     def _note_upstream_error(self, credential_id: str, kind: ErrKind,

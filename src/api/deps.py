@@ -86,6 +86,8 @@ class Services:
     # list_models 成功时更新，某上游拉取失败时用缓存兜底（v1/models 稳定返回）。
     # **存未过滤的原始表**：MODEL_BLOCKLIST 是可热更项，过滤在每个出口现做，
     # 否则改完黑名单要等 TTL（300s）才生效、被滤模型还会从兜底缓存复活。
+    # executor 也持有**同一引用**（ExecutorDeps.model_list_cache）：聊天路径的
+    # 倍率查询（免费优先调度档）从这里读 credit_rate，目录刷新后立即可见。
     model_list_cache: dict[str, dict[str, Any]] = field(default_factory=dict)
     # 上次**尝试**拉取时间（monotonic，成功或失败都刷新）：TTL 内的请求不再打
     # 上游——有缓存用缓存，无缓存则跳过该渠道（负缓存）。

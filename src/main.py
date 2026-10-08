@@ -12,6 +12,7 @@ import contextlib
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 
@@ -324,6 +325,9 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # provider → {小写模型名: 上游原始 id}；api/models.list_models 拉取后就地更新，
     # executor 发请求前把归一名映射回各上游的原始大小写
     model_aliases: dict[str, dict[str, str]] = {}
+    # 模型目录原始表的**同一引用**交给 executor（credit_rate 查询）与 Services
+    # （list_models 缓存）——这里先建空 dict，Services 装配时直接挂它
+    model_cache: dict[str, dict[str, Any]] = {}
     stats_collector = StatsCollector(db)
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
                                      scheduler=Scheduler(
@@ -345,7 +349,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                          name, model_aliases),
                                      fallback_groups=lambda: parse_fallback_groups(
                                          runtime.model_fallback_groups),
-                                     model_aliases=model_aliases))
+                                     model_aliases=model_aliases,
+                                     # 同一份 dict 的引用：模型目录恢复 / 拉取后
+                                     # executor 立即可见（倍率查询走它）
+                                     model_list_cache=model_cache))
 
     @asynccontextmanager
     async def lifespan(app_: FastAPI):
@@ -438,6 +445,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.upstream_auth = _upstream_auth(registry, config)
     app.state.pending_probes = []
     app.state.model_aliases = model_aliases
+    app.state.model_list_cache = model_cache
     app.state.pending_callback_state = None
     app.state.pending_callback_user = None
     app.state.login_throttle = LoginThrottle()
@@ -485,6 +493,9 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         login_throttle=app.state.login_throttle,
         upstream_auth=app.state.upstream_auth,
         model_aliases=model_aliases,
+        # executor 拿的就是这一份引用：目录恢复 / 拉取 / TTL 刷新写进来后，
+        # 聊天路径的倍率查询立即看到新数据
+        model_list_cache=model_cache,
         schedule_probe=schedule_probe,
     )
     app.state.services = services

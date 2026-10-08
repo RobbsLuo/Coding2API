@@ -129,6 +129,10 @@ class Candidate:
     quota_remaining: float | None = None   # 账户剩余积分；同健康度平级时多者优先
     cycle_end: int | None = None       # 额度最早到期（epoch）；无到期信息的渠道为 None
     expiry_ladder: list[tuple[int, float]] | None = None  # [(到期 epoch, 该包剩余额度)]
+    # 本凭证请求**当前模型**的消耗倍率（credit_rate）：executor 按模型目录现查
+    # 注入。0 = 免费渠道，参与「免费优先」排序档（见 Scheduler.select）；
+    # None = 未知 / 该模型无倍率数据（如 CodeArts 福利模型），不参与。
+    credit_rate: float | None = None
     # (凭证, 模型) 冷却表：model → ModelCooldown。模型级限流只写这里，
     # 不写 cooling_until，因此同账号的其他模型仍然可选
     model_cooldowns: Mapping[str, ModelCooldown] | None = None
@@ -209,15 +213,19 @@ class Scheduler:
                now: int) -> str | None:
         """返回应使用的 credential_id；无可用的返回 None。
 
-        排序规则：pin 优先 → 主窗口（36h）内即将到期额度多者优先 → 次窗口
-        （7 天）内即将到期额度多者优先 → known 降序 → unknown → exhausted
-        垫底 → 健康度打平时**账户剩余积分多者优先**。到期额度优先于健康度：
-        快过期的先用掉，避免白丢；两级窗口按字典序比较，主窗口打平（含都为 0）
-        时才轮到次窗口，再打平才比健康度。剩余积分只作健康度的**打平键**，
-        不会越级把低健康度的高余额号顶上去（健康度是「剩余/总量」比例，
-        101% 也只是 100，同比例下多留些余额以备后用）。主窗口 ≤0 视为关闭
-        整套到期排序（次窗口一并归零，见 `expiry_windows`），此时退回纯健康度
-        排序。
+        排序规则：**免费优先**（候选中存在 x0 免费渠道时，免费渠道整体排前；
+        仅当本次候选带有倍率数据——executor 注入的 credit_rate——才生效）→
+        pin 优先 → 主窗口（36h）内即将到期额度多者优先 → 次窗口（7 天）内
+        即将到期额度多者优先 → known 降序 → unknown → exhausted 垫底 →
+        健康度打平时**账户剩余积分多者优先**。到期额度优先于健康度：快过期
+        的先用掉，避免白丢；但免费优先又压过到期额度——省下的真金白银比
+        「几百积分快过期先用」值钱（CodeBuddy 36h 窗口到期积分实测峰值
+        ~400，而免费渠道跑一条中等回复就省几十积分、长会话累计破百）。
+        两级窗口按字典序比较，主窗口打平（含都为 0）时才轮到次窗口，再打平
+        才比健康度。剩余积分只作健康度的**打平键**，不会越级把低健康度的
+        高余额号顶上去（健康度是「剩余/总量」比例，101% 也只是 100，同比例
+        下多留些余额以备后用）。主窗口 ≤0 视为关闭整套到期排序（次窗口一并
+        归零，见 `expiry_windows`），此时退回纯健康度排序。
 
         模型级冷却的过滤由调用方在候选集上完成（executor._select）：
         每个候选要按**自己所属上游**的原始模型名查冷却表，选号器不掌握
@@ -230,11 +238,13 @@ class Scheduler:
         if not pool:
             return None
         pinned = [c for c in pool if c.pinned]
+        free_present = any(c.credit_rate == 0 for c in pool)
         primary, secondary = expiry_windows(
             self._expiry_window(), self._secondary_expiry_window())
         chosen = sorted(
             pinned or pool,
-            key=lambda c: (-c.expiry_credits(now, primary),
+            key=lambda c: (_free_first_rank(c, free_present),
+                           -c.expiry_credits(now, primary),
                            -c.expiry_credits(now, secondary),
                            _rank(c.health), -(_health_value(c.health)),
                            -_remaining_value(c.quota_remaining), c.credential_id),
@@ -335,3 +345,16 @@ def _remaining_value(remaining: float | None) -> float:
     （见 `expiring_credits`），此处沿用同一口径。
     """
     return remaining if remaining is not None else 0.0
+
+
+def _free_first_rank(candidate: Candidate, free_present: bool) -> int:
+    """免费优先档：0 = 免费渠道，1 = 其余。
+
+    候选里存在 x0 渠道（credit_rate == 0.0）时，免费渠道整体排到所有付费渠道
+    之前——省下的真金白银优先于「快过期先用」（到期积分排序）。0.08 与 0.29
+    这类付费倍率不参与此档的内部先后（那仍交给到期/健康度排序）；模型倍率
+    未知（None）的渠道与付费渠道同档，不因数据缺失免费优先。
+    """
+    if not free_present:
+        return 0
+    return 0 if candidate.credit_rate == 0 else 1

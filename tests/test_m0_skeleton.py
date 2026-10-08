@@ -306,6 +306,40 @@ def test_select_without_expiry_ladder_keeps_health_order():
     assert cand("empty", expiry_ladder=[]).expiry_credits(NOW, EXPIRY_WINDOW_SECONDS) == 0.0
 
 
+def test_select_free_tier_beats_paid_despite_expiring_credits():
+    """免费优先档：候选中存在 x0 渠道时，即使付费号带着 36h 内到期积分、
+    健康度更高，也排到免费号之后（space-bunny 实测故障：zen 免费 vs CB 付费）。"""
+    paid = cand("paid", provider="codebuddy", health=100,
+                expiry_ladder=[(NOW + 600, 400.0)], credit_rate=0.08)
+    free = cand("free", provider="zen", credit_rate=0.0)
+    assert Scheduler().select([paid, free], set(), NOW) == "free"
+
+
+def test_select_free_tier_inactive_without_free_candidate():
+    """候选里没有免费渠道 → credit_rate 不参与排序（倍率高低不影响选号）。"""
+    pool = [cand("cheap", health=50, credit_rate=0.08),
+            cand("rich", health=90, credit_rate=0.79)]
+    assert Scheduler().select(pool, set(), NOW) == "rich"
+    # 免费渠道候选中已过期/被试过：不构成 free_present，其余照旧
+    cooling = cand("free", provider="zen", credit_rate=0.0,
+                   cooling_until=NOW + 100)
+    assert Scheduler().select([*pool, cooling], set(), NOW) == "rich"
+
+
+def test_select_free_tier_unknown_rate_is_not_free():
+    """倍率未知（None，目录未就绪 / CodeArts 福利模型）不算免费，与付费同档。"""
+    unknown = cand("unknown", health=10, credit_rate=None)
+    paid = cand("paid", health=90, credit_rate=0.29)
+    assert Scheduler().select([unknown, paid], set(), NOW) == "paid"
+
+
+def test_select_free_tier_ties_fall_through_to_expiry_order():
+    """两个免费号之间免费档打平 → 落回到期/健康度既有排序链。"""
+    low = cand("low", provider="zen", health=10, credit_rate=0.0)
+    high = cand("high", provider="kilo", health=90, credit_rate=0.0)
+    assert Scheduler().select([low, high], set(), NOW) == "high"
+
+
 def test_select_expiry_window_zero_disables_metric():
     s = Scheduler(expiry_window=0)
     assert s.select([cand("steady", health=95),

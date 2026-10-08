@@ -910,12 +910,16 @@ class Provider(Protocol):
         无则回落消息前缀指纹；带 user_id 时不派生前缀兜底键（B1.5）
      d. 过滤 healthy（enabled=1, disabled=0, 非冷却中）。enabled=0（管理台「暂停」）
         只作用于本条对话路径：后台任务只检查 disabled，暂停期间照常运行
-     e. 到期额度排序（两级字典序）：quota_expiry_ladder 中「距到期 ≤ 主窗口」
+     e. **免费优先档（Q66）**：候选中存在 credit_rate == 0 的渠道（executor 从
+         模型目录现查当前模型的倍率注入候选快照；None=未知不算免费）时，免费渠道
+         整体排到所有付费渠道之前——省下的真金白银优先于「快过期先用」。候选池
+         无免费渠道时该档恒 0，排序与旧版一致
+     f. 到期额度排序（两级字典序）：quota_expiry_ladder 中「距到期 ≤ 主窗口」
         （QUOTA_EXPIRY_WINDOW_SECONDS，默认 36h）的额度加总，多的先用；打平再比
         次窗口（默认 7 天）；渠道无到期信息（如 CB 企业版）计 0；主窗口 ≤0 时次窗口
         一并失效（expiry_windows() 统一折算）。CodeBuddy 与 TRAE 都按包独立到期，
         CodeArts 按每日池（到期点＝次日 0 点），三者均落阶梯参与此排序
-     f. 两级到期积分都相同时按 health 三态取最高分；health 同分时账户剩余积分
+     g. 两级到期积分都相同时按 health 三态取最高分；health 同分时账户剩余积分
         （quota_remaining）多者优先；仍同分按 credential_id 稳定。余额只作 health
         的打平键，不会越级压过低健康度的高余额号
   4. executor：解密凭证 → provider.stream_chat()
@@ -967,7 +971,7 @@ class Scheduler:
 `credential_model_cooldowns(credential_id, model, cooling_until, hits, reason)` 按 **(凭证, 模型)** 独立建表——账号级 `cooling_until` 放不下「同账号其他模型仍可用」这层语义。
 
 - 登记的名字是**该凭证所属上游的原始模型名**：每个 provider 各自把归一模型名映射成自己注册的原始 id（`_upstream_model(provider_id, model)`，未知则原样），因为 CB 与 TRAE 的注册名大小写变体不同，用归一名会漏判
-- 选号路径：`executor._select` 逐凭证过滤 `c.is_selectable(now, 该凭证的模型名)`，再交给 `Scheduler.select`；这里同时完成模型收窄、粘性命中与排序兜底（`_sticky(...) or scheduler.select(...)`）
+- 选号路径：`executor._select` 逐凭证过滤 `c.is_selectable(now, 该凭证的模型名)` 并把模型目录里当前模型的倍率注入候选快照（`Candidate.credit_rate`，免费优先档数据源），再交给 `Scheduler.select`；这里同时完成模型收窄、粘性命中与排序兜底（`_sticky(...) or scheduler.select(...)`）
 - 退避：`MODEL` 基数 10m 起翻倍、封顶 2h；`BLOCKED` 6h 起翻倍、封顶 24h；`CONCURRENCY`（CodeArts 并发打满）固定 60s 短冷却、不翻倍（打满是瞬态信号）。换 reason 重新计数（基数与封顶不同，沿用对方 hits 会得到错误的第三种时长）
 - 清除：`save_success(..., model=)` 只删 `reason='blocked'`（模型限流按上游重置，成功一次不代表限制解除）；`revive` / 删除凭证 / 账号级冷却出现都清模型条目
 - 回流：留存任务每轮 `purge_expired_model_cooldowns()` 回收过期行；管理台列表只下发未过期条目（`model_cooldowns`）

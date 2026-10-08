@@ -24,7 +24,7 @@ from src.engine.executor import Executor, ExecutorDeps, NoHealthyCredential
 from src.engine.scheduler import Scheduler
 from src.engine.sse import parse_frames
 from src.main import build_app
-from src.provider.base import ErrKind, Event, EventKind, Usage
+from src.provider.base import ErrKind, Event, EventKind, Model, Usage
 from src.provider.codebuddy import events as cb_events
 from src.provider.codebuddy.client import (
     DEFAULT_MODELS,
@@ -2165,6 +2165,81 @@ async def test_flat_exclusive_model_skips_other_upstream(dual_repo):
     assert result["choices"][0]["message"]["content"] == "ok"
     assert trae.calls == 0 and cb.calls == 1
     assert [(r["provider"], r["ok"]) for r in records] == [("codebuddy", True)]
+
+
+async def test_free_tier_preferred_over_paid_when_catalog_has_rates(dual_repo):
+    """候选中存在免费渠道（credit_rate=0）→ 免费渠道优先，不烧付费积分。
+
+    实测故障（2026-10-08）：space-bunny 由 zen（`space-bunny-free`，x0）与
+    CodeBuddy（`space-bunny`，x0.08）同时登记，合并成一条后调度按「到期
+    积分多者先用」选中 CodeBuddy，免费 zen 被晾着——付费渠道的 36h 到期
+    积分永远赢过免费渠道。现在 executor 把模型目录里的倍率注进候选，
+    候选里出现免费渠道时它整体排前。
+    """
+    from src.provider.base import Model
+
+    repo, _db = dual_repo
+    # pin CB 且带足到期积分：旧排序必选 CB，证明免费档压过 pin 之外的
+    # 一切既有指标（pin 本身仍是用户显式意图，最高优先）
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="zen", credential_data={})
+    cb = _RejectProvider("codebuddy", [GOOD])
+    zen = _RejectProvider("zen", [GOOD])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb, "zen": zen}, credentials=repo,
+        scheduler=Scheduler(), default_model="space-bunny",
+        model_aliases={"codebuddy": {"space-bunny": "space-bunny"},
+                       "zen": {"space-bunny": "space-bunny-free"}},
+        model_list_cache={
+            "codebuddy": {"space-bunny": Model(id="space-bunny",
+                                               credit_rate=0.08)},
+            "zen": {"space-bunny-free": Model(id="space-bunny-free",
+                                              credit_rate=0.0)}}))
+
+    result = await executor.complete(_request("space-bunny"), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert (cb.calls, zen.calls) == (0, 1)
+
+
+async def test_free_tier_unknown_rate_keeps_legacy_order(dual_repo):
+    """目录未就绪 / 倍率未知 → 不启用免费档，保持原排序（向后兼容）。"""
+    repo, db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="zen", credential_data={})
+    # zen pinned：旧排序 pin 优先。目录有别名但没有 zen 的倍率条目
+    # （该渠道模型列表回退静态表丢掉该模型）→ zen 与付费同档
+    db.connect().execute("UPDATE credentials SET pinned = 1 WHERE provider = 'zen'")
+    cb = _RejectProvider("codebuddy", [GOOD])
+    zen = _RejectProvider("zen", [GOOD])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb, "zen": zen}, credentials=repo,
+        scheduler=Scheduler(), default_model="space-bunny",
+        model_aliases={"codebuddy": {"space-bunny": "space-bunny"},
+                       "zen": {"space-bunny": "space-bunny-free"}},
+        model_list_cache={"codebuddy": {"space-bunny": Model(
+            id="space-bunny", credit_rate=0.08)}}))
+
+    result = await executor.complete(_request("space-bunny"), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert (cb.calls, zen.calls) == (0, 1)
+
+
+async def test_free_tier_ignored_without_catalog(dual_repo):
+    """ExecutorDeps.model_list_cache 缺省（None）→ 完全走原行为（老测试不破）。"""
+    repo, _db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="zen", credential_data={})
+    cb = _RejectProvider("codebuddy", [GOOD])
+    zen = _RejectProvider("zen", [GOOD])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb, "zen": zen}, credentials=repo,
+        scheduler=Scheduler(), default_model="space-bunny",
+        model_aliases={"codebuddy": {"space-bunny": "space-bunny"},
+                       "zen": {"space-bunny": "space-bunny-free"}}))
+
+    result = await executor.complete(_request("space-bunny"), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert cb.calls + zen.calls == 1
 
 
 async def test_forced_provider_bypasses_catalog_narrowing(dual_repo):
