@@ -500,15 +500,16 @@ def test_credential_needs_refresh_caps_skew_at_sts_lifetime():
     """24h 的全局 skew 会被本渠道封顶，否则每轮都烧一张一次性票。
 
     STS 临时凭证只有 2h 寿命，skew ≫ 寿命会让 needs_refresh 恒为真；
-    封顶后只在「离到期 ≤ 30min」时才轮转。封顶值必须 ≥ 预刷新轮询周期
-    （60min 的一半才安全，这里 30min > 0 且留足余量），否则整轮漏过导致
-    凭证静默过期——所以顺带断言它明显小于 1 小时这个量级之外仍有界。
+    封顶后只在「离到期 ≤ 45min」时才轮转。封顶值必须**严格大于**预刷新轮询
+    周期（默认 30min，见 REFRESH_INTERVAL_MINUTES）：窗口 ≤ 周期时轮询点会
+    整轮落在窗口外，凭证拖到到期才刷（实测封顶 30min + 周期 60min 即为此故障）。
     """
     cap = CodeArtsCredential.refresh_skew_cap_seconds
-    assert cap == 1800
-    # skew 24h（86400s）被压到 30min：now=1000 时离到期 1801s 不刷、1800s 就刷
-    assert _cred(expiration=1000 + 1801).needs_refresh(86400, now=1000) is False
-    assert _cred(expiration=1000 + 1800).needs_refresh(86400, now=1000) is True
+    assert cap == 2700
+    assert cap > 30 * 60          # 严格宽于默认轮询周期，留出余量而非贴边
+    # skew 24h（86400s）被压到 45min：now=1000 时离到期 2701s 不刷、2700s 就刷
+    assert _cred(expiration=1000 + 2701).needs_refresh(86400, now=1000) is False
+    assert _cred(expiration=1000 + 2700).needs_refresh(86400, now=1000) is True
     # 封顶不影响小 skew（调用方传的值更小时原样生效）
     assert _cred(expiration=1000 + 10).needs_refresh(10, now=1000) is True
     assert _cred(expiration=1000 + 11).needs_refresh(10, now=1000) is False

@@ -129,7 +129,7 @@ coding2api/
 │   │   ├── checkin.py           # 全天每 10 分钟；成功即当日封账
 │   │   ├── growth.py            # 成长中心（仅 CB），落 growth_events
 │   │   ├── activity.py          # 活跃上报（仅 CB，默认关闭）
-│   │   ├── refresh.py           # 每 60 分钟；REFRESH_SKEW_HOURS 窗口内预刷新
+│   │   ├── refresh.py           # 每 REFRESH_INTERVAL_MINUTES（默认 30）；REFRESH_SKEW_HOURS 窗口内预刷新
 │   │   ├── retention.py         # 每 5 分钟：小时汇总重算 + 90 天前明细清理
 │   │   ├── alerting.py          # 运维告警（P1-7）：四类规则评估 + webhook + 落库
 │   │   ├── status.py            # 任务清单 + 进程内运行态（B4）
@@ -527,6 +527,8 @@ response.completed | response.incomplete
 
 **展示纪律**：只给「剩余时间」一个数。曾同时展示「最后续期」（JWT `iat`），但那要求读者拿两个数做二次推理（刚续期 vs 没人管），属解释性信息；`iat` 仍落库供诊断。到期未知（0）时单元格显示 `—`，**绝不当成已过期**。
 
+**短寿命凭证不标「即将到期」（2026-10-08）**：`tokenExpiryView()` 增 `issuedAt` 参数——当整段寿命（`expires − issued`）≤ 预警窗口的 2 倍时，该 token 天生就在窗口附近（CodeArts STS 寿命 2h、窗口 1h），「即将到期」是常态而非异常，恒标红只会淹掉真告警；这与后端 `expiring_tokens` 对短寿命凭证静音同口径。**真过期（剩余 ≤0）仍标红**：那是刷新失败、需要人工介入的信号。`issuedAt` 缺省（0 / 未传）时保持旧语义（只看剩余时间），避免未知签发时间时误静音。
+
 **接口**：`GET /api/credentials` 响应新增 `token_expiry_warning_seconds`；每条凭证新增 `token_expires_at` 与 `token_issued_at`（均为 0 表示未知）。
 
 ### 3.10 积分变动流水（B3.4）
@@ -708,7 +710,9 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **DPoP 令牌刷新（刚性约束）**：`POST {sts}/v1/oauth2/tokens` `grant_type=refresh_token` 需带 **DPoP(ES256/P-256) JWS**。refresh_token 与 `client_id=codearts-agent` + DPoP 私钥**三者绑定、一次性**——刷新成功必须把返回的新 `refresh_token` 回写凭证（`RefreshTask` 先落库再同步账号，正好满足）。ES256 用 `cryptography`（`ec.SECP256R1` + `ECDSA(SHA256)`，**低 S 归一化**），不移植 Go/手写 ECDSA。
 
-**刷新节流（2026-10-08）**：`REFRESH_SKEW_HOURS` 默认 24h ≫ STS 寿命 2h，而 `needs_refresh` 的语义是「离到期还剩 skew 秒就刷」，故 24h skew 让本渠道**恒为真**，`RefreshTask` 每轮（约 60min）都去烧一张一次性 `refresh_token`——票是单次的，多烧一张就多一分「被并发/自己消费掉」的风险面。给 `CodeArtsCredential` 加 `refresh_skew_cap_seconds = 1800`，`needs_refresh` 取 `min(skew, cap)`：把「一进窗口就每轮都刷」降成「离到期 30min 内才刷」。不能更小的硬约束是预刷新轮询周期（默认 60min）——窗口窄于周期会整轮漏过，2h 寿命的凭证静默过期。
+**刷新节流（2026-10-08）**：`REFRESH_SKEW_HOURS` 默认 24h ≫ STS 寿命 2h，而 `needs_refresh` 的语义是「离到期还剩 skew 秒就刷」，故 24h skew 让本渠道**恒为真**，`RefreshTask` 每轮都去烧一张一次性 `refresh_token`——票是单次的，多烧一张就多一分「被并发/自己消费掉」的风险面。给 `CodeArtsCredential` 加 `refresh_skew_cap_seconds = 2700`，`needs_refresh` 取 `min(skew, cap)`：把「一进窗口就每轮都刷」降成「离到期 45min 内才刷」。
+
+**窗口必须宽于轮询周期（2026-10-08 二次修正）**：封顶窗口有个容易踩的下界——预刷新轮询周期（`REFRESH_INTERVAL_MINUTES`）。**窗口 ≤ 周期时轮询点会整轮落在窗口之外**，凭证一直拖到到期才刷。实测故障：封顶 30min、周期 60min 时，CodeArts 凭证在距离到期约 26s 时才刷新（管理台最后一小时恒标红、刷新瞬间短暂显示「已过期」，上游还回了 `APIG.0602`）。修正为 ① 新增可热更项 `REFRESH_INTERVAL_MINUTES`（默认 30，下限 5）并把 `build_runner` 接线，把轮询从写死的 60min 缩到 30min；② 封顶抬到 45min（> 30min 周期）留出余量。轮询粒度下实际在**剩余约 30min** 处刷新（每约 90min 一轮），既不贴边也不过密。
 
 **STS 过期分类（`APIG.0602`，2026-10-08）**：临时凭证过期时聊天侧收 `HTTP 400` + `APIG.0602 security token has expired`。此前落进 `classify_status` 的 `400 → INVALID`（语义是「请求本身无效」，换 provider 也没用且不冷却），客户端只看到 `model not available on any configured upstream`（实测 84 条 APIG.0602 全走这条）。现于 `401/403 → DEAD` 判定**之前**识别 `security token has expired`（标记 `_STS_EXPIRED_MARKERS`），判 `SOFT`——账号级**可恢复**故障：下一轮预刷新换上新 STS 凭证即自愈。**不能判 DEAD**：硬禁用会让 `RefreshTask` 跳过该凭证（`candidates()` 的 disabled 分支），反而断掉唯一的自愈路径。
 
@@ -1009,7 +1013,7 @@ class Scheduler:
 |---|---|---|
 | 额度探测（quota_probe.py） | 启动立即一轮（不节流）+ 每 `QUOTA_PROBE_MINUTES`（默认 60）分钟 | 探测剩余额度 → 写 `credentials.quota_*` / `quota_expiry_ladder` / `quota_packages` / `health` |
 | token 到期（token_expiry.py） | —（读路径，非任务） | 从显式 `expires_at` 或 JWT `exp` 派生到期时间，写 `credentials.token_expires_at`（§3.9） |
-| token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token；到期时间同上（CB 实测无显式字段）。短寿命渠道自行封顶该窗口（CodeArts `refresh_skew_cap_seconds=1800`，见 §3.17）。上游明确回「续期凭据已作废」（`UpstreamReloginRequired`）时不重试，改标记「需重新登录」并硬禁用 |
+| token 预刷新（refresh.py） | 每 `REFRESH_INTERVAL_MINUTES`（默认 30）分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token；到期时间同上（CB 实测无显式字段）。短寿命渠道自行封顶该窗口（CodeArts `refresh_skew_cap_seconds=2700`，见 §3.17）——封顶值必须**严格宽于**本周期，否则窗口整轮漏过、凭证拖到到期才刷。上游明确回「续期凭据已作废」（`UpstreamReloginRequired`）时不重试，改标记「需重新登录」并硬禁用 |
 | 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态）；失败持续重试 |
 | 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5） | 仅 CodeBuddy：7 类领取；结果落 `growth_events` + 回写 `credentials.growth_last_result` |
 | 活跃上报（activity.py，默认关闭） | 每 10 分钟醒一次，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点，北京时间）窗口内执行 | 仅 CodeBuddy：补发一条 `chat_request_send` 续连登；按「endpoint + userId」隔离、当日封账；成功落一行 `growth_events` |

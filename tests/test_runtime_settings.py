@@ -497,6 +497,7 @@ def test_every_hot_setting_is_read_lazily_not_baked_at_startup(admin_app):
         "pacer_min_seconds": 3,
         "pacer_max_seconds": 8,
         "quota_probe_minutes": 33,
+        "refresh_interval_minutes": 21,
         "growth_interval_minutes": 9,
         "activity_report_enabled": True,
         "activity_report_hour": 5,
@@ -530,6 +531,7 @@ def test_every_hot_setting_is_read_lazily_not_baked_at_startup(admin_app):
     assert kilo_pacer.allow_concurrent is True
     # 后台任务周期与开关
     assert runner._quota_interval == 33 * 60        # noqa: SLF001
+    assert runner._refresh_interval == 21 * 60      # noqa: SLF001
     assert runner._growth_interval == 9 * 60        # noqa: SLF001
     assert runner._activity_enabled() is True       # noqa: SLF001
     assert runner._activity._hour == 5              # noqa: SLF001

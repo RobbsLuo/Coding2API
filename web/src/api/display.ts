@@ -126,17 +126,32 @@ export interface TokenExpiryView {
  *
  * `token_expires_at` 为 0 表示**未知**（渠道没给到期信息）：此时 `remaining`
  * 为 null，展示层显示 `—` 而非「已过期」，否则拿不到到期时间会误报成预警。
+ *
+ * **短寿命凭证不标红**：给出 `issuedAt`（签发时间）时，若整段寿命 ≤ 预警
+ * 窗口的 2 倍，说明该 token 天生就在窗口附近（CodeArts 的 STS 凭证寿命仅
+ * 2h、预警窗口 1h），「即将到期」是它的常态而非异常，恒标红只会淹掉真告警
+ * ——与后端 `expiring_tokens` 对短寿命凭证静音同口径。**真过期（剩余 ≤0）
+ * 仍标红**：那是刷新失败、需要人工介入的信号。`issuedAt` 缺省（0 / 未传）
+ * 时保持原语义（只看剩余时间），避免未知签发时间时误静音。
  */
 export function tokenExpiryView(
   expiresAt: number | null | undefined,
   warningSeconds: number,
   now = Date.now() / 1000,
+  issuedAt?: number | null,
 ): TokenExpiryView {
   if (!expiresAt || expiresAt <= 0) {
     return { remaining: null, expiring: false, label: "—" };
   }
   const remaining = Math.max(0, Math.floor(expiresAt - now));
-  const expiring = warningSeconds > 0 && remaining <= warningSeconds;
+  const lifetime = issuedAt && issuedAt > 0 ? expiresAt - issuedAt : 0;
+  // 预警窗口覆盖了整段寿命一半以上 → 命中窗口是常态，不标「即将到期」
+  const structurallyShortLived =
+    warningSeconds > 0 && lifetime > 0 && lifetime <= warningSeconds * 2;
+  const expiring =
+    warningSeconds > 0 &&
+    remaining <= warningSeconds &&
+    (!structurallyShortLived || remaining <= 0);
   return { remaining, expiring, label: formatDuration(remaining) };
 }
 

@@ -100,6 +100,13 @@ class Settings(BaseSettings):
     token_expiry_warning_seconds: int = 3600
 
     # 后台任务
+    # token 预刷新轮询周期（分钟）。真正的「何时续期」由 REFRESH_SKEW_HOURS
+    # 决定，但短寿命渠道会把它封顶（CodeArts STS 只有 2h，见
+    # `CodeArtsCredential.refresh_skew_cap_seconds`）——此时轮询周期成了唯一
+    # 保证：周期必须**窄于**封顶窗口，否则刷新窗口整轮落在两次轮询之间，凭证
+    # 会一直拖到到期才刷（实测：封顶 30min、周期 60min 时在到期瞬间才刷，
+    # 上游 401 + 管理台恒标红）。默认 30min 与封顶窗口同宽。
+    refresh_interval_minutes: int = 30
     quota_probe_minutes: int = 60
     # 模型目录兜底刷新周期（分钟）：没有它，模型列表只在有人调 /v1/models /
     # Playground 时才按 TTL 刷新——纯 API 用法的部署（客户端自己缓存了模型

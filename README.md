@@ -183,7 +183,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 几点要知道：
 
-- **令牌刷新是刚性的**：refresh_token 与 `client_id=codearts-agent`、DPoP 私钥三者绑定，且**一次性**——刷新后必须回写新的 refresh_token，否则该账号失效。本服务由 token 预刷新任务自动完成（DPoP ES256/P-256 签名）；这也是该渠道的「保活」手段。为降低烧票风险，本渠道的预刷新窗口封顶 30 分钟（全局 `REFRESH_SKEW_HOURS` 默认 24h ≫ 凭证 2h 寿命，不封顶会每轮都刷）。一旦续期凭据被上游作废（票被消费 / 绑定项不符），该凭证会被标记为「需重新登录」并停止自动重试，需重新登录后按状态列的「恢复」解除。
+- **令牌刷新是刚性的**：refresh_token 与 `client_id=codearts-agent`、DPoP 私钥三者绑定，且**一次性**——刷新后必须回写新的 refresh_token，否则该账号失效。本服务由 token 预刷新任务自动完成（DPoP ES256/P-256 签名）；这也是该渠道的「保活」手段。为降低烧票风险，本渠道的预刷新窗口封顶 45 分钟，且该封顶必须**宽于**预刷新轮询周期（`REFRESH_INTERVAL_MINUTES`，默认 30 分钟）——否则窗口整轮漏过、凭证拖到到期才刷（全局 `REFRESH_SKEW_HOURS` 默认 24h ≫ 凭证 2h 寿命，不封顶会每轮都刷）。一旦续期凭据被上游作废（票被消费 / 绑定项不符），该凭证会被标记为「需重新登录」并停止自动重试，需重新登录后按状态列的「恢复」解除。
 - **没有每日签到**：CodeArts 额度是**每日 1000 万免费 token（当日 0 点清零、不累计）**，上游没有每日签到接口，因此本服务不提供签到入口。启动/定时会尝试领取福利 Token（幂等）并探测余额。
 - **优先消耗**：每日池用完即弃，故当日剩余被登记为「次日本地 0 点到期」的到期额度，调度器会优先把它排在其它渠道之前——只要 CodeArts 还有额度就先走它，用尽后自动回落。上游按 token 计量，管理台统一显示为**积分**（1 积分 = 10000 token，每日池满额 = 1000 积分）；升级前落库的历史数据由 `scripts/convert_codearts_credit_unit.py` 一次性折算。
 - **签名**：上游要求华为云 `SDK-HMAC-SHA256`（AK/SK + `X-Security-Token`）。白名单 `CODEARTS_ALLOWED_ENDPOINTS` 必须含 snap 引擎、STS、福利网关与门户四个主机；改 `CODEARTS_API_ENDPOINT` 时同步调整。
@@ -360,6 +360,7 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `USERS_FILE` | `secrets/users.txt` | **仅引导期**：老式用户文件路径，启动时一次性导入 SQLite（已存在的用户名不覆盖，幂等）。账号唯一源是 `users` 表 |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期（下限 1 分钟） |
+| `REFRESH_INTERVAL_MINUTES` | `30` | token 预刷新轮询周期（下限 5 分钟）；短寿命渠道的预刷新窗口封顶必须**宽于**它，否则窗口整轮漏过、凭证拖到到期才刷 |
 | `MODEL_CATALOG_MINUTES` | `30` | 模型目录兜底刷新周期（下限 5 分钟）；只影响「没人访问列表时」的保鲜，正常仍按 TTL 随访问刷新 |
 | `GROWTH_INTERVAL_MINUTES` | `60` | 成长中心（仅 CodeBuddy）一轮领取的周期；下限 5 分钟 |
 | `GROWTH_IRREVERSIBLE_ACTIONS` | `true` | 是否允许成长中心的不可逆动作：抽奖、连登兑换、开 Buddy 盲盒、消耗补登卡。`false` 时仍会领取旅行礼物与任务奖励 |
@@ -419,9 +420,9 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 
 ### 管理台热更（「任务与配置」页）
 
-上表中带「可热更」语义的 35 项可不改 `.env`、不重启，直接在管理台「任务与配置」页修改：
+上表中带「可热更」语义的 36 项可不改 `.env`、不重启，直接在管理台「任务与配置」页修改：
 
-`DEFAULT_MODEL`、`MODEL_BLOCKLIST`、`CONTEXT_COMPRESS_ENABLED`、`CONTEXT_COMPRESS_RESERVE_TOKENS`、`CONTEXT_COMPRESS_MIN_KEEP_MESSAGES`、`CONTEXT_COMPRESS_SAFETY_RATIO`、`MODEL_FALLBACK_GROUPS`、`QUOTA_EXPIRY_WINDOW_SECONDS`、`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`、`CONVERSATION_STICKY_SECONDS`、`GROWTH_IRREVERSIBLE_ACTIONS`、`GROWTH_INTERVAL_MINUTES`、`QUOTA_PROBE_MINUTES`、`MODEL_CATALOG_MINUTES`、`CODEBUDDY_CHAT_MIN_INTERVAL`、`ZEN_CHAT_MIN_INTERVAL`、`KILO_CHAT_MIN_INTERVAL`、`QODER_CHAT_MIN_INTERVAL`、`CODEARTS_CHAT_MIN_INTERVAL`、`CODEARTS_MAX_CONCURRENCY`、`CODEARTS_REQUEST_WINDOW_SECONDS`、`PACER_MIN_SECONDS`、`PACER_MAX_SECONDS`、`ACTIVITY_REPORT_ENABLED`、`ACTIVITY_REPORT_HOUR`、`ALERT_ENABLED`、`ALERT_WEBHOOK_URL`、`ALERT_INTERVAL_MINUTES`、`ALERT_SILENCE_MINUTES`、`ALERT_POOL_READY_MIN`、`ALERT_TASK_FAILURES`、`ALERT_TOKEN_EXPIRY_HOURS`、`ALERT_ERROR_RATE_THRESHOLD`、`ALERT_ERROR_RATE_MIN_REQUESTS`、`ALERT_ERROR_RATE_WINDOW_MINUTES`。
+`DEFAULT_MODEL`、`MODEL_BLOCKLIST`、`CONTEXT_COMPRESS_ENABLED`、`CONTEXT_COMPRESS_RESERVE_TOKENS`、`CONTEXT_COMPRESS_MIN_KEEP_MESSAGES`、`CONTEXT_COMPRESS_SAFETY_RATIO`、`MODEL_FALLBACK_GROUPS`、`QUOTA_EXPIRY_WINDOW_SECONDS`、`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`、`CONVERSATION_STICKY_SECONDS`、`GROWTH_IRREVERSIBLE_ACTIONS`、`GROWTH_INTERVAL_MINUTES`、`QUOTA_PROBE_MINUTES`、`REFRESH_INTERVAL_MINUTES`、`MODEL_CATALOG_MINUTES`、`CODEBUDDY_CHAT_MIN_INTERVAL`、`ZEN_CHAT_MIN_INTERVAL`、`KILO_CHAT_MIN_INTERVAL`、`QODER_CHAT_MIN_INTERVAL`、`CODEARTS_CHAT_MIN_INTERVAL`、`CODEARTS_MAX_CONCURRENCY`、`CODEARTS_REQUEST_WINDOW_SECONDS`、`PACER_MIN_SECONDS`、`PACER_MAX_SECONDS`、`ACTIVITY_REPORT_ENABLED`、`ACTIVITY_REPORT_HOUR`、`ALERT_ENABLED`、`ALERT_WEBHOOK_URL`、`ALERT_INTERVAL_MINUTES`、`ALERT_SILENCE_MINUTES`、`ALERT_POOL_READY_MIN`、`ALERT_TASK_FAILURES`、`ALERT_TOKEN_EXPIRY_HOURS`、`ALERT_ERROR_RATE_THRESHOLD`、`ALERT_ERROR_RATE_MIN_REQUESTS`、`ALERT_ERROR_RATE_WINDOW_MINUTES`。
 
 要点：
 

@@ -166,8 +166,34 @@ describe("tokenExpiryView", () => {
     expect(view.expiring).toBe(false);
   });
 
-  it("不依赖签发时间：无论如何都只给剩余时间", () => {
-    // 原进度条按 token 寿命（exp - iat）定标，已移除；签发时间不再参与展示计算
+  it("短寿命凭证：剩余落在预警窗口内也不标红（refresh 常态，非异常）", () => {
+    // CodeArts STS：寿命 2h（exp - iat = 7200）、预警 1h。剩余 30min 时距刷新
+    // 窗口很近，但「即将到期」是常态，不该恒标红。
+    const issuedAt = now - (7200 - 1800); // 已过 1.5h，剩余 30min
+    const view = tokenExpiryView(now + 1800, 3600, now, issuedAt);
+    expect(view.remaining).toBe(1800);
+    expect(view.expiring).toBe(false);
+    expect(view.label).toBe("30 分钟");
+  });
+
+  it("短寿命凭证真过期（剩余 ≤0）仍标红，不静音刷新失败信号", () => {
+    const issuedAt = now - 7200 - 60; // 寿命 2h，已过期 60s
+    const view = tokenExpiryView(now - 60, 3600, now, issuedAt);
+    expect(view.remaining).toBe(0);
+    expect(view.expiring).toBe(true);
+  });
+
+  it("长寿命凭证不受短寿命静音影响：进入窗口照常标红", () => {
+    // 30 天寿命 ≫ 2×预警窗口，签发给不给签发给都不抑制
+    const issuedAt = now - (30 * DAY - 600);
+    const view = tokenExpiryView(now + 600, 3600, now, issuedAt);
+    expect(view.expiring).toBe(true);
+  });
+
+  it("不依赖签发时间：未传 issuedAt 时只按剩余时间判定", () => {
+    // 签发时间未知时不静音，保持旧语义（否则会误藏预警）
+    expect(tokenExpiryView(now + 600, 3600, now, 0).expiring).toBe(true);
+    expect(tokenExpiryView(now + 600, 3600, now, null).expiring).toBe(true);
     expect(tokenExpiryView(now + 600, 3600, now).remaining).toBe(600);
     expect(tokenExpiryView(now + 400 * DAY, 3600, now).label).toBe("400.0 天");
   });

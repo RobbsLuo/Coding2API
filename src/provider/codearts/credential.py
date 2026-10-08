@@ -55,12 +55,15 @@ class CodeArtsCredential:
     # refresh_skew_hours 的**上限**（秒）。STS 临时凭证实测寿命 2h（模块文档），
     # 而全局默认 REFRESH_SKEW_HOURS=24h ≫ 寿命：skew 的语义是「离到期还剩
     # skew 秒就提前刷」，所以 24h skew 让 needs_refresh 对本渠道**恒为真**，
-    # RefreshTask 每一轮（约 60min）都会去烧一张一次性 refresh_token——票是
-    # 单次的，多烧一张就多一次「被别人/被自己消费掉」的风险面。
-    # 封顶 30min：把「一进窗口就每轮都刷」降成「离到期 30min 内才刷」。
-    # 不能更小的硬约束是轮询周期（默认 60min）：窗口窄于周期就会整轮漏过，
-    # 凭证静默过期（实测 STS 只有 2h 余量可浪费）。
-    refresh_skew_cap_seconds: ClassVar[int] = 1800
+    # RefreshTask 每一轮都会去烧一张一次性 refresh_token——票是单次的，
+    # 多烧一张就多一次「被别人/被自己消费掉」的风险面。
+    # 封顶 45min：把「一进窗口就每轮都刷」降成「离到期 45min 内才刷」。
+    # 这个值必须**严格大于**预刷新轮询周期（默认 30min，见
+    # REFRESH_INTERVAL_MINUTES），否则窗口宽度 ≤ 周期时，轮询点可能整轮落在
+    # 窗口之外——实测封顶 30min、周期 60min 时，凭证一直拖到**到期瞬间**才刷，
+    # 上游回 401 且管理台恒标红。45min > 30min 留出 ≥15min 余量：轮询粒度
+    # 下实际在剩余 30min 左右刷新（每约 90min 一轮），同牌「中间余量」。
+    refresh_skew_cap_seconds: ClassVar[int] = 2700
 
     def needs_refresh(self, skew_seconds: int, now: int | None = None) -> bool:
         """临时凭证本身到期前刷新。

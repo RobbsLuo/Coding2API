@@ -16,6 +16,9 @@ services:
       # 模型列表黑名单（fnmatch glob，逗号分隔，完全替换语义）
       MODEL_BLOCKLIST: ${MODEL_BLOCKLIST:-custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,hunyuan-image-*}
       QUOTA_PROBE_MINUTES: ${QUOTA_PROBE_MINUTES:-60}
+      # token 预刷新轮询周期（分钟）：短寿命渠道（CodeArts STS 2h）的预刷新
+      # 窗口会被封顶，窗口必须窄于该周期才不会整轮漏过、拖到到期才刷
+      REFRESH_INTERVAL_MINUTES: ${REFRESH_INTERVAL_MINUTES:-30}
       # 模型目录兜底刷新周期（分钟）：没有它，模型表只在有人调 /v1/models 时
       # 才刷新，纯 API 用法的部署会让「模型→渠道」归属表与落盘快照变陈旧
       MODEL_CATALOG_MINUTES: ${MODEL_CATALOG_MINUTES:-30}

@@ -204,19 +204,22 @@ async def test_runner_retention_purges_expired_detail_and_keeps_rollup(repo):
 def test_build_runner_wires_everything(repo):
     credentials, db = repo
     config = Settings(_env_file=None, APP_SECRET=SECRET, QUOTA_PROBE_MINUTES=15,
-                      REFRESH_SKEW_HOURS=6,
+                      REFRESH_SKEW_HOURS=6, REFRESH_INTERVAL_MINUTES=45,
                       PACER_MIN_SECONDS=0, PACER_MAX_SECONDS=0)
     runner = build_runner(credentials, {"codebuddy": StubProvider()}, StatsCollector(db), config)
     assert runner._quota_interval == 15 * 60
     assert runner._quota_probe._pacer is not None
     assert runner._quota_probe._pacer.disabled is True
     assert runner._refresh.skew_seconds == 6 * 3600
+    # 预刷新轮询周期从配置接线（默认 30min）；短寿命渠道靠它保证窗口不漏
+    assert runner._refresh_interval == 45 * 60
 
 
 def test_build_runner_clamps_intervals(repo):
     """过小的配置值必须被夹到安全下限，避免打爆上游。"""
     credentials, db = repo
-    config = Settings(_env_file=None, APP_SECRET=SECRET, QUOTA_PROBE_MINUTES=0)
+    config = Settings(_env_file=None, APP_SECRET=SECRET, QUOTA_PROBE_MINUTES=0,
+                      REFRESH_INTERVAL_MINUTES=0)
     runner = build_runner(credentials, {}, StatsCollector(db), config)
     assert runner._quota_interval == 60
     assert runner._refresh_interval >= 60

@@ -113,6 +113,11 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("growth_interval_minutes", int, "成长中心周期（分钟）",
                "成长中心后台任务的一轮间隔；下限 5 分钟（更密只会撞上游风控）。",
                minimum=5, task="growth", floor=5),
+    HotSetting("refresh_interval_minutes", int, "token 预刷新周期（分钟）",
+               "后台 token 预刷新任务的一轮间隔；下限 5 分钟。短寿命渠道"
+               "（CodeArts STS 2h）会把预刷新窗口封顶，此时该周期必须窄于窗口，"
+               "否则窗口整轮漏过、凭证拖到到期才刷（上游 401 + 管理台标红）。",
+               minimum=5, task="refresh", floor=5),
     HotSetting("quota_probe_minutes", int, "额度探测周期（分钟）",
                "后台额度探测的一轮间隔；下限 1 分钟。", minimum=1,
                task="quota_probe", floor=1),
@@ -505,6 +510,10 @@ class RuntimeSettings:
     @property
     def growth_interval_minutes(self) -> int:
         return int(self.get("growth_interval_minutes"))
+
+    @property
+    def refresh_interval_minutes(self) -> int:
+        return int(self.get("refresh_interval_minutes"))
 
     @property
     def quota_probe_minutes(self) -> int:

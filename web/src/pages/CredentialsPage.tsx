@@ -609,7 +609,7 @@ function Row({
   const state = credentialState(credential, now);
   const cooldown = cooldownRemaining(credential.cooling_until, now);
   const tokenExpiry = tokenExpiryView(
-    credential.token_expires_at, tokenWarning, now);
+    credential.token_expires_at, tokenWarning, now, credential.token_issued_at);
 
   // 抽屉由调用方渲染成**独立的下一行**（见 TableBody）：塞进本行的最后一个单元格
   // 只会挤在「操作」列里——同行内的 colSpan 不生效，整行高度会被拉坏。
