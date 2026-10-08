@@ -120,6 +120,7 @@
 | `Badge` | 语义色调 `ok/warn/danger/muted/accent`；**必须带文字**，色不单独表意 |
 | `Metric` | KPI 卡：标签 + 大号 `tabular-nums` 数值 + hint；可选 icon 与 tone |
 | `Notice` | 行内提示；`danger` 用 `role=alert`；左侧语义色条 |
+| `ToastViewport` + `useToasts` | 操作结果浮层（顶部居中，`web/src/components/Toast.tsx`）：数秒自动消失、可手动关闭；`danger` 用 `role=alert`、其余 `role=status`；同 `testId` 只保留最新一条；语气用 `Badge`/`Notice` 同款 tint 底 + `-ink` 图标（亮色口径色描边叠白底对比过低，不可只用描边） |
 | `EmptyState` | 空态：图标 + 标题 + 描述 + 可选操作 |
 | `Tabs` | 分段器；激活项 `bg-background` + `shadow-sm` |
 | `Table` | 圆角容器 + 表头底色 + 行 hover；移动端横向滚动 |

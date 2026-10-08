@@ -696,7 +696,10 @@ describe("渠道登录入口", () => {
     // 浏览器授权完成后服务端落库 → 下一次轮询发现凭证变多
     credentialCount = 2;
     await vi.advanceTimersByTimeAsync(4000);
-    expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("登录成功");
+    // 浮层沿用同一 testid：授权发起时已有一条提示，这里要等它被最新结果替换
+    await waitFor(() =>
+      expect(screen.getByTestId("credentials-notice")).toHaveTextContent("登录成功"),
+    );
     vi.useRealTimers();
   });
 

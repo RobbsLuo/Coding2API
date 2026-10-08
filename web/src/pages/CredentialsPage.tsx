@@ -1,4 +1,5 @@
 import { Fragment, useState } from "react";
+import type { ReactNode } from "react";
 import {
   ArrowDownIcon,
   CalendarCheck,
@@ -19,6 +20,7 @@ import { useSessionContext } from "../Layout";
 import { useCredentials, useQueryClient } from "../api/hooks";
 import { PoolOverview } from "../components/PoolOverview";
 import { AddCredentialDialog } from "../components/AddCredentialDialog";
+import { ToastViewport, useToasts } from "../components/Toast";
 import { ColumnHint, LongTextTip } from "../components/Tip";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
@@ -100,6 +102,31 @@ function growthNotice(result: GrowthRunResult): string {
   return result.report || (result.ok ? "成长中心执行完成" : "成长中心执行未完全成功");
 }
 
+/** 成长中心浮层内容：一句话汇报 + 逐步结果。步骤是结构化清单，信息量大，
+ * 因此给它比普通提示更长的停留时间，并在浮层内保留完整清单（idle 不是失败，
+ * 必须与 failed 分开显示）。 */
+function GrowthToastContent({ result }: { result: GrowthRunResult }) {
+  return (
+    <div className="space-y-1">
+      <div className="font-medium">成长中心：{growthNotice(result)}</div>
+      <ul className="space-y-0.5 text-xs text-muted-foreground">
+        {result.steps.map((step, index) => (
+          <li key={`${step.name}-${index}`} data-testid="growth-step">
+            <span className={GROWTH_STEP_TONE[step.status]}>
+              {GROWTH_STEP_LABEL[step.status]}
+            </span>
+            {step.name}
+            {step.detail && `：${step.detail}`}
+          </li>
+        ))}
+      </ul>
+      {result.session_dead && (
+        <div className="text-xs">登录态已失效，需重新登录该渠道后才能继续领取。</div>
+      )}
+    </div>
+  );
+}
+
 interface Actions {
   revive: (credential: Credential) => void;
   toggle: (credential: Credential) => void;
@@ -118,15 +145,15 @@ export function CredentialsPage() {
   // 时应自动刷新（与 useTasks 同口径）。
   const { data, isLoading } = useCredentials(session.username, 30_000);
   const client = useQueryClient();
-  const [error, setError] = useState<string | null>(null);
-  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   // 添加凭证对话框（登录渠道 / JSON 导入 / 免费层补回都收在里面）
   const [addOpen, setAddOpen] = useState(false);
-  const [probeDetail, setProbeDetail] = useState<string | null>(null);
-  // 成长中心最近一轮：展示逐步结果（一句话汇报看不出哪一步没做成）
-  const [growthResult, setGrowthResult] = useState<GrowthRunResult | null>(null);
+  // 操作结果统一走顶部居中浮层（toast），不再以插入式横幅撑开页面：
+  // error 与 notice 各占一个槽位，同类提示只保留最新一条。
+  const { toasts, push, dismiss } = useToasts();
+  const showError = (content: ReactNode) => push({ tone: "danger", testId: "credentials-error", content });
+  const showNotice = (content: ReactNode) => push({ tone: "ok", testId: "credentials-notice", content });
   // 积分记录抽屉：一次只开一个（同一行内展开，不弹层——
   // 表格行本身就是最好的上下文，弹层会遮掉额度列）
   const [creditEvents, setCreditEvents] = useState<{
@@ -152,14 +179,12 @@ export function CredentialsPage() {
 
   const run = async (task: () => Promise<unknown>, successMessage?: string) => {
     setBusy(true);
-    setError(null);
-    setNotice(null);
     try {
       await task();
-      if (successMessage) setNotice(successMessage);
+      if (successMessage) showNotice(successMessage);
       await refresh();
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "操作失败");
+      showError(caught instanceof Error ? caught.message : "操作失败");
     } finally {
       setBusy(false);
     }
@@ -190,26 +215,29 @@ export function CredentialsPage() {
     probe: (credential) =>
       void (async () => {
         setBusy(true);
-        setError(null);
-        setNotice(null);
-        setProbeDetail(null);
         try {
           const result = await api.probeCredential(credential.id);
           // 探测失败表示「未知」，绝不能显示成额度为 0。
           // 失败原因用可操作的中文说明，不直接把后端枚举或异常类名丢给用户。
           if (result.probed) {
-            setNotice(
+            showNotice(
               `探测成功：剩余 ${formatNumber(result.remaining)} / ${formatNumber(result.total)}`,
             );
           } else {
-            setNotice(
-              `探测失败：${probeFailureLabel(result.reason)}（健康度保持为「未探测」）`,
+            showNotice(
+              <>
+                {`探测失败：${probeFailureLabel(result.reason)}（健康度保持为「未探测」）`}
+                {result.detail && (
+                  <span className="mt-1 block text-xs text-muted-foreground" data-testid="probe-detail">
+                    原始错误：{result.detail}
+                  </span>
+                )}
+              </>,
             );
-            if (result.detail) setProbeDetail(result.detail);
           }
           await refresh();
         } catch (caught) {
-          setError(caught instanceof Error ? caught.message : "探测失败");
+          showError(caught instanceof Error ? caught.message : "探测失败");
         } finally {
           setBusy(false);
         }
@@ -217,8 +245,6 @@ export function CredentialsPage() {
     checkin: (credential) =>
       void (async () => {
         setBusy(true);
-        setError(null);
-        setNotice(null);
         try {
           const result = await api.checkinCredential(credential.id);
           // 渠道可选回填的活动状态：连续天数/今日积分（TRAE 为 null，拼接自动跳过）
@@ -226,21 +252,21 @@ export function CredentialsPage() {
           const tail = streak === null ? "" : `（连续 ${streak} 天）`;
           if (result.ok && result.already_checked_in) {
             // 渠道把「已签到」返回成 HTTP 400 + code=10001，这不是错误
-            setNotice(`${result.message || "今天已签到，请明天再来"}${tail}`);
+            showNotice(`${result.message || "今天已签到，请明天再来"}${tail}`);
           } else if (result.ok) {
-            setNotice(
+            showNotice(
               (result.credit === null
                 ? "签到成功"
                 : `签到成功，获得 ${formatNumber(result.credit)} 积分`) + tail,
             );
           } else {
-            setNotice(
+            showNotice(
               `签到未成功（code=${result.code ?? "null"}）${result.message ? ` ${result.message}` : ""}`,
             );
           }
           await refresh();
         } catch (caught) {
-          setError(caught instanceof Error ? caught.message : "签到失败");
+          showError(caught instanceof Error ? caught.message : "签到失败");
         } finally {
           setBusy(false);
         }
@@ -248,47 +274,47 @@ export function CredentialsPage() {
     growth: (credential) =>
       void (async () => {
         setBusy(true);
-        setError(null);
-        setNotice(null);
         try {
           const result = await api.runGrowth(credential.id);
-          setGrowthResult(result);
-          setNotice(growthNotice(result));
+          // 成长中心是多步清单，给更长的停留时间；失败用 danger 让读屏强播报。
+          push({
+            tone: result.ok ? "ok" : "danger",
+            testId: "growth-result",
+            duration: 12_000,
+            content: <GrowthToastContent result={result} />,
+          });
           await refresh();
         } catch (caught) {
-          setError(caught instanceof Error ? caught.message : "成长中心执行失败");
+          showError(caught instanceof Error ? caught.message : "成长中心执行失败");
         } finally {
           setBusy(false);
         }
       })(),
-    // 只读：开关抽屉不写任何状态，因此不复用 run()（那个会清 notice 并刷新列表）
+    // 只读：开关抽屉不写任何状态，因此不复用 run()（那个会刷新列表）
     credits: (credential) =>
       void (async () => {
         if (creditEvents?.credentialId === credential.id) {
           setCreditEvents(null);
           return;
         }
-        setError(null);
         try {
           const result = await api.creditEvents(credential.id);
           setCreditEvents({ credentialId: credential.id, events: result.events });
         } catch (caught) {
-          setError(caught instanceof Error ? caught.message : "积分记录读取失败");
+          showError(caught instanceof Error ? caught.message : "积分记录读取失败");
         }
       })(),
     activity: (credential) =>
       void (async () => {
         setBusy(true);
-        setError(null);
-        setNotice(null);
         try {
           const result = await api.reportActivity(credential.id);
-          setNotice(result.ok
+          showNotice(result.ok
             ? "活跃上报成功（已补发一条对话事件）"
             : `活跃上报失败：${result.message || "未知原因"}`);
           await refresh();
         } catch (caught) {
-          setError(caught instanceof Error ? caught.message : "活跃上报失败");
+          showError(caught instanceof Error ? caught.message : "活跃上报失败");
         } finally {
           setBusy(false);
         }
@@ -321,49 +347,9 @@ export function CredentialsPage() {
           </Notice>
         </div>
       )}
-      {/* 操作结果对读屏不可见（视觉横幅无焦点变化）：用 aria-live 播报 */}
-      <div aria-live="polite">
-        {error && (
-          <div data-testid="credentials-error">
-            <Notice tone="danger">{error}</Notice>
-          </div>
-        )}
-        {notice && (
-          <div data-testid="credentials-notice">
-            <Notice tone="ok">
-              {notice}
-              {probeDetail && (
-                <span className="ml-2 text-muted-foreground" data-testid="probe-detail">
-                  原始错误：{probeDetail}
-                </span>
-              )}
-            </Notice>
-          </div>
-        )}
-      </div>
-      {growthResult && (
-        <div data-testid="growth-result">
-          <Notice tone={growthResult.ok ? "ok" : "danger"}>
-            <div className="font-medium">成长中心：{growthResult.report}</div>
-            <ul className="mt-1 space-y-0.5 text-xs text-muted-foreground">
-              {growthResult.steps.map((step, index) => (
-                <li key={`${step.name}-${index}`} data-testid="growth-step">
-                  <span className={GROWTH_STEP_TONE[step.status]}>
-                    {GROWTH_STEP_LABEL[step.status]}
-                  </span>
-                  {step.name}
-                  {step.detail && `：${step.detail}`}
-                </li>
-              ))}
-            </ul>
-            {growthResult.session_dead && (
-              <div className="mt-1 text-xs">
-                登录态已失效，需重新登录该渠道后才能继续领取。
-              </div>
-            )}
-          </Notice>
-        </div>
-      )}
+      {/* 操作结果（探测/签到/导入/成长中心等）统一在顶部居中浮层播报，
+          不再以插入式横幅撑开页面；浮层自带 role=alert/status 供读屏播报。 */}
+      <ToastViewport toasts={toasts} onDismiss={dismiss} />
 
       <Panel
         title="凭证池"
@@ -441,11 +427,11 @@ export function CredentialsPage() {
           hasKilo={hasKilo}
           onImported={(message) => {
             setAddOpen(false);
-            setNotice(message);
+            showNotice(message);
             void refresh();
           }}
-          onNotice={setNotice}
-          onError={setError}
+          onNotice={showNotice}
+          onError={showError}
         />
       )}
     </div>
