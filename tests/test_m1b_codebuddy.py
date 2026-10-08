@@ -21,7 +21,7 @@ from src.db.crypto import CredentialCipher
 from src.db.migrate import apply_schema
 from src.db.repo import CredentialRepository
 from src.engine.executor import Executor, ExecutorDeps, NoHealthyCredential
-from src.engine.scheduler import Scheduler
+from src.engine.scheduler import ErrorOutcome, ModelCooldown, Scheduler
 from src.engine.sse import parse_frames
 from src.main import build_app
 from src.provider.base import ErrKind, Event, EventKind, Model, Usage
@@ -2320,6 +2320,94 @@ async def test_narrowed_provider_without_usable_credential_falls_back(dual_repo)
     result = await executor.complete(_request("deepseek-v4.1-flash"), username="u")
     assert result["choices"][0]["message"]["content"] == "ok"
     assert (cb.calls, trae.calls) == (0, 1)
+
+
+async def test_model_cooling_exhaustion_does_not_fan_out(dual_repo):
+    """收窄渠道全部因**模型级冷却**不可选 → 不放宽重试（不扇出到不认的渠道）。
+
+    实测故障（2026-10-08 15:53）：`qwen3.8-flash` 只有 Qoder 登记（内部原代号
+    `qfmodel`），Qoder 节点故障（`[FAIL]node:oa_qwen-plus-main Execution failed`，
+    按 Q50 归 MODEL）让两条 Qoder 凭证进 600s 模型级冷却；此后每次请求收窄到
+    `{qoder}` → 空 → 触发 broader 回退，把请求甩给不持有该模型的渠道——它们的
+    别名表没有这个键、拿到的仍是原始名 `qwen3.8-flash`，必然被拒（CB 11102 /
+    TRAE 4001 / zen·kilo 401），实测 6 次轮换全废、还给 CB 写下 6 小时起步的
+    BLOCKED 负缓存。现在此路径不扇出，直接给模型级 503（换个模型即可用）。
+    """
+    repo, db = dual_repo
+    qoder_a = repo.add(provider="qoder", credential_data={"accessToken": "a"})
+    qoder_b = repo.add(provider="qoder", credential_data={"accessToken": "b"})
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="trae", credential_data={"accessToken": "trae"})
+    # 冷却登记用**上游原始名**（冷却表按各渠道自己调用的名字）
+    cool = ErrorOutcome(model_cooldowns={"qfmodel": ModelCooldown(
+        cooling_until=int(time.time()) + 600, hits=1, reason="model")})
+    repo.save_error(qoder_a, cool)
+    repo.save_error(qoder_b, cool)
+    qoder = _RejectProvider("qoder", [GOOD])
+    cb = _RejectProvider("codebuddy", [GOOD])
+    trae = _RejectProvider("trae", [GOOD])
+    executor = Executor(ExecutorDeps(
+        providers={"qoder": qoder, "codebuddy": cb, "trae": trae}, credentials=repo,
+        scheduler=Scheduler(), default_model="qwen3.8-flash",
+        # 只有 Qoder 登记该模型（内部原代号 qfmodel）
+        model_aliases={"qoder": {"qwen3.8-flash": "qfmodel"}},
+        # 与 main.py 同款注入：模型冷却按各渠道实际调用的名字（qfmodel）对齐
+        upstream_model_name=lambda pid, name: {
+            "qoder": {"qwen3.8-flash": "qfmodel"}}.get(pid, {}).get(name.lower(), name),
+        model_suggestions=lambda _name: ["qwen3.8-max"]))
+
+    with pytest.raises(NoHealthyCredential) as exc_info:
+        await executor.complete(_request("qwen3.8-flash"), username="u")
+    assert "temporarily unavailable on upstream" in str(exc_info.value)
+    assert "qwen3.8-max" in str(exc_info.value)
+    assert (qoder.calls, cb.calls, trae.calls) == (0, 0, 0)
+    # 负缓存零新增：没有渠道被写「该后端无此模型」
+    assert db.connect().execute(
+        "SELECT COUNT(*) FROM credential_model_cooldowns").fetchone()[0] == 2
+
+
+async def test_model_cooling_with_dead_credential_still_broadens(dual_repo):
+    """收窄渠道**混有账号级不可用**时仍放宽重试（目录陈旧兜底语义不变）。"""
+    repo, db = dual_repo
+    qoder_ok = repo.add(provider="qoder", credential_data={"accessToken": "a"})
+    dead = repo.add(provider="qoder", credential_data={"accessToken": "b"})
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    # 一条账号级硬禁用 + 一条模型级冷却 → 成因不纯，按旧口径放宽
+    db.connect().execute("UPDATE credentials SET disabled = 1 WHERE id = ?", (dead,))
+    repo.save_error(qoder_ok, ErrorOutcome(model_cooldowns={"qfmodel": ModelCooldown(
+        cooling_until=int(time.time()) + 600, hits=1, reason="model")}))
+    qoder = _RejectProvider("qoder", [GOOD])
+    cb = _RejectProvider("codebuddy", [GOOD])
+    executor = Executor(ExecutorDeps(
+        providers={"qoder": qoder, "codebuddy": cb}, credentials=repo,
+        scheduler=Scheduler(), default_model="qwen3.8-flash",
+        # 陈旧目录：qoder 与 codebuddy 都登记了该模型，qoder 又不可用 → 回落 CB
+        model_aliases={"qoder": {"qwen3.8-flash": "qfmodel"},
+                       "codebuddy": {"qwen3.8-flash": "qwen3.8-flash"}},
+        upstream_model_name=lambda pid, name: {
+            "qoder": {"qwen3.8-flash": "qfmodel"}}.get(pid, {}).get(name.lower(), name)))
+
+    result = await executor.complete(_request("qwen3.8-flash"), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert (qoder.calls, cb.calls) == (0, 1)
+
+
+async def test_narrowed_channel_without_credentials_still_broadens(dual_repo):
+    """收窄渠道**一条凭证都没有**时仍放宽重试（无候选 ≠ 模型故障）。"""
+    from src.engine.scheduler import ErrorOutcome, ModelCooldown  # noqa: F401 - 语义对照
+
+    repo, _db = dual_repo
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    cb = _RejectProvider("codebuddy", [GOOD])
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": cb, "codearts": _RejectProvider("codearts", [GOOD])},
+        credentials=repo, scheduler=Scheduler(), default_model="m-only",
+        # 只有 codearts 登记，但该渠道无凭证 → 放宽到 codebuddy 兜底
+        model_aliases={"codearts": {"m-only": "m-only"}}))
+
+    result = await executor.complete(_request("m-only"), username="u")
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert cb.calls == 1
 
 
 async def test_forced_provider_without_usable_credential_keeps_narrowing(dual_repo):

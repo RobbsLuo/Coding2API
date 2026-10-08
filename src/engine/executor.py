@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
@@ -146,21 +146,18 @@ class Executor:
                                          self._suggestions(target.model))
         return _unavailable_message(last_error)
 
-    def _all_model_cooled(self, target: ModelTarget) -> bool:
-        """候选凭证是否**全部**因该模型的模型级冷却而不可选（账号本身可选）。
+    def _model_cooled_only(self, providers: Iterable[str],
+                           target: ModelTarget, now: int) -> bool:
+        """这些上游的凭证是否**全部**只因该模型的模型级冷却而不可选。
 
-        只认模型级冷却：账号级冷却/禁用属于「凭证不可用」，不能冒充模型故障。
-        用于把两种耗尽的文案区分开（见 `_unavailable_text`）。
-
-        调用点在 `_pick` 返回 None 之后，此时 `_select` 已保证至少注册了一个
-        上游（全无注册时它会先抛 NoProviderForModel），故无需再判空上游。
+        只认模型级冷却：账号级冷却 / 硬禁用 / 暂停属于「凭证不可用」，不能冒充
+        模型故障——那类情况说明目录可能陈旧（见 `_select` 的 broader 回退），仍应
+        放宽重试。候选集为空（该上游一条凭证都没有）同样不算：那是目录/凭证侧
+        的问题，不是上游在限流。
         """
-        registered = [pid for pid in self._narrow_providers(target)
-                      if pid in self._deps.providers]
-        candidates = self._deps.credentials.candidates(registered)
+        candidates = self._deps.credentials.candidates(providers)
         if not candidates:
             return False
-        now = int(time.time())
         for candidate in candidates:
             scope = self._model_scope(candidate.provider, target.model)
             if candidate.is_selectable(now, scope):
@@ -168,6 +165,20 @@ class Executor:
             if not candidate.is_selectable(now):    # 账号级原因 → 非模型故障
                 return False
         return True
+
+    def _all_model_cooled(self, target: ModelTarget) -> bool:
+        """候选凭证是否**全部**因该模型的模型级冷却而不可选（账号本身可选）。
+
+        只认模型级冷却：账号级冷却/禁用属于「凭证不可用」，不能冒充模型故障。
+        用于把两种耗尽的文案区分开（见 `_unavailable_text`），也用于决定
+        「收窄后无可用候选」时**是否**该放宽重试（见 `_select`）。
+
+        调用点在 `_pick` 返回 None 之后，此时 `_select` 已保证至少注册了一个
+        上游（全无注册时它会先抛 NoProviderForModel），故无需再判空上游。
+        """
+        registered = [pid for pid in self._narrow_providers(target)
+                      if pid in self._deps.providers]
+        return self._model_cooled_only(registered, target, int(time.time()))
 
     def _skip_provider(self, provider_id: str, tried: set[str]) -> None:
         """INVALID 后跳过该上游：把它的全部凭证都标记为已试。"""
@@ -827,15 +838,27 @@ class Executor:
         usable = self._selectable(self._deps.credentials.candidates(registered),
                                   target, now)
         if not usable:
-            # 收窄后的候选**全部不可用**，不能就此判「无可用渠道」：目录可能陈旧
-            # 或降级——某渠道新增了该模型但别名表还没更新（TTL 内），或该渠道
-            # 的模型列表回退了静态表而丢掉该模型。此时退回 target 的原始候选集
-            # 再试一次，让真正持有该模型且有可用凭证的渠道兜底（CodeArts 无凭证
-            # 时回落到 CodeBuddy/TRAE，而不是直接 503）。
+            # 收窄后的候选**全部不可用**，不能一概判「无可用渠道」，得分两种成因：
+            #
+            # 1. **账号级原因**（无凭证 / 硬禁用 / 暂停 / 账号冷却）→ 目录可能陈旧
+            #    或降级：某渠道新增了该模型但别名表还没更新（TTL 内），或该渠道的
+            #    模型列表回退了静态表而丢掉该模型。此时退回 target 的原始候选集再试
+            #    一次，让真正持有该模型且有可用凭证的渠道兜底（CodeArts 无凭证时
+            #    回落到 CodeBuddy/TRAE，而不是直接 503）。
+            # 2. **模型级冷却**（上游对该模型限流 / 节点故障，如 Qoder 的
+            #    `[FAIL]node:…Execution failed`）→ 持有方是**对的**，只是上游暂时
+            #    不可用。此时**放宽即扇出**：别名表里没有该模型的渠道拿到的仍是
+            #    原始名（没有机会换成对方的原代号），必然被拒（CodeBuddy 11102 /
+            #    TRAE 4001 / zen·kilo 401），白打一轮还留下噪音——CB 的 11102 还会
+            #    被当成「该后端无此模型」写下 6 小时起步的 BLOCKED 负缓存（实测
+            #    2026-10-08 的 qwen3.8-flash：Qoder 节点故障后 6 次轮换全打在
+            #    trae/zen/kilo/codebuddy 上，客户端拿到 400 而非「换个模型即可」）。
+            #    故此路径不扇出，直接交给 `_unavailable_text` 出模型级 503 文案。
             # 强制/@绑定 的 target 候选本就是单一渠道，`broader` 不会更宽，
             # 因此「强制指定出不回退」的语义不受影响。
             broader = [pid for pid in target.providers if pid in self._deps.providers]
-            if len(broader) > len(registered):
+            if (len(broader) > len(registered)
+                    and not self._model_cooled_only(registered, target, now)):
                 usable = self._selectable(self._deps.credentials.candidates(broader),
                                           target, now)
         if not usable:
