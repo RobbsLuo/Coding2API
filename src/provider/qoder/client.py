@@ -357,17 +357,23 @@ class QoderClient:
             if error.status not in CHECKIN_UNAVAILABLE_STATUS:
                 raise
             return await self._legacy_checkin(credential)
+        # 封账到当前签到窗口结束（= 下一轮 10:00 开放时刻），见
+        # `events.checkin_window_end` 与 `CheckinResult.seal_until`
+        seal_until = qoder_events.checkin_window_end(data)
         status = qoder_events.checkin_status_from_campaigns(data)
         if status.today_checked_in:
             return CheckinResult(ok=True, already_checked_in=True,
-                                 message="今日已签到", status=status)
+                                 message="今日已签到", status=status,
+                                 seal_until=seal_until)
         campaign = qoder_events.checkin_campaign(data)
         if campaign is None:
             # 有签到活动但今日无可领项（如已领/同自然人已领）：不重试
             message = ("官方签到活动未开放" if not status.active
                        else "今日暂无可领取的签到奖励")
-            return CheckinResult(ok=True, message=message, status=status)
-        return await self._claim_campaign(credential, status, campaign)
+            return CheckinResult(ok=True, message=message, status=status,
+                                 seal_until=seal_until)
+        return await self._claim_campaign(credential, status, campaign,
+                                          seal_until=seal_until)
 
     async def _legacy_checkin(self, credential: QoderCredential) -> CheckinResult:
         """旧 `daily-check-in/{status,claim}` 流程（活动制接口不可用时的回退）。"""
@@ -414,7 +420,8 @@ class QoderClient:
 
     async def _claim_campaign(self, credential: QoderCredential,
                               status: CheckinStatus | None,
-                              campaign: dict[str, Any]) -> CheckinResult:
+                              campaign: dict[str, Any],
+                              *, seal_until: int | None = None) -> CheckinResult:
         """活动制 claim：`POST /me/campaigns/{id}/claim`（带 Cosy-ClientType）。
 
         上游响应不区分「重放/同自然人已领」与「新领」时都算成功（`ok=True`）：
@@ -427,7 +434,8 @@ class QoderClient:
                                      extra_headers=CAMPAIGN_HEADERS)
         if qoder_events.claim_already_done(data):
             return CheckinResult(ok=True, already_checked_in=True,
-                                 message="今日已签到", status=status)
+                                 message="今日已签到", status=status,
+                                 seal_until=seal_until)
         if str(data.get("status") or "") == qoder_events.CLAIM_STATUS_BLOCKED:
             # 明确被拒（非「同一自然人已领」）：真实失败，交给重试/人工处理
             reason = str(data.get("failureCode") or "BLOCKED")
@@ -436,7 +444,7 @@ class QoderClient:
         reward = qoder_events.campaign_claim_credit(data)
         message = "签到成功" if reward is not None else "签到成功（活动响应异常）"
         return CheckinResult(ok=True, credit=reward, code=0,
-                             message=message, status=status)
+                             message=message, status=status, seal_until=seal_until)
 
     async def _claim_legacy_checkin(self, credential: QoderCredential,
                                     status: CheckinStatus | None) -> CheckinResult:

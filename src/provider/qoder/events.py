@@ -530,6 +530,26 @@ def checkin_campaign(payload: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
+def checkin_window_end(payload: dict[str, Any]) -> int | None:
+    """`GET /me/campaigns` → 签到窗口结束时刻（epoch 秒；无则 None）。
+
+    上游每日 10:00（UTC+8）轮换签到 campaign：当前窗口 10:00 → 次日 09:59，
+    故窗口 endAt 就是**下一轮开放的时刻**。签到任务据此封账（而非封到本地
+    当日结束）：凌晨 00:00 那轮看到的仍是上一轮窗口且已 CLAIMED，按自然日
+    封账会把整天封掉，新窗口 10:00 出现后不再签（表现为「Qoder 不能自动
+    签到」，只能人工点）。取所有签到活动里**最晚**的 endAt，多个窗口并存
+    时以最后一个为准。
+    """
+    campaigns = payload.get("campaigns")
+    if not isinstance(campaigns, list):
+        return None
+    ends = [_opt_int(item.get("endAt")) for item in campaigns
+            if isinstance(item, dict)
+            and str(item.get("actionType") or "") == ACTION_CLAIM_BENEFIT]
+    ends = [end for end in ends if end is not None and end > 0]
+    return max(ends) if ends else None
+
+
 def checkin_status_from_campaigns(payload: dict[str, Any]) -> CheckinStatus:
     """活动制签到状态 → 中立 CheckinStatus。
 

@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -415,6 +416,74 @@ async def test_checkin_task_soft_failure_retries_same_day(repo, monkeypatch):
     report2 = await task.run_once(now=now)
     assert report2.succeeded == 1 and report2.failed == 0
     assert any(key.startswith(f"{task._day_key(now)}:") for key in task._done_scopes)
+
+
+async def test_checkin_seal_until_shortens_day_and_prunes_stale_days(repo):
+    """渠道给了 `seal_until`（签到周期 ≠ 自然日，如 Qoder 每日 10:00 换窗口）：
+    封账只到那一刻，到点后同一天仍会再跑一轮；跨天的封账记录被清掉。"""
+    from src.provider.base import CheckinResult
+
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    provider = StubProvider()
+    calls: list[int] = []
+
+    async def sealed_checkin(_data):
+        # 封到 10:05（比当日结束早得多）：模拟 Qoder 的签到窗口结束时刻
+        calls.append(1)
+        return CheckinResult(ok=True, already_checked_in=True,
+                             message="今日已签到", seal_until=window_end)
+
+    midnight = time.struct_time((2026, 10, 8, 0, 5, 0, 0, 1, -1))
+    window_end = int(time.mktime((2026, 10, 8, 10, 5, 0, 0, 1, -1)))
+    provider.checkin = sealed_checkin
+    task = CheckinTask(credentials, {"codebuddy": provider})
+
+    assert (await task.run_once(now=midnight)).succeeded == 1
+    done_key = f"{task._day_key(midnight)}:scope"
+    assert task._done_scopes[done_key] == window_end
+    # 封账期内不再调上游
+    assert (await task.run_once(now=midnight)).skipped == 1
+    assert len(calls) == 1
+    # 窗口结束（10:05）后：同一天自动再跑一轮，而不是等人工
+    after = time.struct_time((2026, 10, 8, 10, 15, 0, 0, 1, -1))
+    assert (await task.run_once(now=after)).succeeded == 1
+    assert len(calls) == 2
+    # 跨天：昨天的封账记录被清掉（done_key 以日期开头，否则长驻进程无上限增长）
+    task._done_scopes["2026-10-07:scope"] = window_end
+    await task.run_once(now=after)
+    assert "2026-10-07:scope" not in task._done_scopes
+
+
+async def test_checkin_seal_expired_entry_is_not_treated_as_sealed(repo):
+    """封账到期后条目仍在 dict 里（当天不 prune），但不再算封账——否则
+    `seal_until` 一过期该作用域会被永久跳过。"""
+    from src.provider.base import CheckinResult
+
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    provider = StubProvider()
+    calls: list[int] = []
+
+    async def checkin(_data):
+        calls.append(1)
+        return CheckinResult(ok=True, credit=1, code=0,
+                             seal_until=int(time.mktime((2026, 10, 8, 0, 10, 0, 0, 1, -1))))
+
+    provider.checkin = checkin
+    task = CheckinTask(credentials, {"codebuddy": provider})
+    before = time.struct_time((2026, 10, 8, 0, 5, 0, 0, 1, -1))
+    await task.run_once(now=before)
+    after = time.struct_time((2026, 10, 8, 0, 20, 0, 0, 1, -1))
+    assert (await task.run_once(now=after)).succeeded == 1
+    assert len(calls) == 2
+
+
+def test_checkin_day_end_is_next_local_midnight():
+    """默认封账截止 = 当日 24:00（渠道不给 seal_until 时的兜底）。"""
+    task = CheckinTask.__new__(CheckinTask)
+    now = time.struct_time((2026, 10, 8, 23, 30, 0, 0, 1, -1))
+    assert task._day_end(now) == int(time.mktime((2026, 10, 9, 0, 0, 0, 0, 1, -1)))
 
 
 class RecordingPacer:

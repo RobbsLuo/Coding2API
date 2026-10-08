@@ -698,6 +698,10 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **额度**：`GET {openapi}/api/v2/quota/usage` 的 `userQuota` + `addOnQuota` 合成 `remaining`/`total`，`cycle_end` 取最早 `expiresAt`。
 
+**签到窗口 ≠ 自然日，故按窗口封账（2026-10-08）**：上游签到活动每日 **10:00（UTC+8）** 才轮换 `campaignId`，当前窗口 `startAt 10:00 → endAt 次日 09:59`（实测两个账号同批：`startAt=1791424800 endAt=1791511140`）。而 `CheckinTask` 的封账键是 `日期:scope`、封到**本地当日结束**——于是凌晨 00:0x 那轮看到的是**上一轮窗口且已 CLAIMED**，判成「今日已签到」后把整天封掉，等 10:00 新窗口变 `CLAIMABLE` 时早已被封账跳过。表现就是「Qoder 不能自动签到、只能人工点」：积分流水里今天的 +100 全是管理台手点的（`window_start` 距观测只有几秒）。
+
+修法是把封账截止从「当天结束」放宽成渠道可回填的时刻：`CheckinResult.seal_until`（epoch 秒，缺省 None = 当天结束），Qoder 的活动制路径回填 `events.checkin_window_end(payload)` = 签到类活动里**最晚**的 `endAt`（即下一轮开放时刻；展示位 `VIEW_DETAILS` 的 `endAt` 不采信，`endAt` 缺失/非数值/0 → None，回落原口径）。`CheckinTask._done_scopes` 由 `set` 变成 `dict[done_key → 截止时刻]`，判跳过用 `_sealed()`（`until > now`），成功时写 `result.seal_until or _day_end(now)`；跨天由 `_prune()` 清掉旧日期键（否则长驻进程每天每账号各攒一条）。效果：00:0x 那轮封到 09:59，10:0x 起自动再跑一轮领新的，稳态下每账号每天只打一次上游。旧 `daily-check-in` 回退路径与其它渠道仍走自然日封账。
+
 **节点白名单**：`QODER_ALLOWED_ENDPOINTS` 同时含国内 openapi+gateway 与国际版；`_qoder_endpoint` 启动时校验，防止把带签名的请求发往未授权主机。`QODER_CHAT_MIN_INTERVAL`（热更项，默认 5s）走独立 pacer，与其余渠道互不排队。
 
 **上游节点故障归类（Q50）**：Qoder 会把**自身推理节点故障**也包成 400——实测（2026-09-30）免费模型 `qfmodel` 被路由到 `oa_qwen-plus-main` 节点后持续返回 `{"code":"400","message":"[FAIL]node:… msg:Execution failed: null"}`（HTTP 与信封 `statusCodeValue` 都是 400），而同批其他模型正常出流。这与「模型不存在 / 请求无效」的 400 语义完全不同：换凭证不解决但会自愈。故 `classify_error_code` 对 400/404/422 增加**响应体判据**：命中 `NODE_FAILURE_MARKERS = ("[FAIL]node:", "Execution failed")` → `ErrKind.MODEL`（模型级瞬时冷却：只锁 (凭证, 模型)，不再当 `INVALID` 直接 400），否则维持 `INVALID`。`classify_status(status, body)` 与信封解析（`client._decode_frame` 传入 `envelope.body`）都已带 body。安全前提：探测未知模型名（乱码/空串）上游既不返回 ERROR 也不带该标记，真「模型不存在」不含该标记，故识别不会误伤。配套 executor：耗尽轮换且**全部候选都因该模型处于模型级冷却**时（`_all_model_cooled`——逐个候选要求「账号级可选 + 该模型上不可选」），503 文案由 `all credentials unavailable` 改为 `model 'x' temporarily unavailable on upstream`（可附相近模型建议），错误码仍是 `no_healthy_credential`。
@@ -1014,7 +1018,7 @@ class Scheduler:
 | 额度探测（quota_probe.py） | 启动立即一轮（不节流）+ 每 `QUOTA_PROBE_MINUTES`（默认 60）分钟 | 探测剩余额度 → 写 `credentials.quota_*` / `quota_expiry_ladder` / `quota_packages` / `health` |
 | token 到期（token_expiry.py） | —（读路径，非任务） | 从显式 `expires_at` 或 JWT `exp` 派生到期时间，写 `credentials.token_expires_at`（§3.9） |
 | token 预刷新（refresh.py） | 每 `REFRESH_INTERVAL_MINUTES`（默认 30）分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token；到期时间同上（CB 实测无显式字段）。短寿命渠道自行封顶该窗口（CodeArts `refresh_skew_cap_seconds=2700`，见 §3.17）——封顶值必须**严格宽于**本周期，否则窗口整轮漏过、凭证拖到到期才刷。上游明确回「续期凭据已作废」（`UpstreamReloginRequired`）时不重试，改标记「需重新登录」并硬禁用 |
-| 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态）；失败持续重试 |
+| 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证（`日期:scope` → 截止时刻，进程内内存态，跨天清理）；默认封到本地当日结束，渠道可回填 `CheckinResult.seal_until` 封到自己的签到窗口结束（Qoder 每日 10:00 换窗口，见 §3.16）；失败持续重试 |
 | 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5） | 仅 CodeBuddy：7 类领取；结果落 `growth_events` + 回写 `credentials.growth_last_result` |
 | 活跃上报（activity.py，默认关闭） | 每 10 分钟醒一次，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点，北京时间）窗口内执行 | 仅 CodeBuddy：补发一条 `chat_request_send` 续连登；按「endpoint + userId」隔离、当日封账；成功落一行 `growth_events` |
 | 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理；同期限回收 `credit_events`（§3.10）、`audit_events`（§3.13）与 `alert_events`（§3.22） |

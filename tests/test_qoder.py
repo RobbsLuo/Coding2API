@@ -631,14 +631,17 @@ def _status_payload(status: str, *, last: int | None = None) -> dict:
 
 def _campaign(campaign_id: str = "c-1", *, action: str = "CLAIM_BENEFIT",
               status: str = "CLAIMABLE", amount: object = 100,
-              kind: object = "CREDITS") -> dict:
+              kind: object = "CREDITS", end_at: object = 1_795_111_140) -> dict:
     benefit: dict = {}
     if kind is not None:
         benefit["kind"] = kind
     if amount is not None:
         benefit["amount"] = amount
-    return {"campaignId": campaign_id, "campaignKey": "act-1",
-            "actionType": action, "claimStatus": status, "benefit": benefit}
+    item: dict = {"campaignId": campaign_id, "campaignKey": "act-1",
+                  "actionType": action, "claimStatus": status, "benefit": benefit}
+    if end_at is not None:
+        item["endAt"] = end_at
+    return item
 
 
 def _campaigns(*items: dict) -> dict:
@@ -666,6 +669,9 @@ async def test_checkin_campaign_claims_and_reports_credit():
     assert result.ok is True and result.already_checked_in is False
     assert result.credit == 100.0 and result.code == 0
     assert result.message == "签到成功"
+    # 封账到当前签到窗口结束（= 下一轮 10:00 开放时刻），否则任务按自然日封账
+    # 会把凌晨那轮「已领」当成整天完成，新窗口出现后不再自动签
+    assert result.seal_until == 1_795_111_140
     # 新协议不提供连续天数：不编造 0，置 None 交前端隐藏
     assert result.status is not None and result.status.streak_days is None
     assert result.status.today_credit == 100
@@ -684,7 +690,44 @@ async def test_checkin_campaign_already_claimed_needs_no_claim():
     result = await handler_for(handler).checkin(cred())
     assert result.ok is True and result.already_checked_in is True
     assert result.message == "今日已签到"
+    assert result.seal_until == 1_795_111_140
     assert paths == [qoder_events.EP_CAMPAIGNS]
+
+
+async def test_checkin_without_window_end_leaves_seal_to_task_default():
+    """上游没给 endAt（活动改版）→ 不猜窗口，seal_until 留 None 由任务封到
+    当日结束，与其它渠道同口径。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(200, json=_campaigns(_campaign(end_at=None)))
+        return httpx.Response(200, json={"status": "CLAIMED",
+                                         "benefit": {"amount": 100}})
+
+    assert (await handler_for(handler).checkin(cred())).seal_until is None
+
+
+async def test_checkin_claim_already_done_still_seals_to_window_end():
+    """重放/同自然人已领：算「今日已签」并封到窗口结束，不每 10 分钟重试。"""
+    def replayed(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(200, json=_campaigns(_campaign()))
+        return httpx.Response(200, json={"status": "CLAIMED", "replayed": True,
+                                         "benefit": {"amount": 100}})
+
+    result = await handler_for(replayed).checkin(cred())
+    assert result.ok is True and result.already_checked_in is True
+    assert result.seal_until == 1_795_111_140
+
+
+async def test_checkin_blocked_is_failure_and_not_sealed():
+    """真被拒（BLOCKED 非同一自然人）→ 不封账，下轮重试。"""
+    def blocked(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CAMPAIGNS:
+            return httpx.Response(200, json=_campaigns(_campaign()))
+        return httpx.Response(200, json={"status": "BLOCKED",
+                                         "failureCode": "RATE_LIMITED"})
+
+    assert (await handler_for(blocked).checkin(cred())).seal_until is None
 
 
 async def test_checkin_campaign_skips_view_details_and_picks_claimable():
@@ -950,6 +993,23 @@ def test_campaign_helpers_edges():
     assert qoder_events.claim_already_done(
         {"status": "BLOCKED", "failureCode": "RATE_LIMITED"}) is False
     assert qoder_events.claim_already_done({"status": "CLAIMED"}) is False
+
+
+def test_checkin_window_end_picks_latest_checkin_campaign():
+    """窗口结束 = 下一轮开放时刻：只认签到活动，取最晚 endAt；展示位
+    （VIEW_DETAILS）的 endAt 更晚也不能被采信。缺失/非数值 → None。"""
+    assert qoder_events.checkin_window_end(
+        _campaigns(_campaign("c-1", end_at=100), _campaign("c-2", end_at=200))) == 200
+    assert qoder_events.checkin_window_end(_campaigns(
+        _campaign(end_at=100),
+        _campaign("detail", action="VIEW_DETAILS", end_at=999))) == 100
+    assert qoder_events.checkin_window_end({"campaigns": "x"}) is None
+    assert qoder_events.checkin_window_end(_campaigns()) is None
+    # 非数值 / 0 / 负数的 endAt 一律当缺失（不猜窗口）
+    assert qoder_events.checkin_window_end(
+        _campaigns(_campaign(end_at="soon"))) is None
+    assert qoder_events.checkin_window_end(_campaigns(_campaign(end_at=0))) is None
+    assert qoder_events.checkin_window_end(_campaigns(1, "x")) is None
 
 
 # ---------------------------------------------------------------- 刷新

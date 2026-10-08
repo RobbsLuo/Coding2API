@@ -248,6 +248,13 @@ class CheckinResult:
     # 渠道可选回填的活动状态（CB 有；TRAE 为 None 或仅回填部分字段）。
     # 用 dict 而非具体类型：这是 provider 私有形状，中立层不该认识它。
     status: Any | None = None
+    # 封账截止时刻（epoch 秒），None = 封到本地当日结束（`CheckinTask` 默认）。
+    # 只有**渠道的签到周期不等于本地自然日**时才需要回填：Qoder 每日 10:00
+    # （UTC+8）才换 campaign，凌晨 00:00 那轮看到的仍是上一轮窗口且已 CLAIMED，
+    # 按自然日封账会把整天封掉 → 新窗口 10:00 出现后再也不签（只能人工点）。
+    # 回填成「当前窗口 endAt」（= 下一轮开放的时刻）后，任务在新窗口出现时
+    # 会自动再跑一轮，签到窗口每天只打一次上游。
+    seal_until: int | None = None
 
 
 @dataclass(slots=True)
