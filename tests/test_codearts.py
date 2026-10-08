@@ -20,7 +20,13 @@ import time
 import httpx
 import pytest
 
-from src.provider.base import ErrKind, Event, EventKind, Usage
+from src.provider.base import (
+    ErrKind,
+    Event,
+    EventKind,
+    UpstreamReloginRequired,
+    Usage,
+)
 from src.provider.codearts import CodeArtsProvider, credential_key, dpop, signer
 from src.provider.codearts import auth as codearts_auth
 from src.provider.codearts import events as codearts_events
@@ -488,6 +494,24 @@ def test_credential_expiry_and_needs_refresh():
     # 显式传 now：不依赖真实时钟
     assert _cred(expiration=1000).needs_refresh(10, now=995) is True
     assert _cred(expiration=1000).needs_refresh(10, now=1) is False
+
+
+def test_credential_needs_refresh_caps_skew_at_sts_lifetime():
+    """24h 的全局 skew 会被本渠道封顶，否则每轮都烧一张一次性票。
+
+    STS 临时凭证只有 2h 寿命，skew ≫ 寿命会让 needs_refresh 恒为真；
+    封顶后只在「离到期 ≤ 30min」时才轮转。封顶值必须 ≥ 预刷新轮询周期
+    （60min 的一半才安全，这里 30min > 0 且留足余量），否则整轮漏过导致
+    凭证静默过期——所以顺带断言它明显小于 1 小时这个量级之外仍有界。
+    """
+    cap = CodeArtsCredential.refresh_skew_cap_seconds
+    assert cap == 1800
+    # skew 24h（86400s）被压到 30min：now=1000 时离到期 1801s 不刷、1800s 就刷
+    assert _cred(expiration=1000 + 1801).needs_refresh(86400, now=1000) is False
+    assert _cred(expiration=1000 + 1800).needs_refresh(86400, now=1000) is True
+    # 封顶不影响小 skew（调用方传的值更小时原样生效）
+    assert _cred(expiration=1000 + 10).needs_refresh(10, now=1000) is True
+    assert _cred(expiration=1000 + 11).needs_refresh(10, now=1000) is False
 
 
 def test_credential_to_dict_roundtrip():
@@ -1047,6 +1071,28 @@ async def test_client_refresh_token_rotates_via_sts():
     assert refreshed.access_key_id == "AKN"
 
 
+async def test_client_refresh_token_spent_raises_relogin_required():
+    """一次性票被消费 → 终态异常（不是可重试失败，RefreshTask 据此停手）。"""
+    def burned(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, content=(
+            b'{"error_code":"STS5.1806","error_msg":"invalid refresh token: '
+            b"\'the refresh token has been used\'\"}"))
+
+    with pytest.raises(UpstreamReloginRequired, match="需重新登录"):
+        await _client(burned).refresh_token(
+            _cred(refresh_token="rt-old", dpop_private_jwk=_jwk()))
+
+
+async def test_client_refresh_token_retryable_failure_not_terminal():
+    """5xx / 普通 4xx 是可重试的失败：原样上抛，不能升级成终态。"""
+    def server_error(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, content=b"upstream busy")
+
+    with pytest.raises(codearts_auth.TokenEndpointError):
+        await _client(server_error).refresh_token(
+            _cred(refresh_token="rt-old", dpop_private_jwk=_jwk()))
+
+
 async def test_client_request_json_error_paths():
     def http_error(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(502, content=b"bad gateway")
@@ -1365,6 +1411,34 @@ def test_events_classify_error_code_branches():
     assert classify("1005 quota") is ErrKind.PLAN
     assert classify("APIG.0301 decrypt token fail") is ErrKind.DEAD
     assert classify("ChatAgent.99999999") is ErrKind.OTHER
+
+
+def test_events_relogin_required_markers():
+    """令牌端点终态判定：只有点名的一次性票据失效类错误才算不可自愈。"""
+    burned = codearts_events.relogin_required(
+        b'{"error_code":"STS5.1806","error_msg":"invalid refresh token: '
+        b"\'the refresh token has been used\'\"}")
+    assert burned == "刷新令牌已失效，需重新登录"
+    for body in (b"invalid client id", b"InvalidDPoPHeader", b"invalid_grant"):
+        assert codearts_events.relogin_required(body)
+    # 可重试的失败不得判终态：否则一次偶发 5xx 会永久废掉一条好凭证
+    for body in (b"", b"internal server error", b"too many requests"):
+        assert codearts_events.relogin_required(body) == ""
+
+
+def test_events_classify_status_sts_expired_is_soft():
+    """`APIG.0602`（STS 临时凭证过期）走短冷却，不落 INVALID 也不硬禁用。
+
+    INVALID 会让客户端收到 `model not available on any configured upstream`
+    （实测 84 条 APIG.0602 全走这条），DEAD 会硬禁用从而断掉 RefreshTask
+    唯一的自愈路径——只有短冷却才对：既挡住对废凭证的连续打，又保留接管权。
+    """
+    classify = codearts_events.classify_status
+    body = b'{"error_msg":"Bad request: the security token has expired","error_code":"APIG.0602"}'
+    assert classify(400, body) is ErrKind.SOFT
+    assert classify(400, b"the security token has expired") is ErrKind.SOFT
+    # 普通 400 仍是 INVALID（不回归原有语义）
+    assert classify(400, b"bad model param") is ErrKind.INVALID
 
 
 def test_events_classify_status_branches():

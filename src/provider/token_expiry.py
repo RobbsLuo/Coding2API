@@ -25,7 +25,18 @@ from typing import Any
 _TOKEN_KEYS: tuple[str, ...] = (
     "bearer_token", "bearerToken", "accessToken", "access_token", "token")
 # 凭证 JSON 里可能出现到期时间的键名。
-_EXPIRY_KEYS: tuple[str, ...] = ("expires_at", "expiresAt")
+# `expiration` 是华为云系（CodeArts STS 临时凭证）的通用字段名：凭证落库前已由
+# `CodeArtsCredential._expiration_from_raw` 归一成秒，整数落盘。漏掉它时该渠道的
+# `token_expires_at` 恒为 0 → 管理台无到期预览、到期预警规则（token_expiring）
+# 对它完全不生效，实测 2 小时寿命的临时凭证过期时没有任何提示。
+_EXPIRY_KEYS: tuple[str, ...] = ("expires_at", "expiresAt", "expiration")
+# 只借 `iat`（**不借 exp**）的键名，放在 access token 键之后兜底。
+# CodeArts 的 access token 是 STS AK/SK（不是 JWT，取不到 iat），但签发它的那次
+# STS 响应同时轮转出一张 refresh_token JWT，其 `iat` 就是这组临时凭证的签发
+# 时刻（实测 `iat + 7200 == expiration`，上游固定 2h 寿命）——这是上游自己给的
+# 权威签发时间，不是本地回填时刻，因此可用于进度条满量程与「寿命是否短于预警
+# 窗口」的判定（见 db/repo.py 的 expiring_tokens）。
+_ISSUED_ONLY_KEYS: tuple[str, ...] = ("refresh_token",)
 
 # 上游可能返回毫秒时间戳；超过该阈值（≈ 公元 33658 年）视为毫秒。
 _MILLISECOND_THRESHOLD = 1_000_000_000_000
@@ -107,6 +118,8 @@ def credential_token_times(data: dict[str, Any]) -> tuple[int, int]:
     的 `iat` 能给（上游不会单独回传），所以显式 `expires_at` 的渠道拿不到
     `iat` 时签发时间为 0——此时进度条按「未知寿命」处理，而不是拿回填时刻
     冒充（回填时刻是「我们什么时候写这条记录」，不是「上游什么时候签发的」）。
+    唯一的例外是 `_ISSUED_ONLY_KEYS`：那里的 JWT 不是 access token，只是**和**
+    access token 同时签发，故 `iat` 可用而 `exp` 不可用。
 
     挑选规则与 `credential_expiry` 保持一致：遍历 token 键、取第一个真正
     带得出信息的那个，而不是碰到的第一个字符串就收手——否则 `access_token`
@@ -122,4 +135,12 @@ def credential_token_times(data: dict[str, Any]) -> tuple[int, int]:
             if issued_at or jwt_exp:
                 # 显式 expires_at 更贴渠道语义：JWT 只补 iat，不覆盖到期时间
                 return issued_at, expires_at or jwt_exp
+    for key in _ISSUED_ONLY_KEYS:
+        token = data.get(key)
+        if isinstance(token, str):
+            # 只借 iat：refresh_token 自身的 exp 是「登录 +30 天」，拿它当
+            # access token 的到期会把 2h 的临时凭证画成 30 天
+            issued_at, _jwt_exp = jwt_times(token)
+            if issued_at:
+                return issued_at, expires_at
     return 0, expires_at

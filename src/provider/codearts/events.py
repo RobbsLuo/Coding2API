@@ -83,6 +83,19 @@ _MODEL_THROTTLE_MARKERS = ("tpm", "429", "rate limit", "throttl")
 # 上游把并发超限放在 HTTP 400（不是 429），命中即应算可重试的限流。
 # 并发与否的区分见 _CONCURRENCY_MARKERS（先判并发，再判模型级限流）。
 _STATUS_THROTTLE_MARKERS = ("00001041", "tpm", "并发", "rate limit", "throttl")
+# 令牌端点判定「这张 refresh_token 已经废了」的标记（实测原文，绑定关系见
+# credential.py 模块文档）。命中即无法自愈：程序换不出新票，只能重新登录。
+# 这里只收上游点名的那几类终态——网络抖动 / 5xx / 限流都是可重试的，误判成终态
+# 会让一次偶发故障永久废掉一条好凭证。
+_RELOGIN_MARKERS: tuple[str, ...] = (
+    "invalid refresh token",        # STS5.1806：一次性票已被消费或已失效
+    "the refresh token has been used",
+    "invalid client id",            # 绑定项 client_id 不符
+    "invaliddpopheader",            # 绑定项 DPoP 私钥不匹配
+    "invalid_grant",                # OAuth 标准错误码
+)
+# 临时凭证过期（`APIG.0602 the security token has expired`）。
+_STS_EXPIRED_MARKERS: tuple[str, ...] = ("apig.0602", "security token has expired")
 # 结构性噪声行（心跳、被截断的裸括号）：整行只有空白与 `[]:,`，无 JSON 语义。
 # `_data_payload` 会放行 `{`/`[` 开头的行，实测上游偶发只发一个括号的心跳。
 _SSE_NOISE_RE = re.compile(r"^[\s{}\[\]:,]*$")
@@ -276,6 +289,22 @@ def classify_error_code(code: str | None) -> ErrKind:
     return ErrKind.OTHER
 
 
+def relogin_required(body: bytes) -> str:
+    """令牌端点的非 2xx 响应体 → 该凭证是否已**不可自愈**，需要重新登录。
+
+    返回可直接展示的原因（不含上游正文，符合 M2 不回显上游响应的约束）；
+    可重试的失败（网络、5xx、限流、绑定项齐全的普通 4xx）返回空串。
+
+    为什么必须在这里判终态而不是让 RefreshTask 重试：refresh_token 一次性，
+    被消费/失配之后每次重试都是同一张废票。判错的代价是「一次偶发故障永久
+    废掉一条好凭证」，所以只认 `_RELOGIN_MARKERS` 里上游点名的那几类。
+    """
+    text = body.decode("utf-8", errors="replace").lower()
+    if any(marker in text for marker in _RELOGIN_MARKERS):
+        return "刷新令牌已失效，需重新登录"
+    return ""
+
+
 def classify_status(status: int, body: bytes = b"") -> ErrKind:
     """HTTP 状态码 + body 业务码分类（判定顺序即优先级）。
 
@@ -292,6 +321,15 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
     if status in (400, 404) and (
            11102 in codes or any(m in lowered for m in _MODEL_ABSENT_MARKERS)):
         return ErrKind.BLOCKED
+    # 临时凭证过期（`APIG.0602`，实测走 HTTP 400）：账号级的**可恢复**故障——
+    # 预刷新任务下一轮就会换上新 STS 凭证。必须排在下面的 `400 → INVALID` 之前：
+    # INVALID 的语义是「请求本身无效」，换 provider 也没用且不冷却，客户端只会
+    # 收到 `model not available on any configured upstream`（实测 84 条 APIG.0602
+    # 全走这条）。也不能判 DEAD：硬禁用会让预刷新任务跳过该凭证（`candidates()`
+    # 的 disabled 分支），反而断掉唯一的自愈路径。短冷却既挡住对同一张废凭证的
+    # 连续打，又把接管权留给 RefreshTask。
+    if any(m in lowered for m in _STS_EXPIRED_MARKERS):
+        return ErrKind.SOFT
     if status in (401, 403):
         return ErrKind.DEAD
     if status == 404:

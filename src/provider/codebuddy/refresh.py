@@ -13,6 +13,7 @@ from typing import Any
 
 import httpx
 
+from ..base import UpstreamReloginRequired
 from .credential import CodeBuddyCredential
 from .events import UpstreamProtocolViolation
 from .headers import EP_ACCOUNTS, EP_SWITCH_ENTERPRISE, EP_TOKEN_REFRESH, host_of
@@ -75,7 +76,11 @@ class CodeBuddyRefresh:
             raise UpstreamProtocolViolation(
                 f"refresh transport error: {type(error).__name__}") from error
         if response.status_code in (401, 403):
-            raise UpstreamProtocolViolation("refresh unauthorized")
+            # refresh token 被拒是终态：它不像 CodeArts 那样一次性消费，但被撤销 /
+            # 过期后重试同样拿不回新 access token，程序侧无法自愈，只能重新登录。
+            # 与网络/5xx/结构异常（下面那些 UpstreamProtocolViolation，可重试）
+            # 区分开，才不会让 RefreshTask 每小时拿同一张废票重试。
+            raise UpstreamReloginRequired("刷新令牌已失效，需重新登录")
         if response.status_code >= 400:
             raise UpstreamProtocolViolation(f"refresh rejected with {response.status_code}")
         try:

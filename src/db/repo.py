@@ -151,6 +151,24 @@ class CredentialRepository:
                          (credential_id,))
         return cursor.rowcount > 0
 
+    def mark_relogin_required(self, credential_id: str, reason: str) -> None:
+        """标记「需重新登录」：硬禁用 + 可操作原因，停止一切自动重试。
+
+        与 `save_error` 的 `session dead` 分支分开：那条是聊天路径按
+        ErrKind.DEAD 打的通用标记，而这里由预刷新任务在确认「续期凭据已被上游
+        作废」后写入**可操作**的原因（管理台直接显示在 disabled_reason 上）。
+
+        硬禁用是必需的：RefreshTask 会跳过 disabled 的凭证，调度选号与额度
+        探测同样跳过（`candidates(selectable_only=True)`），否则一条已经死了的
+        凭证会继续每轮被挑中并刷屏，而唯一能救它的刷新任务反倒不再尝试。
+        """
+        with self._db.transaction() as conn:
+            conn.execute(
+                "UPDATE credentials SET disabled = 1, disabled_reason = ?, err_count = 0, "
+                "cooling_until = NULL WHERE id = ?", (reason, credential_id))
+            conn.execute("DELETE FROM credential_model_cooldowns WHERE credential_id = ?",
+                         (credential_id,))
+
     def save_error(self, credential_id: str, outcome: ErrorOutcome) -> None:
         """落库一次错误结果。
 
@@ -461,21 +479,29 @@ class CredentialRepository:
           同源；派生不出（0）视为未知，不算「即将到期」；
         - 0 = 上游确实没给到期信息，不当成已过期；
         - 硬禁用（session 死亡）的凭证排除：它们本就要求重新登录，再报 token
-          到期没有额外价值。
+          到期没有额外价值；
+        - **寿命本就短于窗口**的凭证排除：CodeArts 的 STS 临时凭证只有 2h，
+          而默认窗口 24h，于是无论续期成功与否它都永远「即将到期」，每个静默窗
+          报一次——恒真的告警只会把真告警淹掉。这类凭证真出问题时预刷新任务会
+          失败并把它标成需重新登录（进而触发池空告警），所以这里主动静音。
+          签发时间未知（0）时不猜，按原语义照报。
         """
         if within_seconds <= 0:
             return []
         moment = int(now if now is not None else time.time())
         deadline = moment + within_seconds
         rows = self._db.connect().execute(
-            "SELECT id, provider, nickname, data_enc, token_expires_at "
+            "SELECT id, provider, nickname, data_enc, token_expires_at, token_issued_at "
             "FROM credentials WHERE disabled = 0").fetchall()
         out: list[dict[str, Any]] = []
         for row in rows:
             if row["token_expires_at"] is None:
-                _issued, expires_at = _token_times_from_blob(row["data_enc"], self._cipher)
+                issued_at, expires_at = _token_times_from_blob(row["data_enc"], self._cipher)
             else:
-                expires_at = row["token_expires_at"]
+                issued_at, expires_at = row["token_issued_at"] or 0, row["token_expires_at"]
+            lifetime = expires_at - issued_at if issued_at > 0 else 0
+            if lifetime and lifetime <= within_seconds:
+                continue
             if expires_at and moment < expires_at <= deadline:
                 out.append({"id": row["id"], "provider": row["provider"],
                             "nickname": row["nickname"],

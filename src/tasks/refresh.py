@@ -1,4 +1,10 @@
-"""token 预刷新：只处理进入 REFRESH_SKEW_HOURS 窗口的凭证。"""
+"""token 预刷新：只处理进入 REFRESH_SKEW_HOURS 窗口的凭证。
+
+终态识别：一次性 refresh_token 被消费后，每轮重试用的都是同一张废票，
+表现为「每小时刷一条一模一样的 warning」而凭证其实早就死了。上游明确说
+票据作废时（`UpstreamReloginRequired`）改写 disabled_reason 并停手，把处置
+交给人；其余失败照旧只记 warning，等下一轮。
+"""
 
 from __future__ import annotations
 
@@ -7,6 +13,7 @@ import time
 from collections.abc import Callable
 
 from ..db.repo import CredentialRepository
+from ..provider.base import UpstreamReloginRequired
 from . import TaskReport
 from .pacer import Pacer
 
@@ -47,6 +54,16 @@ class RefreshTask:
                 await self._pacer.wait_turn()
             try:
                 refreshed = await provider.refresh(data)
+            except UpstreamReloginRequired as error:
+                # 续期凭据已作废：重试无意义，且重试只会继续污染凭证状态。
+                # 标记成需重新登录后本任务下轮直接跳过（candidates 的 disabled 分支），
+                # 不再每小时刷一条同样的 warning。
+                logger.warning(
+                    "refresh for %s needs re-login, disabling credential: %s",
+                    candidate.credential_id, error)
+                self._credentials.mark_relogin_required(candidate.credential_id, str(error))
+                report.failed += 1
+                continue
             except Exception as error:  # noqa: BLE001
                 logger.warning("refresh failed for %s: %s", candidate.credential_id, error)
                 report.failed += 1

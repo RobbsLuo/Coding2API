@@ -502,12 +502,14 @@ response.completed | response.incomplete
 |---|---|---|
 | TRAE | 有值（= JWT `exp`） | 凭证字段即可 |
 | CodeBuddy | **恒为 0**：OAuth 登录与刷新响应都不带 `expires_at`/`created_at`/`expires_in` | 只能从 bearer token 的 JWT `exp` 解析 |
+| CodeArts | 用 `expiration`（**不是** `expires_at`） | `expiration` 字段；签发时间借 `refresh_token` JWT 的 `iat` |
 
 三个 CodeBuddy 凭证实测 `expires_at` 全为 0，而其 bearer token 都是 JWT、带权威 `exp`。严格只读凭证字段，预警对**全部** CodeBuddy 凭证名存实亡；更糟的是 `CodeBuddyCredential.needs_refresh` 首行要求 `expires_at > 0`，于是 CodeBuddy 的 token **从来不预刷新**——这正是本批顺带修掉的真实故障。
 
 **实现**：`provider/token_expiry.py`（渠道中立，刻意不 import provider 子模块，否则 `provider.codebuddy.events → engine.sse` 会被拖进 `db` 层）：
 
-- `credential_token_times(data)`：返回 `(签发, 到期)` 两个 epoch。到期优先显式 `expires_at`/`expiresAt`，缺失 / 非法时遍历可能的 token 键（`bearer_token`/`accessToken`/…）解析 JWT `exp`；签发时间只来自 JWT `iat`（上游不会单独回传）。各自拿不到时返回 **0 = 未知**。**不猜本地 TTL**——捏造的到期时间会让管理台显示假预警，比不显示更糟；拿回填时刻冒充 `iat` 同样不行（那是「我们何时写的」，不是「上游何时签发的」）。
+- `credential_token_times(data)`：返回 `(签发, 到期)` 两个 epoch。到期优先显式 `expires_at`/`expiresAt`/`expiration`（后者是华为云系的字段名），缺失 / 非法时遍历可能的 token 键（`bearer_token`/`accessToken`/…）解析 JWT `exp`；签发时间只来自 JWT `iat`（上游不会单独回传）。各自拿不到时返回 **0 = 未知**。**不猜本地 TTL**——捏造的到期时间会让管理台显示假预警，比不显示更糟；拿回填时刻冒充 `iat` 同样不行（那是「我们何时写的」，不是「上游何时签发的」）。
+  - **只借 `iat` 的兜底**：CodeArts 的 access token 是 STS AK/SK（非 JWT，取不到 `iat`），但签发它的那次 STS 响应同时轮转出一张 `refresh_token` JWT，其 `iat` 就是这组临时凭证的签发时刻（实测 `iat + 7200 == expiration`）。故 access token 键都取不到信息时，再遍历 `_ISSUED_ONLY_KEYS`（`refresh_token`）**只借 `iat`、不借 `exp`**——后者的 30 天寿命会把 2h 的临时凭证画成 30 天。这是上游给的权威签发时间，不是本地回填时刻。
 - `credential_expiry(data)`：上面的到期分量（预刷新判定与兼容入口）。
 - `jwt_times(token)` / `jwt_expiry(token)`：只 base64url 解码不验签（签名由上游校验，这里仅用于展示与预刷新判定）；非 JWT / 结构异常 / claim 非法一律 0。
 - `normalize_epoch()`：毫秒时间戳归一（TRAE 原先的私有 `_normalize_epoch` 收敛到这里，两渠道共用）。
@@ -706,6 +708,12 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 **DPoP 令牌刷新（刚性约束）**：`POST {sts}/v1/oauth2/tokens` `grant_type=refresh_token` 需带 **DPoP(ES256/P-256) JWS**。refresh_token 与 `client_id=codearts-agent` + DPoP 私钥**三者绑定、一次性**——刷新成功必须把返回的新 `refresh_token` 回写凭证（`RefreshTask` 先落库再同步账号，正好满足）。ES256 用 `cryptography`（`ec.SECP256R1` + `ECDSA(SHA256)`，**低 S 归一化**），不移植 Go/手写 ECDSA。
 
+**刷新节流（2026-10-08）**：`REFRESH_SKEW_HOURS` 默认 24h ≫ STS 寿命 2h，而 `needs_refresh` 的语义是「离到期还剩 skew 秒就刷」，故 24h skew 让本渠道**恒为真**，`RefreshTask` 每轮（约 60min）都去烧一张一次性 `refresh_token`——票是单次的，多烧一张就多一分「被并发/自己消费掉」的风险面。给 `CodeArtsCredential` 加 `refresh_skew_cap_seconds = 1800`，`needs_refresh` 取 `min(skew, cap)`：把「一进窗口就每轮都刷」降成「离到期 30min 内才刷」。不能更小的硬约束是预刷新轮询周期（默认 60min）——窗口窄于周期会整轮漏过，2h 寿命的凭证静默过期。
+
+**STS 过期分类（`APIG.0602`，2026-10-08）**：临时凭证过期时聊天侧收 `HTTP 400` + `APIG.0602 security token has expired`。此前落进 `classify_status` 的 `400 → INVALID`（语义是「请求本身无效」，换 provider 也没用且不冷却），客户端只看到 `model not available on any configured upstream`（实测 84 条 APIG.0602 全走这条）。现于 `401/403 → DEAD` 判定**之前**识别 `security token has expired`（标记 `_STS_EXPIRED_MARKERS`），判 `SOFT`——账号级**可恢复**故障：下一轮预刷新换上新 STS 凭证即自愈。**不能判 DEAD**：硬禁用会让 `RefreshTask` 跳过该凭证（`candidates()` 的 disabled 分支），反而断掉唯一的自愈路径。
+
+**一次性票终态（`UpstreamReloginRequired`，2026-10-08）**：`refresh_token` 被消费 / 绑定项不符后，每次重试都是同一张废票，表现为「每小时刷一条一模一样的 warning 而凭证早已死透」。`provider.base` 新增 `UpstreamReloginRequired`（与「可重试失败」的区别只在处置方式）；CodeArts 令牌端点在 `client.refresh_token` 捕获 `TokenEndpointError` 后经 `events.relogin_required(body)` 判定——只认 `_RELOGIN_MARKERS`（`STS5.1806 the refresh token has been used` / `invalid client id` / `InvalidDPoPHeader` / `invalid_grant`）这几类**上游点名**的终态，网络 / 5xx / 限流 / 绑定项齐全的普通 4xx 仍走可重试路径（误判成终态会让一次偶发故障永久废掉一条好凭证）。CodeBuddy 的 401/403 同样归入该异常。`RefreshTask` 捕获后调 `CredentialRepository.mark_relogin_required`：写**可操作**的 `disabled_reason`（「刷新令牌已失效，需重新登录」）、硬禁用、清模型级冷却；本轮记 failed，下轮 `candidates()` 直接计入 skipped，不再重试。
+
 **SSE 帧（2026-09-30 抓真实流核实）**：逐行 `data:` JSON（`data:` 行间有空行；也有不带 `data:` 前缀的裸 JSON 行），最后由 `data:[DONE]` 结束。**v2 `/api/v2/chat/completions` 实测是标准 OpenAI chunk**：`{"choices":[{"delta":{"content":…,"reasoning_content":…,"tool_calls":…},"finish_reason":…}]}`，增量在 `delta`（**不是**累计全文），收尾帧 `choices:[]` + `usage` 单独给 token 数；带 `tool_stream:true` 时工具调用分片在 `delta.tool_calls`。旧形状（逆向记录 §5 / legacy `/v1/chat/chat`）则是 `{"text":"<累计全文>"}`（替换语义，用 `TextSnapshot` 做差）+ 结束帧 `{"text":"[DONE]","error_code":"0"}`。解析器**两种形状同时兼容**，按字段分派。错误有两条路：HTTP 非 2xx，或流内 `error_code`（形如 `ChatAgent.*` / `TM.00001041`，HTTP 仍 200）。
 
 **无每日签到**：额度是**每日 token 池**（实测 2026-09-30：`GET {opengw}/api/v1/user/tokens/balance` 返回 `daily_token_limit` 1000 万 / `daily_tokens_used`；官方口径「每日千万 Token 免费领，当日 0 点清零、不累计」），上游没有每日签到接口。因此本渠道**不实现 `checkin`**（`checkin_scope` 也一并省略，后台签到任务自动跳过它）；「保活」由 token 自动 refresh 承担——且**只由 `RefreshTask` 承担**（先落库再同步）：`refresh_token` 是一次性的，额度探测等旁路若也顺手刷新，同一个 token 会被两处各消费一次，后到的报 `the refresh token has been used`，且旁路刷新结果不落库、库里 token 被烧成废票（实测由此把渠道打成 `APIG.0602 security token has expired`）。`probe_quota` 因此改为**只读余额**，不再保活刷新。`parse_balance` 有 `daily_token_limit` 时按**当日**口径算剩余（`remaining = daily_token_limit - daily_tokens_used`），拿不到该字段才退化到 `total_quota`/`total_balance`/`used_amount` 等通用键；**上游数值是 token，落库前统一折成「积分」**（见下条）。福利模型发现（`{opengw}/api/v1/gateway/config`）与 Token 领取（`POST /api/v1/benefit/claim`，幂等）在探测时顺带完成。
@@ -804,7 +812,7 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 - `pool_empty` 取 `total>0`：池里一个凭证都没有是「没配」而非「耗尽」，不报。
 - `task_failed` 只列**真跑过且达阈值**的 key：从未运行的任务不在 `_failure_streaks` 里，不会被误报。
-- `token_expiring`：`token_expires_at` 列 NULL（老库未回填）时从密文按需派生（与列表页同源）；派生不出（0）视为未知、不算「即将到期」；硬禁用（session 死亡）凭证排除——它们本就要求重新登录。
+- `token_expiring`：`token_expires_at` 列 NULL（老库未回填）时从密文按需派生（与列表页同源）；派生不出（0）视为未知、不算「即将到期」；硬禁用（session 死亡）凭证排除——它们本就要求重新登录；**寿命本就短于窗口**的凭证排除——CodeArts 的 STS 临时凭证只有 2h，而默认窗口 24h，无论续期成功与否它都永远「即将到期」，每个静默窗报一次只会把真告警淹掉；它真出问题时预刷新任务会失败并把它标成需重新登录（进而触发池空告警）。签发时间未知（0）时不猜，按原语义照报。
 - `error_rate` 读 `usage_events` **明细**而非小时汇总：告警窗是分钟级（默认 15 分钟），小时粒度要么整点才更新、要么跨小时口径错乱。
 
 **投递（用户选定「Webhook + 站内」）**：
@@ -1001,7 +1009,7 @@ class Scheduler:
 |---|---|---|
 | 额度探测（quota_probe.py） | 启动立即一轮（不节流）+ 每 `QUOTA_PROBE_MINUTES`（默认 60）分钟 | 探测剩余额度 → 写 `credentials.quota_*` / `quota_expiry_ladder` / `quota_packages` / `health` |
 | token 到期（token_expiry.py） | —（读路径，非任务） | 从显式 `expires_at` 或 JWT `exp` 派生到期时间，写 `credentials.token_expires_at`（§3.9） |
-| token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token；到期时间同上（CB 实测无显式字段） |
+| token 预刷新（refresh.py） | 每 60 分钟 | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换 refresh token；到期时间同上（CB 实测无显式字段）。短寿命渠道自行封顶该窗口（CodeArts `refresh_skew_cap_seconds=1800`，见 §3.17）。上游明确回「续期凭据已作废」（`UpstreamReloginRequired`）时不重试，改标记「需重新登录」并硬禁用 |
 | 每日签到（checkin.py） | 每 10 分钟（全天） | 成功即封账该凭证当日（`日期:scope`，进程内内存态）；失败持续重试 |
 | 成长中心（growth.py） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5） | 仅 CodeBuddy：7 类领取；结果落 `growth_events` + 回写 `credentials.growth_last_result` |
 | 活跃上报（activity.py，默认关闭） | 每 10 分钟醒一次，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点，北京时间）窗口内执行 | 仅 CodeBuddy：补发一条 `chat_request_send` 续连登；按「endpoint + userId」隔离、当日封账；成功落一行 `growth_events` |

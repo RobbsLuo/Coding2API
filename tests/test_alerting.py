@@ -224,6 +224,29 @@ def test_expiring_tokens_off_returns_empty(repo):
     assert credentials.expiring_tokens(within_seconds=0, now=1) == []
 
 
+def test_expiring_tokens_skips_tokens_shorter_lived_than_window(repo):
+    """寿命本就短于窗口的 token 不报：命中是常态，规则没有信息量。
+
+    CodeArts 的 STS 临时凭证只有 2h 寿命，默认窗口 24h——不管续期成功与否它都
+    永远「即将到期」，每个静默窗报一次只会把真告警淹掉。它真出问题时预刷新任务
+    会失败并标记需重新登录（进而触发池空告警）。
+    """
+    credentials, _db = repo
+    now = 1_000_000
+    # 2h 寿命（expiration 与 refresh_token JWT 的 iat 相差 7200）
+    credentials.add(provider="codearts", credential_data={
+        "expiration": now + 3600,
+        "refresh_token": _jwt({"iat": now + 3600 - 7200, "exp": now + 30 * 86400})},
+        now=now)
+    # 30 天寿命的同形态凭证：窗口 24h 相对它很短，必须照报
+    long_lived = credentials.add(provider="codearts", credential_data={
+        "expiration": now + 3600,
+        "refresh_token": _jwt({"iat": now + 3600 - 30 * 86400, "exp": now + 30 * 86400})},
+        now=now)
+    rows = credentials.expiring_tokens(within_seconds=86400, now=now)
+    assert [r["id"] for r in rows] == [long_lived]
+
+
 # --------------------------------------------------------- StatsCollector
 
 

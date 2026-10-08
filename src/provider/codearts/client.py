@@ -39,7 +39,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from ...provider import base
-from ...provider.base import Event, EventKind, Model, Quota
+from ...provider.base import Event, EventKind, Model, Quota, UpstreamReloginRequired
 from ...provider.proxy import build_client
 from ...provider.token_expiry import normalize_epoch
 from . import auth as codearts_auth
@@ -462,11 +462,21 @@ class CodeArtsClient:
 
         `client_id` / DPoP 私钥随 refresh_token 绑定，必须沿用凭证里的原值；
         否则上游回 `invalid client id` / `InvalidDPoPHeader`。
+
+        令牌端点把终态错误（票已消费/失配）翻译成 `UpstreamReloginRequired`，
+        好让 RefreshTask 停手并提示重新登录，而不是每小时拿同一张废票重试。
+        非终态的 5xx / 网络失败原样上抛：那类可重试，交给 RefreshTask 下一轮。
         """
-        tokens = await codearts_auth.refresh_tokens(
-            self._short(), self.login, refresh_token=credential.refresh_token,
-            dpop_private_jwk=credential.dpop_private_jwk,
-            code_verifier=credential.code_verifier)
+        try:
+            tokens = await codearts_auth.refresh_tokens(
+                self._short(), self.login, refresh_token=credential.refresh_token,
+                dpop_private_jwk=credential.dpop_private_jwk,
+                code_verifier=credential.code_verifier)
+        except codearts_auth.TokenEndpointError as error:
+            reason = codearts_events.relogin_required(error.body)
+            if not reason:
+                raise
+            raise UpstreamReloginRequired(reason) from error
         return merge_refreshed(credential, tokens)
 
     # --------------------------------------------------------------- 内部

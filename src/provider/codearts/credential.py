@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, ClassVar
 
 from ...provider.token_expiry import normalize_epoch
 from .events import CLIENT_ID, UpstreamProtocolViolation
@@ -52,6 +52,16 @@ class CodeArtsCredential:
         """
         return self.expiration
 
+    # refresh_skew_hours 的**上限**（秒）。STS 临时凭证实测寿命 2h（模块文档），
+    # 而全局默认 REFRESH_SKEW_HOURS=24h ≫ 寿命：skew 的语义是「离到期还剩
+    # skew 秒就提前刷」，所以 24h skew 让 needs_refresh 对本渠道**恒为真**，
+    # RefreshTask 每一轮（约 60min）都会去烧一张一次性 refresh_token——票是
+    # 单次的，多烧一张就多一次「被别人/被自己消费掉」的风险面。
+    # 封顶 30min：把「一进窗口就每轮都刷」降成「离到期 30min 内才刷」。
+    # 不能更小的硬约束是轮询周期（默认 60min）：窗口窄于周期就会整轮漏过，
+    # 凭证静默过期（实测 STS 只有 2h 余量可浪费）。
+    refresh_skew_cap_seconds: ClassVar[int] = 1800
+
     def needs_refresh(self, skew_seconds: int, now: int | None = None) -> bool:
         """临时凭证本身到期前刷新。
 
@@ -59,12 +69,16 @@ class CodeArtsCredential:
         refresh_token（旧登录通道），它同样会到期；此时刷新必然失败并被
         RefreshTask 记为 failed，但那比「凭证静默过期 → 聊天 401 硬禁用」好。
 
+        `skew_seconds`（全局 REFRESH_SKEW_HOURS）按本渠道封顶，见
+        `refresh_skew_cap_seconds`。
+
         到期未知（0）→ False（不猜 TTL，见 `token_expires_at`）。
         """
         if self.expiration <= 0:
             return False
         current = int(now if now is not None else time.time())
-        return current + skew_seconds >= self.expiration
+        lead = min(skew_seconds, self.refresh_skew_cap_seconds)
+        return current + lead >= self.expiration
 
     def to_dict(self) -> dict[str, Any]:
         return {

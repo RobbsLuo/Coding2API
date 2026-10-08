@@ -78,6 +78,11 @@ class Settings(BaseSettings):
 
     # 路由与调度
     default_model: str = "glm-5.2"
+    # token 预刷新的提前量（小时）：距 access token 到期 ≤ 该值就提前换新。
+    # 注意它对**短寿命渠道**会被自行封顶（CodeArts STS 只有 2h，见
+    # `CodeArtsCredential.refresh_skew_cap_seconds`），所以调大它不会让短寿命
+    # 渠道「提前更多」；反之把它调到远小于该渠道寿命的量级也没意义——真正的
+    # 下界是预刷新任务的轮询周期，窗口窄于周期会整轮漏过导致凭证静默过期。
     refresh_skew_hours: int = 24
     # 到期排序窗口：把「距到期 ≤ 该秒数」的积分加总，作为选号第一排序指标（多者先用）；
     # CodeBuddy 是每日 100 积分 × N 的小包；≤0 关闭整套到期排序（次窗口一并失效）

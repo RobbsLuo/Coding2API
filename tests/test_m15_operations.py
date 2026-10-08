@@ -21,9 +21,16 @@ from src.db.crypto import CredentialCipher
 from src.db.migrate import apply_schema
 from src.db.repo import CredentialRepository, CreditEventRepository
 from src.engine.executor import NoHealthyCredential
-from src.engine.scheduler import ErrorOutcome
+from src.engine.scheduler import ErrorOutcome, ModelCooldown
 from src.main import build_app
-from src.provider.base import ErrKind, Event, EventKind, Quota, Usage
+from src.provider.base import (
+    ErrKind,
+    Event,
+    EventKind,
+    Quota,
+    UpstreamReloginRequired,
+    Usage,
+)
 from src.provider.codebuddy.checkin import (
     CheckinResult,
     CodeBuddyCheckin,
@@ -1433,6 +1440,60 @@ async def test_refresh_task_only_touches_due_credentials(repo):
     assert credentials.credential_data(later)["bearer_token"] == "old"
 
 
+async def test_refresh_task_marks_relogin_required_on_terminal_failure(repo):
+    """一次性续期凭据被作废 → 标记「需重新登录」并停止重试。
+
+    旧行为是每轮任务刷一条一模一样的 warning：refresh_token 已废，重试永远
+    成功不了。标记后本轮记 failed，下轮 `candidates()` 把它计入 skipped，
+    管理台按 disabled_reason 提示需要人工重新登录。
+    """
+    credentials, _db = repo
+    credential_id = credentials.add(provider="codebuddy", credential_data={
+        "bearer_token": "old", "refresh_token": "RT", "auth_source": "oauth",
+        "expires_at": 1_000_100})
+
+    class DeadProvider(ProbeProvider):
+        async def refresh(self, _data):
+            self.refresh_calls += 1
+            raise UpstreamReloginRequired("刷新令牌已失效，需重新登录")
+
+    provider = DeadProvider()
+    task = RefreshTask(credentials, {"codebuddy": provider}, skew_seconds=3600,
+                       now=lambda: 1_000_000)
+    report = await task.run_once()
+    assert report.failed == 1 and report.succeeded == 0
+    row = credentials.list_all()[0]
+    assert row["disabled"] == 1
+    assert row["disabled_reason"] == "刷新令牌已失效，需重新登录"
+    # 凭证字段未被失败路径改写（旧票仍原样留着，供管理员复核）
+    assert credentials.credential_data(credential_id)["bearer_token"] == "old"
+    # 第二轮：已硬禁用 → 直接跳过，不再发刷新请求
+    again = await task.run_once()
+    assert again.skipped == 1 and provider.refresh_calls == 1
+
+
+async def test_refresh_task_relogin_clears_model_cooldowns(repo):
+    """标记「需重新登录」同时清掉模型级冷却，避免残留负缓存误导排查。"""
+    credentials, _db = repo
+    credential_id = credentials.add(provider="codebuddy", credential_data={
+        "bearer_token": "old", "refresh_token": "RT", "auth_source": "oauth",
+        "expires_at": 1_000_100})
+    credentials.save_error(credential_id, ErrorOutcome(
+        model_cooldowns={"m": ModelCooldown(cooling_until=9_999_999_999, hits=1,
+                                           reason="model")}))
+    assert credentials.model_cooldowns_for(credential_id) == {"m": 9_999_999_999}
+
+    class DeadProvider(ProbeProvider):
+        async def refresh(self, _data):
+            raise UpstreamReloginRequired("刷新令牌已失效，需重新登录")
+
+    report = await RefreshTask(credentials, {"codebuddy": DeadProvider()},
+                               skew_seconds=3600, now=lambda: 1_000_000).run_once()
+    assert report.failed == 1
+    assert credentials.candidates()[0].disabled is True
+    assert credentials.model_cooldowns_for(credential_id) == {}
+
+
 async def test_refresh_task_skips_manual_and_missing(repo):
     credentials, _db = repo
     credentials.add(provider="codebuddy", credential_data={"bearer_token": "t",
@@ -1937,7 +1998,19 @@ async def test_checkin_claim_http_error_paths(repo):
 
 
 async def test_refresh_rejects_unauthorized_and_server_error():
-    for status in (401, 403, 500, 503):
+    # 401/403 = 续期凭据被拒，终态：程序侧换不回新 token，只能重新登录
+    for status in (401, 403):
+        async def handler(_request: httpx.Request, status=status) -> httpx.Response:
+            return httpx.Response(status, content=b"x")
+
+        client = CodeBuddyRefresh("https://e", client=_refresh_client(handler))
+        with pytest.raises(UpstreamReloginRequired):
+            await client.refresh(CodeBuddyCredential(bearer_token="t", refresh_token="RT",
+                                                     auth_source="oauth"))
+        await client.aclose()
+    # 5xx 是可重试的失败：必须留在 UpstreamProtocolViolation，判成终态会让一次
+    # 偶发故障永久废掉一条好凭证
+    for status in (500, 503):
         async def handler(_request: httpx.Request, status=status) -> httpx.Response:
             return httpx.Response(status, content=b"x")
 
@@ -4306,6 +4379,12 @@ def test_credential_expiry_prefers_explicit_then_jwt():
     token = _jwt(1794389367)
     assert credential_expiry({"expires_at": 100}) == 100
     assert credential_expiry({"expiresAt": 200}) == 200
+    # `expiration`：华为云系（CodeArts STS 临时凭证）的字段名。漏掉它时该渠道
+    # `token_expires_at` 恒为 0 → 管理台无到期预览、到期预警对它完全失效。
+    assert credential_expiry({"expiration": 300}) == 300
+    assert credential_expiry({"expiration": 1794389367000}) == 1794389367   # 毫秒
+    assert credential_expiry({"expires_at": 100, "expiration": 300}) == 100  # 前者优先
+    assert credential_expiry({"expiration": "soon"}) == 0                   # 非数字
     # 显式值为 0 / 非数字 → 视作缺失，回落 JWT
     assert credential_expiry({"expires_at": 0, "bearer_token": token}) == 1794389367
     assert credential_expiry({"expires_at": True, "accessToken": token}) == 1794389367
@@ -4316,6 +4395,33 @@ def test_credential_expiry_prefers_explicit_then_jwt():
     assert credential_expiry({"bearer_token": None}) == 0
     assert credential_expiry({"bearer_token": "plain-token"}) == 0
     assert credential_expiry([]) == 0         # type: ignore[arg-type]
+
+
+def test_credential_token_times_borrows_iat_from_co_issued_refresh_token():
+    """access token 不是 JWT 时，借**同时签发**的 refresh_token JWT 的 `iat`。
+
+    CodeArts 的 access token 是 STS AK/SK（取不到 iat），但签发它的那次响应同时
+    轮转出一张 refresh_token JWT，`iat` 就是临时凭证的签发时刻（实测
+    `iat + 7200 == expiration`）。只借 iat：它自己的 `exp` 是「登录 +30 天」，
+    拿来做 access token 的到期会把 2h 的临时凭证画成 30 天。
+    """
+    from src.provider.token_expiry import credential_token_times
+
+    issued = 1_700_000_000
+    refresh_token = _jwt(issued + 30 * 86400, iat=issued)
+    # CodeArts 形态：到期来自 `expiration`，签发借 refresh_token 的 iat
+    assert credential_token_times({"expiration": issued + 7200,
+                                   "refresh_token": refresh_token}) == (issued, issued + 7200)
+    # access token 本身是 JWT 时优先用它自己的 iat（借 iat 只在兜底时发生）
+    assert credential_token_times({
+        "expiration": issued + 7200, "refresh_token": refresh_token,
+        "bearer_token": _jwt(issued + 7200, iat=issued - 5),
+    }) == (issued - 5, issued + 7200)
+    # refresh_token 不是 JWT / 没有 iat → 签发时间仍旧 0（绝不拿回填时刻冒充）
+    assert credential_token_times({"expiration": 1_700_007_200,
+                                   "refresh_token": "plain"}) == (0, 1_700_007_200)
+    assert credential_token_times({"expiration": 1_700_007_200, "refresh_token": ""}) == (
+        0, 1_700_007_200)
 
 
 def test_credential_token_times_pairs_issued_with_expiry():

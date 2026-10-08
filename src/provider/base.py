@@ -145,6 +145,20 @@ class UpstreamHTTPError(Exception):
         return self.classify_status(self.status, self.body)
 
 
+class UpstreamReloginRequired(RuntimeError):
+    """凭证的续期凭据已被上游作废，**程序侧无法自愈**，只能重新登录。
+
+    一次性 refresh_token 被消费（CodeArts `STS5.1806 the refresh token has been
+    used`）、绑定项不符（client_id / DPoP 私钥）、以及「刷新成功但响应里没有
+    轮转后的 refresh_token」都属于此类：refresh_token 与 client_id / DPoP 私钥
+    三者绑定，程序换不出新票，重试每次用的都是同一张废票。
+
+    与「可重试失败」的区别只在处置方式上：RefreshTask 捕获它之后把凭证标成需
+    重新登录并停止重试（`tasks/refresh.py`），否则表现是每轮任务刷一条同样的
+    警告，而凭证其实早就死了。
+    """
+
+
 class UpstreamProtocolViolation(ValueError):
     """上游响应违反可映射的结构约束（非 JSON / 字段缺失 / 形状不符）。
 

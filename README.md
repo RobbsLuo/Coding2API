@@ -183,7 +183,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 几点要知道：
 
-- **令牌刷新是刚性的**：refresh_token 与 `client_id=codearts-agent`、DPoP 私钥三者绑定，且**一次性**——刷新后必须回写新的 refresh_token，否则该账号失效。本服务由 token 预刷新任务自动完成（DPoP ES256/P-256 签名）；这也是该渠道的「保活」手段。
+- **令牌刷新是刚性的**：refresh_token 与 `client_id=codearts-agent`、DPoP 私钥三者绑定，且**一次性**——刷新后必须回写新的 refresh_token，否则该账号失效。本服务由 token 预刷新任务自动完成（DPoP ES256/P-256 签名）；这也是该渠道的「保活」手段。为降低烧票风险，本渠道的预刷新窗口封顶 30 分钟（全局 `REFRESH_SKEW_HOURS` 默认 24h ≫ 凭证 2h 寿命，不封顶会每轮都刷）。一旦续期凭据被上游作废（票被消费 / 绑定项不符），该凭证会被标记为「需重新登录」并停止自动重试，需重新登录后按状态列的「恢复」解除。
 - **没有每日签到**：CodeArts 额度是**每日 1000 万免费 token（当日 0 点清零、不累计）**，上游没有每日签到接口，因此本服务不提供签到入口。启动/定时会尝试领取福利 Token（幂等）并探测余额。
 - **优先消耗**：每日池用完即弃，故当日剩余被登记为「次日本地 0 点到期」的到期额度，调度器会优先把它排在其它渠道之前——只要 CodeArts 还有额度就先走它，用尽后自动回落。上游按 token 计量，管理台统一显示为**积分**（1 积分 = 10000 token，每日池满额 = 1000 积分）；升级前落库的历史数据由 `scripts/convert_codearts_credit_unit.py` 一次性折算。
 - **签名**：上游要求华为云 `SDK-HMAC-SHA256`（AK/SK + `X-Security-Token`）。白名单 `CODEARTS_ALLOWED_ENDPOINTS` 必须含 snap 引擎、STS、福利网关与门户四个主机；改 `CODEARTS_API_ENDPOINT` 时同步调整。
@@ -402,7 +402,7 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `CODEARTS_MAX_CONCURRENCY` | `3` | CodeArts 每账号**在途并发上限**（热更项）。上游硬限每账号并发会话数 3，超出即 `400 TM.00001041`；桶内名额满时请求挂起直到有请求结束；`0` 关闭上限（回到「有在途即放行」，会再次击穿）。名额在每次尝试结束时**同步**归还，不依赖 GC |
 | `CODEARTS_REQUEST_WINDOW_SECONDS` | `60` | CodeArts **账号滑动窗口**（秒，热更项）。与上一项组合成「每账号每 60s 最多启动 3 次」——实测上游限制的是「每账号每约 60s 最多 3 个会话」（会话在流结束后仍滞留数十秒，实测约 68s 才恢复），纯在途上限挡不住「3 个刚结束就再发 3 个」的突发。窗口内满额时请求挂起到最早一次启动滑出窗口；`0` 关闭窗口口径，退回纯在途上限 |
 | `CODEBUDDY_SANITIZE_CHANNEL_MARKERS` | `true` | 出站 `system`/`assistant` 正文命中「伪装其他厂商官方客户端」指纹串时替换为占位符（上游 11128 内容风控：换号无效、会话带入即持续报错）；只改出站副本，客户端历史不受影响；`false` 关闭（见 TECHNICAL.md §3.2） |
-| `REFRESH_SKEW_HOURS` | `24` | token 到期前该小时数窗口内预刷新。到期时间取凭证显式 `expires_at`，缺失时回落 access token 的 JWT `exp`（CodeBuddy 实测不带显式到期字段） |
+| `REFRESH_SKEW_HOURS` | `24` | token 到期前该小时数窗口内预刷新。到期时间取凭证显式 `expires_at`/`expiration`，缺失时回落 access token 的 JWT `exp`（CodeBuddy 实测不带显式到期字段）。短寿命渠道自行封顶该窗口：CodeArts STS 只有 2h，封顶 30min（否则 24h 窗口对它恒为真、每轮都烧一张一次性 refresh_token）。下游硬约束是预刷新周期（60min），窗口窄于周期会整轮漏过 |
 | `TOKEN_EXPIRY_WARNING_SECONDS` | `3600` | 管理台 token 到期预警阈值：剩余低于该值时标红；`≤0` 关闭预警（仍显示剩余时间）。纯展示，不参与调度 |
 | `PACER_MIN_SECONDS` / `PACER_MAX_SECONDS` | `5` / `20` | 全局节流器随机等待区间（秒） |
 | `LOG_LEVEL` | `INFO` | 日志级别；审计日志是 INFO 级，调到 `WARNING` 会一并关掉 |
