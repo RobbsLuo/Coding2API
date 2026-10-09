@@ -1400,6 +1400,57 @@ def test_events_usage_tolerates_bad_types():
     assert usage.usage.input_tokens == 1 and usage.usage.output_tokens is None
 
 
+def _v2_usage(usage: dict) -> Usage:
+    """喂一帧标准 OpenAI usage 对象（v2 路径），取回解析结果。"""
+    snapshot = codearts_events.TextSnapshot()
+    payload = {"choices": [], "usage": usage}
+    return codearts_events.parse_line(json.dumps(payload), snapshot)[0].usage
+
+
+def test_usage_object_reads_details_fields():
+    """上游实测把 cached/reasoning 放在 details 里（TECHNICAL §3.17）。"""
+    usage = _v2_usage({
+        "prompt_tokens": 35, "completion_tokens": 45,
+        "prompt_tokens_details": {"cached_tokens": 12},
+        "completion_tokens_details": {"reasoning_tokens": 30},
+    })
+    assert (usage.input_tokens, usage.output_tokens) == (35, 45)
+    assert usage.cached_tokens == 12
+    assert usage.reasoning_tokens == 30
+
+
+def test_usage_object_details_zero_is_a_reported_value():
+    """未命中时上游报 0：0 是有效值，必须与「未上报」区分开。"""
+    usage = _v2_usage({
+        "prompt_tokens": 35,
+        "prompt_tokens_details": {"cached_tokens": 0},
+        "completion_tokens_details": {"reasoning_tokens": 0},
+    })
+    assert usage.cached_tokens == 0
+    assert usage.reasoning_tokens == 0
+
+
+def test_usage_object_invalid_details_falls_back_to_top_level():
+    """details 值非法（bool / 字符串）时回落顶层同名字段。"""
+    usage = _v2_usage({
+        "prompt_tokens": 35,
+        "cached_tokens": 7,
+        "reasoning_tokens": True,              # bool 非法且顶层无 → None
+        "prompt_tokens_details": {"cached_tokens": "12"},
+        "completion_tokens_details": {"reasoning_tokens": False},
+    })
+    assert usage.cached_tokens == 7              # 字符串非法 → 顶层 7
+    assert usage.reasoning_tokens is None
+
+
+def test_usage_object_missing_details_keeps_none():
+    """details 整缺：无上报就诚实为 None，不拿 0 冒充。"""
+    usage = _v2_usage({"prompt_tokens": 35, "completion_tokens": 45,
+                       "prompt_tokens_details": "not-an-object"})
+    assert usage.cached_tokens is None
+    assert usage.reasoning_tokens is None
+
+
 def test_events_classify_error_code_branches():
     classify = codearts_events.classify_error_code
     assert classify(None) is ErrKind.OTHER

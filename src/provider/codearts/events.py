@@ -259,7 +259,25 @@ def _usage(payload: dict[str, Any]) -> Usage | None:
 def _usage_object(usage: dict[str, Any]) -> Usage:
     """标准 OpenAI `usage` 对象（v2 收尾帧）。"""
     return Usage(input_tokens=_as_int(usage.get("prompt_tokens")),
-                 output_tokens=_as_int(usage.get("completion_tokens")))
+                 output_tokens=_as_int(usage.get("completion_tokens")),
+                 cached_tokens=_details_int(
+                     usage, "prompt_tokens_details", "cached_tokens"),
+                 reasoning_tokens=_details_int(
+                     usage, "completion_tokens_details", "reasoning_tokens"))
+
+
+def _details_int(usage: dict[str, Any], details_key: str, key: str) -> int | None:
+    """details 子对象优先，顶层同名字段兜底（与其他 provider 同构）。
+
+    上游实测把两个字段放在 details 里（`cached_tokens` 未命中时报 0，是有效值
+    而非缺失），顶层只是兼容形状。details 值非法（非数值 / bool）时回落顶层，
+    仍缺则 None——绝不把「未上报」量化成 0。
+    """
+    details = usage.get(details_key)
+    value = details.get(key) if isinstance(details, dict) else None
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return _as_int(usage.get(key))
 
 
 def _as_int(value: Any) -> int | None:
