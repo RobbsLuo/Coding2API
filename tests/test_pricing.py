@@ -1,4 +1,4 @@
-"""费用估算（models.dev 刊例价）与统计费用列。
+"""成本估算（models.dev 刊例价）与统计成本列。
 
 覆盖：价表构建（原厂优先 / 最高价回退 / 坏条目）、单请求估算（缓存夹取、
 缺 token / 缺模型降级）、汇率换算（非法汇率兜底）、落盘快照（版本 / 过期 /
@@ -346,7 +346,7 @@ def test_collector_cost_none_when_model_unmatched(collector_query):
 def test_collector_without_prices_never_sets_cost(tmp_path):
     db = Database(tmp_path / "p2.sqlite3")
     apply_schema(db.connect())
-    collector = StatsCollector(db)               # 老装配：不估算费用
+    collector = StatsCollector(db)               # 老装配：不估算成本
     collector.record(username="u", provider="trae", model="glm-5.2", ok=True,
                      input_tokens=100, output_tokens=100)
     row = db.connect().execute(
@@ -356,7 +356,7 @@ def test_collector_without_prices_never_sets_cost(tmp_path):
 
 
 def test_collector_cost_failure_is_swallowed(tmp_path, caplog):
-    """价表取值器抛异常只降级为无费用，绝不影响统计写入。"""
+    """价表取值器抛异常只降级为无成本，绝不影响统计写入。"""
     db = Database(tmp_path / "p3.sqlite3")
     apply_schema(db.connect())
 
@@ -370,7 +370,7 @@ def test_collector_cost_failure_is_swallowed(tmp_path, caplog):
     row = db.connect().execute(
         "SELECT cost_usd FROM usage_events").fetchone()
     assert row["cost_usd"] is None
-    assert any("费用估算失败" in r.getMessage() for r in caplog.records)
+    assert any("成本估算失败" in r.getMessage() for r in caplog.records)
     db.close()
 
 
@@ -506,7 +506,7 @@ def _price_app(tmp_path, **env):
 
 
 def test_app_restores_price_snapshot_and_estimates_cost(tmp_path):
-    """启动回灌落盘价表：新写入的明细立刻能估出费用（零上游请求）。"""
+    """启动回灌落盘价表：新写入的明细立刻能估出成本（零上游请求）。"""
     from fastapi.testclient import TestClient
 
     save_prices(str(tmp_path), {"glm-5.2": (1.0, 2.0, 0.1)})
@@ -604,7 +604,7 @@ def test_build_runner_without_price_catalog_keeps_task_hidden(tmp_path):
 # --------------------------------------------------------- 启动预热（无快照时补拉）
 
 async def test_warm_price_table_fetches_when_empty():
-    """无落盘快照时立即补拉一次，避免首次部署费用空窗到下一轮。"""
+    """无落盘快照时立即补拉一次，避免首次部署成本空窗到下一轮。"""
     from src.main import _warm_price_table
 
     called = []
@@ -632,7 +632,7 @@ async def test_warm_price_table_skips_when_snapshot_present():
 
 
 async def test_warm_price_table_swallows_fetch_error(caplog):
-    """补拉失败只记日志：费用显示 — 而已，不影响启动与聊天。"""
+    """补拉失败只记日志：成本显示 — 而已，不影响启动与聊天。"""
     from src.main import _warm_price_table
 
     async def boom():

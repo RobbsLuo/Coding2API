@@ -2434,12 +2434,12 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     assert "cached_tokens" in events_columns
     # 积分推算标记（TRAE 无上游积分）：老库补 0=历史行全按非推算处理
     assert "credit_estimated" in events_columns
-    # 费用估算两列（models.dev 刊例价 × 当时汇率）：老库补列后历史行为 NULL
+    # 成本估算两列（models.dev 刊例价 × 当时汇率）：老库补列后历史行为 NULL
     assert {"cost_usd", "cost_cny"} <= events_columns
     hourly_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(usage_hourly)")}
     assert "ttfb_sum" in hourly_columns
     assert "credit_estimated_known" in hourly_columns
-    # 费用聚合三列：老库补列后历史小时 cost_known=0（聚合值不可信）
+    # 成本聚合三列：老库补列后历史小时 cost_known=0（聚合值不可信）
     assert {"cost_usd_sum", "cost_cny_sum", "cost_known"} <= hourly_columns
     # 总览改读小时汇总后新增的三列（老库历史行补 0，数值无法回填）
     assert {"reasoning_tokens", "cached_tokens", "cached_known"} <= hourly_columns
@@ -2452,7 +2452,7 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     assert legacy_est[0] == 0                     # 老库历史行按非推算
     legacy_cost = db.connect().execute(
         "SELECT cost_known, cost_usd_sum FROM usage_hourly WHERE hour_utc = 1").fetchone()
-    assert tuple(legacy_cost) == (0, None)        # 老库历史行无费用（cost_known=0）
+    assert tuple(legacy_cost) == (0, None)        # 老库历史行无成本（cost_known=0）
     cred_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
     assert "quota_expiry_ladder" in cred_columns
     # 额度包明细（展示用）也是本次新增列

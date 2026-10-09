@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""按**当前**价表与汇率一次性重算历史明细的费用，并重算小时汇总。
+"""按**当前**价表与汇率一次性重算历史明细的成本，并重算小时汇总。
 
-背景：费用在**写入时**定值落库（`usage_events.cost_usd` / `cost_cny`，见
+背景：成本在**写入时**定值落库（`usage_events.cost_usd` / `cost_cny`，见
 `src/pricing.py` 与 `src/stats/collector.py`）；改动前已落库的历史明细两列是
 NULL，统计页显示 `—`。本脚本用**当前**落盘价表（`DATA_DIR/model_prices.json`）
-与**当前生效**汇率（热更覆盖 > env 默认）补齐 / 重算全部明细，让费用覆盖全部
+与**当前生效**汇率（热更覆盖 > env 默认）补齐 / 重算全部明细，让成本覆盖全部
 时间范围。
 
 口径提醒：历史汇率与当时的价表已不可得，所以这是「按今天口径重估」，不是还原
@@ -67,7 +67,7 @@ def effective_rate(database: Database) -> float:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="按当前价表与汇率重算历史明细费用")
+    parser = argparse.ArgumentParser(description="按当前价表与汇率重算历史明细成本")
     parser.add_argument("--db", help="SQLite 路径（默认 DATA_DIR/coding2api.sqlite3）")
     parser.add_argument("--data-dir", help="价表快照目录（默认数据库所在目录）")
     parser.add_argument("--apply", action="store_true", help="实际写库（默认只预览）")
@@ -90,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
 
     todo = pending_cost(database.connect(), table, rate)
     if not todo:
-        print("没有需要处理的费用明细")
+        print("没有需要处理的成本明细")
         return 0
     for model, count, total in todo:
         print(f"  {model:<28} x{count:<5} ≈¥{total:.4f}")

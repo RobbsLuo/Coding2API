@@ -92,7 +92,7 @@ def price_catalog_offline(monkeypatch):
     `build_app()` 在**没有落盘价表快照**时会后台补拉一次
     （`_warm_price_table`），每个用默认空 DATA_DIR 建 app 的用例都会发外网请求。
     真实抓取逻辑由 `tests/test_pricing.py` 用 MockTransport 覆盖；这里给一个空表
-    （等价「上游不可用」，费用显示 —），既不打外网也不污染既有断言。
+    （等价「上游不可用」，成本显示 —），既不打外网也不污染既有断言。
     """
     from src import main
 

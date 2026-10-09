@@ -310,9 +310,9 @@ export function formatCredit(
 }
 
 /**
- * 费用金额格式化：null/undefined 显示 —，否则加币种符号（¥ / $）。
+ * 成本金额格式化：null/undefined 显示 —，否则加币种符号（¥ / $）。
  *
- * 费用是估算值且量级很小（单请求常是几厘钱），按绝对值自适应小数位：
+ * 成本是估算值且量级很小（单请求常是几厘钱），按绝对值自适应小数位：
  * ≥1 元两位、≥0.01 元四位、更小六位——否则 `toFixed(2)` 会把所有小额抹成 0。
  * `estimated` 为真时前置 ≈，提醒这是刊例价折算而非上游真实扣费。
  */
@@ -387,7 +387,7 @@ export function formatChartValue(value: number, metric: string): string {
  * （8 个字符 ≈ 55px），超出轴宽后被裁掉左侧，看起来像缺了一位。
  *
  * - 计数 / token：紧凑格式（`1500万`），单位交给轴顶的 `METRIC_AXIS_UNIT` 写一次
- * - 费用：保留两位小数（单请求常是零点几元，`formatCompact` 的「万/亿」不适用）
+ * - 成本：保留两位小数（单请求常是零点几元，`formatCompact` 的「万/亿」不适用）
  * - 耗时 / 首字：复用 `formatLatency`，与 hover 完全同口径（`850 ms` / `8.2 s`），
  *   刻度自带单位所以不再另标
  */

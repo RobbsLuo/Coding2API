@@ -2,7 +2,7 @@
 
 纪律（PROPOSAL §8）：不存提示词、回答、请求头、Token、工具参数、原始错误体、会话 ID。
 credit 为上游可选字段，两边都经常为 None。
-费用（cost_usd / cost_cny）是**估算**：models.dev 刊例价 × 写入时的汇率，不是上游
+成本（cost_usd / cost_cny）是**估算**：models.dev 刊例价 × 写入时的汇率，不是上游
 真实扣费；两列同生同灭，匹配不到定价时为 None（界面显示 —）。
 """
 
@@ -76,7 +76,7 @@ class StatsCollector:
                  prices: Callable[[], Mapping[str, tuple[float, float, float]]] | None = None,
                  usd_cny_rate: Callable[[], float] | None = None) -> None:
         """`prices` / `usd_cny_rate` 是零参取值器（热更：每写一条现读当前价表
-        与汇率）。两者都缺省为 None = 不估算费用（既有测试与老装配保持原行为，
+        与汇率）。两者都缺省为 None = 不估算成本（既有测试与老装配保持原行为，
         cost 两列恒为 NULL）。
         """
         self._db = db
@@ -88,7 +88,7 @@ class StatsCollector:
               cached_tokens: int | None) -> tuple[float | None, float | None]:
         """按写入时的价表与汇率估算 (cost_usd, cost_cny)；无法定价则 (None, None)。
 
-        估算异常绝不能影响聊天统计：取值器/换算任何抛出都降级为无费用。
+        估算异常绝不能影响聊天统计：取值器/换算任何抛出都降级为无成本。
         """
         if self._prices is None or self._usd_cny_rate is None:
             return None, None
@@ -101,7 +101,7 @@ class StatsCollector:
                 return None, None
             return usd, to_cny(usd, self._usd_cny_rate())
         except Exception as error:  # noqa: BLE001 - 定价失败不影响统计写入
-            logger.warning("费用估算失败（model=%s）: %s", model, error)
+            logger.warning("成本估算失败（model=%s）: %s", model, error)
             return None, None
 
     def record(

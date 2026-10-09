@@ -233,9 +233,9 @@ async def _warm_price_table(refresh, table: dict) -> None:
     """后台补价表：仅在**没有落盘快照**时立即拉一次。
 
     有快照就交给周期性任务——models.dev 是数 MB 公开大表，刚恢复就重拉纯属
-    白花；但没有快照（首次部署 / 快照损坏）时若不补，费用要等到下一轮
+    白花；但没有快照（首次部署 / 快照损坏）时若不补，成本要等到下一轮
     `PRICE_CATALOG_MINUTES`（默认每日）才可用，期间全显示 —。放后台跑不阻塞
-    启动；失败仅记日志（费用显示 — 而已，不影响聊天）。
+    启动；失败仅记日志（成本显示 — 而已，不影响聊天）。
     """
     if table:
         return
@@ -345,7 +345,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 模型目录原始表的**同一引用**交给 executor（credit_rate 查询）与 Services
     # （list_models 缓存）——这里先建空 dict，Services 装配时直接挂它
     model_cache: dict[str, dict[str, Any]] = {}
-    # 费用价表（models.dev 刊例价，USD/百万 token）：启动时同步读回落盘快照
+    # 成本价表（models.dev 刊例价，USD/百万 token）：启动时同步读回落盘快照
     # （零上游请求），后台 price_catalog 循环再周期刷新。同一份 dict 引用交给
     # StatsCollector，刷新时就地替换后新写入的明细立即用上新价。
     price_table: dict[str, tuple[float, float, float]] = {}
@@ -431,7 +431,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         # 不内联 await 的原因：zen 免费层探活最慢的模型可占十几秒，内联会让应用
         # 在这段时间里不响应 /health，容器存活探针可能误判；动态拉取失败仅记日志。
         app_.state.model_warmup_task = asyncio.create_task(_warm_model_list(services_))
-        # 价表同理：仅在无落盘快照时后台补拉一次，避免首次部署费用空窗到下一轮。
+        # 价表同理：仅在无落盘快照时后台补拉一次，避免首次部署成本空窗到下一轮。
         app_.state.price_warmup_task = asyncio.create_task(
             _warm_price_table(_refresh_price_catalog, price_table))
         # 让预热任务先跑一步：失败时日志立即落盘（成功与否都不阻塞下面 yield）。

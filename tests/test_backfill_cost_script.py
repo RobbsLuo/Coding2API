@@ -1,4 +1,4 @@
-"""scripts/backfill_cost.py 的历史费用重算与汇总重算测试。"""
+"""scripts/backfill_cost.py 的历史成本重算与汇总重算测试。"""
 
 from __future__ import annotations
 
@@ -64,7 +64,7 @@ def test_pending_lists_only_changed_priced_rows(db):
 
 
 def test_recompute_costs_writes_and_is_idempotent(db):
-    """改写缺失费用；重跑无变化返回 0（幂等）。"""
+    """改写缺失成本；重跑无变化返回 0（幂等）。"""
     _insert(db, id="a", model="deepseek-v4.1-flash", input_tokens=1_000_000,
             output_tokens=1_000_000)
     _insert(db, id="b", model="sagitta")                             # 未收录，保持 NULL
@@ -95,7 +95,7 @@ def test_main_empty_reports_nothing_to_do(db, tmp_path, capsys):
     """有价表但无待补行：直接返回。"""
     save_prices(str(tmp_path), TABLE)
     assert BACKFILL.main(["--db", db.path]) == 0
-    assert "没有需要处理的费用明细" in capsys.readouterr().out
+    assert "没有需要处理的成本明细" in capsys.readouterr().out
 
 
 def test_main_empty_price_table_aborts(db, tmp_path, capsys):
@@ -128,7 +128,7 @@ def test_main_apply_is_idempotent(db, tmp_path, capsys):
     assert BACKFILL.main(["--db", db.path, "--apply"]) == 0
     capsys.readouterr()
     assert BACKFILL.main(["--db", db.path, "--apply"]) == 0
-    assert "没有需要处理的费用明细" in capsys.readouterr().out
+    assert "没有需要处理的成本明细" in capsys.readouterr().out
 
 
 def test_main_uses_explicit_data_dir(db, tmp_path, capsys):

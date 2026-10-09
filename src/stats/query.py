@@ -10,7 +10,7 @@ METRIC_COLUMNS: dict[str, str] = {
     "tokens": "input_tokens + output_tokens",
     "latency": "latency_sum",      # 均值由调用方除以 ok_count
     "ttfb": "ttfb_sum",            # 同上
-    # 费用默认口径是人民币（与本模块展示一致）；仅含可定价明细的小时才有值。
+    # 成本默认口径是人民币（与本模块展示一致）；仅含可定价明细的小时才有值。
     "cost": "cost_cny_sum",
 }
 
@@ -27,7 +27,7 @@ class StatsQuery:
     def _metric_value(self, metric: str, expr_value, ok_count, cost_known: int = 0) -> Any:
         """把 SQL 原始值按 metric 归一：均值类除以 ok_count，无成功则 0。
 
-        费用是**部分可定价**的：某小时/模型若一条明细都没匹配到价表
+        成本是**部分可定价**的：某小时/模型若一条明细都没匹配到价表
         （`cost_known=0`），聚合值只是 0，直接展示会被读成「免费」；这里回 None
         让前端显示 —。只要有一条可定价，就按可定价部分求和（宁可少算不虚报）。
         """
@@ -106,7 +106,7 @@ class StatsQuery:
             "credit": row["credit_sum"] if row["credit_known"] else None,
             # 汇总 credit 中含推算值时标 ≈（全部渠道任一为推算即标，保守）
             "credit_estimated": bool(row["credit_estimated_known"]),
-            # 费用：只统计匹配到定价的明细（cost_known 条数>0 才可信）
+            # 成本：只统计匹配到定价的明细（cost_known 条数>0 才可信）
             "cost_usd": row["cost_usd_sum"] if row["cost_known"] else None,
             "cost_cny": row["cost_cny_sum"] if row["cost_known"] else None,
             "avg_latency_ms": round(row["latency_sum"] / ok_count) if ok_count else None,

@@ -17,7 +17,7 @@
 - **公共凭证池**：admin 集中维护、全员共享、加密入库（`APP_SECRET`）；设备码登录、多账号切换、额度探测、每日签到、token 预刷新
 - **三角色账号体系**：`admin` / `operator` / `viewer`，用户存 SQLite；一次性激活链接自设密码（无共享初始密码）、首登强制改密、改角色/停用即时吊销会话；登录与写操作留审计
 - **成长中心**（仅 CodeBuddy）：自动领 Buddy 旅行礼物、派 Buddy、领取新任务与任务奖、断登补登、连登奖励兑换、开盲盒；不可逆动作可用 `GROWTH_IRREVERSIBLE_ACTIONS=false` 关停；管理台可手动执行并查看逐条结果
-- **脱敏统计**：不存对话内容；明细 90 天、小时汇总永久；按人/渠道/模型可视化；另按 models.dev 刊例价估算**费用**（人民币为主，Q70）
+- **脱敏统计**：不存对话内容；明细 90 天、小时汇总永久；按人/渠道/模型可视化；另按 models.dev 刊例价估算**成本**（人民币为主，Q70）
 - **管理台安全加固**：登录限流、CSRF 校验、请求体上限、Host 白名单
 
 六个渠道的接入方式与各自注意事项见下文「[渠道](#渠道)」；协议层实现（私有信封、签名、门禁伪装等）见 [`TECHNICAL.md`](TECHNICAL.md) §3.14–§3.17。
@@ -325,13 +325,13 @@ Playground 与 `GET /v1/models` 走 **stale-while-revalidate**：有缓存就立
 
 统计页 **Credit 消耗** 列：CodeBuddy 是上游**真值**；TRAE 的 `token_usage` 帧只有 token 数，credit 按官方单价**推算**并标 `≈`；CodeArts 福利模型按每日池 1:1 扣减推算，同样标 `≈`。单价表与推算逻辑集中在 `src/provider/trae/pricing.py`（TRAE）与 `src/provider/codearts/units.py`（CodeArts），未收录的模型不推算（显示 `—`）。历史明细可分别用 `python3 scripts/backfill_trae_credit.py` / `scripts/convert_codearts_credit_unit.py` 补齐（默认预览、`--apply` 才写）。单价 / 折扣的实测细节见 [`TECHNICAL.md`](TECHNICAL.md) §9 与 PROPOSAL Q36 / Q52。
 
-### 用量统计里的费用（估算，≈）
+### 用量统计里的成本（估算，≈）
 
-统计页 **费用（估算）** 卡片与各表的**费用**列是「按 token × 公开刊例价」的**估算**，不是上游真实扣费：单价取自 [models.dev](https://models.dev) 的模型目录（`input` / `output` / `cache_read`，单位 **USD / 百万 token**），按 `(输入−命中)×输入价 + 命中×缓存价 + 输出×输出价` 折算成美元，再按**写入时生效的汇率**（`USD_CNY_RATE`，默认 `6.70`）折成人民币。人民币为主、美元为辅（明细单元格悬停显示美元）。
+统计页 **成本（估算）** 卡片与各表的**成本**列是「按 token × 公开刊例价」的**估算**，不是上游真实扣费：单价取自 [models.dev](https://models.dev) 的模型目录（`input` / `output` / `cache_read`，单位 **USD / 百万 token**），按 `(输入−命中)×输入价 + 命中×缓存价 + 输出×输出价` 折算成美元，再按**写入时生效的汇率**（`USD_CNY_RATE`，默认 `6.70`）折成人民币。人民币为主、美元为辅（明细单元格悬停显示美元）。
 
-- **写入时定值**：费用在写明细那一刻算好落库（`usage_events.cost_usd` / `cost_cny`），历史行**不随价表或汇率变化重算**——改汇率只影响之后写入的请求。功能上线前的历史明细两列是 `NULL`（显示 `—`），可用 `python3 scripts/backfill_cost.py --apply` 一次性按**当前**价表与汇率补齐 / 重算（默认预览、写库前自动备份、幂等；口径是「按今天重估」，不是还原当时花费）。
-- **匹配不到就不计**：本地模型名按 `models.dev` 的 `model.id`（小写）对齐，同一 id 挂在几十个 provider 下时**优先原厂 provider**（`canonical_model_id` 前缀 == provider id），否则取 `input` 价最高的非空条目；未匹配到定价、或未上报输入 token 的请求不计入，聚合值为 `null` 时显示 `—`（**不拿 0 冒充免费**）。因此费用是**下限**：只覆盖能在 models.dev 里找到的模型。
-- **价表来源与刷新**：价表由后台任务 `PRICE_CATALOG_MINUTES`（默认每日一次、下限 60 分钟）从 `models.dev` 拉取并落盘 `data/model_prices.json`，启动时同步回灌（零上游请求）；**没有快照时**（首次部署）启动会后台补拉一次，避免费用空窗到下一轮。价表缺失时费用全部显示 `—`，不影响聊天。
+- **写入时定值**：成本在写明细那一刻算好落库（`usage_events.cost_usd` / `cost_cny`），历史行**不随价表或汇率变化重算**——改汇率只影响之后写入的请求。功能上线前的历史明细两列是 `NULL`（显示 `—`），可用 `python3 scripts/backfill_cost.py --apply` 一次性按**当前**价表与汇率补齐 / 重算（默认预览、写库前自动备份、幂等；口径是「按今天重估」，不是还原当时花费）。
+- **匹配不到就不计**：本地模型名按 `models.dev` 的 `model.id`（小写）对齐，同一 id 挂在几十个 provider 下时**优先原厂 provider**（`canonical_model_id` 前缀 == provider id），否则取 `input` 价最高的非空条目；未匹配到定价、或未上报输入 token 的请求不计入，聚合值为 `null` 时显示 `—`（**不拿 0 冒充免费**）。因此成本是**下限**：只覆盖能在 models.dev 里找到的模型。
+- **价表来源与刷新**：价表由后台任务 `PRICE_CATALOG_MINUTES`（默认每日一次、下限 60 分钟）从 `models.dev` 拉取并落盘 `data/model_prices.json`，启动时同步回灌（零上游请求）；**没有快照时**（首次部署）启动会后台补拉一次，避免成本空窗到下一轮。价表缺失时成本全部显示 `—`，不影响聊天。
 
 ### 用量统计里的缓存命中率
 
@@ -370,8 +370,8 @@ CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端�
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期（下限 1 分钟） |
 | `REFRESH_INTERVAL_MINUTES` | `30` | token 预刷新轮询周期（下限 5 分钟）；短寿命渠道的预刷新窗口封顶必须**宽于**它，否则窗口整轮漏过、凭证拖到到期才刷 |
 | `MODEL_CATALOG_MINUTES` | `30` | 模型目录兜底刷新周期（下限 5 分钟）；只影响「没人访问列表时」的保鲜，正常仍按 TTL 随访问刷新 |
-| `PRICE_CATALOG_MINUTES` | `1440` | 价表刷新周期（下限 60 分钟）：后台从 `models.dev` 拉取模型定价表（USD/百万 token）并落盘，供统计里的费用估算；上游价格变动很少，默认每日一次 |
-| `USD_CNY_RATE` | `6.70` | 费用估算的美元兑人民币汇率（1 USD = 该值 CNY）；可热更，只影响之后写入的请求，历史费用不重算 |
+| `PRICE_CATALOG_MINUTES` | `1440` | 价表刷新周期（下限 60 分钟）：后台从 `models.dev` 拉取模型定价表（USD/百万 token）并落盘，供统计里的成本估算；上游价格变动很少，默认每日一次 |
+| `USD_CNY_RATE` | `6.70` | 成本估算的美元兑人民币汇率（1 USD = 该值 CNY）；可热更，只影响之后写入的请求，历史成本不重算 |
 | `MODELS_DEV_URL` | `https://models.dev/api.json` | 价表来源地址；改后需重启 |
 | `GROWTH_INTERVAL_MINUTES` | `60` | 成长中心（仅 CodeBuddy）一轮领取的周期；下限 5 分钟 |
 | `GROWTH_IRREVERSIBLE_ACTIONS` | `true` | 是否允许成长中心的不可逆动作：抽奖、连登兑换、开 Buddy 盲盒、消耗补登卡。`false` 时仍会领取旅行礼物与任务奖励 |

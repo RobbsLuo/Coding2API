@@ -90,7 +90,7 @@ describe("formatChartValue", () => {
     expect(formatChartValue(8200, "ttfb")).toBe("8.2 s");
   });
 
-  it("费用：人民币金额 + 单位（元）", () => {
+  it("成本：人民币金额 + 单位（元）", () => {
     expect(formatChartValue(12.34, "cost")).toBe("¥12.34 (元)");
   });
 
@@ -111,7 +111,7 @@ describe("formatAxisValue", () => {
     expect(formatAxisValue(22000, "ttfb")).toBe("22 s");
   });
 
-  it("费用：保留两位小数（不用万/亿紧凑格式）", () => {
+  it("成本：保留两位小数（不用万/亿紧凑格式）", () => {
     expect(formatAxisValue(12.34, "cost")).toBe("12.34");
     expect(formatAxisValue(1500.5, "cost")).toBe("1,500.5");
   });

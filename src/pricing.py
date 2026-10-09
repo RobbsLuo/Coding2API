@@ -1,6 +1,6 @@
-"""模型定价表（models.dev 刊例价）+ 单请求费用估算。
+"""模型定价表（models.dev 刊例价）+ 单请求成本估算。
 
-**为什么单独一个模块**：费用不等于上游真实扣费，而是「按 token × 公开刊例价」
+**为什么单独一个模块**：成本不等于上游真实扣费，而是「按 token × 公开刊例价」
 的估算，供管理台横向对比渠道成本。价表来自 `https://models.dev/api.json`，
 每条 cost 是**美元 / 百万 token**（`input` / `output` / `cache_read`）。
 
@@ -15,9 +15,9 @@
 
 **落盘快照**（`DATA_DIR/model_prices.json`）：与模型目录同理，进程重启即丢，
 启动时同步读回，后台任务周期刷新。损坏 / 版本不符 / 过旧一律安静降级为空表
-——价表缺失只让费用显示 `—`，绝不影响聊天。
+——价表缺失只让成本显示 `—`，绝不影响聊天。
 
-**费用写入时定值**：`estimate_cost_usd` + `to_cny` 在写明细那一刻算好落库，
+**成本写入时定值**：`estimate_cost_usd` + `to_cny` 在写明细那一刻算好落库，
 历史行不随价表或汇率变化而重算（与 credit 推算同一心智模型）。
 """
 
@@ -118,7 +118,7 @@ def estimate_cost_usd(
     output_tokens: int | None,
     cached_tokens: int | None,
 ) -> float | None:
-    """按刊例价估算一次请求的美元费用；无法定价时返回 None。
+    """按刊例价估算一次请求的美元成本；无法定价时返回 None。
 
     返回 None 的两种情形：价表里没有该模型，或没有输入 token 数（拿不到用量
     就无法估算——不能拿 0 冒充「免费」）。缓存 token 会被夹到 `[0, input]`，
@@ -142,7 +142,7 @@ def estimate_cost_usd(
 
 
 def to_cny(cost_usd: float, rate: float) -> float:
-    """美元费用按汇率折人民币；rate 非法（NaN / 非正）时按 1:1 兜底。
+    """美元成本按汇率折人民币；rate 非法（NaN / 非正）时按 1:1 兜底。
 
     汇率校验放这里是为了让落库值永远有限：坏汇率若产生 NaN 会污染整段聚合，
     且一进 SQLite 再也回不来（与 credit 拒绝 NaN 同理）。

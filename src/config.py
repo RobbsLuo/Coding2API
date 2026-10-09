@@ -170,7 +170,7 @@ class Settings(BaseSettings):
     # 3 个会话」——会话在 HTTP 流结束后仍滞留数十秒（打满 3 并发后，单请求
     # 直到约 68s 才恢复）。0 关闭窗口口径，退回纯在途上限。可热更。
     codearts_request_window_seconds: float = 60
-    # 费用估算（models.dev 刊例价，USD/百万 token）：人民币汇率（1 USD = 该值 CNY）
+    # 成本估算（models.dev 刊例价，USD/百万 token）：人民币汇率（1 USD = 该值 CNY）
     # 与价表刷新周期（分钟）。汇率是运行时热更项（见 HOT_SETTINGS），价表来源
     # 是公开只读端点，无需密钥。
     usd_cny_rate: float = 6.70

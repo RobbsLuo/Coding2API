@@ -164,7 +164,7 @@ describe("StatsPage", () => {
     expect(cbRow).not.toHaveTextContent("≈12.5");
   });
 
-  it("费用卡片：人民币为主、美元为辅，未匹配定价显示 —", async () => {
+  it("成本卡片：人民币为主、美元为辅，未匹配定价显示 —", async () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
@@ -174,16 +174,16 @@ describe("StatsPage", () => {
     renderPage(<StatsPage />, ADMIN);
     await settle();
 
-    const card = screen.getByText("费用（估算）").closest("[data-slot=card]")!;
+    const card = screen.getByText("成本（估算）").closest("[data-slot=card]")!;
     expect(card).toHaveTextContent("≈¥12.34");
     expect(card).toHaveTextContent("美元 ≈$1.84");
-    // 按渠道表带费用列，人民币口径
+    // 按渠道表带成本列，人民币口径
     const table = screen.getByTestId("provider-table");
     const traeRow = within(table).getAllByText("TRAE")[0].closest("tr")!;
     expect(traeRow).toHaveTextContent("≈¥3.35");
   });
 
-  it("费用缺失（无可定价模型）显示占位符而非 ¥0", async () => {
+  it("成本缺失（无可定价模型）显示占位符而非 ¥0", async () => {
     mockFetch({
       "/api/stats/overview": { ...OVERVIEW, cost_usd: null, cost_cny: null },
       "/api/stats/by-provider": { providers: [
@@ -196,7 +196,7 @@ describe("StatsPage", () => {
     renderPage(<StatsPage />, ADMIN);
     await settle();
 
-    expect(screen.getByText("费用（估算）").closest("[data-slot=card]")).toHaveTextContent("—");
+    expect(screen.getByText("成本（估算）").closest("[data-slot=card]")).toHaveTextContent("—");
     const table = screen.getByTestId("provider-table");
     const row = within(table).getAllByText("TRAE")[0].closest("tr")!;
     expect(row).toHaveTextContent("—");
@@ -284,7 +284,7 @@ describe("StatsPage", () => {
     );
     expect(screen.getByTestId("metric-tabs-tokens")).toHaveAttribute("aria-selected", "true");
 
-    // 费用指标也可选：触发 metric=cost（人民币口径）
+    // 成本指标也可选：触发 metric=cost（人民币口径）
     await userEvent.click(screen.getByTestId("metric-tabs-cost"));
     await waitFor(() =>
       expect(fetchSpy.mock.calls.some(([url]) =>
@@ -293,7 +293,7 @@ describe("StatsPage", () => {
     expect(screen.getByTestId("metric-tabs-cost")).toHaveAttribute("aria-selected", "true");
   });
 
-  it("请求明细：费用列显示人民币，缺失显示 —", async () => {
+  it("请求明细：成本列显示人民币，缺失显示 —", async () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
@@ -304,7 +304,7 @@ describe("StatsPage", () => {
     await settle();
 
     const table = screen.getByTestId("events-table");
-    expect(within(table).getByText("费用")).toBeInTheDocument();
+    expect(within(table).getByText("成本")).toBeInTheDocument();
     expect(within(table).getByText("≈¥0.008")).toBeInTheDocument();
   });
 

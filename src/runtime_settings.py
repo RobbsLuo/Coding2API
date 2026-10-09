@@ -127,12 +127,12 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "「模型→渠道」归属表与落盘快照一起变陈旧。下限 5 分钟。",
                minimum=5, task="model_catalog", floor=5),
     HotSetting("price_catalog_minutes", int, "价表刷新周期（分钟）",
-               "后台拉取 models.dev 模型定价表的间隔；价表决定统计里的费用估算，"
+               "后台拉取 models.dev 模型定价表的间隔；价表决定统计里的成本估算，"
                "上游价格变动很少，默认每日一次即可。下限 60 分钟。",
                minimum=60, task="price_catalog", floor=60),
     HotSetting("usd_cny_rate", float, "美元兑人民币汇率",
-               "费用估算里把 models.dev 的美元刊例价折成人民币的汇率"
-               "（1 USD = 该值 CNY）；改后只影响之后写入的请求，历史费用不重算。",
+               "成本估算里把 models.dev 的美元刊例价折成人民币的汇率"
+               "（1 USD = 该值 CNY）；改后只影响之后写入的请求，历史成本不重算。",
                minimum=0.000001, group="routing"),
     HotSetting("codebuddy_chat_min_interval", float, "CodeBuddy 聊天最小间隔（秒）",
                "同渠道同凭证顺序连发的最小请求间隔（0 关闭）；按凭证分桶、桶内"

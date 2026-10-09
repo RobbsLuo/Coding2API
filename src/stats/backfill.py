@@ -1,8 +1,8 @@
-"""历史明细的费用回填 / 重算（一次性，见 `scripts/backfill_cost.py`）。
+"""历史明细的成本回填 / 重算（一次性，见 `scripts/backfill_cost.py`）。
 
-费用在**写入明细那一刻**按当时的价表与汇率定值落库（`usage_events.cost_usd` /
+成本在**写入明细那一刻**按当时的价表与汇率定值落库（`usage_events.cost_usd` /
 `cost_cny`，见 `pricing` / `collector`）；改动前已落库的历史明细两列是 NULL，
-统计页显示 `—`。本模块用**当前**价表与汇率把历史明细一次性补齐 / 重算，让费用
+统计页显示 `—`。本模块用**当前**价表与汇率把历史明细一次性补齐 / 重算，让成本
 覆盖全部时间范围；之后新请求走正常写入路径，不再需要回填。
 
 与 credit 回填（`provider.trae.backfill`）同一心智：
@@ -62,7 +62,7 @@ def pending_cost(conn, table: PriceTable, rate: float) -> list[tuple[str, int, f
 
 
 def recompute_costs(db, table: PriceTable, rate: float) -> int:
-    """按当前价表 / 汇率重算全部明细费用，返回改写条数（0 = 无需处理）。
+    """按当前价表 / 汇率重算全部明细成本，返回改写条数（0 = 无需处理）。
 
     `db` 只用到 `Database` 的 `transaction()` 形态（鸭子类型），便于脚本注入
     裸连接适配器与测试。先整批物化再 `executemany`：不在遍历游标的同时改表。
