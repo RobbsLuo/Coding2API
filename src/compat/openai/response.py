@@ -33,6 +33,25 @@ def _chunk(model: str, delta: dict[str, Any], *,
     }
 
 
+def usage_payload(usage: Usage | None) -> dict[str, Any]:
+    """OpenAI `usage` 对象形状：三个主计数 + 两个 details 子对象。
+
+    流式收尾帧与非流式 `aggregate()` 共用一处，避免两份形状各自漂移。
+    「上游未上报」与「上报 0」必须可区分，故缺省一律为 None 而非 0。
+    """
+    return {
+        "prompt_tokens": (usage.input_tokens if usage else None),
+        "completion_tokens": (usage.output_tokens if usage else None),
+        "total_tokens": (
+            (usage.input_tokens or 0) + (usage.output_tokens or 0) if usage else None
+        ),
+        "prompt_tokens_details": {
+            "cached_tokens": usage.cached_tokens if usage else None},
+        "completion_tokens_details": {
+            "reasoning_tokens": usage.reasoning_tokens if usage else None},
+    }
+
+
 def _completion_id() -> str:
     return "chatcmpl-" + f"{time.time_ns():x}"
 
@@ -75,7 +94,8 @@ class StreamTranslator:
         self._sent_role = False
         self._tool_index = ToolIndexState()
         self._finished = False
-        # 上游 usage 不单独成帧，但要留给统计采集
+        # 上游 usage 不在收到时就成帧（OpenAI 惯例是收尾帧之后、[DONE] 之前
+        # 补一帧 choices 为空的 usage），这里先缓冲 latest 值供统计与收尾帧共用
         self.usage: Usage | None = None
         # [DONE] 已产出：客户端此后断开属正常收尾（拿到回调即关连接）
         self.done_sent = False
@@ -92,7 +112,8 @@ class StreamTranslator:
                 ensure_ascii=False))
             return
         if event.kind is EventKind.USAGE:
-            # usage 不单独成帧，由聚合路径处理；流式沿用上游语义不额外发 usage 块
+            # 此处不成帧：留到 _close 随 [DONE] 之前补发（OpenAI 标准形态）。
+            # 多次 USAGE 取最后一次上游汇报的值。
             self.usage = event.usage
             return
         if event.kind is EventKind.FINISH:
@@ -118,8 +139,8 @@ class StreamTranslator:
         """上游未发 done 就断流：补一个结束帧，保证客户端不会挂住。"""
         if self._finished:
             return  # 上游已发 done，DONE 已随 _close 发出，不能重复
+        # [DONE] 由 _close 统一发出（与 FINISH 路径同源），此处不再补
         yield from self._close("stop")
-        yield SSE_DONE
 
     def keepalive(self) -> bytes:
         """SSE 注释帧心跳。
@@ -137,6 +158,17 @@ class StreamTranslator:
     def _close(self, finish_reason: str) -> Iterator[bytes]:
         yield format_openai_frame(json.dumps(
             _chunk(self.model, {}, finish_reason=finish_reason), ensure_ascii=False))
+        # OpenAI 标准形态：include_usage 时收尾帧之后、[DONE] 之前补一帧
+        # choices 为空的 usage。上游没报就不补（不发 0 占位冒充已上报）。
+        if self.usage is not None:
+            yield format_openai_frame(json.dumps(
+                {"id": _completion_id(),
+                 "object": "chat.completion.chunk",
+                 "created": int(time.time()),
+                 "model": self.model,
+                 "choices": [],
+                 "usage": usage_payload(self.usage)},
+                ensure_ascii=False))
         # 在产出 [DONE] 前置位：executor 据此区分「完整响应已送出后的断开」
         # （客户端拿到回调即关闭连接，属正常收尾）与真正的中途断开
         self.done_sent = True
@@ -189,15 +221,5 @@ def aggregate(events: Iterable[Event], model: str) -> dict[str, Any]:
         "model": model,
         "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
     }
-    result["usage"] = {
-        "prompt_tokens": (usage.input_tokens if usage else None),
-        "completion_tokens": (usage.output_tokens if usage else None),
-        "total_tokens": (
-            (usage.input_tokens or 0) + (usage.output_tokens or 0) if usage else None
-        ),
-        "prompt_tokens_details": {
-            "cached_tokens": usage.cached_tokens if usage else None},
-        "completion_tokens_details": {
-            "reasoning_tokens": usage.reasoning_tokens if usage else None},
-    }
+    result["usage"] = usage_payload(usage)
     return result
