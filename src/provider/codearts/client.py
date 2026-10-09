@@ -14,8 +14,9 @@
   不是按月的套餐积分。**当日没用完即作废**，故 `parse_balance` 把当日剩余登记成
   到期点＝次日 0 点的 `expiry_ladder`，让调度器「快过期的先用」把 CodeArts 排在
   其它渠道之前。上游 token 由 `units` 统一折成「积分」（1 积分 = 10000 token，
-  每日池满额 = 1000 积分），与其它渠道同口径，见该模块。CodeArts 没有签到接口，
-  临时凭证的续期由
+  每日池满额 = 1000 积分），与其它渠道同口径，见该模块。**每日签到**（Q72）
+  走另一套接口（`GET {snap}/v1/ops/delivery` → `claim` → `confirm`，见下），
+  与上述 token 池并行的积分账，临时凭证的续期由
   `tasks.refresh.RefreshTask` 独占（先落库再同步）；额度探测只读余额，
   绝不在此刷新一次性 refresh_token，见 `probe_quota`。
 
@@ -49,15 +50,20 @@ from .credential import CodeArtsCredential, merge_refreshed
 from .events import (
     AGENT_TYPE_PROMPT_CENTER,
     BENEFIT_HOST,
+    CAMPAIGN_DAILY_CREDIT,
     EP_BENEFIT_CLAIM,
     EP_BENEFIT_CONFIG,
     EP_CHAT,
     EP_CHAT_V2,
     EP_CURRENT_USER,
     EP_MODEL_BUILTIN,
+    EP_OPS_CLAIM,
+    EP_OPS_CONFIRM,
+    EP_OPS_DELIVERY,
     EP_TOKEN_BALANCE,
     HEADER_MAAS_TYPE,
     MAAS_BENEFIT,
+    OPS_CHANNEL,
     SNAP_ENGINE_HOST,
     STS_HOST,
     UpstreamProtocolViolation,
@@ -418,7 +424,8 @@ class CodeArtsClient:
     async def probe_quota(self, credential: CodeArtsCredential) -> Quota:
         """额度余额（只读，不刷新）。
 
-        CodeArts 没有每日签到接口，额度是**每日 token 池**（当日 0 点清零）。
+        额度是**每日 token 池**（当日 0 点清零）；另有独立的积分余额走
+        `/v1/statistics/plugin`，两者是并行的两套账，**不要混**。
         临时凭证的续期**不在**这里做：refresh_token 是一次性的，必须由
         `tasks.refresh.RefreshTask`（先落库再同步）独占轮转。若此处顺手刷新，
         一个 refresh_token 会被两个地方各消费一次，后到的报
@@ -428,6 +435,113 @@ class CodeArtsClient:
         url = f"{self.benefit_host}{EP_TOKEN_BALANCE}"
         data = await self._get_json(url, credential, short_headers())
         return parse_balance(data)
+
+    # ------------------------------------------------------------ 每日签到
+
+    async def fetch_checkin_status(self, credential: CodeArtsCredential,
+                                   ) -> dict[str, Any] | None:
+        """查「每日签到领1000 积分」活动（只读）；上游没有/改版返回 None。
+
+        走 `snap` 根的 `/v1/ops/delivery`——**不带 `snap-manager` 前缀**（带了
+        回 APIG.0101）。与额度探测用的 `{opengw}/api/v1/user/tokens/balance`
+        是两个不同 host 的两套体系。
+        """
+        url = (f"{self.endpoint}{EP_OPS_DELIVERY}"
+               f"?channel={OPS_CHANNEL}")
+        data = await self._get_json(
+            url, credential, short_headers(AGENT_TYPE_PROMPT_CENTER))
+        return codearts_events.daily_credit_campaign(data)
+
+    async def claim_daily_credit(self, credential: CodeArtsCredential,
+                                 ) -> tuple[int, str]:
+        """领取当日签到积分，返回 `(业务码, 提示文案)`。
+
+        **claim 之后必须 confirm**：`CLAIMED`（已领未确认）是上游真实存在的
+        状态（Q72 实测三账号之一正卡在这一档），漏掉 confirm 积分可能不到账。
+        所以本方法把两步捆在一起，调用方无需知道这个两步协议。
+
+        业务码取上游 `code`（`0` 为成功）。非 0 是**业务**失败而非签名失败——
+        实测有 `40001尚未到达权益刷新时间` 这类码，走 HTTP 200，所以不能只看
+        HTTP 状态码。
+        """
+        url = f"{self.endpoint}{EP_OPS_CLAIM}"
+        key = (f"claim_{CAMPAIGN_DAILY_CREDIT}"
+               f"_{int(time.time() * 1000)}")
+        body = {"campaignId": CAMPAIGN_DAILY_CREDIT,
+                "idempotentKey": key, "channel": OPS_CHANNEL}
+        data = await self._request_json(
+            "POST", url, credential,
+            short_headers(AGENT_TYPE_PROMPT_CENTER), body)
+        code = _opt_int(data.get("code"))
+        message = str(data.get("message") or "")
+        if code != 0:
+            return (-1 if code is None else code), (message or "领取失败")
+        await self._confirm_daily_credit(credential)
+        return 0, message
+
+    async def _confirm_daily_credit(self, credential: CodeArtsCredential) -> bool:
+        """确认已领积分（claim 的第二步）；返回是否成功。
+
+        积分在 **claim 时就已到账**（Q72 实测：claim 后总额 +1000），confirm 只把
+        状态从 `CLAIMED` 推到 `CONFIRMED`。所以 confirm 失败不丢积分，但它决定
+        本方法返回值——`checkin()` 的 `CLAIMED` 分支要靠它决定是否封账，吞掉失败
+        会让 `CheckinTask` 当天封账后再也不补确认。
+        """
+        try:
+            await self._request_json(
+                "POST", f"{self.endpoint}{EP_OPS_CONFIRM}", credential,
+                short_headers(AGENT_TYPE_PROMPT_CENTER),
+                {"campaignId": CAMPAIGN_DAILY_CREDIT})
+        except (UpstreamHTTPError, UpstreamProtocolViolation) as error:
+            logger.warning("CodeArts 签到确认失败: %s", error)
+            return False
+        return True
+
+    async def checkin(self, credential: CodeArtsCredential,
+                      *, now: int | None = None) -> base.CheckinResult:
+        """每日签到状态机：查活动 → 按 status 决定领/补确认/跳过。
+
+        `CheckinTask` 只认 `CheckinResult.ok`（成功即当日封账）与
+        `already_checked_in`（已签不算错误），故这里把上游四种 status 归一到
+        该语义，细节见 `codearts_events` 顶部的 status 说明。三种真实状态
+        （Q72 实测三账号各占一档）都有对应分支：
+
+        * `ELIGIBLE` 且 `claimable` → claim + confirm；
+        * `CLAIMED`（已领未确认）→ **只补 confirm**，不能当已签跳过；
+        * `CONFIRMED` / `CONSUMED` → 已签，不碰写接口。
+
+        活动不存在 / 已过期一律 `ok=True`（不是错误），否则后台任务会每 10 分钟
+        刷失败日志；`ELIGIBLE` 但不可领、或未知 status 归 `ok=False` 让任务重试
+        —— 漏签一天 1000 积分的代价高于多刷几行日志。
+        """
+        campaign = await self.fetch_checkin_status(credential)
+        if campaign is None:
+            return base.CheckinResult(ok=True, message="官方签到活动未开放")
+        stamp = int(time.time()) if now is None else now
+        end = codearts_events.campaign_end_epoch(campaign)
+        if end is not None and end <= stamp:
+            return base.CheckinResult(ok=True, message="官方签到活动已结束")
+        status = codearts_events.campaign_status(campaign)
+        if status in codearts_events.CHECKIN_DONE:
+            return base.CheckinResult(ok=True, already_checked_in=True, code=0,
+                                      message="今日已签到")
+        if status == codearts_events.CHECKIN_CLAIMED:
+            # 已领未确认：补齐第二步。confirm 失败要 ok=False，否则 CheckinTask
+            # 当日封账、再也不会补确认（积分已在 claim 时到账，这里只是状态收尾）。
+            confirmed = await self._confirm_daily_credit(credential)
+            if not confirmed:
+                return base.CheckinResult(ok=False, message="签到确认失败，稍后重试")
+            return base.CheckinResult(ok=True, code=0, message="已补确认签到")
+        if (status == codearts_events.CHECKIN_ELIGIBLE
+                and codearts_events.campaign_claimable(campaign)):
+            code, message = await self.claim_daily_credit(credential)
+            if code != 0:
+                return base.CheckinResult(ok=False, code=code, message=message)
+            return base.CheckinResult(
+                ok=True, credit=codearts_events.campaign_credit(campaign), code=0,
+                message=message or "签到成功")
+        # ELIGIBLE 但不可领 / 未知 status：交给下一轮重试，不静默吞掉。
+        return base.CheckinResult(ok=False, message="当前不可领取")
 
     # ------------------------------------------------------------ 身份/刷新
 
@@ -610,6 +724,13 @@ def _first_int(item: dict[str, Any], keys: tuple[str, ...]) -> int | None:
         if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             return value
     return None
+
+
+def _opt_int(value: Any) -> int | None:
+    """可空的整数字段 → int；非 int / bool / 缺失返回 None（区分「未提供」与 0）。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def parse_balance(data: dict[str, Any], *, now: int | None = None) -> Quota:

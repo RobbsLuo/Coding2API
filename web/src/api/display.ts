@@ -59,10 +59,12 @@ export function quotaSemantics(credential: Credential): string {
   if (credential.provider === "trae") {
     return "账户剩余（单调递减）";
   }
-  // CodeArts 是每日 1000 积分池（上游 1000 万 token 折成，1 积分 = 10000 token），
-  // 当日 0 点清零——上游不给重置时间戳，固定按时段描述，不能退化成「本周期剩余」。
+  // CodeArts 是每日 token 池折算成的额度（上游 1000 万 token 折 1000 积分，
+  // 1 积分 = 10000 token），当日 0 点清零——上游不给重置时间戳，固定按时段
+  // 描述，不能退化成「本周期剩余」。这里的「积分」是合成折算值，与上游真积分
+  // （内置模型计费单位，Q72）同名不同物，故文案用「额度池」而非「积分」。
   if (credential.provider === "codearts") {
-    return "每日积分额度（当日 0 点清零）";
+    return "每日额度池（token 折算，当日 0 点清零）";
   }
   // CodeBuddy / Qoder 随周期重置；未探测到重置时间时退化为本周期口径。
   if (!credential.quota_cycle_end) {

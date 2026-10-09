@@ -23,6 +23,7 @@ CodeArts 的业务码是**字符串**（`ChatAgent.00001001`），而中立 `Eve
 from __future__ import annotations
 
 import codecs
+import datetime
 import json
 import re
 from collections.abc import AsyncIterator
@@ -59,6 +60,19 @@ EP_LOGIN_TICKET = "/v1/login/ticket"
 EP_OAUTH_TOKENS = "/v1/oauth2/tokens"
 EP_CURRENT_USER = "/v1/current/user"
 EP_CALLER_IDENTITY = "/v5/caller-identity"
+
+# 运营活动（每日签到领积分）端点。**前缀与上面这批不一样：`/v1/ops/*` 挂在
+# snap 引擎根上、不带 `snap-manager`**——带上会回 APIG.0101「API does not exist」
+# （而 `/v1/statistics/plugin`、`/v1/current/user` 必须带）。两套前缀混用是
+# 之前扫不到这些接口的根因，Q72 实测记录。
+EP_OPS_DELIVERY = "/v1/ops/delivery"
+EP_OPS_CLAIM = "/v1/ops/claim"
+EP_OPS_CONFIRM = "/v1/ops/confirm"
+# delivery 查询的渠道参数（上游按渠道返回可领活动，实测固定 `IDE`）。
+OPS_CHANNEL = "IDE"
+# 「每日签到领1000 积分」的活动 ID（Q72 实测：delivery 同时返回推荐码 3 /
+# 新用户 4 / 学生认证 2 / 每日签到 1，只有这个每天可领）。
+CAMPAIGN_DAILY_CREDIT = 1
 
 # 福利模型路由头（逆向记录 §7：无此头报 InferHub.002002009.404 未注册）。
 HEADER_MAAS_TYPE = "maas_type"
@@ -366,3 +380,107 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
     if status == 400:
         return ErrKind.INVALID
     return ErrKind.OTHER
+
+
+# ------------------------------------------------------------------ 每日签到
+# 上游 status 语义（Q72 实测三账号同时覆盖到三档，务必区分）：
+#   ELIGIBLE  → 可领，`claimable=true`、`pendingTotalAmount` 是待领积分数
+#   CLAIMED   → **已领但未确认**（实测 hid_z- 就是这一档）。这不是终态：漏掉
+#               `/v1/ops/confirm` 积分可能不到账，故必须补一次确认而不是当已签。
+#   CONFIRMED → 已领且已确认（终态）
+#   CONSUMED  → 已领且已花掉（终态）
+CHECKIN_ELIGIBLE = "ELIGIBLE"
+CHECKIN_CLAIMED = "CLAIMED"
+CHECKIN_DONE = ("CONFIRMED", "CONSUMED")
+
+
+def daily_credit_campaign(data: dict[str, Any]) -> dict[str, Any] | None:
+    """delivery 响应 → 「每日签到领1000 积分」活动条目；找不到返回 None。
+
+    上游把活动列表包在 `data.items`（不是顶层），实测同时返回推荐码 / 新用户 /
+    学生认证 / 每日签到四条，按 `campaignId` 精确挑，不靠标题匹配——标题会改。
+    字段缺失或形状不对一律返回 None（上游改版不该让签到任务抛异常，调用方把
+    None 归一为「活动未开放」）。
+    """
+    if not isinstance(data, dict):
+        return None
+    envelope = data.get("data")
+    if not isinstance(envelope, dict):
+        return None
+    items = envelope.get("items")
+    if not isinstance(items, list):
+        return None
+    for item in items:
+        if (isinstance(item, dict)
+                and _as_int(item.get("campaignId")) == CAMPAIGN_DAILY_CREDIT):
+            return item
+    return None
+
+
+def campaign_status(campaign: dict[str, Any] | None) -> str:
+    """活动 `status` → 归一后的字符串；缺失/非字符串返回空串。"""
+    if not isinstance(campaign, dict):
+        return ""
+    status = campaign.get("status")
+    return status.strip() if isinstance(status, str) else ""
+
+
+def campaign_claimable(campaign: dict[str, Any] | None) -> bool:
+    """活动是否**当前**可领。
+
+    只认上游显式的 `claimable=true`。活动存在 ≠ 可领（实测今日已领的账号
+    `claimable` 为 false），靠 status 推断会漏掉「已领未确认」那一档。
+    """
+    return isinstance(campaign, dict) and campaign.get("claimable") is True
+
+
+def campaign_credit(campaign: dict[str, Any] | None) -> float | None:
+    """活动 `benefitAmount` → 积分数；缺失/非数值返回 None（不猜）。"""
+    if not isinstance(campaign, dict):
+        return None
+    value = campaign.get("benefitAmount")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def campaign_end_epoch(campaign: dict[str, Any] | None) -> int | None:
+    """活动 `extra.endTime`（ISO8601 UTC）→ epoch；缺失/畸形返回 None。
+
+    用于「活动已结束就别再去 claim」。返回 None 时调用方**不**按过期处理——
+    宁可多调一次上游（幂等），也不因为解析失败把每天 1000 积分白白丢掉。
+    """
+    if not isinstance(campaign, dict):
+        return None
+    extra = campaign.get("extra")
+    if not isinstance(extra, dict):
+        return None
+    text = extra.get("endTime")
+    if not isinstance(text, str) or not text.strip():
+        return None
+    return _parse_iso8601(text.strip())
+
+
+def campaign_name(campaign: dict[str, Any] | None) -> str:
+    """活动 `title`；缺失时给通用名，让管理台永远有可显示的活动名。"""
+    if isinstance(campaign, dict):
+        title = campaign.get("title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+    return "每日签到领积分"
+
+
+def _parse_iso8601(text: str) -> int | None:
+    """`2026-12-30T16:00:00Z` → epoch 秒；不可解析返回 None。
+
+    只认结尾的 `Z`（上游实测就是 UTC），不带时区后缀的按 UTC 处理——上游
+    若改成带偏移量，由 Python 的 `fromisoformat` 直接处理。
+    """
+    candidate = text[:-1] + "+00:00" if text.endswith("Z") else text
+    try:
+        parsed = datetime.datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.UTC)
+    return int(parsed.timestamp())

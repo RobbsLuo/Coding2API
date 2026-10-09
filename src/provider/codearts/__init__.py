@@ -9,9 +9,10 @@
    `tasks.refresh.RefreshTask`（唯一持有者，**先落库再同步**）承担，额度探测
    等旁路**不得**顺手刷新——否则一个一次性 refresh_token 被两个地方各消费一次，
    后到的必然报 `the refresh token has been used`，DB 里的 token 也被烧掉。
-3. **没有每日签到接口**（额度为每日 token 池、0 点清零，逆向记录 §6）。对应能力由
-   任务侧 `RefreshTask` 的到期预刷新承担，故本 provider **不实现 checkin**
-   （任务侧靠 getattr 探测自然跳过）。
+3. **每日签到领 1000 积分**（`/v1/ops/delivery` → `claim` → `confirm`，Q72）。
+   `CheckinTask` 与管理台靠 `getattr` 自动发现，故这里实现 `checkin` /
+   `checkin_status` / `checkin_scope`；`claim` 后**必须** `confirm`，否则积分
+   可能不到账（上游 `CLAIMED` 是「已领未确认」而非终态）。
 4. **SSE 不是标准分隔**（逐行 `data:`、无空行），且 `text` 是**累计全文**，
    解析层必须做替换语义的差量，见 `events.TextSnapshot`。
 
@@ -26,7 +27,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...provider.base import ErrKind, Event, Model, Quota
+from ...provider.base import CheckinResult, ErrKind, Event, Model, Quota
 from . import dpop
 from . import events as codearts_events
 from .client import CodeArtsClient
@@ -111,6 +112,36 @@ class CodeArtsProvider:
         refreshed = await self.client.refresh_token(
             CodeArtsCredential.from_dict(credential_data))
         return refreshed.to_dict()
+
+    # ---------------------------------------------------------------- 签到
+
+    async def checkin(self, credential_data: dict) -> CheckinResult:
+        return await self.client.checkin(
+            CodeArtsCredential.from_dict(credential_data))
+
+    async def checkin_status(self, credential_data: dict) -> dict:
+        """只读签到状态（管理台展示）；活动不存在/改版时给非活动态。"""
+        credential = CodeArtsCredential.from_dict(credential_data)
+        campaign = await self.client.fetch_checkin_status(credential)
+        if campaign is None:
+            return {"active": False, "today_checked_in": False,
+                    "today_credit": None, "activity_name": "每日签到领积分"}
+        status = codearts_events.campaign_status(campaign)
+        return {
+            "active": True,
+            "today_checked_in": status in codearts_events.CHECKIN_DONE,
+            "today_credit": codearts_events.campaign_credit(campaign),
+            "activity_name": codearts_events.campaign_name(campaign),
+        }
+
+    def checkin_scope(self, credential_data: dict) -> str:
+        """签到隔离键：uid；身份未知时返回空串（调用方回落凭证 ID）。
+
+        与 Qoder 同取向：返回空串而非「codearts|」——后者会让同渠道所有身份
+        未知的凭证算出同一个 scope，`CheckinTask` 的 seen 集合只跑第一个账号。
+        """
+        uid = CodeArtsCredential.from_dict(credential_data).uid
+        return f"codearts|{uid}" if uid else ""
 
     async def aclose(self) -> None:
         """释放内部 HTTP 连接池。"""

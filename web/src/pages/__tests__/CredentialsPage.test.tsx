@@ -594,7 +594,7 @@ describe("渠道登录入口", () => {
     expect(screen.getByTestId("start-login-codearts")).toHaveTextContent("登录 CodeArts");
   });
 
-  it("CodeArts 无签到接口：只显示探测、不显示签到", async () => {
+  it("CodeArts 有签到接口：探测与签到都显示（Q72）", async () => {
     mockFetch({
       "/api/credentials": listBody([makeCredential({ id: "ca", provider: "codearts" })]),
     });
@@ -602,7 +602,7 @@ describe("渠道登录入口", () => {
     await settle();
 
     expect(screen.getByTestId("probe-ca")).toBeInTheDocument();
-    expect(screen.queryByTestId("checkin-ca")).not.toBeInTheDocument();
+    expect(screen.getByTestId("checkin-ca")).toBeInTheDocument();
     // 有额度接口 → 积分记录入口保留
     expect(screen.getByTestId("credits-ca")).toBeInTheDocument();
   });

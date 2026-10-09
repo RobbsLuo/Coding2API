@@ -71,9 +71,15 @@ import {
   TableRow,
 } from "../ui";
 
-/** 无每日签到的渠道：CodeArts 上游没有签到接口（每日 token 额度，0 点清零）。 */
-function supportsCheckin(provider: Credential["provider"]): boolean {
-  return provider !== "codearts";
+/**
+ * 渠道是否支持每日签到。
+ *
+ * 目前全部渠道都有签到：CodeArts 自 Q72 起接入 `/v1/ops/delivery`
+ * （此前「上游没有签到接口」的结论已推翻）。保留函数是为了将来某个渠道
+ * 下线签到时不至于把按钮散落在 JSX 里，也便于测试单点断言。
+ */
+function supportsCheckin(_provider: Credential["provider"]): boolean {
+  return true;
 }
 
 /** 套餐到期日：只要日期，时分秒对"哪个包先过期"没用。 */
@@ -729,7 +735,7 @@ function Row({
                 {/* 探测 / 签到是高频日常动作，从「更多」菜单提出来常驻，
                     少一次点击；其余低频动作仍收在菜单里。
                     zen / kilo 免费层探测无意义（上游无额度接口，探测恒失败）；
-                    CodeArts 无签到接口（每日 token 额度，0 点清零），只藏签到、保留探测。 */}
+                    签到现全渠道支持（CodeArts 自 Q72 起接入）。 */}
                 {hasQuotaProbe(credential.provider) && (
                   <>
                     <Button
