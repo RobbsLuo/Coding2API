@@ -24,7 +24,7 @@ from .api import (
     admin_auth,
     admin_credentials,
     admin_keys,
-    admin_pricing,
+    admin_model_catalog,
     admin_settings,
     admin_stats,
     admin_users,
@@ -64,7 +64,15 @@ from .engine.affinity import ConversationAffinity
 from .engine.executor import Executor, ExecutorDeps
 from .engine.model_resolver import KNOWN_PROVIDERS, parse_fallback_groups
 from .engine.scheduler import Scheduler
-from .pricing import fetch_prices, load_prices_snapshot, save_prices
+from .pricing import (
+    build_model_catalog,
+    build_price_table,
+    fetch_models_dev,
+    load_model_catalog,
+    load_prices_snapshot,
+    save_model_catalog,
+    save_prices,
+)
 from .provider.codearts import CodeArtsProvider
 from .provider.codearts.client import CodeArtsClient
 from .provider.codearts.oauth import CodeArtsOAuth
@@ -231,15 +239,15 @@ async def _warm_model_list(services) -> None:
         logger.warning("启动预热模型列表失败: %s", error)
 
 
-async def _warm_price_table(refresh, table: dict) -> None:
-    """后台补价表：仅在**没有落盘快照**时立即拉一次。
+async def _warm_price_table(refresh, table: dict, catalog: dict) -> None:
+    """后台补价表 / 模型目录：仅在**没有落盘快照**时立即拉一次。
 
     有快照就交给周期性任务——models.dev 是数 MB 公开大表，刚恢复就重拉纯属
-    白花；但没有快照（首次部署 / 快照损坏）时若不补，成本要等到下一轮
-    `PRICE_CATALOG_MINUTES`（默认每日）才可用，期间全显示 —。放后台跑不阻塞
-    启动；失败仅记日志（成本显示 — 而已，不影响聊天）。
+    白花；但没有快照（首次部署 / 快照损坏 / 升级后新引入的目录文件缺失）时若
+    不补，成本与模型列表要等到下一轮 `PRICE_CATALOG_MINUTES`（默认每日）才可用。
+    放后台跑不阻塞启动；失败仅记日志（成本显示 — 而已，不影响聊天）。
     """
-    if table:
+    if table and catalog:
         return
     try:
         await refresh()
@@ -351,11 +359,16 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # （零上游请求），后台 price_catalog 循环再周期刷新。同一份 dict 引用交给
     # StatsCollector，刷新时就地替换后新写入的明细立即用上新价。
     price_table: dict[str, tuple[float, float, float]] = {}
-    # 快照保存时刻（供管理台「价表」页展示「这份表何时拉取」）：启动读回，
+    # 模型目录明细（管理台「模型列表」页）：与价表同一次抓取的更多元数据，
+    # 同样启动读回、后台就地刷新。命名避开 main 里既有的「模型目录」缓存
+    # （那是网关的 model_cache）。
+    models_dev_catalog: dict[str, dict[str, Any]] = {}
+    # 快照保存时刻（供管理台「模型列表」页展示「这份表何时拉取」）：启动读回，
     # 每轮后台刷新后更新。
     price_saved_at: float | None = None
     try:
         price_table, price_saved_at = load_prices_snapshot(config.data_dir)
+        models_dev_catalog = load_model_catalog(config.data_dir)
     except Exception as error:  # noqa: BLE001 - 价表是加速手段，失败不阻断服务
         logger.warning("恢复落盘价表失败: %s", error)
     stats_collector = StatsCollector(
@@ -408,18 +421,23 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             return {"models": len(result.get("data") or [])}
 
         async def _refresh_price_catalog() -> dict[str, int]:
-            """后台刷新价表一轮：拉 models.dev → 落盘 → 就地换入。
+            """后台刷新价表 + 模型目录一轮：拉 models.dev → 落盘 → 就地换入。
 
             就地替换（clear + update）而不是重新绑定变量：StatsCollector 持有
             的是这份 dict 的引用，换引用会让它读到旧表。返回条目数供运行态展示
             （整张表几百条，不透传原始数据）。
             """
-            table = await fetch_prices(config.models_dev_url)
+            raw = await fetch_models_dev(config.models_dev_url)
+            table = build_price_table(raw)
             if not table:
                 raise RuntimeError("models.dev 返回空价表")
+            catalog = build_model_catalog(raw)
             price_table.clear()
             price_table.update(table)
+            models_dev_catalog.clear()
+            models_dev_catalog.update(catalog)
             save_prices(config.data_dir, price_table)
+            save_model_catalog(config.data_dir, models_dev_catalog)
             app_.state.price_saved_at = time.time()
             return {"models": len(price_table)}
 
@@ -439,7 +457,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         app_.state.model_warmup_task = asyncio.create_task(_warm_model_list(services_))
         # 价表同理：仅在无落盘快照时后台补拉一次，避免首次部署成本空窗到下一轮。
         app_.state.price_warmup_task = asyncio.create_task(
-            _warm_price_table(_refresh_price_catalog, price_table))
+            _warm_price_table(_refresh_price_catalog, price_table, models_dev_catalog))
         # 让预热任务先跑一步：失败时日志立即落盘（成功与否都不阻塞下面 yield）。
         await asyncio.sleep(0)
         try:
@@ -503,6 +521,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.model_aliases = model_aliases
     app.state.model_list_cache = model_cache
     app.state.price_table = price_table
+    app.state.models_dev_catalog = models_dev_catalog
     app.state.price_saved_at = price_saved_at
     app.state.pending_callback_state = None
     app.state.pending_callback_user = None
@@ -587,7 +606,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.include_router(admin_credentials.create_router(services))
     app.include_router(admin_keys.create_router(services))
     app.include_router(admin_settings.create_router(services))
-    app.include_router(admin_pricing.create_router(services))
+    app.include_router(admin_model_catalog.create_router(services))
     app.include_router(admin_alerts.create_router(services))
     app.include_router(admin_stats.create_router(services))
     app.include_router(admin_users.create_router(services))

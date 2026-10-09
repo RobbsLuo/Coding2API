@@ -414,27 +414,57 @@ export interface ModelInfo {
   by_provider?: Record<string, { credit_rate?: number; raw_id?: string }>;
 }
 
-/** 价表页（GET /api/pricing）一行：models.dev 刊例价，单位 USD / 百万 token。 */
-export interface PriceEntry {
-  model: string;
+/**
+ * 模型列表页（GET /api/model-catalog）一行：models.dev 的模型明细。
+ *
+ * 价格单位 USD / 百万 token；其余为 models.dev 提供的元数据。缺失字段为
+ * null / 空数组 / false（页面显示 — 或空）。
+ */
+export interface ModelCatalogEntry {
+  /** models.dev 的模型 id（小写），也是本服务的匹配键 */
+  id: string;
+  /** 展示名（models.dev 清洗过）；上游未给时为 null */
+  name: string | null;
+  /** 本条明细命中的 provider（原厂优先，否则价高者） */
+  provider: string;
+  family: string | null;
+  /** 知识截止日期（YYYY-MM-DD）；上游未给时为 null */
+  knowledge: string | null;
+  release_date: string | null;
+  /** 上下文窗口 token 上限；未知为 null */
+  context: number | null;
+  /** 单次输出 token 上限；未知为 null */
+  max_output: number | null;
+  input_modalities: string[];
+  output_modalities: string[];
+  attachment: boolean;
+  reasoning: boolean;
+  tool_call: boolean;
+  structured_output: boolean;
+  open_weights: boolean;
+  /** 输入价（USD / 百万 token） */
   input: number;
   output: number;
+  /** 缓存命中读价；上游未声明时与 input 同价（成本就是这么算的） */
   cache_read: number;
+  /** 缓存写入价；上游未声明时为 null */
+  cache_write: number | null;
 }
 
 /**
- * 当前生效的模型价表快照（GET /api/pricing）。
+ * 当前生效的 models.dev 模型目录快照（GET /api/model-catalog）。
  *
- * 价表是统计页成本估算的输入；本结构只做只读展示（不参与计算，计算在后端）。
+ * 既是统计页成本估算的价格来源，也是「模型列表」页的数据源；本结构只读展示
+ * （成本计算在后端）。
  */
-export interface PriceTableResponse {
-  models: PriceEntry[];
+export interface ModelCatalogResponse {
+  models: ModelCatalogEntry[];
   count: number;
   /** 刊例价币种，当前恒为 "USD" */
   currency: string;
   /** 成本估算当前生效的 USD→CNY 汇率（热更项 USD_CNY_RATE） */
   usd_cny_rate: number;
-  /** 价表快照保存时刻（epoch 秒）；无快照时为 null */
+  /** 目录快照保存时刻（epoch 秒）；无快照时为 null */
   saved_at: number | null;
 }
 

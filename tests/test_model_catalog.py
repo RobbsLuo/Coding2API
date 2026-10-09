@@ -308,7 +308,7 @@ async def test_periodic_refresh_reports_only_model_count(settings):
     app = _app_with(settings, {"kilo": provider})
     async with app.router.lifespan_context(app):
         runner = app.state.task_runner
-        assert await runner._guarded(runner._model_catalog(), "模型目录刷新",
+        assert await runner._guarded(runner._model_catalog(), "渠道模型列表刷新",
                                      key="model_catalog")
         run = runner.status.get("model_catalog")
         assert run.ok is True and run.report == {"models": 2}

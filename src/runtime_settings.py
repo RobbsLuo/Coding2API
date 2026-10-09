@@ -121,14 +121,15 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("quota_probe_minutes", int, "额度探测周期（分钟）",
                "后台额度探测的一轮间隔；下限 1 分钟。", minimum=1,
                task="quota_probe", floor=1),
-    HotSetting("model_catalog_minutes", int, "模型目录刷新周期（分钟）",
+    HotSetting("model_catalog_minutes", int, "渠道模型列表刷新周期（分钟）",
                "后台兜底刷新各渠道模型表的间隔；没有它，模型列表只在有人调 "
                "/v1/models 或 Playground 时才刷新，纯 API 用法的部署会让"
                "「模型→渠道」归属表与落盘快照一起变陈旧。下限 5 分钟。",
                minimum=5, task="model_catalog", floor=5),
-    HotSetting("price_catalog_minutes", int, "价表刷新周期（分钟）",
-               "后台拉取 models.dev 模型定价表的间隔；价表决定统计里的成本估算，"
-               "上游价格变动很少，默认每日一次即可。下限 60 分钟。",
+    HotSetting("price_catalog_minutes", int, "模型列表刷新周期（分钟，models.dev）",
+               "后台拉取 models.dev 模型目录（刊例价 + 明细元数据）的间隔；目录决定"
+               "统计里的成本估算与「模型列表」页，上游变动很少，默认每日一次即可。"
+               "下限 60 分钟。",
                minimum=60, task="price_catalog", floor=60),
     HotSetting("usd_cny_rate", float, "美元兑人民币汇率",
                "成本估算里把 models.dev 的美元刊例价折成人民币的汇率"

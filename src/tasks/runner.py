@@ -41,12 +41,13 @@ class TaskRunner:
     activity: ActivityTask | None = None,
     refresh: RefreshTask,
     retention: RetentionTask,
-    # 模型目录兜底刷新：注入「跑一轮」的协程而不是任务对象——真正的活是
+    # 渠道模型列表兜底刷新：注入「跑一轮」的协程而不是任务对象——真正的活是
     # api.models.list_models（要 services 与 provider registry），tasks 层
     # 不该反向依赖 api 层。由 main 装配时传入；None 表示不装配这条循环。
     model_catalog: Callable[[], Awaitable[object]] | None = None,
-    # 价表刷新：同样注入「跑一轮」的协程（真正的活是 pricing.fetch_prices +
-    # 落盘 + 换入价表），tasks 层不依赖 pricing/httpx。None 表示不装配。
+    # 模型列表刷新（models.dev）：同样注入「跑一轮」的协程（真正的活是
+    # pricing.fetch_models_dev + 落盘 + 换入），tasks 层不依赖 pricing/httpx。
+    # None 表示不装配。
     price_catalog: Callable[[], Awaitable[object]] | None = None,
     # 运维告警（P1-7）：None 表示不装配该循环（老调用方/测试保持原行为）。
     alert: AlertTask | None = None,
@@ -157,10 +158,10 @@ class TaskRunner:
             loops.append(("activity", "活跃上报", self._sync_activity,
                           lambda: float(self._activity_interval)))
         if self._model_catalog is not None:
-            loops.append(("model_catalog", "模型目录刷新", self._model_catalog,
+            loops.append(("model_catalog", "渠道模型列表刷新", self._model_catalog,
                           lambda: self._model_catalog_interval))
         if self._price_catalog is not None:
-            loops.append(("price_catalog", "价表刷新", self._price_catalog,
+            loops.append(("price_catalog", "模型列表刷新（models.dev）", self._price_catalog,
                           lambda: self._price_catalog_interval))
         if self._alert is not None:
             loops.append(("alert", "运维告警", self._sync_alert,
@@ -344,11 +345,11 @@ def build_runner(credentials, providers: dict, stats_collector, config,
     audit 同理：为 None 时不清理审计流水（表仍会随登录/写操作增长；
     生产路径总是传入）。
 
-    model_catalog 同理：None 时不装配模型目录刷新循环（老调用方与测试保持
+    model_catalog 同理：None 时不装配渠道模型列表刷新循环（老调用方与测试保持
     原行为）；生产路径传入「跑一轮 list_models」的协程。
 
-    price_catalog 同理：None 时不装配价表刷新循环；生产路径传入「拉 models.dev
-    + 落盘 + 换入价表」的协程。
+    price_catalog 同理：None 时不装配模型列表刷新（models.dev）循环；生产路径
+    传入「拉 models.dev + 落盘 + 换入价表与明细目录」的协程。
 
     alerts 同理：None 时不装配运维告警循环、也不清理告警记录（老调用方与测试
     保持原行为；生产路径传入 AlertRepository）。

@@ -84,6 +84,21 @@ async def test_no_continuation_when_finish_reason_stop():
 
 
 @pytest.mark.asyncio
+async def test_no_usage_reported_by_upstream_emits_no_usage_event():
+    """上游整轮一次 usage 都没报：不补发全空 Usage。
+
+    补发一条全空 Usage 会让出口把「未上报」误报成 total_tokens: 0
+    （客户端分不清「0 token」与「上游没给数据」）。统计侧同样无贡献——
+    `_usage_field` 对全空 Usage 一律取 None。
+    """
+    provider = _FakeProvider([[Event(kind=EventKind.CONTENT, content="done"),
+                               Event(kind=EventKind.FINISH, finish_reason="stop")]])
+    stream = ContinuationStream(provider, {}, {"messages": []}, "m", max_continues=10)
+    events = await _collect(stream)
+    assert [e.kind for e in events] == [EventKind.CONTENT, EventKind.FINISH]
+
+
+@pytest.mark.asyncio
 async def test_continues_on_length_and_accumulates_usage():
     provider = _FakeProvider([
         [Event(kind=EventKind.CONTENT, content="part1"),
@@ -172,10 +187,9 @@ async def test_reasoning_only_round_is_forwarded_and_continued():
     ])
     stream = ContinuationStream(provider, {}, {"messages": []}, "m", max_continues=5)
     events = await _collect(stream)
-    # 续写前先补发一条「已完成轮次」的累计 usage（M3：中途断开的记账依据），
-    # 之后是第二轮正文，最后再补一条终局累计 usage
+    # 上游整轮没报 usage → 不补发（补全空 Usage 会把「未上报」误报成 0 token）
     assert [e.kind for e in events if e.kind is not EventKind.FINISH] == [
-        EventKind.REASONING, EventKind.USAGE, EventKind.CONTENT, EventKind.USAGE]
+        EventKind.REASONING, EventKind.CONTENT]
     assert provider.payloads[1]["messages"][-2]["reasoning_content"] == "thinking"
 
 
@@ -190,8 +204,9 @@ async def test_tool_calls_and_empty_reasoning_passthrough():
     ])
     stream = ContinuationStream(provider, {}, {"messages": []}, "m", max_continues=5)
     events = await _collect(stream)
+    # 上游整轮没报 usage → 不补发（补全空 Usage 会把「未上报」误报成 0 token）
     assert [e.kind for e in events] == [EventKind.TOOL_CALLS, EventKind.REASONING,
-                                        EventKind.USAGE, EventKind.FINISH]
+                                        EventKind.FINISH]
     assert events[0].tool_calls[0]["function"]["name"] == "f"
     assert stream.continues_done == 0
 

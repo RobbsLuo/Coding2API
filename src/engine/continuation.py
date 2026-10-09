@@ -62,6 +62,17 @@ def extend_payload(payload: dict[str, Any], content: str, reasoning: str
     return body
 
 
+def _usage_is_empty(usage: Usage) -> bool:
+    """累计 usage 是否一个字段都没有（上游整轮一次都没报过）。
+
+    补发一条全空的 USAGE 事件对统计没有贡献（`_usage_field` 全是 None），
+    却会让出口侧把「未上报」误报成 total_tokens: 0——客户端看到 0 token
+    与「上游没给数据」是两件事，后者必须透传为 null。
+    """
+    return not any((usage.input_tokens, usage.output_tokens, usage.reasoning_tokens,
+                    usage.cached_tokens, usage.credit))
+
+
 class ContinuationStream:
     """把「一轮上游流」包装成「自动续写到完整」的事件流。
 
@@ -108,7 +119,8 @@ class ContinuationStream:
                 # 未截断 / 已达上限：按最后一轮的真实 finish_reason 收尾
                 if (not continues(finish_reason)
                         or self.continues_done >= self._max_continues):
-                    yield Event(kind=EventKind.USAGE, usage=usage)
+                    if not _usage_is_empty(usage):
+                        yield Event(kind=EventKind.USAGE, usage=usage)
                     yield Event(kind=EventKind.FINISH, finish_reason=finish_reason)
                     return
 
@@ -116,7 +128,8 @@ class ContinuationStream:
                 # 每轮结束先把**已完成轮次**的累计用量汇报一次（USAGE 事件不单独
                 # 成帧，只落进 translator.usage）：下一轮若客户端中途断开，记账
                 # 仍能拿到已跑完的用量，而不是退化成 0（M3）。
-                yield Event(kind=EventKind.USAGE, usage=usage)
+                if not _usage_is_empty(usage):
+                    yield Event(kind=EventKind.USAGE, usage=usage)
                 self._payload = extend_payload(
                     self._payload, "".join(content_parts), "".join(reasoning_parts))
                 content_parts, reasoning_parts = [], []

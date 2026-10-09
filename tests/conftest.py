@@ -89,14 +89,14 @@ def zen_models_offline(monkeypatch, request):
 def price_catalog_offline(monkeypatch):
     """除 test_pricing 外，一律不真连 models.dev。
 
-    `build_app()` 在**没有落盘价表快照**时会后台补拉一次
+    `build_app()` 在**没有落盘价表 / 模型目录快照**时会后台补拉一次
     （`_warm_price_table`），每个用默认空 DATA_DIR 建 app 的用例都会发外网请求。
-    真实抓取逻辑由 `tests/test_pricing.py` 用 MockTransport 覆盖；这里给一个空表
-    （等价「上游不可用」，成本显示 —），既不打外网也不污染既有断言。
+    真实抓取逻辑由 `tests/test_pricing.py` 用 MockTransport 覆盖；这里给一个空
+    原始表（等价「上游不可用」，成本显示 —），既不打外网也不污染既有断言。
     """
     from src import main
 
     async def fake_fetch(_url):
         return {}
 
-    monkeypatch.setattr(main, "fetch_prices", fake_fetch)
+    monkeypatch.setattr(main, "fetch_models_dev", fake_fetch)

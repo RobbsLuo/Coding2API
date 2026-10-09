@@ -43,12 +43,13 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
              "按配置时点为 CodeBuddy 账号补发对话事件；关闭时每轮都是 no-op。"),
     TaskSpec("retention", "明细清理",
              "小时汇总 + 90 天明细清理，顺带回收过期冷却与积分流水。"),
-    TaskSpec("model_catalog", "模型目录刷新",
+    TaskSpec("model_catalog", "渠道模型列表刷新",
              "兜底重拉各渠道模型表：没有它，列表只在有人访问 /v1/models 或 "
              "Playground 时才刷新，纯 API 用法的部署会让归属表与落盘快照变陈旧。"),
-    TaskSpec("price_catalog", "价表刷新",
-             "拉取 models.dev 模型定价表（USD/百万 token）并落盘：统计里的成本估算"
-             "依赖它，价表缺失时成本显示 —。上游价格变动很少，默认每日一次。"),
+    TaskSpec("price_catalog", "模型列表刷新（models.dev）",
+             "拉取 models.dev 模型目录（刊例价 + 明细元数据，USD/百万 token）并落盘："
+             "统计里的成本估算与「模型列表」页都依赖它，缺失时成本显示 —。"
+             "上游价格变动很少，默认每日一次。"),
     TaskSpec("alert", "运维告警",
              "周期评估四类风险（池耗尽 / 任务连续失败 / token 临近到期 / 上游"
              "错误率骤升），命中落站内记录并可推送 webhook；周期见「运维告警周期」。"),

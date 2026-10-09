@@ -2,7 +2,7 @@ import { NavLink } from "react-router-dom";
 import {
   BarChart3,
   BellRing,
-  CircleDollarSign,
+  Boxes,
   Database,
   KeyRound,
   ScrollText,
@@ -24,7 +24,7 @@ export interface NavItem {
 export const NAV: NavItem[] = [
   { to: "/", label: "凭证管理", icon: Database, end: true },
   { to: "/stats", label: "用量统计", icon: BarChart3 },
-  { to: "/pricing", label: "价表", icon: CircleDollarSign },
+  { to: "/models", label: "模型列表", icon: Boxes },
   { to: "/playground", label: "Playground", icon: TerminalSquare },
   { to: "/api-keys", label: "API Key", icon: KeyRound },
 ];
