@@ -9,16 +9,24 @@
 * body `tools` 必须**同时**含 name 为 `bash` 与 `read` 的工具
   （只校验 name，参数留空壳即可）。
 
-门禁要求 tools 含 bash/read，但这两个是**我们伪造的**、客户端从没声明过：
-若模型真的调用了它们，回包里的这些 tool_call 必须被过滤掉，否则客户端会
-收到自己没定义的函数调用。过滤只针对「本次由我们注入的名字」——用户自己
-就带了 bash/read 时绝不误伤（见 `_InjectedToolFilter`）。
+门禁要求 tools 含 bash/read，但这两个可能是**我们伪造的**、客户端从没声明过
+（如 OpenCode 的执行工具叫 `shell`）。模型偏好调 `bash` 这个名字（实测
+mimo-v2.6 高频），若直接吞掉调用，客户端收到「空正文 + stop」会提前结束
+回合（表现为「自动结束」）。故对注入名两级处理（见 `_InjectedToolFilter`）：
+
+1. 客户端声明了同义工具（`_TOOL_SYNONYMS`，如 `bash`→`shell`）→ 把 tool_call
+   的函数名**改写**成同义工具再透传，客户端可正常执行；
+2. 没有同义工具 → 才整块丢弃并记 WARNING，finish 收敛为 stop。
+
+过滤/改写只针对「本次由我们注入的名字」——用户自己就带了 bash/read 时
+视为真实工具，不注入也不处理。
 """
 
 from __future__ import annotations
 
 import asyncio
 import copy
+import logging
 import secrets
 import string
 import time
@@ -40,6 +48,8 @@ from ...provider.base import (
 from ...provider.proxy import build_client
 from . import events as zen_events
 
+logger = logging.getLogger(__name__)
+
 # 上游端点（公开事实，非用户可配置输入；凭证/主机不随凭证 JSON 变化）
 ZEN_HOST = "https://opencode.ai"
 EP_CHAT = "/zen/v1/chat/completions"
@@ -48,6 +58,13 @@ EP_MODELS = "/zen/v1/models"
 MIN_OPENCODE_VERSION = "1.18.0"
 # 门禁要求 tools 里必须出现的工具名（大小写敏感）
 REQUIRED_TOOLS: tuple[str, ...] = ("bash", "read")
+# 注入名 → 客户端常见同义工具名（按优先级）。模型调了我们注入的伪工具时，
+# 改写成客户端真实声明的同义工具再透传，避免「调用被吞 → 空 stop → 客户端
+# 提前结束回合」。键是门禁名，值只收录各 agent 客户端的真实工具名。
+TOOL_SYNONYMS: dict[str, tuple[str, ...]] = {
+    "bash": ("shell", "execute"),
+    "read": ("read_file",),
+}
 
 # 免费模型判定：上游 `/zen/v1/models` 返回**全部**模型（含付费）且不带任何
 # 免费/付费标记（`owned_by` 恒为 `opencode`——它是厂商名不是模型名，故展示名
@@ -127,10 +144,24 @@ def pretty_model_name(model_id: str,
     return naming.display_model_name(stem)
 
 
-def _empty_tool(name: str) -> dict[str, Any]:
-    """门禁空壳工具：只要求 name 存在，参数留最小合法 schema。"""
-    return {"type": "function",
-            "function": {"name": name, "parameters": {"type": "object"}}}
+def _empty_tool(name: str,
+                proto: dict[str, Any] | None = None) -> dict[str, Any]:
+    """门禁工具：只要求 name 存在；有同义原型时复制其描述与参数 schema。
+
+    复制 schema 的意义：模型看到的伪 `bash` 与客户端真实的 `shell` 完全一致，
+    生成的 arguments 直接匹配改写目标的参数名（否则空壳会让模型自由发挥，
+    改写后参数对不上客户端工具）。
+    """
+    function: dict[str, Any] = {"name": name}
+    if isinstance(proto, dict):
+        description = proto.get("description")
+        if isinstance(description, str):
+            function["description"] = description
+        parameters = proto.get("parameters")
+        if isinstance(parameters, dict):
+            function["parameters"] = parameters
+    function.setdefault("parameters", {"type": "object"})
+    return {"type": "function", "function": function}
 
 
 def _tool_names(tools: list[Any]) -> set[str]:
@@ -146,10 +177,24 @@ def _tool_names(tools: list[Any]) -> set[str]:
     return names
 
 
+def _find_synonym(tools: list[Any], names: tuple[str, ...]) -> dict[str, Any] | None:
+    """按优先级找第一个命中的同义工具的 `function` 定义（无则 None）。"""
+    wanted = set(names)
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if isinstance(function, dict) and function.get("name") in wanted:
+            return function
+    return None
+
+
 def ensure_gate_tools(body: dict[str, Any]) -> frozenset[str]:
     """确保 body.tools 同时含 `bash`/`read`，返回**本次注入**的名字集合。
 
     只补缺、不覆盖：用户自带同名工具时视为真实工具，不注入也不过滤。
+    注入时若客户端声明了同义工具（`TOOL_SYNONYMS`），伪工具复制同义工具的
+    description/parameters（见 `_empty_tool`），供 `gate_aliases` 改写透传。
     """
     existing = body.get("tools")
     tools = list(existing) if isinstance(existing, list) else []
@@ -157,10 +202,27 @@ def ensure_gate_tools(body: dict[str, Any]) -> frozenset[str]:
     injected: set[str] = set()
     for name in REQUIRED_TOOLS:
         if name not in present:
-            tools.append(_empty_tool(name))
+            proto = _find_synonym(tools, TOOL_SYNONYMS.get(name, ()))
+            tools.append(_empty_tool(name, proto))
             injected.add(name)
     body["tools"] = tools
     return frozenset(injected)
+
+
+def gate_aliases(tools: list[Any] | None,
+                 injected: frozenset[str]) -> dict[str, str]:
+    """注入名 → 客户端真实同义工具名（无同义则不进映射，按丢弃处理）。
+
+    只对**本次注入**的名字建映射：用户自带的 bash/read 是真工具，不改写。
+    """
+    present = _tool_names(list(tools) if isinstance(tools, list) else [])
+    aliases: dict[str, str] = {}
+    for name in sorted(injected):
+        for synonym in TOOL_SYNONYMS.get(name, ()):
+            if synonym in present:
+                aliases[name] = synonym
+                break
+    return aliases
 
 
 def prepare_body(payload: dict[str, Any], model: str,
@@ -180,15 +242,20 @@ def prepare_body(payload: dict[str, Any], model: str,
 
 
 class _InjectedToolFilter:
-    """过滤模型对「我们伪造的 bash/read」的调用。
+    """处理模型对「我们伪造的 bash/read」的调用：有同义工具则**改写透传**，
+    没有才丢弃。
 
     OpenAI 流式 tool_call 分片：首个分片带 `id`/`function.name`，后续分片
     只有 `index` 与 `function.arguments`。因此按 `index` 记录已丢弃的调用，
-    后续同名 index 的分片一并丢弃，避免残留半截 arguments。
+    后续同名 index 的分片一并丢弃，避免残留半截 arguments；改写的调用不标
+    丢弃，后续 arguments 分片自然保留（name 只在首片）。
     """
 
-    def __init__(self, injected: frozenset[str]) -> None:
+    def __init__(self, injected: frozenset[str],
+                 aliases: dict[str, str] | None = None) -> None:
         self._injected = injected
+        # 注入名 → 客户端真实同义工具名（`gate_aliases` 产出；无则全丢）
+        self._aliases = dict(aliases) if aliases else {}
         self._dropped_indexes: set[int] = set()
 
     def keep(self, tool_calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -201,9 +268,18 @@ class _InjectedToolFilter:
             function = call.get("function")
             name = function.get("name") if isinstance(function, dict) else None
             if isinstance(name, str) and name in self._injected:
-                if index is not None:
-                    self._dropped_indexes.add(index)
-                continue
+                target = self._aliases.get(name)
+                if target is None:
+                    # 无同义工具可映射：只能丢弃，否则客户端收到自己没定义的
+                    # 函数调用。WARNING 让「空 stop 提前结束」可诊断。
+                    logger.warning("门禁伪工具 %r 无客户端同义工具，调用已丢弃",
+                                   name)
+                    if index is not None:
+                        self._dropped_indexes.add(index)
+                    continue
+                # 改写成客户端真实工具名，id/arguments/index 原样保留
+                call = dict(call)
+                call["function"] = {**function, "name": target}
             kept.append(call)
         return kept
 
@@ -256,9 +332,10 @@ class ZenClient:
     async def stream_chat(self, payload: dict[str, Any], model: str) -> AsyncIterator[Event]:
         """POST chat/completions 并逐事件产出中立 Event。非 2xx 抛 UpstreamHTTPError。"""
         body, injected = prepare_body(payload, model)
-        tool_filter = _InjectedToolFilter(injected)
-        # 有实际 tool_call 被保留时才允许 finish_reason=tool_calls；
-        # 全是伪工具调用时收敛为 stop，避免客户端收到空的 tool_calls 收尾。
+        tool_filter = _InjectedToolFilter(
+            injected, gate_aliases(body.get("tools"), injected))
+        # 有实际（保留或改写）tool_call 时才允许 finish_reason=tool_calls；
+        # 全是无法映射的伪工具调用时收敛为 stop，避免客户端收到空的收尾。
         kept_tool_calls = False
         async with self._stream().stream(
             "POST", f"{self.host}{EP_CHAT}", json=body,

@@ -25,6 +25,7 @@ from src.provider.zen.client import (
     ZenProvider,
     _InjectedToolFilter,
     ensure_gate_tools,
+    gate_aliases,
     gate_headers,
     new_session_id,
     prepare_body,
@@ -111,6 +112,69 @@ def test_ensure_gate_tools_ignores_non_list_tools():
     assert isinstance(body["tools"], list)
 
 
+def test_ensure_gate_tools_copies_synonym_schema():
+    """注入的 bash 复制同义工具 shell 的描述与参数 schema（供改写透传）。"""
+    body = {"tools": [
+        {"type": "function", "function": {"name": "shell",
+                                          "description": "Run a command",
+                                          "parameters": {"type": "object",
+                                                         "properties": {
+                                                             "command": {"type": "string"}},
+                                                         "required": ["command"]}}},
+    ]}
+    injected = ensure_gate_tools(body)
+    assert injected == frozenset({"bash", "read"})
+    by_name = {t["function"]["name"]: t["function"] for t in body["tools"]}
+    assert by_name["bash"]["description"] == "Run a command"
+    assert by_name["bash"]["parameters"]["required"] == ["command"]
+    # 无同义的 read 仍是最小空壳
+    assert by_name["read"] == {"name": "read", "parameters": {"type": "object"}}
+
+
+def test_ensure_gate_tools_tolerates_malformed_synonym():
+    """同义工具的 description/parameters 非法 → 跳过，不复制坏字段。"""
+    body = {"tools": [
+        {"type": "function", "function": {"name": "shell",
+                                          "description": 123,
+                                          "parameters": "junk"}},
+    ]}
+    ensure_gate_tools(body)
+    bash = next(t["function"] for t in body["tools"]
+                if t["function"]["name"] == "bash")
+    assert bash == {"name": "bash", "parameters": {"type": "object"}}
+
+
+def test_find_synonym_skips_malformed_tools():
+    body = {"tools": [None, {"function": "x"},
+                      {"type": "function"},
+                      {"function": {"name": "shell"}}]}
+    injected = ensure_gate_tools(body)
+    assert injected == frozenset({"bash", "read"})
+
+
+def test_gate_aliases_maps_injected_to_present_synonyms():
+    tools = [{"type": "function", "function": {"name": "shell"}},
+             {"type": "function", "function": {"name": "read"}}]
+    aliases = gate_aliases(tools, frozenset({"bash", "read"}))
+    assert aliases == {"bash": "shell"}  # read 的同义 read_file 不在客户端
+
+
+def test_gate_aliases_prefers_first_synonym():
+    tools = [{"function": {"name": "execute"}},
+             {"function": {"name": "shell"}}]
+    assert gate_aliases(tools, frozenset({"bash"})) == {"bash": "shell"}
+
+
+def test_gate_aliases_ignores_unmapped_and_malformed_input():
+    # 注入名不在同义表 → 不映射（调用按丢弃处理）
+    assert gate_aliases([{"function": {"name": "shell"}}],
+                        frozenset({"mcp_tool"})) == {}
+    # tools 缺失/非 list → 空映射
+    assert gate_aliases(None, frozenset({"bash"})) == {}
+    assert gate_aliases([{"function": {"name": "shell"}}],
+                        frozenset()) == {}
+
+
 def test_prepare_body_forces_stream_and_deepcopies_messages():
     messages = [{"role": "user", "content": "hi"}]
     body, injected = prepare_body({"messages": messages, "stream": False, "tools": []},
@@ -150,6 +214,29 @@ def test_tool_filter_keeps_real_tools_and_non_dict_function():
     flt = _InjectedToolFilter(frozenset({"bash"}))
     kept = flt.keep([{"index": 0, "function": "weird"}, {"index": 1}])
     assert len(kept) == 2
+
+
+def test_tool_filter_rewrites_injected_to_synonym():
+    """有同义映射：伪 bash 改写成 shell 透传，原对象不被就地篡改。"""
+    original = {"index": 0, "id": "c1", "type": "function",
+                "function": {"name": "bash", "arguments": "{\"command\":"}}
+    flt = _InjectedToolFilter(frozenset({"bash"}), {"bash": "shell"})
+    kept = flt.keep([original])
+    assert kept[0]["function"]["name"] == "shell"
+    assert kept[0]["id"] == "c1"
+    assert kept[0]["function"]["arguments"] == "{\"command\":"
+    assert original["function"]["name"] == "bash"
+    # 改写的调用不进丢弃索引：后续 arguments 分片自然保留
+    assert flt.keep([{"index": 0, "function": {"arguments": "\"pwd\""}}])
+
+
+def test_tool_filter_rewrite_keeps_mix_and_still_drops_unmapped():
+    """混合批次：shell 映射保留，无映射的 read 仍被丢。"""
+    flt = _InjectedToolFilter(frozenset({"bash", "read"}), {"bash": "shell"})
+    kept = flt.keep([{"index": 0, "function": {"name": "bash"}},
+                     {"index": 1, "function": {"name": "read"}},
+                     {"index": 2, "function": {"name": "grep"}}])
+    assert [c["function"]["name"] for c in kept] == ["shell", "grep"]
 
 
 # ------------------------------------------------------------ SSE 事件映射
@@ -345,6 +432,41 @@ async def test_stream_chat_drops_injected_tool_calls_and_downgrades_finish():
     assert all(e.kind is not EventKind.TOOL_CALLS for e in events)
     finishes = [e for e in events if e.kind is EventKind.FINISH]
     assert finishes and finishes[0].finish_reason == "stop"
+
+
+async def test_stream_chat_rewrites_injected_bash_to_synonym():
+    """客户端有 shell 工具时：模型调伪 bash → 改写成 shell，finish 保持 tool_calls。"""
+    shell_tool = {"type": "function",
+                  "function": {"name": "shell",
+                               "description": "Run a shell command",
+                               "parameters": {"type": "object",
+                                              "properties": {"command": {"type": "string"}},
+                                              "required": ["command"]}}}
+    sent: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        sent.update(json.loads(request.content))
+        return httpx.Response(200, text=_sse(
+            chunk({"tool_calls": [
+                {"index": 0, "id": "c1", "type": "function",
+                 "function": {"name": "bash",
+                              "arguments": "{\"command\":\"pwd\"}"}}],
+                "content": ""}, finish="tool_calls"),
+            chunk({}, choices=[], usage={"prompt_tokens": 1}),
+        ))
+
+    events = [e async for e in _client(handler).stream_chat(
+        {"messages": [], "tools": [shell_tool]}, "m")]
+    # 上游请求里注入的 bash 带上了 shell 的 schema（供模型生成匹配参数）
+    by_name = {t["function"]["name"]: t["function"] for t in sent["tools"]}
+    assert by_name["bash"]["description"] == "Run a shell command"
+    # 出口：tool_call 被改写成客户端真实工具，finish 不降级
+    tool_events = [e for e in events if e.kind is EventKind.TOOL_CALLS]
+    call = tool_events[0].tool_calls[0]
+    assert call["function"]["name"] == "shell"
+    assert call["function"]["arguments"] == "{\"command\":\"pwd\"}"
+    finishes = [e for e in events if e.kind is EventKind.FINISH]
+    assert finishes[0].finish_reason == "tool_calls"
 
 
 async def test_stream_chat_keeps_real_tool_calls():

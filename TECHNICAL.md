@@ -423,6 +423,7 @@ CLI 指纹（`build_headers`）即可被接受，无需切换身份；多套指�
 | `tool_choice` 字符串 / `{type:function,name}` | 同名 / 嵌套形式 |
 | `max_output_tokens` | `max_tokens`（CB 上游只认这个键，§3.4） |
 | `reasoning.effort` | `reasoning_effort` |
+| `text.format`（`{type,name,description?,schema,strict?}` 扁平） | `response_format`（`text`/`json_object` 直通；`json_schema` 展开成 `{type, json_schema:{...}}` 嵌套；缺 name/schema、未知 type 显式 400） |
 | `temperature` / `top_p` / `parallel_tool_calls` / `prompt_cache_key` / `text.verbosity` | 同名透传 |
 
 **出站事件序列**（流式）：
@@ -655,7 +656,7 @@ response.completed | response.incomplete
 
 UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编码）；`ZEN_API_ENDPOINT` 走端点白名单（`ZEN_ALLOWED_ENDPOINTS`）。Zen **不携带任何用户 Token**，风险面小于 CodeBuddy，白名单只为防误配。
 
-**注入空壳 + 过滤回包（Q40 的核心取舍）**：门禁要求 tools 含 `bash`/`read`，但这两个是**我们伪造的**、客户端从没声明过。若模型真的调用了它们，回包里的 tool_call 必须被过滤掉，否则客户端会收到自己没定义的函数调用。实现只在**缺失时**补骨架工具（用户自带同名工具 → 不注入也不过滤，绝不误伤）；过滤按 `index` 跟踪流式 tool_call 分片（首片带 `function.name`、后续片只有 `arguments`，靠 index 关联），把注入名的整条调用丢弃；若整条流没有保留任何真 tool_call，则把 `finish_reason=tool_calls` 收敛为 `stop`，不让客户端收到空的 tool_calls 收尾。
+**注入空壳 + 改写/过滤回包（Q40 的核心取舍）**：门禁要求 tools 含 `bash`/`read`，但这两个可能是**我们伪造的**、客户端从没声明过（如 OpenCode 的执行工具叫 `shell`）。模型偏好调 `bash` 这个名字（实测 mimo-v2.6 高频），直接吞掉会让客户端收到「空正文 + stop」提前结束回合（表现为「自动结束」）。故两级处理：① 客户端声明了同义工具（`TOOL_SYNONYMS`，`bash`→`shell`/`execute`、`read`→`read_file`，按优先级取第一个命中的）→ 把注入名的 tool_call 函数名**改写**成同义工具原样透传，注入时还复制同义工具的 description/parameters（模型生成的 arguments 直接匹配目标 schema）；② 没有同义工具 → 才整块丢弃并记 WARNING。实现只在**缺失时**补骨架工具（用户自带同名工具 → 不注入也不改写不过滤，绝不误伤）；处理按 `index` 跟踪流式 tool_call 分片（首片带 `function.name`、后续片只有 `arguments`，靠 index 关联），丢弃的 index 后续分片一并丢、改写的不标丢弃；若整条流没有任何保留的真 tool_call，则把 `finish_reason=tool_calls` 收敛为 `stop`，不让客户端收到空的 tool_calls 收尾。
 
 **虚拟凭证行**：Zen 无凭证、无额度接口。池里种一条空凭证（`credential_data={}`，`added_by="system"`），复用现有调度 / 冷却 / 统计 / 会话粘性。`probe_quota` 恒返回 `Quota(probe_failed=True)` → `health_score` 返回 `None`（**未知**，不是 `EXHAUSTED=-1`）——这点很关键：若返回 `total=None`，`health_score` 会判定为「已耗尽」而把这条免费渠道错误降级。种子幂等（已有 zen 凭证则不补），**用户删除后重启会复活**，永久停用请用「暂停」（`enabled=0`，只摘对话流量）。只为默认装配路径种子（测试注入自定义 registry 时不多出凭证行）。
 
@@ -773,6 +774,8 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 - `tools[].input_schema` → `function.parameters`；`tool_choice`：`auto`/`none` 直传，`any` → `required`，`tool` → `{"type":"function",...}`；`stop_sequences` → `stop`；`max_tokens`/`temperature`/`top_p` 直传，`top_k` 丢弃（chat 无等价物）。
 
 **出口翻译**（`response.py`，实现 executor 的 `StreamSink` 协议）：`message_start` → `content_block_start`/`content_block_delta`/`content_block_stop`（文本 `text_delta`、思考 `thinking_delta`、工具 `input_json_delta`）→ `message_delta`（`stop_reason` + usage）→ `message_stop`。Anthropic 协议**没有 `[DONE]` 哨兵**，`message_stop` 即流结束；thinking 块在 `content_block_stop` 前补一个占位 `signature_delta`（客户端要求，本网关不产真签名）。错误用 `event: error`（`_error_type_for` 把上游错误码映射成 Anthropic 错误类型）。非流式 `completion_to_message` 复用 `executor.complete` 的输出形状转换。
+
+**usage 缓存字段（2026-10-09 修复）**：内部 `Usage.input_tokens` 是 OpenAI 口径的 `prompt_tokens`（**含**缓存命中，见各 provider events 解析），而 Anthropic 语义里 `input_tokens` 与 `cache_read_input_tokens` / `cache_creation_input_tokens` **互斥**（`input_tokens` 只计未命中）。故 `_usage_payload`（流式 `message_delta`）与 `completion_to_message`（非流式）统一按此拆分：命中时 `input_tokens = max(0, prompt_tokens − cached_tokens)` 并另记 `cache_read_input_tokens = cached_tokens`，不减会让 Claude Code 对同一批 token 既按全价输入又按缓存读重复计费；命中为 0/None 时不补占位字段（与 OpenAI 出口「上游没报就不冒充已上报」同纪律）。非流式经 `_completion_usage` 从 chat usage 的 `prompt_tokens_details.cached_tokens` 取命中。
 
 **鉴权**：`deps.api_key_user_anthropic` 先读 `x-api-key`（Anthropic SDK 的 `ANTHROPIC_API_KEY`），为空再回落 `Authorization: Bearer`（`ANTHROPIC_AUTH_TOKEN`），两者共用 `_api_key_principal`（含 IP / 过期 / 模型白名单判定）。客户端 Base URL 填到根（如 `http://127.0.0.1:8000`），SDK 自行拼 `/v1/messages`。
 
@@ -1235,4 +1238,4 @@ fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文�
 - **应用日志只写 stderr，轮转交给平台**：不在应用内开文件、不用 `RotatingFileHandler`。各部署形态（systemd / docker 等）采集方式不同但都靠 stdout/stderr 对接；应用自己写文件会与平台轮转争抢同一文件，容器里还会写进镜像层（重启即丢且 `docker logs` 看不到）。各自配置见 `deploy/` 与 compose 的 `logging` 段
 - **必须在 `build_app` 里配 root logger**：uvicorn 默认 `LOGGING_CONFIG` 只配 `uvicorn` / `uvicorn.access`（`propagate=false`），**从不配 root**；root 默认 `WARNING` 且无 handler，导致 `logging.getLogger(__name__)` 的 INFO 静默丢失。生产路径 `uvicorn src.main:build_app --factory` 不经过 `run()`，所以配置必须挂在 `build_app`（幂等，见 `src/webapp/logging.py`）
 - **Zen 无凭证渠道用「虚拟凭证行」而非特判**（Q40）：调度 / 冷却 / 统计 / 粘性全部按 `credentials` 行工作，给 Zen 种一条空凭证（`added_by="system"`）比在每个环节加「无凭证 provider」分支代价小得多，也让它天然出现在管理台凭证池里可暂停/探测/删除。`probe_quota` 恒 `probe_failed=True`（health `None` = 未知，**不是耗尽**）。种子只在默认装配路径执行，且幂等；删除后重启复活是刻意的（文档写「永久停用用暂停」）
-- **Zen 门禁伪装注入 `bash`/`read` 是「对上游撒谎、对客户端诚实」**：上游要求 tools 含这两者，客户端没声明过，所以注入只补缺、回包只过滤**本次注入的名字**（按 `index` 跟踪分片），全被滤掉时收敛 `finish_reason`。用户自带同名工具时既不注入也不过滤——宁可不满足门禁（让上游自己报错），也不误伤用户的真实工具调用
+- **Zen 门禁伪装注入 `bash`/`read` 是「对上游撒谎、对客户端诚实」**：上游要求 tools 含这两者，客户端未必声明过，所以注入只补缺。回包对**本次注入的名字**按 `index` 跟踪分片：客户端有同义工具（`shell` 等）就改写成同名透传（否则模型调伪工具被吞 → 空 stop → 客户端提前结束回合），没有才过滤并收敛 `finish_reason`。用户自带同名工具时既不注入也不处理——宁可不满足门禁（让上游自己报错），也不误伤用户的真实工具调用
