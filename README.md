@@ -105,7 +105,7 @@ docker compose exec coding2api python scripts/create_user.py admin --role admin
 
 ```bash
 docker compose pull
-# 或指定版本：docker pull ghcr.io/robbsluo/coding2api:v0.3.0
+# 或指定版本：docker pull ghcr.io/robbsluo/coding2api:v0.4.0
 ```
 
 推送新版本：打 tag `v*` 推到 main 即触发 publish workflow（见 `.github/workflows/publish.yml`），同时打 `<tag>` 和 `:latest` 到 GHCR。也可在 Actions 页面手动触发（填版本号）。
@@ -273,7 +273,7 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 {
   "status": "ok",
   "service": "coding2api",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "credentials": {"total": 5, "ready": 4, "cooling": 1, "paused": 0, "disabled": 0}
 }
 ```
@@ -546,7 +546,7 @@ pnpm build
 
 ## 状态
 
-M0–M3 及后续迭代全部完成，`main` 分支可运行，当前版本 v0.3.0。
+M0–M3 及后续迭代全部完成，`main` 分支可运行，当前版本 v0.4.0。
 
 后续批次（B1–B11）已按批准计划落地：
 
