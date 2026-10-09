@@ -47,6 +47,14 @@ export function useSettings(username?: string) {
   });
 }
 
+/** 模型目录（价表等）不缓存太久的引用数据；与凭证/设置同区分。 */
+export function usePricing(username?: string) {
+  return useQuery({
+    queryKey: adminKey(username, "pricing"),
+    queryFn: api.pricing,
+  });
+}
+
 /** 用户列表（admin only）。改动后由 useUserMutation 统一失效。 */
 export function useUsers(username?: string) {
   return useQuery({

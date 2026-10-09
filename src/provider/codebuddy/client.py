@@ -219,6 +219,12 @@ class CodeBuddyClient:
                     sanitized)
         # 官方 CLI 请求的标准特征字段；缺失会被渠道风控判定非官方调用（11128）
         body.setdefault("enable_thinking", True)
+        # 缺 reasoning_effort 时上游退化成「可见推演」：思考整段写进
+        # delta.content、reasoning_content 恒空、usage 的 reasoning_tokens 恒 0
+        # （非官方 CLI 客户端不发该字段，官方 CLI 69/71 份真实 dump 都带）。
+        # 补缺省即恢复独立思考通道；客户端显式值不覆盖——与参考实现
+        # codebuddy2api「白名单模型强制 max」不同，那是改写客户端意图。
+        body.setdefault("reasoning_effort", "medium")
         stream_options = body.get("stream_options")
         body["stream_options"] = {
             **(stream_options if isinstance(stream_options, dict) else {}),

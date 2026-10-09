@@ -10,6 +10,7 @@ import { LoginPage } from "./pages/LoginPage";
 const CredentialsPage = lazy(() => import("./pages/CredentialsPage").then(m => ({ default: m.CredentialsPage })));
 const ApiKeysPage = lazy(() => import("./pages/ApiKeysPage").then(m => ({ default: m.ApiKeysPage })));
 const StatsPage = lazy(() => import("./pages/StatsPage").then(m => ({ default: m.StatsPage })));
+const PriceCatalogPage = lazy(() => import("./pages/PriceCatalogPage").then(m => ({ default: m.PriceCatalogPage })));
 const PlaygroundPage = lazy(() => import("./pages/PlaygroundPage").then(m => ({ default: m.PlaygroundPage })));
 const SettingsPage = lazy(() => import("./pages/SettingsPage").then(m => ({ default: m.SettingsPage })));
 const UsersPage = lazy(() => import("./pages/UsersPage").then(m => ({ default: m.UsersPage })));
@@ -53,6 +54,7 @@ export function App() {
           <Route path="/credentials" element={<Navigate to="/" replace />} />
           <Route path="/api-keys" element={<ApiKeysPage />} />
           <Route path="/stats" element={<StatsPage />} />
+          <Route path="/pricing" element={<PriceCatalogPage />} />
           <Route path="/playground" element={<PlaygroundPage />} />
           <Route path="/users" element={<UsersPage />} />
           <Route path="/audit" element={<AuditPage />} />

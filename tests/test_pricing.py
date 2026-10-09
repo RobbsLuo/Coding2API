@@ -28,6 +28,7 @@ from src.pricing import (
     estimate_cost_usd,
     fetch_prices,
     load_prices,
+    load_prices_snapshot,
     prices_path,
     save_prices,
     to_cny,
@@ -254,6 +255,23 @@ def test_prices_prices_not_dict(tmp_path):
     payload = {"version": PRICES_VERSION, "saved_at": time.time(), "prices": []}
     (tmp_path / PRICES_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
     assert load_prices(str(tmp_path)) == {}
+
+
+def test_prices_snapshot_returns_saved_at(tmp_path):
+    """快照读回同时给出保存时刻，供管理台「价表」页展示。"""
+    before = time.time()
+    save_prices(str(tmp_path), {"m": (1.0, 2.0, 0.5)})
+    table, saved_at = load_prices_snapshot(str(tmp_path))
+    assert table == {"m": (1.0, 2.0, 0.5)}
+    assert saved_at is not None and before <= saved_at <= time.time()
+
+
+def test_prices_snapshot_degradations_carry_no_timestamp(tmp_path):
+    """缺失 / 过期：表与保存时刻一起降级为空与 None。"""
+    assert load_prices_snapshot(str(tmp_path)) == ({}, None)
+    save_prices(str(tmp_path), {"m": (1.0, 2.0, 0.5)})
+    assert load_prices_snapshot(
+        str(tmp_path), now=time.time() + PRICES_MAX_AGE_SECONDS + 10) == ({}, None)
 
 
 def test_save_prices_failure_is_logged(tmp_path, caplog):
@@ -530,10 +548,11 @@ def test_app_restore_price_failure_is_logged(tmp_path, monkeypatch, caplog):
     def boom(_data_dir):
         raise RuntimeError("bad snapshot")
 
-    monkeypatch.setattr(main, "load_prices", boom)
+    monkeypatch.setattr(main, "load_prices_snapshot", boom)
     app = _price_app(tmp_path)
     with caplog.at_level("WARNING"), TestClient(app):
         assert app.state.price_table == {}
+        assert app.state.price_saved_at is None
     assert any("恢复落盘价表失败" in r.getMessage() for r in caplog.records)
 
 
@@ -554,6 +573,7 @@ async def test_price_catalog_refresh_reports_count(tmp_path, monkeypatch):
         assert run.ok is True and run.report == {"models": 2}
     assert app.state.price_table == {"glm-5.2": (1.0, 2.0, 0.1),
                                      "glm-4.6": (0.5, 1.0, 0.1)}
+    assert app.state.price_saved_at is not None
     assert load_prices(str(tmp_path)) == app.state.price_table
 
 
@@ -669,4 +689,58 @@ def test_shutdown_cancels_inflight_price_warmup(tmp_path, monkeypatch):
             time.sleep(0.01)
         assert started.is_set()                 # 预热已进入抓取
     assert cancelled == [True]                  # 关机时被取消
+
+
+# ---------------------------------------------------- 管理台「价表」只读端点
+
+
+def _pricing_client(app):
+    from fastapi.testclient import TestClient
+
+    from src.auth.session import create_session_token
+
+    client = TestClient(app)
+    client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+    return client
+
+
+def test_pricing_endpoint_lists_sorted_table(tmp_path):
+    """带登录可读全量价表：按模型 id 升序，含汇率与快照时间。"""
+    save_prices(str(tmp_path), {"glm-5.2": (1.0, 2.0, 0.1),
+                                "a-model": (0.5, 1.5, 0.05)})
+    app = _price_app(tmp_path, USD_CNY_RATE=7)
+    with _pricing_client(app) as client:
+        payload = client.get("/api/pricing").json()
+        assert payload["count"] == 2
+        assert payload["currency"] == "USD"
+        assert payload["usd_cny_rate"] == 7
+        assert payload["saved_at"] == app.state.price_saved_at
+    assert [row["model"] for row in payload["models"]] == ["a-model", "glm-5.2"]
+    assert payload["models"][1] == {"model": "glm-5.2", "input": 1.0,
+                                    "output": 2.0, "cache_read": 0.1}
+
+
+def test_pricing_endpoint_empty_table(tmp_path, monkeypatch):
+    """无快照时回空表 + saved_at=None（页面显示空态，不是错误）。"""
+    from src import main
+
+    async def no_prices(_url):
+        return {}
+
+    monkeypatch.setattr(main, "fetch_prices", no_prices)
+    app = _price_app(tmp_path)
+    with _pricing_client(app) as client:
+        payload = client.get("/api/pricing").json()
+    assert payload["models"] == [] and payload["count"] == 0
+    assert payload["saved_at"] is None
+
+
+def test_pricing_endpoint_requires_session(tmp_path):
+    """未登录一律 401：价表页也要经过会话鉴权。"""
+    from fastapi.testclient import TestClient
+
+    save_prices(str(tmp_path), {"m": (1.0, 2.0, 0.5)})
+    app = _price_app(tmp_path)
+    with TestClient(app) as client:
+        assert client.get("/api/pricing").status_code == 401
 

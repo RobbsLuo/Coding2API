@@ -108,8 +108,9 @@
 - **活跃上报（B1.7，默认关闭）**：`POST /v2/report`，body 为事件数组（`eventCode=chat_request_send`），`userId` 必填——缺失时上游 HTTP 200 `code:0` 但静默丢弃。OAuth 凭证 `account_uid`/`user_id` 实测为空，回落 bearer JWT 的 `sub`；实测一条即点亮连登（1→2）。风险与开关语义见 [README.md](README.md)（条款明禁脚本篡改；事件形状改版即失效，不作为可靠性功能）
 - **凭证身份可能为空**：OAuth 路径下上游账号接口未回填 `account_uid`/`user_id`（实测），签到 / 成长中心的同账号隔离必须回落到 `credential_id`，否则第二个账号会被静默跳过
 - 请求头需 `X-Domain`、`X-User-Id`、`X-Enterprise-Id`、`X-Department-Info`（部门名须 UTF-8 百分号编码）
-- **reasoning 字段直接透传，不注入也不剥离**（实测 71 份真实 dump）：客户端自带 `reasoning_effort`（69/71，仅 `low`/`medium`，非推理模型如 `hy3` 不带）并在历史 assistant 消息里回传 `reasoning_content`（51/71，含带 `tool_calls` 的消息），上游原样接受（`deepseek-v4.1-flash` 4260 次请求 99.6% 成功）。故无需「effort 档位映射」，也不存在「客户端丢弃 reasoning_content」的前提；`enable_thinking` 只在客户端未给时补 `true`
-- **CB 的 usage 不回 `reasoning_tokens`**（实测恒为 0：`deepseek-v4.1-flash` 289 万 output tokens / reasoning_tokens 全 0），TRAE 侧正常回（`qwen-3.7-plus` 单请求 6~114）。统计页 CB 的思考 token 恒为 0 属上游口径差异，不是采集丢失
+- **reasoning 字段客户端给什么就透传什么，`reasoning_content` 不剥离**（实测 71 份真实 dump）：客户端自带 `reasoning_effort`（69/71，仅 `low`/`medium`，非推理模型如 `hy3` 不带）并在历史 assistant 消息里回传 `reasoning_content`（51/71，含带 `tool_calls` 的消息），上游原样接受（`deepseek-v4.1-flash` 4260 次请求 99.6% 成功）。故无需「effort 档位映射」，也不存在「客户端丢弃 reasoning_content」的前提
+- **`reasoning_effort` 缺失时补 `medium`，显式值不覆盖**（2026-10-09）：不发该字段时上游退化成「可见推演」——整段思考写进 `delta.content`、`delta.reasoning_content` 恒空、`usage` 的 `reasoning_tokens` 恒 0（同一 prompt 带 `low` 立即恢复独立思考通道，实测思考 6594 tokens 全在 `reasoning_content`）。官方 CLI 从不发这种形态（69/71 份 dump 都带），但非官方 CLI 客户端（如 DSH / pi-ai）不发，故补缺省。`enable_thinking` 同样只在未给时补 `true`。**只补缺省、不改写客户端意图**——参考实现 IceeAn/codebuddy2api 走「白名单模型强制 `max`」，那是覆盖客户端值，不采纳。客户端可显式传 `reasoning_effort: "low"` 控制思考量（难题上 `medium` 单次实测 6594 思考 tokens，总成本与此前「可见推演」大体相当——此前也计入输出 token）
+- **CB 的 `reasoning_tokens` 在 `completion_tokens_details` 里，顶层恒缺**（2026-10-09 修正）：早先只读顶层 `reasoning_tokens`，实测恒为 0，据此误判为「CB 不回思考 token、属上游口径差异」。补上 details 优先的解析链后统计页 CB 思考 token 恢复真值。TRAE 侧在顶层正常回（`qwen-3.7-plus` 单请求 6~114）
 - **输出上限键名不对称**（2026-09-21 直连实测）：CB 上游**完全忽略 `max_completion_tokens`**（`=1` 仍出 59 tokens），只认 `max_tokens`（精确截断 + `finish_reason=length`），两键同发时后者胜出；TRAE 对两个键**都不生效**。本网关不做键映射，客户端限额原样透传——若客户端只发 `max_completion_tokens`，输出不会被截断；`enable_thinking: false` 亦被上游忽略（细节见 [TECHNICAL.md §3.4](TECHNICAL.md)）
 
 ### 3.2 TRAE SOLO（字节）

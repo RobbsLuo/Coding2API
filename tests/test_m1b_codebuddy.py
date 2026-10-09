@@ -286,6 +286,45 @@ def test_usage_ignores_boolean_and_non_numeric_values():
     assert usage.input_tokens is None and usage.output_tokens is None and usage.credit is None
 
 
+def test_usage_reasoning_tokens_from_details_and_top_level():
+    """思考 token：优先 completion_tokens_details，顶层 reasoning_tokens 兜底。
+
+    顶层恒缺是 CB 的既有实测事实，真值只在 details 里——早先只读顶层导致
+    统计页 CB 思考 token 恒 0（被误判为上游口径差异）。
+    """
+    frame = cb_events.SSEFrame(event="", data=(
+        '{"usage":{"completion_tokens":20,'
+        '"completion_tokens_details":{"reasoning_tokens":13}}}'))
+    assert cb_events.parse_frame(frame).usage.reasoning_tokens == 13
+
+    frame = cb_events.SSEFrame(
+        event="", data='{"usage":{"completion_tokens":20,"reasoning_tokens":9}}')
+    assert cb_events.parse_frame(frame).usage.reasoning_tokens == 9
+
+    frame = cb_events.SSEFrame(event="", data='{"usage":{"completion_tokens":20}}')
+    assert cb_events.parse_frame(frame).usage.reasoning_tokens is None
+
+
+def test_usage_details_invalid_values_fall_back_to_top_level():
+    """details 值非法（bool / 字符串）时回落顶层；顶层也非法则 None。"""
+    frame = cb_events.SSEFrame(event="", data=(
+        '{"usage":{"cached_tokens":4,"reasoning_tokens":6,'
+        '"prompt_tokens_details":{"cached_tokens":"7"},'
+        '"completion_tokens_details":{"reasoning_tokens":false}}}'))
+    usage = cb_events.parse_frame(frame).usage
+    assert usage.cached_tokens == 4
+    assert usage.reasoning_tokens == 6
+
+    frame = cb_events.SSEFrame(event="", data=(
+        '{"usage":{"completion_tokens_details":{"reasoning_tokens":true}}}'))
+    assert cb_events.parse_frame(frame).usage.reasoning_tokens is None
+
+    # details 不是对象时同样走顶层兜底，不抛
+    frame = cb_events.SSEFrame(
+        event="", data='{"usage":{"completion_tokens_details":"x","reasoning_tokens":2}}')
+    assert cb_events.parse_frame(frame).usage.reasoning_tokens == 2
+
+
 # ----------------------------------------------------------- 错误分类
 
 @pytest.mark.parametrize(("status", "expected"), [
@@ -2638,11 +2677,8 @@ async def test_stream_inner_4001_yields_invalid_frame(dual_repo, caplog):
 
 
 async def test_stream_chat_body_carries_cli_signature_fields():
-    """官方 CLI 特征字段：enable_thinking / stream_options.include_usage。"""
+    """官方 CLI 特征字段：enable_thinking / reasoning_effort / include_usage。"""
     import json as _json
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, text=fixture("chat-basic.sse"))
 
     captured: dict = {}
 
@@ -2657,10 +2693,29 @@ async def test_stream_chat_body_carries_cli_signature_fields():
 
     body = captured["body"]
     assert body["enable_thinking"] is True          # 缺失触发 11128 渠道风控
+    assert body["reasoning_effort"] == "medium"     # 缺失则思考被写进正文
     assert body["stream_options"]["include_usage"] is True
     assert body["stream"] is True
     assert body["model"] == "m"
     assert events[-1].kind is EventKind.FINISH
+
+
+async def test_stream_chat_keeps_client_reasoning_effort():
+    """客户端显式给的 effort 不被覆盖：补缺省不改写客户端意图。"""
+    import json as _json
+
+    captured: dict = {}
+
+    def capture_handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = _json.loads(request.read())
+        return httpx.Response(200, text=fixture("chat-basic.sse"))
+
+    provider = CodeBuddyProvider(client=_client(capture_handler))
+    payload = {"messages": [{"role": "user", "content": "hi"}],
+               "reasoning_effort": "low"}
+    [e async for e in provider.stream_chat({"bearer_token": "t"}, payload, "m")]
+
+    assert captured["body"]["reasoning_effort"] == "low"
 
 
 async def test_trae_4001_falls_through_to_codebuddy(dual_repo, caplog):

@@ -182,6 +182,17 @@ def save_prices(data_dir: str, table: Mapping[str, tuple[float, float, float]]) 
 
 def load_prices(data_dir: str, *, now: float | None = None) -> PriceTable:
     """读回落盘价表；文件缺失 / 损坏 / 版本不符 / 过旧一律退化成空表。"""
+    return load_prices_snapshot(data_dir, now=now)[0]
+
+
+def load_prices_snapshot(
+    data_dir: str, *, now: float | None = None,
+) -> tuple[PriceTable, float | None]:
+    """读回 `(价表, 快照保存时刻)`；校验口径与 `load_prices` 完全一致。
+
+    保存时刻供管理台「价表」页展示「这份表是什么时候拉取的」；任何异常都与
+    表本身一样安静降级为 `({}, None)`——价表缺失只让成本显示 `—`，绝不影响聊天。
+    """
     path = prices_path(data_dir)
     moment = time.time() if now is None else now
     try:
@@ -189,12 +200,13 @@ def load_prices(data_dir: str, *, now: float | None = None) -> PriceTable:
             raw = json.load(handle)
         if raw.get("version") != PRICES_VERSION:
             logger.warning("价表版本不匹配 %s，忽略", path)
-            return {}
-        if moment - raw["saved_at"] > PRICES_MAX_AGE_SECONDS:
-            return {}
+            return {}, None
+        saved_at = raw["saved_at"]
+        if moment - saved_at > PRICES_MAX_AGE_SECONDS:
+            return {}, None
         prices = raw["prices"]
         if not isinstance(prices, dict):
-            return {}
+            return {}, None
         table: PriceTable = {}
         for model, price in prices.items():
             # JSON 对象的 key 恒为字符串；这里只校验值形状。
@@ -204,12 +216,13 @@ def load_prices(data_dir: str, *, now: float | None = None) -> PriceTable:
             if any(value is None for value in numbers):
                 continue
             table[model.lower()] = numbers  # type: ignore[assignment]
-        return table
+        # 上面 `moment - saved_at` 已排除非数值，这里可安全转 float。
+        return table, float(saved_at)
     except FileNotFoundError:
-        return {}
+        return {}, None
     except (OSError, ValueError, TypeError, AttributeError, KeyError) as error:
         logger.warning("价表读取失败 %s: %s", path, error)
-        return {}
+        return {}, None
 
 
 async def fetch_prices(url: str = MODELS_DEV_URL, *,

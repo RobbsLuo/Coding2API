@@ -14,6 +14,7 @@ import type {
   ActivityReportResult,
   ModelInfo,
   ProbeResult,
+  PriceTableResponse,
   ProviderStats,
   Role,
   SessionInfo,
@@ -185,6 +186,8 @@ export const api = {
   tasks: () => request<TasksResponse>("/api/tasks"),
   /** 运维告警记录（P1-7）：后台评估命中后落库，倒序回看。 */
   alerts: () => request<AlertsResponse>("/api/alerts"),
+  /** 当前生效的模型价表（models.dev 刊例价），价表页只读展示。 */
+  pricing: () => request<PriceTableResponse>("/api/pricing"),
 
   // ---------------------------------------------------------------- 统计
   statsOverview: (username?: string, since?: number) =>

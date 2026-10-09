@@ -98,18 +98,26 @@ def _usage(raw: dict[str, Any]) -> Usage:
         value = raw.get(key)
         return value if isinstance(value, int) and not isinstance(value, bool) else None
 
+    def details_int(details_key: str, key: str) -> int | None:
+        """OpenAI 惯例把这两个字段放在 details 子对象里，顶层同名字段兜底。
+
+        CB 实测顶层 `reasoning_tokens` 恒缺（早先据此误判为「CB 不回思考
+        token」），真值在 `completion_tokens_details`；`cached_tokens` 同构。
+        details 值非法（非数值 / bool）时回落顶层，仍缺则 None。
+        """
+        details = raw.get(details_key)
+        value = details.get(key) if isinstance(details, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        return as_int(key)
+
     credit = raw.get("credit")
-    # 缓存命中：OpenAI 惯例在 prompt_tokens_details.cached_tokens，顶层 cached_tokens 兜底
-    details = raw.get("prompt_tokens_details")
-    cached = (details or {}).get("cached_tokens") if isinstance(details, dict) else None
-    if not isinstance(cached, int) or isinstance(cached, bool):
-        cached = as_int("cached_tokens")
 
     return Usage(
         input_tokens=as_int("prompt_tokens"),
         output_tokens=as_int("completion_tokens"),
-        reasoning_tokens=as_int("reasoning_tokens"),
-        cached_tokens=cached,
+        reasoning_tokens=details_int("completion_tokens_details", "reasoning_tokens"),
+        cached_tokens=details_int("prompt_tokens_details", "cached_tokens"),
         credit=float(credit) if isinstance(credit, (int, float)) and not isinstance(credit, bool)
         else None,
     )

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ from .api import (
     admin_auth,
     admin_credentials,
     admin_keys,
+    admin_pricing,
     admin_settings,
     admin_stats,
     admin_users,
@@ -62,7 +64,7 @@ from .engine.affinity import ConversationAffinity
 from .engine.executor import Executor, ExecutorDeps
 from .engine.model_resolver import KNOWN_PROVIDERS, parse_fallback_groups
 from .engine.scheduler import Scheduler
-from .pricing import fetch_prices, load_prices, save_prices
+from .pricing import fetch_prices, load_prices_snapshot, save_prices
 from .provider.codearts import CodeArtsProvider
 from .provider.codearts.client import CodeArtsClient
 from .provider.codearts.oauth import CodeArtsOAuth
@@ -349,8 +351,11 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # （零上游请求），后台 price_catalog 循环再周期刷新。同一份 dict 引用交给
     # StatsCollector，刷新时就地替换后新写入的明细立即用上新价。
     price_table: dict[str, tuple[float, float, float]] = {}
+    # 快照保存时刻（供管理台「价表」页展示「这份表何时拉取」）：启动读回，
+    # 每轮后台刷新后更新。
+    price_saved_at: float | None = None
     try:
-        price_table.update(load_prices(config.data_dir))
+        price_table, price_saved_at = load_prices_snapshot(config.data_dir)
     except Exception as error:  # noqa: BLE001 - 价表是加速手段，失败不阻断服务
         logger.warning("恢复落盘价表失败: %s", error)
     stats_collector = StatsCollector(
@@ -415,6 +420,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             price_table.clear()
             price_table.update(table)
             save_prices(config.data_dir, price_table)
+            app_.state.price_saved_at = time.time()
             return {"models": len(price_table)}
 
         # 传 runtime（而非 env 快照）：后台循环的热更值每轮现读覆盖层。
@@ -497,6 +503,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.model_aliases = model_aliases
     app.state.model_list_cache = model_cache
     app.state.price_table = price_table
+    app.state.price_saved_at = price_saved_at
     app.state.pending_callback_state = None
     app.state.pending_callback_user = None
     app.state.login_throttle = LoginThrottle()
@@ -580,6 +587,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.include_router(admin_credentials.create_router(services))
     app.include_router(admin_keys.create_router(services))
     app.include_router(admin_settings.create_router(services))
+    app.include_router(admin_pricing.create_router(services))
     app.include_router(admin_alerts.create_router(services))
     app.include_router(admin_stats.create_router(services))
     app.include_router(admin_users.create_router(services))

@@ -414,6 +414,30 @@ export interface ModelInfo {
   by_provider?: Record<string, { credit_rate?: number; raw_id?: string }>;
 }
 
+/** 价表页（GET /api/pricing）一行：models.dev 刊例价，单位 USD / 百万 token。 */
+export interface PriceEntry {
+  model: string;
+  input: number;
+  output: number;
+  cache_read: number;
+}
+
+/**
+ * 当前生效的模型价表快照（GET /api/pricing）。
+ *
+ * 价表是统计页成本估算的输入；本结构只做只读展示（不参与计算，计算在后端）。
+ */
+export interface PriceTableResponse {
+  models: PriceEntry[];
+  count: number;
+  /** 刊例价币种，当前恒为 "USD" */
+  currency: string;
+  /** 成本估算当前生效的 USD→CNY 汇率（热更项 USD_CNY_RATE） */
+  usd_cny_rate: number;
+  /** 价表快照保存时刻（epoch 秒）；无快照时为 null */
+  saved_at: number | null;
+}
+
 /**
  * 一条可热更运行时配置（GET/PUT /api/settings）。
  *
