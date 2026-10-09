@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Boxes, CircleDollarSign, Coins, RefreshCw, Search } from "lucide-react";
 import { useSessionContext } from "../Layout";
 import { useModelCatalog } from "../api/hooks";
@@ -11,11 +11,13 @@ import {
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import {
+  Button,
   Empty,
   Input,
   Metric,
   Notice,
   Panel,
+  Select,
   Table,
   TableBody,
   TableCell,
@@ -33,6 +35,9 @@ const CURRENCIES = [
   { value: "USD", label: "美元" },
   { value: "CNY", label: "人民币" },
 ];
+
+/** 分页步长：与「用量统计」明细表一致，默认 50（3536 条全渲染会拖慢搜索）。 */
+const PAGE_SIZES = [20, 50, 100];
 
 /** 单价格式化：刊例价量级跨度大（0.02 ~ 数十），保留最多 4 位小数。 */
 function formatUnitPrice(
@@ -89,6 +94,8 @@ export function ModelCatalogPage() {
   const { data, isLoading, isError } = useModelCatalog(session.username);
   const [query, setQuery] = useState("");
   const [currency, setCurrency] = useState<Currency>("USD");
+  const [pageIndex, setPageIndex] = useState(0);
+  const [pageSize, setPageSize] = useState(50);
 
   const rate = data?.usd_cny_rate ?? 1;
   const models = useMemo(() => data?.models ?? [], [data]);
@@ -102,6 +109,18 @@ export function ModelCatalogPage() {
     );
   }, [models, query]);
 
+  const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
+  const safePage = Math.min(pageIndex, pageCount - 1);
+  const pageRows = useMemo(
+    () => filtered.slice(safePage * pageSize, safePage * pageSize + pageSize),
+    [filtered, safePage, pageSize],
+  );
+
+  // 搜索 / 改每页条数后回到第一页：否则会停在一个已不存在的页码上（空白）。
+  useEffect(() => {
+    setPageIndex(0);
+  }, [query, pageSize]);
+
   if (isLoading) {
     return (
       <div data-testid="model-catalog-page">
@@ -111,6 +130,27 @@ export function ModelCatalogPage() {
   }
 
   const priceUnit = `${currency === "CNY" ? "¥" : "$"} / 百万 token`;
+
+  const toolbar = (
+    <div className="flex flex-wrap items-center gap-2">
+      <div className="relative">
+        <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+        <Input
+          value={query}
+          data-testid="model-search"
+          placeholder="搜索 id / 名称 / 渠道"
+          className="h-8 w-full pl-7 text-xs sm:w-56"
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </div>
+      <Tabs
+        value={currency}
+        options={CURRENCIES}
+        onChange={(value) => setCurrency(value as Currency)}
+        testId="model-currency-tabs"
+      />
+    </div>
+  );
 
   return (
     <div className="space-y-6" data-testid="model-catalog-page">
@@ -155,94 +195,122 @@ export function ModelCatalogPage() {
           </Empty>
         </Panel>
       ) : (
-        <Panel
-          title={`模型列表（${filtered.length} / ${models.length}）`}
-          action={
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="relative">
-                <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={query}
-                  data-testid="model-search"
-                  placeholder="搜索 id / 名称 / 渠道"
-                  className="h-8 w-44 pl-7 text-xs"
-                  onChange={(event) => setQuery(event.target.value)}
-                />
-              </div>
-              <Tabs
-                value={currency}
-                options={CURRENCIES}
-                onChange={(value) => setCurrency(value as Currency)}
-                testId="model-currency-tabs"
-              />
-            </div>
-          }
-        >
+        <Panel title={`模型列表（${filtered.length} / ${models.length}）`}>
+          {/* 搜索与币种切换独立成行：放进 Panel 标题行会在窄视口挤压标题成竖排 */}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            {toolbar}
+            <label className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              每页
+              <Select
+                value={String(pageSize)}
+                data-testid="model-page-size"
+                className="h-8 w-20 text-xs"
+                onChange={(event) => setPageSize(Number(event.target.value))}
+              >
+                {PAGE_SIZES.map((size) => (
+                  <option key={size} value={size}>{size} 条</option>
+                ))}
+              </Select>
+            </label>
+          </div>
+
           {filtered.length === 0 ? (
             <Empty data-testid="no-model-match">没有匹配「{query}」的模型</Empty>
           ) : (
-            <Table data-testid="model-catalog-table">
-              <TableHeader>
-                <TableRow>
-                  <TableHead>模型</TableHead>
-                  <TableHead>提供方</TableHead>
-                  <TableHead>上下文 / 输出</TableHead>
-                  <TableHead>输入 → 输出模态</TableHead>
-                  <TableHead>能力</TableHead>
-                  <TableHead>知识 / 发布</TableHead>
-                  <TableHead className="text-right">价格（{priceUnit}）</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {filtered.map((row) => {
-                  const caps = capabilities(row);
-                  return (
-                    <TableRow key={row.id} data-testid={`model-row-${row.id}`}>
-                      <TableCell className="max-w-[17rem]">
-                        <div className="font-medium break-words">{row.name ?? row.id}</div>
-                        <div className="font-mono text-xs break-all text-muted-foreground">
-                          {row.id}
-                        </div>
-                      </TableCell>
-                      <TableCell className="font-mono text-xs">{row.provider}</TableCell>
-                      <TableCell className="text-xs tabular-nums">
-                        <div title="上下文窗口上限">{limitLine(row.context)}</div>
-                        <div className="text-muted-foreground" title="单次输出上限">
-                          {limitLine(row.max_output)}
-                        </div>
-                      </TableCell>
-                      <TableCell className="max-w-[9rem] text-xs whitespace-normal">
-                        {modalityText(row.input_modalities)} →{" "}
-                        {modalityText(row.output_modalities)}
-                      </TableCell>
-                      <TableCell className="text-xs">
-                        {caps.length === 0 ? "—" : caps.join(" · ")}
-                      </TableCell>
-                      <TableCell className="text-xs">
-                        <div>{row.knowledge ?? "—"}</div>
-                        <div className="text-muted-foreground">
-                          {row.release_date ?? "—"}
-                        </div>
-                      </TableCell>
-                      <TableCell className="text-right tabular-nums">
-                        <div title="输入 · 输出">
-                          <span className="text-muted-foreground">入 </span>
-                          {formatUnitPrice(row.input, currency, rate)}
-                          <span className="text-muted-foreground"> · 出 </span>
-                          {formatUnitPrice(row.output, currency, rate)}
-                        </div>
-                        <div className="text-xs text-muted-foreground" title="缓存读 · 缓存写">
-                          <span>缓读 </span>
-                          {formatUnitPrice(row.cache_read, currency, rate)}
-                          <span> · 缓写 </span>
-                          {formatUnitPrice(row.cache_write, currency, rate)}
-                        </div>
-                      </TableCell>
-                    </TableRow>
-                  );
-                })}
-              </TableBody>
-            </Table>
+            <div className="mt-3">
+              <Table
+                data-testid="model-catalog-table"
+                containerClassName="max-h-[70vh] overflow-auto"
+              >
+                <TableHeader className="sticky top-0 z-10">
+                  <TableRow>
+                    <TableHead>模型</TableHead>
+                    <TableHead>提供方</TableHead>
+                    <TableHead>上下文 / 输出</TableHead>
+                    <TableHead>输入 → 输出模态</TableHead>
+                    <TableHead>能力</TableHead>
+                    <TableHead>知识 / 发布</TableHead>
+                    <TableHead className="text-right">价格（{priceUnit}）</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {pageRows.map((row) => {
+                    const caps = capabilities(row);
+                    return (
+                      <TableRow key={row.id} data-testid={`model-row-${row.id}`}>
+                        <TableCell className="max-w-[17rem]">
+                          <div className="font-medium break-words">{row.name ?? row.id}</div>
+                          <div className="font-mono text-xs break-all text-muted-foreground">
+                            {row.id}
+                          </div>
+                        </TableCell>
+                        <TableCell className="font-mono text-xs">{row.provider}</TableCell>
+                        <TableCell className="text-xs tabular-nums">
+                          <div title="上下文窗口上限">{limitLine(row.context)}</div>
+                          <div className="text-muted-foreground" title="单次输出上限">
+                            {limitLine(row.max_output)}
+                          </div>
+                        </TableCell>
+                        <TableCell className="max-w-[9rem] text-xs whitespace-normal break-keep">
+                          {modalityText(row.input_modalities)} →{" "}
+                          {modalityText(row.output_modalities)}
+                        </TableCell>
+                        <TableCell className="max-w-[12rem] text-xs whitespace-normal break-keep">
+                          {caps.length === 0 ? "—" : caps.join(" · ")}
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          <div>{row.knowledge ?? "—"}</div>
+                          <div className="text-muted-foreground">
+                            {row.release_date ?? "—"}
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          <div title="输入 单价 · 输出 单价">
+                            <span className="text-muted-foreground">输入 </span>
+                            {formatUnitPrice(row.input, currency, rate)}
+                            <span className="text-muted-foreground"> · 输出 </span>
+                            {formatUnitPrice(row.output, currency, rate)}
+                          </div>
+                          <div className="text-xs text-muted-foreground" title="缓存读 单价 · 缓存写 单价">
+                            <span>缓存读 </span>
+                            {formatUnitPrice(row.cache_read, currency, rate)}
+                            <span> · 缓存写 </span>
+                            {formatUnitPrice(row.cache_write, currency, rate)}
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                    );
+                  })}
+                </TableBody>
+              </Table>
+              {pageCount > 1 && (
+                <div className="mt-3 flex items-center justify-between">
+                  <span className="text-xs text-muted-foreground" data-testid="model-page-info">
+                    第 {safePage + 1} / {pageCount} 页
+                  </span>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      data-testid="model-prev"
+                      disabled={safePage === 0}
+                      onClick={() => setPageIndex((p) => Math.max(0, p - 1))}
+                    >
+                      上一页
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      data-testid="model-next"
+                      disabled={safePage >= pageCount - 1}
+                      onClick={() => setPageIndex((p) => Math.min(pageCount - 1, p + 1))}
+                    >
+                      下一页
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </Panel>
       )}
@@ -252,7 +320,7 @@ export function ModelCatalogPage() {
           模型 id 为 models.dev 的 id（小写），与本服务对外模型名（归一键）并不总是逐个相同；未匹配到定价的模型成本显示 —。价格为「按 token × 公开刊例价」的估算依据，不是上游真实扣费；匹配口径见「用量统计」页。
         </p>
         <p>
-          价格列上行「入 · 出」为输入 / 输出单价，下行「缓读 · 缓写」为缓存命中读价 / 缓存写入价（未声明缓存价时显示 —）。同一模型可能挂在多个渠道下、价差极大，这里按「原厂优先，否则取输入价最高」选一条展示。币种：原始单位为 USD / 百万 token；切到人民币按当前汇率（1 USD = {formatNumber(rate)} CNY）折算，历史成本按写入时汇率定值，不随本页变化重算。
+          价格列上行是「输入 / 输出」单价、下行是「缓存读 / 缓存写」单价（未声明缓存价时显示 —）。同一模型可能挂在多个渠道下、价差极大，这里按「原厂优先，否则取输入价最高」选一条展示。币种：原始单位为 USD / 百万 token；切到人民币按当前汇率（1 USD = {formatNumber(rate)} CNY）折算，历史成本按写入时汇率定值，不随本页变化重算。
         </p>
       </Notice>
     </div>
