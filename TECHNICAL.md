@@ -287,7 +287,7 @@ def health(q: Quota | None) -> HealthScore:
 
 ### 3.4 截断续写（B1.4，按实测收窄）
 
-上游以 `finish_reason == "length"` 结束本轮流时，同凭证自动续写，最多 `AUTO_CONTINUE_MAX`（默认 10，0 关闭）。实现在 `src/engine/continuation.py` 的 `ContinuationStream`：包装上游事件流，截断则追加「已产出正文（含 reasoning）+ 续写指令」重发，并把输出上限两键归零（否则在同一处再次截断），跨轮累计 usage，末端补发一条累计 usage + 最后一轮真实 `finish_reason`。做成事件流包装器而非 executor 内重跑：凭证固定，轮换 / 记账 / 统计零改动。
+上游以 `finish_reason == "length"` 结束本轮流时，同凭证自动续写，最多 `AUTO_CONTINUE_MAX`（默认 10，0 关闭）。实现在 `src/engine/continuation.py` 的 `ContinuationStream`：包装上游事件流，截断则追加「已产出正文（含 reasoning）+ 续写指令」重发，并把输出上限两键归零（否则在同一处再次截断），跨轮累计 usage，末端补发一条累计 usage + 最后一轮真实 `finish_reason`（上游整轮未报 usage 时不补发，避免出口把「未上报」误报成 0）。做成事件流包装器而非 executor 内重跑：凭证固定，轮换 / 记账 / 统计零改动。
 
 **为什么不实现已批准计划里的其余三类判据**（2026-09-21 直连上游实测，36+ 请求，交错中性对照排除频率窗口假因）：
 
@@ -299,7 +299,7 @@ def health(q: Quota | None) -> HealthScore:
 
 另两条实测事实（影响 `length` 可观测性）：`max_completion_tokens` 被 CB 上游**完全忽略**（`=1` 仍出 59 tokens）；`max_tokens` 才生效（精确截断 + `length`）；两键同发时后者胜出；TRAE 对两个键**都不生效**（80/80/80 字符）。`enable_thinking: false` 被上游**忽略**（仍产 reasoning 且计入 `max_tokens`）。
 
-**`reasoning_effort` 缺失时补 `medium`**（2026-10-09）：不带该字段时上游把整段思考以「可见推演」写进 `delta.content`（`delta.reasoning_content` 恒空、`usage` 的 `reasoning_tokens` 恒 0），正文里混着 "Wait—could…" 式自我质疑；带上任意档位（`low` 实测即可）立即恢复独立思考通道。官方 CLI 的 69/71 份真实 dump 都带该字段，故官方客户端从不触发；非官方 CLI 客户端（DSH / pi-ai 等）不发，是唯一触发面。`stream_chat` 用 `setdefault` 补缺省、**不覆盖客户端显式值**——与参考实现 codebuddy2api 的「白名单模型强制 `max`」语义不同（那是改写客户端意图），不采纳。思考 token 量随之上升（难题上 `medium` 单次实测 6594），但总成本与此前「可见推演」大体相当：那种形态的思考同样计入输出 token。
+**`reasoning_effort` 缺失时补 `medium`**（2026-10-09）：不带该字段时上游把整段思考以「可见推演」写进 `delta.content`（`delta.reasoning_content` 恒空、`usage` 的 `reasoning_tokens` 恒 0），正文里混着 "Wait—could…" 式自我质疑；带上任意档位（`low` 实测即可）立即恢复独立思考通道。官方 CLI 的 dump 都带该字段，非官方 CLI 客户端（DSH / pi-ai 等）不发，是唯一触发面。`stream_chat` 用 `setdefault` 补缺省、**不覆盖客户端显式值**（参考实现 codebuddy2api 的「白名单强制 `max`」是改写客户端意图，不采纳）。思考 token 量随之上升，但总成本与此前「可见推演」大体相当——那种形态的思考同样计入输出 token。
 
 参考实现（IceeAn/codebuddy2api）只**统计** `finish_reason`、**不实现**续写，故本项无照搬蓝本，全部依据上述直连实测。
 
@@ -960,6 +960,8 @@ class Provider(Protocol):
        （累计到阈值同样会熔断），否则会顺手把已有的 cooling_until 写成 NULL
   5. response.py：Event → OpenAI chunk（流式）或聚合（非流式）
      - 首块补 role:assistant；上游无 index 的 tool_calls 补稳定 index
+     - 收尾帧序列：finish chunk → usage 帧（choices: []）→ [DONE]；上游未报
+       usage 则不补该帧（不发 0 占位）。非流式/流式收尾共用 usage_payload()
   6. stats.collector：写 usage_events（username/provider/model/tokens/latency/ttfb/ok）
   7. scheduler.note_success：清 err_count，并把本对话重新粘到实际服务的凭证
 ```
@@ -1210,7 +1212,7 @@ fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文�
 - **polling OAuth 不转回调**（Q17=C）：上游协议决定；TRAE 回调走主端口 + `PUBLIC_BASE_URL`。`/authorize` 无鉴权（浏览器 302 不带 key），防滥用靠两条：无进行中登录一律拒绝；待完成登录有 600s TTL（长期挂着的 pending 会被同网络任何人用自己的 refreshToken 完成兑换——凭证入池、归属记为发起登录的管理员）。`app.state` 只保留 pending 的 state，不驻留含 refreshToken 的完整回调 URL
 - **Anthropic 出口已落地**（Q8 原定 v1.1，P0-1/Q59 实现）：`compat/anthropic/` + `api/messages.py` 提供 `POST /v1/messages` 与 `/v1/messages/count_tokens`，供只走 Anthropic 协议的客户端（Claude Code）接入，复用同一 `executor`（详见 §3.18）
 - **Responses 出口只做 Codex CLI 用到的子集**（Q32，详见 §3.7）：不做 `store=true` / `previous_response_id`（服务端无状态，不假装支持）；`include=["reasoning.encrypted_content"]` 按实测接受并忽略——Codex CLI 每轮必带，400 会直接打死主客户端；流式终止用 `response.completed` / `response.incomplete` / `response.failed`，**不发 `[DONE]`**（Responses 协议无该哨兵）。形状取自官方 `openai` SDK 类型并用其作客户端验证，对真实 CB 上游冒烟过；**未经真实 Codex CLI 端到端验证**（开发环境无 CLI）
-- **effort 档位映射仍不做，但缺省补值**（原 B1.2，实测后收窄）：原计划对「强制推理模型族」注入 `thinking` + `reasoning_effort` 并回填历史 `reasoning_content`，实测前提不成立——（1）客户端给什么档位上游都接受，无需映射；（2）客户端已回传历史 `reasoning_content` 且上游接受；（3）原计划的默认模型清单与实际在用命名无关，且 `glm-5.1` 在 `MODEL_BLOCKLIST` 里，硬编码白名单会空转；（4）真要做「客户端丢弃时回填」必须服务端存对话内容，与脱敏纪律冲突。参考实现 IceeAn/codebuddy2api 走相反取向（对白名单模型强制 `reasoning_effort=max` 覆盖客户端），属单来源且会改写客户端意图，不采纳。**2026-10-09 例外**：客户端**完全不发**该字段时上游退化成「可见推演」（思考混进正文、`reasoning_tokens` 恒 0，见 §3.4），故 `stream_chat` 用 `setdefault` 补 `medium`——只补缺省，不映射档位、不覆盖显式值
+- **effort 档位映射仍不做，但缺省补值**（原 B1.2，实测后收窄）：原计划对「强制推理模型族」注入 `thinking` + `reasoning_effort` 并回填历史 `reasoning_content`，实测前提不成立——客户端给什么档位上游都接受（无需映射）、客户端已回传历史 `reasoning_content` 且上游接受、硬编码模型白名单与实际命名无关且会空转、回填需服务端存对话内容（与脱敏纪律冲突）。**2026-10-09 例外**：客户端**完全不发** `reasoning_effort` 时上游退化成「可见推演」（思考混进正文，见 §3.4），故 `stream_chat` 用 `setdefault` 补 `medium`——只补缺省，不映射档位、不覆盖显式值
 - **统计一律以 `usage_hourly` 为准**：`overview` / `by_provider` / `timeline` / `model-timeline` 均读小时汇总，只有 `events`（逐请求明细）读 `usage_events`。统一口径是为了让选「全部」时总览与图表同值（明细只留 90 天，汇总永久）。代价：最近 ≤5 分钟未进汇总的请求不计入，刷新一次即可
 - **TRAE credit 为推算值**（`credit_estimated`）：TRAE 上游 `token_usage` 只给 token 数、不给单请求积分，故按官方计费公式（`(输入−缓存)×输入价 + 输出×输出价 + 缓存×缓存价`，单价为积分/百万，见 `src/provider/trae/pricing.py`）折算；明细存 `usage_events.credit_estimated`，小时汇总存 `credit_estimated_known`（推算条数），展示层对推算值加 `≈`。CodeBuddy 的 credit 是上游真值，恒不标推算。单价表与折扣会随官方调价/活动变化，改动集中在 pricing 模块。**缓存命中价要单独实测**：DeepSeek-V4.1-Flash 刊例缓存价 0.04 元/M，账号实测有效 ≈0.07 元/M（2.8 积分/M），且该模型缓存占输入 ≈99%，按刊例会把整体积分低估约一半（2026-09-30 修正，全量 229→449）；这类与「刊例 × 折扣」不符的模型走 `pricing.MEASURED_EFFECTIVE_OVERRIDE`。**回填 / 重算**：上线前的 TRAE 明细 `credit` 为 NULL，单价表调整后旧推算值也会过期，都用 `scripts/backfill_trae_credit.py --apply` 处理——范围是「`credit` 为 NULL 或 `credit_estimated=1`」的 trae 行，上游真值（`credit_estimated=0`）与值未变化的行不动（幂等），复用 `src/provider/trae/backfill.py`，补完重算小时汇总；之后新请求走正常路径。明细 90 天后清理，更早的小时汇总不再推算
 - **小时汇总双写**：`record()` 写明细的同时增量累加当前小时行，新请求立即可见于统计页（不依赖 5 分钟一轮的 rollup）；`rollup_hourly` 仍每 5 分钟全量重算作对账，两者结果一致（幂等）
