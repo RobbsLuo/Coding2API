@@ -172,7 +172,7 @@ def test_build_model_catalog_captures_metadata():
         "id": "z-ai/glm-5.3",
         "name": "Z.ai: GLM 5.3",
         "context_length": 1048576,
-        "knowledge_cutoff": 1750000000,
+        "knowledge_cutoff": "2026-02-16",   # 上游给的就是日期字符串
         "architecture": {"input_modalities": ["text", "image", 7],
                          "output_modalities": ["text"]},
         "top_provider": {"max_completion_tokens": 131072},
@@ -187,7 +187,7 @@ def test_build_model_catalog_captures_metadata():
     assert row["id"] == "z-ai/glm-5.3"
     assert row["provider"] == "z-ai"          # id 的厂商前缀
     assert row["name"] == "Z.ai: GLM 5.3"
-    assert row["knowledge"] == time.strftime("%Y-%m-%d", time.gmtime(1750000000))
+    assert row["knowledge"] == "2026-02-16"
     assert row["context"] == 1048576 and row["max_output"] == 131072
     assert row["input_modalities"] == ["text", "image"]     # 非串元素丢弃
     assert row["output_modalities"] == ["text"]
@@ -225,6 +225,26 @@ def test_build_model_catalog_tolerates_missing_fields():
     raw2 = {"data": [{"id": "m", "top_provider": "bad", "architecture": "bad",
                       "pricing": {"prompt": 1}}]}
     assert build_model_catalog(raw2)["m"]["max_output"] is None
+
+
+@pytest.mark.parametrize("cutoff,expected", [
+    ("2026-02-16", "2026-02-16"),          # 上游真实形态：日期字符串
+    ("  2026-02-16  ", "2026-02-16"),      # 两端空白照收
+    (1750000000, "2025-06-15"),            # 数值（epoch 秒）仍兼容
+    ("2026/02/16", None),                  # 别的日期格式不猜
+    ("2026-2-16", None),                   # 不补零
+    ("20260216", None),
+    ("", None),
+    (None, None),
+    (-1, None),
+    (True, None),
+    (1e30, None),                          # 溢出的 epoch → None，不抛
+])
+def test_build_model_catalog_knowledge_cutoff_shapes(cutoff, expected):
+    """知识截止只认 `YYYY-MM-DD`（上游真实形态）；别的写法宁可显示 — 也不给错日期。"""
+    raw = {"data": [{"id": "m", "knowledge_cutoff": cutoff,
+                     "pricing": {"prompt": "0.000001"}}]}
+    assert build_model_catalog(raw)["m"]["knowledge"] == expected
 
 
 def test_build_model_catalog_skips_unpriced():

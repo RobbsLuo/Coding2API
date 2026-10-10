@@ -468,8 +468,10 @@ export interface ModelInfo {
  * 价格单位 USD / 百万 token；其余为上游提供的元数据。缺失字段为
  * null / 空数组 / false（页面显示 — 或空）。
  *
- * OpenRouter 没有 models.dev 的 `family` / `release_date` / 开放权重三列，
- * 后端固定给 null / null / false（前端按「缺失」兜底，不改契约）。
+ * OpenRouter 不提供 `family` / 开放权重 / **原厂发布时间**三列，后端固定给
+ * null / false / null。前端只展示 `knowledge`；`release_date` 字段保留在契约里
+ * 但恒为 null（上游有 `created`，那是「收录进 OpenRouter 的时间」，不是原厂
+ * 发布日，标成发布日期是错的，故不给）。
  */
 export interface ModelCatalogEntry {
   /** OpenRouter 的模型 id（含厂商前缀，如 `z-ai/glm-5.3`），也是匹配键 */
@@ -479,8 +481,9 @@ export interface ModelCatalogEntry {
   /** id 的厂商前缀（如 `z-ai`）；id 无前缀时为空串 */
   provider: string;
   family: string | null;
-  /** 知识截止日期（YYYY-MM-DD）；上游未给时为 null */
+  /** 知识截止日期（YYYY-MM-DD）；上游约 1/3 条目未给，为 null */
   knowledge: string | null;
+  /** 恒为 null：OpenRouter 不提供原厂发布时间，页面不展示（见上方说明） */
   release_date: string | null;
   /** 上下文窗口 token 上限；未知为 null */
   context: number | null;

@@ -83,6 +83,11 @@ describe("ModelCatalogPage（模型列表）", () => {
     expect(row).toHaveTextContent("文本 · 图片");
     expect(row).toHaveTextContent("工具调用 · 附件");
     expect(row).toHaveTextContent("2024-01-01");
+    // OpenRouter 不提供原厂发布时间：只留知识截止一列，不渲染发布日期（全表恒 —）
+    expect(screen.getByTestId("sort-knowledge")).toBeInTheDocument();
+    expect(screen.queryByTestId("sort-release_date")).not.toBeInTheDocument();
+    expect(screen.queryByText("知识 / 发布")).not.toBeInTheDocument();
+    expect(row).not.toHaveTextContent("2024-02-01");   // release_date 不展示
     // 价格合并为一列两行：上行「输入 · 输出」，下行「缓存读 · 缓存写」（缺失显示 —）
     expect(row).toHaveTextContent("输入 $0.5 · 输出 $1.5");
     expect(row).toHaveTextContent("缓存读 $0.05 · 缓存写 —");

@@ -38,7 +38,7 @@ const CURRENCIES = [
   { value: "CNY", label: "人民币" },
 ];
 
-/** 分页步长：与「用量统计」明细表一致，默认 50（3536 条全渲染会拖慢搜索）。 */
+/** 分页步长：与「用量统计」明细表一致，默认 50（目录数百条，全渲染会拖慢搜索）。 */
 const PAGE_SIZES = [20, 50, 100];
 
 /** 单价格式化：刊例价量级跨度大（0.02 ~ 数十），保留最多 4 位小数。 */
@@ -268,9 +268,9 @@ export function ModelCatalogPage() {
                     <TableHead>输入 → 输出模态</TableHead>
                     <TableHead>能力</TableHead>
                     <TableHead>能力分</TableHead>
-                    <SortableHead label="知识 / 发布" columnKey="release_date"
-                                  active={sort === "release_date"} direction={order}
-                                  onToggle={toggle} testId="sort-release_date" />
+                    <SortableHead label="知识截止" columnKey="knowledge"
+                                  active={sort === "knowledge"} direction={order}
+                                  onToggle={toggle} testId="sort-knowledge" />
                     <SortableHead label={`价格（${priceUnit}）`} columnKey="input"
                                   active={sort === "input"} direction={order}
                                   onToggle={toggle} align="right" testId="sort-input" />
@@ -305,10 +305,7 @@ export function ModelCatalogPage() {
                           {benchmarkLine(row)}
                         </TableCell>
                         <TableCell className="text-xs">
-                          <div>{row.knowledge ?? "—"}</div>
-                          <div className="text-muted-foreground">
-                            {row.release_date ?? "—"}
-                          </div>
+                          {row.knowledge ?? "—"}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
                           <div title="输入 单价 · 输出 单价">
@@ -366,7 +363,7 @@ export function ModelCatalogPage() {
           模型 id 为 OpenRouter 的 id（含厂商前缀，如 z-ai/glm-5.3），与本服务对外模型名（归一键）并不总是逐个相同；未匹配到定价的模型成本显示 —。价格为「按 token × 公开刊例价」的估算依据，不是上游真实扣费；匹配口径见「用量统计」页。
         </p>
         <p>
-          模型数是 OpenRouter 公开收录的范围（数百条），较此前 models.dev 目录小；上游没有刊例价的模型（如部分国产渠道模型）成本显示 —。价格列上行是「输入 / 输出」单价、下行是「缓存读 / 缓存写」单价（未声明缓存价时显示 —）。币种：原始单位为 USD / 百万 token；切到人民币按当前汇率（1 USD = {formatNumber(rate)} CNY）折算，历史成本按写入时汇率定值，不随本页变化重算。
+          模型数是 OpenRouter 公开收录的范围（数百条），较此前 models.dev 目录小；上游没有刊例价的模型（如部分国产渠道模型）成本显示 —。价格列上行是「输入 / 输出」单价、下行是「缓存读 / 缓存写」单价（未声明缓存价时显示 —）。币种：原始单位为 USD / 百万 token；切到人民币按当前汇率（1 USD = {formatNumber(rate)} CNY）折算，历史成本按写入时汇率定值，不随本页变化重算。OpenRouter 不提供原厂发布时间（上游的 `created` 是「收录进 OpenRouter 的时间」，不是发布日），故本表只列知识截止、不列发布日期。
         </p>
       </Notice>
     </div>

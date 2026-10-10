@@ -16,8 +16,9 @@
 
 **代价（已知取舍）**：OpenRouter 只收录 458 个模型，models.dev 有 3536 个，
 故「模型列表」页从 3536 条缩到 458 条；`space-bunny` / `doubao-seed-2.1-turbo`
-/ `qwen3.8-max` 三个本项目在用模型上游没有刊例价（成本显示 —）。这是用户
-在 2026-10-10 明确选择的「完全替换」方案。
+/ `qwen3.8-max` 三个本项目在用模型上游没有刊例价（成本显示 —）；开放权重 /
+所属家族 / **原厂发布时间**三列上游没有（见 `build_model_catalog`）。这是
+用户在 2026-10-10 明确选择的「完全替换」方案。
 
 三条纪律（与原先的价表 / 能力表一致）：
 
@@ -35,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -55,6 +57,9 @@ CATALOG_VERSION = 2
 # （显示 —）也不展示一周前的旧数据。
 MAX_AGE_SECONDS = 7 * 24 * 3600
 DEFAULT_TIMEOUT_SECONDS = 30.0
+# 知识截止只认 `YYYY-MM-DD` 这一个形态（不解析时区、不做各种本地化格式的
+# 兼容猜测：解析不出来就显示 —，别给一个错的日期）。
+_DATE_PATTERN = re.compile(r"\d{4}-\d{2}-\d{2}\Z")
 
 # 能力指数来源标识：透给前端与 API，让「数据是谁的」始终可见。
 SOURCE = "openrouter"
@@ -104,6 +109,27 @@ def _as_int(value: Any) -> int | None:
 def _as_str(value: Any) -> str | None:
     """非空字符串才保留；其余（缺失 / 类型不符 / 空串）为 None。"""
     return value if isinstance(value, str) and value else None
+
+
+def _as_date(value: Any) -> str | None:
+    """知识截止 → `YYYY-MM-DD`；不合法回 None。
+
+    OpenRouter 的 `knowledge_cutoff` 给的是**日期字符串**（`"2026-02-16"`），
+    不是 epoch 秒——早期按数值解析会整列解析失败、451 条全空。仍留数值分支：
+    上游若哪天改回 epoch 秒，页面不至于整列塌成 —，只是格式约定要跟着改。
+    """
+    if isinstance(value, str):
+        text = value.strip()
+        if _DATE_PATTERN.match(text):
+            return text
+        return None
+    number = _as_number(value)
+    if number is None:
+        return None
+    try:
+        return time.strftime("%Y-%m-%d", time.gmtime(number))
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 def _as_str_list(value: Any) -> list[str]:
@@ -227,11 +253,16 @@ def build_model_catalog(raw: Any) -> ModelCatalog:
     | 工具调用 | `supported_parameters` 含 `tools` |
     | 结构化输出 | `supported_parameters` 含 `structured_outputs` |
     | 附件 | 输入模态含 `image` / `file` |
-    | 知识截止 | `knowledge_cutoff`（epoch 秒 → YYYY-MM-DD） |
+    | 知识截止 | `knowledge_cutoff`（上游给的是 `"YYYY-MM-DD"` 字符串） |
 
     **没有的列**（models.dev 有、OpenRouter 没有）：所属家族 `family`、开放
     权重 `open_weights`、发布日期 `release_date`。前端对它们按 null / false
     兜底（显示 — / 不列标签），故这里直接给 None / False，不改前端契约。
+
+    关于发布日期：OpenRouter **不提供原厂发布时间**（458 条实测无此字段）。
+    它有个 `created`（epoch 秒，458 条全有），但那是「该模型被 OpenRouter 收录
+    的时间」，与原厂发布日无关（2026-10 实测大量模型 `created` 就在近期）。
+    拿它当发布日期会是错标，故不给——宁可不显示也不显示错的。
     """
     catalog: ModelCatalog = {}
     for item in _select_entries(raw):
@@ -245,7 +276,7 @@ def build_model_catalog(raw: Any) -> ModelCatalog:
         architecture = architecture if isinstance(architecture, dict) else {}
         input_modalities = _as_str_list(architecture.get("input_modalities"))
         parameters = set(_as_str_list(item.get("supported_parameters")))
-        cutoff = _as_int(item.get("knowledge_cutoff"))
+        cutoff = _as_date(item.get("knowledge_cutoff"))
         price_in, price_out, cache_read = price
         raw_cache_write = (
             _as_number(item.get("pricing").get("input_cache_write"))
@@ -257,8 +288,7 @@ def build_model_catalog(raw: Any) -> ModelCatalog:
             # `z-ai`），与 models.dev 时代的「命中的 provider」同义。
             "provider": (names[0].split("/", 1)[0] if "/" in names[0] else ""),
             "family": None,
-            "knowledge": (time.strftime("%Y-%m-%d", time.gmtime(cutoff))
-                          if cutoff else None),
+            "knowledge": cutoff,
             "release_date": None,
             "context": _as_int(item.get("context_length")),
             "max_output": _as_int(top_provider.get("max_completion_tokens")),
