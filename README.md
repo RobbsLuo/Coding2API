@@ -84,7 +84,7 @@ docker compose exec coding2api python scripts/create_user.py admin --role admin
 
 ```bash
 docker compose pull
-# 或指定版本：docker pull ghcr.io/robbsluo/coding2api:v0.4.0
+# 或指定版本：docker pull ghcr.io/robbsluo/coding2api:v0.4.1
 ```
 
 推送新版本：打 tag `v*` 推到 main 即触发 publish workflow（见 `.github/workflows/publish.yml`），同时打 `<tag>` 与 `:latest` 到 GHCR。也可在 Actions 页面手动触发（填版本号）。
@@ -213,7 +213,7 @@ curl http://127.0.0.1:8000/v1/user/balance -H "Authorization: Bearer sk-你的ke
 {
   "status": "ok",
   "service": "coding2api",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "credentials": {"total": 5, "ready": 4, "cooling": 1, "paused": 0, "disabled": 0}
 }
 ```
@@ -460,7 +460,7 @@ pnpm build
 | [`diagrams/coding2api-credential-lifecycle.html`](diagrams/coding2api-credential-lifecycle.html) | 凭证调度状态机（浏览器打开） |
 
 ## 状态
-M0–M3 及后续迭代全部完成，`main` 分支可运行，当前版本 v0.4.0。后续批次（B1–B11）已按批准计划落地：
+M0–M3 及后续迭代全部完成，`main` 分支可运行，当前版本 v0.4.1。后续批次（B1–B11）已按批准计划落地：
 
 **B1 请求质量**：错误分类细分 + 模型级冷却、出站指纹清洗（11128 内容风控）、截断续写、会话粘性键、模型元数据/黑名单。**B2 协议出口**：`/v1/responses`（Codex CLI 子集）；Anthropic `/v1/messages`（Claude Code，含 `count_tokens`，见 P0-1）。**B3 运维**：凭证暂停语义、运行时配置热更、token 到期展示、积分变动流水、池健康 `/healthz` + 多 Key 出口/IP 绑定。**B4 任务可视化**：后台任务运行态并入「任务与配置」页；模型黑名单热更延迟修复。
 
