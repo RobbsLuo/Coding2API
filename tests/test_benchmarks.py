@@ -1,17 +1,21 @@
-"""能力排行（Artificial Analysis 指数，经 OpenRouter 公开接口）与统一匹配。
+"""OpenRouter 模型目录（价格 + 明细 + 能力分）与统一匹配。
 
-覆盖三条主线：
+覆盖四条主线：
 1. `model_match`：候选键生成、`lookup` 的唯一命中/歧义拒绝/查不到、`build_table`
    的 first-wins；
-2. `benchmarks`：建表（结构异常逐条跳过、null 指数不带）、快照落盘/读回（版本
-   不符、过旧、坏条目）、抓取（MockTransport 成功与 HTTP 失败上抛）；
-3. 端到端：`/v1/models`、`/api/playground/models`、`/api/model-catalog` 三处
+2. `benchmarks`：三张表建表（价格 / 明细 / 能力分，结构异常逐条跳过、null 指数
+   不带）、快照落盘/读回（版本不符、过旧、坏条目）、抓取（MockTransport 成功与
+   HTTP 失败上抛）；
+3. 后台刷新与启动预热：单一 `openrouter_catalog` 任务一次抓取换入三张表；
+4. 端到端：`/v1/models`、`/api/playground/models`、`/api/model-catalog` 三处
    都把分数随条目透出，匹配不到就不带字段，表为空时行为与加字段前一致。
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from typing import Any
 
 import httpx
@@ -19,17 +23,27 @@ import pytest
 
 from src import main
 from src.benchmarks import (
-    BENCHMARKS_VERSION,
+    CATALOG_FILENAME,
+    CATALOG_VERSION,
+    MAX_AGE_SECONDS,
     BenchmarkTable,
     build_benchmark_table,
+    build_model_catalog,
+    build_price_table,
     fetch_openrouter_models,
     load_benchmarks,
-    load_benchmarks_snapshot,
-    save_benchmarks,
+    load_catalog_snapshot,
+    save_catalog,
 )
+from src.config import Settings
+from src.db.conn import Database
+from src.db.crypto import CredentialCipher
+from src.db.migrate import apply_schema
+from src.db.repo import CredentialRepository
 from src.model_match import build_table, lookup, match_keys
+from src.pricing import estimate_cost_usd
 
-from .conftest import SECRET  # noqa: F401 - 与其它用例共用常量
+from .conftest import SECRET
 
 # --------------------------------------------------------------- model_match
 
@@ -104,19 +118,148 @@ def test_build_table_first_wins():
     assert table == {"m": 1}
 
 
-# --------------------------------------------------------------- benchmarks
+# ------------------------------------------------------------ 价表构建
+
+def test_build_price_table_converts_per_token_to_per_million():
+    """上游按 USD/token 给字符串小数 → 转 USD/百万 token。cache_read 缺失按
+    input 原价（不打折也不免费）；completion 缺失按 0。"""
+    raw = {"data": [
+        {"id": "z-ai/glm-5.3", "name": "Z.ai: GLM 5.3",
+         "pricing": {"prompt": "0.000000039", "completion": "0.0000048",
+                     "input_cache_read": "0.000000038"}},
+        {"id": "ok/no-cache", "name": "No Cache",
+         "pricing": {"prompt": "0.000001"}},
+    ]}
+    table = build_price_table(raw)
+    assert table["glm-5.3"] == pytest.approx((0.039, 4.8, 0.038))
+    # 展示名一路也能查；无缓存价 → 按 input 原价（1.0），无输出价 → 0
+    assert table["no-cache"] == pytest.approx((1.0, 0.0, 1.0))
+
+
+@pytest.mark.parametrize("raw", [None, [], "x", 5, {}, {"data": "not-a-list"}])
+def test_build_price_table_non_dict_or_bad_data_is_empty(raw):
+    assert build_price_table(raw) == {}
+
+
+def test_build_price_table_skips_bad_entries():
+    """结构异常一律跳过：非 dict 条目、无 id/name、pricing 非 dict、无输入价 /
+    负数 / 布尔 / 非数值。"""
+    raw = {"data": [
+        {"id": "good", "pricing": {"prompt": 1, "completion": 2}},
+        {"pricing": {"prompt": 1}},                       # 无 id/name → 跳过
+        {"id": "nocost"},                                 # 无 pricing
+        {"id": "costnotdict", "pricing": "x"},            # pricing 非 dict
+        {"id": "noinput", "pricing": {"completion": 1}},  # 无输入价
+        {"id": "nullinput", "pricing": {"prompt": None}},
+        {"id": "neginput", "pricing": {"prompt": -1}},
+        {"id": "boolinput", "pricing": {"prompt": True}},
+        {"id": "notanumber", "pricing": {"prompt": "abc"}},
+        {"id": "emptyinput", "pricing": {"prompt": "  "}},
+        "not-a-dict",
+        {"id": 5, "pricing": {"prompt": 1}},              # id 非串且无 name → 跳过
+    ]}
+    # 数值 prompt = 1（USD/token）→ 1e6 USD/百万 token
+    table = build_price_table(raw)
+    assert set(table) == {"good"}
+    assert table["good"] == pytest.approx((1e6, 2e6, 1e6))
+
+
+# --------------------------------------------------------------- 模型目录构建
+
+def test_build_model_catalog_captures_metadata():
+    """同口径选条，保留 OpenRouter 的完整明细（名称 / 上下文 / 模态 / 能力 / 价格）。"""
+    raw = {"data": [{
+        "id": "z-ai/glm-5.3",
+        "name": "Z.ai: GLM 5.3",
+        "context_length": 1048576,
+        "knowledge_cutoff": 1750000000,
+        "architecture": {"input_modalities": ["text", "image", 7],
+                         "output_modalities": ["text"]},
+        "top_provider": {"max_completion_tokens": 131072},
+        "supported_parameters": ["reasoning", "tools", "structured_outputs"],
+        "pricing": {"prompt": "0.000001", "completion": "0.000005",
+                    "input_cache_read": "0.0000001",
+                    "input_cache_write": "0.00000125"},
+    }]}
+    catalog = build_model_catalog(raw)
+    assert set(catalog) == {"z-ai/glm-5.3"}
+    row = catalog["z-ai/glm-5.3"]
+    assert row["id"] == "z-ai/glm-5.3"
+    assert row["provider"] == "z-ai"          # id 的厂商前缀
+    assert row["name"] == "Z.ai: GLM 5.3"
+    assert row["knowledge"] == time.strftime("%Y-%m-%d", time.gmtime(1750000000))
+    assert row["context"] == 1048576 and row["max_output"] == 131072
+    assert row["input_modalities"] == ["text", "image"]     # 非串元素丢弃
+    assert row["output_modalities"] == ["text"]
+    assert row["attachment"] is True
+    assert row["reasoning"] is True and row["tool_call"] is True
+    assert row["structured_output"] is True
+    assert row["input"] == pytest.approx(1.0) and row["output"] == pytest.approx(5.0)
+    assert row["cache_read"] == pytest.approx(0.1)
+    assert row["cache_write"] == pytest.approx(1.25)
+    # 旧目录有、OpenRouter 没有的三列：给 None / False，不改前端契约
+    assert row["family"] is None and row["release_date"] is None
+    assert row["open_weights"] is False
+
+
+def test_build_model_catalog_tolerates_missing_fields():
+    """缺字段 / 类型不符一律收敛为 None / 空 / False；缓存读缺失按 input 原价。"""
+    raw = {"data": [{
+        "id": "m",
+        "name": "",
+        "context_length": True,              # 布尔 → None
+        "architecture": None,                # 非 dict → 空模态
+        "pricing": {"prompt": "0.000002"},   # 无 output / cache_read / cache_write
+        "supported_parameters": "not-a-list",
+    }]}
+    row = build_model_catalog(raw)["m"]
+    assert row["name"] is None
+    assert row["context"] is None and row["max_output"] is None
+    assert row["input_modalities"] == [] and row["output_modalities"] == []
+    assert row["output"] == 0.0
+    assert row["cache_read"] == pytest.approx(2.0)      # 缺失按 input 原价
+    assert row["cache_write"] is None
+    assert row["reasoning"] is False and row["structured_output"] is False
+    assert row["family"] is None
+    # top_provider / architecture 整体非 dict 的分支
+    raw2 = {"data": [{"id": "m", "top_provider": "bad", "architecture": "bad",
+                      "pricing": {"prompt": 1}}]}
+    assert build_model_catalog(raw2)["m"]["max_output"] is None
+
+
+def test_build_model_catalog_skips_unpriced():
+    """没有刊例价的条目不进目录（页面「成本」列无意义）。"""
+    raw = {"data": [{"id": "m", "name": "M"}]}     # 无 pricing
+    assert build_model_catalog(raw) == {}
+
+
+def test_build_model_catalog_empty_on_bad_raw():
+    assert build_model_catalog(None) == {}
+    assert build_model_catalog({"data": "x"}) == {}
+
+
+def test_build_model_catalog_provider_without_slash():
+    """id 无 '/' 时 provider 列给空串（不臆造厂商）。"""
+    raw = {"data": [{"id": "bagelmix", "name": "Bagel", "pricing": {"prompt": 1}}]}
+    assert build_model_catalog(raw)["bagelmix"]["provider"] == ""
+
+
+# --------------------------------------------------------------- 能力分构建
 
 _OR_PAYLOAD = {
     "data": [
         {"id": "z-ai/glm-5.3", "name": "Z.ai: GLM 5.3",
+         "pricing": {"prompt": "0.000001", "completion": "0.000002"},
          "benchmarks": {"artificial_analysis": {
              "intelligence_index": 44.8, "coding_index": 74.8,
              "agentic_index": 53.1}}},
         {"id": "moonshotai/kimi-k3", "name": "MoonshotAI: Kimi K3",
+         "pricing": {"prompt": "0.0000005", "completion": "0.000001"},
          "benchmarks": {"artificial_analysis": {
              "intelligence_index": 43.6, "coding_index": 76.2,
              "agentic_index": None}}},
         {"id": "xai/grok-no-score", "name": "Grok",
+         "pricing": {"prompt": "0.000002"},
          "benchmarks": {"artificial_analysis": {
              "intelligence_index": None, "coding_index": None,
              "agentic_index": None}}},
@@ -155,7 +298,7 @@ def test_build_benchmark_table_tolerates_malformed(raw):
     assert build_benchmark_table(raw) == {}
 
 
-async def test_build_benchmark_table_rejects_nan_and_infinite():
+def test_build_benchmark_table_rejects_nan_and_infinite():
     """NaN / inf 不是有效指数：不当字段收。"""
     table = build_benchmark_table({"data": [
         {"id": "a", "benchmarks": {"artificial_analysis": {
@@ -168,7 +311,9 @@ async def test_build_benchmark_table_rejects_nan_and_infinite():
                            "intelligence_index": 0}}
 
 
-async def test_fetch_openrouter_models_parses_and_raises(monkeypatch):
+# --------------------------------------------------------------- 网络拉取
+
+async def test_fetch_openrouter_models_parses_and_raises():
     """MockTransport 下成功返回 JSON；HTTP 错误向上抛（调用方降级）。"""
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -207,52 +352,121 @@ async def test_fetch_openrouter_models_default_transport_branch(monkeypatch):
     assert build_benchmark_table(fetched)["glm-5.3"]["coding_index"] == 74.8
 
 
-def test_save_and_load_benchmarks_roundtrip(tmp_path):
-    """落盘 → 读回：内容一致，且保存时刻可见。"""
-    table = build_benchmark_table(_OR_PAYLOAD)
-    save_benchmarks(str(tmp_path), table)
-    assert load_benchmarks(str(tmp_path)) == table
-    loaded, saved_at = load_benchmarks_snapshot(str(tmp_path))
-    assert loaded == table and saved_at is not None
+# --------------------------------------------------------- 落盘快照（三表一体）
+
+def test_save_and_load_catalog_roundtrip(tmp_path):
+    """落盘 → 读回：三张表内容一致，且共用同一个保存时刻。"""
+    prices = {"glm-5.3": (1.0, 2.0, 0.5)}
+    benchmarks = build_benchmark_table(_OR_PAYLOAD)
+    catalog = build_model_catalog({"data": [
+        {"id": "z-ai/glm-5.3", "name": "GLM", "pricing": {"prompt": 1}}]})
+    before = time.time()
+    save_catalog(str(tmp_path), prices, benchmarks, catalog)
+    loaded_prices, loaded_bench, loaded_cat, saved_at = load_catalog_snapshot(
+        str(tmp_path))
+    assert loaded_prices == prices
+    assert loaded_bench == benchmarks
+    assert loaded_cat == catalog
+    assert saved_at is not None and before <= saved_at <= time.time()
+    assert load_benchmarks(str(tmp_path)) == benchmarks
 
 
-def test_load_benchmarks_degrades_on_bad_snapshot(tmp_path):
-    """缺失 / 损坏 / 版本不符 / 过旧一律退化为空表（不抛）。"""
-    assert load_benchmarks(str(tmp_path)) == {}          # 文件不存在
-    path = tmp_path / "model_benchmarks.json"
+def test_catalog_path_filename(tmp_path):
+    from src.benchmarks import catalog_path
 
-    path.write_text("{ broken", encoding="utf-8")
+    assert catalog_path(str(tmp_path)).endswith(CATALOG_FILENAME)
+
+
+def test_load_catalog_missing_file_is_empty(tmp_path):
+    assert load_catalog_snapshot(str(tmp_path)) == ({}, {}, {}, None)
     assert load_benchmarks(str(tmp_path)) == {}
 
-    path.write_text(json.dumps({"version": BENCHMARKS_VERSION + 1,
-                                "saved_at": 0, "models": {}}), encoding="utf-8")
-    assert load_benchmarks(str(tmp_path)) == {}
 
-    path.write_text(json.dumps({"version": BENCHMARKS_VERSION,
-                                "saved_at": 0, "models": {"m": {"x": 1}}}),
-                    encoding="utf-8")
-    assert load_benchmarks(str(tmp_path)) == {}          # 过旧（7 天上限）
-
-    path.write_text(json.dumps({"version": BENCHMARKS_VERSION,
-                                "saved_at": 1e18, "models": "bad"}), encoding="utf-8")
-    assert load_benchmarks(str(tmp_path)) == {}          # models 非 dict
+def test_load_catalog_version_mismatch_is_empty(tmp_path, caplog):
+    save_catalog(str(tmp_path), {"m": (1.0, 2.0, 0.5)}, {}, {})
+    payload = json.loads((tmp_path / CATALOG_FILENAME).read_text(encoding="utf-8"))
+    payload["version"] = CATALOG_VERSION + 1
+    (tmp_path / CATALOG_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert load_catalog_snapshot(str(tmp_path)) == ({}, {}, {}, None)
+    assert any("模型目录版本不匹配" in r.getMessage() for r in caplog.records)
 
 
-def test_load_benchmarks_skips_broken_records(tmp_path):
-    """坏条目跳过而不拖垮整张表（缺指数字段的记录不收）。"""
-    import time
-
-    payload = {"version": BENCHMARKS_VERSION, "saved_at": time.time(),
-               "models": {"good": {"source": "openrouter",
-                                   "intelligence_index": 1.0},
-                          "bad": {"source": "openrouter"},   # 缺指数字段
-                          "worse": "not-a-dict"}}
-    (tmp_path / "model_benchmarks.json").write_text(
-        json.dumps(payload), encoding="utf-8")
-    assert load_benchmarks(str(tmp_path)) == {"good": payload["models"]["good"]}
+def test_load_catalog_expired_is_empty(tmp_path):
+    save_catalog(str(tmp_path), {"m": (1.0, 2.0, 0.5)}, {}, {})
+    assert load_catalog_snapshot(str(tmp_path),
+                                 now=time.time() + MAX_AGE_SECONDS + 10) == ({}, {}, {}, None)
 
 
-def test_save_benchmarks_failure_is_logged(tmp_path, monkeypatch, caplog):
+def test_load_catalog_broken_json_is_empty(tmp_path, caplog):
+    (tmp_path / CATALOG_FILENAME).write_text("{not json", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert load_catalog_snapshot(str(tmp_path)) == ({}, {}, {}, None)
+    assert any("模型目录读取失败" in r.getMessage() for r in caplog.records)
+
+
+def test_load_catalog_saved_at_missing_is_error(tmp_path, caplog):
+    payload = {"version": CATALOG_VERSION, "prices": {}, "benchmarks": {},
+               "models": {}}
+    (tmp_path / CATALOG_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        assert load_catalog_snapshot(str(tmp_path)) == ({}, {}, {}, None)
+    assert any("模型目录读取失败" in r.getMessage() for r in caplog.records)
+
+
+def test_load_catalog_skips_bad_prices(tmp_path):
+    """坏价格行跳过而不拖垮整表：非 list / 长度不对 / 含非数值 / 负值 / 布尔。"""
+    payload = {
+        "version": CATALOG_VERSION, "saved_at": time.time(),
+        "prices": {
+            "good": [1, 2, 3],
+            "notlist": "x",
+            "wronglen": [1, 2],
+            "hasnull": [1, None, 3],
+            "neg": [1, -2, 3],
+            "notanumber": [1, "x", 3],
+            "boolval": [1, True, 3],
+            "": [1, 2, 3],
+        },
+        "benchmarks": {}, "models": {},
+    }
+    (tmp_path / CATALOG_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+    assert load_catalog_snapshot(str(tmp_path))[0] == {"good": (1.0, 2.0, 3.0)}
+
+
+def test_load_catalog_skips_bad_benchmarks(tmp_path):
+    """缺指数字段的记录 / 非 dict 值 / 空键一律不收。"""
+    payload = {
+        "version": CATALOG_VERSION, "saved_at": time.time(), "prices": {},
+        "models": {},
+        "benchmarks": {"good": {"source": "openrouter", "intelligence_index": 1.0},
+                       "bad": {"source": "openrouter"},      # 缺指数字段
+                       "worse": "not-a-dict",
+                       "": {"intelligence_index": 2.0}},
+    }
+    (tmp_path / CATALOG_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+    assert load_catalog_snapshot(str(tmp_path))[1] == {
+        "good": {"source": "openrouter", "intelligence_index": 1.0}}
+
+
+def test_load_catalog_skips_bad_models(tmp_path):
+    """坏条目（非 dict）跳过而不拖垮整份目录。"""
+    payload = {"version": CATALOG_VERSION, "saved_at": time.time(),
+               "prices": {}, "benchmarks": {},
+               "models": {"good": {"id": "good"}, "bad": "x", "": {"id": ""}}}
+    (tmp_path / CATALOG_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+    assert load_catalog_snapshot(str(tmp_path))[2] == {"good": {"id": "good"}}
+
+
+def test_load_catalog_non_dict_sections_are_empty(tmp_path):
+    """三块整体类型不对（非 dict）时各自退空，不抛。"""
+    payload = {"version": CATALOG_VERSION, "saved_at": time.time(),
+               "prices": [], "benchmarks": "x", "models": 5}
+    (tmp_path / CATALOG_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+    assert load_catalog_snapshot(str(tmp_path)) == ({}, {}, {}, payload["saved_at"])
+
+
+def test_save_catalog_failure_is_logged(tmp_path, monkeypatch, caplog):
     """落盘失败只记日志，不抛（绝不影响模型列表）。"""
     import logging
     import os
@@ -261,9 +475,21 @@ def test_save_benchmarks_failure_is_logged(tmp_path, monkeypatch, caplog):
         raise OSError("disk full")
 
     monkeypatch.setattr(os, "replace", boom)
-    save_benchmarks(str(tmp_path), {"m": {"source": "openrouter"}})
-    assert any("能力排行落盘失败" in r.getMessage()
+    save_catalog(str(tmp_path), {"m": (1.0, 2.0, 0.5)}, {}, {"m": {"id": "m"}})
+    assert any("模型目录落盘失败" in r.getMessage()
                for r in caplog.records if r.levelno >= logging.WARNING)
+
+
+# ------------------------------------------------------- 成本估算接价表
+
+def test_estimate_cost_matches_across_openrouter_prefix():
+    """价表由 OpenRouter 构建：`z-ai/glm-5.3` 能对上本项目键 `glm-5.3`。"""
+    table = build_price_table({"data": [{
+        "id": "z-ai/glm-5.3", "pricing": {"prompt": "0.000001",
+                                          "completion": "0.000002"}}]})
+    cost = estimate_cost_usd(table, "glm-5.3", input_tokens=1_000_000,
+                             output_tokens=0, cached_tokens=0)
+    assert cost == pytest.approx(1.0)
 
 
 # ------------------------------------------------------------ 端到端注入
@@ -272,10 +498,9 @@ def _benchmarks_app(tmp_path, monkeypatch, *, table: BenchmarkTable | None,
                     raw: Any = _OR_PAYLOAD):
     """带真实装配的 app，并直接把能力分表塞进 app.state（不打上游）。
 
-    `raw` 是 OpenRouter 抓取的替身返回：默认给带两个分数的正常表，传 `{}` 模拟
+    `raw` 是 OpenRouter 抓取的替身返回：默认给带两个分数的正常表，传 `` 模拟
     「上游不可用」（此时启动预热与后台刷新都拿不到分数，表保持空）。
     """
-    from src.config import Settings
     from src.main import build_app
 
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
@@ -361,53 +586,60 @@ def test_model_catalog_endpoint_merges_benchmarks(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     from src.auth.session import create_session_token
-    from src.pricing import save_model_catalog
 
-    save_model_catalog(str(tmp_path), {
+    catalog = {
         "z-ai/glm-5.3": {"id": "z-ai/glm-5.3", "name": "GLM 5.3",
                          "provider": "z-ai", "input": 1.0, "output": 2.0,
                          "cache_read": 0.1},
         "other/model": {"id": "other/model", "name": "No Score", "provider": "p",
                         "input": 0.5, "output": 1.0, "cache_read": 0.05},
-    })
-    app = _benchmarks_app(tmp_path, monkeypatch, table=None)
-    app.state.model_benchmarks.update(build_benchmark_table(_OR_PAYLOAD))
-    app.state.benchmark_saved_at = 123.0
+    }
+    save_catalog(str(tmp_path), {}, {}, catalog)
+    # raw={} → 启动预热拿不到上游数据、失败退出，落盘明细目录得以保留（否则预热会
+    # 用替身数据把它覆盖掉）；能力分表由 snapshot/helper 提供。
+    app = _benchmarks_app(tmp_path, monkeypatch,
+                          table=build_benchmark_table(_OR_PAYLOAD), raw={})
     with TestClient(app) as client:
         client.cookies.set("coding2api_session", create_session_token("root", SECRET))
         payload = client.get("/api/model-catalog").json()
     rows = {row["id"]: row for row in payload["models"]}
     assert rows["z-ai/glm-5.3"]["benchmarks"]["coding_index"] == 74.8
     assert "benchmarks" not in rows["other/model"]
-    assert payload["benchmark_saved_at"] == 123.0
+    assert payload["saved_at"] is not None
 
 
-async def test_refresh_benchmark_catalog_roundtrip(tmp_path, monkeypatch):
-    """后台刷新一轮：拉 OpenRouter → 落盘 → 就地换入，回报条目数。"""
+# ---------------------------------------------------- 后台刷新（单一任务三表）
+
+async def test_refresh_openrouter_catalog_roundtrip(tmp_path, monkeypatch):
+    """后台刷新一轮：拉 OpenRouter → 建三表 → 落盘 → 就地换入，回报条目数。"""
     from fastapi.testclient import TestClient
-
 
     app = _benchmarks_app(tmp_path, monkeypatch, table=None)
     with TestClient(app):
         pass
     async with app.router.lifespan_context(app):
         runner = app.state.task_runner
-        assert await runner._guarded(runner._benchmark_catalog(),
-                                     "能力排行刷新（OpenRouter）",
-                                     key="benchmark_catalog")
-        run = runner.status.get("benchmark_catalog")
-        assert run.ok is True and run.report == {"models": 3}
+        assert await runner._guarded(runner._openrouter_catalog(),
+                                     "模型目录刷新（OpenRouter）",
+                                     key="openrouter_catalog")
+        run = runner.status.get("openrouter_catalog")
+        assert run.ok is True and run.report == {
+            "models": len(app.state.price_table)}
+    assert app.state.price_table["glm-5.3"] == pytest.approx((1.0, 2.0, 1.0))
     assert app.state.model_benchmarks["glm-5.3"]["intelligence_index"] == 44.8
-    assert app.state.benchmark_saved_at is not None
+    assert app.state.price_saved_at is not None
+    # 明细目录也换入了（与价表同一次抓取）
+    assert app.state.models_dev_catalog["z-ai/glm-5.3"]["context"] is None
     # 落盘快照与回灌一致（下次启动零上游请求）
     assert load_benchmarks(str(tmp_path)) == app.state.model_benchmarks
 
 
-async def test_refresh_benchmark_catalog_rejects_empty(tmp_path, monkeypatch):
-    """拉到空表视为失败：不把已有的分数清空，只记运行态。"""
+async def test_refresh_openrouter_catalog_rejects_empty(tmp_path, monkeypatch):
+    """拉到空价表视为失败：不把已有的数据清空，只记运行态。"""
     from fastapi.testclient import TestClient
 
     app = _benchmarks_app(tmp_path, monkeypatch, table=None)
+    app.state.price_table["glm-5.3"] = (1.0, 2.0, 1.0)
     app.state.model_benchmarks.update({"glm-5.3": {"source": "openrouter",
                                                    "intelligence_index": 1.0}})
 
@@ -419,18 +651,17 @@ async def test_refresh_benchmark_catalog_rejects_empty(tmp_path, monkeypatch):
         pass
     async with app.router.lifespan_context(app):
         runner = app.state.task_runner
-        ok = await runner._guarded(runner._benchmark_catalog(),
-                                   "能力排行刷新（OpenRouter）",
-                                   key="benchmark_catalog")
+        ok = await runner._guarded(runner._openrouter_catalog(),
+                                   "模型目录刷新（OpenRouter）",
+                                   key="openrouter_catalog")
         assert ok is False
+    assert app.state.price_table == {"glm-5.3": (1.0, 2.0, 1.0)}
     assert app.state.model_benchmarks == {"glm-5.3": {"source": "openrouter",
                                                       "intelligence_index": 1.0}}
 
 
-async def test_startup_warm_benchmark_table_only_when_missing(tmp_path, monkeypatch, caplog):
+async def test_startup_warm_model_catalog_only_when_missing(caplog):
     """启动预热：无落盘快照时才补拉一次，有快照直接跳过（不打上游）。"""
-    from src import main as main_module
-
     calls: list[str] = []
 
     async def refresh():
@@ -438,11 +669,11 @@ async def test_startup_warm_benchmark_table_only_when_missing(tmp_path, monkeypa
         return {"models": 1}
 
     # 有表：直接返回，不拉
-    await main_module._warm_benchmark_table(refresh, {"m": {}})
+    await main._warm_model_catalog(refresh, {"m": (1.0, 2.0, 1.0)})
     assert calls == []
 
     # 无表：补拉一次
-    await main_module._warm_benchmark_table(refresh, {})
+    await main._warm_model_catalog(refresh, {})
     assert calls == ["ran"]
 
     # 补拉失败只记日志，不抛
@@ -450,8 +681,198 @@ async def test_startup_warm_benchmark_table_only_when_missing(tmp_path, monkeypa
         raise RuntimeError("boom")
 
     with caplog.at_level("WARNING"):
-        await main_module._warm_benchmark_table(failing, {})
-    assert any("启动预热能力分表失败" in r.getMessage() for r in caplog.records)
+        await main._warm_model_catalog(failing, {})
+    assert any("启动预热模型目录失败" in r.getMessage() for r in caplog.records)
+
+
+# -------------------------------------------------- 应用装配：快照回灌 / 端点
+
+class _PriceStub:
+    """最小 provider：只满足启动预热对 list_models 的调用。"""
+
+    id = "kilo"
+
+    async def list_models(self, _data):
+        return []
+
+
+def _price_app(tmp_path, **env):
+    from src.main import build_app
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root", **env)
+    return build_app(settings, providers={"kilo": _PriceStub()})
+
+
+def test_app_restores_catalog_snapshot_and_estimates_cost(tmp_path):
+    """启动回灌落盘模型目录：新写入的明细立刻能估出成本（零上游请求）。"""
+    from fastapi.testclient import TestClient
+
+    save_catalog(str(tmp_path), {"glm-5.2": (1.0, 2.0, 0.1)}, {},
+                 {"glm-5.2": {"id": "glm-5.2", "name": "GLM"}})
+    app = _price_app(tmp_path)
+    with TestClient(app):
+        assert app.state.price_table == {"glm-5.2": (1.0, 2.0, 0.1)}
+        assert app.state.models_dev_catalog == {
+            "glm-5.2": {"id": "glm-5.2", "name": "GLM"}}
+        app.state.stats_collector.record(
+            username="u", provider="trae", model="glm-5.2", ok=True,
+            input_tokens=1_000_000, output_tokens=0)
+        row = app.state.stats_collector._db.connect().execute(
+            "SELECT cost_usd FROM usage_events").fetchone()
+    assert row["cost_usd"] == pytest.approx(1.0)
+
+
+def test_app_restore_catalog_failure_is_logged(tmp_path, monkeypatch, caplog):
+    """恢复快照抛异常只记日志，服务照常启动。"""
+    from fastapi.testclient import TestClient
+
+    def boom(_data_dir):
+        raise RuntimeError("bad snapshot")
+
+    monkeypatch.setattr(main, "load_catalog_snapshot", boom)
+    app = _price_app(tmp_path)
+    with caplog.at_level("WARNING"), TestClient(app):
+        assert app.state.price_table == {}
+        assert app.state.models_dev_catalog == {}
+        assert app.state.price_saved_at is None
+    assert any("恢复落盘模型目录失败" in r.getMessage() for r in caplog.records)
+
+
+def test_openrouter_catalog_task_status_and_interval(tmp_path):
+    from fastapi.testclient import TestClient
+
+    app = _price_app(tmp_path)
+    with TestClient(app):
+        status = {item["key"]: item for item in app.state.task_runner.task_status()}
+    assert status["openrouter_catalog"]["interval_seconds"] == 86400
+    assert status["openrouter_catalog"]["enabled"] is True
+    assert status["openrouter_catalog"]["last_ok"] is None
+
+
+def test_build_runner_without_openrouter_catalog_keeps_task_hidden(tmp_path):
+    """不注入刷新协程时不装配这条循环（老调用方/测试保持原行为）。"""
+    from src.tasks.runner import build_runner
+
+    db = Database(tmp_path / "c.sqlite3")
+    apply_schema(db.connect())
+    credentials = CredentialRepository(db, CredentialCipher(SECRET))
+    config = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                      OPENROUTER_CATALOG_MINUTES=1)
+    runner = build_runner(credentials, {}, None, config)
+    keys = {item["key"] for item in runner.task_status()}
+    assert "openrouter_catalog" not in keys
+    assert runner._openrouter_catalog_interval == 3600      # 下限 60 分钟
+    db.close()
+
+
+def _catalog_client(app):
+    from fastapi.testclient import TestClient
+
+    from src.auth.session import create_session_token
+
+    client = TestClient(app)
+    client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+    return client
+
+
+def test_model_catalog_endpoint_lists_sorted_catalog(tmp_path):
+    """带登录可读全量模型目录：按模型 id 升序，含汇率与快照时间。"""
+    save_catalog(str(tmp_path), {}, {}, {
+        "glm-5.2": {"id": "glm-5.2", "name": "GLM 5.2", "provider": "zhipuai",
+                    "context": 200000, "input": 1.0, "output": 2.0,
+                    "cache_read": 0.1},
+        "a-model": {"id": "a-model", "name": None, "provider": "p",
+                    "input": 0.5, "output": 1.5, "cache_read": 0.05},
+    })
+    app = _price_app(tmp_path, USD_CNY_RATE=7)
+    with _catalog_client(app) as client:
+        payload = client.get("/api/model-catalog").json()
+        assert payload["count"] == 2
+        assert payload["currency"] == "USD"
+        assert payload["usd_cny_rate"] == 7
+        assert payload["saved_at"] == app.state.price_saved_at
+    assert [row["id"] for row in payload["models"]] == ["a-model", "glm-5.2"]
+    assert payload["models"][1] == {
+        "id": "glm-5.2", "name": "GLM 5.2", "provider": "zhipuai",
+        "context": 200000, "input": 1.0, "output": 2.0, "cache_read": 0.1}
+
+
+def test_model_catalog_endpoint_empty_table(tmp_path, monkeypatch):
+    """无快照时回空表 + saved_at=None（页面显示空态，不是错误）。"""
+    async def no_models(_url):
+        return {}
+
+    monkeypatch.setattr(main, "fetch_openrouter_models", no_models)
+    app = _price_app(tmp_path)
+    with _catalog_client(app) as client:
+        payload = client.get("/api/model-catalog").json()
+    assert payload["models"] == [] and payload["count"] == 0
+    assert payload["saved_at"] is None
+
+
+def test_model_catalog_endpoint_requires_session(tmp_path):
+    """未登录一律 401：模型列表页也要经过会话鉴权。"""
+    from fastapi.testclient import TestClient
+
+    save_catalog(str(tmp_path), {"m": (1.0, 2.0, 0.5)}, {}, {})
+    app = _price_app(tmp_path)
+    with TestClient(app) as client:
+        assert client.get("/api/model-catalog").status_code == 401
+
+
+def test_shutdown_cancels_inflight_catalog_warmup(tmp_path, monkeypatch):
+    """关机时模型目录预热若仍在飞，取消它，别把上游请求带出事件循环。"""
+    from fastapi.testclient import TestClient
+
+    started = asyncio.Event()
+    cancelled = []
+
+    async def hang(_url):
+        started.set()
+        try:
+            await asyncio.Event().wait()        # 永不返回，直到被取消
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+
+    monkeypatch.setattr(main, "fetch_openrouter_models", hang)
+    app = _price_app(tmp_path)
+    with TestClient(app):
+        # 预热在后台线程的事件循环里跑，轮询等它进入抓取（避免时序竞态）
+        deadline = time.monotonic() + 2
+        while not started.is_set() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert started.is_set()                 # 预热已进入抓取
+    assert cancelled == [True]                  # 关机时被取消
+
+
+# --------------------------------------------------------- 汇率热更
+
+def test_usd_cny_rate_is_hot_setting(tmp_path):
+    from src.db.repo import RuntimeSettingsRepository
+    from src.runtime_settings import load_runtime_settings
+
+    db = Database(tmp_path / "r.sqlite3")
+    apply_schema(db.connect())
+    config = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                      USD_CNY_RATE=7.0)
+    runtime = load_runtime_settings(config, RuntimeSettingsRepository(db))
+    assert runtime.usd_cny_rate == 7.0
+    runtime.set("usd_cny_rate", 6.5)
+    assert runtime.usd_cny_rate == 6.5
+    runtime.reset("usd_cny_rate")
+    assert runtime.usd_cny_rate == 7.0
+    db.close()
+
+
+def test_openrouter_catalog_minutes_has_floor():
+    from src.runtime_settings import HOT_BY_KEY
+
+    spec = HOT_BY_KEY["openrouter_catalog_minutes"]
+    assert spec.task == "openrouter_catalog"
+    assert spec.floor == 60
+    assert spec.minimum == 60
 
 
 def _create_api_key(client) -> str:

@@ -2594,7 +2594,7 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     assert "cached_tokens" in events_columns
     # 积分推算标记（TRAE 无上游积分）：老库补 0=历史行全按非推算处理
     assert "credit_estimated" in events_columns
-    # 成本估算两列（models.dev 刊例价 × 当时汇率）：老库补列后历史行为 NULL
+    # 成本估算两列（OpenRouter 刊例价 × 当时汇率）：老库补列后历史行为 NULL
     assert {"cost_usd", "cost_cny"} <= events_columns
     hourly_columns = {row[1] for row in db.connect().execute("PRAGMA table_info(usage_hourly)")}
     assert "ttfb_sum" in hourly_columns

@@ -2,7 +2,7 @@
 
 纪律（PROPOSAL §8）：不存提示词、回答、请求头、Token、工具参数、原始错误体、会话 ID。
 credit 为上游可选字段，两边都经常为 None。
-成本（cost_usd / cost_cny）是**估算**：models.dev 刊例价 × 写入时的汇率，不是上游
+成本（cost_usd / cost_cny）是**估算**：OpenRouter 刊例价 × 写入时的汇率，不是上游
 真实扣费；两列同生同灭，匹配不到定价时为 None（界面显示 —）。
 """
 

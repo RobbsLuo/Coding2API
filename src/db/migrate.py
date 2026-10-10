@@ -34,7 +34,7 @@ SCHEMA_NAME = "schema.sql"
 # 「站内告警记录」回看）。新增表只需进 schema.sql（CREATE TABLE IF NOT EXISTS
 # 对老库同样生效），无需迁移动作。
 # 18：usage_events 新增 cost_usd / cost_cny，usage_hourly 新增 cost_usd_sum /
-# cost_cny_sum / cost_known（成本估算：models.dev 刊例价 × 当时汇率，写入时定值）。
+# cost_cny_sum / cost_known（成本估算：OpenRouter 刊例价 × 当时汇率，写入时定值）。
 # 老库补列后历史行成本为 NULL（显示 —），不随汇率/价表变化重算。
 SCHEMA_VERSION = 18
 
@@ -71,7 +71,7 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # 老库补列后与补列前行为一致
     ("api_keys", "allowed_models TEXT NOT NULL DEFAULT ''"),
     ("api_keys", "expires_at INTEGER"),
-    # 成本估算（models.dev 刊例价 × 当时汇率）：老库补列后历史成本为 NULL。
+    # 成本估算（OpenRouter 刊例价 × 当时汇率）：老库补列后历史成本为 NULL。
     # usage_hourly 的 cost_known=0 表示该小时没有可定价明细，聚合值不可信。
     ("usage_events", "cost_usd REAL"),
     ("usage_events", "cost_cny REAL"),

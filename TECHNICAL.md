@@ -137,7 +137,8 @@ coding2api/
 │   │   ├── collector.py         # usage_events 写入（脱敏）+ 小时汇总双写/重算
 │   │   └── query.py             # overview / by-provider|by-model|by-user|by-credential / timeline / model-timeline / events
 │   ├── sorting.py               # 列表排序：sort/order 白名单解析（SQL 片段 + 组装后排序），db 与 api 共用
-│   ├── pricing.py               # models.dev 目录（刊例价 + 明细元数据）+ 单请求成本估算（USD→CNY）
+│   ├── benchmarks.py            # OpenRouter 单一源：刊例价 + 明细元数据 + 能力指数（抓取/建表/落盘快照）
+│   ├── pricing.py               # 单请求成本估算（USD→CNY）+ 刊例价类型（价表构建在 benchmarks.py）
 │   └── api/
 │       ├── deps.py              # Services 容器 + require_api_key / session / csrf 依赖
 │       ├── chat.py              # POST /v1/chat/completions
@@ -492,14 +493,14 @@ response.completed | response.incomplete
 
 ### 3.12 后台任务可视化（B4，「任务与配置」页）
 
-**问题**：`TaskRunner` 跑着 9 类循环（额度探测 / token 预刷新 / 每日签到 / 成长中心 / 活跃上报 / 明细清理 / 渠道模型列表刷新 / 模型列表刷新（models.dev） / 运维告警），但除失败时一行 `logger.warning`，没有任何地方能看到「上次何时跑的、结果如何」，也没有端点暴露。运维只能翻服务日志。
+**问题**：`TaskRunner` 跑着 9 类循环（额度探测 / token 预刷新 / 每日签到 / 成长中心 / 活跃上报 / 明细清理 / 渠道模型列表刷新 / 模型目录刷新（OpenRouter） / 运维告警），但除失败时一行 `logger.warning`，没有任何地方能看到「上次何时跑的、结果如何」，也没有端点暴露。运维只能翻服务日志。
 **上一轮调研结论**：项目内**不存在**后台任务页（无 `TasksPage`、无 `/api/tasks`，git 全历史与文档均无），所以这不是「找回旧页面」而是新增；同类项目（ithtelab/workbuddy-manager）的做法是「任务记录页 + 30s 自动刷新 + 单次 200 条上限」，关键教训是**容器重建即丢、必须采集落库**。
 **本项目的选择：只做进程内运行态，不落库**（PROPOSAL Q38）：任务状态回答的是「**这次进程活着的时候**谁跑过、结果如何」，重启本身意味着任务刚被重新调度，显示「本次启动以来未运行」比捞出一条重启前旧记录更诚实；落库要新增表 + 保留期清理 + 老库迁移，而跨重启的历史价值有限（业务留痕已有 `growth_events` / `credit_events` / `usage_events`）。代价明确写进 UI：卡片只显示本进程内的运行，不承诺「历史记录」。
 **记录口径（核心语义，容易退化）**：`_guarded` 在任务返回 `None` 时**不入账**。`sleep` 到点但 `due()=False`（签到当天已签、活跃上报未到窗口 / 未开启）是 no-op，若当成一次成功执行，页面会显示「签到 3 分钟前刚跑过」——而当天其实**一次都没签**。因此 `TaskRun` 只在真实执行（返回非 `None`）或抛异常时写入；异常也入账（`last_error`），否则「一直在失败」会被显示成「尚未执行」。计数 `runs` 同样只涨真实执行。
 **任务清单与归属**：`tasks/status.py` 的 `TASK_SPECS` 是静态描述（key / 名称 / 一句话说明），与 `TaskRunner.start()` 建立的循环一一对应；周期与开关**运行时现算**（`TaskRunner.task_status()` 读热更值），不是装配快照——改完配置刷新页面就该看到新周期。未装配的任务（测试或降级时不传 growth/activity）不出现在清单里，避免展示「永远不跑」的卡片。
 配置项一侧用 `HotSetting.task`（§3.8）表达归属，前端据此把配置塞进对应任务 tab；无任务归属的项用 `HotSetting.group` 归入四个网关卡组（`GATEWAY_GROUPS`：模型路由 / 选号与会话 / 渠道节流 / 后台任务节流），各自一个一级 tab。两处通过 `TASK_BY_KEY` / `GATEWAY_GROUPS` 交叉校验（测试保证 `task` 指向真实任务 key、非任务项的 `group` 落在已定义的网关卡组内）。
 **接口**：`GET /api/tasks`（admin）返回 `{tasks: [...], server_time}`。每条含 `key`/`name`/`description`/`interval_seconds`/`enabled`/`runs`/`last_started_at`/`last_finished_at`/`last_ok`/`last_report`/`last_error`。带 `server_time` 是为了让前端用**服务端时钟**算「距今多久」——浏览器时钟偏移会把刚跑完的任务显示成几小时前。`app.state.task_runner` 不存在时（未进 lifespan）返回空列表而不是 500。
-**前端**：导航与页头从「运行时配置」改为「任务与配置」，`SettingsPage` 用一排 tabs 控制信息量：每个任务一个 tab（该任务运行态 + 配置项，复用 `SettingRow`），无任务归属的配置按后端下发的网关卡组各占一个 tab（模型路由 / 选号与会话 / 渠道节流 / 后台任务节流）；一屏只呈现一块，避免 9 张卡片 + 全部配置项铺满整页。**tab 为紧凑单行**（`text-xs`，放不下时横向滚动、不折行，不再把标签挤成多行）；tab 上长任务名用简称——正式名「渠道模型列表刷新」显示「渠道模型刷新」、「模型列表刷新（models.dev）」显示「模型列表刷新」，卡片标题与告警仍用完整名。没有配置项的分组不出 tab；归属对不上的项落进「其他」tab，绝不吞掉配置。保存按钮与「N 项待保存」常驻面板顶部，草稿跨 tab 保留、一次提交全部改动。`useTasks` 以 `refetchInterval: 30_000` 自动刷新（运行态是随时间变化的观测量，手动刷新会让人以为任务停了），`/api/settings` 不自动刷新（配置改动由用户触发）。
+**前端**：导航与页头从「运行时配置」改为「任务与配置」，`SettingsPage` 用一排 tabs 控制信息量：每个任务一个 tab（该任务运行态 + 配置项，复用 `SettingRow`），无任务归属的配置按后端下发的网关卡组各占一个 tab（模型路由 / 选号与会话 / 渠道节流 / 后台任务节流）；一屏只呈现一块，避免 9 张卡片 + 全部配置项铺满整页。**tab 为紧凑单行**（`text-xs`，放不下时横向滚动、不折行，不再把标签挤成多行）；tab 上长任务名用简称——正式名「渠道模型列表刷新」显示「渠道模型刷新」、「模型目录刷新（OpenRouter）」显示「模型目录刷新」，卡片标题与告警仍用完整名。没有配置项的分组不出 tab；归属对不上的项落进「其他」tab，绝不吞掉配置。保存按钮与「N 项待保存」常驻面板顶部，草稿跨 tab 保留、一次提交全部改动。`useTasks` 以 `refetchInterval: 30_000` 自动刷新（运行态是随时间变化的观测量，手动刷新会让人以为任务停了），`/api/settings` 不自动刷新（配置改动由用户触发）。
 
 ---
 
@@ -687,20 +688,24 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 
 无 schema 变更，无配置变更。`tests/test_sorting.py` 覆盖白名单回落、`None` 排最后、SQL tiebreak、分组默认降序、明细两种分页与端到端参数透传。
 
-### 3.25 模型能力排行（Artificial Analysis 指数，经 OpenRouter 公开接口）
+### 3.25 模型目录（OpenRouter 单一来源：价格 + 明细 + 能力排行）
 
-**动机**：Playground 与「模型列表」页原先只有渠道侧的倍率 / 限额，看不出模型本身强不强。用户切模型时想知道「哪个更聪明」，而这个信息不必自己跑实测——Artificial Analysis 的三项指数有公开接口分发。
+**动机（能力排行部分）**：Playground 与「模型列表」页原先只有渠道侧的倍率 / 限额，看不出模型本身强不强。用户切模型时想知道「哪个更聪明」，而这个信息不必自己跑实测——Artificial Analysis 的三项指数有公开接口分发。
 
-**数据源**：`https://openrouter.ai/api/v1/models`（`OPENROUTER_MODELS_URL`，匿名可读、无需 key）。同一响应还带各渠道的价格与上下文长度，但本功能只取 `benchmarks.artificial_analysis` 的 `intelligence_index` / `coding_index` / `agentic_index`。AA 官方 API 需 key，故不采用；上游字段类型意外时安静跳过，绝不让模型列表挂掉。
+**动机（数据源合并，2026-10-10）**：这个项目原先两份公开目录——`models.dev`（刊例价 + 明细元数据）与 OpenRouter（能力排行），各自一套匹配口径、各自一个后台任务、各自落盘。合并为**单一 OpenRouter 源**：一次抓取同时得到刊例价（`pricing`）、明细元数据（`architecture` / `top_provider` / `supported_parameters`）与三项指数（`benchmarks.artificial_analysis`）；两套匹配口径漂移过（doubao / `-official` / 版本点连字符各修一遍），合并后只剩 `model_match` 一套规则。
 
-**架构与 models.dev 目录同构**（后台抓 → 落盘 → `app.state` → 每请求现读）：
+**已知取舍**：OpenRouter 只收录数百个模型（models.dev 有 3536 个），故「模型列表」页条目变少；`space-bunny` / `doubao-seed-2.1-turbo` / `qwen3.8-max` 三个本项目在用模型上游没有刊例价（成本显示 `—`）；`family` / `open_weights` / `release_date` 三列上游不提供（后端固定给 `null` / `false`，前端按缺失兜底）。这是用户在 2026-10-10 明确选择的「完全替换」方案。
 
-- 后台任务 `benchmark_catalog`（`src/tasks/runner.py` 的 `TaskSpec`），周期由 `BENCHMARK_CATALOG_MINUTES` 控制（默认 1440 分钟、下限 60，可热更见 `src/runtime_settings.py`）。
-- 落盘 `data/model_benchmarks.json`（`BENCHMARKS_VERSION=1`，带 `saved_at`，超过 `BENCHMARKS_MAX_AGE_SECONDS`=7 天视为过期 → 空表），启动时同步回灌（`load_benchmarks_snapshot`，零上游请求）；**无快照时**（首次部署）启动后台补拉一次，与 `_warm_price_table` 同口径。
-- 挂在 `app.state.model_benchmarks` / `app.state.benchmark_saved_at`。刷新是**就地 `clear()` + `update()`**，不换引用——`src/api/models.py` 的注释记着原因：每请求现读，换引用会让路由读到旧表。
+**数据源**：`https://openrouter.ai/api/v1/models`（`OPENROUTER_MODELS_URL`，匿名可读、无需 key）。AA 官方 API 需 key，故不采用；上游字段类型意外时安静跳过，绝不让模型列表挂掉。
+
+**架构**（后台抓 → 落盘 → `app.state` → 每请求现读）：
+
+- 后台任务 `openrouter_catalog`（`src/tasks/runner.py` 的 `TaskSpec`），周期由 `OPENROUTER_CATALOG_MINUTES` 控制（默认 1440 分钟、下限 60，可热更见 `src/runtime_settings.py`）。一轮抓取建三张表：价表（`build_price_table`，成本估算用）、明细目录（`build_model_catalog`，「模型列表」页用）、能力表（`build_benchmark_table`，Playground / `/v1/models` 用）。
+- 落盘 `data/openrouter_catalog.json`（`CATALOG_VERSION=2`，三张表同一个文件、同一个 `saved_at`，超 `MAX_AGE_SECONDS`=7 天视为过期 → 全退空），启动时同步回灌（`load_catalog_snapshot`，零上游请求）；**无快照时**（首次部署）启动后台补拉一次（`_warm_model_catalog`）。
+- 挂 `app.state.price_table` / `app.state.models_dev_catalog`（明细目录，沿用旧名避免大改锚点）/ `app.state.model_benchmarks` / `app.state.price_saved_at`。刷新是**就地 `clear()` + `update()`**，不换引用——`src/api/models.py` 的注释记着原因：每请求现读，换引用会让路由读到旧表。
 - 路由层每请求现读注入，不塞进 `Services`：与 `models_dev_catalog` 同类，是运行数据不是仓储依赖。
 
-**匹配纪律**（`src/model_match.py`，价格目录与能力排行**共用同一套**）：本项目对外的模型 id 是归一键（`kimi-k3`），models.dev 用 `tencent/hy3`，OpenRouter 用 `moonshotai/kimi-k3` + 展示名 `MoonshotAI: Kimi K3`。`match_keys(*texts)` 把任意写法展开成候选键集合（归一键 + `_ALIAS_RULES` 显式等价 + 剥 `_DROP_SUFFIXES` 尾缀 + 版本号点/连字符互换），`lookup` **只做等值匹配**、命中不唯一返回 `None`。`glm-5.3` 绝不匹配 `glm-5.3-flash`；`qwen3.8-max` 上游只有 `qwen3.8-max-0902` 与 `qwen3.8-max-prime` 两个不同规格，宁可漏配也不错配。规则全部显式登记，每条附实测来源，不做启发式推断。
+**匹配纪律**（`src/model_match.py`，价表 / 明细 / 能力排行**共用同一套**）：本项目对外的模型 id 是归一键（`kimi-k3`），OpenRouter 用 `moonshotai/kimi-k3` + 展示名 `MoonshotAI: Kimi K3`。`match_keys(*texts)` 把任意写法展开成候选键集合（归一键 + `_ALIAS_RULES` 显式等价 + 剥 `_DROP_SUFFIXES` 尾缀 + 版本号点/连字符互换），`lookup` **只做等值匹配**、命中不唯一返回 `None`。`glm-5.3` 绝不匹配 `glm-5.3-flash`；`qwen3.8-max` 上游只有 `qwen3.8-max-0902` 与 `qwen3.8-max-prime` 两个不同规格，宁可漏配也不错配。规则全部显式登记，每条附实测来源，不做启发式推断。
 
 **展示范围**（三处，同一份表同一口径）：
 
@@ -708,13 +713,13 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 |---|---|
 | `GET /v1/models` | 每行可选 `benchmarks` 字段（`_entry_response(entry, benchmarks=None)`） |
 | `GET /api/playground/models` | 同上，经 `serve_models(services, "", request)` 传 request |
-| `GET /api/model-catalog` | 每行可选 `benchmarks` + 顶层 `benchmark_saved_at` |
+| `GET /api/model-catalog` | 每行可选 `benchmarks` + 顶层 `saved_at`（三表共用同一时刻） |
 
-**UI**：Playground 模型选择器行内徽章（只显示综合智能指数，tooltip 带三项与来源）+ 选中模型的能力分卡；「模型列表」页新增「能力分」列（三行：智 / 编 / 体）+ 「能力分更新」指标卡。**不做排序**——分数是第三方成绩，排序等于替用户下结论。每处都标注「Artificial Analysis 指数，经 OpenRouter 公开接口；非本服务实测」。
+**UI**：Playground 模型选择器行内徽章（只显示综合智能指数，tooltip 带三项与来源）+ 选中模型的能力分卡；「模型列表」页新增「能力分」列（三行：智 / 编 / 体）+ 「能力分来源」指标卡。**不做排序**——分数是第三方成绩，排序等于替用户下结论。每处都标注「Artificial Analysis 指数，经 OpenRouter 公开接口；非本服务实测」。
 
-**降级**：拉取失败 / 快照损坏 / 版本不符 / 过快照年龄上限，一律退化为空表：条目**不带** `benchmarks` 字段（不是 `null`），页面显示 `—`，模型列表与聊天不受影响。
+**降级**：拉取失败 / 快照损坏 / 版本不符 / 过快照年龄上限，一律退化为空表：条目**不带** `benchmarks` 字段（不是 `null`），页面显示 `—`，模型列表与聊天不受影响。拉到空价表视为失败，不覆盖已有三张表。
 
-覆盖：`tests/test_benchmarks.py`（匹配规则含歧义拒配、建表逐条跳过、快照四种坏法、三处端点注入、后台刷新一轮与拉到空表不清旧值、启动预热仅在无快照时补拉）。
+覆盖：`tests/test_benchmarks.py`（匹配规则含歧义拒配、三表建表逐条跳过、快照四种坏法与三表各自坏条目、三处端点注入、后台一轮换入三表与拉到空表不清旧值、启动预热仅在无快照时补拉）。
 
 ---
 
@@ -869,10 +874,10 @@ class Scheduler:
 | 活跃上报（activity.py，默认关闭） | 每 10 分钟醒一次，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点，北京时间）窗口内执行 | 仅 CodeBuddy：补发一条 `chat_request_send` 续连登；按「endpoint + userId」隔离、当日封账；成功落一行 `growth_events` |
 | 明细清理（retention.py） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert，与 record 的增量双写对账）+ 90 天前明细清理；同期限回收 `credit_events`（§3.10）、`audit_events`（§3.13）与 `alert_events`（§3.22） |
 | 渠道模型列表刷新（`api/models.py::list_models`，注入式） | 每 `MODEL_CATALOG_MINUTES`（默认 30，下限 5） | 兜底重拉各渠道模型表（走同一条 `list_models`：TTL 门禁 + 逐渠道 publish + 落盘快照）。周期 30 分钟是跟着 zen 免费模型判活缓存（`MODELS_CACHE_TTL_SECONDS`，30 分钟）对齐——更密不会让 zen 多探一次，只是白打其余渠道的 `/models` |
-| 模型列表刷新（models.dev）（`pricing.fetch_models_dev`，注入式） | 每 `PRICE_CATALOG_MINUTES`（默认 1440，下限 60） | 拉 `models.dev/api.json` → `build_price_table` / `build_model_catalog` → 落盘 `DATA_DIR/model_prices.json` + `DATA_DIR/models_dev_catalog.json`，并就地换入 `StatsCollector` 持有的同一份价表 dict 与 `app.state.models_dev_catalog`。上游价格变动很少，默认每日一次；返回空价表视为失败（保留旧表），异常由 `_guarded` 记日志不影响聊天 |
+| 模型目录刷新（OpenRouter）（`benchmarks.fetch_openrouter_models`，注入式） | 每 `OPENROUTER_CATALOG_MINUTES`（默认 1440，下限 60） | 拉 `openrouter.ai/api/v1/models` → `build_price_table` / `build_model_catalog` / `build_benchmark_table` → 落盘 `DATA_DIR/openrouter_catalog.json`（三表一体），并就地换入 `StatsCollector` 持有的同一份价表 dict 与 `app.state.models_dev_catalog` / `app.state.model_benchmarks`。上游变动很少，默认每日一次；返回空价表视为失败（保留旧三表），异常由 `_guarded` 记日志不影响聊天 |
 | 运维告警（alerting.py） | 每 `ALERT_INTERVAL_MINUTES`（默认 5，下限 1） | 评估四类风险（池耗尽 / 任务连续失败 / token 临近到期 / 上游错误率骤升），命中落 `alert_events` 并可选推送 webhook；同 `(规则, 对象)` 在静默窗内只报一次（§3.22） |
 
-**渠道模型列表刷新为什么是「注入协程」而不是一个 tasks 模块**：`tasks/` 不 import `api/`（反向依赖会把 HTTP 层拖进后台任务），所以 `TaskRunner` 接的是 `model_catalog: Callable[[], Awaitable[object]] | None`，由 `main.lifespan` 闭包注入；`None`（老调用方 / 测试）时不装配这条循环，管理台也不展示这张卡片——与 growth / activity 的处理一致。**模型列表刷新（models.dev）同理**（`price_catalog`）：`tasks/` 不依赖 `pricing` / `httpx`，由 `main` 注入「拉取 + 落盘 + 换表」的协程。**并发保护**：HTTP 出口（`/v1/models` 同步、Playground 走 `refresh_pending_models`）与这条后台循环都会调 `list_models`，两者不串行就会同时对同一条渠道打上游（zen 那次是十几秒的真推理），后到的拿到的还是同一份数据。故 `api/models.py` 里 `_refresh_providers` 整段持模块级 `asyncio.Lock`。锁的粒度是「整次列表刷新」而非单渠道：跨渠道合并与别名表 publish 需要看到一致的全集。Playground 的后台刷新任务复用同一把锁，只是把等待从请求路径挪到后台。**没有它会烂在哪**（推断，非实测故障）：模型表只在有人访问列表时才按 TTL 更新，纯 API 用法的部署（客户端自己缓存了模型列表）会让「模型 → 渠道」归属表与落盘快照一起变陈旧——上游新增的模型不认识 → 扁平名请求按全部渠道扇出、各渠道回 11102/4001，并给每个凭证写上 6 小时起步的 (凭证, 模型) 负缓存；停机超过 `MAX_AGE_SECONDS`（7 天）后落盘快照也会被直接丢弃，退回「启动窗口无归属」的老行为。**签到 / 成长中心的「同账号」隔离键**：`checkin_scope(data) or f"credential|{credential_id}"`。provider 在身份未知时返回空串（CB 的 `checkin_scope_key` 在 `account_uid` 与 `user_id` 都为空时返回 `""`），任务层必须回落到 `credential_id`。这不是保守取值：共享空 scope 会让第二个账号被 `seen` 集合永久跳过，表现为「只有第一个凭证被自动签到」且没有任何报错；回落到凭证 ID 最坏只是多签一次（上游签到幂等，返回 ALREADY）。
+**渠道模型列表刷新为什么是「注入协程」而不是一个 tasks 模块**：`tasks/` 不 import `api/`（反向依赖会把 HTTP 层拖进后台任务），所以 `TaskRunner` 接的是 `model_catalog: Callable[[], Awaitable[object]] | None`，由 `main.lifespan` 闭包注入；`None`（老调用方 / 测试）时不装配这条循环，管理台也不展示这张卡片——与 growth / activity 的处理一致。**模型目录刷新（OpenRouter）同理**（`openrouter_catalog`）：`tasks/` 不依赖 `benchmarks` / `httpx`，由 `main` 注入「拉取 + 落盘 + 换三表」的协程（价格 + 明细 + 能力分一次抓完）。**并发保护**：HTTP 出口（`/v1/models` 同步、Playground 走 `refresh_pending_models`）与这条后台循环都会调 `list_models`，两者不串行就会同时对同一条渠道打上游（zen 那次是十几秒的真推理），后到的拿到的还是同一份数据。故 `api/models.py` 里 `_refresh_providers` 整段持模块级 `asyncio.Lock`。锁的粒度是「整次列表刷新」而非单渠道：跨渠道合并与别名表 publish 需要看到一致的全集。Playground 的后台刷新任务复用同一把锁，只是把等待从请求路径挪到后台。**没有它会烂在哪**（推断，非实测故障）：模型表只在有人访问列表时才按 TTL 更新，纯 API 用法的部署（客户端自己缓存了模型列表）会让「模型 → 渠道」归属表与落盘快照一起变陈旧——上游新增的模型不认识 → 扁平名请求按全部渠道扇出、各渠道回 11102/4001，并给每个凭证写上 6 小时起步的 (凭证, 模型) 负缓存；停机超过 `MAX_AGE_SECONDS`（7 天）后落盘快照也会被直接丢弃，退回「启动窗口无归属」的老行为。**签到 / 成长中心的「同账号」隔离键**：`checkin_scope(data) or f"credential|{credential_id}"`。provider 在身份未知时返回空串（CB 的 `checkin_scope_key` 在 `account_uid` 与 `user_id` 都为空时返回 `""`），任务层必须回落到 `credential_id`。这不是保守取值：共享空 scope 会让第二个账号被 `seen` 集合永久跳过，表现为「只有第一个凭证被自动签到」且没有任何报错；回落到凭证 ID 最坏只是多签一次（上游签到幂等，返回 ALREADY）。
 **成长中心的失败判定**（三层分开，勿合并）：
 
 - 协议层（`growth.py`）：非 2xx 抛 `GrowthRejected`；业务码非 0 / 缺 data / 非 JSON 抛 `UpstreamProtocolViolation`（HTTP 200 也可能是失败，只看状态码会把失败当成功）
@@ -1023,8 +1028,8 @@ fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文�
 - **统计一律以 `usage_hourly` 为准**：`overview` / `by_provider` / `timeline` / `model-timeline` 均读小时汇总，只有 `events`（逐请求明细）读 `usage_events`。统一口径让选「全部」时总览与图表同值（明细只留 90 天，汇总永久）。代价：最近 ≤5 分钟未进汇总的请求不计入，刷新一次即可
 - **TRAE credit 为推算值**（`credit_estimated`）：TRAE 上游 `token_usage` 只给 token 数、无单请求积分，故按官方计费公式（`(输入−缓存)×输入价 + 输出×输出价 + 缓存×缓存价`，单价为积分/百万，见 `src/provider/trae/pricing.py`）折算；明细存 `usage_events.credit_estimated`，小时汇总存 `credit_estimated_known`（推算条数），展示层对推算值加 `≈`。CodeBuddy 的 credit 是上游真值，恒不标推算；单价表与折扣随官方调价 / 活动变化，改动集中在 pricing 模块。**缓存命中价要单独实测**：DeepSeek-V4.1-Flash 刊例缓存价 0.04 元/M，账号实测有效 ≈0.07 元/M（2.8 积分/M），且该模型缓存占输入 ≈99%，按刊例会把整体积分低估约一半（2026-09-30 修正，全量 229→449）；这类与「刊例 × 折扣」不符的模型走 `pricing.MEASURED_EFFECTIVE_OVERRIDE`。**回填 / 重算**：上线前 TRAE 明细 `credit` 为 NULL、单价表调整后旧推算值也过期，都用 `scripts/backfill_trae_credit.py --apply` 处理——范围是「`credit` 为 NULL 或 `credit_estimated=1`」的 trae 行，上游真值（`credit_estimated=0`）与值未变化的行不动（幂等），复用 `src/provider/trae/backfill.py`，补完重算小时汇总；之后新请求走正常路径。明细 90 天后清理，更早的小时汇总不再推算
 - **小时汇总双写**：`record()` 写明细的同时增量累加当前小时行，新请求立即可见于统计页（不依赖 5 分钟一轮的 rollup）；`rollup_hourly` 每 5 分钟全量重算作对账，两者结果一致（幂等）
-- **成本估算（`cost_usd` / `cost_cny`，2026-10）**：统计页成本非上游真实扣费，而是「token × 公开刊例价」估算；价表来自 `https://models.dev/api.json`（每模型 `cost.input` / `cost.output` / `cost.cache_read`，**USD / 百万 token**），逻辑在 `src/pricing.py`（选条 / 公式 / 匹配口径见 README「用量统计里的成本」）。**写入时定值**：`StatsCollector.record()` 按**当时**价表与汇率算好 `usage_events.cost_usd` / `cost_cny` 落库，历史行不随价表 / 汇率重算（与 credit 推算同一心智）。**聚合口径**：`usage_hourly` 加 `cost_usd_sum` / `cost_cny_sum` / `cost_known`；查询侧 `cost_known=0`（该小时 / 渠道无可定价明细）回 `None`、展示 `—` 而非 0——成本天然是**下限**（未收录模型不计）。**汇率**是热更项 `USD_CNY_RATE`（默认 6.70），只影响之后写入；价表由后台任务 `price_catalog`（`PRICE_CATALOG_MINUTES`，默认每日、下限 60 分钟）周期拉取并落盘 `DATA_DIR/model_prices.json`，启动同步回灌（零上游请求）、失败只记日志；**无快照时**（首次部署 / 快照损坏）启动另起后台预热任务（`_warm_price_table`，不阻塞 `/health`）立即补拉，否则成本空窗到下一轮（最长一日）。老库升级补这五列后历史行成本为 `NULL`（`—`）；用 `scripts/backfill_cost.py --apply`（默认预览、写库前备份、幂等）按当前价表与生效汇率一次性补齐 / 重算全部明细并重算小时汇总——口径是「按今天重估」而非还原每笔当时真实花费。
-**管理台「模型列表」页**（`GET /api/model-catalog`，`api/admin_model_catalog.py`）只读展示 models.dev 目录：`build_model_catalog` 与 `build_price_table` 共用 `_select_entries` 选条口径，价格外保留名称 / 上下文 / 模态 / 能力 / 知识截止等元数据，落盘 `DATA_DIR/models_dev_catalog.json`（同 7 天上限），`_refresh_price_catalog` 一轮里就地换入 `app.state.models_dev_catalog`。端点默认按模型 id 升序回 `models`（`sort` / `order` 可切列，见 §3.24；每行含 `id`/`name`/`provider`/`context`/`max_output`/`input_modalities`/`output_modalities`/能力布尔/`knowledge`/`release_date`/`input`/`output`/`cache_read`/`cache_write`）与 `count`/`currency`/`usd_cny_rate`/`saved_at`——目录缺失回空表 + `saved_at=None`，页面显示空态而非报错。只要求登录（models.dev 是公开数据，各角色可看），不写库
+- **成本估算（`cost_usd` / `cost_cny`，2026-10）**：统计页成本非上游真实扣费，而是「token × 公开刊例价」估算；价表来自 OpenRouter 公开模型列表（每模型 `pricing.prompt` / `pricing.completion` / `pricing.input_cache_read`，按 USD/token 字符串给出，抓取时乘 1e6 转 **USD / 百万 token**），构建逻辑在 `src/benchmarks.py::build_price_table`，成本公式与匹配口径在 `src/pricing.py`（公式 / 匹配口径见 README「用量统计里的成本」）。**写入时定值**：`StatsCollector.record()` 按**当时**价表与汇率算好 `usage_events.cost_usd` / `cost_cny` 落库，历史行不随价表 / 汇率重算（与 credit 推算同一心智）。**聚合口径**：`usage_hourly` 加 `cost_usd_sum` / `cost_cny_sum` / `cost_known`；查询侧 `cost_known=0`（该小时 / 渠道无可定价明细）回 `None`、展示 `—` 而非 0——成本天然是**下限**（未收录模型不计）。**汇率**是热更项 `USD_CNY_RATE`（默认 6.70），只影响之后写入；目录由后台任务 `openrouter_catalog`（`OPENROUTER_CATALOG_MINUTES`，默认每日、下限 60 分钟）周期拉取并落盘 `DATA_DIR/openrouter_catalog.json`（价表与明细、能力分同一次抓取一体落盘），启动同步回灌（零上游请求）、失败只记日志；**无快照时**（首次部署 / 快照损坏）启动另起后台预热任务（`_warm_model_catalog`，不阻塞 `/health`）立即补拉，否则成本空窗到下一轮（最长一日）。老库升级补这五列后历史行成本为 `NULL`（`—`）；用 `scripts/backfill_cost.py --apply`（默认预览、写库前备份、幂等）按当前价表与生效汇率一次性补齐 / 重算全部明细并重算小时汇总——口径是「按今天重估」而非还原每笔当时真实花费。
+**管理台「模型列表」页**（`GET /api/model-catalog`，`api/admin_model_catalog.py`）只读展示 OpenRouter 目录：`build_model_catalog` 从同一次抓取里取价格 + 元数据（名称 / 上下文 / 模态 / 能力 / 知识截止等；`family` / `open_weights` / `release_date` 上游不提供，固定 `null` / `false`），与价表、能力分同落 `DATA_DIR/openrouter_catalog.json`（同 7 天上限），`_refresh_model_catalog` 一轮里就地换入 `app.state.models_dev_catalog`。端点默认按模型 id 升序回 `models`（`sort` / `order` 可切列，见 §3.24；每行含 `id`/`name`/`provider`/`context`/`max_output`/`input_modalities`/`output_modalities`/能力布尔/`knowledge`/`release_date`/`input`/`output`/`cache_read`/`cache_write`）与 `count`/`currency`/`usd_cny_rate`/`saved_at`——目录缺失回空表 + `saved_at=None`，页面显示空态而非报错。只要求登录（OpenRouter 是公开数据，各角色可看），不写库
 - **延迟均值只算成功请求**：分子 `SUM(latency_ms WHERE ok=1)` 与分母 `ok_count` 配对；失败请求耗时不能拉偏「典型耗时」（与图表口径一致）
 - **应用日志只写 stderr，轮转交给平台**：不在应用内开文件、不用 `RotatingFileHandler`。各部署形态（systemd / docker 等）采集方式不同但都靠 stdout/stderr 对接；应用自己写文件会与平台轮转争抢同一文件，容器里还会写进镜像层（重启即丢且 `docker logs` 看不到）。配置见 `deploy/` 与 compose 的 `logging` 段
 - **必须在 `build_app` 里配 root logger**：uvicorn 默认 `LOGGING_CONFIG` 只配 `uvicorn` / `uvicorn.access`（`propagate=false`），**从不配 root**；root 默认 `WARNING` 且无 handler，导致 `logging.getLogger(__name__)` 的 INFO 静默丢失。生产路径 `uvicorn src.main:build_app --factory` 不经过 `run()`，所以配置必须挂在 `build_app`（幂等，见 `src/webapp/logging.py`）

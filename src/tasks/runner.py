@@ -45,14 +45,10 @@ class TaskRunner:
     # api.models.list_models（要 services 与 provider registry），tasks 层
     # 不该反向依赖 api 层。由 main 装配时传入；None 表示不装配这条循环。
     model_catalog: Callable[[], Awaitable[object]] | None = None,
-    # 模型列表刷新（models.dev）：同样注入「跑一轮」的协程（真正的活是
-    # pricing.fetch_models_dev + 落盘 + 换入），tasks 层不依赖 pricing/httpx。
-    # None 表示不装配。
-    price_catalog: Callable[[], Awaitable[object]] | None = None,
-    # 能力排行刷新（OpenRouter）：同一模式注入「跑一轮」的协程（真正的活是
-    # benchmarks.fetch_openrouter_models + 落盘 + 换入），tasks 层不依赖
-    # benchmarks/httpx。None 表示不装配。
-    benchmark_catalog: Callable[[], Awaitable[object]] | None = None,
+    # OpenRouter 模型目录刷新（价格 + 明细 + 能力分，一次抓取）：同样注入
+    # 「跑一轮」的协程（真正的活是 benchmarks.fetch_openrouter_models + 落盘 +
+    # 换入），tasks 层不依赖 benchmarks/httpx。None 表示不装配。
+    openrouter_catalog: Callable[[], Awaitable[object]] | None = None,
     # 运维告警（P1-7）：None 表示不装配该循环（老调用方/测试保持原行为）。
     alert: AlertTask | None = None,
     quota_probe_minutes: int | Callable[[], int] = 60,
@@ -60,8 +56,7 @@ class TaskRunner:
     refresh_interval_minutes: int | Callable[[], int] = 60,
     retention_interval_minutes: int | Callable[[], int] = 5,
     model_catalog_minutes: int | Callable[[], int] = 30,
-    price_catalog_minutes: int | Callable[[], int] = 1440,
-    benchmark_catalog_minutes: int | Callable[[], int] = 1440,
+    openrouter_catalog_minutes: int | Callable[[], int] = 1440,
     alert_interval_minutes: int | Callable[[], int] = 5,
     activity_enabled: Callable[[], bool] | None = None,
     alert_enabled: Callable[[], bool] | None = None,
@@ -74,8 +69,7 @@ class TaskRunner:
         self._refresh = refresh
         self._retention = retention
         self._model_catalog = model_catalog
-        self._price_catalog = price_catalog
-        self._benchmark_catalog = benchmark_catalog
+        self._openrouter_catalog = openrouter_catalog
         self._alert = alert
         # 周期可热更（B3.2）：存取值器，每轮 sleep 前读当前值（否则改配置
         # 要等到下一次重启才生效）。下限与业务语义同前，不变。
@@ -84,8 +78,7 @@ class TaskRunner:
         self._refresh_minutes = live(refresh_interval_minutes)
         self._retention_minutes = live(retention_interval_minutes)
         self._model_catalog_minutes = live(model_catalog_minutes)
-        self._price_catalog_minutes = live(price_catalog_minutes)
-        self._benchmark_catalog_minutes = live(benchmark_catalog_minutes)
+        self._openrouter_catalog_minutes = live(openrouter_catalog_minutes)
         self._alert_minutes = live(alert_interval_minutes)
         # 活跃上报是否启用也可热更：装配时恒建对象（构造成本为零），
         # 每轮由 _sync_activity 问一次，关着时是 no-op。
@@ -125,15 +118,10 @@ class TaskRunner:
         return max(300, int(self._model_catalog_minutes()) * 60)
 
     @property
-    def _price_catalog_interval(self) -> float:
-        # 下限 60 分钟与热更项 minimum 对齐：models.dev 是公开大表（数 MB），
-        # 上游价格变动很少，更密只是白拉一遍。
-        return max(3600, int(self._price_catalog_minutes()) * 60)
-
-    @property
-    def _benchmark_catalog_interval(self) -> float:
-        # 下限 60 分钟，同 price_catalog：能力指数比价格动得更少，更密白拉。
-        return max(3600, int(self._benchmark_catalog_minutes()) * 60)
+    def _openrouter_catalog_interval(self) -> float:
+        # 下限 60 分钟与热更项 minimum 对齐：价格与能力指数变动都很少，更密只是
+        # 白拉一遍（一次抓取同时供三处用）。
+        return max(3600, int(self._openrouter_catalog_minutes()) * 60)
 
     @property
     def _alert_interval(self) -> float:
@@ -172,13 +160,10 @@ class TaskRunner:
         if self._model_catalog is not None:
             loops.append(("model_catalog", "渠道模型列表刷新", self._model_catalog,
                           lambda: self._model_catalog_interval))
-        if self._price_catalog is not None:
-            loops.append(("price_catalog", "模型列表刷新（models.dev）", self._price_catalog,
-                          lambda: self._price_catalog_interval))
-        if self._benchmark_catalog is not None:
-            loops.append(("benchmark_catalog", "能力排行刷新（OpenRouter）",
-                          self._benchmark_catalog,
-                          lambda: self._benchmark_catalog_interval))
+        if self._openrouter_catalog is not None:
+            loops.append(("openrouter_catalog", "模型目录刷新（OpenRouter）",
+                          self._openrouter_catalog,
+                          lambda: self._openrouter_catalog_interval))
         if self._alert is not None:
             loops.append(("alert", "运维告警", self._sync_alert,
                           lambda: self._alert_interval))
@@ -273,9 +258,7 @@ class TaskRunner:
                 continue
             if spec.key == "model_catalog" and self._model_catalog is None:
                 continue
-            if spec.key == "price_catalog" and self._price_catalog is None:
-                continue
-            if spec.key == "benchmark_catalog" and self._benchmark_catalog is None:
+            if spec.key == "openrouter_catalog" and self._openrouter_catalog is None:
                 continue
             if spec.key == "alert" and self._alert is None:
                 continue
@@ -308,10 +291,8 @@ class TaskRunner:
             return float(self._activity_interval)
         if key == "model_catalog":
             return self._model_catalog_interval
-        if key == "price_catalog":
-            return self._price_catalog_interval
-        if key == "benchmark_catalog":
-            return self._benchmark_catalog_interval
+        if key == "openrouter_catalog":
+            return self._openrouter_catalog_interval
         if key == "alert":
             return self._alert_interval
         return self._retention_interval
@@ -351,9 +332,8 @@ def _as_report(result: object) -> dict[str, Any]:
 def build_runner(credentials, providers: dict, stats_collector, config,
                  growth_events=None, credit_events=None, audit=None,
                  model_catalog: Callable[[], Awaitable[object]] | None = None,
-                 price_catalog: Callable[[], Awaitable[object]] | None = None,
-                 benchmark_catalog: Callable[[], Awaitable[object]] | None = None,
-                 benchmark_catalog_minutes: int | Callable[[], int] = 1440,
+                 openrouter_catalog: Callable[[], Awaitable[object]] | None = None,
+                 openrouter_catalog_minutes: int | Callable[[], int] = 1440,
                  alerts=None,
                  status: TaskStatusStore | None = None) -> TaskRunner:
     """按配置装配后台任务（Pacer 由两个 provider 共享）。
@@ -370,11 +350,9 @@ def build_runner(credentials, providers: dict, stats_collector, config,
     model_catalog 同理：None 时不装配渠道模型列表刷新循环（老调用方与测试保持
     原行为）；生产路径传入「跑一轮 list_models」的协程。
 
-    price_catalog 同理：None 时不装配模型列表刷新（models.dev）循环；生产路径
-    传入「拉 models.dev + 落盘 + 换入价表与明细目录」的协程。
-
-    benchmark_catalog 同理：None 时不装配能力排行刷新循环；生产路径传入
-    「拉 OpenRouter 能力指数 + 落盘 + 就地换入」的协程。
+    openrouter_catalog 同理：None 时不装配 OpenRouter 模型目录刷新循环；生产路径
+    传入「拉 OpenRouter 模型列表 + 落盘 + 就地把价表/明细/能力分三张表换入」的
+    协程（价格 + 明细 + 能力分一次抓完）。
 
     alerts 同理：None 时不装配运维告警循环、也不清理告警记录（老调用方与测试
     保持原行为；生产路径传入 AlertRepository）。
@@ -427,10 +405,8 @@ def build_runner(credentials, providers: dict, stats_collector, config,
         growth_interval_minutes=lambda: config.growth_interval_minutes,
         model_catalog=model_catalog,
         model_catalog_minutes=lambda: config.model_catalog_minutes,
-        price_catalog=price_catalog,
-        price_catalog_minutes=lambda: config.price_catalog_minutes,
-        benchmark_catalog=benchmark_catalog,
-        benchmark_catalog_minutes=lambda: config.benchmark_catalog_minutes,
+        openrouter_catalog=openrouter_catalog,
+        openrouter_catalog_minutes=lambda: config.openrouter_catalog_minutes,
         alert=alert,
         alert_interval_minutes=lambda: config.alert_interval_minutes,
         activity_enabled=lambda: config.activity_report_enabled,

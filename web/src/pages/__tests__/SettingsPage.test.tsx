@@ -205,9 +205,9 @@ describe("SettingsPage", () => {
               last_error: null,
             },
             {
-              key: "price_catalog",
-              name: "模型列表刷新（models.dev）",
-              description: "拉取 models.dev 模型目录。",
+              key: "openrouter_catalog",
+              name: "模型目录刷新（OpenRouter）",
+              description: "拉取 OpenRouter 模型目录。",
               interval_seconds: 86400,
               enabled: true,
               runs: 0,
@@ -229,17 +229,17 @@ describe("SettingsPage", () => {
     await settle();
 
     // 括号补充被去掉、过长任务名用简称
-    expect(screen.getByRole("tab", { name: "模型列表刷新" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "模型目录刷新" })).toBeInTheDocument();
     expect(
-      screen.queryByRole("tab", { name: "模型列表刷新（models.dev）" }),
+      screen.queryByRole("tab", { name: "模型目录刷新（OpenRouter）" }),
     ).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "渠道模型刷新" })).toBeInTheDocument();
     // 卡片标题仍用完整名（默认落在第一个任务 model_catalog）
     expect(screen.getByTestId("task-model_catalog")).toHaveTextContent("渠道模型列表刷新");
 
-    await switchTab("settings-tabs-price_catalog");
-    expect(screen.getByTestId("task-price_catalog")).toHaveTextContent(
-      "模型列表刷新（models.dev）",
+    await switchTab("settings-tabs-openrouter_catalog");
+    expect(screen.getByTestId("task-openrouter_catalog")).toHaveTextContent(
+      "模型目录刷新（OpenRouter）",
     );
   });
 

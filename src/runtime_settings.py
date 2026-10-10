@@ -126,19 +126,14 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "/v1/models 或 Playground 时才刷新，纯 API 用法的部署会让"
                "「模型→渠道」归属表与落盘快照一起变陈旧。下限 5 分钟。",
                minimum=5, task="model_catalog", floor=5),
-    HotSetting("price_catalog_minutes", int, "模型列表刷新周期（分钟，models.dev）",
-               "后台拉取 models.dev 模型目录（刊例价 + 明细元数据）的间隔；目录决定"
-               "统计里的成本估算与「模型列表」页，上游变动很少，默认每日一次即可。"
-               "下限 60 分钟。",
-               minimum=60, task="price_catalog", floor=60),
-    HotSetting("benchmark_catalog_minutes", int, "能力排行刷新周期（分钟）",
-               "后台拉取模型能力排行（Artificial Analysis 指数，经 OpenRouter 公开"
-               "接口，无需密钥）的间隔；分数展示在 Playground 与「模型列表」页，"
-               "并随 /v1/models 透出。指数变动很慢，默认每日一次；拉取失败只是"
-               "不显示分数，不影响模型列表。下限 60 分钟。",
-               minimum=60, task="benchmark_catalog", floor=60),
+    HotSetting("openrouter_catalog_minutes", int, "模型目录刷新周期（分钟）",
+               "后台拉取 OpenRouter 公开模型列表的间隔：一次抓取代刊例价（成本"
+               "估算）、明细元数据（「模型列表」页）与 Artificial Analysis 能力"
+               "指数（Playground / /v1/models 的 benchmarks）三份数据。上游变动"
+               "很少，默认每日一次；拉取失败只是成本与分数显示 —。下限 60 分钟。",
+               minimum=60, task="openrouter_catalog", floor=60),
     HotSetting("usd_cny_rate", float, "美元兑人民币汇率",
-               "成本估算里把 models.dev 的美元刊例价折成人民币的汇率"
+               "成本估算里把 OpenRouter 的美元刊例价折成人民币的汇率"
                "（1 USD = 该值 CNY）；改后只影响之后写入的请求，历史成本不重算。",
                minimum=0.000001, group="routing"),
     HotSetting("codebuddy_chat_min_interval", float, "CodeBuddy 聊天最小间隔（秒）",
@@ -539,8 +534,8 @@ class RuntimeSettings:
         return int(self.get("model_catalog_minutes"))
 
     @property
-    def price_catalog_minutes(self) -> int:
-        return int(self.get("price_catalog_minutes"))
+    def openrouter_catalog_minutes(self) -> int:
+        return int(self.get("openrouter_catalog_minutes"))
 
     @property
     def usd_cny_rate(self) -> float:

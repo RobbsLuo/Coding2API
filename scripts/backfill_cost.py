@@ -3,7 +3,7 @@
 
 背景：成本在**写入时**定值落库（`usage_events.cost_usd` / `cost_cny`，见
 `src/pricing.py` 与 `src/stats/collector.py`）；改动前已落库的历史明细两列是
-NULL，统计页显示 `—`。本脚本用**当前**落盘价表（`DATA_DIR/model_prices.json`）
+NULL，统计页显示 `—`。本脚本用**当前**落盘模型目录（`DATA_DIR/model_catalog.json`）
 与**当前生效**汇率（热更覆盖 > env 默认）补齐 / 重算全部明细，让成本覆盖全部
 时间范围。
 
@@ -33,10 +33,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.benchmarks import load_catalog_snapshot  # noqa: E402
 from src.config import Settings, load_settings  # noqa: E402
 from src.db.conn import Database  # noqa: E402
 from src.db.repo import RuntimeSettingsRepository  # noqa: E402
-from src.pricing import load_prices  # noqa: E402
 from src.runtime_settings import load_runtime_settings  # noqa: E402
 from src.stats.backfill import pending_cost, recompute_costs  # noqa: E402
 from src.stats.collector import StatsCollector  # noqa: E402
@@ -78,9 +78,9 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"数据库不存在: {db_path}")
 
     data_dir = Path(args.data_dir) if args.data_dir else db_path.parent
-    table = load_prices(str(data_dir))
+    table = load_catalog_snapshot(str(data_dir))[0]
     if not table:
-        print(f"价表为空（{data_dir}/model_prices.json 缺失 / 过期 / 损坏）")
+        print(f"价表为空（{data_dir}/model_catalog.json 缺失 / 过期 / 损坏）")
         print("先让服务刷新价表（或检查 --data-dir），再重跑本脚本")
         return 1
 

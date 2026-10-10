@@ -53,7 +53,7 @@ function formatUnitPrice(
   return `${symbol}${converted.toLocaleString("zh-CN", { maximumFractionDigits: 4 })}`;
 }
 
-/** models.dev 模态取值 → 中文（未知取值原样回显，上游加值前端不炸）。 */
+/** 上游模态取值 → 中文（未知取值原样回显，上游加值前端不炸）。 */
 const MODALITY_LABEL: Record<string, string> = {
   text: "文本",
   image: "图片",
@@ -88,7 +88,7 @@ function limitLine(value: number | null): string {
  * 能力分一行：智 / 编 / 智体三项各占一行，缺失的那项显示 —。
  *
  * 与表头「能力分」对应（三行结构同「上下文 / 输出」）。整块没有分时只显示一个
- * 居中的 —：models.dev 收录了 3500+ 条目，其中多数没有第三方成绩，逐个渲染
+ * 居中的 —：OpenRouter 收录数百条目，其中多数没有第三方成绩，逐个渲染
  * 三个 — 会让这一列显得很吵。
  */
 function benchmarkLine(row: ModelCatalogEntry) {
@@ -106,11 +106,11 @@ function benchmarkLine(row: ModelCatalogEntry) {
 }
 
 /**
- * 模型列表页（控制台）：只读展示 models.dev 的模型目录。
+ * 模型列表页（控制台）：只读展示 OpenRouter 的模型目录。
  *
  * 这份目录既是统计页「成本（估算）」的价格来源（输入 / 输出 / 缓存读，USD /
- * 百万 token），也带出 models.dev 更详细的元数据（上下文、模态、能力、知识
- * 截止等）。目录缺失（首次部署尚未拉取）时显示空态而非报错。
+ * 百万 token），也带出上游更详细的元数据（上下文、模态、能力、知识截止等）。
+ * 目录缺失（首次部署尚未拉取）时显示空态而非报错。
  */
 export function ModelCatalogPage() {
   const session = useSessionContext();
@@ -183,7 +183,7 @@ export function ModelCatalogPage() {
       <PageHeader
         eyebrow="控制台"
         title="模型列表"
-        description="models.dev 的模型目录：既列出统计页「成本（估算）」所用刊例价（输入 / 输出 / 缓存读，原始单位 USD / 百万 token），也带出上下文、模态、能力、知识截止等元数据；「能力分」列是 Artificial Analysis 指数（经 OpenRouter 公开接口），非本服务实测。两份目录都由后台任务周期拉取并落盘，这里只读展示。"
+        description="OpenRouter 的模型目录：既列出统计页「成本（估算）」所用刊例价（输入 / 输出 / 缓存读，原始单位 USD / 百万 token），也带出上下文、模态、能力、知识截止等元数据；「能力分」列是 Artificial Analysis 指数（经 OpenRouter 公开接口），非本服务实测。三份数据同一次抓取、同一个后台任务周期落盘，这里只读展示。"
         icon={<Boxes className="size-5" />}
       />
 
@@ -191,21 +191,21 @@ export function ModelCatalogPage() {
         <Metric
           label="模型数"
           value={formatNumber(data?.count ?? 0)}
-          hint="models.dev 已收录的模型条目"
+          hint="OpenRouter 已收录的模型条目"
           icon={<Coins className="size-4" />}
         />
         <Metric
           label="目录更新"
           value={data?.saved_at ? formatAgo(data.saved_at) : "—"}
-          hint={data?.saved_at ? formatTime(data.saved_at) : "尚无目录快照，成本将显示 —"}
+          hint={data?.saved_at
+            ? `${formatTime(data.saved_at)} · 价格 / 明细 / 能力分同一次抓取`
+            : "尚无目录快照，成本与能力分将显示 —"}
           icon={<RefreshCw className="size-4" />}
         />
         <Metric
-          label="能力分更新"
-          value={data?.benchmark_saved_at ? formatAgo(data.benchmark_saved_at) : "—"}
-          hint={data?.benchmark_saved_at
-            ? `${formatTime(data.benchmark_saved_at)} · Artificial Analysis 指数（经 OpenRouter 公开接口）`
-            : "尚无能力分快照（后台拉取后自动出现），「能力分」列将显示 —"}
+          label="能力分来源"
+          value="Artificial Analysis"
+          hint="经 OpenRouter 公开接口分发，非本服务实测；与价格同一次抓取"
           icon={<Trophy className="size-4" />}
         />
         <Metric
@@ -225,7 +225,7 @@ export function ModelCatalogPage() {
       ) : models.length === 0 ? (
         <Panel title="模型列表">
           <Empty data-testid="no-model-catalog">
-            尚无模型目录快照（后台拉取 models.dev 后自动出现），统计里的成本会显示 —
+            尚无模型目录快照（后台拉取 OpenRouter 后自动出现），统计里的成本与能力分会显示 —
           </Empty>
         </Panel>
       ) : (
@@ -363,10 +363,10 @@ export function ModelCatalogPage() {
 
       <Notice tone="muted" className="items-start gap-1 px-3 py-2.5 text-xs">
         <p>
-          模型 id 为 models.dev 的 id（小写），与本服务对外模型名（归一键）并不总是逐个相同；未匹配到定价的模型成本显示 —。价格为「按 token × 公开刊例价」的估算依据，不是上游真实扣费；匹配口径见「用量统计」页。
+          模型 id 为 OpenRouter 的 id（含厂商前缀，如 z-ai/glm-5.3），与本服务对外模型名（归一键）并不总是逐个相同；未匹配到定价的模型成本显示 —。价格为「按 token × 公开刊例价」的估算依据，不是上游真实扣费；匹配口径见「用量统计」页。
         </p>
         <p>
-          价格列上行是「输入 / 输出」单价、下行是「缓存读 / 缓存写」单价（未声明缓存价时显示 —）。同一模型可能挂在多个渠道下、价差极大，这里按「原厂优先，否则取输入价最高」选一条展示。币种：原始单位为 USD / 百万 token；切到人民币按当前汇率（1 USD = {formatNumber(rate)} CNY）折算，历史成本按写入时汇率定值，不随本页变化重算。
+          模型数是 OpenRouter 公开收录的范围（数百条），较此前 models.dev 目录小；上游没有刊例价的模型（如部分国产渠道模型）成本显示 —。价格列上行是「输入 / 输出」单价、下行是「缓存读 / 缓存写」单价（未声明缓存价时显示 —）。币种：原始单位为 USD / 百万 token；切到人民币按当前汇率（1 USD = {formatNumber(rate)} CNY）折算，历史成本按写入时汇率定值，不随本页变化重算。
         </p>
       </Notice>
     </div>

@@ -3,7 +3,7 @@
 **为什么需要它**：本项目对外的模型 id 是**归一键**（`kimi-k3`、`glm-5.3`，
 见 `provider.naming`），而两个公开目录用的是各自的原名：
 
-* models.dev：`tencent/hy3`、`z-ai/glm-5.3-flash`（带厂商命名空间）；
+* OpenRouter：`tencent/hy3`、`z-ai/glm-5.3-flash`（带厂商命名空间）；
 * OpenRouter：`moonshotai/kimi-k3`、展示名 `MoonshotAI: Kimi K3`。
 
 两边与本项目 id 的对应关系只靠一条清洗链路是对不上的（`doubao-seed-2.1-turbo`
@@ -109,7 +109,7 @@ def match_keys(*texts: str | None) -> set[str]:
 def lookup(table: Mapping[str, object], *texts: str | None) -> object | None:
     """按候选键查表；**命中不唯一或查不到时返回 None**（不猜、不取其一）。
 
-    唯一性判定的是「值是否同一个对象 / 等值」：models.dev 与能力排行表都是
+    唯一性判定的是「值是否同一个对象 / 等值」：价表与能力排行表都是
     `{键: 值}` 的单值表，同键多处登记只可能来自上游自身重名，那样这个键就
     没有判别力。
     """

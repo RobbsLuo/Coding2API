@@ -110,7 +110,7 @@ export interface StatsOverview {
   credit: number | null;
   /** credit 是否为推算值（TRAE 按官方单价、CodeArts 福利模型按每日池 1:1），展示加 ≈ */
   credit_estimated: boolean;
-  /** 成本估算（USD，models.dev 刊例价 × token）；无可定价明细时为 null（显示 —） */
+  /** 成本估算（USD，OpenRouter 刊例价 × token）；无可定价明细时为 null（显示 —） */
   cost_usd: number | null;
   /** 成本估算（CNY，按当时汇率折算）；与 cost_usd 同生同灭 */
   cost_cny: number | null;
@@ -201,7 +201,7 @@ export interface UsageEventRow {
   credit: number | null;
   /** credit 是否为推算值（TRAE 按官方单价、CodeArts 福利模型按每日池 1:1），展示加 ≈ */
   credit_estimated: number;
-  /** 成本估算（USD，models.dev 刊例价）；未匹配到定价或未上报 token 时为 null */
+  /** 成本估算（USD，OpenRouter 刊例价）；未匹配到定价或未上报 token 时为 null */
   cost_usd: number | null;
   /** 成本估算（CNY，按写入时汇率折算）；与 cost_usd 同生同灭 */
   cost_cny: number | null;
@@ -463,17 +463,20 @@ export interface ModelInfo {
 }
 
 /**
- * 模型列表页（GET /api/model-catalog）一行：models.dev 的模型明细。
+ * 模型列表页（GET /api/model-catalog）一行：OpenRouter 的模型明细。
  *
- * 价格单位 USD / 百万 token；其余为 models.dev 提供的元数据。缺失字段为
+ * 价格单位 USD / 百万 token；其余为上游提供的元数据。缺失字段为
  * null / 空数组 / false（页面显示 — 或空）。
+ *
+ * OpenRouter 没有 models.dev 的 `family` / `release_date` / 开放权重三列，
+ * 后端固定给 null / null / false（前端按「缺失」兜底，不改契约）。
  */
 export interface ModelCatalogEntry {
-  /** models.dev 的模型 id（小写），也是本服务的匹配键 */
+  /** OpenRouter 的模型 id（含厂商前缀，如 `z-ai/glm-5.3`），也是匹配键 */
   id: string;
-  /** 展示名（models.dev 清洗过）；上游未给时为 null */
+  /** 展示名（上游清洗过）；上游未给时为 null */
   name: string | null;
-  /** 本条明细命中的 provider（原厂优先，否则价高者） */
+  /** id 的厂商前缀（如 `z-ai`）；id 无前缀时为空串 */
   provider: string;
   family: string | null;
   /** 知识截止日期（YYYY-MM-DD）；上游未给时为 null */
@@ -505,10 +508,11 @@ export interface ModelCatalogEntry {
 }
 
 /**
- * 当前生效的 models.dev 模型目录快照（GET /api/model-catalog）。
+ * 当前生效的模型目录快照（GET /api/model-catalog）。
  *
- * 既是统计页成本估算的价格来源，也是「模型列表」页的数据源；本结构只读展示
- * （成本计算在后端）。
+ * 由后台 `openrouter_catalog` 任务从 OpenRouter 一次抓取（刊例价 + 明细元数据 +
+ * 能力分）并落盘；既是统计页成本估算的价格来源，也是「模型列表」页的数据源。
+ * 本结构只读展示（成本计算在后端）。
  */
 export interface ModelCatalogResponse {
   models: ModelCatalogEntry[];
@@ -517,13 +521,11 @@ export interface ModelCatalogResponse {
   currency: string;
   /** 成本估算当前生效的 USD→CNY 汇率（热更项 USD_CNY_RATE） */
   usd_cny_rate: number;
-  /** 目录快照保存时刻（epoch 秒）；无快照时为 null */
-  saved_at: number | null;
   /**
-   * 能力分快照保存时刻（epoch 秒）。与 `saved_at` 分开：两个后台任务、两个
-   * 落盘文件；为 null 表示本次启动以来没拉到过能力分（页面显示 —）。
+   * 目录（价表 + 明细 + 能力分）快照保存时刻（epoch 秒）；无快照时为 null。
+   * 三者同一次抓取，故只有一个时刻。
    */
-  benchmark_saved_at: number | null;
+  saved_at: number | null;
 }
 
 /**

@@ -69,7 +69,7 @@ TOOL_SYNONYMS: dict[str, tuple[str, ...]] = {
 # 免费模型判定：上游 `/zen/v1/models` 返回**全部**模型（含付费）且不带任何
 # 免费/付费标记（`owned_by` 恒为 `opencode`——它是厂商名不是模型名，故展示名
 # 另由 id 派生，见 `pretty_model_name`；亦无 cost 字段），换鉴权头 / query
-# 也仍是全量；models.dev 之类的第三方目录又与上游实际可用集不同步。
+# 也仍是全量；公开模型目录（OpenRouter 等）又与上游实际可用集不同步。
 # 唯一权威信号是**匿名可用性**：付费模型恒 401 AuthError（`Missing API key.`），
 # 免费模型永不 401。
 #

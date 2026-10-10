@@ -76,7 +76,7 @@ CREATE TABLE IF NOT EXISTS usage_events (
     cached_tokens    INTEGER,                  -- 输入中命中缓存的 token（上游可选，NULL=未上报）
     credit           REAL,                     -- 上游可选字段，两边都经常为 NULL
     credit_estimated INTEGER NOT NULL DEFAULT 0,  -- credit 是否本服务推算（1=推算，展示标 ≈）
-    -- 成本估算（models.dev 刊例价 × 当时汇率，写入时定值）：NULL=未匹配到定价或未上报 token。
+    -- 成本估算（OpenRouter 刊例价 × 当时汇率，写入时定值）：NULL=未匹配到定价或未上报 token。
     -- 两列同生同灭；历史行不随汇率/价表变化而重算。
     cost_usd         REAL,
     cost_cny         REAL,

@@ -7,9 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from src.benchmarks import save_catalog
 from src.db.conn import Database
 from src.db.migrate import apply_schema
-from src.pricing import save_prices
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "backfill_cost.py"
 TABLE = {"glm-5.2": (1.0, 2.0, 0.5), "deepseek-v4.1-flash": (0.5, 1.5, 0.05)}
@@ -80,7 +80,7 @@ def test_recompute_costs_writes_and_is_idempotent(db):
 
 def test_main_preview_does_not_write(db, tmp_path, capsys):
     """默认预览：不写库，打印待补统计。"""
-    save_prices(str(tmp_path), TABLE)
+    save_catalog(str(tmp_path), TABLE, {}, {})
     _set_rate(db, "7.0")
     _insert(db, id="a", model="glm-5.2")
     assert BACKFILL.main(["--db", db.path]) == 0
@@ -93,7 +93,7 @@ def test_main_preview_does_not_write(db, tmp_path, capsys):
 
 def test_main_empty_reports_nothing_to_do(db, tmp_path, capsys):
     """有价表但无待补行：直接返回。"""
-    save_prices(str(tmp_path), TABLE)
+    save_catalog(str(tmp_path), TABLE, {}, {})
     assert BACKFILL.main(["--db", db.path]) == 0
     assert "没有需要处理的成本明细" in capsys.readouterr().out
 
@@ -106,7 +106,7 @@ def test_main_empty_price_table_aborts(db, tmp_path, capsys):
 
 def test_main_apply_backfills_and_rolls_up(db, tmp_path, capsys):
     """--apply：备份 + 补明细 + 重算小时汇总。"""
-    save_prices(str(tmp_path), TABLE)
+    save_catalog(str(tmp_path), TABLE, {}, {})
     _set_rate(db, "7.0")
     _insert(db, id="a", model="glm-5.2")
     assert BACKFILL.main(["--db", db.path, "--apply"]) == 0
@@ -122,7 +122,7 @@ def test_main_apply_backfills_and_rolls_up(db, tmp_path, capsys):
 
 def test_main_apply_is_idempotent(db, tmp_path, capsys):
     """--apply 重跑：明细已是当前口径，无待处理行。"""
-    save_prices(str(tmp_path), TABLE)
+    save_catalog(str(tmp_path), TABLE, {}, {})
     _set_rate(db, "7.0")
     _insert(db, id="a", model="glm-5.2")
     assert BACKFILL.main(["--db", db.path, "--apply"]) == 0
@@ -135,7 +135,7 @@ def test_main_uses_explicit_data_dir(db, tmp_path, capsys):
     """--data-dir 指定价表快照目录（默认数据库同目录）。"""
     other = tmp_path / "snap"
     other.mkdir()
-    save_prices(str(other), TABLE)
+    save_catalog(str(other), TABLE, {}, {})
     _set_rate(db, "7.0")
     _insert(db, id="a", model="glm-5.2")
     assert BACKFILL.main(["--db", db.path, "--data-dir", str(other)]) == 0

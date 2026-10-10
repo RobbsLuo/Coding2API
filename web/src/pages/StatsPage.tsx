@@ -257,7 +257,7 @@ export function StatsPage() {
         <Metric
           label="成本（估算）"
           value={formatMoney(stats?.cost_cny, "CNY")}
-          hint={`美元 ${formatMoney(stats?.cost_usd, "USD")} · 按 models.dev 刊例价折算，未匹配定价的请求不计`}
+          hint={`美元 ${formatMoney(stats?.cost_usd, "USD")} · 按 OpenRouter 刊例价折算，未匹配定价的请求不计`}
           icon={<Wallet className="size-4" />}
         />
       </section>
@@ -571,7 +571,7 @@ export function StatsPage() {
           credit 为渠道可选字段，经常不返回；TRAE 上游不给单请求积分，带 ≈ 的数值是按官方单价折算；CodeArts 福利模型按每日 token 池 1:1 扣减后折成积分（1 积分 = 10000 token），带 ≈ 的值即该请求折算后的积分（CodeBuddy 为上游返回的真值）。健康度只依赖额度探测接口，主指标是 token 数。缓存命中率 = 命中 token ÷ 输入 token，仅在上报过缓存时展示。
         </p>
         <p>
-          成本为估算：按 models.dev 的模型刊例价（USD / 百万 token）与本服务写入时生效的美元汇率折算，展示人民币、括号内为美元；不是上游真实扣费，未匹配到定价的模型不计入（显示 —）。汇率可在「任务与配置」页热更，仅影响之后写入的请求，历史成本不重算。
+          成本为估算：按 OpenRouter 的模型刊例价（USD / 百万 token）与本服务写入时生效的美元汇率折算，展示人民币、括号内为美元；不是上游真实扣费，未匹配到定价的模型不计入（显示 —）。汇率可在「任务与配置」页热更，仅影响之后写入的请求，历史成本不重算。
         </p>
       </Notice>
     </div>

@@ -48,7 +48,7 @@ export function useSettings(username?: string) {
   });
 }
 
-/** models.dev 模型目录（模型列表页）不缓存太久的引用数据；与凭证/设置同区分。 */
+/** OpenRouter 模型目录（模型列表页）不缓存太久的引用数据；与凭证/设置同区分。 */
 export function useModelCatalog(username?: string, sort?: string, order?: string) {
   return useQuery({
     queryKey: adminKey(username, "model-catalog", sort, order),

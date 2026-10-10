@@ -22,14 +22,10 @@ services:
       # 渠道模型列表兜底刷新周期（分钟）：没有它，模型表只在有人调 /v1/models 时
       # 才刷新，纯 API 用法的部署会让「模型→渠道」归属表与落盘快照变陈旧
       MODEL_CATALOG_MINUTES: ${MODEL_CATALOG_MINUTES:-30}
-      # 模型列表刷新周期（分钟，models.dev）+ 成本估算汇率：目录来自 models.dev
-      # （USD/百万 token），后台周期拉取并落盘；汇率只影响之后写入的成本
-      PRICE_CATALOG_MINUTES: ${PRICE_CATALOG_MINUTES:-1440}
+      # OpenRouter 模型目录刷新周期（分钟）+ 成本估算汇率：一次抓取同时供刊例价
+      # （USD/百万 token）、明细元数据与能力指数三处；汇率只影响之后写入的成本
+      OPENROUTER_CATALOG_MINUTES: ${OPENROUTER_CATALOG_MINUTES:-1440}
       USD_CNY_RATE: ${USD_CNY_RATE:-6.70}
-      MODELS_DEV_URL: ${MODELS_DEV_URL:-https://models.dev/api.json}
-      # 能力排行刷新周期（分钟，OpenRouter）+ 数据源：与价表同一节奏，
-      # 周期拉能力指数并落盘快照；空表视为失败不换入
-      BENCHMARK_CATALOG_MINUTES: ${BENCHMARK_CATALOG_MINUTES:-1440}
       OPENROUTER_MODELS_URL: ${OPENROUTER_MODELS_URL:-https://openrouter.ai/api/v1/models}
       # 成长中心（仅 CodeBuddy）：一轮领取周期，以及是否允许不可逆动作
       # （抽奖/连登兑换/开 Buddy 盲盒/消耗补登卡）

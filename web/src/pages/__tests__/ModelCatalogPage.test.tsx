@@ -182,7 +182,6 @@ describe("ModelCatalogPage（模型列表）", () => {
   it("能力分列展示三项指数，缺失显示 —", async () => {
     stubFetch({
       ...CATALOG,
-      benchmark_saved_at: 1_700_000_100,
       models: [
         { ...CATALOG.models[1], benchmarks: {
           intelligence_index: 44.8, coding_index: 74.8, agentic_index: 53.1 } },
@@ -200,15 +199,16 @@ describe("ModelCatalogPage（模型列表）", () => {
     const plain = screen.getByTestId("model-row-a-model");
     expect(plain.querySelectorAll("div").length).toBeGreaterThan(0);
     expect(plain).not.toHaveTextContent("智 ");
-    // 能力分快照时刻单独展示（与目录快照分开）
-    expect(screen.getByTestId("model-catalog-page")).toHaveTextContent("能力分更新");
+    // 能力分来源指标卡（与价格同一次抓取）
+    expect(screen.getByTestId("model-catalog-page")).toHaveTextContent("能力分来源");
   });
 
   it("无能力分快照时指标卡显示 —", async () => {
-    stubFetch({ ...CATALOG, benchmark_saved_at: null });
+    stubFetch({ ...CATALOG, saved_at: null });
     renderPage(<ModelCatalogPage />);
     await settle();
-    expect(screen.getByTestId("model-catalog-page")).toHaveTextContent("尚无能力分快照");
+    expect(screen.getByTestId("model-catalog-page")).toHaveTextContent(
+      "尚无目录快照，成本与能力分将显示 —");
   });
 
   it("无目录快照时显示空态", async () => {

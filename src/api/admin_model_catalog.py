@@ -1,17 +1,16 @@
-"""models.dev 模型目录（管理台「模型列表」页）：刊例价 + 明细元数据 + 能力分，只读。
+"""OpenRouter 模型目录（管理台「模型列表」页）：刊例价 + 明细元数据 + 能力分，只读。
 
-数据来自 `https://models.dev/api.json`，由后台 `price_catalog` 任务周期抓取并
-落盘。这里在同一次抓取里既取价格（统计页**成本估算**的输入：`input` /
-`output` / `cache_read`，单位 USD / 百万 token），也取更详细的元数据——展示名 /
-所属家族 / 上下文与输出上限 / 输入·输出模态 / 能力（附件·推理·工具调用·结构化
-输出）/ 是否开放权重 / 知识截止 / 发布日期 / provider。目录缺失时回空表（页面
-显示空态），不影响聊天与成本（成本另行读价表）。
+数据来自 `https://openrouter.ai/api/v1/models`，由后台 `openrouter_catalog`
+任务周期抓取并落盘（`src/benchmarks.py`）。这里在同一次抓取里既取价格（统计页
+**成本估算**的输入：`input` / `output` / `cache_read`，单位 USD / 百万 token），
+也取更详细的元数据——展示名 / 上下文与输出上限 / 输入·输出模态 / 能力
+（附件·推理·工具调用·结构化输出）/ 知识截止 / provider。目录缺失时回空表
+（页面显示空态），不影响聊天与成本（成本另行读价表）。
 
-**能力分**（2026-10 起）来自另一个后台任务 `benchmark_catalog`（Artificial
-Analysis 指数，经 OpenRouter 公开接口，见 `src/benchmarks.py`），挂在
+**能力分**（Artificial Analysis 指数）与价格、元数据同一次抓取，挂在
 `app.state.model_benchmarks`。这里按**同一套匹配口径**（`model_match.lookup`：
-候选键等值、唯一命中才采用）给每行补 `benchmarks` 字段——models.dev 的 id
-（`tencent/hy3`）与本项目归一键（`hy3`）写法不同，靠的就是那层统一规则。
+候选键等值、唯一命中才采用）给每行补 `benchmarks` 字段——上游 id
+（`z-ai/glm-5.3`）与本项目归一键（`glm-5.3`）写法不同，靠的就是那层统一规则。
 匹配不到的行**不带**该字段，页面显示 `—`；宁可不配也不错配。
 
 目录挂在 `app.state.models_dev_catalog`（`main.lifespan` 同步回灌 + 后台刷新
@@ -65,7 +64,7 @@ def create_router(services: Services) -> APIRouter:
     async def get_model_catalog(request: Request, sort: str | None = None,
                                 order: str | None = None,
                                 _principal=Depends(principal_from_request)):
-        """当前生效模型目录 + 元信息；仅要求登录（models.dev 是公开数据，各角色可看）。"""
+        """当前生效模型目录 + 元信息；仅要求登录（OpenRouter 是公开数据，各角色可看）。"""
         state = request.app.state
         catalog: dict[str, dict] = state.models_dev_catalog
         # 默认按模型 id 升序：结果确定（前端无需再排），与历史行为一致。
@@ -77,11 +76,9 @@ def create_router(services: Services) -> APIRouter:
             "count": len(catalog),
             "currency": "USD",
             "usd_cny_rate": float(services.settings.usd_cny_rate),
-            # 目录快照时刻（models.dev）：页面显示「目录更新」。
+            # 快照时刻：价格、明细与能力分同一次抓取，故只有一个时刻。缺失即
+            # 「本次启动以来没拉到过」，页面显示 —。
             "saved_at": state.price_saved_at,
-            # 能力分快照时刻：与目录快照分开记（两个后台任务、两个落盘文件），
-            # 缺失即「本次启动以来没拉到过」，页面显示 —。
-            "benchmark_saved_at": getattr(state, "benchmark_saved_at", None),
         }
 
     return router

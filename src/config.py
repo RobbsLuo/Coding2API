@@ -170,16 +170,12 @@ class Settings(BaseSettings):
     # 3 个会话」——会话在 HTTP 流结束后仍滞留数十秒（打满 3 并发后，单请求
     # 直到约 68s 才恢复）。0 关闭窗口口径，退回纯在途上限。可热更。
     codearts_request_window_seconds: float = 60
-    # 成本估算（models.dev 刊例价，USD/百万 token）：人民币汇率（1 USD = 该值 CNY）
-    # 与模型列表刷新周期（分钟）。汇率是运行时热更项（见 HOT_SETTINGS），来源
-    # 是公开只读端点，无需密钥。
+    # 成本估算与模型目录（OpenRouter 公开接口，USD/百万 token）：人民币汇率
+    # （1 USD = 该值 CNY）、目录刷新周期（分钟）与数据源 URL。汇率是运行时热更
+    # 项（见 HOT_SETTINGS），来源是公开只读端点，无需密钥。一次抓取同时供成本
+    # 估算、「模型列表」页与能力分（Artificial Analysis 指数）三处使用。
     usd_cny_rate: float = 6.70
-    price_catalog_minutes: int = 1440      # 模型列表刷新周期（分钟）：默认每日一次
-    models_dev_url: str = "https://models.dev/api.json"
-    # 能力排行（Artificial Analysis 指数，经 OpenRouter 公开接口分发，无需密钥）：
-    # 拉取周期（分钟）与数据源 URL。指数变动很慢，默认每日一次；拉取失败只是
-    # 没有分数徽章，不影响模型列表。URL 可覆盖以便测试/内网镜像。
-    benchmark_catalog_minutes: int = 1440
+    openrouter_catalog_minutes: int = 1440     # 模型目录刷新周期（分钟）：默认每日一次
     openrouter_models_url: str = "https://openrouter.ai/api/v1/models"
     # 内容风控自愈（11128）：出站 system/assistant 正文命中「伪装其他厂商
     # 官方客户端」指纹串时替换为占位符（客户端会话历史不受影响）。该拦截

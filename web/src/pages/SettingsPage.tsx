@@ -16,7 +16,7 @@ const groupTabValue = (key: string) => `gateway-${key}`;
 /** 兜底 tab：归属对不上（task 指向未装配任务、后端留空 group）的项都进这里。 */
 const OTHER_TAB = "settings-other";
 
-/** tab 文案：去掉任务名里的括号补充（如「模型列表刷新（models.dev）」），
+/** tab 文案：去掉任务名里的括号补充（如「模型目录刷新（OpenRouter）」），
  * 十几个 tab 排一行时它会把行撑爆、挤得每个标签折行；完整名仍在卡片标题与告警里。 */
 function tabLabel(name: string): string {
   return name.replace(/（[^）]*）/g, "").trim() || name;

@@ -195,7 +195,7 @@ export const api = {
   /** 运维告警记录（P1-7）：后台评估命中后落库，倒序回看。 */
   alerts: (sort?: string, order?: string) =>
     request<AlertsResponse>(`/api/alerts${query({ sort, order })}`),
-  /** models.dev 模型目录（刊例价 + 明细元数据），模型列表页只读展示。 */
+  /** OpenRouter 模型目录（刊例价 + 明细元数据），模型列表页只读展示。 */
   modelCatalog: (sort?: string, order?: string) =>
     request<ModelCatalogResponse>(`/api/model-catalog${query({ sort, order })}`),
 
