@@ -136,6 +136,7 @@ coding2api/
 │   │   ├── backfill.py          # 历史成本一次性回填/重算（scripts/backfill_cost.py）
 │   │   ├── collector.py         # usage_events 写入（脱敏）+ 小时汇总双写/重算
 │   │   └── query.py             # overview / by-provider|by-model|by-user|by-credential / timeline / model-timeline / events
+│   ├── sorting.py               # 列表排序：sort/order 白名单解析（SQL 片段 + 组装后排序），db 与 api 共用
 │   ├── pricing.py               # models.dev 目录（刊例价 + 明细元数据）+ 单请求成本估算（USD→CNY）
 │   └── api/
 │       ├── deps.py              # Services 容器 + require_api_key / session / csrf 依赖
@@ -446,7 +447,7 @@ response.completed | response.incomplete
 | 两端都未知 | **不记** | 什么也没学到 |
 | 凭证被并发删除 | **不记** | 避免悬挂行 |
 
-`window_start` 记的是**上次探测时刻**（不是「上次有变动」）：中间那次没变化但同样观测过，区间必须从最近一次观测算起，否则会把一段无人观测的时间也算进去。**接口**：`GET /api/credentials/{id}/credit-events?limit=20`（管理员；未知凭证 400 而不是空列表，避免拼错 id 时看起来「没有记录」）。前端入口是凭证**额度**列数字后的下箭头，展开为该行内独立的「积分记录」抽屉。**保留**：`RetentionTask` 按 `usage_events` 同一保留期（90 天）回收，报告里体现为 `purged_credit_events`。
+`window_start` 记的是**上次探测时刻**（不是「上次有变动」）：中间那次没变化但同样观测过，区间必须从最近一次观测算起，否则会把一段无人观测的时间也算进去。**接口**：`GET /api/credentials/{id}/credit-events?limit=20`（管理员；未知凭证 400 而不是空列表，避免拼错 id 时看起来「没有记录」；`sort` / `order` 可切列，见 §3.24）。前端入口是凭证**额度**列数字后的下箭头，展开为该行内独立的「积分记录」抽屉。**保留**：`RetentionTask` 按 `usage_events` 同一保留期（90 天）回收，报告里体现为 `purged_credit_events`。
 
 ---
 
@@ -658,6 +659,23 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 - **为什么启动期而非热更**：代理作用于连接池，运行中改值需重建在途连接池（涉及 6 个客户端 + 3 个 OAuth 流），风险与测试量都大；与上游端点同属启动期传输层配置（§3.1 端点是启动期）。
 
 无 schema 变更，compose 透传 `PROVIDER_PROXIES`；`tests/test_provider_proxy.py`（30 例）覆盖解析 / 工厂 / 6 客户端 + 3 OAuth 透传 / main 装配接线。
+
+---
+
+### 3.24 列表排序（可点列头）
+
+**动机**：管理台列表原先的顺序全部由 SQL 写死，用户无法按「剩余额度最多 / 消耗最多 / 最近使用」等自己关心的维度查看。
+**契约**（`src/sorting.py`，db 与 api 共用，避免 db → api 反向依赖）：所有 `GET` 列表端点接受 `sort`（白名单键）+ `order`（`asc`/`desc`）。**未知 `sort` 键 → 回落该端点默认键；非法 `order` → 回落默认方向，都不报错**——前端缓存里的旧键不会把页面打挂。`sort` 是白名单键，SQL 片段只由受控常量（`sql_order` 的列名映射 / `_group_order`）拼出，用户输入永不进 SQL，注入面为零。
+
+- `parse_sort_order(sort, order, allowed, *, default_key, default_desc) -> (key, desc)`：唯一解析入口。
+- `sql_order(..., tiebreak=...)`：生成 `ORDER BY` 片段；`tiebreak`（`id`/`rowid`）兜底稳定次序——主列并列时 SQLite 可能抖序，翻页 / 轮询会跳行。
+- `sort_rows(rows, sort, order, allowed, ...)`：组装后再排（凭证 / 模型目录含派生字段，SQL 排不了）；`None` 值无论升降序都排**最后**（「缺失」不是「最小」，未探测 / 未到期的行顶到最前会误导）。
+
+**改动点**：仓储 / 查询方法新增**可选** `sort` / `order`，缺省值与上表一致 → 不传参行为与引入前**完全一致**（`balance.py` 等其它调用点不受影响）。白名单集中在 `src/db/repo.py`（`CREDENTIAL_SORT_KEYS` 取值函数 + 各表列名映射）与 `src/stats/query.py`（`GROUP_SORT_COLUMNS` / `EVENT_SORT_COLUMNS`，列名带 `e.` 前缀因有 JOIN）。**分组统计默认由「分组键字母序」改为「请求数降序」**——分组表的用途就是「谁用得最多」，并列时仍按分组键升序（与旧行为一致）。
+
+**逐请求明细（`/api/stats/events`）的两套分页**：rowid 游标分页与「任意列排序」不兼容（游标只在按 rowid 走时成立）。故默认（`time` 降序）仍走游标、返回 `next_before`（`total` 为 null）；**按其它列排序 / 时间升序 / 显式 `offset`** 时改用 `LIMIT/OFFSET`、额外返回 `total`，此时忽略 `before`（`next_before` 恒 null）。明细只留 90 天，深 offset 成本可接受，故不做复合 keyset 游标。**前端**：`web/src/hooks/useSort.ts`（排序状态 + 每列首次点击方向）+ `web/src/components/SortableHead.tsx`（表头按钮 + 方向箭头 + `aria-sort`，列名后的 `ColumnHint` 置于按钮外，避免点提示误触排序）。切排序 / 改每页数量 / 切范围一律回到第一页。**不做**：服务端持久化排序偏好（仅页面内状态）。
+
+无 schema 变更，无配置变更。`tests/test_sorting.py` 覆盖白名单回落、`None` 排最后、SQL tiebreak、分组默认降序、明细两种分页与端到端参数透传。
 
 ---
 
@@ -967,7 +985,7 @@ fixture 存于 `src/provider/fixtures/`（真实 SSE/JSON 样本，覆盖正文�
 - **TRAE credit 为推算值**（`credit_estimated`）：TRAE 上游 `token_usage` 只给 token 数、无单请求积分，故按官方计费公式（`(输入−缓存)×输入价 + 输出×输出价 + 缓存×缓存价`，单价为积分/百万，见 `src/provider/trae/pricing.py`）折算；明细存 `usage_events.credit_estimated`，小时汇总存 `credit_estimated_known`（推算条数），展示层对推算值加 `≈`。CodeBuddy 的 credit 是上游真值，恒不标推算；单价表与折扣随官方调价 / 活动变化，改动集中在 pricing 模块。**缓存命中价要单独实测**：DeepSeek-V4.1-Flash 刊例缓存价 0.04 元/M，账号实测有效 ≈0.07 元/M（2.8 积分/M），且该模型缓存占输入 ≈99%，按刊例会把整体积分低估约一半（2026-09-30 修正，全量 229→449）；这类与「刊例 × 折扣」不符的模型走 `pricing.MEASURED_EFFECTIVE_OVERRIDE`。**回填 / 重算**：上线前 TRAE 明细 `credit` 为 NULL、单价表调整后旧推算值也过期，都用 `scripts/backfill_trae_credit.py --apply` 处理——范围是「`credit` 为 NULL 或 `credit_estimated=1`」的 trae 行，上游真值（`credit_estimated=0`）与值未变化的行不动（幂等），复用 `src/provider/trae/backfill.py`，补完重算小时汇总；之后新请求走正常路径。明细 90 天后清理，更早的小时汇总不再推算
 - **小时汇总双写**：`record()` 写明细的同时增量累加当前小时行，新请求立即可见于统计页（不依赖 5 分钟一轮的 rollup）；`rollup_hourly` 每 5 分钟全量重算作对账，两者结果一致（幂等）
 - **成本估算（`cost_usd` / `cost_cny`，2026-10）**：统计页成本非上游真实扣费，而是「token × 公开刊例价」估算；价表来自 `https://models.dev/api.json`（每模型 `cost.input` / `cost.output` / `cost.cache_read`，**USD / 百万 token**），逻辑在 `src/pricing.py`（选条 / 公式 / 匹配口径见 README「用量统计里的成本」）。**写入时定值**：`StatsCollector.record()` 按**当时**价表与汇率算好 `usage_events.cost_usd` / `cost_cny` 落库，历史行不随价表 / 汇率重算（与 credit 推算同一心智）。**聚合口径**：`usage_hourly` 加 `cost_usd_sum` / `cost_cny_sum` / `cost_known`；查询侧 `cost_known=0`（该小时 / 渠道无可定价明细）回 `None`、展示 `—` 而非 0——成本天然是**下限**（未收录模型不计）。**汇率**是热更项 `USD_CNY_RATE`（默认 6.70），只影响之后写入；价表由后台任务 `price_catalog`（`PRICE_CATALOG_MINUTES`，默认每日、下限 60 分钟）周期拉取并落盘 `DATA_DIR/model_prices.json`，启动同步回灌（零上游请求）、失败只记日志；**无快照时**（首次部署 / 快照损坏）启动另起后台预热任务（`_warm_price_table`，不阻塞 `/health`）立即补拉，否则成本空窗到下一轮（最长一日）。老库升级补这五列后历史行成本为 `NULL`（`—`）；用 `scripts/backfill_cost.py --apply`（默认预览、写库前备份、幂等）按当前价表与生效汇率一次性补齐 / 重算全部明细并重算小时汇总——口径是「按今天重估」而非还原每笔当时真实花费。
-**管理台「模型列表」页**（`GET /api/model-catalog`，`api/admin_model_catalog.py`）只读展示 models.dev 目录：`build_model_catalog` 与 `build_price_table` 共用 `_select_entries` 选条口径，价格外保留名称 / 上下文 / 模态 / 能力 / 知识截止等元数据，落盘 `DATA_DIR/models_dev_catalog.json`（同 7 天上限），`_refresh_price_catalog` 一轮里就地换入 `app.state.models_dev_catalog`。端点按模型 id 升序回 `models`（每行含 `id`/`name`/`provider`/`context`/`max_output`/`input_modalities`/`output_modalities`/能力布尔/`knowledge`/`release_date`/`input`/`output`/`cache_read`/`cache_write`）与 `count`/`currency`/`usd_cny_rate`/`saved_at`——目录缺失回空表 + `saved_at=None`，页面显示空态而非报错。只要求登录（models.dev 是公开数据，各角色可看），不写库
+**管理台「模型列表」页**（`GET /api/model-catalog`，`api/admin_model_catalog.py`）只读展示 models.dev 目录：`build_model_catalog` 与 `build_price_table` 共用 `_select_entries` 选条口径，价格外保留名称 / 上下文 / 模态 / 能力 / 知识截止等元数据，落盘 `DATA_DIR/models_dev_catalog.json`（同 7 天上限），`_refresh_price_catalog` 一轮里就地换入 `app.state.models_dev_catalog`。端点默认按模型 id 升序回 `models`（`sort` / `order` 可切列，见 §3.24；每行含 `id`/`name`/`provider`/`context`/`max_output`/`input_modalities`/`output_modalities`/能力布尔/`knowledge`/`release_date`/`input`/`output`/`cache_read`/`cache_write`）与 `count`/`currency`/`usd_cny_rate`/`saved_at`——目录缺失回空表 + `saved_at=None`，页面显示空态而非报错。只要求登录（models.dev 是公开数据，各角色可看），不写库
 - **延迟均值只算成功请求**：分子 `SUM(latency_ms WHERE ok=1)` 与分母 `ok_count` 配对；失败请求耗时不能拉偏「典型耗时」（与图表口径一致）
 - **应用日志只写 stderr，轮转交给平台**：不在应用内开文件、不用 `RotatingFileHandler`。各部署形态（systemd / docker 等）采集方式不同但都靠 stdout/stderr 对接；应用自己写文件会与平台轮转争抢同一文件，容器里还会写进镜像层（重启即丢且 `docker logs` 看不到）。配置见 `deploy/` 与 compose 的 `logging` 段
 - **必须在 `build_app` 里配 root logger**：uvicorn 默认 `LOGGING_CONFIG` 只配 `uvicorn` / `uvicorn.access`（`propagate=false`），**从不配 root**；root 默认 `WARNING` 且无 handler，导致 `logging.getLogger(__name__)` 的 INFO 静默丢失。生产路径 `uvicorn src.main:build_app --factory` 不经过 `run()`，所以配置必须挂在 `build_app`（幂等，见 `src/webapp/logging.py`）

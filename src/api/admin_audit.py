@@ -19,12 +19,13 @@ def create_router(services: Services) -> APIRouter:
     @router.get("/api/audit")
     async def list_audit(actor: str = "", action: str = "", since: int = 0,
                          before: int = 0, limit: int = 100, offset: int = 0,
+                         sort: str | None = None, order: str | None = None,
                          principal=Depends(principal_from_request)):
         require_admin(principal)
         rows = services.audit.query(
             actor=actor or None, action=action or None,
             since=since or None, before=before or None,
-            limit=limit, offset=offset)
+            limit=limit, offset=offset, sort=sort, order=order)
         return {"events": rows, "actions": list(ACTIONS), "labels": ACTION_LABELS}
 
     return router

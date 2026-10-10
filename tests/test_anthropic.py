@@ -428,6 +428,31 @@ def test_translator_usage_payload_none():
     assert _usage_payload(None) == {"input_tokens": 0, "output_tokens": 0}
 
 
+def test_usage_payload_splits_cache_read_from_input():
+    """内部 input_tokens 含缓存命中（OpenAI 口径），Anthropic 要拆成两笔。"""
+    from src.compat.anthropic.response import _usage_payload
+
+    assert _usage_payload(
+        Usage(input_tokens=10, output_tokens=2, cached_tokens=6)) == {
+            "input_tokens": 4, "output_tokens": 2, "cache_read_input_tokens": 6}
+
+
+def test_usage_payload_cache_edge_cases():
+    from src.compat.anthropic.response import _usage_payload
+
+    # cached=0 不算命中，不补占位字段
+    assert _usage_payload(
+        Usage(input_tokens=10, output_tokens=1, cached_tokens=0)) == {
+            "input_tokens": 10, "output_tokens": 1}
+    # 上游数据异常（命中 > 输入）时夹到 0，不出现负输入
+    assert _usage_payload(
+        Usage(input_tokens=3, output_tokens=1, cached_tokens=9)) == {
+            "input_tokens": 0, "output_tokens": 1, "cache_read_input_tokens": 9}
+    # 缺 input/output 时按 0 兜底，命中仍照记
+    assert _usage_payload(Usage(cached_tokens=5)) == {
+        "input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 5}
+
+
 def test_translator_reuses_open_block_for_consecutive_same_kind():
     """连续同类型增量并入同一个块（不重复 start/stop），已收尾后再收尾是幂等的。"""
     translator = AnthropicStreamTranslator("m")
@@ -508,6 +533,31 @@ def test_completion_to_message_tolerates_missing_fields():
     assert payload["usage"] == {"input_tokens": 0, "output_tokens": 0}
 
 
+def test_completion_to_message_maps_cache_read():
+    payload = completion_to_message({
+        "choices": [{"message": {}}],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 2,
+                  "prompt_tokens_details": {"cached_tokens": 6}}})
+    assert payload["usage"] == {"input_tokens": 4, "output_tokens": 2,
+                                "cache_read_input_tokens": 6}
+
+
+def test_completion_to_message_ignores_malformed_usage_counts():
+    payload = completion_to_message({
+        "choices": [{"message": {}}],
+        "usage": {"prompt_tokens": True, "completion_tokens": "3",
+                  "prompt_tokens_details": 5}})
+    assert payload["usage"] == {"input_tokens": 0, "output_tokens": 0}
+
+
+def test_completion_to_message_ignores_non_int_cached():
+    payload = completion_to_message({
+        "choices": [{"message": {}}],
+        "usage": {"prompt_tokens": 4, "completion_tokens": 1,
+                  "prompt_tokens_details": {"cached_tokens": "2"}}})
+    assert payload["usage"] == {"input_tokens": 4, "output_tokens": 1}
+
+
 def test_completion_to_message_parses_arguments():
     payload = completion_to_message({"choices": [{"message": {"tool_calls": [
         {"id": "c1", "function": {"name": "f", "arguments": '{"a": 1}'}},
@@ -539,6 +589,12 @@ class _Provider:
                 {"index": 0, "id": "call_9", "type": "function",
                  "function": {"name": "f", "arguments": '{"a":1}'}}])
             yield Event(kind=EventKind.FINISH, finish_reason="tool_calls")
+            return
+        if self.scenario == "cache":
+            yield Event(kind=EventKind.CONTENT, content="cached")
+            yield Event(kind=EventKind.USAGE, usage=Usage(
+                input_tokens=10, output_tokens=3, cached_tokens=8))
+            yield Event(kind=EventKind.FINISH, finish_reason="stop")
             return
         yield Event(kind=EventKind.CONTENT, content="hi there")
         yield Event(kind=EventKind.USAGE, usage=Usage(input_tokens=2, output_tokens=3))
@@ -613,6 +669,25 @@ def test_endpoint_non_stream(tmp_path):
     assert body["content"] == [{"type": "text", "text": "hi there"}]
     assert body["usage"] == {"input_tokens": 2, "output_tokens": 3}
     assert provider.last_payload["messages"][0] == {"role": "user", "content": "hi"}
+
+
+def test_endpoint_stream_reports_cache_read(tmp_path):
+    app = _app(tmp_path, _Provider("cache"))
+    with TestClient(app) as client:
+        response = client.post("/v1/messages", headers=_auth(app),
+                               json=_messages(stream=True))
+    events = _events(response.text)
+    usage = [data["usage"] for name, data in events if name == "message_delta"][0]
+    assert usage == {"input_tokens": 2, "output_tokens": 3,
+                     "cache_read_input_tokens": 8}
+
+
+def test_endpoint_non_stream_reports_cache_read(tmp_path):
+    app = _app(tmp_path, _Provider("cache"))
+    with TestClient(app) as client:
+        response = client.post("/v1/messages", headers=_auth(app), json=_messages())
+    assert response.json()["usage"] == {"input_tokens": 2, "output_tokens": 3,
+                                        "cache_read_input_tokens": 8}
 
 
 def test_endpoint_accepts_bearer_fallback(tmp_path):

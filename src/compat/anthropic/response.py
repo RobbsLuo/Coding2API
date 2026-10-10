@@ -61,11 +61,26 @@ def _error_type_for(code: str) -> str:
 
 
 def _usage_payload(usage: Usage | None) -> dict[str, int]:
-    """Anthropic usage 形状：input_tokens / output_tokens 两个必填 int。"""
+    """Anthropic usage 形状：input_tokens / output_tokens 必填，缓存命中另计。
+
+    Anthropic 语义里 input / cache_read / cache_creation 三者互斥（`input_tokens`
+    **不含**缓存命中）；本网关内部 `Usage.input_tokens` 取 OpenAI 口径的
+    `prompt_tokens`（**含**命中，见各 provider 的 events 解析）。故命中时先从
+    `input_tokens` 扣除、再另记 `cache_read_input_tokens`——否则 Claude Code 会
+    把同一批 token 既按全价输入、又按缓存读各计一次。上游没报命中（None）时
+    不补 0 占位（与 OpenAI 出口「上游没报就不冒充已上报」同一纪律）。
+    """
     if usage is None:
         return {"input_tokens": 0, "output_tokens": 0}
-    return {"input_tokens": usage.input_tokens or 0,
-            "output_tokens": usage.output_tokens or 0}
+    input_tokens = usage.input_tokens or 0
+    payload: dict[str, int] = {
+        "input_tokens": input_tokens,
+        "output_tokens": usage.output_tokens or 0}
+    cached = usage.cached_tokens
+    if cached:
+        payload["input_tokens"] = max(0, input_tokens - cached)
+        payload["cache_read_input_tokens"] = cached
+    return payload
 
 
 class AnthropicStreamTranslator:
@@ -252,15 +267,30 @@ def _parse_arguments(value: Any) -> Any:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _int_or_none(value: Any) -> int | None:
+    """chat usage 里的计数只认非 bool 的 int，其余（缺失/串/浮点）当未知。"""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
+
+
+def _completion_usage(usage: dict[str, Any]) -> Usage:
+    """chat.completion 的 OpenAI 形状 usage → 内部 Usage（含缓存命中）。"""
+    details = usage.get("prompt_tokens_details")
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    return Usage(input_tokens=_int_or_none(usage.get("prompt_tokens")),
+                 output_tokens=_int_or_none(usage.get("completion_tokens")),
+                 cached_tokens=_int_or_none(cached))
+
+
 def completion_to_message(completion: dict[str, Any], *,
                           message_id: str | None = None) -> dict[str, Any]:
     """聚合好的 chat.completion → Anthropic `message` 对象（非流式出口）。"""
     choice = (completion.get("choices") or [])[0]
     message = choice.get("message") or {}
     finish_reason = choice.get("finish_reason") or "stop"
-    usage = completion.get("usage") or {}
-    prompt = usage.get("prompt_tokens")
-    completion_tokens = usage.get("completion_tokens")
+    usage = completion.get("usage")
+    usage_obj = _completion_usage(usage) if isinstance(usage, dict) else None
     return {
         "id": message_id or _id("msg"),
         "type": "message",
@@ -269,8 +299,5 @@ def completion_to_message(completion: dict[str, Any], *,
         "content": _content_from_message(message),
         "stop_reason": _stop_reason(finish_reason),
         "stop_sequence": None,
-        "usage": {
-            "input_tokens": prompt if isinstance(prompt, int) else 0,
-            "output_tokens": completion_tokens if isinstance(completion_tokens, int) else 0,
-        },
+        "usage": _usage_payload(usage_obj),
     }

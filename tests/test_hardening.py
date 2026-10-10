@@ -556,6 +556,30 @@ def test_api_not_found_helper_shape():
     assert _api_not_found("api/x").status_code == 404
 
 
+def test_static_cache_headers_keep_entry_fresh_and_assets_immutable(
+        client, tmp_path, monkeypatch):
+    """index.html 走 no-cache，hash 化的 assets 永久缓存。
+
+    重新构建后 assets 文件名会变，但浏览器若缓存了旧 index.html 就会加载上一版
+    bundle（页面能打开、功能却是旧的）。入口页必须每次回源校验。
+    """
+    from src.webapp import static
+
+    dist = tmp_path / "dist"
+    (dist / "assets").mkdir(parents=True)
+    (dist / "index.html").write_text("<html>spa</html>", encoding="utf-8")
+    (dist / "assets" / "index-abc123.js").write_text("console.log(1)", encoding="utf-8")
+    monkeypatch.setattr(static, "frontend_dist", lambda: dist)
+
+    index = client.get("/credentials")
+    assert index.status_code == 200
+    assert index.headers["cache-control"] == "no-cache"
+
+    asset = client.get("/assets/index-abc123.js")
+    assert asset.status_code == 200
+    assert "immutable" in asset.headers["cache-control"]
+
+
 # ---------------------------------------------------- #15 凭证恢复入口
 
 

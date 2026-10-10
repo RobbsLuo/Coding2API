@@ -5,8 +5,10 @@ import { useApiKeys, useQueryClient } from "../api/hooks";
 import { formatTime } from "../api/display";
 import { cn } from "../lib/utils";
 import { useDialogFocus } from "../hooks/useDialogFocus";
+import { useSort } from "../hooks/useSort";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { SortableHead } from "../components/SortableHead";
 import { PROVIDER_LABEL, PROVIDER_ORDER } from "../api/providers";
 import type { ApiKeyCreated } from "../api/types";
 import {
@@ -369,7 +371,8 @@ function AnthropicEntry({ apiKey }: { apiKey: string }) {
 }
 
 export function ApiKeysPage() {
-  const { data, isLoading } = useApiKeys();
+  const { sort, order, toggle } = useSort("created_at", "asc", { last_used_at: "desc" });
+  const { data, isLoading } = useApiKeys(undefined, sort, order);
   const client = useQueryClient();
   const [name, setName] = useState("");
   const [binding, setBinding] = useState("");
@@ -474,14 +477,21 @@ export function ApiKeysPage() {
           <Table data-testid="keys-table">
             <TableHeader>
               <TableRow>
-                <TableHead>名称</TableHead>
+                <SortableHead label="名称" columnKey="name" active={sort === "name"}
+                              direction={order} onToggle={toggle} testId="sort-name" />
                 <TableHead>Key</TableHead>
-                <TableHead>渠道</TableHead>
+                <SortableHead label="渠道" columnKey="provider_binding"
+                              active={sort === "provider_binding"} direction={order}
+                              onToggle={toggle} testId="sort-provider_binding" />
                 <TableHead>来源 IP</TableHead>
                 <TableHead>模型白名单</TableHead>
-                <TableHead>到期</TableHead>
-                <TableHead>创建时间</TableHead>
-                <TableHead>最后使用</TableHead>
+                <SortableHead label="到期" columnKey="expires_at" active={sort === "expires_at"}
+                              direction={order} onToggle={toggle} testId="sort-expires_at" />
+                <SortableHead label="创建时间" columnKey="created_at" active={sort === "created_at"}
+                              direction={order} onToggle={toggle} testId="sort-created_at" />
+                <SortableHead label="最后使用" columnKey="last_used_at"
+                              active={sort === "last_used_at"} direction={order}
+                              onToggle={toggle} testId="sort-last_used_at" />
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>

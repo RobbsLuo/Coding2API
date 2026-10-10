@@ -265,7 +265,21 @@ Playground 与 `GET /v1/models` 走 **stale-while-revalidate**：有缓存立刻
 统计页**按渠道 / 按模型 / 按用户**三个维度读小时汇总表 `usage_hourly`（永久保留），新请求在写入时增量累加（`collector._bump_hourly`），后台 retention 任务每轮全量重算（`rollup_hourly`）。若历史数据偏小——老库升级前落的明细没被覆盖、或补过明细（`backfill_cost.py` 等）后没重算——用 `python3 scripts/rollup_hourly.py --apply` 一次性重算（默认预览、**写库前自动备份**、幂等）。脚本先报告缺口（缺汇总行的分组键、数值不符的分组键）与两侧时间跨度，并提示**明细已过保留期（90 天）无法还原**的区间：早于明细保留期且汇总也没有的小时不可逆补回，只能如实显示缺口。
 
 ### 用量统计里的分组维度
-统计页**分组统计**面板用 tabs 切维度，四个维度共用同一张表（请求数 / 成功数 / 成功率 / 输入 / 输出 / 命中缓存 / Credit / 成本）：**按渠道**、**按模型**、**按用户**、**按凭证**。后三个分组键分别为 `usage_hourly.username`、`usage_hourly.model`、`usage_events.credential_id`，对应端点 `GET /api/stats/by-provider|by-model|by-user|by-credential`（`username` / `since` 参数与其它统计端点一致，租户隔离同样以 `_scope` 为准）。**按用户 / 按凭证**只对 admin 与 operator 展示（viewer 只能看自己，恒是「我」一行，给这个 tab 只是噪音）。**口径差异**：渠道 / 模型 / 用户三维读**小时汇总**（永久保留，最近 5 分钟内的请求尚未计入）；**凭证维度读明细表**（小时汇总主键里没有 `credential_id`），故只覆盖**最近 90 天**，且无凭证的预热失败等请求不计入——面板底部按当前维度给出对应说明。凭证 ID 只展示前 12 位（完整值在悬停 title 里），刻意不展示凭证昵称（常含邮箱/手机）。
+统计页**分组统计**面板用 tabs 切维度，四个维度共用同一张表（请求数 / 成功数 / 成功率 / 输入 / 输出 / 命中缓存 / Credit / 成本）：**按渠道**、**按模型**、**按用户**、**按凭证**。后三个分组键分别为 `usage_hourly.username`、`usage_hourly.model`、`usage_events.credential_id`，对应端点 `GET /api/stats/by-provider|by-model|by-user|by-credential`（`username` / `since` 参数与其它统计端点一致，租户隔离同样以 `_scope` 为准）。**默认按请求数降序**（并列时按分组键升序，次序稳定），点列头可在升序 / 降序间切换，`sort` / `order` 查询参数见下「列表排序」。**按用户 / 按凭证**只对 admin 与 operator 展示（viewer 只能看自己，恒是「我」一行，给这个 tab 只是噪音）。**口径差异**：渠道 / 模型 / 用户三维读**小时汇总**（永久保留，最近 5 分钟内的请求尚未计入）；**凭证维度读明细表**（小时汇总主键里没有 `credential_id`），故只覆盖**最近 90 天**，且无凭证的预热失败等请求不计入——面板底部按当前维度给出对应说明。凭证列显示**渠道 icon + 凭证昵称**，与请求明细同口径：昵称为空或凭证已删除时回落 ID 前 12 位（完整值在悬停 title 里）；icon 取凭证当前所属渠道，凭证已删除则回退该组明细里的渠道。
+
+### 列表排序（可点列头）
+管理台各列表**列头可点排序**：点一次用该列的「首次点击方向」（数值列先降序、文本列先升序），再点在同一列的升序 / 降序间切换；当前排序列在表头显示上 / 下箭头并经 `aria-sort` 标注。排序一律由**后端**完成——所有 `GET` 列表端点接受统一的 `sort`（白名单键）与 `order`（`asc` / `desc`）查询参数。**未知 `sort` 键或非法 `order` 值回落到该端点的默认排序，不报错**（前端缓存里的旧键不会把页面打挂）；`sort` 是白名单键而非 SQL 列名，注入面为零。适用端点：
+
+- `GET /api/credentials`：`nickname` / `provider` / `health` / `enabled` / `pinned` / `quota_remaining` / `quota_total` / `quota_expiring_credits` / `token_expires_at` / `growth_last_run_at` / `created_at`（默认 `created_at` 升序）。含派生字段（到期额度等）在组装后排序，`token_expires_at` / `growth_last_run_at` 为「未知」（0 / 空）时始终排最后。
+- `GET /api/users`：`username` / `role` / `enabled` / `created_by` / `created_at` / `updated_at`（默认 `username` 升序）。
+- `GET /api/api-keys`：`name` / `provider_binding` / `created_at` / `last_used_at` / `expires_at`（默认 `created_at` 升序）。
+- `GET /api/audit`：`ts` / `actor` / `action` / `target` / `detail` / `ip` / `ok`（默认 `ts` 降序）。
+- `GET /api/alerts`：`ts` / `severity` / `rule` / `scope` / `message` / `delivered`（默认 `ts` 降序）。
+- `GET /api/model-catalog`：`id` / `name` / `provider` / `context` / `max_output` / `knowledge` / `release_date` / `input` / `output` / `cache_read` / `cache_write`（默认 `id` 升序）。
+- `GET /api/credentials/{id}/credit-events`：`ts` / `window_start` / `delta` / `source`（默认 `ts` 降序）。
+- `GET /api/credentials/{id}/accounts`：`nickname` / `account_id` / `type`（默认 `nickname` 升序）。
+- `GET /api/stats/by-provider|by-model|by-user|by-credential`：`group`（分组键）/ `requests` / `ok_count` / `input_tokens` / `output_tokens` / `cached_tokens` / `credit` / `cost_cny`（默认 `requests` 降序）。
+- `GET /api/stats/events`（逐请求明细）：`time`（rowid）/ `ts` / `username` / `provider` / `credential` / `model` / `ok` / `input_tokens` / `output_tokens` / `cached_tokens` / `credit` / `cost_cny` / `ttfb_ms` / `latency_ms`。**两套分页**：默认（`time` 降序）仍走 rowid 游标分页、返回 `next_before`（null 表示到底，`total` 为 null）；按**其它列**排序或时间升序时改用 `LIMIT/OFFSET` 分页、额外返回 `total`（总数，供前端算还有没有下一页），此时忽略 `before`。换排序 / 改每页数量 / 切时间范围都会回到第一页。
 
 ## 后台任务
 额度探测、token 预刷新、每日签到、成长中心、活跃上报、明细清理、渠道模型列表刷新、模型列表刷新（models.dev）、运维告警共 9 类，由 `TaskRunner` 自动调度，失败互不影响；周期见 TECHNICAL.md §6.2。每类任务的上次执行时间、最近结果与错误在管理台**「任务与配置」页**查看（30 秒自动刷新），运行态只存在于**本次进程**内，重启归零。

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..sorting import parse_sort_order, sql_order
+
 METRIC_COLUMNS: dict[str, str] = {
     # metric 参数 → usage_hourly 上的取值表达式
     "requests": "requests",
@@ -13,6 +15,52 @@ METRIC_COLUMNS: dict[str, str] = {
     # 成本默认口径是人民币（与本模块展示一致）；仅含可定价明细的小时才有值。
     "cost": "cost_cny_sum",
 }
+
+
+# 分组统计排序白名单：API 键 → 聚合列别名（`group` 指分组键列 `group_key`）。
+# 默认按请求数降序（「哪家/哪个模型用得最多」才是分组表的用途），并列时按
+# 分组键升序——次序稳定且与旧行为一致（旧代码就是按分组键升序）。
+GROUP_SORT_COLUMNS: dict[str, str] = {
+    "group": "group_key",
+    "requests": "requests",
+    "ok_count": "ok_count",
+    "input_tokens": "input_tokens",
+    "output_tokens": "output_tokens",
+    "cached_tokens": "cached_tokens",
+    "credit": "credit_sum",
+    "cost_cny": "cost_cny_sum",
+}
+
+
+# 逐请求明细排序白名单：API 键 → 列（带 `e.` 前缀，因查询有 JOIN）。
+# `time` 是 rowid（插入序）；它保持降序时走游标分页，其余情况走 offset 分页。
+EVENT_SORT_COLUMNS: dict[str, str] = {
+    "time": "e.rowid",
+    "ts": "e.ts",
+    "username": "e.username",
+    "provider": "e.provider",
+    "credential": "e.credential_id",
+    "model": "e.model",
+    "ok": "e.ok",
+    "input_tokens": "e.input_tokens",
+    "output_tokens": "e.output_tokens",
+    "cached_tokens": "e.cached_tokens",
+    "credit": "e.credit",
+    "cost_cny": "e.cost_cny",
+    "ttfb_ms": "e.ttfb_ms",
+    "latency_ms": "e.latency_ms",
+}
+
+
+def _group_order(sort: str | None, order: str | None) -> str:
+    """分组统计的 `ORDER BY`：主列随 sort，并列时分组键升序（稳定次序）。"""
+    key, desc = parse_sort_order(sort, order, GROUP_SORT_COLUMNS,
+                                 default_key="requests", default_desc=True)
+    column = GROUP_SORT_COLUMNS[key]
+    if column == "group_key":
+        return "group_key ASC"
+    direction = "DESC" if desc else "ASC"
+    return f"{column} {direction}, group_key ASC"
 
 
 class StatsQuery:
@@ -113,34 +161,131 @@ class StatsQuery:
             "avg_ttfb_ms": round(row["ttfb_sum"] / ok_count) if ok_count else None,
         }
 
-    def by_provider(self, *, username: str | None = None,
-                    since: int | None = None) -> list[dict[str, Any]]:
-        """按渠道聚合（同样读小时汇总，与总览/图表同源）。"""
+    @staticmethod
+    def _group_row(row: Any, key: str, extra: tuple[str, ...] = ()) -> dict[str, Any]:
+        """把一行聚合结果转成 {分组键: ...} + 公共指标的 dict（各分组维度共用）。
+
+        `extra`：维度特有的展示列（如凭证维度的 provider / credential_name），
+        SQL 已算好，这里原样带出。
+        """
+        return {
+            key: row["group_key"],
+            "requests": row["requests"],
+            "ok_count": row["ok_count"],
+            "input_tokens": row["input_tokens"],
+            "output_tokens": row["output_tokens"],
+            # 缓存命中：任一明细上报过才可信，否则 None（前端显示 —）
+            "cached_tokens": row["cached_tokens"] if row["cached_known"] else None,
+            "credit": row["credit_sum"] if row["credit_known"] else None,
+            "credit_estimated": bool(row["credit_estimated_known"]),
+            "cost_usd": row["cost_usd_sum"] if row["cost_known"] else None,
+            "cost_cny": row["cost_cny_sum"] if row["cost_known"] else None,
+            **{name: row[name] for name in extra},
+        }
+
+    def _group_hourly(self, key: str, *, username: str | None = None,
+                      since: int | None = None, sort: str | None = None,
+                      order: str | None = None) -> list[dict[str, Any]]:
+        """在小时汇总上按 `key` 列聚合（渠道 / 模型 / 用户三个维度共用）。"""
         where, params = self._where(username=username, since=since, since_col="hour_utc")
         rows = self._db.connect().execute(
             f"""
-            SELECT provider, COALESCE(SUM(requests), 0) AS requests,
+            SELECT {key} AS group_key, COALESCE(SUM(requests), 0) AS requests,
                    COALESCE(SUM(ok_count), 0) AS ok_count,
                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   SUM(cached_tokens) AS cached_tokens,
+                   SUM(cached_known) AS cached_known,
                    SUM(credit_sum) AS credit_sum,
                    SUM(credit_known) AS credit_known,
                    SUM(credit_estimated_known) AS credit_estimated_known,
                    SUM(cost_usd_sum) AS cost_usd_sum,
                    SUM(cost_cny_sum) AS cost_cny_sum,
                    SUM(cost_known) AS cost_known
-            FROM usage_hourly {where} GROUP BY provider ORDER BY provider
+            FROM usage_hourly {where} GROUP BY {key} ORDER BY {_group_order(sort, order)}
             """, params).fetchall()
-        return [
-            {"provider": row["provider"], "requests": row["requests"],
-             "ok_count": row["ok_count"],
-             "input_tokens": row["input_tokens"], "output_tokens": row["output_tokens"],
-             "credit": row["credit_sum"] if row["credit_known"] else None,
-             "credit_estimated": bool(row["credit_estimated_known"]),
-             "cost_usd": row["cost_usd_sum"] if row["cost_known"] else None,
-             "cost_cny": row["cost_cny_sum"] if row["cost_known"] else None}
-            for row in rows
-        ]
+        return [self._group_row(row, key) for row in rows]
+
+    def _group_events(self, key: str, *, username: str | None = None,
+                      since: int | None = None, sort: str | None = None,
+                      order: str | None = None, include_credential_name: bool = False,
+                      ) -> list[dict[str, Any]]:
+        """在明细上按 `key` 列聚合。
+
+        仅凭证维度需要：小时汇总的主键里没有 credential_id，无法还原。代价是
+        数据源只保留 90 天（选「全部」时凭证分组比其它维度少），且无凭证的
+        预热失败等请求被排除（它们没有可归属的凭证）。
+
+        `include_credential_name`：随行下发凭证昵称与渠道，前端据此在凭证名前
+        画渠道 icon 并与请求明细显示同一个名字。昵称取自**全局共享池**（常含
+        邮箱/手机），只对 admin/operator 返回（与 `events()` 的 M7 约束一致）。
+        """
+        where, params = self._where(username=username, since=since, since_col="ts",
+                                    alias="e.")
+        # 分组键为空的行（无凭证的预热失败等）没有可归属对象，不参与分组；
+        # _where 无条件时返回空串，这里补 WHERE 关键词
+        clause = f"{where} AND e.{key} IS NOT NULL" if where else f"WHERE e.{key} IS NOT NULL"
+        # 渠道优先取凭证当前所属渠道；凭证已被硬删除则回退该组明细里的渠道。
+        # 同组跨渠道（凭证改过 provider）时 MAX 取字典序最大的那个，仅用于画
+        # icon，不参与统计口径。
+        name_expr = "NULLIF(c.nickname, '')" if include_credential_name else "NULL"
+        rows = self._db.connect().execute(
+            f"""
+            SELECT e.{key} AS group_key, COUNT(*) AS requests,
+                   SUM(e.ok) AS ok_count,
+                   COALESCE(SUM(e.input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(e.output_tokens), 0) AS output_tokens,
+                   SUM(e.cached_tokens) AS cached_tokens,
+                   SUM(CASE WHEN e.cached_tokens IS NULL THEN 0 ELSE 1 END) AS cached_known,
+                   COALESCE(SUM(e.credit), 0) AS credit_sum,
+                   SUM(CASE WHEN e.credit IS NULL THEN 0 ELSE 1 END) AS credit_known,
+                   SUM(CASE WHEN e.credit_estimated = 1 AND e.credit IS NOT NULL
+                            THEN 1 ELSE 0 END) AS credit_estimated_known,
+                   COALESCE(SUM(e.cost_usd), 0) AS cost_usd_sum,
+                   COALESCE(SUM(e.cost_cny), 0) AS cost_cny_sum,
+                   SUM(CASE WHEN e.cost_usd IS NULL THEN 0 ELSE 1 END) AS cost_known,
+                   COALESCE(c.provider, MAX(e.provider)) AS provider,
+                   {name_expr} AS credential_name
+            FROM usage_events e
+            LEFT JOIN credentials c ON c.id = e.credential_id
+            {clause}
+            GROUP BY e.{key} ORDER BY {_group_order(sort, order)}
+            """, params).fetchall()
+        return [self._group_row(row, key, ("provider", "credential_name")) for row in rows]
+
+    def by_provider(self, *, username: str | None = None,
+                    since: int | None = None, sort: str | None = None,
+                    order: str | None = None) -> list[dict[str, Any]]:
+        """按渠道聚合（读小时汇总，与总览/图表同源）。"""
+        return self._group_hourly("provider", username=username, since=since,
+                                  sort=sort, order=order)
+
+    def by_model(self, *, username: str | None = None,
+                 since: int | None = None, sort: str | None = None,
+                 order: str | None = None) -> list[dict[str, Any]]:
+        """按模型聚合（读小时汇总，与总览/图表同源）。"""
+        return self._group_hourly("model", username=username, since=since,
+                                  sort=sort, order=order)
+
+    def by_user(self, *, username: str | None = None,
+                since: int | None = None, sort: str | None = None,
+                order: str | None = None) -> list[dict[str, Any]]:
+        """按用户聚合（读小时汇总，与总览/图表同源）。"""
+        return self._group_hourly("username", username=username, since=since,
+                                  sort=sort, order=order)
+
+    def by_credential(self, *, username: str | None = None,
+                      since: int | None = None, sort: str | None = None,
+                      order: str | None = None,
+                      include_credential_name: bool = False) -> list[dict[str, Any]]:
+        """按凭证聚合（读明细表：小时汇总主键里没有 credential_id）。
+
+        行里带 `provider`（画渠道 icon）与 `credential_name`（与请求明细同口径
+        显示凭证名；未授权/无昵称/凭证已删除时为 None，前端回退显示 ID 前 12 位）。
+        """
+        return self._group_events("credential_id", username=username, since=since,
+                                  sort=sort, order=order,
+                                  include_credential_name=include_credential_name)
 
     def timeline(self, *, username: str | None = None,
                  since: int | None = None, metric: str = "requests") -> list[dict[str, Any]]:
@@ -180,36 +325,72 @@ class StatsQuery:
 
     def events(self, *, username: str | None = None, since: int | None = None,
                before: int | None = None, limit: int = 50,
-               include_credential_name: bool = False) -> dict[str, Any]:
-        """逐请求明细（新→旧，rowid 游标分页）。明细仅保留 90 天。
+               include_credential_name: bool = False, sort: str | None = None,
+               order: str | None = None, offset: int = 0) -> dict[str, Any]:
+        """逐请求明细（默认新→旧，rowid 游标分页）。明细仅保留 90 天。
 
-        rowid 即插入序，稳定且可比大小，游标翻页不漏不重；
-        返回 next_before 供下一页取「rowid 更小」的记录，null 表示到底。
+        **两种分页模式**：
+
+        - 默认（`sort=time` 降序、`offset=0`）：rowid 即插入序，稳定且可比大小，
+          游标翻页不漏不重；返回 `next_before` 供下一页取「rowid 更小」的记录，
+          null 表示到底。
+        - 按其它列排序、或时间升序、或显式给 `offset`：改用 `LIMIT/OFFSET` 分页，
+          额外返回 `total`（总条数）供前端算页数；`next_before` 恒为 null。
+
+        之所以分两套：任意列排序与「rowid 游标」不兼容（游标只在按 rowid 走时
+        成立）。明细只留 90 天，offset 的深翻页成本可接受。
 
         `include_credential_name`：凭证昵称取自**全局共享池**（常含邮箱/手机），
         只对 admin/operator 返回；viewer 即便只看自己的记录也不该看到池里他人
         凭证的昵称（M7）。
         """
-        where, params = self._where(username=username, since=since, before=before,
-                                    alias="e.")
+        key, desc = parse_sort_order(sort, order, EVENT_SORT_COLUMNS,
+                                     default_key="time", default_desc=True)
+        cursor_mode = key == "time" and desc and offset == 0
+        clause = sql_order(sort, order, EVENT_SORT_COLUMNS, default_key="time",
+                           default_desc=True, tiebreak="e.rowid")
         name_expr = ("NULLIF(c.nickname, '')" if include_credential_name else "NULL")
+        columns = (
+            "e.rowid, e.ts, e.username, e.provider, e.credential_id, e.model, "
+            "e.ok, e.error_type, e.input_tokens, e.output_tokens, "
+            "e.reasoning_tokens, e.cached_tokens, e.credit, e.credit_estimated, "
+            "e.cost_usd, e.cost_cny, e.latency_ms, "
+            f"e.ttfb_ms, {name_expr} AS credential_name"
+        )
+        if cursor_mode:
+            where, params = self._where(username=username, since=since, before=before,
+                                        alias="e.")
+            rows = self._db.connect().execute(
+                f"""
+                SELECT {columns}
+                FROM usage_events e
+                LEFT JOIN credentials c ON c.id = e.credential_id
+                {where}
+                ORDER BY {clause} LIMIT ?
+                """, [*params, limit + 1]).fetchall()
+            has_more = len(rows) > limit
+            page = rows[:limit]
+            return {
+                "events": [dict(row) for row in page],
+                "next_before": page[-1]["rowid"] if has_more and page else None,
+                "total": None,
+            }
+        # offset 模式：before 不参与（游标语义仅对 rowid 降序成立）
+        where, params = self._where(username=username, since=since, alias="e.")
+        total = self._db.connect().execute(
+            f"SELECT COUNT(*) AS n FROM usage_events e {where}", params).fetchone()["n"]
         rows = self._db.connect().execute(
             f"""
-            SELECT e.rowid, e.ts, e.username, e.provider, e.credential_id, e.model,
-                   e.ok, e.error_type, e.input_tokens, e.output_tokens,
-                   e.reasoning_tokens, e.cached_tokens, e.credit, e.credit_estimated,
-                   e.cost_usd, e.cost_cny, e.latency_ms,
-                   e.ttfb_ms, {name_expr} AS credential_name
+            SELECT {columns}
             FROM usage_events e
             LEFT JOIN credentials c ON c.id = e.credential_id
             {where}
-            ORDER BY e.rowid DESC LIMIT ?
-            """, [*params, limit + 1]).fetchall()
-        has_more = len(rows) > limit
-        page = rows[:limit]
+            ORDER BY {clause} LIMIT ? OFFSET ?
+            """, [*params, limit, max(0, offset)]).fetchall()
         return {
-            "events": [dict(row) for row in page],
-            "next_before": page[-1]["rowid"] if has_more and page else None,
+            "events": [dict(row) for row in rows],
+            "next_before": None,
+            "total": int(total),
         }
 
     def model_timeline(self, *, username: str | None = None,

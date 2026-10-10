@@ -14,6 +14,8 @@ import type {
   ActivityReportResult,
   ModelInfo,
   ModelCatalogResponse,
+  ModelStats,
+  CredentialStats,
   ProbeResult,
   ProviderStats,
   Role,
@@ -27,6 +29,7 @@ import type {
   TasksResponse,
   UpstreamAuthPoll,
   UpstreamAuthStart,
+  UserStats,
   UserRow,
 } from "./types";
 
@@ -91,7 +94,8 @@ export const api = {
     }),
 
   // ------------------------------------------------------------ 用户管理
-  users: () => request<{ users: UserRow[] }>("/api/users"),
+  users: (sort?: string, order?: string) =>
+    request<{ users: UserRow[] }>(`/api/users${query({ sort, order })}`),
   createUser: (username: string, role: Role) =>
     request<ActivationIssued>("/api/users", { method: "POST", ...json({ username, role }) }),
   updateUserRole: (username: string, role: Role) =>
@@ -114,11 +118,13 @@ export const api = {
     ),
 
   // ---------------------------------------------------------------- 审计
-  audit: (filters: { actor?: string; action?: string; limit?: number; offset?: number } = {}) =>
+  audit: (filters: { actor?: string; action?: string; limit?: number; offset?: number;
+                     sort?: string; order?: string } = {}) =>
     request<AuditResponse>(`/api/audit${query(filters)}`),
 
   // ---------------------------------------------------------------- 凭证
-  credentials: () => request<CredentialsResponse>("/api/credentials"),
+  credentials: (sort?: string, order?: string) =>
+    request<CredentialsResponse>(`/api/credentials${query({ sort, order })}`),
   importCredential: (provider: string, credential: unknown, nickname = "") =>
     request<{ id: string }>("/api/credentials", {
       method: "POST",
@@ -142,8 +148,9 @@ export const api = {
     request<GrowthRunResult>(`/api/credentials/${id}/growth`, { method: "POST" }),
   growthHistory: (id: string) =>
     request<{ events: GrowthEvent[] }>(`/api/credentials/${id}/growth`),
-  creditEvents: (id: string) =>
-    request<{ events: CreditEvent[] }>(`/api/credentials/${id}/credit-events`),
+  creditEvents: (id: string, sort?: string, order?: string) =>
+    request<{ events: CreditEvent[] }>(
+      `/api/credentials/${id}/credit-events${query({ sort, order })}`),
   reportActivity: (id: string) =>
     request<ActivityReportResult>(`/api/credentials/${id}/activity`, { method: "POST" }),
 
@@ -167,7 +174,8 @@ export const api = {
     }),
 
   // ------------------------------------------------------------- API Key
-  apiKeys: () => request<{ api_keys: ApiKey[] }>("/api/api-keys"),
+  apiKeys: (sort?: string, order?: string) =>
+    request<{ api_keys: ApiKey[] }>(`/api/api-keys${query({ sort, order })}`),
   createApiKey: (payload: {
     name: string;
     provider_binding?: string;
@@ -185,21 +193,35 @@ export const api = {
   /** 后台任务运行态（进程内）：与 /api/settings 同页展示。 */
   tasks: () => request<TasksResponse>("/api/tasks"),
   /** 运维告警记录（P1-7）：后台评估命中后落库，倒序回看。 */
-  alerts: () => request<AlertsResponse>("/api/alerts"),
+  alerts: (sort?: string, order?: string) =>
+    request<AlertsResponse>(`/api/alerts${query({ sort, order })}`),
   /** models.dev 模型目录（刊例价 + 明细元数据），模型列表页只读展示。 */
-  modelCatalog: () => request<ModelCatalogResponse>("/api/model-catalog"),
+  modelCatalog: (sort?: string, order?: string) =>
+    request<ModelCatalogResponse>(`/api/model-catalog${query({ sort, order })}`),
 
   // ---------------------------------------------------------------- 统计
   statsOverview: (username?: string, since?: number) =>
     request<StatsOverview>(`/api/stats/overview${query({ username, since })}`),
-  statsByProvider: (username?: string, since?: number) =>
-    request<{ providers: ProviderStats[] }>(`/api/stats/by-provider${query({ username, since })}`),
+  statsByProvider: (username?: string, since?: number, sort?: string, order?: string) =>
+    request<{ providers: ProviderStats[] }>(
+      `/api/stats/by-provider${query({ username, since, sort, order })}`),
+  statsByModel: (username?: string, since?: number, sort?: string, order?: string) =>
+    request<{ models: ModelStats[] }>(
+      `/api/stats/by-model${query({ username, since, sort, order })}`),
+  statsByUser: (username?: string, since?: number, sort?: string, order?: string) =>
+    request<{ users: UserStats[] }>(
+      `/api/stats/by-user${query({ username, since, sort, order })}`),
+  statsByCredential: (username?: string, since?: number, sort?: string, order?: string) =>
+    request<{ credentials: CredentialStats[] }>(
+      `/api/stats/by-credential${query({ username, since, sort, order })}`),
   statsTimeline: (username?: string, since?: number, metric?: StatsMetric) =>
     request<{ points: TimelinePoint[] }>(`/api/stats/timeline${query({ username, since, metric })}`),
   statsModelTimeline: (username?: string, since?: number, metric?: StatsMetric) =>
     request<ModelTimelineResponse>(`/api/stats/model-timeline${query({ username, since, metric })}`),
-  statsEvents: (username?: string, since?: number, before?: number, limit?: number) =>
-    request<StatsEventsResponse>(`/api/stats/events${query({ username, since, before, limit })}`),
+  statsEvents: (username?: string, since?: number, before?: number, limit?: number,
+                sort?: string, order?: string, offset?: number) =>
+    request<StatsEventsResponse>(
+      `/api/stats/events${query({ username, since, before, limit, sort, order, offset })}`),
 
   // ---------------------------------------------------------------- 模型
   models: (apiKey: string) =>

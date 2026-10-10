@@ -14,7 +14,7 @@
       "url": "git@github.com:RobbsLuo/Coding2API.git",
       "provider": "github",
       "link_mode": "local-only",
-      "revision": "d10447ca278440d0d26c8b99733a96fb1d1f1661"
+      "revision": "7b818bcdec8a4fa16e52060589fe09d4181d80fc"
     },
     "views": [
       {
@@ -106,7 +106,7 @@
         },
         {
           "path": "src/api/deps.py",
-          "line": 186,
+          "line": 188,
           "label": "api_key_user"
         }
       ]
@@ -115,7 +115,7 @@
       "id": "admin-ui",
       "type": "frontend",
       "label": "React 管理台",
-      "sublabel": "凭证 / 用户 / 统计 / 配置",
+      "sublabel": "凭证 / 统计 / 配置",
       "pos": [
         248,
         60
@@ -127,12 +127,12 @@
       "sources": [
         {
           "path": "web/src/App.tsx",
-          "line": 23,
+          "line": 24,
           "label": "App"
         },
         {
-          "path": "web/src/Layout.tsx",
-          "line": 46,
+          "path": "web/src/components/Sidebar.tsx",
+          "line": 33,
           "label": "ADMIN_NAV"
         }
       ]
@@ -153,7 +153,7 @@
       "sources": [
         {
           "path": "src/api/deps.py",
-          "line": 116,
+          "line": 118,
           "label": "principal_from_request"
         },
         {
@@ -257,12 +257,12 @@
       "sources": [
         {
           "path": "src/engine/executor.py",
-          "line": 111,
+          "line": 115,
           "label": "Executor"
         },
         {
           "path": "src/engine/scheduler.py",
-          "line": 208,
+          "line": 212,
           "label": "Scheduler.select"
         },
         {
@@ -298,7 +298,7 @@
         },
         {
           "path": "src/db/schema.sql",
-          "line": 234,
+          "line": 243,
           "label": "alert_events"
         }
       ]
@@ -341,12 +341,12 @@
       "sources": [
         {
           "path": "src/main.py",
-          "line": 291,
+          "line": 319,
           "label": "registry"
         },
         {
           "path": "src/provider/base.py",
-          "line": 315,
+          "line": 379,
           "label": "Provider 协议"
         },
         {
@@ -378,8 +378,8 @@
         },
         {
           "path": "src/db/migrate.py",
-          "line": 36,
-          "label": "SCHEMA_VERSION=17"
+          "line": 39,
+          "label": "SCHEMA_VERSION=18"
         },
         {
           "path": "src/db/repo.py",
@@ -392,7 +392,7 @@
       "id": "bg",
       "type": "backend",
       "label": "后台任务",
-      "sublabel": "探测 / 签到 / 告警",
+      "sublabel": "9 类循环 · 运行态",
       "pos": [
         808,
         440
@@ -405,7 +405,7 @@
       "sources": [
         {
           "path": "src/tasks/runner.py",
-          "line": 311,
+          "line": 331,
           "label": "build_runner"
         },
         {
@@ -436,7 +436,7 @@
       "sources": [
         {
           "path": "src/provider/codebuddy/client.py",
-          "line": 573,
+          "line": 579,
           "label": "CodeBuddyProvider"
         }
       ]
@@ -457,7 +457,7 @@
       "sources": [
         {
           "path": "src/provider/trae/client.py",
-          "line": 605,
+          "line": 606,
           "label": "TraeProvider"
         }
       ]
@@ -479,7 +479,7 @@
       "sources": [
         {
           "path": "src/provider/zen/client.py",
-          "line": 374,
+          "line": 451,
           "label": "ZenProvider"
         }
       ]
@@ -543,7 +543,7 @@
       "sources": [
         {
           "path": "src/provider/codearts/__init__.py",
-          "line": 45,
+          "line": 46,
           "label": "CodeArtsProvider"
         }
       ]
@@ -982,7 +982,7 @@
       "dot": "rose",
       "title": "数据与安全",
       "items": [
-        "SQLite WAL 11 表；35 项配置热更",
+        "SQLite WAL 11 表；38 项配置热更",
         "三角色 RBAC + 会话 epoch 吊销；审计留痕（90 天）",
         "凭证加密 + 统计脱敏；API Key 摘要"
       ]

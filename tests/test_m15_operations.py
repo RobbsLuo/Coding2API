@@ -1633,6 +1633,155 @@ def test_stats_overview_global_for_admin(stats):
     assert query.overview(username="alice")["requests"] == 1
 
 
+def test_stats_by_model_aggregates(stats):
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="glm-5.2", ok=True,
+                     input_tokens=100, output_tokens=50, credit=1.0)
+    collector.record(username="u", provider="codebuddy", model="glm-5.2", ok=False)
+    collector.record(username="u", provider="trae", model="kimi-k3", ok=True,
+                     input_tokens=200, output_tokens=100, credit=2.0)
+    rows = query.by_model(username="u")
+    assert [row["model"] for row in rows] == ["glm-5.2", "kimi-k3"]
+    glm = rows[0]
+    assert glm["requests"] == 2 and glm["ok_count"] == 1
+    assert glm["input_tokens"] == 100 and glm["output_tokens"] == 50
+    assert glm["credit"] == 1.0
+    kimi = rows[1]
+    assert kimi["requests"] == 1 and kimi["ok_count"] == 1
+    assert kimi["input_tokens"] == 200 and kimi["output_tokens"] == 100
+    assert kimi["credit"] == 2.0
+
+
+def test_stats_by_model_empty(stats):
+    _collector, query = stats
+    assert query.by_model() == []
+    assert query.by_model(username="nobody") == []
+
+
+def test_stats_by_user_aggregates(stats):
+    collector, query = stats
+    collector.record(username="alice", provider="trae", model="glm-5.2", ok=True,
+                     input_tokens=100, output_tokens=50, credit=1.0)
+    collector.record(username="alice", provider="codebuddy", model="kimi-k3", ok=False)
+    collector.record(username="bob", provider="trae", model="glm-5.2", ok=True,
+                     input_tokens=10, output_tokens=5, credit=0.5)
+    rows = {row["username"]: row for row in query.by_user()}
+    assert set(rows) == {"alice", "bob"}
+    alice = rows["alice"]
+    assert alice["requests"] == 2 and alice["ok_count"] == 1
+    assert alice["input_tokens"] == 100 and alice["output_tokens"] == 50
+    assert alice["credit"] == 1.0
+    assert rows["bob"]["requests"] == 1 and rows["bob"]["ok_count"] == 1
+    # 用户维度同样可按人过滤（viewer 只能看自己）
+    assert [row["username"] for row in query.by_user(username="bob")] == ["bob"]
+    assert query.by_user(username="nobody") == []
+
+
+def test_stats_by_credential_aggregates(stats):
+    """凭证维度读明细表（小时汇总主键里没有 credential_id）。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="glm-5.2", ok=True,
+                     credential_id="cred_a", input_tokens=100, output_tokens=50,
+                     cached_tokens=30, credit=1.0)
+    collector.record(username="u", provider="codebuddy", model="glm-5.2", ok=True,
+                     credential_id="cred_a", input_tokens=10, output_tokens=5,
+                     cached_tokens=0, credit=0.5)
+    collector.record(username="u", provider="trae", model="kimi-k3", ok=True,
+                     credential_id="cred_b", input_tokens=20, output_tokens=10,
+                     credit=2.0)
+    # 无凭证的请求（预热失败等）不可归属，不进分组
+    collector.record(username="u", provider="trae", model="glm-5.2", ok=False,
+                     error_type="upstream_error")
+
+    rows = {row["credential_id"]: row for row in query.by_credential()}
+    assert set(rows) == {"cred_a", "cred_b"}
+    cred_a = rows["cred_a"]
+    assert cred_a["requests"] == 2 and cred_a["ok_count"] == 2
+    assert cred_a["input_tokens"] == 110 and cred_a["output_tokens"] == 55
+    assert cred_a["cached_tokens"] == 30
+    assert cred_a["credit"] == 1.5
+    assert rows["cred_b"]["requests"] == 1
+    # 无缓存上报时 cached_tokens 回 None（不把 0 当成真值）
+    assert rows["cred_b"]["cached_tokens"] is None
+    # 按用户/时间过滤同样生效（_where 拼的子句与 hourly 维度共用）
+    assert query.by_credential(username="nobody") == []
+
+
+def test_stats_by_credential_reports_name_and_provider(repo):
+    """凭证分组随行下发渠道（画 icon）与昵称（与明细同口径显示凭证名）。
+
+    昵称取自共享池，只对 operator 返回（M7）；渠道优先取凭证当前所属，
+    凭证已删除则回退明细里的渠道。
+    """
+    credentials, db = repo
+    collector, query = StatsCollector(db), StatsQuery(db)
+    keep_id = credentials.add(provider="trae", credential_data={"accessToken": "t"},
+                              nickname="主号")
+    ghost_id = credentials.add(provider="trae", credential_data={"accessToken": "g"},
+                               nickname="将删")
+    blank_id = credentials.add(provider="codearts", credential_data={}, nickname="")
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     credential_id=keep_id)
+    # 已删除凭证的明细跨渠道（凭证改过 provider）→ 回退取字典序最大的那个
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     credential_id=ghost_id)
+    collector.record(username="u", provider="codebuddy", model="m", ok=True,
+                     credential_id=ghost_id)
+    collector.record(username="u", provider="codearts", model="m", ok=True,
+                     credential_id=blank_id)
+    assert credentials.delete(ghost_id) is True
+
+    rows = {row["credential_id"]: row for row in
+            query.by_credential(include_credential_name=True)}
+    assert rows[keep_id]["credential_name"] == "主号"
+    assert rows[keep_id]["provider"] == "trae"
+    assert rows[ghost_id]["credential_name"] is None        # 已删除 → 回退
+    assert rows[ghost_id]["provider"] == "trae"             # 回退明细渠道
+    assert rows[blank_id]["credential_name"] is None        # 空昵称 → 同回退
+    assert rows[blank_id]["provider"] == "codearts"
+
+    # M7：默认（viewer 口径）不下发共享池昵称，渠道照常给（前端 icon 依赖）
+    default_rows = {row["credential_id"]: row for row in query.by_credential()}
+    assert default_rows[keep_id]["credential_name"] is None
+    assert default_rows[keep_id]["provider"] == "trae"
+
+
+def test_stats_by_credential_endpoint_gates_credential_name(admin_client, tmp_path):
+    """by-credential 端点：operator 拿昵称；viewer 不下发昵称但仍拿渠道。"""
+    app, client = admin_client
+    credential_id = app.state.credentials.add(provider="trae",
+                                              credential_data={"accessToken": "t"},
+                                              nickname="主号")
+    app.state.stats_collector.record(username="root", provider="trae", model="m", ok=True,
+                                     credential_id=credential_id)
+    row = client.get("/api/stats/by-credential").json()["credentials"][0]
+    assert row["credential_name"] == "主号" and row["provider"] == "trae"
+
+    # 非 operator 身份：共享池昵称不下发（M7），渠道 icon 依赖的 provider 照常
+    reader_settings = Settings(_env_file=None, APP_SECRET=SECRET,
+                               DATA_DIR=str(tmp_path / "reader"))
+    reader_app = build_app(reader_settings)
+    reader_cred = reader_app.state.credentials.add(
+        provider="codebuddy", credential_data={"bearer_token": "b"}, nickname="他人号")
+    reader_app.state.stats_collector.record(username="alice", provider="codebuddy",
+                                            model="m", ok=True,
+                                            credential_id=reader_cred)
+    with TestClient(reader_app) as viewer:
+        viewer.cookies.set("coding2api_session", create_session_token("alice", SECRET))
+        seen = viewer.get("/api/stats/by-credential").json()["credentials"][0]
+    assert seen["credential_name"] is None and seen["provider"] == "codebuddy"
+
+
+def test_stats_groups_report_cached_tokens_and_known(stats):
+    """各维度的缓存命中：任一明细上报过才给值，否则 None。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True, cached_tokens=40)
+    for rows in (query.by_provider(), query.by_model(), query.by_user()):
+        assert rows[0]["cached_tokens"] == 40
+    collector.record(username="v", provider="trae", model="m", ok=True)
+    assert query.by_provider(username="v")[0]["cached_tokens"] is None
+
+
 def test_stats_overview_empty_and_filters(stats):
     _collector, query = stats
     empty = query.overview()
@@ -1959,6 +2108,17 @@ def test_stats_endpoints_scope_by_principal(admin_client):
     scoped = client.get("/api/stats/overview", params={"username": "other"}).json()
     assert scoped["requests"] == 1
     assert client.get("/api/stats/by-provider").json()["providers"][0]["requests"] == 2
+    assert client.get("/api/stats/by-model").json()["models"][0]["requests"] == 2
+    assert client.get("/api/stats/by-user").json()["users"] == [
+        {"username": "other", "requests": 1, "ok_count": 1, "input_tokens": 0,
+         "output_tokens": 0, "cached_tokens": None, "credit": None,
+         "credit_estimated": False, "cost_usd": None, "cost_cny": None},
+        {"username": "root", "requests": 1, "ok_count": 1, "input_tokens": 0,
+         "output_tokens": 0, "cached_tokens": None, "credit": None,
+         "credit_estimated": False, "cost_usd": None, "cost_cny": None},
+    ]
+    # 凭证分组读明细：本用例两条记录都没带 credential_id，故为空
+    assert client.get("/api/stats/by-credential").json() == {"credentials": []}
     timeline = client.get("/api/stats/timeline").json()
     assert timeline["points"]
     # 渠道列动态取自数据（本用例只写了 trae），不再固定为两渠道
@@ -2563,7 +2723,7 @@ def test_stats_model_timeline_endpoint(admin_client):
 def test_stats_events_empty(stats):
     """空库：明细返回空页且无游标。"""
     _collector, query = stats
-    assert query.events() == {"events": [], "next_before": None}
+    assert query.events() == {"events": [], "next_before": None, "total": None}
 
 
 def test_stats_events_pagination_and_filters(stats):

@@ -200,11 +200,14 @@ export function Tabs({
   options,
   onChange,
   testId,
+  compact = false,
 }: {
   value: string;
   options: { value: string; label: string; icon?: ReactNode }[];
   onChange: (value: string) => void;
   testId?: string;
+  /** 紧凑模式：更小的字号与内边距，给 tab 数量多的页面（如「任务与配置」）。 */
+  compact?: boolean;
 }) {
   return (
     <div
@@ -221,7 +224,10 @@ export function Tabs({
           data-testid={testId ? `${testId}-${option.value}` : undefined}
           onClick={() => onChange(option.value)}
           className={cn(
-            "rounded-md px-3 py-1.5 text-sm font-medium transition-colors",
+            // whitespace-nowrap：tab 行放不下时横向滚动（外层 overflow-x-auto），
+            // 而不是把标签挤成多行
+            "rounded-md font-medium whitespace-nowrap transition-colors",
+            compact ? "px-2 py-1 text-xs" : "px-3 py-1.5 text-sm",
             option.value === value
               ? "bg-background text-foreground shadow-sm ring-1 ring-border/60"
               : "text-muted-foreground hover:text-foreground",

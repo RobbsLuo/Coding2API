@@ -16,6 +16,13 @@ from ..compat.openai.errors import error_payload
 # 每个路径前缀对应的 API 错误形状：/v1 走 OpenAI 兼容体，其余走管理台形状
 _API_PREFIXES = ("api/", "v1/")
 
+# index.html 必须每次回源校验：它引用**内容 hash 化**的 assets，重新构建后
+# 文件名会变，但浏览器若缓存了旧 index.html，就会加载上一版的 bundle——表现是
+# 「页面能打开、功能却是旧的」，与「新前端 + 旧后端」同属最难自查的一类假故障。
+# assets 反过来可以永久缓存：内容变了文件名就变，命中不了就是没变。
+_INDEX_CACHE_HEADERS = {"Cache-Control": "no-cache"}
+_ASSET_CACHE_HEADERS = {"Cache-Control": "public, max-age=31536000, immutable"}
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _CONTAINER_DIST = Path("/app/web/dist")
 
@@ -78,8 +85,8 @@ def register_spa_routes(app: FastAPI) -> None:
             return HTMLResponse(_FRONTEND_MISSING_HTML, status_code=503)
         candidate = (dist / path).resolve()
         if path and candidate.is_file() and dist.resolve() in candidate.parents:
-            return FileResponse(candidate)
+            return FileResponse(candidate, headers=_ASSET_CACHE_HEADERS)
         index = dist / "index.html"
         if not index.is_file():
             return HTMLResponse(_FRONTEND_MISSING_HTML, status_code=503)
-        return FileResponse(index)
+        return FileResponse(index, headers=_INDEX_CACHE_HEADERS)

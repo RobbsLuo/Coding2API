@@ -52,8 +52,9 @@ def create_router(services: Services) -> APIRouter:
     api_keys = services.api_keys
 
     @router.get("/api/api-keys")
-    async def list_keys(principal=Depends(principal_from_request)):
-        return {"api_keys": api_keys.list_for(principal.username)}
+    async def list_keys(sort: str | None = None, order: str | None = None,
+                        principal=Depends(principal_from_request)):
+        return {"api_keys": api_keys.list_for(principal.username, sort=sort, order=order)}
 
     @router.post("/api/api-keys")
     async def create_key(payload: dict,

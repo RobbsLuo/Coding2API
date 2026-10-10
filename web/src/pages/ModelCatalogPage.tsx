@@ -10,6 +10,8 @@ import {
 } from "../api/display";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { SortableHead } from "../components/SortableHead";
+import { useSort } from "../hooks/useSort";
 import {
   Button,
   Empty,
@@ -91,7 +93,10 @@ function limitLine(value: number | null): string {
  */
 export function ModelCatalogPage() {
   const session = useSessionContext();
-  const { data, isLoading, isError } = useModelCatalog(session.username);
+  const { sort, order, toggle } = useSort("id", "asc",
+    { context: "desc", max_output: "desc", input: "desc", output: "desc",
+      cache_read: "desc", cache_write: "desc" });
+  const { data, isLoading, isError } = useModelCatalog(session.username, sort, order);
   const [query, setQuery] = useState("");
   const [currency, setCurrency] = useState<Currency>("USD");
   const [pageIndex, setPageIndex] = useState(0);
@@ -116,10 +121,10 @@ export function ModelCatalogPage() {
     [filtered, safePage, pageSize],
   );
 
-  // 搜索 / 改每页条数后回到第一页：否则会停在一个已不存在的页码上（空白）。
+  // 搜索 / 改每页条数 / 换排序后回到第一页：否则会停在一个已不存在的页码上（空白）
   useEffect(() => {
     setPageIndex(0);
-  }, [query, pageSize]);
+  }, [query, pageSize, sort, order]);
 
   if (isLoading) {
     return (
@@ -224,13 +229,21 @@ export function ModelCatalogPage() {
               >
                 <TableHeader className="sticky top-0 z-10">
                   <TableRow>
-                    <TableHead>模型</TableHead>
-                    <TableHead>提供方</TableHead>
-                    <TableHead>上下文 / 输出</TableHead>
+                    <SortableHead label="模型" columnKey="id" active={sort === "id"}
+                                  direction={order} onToggle={toggle} testId="sort-id" />
+                    <SortableHead label="提供方" columnKey="provider" active={sort === "provider"}
+                                  direction={order} onToggle={toggle} testId="sort-provider" />
+                    <SortableHead label="上下文 / 输出" columnKey="context"
+                                  active={sort === "context"} direction={order}
+                                  onToggle={toggle} testId="sort-context" />
                     <TableHead>输入 → 输出模态</TableHead>
                     <TableHead>能力</TableHead>
-                    <TableHead>知识 / 发布</TableHead>
-                    <TableHead className="text-right">价格（{priceUnit}）</TableHead>
+                    <SortableHead label="知识 / 发布" columnKey="release_date"
+                                  active={sort === "release_date"} direction={order}
+                                  onToggle={toggle} testId="sort-release_date" />
+                    <SortableHead label={`价格（${priceUnit}）`} columnKey="input"
+                                  active={sort === "input"} direction={order}
+                                  onToggle={toggle} align="right" testId="sort-input" />
                   </TableRow>
                 </TableHeader>
                 <TableBody>

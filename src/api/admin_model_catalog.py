@@ -16,21 +16,40 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 
+from ..sorting import sort_rows
 from .deps import Services, principal_from_request
+
+# 模型目录排序白名单：API 键 → 取值函数（缺失值排最后）。
+MODEL_CATALOG_SORT_KEYS = {
+    "id": lambda row: row["id"],
+    "name": lambda row: row["name"],
+    "provider": lambda row: row["provider"],
+    "context": lambda row: row["context"],
+    "max_output": lambda row: row["max_output"],
+    "knowledge": lambda row: row["knowledge"],
+    "release_date": lambda row: row["release_date"],
+    "input": lambda row: row["input"],
+    "output": lambda row: row["output"],
+    "cache_read": lambda row: row["cache_read"],
+    "cache_write": lambda row: row["cache_write"],
+}
 
 
 def create_router(services: Services) -> APIRouter:
     router = APIRouter()
 
     @router.get("/api/model-catalog")
-    async def get_model_catalog(request: Request,
+    async def get_model_catalog(request: Request, sort: str | None = None,
+                                order: str | None = None,
                                 _principal=Depends(principal_from_request)):
         """当前生效模型目录 + 元信息；仅要求登录（models.dev 是公开数据，各角色可看）。"""
         state = request.app.state
         catalog: dict[str, dict] = state.models_dev_catalog
+        # 默认按模型 id 升序：结果确定（前端无需再排），与历史行为一致。
+        models = sort_rows([catalog[model] for model in sorted(catalog)], sort, order,
+                           MODEL_CATALOG_SORT_KEYS, default_key="id", default_desc=False)
         return {
-            # 按模型 id 升序：结果确定，前端无需再排
-            "models": [catalog[model] for model in sorted(catalog)],
+            "models": models,
             "count": len(catalog),
             "currency": "USD",
             "usd_cny_rate": float(services.settings.usd_cny_rate),

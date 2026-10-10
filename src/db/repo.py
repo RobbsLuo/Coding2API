@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from ..auth.api_key import digest_api_key, generate_api_key, preview_api_key
@@ -22,6 +22,7 @@ from ..engine.scheduler import (
 )
 from ..provider.base import Quota, health_score
 from ..provider.token_expiry import credential_token_times
+from ..sorting import sort_rows, sql_order
 
 
 def _new_id(prefix: str) -> str:
@@ -72,6 +73,68 @@ def _packages_value(text: str | None) -> list[dict[str, Any]] | None:
     if not isinstance(items, list):
         return None
     return [item for item in items if isinstance(item, dict)]
+
+
+# 列表排序白名单：API 键 → 取值函数（`None` 值统一排最后，见 src/sorting.py）。
+# 凭证列含派生字段（quota_expiring_credits 等），故在 Python 侧排序而非 SQL。
+CREDENTIAL_SORT_KEYS: dict[str, Callable[[dict[str, Any]], Any]] = {
+    "nickname": lambda row: row["nickname"] or "",
+    "provider": lambda row: row["provider"],
+    "health": lambda row: row["health"],
+    "enabled": lambda row: row["enabled"],
+    "pinned": lambda row: row["pinned"],
+    "quota_remaining": lambda row: row["quota_remaining"],
+    "quota_total": lambda row: row["quota_total"],
+    "quota_expiring_credits": lambda row: row["quota_expiring_credits"],
+    # 0 = 上游未给到期信息，视为缺失（排最后），不当成「最早过期」
+    "token_expires_at": lambda row: row["token_expires_at"] or None,
+    "growth_last_run_at": lambda row: row["growth_last_run_at"] or None,
+    "created_at": lambda row: row["created_at"],
+}
+
+# 纯 SQL 列表的白名单：API 键 → 列名（受控常量，用户输入永不进 SQL）。
+API_KEY_SORT_COLUMNS: dict[str, str] = {
+    "name": "name",
+    "provider_binding": "provider_binding",
+    "created_at": "created_at",
+    "last_used_at": "last_used_at",
+    "expires_at": "expires_at",
+}
+
+USER_SORT_COLUMNS: dict[str, str] = {
+    "username": "username",
+    "role": "role",
+    "enabled": "enabled",
+    "created_by": "created_by",
+    "created_at": "created_at",
+    "updated_at": "updated_at",
+}
+
+AUDIT_SORT_COLUMNS: dict[str, str] = {
+    "ts": "ts",
+    "actor": "actor",
+    "action": "action",
+    "target": "target",
+    "detail": "detail",
+    "ip": "ip",
+    "ok": "ok",
+}
+
+ALERT_SORT_COLUMNS: dict[str, str] = {
+    "ts": "ts",
+    "severity": "severity",
+    "rule": "rule",
+    "scope": "scope",
+    "message": "message",
+    "delivered": "delivered",
+}
+
+CREDIT_EVENT_SORT_COLUMNS: dict[str, str] = {
+    "ts": "ts",
+    "window_start": "window_start",
+    "delta": "delta",
+    "source": "source",
+}
 
 
 def _token_times_from_blob(
@@ -415,9 +478,13 @@ class CredentialRepository:
 
     def list_all(
         self, *, expiring_window: int = 0, expiring_secondary_window: int = 0,
-        now: int | None = None,
+        now: int | None = None, sort: str | None = None, order: str | None = None,
     ) -> list[dict[str, Any]]:
         """管理台列表：绝不返回明文凭证。
+
+        `sort` / `order`：列表排序（白名单见 `CREDENTIAL_SORT_KEYS`）；未知键 /
+        非法方向回落 `created_at` 升序。派生字段（到期额度等）在此可见，故排序
+        放在组装之后，而不是 SQL。
 
         附 `quota_expiring_credits`（主窗口内即将到期的积分，与调度排序第一级同源）；
         附 `quota_expiring_credits_secondary`（次窗口，主窗口打平时才参与排序的第二级）；
@@ -468,7 +535,10 @@ class CredentialRepository:
                 else expiring_credits(ladder, secondary, now))
             rec["model_cooldowns"] = cooling.get(row["id"], [])
             out.append(rec)
-        return out
+        # 排序在组装后做：额度占比 / 到期额度是派生字段，SQL 排不了。
+        # 默认 created_at 升序，与历史行为一致。
+        return sort_rows(out, sort, order, CREDENTIAL_SORT_KEYS,
+                         default_key="created_at", default_desc=False)
 
     def expiring_tokens(self, *, within_seconds: int, now: int | None = None,
                         ) -> list[dict[str, Any]]:
@@ -553,11 +623,14 @@ class ApiKeyRepository:
         row = self.authenticate(api_key)
         return row["username"] if row else None
 
-    def list_for(self, username: str) -> list[dict[str, Any]]:
+    def list_for(self, username: str, sort: str | None = None,
+                 order: str | None = None) -> list[dict[str, Any]]:
+        clause = sql_order(sort, order, API_KEY_SORT_COLUMNS,
+                           default_key="created_at", default_desc=False, tiebreak="id")
         rows = self._db.connect().execute(
             "SELECT id, username, name, preview, created_at, last_used_at, "
             "provider_binding, allowed_ips, allowed_models, expires_at FROM api_keys "
-            "WHERE username = ? ORDER BY created_at", (username,)).fetchall()
+            f"WHERE username = ? ORDER BY {clause}", (username,)).fetchall()
         return [dict(row) for row in rows]
 
     def delete(self, key_id: str, username: str) -> bool:
@@ -614,11 +687,17 @@ class CreditEventRepository:
     def __init__(self, db) -> None:
         self._db = db
 
-    def recent(self, credential_id: str, limit: int = 20) -> list[dict[str, Any]]:
-        """倒序返回变动记录；limit 收敛到 [1, 200] 防止一次拉爆前端。"""
+    def recent(self, credential_id: str, limit: int = 20, sort: str | None = None,
+               order: str | None = None) -> list[dict[str, Any]]:
+        """默认倒序返回变动记录；limit 收敛到 [1, 200] 防止一次拉爆前端。
+
+        `sort` / `order`：列头排序白名单见 `CREDIT_EVENT_SORT_COLUMNS`。
+        """
+        clause = sql_order(sort, order, CREDIT_EVENT_SORT_COLUMNS,
+                           default_key="ts", default_desc=True, tiebreak="id")
         rows = self._db.connect().execute(
-            "SELECT * FROM credit_events WHERE credential_id = ? "
-            "ORDER BY ts DESC, id DESC LIMIT ?",
+            f"SELECT * FROM credit_events WHERE credential_id = ? "
+            f"ORDER BY {clause} LIMIT ?",
             (credential_id, max(1, min(200, limit)))).fetchall()
         return [dict(row) for row in rows]
 
@@ -657,10 +736,16 @@ class AlertRepository:
             )
         return alert_id
 
-    def recent(self, limit: int = 50) -> list[dict[str, Any]]:
-        """倒序返回最近告警；limit 收敛到 [1, 200] 防止一次拉爆前端。"""
+    def recent(self, limit: int = 50, sort: str | None = None,
+               order: str | None = None) -> list[dict[str, Any]]:
+        """默认倒序返回最近告警；limit 收敛到 [1, 200] 防止一次拉爆前端。
+
+        `sort` / `order`：列头排序白名单见 `ALERT_SORT_COLUMNS`。
+        """
+        clause = sql_order(sort, order, ALERT_SORT_COLUMNS,
+                           default_key="ts", default_desc=True, tiebreak="id")
         rows = self._db.connect().execute(
-            "SELECT * FROM alert_events ORDER BY ts DESC, id DESC LIMIT ?",
+            f"SELECT * FROM alert_events ORDER BY {clause} LIMIT ?",
             (max(1, min(200, limit)),)).fetchall()
         return [dict(row) for row in rows]
 
@@ -734,10 +819,16 @@ class UserRepository:
             "SELECT * FROM users WHERE username = ?", (username,)).fetchone()
         return dict(row) if row else None
 
-    def list_all(self) -> list[dict[str, Any]]:
-        """按用户名排序的完整行；展示层负责剔除敏感列。"""
+    def list_all(self, sort: str | None = None,
+                 order: str | None = None) -> list[dict[str, Any]]:
+        """按用户名排序的完整行；展示层负责剔除敏感列。
+
+        `sort` / `order`：排序白名单见 `USER_SORT_COLUMNS`；默认用户名升序。
+        """
+        clause = sql_order(sort, order, USER_SORT_COLUMNS,
+                           default_key="username", default_desc=False, tiebreak="username")
         rows = self._db.connect().execute(
-            "SELECT * FROM users ORDER BY username").fetchall()
+            f"SELECT * FROM users ORDER BY {clause}").fetchall()
         return [dict(row) for row in rows]
 
     def list_usernames(self) -> tuple[str, ...]:
@@ -865,8 +956,12 @@ class AuditRepository:
 
     def query(self, *, actor: str | None = None, action: str | None = None,
               since: int | None = None, before: int | None = None,
-              limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
-        """按 ts 倒序；limit 收敛到 [1, 500]，offset 非负。"""
+              limit: int = 100, offset: int = 0,
+              sort: str | None = None, order: str | None = None) -> list[dict[str, Any]]:
+        """默认按 ts 倒序；limit 收敛到 [1, 500]，offset 非负。
+
+        `sort` / `order`：列头排序白名单见 `AUDIT_SORT_COLUMNS`。
+        """
         clauses: list[str] = []
         params: list[Any] = []
         if actor:
@@ -883,8 +978,10 @@ class AuditRepository:
             params.append(int(before))
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         params.extend((max(1, min(500, limit)), max(0, offset)))
+        clause = sql_order(sort, order, AUDIT_SORT_COLUMNS,
+                           default_key="ts", default_desc=True, tiebreak="id")
         rows = self._db.connect().execute(
-            f"SELECT * FROM audit_events {where} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?",
+            f"SELECT * FROM audit_events {where} ORDER BY {clause} LIMIT ? OFFSET ?",
             tuple(params)).fetchall()
         return [dict(row) for row in rows]
 

@@ -7,8 +7,10 @@ import { useUserMutation, useUsers } from "../api/hooks";
 import type { ActivationIssued, Role, UserRow } from "../api/types";
 import { ROLE_LABELS, ROLE_OPTIONS } from "../api/types";
 import { useDialogFocus } from "../hooks/useDialogFocus";
+import { useSort } from "../hooks/useSort";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { SortableHead } from "../components/SortableHead";
 import {
   Badge,
   Button,
@@ -67,7 +69,9 @@ function TokenCard({
 
 export function UsersPage() {
   const session = useSessionContext();
-  const { data, isLoading } = useUsers(session.username);
+  const { sort, order, toggle } = useSort("username", "asc",
+    { created_at: "desc", enabled: "desc" });
+  const { data, isLoading } = useUsers(session.username, sort, order);
   const [username, setUsername] = useState("");
   const [role, setRole] = useState<Role>("viewer");
   const [issued, setIssued] = useState<ActivationIssued | null>(null);
@@ -214,11 +218,16 @@ export function UsersPage() {
           <Table data-testid="users-table">
             <TableHeader>
               <TableRow>
-                <TableHead>用户名</TableHead>
-                <TableHead>角色</TableHead>
-                <TableHead>状态</TableHead>
-                <TableHead>创建者</TableHead>
-                <TableHead>创建时间</TableHead>
+                <SortableHead label="用户名" columnKey="username" active={sort === "username"}
+                              direction={order} onToggle={toggle} testId="sort-username" />
+                <SortableHead label="角色" columnKey="role" active={sort === "role"}
+                              direction={order} onToggle={toggle} testId="sort-role" />
+                <SortableHead label="状态" columnKey="enabled" active={sort === "enabled"}
+                              direction={order} onToggle={toggle} testId="sort-enabled" />
+                <SortableHead label="创建者" columnKey="created_by" active={sort === "created_by"}
+                              direction={order} onToggle={toggle} testId="sort-created_by" />
+                <SortableHead label="创建时间" columnKey="created_at" active={sort === "created_at"}
+                              direction={order} onToggle={toggle} testId="sort-created_at" />
                 <TableHead className="text-right">操作</TableHead>
               </TableRow>
             </TableHeader>

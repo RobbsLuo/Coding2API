@@ -16,6 +16,22 @@ const groupTabValue = (key: string) => `gateway-${key}`;
 /** 兜底 tab：归属对不上（task 指向未装配任务、后端留空 group）的项都进这里。 */
 const OTHER_TAB = "settings-other";
 
+/** tab 文案：去掉任务名里的括号补充（如「模型列表刷新（models.dev）」），
+ * 十几个 tab 排一行时它会把行撑爆、挤得每个标签折行；完整名仍在卡片标题与告警里。 */
+function tabLabel(name: string): string {
+  return name.replace(/（[^）]*）/g, "").trim() || name;
+}
+
+/** 个别仍偏长的任务名在 tab 上用简称（显示用，不影响卡片标题/告警/接口字段）。 */
+const TAB_SHORT_NAMES: Record<string, string> = {
+  model_catalog: "渠道模型刷新",
+};
+
+/** tab 文案：优先显式简称，其次去掉括号补充，最后回落到原任务名。 */
+function tabText(task: { key: string; name: string }): string {
+  return TAB_SHORT_NAMES[task.key] ?? tabLabel(task.name);
+}
+
 /** 前端只做「文本 → 待提交标量」的粗转；范围/组合校验以后端为准。 */
 function toInputValue(setting: RuntimeSetting): string {
   return String(setting.value);
@@ -230,7 +246,7 @@ export function SettingsPage() {
   };
 
   const tabOptions = [
-    ...tasks.map((task) => ({ value: task.key, label: task.name })),
+    ...tasks.map((task) => ({ value: task.key, label: tabText(task) })),
     // 只列出「确实有配置项」的网关卡组，避免点开是空页
     ...groups
       .filter((group) => settings.some((s) => assignTab(s) === groupTabValue(group.value)))
@@ -380,6 +396,7 @@ export function SettingsPage() {
                     options={tabOptions}
                     onChange={setActiveTab}
                     testId="settings-tabs"
+                    compact
                   />
                 </div>
 

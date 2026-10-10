@@ -81,9 +81,11 @@ def create_router(services: Services) -> APIRouter:
             raise LastAdminError("cannot remove the last active admin")
 
     @router.get("/api/users")
-    async def list_users(principal=Depends(principal_from_request)):
+    async def list_users(sort: str | None = None, order: str | None = None,
+                         principal=Depends(principal_from_request)):
         _require(principal)
-        return {"users": [_public_view(row) for row in services.user_repo.list_all()]}
+        return {"users": [_public_view(row) for row in
+                          services.user_repo.list_all(sort=sort, order=order)]}
 
     @router.post("/api/users")
     async def create_user(request: Request, payload: dict,

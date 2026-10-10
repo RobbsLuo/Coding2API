@@ -120,19 +120,44 @@ export interface StatsOverview {
   avg_ttfb_ms: number | null;
 }
 
-export interface ProviderStats {
-  provider: Provider;
+/**
+ * 分组统计的公共指标：渠道 / 模型 / 用户 / 凭证四个维度行结构一致，
+ * 只多一个分组键列（见下面四个接口）。
+ */
+export interface GroupStats {
   requests: number;
   ok_count: number;
   input_tokens: number;
   output_tokens: number;
+  /** 输入中命中缓存的 token；该维度任一明细上报过才非 null */
+  cached_tokens: number | null;
   credit: number | null;
   /** credit 是否为推算值（含推算即为 true），展示加 ≈ */
   credit_estimated: boolean;
-  /** 成本估算（USD）；该渠道无可定价明细时为 null */
+  /** 成本估算（USD）；该维度无可定价明细时为 null */
   cost_usd: number | null;
   /** 成本估算（CNY） */
   cost_cny: number | null;
+}
+
+export interface ProviderStats extends GroupStats {
+  provider: Provider;
+}
+
+export interface ModelStats extends GroupStats {
+  model: string;
+}
+
+export interface UserStats extends GroupStats {
+  username: string;
+}
+
+export interface CredentialStats extends GroupStats {
+  credential_id: string;
+  /** 凭证所属渠道（凭证已删除时后端回退为明细里的渠道），用于凭证名前的渠道 icon */
+  provider: Provider;
+  /** 凭证昵称：与请求明细同口径；仅 admin/operator 下发，空昵称/已删除为 null */
+  credential_name: string | null;
 }
 
 /** 图表指标：请求次数 / token 消耗 / 成本 / 平均耗时 / 平均首字延迟。 */
@@ -188,8 +213,10 @@ export interface UsageEventRow {
 
 export interface StatsEventsResponse {
   events: UsageEventRow[];
-  /** 下一页游标：本页最小 rowid；null 表示到底 */
+  /** 下一页游标：本页最小 rowid；null 表示到底（或走了 offset 分页模式） */
   next_before: number | null;
+  /** offset 分页模式下的总条数；游标模式（默认时间降序）为 null */
+  total: number | null;
 }
 
 /** 三角色（B5）：与后端 src/auth/rbac.py 的 ROLE_* 字面量一致。 */

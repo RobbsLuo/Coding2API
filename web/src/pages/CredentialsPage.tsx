@@ -25,6 +25,8 @@ import { ColumnHint, LongTextTip } from "../components/Tip";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { ProviderIcon } from "../components/ProviderIcon";
+import { SortableHead } from "../components/SortableHead";
+import { useSort } from "../hooks/useSort";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -147,9 +149,13 @@ interface Actions {
 
 export function CredentialsPage() {
   const session = useSessionContext();
+  // 默认 created_at 升序（与后端一致）；额度 / 健康度等数值列首点降序
+  const { sort, order, toggle } = useSort("created_at", "asc",
+    { health: "desc", quota_remaining: "desc", token_expires_at: "asc",
+      growth_last_run_at: "desc" });
   // 30s 轮询：冷却倒计时 / token 剩余都是「随时间变化」的观测量，页面停留
   // 时应自动刷新（与 useTasks 同口径）。
-  const { data, isLoading } = useCredentials(session.username, 30_000);
+  const { data, isLoading } = useCredentials(session.username, 30_000, sort, order);
   const client = useQueryClient();
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -165,6 +171,8 @@ export function CredentialsPage() {
   const [creditEvents, setCreditEvents] = useState<{
     credentialId: string;
     events: CreditEvent[];
+    sort: string;
+    order: string;
   } | null>(null);
 
   const credentials = data?.credentials ?? [];
@@ -182,6 +190,24 @@ export function CredentialsPage() {
   const now = Date.now() / 1000;
 
   const refresh = () => client.invalidateQueries({ queryKey: ["admin"] });
+
+  // 积分记录抽屉内排序：改排序需重新取数（后端排），并保持方向直觉
+  // （时间/数值列首点降序，来源首点升序）。
+  const CREDIT_FIRST_ORDER: Record<string, "asc" | "desc"> = {
+    ts: "desc", window_start: "desc", delta: "desc", source: "asc",
+  };
+  const sortCredits = async (columnKey: string) => {
+    if (!creditEvents) return;
+    const order = creditEvents.sort === columnKey
+      ? (creditEvents.order === "asc" ? "desc" : "asc")
+      : (CREDIT_FIRST_ORDER[columnKey] ?? "asc");
+    try {
+      const result = await api.creditEvents(creditEvents.credentialId, columnKey, order);
+      setCreditEvents({ ...creditEvents, events: result.events, sort: columnKey, order });
+    } catch (caught) {
+      showError(caught instanceof Error ? caught.message : "积分记录读取失败");
+    }
+  };
 
   const run = async (task: () => Promise<unknown>, successMessage?: string) => {
     setBusy(true);
@@ -305,7 +331,10 @@ export function CredentialsPage() {
         }
         try {
           const result = await api.creditEvents(credential.id);
-          setCreditEvents({ credentialId: credential.id, events: result.events });
+          setCreditEvents({
+            credentialId: credential.id, events: result.events,
+            sort: "ts", order: "desc",
+          });
         } catch (caught) {
           showError(caught instanceof Error ? caught.message : "积分记录读取失败");
         }
@@ -382,11 +411,24 @@ export function CredentialsPage() {
           <Table data-testid="credentials-table">
             <TableHeader>
               <TableRow>
-                <TableHead><span className="inline-flex items-center gap-1">凭证<ColumnHint text="昵称 + 所属渠道；「已指定」表示调度器优先使用该凭证（全局唯一）。" /></span></TableHead>
-                <TableHead><span className="inline-flex items-center gap-1">状态 / 健康度<ColumnHint text="状态：可用/冷却中/已禁用/已暂停/额度耗尽；已暂停只摘对话流量，签到/刷新/探测照常；冷却中到期自动恢复。健康度：剩余积分占比四态（已知百分比/未探测/无探测/已耗尽）。未探测＝探测失败或渠道未给额度信息（点「探测」可重试），≠已耗尽；无探测＝免费层上游根本没有额度接口。调度器优先选百分比高者，打平时再用账户剩余积分多者。" /></span></TableHead>
-                <TableHead><span className="inline-flex items-center gap-1">额度<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期额度行＝调度窗口内即将过期、会被优先消耗的额度；主窗口（36h）打平时才比较次窗口（7 天）。CodeArts 的额度是 token（每日 1000 万池、0 点清零），其余渠道是积分。数字后的下箭头展开该凭证的积分记录（两次额度探测之间的净变化）。" /></span></TableHead>
-                <TableHead><span className="inline-flex items-center gap-1">token 剩余<ColumnHint text="access token 距离到期还有多久，取自凭证本身（为 0 表示渠道未给到期信息，显示 —）。预刷新任务每小时检查一次，进入 24 小时窗口即自动续期；「已过期」意味着上游会拒绝该凭证，需重新登录。" /></span></TableHead>
-                <TableHead><span className="inline-flex items-center gap-1">成长中心<ColumnHint text="仅 CodeBuddy：最近一轮成长中心（旅行礼物/任务/连登兑换/盲盒）的领取结果与时间，由定时任务或手动执行写入。汇报较长时单行截断，悬浮看全文。" /></span></TableHead>
+                <SortableHead label="凭证" columnKey="nickname" active={sort === "nickname"}
+                              direction={order} onToggle={toggle} testId="sort-nickname"
+                              hint={<ColumnHint text="昵称 + 所属渠道；「已指定」表示调度器优先使用该凭证（全局唯一）。" />} />
+                <SortableHead label="状态 / 健康度" columnKey="health" active={sort === "health"}
+                              direction={order} onToggle={toggle} testId="sort-health"
+                              hint={<ColumnHint text="状态：可用/冷却中/已禁用/已暂停/额度耗尽；已暂停只摘对话流量，签到/刷新/探测照常；冷却中到期自动恢复。健康度：剩余积分占比四态（已知百分比/未探测/无探测/已耗尽）。未探测＝探测失败或渠道未给额度信息（点「探测」可重试），≠已耗尽；无探测＝免费层上游根本没有额度接口。调度器优先选百分比高者，打平时再用账户剩余积分多者。" />} />
+                <SortableHead label="额度" columnKey="quota_remaining"
+                              active={sort === "quota_remaining"} direction={order}
+                              onToggle={toggle} testId="sort-quota_remaining"
+                              hint={<ColumnHint text="CodeBuddy 本周期剩余按日期重置；TRAE 账户剩余单调递减。到期额度行＝调度窗口内即将过期、会被优先消耗的额度；主窗口（36h）打平时才比较次窗口（7 天）。CodeArts 的额度是 token（每日 1000 万池、0 点清零），其余渠道是积分。数字后的下箭头展开该凭证的积分记录（两次额度探测之间的净变化）。" />} />
+                <SortableHead label="token 剩余" columnKey="token_expires_at"
+                              active={sort === "token_expires_at"} direction={order}
+                              onToggle={toggle} testId="sort-token_expires_at"
+                              hint={<ColumnHint text="access token 距离到期还有多久，取自凭证本身（为 0 表示渠道未给到期信息，显示 —）。预刷新任务每小时检查一次，进入 24 小时窗口即自动续期；「已过期」意味着上游会拒绝该凭证，需重新登录。" />} />
+                <SortableHead label="成长中心" columnKey="growth_last_run_at"
+                              active={sort === "growth_last_run_at"} direction={order}
+                              onToggle={toggle} testId="sort-growth_last_run_at"
+                              hint={<ColumnHint text="仅 CodeBuddy：最近一轮成长中心（旅行礼物/任务/连登兑换/盲盒）的领取结果与时间，由定时任务或手动执行写入。汇报较长时单行截断，悬浮看全文。" />} />
                 {canWrite && <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测/签到：行内常驻按钮。更多操作（⋯）：成长中心、活跃上报（均仅 CodeBuddy）、指定、暂停/恢复、删除。积分记录入口在额度列数字后的下箭头。" /></span></TableHead>}
               </TableRow>
             </TableHeader>
@@ -412,6 +454,9 @@ export function CredentialsPage() {
                         <CreditDrawer
                           credentialId={credential.id}
                           events={creditEvents.events}
+                          sort={creditEvents.sort}
+                          order={creditEvents.order}
+                          onSort={sortCredits}
                           onClose={() => actions.credits(credential)}
                         />
                       </TableCell>
@@ -828,10 +873,16 @@ function Row({
 function CreditDrawer({
   credentialId,
   events,
+  sort,
+  order,
+  onSort,
   onClose,
 }: {
   credentialId: string;
   events: CreditEvent[];
+  sort: string;
+  order: string;
+  onSort: (columnKey: string) => void;
   onClose: () => void;
 }) {
   return (
@@ -858,10 +909,18 @@ function CreditDrawer({
         <Table data-testid="credit-drawer-table">
           <TableHeader>
             <TableRow>
-              <TableHead>观测时间</TableHead>
-              <TableHead>区间起点</TableHead>
-              <TableHead>变化</TableHead>
-              <TableHead>说明</TableHead>
+              <SortableHead label="观测时间" columnKey="ts" active={sort === "ts"}
+                            direction={order as "asc" | "desc"} onToggle={onSort}
+                            testId="sort-credit-ts" />
+              <SortableHead label="区间起点" columnKey="window_start"
+                            active={sort === "window_start"} direction={order as "asc" | "desc"}
+                            onToggle={onSort} testId="sort-credit-window_start" />
+              <SortableHead label="变化" columnKey="delta" active={sort === "delta"}
+                            direction={order as "asc" | "desc"} onToggle={onSort}
+                            testId="sort-credit-delta" />
+              <SortableHead label="说明" columnKey="source" active={sort === "source"}
+                            direction={order as "asc" | "desc"} onToggle={onSort}
+                            testId="sort-credit-source" />
             </TableRow>
           </TableHeader>
           <TableBody>

@@ -185,6 +185,64 @@ describe("SettingsPage", () => {
     expect(screen.queryByRole("tab", { name: "渠道节流" })).not.toBeInTheDocument();
   });
 
+  it("tab 文案去掉任务名的括号补充、过长的用简称；卡片标题保留完整名", async () => {
+    const spy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/api/tasks")) {
+        return jsonResponse({
+          tasks: [
+            {
+              key: "model_catalog",
+              name: "渠道模型列表刷新",
+              description: "兜底重拉各渠道模型表。",
+              interval_seconds: 1800,
+              enabled: true,
+              runs: 0,
+              last_started_at: null,
+              last_finished_at: null,
+              last_ok: null,
+              last_report: null,
+              last_error: null,
+            },
+            {
+              key: "price_catalog",
+              name: "模型列表刷新（models.dev）",
+              description: "拉取 models.dev 模型目录。",
+              interval_seconds: 86400,
+              enabled: true,
+              runs: 0,
+              last_started_at: null,
+              last_finished_at: null,
+              last_ok: null,
+              last_report: null,
+              last_error: null,
+            },
+          ],
+          server_time: SERVER_TIME,
+        });
+      }
+      return jsonResponse(body());
+    });
+    vi.stubGlobal("fetch", spy);
+
+    renderPage(<SettingsPage />);
+    await settle();
+
+    // 括号补充被去掉、过长任务名用简称
+    expect(screen.getByRole("tab", { name: "模型列表刷新" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("tab", { name: "模型列表刷新（models.dev）" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "渠道模型刷新" })).toBeInTheDocument();
+    // 卡片标题仍用完整名（默认落在第一个任务 model_catalog）
+    expect(screen.getByTestId("task-model_catalog")).toHaveTextContent("渠道模型列表刷新");
+
+    await switchTab("settings-tabs-price_catalog");
+    expect(screen.getByTestId("task-price_catalog")).toHaveTextContent(
+      "模型列表刷新（models.dev）",
+    );
+  });
+
   it("任务卡片展示周期、上次执行相对时间与最近结果", async () => {
     mockAll();
     renderPage(<SettingsPage />);

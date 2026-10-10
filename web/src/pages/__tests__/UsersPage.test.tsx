@@ -84,7 +84,7 @@ describe("UsersPage", () => {
     await openCreateUserDialog();
 
     await userEvent.type(screen.getByTestId("new-user-name"), "newbie");
-    await userEvent.click(screen.getByRole("button", { name: /创建/ }));
+    await userEvent.click(screen.getByRole("button", { name: "创建" }));
 
     const link = await screen.findByTestId("activation-link");
     // token 出现在链接里（URL 编码）
@@ -107,7 +107,7 @@ describe("UsersPage", () => {
     await settle();
     await openCreateUserDialog();
     await userEvent.type(screen.getByTestId("new-user-name"), "alice");
-    await userEvent.click(screen.getByRole("button", { name: /创建/ }));
+    await userEvent.click(screen.getByRole("button", { name: "创建" }));
     expect(await screen.findByTestId("users-error")).toHaveTextContent("创建失败");
   });
 

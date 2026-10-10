@@ -3,8 +3,10 @@ import { ScrollText } from "lucide-react";
 import { formatTime } from "../api/display";
 import { useAudit } from "../api/hooks";
 import { useSessionContext } from "../Layout";
+import { useSort } from "../hooks/useSort";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { SortableHead } from "../components/SortableHead";
 import {
   Badge,
   Button,
@@ -26,6 +28,7 @@ const PAGE_SIZE = 50;
 
 export function AuditPage() {
   const session = useSessionContext();
+  const { sort, order, toggle } = useSort("ts", "desc", { ts: "desc" });
   const [actor, setActor] = useState("");
   const [action, setAction] = useState("");
   const [offset, setOffset] = useState(0);
@@ -37,6 +40,8 @@ export function AuditPage() {
     action: action || undefined,
     limit: PAGE_SIZE,
     offset,
+    sort,
+    order,
   });
 
   const events = data?.events ?? [];
@@ -46,6 +51,12 @@ export function AuditPage() {
   const reset = (next: () => void) => {
     setOffset(0);
     next();
+  };
+
+  // 换排序 = 换数据集：回到第一页，避免停在越界页码上（空白）
+  const toggleSort = (columnKey: string) => {
+    toggle(columnKey);
+    setOffset(0);
   };
 
   return (
@@ -126,12 +137,17 @@ export function AuditPage() {
             <Table data-testid="audit-table">
               <TableHeader>
                 <TableRow>
-                  <TableHead>时间</TableHead>
-                  <TableHead>操作者</TableHead>
-                  <TableHead>动作</TableHead>
-                  <TableHead>对象</TableHead>
+                  <SortableHead label="时间" columnKey="ts" active={sort === "ts"}
+                                direction={order} onToggle={toggleSort} testId="sort-ts" />
+                  <SortableHead label="操作者" columnKey="actor" active={sort === "actor"}
+                                direction={order} onToggle={toggleSort} testId="sort-actor" />
+                  <SortableHead label="动作" columnKey="action" active={sort === "action"}
+                                direction={order} onToggle={toggleSort} testId="sort-action" />
+                  <SortableHead label="对象" columnKey="target" active={sort === "target"}
+                                direction={order} onToggle={toggleSort} testId="sort-target" />
                   <TableHead>详情</TableHead>
-                  <TableHead>来源 IP</TableHead>
+                  <SortableHead label="来源 IP" columnKey="ip" active={sort === "ip"}
+                                direction={order} onToggle={toggleSort} testId="sort-ip" />
                 </TableRow>
               </TableHeader>
               <TableBody>

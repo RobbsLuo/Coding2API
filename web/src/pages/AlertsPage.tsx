@@ -2,8 +2,10 @@ import { BellRing } from "lucide-react";
 import { ALERT_RULE_LABEL, formatTime } from "../api/display";
 import { useAlerts } from "../api/hooks";
 import { useSessionContext } from "../Layout";
+import { useSort } from "../hooks/useSort";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
+import { SortableHead } from "../components/SortableHead";
 import {
   Badge,
   EmptyState,
@@ -26,8 +28,9 @@ function severityTone(severity: string): "danger" | "warn" | "muted" {
 
 export function AlertsPage() {
   const session = useSessionContext();
+  const { sort, order, toggle } = useSort("ts", "desc", { ts: "desc" });
   // 30 秒轮询：告警是「刚刚发生了什么」，用户停留时自动刷新。
-  const { data, isLoading } = useAlerts(session.username);
+  const { data, isLoading } = useAlerts(session.username, 30_000, sort, order);
 
   const alerts = data?.alerts ?? [];
 
@@ -57,12 +60,17 @@ export function AlertsPage() {
           <Table data-testid="alerts-table">
             <TableHeader>
               <TableRow>
-                <TableHead>时间</TableHead>
-                <TableHead>级别</TableHead>
-                <TableHead>规则</TableHead>
-                <TableHead>对象</TableHead>
+                <SortableHead label="时间" columnKey="ts" active={sort === "ts"}
+                              direction={order} onToggle={toggle} testId="sort-ts" />
+                <SortableHead label="级别" columnKey="severity" active={sort === "severity"}
+                              direction={order} onToggle={toggle} testId="sort-severity" />
+                <SortableHead label="规则" columnKey="rule" active={sort === "rule"}
+                              direction={order} onToggle={toggle} testId="sort-rule" />
+                <SortableHead label="对象" columnKey="scope" active={sort === "scope"}
+                              direction={order} onToggle={toggle} testId="sort-scope" />
                 <TableHead>说明</TableHead>
-                <TableHead>推送</TableHead>
+                <SortableHead label="推送" columnKey="delivered" active={sort === "delivered"}
+                              direction={order} onToggle={toggle} testId="sort-delivered" />
               </TableRow>
             </TableHeader>
             <TableBody>

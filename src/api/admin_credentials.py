@@ -21,9 +21,17 @@ from ..audit.actions import (
 from ..auth.rbac import require_operator
 from ..compat.openai.request import InvalidRequest
 from ..provider.base import GrowthResult, GrowthStep, StepStatus
+from ..sorting import sort_rows
 from .deps import Services, csrf_protected, principal_from_request
 
 logger = logging.getLogger(__name__)
+
+# 账号切换列表排序：API 键 → 取值函数（昵称缺失排最后）。
+ACCOUNT_SORT_KEYS = {
+    "nickname": lambda row: row["nickname"] or None,
+    "account_id": lambda row: row["account_id"],
+    "type": lambda row: row["type"],
+}
 
 
 def describe_probe_failure(error: Exception) -> str:
@@ -70,11 +78,13 @@ def create_router(services: Services) -> APIRouter:
     schedule_probe = services.schedule_probe
 
     @router.get("/api/credentials")
-    async def list_credentials(principal=Depends(principal_from_request)):
+    async def list_credentials(sort: str | None = None, order: str | None = None,
+                               principal=Depends(principal_from_request)):
         window = services.settings.quota_expiry_window_seconds
         secondary = services.settings.quota_expiry_secondary_window_seconds
         return {"credentials": credentials.list_all(
-                    expiring_window=window, expiring_secondary_window=secondary),
+                    expiring_window=window, expiring_secondary_window=secondary,
+                    sort=sort, order=order),
                 "expiry_window_seconds": window,
                 "expiry_secondary_window_seconds": secondary,
                 # 到期预警阈值（B3.3）：前端进度条与 <1h 红字同源，避免两处各写一个数
@@ -222,7 +232,8 @@ def create_router(services: Services) -> APIRouter:
         return {"events": services.growth_events.recent(credential_id, limit=limit)}
 
     @router.get("/api/credentials/{credential_id}/credit-events")
-    async def credit_events(credential_id: str, limit: int = 20,
+    async def credit_events(credential_id: str, limit: int = 20, sort: str | None = None,
+                            order: str | None = None,
                             principal=Depends(principal_from_request)):
         """积分变动流水：两次额度探测之间的净变化（倒序）。
 
@@ -233,7 +244,8 @@ def create_router(services: Services) -> APIRouter:
         require_operator(principal)
         if services.credentials.provider_of(credential_id) is None:
             raise InvalidRequest("credential not found")
-        return {"events": services.credit_events.recent(credential_id, limit=limit)}
+        return {"events": services.credit_events.recent(
+            credential_id, limit=limit, sort=sort, order=order)}
 
     @router.post("/api/credentials/{credential_id}/growth")
     async def run_growth(credential_id: str,
@@ -293,7 +305,8 @@ def create_router(services: Services) -> APIRouter:
         return {"ok": result.ok, "message": result.message}
 
     @router.get("/api/credentials/{credential_id}/accounts")
-    async def list_credential_accounts(credential_id: str,
+    async def list_credential_accounts(credential_id: str, sort: str | None = None,
+                                       order: str | None = None,
                                        principal=Depends(principal_from_request)):
         require_operator(principal)
         provider_id = credentials.provider_of(credential_id)
@@ -302,8 +315,12 @@ def create_router(services: Services) -> APIRouter:
         if provider is None or data is None or not hasattr(provider, "list_accounts"):
             raise InvalidRequest("credential does not support account switching")
         accounts = await provider.list_accounts(data)
-        return {"accounts": [{"account_id": a.account_id, "nickname": a.nickname,
-                              "type": a.account_type} for a in accounts]}
+        rows = [{"account_id": a.account_id, "nickname": a.nickname,
+                 "type": a.account_type} for a in accounts]
+        # 默认按昵称升序（上游返回序无意义）；缺失昵称排最后（见 src/sorting.py）
+        rows = sort_rows(rows, sort, order, ACCOUNT_SORT_KEYS,
+                         default_key="nickname", default_desc=False)
+        return {"accounts": rows}
 
     @router.post("/api/credentials/{credential_id}/accounts/select")
     async def select_credential_account(credential_id: str, payload: dict,

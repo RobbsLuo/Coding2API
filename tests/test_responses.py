@@ -181,6 +181,40 @@ def test_empty_tools_are_omitted():
     assert "tools" not in request.raw
 
 
+def test_text_format_text_and_json_object_pass_through():
+    for kind in ("text", "json_object"):
+        request = parse_responses_request(
+            {"input": "hi", "text": {"format": {"type": kind}}})
+        assert request.raw["response_format"] == {"type": kind}
+
+
+def test_text_format_json_schema_expands_to_chat_shape():
+    request = parse_responses_request({"input": "hi", "text": {
+        "verbosity": "low",
+        "format": {"type": "json_schema", "name": "out",
+                   "description": "d", "strict": True,
+                   "schema": {"type": "object"}}}})
+    assert request.raw["verbosity"] == "low"
+    assert request.raw["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "out", "description": "d", "strict": True,
+                        "schema": {"type": "object"}}}
+
+
+def test_text_format_json_schema_omits_optional_fields():
+    request = parse_responses_request({"input": "hi", "text": {
+        "format": {"type": "json_schema", "name": "out", "schema": {}}}})
+    assert request.raw["response_format"] == {
+        "type": "json_schema", "json_schema": {"name": "out", "schema": {}}}
+
+
+def test_text_without_format_yields_no_response_format():
+    request = parse_responses_request(
+        {"input": "hi", "text": {"verbosity": "high"}})
+    assert "response_format" not in request.raw
+    assert request.raw["verbosity"] == "high"
+
+
 def test_include_only_encrypted_reasoning_allowed():
     """Codex CLI 每轮都发 include=["reasoning.encrypted_content"]。"""
     request = parse_responses_request(
@@ -237,6 +271,12 @@ def test_stream_flag_flows_through():
     ({"input": [{"type": "function_call_output", "call_id": "c", "output": 5}]},
      "output must be a string, object or array"),
     ({"instructions": 5, "input": "hi"}, "content must be a string or an array"),
+    ({"input": "hi", "text": {"format": 5}}, "text.format must be an object"),
+    ({"input": "hi", "text": {"format": {"type": "nope"}}}, "text.format.type"),
+    ({"input": "hi", "text": {"format": {"type": "json_schema", "schema": {}}}},
+     "text.format.name"),
+    ({"input": "hi", "text": {"format": {"type": "json_schema", "name": "o"}}},
+     "text.format.schema"),
 ])
 def test_rejected_bodies(body, fragment):
     with pytest.raises(InvalidRequest, match=fragment.replace("[", r"\[")):

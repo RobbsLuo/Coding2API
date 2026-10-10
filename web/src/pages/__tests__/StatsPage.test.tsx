@@ -24,8 +24,32 @@ const OVERVIEW = {
 
 const PROVIDERS = {
   providers: [
-    { provider: "trae", requests: 70, ok_count: 68, input_tokens: 600, output_tokens: 1200, credit: 5.25, credit_estimated: true, cost_usd: 0.5, cost_cny: 3.35 },
-    { provider: "codebuddy", requests: 50, ok_count: 46, input_tokens: 400, output_tokens: 800, credit: 12.5, credit_estimated: false, cost_usd: 1.34, cost_cny: 8.99 },
+    { provider: "trae", requests: 70, ok_count: 68, input_tokens: 600, output_tokens: 1200, cached_tokens: 250, credit: 5.25, credit_estimated: true, cost_usd: 0.5, cost_cny: 3.35 },
+    { provider: "codebuddy", requests: 50, ok_count: 46, input_tokens: 400, output_tokens: 800, cached_tokens: 150, credit: 12.5, credit_estimated: false, cost_usd: 1.34, cost_cny: 8.99 },
+  ],
+};
+
+const MODELS = {
+  models: [
+    { model: "glm-5.2", requests: 40, ok_count: 38, input_tokens: 300, output_tokens: 900, cached_tokens: 100, credit: 8.0, credit_estimated: false, cost_usd: 0.8, cost_cny: 5.36 },
+    { model: "kimi-k3", requests: 30, ok_count: 28, input_tokens: 200, output_tokens: 600, credit: 4.5, credit_estimated: true, cost_usd: 0.4, cost_cny: 2.68 },
+  ],
+};
+
+const USERS = {
+  users: [
+    { username: "alice", requests: 80, ok_count: 76, input_tokens: 700, output_tokens: 1500, cached_tokens: 300, credit: 9.75, credit_estimated: true, cost_usd: 1.2, cost_cny: 8.04 },
+    { username: "bob", requests: 40, ok_count: 38, input_tokens: 300, output_tokens: 500, cached_tokens: 100, credit: 2.75, credit_estimated: false, cost_usd: 0.64, cost_cny: 4.28 },
+  ],
+};
+
+const CREDENTIALS = {
+  credentials: [
+    { credential_id: "cred_abc123", credential_name: "主账号", provider: "trae",
+      requests: 70, ok_count: 68, input_tokens: 600, output_tokens: 1200, cached_tokens: 250, credit: 5.25, credit_estimated: true, cost_usd: 0.5, cost_cny: 3.35 },
+    // 无昵称（老库/已删除）：回落 ID 前 12 位
+    { credential_id: "cred_zzz999888777", credential_name: null, provider: "codebuddy",
+      requests: 50, ok_count: 46, input_tokens: 400, output_tokens: 800, cached_tokens: 150, credit: 12.5, credit_estimated: false, cost_usd: 1.34, cost_cny: 8.99 },
   ],
 };
 
@@ -75,6 +99,9 @@ describe("StatsPage", () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_EMPTY,
     });
@@ -87,14 +114,17 @@ describe("StatsPage", () => {
     expect(screen.getByText(/输入 1000（命中 400 · 未命中 600） · 输出 2000 · 推理 300 · 缓存命中率 40.0%/))
       .toBeInTheDocument();
     expect(screen.getByText(/首字延迟 220 ms/)).toBeInTheDocument();
-    expect(screen.getByTestId("provider-table")).toHaveTextContent("CodeBuddy");
-    expect(screen.getByTestId("provider-table")).toHaveTextContent("TRAE");
+    expect(screen.getByTestId("group-table")).toHaveTextContent("CodeBuddy");
+    expect(screen.getByTestId("group-table")).toHaveTextContent("TRAE");
   });
 
   it("按模型趋势面板与 Top 文案渲染", async () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_EMPTY,
     });
@@ -111,6 +141,9 @@ describe("StatsPage", () => {
       "/api/stats/overview": { ...OVERVIEW, input_tokens: 123456, output_tokens: 7890123,
         cached_tokens: null },
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_EMPTY,
     });
@@ -130,6 +163,9 @@ describe("StatsPage", () => {
         { provider: "trae", requests: 70, ok_count: 68, input_tokens: 600, output_tokens: 1200,
           credit: null, credit_estimated: false, cost_usd: null, cost_cny: null },
       ] },
+      "/api/stats/by-model": { models: [] },
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_EMPTY,
     });
@@ -137,7 +173,7 @@ describe("StatsPage", () => {
     await settle();
 
     // TRAE 那一行的 credit 为 null（限定表格范围：图例 logo 的 title 也叫 TRAE）
-    const table = screen.getByTestId("provider-table");
+    const table = screen.getByTestId("group-table");
     const row = within(table).getAllByText("TRAE")[0].closest("tr")!;
     expect(row).toHaveTextContent("—");
     // 总览未探测到 credit
@@ -148,6 +184,9 @@ describe("StatsPage", () => {
     mockFetch({
       "/api/stats/overview": { ...OVERVIEW, credit: 5.25, credit_estimated: true },
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_EMPTY,
     });
@@ -156,7 +195,7 @@ describe("StatsPage", () => {
 
     // 总览卡片与按渠道表对推算值都标 ≈
     expect(screen.getByText("Credit 消耗").closest("[data-slot=card]")).toHaveTextContent("≈5.25");
-    const table = screen.getByTestId("provider-table");
+    const table = screen.getByTestId("group-table");
     const traeRow = within(table).getAllByText("TRAE")[0].closest("tr")!;
     expect(traeRow).toHaveTextContent("≈5.25");
     const cbRow = within(table).getAllByText("CodeBuddy")[0].closest("tr")!;
@@ -168,6 +207,9 @@ describe("StatsPage", () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_EMPTY,
     });
@@ -178,7 +220,7 @@ describe("StatsPage", () => {
     expect(card).toHaveTextContent("≈¥12.34");
     expect(card).toHaveTextContent("美元 ≈$1.84");
     // 按渠道表带成本列，人民币口径
-    const table = screen.getByTestId("provider-table");
+    const table = screen.getByTestId("group-table");
     const traeRow = within(table).getAllByText("TRAE")[0].closest("tr")!;
     expect(traeRow).toHaveTextContent("≈¥3.35");
   });
@@ -190,6 +232,9 @@ describe("StatsPage", () => {
         { provider: "trae", requests: 70, ok_count: 68, input_tokens: 600, output_tokens: 1200,
           credit: 5.25, credit_estimated: true, cost_usd: null, cost_cny: null },
       ] },
+      "/api/stats/by-model": { models: [] },
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_EMPTY,
     });
@@ -197,7 +242,7 @@ describe("StatsPage", () => {
     await settle();
 
     expect(screen.getByText("成本（估算）").closest("[data-slot=card]")).toHaveTextContent("—");
-    const table = screen.getByTestId("provider-table");
+    const table = screen.getByTestId("group-table");
     const row = within(table).getAllByText("TRAE")[0].closest("tr")!;
     expect(row).toHaveTextContent("—");
   });
@@ -214,6 +259,9 @@ describe("StatsPage", () => {
         cached_tokens: null,
       },
       "/api/stats/by-provider": { providers: [] },
+      "/api/stats/by-model": { models: [] },
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": { models: [], points: [] },
       "/api/stats/events": EVENTS_EMPTY,
     });
@@ -221,7 +269,7 @@ describe("StatsPage", () => {
     await settle();
     expect(screen.getByText("请求数").closest("[data-slot=card]")).toHaveTextContent("成功率 —");
     expect(screen.getByText("平均耗时").closest("[data-slot=card]")).toHaveTextContent("首字延迟 —");
-    expect(screen.getByTestId("no-provider-stats")).toBeInTheDocument();
+    expect(screen.getByTestId("no-group-stats")).toBeInTheDocument();
     expect(screen.getByTestId("no-model-trend")).toBeInTheDocument();
   });
 
@@ -229,6 +277,9 @@ describe("StatsPage", () => {
     const fetchSpy = mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_EMPTY,
     });
@@ -250,6 +301,9 @@ describe("StatsPage", () => {
     const fetchSpy = mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_EMPTY,
     });
@@ -266,6 +320,9 @@ describe("StatsPage", () => {
     const fetchSpy = mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_EMPTY,
     });
@@ -297,6 +354,9 @@ describe("StatsPage", () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_PAGE1,
     });
@@ -312,6 +372,9 @@ describe("StatsPage", () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": {
         events: [
@@ -342,6 +405,9 @@ describe("StatsPage", () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_PAGE1,
     });
@@ -368,6 +434,9 @@ describe("StatsPage", () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_PAGE1,
     });
@@ -381,6 +450,9 @@ describe("StatsPage", () => {
     const fetchSpy = mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": (url: string) =>
         jsonResponse(url.includes("before=") ? EVENTS_PAGE2 : EVENTS_PAGE1),
@@ -430,10 +502,75 @@ describe("StatsPage", () => {
     expect(screen.getByTestId("events-table")).toHaveTextContent("glm-5.2");
   });
 
+  it("分组统计排序：默认请求数降序，点表头带 sort/order 重新取数", async () => {
+    const spy = mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    // 默认按请求数降序（后端默认，前端也显式下发）
+    const providerCall = spy.mock.calls
+      .map((call) => String(call[0]))
+      .find((url) => url.includes("/api/stats/by-provider"))!;
+    expect(providerCall).toContain("sort=requests");
+    expect(providerCall).toContain("order=desc");
+
+    // 点「渠道」列头 → 按分组键升序重新取数
+    await userEvent.click(screen.getByTestId("sort-group"));
+    await waitFor(() => {
+      const last = spy.mock.calls
+        .map((call) => String(call[0]))
+        .filter((url) => url.includes("/api/stats/by-provider"))
+        .at(-1)!;
+      expect(last).toContain("sort=group");
+    });
+  });
+
+  it("请求明细排序：换列从 rowid 游标切到 offset 分页", async () => {
+    const spy = mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": { events: EVENTS_PAGE1.events, next_before: null, total: 7 },
+    });
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    // 默认（rowid 降序）走游标分页：请求不带 offset
+    const first = spy.mock.calls.map((call) => String(call[0]))
+      .find((url) => url.includes("/api/stats/events"))!;
+    expect(first).toContain("sort=time");
+    expect(first).not.toContain("offset=");
+
+    // 点「模型」列头 → 走 offset 分页（offset 从 0 起）
+    await userEvent.click(screen.getByTestId("event-sort-model"));
+    await waitFor(() => {
+      const last = spy.mock.calls.map((call) => String(call[0]))
+        .filter((url) => url.includes("/api/stats/events")).at(-1)!;
+      expect(last).toContain("sort=model");
+      expect(last).toContain("offset=0");
+    });
+    // total=7 > 本页 2 条 → 下一页可用（offset 模式的 hasNextPage）
+    expect(screen.getByTestId("events-next")).toBeEnabled();
+  });
+
   it("非管理员明细表无用户列", async () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
       "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
       "/api/stats/model-timeline": MODEL_TIMELINE,
       "/api/stats/events": EVENTS_PAGE1,
     });
@@ -443,5 +580,134 @@ describe("StatsPage", () => {
     const table = screen.getByTestId("events-table");
     expect(within(table).queryByText("用户")).not.toBeInTheDocument();
     expect(within(table).queryByText("root")).not.toBeInTheDocument();
+  });
+
+  it("分组统计：默认按渠道，切换 tabs 依次展示模型/用户/凭证", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    // 默认选中「按渠道」
+    expect(screen.getByTestId("group-tabs-provider")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("group-table")).toHaveTextContent("TRAE");
+    expect(screen.getByTestId("group-table")).toHaveTextContent("CodeBuddy");
+
+    // 切模型：行换成模型名
+    await userEvent.click(screen.getByTestId("group-tabs-model"));
+    await waitFor(() => expect(within(screen.getByTestId("group-table")).getByText("glm-5.2"))
+      .toBeInTheDocument());
+    expect(screen.getByTestId("group-table")).toHaveTextContent("kimi-k3");
+
+    // 切用户
+    await userEvent.click(screen.getByTestId("group-tabs-user"));
+    await waitFor(() => expect(within(screen.getByTestId("group-table")).getByText("alice"))
+      .toBeInTheDocument());
+    expect(screen.getByTestId("group-table")).toHaveTextContent("bob");
+
+    // 切凭证：昵称优先（无昵称回落到 ID 前 12 位）
+    await userEvent.click(screen.getByTestId("group-tabs-credential"));
+    await waitFor(() => expect(screen.getByTestId("group-table"))
+      .toHaveTextContent("主账号"));
+    expect(screen.getByTestId("group-table")).toHaveTextContent("cred_zzz9998");
+    expect(within(screen.getByTestId("group-table")).queryByText("cred_zzz999888777"))
+      .not.toBeInTheDocument();
+  });
+
+  it("分组统计：各维度都给出成功率、命中缓存与成本", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    // 按模型：glm-5.2 38/40 = 95.0%，命中缓存 100，成本 ¥5.36
+    await userEvent.click(screen.getByTestId("group-tabs-model"));
+    await settle();
+    let row = within(screen.getByTestId("group-table")).getByText("glm-5.2").closest("tr")!;
+    expect(row).toHaveTextContent("95.0%");
+    expect(row).toHaveTextContent("100");
+    expect(row).toHaveTextContent("¥5.36");
+    // kimi-k3 28/30 = 93.3%，推算成本标 ≈
+    row = within(screen.getByTestId("group-table")).getByText("kimi-k3").closest("tr")!;
+    expect(row).toHaveTextContent("93.3%");
+    expect(row).toHaveTextContent("≈¥2.68");
+
+    // 按用户：alice 76/80 = 95.0%
+    await userEvent.click(screen.getByTestId("group-tabs-user"));
+    await settle();
+    row = within(screen.getByTestId("group-table")).getByText("alice").closest("tr")!;
+    expect(row).toHaveTextContent("95.0%");
+    expect(row).toHaveTextContent("¥8.04");
+
+    // 按凭证：主账号行 68/70 = 97.1%
+    await userEvent.click(screen.getByTestId("group-tabs-credential"));
+    await settle();
+    row = within(screen.getByTestId("group-table")).getByText("主账号").closest("tr")!;
+    expect(row).toHaveTextContent("97.1%");
+    expect(row).toHaveTextContent("≈¥3.35");
+  });
+
+  it("分组统计：凭证名与请求明细同口径，且带渠道 icon", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": EVENTS_PAGE1,
+    });
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    await userEvent.click(screen.getByTestId("group-tabs-credential"));
+    await settle();
+
+    const groupTable = screen.getByTestId("group-table");
+    // 同一个凭证：分组表与明细表都显示昵称「主账号」，完整 ID 落在 title 里
+    const groupCell = within(groupTable).getByText("主账号").closest("td")!;
+    expect(groupCell).toHaveAttribute("title", "cred_abc123");
+    const eventCell = within(screen.getByTestId("events-table")).getByText("主账号")
+      .closest("td")!;
+    expect(eventCell).toHaveAttribute("title", "cred_abc123");
+    // 凭证名前有渠道 icon（品牌 svg）
+    expect(groupCell.querySelector("svg")).not.toBeNull();
+    // 无昵称的行回落 ID 前 12 位，title 给完整 ID
+    const fallbackCell = within(groupTable).getByText("cred_zzz9998").closest("td")!;
+    expect(fallbackCell).toHaveAttribute("title", "cred_zzz999888777");
+    expect(fallbackCell.querySelector("svg")).not.toBeNull();
+  });
+
+  it("分组统计：只读用户看不到按用户/按凭证 tab", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    renderPage(<StatsPage />, READER);
+    await settle();
+
+    expect(screen.getByTestId("group-tabs-provider")).toBeInTheDocument();
+    expect(screen.getByTestId("group-tabs-model")).toBeInTheDocument();
+    expect(screen.queryByTestId("group-tabs-user")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("group-tabs-credential")).not.toBeInTheDocument();
   });
 });

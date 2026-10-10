@@ -12,6 +12,8 @@
 - `tools` 的 `{type:"function", name, description, parameters}` → chat
   `{type:"function", function:{...}}`；非 function 工具（web_search 等）→ 400
 - `reasoning.effort` → 顶层 `reasoning_effort`（出口侧字段名映射）
+- `text.format` → `response_format`（`text`/`json_object` 直通，`json_schema`
+  展开成 chat 的嵌套结构；无法表达的形状显式 400）
 - `max_output_tokens` → `max_tokens`（CB 上游只认后者，见 TECHNICAL §3.4）
 - `prompt_cache_key` → 透传，供会话粘性（§3.5）与上游使用
 - `store=true` / `previous_response_id` / `background=true` / 未知 `include`
@@ -200,6 +202,39 @@ def _map_tools(tools: Any) -> list[dict[str, Any]]:
     return mapped
 
 
+def _map_response_format(text_config: dict[str, Any]) -> dict[str, Any] | None:
+    """Responses `text.format` → chat `response_format`。
+
+    形状取自官方 openai-python 3.x：Responses 的 json_schema 是
+    `{type, name, description?, schema, strict?}` 扁平结构，chat 是
+    `{type, json_schema: {name, description?, schema, strict?}}` 嵌套结构。
+    只有 verbosity、没有 format 时返回 None（不产生 response_format）。
+    无法无损表达的形状显式 400（与模块「不静默降级」一致）。
+    """
+    format = text_config.get("format")
+    if format is None:
+        return None
+    if not isinstance(format, dict):
+        raise InvalidRequest("text.format must be an object")
+    kind = format.get("type")
+    if kind in ("text", "json_object"):
+        return {"type": kind}
+    if kind != "json_schema":
+        raise InvalidRequest(
+            f"text.format.type {kind!r} is not supported by this gateway")
+    name = format.get("name")
+    if not isinstance(name, str) or not name:
+        raise InvalidRequest("text.format.name must be a non-empty string")
+    if "schema" not in format:
+        raise InvalidRequest("text.format.schema is required for json_schema")
+    json_schema: dict[str, Any] = {"name": name, "schema": format["schema"]}
+    if isinstance(format.get("description"), str):
+        json_schema["description"] = format["description"]
+    if isinstance(format.get("strict"), bool):
+        json_schema["strict"] = format["strict"]
+    return {"type": "json_schema", "json_schema": json_schema}
+
+
 def _map_tool_choice(value: Any) -> Any:
     if value is None or isinstance(value, str):
         return value
@@ -296,8 +331,12 @@ def parse_responses_request(body: Any) -> ChatRequest:
         # 与 chat 出站同理：显式会话标识能固定凭证（B1.5），上游也认该字段
         upstream["prompt_cache_key"] = cache_key
     text_config = body.get("text")
-    if isinstance(text_config, dict) and isinstance(text_config.get("verbosity"), str):
-        upstream["verbosity"] = text_config["verbosity"]
+    if isinstance(text_config, dict):
+        if isinstance(text_config.get("verbosity"), str):
+            upstream["verbosity"] = text_config["verbosity"]
+        response_format = _map_response_format(text_config)
+        if response_format is not None:
+            upstream["response_format"] = response_format
 
     # ChatRequest.raw 供 executor 使用；Responses 元数据在出口侧重新生成
     return ChatRequest(model=model or "", messages=messages, stream=stream,
