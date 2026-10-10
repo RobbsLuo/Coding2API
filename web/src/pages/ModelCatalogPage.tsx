@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Boxes, CircleDollarSign, Coins, RefreshCw, Search, Trophy } from "lucide-react";
+import { Boxes, CircleDollarSign, RefreshCw, Search, Trophy } from "lucide-react";
 import { useSessionContext } from "../Layout";
 import { useModelCatalog } from "../api/hooks";
 import {
@@ -128,10 +128,10 @@ export function ModelCatalogPage() {
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();
     if (!needle) return models;
+    // provider 不参与匹配：它恒为 id 的厂商前缀（id 的子串），匹配它等于匹配 id
     return models.filter((row) =>
       row.id.toLowerCase().includes(needle) ||
-      (row.name ?? "").toLowerCase().includes(needle) ||
-      row.provider.toLowerCase().includes(needle),
+      (row.name ?? "").toLowerCase().includes(needle),
     );
   }, [models, query]);
 
@@ -164,7 +164,7 @@ export function ModelCatalogPage() {
         <Input
           value={query}
           data-testid="model-search"
-          placeholder="搜索 id / 名称 / 渠道"
+          placeholder="搜索 id / 名称"
           className="h-8 w-full pl-7 text-xs sm:w-56"
           onChange={(event) => setQuery(event.target.value)}
         />
@@ -188,12 +188,6 @@ export function ModelCatalogPage() {
       />
 
       <section className="grid grid-cols-2 gap-3 md:grid-cols-3">
-        <Metric
-          label="模型数"
-          value={formatNumber(data?.count ?? 0)}
-          hint="OpenRouter 已收录的模型条目"
-          icon={<Coins className="size-4" />}
-        />
         <Metric
           label="目录更新"
           value={data?.saved_at ? formatAgo(data.saved_at) : "—"}
@@ -260,8 +254,6 @@ export function ModelCatalogPage() {
                   <TableRow>
                     <SortableHead label="模型" columnKey="id" active={sort === "id"}
                                   direction={order} onToggle={toggle} testId="sort-id" />
-                    <SortableHead label="提供方" columnKey="provider" active={sort === "provider"}
-                                  direction={order} onToggle={toggle} testId="sort-provider" />
                     <SortableHead label="上下文 / 输出" columnKey="context"
                                   active={sort === "context"} direction={order}
                                   onToggle={toggle} testId="sort-context" />
@@ -287,7 +279,6 @@ export function ModelCatalogPage() {
                             {row.id}
                           </div>
                         </TableCell>
-                        <TableCell className="font-mono text-xs">{row.provider}</TableCell>
                         <TableCell className="text-xs tabular-nums">
                           <div title="上下文窗口上限">{limitLine(row.context)}</div>
                           <div className="text-muted-foreground" title="单次输出上限">
@@ -363,7 +354,7 @@ export function ModelCatalogPage() {
           模型 id 为 OpenRouter 的 id（含厂商前缀，如 z-ai/glm-5.3），与本服务对外模型名（归一键）并不总是逐个相同；未匹配到定价的模型成本显示 —。价格为「按 token × 公开刊例价」的估算依据，不是上游真实扣费；匹配口径见「用量统计」页。
         </p>
         <p>
-          模型数是 OpenRouter 公开收录的范围（数百条），较此前 models.dev 目录小；上游没有刊例价的模型（如部分国产渠道模型）成本显示 —。价格列上行是「输入 / 输出」单价、下行是「缓存读 / 缓存写」单价（未声明缓存价时显示 —）。币种：原始单位为 USD / 百万 token；切到人民币按当前汇率（1 USD = {formatNumber(rate)} CNY）折算，历史成本按写入时汇率定值，不随本页变化重算。OpenRouter 不提供原厂发布时间（上游的 `created` 是「收录进 OpenRouter 的时间」，不是发布日），故本表只列知识截止、不列发布日期。
+          本表是 OpenRouter 公开收录的范围（数百个模型），较此前 models.dev 目录小；上游没有刊例价的模型（如部分国产渠道模型）成本显示 —。价格列上行是「输入 / 输出」单价、下行是「缓存读 / 缓存写」单价（未声明缓存价时显示 —）。币种：原始单位为 USD / 百万 token；切到人民币按当前汇率（1 USD = {formatNumber(rate)} CNY）折算，历史成本按写入时汇率定值，不随本页变化重算。OpenRouter 不提供原厂发布时间（上游的 `created` 是「收录进 OpenRouter 的时间」，不是发布日），故本表只列知识截止、不列发布日期。
         </p>
       </Notice>
     </div>

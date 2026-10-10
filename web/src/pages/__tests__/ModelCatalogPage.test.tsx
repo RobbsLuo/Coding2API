@@ -70,7 +70,7 @@ describe("ModelCatalogPage（模型列表）", () => {
     vi.unstubAllGlobals();
   });
 
-  it("渲染模型明细：名称 / id / 渠道 / 模态 / 能力 / 知识与刊例价", async () => {
+  it("渲染模型明细：名称 / id / 模态 / 能力 / 知识与刊例价", async () => {
     stubFetch(CATALOG);
     renderPage(<ModelCatalogPage />);
     await settle();
@@ -79,7 +79,6 @@ describe("ModelCatalogPage（模型列表）", () => {
     const row = screen.getByTestId("model-row-a-model");
     expect(row).toHaveTextContent("A Model");
     expect(row).toHaveTextContent("a-model");
-    expect(row).toHaveTextContent("alpha");
     expect(row).toHaveTextContent("文本 · 图片");
     expect(row).toHaveTextContent("工具调用 · 附件");
     expect(row).toHaveTextContent("2024-01-01");
@@ -92,7 +91,10 @@ describe("ModelCatalogPage（模型列表）", () => {
     expect(row).toHaveTextContent("输入 $0.5 · 输出 $1.5");
     expect(row).toHaveTextContent("缓存读 $0.05 · 缓存写 —");
     expect(screen.getByTestId("model-catalog-page")).toHaveTextContent("1 USD = 7 CNY");
-    expect(screen.getByTestId("model-catalog-page")).toHaveTextContent("模型数");
+    // 「提供方」列与「模型数」指标卡已移除（provider 恒为 id 前缀，信息重复）
+    expect(screen.queryByText("提供方")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("sort-provider")).not.toBeInTheDocument();
+    expect(screen.queryByText("模型数")).not.toBeInTheDocument();
   });
 
   it("名称缺失时回退显示 id，缓存写价照常展示", async () => {
@@ -110,7 +112,7 @@ describe("ModelCatalogPage（模型列表）", () => {
     expect(row).toHaveTextContent("缓存读 $0.1 · 缓存写 $1.25");
   });
 
-  it("搜索按 id / 名称 / 渠道过滤，无匹配显示空态", async () => {
+  it("搜索按 id / 名称过滤，无匹配显示空态", async () => {
     stubFetch(CATALOG);
     renderPage(<ModelCatalogPage />);
     await settle();
@@ -124,12 +126,24 @@ describe("ModelCatalogPage（模型列表）", () => {
     expect(screen.getByTestId("model-row-a-model")).toBeInTheDocument();
     expect(screen.queryByTestId("model-row-glm-5.2")).not.toBeInTheDocument();
 
-    // 按渠道搜
-    fireEvent.change(screen.getByTestId("model-search"), { target: { value: "zhipuai" } });
-    expect(screen.getByTestId("model-row-glm-5.2")).toBeInTheDocument();
-
     fireEvent.change(screen.getByTestId("model-search"), { target: { value: "zzz" } });
     expect(screen.getByTestId("no-model-match")).toBeInTheDocument();
+  });
+
+  it("按 id 的厂商前缀搜（provider 列已移除，前缀仍在 id 里）", async () => {
+    stubFetch({
+      ...CATALOG,
+      models: [
+        { ...CATALOG.models[0], id: "zhipuai/glm-5.3", name: "GLM 5.3" },
+        { ...CATALOG.models[0], id: "moonshotai/kimi-k3", name: "Kimi K3" },
+      ],
+    });
+    renderPage(<ModelCatalogPage />);
+    await settle();
+
+    fireEvent.change(screen.getByTestId("model-search"), { target: { value: "zhipuai/" } });
+    expect(screen.getByTestId("model-row-zhipuai/glm-5.3")).toBeInTheDocument();
+    expect(screen.queryByTestId("model-row-moonshotai/kimi-k3")).not.toBeInTheDocument();
   });
 
   it("切到人民币按汇率折算", async () => {
