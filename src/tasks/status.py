@@ -50,6 +50,10 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
              "拉取 models.dev 模型目录（刊例价 + 明细元数据，USD/百万 token）并落盘："
              "统计里的成本估算与「模型列表」页都依赖它，缺失时成本显示 —。"
              "上游价格变动很少，默认每日一次。"),
+    TaskSpec("benchmark_catalog", "能力排行刷新（OpenRouter）",
+             "拉取模型能力排行（Artificial Analysis 指数，经 OpenRouter 公开接口，"
+             "无需密钥）并落盘：Playground 与「模型列表」页的分数徽章、/v1/models "
+             "的 benchmarks 字段都来自它。拉取失败只是不显示分数，不影响模型列表。"),
     TaskSpec("alert", "运维告警",
              "周期评估四类风险（池耗尽 / 任务连续失败 / token 临近到期 / 上游"
              "错误率骤升），命中落站内记录并可推送 webhook；周期见「运维告警周期」。"),

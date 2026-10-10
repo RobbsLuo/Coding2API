@@ -170,6 +170,43 @@ export function PlaygroundPage() {
             </Card>
           )}
 
+          {/* 能力分（Artificial Analysis 指数，经 OpenRouter 公开接口）：与上面的
+              上游元数据分开一张卡——它是第三方成绩，不是本服务实测，混在一起会被
+              误读成本服务的字段。匹配不到该模型时整卡不渲染。 */}
+          {selectedInfo?.benchmarks && (
+            <Card
+              size="sm"
+              className="flex flex-row flex-wrap items-center gap-x-4 gap-y-1 bg-muted/40 px-3 py-2 text-xs text-muted-foreground ring-border"
+              data-testid="playground-benchmarks"
+            >
+              <span className="font-medium text-foreground">能力分</span>
+              {selectedInfo.benchmarks.intelligence_index !== undefined && (
+                <span>
+                  智能 <span className="font-medium tabular-nums text-foreground">
+                    {selectedInfo.benchmarks.intelligence_index}
+                  </span>
+                </span>
+              )}
+              {selectedInfo.benchmarks.coding_index !== undefined && (
+                <span>
+                  编程 <span className="font-medium tabular-nums text-foreground">
+                    {selectedInfo.benchmarks.coding_index}
+                  </span>
+                </span>
+              )}
+              {selectedInfo.benchmarks.agentic_index !== undefined && (
+                <span>
+                  智能体 <span className="font-medium tabular-nums text-foreground">
+                    {selectedInfo.benchmarks.agentic_index}
+                  </span>
+                </span>
+              )}
+              <span className="text-[11px]">
+                Artificial Analysis 指数，经 OpenRouter 公开接口；非本服务实测
+              </span>
+            </Card>
+          )}
+
           <Field label="提示词">
             <Textarea
               rows={4}

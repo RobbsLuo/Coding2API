@@ -38,6 +38,13 @@ from .api import (
 )
 from .api.deps import Services
 from .auth.throttle import LoginThrottle
+from .benchmarks import (
+    BenchmarkTable,
+    build_benchmark_table,
+    fetch_openrouter_models,
+    load_benchmarks_snapshot,
+    save_benchmarks,
+)
 from .config import (
     Settings,
     load_settings,
@@ -255,6 +262,23 @@ async def _warm_price_table(refresh, table: dict, catalog: dict) -> None:
         logger.warning("启动预热价表失败: %s", error)
 
 
+async def _warm_benchmark_table(refresh, table: dict) -> None:
+    """后台补能力分表：仅在**没有落盘快照**时立即拉一次。
+
+    与 `_warm_price_table` 同一口径：有快照就交给周期任务（OpenRouter 是公开
+    接口，24 小时一次足够），没有快照（首次部署 / 快照损坏 / 升级后新引入的
+    文件缺失）时若不补，Playground 与「模型列表」页要等到下一轮
+    `BENCHMARK_CATALOG_MINUTES` 才显示分数。失败仅记日志（没有徽章而已，
+    不影响模型列表）。
+    """
+    if table:
+        return
+    try:
+        await refresh()
+    except Exception as error:  # noqa: BLE001 - 预热失败不阻断服务
+        logger.warning("启动预热能力分表失败: %s", error)
+
+
 def _restore_model_list(services) -> None:
     """启动时同步回灌落盘模型目录：失败仅记日志（缓存是加速手段，不是必需项）。"""
     try:
@@ -366,9 +390,15 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 快照保存时刻（供管理台「模型列表」页展示「这份表何时拉取」）：启动读回，
     # 每轮后台刷新后更新。
     price_saved_at: float | None = None
+    # 能力排行（Artificial Analysis 指数，经 OpenRouter 公开接口）：与价表同一
+    # 节奏——启动读回落盘快照（零上游请求），后台周期刷新。同一份 dict 引用交给
+    # 路由层（每请求现读 app.state），刷新时就地替换后新请求立即用上新分数。
+    model_benchmarks: BenchmarkTable = {}
+    benchmark_saved_at: float | None = None
     try:
         price_table, price_saved_at = load_prices_snapshot(config.data_dir)
         models_dev_catalog = load_model_catalog(config.data_dir)
+        model_benchmarks, benchmark_saved_at = load_benchmarks_snapshot(config.data_dir)
     except Exception as error:  # noqa: BLE001 - 价表是加速手段，失败不阻断服务
         logger.warning("恢复落盘价表失败: %s", error)
     stats_collector = StatsCollector(
@@ -441,6 +471,27 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             app_.state.price_saved_at = time.time()
             return {"models": len(price_table)}
 
+        async def _refresh_benchmark_catalog() -> dict[str, int]:
+            """后台刷新能力排行一轮：拉 OpenRouter → 建表 → 落盘 → 就地换入。
+
+            与价表同一模式：就地替换（clear + update）而不是重新绑定变量——路由层
+            每次请求从 `app.state.model_benchmarks` 现读，换引用会让它读到旧表。
+            返回有分模型数供运行态展示（整张表几百条，不透传原始数据）。
+
+            拉到空表视为失败（抛给 `_guarded` 记运行态）：上游返回结构变了的空
+            `data` 与「真的全都没分数」区分不开，而后者宁可显示「没有分数」也不
+            该把已有的分数清空——所以空表直接不换入。
+            """
+            raw = await fetch_openrouter_models(config.openrouter_models_url)
+            table = build_benchmark_table(raw)
+            if not table:
+                raise RuntimeError("OpenRouter 返回的能力表为空")
+            model_benchmarks.clear()
+            model_benchmarks.update(table)
+            save_benchmarks(config.data_dir, model_benchmarks)
+            app_.state.benchmark_saved_at = time.time()
+            return {"models": len(model_benchmarks)}
+
         # 传 runtime（而非 env 快照）：后台循环的热更值每轮现读覆盖层。
         runner = build_runner(credentials, registry, app_.state.stats_collector, runtime,
                               growth_events=app_.state.growth_events,
@@ -448,7 +499,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                               audit=audit,
                               alerts=alerts,
                               model_catalog=_refresh_model_catalog,
-                              price_catalog=_refresh_price_catalog)
+                              price_catalog=_refresh_price_catalog,
+                              benchmark_catalog=_refresh_benchmark_catalog,
+                              benchmark_catalog_minutes=(
+                                  lambda: runtime.benchmark_catalog_minutes))
         app_.state.task_runner = runner
         await runner.start()
         # 预热模型别名表：放后台跑（force 绕过 TTL）。
@@ -458,6 +512,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         # 价表同理：仅在无落盘快照时后台补拉一次，避免首次部署成本空窗到下一轮。
         app_.state.price_warmup_task = asyncio.create_task(
             _warm_price_table(_refresh_price_catalog, price_table, models_dev_catalog))
+        # 能力分表同理：仅在无落盘快照时后台补拉一次，避免首次部署的分数空窗
+        # 到下一轮（默认 24 小时后）。
+        app_.state.benchmark_warmup_task = asyncio.create_task(
+            _warm_benchmark_table(_refresh_benchmark_catalog, model_benchmarks))
         # 让预热任务先跑一步：失败时日志立即落盘（成功与否都不阻塞下面 yield）。
         await asyncio.sleep(0)
         try:
@@ -474,6 +532,11 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                 price_warmup.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
                     await price_warmup
+            benchmark_warmup = getattr(app_.state, "benchmark_warmup_task", None)
+            if benchmark_warmup is not None and not benchmark_warmup.done():
+                benchmark_warmup.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await benchmark_warmup
             # stale-while-revalidate 的后台刷新任务：不取消会把 in-flight 的
             # 上游请求（zen 探活可占十几秒）带出事件循环，关闭变慢且报错。
             for task in list(services_.model_refresh_tasks):
@@ -523,6 +586,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.price_table = price_table
     app.state.models_dev_catalog = models_dev_catalog
     app.state.price_saved_at = price_saved_at
+    # 能力排行表与快照时刻：与 models_dev_catalog 同一形态挂在 app.state（运行
+    # 数据，不是仓储/引擎依赖），刷新时就地换值，路由层每请求现读。
+    app.state.model_benchmarks = model_benchmarks
+    app.state.benchmark_saved_at = benchmark_saved_at
     app.state.pending_callback_state = None
     app.state.pending_callback_user = None
     app.state.login_throttle = LoginThrottle()

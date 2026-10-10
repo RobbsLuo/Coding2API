@@ -220,10 +220,19 @@ def estimate_cost_usd(
     返回 None 的两种情形：价表里没有该模型，或没有输入 token 数（拿不到用量
     就无法估算——不能拿 0 冒充「免费」）。缓存 token 会被夹到 `[0, input]`，
     多报的缓存不会把未命中部分算成负数。
+
+    匹配口径与能力排行共用 `model_match`：**原样小写 id 先精确命中**（既有行为
+    不变），未命中才走候选键等值匹配（唯一命中才采用）。这样 models.dev 的
+    `tencent/hy3` 能对上本项目归一键 `hy3`，而 `glm-5.3` 不会误配到
+    `glm-5.3-flash`。
     """
+    from .model_match import lookup
+
     if not isinstance(model, str) or not model:
         return None
     price = (table or {}).get(model.strip().lower())
+    if price is None:
+        price = lookup(table or {}, model)
     if price is None:
         return None
     if input_tokens is None:

@@ -308,6 +308,17 @@ env 完整清单见 [README.md「配置」](README.md)（以 `src/config.py` 为
 M0 骨架 → M1a TRAE → M1b CB 基础 → M1.5 CB 完整化 → M2 前端 → M3 收尾，**已全部完成**。状态见 [README.md「状态」](README.md)。
 ## 10. 技术选型
 见 [TECHNICAL.md §1](TECHNICAL.md)。
+## 10.5 模型能力排行（2026-10 增补）
+
+| 决策点 | 结论 | 理由 |
+|---|---|---|
+| Q49 数据源 | OpenRouter 公开接口 `api/v1/models` 的 `benchmarks.artificial_analysis` 三项指数 | 匿名可读、无需 key；AA 官方 API 需 key，自建实测排行本期不做 |
+| Q50 展示范围 | Playground 选择器 + 选中卡、管理台「模型列表」页、`/v1/models` 字段，三处都加 | 用户要「都加」 |
+| Q51 是否排序 | **不排**，只展示分数 | 用户明确要求；分数是第三方成绩，排序等于替用户下结论 |
+| Q52 匹配口径 | 与 models.dev 价格目录共用 `src/model_match.py`（等值匹配 + 唯一命中） | 原先两套独立匹配会漂移；宁可不配也不错配 |
+| Q53 拉取失败 | 安静降级为空表，条目不带字段、页面显示 `—` | 绝不影响模型列表与聊天 |
+| Q54 架构 | 与 models.dev 目录同构：后台任务 `benchmark_catalog` → 落盘 → `app.state` → 每请求现读 | 复用既有模式，冷启动零上游请求 |
+
 ## 11. 风险清单
 
 | 风险 | 等级 | 对策 |
@@ -321,6 +332,8 @@ M0 骨架 → M1a TRAE → M1b CB 基础 → M1.5 CB 完整化 → M2 前端 →
 | 积分语义混淆（周期 vs 余额） | 低 | 健康分仅用于调度；展示层标注周期语义 |
 | 容器环境特殊（Apple container，无 compose） | 低 | Dockerfile 本地构建验证；compose 靠 CI 验证 |
 | License 溯源不全 | 中 | NOTICE 列明 5 个参考项目（含各自上游共 7 条来源）的署名与协议 |
+| 第三方能力分被误读为本服务实测 | 中 | 三处 UI 均标注「Artificial Analysis 指数，经 OpenRouter 公开接口；非本服务实测」；不做排序 |
+| 上游模型写法差异导致错配分数 | 中 | 只登记显式等价规则 + 命中不唯一即拒配；`qwen3.8-max` 上游是 `-0902` / `-prime` 两个规格，宁可漏配 |
 
 ## 12. NOTICE 三方溯源
 署名清单以仓库根目录的 [`NOTICE`](NOTICE) 为唯一真源（本文件不再复制一份，

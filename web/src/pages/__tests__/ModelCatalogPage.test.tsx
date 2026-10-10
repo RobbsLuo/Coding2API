@@ -179,6 +179,38 @@ describe("ModelCatalogPage（模型列表）", () => {
     expect(screen.getByTestId("model-row-m-59")).toBeInTheDocument();
   });
 
+  it("能力分列展示三项指数，缺失显示 —", async () => {
+    stubFetch({
+      ...CATALOG,
+      benchmark_saved_at: 1_700_000_100,
+      models: [
+        { ...CATALOG.models[1], benchmarks: {
+          intelligence_index: 44.8, coding_index: 74.8, agentic_index: 53.1 } },
+        CATALOG.models[0],
+      ],
+    });
+    renderPage(<ModelCatalogPage />);
+    await settle();
+
+    const row = screen.getByTestId("model-row-glm-5.2");
+    expect(row).toHaveTextContent("智 44.8");
+    expect(row).toHaveTextContent("编 74.8");
+    expect(row).toHaveTextContent("体 53.1");
+    // 无分数的行只显示一个 —，不渲染三个
+    const plain = screen.getByTestId("model-row-a-model");
+    expect(plain.querySelectorAll("div").length).toBeGreaterThan(0);
+    expect(plain).not.toHaveTextContent("智 ");
+    // 能力分快照时刻单独展示（与目录快照分开）
+    expect(screen.getByTestId("model-catalog-page")).toHaveTextContent("能力分更新");
+  });
+
+  it("无能力分快照时指标卡显示 —", async () => {
+    stubFetch({ ...CATALOG, benchmark_saved_at: null });
+    renderPage(<ModelCatalogPage />);
+    await settle();
+    expect(screen.getByTestId("model-catalog-page")).toHaveTextContent("尚无能力分快照");
+  });
+
   it("无目录快照时显示空态", async () => {
     stubFetch({ ...CATALOG, count: 0, models: [], saved_at: null });
     renderPage(<ModelCatalogPage />);

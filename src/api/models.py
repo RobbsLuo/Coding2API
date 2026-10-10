@@ -24,6 +24,15 @@ publish 别名表——否则启动预热跑完之前别名表是空的，扁平
 元数据（消耗倍率 / token 上限 / 支持性）随条目透传，双上游同名模型
 逐字段补缺（先到先填，后到只补 None）。
 
+**能力分（2026-10 起）**：每个条目可带可选 `benchmarks` 字段——Artificial
+Analysis 的三项指数（智能 / 编程 / 智能体），经 OpenRouter 公开接口分发
+（`src/benchmarks.py`）。匹配口径与价表共用 `model_match.lookup`：按对外 id
+与展示名两路取候选键等值查表，**唯一命中才采用**，查不到或有歧义就不带该
+字段（宁可不配也不错配）。渠道内部占位模型（`custom_model_*`、`*_subagent`）
+本来就不该有分，匹配不到即无字段。拉取失败时整表为空，效果同样是「没有
+字段」——模型列表本身不受影响。数据是第三方成绩，不是本服务实测，故随条目
+透出 `source` 与 `source_model`（上游原始 id）供溯源。
+
 **命名三字段（2026-10 起）**：六条渠道（codebuddy / trae / zen / kilo /
 qoder / codearts）的每个模型统一成三个字段，规则见
 `provider.naming`：
@@ -74,8 +83,10 @@ import time
 from fnmatch import fnmatch
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 
+from ..benchmarks import BenchmarkTable
+from ..model_match import lookup
 from ..provider.base import Model
 from ..provider.naming import display_model_name, normalize_model_key
 from .deps import ApiKeyPrincipal, Services, api_key_user
@@ -385,13 +396,17 @@ def _build_aliases(entries: list[dict[str, Any]]) -> dict[str, dict[str, str]]:
     return aliases
 
 
-def _entry_response(entry: dict[str, Any]) -> dict[str, Any]:
+def _entry_response(entry: dict[str, Any],
+                    benchmarks: BenchmarkTable | None = None) -> dict[str, Any]:
     """合并后的 grouped 条目 → OpenAI 兼容响应条目。
 
     多渠道模型额外给 `by_provider.{pid}`：各渠道倍率不同时前端按渠道分别
     展示；`raw_id` 一并透出，让用户能直接看到「选这个模型实际会发什么
     key」（kilo 的 `kilo-auto/free`、Qoder 的 `kmodel_latest`），排障不必
     再翻服务端日志。
+
+    `benchmarks` 非空时按对外 id 与展示名两路查能力分（唯一命中才带），
+    查不到就不带该字段——调用方不传（默认 None）时行为与加该字段前完全一致。
     """
     result: dict[str, Any] = {
         "id": entry["id"], "object": "model", "owned_by": "Coding2API",
@@ -409,6 +424,9 @@ def _entry_response(entry: dict[str, Any]) -> dict[str, Any]:
         by_provider[pid] = detail
     if len(entry["providers"]) > 1 and by_provider:
         result["by_provider"] = by_provider
+    score = lookup(benchmarks or {}, entry["id"], entry["meta"].get("name"))
+    if score is not None:
+        result["benchmarks"] = score
     return result
 
 
@@ -597,12 +615,16 @@ def _schedule_refresh(services: Services, connected: set[str],
 
 
 def _build_response(services: Services, connected: set[str],
-                    allowed_models: str = "") -> dict:
+                    allowed_models: str = "",
+                    benchmarks: BenchmarkTable | None = None) -> dict:
     """按当前缓存合并出响应（不碰上游），并就地 publish 别名表。
 
     `allowed_models` 非空时按该 Key 的模型白名单过滤展示（P0-3）：白名单是
     Key 级策略，执行时的权威判定在出口（`model_allowed`），这里只是让
     `/v1/models` 与 Key 实际能用的模型一致。
+
+    `benchmarks` 为能力分表（`app.state.model_benchmarks`）；None/空表时条目
+    不带 `benchmarks` 字段，与加该字段前的行为一致。
     """
     entries = merged_entries(services, connected)
     _publish(services, entries)
@@ -610,11 +632,12 @@ def _build_response(services: Services, connected: set[str],
         from ..auth.access import model_allowed
         entries = [entry for entry in entries
                    if model_allowed(entry["id"], allowed_models)]
-    return {"object": "list", "data": [_entry_response(entry)
+    return {"object": "list", "data": [_entry_response(entry, benchmarks)
                                        for entry in entries]}
 
 
-async def serve_models(services: Services, allowed_models: str = "") -> dict:
+async def serve_models(services: Services, allowed_models: str = "",
+                       request: Request | None = None) -> dict:
     """HTTP 出口（`/v1/models`、Playground）：先回旧列表，过期渠道后台刷。
 
     stale-while-revalidate：TTL 到期不再把 zen 探活的十几秒压在请求上。只有某
@@ -625,6 +648,10 @@ async def serve_models(services: Services, allowed_models: str = "") -> dict:
 
     后台刷新任务收敛在 `services.model_refresh_tasks` / `pending_model_refreshes`，
     `model_refreshing` 去重，lifespan 关闭时统一取消。
+
+    `request` 非空时从 `request.app.state.model_benchmarks` 现读能力分表并随
+    条目透出（与 `models_dev_catalog` 同一形态：运行数据挂 app.state，不是
+    Services 依赖）。不传（测试 / 内部调用）时条目不带 `benchmarks` 字段。
     """
     connected = credential_providers(services)
     stale = {provider_id for provider_id in connected
@@ -634,10 +661,12 @@ async def serve_models(services: Services, allowed_models: str = "") -> dict:
         await _refresh_providers(services, connected)
     elif stale:
         _schedule_refresh(services, connected, stale)
-    return _build_response(services, connected, allowed_models)
+    benchmarks = getattr(request.app.state, "model_benchmarks", None) if request else None
+    return _build_response(services, connected, allowed_models, benchmarks)
 
 
-async def list_models(services: Services) -> dict:
+async def list_models(services: Services,
+                      benchmarks: BenchmarkTable | None = None) -> dict:
     """同步拉取并合并模型列表（供后台预热 / 兜底刷新循环）。
 
     同一模型在各渠道的内部代号互不相同（Qoder `kmodel_latest` = TRAE
@@ -661,14 +690,15 @@ async def list_models(services: Services) -> dict:
     """
     connected = credential_providers(services)
     await _refresh_providers(services, connected)
-    return _build_response(services, connected)
+    return _build_response(services, connected, "", benchmarks)
 
 
 def create_router(services: Services) -> APIRouter:
     router = APIRouter()
 
     @router.get("/v1/models")
-    async def list_v1_models(principal: ApiKeyPrincipal = Depends(api_key_user)):
-        return await serve_models(services, principal.allowed_models)
+    async def list_v1_models(request: Request,
+                             principal: ApiKeyPrincipal = Depends(api_key_user)):
+        return await serve_models(services, principal.allowed_models, request)
 
     return router

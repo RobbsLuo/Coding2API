@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Check, RefreshCw, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { ModelInfo } from "../api/types";
+import type { ModelBenchmarks, ModelInfo } from "../api/types";
 import { providerChartColor, providerLabel, providerRank } from "../api/providers";
 import { ProviderIcon } from "./ProviderIcon";
 import { Input } from "../ui";
@@ -180,6 +180,51 @@ function ChannelPill({
   );
 }
 
+/**
+ * 能力分 tooltip 文本：三项指数 + 来源说明。
+ *
+ * 必须写明「第三方成绩、非本服务实测」：用户容易把这里的分数当成 coding2api
+ * 自己跑出来的排名。上游只给部分项时只列有的那几项。
+ */
+function benchmarkTitle(item: { benchmarks?: ModelBenchmarks }): string {
+  const b = item.benchmarks;
+  if (!b) return "";
+  const parts: string[] = [];
+  if (b.intelligence_index !== undefined) parts.push(`智能 ${b.intelligence_index}`);
+  if (b.coding_index !== undefined) parts.push(`编程 ${b.coding_index}`);
+  if (b.agentic_index !== undefined) parts.push(`智能体 ${b.agentic_index}`);
+  const source = b.source_model ? `（${b.source_model}）` : "";
+  return `${parts.join(" · ")}\nArtificial Analysis 指数，经 OpenRouter 公开接口${source}；非本服务实测`;
+}
+
+/**
+ * 能力分行内徽章：只显示**综合智能指数**（三项全列会把行挤爆），无分不渲染。
+ *
+ * 颜色分档（前端本地口径，只用于让强模型在列表里更显眼）：≥40 主色、
+ * ≥30 中性、其余弱化。后端不返回任何排序，这里也不排——展示层不做排名。
+ */
+function BenchmarkBadge({ item }: { item: { benchmarks?: ModelBenchmarks } }) {
+  const score = item.benchmarks?.intelligence_index;
+  if (score === undefined) return null;
+  const tone = score >= 40
+    ? "border-primary/40 bg-primary/10 text-primary-ink"
+    : score >= 30
+      ? "border-border bg-muted text-foreground"
+      : "border-border text-muted-foreground";
+  return (
+    <span
+      data-testid="model-benchmark"
+      title={benchmarkTitle(item)}
+      className={cn(
+        "inline-flex items-center gap-0.5 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold tabular-nums",
+        tone,
+      )}
+    >
+      智 {score}
+    </span>
+  );
+}
+
 function ModelRow({
   item,
   selected,
@@ -229,6 +274,7 @@ function ModelRow({
           自身 `flex-wrap`，多渠道放不下时**在右侧区域内折行**，而不是整组掉到
           名称下方独占一行（内层 `justify-end` 让每行都贴右）。 */}
       <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+        <BenchmarkBadge item={item} />
         {providers.map((provider) => (
           <ChannelPill
             key={provider}
@@ -329,6 +375,7 @@ export function ModelPicker({
             )}
           </span>
           <span className="flex flex-wrap items-center gap-1.5">
+            <BenchmarkBadge item={selectedItem} />
             {sortProviders(selectedItem.providers).map((provider) => (
               <ChannelPill
                 key={provider}

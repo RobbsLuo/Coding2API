@@ -176,6 +176,11 @@ class Settings(BaseSettings):
     usd_cny_rate: float = 6.70
     price_catalog_minutes: int = 1440      # 模型列表刷新周期（分钟）：默认每日一次
     models_dev_url: str = "https://models.dev/api.json"
+    # 能力排行（Artificial Analysis 指数，经 OpenRouter 公开接口分发，无需密钥）：
+    # 拉取周期（分钟）与数据源 URL。指数变动很慢，默认每日一次；拉取失败只是
+    # 没有分数徽章，不影响模型列表。URL 可覆盖以便测试/内网镜像。
+    benchmark_catalog_minutes: int = 1440
+    openrouter_models_url: str = "https://openrouter.ai/api/v1/models"
     # 内容风控自愈（11128）：出站 system/assistant 正文命中「伪装其他厂商
     # 官方客户端」指纹串时替换为占位符（客户端会话历史不受影响）。该拦截
     # 与凭证无关、换号无效，会话一旦带入指纹将持续 11128；false 关闭

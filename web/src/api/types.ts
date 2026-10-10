@@ -418,6 +418,25 @@ export interface CheckinResult {
   status: CheckinStatus | null;
 }
 
+/**
+ * 模型能力分：Artificial Analysis 的三项指数，经 OpenRouter 公开接口分发。
+ *
+ * 后端按候选键等值匹配（唯一命中才带），匹配不到时整个字段缺失（不是 null）。
+ * 三项都可能没有（上游只给了其中几项），故逐个判存在性。
+ */
+export interface ModelBenchmarks {
+  /** 综合智能指数（0–100 量级的排名分） */
+  intelligence_index?: number;
+  /** 编程指数 */
+  coding_index?: number;
+  /** 智能体（agentic）指数 */
+  agentic_index?: number;
+  /** 数据来源标识（当前恒为 "openrouter"） */
+  source?: string;
+  /** 上游原始模型 id（如 `z-ai/glm-5.3`），供溯源 */
+  source_model?: string;
+}
+
 export interface ModelInfo {
   id: string;
   object: string;
@@ -439,6 +458,8 @@ export interface ModelInfo {
   default_effort?: number;
   /** 多渠道模型才有：按渠道给出倍率与**该渠道实际请求的 key**（raw key 永不改动） */
   by_provider?: Record<string, { credit_rate?: number; raw_id?: string }>;
+  /** 能力分（Artificial Analysis 指数）：匹配不到该模型的第三方成绩时整个字段缺失 */
+  benchmarks?: ModelBenchmarks;
 }
 
 /**
@@ -476,6 +497,11 @@ export interface ModelCatalogEntry {
   cache_read: number;
   /** 缓存写入价；上游未声明时为 null */
   cache_write: number | null;
+  /**
+   * 能力分（Artificial Analysis 指数，经 OpenRouter 公开接口）。
+   * 后端按同一套匹配口径补分，匹配不到时字段缺失（页面显示 —）。
+   */
+  benchmarks?: ModelBenchmarks;
 }
 
 /**
@@ -493,6 +519,11 @@ export interface ModelCatalogResponse {
   usd_cny_rate: number;
   /** 目录快照保存时刻（epoch 秒）；无快照时为 null */
   saved_at: number | null;
+  /**
+   * 能力分快照保存时刻（epoch 秒）。与 `saved_at` 分开：两个后台任务、两个
+   * 落盘文件；为 null 表示本次启动以来没拉到过能力分（页面显示 —）。
+   */
+  benchmark_saved_at: number | null;
 }
 
 /**

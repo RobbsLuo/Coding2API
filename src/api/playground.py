@@ -17,10 +17,12 @@ def create_router(services: Services) -> APIRouter:
     executor = services.executor
 
     @router.get("/api/playground/models")
-    async def playground_list_models(_principal=Depends(principal_from_request)):
+    async def playground_list_models(request: Request,
+                                     _principal=Depends(principal_from_request)):
         # 管理台入口用 stale-while-revalidate：先回缓存的旧列表，过期渠道后台刷，
-        # 不把 zen 探活的十几秒压在打开页面上。
-        return await serve_models(services)
+        # 不把 zen 探活的十几秒压在打开页面上。request 用于把能力分表
+        # （app.state.model_benchmarks）随条目透出，与 /v1/models 同一口径。
+        return await serve_models(services, request=request)
 
     @router.post("/api/playground/chat/completions")
     async def playground_chat(request: Request,

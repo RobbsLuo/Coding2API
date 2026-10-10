@@ -106,6 +106,60 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(screen.getByTestId("model-current")).not.toHaveTextContent("x0.17");
   });
 
+  it("能力分（Artificial Analysis 指数）在选择器行与元数据卡展示", async () => {
+    const RATED_MODELS = {
+      object: "list",
+      data: [
+        {
+          id: "glm-5.3", object: "model", owned_by: "Coding2API",
+          providers: ["codebuddy", "trae"],
+          benchmarks: {
+            intelligence_index: 44.8, coding_index: 74.8, agentic_index: 53.1,
+            source: "openrouter", source_model: "z-ai/glm-5.3",
+          },
+        },
+        {
+          id: "kimi-k3", object: "model", owned_by: "Coding2API",
+          providers: ["trae"],
+          // 上游只给了综合分：另两项不渲染，也不显示 null
+          benchmarks: { intelligence_index: 43.6, source: "openrouter" },
+        },
+        { id: "no-score", object: "model", owned_by: "Coding2API", providers: ["trae"] },
+      ],
+    };
+    mockFetch({ "/api/playground/models": RATED_MODELS });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    // 默认选中第一条（无倍率数据时回退列表第一个）：三项分数 + 来源说明
+    const card = screen.getByTestId("playground-benchmarks");
+    expect(card).toHaveTextContent("能力分");
+    expect(card).toHaveTextContent("44.8");
+    expect(card).toHaveTextContent("74.8");
+    expect(card).toHaveTextContent("53.1");
+    // 必须标明是第三方成绩，不是本服务实测
+    expect(card).toHaveTextContent("非本服务实测");
+
+    // 行内徽章只显示综合分，tooltip 带三项与来源
+    const row = screen.getByTestId("model-option-glm-5.3");
+    const badge = within(row).getByTestId("model-benchmark");
+    expect(badge).toHaveTextContent("智 44.8");
+    expect(badge.getAttribute("title")).toContain("编程 74.8");
+    expect(badge.getAttribute("title")).toContain("z-ai/glm-5.3");
+    expect(badge.getAttribute("title")).toContain("非本服务实测");
+
+    // 只有综合分的模型：徽章照显，卡里只列那一项
+    await userEvent.click(screen.getByTestId("model-option-kimi-k3@trae"));
+    expect(screen.getByTestId("playground-benchmarks")).toHaveTextContent("43.6");
+    expect(screen.getByTestId("playground-benchmarks")).not.toHaveTextContent("74.8");
+
+    // 无分数的模型：整卡不渲染，行里也没有徽章
+    await userEvent.click(screen.getByTestId("model-option-no-score@trae"));
+    expect(screen.queryByTestId("playground-benchmarks")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("model-option-no-score@trae"))
+      .queryByTestId("model-benchmark")).not.toBeInTheDocument();
+  });
+
   it("自动载入模型列表并展示可选渠道，请求走会话端点", async () => {
     const spy = mockFetch({ "/api/playground/models": MODELS });
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Boxes, CircleDollarSign, Coins, RefreshCw, Search } from "lucide-react";
+import { Boxes, CircleDollarSign, Coins, RefreshCw, Search, Trophy } from "lucide-react";
 import { useSessionContext } from "../Layout";
 import { useModelCatalog } from "../api/hooks";
 import {
@@ -85,6 +85,27 @@ function limitLine(value: number | null): string {
 }
 
 /**
+ * 能力分一行：智 / 编 / 智体三项各占一行，缺失的那项显示 —。
+ *
+ * 与表头「能力分」对应（三行结构同「上下文 / 输出」）。整块没有分时只显示一个
+ * 居中的 —：models.dev 收录了 3500+ 条目，其中多数没有第三方成绩，逐个渲染
+ * 三个 — 会让这一列显得很吵。
+ */
+function benchmarkLine(row: ModelCatalogEntry) {
+  const b = row.benchmarks;
+  if (!b) return <div className="text-muted-foreground">—</div>;
+  const score = (value: number | undefined): string =>
+    value === undefined ? "—" : value.toLocaleString("zh-CN");
+  return (
+    <div title="Artificial Analysis 指数（智能 / 编程 / 智能体），经 OpenRouter 公开接口；非本服务实测">
+      <div>智 {score(b.intelligence_index)}</div>
+      <div className="text-muted-foreground">编 {score(b.coding_index)}</div>
+      <div className="text-muted-foreground">体 {score(b.agentic_index)}</div>
+    </div>
+  );
+}
+
+/**
  * 模型列表页（控制台）：只读展示 models.dev 的模型目录。
  *
  * 这份目录既是统计页「成本（估算）」的价格来源（输入 / 输出 / 缓存读，USD /
@@ -162,7 +183,7 @@ export function ModelCatalogPage() {
       <PageHeader
         eyebrow="控制台"
         title="模型列表"
-        description="models.dev 的模型目录：既列出统计页「成本（估算）」所用刊例价（输入 / 输出 / 缓存读，原始单位 USD / 百万 token），也带出上下文、模态、能力、知识截止等元数据。目录由后台任务周期拉取并落盘，这里只读展示。"
+        description="models.dev 的模型目录：既列出统计页「成本（估算）」所用刊例价（输入 / 输出 / 缓存读，原始单位 USD / 百万 token），也带出上下文、模态、能力、知识截止等元数据；「能力分」列是 Artificial Analysis 指数（经 OpenRouter 公开接口），非本服务实测。两份目录都由后台任务周期拉取并落盘，这里只读展示。"
         icon={<Boxes className="size-5" />}
       />
 
@@ -178,6 +199,14 @@ export function ModelCatalogPage() {
           value={data?.saved_at ? formatAgo(data.saved_at) : "—"}
           hint={data?.saved_at ? formatTime(data.saved_at) : "尚无目录快照，成本将显示 —"}
           icon={<RefreshCw className="size-4" />}
+        />
+        <Metric
+          label="能力分更新"
+          value={data?.benchmark_saved_at ? formatAgo(data.benchmark_saved_at) : "—"}
+          hint={data?.benchmark_saved_at
+            ? `${formatTime(data.benchmark_saved_at)} · Artificial Analysis 指数（经 OpenRouter 公开接口）`
+            : "尚无能力分快照（后台拉取后自动出现），「能力分」列将显示 —"}
+          icon={<Trophy className="size-4" />}
         />
         <Metric
           label="汇率"
@@ -238,6 +267,7 @@ export function ModelCatalogPage() {
                                   onToggle={toggle} testId="sort-context" />
                     <TableHead>输入 → 输出模态</TableHead>
                     <TableHead>能力</TableHead>
+                    <TableHead>能力分</TableHead>
                     <SortableHead label="知识 / 发布" columnKey="release_date"
                                   active={sort === "release_date"} direction={order}
                                   onToggle={toggle} testId="sort-release_date" />
@@ -270,6 +300,9 @@ export function ModelCatalogPage() {
                         </TableCell>
                         <TableCell className="max-w-[12rem] text-xs whitespace-normal break-keep">
                           {caps.length === 0 ? "—" : caps.join(" · ")}
+                        </TableCell>
+                        <TableCell className="text-xs tabular-nums">
+                          {benchmarkLine(row)}
                         </TableCell>
                         <TableCell className="text-xs">
                           <div>{row.knowledge ?? "—"}</div>

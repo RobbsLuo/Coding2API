@@ -302,6 +302,16 @@ def health(q: Quota | None) -> HealthScore:
 | `hunyuan-image-*` | CB `hunyuan-image-alpha`、`-edit` | HTTP 400 `11103`「Backend [hunyuan-stream] is not supported」 |
 | `file_search_agent` | TRAE `file_search_agent` | HTTP 200 但错误 `3003`「model service is unavailable」+ 零内容（`*sub*agent*` 不含 "sub" 故漏网） |
 
+**2026-10-10 六渠道全量复测后补入三条**（每条都直连实测，判据＝有正文且无 error 事件；脚本同 `scripts/probe_trae_credit_rate.py` 的取凭证方式，逐模型发一次最小对话）：
+
+| 模式 | 命中实例 | 实测结论 |
+|---|---|---|
+| `hy4-preview-x` | CB `hy4-preview-x` | HTTP 400 `11102`「service info not found」（下架）。同展示名的 `hy4-preview` 实测正常，故写全名不用 `hy4-preview*` |
+| `qwen3.8-flash` | Qoder `qfmodel`（展示名 Qwen3.8-Flash） | HTTP 400「Execution failed: null」。CB/TRAE 的 `qwen3.8-max` 正常，不受影响 |
+| `glyph-cluster` | Kilo `stealth/glyph-cluster` | 两次都是 121s 后 HTTP 408「upstream was unable to process」（不可用）。按展示名清洗出的归一键命中 |
+
+同批复测**确认可用、故不加**（此前被自定义黑名单滤掉的）：CB `deepseek-v4-pro`/`-flash`/`-4.1-flash`/`deepseek-v3-2-volc`/`glm-5.2`/`glm-5.1`/`glm-5.0-turbo`/`glm-5v-turbo`/`kimi-k2.5`/`kimi-k2.6`/`hy3`/`hy3-x`/`hunyuan-chat`/`space-bunny`，TRAE 全量 13 个可疑项（含 `sagitta`/`aquila`/`seed-code-pro-0430`/`glm-5`/`glm-5-turbo`/`qwen-3.7-plus`），Qoder `auto`/`qmodel_latest`/`qmodel`/`q37fmodel`/`dfmodel`，CodeArts `openpangu-2.0-flash`/`-pro`/`glm-5.2-sft-harmony`/`Qwen3-VL-235B`，zen/kilo 除上表外全部。**非模型级问题，不进黑名单**：CodeArts 的 `deepseek-v4-*`/`glm-5.3-flash` 报 `InferHub.4291.200 insufficient quota` 与 `TM.00001041 并发上限`（账号级），Kilo `poolside/laguna-xs-2.1` 与 `nemotron-3-nano-omni` 的 429/502（上游限流，复测即恢复），`thinkingmachines/inkling-small` 的 `limit_rpd` 日配额（当天耗尽，次日可恢复）。**两条存疑未加**：Qoder `mmodel`（MiniMax-M2.7）上游回 inner body `null` 触发协议异常，但与 CB 正常的 MiniMax-M2.7 合并成一条，滤掉会连带隐藏可用渠道；zen `ling-3.1-flash-free` 两次 429「Endpoint is unavailable」，同样与 Kilo 可用的 ling-3.1-flash 合并。
+
 **刻意不加**（推翻计划原拟噪音名，全部直连实测）：`*-volc`（`deepseek-v3-2-volc` 实测正常 chat）、`codewise-*` / `completion-*` / `*-lkeap`（两边清单零命中，无从核实）、`aquila` / `sagitta` / `seed-code-pro-0430`（TRAE 实测正常 chat，名字可疑但可用）。**黑名单热更与列表缓存（B4 修正）**：`MODEL_BLOCKLIST` 是热更项，但 `list_models` 的 `model_list_cache` 原存**过滤后**结果，改完最长要等 `MODEL_LIST_TTL_SECONDS`（300s）才反映到 Playground，且被滤模型在 TTL 内会从「上游失败兜底缓存」复活。现缓存只存**未过滤原始表**，过滤在每个出口现做（`_visible()`，命中缓存 / 成功拉取 / 失败兜底三条路径都过）；前端保存后显式 `invalidateQueries(["playground-models"])`，黑名单与列表两条缓存都立即生效，不依赖 TTL。
 **黑名单按归一后的对外写法匹配（2026-10）**：对外 id 改为归一键后，若只比对上游原代号，用户照列表里看到的**归一键 / 展示名**写黑名单就会失效。`_blocked` 改为对 `_block_names(model)` 四种写法取并集：原代号（`kmodel_latest`）、原代号归一键（兜底/哨兵条目的对外 id，`kilo-auto/free` → `kilo-auto`）、展示名（`Kimi K3`）、展示名归一键（正常条目对外 id，`kimi-k3`）。保留原代号是因为默认规则带下划线（`custom_model_*` / `browser_use_*`），归一键把下划线换成连字符后不命中，只有原代号能匹配；清洗后退化为空的名字不参与匹配（否则 `*` 会命中空串）。**按凭证加载（Q41）**：`list_models` 先用 `credential_providers()` 求「当前有可用凭证」的渠道集合（`candidates(selectable_only=True)`：未暂停、未硬禁用；冷却中的仍算有凭证，避免限流时列表闪没），循环里 `provider_id not in connected` 直接 `continue`——**没凭证的渠道不读缓存、不拉上游、不展示**。此前无凭证也会 `list_models({})`（CB/TRAE 回退静态表、zen 匿名拉取），只接部分渠道时列表会出现打不通的幽灵模型；启动预热也不再对无凭证渠道白打上游。zen 自带虚拟凭证，不受影响。**失败也进 TTL（负缓存）**：`model_list_fetched_at` 记**上次尝试**时间（成功或失败都刷新），TTL（300s）内不再打上游——有缓存用缓存，没缓存跳过该渠道。此前只在成功时记时间戳，上游一次抖动（尤其 zen 探活十几秒）会让其后**每次** `/v1/models` 都重跑拉取，把列表请求打成一串超时。
 **HTTP 出口 stale-while-revalidate（2026-10-04）**：TTL 到期后，`GET /v1/models` 与 `GET /api/playground/models` 走 `serve_models`：**有缓存直接回旧列表**，过期渠道丢后台（`_schedule_refresh`）异步刷新。此前 TTL 一过出口同步串行重拉全部渠道（实测合计 30–31s，zen 探活占 23s），Playground 每次打开都卡「载入模型中…」。两条纪律：① **某渠道一条缓存都没有时才同步等它**（冷启动无快照 / 新接入渠道），否则列表会缺一条渠道；② 后台刷新收敛在 `services.model_refresh_tasks` / `pending_model_refreshes`，`model_refreshing` 去重（同渠道不在途才排），`lifespan` 关闭时逐个 `cancel()` + `await`，不把 in-flight 上游请求带出事件循环。代价：列表最多滞后一个 TTL。后台预热（`_warm_model_list`）与兜底循环（每 `MODEL_CATALOG_MINUTES`）仍走同步 `list_models`，保证纯 API 部署也真刷新。**逐渠道增量 publish（2026-10-01）**：别名表原先在 `list_models` **末尾**统一 `clear()+update()`，被最慢的渠道拖着——zen 的 `fetch_models` 逐个免费模型真发探活（实测 12–15s），期间别名表为空，`executor._narrow_providers` 拿不到归属就按「全部渠道」放行，扁平名请求白打不认该模型的上游（实测 CodeBuddy 回 `11102 service info not found`、TRAE 回 `4001`，各留下 (凭证,模型) 负缓存与 `invalid_request` 统计）。现每拉完一条渠道就 `publish_aliases()` 一次（从 `model_list_cache` 重建 + 就地更新，executor 闭包引用同一 dict），不再等最慢那条；合并逻辑收敛到 `merged_entries()`，缓存兜底 / TTL 复用 / 落盘恢复三条路径共用。**落盘快照（2026-10-01，`src/api/model_catalog.py`）**：进程内缓存重启即丢，代价两处——启动到预热跑完之间别名表为空（上面那个扇出），以及某渠道拉取失败时连兜底都没有、模型整体消失。故每次成功拉取后把**未过滤原始表**原子写进 `DATA_DIR/model_catalog.json`（tmp + `os.replace`，格式 `{"version":1,"providers":{pid:{"saved_at":…,"models":[…]}}}`，序列化字段取 `dataclasses.fields(Model)`，新增字段自动带上、未知键忽略）。
@@ -676,6 +686,35 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 **逐请求明细（`/api/stats/events`）的两套分页**：rowid 游标分页与「任意列排序」不兼容（游标只在按 rowid 走时成立）。故默认（`time` 降序）仍走游标、返回 `next_before`（`total` 为 null）；**按其它列排序 / 时间升序 / 显式 `offset`** 时改用 `LIMIT/OFFSET`、额外返回 `total`，此时忽略 `before`（`next_before` 恒 null）。明细只留 90 天，深 offset 成本可接受，故不做复合 keyset 游标。**前端**：`web/src/hooks/useSort.ts`（排序状态 + 每列首次点击方向）+ `web/src/components/SortableHead.tsx`（表头按钮 + 方向箭头 + `aria-sort`，列名后的 `ColumnHint` 置于按钮外，避免点提示误触排序）。切排序 / 改每页数量 / 切范围一律回到第一页。**不做**：服务端持久化排序偏好（仅页面内状态）。
 
 无 schema 变更，无配置变更。`tests/test_sorting.py` 覆盖白名单回落、`None` 排最后、SQL tiebreak、分组默认降序、明细两种分页与端到端参数透传。
+
+### 3.25 模型能力排行（Artificial Analysis 指数，经 OpenRouter 公开接口）
+
+**动机**：Playground 与「模型列表」页原先只有渠道侧的倍率 / 限额，看不出模型本身强不强。用户切模型时想知道「哪个更聪明」，而这个信息不必自己跑实测——Artificial Analysis 的三项指数有公开接口分发。
+
+**数据源**：`https://openrouter.ai/api/v1/models`（`OPENROUTER_MODELS_URL`，匿名可读、无需 key）。同一响应还带各渠道的价格与上下文长度，但本功能只取 `benchmarks.artificial_analysis` 的 `intelligence_index` / `coding_index` / `agentic_index`。AA 官方 API 需 key，故不采用；上游字段类型意外时安静跳过，绝不让模型列表挂掉。
+
+**架构与 models.dev 目录同构**（后台抓 → 落盘 → `app.state` → 每请求现读）：
+
+- 后台任务 `benchmark_catalog`（`src/tasks/runner.py` 的 `TaskSpec`），周期由 `BENCHMARK_CATALOG_MINUTES` 控制（默认 1440 分钟、下限 60，可热更见 `src/runtime_settings.py`）。
+- 落盘 `data/model_benchmarks.json`（`BENCHMARKS_VERSION=1`，带 `saved_at`，超过 `BENCHMARKS_MAX_AGE_SECONDS`=7 天视为过期 → 空表），启动时同步回灌（`load_benchmarks_snapshot`，零上游请求）；**无快照时**（首次部署）启动后台补拉一次，与 `_warm_price_table` 同口径。
+- 挂在 `app.state.model_benchmarks` / `app.state.benchmark_saved_at`。刷新是**就地 `clear()` + `update()`**，不换引用——`src/api/models.py` 的注释记着原因：每请求现读，换引用会让路由读到旧表。
+- 路由层每请求现读注入，不塞进 `Services`：与 `models_dev_catalog` 同类，是运行数据不是仓储依赖。
+
+**匹配纪律**（`src/model_match.py`，价格目录与能力排行**共用同一套**）：本项目对外的模型 id 是归一键（`kimi-k3`），models.dev 用 `tencent/hy3`，OpenRouter 用 `moonshotai/kimi-k3` + 展示名 `MoonshotAI: Kimi K3`。`match_keys(*texts)` 把任意写法展开成候选键集合（归一键 + `_ALIAS_RULES` 显式等价 + 剥 `_DROP_SUFFIXES` 尾缀 + 版本号点/连字符互换），`lookup` **只做等值匹配**、命中不唯一返回 `None`。`glm-5.3` 绝不匹配 `glm-5.3-flash`；`qwen3.8-max` 上游只有 `qwen3.8-max-0902` 与 `qwen3.8-max-prime` 两个不同规格，宁可漏配也不错配。规则全部显式登记，每条附实测来源，不做启发式推断。
+
+**展示范围**（三处，同一份表同一口径）：
+
+| 位置 | 契约 |
+|---|---|
+| `GET /v1/models` | 每行可选 `benchmarks` 字段（`_entry_response(entry, benchmarks=None)`） |
+| `GET /api/playground/models` | 同上，经 `serve_models(services, "", request)` 传 request |
+| `GET /api/model-catalog` | 每行可选 `benchmarks` + 顶层 `benchmark_saved_at` |
+
+**UI**：Playground 模型选择器行内徽章（只显示综合智能指数，tooltip 带三项与来源）+ 选中模型的能力分卡；「模型列表」页新增「能力分」列（三行：智 / 编 / 体）+ 「能力分更新」指标卡。**不做排序**——分数是第三方成绩，排序等于替用户下结论。每处都标注「Artificial Analysis 指数，经 OpenRouter 公开接口；非本服务实测」。
+
+**降级**：拉取失败 / 快照损坏 / 版本不符 / 过快照年龄上限，一律退化为空表：条目**不带** `benchmarks` 字段（不是 `null`），页面显示 `—`，模型列表与聊天不受影响。
+
+覆盖：`tests/test_benchmarks.py`（匹配规则含歧义拒配、建表逐条跳过、快照四种坏法、三处端点注入、后台刷新一轮与拉到空表不清旧值、启动预热仅在无快照时补拉）。
 
 ---
 

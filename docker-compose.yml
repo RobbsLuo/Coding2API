@@ -14,7 +14,7 @@ services:
       CODEBUDDY_API_ENDPOINT: ${CODEBUDDY_API_ENDPOINT:-https://copilot.tencent.com}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-glm-5.2}
       # 模型列表黑名单（fnmatch glob，逗号分隔，完全替换语义）
-      MODEL_BLOCKLIST: ${MODEL_BLOCKLIST:-custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,hunyuan-image-*}
+      MODEL_BLOCKLIST: ${MODEL_BLOCKLIST:-custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,hunyuan-image-*,hy4-preview-x,qwen3.8-flash,glyph-cluster}
       QUOTA_PROBE_MINUTES: ${QUOTA_PROBE_MINUTES:-60}
       # token 预刷新轮询周期（分钟）：短寿命渠道（CodeArts STS 2h）的预刷新
       # 窗口会被封顶，窗口必须窄于该周期才不会整轮漏过、拖到到期才刷
@@ -27,6 +27,10 @@ services:
       PRICE_CATALOG_MINUTES: ${PRICE_CATALOG_MINUTES:-1440}
       USD_CNY_RATE: ${USD_CNY_RATE:-6.70}
       MODELS_DEV_URL: ${MODELS_DEV_URL:-https://models.dev/api.json}
+      # 能力排行刷新周期（分钟，OpenRouter）+ 数据源：与价表同一节奏，
+      # 周期拉能力指数并落盘快照；空表视为失败不换入
+      BENCHMARK_CATALOG_MINUTES: ${BENCHMARK_CATALOG_MINUTES:-1440}
+      OPENROUTER_MODELS_URL: ${OPENROUTER_MODELS_URL:-https://openrouter.ai/api/v1/models}
       # 成长中心（仅 CodeBuddy）：一轮领取周期，以及是否允许不可逆动作
       # （抽奖/连登兑换/开 Buddy 盲盒/消耗补登卡）
       GROWTH_INTERVAL_MINUTES: ${GROWTH_INTERVAL_MINUTES:-60}

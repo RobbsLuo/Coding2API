@@ -131,6 +131,12 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "统计里的成本估算与「模型列表」页，上游变动很少，默认每日一次即可。"
                "下限 60 分钟。",
                minimum=60, task="price_catalog", floor=60),
+    HotSetting("benchmark_catalog_minutes", int, "能力排行刷新周期（分钟）",
+               "后台拉取模型能力排行（Artificial Analysis 指数，经 OpenRouter 公开"
+               "接口，无需密钥）的间隔；分数展示在 Playground 与「模型列表」页，"
+               "并随 /v1/models 透出。指数变动很慢，默认每日一次；拉取失败只是"
+               "不显示分数，不影响模型列表。下限 60 分钟。",
+               minimum=60, task="benchmark_catalog", floor=60),
     HotSetting("usd_cny_rate", float, "美元兑人民币汇率",
                "成本估算里把 models.dev 的美元刊例价折成人民币的汇率"
                "（1 USD = 该值 CNY）；改后只影响之后写入的请求，历史成本不重算。",
