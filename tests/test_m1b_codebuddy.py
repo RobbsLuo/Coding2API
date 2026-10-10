@@ -1127,6 +1127,52 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
     assert "kimi-k2.6" not in ids2 and "glm-5.2" in ids2
 
 
+def test_models_blocklist_default_covers_retired_upstream_models(tmp_path):
+    """默认黑名单含 2026-10-10 复测补入的三条「上游已下架」。
+
+    `hy4-preview-x`（CB 400 11102）与同名的 `hy4-preview` 只差后缀，故必须
+    写全名而不是 `hy4-preview*`；`qwen3.8-flash` 只命中 Qoder 的 qfmodel，
+    CB/TRAE 的 `qwen3.8-max` 不受影响；`glyph-cluster` 按 kilo 展示名清洗出的
+    归一键命中，不误伤同渠道其它模型。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return list(self._models)
+
+        def import_credential(self, raw):
+            return raw
+
+    from src.provider.base import Model
+
+    app = build_app(settings, providers={
+        "codebuddy": Stub("codebuddy", [Model(id="hy4-preview-x", name="Hy4 preview"),
+                                        Model(id="hy4-preview", name="Hy4 preview")]),
+        "qoder": Stub("qoder", [Model(id="qfmodel", name="Qwen3.8-Flash"),
+                                Model(id="qmodel_38max", name="Qwen3.8-Max")]),
+        "kilo": Stub("kilo", [Model(id="stealth/glyph-cluster",
+                                    name="Stealth: Glyph Cluster (free)"),
+                               Model(id="kilo-auto/free", name="Auto Free")]),
+    })
+    for pid in ("codebuddy", "qoder", "kilo"):
+        app.state.credentials.add(provider=pid, credential_data={"accessToken": "a"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        ids = {item["id"] for item in client.get(
+            "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]}
+
+    assert "hy4-preview-x" not in ids
+    assert "qwen3.8-flash" not in ids
+    assert "glyph-cluster" not in ids
+    # 近邻模型不受牵连：同名不同 id 的 hy4-preview、qwen3.8-max、kilo-auto 都在
+    assert {"hy4-preview", "qwen3.8-max", "kilo-auto"} <= ids
+
+
 def test_models_blocklist_matches_normalized_id_and_display_name(tmp_path):
     """黑名单按**归一后的对外写法**匹配，且两边忽略大小写。
 
@@ -1410,8 +1456,12 @@ def test_models_name_merge_includes_zen_and_guards_colliding_names(tmp_path):
 
     仍要挡住同渠道重名：CodeBuddy 的 `hy4-preview` / `hy4-preview-x`（都叫
     「Hy4 Preview」）若都按名入键，其中一个会被同键覆盖而消失。
+
+    黑名单置空：本用例只验合并口径，`hy4-preview-x` 已被默认黑名单滤掉
+    （2026-10-10 实测 CB 400 11102 下架）。
     """
-    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        MODEL_BLOCKLIST="")
 
     class Stub:
         def __init__(self, pid: str, models):

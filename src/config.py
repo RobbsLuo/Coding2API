@@ -196,11 +196,18 @@ class Settings(BaseSettings):
     #   为上游内部或代理模型（chat 报 3003 / 非用户模型）
     #   default 实测 HTTP 200 但零内容（不可用于 chat）
     #   hunyuan-image-* 实测 HTTP 400 11103「backend is not supported」
+    # 2026-10-10 复测六渠道全量清单后补入三条「上游已下架」：
+    #   hy4-preview-x（CB 400 11102 service info not found；同名的 hy4-preview
+    #     仍可用，故写全名不用 glob）
+    #   qwen3.8-flash（Qoder qfmodel 400「Execution failed: null」；CB/TRAE 的
+    #     qwen3.8-max 正常，不受影响）
+    #   glyph-cluster（Kilo stealth/glyph-cluster 两次 121s 后 408；Kilo 其余正常）
     # 刻意不加的：*-volc（deepseek-v3-2-volc 实测正常 chat）、aquila/sagitta/
-    #   seed-code-pro-0430（TRAE 实测均正常 chat）
+    #   seed-code-pro-0430（TRAE 实测均正常 chat）、glm-5.0-turbo/glm-5v-turbo/
+    #   hunyuan-chat/hy3/auto（2026-10-10 复测均正常 chat）
     model_blocklist: str = (
         "custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,"
-        "default,hunyuan-image-*"
+        "default,hunyuan-image-*,hy4-preview-x,qwen3.8-flash,glyph-cluster"
     )
     # 诊断：把 /v1 入口的原始请求体落到 data/dumps/（排查客户端差异用）
     dump_request_bodies: bool = False
