@@ -39,7 +39,10 @@ export function PageHeader({
           {title}
         </h1>
         {description && (
-          <p className="max-w-4xl text-sm leading-relaxed text-pretty text-muted-foreground">{description}</p>
+          // 不设 max-width：描述必须与下方内容同宽同换行点。曾用 max-w-4xl 卡在
+          // 896px，而容器是 100rem——宽屏上描述提前折行、右侧留一段空白，与下面
+          // 的表格 / 卡片左边界对不齐，看着像两套栅格。
+          <p className="text-sm leading-relaxed text-pretty text-muted-foreground">{description}</p>
         )}
       </div>
       {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}

@@ -41,6 +41,13 @@ describe("PageHeader", () => {
     render(<PageHeader title="审计日志" />);
     expect(screen.getByRole("heading", { name: "审计日志" })).toBeInTheDocument();
   });
+
+  it("描述不设宽度上限，与下方内容同宽同换行点", () => {
+    render(<PageHeader title="模型列表" description="一段说明" />);
+    const desc = screen.getByText("一段说明");
+    // max-w-* 会让描述在宽屏上提前折行、与下方内容左边界对不齐
+    expect(desc.className).not.toMatch(/max-w-/);
+  });
 });
 
 describe("EmptyState / Metric", () => {
