@@ -420,7 +420,12 @@ async def test_stream_no_fallback_after_first_frame_invalid_budget_spent(repo):
 
 @pytest.mark.asyncio
 async def test_stream_no_healthy_credential_before_frame_falls_back(repo):
-    """链首候选渠道无凭证（未出帧）→ 也回退到下一项。"""
+    """链首候选渠道无凭证（未出帧）→ 也回退到下一项。
+
+    目录里 `glm-5.2` 只挂在 codebuddy 名下，而 codebuddy 一条凭证都没有：
+    不放宽到没登记它的 trae（那是拿请求逐个渠道试错），直接让回退链走下一
+    成员 `glm-4.6`——trae 只被它认识的模型打一次。
+    """
     credentials, db = repo
     _add(credentials, "trae", "tr")
     tr = ModelAwareProvider("trae", {"glm-4.6"})
@@ -431,7 +436,7 @@ async def test_stream_no_healthy_credential_before_frame_falls_back(repo):
     frames = [f async for f in executor.stream(_request("glm-5.2"), username="u")]
     joined = b"".join(frames).decode()
     assert "ok" in joined
-    assert tr.models_seen == ["glm-5.2", "glm-4.6"]
+    assert tr.models_seen == ["glm-4.6"]
     db.close()
 
 
@@ -537,7 +542,11 @@ class ModelAwareProvider:
 
 @pytest.mark.asyncio
 async def test_complete_503_primary_then_fallback_ok(repo):
-    """主模型被上游拒（目录可能陈旧先兜底候选）→ 回退链仍尝试下一项。"""
+    """主模型无可用凭证（唯一登记渠道无凭证）→ 回退链尝试下一项。
+
+    同流式路径：不在未登记 `glm-5.2` 的 trae 上白打一次（旧逻辑会先拿原始名
+    打过去、拿一个 INVALID 再回退），直接从链首的「无可用凭证」进下一成员。
+    """
     credentials, db = repo
     # 只有 trae 有凭证；codebuddy 一条都没有
     _add(credentials, "trae", "tr")
@@ -548,7 +557,7 @@ async def test_complete_503_primary_then_fallback_ok(repo):
                          _aliases("glm-5.2", "glm-4.6"))
     result = await executor.complete(_request("glm-5.2"))
     assert result["choices"][0]["message"]["content"] == "ok"
-    assert tr.models_seen == ["glm-5.2", "glm-4.6"]
+    assert tr.models_seen == ["glm-4.6"]
     db.close()
 
 

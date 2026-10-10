@@ -150,10 +150,11 @@ class Executor:
                            target: ModelTarget, now: int) -> bool:
         """这些上游的凭证是否**全部**只因该模型的模型级冷却而不可选。
 
-        只认模型级冷却：账号级冷却 / 硬禁用 / 暂停属于「凭证不可用」，不能冒充
-        模型故障——那类情况说明目录可能陈旧（见 `_select` 的 broader 回退），仍应
-        放宽重试。候选集为空（该上游一条凭证都没有）同样不算：那是目录/凭证侧
-        的问题，不是上游在限流。
+        只认模型级冷却：账号级冷却 / 硬禁用 / 暂停属于「凭证不可用」，不能
+        冒充模型故障——那种情况下换个模型也未必能用，文案不能指向「换个
+        模型即可」。候选集为空（该上游一条凭证都没有）同样不算：那是
+        目录 / 凭证侧的问题，不是上游在限流。仅用于耗尽时的 503 文案
+        分流（见 `_unavailable_text`）。
         """
         candidates = self._deps.credentials.candidates(providers)
         if not candidates:
@@ -829,6 +830,17 @@ class Executor:
         模型冷却按凭证所属上游的原始模型名登记（见 `_model_scope`），
         因此逐凭证查自己的那份名字：同一账号在不同上游的大小写可能不同。
         未命中冷却时查询恒为空，代价可忽略。
+
+        **候选渠道只信模型目录**（`_narrow_providers` 的收窄结果，即模型
+        对应缓存列表）：目录登记了该模型的渠道全部不可用时直接判「无可用
+        凭证」，不再放宽到没登记它的渠道——那只是拿请求逐个渠道试错。
+        实测（2026-10-10 `longcat-2.5-preview`）：目录里只有 zen 登记它，
+        zen 匿名免费层 429 让虚拟凭证进 60s 账号级冷却后，旧逻辑每次请求都
+        放宽扇出到 CB/TRAE/kilo/CodeArts，各回 11102/4001/401/404——客户端
+        拿到误导性的 400 而非「该渠道暂时不可用」，还给 CodeBuddy 写下 6
+        小时起步的 (凭证, 模型) 负缓存。目录证不了归属时（模型不在任何渠道
+        的登记表里）`_narrow_providers` 本就放行全部候选，不存在「漏试真正
+        持有它的新渠道」——模型列表 TTL 300s + 后台兜底刷新即新鲜度上限。
         """
         registered = [pid for pid in self._narrow_providers(target)
                       if pid in self._deps.providers]
@@ -838,30 +850,6 @@ class Executor:
         usable = self._selectable(self._deps.credentials.candidates(registered),
                                   target, now)
         if not usable:
-            # 收窄后的候选**全部不可用**，不能一概判「无可用渠道」，得分两种成因：
-            #
-            # 1. **账号级原因**（无凭证 / 硬禁用 / 暂停 / 账号冷却）→ 目录可能陈旧
-            #    或降级：某渠道新增了该模型但别名表还没更新（TTL 内），或该渠道的
-            #    模型列表回退了静态表而丢掉该模型。此时退回 target 的原始候选集再试
-            #    一次，让真正持有该模型且有可用凭证的渠道兜底（CodeArts 无凭证时
-            #    回落到 CodeBuddy/TRAE，而不是直接 503）。
-            # 2. **模型级冷却**（上游对该模型限流 / 节点故障，如 Qoder 的
-            #    `[FAIL]node:…Execution failed`）→ 持有方是**对的**，只是上游暂时
-            #    不可用。此时**放宽即扇出**：别名表里没有该模型的渠道拿到的仍是
-            #    原始名（没有机会换成对方的原代号），必然被拒（CodeBuddy 11102 /
-            #    TRAE 4001 / zen·kilo 401），白打一轮还留下噪音——CB 的 11102 还会
-            #    被当成「该后端无此模型」写下 6 小时起步的 BLOCKED 负缓存（实测
-            #    2026-10-08 的 qwen3.8-flash：Qoder 节点故障后 6 次轮换全打在
-            #    trae/zen/kilo/codebuddy 上，客户端拿到 400 而非「换个模型即可」）。
-            #    故此路径不扇出，直接交给 `_unavailable_text` 出模型级 503 文案。
-            # 强制/@绑定 的 target 候选本就是单一渠道，`broader` 不会更宽，
-            # 因此「强制指定出不回退」的语义不受影响。
-            broader = [pid for pid in target.providers if pid in self._deps.providers]
-            if (len(broader) > len(registered)
-                    and not self._model_cooled_only(registered, target, now)):
-                usable = self._selectable(self._deps.credentials.candidates(broader),
-                                          target, now)
-        if not usable:
             return None
         return (self._sticky(usable, tried, affinity_id)
                 or self._deps.scheduler.select(usable, tried, now))
@@ -870,8 +858,8 @@ class Executor:
         """按「该凭证所属上游的原始模型名」过滤出当前可选的候选。
 
         顺手把**当前模型**的消耗倍率按渠道注进候选快照（free-tier 优先档的
-        数据源，见 Scheduler.select）。按目标过滤后的最终集合注入一次即可，
-        兜底重选（broader）走同一条路自然带上。
+        数据源，见 Scheduler.select）。候选集（就是 `_select` 按模型目录
+        收窄后的那些渠道）在此一次注入。
         """
         rates = self._model_rates(target)
         selected = [

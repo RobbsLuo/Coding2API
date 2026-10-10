@@ -2336,12 +2336,15 @@ async def test_narrowing_keeps_candidates_when_model_unknown_to_catalog(dual_rep
     assert trae.calls == 1 and cb.calls == 1
 
 
-async def test_narrowed_provider_without_usable_credential_falls_back(dual_repo):
-    """收窄后候选全部不可用 → 退回原始候选集兜底，不误报「无可用渠道」。
+async def test_narrowed_provider_without_usable_credential_does_not_fan_out(dual_repo):
+    """收窄渠道无可用凭证 → 不扇出到未登记该模型的渠道（只信模型目录）。
 
-    复现用户场景：某渠道的模型列表回退静态表丢掉了该模型，别名表里只剩另一个
-    渠道登记它，而该渠道又无可用凭证。此前直接 503 no_healthy；现在应回落到
-    真正持有该模型且有可用凭证的渠道（CodeArts 无凭证 → CodeBuddy/TRAE）。
+    实测故障（2026-10-10 `longcat-2.5-preview`）：目录里只有 zen 登记它
+    （原代号 `longcat-2.5-preview-free`），zen 匿名免费层 429 让虚拟凭证进
+    60s 账号级冷却后，`_select` 旧逻辑放宽到全部渠道，CB/TRAE/kilo/CodeArts
+    各回 11102/4001/401/404——客户端拿到误导性的 400 而非「该渠道暂时
+    不可用」，还给 CB 写下 6 小时起步的 (凭证, 模型) 负缓存。现在直接出
+    503，其余渠道零调用。此用例即该场景的合成版（唯一登记渠道被硬禁用）。
     """
     repo, db = dual_repo
     repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
@@ -2356,9 +2359,9 @@ async def test_narrowed_provider_without_usable_credential_falls_back(dual_repo)
         # 陈旧/降级目录：只登记了 CodeBuddy，TRAE 被漏掉
         model_aliases={"codebuddy": {"deepseek-v4.1-flash": "deepseek-v4.1-flash"}}))
 
-    result = await executor.complete(_request("deepseek-v4.1-flash"), username="u")
-    assert result["choices"][0]["message"]["content"] == "ok"
-    assert (cb.calls, trae.calls) == (0, 1)
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(_request("deepseek-v4.1-flash"), username="u")
+    assert (cb.calls, trae.calls) == (0, 0)
 
 
 async def test_model_cooling_exhaustion_does_not_fan_out(dual_repo):
@@ -2405,13 +2408,17 @@ async def test_model_cooling_exhaustion_does_not_fan_out(dual_repo):
         "SELECT COUNT(*) FROM credential_model_cooldowns").fetchone()[0] == 2
 
 
-async def test_model_cooling_with_dead_credential_still_broadens(dual_repo):
-    """收窄渠道**混有账号级不可用**时仍放宽重试（目录陈旧兜底语义不变）。"""
+async def test_model_cooled_registered_peer_takes_over(dual_repo):
+    """收窄渠道模型级冷却、但另一条**已登记**渠道有可用凭证 → 走登记渠道。
+
+    非扇出路径：目录同时登记了 qoder 与 codebuddy，qoder 被模型级冷却后
+    收窄候选池里 codebuddy 本身就是可用候选，无需放宽到任何未登记渠道。
+    """
     repo, db = dual_repo
     qoder_ok = repo.add(provider="qoder", credential_data={"accessToken": "a"})
     dead = repo.add(provider="qoder", credential_data={"accessToken": "b"})
     repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
-    # 一条账号级硬禁用 + 一条模型级冷却 → 成因不纯，按旧口径放宽
+    # 一条账号级硬禁用 + 一条模型级冷却：混有成因也不放宽（登记渠道已够用）
     db.connect().execute("UPDATE credentials SET disabled = 1 WHERE id = ?", (dead,))
     repo.save_error(qoder_ok, ErrorOutcome(model_cooldowns={"qfmodel": ModelCooldown(
         cooling_until=int(time.time()) + 600, hits=1, reason="model")}))
@@ -2420,7 +2427,7 @@ async def test_model_cooling_with_dead_credential_still_broadens(dual_repo):
     executor = Executor(ExecutorDeps(
         providers={"qoder": qoder, "codebuddy": cb}, credentials=repo,
         scheduler=Scheduler(), default_model="qwen3.8-flash",
-        # 陈旧目录：qoder 与 codebuddy 都登记了该模型，qoder 又不可用 → 回落 CB
+        # 目录：qoder 与 codebuddy 都登记了该模型，qoder 又不可用 → 回落 CB
         model_aliases={"qoder": {"qwen3.8-flash": "qfmodel"},
                        "codebuddy": {"qwen3.8-flash": "qwen3.8-flash"}},
         upstream_model_name=lambda pid, name: {
@@ -2431,22 +2438,64 @@ async def test_model_cooling_with_dead_credential_still_broadens(dual_repo):
     assert (qoder.calls, cb.calls) == (0, 1)
 
 
-async def test_narrowed_channel_without_credentials_still_broadens(dual_repo):
-    """收窄渠道**一条凭证都没有**时仍放宽重试（无候选 ≠ 模型故障）。"""
-    from src.engine.scheduler import ErrorOutcome, ModelCooldown  # noqa: F401 - 语义对照
+async def test_narrowed_channel_without_credentials_does_not_broaden(dual_repo):
+    """收窄渠道**一条凭证都没有** → 不放宽到未登记渠道（无候选 ≠ 该试别的）。
 
+    目录说该模型只在 codearts，而 codearts 一条凭证都没有：直接出 503，
+    不去打没登记它的 codebuddy——那只会拿 11102/4001 换一条误导性错误。
+    """
     repo, _db = dual_repo
     repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
     cb = _RejectProvider("codebuddy", [GOOD])
     executor = Executor(ExecutorDeps(
         providers={"codebuddy": cb, "codearts": _RejectProvider("codearts", [GOOD])},
         credentials=repo, scheduler=Scheduler(), default_model="m-only",
-        # 只有 codearts 登记，但该渠道无凭证 → 放宽到 codebuddy 兜底
+        # 只有 codearts 登记，但该渠道无凭证 → 不放宽
         model_aliases={"codearts": {"m-only": "m-only"}}))
 
-    result = await executor.complete(_request("m-only"), username="u")
-    assert result["choices"][0]["message"]["content"] == "ok"
-    assert cb.calls == 1
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(_request("m-only"), username="u")
+    assert cb.calls == 0
+
+
+async def test_owner_channel_account_cooled_does_not_fan_out(dual_repo):
+    """持有渠道账号级冷却（429）→ 不扇出到未登记渠道（2026-10-10 longcat 实测）。
+
+    `longcat-2.5-preview` 在模型目录里只有 zen 登记（原代号
+    `longcat-2.5-preview-free`）。zen 匿名免费层 429（kind=SOFT）让虚拟凭证
+    进 60s 账号级冷却后，旧逻辑每次请求都放宽打 CB/TRAE/kilo/CodeArts——各回
+    11102/4001/401/404，客户端拿到 400 `invalid_request` 而非「zen 暂时
+    不可用」，还给 CB 写下 6 小时起步的负缓存（线上实测 usage_events 里同一
+    模型同时出现 kilo/codearts/codebuddy/trae 的失败记录）。现在只信目录：
+    zen 冷却中则零上游调用，直接出 503。
+    """
+    repo, db = dual_repo
+    zen_id = repo.add(provider="zen", credential_data={})
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="trae", credential_data={"accessToken": "trae"})
+    repo.add(provider="kilo", credential_data={})
+    # zen 被 429 打冷却（账号级 SOFT）：目录里唯一登记该模型的渠道不可用
+    repo.save_error(zen_id, ErrorOutcome(cooling_until=int(time.time()) + 60,
+                                         err_count=0))
+    zen = _RejectProvider("zen", [GOOD])
+    cb = _RejectProvider("codebuddy", [GOOD])
+    trae = _RejectProvider("trae", [GOOD])
+    kilo = _RejectProvider("kilo", [GOOD])
+    executor = Executor(ExecutorDeps(
+        providers={"zen": zen, "codebuddy": cb, "trae": trae, "kilo": kilo},
+        credentials=repo, scheduler=Scheduler(), default_model="longcat-2.5-preview",
+        model_aliases={"zen": {"longcat-2.5-preview": "longcat-2.5-preview-free"}},
+        upstream_model_name=lambda pid, name: {
+            "zen": {"longcat-2.5-preview": "longcat-2.5-preview-free"}}
+        .get(pid, {}).get(name.lower(), name)))
+
+    with pytest.raises(NoHealthyCredential) as exc_info:
+        await executor.complete(_request("longcat-2.5-preview"), username="u")
+    assert "all credentials unavailable" in str(exc_info.value)
+    assert (zen.calls, cb.calls, trae.calls, kilo.calls) == (0, 0, 0, 0)
+    # 零负缓存：没有任何渠道被写「该后端无此模型」
+    assert db.connect().execute(
+        "SELECT COUNT(*) FROM credential_model_cooldowns").fetchone()[0] == 0
 
 
 async def test_forced_provider_without_usable_credential_keeps_narrowing(dual_repo):
