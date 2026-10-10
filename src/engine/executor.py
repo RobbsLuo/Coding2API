@@ -101,6 +101,11 @@ class ExecutorDeps:
     # 跨渠道 fallback 兼容组（P1-5）：配置文本 → 组的解析值（dict）；None 表示
     # 关闭。零参 callable 时每次请求现读（热更）。空 dict 与 None 等价（无组）。
     fallback_groups: Any | None = None
+    # 上下文压缩（P0-2 修订）：选号后按**实际服务渠道**的输入窗口压缩请求体。
+    # (provider_id, 归一名, payload) → payload；None 表示不压缩。契约：实现
+    # 必须返回新对象或原样返回，不得原地改入参——同一请求可能在轮换/回退里
+    # 对不同渠道各压一次，且 affinity 指纹读的是未压缩原文
+    context_compress: Any | None = None
 
     def record(self, **fields: Any) -> None:
         """统计写入失败绝不能影响聊天响应。"""
@@ -443,13 +448,16 @@ class Executor:
             state.provider, state.credential_id = provider_id or "-", credential_id
             tried.add(credential_id)
             attempts += 1
+            # 按实际服务渠道压缩（未启用/未知窗口/未超限时原样返回）：窗口
+            # 取该渠道自己的上限，不再被更小窗口的兄弟渠道拖累误裁
+            payload = self._compress_payload(request, provider_id, target.model)
             # 显式持有迭代器并在 finally 里关闭：下面两处 `break`（流内错误）
             # 只跳出 `async for`，不会关闭上游 async generator，provider 的
             # 节流名额归还（pacer.release 在其 finally 里）会推迟到 GC。
             # 轮换重试每次都要重新 wait_turn，泄漏累积到 max_concurrency 后
             # 新请求永久阻塞——「用了三次就限制」。见 aclose_stream 注释。
             iterator = self._stream_source(
-                provider_id, credential_data, request.raw, target.model).__aiter__()
+                provider_id, credential_data, payload, target.model).__aiter__()
             try:
                 async for event in iterator:
                     if event.kind is EventKind.ERROR:
@@ -525,6 +533,20 @@ class Executor:
                 yield terminal(self._unavailable_text(target, last_error),
                                "no_healthy_credential")
                 return
+
+    def _compress_payload(self, request: ChatRequest, provider_id: str | None,
+                          model: str) -> dict[str, Any]:
+        """按实际服务渠道压缩请求体；未装配 / 未启用 / 未知窗口时原样返回。
+
+        放在选号之后（而不是 API 入口）是为了用**该渠道自己的**输入上限：
+        同名模型跨渠道窗口不同（180K vs 1M），路由前只能取 min，会把大窗口
+        渠道的会话误裁到前缀不稳定、击穿上游前缀缓存。读 `request.raw` 原文
+        而非上一轮压缩结果：换号/回退可能落到不同窗口的渠道，必须每轮从
+        原文重压（实现契约禁止原地修改，见 ExecutorDeps.context_compress）。
+        """
+        if self._deps.context_compress is None:
+            return request.raw
+        return self._deps.context_compress(provider_id or "-", model, request.raw)
 
     def _stream_source(self, provider_id: str, credential_data: dict[str, Any],
                        payload: dict[str, Any], model: str) -> AsyncIterator[Event]:
@@ -626,11 +648,14 @@ class Executor:
             attempts += 1
             provider_id = self._deps.credentials.provider_of(credential_id)
             last_provider, last_credential = provider_id or "-", credential_id
+            # 与 _stream_loop 同理：按实际服务渠道压缩（对同一请求可能压多次，
+            # 但实现必须无副作用——每轮都从原文出发）
+            payload = self._compress_payload(request, provider_id, target.model)
             events: list[Event] = []
             # 与 _stream_loop 同理：显式关闭上游流，让节流名额在每次尝试
             # 结束时同步归还，不依赖 GC 的 asyncgen finalize
             iterator = self._stream_source(
-                provider_id, credential_data, request.raw, target.model).__aiter__()
+                provider_id, credential_data, payload, target.model).__aiter__()
             try:
                 # 聚合整体超时兜底（见 ExecutorDeps.complete_timeout_seconds）
                 async with (asyncio.timeout(self._deps.complete_timeout_seconds)

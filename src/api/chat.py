@@ -12,7 +12,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..auth.access import model_allowed
 from ..compat.openai.request import InvalidRequest, parse_chat_request
-from .context import apply_context_compression
 from .deps import ApiKeyPrincipal, Services, api_key_user, read_json_body
 from .streaming import with_keepalive
 
@@ -55,7 +54,6 @@ def create_router(services: Services) -> APIRouter:
                              default_model=settings.default_model):
             raise InvalidRequest(
                 f"model {chat_request.model!r} is not allowed for this api key")
-        apply_context_compression(services, chat_request)
         binding = principal.provider_binding
         if chat_request.stream:
             # 前置校验：在 200 响应头发出前拒绝不可能成功的请求

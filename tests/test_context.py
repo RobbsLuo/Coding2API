@@ -1,12 +1,15 @@
 """P0-2：上下文压缩（`src/engine/compress.py` + `src/api/context.py`）。
 
 纯函数直测为主：估算口径、按上限裁剪、system 保留、tool_calls 成组、
-单条超限截断。末尾一节覆盖 API 层接线（模型目录查上限 + 开关）。
+单条超限截断。末尾两节覆盖「按渠道查窗口 + 压缩闭包」与 executor 选号后
+接线（Q60 修订：窗口按实际服务渠道取值，不再跨渠道取 min）。
 """
 
 from __future__ import annotations
 
-from src.api.context import apply_context_compression, context_window_for
+import pytest
+
+from src.api.context import build_context_compressor, context_window_for
 from src.compat.openai.request import ChatRequest
 from src.engine.compress import (
     _content_text,
@@ -165,11 +168,12 @@ def test_compress_truncates_part_array_content():
 
 # --------------------------------------------------------- 目录查上限 / 接线
 
-class _ServicesStub:
-    def __init__(self, *, cache=None, aliases=None, settings=None):
+class _CacheStub:
+    """model_list_cache / model_aliases 的最小替身（与 Services 同形状）。"""
+
+    def __init__(self, cache=None, aliases=None):
         self.model_list_cache = cache or {}
         self.model_aliases = aliases or {}
-        self.settings = settings
 
 
 class _SettingsStub:
@@ -181,86 +185,181 @@ class _SettingsStub:
 
 
 def test_context_window_looks_up_by_normalized_and_raw_name():
-    services = _ServicesStub(
-        cache={"codebuddy": {"glm-5.2": Model(id="glm-5.2", max_input_tokens=8000)}},
-        aliases={"codebuddy": {"glm-5.2": "GLM-5.2-raw"}},
-        settings=_SettingsStub())
-    assert context_window_for(services, "glm-5.2") == 8000
-    assert context_window_for(services, "glm-5.2@codebuddy") == 8000
+    cache = {"codebuddy": {"glm-5.2": Model(id="glm-5.2", max_input_tokens=8000)}}
+    aliases = {"codebuddy": {"glm-5.2": "GLM-5.2-raw"}}
+    assert context_window_for(cache, aliases, "codebuddy", "glm-5.2") == 8000
+    assert context_window_for(cache, aliases, "codebuddy", "glm-5.2@codebuddy") == 8000
 
 
 def test_context_window_looks_up_by_raw_id_when_alias_points_to_it():
-    services = _ServicesStub(
-        cache={"codebuddy": {"glm-5.2-raw": Model(id="x", max_input_tokens=4096)}},
-        aliases={"codebuddy": {"glm-5.2": "glm-5.2-raw"}},
-        settings=_SettingsStub())
-    assert context_window_for(services, "glm-5.2") == 4096
+    cache = {"codebuddy": {"glm-5.2-raw": Model(id="x", max_input_tokens=4096)}}
+    aliases = {"codebuddy": {"glm-5.2": "glm-5.2-raw"}}
+    assert context_window_for(cache, aliases, "codebuddy", "glm-5.2") == 4096
 
 
-def test_context_window_takes_minimum_across_providers():
-    services = _ServicesStub(cache={
-        "codebuddy": {"m": Model(id="m", max_input_tokens=10000)},
-        "trae": {"m": Model(id="m", max_input_tokens=4000)}},
-        aliases={"codebuddy": {"m": "m"}, "trae": {"m": "m"}},
-        settings=_SettingsStub())
-    assert context_window_for(services, "m") == 4000
+def test_context_window_is_per_provider_not_minimum():
+    """B 修订核心：窗口按渠道各自取值，不再跨渠道取 min。
+
+    回归场景：deepseek-v4.1-flash 挂 qoder（180K，经同义词归一并入）与
+    codebuddy（1M）；min 口径会把 codebuddy 的会话按 180K 反复误裁，前缀
+    不稳定击穿上游前缀缓存。
+    """
+    cache = {
+        "codebuddy": {"m": Model(id="m", max_input_tokens=1000000)},
+        "qoder": {"dfmodel": Model(id="dfmodel", max_input_tokens=180000)}}
+    aliases = {"codebuddy": {"m": "m"}, "qoder": {"m": "dfmodel"}}
+    assert context_window_for(cache, aliases, "codebuddy", "m") == 1000000
+    assert context_window_for(cache, aliases, "qoder", "m") == 180000
+    # 未登记该模型的渠道：未知，None（不压缩）
+    assert context_window_for(cache, aliases, "trae", "m") is None
 
 
 def test_context_window_ignores_unknown_and_invalid_values():
-    services = _ServicesStub(cache={
-        "codebuddy": {"m": Model(id="m", max_input_tokens=0),
-                      "n": Model(id="n", max_input_tokens=None)}},
-        aliases={"codebuddy": {"m": "m", "n": "n"}},
-        settings=_SettingsStub())
-    assert context_window_for(services, "m") is None
-    assert context_window_for(services, "n") is None
-    assert context_window_for(services, "missing") is None
-    assert context_window_for(services, "") is None
+    cache = {"codebuddy": {"m": Model(id="m", max_input_tokens=0),
+                           "n": Model(id="n", max_input_tokens=None)}}
+    aliases = {"codebuddy": {"m": "m", "n": "n"}}
+    assert context_window_for(cache, aliases, "codebuddy", "m") is None
+    assert context_window_for(cache, aliases, "codebuddy", "n") is None
+    assert context_window_for(cache, aliases, "codebuddy", "missing") is None
+    assert context_window_for(cache, aliases, "codebuddy", "") is None
 
 
-def test_apply_compression_disabled_is_noop():
-    services = _ServicesStub(
-        cache={"codebuddy": {"m": Model(id="m", max_input_tokens=1)}},
-        aliases={"codebuddy": {"m": "m"}}, settings=_SettingsStub(enabled=False))
-    request = ChatRequest(model="m", messages=[_user("x" * 1000)],
-                          stream=False, raw={"messages": [_user("x" * 1000)]})
-    apply_context_compression(services, request)
-    assert request.messages == [_user("x" * 1000)]
+def test_compressor_disabled_is_noop():
+    cache = {"codebuddy": {"m": Model(id="m", max_input_tokens=1)}}
+    compress = build_context_compressor(
+        cache, {"codebuddy": {"m": "m"}}, _SettingsStub(enabled=False))
+    payload = {"messages": [_user("x" * 1000)]}
+    assert compress("codebuddy", "m", payload) is payload
 
 
-def test_apply_compression_skips_when_window_unknown_or_messages_missing():
-    services = _ServicesStub(settings=_SettingsStub())
-    request = ChatRequest(model="m", messages=[_user("x")], stream=False,
-                          raw={"messages": [_user("x")]})
-    apply_context_compression(services, request)
-    assert request.messages == [_user("x")]
+def test_compressor_skips_when_window_unknown_or_messages_missing():
+    compress = build_context_compressor({}, {}, _SettingsStub())
+    payload = {"messages": [_user("x")]}
+    assert compress("codebuddy", "m", payload) is payload
     # 有上限但 raw 里没有 messages（非 chat 形状）：安全跳过
-    services2 = _ServicesStub(
-        cache={"codebuddy": {"m": Model(id="m", max_input_tokens=1)}},
-        aliases={"codebuddy": {"m": "m"}}, settings=_SettingsStub())
-    request2 = ChatRequest(model="m", messages=[], stream=False, raw={})
-    apply_context_compression(services2, request2)
-    assert request2.raw == {}
+    cache = {"codebuddy": {"m": Model(id="m", max_input_tokens=1)}}
+    compress2 = build_context_compressor(
+        cache, {"codebuddy": {"m": "m"}}, _SettingsStub())
+    payload2 = {}
+    assert compress2("codebuddy", "m", payload2) is payload2
 
 
-def test_apply_compression_under_budget_is_noop():
+def test_compressor_under_budget_is_noop():
     messages = [_user("short")]
-    services = _ServicesStub(
-        cache={"codebuddy": {"m": Model(id="m", max_input_tokens=100000)}},
-        aliases={"codebuddy": {"m": "m"}}, settings=_SettingsStub())
-    request = ChatRequest(model="m", messages=messages, stream=False,
-                          raw={"messages": messages})
-    apply_context_compression(services, request)
-    assert request.messages is messages
+    cache = {"codebuddy": {"m": Model(id="m", max_input_tokens=100000)}}
+    compress = build_context_compressor(
+        cache, {"codebuddy": {"m": "m"}}, _SettingsStub())
+    payload = {"messages": messages}
+    assert compress("codebuddy", "m", payload) is payload
 
 
-def test_apply_compression_shrinks_and_updates_both_views():
+def test_compressor_uses_per_channel_window_and_returns_fresh_payload():
+    """同一 payload 按渠道压出不同结果，且不原地改入参（换号重压契约）。"""
     messages = [_user("old " * 500), _user("new")]
-    services = _ServicesStub(
-        cache={"codebuddy": {"m": Model(id="m", max_input_tokens=50)}},
-        aliases={"codebuddy": {"m": "m"}}, settings=_SettingsStub(min_keep=1))
-    request = ChatRequest(model="m", messages=messages, stream=False,
-                          raw={"messages": messages})
-    apply_context_compression(services, request)
-    assert request.messages is request.raw["messages"]
-    assert request.messages == [_user("new")]        # 老消息被裁掉
+    cache = {
+        "codebuddy": {"m": Model(id="m", max_input_tokens=100000)},
+        "qoder": {"m": Model(id="m", max_input_tokens=50)}}
+    compress = build_context_compressor(
+        cache, {"codebuddy": {"m": "m"}, "qoder": {"m": "m"}},
+        _SettingsStub(min_keep=1))
+    payload = {"messages": messages, "model": "m"}
+    # 大窗口渠道：未超限，原样
+    assert compress("codebuddy", "m", payload) is payload
+    # 小窗口渠道：裁剪；入参 payload/messages 均未被改（可再压一次）
+    out = compress("qoder", "m", payload)
+    assert out is not payload
+    assert out["messages"] == [_user("new")]
+    assert payload["messages"] is messages
+    assert compress("qoder", "m", payload)["messages"] == [_user("new")]
+
+
+# ------------------------------------------------------------- executor 接线
+
+class _FakeCredentials:
+    provider = "codebuddy"
+
+    def candidates(self, providers=None, *, selectable_only=False):
+        from src.engine.scheduler import Candidate
+
+        return [Candidate(credential_id="c1", provider=self.provider)]
+
+    def provider_of(self, credential_id):
+        return self.provider
+
+    def credential_data(self, credential_id):
+        return {"accessToken": "a"}
+
+    def save_success(self, credential_id, *, model=None):
+        pass
+
+
+class _Scheduler:
+    def select(self, candidates, tried, now):
+        for candidate in candidates:
+            if candidate.credential_id not in tried:
+                return candidate.credential_id
+        return None
+
+    def should_rotate(self, tried):
+        return False
+
+
+def _big_request():
+    messages = [_user("old " * 500), _user("new")]
+    return ChatRequest(model="m", messages=messages, stream=True,
+                       raw={"messages": messages})
+
+
+@pytest.mark.asyncio
+async def test_executor_compresses_after_pick_with_provider_window():
+    """executor 在选号后按该渠道窗口压缩，上游收到的是压缩后的载荷。"""
+    from src.engine.executor import Executor, ExecutorDeps
+    from src.provider.base import Event, EventKind
+
+    seen = []
+
+    class Provider:
+        id = "codebuddy"
+
+        async def stream_chat(self, credential_data, payload, model):
+            seen.append(payload)
+            yield Event(kind=EventKind.CONTENT, content="ok")
+
+    cache = {"codebuddy": {"m": Model(id="m", max_input_tokens=50)}}
+    compress = build_context_compressor(
+        cache, {"codebuddy": {"m": "m"}}, _SettingsStub(min_keep=1))
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": Provider()}, credentials=_FakeCredentials(),
+        scheduler=_Scheduler(), context_compress=compress))
+    request = _big_request()
+    async for _frame in executor.stream(request, username="alice"):
+        pass
+    assert len(seen) == 1
+    assert seen[0]["messages"] == [_user("new")]
+    # 请求原文未被改：affinity 指纹与后续换号重压都读它
+    assert request.raw["messages"] == [_user("old " * 500), _user("new")]
+
+
+@pytest.mark.asyncio
+async def test_executor_without_compressor_sends_raw_payload():
+    """未装配压缩（老调用方/测试）：原样转发。"""
+    from src.engine.executor import Executor, ExecutorDeps
+    from src.provider.base import Event, EventKind
+
+    seen = []
+
+    class Provider:
+        id = "codebuddy"
+
+        async def stream_chat(self, credential_data, payload, model):
+            seen.append(payload)
+            yield Event(kind=EventKind.CONTENT, content="ok")
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": Provider()}, credentials=_FakeCredentials(),
+        scheduler=_Scheduler()))
+    request = _big_request()
+    async for _frame in executor.stream(request, username="alice"):
+        pass
+    # 未压缩时上游收到的就是原文 messages（_with_model 只补 model 键的浅拷）
+    assert seen[0]["messages"] is request.raw["messages"]

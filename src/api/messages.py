@@ -28,7 +28,6 @@ from ..compat.anthropic.response import (
 )
 from ..compat.openai.request import InvalidRequest
 from ..engine.compress import estimate_messages
-from .context import apply_context_compression
 from .deps import (
     ApiKeyPrincipal,
     Services,
@@ -52,7 +51,6 @@ def create_router(services: Services) -> APIRouter:
                              default_model=settings.default_model):
             raise InvalidRequest(
                 f"model {chat_request.model!r} is not allowed for this api key")
-        apply_context_compression(services, chat_request)
         binding = principal.provider_binding
         if chat_request.stream:
             # 与 chat 出口同样的前置校验：在 200 响应头发出前拒绝不可能成功的请求

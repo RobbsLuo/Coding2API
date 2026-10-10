@@ -1,31 +1,33 @@
-"""请求入口的上下文压缩接线（P0-2）。
+"""上下文压缩接线（P0-2，Q60 修订：按实际服务渠道取窗口）。
 
-`src/engine/compress.py` 是纯函数；本模块负责把「模型目录里的输入上限」接到
-它上面，并在三个 /v1 出口（chat / responses / anthropic）与 Playground 的
-入站处调用。放在 api/ 层是因为只有这里能同时拿到 `Services`（模型目录缓存 +
-别名表）和 `ChatRequest`。
+`src/engine/compress.py` 是纯函数；本模块构造「按渠道查输入上限 → 压缩」的
+闭包，注入执行引擎（`ExecutorDeps.context_compress`）。压缩点在**选号之后、
+发上游之前**：同名模型挂多渠道时各自上限不同（qoder 180K vs codebuddy 1M），
+路由前取最小值会让大窗口渠道的会话被小窗口渠道的阈值反复裁剪——估算器口径
+偏高时每轮裁剪结果不稳定，上游前缀缓存只命中 system 段（实测命中率从 96%+
+跌到 7-16%）。按实际落到的渠道取窗口后，未超限的会话零裁剪，前缀单调增长、
+缓存可正常命中。
 
-目录里查不到输入上限时**不压缩**：宁可不裁剪，也不拿一个猜出来的数字去砍
-用户上下文。因此本功能对未知模型是零副作用的。
+目录里查不到输入上限时**不压缩**：宁可不裁剪，也不拿猜出来的数字去砍用户
+上下文；因此本功能对未知模型是零副作用的。
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import Any
 
-from ..compat.openai.request import ChatRequest
 from ..engine.compress import compress_messages
 
-if TYPE_CHECKING:
-    from .deps import Services
 
+def context_window_for(cache: dict[str, dict[str, Any]],
+                       aliases: dict[str, dict[str, str]],
+                       provider_id: str, model: str) -> int | None:
+    """单渠道的模型输入上限：按归一名或别名原始 id 在该渠道目录取值。
 
-def context_window_for(services: Services, model: str) -> int | None:
-    """按模型名从模型目录取输入上限；查不到返回 None。
-
-    同名模型可能挂在多个渠道（各自上限不同），取**最小值**：调度可能落到
-    任何一个候选渠道，用最小上限裁剪才不会在最小的那个上撞 400。
-    `model` 可带 `@provider` 后缀，后缀不参与匹配。
+    `model` 可带 `@provider` 后缀（防御：executor 传入的已是去掉后缀的
+    归一名，这里再剥一层不伤直调方）。查不到 / 值非法（≤0、非 int、bool）
+    视为未知，返回 None。
     """
     name = (model or "").strip()
     if "@" in name:
@@ -33,45 +35,49 @@ def context_window_for(services: Services, model: str) -> int | None:
     key = name.lower()
     if not key:
         return None
-    windows: list[int] = []
-    for provider_id, table in services.model_list_cache.items():
-        raw = services.model_aliases.get(provider_id, {}).get(key)
-        candidates = {key}
-        if raw:
-            candidates.add(raw.lower())
-        for candidate in candidates:
-            entry = table.get(candidate)
-            value = getattr(entry, "max_input_tokens", None)
-            # bool 是 int 子类，显式排除；<=0 视为未上报
-            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-                windows.append(value)
-                break
-    return min(windows) if windows else None
+    table = cache.get(provider_id) or {}
+    candidates = {key}
+    raw = (aliases.get(provider_id) or {}).get(key)
+    if raw:
+        candidates.add(raw.lower())
+    for candidate in candidates:
+        entry = table.get(candidate)
+        value = getattr(entry, "max_input_tokens", None)
+        # bool 是 int 子类，显式排除；<=0 视为未上报
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+            return value
+    return None
 
 
-def apply_context_compression(services: Services, chat_request: ChatRequest) -> None:
-    """按热更配置与模型上限就地压缩 `chat_request` 的消息列表。
+def build_context_compressor(
+        cache: dict[str, dict[str, Any]],
+        aliases: dict[str, dict[str, str]],
+        settings: Any) -> Callable[[str, str, dict], dict]:
+    """构造 `(provider_id, model, payload) → payload` 的压缩闭包。
 
-    未启用、未知上限、未超限时都不改动（`compress_messages` 原样返回同一
-    列表对象，据此判断是否发生压缩）。
+    `settings` 传运行态覆盖层（`RuntimeSettings`）：开关与四个参数每轮
+    请求现读，管理台热更即生效（B3.2）。装配侧（main.py）把它注入
+    `ExecutorDeps.context_compress`；executor 在选号后按实际渠道调用。
     """
-    settings = services.settings
-    if not settings.context_compress_enabled:
-        return
-    window = context_window_for(services, chat_request.model)
-    if window is None:
-        return
-    messages = chat_request.raw.get("messages")
-    if not isinstance(messages, list):
-        return
-    compressed = compress_messages(
-        messages,
-        max_input_tokens=window,
-        reserve_for_output=int(settings.context_compress_reserve_tokens),
-        min_keep_messages=int(settings.context_compress_min_keep_messages),
-        safety_ratio=float(settings.context_compress_safety_ratio),
-    )
-    if compressed is messages:
-        return
-    chat_request.raw["messages"] = compressed
-    chat_request.messages = compressed
+    def compress(provider_id: str, model: str, payload: dict) -> dict:
+        if not settings.context_compress_enabled:
+            return payload
+        window = context_window_for(cache, aliases, provider_id, model)
+        if window is None:
+            return payload
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            return payload
+        compressed = compress_messages(
+            messages,
+            max_input_tokens=window,
+            reserve_for_output=int(settings.context_compress_reserve_tokens),
+            min_keep_messages=int(settings.context_compress_min_keep_messages),
+            safety_ratio=float(settings.context_compress_safety_ratio),
+        )
+        if compressed is messages:
+            return payload
+        # 不原地改 payload：同一请求可能在轮换/回退里再压一次（另一个渠道、
+        # 另一个窗口），必须始终从原文出发，且 affinity 指纹读的是原文
+        return {**payload, "messages": compressed}
+    return compress

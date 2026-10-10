@@ -36,6 +36,7 @@ from .api import (
     playground,
     responses,
 )
+from .api.context import build_context_compressor
 from .api.deps import Services
 from .auth.throttle import LoginThrottle
 from .benchmarks import (
@@ -426,7 +427,12 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                      model_aliases=model_aliases,
                                      # 同一份 dict 的引用：模型目录恢复 / 拉取后
                                      # executor 立即可见（倍率查询走它）
-                                     model_list_cache=model_cache))
+                                     model_list_cache=model_cache,
+                                     # 上下文压缩（P0-2 修订）：选号后按实际服务
+                                     # 渠道的窗口裁剪；settings 传运行态覆盖层，
+                                     # 开关与四个参数每请求现读（B3.2 热更）
+                                     context_compress=build_context_compressor(
+                                         model_cache, model_aliases, runtime)))
 
     @asynccontextmanager
     async def lifespan(app_: FastAPI):

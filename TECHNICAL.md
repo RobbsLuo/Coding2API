@@ -590,13 +590,13 @@ UA 版本走 `ZEN_OPENCODE_VERSION` 配置（上游改阈值改 env，不硬编�
 ### 3.19 上下文压缩（P0-2）
 
 **动机**：上游对输入长度有硬限制（CodeBuddy `11115 prompt is too long: … tokens > … maximum`）。反代若原样转发，长会话（编码助手把整份文件塞进上下文）必然撞墙，客户端只看到裸的 400，而换号无意义（每个号上限一样）。
-**只做确定性的「估算 → 裁剪」**，不做「超限后压缩再重试」的放大路径（后者要把压缩塞进 executor 的轮换循环，放大倍率难控）。实现分两层：纯函数 `engine/compress.py` + API 层接线 `api/context.py`（在 chat / responses / messages / playground 四个入站处、解析之后、`preflight`/`complete` 之前调用）。
+**只做确定性的「估算 → 裁剪」**，不做「超限后压缩再重试」的放大路径（后者要把压缩塞进 executor 的轮换循环，放大倍率难控）。实现分两层：纯函数 `engine/compress.py` + 装配闭包 `api/context.py`（`build_context_compressor`，由 main.py 注入 `ExecutorDeps.context_compress`，在 executor **选号之后、发上游之前**按实际服务渠道的窗口调用；chat / responses / messages / playground 四个出口共用）。
 
 - **token 估算**：中文 0.55 tok/字、数字 0.33、其他 0.25。刻意不用「3 字符 ≈ 1 token」的英文口径——它会把中文低估约 1.6 倍，于是「以为装得下、其实装不下」，压缩根本不触发。
 - **预算**：`模型上限 × safety_ratio − reserve_for_output`（给回复预留 + 给估算误差留余量）。
 - **裁剪**：`system` 永久保留（丢了会改变模型行为）；`assistant.tool_calls` 与其后连续的 `tool` 结果**同组同生共死**（只删一半会让上游报 tool_call_id 找不到）；至少保留最近 `min_keep_messages` 条；其外从最新往最老贪心回填（越新越重要，装不下就跳过看更老的）。裁剪后仍超限则截断最长的**非 system** 消息内容（留头尾 + 标记）。
 - **未知上限不压缩**：模型目录里查不到 `max_input_tokens` 时直接跳过——宁可不裁剪，也不拿一个猜的数字去砍用户上下文。故本功能对未知模型**零副作用**。
-- **多渠道取最小**：同名模型可能挂多个渠道、各自上限不同，`context_window_for` 取**最小值**（调度可能落到任一候选渠道，用最小上限裁剪才不会在最小的那个上撞 400）。
+- **多渠道按实际渠道取值**（Q60 修订）：同名模型可能挂多个渠道、各自上限不同（qoder 180K vs codebuddy 1M）。压缩从 API 入口移到 **executor 选号之后**（`ExecutorDeps.context_compress`），按实际服务渠道的上限裁剪——路由前只能取 min 的口径会把大窗口渠道的会话反复误裁，前缀不稳定击穿上游前缀缓存（实测命中率 96%+ → 7-16%）。压缩实现无副作用：每轮从原文重压（换号/回退可能落到不同窗口的渠道），affinity 指纹读未压缩原文。
 
 热更项 `context_compress_enabled`（默认 true）/ `context_compress_reserve_tokens`（4096）/ `context_compress_min_keep_messages`（4）/ `context_compress_safety_ratio`（0.95）。
 

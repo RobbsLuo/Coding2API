@@ -26,7 +26,6 @@ from ..compat.responses.response import (
     ResponsesStreamTranslator,
     completion_to_response,
 )
-from .context import apply_context_compression
 from .deps import ApiKeyPrincipal, Services, api_key_user, read_json_body
 from .streaming import with_keepalive
 
@@ -45,7 +44,6 @@ def create_router(services: Services) -> APIRouter:
                              default_model=settings.default_model):
             raise InvalidRequest(
                 f"model {chat_request.model!r} is not allowed for this api key")
-        apply_context_compression(services, chat_request)
         binding = principal.provider_binding
         if chat_request.stream:
             # 与 chat 出口同样的前置校验：在 200 响应头发出前拒绝不可能成功的请求
