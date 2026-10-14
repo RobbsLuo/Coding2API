@@ -41,6 +41,25 @@ def test_dockerfile_is_multi_stage_with_frontend_build():
     assert "COPY web/dist/" not in text, "从上下文复制 web/dist 在 CI 必然失败"
 
 
+def test_web_stage_installs_corepack_before_enabling():
+    """Node 25 起不再内置 corepack，必须先 npm 安装再 enable。
+
+    裸 `corepack enable` 在 node:26-alpine 里是 exit 127（command not found），
+    compose job 的镜像构建会直接失败。corepack 0.34.x 与 pnpm 11+ 不兼容，
+    因此版本固定，不能退化成不带版本号的 `npm install -g corepack`。
+    """
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    stage = text.split("FROM ", 1)[1].split("FROM ", 1)[0]
+    # 只看 RUN 指令：注释里也会出现 corepack enable 字样
+    runs = [line for line in stage.splitlines() if line.startswith("RUN ")]
+    enable_runs = [line for line in runs if "corepack enable" in line]
+    assert enable_runs, "web 阶段必须有启用 corepack 的 RUN"
+    for line in enable_runs:
+        assert "npm install -g corepack@" in line, "必须先 npm 安装 corepack 再 enable"
+        assert line.index("npm install -g corepack@") < line.index("corepack enable"), \
+            "安装必须在 enable 之前"
+
+
 @pytest.mark.parametrize("source", [
     "web/package.json", "web/pnpm-lock.yaml", "web/", "pyproject.toml",
     "uv.lock", "README.md", "src/", "scripts/",

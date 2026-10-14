@@ -1,10 +1,12 @@
 # 多阶段构建：前端产物 + Python 运行时
-FROM node:24-alpine AS web
+FROM node:26-alpine AS web
 WORKDIR /web
 # pnpm-workspace.yaml 必须一起 COPY：pnpm 从这里读 allowBuilds（放行 esbuild
 # 的 postinstall），缺失会以 ERR_PNPM_IGNORED_BUILDS 退出。
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml ./
-RUN corepack enable && pnpm install --frozen-lockfile
+# Node 25 起不再内置 corepack，裸 `corepack enable` 会 exit 127（command not found）；
+# 先用 npm 装一份再 enable。0.34.x 与 pnpm 11+ 不兼容，固定到 0.36.0。
+RUN npm install -g corepack@0.36.0 && corepack enable && pnpm install --frozen-lockfile
 COPY web/ ./
 RUN pnpm exec vite build
 
