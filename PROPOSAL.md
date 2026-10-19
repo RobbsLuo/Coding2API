@@ -49,7 +49,7 @@
 
 - 端点 `https://opencode.ai`，`/zen/v1/chat/completions` 与 `/zen/v1/models`。协议是标准 OpenAI SSE，**不逆向**。
 - 渠道私有的是**免费层门禁伪装**：UA `opencode/<version>` ≥1.18.0（否则 426；无版本号 403）、`x-opencode-session`、body `stream:true`、body `tools` 必须同时含 `bash` 与 `read`。对策：只在缺失时补骨架工具；模型调用注入名时改写为客户端声明的同义工具（`bash`→`shell`/`execute`、`read`→`read_file`）并复制其 schema，无同义工具才丢弃并记 WARNING。
-- **免费模型清单完全动态**：免鉴权 `/zen/v1/models` 返回全部模型（含付费）且不带免费标记，唯一权威信号是匿名可用性（付费恒 401 `Missing API key.`），按 `-free` 后缀收窄 + 并发探活只留 2xx，判活按 30 分钟缓存；免费模型标 **x0 倍率**（`credit_rate=0.0`）。
+- **免费模型清单完全动态**：免鉴权 `/zen/v1/models` 返回全部模型（含付费）且不带免费标记，唯一权威信号是匿名可用性（付费恒 401 `Missing API key.`），按 `-free` 后缀收窄 + 并发探活只留 2xx，判活按 30 分钟缓存；免费模型标 **x0 倍率**（`credit_rate=0.0`）。服务层列表拉取**连续失败按 2^(n-1)×TTL 退避重试**（封顶 2h、成功即清零），日志首次 WARNING 其后降 INFO——上游按出口 IP 长期拦截时不至每 5 分钟重探十几秒再刷一条同样的告警。
 - **凭证用虚拟凭证行**：无凭证/无额度接口，`probe_quota` 恒 `probe_failed=True` → health「未知」而非耗尽；删除后重启复活，永久停用请用「暂停」。401 归 `INVALID`；**403 FreeTierError 抖动在客户端内退避重试一次**，否则单虚拟凭证下 REQUEST 类错误会耗尽轮换预算、直接 503。
 
 ### 2.6 Kilo Gateway（`kilo`，虚拟凭证）
@@ -62,6 +62,7 @@
 - 端点 `https://www.codebuddy.ai`。**与国内站同协议**（同一套 `/v2/chat/completions`、`/v3/config`、`/v2/plugin/auth/*`、`/v2/billing/*` 路径，同一 Keycloak realm），但是**两套独立账号体系**（各自注册、各自计费），故作为独立渠道存在。**为什么不是「改环境变量切站点」**：`CODEBUDDY_API_ENDPOINT` 是进程级单值，切过去会让所有存量国内站凭证立刻打到国际站（额度错配 / 403）；两站可同时持有凭证，各走各的端点、节流器与登录流程。
 - **白名单刻意互不含**：`CODEBUDDY_INTL_ALLOWED_ENDPOINTS` 默认只有国际站主机，**不含**国内站主机。两站 Token 由不同网关签发，跨站发送即凭证泄露，填错会在**启动时**报错。
 - **能力差异**：聊天、模型列表、额度探测、token 刷新、**活跃上报**全部启用；**每日签到、成长中心未启用**——签到是渠道侧就没有这个活动（`checkin-activity-status` 回 `active: false`），成长中心**无法验证**（整个 `/v2/activity/*` 前缀挂在网关认证插件后，连不存在的子路径也返回 401 而非 404）且含不可逆动作，不盲跑。活跃上报端点 `/v2/report` 与成长中心不是同一路径，实测国际站可用。
+- **模型列表按套餐探活**：上游 `/v3/config` 返回全量模型，免费号也会看到 `gpt-5.5` / `gpt-5.6-luna` 等调用时才回 `400 / 11158` 的模型。国际站列表用当前刷新凭证逐个发一次最小请求（只读状态行即断开），只保留可用模型；`11158`（套餐不允许）与 `11102`（无此模型）剔除，`429` / 5xx / 超时等不确定结果**保留模型**。结论按账号缓存 6 小时。
 - **唯一协议行为差异：首条 system 强制注入**——国际站网关要求 `messages[0]` 是 system，否则整单 400 + `{"code":11128,"msg":"first message is not system prompt"}`；国内站无此要求。同名模型在两站是**一条**、同时挂两个渠道。
 
 ### 2.8 冲突与陷阱
@@ -187,7 +188,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 **12 张表**，`SCH
 - TLS 校验默认开启；Host / Origin 白名单；CSP `frame-ancestors 'none'`、`object-src 'none'`、`base-uri 'self'`、`form-action 'self'`。**请求体上限**：登录 8KB、其余 16MB（ASGI 层按实际字节计数，`chunked` 不能绕过）。登录三级限流（全局 / IP / 用户名）+ PBKDF2 并发上限；失败键有数量上限 + 过期淘汰（防内存 DoS）。
 - **API Key 仅存摘要**，明文只在创建时返回一次；可按 Key 限定渠道绑定、来源 IP 白名单（默认**不信** `X-Forwarded-For`，仅 `TRUST_PROXY=true` 时取 XFF 最后一个条目）、模型白名单（fnmatch，无法判定模型名时 fail closed）与到期时间。
 - **会话**：Cookie `SameSite=Lax` + 写操作 CSRF 校验（含 logout）；`Secure` **按请求实际协议动态判定**（`X-Forwarded-Proto` 首个值优先，无该头则仅当请求 Host 命中 https 的 `PUBLIC_BASE_URL` 主机才判 Secure）——同一实例 LAN(http) 与隧道(https) 双入口写死任一侧都会打断另一侧；**无 Cookie 的写端点（登录 / `/authorize`）也做跨站防护**：登录按 Origin/Referer 同源校验（防 login CSRF），`/authorize` 按上游原样回显的 `loginTraceID` 绑定到**发起登录那一次**（TRAE 回调本就跨源，Origin/Referer 既拦不住真攻击也可能误杀真回调）；会话与 API Key 除签名 / 摘要外校验用户仍存在、启用且 epoch 一致。
-- **错误响应不回流上游正文**：`/v1` 与外层的错误文案只带受控标识（HTTP 状态码 / 上游业务码 / 异常类名），上游错误体摘要只进服务端日志；未匹配的 `/api`、`/v1` 路径返回 JSON 404（不落到 SPA 的 200 + HTML）。**日志脱敏**：不打印 Token、完整请求体；审计写 INFO（含操作人），**绝不记密码/令牌明文**。
+- **错误响应不回流上游正文**：`/v1` 与外层的错误文案只带受控标识（HTTP 状态码 / 上游业务码 / 异常类名），上游错误体摘要只进服务端日志；未匹配的 `/api`、`/v1` 路径返回 JSON 404（不落到 SPA 的 200 + HTML）。**客户端读体中途断开不是服务端错误**：按网关惯例回 `499 client_disconnected`，不落 500 + ASGI Traceback（噪音 + 语义错）。**日志脱敏**：不打印 Token、完整请求体；审计写 INFO（含操作人），**绝不记密码/令牌明文**。
 - **请求 ID 是客户端可写输入**：入站 `X-Request-ID` 按白名单字符集与长度（`[A-Za-z0-9._:-]{1,128}`）校验后才采信与回显，不合法一律丢弃改用自生成——否则日志与统计列会被人塞进换行/超长串。响应头回显最终 ID（含自生成值），不伪装成上游追踪。
 - **服务端日志页同样只出不进**：`src/webapp/log_buffer.py` 的 `redact_or_drop` 在行离开进程前整行过滤——独立敏感词（token/secret/authorization/cookie/password/api_key 及复数和连字符形态）、键值形态（`access_token=`、`X-Api-Key:`、`set-cookie:`、JSON 键）、`sk-…` 形状、`Bearer <值>` 命中即丢弃；空行也丢。代价是 `token 已刷新` 这类正常行会被一起吞掉，取舍是**宁可漏一条日志，也不把凭证推进浏览器**。页面无任何写入/执行入口，订阅者只能读。
 - **请求级结构化日志**（`src/webapp/access_log.py`，`REQUEST_LOG_ENABLED` 可热更）：每个业务请求（`/api/*`、`/v1/*`、`/authorize`）一行 logfmt，含 `request_id` / 路由**模板** / 状态码 / 耗时。**不写 query string**（可能被客户端塞 token）、**不写请求体 / 请求头 / 用户名**（身份靠 `request_id` 关联 `usage_events`）；未匹配路由时回落为清洗并截断的原始路径，防换行注入。静态资源与探针不记（uvicorn 已覆盖）。
