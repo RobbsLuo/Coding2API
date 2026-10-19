@@ -6,7 +6,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
+import hashlib
 import logging
 import time
 import weakref
@@ -48,6 +50,26 @@ EP_CONFIG = "/v3/config"
 MODEL_CACHE_TTL_SECONDS = 600
 # 模型缓存条目上限（LOW）：key 含 token 前缀，凭证轮换后旧条目永不命中。
 MODEL_CACHE_MAX_ENTRIES = 256
+
+# ---------------------------------------------------------------- 模型可用性
+# 国际站 `/v3/config` 返回**全部**模型，但账号套餐决定能否真正调用：
+# 免费号请求 gpt-5.5 / gpt-5.6-luna 等模型时上游回 400 / 11158
+# `model [...] is not allowed for user type [personal_free_user]`。
+# 与 Zen 的免费层一样，列表只保留**实际探活通过**的模型；差异是这里没有
+# 「免费/付费」后缀可收窄，必须逐个真发一次请求。
+#
+# 判活只认两个业务码：11158（套餐不允许）与 11102（后端无此模型）。429 /
+# 5xx / 超时 / 认证失败一律视为 **inconclusive** 并保留模型——把限流误判成
+# 「模型不存在」会让列表随上游抖动闪没，代价比多显示一个模型大得多。
+MODEL_ACCESS_CACHE_TTL_SECONDS = 6 * 3600
+MODEL_ACCESS_CACHE_MAX_ENTRIES = 256
+MODEL_ACCESS_PROBE_TIMEOUT = 5.0
+MODEL_ACCESS_PROBE_CONCURRENCY = 4
+MODEL_ACCESS_DENIED_CODES = frozenset({11102, 11158})
+_MODEL_ACCESS_CACHE: dict[tuple[str, str], tuple[float, dict[str, bool | None]]] = {}
+_PROBE_PROMPT = "hi"
+
+logger = logging.getLogger(__name__)
 
 # 上游内容风控（11128）已确认的指纹串：出现在 system/assistant 消息正文
 # （含行中）即整单拒绝。清单来自 2026-09 对真实上游的确定性复现实验。
@@ -427,6 +449,107 @@ class CodeBuddyClient:
                 _MODEL_CACHE.clear()
         _MODEL_CACHE[cache_key] = (now, models)
         return models
+
+    async def filter_available_models(
+            self, credential: CodeBuddyCredential,
+            models: list[Model]) -> list[Model]:
+        """只保留当前账号**实际可用**的模型（国际站套餐门禁）。
+
+        上游 `/v3/config` 返回全量模型，套餐限制只在真正调用时以
+        400 / 11158 暴露。这里像 Zen 免费层一样逐个探活，但判据更保守：
+        只有 11158 / 11102 才判不可用，限流 / 超时 / 5xx 都保留模型。
+        探活结果按账号缓存 6 小时——套餐变化很慢，而每轮 20 个模型全探
+        一次，不值得按 5 分钟的列表 TTL 重跑。
+        """
+        if not models or not credential.bearer_token:
+            return models
+        cache_key = self._model_access_cache_key(credential)
+        now = time.time()
+        cached = _MODEL_ACCESS_CACHE.get(cache_key)
+        if cached and now - cached[0] < MODEL_ACCESS_CACHE_TTL_SECONDS:
+            access = cached[1]
+        else:
+            access = await self._probe_model_accesses(
+                credential, [model.id for model in models])
+            self._remember_model_access(cache_key, now, access)
+        kept = [model for model in models if access.get(model.id) is not False]
+        if not kept:
+            # 全被拒绝多半是探活整体异常或账号刚降级：保留全量，避免渠道
+            # 从列表里凭空消失（调用时仍会由上游给出准确错误）。
+            logger.warning("CodeBuddy 模型可用性探活全部失败，回退全量列表")
+            return models
+        return kept
+
+    def _model_access_cache_key(
+            self, credential: CodeBuddyCredential) -> tuple[str, str]:
+        """可用性缓存按**账号**隔离，不能按 token 前缀。
+
+        同一 realm 签发的 access token 前 64 字符完全相同（JWT 头 + payload
+        开头），按前缀取 key 会让付费号与免费号共享同一份探活结果——正是
+        最需要区分套餐的场景。OAuth 凭证有稳定 nickname，直接用它；手动
+        凭证无昵称时回退到整 token 的 SHA-256，既不碰撞也不把明文 token
+        当 key 长期挂在模块字典里。
+        """
+        identity = credential.nickname or hashlib.sha256(
+            credential.bearer_token.encode("utf-8")).hexdigest()
+        return identity, self.endpoint
+
+    async def _probe_model_accesses(
+            self, credential: CodeBuddyCredential,
+            model_ids: list[str]) -> dict[str, bool | None]:
+        """并发探活一批模型；返回值 None 表示不确定（保留该模型）。"""
+        semaphore = asyncio.Semaphore(MODEL_ACCESS_PROBE_CONCURRENCY)
+
+        async def one(model_id: str) -> tuple[str, bool | None]:
+            async with semaphore:
+                return model_id, await self._probe_model_access(credential, model_id)
+
+        return dict(await asyncio.gather(*(one(model_id) for model_id in model_ids)))
+
+    async def _probe_model_access(
+            self, credential: CodeBuddyCredential, model_id: str) -> bool | None:
+        """发一次最小流式请求，只看响应状态行就断开。
+
+        200 说明套餐允许；11158 / 11102 说明模型不可用。其余状态码与网络
+        异常一律返回 None——不能把限流或上游故障当成「模型不存在」。
+        """
+        body = {
+            "model": model_id,
+            "messages": [
+                {"role": "system", "content": DEFAULT_LEADING_SYSTEM},
+                {"role": "user", "content": _PROBE_PROMPT},
+            ],
+            "max_tokens": 1,
+            "stream": True,
+            "enable_thinking": True,
+            "reasoning_effort": "medium",
+            "stream_options": {"include_usage": True},
+        }
+        try:
+            async with asyncio.timeout(MODEL_ACCESS_PROBE_TIMEOUT):
+                async with self._short.stream(
+                        "POST", f"{self.endpoint}{EP_CHAT}", json=body,
+                        headers=build_headers(credential, self.endpoint)) as response:
+                    if response.status_code < 400:
+                        return True
+                    raw = await base.read_body_bounded(response)
+        except (httpx.HTTPError, TimeoutError):
+            return None
+        codes = base.business_codes(raw.decode("utf-8", errors="replace"))
+        return False if codes & MODEL_ACCESS_DENIED_CODES else None
+
+    @staticmethod
+    def _remember_model_access(cache_key: tuple[str, str], now: float,
+                               access: dict[str, bool | None]) -> None:
+        """写入探活缓存，并按模型缓存同样的策略限制条目数。"""
+        if len(_MODEL_ACCESS_CACHE) >= MODEL_ACCESS_CACHE_MAX_ENTRIES:
+            cutoff = now - MODEL_ACCESS_CACHE_TTL_SECONDS
+            for key in [k for k, value in _MODEL_ACCESS_CACHE.items()
+                        if value[0] < cutoff]:
+                del _MODEL_ACCESS_CACHE[key]
+            if len(_MODEL_ACCESS_CACHE) >= MODEL_ACCESS_CACHE_MAX_ENTRIES:
+                _MODEL_ACCESS_CACHE.clear()
+        _MODEL_ACCESS_CACHE[cache_key] = (now, access)
 
     async def _post_json(self, url: str, payload: dict[str, Any],
                          credential: CodeBuddyCredential, *,

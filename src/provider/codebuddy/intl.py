@@ -43,7 +43,9 @@ system prompt，否则整单 400 / 11128 `first message is not system prompt`
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
+from ..base import Model
 from .client import CodeBuddyProvider
 
 
@@ -57,6 +59,21 @@ class CodeBuddyIntlProvider(CodeBuddyProvider):
     """
 
     id: str = "codebuddy_intl"
+
+    async def list_models(self, credential_data: dict[str, Any]) -> list[Model]:
+        """国际站列表只保留当前账号套餐真正允许的模型。
+
+        上游 `/v3/config` 不按套餐过滤：免费号也会看到 `gpt-5.6-luna` 等
+        调用时才 400 / 11158 的模型。探活复用父类的动态拉取与静态兜底，
+        再按当前凭证过滤；限流 / 网络抖动不会误删模型（见 client 的
+        `filter_available_models`）。
+        """
+        # dataclass(slots=True) 会重建类，零参 super() 的 __class__ 单元指向旧类，
+        # 必须显式调用父类方法。
+        models = await CodeBuddyProvider.list_models(self, credential_data)
+        return await self.client.filter_available_models(
+            self.credential_from(credential_data), models)
+
     # 下面几项刻意覆盖父类方法为 None（不是删方法）：调用方一律用
     # `getattr(provider, "growth", None)` 之类探测能力，置 None 就是
     # 「本渠道没有该能力」，无需在任务层加渠道分支。
