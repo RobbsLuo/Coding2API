@@ -11,6 +11,7 @@ import logging
 import httpx
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
+from starlette.requests import ClientDisconnect
 
 from ..auth.csrf import CsrfRejectedError
 from ..auth.rbac import (
@@ -126,6 +127,20 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=UPSTREAM_ERROR_STATUS,
             content=error_payload("upstream transport failed",
                                   "upstream_unavailable", UPSTREAM_ERROR_STATUS))
+
+    @app.exception_handler(ClientDisconnect)
+    async def _client_disconnected(_request, _error: ClientDisconnect):
+        """读请求体时客户端已断开：不是服务端错误，499 收尾。
+
+        以前 `request.body()` 抛 `ClientDisconnect` 会一路冒泡到
+        ServerErrorMiddleware——落一条 500 + 全量 ASGI Traceback，既刷屏日志，
+        又让「客户端自己取消」混进服务错误统计。499 是网关惯例
+        （nginx「client closed request」），调用方已不在，响应体只为把
+        access log 的状态码记对。
+        """
+        return JSONResponse(status_code=499,
+                            content=error_payload("client disconnected",
+                                                  "client_disconnected", 499))
 
     @app.exception_handler(ThrottledError)
     async def _throttled(_request, _error: ThrottledError):

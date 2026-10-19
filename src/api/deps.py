@@ -119,6 +119,10 @@ class Services:
     # 上次**尝试**拉取时间（monotonic，成功或失败都刷新）：TTL 内的请求不再打
     # 上游——有缓存用缓存，无缓存则跳过该渠道（负缓存）。
     model_list_fetched_at: dict[str, float] = field(default_factory=dict)
+    # 拉取连续失败次数：`_needs_refresh` 按 2^(n-1)×TTL 拉长重试间隔（封顶见
+    # `MODEL_LIST_BACKOFF_MAX_SECONDS`），一次成功即清零。上游被长期封禁时
+    # 避免每 5 分钟重探 + 刷一条同样内容的 WARNING。
+    model_list_failures: dict[str, int] = field(default_factory=dict)
     # stale-while-revalidate：正在后台刷新的渠道（`_schedule_refresh` 去重用，
     # 同一渠道同一时刻只跑一个刷新任务）；任务句柄与 all-tasks 列表供 lifespan
     # 关闭时取消，避免把 in-flight 的上游请求带出事件循环。

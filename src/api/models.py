@@ -15,7 +15,10 @@
 publish 别名表——否则启动预热跑完之前别名表是空的，扁平名请求无法收窄候选，
 会真实打一轮不认该模型的上游。TTL 记的是**上次尝试**时间（成功或
 失败都记）：失败不记时间戳的话，上游一次抖动就会让其后的每次 /v1/models 都
-重跑一遍拉取（zen 探活最慢可占十几秒），把列表请求打成一串超时。
+重跑一遍拉取（zen 探活最慢可占十几秒），把列表请求打成一串超时。**连续失败
+再按 2^(n-1) 拉长重试间隔**（封顶 `MODEL_LIST_BACKOFF_MAX_SECONDS`）：上游被
+长期封禁（zen 免费层按 IP 拦）时每 5 分钟重探一次纯属刷屏，且日志只在首次
+失败打 WARNING、其后降 INFO（见 `_refresh_provider`）。
 
 **缓存存的是未过滤列表，过滤在每个出口现做**：MODEL_BLOCKLIST 是可热更项
 （「改完立即生效」），若把过滤结果存进缓存，改完黑名单要等 TTL（300s）
@@ -55,6 +58,12 @@ logger = logging.getLogger(__name__)
 # 时间戳记「上次尝试」（含失败）：失败也进 TTL，否则一次抖动之后每次请求
 # 都会重试，zen 探活的十几秒会叠加成一串慢请求。
 MODEL_LIST_TTL_SECONDS = 300
+
+# 连续失败退避上限：失败的重试间隔按 2^(连续失败次数-1) × TTL 拉长，到此封顶
+# （2h）。上游被长期封禁（如 zen 免费层按出口 IP 拦截）时，每 5 分钟重探一遍
+# （zen 逐个真发一次推理，十几秒）既费时又刷日志，退避后恢复探测的代价只是
+# 最多晚 2h 知道上游恢复了（期间一直有缓存兜底）。
+MODEL_LIST_BACKOFF_MAX_SECONDS = 7200
 
 # 拉取串行锁：模块级单锁（一次只有一个进程内的列表刷新在跑）。调用方有 HTTP
 # 出口与后台兜底刷新两处，不串行就会同时打同一条渠道的上游。
@@ -136,12 +145,20 @@ async def _refresh_provider(services: Services, provider_id: str, provider: Any)
         models = await provider.list_models(credential_data)
     except Exception as error:  # noqa: BLE001 - 单上游失败不影响其他
         # 失败也记时间戳（负缓存）：TTL 内不再重试，有缓存用缓存、无缓存跳过。
+        # 连续失败按 `_needs_refresh` 的退避拉长下一次尝试；日志只在**首次**
+        # 失败打 WARNING，其后降 INFO——长期封禁下同样内容的 WARNING 刷屏
+        # 只会淹没真问题，连续次数仍留在消息里供排查。
+        failures = services.model_list_failures.get(provider_id, 0) + 1
+        services.model_list_failures[provider_id] = failures
         services.model_list_fetched_at[provider_id] = time.monotonic()
+        log = logger.warning if failures == 1 else logger.info
         if services.model_list_cache.get(provider_id):
-            logger.warning("模型列表获取失败 %s，使用上次缓存: %s", provider_id, error)
+            log("模型列表获取失败 %s（连续 %d 次），使用上次缓存: %s",
+                provider_id, failures, error)
         else:
-            logger.warning("模型列表获取失败 %s: %s", provider_id, error)
+            log("模型列表获取失败 %s（连续 %d 次）: %s", provider_id, failures, error)
         return
+    services.model_list_failures.pop(provider_id, None)
     services.model_list_cache[provider_id] = {model.id.lower(): model for model in models}
     services.model_list_fetched_at[provider_id] = time.monotonic()
     save_catalog(services.settings.data_dir, services.model_list_cache)
@@ -153,9 +170,20 @@ def _needs_refresh(services: Services, provider_id: str, *, now: float) -> bool:
     TTL 按「上次尝试」计（失败也刷新，restore 也播种）：TTL 内一律不打上游
     ——有缓存就用缓存、没缓存就跳过，避免上游抖动时每次 `/v1/models` 都重跑
     一遍拉取（zen 探活的十几秒会叠加成一串慢请求）。
+
+    **连续失败再退避**：拉取连续失败时按 2^(n-1) × TTL 拉长重试间隔，封顶
+    `MODEL_LIST_BACKOFF_MAX_SECONDS`。只放大间隔、不阻断恢复——成功一次即
+    清零失败计数（见 `_refresh_provider`），回到正常 TTL。
     """
     fetched_at = services.model_list_fetched_at.get(provider_id)
-    return fetched_at is None or now - fetched_at >= MODEL_LIST_TTL_SECONDS
+    if fetched_at is None:
+        return True
+    failures = services.model_list_failures.get(provider_id, 0)
+    interval = MODEL_LIST_TTL_SECONDS
+    if failures:
+        interval = min(interval * 2 ** min(failures - 1, 10),
+                       MODEL_LIST_BACKOFF_MAX_SECONDS)
+    return now - fetched_at >= interval
 
 
 def restore_model_catalog(services: Services) -> int:

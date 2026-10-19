@@ -367,3 +367,96 @@ def test_codebuddy_import_via_api(tmp_path):
         bad = client.post("/api/credentials", json={"provider": "codebuddy",
                                                     "credential": {}})
         assert bad.status_code == 400
+
+def test_models_failure_backoff_stretches_retry_interval(tmp_path):
+    """连续失败按 2^(n-1)×TTL 拉长重试间隔，封顶 MODEL_LIST_BACKOFF_MAX_SECONDS。
+
+    上游被长期封禁（zen 免费层按出口 IP 拦）时每 5 分钟重探一次纯属刷屏；
+    退避只放大间隔，不阻断恢复（成功清零见下个用例）。
+    """
+    from src.api.models import (
+        MODEL_LIST_BACKOFF_MAX_SECONDS,
+        MODEL_LIST_TTL_SECONDS,
+        _needs_refresh,
+    )
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+    app = build_app(settings, providers={})
+    services = app.state.services
+
+    # 无时间戳（从未尝试）：永远需要刷新
+    assert _needs_refresh(services, "trae", now=1000.0)
+
+    services.model_list_fetched_at["trae"] = 1000.0
+    # 无失败记录：基础 TTL
+    assert not _needs_refresh(services, "trae",
+                              now=1000.0 + MODEL_LIST_TTL_SECONDS - 1)
+    assert _needs_refresh(services, "trae",
+                          now=1000.0 + MODEL_LIST_TTL_SECONDS + 1)
+
+    # 连续 2 次失败：2×TTL
+    services.model_list_failures["trae"] = 2
+    assert not _needs_refresh(services, "trae",
+                              now=1000.0 + 2 * MODEL_LIST_TTL_SECONDS - 1)
+    assert _needs_refresh(services, "trae",
+                          now=1000.0 + 2 * MODEL_LIST_TTL_SECONDS + 1)
+
+    # 失败次数再多：封顶
+    services.model_list_failures["trae"] = 100
+    assert not _needs_refresh(services, "trae",
+                              now=1000.0 + MODEL_LIST_BACKOFF_MAX_SECONDS - 1)
+    assert _needs_refresh(services, "trae",
+                          now=1000.0 + MODEL_LIST_BACKOFF_MAX_SECONDS + 1)
+
+def test_models_refresh_failure_counts_and_logs_once(tmp_path, caplog):
+    """失败计数递增、首次 WARNING 其后 INFO（带「使用上次缓存」分支）、成功清零。"""
+    import asyncio
+    import logging
+
+    from src.api.models import _refresh_provider
+
+    class Flaky:
+        id = "trae"
+        fail = True
+
+        async def list_models(self, _data):
+            if self.fail:
+                raise RuntimeError("upstream down")
+            from src.provider.base import Model
+
+            return [Model(id="glm-5.3")]
+
+        def import_credential(self, raw):  # pragma: no cover - 本用例不调用
+            return raw
+
+    provider = Flaky()
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+    app = build_app(settings, providers={"trae": provider})
+    services = app.state.services
+
+    caplog.set_level(logging.INFO)
+
+    # 第一次失败（无缓存分支）：WARNING + 连续 1 次
+    asyncio.run(_refresh_provider(services, "trae", provider))
+    assert services.model_list_failures["trae"] == 1
+    failures = [r for r in caplog.records if "模型列表获取失败" in r.getMessage()]
+    assert len(failures) == 1
+    assert failures[0].levelno == logging.WARNING
+    assert "连续 1 次" in failures[0].getMessage()
+
+    # 第二次失败（有缓存分支）：降 INFO，计数继续累计
+    from src.provider.base import Model
+
+    services.model_list_cache["trae"] = {"glm-5.3": Model(id="glm-5.3")}
+    asyncio.run(_refresh_provider(services, "trae", provider))
+    assert services.model_list_failures["trae"] == 2
+    failures = [r for r in caplog.records if "模型列表获取失败" in r.getMessage()]
+    assert len(failures) == 2
+    assert failures[1].levelno == logging.INFO
+    assert "使用上次缓存" in failures[1].getMessage()
+
+    # 成功：失败计数清零，缓存刷新
+    provider.fail = False
+    asyncio.run(_refresh_provider(services, "trae", provider))
+    assert "trae" not in services.model_list_failures
+    assert set(services.model_list_cache["trae"]) == {"glm-5.3"}
