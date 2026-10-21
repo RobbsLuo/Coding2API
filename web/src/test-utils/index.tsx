@@ -78,6 +78,9 @@ export function jsonResponse(body: unknown, status = 200): Response {
  */
 const DEFAULT_ROUTES: Record<string, unknown> = {
   "/api/nav-badges": {},
+  // 凭证页组头会读「本渠道能提供几个模型」（与 Playground 同源）。默认回空列表，
+  // 组头那块整体不渲染；需要断言模型数量的用例覆盖同名路由即可。
+  "/api/playground/models": { object: "list", data: [] },
   // 失败归因（StatsPage 对 operator+ 恒发）：默认「没有失败」，避免每个用例
   // 都要 mock 一条；需要真实数据的用例覆盖同名路由即可。
   "/api/stats/errors": { errors: [] },

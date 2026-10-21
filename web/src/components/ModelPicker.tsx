@@ -137,6 +137,49 @@ export function displayName(item: { id: string; name?: string }): string {
   return name === "" ? item.id : name;
 }
 
+/** 倍率文案：`0` 是免费额度（上游给 0 表示不计费），不能显示成 `x0`。 */
+export function rateLabel(rate: number): string {
+  return rate === 0 ? "免" : `x${rate}`;
+}
+
+/** 凭证页组头「模型 N 个」用的条目：id 供排障，label 是展示名，rate 是该渠道的消耗倍率。 */
+export interface ProviderModel {
+  id: string;
+  label: string;
+  /** 该渠道下的倍率（`by_provider` 优先，单渠道回退合并值）；上游没给则为 undefined */
+  rate?: number;
+}
+
+/**
+ * 按渠道归类模型（凭证页渠道组头用）。
+ *
+ * 数据源是 `/api/playground/models`：它只含「有可用凭证且过当前黑名单」的渠道，
+ * 与 `/v1/models` 同口径，所以组里「有凭证」和「有模型」不必各算一套。
+ *
+ * **倍率按渠道取**（复用 `providerRate`，与模型选择器同一口径）：多渠道模型
+ * 各渠道倍率不同，拿合并值冒充会把某个渠道的倍率错标到别的渠道上。
+ * 排序按展示名（人类可读名优先），同名再按 id 兜底——凭证页 30s 轮询，
+ * 顺序必须稳定，不能随上游返回顺序跳动。
+ */
+export function groupModelsByProvider(models: ModelInfo[]): Map<string, ProviderModel[]> {
+  const grouped = new Map<string, ProviderModel[]>();
+  for (const item of models) {
+    for (const provider of item.providers) {
+      const entry: ProviderModel = {
+        id: item.id, label: displayName(item), rate: providerRate(item, provider),
+      };
+      const bucket = grouped.get(provider);
+      if (bucket) bucket.push(entry);
+      else grouped.set(provider, [entry]);
+    }
+  }
+  for (const bucket of grouped.values()) {
+    bucket.sort((left, right) =>
+      left.label.localeCompare(right.label, "zh-CN") || left.id.localeCompare(right.id));
+  }
+  return grouped;
+}
+
 /** 渠道徽章的展示顺序（CB → TR → 其余），与全站展示顺序一致。 */
 function sortProviders(providers: string[]): string[] {
   return [...providers].sort((left, right) => providerRank(left) - providerRank(right));
@@ -174,7 +217,7 @@ function ChannelPill({
       {providerLabel(provider)}
       {rate !== undefined && (
         <span className="rounded bg-background/70 px-1 font-bold tabular-nums">
-          {rate === 0 ? "免" : `x${rate}`}
+          {rateLabel(rate)}
         </span>
       )}
     </span>

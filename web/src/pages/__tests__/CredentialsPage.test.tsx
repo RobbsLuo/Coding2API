@@ -845,6 +845,94 @@ describe("CredentialsPage", () => {
     }
   });
 
+  it("组头显示该渠道当前能提供的模型数与最低倍率，hover 看逐条倍率", async () => {
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ id: "cb1", provider: "codebuddy" }),
+        makeCredential({ id: "tr1", provider: "trae" }),
+      ]),
+      "/api/playground/models": {
+        object: "list",
+        data: [
+          // 多渠道条目：两个渠道的组头都要算上它，倍率各按自己的渠道取
+          {
+            id: "glm-5.2", name: "GLM 5.2", providers: ["codebuddy", "trae"],
+            by_provider: { codebuddy: { credit_rate: 0.29 }, trae: { credit_rate: 0.5 } },
+          },
+          { id: "kimi-k3", name: "Kimi K3", providers: ["codebuddy"], credit_rate: 0.8 },
+          // 免费额度：0 必须显示成「免」，不能是 x0
+          { id: "free-model", name: "Free Model", providers: ["trae"], credit_rate: 0 },
+        ],
+      },
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    // 折叠态就可见：数量 + 最低倍率（先回答「这渠道贵不贵」）
+    const cbCount = screen.getByTestId("group-codebuddy-model-count");
+    expect(cbCount).toHaveTextContent("2 个");
+    expect(cbCount).toHaveTextContent("最低 x0.29");
+    const trCount = screen.getByTestId("group-trae-model-count");
+    expect(trCount).toHaveTextContent("2 个");
+    expect(trCount).toHaveTextContent("最低 免");
+
+    // 逐条清单不铺在组头（几十条会把这一行撑爆），hover 才展开
+    expect(screen.queryByTestId("group-codebuddy-models")).not.toBeInTheDocument();
+    await userEvent.hover(cbCount);
+    const tip = await screen.findByTestId("group-codebuddy-models");
+    // 头部：渠道身份 + 条数（条数单独成胶囊，不混进渠道名一句话里）
+    expect(tip).toHaveTextContent("CodeBuddy");
+    expect(tip).toHaveTextContent("2 个模型");
+    const rows = within(tip).getAllByTestId("group-codebuddy-model");
+    expect(rows.map((row) => row.textContent)).toEqual([
+      "GLM 5.2x0.29",
+      "Kimi K3x0.8",
+    ]);
+    // 多行清单走 panel 表面（卡片底 + 描边 + 阴影），不是反色气泡：反色底放大段
+    // 文字会糊成一块，且气泡的箭头会盖住描边留一道缺口
+    expect(tip.closest("[data-slot='tooltip-content']"))
+      .toHaveAttribute("data-surface", "panel");
+    await userEvent.unhover(cbCount);
+
+    // 同一模型在 TRAE 组里显示的是 TRAE 的倍率（0.5，不是 CodeBuddy 的 0.29）
+    await userEvent.hover(trCount);
+    const traeTip = await screen.findByTestId("group-trae-models");
+    const traeRows = within(traeTip).getAllByTestId("group-trae-model");
+    expect(traeRows.map((row) => row.textContent)).toEqual([
+      "Free Model免",
+      "GLM 5.2x0.5",
+    ]);
+    await userEvent.unhover(trCount);
+  });
+
+  it("模型都未给倍率时只显示数量，不造一个「最低」", async () => {
+    mockFetch({
+      "/api/credentials": listBody([makeCredential({ id: "cb1", provider: "codebuddy" })]),
+      "/api/playground/models": {
+        object: "list",
+        data: [{ id: "glm-5.2", name: "GLM 5.2", providers: ["codebuddy"] }],
+      },
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const count = screen.getByTestId("group-codebuddy-model-count");
+    expect(count).toHaveTextContent("1 个");
+    expect(count).not.toHaveTextContent("最低");
+    // 逐条倍率未知时显示 —（不当 0 读成免费）
+    await userEvent.hover(count);
+    const tip = await screen.findByTestId("group-codebuddy-models");
+    expect(within(tip).getByTestId("group-codebuddy-model")).toHaveTextContent("GLM 5.2—");
+  });
+
+  it("模型列表为空时不显示「模型 0 个」（0 会被读成这渠道没有模型）", async () => {
+    mockFetch({ "/api/credentials": listBody([makeCredential({ id: "cb1", provider: "codebuddy" })]) });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    expect(screen.queryByTestId("group-codebuddy-model-count")).not.toBeInTheDocument();
+  });
+
   it("组头聚合状态分布与 1.5 / 7 天内将过期的积分，折叠时也读得到", async () => {
     mockFetch({
       "/api/credentials": listBody([

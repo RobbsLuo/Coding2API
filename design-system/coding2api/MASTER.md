@@ -126,6 +126,7 @@
 | `Table` | 圆角容器 + 表头底色 + 行 hover；移动端横向滚动。窄屏（<768px）可开 `cards` 转卡片：列名变排序片、每格用 `TableCell label` 显示字段名（DOM 不变，见 `styles.css`「窄屏表 → 卡片」） |
 | `PageHeader` | eyebrow（可选）+ 标题 + 说明 + 右侧操作槽 |
 | `PageSkeleton` | 加载骨架，替代纯文字「载入中…」 |
+| `Tip` / `LongTextTip` | 悬浮说明两档表面（`web/src/components/Tip.tsx` → `ui/tooltip.tsx` 的 `surface`）：**短提示走 `ink`**（反色气泡 + 箭头，一句话强对比）；**多行清单 / 明细走 `panel`**（`panel-raised` + `ring-border` + `shadow-lg`，与下拉 / 弹窗同层，**不出箭头**——箭头会盖住描边留缺口）。`panel` 档内容自带「头部（身份 + 条数胶囊）/ 限高内滚清单 / 脚注口径」，左对齐且 `items-start`：多行居中会让每行起点都不同，读不成列 |
 
 ---
 

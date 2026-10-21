@@ -4,11 +4,13 @@ import {
   buildSections,
   displayName,
   filterOptions,
+  groupModelsByProvider,
   matchesFilter,
   modelRate,
   modelValue,
   pickDefaultModel,
   providerRate,
+  rateLabel,
   type PickableModel,
 } from "../ModelPicker";
 
@@ -174,5 +176,49 @@ describe("displayName", () => {
     expect(displayName({ id: "qmodel_38max", name: "Qwen3.8 Max" })).toBe("Qwen3.8 Max");
     expect(displayName({ id: "dmodel" })).toBe("dmodel");
     expect(displayName({ id: "dmodel", name: "   " })).toBe("dmodel");
+  });
+});
+
+describe("groupModelsByProvider", () => {
+  it("多渠道条目同时进各渠道，倍率按渠道取（不拿合并值冒充）", () => {
+    const grouped = groupModelsByProvider([
+      model({
+        id: "glm-5.2", name: "GLM 5.2", providers: ["codebuddy", "trae"],
+        // 合并值是 0.29，但两个渠道各自不同；多渠道时不能用合并值
+        credit_rate: 0.29,
+        by_provider: { codebuddy: { credit_rate: 0.29 }, trae: { credit_rate: 0.5 } },
+      }),
+      model({ id: "kimi-k3", name: "Kimi K3", providers: ["trae"], credit_rate: 0 }),
+      model({ id: "aaa", providers: ["trae"] }),
+    ]);
+    expect([...grouped.keys()].sort()).toEqual(["codebuddy", "trae"]);
+    expect(grouped.get("codebuddy")).toEqual([
+      { id: "glm-5.2", label: "GLM 5.2", rate: 0.29 },
+    ]);
+    // 展示名排序（zh-CN 排序忽略大小写）：aaa < GLM 5.2 < Kimi K3
+    expect(grouped.get("trae")).toEqual([
+      // 无倍率：rate 为 undefined（展示 —），不是 0
+      { id: "aaa", label: "aaa", rate: undefined },
+      { id: "glm-5.2", label: "GLM 5.2", rate: 0.5 },
+      { id: "kimi-k3", label: "Kimi K3", rate: 0 },
+    ]);
+  });
+
+  it("单渠道模型回退合并倍率；同名条目按 id 稳定排序；空列表返回空 Map", () => {
+    const grouped = groupModelsByProvider([
+      model({ id: "b", name: "同名", providers: ["trae"], credit_rate: 0.1 }),
+      model({ id: "a", name: "同名", providers: ["trae"], credit_rate: 0.2 }),
+    ]);
+    expect(grouped.get("trae")?.map((item) => item.id)).toEqual(["a", "b"]);
+    expect(grouped.get("trae")?.map((item) => item.rate)).toEqual([0.2, 0.1]);
+    expect(groupModelsByProvider([]).size).toBe(0);
+  });
+});
+
+describe("rateLabel", () => {
+  it("0 是免费额度（免），其余加 x 前缀", () => {
+    expect(rateLabel(0)).toBe("免");
+    expect(rateLabel(0.29)).toBe("x0.29");
+    expect(rateLabel(2)).toBe("x2");
   });
 });

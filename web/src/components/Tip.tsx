@@ -25,8 +25,10 @@ export function Tip({ content, children }: { content: ReactNode; children: React
 /**
  * 长文本就地悬浮：触发元素本身按容器宽度截断，hover 显示完整内容。
  *
- * 与 Tip 的区别：Tip 的 content 是短语义提示（固定 max-w-xs），而这里要展示
- * 可能是几行的完整文本（如成长中心的一行汇报），需要更宽的弹层与自动换行。
+ * 与 Tip 的区别不止宽度：这里的内容常是**多行结构化清单**（额度包 / 模型与倍率 /
+ * 成长中心汇报），故走 `panel` 表面（`panel-raised` + 描边 + 阴影）而不是反色气泡
+ * ——反色底放大段文字会糊成一块，且反色气泡带箭头，箭头会盖住描边留一道缺口。
+ * 同时默认 `items-start` + 左对齐：多行内容居中会让每行起点都不同，读不成列。
  */
 export function LongTextTip({ content, children, className }: {
   content: ReactNode;
@@ -39,9 +41,10 @@ export function LongTextTip({ content, children, className }: {
       <Tooltip>
         <TooltipTrigger asChild>{children}</TooltipTrigger>
         <TooltipContent
-          sideOffset={4}
+          surface="panel"
+          sideOffset={6}
           className={cn(
-            "max-w-sm items-start whitespace-normal break-words text-left",
+            "block max-w-sm items-start px-3 py-2 text-xs whitespace-normal break-words text-left",
             className,
           )}
         >
