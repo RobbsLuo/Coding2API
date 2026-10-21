@@ -23,6 +23,8 @@ publish 别名表——否则启动预热跑完之前别名表是空的，扁平
 **缓存存的是未过滤列表，过滤在每个出口现做**：MODEL_BLOCKLIST 是可热更项
 （「改完立即生效」），若把过滤结果存进缓存，改完黑名单要等 TTL（300s）
 才反映到 Playground，且被滤掉的模型在 TTL 内会从「兜底缓存」里复活。
+「探活判死」同理现算（`model_probes.failed_and_blocked`），并**逐渠道**抽掉：
+(渠道, 模型) 判死只让这一对从该渠道消失，别的渠道正常时同一模型照常展示。
 """
 
 from __future__ import annotations
@@ -90,12 +92,25 @@ def merged_entries(services: Services, connected: set[str]) -> list[dict[str, An
     只看 `services.model_list_cache`，不看「本次拉到了什么」：这样缓存兜底、
     TTL 复用、落盘恢复三条路径共用同一段合并逻辑，行为一致。渠道过滤用
     `connected`（有可用凭证），与 `list_models` 的拉取范围保持同口径。
+
+    **再叠一层「探活判死」过滤**（`probed_out`）：(渠道, 模型) 被探活判死且
+    仍被 blocked 负缓存锁着时，把这条模型**从该渠道的表里抽掉**——只抽该渠道，
+    别的渠道正常时同一模型照常展示（合并键跨渠道，多渠道条目退化成单渠道条目）。
+    隐藏条目时同时跳过它，别名表里也就没有「渠道 → 原名」，执行侧
+    `_narrow_providers` 自然不再选它。与黑名单同口径：点名直连指定模型不受影响。
     """
     patterns = services.settings.blocklist_patterns
+    probed_out = services.model_probes.failed_and_blocked()
     grouped: dict[str, dict[str, Any]] = {}   # 归一键 → {providers, meta, raw_ids, ...}
     for provider_id, table in services.model_list_cache.items():
         if provider_id in connected and table:
-            _merge_provider(grouped, provider_id, _visible(table, patterns))
+            visible = _visible(table, patterns)
+            if probed_out:
+                visible = {lower: model for lower, model in visible.items()
+                           if (provider_id, lower) not in probed_out}
+            if not visible:
+                continue
+            _merge_provider(grouped, provider_id, visible)
     # 先按渠道优先级 + 归一键排序（对外 id 尚未算出），再定稿：`_disambiguate`
     # 要靠这个顺序决定对外 id 撞车时谁保留。定稿后顺序不再变化，输出即此序。
     return sorted(grouped.values(), key=_sort_key)

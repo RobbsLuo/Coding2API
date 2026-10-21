@@ -1307,12 +1307,15 @@ class AuditRepository:
         return cursor.rowcount
 
 class ModelProbeRepository:
-    """主动探活结论（`model_probes`）：只供管理台展示 + 「探活成功清负缓存」。
+    """主动探活结论（`model_probes`）：管理台展示 + 「探活成功清负缓存」+
+    判死期间从模型列表暂时摘除。
 
     与 `credential_model_cooldowns` 严格分工：那张表是调度**权威**状态（真实
-    请求的失败驱动，直接决定选号），本表只是观测记录，不参与任何出口判断。
-    把探测结论写进冷却表会让一次探测直接改变选号结果，而「探测失败」未必是
-    模型本身的问题（额度耗尽、限流、网络抖动都会失败）。
+    请求的失败驱动，直接决定选号），本表只是观测记录。把探测结论写进冷却表
+    会让一次探测直接改变选号结果，而「探测失败」未必是模型本身的问题（额度
+    耗尽、限流、网络抖动都会失败）。唯一的出口影响是 `failed_and_blocked()`：
+    判死**且**负缓存仍生效的 (渠道, 模型) 从模型列表与别名表里整对抽掉，
+    到期口径仍是负缓存的 `cooling_until`，不引入第二套时间基准。
     """
 
     def __init__(self, db) -> None:
@@ -1374,6 +1377,31 @@ class ModelProbeRepository:
                 "VALUES (?,?,?,?) ON CONFLICT(provider, model) DO UPDATE SET "
                 "manual = excluded.manual, updated_at = excluded.updated_at",
                 (provider, model, manual, stamp))
+
+    def failed_and_blocked(self, now: int | None = None
+                           ) -> set[tuple[str, str]]:
+        """「探活判死」且**仍被 blocked 负缓存锁着**的 `(渠道, 模型小写原名)`。
+
+        模型列表据此把该 (渠道, 模型) 整对抽掉（见 `api.models.merged_entries`）。
+        两个条件缺一不可：
+
+        * 只有 `state='failed'`：探活判死是观测结论，光它一个不会随时间恢复。
+        * 还必须**仍被负缓存锁着**：`cooling_until` 是这套隐藏的到期口径（6–24h
+          起步的退避），与调度侧的避让同一块表、同一个到期时刻。负缓存过期后
+          没人再探（`ModelProbeTask` 只探被锁的行），若隐藏只看探活结论，该模型
+          会永久消失——它其实只是还没被重新验证。
+
+        模型名取两表原样比对（`model_probes` 的行本来就来自
+        `blocked_cooldowns`），输出统一小写以匹配模型列表缓存的键。
+        """
+        rows = self._db.connect().execute(
+            "SELECT DISTINCT cred.provider AS provider, LOWER(c.model) AS model "
+            "FROM credential_model_cooldowns c "
+            "JOIN credentials cred ON cred.id = c.credential_id "
+            "JOIN model_probes p ON p.provider = cred.provider AND p.model = c.model "
+            "WHERE c.reason = 'blocked' AND c.cooling_until > ? AND p.state = 'failed'",
+            (int(now if now is not None else time.time()),)).fetchall()
+        return {(row["provider"], row["model"]) for row in rows}
 
     def manual_marked(self) -> set[tuple[str, str]]:
         """被人工接管的 (渠道, 模型)：自动探活整行跳过。"""

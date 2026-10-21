@@ -408,6 +408,104 @@ def test_models_failure_backoff_stretches_retry_interval(tmp_path):
     assert _needs_refresh(services, "trae",
                           now=1000.0 + MODEL_LIST_BACKOFF_MAX_SECONDS + 1)
 
+def test_failed_probe_hides_model_for_that_channel_only(tmp_path):
+    """探活判死 + 仍被 blocked 负缓存锁着 → 只把该 (渠道, 模型) 从该渠道抽出。
+
+    其它渠道正常时同一模型照常展示（多渠道条目退化成单渠道条目）；负缓存
+    到期后自动回到列表（那之后没人再探，只看探活结论会永久隐藏）。
+    """
+    import time
+
+    from src.provider.base import Model
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        MODEL_BLOCKLIST="")
+
+    class Stub:
+        def __init__(self, pid: str):
+            self.id = pid
+
+        async def list_models(self, _data):
+            return [Model(id="glm-5.3")]
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    app = build_app(settings, providers={"trae": Stub("trae"),
+                                         "zen": Stub("zen")})
+    for provider_id in ("trae", "zen"):
+        app.state.credentials.add(provider=provider_id,
+                                  credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    auth = {"Authorization": f"Bearer {key}"}
+    with TestClient(app) as client:
+        assert client.get("/v1/models", headers=auth).json()["data"][0]["providers"] \
+            == ["trae", "zen"]
+
+        services = app.state.services
+        services.model_probes.record(provider="trae", model="glm-5.3", state="failed")
+        credential_id = services.credentials.candidates(["trae"])[0].credential_id
+        with services.credentials._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO credential_model_cooldowns "
+                "(credential_id, model, cooling_until, hits, reason) "
+                "VALUES (?,?,?,?,'blocked')",
+                (credential_id, "glm-5.3", int(time.time()) + 3600, 1))
+
+        # 只剩 zen 提供：条目仍在，但 providers 里没有 trae
+        entry = client.get("/v1/models", headers=auth).json()["data"][0]
+        assert (entry["id"], entry["providers"]) == ("glm-5.3", ["zen"])
+        # 别名表同步收窄：执行侧 `_narrow_providers` 不再选 trae
+        assert "trae" not in services.model_aliases
+
+        # 负缓存到期：自动回到列表（不依赖再次探活）
+        with services.credentials._db.transaction() as conn:
+            conn.execute("UPDATE credential_model_cooldowns SET cooling_until = 1")
+        entry = client.get("/v1/models", headers=auth).json()["data"][0]
+        assert entry["providers"] == ["trae", "zen"]
+
+
+def test_probe_ok_does_not_hide_model(tmp_path):
+    """探活成功（清了负缓存）不影响列表；判死但负缓存已清同样不隐藏。"""
+    import time
+
+    from src.provider.base import Model
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        MODEL_BLOCKLIST="")
+
+    class Stub:
+        id = "trae"
+
+        async def list_models(self, _data):
+            return [Model(id="glm-5.3")]
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    app = build_app(settings, providers={"trae": Stub()})
+    app.state.credentials.add(provider="trae", credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    auth = {"Authorization": f"Bearer {key}"}
+    with TestClient(app) as client:
+        services = app.state.services
+        services.model_probes.record(provider="trae", model="glm-5.3", state="ok")
+        assert client.get("/v1/models", headers=auth).json()["data"][0]["providers"] \
+            == ["trae"]
+
+        # failed 但负缓存已过期（有人手动清了）：不当隐藏依据
+        services.model_probes.record(provider="trae", model="glm-5.3", state="failed")
+        credential_id = services.credentials.candidates(["trae"])[0].credential_id
+        with services.credentials._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO credential_model_cooldowns "
+                "(credential_id, model, cooling_until, hits, reason) "
+                "VALUES (?,?,?,?,'blocked')",
+                (credential_id, "glm-5.3", int(time.time()) - 1, 1))
+        assert client.get("/v1/models", headers=auth).json()["data"][0]["providers"] \
+            == ["trae"]
+
+
 def test_models_refresh_failure_counts_and_logs_once(tmp_path, caplog):
     """失败计数递增、首次 WARNING 其后 INFO（带「使用上次缓存」分支）、成功清零。"""
     import asyncio

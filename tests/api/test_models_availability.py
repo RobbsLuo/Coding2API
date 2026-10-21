@@ -297,6 +297,30 @@ def test_probes_shows_manual_row_without_blocked(tmp_path):
     assert rows[0]["manual"] == "manual"
 
 
+def test_probes_hides_blacklisted_models(tmp_path):
+    """命中黑名单的行整条不返回：黑名单是「主动弃用」，不该再去救它。"""
+    app, client = _operator_client(tmp_path)
+    with client:
+        app.state.runtime_settings.set("model_blocklist", "glm-*")
+        _block(app, provider="trae", model="glm-5.3")
+        _block(app, provider="trae", model="kimi-k3")
+        rows = client.get(PROBES).json()["rows"]
+    assert [row["model"] for row in rows] == ["kimi-k3"]
+
+
+def test_probes_hides_blacklisted_manual_row(tmp_path):
+    """只留人工标记、没有负缓存的黑名单行同样滤掉。"""
+    app, client = _operator_client(tmp_path)
+    with client:
+        app.state.runtime_settings.set("model_blocklist", "glm-5.3")
+        app.state.services.model_probes.set_manual(
+            provider="trae", model="glm-5.3", manual="manual")
+        app.state.services.model_probes.set_manual(
+            provider="trae", model="kimi-k3", manual="manual")
+        rows = client.get(PROBES).json()["rows"]
+    assert [row["model"] for row in rows] == ["kimi-k3"]
+
+
 def test_probes_sorted_failed_first_then_until(tmp_path):
     """排序：failed 结论优先，其后按最晚解除时刻降序（最该处理的排最前）。"""
     app, client = _operator_client(tmp_path)
