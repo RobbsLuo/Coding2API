@@ -1,8 +1,8 @@
 # Coding2API
 
 Unified OpenAI-compatible gateway for the **CodeBuddy** (CN site + international site),
-**TRAE SOLO**, **OpenCode Zen**, **Kilo Gateway**, **Qoder**, and **CodeArts** coding-agent
-upstreams, with a shared credential pool, unified scheduling, and per-user usage stats.
+**TRAE SOLO**, **OpenCode Zen**, **Kilo Gateway**, **Qoder**, **CodeArts**, and **officeAce**
+coding-agent upstreams, with a shared credential pool, unified scheduling, and per-user usage stats.
 
 > [!WARNING]
 > This project bridges reverse-engineered third-party endpoints; study and research use
@@ -58,7 +58,7 @@ Pull the GHCR image instead of building:
 
 ```bash
 docker compose pull
-# or pin a version: docker pull ghcr.io/robbsluo/coding2api:v0.8.0
+# or pin a version: docker pull ghcr.io/robbsluo/coding2api:v0.9.0
 ```
 
 Pushing a `v*` tag to main triggers the publish workflow (`.github/workflows/publish.yml`), tagging both `<tag>` and `:latest` on GHCR.
@@ -111,6 +111,7 @@ The *Server logs* page (`/logs`, admins only) is a **read-only** live view of th
    - **CodeBuddy** (incl. international): device-code login, or paste `{"token":"..."}`.
    - **TRAE**: paste the credential JSON (`accessToken`/`uid`/`refreshToken`) or the callback URL (`apiHost` must be an official address).
    - **Qoder / CodeArts**: device-code / OAuth2 authorization-code login (CodeArts: paste the unreachable local callback URL back into the page).
+   - **officeAce**: click *Log in to officeAce* for the Huawei Cloud authorization (the callback is handled in the cloud — no URL to paste, no local port).
    - **OpenCode Zen / Kilo Gateway**: nothing to add — a virtual credential is seeded at startup (re-added from the same panel if deleted).
 2. **API keys** — create an `sk-...` (plaintext shown once).
 3. Call it:
@@ -126,7 +127,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ### Three model-name fields
 
-Every model on the seven channels is unified into three fields:
+Every model on the eight channels is unified into three fields:
 
 1. **Raw id** (`raw_id`): the key actually sent upstream, **never changed**. Raw ids differ per channel (Qoder `kmodel_latest` = TRAE `kimi-k3-1`) and may carry a namespace prefix (Kilo's `kilo-auto/free`).
 2. **Canonical key**: free-tier markers (`-free` / path segment `free`) and namespace prefixes stripped, then slugified — `kilo-auto`, `longcat-2.5-preview`. The list merges entries by it, so Zen's free tier and TRAE's paid tier collapse into one row.
@@ -147,7 +148,7 @@ The Playground request form carries optional `temperature` / `max_tokens` / `rea
 
 ## Channels
 
-> CodeBuddy (incl. international) / TRAE / Qoder / CodeArts need credentials; **OpenCode Zen and Kilo Gateway are credential-less free tiers** — the pool holds one virtual placeholder row (so scheduling / cooldown / stats work as usual), the quota column reads "free tier (no quota API)", and health stays "no probe" (unknown ≠ exhausted). The virtual row **re-seeds on restart after deletion**; use *pause* to disable permanently.
+> CodeBuddy (incl. international) / TRAE / Qoder / CodeArts / officeAce need credentials; **OpenCode Zen and Kilo Gateway are credential-less free tiers** — the pool holds one virtual placeholder row (so scheduling / cooldown / stats work as usual), the quota column reads "free tier (no quota API)", and health stays "no probe" (unknown ≠ exhausted). The virtual row **re-seeds on restart after deletion**; use *pause* to disable permanently.
 
 ### OpenCode Zen free tier (`zen`)
 
@@ -186,6 +187,39 @@ Free models at [Kilo Gateway](https://kilo.ai) (`api.kilo.ai/api/gateway`), no a
 **The credentials page splits CodeArts into two channels**: **CodeArts 内置** (writable: all actions and the credit ledger) and **CodeArts 福利** (read-only: daily token pool only), each listing the same accounts once. This is a **front-end-only display split — the backend still has one `codearts` channel**: `refresh_token` is single-use and bound to `client_id` + the DPoP key, so two credential rows would each refresh once and the second would fail with `the refresh token has been used`, burning the ticket. The ledger split axis is the **model** (`is_benefit_model()` decides per request), not the channel, so this split only affects display and action entry points. **Expiring credits are split per ledger too**: the backend keeps the daily-pool rung and the credit-package rung apart (`quota_credits_expiry_ladder`), so the 福利 group shows the daily pool's expiring credits and the 内置 group shows the credit ledger's own.
 
 **Signing / cumulative SSE / pacing**: the upstream requires Huawei `SDK-HMAC-SHA256` (AK/SK + `X-Security-Token`), and `CODEARTS_ALLOWED_ENDPOINTS` must include the snap engine, STS, benefit gateway and portal hosts. Streaming `text` is **cumulative (replace semantics)**, reduced to incremental events for clients. Default `CODEARTS_CHAT_MIN_INTERVAL=5`; the upstream hard-limits **3 concurrent sessions per account**, so an in-flight cap (`CODEARTS_MAX_CONCURRENCY`) and a sliding window (`CODEARTS_REQUEST_WINDOW_SECONDS`, 3 starts per 60s) keep bursts ahead of `400 TM.00001041`. All hot-updatable.
+
+### officeAce (`officeace`, real account)
+
+[Huawei Cloud officeAce](https://www.huaweicloud.com/product/agentarts.html) (果办 / AgentArts office agents), **real account** required: click *Log in to officeAce* and finish the Huawei Cloud authorization in the browser — **the callback is handled in the cloud** (`/v1/claw/auth/callback`), so this service listens on no port and the user never pastes a URL; the backend polls `/v1/claw/auth/code` every 2.5s for the authorization code (the same mechanism the official desktop client uses).
+
+**Provisioning prerequisite**: the account must first sign in to the OfficeAce client and redeem an invitation code. An unprovisioned account completes the login but gets no model key (`subscription: null` from the cloud); the service reports "this account has not activated officeAce" instead of a vague login failure.
+
+**Two credential sets with very different lifetimes** (the most common mistake on this channel):
+
+| Credential | Lifetime | Used for |
+|---|---|---|
+| `Basic model_app_key:model_app_secret` | **never expires** | chat forwarding (`{gateway}/v2/chat/completions`) |
+| temporary AK/SK + `security_token` + `project_id` | **~2 hours** | quota lookup, check-in (`/v1/subscription*`) |
+
+Mixing them yields `APIG.0303 app not found`. The failure is confusing either way: chat keeps working (the Basic key never expires) while the quota column goes blank and check-in keeps failing (the temporary credential expired). The pre-refresh task renews the temporary half automatically — `refresh_token` is single-use and bound to `client_id=pdp5_for_agentarts` plus the DPoP key, and **is not interchangeable with the CodeArts ticket** (`STS5.1806 invalid client id`).
+
+**The upstream is plain OpenAI protocol**, so no private envelope parsing is needed; three upstream quirks do need handling:
+
+- **Rate limits arrive as fake 200s**: HTTP 200 + `data:{"error":…}`, and "first frame fine, second frame is the error" has been observed. Error frames flow to the engine as usual; `81111`/`81114` cool down only that credential × model.
+- **Model-level rejection must not kill the credential**: `81004` (account lacks the model) / `81009` (unknown name) would otherwise be read from the status code as a dead credential. Business codes are checked before status codes and classified as a model-level negative cache (cleared on first success).
+- **`max_tokens` is a combined "reasoning + answer" budget**: 9 of the 11 usable models are reasoning models, and a small budget leaves the answer empty. Values `≥16` get 1024 extra headroom clamped to the model ceiling (`glm-5*` 131072 / `qwen3*` 65536 / `deepseek-v4.1-flash` 393216); `<16` passes through untouched (probes / exact tests); absent stays absent.
+
+**Credits are the primary ledger**: the unit is `officeace_points` (one-off new-user grant + a daily check-in grant). Unlike CodeArts there is no parallel token pool — `remaining`/`total` are simply credits. Each grant **expires independently**, hence the quota label reads "per-grant expiry"; scheduling still burns near-expiry first.
+
+**Daily check-in**: `POST /v1/subscription/bonus/claim` (**a write — it really grants credits**; the body must be {} with a JSON `Content-Type`, an empty body returns 500 `OfficeAce.11020001`). Re-claiming on the same day is idempotent upstream, so no local "already claimed" flag is needed. The gain is computed from the **remaining-quantity delta** of `bonus_skus` (`points` is the campaign's cumulative total, contributed to by several channels, so using it as "what I just earned" would overstate). The seal runs to the next Beijing midnight: the next day's campaign triggers an automatic catch-up.
+
+**No active model probing**: only 11 of the 34 catalog entries actually work, but probing sends real inference and burns credits, which are scarce here. Model-level rejection is handled by the `BLOCKED` negative cache from real requests instead. **No credit estimation either**: upstream exposes `cost_coefficient` and `tokens_per_point`, but their multiplication is undocumented, and a guess would desynchronize the whole cross-channel quota ordering.
+
+**Signing and endpoints**: the control plane (`/v1/claw/*`) uses Huawei `SDK-HMAC-SHA256`; the model gateway (`/v1/subscription*`, `/v1/model-token-rates`) accepts only **`V11-HMAC-SHA256`** (an extra region scope plus key derivation) and answers `APIG.0624` or 401 otherwise. `OFFICEACE_ALLOWED_ENDPOINTS` only needs the control-plane host — the model gateway differs per account and is issued by `client-permission-validate` into the credential, so it is not something this service can misconfigure. `OFFICEACE_CHAT_MIN_INTERVAL` defaults to `0` (no CodeArts-style hard concurrency limit) and is hot-updatable.
+
+**One account, one user**: the official plan page states the personal edition is "limited to a single user per account", so this channel is not shared between people — each user adds their own credential.
+
+**Switching accounts**: the login flow supports `force_login`, which first hits `/authui/logout?service=…` to clear the Huawei Cloud browser session. The *Log in to officeAce* button does not pass it — use a private window or another browser for a second account, or sign out of Huawei Cloud first. The server-side capability is in place; wiring it into the UI is follow-up work.
 
 ### CodeBuddy international site (`codebuddy_intl`, real account)
 
@@ -249,7 +283,7 @@ claude
 
 **Auth**: both `x-api-key` and `Authorization: Bearer` are accepted. **Streaming**: `message_start` → `content_block_start/delta/stop` → `message_delta` (with `stop_reason` and usage) → `message_stop`; no `[DONE]` sentinel, and thinking blocks get a `signature_delta` before `content_block_stop`. **Cache hit**: usage is split Anthropic-style — `input_tokens` counts only misses, hits are reported separately as `cache_read_input_tokens` (the internal `input_tokens` is OpenAI's `prompt_tokens`, which includes hits), so Claude Code shows cached tokens instead of always 0. **`count_tokens`**: `POST /v1/messages/count_tokens` estimates input tokens locally. **Images**: `image` blocks (`source.type=base64` becomes a `data:` URL, `source.type=url` passes through) are normalized to chat `image_url` parts, and images inside `tool_result.content` are kept too — pure-text content is still folded into a string, so image-free requests map byte-for-byte as before. **Not supported**: `document` blocks (PDF, no chat equivalent), `source.type=file` and Anthropic-only server tools — explicit 400.
 
-**`cache_control` pass-through** (always on, no flag): inbound cache markers are forwarded verbatim, at the same places Anthropic accepts them — `system` content blocks, user/assistant content blocks, `tool_result` (attached to the **tool message top level**, avoiding a synthetic empty text block), `tool_calls` elements, and `tools` elements. Only **structure** is validated (must be an object with a non-empty string `type`; `ttl`, if present, must be a string); values are not interpreted (an unknown `type` still passes through — a gateway should not gatekeep cache types upstream may add later). Malformed markers are an explicit 400 rather than a silent drop. **Without markers the mapping is byte-for-byte unchanged** (pure text still folds into a string), so session-affinity fingerprints and upstream prefix caching are unaffected. Six of the seven channels accept the markers in testing (codebuddy / codebuddy_intl / trae / qoder / codearts / kilo); **zen is unverified** (its upstream returns `FreeTierError` 403 even with `--plain`, unrelated to the markers). Probe script: `scripts/probe_cache_control.py`.
+**`cache_control` pass-through** (always on, no flag): inbound cache markers are forwarded verbatim, at the same places Anthropic accepts them — `system` content blocks, user/assistant content blocks, `tool_result` (attached to the **tool message top level**, avoiding a synthetic empty text block), `tool_calls` elements, and `tools` elements. Only **structure** is validated (must be an object with a non-empty string `type`; `ttl`, if present, must be a string); values are not interpreted (an unknown `type` still passes through — a gateway should not gatekeep cache types upstream may add later). Malformed markers are an explicit 400 rather than a silent drop. **Without markers the mapping is byte-for-byte unchanged** (pure text still folds into a string), so session-affinity fingerprints and upstream prefix caching are unaffected. Six of the eight channels accept the markers in testing (codebuddy / codebuddy_intl / trae / qoder / codearts / kilo); **zen and officeAce are unverified** (its upstream returns `FreeTierError` 403 even with `--plain`, unrelated to the markers). Probe script: `scripts/probe_cache_control.py`.
 
 ### CC Switch one-click import
 
@@ -477,12 +511,15 @@ Key variables below; the full list is in `src/config.py` (authoritative), and **
 | `QODER_API_ENDPOINT` / `QODER_GATEWAY_ENDPOINT` | `https://openapi.qoder.com.cn` / `https://gateway.qoder.com.cn` | Qoder openapi (quota/login) + gateway (chat); international: `openapi.qoder.sh` / `api1.qoder.sh` |
 | `QODER_ALLOWED_ENDPOINTS` | CN + international (see compose) | COSY-signed requests only to allowlisted hosts |
 | `CODEARTS_API_ENDPOINT` | `https://snap-access.cn-north-4.myhuaweicloud.com` | CodeArts snap engine; add it to its allowlist |
+| `OFFICEACE_API_ENDPOINT` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | officeAce control plane (OAuth + provisioning); add it to its allowlist |
+| `OFFICEACE_ALLOWED_ENDPOINTS` | the control-plane host only | The model gateway differs per account and is issued into the credential, so it is **not** allowlisted here |
 | `CODEARTS_ALLOWED_ENDPOINTS` | snap + STS + benefit gateway + portal (see compose) | AK/SK-signed requests only to allowlisted hosts |
 | `PROVIDER_PROXIES` | `""` | Per-channel egress proxy (startup-only); empty = all direct |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB pacer (seconds), per-credential bucket; `0` disables |
 | `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB international pacer, **independent**; `0` disables |
 | `ZEN_CHAT_MIN_INTERVAL` / `KILO_CHAT_MIN_INTERVAL` | `0` | Zen / Kilo pacers, independent, off by default |
 | `QODER_CHAT_MIN_INTERVAL` / `CODEARTS_CHAT_MIN_INTERVAL` | `5` | Qoder / CodeArts pacers; `0` disables |
+| `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | officeAce pacer, independent; `0` disables |
 | `CODEARTS_MAX_CONCURRENCY` | `3` | CodeArts in-flight cap per account; `0` disables |
 | `CODEARTS_REQUEST_WINDOW_SECONDS` | `60` | CodeArts sliding window (3 starts / 60s with the cap above); `0` disables |
 | `CODEBUDDY_SANITIZE_CHANNEL_MARKERS` | `true` | Neutralize official-client fingerprints in outbound `system`/`assistant` text (upstream 11128 content filter); outbound copy only |

@@ -60,7 +60,7 @@ docker compose exec coding2api python scripts/create_user.py admin --role admin
 
 ```bash
 docker compose pull
-# 或指定版本：docker pull ghcr.io/robbsluo/coding2api:v0.8.1
+# 或指定版本：docker pull ghcr.io/robbsluo/coding2api:v0.9.0
 ```
 
 推送新版本：打 tag `v*` 推到 main 即触发 publish workflow（`.github/workflows/publish.yml`），同时打 `<tag>` 与 `:latest` 到 GHCR；也可在 Actions 页面手动触发。
@@ -312,7 +312,7 @@ claude
 
 **鉴权**：`x-api-key` 与 `Authorization: Bearer` 都接受。**流式**：`message_start` → `content_block_start/delta/stop` → `message_delta`（含 `stop_reason` 与 usage）→ `message_stop`；无 `[DONE]` 哨兵，thinking 块在 `content_block_stop` 前补 `signature_delta`。**缓存命中**：出口 usage 按 Anthropic 语义拆两笔——`input_tokens` 只计未命中，命中另记 `cache_read_input_tokens`（内部 `input_tokens` 是 OpenAI 口径的 `prompt_tokens`，含命中），Claude Code 据此显示缓存读 token。**`count_tokens`**：`POST /v1/messages/count_tokens` 本地估算输入 token（不转发上游）。**图片**：`image` 块（`source.type=base64` 拼成 `data:` URL、`source.type=url` 直传）归一为 chat 的 `image_url` 内容块，`tool_result.content` 内的图片同样保留——纯文本内容仍折成字符串，故无图请求的映射结果与旧版逐字节一致。**不支持**：`document` 块（PDF，chat 上游无对应表达）、`source.type=file`、Anthropic 服务端工具一律显式 400。
 
-**`cache_control` 透传**（默认开启，无开关）：入站的缓存提示标记原样带给上游，落点与 Anthropic 一致——`system` 内容块、user/assistant 消息内容块、`tool_result`（挂 tool 消息**顶层**，不造空 text 块）、assistant `tool_calls` 元素顶层、`tools` 元素顶层。只做**结构**校验（必须是对象、必须有非空字符串 `type`、`ttl` 若给必须是字符串），取值不解释（未知 `type` 也透传，上游将来新增的缓存类型不该被本网关挡掉）；结构不合法显式 400 而不是静默丢弃。**不带标记时映射结果与旧版逐字节一致**（纯文本仍折成字符串），故会话粘性指纹与上游前缀缓存不受影响。七渠道实测 6 个接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo），**zen 未验证**（该渠道上游返 `FreeTierError` 403，`--plain` 对照同样失败，与标记无关）；实测脚本 `scripts/probe_cache_control.py`。
+**`cache_control` 透传**（默认开启，无开关）：入站的缓存提示标记原样带给上游，落点与 Anthropic 一致——`system` 内容块、user/assistant 消息内容块、`tool_result`（挂 tool 消息**顶层**，不造空 text 块）、assistant `tool_calls` 元素顶层、`tools` 元素顶层。只做**结构**校验（必须是对象、必须有非空字符串 `type`、`ttl` 若给必须是字符串），取值不解释（未知 `type` 也透传，上游将来新增的缓存类型不该被本网关挡掉）；结构不合法显式 400 而不是静默丢弃。**不带标记时映射结果与旧版逐字节一致**（纯文本仍折成字符串），故会话粘性指纹与上游前缀缓存不受影响。八渠道实测 6 个接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo）；**zen 未验证**（上游返 `FreeTierError` 403，`--plain` 对照同样失败，与标记无关）、**officeAce 未验证**（账号未开通模型网关，拿不到可聊凭证）；实测脚本 `scripts/probe_cache_control.py`。
 
 ### CC Switch 一键导入
 
@@ -340,7 +340,7 @@ claude
 
 ```json
 {
-  "status": "ok", "service": "coding2api", "version": "0.8.1",
+  "status": "ok", "service": "coding2api", "version": "0.9.0",
   "credentials": {"total": 5, "ready": 4, "cooling": 1, "paused": 0, "disabled": 0}
 }
 ```
