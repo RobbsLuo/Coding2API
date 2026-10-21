@@ -148,6 +148,49 @@ def test_models_synonym_merges_qoder_deepseek_flash(tmp_path):
     assert aliases["qoder"]["deepseek-v4.1-flash"] == "dfmodel"
     assert aliases["qoder"]["dfmodel"] == "dfmodel"
 
+def test_models_synonym_merges_cb_xiaomi_mimo_pro(tmp_path):
+    """CB 的 `Xiaomi MiMo-V2.6-Pro` 与 TRAE 的 `MiMo-V2.6-Pro` 并成一条。
+
+    CB 上游名带厂商前缀（空格式），清洗规则削不到，归一键会多出 `xiaomi-`，
+    同一模型拆成两条、对外多出 `xiaomi-mimo-v2.6-pro`。`MODEL_SYNONYMS` 把
+    两者收敛到同一个规范键与展示名，请求 `mimo-v2.6-pro` 也能路由到 CB。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return list(self._models)
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    from src.provider.base import Model
+
+    app = build_app(settings, providers={
+        "codebuddy": Stub("codebuddy", [Model(id="mimo-v2.6-pro",
+                                              name="Xiaomi MiMo-V2.6-Pro",
+                                              credit_rate=0.13)]),
+        "trae": Stub("trae", [Model(id="mimo-v2.6-pro", name="MiMo-V2.6-Pro",
+                                    credit_rate=0.15)]),
+    })
+    for provider_id in ("codebuddy", "trae"):
+        app.state.credentials.add(provider=provider_id, credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        data = client.get("/v1/models", headers={
+            "Authorization": f"Bearer {key}"}).json()["data"]
+
+    assert [m["id"] for m in data] == ["mimo-v2.6-pro"]      # 两渠道并成一条
+    assert data[0]["providers"] == ["codebuddy", "trae"]
+    assert data[0]["name"] == "MiMo V2.6 Pro"
+    aliases = app.state.services.model_aliases
+    assert aliases["codebuddy"]["mimo-v2.6-pro"] == "mimo-v2.6-pro"
+    assert aliases["trae"]["mimo-v2.6-pro"] == "mimo-v2.6-pro"
+
 def test_models_name_merge_includes_zen_and_guards_colliding_names(tmp_path):
     """六条渠道统一按归一键合并；同渠道内归一键重复的退回原 id。
 

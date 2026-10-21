@@ -59,6 +59,10 @@ _NOISE_MARK_ALT = "|".join(sorted(NOISE_MARKS))     # 正则用的 alternation
 MODEL_SYNONYMS: dict[str, tuple[str, str]] = {
     # 异名归一键 → (规范归一键, 规范展示名)
     "deepseek-flash": ("deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+    # CodeBuddy 的可读名带厂商前缀（`Xiaomi MiMo-V2.6-Pro`），TRAE 只叫
+    # `MiMo-V2.6-Pro`：`Vendor: Model` 的冒号式前缀削不到它，键会多出
+    # `xiaomi-`，同一模型被拆成两条（对外多出 `xiaomi-mimo-v2.6-pro`）。
+    "xiaomi-mimo-v2.6-pro": ("mimo-v2.6-pro", "MiMo V2.6 Pro"),
 }
 _SYNONYM_DISPLAY: dict[str, str] = {
     key: display for key, (_, display) in MODEL_SYNONYMS.items()}
