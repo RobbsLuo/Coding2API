@@ -53,7 +53,11 @@ async def test_checkin_dedupes_same_upstream_account(repo):
     assert provider.checkin_calls == 1
 
 async def test_checkin_same_scope_failure_still_dedupes(repo):
-    """同账号多凭证：首条失败时本轮不重试第二条（seen 去重），下轮才重试。"""
+    """同账号多凭证：首条失败时本轮不重试第二条（seen 去重）。
+
+    行序不变则下一轮仍是首条先被试，第二条永远轮不到 —— 这是有意的上限
+    （避免同账号重复打上游），不是「下轮必重试」。
+    """
     credentials, _db = repo
     credentials.add(provider="codebuddy", credential_data={"bearer_token": "a",
                                                           "account_uid": "same"})
@@ -63,6 +67,33 @@ async def test_checkin_same_scope_failure_still_dedupes(repo):
     task = CheckinTask(credentials, {"codebuddy": provider})
     report = await task.run_once()
     assert report.attempted == 1 and report.skipped == 1 and report.failed == 1
+    assert provider.checkin_calls == 1
+
+async def test_checkin_skips_paused_credential_and_frees_scope(repo):
+    """回归 #15：暂停（enabled=0）的旧凭证不得占用上游账号名额。
+
+    行序更靠前且会话已死的暂停凭证若仍被尝试，会先 `seen.add(scope)`，后面
+    那条启用中的同账号凭证每轮都被去重挡下 → 渠道签到永久静默失效。
+    """
+    credentials, _db = repo
+    paused = credentials.add(provider="codebuddy", credential_data={"bearer_token": "dead",
+                                                                    "account_uid": "same"})
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "live",
+                                                          "account_uid": "same"})
+    credentials.set_enabled(paused, False)
+
+    class HalfDead(ProbeProvider):
+        """暂停那条会话已死：若它仍被尝试，本轮就会 failed=1 且占用账号名额。"""
+
+        async def checkin(self, data):
+            self.checkin_calls += 1
+            return CheckinResult(ok=data["bearer_token"] != "dead", credit=10)
+
+    provider = HalfDead()
+    task = CheckinTask(credentials, {"codebuddy": provider})
+    report = await task.run_once()
+    assert report.attempted == 1 and report.succeeded == 1
+    assert report.failed == 0 and report.skipped == 1
     assert provider.checkin_calls == 1
 
 async def test_checkin_skips_disabled(repo):
