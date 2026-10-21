@@ -363,7 +363,7 @@ async def test_poll_unprovisioned_account_gives_actionable_message():
                    "subscription": None})))
     with pytest.raises(UpstreamProtocolViolation) as caught:
         await oauth.poll(state, "alice")
-    assert "还没开通 officeAce 服务" in caught.value.public_message
+    assert "还没开通 OfficeAce 服务" in caught.value.public_message
     assert "eve" in caught.value.public_message
     # 失败后 state 未消费：用户可以补齐开通再重试
     assert len(oauth.store) == 1
@@ -376,7 +376,7 @@ async def test_poll_unprovisioned_without_identity_uses_generic_wording():
     with pytest.raises(UpstreamProtocolViolation) as caught:
         await oauth.poll(state, "alice")
     message = caught.value.public_message
-    assert message.startswith("这个账号还没开通 officeAce 服务")
+    assert message.startswith("这个账号还没开通 OfficeAce 服务")
     assert "华为云账号" not in message
 
 

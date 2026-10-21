@@ -368,8 +368,8 @@ class OfficeAceOAuth:
             who = info["user_name"] or info["account_id"]
             raise UpstreamProtocolViolation(
                 "officeAce account is not provisioned",
-                public=(f"华为云账号 {who} 还没开通 officeAce 服务。" if who
-                        else "这个账号还没开通 officeAce 服务。")
+                public=(f"华为云账号 {who} 还没开通 OfficeAce 服务。" if who
+                        else "这个账号还没开通 OfficeAce 服务。")
                 + ("请先在 OfficeAce 客户端里登录并兑换邀请码完成开通，"
                    "或点「换账号」用已开通的账号重新登录。"))
         if not info["base_url"]:

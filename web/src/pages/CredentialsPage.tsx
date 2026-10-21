@@ -1477,7 +1477,7 @@ function ColumnHeaderRow({
       )}
       {canWrite && (
         writable ? (
-          <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测/签到：行内常驻。更多操作（⋯）：成长中心（仅 CodeBuddy）、活跃上报（CodeBuddy 与 CodeBuddy 国际版）、指定、暂停/恢复、删除。积分记录在额度列下箭头。" /></span></TableHead>
+          <TableHead className="text-right"><span className="inline-flex items-center gap-1">操作<ColumnHint text="探测/签到：行内常驻。更多操作（⋯）：成长中心（仅 CodeBuddy）、活跃上报（CodeBuddy 与 CodeBuddy 国际）、指定、暂停/恢复、删除。积分记录在额度列下箭头。" /></span></TableHead>
         ) : (
           // 只读组的操作列只留位置，不给列名（没有操作可做，写了反而像能点）
           <TableHead aria-hidden />

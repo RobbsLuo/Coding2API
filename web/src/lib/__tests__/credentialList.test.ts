@@ -299,7 +299,7 @@ describe("sortGroups", () => {
         { key: "zen", provider: "zen", label: "OpenCode Zen", readOnly: false,
           ledger: "pool", items: [], states: {}, remaining: null, total: null,
           expiring: null, expiringSecondary: null },
-        { key: "kilo", provider: "kilo", label: "Kilo Gateway", readOnly: false,
+        { key: "kilo", provider: "kilo", label: "Kilo", readOnly: false,
           ledger: "pool", items: [], states: {}, remaining: null, total: null,
           expiring: null, expiringSecondary: null },
       ] as ProviderGroup[],

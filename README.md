@@ -1,6 +1,6 @@
 # Coding2API
 
-把 **CodeBuddy**（国内站 + 国际版）、**TRAE SOLO**、**OpenCode Zen**、**Kilo Gateway**、**Qoder**、**CodeArts**、**officeAce** 八个上游渠道封装为 OpenAI 兼容 API，提供公共凭证池、统一模型名与调度、按人用量统计。
+把 **CodeBuddy**（国内站 + 国际）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce** 八个上游渠道封装为 OpenAI 兼容 API，提供公共凭证池、统一模型名与调度、按人用量统计。
 
 > [!WARNING]
 > 逆向接口，仅供学习研究，未做安全审计；公网部署需反向代理 + 鉴权 + IP 白名单。
@@ -111,11 +111,11 @@ echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-
 ## 使用
 
 1. 「凭证管理」添加凭证：
-   - **CodeBuddy**（含国际版）：设备码登录，或粘贴 `{"token":"..."}`。
+   - **CodeBuddy**（含国际）：设备码登录，或粘贴 `{"token":"..."}`。
    - **TRAE**：粘贴凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（`apiHost` 只接受官方地址）。
    - **Qoder / CodeArts**：设备码 / OAuth2 授权码登录（CodeArts 授权后把打不开的本地回调链接粘回页面）。
-   - **officeAce**：点「登录 officeAce」走华为云授权（回调由云端承接，无需粘链接、无需开本地端口）。
-   - **OpenCode Zen / Kilo Gateway**：无需添加——启动时自动出现虚拟凭证（被删可在同面板点「添加」补回）。
+   - **OfficeAce**：点「登录 OfficeAce」走华为云授权（回调由云端承接，无需粘链接、无需开本地端口）。
+   - **OpenCode Zen / Kilo**：无需添加——启动时自动出现虚拟凭证（被删可在同面板点「添加」补回）。
 2. 「API Key」创建 `sk-...`（明文仅显示一次）。
 3. 调用：
 
@@ -167,7 +167,7 @@ Playground 请求表单可选填 `temperature` / `max_tokens` / `reasoning_effor
 
 ## 渠道
 
-> CodeBuddy（含国际版）/ TRAE / Qoder / CodeArts / officeAce 需填凭证；**OpenCode Zen 与 Kilo Gateway 是无凭证的免费层渠道**——池里是一条虚拟占位行（让调度 / 冷却 / 统计照常工作），额度列显示「免费层（无额度接口）」，健康度恒为「无探测」（未知 ≠ 耗尽）。虚拟行**删除后重启会复活**，永久停用请用「暂停」。
+> CodeBuddy（含国际）/ TRAE / Qoder / CodeArts / OfficeAce 需填凭证；**OpenCode Zen 与 Kilo 是无凭证的免费层渠道**——池里是一条虚拟占位行（让调度 / 冷却 / 统计照常工作），额度列显示「免费层（无额度接口）」，健康度恒为「无探测」（未知 ≠ 耗尽）。虚拟行**删除后重启会复活**，永久停用请用「暂停」。
 
 ### OpenCode Zen 免费层（`zen`）
 
@@ -175,9 +175,9 @@ Playground 请求表单可选填 `temperature` / `max_tokens` / `reasoning_effor
 
 **免费层门禁**：上游要求伪装成官方客户端（UA 版本、会话头、`stream:true`、tools 含 `bash`/`read`），本服务自动满足；注入的 `bash`/`read` 是空壳，模型真调用时这类 tool_call 被过滤掉，不泄漏你没声明过的函数。UA 版本用 `ZEN_OPENCODE_VERSION` 调，端点用 `ZEN_API_ENDPOINT`（须在 `ZEN_ALLOWED_ENDPOINTS` 内）；付费模型即使强制 `模型@zen` 也只报「不可用」。
 
-### Kilo Gateway 免费层（`kilo`）
+### Kilo 免费层（`kilo`）
 
-接 [Kilo Gateway](https://kilo.ai)（`api.kilo.ai/api/gateway`）的**免费模型**，无需账号或登录。对外是**标准 OpenAI 兼容协议**，无私有信封、无门禁伪装；上游 `/models` 每条带权威 `isFree` 布尔，本服务**据此直接过滤**免费集、**不做探活**（探活白耗本就极小的免费配额）。免费模型标 **x0**。
+接 [Kilo](https://kilo.ai)（`api.kilo.ai/api/gateway`）的**免费模型**，无需账号或登录。对外是**标准 OpenAI 兼容协议**，无私有信封、无门禁伪装；上游 `/models` 每条带权威 `isFree` 布尔，本服务**据此直接过滤**免费集、**不做探活**（探活白耗本就极小的免费配额）。免费模型标 **x0**。
 
 **额度与限流**：免费层额度很小（网关级约 200 请求/小时/IP），实为 OpenRouter 免费池的转发；上游 **429 与 502/503/504 都是模型级**——只冷却被点名的那个模型，本服务不自建熔断。端点用 `KILO_API_ENDPOINT`（须在 `KILO_ALLOWED_ENDPOINTS` 内）。
 
@@ -185,9 +185,9 @@ Playground 请求表单可选填 `temperature` / `max_tokens` / `reasoning_effor
 
 接 [Qoder](https://qoder.com)，**需要真实账号**：在「凭证管理 → 登录渠道账号」点「登录 Qoder」，按提示在浏览器完成设备码授权（登录全程后端轮询完成，Token 不经过浏览器）。上游是私有 COSY 协议（自定义 Base64 编码 + 信封式 SSE），本服务负责签名与解包，对外仍是标准 OpenAI 协议。
 
-**额度与签到**：支持额度探测（`GET /api/v2/quota/usage`）与每日签到（积分可累积）。签到为**活动制**（`/sash/api/v1/me/campaigns`，需带 `Cosy-ClientType`），旧 `daily-check-in` 仅作回退；本服务自动查询并领取可领活动，管理台可手动触发。**签到活动每日 10:00（UTC+8）刷新**（领取后 30 天有效），后台任务按该窗口封账：凌晨看到的「已领」只封到当天 09:59，10:00 新一轮出现后自动补签。新协议不提供连续天数，界面不再显示「连续 N 天」。**国际版没有签到接口**（该端点 404），记为「本区域无此接口」，不是错误。
+**额度与签到**：支持额度探测（`GET /api/v2/quota/usage`）与每日签到（积分可累积）。签到为**活动制**（`/sash/api/v1/me/campaigns`，需带 `Cosy-ClientType`），旧 `daily-check-in` 仅作回退；本服务自动查询并领取可领活动，管理台可手动触发。**签到活动每日 10:00（UTC+8）刷新**（领取后 30 天有效），后台任务按该窗口封账：凌晨看到的「已领」只封到当天 09:59，10:00 新一轮出现后自动补签。新协议不提供连续天数，界面不再显示「连续 N 天」。**国际站没有签到接口**（该端点 404），记为「本区域无此接口」，不是错误。
 
-**端点与节流**：默认国内版（`openapi.qoder.com.cn` + `gateway.qoder.com.cn`），国际版改 `QODER_API_ENDPOINT=https://openapi.qoder.sh` 并确认白名单含国际版域名（签名携带完整 `cosy-*` 头，白名单防误发）。默认 `QODER_CHAT_MIN_INTERVAL=5`（独立节流器），可在「任务与配置」热更。
+**端点与节流**：默认国内版（`openapi.qoder.com.cn` + `gateway.qoder.com.cn`），国际站改 `QODER_API_ENDPOINT=https://openapi.qoder.sh` 并确认白名单含国际站域名（签名携带完整 `cosy-*` 头，白名单防误发）。默认 `QODER_CHAT_MIN_INTERVAL=5`（独立节流器），可在「任务与配置」热更。
 
 **上游节点故障**：Qoder 有时把自身推理节点故障包成 400（`[FAIL]node:… msg:Execution failed`）。本服务识别为**模型级瞬时故障**——只冷却该模型，耗尽候选时返回「该模型暂时不可用」的 503（`no_healthy_credential`），而非误报「模型不存在」；稍后重试通常自愈。
 
@@ -207,11 +207,11 @@ Playground 请求表单可选填 `temperature` / `max_tokens` / `reasoning_effor
 
 **签名 / 累计全文 SSE / 节流与并发**：上游要求华为云 `SDK-HMAC-SHA256`（AK/SK + `X-Security-Token`），白名单 `CODEARTS_ALLOWED_ENDPOINTS` 必须含 snap 引擎、STS、福利网关与门户四个主机。流式 `text` 是**累计全文（替换语义）**而非增量，本服务在解析层还原为增量事件，对客户端透明。默认 `CODEARTS_CHAT_MIN_INTERVAL=5`；上游硬限**每账号并发会话数 3**，故配在途上限 `CODEARTS_MAX_CONCURRENCY` 与滑动窗口 `CODEARTS_REQUEST_WINDOW_SECONDS`（每账号每 60s 最多启动 3 次），把突发挡在 `400 TM.00001041` 之前。均可热更。
 
-### officeAce（`officeace`，真实账号）
+### OfficeAce（`officeace`，真实账号）
 
-接 [华为云 officeAce](https://www.huaweicloud.com/product/agentarts.html)（果办 / AgentArts 办公智能体），**需要真实账号**：点「登录 officeAce」，浏览器完成华为云登录与授权即可——**回调由云端承接**（`/v1/claw/auth/callback`），本服务不监听任何端口、用户也不需要粘链接，后端按 2.5s 轮询 `/v1/claw/auth/code` 取回授权码（与官方桌面端同一机制）。
+接 [华为云 OfficeAce](https://www.huaweicloud.com/product/agentarts.html)（果办 / AgentArts 办公智能体），**需要真实账号**：点「登录 OfficeAce」，浏览器完成华为云登录与授权即可——**回调由云端承接**（`/v1/claw/auth/callback`），本服务不监听任何端口、用户也不需要粘链接，后端按 2.5s 轮询 `/v1/claw/auth/code` 取回授权码（与官方桌面端同一机制）。
 
-**开通前提**：账号必须先在 OfficeAce 客户端里登录并兑换邀请码完成开通。未开通的账号登录会「成功」但拿不到模型密钥（云端 `subscription: null`），本服务据此报出「这个账号还没开通 officeAce 服务」而不是含糊的登录失败。
+**开通前提**：账号必须先在 OfficeAce 客户端里登录并兑换邀请码完成开通。未开通的账号登录会「成功」但拿不到模型密钥（云端 `subscription: null`），本服务据此点名报出「华为云账号 xxx 还没开通 OfficeAce 服务」而不是含糊的登录失败。
 
 **两套凭据，寿命完全不同**（这是本渠道最容易踩错的地方）：
 
@@ -240,7 +240,7 @@ Playground 请求表单可选填 `temperature` / `max_tokens` / `reasoning_effor
 
 **换账号**：华为云会话按**浏览器**走——浏览器里还留着上一个账号时，云端会直接放行、把「新增账号」变成「同一个账号再登一遍」。故登录按钮旁额外给一个**「换账号」**（`force_login=true`），它先走 `/authui/logout?service=…` 清掉会话再授权。未开通的账号会明确报出是哪个号没开通，而不是笼统的「登录失败」。
 
-### CodeBuddy 国际版（`codebuddy_intl`，真实账号）
+### CodeBuddy 国际（`codebuddy_intl`，真实账号）
 
 接 CodeBuddy 国际站 [www.codebuddy.ai](https://www.codebuddy.ai)，**与国内站同协议**（同一套 `/v2/chat/completions`、`/v3/config`、`/v2/plugin/auth/*`、`/v2/billing/*` 路径，同一 Keycloak realm），但**是两套独立账号体系**：各自注册、各自计费，故作为**独立渠道**存在。登录链路与国内版完全一致（设备码，Token 不经过浏览器）。
 
@@ -312,7 +312,7 @@ claude
 
 **鉴权**：`x-api-key` 与 `Authorization: Bearer` 都接受。**流式**：`message_start` → `content_block_start/delta/stop` → `message_delta`（含 `stop_reason` 与 usage）→ `message_stop`；无 `[DONE]` 哨兵，thinking 块在 `content_block_stop` 前补 `signature_delta`。**缓存命中**：出口 usage 按 Anthropic 语义拆两笔——`input_tokens` 只计未命中，命中另记 `cache_read_input_tokens`（内部 `input_tokens` 是 OpenAI 口径的 `prompt_tokens`，含命中），Claude Code 据此显示缓存读 token。**`count_tokens`**：`POST /v1/messages/count_tokens` 本地估算输入 token（不转发上游）。**图片**：`image` 块（`source.type=base64` 拼成 `data:` URL、`source.type=url` 直传）归一为 chat 的 `image_url` 内容块，`tool_result.content` 内的图片同样保留——纯文本内容仍折成字符串，故无图请求的映射结果与旧版逐字节一致。**不支持**：`document` 块（PDF，chat 上游无对应表达）、`source.type=file`、Anthropic 服务端工具一律显式 400。
 
-**`cache_control` 透传**（默认开启，无开关）：入站的缓存提示标记原样带给上游，落点与 Anthropic 一致——`system` 内容块、user/assistant 消息内容块、`tool_result`（挂 tool 消息**顶层**，不造空 text 块）、assistant `tool_calls` 元素顶层、`tools` 元素顶层。只做**结构**校验（必须是对象、必须有非空字符串 `type`、`ttl` 若给必须是字符串），取值不解释（未知 `type` 也透传，上游将来新增的缓存类型不该被本网关挡掉）；结构不合法显式 400 而不是静默丢弃。**不带标记时映射结果与旧版逐字节一致**（纯文本仍折成字符串），故会话粘性指纹与上游前缀缓存不受影响。八渠道实测 6 个接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo）；**zen 未验证**（上游返 `FreeTierError` 403，`--plain` 对照同样失败，与标记无关）、**officeAce 未验证**（账号未开通模型网关，拿不到可聊凭证）；实测脚本 `scripts/probe_cache_control.py`。
+**`cache_control` 透传**（默认开启，无开关）：入站的缓存提示标记原样带给上游，落点与 Anthropic 一致——`system` 内容块、user/assistant 消息内容块、`tool_result`（挂 tool 消息**顶层**，不造空 text 块）、assistant `tool_calls` 元素顶层、`tools` 元素顶层。只做**结构**校验（必须是对象、必须有非空字符串 `type`、`ttl` 若给必须是字符串），取值不解释（未知 `type` 也透传，上游将来新增的缓存类型不该被本网关挡掉）；结构不合法显式 400 而不是静默丢弃。**不带标记时映射结果与旧版逐字节一致**（纯文本仍折成字符串），故会话粘性指纹与上游前缀缓存不受影响。八渠道实测 6 个接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo）；**zen 未验证**（上游返 `FreeTierError` 403，`--plain` 对照同样失败，与标记无关）、**OfficeAce 未单独验证**（未跑该探针）；实测脚本 `scripts/probe_cache_control.py`。
 
 ### CC Switch 一键导入
 
@@ -383,7 +383,7 @@ claude
 
 凭证列表行内菜单的「暂停」把该凭证摘出**对话流量**，并让**每日签到 / token 预刷新**跳过它（这两类任务对 `disabled` 与 `enabled=0` 一视同仁）。其余后台任务（额度探测、成长中心、活跃上报）仍照常运行（只认系统硬禁用 `disabled`），适合「先不接聊天、但积分继续领」；「取消暂停」立即放回池子。与状态列的「已禁用」不同——那是渠道判定会话失效后的系统禁用，需重新登录后用「恢复」解除。同一开关也在 `POST /api/credentials/{id}/toggle`。
 
-> OpenCode Zen / Kilo Gateway 是无凭证渠道，池里是一条虚拟占位行。**暂停它是永久停用的唯一方式**——删除后下次重启会被种子重新补上。暂停也会把该渠道从模型列表摘掉。
+> OpenCode Zen / Kilo 是无凭证渠道，池里是一条虚拟占位行。**暂停它是永久停用的唯一方式**——删除后下次重启会被种子重新补上。暂停也会把该渠道从模型列表摘掉。
 
 ## 凭证批量运维
 
@@ -440,7 +440,7 @@ claude
 
 `GET /v1/models` 与 Playground 的模型下拉只合并**当前有可用凭证**的渠道：该渠道至少有一条**未暂停、未会话失效**的记录。判定在缓存之前——没凭证的渠道不读缓存、不拉上游、不展示，故**从未接入**的渠道不出现「幽灵模型」；**全部暂停 / 凭证失效**时其模型暂时消失，恢复或补一条凭证后立刻回来；冷启动默认只有 `zen` / `kilo`（自带虚拟凭证）。冷却中的凭证仍算「有凭证」——只是暂时限流，列表不闪没。
 
-**展示顺序**：CodeBuddy、TRAE、Qoder、CodeArts、officeAce 的模型依次排在前面，组内按模型名字典序；多渠道模型按最高优先级渠道归位。纯展示排序，不改变调度选号。
+**展示顺序**：CodeBuddy、TRAE、Qoder、CodeArts、OfficeAce 的模型依次排在前面，组内按模型名字典序；多渠道模型按最高优先级渠道归位。纯展示排序，不改变调度选号。
 
 **请求路由只认这份模型缓存列表**：模型目录能证明某模型归属哪些渠道时，候选渠道就只有它们——登记了该模型的渠道全部不可用（都在冷却 / 都被暂停）时直接返回 503，不再把请求逐个渠道试过去（各上游只会回 11102 / 4001 / 401，还会给渠道写下数小时的「该后端无此模型」负缓存）。模型完全不在目录里时仍按全部候选渠道路由；直连指定（`模型@渠道`）与 Key 渠道绑定不受影响。
 
@@ -580,7 +580,7 @@ OpenRouter 收录数百条，其中多数本服务没接。每行带 `available`
 
 ### 活跃上报（可选，默认关闭）
 
-CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端对话事件，账号长期只被本网关自动调用时会断连登。`ACTIVITY_REPORT_ENABLED=true` 时，后台任务在每天 `ACTIVITY_REPORT_HOUR`（默认 10 点）所在整点窗口为每个账号补发**一条** `chat_request_send` 事件续上连登——与积分、调度无关，上报失败不影响聊天请求。凭证行内菜单也可手动补报一次。适用于 CodeBuddy 与 CodeBuddy 国际版。
+CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端对话事件，账号长期只被本网关自动调用时会断连登。`ACTIVITY_REPORT_ENABLED=true` 时，后台任务在每天 `ACTIVITY_REPORT_HOUR`（默认 10 点）所在整点窗口为每个账号补发**一条** `chat_request_send` 事件续上连登——与积分、调度无关，上报失败不影响聊天请求。凭证行内菜单也可手动补报一次。适用于 CodeBuddy 与 CodeBuddy 国际。
 
 > ⚠️ **风险与限制**：官方活动条款禁止用模拟器 / 脚本篡改活动数据，处罚为**取消资格并追回已发礼品**。默认关闭，开启前请自行评估账号风险。事件名与请求形状依赖上游实现，**上游改版即失效**，不承诺任何收益，不作为可靠性功能。实测（2026-09-21）：缺少 `userId` 时上游返回 HTTP 200 `{"code":0}` 却**静默丢弃**；OAuth 凭证的 `user_id`/`account_uid` 可能为空，此时回落取 bearer JWT 的 `sub`，仍缺失则跳过（不编造）。
 
@@ -647,7 +647,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `USD_CNY_RATE` | `6.70` | 成本估算的美元兑人民币汇率；可热更，只影响之后写入的请求 |
 | `GROWTH_INTERVAL_MINUTES` | `60` | 成长中心（仅 CodeBuddy）一轮领取的周期（下限 5 分钟） |
 | `GROWTH_IRREVERSIBLE_ACTIONS` | `true` | 是否允许成长中心的不可逆动作：抽奖、连登兑换、开盲盒、消耗补登卡 |
-| `ACTIVITY_REPORT_ENABLED` | `false` | 活跃上报（CodeBuddy 与国际版）：每天为账号补发一条对话事件续连登。**默认关闭**——条款禁止篡改活动数据，上游改版即失效 |
+| `ACTIVITY_REPORT_ENABLED` | `false` | 活跃上报（CodeBuddy 与国际）：每天为账号补发一条对话事件续连登。**默认关闭**——条款禁止篡改活动数据，上游改版即失效 |
 | `ACTIVITY_REPORT_HOUR` | `10` | 活跃上报的本地（北京）时间整点窗口；仅在开关开启时生效 |
 | `CHECKIN_TIMES` | `""` | 每日签到执行时点：本地时间 `HH:MM`，逗号分隔（如 `09:37,21:10`）。命中时点才跑一轮；**留空 = 全天每 10 分钟检查一次**（旧行为，升级后不做任何配置也不变节奏）。坏段忽略并记 warning，全是坏段等同留空。上游签到幂等，多设几个时点只是多几次重试机会。配了时点后循环改为**每 60 秒**醒一次（否则抖动=0 时窗只有一分钟，必然整天漏签）。可热更 |
 | `CHECKIN_JITTER_MINUTES` | `0` | 签到抖动（分钟）：在时点**之前**提前一个 `0..N` 的随机偏移执行，把多部署摊开、避免同一分钟齐打上游。按「日期 + 时点」记去重键，抖动只改执行时刻，不会让同一时点跑两次。`0` = 不抖。可热更 |
@@ -684,24 +684,24 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | 监听地址与端口（compose 默认 `0.0.0.0`）。compose 里 `PORT` 同时决定**容器内监听端口与宿主机映射端口**（两侧一致，改一个即可） |
 | `CODEBUDDY_API_ENDPOINT` | `https://copilot.tencent.com` | CodeBuddy 上游地址；改动时必须同时加入 `CODEBUDDY_ALLOWED_ENDPOINTS` |
 | `CODEBUDDY_ALLOWED_ENDPOINTS` | 官方两站（见 compose） | 上游端点白名单，真实 Token 只发往白名单内地址 |
-| `CODEBUDDY_INTL_API_ENDPOINT` | `https://www.codebuddy.ai` | CodeBuddy 国际版上游地址；改动时必须同时加入 `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` |
-| `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` | `https://www.codebuddy.ai` | 国际版白名单，**刻意不含**国内站主机（跨站发送即凭证泄露，填错启动失败） |
+| `CODEBUDDY_INTL_API_ENDPOINT` | `https://www.codebuddy.ai` | CodeBuddy 国际上游地址；改动时必须同时加入 `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` |
+| `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` | `https://www.codebuddy.ai` | 国际站白名单，**刻意不含**国内站主机（跨站发送即凭证泄露，填错启动失败） |
 | `ZEN_API_ENDPOINT` | `https://opencode.ai` | OpenCode Zen 上游地址；改动时必须同时加入 `ZEN_ALLOWED_ENDPOINTS` |
 | `ZEN_ALLOWED_ENDPOINTS` | `https://opencode.ai` | Zen 端点白名单 |
 | `ZEN_OPENCODE_VERSION` | `1.18.0` | 门禁伪装用的 `opencode/<version>` UA 版本（低于阈值会被 426 拒绝） |
-| `KILO_API_ENDPOINT` | `https://api.kilo.ai/api/gateway` | Kilo Gateway 上游地址；改动时必须同时加入 `KILO_ALLOWED_ENDPOINTS` |
+| `KILO_API_ENDPOINT` | `https://api.kilo.ai/api/gateway` | Kilo 上游地址；改动时必须同时加入 `KILO_ALLOWED_ENDPOINTS` |
 | `KILO_ALLOWED_ENDPOINTS` | `https://api.kilo.ai/api/gateway` | Kilo 端点白名单 |
-| `QODER_API_ENDPOINT` | `https://openapi.qoder.com.cn` | Qoder openapi 地址（额度/登录）；国际版设为 `https://openapi.qoder.sh` |
-| `QODER_GATEWAY_ENDPOINT` | `https://gateway.qoder.com.cn` | Qoder 推理网关地址（聊天/模型发现）；国际版设为 `https://api1.qoder.sh` |
-| `QODER_ALLOWED_ENDPOINTS` | 国内 openapi+gateway + 国际版（见 compose） | Qoder 端点白名单，带 COSY 签名的请求只发往白名单内地址 |
+| `QODER_API_ENDPOINT` | `https://openapi.qoder.com.cn` | Qoder openapi 地址（额度/登录）；国际站设为 `https://openapi.qoder.sh` |
+| `QODER_GATEWAY_ENDPOINT` | `https://gateway.qoder.com.cn` | Qoder 推理网关地址（聊天/模型发现）；国际站设为 `https://api1.qoder.sh` |
+| `QODER_ALLOWED_ENDPOINTS` | 国内 openapi+gateway + 国际站（见 compose） | Qoder 端点白名单，带 COSY 签名的请求只发往白名单内地址 |
 | `CODEARTS_API_ENDPOINT` | `https://snap-access.cn-north-4.myhuaweicloud.com` | CodeArts snap 引擎地址；改动时必须同时加入 `CODEARTS_ALLOWED_ENDPOINTS` |
 | `CODEARTS_ALLOWED_ENDPOINTS` | snap 引擎 + STS + 福利网关 + 门户（见 compose） | CodeArts 端点白名单，AK/SK 签名请求只发往白名单内地址 |
-| `OFFICEACE_API_ENDPOINT` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | officeAce 控制面地址（OAuth / 开通校验）；改动时必须同时加入 `OFFICEACE_ALLOWED_ENDPOINTS` |
-| `OFFICEACE_ALLOWED_ENDPOINTS` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | officeAce 端点白名单。**只需控制面**：模型网关每账号不同，由上游下发并存在凭证里 |
-| `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | officeAce 聊天最小间隔（秒），独立节流器；`0` 关闭 |
+| `OFFICEACE_API_ENDPOINT` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | OfficeAce 控制面地址（OAuth / 开通校验）；改动时必须同时加入 `OFFICEACE_ALLOWED_ENDPOINTS` |
+| `OFFICEACE_ALLOWED_ENDPOINTS` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | OfficeAce 端点白名单。**只需控制面**：模型网关每账号不同，由上游下发并存在凭证里 |
+| `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | OfficeAce 聊天最小间隔（秒），独立节流器；`0` 关闭 |
 | `PROVIDER_PROXIES` | `""` | **按渠道出站代理**（启动期项，改后需重启）；留空 = 全部直连。容器内 `127.0.0.1` 指容器自身，代理跑在宿主时须写 `host.docker.internal` |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB 聊天节流器最小间隔（秒）：按凭证分桶、**桶内允许并发**，只在同凭证顺序连发时补足间隔；`0` 关闭 |
-| `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB 国际版聊天最小间隔（秒），**独立**节流器；`0` 关闭 |
+| `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB 国际聊天最小间隔（秒），**独立**节流器；`0` 关闭 |
 | `ZEN_CHAT_MIN_INTERVAL` | `0` | Zen 聊天最小间隔（秒），独立节流器，默认关闭 |
 | `KILO_CHAT_MIN_INTERVAL` | `0` | Kilo 聊天最小间隔（秒），独立节流器，默认关闭 |
 | `QODER_CHAT_MIN_INTERVAL` | `5` | Qoder 聊天最小间隔（秒），独立节流器；`0` 关闭 |

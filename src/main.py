@@ -274,7 +274,7 @@ def _seed_zen_credential(credentials: CredentialRepository) -> None:
 
 def _seed_kilo_credential(credentials: CredentialRepository) -> None:
     """确保池里有一条 kilo 虚拟凭证（幂等）。"""
-    _seed_free_credential(credentials, provider="kilo", nickname="Kilo Gateway")
+    _seed_free_credential(credentials, provider="kilo", nickname="Kilo")
 
 
 def _similar_models(name: str, aliases: dict[str, dict[str, str]],

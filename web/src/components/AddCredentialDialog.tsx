@@ -175,7 +175,7 @@ export function AddCredentialDialog({
           }
         } catch (caught) {
           stopPolling(provider);
-          // 轮询失败多半是上游给的可行动原因（如「这个账号还没开通 officeAce」），
+          // 轮询失败多半是上游给的可行动原因（如「这个账号还没开通 OfficeAce」），
           // 兜底文案会把它抹掉，用户只会看到「失败」而不知道该去做什么。
           onError(caught instanceof Error && caught.message
             ? caught.message
@@ -352,7 +352,7 @@ export function AddCredentialDialog({
               （授权后由 <code>/authorize</code> 直接落库，本对话框轮询凭证列表，
               期间勿关闭对话框）；Qoder 走设备码登录；CodeArts 走 OAuth2 授权码登录
               （授权后把地址栏打不开的 127.0.0.1 回调链接粘回本对话框）；
-              officeAce 由云端承接回调（本对话框轮询，多账号请用「换账号」）。
+              OfficeAce 由云端承接回调（本对话框轮询，多账号请用「换账号」）。
             </p>
             {pasteProvider && (
               <div className="space-y-2" data-testid="paste-callback">
@@ -388,7 +388,7 @@ export function AddCredentialDialog({
             )}
             <div className="border-t border-border pt-3">
               <div className="mb-2 text-xs text-muted-foreground">
-                OpenCode Zen / Kilo Gateway 免费层无需凭证/登录，删除其虚拟凭证后点下方按钮补回
+                OpenCode Zen / Kilo 免费层无需凭证/登录，删除其虚拟凭证后点下方按钮补回
                 （永久停用请改用「暂停」）。
               </div>
               <div className="flex flex-wrap gap-2">
@@ -419,8 +419,8 @@ export function AddCredentialDialog({
                   onClick={async () => {
                     setBusy(true);
                     try {
-                      await api.importCredential("kilo", {}, "Kilo Gateway");
-                      onImported("已添加 Kilo Gateway 免费渠道");
+                      await api.importCredential("kilo", {}, "Kilo");
+                      onImported("已添加 Kilo 免费渠道");
                     } catch (caught) {
                       onError(caught instanceof Error ? caught.message : "添加失败");
                     } finally {
@@ -428,7 +428,7 @@ export function AddCredentialDialog({
                     }
                   }}
                 >
-                  {hasKilo ? "Kilo Gateway 已添加" : "添加 Kilo Gateway"}
+                  {hasKilo ? "Kilo 已添加" : "添加 Kilo"}
                 </Button>
               </div>
             </div>

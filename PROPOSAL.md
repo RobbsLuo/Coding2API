@@ -1,6 +1,6 @@
 # Coding2API 设计文档
 
-把 **CodeBuddy**（国内站 `codebuddy` + 国际版 `codebuddy_intl`）、**TRAE SOLO**、**OpenCode Zen**、**Kilo Gateway**、**Qoder**、**CodeArts**、**officeAce** 八个上游渠道封装为 OpenAI 兼容 API，提供公共凭证池、统一模型名与调度、按人用量统计。
+把 **CodeBuddy**（国内站 `codebuddy` + 国际版 `codebuddy_intl`）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce** 八个上游渠道封装为 OpenAI 兼容 API，提供公共凭证池、统一模型名与调度、按人用量统计。
 
 > 现状文档：只记录仍然成立的目标、上游事实、架构与约束。实现细节见 [TECHNICAL.md](TECHNICAL.md)，使用与部署见 [README.md](README.md)。
 
@@ -52,12 +52,12 @@
 - **免费模型清单完全动态**：免鉴权 `/zen/v1/models` 返回全部模型（含付费）且不带免费标记，唯一权威信号是匿名可用性（付费恒 401 `Missing API key.`），按 `-free` 后缀收窄 + 并发探活只留 2xx，判活按 30 分钟缓存；免费模型标 **x0 倍率**（`credit_rate=0.0`）。服务层列表拉取**连续失败按 2^(n-1)×TTL 退避重试**（封顶 2h、成功即清零），日志首次 WARNING 其后降 INFO——上游按出口 IP 长期拦截时不至每 5 分钟重探十几秒再刷一条同样的告警。
 - **凭证用虚拟凭证行**：无凭证/无额度接口，`probe_quota` 恒 `probe_failed=True` → health「未知」而非耗尽；删除后重启复活，永久停用请用「暂停」。401 归 `INVALID`；**403 FreeTierError 抖动在客户端内退避重试一次**，否则单虚拟凭证下 REQUEST 类错误会耗尽轮换预算、直接 503。
 
-### 2.6 Kilo Gateway（`kilo`，虚拟凭证）
+### 2.6 Kilo（`kilo`，虚拟凭证）
 
 - 端点 `https://api.kilo.ai/api/gateway`，`/chat/completions` + `/models`。**标准 OpenAI 兼容**，无私有信封、无门禁伪装。**免费模型有权威标记**：`/models` 每条带 `isFree` 布尔，据此直接过滤、**不做探活**（探活会真发推理、白耗网关级约 200 req/h/IP 的极小配额）；免费模型标 **x0 倍率**。思考字段是 **`delta.reasoning`**（不是 Zen 的 `reasoning_content`）。凭证用虚拟凭证行（同 Zen）。
 - 错误分类：401→`INVALID`、400/404/422→`INVALID`、403→`REQUEST`、**429 与 502/503/504→`MODEL`（模型级冷却）**——实测 429/5xx 点名具体模型、同批其他免费模型仍 200，归账号级会因单模型问题冷却整条渠道；本包不自建熔断。
 
-### 2.7 CodeBuddy 国际版（`codebuddy_intl`）
+### 2.7 CodeBuddy 国际（`codebuddy_intl`）
 
 - 端点 `https://www.codebuddy.ai`。**与国内站同协议**（同一套 `/v2/chat/completions`、`/v3/config`、`/v2/plugin/auth/*`、`/v2/billing/*` 路径，同一 Keycloak realm），但是**两套独立账号体系**（各自注册、各自计费），故作为独立渠道存在。**为什么不是「改环境变量切站点」**：`CODEBUDDY_API_ENDPOINT` 是进程级单值，切过去会让所有存量国内站凭证立刻打到国际站（额度错配 / 403）；两站可同时持有凭证，各走各的端点、节流器与登录流程。
 - **白名单刻意互不含**：`CODEBUDDY_INTL_ALLOWED_ENDPOINTS` 默认只有国际站主机，**不含**国内站主机。两站 Token 由不同网关签发，跨站发送即凭证泄露，填错会在**启动时**报错。
@@ -65,7 +65,7 @@
 - **模型列表按套餐探活**：上游 `/v3/config` 返回全量模型，免费号也会看到 `gpt-5.5` / `gpt-5.6-luna` 等调用时才回 `400 / 11158` 的模型。国际站列表用当前刷新凭证逐个发一次最小请求（只读状态行即断开），只保留可用模型；`11158`（套餐不允许）与 `11102`（无此模型）剔除，`429` / 5xx / 超时等不确定结果**保留模型**。结论按账号缓存 6 小时。
 - **唯一协议行为差异：首条 system 强制注入**——国际站网关要求 `messages[0]` 是 system，否则整单 400 + `{"code":11128,"msg":"first message is not system prompt"}`；国内站无此要求。同名模型在两站是**一条**、同时挂两个渠道。
 
-### 2.8 officeAce（`officeace`，真实账号）
+### 2.8 OfficeAce（`officeace`，真实账号）
 
 - 端点：控制面 `https://agentarts.cn-southwest-2.myhuaweicloud.com`（OAuth + 开通校验），模型网关 `modelgw-XXXX.officeace.*` **每账号一个**、由 `client-permission-validate` 下发并存在凭证里——故它不进配置、也不进白名单（那是本服务写不错的值）。
 - **两套凭据、两套签名、两种寿命**（本渠道最容易踩错的地方）：
@@ -90,8 +90,8 @@
 | 模型 ID 撞车 | 多渠道都有 `glm-5.2`、`DeepSeek-V4-Pro`、`kimi-k3` 等 | 扁平名 + 归一键合并 + 健康度路由 + `@渠道` 后缀 |
 | 积分语义不同 | CB/Qoder/CodeArts 有周期会重置；TRAE 各权益包独立到期 | 健康分统一为百分比；展示层标注周期语义 |
 | credit 可得性 | CB 有 per-request；TRAE 只有账户总额 | 统计表 credit 可空；TRAE 按官方单价、CodeArts 福利模型按每日池 1:1 推算并标 `credit_estimated` |
-| 登录机制 | CB/Qoder/CodeArts/officeAce 轮询或粘贴（后端出网）；TRAE 浏览器回调 | 三轨（poll / callback / paste），回调统一走主端口 |
-| 同一厂商两套票 | officeAce 与 CodeArts 同属华为云 STS，但 client_id 不同，refresh_token 互不通用（混用回 `STS5.1806`） | 各自独立实现 OAuth 与凭证类型，只复用 DPoP 签名原语 |
+| 登录机制 | CB/Qoder/CodeArts/OfficeAce 轮询或粘贴（后端出网）；TRAE 浏览器回调 | 三轨（poll / callback / paste），回调统一走主端口 |
+| 同一厂商两套票 | OfficeAce 与 CodeArts 同属华为云 STS，但 client_id 不同，refresh_token 互不通用（混用回 `STS5.1806`） | 各自独立实现 OAuth 与凭证类型，只复用 DPoP 签名原语 |
 | 上游 SSE 格式变更 | 各渠道 SSE 形状不同 | 各渠道解析成中立事件；样本存 fixture 做契约测试 |
 | 图片能力标志不可信 | 八渠道出站均为 OpenAI `image_url` 内容块原样透传，上游全部接受（实测 2026-10-15）；而模型目录的 `supportsImages` 与实际行为不一致（CB `glm-5.0` 标 false 却能识图；`hunyuan-chat` 标 false 却接受并自行降级） | 入站统一归一为 `image_url` 透传，**不做模型能力门禁**，能否识图交上游裁决 |
 

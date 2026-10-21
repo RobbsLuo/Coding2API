@@ -96,7 +96,7 @@ describe("AddCredentialDialog", () => {
       if (url.includes("/upstream/poll")) {
         return jsonResponse({ error: {
           code: "upstream_error",
-          message: "这个账号还没开通 officeAce 服务。请先在 OfficeAce 客户端里登录并兑换邀请码完成开通，再回来重新登录。",
+          message: "这个账号还没开通 OfficeAce 服务。请先在 OfficeAce 客户端里登录并兑换邀请码完成开通，再回来重新登录。",
         } }, 400);
       }
       return jsonResponse({ credentials: [], viewer: "root", is_admin: true });
@@ -107,11 +107,11 @@ describe("AddCredentialDialog", () => {
     await vi.advanceTimersByTimeAsync(2000);
 
     expect(props.onError).toHaveBeenCalledWith(
-      expect.stringContaining("还没开通 officeAce 服务"));
+      expect.stringContaining("还没开通 OfficeAce 服务"));
     vi.useRealTimers();
   });
 
-  it("officeAce「换账号」带着 force_login 发起登录", async () => {
+  it("OfficeAce「换账号」带着 force_login 发起登录", async () => {
     const bodies: unknown[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);

@@ -62,7 +62,7 @@ describe("渠道登录入口", () => {
     expect(screen.getByTestId("checkin-qd")).toBeInTheDocument();
   });
 
-  it("CodeBuddy 国际版无签到活动：探测保留、签到入口隐藏", async () => {
+  it("CodeBuddy 国际无签到活动：探测保留、签到入口隐藏", async () => {
     // 上游 /billing/meter/checkin-activity-status 回 active:false 且活动
     // 字段全空（渠道侧无此活动，非账号级未开启），后端相应把 checkin* 置
     // None，签到按钮必须同步消失——否则就是一个必然失败的出口。
@@ -77,7 +77,7 @@ describe("渠道登录入口", () => {
     expect(screen.queryByTestId("checkin-ci")).not.toBeInTheDocument();
   });
 
-  it("CodeBuddy 国际版有活跃上报入口、无成长中心入口", async () => {
+  it("CodeBuddy 国际有活跃上报入口、无成长中心入口", async () => {
     // 后端 intl.py 只把 growth 置 None，activity 已恢复继承国内站实现
     // （/v2/report 实测可用），前端判定必须跟能力走：写死 codebuddy 会让
     // 国际版明明能跑却看不到菜单项。
@@ -348,7 +348,7 @@ describe("渠道登录入口", () => {
     expect(screen.queryByTestId("checkin-z")).not.toBeInTheDocument();
   });
 
-  it("管理员可一键补回 Kilo Gateway（删除后渠道不丢）", async () => {
+  it("管理员可一键补回 Kilo（删除后渠道不丢）", async () => {
     const spy = mockFetch({
       "/api/credentials": listBody([makeCredential({ id: "cb", provider: "codebuddy" })]),
     });
@@ -358,7 +358,7 @@ describe("渠道登录入口", () => {
     await openAddDialog();
 
     const button = screen.getByTestId("add-kilo");
-    expect(button).toHaveTextContent("添加 Kilo Gateway");
+    expect(button).toHaveTextContent("添加 Kilo");
     expect(button).not.toBeDisabled();
 
     await userEvent.click(button);
@@ -371,10 +371,10 @@ describe("渠道登录入口", () => {
       expect(String(posted?.[1]?.body)).toContain('"kilo"');
     });
     expect(await screen.findByTestId("credentials-notice"))
-      .toHaveTextContent("已添加 Kilo Gateway");
+      .toHaveTextContent("已添加 Kilo");
   });
 
-  it("已有 Kilo Gateway 凭证时按钮禁用，避免重复占位", async () => {
+  it("已有 Kilo 凭证时按钮禁用，避免重复占位", async () => {
     mockFetch({
       "/api/credentials": listBody([makeCredential({ id: "k", provider: "kilo" })]),
     });
@@ -385,7 +385,7 @@ describe("渠道登录入口", () => {
 
     const button = screen.getByTestId("add-kilo");
     expect(button).toBeDisabled();
-    expect(button).toHaveTextContent("Kilo Gateway 已添加");
+    expect(button).toHaveTextContent("Kilo 已添加");
     expect(screen.queryByTestId("credits-k")).not.toBeInTheDocument();
     expect(screen.queryByTestId("probe-k")).not.toBeInTheDocument();
     expect(screen.queryByTestId("checkin-k")).not.toBeInTheDocument();

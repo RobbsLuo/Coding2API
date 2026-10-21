@@ -9,13 +9,13 @@ import type { Provider } from "./types";
  */
 export const PROVIDER_LABEL: Record<Provider, string> = {
   codebuddy: "CodeBuddy",
-  codebuddy_intl: "CodeBuddy 国际版",
+  codebuddy_intl: "CodeBuddy 国际",
   trae: "TRAE",
   zen: "OpenCode Zen",
-  kilo: "Kilo Gateway",
+  kilo: "Kilo",
   qoder: "Qoder",
   codearts: "CodeArts",
-  officeace: "officeAce",
+  officeace: "OfficeAce",
 };
 
 /** 模型下拉里的渠道缩写（如 `CB x0.29`）。 */
