@@ -231,6 +231,22 @@ export function formatTime(epoch: number | null | undefined): string {
 }
 
 /**
+ * 时间拆成「日期 / 时刻」两段：明细表把两行摞起来显示，窄屏也不折行。
+ *
+ * 与 `formatTime` 同一时区口径（浏览器本地时间），只是不带上 `toLocaleString`
+ * 的逗号与斜杠，方便对齐等宽字体。
+ */
+export function formatTimeParts(epoch: number | null | undefined): [string, string] {
+  if (!epoch) return ["—", ""];
+  const at = new Date(epoch * 1000);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return [
+    `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`,
+    `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`,
+  ];
+}
+
+/**
  * 相对时间（「刚刚 / 12 分钟前 / 3 小时后」），后台任务运行态用。
  *
  * `now` 默认取浏览器时钟；调用方传服务端时钟可避免浏览器偏移把刚跑完的
@@ -384,6 +400,25 @@ export function formatSpeed(tps: number | null | undefined, estimated = false): 
   if (tps === null || tps === undefined) return "—";
   const text = `${tps.toFixed(1)} tok/s`;
   return estimated ? `≈${text}` : text;
+}
+
+/**
+ * 速度合并列（分组表与请求明细表共用）：`正文 / 总产出`，单位只在末尾出现一次。
+ *
+ * 两个分子同分母（生成时间），正文贴合屏幕刷新速度、总产出含思考 token，故
+ * 并成一列展示（列头下拉仍可分别排序）；悬停详情里写全各自的口径。任一侧
+ * 无样本时该侧显示 —（正文侧还可能是「整段输出都是思考」），两侧都没有时整格
+ * 就是一个 —，不渲染 `— / —`。
+ */
+export function formatSpeedPair(
+  visible: number | null | undefined,
+  total: number | null | undefined,
+  estimated = false,
+): string {
+  if (visible == null && total == null) return "—";
+  const one = (value: number | null | undefined) =>
+    value == null ? "—" : value.toFixed(1);
+  return `${estimated ? "≈" : ""}${one(visible)} / ${one(total)} tok/s`;
 }
 
 /** 图表 hover 数值：按指标格式化，单位用 () 包裹（耗时/首字数已含 ms/s）。 */

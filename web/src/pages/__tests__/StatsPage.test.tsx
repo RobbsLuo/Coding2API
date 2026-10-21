@@ -41,6 +41,10 @@ describe("StatsPage", () => {
     expect(screen.getByText(/输入 1000（命中 400 · 未命中 600） · 输出 2000 · 推理 300 · 缓存命中率 40.0%/))
       .toBeInTheDocument();
     expect(screen.getByText(/首字延迟 220 ms/)).toBeInTheDocument();
+    // 输出速度卡片：正文 token ÷ 生成时间总和（非逐条平均），总产出在 hint 里
+    const speedCard = screen.getByText("输出速度").closest("[data-slot=card]")!;
+    expect(speedCard).toHaveTextContent("52.0 tok/s");
+    expect(speedCard).toHaveTextContent("总产出（含思考）94.1 tok/s");
     expect(screen.getByTestId("group-table")).toHaveTextContent("CodeBuddy");
     expect(screen.getByTestId("group-table")).toHaveTextContent("TRAE");
   });
@@ -184,6 +188,9 @@ describe("StatsPage", () => {
         avg_latency_ms: null,
         avg_ttfb_ms: null,
         cached_tokens: null,
+        tps: null,
+        tps_visible: null,
+        tps_estimated: false,
       },
       "/api/stats/by-provider": { providers: [] },
       "/api/stats/by-model": { models: [] },
@@ -196,6 +203,10 @@ describe("StatsPage", () => {
     await settle();
     expect(screen.getByText("请求数").closest("[data-slot=card]")).toHaveTextContent("成功率 —");
     expect(screen.getByText("平均耗时").closest("[data-slot=card]")).toHaveTextContent("首字延迟 —");
+    // 速度无样本：显示 —，并在 hint 里说明「为什么没有」而不是留白
+    const speedCard = screen.getByText("输出速度").closest("[data-slot=card]")!;
+    expect(speedCard).toHaveTextContent("—");
+    expect(speedCard).toHaveTextContent("没有可用的生成时间样本");
     expect(screen.getByTestId("no-group-stats")).toBeInTheDocument();
     expect(screen.getByTestId("no-model-trend")).toBeInTheDocument();
   });
@@ -319,6 +330,31 @@ describe("StatsPage", () => {
     expect(failedRow).toHaveTextContent("— / — · —");
   });
 
+  it("请求明细：速度合并列显示 正文/总产出，不可测的请求显示 —", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": EVENTS_PAGE1,
+    });
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    const table = screen.getByTestId("events-table");
+    expect(within(table).getByText("速度")).toBeInTheDocument();
+    // 成功行：后端算好的 正文 51.2 / 总产出 82.8 tok/s；悬停展开口径
+    const okRow = within(table).getByText("glm-5.2").closest("tr")!;
+    expect(okRow).toHaveTextContent("51.2 / 82.8 tok/s");
+    await userEvent.hover(within(okRow).getByText("51.2 / 82.8 tok/s"));
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("总产出（含思考）82.8 tok/s");
+    // 失败行没有输出 → 生成窗口不可测，整格 —
+    const failedRow = within(table).getByText("额度耗尽").closest("tr")!;
+    expect(failedRow).toHaveTextContent("—");
+  });
+
   it("请求明细：推算 credit 标 ≈，真实 credit 不标", async () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
@@ -369,7 +405,9 @@ describe("StatsPage", () => {
 
     const table = screen.getByTestId("events-table");
     expect(within(table).getByText("用户")).toBeInTheDocument();
-    expect(within(table).getByText("凭证")).toBeInTheDocument();
+    // 渠道 / 凭证已合并成一列：表头写明两列，凭证名进同一格的主行
+    expect(within(table).getByText("渠道 / 凭证")).toBeInTheDocument();
+    expect(within(table).queryByText("凭证")).not.toBeInTheDocument();
     expect(within(table).getByText("主账号")).toBeInTheDocument();
     expect(within(table).getByText("glm-5.2")).toBeInTheDocument();
     expect(within(table).getByText("成功")).toBeInTheDocument();
@@ -382,6 +420,46 @@ describe("StatsPage", () => {
     expect(failRow).toHaveTextContent("460 ms / 120 ms");
     expect(screen.getByTestId("events-prev")).toBeDisabled();
     expect(screen.getByTestId("events-next")).toBeEnabled();
+  });
+
+  it("请求明细：时间拆成时刻 / 日期两行（时刻优先），渠道与凭证合并成一列（凭证优先）", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": EVENTS_PAGE1,
+    });
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    const table = screen.getByTestId("events-table");
+    const okRow = within(table).getByText("glm-5.2").closest("tr")!;
+
+    // 时间格：第一行是具体时刻（正常色），第二行是日期（次要色）
+    const timeCellEl = okRow.querySelector("[data-label='时间']")!;
+    const [clockEl, dateEl] = Array.from(timeCellEl.children) as HTMLElement[];
+    expect(clockEl.className).toContain("block");
+    expect(clockEl.textContent).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    expect(clockEl.className).not.toContain("muted-foreground");
+    expect(dateEl.textContent).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(dateEl.className).toContain("text-muted-foreground");
+
+    // 渠道 / 凭证：只有一列，凭证在主行、渠道（icon + 名）在副行，完整凭证 ID 落在 title
+    const sourceCellEl = okRow.querySelector("[data-label='渠道 / 凭证']")!;
+    const [credEl, providerEl] = Array.from(sourceCellEl.children) as HTMLElement[];
+    expect(credEl.textContent).toBe("主账号");
+    expect(credEl.className).not.toContain("muted-foreground");
+    expect(providerEl.textContent).toContain("CodeBuddy");
+    expect(providerEl.className).toContain("text-muted-foreground");
+    expect(sourceCellEl).toHaveAttribute("title", "cred_abc123");
+    expect(okRow.querySelector("[data-label='凭证']")).toBeNull();
+    // 合并后仍可分别按渠道 / 凭证排序
+    expect(screen.getByTestId("event-sort-source")).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("event-sort-source"));
+    expect(await screen.findByTestId("event-sort-source-credential")).toBeInTheDocument();
   });
 
   it("请求明细的时间单元格带请求 ID 提示（老库历史行无提示）", async () => {

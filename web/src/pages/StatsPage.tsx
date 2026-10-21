@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { Activity, BarChart3, Coins, CreditCard, Download, Gauge, Timer, Wallet, X } from "lucide-react";
+import { Activity, BarChart3, Coins, CreditCard, Download, Gauge, Timer, Wallet, X, Zap } from "lucide-react";
 import { useSessionContext } from "../Layout";
 import { useSort } from "../hooks/useSort";
 import {
@@ -13,7 +13,7 @@ import {
   useStatsOverview,
   useStatsTimeline,
 } from "../api/hooks";
-import { formatCacheRate, formatCompact, formatCredit, formatLatency, formatMoney, formatNumber, formatTime, usageErrorLabel } from "../api/display";
+import { formatCacheRate, formatCompact, formatCredit, formatLatency, formatMoney, formatNumber, formatSpeed, formatSpeedPair, formatTime, formatTimeParts, usageErrorLabel } from "../api/display";
 import { useStatsErrors } from "../api/statsErrors";
 import { ModelTrendChart } from "../components/ModelTrendChart";
 import { PageHeader } from "../components/PageHeader";
@@ -84,6 +84,17 @@ const TOKEN_COLUMNS = [
 const LATENCY_COLUMNS = [
   { key: "latency_ms", label: "耗时" },
   { key: "ttfb_ms", label: "首字" },
+] as const;
+
+/**
+ * 明细「渠道 / 凭证」合并列的子列：渠道 / 凭证。
+ *
+ * 单元格主行给凭证、副行给渠道（同渠道常挂多个账号，先认账号）；排序能力靠列头
+ * 下拉保留（两个子键都还在），故列头同时写明两列。
+ */
+const SOURCE_COLUMNS = [
+  { key: "provider", label: "渠道" },
+  { key: "credential", label: "凭证" },
 ] as const;
 
 /**
@@ -164,6 +175,47 @@ function credentialCellLabel(name: string | null | undefined, id: string | null 
   return name ?? (id ? id.slice(0, 12) : "—");
 }
 
+/**
+ * 明细时间列：时刻与日期摞成两行（`20:17:09` / `2026-10-21`）。
+ *
+ * **具体时刻优先**（第一行、正常色），日期降为第二行次要色：看明细时先关心
+ * 「几点几分」，日期只在跨天对比时才用得上。两行等宽数字各自纵向对齐，扫读更快，
+ * 也避免一行 `toLocaleString` 在窄屏把整行撑宽。
+ */
+function timeCell(row: UsageEventRow) {
+  const [date, clock] = formatTimeParts(row.ts);
+  return (
+    <TableCell label="时间" className="whitespace-nowrap tabular-nums leading-tight"
+               title={row.request_id ? `请求 ID：${row.request_id}` : undefined}>
+      <span className="block">{clock}</span>
+      <span className="block text-xs text-muted-foreground">{date}</span>
+    </TableCell>
+  );
+}
+
+/**
+ * 明细「渠道 / 凭证」合并列：凭证名一行（第一行、正常色），渠道 icon + 名称一行（次要色）。
+ *
+ * **凭证优先**：同渠道下往往挂着多个账号，出问题时先要认出是哪个账号；渠道由图标
+ * 一眼可辨，降为第二行次要色即可。两列都是「这条请求打在哪」，拆成两列时凭证列常
+ * 只有几个字白占宽度；合并后排序能力靠列头下拉保留（渠道 / 凭证两个子键），
+ * 完整凭证 ID 放 title。
+ */
+function sourceCell(row: UsageEventRow) {
+  return (
+    <TableCell label="渠道 / 凭证" className="max-w-48 truncate leading-tight"
+               title={row.credential_id ?? undefined}>
+      <span className="block truncate">
+        {credentialCellLabel(row.credential_name, row.credential_id)}
+      </span>
+      <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+        <ProviderIcon provider={row.provider} size={13} />
+        {providerLabel(row.provider)}
+      </span>
+    </TableCell>
+  );
+}
+
 /** 明细状态列：成功固定文案；失败展示受控错误类型的中文说明（脱敏，不含原始错误体）。 */
 function statusCell(row: UsageEventRow) {
   if (row.ok) {
@@ -201,6 +253,28 @@ function latencyCell(row: UsageEventRow) {
         {formatLatency(row.latency_ms)}
         <span className="text-muted-foreground"> / {formatLatency(row.ttfb_ms)}</span>
       </span>
+    </Tip>
+  );
+}
+
+/**
+ * 速度合并列的子列（分组表与明细表共用同一组排序键）：正文 / 总产出。
+ *
+ * 两列同分母（生成时间总和），分子不同——正文贴合屏幕刷新速度，总产出含思考
+ * token（思考成批快速吐出，数字明显更高），故并成一列 + 下拉选排序键。
+ */
+const SPEED_COLUMNS = [
+  { key: "tps_visible", label: "正文速度" },
+  { key: "tps", label: "总产出速度" },
+] as const;
+
+/** 明细速度单元格（分页明细表与实时表共用，保证两处同口径同文案）。 */
+function eventSpeedCell(row: UsageEventRow) {
+  return (
+    <Tip content={row.tps === null
+      ? "该请求的生成窗口不可测（无首字数据 / 没有输出 token / 生成窗口短于 200ms 或快得不合物理），不计算速度"
+      : `正文 ${formatSpeed(row.tps_visible)} · 总产出（含思考）${formatSpeed(row.tps)}`}>
+      <span className="tabular-nums">{formatSpeedPair(row.tps_visible, row.tps)}</span>
     </Tip>
   );
 }
@@ -500,7 +574,7 @@ export function StatsPage() {
 
       <section
         aria-label="用量概览统计"
-        className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-5"
+        className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6"
       >
         <Metric label="请求数" value={formatNumber(stats?.requests)} tone="ok"
                 hint={`成功率 ${rateText}`} icon={<Activity className="size-4" />} />
@@ -509,6 +583,14 @@ export function StatsPage() {
           value={formatCompact(totalTokens)}
           hint={tokenHint}
           icon={<Coins className="size-4" />}
+        />
+        <Metric
+          label="输出速度"
+          value={formatSpeed(stats?.tps_visible, stats?.tps_estimated)}
+          hint={stats?.tps === null
+            ? "该范围内没有可用的生成时间样本（需有输出 token 且生成窗口 ≥200ms），故不计算速度；换更长的时间范围再试"
+            : `正文 token ÷ 生成时间总和（非逐条平均）；总产出（含思考）${formatSpeed(stats?.tps, stats?.tps_estimated)}。≈ 为无首字数据时按端到端耗时估算（不设输出门槛），取自逐请求明细（仅 90 天）`}
+          icon={<Zap className="size-4" />}
         />
         <Metric
           label="平均耗时"
@@ -610,6 +692,13 @@ export function StatsPage() {
                 <SortMenuHead label="Token" options={[...GROUP_TOKEN_COLUMNS]}
                               activeKey={groupSort.sort} direction={groupSort.order}
                               onToggle={groupSort.toggle} testId="group-sort-token" />
+                {/* 速度合并列：正文 / 总产出（含思考）——同分母（生成时间总和，
+                    读明细、仅 90 天），分子不同：正文贴近屏幕上看到的刷新速度，
+                    总产出含思考 token（思考成批快速吐出，数字会明显更高）。无首字
+                    数据时回落估算并标 ≈。列头下拉可分别按两个分子排序。 */}
+                <SortMenuHead label="速度" options={[...SPEED_COLUMNS]}
+                              activeKey={groupSort.sort} direction={groupSort.order}
+                              onToggle={groupSort.toggle} testId="group-sort-speed" />
                 {/* 延迟两列：均值读小时汇总（与总览同口径），分位读明细表（仅 90 天）。
                     两套口径各自合并成一列，靠表尾说明与悬停文案区分。 */}
                 <SortMenuHead label="平均延迟" options={[...GROUP_AVG_LATENCY_COLUMNS]}
@@ -711,6 +800,17 @@ export function StatsPage() {
                       </span>
                     </Tip>
                   </TableCell>
+                  {/* 速度合并列：正文 / 总产出；无合格样本整格 —（估算口径前置 ≈）。
+                      正文为 0（整段输出都是思考）时正文侧显示 —，不拿 0 冒充速度。 */}
+                  <TableCell label="速度" className="text-right tabular-nums"
+                             data-testid="group-tps">
+                    <Tip content={row.tps === null && row.tps_visible === null
+                      ? "该组没有产出了 token 的成功请求，或生成窗口不可测，不计算速度"
+                      : `正文 ${formatSpeed(row.tps_visible, row.tps_estimated)}`
+                        + ` · 总产出（含思考）${formatSpeed(row.tps, row.tps_estimated)}`}>
+                      <span>{formatSpeedPair(row.tps_visible, row.tps, row.tps_estimated)}</span>
+                    </Tip>
+                  </TableCell>
                   {/* 延迟两列：均值与分位都只算成功请求；无成功请求显示 — */}
                   <TableCell label="平均延迟" className="text-right"
                              data-testid="group-avg-latency">
@@ -756,7 +856,12 @@ export function StatsPage() {
         <p className="mt-1 text-xs text-muted-foreground">
           延迟列只统计成功请求。平均耗时 / 平均首字取自小时汇总（与总览卡片同口径）；
           分位为第 P50/P90/P95/P99 百分位（向上取整名次，默认 P95），取自逐请求明细，
-          只覆盖最近 90 天。
+          只覆盖最近 90 天。速度列两个分子分母相同（生成时间总和，不是逐条平均），正文
+          token（output − reasoning）贴近屏幕上看到的刷新速度，总产出 token（含思考）
+          含思考成批吐出的部分；成功请求只要有产出就计入（不设输出量下限），并剔除生成
+          窗口 &lt;200ms 或单条 &gt;1000 tok/s 的样本——那是上游把内容攒成一批吐出、生成
+          时长根本不可测，不是「很快」。无首字数据时按端到端耗时估算（同样不设输出门槛，
+          分母含首字等待，前置 ≈），同样取自逐请求明细（仅 90 天）。
         </p>
       </Panel>
 
@@ -905,34 +1010,24 @@ export function StatsPage() {
                   <TableRow>
                     <TableHead>时间</TableHead>
                     {session.is_operator && <TableHead>用户</TableHead>}
-                    <TableHead>渠道</TableHead>
-                    <TableHead>凭证</TableHead>
+                    <TableHead>渠道 / 凭证</TableHead>
                     <TableHead>模型</TableHead>
                     <TableHead>状态</TableHead>
                     <TableHead className="text-right">Token</TableHead>
                     <TableHead className="text-right">Credit</TableHead>
                     <TableHead className="text-right">成本</TableHead>
                     <TableHead className="text-right">延迟</TableHead>
+                    <TableHead className="text-right">速度</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {liveRows.map((row) => (
                     <TableRow key={`live-${row.rowid}`} data-testid="live-row">
-                      <TableCell label="时间" className="whitespace-nowrap tabular-nums">
-                        {formatTime(row.ts)}
-                      </TableCell>
+                      {timeCell(row)}
                       {session.is_operator && (
                         <TableCell label="用户">{row.username}</TableCell>
                       )}
-                      <TableCell label="渠道">
-                        <span className="inline-flex items-center gap-1.5">
-                          <ProviderIcon provider={row.provider} size={13} />
-                          {providerLabel(row.provider)}
-                        </span>
-                      </TableCell>
-                      <TableCell label="凭证" className="max-w-40 truncate">
-                        {credentialCellLabel(row.credential_name, row.credential_id)}
-                      </TableCell>
+                      {sourceCell(row)}
                       <TableCell label="模型" className="max-w-48 truncate">
                         {row.model}
                       </TableCell>
@@ -946,6 +1041,9 @@ export function StatsPage() {
                       </TableCell>
                       <TableCell label="延迟" className="text-right">
                         {latencyCell(row)}
+                      </TableCell>
+                      <TableCell label="速度" className="text-right">
+                        {eventSpeedCell(row)}
                       </TableCell>
                     </TableRow>
                   ))}
@@ -974,14 +1072,12 @@ export function StatsPage() {
                                   direction={eventSort.order} onToggle={toggleEventSort}
                                   testId="event-sort-username" />
                   )}
-                  <SortableHead label="渠道" columnKey="provider"
-                                active={eventSort.sort === "provider"}
-                                direction={eventSort.order} onToggle={toggleEventSort}
-                                testId="event-sort-provider" />
-                  <SortableHead label="凭证" columnKey="credential"
-                                active={eventSort.sort === "credential"}
-                                direction={eventSort.order} onToggle={toggleEventSort}
-                                testId="event-sort-credential" />
+                  {/* 渠道 / 凭证合并列：凭证在上、渠道在下（同渠道常挂多个账号，先认账号）。
+                      排序能力靠列头下拉保留（provider / credential 两个子键）。 */}
+                  <SortMenuHead label="渠道 / 凭证" options={[...SOURCE_COLUMNS]}
+                                activeKey={eventSort.sort} direction={eventSort.order}
+                                onToggle={toggleEventSort} align="left"
+                                testId="event-sort-source" />
                   <SortableHead label="模型" columnKey="model" active={eventSort.sort === "model"}
                                 direction={eventSort.order} onToggle={toggleEventSort}
                                 testId="event-sort-model" />
@@ -1004,27 +1100,21 @@ export function StatsPage() {
                   <SortMenuHead label="延迟" options={[...LATENCY_COLUMNS]}
                                 activeKey={eventSort.sort} direction={eventSort.order}
                                 onToggle={toggleEventSort} testId="event-sort-latency" />
+                  {/* 速度合并列：正文 / 总产出（逐行按生成窗口算，无首字数据的
+                      请求不回落估算，直接 —）。列头下拉可选子列排序。 */}
+                  <SortMenuHead label="速度" options={[...SPEED_COLUMNS]}
+                                activeKey={eventSort.sort} direction={eventSort.order}
+                                onToggle={toggleEventSort} testId="event-sort-speed" />
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {eventRows.map((row) => (
                   <TableRow key={row.rowid} data-testid="event-row">
-                    <TableCell label="时间" className="whitespace-nowrap tabular-nums"
-                               title={row.request_id ? `请求 ID：${row.request_id}` : undefined}>
-                      {formatTime(row.ts)}
-                    </TableCell>
+                    {timeCell(row)}
                     {session.is_operator && (
                       <TableCell label="用户">{row.username}</TableCell>
                     )}
-                    <TableCell label="渠道">
-                      <span className="inline-flex items-center gap-1.5">
-                        <ProviderIcon provider={row.provider} size={13} />
-                        {providerLabel(row.provider)}
-                      </span>
-                    </TableCell>
-                    <TableCell label="凭证" className="max-w-40 truncate" title={row.credential_id ?? undefined}>
-                      {credentialCellLabel(row.credential_name, row.credential_id)}
-                    </TableCell>
+                    {sourceCell(row)}
                     <TableCell label="模型" className="max-w-48 truncate" title={row.model}>
                       {row.model}
                     </TableCell>
@@ -1041,6 +1131,9 @@ export function StatsPage() {
                     </TableCell>
                     <TableCell label="延迟" className="text-right">
                       {latencyCell(row)}
+                    </TableCell>
+                    <TableCell label="速度" className="text-right">
+                      {eventSpeedCell(row)}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -1067,6 +1160,11 @@ export function StatsPage() {
                 setPageIndex(next);
               }}
             />
+            <p className="mt-2 text-xs text-muted-foreground">
+              速度 = 输出 token ÷ 生成时间（耗时 − 首字）：左侧正文（不含思考）、右侧总产出
+              （含思考），与分组表同规则（有输出 token、生成窗口 ≥200ms、单条 ≤1000 tok/s）。
+              逐行不按端到端耗时估算——单条样本摊不平首字等待，故无生成窗口的请求显示 —。
+            </p>
           </>
         )}
       </Panel>

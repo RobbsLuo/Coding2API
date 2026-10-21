@@ -26,6 +26,7 @@ def test_stats_endpoints_scope_by_principal(admin_client):
          "output_tokens": 0, "cached_tokens": None, "credit": None,
          "credit_estimated": False, "cost_usd": None, "cost_cny": None,
          "avg_latency_ms": 0, "avg_ttfb_ms": 0,
+         "tps": None, "tps_visible": None, "tps_estimated": False,
          "p50_latency_ms": None, "p50_ttfb_ms": None,
          "p90_latency_ms": None, "p90_ttfb_ms": None,
          "p95_latency_ms": None, "p95_ttfb_ms": None,
@@ -34,6 +35,7 @@ def test_stats_endpoints_scope_by_principal(admin_client):
          "output_tokens": 0, "cached_tokens": None, "credit": None,
          "credit_estimated": False, "cost_usd": None, "cost_cny": None,
          "avg_latency_ms": 0, "avg_ttfb_ms": 0,
+         "tps": None, "tps_visible": None, "tps_estimated": False,
          "p50_latency_ms": None, "p50_ttfb_ms": None,
          "p90_latency_ms": None, "p90_ttfb_ms": None,
          "p95_latency_ms": None, "p95_ttfb_ms": None,
@@ -82,6 +84,9 @@ def test_stats_endpoints_accept_custom_window(admin_client):
                       params={"until": 7200}).json()["points"][0]["trae"] == 1
     assert len(client.get("/api/stats/events",
                           params={"until": 7200}).json()["events"]) == 1
+    # 逐请求明细带本条速度：本用例未上报输出 → 生成窗口不可测，两列都是 None
+    row = client.get("/api/stats/events", params={"until": 7200}).json()["events"][0]
+    assert row["tps"] is None and row["tps_visible"] is None
     response = client.get("/api/stats/events", params={"until": 7200, "format": "csv"})
     assert response.status_code == 200
     assert response.headers["x-export-row-count"] == "1"

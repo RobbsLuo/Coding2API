@@ -19,6 +19,7 @@ import {
   formatDuration,
   formatNumber,
   formatTime,
+  formatTimeParts,
   upstreamLevelLabel,
   upstreamLevelTone,
   hasQuotaProbe,
@@ -438,6 +439,17 @@ describe("display helpers", () => {
     expect(formatTime(1_700_000_000)).not.toBe("—");
     expect(formatNumber(null)).toBe("—");
     expect(formatNumber(1234)).toBe("1,234");
+  });
+
+  it("时间拆成日期 / 时刻两段（明细表两行显示），空值只给一个破折号", () => {
+    // 1700000000 = 2023-11-15 06:13:20 UTC，本地时区换算后两段都要补齐 0
+    const [date, clock] = formatTimeParts(1_700_000_000);
+    expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(clock).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    // 与 formatTime 同一时刻（同一天，同一时区口径）
+    expect(formatTime(1_700_000_000)).toContain(String(Number(date.slice(0, 4))));
+    expect(formatTimeParts(null)).toEqual(["—", ""]);
+    expect(formatTimeParts(0)).toEqual(["—", ""]);
   });
 
   it("模型级冷却只展示生效中的条目，按剩余时长升序", () => {

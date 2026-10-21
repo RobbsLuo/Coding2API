@@ -43,7 +43,19 @@ def test_event_cells_aligns_with_headers():
     assert cells[5] == "成功"
     assert cells[7:11] == ["100", "50", "", "7"]  # 缺失缓存留空
     assert cells[11] == "1.5" and cells[12] == ""  # 非推算
-    assert cells[17] == "req-1"
+    assert cells[19] == "req-1"
+
+
+def test_event_cells_include_per_request_speed():
+    """速度两列与页面明细表同口径：有值按数值渲染，不可测留空（不是 0）。"""
+    cells = event_cells({"ok": 1, "tps_visible": 51.2, "tps": 82.8})
+    assert cells[17:19] == ["51.2", "82.8"]
+    # 整段输出都是思考 → 正文列空、总产出有值
+    cells = event_cells({"ok": 1, "tps_visible": None, "tps": 200.0})
+    assert cells[17:19] == ["", "200.0"]
+    # 失败 / 无生成窗口 → 两列都空
+    cells = event_cells({"ok": 0})
+    assert cells[17:19] == ["", ""]
 
 
 def test_event_cells_falls_back_to_credential_id_and_marks_failure():

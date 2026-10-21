@@ -148,12 +148,15 @@ export interface StatsOverview {
   /** 平均首字延迟（TTFB）：请求开始到首个内容帧，接近真实体感延迟 */
   avg_ttfb_ms: number | null;
   /**
-   * 输出速度（tok/s）：总输出 token ÷ 生成时间总和（不是逐条平均），
-   * 只用经路由的成功请求里输出 ≥ 100 token 的样本；无样本为 null（显示 —）。
+   * 输出速度（tok/s，总产出）：总输出 token ÷ 生成时间总和（不是逐条平均），
+   * 只用经路由的成功请求里**有输出 token** 的样本（不设输出量下限）；无样本为 null（显示 —）。
+   * 分母已剔除物理上不可测的样本（生成窗口 < 200ms 或单条 > 1000 tok/s。
    * 无首字数据时回落估算口径并置 tps_estimated（展示加 ≈）。
    */
   tps: number | null;
-  /** tps 是否为估算值（估算含首字等待，只估输出 ≥ 200 token 的请求） */
+  /** 输出速度（tok/s，正文）：`output_tokens - reasoning_tokens` ÷ 同一生成时间总和 */
+  tps_visible: number | null;
+  /** tps 是否为估算值（估算分母含首字等待，样本门槛与主口径一致） */
   tps_estimated: boolean;
 }
 
@@ -180,10 +183,13 @@ export interface GroupStats {
   /** 平均首字延迟（ms）：ttfb_sum ÷ 成功数，读小时汇总；无成功请求为 null */
   avg_ttfb_ms: number | null;
   /**
-   * 输出速度（tok/s）：总输出 token ÷ 生成时间总和，读明细表（仅 90 天）；
-   * 该维度无路由样本时回落估算口径（含首字等待，只估输出 ≥ 200 token）。
+   * 输出速度（tok/s，总产出）：总输出 token ÷ 生成时间总和，读明细表（仅 90 天）；
+   * 该维度无路由样本时回落估算口径（分母改用端到端耗时，含首字等待）。
+   * 分母已剔除物理上不可测的样本（生成窗口 < 200ms 或单条 > 1000 tok/s）。
    */
   tps: number | null;
+  /** 输出速度（tok/s，正文）：`output_tokens - reasoning_tokens` ÷ 同一生成时间总和 */
+  tps_visible: number | null;
   /** tps 是否为估算值（展示加 ≈）；两个口径都无样本时为 false 且 tps 为 null */
   tps_estimated: boolean;
   /** P95 耗时（ms）：按成功请求 nearest-rank 取第 ⌈0.95n⌉ 小，读明细表（仅 90 天） */
@@ -261,6 +267,14 @@ export interface UsageEventRow {
   latency_ms: number | null;
   /** 首字延迟（TTFB）：请求开始到首个内容帧；无帧（如预热失败）时为 null */
   ttfb_ms: number | null;
+  /**
+   * 本条请求的输出速度（tok/s，总产出）：输出 token ÷ 生成时间（耗时 − 首字）。
+   * 与分组表同规则（有输出 token、生成窗口 ≥ 200ms、单条 ≤ 1000 tok/s），但
+   * **不回落估算口径**——逐行没有相邻样本摊平首字等待；不合格时为 null（显示 —）。
+   */
+  tps: number | null;
+  /** 本条请求的正文速度（tok/s）：`输出 − 思考` ÷ 同一生成时间；正文为 0 时 null */
+  tps_visible: number | null;
   /** 请求 ID（与响应头 X-Request-ID 同值）；老库历史行为 null */
   request_id: string | null;
 }
