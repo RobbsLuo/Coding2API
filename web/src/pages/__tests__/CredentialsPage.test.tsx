@@ -120,15 +120,13 @@ describe("CredentialsPage", () => {
     expect(shown[0]).toHaveTextContent("100 积分将在");
   });
 
-  it("CodeArts 两组的健康度各读各的账本，不与额度列矛盾", async () => {
+  it("CodeArts 单组的健康度与额度列同源，不出现「积分近满却额度耗尽」", async () => {
     mockFetch({
       "/api/credentials": listBody([
         makeCredential({
           id: "ca", provider: "codearts",
-          // 每日池已耗尽（主账 health=-1、额度 0），积分账几乎满
-          health: -1, quota_remaining: 0, quota_total: 1000,
-          quota_credits_remaining: 13498.72, quota_credits_total: 13500,
-          quota_credits_health: 100,
+          // 单一账本（积分）：额度近满 + 健康度 100%，两者一致
+          health: 100, quota_remaining: 13498.72, quota_total: 13500,
         }),
       ]),
     });
@@ -136,26 +134,22 @@ describe("CredentialsPage", () => {
     await settle();
     await expandCredentialGroups();
 
-    // 福利组（每日池）：额度 0 + 健康度「已耗尽」，两者一致
-    const benefitRow = screen.getByTestId("row-ca-benefit");
-    expect(within(benefitRow).getByText("已耗尽")).toBeInTheDocument();
-    expect(within(benefitRow).getByText("0 / 1,000")).toBeInTheDocument();
-    // 内置组（积分账）：额度近满 + 健康度 100%，不能出现「积分近满却额度耗尽」
-    const internalRow = screen.getByTestId("row-ca");
-    expect(within(internalRow).getByText("100%")).toBeInTheDocument();
-    expect(within(internalRow).getByText("13,498.72 / 13,500")).toBeInTheDocument();
-    expect(within(internalRow).queryByText("已耗尽")).not.toBeInTheDocument();
-    expect(within(internalRow).queryByText("额度耗尽")).not.toBeInTheDocument();
+    const row = screen.getByTestId("row-ca");
+    expect(within(row).getByText("100%")).toBeInTheDocument();
+    expect(within(row).getByText("13,498.72 / 13,500")).toBeInTheDocument();
+    expect(within(row).queryByText("已耗尽")).not.toBeInTheDocument();
+    expect(within(row).queryByText("额度耗尽")).not.toBeInTheDocument();
+    // 不再有第二份（福利 / 内置）重复行
+    expect(screen.queryByTestId("row-ca-benefit")).not.toBeInTheDocument();
   });
 
-  it("CodeArts 两组各显各的到期积分：福利组读每日池、内置组读积分账", async () => {
+  it("CodeArts 单组按通用字段展示本组到期积分（主 / 次窗口）", async () => {
     mockFetch({
       "/api/credentials": listBody([
         makeCredential({
           id: "ca", provider: "codearts", health: 100,
-          // 主账字段＝每日池那一段；积分账字段＝积分套餐那一段，两者独立下发
           quota_expiring_credits: 999.5,
-          quota_credits_expiring: 40,
+          quota_expiring_credits_secondary: 1500,
         }),
       ]),
     });
@@ -163,19 +157,18 @@ describe("CredentialsPage", () => {
     await settle();
     await expandCredentialGroups();
 
-    // 福利组（每日池）显示主账到期积分；内置组（积分账）显示积分账到期积分
-    const benefit = screen.getByTestId("group-codearts-benefit-expiring");
-    expect(benefit).toHaveTextContent("999.5");
-    const internal = screen.getByTestId("group-codearts-internal-expiring");
-    expect(internal).toHaveTextContent("40");
+    // 一个 CodeArts 组：主窗口读 quota_expiring_credits、次窗口读 secondary
+    expect(screen.getByTestId("group-codearts-expiring")).toHaveTextContent("999.5");
+    expect(screen.getByTestId("group-codearts-expiring-secondary")).toHaveTextContent("1,500");
+    expect(screen.queryByTestId("group-codearts-benefit-expiring")).not.toBeInTheDocument();
   });
 
-  it("CodeArts 福利组无到期积分时只隐藏福利那一块，不影响内置组", async () => {
+  it("CodeArts 无主窗口到期积分时只隐藏主窗口那一块，次窗口仍可见", async () => {
     mockFetch({
       "/api/credentials": listBody([
         makeCredential({
           id: "ca", provider: "codearts", health: 100,
-          quota_expiring_credits: null, quota_credits_expiring: 40,
+          quota_expiring_credits: null, quota_expiring_credits_secondary: 40,
         }),
       ]),
     });
@@ -183,10 +176,8 @@ describe("CredentialsPage", () => {
     await settle();
     await expandCredentialGroups();
 
-    expect(screen.queryByTestId("group-codearts-benefit-expiring"))
-      .not.toBeInTheDocument();
-    expect(screen.getByTestId("group-codearts-internal-expiring"))
-      .toHaveTextContent("40");
+    expect(screen.queryByTestId("group-codearts-expiring")).not.toBeInTheDocument();
+    expect(screen.getByTestId("group-codearts-expiring-secondary")).toHaveTextContent("40");
   });
 
   it("主窗口为空时展示次窗口（7 天）到期积分，措辞与主窗口区分", async () => {
@@ -311,16 +302,15 @@ describe("CredentialsPage", () => {
     expect(screen.queryByTestId("packages-toggle-empty")).not.toBeInTheDocument();
   });
 
-  it("内置组头条额度是积分账，福利组头条是每日池；其余渠道不渲染积分账", async () => {
+  it("CodeArts 单组头条读通用额度字段，口径说明是积分余额", async () => {
     mockFetch({
       "/api/credentials": listBody([
-        // CodeArts：每日池 + 积分账两本。内置组显示积分账，福利组显示每日池。
+        // CodeArts：只有一本账（积分），额度直接读通用字段
         makeCredential({
           id: "ca", provider: "codearts",
-          quota_remaining: 900, quota_total: 1000,
-          quota_credits_remaining: 13498.72, quota_credits_total: 13500,
+          quota_remaining: 13498.72, quota_total: 13500,
         }),
-        // TRAE：无积分账，头条就是它自己的账户余额
+        // TRAE：没有积分账，头条就是它自己的账户余额
         makeCredential({ id: "tr", provider: "trae" }),
       ]),
     });
@@ -328,37 +318,31 @@ describe("CredentialsPage", () => {
     await settle();
     await expandCredentialGroups();
 
-    // 内置组：头条直接是积分账（不再是每日池 + 第二行积分）
-    const internal = screen.getByTestId("row-ca");
-    expect(within(internal).getByText("13,498.72 / 13,500")).toBeInTheDocument();
-    expect(within(internal).queryByText("900 / 1,000")).not.toBeInTheDocument();
-    // 口径说明是积分账那份（与每日额度池并行的独立账本）
-    expect(within(internal).getByText("13,498.72 / 13,500")).toHaveAttribute(
-      "title", expect.stringContaining("独立账本"));
-    // 福利组：头条仍是每日池，且看不到积分账
-    const benefit = screen.getByTestId("row-ca-benefit");
-    expect(within(benefit).getByText("900 / 1,000")).toBeInTheDocument();
-    expect(within(benefit).queryByText("13,498.72 / 13,500")).not.toBeInTheDocument();
-    // TRAE 只有一本账，头条是它自己的余额
+    const codearts = screen.getByTestId("row-ca");
+    expect(within(codearts).getByText("13,498.72 / 13,500")).toBeInTheDocument();
+    // 口径说明挂在额度数字的 title 上（CodeArts＝积分余额）
+    expect(within(codearts).getByText("13,498.72 / 13,500")).toHaveAttribute(
+      "title", expect.stringContaining("积分余额"));
+    // TRAE 头条是它自己的余额
     expect(within(screen.getByTestId("row-tr")).getByText("62 / 100")).toBeInTheDocument();
+    // 只有一组 / 一行
+    expect(screen.queryByTestId("row-ca-benefit")).not.toBeInTheDocument();
   });
 
-  it("内置组积分账未探测到（两字段皆 null）时头条显示 —，不冒充每日池", async () => {
+  it("CodeArts 额度未探测到（两字段皆 null）时头条显示 —，不冒充其它数", async () => {
     mockFetch({
       "/api/credentials": listBody([
         makeCredential({ id: "ca", provider: "codearts",
-                         quota_remaining: 900, quota_total: 1000,
-                         quota_credits_remaining: null, quota_credits_total: null }),
+                         quota_remaining: null, quota_total: null }),
       ]),
     });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
     await expandCredentialGroups();
 
-    // 内置组讲的是积分账：未探测到就是「— / —」，绝不回落到每日池的 900 / 1,000
-    const internal = screen.getByTestId("row-ca");
-    expect(within(internal).getByText("— / —")).toBeInTheDocument();
-    expect(within(internal).queryByText("900 / 1,000")).not.toBeInTheDocument();
+    // 未探测到就是「— / —」，绝不回落到任何占位数
+    const codearts = screen.getByTestId("row-ca");
+    expect(within(codearts).getByText("— / —")).toBeInTheDocument();
   });
 
   it("积分流水抽屉按组读对应账本（内置＝积分账，其余＝每日池）", async () => {
@@ -369,9 +353,7 @@ describe("CredentialsPage", () => {
           before: null, after: 100, delta: null, source: "sync", ledger: "credits" },
       ] },
       "/api/credentials": listBody([
-        makeCredential({ id: "ca", provider: "codearts",
-                         quota_credits_remaining: 13498.72,
-                         quota_credits_total: 13500 }),
+        makeCredential({ id: "ca", provider: "codearts" }),
         makeCredential({ id: "tr", provider: "trae" }),
       ]),
     });
@@ -757,13 +739,12 @@ describe("CredentialsPage", () => {
     expect(screen.queryByTestId("credentials-toolbar")).not.toBeInTheDocument();
   });
 
-  it("CodeArts 拆成内置（可写）与福利（只读）两组：账号各一次，操作只在可写组", async () => {
+  it("CodeArts 只渲染一个可写组：账号只出现一次，操作齐全", async () => {
     mockFetch({
       "/api/credentials": listBody([
         makeCredential({
           id: "ca1", provider: "codearts",
-          quota_remaining: 900, quota_total: 1000,
-          quota_credits_remaining: 13498.72, quota_credits_total: 13500,
+          quota_remaining: 13498.72, quota_total: 13500,
         }),
         makeCredential({ id: "tr1", provider: "trae" }),
       ]),
@@ -772,10 +753,10 @@ describe("CredentialsPage", () => {
     await settle();
     await expandCredentialGroups();
 
-    // 切到全站渠道顺序，组顺序才确定（默认按额度排，CodeArts 每日池 900 > TRAE 62）
+    // 切到全站渠道顺序，组顺序才确定（默认按额度排，CodeArts 13,498 > TRAE 62）
     await userEvent.selectOptions(screen.getByTestId("credential-group-sort"), "provider");
 
-    // 组头：CodeArts 两行（内置在前、福利在后），label 带后缀，账号数一致。
+    // 组头：TRAE 在前、CodeArts 在后，各一行（不再拆内置 / 福利两组）。
     // 组 key 含连字符，故显式排掉同前缀的指标块（-state- / -quota-pct / -expiring）。
     const headers = screen
       .getAllByTestId(/^group-[a-z-]+$/)
@@ -783,56 +764,33 @@ describe("CredentialsPage", () => {
         node.getAttribute("data-testid") ?? ""));
     expect(headers.map((node) => node.getAttribute("data-testid"))).toEqual([
       "group-trae",
-      "group-codearts-internal",
-      "group-codearts-benefit",
+      "group-codearts",
     ]);
-    expect(screen.getByTestId("group-codearts-internal")).toHaveTextContent("CodeArts 内置");
-    expect(screen.getByTestId("group-codearts-benefit")).toHaveTextContent("CodeArts 福利");
-    for (const key of ["codearts-internal", "codearts-benefit"]) {
-      expect(screen.getByTestId(`group-${key}`)).toHaveTextContent("1 个账号");
-    }
+    expect(screen.getByTestId("group-codearts")).toHaveTextContent("CodeArts");
+    expect(screen.getByTestId("group-codearts")).toHaveTextContent("1 个账号");
 
-    // 内置组：全操作 + 勾选 + 积分入口 + 积分账头条 + 套餐明细入口都在。
-    // 头条是**积分账**（内置模型计费），不是福利组的每日池。
-    const internal = screen.getByTestId("row-ca1");
-    expect(within(internal).getByText("13,498.72 / 13,500")).toBeInTheDocument();
-    expect(within(internal).queryByText("900 / 1,000")).not.toBeInTheDocument();
+    // 唯一的 CodeArts 行：全操作 + 勾选 + 流水入口 + 额度头条都在（不再有只读组）。
+    const row = screen.getByTestId("row-ca1");
+    expect(within(row).getByText("13,498.72 / 13,500")).toBeInTheDocument();
     expect(screen.getByTestId("select-ca1")).toBeInTheDocument();
     expect(screen.getByTestId("actions-ca1")).toBeInTheDocument();
     expect(screen.getByTestId("credits-ca1")).toBeInTheDocument();
-    expect(screen.getByTestId("group-select-codearts-internal")).toBeInTheDocument();
+    expect(screen.getByTestId("group-select-codearts")).toBeInTheDocument();
+    // 不再有 -benefit / -internal 那份重复行
+    expect(screen.queryByTestId("row-ca1-benefit")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("row-ca1-internal")).not.toBeInTheDocument();
 
-    // 福利组：只读——每日池照旧，勾选 / 操作 / 积分入口 / 套餐明细全收掉。
-    // 但选择格仍渲染**禁用** checkbox（不是空占位格）：空占位格的内容宽度与
-    // 内置组不同，表格 auto 布局下本行各列起点会与内置组错开。
-    const benefit = screen.getByTestId("row-ca1-benefit");
-    expect(within(benefit).getByText("900 / 1,000")).toBeInTheDocument();
-    expect(within(benefit).queryByText("13,498.72 / 13,500")).not.toBeInTheDocument();
-    const benefitSelect = screen.getByTestId("select-ca1-benefit");
-    expect(benefitSelect).toBeDisabled();
-    expect(screen.queryByTestId("actions-ca1-benefit")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("probe-ca1-benefit")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("credits-ca1-benefit")).not.toBeInTheDocument();
-    expect(screen.queryByTestId("packages-toggle-ca1-benefit")).not.toBeInTheDocument();
-    // 组头全选同样是禁用态（占位对齐，不可勾）
-    expect(screen.getByTestId("group-select-codearts-benefit")).toBeDisabled();
-
-    // 列数恒定：两组的列头 / 数据行 / 组头 colspan 都是 7，否则 auto 布局整列错位
-    for (const key of ["codearts-internal", "codearts-benefit"]) {
-      expect(screen.getByTestId(`column-header-${key}`).children).toHaveLength(7);
-      expect(screen.getByTestId(`group-${key}`).querySelector("td"))
-        .toHaveAttribute("colspan", "7");
-    }
+    // 列数恒定：列头 / 数据行 / 组头 colspan 都是 7，否则 auto 布局整列错位
+    expect(screen.getByTestId("column-header-codearts").children).toHaveLength(7);
+    expect(screen.getByTestId("group-codearts").querySelector("td"))
+      .toHaveAttribute("colspan", "7");
     expect(screen.getByTestId("row-ca1").children).toHaveLength(7);
-    expect(screen.getByTestId("row-ca1-benefit").children).toHaveLength(7);
-    // 福利组的操作列只有占位，不给列名（写了像能点）
-    expect([...screen.getByTestId("column-header-codearts-benefit").children][6])
-      .toBeEmptyDOMElement();
-    expect([...screen.getByTestId("column-header-codearts-internal").children][6])
+    // 可写组的操作列有列名
+    expect([...screen.getByTestId("column-header-codearts").children][6])
       .toHaveTextContent("操作");
   });
 
-  it("只读用户下 CodeArts 同样拆两组，福利组列数仍与其它组一致", async () => {
+  it("只读用户下 CodeArts 仍是单组，列数与其它组一致", async () => {
     mockFetch({
       "/api/credentials": listBody(
         [makeCredential({ id: "ca1", provider: "codearts" })],
@@ -844,14 +802,12 @@ describe("CredentialsPage", () => {
     await settle();
     await expandCredentialGroups();
 
-    // viewer 本来就没有选择 / 操作列，两组都是 5 格（凭证 / 状态 / 额度 / token / 成长占位）
-    for (const key of ["codearts-internal", "codearts-benefit"]) {
-      expect(screen.getByTestId(`column-header-${key}`).children).toHaveLength(5);
-      expect(screen.getByTestId(`group-${key}`).querySelector("td"))
-        .toHaveAttribute("colspan", "5");
-    }
+    // viewer 本来就没有选择 / 操作列，单组是 5 格（凭证 / 状态 / 额度 / token / 成长占位）
+    expect(screen.getByTestId("column-header-codearts").children).toHaveLength(5);
+    expect(screen.getByTestId("group-codearts").querySelector("td"))
+      .toHaveAttribute("colspan", "5");
     expect(screen.getByTestId("row-ca1").children).toHaveLength(5);
-    expect(screen.getByTestId("row-ca1-benefit").children).toHaveLength(5);
+    expect(screen.queryByTestId("row-ca1-benefit")).not.toBeInTheDocument();
   });
 
   it("按渠道分组：组头显示渠道名与数量，行内不再复读渠道名", async () => {
@@ -937,26 +893,26 @@ describe("CredentialsPage", () => {
       .not.toBeInTheDocument();
   });
 
-  it("CodeArts 内置组显示积分账到期积分，福利组显示每日池", async () => {
+  it("CodeArts 单组的行内到期积分读通用字段（与组头同源）", async () => {
     mockFetch({
       "/api/credentials": listBody([
         makeCredential({
           id: "ca1", provider: "codearts",
           quota_expiring_credits: 3_000,
           quota_expiring_credits_secondary: 9_000,
-          quota_credits_expiring: 120,
-          quota_credits_expiring_secondary: 260,
         }),
       ]),
     });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
+    await expandCredentialGroups();
 
-    // 后端把两段合并阶梯按账本拆开，两组各读自己那段：福利组＝每日池、内置组＝积分账
-    expect(screen.getByTestId("group-codearts-benefit-expiring")).toHaveTextContent("3,000");
-    expect(screen.getByTestId("group-codearts-internal-expiring")).toHaveTextContent("120");
-    expect(screen.getByTestId("group-codearts-internal-expiring-secondary"))
-      .toHaveTextContent("260");
+    // 行内到期积分与组头同源，都读通用的主窗口字段；
+    // 次窗口是主窗口的超集，主窗口已有数字时行内不重复渲染（见 Row）
+    expect(screen.getByTestId("quota-expiring")).toHaveTextContent("3,000 积分将在");
+    expect(screen.queryByTestId("quota-expiring-secondary")).not.toBeInTheDocument();
+    expect(screen.getByTestId("group-codearts-expiring")).toHaveTextContent("3,000");
+    expect(screen.getByTestId("group-codearts-expiring-secondary")).toHaveTextContent("9,000");
   });
 
   it("组头额度在免费层显示 —（无额度接口，不当成 0）", async () => {
@@ -1099,7 +1055,6 @@ describe("CredentialsPage", () => {
         makeCredential({
           id: "empty", provider: "codearts",
           quota_remaining: 0, quota_total: 100,
-          quota_credits_remaining: 0, quota_credits_total: 100,
         }),
       ]),
     });
@@ -1111,18 +1066,13 @@ describe("CredentialsPage", () => {
     expect(full).toHaveLength(2);
     expect(full[1].getAttribute("stroke-dasharray")).toBeNull();
 
-    // 归零：只剩淡色轨道，不画进度弧（CodeArts 两组各一份组头；内置组看积分账，
-    // 福利组看每日池，两本账都归零才各出一份 0%）
-    const empty = screen.getByTestId("group-codearts-internal-quota-pct")
-      .querySelectorAll("circle");
+    // 归零：只剩淡色轨道，不画进度弧
+    const empty = screen.getByTestId("group-codearts-quota-pct").querySelectorAll("circle");
     expect(empty).toHaveLength(1);
-    expect(screen.getByTestId("group-codearts-benefit-quota-pct")
-      .querySelectorAll("circle")).toHaveLength(1);
 
     expect(screen.getByTestId("group-qoder")).toHaveTextContent("额度合计100%");
-    // 内置组讲积分账，标签是「积分合计」
-    expect(screen.getByTestId("group-codearts-internal")).toHaveTextContent("积分合计0%");
-    expect(screen.getByTestId("group-codearts-benefit")).toHaveTextContent("额度合计0%");
+    // CodeArts 组讲积分账，标签是「积分合计」
+    expect(screen.getByTestId("group-codearts")).toHaveTextContent("积分合计0%");
   });
 
   it("列头迁进展开区：每个展开的渠道各有一份列头，都能触发同一套排序", async () => {

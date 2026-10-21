@@ -30,7 +30,6 @@ def test_codearts_defaults_and_allowed_parsing():
     assert settings.codearts_allowed == (
         "https://snap-access.cn-north-4.myhuaweicloud.com",
         "https://sts.cn-north-4.myhuaweicloud.com",
-        "https://opengw.developer.huaweicloud.com",
         "https://codearts.huaweicloud.com",
     )
 

@@ -33,9 +33,8 @@ def jwk() -> dict[str, str]:
 
 
 def client(handler, **kw) -> CodeArtsClient:
-    """用 `handler` 造 CodeArtsClient（默认填好三个测试主机）。"""
+    """用 `handler` 造 CodeArtsClient（默认填好两个测试主机）。"""
     kw.setdefault("endpoint", "https://snap.test")
-    kw.setdefault("benefit_host", "https://gw.test")
     kw.setdefault("sts_host", "https://sts.test")
     return provider_client(CodeArtsClient, handler, **kw)
 

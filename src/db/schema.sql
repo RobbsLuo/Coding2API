@@ -56,9 +56,6 @@ CREATE TABLE IF NOT EXISTS credentials (
     quota_cycle_end  INTEGER,                      -- 最早到期 epoch；渠道无此信息为 NULL
     quota_expiry_ladder TEXT,                      -- 到期阶梯 JSON [[epoch, 剩余积分]]；无到期信息为 NULL
     quota_packages   TEXT,                      -- 额度包明细 JSON [{"name","total","used","end"}]，仅展示
-    quota_credits_remaining REAL,               -- 第二本账（CodeArts 积分）：内置模型计费，与 token 池并行；其余渠道 NULL
-    quota_credits_total     REAL,               -- 同上，积分总量
-    quota_credits_expiry_ladder TEXT,           -- 积分账到期阶梯 JSON [[epoch, 剩余积分]]（仅 CodeArts，展示用）；其余渠道 NULL
     quota_probed_at  INTEGER,
     token_expires_at INTEGER,                   -- access token 到期 epoch；NULL=老库未回填，0=未知
     token_issued_at  INTEGER,                   -- access token 签发 epoch（JWT iat）：进度条满量程与「最后续期」

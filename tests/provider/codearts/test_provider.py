@@ -52,11 +52,12 @@ async def test_provider_list_models_refresh_and_probe_quota():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == codearts_events.EP_MODEL_BUILTIN:
             return httpx.Response(200, json={"builtinModels": [{"id": "m1"}]})
-        if request.url.path == codearts_events.EP_BENEFIT_CONFIG:
-            return httpx.Response(200, json={"result": {"models": []}})
         if request.url.host == "sts.test":
             return httpx.Response(200, json=_token_response())
-        return httpx.Response(200, json={"remaining": 9})
+        return httpx.Response(200, json={
+            "metrics": [{"name": "usageTotalPackageCredit",
+                         "package_credit_amount": 100.0,
+                         "package_credit_remain": 9.0}]})
 
     provider = CodeArtsProvider(client=_client(handler))
     models = await provider.list_models({})
@@ -64,48 +65,40 @@ async def test_provider_list_models_refresh_and_probe_quota():
     refreshed = await provider.refresh({"access_key_id": "AK", "secret_access_key": "SK",
                                         "refresh_token": "rt", "dpop_private_jwk": _jwk()})
     assert refreshed["access_key_id"] == "AK2"
-    assert (await provider.probe_quota({})).remaining == pytest.approx(9 / 10000)
+    assert (await provider.probe_quota({})).remaining == pytest.approx(9.0)
     await provider.aclose()
 
-async def test_provider_probe_quota_discovers_benefit_catalog_per_account():
-    """额度探测逐凭证跑，顺带补该账号自己的福利目录。
+async def test_provider_probe_quota_hits_only_statistics_endpoint():
+    """额度探测只打一个端点（`/snap-manager/v1/statistics/plugin`），带 PromptCenter 头。
 
-    模型列表刷新只用 `candidates[0]` 一个凭证，其余账号的 uid 永不上册，
-    `is_benefit_model` 退回冷启动种子；种子装不下「按期授予」的福利模型
-    （如 `deepseek-v4.1-flash`），那些账号的请求就漏带 `maas_type: benefit`
-    头——请求照样 200，但每日 token 池不扣、credit 不记。探测遍历全部凭证，
-    正是补齐点。
+    福利渠道下线后不再有第二本账（每日 token 池 / 福利目录）：探测是纯只读，
+    不触发 claim、不刷新一次性 refresh_token。
     """
+    calls: list[tuple[str, str]] = []
+
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == codearts_events.EP_MODEL_BUILTIN:
-            return httpx.Response(200, json={"builtinModels": [{"id": "m1"}]})
-        if request.url.path == codearts_events.EP_BENEFIT_CONFIG:
-            return httpx.Response(200, json={"result": {"models": [
-                {"id": "deepseek-v4.1-flash"}]}})
-        if request.url.path == codearts_events.EP_BENEFIT_CLAIM:
-            return httpx.Response(200, json={"result": "ok"})
-        return httpx.Response(200, json={"remaining": 9})
+        calls.append((request.url.path, request.headers.get("Agent-Type", "")))
+        return httpx.Response(200, json={
+            "metrics": [{"name": "usageTotalPackageCredit",
+                         "package_credit_amount": 100.0,
+                         "package_credit_remain": 9.0}]})
 
     provider = CodeArtsProvider(client=_client(handler))
-    data = {"uid": "u1", "access_key_id": "AK", "secret_access_key": "SK"}
-    assert (await provider.probe_quota(data)).remaining == pytest.approx(9 / 10000)
-    # 本账号目录已入册：种子外的新福利模型也判 True（否则漏带 benefit 头）。
-    assert provider.client.is_benefit_model(_cred(), "deepseek-v4.1-flash") is True
+    quota = await provider.probe_quota(
+        {"uid": "u1", "access_key_id": "AK", "secret_access_key": "SK"})
+    assert quota.remaining == pytest.approx(9.0) and quota.total == pytest.approx(100.0)
+    assert calls == [(codearts_events.EP_STATISTICS_PLUGIN, "PromptCenter")]
     await provider.aclose()
 
-async def test_provider_probe_quota_keeps_balance_when_catalog_discovery_fails(caplog):
-    """目录发现失败必须降级：余额照常返回、只记 warning，不拖垮探测。"""
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == codearts_events.EP_TOKEN_BALANCE:
-            return httpx.Response(200, json={"remaining": 9})
+async def test_provider_probe_quota_propagates_upstream_failure():
+    """积分接口失败直接上抛（不再降级吞掉合并第二本账）。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, content=b"down")
 
     provider = CodeArtsProvider(client=_client(handler))
-    with caplog.at_level("WARNING"):
-        quota = await provider.probe_quota(
+    with pytest.raises(UpstreamHTTPError):
+        await provider.probe_quota(
             {"uid": "u1", "access_key_id": "AK", "secret_access_key": "SK"})
-    assert quota.remaining == pytest.approx(9 / 10000)
-    assert any("福利目录刷新失败" in record.getMessage() for record in caplog.records)
     await provider.aclose()
 
 async def test_provider_stream_chat_pacer_pairing_and_release_on_error():

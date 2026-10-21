@@ -8,7 +8,6 @@ import {
   modelRate,
   modelValue,
   pickDefaultModel,
-  providerBenefit,
   providerRate,
   type PickableModel,
 } from "../ModelPicker";
@@ -52,29 +51,6 @@ describe("providerRate", () => {
       by_provider: { codebuddy: { credit_rate: 0.29 } },
     });
     expect(providerRate(item, "trae")).toBeUndefined();
-  });
-});
-
-describe("providerBenefit", () => {
-  it("优先按渠道细分标记；单渠道回退顶层 benefit", () => {
-    const dual = model({
-      id: "shared", providers: ["codearts", "trae"],
-      by_provider: { codearts: { benefit: true }, trae: {} },
-    });
-    expect(providerBenefit(dual, "codearts")).toBe(true);
-    expect(providerBenefit(dual, "trae")).toBe(false);
-    const single = model({ id: "b", providers: ["codearts"], benefit: true });
-    expect(providerBenefit(single, "codearts")).toBe(true);
-    expect(providerBenefit(model({ id: "x", providers: ["trae"] }), "trae")).toBe(false);
-  });
-
-  it("多渠道缺细分标记时不拿顶层 benefit 冒充", () => {
-    const item = model({
-      id: "shared", providers: ["codearts", "trae"], benefit: true,
-      by_provider: { trae: {} },
-    });
-    expect(providerBenefit(item, "codearts")).toBe(false);
-    expect(providerBenefit(item, "trae")).toBe(false);
   });
 });
 

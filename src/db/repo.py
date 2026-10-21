@@ -21,7 +21,7 @@ from ..engine.scheduler import (
     expiring_credits,
     expiry_windows,
 )
-from ..provider.base import Quota, credits_health_score, health_score
+from ..provider.base import Quota, health_score
 from ..provider.token_expiry import credential_token_times
 from ..sorting import sort_rows, sql_order
 from ..tags import tags_text, tags_value
@@ -100,13 +100,6 @@ CREDENTIAL_SORT_KEYS: dict[str, Callable[[dict[str, Any]], Any]] = {
     "pinned": lambda row: row["pinned"],
     "quota_remaining": lambda row: row["quota_remaining"],
     "quota_total": lambda row: row["quota_total"],
-    # 第二本账（CodeArts 积分账）：内置组按它排序，与「额度」列显示的账本同源
-    # ——否则点列头会按每日池排、却显示积分，数字看着不成序。其余渠道恒 None，
-    # 排在末尾（`sort_rows` 的 null 语义），组内保持原顺序。
-    "quota_credits_remaining": lambda row: row["quota_credits_remaining"],
-    # 积分账派生的健康度：内置组点「状态 / 健康度」列头时按它排——与列里显示的
-    # 那本账同源（否则列里显示积分 99%，排序却按每日池的 0%）。其余渠道恒 None。
-    "quota_credits_health": lambda row: row["quota_credits_health"],
     "quota_expiring_credits": lambda row: row["quota_expiring_credits"],
     # 0 = 上游未给到期信息，视为缺失（排最后），不当成「最早过期」
     "token_expires_at": lambda row: row["token_expires_at"] or None,
@@ -158,8 +151,9 @@ CREDIT_EVENT_SORT_COLUMNS: dict[str, str] = {
     "source": "source",
 }
 
-# 变动流水的账本白名单：pool＝每日 token 池（福利模型）/ credits＝积分账
-# （CodeArts 内置模型）。查询侧只认这两个取值，其余回落 pool。
+# 变动流水的账本白名单：pool＝套餐/每日池余额（CodeArts 之外的渠道）/
+# credits＝CodeArts 积分（该渠道唯一的额度来源，见 `quota_ledger`）。
+# 查询侧只认这两个取值，其余回落 pool。
 CREDIT_EVENT_LEDGERS: frozenset[str] = frozenset({"pool", "credits"})
 
 
@@ -179,6 +173,17 @@ def _token_times_from_blob(
     except (CredentialDecryptError, ValueError, UnicodeDecodeError):
         return 0, 0
     return credential_token_times(data) if isinstance(data, dict) else (0, 0)
+
+
+def quota_ledger(provider: str) -> str:
+    """该渠道的额度记在哪本账（`credit_events.ledger`）。
+
+    CodeArts 的额度来自积分接口（`/snap-manager/v1/statistics/plugin`，内置模型
+    按积分计费），记 `credits`；其余渠道是套餐 / 每日池口径的余额，记 `pool`。
+    老库里 CodeArts 的 `pool` 行是已下线的每日 token 池口径，不再展示（量级与
+    语义都和积分不同，混读会被当成同一本账的连续读数）。
+    """
+    return "credits" if provider == "codearts" else "pool"
 
 
 class CredentialRepository:
@@ -394,65 +399,41 @@ class CredentialRepository:
                 (self._cipher.encrypt(payload), expires_at, issued_at, credential_id))
 
     def save_quota(self, credential_id: str, quota: Quota) -> None:
-        """写回额度，并顺带为每本账各记一条变动流水。
+        """写回额度，并顺带记一条变动流水。
 
         流水必须在同一事务里与前值比较：分两次读改写会与并发探测交错，
         记出「before 是别人写过的值」的错行。因此这里先取旧余额，
-        再在同一个事务里 UPDATE + INSERT。
+        再在同一个事务里 UPDATE + INSERT。账本由凭证自己的渠道决定，见
+        `quota_ledger`。
         """
         with self._db.transaction() as conn:
             previous = conn.execute(
-                "SELECT quota_remaining, quota_credits_remaining, quota_probed_at "
+                "SELECT provider, quota_remaining, quota_probed_at "
                 "FROM credentials WHERE id = ?",
                 (credential_id,)).fetchone()
             conn.execute(
                 "UPDATE credentials SET quota_remaining = ?, quota_total = ?, "
                 "quota_cycle_end = ?, quota_expiry_ladder = ?, quota_packages = ?, "
-                # 积分账用 COALESCE 保旧值：它是 best-effort 探测（积分接口偶发
-                # 失败只记 warning、不判整次探测失败），若直接写 NULL，右侧那行
-                # 会凭空消失一整轮，与主账「失败保留上次余额」的口径不一致。
-                # 无积分账的渠道两列本就恒 NULL，COALESCE 后仍是 NULL。
-                "quota_credits_remaining = COALESCE(?, quota_credits_remaining), "
-                "quota_credits_total = COALESCE(?, quota_credits_total), "
-                # 积分到期阶梯**不用** COALESCE：它与上面的合并阶梯同一次探测产出，
-                # 积分探测失败时合并阶梯也丢了那一段，若此处保旧值，读路径「合并阶梯
-                # 减积分阶梯」会算出负的每日池到期额。两者同生共死才自洽。
-                "quota_credits_expiry_ladder = ?, "
                 "quota_probed_at = ?, health = ? "
                 "WHERE id = ?",
                 (quota.remaining, quota.total, quota.cycle_end,
                  _ladder_text(quota.expiry_ladder), _packages_text(quota.packages),
-                 quota.credits_remaining, quota.credits_total,
-                 _ladder_text(quota.credits_expiry_ladder),
                  quota.probed_at,
                  health_score(quota), credential_id),
             )
             if previous is not None:
-                window_start = previous["quota_probed_at"]
-                # 每日 token 池（福利模型）：各渠道的主账，CodeArts 之外唯一的一本。
                 self._record_credit_event(
-                    conn, credential_id, ledger="pool",
+                    conn, credential_id, ledger=quota_ledger(previous["provider"]),
                     before=previous["quota_remaining"], after=quota.remaining,
-                    probed_at=quota.probed_at, window_start=window_start)
-                # 积分账（CodeArts 内置模型）：探测失败（None）时库里经 COALESCE
-                # 保留旧值，账本**没有**变化，故用「保留后的值」当 after——否则会
-                # 把「这次没探到」记成「余额变未知」，与落库事实矛盾。其余渠道
-                # 两列恒 NULL，两端皆 None 自然不写行。
-                credits_after = (quota.credits_remaining
-                                 if quota.credits_remaining is not None
-                                 else previous["quota_credits_remaining"])
-                self._record_credit_event(
-                    conn, credential_id, ledger="credits",
-                    before=previous["quota_credits_remaining"], after=credits_after,
-                    probed_at=quota.probed_at, window_start=window_start)
+                    probed_at=quota.probed_at, window_start=previous["quota_probed_at"])
 
     @staticmethod
     def _record_credit_event(conn, credential_id: str, *, ledger: str, before, after,
                              probed_at: int, window_start: int | None) -> None:
         """比对一本账的前后余额写一条 credit_events；无变化或无法量化时不写。
 
-        `ledger` 标明这是哪本账（pool＝每日 token 池 / credits＝积分账），
-        两本账的数值量级与语义都不同，混读会被当成同一本账的连续读数。
+        `ledger` 标明这是哪本账（pool＝套餐/每日池余额 / credits＝CodeArts 积分，
+见 `quota_ledger`），两本账的数值量级与语义都不同，混读会被当成同一本账的连续读数。
 
         只记「有信息量」的行：
         - 首次探测（没有对照基线）→ source=sync，只是建立基线；
@@ -629,15 +610,10 @@ class CredentialRepository:
         admin/operator 返回，与 `/api/stats/events`、`by-credential` 口径一致；
         viewer 只看得到自己的记录，昵称对它没有用途。
 
-        附 `quota_expiring_credits`（主账窗口内即将到期的积分，与调度排序第一级同源）；
-        附 `quota_expiring_credits_secondary`（主账次窗口，主窗口打平时才参与排序的第二级）；
-        附 `quota_credits_expiring` / `quota_credits_expiring_secondary`（**积分账**
-        自己的窗口内到期积分，仅 CodeArts 有；其余渠道为 None）；
-        附 `quota_credits_health`（**积分账**派生的健康度，仅 CodeArts 有值；只供
-        内置组展示，调度口径仍读 `health`）；
-        附 `quota_expiry_ladder`（两本账合并的套餐到期阶梯，[[epoch, 剩余积分]]，按包
-        独立到期的渠道）、`quota_credits_expiry_ladder`（仅积分账那一段，仅 CodeArts）；
-        渠道无到期信息时前两者为 None，展示层据此隐藏。
+        附 `quota_expiring_credits`（窗口内即将到期的积分，与调度排序第一级同源）；
+        附 `quota_expiring_credits_secondary`（次窗口，主窗口打平时才参与排序的第二级）；
+        附 `quota_expiry_ladder`（套餐到期阶梯，[[epoch, 剩余积分]]，按包独立到期的渠道）；
+        渠道无到期信息时为 None，展示层据此隐藏。
         附 `model_cooldowns`（model → 截止 epoch），只在模型级限流/负缓存时非空。
         附 `token_expires_at` / `token_issued_at`（token 到期展示）：只下发
         绝对 epoch，剩余时间与预警阈值判定交给展示层用同一个时钟现算——否则
@@ -649,8 +625,7 @@ class CredentialRepository:
             "SELECT id, provider, nickname, enabled, disabled, disabled_reason, pinned, "
             "health, cooling_until, err_count, quota_remaining, quota_total, quota_cycle_end, "
             "quota_probed_at, growth_last_run_at, growth_last_result, created_at, added_by, "
-            "quota_expiry_ladder, quota_packages, quota_credits_remaining, "
-            "quota_credits_total, quota_credits_expiry_ladder, data_enc, "
+            "quota_expiry_ladder, quota_packages, data_enc, "
             "token_expires_at, token_issued_at, "
             "tags "
             "FROM credentials ORDER BY created_at").fetchall()
@@ -679,34 +654,15 @@ class CredentialRepository:
             rec["token_issued_at"] = issued_at
             ladder = _ladder_value(row["quota_expiry_ladder"])
             rec["quota_expiry_ladder"] = ladder
-            credits_ladder = _ladder_value(row["quota_credits_expiry_ladder"])
-            rec["quota_credits_expiry_ladder"] = credits_ladder
             rec["quota_packages"] = _packages_value(row["quota_packages"])
             # 标签以列表下发（库里是逗号分隔文本）：展示层不必知道存储形态，
             # 脏数据由 tags_value 读路径容错滤掉。
             rec["tags"] = tags_value(row["tags"])
             primary, secondary = expiry_windows(expiring_window, expiring_secondary_window)
-            # 主账到期积分 = 合并阶梯 − 积分账那一段。`expiring_credits` 是对
-            # 阶梯逐条求和，合并阶梯是两本账的拼接，故相减即精确得到主账那一段；
-            # 非 CodeArts 的 `credits_ladder` 恒 None（求和为 0），结果与改动前
-            # 完全一致。积分账的到期额另起两个字段，供管理台内置组读取。
-            credits_primary = expiring_credits(credits_ladder, primary, now)
-            credits_secondary = expiring_credits(credits_ladder, secondary, now)
             rec["quota_expiring_credits"] = (
-                None if ladder is None
-                else expiring_credits(ladder, primary, now) - credits_primary)
+                None if ladder is None else expiring_credits(ladder, primary, now))
             rec["quota_expiring_credits_secondary"] = (
-                None if ladder is None
-                else expiring_credits(ladder, secondary, now) - credits_secondary)
-            rec["quota_credits_expiring"] = (
-                None if credits_ladder is None else credits_primary)
-            rec["quota_credits_expiring_secondary"] = (
-                None if credits_ladder is None else credits_secondary)
-            # 积分账的派生健康度（仅展示，调度口径仍是 `health`）。内置组的
-            # 额度列讲积分账，健康度也必须讲同一本账，否则两列自相矛盾：
-            # 库里 `health` 只按主账（每日池）算，积分还剩 99% 的号也会显示 0%。
-            rec["quota_credits_health"] = credits_health_score(
-                row["quota_credits_remaining"], row["quota_credits_total"])
+                None if ladder is None else expiring_credits(ladder, secondary, now))
             rec["model_cooldowns"] = cooling.get(row["id"], [])
             out.append(rec)
         # 排序在组装后做：额度占比 / 到期额度是派生字段，SQL 排不了。
@@ -934,10 +890,11 @@ class CreditEventRepository:
                ) -> list[dict[str, Any]]:
         """默认倒序返回变动记录；limit 收敛到 [1, 200] 防止一次拉爆前端。
 
-        `ledger`：读哪一本账的流水（pool＝每日 token 池 / credits＝积分账）。
+        `ledger`：读哪一本账的流水（pool＝套餐/每日池余额 / credits＝CodeArts 积分）。
         **必须按账本过滤**：两本账的数值量级与语义都不同，混读会被当成同一本
-        账的连续读数（如每日池 1000 与积分账 14000 交替出现）。未知取值回落
-        `pool`——与老库默认列值一致，拼错也不会把两本账混在一起。
+        账的连续读数（CodeArts 老库里 pool 行是已下线的每日池口径，与积分差一个
+        数量级）。未知取值回落 `pool`——与老库默认列值一致，拼错也不会把两本账
+        混在一起。
 
         `sort` / `order`：列头排序白名单见 `CREDIT_EVENT_SORT_COLUMNS`。
         """

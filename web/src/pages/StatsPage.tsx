@@ -519,7 +519,7 @@ export function StatsPage() {
         <Metric
           label="Credit 消耗"
           value={formatCredit(stats?.credit, stats?.credit_estimated)}
-          hint="渠道可选字段，可能不返回；≈ 为推算值（TRAE 按单价、CodeArts 福利模型按每日池）"
+          hint="渠道可选字段，可能不返回；≈ 为推算值（TRAE 按单价折算）"
           icon={<CreditCard className="size-4" />}
         />
         <Metric
@@ -1076,7 +1076,7 @@ export function StatsPage() {
           隐私：不保存提示词、回答、请求头、Token、工具参数与原始错误体；逐请求明细保留 90 天，小时汇总永久保留；按 API Key 归属用户统计。
         </p>
         <p>
-          credit 为渠道可选字段，经常不返回；TRAE 上游不给单请求积分，带 ≈ 的数值是按官方单价折算；CodeArts 福利模型按每日 token 池 1:1 扣减后折成积分（1 积分 = 10000 token），带 ≈ 的值即该请求折算后的积分（CodeBuddy 为上游返回的真值）。健康度只依赖额度探测接口，主指标是 token 数。缓存命中率 = 命中 token ÷ 输入 token，仅在上报过缓存时展示。
+          credit 为渠道可选字段，经常不返回；TRAE 上游不给单请求积分，带 ≈ 的数值是按官方单价折算（CodeBuddy 为上游返回的真值）。健康度只依赖额度探测接口，主指标是 token 数。缓存命中率 = 命中 token ÷ 输入 token，仅在上报过缓存时展示。
         </p>
         <p>
           成本为估算：按 OpenRouter 的模型刊例价（USD / 百万 token）与本服务写入时生效的美元汇率折算，展示人民币、括号内为美元；不是上游真实扣费，未匹配到定价的模型不计入（显示 —）。汇率可在「任务与配置」页热更，仅影响之后写入的请求，历史成本不重算。

@@ -15,7 +15,12 @@ def test_migration_declarations_match_schema_sql():
     `_MIGRATION_COLUMNS` 里的列名写错、或 schema.sql 删掉了对应的新库列定义，
     都会让两边静默分叉（新库/老库结构不一致），这里在测试期就抦住。
     """
-    from src.db.migrate import _MIGRATION_COLUMNS, _MIGRATION_DROPS, _read_schema
+    from src.db.migrate import (
+        _MIGRATION_COLUMN_DROPS,
+        _MIGRATION_COLUMNS,
+        _MIGRATION_DROPS,
+        _read_schema,
+    )
 
     schema = _read_schema()
     for table, column_def in _MIGRATION_COLUMNS:
@@ -28,6 +33,16 @@ def test_migration_declarations_match_schema_sql():
     for table in _MIGRATION_DROPS:
         # 删掉的表不得在 schema.sql 里重建，否则每次启动都会建了又删
         assert f"CREATE TABLE IF NOT EXISTS {table}" not in schema, table
+
+    for table, column in _MIGRATION_COLUMN_DROPS:
+        # 已删列不得再出现在 schema.sql，否则新库每次建表都带着它、
+        # 紧接着又被删列步骤删掉（每次启动都在建了又删）
+        assert f"CREATE TABLE IF NOT EXISTS {table}" in schema, table
+        segment = schema.split(f"CREATE TABLE IF NOT EXISTS {table}", 1)[1]
+        segment = segment.split(");", 1)[0]
+        assert column not in segment, f"{table}.{column} 不该出现在 schema.sql"
+        # 补列清单里也不得残留同名列（补了又删）
+        assert all(col_def.split()[0] != column for t, col_def in _MIGRATION_COLUMNS), column
 
 
 def test_migration_indexes_not_in_schema_sql():
@@ -362,79 +377,98 @@ def test_legacy_db_upgrade_adds_credential_tags(tmp_path):
     db.close()
 
 
-def test_legacy_db_upgrade_adds_credential_credits_columns(tmp_path):
-    """老库升级：credentials 无积分账两列时幂等补列，历史行取 NULL。
+def test_legacy_db_upgrade_drops_credits_columns(tmp_path):
+    """老库升级：credentials 上遗留的三列积分账被删列，版本推进到 29。
 
-    补列后老库全部凭证「无积分账」——展示层据此隐藏第二行，`health` /
-    选号完全不受影响（它们是主账 quota_remaining 的职责）。
+    福利链路下线后积分账成为 CodeArts 唯一的额度来源，直接落在通用列上，
+    故老库里这三列必须显式 `ALTER TABLE ... DROP COLUMN`（schema.sql 删定义
+    对老库无效）。历史数据（同表其余列）不受影响。
     """
+    from src.db.migrate import _MIGRATION_COLUMN_DROPS, SCHEMA_VERSION
+
     db = Database(tmp_path / "legacy.sqlite3")
     conn = sqlite3.connect(db.path)
+    conn.execute("""
+        CREATE TABLE credentials (
+            id TEXT PRIMARY KEY, provider TEXT NOT NULL, data_enc BLOB NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1, disabled INTEGER NOT NULL DEFAULT 0,
+            disabled_reason TEXT, pinned INTEGER NOT NULL DEFAULT 0,
+            health INTEGER, cooling_until INTEGER, err_count INTEGER NOT NULL DEFAULT 0,
+            quota_remaining REAL, quota_total REAL, quota_cycle_end INTEGER,
+            quota_probed_at INTEGER, created_at INTEGER NOT NULL, added_by TEXT,
+            quota_credits_remaining REAL, quota_credits_total REAL,
+            quota_credits_expiry_ladder TEXT)
+    """)
+    # 老库里已有一条带积分账的凭证：删列后必须保留（其余列不动）
     conn.execute(
-        "CREATE TABLE credentials (id TEXT PRIMARY KEY, provider TEXT NOT NULL,"
-        " data_enc BLOB NOT NULL, created_at INTEGER NOT NULL)")
-    conn.execute("INSERT INTO credentials (id, provider, data_enc, created_at)"
-                 " VALUES ('cred_old', 'codearts', x'00', 1)")
+        "INSERT INTO credentials (id, provider, data_enc, quota_remaining,"
+        " quota_credits_remaining, quota_credits_total, quota_credits_expiry_ladder,"
+        " created_at) VALUES ('cred_old', 'codearts', x'00', 42.0, 13498.72, 13500.0,"
+        " '[[123, 40.0]]', 1)")
     conn.commit()
     conn.close()
 
     apply_schema(db.connect())
     columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
-    assert {"quota_credits_remaining", "quota_credits_total"} <= columns
-    # 历史行取 NULL（区分「无积分账」与「积分为 0」）
+    for _, column in _MIGRATION_COLUMN_DROPS:
+        assert column not in columns, column
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    # 历史行保留，同表其余列取原值（删列不动数据）
     legacy = db.connect().execute(
-        "SELECT quota_credits_remaining, quota_credits_total "
-        "FROM credentials WHERE id = 'cred_old'").fetchone()
-    assert tuple(legacy) == (None, None)
-    # 补列后可写可读
-    db.connect().execute(
-        "UPDATE credentials SET quota_credits_remaining = 13498.72, "
-        "quota_credits_total = 13500.0 WHERE id = 'cred_old'")
-    db.connect().commit()
-    assert tuple(db.connect().execute(
-        "SELECT quota_credits_remaining, quota_credits_total "
-        "FROM credentials WHERE id = 'cred_old'").fetchone()) == (13498.72, 13500.0)
-    from src.db.migrate import SCHEMA_VERSION
-
+        "SELECT provider, quota_remaining FROM credentials WHERE id = 'cred_old'").fetchone()
+    assert tuple(legacy) == ("codearts", 42.0)
+    # 二次执行幂等：列已不存在 → `no such column` 被忽略，不抛错
+    apply_schema(db.connect())
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     db.close()
 
 
-def test_legacy_db_upgrade_adds_credits_expiry_ladder(tmp_path):
-    """老库升级：credentials 无积分账到期阶梯列时幂等补列，历史行取 NULL。
+def test_new_db_has_no_credits_columns(tmp_path):
+    """新库路径：schema.sql 本就没有三列，删列步骤「列不存在」被静默忽略。"""
+    from src.db.migrate import SCHEMA_VERSION
 
-    补列后老库全部凭证「无积分到期信息」——管理台按「无到期积分」处理，
-    选号读的是两本账合并的 `quota_expiry_ladder`，不受本列影响。
-    """
-    db = Database(tmp_path / "legacy.sqlite3")
-    conn = sqlite3.connect(db.path)
-    conn.execute(
-        "CREATE TABLE credentials (id TEXT PRIMARY KEY, provider TEXT NOT NULL,"
-        " data_enc BLOB NOT NULL, created_at INTEGER NOT NULL)")
-    conn.execute("INSERT INTO credentials (id, provider, data_enc, created_at)"
-                 " VALUES ('cred_old', 'codearts', x'00', 1)")
-    conn.commit()
-    conn.close()
-
+    db = Database(tmp_path / "fresh.sqlite3")
     apply_schema(db.connect())
     columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
-    assert "quota_credits_expiry_ladder" in columns
-    # 历史行取 NULL（区分「无积分到期信息」与「到期积分为 0」）
-    assert db.connect().execute(
-        "SELECT quota_credits_expiry_ladder FROM credentials WHERE id = 'cred_old'"
-    ).fetchone()[0] is None
-    # 补列后可写可读
-    db.connect().execute(
-        "UPDATE credentials SET quota_credits_expiry_ladder = '[[123, 40.0]]' "
-        "WHERE id = 'cred_old'")
-    db.connect().commit()
-    assert json.loads(db.connect().execute(
-        "SELECT quota_credits_expiry_ladder FROM credentials WHERE id = 'cred_old'"
-    ).fetchone()[0]) == [[123, 40.0]]
-    from src.db.migrate import SCHEMA_VERSION
-
+    assert "quota_credits_remaining" not in columns
+    assert "quota_credits_total" not in columns
+    assert "quota_credits_expiry_ladder" not in columns
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     db.close()
+
+
+def test_migrate_reraises_drop_column_errors():
+    """删列时的其他 OperationalError（非「no such column」）必须上抛。
+
+    只有列不存在才是预期内的——数据库不可重试之外的任何失败（例如表被锁、
+    磁盘错误）都必须让启动失败，不能静默吞掉留下一个「半迁」的库。
+    """
+    import pytest as _pytest
+
+    class _FakeConn:
+        OperationalError = sqlite3.OperationalError
+
+        def executescript(self, _script):
+            pass
+
+        def execute(self, sql):
+            if sql.startswith("PRAGMA user_version"):
+                return _FakeRow()
+            if "ADD COLUMN" in sql:      # 补列已存在 → 忽略，继续往下走
+                raise sqlite3.OperationalError("duplicate column name: tags")
+            if "DROP COLUMN" in sql:     # 删列遇到非「列不存在」的失败 → 上抛
+                raise sqlite3.OperationalError("database is locked")
+            return None                  # DROP TABLE 等其余语句放行
+
+        def commit(self):  # pragma: no cover - 本用例在 commit 前就抛错
+            pass
+
+    class _FakeRow:
+        def fetchone(self):
+            return (0,)
+
+    with _pytest.raises(sqlite3.OperationalError, match="database is locked"):
+        apply_schema(_FakeConn())
 
 
 def test_legacy_db_upgrade_adds_api_key_policy_columns(tmp_path):

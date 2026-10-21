@@ -11,13 +11,9 @@
  *
  * 状态判定复用 `credentialState`（与表格里那个 Badge 同一口径），
  * 不在这里另起一套「可用」定义，否则筛选结果会和徽章自相矛盾。
- *
- * 唯一的例外是 CodeArts 的虚拟渠道：状态筛选与池概况仍按**主账**（真实调度口径
- * `health`）判，因为一条凭证是否被选中跟展示分组无关；而组头的状态分布按本组
- * 那本账算（见 `groupByProvider`），与组内额度列同源。
  */
 
-import { credentialHealth, credentialState, STATE_LABEL } from "../api/display";
+import { credentialState, STATE_LABEL } from "../api/display";
 import type { CredentialState } from "../api/display";
 import { providerLabel, providerRank } from "../api/providers";
 import type { Credential } from "../api/types";
@@ -85,79 +81,36 @@ export function filterCredentials(
 }
 
 /**
- * CodeArts 在凭证页拆成两个**虚拟渠道**。
+ * 一个渠道组展示的是哪本账。
  *
- * 为什么不在后端真拆 provider：CodeArts 的 `refresh_token` 是一次性的（与
- * `client_id=codearts-agent` + DPoP 私钥三者绑定，刷后即作废），两条凭证行会
- * 各刷一次、第二条必报 `the refresh token has been used` 并烧掉票据。所以拆分
- * 只发生在展示层：同一批账号在两个组各出现一次，**福利**只读展示每日 token 池，
- * **内置**承载全部操作与积分账（两本账的区分轴是模型，不是渠道，见 PROPOSAL §2.4）。
- */
-export const CODEARTS_INTERNAL_KEY = "codearts-internal";
-export const CODEARTS_BENEFIT_KEY = "codearts-benefit";
-
-/** 虚拟渠道在组内的展示次序：内置（承载全部操作）在前，福利（只读）在后。 */
-const CHANNEL_ORDER: Record<string, number> = {
-  [CODEARTS_INTERNAL_KEY]: 0,
-  [CODEARTS_BENEFIT_KEY]: 1,
-};
-
-/**
- * 一组展示的是哪本账。
- *
- * `pool`＝每日 token 池（福利模型计费），`credits`＝积分账（内置模型计费）。
- * 两本账在上游是两个独立接口、互不通气，数值量级也差一个数量级，故**一个组
- * 只讲一本账**：组头额度合计、行内额度数字、变动流水都按它取。
+ * `pool`＝套餐 / 每日池口径的余额（CodeArts 之外的渠道），`credits`＝CodeArts
+ * 积分（该渠道唯一的额度来源）。组头额度合计、行内额度数字、变动流水都按它取。
  */
 export type Ledger = "pool" | "credits";
 
-/** 展示渠道的定义：一个真实渠道一组，CodeArts 拆成两组。 */
-interface ChannelDef {
-  key: string;
-  provider: string;
-  label: string;
-  readOnly: boolean;
-  ledger: Ledger;
-}
-
 /**
- * 一条凭证归属的展示渠道（可多个）。
- *
- * CodeArts 同时进「内置」与「福利」两组；其余渠道只有自己一组。`key` 与
- * `provider` 分开：筛选 / 行内语义仍按真实 `provider` 判断（`quotaSemantics`、
- * `hasQuotaProbe` 等），只有分组与 testid 用 `key`。
+ * 渠道 → 账本。与后端 `db.repo.quota_ledger` 同口径：CodeArts 的额度来自积分
+ * 接口（内置模型按积分计费），记 `credits`；其余渠道记 `pool`。两本账在上游是
+ * 两套接口、数值量级也不同，混读会被当成同一本账的连续读数。
  */
-function channelDefs(provider: string): ChannelDef[] {
-  const label = providerLabel(provider);
-  if (provider !== "codearts") {
-    // 其余渠道只有一本账（主账＝每日 token 池口径的余额），积分账恒为 null。
-    return [{ key: provider, provider, label, readOnly: false, ledger: "pool" }];
-  }
-  return [
-    { key: CODEARTS_INTERNAL_KEY, provider, label: `${label} 内置`,
-      readOnly: false, ledger: "credits" },
-    { key: CODEARTS_BENEFIT_KEY, provider, label: `${label} 福利`,
-      readOnly: true, ledger: "pool" },
-  ];
+export function providerLedger(provider: string): Ledger {
+  return provider === "codearts" ? "credits" : "pool";
 }
 
-/** 组间顺序：先按全站渠道顺序，再按虚拟渠道次序（内置前、福利后），最后按 key 定序。 */
+/** 组间顺序：按全站渠道顺序，最后按 key 定序（同渠道只有一组，用于兜底稳定排序）。 */
 function compareGroups(left: ProviderGroup, right: ProviderGroup): number {
   return providerRank(left.provider) - providerRank(right.provider)
-    || (CHANNEL_ORDER[left.key] ?? 0) - (CHANNEL_ORDER[right.key] ?? 0)
     || left.key.localeCompare(right.key);
 }
 
 export interface ProviderGroup {
-  /** 分组唯一键：真实渠道＝provider；CodeArts 虚拟渠道＝`codearts-internal` / `codearts-benefit` */
+  /** 分组唯一键＝真实渠道 id */
   key: string;
-  /** 真实渠道 id（行内渠道语义仍按它判断） */
+  /** 真实渠道 id（行内渠道语义按它判断） */
   provider: string;
-  /** 组头展示名（虚拟渠道带「内置 / 福利」后缀） */
+  /** 组头展示名 */
   label: string;
-  /** 只读组（福利渠道）：只展示额度，不渲染勾选与任何操作 */
-  readOnly: boolean;
-  /** 本组讲哪一本账：pool＝每日 token 池 / credits＝积分账（额度合计与流水都按它取） */
+  /** 本组讲哪一本账：pool＝套餐/每日池余额 / credits＝CodeArts 积分（额度合计与流水都按它取） */
   ledger: Ledger;
   /** 组内凭证，保持传入顺序（即后端排序），分组不改变排序语义 */
   items: Credential[];
@@ -180,58 +133,40 @@ export interface ProviderGroup {
  * 30s 轮询会让列表顺序随排序键变化，若按出现顺序排组，组头会在页面上乱跳。
  * 未知渠道排在已知渠道之后，与模型列表口径一致。
  *
- * 聚合口径与行内展示同源：状态走 `credentialState`，额度直接对**本组那本账**的
- * 字段求和（内置组＝`quota_credits_*`，其余＝`quota_remaining/total`）。
- * **null 语义必须保住**：免费层（zen / kilo）的 `quota_remaining` 与内置组的
- * 未探测积分账恒为 null，若当 0 求和会把「无额度接口 / 未探测」显示成「额度 0」。
- * 故只对非 null 求和，一个都没有时返回 null（调用方显示 —）。
+ * 聚合口径与行内展示同源：状态走 `credentialState`，额度对通用额度字段求和。
+ * **null 语义必须保住**：免费层（zen / kilo）的 `quota_remaining` 恒为 null，
+ * 若当 0 求和会把「无额度接口」显示成「额度 0」。故只对非 null 求和，一个都没有
+ * 时返回 null（调用方显示 —）。
  */
 export function groupByProvider(
   credentials: Credential[],
   now: number = Date.now() / 1000,
 ): ProviderGroup[] {
-  const buckets = new Map<string, { channel: ChannelDef; items: Credential[] }>();
+  const buckets = new Map<string, Credential[]>();
   for (const credential of credentials) {
-    for (const channel of channelDefs(credential.provider)) {
-      const bucket = buckets.get(channel.key);
-      if (bucket) bucket.items.push(credential);
-      else buckets.set(channel.key, { channel, items: [credential] });
-    }
+    const bucket = buckets.get(credential.provider);
+    if (bucket) bucket.push(credential);
+    else buckets.set(credential.provider, [credential]);
   }
-  return [...buckets.values()]
-    .map(({ channel, items }) => {
+  return [...buckets.entries()]
+    .map(([provider, items]) => {
       const states: Partial<Record<CredentialState, number>> = {};
-      const credits = channel.ledger === "credits";
       for (const item of items) {
-        // 状态按**本组那本账**的健康度算：内置组讲积分账，若仍读主账，会出现
-        // 「额度还剩一大截却记在『额度耗尽』」的组头分布。
-        const state = credentialState(item, now, credentialHealth(item, channel.ledger));
+        const state = credentialState(item, now);
         states[state] = (states[state] ?? 0) + 1;
       }
       return {
-        key: channel.key,
-        provider: channel.provider,
-        label: channel.label,
-        readOnly: channel.readOnly,
-        ledger: channel.ledger,
+        key: provider,
+        provider,
+        label: providerLabel(provider),
+        ledger: providerLedger(provider),
         items,
         states,
-        remaining: sumDefined(
-          items, (item) => credits ? item.quota_credits_remaining : item.quota_remaining),
-        total: sumDefined(
-          items, (item) => credits ? item.quota_credits_total : item.quota_total),
-        expiring: sumDefined(
-          items,
-          (item) => credits
-            ? item.quota_credits_expiring
-            : item.quota_expiring_credits,
-        ),
+        remaining: sumDefined(items, (item) => item.quota_remaining),
+        total: sumDefined(items, (item) => item.quota_total),
+        expiring: sumDefined(items, (item) => item.quota_expiring_credits),
         expiringSecondary: sumDefined(
-          items,
-          (item) => credits
-            ? item.quota_credits_expiring_secondary
-            : item.quota_expiring_credits_secondary,
-        ),
+          items, (item) => item.quota_expiring_credits_secondary),
       };
     })
     .sort(compareGroups);

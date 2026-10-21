@@ -174,10 +174,7 @@ async def probe_credential_once(credentials, provider, data, credential_id: str)
         return {"probed": False, "reason": reason}
     credentials.save_quota(credential_id, quota)
     return {"probed": True, "remaining": quota.remaining, "total": quota.total,
-            "cycle_end": quota.cycle_end,
-            # 第二本账（CodeArts 积分）：其余渠道恒 None，前端据此隐藏该行
-            "credits_remaining": quota.credits_remaining,
-            "credits_total": quota.credits_total}
+            "cycle_end": quota.cycle_end}
 
 
 async def checkin_credential_once(credentials, provider, data, credential_id: str,
@@ -509,7 +506,7 @@ def create_router(services: Services) -> APIRouter:
                             principal=Depends(principal_from_request)):
         """变动流水：两次额度探测之间的净变化（倒序）。
 
-        `ledger` 选账本：`pool`（默认）＝每日 token 池，`credits`＝积分账。
+        `ledger` 选账本：`pool`（默认）＝套餐/每日池余额，`credits`＝CodeArts 积分。
         两本账量级与语义都不同，必须分开读，混在一起会被当成同一本账的连续
         读数。未知取值由仓储回落 `pool`（与老库默认列值一致）。
 

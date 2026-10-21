@@ -74,13 +74,12 @@ class Settings(BaseSettings):
         "https://openapi.qoder.sh,https://api1.qoder.sh"
     )
     # CodeArts（华为云码道 / snap-access 盘古引擎）：AK/SK 签名渠道。白名单
-    # 必须含 snap 引擎（推理/令牌）、STS（refresh）、福利网关（模型/领取/余额）
-    # 与门户（PKCE 授权页）四个主机。
+    # 必须含 snap 引擎（推理/令牌/额度/签到）、STS（refresh）与门户（PKCE
+    # 授权页）三个主机。
     codearts_api_endpoint: str = "https://snap-access.cn-north-4.myhuaweicloud.com"
     codearts_allowed_endpoints: str = (
         "https://snap-access.cn-north-4.myhuaweicloud.com,"
         "https://sts.cn-north-4.myhuaweicloud.com,"
-        "https://opengw.developer.huaweicloud.com,"
         "https://codearts.huaweicloud.com"
     )
     # officeAce（华为云果办 / AgentArts）：OAuth + 开通校验走**控制面**

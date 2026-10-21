@@ -300,8 +300,7 @@ def test_probe_endpoint_returns_quota_fields(admin_client):
 
     app.state.executor._deps.providers["codebuddy"] = Stub()
     body = client.post(f"/api/credentials/{credential_id}/probe").json()
-    assert body == {"probed": True, "remaining": 7, "total": 10, "cycle_end": 123,
-                    "credits_remaining": None, "credits_total": None}
+    assert body == {"probed": True, "remaining": 7, "total": 10, "cycle_end": 123}
 
 def test_import_triggers_immediate_probe(admin_client):
     """新增凭证后应立即探测，否则界面一直显示「未探测到额度」。"""

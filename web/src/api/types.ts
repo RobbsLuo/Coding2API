@@ -57,31 +57,14 @@ export interface Credential {
   err_count: number;
   quota_remaining: number | null;
   quota_total: number | null;
-  /** 第二本账（仅 CodeArts 有）：积分＝内置模型计费单位，与每日 token 池并行。
-   *  其余渠道恒 null。健康度只看 quota_remaining；积分到期日由后端并入
-   *  到期阶梯参与选号排序，前端不据此改健康度。 */
-  quota_credits_remaining: number | null;
-  quota_credits_total: number | null;
   /** 仅 CodeBuddy 有周期；TRAE 为 null */
   quota_cycle_end: number | null;
-  /** 调度主窗口（36h）内即将到期的积分（与选号排序第一级同源）；无到期信息的渠道为 null。
-   *  CodeArts 已按账本拆分：此字段是**每日池**那一段，积分账那一段见
-   *  `quota_credits_expiring`。 */
+  /** 调度主窗口（36h）内即将到期的积分（与选号排序第一级同源）；无到期信息的渠道为 null */
   quota_expiring_credits: number | null;
   /** 调度次窗口（7 天）内即将到期的积分（主窗口打平时才参与排序的第二级）；同上 */
   quota_expiring_credits_secondary: number | null;
-  /** 积分账自己的主窗口内到期积分（仅 CodeArts 有，其余渠道 null） */
-  quota_credits_expiring: number | null;
-  /** 积分账自己的次窗口内到期积分（仅 CodeArts 有） */
-  quota_credits_expiring_secondary: number | null;
-  /** 积分账派生的健康度（仅 CodeArts 有，其余渠道 null）。
-   *  **不参与调度**：调度只用 `health`（每日池）；本字段只让「内置」展示组
-   *  的健康度与该组额度列讲同一本账，避免「积分还剩 99%、健康度却 0%」。 */
-  quota_credits_health: Health;
   /** 套餐到期阶梯 [[到期 epoch, 该套餐剩余积分]]，仅 CodeBuddy；TRAE 为 null */
   quota_expiry_ladder: [number, number][] | null;
-  /** 积分账那一段到期阶梯（仅 CodeArts）；其余渠道 null */
-  quota_credits_expiry_ladder: [number, number][] | null;
   /** 额度包明细（含包名，仅供展示）；未探测或上游未提供时为 null */
   quota_packages: QuotaPackage[] | null;
   /** 生效中的模型级冷却（模型级限流/负缓存）；无则为空数组 */
@@ -154,7 +137,7 @@ export interface StatsOverview {
   cached_tokens: number | null;
   /** 渠道可选字段，两边都经常为 null */
   credit: number | null;
-  /** credit 是否为推算值（TRAE 按官方单价、CodeArts 福利模型按每日池 1:1），展示加 ≈ */
+  /** credit 是否为推算值（TRAE 按官方单价折算），展示加 ≈ */
   credit_estimated: boolean;
   /** 成本估算（USD，OpenRouter 刊例价 × token）；无可定价明细时为 null（显示 —） */
   cost_usd: number | null;
@@ -164,6 +147,14 @@ export interface StatsOverview {
   avg_latency_ms: number | null;
   /** 平均首字延迟（TTFB）：请求开始到首个内容帧，接近真实体感延迟 */
   avg_ttfb_ms: number | null;
+  /**
+   * 输出速度（tok/s）：总输出 token ÷ 生成时间总和（不是逐条平均），
+   * 只用经路由的成功请求里输出 ≥ 100 token 的样本；无样本为 null（显示 —）。
+   * 无首字数据时回落估算口径并置 tps_estimated（展示加 ≈）。
+   */
+  tps: number | null;
+  /** tps 是否为估算值（估算含首字等待，只估输出 ≥ 200 token 的请求） */
+  tps_estimated: boolean;
 }
 
 /**
@@ -188,6 +179,13 @@ export interface GroupStats {
   avg_latency_ms: number | null;
   /** 平均首字延迟（ms）：ttfb_sum ÷ 成功数，读小时汇总；无成功请求为 null */
   avg_ttfb_ms: number | null;
+  /**
+   * 输出速度（tok/s）：总输出 token ÷ 生成时间总和，读明细表（仅 90 天）；
+   * 该维度无路由样本时回落估算口径（含首字等待，只估输出 ≥ 200 token）。
+   */
+  tps: number | null;
+  /** tps 是否为估算值（展示加 ≈）；两个口径都无样本时为 false 且 tps 为 null */
+  tps_estimated: boolean;
   /** P95 耗时（ms）：按成功请求 nearest-rank 取第 ⌈0.95n⌉ 小，读明细表（仅 90 天） */
   p95_latency_ms: number | null;
   /** P95 首字延迟（ms）：同 p95_latency_ms，只数上报过 ttfb 的样本 */
@@ -253,7 +251,7 @@ export interface UsageEventRow {
   output_tokens: number | null;
   cached_tokens: number | null;
   credit: number | null;
-  /** credit 是否为推算值（TRAE 按官方单价、CodeArts 福利模型按每日池 1:1），展示加 ≈ */
+  /** credit 是否为推算值（TRAE 按官方单价折算），展示加 ≈ */
   credit_estimated: number;
   /** 成本估算（USD，OpenRouter 刊例价）；未匹配到定价或未上报 token 时为 null */
   cost_usd: number | null;
@@ -485,7 +483,7 @@ export interface CreditEvent {
   delta: number | null;
   /** observed=两次探测间净变化；sync=首次建立基线（无对照） */
   source: string;
-  /** 账本：pool=每日 token 池（福利模型）；credits=积分账（内置模型） */
+  /** 账本：pool=套餐/每日池余额（CodeArts 之外的渠道）；credits=积分（CodeArts） */
   ledger: string;
 }
 
@@ -566,13 +564,7 @@ export interface ModelInfo {
   /** 上游为该模型配置的默认推理档位（字符串，如 `high` / `medium`；无则为空串/缺失） */
   default_effort?: string;
   /** 多渠道模型才有：按渠道给出倍率与**该渠道实际请求的 key**（raw key 永不改动） */
-  by_provider?: Record<string, { credit_rate?: number; raw_id?: string; benefit?: boolean }>;
-  /**
-   * 福利模型标记（当前只有 CodeArts）：来自「限时免费套餐」目录，走每日
-   * token 池而非积分账、上游不给倍率。单渠道条目读这里；多渠道按
-   * `by_provider.{渠道}.benefit` 分渠道判断（见 providerBenefit）。
-   */
-  benefit?: boolean;
+  by_provider?: Record<string, { credit_rate?: number; raw_id?: string }>;
   /** 能力分（Artificial Analysis 指数）：匹配不到该模型的第三方成绩时整个字段缺失 */
   benchmarks?: ModelBenchmarks;
 }

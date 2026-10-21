@@ -115,10 +115,9 @@ services:
       QODER_GATEWAY_ENDPOINT: ${QODER_GATEWAY_ENDPOINT:-https://gateway.qoder.com.cn}
       QODER_ALLOWED_ENDPOINTS: ${QODER_ALLOWED_ENDPOINTS:-https://openapi.qoder.com.cn,https://gateway.qoder.com.cn,https://openapi.qoder.sh,https://api1.qoder.sh}
       # CodeArts（华为云码道 / snap-access）：AK/SK 签名渠道。白名单必须含
-      # snap 引擎（推理/令牌）、STS（refresh）、福利网关（模型/领取/余额）、
-      # 门户（PKCE 授权页）。
+      # snap 引擎（推理/令牌/额度/模型目录）、STS（refresh）、门户（PKCE 授权页）。
       CODEARTS_API_ENDPOINT: ${CODEARTS_API_ENDPOINT:-https://snap-access.cn-north-4.myhuaweicloud.com}
-      CODEARTS_ALLOWED_ENDPOINTS: ${CODEARTS_ALLOWED_ENDPOINTS:-https://snap-access.cn-north-4.myhuaweicloud.com,https://sts.cn-north-4.myhuaweicloud.com,https://opengw.developer.huaweicloud.com,https://codearts.huaweicloud.com}
+      CODEARTS_ALLOWED_ENDPOINTS: ${CODEARTS_ALLOWED_ENDPOINTS:-https://snap-access.cn-north-4.myhuaweicloud.com,https://sts.cn-north-4.myhuaweicloud.com,https://codearts.huaweicloud.com}
       # CodeBuddy 聊天最小间隔（秒）：同凭证顺序连发节流，0 关闭
       CODEBUDDY_CHAT_MIN_INTERVAL: ${CODEBUDDY_CHAT_MIN_INTERVAL:-5}
       # CB 国际版聊天最小间隔（秒）：与国内站**各自独立**的节流器
