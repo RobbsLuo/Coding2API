@@ -37,11 +37,19 @@ from .provider.naming import normalize_model_key
 # 每条对应一个实测过的写法差异：
 #   `doubao ≡ seed`：字节两个模型族在 TRAE 叫 `Doubao-Seed-2.1-Turbo`，在
 #     OpenRouter 叫 `bytedance-seed/seed-2.1-turbo`（2026-10-10 实测）。
+#   `deepseek-v4.1-flash` 的渠道分发代号：OfficeAce 用快照日 `-0930`、
+#     CodeBuddy 国际站用区域 `-sg`，两者都是同一个 `deepseek-v4.1-flash`
+#     （2026-10-21 实测：价表里没有这两个 id，两条渠道共 3600+ 条明细成本为空）。
+#     **逐 id 登记，不做通用「剥日期 / 剥区域尾缀」**——OpenRouter 的
+#     `deepseek-v4.1-flash-1017` 是**另一个价位**的快照（0.15 / 0.6 USD 对
+#     浮动别名的 0.035 / 0.12），通用剥尾会把两套价格混成一个。
 #   `维 度 ≡ vision`：CodeArts 的 `Qwen3-VL-235B`，OpenRouter 不带 `-vl` 后缀
 #     的 `qwen3-235b` 是不同规格，**不能**并入，故不登记该条（留作反例说明
 #     为什么只登记实测过的）。
 _ALIAS_RULES: tuple[tuple[str, str], ...] = (
     ("doubao-seed", "seed"),
+    ("deepseek-v4.1-flash-0930", "deepseek-v4.1-flash"),
+    ("deepseek-v4.1-flash-sg", "deepseek-v4.1-flash"),
 )
 
 # 需要整段剥掉的尾缀词：上游用它区分「同一模型的另一个分发口径」，不是模型

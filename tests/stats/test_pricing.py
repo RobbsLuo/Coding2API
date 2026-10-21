@@ -77,6 +77,24 @@ def test_estimate_cost_usd_missing_output_uses_zero():
                              cached_tokens=None) == pytest.approx(1.0)
 
 
+def test_estimate_cost_usd_channel_variants_use_base_model_price():
+    """渠道分发代号（OfficeAce 的 `-0930`、CodeBuddy 国际站的 `-sg`）按同一个
+    `deepseek-v4.1-flash` 刊例价算，不再显示 `—`。
+
+    价表里没有这两个 id，靠 `model_match` 的显式等价规则命中基础模型；另一个
+    方向的反例是 OpenRouter 的 `-1017` 快照——它有自己的价位，**不能**被剥尾
+    归到基础模型上。
+    """
+    table = {"deepseek-v4.1-flash": (0.03552, 0.12, 0.03552)}
+    base = estimate_cost_usd(table, "deepseek-v4.1-flash", input_tokens=1000,
+                             output_tokens=100, cached_tokens=0)
+    for model in ("deepseek-v4.1-flash-0930", "deepseek-v4.1-flash-sg"):
+        assert estimate_cost_usd(table, model, input_tokens=1000, output_tokens=100,
+                                 cached_tokens=0) == base
+    assert estimate_cost_usd(table, "deepseek-v4.1-flash-1017", input_tokens=1000,
+                             output_tokens=100, cached_tokens=0) is None
+
+
 def test_to_cny_falls_back_on_invalid_rate():
     assert to_cny(1.0, 6.7) == pytest.approx(6.7)
     assert to_cny(1.0, 0) == 1.0          # 非正 → 1:1

@@ -33,6 +33,18 @@ def test_match_keys_drops_stacked_suffix_once():
     assert "seed-2.0-code" in keys
     assert "doubao-seed-2.0-code" not in keys  # 输入没有 doubao 前缀，不加
 
+def test_match_keys_maps_deepseek_flash_channel_codes():
+    """渠道分发代号归到同一刊例价：`-0930`（快照日）/ `-sg`（国际站区域）。
+
+    只登记这两个 id，**不做通用日期 / 区域剥尾**——OpenRouter 的
+    `deepseek-v4.1-flash-1017` 是另一个价位的快照，剥尾会把两套价格混成一个。
+    """
+    assert "deepseek-v4.1-flash" in match_keys("deepseek-v4.1-flash-0930")
+    assert "deepseek-v4.1-flash" in match_keys("deepseek-v4.1-flash-sg")
+    assert "deepseek-v4.1-flash" not in match_keys("deepseek-v4.1-flash-1017")
+    assert "deepseek-v4.1-flash" not in match_keys("deepseek-v4.1-flash-batch")
+
+
 def test_match_keys_swaps_version_separator():
     """版本号点 / 连字符互换：`seed-2.1-turbo` 与 `seed-2-1-turbo` 都能查。
 
