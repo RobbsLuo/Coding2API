@@ -353,14 +353,31 @@ async def test_poll_credentials_use_client_id_from_config():
 
 
 async def test_poll_unprovisioned_account_gives_actionable_message():
-    """未开通（`subscription: null`）不是登录失败，必须给可行动的指引。"""
+    """未开通（`subscription: null`）不是登录失败，必须给可行动的指引。
+
+    还要点名是**哪个**账号没开通：浏览器里留着别的华为云会话时，用户根本
+    不知道刚才授权的是哪个号。
+    """
     oauth, state = await _started(_flow(permission=httpx.Response(
-        200, json={"account_id": "a", "subscription": None})))
+        200, json={"account_id": "a", "principal_urn": "iam::a:user:eve",
+                   "subscription": None})))
     with pytest.raises(UpstreamProtocolViolation) as caught:
         await oauth.poll(state, "alice")
     assert "还没开通 officeAce 服务" in caught.value.public_message
+    assert "eve" in caught.value.public_message
     # 失败后 state 未消费：用户可以补齐开通再重试
     assert len(oauth.store) == 1
+
+
+async def test_poll_unprovisioned_without_identity_uses_generic_wording():
+    """上游连身份都不给时不能拼出「华为云账号  还没开通」这种残句。"""
+    oauth, state = await _started(_flow(permission=httpx.Response(
+        200, json={"subscription": None})))
+    with pytest.raises(UpstreamProtocolViolation) as caught:
+        await oauth.poll(state, "alice")
+    message = caught.value.public_message
+    assert message.startswith("这个账号还没开通 officeAce 服务")
+    assert "华为云账号" not in message
 
 
 async def test_poll_missing_gateway_raises():

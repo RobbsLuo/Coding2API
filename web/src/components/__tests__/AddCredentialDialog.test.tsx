@@ -111,6 +111,23 @@ describe("AddCredentialDialog", () => {
     vi.useRealTimers();
   });
 
+  it("officeAce「换账号」带着 force_login 发起登录", async () => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/upstream/start")) {
+        bodies.push(JSON.parse(String(init?.body ?? "")));
+        return jsonResponse({ flow: "poll", state: "s", auth_url: "https://a", interval: 5 });
+      }
+      return jsonResponse({ credentials: [], viewer: "root", is_admin: true });
+    }));
+    vi.stubGlobal("open", () => ({ closed: false, close: vi.fn(), opener: {}, location: { href: "" } }));
+    renderDialog();
+    await userEvent.click(screen.getByTestId("switch-login-officeace"));
+
+    expect(bodies).toEqual([{ provider: "officeace", force_login: true }]);
+  });
+
   it("拒绝非 http(s) 授权地址，不对弹窗赋值", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

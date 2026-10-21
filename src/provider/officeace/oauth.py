@@ -355,14 +355,23 @@ class OfficeAceOAuth:
         credential.client_id = self.config.client_id
         credential.dpop_private_jwk = dict(session.dpop_private_jwk)
         info = await self.fetch_model_info(credential)
+        # 身份字段先落：未开通时要靠它告诉用户「是哪个账号没开通」——浏览器里
+        # 留着另一个华为云账号时，用户看到「没开通」根本不知道说的是哪个号。
+        credential.account_id = info["account_id"] or credential.account_id
+        credential.principal_id = info["principal_id"] or credential.principal_id
+        credential.user_name = info["user_name"] or credential.user_name
         if not info["app_key"] or not info["app_secret"]:
             # 未开通的账号：云端 200 但 `subscription: null`（实测三账号全如此）。
             # 这不是登录失败，而是「还没兑换邀请码」——必须给可行动的指引，
-            # 否则用户会以为是自己登录姿势不对。
+            # 否则用户会以为是自己登录姿势不对。带上账号名，否则用户不知道
+            # 刚才授权的是浏览器里的哪个（很可能不是自己想用的那个）账号。
+            who = info["user_name"] or info["account_id"]
             raise UpstreamProtocolViolation(
                 "officeAce account is not provisioned",
-                public=("这个账号还没开通 officeAce 服务。请先在 OfficeAce "
-                        "客户端里登录并兑换邀请码完成开通，再回来重新登录。"))
+                public=(f"华为云账号 {who} 还没开通 officeAce 服务。" if who
+                        else "这个账号还没开通 officeAce 服务。")
+                + ("请先在 OfficeAce 客户端里登录并兑换邀请码完成开通，"
+                   "或点「换账号」用已开通的账号重新登录。"))
         if not info["base_url"]:
             raise UpstreamProtocolViolation(
                 "model gateway address missing",
@@ -370,11 +379,6 @@ class OfficeAceOAuth:
         credential.model_app_key = info["app_key"]
         credential.model_app_secret = info["app_secret"]
         credential.model_base_url = info["base_url"]
-        credential.account_id = info["account_id"] or credential.account_id
-        credential.principal_id = info["principal_id"] or credential.principal_id
-        # 用户名只出现在 `principal_urn` 里（接口无独立字段）：补上后昵称才不是
-        # 一串 32 位账号 ID，用户才认得出「哪条凭证是自己的」。
-        credential.user_name = info["user_name"] or credential.user_name
         # 昵称只用于展示：优先上游给的、其次用户名、最后账号 ID（都没有就留空，
         # 前端按凭证 ID 兜底）。用 `or` 链而非 if：三者都缺是合法情况，
         # STS 响应本身并不带 nickname 字段。

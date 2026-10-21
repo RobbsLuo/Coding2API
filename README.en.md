@@ -219,7 +219,7 @@ Mixing them yields `APIG.0303 app not found`. The failure is confusing either wa
 
 **One account, one user**: the official plan page states the personal edition is "limited to a single user per account", so this channel is not shared between people — each user adds their own credential.
 
-**Switching accounts**: the login flow supports `force_login`, which first hits `/authui/logout?service=…` to clear the Huawei Cloud browser session. The *Log in to officeAce* button does not pass it — use a private window or another browser for a second account, or sign out of Huawei Cloud first. The server-side capability is in place; wiring it into the UI is follow-up work.
+**Switching accounts**: the Huawei Cloud session is **per browser**. If a previous account's session is still alive, the cloud silently re-approves it and "add a credential" becomes "log the same account in again". The login row therefore has a second **Switch account** action (`force_login=true`) that hits `/authui/logout?service=…` first. An account that has not opened officeAce is reported by name instead of a generic login failure.
 
 ### CodeBuddy international site (`codebuddy_intl`, real account)
 

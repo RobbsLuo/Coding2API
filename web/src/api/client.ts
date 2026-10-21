@@ -182,8 +182,13 @@ export const api = {
     request<ActivityReportResult>(`/api/credentials/${id}/activity`, { method: "POST" }),
 
   // ------------------------------------------------------------ 渠道登录
-  upstreamStart: (provider: string) =>
-    request<UpstreamAuthStart>("/api/auth/upstream/start", { method: "POST", ...json({ provider }) }),
+  /** 发起渠道登录。`forceLogin`：先登出上游，用于新增另一个账号（避免云端
+   *  直接复用浏览器里现有的会话，把「新增」变成「同一个账号再登一遍」）。 */
+  upstreamStart: (provider: string, forceLogin = false) =>
+    request<UpstreamAuthStart>("/api/auth/upstream/start", {
+      method: "POST",
+      ...json({ provider, force_login: forceLogin }),
+    }),
   upstreamPoll: (provider: string, state: string) =>
     request<UpstreamAuthPoll>("/api/auth/upstream/poll", {
       method: "POST",
