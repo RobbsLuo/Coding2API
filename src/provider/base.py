@@ -153,7 +153,7 @@ def _retry_after_delta(raw: str, now: int) -> float | None:
 def parse_retry_after(headers: Any, now: int) -> int | None:
     """上游 `Retry-After` → 「何时恢复」的 epoch 秒；缺头/非法返回 None。
 
-    这是唯一解析入口：七渠道在构造 `UpstreamHTTPError` 时统一调用
+    这是唯一解析入口：八渠道在构造 `UpstreamHTTPError` 时统一调用
     `retry_hints`（本函数的薄包装），再交给调度器按错误分类的作用域钳制。
     """
     delta = _retry_after_delta(_header_value(headers, "retry-after"), now)

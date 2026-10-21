@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     preview       TEXT NOT NULL,
     created_at    INTEGER NOT NULL,
     last_used_at  INTEGER,
-    -- 多 Key 出口：绑定渠道（见 KNOWN_PROVIDERS 七渠道 | ''=自动）与来源 IP
+    -- 多 Key 出口：绑定渠道（见 KNOWN_PROVIDERS 八渠道 | ''=自动）与来源 IP
     -- 白名单（逗号分隔 IP/CIDR，''=不限制）。空值即老库/未设置时的原行为。
     provider_binding TEXT NOT NULL DEFAULT '',
     allowed_ips   TEXT NOT NULL DEFAULT '',
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
 
 CREATE TABLE IF NOT EXISTS credentials (
     id               TEXT PRIMARY KEY,
-    provider         TEXT NOT NULL,          -- 见 KNOWN_PROVIDERS（七渠道）
+    provider         TEXT NOT NULL,          -- 见 KNOWN_PROVIDERS（八渠道）
     nickname         TEXT NOT NULL DEFAULT '',
     data_enc         BLOB NOT NULL,          -- Fernet 加密的凭证 JSON
     enabled          INTEGER NOT NULL DEFAULT 1,   -- 用户软开关

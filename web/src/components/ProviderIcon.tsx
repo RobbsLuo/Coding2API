@@ -24,6 +24,8 @@ const BRAND: Record<string, { Main: BrandComp; Color: BrandComp }> = {
   qoder: { Main: QoderMono, Color: QoderColor },
   // CodeArts 无独立图标，用母公司 HuaweiCloud 品牌图标
   codearts: { Main: HuaweiCloudMono, Color: HuaweiCloudColor },
+  // officeAce 同为华为云产品（AgentArts 办公智能体），沿用母公司图标
+  officeace: { Main: HuaweiCloudMono, Color: HuaweiCloudColor },
 };
 
 /**

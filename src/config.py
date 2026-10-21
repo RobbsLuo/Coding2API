@@ -83,6 +83,16 @@ class Settings(BaseSettings):
         "https://opengw.developer.huaweicloud.com,"
         "https://codearts.huaweicloud.com"
     )
+    # officeAce（华为云果办 / AgentArts）：OAuth + 开通校验走**控制面**
+    # `agentarts.{region}.myhuaweicloud.com`；聊天走每账号各自的模型网关
+    # `modelgw-XXXX.officeace.{region}.huaweicloud-agentarts.com`，该地址由
+    # `client-permission-validate` 下发并存在凭证里（每个账号不同），故不在此配置，
+    # 也不进白名单——它不是本服务能写错的值，而是上游签发的。这里只白名单控制面：
+    # 带临时 AK/SK 签名的请求只会发往它。
+    officeace_api_endpoint: str = "https://agentarts.cn-southwest-2.myhuaweicloud.com"
+    officeace_allowed_endpoints: str = (
+        "https://agentarts.cn-southwest-2.myhuaweicloud.com"
+    )
     # 按渠道出站代理（启动期项，见 provider/proxy.py）：格式
     # `渠道=代理URL;渠道2=代理URL2`，协议 http/https/socks5/socks5h；留空 = 直连。
     # 代理作用于连接池，运行中改值需重启，故不做热更。
@@ -213,6 +223,11 @@ class Settings(BaseSettings):
     qoder_chat_min_interval: float = 5
     # CodeArts 聊天最小间隔：真实账号渠道，默认 5s；独立节流器。
     codearts_chat_min_interval: float = 5
+    # officeAce 聊天最小间隔：真实账号渠道（单账号单用户条款），默认 0——
+    # 上游没有像 CodeArts 那样「每 60s 最多 3 会话」的硬限，实测并发下
+    # 直接放行即可；被限流时走伪 200 的 81111/81114（模型级短冷却），
+    # 不需要靠本地节流兜。另有独立节流器，与其余渠道互不排队。
+    officeace_chat_min_interval: float = 0
     # CodeArts 每账号在途并发上限：上游硬限「并发会话数 3」，超限的请求直接
     # 400 TM.00001041 并发超限（实测 77% 失败率的主因）。默认 3 对齐上游；
     # 0 关闭上限（回到「有在途就放行」，会再次击穿）。可热更。
@@ -374,6 +389,11 @@ class Settings(BaseSettings):
                      if e.strip())
 
     @cached_property
+    def officeace_allowed(self) -> tuple[str, ...]:
+        return tuple(e.strip().rstrip("/") for e in self.officeace_allowed_endpoints.split(",")
+                     if e.strip())
+
+    @cached_property
     def blocklist_patterns(self) -> tuple[str, ...]:
         return tuple(p.strip() for p in self.model_blocklist.split(",") if p.strip())
 
@@ -422,6 +442,11 @@ def validate_qoder_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
 def validate_codearts_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
     """CodeArts 端点白名单校验（防把 AK/SK 签名请求发往未授权主机）。"""
     return endpoint.strip().rstrip("/") in settings.codearts_allowed
+
+
+def validate_officeace_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
+    """officeAce 控制面端点白名单校验（防把 AK/SK 签名请求发往未授权主机）。"""
+    return endpoint.strip().rstrip("/") in settings.officeace_allowed
 
 
 def live(value: Any) -> Callable[[], Any]:

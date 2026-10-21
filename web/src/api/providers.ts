@@ -15,6 +15,7 @@ export const PROVIDER_LABEL: Record<Provider, string> = {
   kilo: "Kilo Gateway",
   qoder: "Qoder",
   codearts: "CodeArts",
+  officeace: "officeAce",
 };
 
 /** 模型下拉里的渠道缩写（如 `CB x0.29`）。 */
@@ -26,6 +27,7 @@ export const PROVIDER_ABBR: Record<Provider, string> = {
   kilo: "KL",
   qoder: "QD",
   codearts: "CA",
+  officeace: "OA",
 };
 
 /**
@@ -42,6 +44,7 @@ export const PROVIDER_CHART_COLOR: Record<Provider, string> = {
   kilo: "var(--chart-2)",
   qoder: "var(--chart-5)",
   codearts: "var(--chart-6)",
+  officeace: "var(--chart-8)",
 };
 
 /** 未知渠道（老数据/未来渠道）的兜底色。 */
@@ -51,7 +54,7 @@ export const FALLBACK_CHART_COLOR = "var(--chart-5)";
  * 模型列表 / 下拉的渠道展示顺序：CodeBuddy、TRAE 优先，其余渠道在后。
  *
  * 注意：这**不是**后端 `/v1/models` 的排序权重（`src/api/models.py` 的
- * `_PROVIDER_RANK` 把 zen/kilo 与 qoder/codearts 同归「其他 4」）。前端把
+ * `_PROVIDER_RANK` 把 zen/kilo 与 qoder/codearts 同归「其他」）。前端把
  * zen/kilo 提到 qoder/codearts 之前是有意的 UI 取舍（免费渠道更常被翻），
  * 因此 Playground 的分组顺序与接口返回的 data 顺序并不保证一致。
  */
@@ -63,6 +66,7 @@ export const PROVIDER_ORDER: Provider[] = [
   "kilo",
   "qoder",
   "codearts",
+  "officeace",
 ];
 
 /** 渠道排序权重；未知渠道排在已知渠道之后。 */

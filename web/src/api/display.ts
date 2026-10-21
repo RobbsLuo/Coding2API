@@ -85,6 +85,11 @@ export function quotaSemantics(credential: Credential): string {
   if (credential.provider === "codearts") {
     return "每日额度池（token 折算，当日 0 点清零）";
   }
+  // officeAce 的积分就是主账（新用户一次性 + 每日签到各发一笔），每笔有
+  // 独立到期时间、不一并重置，故按「余额 + 逐笔到期」描述，不能说成本周期。
+  if (credential.provider === "officeace") {
+    return "积分余额（逐笔到期，新用户与每日签到各自计时）";
+  }
   // CodeBuddy / Qoder 随周期重置；未探测到重置时间时退化为本周期口径。
   if (!credential.quota_cycle_end) {
     return "本周期剩余（未探测到重置时间）";

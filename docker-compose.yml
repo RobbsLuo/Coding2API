@@ -135,6 +135,13 @@ services:
       # CodeArts 账号滑动窗口（秒）：与上限组合成「窗口内最多启动 N 次」，
       # 对齐上游「每账号每约 60s 最多 3 个会话」；0 关闭窗口口径
       CODEARTS_REQUEST_WINDOW_SECONDS: ${CODEARTS_REQUEST_WINDOW_SECONDS:-60}
+      # officeAce（华为云果办 / AgentArts）：只能配控制面端点。模型网关
+      # 每账号一个（由上游 client-permission-validate 下发、存在凭证里），
+      # 不在这里配也不进白名单。
+      OFFICEACE_API_ENDPOINT: ${OFFICEACE_API_ENDPOINT:-https://agentarts.cn-southwest-2.myhuaweicloud.com}
+      OFFICEACE_ALLOWED_ENDPOINTS: ${OFFICEACE_ALLOWED_ENDPOINTS:-https://agentarts.cn-southwest-2.myhuaweicloud.com}
+      # officeAce 聊天最小间隔（秒）：真实账号渠道，独立节流器，默认 0
+      OFFICEACE_CHAT_MIN_INTERVAL: ${OFFICEACE_CHAT_MIN_INTERVAL:-0}
       # 11128 内容风控自愈：中和出站正文里的伪装客户端指纹，false 关闭
       CODEBUDDY_SANITIZE_CHANNEL_MARKERS: ${CODEBUDDY_SANITIZE_CHANNEL_MARKERS:-true}
       # token 预刷新窗口（小时）

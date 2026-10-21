@@ -323,9 +323,10 @@ describe("display helpers", () => {
     expect(hasQuotaProbe("zen")).toBe(false);
     expect(hasQuotaProbe("kilo")).toBe(false);
     expect(hasQuotaProbe("trae")).toBe(true);
-    // Qoder / CodeArts 都有额度接口，属「需探测」
+    // Qoder / CodeArts / officeAce 都有额度接口，属「需探测」
     expect(hasQuotaProbe("qoder")).toBe(true);
     expect(hasQuotaProbe("codearts")).toBe(true);
+    expect(hasQuotaProbe("officeace")).toBe(true);
   });
 
   it("周期语义按渠道类型判定，而不是看 cycle_end 是否存在", () => {
@@ -361,6 +362,14 @@ describe("display helpers", () => {
     const codearts = quotaSemantics(makeCredential({
       provider: "codearts", quota_cycle_end: 1_800_000_000 }) as never);
     expect(codearts).toBe("每日额度池（token 折算，当日 0 点清零）");
+
+    // officeAce 的积分是主账，逐笔到期（新用户福利 + 每日签到各自计时），
+    // 不能说成「本周期剩余」（那是统一重置的语义）
+    const officeace = quotaSemantics(makeCredential({
+      provider: "officeace", quota_cycle_end: 1_800_000_000 }) as never);
+    expect(officeace).toContain("积分余额");
+    expect(officeace).toContain("逐笔到期");
+    expect(officeace).not.toContain("本周期");
 
     // 国际版 Qoder 无旧签到接口，但额度语义不变（不在此断言）
   });

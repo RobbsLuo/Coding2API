@@ -62,6 +62,7 @@ from .config import (
     validate_codebuddy_intl_endpoint_allowed,
     validate_endpoint_allowed,
     validate_kilo_endpoint_allowed,
+    validate_officeace_endpoint_allowed,
     validate_qoder_endpoint_allowed,
     validate_zen_endpoint_allowed,
 )
@@ -95,6 +96,9 @@ from .provider.codebuddy.client import CodeBuddyClient, CodeBuddyProvider
 from .provider.codebuddy.intl import CodeBuddyIntlProvider
 from .provider.codebuddy.oauth import CodeBuddyOAuth
 from .provider.kilo.client import KiloClient, KiloProvider
+from .provider.officeace import OfficeAceProvider
+from .provider.officeace.client import OfficeAceClient
+from .provider.officeace.oauth import OfficeAceOAuth
 from .provider.proxy import parse_provider_proxies
 from .provider.qoder import QoderProvider
 from .provider.qoder.auth import QoderOAuth
@@ -233,6 +237,19 @@ def _codearts_endpoint(config: Settings) -> str:
                              validator=validate_codearts_endpoint_allowed,
                              env_name="CODEARTS_API_ENDPOINT",
                              allowed_name="CODEARTS_ALLOWED_ENDPOINTS")
+
+
+def _officeace_endpoint(config: Settings) -> str:
+    """解析 officeAce 控制面端点并强制白名单校验。
+
+    模型网关（每账号一个 `modelgw-*.officeace.*`）不在这里：它是上游
+    `client-permission-validate` 下发的、存在凭证里的值，改不了也写不错。
+    """
+    return _resolve_endpoint(config, attr="officeace_api_endpoint",
+                             validator=validate_officeace_endpoint_allowed,
+                             env_name="OFFICEACE_API_ENDPOINT",
+                             allowed_name="OFFICEACE_ALLOWED_ENDPOINTS",
+                             strip_slash=True)
 
 
 def _seed_free_credential(credentials: CredentialRepository, *, provider: str,
@@ -389,6 +406,11 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                            allow_concurrent=True,
                            max_concurrency=lambda: runtime.codearts_max_concurrency,
                            window_seconds=lambda: runtime.codearts_request_window_seconds)
+    # officeAce 独立 pacer：真实账号渠道（单账号单用户），上游没有 CodeArts
+    # 那种硬并发限，默认不节流；与其余渠道互不排队。
+    officeace_pacer = Pacer(lambda: runtime.officeace_chat_min_interval,
+                            lambda: runtime.officeace_chat_min_interval,
+                            allow_concurrent=True)
     # 按渠道出站代理：启动期解析一次，装配时注入到各 provider 的
     # httpx client；运行中改值需重启（连接池已建立，见 provider/proxy.py）。
     proxies = parse_provider_proxies(config.provider_proxies, KNOWN_PROVIDERS)
@@ -427,6 +449,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             client=CodeArtsClient(endpoint=_codearts_endpoint(config),
                                   proxy=proxies.get("codearts")),
             pacer=codearts_pacer),
+        "officeace": OfficeAceProvider(
+            client=OfficeAceClient(cloud_base=_officeace_endpoint(config),
+                                   proxy=proxies.get("officeace")),
+            pacer=officeace_pacer),
     }
     # 默认装配路径（生产）才种子无凭证渠道的虚拟凭证：测试注入自定义 registry
     # 时不应凭空多出一条无对应 provider 的凭证行。
@@ -858,7 +884,8 @@ def _upstream_auth(registry: dict, settings: Settings) -> dict:
 
     CodeBuddy 走设备码轮询（国内站与国际站各一套：endpoint 不同、登录域名不同）；
     Qoder 走设备码 PKCE（区域由 openapi 主机推导）；
-    CodeArts 走门户 ticket 轮询（token 响应直接给临时 AK/SK，无本地回调）。
+    CodeArts 走门户 ticket 轮询（token 响应直接给临时 AK/SK，无本地回调）；
+    officeAce 走云端授权码轮询（回调由云端承接，同样无本地回调）。
     """
     flows: dict = {}
     proxies = parse_provider_proxies(settings.provider_proxies, KNOWN_PROVIDERS)
@@ -872,6 +899,15 @@ def _upstream_auth(registry: dict, settings: Settings) -> dict:
     if host is not None:
         flows["qoder"] = QoderOAuth(detect_realm_from_domain(host),
                                     proxy=proxies.get("qoder"))
+    officeace = registry.get("officeace")
+    officeace_client = getattr(officeace, "client", None)
+    officeace_login = getattr(officeace_client, "login", None)
+    if officeace_login is not None:
+        # officeAce 走 poll 轨道：授权回调由**云端**承接，服务端只轮询
+        # `/v1/claw/auth/code`。登录流量（每次登录几十次短请求）与聊天流量
+        # 的并发特征完全不同，故用独立连接池；但共用同一个出站代理设置。
+        flows["officeace"] = OfficeAceOAuth(
+            officeace_login, proxy=proxies.get("officeace"))
     codearts = registry.get("codearts")
     client = getattr(codearts, "client", None)
     login = getattr(client, "login", None)

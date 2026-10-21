@@ -31,7 +31,8 @@ def _client(handler, **kw) -> TraeClient:
 
 def test_resolve_flat_auto_and_forced():
     assert resolve("glm-5.2", "d").providers == (
-        "codebuddy", "codebuddy_intl", "trae", "zen", "kilo", "qoder", "codearts")
+        "codebuddy", "codebuddy_intl", "trae", "zen", "kilo", "qoder",
+        "codearts", "officeace")
     assert resolve("", "glm-5.2").model == "glm-5.2"
     assert resolve("auto", "glm-5.2").model == "glm-5.2"
     assert resolve(None, "glm-5.2").model == "glm-5.2"

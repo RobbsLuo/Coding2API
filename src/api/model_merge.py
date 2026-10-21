@@ -81,8 +81,8 @@ _META_FIELDS = ("name", "credit_rate", "max_input_tokens", "max_output_tokens",
 # 展示排序权重：CodeBuddy / TRAE 优先，其余渠道（zen / kilo 等）在后；
 # 多渠道模型取所有渠道里的最小权重（含 CB 即进第一段）。
 _PROVIDER_RANK = {"codebuddy": 0, "codebuddy_intl": 1, "trae": 2, "qoder": 3,
-                  "codearts": 4}
-_UNRANKED_PROVIDER = 5
+                  "codearts": 4, "officeace": 5}
+_UNRANKED_PROVIDER = 6
 
 # 哨兵名：各上游自己的「自动路由 / 默认模型」占位，语义只在本渠道内成立，不跨
 # 渠道合并。kilo 的 `kilo-auto/free`（上游名 `Auto Free`）与 Qoder 的 `auto`

@@ -13,6 +13,7 @@ const LOGIN_PROVIDERS: Provider[] = [
   "trae",
   "qoder",
   "codearts",
+  "officeace",
 ];
 
 type TabValue = "login" | "import";

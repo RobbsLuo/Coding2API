@@ -163,3 +163,78 @@ def test_upstream_auth_registers_qoder_and_codearts_tracks():
     assert flows["codearts"]._identity_client is registry["codearts"].client
     # 未注册的渠道不产生轨道（防御：registry 缺 key 时不应抛）
     assert _upstream_auth({}, _settings()) == {}
+
+# --------------------------------------------------------------- officeAce
+
+def test_officeace_defaults_and_allowed_parsing():
+    settings = _settings()
+    assert settings.officeace_api_endpoint == (
+        "https://agentarts.cn-southwest-2.myhuaweicloud.com")
+    # 白名单只有控制面：模型网关每账号一个、由上游下发并存在凭证里
+    assert settings.officeace_allowed == (
+        "https://agentarts.cn-southwest-2.myhuaweicloud.com",)
+    parsed = _settings(
+        officeace_allowed_endpoints=" https://a.example.com/ , , ")
+    assert parsed.officeace_allowed == ("https://a.example.com",)
+
+
+def test_officeace_endpoint_whitelist():
+    from src.config import validate_officeace_endpoint_allowed
+
+    settings = _settings()
+    base = "https://agentarts.cn-southwest-2.myhuaweicloud.com"
+    assert validate_officeace_endpoint_allowed(base, settings)
+    assert validate_officeace_endpoint_allowed(base + "/", settings)
+    assert not validate_officeace_endpoint_allowed("https://evil.example.com", settings)
+
+
+def test_officeace_endpoint_resolver_accepts_default_and_rejects_evil():
+    from src.main import _officeace_endpoint
+
+    assert _officeace_endpoint(_settings()) == (
+        "https://agentarts.cn-southwest-2.myhuaweicloud.com")
+    bad = _settings(officeace_api_endpoint="https://evil.example.com")
+    with pytest.raises(ValueError, match="OFFICEACE_ALLOWED_ENDPOINTS"):
+        _officeace_endpoint(bad)
+
+
+def test_officeace_min_interval_is_hot():
+    """默认 0（上游没有 CodeArts 那种硬限），可热更到正值。"""
+    assert "officeace_chat_min_interval" in HOT_BY_KEY
+    runtime = RuntimeSettings(_settings(), _MemoryStore())
+    assert runtime.officeace_chat_min_interval == 0
+    runtime.set("officeace_chat_min_interval", 3)
+    assert runtime.officeace_chat_min_interval == 3
+
+
+def test_officeace_min_interval_rejects_negative():
+    from src.runtime_settings import InvalidSetting
+
+    runtime = RuntimeSettings(_settings(), _MemoryStore())
+    with pytest.raises(InvalidSetting):
+        runtime.set("officeace_chat_min_interval", -1)
+
+
+def test_upstream_auth_registers_officeace_poll_track():
+    """officeAce 走 poll 轨道：授权回调由云端承接，服务端只轮询授权码。"""
+    from src.main import _upstream_auth
+    from src.provider.officeace import OfficeAceProvider
+    from src.provider.officeace.client import OfficeAceClient
+    from src.provider.officeace.oauth import OfficeAceOAuth
+
+    registry = {"officeace": OfficeAceProvider(client=OfficeAceClient(
+        cloud_base="https://agentarts.cn-southwest-2.myhuaweicloud.com"))}
+    flows = _upstream_auth(registry, _settings())
+    assert isinstance(flows["officeace"], OfficeAceOAuth)
+    # 登录用独立连接池（几十次短轮询），但共用同一套端点与代理设置
+    assert flows["officeace"].config.cloud_base == (
+        "https://agentarts.cn-southwest-2.myhuaweicloud.com")
+
+
+def test_officeace_pacer_is_independent_and_off_by_default(admin_client):
+    """默认不节流；且与其余渠道互不排队（独立 pacer 实例）。"""
+    app, _client = admin_client
+    registry = app.state.services.registry
+    pacer = registry["officeace"].pacer
+    assert pacer is not registry["codearts"].pacer
+    assert pacer.min_seconds == 0
