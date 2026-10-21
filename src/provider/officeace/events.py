@@ -600,10 +600,27 @@ def parse_model_info(payload: Any) -> dict[str, str]:
     return {
         "account_id": str(data.get("account_id") or ""),
         "principal_id": str(data.get("principal_id") or ""),
+        "user_name": _user_name_of(data),
         "app_key": str(auth_info.get("model_app_key") or ""),
         "app_secret": str(auth_info.get("model_app_secret") or ""),
         "base_url": base,
     }
+
+
+def _user_name_of(data: dict[str, Any]) -> str:
+    """从 `principal_urn` 末尾取用户名：`iam::<account>:user:<name>`。
+
+    该接口**没有**独立的用户名字段（实测 2026-10-21），用户名只出现在 URN
+    里。取不到就留空——调用方会退到账号 ID 当昵称，不能让登录因此失败。
+    """
+    explicit = str(data.get("user_name") or data.get("userName") or "").strip()
+    if explicit:
+        return explicit
+    urn = str(data.get("principal_urn") or "")
+    marker = ":user:"
+    if marker not in urn:
+        return ""
+    return urn.split(marker, 1)[1].strip()
 
 
 def build_authorize_url(*, auth_base: str, client_id: str, state: str,

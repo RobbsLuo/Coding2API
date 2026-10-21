@@ -372,6 +372,9 @@ class OfficeAceOAuth:
         credential.model_base_url = info["base_url"]
         credential.account_id = info["account_id"] or credential.account_id
         credential.principal_id = info["principal_id"] or credential.principal_id
+        # 用户名只出现在 `principal_urn` 里（接口无独立字段）：补上后昵称才不是
+        # 一串 32 位账号 ID，用户才认得出「哪条凭证是自己的」。
+        credential.user_name = info["user_name"] or credential.user_name
         # 昵称只用于展示：优先上游给的、其次用户名、最后账号 ID（都没有就留空，
         # 前端按凭证 ID 兜底）。用 `or` 链而非 if：三者都缺是合法情况，
         # STS 响应本身并不带 nickname 字段。

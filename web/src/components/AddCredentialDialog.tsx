@@ -173,9 +173,13 @@ export function AddCredentialDialog({
             onNotice("登录成功，凭证已保存。");
             onImported("登录成功，凭证已保存。");
           }
-        } catch {
+        } catch (caught) {
           stopPolling(provider);
-          onError("登录轮询失败，请重试。");
+          // 轮询失败多半是上游给的可行动原因（如「这个账号还没开通 officeAce」），
+          // 兜底文案会把它抹掉，用户只会看到「失败」而不知道该去做什么。
+          onError(caught instanceof Error && caught.message
+            ? caught.message
+            : "登录轮询失败，请重试。");
         }
       }, interval);
       loginTimersRef.current[provider] = timer;

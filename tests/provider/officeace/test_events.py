@@ -468,7 +468,7 @@ def test_parse_model_info_reads_subscription_block():
         }},
     }
     assert events.parse_model_info(payload) == {
-        "account_id": "acct", "principal_id": "prin",
+        "account_id": "acct", "principal_id": "prin", "user_name": "",
         "app_key": "K", "app_secret": "S", "base_url": "https://gw.test/v2",
     }
 
@@ -484,8 +484,8 @@ def test_parse_model_info_unprovisioned_account():
     """未开通：`subscription: null`（实测三账号全如此）→ 各字段空。"""
     info = events.parse_model_info({"account_id": "a", "subscription": None,
                                     "model_info": {}})
-    assert info == {"account_id": "a", "principal_id": "", "app_key": "",
-                    "app_secret": "", "base_url": ""}
+    assert info == {"account_id": "a", "principal_id": "", "user_name": "",
+                    "app_key": "", "app_secret": "", "base_url": ""}
 
 
 def test_parse_model_info_tolerates_garbage():
@@ -493,6 +493,29 @@ def test_parse_model_info_tolerates_garbage():
     assert events.parse_model_info({"model_info": "x"})["base_url"] == ""
     assert events.parse_model_info(
         {"subscription": {"model_info": {"model_auth_info": "x"}}})["base_url"] == ""
+
+
+def test_parse_model_info_reads_user_name_from_principal_urn():
+    """用户名只在 `principal_urn` 末尾，接口没有独立字段（2026-10-21 实测）。"""
+    info = events.parse_model_info(
+        {"principal_urn": "iam::acct:user:robbsluo"})
+    assert info["user_name"] == "robbsluo"
+
+
+def test_parse_model_info_prefers_explicit_user_name():
+    for key in ("user_name", "userName"):
+        info = events.parse_model_info(
+            {key: " carol ", "principal_urn": "iam::acct:user:ignored"})
+        assert info["user_name"] == "carol"
+
+
+def test_parse_model_info_urn_without_user_marker_is_blank():
+    """URM 形态变了也不能炸：认不出就留空，昵称退到账号 ID。"""
+    assert events.parse_model_info({"principal_urn": "iam::acct"})["user_name"] == ""
+    assert events.parse_model_info(
+        {"principal_urn": 123})["user_name"] == ""
+    assert events.parse_model_info(
+        {"user_name": "  "})["user_name"] == ""
 
 
 # ------------------------------------------------------------------ 授权 URL

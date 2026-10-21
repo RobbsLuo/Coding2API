@@ -381,6 +381,17 @@ async def test_poll_nickname_falls_back_to_user_name():
     assert result is not None and result.nickname == "carol"
 
 
+async def test_poll_nickname_from_principal_urn():
+    """令牌里没名字时用开通校验的 `principal_urn`：否则昵称是一串账号 ID。"""
+    oauth, state = await _started(_flow(permission=_permission_response(
+        principal_urn="iam::acct:user:dave")))
+    result = await oauth.poll(state, "alice")
+    assert result is not None
+    assert result.nickname == "dave"
+    assert OfficeAceCredential.from_dict(
+        result.credential_data).user_name == "dave"
+
+
 async def test_poll_concurrent_consume_raises():
     """两路轮询同时拿到码时，后完成的那路不能再落一条重复凭证。"""
     class LosingStore(AuthStateStore):
