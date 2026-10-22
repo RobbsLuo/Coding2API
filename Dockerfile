@@ -9,7 +9,18 @@ WORKDIR /web
 COPY web/package.json web/pnpm-lock.yaml web/pnpm-workspace.yaml web/.npmrc ./
 # Node 25 起不再内置 corepack，裸 `corepack enable` 会 exit 127（command not found）；
 # 先用 npm 装一份再 enable。0.34.x 与 pnpm 11+ 不兼容，固定到 0.36.0。
-RUN npm install -g corepack@0.36.0 && corepack enable && pnpm install --frozen-lockfile
+#
+# `corepack prepare` 要现去 registry.npmjs.org 取 pnpm 本体，该端点偶发 503
+# （compose job 因此连续红过两次，同期 registry 拉普通包正常），而 corepack
+# 自己不重试，所以这里显式重试。prepare 成功后 pnpm 已落在 corepack 缓存里，
+# 后面的 install 不再需要联网取 pnpm 本体。
+RUN npm install -g corepack@0.36.0 && corepack enable \
+    && ( for i in 1 2 3 4 5; do \
+           if corepack prepare pnpm@10.18.0 --activate; then exit 0; fi; \
+           echo "corepack prepare 第 $i 次失败（registry 抖动？），10s 后重试"; \
+           sleep 10; \
+         done; exit 1 ) \
+    && pnpm install --frozen-lockfile
 COPY web/ ./
 RUN pnpm exec vite build
 

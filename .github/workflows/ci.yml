@@ -45,7 +45,16 @@ jobs:
           cache-dependency-path: web/pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - name: 依赖漏洞（生产依赖，high 及以上阻断）
-        run: pnpm audit --prod --audit-level=high
+        run: |
+          # registry.npmjs.org 的审计端点偶发 ERR_SOCKET_TIMEOUT（实测连续两次
+          # 在 2 分钟超时后失败，同期 registry 本身可正常拉包）。重试 3 次：
+          # 真漏洞会稳定复现、三次都非零；网络抖动大概率第二次就过。
+          for i in 1 2 3; do
+            if pnpm audit --prod --audit-level=high; then exit 0; fi
+            echo "::warning::pnpm audit 第 $i 次失败（可能是 registry 网络抖动），15s 后重试"
+            sleep 15
+          done
+          exit 1
       - run: pnpm exec tsc --noEmit
       - run: pnpm exec vitest run
       - run: pnpm build
