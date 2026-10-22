@@ -49,7 +49,7 @@ import { PoolOverview } from "../components/PoolOverview";
 import { AddCredentialDialog } from "../components/AddCredentialDialog";
 import { CredentialLimitsDialog } from "../components/CredentialLimitsDialog";
 import { CredentialTagsDialog } from "../components/CredentialTagsDialog";
-import { groupModelsByProvider, rateLabel } from "../components/ModelPicker";
+import { groupModelsByProvider, rateLabel, rateSummary } from "../components/ModelPicker";
 import { ToastViewport, useToasts } from "../components/Toast";
 import { ColumnHint, LongTextTip } from "../components/Tip";
 import { PageHeader } from "../components/PageHeader";
@@ -473,7 +473,13 @@ export function CredentialsPage() {
     });
   };
 
-  const refresh = () => client.invalidateQueries({ queryKey: ["admin"] });
+  // 凭证增删 / 暂停会改变「哪些渠道还有可用凭证」，组头的模型清单（与 Playground
+  // 共用的 `playground-models` 缓存）必须一起失效，否则凭证列表刷新了、模型块还
+  // 停在旧数据上（新接入的渠道组头一直空着）。
+  const refresh = () => Promise.all([
+    client.invalidateQueries({ queryKey: ["admin"] }),
+    client.invalidateQueries({ queryKey: ["playground-models"] }),
+  ]);
 
   // 流水抽屉内排序：改排序需重新取数（后端排），并保持方向直觉
   // （时间/数值列首点降序，来源首点升序）。
@@ -924,14 +930,10 @@ export function CredentialsPage() {
                     // 取不到模型列表时为空数组，那块整体不渲染。
                     const groupModels = modelsByProvider.get(group.provider) ?? [];
                     // 组头顺带给一个「最低倍率」：只看数量看不出这渠道贵不贵，
-                    // 而最低倍率正是「这渠道值不值得优先用」的答案。未给倍率的
-                    // 模型（undefined）不参与取最小，全都未给时为 null。
-                    const minRate = groupModels.reduce<number | null>(
-                      (best, model) => (model.rate === undefined
-                        ? best
-                        : (best === null ? model.rate : Math.min(best, model.rate))),
-                      null,
-                    );
+                    // 而最低倍率正是「这渠道值不值得优先用」的答案。免费额度
+                    // （rate 0）不参与取最低——渠道里混着 1~2 个免费模型时按字面
+                    // 取最小会显示「最低 免」，读起来像整个渠道免费。
+                    const rateText = rateSummary(groupModels);
                     // 额度合计的进度条：剩余 / 总量（免费层两者皆 null，不出条）
                     const quotaPct =
                       group.remaining !== null && group.total !== null && group.total > 0
@@ -969,7 +971,7 @@ export function CredentialsPage() {
                                 data-testid={`group-toggle-${group.key}`}
                                 aria-expanded={!isCollapsed}
                                 onClick={() => toggleGroup(group.key)}
-                                className="flex w-full cursor-pointer flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+                                className="flex min-w-0 flex-1 cursor-pointer flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
                               >
                               {/* 身份：折叠箭头 + 品牌图标 + 渠道名 + 账号数 */}
                               <span className="flex w-48 shrink-0 items-center gap-2">
@@ -998,87 +1000,6 @@ export function CredentialsPage() {
                                   各组的「状态 / 额度 / 到期」起点会各错各的、读起来不成列。
                                   窄屏放不下时按整块换行，块内仍保持同一套对齐。 */}
                               <span className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                                {/* 本渠道当前能提供的模型：只给数量，全量清单进 hover。
-                                    模型多的渠道有几十条，铺在组头会把这一行撑成十几行；
-                                    而「几个模型、最便宜多少」正是判断这渠道值不值得展开的
-                                    第一信息。清单里每条带**该渠道的**倍率（与模型选择器
-                                    同口径，多渠道模型各渠道倍率不同，不能拿合并值冒充）。
-                                    取不到模型列表时整块不渲染（不显示「0 个」——那会被读成
-                                    这渠道没有模型，实际只是列表还没回来）。 */}
-                                {groupModels.length > 0 && (
-                                  <LongTextTip
-                                    className="w-80 max-w-[min(90vw,20rem)] p-0"
-                                    content={
-                                      <div data-testid={`group-${group.key}-models`}>
-                                        {/* 头部：渠道身份 + 条数，吸顶不随清单滚走——
-                                            几十条模型滚到中段时仍知道「这是哪个渠道的清单」 */}
-                                        <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-                                          <ProviderIcon provider={group.provider} size={14} />
-                                          <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">
-                                            {group.label}
-                                          </span>
-                                          <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
-                                            {groupModels.length} 个模型
-                                          </span>
-                                        </div>
-                                        {/* 清单：限高内滚（不把弹层顶出视口），行间细分隔线 */}
-                                        <ul className="max-h-64 divide-y divide-border/60 overflow-y-auto">
-                                          {groupModels.map((model) => (
-                                            <li
-                                              key={model.id}
-                                              data-testid={`group-${group.key}-model`}
-                                              className="flex items-baseline justify-between gap-3 px-3 py-1"
-                                            >
-                                              <span className="min-w-0 truncate text-xs text-foreground">
-                                                {model.label}
-                                              </span>
-                                              {/* 倍率做成数值胶囊：等宽数字 + 免费额度单独着色，
-                                                  扫一列倍率时数字右对齐、颜色分档一眼可辨 */}
-                                              <span
-                                                className={cn(
-                                                  "shrink-0 rounded px-1 text-[11px] font-semibold tabular-nums",
-                                                  model.rate === undefined
-                                                    ? "text-muted-foreground"
-                                                    : model.rate === 0
-                                                      ? "bg-ok/12 text-ok-ink"
-                                                      : "bg-muted text-foreground",
-                                                )}
-                                              >
-                                                {model.rate === undefined ? "—" : rateLabel(model.rate)}
-                                              </span>
-                                            </li>
-                                          ))}
-                                        </ul>
-                                        {/* 脚注：口径说明，避免「免 / —」被误读 */}
-                                        <div className="border-t border-border px-3 py-1.5 text-[11px] leading-snug text-muted-foreground">
-                                          倍率＝该渠道的消耗倍率；<span className="text-ok-ink">免</span>＝免费额度，
-                                          — ＝上游未给倍率
-                                        </div>
-                                      </div>
-                                    }
-                                  >
-                                    <span
-                                      className="flex w-40 shrink-0 cursor-help items-center gap-2"
-                                      data-testid={`group-${group.key}-model-count`}
-                                    >
-                                      <span className="grid size-7 shrink-0 place-items-center rounded-md bg-background text-muted-foreground ring-1 ring-border/70">
-                                        <Sparkles className="size-3.5" aria-hidden />
-                                      </span>
-                                      <span className="min-w-0">
-                                        <span className="block text-[11px] leading-tight text-muted-foreground">模型</span>
-                                        <span className="block truncate text-xs leading-tight font-medium tabular-nums text-foreground">
-                                          {groupModels.length} 个
-                                          {minRate !== null && (
-                                            <span className="ml-1 font-normal text-muted-foreground">
-                                              · 最低 {rateLabel(minRate)}
-                                            </span>
-                                          )}
-                                        </span>
-                                      </span>
-                                    </span>
-                                  </LongTextTip>
-                                )}
-
                                 {/* 状态分布：只列出现过的态，图标语义与行内状态徽章同源 */}
                                 <span className="flex w-40 shrink-0 items-center gap-2">
                                   <span className="grid size-7 shrink-0 place-items-center rounded-md bg-background text-muted-foreground ring-1 ring-border/70">
@@ -1198,6 +1119,94 @@ export function CredentialsPage() {
                                 )}
                               </span>
                             </button>
+                            {/* 本渠道当前能提供的模型：只给数量，全量清单进 hover。
+                                模型多的渠道有几十条，铺在组头会把这一行撑成十几行；
+                                而「几个模型、最便宜多少」正是判断这渠道值不值得展开的
+                                第一信息。清单里每条带**该渠道的**倍率（与模型选择器
+                                同口径，多渠道模型各渠道倍率不同，不能拿合并值冒充）。
+                                取不到模型列表时整块不渲染（不显示「0 个」——那会被读成
+                                这渠道没有模型，实际只是列表还没回来）。
+
+                                **必须在折叠按钮外面**：它自己是个可聚焦按钮（键盘能
+                                打开清单），按钮套按钮会让 HTML 解析直接拆掉外层结构。
+
+                                触屏没有 hover，点击又会被 Radix 的 pointerdown 关掉，
+                                所以移动端打不开清单（与页面其它 hover 明细同一限制）；
+                                真要在手机上看，需要换成 Popover（点击开合）。 */}
+                            {groupModels.length > 0 && (
+                              <LongTextTip
+                                className="w-80 max-w-[min(90vw,20rem)] p-0"
+                                content={
+                                  <div data-testid={`group-${group.key}-models`}>
+                                    {/* 头部：渠道身份 + 条数，吸顶不随清单滚走——
+                                        几十条模型滚到中段时仍知道「这是哪个渠道的清单」 */}
+                                    <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+                                      <ProviderIcon provider={group.provider} size={14} />
+                                      <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">
+                                        {group.label}
+                                      </span>
+                                      <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+                                        {groupModels.length} 个模型
+                                      </span>
+                                    </div>
+                                    {/* 清单：限高内滚（不把弹层顶出视口），行间细分隔线 */}
+                                    <ul className="max-h-64 divide-y divide-border/60 overflow-y-auto">
+                                      {groupModels.map((model) => (
+                                        <li
+                                          key={model.id}
+                                          data-testid={`group-${group.key}-model`}
+                                          className="flex items-baseline justify-between gap-3 px-3 py-1"
+                                        >
+                                          <span className="min-w-0 truncate text-xs text-foreground">
+                                            {model.label}
+                                          </span>
+                                          {/* 倍率做成数值胶囊：等宽数字 + 免费额度单独着色，
+                                              扫一列倍率时数字右对齐、颜色分档一眼可辨 */}
+                                          <span
+                                            className={cn(
+                                              "shrink-0 rounded px-1 text-[11px] font-semibold tabular-nums",
+                                              model.rate === undefined
+                                                ? "text-muted-foreground"
+                                                : model.rate === 0
+                                                  ? "bg-ok/12 text-ok-ink"
+                                                  : "bg-muted text-foreground",
+                                            )}
+                                          >
+                                            {model.rate === undefined ? "—" : rateLabel(model.rate)}
+                                          </span>
+                                        </li>
+                                      ))}
+                                    </ul>
+                                    {/* 脚注：口径说明，避免「免 / —」被误读 */}
+                                    <div className="border-t border-border px-3 py-1.5 text-[11px] leading-snug text-muted-foreground">
+                                      倍率＝该渠道的消耗倍率；<span className="text-ok-ink">免</span>＝免费额度，
+                                      — ＝上游未给倍率
+                                    </div>
+                                  </div>
+                                }
+                              >
+                                <button
+                                  type="button"
+                                  className="flex w-40 shrink-0 cursor-help items-center gap-2 rounded-md py-2 pr-3 pl-1 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+                                  data-testid={`group-${group.key}-model-count`}
+                                >
+                                  <span className="grid size-7 shrink-0 place-items-center rounded-md bg-background text-muted-foreground ring-1 ring-border/70">
+                                    <Sparkles className="size-3.5" aria-hidden />
+                                  </span>
+                                  <span className="min-w-0">
+                                    <span className="block text-[11px] leading-tight text-muted-foreground">模型</span>
+                                    <span className="block truncate text-xs leading-tight font-medium tabular-nums text-foreground">
+                                      {groupModels.length} 个
+                                      {rateText !== null && (
+                                        <span className="ml-1 font-normal text-muted-foreground">
+                                          · {rateText}
+                                        </span>
+                                      )}
+                                    </span>
+                                  </span>
+                                </button>
+                              </LongTextTip>
+                            )}
                             </div>
                           </TableCell>
                         </TableRow>

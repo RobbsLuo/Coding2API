@@ -2,7 +2,10 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CredentialsPage } from "../CredentialsPage";
 import {
-  expandCredentialGroups, jsonResponse, makeCredential, mockFetch, renderPage, settle, userEvent,
+  expandCredentialGroups, jsonResponse, makeCredential, renderPage, settle, userEvent,
+  // 组头读模型列表：用凭证页专用入口（自动兜底 /api/playground/models），
+  // 而不是全局 DEFAULT_ROUTES —— 全局兜底会掩盖别的页面的漏 mock。
+  mockCredentialsFetch as mockFetch,
 } from "@/test-utils";
 
 const ADMIN = { username: "root", is_admin: true } as const;
@@ -757,10 +760,11 @@ describe("CredentialsPage", () => {
     await userEvent.selectOptions(screen.getByTestId("credential-group-sort"), "provider");
 
     // 组头：TRAE 在前、CodeArts 在后，各一行（不再拆内置 / 福利两组）。
-    // 组 key 含连字符，故显式排掉同前缀的指标块（-state- / -quota-pct / -expiring）。
+    // 组 key 含连字符，故显式排掉同前缀的指标块（-state- / -quota-pct / -expiring /
+    // -model-count 等），否则它们也会被这条正则匹配进来。
     const headers = screen
       .getAllByTestId(/^group-[a-z-]+$/)
-      .filter((node) => !/-state-|-quota-pct|-expiring|-select-|-toggle-/.test(
+      .filter((node) => !/-state-|-quota-pct|-expiring|-select-|-toggle-|-model/.test(
         node.getAttribute("data-testid") ?? ""));
     expect(headers.map((node) => node.getAttribute("data-testid"))).toEqual([
       "group-trae",
@@ -874,7 +878,9 @@ describe("CredentialsPage", () => {
     expect(cbCount).toHaveTextContent("最低 x0.29");
     const trCount = screen.getByTestId("group-trae-model-count");
     expect(trCount).toHaveTextContent("2 个");
-    expect(trCount).toHaveTextContent("最低 免");
+    // 免费额度不参与取最低：TRAE 有 1 个免费 + 1 个 x0.5，最低写 x0.5 而不是「免」
+    // （按字面取最小会让「有 1 个免费模型」读成整渠道免费）
+    expect(trCount).toHaveTextContent("最低 x0.5");
 
     // 逐条清单不铺在组头（几十条会把这一行撑爆），hover 才展开
     expect(screen.queryByTestId("group-codebuddy-models")).not.toBeInTheDocument();
@@ -931,6 +937,68 @@ describe("CredentialsPage", () => {
     await settle();
 
     expect(screen.queryByTestId("group-codebuddy-model-count")).not.toBeInTheDocument();
+  });
+
+  it("整组都免费时说「全免」，不说「最低 免」", async () => {
+    mockFetch({
+      "/api/credentials": listBody([makeCredential({ id: "zen1", provider: "zen" })]),
+      "/api/playground/models": {
+        object: "list",
+        data: [
+          { id: "a", name: "A", providers: ["zen"], credit_rate: 0 },
+          { id: "b", name: "B", providers: ["zen"], credit_rate: 0 },
+        ],
+      },
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const count = screen.getByTestId("group-zen-model-count");
+    expect(count).toHaveTextContent("2 个");
+    expect(count).toHaveTextContent("全免");
+    expect(count).not.toHaveTextContent("最低");
+  });
+
+  it("模型块是可聚焦按钮：键盘 Tab 到它就打开清单（不靠 hover）", async () => {
+    mockFetch({
+      "/api/credentials": listBody([makeCredential({ id: "cb1", provider: "codebuddy" })]),
+      "/api/playground/models": {
+        object: "list",
+        data: [{ id: "glm-5.2", name: "GLM 5.2", providers: ["codebuddy"], credit_rate: 0.29 }],
+      },
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    const trigger = screen.getByTestId("group-codebuddy-model-count");
+    // 触发器必须是 button 且**不在**折叠按钮里：button 套 button 会被 HTML 解析器
+    // 拆开，键盘也就再也聚焦不到清单
+    expect(trigger.tagName).toBe("BUTTON");
+    expect(trigger.closest("[data-testid^='group-toggle-']")).toBeNull();
+
+    trigger.focus();
+    const tip = await screen.findByTestId("group-codebuddy-models");
+    expect(within(tip).getByTestId("group-codebuddy-model")).toHaveTextContent("GLM 5.2x0.29");
+  });
+
+  it("改完凭证会一并重取模型列表（组头不留在旧数据上）", async () => {
+    const spy = mockFetch({
+      "/api/credentials": listBody([makeCredential({ id: "cred_1", provider: "codebuddy", enabled: 1 })]),
+      "/api/credentials/cred_1/toggle": { ok: true },
+      "/api/playground/models": { object: "list", data: [] },
+    });
+    const modelsCalls = () =>
+      spy.mock.calls.filter(([url]) => String(url).includes("/api/playground/models")).length;
+
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    expect(modelsCalls()).toBe(1);
+
+    await expandCredentialGroups();
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "暂停" }));
+
+    await waitFor(() => expect(modelsCalls()).toBe(2));
   });
 
   it("组头聚合状态分布与 1.5 / 7 天内将过期的积分，折叠时也读得到", async () => {

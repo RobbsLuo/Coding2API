@@ -2,7 +2,8 @@ import { screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { CredentialsPage } from "../CredentialsPage";
 import {
-  expandCredentialGroups, jsonResponse, makeCredential, mockFetch, renderPage, settle, userEvent,
+  expandCredentialGroups, jsonResponse, makeCredential, renderPage, settle, userEvent,
+  mockCredentialsFetch as mockFetch,
 } from "@/test-utils";
 
 const ADMIN = { username: "root", is_admin: true } as const;

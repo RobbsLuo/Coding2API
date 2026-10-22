@@ -139,7 +139,10 @@ export function displayName(item: { id: string; name?: string }): string {
 
 /** 倍率文案：`0` 是免费额度（上游给 0 表示不计费），不能显示成 `x0`。 */
 export function rateLabel(rate: number): string {
-  return rate === 0 ? "免" : `x${rate}`;
+  if (rate === 0) return "免";
+  // 上游倍率是浮点，可能带长尾（0.1+0.2 → 0.30000000000000004）。取 6 位有效
+  // 数字够覆盖真实倍率，又不像 toFixed(2) 那样把 0.004 压成 0（会显示成「免」）。
+  return `x${Number(rate.toPrecision(6))}`;
 }
 
 /** 凭证页组头「模型 N 个」用的条目：id 供排障，label 是展示名，rate 是该渠道的消耗倍率。 */
@@ -164,6 +167,9 @@ export interface ProviderModel {
 export function groupModelsByProvider(models: ModelInfo[]): Map<string, ProviderModel[]> {
   const grouped = new Map<string, ProviderModel[]>();
   for (const item of models) {
+    // 自定义别名是**同一模型**的另一个可请求名字（后端克隆目标条目生成），
+    // 目标条目本身也在列表里；算进来会让「N 个模型」虚高、清单里同一模型出现两次。
+    if (isCustomAlias(item)) continue;
     for (const provider of item.providers) {
       const entry: ProviderModel = {
         id: item.id, label: displayName(item), rate: providerRate(item, provider),
@@ -178,6 +184,23 @@ export function groupModelsByProvider(models: ModelInfo[]): Map<string, Provider
       left.label.localeCompare(right.label, "zh-CN") || left.id.localeCompare(right.id));
   }
   return grouped;
+}
+
+/**
+ * 组头「最低倍率」的文案（`null` = 一条倍率都没有，整块不显示）。
+ *
+ * **免费额度不参与取最低**：渠道里常混着 1~2 个 0 倍率模型（CodeBuddy 33 个里
+ * 2 个、Qoder 11 个里 2 个），按字面取最小会显示「最低 免」，读起来像整个渠道
+ * 免费——实际其余几十个都在收费。全渠道都免费时才说「全免」。
+ */
+export function rateSummary(models: ProviderModel[]): string | null {
+  const rates = models
+    .map((model) => model.rate)
+    .filter((rate): rate is number => rate !== undefined);
+  if (rates.length === 0) return null;
+  const paid = rates.filter((rate) => rate > 0);
+  if (paid.length === 0) return "全免";
+  return `最低 ${rateLabel(Math.min(...paid))}`;
 }
 
 /** 渠道徽章的展示顺序（CB → TR → 其余），与全站展示顺序一致。 */

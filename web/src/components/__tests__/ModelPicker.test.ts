@@ -11,6 +11,7 @@ import {
   pickDefaultModel,
   providerRate,
   rateLabel,
+  rateSummary,
   type PickableModel,
 } from "../ModelPicker";
 
@@ -213,6 +214,41 @@ describe("groupModelsByProvider", () => {
     expect(grouped.get("trae")?.map((item) => item.rate)).toEqual([0.2, 0.1]);
     expect(groupModelsByProvider([]).size).toBe(0);
   });
+
+  it("自定义别名不算独立模型（后端克隆目标条目，算进来会虚高）", () => {
+    const grouped = groupModelsByProvider([
+      model({ id: "kimi-k3", name: "Kimi K3", providers: ["trae"], credit_rate: 0.5 }),
+      model({
+        id: "my-kimi", name: "my-kimi", providers: ["trae"], credit_rate: 0.5,
+        custom_alias: true, alias_target: "kimi-k3",
+      } as Partial<ModelInfo> & Pick<ModelInfo, "id" | "providers">),
+    ]);
+    expect(grouped.get("trae")).toEqual([
+      { id: "kimi-k3", label: "Kimi K3", rate: 0.5 },
+    ]);
+  });
+});
+
+describe("rateSummary", () => {
+  it("免费额度不参与取最低：混着免费模型时不显示「最低 免」", () => {
+    expect(rateSummary([
+      { id: "a", label: "A", rate: 0 },
+      { id: "b", label: "B", rate: 0.05 },
+      { id: "c", label: "C", rate: 2 },
+    ])).toBe("最低 x0.05");
+  });
+
+  it("整组都免费时说「全免」", () => {
+    expect(rateSummary([
+      { id: "a", label: "A", rate: 0 },
+      { id: "b", label: "B", rate: 0 },
+    ])).toBe("全免");
+  });
+
+  it("一条倍率都没有（或没有模型）时不造「最低」", () => {
+    expect(rateSummary([{ id: "a", label: "A" }])).toBeNull();
+    expect(rateSummary([])).toBeNull();
+  });
 });
 
 describe("rateLabel", () => {
@@ -220,5 +256,10 @@ describe("rateLabel", () => {
     expect(rateLabel(0)).toBe("免");
     expect(rateLabel(0.29)).toBe("x0.29");
     expect(rateLabel(2)).toBe("x2");
+  });
+
+  it("抹掉浮点长尾，也不把极小倍率压成 0（那会显示成「免」）", () => {
+    expect(rateLabel(0.1 + 0.2)).toBe("x0.3");
+    expect(rateLabel(0.004)).toBe("x0.004");
   });
 });
