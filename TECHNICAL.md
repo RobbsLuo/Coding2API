@@ -581,7 +581,7 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 
 ```json
 {
-  "status": "ok", "service": "coding2api", "version": "0.9.0",
+  "status": "ok", "service": "coding2api", "version": "0.9.1",
   "credentials": {"total": 5, "ready": 4, "cooling": 1, "paused": 0, "disabled": 0}
 }
 ```

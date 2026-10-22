@@ -60,7 +60,7 @@ docker compose exec coding2api python scripts/create_user.py admin --role admin
 
 ```bash
 docker compose pull
-# 或指定版本：docker pull ghcr.io/robbsluo/coding2api:v0.9.0
+# 或指定版本：docker pull ghcr.io/robbsluo/coding2api:v0.9.1
 ```
 
 推送新版本：打 tag `v*` 推到 main 即触发 publish workflow（`.github/workflows/publish.yml`），同时打 `<tag>` 与 `:latest` 到 GHCR；也可在 Actions 页面手动触发。
@@ -338,7 +338,7 @@ claude
 
 ```json
 {
-  "status": "ok", "service": "coding2api", "version": "0.9.0",
+  "status": "ok", "service": "coding2api", "version": "0.9.1",
   "credentials": {"total": 5, "ready": 4, "cooling": 1, "paused": 0, "disabled": 0}
 }
 ```

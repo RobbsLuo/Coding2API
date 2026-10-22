@@ -58,7 +58,7 @@ Pull the GHCR image instead of building:
 
 ```bash
 docker compose pull
-# or pin a version: docker pull ghcr.io/robbsluo/coding2api:v0.9.0
+# or pin a version: docker pull ghcr.io/robbsluo/coding2api:v0.9.1
 ```
 
 Pushing a `v*` tag to main triggers the publish workflow (`.github/workflows/publish.yml`), tagging both `<tag>` and `:latest` on GHCR.
