@@ -16,7 +16,7 @@
 ## 响应
 
 单人维护项目，尽力而为：3 个工作日内确认收到，能修的尽快修，修复随常规
-release 发布并在 CHANGELOG / commit message 里说明。
+release 发布并在 commit message 与 GitHub Release 说明里注明。
 
 ## 部署方须知（本项目的信任边界）
 

@@ -737,7 +737,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 
 ### 管理台热更（「任务与配置」页）
 
-上表中带「可热更」语义的 **58 项**可不改 `.env`、不重启，直接在管理台「任务与配置」页修改：
+上表中带「可热更」语义的 **60 项**可不改 `.env`、不重启，直接在管理台「任务与配置」页修改：
 
 `DEFAULT_MODEL`、`MODEL_BLOCKLIST`、`MODEL_ALIASES`、`CONTEXT_COMPRESS_ENABLED`、`CONTEXT_COMPRESS_RESERVE_TOKENS`、`CONTEXT_COMPRESS_MIN_KEEP_MESSAGES`、`CONTEXT_COMPRESS_SAFETY_RATIO`、`MODEL_FALLBACK_GROUPS`、`STREAM_FIRST_EVENT_TIMEOUT_SECONDS`、`STREAM_IDLE_TIMEOUT_SECONDS`、`SHORT_COOLDOWN_WAIT_SECONDS`、`QUOTA_EXPIRY_WINDOW_SECONDS`、`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`、`CONVERSATION_STICKY_SECONDS`、`MAX_INFLIGHT_PER_CREDENTIAL`、`GROWTH_IRREVERSIBLE_ACTIONS`、`GROWTH_INTERVAL_MINUTES`、`REFRESH_INTERVAL_MINUTES`、`QUOTA_PROBE_MINUTES`、`MODEL_CATALOG_MINUTES`、`OPENROUTER_CATALOG_MINUTES`、`USD_CNY_RATE`、`CODEBUDDY_CHAT_MIN_INTERVAL`、`CODEBUDDY_INTL_CHAT_MIN_INTERVAL`、`ZEN_CHAT_MIN_INTERVAL`、`KILO_CHAT_MIN_INTERVAL`、`QODER_CHAT_MIN_INTERVAL`、`CODEARTS_CHAT_MIN_INTERVAL`、`CODEARTS_MAX_CONCURRENCY`、`CODEARTS_REQUEST_WINDOW_SECONDS`、`PACER_MIN_SECONDS`、`PACER_MAX_SECONDS`、`ACTIVITY_REPORT_ENABLED`、`ACTIVITY_REPORT_HOUR`、`ALERT_ENABLED`、`ALERT_WEBHOOK_URL`、`ALERT_INTERVAL_MINUTES`、`ALERT_SILENCE_MINUTES`、`ALERT_FOR_TICKS`、`ALERT_CLEAR_TICKS`、`ALERT_POOL_READY_MIN`、`ALERT_TASK_FAILURES`、`ALERT_TOKEN_EXPIRY_HOURS`、`ALERT_ERROR_RATE_THRESHOLD`、`ALERT_ERROR_RATE_MIN_REQUESTS`、`ALERT_ERROR_RATE_WINDOW_MINUTES`、`BACKUP_INTERVAL_MINUTES`、`BACKUP_KEEP`、`UPSTREAM_STATUS_ENABLED`、`UPSTREAM_STATUS_MINUTES`、`MODEL_PROBE_MINUTES`、`METRICS_ENABLED`、`REQUEST_LOG_ENABLED`、`FORCE_DISABLE_THINKING`、`REASONING_EFFORT_MAP`、`ANTHROPIC_THINKING_EFFORTS`、`CHECKIN_TIMES`、`CHECKIN_JITTER_MINUTES`、`LOG_BUFFER_LINES`。
 
@@ -773,7 +773,7 @@ sudo systemctl restart coding2api       # systemd
 **确认升级已生效**（先查版本，再查路由）：
 
 ```bash
-# 1) schema 版本已迁移（期望 22）且账号已导入
+# 1) schema 版本已迁移（期望 29）且账号已导入
 sqlite3 data/coding2api.sqlite3 "PRAGMA user_version; SELECT username, role, enabled FROM users;"
 # 2) 路由存在：期望 401（未登录），404 = 旧后端进程
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
@@ -789,6 +789,8 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
 ./scripts/build-web.sh            # 仅在产物过期时构建
 ./scripts/build-web.sh --force    # 无条件重建
 ```
+
+> **`web/.npmrc` 不能删，也不能只在本地改**：它把 `auto-install-peers` 关掉了。`@lobehub/icons` 把 `@lobehub/ui` / `antd` 声明为 peer，自动安装会拖进 400+ 个用不到的包（本项目只 import 它的静态图标组件，不引用 `@lobehub/ui`）；关掉后 lock 里少一半包，`pnpm audit --prod` 也是 0 漏洞。代价是**真正需要的 peer 必须显式声明**（`@testing-library/dom` 就是这么加进 `devDependencies` 的）。该设置与 lockfile 里的 `settings.autoInstallPeers` 强耦合，所以 `Dockerfile` 也必须 `COPY web/.npmrc`，否则 `--frozen-lockfile` 直接报 `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`。
 
 > **部署相关操作记在本地文档**：当前开发机的进程管理方式、路径与工具版本等见 `docs/local-environment.md`。该目录已在 `.gitignore` 中，**克隆仓库的人不会有这个文件**。
 

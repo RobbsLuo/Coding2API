@@ -4,15 +4,15 @@ PROPOSAL.md 定方向，本文档定实现。描述**当前代码的现状**，�
 ## 1. 技术栈定稿
 | 层 | 选型 | 版本 | 说明 |
 |---|---|---|---|
-| 运行时 | Python | 3.12（`requires-python >=3.12`，CI/Dockerfile 均 3.12） | |
+| 运行时 | Python | 3.12（`requires-python >=3.12`；CI 3.12，Dockerfile 运行时基础镜像 3.14-slim） | |
 | 包管理 | uv（venv + pyproject.toml + uv.lock） | 锁定版本见 `uv.lock` | |
-| Web | FastAPI + Uvicorn | 0.141.1 / 0.52.4 | |
-| 配置 | pydantic-settings | 2.15.0 | `Settings` 为 frozen |
+| Web | FastAPI + Uvicorn | 0.143.3 / 0.54.0 | |
+| 配置 | pydantic-settings | 2.16.0 | `Settings` 为 frozen |
 | HTTP | httpx 双客户端（流式/短请求分离）；`httpx[socks]` 提供按渠道 SOCKS5 代理 | 0.28.1 / socksio | 共享 `trust_env=False` |
 | 数据库 | 标准库 sqlite3（WAL）+ 手写 SQL | 内置 | |
-| 加密 | cryptography Fernet（凭证列） | 50.0.1 | |
-| 测试 | pytest + pytest-cov + respx + 文件化 fixture | pytest 9.1.1 / respx 0.23.1 | |
-| 前端 | React 19 + Tailwind 4 + shadcn/ui + @lobehub/icons + Vite 7 | 实例版本见 `web/package.json` | |
+| 加密 | cryptography Fernet（凭证列） | 50.0.2 | |
+| 测试 | pytest + pytest-cov + respx + 文件化 fixture | pytest 9.1.1 / pytest-cov 7.1.0 / respx 0.23.1 | |
+| 前端 | React 19 + Tailwind 4 + shadcn/ui + @lobehub/icons + Vite 8 + TypeScript 7 | 实例版本见 `web/package.json` | |
 
 > 上表是选型定稿；小版本随依赖漂移，实际以 `pyproject.toml` / `uv.lock` / `web/package.json` 为准；仅主版本或兼容边界（`requires-python`、Node 主版本）变化时回改本表。
 
@@ -42,7 +42,7 @@ PROPOSAL.md 定方向，本文档定实现。描述**当前代码的现状**，�
 | `src/` 顶层 | `sorting.py` `benchmarks.py` `pricing.py` `model_match.py` `request_context.py` `upstream_status.py` | 列表排序 `sort`/`order` 白名单解析（db 与 api 共用）／OpenRouter 单一源：刊例价 + 明细元数据 + 能力指数 + 落盘快照／单请求成本估算（USD→CNY）／本地模型名 ↔ OpenRouter 条目匹配（仅 benchmarks·pricing 用）／请求 ID 的 contextvar + 白名单校验 + 自生成（中间件设置、统计写入现读）／上游状态页聚合（`SOURCE_SPECS` + 四种解析器 + 并发抓取 + 内存快照 store） |
 | `src/api/` | `deps.py` `endpoints.py` `chat.py` `responses.py` `messages.py` `context.py` `models.py` `model_merge.py` `model_catalog.py` `balance.py` `authorize.py` `admin_credentials.py` `admin_keys.py` `admin_settings.py` `admin_users.py` `admin_audit.py` `admin_alerts.py` `admin_badges.py` `admin_upstream.py` `admin_model_catalog.py` `admin_model_availability.py` `logs.py` `activate.py` `admin_stats.py` `admin_auth.py` `playground.py` `streaming.py` `metrics.py` | Services 容器 + 鉴权·会话·CSRF 依赖／三个 /v1 出口共用的 `dispatch_compat` 骨架／`POST /v1/chat/completions`·`/v1/responses`·`/v1/messages`／请求入口的上下文压缩接线／`GET /v1/models`（按凭证加载 + SWR + 缓存·TTL + 落盘 + 黑名单 + 白名单）／模型归一·合并·命名·对外 id 消歧·别名表（纯函数）／模型目录落盘快照 + 别名预热／`GET /v1/user/balance`／`GET /authorize`（TRAE 回调落点）／凭证 CRUD·toggle·pin·probe·checkin·成长·账号切换／API Key CRUD（渠道绑定 + 双白名单 + 到期）／`GET`/`PUT /api/settings` + `GET /api/tasks` + `POST /api/tasks/{key}/run`／用户管理／审计查询／告警回看 + 人工标记恢复（`GET /api/alerts`、`POST /api/alerts/{id}/resolve`）／侧栏角标聚合（`GET /api/nav-badges`，按角色裁剪 payload）／上游状态聚合只读回看（`GET /api/upstream-status`）／模型目录只读查看 + 模型级失败聚合 + 探活结论·立即探活·人工接管／一次性令牌激活流／统计查询／登录·登出·会话·自助改密 + 上游登录 start·poll·complete·cancel／会话调试端点（无需 API Key）／SSE 流包装（长空隙插心跳帧）／`GET /metrics`（Prometheus text 格式） |
 | `src/audit/actions.py` | — | 审计动作常量 + 中文标签（含 `alert.resolve`） |
-| `web/` | — | React 前端 |
+| `web/` | — | React 前端。**`.npmrc` 的 `auto-install-peers=false` 与 `pnpm-lock.yaml` 的 `settings.autoInstallPeers` 强耦合**：关掉是为了不装 `@lobehub/icons` 声明的 `@lobehub/ui`/`antd` peer 子树（400+ 包，本项目只深引用静态图标组件，不引用 `@lobehub/ui`）；代价是真实需要的 peer 必须显式进 `devDependencies`（如 `@testing-library/dom`）。`Dockerfile` 必须 `COPY web/.npmrc`，否则 `--frozen-lockfile` 报 `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH` |
 | `deploy/` | — | 各部署形态模板（launchd / newsyslog / logrotate / systemd） |
 | `diagrams/` | — | 架构图 / 请求时序图 / 调度状态机（HTML 成品 + 源 JSON） |
 | `scripts/` | — | hash_password / create_user / 回填与运维脚本 |
@@ -432,7 +432,7 @@ class Scheduler:
 客户端断连：生成器被关闭/取消时统计 `error_type=client_disconnect`，关闭上游流；例外：`[DONE]` 已产出后的收尾断开（客户端拿到回调即关连接，框架在结束帧 `more_body=False` 前有一拍竞态会把它判为断开）按成功记账。
 
 ## 8. 数据库
-DDL 以 `src/db/schema.sql` 为准。当前 `SCHEMA_VERSION = 28`，共 13 张表：`api_keys` / `credentials` / `credential_limits` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `model_probes` / `runtime_settings` / `alert_events`。
+DDL 以 `src/db/schema.sql` 为准。当前 `SCHEMA_VERSION = 29`，共 13 张表：`api_keys` / `credentials` / `credential_limits` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `model_probes` / `runtime_settings` / `alert_events`。
 
 ```sql
 -- conn.py 打开时执行
@@ -698,7 +698,7 @@ sudo systemctl restart coding2api       # systemd
 **诊断顺序**（先确认版本，再查业务）：
 
 ```bash
-# 1) schema 版本已迁移（期望 19）且账号已导入
+# 1) schema 版本已迁移（期望 29）且账号已导入
 sqlite3 data/coding2api.sqlite3 "PRAGMA user_version; SELECT username, role, enabled FROM users;"
 # 2) 路由存在：期望 401（未登录），404 = 旧后端进程
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users

@@ -161,7 +161,7 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 ## 4. 数据模型
 
-DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 **12 张表**，`SCHEMA_VERSION = 27`。变更纪律：schema.sql **只加不改**；新增列走 `_MIGRATION_COLUMNS` 幂等补列，删表须在 `_MIGRATION_DROPS` 补一条。
+DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 **13 张表**，`SCHEMA_VERSION = 29`。变更纪律：schema.sql **只加不改**；新增列走 `_MIGRATION_COLUMNS` 幂等补列，删表须在 `_MIGRATION_DROPS` 补一条。
 
 | 表 | 用途 |
 |---|---|

@@ -22,12 +22,15 @@
 
 ## GitHub Actions（硬约束）
 
-- push 到 main（或 PR）会触发 CI（.github/workflows/ci.yml）：backend / frontend / compose 三个 job
+- push 到 main（或 PR）会触发 CI（.github/workflows/ci.yml）：backend / frontend / compose / security 四个 job
 - **推送后必须确认 CI 全绿才算完成**：`gh run watch $(gh run list --limit 1 --json databaseId -q '.[0].databaseId')`
   或 `gh run list --limit 1`
 - CI 失败必须修复直到通过；不允许留下红色 main 分支
 - compose job 会在 Docker 内真实构建并启动服务（health 检查），改 Dockerfile / 依赖 /
   启动逻辑时先本地 `docker build` 预演
+- **`web/.npmrc` 与 `web/pnpm-lock.yaml` 强耦合**：`auto-install-peers=false` 必须与 lock 里的
+  `settings.autoInstallPeers` 一致，且 `Dockerfile` 必须 `COPY web/.npmrc`。改任一处都要
+  本地 `docker build` 验证，否则 compose job 报 `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`
 
 ## 其他
 
