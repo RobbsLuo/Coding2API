@@ -2,13 +2,12 @@ import { describe, expect, it } from "vitest";
 import { makeCredential } from "@/test-utils";
 import {
   ANY,
-  CODEARTS_BENEFIT_KEY,
-  CODEARTS_INTERNAL_KEY,
   DEFAULT_FILTERS,
   DEFAULT_GROUP_SORT,
   filterCredentials,
   groupByProvider,
   matchesFilters,
+  providerLedger,
   providerOptions,
   sortGroups,
   stateOptions,
@@ -112,31 +111,28 @@ describe("groupByProvider", () => {
     ]);
   });
 
-  it("CodeArts 拆成「内置（可写）」与「福利（只读）」两组，账号各出现一次", () => {
+  it("CodeArts 只有一个组（不再拆内置/福利），账本为 credits", () => {
     const groups = groupByProvider([
       credential({ id: "ca1", provider: "codearts" }),
       credential({ id: "ca2", provider: "codearts" }),
     ]);
-    expect(groups.map((group) => group.key)).toEqual([
-      CODEARTS_INTERNAL_KEY,
-      CODEARTS_BENEFIT_KEY,
-    ]);
-    // 真实 provider 不变：行内渠道语义（额度口径、探测能力）仍按它判断
-    expect(groups.map((group) => group.provider)).toEqual(["codearts", "codearts"]);
-    expect(groups.map((group) => group.label)).toEqual(["CodeArts 内置", "CodeArts 福利"]);
-    expect(groups.map((group) => group.readOnly)).toEqual([false, true]);
-    // 同一批账号在两个组各出现一次
+    expect(groups).toHaveLength(1);
+    expect(groups[0]).toMatchObject({
+      key: "codearts",
+      provider: "codearts",
+      label: "CodeArts",
+      ledger: "credits",
+    });
+    // 一个真实渠道只有一个组：账号只出现一次
     expect(groups[0].items.map((item) => item.id)).toEqual(["ca1", "ca2"]);
-    expect(groups[1].items.map((item) => item.id)).toEqual(["ca1", "ca2"]);
-    // 两组各自聚合，互不影响
     expect(groups[0].states).toEqual({ ready: 2 });
   });
 
-  it("非 CodeArts 渠道只有一组，label 用全站展示名且可写", () => {
+  it("非 CodeArts 渠道只有一组，label 用全站展示名", () => {
     const groups = groupByProvider([credential({ id: "cb", provider: "codebuddy" })]);
     expect(groups).toHaveLength(1);
     expect(groups[0]).toMatchObject({
-      key: "codebuddy", provider: "codebuddy", label: "CodeBuddy", readOnly: false,
+      key: "codebuddy", provider: "codebuddy", label: "CodeBuddy", ledger: "pool",
     });
   });
 
@@ -218,44 +214,50 @@ describe("groupByProvider", () => {
     expect(group.total).toBe(100);
   });
 
-  it("CodeArts 两组各聚合本账的到期积分（福利＝每日池、内置＝积分账）", () => {
+  it("CodeArts 组按通用额度字段聚合到期积分，账本为 credits", () => {
     const groups = groupByProvider(
       [
         credential({
           id: "ca1", provider: "codearts",
           quota_expiring_credits: 100,
           quota_expiring_credits_secondary: 140,
-          quota_credits_expiring: 8,
-          quota_credits_expiring_secondary: 20,
         }),
         credential({
           id: "ca2", provider: "codearts",
           quota_expiring_credits: 50,
           quota_expiring_credits_secondary: 60,
-          quota_credits_expiring: 2,
-          quota_credits_expiring_secondary: 5,
         }),
       ],
       NOW,
     );
-    const byKey = Object.fromEntries(groups.map((group) => [group.key, group]));
-    // 福利组＝每日池字段，内置组＝积分账字段，互不串账
-    expect(byKey["codearts-benefit"].expiring).toBe(150);
-    expect(byKey["codearts-benefit"].expiringSecondary).toBe(200);
-    expect(byKey["codearts-internal"].expiring).toBe(10);
-    expect(byKey["codearts-internal"].expiringSecondary).toBe(25);
+    // 唯一的 CodeArts 组：主/次窗口都按通用字段求和
+    expect(groups).toHaveLength(1);
+    expect(groups[0].ledger).toBe("credits");
+    expect(groups[0].expiring).toBe(150);
+    expect(groups[0].expiringSecondary).toBe(200);
+  });
+});
+
+describe("providerLedger", () => {
+  it("CodeArts 记积分账，其余渠道（含未知）记套餐池账", () => {
+    expect(providerLedger("codearts")).toBe("credits");
+    for (const provider of [
+      "codebuddy", "codebuddy_intl", "trae", "zen", "kilo", "qoder", "officeace", "mystery",
+    ]) {
+      expect(providerLedger(provider)).toBe("pool");
+    }
   });
 });
 
 describe("sortGroups", () => {
   const groups = (): ProviderGroup[] => [
-    { key: "codebuddy", provider: "codebuddy", label: "CodeBuddy", readOnly: false,
+    { key: "codebuddy", provider: "codebuddy", label: "CodeBuddy",
       ledger: "pool", items: [], states: {}, remaining: 50, total: 100,
       expiring: null, expiringSecondary: null },
-    { key: "trae", provider: "trae", label: "TRAE", readOnly: false,
+    { key: "trae", provider: "trae", label: "TRAE",
       ledger: "pool", items: [], states: {}, remaining: 900, total: 1000,
       expiring: null, expiringSecondary: null },
-    { key: "zen", provider: "zen", label: "OpenCode Zen", readOnly: false,
+    { key: "zen", provider: "zen", label: "OpenCode Zen",
       ledger: "pool", items: [], states: {}, remaining: null, total: null,
       expiring: null, expiringSecondary: null },
   ];
@@ -280,10 +282,10 @@ describe("sortGroups", () => {
   it("无额度接口（remaining null）垫底，不当 0 参与比较", () => {
     const sorted = sortGroups(
       [
-        { key: "zen", provider: "zen", label: "OpenCode Zen", readOnly: false,
+        { key: "zen", provider: "zen", label: "OpenCode Zen",
           ledger: "pool", items: [], states: {}, remaining: null, total: null,
           expiring: null, expiringSecondary: null },
-        { key: "codebuddy", provider: "codebuddy", label: "CodeBuddy", readOnly: false,
+        { key: "codebuddy", provider: "codebuddy", label: "CodeBuddy",
           ledger: "pool", items: [], states: {}, remaining: 0, total: 100,
           expiring: null, expiringSecondary: null },
       ] as ProviderGroup[],
@@ -296,10 +298,10 @@ describe("sortGroups", () => {
   it("额度相同（含都为 null）时回落到渠道顺序，不抖动", () => {
     const sorted = sortGroups(
       [
-        { key: "zen", provider: "zen", label: "OpenCode Zen", readOnly: false,
+        { key: "zen", provider: "zen", label: "OpenCode Zen",
           ledger: "pool", items: [], states: {}, remaining: null, total: null,
           expiring: null, expiringSecondary: null },
-        { key: "kilo", provider: "kilo", label: "Kilo Gateway", readOnly: false,
+        { key: "kilo", provider: "kilo", label: "Kilo",
           ledger: "pool", items: [], states: {}, remaining: null, total: null,
           expiring: null, expiringSecondary: null },
       ] as ProviderGroup[],
@@ -309,22 +311,20 @@ describe("sortGroups", () => {
     expect(sorted.map((group) => group.key)).toEqual(["zen", "kilo"]);
   });
 
-  it("额度相同时 CodeArts 内置排在福利前（虚拟渠道次序）", () => {
+  it("额度相同时按分组 key 兜底定序，不随入参抖动", () => {
     const sorted = sortGroups(
       [
-        { key: CODEARTS_BENEFIT_KEY, provider: "codearts", label: "CodeArts 福利",
-          readOnly: true, ledger: "pool", items: [], states: {}, remaining: 100,
+        { key: "mystery-b", provider: "mystery-b", label: "mystery-b",
+          ledger: "pool", items: [], states: {}, remaining: 100,
           total: 1000, expiring: null, expiringSecondary: null },
-        { key: CODEARTS_INTERNAL_KEY, provider: "codearts", label: "CodeArts 内置",
-          readOnly: false, ledger: "credits", items: [], states: {}, remaining: 100,
+        { key: "mystery-a", provider: "mystery-a", label: "mystery-a",
+          ledger: "pool", items: [], states: {}, remaining: 100,
           total: 1000, expiring: null, expiringSecondary: null },
       ] as ProviderGroup[],
       "quota",
     );
-    expect(sorted.map((group) => group.key)).toEqual([
-      CODEARTS_INTERNAL_KEY,
-      CODEARTS_BENEFIT_KEY,
-    ]);
+    // 两个未知渠道同权重、同额度 → 回落到 key 字典序
+    expect(sorted.map((group) => group.key)).toEqual(["mystery-a", "mystery-b"]);
   });
 
   it("不改动入参数组的顺序", () => {

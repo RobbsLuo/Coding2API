@@ -86,6 +86,48 @@ describe("AddCredentialDialog", () => {
     vi.useRealTimers();
   });
 
+  it("poll 失败时透出上游可行动原因，而不是兜底文案", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/upstream/start")) {
+        return jsonResponse({ flow: "poll", state: "s", auth_url: "https://a", interval: 1 });
+      }
+      if (url.includes("/upstream/poll")) {
+        return jsonResponse({ error: {
+          code: "upstream_error",
+          message: "这个账号还没开通 OfficeAce 服务。请先在 OfficeAce 客户端里登录并兑换邀请码完成开通，再回来重新登录。",
+        } }, 400);
+      }
+      return jsonResponse({ credentials: [], viewer: "root", is_admin: true });
+    }));
+    vi.stubGlobal("open", () => null);
+    const props = renderDialog();
+    await userEvent.click(screen.getByTestId("start-login-officeace"));
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(props.onError).toHaveBeenCalledWith(
+      expect.stringContaining("还没开通 OfficeAce 服务"));
+    vi.useRealTimers();
+  });
+
+  it("OfficeAce「换账号」带着 force_login 发起登录", async () => {
+    const bodies: unknown[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/upstream/start")) {
+        bodies.push(JSON.parse(String(init?.body ?? "")));
+        return jsonResponse({ flow: "poll", state: "s", auth_url: "https://a", interval: 5 });
+      }
+      return jsonResponse({ credentials: [], viewer: "root", is_admin: true });
+    }));
+    vi.stubGlobal("open", () => ({ closed: false, close: vi.fn(), opener: {}, location: { href: "" } }));
+    renderDialog();
+    await userEvent.click(screen.getByTestId("switch-login-officeace"));
+
+    expect(bodies).toEqual([{ provider: "officeace", force_login: true }]);
+  });
+
   it("拒绝非 http(s) 授权地址，不对弹窗赋值", async () => {
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);

@@ -43,26 +43,9 @@ export function healthView(health: Health, provider?: string): HealthView {
 }
 
 /**
- * 一条凭证在**某个展示组**里的健康度。
- *
- * CodeArts 在凭证页拆成两组、每组只讲一本账，健康度也必须跟着账本走：
- * 后端 `health` 只按主账（每日 token 池）算，积分账另有派生的
- * `quota_credits_health`。若内置组仍读 `health`，就会出现「额度列显示
- * 积分还剩 99%、健康度却 0%」的自相矛盾。
- *
- * 其余渠道与福利组都读主账；调度口径始终只有 `health` 一个（派生值不改选号）。
- */
-export function credentialHealth(
-  credential: Credential,
-  ledger: "pool" | "credits" = "pool",
-): Health {
-  return ledger === "credits" ? credential.quota_credits_health : credential.health;
-}
-
-/**
  * 周期语义：CodeBuddy 的额度随周期重置，TRAE 是单调递减的账户余额，
  * Zen / Kilo 走免费层、上游没有额度接口（探测恒为「未知」），
- * CodeArts 是**每日积分池**（上游 1000 万 token 折 1000 积分，当日 0 点清零、不累计）。
+ * CodeArts 是**积分余额**（内置模型按积分计费，按积分包到期日作废）。
  *
  * 判定依据是**渠道类型**，不是 quota_cycle_end 是否存在：
  * CodeBuddy 未探测时 cycle_end 同样是 null，而按 cycle_end 推断会把它
@@ -76,14 +59,19 @@ export function quotaSemantics(credential: Credential): string {
   if (credential.provider === "trae") {
     return "账户剩余（单调递减）";
   }
-  // CodeArts 是每日 token 池折算成的额度（上游 1000 万 token 折 1000 积分，
-  // 1 积分 = 10000 token），当日 0 点清零——上游不给重置时间戳，固定按时段
-  // 描述，不能退化成「本周期剩余」。这里的「积分」是合成折算值，与上游真积分
-  // （内置模型计费单位）同名不同物，故文案用「额度池」而非「积分」。
-  // 另有并行的积分账（内置模型）在凭证页「CodeArts 内置」组单独展示，
-  // 见 CREDITS_QUOTA_SEMANTICS。
+  // CodeArts 的额度就是积分（内置模型计费，上游数值本身即积分，不经折算）；
+  // 积分包各自有到期日，用完不掉，到期即作废，故不说「本周期」。
   if (credential.provider === "codearts") {
-    return "每日额度池（token 折算，当日 0 点清零）";
+    if (!credential.quota_cycle_end) {
+      return "积分余额（内置模型计费，按积分包到期日作废）";
+    }
+    const date = new Date(credential.quota_cycle_end * 1000).toLocaleDateString("zh-CN");
+    return `积分余额（内置模型计费），最早 ${date} 到期`;
+  }
+  // officeAce 的积分就是主账（新用户一次性 + 每日签到各发一笔），每笔有
+  // 独立到期时间、不一并重置，故按「余额 + 逐笔到期」描述，不能说成本周期。
+  if (credential.provider === "officeace") {
+    return "积分余额（逐笔到期，新用户与每日签到各自计时）";
   }
   // CodeBuddy / Qoder 随周期重置；未探测到重置时间时退化为本周期口径。
   if (!credential.quota_cycle_end) {
@@ -94,23 +82,8 @@ export function quotaSemantics(credential: Credential): string {
 }
 
 /**
- * 第二本账（CodeArts 积分）的口径说明：内置模型（GLM-5.2 / OpenPangu 等）
- * 按积分计费，与福利模型走的每日 token 池是**并行的两本账**、互不通气
- * （上游两个接口各自独立，实测）。其余渠道无此账（`quota_credits_*` 恒 null），
- * 故调用方要先判空再渲染。
- *
- * 措辞刻意与主账区分：主账是「额度池（token 折算）」，这里是「积分」——
- * 上游数值本身就是积分，不经 `units` 折算，两者同名不同物。
- */
-export const CREDITS_QUOTA_SEMANTICS =
-  "内置模型积分（GLM-5.2 / OpenPangu 等）：与每日额度池并行的独立账本，" +
-  "按积分计费，套餐到期日作废。选号仍按每日池额度算（调度口径不变），" +
-  "但本组健康度按积分账算，与本组额度同源；到期日计入「快过期先用」。";
-
-/**
- * 额度单位统一为「积分」：CodeArts 上游的 token 已在后端折成积分
- * （1 积分 = 10000 token，见 `src/provider/codearts/units.py`），
- * 与 CodeBuddy / TRAE / Qoder 同口径，展示层不再需要按渠道换单位。
+ * 额度单位统一为「积分」：CodeArts 上游直接以积分计费，CodeBuddy / TRAE /
+ * Qoder / officeAce 的额度也按积分口径展示，展示层不再需要按渠道换单位。
  */
 export const QUOTA_UNIT = "积分";
 
@@ -123,7 +96,7 @@ export const QUOTA_UNIT = "积分";
  * 主/次两个窗口共用一个函数：措辞区分开，否则两行同样的句式看不出
  * 谁是第一优先级（主窗口 36h 打平时才轮到次窗口 7 天）。
  *
- * `unit` 默认「积分」，全渠道同口径（CodeArts 的 token 已在后端折成积分）。
+ * `unit` 默认「积分」，全渠道同口径。
  */
 export function expiringQuotaLabel(
   credits: number | null | undefined,
@@ -200,14 +173,11 @@ export type CredentialState =
 export function credentialState(
   credential: Credential,
   now = Date.now() / 1000,
-  /** 本组讲的那本账的健康度；缺省＝主账（`credential.health`）。
-   *  CodeArts 内置组传积分账派生的健康度，否则会出现「额度 99% + 额度耗尽」。 */
-  health: Health = credential.health,
 ): CredentialState {
   if (credential.disabled) return "disabled";
   if (!credential.enabled) return "off";
   if (cooldownRemaining(credential.cooling_until, now) > 0) return "cooling";
-  if (health !== null && health < 0) return "exhausted";
+  if (credential.health !== null && credential.health < 0) return "exhausted";
   return "ready";
 }
 
@@ -258,6 +228,22 @@ export function formatDuration(seconds: number): string {
 export function formatTime(epoch: number | null | undefined): string {
   if (!epoch) return "—";
   return new Date(epoch * 1000).toLocaleString("zh-CN", { hour12: false });
+}
+
+/**
+ * 时间拆成「日期 / 时刻」两段：明细表把两行摞起来显示，窄屏也不折行。
+ *
+ * 与 `formatTime` 同一时区口径（浏览器本地时间），只是不带上 `toLocaleString`
+ * 的逗号与斜杠，方便对齐等宽字体。
+ */
+export function formatTimeParts(epoch: number | null | undefined): [string, string] {
+  if (!epoch) return ["—", ""];
+  const at = new Date(epoch * 1000);
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return [
+    `${at.getFullYear()}-${pad(at.getMonth() + 1)}-${pad(at.getDate())}`,
+    `${pad(at.getHours())}:${pad(at.getMinutes())}:${pad(at.getSeconds())}`,
+  ];
 }
 
 /**
@@ -337,8 +323,7 @@ export function formatCacheRate(
 }
 
 /**
- * Credit 展示：null 显示 —；推算值（TRAE 按官方单价折算、CodeArts 福利模型按
- * 每日池 1:1 折算）前置
+ * Credit 展示：null 显示 —；推算值（TRAE 按官方单价折算）前置
  * ≈ 表示约等于，提醒是估算而非上游回传的真实扣费。
  */
 export function formatCredit(
@@ -403,6 +388,37 @@ export function formatLatency(ms: number | null | undefined): string {
   if (ms === null || ms === undefined) return "—";
   if (ms >= 1000) return `${Number((ms / 1000).toFixed(1))} s`;
   return `${formatNumber(ms)} ms`;
+}
+
+/**
+ * 输出速度：`94.1 tok/s`；无样本（null）显示 —。
+ *
+ * `estimated` 为真时前置 ≈：该值不是按生成时间（扣掉首字等待）算的，而是
+ * 在没有首字数据时拿端到端耗时估算的，提醒读者别把它当同一口径比较。
+ */
+export function formatSpeed(tps: number | null | undefined, estimated = false): string {
+  if (tps === null || tps === undefined) return "—";
+  const text = `${tps.toFixed(1)} tok/s`;
+  return estimated ? `≈${text}` : text;
+}
+
+/**
+ * 速度合并列（分组表与请求明细表共用）：`正文 / 总产出`，单位只在末尾出现一次。
+ *
+ * 两个分子同分母（生成时间），正文贴合屏幕刷新速度、总产出含思考 token，故
+ * 并成一列展示（列头下拉仍可分别排序）；悬停详情里写全各自的口径。任一侧
+ * 无样本时该侧显示 —（正文侧还可能是「整段输出都是思考」），两侧都没有时整格
+ * 就是一个 —，不渲染 `— / —`。
+ */
+export function formatSpeedPair(
+  visible: number | null | undefined,
+  total: number | null | undefined,
+  estimated = false,
+): string {
+  if (visible == null && total == null) return "—";
+  const one = (value: number | null | undefined) =>
+    value == null ? "—" : value.toFixed(1);
+  return `${estimated ? "≈" : ""}${one(visible)} / ${one(total)} tok/s`;
 }
 
 /** 图表 hover 数值：按指标格式化，单位用 () 包裹（耗时/首字数已含 ms/s）。 */

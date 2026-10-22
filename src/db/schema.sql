@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
     preview       TEXT NOT NULL,
     created_at    INTEGER NOT NULL,
     last_used_at  INTEGER,
-    -- 多 Key 出口：绑定渠道（见 KNOWN_PROVIDERS 七渠道 | ''=自动）与来源 IP
+    -- 多 Key 出口：绑定渠道（见 KNOWN_PROVIDERS 八渠道 | ''=自动）与来源 IP
     -- 白名单（逗号分隔 IP/CIDR，''=不限制）。空值即老库/未设置时的原行为。
     provider_binding TEXT NOT NULL DEFAULT '',
     allowed_ips   TEXT NOT NULL DEFAULT '',
@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS api_keys (
 
 CREATE TABLE IF NOT EXISTS credentials (
     id               TEXT PRIMARY KEY,
-    provider         TEXT NOT NULL,          -- 见 KNOWN_PROVIDERS（七渠道）
+    provider         TEXT NOT NULL,          -- 见 KNOWN_PROVIDERS（八渠道）
     nickname         TEXT NOT NULL DEFAULT '',
     data_enc         BLOB NOT NULL,          -- Fernet 加密的凭证 JSON
     enabled          INTEGER NOT NULL DEFAULT 1,   -- 用户软开关
@@ -56,9 +56,6 @@ CREATE TABLE IF NOT EXISTS credentials (
     quota_cycle_end  INTEGER,                      -- 最早到期 epoch；渠道无此信息为 NULL
     quota_expiry_ladder TEXT,                      -- 到期阶梯 JSON [[epoch, 剩余积分]]；无到期信息为 NULL
     quota_packages   TEXT,                      -- 额度包明细 JSON [{"name","total","used","end"}]，仅展示
-    quota_credits_remaining REAL,               -- 第二本账（CodeArts 积分）：内置模型计费，与 token 池并行；其余渠道 NULL
-    quota_credits_total     REAL,               -- 同上，积分总量
-    quota_credits_expiry_ladder TEXT,           -- 积分账到期阶梯 JSON [[epoch, 剩余积分]]（仅 CodeArts，展示用）；其余渠道 NULL
     quota_probed_at  INTEGER,
     token_expires_at INTEGER,                   -- access token 到期 epoch；NULL=老库未回填，0=未知
     token_issued_at  INTEGER,                   -- access token 签发 epoch（JWT iat）：进度条满量程与「最后续期」
@@ -227,6 +224,9 @@ CREATE INDEX IF NOT EXISTS idx_model_cooling_until
 -- `state`：ok（探活成功）/ failed（上游明确不认这个模型）/ inconclusive
 -- （额度、限流、网络等与模型无关的失败——**绝不能**据此禁用）。
 -- `manual`：人工接管标记（非空 = 跳过自动探活），见 src/api/admin_model_availability.py。
+-- `failed` + 同 (渠道, 模型) 仍有生效中的 `credential_model_cooldowns`
+-- （reason='blocked'）时，该 (渠道, 模型) 会被模型列表暂时摘掉；到期口径
+-- 就是那条负缓存的 cooling_until，见 src/api/models.py::merged_entries。
 CREATE TABLE IF NOT EXISTS model_probes (
     provider      TEXT NOT NULL,
     model         TEXT NOT NULL,

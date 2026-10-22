@@ -178,6 +178,13 @@ describe("StatsPage 分组与明细", () => {
       await userEvent.click(screen.getByTestId(`group-sort-token-${key}`));
       await waitFor(() => expect(lastProviderCall()).toContain(`sort=${key}`));
     }
+
+    // 速度合并列：正文 / 总产出两个分子各自是排序键
+    for (const key of ["tps_visible", "tps"]) {
+      await userEvent.click(screen.getByTestId("group-sort-speed"));
+      await userEvent.click(screen.getByTestId(`group-sort-speed-${key}`));
+      await waitFor(() => expect(lastProviderCall()).toContain(`sort=${key}`));
+    }
   });
 
   it("请求明细排序：换列从 rowid 游标切到 offset 分页", async () => {
@@ -240,6 +247,31 @@ describe("StatsPage 分组与明细", () => {
       const last = spy.mock.calls.map((call) => String(call[0]))
         .filter((url) => url.includes("/api/stats/events")).at(-1)!;
       expect(last).toContain("sort=ttfb_ms");
+    });
+
+    // 速度列下拉选「总产出速度」→ 后端 sort=tps（正文侧是 tps_visible）
+    await userEvent.click(screen.getByTestId("event-sort-speed"));
+    await userEvent.click(screen.getByTestId("event-sort-speed-tps"));
+    await waitFor(() => {
+      const last = spy.mock.calls.map((call) => String(call[0]))
+        .filter((url) => url.includes("/api/stats/events")).at(-1)!;
+      expect(last).toContain("sort=tps");
+    });
+
+    // 渠道/凭证合并列：合并后仍可分别按两个子列排序
+    await userEvent.click(screen.getByTestId("event-sort-source"));
+    await userEvent.click(screen.getByTestId("event-sort-source-credential"));
+    await waitFor(() => {
+      const last = spy.mock.calls.map((call) => String(call[0]))
+        .filter((url) => url.includes("/api/stats/events")).at(-1)!;
+      expect(last).toContain("sort=credential");
+    });
+    await userEvent.click(screen.getByTestId("event-sort-source"));
+    await userEvent.click(screen.getByTestId("event-sort-source-provider"));
+    await waitFor(() => {
+      const last = spy.mock.calls.map((call) => String(call[0]))
+        .filter((url) => url.includes("/api/stats/events")).at(-1)!;
+      expect(last).toContain("sort=provider");
     });
   });
 
@@ -330,11 +362,15 @@ describe("StatsPage 分组与明细", () => {
     expect(within(row).getByTestId("group-avg-ttfb")).toHaveTextContent("900 ms");
     expect(within(row).getByTestId("group-p95-latency")).toHaveTextContent("9.5 s");
     expect(within(row).getByTestId("group-p95-ttfb")).toHaveTextContent("2.4 s");
+    // 速度合并列：正文 58.0 / 总产出 102.0 tok/s（同分母，两个分子并成一列）
+    expect(within(row).getByTestId("group-tps")).toHaveTextContent("58.0 / 102.0 tok/s");
     // kimi-k3 28/30 = 93.3%，推算成本标 ≈；未上报缓存 → 命中率显示 —
     row = within(screen.getByTestId("group-table")).getByText("kimi-k3").closest("tr")!;
     expect(row).toHaveTextContent("93.3%");
     expect(row).toHaveTextContent("≈¥2.68");
     expect(within(row).getByTestId("group-cache-rate")).toHaveTextContent("—");
+    // 估算口径两个分子都前置 ≈（同一个 ≈ 覆盖整格）
+    expect(within(row).getByTestId("group-tps")).toHaveTextContent("≈40.2 / 76.4 tok/s");
 
     // 按用户：alice 76/80 = 95.0%
     await userEvent.click(screen.getByTestId("group-tabs-user"));
@@ -351,12 +387,14 @@ describe("StatsPage 分组与明细", () => {
     expect(row).toHaveTextContent("97.1%");
     expect(row).toHaveTextContent("≈¥3.35");
     expect(within(row).getByTestId("group-avg-latency")).toHaveTextContent("8.2 s");
+    expect(within(row).getByTestId("group-tps")).toHaveTextContent("61.0 / 88.0 tok/s");
     // 无成功样本的凭证行：延迟四列都是 —（不拿 0 冒充有数据）
     row = within(screen.getByTestId("group-table")).getByText("cred_zzz9998").closest("tr")!;
     expect(within(row).getByTestId("group-avg-latency")).toHaveTextContent("—");
     expect(within(row).getByTestId("group-avg-ttfb")).toHaveTextContent("—");
     expect(within(row).getByTestId("group-p95-latency")).toHaveTextContent("—");
     expect(within(row).getByTestId("group-p95-ttfb")).toHaveTextContent("—");
+    expect(within(row).getByTestId("group-tps")).toHaveTextContent("—");
   });
 
   it("分组统计：凭证名与请求明细同口径，且带渠道 icon", async () => {

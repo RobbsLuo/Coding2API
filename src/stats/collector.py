@@ -18,6 +18,7 @@ from typing import Any
 
 from ..pricing import PriceTable, estimate_cost_usd, to_cny
 from ..request_context import get_api_key_id, get_request_id
+from .query import row_speed
 
 logger = logging.getLogger(__name__)
 
@@ -213,6 +214,12 @@ class StatsCollector:
         """
         if self._on_record is None:
             return
+        # `tps` / `tps_visible` 是派生列（库里不存）：实时流行在广播点就地算，
+        # 规则与 /api/stats/events 的 SQL 列同源（`row_speed`）。
+        visible_tps, total_tps = row_speed(
+            ok=event.ok, output_tokens=event.output_tokens,
+            reasoning_tokens=event.reasoning_tokens,
+            latency_ms=event.latency_ms, ttfb_ms=event.ttfb_ms)
         payload = {
             "rowid": rowid,
             "id": event.id,
@@ -233,6 +240,9 @@ class StatsCollector:
             "cost_cny": event.cost_cny,
             "latency_ms": event.latency_ms,
             "ttfb_ms": event.ttfb_ms,
+            # 逐请求速度（派生列，见 `_notify` 开头）：与明细端点同规则
+            "tps": total_tps,
+            "tps_visible": visible_tps,
             "request_id": event.request_id,
         }
         try:

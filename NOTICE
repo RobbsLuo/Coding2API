@@ -36,7 +36,7 @@ Copyright (c) 2026 Hongsheng Luo (Robbs)
 
 - codearts2api - https://github.com/HITZY2002/codearts2api
   （提供华为云 CodeArts 上游的逆向记录与实现参考：SDK-HMAC-SHA256 签名、
-    DPoP(ES256) 令牌刷新、累计全文 SSE 语义、福利模型发现与领取）
+    DPoP(ES256) 令牌刷新、累计全文 SSE 语义、签到与积分额度接口形状）
 
 本项目的代码为独立实现，不复制上述项目的源代码。
 上游服务的协议细节来自对客户端行为的观察，不属于上述项目的版权范围。

@@ -46,18 +46,15 @@ SNAP_ENGINE_HOST = "https://snap-access.cn-north-4.myhuaweicloud.com"
 SNAP_MANAGER_PREFIX = "/snap-manager"
 STS_HOST = "https://sts.cn-north-4.myhuaweicloud.com"
 PORTAL_HOST = "https://codearts.huaweicloud.com/portal"
-BENEFIT_HOST = "https://opengw.developer.huaweicloud.com"
 # refresh_token 与 client_id 绑定：换值刷新会被 STS 拒（STS5.1806）。
 CLIENT_ID = "codearts-agent"
 
 EP_CHAT_V2 = "/api/v2/chat/completions"
 EP_CHAT = "/v1/chat/chat"
 EP_MODEL_BUILTIN = "/v1/model/builtin"
-EP_BENEFIT_CONFIG = "/api/v1/gateway/config"
-EP_BENEFIT_CLAIM = "/api/v1/benefit/claim"
-EP_TOKEN_BALANCE = "/api/v1/user/tokens/balance"
-# 积分账（内置模型）统计：**挂在 snap 引擎根上、带 `snap-manager` 前缀**，
-# 与 `/v1/ops/*`（签到，不带前缀）相反；不带前缀回 APIG.0101（实测）。
+# 积分账（内置模型计费，本渠道唯一的额度来源）：**挂在 snap 引擎根上、带
+# `snap-manager` 前缀**，与 `/v1/ops/*`（签到，不带前缀）相反；不带前缀回
+# APIG.0101（实测）。
 EP_STATISTICS_PLUGIN = "/snap-manager/v1/statistics/plugin"
 EP_LOGIN_TICKET = "/v1/login/ticket"
 EP_OAUTH_TOKENS = "/v1/oauth2/tokens"
@@ -77,9 +74,6 @@ OPS_CHANNEL = "IDE"
 # 新用户 4 / 学生认证 2 / 每日签到 1，只有这个每天可领）。
 CAMPAIGN_DAILY_CREDIT = 1
 
-# 福利模型路由头（逆向记录 §7：无此头报 InferHub.002002009.404 未注册）。
-HEADER_MAAS_TYPE = "maas_type"
-MAAS_BENEFIT = "benefit"
 # 内置模型接口要求（逆向记录 §7）。
 AGENT_TYPE_PROMPT_CENTER = "PromptCenter"
 
@@ -89,7 +83,8 @@ DONE_TEXT = "[DONE]"
 
 # 该账号用不了这个模型（重试无意义）→ (账号, 模型) 负缓存。
 # `InferHub.002002009.404 model is not registered` / `InferHub.4004.200
-# benefit not found` 均来自逆向记录 §7 实测原文。
+# benefit not found` 均来自逆向记录 §7 实测原文；后者是上游「权益未领取」
+# 文案（福利链路已下线，仍保留：命中即模型确实拿不到，值得负缓存）。
 _MODEL_ABSENT_MARKERS = ("002002009", "not registered", "4004.200", "benefit not found")
 # 并发会话打满：上游点名「在途满了」（`TM.00001041`、并发），排空即恢复，
 # 走固定短冷却的 CONCURRENCY，不套 MODEL 的翻倍退避（一次打满锁 10min 太久）。
@@ -309,9 +304,9 @@ def _as_int(value: Any) -> int | None:
 def classify_error_code(code: str | None) -> ErrKind:
     """流内业务码（字符串）分类。
 
-    只有 `002002009.404`（模型未注册）与 `4004.200`（福利未领取）是逆向记录里
-    的实测原文，其余按语义就近映射；未识别的一律 OTHER（累计 3 次 → 10m
-    整条渠道冷却），绝不猜测成更重的死禁。
+    只有 `002002009.404`（模型未注册）与 `4004.200`（上游对应「权益未领取」，
+    福利下线前的实测原文）是逆向记录里的实测原文，其余按语义就近映射；
+    未识别的一律 OTHER（累计 3 次 → 10m 整条渠道冷却），绝不猜测成更重的死禁。
     """
     text = (code or "").strip().lower()
     if not text or text == "0":

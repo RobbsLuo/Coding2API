@@ -153,7 +153,7 @@ def _retry_after_delta(raw: str, now: int) -> float | None:
 def parse_retry_after(headers: Any, now: int) -> int | None:
     """上游 `Retry-After` → 「何时恢复」的 epoch 秒；缺头/非法返回 None。
 
-    这是唯一解析入口：七渠道在构造 `UpstreamHTTPError` 时统一调用
+    这是唯一解析入口：八渠道在构造 `UpstreamHTTPError` 时统一调用
     `retry_hints`（本函数的薄包装），再交给调度器按错误分类的作用域钳制。
     """
     delta = _retry_after_delta(_header_value(headers, "retry-after"), now)
@@ -313,7 +313,7 @@ class Usage:
     reasoning_tokens: int | None = None
     cached_tokens: int | None = None   # 输入中命中缓存的 token（上游可选，缺省 None）
     credit: float | None = None   # 上游可选字段，两边都经常为 None
-    # credit 是否为本服务推算（TRAE 按官方单价、CodeArts 福利模型按每日 token 池 1:1）。
+    # credit 是否为本服务推算（TRAE 按官方单价折算）。
     # True 时展示层标 ≈；上游真给 credit 的渠道恒为 False。
     credit_estimated: bool = False
 
@@ -357,17 +357,6 @@ class Quota:
     # 与 expiry_ladder 分开存：后者的结构装不下名称，且两者口径不同
     # （明细额外含「已过期但仍有余额」与「已用完但仍有效」的包）。
     packages: list[dict[str, Any]] | None = None
-    # 第二本账：积分（CodeArts 内置模型的计费单位，与每日 token 池并行）。
-    # 只有双账本渠道（当前仅 CodeArts）填，其余渠道恒 None——`remaining`/`total`
-    # 仍是各渠道的主账（CodeArts 为每日 token 池），**调度健康度只看主账**；
-    # 管理台内置组另用 `credits_health_score` 派生一个积分账健康度（只展示，
-    # 不改选号）；积分到期日由渠道并入 `expiry_ladder` 参与到期排序（见 codearts/client）。
-    credits_remaining: float | None = None
-    credits_total: float | None = None
-    # 积分账自己的到期阶梯（仅 CodeArts）：与并入主账 `expiry_ladder` 的那一段
-    # 同源，单独留一份供管理台**按账本**展示到期积分——选号仍要两本账合并的
-    # 阶梯，故不替换主账字段。其余渠道恒 None。
-    credits_expiry_ladder: list[tuple[int, float]] | None = None
     probed_at: int | None = None
     probe_failed: bool = False
 
@@ -389,21 +378,6 @@ def health_score(quota: Quota | None) -> int | None:
     if quota is None or quota.probe_failed:
         return UNKNOWN
     return _ratio_health(quota.remaining, quota.total)
-
-
-def credits_health_score(remaining: float | None, total: float | None) -> int | None:
-    """第二本账（CodeArts 积分）的派生健康度，供管理台内置组展示。
-
-    **不参与调度**：调度器只用 `health`（主账＝每日 token 池），选号口径不变。
-    积分账只在列表层给一个与额度列同源的百分比——否则内置组会出现
-    「额度列显示积分 x / y，健康度却是每日池的 0%」，两个数字自相矛盾。
-
-    两字段同时为 None = 积分接口未探测（best-effort 失败或从未探到），与主账
-    `probe_failed` 同语义：回「未探测」而不是「已耗尽」。
-    """
-    if remaining is None and total is None:
-        return UNKNOWN
-    return _ratio_health(remaining, total)
 
 
 @dataclass(slots=True)
@@ -501,10 +475,6 @@ class Model:
     name: str = ""
     # 消耗倍数：CB 为 "x0.29 credits" 解析出的数值；TRAE 为 consumption_rate.rate
     credit_rate: float | None = None
-    # 福利模型标记（当前只有 CodeArts 用）：来自「限时免费套餐」目录，走每日
-    # token 池而非积分账，上游不给倍率。展示层据此在渠道徽章上打「福」标——
-    # 不能用 `credit_rate == 0` 代替（那是 zen/kilo 的真·免费，额度不会用尽）。
-    benefit: bool = False
     max_input_tokens: int | None = None
     max_output_tokens: int | None = None
     supports_images: bool | None = None

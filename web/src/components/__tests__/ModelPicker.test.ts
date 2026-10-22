@@ -4,12 +4,14 @@ import {
   buildSections,
   displayName,
   filterOptions,
+  groupModelsByProvider,
   matchesFilter,
   modelRate,
   modelValue,
   pickDefaultModel,
-  providerBenefit,
   providerRate,
+  rateLabel,
+  rateSummary,
   type PickableModel,
 } from "../ModelPicker";
 
@@ -52,29 +54,6 @@ describe("providerRate", () => {
       by_provider: { codebuddy: { credit_rate: 0.29 } },
     });
     expect(providerRate(item, "trae")).toBeUndefined();
-  });
-});
-
-describe("providerBenefit", () => {
-  it("优先按渠道细分标记；单渠道回退顶层 benefit", () => {
-    const dual = model({
-      id: "shared", providers: ["codearts", "trae"],
-      by_provider: { codearts: { benefit: true }, trae: {} },
-    });
-    expect(providerBenefit(dual, "codearts")).toBe(true);
-    expect(providerBenefit(dual, "trae")).toBe(false);
-    const single = model({ id: "b", providers: ["codearts"], benefit: true });
-    expect(providerBenefit(single, "codearts")).toBe(true);
-    expect(providerBenefit(model({ id: "x", providers: ["trae"] }), "trae")).toBe(false);
-  });
-
-  it("多渠道缺细分标记时不拿顶层 benefit 冒充", () => {
-    const item = model({
-      id: "shared", providers: ["codearts", "trae"], benefit: true,
-      by_provider: { trae: {} },
-    });
-    expect(providerBenefit(item, "codearts")).toBe(false);
-    expect(providerBenefit(item, "trae")).toBe(false);
   });
 });
 
@@ -198,5 +177,89 @@ describe("displayName", () => {
     expect(displayName({ id: "qmodel_38max", name: "Qwen3.8 Max" })).toBe("Qwen3.8 Max");
     expect(displayName({ id: "dmodel" })).toBe("dmodel");
     expect(displayName({ id: "dmodel", name: "   " })).toBe("dmodel");
+  });
+});
+
+describe("groupModelsByProvider", () => {
+  it("多渠道条目同时进各渠道，倍率按渠道取（不拿合并值冒充）", () => {
+    const grouped = groupModelsByProvider([
+      model({
+        id: "glm-5.2", name: "GLM 5.2", providers: ["codebuddy", "trae"],
+        // 合并值是 0.29，但两个渠道各自不同；多渠道时不能用合并值
+        credit_rate: 0.29,
+        by_provider: { codebuddy: { credit_rate: 0.29 }, trae: { credit_rate: 0.5 } },
+      }),
+      model({ id: "kimi-k3", name: "Kimi K3", providers: ["trae"], credit_rate: 0 }),
+      model({ id: "aaa", providers: ["trae"] }),
+    ]);
+    expect([...grouped.keys()].sort()).toEqual(["codebuddy", "trae"]);
+    expect(grouped.get("codebuddy")).toEqual([
+      { id: "glm-5.2", label: "GLM 5.2", rate: 0.29 },
+    ]);
+    // 展示名排序（zh-CN 排序忽略大小写）：aaa < GLM 5.2 < Kimi K3
+    expect(grouped.get("trae")).toEqual([
+      // 无倍率：rate 为 undefined（展示 —），不是 0
+      { id: "aaa", label: "aaa", rate: undefined },
+      { id: "glm-5.2", label: "GLM 5.2", rate: 0.5 },
+      { id: "kimi-k3", label: "Kimi K3", rate: 0 },
+    ]);
+  });
+
+  it("单渠道模型回退合并倍率；同名条目按 id 稳定排序；空列表返回空 Map", () => {
+    const grouped = groupModelsByProvider([
+      model({ id: "b", name: "同名", providers: ["trae"], credit_rate: 0.1 }),
+      model({ id: "a", name: "同名", providers: ["trae"], credit_rate: 0.2 }),
+    ]);
+    expect(grouped.get("trae")?.map((item) => item.id)).toEqual(["a", "b"]);
+    expect(grouped.get("trae")?.map((item) => item.rate)).toEqual([0.2, 0.1]);
+    expect(groupModelsByProvider([]).size).toBe(0);
+  });
+
+  it("自定义别名不算独立模型（后端克隆目标条目，算进来会虚高）", () => {
+    const grouped = groupModelsByProvider([
+      model({ id: "kimi-k3", name: "Kimi K3", providers: ["trae"], credit_rate: 0.5 }),
+      model({
+        id: "my-kimi", name: "my-kimi", providers: ["trae"], credit_rate: 0.5,
+        custom_alias: true, alias_target: "kimi-k3",
+      } as Partial<ModelInfo> & Pick<ModelInfo, "id" | "providers">),
+    ]);
+    expect(grouped.get("trae")).toEqual([
+      { id: "kimi-k3", label: "Kimi K3", rate: 0.5 },
+    ]);
+  });
+});
+
+describe("rateSummary", () => {
+  it("免费额度不参与取最低：混着免费模型时不显示「最低 免」", () => {
+    expect(rateSummary([
+      { id: "a", label: "A", rate: 0 },
+      { id: "b", label: "B", rate: 0.05 },
+      { id: "c", label: "C", rate: 2 },
+    ])).toBe("最低 x0.05");
+  });
+
+  it("整组都免费时说「全免」", () => {
+    expect(rateSummary([
+      { id: "a", label: "A", rate: 0 },
+      { id: "b", label: "B", rate: 0 },
+    ])).toBe("全免");
+  });
+
+  it("一条倍率都没有（或没有模型）时不造「最低」", () => {
+    expect(rateSummary([{ id: "a", label: "A" }])).toBeNull();
+    expect(rateSummary([])).toBeNull();
+  });
+});
+
+describe("rateLabel", () => {
+  it("0 是免费额度（免），其余加 x 前缀", () => {
+    expect(rateLabel(0)).toBe("免");
+    expect(rateLabel(0.29)).toBe("x0.29");
+    expect(rateLabel(2)).toBe("x2");
+  });
+
+  it("抹掉浮点长尾，也不把极小倍率压成 0（那会显示成「免」）", () => {
+    expect(rateLabel(0.1 + 0.2)).toBe("x0.3");
+    expect(rateLabel(0.004)).toBe("x0.004");
   });
 });

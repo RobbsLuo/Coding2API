@@ -90,8 +90,7 @@ def test_batch_probe_success_path(batch_app):
     assert body["succeeded"] == 2 and body["failed"] == 0
     assert all(row["ok"] for row in body["results"])
     assert body["results"][0]["detail"] == {
-        "probed": True, "remaining": 7, "total": 10, "cycle_end": None,
-        "credits_remaining": None, "credits_total": None}
+        "probed": True, "remaining": 7, "total": 10, "cycle_end": None}
     # 探测是只读语义：不写审计（与单条端点一致）
     assert app.state.audit.query(action="credential.toggle") == []
 

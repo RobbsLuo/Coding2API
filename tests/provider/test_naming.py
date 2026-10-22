@@ -251,6 +251,22 @@ class TestCrossChannelAlignment:
         assert normalize_model_key("DeepSeek-Flash") != \
             normalize_model_key("DeepSeek-V4-Flash")
 
+    def test_synonym_table_collapses_vendor_prefixed_cb_name(self):
+        """CodeBuddy 的 `Xiaomi MiMo-V2.6-Pro` 与 TRAE 的 `MiMo-V2.6-Pro` 同一条。
+
+        CB 的可读名带厂商前缀（空格式，不是 `Vendor: ` 冒号式，清洗削不到），
+        归一键会多出 `xiaomi-`，同一模型被拆成两条、对外多出
+        `xiaomi-mimo-v2.6-pro`。异名表把键与展示名收敛到 TRAE 的写法。
+        """
+        assert normalize_model_key("Xiaomi MiMo-V2.6-Pro") == "mimo-v2.6-pro"
+        assert normalize_model_key("Xiaomi MiMo-V2.6-Pro") == \
+            normalize_model_key("MiMo-V2.6-Pro")
+        assert display_model_name("Xiaomi MiMo-V2.6-Pro") == "MiMo V2.6 Pro"
+        assert display_model_name("Xiaomi MiMo-V2.6-Pro") == \
+            display_model_name("MiMo-V2.6-Pro")
+        # Flash 档不带前缀，不受影响
+        assert normalize_model_key("MiMo-V2.6-Flash") == "mimo-v2.6-flash"
+
     def test_synonym_display_is_idempotent(self):
         """规范展示名再洗一遍不变（幂等），否则中心层二次清洗会来回横跳。"""
         canonical = display_model_name("DeepSeek-Flash")

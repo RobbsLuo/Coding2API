@@ -179,7 +179,7 @@ def admin_client(tmp_path):
 
 
 def test_login_start_endpoint_accepts_intl(admin_client, monkeypatch):
-    """端到端：管理台「登录 CodeBuddy 国际版」必须走 poll 轨道。
+    """端到端：管理台「登录 CodeBuddy 国际」必须走 poll 轨道。
 
     这条测的是**真实装配**的 registry，不注入替身 OAuth——只测
     `_upstream_auth` 的返回值会漏掉「注册表里没有该渠道」这类断线，

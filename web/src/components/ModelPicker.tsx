@@ -32,21 +32,6 @@ export function providerRate(item: ModelInfo, provider: string): number | undefi
   return undefined;
 }
 
-/**
- * 某渠道的模型是否为**福利模型**（当前只有 CodeArts）。
- *
- * 福利模型走每日 token 池、上游不给倍率，展示层在渠道徽章上打「福」标区分
- * 于内置模型。判据与倍率同构：优先按渠道细分（`by_provider`），单渠道条目
- * 回退顶层 `benefit`；多渠道缺细分标记时返回 false——**不能**拿顶层冒充，
- * 否则会把福利标到同条目的其它渠道上。
- */
-export function providerBenefit(item: ModelInfo, provider: string): boolean {
-  const perProvider = item.by_provider?.[provider]?.benefit;
-  if (perProvider !== undefined) return perProvider;
-  if (item.providers.length === 1) return item.benefit === true;
-  return false;
-}
-
 /** 模型排序用倍率：多渠道取各渠道最小倍率；无倍率视为最大（排最后）。 */
 export function modelRate(item: ModelInfo): number | undefined {
   const rates = item.providers
@@ -152,6 +137,72 @@ export function displayName(item: { id: string; name?: string }): string {
   return name === "" ? item.id : name;
 }
 
+/** 倍率文案：`0` 是免费额度（上游给 0 表示不计费），不能显示成 `x0`。 */
+export function rateLabel(rate: number): string {
+  if (rate === 0) return "免";
+  // 上游倍率是浮点，可能带长尾（0.1+0.2 → 0.30000000000000004）。取 6 位有效
+  // 数字够覆盖真实倍率，又不像 toFixed(2) 那样把 0.004 压成 0（会显示成「免」）。
+  return `x${Number(rate.toPrecision(6))}`;
+}
+
+/** 凭证页组头「模型 N 个」用的条目：id 供排障，label 是展示名，rate 是该渠道的消耗倍率。 */
+export interface ProviderModel {
+  id: string;
+  label: string;
+  /** 该渠道下的倍率（`by_provider` 优先，单渠道回退合并值）；上游没给则为 undefined */
+  rate?: number;
+}
+
+/**
+ * 按渠道归类模型（凭证页渠道组头用）。
+ *
+ * 数据源是 `/api/playground/models`：它只含「有可用凭证且过当前黑名单」的渠道，
+ * 与 `/v1/models` 同口径，所以组里「有凭证」和「有模型」不必各算一套。
+ *
+ * **倍率按渠道取**（复用 `providerRate`，与模型选择器同一口径）：多渠道模型
+ * 各渠道倍率不同，拿合并值冒充会把某个渠道的倍率错标到别的渠道上。
+ * 排序按展示名（人类可读名优先），同名再按 id 兜底——凭证页 30s 轮询，
+ * 顺序必须稳定，不能随上游返回顺序跳动。
+ */
+export function groupModelsByProvider(models: ModelInfo[]): Map<string, ProviderModel[]> {
+  const grouped = new Map<string, ProviderModel[]>();
+  for (const item of models) {
+    // 自定义别名是**同一模型**的另一个可请求名字（后端克隆目标条目生成），
+    // 目标条目本身也在列表里；算进来会让「N 个模型」虚高、清单里同一模型出现两次。
+    if (isCustomAlias(item)) continue;
+    for (const provider of item.providers) {
+      const entry: ProviderModel = {
+        id: item.id, label: displayName(item), rate: providerRate(item, provider),
+      };
+      const bucket = grouped.get(provider);
+      if (bucket) bucket.push(entry);
+      else grouped.set(provider, [entry]);
+    }
+  }
+  for (const bucket of grouped.values()) {
+    bucket.sort((left, right) =>
+      left.label.localeCompare(right.label, "zh-CN") || left.id.localeCompare(right.id));
+  }
+  return grouped;
+}
+
+/**
+ * 组头「最低倍率」的文案（`null` = 一条倍率都没有，整块不显示）。
+ *
+ * **免费额度不参与取最低**：渠道里常混着 1~2 个 0 倍率模型（CodeBuddy 33 个里
+ * 2 个、Qoder 11 个里 2 个），按字面取最小会显示「最低 免」，读起来像整个渠道
+ * 免费——实际其余几十个都在收费。全渠道都免费时才说「全免」。
+ */
+export function rateSummary(models: ProviderModel[]): string | null {
+  const rates = models
+    .map((model) => model.rate)
+    .filter((rate): rate is number => rate !== undefined);
+  if (rates.length === 0) return null;
+  const paid = rates.filter((rate) => rate > 0);
+  if (paid.length === 0) return "全免";
+  return `最低 ${rateLabel(Math.min(...paid))}`;
+}
+
 /** 渠道徽章的展示顺序（CB → TR → 其余），与全站展示顺序一致。 */
 function sortProviders(providers: string[]): string[] {
   return [...providers].sort((left, right) => providerRank(left) - providerRank(right));
@@ -162,19 +213,15 @@ function sortProviders(providers: string[]): string[] {
  *
  * 倍率作为其内的加粗数字块单独强调（`x0.29`；免费额度显示「免」）。
  * `rawId` 非空时作为 tooltip：该渠道实际请求的 key。
- * `benefit` 为真时在渠道名后加一个「福」标：福利模型走每日 token 池、
- * 上游不给倍率，没有倍率块可看，这个标是它与内置模型唯一的区分点。
  */
 function ChannelPill({
   provider,
   rate,
   rawId,
-  benefit,
 }: {
   provider: string;
   rate?: number;
   rawId?: string;
-  benefit?: boolean;
 }) {
   const color = providerChartColor(provider);
   return (
@@ -191,18 +238,9 @@ function ChannelPill({
     >
       <ProviderIcon provider={provider} size={13} />
       {providerLabel(provider)}
-      {benefit && (
-        <span
-          data-testid={`channel-benefit-${provider}`}
-          title="福利模型：走每日免费 token 池，不消耗积分"
-          className="rounded bg-warn/15 px-1 font-bold text-warn-ink"
-        >
-          福
-        </span>
-      )}
       {rate !== undefined && (
         <span className="rounded bg-background/70 px-1 font-bold tabular-nums">
-          {rate === 0 ? "免" : `x${rate}`}
+          {rateLabel(rate)}
         </span>
       )}
     </span>
@@ -315,7 +353,6 @@ function ModelRow({
             provider={provider}
             rate={providerRate(item, provider)}
             rawId={providerRawId(item, provider)}
-            benefit={providerBenefit(item, provider)}
           />
         ))}
       </span>
@@ -427,7 +464,6 @@ export function ModelPicker({
                 provider={provider}
                 rate={providerRate(selectedItem, provider)}
                 rawId={providerRawId(selectedItem, provider)}
-                benefit={providerBenefit(selectedItem, provider)}
               />
             ))}
           </span>
@@ -471,7 +507,6 @@ export function ModelPicker({
                       provider={provider}
                       rate={providerRate(selectedItem, provider)}
                       rawId={providerRawId(selectedItem, provider)}
-                      benefit={providerBenefit(selectedItem, provider)}
                     />
                   </button>
                 ))}

@@ -22,6 +22,108 @@ METRIC_COLUMNS: dict[str, str] = {
 # 还原分布；分位只能从明细表算（见 `_percentile_join`）。
 PERCENTILES: tuple[int, ...] = (50, 90, 95, 99)
 
+# 明细聚合子查询（分位 + 输出速度）在主查询里的 JOIN 别名：`_percentile_join`
+# 与两个分组路径共用，别名固定。
+_DETAIL_AGG_ALIAS = "agg"
+
+# 输出速度（tok/s）口径：**token 总量 ÷ 生成时间总和**，不是逐条平均——
+# 短请求的逐条比值噪声大，逐条平均会把整体数字带歪；总量相除才是池级吞吐。
+# 只统计经本服务路由的成功请求，且**至少产出了 1 个 token**：输出为 0 / 未上报
+# 的请求没有可测的产出（比值恒为 0），不是「慢」，不该混进分母。**不设输出量
+# 下限**——短输出照样计入，量少时噪声由「总量相除」和下面两道物理下限兜住。
+# 生成窗口下限（ms）：`latency - ttfb` 极小时分母趋近 0，比值会被网络抖动 /
+# 毫秒取整放大成天文数字。真实成因是上游把整段内容攒成一批吐（首帧到达时
+# 内容其实早已生成完），此时「生成时长」根本不可测——这类样本没有信息量，
+# 属于无样本而不是「很快」，一律剔除（实测 901 token / 3ms = 30 万 tok/s）。
+SPEED_MIN_GEN_MS = 200
+# 单条样本的物理上限（tok/s）：单流生成不可能到这个量级。与上面的窗口下限
+# 互补——窗口够长但仍远快于硬件极限的样本同样是「批到达」的畸形数据
+# （如 901 token / 300ms），一并剔除，不拿它冒充速度。
+SPEED_MAX_TPS = 1000
+
+
+# 速度口径的样本筛选收在上面那两个 `_*_guard` 函数里：三处判定必须逐字一致，
+# 各写一份迟早会分叉——
+#   1. 分组 / 总览的 SQL 条件聚合（`_speed_aggregates`，见 `_percentile_join`）
+#   2. 逐请求明细的 SQL 列（`_row_speed_sql`，`GET /api/stats/events`）
+#   3. 实时流广播行的 Python 计算（`row_speed`，SSE 不查库，只能自己算）
+def _routed_guard(ref: str) -> str:
+    """路由口径的样本筛选（生成时间可测：有首字，分母 = 耗时 − 首字）。
+
+    要求**至少产出 1 个 token**（`output_tokens > 0`，NULL 参与比较得 NULL 而
+    排除）、生成窗口 ≥ `SPEED_MIN_GEN_MS` 且不超过单流物理上限。**不设输出量
+    下限**：短输出也是真实产出，剔除它会让「短问答为主」的渠道永远没有速度；
+    分母趋近 0 的畸形样本已由窗口下限与 `SPEED_MAX_TPS` 拦掉。
+    `latency_ms > ttfb_ms` 同时承担「`ttfb_ms` 为 NULL 则排除」。
+    `ref` 是表/子查询前缀，可为空串。
+    """
+    gen = f"({ref}latency_ms - {ref}ttfb_ms)"
+    return (f"{ref}output_tokens > 0 "
+            f"AND {ref}latency_ms > {ref}ttfb_ms "
+            f"AND {gen} >= {SPEED_MIN_GEN_MS} "
+            f"AND {ref}output_tokens * 1000.0 <= {SPEED_MAX_TPS} * {gen}")
+
+
+def _estimate_guard(ref: str) -> str:
+    """估算口径的样本筛选（无首字数据，分母 = 端到端耗时，含首字等待）。
+
+    样本门槛与路由口径一致（同样是「至少 1 个 token」+ 两道物理下限）：两口径
+    只在**分母**上不同，样本集合对齐后「换口径」不会顺带换掉样本。端到端耗时
+    含首字等待，本就比生成窗口大，比值只会更保守。
+    """
+    return (f"{ref}output_tokens > 0 "
+            f"AND {ref}latency_ms >= {SPEED_MIN_GEN_MS} "
+            f"AND {ref}output_tokens * 1000.0 <= {SPEED_MAX_TPS} * {ref}latency_ms")
+
+
+def _visible_tokens(ref: str) -> str:
+    """正文 token 的 SQL 表达式：输出 − 思考，负数折 0（上游偶有 reasoning > output）。"""
+    return (f"MAX(COALESCE({ref}output_tokens, 0) "
+            f"- COALESCE({ref}reasoning_tokens, 0), 0)")
+
+
+def _row_speed_sql(ref: str = "e.") -> tuple[str, str]:
+    """单条明细的速度列 SQL `(正文, 总产出)`；样本不合格的行给 NULL（显示 —）。
+
+    逐行只按**路由口径**算（`_routed_guard`），**不回落估算口径**：估算的分母
+    含首字等待，聚合口径靠成百上千条样本摊平还能看，单条上就是拿「等我打完
+    首字的时间」当生成时间，逐行展示只会误导。没有生成窗口的行给 — 更诚实。
+
+    正文为 0（整段输出都是思考）时给 NULL 而不是 0：「算不出正文速度」与
+    「正文速度是 0」在界面上不是一回事（前者显示 —）。
+    """
+    gen = f"({ref}latency_ms - {ref}ttfb_ms)"
+    sample = f"{ref}ok = 1 AND {_routed_guard(ref)}"
+    visible = (f"NULLIF(ROUND(CASE WHEN {sample} "
+               f"THEN {_visible_tokens(ref)} * 1000.0 / {gen} END, 1), 0)")
+    total = f"ROUND(CASE WHEN {sample} THEN {ref}output_tokens * 1000.0 / {gen} END, 1)"
+    return visible, total
+
+
+# 逐请求明细的速度表达式（`(正文, 总产出)`）：排序白名单与 `events()` 的
+# SELECT 列共用同一片段，避免「排序按 A 算、展示按 B 算」两套口径。
+_ROW_SPEED_VISIBLE, _ROW_SPEED_TOTAL = _row_speed_sql("e.")
+
+
+def row_speed(*, ok: bool | int, output_tokens: int | None, reasoning_tokens: int | None,
+              latency_ms: int | None, ttfb_ms: int | None) -> tuple[float | None, float | None]:
+    """单条明细的 `(正文 tok/s, 总产出 tok/s)`；不可测给 None（= `_row_speed_sql`）。
+
+    实时流（`StatsCollector.record` 广播）不查库，只能在广播前用 Python 算，
+    故这里保留一份与 SQL 同规则的实现（规则本体在 `_routed_guard`）。
+    """
+    if not ok or output_tokens is None or latency_ms is None or ttfb_ms is None:
+        return None, None
+    gen = latency_ms - ttfb_ms
+    # 与 `_routed_guard` 同规则：至少 1 个 token、窗口 ≥ 下限、不超过物理上限
+    if output_tokens <= 0 or gen < SPEED_MIN_GEN_MS:
+        return None, None
+    if output_tokens * 1000.0 > SPEED_MAX_TPS * gen:
+        return None, None
+    visible = max(output_tokens - (reasoning_tokens or 0), 0)
+    visible_tps = round(visible * 1000.0 / gen, 1) if visible > 0 else None
+    return visible_tps, round(output_tokens * 1000.0 / gen, 1)
+
 
 # 分组统计排序白名单：API 键 → 聚合列别名（`group` 指分组键列 `group_key`）。
 # 默认按请求数降序（「哪家/哪个模型用得最多」才是分组表的用途），并列时按
@@ -44,6 +146,23 @@ GROUP_SORT_COLUMNS: dict[str, str] = {
     "cost_cny": "cost_cny_sum",
     "avg_latency_ms": "CAST(latency_sum AS REAL) / ok_count",
     "avg_ttfb_ms": "CAST(ttfb_sum AS REAL) / ok_count",
+    # 输出速度：读明细聚合（与分位同源，只覆盖 90 天）。路由口径（生成时间总和）
+    # 优先；该组无路由样本时回落估算口径（端到端耗时含首字等待）。两口径都是
+    # 总量相除，tokens/ms 与 tok/s 单调同序，排序直接按该表达式。
+    # `tps` 是总产出（含思考 token），`tps_visible` 是正文（不含思考）；
+    # 同分母，故两者排序互不干扰，各自按自己的分子排。
+    "tps": (f"CASE WHEN {_DETAIL_AGG_ALIAS}.speed_gen_ms > 0 THEN "
+            f"CAST({_DETAIL_AGG_ALIAS}.speed_tokens AS REAL) "
+            f"/ {_DETAIL_AGG_ALIAS}.speed_gen_ms "
+            f"WHEN {_DETAIL_AGG_ALIAS}.est_ms > 0 THEN "
+            f"CAST({_DETAIL_AGG_ALIAS}.est_tokens AS REAL) "
+            f"/ {_DETAIL_AGG_ALIAS}.est_ms ELSE NULL END"),
+    "tps_visible": (f"CASE WHEN {_DETAIL_AGG_ALIAS}.speed_gen_ms > 0 THEN "
+                    f"CAST({_DETAIL_AGG_ALIAS}.speed_visible_tokens AS REAL) "
+                    f"/ {_DETAIL_AGG_ALIAS}.speed_gen_ms "
+                    f"WHEN {_DETAIL_AGG_ALIAS}.est_ms > 0 THEN "
+                    f"CAST({_DETAIL_AGG_ALIAS}.est_visible_tokens AS REAL) "
+                    f"/ {_DETAIL_AGG_ALIAS}.est_ms ELSE NULL END"),
     "p50_latency_ms": "p50_latency_ms",
     "p50_ttfb_ms": "p50_ttfb_ms",
     "p90_latency_ms": "p90_latency_ms",
@@ -77,6 +196,10 @@ EVENT_SORT_COLUMNS: dict[str, str] = {
     "cost_cny": "e.cost_cny",
     "ttfb_ms": "e.ttfb_ms",
     "latency_ms": "e.latency_ms",
+    # 逐请求速度（路由口径，见 `_row_speed_sql`）：无合格样本的行该列为 NULL，
+    # 降序时自然排最后。`tps` 总产出（含思考）/+ `tps_visible` 正文，各按自己排。
+    "tps_visible": _ROW_SPEED_VISIBLE,
+    "tps": _ROW_SPEED_TOTAL,
 }
 
 
@@ -99,13 +222,84 @@ ERROR_MAX_GROUPS = 5000
 # 向上取整），避免浮点误差把名次算偏。与原 P95 的 `(95*n+99)/100` 逐字节一致。
 _PERCENT_DENOM = 100
 
-# 分位 JOIN 子查询的别名：`_percentile_join` 与两个分组路径共用，别名固定。
-_PERCENTILE_ALIAS = "lat"
-
 # 每档分位在结果行里下发的列名（latency 与 ttfb 各一列）。`_group_row` 按此
 # 生成返回 dict——加档只需改 `PERCENTILES`，不用再改三处 SQL/映射。
 _PERCENTILE_FIELDS: tuple[str, ...] = tuple(
     f"p{pct}_{kind}" for pct in PERCENTILES for kind in ("latency_ms", "ttfb_ms"))
+
+# 明细聚合子查询下发的速度求和列名（`_group_row` / `_speed_value` 共用）：
+# speed_* = 路由口径（生成时间总和），est_* = 无首字数据时的估算口径；
+# *_tokens 是总产出（含思考），*_visible_tokens 是正文（不含思考）。
+_SPEED_FIELDS: tuple[str, ...] = ("speed_tokens", "speed_visible_tokens", "speed_gen_ms",
+                                  "est_tokens", "est_visible_tokens", "est_ms")
+
+
+def _speed_aggregates(indent: str = "                   ", ref: str = "ranked.") -> str:
+    """速度求和列（路由口径 + 估算口径；各含总产出与正文两个分子）。
+
+    `ref`：取值行的表/子查询前缀——分组路径取窗口子查询（`ranked.`），
+    总览路径直接在 `usage_events` 上聚合（空串）。
+
+    样本筛选复用 `_routed_guard` / `_estimate_guard`（逐请求明细与实时流用同一
+    套，见那两处注释），这里只负责把符合样本条件的分母与分子各自求和：
+    - 路由：`output_tokens > 0` 且 `latency > ttfb`（`ttfb_ms` 为 NULL 时比较得
+      NULL，天然排除非流式请求），分母是生成时间（耗时 − 首字）；另加物理合理性
+      下限（见 `SPEED_MIN_GEN_MS` / `SPEED_MAX_TPS`）：窗口过短或单条快得不像是
+      真生成的样本按「无法测量」剔除，不当作速度。**不设输出量下限**：短输出也
+      是真实产出，剔掉会让短问答为主的渠道永远没有速度。
+    - 估算：同样 `output_tokens > 0`，分母是端到端耗时（含首字等待）。仅在路由
+      口径无样本时使用，展示标 ≈。物理下限同样要加：分母换成端到端耗时只是把
+      比值压小，攒批到达的样本照样能算出成百上千 tok/s，不能因为「换了分母」就
+      当成有效样本。样本门槛与路由口径一致，两口径只差在分母。
+
+    正文分子用 `output_tokens - reasoning_tokens`：思考 token 也是模型产出的，
+    但它是成批快速吐出的（实测 13071 思考 token 62s 流完，正文随后 5.9s 吐完
+    1966 帧），混在一起算会得到远高于「屏幕上看到的正文刷新速度」的数字。
+    两个分子同分母，故样本筛选只需按总产出的窗口判定（正文 ⊆ 总产出，总产出
+    不超 `SPEED_MAX_TPS` 时正文也不会超）。
+    """
+    gen = f"({ref}latency_ms - {ref}ttfb_ms)"
+    routed = _routed_guard(ref)
+    est = _estimate_guard(ref)
+    visible = _visible_tokens(ref)
+    return (
+        f"{indent}COALESCE(SUM(CASE WHEN {routed}\n"
+        f"{indent}         THEN {ref}output_tokens END), 0) AS speed_tokens,\n"
+        f"{indent}COALESCE(SUM(CASE WHEN {routed}\n"
+        f"{indent}         THEN {visible} END), 0) AS speed_visible_tokens,\n"
+        f"{indent}COALESCE(SUM(CASE WHEN {routed}\n"
+        f"{indent}         THEN {gen} END), 0) AS speed_gen_ms,\n"
+        f"{indent}COALESCE(SUM(CASE WHEN {est}\n"
+        f"{indent}         THEN {ref}output_tokens END), 0) AS est_tokens,\n"
+        f"{indent}COALESCE(SUM(CASE WHEN {est}\n"
+        f"{indent}         THEN {visible} END), 0) AS est_visible_tokens,\n"
+        f"{indent}COALESCE(SUM(CASE WHEN {est}\n"
+        f"{indent}         THEN {ref}latency_ms END), 0) AS est_ms"
+    )
+
+
+def _speed_value(tokens: int | None, visible_tokens: int | None, gen_ms: int | None,
+                 est_tokens: int | None, est_visible_tokens: int | None,
+                 est_ms: int | None) -> tuple[float | None, float | None, bool]:
+    """`(总产出 tok/s, 正文 tok/s, 是否估算)`；某口径无样本时该值为 None。
+
+    路由口径有样本就用它，否则回落估算口径，都没有给 `(None, None, False)`。
+    分子分母都要求 > 0：`SUM(CASE …)` 无匹配行时为 NULL，`COALESCE` 归 0；
+    有耗时却没上报 token（或反之）的行不该产出「0 tok/s」这种假数据。正文分子
+    还可能为 0（整段输出都是思考），此时正文列给 None 而不是假的 0。
+    """
+    def ratio(num: int | None, den: int | None) -> float | None:
+        if den and den > 0 and num and num > 0:
+            return round(num * 1000 / den, 1)
+        return None
+
+    routed = ratio(tokens, gen_ms)
+    if routed is not None:
+        return routed, ratio(visible_tokens, gen_ms), False
+    estimated = ratio(est_tokens, est_ms)
+    if estimated is not None:
+        return estimated, ratio(est_visible_tokens, est_ms), True
+    return None, None, False
 
 
 def _percentile_rank(n_expr: str, pct: int) -> str:
@@ -123,28 +317,38 @@ def _percentile_select(pct: int, *, indent: str = "                   ") -> str:
     )
 
 
-def _percentile_columns(outer: str = _PERCENTILE_ALIAS) -> str:
-    """主查询里取各档分位列的 SELECT 片段（逗号分隔，不含前导逗号）。"""
+def _percentile_columns(outer: str = _DETAIL_AGG_ALIAS) -> str:
+    """主查询里取各档分名列的 SELECT 片段（逗号分隔，不含前导逗号）。"""
     return ",\n                   ".join(
         f"{outer}.{name} AS {name}" for name in _PERCENTILE_FIELDS)
 
 
+def _speed_columns(outer: str = _DETAIL_AGG_ALIAS) -> str:
+    """主查询里取速度求和列的 SELECT 片段（供 `_group_row` 折算 tok/s）。"""
+    return ",\n                   ".join(
+        f"{outer}.{name} AS {name}" for name in _SPEED_FIELDS)
+
+
 def _percentile_join(key: str, *, where: str = "", params: list[Any] | None = None,
                      suffix: str = "e2", outer: str = "") -> tuple[str, list[Any]]:
-    """按 `key` 分组算 P50/P90/P95/P99 延迟的 LEFT JOIN 子查询（挂到主聚合查询上）。
+    """按 `key` 分组算 P50/P90/P95/P99 延迟 + 输出速度求和的 LEFT JOIN 子查询。
 
     四档分位在**同一次**窗口函数扫描里算完：明细表按分组排一次序、按 latency 与
     ttfb 各生成一套 row_number，再用条件聚合按名次挑出各档的值。拆成四个 JOIN
-    会把同一批明细扫四遍。
+    会把同一批明细扫四遍。输出速度的两套求和（路由 / 估算口径）也在这次扫描里
+    用条件聚合顺带算完，不再单独扫一遍明细。
 
-    分位值**只能从明细表算**：小时汇总只存 `latency_sum` / `ttfb_sum`（和与
-    成功计数），数学上无法还原分布。代价是只覆盖明细保留期（90 天），均值列
-    仍读小时汇总（永久）——表尾文案把这个差异写明，不假装全覆盖。
+    分位与速度**只能从明细表算**：小时汇总只存 `latency_sum` / `ttfb_sum`（和与
+    成功计数），既无法还原分布，也无法按「单请求输出量 / 生成窗口」筛选样本。
+    代价是只覆盖明细保留期（90 天），均值列仍读小时汇总（永久）——表尾文案把这个
+    差异写明。
 
     口径与均值一致：**只算成功请求**（`ok = 1`，TECHNICAL §9.7）。`ttfb_ms`
     对非流式 / 未产出首字的成功请求为 NULL，故 latency 与 ttfb 各自独立排名
     （`COUNT(col)` 忽略 NULL，天然只数有值样本）。`ORDER BY (col IS NULL), col`
-    把 NULL 排在有值样本之后，配合 `COUNT(col)` 的名次不会错位。
+    把 NULL 排在有值样本之后，配合 `COUNT(col)` 的名次不会错位。速度的路由口径
+    同样要求 `latency > ttfb`（`ttfb_ms` 为 NULL 的比较得 NULL 而被排除），估算
+    口径则只要耗时可算。
 
     `where` / `params`：子查询**独立**应用作用域与时间窗（取值列用 `ts`，
     与主查询的 `hour_utc` 口径区分）。参数由调用方按子查询内的占位符顺序给出，
@@ -162,10 +366,13 @@ def _percentile_join(key: str, *, where: str = "", params: list[Any] | None = No
     return f"""
         LEFT JOIN (
             SELECT ranked.group_key AS group_key,
-{pct_selects}
+{pct_selects},
+{_speed_aggregates()}
             FROM (
                 SELECT {inner} AS group_key, {suffix}.latency_ms AS latency_ms,
                        {suffix}.ttfb_ms AS ttfb_ms,
+                       {suffix}.output_tokens AS output_tokens,
+                       {suffix}.reasoning_tokens AS reasoning_tokens,
                        ROW_NUMBER() OVER (
                            PARTITION BY {inner}
                            ORDER BY ({suffix}.latency_ms IS NULL), {suffix}.latency_ms
@@ -180,7 +387,7 @@ def _percentile_join(key: str, *, where: str = "", params: list[Any] | None = No
                 WHERE {suffix}.ok = 1 AND {inner} IS NOT NULL {where}
             ) AS ranked
             GROUP BY ranked.group_key
-        ) AS {_PERCENTILE_ALIAS} ON {_PERCENTILE_ALIAS}.group_key = {outer}{key}
+        ) AS {_DETAIL_AGG_ALIAS} ON {_DETAIL_AGG_ALIAS}.group_key = {outer}{key}
     """, list(params or [])
 
 
@@ -275,6 +482,12 @@ class StatsQuery:
         代价：最近 ≤5 分钟未进汇总的请求不计入（retention 每 5 分钟 rollup），
         刷新一次即可。延迟类均值统一按 `ok_count` 归一（与图表同口径）。
 
+        **例外：输出速度**（`tps` / `tps_estimated`）读明细表——小时汇总没有
+        单请求输出量与逐请求耗时，无法按「单请求输出量 / 生成窗口」筛样本；
+        代价是只覆盖明细保留期（90 天），选「全部」时它只反映最近 90 天（前端
+        卡片文案写明）。路由口径优先（生成时间总和），无路由样本时回落估算口径
+        （含首字等待）并标 `tps_estimated=True`。
+
         `since` / `until`：自定义时间窗两端（半开 `[since, until)`），按小时桶
         过滤，与 `timeline` 同口径。
         """
@@ -301,6 +514,20 @@ class StatsQuery:
                    SUM(ttfb_sum) AS ttfb_sum
             FROM usage_hourly {where}
             """, params).fetchone()
+        # 输出速度单独读明细（口径见 docstring）：作用域与时间窗与上面一致，
+        # 但取值列是明细的 `ts`（半开区间两端同 `_where` 的 ts 语义）。
+        speed_where, speed_params = self._where(
+            username=username, provider=provider, ok=1,
+            since=since, since_col="ts", until=until, until_col="ts")
+        speed = self._db.connect().execute(
+            f"""
+            SELECT
+                {_speed_aggregates(indent="                ", ref="")}
+            FROM usage_events {speed_where}
+            """, speed_params).fetchone()
+        tps, tps_visible, tps_estimated = _speed_value(
+            speed["speed_tokens"], speed["speed_visible_tokens"], speed["speed_gen_ms"],
+            speed["est_tokens"], speed["est_visible_tokens"], speed["est_ms"])
         requests = row["requests"] or 0
         ok_count = row["ok_count"] or 0
         # 均值口径：只除成功请求（失败请求的 latency 会拉偏"典型耗时"，
@@ -322,6 +549,9 @@ class StatsQuery:
             "cost_cny": row["cost_cny_sum"] if row["cost_known"] else None,
             "avg_latency_ms": round(row["latency_sum"] / ok_count) if ok_count else None,
             "avg_ttfb_ms": round(row["ttfb_sum"] / ok_count) if ok_count else None,
+            "tps": tps,
+            "tps_visible": tps_visible,
+            "tps_estimated": tps_estimated,
         }
 
     def metrics_provider_model(self) -> list[tuple[str, str, int, int]]:
@@ -392,8 +622,16 @@ class StatsQuery:
           `round(sum / ok_count)`，无成功请求给 None（前端显示 —）；
         - 分位读明细表（只覆盖 90 天），SQL 里已按成功请求算好，NULL =
           该组无成功样本（全失败 / 未上报延迟）。
+
+        输出速度（`tps` / `tps_visible` / `tps_estimated`）也读明细表：路由口径
+        优先（生成时间总和），该组无路由样本时回落估算口径（含首字等待）并标
+        `tps_estimated=True`，两者都无样本给 None。`tps` 是总产出（含思考 token），
+        `tps_visible` 是正文（`output_tokens - reasoning_tokens`），两者同分母。
         """
         ok_count = row["ok_count"] or 0
+        tps, tps_visible, tps_estimated = _speed_value(
+            row["speed_tokens"], row["speed_visible_tokens"], row["speed_gen_ms"],
+            row["est_tokens"], row["est_visible_tokens"], row["est_ms"])
         return {
             key: row["group_key"],
             "requests": row["requests"],
@@ -408,6 +646,9 @@ class StatsQuery:
             "cost_cny": row["cost_cny_sum"] if row["cost_known"] else None,
             "avg_latency_ms": round(row["latency_sum"] / ok_count) if ok_count else None,
             "avg_ttfb_ms": round(row["ttfb_sum"] / ok_count) if ok_count else None,
+            "tps": tps,
+            "tps_visible": tps_visible,
+            "tps_estimated": tps_estimated,
             **{name: row[name] for name in _PERCENTILE_FIELDS},
             **{name: row[name] for name in extra},
         }
@@ -444,7 +685,8 @@ class StatsQuery:
                    SUM(cost_known) AS cost_known,
                    COALESCE(SUM(latency_sum), 0) AS latency_sum,
                    COALESCE(SUM(ttfb_sum), 0) AS ttfb_sum,
-                   {_percentile_columns()}
+                   {_percentile_columns()},
+                   {_speed_columns()}
             FROM usage_hourly
             {join}
             {where} GROUP BY {key} ORDER BY {_group_order(sort, order)}
@@ -503,7 +745,8 @@ class StatsQuery:
                    COALESCE(SUM(CASE WHEN e.ok = 1 THEN e.ttfb_ms END), 0) AS ttfb_sum,
                    COALESCE(c.provider, MAX(e.provider)) AS provider,
                    {name_expr} AS credential_name,
-                   {_percentile_columns()}
+                   {_percentile_columns()},
+                   {_speed_columns()}
             FROM usage_events e
             LEFT JOIN credentials c ON c.id = e.credential_id
             {join}
@@ -615,6 +858,10 @@ class StatsQuery:
         `ok`：只看成功（1）/ 只看失败（0）的明细。失败归因卡片点行即带 `ok=0`
         下钻——否则「失败 12 次」点进去会看到同一组的成功记录，对不上账。
 
+        `tps` / `tps_visible`：逐请求速度（tok/s，总产出 / 正文）。规则与分组表
+        同一套（`_routed_guard`），但**只在路由口径成立时给值**：逐行没有相邻
+        样本摊平首字等待，不回落估算口径。不合格的行给 None（前端显示 —）。
+
         `include_credential_name`：凭证昵称取自**全局共享池**（常含邮箱/手机），
         只对 admin/operator 返回；viewer 即便只看自己的记录也不该看到池里他人
         凭证的昵称。
@@ -630,7 +877,8 @@ class StatsQuery:
             "e.ok, e.error_type, e.input_tokens, e.output_tokens, "
             "e.reasoning_tokens, e.cached_tokens, e.credit, e.credit_estimated, "
             "e.cost_usd, e.cost_cny, e.latency_ms, "
-            f"e.ttfb_ms, e.request_id, {name_expr} AS credential_name"
+            f"e.ttfb_ms, e.request_id, {_ROW_SPEED_VISIBLE} AS tps_visible, "
+            f"{_ROW_SPEED_TOTAL} AS tps, {name_expr} AS credential_name"
         )
         filters = {"provider": provider, "model": model, "credential_id": credential_id,
                    "ok": ok}
@@ -696,6 +944,7 @@ class StatsQuery:
                    e.ok, e.error_type, e.input_tokens, e.output_tokens,
                    e.reasoning_tokens, e.cached_tokens, e.credit, e.credit_estimated,
                    e.cost_usd, e.cost_cny, e.ttfb_ms, e.latency_ms, e.request_id,
+                   {_ROW_SPEED_VISIBLE} AS tps_visible, {_ROW_SPEED_TOTAL} AS tps,
                    {name_expr} AS credential_name
             FROM usage_events e
             LEFT JOIN credentials c ON c.id = e.credential_id

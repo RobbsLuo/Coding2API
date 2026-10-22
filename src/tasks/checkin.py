@@ -157,7 +157,10 @@ class CheckinTask:
         seen: set[str] = set()
         self._prune(current)
         for candidate in self._credentials.candidates():
-            if candidate.disabled:
+            # `enabled=0`（用户软暂停）同样跳过，口径与调度器 is_selectable 一致。
+            # 必须早于 seen.add：否则暂停凭证会白占上游账号的本轮名额，后面那条
+            # 启用中的同账号凭证每轮都被 seen 挡下 → 该渠道签到永久静默失效。
+            if candidate.disabled or not candidate.enabled:
                 report.skipped += 1
                 continue
             provider = self._providers.get(candidate.provider)

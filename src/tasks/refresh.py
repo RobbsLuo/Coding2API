@@ -39,7 +39,9 @@ class RefreshTask:
         report = TaskReport()
         current = self._now()
         for candidate in self._credentials.candidates():
-            if candidate.disabled:
+            # 硬禁用与用户软暂停（enabled=0）都跳过：暂停凭证不该被预刷新占用
+            # 调度窗口，线上失败的也只会是早已停用的旧凭证（掩盖真实状态）。
+            if candidate.disabled or not candidate.enabled:
                 report.skipped += 1
                 continue
             provider = self._providers.get(candidate.provider)

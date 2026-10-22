@@ -1,8 +1,8 @@
 # Coding2API
 
-Unified OpenAI-compatible gateway for the **CodeBuddy** (CN site + international site),
-**TRAE SOLO**, **OpenCode Zen**, **Kilo Gateway**, **Qoder**, and **CodeArts** coding-agent
-upstreams, with a shared credential pool, unified scheduling, and per-user usage stats.
+Unified OpenAI-compatible gateway for the **CodeBuddy** (CN + international),
+**TRAE SOLO**, **OpenCode Zen**, **Kilo**, **Qoder**, **CodeArts**, and **OfficeAce**
+coding-agent upstreams, with a shared credential pool, unified scheduling, and per-user usage stats.
 
 > [!WARNING]
 > This project bridges reverse-engineered third-party endpoints; study and research use
@@ -58,7 +58,7 @@ Pull the GHCR image instead of building:
 
 ```bash
 docker compose pull
-# or pin a version: docker pull ghcr.io/robbsluo/coding2api:v0.8.0
+# or pin a version: docker pull ghcr.io/robbsluo/coding2api:v0.9.0
 ```
 
 Pushing a `v*` tag to main triggers the publish workflow (`.github/workflows/publish.yml`), tagging both `<tag>` and `:latest` on GHCR.
@@ -111,7 +111,8 @@ The *Server logs* page (`/logs`, admins only) is a **read-only** live view of th
    - **CodeBuddy** (incl. international): device-code login, or paste `{"token":"..."}`.
    - **TRAE**: paste the credential JSON (`accessToken`/`uid`/`refreshToken`) or the callback URL (`apiHost` must be an official address).
    - **Qoder / CodeArts**: device-code / OAuth2 authorization-code login (CodeArts: paste the unreachable local callback URL back into the page).
-   - **OpenCode Zen / Kilo Gateway**: nothing to add — a virtual credential is seeded at startup (re-added from the same panel if deleted).
+   - **OfficeAce**: click *Log in to OfficeAce* for the Huawei Cloud authorization (the callback is handled in the cloud — no URL to paste, no local port).
+   - **OpenCode Zen / Kilo**: nothing to add — a virtual credential is seeded at startup (re-added from the same panel if deleted).
 2. **API keys** — create an `sk-...` (plaintext shown once).
 3. Call it:
 
@@ -126,13 +127,13 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ### Three model-name fields
 
-Every model on the seven channels is unified into three fields:
+Every model on the eight channels is unified into three fields:
 
 1. **Raw id** (`raw_id`): the key actually sent upstream, **never changed**. Raw ids differ per channel (Qoder `kmodel_latest` = TRAE `kimi-k3-1`) and may carry a namespace prefix (Kilo's `kilo-auto/free`).
 2. **Canonical key**: free-tier markers (`-free` / path segment `free`) and namespace prefixes stripped, then slugified — `kilo-auto`, `longcat-2.5-preview`. The list merges entries by it, so Zen's free tier and TRAE's paid tier collapse into one row.
 3. **Display name** (`name`): cleaned readable text, from upstream when given (`Qwen3.8-Max` → `Qwen3.8 Max`), otherwise derived; brand casing normalized (`DeepSeek` / `MiMo` / `GLM` / `GPT`).
 
-Every `id` in `GET /v1/models` is the canonical key; requests are translated back to the channel's raw id (`by_provider.{channel}.raw_id`). **All three spellings are directly requestable** (`kmodel_latest`, `Kimi K3`, `kimi-k3` all resolve to the same model). **`benefit` marker**: CodeArts models that draw on the daily free token pool get no rate from upstream, so their entries carry `benefit: true` (top level for single-channel, `by_provider.{channel}` for multi-channel); the Playground uses it to show a「福」badge on the channel pill, distinguishing them from the credit-billed built-in models.
+Every `id` in `GET /v1/models` is the canonical key; requests are translated back to the channel's raw id (`by_provider.{channel}.raw_id`). **All three spellings are directly requestable** (`kmodel_latest`, `Kimi K3`, `kimi-k3` all resolve to the same model).
 
 **`GET /v1/models/{id}` single-model lookup** (same shape as OpenAI): all three spellings resolve, case-insensitively. The route uses `:path`, so namespaced raw ids (`dots-studio/dots-3-note-preview:free`) work too. A model that does not exist **or is outside the calling key's model allowlist** returns the same 404 with an OpenAI error body (`code=model_not_found`) — allowlisted-out and missing look identical, so a client cannot probe "what else is in the pool". Benchmarks and refresh timing come from the same merged snapshot as the list, so a model shown in the list never 404s on lookup.
 
@@ -147,7 +148,7 @@ The Playground request form carries optional `temperature` / `max_tokens` / `rea
 
 ## Channels
 
-> CodeBuddy (incl. international) / TRAE / Qoder / CodeArts need credentials; **OpenCode Zen and Kilo Gateway are credential-less free tiers** — the pool holds one virtual placeholder row (so scheduling / cooldown / stats work as usual), the quota column reads "free tier (no quota API)", and health stays "no probe" (unknown ≠ exhausted). The virtual row **re-seeds on restart after deletion**; use *pause* to disable permanently.
+> CodeBuddy (incl. international) / TRAE / Qoder / CodeArts / OfficeAce need credentials; **OpenCode Zen and Kilo are credential-less free tiers** — the pool holds one virtual placeholder row (so scheduling / cooldown / stats work as usual), the quota column reads "free tier (no quota API)", and health stays "no probe" (unknown ≠ exhausted). The virtual row **re-seeds on restart after deletion**; use *pause* to disable permanently.
 
 ### OpenCode Zen free tier (`zen`)
 
@@ -155,9 +156,9 @@ Free models at [opencode.ai/zen](https://opencode.ai), no account or login. The 
 
 **Free-tier gate**: the upstream wants to believe it is talking to the official client (UA version, session header, `stream:true`, `tools` with `bash`/`read`). The gateway satisfies this; the injected `bash`/`read` are empty shells and their calls are filtered out, so you never see functions you did not declare. UA version via `ZEN_OPENCODE_VERSION`, endpoint via `ZEN_API_ENDPOINT` (must be inside `ZEN_ALLOWED_ENDPOINTS`). Paid models return "unavailable" even when pinned.
 
-### Kilo Gateway free tier (`kilo`)
+### Kilo free tier (`kilo`)
 
-Free models at [Kilo Gateway](https://kilo.ai) (`api.kilo.ai/api/gateway`), no account or login. Standard OpenAI protocol, no private envelope or gate spoofing; the upstream `/models` carries an authoritative `isFree` flag, so the gateway filters on it directly and **does not probe** (probing burns the tiny quota). Free models marked **x0**.
+Free models at [Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`), no account or login. Standard OpenAI protocol, no private envelope or gate spoofing; the upstream `/models` carries an authoritative `isFree` flag, so the gateway filters on it directly and **does not probe** (probing burns the tiny quota). Free models marked **x0**.
 
 **Quota and limits**: the free tier is small (gateway-wide ~200 requests/hour/IP) and is a forward of OpenRouter's free pool; upstream **429 and 502/503/504 are model-scoped** — only the named model cools, and the gateway adds no circuit breaker. Endpoint via `KILO_API_ENDPOINT` (must be inside `KILO_ALLOWED_ENDPOINTS`).
 
@@ -177,17 +178,48 @@ Free models at [Kilo Gateway](https://kilo.ai) (`api.kilo.ai/api/gateway`), no a
 
 **Token refresh is rigid**: refresh_token, `client_id=codearts-agent` and the DPoP key are bound together and **single-use** — the new refresh_token must be written back or the account breaks; the pre-refresh task does this automatically (DPoP ES256/P-256). The pre-refresh window is capped at 45 minutes and must be **wider** than the polling interval (`REFRESH_INTERVAL_MINUTES`, default 30 min). A revoked renewal marks the credential "re-login required" and stops automatic retries until restored.
 
-**Daily check-in**: a "1000 credits/day" campaign (`GET /v1/ops/delivery` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`). The task claims automatically and can be triggered from the admin UI; `claim` alone is **not** enough (`CLAIMED` is a "claimed but unconfirmed" state), so both steps always run. This credit ledger is **separate from** the daily token pool: the pool feeds benefit models (`deepseek-v4.1-flash`), the credits feed built-in models (GLM-5.2 / OpenPangu) — both ledgers are shown on the admin UI (see below).
+**Daily check-in**: a "1000 credits/day" campaign (`GET /v1/ops/delivery` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`). The task claims automatically and can be triggered from the admin UI; `claim` alone is **not** enough (`CLAIMED` is a "claimed but unconfirmed" state), so both steps always run. The credits go into the channel's single ledger (see below).
 
-**Burn first**: the daily pool does not roll over, so the day's remainder is registered as midnight-expiring quota and scheduled **before** other channels. The upstream meters tokens, normalized to **credits** on the admin UI (1 credit = 10,000 tokens; a full daily pool = 1000 credits); pre-upgrade history is converted by `scripts/convert_codearts_credit_unit.py`. **This "credit" is a synthetic unit for cross-channel ordering, not the upstream check-in/plan credits.**
+**Quota = credit balance**: probing hits `GET {snap}/snap-manager/v1/statistics/plugin` (the `snap-manager` prefix is **mandatory**; header `Agent-Type: PromptCenter`), because the built-in models (GLM-5.2 / OpenPangu) are billed in credits. The upstream values **are** credits — no unit conversion is applied. Sub-packages (`基础积分` / `按需积分` / `福利积分`) go into the "套餐 N 个" detail popover, and the plan's expiry date (`end_date`, verified to differ per account) is registered in the expiry ladder — unused credits are voided too, so "burn near-expiry first" also burns credits first. A failing endpoint only logs; it never breaks the rest of the pipeline.
 
-**Two ledgers shown**: CodeArts is split into two groups on the credentials page, and **each group tells one ledger only** — **内置** shows the **credit ledger** (`GET {snap}/snap-manager/v1/statistics/plugin`, built-in models GLM-5.2 / OpenPangu), **福利** shows the **daily pool** (token-derived, benefit models). They are two independent upstream endpoints that never talk to each other and differ by an order of magnitude, so they live in separate groups with their own hover notes instead of one merged number. The credit sub-packages (`基础积分` / `按需积分` / `福利积分`) go into the "套餐 N 个" detail popover, and the plan's expiry date (`end_date`, verified to differ per account) is registered in the expiry ladder — unused credits are voided too, so "burn near-expiry first" also burns credits first. The **credit ledger does not feed the scheduler's health** (`health` still reads the daily pool only, so routing is unchanged), and a failing credit endpoint only logs, leaving the balance probe result intact. The 内置 group's **health badge** is derived from the credit ledger instead (`quota_credits_health`), so it always agrees with that group's quota column rather than showing "99% credits left, 0% health". **Change events are split per ledger** (`credit_events.ledger`): the 内置 group expands the credit-ledger history, other channels and the 福利 group expand the daily-pool history — mixing them would read as consecutive samples of one ledger.
+**Change events**: each probe diff writes one `credit_events` row with `ledger=credits` (see below).
 
-**The credentials page splits CodeArts into two channels**: **CodeArts 内置** (writable: all actions and the credit ledger) and **CodeArts 福利** (read-only: daily token pool only), each listing the same accounts once. This is a **front-end-only display split — the backend still has one `codearts` channel**: `refresh_token` is single-use and bound to `client_id` + the DPoP key, so two credential rows would each refresh once and the second would fail with `the refresh token has been used`, burning the ticket. The ledger split axis is the **model** (`is_benefit_model()` decides per request), not the channel, so this split only affects display and action entry points. **Expiring credits are split per ledger too**: the backend keeps the daily-pool rung and the credit-package rung apart (`quota_credits_expiry_ladder`), so the 福利 group shows the daily pool's expiring credits and the 内置 group shows the credit ledger's own.
+**Signing / cumulative SSE / pacing**: the upstream requires Huawei `SDK-HMAC-SHA256` (AK/SK + `X-Security-Token`), and `CODEARTS_ALLOWED_ENDPOINTS` must include the snap engine, STS and portal hosts. Streaming `text` is **cumulative (replace semantics)**, reduced to incremental events for clients. Default `CODEARTS_CHAT_MIN_INTERVAL=5`; the upstream hard-limits **3 concurrent sessions per account**, so an in-flight cap (`CODEARTS_MAX_CONCURRENCY`) and a sliding window (`CODEARTS_REQUEST_WINDOW_SECONDS`, 3 starts per 60s) keep bursts ahead of `400 TM.00001041`. All hot-updatable.
 
-**Signing / cumulative SSE / pacing**: the upstream requires Huawei `SDK-HMAC-SHA256` (AK/SK + `X-Security-Token`), and `CODEARTS_ALLOWED_ENDPOINTS` must include the snap engine, STS, benefit gateway and portal hosts. Streaming `text` is **cumulative (replace semantics)**, reduced to incremental events for clients. Default `CODEARTS_CHAT_MIN_INTERVAL=5`; the upstream hard-limits **3 concurrent sessions per account**, so an in-flight cap (`CODEARTS_MAX_CONCURRENCY`) and a sliding window (`CODEARTS_REQUEST_WINDOW_SECONDS`, 3 starts per 60s) keep bursts ahead of `400 TM.00001041`. All hot-updatable.
+### OfficeAce (`officeace`, real account)
 
-### CodeBuddy international site (`codebuddy_intl`, real account)
+[Huawei Cloud OfficeAce](https://www.huaweicloud.com/product/agentarts.html) (果办 / AgentArts office agents), **real account** required: click *Log in to OfficeAce* and finish the Huawei Cloud authorization in the browser — **the callback is handled in the cloud** (`/v1/claw/auth/callback`), so this service listens on no port and the user never pastes a URL; the backend polls `/v1/claw/auth/code` every 2.5s for the authorization code (the same mechanism the official desktop client uses).
+
+**Provisioning prerequisite**: the account must first sign in to the OfficeAce client and redeem an invitation code. An unprovisioned account completes the login but gets no model key (`subscription: null` from the cloud); the service names the account and reports it has not activated OfficeAce instead of a vague login failure.
+
+**Two credential sets with very different lifetimes** (the most common mistake on this channel):
+
+| Credential | Lifetime | Used for |
+|---|---|---|
+| `Basic model_app_key:model_app_secret` | **never expires** | chat forwarding (`{gateway}/v2/chat/completions`) |
+| temporary AK/SK + `security_token` + `project_id` | **~2 hours** | quota lookup, check-in (`/v1/subscription*`) |
+
+Mixing them yields `APIG.0303 app not found`. The failure is confusing either way: chat keeps working (the Basic key never expires) while the quota column goes blank and check-in keeps failing (the temporary credential expired). The pre-refresh task renews the temporary half automatically — `refresh_token` is single-use and bound to `client_id=pdp5_for_agentarts` plus the DPoP key, and **is not interchangeable with the CodeArts ticket** (`STS5.1806 invalid client id`).
+
+**The upstream is plain OpenAI protocol**, so no private envelope parsing is needed; three upstream quirks do need handling:
+
+- **Rate limits arrive as fake 200s**: HTTP 200 + `data:{"error":…}`, and "first frame fine, second frame is the error" has been observed. Error frames flow to the engine as usual; `81111`/`81114` cool down only that credential × model.
+- **Model-level rejection must not kill the credential**: `81004` (account lacks the model) / `81009` (unknown name) would otherwise be read from the status code as a dead credential. Business codes are checked before status codes and classified as a model-level negative cache (cleared on first success).
+- **`max_tokens` is a combined "reasoning + answer" budget**: 9 of the 11 usable models are reasoning models, and a small budget leaves the answer empty. Values `≥16` get 1024 extra headroom clamped to the model ceiling (`glm-5*` 131072 / `qwen3*` 65536 / `deepseek-v4.1-flash` 393216); `<16` passes through untouched (probes / exact tests); absent stays absent.
+
+**Credits are the primary ledger**: the unit is `officeace_points` (one-off new-user grant + a daily check-in grant). Unlike CodeArts there is no parallel token pool — `remaining`/`total` are simply credits. Each grant **expires independently**, hence the quota label reads "per-grant expiry"; scheduling still burns near-expiry first.
+
+**Daily check-in**: `POST /v1/subscription/bonus/claim` (**a write — it really grants credits**; the body must be {} with a JSON `Content-Type`, an empty body returns 500 `OfficeAce.11020001`). Re-claiming on the same day is idempotent upstream, so no local "already claimed" flag is needed. The gain is computed from the **remaining-quantity delta** of `bonus_skus` (`points` is the campaign's cumulative total, contributed to by several channels, so using it as "what I just earned" would overstate). The seal runs to the next Beijing midnight: the next day's campaign triggers an automatic catch-up.
+
+**No active model probing**: only 11 of the 34 catalog entries actually work, but probing sends real inference and burns credits, which are scarce here. Model-level rejection is handled by the `BLOCKED` negative cache from real requests instead. **No credit estimation either**: upstream exposes `cost_coefficient` and `tokens_per_point`, but their multiplication is undocumented, and a guess would desynchronize the whole cross-channel quota ordering.
+
+**Signing and endpoints**: the control plane (`/v1/claw/*`) uses Huawei `SDK-HMAC-SHA256`; the model gateway (`/v1/subscription*`, `/v1/model-token-rates`) accepts only **`V11-HMAC-SHA256`** (an extra region scope plus key derivation) and answers `APIG.0624` or 401 otherwise. `OFFICEACE_ALLOWED_ENDPOINTS` only needs the control-plane host — the model gateway differs per account and is issued by `client-permission-validate` into the credential, so it is not something this service can misconfigure. `OFFICEACE_CHAT_MIN_INTERVAL` defaults to `0` (no CodeArts-style hard concurrency limit) and is hot-updatable.
+
+**One account, one user**: the official plan page states the personal edition is "limited to a single user per account", so this channel is not shared between people — each user adds their own credential.
+
+**Switching accounts**: the Huawei Cloud session is **per browser**. If a previous account's session is still alive, the cloud silently re-approves it and "add a credential" becomes "log the same account in again". The login row therefore has a second **Switch account** action (`force_login=true`) that hits `/authui/logout?service=…` first. An account that has not opened OfficeAce is reported by name instead of a generic login failure.
+
+### CodeBuddy international (`codebuddy_intl`, real account)
 
 The international site [www.codebuddy.ai](https://www.codebuddy.ai), **same protocol** as the CN site (same `/v2/chat/completions`, `/v3/config`, `/v2/plugin/auth/*`, `/v2/billing/*` routes, same Keycloak realm) but a **separate account system** (separate signup, billing) — hence a **separate channel**. Login is identical to the CN site (device code, token never in the browser).
 
@@ -249,7 +281,7 @@ claude
 
 **Auth**: both `x-api-key` and `Authorization: Bearer` are accepted. **Streaming**: `message_start` → `content_block_start/delta/stop` → `message_delta` (with `stop_reason` and usage) → `message_stop`; no `[DONE]` sentinel, and thinking blocks get a `signature_delta` before `content_block_stop`. **Cache hit**: usage is split Anthropic-style — `input_tokens` counts only misses, hits are reported separately as `cache_read_input_tokens` (the internal `input_tokens` is OpenAI's `prompt_tokens`, which includes hits), so Claude Code shows cached tokens instead of always 0. **`count_tokens`**: `POST /v1/messages/count_tokens` estimates input tokens locally. **Images**: `image` blocks (`source.type=base64` becomes a `data:` URL, `source.type=url` passes through) are normalized to chat `image_url` parts, and images inside `tool_result.content` are kept too — pure-text content is still folded into a string, so image-free requests map byte-for-byte as before. **Not supported**: `document` blocks (PDF, no chat equivalent), `source.type=file` and Anthropic-only server tools — explicit 400.
 
-**`cache_control` pass-through** (always on, no flag): inbound cache markers are forwarded verbatim, at the same places Anthropic accepts them — `system` content blocks, user/assistant content blocks, `tool_result` (attached to the **tool message top level**, avoiding a synthetic empty text block), `tool_calls` elements, and `tools` elements. Only **structure** is validated (must be an object with a non-empty string `type`; `ttl`, if present, must be a string); values are not interpreted (an unknown `type` still passes through — a gateway should not gatekeep cache types upstream may add later). Malformed markers are an explicit 400 rather than a silent drop. **Without markers the mapping is byte-for-byte unchanged** (pure text still folds into a string), so session-affinity fingerprints and upstream prefix caching are unaffected. Six of the seven channels accept the markers in testing (codebuddy / codebuddy_intl / trae / qoder / codearts / kilo); **zen is unverified** (its upstream returns `FreeTierError` 403 even with `--plain`, unrelated to the markers). Probe script: `scripts/probe_cache_control.py`.
+**`cache_control` pass-through** (always on, no flag): inbound cache markers are forwarded verbatim, at the same places Anthropic accepts them — `system` content blocks, user/assistant content blocks, `tool_result` (attached to the **tool message top level**, avoiding a synthetic empty text block), `tool_calls` elements, and `tools` elements. Only **structure** is validated (must be an object with a non-empty string `type`; `ttl`, if present, must be a string); values are not interpreted (an unknown `type` still passes through — a gateway should not gatekeep cache types upstream may add later). Malformed markers are an explicit 400 rather than a silent drop. **Without markers the mapping is byte-for-byte unchanged** (pure text still folds into a string), so session-affinity fingerprints and upstream prefix caching are unaffected. Six of the eight channels accept the markers in testing (codebuddy / codebuddy_intl / trae / qoder / codearts / kilo); **zen and OfficeAce are unverified** (zen's upstream returns `FreeTierError` 403 even with `--plain`, unrelated to the markers; OfficeAce was not probed). Probe script: `scripts/probe_cache_control.py`.
 
 ### CC Switch one-click import
 
@@ -310,13 +342,13 @@ Once the pool grows, the page splits "find that one account" into three layers, 
 - **Filter bar**: search (nickname / channel / id, case-insensitive) × channel × state × tag. The four are **AND**-combined and purely client-side — the backend still returns the full set ordered by `sort` / `order`. When any filter is active it shows "showing N / total" plus a *Clear* action; no match yields an empty state rather than a blank table. Counts in the channel / state / tag dropdowns come from the full set, so narrowing one filter never re-narrows the others. The **tag dropdown renders only when some credential actually carries a tag** (no permanent "all tags" control otherwise), and tags are a structured dimension that **does not participate in the search term** — otherwise finding a nickname that happens to be "prod" would be impossible.
 - **Tags**: each credential can carry any number of ops tags (comma-separated, up to 16 tags of ≤ 24 chars; half-width and full-width commas and semicolons all separate), edited via the row's *More → Set tags*. Tags are **display/filter only** — they never affect selection and never change request behaviour, since using them as policy would make a rename silently change traffic. A row shows at most two tags, collapsing the rest into `+N` with the full list in the hover title.
 - **Group sort**: a separate control reorders only the channel *groups* (never the rows inside them, which still follow the column header / backend `sort`). Default is **quota high→low**, ranked by the group's summed remaining quota so the channels that can still serve the most surface first; switchable to **channel order** (fixed, so 30s polling cannot make headers jump). Channels with no quota API (free tier) sort last rather than being treated as `0`, and ties fall back to channel order.
-- **Grouped by channel**: rows aggregate per channel; each group header is a compact **channel dashboard** — brand icon + channel name + account count, plus a **state breakdown** (icon + count, listing only states that occur, using the same `credentialState` as the state badge), a **total quota** figure (a share ring plus the number; the ring is a pure gauge and the exact percentage sits on the "total quota / total credits" label line; sums the group's non-null values, and the free tier zen / kilo shows `—` rather than `0` with no ring), and an **expiring credits** figure (one block for the primary 1.5-day window; the secondary 7-day window appears only when it holds **more** than the primary — the 7-day window is a superset, so an equal number means nothing expires beyond 1.5 days). Clicking a header collapses / expands that channel — **collapsed by default** (see structure first, expand to inspect accounts); an active filter auto-expands matching channels, and clearing it returns to the collapsed overview. Group order is "quota high→low" by default and switchable from the toolbar to the fixed site-wide channel order (CodeBuddy, TRAE first); it does not follow the sort key. The channel name appears only in the header, never repeated per row. **The total reads the group's own ledger**: the CodeArts 内置 group totals the credit ledger (labelled "total credits"), every other group totals the daily pool.
+- **Grouped by channel**: rows aggregate per channel; each group header is a compact **channel dashboard** — brand icon + channel name + account count, plus a **state breakdown** (icon + count, listing only states that occur, using the same `credentialState` as the state badge), a **total quota** figure (a share ring plus the number; the ring is a pure gauge and the exact percentage sits on the "total quota / total credits" label line; sums the group's non-null values, and the free tier zen / kilo shows `—` rather than `0` with no ring), and an **expiring credits** figure (one block for the primary 1.5-day window; the secondary 7-day window appears only when it holds **more** than the primary — the 7-day window is a superset, so an equal number means nothing expires beyond 1.5 days). Clicking a header collapses / expands that channel — **collapsed by default** (see structure first, expand to inspect accounts); an active filter auto-expands matching channels, and clearing it returns to the collapsed overview. Group order is "quota high→low" by default and switchable from the toolbar to the fixed site-wide channel order (CodeBuddy, TRAE first); it does not follow the sort key. The channel name appears only in the header, never repeated per row. **One real channel = one group**: CodeArts quota *is* credits, so its group totals label the figure "total credits"; other channels label it "total quota".
 - **Column headers follow the expanded region**: there is no global table header; the column row (with sort buttons and column hints) renders inside each expanded channel group and sticks while the container scrolls. When collapsed, the group header *is* the overview and the column names have nothing to label; only an expanded group needs the "what is this column" anchor. Several groups can be expanded at once, and every group's header shares one sort state (clicking any of them writes the same backend `sort` parameter). The **"growth center" column appears only for channels that support it** (CodeBuddy); other channels get an empty placeholder cell — the column count stays constant, otherwise auto layout recomputes the widths and groups expanded below misalign.
 
-- **CodeArts splits into two channel groups**: **CodeArts 内置** (writable: all actions, the credit-history entry, the credit ledger and the package detail) and **CodeArts 福利** (read-only: daily token pool only), each listing the same accounts once, header labels suffixed "内置 / 福利" with 内置 first. **Each group tells one ledger**: the 内置 group's quota column is the credit ledger (`积分 x / y`, sort key `quota_credits_remaining`), the 福利 group is the daily token pool; the change-event entry follows the ledger too (内置 reads `ledger=credits`; 福利 renders no entry). **Expiring credits follow the ledger as well** — the backend splits the merged ladder per ledger (`quota_expiring_credits` = daily pool, `quota_credits_expiring` = credit ledger), so the 福利 group shows the daily pool's near-expiry quota and the 内置 group shows the credit ledger's own. **Health follows the ledger too**: the 内置 group's health badge and state read the derived `quota_credits_health` (still display-only — routing keeps using the daily-pool `health`), while the 福利 group reads the daily pool. The 福利 group drops probe / check-in / more-actions, the credit-history entry and the package detail, but the **column count stays constant**: the group-header and row checkboxes still render, only **disabled** — an empty placeholder cell is narrower than a real checkbox, so under auto table layout the row's column starts drift from the 内置 group; a same-size disabled box is what actually aligns them. This is a **front-end-only display split; the backend still has one `codearts` channel** (`refresh_token` is single-use, so two rows would burn each other's ticket), and the ledger split axis is the model, not the channel.
+- **One group per channel**: the header label is just the channel display name and `ProviderGroup.key === provider`; CodeArts is no longer split into "内置 / 福利" groups (the benefit path is gone — its quota is simply the credit ledger). Each row reads its own channel's ledger: CodeArts is credits (`ledger=credits`), every other channel is plan / daily balance (`ledger=pool`), derived by `providerLedger()`.
 - **Scrollable long list**: the table is capped at 70vh, and the group's sticky column header and row actions stay visible deep in the list.
 
-The quota number is dotted-underlined: hovering reveals **that row's cycle semantics** (this-cycle remainder / account balance / daily pool / free tier with no quota API); the per-row caption lives in that hover hint.
+The quota number is dotted-underlined: hovering reveals **that row's cycle semantics** (this-cycle remainder / account balance / credit balance / free tier with no quota API); the per-row caption lives in that hover hint.
 
 ## Model list loading
 
@@ -352,7 +384,7 @@ The time range defaults to the **last 24 hours** (also 7 days / 30 days / all): 
 
 ### Credit, cost and cache hit rate
 
-The **Credit** column: CodeBuddy is the real upstream value; TRAE's `token_usage` frame carries only tokens, so its credit is **estimated** from official unit prices (`≈`); CodeArts benefit models are estimated 1:1 against the daily pool (`≈`). Tables live in `src/provider/trae/pricing.py` and `src/provider/codearts/units.py`; unmatched models show `—`.
+The **Credit** column: CodeBuddy is the real upstream value; TRAE's `token_usage` frame carries only tokens, so its credit is **estimated** from official unit prices (`≈`). The price table lives in `src/provider/trae/pricing.py`; unmatched models show `—`.
 
 **Cost (est.)** estimates tokens × public list prices, not the real charge. Prices come from the **OpenRouter public catalog** (USD per million tokens), computed as `(input − cached) × input + cached × cache_read + output × output`, converted to CNY at the **rate in effect when the row was written** (`USD_CNY_RATE`). Costs are **fixed at write time** (`usage_events.cost_usd` / `cost_cny`) and **never recomputed**; pre-upgrade rows are `NULL` and can be backfilled with `scripts/backfill_cost.py --apply`. Matching compares canonical keys for equality and **drops ambiguous hits**; unmatched models or requests without input tokens contribute nothing and aggregates render `—` (never a fake `0`), so the figure is a **lower bound**.
 
@@ -362,7 +394,7 @@ The **Credit** column: CodeBuddy is the real upstream value; TRAE's `token_usage
 
 The drawer under a credential's quota number lists the **net change between consecutive quota probes**, attributing nothing to check-in / growth / chat (the upstream logs nothing), so the UI says "net change". The first probe records only a baseline; unchanged balances are skipped; a balance going unknown still records a row. 90-day retention.
 
-**Split per ledger**: CodeArts has two ledgers (daily token pool / credit ledger), so the table carries a `ledger` column (`pool` / `credits`) and each probe writes one row per ledger. The 内置 group expands the credit-ledger history (`ledger=credits`), other channels and the 福利 group expand the daily-pool history (`ledger=pool`); `GET /api/credentials/{id}/credit-events` takes a `ledger` query parameter (default `pool`, unknown values fall back to `pool`). **They must be read separately**: the two ledgers differ by an order of magnitude, and mixing them reads as consecutive samples of one ledger. On upgrading an old database every historical row lands in `pool` — those rows were produced by the daily-pool diff.
+**Split per ledger**: the table carries a `ledger` column (`pool` / `credits`) and each probe writes one row according to the credential's own channel — CodeArts quota comes from the credit endpoint, so it records `credits`; other channels record `pool`. A CodeArts row expands the credit history (`ledger=credits`), other channels expand the plan / daily-balance history (`ledger=pool`); `GET /api/credentials/{id}/credit-events` takes a `ledger` query parameter (default `pool`, unknown values fall back to `pool`). **They must be read separately**: the two ledgers differ in magnitude and meaning, and mixing them reads as consecutive samples of one ledger (on an old database a CodeArts `pool` row is the retired daily token pool, an order of magnitude away from credits). On upgrading an old database every historical row lands in `pool` — those rows were produced by the then-current balance diff and are no longer shown.
 
 ### Grouping and re-rollup
 
@@ -414,7 +446,7 @@ A periodic task evaluates four risks and persists hits to `alert_events`, review
 
 ### Activity reporting (optional, off by default)
 
-The growth center's streak counts daily client chat events; an account driven only by the gateway would break the streak. With `ACTIVITY_REPORT_ENABLED=true`, a task posts **one** `chat_request_send` event per account per day at `ACTIVITY_REPORT_HOUR` (default 10:00) to keep the streak alive — unrelated to credits or scheduling, and failures do not affect chat. Applies to CodeBuddy and CodeBuddy International.
+The growth center's streak counts daily client chat events; an account driven only by the gateway would break the streak. With `ACTIVITY_REPORT_ENABLED=true`, a task posts **one** `chat_request_send` event per account per day at `ACTIVITY_REPORT_HOUR` (default 10:00) to keep the streak alive — unrelated to credits or scheduling, and failures do not affect chat. Applies to CodeBuddy and CodeBuddy international.
 
 > ⚠️ **Risk**: the official terms forbid scripted tampering with activity data (disqualification + gift clawback). Off by default; evaluate the account risk first. Event names and request shapes depend on the upstream and **break without notice** — not a reliability feature. Measured (2026-09-21): without `userId` the upstream returns HTTP 200 `{"code":0}` and **silently drops** the event; when a credential's `user_id`/`account_uid` is empty, the gateway falls back to the bearer JWT `sub`, and skips if still missing (never fabricated).
 
@@ -469,7 +501,7 @@ Key variables below; the full list is in `src/config.py` (authoritative), and **
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | Listen address/port (compose defaults to `0.0.0.0`) |
 | `CODEBUDDY_API_ENDPOINT` | `https://copilot.tencent.com` | CodeBuddy upstream; add it to `CODEBUDDY_ALLOWED_ENDPOINTS` when changed |
 | `CODEBUDDY_ALLOWED_ENDPOINTS` | both official sites (see compose) | Token only goes to allowlisted hosts |
-| `CODEBUDDY_INTL_API_ENDPOINT` | `https://www.codebuddy.ai` | International upstream; add it to its own allowlist |
+| `CODEBUDDY_INTL_API_ENDPOINT` | `https://www.codebuddy.ai` | CodeBuddy international upstream; add it to its own allowlist |
 | `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` | `https://www.codebuddy.ai` | **Deliberately excludes** the CN host (cross-site = leakage; misconfig fails startup) |
 | `ZEN_API_ENDPOINT` / `ZEN_ALLOWED_ENDPOINTS` | `https://opencode.ai` | Zen endpoint + allowlist |
 | `ZEN_OPENCODE_VERSION` | `1.18.0` | Spoofed `opencode/<version>` UA (below threshold → 426) |
@@ -477,12 +509,15 @@ Key variables below; the full list is in `src/config.py` (authoritative), and **
 | `QODER_API_ENDPOINT` / `QODER_GATEWAY_ENDPOINT` | `https://openapi.qoder.com.cn` / `https://gateway.qoder.com.cn` | Qoder openapi (quota/login) + gateway (chat); international: `openapi.qoder.sh` / `api1.qoder.sh` |
 | `QODER_ALLOWED_ENDPOINTS` | CN + international (see compose) | COSY-signed requests only to allowlisted hosts |
 | `CODEARTS_API_ENDPOINT` | `https://snap-access.cn-north-4.myhuaweicloud.com` | CodeArts snap engine; add it to its allowlist |
-| `CODEARTS_ALLOWED_ENDPOINTS` | snap + STS + benefit gateway + portal (see compose) | AK/SK-signed requests only to allowlisted hosts |
+| `OFFICEACE_API_ENDPOINT` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | OfficeAce control plane (OAuth + provisioning); add it to its allowlist |
+| `OFFICEACE_ALLOWED_ENDPOINTS` | the control-plane host only | The model gateway differs per account and is issued into the credential, so it is **not** allowlisted here |
+| `CODEARTS_ALLOWED_ENDPOINTS` | snap + STS + portal (see compose) | AK/SK-signed requests only to allowlisted hosts |
 | `PROVIDER_PROXIES` | `""` | Per-channel egress proxy (startup-only); empty = all direct |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB pacer (seconds), per-credential bucket; `0` disables |
 | `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB international pacer, **independent**; `0` disables |
 | `ZEN_CHAT_MIN_INTERVAL` / `KILO_CHAT_MIN_INTERVAL` | `0` | Zen / Kilo pacers, independent, off by default |
 | `QODER_CHAT_MIN_INTERVAL` / `CODEARTS_CHAT_MIN_INTERVAL` | `5` | Qoder / CodeArts pacers; `0` disables |
+| `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | OfficeAce pacer, independent; `0` disables |
 | `CODEARTS_MAX_CONCURRENCY` | `3` | CodeArts in-flight cap per account; `0` disables |
 | `CODEARTS_REQUEST_WINDOW_SECONDS` | `60` | CodeArts sliding window (3 starts / 60s with the cap above); `0` disables |
 | `CODEBUDDY_SANITIZE_CHANNEL_MARKERS` | `true` | Neutralize official-client fingerprints in outbound `system`/`assistant` text (upstream 11128 content filter); outbound copy only |

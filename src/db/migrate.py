@@ -4,6 +4,7 @@ schema.sql 只含 CREATE TABLE IF NOT EXISTS，已存在的表不会被改动：
 - 新增列 → `_MIGRATION_COLUMNS`（ALTER TABLE ADD COLUMN，列已存在时忽略）
 - 删除表 → `_MIGRATION_DROPS`（DROP TABLE IF EXISTS；schema.sql 里删定义
   不会作用于老库，遗留表必须在这里显式删，否则 schema.sql 与实际库不一致）
+- 删除列 → `_MIGRATION_COLUMN_DROPS`（ALTER TABLE DROP COLUMN，列不存在时忽略）
 
 schema 版本记在 SQLite 的 `PRAGMA user_version` 里，便于运维判断
 "这个库是哪一代"；旧库（user_version=0）在升级时只补列/删表不丢数据。
@@ -46,14 +47,15 @@ SCHEMA_NAME = "schema.sql"
 # 不参与调度/鉴权）。默认 ''，老库补列后全部凭证「无标签」，行为不变。
 # 23：credentials 新增 quota_credits_remaining / quota_credits_total（CodeArts
 # 第二本账：积分＝内置模型计费单位，与每日 token 池并行）。老库补列后为 NULL
-# ＝「无积分账」，展示层隐藏该行，health / 选号行为不变。
+# ＝「无积分账」，展示层隐藏该行，health / 选号行为不变。第 29 版已删除
+# （福利链路下线，积分账成为唯一额度来源）。
 # 24：credit_events 新增 ledger（区分两本账：pool＝每日 token 池 / credits＝
 # 积分账）。老库补列后默认 'pool'——历史流水全部由主账（每日池）的 diff 产生，
 # 归入 pool 即为事实，不需要回填；积分账流水从补列后的下一轮探测开始记。
 # 25：credentials 新增 quota_credits_expiry_ladder（积分账到期阶梯，仅 CodeArts，
 # 供管理台按账本展示到期积分：福利组＝每日池 / 内置组＝积分账）。老库补列后为
 # NULL ＝「无积分到期信息」，展示层按「无到期积分」处理，health / 选号不受影响
-# （选号读的是两本账合并的 quota_expiry_ladder，不读这一列）。
+# （选号读的是两本账合并的 quota_expiry_ladder，不读这一列）。第 29 版已删除。
 # 26：usage_events 新增 api_key_id（发起请求的 API Key id，供按 Key 计量与
 # 自助用量）。老库补列后历史行为 NULL ＝「未归属到具体 Key」，读路径按未归属
 # 处理，与补列前行为一致；索引 idx_usage_key 在补列之后建（见 _MIGRATION_INDEXES）。
@@ -63,7 +65,11 @@ SCHEMA_NAME = "schema.sql"
 # 28：新增 model_probes 表（主动探活结论 + 人工接管标记）。新增表只需进
 # schema.sql（CREATE TABLE IF NOT EXISTS 对老库同样生效），无需迁移动作；
 # 老库升级后表为空 ＝「从未探活」，管理台显示「—」，行为与补表前一致。
-SCHEMA_VERSION = 28
+# 29：移除福利链路（每日千万 token 免费池已下线）：credentials 删三列积分账
+# （`quota_credits_remaining` / `quota_credits_total` / `quota_credits_expiry_ladder`）。
+# 积分账成为 CodeArts 唯一的额度来源，直接落在通用列（`quota_remaining` 等）上，
+# 故这三列不再有读者；见 `_MIGRATION_COLUMN_DROPS`。
+SCHEMA_VERSION = 29
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -113,16 +119,9 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # 运维标签（仅列表展示与筛选，不参与调度）：老库补 '' 后全部凭证无标签，
     # 筛选界面默认「全部标签」下行为与补列前一致。
     ("credentials", "tags TEXT NOT NULL DEFAULT ''"),
-    # 第二本账（CodeArts 积分：内置模型计费，与每日 token 池并行）：老库补列后
-    # 为 NULL ＝「无积分账」，展示层隐藏该行，health / 选号不受影响。
-    ("credentials", "quota_credits_remaining REAL"),
-    ("credentials", "quota_credits_total REAL"),
     # 变动流水按账本分流：老库补 'pool'——历史行全部由主账（每日池）diff 产生，
-    # 归入 pool 即为事实；无账本概念的渠道也恒为 pool，读路径行为不变。
+    # 归入 pool 即为事实；CodeArts 今后写 'credits'（见 repo.quota_ledger）。
     ("credit_events", "ledger TEXT NOT NULL DEFAULT 'pool'"),
-    # 积分账到期阶梯（仅 CodeArts，展示用）：老库补列后为 NULL ＝「无积分到期
-    # 信息」，管理台按「无到期积分」处理；选号读合并阶梯，不受本列影响。
-    ("credentials", "quota_credits_expiry_ladder TEXT"),
     # 发起请求的 API Key（按 Key 计量 / 自助用量）：老库补列后历史行为 NULL
     # ＝「未归属到具体 Key」，读路径按未归属处理，与补列前一致。
     ("usage_events", "api_key_id TEXT"),
@@ -133,6 +132,16 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
 # 已废弃的表：schema.sql 里已删定义，但老库里可能还留着，必须显式清理。
 # 签到去重改为当日内存态、模型列表改为进程内 TTL 缓存后这两张表零引用。
 _MIGRATION_DROPS: tuple[str, ...] = ("checkins", "model_cache")
+
+# (表, 列)：已废弃的列，schema.sql 里已删定义，但老库里可能还留着。
+# `ALTER TABLE ADD COLUMN` 只加不删，故必须显式 DROP；列不存在时忽略
+# （新库本就没有这些列）。删列要求 SQLite ≥ 3.35（2021，本机 3.54）。
+_MIGRATION_COLUMN_DROPS: tuple[tuple[str, str], ...] = (
+    # 福利链路下线：积分账成为 CodeArts 唯一的额度来源，直接落在通用列上。
+    ("credentials", "quota_credits_remaining"),
+    ("credentials", "quota_credits_total"),
+    ("credentials", "quota_credits_expiry_ladder"),
+)
 
 # (索引名, 表, 列)：**建在补列之后**的索引。
 # 为什么不能只放 schema.sql：`CREATE INDEX` 在 `executescript` 阶段执行，而老库
@@ -176,6 +185,12 @@ def apply_schema(conn) -> None:
                 raise
     for table in _MIGRATION_DROPS:
         conn.execute(f"DROP TABLE IF EXISTS {table}")
+    for table, column in _MIGRATION_COLUMN_DROPS:
+        try:
+            conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+        except conn.OperationalError as error:  # 列不存在（新库 / 已删过）
+            if "no such column" not in str(error).lower():
+                raise
     for name, table, column in _MIGRATION_INDEXES:
         conn.execute(f"CREATE INDEX IF NOT EXISTS {name} ON {table}({column})")
     # PRAGMA 不支持参数绑定，版本号来自本模块常量（非外部输入）

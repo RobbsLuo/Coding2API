@@ -23,8 +23,10 @@
 * 真实请求的失败只能「证明我这次没打通」，不能区分「上游真没有这个模型」与
   「额度耗尽 / 限流 / 网络抖动」。探活用一条最小对话把这两类分开，因此三态
   判定里 `inconclusive` **绝不**触发禁用。
-* 探活与生产完全隔离：直连 provider，不写 `usage_events`、不动冷却、不影响
-  任何出口判断，结论只进独立的 `model_probes` 表。
+* 探活与生产完全隔离：直连 provider，不写 `usage_events`、不动冷却表、不改
+  健康度，结论只进独立的 `model_probes` 表。唯一的出口影响是**列表展示**：
+  判死（`failed`）且负缓存仍生效的 (渠道, 模型) 从 `/v1/models` 里摘掉，
+  到期口径是那条负缓存的 `cooling_until`（见 `api.models.merged_entries`）。
 * 探活**成功**才是恢复入口：它清掉该 (渠道, 模型) 的 blocked 负缓存，模型
   立即回到池子，不必等 6–24h 的 TTL 走完。
 * 人工接管（`manual != ''`）优先于自动探活：管理员点过「恢复」之后不希望
@@ -155,12 +157,20 @@ def create_router(services: Services) -> APIRouter:
         会漏掉「从未探过但正被负缓存锁着」的模型（那才是该点探活的）。
         `blocked` 按 (渠道, 模型) 聚合，`credentials` 是该结论涉及的号数
         （负缓存是逐号的，结论是模型级的）。
+
+        **命中黑名单的行整条不返回**（口径同 `/v1/models` 的过滤）：黑名单是
+        管理员「这个模型我不要了」的显式决定，它已经把自己排除在模型列表之外，
+        再在探活面板里冒出来只会诱导管理员反复去救一个已主动弃用的模型。
+        黑名单现读热更值，故点掉黑名单后下一次请求立即重新露出。
         """
         require_operator(principal)
+        patterns = tuple(getattr(services.settings, "blocklist_patterns", ()) or ())
         rows = services.credentials.blocked_cooldowns()
         grouped: dict[tuple[str, str], dict[str, Any]] = {}
         for row in rows:
             key = (row["provider"], row["model"])
+            if _blocked(row["model"], patterns):
+                continue
             item = grouped.setdefault(key, {
                 "provider": row["provider"], "model": row["model"],
                 "credentials": 0, "until": 0, "hits": 0,
@@ -178,7 +188,7 @@ def create_router(services: Services) -> APIRouter:
         # 有人工接管标记但负缓存已被清掉的行也要露出（否则「恢复」之后那一行
         # 就从页面上消失了，用户无法把它交还给自动探活）。
         for key, probe in probes.items():
-            if key in merged:
+            if key in merged or _blocked(key[1], patterns):
                 continue
             merged[key] = {"provider": key[0], "model": key[1], "credentials": 0,
                            "until": 0, "hits": 0, **probe}

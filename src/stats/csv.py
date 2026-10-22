@@ -29,7 +29,11 @@ EXPORT_HEADERS: tuple[str, ...] = (
     "时间", "用户", "渠道", "凭证", "模型", "状态", "错误类型",
     "输入 token", "输出 token", "命中缓存", "推理 token",
     "credit", "credit 为推算", "成本 USD", "成本 CNY",
-    "首字延迟 ms", "耗时 ms", "请求 ID",
+    "首字延迟 ms", "耗时 ms",
+    # 逐请求速度与页面明细表同口径（规则见 query._row_speed_sql）：只算生成
+    # 窗口可测的成功请求，不可测的行留空（不是 0）。
+    "正文速度 tok/s", "总产出速度 tok/s",
+    "请求 ID",
 )
 
 # 文本单元格里会被表格软件当公式起点的前缀字符。
@@ -84,6 +88,8 @@ def event_cells(row: dict[str, Any]) -> list[str]:
         format_cell(row.get("cost_cny")),
         format_cell(row.get("ttfb_ms")),
         format_cell(row.get("latency_ms")),
+        format_cell(row.get("tps_visible")),
+        format_cell(row.get("tps")),
         format_cell(row.get("request_id")),
     ]
 

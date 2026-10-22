@@ -312,36 +312,41 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(screen.getByText("没有匹配的模型")).toBeInTheDocument();
   });
 
-  it("福利模型（CodeArts 每日池）在渠道徽章打「福」标，多渠道只标该渠道", async () => {
-    const BENEFIT_MODELS = {
+  it("渠道徽章只渲染渠道名与倍率，福标已随渠道重构移除", async () => {
+    const CHANNEL_MODELS = {
       object: "list",
       data: [
         {
           id: "deepseek-v4.1-flash", object: "model", owned_by: "Coding2API",
           providers: ["codearts", "trae"],
           by_provider: {
-            codearts: { raw_id: "deepseek-v4.1-flash", benefit: true },
+            codearts: { raw_id: "deepseek-v4.1-flash" },
             trae: { raw_id: "deepseek-v4.1-flash", credit_rate: 0.08 },
           },
         },
         {
-          id: "benefit-only", object: "model", owned_by: "Coding2API",
-          providers: ["codearts"], benefit: true,
+          id: "codearts-only", object: "model", owned_by: "Coding2API",
+          providers: ["codearts"],
         },
       ],
     };
-    mockFetch({ "/api/playground/models": BENEFIT_MODELS });
+    mockFetch({ "/api/playground/models": CHANNEL_MODELS });
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await waitForModelLoaded();
 
-    // 多渠道：只有 codearts 那侧打「福」标（trae 侧不打）
+    // 多渠道：两侧渠道徽章只渲染渠道名（trae 侧带倍率），不再有「福」标
     const dual = screen.getByTestId("model-option-deepseek-v4.1-flash");
-    expect(within(dual).getByTestId("channel-benefit-codearts")).toHaveTextContent("福");
-    expect(within(dual).queryByTestId("channel-benefit-trae")).not.toBeInTheDocument();
+    expect(within(dual).getByTestId("channel-pill-codearts")).toHaveTextContent("CodeArts");
+    expect(within(dual).getByTestId("channel-pill-trae")).toHaveTextContent("TRAE");
+    expect(within(dual).getByTestId("channel-pill-trae")).toHaveTextContent("x0.08");
+    expect(dual).not.toHaveTextContent("福");
+    expect(dual.querySelector('[data-testid^="channel-benefit-"]')).not.toBeInTheDocument();
 
-    // 单渠道福利：顶层 benefit 也打「福」标
-    const single = screen.getByTestId("model-option-benefit-only@codearts");
-    expect(within(single).getByTestId("channel-benefit-codearts")).toHaveTextContent("福");
+    // 单渠道 CodeArts：同样只有渠道名与（可选的）倍率
+    const single = screen.getByTestId("model-option-codearts-only@codearts");
+    expect(within(single).getByTestId("channel-pill-codearts")).toHaveTextContent("CodeArts");
+    expect(single).not.toHaveTextContent("福");
+    expect(single.querySelector('[data-testid^="channel-benefit-"]')).not.toBeInTheDocument();
   });
 
   it("免费模型（x0）的倍率块显示「免」，单渠道当前选择条不打自动路由标", async () => {

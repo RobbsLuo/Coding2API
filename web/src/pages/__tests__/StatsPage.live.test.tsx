@@ -48,6 +48,21 @@ describe("StatsPage 实时明细", () => {
       expect(screen.getByTestId("events-live-table")).toHaveTextContent("live-model");
     });
     expect(screen.getAllByTestId("live-row")).toHaveLength(1);
+    // 实时行与分页明细表同列：速度按广播行自带的 tps / tps_visible 渲染
+    const liveTable = screen.getByTestId("events-live-table");
+    expect(liveTable).toHaveTextContent("速度");
+    expect(liveTable).toHaveTextContent("51.2 / 82.8 tok/s");
+    // 时间两行（时刻优先、日期在下）、渠道/凭证合并列：实时表与分页表同一套渲染
+    const liveCell = screen.getAllByTestId("live-row")[0]
+      .querySelector("[data-label='时间']")!;
+    expect(liveCell.children).toHaveLength(2);
+    expect(liveCell.children[0].textContent).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    expect(liveCell.children[1].textContent).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const liveRow = screen.getAllByTestId("live-row")[0];
+    expect(liveRow.querySelector("[data-label='凭证']")).toBeNull();
+    const liveSource = liveRow.querySelector("[data-label='渠道 / 凭证']")!;
+    expect(liveSource.children[0].textContent).toBe("主账号");
+    expect(liveSource.textContent).toContain("CodeBuddy");
   });
 
   it("实时行按新→旧排列，坏帧被丢弃不影响后续", async () => {

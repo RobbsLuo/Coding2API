@@ -13,6 +13,7 @@ const LOGIN_PROVIDERS: Provider[] = [
   "trae",
   "qoder",
   "codearts",
+  "officeace",
 ];
 
 type TabValue = "login" | "import";
@@ -108,7 +109,7 @@ export function AddCredentialDialog({
     setLoginProviders((previous) => previous.filter((item) => item !== provider));
   };
 
-  const startLogin = async (provider: Provider) => {
+  const startLogin = async (provider: Provider, forceLogin = false) => {
     onError("");
     onNotice("");
     // 先同步开一个占位窗口：window.open 若在 await 之后才调用，
@@ -116,7 +117,7 @@ export function AddCredentialDialog({
     const popup = window.open("", "_blank");
     if (popup) popup.opener = null;               // 切断对管理台 window 的引用
     try {
-      const started = await api.upstreamStart(provider);
+      const started = await api.upstreamStart(provider, forceLogin);
       loginStatesRef.current[provider] = started.state;
       if (!started.auth_url) {
         popup?.close();                        // 上游没给授权地址：关掉空白占位窗
@@ -172,9 +173,13 @@ export function AddCredentialDialog({
             onNotice("登录成功，凭证已保存。");
             onImported("登录成功，凭证已保存。");
           }
-        } catch {
+        } catch (caught) {
           stopPolling(provider);
-          onError("登录轮询失败，请重试。");
+          // 轮询失败多半是上游给的可行动原因（如「这个账号还没开通 OfficeAce」），
+          // 兜底文案会把它抹掉，用户只会看到「失败」而不知道该去做什么。
+          onError(caught instanceof Error && caught.message
+            ? caught.message
+            : "登录轮询失败，请重试。");
         }
       }, interval);
       loginTimersRef.current[provider] = timer;
@@ -315,16 +320,30 @@ export function AddCredentialDialog({
                     </Button>
                   </span>
                 ) : (
-                  <Button
-                    key={item}
-                    size="sm"
-                    variant="primary"
-                    data-testid={`start-login-${item}`}
-                    disabled={busy}
-                    onClick={() => void startLogin(item)}
-                  >
-                    登录 {PROVIDER_LABEL[item]}
-                  </Button>
+                  <span key={item} className="inline-flex items-center gap-1">
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      data-testid={`start-login-${item}`}
+                      disabled={busy}
+                      onClick={() => void startLogin(item)}
+                    >
+                      登录 {PROVIDER_LABEL[item]}
+                    </Button>
+                    {item === "officeace" && (
+                      // 华为云会话按浏览器走：不先登出，云端会直接放行现有账号，
+                      // 用户点「新增」却始终只有同一条凭证。
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        data-testid="switch-login-officeace"
+                        disabled={busy}
+                        onClick={() => void startLogin(item, true)}
+                      >
+                        换账号
+                      </Button>
+                    )}
+                  </span>
                 );
               })}
             </div>
@@ -332,7 +351,8 @@ export function AddCredentialDialog({
               CodeBuddy 走设备码轮询（自动检测完成）；TRAE 走浏览器回调
               （授权后由 <code>/authorize</code> 直接落库，本对话框轮询凭证列表，
               期间勿关闭对话框）；Qoder 走设备码登录；CodeArts 走 OAuth2 授权码登录
-              （授权后把地址栏打不开的 127.0.0.1 回调链接粘回本对话框）。
+              （授权后把地址栏打不开的 127.0.0.1 回调链接粘回本对话框）；
+              OfficeAce 由云端承接回调（本对话框轮询，多账号请用「换账号」）。
             </p>
             {pasteProvider && (
               <div className="space-y-2" data-testid="paste-callback">
@@ -368,7 +388,7 @@ export function AddCredentialDialog({
             )}
             <div className="border-t border-border pt-3">
               <div className="mb-2 text-xs text-muted-foreground">
-                OpenCode Zen / Kilo Gateway 免费层无需凭证/登录，删除其虚拟凭证后点下方按钮补回
+                OpenCode Zen / Kilo 免费层无需凭证/登录，删除其虚拟凭证后点下方按钮补回
                 （永久停用请改用「暂停」）。
               </div>
               <div className="flex flex-wrap gap-2">
@@ -399,8 +419,8 @@ export function AddCredentialDialog({
                   onClick={async () => {
                     setBusy(true);
                     try {
-                      await api.importCredential("kilo", {}, "Kilo Gateway");
-                      onImported("已添加 Kilo Gateway 免费渠道");
+                      await api.importCredential("kilo", {}, "Kilo");
+                      onImported("已添加 Kilo 免费渠道");
                     } catch (caught) {
                       onError(caught instanceof Error ? caught.message : "添加失败");
                     } finally {
@@ -408,7 +428,7 @@ export function AddCredentialDialog({
                     }
                   }}
                 >
-                  {hasKilo ? "Kilo Gateway 已添加" : "添加 Kilo Gateway"}
+                  {hasKilo ? "Kilo 已添加" : "添加 Kilo"}
                 </Button>
               </div>
             </div>

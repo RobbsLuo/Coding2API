@@ -732,13 +732,17 @@ def test_stats_events_csv_export(admin_client):
     collector = client.app.state.stats_collector
     collector.record(username="other", provider="trae", model="=cmd|calc", ok=True,
                      input_tokens=10, output_tokens=5, now=1_700_000_000)
+    # 有生成窗口的成功请求：速度两列应有值（正文 50 / 总产出 200 tok/s）
+    collector.record(username="other", provider="trae", model="fast", ok=True,
+                     output_tokens=1000, reasoning_tokens=750,
+                     latency_ms=6000, ttfb_ms=1000, now=1_700_000_050)
     collector.record(username="other", provider="codebuddy", model="m2", ok=False,
                      error_type="rate_limit", now=1_700_000_100)
 
     response = client.get("/api/stats/events", params={"format": "csv"})
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/csv")
-    assert response.headers["x-export-row-count"] == "2"
+    assert response.headers["x-export-row-count"] == "3"
     assert response.headers["x-export-truncated"] == "0"
     assert "attachment" in response.headers["content-disposition"]
     assert ".csv" in response.headers["content-disposition"]
@@ -746,6 +750,9 @@ def test_stats_events_csv_export(admin_client):
     assert text.startswith("\ufeff")                  # BOM 供 Excel 认 UTF-8
     lines = text.lstrip("\ufeff").split("\r\n")
     assert lines[0].startswith("时间,用户,渠道,凭证,模型")
+    assert "正文速度 tok/s,总产出速度 tok/s" in lines[0]
+    # 速度与页面明细表同口径：可测的行有值，不可测的行留空
+    assert ",50.0,200.0," in text
     # 模型列以 = 开头 → 加前导单引号防公式注入
     assert "'=cmd|calc" in text
     assert "失败" in text and "rate_limit" in text
@@ -808,3 +815,364 @@ def test_stats_events_csv_export_truncates(admin_client, monkeypatch):
     response = client.get("/api/stats/events", params={"format": "csv"})
     assert response.headers["x-export-row-count"] == "2"
     assert response.headers["x-export-truncated"] == "1"
+
+
+def test_overview_output_speed_divides_totals_not_per_request_average(stats):
+    """输出速度 = 总输出 token ÷ 生成时间总和，不是逐条比值的平均。
+
+    逐条平均会被短请求带歪：本例两条长请求各自约 100 / 91 tok/s，逐条平均
+    约 95.5；总量相除是 94.1。断言后者证明实现走的是总量口径。
+    """
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=300, latency_ms=4000, ttfb_ms=1000)   # 生成 3.0s
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=500, latency_ms=6500, ttfb_ms=1000)   # 生成 5.5s
+    overview = query.overview(username="u")
+    assert overview["tps"] == round(800 * 1000 / 8500, 1) == 94.1
+    assert overview["tps_estimated"] is False
+
+
+def test_overview_output_speed_counts_short_outputs_excludes_zero(stats):
+    """不设输出量下限：短输出照样进样本，只有「产出 0 个 token」与失败被排除。
+
+    短输出也是真实产出；剔掉它们会让短问答为主的渠道永远没有速度。输出为 0 /
+    未上报的请求没有可测产出（比值恒为 0），不算样本——那是「没产出」不是「慢」。
+    """
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=3, latency_ms=1000, ttfb_ms=100)    # 3 token / 0.9s
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=97, latency_ms=1100, ttfb_ms=100)   # 97 token / 1.0s
+    overview = query.overview(username="u")
+    # 总量相除：100 token / 1.9s（不是逐条平均）
+    assert overview["tps"] == round(100 * 1000 / 1900, 1) == 52.6
+    assert overview["tps_estimated"] is False
+    # 输出 0 / 未上报 / 失败：都不进样本
+    collector.record(username="v", provider="trae", model="m", ok=True,
+                     output_tokens=0, latency_ms=1000, ttfb_ms=100)
+    collector.record(username="v", provider="trae", model="m", ok=True,
+                     output_tokens=None, latency_ms=1000, ttfb_ms=100)
+    collector.record(username="v", provider="trae", model="m", ok=False,
+                     error_type="upstream_error", output_tokens=5000,
+                     latency_ms=9000, ttfb_ms=100)
+    assert query.overview(username="v")["tps"] is None
+
+
+def test_overview_output_speed_estimates_without_first_byte_data(stats):
+    """无首字数据（非流式）时按端到端耗时估算（含首字等待），样本标 ≈。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=1000, latency_ms=2000, ttfb_ms=None)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=200, latency_ms=500, ttfb_ms=None)
+    overview = query.overview(username="u")
+    assert overview["tps"] == round(1200 * 1000 / 2500, 1) == 480.0
+    assert overview["tps_estimated"] is True
+
+
+def test_overview_output_speed_estimate_uses_same_output_floor(stats):
+    """估算口径与路由口径同门槛（>0 token），两口径只差在分母。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=199, latency_ms=1000, ttfb_ms=None)
+    overview = query.overview(username="u")
+    assert overview["tps"] == 199.0
+    assert overview["tps_estimated"] is True
+    # 短输出同样算（无输出量下限）；0 个 token 不算样本
+    collector.record(username="v", provider="trae", model="m", ok=True,
+                     output_tokens=5, latency_ms=1000, ttfb_ms=None)
+    assert query.overview(username="v")["tps"] == 5.0
+    collector.record(username="w", provider="trae", model="m", ok=True,
+                     output_tokens=0, latency_ms=1000, ttfb_ms=None)
+    assert query.overview(username="w")["tps"] is None
+
+
+def test_overview_output_speed_prefers_routed_over_estimate(stats):
+    """两条口径都有样本时用路由口径（生成时间总和），不混入估算样本。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=400, latency_ms=5000, ttfb_ms=1000)     # 路由
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=1000, latency_ms=2000, ttfb_ms=None)    # 估算样本
+    overview = query.overview(username="u")
+    assert overview["tps"] == 100.0                 # 只算 400 tok / 4.0s
+    assert overview["tps_estimated"] is False
+
+
+def test_overview_output_speed_respects_scope_and_window(stats):
+    """速度读明细表，独立应用作用域与时间窗（取值列是 ts）。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=400, latency_ms=5000, ttfb_ms=1000, now=1000)
+    collector.record(username="v", provider="trae", model="m", ok=True,
+                     output_tokens=900, latency_ms=2000, ttfb_ms=500, now=1000)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=900, latency_ms=2000, ttfb_ms=500, now=9000)
+    assert query.overview(username="u")["tps"] == round(1300 * 1000 / 5500, 1)
+    assert query.overview(username="u", since=5000)["tps"] == 600.0
+    assert query.overview(username="u", until=5000)["tps"] == 100.0
+    # provider 过滤同样生效（总览卡片支持按渠道收窄）
+    assert query.overview(provider="trae", since=5000)["tps"] == 600.0
+
+
+def test_stats_groups_report_output_speed_with_estimate_fallback(stats):
+    """分组行带速度：路由口径优先，无样本的组回落估算并标 tps_estimated。"""
+    collector, query = stats
+    # trae：有首字数据 → 路由口径 400 tok / 4.0s = 100
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=400, latency_ms=5000, ttfb_ms=1000)
+    # codebuddy：无首字数据 → 估算口径 600 tok / 3.0s = 200
+    collector.record(username="u", provider="codebuddy", model="m", ok=True,
+                     output_tokens=600, latency_ms=3000, ttfb_ms=None)
+    # zen：生成窗口与端到端耗时都过短 → 两个口径都没有样本
+    collector.record(username="u", provider="zen", model="m", ok=True,
+                     output_tokens=50, latency_ms=150, ttfb_ms=100)
+    rows = {row["provider"]: row for row in query.by_provider(username="u")}
+    assert rows["trae"]["tps"] == 100.0 and rows["trae"]["tps_estimated"] is False
+    assert rows["codebuddy"]["tps"] == 200.0
+    assert rows["codebuddy"]["tps_estimated"] is True
+    assert rows["zen"]["tps"] is None and rows["zen"]["tps_estimated"] is False
+
+
+def test_stats_groups_output_speed_all_dimensions_and_sort(stats):
+    """四个维度都带速度值；排序键走明细聚合列（无样本的组排最后）。"""
+    collector, query = stats
+    for value, provider in ((200, "trae"), (800, "codebuddy")):
+        collector.record(username="u", provider=provider, model="m", ok=True,
+                         credential_id=f"cred_{provider}",
+                         output_tokens=value, latency_ms=2000, ttfb_ms=1000)
+    # zen 全失败 → 速度列 NULL（不是 0）
+    collector.record(username="u", provider="zen", model="m", ok=False,
+                     error_type="upstream_error", output_tokens=900,
+                     latency_ms=2000, ttfb_ms=1000)
+    assert {row["tps"] for row in query.by_provider(username="u")} == {200.0, 800.0, None}
+    assert {row["tps"] for row in query.by_credential(username="u")} == {200.0, 800.0}
+    # 模型 / 用户维度把两个渠道合并成一行：总量相除得 1000 tok / 2.0s
+    for rows in (query.by_model(username="u"), query.by_user(username="u")):
+        assert [row["tps"] for row in rows] == [500.0]
+    order = [row["provider"] for row in
+             query.by_provider(username="u", sort="tps", order="desc")]
+    assert order == ["codebuddy", "trae", "zen"]
+    # 升序时 NULL 排最前（SQLite 对可空列的既有语义，延迟列同样如此）
+    assert query.by_provider(username="u", sort="tps", order="asc")[0]["provider"] == "zen"
+
+
+def test_stats_group_output_speed_respects_window(stats):
+    """分组速度与分位同源明细表：时间窗按 ts 过滤，不受小时汇总干扰。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=400, latency_ms=5000, ttfb_ms=1000, now=1000)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=900, latency_ms=2000, ttfb_ms=500, now=9000)
+    assert query.by_provider(username="u", until=5000)[0]["tps"] == 100.0
+    assert query.by_provider(username="u", since=5000)[0]["tps"] == 600.0
+
+
+def test_speed_value_branches():
+    """`_speed_value`：两个口径的分母/分子都要 > 0，缺一就是「没有样本」。"""
+    from src.stats.query import _speed_value
+
+    # 路由口径：总产出 400 / 4000ms = 100，正文 300 / 4000ms = 75
+    assert _speed_value(400, 300, 4000, 0, 0, 0) == (100.0, 75.0, False)
+    # 路由口径缺项 → 回落估算口径（300 / 1000ms = 300，正文 200 / 1000ms = 200）
+    assert _speed_value(0, 0, 0, 300, 200, 1000) == (300.0, 200.0, True)
+    assert _speed_value(400, 300, 0, 0, 0, 0) == (None, None, False)
+    assert _speed_value(400, 300, None, 0, 0, 0) == (None, None, False)
+    assert _speed_value(0, 0, 4000, 300, 200, 1000) == (300.0, 200.0, True)
+    assert _speed_value(None, None, 4000, None, None, 1000) == (None, None, False)
+    assert _speed_value(0, 0, 0, 300, 200, None) == (None, None, False)
+    assert _speed_value(0, 0, 0, 300, None, 1000) == (300.0, None, True)
+    assert _speed_value(0, 0, 0, 0, 0, 0) == (None, None, False)
+    # 正文分子为 0（整段输出都是思考 token）→ 正文列 None，不拿 0 冒充速度
+    assert _speed_value(400, 0, 4000, 0, 0, 0) == (100.0, None, False)
+    assert _speed_value(0, 0, 0, 300, 0, 1000) == (300.0, None, True)
+
+
+def test_overview_output_speed_reports_visible_and_total(stats):
+    """总览同时给正文速度与总产出速度：同分母，分子分别扣 / 不扣思考 token。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=1000, reasoning_tokens=750,
+                     latency_ms=6000, ttfb_ms=1000)      # 生成 5.0s
+    overview = query.overview(username="u")
+    assert overview["tps"] == 200.0                     # 1000 / 5.0s
+    assert overview["tps_visible"] == 50.0              # (1000-750) / 5.0s
+    assert overview["tps_estimated"] is False
+
+
+def test_overview_output_speed_visible_null_when_all_reasoning(stats):
+    """整段输出都是思考 token 时正文速度为 None（前端显示 —），不是 0。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=600, reasoning_tokens=600,
+                     latency_ms=4000, ttfb_ms=1000)
+    overview = query.overview(username="u")
+    assert overview["tps"] == 200.0
+    assert overview["tps_visible"] is None
+
+
+def test_overview_output_speed_drops_unmeasurable_generation_window(stats):
+    """生成窗口 <200ms 的样本按「无法测量」剔除，不当成极快。
+
+    上游把整段内容攒成一批吐时首帧与末帧几乎同时到达，`latency - ttfb` 只有
+    几毫秒，比值会被放大成天文数字（实测 901 token / 3ms = 30 万 tok/s）。
+    """
+    collector, query = stats
+    # 无法测量：131ms 生成 500 token（约 3800 tok/s，且窗口太短）
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=500, latency_ms=1131, ttfb_ms=1000)
+    # 同一窗口内另一条正常样本：400 token / 4.0s = 100
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=400, latency_ms=5000, ttfb_ms=1000)
+    assert query.overview(username="u")["tps"] == 100.0
+
+
+def test_overview_output_speed_only_leaves_unmeasurable_samples(stats):
+    """只剩不可测样本时按无样本处理（None），两个口径都不拿畸形比值顶上。"""
+    collector, query = stats
+    # 生成窗口 3ms（路由口径不可测），端到端 3000 token / 1200ms = 2500 tok/s
+    # （估算口径也超过物理上限）→ 两个口径都没有合格样本。
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=3000, latency_ms=1200, ttfb_ms=1197)
+    overview = query.overview(username="u")
+    assert overview["tps"] is None and overview["tps_visible"] is None
+
+
+def test_overview_output_speed_drops_implausibly_fast_samples(stats):
+    """窗口够长但单条快过物理上限（>1000 tok/s）的样本同样剔除。
+
+    这类样本与「批到达」同源：窗口被上游的分批节奏拉长了一点，但仍然远短于
+    真实生成时长（2000 token / 300ms ≈ 6666 tok/s；端到端 2000 / 1300ms ≈ 1538
+    也超上限，两个口径都该拒收）。
+    """
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=2000, latency_ms=1300, ttfb_ms=1000)
+    assert query.overview(username="u")["tps"] is None
+    # 恰好 1000 tok/s（1000 token / 1000ms）算合格样本，上限是「不超过」
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=1000, latency_ms=2000, ttfb_ms=1000)
+    overview = query.overview(username="u")
+    assert overview["tps"] == 1000.0
+
+
+def test_stats_groups_output_speed_reports_visible_and_sort(stats):
+    """分组行同时下发正文 / 总产出速度，且两列都能独立排序。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=1000, reasoning_tokens=900,
+                     latency_ms=6000, ttfb_ms=1000)       # 总 200，正文 20
+    collector.record(username="u", provider="codebuddy", model="m", ok=True,
+                     output_tokens=600, reasoning_tokens=0,
+                     latency_ms=4000, ttfb_ms=1000)       # 总 200，正文 200
+    rows = {row["provider"]: row for row in query.by_provider(username="u")}
+    assert rows["trae"]["tps"] == 200.0 and rows["trae"]["tps_visible"] == 20.0
+    assert rows["codebuddy"]["tps"] == 200.0 and rows["codebuddy"]["tps_visible"] == 200.0
+    # 总产出相同 → 按分组键升序；正文速度排序把 codebuddy 排前
+    assert [row["provider"] for row in
+            query.by_provider(username="u", sort="tps_visible", order="desc")] == [
+        "codebuddy", "trae"]
+    # 估算口径也带正文速度
+    collector.record(username="u", provider="zen", model="m", ok=True,
+                     output_tokens=800, reasoning_tokens=600,
+                     latency_ms=4000, ttfb_ms=None)       # 估算：总 200，正文 50
+    zen = {row["provider"]: row for row in query.by_provider(username="u")}["zen"]
+    assert zen["tps"] == 200.0 and zen["tps_visible"] == 50.0
+    assert zen["tps_estimated"] is True
+
+
+def test_events_rows_carry_per_request_speed(stats):
+    """逐请求明细带本条速度：与分组同一套样本筛选，但逐行不回落估算口径。
+
+    逐行展示拿不到相邻样本摊平首字等待，估算口径（分母含首字）在单条上只会
+    误导，故没有生成窗口的行给 None（前端 —）。
+    """
+    from src.stats.query import row_speed
+
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="routed", ok=True,
+                     output_tokens=1000, reasoning_tokens=750,
+                     latency_ms=6000, ttfb_ms=1000)            # 生成 5.0s：总 200 / 正文 50
+    collector.record(username="u", provider="trae", model="short", ok=True,
+                     output_tokens=99, latency_ms=6000, ttfb_ms=1000)      # 短输出也算
+    collector.record(username="u", provider="trae", model="zero", ok=True,
+                     output_tokens=0, latency_ms=6000, ttfb_ms=1000)       # 没产出：不算
+    collector.record(username="u", provider="trae", model="batched", ok=True,
+                     output_tokens=500, latency_ms=1100, ttfb_ms=1000)     # 窗口仅 100ms
+    collector.record(username="u", provider="trae", model="implausible", ok=True,
+                     output_tokens=2000, latency_ms=1400, ttfb_ms=1200)  # 窗口 200ms 却 4000 tok/s
+    collector.record(username="u", provider="trae", model="all-reasoning", ok=True,
+                     output_tokens=600, reasoning_tokens=600,
+                     latency_ms=4000, ttfb_ms=1000)            # 正文为 0 → 正文列 None
+    collector.record(username="u", provider="trae", model="failed", ok=False,
+                     error_type="upstream_error", output_tokens=900,
+                     latency_ms=5000, ttfb_ms=1000)            # 失败请求不算
+    collector.record(username="u", provider="trae", model="no-ttfb", ok=True,
+                     output_tokens=900, latency_ms=5000, ttfb_ms=None)     # 非流式：不估算
+    rows = {row["model"]: row for row in query.events(username="u")["events"]}
+    assert (rows["routed"]["tps"], rows["routed"]["tps_visible"]) == (200.0, 50.0)
+    assert (rows["all-reasoning"]["tps"], rows["all-reasoning"]["tps_visible"]) == (200.0, None)
+    # 短输出（99 token / 5.0s）照样给值：不设输出量下限
+    assert (rows["short"]["tps"], rows["short"]["tps_visible"]) == (19.8, 19.8)
+    for model in ("zero", "batched", "implausible", "failed", "no-ttfb"):
+        assert (rows[model]["tps"], rows[model]["tps_visible"]) == (None, None)
+    # SQL 列与实时流用的 Python 版逐行同值（同一 `_routed_guard`）
+    for row in rows.values():
+        assert (row["tps_visible"], row["tps"]) == row_speed(
+            ok=row["ok"], output_tokens=row["output_tokens"],
+            reasoning_tokens=row["reasoning_tokens"],
+            latency_ms=row["latency_ms"], ttfb_ms=row["ttfb_ms"])
+
+
+def test_events_sort_by_speed_keys(stats):
+    """明细可按逐请求速度排序：正文与总产出各自为键，不可测的行排最后。"""
+    collector, query = stats
+    # 同一生成窗口 2.0s：总产出 500 / 正文 100（思考占大半）
+    collector.record(username="u", provider="trae", model="reasoning", ok=True,
+                     output_tokens=1000, reasoning_tokens=800,
+                     latency_ms=3000, ttfb_ms=1000)
+    # 总产出 300 / 正文 300（无思考）
+    collector.record(username="u", provider="trae", model="plain", ok=True,
+                     output_tokens=600, latency_ms=3000, ttfb_ms=1000)
+    # 窗口不可测 → 两列都是 NULL
+    collector.record(username="u", provider="trae", model="unmeasurable", ok=True,
+                     output_tokens=900, latency_ms=2000, ttfb_ms=1900)
+    by_total = query.events(username="u", sort="tps", order="desc")
+    assert [row["model"] for row in by_total["events"]] == [
+        "reasoning", "plain", "unmeasurable"]
+    # 换列排序走 offset 分页，故额外下发 total（游标模式没有）
+    assert by_total["total"] == 3
+    assert [row["model"] for row in
+            query.events(username="u", sort="tps_visible", order="desc")["events"]] == [
+        "plain", "reasoning", "unmeasurable"]
+
+
+def test_row_speed_python_matches_sql_guards():
+    """实时流那侧的 Python 版逐行速度：同规则、逐分支。"""
+    from src.stats.query import row_speed
+
+    # 输出 1000 / 生成 5.0s = 200；正文 (1000 − 750) = 50
+    assert row_speed(ok=True, output_tokens=1000, reasoning_tokens=750,
+                     latency_ms=6000, ttfb_ms=1000) == (50.0, 200.0)
+    # 正文为 0（整段思考）→ 正文列 None；思考大于输出时折 0（上游偶发）
+    assert row_speed(ok=True, output_tokens=600, reasoning_tokens=600,
+                     latency_ms=4000, ttfb_ms=1000) == (None, 200.0)
+    assert row_speed(ok=True, output_tokens=600, reasoning_tokens=900,
+                     latency_ms=4000, ttfb_ms=1000) == (None, 200.0)
+    # 失败请求 / 缺字段（历史行可能没有输出、耗时或首字）
+    assert row_speed(ok=False, output_tokens=1000, reasoning_tokens=0,
+                     latency_ms=6000, ttfb_ms=1000) == (None, None)
+    assert row_speed(ok=True, output_tokens=None, reasoning_tokens=None,
+                     latency_ms=6000, ttfb_ms=1000) == (None, None)
+    assert row_speed(ok=True, output_tokens=1000, reasoning_tokens=None,
+                     latency_ms=None, ttfb_ms=1000) == (None, None)
+    assert row_speed(ok=True, output_tokens=1000, reasoning_tokens=None,
+                     latency_ms=6000, ttfb_ms=None) == (None, None)
+    # 没产出 / 生成窗口过短 / 快过物理上限
+    assert row_speed(ok=True, output_tokens=0, reasoning_tokens=0,
+                     latency_ms=6000, ttfb_ms=1000) == (None, None)
+    assert row_speed(ok=True, output_tokens=500, reasoning_tokens=0,
+                     latency_ms=1100, ttfb_ms=1000) == (None, None)
+    assert row_speed(ok=True, output_tokens=2000, reasoning_tokens=0,
+                     latency_ms=1400, ttfb_ms=1200) == (None, None)

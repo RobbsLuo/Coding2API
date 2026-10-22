@@ -8,14 +8,13 @@ import time
 import httpx
 import pytest
 
-from src.provider.base import ErrKind, Event, EventKind, UpstreamReloginRequired, Usage
+from src.provider.base import ErrKind, EventKind, UpstreamReloginRequired
 from src.provider.codearts import auth as codearts_auth
 from src.provider.codearts import events as codearts_events
 from src.provider.codearts.client import (
     CodeArtsClient,
     UpstreamHTTPError,
     _credit_rate,
-    _fill_estimated_credit,
     _flatten_content,
     _legacy_blocks,
     _models_from_items,
@@ -23,7 +22,6 @@ from src.provider.codearts.client import (
     chat_headers,
     derive_chat_id,
     new_chat_id,
-    parse_balance,
     parse_credits,
     prepare_body,
     request_path,
@@ -56,9 +54,6 @@ def test_client_request_path_and_headers():
         "/v1/model/builtin", "b=2&a=1")
     assert request_path("") == ("/", "")
     assert chat_headers(_cred(), trace_id="t")["x-auth-token"] == "TOK"
-    benefit = chat_headers(_cred(), trace_id="t", benefit=True)
-    assert benefit[codearts_events.HEADER_MAAS_TYPE] == codearts_events.MAAS_BENEFIT
-    assert codearts_events.HEADER_MAAS_TYPE not in chat_headers(_cred(), trace_id="t")
     assert short_headers("PromptCenter")["Agent-Type"] == "PromptCenter"
     assert "Agent-Type" not in short_headers()
 
@@ -97,27 +92,20 @@ def test_client_legacy_blocks_and_flatten():
     assert _flatten_content(None) == ""
 
 def test_client_models_from_items_and_helpers():
-    assert _models_from_items("nope", benefit=False) == []
-    # 内置：credit[].ratio_display → credit_rate；福利：不带 credit → None。
+    assert _models_from_items("nope") == []
+    # credit[].ratio_display → credit_rate；无 credit 的条目 → None（不猜）。
     models = _models_from_items([
         "junk", {},
         {"model_id": "a", "model_name": "A", "contextWindow": 8000, "maxTokens": 100,
          "credit": [{"ratio_display": "0.7x", "ratio": "0.05"}]},
         {"modelId": "b", "display_name": "B", "max_input_tokens": 900},
-    ], benefit=False)
+    ])
     assert [m.id for m in models] == ["a", "b"]
     assert models[0].credit_rate == 0.7 and models[0].max_input_tokens == 8000
     assert models[0].max_output_tokens == 100
-    assert models[0].benefit is False                # 内置条目不是福利
     assert models[1].credit_rate is None          # 无 credit → 不猜
-    benefit_models = _models_from_items([
-        {"model_id": "c", "name": "C", "credit": [{"ratio_display": "0.7x"}]}],
-        benefit=True)
-    assert benefit_models[0].credit_rate is None  # 福利走每日 token 池，不打倍率
-    assert benefit_models[0].benefit is True      # 但标记为福利（前端打「福」标）
     none_models = _models_from_items([
-        {"model_id": "c", "name": 5, "context_window": True, "max_tokens": -1}],
-        benefit=False)
+        {"model_id": "c", "name": 5, "context_window": True, "max_tokens": -1}])
     assert none_models[0].name == "c" and none_models[0].credit_rate is None
     assert none_models[0].max_input_tokens is None
     assert none_models[0].max_output_tokens is None
@@ -138,90 +126,11 @@ def test_client_credit_rate_and_ratio_parsing():
     assert _parse_ratio("0.7.1") is None
     assert _parse_ratio(None) is None
 
-def test_client_fill_estimated_credit_benefit_and_guards():
-    # 福利模型：输入 + 输出 token 折成积分（1 积分 = 10000 token）后标推算值
-    event = Event(kind=EventKind.USAGE, usage=Usage(input_tokens=32, output_tokens=694))
-    _fill_estimated_credit(event, benefit=True)
-    assert event.usage.credit == pytest.approx(726 / 10000)
-    assert event.usage.credit_estimated is True
-    # 上游将来真回传 credit → 不覆盖
-    upstream = Event(kind=EventKind.USAGE,
-                     usage=Usage(input_tokens=1, output_tokens=2, credit=9.5))
-    _fill_estimated_credit(upstream, benefit=True)
-    assert upstream.usage.credit == 9.5 and upstream.usage.credit_estimated is False
-    # 内置模型不扣每日池 → 不补
-    builtin = Event(kind=EventKind.USAGE, usage=Usage(input_tokens=1, output_tokens=2))
-    _fill_estimated_credit(builtin, benefit=False)
-    assert builtin.usage.credit is None and builtin.usage.credit_estimated is False
-    # 非 USAGE 事件 / 无 usage / 两个 token 都缺 → 都不猜
-    content = Event(kind=EventKind.CONTENT, content="x")
-    _fill_estimated_credit(content, benefit=True)
-    assert content.usage is None
-    _fill_estimated_credit(Event(kind=EventKind.USAGE), benefit=True)
-    empty = Event(kind=EventKind.USAGE, usage=Usage())
-    _fill_estimated_credit(empty, benefit=True)
-    assert empty.usage.credit is None
-    # 只给一半 token 也照算（另一侧按 0）
-    half = Event(kind=EventKind.USAGE, usage=Usage(output_tokens=5))
-    _fill_estimated_credit(half, benefit=True)
-    assert half.usage.credit == pytest.approx(5 / 10000)
-    assert half.usage.credit_estimated is True
-
-def test_client_parse_balance_variants():
-    # 上游是 token、本服务折成积分（1 积分 = 10000 token）：余额/额度/阶梯同口径
-    assert parse_balance({}).probe_failed is True
-    direct = parse_balance({"total": 100, "used": 30})
-    assert direct.remaining == pytest.approx(70 / 10000)
-    assert direct.total == pytest.approx(100 / 10000)
-    envelope = parse_balance({"result": {"remaining": 5, "total": 10,
-                                         "cycle_end": 1700000000}})
-    assert envelope.remaining == pytest.approx(5 / 10000)
-    assert envelope.cycle_end == 1700000000
-    # bool 不算数字；残缺键回落下一个候选
-    tolerant = parse_balance({"remaining": True, "balance": 3, "cycle_end": -1,
-                              "expire_time": 1700000001})
-    assert tolerant.remaining == pytest.approx(3 / 10000)
-    assert tolerant.cycle_end == 1700000001
-    assert parse_balance({"quota": 0}).probe_failed is False
-    # 真实每日池形状（2026-09-30 实测）：按 daily_token_limit 算当日剩余，再折积分
-    noon = 1_780_300_800  # 任意时刻；到期点断言不依赖具体时区
-    daily = parse_balance({"result": {
-        "total_quota": 10000000, "total_balance": 9998868, "used_amount": 1132,
-        "daily_token_limit": 10000000, "daily_tokens_used": 1132,
-        "monthly_token_limit": 0, "expire_time": 0}}, now=noon)
-    # 每日池满额 1000 万 token ≡ 1000 积分；剩余 9998868 token ≡ 999.8868 积分
-    assert daily.total == pytest.approx(1000.0)
-    assert daily.remaining == pytest.approx(999.8868)
-    assert daily.probe_failed is False
-    assert daily.probed_at == noon
-    # 到期点＝下一个本地 0 点，当日剩余进到期阶梯 → 调度器「快过期的先用」优先消耗
-    midnight = time.localtime(daily.cycle_end)
-    assert (midnight.tm_hour, midnight.tm_min, midnight.tm_sec) == (0, 0, 0)
-    assert noon < daily.cycle_end <= noon + 86400
-    assert daily.expiry_ladder == [(daily.cycle_end, pytest.approx(999.8868))]
-    # 当日用尽 → 剩余 0（不是负数），健康度会判「已耗尽」；空池不进到期排序
-    drained = parse_balance({"daily_token_limit": 100,
-                             "daily_tokens_used": 250}, now=noon)
-    assert drained.remaining == 0 and drained.total == pytest.approx(0.01)
-    assert drained.cycle_end == daily.cycle_end and drained.expiry_ladder is None
-    # daily_token_limit 为 0/缺失时退化到通用键（含新补的 total_balance/used_amount）
-    generic = parse_balance({"total_quota": 500, "used_amount": 40}, now=noon)
-    assert generic.total == pytest.approx(500 / 10000)
-    assert generic.remaining == pytest.approx(460 / 10000)
-    # 通用形状没有可靠的每日重置时间 → 不登记到期阶梯，也不伪造 cycle_end
-    assert generic.expiry_ladder is None and generic.cycle_end is None
-    fallback = parse_balance({"result": {"total_balance": 900, "total_quota": 1000}})
-    assert fallback.total == pytest.approx(0.1)
-    assert fallback.remaining == pytest.approx(0.09)
-    # daily_tokens_used 缺失时按 0 处理 → 剩余等于额度
-    assert parse_balance({"daily_token_limit": 10},
-                         now=noon).remaining == pytest.approx(10 / 10000)
-
 def test_client_parse_credits_real_shape():
     """积分账解析（2026-10-15 实测形状）：合计项进 remaining/total，分项进 packages。
 
-    单位是积分本身，**不折 token**（与 `parse_balance` 相反）——两个接口量级差
-    三个数量级，套错单位会把 13500 积分显示成 1.35。
+    单位是积分本身，**不做 token 折算**——上游数值已是积分，套错单位会把
+    13500 积分显示成 1.35。这是本渠道唯一的额度来源。
     """
     noon = 1_780_300_800
     data = {
@@ -320,8 +229,6 @@ def test_client_defaults_and_chat_url():
     assert client.endpoint == "https://snap.test"
     assert client.sts_host == "https://sts.test"
     assert client.chat_url() == "https://snap.test" + codearts_events.EP_CHAT_V2
-    assert client.is_benefit_model(_cred(), "deepseek-v4-flash-0731") is True
-    assert client.is_benefit_model(_cred(), "unknown-model") is False
     legacy = CodeArtsClient(endpoint="https://snap.test", legacy=True,
                             login=codearts_auth.LoginConfig())
     assert legacy.chat_url() == "https://snap.test" + codearts_events.EP_CHAT
@@ -343,7 +250,6 @@ async def test_client_stream_chat_openai_chunks_and_done():
         assert body["stream"] is True and body["messages"][0]["content"] == "x"
         assert body["tool_stream"] is True
         assert request.headers["Authorization"].startswith("SDK-HMAC-SHA256 ")
-        assert codearts_events.HEADER_MAAS_TYPE not in request.headers
         return httpx.Response(200, text=_sse(
             {"choices": [{"index": 0, "delta": {"role": "assistant",
                                                 "reasoning_content": ""},
@@ -383,37 +289,18 @@ async def test_client_stream_chat_snapshot_semantics_and_done():
         "He", "llo", "Hi"]
     assert [e.kind for e in events][-1] is EventKind.FINISH
 
-async def test_client_stream_chat_benefit_header_and_embedded_error():
+async def test_client_stream_chat_embedded_error():
+    """错误内嵌在 HTTP 200 流里：原始业务码进 error_message，分类进 error_kind。"""
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers[codearts_events.HEADER_MAAS_TYPE] == (
-            codearts_events.MAAS_BENEFIT)
         return httpx.Response(200, text=_sse(
             {"text": "[DONE]", "error_code": "ChatAgent.00001001",
              "error_msg": "busy"}))
 
     events = [e async for e in _client(handler).stream_chat(
-        _cred(), {"messages": []}, "deepseek-v4-flash-0731")]
+        _cred(), {"messages": []}, "m")]
     assert len(events) == 1 and events[0].kind is EventKind.ERROR
     assert events[0].error_message == "ChatAgent.00001001 busy"
     assert events[0].error_kind is ErrKind.OTHER
-
-async def test_client_stream_chat_benefit_usage_records_pool_credit():
-    """福利模型收尾帧的 usage → 补推算扣池额度（token 1:1 后折积分），标 estimated。"""
-    def handler(request: httpx.Request) -> httpx.Response:
-        assert request.headers[codearts_events.HEADER_MAAS_TYPE] == (
-            codearts_events.MAAS_BENEFIT)
-        return httpx.Response(200, text=_sse(
-            {"choices": [{"delta": {"content": "hi"}, "finish_reason": "stop"}],
-             "usage": {"prompt_tokens": 32, "completion_tokens": 694}},
-        ) + "data:[DONE]\n")
-
-    events = [e async for e in _client(handler).stream_chat(
-        _cred(), {"messages": [{"role": "user", "content": "x"}]},
-        "deepseek-v4-flash-0731")]
-    usage = next(e for e in events if e.kind is EventKind.USAGE).usage
-    assert usage.input_tokens == 32 and usage.output_tokens == 694
-    assert usage.credit == pytest.approx(726 / 10000)
-    assert usage.credit_estimated is True
 
 async def test_client_stream_chat_legacy_and_http_error():
     def handler(request: httpx.Request) -> httpx.Response:
@@ -421,7 +308,6 @@ async def test_client_stream_chat_legacy_and_http_error():
         body = json.loads(request.content)
         assert body["task"] == "chat"
         assert body["user_id"] == "alice"
-        assert codearts_events.HEADER_MAAS_TYPE not in request.headers
         return httpx.Response(200, text=_sse({"text": "[DONE]"}))
 
     events = [e async for e in _client(handler, legacy=True).stream_chat(
@@ -435,79 +321,46 @@ async def test_client_stream_chat_legacy_and_http_error():
         [e async for e in _client(error_handler).stream_chat(_cred(), {}, "m")]
     assert caught.value.kind() is ErrKind.OTHER
 
-async def test_client_fetch_models_merges_builtin_and_benefit():
-    calls: list[str] = []
+async def test_client_fetch_models_builtin_only():
+    """模型发现只走内置接口 `GET {endpoint}/v1/model/builtin`（Agent-Type）。"""
+    calls: list[tuple[str, str]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(f"{request.url.host}{request.url.path}")
-        if request.url.path == codearts_events.EP_BENEFIT_CLAIM:
-            assert request.method == "POST"
-            return httpx.Response(200, json={"result": "ok"})     # 幂等
-        if request.url.path == codearts_events.EP_MODEL_BUILTIN:
-            assert request.headers["Agent-Type"] == "PromptCenter"
-            return httpx.Response(200, json={"builtinModels": [
-                "junk",
-                {"model_id": "m1", "model_name": "M1"},
-                {"name": "m2"},
-            ]})
-        return httpx.Response(200, json={"result": {"models": [
-            {"modelId": "b1", "name": "B1"},
-            {"model_name": "m1"},                                  # 已转正 → 不进福利目录
+        calls.append((request.url.host + request.url.path,
+                      request.headers.get("Agent-Type", "")))
+        assert request.method == "GET"
+        return httpx.Response(200, json={"builtinModels": [
+            "junk",
+            {"model_id": "m1", "model_name": "M1",
+             "credit": [{"ratio": "0.05"}, {"ratio_display": "0.7x"}]},
+            {"name": "m2"},
             {"id": 7},                                             # 坏条目跳过
-        ]}})
+        ]})
 
     client = _client(handler)
     models = await client.fetch_models(_cred())
-    assert [m.id for m in models] == ["m1", "m2", "b1"]
-    assert "gw.test" + codearts_events.EP_BENEFIT_CLAIM in calls
-    # 目录只含未转正的福利模型：m1 有 benefit 头被摘掉，b1 需要
-    assert client.is_benefit_model(_cred(), "b1") is True
-    assert client.is_benefit_model(_cred(), "m1") is False
-    assert client.is_benefit_model(_cred(), "deepseek-v4-pro-0813") is False
-
-async def test_client_fetch_models_partial_failure_keeps_previous_catalog():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == codearts_events.EP_MODEL_BUILTIN:
-            return httpx.Response(200, json={"builtinModels": [{"id": "m1"}]})
-        if request.url.path == codearts_events.EP_BENEFIT_CONFIG:
-            return httpx.Response(500, content=b"gw down")
-        return httpx.Response(200, json={})                        # claim
-
-    client = _client(handler, benefit_auto_claim=False)
-    models = await client.fetch_models(_cred())
-    assert [m.id for m in models] == ["m1"]
-    # 福利来源失败 → 目录保留（不误摘 benefit 头）
-    assert client.is_benefit_model(_cred(), "glm-5.3-flash") is True
-
-async def test_client_fetch_models_builtin_failure_uses_benefit_and_empty_catalog():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == codearts_events.EP_MODEL_BUILTIN:
-            return httpx.Response(500, content=b"builtin down")
-        if request.url.path == codearts_events.EP_BENEFIT_CLAIM:
-            return httpx.Response(500, content=b"claim down")       # 静默失败
-        return httpx.Response(200, json={"result": {"models": [{"id": "b1"}]}})
-
-    client = _client(handler)
-    models = await client.fetch_models(_cred())
-    assert [m.id for m in models] == ["b1"]
-    # 福利来源成功但为空集合 → 整体替换（非种子模型不必带 benefit 头）
-    assert client.is_benefit_model(_cred(), "deepseek-v4-flash-0731") is False
+    assert [m.id for m in models] == ["m1", "m2"]
+    assert models[0].credit_rate == 0.7
+    assert calls == [("snap.test" + codearts_events.EP_MODEL_BUILTIN, "PromptCenter")]
+    await client.aclose()
 
 async def test_client_fetch_models_empty_raises_violation():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == codearts_events.EP_BENEFIT_CLAIM:
-            return httpx.Response(200, json={})
-        return httpx.Response(200, json={})                         # 两路都无模型
+    """空列表（含 `builtinModels` 缺失/非列表）→ 协议违规，交由调用方退避。"""
+    for body in ({}, {"builtinModels": []}, {"builtinModels": "nope"}):
+        with pytest.raises(codearts_events.UpstreamProtocolViolation, match="empty list"):
+            await _client(lambda _r, _b=body: httpx.Response(200, json=_b)).fetch_models(
+                _cred())
 
-    with pytest.raises(codearts_events.UpstreamProtocolViolation, match="empty list"):
+async def test_client_fetch_models_propagates_upstream_failure():
+    """内置接口失败直接上抛（不再吞掉后合并福利目录兜底）。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"builtin down")
+
+    with pytest.raises(UpstreamHTTPError):
         await _client(handler).fetch_models(_cred())
 
-async def test_client_claim_benefit_and_quota_and_identity():
+async def test_client_identity_paths():
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == codearts_events.EP_BENEFIT_CLAIM:
-            return httpx.Response(200, json={"result": {"claimed": True}})
-        if request.url.path == codearts_events.EP_TOKEN_BALANCE:
-            return httpx.Response(200, json={"result": {"remaining": 42, "total": 100}})
         if request.url.path == codearts_events.EP_CALLER_IDENTITY:
             return httpx.Response(200, json={
                 "principal_id": "pid", "account_id": "acc",
@@ -518,10 +371,6 @@ async def test_client_claim_benefit_and_quota_and_identity():
         return httpx.Response(500, content=b"unexpected")
 
     client = _client(handler)
-    assert (await client.claim_benefit(_cred()))["result"]["claimed"] is True
-    quota = await client.probe_quota(_cred())
-    assert quota.remaining == pytest.approx(42 / 10000)
-    assert quota.total == pytest.approx(100 / 10000)
     assert await client.caller_identity(_cred()) == ("pid", "carol", "acc")
     assert await client.current_user(_cred()) == ("u", "n", "d")
 
@@ -530,79 +379,33 @@ async def test_client_claim_benefit_and_quota_and_identity():
 
     assert await _client(urnless).caller_identity(_cred()) == ("p", "", "a")
 
-async def test_client_probe_quota_attaches_credits_and_merges_ladder():
-    """探测顺带拉积分账：`credits_*` 挂在同一 Quota 上，积分到期并入阶梯。
+async def test_client_probe_quota_hits_only_statistics_endpoint():
+    """额度只读一个端点：`/snap-manager/v1/statistics/plugin`，带 PromptCenter 头。"""
+    calls: list[tuple[str, str]] = []
 
-    两本账是上游两个独立接口，合并后调度「窗口内到期额度多者先用」也会
-    先烧积分；主账（每日池）自己的阶梯不受影响，两段并存。
-    """
     def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == codearts_events.EP_STATISTICS_PLUGIN:
-            return httpx.Response(200, json={
-                "metrics": [{"name": "usageTotalPackageCredit",
-                             "package_credit_amount": 13500.0,
-                             "package_credit_remain": 13498.72},
-                            {"name": "usageBonusPackageCredit",
-                             "package_credit_amount": 13000.0,
-                             "package_credit_used": 1.28}],
-                "end_date": "2026-11-02"})
-        return httpx.Response(200, json={"daily_token_limit": 10000000,
-                                         "daily_tokens_used": 1000000})
+        calls.append((request.url.path, request.headers.get("Agent-Type", "")))
+        return httpx.Response(200, json={
+            "metrics": [{"name": "usageTotalPackageCredit",
+                         "package_credit_amount": 13500.0,
+                         "package_credit_remain": 13498.72},
+                        {"name": "usageBonusPackageCredit",
+                         "package_credit_amount": 13000.0,
+                         "package_credit_used": 1.28}],
+            "end_date": "2026-11-02"})
 
-    client = _client(handler)
-    quota = await client.probe_quota(_cred())
-    assert quota.remaining == pytest.approx(900.0)          # 主账：每日池
-    assert quota.credits_remaining == pytest.approx(13498.72)  # 第二本账：积分
-    assert quota.credits_total == pytest.approx(13500.0)
-    # 两段阶梯并存：每日池（次日 0 点）+ 积分（套餐到期日）
-    assert len(quota.expiry_ladder) == 2
-    # 积分那一段另留一份（供管理台按账本展示）：金额＝积分账剩余，且等于合并阶梯的
-    # 第二段——合并阶梯只多出每日池那一段。
-    assert quota.credits_expiry_ladder == [(quota.expiry_ladder[1][0],
-                                            pytest.approx(13498.72))]
-    assert quota.credits_expiry_ladder[0] == quota.expiry_ladder[1]
-    assert quota.expiry_ladder[0][0] == quota.cycle_end   # 第一段是每日池（次日 0 点）
-    # 积分分项包并入展示明细（主账不产 packages，故这里是合并而非覆盖）
+    quota = await _client(handler).probe_quota(_cred())
+    assert quota.remaining == pytest.approx(13498.72)
+    assert quota.total == pytest.approx(13500.0)
     assert [p["name"] for p in quota.packages] == ["福利积分"]
+    assert calls == [(codearts_events.EP_STATISTICS_PLUGIN, "PromptCenter")]
 
+async def test_client_probe_quota_propagates_upstream_failure():
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"down")
 
-async def test_client_probe_quota_credits_without_ladder_or_packages():
-    """积分账无到期日 / 无分项包时只挂 credits_*，不伪造阶梯或空明细。"""
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == codearts_events.EP_STATISTICS_PLUGIN:
-            return httpx.Response(200, json={
-                "metrics": [{"name": "usageTotalPackageCredit",
-                             "package_credit_amount": 100.0,
-                             "package_credit_remain": 40.0}]})
-        return httpx.Response(200, json={"remaining": 9})
-
-    client = _client(handler)
-    quota = await client.probe_quota(_cred())
-    assert quota.credits_remaining == pytest.approx(40.0)
-    assert quota.packages is None            # 无分项包 → 不塞空列表
-    # 主账（通用形状）本就不产阶梯；积分无 end_date 也不补 → 整条为 None
-    assert quota.expiry_ladder is None
-    assert quota.credits_expiry_ladder is None
-
-
-async def test_client_probe_quota_keeps_balance_when_credits_fail(caplog):
-    """积分接口挂了不得把整次探测判失败：每日池明明有额度，不能显示成未知。"""
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == codearts_events.EP_STATISTICS_PLUGIN:
-            return httpx.Response(500, content=b"down")
-        return httpx.Response(200, json={"daily_token_limit": 100,
-                                         "daily_tokens_used": 10})
-
-    client = _client(handler)
-    with caplog.at_level("WARNING"):
-        quota = await client.probe_quota(_cred())
-    assert quota.probe_failed is False
-    assert quota.remaining == pytest.approx(90 / 10000)
-    assert quota.credits_remaining is None and quota.credits_total is None
-    assert quota.expiry_ladder == [(quota.cycle_end, pytest.approx(90 / 10000))]
-    assert quota.credits_expiry_ladder is None
-    assert "积分余额拉取失败" in caplog.text
-
+    with pytest.raises(UpstreamHTTPError):
+        await _client(handler).probe_quota(_cred())
 
 async def test_client_probe_quota_never_refreshes_even_in_window():
     """额度探测只读余额：即使凭证已在刷新窗口，也不得消费一次性 refresh_token。
@@ -619,13 +422,16 @@ async def test_client_probe_quota_never_refreshes_even_in_window():
         if request.url.host == "sts.test":
             sts_calls += 1
             return httpx.Response(200, json=_token_response())
-        return httpx.Response(200, json={"remaining": 7})
+        return httpx.Response(200, json={
+            "metrics": [{"name": "usageTotalPackageCredit",
+                         "package_credit_amount": 100.0,
+                         "package_credit_remain": 7.0}]})
 
     client = _client(handler)
     expiring = _cred(refresh_token="rt", dpop_private_jwk=jwk,
                      expiration=int(time.time()) + 5)
     quota = await client.probe_quota(expiring)
-    assert sts_calls == 0 and quota.remaining == pytest.approx(7 / 10000)
+    assert sts_calls == 0 and quota.remaining == pytest.approx(7.0)
 
 async def test_client_refresh_token_rotates_via_sts():
     def handler(request: httpx.Request) -> httpx.Response:

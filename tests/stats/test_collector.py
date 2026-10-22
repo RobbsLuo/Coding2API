@@ -220,6 +220,24 @@ def test_record_publishes_redacted_row_after_commit(stats):
     # 广播的字段集与 /api/stats/events 一致：不含 credential_name（端点按角色补）
     assert "credential_name" not in row
     assert "prompt" not in row and "headers" not in row
+    # 派生速度列也在广播里：本行未带首字数据 → 不可测
+    assert row["tps"] is None and row["tps_visible"] is None
+
+
+def test_record_publishes_per_request_speed(stats):
+    """广播行自带逐请求速度（实时表那一列不查库）：规则与明细端点一致。"""
+    from src.stats.collector import StatsCollector
+
+    published: list[dict] = []
+    collector = StatsCollector(stats[0]._db, on_record=published.append)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     output_tokens=1000, reasoning_tokens=750,
+                     latency_ms=6000, ttfb_ms=1000)      # 生成 5.0s：总 200 / 正文 50
+    collector.record(username="u", provider="trae", model="m", ok=False,
+                     error_type="upstream_error", output_tokens=900,
+                     latency_ms=3000, ttfb_ms=1000)      # 失败请求不算
+    assert (published[0]["tps"], published[0]["tps_visible"]) == (200.0, 50.0)
+    assert (published[1]["tps"], published[1]["tps_visible"]) == (None, None)
 
 
 def test_record_without_callback_is_silent(stats):

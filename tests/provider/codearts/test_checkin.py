@@ -1,4 +1,4 @@
-"""CodeArts 福利领取与签到。"""
+"""CodeArts 每日签到。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,6 @@ import httpx
 
 from src.provider.codearts import CodeArtsProvider
 from src.provider.codearts import events as codearts_events
-from src.provider.codearts.client import BENEFIT_SEED
 from tests.provider.codearts._support import client as _client
 from tests.provider.codearts._support import cred as _cred
 
@@ -29,10 +28,6 @@ def _campaign(**over) -> dict:
     }
     base.update(over)
     return base
-
-def test_benefit_seed_is_lowercase_and_nonempty():
-    assert BENEFIT_SEED
-    assert all(model == model.lower() for model in BENEFIT_SEED)
 
 def test_events_daily_credit_campaign_picks_id_and_tolerates_shape():
     other = {"campaignId": 3, "title": "推荐码上有礼", "status": "ELIGIBLE"}

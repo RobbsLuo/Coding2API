@@ -81,8 +81,8 @@ _META_FIELDS = ("name", "credit_rate", "max_input_tokens", "max_output_tokens",
 # 展示排序权重：CodeBuddy / TRAE 优先，其余渠道（zen / kilo 等）在后；
 # 多渠道模型取所有渠道里的最小权重（含 CB 即进第一段）。
 _PROVIDER_RANK = {"codebuddy": 0, "codebuddy_intl": 1, "trae": 2, "qoder": 3,
-                  "codearts": 4}
-_UNRANKED_PROVIDER = 5
+                  "codearts": 4, "officeace": 5}
+_UNRANKED_PROVIDER = 6
 
 # 哨兵名：各上游自己的「自动路由 / 默认模型」占位，语义只在本渠道内成立，不跨
 # 渠道合并。kilo 的 `kilo-auto/free`（上游名 `Auto Free`）与 Qoder 的 `auto`
@@ -256,12 +256,6 @@ def _merge_provider(grouped: dict[str, dict[str, Any]],
             entry["name_keyed"].add(provider_id)
         meta = entry["meta"]
         provider_meta = {field: getattr(model, field) for field in _META_FIELDS}
-        # 福利标记单独记（**不**进 `_META_FIELDS`）：它是默认 False 的布尔，走
-        # 通用字段通道会让每个模型都多一个 `benefit: false`。只在为真时按渠道
-        # 记录；单渠道条目的顶层 `benefit` 在 `_entry_response` 里补（那时才
-        # 知道是不是单渠道——多渠道要按渠道分别判断，顶层标记会误导）。
-        if model.benefit:
-            provider_meta["benefit"] = True
         entry["provider_meta"][provider_id] = provider_meta
         for field in _META_FIELDS:
             # 空串按「未填」处理（`name`/`default_effort` 缺省为 ""）：先到的
@@ -543,8 +537,7 @@ def _entry_response(entry: dict[str, Any],
     多渠道模型额外给 `by_provider.{pid}`：各渠道倍率不同时前端按渠道分别
     展示；`raw_id` 一并透出，让用户能直接看到「选这个模型实际会发什么
     key」（kilo 的 `kilo-auto/free`、Qoder 的 `kmodel_latest`），排障不必
-    再翻服务端日志。福利标记 `benefit` 同路透出：多渠道放 `by_provider.{pid}`，
-    单渠道（无 `by_provider`）放顶层。
+    再翻服务端日志。
 
     `benchmarks` 非空时按对外 id 与展示名两路查能力分（唯一命中才带），
     查不到就不带该字段——调用方不传（默认 None）时行为与加该字段前完全一致。
@@ -571,16 +564,9 @@ def _entry_response(entry: dict[str, Any],
         detail: dict[str, Any] = {"raw_id": entry["raw_ids"][pid]}
         if meta["credit_rate"] is not None:
             detail["credit_rate"] = meta["credit_rate"]
-        if meta.get("benefit"):
-            detail["benefit"] = True
         by_provider[pid] = detail
     if len(entry["providers"]) > 1 and by_provider:
         result["by_provider"] = by_provider
-    elif any(meta.get("benefit") for meta in entry["provider_meta"].values()):
-        # 单渠道条目没有 `by_provider` 承载福利标记，放顶层（前端 `providerBenefit`
-        # 单渠道回退读它）。多渠道只能按渠道判断，顶层不置真，否则会把福利错标到
-        # 同条目的其它渠道上。
-        result["benefit"] = True
     score = lookup(benchmarks or {}, entry["id"], entry["meta"].get("name"))
     if score is not None:
         result["benchmarks"] = score

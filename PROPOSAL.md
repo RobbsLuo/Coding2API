@@ -1,14 +1,14 @@
 # Coding2API 设计文档
 
-把 **CodeBuddy**（国内站 `codebuddy` + 国际版 `codebuddy_intl`）、**TRAE SOLO**、**OpenCode Zen**、**Kilo Gateway**、**Qoder**、**CodeArts** 七个上游渠道封装为 OpenAI 兼容 API，提供公共凭证池、统一模型名与调度、按人用量统计。
+把 **CodeBuddy**（国内站 `codebuddy` + 国际版 `codebuddy_intl`）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce** 八个上游渠道封装为 OpenAI 兼容 API，提供公共凭证池、统一模型名与调度、按人用量统计。
 
 > 现状文档：只记录仍然成立的目标、上游事实、架构与约束。实现细节见 [TECHNICAL.md](TECHNICAL.md)，使用与部署见 [README.md](README.md)。
 
 ## 1. 目标与非目标
 
-**目标**：单一 OpenAI 兼容出口后挂七个上游，支持 `模型@渠道` 精确指定；凭证由 admin 集中维护、全员共享，调度器自动挑健康号、上游死亡自动冷却；按人统计用量（请求数 / 成功率 / token / 耗时 / 首字延迟）与估算成本。
+**目标**：单一 OpenAI 兼容出口后挂八个上游，支持 `模型@渠道` 精确指定；凭证由 admin 集中维护、全员共享，调度器自动挑健康号、上游死亡自动冷却；按人统计用量（请求数 / 成功率 / token / 耗时 / 首字延迟）与估算成本。
 
-**非目标（明确不做）**：**不做配额/限流**（上游是订阅制通道，成本不随 token 线性增长；小规模团队靠统计页可见性约束滥用）；**不做通用 provider 网关**（只硬编码上述七个上游，不做插件系统）；**不做货币换算**（上游积分单位互不通用，分开记录）；不做旧项目数据迁移、不做自更新脚本、不做 mTLS。
+**非目标（明确不做）**：**不做配额/限流**（上游是订阅制通道，成本不随 token 线性增长；小规模团队靠统计页可见性约束滥用）；**不做通用 provider 网关**（只硬编码上述八个上游，不做插件系统）；**不做货币换算**（上游积分单位互不通用，分开记录）；不做旧项目数据迁移、不做自更新脚本、不做 mTLS。
 
 ## 2. 上游可行性核实
 
@@ -37,11 +37,11 @@
 
 ### 2.4 CodeArts（`codearts`，真实账号）
 
-- 域：snap 引擎 `snap-access.cn-north-4.myhuaweicloud.com`、STS `sts.cn-north-4.myhuaweicloud.com`、福利网关 `opengw.developer.huaweicloud.com`、门户 `codearts.huaweicloud.com`。聊天 `POST /api/v2/chat/completions`（福利模型追加头 `maas_type: benefit`）；鉴权为华为云 **`SDK-HMAC-SHA256`**（AK/SK + `X-Security-Token`）。OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens` 换 AK/SK/security_token/refresh_token。模型内置 `GET {snap}/v1/model/builtin`（头 `Agent-Type: PromptCenter`）；福利 `GET {opengw}/api/v1/gateway/config`；领取 `POST /api/v1/benefit/claim`；余额 `GET /api/v1/user/tokens/balance`（每日池）；积分账 `GET {snap-manager}/v1/statistics/plugin`（头 `Agent-Type: PromptCenter`）。
+- 域：snap 引擎 `snap-access.cn-north-4.myhuaweicloud.com`、STS `sts.cn-north-4.myhuaweicloud.com`、门户 `codearts.huaweicloud.com`。聊天 `POST /api/v2/chat/completions`；鉴权为华为云 **`SDK-HMAC-SHA256`**（AK/SK + `X-Security-Token`）。OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens` 换 AK/SK/security_token/refresh_token。模型 `GET {snap}/v1/model/builtin`（头 `Agent-Type: PromptCenter`）；额度 `GET {snap}/snap-manager/v1/statistics/plugin`（头 `Agent-Type: PromptCenter`）。
 - **令牌刷新是刚性的**：`refresh_token` 与 `client_id=codearts-agent` + DPoP 私钥三者绑定、**一次性**，刷新走 **DPoP ES256/P-256**，刷后必须回写新 `refresh_token`，由 token 预刷新任务独占轮转。续期凭据被上游作废时标记「需重新登录」并停止自动重试。
 - **每日签到**：`GET {snap}/v1/ops/delivery?channel=IDE` → `POST /v1/ops/claim`（`{campaignId:1, idempotentKey, channel:"IDE"}`）→ `POST /v1/ops/confirm`（`{campaignId:1}`）；**`/v1/ops/*` 挂在 snap 引擎根、不带 `snap-manager` 前缀**。`status` 四态必须区分：`ELIGIBLE`→claim+confirm；`CLAIMED`（已领未确认，非终态）→只补 confirm；`CONFIRMED`/`CONSUMED`→已签不写。**claim 时积分即到账**，confirm 只推进状态；业务码走 HTTP 200，不能只看状态码。
-- **单位折算**：上游余额按 token 计量（每日池 1000 万），统一折算为积分，**1 积分 = 10000 token**。该「积分」是为跨渠道排序合成的折算值，与上游签到/套餐积分同名不同物。**积分与每日 token 池是两套并行的账**：token 池给福利模型用，签到积分给系统内置模型用。**两本账都探测并展示**：`GET {snap}/snap-manager/v1/statistics/plugin`（前缀必带 `snap-manager`）的 `usageTotalPackageCredit` 进 `credentials.quota_credits_*`，分项包（基础/按需/福利）走 `quota_packages` 明细，套餐 `end_date` 登记到期阶梯（积分用不完作废，故也参与「快过期的先用」）；积分账**不参与调度口径的 health**（选号仍按每日池），管理台内置组另用派生的 `quota_credits_health` 让健康度与该组额度同源。**福利模型单请求扣池**：上游 usage 缺额度字段时按「输入 + 输出 token」补 `credit` 并标 `credit_estimated`（展示加 ≈）。
-- **凭证页把 CodeArts 拆成两个渠道**（纯前端展示拆分，后端仍一个 `codearts` provider）：**CodeArts 内置**（可写，承载全部操作与积分账）与 **CodeArts 福利**（只读，只展示每日 token 池），同一批账号各出现一次，**每组只讲一本账**（内置组额度列＝积分账、流水读 `ledger=credits`；福利组＝每日池）。**到期积分也按账本拆**：积分那一段另存 `quota_credits_expiry_ladder`（选号仍读两本账合并的 `quota_expiry_ladder`），管理台 `quota_expiring_credits` ＝「合并阶梯 − 积分账段」＝每日池段、`quota_credits_expiring` ＝积分账段，福利 / 内置两组各显各的。**为什么不在后端真拆**：`refresh_token` 一次性且与 `client_id` + DPoP 私钥绑定，两条凭证行会各刷一次、第二条必报 `the refresh token has been used` 并烧掉票据。两本账的区分轴是**模型**（`is_benefit_model()` 逐请求判断），不是渠道。
+- **额度＝积分**：额度探测打 `GET {snap}/snap-manager/v1/statistics/plugin`（前缀**必带** `snap-manager`，头 `Agent-Type: PromptCenter`）——内置模型（GLM-5.2 / OpenPangu 等）按积分计费，这是本渠道唯一的额度来源。上游数值本身即积分，**不做任何单位折算**；`usageTotalPackageCredit` 直接进 `quota_remaining` / `quota_total`，分项包（基础/按需/福利）走 `quota_packages` 明细，套餐 `end_date` 登记到期阶梯（积分用不完作废，故也参与「快过期的先用」）。签到发的积分也计入这本账。
+- **凭证页一个渠道一个组**（后端始终是单个 `codearts` provider）：额度列＝积分账，变动流水读 `ledger=credits`。**不拆成两条凭证行**：`refresh_token` 一次性且与 `client_id` + DPoP 私钥绑定，两条凭证行会各刷一次、第二条必报 `the refresh token has been used` 并烧掉票据。
 - **并发上限**：上游硬限**每账号每约 60s 最多 3 个会话**，超出即 `400 TM.00001041`；配在途上限 `CODEARTS_MAX_CONCURRENCY` 与滑动窗口 `CODEARTS_REQUEST_WINDOW_SECONDS`。流式 `text` 是**累计全文（替换语义）**，解析层还原为增量事件。
 - **流内业务错误分类**：业务错误内嵌在 HTTP 200 的 SSE 里（`InferHub.<码>`），由 executor 转成冷却 + 轮换。分类统一由 `Event.error_kind` 承载，`UpstreamStreamError.kind()` 与 `executor._event_kind` 共用 `provider.base.event_error_kind` 兜底（缺失 → `OTHER`），避免两处各写一份而漂移。非多模态模型收到图片（`InferHub.001001020.406 The request model is not multimodal`）归 `REQUEST`：请求侧错误不冷却、不累计、不落库，仍换号重试。
 
@@ -52,12 +52,12 @@
 - **免费模型清单完全动态**：免鉴权 `/zen/v1/models` 返回全部模型（含付费）且不带免费标记，唯一权威信号是匿名可用性（付费恒 401 `Missing API key.`），按 `-free` 后缀收窄 + 并发探活只留 2xx，判活按 30 分钟缓存；免费模型标 **x0 倍率**（`credit_rate=0.0`）。服务层列表拉取**连续失败按 2^(n-1)×TTL 退避重试**（封顶 2h、成功即清零），日志首次 WARNING 其后降 INFO——上游按出口 IP 长期拦截时不至每 5 分钟重探十几秒再刷一条同样的告警。
 - **凭证用虚拟凭证行**：无凭证/无额度接口，`probe_quota` 恒 `probe_failed=True` → health「未知」而非耗尽；删除后重启复活，永久停用请用「暂停」。401 归 `INVALID`；**403 FreeTierError 抖动在客户端内退避重试一次**，否则单虚拟凭证下 REQUEST 类错误会耗尽轮换预算、直接 503。
 
-### 2.6 Kilo Gateway（`kilo`，虚拟凭证）
+### 2.6 Kilo（`kilo`，虚拟凭证）
 
 - 端点 `https://api.kilo.ai/api/gateway`，`/chat/completions` + `/models`。**标准 OpenAI 兼容**，无私有信封、无门禁伪装。**免费模型有权威标记**：`/models` 每条带 `isFree` 布尔，据此直接过滤、**不做探活**（探活会真发推理、白耗网关级约 200 req/h/IP 的极小配额）；免费模型标 **x0 倍率**。思考字段是 **`delta.reasoning`**（不是 Zen 的 `reasoning_content`）。凭证用虚拟凭证行（同 Zen）。
 - 错误分类：401→`INVALID`、400/404/422→`INVALID`、403→`REQUEST`、**429 与 502/503/504→`MODEL`（模型级冷却）**——实测 429/5xx 点名具体模型、同批其他免费模型仍 200，归账号级会因单模型问题冷却整条渠道；本包不自建熔断。
 
-### 2.7 CodeBuddy 国际版（`codebuddy_intl`）
+### 2.7 CodeBuddy 国际（`codebuddy_intl`）
 
 - 端点 `https://www.codebuddy.ai`。**与国内站同协议**（同一套 `/v2/chat/completions`、`/v3/config`、`/v2/plugin/auth/*`、`/v2/billing/*` 路径，同一 Keycloak realm），但是**两套独立账号体系**（各自注册、各自计费），故作为独立渠道存在。**为什么不是「改环境变量切站点」**：`CODEBUDDY_API_ENDPOINT` 是进程级单值，切过去会让所有存量国内站凭证立刻打到国际站（额度错配 / 403）；两站可同时持有凭证，各走各的端点、节流器与登录流程。
 - **白名单刻意互不含**：`CODEBUDDY_INTL_ALLOWED_ENDPOINTS` 默认只有国际站主机，**不含**国内站主机。两站 Token 由不同网关签发，跨站发送即凭证泄露，填错会在**启动时**报错。
@@ -65,16 +65,35 @@
 - **模型列表按套餐探活**：上游 `/v3/config` 返回全量模型，免费号也会看到 `gpt-5.5` / `gpt-5.6-luna` 等调用时才回 `400 / 11158` 的模型。国际站列表用当前刷新凭证逐个发一次最小请求（只读状态行即断开），只保留可用模型；`11158`（套餐不允许）与 `11102`（无此模型）剔除，`429` / 5xx / 超时等不确定结果**保留模型**。结论按账号缓存 6 小时。
 - **唯一协议行为差异：首条 system 强制注入**——国际站网关要求 `messages[0]` 是 system，否则整单 400 + `{"code":11128,"msg":"first message is not system prompt"}`；国内站无此要求。同名模型在两站是**一条**、同时挂两个渠道。
 
-### 2.8 冲突与陷阱
+### 2.8 OfficeAce（`officeace`，真实账号）
+
+- 端点：控制面 `https://agentarts.cn-southwest-2.myhuaweicloud.com`（OAuth + 开通校验），模型网关 `modelgw-XXXX.officeace.*` **每账号一个**、由 `client-permission-validate` 下发并存在凭证里——故它不进配置、也不进白名单（那是本服务写不错的值）。
+- **两套凭据、两套签名、两种寿命**（本渠道最容易踩错的地方）：
+  | 凭据 | 寿命 | 用途 | 签名 |
+  |---|---|---|---|
+  | `Basic model_app_key:model_app_secret` | 不过期 | 聊天（`{网关}/v2/chat/completions`） | HTTP Basic |
+  | 临时 AK/SK + `security_token` + `project_id` | 约 2h | 积分 / 签到 / 费率（`/v1/subscription*`、`/v1/model-token-rates`） | `V11-HMAC-SHA256` |
+  | 同上，打控制面（`/v1/claw/*`） | 同上 | 开通校验 | `SDK-HMAC-SHA256` |
+  混用得 `APIG.0303 app not found`；丢失区别的现象是「聊天正常但积分空白、签到一直失败」。
+- **V11 的三个必须原样**（写错任一处恒 401 `verify ak sk signature fail`，已逐项实测对照）：① 派生密钥外层 key=AK、msg=SK；② `HMAC(HMAC(AK,SK), scope+0x01)[:32]` 要转 **hex 文本** 当下一轮密钥；③ **不要**加 `X-Sdk-Content-Sha256` 头（多一个签名头即失败）。另：query 必须参与签名，`CanonicalURI` 每段 percent-encode 且末尾补 `/`。
+- **登录（poll 轨道）**：`POST /v1/claw/auth/state` 取云端 state → 本地生成 PKCE + DPoP → 用户浏览器登录授权 → `GET /v1/claw/auth/code?state=` 轮询取码（202 = 还没登完）→ STS `POST /v1/oauth2/tokens` 换临时 AK/SK → `client-permission-validate` 取网关与 app key。**回调由云端承接，本服务不监听端口、也不需要粘链接**。`client_id=pdp5_for_agentarts`，refresh_token 与 CodeArts 的**互不通用**（混用回 `STS5.1806 invalid client id`），故 OAuth 与凭证类型独立实现，只复用 `codearts/dpop.py` 的 ES256 低 S 签名原语。
+- **未开通的账号要可行动**：`subscription: null` 时给「请先在 OfficeAce 客户端兑换邀请码完成开通」，而不是含糊的登录失败。
+- **三种上游特例**：① 限流走**伪 200**（HTTP 200 + `data:{"error":…}`，也出现过首帧正常、第二帧才错）；② `81004`/`81009` 走 403/404 但属**模型级**，业务码判定必须先于状态码，否则会把整条凭据打死；③ `max_tokens` 是「推理 + 正文」总预算，`≥16` 追加 1024 再夹到模型硬上限（`glm-5*` 131072 / `qwen3*` 65536 / `deepseek-v4.1-flash` 393216），`<16` 原样透传，未给不补。
+- **积分即主账**：单位 `officeace_points`（新用户一次性 + 每日签到），**没有并行的 token 池**，故 `Quota.remaining`/`total` 直接是积分；每笔奖励独立到期，口径写「逐笔到期」。签到 `POST /v1/subscription/bonus/claim` 是**写操作**（调用即真发积分），body 必须给 {} + JSON `Content-Type`（空 body 会 500 `OfficeAce.11020001`），上游对当日重复领取幂等；收获按 `bonus_skus` **剩余量增量**计算（`points` 是活动累计发放量，由多渠道共同贡献）。
+- **不做主动模型探活**：目录 34 个里实测仅 11 个可用，探活要真发推理、消耗积分，改由真实请求按 `BLOCKED` 负缓存（成功即撤销）。**不做 credit 估算**：`cost_coefficient` 与 `tokens_per_point` 的叠乘关系官方未说明，折算会与真实扣点对不上。
+- **单账号单用户**：官方《套餐管理》原文「个人版面向个人用户，**限制单账号单用户使用**」，故不做多人共享，每人各加自己的凭证。
+
+### 2.9 冲突与陷阱
 
 | 问题 | 事实 | 对策 |
 |---|---|---|
 | 模型 ID 撞车 | 多渠道都有 `glm-5.2`、`DeepSeek-V4-Pro`、`kimi-k3` 等 | 扁平名 + 归一键合并 + 健康度路由 + `@渠道` 后缀 |
-| 积分语义不同 | CB/Qoder/CodeArts 有周期会重置；TRAE 各权益包独立到期 | 健康分统一为百分比；展示层标注周期语义 |
-| credit 可得性 | CB 有 per-request；TRAE 只有账户总额 | 统计表 credit 可空；TRAE 按官方单价、CodeArts 福利模型按每日池 1:1 推算并标 `credit_estimated` |
-| 登录机制 | CB/Qoder/CodeArts 轮询或粘贴（后端出网）；TRAE 浏览器回调 | 三轨（poll / callback / paste），回调统一走主端口 |
+| 积分语义不同 | CB 有周期会重置；TRAE / CodeArts 各自权益包独立到期 | 健康分统一为百分比；展示层标注周期语义 |
+| credit 可得性 | CB 有 per-request；TRAE 只有账户总额 | 统计表 credit 可空；TRAE 按官方单价推算并标 `credit_estimated` |
+| 登录机制 | CB/Qoder/CodeArts/OfficeAce 轮询或粘贴（后端出网）；TRAE 浏览器回调 | 三轨（poll / callback / paste），回调统一走主端口 |
+| 同一厂商两套票 | OfficeAce 与 CodeArts 同属华为云 STS，但 client_id 不同，refresh_token 互不通用（混用回 `STS5.1806`） | 各自独立实现 OAuth 与凭证类型，只复用 DPoP 签名原语 |
 | 上游 SSE 格式变更 | 各渠道 SSE 形状不同 | 各渠道解析成中立事件；样本存 fixture 做契约测试 |
-| 图片能力标志不可信 | 七渠道出站均为 OpenAI `image_url` 内容块原样透传，上游全部接受（实测 2026-10-15）；而模型目录的 `supportsImages` 与实际行为不一致（CB `glm-5.0` 标 false 却能识图；`hunyuan-chat` 标 false 却接受并自行降级） | 入站统一归一为 `image_url` 透传，**不做模型能力门禁**，能否识图交上游裁决 |
+| 图片能力标志不可信 | 八渠道出站均为 OpenAI `image_url` 内容块原样透传，上游全部接受（实测 2026-10-15）；而模型目录的 `supportsImages` 与实际行为不一致（CB `glm-5.0` 标 false 却能识图；`hunyuan-chat` 标 false 却接受并自行降级） | 入站统一归一为 `image_url` 透传，**不做模型能力门禁**，能否识图交上游裁决 |
 
 ## 3. 架构
 
@@ -82,7 +101,7 @@
 
 一个 FastAPI 进程内按**三个平面**组织，三面共享同一份 SQLite（WAL + `busy_timeout=5000`：账号 / 加密凭证 / 统计 / 审计）与 Provider 客户端：
 
-- **请求面**（鉴权 = API Key）：`/v1/chat/completions` · `/v1/responses` · `/v1/messages` · `/v1/models` · `/v1/user/balance` → 协议层（OpenAI / Responses / Anthropic 规范化与适配、模型名解析 `name` ｜ `name@provider`）→ 执行引擎（调度器 · 冷却状态机 · 会话粘性 · 截断续写 · 统计采集）→ 中立事件流 → 七个 Provider。
+- **请求面**（鉴权 = API Key）：`/v1/chat/completions` · `/v1/responses` · `/v1/messages` · `/v1/models` · `/v1/user/balance` → 协议层（OpenAI / Responses / Anthropic 规范化与适配、模型名解析 `name` ｜ `name@provider`）→ 执行引擎（调度器 · 冷却状态机 · 会话粘性 · 截断续写 · 统计采集）→ 中立事件流 → 八个 Provider。
 - **管理面**（鉴权 = 会话 Cookie + RBAC）：React 管理台 → `/api/*`，含用户管理、审计、凭证运维、API Key、统计、任务与配置、上游状态、模型列表。
 - **后台面**（无 HTTP 入口，`TaskRunner` 起 11 类循环）：额度探测 · token 预刷新 · 每日签到 · 成长中心 · 活跃上报 · 明细清理 · 数据库备份 · 渠道模型列表刷新 · 模型目录刷新（OpenRouter）· 运维告警 · 上游状态页聚合 → Provider 客户端 → 上游。
 
@@ -105,7 +124,7 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 **为什么冷却分「账号级」与「模型级」两层**：上游拒绝语义不都是账号级问题——`429 + 6004` 是「这个模型在当前账号上用超了」，`400/404 + 11102` 是「当前账号没有这个模型」。一律记账号级会让一次模型级限流把整个账号踢出池。故账号级写 `credentials.cooling_until`，模型级另建 `credential_model_cooldowns`；账号级冷却出现时清空该凭证的模型级条目，防「切模型」绕过。业务码识别只认 `"code": N` 键值形态，不搜裸数字。冷却时长：`PLAN` 12h、`SOFT` 60s（不累计）、`OTHER` 连续 3 次→10m、`MODEL` 600s 起翻倍封顶 2h、`BLOCKED`（无此模型负缓存）6h 起翻倍封顶 24h、`CONCURRENCY` 固定 60s（不翻倍）、`CREDIT` 冷却到次日 04:00。**传输层失败归 `SOFT`**：`httpx.TransportError`（连接超时 / 写请求体超时 / 读超时）与 `UpstreamTransportError` 统一在 `executor._classify` 兜住——这类异常从 `client.stream()` 的 `__aenter__`、`aiter_bytes()`、写请求体等多个位置抛出，逐点包装必漏，集中在一处才不会让「链路瞬态」逃成 `internal_error` 帧（逃逸后既不换号也不冷却、不记账）。刻意不泛化到 `OSError` / `ConnectionError`：磁盘满、句柄耗尽也是它们的子类，误判会去冷却一个完全健康的凭证。**上游给出的重置时刻可覆盖上述常量**：响应头 `Retry-After`（整秒 / HTTP-date）或 `Try again in 17h 59m` 这类文本经 `parse_retry_after` 解析后，按该错误分类的作用域写入冷却，并**双端钳制**在 `[now + 该 ErrKind 现有常量, now + 24h]`——上游给 0 或过去时刻回落常量，否则一个 `Retry-After: 0` 就能把所有号瞬间打爆。无该头时行为与常量完全一致。
 
-**为什么是「窗口内积分总量」而不是「是否即将过期」**：实测 CodeBuddy 额度不是整块周期，而是几十个各自独立到期的小包（每日 100 积分 × N），只存一个日期没有区分度。四个取舍：① 统计窗口内的到期积分总量，账号之间才有可比高低；② **落库到期阶梯**（`[(到期 epoch, 包剩余积分)]`）而非预计算数字，窗口是运行时参数，改阈值立刻生效；③ 过滤条件必须是 `end > now` 且排除已用完的包（上游会把已过期套餐一起返回）；④ **两级窗口**，只比 36h 会大量账号同为 0、排序退化成健康度。主窗口 `≤0` 等于关闭整套到期排序。TRAE 的权益包各自独立到期，同构填 `expiry_ladder`；CodeArts 每日池登记为「次日本地 0 点到期」。**展示与调度指标分开存**：`quota_packages`（含包名/用量，仅展示）与 `quota_expiry_ladder`（只有 `[到期, 剩余]`，选号指标）。
+**为什么是「窗口内积分总量」而不是「是否即将过期」**：实测 CodeBuddy 额度不是整块周期，而是几十个各自独立到期的小包（每日 100 积分 × N），只存一个日期没有区分度。四个取舍：① 统计窗口内的到期积分总量，账号之间才有可比高低；② **落库到期阶梯**（`[(到期 epoch, 包剩余积分)]`）而非预计算数字，窗口是运行时参数，改阈值立刻生效；③ 过滤条件必须是 `end > now` 且排除已用完的包（上游会把已过期套餐一起返回）；④ **两级窗口**，只比 36h 会大量账号同为 0、排序退化成健康度。主窗口 `≤0` 等于关闭整套到期排序。TRAE 的权益包各自独立到期，同构填 `expiry_ladder`；CodeArts 的积分包按各自的套餐 `end_date` 登记到期。**展示与调度指标分开存**：`quota_packages`（含包名/用量，仅展示）与 `quota_expiry_ladder`（只有 `[到期, 剩余]`，选号指标）。
 
 **健康度归一化**：`known(0-100) | unknown | exhausted`。CB 取 `CycleCapacityRemainPrecise`/`CycleCapacitySizePrecise`，TRAE 取 `credits_limit - credits_amount` / `credits_limit`。**不用响应顶层的 `TotalDosage`**：它 = Σ(size − CapacityUsed)，而 `CapacityUsed` 是上周期口径，本周期消耗记在 `CycleCapacityUsed`/`CycleCapacityRemain`，用它会出现 `remaining == total`、健康度恒 100。**为什么必须三态**：探测失败被算成 0 分会让这类凭证在有健康号时永远轮不到。
 
@@ -113,7 +132,7 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 ### 3.4 模型名三字段
 
-七条渠道每个模型统一为三个字段，同一条链派生：**原代号**（`raw_id`，渠道请求时真正发的 key，**永不改动**，转发时经别名表换回）、**归一键**（剥掉免费档标记 `-free` / 路径段 `free`、新版标记 `-new` 与命名空间前缀后 slug 化，模型列表按它判断同一模型并合并）、**展示名**（`name`，清洗后的可读文本，上游可读名优先、无则由原代号派生、品牌缩写按官方写法纠正）。
+八条渠道每个模型统一为三个字段，同一条链派生：**原代号**（`raw_id`，渠道请求时真正发的 key，**永不改动**，转发时经别名表换回）、**归一键**（剥掉免费档标记 `-free` / 路径段 `free`、新版标记 `-new` 与命名空间前缀后 slug 化，模型列表按它判断同一模型并合并）、**展示名**（`name`，清洗后的可读文本，上游可读名优先、无则由原代号派生、品牌缩写按官方写法纠正）。
 
 **合并键 = 归一键**；`/v1/models` 对外 `id` 一律是归一键，原代号进 `by_provider.{渠道}.raw_id`；**原代号、展示名、归一键三种写法都能直接请求**。同模型异名由显式规范表 `MODEL_SYNONYMS` 收敛（键与展示名一起），**只登记人工核实的等价、不做模糊匹配**。哨兵名（`auto` / `default`）语义只在本渠道内成立，不跨渠道合并；同渠道内归一键重复或对外 id 撞车时退回原代号 / 加后缀。黑名单按**归一后的对外写法**匹配（原代号、其归一键、展示名、展示名归一键四种任一命中即滤）。
 
@@ -165,7 +184,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 **12 张表**，`SCH
 
 ## 5. API 契约
 
-**外部（API Key 鉴权）**：`POST /v1/chat/completions`（流式 + 非流式，`n` 只接受 1——出口结构只能产生单个 choice，其余值 400 `invalid_request`）；`POST /v1/responses`（Responses 子集，Codex CLI）；`POST /v1/messages` 与 `POST /v1/messages/count_tokens`（Anthropic Messages 子集，`count_tokens` 本地估算不转发上游）——三者共用同一调度链路；`GET /v1/models`（对外 `id` 为归一键 + `name` + `providers` + `by_provider.{渠道}.{raw_id, credit_rate, benefit}` + 可选 `benchmarks` / `cost`（`input`/`output`/`cache_read`，USD/1M，缺价不带该字段）/ `reasoning_efforts`（该渠道生效档位去重集合，未配置不带）；`benefit` 标福利模型，单渠道在顶层；自定义别名条目另带 `custom_alias: true`）；`GET /v1/models/{id}`（单模型查询，`:path` 容纳带命名空间的渠道原代号；对外 id / 展示名 / 任一渠道原 id / 自定义别名四种写法、大小写不敏感；不存在**或不在该 Key 模型白名单内**一律 404 + `model_not_found`，不泄露池中模型）；`GET /v1/usage?days=1|7|30`（自助用量：只查**该 Key 自己**的本地明细，不触发上游，返回 `requests/ok/failed/token/cost_usd` + `limits`/`remaining`/`rate`/`resets_at`，不含凭证 id、昵称或池级信息）；`GET /v1/user/balance`（DeepSeek 兼容余额，读探测缓存聚合，不实时打上游）；`GET /health`（纯存活）、`GET /healthz`（存活 + 凭证池五类计数，无鉴权）、`GET /metrics`（Prometheus text 格式指标，默认开、无鉴权，`METRICS_ENABLED=false` 关闭）。
+**外部（API Key 鉴权）**：`POST /v1/chat/completions`（流式 + 非流式，`n` 只接受 1——出口结构只能产生单个 choice，其余值 400 `invalid_request`）；`POST /v1/responses`（Responses 子集，Codex CLI）；`POST /v1/messages` 与 `POST /v1/messages/count_tokens`（Anthropic Messages 子集，`count_tokens` 本地估算不转发上游）——三者共用同一调度链路；`GET /v1/models`（对外 `id` 为归一键 + `name` + `providers` + `by_provider.{渠道}.{raw_id, credit_rate}` + 可选 `benchmarks` / `cost`（`input`/`output`/`cache_read`，USD/1M，缺价不带该字段）/ `reasoning_efforts`（该渠道生效档位去重集合，未配置不带）；自定义别名条目另带 `custom_alias: true`）；`GET /v1/models/{id}`（单模型查询，`:path` 容纳带命名空间的渠道原代号；对外 id / 展示名 / 任一渠道原 id / 自定义别名四种写法、大小写不敏感；不存在**或不在该 Key 模型白名单内**一律 404 + `model_not_found`，不泄露池中模型）；`GET /v1/usage?days=1|7|30`（自助用量：只查**该 Key 自己**的本地明细，不触发上游，返回 `requests/ok/failed/token/cost_usd` + `limits`/`remaining`/`rate`/`resets_at`，不含凭证 id、昵称或池级信息）；`GET /v1/user/balance`（DeepSeek 兼容余额，读探测缓存聚合，不实时打上游）；`GET /health`（纯存活）、`GET /healthz`（存活 + 凭证池五类计数，无鉴权）、`GET /metrics`（Prometheus text 格式指标，默认开、无鉴权，`METRICS_ENABLED=false` 关闭）。
 
 **管理台（会话 Cookie + RBAC）**：凭证管理、API Key 管理（含 Key 级配额 `quota`：日请求 / 日 token / 日成本 / RPM / TPM / 并发，`0`=不限；超限 429 + `Retry-After`，判定异常一律**放行**并记 warning）、用量统计（`/api/stats/*`）、Playground、模型列表（operator，含 `GET /api/models/availability` 疑似下线只读视图）、用户管理（admin-only）、审计日志（admin-only）、运维告警（admin-only）、上游状态（operator）、任务与配置（admin-only）、**服务端日志（admin-only，只读）**。
 
@@ -175,7 +194,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 **12 张表**，`SCH
 - 运行时配置与任务运行态：`GET|PUT /api/settings` + `GET /api/tasks` + `POST /api/tasks/{key}/run`（手动跑一轮）。列表端点接受统一 `sort`（白名单键）+ `order`（`asc`/`desc`）；未知键 / 非法值回落到默认，不报错。回调（无鉴权）：`GET /authorize`。
 - 运维告警：`GET /api/alerts`（倒序回看，分页）+ `POST /api/alerts/{id}/resolve`（人工标记一条已恢复，admin + CSRF + 审计；用于规则已下线 / 误报等状态机无法自动判定的情况）。后台正常路径会在规则不再命中时自动写 `resolved_at`，且 `AlertTask` 启动时从库里未恢复的行重建「告警中」集合，重启后仍能自愈。
 - 上游状态聚合：`GET /api/upstream-status`（operator）返回后台任务抓取的内存快照（`summary` + `sources`）与任务的当前 `enabled` / `interval_seconds` / `server_time`；**不落盘**，重启后为「尚未抓取」。四种解析器（Statuspage v2 / OpenCode / Better Stack / Atom）归一化到六档，加源只需在 `SOURCE_SPECS` 加一行。
-- 用量统计：`GET /api/stats/{overview,by-provider,by-model,by-user,by-credential,timeline,model-timeline}`（分组表的延迟列可选 P50/P90/P95/P99 四档，默认 P95；`p95_*` 字段与排序键保持兼容）、`GET /api/stats/errors`（**失败归因**：窗口内 `ok=0` 明细按 `(provider, model, error_type)` 分组计数 + 最近失败时刻，`limit` ≤ 5000）、`GET /api/stats/events`（rowid 游标 / LIMIT-OFFSET 双模式，`provider`/`model`/`credential_id` 钻取过滤，`ok=0` 只看失败，`?format=csv` 导出）、`GET /api/stats/events/stream`（**SSE 实时明细**：`StatsCollector.record` 事务提交后由进程内 `LiveEventHub` 广播刚写入的行，不轮询数据库；每订阅者有界缓冲 200 条、并发上限 8 超出回 429 + `Retry-After`；15s 注释帧保活，`Cache-Control: no-store` + `X-Accel-Buffering: no`；作用域/过滤在订阅者侧逐条判定，与 `/api/stats/events` 同口径）。
+- 用量统计：`GET /api/stats/{overview,by-provider,by-model,by-user,by-credential,timeline,model-timeline}`（分组表的延迟列可选 P50/P90/P95/P99 四档，默认 P95；`p95_*` 字段与排序键保持兼容；另有输出速度 `tps_visible`（正文）/ `tps`（总产出含思考）/ `tps_estimated` 列，排序键 `tps_visible` / `tps`）、`GET /api/stats/errors`（**失败归因**：窗口内 `ok=0` 明细按 `(provider, model, error_type)` 分组计数 + 最近失败时刻，`limit` ≤ 5000）、`GET /api/stats/events`（rowid 游标 / LIMIT-OFFSET 双模式，`provider`/`model`/`credential_id` 钻取过滤，`ok=0` 只看失败，每行带逐请求速度 `tps` / `tps_visible`、排序键同名，`?format=csv` 导出）、`GET /api/stats/events/stream`（**SSE 实时明细**：`StatsCollector.record` 事务提交后由进程内 `LiveEventHub` 广播刚写入的行，不轮询数据库；每订阅者有界缓冲 200 条、并发上限 8 超出回 429 + `Retry-After`；15s 注释帧保活，`Cache-Control: no-store` + `X-Accel-Buffering: no`；作用域/过滤在订阅者侧逐条判定，与 `/api/stats/events` 同口径）。
 - 服务端日志：`GET /api/logs?limit=`（默认 200，上限 = 缓冲容量）+ `GET /api/logs/stream`（SSE，先回放缓冲再推实时，按 `seq` 去重）。**只读**、admin-only；`LOG_BUFFER_LINES=0` 时两端点均 404。只收本进程 `logging` 记录，不读文件；每行发出前过脱敏白名单。
 - 侧栏数据提醒：`GET /api/nav-badges` 一次返回侧栏各项的待办计数（凭证需重登/耗尽、未恢复告警、上次失败任务、异常上游源、待激活账号、本人将到期 Key、模型目录陈旧）。**按角色裁剪 payload**——缺失的键 = 无权看（admin-only 的告警/任务/用户不下发给 operator/viewer，operator 的上游/目录不下发给 viewer）；这是聚合端点，**不做整体 403**（viewer 也要看自己的 API Key）。各计数与对应页面数据**不是同一口径**：只数「待办」（如告警只数 `resolved_at IS NULL`、任务用「上次失败」而非「连续失败达阈值」）。
 
@@ -206,7 +225,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 **12 张表**，`SCH
 | 上游 SSE / 私有协议格式变更 | 中 | 各 provider 的 SSE 样本存 fixture 做契约测试；解析失败不静默 |
 | 模型 ID 撞车导致路由错误 | 中 | 扁平名 + 归一键合并 + `@渠道` 后门；统计行强制带 provider 字段 |
 | 上游 credit 不保证可得 | 低 | credit 仅辅助展示；健康度只依赖额度探测接口 |
-| 积分语义混淆（周期 vs 余额 vs 合成折算） | 低 | 健康分仅用于调度；展示层标注周期与折算语义 |
+| 积分语义混淆（周期 vs 账户余额 vs 权益包到期） | 低 | 健康分仅用于调度；展示层标注周期与到期语义 |
 | 第三方能力分被误读为本服务实测 | 中 | 三处 UI 均标注「Artificial Analysis 指数，经 OpenRouter 公开接口；非本服务实测」；不做排序 |
 | 能力分取了旧快照的评测变体 | 中 | 上游把浮动别名钉在旧快照上并换变体（实测 24.7 vs 39.5）。按 `canonical_slug` 日期归族，浮动别名取同族最新快照；显式快照 id 不改写；`source_model` 指向真正出分的上游 id |
 | 上游模型写法差异导致错配 | 中 | 只登记显式等价规则 + 命中不唯一即拒配 |

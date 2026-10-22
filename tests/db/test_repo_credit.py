@@ -61,12 +61,21 @@ def test_save_quota_records_net_credit_change(tmp_path):
     assert events.recent(cid)[0]["delta"] == -5
     db.close()
 
-def test_save_quota_keeps_last_credits_when_credit_probe_missing(tmp_path):
-    """积分账探测失败（写 None）时保留上次值，不把右侧那行抹掉一整轮。
+def test_quota_ledger_maps_codearts_to_credits():
+    """账本由凭证自己的渠道决定：CodeArts 记 credits，其余渠道记 pool。"""
+    from src.db.repo import quota_ledger
 
-    积分账是 best-effort 探测：积分接口偶发失败只记 warning、不判整次探测失败。
-    若直接写 NULL，右侧「积分 x / y」会凭空消失到下一轮，与主账「失败保留
-    上次余额」的口径不一致。无积分账的渠道两列本就恒 NULL，补写 None 仍为 NULL。
+    assert quota_ledger("codearts") == "credits"
+    assert quota_ledger("codebuddy") == "pool"
+    assert quota_ledger("trae") == "pool"
+
+
+def test_list_all_derives_expiring_credits_from_ladder(tmp_path):
+    """到期积分直接来自 `quota_expiry_ladder`（福利链路下线后已无第二本账可相减）。
+
+    CodeArts 的积分账现在落在通用列（`quota_expiry_ladder` 等）上，故列表下发
+    的 `quota_expiring_credits` 就是该阶梯在窗口内的求和——不再做「合并阶梯减
+    积分阶梯」的相减，也不再下发任何 `quota_credits_*` 派生字段。
     """
     db = Database(tmp_path / "t.sqlite3")
     apply_schema(db.connect())
@@ -74,67 +83,29 @@ def test_save_quota_keeps_last_credits_when_credit_probe_missing(tmp_path):
     now = int(time.time())
     cid = credentials.add(provider="codearts", credential_data={"x": "y"}, now=now)
 
-    # 正常探测：两本账都有值
-    credentials.save_quota(cid, Quota(remaining=43.5, total=1000.0,
-                                      credits_remaining=13498.72, credits_total=13500.0,
-                                      probed_at=now))
-    row = credentials.list_all()[0]
-    assert row["quota_credits_remaining"] == pytest.approx(13498.72)
-    # 主账失败/重探但积分账缺失（None）→ 保留上次积分值
-    credentials.save_quota(cid, Quota(remaining=40.0, total=1000.0,
-                                      credits_remaining=None, credits_total=None,
-                                      probed_at=now + 60))
-    row = credentials.list_all()[0]
-    assert row["quota_remaining"] == pytest.approx(40.0)          # 主账照常更新
-    assert row["quota_credits_remaining"] == pytest.approx(13498.72)  # 积分账保旧值
-    assert row["quota_credits_total"] == pytest.approx(13500.0)
-    # 无积分账的渠道：两列始终为 NULL（COALESCE 不会造出 0）
-    other = credentials.add(provider="trae", credential_data={"x": "y"}, now=now)
-    credentials.save_quota(other, Quota(remaining=5.0, total=10.0, probed_at=now))
-    other_row = next(r for r in credentials.list_all() if r["id"] == other)
-    assert other_row["quota_credits_remaining"] is None
-    assert other_row["quota_credits_total"] is None
-    db.close()
-
-
-def test_list_all_splits_expiring_credits_by_ledger(tmp_path):
-    """到期积分按账本拆开：主账＝合并阶梯 − 积分账那一段，积分账另起两个字段。
-
-    福利组读主账字段、内置组读积分账字段。非 CodeArts 无积分阶梯，
-    主账字段与改动前完全一致（拆分不改变既有渠道的数值）。
-    """
-    db = Database(tmp_path / "t.sqlite3")
-    apply_schema(db.connect())
-    credentials = CredentialRepository(db, CredentialCipher(SECRET))
-    now = int(time.time())
-    cid = credentials.add(provider="codearts", credential_data={"x": "y"}, now=now)
-
-    # 每日池（次日 0 点，36h 内）＋积分套餐（7 天内、36h 外）
-    pool_end = now + 6 * 3600
-    credits_end = now + 3 * 86400
+    # 主窗口（36h）内的包 + 只在次窗口（7 天）内的包
+    soon_end = now + 6 * 3600
+    later_end = now + 3 * 86400
     credentials.save_quota(cid, Quota(
         remaining=900.0, total=1000.0,
-        expiry_ladder=[(pool_end, 900.0), (credits_end, 13498.72)],
-        credits_remaining=13498.72, credits_total=13500.0,
-        credits_expiry_ladder=[(credits_end, 13498.72)],
+        expiry_ladder=[(soon_end, 900.0), (later_end, 13498.72)],
         probed_at=now))
     row = credentials.list_all(
         expiring_window=36 * 3600, expiring_secondary_window=7 * 86400, now=now)[0]
-    # 主账（福利组）：只有每日池那一段落在 36h 主窗口内
+    # 主窗口：只有落在 36h 内的那一段
     assert row["quota_expiring_credits"] == pytest.approx(900.0)
-    # 次窗口（7 天）含两段，但主账字段仍是「合并 − 积分账」＝每日池那一段
-    assert row["quota_expiring_credits_secondary"] == pytest.approx(900.0)
-    # 积分账（内置组）：套餐到期日在 36h 外，主窗口为 0，7 天内才有
-    assert row["quota_credits_expiring"] == 0.0
-    assert row["quota_credits_expiring_secondary"] == pytest.approx(13498.72)
-    assert row["quota_credits_expiry_ladder"] == [(credits_end, 13498.72)]
-    # 积分账派生的健康度：按积分账算（13498.72 / 13500 ≈ 100%），而主账 health
-    # 是每日池（900 / 1000 = 90%）。两者必须各自独立——内置组的额度列与健康度
-    # 徽章读同一本账，才不会出现「积分还剩 99%、健康度却 0%」。
+    # 次窗口（7 天）是主窗口的超集：两段都计入，直接求和
+    assert row["quota_expiring_credits_secondary"] == pytest.approx(900.0 + 13498.72)
+    assert row["quota_expiry_ladder"] == [(soon_end, 900.0), (later_end, 13498.72)]
+    # 积分账已成为唯一额度来源，列表不再下发任何积分账派生字段
+    for key in ("quota_credits_expiring", "quota_credits_expiring_secondary",
+                "quota_credits_health", "quota_credits_expiry_ladder",
+                "quota_credits_remaining", "quota_credits_total"):
+        assert key not in row
+    # 健康度仍是主账口径（通用列 900 / 1000）
     assert row["health"] == 90
-    assert row["quota_credits_health"] == 100
 
-    # 非 CodeArts：无积分阶梯 → 主账字段＝合并阶梯求和，积分账字段恒 None
+    # 其余渠道：同样直接对阶梯求和
     other = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"},
                             now=now)
     credentials.save_quota(other, Quota(
@@ -143,53 +114,51 @@ def test_list_all_splits_expiring_credits_by_ledger(tmp_path):
         expiring_window=36 * 3600, expiring_secondary_window=7 * 86400,
         now=now) if r["id"] == other)
     assert other_row["quota_expiring_credits"] == pytest.approx(30.0)
-    assert other_row["quota_credits_expiring"] is None
-    assert other_row["quota_credits_expiring_secondary"] is None
-    assert other_row["quota_credits_expiry_ladder"] is None
-    # 无积分账的渠道：派生健康度恒 None（而不是 0 / 耗尽），前端内置组根本不会读它
-    assert other_row["quota_credits_health"] is None
+    assert other_row["quota_expiring_credits_secondary"] == pytest.approx(30.0)
+    assert "quota_credits_expiring" not in other_row
+
+    # 无到期信息（阶梯为 None）→ 派生的到期字段为 None，而不是 0
+    bare = credentials.add(provider="trae", credential_data={"accessToken": "t"}, now=now)
+    credentials.save_quota(bare, Quota(remaining=5.0, total=10.0, probed_at=now))
+    bare_row = next(r for r in credentials.list_all(now=now) if r["id"] == bare)
+    assert bare_row["quota_expiring_credits"] is None
+    assert bare_row["quota_expiring_credits_secondary"] is None
     db.close()
 
 
-def test_save_quota_records_both_ledgers_separately(tmp_path):
-    """同一轮探测为两本账各记一条流水，`recent(ledger=...)` 分开读。
+def test_save_quota_records_single_ledger_by_provider(tmp_path):
+    """每轮探测只记一条流水，账本由渠道决定（见 `quota_ledger`）。
 
-    CodeArts 的两本账（每日 token 池 / 积分账）在上游是两个独立接口、数值量级
-    差一个数量级，混在一个列表里会被读成同一本账的连续读数，故必须按 `ledger`
-    分流：同一 `ts` 两行（id 不同），各自只看得见自己那本。
+    福利链路下线后 CodeArts 只剩一本账（积分），记 `credits`；其余渠道记
+    `pool`。`recent(ledger=...)` 按账本分流读取，未知取值回落 `pool`。
     """
     db = Database(tmp_path / "t.sqlite3")
     apply_schema(db.connect())
     credentials = CredentialRepository(db, CredentialCipher(SECRET))
     events = CreditEventRepository(db)
     now = int(time.time())
+
+    # CodeArts：只写 credits，pool 侧看不到任何行
     cid = credentials.add(provider="codearts", credential_data={"x": "y"}, now=now)
-
-    # 首次探测：两本账各建立一条基线（sync），各自 before 为空
-    credentials.save_quota(cid, Quota(remaining=900.0, total=1000.0,
-                                      credits_remaining=13498.72, credits_total=13500.0,
-                                      probed_at=now))
-    pool = events.recent(cid, ledger="pool")
+    credentials.save_quota(cid, Quota(remaining=13498.72, total=13500.0, probed_at=now))
     credits = events.recent(cid, ledger="credits")
-    assert len(pool) == 1 and len(credits) == 1
-    assert pool[0]["ledger"] == "pool" and credits[0]["ledger"] == "credits"
-    assert pool[0]["after"] == pytest.approx(900.0)
-    assert credits[0]["after"] == pytest.approx(13498.72)
-    # 同一轮探测：两行 ts 相同、id 不同（各账一本，互不覆盖）
-    assert pool[0]["ts"] == credits[0]["ts"] == now
-    assert pool[0]["id"] != credits[0]["id"]
-
-    # 第二轮两本账都变：各记各的净变化，不会互相串数
-    credentials.save_quota(cid, Quota(remaining=880.0, total=1000.0,
-                                      credits_remaining=13490.0, credits_total=13500.0,
-                                      probed_at=now + 60))
-    assert [row["delta"] for row in events.recent(cid, ledger="pool")] == [-20.0, None]
+    assert len(credits) == 1
+    assert credits[0]["ledger"] == "credits"
+    assert credits[0]["source"] == "sync" and credits[0]["after"] == pytest.approx(13498.72)
+    assert events.recent(cid, ledger="pool") == []
+    assert events.recent(cid) == []                    # 默认 pool：看不到积分流水
+    # 第二轮：积分的净变化记在 credits 账
+    credentials.save_quota(cid, Quota(remaining=13490.0, total=13500.0, probed_at=now + 60))
     assert [row["delta"] for row in events.recent(cid, ledger="credits")] == [-8.72, None]
 
+    # 其余渠道：只写 pool（与改动前语义一致）
+    other = credentials.add(provider="trae", credential_data={"accessToken": "t"}, now=now)
+    credentials.save_quota(other, Quota(remaining=900.0, total=1000.0, probed_at=now))
+    credentials.save_quota(other, Quota(remaining=880.0, total=1000.0, probed_at=now + 60))
+    assert [row["delta"] for row in events.recent(other, ledger="pool")] == [-20.0, None]
+    assert events.recent(other, ledger="credits") == []
     # 未知账本名回落 pool（与老库默认列值一致），绝不把两本账混在一起
-    assert [row["ledger"] for row in events.recent(cid, ledger="nope")] == ["pool", "pool"]
-    # 默认参数即 pool（既有调用方语义不变）
-    assert [row["ledger"] for row in events.recent(cid)] == ["pool", "pool"]
+    assert [row["ledger"] for row in events.recent(other, ledger="nope")] == ["pool", "pool"]
     db.close()
 
 
@@ -292,34 +261,44 @@ def test_credited_events_endpoint_requires_admin_and_known_credential(tmp_path):
         assert client.get(f"/api/credentials/{cid}/credit-events").status_code == 403
 
 def test_credit_events_endpoint_selects_ledger(tmp_path):
-    """端到端：`ledger` 选账本；缺省 pool，未知取值回落 pool。"""
+    """端到端：`ledger` 选账本；缺省 pool，未知取值回落 pool。
+
+    福利链路下线后 CodeArts 只写 `credits`，其余渠道只写 `pool`——同一凭证
+    不可能两本账都有行，故这里分别用 CodeArts / codebuddy 验分流。
+    """
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
     app = build_app(settings)
     with TestClient(app) as client:
         now = int(time.time())
         repo = app.state.credentials
-        cid = repo.add(provider="codearts", credential_data={"x": "y"}, now=now)
-        repo.save_quota(cid, Quota(remaining=900.0, total=1000.0,
-                                   credits_remaining=13498.72, credits_total=13500.0,
-                                   probed_at=now))
-        repo.save_quota(cid, Quota(remaining=880.0, total=1000.0,
-                                   credits_remaining=13490.0, credits_total=13500.0,
-                                   probed_at=now + 60))
+        codearts = repo.add(provider="codearts", credential_data={"x": "y"}, now=now)
+        repo.save_quota(codearts, Quota(remaining=13498.72, total=13500.0, probed_at=now))
+        repo.save_quota(codearts, Quota(remaining=13490.0, total=13500.0, probed_at=now + 60))
+        codebuddy = repo.add(provider="codebuddy", credential_data={"bearer_token": "t"},
+                             now=now)
+        repo.save_quota(codebuddy, Quota(remaining=50.0, total=100.0, probed_at=now))
+        repo.save_quota(codebuddy, Quota(remaining=60.0, total=100.0, probed_at=now + 60))
 
         client.cookies.set("coding2api_session", create_session_token("root", SECRET))
-        # 缺省 = pool：只看到每日池的两行，看不到积分账
-        default = client.get(f"/api/credentials/{cid}/credit-events").json()["events"]
-        assert [event["ledger"] for event in default] == ["pool", "pool"]
-        assert [event["delta"] for event in default] == [-20.0, None]
-        # ledger=credits：只看到积分账的两行
+        # CodeArts：缺省 = pool → 积分流水不在 pool 账里
+        assert client.get(
+            f"/api/credentials/{codearts}/credit-events").json()["events"] == []
+        # ledger=credits：看到积分账的两行
         credits = client.get(
-            f"/api/credentials/{cid}/credit-events?ledger=credits").json()["events"]
+            f"/api/credentials/{codearts}/credit-events?ledger=credits").json()["events"]
         assert [event["ledger"] for event in credits] == ["credits", "credits"]
         assert [event["delta"] for event in credits] == [-8.72, None]
+        # codebuddy：缺省 = pool，看不到积分账
+        default = client.get(f"/api/credentials/{codebuddy}/credit-events").json()["events"]
+        assert [event["ledger"] for event in default] == ["pool", "pool"]
+        assert [event["delta"] for event in default] == [10.0, None]
+        assert client.get(
+            f"/api/credentials/{codebuddy}/credit-events?ledger=credits").json()[
+                "events"] == []
         # 未知取值回落 pool（不报错、也不把两本账混在一起）
         unknown = client.get(
-            f"/api/credentials/{cid}/credit-events?ledger=nope").json()["events"]
+            f"/api/credentials/{codebuddy}/credit-events?ledger=nope").json()["events"]
         assert [event["ledger"] for event in unknown] == ["pool", "pool"]
 
 

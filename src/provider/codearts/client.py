@@ -2,23 +2,15 @@
 
 三条链路（逆向记录 §2/§4/§7）：
 
-* **推理** `POST {snap}/api/v2/chat/completions`（原生 OpenAI 形状）；
-  福利模型（限时免费套餐）必须追加 `maas_type: benefit`，否则报
-  `InferHub.002002009.404 model is not registered`。旧端点 `/v1/chat/chat`
-  走 §4 的 `task=chat` 形状，作为兼容路径保留。
-* **模型发现** `GET {snap}/v1/model/builtin`（`Agent-Type: PromptCenter`）
-  + `GET {benefit}/api/v1/gateway/config` 两路合并；福利是按账号授予的，
-  因此「哪些模型该带 benefit 头」按 **uid** 分别记账，不跨账号共享。
-* **额度** `GET {benefit}/api/v1/user/tokens/balance`，上游单位是 **token**：免费
-  额度为**每日 1000 万 token、当日 0 点清零**（官方「每日千万 Token 免费领」），
-  不是按月的套餐积分。**当日没用完即作废**，故 `parse_balance` 把当日剩余登记成
-  到期点＝次日 0 点的 `expiry_ladder`，让调度器「快过期的先用」把 CodeArts 排在
-  其它渠道之前。上游 token 由 `units` 统一折成「积分」（1 积分 = 10000 token，
-  每日池满额 = 1000 积分），与其它渠道同口径，见该模块。**每日签到**
+* **推理** `POST {snap}/api/v2/chat/completions`（原生 OpenAI 形状）。旧端点
+  `/v1/chat/chat` 走 §4 的 `task=chat` 形状，作为兼容路径保留。
+* **模型发现** `GET {snap}/v1/model/builtin`（`Agent-Type: PromptCenter`）。
+* **额度** `GET {snap}/snap-manager/v1/statistics/plugin`（`Agent-Type:
+  PromptCenter`），单位本身就是积分（内置模型计费）；积分包带独立到期日，
+  登记成 `expiry_ladder` 参与调度「快过期的先用」。**每日签到**
   走另一套接口（`GET {snap}/v1/ops/delivery` → `claim` → `confirm`，见下），
-  与上述 token 池并行的积分账，临时凭证的续期由
-  `tasks.refresh.RefreshTask` 独占（先落库再同步）；额度探测只读余额，
-  绝不在此刷新一次性 refresh_token，见 `probe_quota`。
+  临时凭证的续期由 `tasks.refresh.RefreshTask` 独占（先落库再同步）；
+  额度探测只读余额，绝不在此刷新一次性 refresh_token，见 `probe_quota`。
 
 签名不是 bearer：`x-auth-token` 传 STS security_token 会被 APIG 拒
 （`APIG.0301 decrypt token fail`），真正的凭据是 AK/SK 签名（+ X-Security-Token）。
@@ -40,19 +32,15 @@ from urllib.parse import urlsplit
 import httpx
 
 from ...provider import base
-from ...provider.base import Event, EventKind, Model, Quota, UpstreamReloginRequired
+from ...provider.base import Event, Model, Quota, UpstreamReloginRequired
 from ...provider.proxy import build_client
-from ...provider.token_expiry import normalize_epoch
 from . import auth as codearts_auth
 from . import events as codearts_events
-from . import signer, units
+from . import signer
 from .credential import CodeArtsCredential, merge_refreshed
 from .events import (
     AGENT_TYPE_PROMPT_CENTER,
-    BENEFIT_HOST,
     CAMPAIGN_DAILY_CREDIT,
-    EP_BENEFIT_CLAIM,
-    EP_BENEFIT_CONFIG,
     EP_CHAT,
     EP_CHAT_V2,
     EP_CURRENT_USER,
@@ -61,9 +49,6 @@ from .events import (
     EP_OPS_CONFIRM,
     EP_OPS_DELIVERY,
     EP_STATISTICS_PLUGIN,
-    EP_TOKEN_BALANCE,
-    HEADER_MAAS_TYPE,
-    MAAS_BENEFIT,
     OPS_CHANNEL,
     SNAP_ENGINE_HOST,
     STS_HOST,
@@ -78,12 +63,6 @@ logger = logging.getLogger(__name__)
 # stream_first_event_timeout_seconds 负责，两者不要混为一谈。
 STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0)
 SHORT_TIMEOUT = httpx.Timeout(30.0)
-
-# 冷启动种子：首次发现完成前也要带 benefit 头，否则第一轮请求必吃一次
-# 404 未注册（逆向记录 §7「冷启动种子」同款取舍）。
-BENEFIT_SEED: frozenset[str] = frozenset({
-    "deepseek-v4-flash-0731", "deepseek-v4-pro-0813", "glm-5.3-flash",
-})
 
 
 def sdk_date(now: float | None = None) -> str:
@@ -125,12 +104,11 @@ def request_path(url: str) -> tuple[str, str]:
 
 
 def prepare_body(payload: dict[str, Any], model: str, *,
-                 chat_id: str, benefit: bool = False, user_id: str = "",
+                 chat_id: str, user_id: str = "",
                  legacy: bool = False) -> dict[str, Any]:
     """下游请求体 → 上游请求体。
 
     v2（默认）：原生 OpenAI 形状，强制 `stream=true`（非流式由引擎聚合）。
-    `maas_type` 是**头**不是 body 字段，故 body 与 benefit 无关（便于缓存命中）。
 
     legacy（`/v1/chat/chat`）：§4 的 `task=chat` 形状，`messages` 是**内容块
     数组（无 role）**。多轮对话如何折进无 role 的形状，逆向记录里只有单轮
@@ -206,9 +184,8 @@ def _flatten_content(content: Any) -> str:
     return "".join(parts)
 
 
-def chat_headers(credential: CodeArtsCredential, *, trace_id: str,
-                 benefit: bool = False) -> dict[str, str]:
-    """聊天请求头（签名前）；`maas_type` 在签名前写入 → 计入 SignedHeaders。"""
+def chat_headers(credential: CodeArtsCredential, *, trace_id: str) -> dict[str, str]:
+    """聊天请求头（签名前）。"""
     headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
@@ -218,8 +195,6 @@ def chat_headers(credential: CodeArtsCredential, *, trace_id: str,
         "app-id": "CodeAgent3.0",
         "is_confidential": "false",
     }
-    if benefit:
-        headers[HEADER_MAAS_TYPE] = MAAS_BENEFIT
     return headers
 
 
@@ -244,19 +219,15 @@ class CodeArtsClient:
         self,
         *,
         endpoint: str = SNAP_ENGINE_HOST,
-        benefit_host: str = BENEFIT_HOST,
         sts_host: str = STS_HOST,
         legacy: bool = False,
-        benefit_auto_claim: bool = True,
         login: codearts_auth.LoginConfig | None = None,
         stream_client: httpx.AsyncClient | None = None,
         short_client: httpx.AsyncClient | None = None,
         proxy: str | None = None,
     ) -> None:
         self.endpoint = endpoint.rstrip("/")
-        self.benefit_host = benefit_host.rstrip("/")
         self.sts_host = sts_host.rstrip("/")
-        self.benefit_auto_claim = benefit_auto_claim
         self._legacy = legacy
         self.login = login or codearts_auth.LoginConfig(
             snap_manager=self.endpoint + codearts_events.SNAP_MANAGER_PREFIX,
@@ -264,9 +235,6 @@ class CodeArtsClient:
         self._stream_client = stream_client
         self._short_client = short_client
         self._proxy = proxy
-        # 每账号的福利目录（uid → 小写模型 id 集合）。整体替换、不跨账号共享：
-        # 福利是按账号授予的，A 有 B 没有时判定依据必须是发起请求的那个账号。
-        self._benefit_models: dict[str, frozenset[str]] = {}
 
     def _stream(self) -> httpx.AsyncClient:
         if self._stream_client is None:
@@ -288,39 +256,25 @@ class CodeArtsClient:
         path = EP_CHAT if self._legacy else EP_CHAT_V2
         return f"{self.endpoint}{path}"
 
-    def is_benefit_model(self, credential: CodeArtsCredential, model: str) -> bool:
-        """该账号的该模型是否走福利路由。
-
-        目录里查得到 → 按目录（上游把它登记成内置即自动摘掉 benefit 头）；
-        目录未知（还没发现过 / 福利来源失败）→ 回退冷启动种子，宁可多带一次
-        头（带错只是路由到福利通道）也不能让模型 404 未注册。
-        """
-        catalog = self._benefit_models.get(credential.uid)
-        if catalog is None:
-            return model.lower() in BENEFIT_SEED
-        return model.lower() in catalog
-
     # --------------------------------------------------------------- 聊天流
 
     async def stream_chat(self, credential: CodeArtsCredential, payload: dict[str, Any],
                           model: str) -> AsyncIterator[Event]:
         """POST 聊天端点并逐行产出中立事件。非 2xx 抛 UpstreamHTTPError。
 
-        流量走 `/api/v2/chat/completions`（福利模型带 `maas_type: benefit`）。
-        CodeArts 的 SSE **没有空行分隔**，故不能用 `engine.sse.iter_frames`；
-        逐行解析 + `TextSnapshot`（累计全文 → 增量）在 `events.py`。
+        流量走 `/api/v2/chat/completions`。CodeArts 的 SSE **没有空行分隔**，
+        故不能用 `engine.sse.iter_frames`；逐行解析 + `TextSnapshot`
+        （累计全文 → 增量）在 `events.py`。
         """
         url = self.chat_url()
-        benefit = self.is_benefit_model(credential, model) and not self._legacy
         chat_id = derive_chat_id(payload)
-        body = prepare_body(payload, model, chat_id=chat_id, benefit=benefit,
+        body = prepare_body(payload, model, chat_id=chat_id,
                             user_id=credential.user_name, legacy=self._legacy)
         raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
         path, query = request_path(url)
         headers = signer.sign_headers(
             _sign_credential(credential), method="POST", path=path, raw_query=query,
-            headers=chat_headers(credential, trace_id=secrets.token_hex(16),
-                                 benefit=benefit),
+            headers=chat_headers(credential, trace_id=secrets.token_hex(16)),
             payload=raw, x_sdk_date=sdk_date())
         snapshot = codearts_events.TextSnapshot()
         async with self._stream().stream("POST", url, content=raw, headers=headers) as response:
@@ -330,159 +284,47 @@ class CodeArtsClient:
                                         **base.retry_hints(response.headers))
             async for line in codearts_events.iter_data_lines(response.aiter_bytes()):
                 for event in codearts_events.parse_line(line, snapshot):
-                    _fill_estimated_credit(event, benefit=benefit)
                     yield event
 
     # ------------------------------------------------------------ 模型发现
 
     async def fetch_models(self, credential: CodeArtsCredential) -> list[Model]:
-        """内置 + 限时福利两路合并（一路失败不影响另一路，全灭才抛违规）。
+        """内置模型列表；空结果按上游协议违规处理（不静默返回空）。
 
-        内置来源登记了同名模型即视为「转正」——该模型不再需要 benefit 头
-        （逆向记录 §7：目录里有但没标 → 不带，福利模型转正后能自动摘掉）。
+        空列表会被下游读成「这个渠道没有模型」（列表接口据此剔除该渠道），而
+        「这次没拉到」该退避重试，两者不是一回事，故抛违规让调用方退避。
         """
-        builtin: list[Model] = []
-        builtin_error: str = ""
-        try:
-            builtin = await self._fetch_builtin_models(credential)
-        except (UpstreamHTTPError, UpstreamProtocolViolation) as error:
-            builtin_error = str(error)
-            logger.warning("CodeArts 内置模型拉取失败: %s", error)
-
-        benefit: list[Model] = []
-        benefit_error: str | None = None
-        if self.benefit_auto_claim:
-            await self._claim_benefit_quietly(credential)
-        try:
-            benefit = await self._fetch_benefit_models(credential)
-        except (UpstreamHTTPError, UpstreamProtocolViolation) as error:
-            benefit_error = str(error)
-            logger.warning("CodeArts 福利模型拉取失败: %s", error)
-
-        if benefit_error is None:
-            # 只有福利来源**成功**才整体替换目录（含成功但为空：套餐轮换后
-            # 不留旧标记）；失败时保留上一轮，避免非种子福利模型丢 benefit 头。
-            promoted = {model.id.lower() for model in builtin}
-            self._benefit_models[credential.uid] = frozenset(
-                model.id.lower() for model in benefit
-                if model.id.lower() not in promoted)
-
-        merged: list[Model] = []
-        seen: set[str] = set()
-        for model in [*builtin, *benefit]:
-            key = model.id.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(model)
-        if not merged:
-            # 文案含上游错误原文（builtin_error/benefit_error）→ 只进日志，
-            # 对外用受控 `public`（绝不回显上游正文）。
+        builtin = await self._fetch_builtin_models(credential)
+        if not builtin:
             raise UpstreamProtocolViolation(
-                f"models api returned empty list (builtin={builtin_error}, "
-                f"benefit={benefit_error or ''})",
+                "models api returned empty list",
                 public="upstream returned no available models")
-        return merged
-
-    async def refresh_benefit_catalog(self, credential: CodeArtsCredential) -> None:
-        """按账号补一轮福利目录发现（best-effort，失败保留上一轮）。
-
-        `_benefit_models` 按 uid 分别记账、不跨账号共享，但模型列表刷新只用
-        `candidates[0]` 那一个凭证拉取——其余账号永远不会入册，`is_benefit_model`
-        退回 `BENEFIT_SEED`。种子是账号无关的冷启动兜底，装不下「按期授予」的
-        福利模型（如 `deepseek-v4.1-flash`），于是那些账号的请求漏带
-        `maas_type: benefit` 头：请求照样 200，但每日 token 池不扣、credit 不记。
-        额度探测逐凭证遍历，这里顺带补齐（TECHNICAL「探测时顺带完成」）。
-        """
-        try:
-            await self.fetch_models(credential)
-        except Exception as error:  # noqa: BLE001 - 发现失败不得影响余额探测
-            logger.warning("CodeArts 福利目录刷新失败: %s", error)
+        return builtin
 
     async def _fetch_builtin_models(self, credential: CodeArtsCredential) -> list[Model]:
         url = f"{self.endpoint}{EP_MODEL_BUILTIN}"
         data = await self._get_json(url, credential,
                                     short_headers(AGENT_TYPE_PROMPT_CENTER))
-        return _models_from_items(data.get("builtinModels"), benefit=False)
+        return _models_from_items(data.get("builtinModels"))
 
-    async def _fetch_benefit_models(self, credential: CodeArtsCredential) -> list[Model]:
-        url = f"{self.benefit_host}{EP_BENEFIT_CONFIG}"
-        data = await self._get_json(url, credential, short_headers())
-        result = data.get("result")
-        items = result.get("models") if isinstance(result, dict) else None
-        return _models_from_items(items, benefit=True)
-
-    # ------------------------------------------------------ 福利领取/额度
-
-    async def claim_benefit(self, credential: CodeArtsCredential) -> dict[str, Any]:
-        """领取限时福利（幂等；官方客户端打开模型菜单即调用）。
-
-        未领取时福利模型一律返回 `InferHub.4004.200 benefit not found`。
-        """
-        url = f"{self.benefit_host}{EP_BENEFIT_CLAIM}"
-        return await self._request_json("POST", url, credential, short_headers(), {})
-
-    async def _claim_benefit_quietly(self, credential: CodeArtsCredential) -> None:
-        """发现流程里的自动领取：失败不影响列表（只记日志）。"""
-        try:
-            await self.claim_benefit(credential)
-        except (UpstreamHTTPError, UpstreamProtocolViolation) as error:
-            logger.warning("CodeArts 福利自动领取失败: %s", error)
+    # ------------------------------------------------------------ 额度
 
     async def probe_quota(self, credential: CodeArtsCredential) -> Quota:
-        """额度余额（只读，不刷新）。
+        """积分余额（只读，不刷新）。
 
-        额度是**每日 token 池**（当日 0 点清零）；另有独立的积分余额走
-        `/snap-manager/v1/statistics/plugin`，两者是并行的两套账，**不要混**。
-        积分账（内置模型计费）在这里顺带探测并挂在 `credits_*` 上——它是
-        第二本账，**不参与调度口径的 health**（选号仍按主账），但到期日会并入 `expiry_ladder` 参与
-        「快过期先用」的选号排序（见 `Quota.credits_remaining`）。
+        走 `{snap}/snap-manager/v1/statistics/plugin`：内置模型按积分计费，
+        积分包带独立到期日，登记成 `expiry_ladder` 参与「快过期先用」的选号排序。
+
         临时凭证的续期**不在**这里做：refresh_token 是一次性的，必须由
         `tasks.refresh.RefreshTask`（先落库再同步）独占轮转。若此处顺手刷新，
         一个 refresh_token 会被两个地方各消费一次，后到的报
         `the refresh token has been used`，且此处刷新结果不落库、DB 里的
         token 被烧成废票——实测由此把整条渠道打成 APIG.0602 硬失效。
         """
-        url = f"{self.benefit_host}{EP_TOKEN_BALANCE}"
-        data = await self._get_json(url, credential, short_headers())
-        quota = parse_balance(data)
-        return await self._attach_credits(credential, quota)
-
-    async def _attach_credits(self, credential: CodeArtsCredential,
-                              quota: Quota) -> Quota:
-        """补积分账（best-effort）：失败保留主账，绝不把探测整体判失败。
-
-        两本账在上游是独立接口，一个挂了不代表另一个没有额度。若让积分接口的
-        失败把 `probe_failed` 置真，每日池明明有额度也会被显示成「未知」。
-        """
-        try:
-            credits = await self._fetch_credits(credential)
-        except (UpstreamHTTPError, UpstreamProtocolViolation) as error:
-            logger.warning("CodeArts 积分余额拉取失败: %s", error)
-            return quota
-        # `_fetch_credits` 返回的 Quota 用 remaining/total 承载积分值（它只是
-        # 解析中转），这里再挂到主账的 credits_* 槽位——两者不可混：主账的
-        # remaining/total 是每日 token 池。
-        quota.credits_remaining = credits.remaining
-        quota.credits_total = credits.total
-        # 积分包独立到期（实测 end_date 是「体验版」月度周期），并入主账的
-        # 到期阶梯：调度「窗口内即将到期额度多者先用」因此也会先烧积分。
-        # 主账自己的阶梯（每日池次日 0 点）不受影响，两段相加即该凭证的
-        # 窗口内到期总量。
-        if credits.expiry_ladder:
-            # 积分那一段另留一份：管理台按账本拆分展示到期积分（福利组＝每日池、
-            # 内置组＝积分账），合并后的阶梯分不出哪段属于哪本账。
-            quota.credits_expiry_ladder = list(credits.expiry_ladder)
-            quota.expiry_ladder = [*(quota.expiry_ladder or []),
-                                   *credits.expiry_ladder]
-        # 积分分项包（基础 / 按需 / 福利）并入展示明细：主账（每日池）不产
-        # packages（parse_balance 恒 None），故这里是「有则合并」而非覆盖。
-        if credits.packages:
-            quota.packages = [*(quota.packages or []), *credits.packages]
-        return quota
+        return await self._fetch_credits(credential)
 
     async def _fetch_credits(self, credential: CodeArtsCredential) -> Quota:
-        """`/snap-manager/v1/statistics/plugin` → 积分账（单位已是积分）。
+        """`/snap-manager/v1/statistics/plugin` → 额度（单位已是积分）。
 
         **前缀必须带 `snap-manager`**（实测不带回 APIG.0101），与 `/v1/ops/*`
         相反；头 `Agent-Type: PromptCenter` 同内置模型接口。
@@ -499,8 +341,7 @@ class CodeArtsClient:
         """查「每日签到领1000 积分」活动（只读）；上游没有/改版返回 None。
 
         走 `snap` 根的 `/v1/ops/delivery`——**不带 `snap-manager` 前缀**（带了
-        回 APIG.0101）。与额度探测用的 `{opengw}/api/v1/user/tokens/balance`
-        是两个不同 host 的两套体系。
+        回 APIG.0101）。
         """
         url = (f"{self.endpoint}{EP_OPS_DELIVERY}"
                f"?channel={OPS_CHANNEL}")
@@ -681,14 +522,12 @@ class CodeArtsClient:
         return data
 
 
-def _models_from_items(items: Any, *, benefit: bool) -> list[Model]:
-    """模型条目（内置/福利两种形状）→ 中立 Model；畸形条目跳过。
+def _models_from_items(items: Any) -> list[Model]:
+    """内置模型条目 → 中立 Model；畸形条目跳过。
 
-    倍率：内置条目带 `credit[]`，其中 `ratio_display`（如 `"0.7x"`）是官方对外
-    展示的消耗倍率，取首条可解析项作为本渠道 `credit_rate`。福利条目来自每日
-    免费 token 池、上游不给该字段，保持 `None`（**不**冒充 zen/kilo 的 x0「免费」
-    ——它消耗的是每日 token 额度，额度用尽即不可用）。福利模型的单请求扣池
-    改在 usage 事件上按 token 1:1 推算并折成积分，见 `_fill_estimated_credit`。
+    倍率：条目带 `credit[]`，其中 `ratio_display`（如 `"0.7x"`）是官方对外
+    展示的消耗倍率，取首条可解析项作为本渠道 `credit_rate`；上游不给该字段时
+    保持 `None`（**不**冒充 zen/kilo 的 x0「免费」——免费层是另一回事）。
     """
     if not isinstance(items, list):
         return []
@@ -703,39 +542,13 @@ def _models_from_items(items: Any, *, benefit: bool) -> list[Model]:
             id=model_id,
             name=_first_str(item, ("model_name", "modelName", "name", "display_name"))
             or model_id,
-            credit_rate=None if benefit else _credit_rate(item.get("credit")),
-            benefit=benefit,
+            credit_rate=_credit_rate(item.get("credit")),
             max_input_tokens=_first_int(item, ("context_window", "contextWindow",
                                                "max_input_tokens")),
             max_output_tokens=_first_int(item, ("max_tokens", "maxTokens",
                                                 "max_output_tokens")),
         ))
     return models
-
-
-def _fill_estimated_credit(event: Event, *, benefit: bool) -> None:
-    """福利模型 USAGE 事件补记**推算额度消耗**（单位：积分）。
-
-    CodeArts 上游的 usage 只给 token 数、不带单请求额度字段，而福利模型实测
-    按每日 token 池 **1:1** 扣减（`credit_events` 反解：一条输入 32 + 输出 694
-    = 726 token 的请求，池余额恰好 −726），故本服务按「输入 + 输出 token」推算
-    该请求的额度消耗并标 `credit_estimated`（展示层加 ≈）。上游 token 经 `units`
-    折成积分（1 积分 = 10000 token），与每日池余额同口径——否则统计页的
-    `credit` 会是 token 量级、与额度单位对不上。
-
-    只补福利模型：内置模型不扣这条每日 token 池（它走 `credit[]` 的付费倍率），
-    补了会把 token 数当成池消耗。上游将来若直接回传 `credit` 则不覆盖；
-    两个 token 都没有时不猜（保持 None）。
-    """
-    usage = event.usage
-    if (not benefit or event.kind is not EventKind.USAGE or usage is None
-            or usage.credit is not None):
-        return
-    if usage.input_tokens is None and usage.output_tokens is None:
-        return
-    usage.credit = units.tokens_to_credits(
-        float((usage.input_tokens or 0) + (usage.output_tokens or 0)))
-    usage.credit_estimated = True
 
 
 def _credit_rate(credit: Any) -> float | None:
@@ -795,63 +608,6 @@ def _opt_int(value: Any) -> int | None:
     return value
 
 
-def parse_balance(data: dict[str, Any], *, now: int | None = None) -> Quota:
-    """`/api/v1/user/tokens/balance` 响应 → Quota（单位：积分）。
-
-    上游实际返回的是**每日免费 token 池**（实测 2026-09-30）：
-    `daily_token_limit` / `daily_tokens_used`（+ 等价的 `total_quota` /
-    `total_balance` / `used_amount`）。官方口径是「每日 1000 万 token、当日 0 点
-    清零」，故有 `daily_token_limit` 时一律按**当日**口径算剩余，而不是拿可能
-    代表套餐的 `total_quota` 冒充。
-
-    上游数值是 **token**、量级达千万，直接落库既难看也与其它渠道（几百积分）
-    不可比，故这里经 `units.tokens_to_credits` 统一折成「积分」（1 积分 =
-    10000 token，每日池满额 = 1000 积分）；余额、额度与到期阶梯一律按积分口径，
-    与 `_fill_estimated_credit` 的单请求扣池同单位。
-
-    每日池同时是**用完即弃**：当日没用完的额度 0 点清零、不累计。故这里按与
-    CodeBuddy/TRAE 相同的口径登记 `expiry_ladder`（到期点＝次日 0 点、金额＝
-    当日剩余积分），让调度器的「窗口内即将到期额度多者先用」把 CodeArts 排在
-    其它渠道之前——否则每天会白丢一个用不完的 1000 分池。
-
-    没有每日字段时退化为键名宽容解析（套餐/月度形状或旧字段），此时不登记
-    到期阶梯（无可靠重置时间）；全部取不到时返回 `probe_failed=True`（**未知**），
-    绝不返回 `total=None, remaining=None` 被判「已耗尽」。
-    """
-    stamp = int(time.time()) if now is None else now
-    result = data.get("result")
-    result = result if isinstance(result, dict) else data
-    cycle_end = _first_epoch(result, ("cycle_end", "expire_time", "expires_at",
-                                      "reset_time", "next_reset_time"))
-    daily_limit = _first_number(result, ("daily_token_limit",))
-    if daily_limit is not None and daily_limit > 0:
-        daily_used = _first_number(result, ("daily_tokens_used",)) or 0.0
-        remaining = units.tokens_to_credits(max(0.0, daily_limit - daily_used))
-        total = units.tokens_to_credits(daily_limit)
-        reset = _next_local_midnight(stamp)
-        # 已用尽（remaining=0）不携带可消耗额度，不进到期排序（对空包排第一没意义）
-        ladder = [(reset, remaining)] if remaining > 0 else None
-        return Quota(remaining=remaining, total=total, cycle_end=reset,
-                     expiry_ladder=ladder, probed_at=stamp)
-    remaining = _first_number(result, ("remaining", "remaining_tokens", "tokens_balance",
-                                       "balance", "available", "available_tokens",
-                                       "total_balance"))
-    total = _first_number(result, ("total", "total_tokens", "quota", "total_quota"))
-    used = _first_number(result, ("used", "used_tokens", "consumed", "used_balance",
-                                  "used_amount"))
-    if remaining is None and total is not None and used is not None:
-        remaining = max(0.0, total - used)
-    if remaining is None and total is None:
-        return Quota(probe_failed=True, probed_at=stamp)
-    return Quota(remaining=_opt_credits(remaining), total=_opt_credits(total),
-                 cycle_end=cycle_end, probed_at=stamp)
-
-
-def _opt_credits(tokens: float | None) -> float | None:
-    """可空的 token 额度 → 积分；None 原样返回（区分「未提供」与「0」）。"""
-    return None if tokens is None else units.tokens_to_credits(tokens)
-
-
 # 积分账里代表「本账号积分合计」的那一条 metric（实测：其余是分项包）。
 _CREDIT_TOTAL_METRIC = "usageTotalPackageCredit"
 # 分项包 → 中文包名（展示用）。上游只给英文 metric 名，包名映射写在这里，
@@ -864,11 +620,10 @@ _CREDIT_PACKAGE_NAMES: dict[str, str] = {
 
 
 def parse_credits(data: dict[str, Any], *, now: int | None = None) -> Quota:
-    """`/snap-manager/v1/statistics/plugin` 响应 → 积分账 Quota（单位：积分）。
+    """`/snap-manager/v1/statistics/plugin` 响应 → Quota（单位：积分）。
 
-    这是 CodeArts 的**第二本账**：内置模型（GLM-5.2 / OpenPangu 等）按积分计费，
-    与福利模型走的每日 token 池并行、互不通气（实测两接口各自独立）。上游
-    数值本身已是积分，**不做单位折算**（勿套 `units`，那套是 token 池专用）。
+    内置模型（GLM-5.2 / OpenPangu 等）按积分计费，这是本渠道唯一的额度来源。
+    上游数值本身已是积分，**不做单位折算**。
 
     形状（实测 2026-10-15）：
     `metrics[]` 每项含 `package_credit_amount` / `_used` / `_remain`，其中
@@ -946,37 +701,3 @@ def _package_end_date(value: Any) -> int | None:
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
-
-
-def _next_local_midnight(now: int) -> int:
-    """距 `now` 最近的下一个本地 0 点（epoch）。
-
-    CodeArts 每日池在**当日 0 点**清零、不累计，上游不返回重置时间戳，故按服务端
-    本地时区（部署为 Asia/Shanghai）推算。与 `scheduler.next_credit_reset` 同口径：
-    用 `time.localtime` / `time.mktime` 走系统时区，保证调度窗口与「0 点清零」一致。
-    """
-    local = time.localtime(now)
-    midnight = time.mktime((local.tm_year, local.tm_mon, local.tm_mday,
-                            0, 0, 0, 0, 0, -1))
-    return int(midnight) + 86400
-
-
-def _first_number(obj: dict[str, Any], keys: tuple[str, ...]) -> float | None:
-    for key in keys:
-        value = obj.get(key)
-        if isinstance(value, bool):
-            continue
-        if isinstance(value, (int, float)):
-            return float(value)
-    return None
-
-
-def _first_epoch(obj: dict[str, Any], keys: tuple[str, ...]) -> int | None:
-    for key in keys:
-        value = obj.get(key)
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            continue
-        epoch = normalize_epoch(int(value))
-        if epoch > 0:
-            return epoch
-    return None

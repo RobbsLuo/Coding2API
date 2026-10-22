@@ -9,17 +9,17 @@ import {
   formatChartValue,
   formatCredit,
   formatMoney,
+  formatSpeed,
   METRIC_AXIS_UNIT,
   QUOTA_UNIT,
   taskReportLabel,
   tokenExpiryView,
   activeModelCooldowns,
-  CREDITS_QUOTA_SEMANTICS,
   credentialState,
-  credentialHealth,
   formatDuration,
   formatNumber,
   formatTime,
+  formatTimeParts,
   upstreamLevelLabel,
   upstreamLevelTone,
   hasQuotaProbe,
@@ -112,6 +112,17 @@ describe("formatChartValue", () => {
 
   it("未知指标回退请求次数", () => {
     expect(formatChartValue(12, "bogus")).toBe("12 (次)");
+  });
+});
+
+describe("formatSpeed", () => {
+  it("输出速度带 tok/s；估算值前置 ≈；无样本显示 —", () => {
+    expect(formatSpeed(94.1)).toBe("94.1 tok/s");
+    expect(formatSpeed(94.1, false)).toBe("94.1 tok/s");
+    expect(formatSpeed(76.4, true)).toBe("≈76.4 tok/s");
+    expect(formatSpeed(0)).toBe("0.0 tok/s");
+    expect(formatSpeed(null)).toBe("—");
+    expect(formatSpeed(undefined)).toBe("—");
   });
 });
 
@@ -323,9 +334,10 @@ describe("display helpers", () => {
     expect(hasQuotaProbe("zen")).toBe(false);
     expect(hasQuotaProbe("kilo")).toBe(false);
     expect(hasQuotaProbe("trae")).toBe(true);
-    // Qoder / CodeArts 都有额度接口，属「需探测」
+    // Qoder / CodeArts / officeAce 都有额度接口，属「需探测」
     expect(hasQuotaProbe("qoder")).toBe(true);
     expect(hasQuotaProbe("codearts")).toBe(true);
+    expect(hasQuotaProbe("officeace")).toBe(true);
   });
 
   it("周期语义按渠道类型判定，而不是看 cycle_end 是否存在", () => {
@@ -357,19 +369,28 @@ describe("display helpers", () => {
     expect(qoder).toContain("本周期剩余");
     expect(qoder).not.toContain("单调递减");
 
-    // CodeArts 是每日 token 池折算的额度池（0 点清零），不看 cycle_end，也不套用周期口径
+    // CodeArts 是积分余额（内置模型按积分计费），按积分包到期日作废；
+    // 有 cycle_end 时点出最早到期日，不说「本周期」也不套「每日额度池」
     const codearts = quotaSemantics(makeCredential({
       provider: "codearts", quota_cycle_end: 1_800_000_000 }) as never);
-    expect(codearts).toBe("每日额度池（token 折算，当日 0 点清零）");
+    expect(codearts).toContain("积分余额（内置模型计费）");
+    expect(codearts).toContain("最早");
+    expect(codearts).not.toContain("每日额度池");
+
+    // 未探测到到期时间：退化为不带日期的积分口径
+    const codeartsNoEnd = quotaSemantics(makeCredential({
+      provider: "codearts", quota_cycle_end: null }) as never);
+    expect(codeartsNoEnd).toBe("积分余额（内置模型计费，按积分包到期日作废）");
+
+    // officeAce 的积分是主账，逐笔到期（新用户福利 + 每日签到各自计时），
+    // 不能说成「本周期剩余」（那是统一重置的语义）
+    const officeace = quotaSemantics(makeCredential({
+      provider: "officeace", quota_cycle_end: 1_800_000_000 }) as never);
+    expect(officeace).toContain("积分余额");
+    expect(officeace).toContain("逐笔到期");
+    expect(officeace).not.toContain("本周期");
 
     // 国际版 Qoder 无旧签到接口，但额度语义不变（不在此断言）
-  });
-
-  it("第二本账（积分）的口径文案", () => {
-    // 口径文案必须点明「与每日额度池并行的独立账本」，否则会被读成同一本账
-    expect(CREDITS_QUOTA_SEMANTICS).toContain("独立账本");
-    expect(CREDITS_QUOTA_SEMANTICS).toContain("内置模型");
-    expect(CREDITS_QUOTA_SEMANTICS).toContain("调度口径不变");
   });
 
   it("凭证状态机覆盖全部状态", () => {
@@ -380,28 +401,6 @@ describe("display helpers", () => {
     expect(credentialState(makeCredential({ health: -1 }) as never, 0)).toBe("exhausted");
     // 冷却已过期 → 不再是 cooling
     expect(credentialState(makeCredential({ cooling_until: 50 }) as never, 100)).toBe("ready");
-  });
-
-  it("CodeArts 两本账各读各的健康度（内置组不与额度列自相矛盾）", () => {
-    // 主账（每日池）已耗尽、积分账几乎满：库里 health=-1，积分派生值 100
-    const codearts = makeCredential({
-      provider: "codearts", health: -1,
-      quota_credits_remaining: 13498.72, quota_credits_total: 13500,
-      quota_credits_health: 100,
-    }) as never;
-    // 福利组（每日池）读主账 → 已耗尽
-    expect(credentialHealth(codearts, "pool")).toBe(-1);
-    expect(credentialState(codearts, 0, credentialHealth(codearts, "pool"))).toBe("exhausted");
-    // 内置组（积分账）读派生值 → 100%，状态不能是「额度耗尽」
-    expect(credentialHealth(codearts, "credits")).toBe(100);
-    expect(healthView(credentialHealth(codearts, "credits"), "codearts"))
-      .toMatchObject({ kind: "known", percent: 100, tone: "ok" });
-    expect(credentialState(codearts, 0, credentialHealth(codearts, "credits"))).toBe("ready");
-    // 缺省账本＝主账，与调度口径一致
-    expect(credentialHealth(codearts)).toBe(-1);
-    // 非 CodeArts 渠道积分账恒 null → 内置组也只会读到 null（此时按「未探测」）
-    const trae = makeCredential({ provider: "trae", quota_credits_health: null }) as never;
-    expect(credentialHealth(trae, "credits")).toBeNull();
   });
 
   it("时长格式化覆盖秒/分/时/天与零值", () => {
@@ -440,6 +439,17 @@ describe("display helpers", () => {
     expect(formatTime(1_700_000_000)).not.toBe("—");
     expect(formatNumber(null)).toBe("—");
     expect(formatNumber(1234)).toBe("1,234");
+  });
+
+  it("时间拆成日期 / 时刻两段（明细表两行显示），空值只给一个破折号", () => {
+    // 1700000000 = 2023-11-15 06:13:20 UTC，本地时区换算后两段都要补齐 0
+    const [date, clock] = formatTimeParts(1_700_000_000);
+    expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(clock).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    // 与 formatTime 同一时刻（同一天，同一时区口径）
+    expect(formatTime(1_700_000_000)).toContain(String(Number(date.slice(0, 4))));
+    expect(formatTimeParts(null)).toEqual(["—", ""]);
+    expect(formatTimeParts(0)).toEqual(["—", ""]);
   });
 
   it("模型级冷却只展示生效中的条目，按剩余时长升序", () => {

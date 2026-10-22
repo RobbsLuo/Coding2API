@@ -164,7 +164,7 @@ class Candidate:
     expiry_ladder: list[tuple[int, float]] | None = None  # [(到期 epoch, 该包剩余额度)]
     # 本凭证请求**当前模型**的消耗倍率（credit_rate）：executor 按模型目录现查
     # 注入。0 = 免费渠道，参与「免费优先」排序档（见 Scheduler.select）；
-    # None = 未知 / 该模型无倍率数据（如 CodeArts 福利模型），不参与。
+    # None = 未知 / 该模型无倍率数据，不参与。
     credit_rate: float | None = None
     # 本凭证**当前在途请求数**（InflightGuard 现查注入）。用作「最少连接」负载
     # 键：并发请求摊到空闲号，避免全部压在同一凭证上（见 Scheduler.select）。

@@ -118,6 +118,36 @@ def test_select_account_rejects_vanished_credential(admin_client):
         app.state.credentials.credential_data = original  # type: ignore[method-assign]
     assert response.status_code == 400
 
+def test_upstream_auth_start_forwards_force_login_when_supported(admin_client):
+    """`force_login` 只传给支持的渠道，其余渠道仍按单参调用。"""
+    from src.provider.base import AuthFlow, AuthSession
+
+    app, client = admin_client
+    seen: dict[str, object] = {}
+    oauth = app.state.upstream_auth["codebuddy"]
+
+    async def with_flag(username: str, *, force_login: bool = False) -> AuthSession:
+        seen["flagged"] = (username, force_login)
+        return AuthSession(flow=AuthFlow.POLL, state="s1", auth_url="https://a")
+
+    async def plain(username: str) -> AuthSession:
+        seen["plain"] = username
+        return AuthSession(flow=AuthFlow.POLL, state="s2", auth_url="https://a")
+
+    original = oauth.start
+    try:
+        oauth.start = with_flag  # type: ignore[method-assign]
+        client.post("/api/auth/upstream/start",
+                    json={"provider": "codebuddy", "force_login": True})
+        assert seen["flagged"] == ("root", True)
+        oauth.start = plain  # type: ignore[method-assign]
+        client.post("/api/auth/upstream/start",
+                    json={"provider": "codebuddy", "force_login": True})
+        assert seen["plain"] == "root"
+    finally:
+        oauth.start = original  # type: ignore[method-assign]
+
+
 def test_upstream_auth_cancel_endpoint(admin_client):
     app, client = admin_client
     oauth = app.state.upstream_auth["codebuddy"]
@@ -270,8 +300,7 @@ def test_probe_endpoint_returns_quota_fields(admin_client):
 
     app.state.executor._deps.providers["codebuddy"] = Stub()
     body = client.post(f"/api/credentials/{credential_id}/probe").json()
-    assert body == {"probed": True, "remaining": 7, "total": 10, "cycle_end": 123,
-                    "credits_remaining": None, "credits_total": None}
+    assert body == {"probed": True, "remaining": 7, "total": 10, "cycle_end": 123}
 
 def test_import_triggers_immediate_probe(admin_client):
     """新增凭证后应立即探测，否则界面一直显示「未探测到额度」。"""

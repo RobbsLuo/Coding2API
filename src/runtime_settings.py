@@ -174,7 +174,7 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "允许并发，故同渠道同模型的并发请求不会被串行化。",
                minimum=0.0, group="channels"),
     HotSetting("codebuddy_intl_chat_min_interval", float,
-               "CodeBuddy 国际版聊天最小间隔（秒）",
+               "CodeBuddy 国际聊天最小间隔（秒）",
                "国际站（www.codebuddy.ai）专用节流（默认 5s，0 关闭）。与国内站"
                "各自独立、不共享——共用会让两站请求排进同一条队列互相空等。",
                minimum=0.0, group="channels"),
@@ -190,6 +190,11 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "独立，不共享。", minimum=0.0, group="channels"),
     HotSetting("codearts_chat_min_interval", float, "CodeArts 聊天最小间隔（秒）",
                "CodeArts 真实账号渠道专用节流（默认 5s，0 关闭）。与其余渠道各自"
+               "独立，不共享。", minimum=0.0, group="channels"),
+    HotSetting("officeace_chat_min_interval", float,
+               "OfficeAce 聊天最小间隔（秒）",
+               "OfficeAce 真实账号渠道专用节流（默认 0 关闭）。上游没有 CodeArts "
+               "那种硬并发限，被限流时走伪 200 的模型级短冷却；与其余渠道各自"
                "独立，不共享。", minimum=0.0, group="channels"),
     HotSetting("codearts_max_concurrency", int, "CodeArts 每账号并发上限",
                "CodeArts 上游硬限每账号并发会话数 3，超限请求直接 400 "
@@ -208,7 +213,7 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "后台任务相邻上游请求的最大间隔，必须不小于下限。", minimum=0.0,
                group="pacer"),
     HotSetting("activity_report_enabled", bool, "活跃上报",
-               "是否为 CodeBuddy（含国际版）账号补发对话事件以续连连登天数。官方"
+               "是否为 CodeBuddy（含国际）账号补发对话事件以续连连登天数。官方"
                "条款禁止脚本篡改活动数据，开启前请自行评估账号风险。", task="activity"),
     # 与开关配对：开着但时点不对等于没开，只热更开关会让用户以为改坏了。
     HotSetting("activity_report_hour", int, "活跃上报时点（0-23）",
@@ -737,6 +742,10 @@ class RuntimeSettings:
     @property
     def qoder_chat_min_interval(self) -> float:
         return float(self.get("qoder_chat_min_interval"))
+
+    @property
+    def officeace_chat_min_interval(self) -> float:
+        return float(self.get("officeace_chat_min_interval"))
 
     @property
     def codearts_chat_min_interval(self) -> float:

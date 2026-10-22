@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import inspect
 import time
 
 from fastapi import APIRouter, Depends, Request
@@ -155,7 +156,14 @@ def create_router(services: Services) -> APIRouter:
         require_admin(principal)
         provider_id = str(payload.get("provider") or "")
         if provider_id in services.upstream_auth:
-            session = await services.upstream_auth[provider_id].start(principal.username)
+            oauth = services.upstream_auth[provider_id]
+            # `force_login`（换账号）只有支持它的渠道认：浏览器里还留着上一个
+            # 账号的上游会话时，不先登出就会被云端直接放行成「同一个账号再登
+            # 一遍」，用户点了「新增账号」却始终拿不到另一条凭证。
+            session = (await oauth.start(principal.username,
+                                         force_login=bool(payload.get("force_login")))
+                       if "force_login" in inspect.signature(oauth.start).parameters
+                       else await oauth.start(principal.username))
         else:
             provider = services.registry.get(provider_id)
             builder = getattr(provider, "start_auth", None)

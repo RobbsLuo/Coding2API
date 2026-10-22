@@ -1,6 +1,6 @@
 # Coding2API
 
-把 **CodeBuddy**（国内站 + 国际版）、**TRAE SOLO**、**OpenCode Zen**、**Kilo Gateway**、**Qoder**、**CodeArts** 七个上游渠道封装为 OpenAI 兼容 API，提供公共凭证池、统一模型名与调度、按人用量统计。
+把 **CodeBuddy**（国内站 + 国际）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce** 八个上游渠道封装为 OpenAI 兼容 API，提供公共凭证池、统一模型名与调度、按人用量统计。
 
 > [!WARNING]
 > 逆向接口，仅供学习研究，未做安全审计；公网部署需反向代理 + 鉴权 + IP 白名单。
@@ -14,7 +14,7 @@
 - **公共凭证池**：admin 集中维护、全员共享、加密入库（`APP_SECRET`）；设备码登录、多账号切换、额度探测、每日签到、token 预刷新。
 - **三角色账号体系**：`admin` / `operator` / `viewer`，用户存 SQLite；一次性激活链接自设密码、首登强制改密、改角色/停用即时吊销会话；登录与写操作留审计。
 - **成长中心**（仅 CodeBuddy）：自动领 Buddy 旅行礼物、派 Buddy、领任务奖、断登补登、连登兑换、开盲盒；不可逆动作可用 `GROWTH_IRREVERSIBLE_ACTIONS=false` 关停；管理台可手动执行。
-- **脱敏统计**：不存对话内容；明细 90 天、小时汇总永久；按人/渠道/模型/凭证可视化；按 OpenRouter 刊例价估算成本（人民币为主）；明细面板带「实时」开关（SSE 推送刚落库的请求）。
+- **脱敏统计**：不存对话内容；明细 90 天、小时汇总永久；按人/渠道/模型/凭证可视化；按 OpenRouter 刊例价估算成本（人民币为主）；按「正文 token ÷ 生成时间总和」与「总产出 token ÷ 生成时间总和」两口径给出输出速度（tok/s，剔除批到达的不可测样本；概览卡片、分组表与逐请求明细同源）；明细面板带「实时」开关（SSE 推送刚落库的请求）。
 - **上游状态聚合**：把各模型 / 网关提供方的官方状态页（OpenCode Zen、Kilo、DeepSeek、Together、Moonshot、MiniMax、OpenAI、Anthropic）归一化后并排展示，用于区分「上游整体故障」与「本服务凭证 / 额度问题」。只做解释、不参与选号 / 熔断；快照只存内存、重启归零。
 - **侧栏数据提醒**：侧栏对应项上显示待办计数角标（凭证需重登/耗尽、未恢复告警、上次失败任务、异常上游源、待激活账号、本人将到期 Key、模型目录陈旧），不点进去也能看到；只数「待办」、按角色裁剪，见[下文](#侧栏数据提醒导航角标)。
 - **管理台安全加固**：登录限流、CSRF 校验、请求体上限、Host 白名单。
@@ -60,7 +60,7 @@ docker compose exec coding2api python scripts/create_user.py admin --role admin
 
 ```bash
 docker compose pull
-# 或指定版本：docker pull ghcr.io/robbsluo/coding2api:v0.8.1
+# 或指定版本：docker pull ghcr.io/robbsluo/coding2api:v0.9.0
 ```
 
 推送新版本：打 tag `v*` 推到 main 即触发 publish workflow（`.github/workflows/publish.yml`），同时打 `<tag>` 与 `:latest` 到 GHCR；也可在 Actions 页面手动触发。
@@ -111,10 +111,11 @@ echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-
 ## 使用
 
 1. 「凭证管理」添加凭证：
-   - **CodeBuddy**（含国际版）：设备码登录，或粘贴 `{"token":"..."}`。
+   - **CodeBuddy**（含国际）：设备码登录，或粘贴 `{"token":"..."}`。
    - **TRAE**：粘贴凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（`apiHost` 只接受官方地址）。
    - **Qoder / CodeArts**：设备码 / OAuth2 授权码登录（CodeArts 授权后把打不开的本地回调链接粘回页面）。
-   - **OpenCode Zen / Kilo Gateway**：无需添加——启动时自动出现虚拟凭证（被删可在同面板点「添加」补回）。
+   - **OfficeAce**：点「登录 OfficeAce」走华为云授权（回调由云端承接，无需粘链接、无需开本地端口）。
+   - **OpenCode Zen / Kilo**：无需添加——启动时自动出现虚拟凭证（被删可在同面板点「添加」补回）。
 2. 「API Key」创建 `sk-...`（明文仅显示一次）。
 3. 调用：
 
@@ -129,13 +130,13 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ### 模型名三字段
 
-七条渠道每个模型统一为三个字段：
+八条渠道每个模型统一为三个字段：
 
 1. **原代号**（`raw_id`）：渠道请求时真正发的 key，**永不改动**。各渠道内部代号互不相同（Qoder `kmodel_latest` = TRAE `kimi-k3-1`），也可能带命名空间前缀（Kilo 的 `kilo-auto/free`）。
 2. **归一键**：剥掉免费档标记（`-free` / 路径段 `free`）与命名空间前缀，再 slug 化——`kilo-auto`、`longcat-2.5-preview`。模型列表按它判断**哪个是同一个模型**并合并，故 Zen 的免费档能与 TRAE 的付费档并成一条。
 3. **展示名**（`name`）：清洗后的可读文本，如 `LongCat 2.5 Preview`、`Kimi K3`。上游给了可读名就用（`Qwen3.8-Max` → `Qwen3.8 Max`），没有就从原代号派生；品牌与缩写按官方写法纠正（`DeepSeek` / `MiMo` / `GLM` / `GPT`）。
 
-`GET /v1/models` 里**所有条目的 `id` 都是归一键**，转发到某渠道时自动换回该渠道原代号，`by_provider.{渠道}.raw_id` 可见。**原代号、展示名、归一键三种写法都能直接请求**（`kmodel_latest`、`Kimi K3`、`kimi-k3` 指向同一模型）。同渠道内归一键重复时退回原代号，避免撞名误并。**福利模型标记 `benefit`**：CodeArts 走每日免费 token 池的模型上游不给倍率，条目会带 `benefit: true`（单渠道在顶层、多渠道在 `by_provider.{渠道}`），Playground 据此在渠道徽章上打「福」标，与按积分计费的内置模型区分。
+`GET /v1/models` 里**所有条目的 `id` 都是归一键**，转发到某渠道时自动换回该渠道原代号，`by_provider.{渠道}.raw_id` 可见。**原代号、展示名、归一键三种写法都能直接请求**（`kmodel_latest`、`Kimi K3`、`kimi-k3` 指向同一模型）。同渠道内归一键重复时退回原代号，避免撞名误并。
 
 **价格与档位**：条目可选带 `cost {input, output, cache_read}`（USD / 百万 token，与统计侧成本估算同一份 OpenRouter 价表）与 `reasoning_efforts`（该渠道生效中的 `REASONING_EFFORT_MAP` 目标档位去重集合）。两者都是**有才给**：缺价、未配置档位映射时**不带该字段**，不填 0 也不编造。
 
@@ -152,7 +153,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ### 流式超时（默认关闭）
 
-七条渠道的上游流读取都设了 `read=None`（长回答不能被读超时打断），因此「上游接了连接却一直不吐数据」只能由网关自己兜：
+八条渠道的上游流读取都设了 `read=None`（长回答不能被读超时打断），因此「上游接了连接却一直不吐数据」只能由网关自己兜：
 
 - **首事件超时**（`STREAM_FIRST_EVENT_TIMEOUT_SECONDS`，默认 `0`）：客户端还**没收到任何内容**时超时，安全地换号重试——记 `upstream_first_event_timeout`，按瞬态错误处理（短冷却、不累计）。注释帧 / 心跳**不**重置计时。
 - **流内空闲超时**（`STREAM_IDLE_TIMEOUT_SECONDS`，默认 `0`）：**已出帧**后超时只能断流并以错误帧收尾（记 `upstream_idle_timeout`），**不换号**——半截输出无法回滚，换号会把两个账号的内容拼给客户端。
@@ -166,7 +167,7 @@ Playground 请求表单可选填 `temperature` / `max_tokens` / `reasoning_effor
 
 ## 渠道
 
-> CodeBuddy（含国际版）/ TRAE / Qoder / CodeArts 需填凭证；**OpenCode Zen 与 Kilo Gateway 是无凭证的免费层渠道**——池里是一条虚拟占位行（让调度 / 冷却 / 统计照常工作），额度列显示「免费层（无额度接口）」，健康度恒为「无探测」（未知 ≠ 耗尽）。虚拟行**删除后重启会复活**，永久停用请用「暂停」。
+> CodeBuddy（含国际）/ TRAE / Qoder / CodeArts / OfficeAce 需填凭证；**OpenCode Zen 与 Kilo 是无凭证的免费层渠道**——池里是一条虚拟占位行（让调度 / 冷却 / 统计照常工作），额度列显示「免费层（无额度接口）」，健康度恒为「无探测」（未知 ≠ 耗尽）。虚拟行**删除后重启会复活**，永久停用请用「暂停」。
 
 ### OpenCode Zen 免费层（`zen`）
 
@@ -174,9 +175,9 @@ Playground 请求表单可选填 `temperature` / `max_tokens` / `reasoning_effor
 
 **免费层门禁**：上游要求伪装成官方客户端（UA 版本、会话头、`stream:true`、tools 含 `bash`/`read`），本服务自动满足；注入的 `bash`/`read` 是空壳，模型真调用时这类 tool_call 被过滤掉，不泄漏你没声明过的函数。UA 版本用 `ZEN_OPENCODE_VERSION` 调，端点用 `ZEN_API_ENDPOINT`（须在 `ZEN_ALLOWED_ENDPOINTS` 内）；付费模型即使强制 `模型@zen` 也只报「不可用」。
 
-### Kilo Gateway 免费层（`kilo`）
+### Kilo 免费层（`kilo`）
 
-接 [Kilo Gateway](https://kilo.ai)（`api.kilo.ai/api/gateway`）的**免费模型**，无需账号或登录。对外是**标准 OpenAI 兼容协议**，无私有信封、无门禁伪装；上游 `/models` 每条带权威 `isFree` 布尔，本服务**据此直接过滤**免费集、**不做探活**（探活白耗本就极小的免费配额）。免费模型标 **x0**。
+接 [Kilo](https://kilo.ai)（`api.kilo.ai/api/gateway`）的**免费模型**，无需账号或登录。对外是**标准 OpenAI 兼容协议**，无私有信封、无门禁伪装；上游 `/models` 每条带权威 `isFree` 布尔，本服务**据此直接过滤**免费集、**不做探活**（探活白耗本就极小的免费配额）。免费模型标 **x0**。
 
 **额度与限流**：免费层额度很小（网关级约 200 请求/小时/IP），实为 OpenRouter 免费池的转发；上游 **429 与 502/503/504 都是模型级**——只冷却被点名的那个模型，本服务不自建熔断。端点用 `KILO_API_ENDPOINT`（须在 `KILO_ALLOWED_ENDPOINTS` 内）。
 
@@ -184,9 +185,9 @@ Playground 请求表单可选填 `temperature` / `max_tokens` / `reasoning_effor
 
 接 [Qoder](https://qoder.com)，**需要真实账号**：在「凭证管理 → 登录渠道账号」点「登录 Qoder」，按提示在浏览器完成设备码授权（登录全程后端轮询完成，Token 不经过浏览器）。上游是私有 COSY 协议（自定义 Base64 编码 + 信封式 SSE），本服务负责签名与解包，对外仍是标准 OpenAI 协议。
 
-**额度与签到**：支持额度探测（`GET /api/v2/quota/usage`）与每日签到（积分可累积）。签到为**活动制**（`/sash/api/v1/me/campaigns`，需带 `Cosy-ClientType`），旧 `daily-check-in` 仅作回退；本服务自动查询并领取可领活动，管理台可手动触发。**签到活动每日 10:00（UTC+8）刷新**（领取后 30 天有效），后台任务按该窗口封账：凌晨看到的「已领」只封到当天 09:59，10:00 新一轮出现后自动补签。新协议不提供连续天数，界面不再显示「连续 N 天」。**国际版没有签到接口**（该端点 404），记为「本区域无此接口」，不是错误。
+**额度与签到**：支持额度探测（`GET /api/v2/quota/usage`）与每日签到（积分可累积）。签到为**活动制**（`/sash/api/v1/me/campaigns`，需带 `Cosy-ClientType`），旧 `daily-check-in` 仅作回退；本服务自动查询并领取可领活动，管理台可手动触发。**签到活动每日 10:00（UTC+8）刷新**（领取后 30 天有效），后台任务按该窗口封账：凌晨看到的「已领」只封到当天 09:59，10:00 新一轮出现后自动补签。新协议不提供连续天数，界面不再显示「连续 N 天」。**国际站没有签到接口**（该端点 404），记为「本区域无此接口」，不是错误。
 
-**端点与节流**：默认国内版（`openapi.qoder.com.cn` + `gateway.qoder.com.cn`），国际版改 `QODER_API_ENDPOINT=https://openapi.qoder.sh` 并确认白名单含国际版域名（签名携带完整 `cosy-*` 头，白名单防误发）。默认 `QODER_CHAT_MIN_INTERVAL=5`（独立节流器），可在「任务与配置」热更。
+**端点与节流**：默认国内版（`openapi.qoder.com.cn` + `gateway.qoder.com.cn`），国际站改 `QODER_API_ENDPOINT=https://openapi.qoder.sh` 并确认白名单含国际站域名（签名携带完整 `cosy-*` 头，白名单防误发）。默认 `QODER_CHAT_MIN_INTERVAL=5`（独立节流器），可在「任务与配置」热更。
 
 **上游节点故障**：Qoder 有时把自身推理节点故障包成 400（`[FAIL]node:… msg:Execution failed`）。本服务识别为**模型级瞬时故障**——只冷却该模型，耗尽候选时返回「该模型暂时不可用」的 503（`no_healthy_credential`），而非误报「模型不存在」；稍后重试通常自愈。
 
@@ -196,17 +197,48 @@ Playground 请求表单可选填 `temperature` / `max_tokens` / `reasoning_effor
 
 **令牌刷新是刚性的**：refresh_token 与 `client_id=codearts-agent`、DPoP 私钥三者绑定且**一次性**，刷新后必须回写新 refresh_token，否则账号失效；由 token 预刷新任务自动完成（DPoP ES256/P-256 签名）。预刷新窗口封顶 45 分钟且必须**宽于**轮询周期（`REFRESH_INTERVAL_MINUTES`，默认 30 分钟）。续期凭据被上游作废时，该凭证标记「需重新登录」并停止自动重试，重新登录后按「恢复」解除。
 
-**每日签到**：上游有「每日签到领 1000 积分」活动（`GET /v1/ops/delivery` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`）。后台任务每日自动领取，管理台可手动触发；`claim` 后**必须** `confirm`（`CLAIMED` 是「已领未确认」而非终态），本服务两步一起做。**这套积分与每日 token 池是两套并行的账**：token 池给福利模型（`deepseek-v4.1-flash` 等）用，积分给系统内置模型（GLM-5.2 / OpenPangu 等）用，互不通气——两本账都在管理台显示（见下）。
+**每日签到**：上游有「每日签到领 1000 积分」活动（`GET /v1/ops/delivery` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`）。后台任务每日自动领取，管理台可手动触发；`claim` 后**必须** `confirm`（`CLAIMED` 是「已领未确认」而非终态），本服务两步一起做。签到发的积分计入本渠道唯一的账本（见下）。
 
-**优先消耗**：每日池用完即弃，故当日剩余登记为「次日本地 0 点到期」的到期额度，调度器优先排在其它渠道之前。上游按 token 计量，管理台统一显示为**积分**（1 积分 = 10000 token，每日池满额 = 1000 积分）；升级前落库的历史数据由 `scripts/convert_codearts_credit_unit.py` 一次性折算。**该「积分」是为跨渠道排序合成的折算值，与上游签到/套餐积分同名但不同物**。
+**额度＝积分余额**：额度探测走 `GET {snap}/snap-manager/v1/statistics/plugin`（前缀**必须**带 `snap-manager`，头 `Agent-Type: PromptCenter`），内置模型（GLM-5.2 / OpenPangu 等）按积分计费。上游数值本身即积分，**不做任何单位折算**；分项包（`基础积分` / `按需积分` / `福利积分`）走「套餐 N 个」悬浮明细，并登记**套餐到期日**（`end_date`，实测每账号不同）的到期阶梯——积分用不完同样作废，故调度「快过期的先用」也会先烧积分。该接口失败只记日志、不影响其余链路。
 
-**两本账的展示**：CodeArts 在凭证页拆成两组，**每组只讲一本账**——**内置**组显示**积分账**（`GET {snap}/snap-manager/v1/statistics/plugin`，内置模型 GLM-5.2 / OpenPangu 等用），**福利**组显示**每日额度池**（token 折算，福利模型用）。两本账在上游是两个独立接口、互不通气、数值量级差一个数量级，故分到两组、各带悬浮口径说明，不混在一个数字里。积分账的分项包（`基础积分` / `按需积分` / `福利积分`）走「套餐 N 个」悬浮明细，并登记**套餐到期日**（`end_date`，实测每账号不同）的到期阶梯——积分用不完同样作废，故调度「快过期的先用」也会先烧积分。**积分账不参与调度口径的健康度**（`health` 仍只看每日池，选号不变），积分接口失败只记日志、不影响余额探测结果；但**内置组的健康度徽章按积分账算**（后端派生 `quota_credits_health`），与该组额度列同源，不会出现「积分还剩 99%、健康度 0%」。**变动流水按账本分流**（`credit_events.ledger`）：内置组展开的是积分账流水，其余渠道与福利组展开的是每日池流水，两本账各记各的，混读会被当成同一本账的连续读数。
+**变动流水**：每轮探测按余额 diff 记一条 `credit_events`（`ledger=credits`，见下）。
 
-**凭证页拆成两个渠道**：管理台把 CodeArts 拆成 **CodeArts 内置**（可写，承载全部操作与积分账）与 **CodeArts 福利**（只读，只展示每日 token 池）两组，同一批账号各出现一次。**这是纯前端的展示拆分，后端仍是一个 `codearts` 渠道**——`refresh_token` 一次性且与 `client_id` + DPoP 私钥绑定，拆成两条凭证行会让两条各自刷新一次、第二条必报 `the refresh token has been used` 并烧掉票据。两本账的区分轴是**模型**（`is_benefit_model()` 逐请求判断），不是渠道，故这一拆分只影响展示与操作入口。
+**签名 / 累计全文 SSE / 节流与并发**：上游要求华为云 `SDK-HMAC-SHA256`（AK/SK + `X-Security-Token`），白名单 `CODEARTS_ALLOWED_ENDPOINTS` 必须含 snap 引擎、STS 与门户三个主机。流式 `text` 是**累计全文（替换语义）**而非增量，本服务在解析层还原为增量事件，对客户端透明。默认 `CODEARTS_CHAT_MIN_INTERVAL=5`；上游硬限**每账号并发会话数 3**，故配在途上限 `CODEARTS_MAX_CONCURRENCY` 与滑动窗口 `CODEARTS_REQUEST_WINDOW_SECONDS`（每账号每 60s 最多启动 3 次），把突发挡在 `400 TM.00001041` 之前。均可热更。
 
-**签名 / 累计全文 SSE / 节流与并发**：上游要求华为云 `SDK-HMAC-SHA256`（AK/SK + `X-Security-Token`），白名单 `CODEARTS_ALLOWED_ENDPOINTS` 必须含 snap 引擎、STS、福利网关与门户四个主机。流式 `text` 是**累计全文（替换语义）**而非增量，本服务在解析层还原为增量事件，对客户端透明。默认 `CODEARTS_CHAT_MIN_INTERVAL=5`；上游硬限**每账号并发会话数 3**，故配在途上限 `CODEARTS_MAX_CONCURRENCY` 与滑动窗口 `CODEARTS_REQUEST_WINDOW_SECONDS`（每账号每 60s 最多启动 3 次），把突发挡在 `400 TM.00001041` 之前。均可热更。
+### OfficeAce（`officeace`，真实账号）
 
-### CodeBuddy 国际版（`codebuddy_intl`，真实账号）
+接 [华为云 OfficeAce](https://www.huaweicloud.com/product/agentarts.html)（果办 / AgentArts 办公智能体），**需要真实账号**：点「登录 OfficeAce」，浏览器完成华为云登录与授权即可——**回调由云端承接**（`/v1/claw/auth/callback`），本服务不监听任何端口、用户也不需要粘链接，后端按 2.5s 轮询 `/v1/claw/auth/code` 取回授权码（与官方桌面端同一机制）。
+
+**开通前提**：账号必须先在 OfficeAce 客户端里登录并兑换邀请码完成开通。未开通的账号登录会「成功」但拿不到模型密钥（云端 `subscription: null`），本服务据此点名报出「华为云账号 xxx 还没开通 OfficeAce 服务」而不是含糊的登录失败。
+
+**两套凭据，寿命完全不同**（这是本渠道最容易踩错的地方）：
+
+| 凭据 | 寿命 | 用途 |
+|---|---|---|
+| `Basic model_app_key:model_app_secret` | **不过期** | 聊天转发（`{网关}/v2/chat/completions`） |
+| 临时 AK/SK + `security_token` + `project_id` | **约 2 小时** | 积分查询、签到（`/v1/subscription*`） |
+
+混用会得到 `APIG.0303 app not found`。丢了区别的现象也很迷惑：聊天一直正常（Basic 不过期），但积分列空白、签到一直失败（临时凭据过期）。临时凭据由预刷新任务自动续期，`refresh_token` 一次性轮换且与 `client_id=pdp5_for_agentarts` + DPoP 私钥三者绑定——**与 CodeArts 的票互不通用**（混用回 `STS5.1806 invalid client id`）。
+
+**上游就是标准 OpenAI 协议**，故对话层不写私有信封解析；但有三处上游特例必须处理：
+
+- **限流走伪 200**：HTTP 200 + `data:{"error":…}`，且实测出现过「首帧正常、第二帧才是错误」。错误帧照常产出交引擎分类，`81111/81114` 只冷却「该凭据 × 该模型」，其它模型不受影响。
+- **模型级拒绝不牵连整条凭据**：`81004`（该号没这个模型）/ `81009`（名字不认）走 403/404，若按状态码判会把整条凭据打死。故业务码判定先于状态码，归类为模型级负缓存（成功即撤销）。
+- **`max_tokens` 是「推理 + 正文」总预算**：可用模型里 9/11 是推理模型，给小了正文直接为空。`≥16` 时自动追加 1024 余量再夹到该模型硬上限（`glm-5*` 131072 / `qwen3*` 65536 / `deepseek-v4.1-flash` 393216），`<16` 原样透传（探活/测通道的精确请求），未给则不补。
+
+**积分即主账**：额度单位是 `officeace_points`（新用户一次性 + 每日签到各发一笔），`remaining`/`total` 直接就是积分。每笔奖励**有独立到期时间、不一并重置**，故额度口径写作「逐笔到期」，调度仍按到期阶梯「快过期的先用」。
+
+**每日签到**：`POST /v1/subscription/bonus/claim`（**写操作，调用即真发积分**；body 必须给 {} + JSON `Content-Type`，空 body 会回 500 `OfficeAce.11020001`）。上游对当日重复领取是幂等的，故不需要本地记「今天领过」。领取收获按**剩余量增量**计算（`points` 是活动累计发放量，由多个渠道共同贡献，拿它当本次收获会虚高）。封账到下个北京时间 0 点：次日新活动一出现就自动补签。
+
+**不做主动模型探活**：目录 34 个里实测只有 11 个真能用，但探活要真发推理、消耗积分，而额度是稀缺资源。模型级拒绝改由真实请求按 `BLOCKED` 负缓存处理，比开机烧 34 次推理省得多。同理**不做 credit 估算**：`cost_coefficient` 与 `tokens_per_point` 的叠乘关系官方未说明，凭空折算会与真实扣点对不上。
+
+**签名与端点**：控制面 `/v1/claw/*` 用华为云 `SDK-HMAC-SHA256`；模型网关 `/v1/subscription*`、`/v1/model-token-rates` 只认 **`V11-HMAC-SHA256`**（多一层 region 作用域 + 签名密钥派生），用错回 `APIG.0624` 或 401。`OFFICEACE_ALLOWED_ENDPOINTS` 只需含控制面主机——模型网关每个账号不同，是上游 `client-permission-validate` 签发并存在凭证里的值，不是本服务能配错的东西。默认 `OFFICEACE_CHAT_MIN_INTERVAL=0`（上游没有 CodeArts 那种硬并发限），可热更。
+
+**单账号单用户**：官方《套餐管理》明确「个人版面向个人用户，限制单账号单用户使用」，故本渠道不做多人共用，每个使用者各自添加自己的凭证。
+
+**换账号**：华为云会话按**浏览器**走——浏览器里还留着上一个账号时，云端会直接放行、把「新增账号」变成「同一个账号再登一遍」。故登录按钮旁额外给一个**「换账号」**（`force_login=true`），它先走 `/authui/logout?service=…` 清掉会话再授权。未开通的账号会明确报出是哪个号没开通，而不是笼统的「登录失败」。
+
+### CodeBuddy 国际（`codebuddy_intl`，真实账号）
 
 接 CodeBuddy 国际站 [www.codebuddy.ai](https://www.codebuddy.ai)，**与国内站同协议**（同一套 `/v2/chat/completions`、`/v3/config`、`/v2/plugin/auth/*`、`/v2/billing/*` 路径，同一 Keycloak realm），但**是两套独立账号体系**：各自注册、各自计费，故作为**独立渠道**存在。登录链路与国内版完全一致（设备码，Token 不经过浏览器）。
 
@@ -230,7 +262,7 @@ Playground 请求表单可选填 `temperature` / `max_tokens` / `reasoning_effor
 PROVIDER_PROXIES="codebuddy=http://127.0.0.1:7890;qoder=socks5://127.0.0.1:1080"
 ```
 
-格式 `渠道=代理URL;渠道2=代理URL2`，渠道取七个渠道名，协议支持 `http/https/socks5/socks5h`，留空 = 全部直连。作用于该渠道**全部出站请求**（聊天流、额度/模型拉取、后台任务与 OAuth 登录）。**启动期项**，改后需重启。**严格解析**：未知渠道 / 非法协议 / 缺 `=` 一律启动失败——「以为走了代理其实直连」比启动报错更糟。环境变量 `HTTP_PROXY` 等一律**不采信**（`trust_env=False`，防部署环境全局代理意外劫持带 Token 的上游请求）。
+格式 `渠道=代理URL;渠道2=代理URL2`，渠道取八个渠道名，协议支持 `http/https/socks5/socks5h`，留空 = 全部直连。作用于该渠道**全部出站请求**（聊天流、额度/模型拉取、后台任务与 OAuth 登录）。**启动期项**，改后需重启。**严格解析**：未知渠道 / 非法协议 / 缺 `=` 一律启动失败——「以为走了代理其实直连」比启动报错更糟。环境变量 `HTTP_PROXY` 等一律**不采信**（`trust_env=False`，防部署环境全局代理意外劫持带 Token 的上游请求）。
 
 > ⚠️ **容器部署时 `127.0.0.1` 指容器自身，不是宿主**。代理跑在宿主上（Clash / mihomo 等）时必须写成 `host.docker.internal`：
 >
@@ -278,7 +310,7 @@ claude
 
 **鉴权**：`x-api-key` 与 `Authorization: Bearer` 都接受。**流式**：`message_start` → `content_block_start/delta/stop` → `message_delta`（含 `stop_reason` 与 usage）→ `message_stop`；无 `[DONE]` 哨兵，thinking 块在 `content_block_stop` 前补 `signature_delta`。**缓存命中**：出口 usage 按 Anthropic 语义拆两笔——`input_tokens` 只计未命中，命中另记 `cache_read_input_tokens`（内部 `input_tokens` 是 OpenAI 口径的 `prompt_tokens`，含命中），Claude Code 据此显示缓存读 token。**`count_tokens`**：`POST /v1/messages/count_tokens` 本地估算输入 token（不转发上游）。**图片**：`image` 块（`source.type=base64` 拼成 `data:` URL、`source.type=url` 直传）归一为 chat 的 `image_url` 内容块，`tool_result.content` 内的图片同样保留——纯文本内容仍折成字符串，故无图请求的映射结果与旧版逐字节一致。**不支持**：`document` 块（PDF，chat 上游无对应表达）、`source.type=file`、Anthropic 服务端工具一律显式 400。
 
-**`cache_control` 透传**（默认开启，无开关）：入站的缓存提示标记原样带给上游，落点与 Anthropic 一致——`system` 内容块、user/assistant 消息内容块、`tool_result`（挂 tool 消息**顶层**，不造空 text 块）、assistant `tool_calls` 元素顶层、`tools` 元素顶层。只做**结构**校验（必须是对象、必须有非空字符串 `type`、`ttl` 若给必须是字符串），取值不解释（未知 `type` 也透传，上游将来新增的缓存类型不该被本网关挡掉）；结构不合法显式 400 而不是静默丢弃。**不带标记时映射结果与旧版逐字节一致**（纯文本仍折成字符串），故会话粘性指纹与上游前缀缓存不受影响。七渠道实测 6 个接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo），**zen 未验证**（该渠道上游返 `FreeTierError` 403，`--plain` 对照同样失败，与标记无关）；实测脚本 `scripts/probe_cache_control.py`。
+**`cache_control` 透传**（默认开启，无开关）：入站的缓存提示标记原样带给上游，落点与 Anthropic 一致——`system` 内容块、user/assistant 消息内容块、`tool_result`（挂 tool 消息**顶层**，不造空 text 块）、assistant `tool_calls` 元素顶层、`tools` 元素顶层。只做**结构**校验（必须是对象、必须有非空字符串 `type`、`ttl` 若给必须是字符串），取值不解释（未知 `type` 也透传，上游将来新增的缓存类型不该被本网关挡掉）；结构不合法显式 400 而不是静默丢弃。**不带标记时映射结果与旧版逐字节一致**（纯文本仍折成字符串），故会话粘性指纹与上游前缀缓存不受影响。八渠道实测 6 个接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo）；**zen 未验证**（上游返 `FreeTierError` 403，`--plain` 对照同样失败，与标记无关）、**OfficeAce 未单独验证**（未跑该探针）；实测脚本 `scripts/probe_cache_control.py`。
 
 ### CC Switch 一键导入
 
@@ -306,7 +338,7 @@ claude
 
 ```json
 {
-  "status": "ok", "service": "coding2api", "version": "0.8.1",
+  "status": "ok", "service": "coding2api", "version": "0.9.0",
   "credentials": {"total": 5, "ready": 4, "cooling": 1, "paused": 0, "disabled": 0}
 }
 ```
@@ -347,9 +379,9 @@ claude
 
 ## 凭证暂停
 
-凭证列表行内菜单的「暂停」只把该凭证摘出**对话流量**：后台的额度探测、token 预刷新、每日签到、成长中心、活跃上报照常运行（这些任务只认系统硬禁用 `disabled`）。适合「先不接聊天、但积分继续领」；「取消暂停」立即放回池子。与状态列的「已禁用」不同——那是渠道判定会话失效后的系统禁用，需重新登录后用「恢复」解除。同一开关也在 `POST /api/credentials/{id}/toggle`。
+凭证列表行内菜单的「暂停」把该凭证摘出**对话流量**，并让**每日签到 / token 预刷新**跳过它（这两类任务对 `disabled` 与 `enabled=0` 一视同仁）。其余后台任务（额度探测、成长中心、活跃上报）仍照常运行（只认系统硬禁用 `disabled`），适合「先不接聊天、但积分继续领」；「取消暂停」立即放回池子。与状态列的「已禁用」不同——那是渠道判定会话失效后的系统禁用，需重新登录后用「恢复」解除。同一开关也在 `POST /api/credentials/{id}/toggle`。
 
-> OpenCode Zen / Kilo Gateway 是无凭证渠道，池里是一条虚拟占位行。**暂停它是永久停用的唯一方式**——删除后下次重启会被种子重新补上。暂停也会把该渠道从模型列表摘掉。
+> OpenCode Zen / Kilo 是无凭证渠道，池里是一条虚拟占位行。**暂停它是永久停用的唯一方式**——删除后下次重启会被种子重新补上。暂停也会把该渠道从模型列表摘掉。
 
 ## 凭证批量运维
 
@@ -365,7 +397,7 @@ claude
 
 ## 凭证限额护栏
 
-凭证级**可选**护栏，给「这个号别用超」一个显式开关：行内菜单「设置限额」配置，四个护栏各自独立、全部留空 = 不受限（老库升级后行为不变）。判定在**选号前**完成，触顶的凭证不再参与对话流量；后台任务（签到 / 探测 / 成长中心）照常运行，与「暂停」同口径。
+凭证级**可选**护栏，给「这个号别用超」一个显式开关：行内菜单「设置限额」配置，四个护栏各自独立、全部留空 = 不受限（老库升级后行为不变）。判定在**选号前**完成，触顶的凭证不再参与对话流量；后台任务（签到 / 探测 / 成长中心）照常运行——限额只管「对话用量」，与「暂停」（连签到/预刷新一并停掉）不是一回事。
 
 - **保留积分**：账户剩余积分 **≤** 该值时整号停用——给号留底，避免把额度跑空。与当日用量无关；余额未知（渠道不上报）时不猜、不停用。
 - **每日 token 上限**：当日累计 `输入 + 输出` token **达到**该值时整号停用。
@@ -395,18 +427,18 @@ claude
 - **筛选工具条**：搜索（昵称 / 渠道 / id，忽略大小写）× 渠道 × 状态 × 标签四件套。四者是 **AND** 关系，纯前端收敛，不改后端排序（后端仍按 `sort` / `order` 给全量）。命中时显示「筛选后 N / 总数」，并提供「清空」；无匹配给空态而非空白表格。渠道 / 状态 / 标签下拉里的计数来自当前全量，切换筛选不会自我缩窄。**标签下拉只在池里真的出现过标签时渲染**（没有标签时不留一个恒为「全部标签」的空控件）；标签是结构化维度，**不参与搜索词匹配**——否则「查一个恰好叫『生产』的昵称」会变得不可能。
 - **标签**：每条凭证可贴任意个运维标签（逗号分隔，最多 16 个、单个 ≤ 24 字符；半角/全角逗号与分号都当分隔符），入口在行内「更多操作 → 设置标签」。标签**只用于列表筛选与展示**，不参与选号、不改变任何请求行为——把标签当策略用会让改名静默改变线上流量。行内最多列两个标签，多余收成 `+N` 并在悬浮里给全量。
 - **组排序**：单独一个控件，只重排「渠道组」，不动组内行序（行序仍由列头 / 后端 `sort` 决定）。默认**额度从高到低**，按组内额度剩余合计排名，让还能打最多的渠道排前面；可切回**渠道顺序**（固定，30s 轮询不会让组头乱跳）。无额度接口的免费层垫底（不当 `0` 参与比较），额度相同（含都为 null）时回落到渠道顺序。
-- **按渠道分组**：列表按渠道聚合，组头做成一张紧凑的「渠道仪表盘」——品牌图标 + 渠道名 + 账号数，加上**状态分布**（图标 + 计数，只列出现过的态，口径与行内状态徽章同一套 `credentialState`）、**额度合计**（占比环 + 数字；环是纯图形仪表，精确百分比写在「额度合计 / 积分合计」标签行，对组内非 null 值求和，免费层 zen / kilo 无额度接口时显示 `—` 而不是 `0`，也不出环），以及**到期积分**（主窗口 1.5 天一块，次窗口 7 天仅在**比主窗口多**时再出一块——次窗口是主窗口的超集，数字相同说明没有超出 1.5 天的部分）。点组头折叠 / 展开该渠道，**默认全折叠**（首屏先看结构，要看具体账号再展开）；筛选生效时自动展开命中渠道，清空筛选回到折叠总览。组顺序默认「额度从高到低」，也可用工具条切到固定的全站渠道顺序（CodeBuddy、TRAE 在前），不随行排序键变化。渠道名只出现在组头，行内不重复。**额度合计按本组那本账取**：CodeArts 内置组是积分账合计（标签写「积分合计」），其余组是每日池合计。
+- **按渠道分组**：列表按渠道聚合，组头做成一张紧凑的「渠道仪表盘」——品牌图标 + 渠道名 + 账号数，加上**模型**（该渠道当前能提供的模型数量 + **最低倍率**，数据源与 Playground / `/v1/models` 同源，只算有可用凭证且过当前黑名单的渠道；**最低倍率只统计收费模型**——免费额度（0）不参与取最小，否则渠道里混着 1~2 个免费模型就会显示「最低 免」，读起来像整个渠道免费；整组都免费时才写「全免」；自定义别名不算独立模型（后端克隆目标条目，算进来会虚高）；组头只给数量与最低倍率，hover 展开**卡片式浮层**——头部是渠道身份 + 条数胶囊，中部是限高内滚的逐条「模型名 + 该渠道倍率」清单，底部是倍率口径脚注。几十条模型铺开会把组头撑成十几行，而「几个模型、最便宜多少」正是判断这渠道值不值得展开的第一信息。倍率按渠道取（`by_provider` 优先，单渠道回退合并值），多渠道模型各渠道倍率不同，不能拿合并值冒充；`0` 显示成「免」并着色，未给倍率的显示 `—` 而不是当免费；模型列表未取到时整块不渲染，不显示「0 个」。模型块是**独立的可聚焦按钮**（放在折叠按钮外——button 套 button 会被 HTML 解析器拆开），键盘 Tab 到它同样能打开清单，不依赖鼠标 hover）、**状态分布**（图标 + 计数，只列出现过的态，口径与行内状态徽章同一套 `credentialState`）、**额度合计**（占比环 + 数字；环是纯图形仪表，精确百分比写在「额度合计 / 积分合计」标签行，对组内非 null 值求和，免费层 zen / kilo 无额度接口时显示 `—` 而不是 `0`，也不出环），以及**到期积分**（主窗口 1.5 天一块，次窗口 7 天仅在**比主窗口多**时再出一块——次窗口是主窗口的超集，数字相同说明没有超出 1.5 天的部分）。点组头折叠 / 展开该渠道，**默认全折叠**（首屏先看结构，要看具体账号再展开）；筛选生效时自动展开命中渠道，清空筛选回到折叠总览。组顺序默认「额度从高到低」，也可用工具条切到固定的全站渠道顺序（CodeBuddy、TRAE 在前），不随行排序键变化。渠道名只出现在组头，行内不重复。**一个真实渠道一个组**：CodeArts 额度就是积分，组头额度合计标签写「积分合计」，其余渠道写「额度合计」。
 - **列头跟着展开区走**：没有全局表头，列头（含排序按钮与列说明）渲染在每个展开的渠道组内部，并在滚动容器里吸顶——折叠态下组头本身就是总览，列名没有对应内容，只有展开某组时才需要「这一列是什么」的锚点。同一时间可能有多个组展开，各组列头共用同一套排序状态（点任一处都写回同一个后端 `sort` 参数）。**「成长中心」列只在支持的渠道（CodeBuddy）出现**，其余渠道留一个空占位格——列数保持恒定，否则 auto 布局会重算列宽、下面展开的组整列错位。
-- **CodeArts 拆成两个渠道组**：**CodeArts 内置**（可写，承载全部操作、积分入口、积分账与套餐明细）与 **CodeArts 福利**（只读，只展示每日 token 池），同一批账号各出现一次，组头 label 带「内置 / 福利」后缀，内置在前。**两组各讲一本账**：内置组额度列是积分账（`积分 x / y`，排序键 `quota_credits_remaining`），福利组是每日 token 池；变动流水入口也按账本读（内置组读 `ledger=credits`，福利组不渲染入口）。**到期积分也按账本拆**：后端把两段合并阶梯分开存（积分那一段另存 `quota_credits_expiry_ladder`），福利组读每日池那一段、内置组读积分账那一段，两组各显各的、互不串账。福利组收掉探测 / 签到 / 更多操作、积分记录入口与套餐明细，但**列数不变**：组头与行内的选择框仍渲染，只是置为**禁用**——空占位格的内容宽度与内置组不同，表格 auto 布局下本行各列起点会与内置组错开，同尺寸的禁用框才能真正对齐。这是**纯前端展示拆分，后端仍是一个 `codearts` 渠道**（`refresh_token` 一次性，拆两条会互相烧票），两本账的区分轴是模型而非渠道。
+- **一个渠道一个组**：组头 label 就是渠道展示名，`ProviderGroup.key === provider`；CodeArts 不再拆「内置 / 福利」两组（福利链路已下线，额度就是积分账）。行内额度列读的是同一个渠道账本：CodeArts 是积分（`ledger=credits`），其余渠道是套餐 / 每日余额（`ledger=pool`），由 `providerLedger()` 派生。
 - **长列表可滚**：表格限高（70vh），滚到第 20 行时该组的吸顶列头与「操作」按钮仍在。
 
-额度列的数字带虚线下划线：悬浮显示**本行的周期口径**（本周期剩余 / 账户剩余 / 每日额度池 / 免费层无额度接口），逐行的同款文案收进悬浮说明。
+额度列的数字带虚线下划线：悬浮显示**本行的周期口径**（本周期剩余 / 账户剩余 / 积分余额 / 免费层无额度接口），逐行的同款文案收进悬浮说明。
 
 ## 模型列表加载
 
 `GET /v1/models` 与 Playground 的模型下拉只合并**当前有可用凭证**的渠道：该渠道至少有一条**未暂停、未会话失效**的记录。判定在缓存之前——没凭证的渠道不读缓存、不拉上游、不展示，故**从未接入**的渠道不出现「幽灵模型」；**全部暂停 / 凭证失效**时其模型暂时消失，恢复或补一条凭证后立刻回来；冷启动默认只有 `zen` / `kilo`（自带虚拟凭证）。冷却中的凭证仍算「有凭证」——只是暂时限流，列表不闪没。
 
-**展示顺序**：CodeBuddy、TRAE、Qoder、CodeArts 的模型依次排在前面，组内按模型名字典序；多渠道模型按最高优先级渠道归位。纯展示排序，不改变调度选号。
+**展示顺序**：CodeBuddy、TRAE、Qoder、CodeArts、OfficeAce 的模型依次排在前面，组内按模型名字典序；多渠道模型按最高优先级渠道归位。纯展示排序，不改变调度选号。
 
 **请求路由只认这份模型缓存列表**：模型目录能证明某模型归属哪些渠道时，候选渠道就只有它们——登记了该模型的渠道全部不可用（都在冷却 / 都被暂停）时直接返回 503，不再把请求逐个渠道试过去（各上游只会回 11102 / 4001 / 401，还会给渠道写下数小时的「该后端无此模型」负缓存）。模型完全不在目录里时仍按全部候选渠道路由；直连指定（`模型@渠道`）与 Key 渠道绑定不受影响。
 
@@ -435,6 +467,10 @@ OpenRouter 收录数百条，其中多数本服务没接。每行带 `available`
 三态判定：**成功**（拿到内容或正常收尾）→ 立即清该渠道的 `blocked` 负缓存，模型马上回到池子，这是 TTL 走完之外的**唯一提前恢复入口**；**`failed`**（上游明确 `BLOCKED` / `INVALID`）→ 保留负缓存并累加连续失败；**`inconclusive`**（额度、限流、并发打满、网络、超时、空流、任何异常）→ **绝不禁用**，并把连续失败归零——一串无关故障不该凑成「连续失败」把好模型判死。
 
 探活与生产完全隔离：直连 `provider.stream_chat`，不经 executor，不写 `usage_events`、不动冷却表（除成功时清 `blocked`）、不改健康度、不参与任何出口判断；结论落独立的 `model_probes` 表，只供页面展示（探测失败 ≠ 上游拒绝）。`reason='model'`（6004 限流）不探——它有自己的重置墙钟。
+
+面板**不列出命中 `MODEL_BLOCKLIST` 的模型**（口径同 `/v1/models`：原样名与归一键任一命中即滤，现读热更值）：黑名单是管理员「这个模型我不要了」的显式决定，它已被排除在模型列表外，再在探活面板冒出来只会诱导管理员反复去救一个已主动弃用的模型。
+
+**判死的模型同时从模型列表里暂时摘掉**：`failed` 且该 (渠道, 模型) 仍被 `blocked` 负缓存锁着时，`/v1/models` 与别名表把**这一对**抽掉——只抽该渠道，别的渠道正常时同一模型照常展示（多渠道条目退化成单渠道条目）。到期口径与负缓存同一个 `cooling_until`（6–24h 起步的退避）：负缓存一过期就自动回列表，因为此后没人再探它，只看 `failed` 会让它永久消失。与黑名单同口径——用户点名直连指定模型不受影响。
 
 **人工接管**（`POST /api/models/probes/manual`，`manual=on|off`）：接管后自动探活整行跳过，避免后台与人工结论互相打架；接管**不**改负缓存——要立刻恢复请点「立即探活」（`POST /api/models/probes/probe`，不受接管标记限制）。后台周期由 `MODEL_PROBE_MINUTES` 控制（默认 `0` = 关闭，可热更）。
 
@@ -484,24 +520,28 @@ OpenRouter 收录数百条，其中多数本服务没接。每行带 `available`
 
 **请求 ID（`X-Request-ID`）**：每个请求都在响应头带一个 `X-Request-ID`（任何响应都带，含被拒的 413 / 400）。入站 `X-Request-ID` 合法则沿用（便于与客户端日志对齐），否则自生成；合法字符集 `[A-Za-z0-9._:-]`、长度 1–128，越界即丢弃改用自生成（客户端可写，不校验会被塞入换行/超长串）。该 ID 随请求落进 `usage_events.request_id`，统计页「请求明细」的**时间列悬停**可见——用于把用户报的一个请求与这行明细对齐。老库历史行为 `NULL`（不回填）。**不透传到上游**：各渠道出站头语义不同（qoder 的 `X-Request-ID` 是 uid 派生的防重放值，trae/codearts 有指纹敏感头），统一改写会破坏既有契约。
 
-统计页 **Credit 消耗**列：CodeBuddy 是上游**真值**；TRAE 的 `token_usage` 帧只有 token 数，credit 按官方单价**推算**并标 `≈`；CodeArts 福利模型按每日池 1:1 扣减推算，同样标 `≈`。单价表集中在 `src/provider/trae/pricing.py` 与 `src/provider/codearts/units.py`，未收录的模型不推算（显示 `—`）。历史明细可分别用 `scripts/backfill_trae_credit.py` / `scripts/convert_codearts_credit_unit.py` 补齐。
+统计页 **Credit 消耗**列：CodeBuddy 是上游**真值**；TRAE 的 `token_usage` 帧只有 token 数，credit 按官方单价**推算**并标 `≈`。单价表集中在 `src/provider/trae/pricing.py`，未收录的模型不推算（显示 `—`）。历史明细可用 `scripts/backfill_trae_credit.py` 补齐。
 
 **成本（估算，≈）**：按 token × 公开刊例价估算，不是上游真实扣费。单价取自 **OpenRouter 公开模型目录**（`pricing.prompt` / `completion` / `input_cache_read`，USD / 百万 token），按 `(输入−命中)×输入价 + 命中×缓存价 + 输出×输出价` 折算美元，再按**写入时生效的汇率**（`USD_CNY_RATE`）折人民币。
 
 - **写入时定值**：成本在写明细时算好落库（`usage_events.cost_usd` / `cost_cny`），历史行**不随价表或汇率重算**；上线前历史两列为 `NULL`，可用 `scripts/backfill_cost.py --apply` 补齐（默认预览、写库前自动备份、幂等）。
-- **匹配不到就不计**：本地模型名按 OpenRouter 的 `id` / 展示名等值匹配（`src/model_match.py`，**命中不唯一就不配**），未匹配或未上报输入 token 的不计入，聚合值 `null` 显示 `—`（**不拿 0 冒充免费**），故成本是**下限**。
+- **匹配不到就不计**：本地模型名按 OpenRouter 的 `id` / 展示名等值匹配（`src/model_match.py`，**命中不唯一就不配**），未匹配或未上报输入 token 的不计入，聚合值 `null` 显示 `—`（**不拿 0 冒充免费**），故成本是**下限**。渠道分发代号按显式等价规则归到基础模型：OfficeAce 的 `deepseek-v4.1-flash-0930`（快照日）与 CodeBuddy 国际站的 `deepseek-v4.1-flash-sg`（区域）都按 `deepseek-v4.1-flash` 的刊例价算；只登记实测过的 id，**不做通用「剥日期 / 剥区域尾缀」**——OpenRouter 的 `deepseek-v4.1-flash-1017` 是另一个价位的快照，剥尾会把两套价格混成一个。
+- **改价表后补历史**：等价规则改动只影响**新写入**的明细；已有明细两列不会自动重算，`scripts/backfill_cost.py --apply`（默认预览、写库前自动备份、幂等）可按当前价表补上。
 
 **缓存命中率**：**Token 消耗**卡片在 token 分项后追加缓存命中率 = 命中 token ÷ 输入 token（保留 1 位小数）；**未上报或输入为 0 时显示 `—`**。**分组统计**表的 Token 合并列与**请求明细**表的 Token 合并列都把命中率与 token 放同一格（「输入 / 输出 · 命中率」），同公式、同占位规则（派生列不参与排序）。
+
+**输出速度（tok/s）**：**输出速度**卡片、分组表的「速度」合并列与**请求明细**表的速度列都按 `token 总量 ÷ 生成时间总和` 算，**不是逐条比值再平均**——短请求的逐条比值噪声大，逐条平均会把整体数字带歪；总量相除才是池级吞吐。聚合口径的两个分子**分母相同**，只是分子不同：**正文速度**的分子是 `output_tokens - reasoning_tokens`（贴近屏幕上看到的正文刷新速度），**总产出速度**含思考 token（思考成批快速吐出，数字会明显更高——实测思考占输出 50–67% 时两者约 190 与 63 tok/s）；前端把它们并成一格显示成 `正文 / 总产出`（`88.2 / 198.8 tok/s`），列头下拉仍可分别排序。总览卡片给正文速度，总产出速度写在卡片 hint 里。**只算经本服务路由的成功请求，且该请求产出了至少 1 个 token**（**不设输出量下限**——短输出也是真实产出，剔掉会让短问答为主的渠道永远没有速度；输出为 0 / 未上报的请求没有可测产出，不算样本，不是「慢」）。生成时间 = 明细的 `latency_ms - ttfb_ms`（扣掉首字等待），并加两道物理合理性下限：**生成窗口 < 200 ms** 或**单条样本 > 1000 tok/s** 的按「生成时长不可测」剔除、不算样本——上游把整段内容攒成一批吐时首帧与末帧几乎同时到达，分母趋近 0 会把比值放大成 30 万 tok/s 这种天文数字（本地实测 901 token / 3 ms），它不是「很快」而是测不出来。`ttfb_ms` 为 `NULL`（非流式请求等）时没有可分离的生成时间，**该请求不进主口径**；若某行/某组在主口径下**一条样本都没有**，回落估算口径：拿端到端耗时当分母（**含首字等待**），样本门槛与主口径一致（同样只要「有输出 token」），同样套用上面两道下限，展示前置 `≈`——提醒它不是同一口径，别与不带 `≈` 的值直接比。两口径都没有样本（或输出全是思考 token，正文速度为 0）时该侧显示 `—`（不拿 0 冒充）。
+与分位列同源：聚合速度也只能从**逐请求明细**算（小时汇总没有单请求输出量、思考 token 数与逐请求耗时，无法按「单请求输出量 / 生成窗口」筛样本），故**只覆盖最近 90 天**；总览卡片同样如此（其余卡片读小时汇总）。**请求明细**给的是**每一条请求自己**的速度：同样按生成窗口（`latency - ttfb`）与那两道物理下限算，但**不回落估算口径**——逐行没有相邻样本摊平首字等待，拿端到端耗时除出来的单条比值只会误导，故无生成窗口的行直接显示 `—`（`tps` / `tps_visible` 字段）。分组表速度列与明细表速度列都可点表头排序（正文 `sort=tps_visible`、总产出 `sort=tps`，无样本的行/组按可空列语义排最后 / 升序时最前）。
 
 ### 积分记录
 
 凭证**额度**列数字后的下箭头展开「变动流水」，记录**两次额度探测之间的净变化**，不是动作归因：签到、成长、对话都会改余额而上游不打日志，探测只能看到区间净变化，界面一律写「净变化」而非「签到 +5」。首次探测只建基线；余额没变不记；余额变「未知」仍记但不填变化量；保留 90 天。
 
-**按账本分流**：CodeArts 有两本账（每日 token 池 / 积分账），流水表因此带 `ledger` 列（`pool` / `credits`），同一轮探测为每本账各记一条。内置组展开的是积分账流水（`ledger=credits`），其余渠道与福利组展开的是每日池流水（`ledger=pool`）；接口 `GET /api/credentials/{id}/credit-events` 用 `ledger` 查询参数选账本（缺省 `pool`，未知取值回落 `pool`）。**必须分开读**：两本账数值量级差一个数量级，混在一个列表里会被当成同一本账的连续读数。老库升级时历史流水一律归 `pool`——它们本就由每日池的探测 diff 产生。
+**按账本分流**：流水表带 `ledger` 列（`pool` / `credits`），每轮探测按凭证自己的渠道记一条——CodeArts 的额度来自积分接口，记 `credits`；其余渠道记 `pool`。CodeArts 行展开的是积分账流水（`ledger=credits`），其余渠道是套餐 / 每日余额流水（`ledger=pool`）；接口 `GET /api/credentials/{id}/credit-events` 用 `ledger` 查询参数选账本（缺省 `pool`，未知取值回落 `pool`）。**必须分开读**：两本账数值量级与语义都不同，混在一个列表里会被当成同一本账的连续读数（老库里 CodeArts 的历史 `pool` 行是已下线的每日 token 池口径，与积分差一个数量级）。老库升级时历史流水一律归 `pool`——它们本就由当时的余额探测 diff 产生，不再展示。
 
 ### 分组维度与重新汇总
 
-**分组统计**面板用 tabs 切四个维度（按渠道 / 按模型 / 按用户 / 按凭证），共用同一张表（渠道 / 请求（请求数 · 成功率，悬停看成功数）/ Credit / 成本 / Token（输入 ÷ 输出 · 命中率，悬停看命中 token）/ 平均延迟（耗时 ÷ 首字）/ P95 延迟（耗时 ÷ 首字）），共 7 列。对应端点 `GET /api/stats/by-provider|by-model|by-user|by-credential`。默认按请求数降序，点列头可切换排序；请求 / Token / 平均延迟 / P95 延迟四个合并列点列头弹菜单选子列再排序（`sort=requests|ok_count|input_tokens|output_tokens|cached_tokens|avg_latency_ms|avg_ttfb_ms|p50_latency_ms|p90_latency_ms|p95_latency_ms|p99_latency_ms|p50_ttfb_ms|p90_ttfb_ms|p95_ttfb_ms|p99_ttfb_ms`），成功率与命中率是派生只读值不参与排序。**延迟分位可切换**：P95 列的表头有 P50 / P90 / P95 / P99 四档切换（默认 P95，不铺开四列以免表头拥挤）；四档由同一次窗口函数子查询算出，取整口径一致（nearest-rank，n 为**有值**样本数）。**按用户 / 按凭证**只对 admin 与 operator 展示。**口径差异**：渠道 / 模型 / 用户三维读**小时汇总**（永久保留，最近 5 分钟内的请求尚未计入）；**凭证维度读明细表**（小时汇总主键里没有 `credential_id`），故只覆盖**最近 90 天**。
+**分组统计**面板用 tabs 切四个维度（按渠道 / 按模型 / 按用户 / 按凭证），共用同一张表（渠道 / 请求（请求数 · 成功率，悬停看成功数）/ Credit / 成本 / Token（输入 ÷ 输出 · 命中率，悬停看命中 token）/ 速度（正文 ÷ 总产出，tok/s，悬停看两口径）/ 平均延迟（耗时 ÷ 首字）/ P95 延迟（耗时 ÷ 首字）），共 8 列。对应端点 `GET /api/stats/by-provider|by-model|by-user|by-credential`。默认按请求数降序，点列头可切换排序；请求 / Token / 速度 / 平均延迟 / P95 延迟五个合并列点列头弹菜单选子列再排序（`sort=requests|ok_count|input_tokens|output_tokens|cached_tokens|avg_latency_ms|avg_ttfb_ms|p50_latency_ms|p90_latency_ms|p95_latency_ms|p99_latency_ms|p50_ttfb_ms|p90_ttfb_ms|p95_ttfb_ms|p99_ttfb_ms|tps_visible|tps`），成功率与命中率是派生只读值不参与排序。**延迟分位可切换**：P95 列的表头有 P50 / P90 / P95 / P99 四档切换（默认 P95，不铺开四列以免表头拥挤）；四档由同一次窗口函数子查询算出，取整口径一致（nearest-rank，n 为**有值**样本数）。**按用户 / 按凭证**只对 admin 与 operator 展示。**口径差异**：渠道 / 模型 / 用户三维读**小时汇总**（永久保留，最近 5 分钟内的请求尚未计入）；**凭证维度读明细表**（小时汇总主键里没有 `credential_id`），故只覆盖**最近 90 天**。
 
 **延迟两类口径**：**只统计成功请求**（失败请求的耗时会拉偏「典型耗时」）。**平均延迟列** = 平均耗时 / 平均首字 = `latency_sum ÷ 成功数`（读小时汇总，与总览卡片、图表同口径，永久保留）；**P95 延迟列** = P95 耗时 / P95 首字 = 第 95 百分位，按 **nearest-rank**（第 `⌈0.95·n⌉` 小的值，n = 该组有值样本数）从**逐请求明细**算出——小时汇总只有和与计数，数学上还原不出分布，故分位列只覆盖**最近 90 天**。P50 / P90 / P99 与 P95 同一套 SQL（一次子查询算完四档），口径完全一致，只是百分位参数不同。`ttfb_ms` 对非流式 / 未产出首字的成功请求为 `NULL`，两列各自独立排名（只数有值样本）。无成功样本 / 未上报延迟时显示 `—`（不拿 0 冒充）。
 
@@ -509,9 +549,9 @@ OpenRouter 收录数百条，其中多数本服务没接。每行带 `available`
 
 **点行钻取**：点分组表任意一行，下方「请求明细」即按该行钻取（渠道 / 模型 / 凭证按同名列过滤，用户维度走作用域参数），条件叠加、可多个维度层层收窄，面板上方显示当前过滤标签并可一键清除。`GET /api/stats/events` 因此接受 `provider` / `model` / `credential_id` 三个过滤参数（`AND` 语义），另有 `ok=0` 只看失败。
 
-**明细表列合并**：请求明细把同类列并成一列，默认值一眼可读、悬停展开全部子项：**Token**（默认「输入 / 输出 · 命中率」，悬停含命中 token）、**延迟**（默认「耗时 / 首字」）。列数从 14 压到约 10，窄屏卡片也少一半字段。排序能力不丢：点合并列头弹出下拉选子列（Token → 输入 / 输出 / 命中 / 命中率，延迟 → 耗时 / 首字），选中即按该子列排序；**命中率**子列走后端 `sort=cache_rate`（命中 ÷ 输入，输入为 0 或未上报时为 `NULL`，与其它可空列同排序语义）。
+**明细表列合并**：请求明细把同类列并成一列，默认值一眼可读、悬停展开全部子项：**Token**（默认「输入 / 输出 · 命中率」，悬停含命中 token）、**延迟**（默认「耗时 / 首字」）、**速度**（默认「正文 / 总产出」，tok/s，悬停写全两口径）、**渠道 / 凭证**（凭证名在上、渠道 icon + 名在下，悬停看完整凭证 ID——同渠道常挂多个账号，先认账号）。**时间列拆成两行**（`20:17:09` / `2026-10-21`，**具体时刻优先**、日期次要色，等宽数字各自纵向对齐，窄屏不折行），请求 ID 提示仍挂在这一格。列数从 15 压到约 10，窄屏卡片也少一半字段。排序能力不丢：点合并列头弹出下拉选子列（Token → 输入 / 输出 / 命中 / 命中率，延迟 → 耗时 / 首字，速度 → 正文 / 总产出，渠道 / 凭证 → 渠道 / 凭证），选中即按该子列排序；**命中率**子列走后端 `sort=cache_rate`（命中 ÷ 输入，输入为 0 或未上报时为 `NULL`，与其它可空列同排序语义），速度子列走 `sort=tps_visible` / `sort=tps`，渠道子列走 `sort=provider` / `sort=credential`。
 
-**导出 CSV**：明细面板右上「导出 CSV」（仅 admin / operator）按**当前时间范围 + 当前钻取过滤**导出逐请求明细，`GET /api/stats/events?format=csv`。文件带 UTF-8 BOM（Excel 认编码）、`\r\n` 换行、时间列 ISO 8601（UTC），并对以 `= + - @`（及制表符/回车）开头的**文本**单元格加前导单引号防公式注入（数值含负数原样）。单次导出上限 10000 行，超出截断并在响应头 `X-Export-Truncated: 1` 标出，页面提示收窄条件。
+**导出 CSV**：明细面板右上「导出 CSV」（仅 admin / operator）按**当前时间范围 + 当前钻取过滤**导出逐请求明细，`GET /api/stats/events?format=csv`。列与页面明细表同口径，含**逐请求速度**（`正文速度 tok/s` / `总产出速度 tok/s`，与页面同规则：只算生成窗口可测的成功请求，不可测的行留空——空不是 0）。文件带 UTF-8 BOM（Excel 认编码）、`\r\n` 换行、时间列 ISO 8601（UTC），并对以 `= + - @`（及制表符/回车）开头的**文本**单元格加前导单引号防公式注入（数值含负数原样）。单次导出上限 10000 行，超出截断并在响应头 `X-Export-Truncated: 1` 标出，页面提示收窄条件。
 
 **实时流（SSE）**：明细面板右上「实时」开关打开后，`EventSource` 订阅 `GET /api/stats/events/stream`，展示**当前筛选范围内刚落库**的请求（与下方翻页的历史明细分开展示，避免混成一张会跳动的表）。事件在 `StatsCollector.record` **事务提交后**由进程内 `LiveEventHub` 广播（不轮询数据库），前端只保留最近 50 条、新→旧排列；关闭开关即断开连接。
 
@@ -546,7 +586,7 @@ OpenRouter 收录数百条，其中多数本服务没接。每行带 `available`
 
 ### 活跃上报（可选，默认关闭）
 
-CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端对话事件，账号长期只被本网关自动调用时会断连登。`ACTIVITY_REPORT_ENABLED=true` 时，后台任务在每天 `ACTIVITY_REPORT_HOUR`（默认 10 点）所在整点窗口为每个账号补发**一条** `chat_request_send` 事件续上连登——与积分、调度无关，上报失败不影响聊天请求。凭证行内菜单也可手动补报一次。适用于 CodeBuddy 与 CodeBuddy 国际版。
+CodeBuddy 成长中心的「连登天数 / 活跃地图」按日统计客户端对话事件，账号长期只被本网关自动调用时会断连登。`ACTIVITY_REPORT_ENABLED=true` 时，后台任务在每天 `ACTIVITY_REPORT_HOUR`（默认 10 点）所在整点窗口为每个账号补发**一条** `chat_request_send` 事件续上连登——与积分、调度无关，上报失败不影响聊天请求。凭证行内菜单也可手动补报一次。适用于 CodeBuddy 与 CodeBuddy 国际。
 
 > ⚠️ **风险与限制**：官方活动条款禁止用模拟器 / 脚本篡改活动数据，处罚为**取消资格并追回已发礼品**。默认关闭，开启前请自行评估账号风险。事件名与请求形状依赖上游实现，**上游改版即失效**，不承诺任何收益，不作为可靠性功能。实测（2026-09-21）：缺少 `userId` 时上游返回 HTTP 200 `{"code":0}` 却**静默丢弃**；OAuth 凭证的 `user_id`/`account_uid` 可能为空，此时回落取 bearer JWT 的 `sub`，仍缺失则跳过（不编造）。
 
@@ -613,7 +653,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `USD_CNY_RATE` | `6.70` | 成本估算的美元兑人民币汇率；可热更，只影响之后写入的请求 |
 | `GROWTH_INTERVAL_MINUTES` | `60` | 成长中心（仅 CodeBuddy）一轮领取的周期（下限 5 分钟） |
 | `GROWTH_IRREVERSIBLE_ACTIONS` | `true` | 是否允许成长中心的不可逆动作：抽奖、连登兑换、开盲盒、消耗补登卡 |
-| `ACTIVITY_REPORT_ENABLED` | `false` | 活跃上报（CodeBuddy 与国际版）：每天为账号补发一条对话事件续连登。**默认关闭**——条款禁止篡改活动数据，上游改版即失效 |
+| `ACTIVITY_REPORT_ENABLED` | `false` | 活跃上报（CodeBuddy 与国际）：每天为账号补发一条对话事件续连登。**默认关闭**——条款禁止篡改活动数据，上游改版即失效 |
 | `ACTIVITY_REPORT_HOUR` | `10` | 活跃上报的本地（北京）时间整点窗口；仅在开关开启时生效 |
 | `CHECKIN_TIMES` | `""` | 每日签到执行时点：本地时间 `HH:MM`，逗号分隔（如 `09:37,21:10`）。命中时点才跑一轮；**留空 = 全天每 10 分钟检查一次**（旧行为，升级后不做任何配置也不变节奏）。坏段忽略并记 warning，全是坏段等同留空。上游签到幂等，多设几个时点只是多几次重试机会。配了时点后循环改为**每 60 秒**醒一次（否则抖动=0 时窗只有一分钟，必然整天漏签）。可热更 |
 | `CHECKIN_JITTER_MINUTES` | `0` | 签到抖动（分钟）：在时点**之前**提前一个 `0..N` 的随机偏移执行，把多部署摊开、避免同一分钟齐打上游。按「日期 + 时点」记去重键，抖动只改执行时刻，不会让同一时点跑两次。`0` = 不抖。可热更 |
@@ -650,21 +690,24 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | 监听地址与端口（compose 默认 `0.0.0.0`）。compose 里 `PORT` 同时决定**容器内监听端口与宿主机映射端口**（两侧一致，改一个即可） |
 | `CODEBUDDY_API_ENDPOINT` | `https://copilot.tencent.com` | CodeBuddy 上游地址；改动时必须同时加入 `CODEBUDDY_ALLOWED_ENDPOINTS` |
 | `CODEBUDDY_ALLOWED_ENDPOINTS` | 官方两站（见 compose） | 上游端点白名单，真实 Token 只发往白名单内地址 |
-| `CODEBUDDY_INTL_API_ENDPOINT` | `https://www.codebuddy.ai` | CodeBuddy 国际版上游地址；改动时必须同时加入 `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` |
-| `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` | `https://www.codebuddy.ai` | 国际版白名单，**刻意不含**国内站主机（跨站发送即凭证泄露，填错启动失败） |
+| `CODEBUDDY_INTL_API_ENDPOINT` | `https://www.codebuddy.ai` | CodeBuddy 国际上游地址；改动时必须同时加入 `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` |
+| `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` | `https://www.codebuddy.ai` | 国际站白名单，**刻意不含**国内站主机（跨站发送即凭证泄露，填错启动失败） |
 | `ZEN_API_ENDPOINT` | `https://opencode.ai` | OpenCode Zen 上游地址；改动时必须同时加入 `ZEN_ALLOWED_ENDPOINTS` |
 | `ZEN_ALLOWED_ENDPOINTS` | `https://opencode.ai` | Zen 端点白名单 |
 | `ZEN_OPENCODE_VERSION` | `1.18.0` | 门禁伪装用的 `opencode/<version>` UA 版本（低于阈值会被 426 拒绝） |
-| `KILO_API_ENDPOINT` | `https://api.kilo.ai/api/gateway` | Kilo Gateway 上游地址；改动时必须同时加入 `KILO_ALLOWED_ENDPOINTS` |
+| `KILO_API_ENDPOINT` | `https://api.kilo.ai/api/gateway` | Kilo 上游地址；改动时必须同时加入 `KILO_ALLOWED_ENDPOINTS` |
 | `KILO_ALLOWED_ENDPOINTS` | `https://api.kilo.ai/api/gateway` | Kilo 端点白名单 |
-| `QODER_API_ENDPOINT` | `https://openapi.qoder.com.cn` | Qoder openapi 地址（额度/登录）；国际版设为 `https://openapi.qoder.sh` |
-| `QODER_GATEWAY_ENDPOINT` | `https://gateway.qoder.com.cn` | Qoder 推理网关地址（聊天/模型发现）；国际版设为 `https://api1.qoder.sh` |
-| `QODER_ALLOWED_ENDPOINTS` | 国内 openapi+gateway + 国际版（见 compose） | Qoder 端点白名单，带 COSY 签名的请求只发往白名单内地址 |
+| `QODER_API_ENDPOINT` | `https://openapi.qoder.com.cn` | Qoder openapi 地址（额度/登录）；国际站设为 `https://openapi.qoder.sh` |
+| `QODER_GATEWAY_ENDPOINT` | `https://gateway.qoder.com.cn` | Qoder 推理网关地址（聊天/模型发现）；国际站设为 `https://api1.qoder.sh` |
+| `QODER_ALLOWED_ENDPOINTS` | 国内 openapi+gateway + 国际站（见 compose） | Qoder 端点白名单，带 COSY 签名的请求只发往白名单内地址 |
 | `CODEARTS_API_ENDPOINT` | `https://snap-access.cn-north-4.myhuaweicloud.com` | CodeArts snap 引擎地址；改动时必须同时加入 `CODEARTS_ALLOWED_ENDPOINTS` |
-| `CODEARTS_ALLOWED_ENDPOINTS` | snap 引擎 + STS + 福利网关 + 门户（见 compose） | CodeArts 端点白名单，AK/SK 签名请求只发往白名单内地址 |
+| `CODEARTS_ALLOWED_ENDPOINTS` | snap 引擎 + STS + 门户（见 compose） | CodeArts 端点白名单，AK/SK 签名请求只发往白名单内地址 |
+| `OFFICEACE_API_ENDPOINT` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | OfficeAce 控制面地址（OAuth / 开通校验）；改动时必须同时加入 `OFFICEACE_ALLOWED_ENDPOINTS` |
+| `OFFICEACE_ALLOWED_ENDPOINTS` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | OfficeAce 端点白名单。**只需控制面**：模型网关每账号不同，由上游下发并存在凭证里 |
+| `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | OfficeAce 聊天最小间隔（秒），独立节流器；`0` 关闭 |
 | `PROVIDER_PROXIES` | `""` | **按渠道出站代理**（启动期项，改后需重启）；留空 = 全部直连。容器内 `127.0.0.1` 指容器自身，代理跑在宿主时须写 `host.docker.internal` |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB 聊天节流器最小间隔（秒）：按凭证分桶、**桶内允许并发**，只在同凭证顺序连发时补足间隔；`0` 关闭 |
-| `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB 国际版聊天最小间隔（秒），**独立**节流器；`0` 关闭 |
+| `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB 国际聊天最小间隔（秒），**独立**节流器；`0` 关闭 |
 | `ZEN_CHAT_MIN_INTERVAL` | `0` | Zen 聊天最小间隔（秒），独立节流器，默认关闭 |
 | `KILO_CHAT_MIN_INTERVAL` | `0` | Kilo 聊天最小间隔（秒），独立节流器，默认关闭 |
 | `QODER_CHAT_MIN_INTERVAL` | `5` | Qoder 聊天最小间隔（秒），独立节流器；`0` 关闭 |

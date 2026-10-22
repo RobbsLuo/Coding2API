@@ -166,7 +166,7 @@ async def test_build_app_seeds_kilo_and_resolves_forced_route(tmp_path):
             await closer()
 
 def test_kilo_credential_can_be_restored_after_delete(tmp_path, monkeypatch):
-    """管理台删除 kilo 虚拟凭证后，可用「添加 Kilo Gateway」从 UI 补回（无需重启）。"""
+    """管理台删除 kilo 虚拟凭证后，可用「添加 Kilo」从 UI 补回（无需重启）。"""
     from fastapi.testclient import TestClient
 
     from src.auth.session import create_session_token
@@ -193,7 +193,7 @@ def test_kilo_credential_can_be_restored_after_delete(tmp_path, monkeypatch):
                            create_session_token("root", SECRET))
         created = client.post("/api/credentials",
                               json={"provider": "kilo", "credential": {},
-                                    "nickname": "Kilo Gateway"})
+                                    "nickname": "Kilo"})
         assert created.status_code == 200
         credential_id = created.json()["id"]
         restored = credentials.candidates(["kilo"])

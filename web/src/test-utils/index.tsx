@@ -83,6 +83,18 @@ const DEFAULT_ROUTES: Record<string, unknown> = {
   "/api/stats/errors": { errors: [] },
 };
 
+/**
+ * 凭证页专用：组头会读 `/api/playground/models`（与 Playground 同源）。
+ *
+ * 单独一个入口，而不是塞进 `DEFAULT_ROUTES` —— 全局兜底会让**别的页面**漏 mock
+ * 时也静默拿到空列表，掩盖真实回归。用例覆盖同名路由即可断言模型数量。
+ */
+export function mockCredentialsFetch(
+  routes: Record<string, unknown | ((url: string) => Response)>,
+) {
+  return mockFetch({ "/api/playground/models": { object: "list", data: [] }, ...routes });
+}
+
 /** 按 URL 分派的 fetch mock；函数路由会收到完整 URL 字符串。 */
 export function mockFetch(routes: Record<string, unknown | ((url: string) => Response)>) {
   const all = { ...DEFAULT_ROUTES, ...routes };
@@ -117,14 +129,8 @@ export function makeCredential(overrides: Record<string, unknown> = {}) {
     quota_cycle_end: null,
     quota_expiring_credits: null,
     quota_expiring_credits_secondary: null,
-    quota_credits_expiring: null,
-    quota_credits_expiring_secondary: null,
-    quota_credits_health: null,
     quota_expiry_ladder: null,
-    quota_credits_expiry_ladder: null,
     quota_packages: null,
-    quota_credits_remaining: null,
-    quota_credits_total: null,
     model_cooldowns: [],
     quota_probed_at: 1_700_000_000,
     token_expires_at: 0,
