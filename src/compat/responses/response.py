@@ -190,7 +190,12 @@ class ResponsesStreamTranslator:
         yield from self._close("stop")
 
     def keepalive(self) -> bytes:
-        """SSE 注释帧心跳（与 chat 出口同一约定）。"""
+        """SSE 注释帧心跳（与 chat 出口同一约定）。
+
+        **不能改成 `event: ping`**：Responses API 没有 ping 事件类型，严格
+        解析器收到未知事件会直接报错（`MAXeaglet/commandcode-proxy` 的实测
+        结论，与 Anthropic 出口的处理相反）。
+        """
         from ...engine.sse import SSE_COMMENT
 
         return SSE_COMMENT

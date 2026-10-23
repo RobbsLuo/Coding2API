@@ -50,6 +50,36 @@ def test_stream_translator_missing_tool_index_gets_stable_position():
                ["choices"][0]["delta"]["tool_calls"]]
     assert indices == [0, 1]
 
+def test_stream_translator_missing_tool_id_gets_stable_id():
+    """`id` 缺失时按 index 补稳定 id：OpenAI 客户端按 id 聚合分片。
+
+    同一个 index 的后续分片必须沿用同一个 id，否则一次调用会被拆成多次。
+    """
+    t = StreamTranslator("m")
+    list(t.translate(Event(kind=EventKind.CONTENT, content="x")))
+    first = list(t.translate(Event(kind=EventKind.TOOL_CALLS,
+                                   tool_calls=[{"index": 0,
+                                                "function": {"name": "f",
+                                                             "arguments": "{"}}])))
+    second = list(t.translate(Event(kind=EventKind.TOOL_CALLS,
+                                    tool_calls=[{"index": 0,
+                                                 "function": {"arguments": "}"}}])))
+    id_a = json.loads(first[0].decode()[6:])["choices"][0]["delta"]["tool_calls"][0]["id"]
+    id_b = json.loads(second[0].decode()[6:])["choices"][0]["delta"]["tool_calls"][0]["id"]
+    assert id_a == id_b
+    assert id_a.startswith("call_0_")
+
+
+def test_stream_translator_keeps_upstream_tool_id():
+    """上游给了 id 就沿用，不覆盖。"""
+    t = StreamTranslator("m")
+    frames = list(t.translate(Event(kind=EventKind.TOOL_CALLS,
+                                    tool_calls=[{"id": "call_up", "index": 0,
+                                                 "function": {"name": "f"}}])))
+    assert json.loads(frames[0].decode()[6:])["choices"][0]["delta"][
+        "tool_calls"][0]["id"] == "call_up"
+
+
 def test_stream_translator_error_frame():
     t = StreamTranslator("m")
     frames = list(t.translate(Event(kind=EventKind.ERROR, error_code=1005,

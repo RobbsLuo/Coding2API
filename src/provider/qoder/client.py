@@ -39,6 +39,7 @@ from ...provider import base
 from ...provider.base import (
     CheckinResult,
     CheckinStatus,
+    ErrKind,
     Event,
     EventKind,
     Model,
@@ -356,6 +357,16 @@ class QoderClient:
         if envelope is None:
             return []
         if envelope.status != 200:
+            # 排队信号必须在分类**之前**拦下：上游把「排队中」包成 403，而
+            # 403 在这里会被 classify_error_code 判成 DEAD 直接硬禁用凭证——
+            # 排队恰恰说明号是好的，只是忙。同时把上游点名的等待秒数带给
+            # executor，它据此在原号上重开（见 executor 的排队重开）。
+            queue_wait = base.parse_queue_hint(envelope.body)
+            if queue_wait is not None:
+                return [Event(kind=EventKind.ERROR, error_code=envelope.status,
+                              error_message=envelope.body[:2000],
+                              error_kind=ErrKind.QUEUE,
+                              retry_after_seconds=queue_wait)]
             kind = qoder_events.classify_error_code(envelope.status, envelope.body)
             # 200 字符只够看到外层 `"details":"{\"error\":{\"message\":...`——上游把
             # 真实原因嵌在转义的 details 里，截断后根因（如缺哪个 tool_call_id）

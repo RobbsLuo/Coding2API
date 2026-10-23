@@ -7,7 +7,14 @@ import pytest
 from src.compat.openai.request import InvalidRequest
 from src.engine.model_resolver import ModelTarget
 from src.provider.base import ErrKind, Event, EventKind
-from tests.engine._fallback_support import GOOD, INVALID, ModelAwareProvider, ScriptedProvider
+from tests.engine._fallback_support import (
+    GOOD,
+    INVALID,
+    HttpInvalid,
+    ModelAwareProvider,
+    RaisingProvider,
+    ScriptedProvider,
+)
 from tests.engine._fallback_support import add_credential as _add
 from tests.engine._fallback_support import aliases as _aliases
 from tests.engine._fallback_support import make_executor as _executor
@@ -23,6 +30,23 @@ async def test_complete_falls_back_when_primary_all_invalid(repo):
     _add(credentials, "codebuddy", "cb")
     _add(credentials, "trae", "tr")
     cb = ScriptedProvider("codebuddy", [INVALID])
+    tr = ScriptedProvider("trae", [GOOD])
+    executor = _executor({"codebuddy": cb, "trae": tr}, credentials,
+                         {"chat": ("glm-5.2", "glm-4.6")},
+                         _aliases("glm-5.2", "glm-4.6"))
+    result = await executor.complete(_request("glm-5.2"))
+    assert result["choices"][0]["message"]["content"] == "ok"
+    assert cb.calls == 1 and tr.calls == 1
+    assert tr.models_seen == ["glm-4.6"]
+    db.close()
+
+@pytest.mark.asyncio
+async def test_complete_http_invalid_exception_skips_provider(repo):
+    """HTTP 级 INVALID（异常）与非流内 INVALID 同语义：跳过该上游，不冷却凭证。"""
+    credentials, db = repo
+    _add(credentials, "codebuddy", "cb")
+    _add(credentials, "trae", "tr")
+    cb = RaisingProvider("codebuddy", HttpInvalid("400 model not found"))
     tr = ScriptedProvider("trae", [GOOD])
     executor = _executor({"codebuddy": cb, "trae": tr}, credentials,
                          {"chat": ("glm-5.2", "glm-4.6")},

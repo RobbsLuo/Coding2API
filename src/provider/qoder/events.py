@@ -37,6 +37,7 @@ from ...provider.base import (
     Quota,
     UpstreamProtocolViolation,
     Usage,
+    parse_queue_hint,
 )
 from ..openai_chunk import first_choice
 from ..token_expiry import normalize_epoch
@@ -221,8 +222,14 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
     401/403 只有**明确带会话失效标记**时才归 DEAD（硬禁用）；否则按 SOFT
     短冷却轮换——实测 Qoder 的 401/403 多数是上游瞬时/风控抖动，直接硬禁用
     会把可自愈的凭证打进冷宫。
+
+    排队信号（`isQueued` / `RESOURCE_LIMIT`）优先于状态码：上游把「排队中」
+    也包成 403，按状态码分类会硬禁用凭证——排队恰恰说明号是好的，只是忙。
     """
-    if status in (401, 403) and not is_session_dead(body.decode("utf-8", errors="replace")):
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
+    if parse_queue_hint(text) is not None:
+        return ErrKind.QUEUE
+    if status in (401, 403) and not is_session_dead(text):
         return ErrKind.SOFT
     return classify_error_code(status, body)
 

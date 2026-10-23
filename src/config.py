@@ -303,6 +303,14 @@ class Settings(BaseSettings):
     # 剩余冷却不超过该值，则等待后重取一次（而不是直接 503）。0 = 关闭（快速
     # 失败）。等待期间不占在途租约，避免把并发请求堆成连接洪峰。可热更。
     short_cooldown_wait_seconds: float = 0
+    # 非流式出口保活（秒）：`stream=false` 的请求在聚合完成前一个字节都不发，
+    # 中间盒（CDN / 反代）的空闲超时会直接切连接。设为 N > 0 时，N 秒内没
+    # 完成就改走 chunked，先吐空白字节再补 JSON 正文——空白是合法 JSON 前导
+    # （RFC 8259 §2 `JSON-text = ws value ws`），解析器照常工作。
+    # 默认 0 = 关闭：本部署 nginx `proxy_read_timeout 3600s` + frp TCP，
+    # 链路上没有短空闲超时，实测 30 天 >60s 的成功请求 1741 个全部成功。
+    # 只有在 CDN 后面（Cloudflare 100s 等）才需要打开，推荐 15。可热更。
+    nonstream_keepalive_seconds: float = 0
     # 单账号在途请求上限（全局，跨渠道）：同一凭证并发达到该值后不再参与选号，
     # 避免把单账号打进上游限流/封号；0 = 不限。租约在请求结束后释放，另有
     # 600s TTL 兜底（见 src/engine/inflight.py）。

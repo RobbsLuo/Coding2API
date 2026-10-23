@@ -19,10 +19,11 @@ from ..compat.openai.request import ChatRequest, InvalidRequest
 from ..config import Settings
 from ..engine.compress import estimate_messages
 from ..engine.executor import Executor, StreamSink
+from ..engine.sse import SSE_COMMENT
 from ..key_quota import Lease, QuotaExceeded
 from ..runtime_settings import RuntimeSettings
 from .deps import ApiKeyPrincipal, get_services, read_json_body
-from .streaming import with_keepalive
+from .streaming import respond_with_keepalive, with_keepalive
 
 
 def ensure_model_allowed(chat_request: ChatRequest, principal: ApiKeyPrincipal,
@@ -98,12 +99,26 @@ async def dispatch_compat(
             lease.release()          # 400 不该占着并发名额
             raise
         translator = translator_for(target.model) if translator_for else None
+        # 心跳帧随出口协议走：Anthropic 要 `event: ping` 具名事件（只解析
+        # `event:` 行的客户端会忽略注释帧），chat / Responses 保持注释帧
+        # （Responses 无 ping 事件，未知事件类型会让严格解析器报错）。
+        keepalive_frame = (translator.keepalive() if translator is not None
+                           else SSE_COMMENT)
         frames = with_keepalive(executor.stream_guarded(chat_request,
                                                         username=principal.username,
                                                         translator=translator,
-                                                        provider_binding=binding))
+                                                        provider_binding=binding),
+                                keepalive_frame=keepalive_frame)
         return StreamingResponse(
             _release_when_done(frames, lease), media_type="text/event-stream")
+    # 非流式保活（`nonstream_keepalive_seconds`，默认 0 = 关闭）：宽限期内
+    # 完成仍是逐字节相同的 JSONResponse，超时才转 chunked 吐空白心跳。
+    keepalive = float(getattr(settings, "nonstream_keepalive_seconds", 0) or 0)
+    if keepalive > 0:
+        return await respond_with_keepalive(
+            lambda: executor.complete(chat_request, username=principal.username,
+                                      provider_binding=binding),
+            grace=keepalive, convert=convert, release=lease.release)
     try:
         completion = await executor.complete(chat_request, username=principal.username,
                                              provider_binding=binding)

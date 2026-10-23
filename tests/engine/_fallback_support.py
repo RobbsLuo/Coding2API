@@ -14,7 +14,9 @@ from tests.helpers.events import GOOD
 __all__ = [
     "GOOD",
     "INVALID",
+    "HttpInvalid",
     "ModelAwareProvider",
+    "RaisingProvider",
     "ScriptedProvider",
     "add_credential",
     "aliases",
@@ -23,6 +25,34 @@ __all__ = [
 
 INVALID = [Event(kind=EventKind.ERROR, error_code="11102",
                  error_message="service info not found", error_kind=ErrKind.INVALID)]
+
+
+class HttpInvalid(Exception):
+    """HTTP 级请求无效（如 400 模型不存在）。
+
+    真实 provider 的 `UpstreamHTTPError` 带 `kind()`：同样是 INVALID，但走
+    executor 的 `except` 分支而不是流内事件分支，两条路径的收尾逻辑不同。
+    """
+
+    def kind(self) -> ErrKind:
+        return ErrKind.INVALID
+
+
+class RaisingProvider:
+    """首次取流就抛出指定异常（模拟 HTTP 非 2xx 在建立流时失败）。"""
+
+    def __init__(self, provider_id: str, error: Exception) -> None:
+        self.id = provider_id
+        self.error = error
+        self.calls = 0
+
+    async def stream_chat(self, _credential_data, _payload, _model):
+        self.calls += 1
+        raise self.error
+        yield  # 让本方法成为异步生成器：异常在首次 anext 时抛出
+
+    def list_models(self, _credential_data):
+        return []
 
 
 class ScriptedProvider:

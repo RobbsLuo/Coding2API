@@ -116,6 +116,36 @@ def test_endpoint_non_stream(tmp_path):
     assert body["usage"] == {"input_tokens": 2, "output_tokens": 3}
     assert provider.last_payload["messages"][0] == {"role": "user", "content": "hi"}
 
+def test_endpoint_stream_keepalive_uses_ping_event(tmp_path, monkeypatch):
+    """空闲心跳走 `event: ping`（不是注释帧）：只解析 event 行的客户端才收得到。
+
+    这是端到端契约：`dispatch_compat` 必须把 translator 的心跳帧交给
+    `with_keepalive`，否则翻译器上的 `keepalive()` 永远不会被调用。
+    """
+    import asyncio
+
+    from src.api import streaming
+
+    monkeypatch.setattr(streaming, "KEEPALIVE_SECONDS", 0.01)
+
+    class SlowProvider(_Provider):
+        async def stream_chat(self, credential_data, payload, model):
+            await asyncio.sleep(0.08)
+            async for event in super().stream_chat(credential_data, payload, model):
+                yield event
+
+    app = _app(tmp_path, SlowProvider())
+    with TestClient(app) as client:
+        response = client.post("/v1/messages", headers=_auth(app),
+                               json=_messages(stream=True))
+    assert response.status_code == 200
+    assert "event: ping" in response.text
+    assert ": keepalive" not in response.text
+    # ping 必须是合法 JSON 事件，不能只有事件名
+    assert any(name == "ping" and data == {"type": "ping"}
+               for name, data in _events(response.text))
+
+
 def test_endpoint_stream_reports_cache_read(tmp_path):
     app = _app(tmp_path, _Provider("cache"))
     with TestClient(app) as client:

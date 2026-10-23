@@ -210,6 +210,7 @@ def test_empty_events_do_not_create_items():
     assert frames[-1][1]["response"]["usage"]["input_tokens"] == 1
 
 def test_keepalive_is_sse_comment():
+    """Responses 出口必须用注释帧：该协议没有 ping 事件类型。"""
     from src.engine.sse import SSE_COMMENT
 
     assert ResponsesStreamTranslator("m").keepalive() is SSE_COMMENT

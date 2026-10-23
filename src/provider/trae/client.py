@@ -399,10 +399,7 @@ class TraeClient:
                 rate = rate_info["data"].get("rate")
                 if isinstance(rate, (int, float)) and not isinstance(rate, bool):
                     credit_rate = float(rate)
-        context_window = config.get("context_window_tokens") or {}
-        max_input = context_window.get("dev") if isinstance(context_window, dict) else None
-        if not isinstance(max_input, int) or isinstance(max_input, bool):
-            max_input = None
+        max_input = _context_window(config)
         return Model(
             id=str(config["config_name"]),
             name=str(display.get("display_name") or ""),
@@ -554,6 +551,31 @@ def _trae_supports_reasoning(config: dict[str, Any]) -> bool | None:
     if isinstance(effort, dict) and isinstance(effort.get("support_thinking"), bool):
         return effort["support_thinking"]
     return None
+
+
+def _context_window(config: dict[str, Any]) -> int | None:
+    """上下文窗口：取 `max`，缺失或非法时回落 `dev`。
+
+    上游 `context_window_tokens` 是 `{dev, max}` 两档：`max` 是模型真实上限
+    （如 glm-5.3 的 1M、mimo 的 981504），`dev` 是保守档（200k 量级）。
+    只读 `dev` 会让列表里 1M 上下文的模型报 200k，客户端的上下文压缩提前
+    触发，把本可以装下的对话截断。`max` 不大于 `dev` 时没有信息量，按 `dev`。
+    """
+    window = config.get("context_window_tokens")
+    if not isinstance(window, dict):
+        return None
+    dev = _positive_int(window.get("dev"))
+    top = _positive_int(window.get("max"))
+    if top is not None and (dev is None or top > dev):
+        return top
+    return dev
+
+
+def _positive_int(value: Any) -> int | None:
+    """严格正整数：bool / 非 int / ≤0 一律视为缺失。"""
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
 
 
 def _pack_name(pack: dict[str, Any]) -> str:

@@ -91,6 +91,39 @@ async def test_client_fetch_models_and_quota():
     assert models == [Model(id="glm-5.2", name="GLM")]
     assert quota.remaining == 70 and quota.total == 100
 
+async def test_client_fetch_models_context_window_prefers_max():
+    """上下文窗口取 `max`（真实上限），缺失/非法/不大于 dev 时回落 `dev`。
+
+    只读 `dev` 会让 1M 上下文的模型报 200k，客户端据此提前压缩上下文。
+    """
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"config_info_list": [
+            {"config_name": "glm-5.3",
+             "context_window_tokens": {"dev": 200000, "max": 1000000}},
+            {"config_name": "mimo",
+             "context_window_tokens": {"dev": 200000, "max": 981504}},
+            # max 不大于 dev → 没有信息量，按 dev
+            {"config_name": "flat",
+             "context_window_tokens": {"dev": 200000, "max": 200000}},
+            # max 非法 → 回落 dev
+            {"config_name": "bad-max",
+             "context_window_tokens": {"dev": 128000, "max": "1M"}},
+            # 只有 max
+            {"config_name": "max-only",
+             "context_window_tokens": {"max": 400000}},
+            # max 为 bool（int 子类，必须排除）
+            {"config_name": "bool-max",
+             "context_window_tokens": {"dev": 64000, "max": True}},
+            # max 非正
+            {"config_name": "zero-max",
+             "context_window_tokens": {"dev": 64000, "max": 0}},
+        ]})
+
+    models = await _client(handler).fetch_models(TraeCredential(access_token="a"))
+    assert [m.max_input_tokens for m in models] == [
+        1000000, 981504, 200000, 128000, 400000, 64000, 64000]
+
+
 async def test_client_fetch_models_metadata():
     """倍率 / 上下文窗口 / 推理能力透传。"""
     def handler(_request: httpx.Request) -> httpx.Response:

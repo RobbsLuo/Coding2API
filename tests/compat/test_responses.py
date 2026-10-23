@@ -67,6 +67,30 @@ def test_endpoint_stream_events(tmp_path):
     assert names[-1] == "response.completed"
     assert "response.output_text.delta" in names
 
+def test_endpoint_stream_keepalive_stays_comment(tmp_path, monkeypatch):
+    """Responses 出口的心跳必须保持注释帧：该协议没有 ping 事件类型。"""
+    import asyncio
+
+    from src.api import streaming
+
+    monkeypatch.setattr(streaming, "KEEPALIVE_SECONDS", 0.01)
+
+    class SlowProvider(_Provider):
+        async def stream_chat(self, credential_data, payload, model):
+            await asyncio.sleep(0.08)
+            async for event in super().stream_chat(credential_data, payload, model):
+                yield event
+
+    app = _app(tmp_path, SlowProvider())
+    with TestClient(app) as client:
+        response = client.post("/v1/responses", headers=_auth(app), json={
+            "model": "glm-5.2@codebuddy", "input": "hi", "stream": True,
+        })
+    assert response.status_code == 200
+    assert ": keepalive" in response.text
+    assert "event: ping" not in response.text
+
+
 def test_endpoint_non_stream(tmp_path):
     provider = _Provider()
     app = _app(tmp_path, provider)

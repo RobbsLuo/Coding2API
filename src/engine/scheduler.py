@@ -325,6 +325,8 @@ class Scheduler:
                            其中 CONCURRENCY 用固定短冷却，不翻倍
                           账号级冷却出现时清空模型级条目（防豁免泄漏）
         REQUEST → 零动作：不是账号的问题，换号但绝不惩罚凭证
+        QUEUE   → 零动作：上游只是排队，等 `retryAfterSeconds` 后原号重开；
+                           写冷却会让「等 5 秒」变成「锁 60 秒并换号」
 
         `retry_at` 是上游 `Retry-After` 解析出的恢复时刻（epoch 秒，见
         `provider.base.parse_retry_after`）。命中时用 `clamp_retry_at` 双端
@@ -334,6 +336,10 @@ class Scheduler:
         「等一会就恢复」。
         """
         if kind is ErrKind.REQUEST:
+            return ErrorOutcome(err_count=candidate.err_count)
+        if kind is ErrKind.QUEUE:
+            # 排队不是失败：不冷却、不累计。真正的「等多久再打」由 executor
+            # 按上游点名的秒数在原号上等，调度器只负责别惩罚这个号。
             return ErrorOutcome(err_count=candidate.err_count)
         if kind is ErrKind.DEAD:
             return ErrorOutcome(disabled=True, err_count=0)

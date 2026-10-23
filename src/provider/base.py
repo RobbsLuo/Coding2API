@@ -6,6 +6,7 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import time
@@ -52,6 +53,11 @@ class ErrKind(StrEnum):
     # 图片无效 11135 / CodeArts 非多模态模型收到图片 001001020）：不是账号
     # 的问题，不冷却、不累计；仍会换号重试
     REQUEST = "request"
+    # 排队中（上游明确回 `isQueued` / `RESOURCE_LIMIT` + `retryAfterSeconds`）：
+    # 既不是账号故障也不是请求错误，是「这个号现在满了，等 N 秒再打它」。
+    # 不冷却、不累计、不占轮换预算，等在原号上重开（见 executor 的排队重开）。
+    # 与 SOFT 的关键差别：SOFT 冷却 60s 且换号，排队按上游点名的秒数等在原号。
+    QUEUE = "queue"
 
 
 # 冷却作用域是「(凭证, 模型)」而非整个凭证的错误类别。
@@ -194,6 +200,87 @@ async def read_body_bounded(response: Any, limit: int = BOUNDED_BODY_LIMIT) -> b
     return bytes(collected[:limit])
 
 
+# 上游「排队中」信号：`isQueued` 为真，或子码点名 RESOURCE_LIMIT。
+# 这是跨渠道的**协议形状**而非某家私有码，故放中立层。
+QUEUE_FLAG_KEYS = ("isQueued", "is_queued", "queued")
+QUEUE_WAIT_KEYS = ("retryAfterSeconds", "retry_after_seconds", "retryAfter", "retry_after")
+QUEUE_SUB_CODES = ("RESOURCE_LIMIT", "RESOURCE_LIMIT_EXCEEDED")
+# 上游只说「排队」不给秒数时的兜底等待（秒）。取 5s：比 SOFT 的 60s 短得多，
+# 又足以让排队轮次真正错开，不至于变成忙等。
+QUEUE_DEFAULT_WAIT_SECONDS = 5.0
+# 单轮最长等待（秒）：上游可能点名「2 小时后再来」，照等会把客户端连接吊死。
+# 超过上限就按上限等一轮，下一轮仍排队则轮次用尽、退回普通错误处理。
+QUEUE_MAX_WAIT_SECONDS = 60.0
+# 单次请求最多在原号上重开几轮。上限存在的意义：上游若持续排队，无限重开
+# 会把客户端连接吊死；3 轮 + 兜底 5s 最坏多等 ~15s，比直接 503 更友好。
+QUEUE_MAX_ROUNDS = 3
+
+
+def parse_queue_hint(body: bytes | str) -> float | None:
+    """上游 body 是否表示「排队中」→ 建议等待秒数；非排队返回 None。
+
+    形状来自上游信封：`{"isQueued": true, "retryAfterSeconds": 30,
+    "subCode": "RESOURCE_LIMIT"}`。三者**任一**成立即认定排队——只认
+    `isQueued` 会漏掉只给子码的上游，只认子码又会把「配额真的耗尽」误判成
+    排队（故子码只认 `RESOURCE_LIMIT` 这一族，不含 `QUOTA_EXCEEDED`）。
+
+    宁可漏判不可误判：识别不出就返回 None，走原有的错误分类路径（最坏是
+    一次 SOFT 冷却换号），绝不能把普通失败当成排队而无限等下去。
+    """
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
+    if not text.strip():
+        return None
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return _queue_wait_in(payload, depth=0)
+
+
+def _queue_wait_in(node: Any, depth: int) -> float | None:
+    """在（可能嵌套的）信封里找排队标记；命中返回等待秒数。
+
+    只下钻 3 层：上游信封常见 `{"data": {"error": {...}}}`，再深就不是
+    协议结构而是业务正文了，继续递归只会在长正文上白烧 CPU。
+    """
+    if depth > 3:
+        return None
+    if isinstance(node, dict):
+        if _is_queue_flag(node):
+            return _queue_wait_value(node)
+        for value in node.values():
+            found = _queue_wait_in(value, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _queue_wait_in(item, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def _is_queue_flag(node: dict[str, Any]) -> bool:
+    for key in QUEUE_FLAG_KEYS:
+        if node.get(key) is True:
+            return True
+    for key in ("subCode", "sub_code", "errorCode", "code"):
+        value = node.get(key)
+        if isinstance(value, str) and value.upper() in QUEUE_SUB_CODES:
+            return True
+    return False
+
+
+def _queue_wait_value(node: dict[str, Any]) -> float:
+    for key in QUEUE_WAIT_KEYS:
+        value = node.get(key)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
+            return float(value)
+    return QUEUE_DEFAULT_WAIT_SECONDS
+
+
 _BUSINESS_CODE_RE = re.compile(r'"code"\s*:\s*(-?\d+)')
 
 
@@ -330,6 +417,9 @@ class Event:
     # 流内 error 事件的业务分类：provider 解析时按自己的错误码语义定好，
     # executor 不再维护第二份 code→kind 映射（两份必然漂移）
     error_kind: ErrKind | None = None
+    # 上游点名「过多久再来」（秒）：目前只有排队信号带它。executor 据此决定
+    # 在原号上等多久再重开；None 表示上游没给，按 `QUEUE_DEFAULT_WAIT_SECONDS`。
+    retry_after_seconds: float | None = None
 
 
 def event_error_kind(event: Event) -> ErrKind:

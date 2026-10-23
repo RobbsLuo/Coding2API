@@ -261,6 +261,24 @@ async def test_stream_chat_inner_error_frame_is_classified():
     assert events[1].error_code == 418
     assert events[1].error_kind is ErrKind.SOFT
 
+async def test_stream_chat_queue_envelope_yields_queue_event():
+    """排队信封（403 + `isQueued`）必须归 QUEUE。
+
+    按状态码分类会把 403 当事务级失败硬禁用凭证，而排队恰恰说明号是好的；
+    上游点名的等待秒数要原样带给 executor（原号重开）。
+    """
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=envelope(
+            {"isQueued": True, "retryAfterSeconds": 6}, status=403))
+
+    events = [e async for e in handler_for(handler).stream_chat(cred(), {}, "m")]
+    assert len(events) == 1
+    assert events[0].kind is EventKind.ERROR
+    assert events[0].error_kind is ErrKind.QUEUE
+    assert events[0].error_code == 403
+    assert events[0].retry_after_seconds == 6
+
+
 async def test_inner_error_message_keeps_nested_details():
     """错误正文放宽到 2000：200 字符会截在转义的 details 中间，根因丢失。"""
     detail = json.dumps({"error": {"message": "Messages with role 'tool' must be a "
@@ -517,6 +535,14 @@ def test_node_failure_400_is_model_scoped_transient():
     # 普通 400（无节点故障标记）仍是 INVALID
     assert qoder_events.classify_error_code(400, "bad request") is ErrKind.INVALID
     assert qoder_events.classify_status(400, body.encode()) is ErrKind.MODEL
+
+def test_classify_status_queue_hint_wins_over_403():
+    """排队标记优先于状态码：403 不再当硬失败（会把健康凭证打进冷宫）。"""
+    body = b'{"isQueued": true, "retryAfterSeconds": 9}'
+    assert qoder_events.classify_status(403, body) is ErrKind.QUEUE
+    # 没有排队标记的 403 仍是 SOFT：实测多为瞬时/风控抖动，可自愈
+    assert qoder_events.classify_status(403, b"") is ErrKind.SOFT
+
 
 def test_to_status_variants():
     assert qoder_events._to_status(None) == 200

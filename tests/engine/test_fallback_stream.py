@@ -6,7 +6,14 @@ import pytest
 
 from src.engine.executor import NoProviderForModel
 from src.provider.base import ErrKind, Event, EventKind
-from tests.engine._fallback_support import GOOD, INVALID, ModelAwareProvider, ScriptedProvider
+from tests.engine._fallback_support import (
+    GOOD,
+    INVALID,
+    HttpInvalid,
+    ModelAwareProvider,
+    RaisingProvider,
+    ScriptedProvider,
+)
 from tests.engine._fallback_support import add_credential as _add
 from tests.engine._fallback_support import aliases as _aliases
 from tests.engine._fallback_support import make_executor as _executor
@@ -29,6 +36,24 @@ async def test_stream_falls_back_before_first_frame(repo):
     assert "ok" in joined
     assert "error" not in joined
     assert joined.count("data: [DONE]") == 1
+    assert tr.models_seen == ["glm-4.6"]
+    db.close()
+
+@pytest.mark.asyncio
+async def test_stream_http_invalid_exception_falls_back(repo):
+    """HTTP 级 INVALID（异常，不是流内事件）同样在首帧前回退。"""
+    credentials, db = repo
+    _add(credentials, "codebuddy", "cb")
+    _add(credentials, "trae", "tr")
+    cb = RaisingProvider("codebuddy", HttpInvalid("400 model not found"))
+    tr = ScriptedProvider("trae", [GOOD])
+    executor = _executor({"codebuddy": cb, "trae": tr}, credentials,
+                         {"chat": ("glm-5.2", "glm-4.6")},
+                         _aliases("glm-5.2", "glm-4.6"))
+    frames = [f async for f in executor.stream(_request("glm-5.2"), username="u")]
+    joined = b"".join(frames).decode()
+    assert "ok" in joined and "error" not in joined
+    assert cb.calls == 1 and tr.calls == 1
     assert tr.models_seen == ["glm-4.6"]
     db.close()
 

@@ -21,6 +21,9 @@ from ..compat.openai.response import (
 from ..config import live
 from ..db.repo import CredentialRepository
 from ..provider.base import (
+    QUEUE_DEFAULT_WAIT_SECONDS,
+    QUEUE_MAX_ROUNDS,
+    QUEUE_MAX_WAIT_SECONDS,
     ErrKind,
     Event,
     EventKind,
@@ -57,6 +60,8 @@ class StreamSink(Protocol):
 
     def error_frame(self, message: str, code: str) -> bytes: ...
 
+    def keepalive(self) -> bytes: ...
+
 
 class NoHealthyCredential(Exception):
     pass
@@ -88,6 +93,19 @@ class _AggregateOverflow(Exception):
     def __init__(self, limit: int) -> None:
         super().__init__(f"aggregate exceeded {limit} events")
         self.limit = limit
+
+
+class _Queued(Exception):
+    """上游排队中（`ErrKind.QUEUE`）：内部信号，等 `wait` 秒后原号重开。
+
+    用异常而不是 `break`+标志位，是因为非流式的读流包在 `try/except/else` 里，
+    `break` 出来会落到 `else` 分支把**半截** events 拿去聚合。异常能干净地
+    跳过 `else`，走 finally 释放租约后再等待。
+    """
+
+    def __init__(self, wait: float) -> None:
+        super().__init__(f"upstream queued {wait}s")
+        self.wait = wait
 
 
 class _StreamTimeout(Exception):
@@ -558,6 +576,13 @@ class Executor:
         # 外层既保住续写质量，又对三个出口（chat/Anthropic/Responses）一致。
         hide_reasoning = self._thinking_disabled()
 
+        # 排队重开（F3）：上游回「排队中 + retryAfterSeconds」时，等它点名的
+        # 秒数后在**原号**上重开，不冷却、不换号、不占轮换预算。
+        # `pinned` 是被点名的凭证（下一轮跳过 `_pick` 直接用），
+        # `queued_wait` 是本轮要等的秒数（等完 `continue`）。
+        queue_rounds = 0
+        pinned: tuple[str, dict[str, Any]] | None = None
+
         def terminal(message: str, code: str) -> bytes:
             """终帧：本项未出帧时抛信号让外层试下一链项；已出帧则写错误帧收尾。"""
             if not emitted:
@@ -565,31 +590,43 @@ class Executor:
             return state.translator.error_frame(message, code)
 
         while True:
-            pick = await self._pick(target, tried, state.affinity_id)
-            if pick is None:
-                # 走到这里 emitted 必为 False：已出帧的路径在上面 `if emitted or
-                # not should_rotate` 就 return 了，所以 `terminal()` 在这里**必定**
-                # 抛 `_ModelExhausted`（交给回退链下一项）。直接抛，不留永远
-                # 走不到的 `yield`+`return`。
-                if last_kind is ErrKind.INVALID:
-                    # 所有候选上游都拒绝了该模型：400 语义而非 503
+            if pinned is not None:
+                # 排队重开：复用被点名的凭证，不走 `_pick`（否则可能选到别的号，
+                # 排队语义就丢了）。凭证可能已被并发删除，删了就退回正常选号。
+                # **不计入 attempts**：排队不是一次「换号尝试」，吃掉轮换预算
+                # 会让三次排队就把整个请求打成 503。
+                credential_id, credential_data = pinned
+                pinned = None
+                if self._deps.credentials.credential_data(credential_id) is None:
+                    continue
+                provider_id = self._deps.credentials.provider_of(credential_id)
+                state.provider, state.credential_id = provider_id or "-", credential_id
+            else:
+                pick = await self._pick(target, tried, state.affinity_id)
+                if pick is None:
+                    # 走到这里 emitted 必为 False：已出帧的路径在上面 `if emitted or
+                    # not should_rotate` 就 return 了，所以 `terminal()` 在这里**必定**
+                    # 抛 `_ModelExhausted`（交给回退链下一项）。直接抛，不留永远
+                    # 走不到的 `yield`+`return`。
+                    if last_kind is ErrKind.INVALID:
+                        # 所有候选上游都拒绝了该模型：400 语义而非 503
+                        raise _ModelExhausted(
+                            _reject_message(target.model, last_error,
+                                            self._suggestions(target.model)),
+                            "invalid_request")
+                    self._deps.record(
+                        username=state.username, provider=state.provider,
+                        credential_id=state.credential_id, model=target.model, ok=False,
+                        error_type=self._exhaust_error_type(target),
+                        latency_ms=_elapsed_ms(state.started))
                     raise _ModelExhausted(
-                        _reject_message(target.model, last_error,
-                                        self._suggestions(target.model)),
-                        "invalid_request")
-                self._deps.record(
-                    username=state.username, provider=state.provider,
-                    credential_id=state.credential_id, model=target.model, ok=False,
-                    error_type=self._exhaust_error_type(target),
-                    latency_ms=_elapsed_ms(state.started))
-                raise _ModelExhausted(
-                    self._unavailable_text(target, last_error),
-                    "no_healthy_credential")
-            credential_id, credential_data = pick
-            provider_id = self._deps.credentials.provider_of(credential_id)
-            state.provider, state.credential_id = provider_id or "-", credential_id
-            tried.add(credential_id)
-            attempts += 1
+                        self._unavailable_text(target, last_error),
+                        "no_healthy_credential")
+                credential_id, credential_data = pick
+                provider_id = self._deps.credentials.provider_of(credential_id)
+                state.provider, state.credential_id = provider_id or "-", credential_id
+                tried.add(credential_id)
+                attempts += 1
             # 按实际服务渠道压缩（未启用/未知窗口/未超限时原样返回）：窗口
             # 取该渠道自己的上限，不再被更小窗口的兄弟渠道拖累误裁
             payload = self._compress_payload(request, provider_id, target.model)
@@ -609,6 +646,7 @@ class Executor:
             reader = _TimedReader(iterator)
             state.deadline = None
             broken = False
+            queued_wait: float | None = None
             try:
                 while True:
                     event = await self._next_event(reader, state, emitted)
@@ -619,6 +657,27 @@ class Executor:
                         continue
                     if event.kind is EventKind.ERROR:
                         kind = _event_kind(event)
+                        if kind is ErrKind.QUEUE:
+                            # 排队：上游点名「等 N 秒再来」。未出帧时在原号上
+                            # 重开，不冷却、不换号、不占轮换预算；已出帧则
+                            # 无法重开（半截输出不可回滚），按 SOFT 收尾。
+                            wait = self._queue_wait(event.retry_after_seconds,
+                                                    emitted, queue_rounds)
+                            if wait is not None:
+                                queue_rounds += 1
+                                # 归还轮换预算：排队不是「换号尝试」。不归还的话
+                                # 三次排队就把 max_rotate 吃满，请求直接 503。
+                                attempts -= 1
+                                pinned = (credential_id, credential_data)
+                                queued_wait = wait
+                                logger.info(
+                                    "上游 %s 排队中（凭证 %s，第 %s/%s 轮），"
+                                    "%.1fs 后原号重开",
+                                    provider_id, credential_id, queue_rounds,
+                                    QUEUE_MAX_ROUNDS, wait)
+                                broken = True
+                                break
+                            kind = ErrKind.SOFT
                         if kind is ErrKind.INVALID:
                             # 流内 4001 等参数/模型错误：换凭证没用，
                             # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
@@ -660,7 +719,29 @@ class Executor:
                 kind = _classify(error)
                 if kind is None:
                     raise
-                if kind is ErrKind.INVALID:
+                if kind is ErrKind.QUEUE:
+                    # 排队也可能以 HTTP 403 + 排队 body 的形式抛出（见
+                    # qoder.events.classify_status）：同样在原号上等后重开。
+                    wait = self._queue_wait(
+                        getattr(error, "retry_after_seconds", None),
+                        emitted, queue_rounds)
+                    if wait is not None:
+                        queue_rounds += 1
+                        attempts -= 1
+                        pinned = (credential_id, credential_data)
+                        queued_wait = wait
+                        logger.info(
+                            "上游 %s 排队中（凭证 %s，第 %s/%s 轮），%.1fs 后原号重开",
+                            provider_id, credential_id, queue_rounds,
+                            QUEUE_MAX_ROUNDS, wait)
+                    else:
+                        kind = ErrKind.SOFT
+                        logger.warning("上游 %s 排队但无法重开（凭证 %s）: %s",
+                                       provider_id, credential_id, error)
+                        self._note_upstream_error(credential_id, kind, provider_id,
+                                                  target.model, error)
+                        last_error = error
+                elif kind is ErrKind.INVALID:
                     # 请求无效（如该上游不认识模型）：不冷却凭证，
                     # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
                     logger.warning("上游 %s 拒绝模型 %s（凭证 %s 跳过）: %s",
@@ -682,6 +763,11 @@ class Executor:
                 await reader.aclose()
                 await aclose_stream(iterator)
                 self._release(credential_id)
+            if queued_wait is not None:
+                # 在租约与上游流都释放**之后**才等：等待期间不占并发名额，
+                # 也不让上游连接白挂着。等完回到 while 顶部用 `pinned` 重开。
+                await asyncio.sleep(queued_wait)
+                continue
             if not self._deps.scheduler.should_rotate(attempts) or emitted:
                 if last_kind is ErrKind.INVALID:
                     # 流已开始（200 已发出），以 invalid_request 错误帧结束
@@ -884,25 +970,39 @@ class Executor:
         # `reasoning_content`；三个出口共用 complete 路径，故一致生效。
         hide_reasoning = self._thinking_disabled()
 
+        # 排队重开：与 `_stream_loop` 同一套语义（不冷却、不换号、不占轮换预算）。
+        # 非流式同样要处理：排队信号在上游流里，聚合前不拦就会被 `aggregate`
+        # 当成流内错误，直接冷却换号。
+        queue_rounds = 0
+        pinned: tuple[str, dict[str, Any]] | None = None
+
         while True:
-            pick = await self._pick(target, tried, affinity_id)
-            if pick is None:
-                if last_kind is ErrKind.INVALID:
-                    # 所有候选上游都拒绝了该模型：400 而非 503
-                    raise InvalidRequest(_reject_message(
-                        target.model, last_error, self._suggestions(target.model)))
-                self._deps.record(
-                    username=username, provider=last_provider, credential_id=last_credential,
-                    model=target.model, ok=False,
-                    error_type=self._exhaust_error_type(target),
-                    latency_ms=int((time.monotonic() - started) * 1000))
-                raise NoHealthyCredential(
-                    self._unavailable_text(target, last_error))
-            credential_id, credential_data = pick
-            tried.add(credential_id)
-            attempts += 1
-            provider_id = self._deps.credentials.provider_of(credential_id)
-            last_provider, last_credential = provider_id or "-", credential_id
+            if pinned is not None:
+                credential_id, credential_data = pinned
+                pinned = None
+                if self._deps.credentials.credential_data(credential_id) is None:
+                    continue
+                provider_id = self._deps.credentials.provider_of(credential_id)
+                last_provider, last_credential = provider_id or "-", credential_id
+            else:
+                pick = await self._pick(target, tried, affinity_id)
+                if pick is None:
+                    if last_kind is ErrKind.INVALID:
+                        # 所有候选上游都拒绝了该模型：400 而非 503
+                        raise InvalidRequest(_reject_message(
+                            target.model, last_error, self._suggestions(target.model)))
+                    self._deps.record(
+                        username=username, provider=last_provider, credential_id=last_credential,
+                        model=target.model, ok=False,
+                        error_type=self._exhaust_error_type(target),
+                        latency_ms=int((time.monotonic() - started) * 1000))
+                    raise NoHealthyCredential(
+                        self._unavailable_text(target, last_error))
+                credential_id, credential_data = pick
+                tried.add(credential_id)
+                attempts += 1
+                provider_id = self._deps.credentials.provider_of(credential_id)
+                last_provider, last_credential = provider_id or "-", credential_id
             # 与 _stream_loop 同理：按实际服务渠道压缩（对同一请求可能压多次，
             # 但实现必须无副作用——每轮都从原文出发），再按实际服务渠道映射档位
             payload = self._compress_payload(request, provider_id, target.model)
@@ -914,6 +1014,7 @@ class Executor:
                 provider_id, credential_data, payload, target.model).__aiter__()
             # 与 _stream_loop 同理：在途登记 + finally 释放（含超时/断开）
             self._lease(credential_id)
+            queued_wait: float | None = None
             try:
                 # 聚合整体超时兜底（见 ExecutorDeps.complete_timeout_seconds）
                 async with (asyncio.timeout(self._deps.complete_timeout_seconds)
@@ -925,6 +1026,16 @@ class Executor:
                         if hide_reasoning and event.kind is EventKind.REASONING:
                             # 出站剥离思考：上游仍照常生成，只是不交给客户端
                             continue
+                        if (event.kind is EventKind.ERROR
+                                and _event_kind(event) is ErrKind.QUEUE):
+                            # 排队信号必须在入 events **之前**拦下：进了 events
+                            # 就会被 `aggregate` 当成流内错误，直接冷却换号。
+                            wait = self._queue_wait(event.retry_after_seconds,
+                                                    False, queue_rounds)
+                            if wait is not None:
+                                raise _Queued(wait)
+                            # 轮次用尽：降级为普通瞬态错误，交给既有路径处理
+                            event = replace(event, error_kind=ErrKind.SOFT)
                         events.append(event)
                         # 事件条数上限：超长/死循环输出下 events 会无界
                         # 增长直到 OOM，超时兜不住「快而无穷」。按瞬态错误换号。
@@ -932,6 +1043,15 @@ class Executor:
                                 and len(events) > self._deps.complete_max_events):
                             raise _AggregateOverflow(
                                 self._deps.complete_max_events)
+            except _Queued as queued:
+                queue_rounds += 1
+                attempts -= 1
+                pinned = (credential_id, credential_data)
+                queued_wait = queued.wait
+                logger.info(
+                    "上游 %s 排队中（凭证 %s，第 %s/%s 轮），%.1fs 后原号重开",
+                    provider_id, credential_id, queue_rounds,
+                    QUEUE_MAX_ROUNDS, queued.wait)
             except TimeoutError:
                 logger.warning(
                     "上游 %s 非流式聚合超过 %ss（凭证 %s，按瞬态错误换号）",
@@ -956,7 +1076,27 @@ class Executor:
                 kind = _classify(error)
                 if kind is None:
                     raise
-                if kind is ErrKind.INVALID:
+                if kind is ErrKind.QUEUE:
+                    # HTTP 级排队（403 + 排队 body）：与流内排队同一套语义
+                    wait = self._queue_wait(
+                        getattr(error, "retry_after_seconds", None),
+                        False, queue_rounds)
+                    if wait is not None:
+                        queue_rounds += 1
+                        attempts -= 1
+                        pinned = (credential_id, credential_data)
+                        queued_wait = wait
+                        logger.info(
+                            "上游 %s 排队中（凭证 %s，第 %s/%s 轮），%.1fs 后原号重开",
+                            provider_id, credential_id, queue_rounds,
+                            QUEUE_MAX_ROUNDS, wait)
+                    else:
+                        logger.warning("上游 %s 排队但无法重开（凭证 %s）: %s",
+                                       provider_id, credential_id, error)
+                        self._note_upstream_error(credential_id, ErrKind.SOFT,
+                                                  provider_id, target.model, error)
+                        last_error = error
+                elif kind is ErrKind.INVALID:
                     # 请求无效（如该上游不认识模型）：不冷却凭证，
                     # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
                     logger.warning("上游 %s 拒绝模型 %s（凭证 %s 跳过）: %s",
@@ -1022,6 +1162,10 @@ class Executor:
             finally:
                 await aclose_stream(iterator)
                 self._release(credential_id)
+            if queued_wait is not None:
+                # 租约与上游流都释放**之后**才等（同 _stream_loop）
+                await asyncio.sleep(queued_wait)
+                continue
             if not self._deps.scheduler.should_rotate(attempts):
                 if last_kind is ErrKind.INVALID:
                     raise InvalidRequest(_reject_message(
@@ -1305,10 +1449,27 @@ class Executor:
             retry_at=getattr(error, "retry_at", None))
         self._deps.credentials.save_error(credential_id, outcome)
 
+    def _queue_wait(self, retry_after: float | None, emitted: bool,
+                    rounds: int) -> float | None:
+        """排队信号 → 本轮等待秒数；不该重开时返回 None（调用方降级为 SOFT）。
+
+        三条约束：
+
+        - **已出帧不重开**：半截输出不可回滚，重开会把两个号的内容拼进同一条
+          回复。此时返回 None，让调用方按 SOFT 收尾。
+        - **轮次上限**：`QUEUE_MAX_ROUNDS` 用尽后返回 None，否则持续排队的
+          上游会把客户端连接吊死到它自己的超时。
+        - **单轮封顶**：上游可能点名「2 小时后再来」，照等等于把请求挂死；
+          按 `QUEUE_MAX_WAIT_SECONDS` 封顶，超了先等一轮再说。
+        """
+        if emitted or rounds >= QUEUE_MAX_ROUNDS:
+            return None
+        wait = QUEUE_DEFAULT_WAIT_SECONDS if retry_after is None else float(retry_after)
+        return min(max(wait, 0.0), QUEUE_MAX_WAIT_SECONDS)
+
     def _model_scope(self, provider_id: str, model: str) -> str:
         """冷却表登记的模型名：用上游原始名（与 provider 实际调用的名字一致）。"""
         return self._upstream_model(provider_id, model)
-
 
 @dataclass(slots=True)
 class _StreamState:
@@ -1478,8 +1639,10 @@ def _stream_error_type(error: Exception | None) -> str:
 
 def _error_type_for(kind: ErrKind) -> str:
     """ErrKind → 受控的统计失败类型（web/src/api/display.ts 同步维护）。"""
-    if kind in (ErrKind.PLAN, ErrKind.CREDIT, ErrKind.MODEL, ErrKind.CONCURRENCY):
+    if kind in (ErrKind.PLAN, ErrKind.CREDIT, ErrKind.MODEL,
+                ErrKind.CONCURRENCY, ErrKind.QUEUE):
         # MODEL / CONCURRENCY 都是模型级限流，展示口径同为额度类；
+        # QUEUE 是「上游排队中」，同属容量不足，与额度类同档展示。
         # 冷却作用域与时长差异在 schema 层
         return "rate_limit"
     if kind is ErrKind.DEAD:

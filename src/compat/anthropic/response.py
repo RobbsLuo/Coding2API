@@ -157,10 +157,13 @@ class AnthropicStreamTranslator:
         yield from self._close("stop")
 
     def keepalive(self) -> bytes:
-        """SSE 注释帧心跳（与 chat / Responses 出口同一约定）。"""
-        from ...engine.sse import SSE_COMMENT
+        """Anthropic 心跳：具名 `ping` 事件（不是 SSE 注释帧）。
 
-        return SSE_COMMENT
+        官方流式规范里的 `ping` 是**具名事件**（`event: ping` +
+        `data: {"type": "ping"}`），客户端只解析 `event:` 行时注释帧等于没有
+        字节，长静默（推理模型 TTFT 可达 40s）下仍会判超时断开。
+        """
+        return b'event: ping\ndata: {"type": "ping"}\n\n'
 
     def error_frame(self, message: str, code: str) -> bytes:
         """出口错误帧：Anthropic 用 `event: error`（无 [DONE] 哨兵）。"""

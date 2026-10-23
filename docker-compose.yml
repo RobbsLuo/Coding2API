@@ -159,6 +159,8 @@ services:
       STREAM_IDLE_TIMEOUT_SECONDS: ${STREAM_IDLE_TIMEOUT_SECONDS:-0}
       # 短冷却「等待续上」（秒）：全池都在短冷却时最多等这么久再取一次；0 关闭
       SHORT_COOLDOWN_WAIT_SECONDS: ${SHORT_COOLDOWN_WAIT_SECONDS:-0}
+      # 非流式出口保活（秒）：N 秒内没聚合完就转 chunked 吐空白心跳；0 关闭
+      NONSTREAM_KEEPALIVE_SECONDS: ${NONSTREAM_KEEPALIVE_SECONDS:-0}
       # 单账号在途请求上限（跨渠道全局）；0 = 不限
       MAX_INFLIGHT_PER_CREDENTIAL: ${MAX_INFLIGHT_PER_CREDENTIAL:-0}
       # Prometheus 指标出口（GET /metrics，无鉴权，与 /healthz 同口径）；false 关闭

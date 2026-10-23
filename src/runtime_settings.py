@@ -116,6 +116,12 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "全池都在短冷却、没有任何立即可用候选时，最短剩余冷却不超过该值"
                "则等待后续上（而非直接 503）。等待期间不占在途租约。0 = 关闭"
                "（快速失败，保持旧行为）。", minimum=0.0, group="affinity"),
+    HotSetting("nonstream_keepalive_seconds", float, "非流式保活（秒）",
+               "`stream=false` 的请求在聚合完成前不发任何字节，CDN / 反代的空闲"
+               "超时会切连接。设为 N>0 时，N 秒内没完成就转 chunked，先吐空白"
+               "再补 JSON 正文——空白是合法 JSON 前导（RFC 8259），解析器照常"
+               "工作。0 = 关闭（本部署 nginx 3600s + frp TCP 无此问题）；"
+               "只在 CDN 后面需要，推荐 15。", minimum=0.0, group="routing"),
     HotSetting("quota_expiry_window_seconds", int, "到期积分主窗口（秒）",
                "把「距到期 ≤ 该秒数」的积分加总作为选号第一排序指标；"
                "≤0 关闭整套到期排序（次窗口一并失效）。", minimum=0,
@@ -649,6 +655,10 @@ class RuntimeSettings:
     @property
     def short_cooldown_wait_seconds(self) -> float:
         return float(self.get("short_cooldown_wait_seconds"))
+
+    @property
+    def nonstream_keepalive_seconds(self) -> float:
+        return float(self.get("nonstream_keepalive_seconds"))
 
     @property
     def blocklist_patterns(self) -> tuple[str, ...]:

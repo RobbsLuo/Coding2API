@@ -84,6 +84,21 @@ async def test_with_keepalive_passes_frames_through_when_fast():
 
     assert [f async for f in with_keepalive(fast(), interval=5)] == [b"a", b"b"]
 
+
+@pytest.mark.asyncio
+async def test_with_keepalive_uses_protocol_specific_frame():
+    """心跳帧随出口协议走：Anthropic 的 ping 事件替换默认注释帧。"""
+    ping = b'event: ping\ndata: {"type": "ping"}\n\n'
+
+    async def slow():
+        await asyncio.sleep(0.05)
+        yield b"data: x\n\n"
+
+    frames = [f async for f in with_keepalive(slow(), interval=0.01,
+                                              keepalive_frame=ping)]
+    assert ping in frames
+    assert SSE_COMMENT not in frames
+
 @pytest.mark.asyncio
 async def test_stream_disconnect_records_usage():
     """客户端断开时把已知用量记账（client_disconnect），不再静默丢弃。

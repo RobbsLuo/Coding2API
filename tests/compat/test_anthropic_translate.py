@@ -93,10 +93,14 @@ def test_translator_error_without_message_uses_default():
     frames = list(translator.translate(Event(kind=EventKind.ERROR)))
     assert b"upstream error" in frames[0]
 
-def test_translator_keepalive_is_comment_frame():
-    from src.engine.sse import SSE_COMMENT
+def test_translator_keepalive_is_ping_event():
+    """Anthropic 心跳是具名 `ping` 事件，不是 SSE 注释帧。
 
-    assert AnthropicStreamTranslator("m").keepalive() == SSE_COMMENT
+    官方流式规范里 ping 带 `event: ping` + `data: {"type": "ping"}`；只解析
+    `event:` 行的客户端会忽略注释帧，长静默下仍会判超时断开。
+    """
+    assert (AnthropicStreamTranslator("m").keepalive()
+            == b'event: ping\ndata: {"type": "ping"}\n\n')
 
 def test_translator_stop_reason_mapping():
     from src.compat.anthropic.response import _stop_reason
