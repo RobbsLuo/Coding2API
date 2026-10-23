@@ -128,6 +128,31 @@ def _openapi_request_id(uid: str) -> str:
     return derive_request_id(uid)
 
 
+def _normalize_null_content(messages: list[dict[str, Any]]) -> int:
+    """把 `content: null` 归一为空串（返回改写条数）。
+
+    OpenAI 允许「带 tool_calls 的 assistant 把 content 置为 null」，但 Qoder
+    上游不接受：它把这条消息当成「没有内容」而跳过，紧随其后的 `role:"tool"`
+    就成了孤儿，于是以 400 `Messages with role 'tool' must be a response to a
+    preceding message with 'tool_calls'` 拒绝——报文指向 tool 配对，真实原因
+    却是 assistant 的 null content（2026-10-23 实测：同一请求体只把 null 换成
+    `""` 即从 400 变 200，且与 reasoning_content / 并行调用 / 轮数无关）。
+
+    `""` 与 `null` 语义等价（都表示「这条 assistant 没有正文」），对上游是
+    合法形状，所以这里就地归一，不改其他字段。
+    """
+    rewritten = 0
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") not in ("assistant", "tool"):
+            continue
+        if message.get("content", "") is None:
+            message["content"] = ""
+            rewritten += 1
+    return rewritten
+
+
 def _drop_orphan_tool_messages(
         messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
     """丢弃没有对应 `assistant.tool_calls` 的 `role:"tool"` 消息。
@@ -186,8 +211,15 @@ def build_chat_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
     messages = json.loads(json.dumps(raw_messages)) if raw_messages is not None else []
     # 非 list 形状（畸形请求）交给上游裁决，不做结构假设
     dropped = 0
+    rewritten = 0
     if isinstance(messages, list):
+        # 必须先归一 null content：上游把 content:null 的 assistant 当空消息跳过，
+        # 其后的 tool 结果就成了孤儿并被报成 tool 配对错误（见函数 docstring）
+        rewritten = _normalize_null_content(messages)
         messages, dropped = _drop_orphan_tool_messages(messages)
+    if rewritten:
+        logger.info("Qoder 请求把 %d 条消息的 null content 归一为空串"
+                    "（上游会把它当空消息跳过、再报 tool 配对 400）", rewritten)
     if dropped:
         # 只记条数：正文里可能有用户数据，日志不落消息内容
         logger.warning("Qoder 请求含 %d 条孤立 tool 消息，已丢弃（上游会以 400 拒绝）",

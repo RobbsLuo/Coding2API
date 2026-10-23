@@ -112,6 +112,58 @@ def test_build_chat_body_unions_consecutive_assistant_tool_calls():
     body = build_chat_body({"messages": messages}, "m")
     assert body["messages"] == messages
 
+def test_build_chat_body_normalizes_null_assistant_content():
+    """带 tool_calls 的 assistant 的 `content: null` 归一为空串。
+
+    上游把 null content 的 assistant 当成空消息跳过，其后的 tool 结果就成了
+    孤儿，并以 400「Messages with role 'tool' must be a response to a preceding
+    message with 'tool_calls'」拒绝——报文指向 tool 配对，真实原因是 null
+    content（2026-10-23 实测：只把 null 换成 "" 即从 400 变 200）。
+    """
+    messages = [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": None, "reasoning_content": "想想",
+         "tool_calls": [{"id": "a", "type": "function", "function": {"name": "f"}}]},
+        {"role": "tool", "tool_call_id": "a", "content": "结果"},
+    ]
+    body = build_chat_body({"messages": messages}, "m")
+    assert body["messages"][1]["content"] == ""
+    assert body["messages"][1]["reasoning_content"] == "想想"
+    assert body["messages"][2] == messages[2]
+    # 入参不被改写（build_chat_body 深拷贝）
+    assert messages[1]["content"] is None
+
+def test_build_chat_body_normalizes_null_tool_content(caplog):
+    """tool 消息的 null content 同样归一，且计入日志条数。"""
+    messages = [
+        {"role": "assistant", "content": None, "tool_calls": [
+            {"id": "a", "type": "function", "function": {"name": "f"}}]},
+        {"role": "tool", "tool_call_id": "a", "content": None},
+        {"role": "assistant", "content": None},
+    ]
+    with caplog.at_level("INFO", logger=qoder_client.__name__):
+        body = build_chat_body({"messages": messages}, "m")
+    assert [m["content"] for m in body["messages"]] == ["", "", ""]
+    assert any("null content" in r.getMessage() and "3" in r.getMessage()
+               for r in caplog.records)
+
+def test_build_chat_body_leaves_other_roles_content_untouched():
+    """只归一 assistant/tool：user/system 的 null 原样交给上游裁决。"""
+    messages = [
+        {"role": "system", "content": None},
+        {"role": "user", "content": None},
+        {"role": "assistant", "content": "有正文"},
+        {"role": "junk", "content": None},
+    ]
+    body = build_chat_body({"messages": messages}, "m")
+    assert [m["content"] for m in body["messages"]] == [None, None, "有正文", None]
+
+def test_normalize_null_content_skips_non_dict_entries():
+    """畸形历史（非 dict 消息）跳过，不改写也不计数。"""
+    messages = ["junk", {"role": "assistant", "content": None}]
+    assert qoder_client._normalize_null_content(messages) == 1
+    assert messages == ["junk", {"role": "assistant", "content": ""}]
+
 def test_build_chat_body_plain_assistant_resets_declared_ids():
     """中间夹了一条不带 tool_calls 的 assistant：它打断了配对，其后的 tool 孤立。"""
     messages = [
