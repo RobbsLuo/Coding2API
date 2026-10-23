@@ -668,6 +668,7 @@ Full list in `src/config.py` (authoritative); every item is wired through `docke
 | `STREAM_FIRST_EVENT_TIMEOUT_SECONDS` | `0` | First-event timeout (retryable before any frame). **Keep off by default**, recommended 60. Hot-reloadable |
 | `STREAM_IDLE_TIMEOUT_SECONDS` | `0` | Idle timeout (closes, never retries), recommended 300. Hot-reloadable |
 | `SHORT_COOLDOWN_WAIT_SECONDS` | `0` | Wait when the whole pool is in short cooldown; `0` = fail fast. Hot-reloadable |
+| `NONSTREAM_KEEPALIVE_SECONDS` | `0` | Non-streaming responses switch to chunked with whitespace heartbeats after N seconds (leading whitespace is legal JSON); `0` = off, only needed behind a CDN, recommended 15. Hot-reloadable |
 | `MODEL_ALIASES` | `""` | Custom aliases; empty = off. Hot-reloadable |
 | `MAX_INFLIGHT_PER_CREDENTIAL` | `0` | Per-account in-flight cap; `0` = unlimited. 600s TTL backstop |
 | `METRICS_ENABLED` | `true` | Expose `/metrics` (unauthenticated). Hot-reloadable |

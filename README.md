@@ -670,6 +670,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `STREAM_FIRST_EVENT_TIMEOUT_SECONDS` | `0` | 首事件超时（出帧前可换号）。**默认必须保持关闭**，推荐 60。可热更 |
 | `STREAM_IDLE_TIMEOUT_SECONDS` | `0` | 流内空闲超时（已出帧只断流不换号），推荐 300。可热更 |
 | `SHORT_COOLDOWN_WAIT_SECONDS` | `0` | 全池短冷却时等待续上；`0` = 快速失败。可热更 |
+| `NONSTREAM_KEEPALIVE_SECONDS` | `0` | 非流式出口 N 秒未完成则转 chunked 吐空白心跳（JSON 前导空白合法）；`0` = 关闭，仅在 CDN 后需要，推荐 15。可热更 |
 | `MODEL_ALIASES` | `""` | 自定义别名；留空不启用。可热更 |
 | `MAX_INFLIGHT_PER_CREDENTIAL` | `0` | 单账号在途上限；`0` = 不限。600s TTL 兜底 |
 | `METRICS_ENABLED` | `true` | 是否暴露 `/metrics`（不鉴权）。可热更 |

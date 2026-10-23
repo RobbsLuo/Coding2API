@@ -98,11 +98,22 @@ class ErrKind(StrEnum):
     CONCURRENCY = "concurrency"  # 并发会话打满 → 固定 60s 模型级短冷却，不翻倍
     BLOCKED = "blocked"  # 该账号无此模型（400/404+11102）→ (凭证, 模型) 负缓存，6h 起翻倍封顶 24h
     REQUEST = "request"  # 请求级错误（11101/11115/11128/11135）→ 零动作：不冷却、不累计，仅换号
+    QUEUE = "queue"      # 排队中（isQueued / RESOURCE_LIMIT）→ 零动作：等 retryAfterSeconds 后原号重开
 
 MODEL_SCOPED_KINDS = frozenset({MODEL, BLOCKED, CONCURRENCY})
 ```
 
 `MODEL_SCOPED_KINDS` 只写 `credential_model_cooldowns`（§6.3），不碰账号级 `cooling_until`。反之账号级冷却出现时清空该凭证的模型级条目，否则切模型能绕过账号级限流。
+
+**排队语义（QUEUE）**：上游明确回「排队中 + 建议等待秒数」时，既不是账号故障也不是请求错误，而是「这个号现在满了，等 N 秒再打它」。处理口径：
+
+- **不冷却**：`scheduler.note_error` 对 QUEUE 零动作（与 REQUEST 同）；
+- **不换号**：`executor` 用 `pinned` 记住被点名的凭证，等完在原号上重开；
+- **不占轮换预算**：排队轮次不计入 `attempts`，否则三次排队就把 `max_rotate` 吃满、请求直接 503；
+- **有界**：`QUEUE_MAX_ROUNDS = 3` 轮、单轮封顶 `QUEUE_MAX_WAIT_SECONDS = 60s`；
+- **已出帧不重开**：半截输出不可回滚，降级为 SOFT 收尾。
+
+识别在 `provider.base.parse_queue_hint`（信封可嵌套，最多下钻 3 层）：`isQueued: true` / `subCode ∈ {RESOURCE_LIMIT, RESOURCE_LIMIT_EXCEEDED}` 任一成立即认定。**宁可漏判不可误判**——识别不出就走原有分类，绝不把普通失败当排队无限等。Qoder 的 `_decode_frame` 必须在 `classify_error_code` **之前**拦下：上游把排队也包成 403，按状态码分类会判成 DEAD 硬禁用凭证。`Event.retry_after_seconds` 承载上游点名的秒数。
 
 | 上游信号 | CB | TRAE | Kilo | ErrKind |
 |---|---|---|---|---|
@@ -117,6 +128,7 @@ MODEL_SCOPED_KINDS = frozenset({MODEL, BLOCKED, CONCURRENCY})
 | 会话失效 | 401/403 | 401 | — | DEAD |
 | 服务端错误 | 5xx | 5xx | 500 | OTHER |
 | 请求自身无效 | 400 | 400（含 4001） | 400/404/422 | INVALID |
+| 排队中 | — | — | — | QUEUE（Qoder `isQueued` / `RESOURCE_LIMIT`） |
 | 流内错误事件 | SSE error 事件 | `event:error` 业务码 | `{"error":{...}}` 帧 | 同上映射（单一来源 `Event.error_kind`，缺失回落 OTHER） |
 
 - **zen / kilo 的 401 → `INVALID`**：两者无凭证，`401 Missing API key.` 只说明该模型要付费 key；归 `DEAD` 会让一次强制付费请求硬禁用整条免费渠道。
@@ -217,6 +229,13 @@ def health_score(q: Quota | None) -> int | None:
 **出口翻译**（`response.py`，实现 `StreamSink`）：`message_start` → `content_block_start`/`delta`/`stop`（`text_delta` / `thinking_delta` / `input_json_delta`）→ `message_delta`（`stop_reason` + usage）→ `message_stop`。无 `[DONE]`；thinking 块在 `content_block_stop` 前补占位 `signature_delta`（本网关不产真签名）。错误走 `event: error`。
 
 **心跳**：`StreamSink.keepalive()` 由出口协议各自实现，`dispatch_compat` 把它交给 `with_keepalive` 作空闲填充帧。Anthropic 返回具名事件 `event: ping` + `data: {"type": "ping"}`（官方规范；只解析 `event:` 行的客户端会忽略注释帧）；chat / Responses 返回 SSE 注释帧 `: keepalive`——Responses **不能**改 ping，该协议无此事件类型，严格解析器遇未知事件直接报错。
+
+**非流式保活**（`NONSTREAM_KEEPALIVE_SECONDS`，默认 0 = 关闭）：`stream=false` 的请求在聚合完成前一个字节都不发，CDN / 反代的空闲超时会直接切连接。`api/streaming.py::respond_with_keepalive` 采用**宽限期**设计——先等 N 秒：
+
+- 期间完成 → 返回普通 `JSONResponse`，状态码 / `Content-Length` / 字节内容与不开保活**完全一致**，异常照常抛给异常处理器（400/503 不变）；
+- 超时 → 才提交 200 + chunked，先吐 `b"\n"` 再补正文。
+
+空白字节合法：RFC 8259 §2 规定 `JSON-text = ws value ws`，值前允许任意空白，故 `"\n\n{...}"` 仍是合法 JSON（Python `json.loads` / JS `JSON.parse` 均已实测接受）。**为什么不一开始就用 `StreamingResponse`**：那样 200 在聚合前就发出去了，之后任何失败都改不回来；宽限期把「改不回来」的窗口压到只有真正超时的请求。代价：提交 200 之后才失败只能把错误写进正文（`LATE_FAILURE_PAYLOAD`），因此**默认关闭**——本部署 nginx `proxy_read_timeout 3600s` + frp TCP，链路上没有短空闲超时，30 天实测 >60s 的成功请求 1741 个全部成功。
 
 **usage 缓存字段**：内部 `input_tokens` 是 OpenAI 口径（含缓存命中），Anthropic 语义互斥。故命中时 `input_tokens = max(0, prompt_tokens − cached_tokens)` 并另记 `cache_read_input_tokens`；命中为 0/None 不补占位。
 

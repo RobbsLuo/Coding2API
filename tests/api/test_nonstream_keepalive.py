@@ -270,6 +270,95 @@ def test_dumps_matches_json_response_rendering():
     assert _dumps(payload) == JSONResponse(payload).render(payload)
 
 
+# ------------------------------------------------------------ 出口接线
+
+
+def _client(tmp_path, keepalive: float, script=None):
+    from fastapi.testclient import TestClient
+
+    from src.config import Settings
+    from src.main import build_app
+    from tests.helpers.constants import SECRET
+    from tests.helpers.events import TRAE_GOOD
+    from tests.helpers.providers import ScriptedProvider
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root",
+                        nonstream_keepalive_seconds=keepalive)
+    app = build_app(settings,
+                    providers={"trae": ScriptedProvider(script or [TRAE_GOOD])})
+    return TestClient(app)
+
+
+def _headers(client) -> dict[str, str]:
+    client.app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    created = client.app.state.api_keys.create("root", "test")
+    return {"Authorization": f"Bearer {created['api_key']}"}
+
+
+def test_endpoint_keepalive_disabled_by_default(tmp_path):
+    """默认 0 = 关闭：走原来的 `JSONResponse` 分支（有 Content-Length）。"""
+    with _client(tmp_path, 0) as client:
+        headers = _headers(client)
+        response = client.post("/v1/chat/completions", headers=headers,
+                               json={"messages": [{"role": "user", "content": "hi"}],
+                                     "model": "glm-5.2"})
+    assert response.status_code == 200
+    assert "content-length" in response.headers
+    assert response.json()["choices"][0]["message"]["content"] == "hi"
+
+
+def test_endpoint_keepalive_enabled_fast_request_stays_plain(tmp_path):
+    """打开保活但请求很快完成：仍是普通 JSON，字节级不变。"""
+    with _client(tmp_path, 5) as client:
+        headers = _headers(client)
+        response = client.post("/v1/chat/completions", headers=headers,
+                               json={"messages": [{"role": "user", "content": "hi"}],
+                                     "model": "glm-5.2"})
+    assert response.status_code == 200
+    assert "content-length" in response.headers
+    assert response.json()["choices"][0]["message"]["content"] == "hi"
+
+
+def test_endpoint_keepalive_enabled_slow_request_streams(tmp_path):
+    """打开保活且超过宽限期：200 + chunked + 空白前导，正文仍是合法 JSON。"""
+    import asyncio as aio
+
+    from tests.helpers.events import TRAE_GOOD
+
+    class SlowProvider:
+        id = "trae"
+
+        async def stream_chat(self, _credential_data, _payload, _model):
+            await aio.sleep(0.05)
+            for event in TRAE_GOOD:
+                yield event
+
+        async def list_models(self, _credential_data):
+            return []
+
+    from fastapi.testclient import TestClient
+
+    from src.config import Settings
+    from src.main import build_app
+    from tests.helpers.constants import SECRET
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root", nonstream_keepalive_seconds=0.01)
+    app = build_app(settings, providers={"trae": SlowProvider()})
+    with TestClient(app) as client:
+        headers = _headers(client)
+        response = client.post("/v1/chat/completions", headers=headers,
+                               json={"messages": [{"role": "user", "content": "hi"}],
+                                     "model": "glm-5.2"})
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.headers["x-accel-buffering"] == "no"
+    assert "content-length" not in response.headers
+    assert response.content.startswith(JSON_KEEPALIVE_BYTES)
+    assert json.loads(response.content)["choices"][0]["message"]["content"] == "hi"
+
+
 def test_endpoint_uses_keepalive_when_enabled(tmp_path):
     """配置打开后非流式出口走保活包装；宽限期内完成仍返回普通 JSON。"""
     from fastapi.testclient import TestClient
