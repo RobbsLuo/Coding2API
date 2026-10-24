@@ -36,9 +36,48 @@ MIN_PASSWORD_LENGTH = 8
 ACTIVATION_TTL_SECONDS = 24 * 3600
 
 
-def resolve_public_callback_url(settings: Settings) -> str:
-    """PUBLIC_BASE_URL + /authorize（远程部署必须可被浏览器访问）。"""
-    return settings.public_base_url.rstrip("/") + "/authorize"
+# 浏览器打不开的基址主机：回环与通配监听。PUBLIC_BASE_URL 默认值就是
+# 127.0.0.1:8000，远程/容器部署忘了改时，回调会跳到**用户自己这台机器**，
+# 浏览器既回不到服务也不报错（issue #21）。
+_UNREACHABLE_BASE_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+
+
+def _host_of(authority: str) -> str:
+    """从 `host[:port]` / `scheme://host[:port]/path` 取出小写主机名。"""
+    text = authority.strip().split("://", 1)[-1].split("/", 1)[0]
+    if text.startswith("["):
+        return text.partition("]")[0].lstrip("[").lower()
+    return text.split(":", 1)[0].lower()
+
+
+def _request_origin(request: Request) -> str:
+    """当前请求的浏览器 origin（采信反代/隧道的 X-Forwarded-Proto）。"""
+    proto = request.headers.get("x-forwarded-proto", "").split(",", 1)[0].strip().lower()
+    if proto not in ("http", "https"):
+        proto = request.url.scheme
+    authority = request.headers.get("host", "") or request.url.netloc
+    return f"{proto}://{authority}"
+
+
+def resolve_public_callback_url(settings: Settings,
+                                request: Request | None = None) -> str:
+    """回调基址 + /authorize。
+
+    `PUBLIC_BASE_URL` 是权威值，但它有两个已知的「静默失效」形态：
+    远程部署忘了改（默认 `http://127.0.0.1:8000` 指向用户自己的机器）、
+    docker-compose 只透传了默认值。这两种情况下回调地址由**浏览器**打开，
+    必然是坏的，而用户只会看到「授权完成但没回调」。
+
+    因此基址落在回环/通配主机、而当前请求来自别的主机时，改用请求自身的
+    origin：能打到本服务的那个地址，浏览器同样能打到。请求已通过
+    `host_allowed` 白名单，故这里采信 Host 头不会放大攻击面。
+    """
+    base = settings.public_base_url.rstrip("/")
+    if request is not None and _host_of(base) in _UNREACHABLE_BASE_HOSTS:
+        request_host = _host_of(request.headers.get("host", "") or request.url.netloc)
+        if request_host and request_host not in _UNREACHABLE_BASE_HOSTS:
+            base = _request_origin(request).rstrip("/")
+    return base + "/authorize"
 
 
 def issue_session(response: JSONResponse, services: Services, username: str, *,
@@ -169,7 +208,7 @@ def create_router(services: Services) -> APIRouter:
             builder = getattr(provider, "start_auth", None)
             if not callable(builder):
                 raise InvalidRequest(f"provider {provider_id!r} does not support login")
-            session = builder(resolve_public_callback_url(services.settings))
+            session = builder(resolve_public_callback_url(services.settings, request))
             # 按发起人分键登记待完成回调：单槽全局态会让两个管理员的
             # 并发登录互相覆盖，把 A 的凭证记到 B 名下；按用户名分键后，
             # 同网段的人也无法用自己的 refreshToken 顶掉别人进行中的登录。

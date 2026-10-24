@@ -585,7 +585,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `APP_SECRET` | **必填** | 凭证加密密钥，≥16 字符；丢失 = 凭证全部作废。拒绝低熵值 |
 | `ADMIN_USERNAMES` | 空 | 仅引导期：逗号分隔，首次启动提权为 `admin` |
 | `USERS_FILE` | `secrets/users.txt` | 仅引导期：老式用户文件，启动时一次性导入 |
-| `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | 浏览器可达地址；TRAE 登录回调用；https 时下发 HSTS。不决定会话 Cookie 的 `Secure` |
+| `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | 浏览器可达地址；TRAE 登录回调用；https 时下发 HSTS。不决定会话 Cookie 的 `Secure`。配成回环 / `0.0.0.0` 时回调基址改用当前请求的 origin（远程与容器部署忘改也能回调，见「部署注意」） |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |
 | `DEFAULT_MODEL` | `deepseek-v4.1-flash` | 模型为空 / `auto` 时的默认 |
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期（下限 1） |
@@ -694,6 +694,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
   ```
 
 - **时区**：镜像默认 `TZ=Asia/Shanghai`，`.env` 里的 `TZ` 会透传。签到 / 额度周期按「今天 9 点」判断，务必与宿主一致。
+- **TRAE 登录回调地址**：默认 `PUBLIC_BASE_URL=http://127.0.0.1:8000` 只在本机访问时可用。远程 / 容器部署请改成浏览器能打开的地址；**忘记改也不会静默失败**——基址落在回环 / `0.0.0.0` 时，回调改用当前请求的 origin（LAN IP 或隧道域名），并在「添加凭证」对话框里显示实际回调地址，授权超时也会点名检查 `PUBLIC_BASE_URL`。
 - **端口**：compose 里 `PORT` 同时决定容器内监听端口与宿主机映射端口。
 - **改代码后重建镜像**：`docker compose up -d` 不带 `--build` 会用本地已有镜像，跑旧代码。改 `src/` 或前端后务必 `docker compose up -d --build`。
 

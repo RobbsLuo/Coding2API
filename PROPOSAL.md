@@ -143,8 +143,8 @@ Provider 承担上游私有部分：发请求、解析事件、分类错误、�
 
 `AuthFlow` 三值：`poll`（CB / Qoder）、`callback`（TRAE，302 回 `/authorize`）、`paste`（CodeArts，服务端监听不到本机回环端口）。
 
-- 回调统一走主端口 `/authorize`，远程部署只需暴露一个端口。回调地址写进登录 URL，故必须可配 `PUBLIC_BASE_URL`。
-- 前端在「凭证管理」页内实现：**poll** 拿 `authUrl` 开新窗、轮询 `/api/auth/upstream/poll`；**callback** 开授权窗、302 回 `/authorize` 落库，前端轮询列表出现新条目即完成。`/authorize` 无鉴权，故按**发起人会话** + **`loginTraceID`** 双重绑定，待完成登录有 TTL（10 分钟）。
+- 回调统一走主端口 `/authorize`，远程部署只需暴露一个端口。回调地址写进登录 URL，故必须可配 `PUBLIC_BASE_URL`；基址是回环 / `0.0.0.0`（默认值）时改用当前请求的 origin，远程与容器部署忘配也不会「授权完成却不回调」。
+- 前端在「凭证管理」页内实现：**poll** 拿 `authUrl` 开新窗、轮询 `/api/auth/upstream/poll`；**callback** 开授权窗、302 回 `/authorize` 落库，前端轮询列表出现新条目即完成（发起时把实际回调地址写进提示，超时提示指向 `PUBLIC_BASE_URL`）。`/authorize` 无鉴权，故按**发起人会话** + **`loginTraceID`** 双重绑定（Cookie 不在回调这条入口时按 trace 反查发起人），待完成登录有 TTL（10 分钟）；浏览器收到的是一张中文说明页而非 JSON。
 
 ### 3.6 中立事件层
 

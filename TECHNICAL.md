@@ -846,7 +846,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
 - **同步 sqlite3 而非 aiosqlite**：本地微秒级操作，asyncio 封装开销大于收益。
 - **双 httpx 客户端**：聊天流 `read=None` 防长流截断；短请求总超时 30s 防悬挂；共享 `trust_env=False`。非流式由引擎聚合同一流式上游，悬挂兜底是 `UPSTREAM_COMPLETE_TIMEOUT_SECONDS`（默认 600s，超时按瞬态错误换号）与事件条数上限（`complete_max_events`）。
 - **手写 SQL 而非 ORM**：11 张表规模下 ORM 收益为负。
-- **polling OAuth 不转回调**：上游协议决定；TRAE 回调走主端口 + `PUBLIC_BASE_URL`。`/authorize` 无鉴权，防滥用三条：无进行中登录一律拒绝；pending 600s TTL；回调必须带匹配的 `loginTraceID`。**刻意不用 Origin/Referer 判同源**（TRAE 回调本就跨源 302，且 `no-referrer` 可绕过）。`app.state` 只保留 pending 的 state。
+- **polling OAuth 不转回调**：上游协议决定；TRAE 回调走主端口 + `PUBLIC_BASE_URL`（基址是回环 / `0.0.0.0` 时改用请求自身 origin，避免远程部署忘配时回调指向用户自己的机器）。`/authorize` 无鉴权，防滥用三条：无进行中登录一律拒绝；pending 600s TTL；回调必须带匹配的 `loginTraceID`。绑定优先用会话 Cookie（发起人），Cookie 不在回调这条入口（LAN 发起 / 隧道回调）时退回按 `loginTraceID` 反查发起人——trace 只出现在发起那次 auth_url 里，等价于一次性凭证。浏览器顶层导航（`Accept: text/html`）返回中文说明页（成功 / 失败原因），程序化客户端仍拿 JSON。**刻意不用 Origin/Referer 判同源**（TRAE 回调本就跨源 302，且 `no-referrer` 可绕过）。`app.state` 只保留 pending 的 state。
 - **Responses / Anthropic 出口只做各自客户端子集**：不做 `store=true` / `previous_response_id`；`include=["reasoning.encrypted_content"]` 接受并忽略；不发 `[DONE]`。**未经真实 Codex CLI 端到端验证**。
 - **effort 映射默认不做，但缺省补值 + 可选机制**：`setdefault` 补 `medium`，只补缺省不覆盖显式值；内置默认矩阵不做，改为默认关闭的三项机制（§3.11）。
 - **Zen / Kilo 用虚拟凭证行而非特判**：调度 / 冷却 / 统计 / 粘性全按 `credentials` 行工作，种一条空凭证比在每个环节加「无凭证 provider」分支代价小。`probe_quota` 恒 `probe_failed=True`。种子只在默认装配路径且幂等；删除后重启复活是刻意的。

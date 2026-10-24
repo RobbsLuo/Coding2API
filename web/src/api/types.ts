@@ -404,6 +404,9 @@ export interface UpstreamAuthStart {
   state: string;
   auth_url: string | null;
   interval: number | null;
+  /** 回调轨道的落点（后端 PUBLIC_BASE_URL + /authorize）；poll 轨道为 null。
+   * 透出到界面是为了让「回调地址指错主机」这类静默失败可见。 */
+  callback_url?: string | null;
 }
 
 export interface UpstreamAuthPoll {

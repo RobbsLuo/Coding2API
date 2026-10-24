@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import time
+from html import escape
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from ..auth.session import SESSION_COOKIE, verify_session_token
 from ..compat.openai.errors import error_payload
@@ -18,6 +19,70 @@ from .deps import Services
 # 换句话说，谁都能把自己的凭证塞进池子（落库归属还是发起登录的管理员）。
 # 10 分钟足够走完一次浏览器登录。
 PENDING_CALLBACK_TTL_SECONDS = 600
+
+# 浏览器回调落在 JSON 上会被当成「什么也没发生」：用户看不到成功也看不到
+# 失败原因（issue #21 的「不回调，也没报错」）。顶层导航带 `Accept: text/html`
+# 时改回一张说明页，程序化客户端仍拿到原来的 JSON。
+_RESULT_PAGE = """<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{title} · Coding2API</title>
+<style>
+  :root {{ color-scheme: light dark; }}
+  body {{ margin: 0; min-height: 100vh; display: grid; place-items: center;
+         background: #0b1120; color: #e6edf7;
+         font: 16px/1.6 -apple-system, "Segoe UI", "Noto Sans SC", sans-serif; }}
+  main {{ max-width: 34rem; padding: 2rem; text-align: center; }}
+  h1 {{ margin: 0 0 .75rem; font-size: 1.25rem; }}
+  p {{ margin: 0; color: #93a4bd; word-break: break-word; }}
+  code {{ color: inherit; }}
+  @media (prefers-color-scheme: light) {{
+    body {{ background: #f6f8fb; color: #101828; }}
+    p {{ color: #475467; }}
+  }}
+</style>
+</head>
+<body><main><h1>{title}</h1><p>{message}</p></main></body>
+</html>"""
+
+
+def _wants_html(request: Request) -> bool:
+    """浏览器顶层导航要人读的页面，程序化客户端（无 Accept 或 */*）继续拿 JSON。"""
+    return "text/html" in request.headers.get("accept", "")
+
+
+def _page(status_code: int, title: str, message: str) -> HTMLResponse:
+    return HTMLResponse(
+        _RESULT_PAGE.format(title=escape(title), message=escape(message)),
+        status_code=status_code)
+
+
+def _failure(request: Request, message: str, hint: str, *,
+             code: str = "invalid_request") -> JSONResponse | HTMLResponse:
+    """失败响应：JSON 契约给程序，中文原因给人（浏览器只看得到后者）。"""
+    if _wants_html(request):
+        return _page(400, "TRAE 登录未完成", hint)
+    return JSONResponse(status_code=400, content=error_payload(message, code, 400))
+
+
+def _pending_by_trace(pending: dict[str, tuple[float, str]],
+                      trace: str) -> tuple[str, tuple[float, str]] | None:
+    """按 loginTraceID 反查发起人。
+
+    管理台可能同时有 LAN 直连与 https 隧道两条入口：在 A 主机登录、回调
+    落在 B 主机时浏览器**不会**带 A 的会话 Cookie。`loginTraceID` 是
+    `(machine_id + device_id)[-16:]`、只出现在发起那次登录的 auth_url 里，
+    它本身就是一次性凭证，据此仍能把回调钉死在**那一次** pending 登录上。
+    """
+    if not trace:
+        return None
+    for username, entry in pending.items():
+        machine_id, _, device_id = entry[1].partition(":")
+        if machine_id and device_id and login_trace_id(machine_id, device_id) == trace:
+            return username, entry
+    return None
 
 
 def create_router(services: Services) -> APIRouter:
@@ -41,7 +106,8 @@ def create_router(services: Services) -> APIRouter:
         - **loginTraceID**（主）：TRAE 原样回显 `login_trace_id`，值是
           `(machine_id + device_id)[-16:]`，只有发起登录那次拿得到；
         - **发起人会话**（辅）：回调是顶层浏览器导航，SameSite=Lax 会带上
-          管理台的会话 Cookie，据会话用户名找到其待完成登录。
+          管理台的会话 Cookie，据会话用户名找到其待完成登录；Cookie 缺失
+          （例如 LAN 发起、隧道回调）时退回按 loginTraceID 反查发起人。
 
         这样：
         - 两个管理员并发发起登录不会互相覆盖（各按用户名分键）；
@@ -60,8 +126,8 @@ def create_router(services: Services) -> APIRouter:
         provider = services.registry.get("trae")
         pending: dict[str, tuple[float, str]] = request.app.state.pending_callbacks
         if provider is None:
-            return JSONResponse(status_code=400, content=error_payload(
-                "no pending TRAE login in progress", "invalid_request", 400))
+            return _failure(request, "no pending TRAE login in progress",
+                            "服务端没有启用 TRAE 渠道，无法完成登录。")
         # 会话 Cookie → 发起人（回调为顶层导航，Lax Cookie 会带上）。
         # 与 deps.principal_from_request 同一套活跃性校验：签名有效还不够，
         # 发起人必须仍存在且未被禁用、会话 epoch 未被改密/禁用作废，
@@ -76,36 +142,50 @@ def create_router(services: Services) -> APIRouter:
                 username = candidate
         entry = pending.get(username) if username else None
         if entry is None:
-            return JSONResponse(status_code=400, content=error_payload(
-                "no pending TRAE login in progress", "invalid_request", 400))
+            # Cookie 不在回调这条入口上（LAN 发起 / 隧道回调）：按 trace 反查。
+            found = _pending_by_trace(pending,
+                                      request.query_params.get("loginTraceID") or "")
+            if found is None:
+                return _failure(
+                    request, "no pending TRAE login in progress",
+                    "没有进行中的 TRAE 登录（可能已过期，或不是在当前浏览器发起的）。"
+                    "请回到管理台重新点击「登录 TRAE」。")
+            username, entry = found
         started_at, state = entry
         if time.monotonic() - started_at > PENDING_CALLBACK_TTL_SECONDS:
             pending.pop(username, None)
-            return JSONResponse(status_code=400, content=error_payload(
-                "pending TRAE login expired, start a new one",
-                "invalid_request", 400))
+            return _failure(
+                request, "pending TRAE login expired, start a new one",
+                "这次登录已超过 10 分钟有效期，请回到管理台重新发起登录。")
         # 回调绑定：loginTraceID 必须等于本次 pending 登录的 trace id
         # （machine/device id 在 state 里）。缺失/不符一律拒绝——这才是
         # 「只接受发起人本人那次登录的回调」，与 Referer 无关。
         machine_id, _, device_id = state.partition(":")
         if request.query_params.get("loginTraceID") != login_trace_id(machine_id, device_id):
-            return JSONResponse(status_code=400, content=error_payload(
-                "callback does not match the pending login", "invalid_request", 400))
+            return _failure(
+                request, "callback does not match the pending login",
+                "这次回调与发起登录的那一次不匹配，请回到管理台重新登录。")
         if not request.query_params.get("refreshToken") and not request.query_params.get("userJwt"):
-            return JSONResponse(status_code=400, content=error_payload(
-                "callback missing refreshToken", "invalid_request", 400))
+            return _failure(
+                request, "callback missing refreshToken",
+                "回调参数里没有 refreshToken，TRAE 没有把登录结果带回来，请重新登录。")
         # 先消费 pending，防止并发回调重复兑换同一登录
         pending.pop(username, None)
         try:
             credential_data = await provider.complete_callback(raw, state)
         except UpstreamProtocolViolation as error:
-            return JSONResponse(status_code=400, content=error_payload(
-                error.public_message, "invalid_credential", 400))
+            return _failure(
+                request, error.public_message,
+                f"换取 TRAE 凭证失败：{error.public_message}",
+                code="invalid_credential")
         credential_id = services.credentials.add(
             provider="trae", credential_data=credential_data,
             nickname=str(credential_data.get("nickname") or ""),
             added_by=username)
         services.schedule_probe(credential_id)
+        if _wants_html(request):
+            return _page(200, "TRAE 登录成功",
+                         "凭证已保存，可以关闭此页面回到管理台。")
         return {"ok": True, "captured": True, "at": int(time.time())}
 
     return router

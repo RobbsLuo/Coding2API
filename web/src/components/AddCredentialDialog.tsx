@@ -136,14 +136,22 @@ export function AddCredentialDialog({
       if (started.flow === "callback") {
         // TRAE：浏览器完成授权后 302 回本服务的 /authorize，那里直接落库。
         // 前端无法轮询渠道，改为轮询凭证列表，出现新凭证即视为完成。
-        onNotice("已在新标签页打开授权页，完成后本页自动刷新出凭证。");
+        // 回调地址一并透出：它由服务端 PUBLIC_BASE_URL 决定，指错主机时
+        // 浏览器会静默跳不回来（用户只看到「授权完成但没反应」）。
+        onNotice(started.callback_url
+          ? `已在新标签页打开授权页，完成后本页自动刷新出凭证。`
+            + `若一直没有反应，请确认浏览器能打开回调地址 ${started.callback_url}。`
+          : "已在新标签页打开授权页，完成后本页自动刷新出凭证。");
         const deadline = Date.now() + 5 * 60 * 1000;
         const baseline = credentialCountRef.current;
         const timer = window.setInterval(async () => {
           const after = (await api.credentials()).credentials.length;
           if (after > baseline || Date.now() > deadline) {
             stopPolling(provider);
-            onNotice(after > baseline ? "登录成功，凭证已保存。" : "授权超时，请重新登录。");
+            onNotice(after > baseline
+              ? "登录成功，凭证已保存。"
+              : "授权超时：浏览器没有回到本服务。请检查授权后地址栏是否跳转到回调地址，"
+                + "以及服务端 PUBLIC_BASE_URL 是否为浏览器可访问的地址。");
           }
         }, 3000);
         loginTimersRef.current[provider] = timer;

@@ -181,6 +181,9 @@ describe("渠道登录入口", () => {
     await openAddDialog();
     await userEvent.click(screen.getByTestId("start-login-trae"));
     expect(await screen.findByTestId("cancel-login-trae")).toBeInTheDocument();
+    // 回调地址一并透出：指错主机时用户能自己看出「跳不回来」的原因
+    expect(screen.getByTestId("credentials-notice"))
+      .toHaveTextContent("http://127.0.0.1:8000/authorize");
 
     // 浏览器授权完成后服务端落库 → 下一次轮询发现凭证变多
     credentialCount = 2;
@@ -189,6 +192,42 @@ describe("渠道登录入口", () => {
     await waitFor(() =>
       expect(screen.getByTestId("credentials-notice")).toHaveTextContent("登录成功"),
     );
+    vi.useRealTimers();
+  });
+
+  it("TRAE 回调超时：提示检查回调地址与 PUBLIC_BASE_URL", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.stubGlobal("open", () => null);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/upstream/start")) {
+          return jsonResponse({
+            flow: "callback",
+            state: "machine:device",
+            auth_url: "https://trae.example/login",
+            interval: null,
+            callback_url: "https://gw.example/authorize",
+          });
+        }
+        return jsonResponse(listBody([makeCredential({ id: "c0" })]));
+      }),
+    );
+
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+    await openAddDialog();
+    await userEvent.click(screen.getByTestId("start-login-trae"));
+    await screen.findByTestId("cancel-login-trae");
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000 + 4000);
+    await waitFor(() =>
+      expect(screen.getByTestId("credentials-notice")).toHaveTextContent("授权超时"),
+    );
+    expect(screen.getByTestId("credentials-notice"))
+      .toHaveTextContent("PUBLIC_BASE_URL");
     vi.useRealTimers();
   });
 
