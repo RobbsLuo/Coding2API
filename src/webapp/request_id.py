@@ -62,3 +62,6 @@ class RequestIdMiddleware:
             # 调用，最可靠。
             set_api_key_id(None)
             set_session_id(None)
+            # request_id 也要复原：超时/后台任务可能比请求活得久，残留旧 ID 会
+            # 让后续写入落进别人的 request_id（归因的「换号救回」按它关联）。
+            set_request_id(None)

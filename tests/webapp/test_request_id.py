@@ -172,6 +172,24 @@ def test_middleware_resets_api_key_id_after_request():
     assert get_api_key_id() is None
 
 
+def test_middleware_resets_request_id_after_request():
+    """request_id 随请求结束复原：超时存活的子任务不能继承旧 ID 写统计。"""
+    from src.request_context import get_request_id
+
+    app = FastAPI()
+    app.add_middleware(RequestIdMiddleware)
+
+    @app.get("/rid")
+    async def rid():
+        from src.request_context import set_request_id
+        set_request_id("stale-after-this")
+        return {"rid": get_request_id()}
+
+    with TestClient(app) as client:
+        assert client.get("/rid").json() == {"rid": "stale-after-this"}
+    assert get_request_id() is None
+
+
 def test_middleware_resets_api_key_id_even_when_handler_raises():
     from src.request_context import get_api_key_id, set_api_key_id
 

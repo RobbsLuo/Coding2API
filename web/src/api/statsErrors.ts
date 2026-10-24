@@ -15,6 +15,15 @@ export interface StatsErrorRow {
   error_type: string | null;
   /** 该 (渠道, 模型, 错误类型) 组合的失败次数 */
   failures: number;
+  /**
+   * 其中「换号已救回」的次数：同一用户同一 request_id 另有成功行。
+   *
+   * 换号重试是常态——`invalid_request` 每次上游拒绝都落一行，随后换渠道成功
+   * 也留着这条失败。`failures` 是**尝试**口径，`failures - rescued` 是
+   * **未被救回的失败尝试数**（同一请求多次失败会算多次，不等于受损请求数）。
+   * 老库历史行 request_id 为 NULL，恒算未救回。
+   */
+  rescued: number;
   /** 最近一次失败的时刻（UTC 秒） */
   last_ts: number;
 }

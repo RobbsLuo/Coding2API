@@ -50,7 +50,7 @@ def test_errors_groups_and_orders_by_failures(admin_client):
     now = _seed_failures(app)
     rows = client.get(PATH, params={"since": now - 3600}).json()["errors"]
     assert rows[0] == {"provider": "trae", "model": "glm", "error_type": "rate_limit",
-                       "failures": 3, "last_ts": now - 8}
+                       "failures": 3, "rescued": 0, "last_ts": now - 8}
     assert rows[1]["error_type"] == "upstream_error" and rows[1]["failures"] == 1
     # 成功请求不进归因
     assert sum(row["failures"] for row in rows) == 4

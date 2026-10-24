@@ -284,8 +284,9 @@ async def test_upstream_http_failure_records_error_type(repo):
     with pytest.raises(NoHealthyCredential):
         await executor.complete(parse_chat_request(
             {"messages": [{"role": "user", "content": "hi"}]}))
-    # 会话失效 → 硬禁用，轮换耗尽后归类为无可用凭证
-    assert collector.events[-1]["error_type"] == "no_healthy_credential"
+    # 会话失效 → 硬禁用；尝试行已给出真实归因（凭证失效），轮换耗尽的收尾行
+    # 不再重复落（否则一次请求两行，requests 与 Key 日额度双计）
+    assert collector.events[-1]["error_type"] == "credential_unavailable"
     assert credentials.candidates()[0].disabled is True
 
 def test_error_type_mapping_covers_all_kinds():
@@ -298,6 +299,100 @@ def test_error_type_mapping_covers_all_kinds():
     assert _error_type_for(ErrKind.DEAD) == "credential_unavailable"
     assert _error_type_for(ErrKind.SOFT) == "upstream_error"
     assert _error_type_for(ErrKind.OTHER) == "upstream_error"
+
+
+async def test_dead_credential_also_records_attribution_row(repo):
+    """DEAD 除硬禁用外必须落一条 `credential_unavailable` 明细。
+
+    硬禁用只写 `credentials.disabled`，归因卡片读的是 `usage_events`——不落
+    明细就完全看不到（实测 2026-10-23 officeace 两次 401 `AppKey or
+    AppSecret is invalid` 在统计页零痕迹）。
+    """
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+
+    class Dead(Exception):
+        def kind(self):
+            return ErrKind.DEAD
+
+    executor = _exec_with_stats(repo, [[Dead()]], collector)
+    from src.compat.openai.request import parse_chat_request
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+
+    kinds = [event["error_type"] for event in collector.events]
+    # 只落尝试级（DEAD 归因）：轮换耗尽的收尾行不再重复落，否则同一请求
+    # 在 requests 里算两次、成功率虚低，按 Key 计的日额度也会被扣两次。
+    assert kinds == ["credential_unavailable"]
+    dead_row = collector.events[0]
+    assert dead_row["ok"] is False
+    assert dead_row["provider"] == "codebuddy"
+    assert dead_row["latency_ms"] is not None
+
+
+async def test_stream_dead_error_does_not_duplicate_terminal_row(repo):
+    """流式同理：DEAD 已落尝试行，选号耗尽时不再落收尾行（一次请求一行）。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+
+    class Dead(Exception):
+        def kind(self):
+            return ErrKind.DEAD
+
+    executor = _exec_with_stats(repo, [[Dead()]], collector)
+    from src.compat.openai.request import parse_chat_request
+
+    chunks = [chunk async for chunk in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
+    assert chunks                       # 以错误帧收尾，不是静默断开
+    assert [event["error_type"] for event in collector.events] == [
+        "credential_unavailable"]
+
+
+async def test_soft_error_does_not_record_attribution_row(repo):
+    """SOFT 等其它分类不落尝试级明细：一次请求可能触发多次，落行会灌满噪声。
+
+    它们的失败仍由轮换耗尽时的收尾行覆盖（见上一个用例的末尾断言）。
+    """
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+
+    class Soft(Exception):
+        def kind(self):
+            return ErrKind.SOFT
+
+    executor = _exec_with_stats(repo, [[Soft()]], collector)
+    from src.compat.openai.request import parse_chat_request
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+
+    kinds = [event["error_type"] for event in collector.events]
+    assert "upstream_error" not in kinds       # 尝试级不落行
+    assert kinds[-1] == "no_healthy_credential"
+
+
+def test_error_detail_includes_exception_class_for_empty_message():
+    """日志要能分辨传输异常的种类：httpx 的读超时 / 写超时 `str()` 常为空串。
+
+    实测 2026-10-23 codebuddy_intl 两次 158s/162s 的 SOFT 错误日志只剩
+    「kind=soft）: 」，分不清读断、写超时还是连接重置。
+    """
+    from src.engine.executor import _error_detail
+
+    class Blank(Exception):
+        pass
+
+    assert _error_detail(Blank()) == "Blank"          # 空消息只给类名
+    assert _error_detail(ValueError("boom")) == "ValueError: boom"
+    assert _error_detail(None) == "-"
+
 
 def test_usage_field_tolerates_missing_usage():
     from src.engine.executor import _usage_field

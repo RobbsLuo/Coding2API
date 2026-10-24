@@ -489,7 +489,7 @@ Playground 与 `/v1/models` 走 stale-while-revalidate：有缓存立刻回旧�
 
 **延迟两类口径**：只统计成功请求。平均延迟 = `latency_sum ÷ 成功数`（小时汇总）；分位延迟从逐请求明细算（只覆盖 90 天）。`ttfb_ms` 为 `NULL` 的两列各自独立排名。无样本显示 `—`。
 
-**失败归因**：分组表下方的面板，`GET /api/stats/errors`（operator+）按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` 的明细，给失败次数与最近失败时刻（按失败数降序，`limit` ≤ 5000）。点行即钻取到明细并加「只看失败」（`GET /api/stats/events?ok=0`）。只在 admin/operator 下渲染。`/metrics` 的 `upstream_errors_total` 仍取进程内计数，两者不合并。
+**失败归因**：分组表下方的面板，`GET /api/stats/errors`（operator+）按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` 的明细，给失败次数、**未救回数**与最近失败时刻（按失败数降序，`limit` ≤ 5000）。**失败数是尝试口径**：换号重试每次上游拒绝都落一行，同一用户同一 `request_id` 另有成功行即算「已救回」，`未救回 = 失败数 − 救回数` 是**未被救回的失败尝试数**（同一请求多次失败会算多次，不等于受损请求数）。凭证 401 这类硬禁用（DEAD）也会落一行 `credential_unavailable`，换号成功后同样标为已救回；轮换耗尽时不再重复落收尾行。点行即钻取到明细并加「只看失败」（`GET /api/stats/events?ok=0`）。只在 admin/operator 下渲染。`/metrics` 的 `upstream_errors_total` 仍取进程内计数，两者不合并。
 
 **点行钻取**：点分组表任意行，明细即按该行过滤（渠道 / 模型 / 凭证，用户维度走作用域参数），条件可叠加。`GET /api/stats/events` 接受 `provider` / `model` / `credential_id`（AND）与 `ok=0`。
 

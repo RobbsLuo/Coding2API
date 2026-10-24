@@ -121,6 +121,9 @@ CREATE TABLE IF NOT EXISTS usage_events (
 
 CREATE INDEX IF NOT EXISTS idx_usage_ts ON usage_events(ts);
 CREATE INDEX IF NOT EXISTS idx_usage_user ON usage_events(username, ts);
+-- `idx_usage_request`（失败归因按 request_id 关联成功行）不在这里建：
+-- request_id 是老库后补的列，`executescript` 先于补列执行会报
+-- "no such column"，只能走 `migrate.py` 的 `_MIGRATION_INDEXES`。
 
 CREATE TABLE IF NOT EXISTS usage_hourly (
     hour_utc      INTEGER NOT NULL,

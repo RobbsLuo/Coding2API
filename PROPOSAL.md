@@ -197,7 +197,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 13 张表，`SCHEMA_
 - 配置与任务：`GET|PUT /api/settings` + `GET /api/tasks` + `POST /api/tasks/{key}/run`。列表端点统一 `sort` + `order`；未知键回落默认。回调：`GET /authorize`。
 - 告警：`GET /api/alerts` + `POST /api/alerts/{id}/resolve`。`AlertTask` 启动时从库里未恢复的行重建集合。
 - 上游状态：`GET /api/upstream-status`（operator）返回内存快照 + 任务运行态；**不落盘**。四种解析器归一化到六档，加源只在 `SOURCE_SPECS` 加一行。
-- 统计：`GET /api/stats/{overview,by-provider,by-model,by-user,by-credential,timeline,model-timeline}`（延迟分位 P50/P90/P95/P99 可切，默认 P95；输出速度 `tps_visible` / `tps` / `tps_estimated`）、`GET /api/stats/errors`（失败归因，`limit` ≤ 5000）、`GET /api/stats/events`（游标 / OFFSET 双模式，钻取过滤，`ok=0`，`?format=csv`）、`GET /api/stats/events/stream`（SSE，订阅者有界缓冲 200、并发上限 8）。
+- 统计：`GET /api/stats/{overview,by-provider,by-model,by-user,by-credential,timeline,model-timeline}`（延迟分位 P50/P90/P95/P99 可切，默认 P95；输出速度 `tps_visible` / `tps` / `tps_estimated`）、`GET /api/stats/errors`（失败归因，`limit` ≤ 5000；`failures` 为尝试口径，`rescued` 为同用户同 `request_id` 另有成功行的次数，`failures − rescued` 是未被救回的失败尝试数）、`GET /api/stats/events`（游标 / OFFSET 双模式，钻取过滤，`ok=0`，`?format=csv`）、`GET /api/stats/events/stream`（SSE，订阅者有界缓冲 200、并发上限 8）。
 - 日志：`GET /api/logs` + `GET /api/logs/stream`（只读、admin-only，`LOG_BUFFER_LINES=0` 时 404）。
 - 侧栏提醒：`GET /api/nav-badges`，**按角色裁剪 payload**（缺失 = 无权看），不做整体 403。各计数只数「待办」，与页面数据不是同一口径。
 

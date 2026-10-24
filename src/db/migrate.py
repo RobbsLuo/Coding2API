@@ -153,6 +153,9 @@ _MIGRATION_INDEXES: tuple[tuple[str, str, str], ...] = (
     # 按 Key 计量 / 自助用量只查「某把 Key + 时间窗」，必须走索引不能全表扫；
     # api_key_id 是第 26 版才补的列，索引只能在这里建。
     ("idx_usage_key", "usage_events", "api_key_id, ts"),
+    # 失败归因的「换号救回」按 request_id 关联同一请求的成功行（见
+    # stats.query.errors）：request_id 是第 19 版补的列，索引只能在这里建。
+    ("idx_usage_request", "usage_events", "request_id"),
 )
 
 

@@ -968,23 +968,42 @@ class StatsQuery:
         `limit` 按失败数降序取前 N 组：归因卡片是「谁最该修」的排行榜，长尾
         组合（同渠道同模型的不同错误类型各算一组）容易把响应撑大。
 
+        **`rescued`（换号救回数）**：同一用户同一 `request_id` 另有成功行的
+        失败**行**数。换号重试是常态——`invalid_request` 在每次上游拒绝时都落
+        一行，即使随后换了另一个渠道成功（实测 2026-10-23：qoder 53 次失败里
+        36 次最终成功）。只看 `failures` 会把「已救回的尝试」读成「用户受损」，
+        故单列下发：`failures - rescued` 是**未被救回的失败尝试数**（同一请求多
+        次失败会计多次，不等于受损请求数）。救援判定**不叠加时间窗**：成功行
+        可能落在窗口右界之后（同一请求的重试），按 `request_id` 全表关联，走
+        `idx_usage_request`。
+
+        **必须加 `s.username = e.username`**：`request_id` 取自入站
+        `X-Request-ID`，客户端可伪造；只按 ID 关联会让别的用户的成功行把本用户
+        的失败标成「已救回」，也会让传了 `username=` 的查询读到跨租户数据。
+
         `now` 可注入（测试确定性）：只在 `since` 缺省时用于推算默认窗口。
         """
         if since is None:
             since = (now if now is not None else int(time.time())) - ERROR_WINDOW_SECONDS
         where, params = self._where(username=username, since=since, since_col="ts",
-                                    until=until, until_col="ts", ok=0)
+                                    until=until, until_col="ts", ok=0, alias="e.")
         rows = self._db.connect().execute(
             f"""
-            SELECT provider, model, error_type, COUNT(*) AS failures,
-                   MAX(ts) AS last_ts
-            FROM usage_events {where}
-            GROUP BY provider, model, error_type
-            ORDER BY failures DESC, provider, model, error_type
+            SELECT e.provider, e.model, e.error_type, COUNT(*) AS failures,
+                   SUM(CASE WHEN EXISTS (
+                       SELECT 1 FROM usage_events s
+                       WHERE s.request_id = e.request_id
+                         AND s.username = e.username AND s.ok = 1)
+                   THEN 1 ELSE 0 END) AS rescued,
+                   MAX(e.ts) AS last_ts
+            FROM usage_events e {where}
+            GROUP BY e.provider, e.model, e.error_type
+            ORDER BY failures DESC, e.provider, e.model, e.error_type
             LIMIT ?
             """, [*params, max(1, limit)]).fetchall()
         return [{"provider": row["provider"], "model": row["model"],
                  "error_type": row["error_type"], "failures": int(row["failures"]),
+                 "rescued": int(row["rescued"]),
                  "last_ts": int(row["last_ts"])} for row in rows]
 
     def model_timeline(self, *, username: str | None = None,

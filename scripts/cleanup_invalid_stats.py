@@ -11,8 +11,10 @@
 时认定为白打，整组删除。两边都没成功过的模型名（如手滑输错的请求）保留；
 本上游有成功记录的（偶发拒绝）保留；非 invalid_request 的错误保留。
 
-汇总同步：usage_hourly 由明细全量重算（StatsCollector.rollup_hourly 幂等），
-删除后重跑 rollup，再清掉不再有明细对应的小时行，保证明细与汇总严格一致。
+汇总同步：`usage_hourly` 由明细全量重算（`StatsCollector.rollup_hourly` 幂等），
+删除后再清掉**本次删除覆盖的小时**里不再有明细对应的孤儿行，保证明细与汇总
+严格一致。只清这些小时：小时汇总永久保留，90 天前的明细已被 `purge_expired`
+删掉，无条件清孤儿会把历史汇总一起删掉。
 
 用法：
     python3 scripts/cleanup_invalid_stats.py                 # 预览，不写库
@@ -28,34 +30,33 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from scripts._common import DbAdapter, backup  # noqa: E402
+from scripts._common import backup, sync_hourly  # noqa: E402
 from src.db.conn import Database  # noqa: E402
-from src.stats.collector import StatsCollector  # noqa: E402
 
 
-def stale_groups(conn) -> list[tuple[str, str, int]]:
-    """白打组列表：(provider, model 原样, 待删条数)。"""
+def stale_groups(conn) -> list[tuple[str, str, int, int, int]]:
+    """白打组列表：(provider, model 原样, 待删条数, 最早 ts, 最晚 ts)。"""
     success: dict[tuple[str, str], int] = {}
     for provider, model, count in conn.execute(
             "SELECT provider, LOWER(model), COUNT(*) FROM usage_events "
             "WHERE ok = 1 GROUP BY provider, LOWER(model)"):
         success[(provider, model)] = count
-    stale: list[tuple[str, str, int]] = []
-    for provider, model, count in conn.execute(
-            "SELECT provider, model, COUNT(*) FROM usage_events "
+    stale: list[tuple[str, str, int, int, int]] = []
+    for provider, model, count, low, high in conn.execute(
+            "SELECT provider, model, COUNT(*), MIN(ts), MAX(ts) FROM usage_events "
             "WHERE ok = 0 AND error_type = 'invalid_request' "
             "GROUP BY provider, model"):
         if success.get((provider, model.lower()), 0) == 0 and any(
                 ok_count for (pid, lower), ok_count in success.items()
                 if pid != provider and lower == model.lower()):
-            stale.append((provider, model, count))
+            stale.append((provider, model, count, low, high))
     return stale
 
 
-def delete_stale(conn, stale: list[tuple[str, str, int]]) -> int:
+def delete_stale(conn, stale: list[tuple[str, str, int, int, int]]) -> int:
     """删除白打明细，返回总条数。"""
     total = 0
-    for provider, model, _count in stale:
+    for provider, model, _count, _low, _high in stale:
         cursor = conn.execute(
             "DELETE FROM usage_events WHERE provider = ? AND model = ? "
             "AND ok = 0 AND error_type = 'invalid_request'", (provider, model))
@@ -63,16 +64,10 @@ def delete_stale(conn, stale: list[tuple[str, str, int]]) -> int:
     return total
 
 
-def sync_hourly(conn) -> None:
-    """小时汇总与明细对齐：全量重算 + 清孤儿行。"""
-    StatsCollector(DbAdapter(conn)).rollup_hourly()
-    conn.execute(
-        "DELETE FROM usage_hourly WHERE NOT EXISTS ("
-        "  SELECT 1 FROM usage_events e"
-        "  WHERE (e.ts / 3600) * 3600 = usage_hourly.hour_utc"
-        "    AND e.username = usage_hourly.username"
-        "    AND e.provider = usage_hourly.provider"
-        "    AND e.model = usage_hourly.model)")
+def _deleted_hours(stale: list[tuple[str, str, int, int, int]]) -> tuple[int, int]:
+    """待删白打行覆盖的小时区间（整点对齐）；只让这些小时参与孤儿清理。"""
+    return (min(group[3] for group in stale) // 3600 * 3600,
+            max(group[4] for group in stale) // 3600 * 3600)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -94,9 +89,9 @@ def main(argv: list[str] | None = None) -> int:
     if not stale:
         print("没有需要清理的记录")
         return 0
-    for provider, model, count in sorted(stale):
+    for provider, model, count, _low, _high in sorted(stale):
         print(f"  {provider:<10} {model:<24} x{count}")
-    total = sum(count for _, _, count in stale)
+    total = sum(group[2] for group in stale)
     print(f"共 {total} 条白打明细（{len(stale)} 组）")
 
     if not args.apply:
@@ -104,8 +99,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     target = backup(db_path)
+    hours = _deleted_hours(stale)
     delete_stale(conn, stale)
-    sync_hourly(conn)
+    sync_hourly(conn, hours)
     conn.commit()
     print(f"已删除 {total} 条明细，小时汇总已同步（备份: {target}）")
     return 0

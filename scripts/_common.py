@@ -68,3 +68,37 @@ class DbAdapter:
             self._depth = depth
         if depth == 0:
             self._conn.commit()
+
+
+def hour_range(conn, where: str, params: list[object]) -> tuple[int, int] | None:
+    """`where` 命中行覆盖的小时区间（整点对齐、闭区间）；无行返回 None。
+
+    删除失败明细前先取这个区间，`sync_hourly` 只在该区间清孤儿行：区间外的
+    小时**本来就没有明细**（`purge_expired` 删 90 天前明细，小时汇总永久保留），
+    无条件清会把历史汇总一起删掉。
+    """
+    row = conn.execute(
+        f"SELECT MIN(ts), MAX(ts) FROM usage_events WHERE {where}", params).fetchone()
+    if row[0] is None:
+        return None
+    return (int(row[0]) // 3600) * 3600, (int(row[1]) // 3600) * 3600
+
+
+def sync_hourly(conn, hours: tuple[int, int] | None) -> None:
+    """全量重算小时汇总，并清掉 `hours` 区间内已无明细对应的孤儿行。
+
+    `hours` 必须是**本次删除覆盖**的小时区间（见 `hour_range`）；None = 没有
+    待删行，只重算不清孤儿。
+    """
+    from src.stats.collector import StatsCollector
+
+    StatsCollector(DbAdapter(conn)).rollup_hourly()
+    if hours is None:
+        return
+    conn.execute(
+        "DELETE FROM usage_hourly WHERE hour_utc BETWEEN ? AND ? AND NOT EXISTS ("
+        "  SELECT 1 FROM usage_events e"
+        "  WHERE (e.ts / 3600) * 3600 = usage_hourly.hour_utc"
+        "    AND e.username = usage_hourly.username"
+        "    AND e.provider = usage_hourly.provider"
+        "    AND e.model = usage_hourly.model)", hours)

@@ -14,7 +14,7 @@ import {
   useStatsTimeline,
 } from "../api/hooks";
 import { formatCacheRate, formatCompact, formatCredit, formatLatency, formatMoney, formatNumber, formatSpeed, formatSpeedPair, formatTime, formatTimeParts, usageErrorLabel } from "../api/display";
-import { useStatsErrors } from "../api/statsErrors";
+import { useStatsErrors, type StatsErrorRow } from "../api/statsErrors";
 import { ModelTrendChart } from "../components/ModelTrendChart";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
@@ -468,6 +468,8 @@ export function StatsPage() {
   // 计数条按本批最大值归一（相对长度才有意义）；全 0 时给 1 避免除零
   const maxFailures = Math.max(1, ...errorRows.map((row) => row.failures));
   const barWidth = (failures: number) => Math.round((failures / maxFailures) * 100);
+  /** 失败数减去换号救回数 = 未被救回的失败尝试数（rescued 恒 ≤ failures）。 */
+  const unrescued = (row: StatsErrorRow) => row.failures - row.rescued;
 
   // 四个维度一次性取数（各维度行结构一致），切 tab 只换渲染、不再发请求；
   // viewer 看不到用户/凭证 tab，若状态残留则回落到渠道维度
@@ -889,6 +891,7 @@ export function StatsPage() {
                   <TableHead>模型</TableHead>
                   <TableHead>错误类型</TableHead>
                   <TableHead className="text-right">失败数</TableHead>
+                  <TableHead className="text-right">未救回</TableHead>
                   <TableHead className="text-right">最近失败</TableHead>
                 </TableRow>
               </TableHeader>
@@ -930,6 +933,14 @@ export function StatsPage() {
                         {formatNumber(row.failures)}
                       </span>
                     </TableCell>
+                    {/* 失败数是「尝试」口径：换号成功后失败行照样留着。
+                        未救回 = failures − rescued，是未被救回的失败尝试数。 */}
+                    <TableCell label="未救回" className="text-right tabular-nums">
+                      <span data-testid={`error-unrescued-${row.provider}-${row.model}-${row.error_type ?? "unknown"}`}
+                            className={unrescued(row) > 0 ? "text-destructive" : "text-muted-foreground"}>
+                        {formatNumber(unrescued(row))}
+                      </span>
+                    </TableCell>
                     <TableCell label="最近失败"
                                className="whitespace-nowrap text-right tabular-nums">
                       {formatTime(row.last_ts)}
@@ -941,7 +952,9 @@ export function StatsPage() {
           )}
           <p className="mt-2 text-xs text-muted-foreground">
             窗口缺省为最近 24 小时（与上方时间范围一致时按所选范围统计）；
-            未上报错误类型的历史行显示为「失败」。点任意一行可钻取到下方「请求明细」（只看失败）。
+            未上报错误类型的历史行显示为「失败」。失败数是<strong>尝试</strong>口径：
+            换号重试每次上游拒绝都记一行，「未救回」是未被救回的失败尝试数
+            （同一请求多次失败会算多次；同请求另有成功行即算救回）。点任意一行可钻取到下方「请求明细」（只看失败）。
           </p>
         </Panel>
       )}

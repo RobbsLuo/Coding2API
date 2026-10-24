@@ -48,7 +48,7 @@ def test_stale_only_when_other_provider_succeeded(db):
     collector.record(username="u", provider="trae", model="solo", ok=False,
                      error_type="upstream_error")           # 非 invalid → 不删
     stale = CLEANUP.stale_groups(collector._db.connect())
-    assert [(p, m, c) for p, m, c in stale] == [("trae", "solo", 1)]
+    assert [(p, m, c) for p, m, c, _low, _high in stale] == [("trae", "solo", 1)]
 
 
 def test_delete_and_sync_hourly_aligns_aggregate(db):
@@ -58,9 +58,10 @@ def test_delete_and_sync_hourly_aligns_aggregate(db):
                      error_type="invalid_request")
     collector.record(username="u", provider="codebuddy", model="solo", ok=True)
     conn = database.connect()
-    assert CLEANUP.delete_stale(conn, CLEANUP.stale_groups(conn)) == 1
+    stale = CLEANUP.stale_groups(conn)
+    assert CLEANUP.delete_stale(conn, stale) == 1
     conn.commit()
-    CLEANUP.sync_hourly(conn)
+    CLEANUP.sync_hourly(conn, CLEANUP._deleted_hours(stale))
     rows = [tuple(r) for r in conn.execute(
         "SELECT provider, model, requests FROM usage_hourly ORDER BY provider")]
     assert rows == [("codebuddy", "solo", 1)]

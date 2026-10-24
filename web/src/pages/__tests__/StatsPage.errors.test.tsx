@@ -54,6 +54,13 @@ describe("StatsPage 失败归因", () => {
     // 未上报错误类型 → 「失败」（不把 NULL 原样透传）
     const unknownRow = within(table).getByTestId("error-row-trae-deepseek-v4-unknown");
     expect(unknownRow).toHaveTextContent("失败");
+    // 未救回 = failures − rescued：12−4=8 / 4−4=0 / 2−0=2
+    expect(screen.getByTestId("error-unrescued-trae-glm-5.2-rate_limit"))
+      .toHaveTextContent("8");
+    expect(screen.getByTestId("error-unrescued-codebuddy-kimi-k3-upstream_error"))
+      .toHaveTextContent("0");
+    expect(screen.getByTestId("error-unrescued-trae-deepseek-v4-unknown"))
+      .toHaveTextContent("2");
   });
 
   it("点归因行 → 明细按 provider+model+ok=0 重新取数并显示过滤标签", async () => {

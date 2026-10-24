@@ -122,11 +122,11 @@ def test_errors_groups_by_provider_model_and_error_type(stats):
     rows = query.errors(since=now - 100, now=now)
     assert rows == [
         {"provider": "trae", "model": "glm", "error_type": "rate_limit",
-         "failures": 3, "last_ts": now + 2},
+         "failures": 3, "rescued": 0, "last_ts": now + 2},
         {"provider": "codebuddy", "model": "kimi", "error_type": "rate_limit",
-         "failures": 1, "last_ts": now + 20},
+         "failures": 1, "rescued": 0, "last_ts": now + 20},
         {"provider": "trae", "model": "glm", "error_type": "upstream_error",
-         "failures": 1, "last_ts": now + 10},
+         "failures": 1, "rescued": 0, "last_ts": now + 10},
     ]
 
 
@@ -174,3 +174,97 @@ def test_errors_limit_is_floored_at_one(stats):
 def test_errors_empty(stats):
     _collector, query = stats
     assert query.errors(now=int(time.time())) == []
+
+
+def test_errors_counts_rescued_attempts_by_request_id(stats):
+    """同 request_id 另有成功行 = 换号救回，单列下发（failures − rescued 才是受损数）。
+
+    换号重试是常态：`invalid_request` 每次上游拒绝都落一行，随后换渠道成功
+    也留着这条失败。不区分会把「已救回的尝试」读成「用户没拿到结果」。
+    """
+    from src.request_context import set_request_id
+
+    collector, query = stats
+    now = 1_700_000_000
+    try:
+        # req-a：先失败后成功（救回）
+        set_request_id("req-a")
+        collector.record(username="u", provider="trae", model="glm", ok=False,
+                         error_type="invalid_request", now=now)
+        collector.record(username="u", provider="codebuddy", model="glm", ok=True,
+                         now=now + 1)
+        # req-b：只失败（未救回）
+        set_request_id("req-b")
+        collector.record(username="u", provider="trae", model="glm", ok=False,
+                         error_type="invalid_request", now=now + 2)
+        # req-c：同一渠道两次失败 + 一次成功，两行都算救回
+        set_request_id("req-c")
+        collector.record(username="u", provider="trae", model="glm", ok=False,
+                         error_type="invalid_request", now=now + 3)
+        collector.record(username="u", provider="trae", model="glm", ok=False,
+                         error_type="invalid_request", now=now + 4)
+        collector.record(username="u", provider="trae", model="glm", ok=True, now=now + 5)
+    finally:
+        set_request_id(None)
+
+    rows = query.errors(since=now - 10, now=now)
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["failures"] == 4          # req-a 1 + req-b 1 + req-c 2
+    assert row["rescued"] == 3           # req-a 1 + req-c 2
+    assert row["failures"] - row["rescued"] == 1   # 只有 req-b 真正受损
+
+
+def test_errors_rescued_ignores_rows_without_request_id(stats):
+    """老库历史行 request_id 为 NULL：无法关联成功行，恒算未救回（不误报救回）。"""
+    collector, query = stats
+    now = 1_700_000_000
+    collector.record(username="u", provider="trae", model="glm", ok=False,
+                     error_type="rate_limit", now=now)
+    row = query.errors(since=now - 10, now=now)[0]
+    assert row["failures"] == 1 and row["rescued"] == 0
+
+
+def test_errors_rescued_is_scoped_to_same_user(stats):
+    """request_id 来自入站 `X-Request-ID`（客户端可伪造）：跨用户不能互相「救回」。
+
+    只按 ID 关联时，bob 的成功行会把 alice 的失败标成已救回（实测可复现），
+    传了 `username=` 的查询同样会读到跨租户数据。
+    """
+    from src.request_context import set_request_id
+
+    collector, query = stats
+    now = 1_700_000_000
+    try:
+        set_request_id("shared-id")
+        collector.record(username="alice", provider="trae", model="glm", ok=False,
+                         error_type="rate_limit", now=now)
+        collector.record(username="bob", provider="codebuddy", model="glm", ok=True,
+                         now=now + 1)
+    finally:
+        set_request_id(None)
+
+    alice = query.errors(username="alice", since=now - 10, now=now)
+    assert alice[0]["failures"] == 1 and alice[0]["rescued"] == 0
+    everyone = query.errors(since=now - 10, now=now)
+    assert sum(row["rescued"] for row in everyone) == 0
+
+
+def test_errors_rescued_sees_success_after_window_end(stats):
+    """救援判定不叠加时间窗：成功行可能落在窗口右界之后（同一请求的重试）。"""
+    from src.request_context import set_request_id
+
+    collector, query = stats
+    now = 1_700_000_000
+    try:
+        set_request_id("req-late")
+        collector.record(username="u", provider="trae", model="glm", ok=False,
+                         error_type="invalid_request", now=now)
+        collector.record(username="u", provider="codebuddy", model="glm", ok=True,
+                         now=now + 500)
+    finally:
+        set_request_id(None)
+
+    # 窗口 [now-10, now+100)：成功行在窗口外，仍应算救回
+    rows = query.errors(since=now - 10, until=now + 100, now=now)
+    assert rows[0]["failures"] == 1 and rows[0]["rescued"] == 1

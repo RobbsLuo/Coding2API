@@ -99,10 +99,10 @@ export const EVENTS_PAGE2 = {
 export const ERRORS = {
   errors: [
     { provider: "trae", model: "glm-5.2", error_type: "rate_limit", failures: 12,
-      last_ts: BASE_TS + 300 },
+      rescued: 4, last_ts: BASE_TS + 300 },
     { provider: "codebuddy", model: "kimi-k3", error_type: "upstream_error", failures: 4,
-      last_ts: BASE_TS + 200 },
+      rescued: 4, last_ts: BASE_TS + 200 },
     { provider: "trae", model: "deepseek-v4", error_type: null, failures: 2,
-      last_ts: BASE_TS + 100 },
+      rescued: 0, last_ts: BASE_TS + 100 },
   ],
 };
