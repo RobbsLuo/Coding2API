@@ -400,6 +400,11 @@ def test_resolve_callback_url_uses_request_origin_for_unreachable_base():
                         PUBLIC_BASE_URL="http://0.0.0.0:8000")
     assert resolve_public_callback_url(wildcard, _request("10.0.0.2:8000")) == \
         "http://10.0.0.2:8000/authorize"
+    # localhost 字面量同理
+    named = Settings(_env_file=None, APP_SECRET=SECRET,
+                     PUBLIC_BASE_URL="http://localhost:8000")
+    assert resolve_public_callback_url(named, _request("10.0.0.2:8000")) == \
+        "http://10.0.0.2:8000/authorize"
 
 
 def test_resolve_callback_url_keeps_configured_base():
@@ -416,6 +421,11 @@ def test_resolve_callback_url_keeps_configured_base():
                         PUBLIC_BASE_URL="https://gw.example")
     assert resolve_public_callback_url(explicit, _request("192.168.1.5:8000")) == \
         "https://gw.example/authorize"
+    # 非回环 IP 基址：本来就是浏览器可达的，不为请求 origin 让路
+    lan_base = Settings(_env_file=None, APP_SECRET=SECRET,
+                        PUBLIC_BASE_URL="http://10.0.0.9:8000")
+    assert resolve_public_callback_url(lan_base, _request("192.168.1.5:8000")) == \
+        "http://10.0.0.9:8000/authorize"
 
 
 def _mock_trae() -> TraeProvider:

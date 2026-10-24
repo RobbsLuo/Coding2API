@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import inspect
+import ipaddress
 import time
 
 from fastapi import APIRouter, Depends, Request
@@ -39,7 +40,7 @@ ACTIVATION_TTL_SECONDS = 24 * 3600
 # 浏览器打不开的基址主机：回环与通配监听。PUBLIC_BASE_URL 默认值就是
 # 127.0.0.1:8000，远程/容器部署忘了改时，回调会跳到**用户自己这台机器**，
 # 浏览器既回不到服务也不报错（issue #21）。
-_UNREACHABLE_BASE_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "0.0.0.0"})
+_LOCALHOST_NAMES = frozenset({"localhost"})
 
 
 def _host_of(authority: str) -> str:
@@ -48,6 +49,17 @@ def _host_of(authority: str) -> str:
     if text.startswith("["):
         return text.partition("]")[0].lstrip("[").lower()
     return text.split(":", 1)[0].lower()
+
+
+def _browser_cannot_reach(host: str) -> bool:
+    """回环 / 通配监听：浏览器打开它到不了本服务（或到不了发请求的那个人）。"""
+    if host in _LOCALHOST_NAMES:
+        return True
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:          # 普通域名 / 无效字面量：按可达处理
+        return False
+    return address.is_loopback or address.is_unspecified
 
 
 def _request_origin(request: Request) -> str:
@@ -73,9 +85,9 @@ def resolve_public_callback_url(settings: Settings,
     `host_allowed` 白名单，故这里采信 Host 头不会放大攻击面。
     """
     base = settings.public_base_url.rstrip("/")
-    if request is not None and _host_of(base) in _UNREACHABLE_BASE_HOSTS:
+    if request is not None and _browser_cannot_reach(_host_of(base)):
         request_host = _host_of(request.headers.get("host", "") or request.url.netloc)
-        if request_host and request_host not in _UNREACHABLE_BASE_HOSTS:
+        if request_host and not _browser_cannot_reach(request_host):
             base = _request_origin(request).rstrip("/")
     return base + "/authorize"
 
