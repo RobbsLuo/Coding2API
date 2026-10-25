@@ -116,6 +116,13 @@ def test_usage_tolerates_bad_types():
     assert event.usage.cached_tokens is None
     assert event.usage.credit is None
 
+def test_usage_parses_credit_when_present():
+    """Zen 是上游真给 credit 的渠道之一：数值必须解析出来（不是默认值吞掉）。"""
+    event = zen_events.parse_frame(frame(
+        {"choices": [], "usage": {"prompt_tokens": 5, "credit": 0.25}}))
+    assert event is not None and event.usage is not None
+    assert event.usage.credit == 0.25
+
 def test_classify_status_maps_each_branch():
     # 401 只代表「该模型需要付费 key」，不是虚拟凭证失效；归 DEAD 会因一次
     # 强制 @zen 的付费模型请求把整条渠道硬禁用。

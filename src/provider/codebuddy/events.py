@@ -7,90 +7,29 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from ...engine.sse import SSEFrame
 from ...provider.base import (
     ErrKind,
     Event,
-    EventKind,
-    UpstreamProtocolViolation,
+    UpstreamProtocolViolation,  # noqa: F401 - credential/client 经本模块导入
     Usage,
     body_hint,
     business_codes,
 )
-from ..openai_chunk import first_choice, is_blank_tool_call, usage_from_openai
+from ..openai_chunk import openai_event, openai_events, payload_of, usage_from_openai
 
 
 def parse_frame(frame: SSEFrame) -> Event | None:
     """单帧 → 中立事件；[DONE] 与无 delta 的帧返回 None。"""
-    if not frame.data:
-        return None
-    if frame.data.strip() == "[DONE]":
-        return None
-    try:
-        payload = json.loads(frame.data)
-    except json.JSONDecodeError as error:
-        raise UpstreamProtocolViolation("unparsable CodeBuddy SSE data") from error
-    if not isinstance(payload, dict):
-        raise UpstreamProtocolViolation("CodeBuddy SSE data is not an object")
-
-    choice = first_choice(payload)
-    delta = choice.get("delta") if choice else None
-    delta = delta if isinstance(delta, dict) else {}
-    finish_reason = choice.get("finish_reason") if choice else None
-
-    tool_calls = delta.get("tool_calls")
-    if isinstance(tool_calls, list):
-        # 上游偶发噪声调用：无 name 且 arguments 为空/{}（客户端聚合后
-        # 显示 "Tool not found"）。正常分片块无 name 但带实际 arguments，
-        # 必须保留。空名噪声整条丢弃。
-        kept = [tc for tc in tool_calls if isinstance(tc, dict) and not is_blank_tool_call(tc)]
-        if kept:
-            return Event(kind=EventKind.TOOL_CALLS, tool_calls=kept)
-
-    content = delta.get("content")
-    if isinstance(content, str) and content:
-        return Event(kind=EventKind.CONTENT, content=content)
-
-    reasoning = delta.get("reasoning_content")
-    if isinstance(reasoning, str) and reasoning:
-        return Event(kind=EventKind.REASONING, content=reasoning)
-
-    usage = payload.get("usage")
-    if isinstance(usage, dict):
-        return Event(kind=EventKind.USAGE, usage=_usage(usage))
-
-    if isinstance(finish_reason, str) and finish_reason:
-        return Event(kind=EventKind.FINISH, finish_reason=finish_reason)
-    return None
+    payload = payload_of(frame, "CodeBuddy")
+    return None if payload is None else openai_event(payload, usage=_usage)
 
 
 def parse_all_events(frame: SSEFrame) -> list[Event]:
     """一帧拆成多个事件：带 usage 的收尾帧同时给出 finish_reason 与 usage。"""
-    if not frame.data:
-        return []
-    if frame.data.strip() == "[DONE]":
-        return []
-    try:
-        payload = json.loads(frame.data)
-    except json.JSONDecodeError as error:
-        raise UpstreamProtocolViolation("unparsable CodeBuddy SSE data") from error
-    if not isinstance(payload, dict):
-        raise UpstreamProtocolViolation("CodeBuddy SSE data is not an object")
-
-    events: list[Event] = [e for e in (parse_frame(frame),) if e is not None]
-    has_usage = any(e.kind is EventKind.USAGE for e in events)
-    has_finish = any(e.kind is EventKind.FINISH for e in events)
-    usage = payload.get("usage")
-    if isinstance(usage, dict) and not has_usage:
-        events.append(Event(kind=EventKind.USAGE, usage=_usage(usage)))
-    choice = first_choice(payload)
-    finish_reason = choice.get("finish_reason") if choice else None
-    if isinstance(finish_reason, str) and finish_reason and not has_finish:
-        events.append(Event(kind=EventKind.FINISH, finish_reason=finish_reason))
-    return events
+    return openai_events(frame, "CodeBuddy", usage=_usage)
 
 
 def _usage(raw: dict[str, Any]) -> Usage:
