@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import email.utils
 import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -260,12 +261,33 @@ def test_retry_hints_falls_back_to_body_without_header():
     assert retry_hints({}, NOW) == {"retry_at": None, "retry_after_seconds": None}
 
 
+def _reset_body_at(moment: int) -> bytes:
+    """按 `moment` 生成一份真实形状的正文（重置时刻写成 UTC+8 墙钟）。
+
+    端到端用例必须用**相对当前时刻**的正文。写死某个日期的话，跑到那天之后
+    `parse_reset_at` 会把「过去的时刻」判成 None（这是它的正确行为，见
+    `test_parse_reset_at_rejects_past_and_garbage`），用例就变成隔天必红——
+    实测 2026-10-25 22:34:25 那条写死正文在 22:35 之后即失败。
+    """
+    stamp = datetime.fromtimestamp(moment, timezone(timedelta(hours=8)))
+    return (
+        b'{"code":6004,"msg":"usage exceeds frequency limit, but don\'t worry, your '
+        b'usage will reset at '
+        + stamp.strftime("%Y-%m-%d %H:%M:%S").encode()
+        + b' UTC+8, alternatively, you can switch to the other models to '
+        b'continue using it.","requestId":"8967ac37"}'
+    )
+
+
 async def test_codebuddy_stream_fills_retry_at_from_body():
     """CodeBuddy 的 raise 点把 body 传给了 retry_hints：429+6004 冷却到重置时刻。"""
     from src.provider.codebuddy.client import CodeBuddyClient, CodeBuddyCredential
 
+    reset_at = int(time.time()) + 3600
+    body = _reset_body_at(reset_at)
+
     def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(429, content=RESET_BODY)
+        return httpx.Response(429, content=body)
 
     transport = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
     client = CodeBuddyClient(stream_client=transport, short_client=transport)
@@ -274,6 +296,6 @@ async def test_codebuddy_stream_fills_retry_at_from_body():
         [event async for event in client.stream_chat(
             CodeBuddyCredential(bearer_token="t"), {"messages": []},
             "deepseek-v4.1-flash")]
-    assert caught.value.retry_at == RESET_MOMENT
+    assert caught.value.retry_at == reset_at
     assert caught.value.kind() is ErrKind.MODEL
     assert caught.value.retry_at > before
