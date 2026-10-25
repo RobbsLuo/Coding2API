@@ -101,11 +101,24 @@ class _Queued(Exception):
     用异常而不是 `break`+标志位，是因为非流式的读流包在 `try/except/else` 里，
     `break` 出来会落到 `else` 分支把**半截** events 拿去聚合。异常能干净地
     跳过 `else`，走 finally 释放租约后再等待。
+
+    携带完整的 `plan`（而不只是秒数）：计数与 pinned 在抛出点已经算好，
+    `except` 分支直接落账，避免两处各算一遍而漂移。
     """
 
-    def __init__(self, wait: float) -> None:
-        super().__init__(f"upstream queued {wait}s")
-        self.wait = wait
+    def __init__(self, plan: _QueueRestart) -> None:
+        super().__init__(f"upstream queued {plan.wait}s")
+        self.plan = plan
+
+
+@dataclass(slots=True)
+class _QueueRestart:
+    """一次排队重开的计划（四个入口共用，见 `_plan_queue_restart`）。"""
+
+    wait: float
+    rounds: int
+    attempts: int
+    pinned: tuple[str, dict[str, Any]]
 
 
 class _StreamTimeout(Exception):
@@ -663,20 +676,16 @@ class Executor:
                             # 排队：上游点名「等 N 秒再来」。未出帧时在原号上
                             # 重开，不冷却、不换号、不占轮换预算；已出帧则
                             # 无法重开（半截输出不可回滚），按 SOFT 收尾。
-                            wait = self._queue_wait(event.retry_after_seconds,
-                                                    emitted, queue_rounds)
-                            if wait is not None:
-                                queue_rounds += 1
-                                # 归还轮换预算：排队不是「换号尝试」。不归还的话
-                                # 三次排队就把 max_rotate 吃满，请求直接 503。
-                                attempts -= 1
-                                pinned = (credential_id, credential_data)
-                                queued_wait = wait
-                                logger.info(
-                                    "上游 %s 排队中（凭证 %s，第 %s/%s 轮），"
-                                    "%.1fs 后原号重开",
-                                    provider_id, credential_id, queue_rounds,
-                                    QUEUE_MAX_ROUNDS, wait)
+                            plan = self._plan_queue_restart(
+                                event.retry_after_seconds, emitted=emitted,
+                                rounds=queue_rounds, attempts=attempts,
+                                provider_id=provider_id, credential_id=credential_id,
+                                credential_data=credential_data)
+                            if plan is not None:
+                                queue_rounds = plan.rounds
+                                attempts = plan.attempts
+                                pinned = plan.pinned
+                                queued_wait = plan.wait
                                 broken = True
                                 break
                             kind = ErrKind.SOFT
@@ -725,18 +734,16 @@ class Executor:
                 if kind is ErrKind.QUEUE:
                     # 排队也可能以 HTTP 403 + 排队 body 的形式抛出（见
                     # qoder.events.classify_status）：同样在原号上等后重开。
-                    wait = self._queue_wait(
+                    plan = self._plan_queue_restart(
                         getattr(error, "retry_after_seconds", None),
-                        emitted, queue_rounds)
-                    if wait is not None:
-                        queue_rounds += 1
-                        attempts -= 1
-                        pinned = (credential_id, credential_data)
-                        queued_wait = wait
-                        logger.info(
-                            "上游 %s 排队中（凭证 %s，第 %s/%s 轮），%.1fs 后原号重开",
-                            provider_id, credential_id, queue_rounds,
-                            QUEUE_MAX_ROUNDS, wait)
+                        emitted=emitted, rounds=queue_rounds, attempts=attempts,
+                        provider_id=provider_id, credential_id=credential_id,
+                        credential_data=credential_data)
+                    if plan is not None:
+                        queue_rounds = plan.rounds
+                        attempts = plan.attempts
+                        pinned = plan.pinned
+                        queued_wait = plan.wait
                     else:
                         kind = ErrKind.SOFT
                         logger.warning("上游 %s 排队但无法重开（凭证 %s）: %s",
@@ -1045,10 +1052,13 @@ class Executor:
                                 and _event_kind(event) is ErrKind.QUEUE):
                             # 排队信号必须在入 events **之前**拦下：进了 events
                             # 就会被 `aggregate` 当成流内错误，直接冷却换号。
-                            wait = self._queue_wait(event.retry_after_seconds,
-                                                    False, queue_rounds)
-                            if wait is not None:
-                                raise _Queued(wait)
+                            plan = self._plan_queue_restart(
+                                event.retry_after_seconds, emitted=False,
+                                rounds=queue_rounds, attempts=attempts,
+                                provider_id=provider_id, credential_id=credential_id,
+                                credential_data=credential_data)
+                            if plan is not None:
+                                raise _Queued(plan)
                             # 轮次用尽：降级为普通瞬态错误，交给既有路径处理
                             event = replace(event, error_kind=ErrKind.SOFT)
                         events.append(event)
@@ -1059,14 +1069,10 @@ class Executor:
                             raise _AggregateOverflow(
                                 self._deps.complete_max_events)
             except _Queued as queued:
-                queue_rounds += 1
-                attempts -= 1
-                pinned = (credential_id, credential_data)
-                queued_wait = queued.wait
-                logger.info(
-                    "上游 %s 排队中（凭证 %s，第 %s/%s 轮），%.1fs 后原号重开",
-                    provider_id, credential_id, queue_rounds,
-                    QUEUE_MAX_ROUNDS, queued.wait)
+                queue_rounds = queued.plan.rounds
+                attempts = queued.plan.attempts
+                pinned = queued.plan.pinned
+                queued_wait = queued.plan.wait
             except TimeoutError:
                 logger.warning(
                     "上游 %s 非流式聚合超过 %ss（凭证 %s，按瞬态错误换号）",
@@ -1095,18 +1101,16 @@ class Executor:
                     raise
                 if kind is ErrKind.QUEUE:
                     # HTTP 级排队（403 + 排队 body）：与流内排队同一套语义
-                    wait = self._queue_wait(
+                    plan = self._plan_queue_restart(
                         getattr(error, "retry_after_seconds", None),
-                        False, queue_rounds)
-                    if wait is not None:
-                        queue_rounds += 1
-                        attempts -= 1
-                        pinned = (credential_id, credential_data)
-                        queued_wait = wait
-                        logger.info(
-                            "上游 %s 排队中（凭证 %s，第 %s/%s 轮），%.1fs 后原号重开",
-                            provider_id, credential_id, queue_rounds,
-                            QUEUE_MAX_ROUNDS, wait)
+                        emitted=False, rounds=queue_rounds, attempts=attempts,
+                        provider_id=provider_id, credential_id=credential_id,
+                        credential_data=credential_data)
+                    if plan is not None:
+                        queue_rounds = plan.rounds
+                        attempts = plan.attempts
+                        pinned = plan.pinned
+                        queued_wait = plan.wait
                     else:
                         logger.warning("上游 %s 排队但无法重开（凭证 %s）: %s",
                                        provider_id, credential_id, _error_detail(error))
@@ -1516,6 +1520,30 @@ class Executor:
             return None
         wait = QUEUE_DEFAULT_WAIT_SECONDS if retry_after is None else float(retry_after)
         return min(max(wait, 0.0), QUEUE_MAX_WAIT_SECONDS)
+
+    def _plan_queue_restart(
+        self, retry_after: float | None, *, emitted: bool, rounds: int,
+        attempts: int, provider_id: str, credential_id: str,
+        credential_data: dict[str, Any],
+    ) -> _QueueRestart | None:
+        """排队信号 → 重开计划；不该重开时返回 None（调用方降级为 SOFT）。
+
+        四个入口（流式事件 / 流式异常 / 非流式 `_Queued` / 非流式异常）原本各
+        写一份「计数 + 记 pinned + 打日志」，收敛到这里保证四处的预算口径一致：
+
+        - `attempts -= 1`：排队不是「换号尝试」。不归还的话三次排队就把
+          `max_rotate` 吃满，请求直接 503。
+        - `pinned` 记下被点名的凭证，下一轮跳过 `_pick` 直接用——否则可能选到
+          别的号，排队语义就丢了。
+        """
+        wait = self._queue_wait(retry_after, emitted, rounds)
+        if wait is None:
+            return None
+        rounds += 1
+        logger.info("上游 %s 排队中（凭证 %s，第 %s/%s 轮），%.1fs 后原号重开",
+                    provider_id, credential_id, rounds, QUEUE_MAX_ROUNDS, wait)
+        return _QueueRestart(wait=wait, rounds=rounds, attempts=attempts - 1,
+                             pinned=(credential_id, credential_data))
 
     def _model_scope(self, provider_id: str, model: str) -> str:
         """冷却表登记的模型名：用上游原始名（与 provider 实际调用的名字一致）。"""

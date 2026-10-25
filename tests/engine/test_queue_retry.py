@@ -523,6 +523,39 @@ def test_queue_wait_uses_value(repo):
     db.close()
 
 
+def test_plan_queue_restart_returns_budget_and_pin(repo):
+    """四个入口共用同一份预算口径：轮次 +1、attempts -1、pin 原号。"""
+    credentials, db = repo
+    executor = _executor(credentials, object())
+    data = {"access_token": "t"}
+
+    plan = executor._plan_queue_restart(
+        7.0, emitted=False, rounds=0, attempts=3,
+        provider_id="trae", credential_id="cid-1", credential_data=data)
+
+    assert plan is not None
+    assert plan.wait == 7.0
+    assert plan.rounds == 1
+    # 排队不是换号尝试：不归还预算的话三次排队就把 max_rotate 吃满
+    assert plan.attempts == 2
+    # pin 原号：下一轮跳过 _pick，排队语义才不会丢
+    assert plan.pinned == ("cid-1", data)
+    db.close()
+
+
+def test_plan_queue_restart_none_when_emitted_or_exhausted(repo):
+    """不该重开的两种情形都返回 None，由调用方降级为 SOFT。"""
+    credentials, db = repo
+    executor = _executor(credentials, object())
+    kwargs = dict(attempts=3, provider_id="trae", credential_id="cid-1",
+                  credential_data={})
+
+    assert executor._plan_queue_restart(1.0, emitted=True, rounds=0, **kwargs) is None
+    assert executor._plan_queue_restart(
+        1.0, emitted=False, rounds=QUEUE_MAX_ROUNDS, **kwargs) is None
+    db.close()
+
+
 def test_error_type_for_queue_is_rate_limit():
     from src.engine.executor import _error_type_for
 
