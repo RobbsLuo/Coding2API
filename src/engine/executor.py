@@ -263,7 +263,7 @@ class Executor:
         self._deps.record(
             username=username, provider=provider_id, credential_id=credential_id,
             model=model, ok=False, error_type="invalid_request",
-            latency_ms=int((time.monotonic() - started) * 1000))
+            latency_ms=_elapsed_ms(started))
 
     def _suggestions(self, model: str) -> list[str] | None:
         """400 时给用户的相近模型建议（未注入或无候选则 None）。"""
@@ -332,9 +332,8 @@ class Executor:
         调用点在 `_pick` 返回 None 之后，此时 `_select` 已保证至少注册了一个
         上游（全无注册时它会先抛 NoProviderForModel），故无需再判空上游。
         """
-        registered = [pid for pid in self._narrow_providers(target)
-                      if pid in self._deps.providers]
-        return self._model_cooled_only(registered, target, int(time.time()))
+        return self._model_cooled_only(self._registered(target), target,
+                                       int(time.time()))
 
     def _skip_provider(self, provider_id: str, tried: set[str]) -> None:
         """INVALID 后跳过该上游：把它的全部凭证都标记为已试。"""
@@ -465,8 +464,7 @@ class Executor:
         """
         target = self.resolve_target(request, provider_binding)
         for attempt in self._fallback_chain(target):
-            if [pid for pid in self._narrow_providers(attempt)
-                    if pid in self._deps.providers]:
+            if self._registered(attempt):
                 return target
         raise NoProviderForModel(f"no provider registered for model {target.model!r}")
 
@@ -1012,7 +1010,7 @@ class Executor:
                             credential_id=last_credential,
                             model=target.model, ok=False,
                             error_type=self._exhaust_error_type(target),
-                            latency_ms=int((time.monotonic() - started) * 1000))
+                            latency_ms=_elapsed_ms(started))
                     raise NoHealthyCredential(
                         self._unavailable_text(target, last_error))
                 credential_id, credential_data = pick
@@ -1182,7 +1180,7 @@ class Executor:
                         if usage_event else False,
                         ttfb_ms=(int((first_event_at - started) * 1000)
                                  if first_event_at is not None else None),
-                        latency_ms=int((time.monotonic() - started) * 1000))
+                        latency_ms=_elapsed_ms(started))
                     return result
             finally:
                 await aclose_stream(iterator)
@@ -1200,7 +1198,7 @@ class Executor:
                     username=username, provider=provider_id, credential_id=credential_id,
                     model=target.model, ok=False,
                     error_type=_error_type_for(kind) if kind else "upstream_protocol",
-                    latency_ms=int((time.monotonic() - started) * 1000))
+                    latency_ms=_elapsed_ms(started))
                 raise NoHealthyCredential(
                     self._unavailable_text(target, last_error))
 
@@ -1265,8 +1263,7 @@ class Executor:
         limit = float(live(self._deps.short_cooldown_wait_seconds)() or 0)
         if limit <= 0:
             return False
-        registered = [pid for pid in self._narrow_providers(target)
-                      if pid in self._deps.providers]
+        registered = self._registered(target)
         if not registered:
             return False
         now = int(time.time())
@@ -1328,6 +1325,11 @@ class Executor:
         if match is None or not match.is_selectable(now):
             return None
         return affinity_id
+
+    def _registered(self, target: ModelTarget) -> list[str]:
+        """收窄后的候选渠道 ∩ 已注册渠道（决定「这个模型能不能发出去」）。"""
+        return [pid for pid in self._narrow_providers(target)
+                if pid in self._deps.providers]
 
     def _narrow_providers(self, target: ModelTarget) -> tuple[str, ...]:
         """模型目录能证明归属时，把候选上游收窄到登记了该模型的上游。
@@ -1395,8 +1397,7 @@ class Executor:
         的登记表里）`_narrow_providers` 本就放行全部候选，不存在「漏试真正
         持有它的新渠道」——模型列表 TTL 300s + 后台兜底刷新即新鲜度上限。
         """
-        registered = [pid for pid in self._narrow_providers(target)
-                      if pid in self._deps.providers]
+        registered = self._registered(target)
         if not registered:
             raise NoProviderForModel(f"no provider registered for model {target.model!r}")
         now = int(time.time())
@@ -1495,7 +1496,7 @@ class Executor:
         self._deps.record(
             username=username, provider=provider_id, credential_id=credential_id,
             model=model, ok=False, error_type=_error_type_for(kind),
-            latency_ms=int((time.monotonic() - started) * 1000))
+            latency_ms=_elapsed_ms(started))
         return True
 
     def _queue_wait(self, retry_after: float | None, emitted: bool,

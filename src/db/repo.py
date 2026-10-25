@@ -27,6 +27,22 @@ from ..sorting import sort_rows, sql_order
 from ..tags import tags_text, tags_value
 
 
+def _now(now: int | None) -> int:
+    """调用方缺省时取当前 epoch 秒；显式传 0 时保留 0（不被当成缺省）。"""
+    return int(now if now is not None else time.time())
+
+
+def _clear_model_cooldowns(conn: Any, credential_id: str) -> None:
+    """清掉该凭证的全部 (凭证, 模型) 冷却行。
+
+    模型级冷却没有外键级联，所以删除凭证 / 硬禁用 / 账号级冷却 / 显式恢复
+    都必须显式清理——否则重建同 id 凭证会继承旧的模型冷却，残留行还会拖慢
+    留存清理。
+    """
+    conn.execute("DELETE FROM credential_model_cooldowns WHERE credential_id = ?",
+                 (credential_id,))
+
+
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:16]}"
 
@@ -214,7 +230,7 @@ class CredentialRepository:
             tags: list[str] | None = None) -> str:
         credential_id = _new_id("cred")
         payload = json.dumps(credential_data, ensure_ascii=False).encode("utf-8")
-        created = int(now if now is not None else time.time())
+        created = _now(now)
         issued_at, expires_at = credential_token_times(credential_data)
         with self._db.transaction() as conn:
             conn.execute(
@@ -237,8 +253,7 @@ class CredentialRepository:
             cursor = conn.execute("DELETE FROM credentials WHERE id = ?", (credential_id,))
             # 模型级冷却没有外键级联，凭证删除后必须显式清理，
             # 否则重建同 id 凭证会继承旧的模型冷却（残留行还会拖慢留存清理）
-            conn.execute("DELETE FROM credential_model_cooldowns WHERE credential_id = ?",
-                         (credential_id,))
+            _clear_model_cooldowns(conn, credential_id)
         return cursor.rowcount > 0
 
     def set_enabled(self, credential_id: str, enabled: bool) -> bool:
@@ -265,8 +280,7 @@ class CredentialRepository:
             cursor = conn.execute(
                 "UPDATE credentials SET disabled = 0, disabled_reason = NULL, "
                 "cooling_until = NULL, err_count = 0 WHERE id = ?", (credential_id,))
-            conn.execute("DELETE FROM credential_model_cooldowns WHERE credential_id = ?",
-                         (credential_id,))
+            _clear_model_cooldowns(conn, credential_id)
         return cursor.rowcount > 0
 
     def mark_relogin_required(self, credential_id: str, reason: str) -> None:
@@ -284,8 +298,7 @@ class CredentialRepository:
             conn.execute(
                 "UPDATE credentials SET disabled = 1, disabled_reason = ?, err_count = 0, "
                 "cooling_until = NULL WHERE id = ?", (reason, credential_id))
-            conn.execute("DELETE FROM credential_model_cooldowns WHERE credential_id = ?",
-                         (credential_id,))
+            _clear_model_cooldowns(conn, credential_id)
 
     def save_error(self, credential_id: str, outcome: ErrorOutcome) -> None:
         """落库一次错误结果。
@@ -316,8 +329,7 @@ class CredentialRepository:
                     "UPDATE credentials SET cooling_until = ?, err_count = ? WHERE id = ?",
                     (outcome.cooling_until, outcome.err_count, credential_id))
             if outcome.cooling_until is not None:
-                conn.execute("DELETE FROM credential_model_cooldowns WHERE credential_id = ?",
-                             (credential_id,))
+                _clear_model_cooldowns(conn, credential_id)
 
     def save_success(self, credential_id: str, *, model: str | None = None) -> None:
         """成功：清账号级错误累计；`model` 命中负缓存条目时一并清除。
@@ -338,7 +350,7 @@ class CredentialRepository:
         with self._db.transaction() as conn:
             cursor = conn.execute(
                 "DELETE FROM credential_model_cooldowns WHERE cooling_until <= ?",
-                (int(now if now is not None else time.time()),))
+                (_now(now),))
         return cursor.rowcount
 
     def model_cooldowns_for(self, credential_id: str,
@@ -347,7 +359,7 @@ class CredentialRepository:
         rows = self._db.connect().execute(
             "SELECT model, cooling_until FROM credential_model_cooldowns "
             "WHERE credential_id = ? AND cooling_until > ?",
-            (credential_id, int(now if now is not None else time.time()))).fetchall()
+            (credential_id, _now(now))).fetchall()
         return {row["model"]: row["cooling_until"] for row in rows}
 
     def blocked_cooldowns(self, now: int | None = None) -> list[dict[str, Any]]:
@@ -362,7 +374,7 @@ class CredentialRepository:
             "FROM credential_model_cooldowns c "
             "JOIN credentials cred ON cred.id = c.credential_id "
             "WHERE c.reason = 'blocked' AND c.cooling_until > ? "
-            "ORDER BY c.cooling_until", (int(now if now is not None else time.time()),)
+            "ORDER BY c.cooling_until", (_now(now),)
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -475,7 +487,7 @@ class CredentialRepository:
     def mark_probe_failed(self, credential_id: str, now: int | None = None) -> None:
         with self._db.transaction() as conn:
             conn.execute("UPDATE credentials SET quota_probed_at = ?, health = NULL WHERE id = ?",
-                         (int(now if now is not None else time.time()), credential_id))
+                         (_now(now), credential_id))
 
     def save_growth_result(self, credential_id: str, report: str,
                            now: int | None = None) -> None:
@@ -484,7 +496,7 @@ class CredentialRepository:
             conn.execute(
                 "UPDATE credentials SET growth_last_run_at = ?, growth_last_result = ? "
                 "WHERE id = ?",
-                (int(now if now is not None else time.time()), report, credential_id))
+                (_now(now), report, credential_id))
 
     # ------------------------------------------------------------- 读取
 
@@ -542,7 +554,7 @@ class CredentialRepository:
         实际选号不一致的「可用数」。判定优先级：disabled → paused → cooling
         → ready，与调度器一致（禁用/暂停优先于冷却）。
         """
-        moment = int(now if now is not None else time.time())
+        moment = _now(now)
         counts = {"total": 0, "ready": 0, "cooling": 0, "paused": 0, "disabled": 0}
         for candidate in self.candidates():
             counts["total"] += 1
@@ -620,6 +632,8 @@ class CredentialRepository:
         服务端算好的「剩余秒数」不会随页面 tick 更新，两处口径还会漂移。
         到期时间未知时为 0（展示层隐藏，绝不当成已过期）。
         """
+        # 注意：这里用 `or` 而非 `is not None`——list_all 的调用方从不传 0，
+        # 而 `now=0`（epoch 起点）对它等同于「取当前时刻」是可接受的。
         now = int(now or time.time())
         rows = self._db.connect().execute(
             "SELECT id, provider, nickname, enabled, disabled, disabled_reason, pinned, "
@@ -688,7 +702,7 @@ class CredentialRepository:
         """
         if within_seconds <= 0:
             return []
-        moment = int(now if now is not None else time.time())
+        moment = _now(now)
         deadline = moment + within_seconds
         rows = self._db.connect().execute(
             "SELECT id, provider, nickname, data_enc, token_expires_at, token_issued_at "
@@ -719,7 +733,7 @@ class ApiKeyRepository:
                quota: str = "") -> dict[str, Any]:
         plaintext = generate_api_key()
         key_id = _new_id("key")
-        created_at = int(now if now is not None else time.time())
+        created_at = _now(now)
         with self._db.transaction() as conn:
             conn.execute(
                 "INSERT INTO api_keys (id, username, name, key_digest, preview, created_at, "
@@ -844,7 +858,7 @@ class GrowthRepository:
             conn.execute(
                 "INSERT INTO growth_events (id, credential_id, ts, ok, session_dead, "
                 "report, credit, energy, streak_days, trigger) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (event_id, credential_id, int(now if now is not None else time.time()),
+                (event_id, credential_id, _now(now),
                  1 if result.ok else 0, 1 if result.session_dead else 0,
                  result.report, result.credit, result.energy, result.streak_days, trigger),
             )
@@ -856,7 +870,7 @@ class GrowthRepository:
         每轮探测都可能落一行，不回收会无界增长（读侧有 LIMIT，但表本身会
         一直变大）；保留期与请求明细一致，避免「成长中心记录比请求明细还久」。
         """
-        cutoff = int(now if now is not None else time.time()) - keep_days * 86400
+        cutoff = _now(now) - keep_days * 86400
         with self._db.transaction() as conn:
             cursor = conn.execute("DELETE FROM growth_events WHERE ts < ?", (cutoff,))
         return cursor.rowcount
@@ -909,7 +923,7 @@ class CreditEventRepository:
 
     def prune(self, *, keep_days: int, now: int | None = None) -> int:
         """删除超过保留期的流水（与 usage_events 同一保留策略入口）。"""
-        cutoff = int(now if now is not None else time.time()) - keep_days * 86400
+        cutoff = _now(now) - keep_days * 86400
         with self._db.transaction() as conn:
             cursor = conn.execute("DELETE FROM credit_events WHERE ts < ?", (cutoff,))
         return cursor.rowcount
@@ -936,7 +950,7 @@ class AlertRepository:
             conn.execute(
                 "INSERT INTO alert_events (id, ts, rule, severity, scope, message, "
                 "detail, delivered, delivery_error) VALUES (?,?,?,?,?,?,?,?,?)",
-                (alert_id, int(now if now is not None else time.time()), rule,
+                (alert_id, _now(now), rule,
                  severity, scope, message, detail, 1 if delivered else 0,
                  delivery_error),
             )
@@ -1003,7 +1017,7 @@ class AlertRepository:
         只动这一行——不做「按 (rule, scope) 批量」，免得手滑一次把仍在告警的
         同组记录一起收掉。
         """
-        resolved_at = int(now if now is not None else time.time())
+        resolved_at = _now(now)
         with self._db.transaction() as conn:
             cursor = conn.execute(
                 "UPDATE alert_events SET resolved_at = ? "
@@ -1020,7 +1034,7 @@ class AlertRepository:
 
         返回受影响行数（0 = 没有待恢复的行，例如告警已被清理）。
         """
-        resolved_at = int(now if now is not None else time.time())
+        resolved_at = _now(now)
         with self._db.transaction() as conn:
             cursor = conn.execute(
                 "UPDATE alert_events SET resolved_at = ? "
@@ -1030,7 +1044,7 @@ class AlertRepository:
 
     def prune(self, *, keep_days: int, now: int | None = None) -> int:
         """删除超过保留期的告警（与 usage_events / 审计同一保留策略入口）。"""
-        cutoff = int(now if now is not None else time.time()) - keep_days * 86400
+        cutoff = _now(now) - keep_days * 86400
         with self._db.transaction() as conn:
             cursor = conn.execute("DELETE FROM alert_events WHERE ts < ?", (cutoff,))
         return cursor.rowcount
@@ -1058,7 +1072,7 @@ class RuntimeSettingsRepository:
                 "INSERT INTO runtime_settings (key, value, updated_at) VALUES (?,?,?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value, "
                 "updated_at = excluded.updated_at",
-                (key, value, int(now if now is not None else time.time())),
+                (key, value, _now(now)),
             )
 
     def delete(self, key: str) -> None:
@@ -1138,7 +1152,7 @@ class UserRepository:
                enabled: bool = True, must_change_password: bool = False,
                created_by: str | None = None, activation_digest: str | None = None,
                activation_expires_at: int | None = None, now: int | None = None) -> None:
-        timestamp = int(now if now is not None else time.time())
+        timestamp = _now(now)
         with self._db.transaction() as conn:
             conn.execute(
                 "INSERT INTO users (username, password_hash, role, enabled, "
@@ -1170,7 +1184,7 @@ class UserRepository:
                 "UPDATE users SET role = ?, session_epoch = session_epoch + ?, "
                 "updated_at = ? WHERE username = ?",
                 (role, 1 if bump_epoch else 0,
-                 int(now if now is not None else time.time()), username),
+                 _now(now), username),
             )
         return cursor.rowcount > 0
 
@@ -1182,7 +1196,7 @@ class UserRepository:
                 "UPDATE users SET enabled = ?, session_epoch = session_epoch + 1, "
                 "updated_at = ? WHERE username = ?",
                 (1 if enabled else 0,
-                 int(now if now is not None else time.time()), username),
+                 _now(now), username),
             )
         return cursor.rowcount > 0
 
@@ -1195,7 +1209,7 @@ class UserRepository:
                 "session_epoch = session_epoch + 1, activation_digest = NULL, "
                 "activation_expires_at = NULL, updated_at = ? WHERE username = ?",
                 (password_hash, 1 if must_change_password else 0,
-                 int(now if now is not None else time.time()), username),
+                 _now(now), username),
             )
         return cursor.rowcount > 0
 
@@ -1206,7 +1220,7 @@ class UserRepository:
             cursor = conn.execute(
                 "UPDATE users SET activation_digest = ?, activation_expires_at = ?, "
                 "updated_at = ? WHERE username = ?",
-                (digest, expires_at, int(now if now is not None else time.time()), username),
+                (digest, expires_at, _now(now), username),
             )
         return cursor.rowcount > 0
 
@@ -1247,7 +1261,7 @@ class AuditRepository:
             conn.execute(
                 "INSERT INTO audit_events (id, ts, actor, action, target, detail, ip, ok) "
                 "VALUES (?,?,?,?,?,?,?,?)",
-                (event_id, int(now if now is not None else time.time()), actor, action,
+                (event_id, _now(now), actor, action,
                  target, detail, ip, 1 if ok else 0),
             )
         return event_id
@@ -1301,7 +1315,7 @@ class AuditRepository:
         return where, params
 
     def prune(self, *, keep_days: int, now: int | None = None) -> int:
-        cutoff = int(now if now is not None else time.time()) - keep_days * 86400
+        cutoff = _now(now) - keep_days * 86400
         with self._db.transaction() as conn:
             cursor = conn.execute("DELETE FROM audit_events WHERE ts < ?", (cutoff,))
         return cursor.rowcount
@@ -1349,7 +1363,7 @@ class ModelProbeRepository:
         证据，继续累计会让一串无关故障凑成「连续失败」，把好模型判死。
         `last_ok_at` 只在 `ok` 时前移，其余状态保留上一次成功时刻。
         """
-        stamp = int(now if now is not None else time.time())
+        stamp = _now(now)
         with self._db.transaction() as conn:
             conn.execute(
                 f"INSERT INTO model_probes ({self._RECORD_COLUMNS}) "
@@ -1370,7 +1384,7 @@ class ModelProbeRepository:
     def set_manual(self, *, provider: str, model: str, manual: str,
                    now: int | None = None) -> None:
         """人工接管标记（`''` = 交还自动探活）。行不存在时先建一条空结论行。"""
-        stamp = int(now if now is not None else time.time())
+        stamp = _now(now)
         with self._db.transaction() as conn:
             conn.execute(
                 "INSERT INTO model_probes (provider, model, manual, updated_at) "
@@ -1400,7 +1414,7 @@ class ModelProbeRepository:
             "JOIN credentials cred ON cred.id = c.credential_id "
             "JOIN model_probes p ON p.provider = cred.provider AND p.model = c.model "
             "WHERE c.reason = 'blocked' AND c.cooling_until > ? AND p.state = 'failed'",
-            (int(now if now is not None else time.time()),)).fetchall()
+            (_now(now),)).fetchall()
         return {(row["provider"], row["model"]) for row in rows}
 
     def manual_marked(self) -> set[tuple[str, str]]:

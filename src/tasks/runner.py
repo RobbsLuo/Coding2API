@@ -238,48 +238,41 @@ class TaskRunner:
         `run_once` 自身返回 None，记 no-op。
         """
         specs: list[_LoopSpec] = [
-            _LoopSpec("quota_probe", lambda: self._quota_probe.run_once(),
-                      lambda: self._interval_seconds("quota_probe")),
-            _LoopSpec("refresh", self._refresh.run_once,
-                      lambda: self._interval_seconds("refresh")),
-            _LoopSpec("retention", self._sync_retention,
-                      lambda: self._interval_seconds("retention")),
+            self._spec("quota_probe", lambda: self._quota_probe.run_once()),
+            self._spec("refresh", self._refresh.run_once),
+            self._spec("retention", self._sync_retention),
             # 签到：留空时点 = 全天每 10 分钟一轮；有配置时点时仍按 10 分钟醒
             # 一次，由 `due()` 自己判定是否落在抖动窗口内。**不能**把周期改成
             # 「按最大时点间隔算」——服务恰在两个时点之间重启会直接漏签，而
             # 10 分钟空转的代价只是读一次配置（与 activity 的取舍同理）。
-            _LoopSpec("checkin",
-                      ((lambda: self._sync_checkin(manual=True)) if manual
-                       else self._sync_checkin),
-                      lambda: self._interval_seconds("checkin")),
+            self._spec("checkin",
+                       ((lambda: self._sync_checkin(manual=True)) if manual
+                        else self._sync_checkin)),
         ]
         if self._growth is not None:
-            specs.append(_LoopSpec("growth", self._sync_growth,
-                                   lambda: self._interval_seconds("growth")))
+            specs.append(self._spec("growth", self._sync_growth))
         if self._activity is not None:
             activity = ((lambda: self._sync_activity(manual=True)) if manual
                         else self._sync_activity)
-            specs.append(_LoopSpec("activity", activity,
-                                   lambda: self._interval_seconds("activity")))
+            specs.append(self._spec("activity", activity))
         if self._model_catalog is not None:
-            specs.append(_LoopSpec("model_catalog", self._model_catalog,
-                                   lambda: self._interval_seconds("model_catalog")))
+            specs.append(self._spec("model_catalog", self._model_catalog))
         if self._model_probe is not None:
-            specs.append(_LoopSpec("model_probe", self._sync_model_probe,
-                                   lambda: self._interval_seconds("model_probe")))
+            specs.append(self._spec("model_probe", self._sync_model_probe))
         if self._openrouter_catalog is not None:
-            specs.append(_LoopSpec("openrouter_catalog", self._openrouter_catalog,
-                                   lambda: self._interval_seconds("openrouter_catalog")))
+            specs.append(self._spec("openrouter_catalog", self._openrouter_catalog))
         if self._alert is not None:
-            specs.append(_LoopSpec("alert", self._sync_alert,
-                                   lambda: self._interval_seconds("alert")))
+            specs.append(self._spec("alert", self._sync_alert))
         if self._backup is not None:
-            specs.append(_LoopSpec("backup", self._sync_backup,
-                                   lambda: self._interval_seconds("backup")))
+            specs.append(self._spec("backup", self._sync_backup))
         if self._upstream_status is not None:
-            specs.append(_LoopSpec("upstream_status", self._sync_upstream_status,
-                                   lambda: self._interval_seconds("upstream_status")))
+            specs.append(self._spec("upstream_status", self._sync_upstream_status))
         return specs
+
+    def _spec(self, key: str,
+              runner: Callable[[], Awaitable[object]]) -> _LoopSpec:
+        """拼一条循环描述：周期取值器统一走 `_interval_seconds`（热更现读）。"""
+        return _LoopSpec(key, runner, lambda: self._interval_seconds(key))
 
     async def run_task(self, key: str) -> dict[str, Any]:
         """手动运行一个后台任务一轮，返回该任务的最新运行态。
@@ -302,11 +295,21 @@ class TaskRunner:
         _ok, ran = await self._run_guarded(spec.runner, TASK_BY_KEY[key].name, key=key)
         return {**self._task_item(key), "ran": ran, "busy": False}
 
+    @staticmethod
+    def _require(task: object | None, label: str) -> Any:
+        """取已装配的任务对象；未装配时显式报错（而不是静默 no-op）。
+
+        这类失败只可能来自装配错误（可选任务未接线却出现在清单里），
+        必须让 `_guarded` 记成失败而不是「未运行」。
+        """
+        if task is None:
+            raise RuntimeError(f"{label} task not configured")
+        return task
+
     async def _sync_growth(self) -> object:
         """成长中心一轮：领礼物 / 派 Buddy / 任务 / 补登 / 兑换 / 抽奖 / 盲盒。"""
-        if self._growth is None:
-            raise RuntimeError("growth task not configured")
-        return await self._growth.run_once()
+        task = self._require(self._growth, "growth")
+        return await task.run_once()
 
     async def _sync_activity(self, *, manual: bool = False) -> object:
         """活跃上报：仅启用且处于配置小时窗口内才执行，成功凭证当日封账。
@@ -314,13 +317,12 @@ class TaskRunner:
         「是否启用」每轮现读：关掉再打开不需要重启，也不必重建循环。
         `manual=True`（管理台「立即运行」）绕过时点窗口：手动就是立刻跑。
         """
-        if self._activity is None:
-            raise RuntimeError("activity task not configured")
+        task = self._require(self._activity, "activity")
         if not self._activity_enabled():
             return None
         if not manual and not self._activity.due():
             return None
-        return await self._activity.run_once()
+        return await task.run_once()
 
     async def _sync_checkin(self, *, manual: bool = False) -> object:
         """签到一轮：有配置时点时只在窗口内跑，留空则全天每 10 分钟一轮。
@@ -347,11 +349,10 @@ class TaskRunner:
         「模型探活周期」填上即生效，不必重启。关着时返回 None，`_guarded`
         不记运行态——页面显示「未运行」，而不是「刚跑过」。
         """
-        if self._model_probe is None:
-            raise RuntimeError("model probe task not configured")
+        task = self._require(self._model_probe, "model probe")
         if int(self._model_probe_minutes()) <= 0:
             return None
-        return await self._model_probe.run_once()
+        return await task.run_once()
 
     async def _sync_alert(self) -> object:
         """运维告警一轮：评估四类规则、静默去重后落库 + 推送。
@@ -359,18 +360,16 @@ class TaskRunner:
         是否启用每轮现读：AlertTask.run_once 关着时返回 None，
         `_guarded` 不记运行态——页面显示「未运行」，而不是「刚跑过」。
         """
-        if self._alert is None:
-            raise RuntimeError("alert task not configured")
-        return await self._alert.run_once()
+        task = self._require(self._alert, "alert")
+        return await task.run_once()
 
     async def _sync_backup(self) -> object:
         """数据库备份一轮：VACUUM INTO 是同步磁盘 IO，放线程池跑。
 
         直接在事件循环里执行会卡住所有并发请求（库越大越久）。
         """
-        if self._backup is None:
-            raise RuntimeError("backup task not configured")
-        return await asyncio.to_thread(self._backup.run_once)
+        task = self._require(self._backup, "backup")
+        return await asyncio.to_thread(task.run_once)
 
     async def _sync_upstream_status(self) -> object:
         """上游状态页一轮：并发抓全部源并原子替换内存快照。
@@ -378,9 +377,8 @@ class TaskRunner:
         是否启用每轮现读：任务关着时 `run_once` 返回 None，`_guarded` 不记
         运行态——页面显示「未运行」，而不是「刚跑过」。
         """
-        if self._upstream_status is None:
-            raise RuntimeError("upstream status task not configured")
-        return await self._upstream_status.run_once()
+        task = self._require(self._upstream_status, "upstream status")
+        return await task.run_once()
 
     async def _loop(self, name: str, runner: Callable[[], Awaitable[object]],
                     interval: float | Callable[[], float],
@@ -486,41 +484,41 @@ class TaskRunner:
         }
 
     def _interval_seconds(self, key: str) -> float:
-        if key == "quota_probe":
-            return self._quota_interval
-        if key == "refresh":
-            return self._refresh_interval
-        if key == "checkin":
-            # 留空（旧行为）= 10 分钟醒一次即可；配了时点则必须 1 分钟醒一次——
-            # 抖动=0 时窗口只有「恰好那一分钟」，10 分钟周期会大概率整天落空。
-            # 醒来只是读一次配置 + 比较几个整数，代价可忽略。
-            return self._checkin_interval
-        if key == "growth":
-            return self._growth_interval
-        if key == "activity":
-            return float(self._activity_interval)
-        if key == "model_catalog":
-            return self._model_catalog_interval
-        if key == "model_probe":
-            return self._model_probe_interval
-        if key == "openrouter_catalog":
-            return self._openrouter_catalog_interval
-        if key == "alert":
-            return self._alert_interval
-        if key == "backup":
-            return self._backup_interval
-        if key == "upstream_status":
-            return self._upstream_status_interval
-        return self._retention_interval
+        """按 key 取当前生效周期（秒）。property 是唯一真源，这里只做派发。"""
+        getter = self._interval_getters().get(key)
+        return float(getter()) if getter is not None else self._retention_interval
+
+    def _interval_getters(self) -> dict[str, Callable[[], float]]:
+        """key → 周期 property 的派发表。
+
+        与 `_task_enabled` 分开维护：周期是每个任务必有的一项，开关只有
+        activity / alert / upstream_status 三个可关。用字典而非 if-chain，
+        新增任务时漏接线会直接落进 `_interval_seconds` 的兜底分支（保留期），
+        而不是静默返回别的任务的周期。
+        """
+        return {
+            "quota_probe": lambda: self._quota_interval,
+            "refresh": lambda: self._refresh_interval,
+            "retention": lambda: self._retention_interval,
+            "checkin": lambda: self._checkin_interval,
+            "growth": lambda: self._growth_interval,
+            "activity": lambda: self._activity_interval,
+            "model_catalog": lambda: self._model_catalog_interval,
+            "model_probe": lambda: self._model_probe_interval,
+            "openrouter_catalog": lambda: self._openrouter_catalog_interval,
+            "alert": lambda: self._alert_interval,
+            "backup": lambda: self._backup_interval,
+            "upstream_status": lambda: self._upstream_status_interval,
+        }
 
     def _task_enabled(self, key: str) -> bool:
-        if key == "activity":
-            return bool(self._activity_enabled())
-        if key == "alert":
-            return bool(self._alert_enabled())
-        if key == "upstream_status":
-            return bool(self._upstream_status_enabled())
-        return True
+        """任务是否启用；只有三个可关的任务需要现读开关，其余恒 True。"""
+        getter = {
+            "activity": self._activity_enabled,
+            "alert": self._alert_enabled,
+            "upstream_status": self._upstream_status_enabled,
+        }.get(key)
+        return True if getter is None else bool(getter())
 
     async def stop(self) -> None:
         for task in self._tasks:
