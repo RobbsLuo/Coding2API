@@ -46,7 +46,7 @@ from ...provider.base import (
     Quota,
     UpstreamTransportError,
 )
-from ...provider.proxy import build_client
+from ...provider.proxy import SHORT_TIMEOUT, STREAM_TIMEOUT, build_client
 from . import events as qoder_events
 from .cosy import CosySession, CosySessionCache, qoder_encode
 from .credential import QoderCredential, merge_refreshed
@@ -70,8 +70,7 @@ logger = logging.getLogger(__name__)
 # 写超时覆盖的是上传请求体阶段，不是首字等待：大上下文请求体可达数 MB，
 # 经代理链路 10s 会稳定超时；首字等待由 read=None +
 # stream_first_event_timeout_seconds 负责，两者不要混为一谈。
-STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0)
-SHORT_TIMEOUT = httpx.Timeout(30.0)
+
 
 # 本区域无签到接口的 HTTP 状态（国际版实测 404；405/410 同义）。活动制与旧接口
 # 共用：两者都不可用才算「本区域无签到」。

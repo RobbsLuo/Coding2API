@@ -446,6 +446,30 @@ async def test_run_task_bypasses_activity_hour_window(repo):
     assert provider.activity_calls == 1
 
 
+async def test_run_task_bypasses_checkin_window(repo):
+    """手动触发签到同样绕过 due() 时点窗口：窗口外也真跑。
+
+    回归：此前只有 activity 特判 manual，签到恒走 `_sync_checkin`，
+    管理台点「立即运行签到」在非时点窗口返回 ran=False（与文档契约不符）。
+    """
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    runner = _runner(repo, StubProvider())
+    calls: list[str] = []
+
+    async def fake_run_once(**kwargs):
+        calls.append("ran")
+        return {"succeeded": 1}
+
+    runner._checkin.due = lambda: False
+    runner._checkin.run_once = fake_run_once  # type: ignore[method-assign]
+
+    result = await runner.run_task("checkin")
+
+    assert result["ran"] is True
+    assert calls == ["ran"]
+
+
 async def test_run_task_skips_when_already_running(repo):
     """同一任务已在跑时立刻返回 busy，不排队、不并发打上游。"""
     credentials, _db = repo

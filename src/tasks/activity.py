@@ -65,8 +65,17 @@ class ActivityTask:
     def _day_key(self) -> str:
         return self._current().strftime("%Y-%m-%d")
 
+    def _prune(self, day: str) -> None:
+        """丢掉非当天的封账记录：键以日期开头，跨天后不可能再命中，
+        长驻进程否则每天每账号各攒一条（无上限）。"""
+        prefix = f"{day}:"
+        self._done_scopes = {key for key in self._done_scopes
+                             if key.startswith(prefix)}
+
     async def run_once(self, *, trigger: str = "auto") -> TaskReport:
         report = TaskReport()
+        day = self._day_key()
+        self._prune(day)                 # 跨天后旧封账记录不再有用
         seen: set[str] = set()
         for candidate in self._credentials.candidates():
             if candidate.disabled:
@@ -79,7 +88,7 @@ class ActivityTask:
                 report.skipped += 1
                 continue
             scope = activity_scope(data) or f"credential|{candidate.credential_id}"
-            if f"{self._day_key()}:{scope}" in self._done_scopes:
+            if f"{day}:{scope}" in self._done_scopes:
                 report.skipped += 1                  # 当日已成功，不再调上游
                 continue
             if scope in seen:
@@ -96,7 +105,7 @@ class ActivityTask:
                 continue
             if result.ok:
                 report.succeeded += 1
-                self._done_scopes.add(f"{self._day_key()}:{scope}")
+                self._done_scopes.add(f"{day}:{scope}")
                 self._record(candidate.credential_id, result, trigger)
             else:
                 report.failed += 1

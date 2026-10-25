@@ -171,6 +171,18 @@ def test_activity_task_day_key_is_cn_local():
     task._now = _cn(0, 30)
     assert task._day_key() == "2026-09-21"
 
+async def test_activity_task_prunes_stale_done_scopes(activity_repo):
+    """跨天后清掉前一天的封账记录：长驻进程否则每天每账号各攒一条（无上限）。"""
+    _add(activity_repo, token="a")
+    task = ActivityTask(activity_repo, {"codebuddy": _FakeProvider()},
+                        hour=10, now=_cn(10, 5))
+    task._done_scopes = {"2026-09-20:s1", "2026-09-21:s1", "2026-09-19:s1"}
+
+    await task.run_once()
+
+    # 非当天两条被清掉；当天那条保留（本轮已成功会重新写入同键）
+    assert task._done_scopes == {"2026-09-21:s1"}
+
 def test_build_runner_activity_toggle(tmp_path):
     """活跃上报恒建对象，开关只决定跑不跑（开关可热更）。
 

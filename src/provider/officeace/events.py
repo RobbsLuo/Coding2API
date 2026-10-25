@@ -44,7 +44,7 @@ from ...provider.base import (
     Usage,
     business_codes,
 )
-from ..openai_chunk import first_choice, is_blank_tool_call
+from ..openai_chunk import first_choice, is_blank_tool_call, usage_from_openai
 
 # ---------------------------------------------------------------- 域与端点
 
@@ -310,25 +310,7 @@ def _error_event(error: dict[str, Any]) -> Event:
 
 
 def _usage(raw: dict[str, Any]) -> Usage:
-    def as_int(key: str) -> int | None:
-        value = raw.get(key)
-        return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-    details = raw.get("prompt_tokens_details")
-    cached = (details or {}).get("cached_tokens") if isinstance(details, dict) else None
-    if not isinstance(cached, int) or isinstance(cached, bool):
-        cached = as_int("cached_tokens")
-    completion_details = raw.get("completion_tokens_details")
-    reasoning = (completion_details or {}).get("reasoning_tokens") \
-        if isinstance(completion_details, dict) else None
-    if not isinstance(reasoning, int) or isinstance(reasoning, bool):
-        reasoning = as_int("reasoning_tokens")
-    return Usage(
-        input_tokens=as_int("prompt_tokens"),
-        output_tokens=as_int("completion_tokens"),
-        reasoning_tokens=reasoning,
-        cached_tokens=cached,
-    )
+    return usage_from_openai(raw)
 
 
 # ------------------------------------------------------------ 订阅 / 积分

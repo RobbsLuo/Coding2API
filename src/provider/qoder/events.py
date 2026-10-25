@@ -39,7 +39,7 @@ from ...provider.base import (
     Usage,
     parse_queue_hint,
 )
-from ..openai_chunk import first_choice
+from ..openai_chunk import first_choice, usage_from_openai
 from ..token_expiry import normalize_epoch
 
 # ---------------------------------------------------------------------------
@@ -376,20 +376,7 @@ def parse_inner_chunk(body: str) -> list[Event]:
 
 
 def _usage(raw: dict[str, Any]) -> Usage:
-    def as_int(key: str) -> int | None:
-        value = raw.get(key)
-        return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-    details = raw.get("prompt_tokens_details")
-    cached = (details or {}).get("cached_tokens") if isinstance(details, dict) else None
-    if not isinstance(cached, int) or isinstance(cached, bool):
-        cached = as_int("cached_tokens")
-    return Usage(
-        input_tokens=as_int("prompt_tokens"),
-        output_tokens=as_int("completion_tokens"),
-        reasoning_tokens=as_int("reasoning_tokens"),
-        cached_tokens=cached,
-    )
+    return usage_from_openai(raw)
 
 
 # ---------------------------------------------------------------------------

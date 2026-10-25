@@ -47,7 +47,7 @@ from ...provider.base import (
     Model,
     Quota,
 )
-from ...provider.proxy import build_client
+from ...provider.proxy import SHORT_TIMEOUT, STREAM_TIMEOUT, build_client
 from . import events as zen_events
 
 logger = logging.getLogger(__name__)
@@ -102,8 +102,7 @@ MODELS_CACHE_TTL_SECONDS = 1800.0
 # 写超时覆盖的是上传请求体阶段，不是首字等待：大上下文请求体可达数 MB，
 # 经代理链路 10s 会稳定超时；首字等待由 read=None +
 # stream_first_event_timeout_seconds 负责，两者不要混为一谈。
-STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0)
-SHORT_TIMEOUT = httpx.Timeout(30.0)
+
 
 # 403 门禁抖动重试（实测 2026-10-09/12 共 7 次）：上游**偶发**对同一请求回
 # FreeTierError 403，数秒后的同请求即 200（门禁条件每次都满足，抖动来自上游）。

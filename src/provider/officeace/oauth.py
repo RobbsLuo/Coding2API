@@ -27,10 +27,7 @@
 
 from __future__ import annotations
 
-import base64
-import hashlib
 import logging
-import secrets
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -38,6 +35,8 @@ from typing import Any
 
 import httpx
 
+from ..auth_state import AuthStateStore as AuthStateStoreBase
+from ..auth_state import pkce_pair
 from ..base import (
     AuthFlow,
     AuthResult,
@@ -46,6 +45,7 @@ from ..base import (
     read_body_bounded,
 )
 from ..codearts import dpop
+from ..codearts.signer import sdk_date
 from ..proxy import build_client
 from . import events as officeace_events
 from .credential import OfficeAceCredential, parse_tokens
@@ -116,28 +116,18 @@ class LoginSession:
     polls: int = 0
 
 
-@dataclass(slots=True)
+@dataclass
 class _Reservation:
-    """一条 pending 登录：归属人 + 创建时刻 + 会话。
+    """本渠道载荷：登录会话（轮询计数就地 +1）。
 
     归属按用户名校验是安全约束而非风格：单槽全局态会让两个管理员的并发登录
-    互相覆盖，把 A 的凭证记到 B 名下。
+    互相覆盖，把 A 的凭证记到 B 名下（归属校验在基类 `AuthStateStore.owner`）。
     """
 
-    username: str
-    created_at: int
     session: LoginSession
 
 
-def pkce_pair(verifier: str | None = None) -> tuple[str, str]:
-    """PKCE `(code_verifier, code_challenge)`；challenge = BASE64URL(SHA256(v))。"""
-    value = verifier or secrets.token_urlsafe(32)
-    digest = hashlib.sha256(value.encode("ascii")).digest()
-    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
-    return value, challenge
-
-
-class AuthStateStore:
+class AuthStateStore(AuthStateStoreBase[_Reservation]):
     """pending 登录会话的登记、归属校验、消费与过期清理。
 
     对外 `state` 是**本地生成的 reservation**，不是云端签发的 state：
@@ -147,75 +137,28 @@ class AuthStateStore:
 
     def __init__(self, ttl_seconds: int = LOGIN_TTL_SECONDS,
                  max_pending: int = MAX_PENDING_SESSIONS) -> None:
-        self._ttl = ttl_seconds
-        self._max_pending = max_pending
-        self._entries: dict[str, _Reservation] = {}
+        super().__init__(ttl_seconds, max_pending=max_pending)
 
     def begin(self, username: str, session: LoginSession,
               now: int | None = None) -> str:
-        self.cleanup(now)
-        # 攒了太多没登完的就顶掉最老的：拒绝会让人以为功能坏了，而每条
-        # pending 会话都在轮询云端，留一堆也只是浪费。
-        while len(self._entries) >= self._max_pending:
-            oldest = min(self._entries, key=lambda key: self._entries[key].created_at)
-            del self._entries[oldest]
-        reservation = secrets.token_urlsafe(18)
-        self._entries[reservation] = _Reservation(
-            username=username,
-            created_at=int(now if now is not None else time.time()),
-            session=session)
-        return reservation
-
-    def owner(self, auth_state: str, username: str,
-              now: int | None = None) -> bool:
-        """归属校验，**含 TTL**：过期 state 不得再轮询或重放。"""
-        entry = self._entries.get(auth_state)
-        if entry is None or entry.username != username:
-            return False
-        current = int(now if now is not None else time.time())
-        if current - entry.created_at >= self._ttl:
-            del self._entries[auth_state]
-            return False
-        return True
+        return super().begin(username, _Reservation(session=session), now)
 
     def session_entry(self, auth_state: str, username: str,
                       now: int | None = None) -> _Reservation | None:
-        if not self.owner(auth_state, username, now):
-            return None
-        return self._entries[auth_state]
+        entry = self.reservation(auth_state, username, now)
+        return None if entry is None else entry.payload
 
     def touch(self, auth_state: str, now: int | None = None) -> None:
         """记一次轮询（排障用；会话可能已被并发消费，故容忍缺失）。"""
         entry = self._entries.get(auth_state)
         if entry is None:
             return
-        session = entry.session
-        entry.session = LoginSession(
+        session = entry.payload.session
+        entry.payload.session = LoginSession(
             state=session.state, code_verifier=session.code_verifier,
             code_challenge=session.code_challenge, auth_url=session.auth_url,
             dpop_private_jwk=session.dpop_private_jwk,
             created_at=session.created_at, polls=session.polls + 1)
-
-    def consume(self, auth_state: str, username: str,
-                now: int | None = None) -> bool:
-        """消费：成功后该 state 不可再次轮询或重放。"""
-        if not self.owner(auth_state, username, now):
-            return False
-        del self._entries[auth_state]
-        return True
-
-    def cancel(self, auth_state: str, username: str,
-               now: int | None = None) -> bool:
-        return self.consume(auth_state, username, now)
-
-    def cleanup(self, now: int | None = None) -> None:
-        current = int(now if now is not None else time.time())
-        for key in [k for k, v in self._entries.items()
-                    if current - v.created_at >= self._ttl]:
-            del self._entries[key]
-
-    def __len__(self) -> int:
-        return len(self._entries)
 
 
 class OfficeAceOAuth:
@@ -227,7 +170,7 @@ class OfficeAceOAuth:
                  proxy: str | None = None,
                  now: Callable[[], int] | None = None) -> None:
         self.config = config or LoginConfig()
-        self.store = store or AuthStateStore()
+        self.store = store if store is not None else AuthStateStore()
         self._client = client
         self._proxy = proxy
         self._now = now or (lambda: int(time.time()))
@@ -468,7 +411,5 @@ class OfficeAceOAuth:
         return officeace_events.parse_model_info(payload)
 
 
-def _sdk_date(moment: int | None = None) -> str:
-    """`X-Sdk-Date`：UTC `YYYYMMDDTHHMMSSZ`（签名与请求必须同值）。"""
-    return time.strftime("%Y%m%dT%H%M%SZ",
-                         time.gmtime(moment if moment is not None else time.time()))
+# 签名与请求必须同值，实现归 codearts.signer（本渠道共用同一份）
+_sdk_date = sdk_date

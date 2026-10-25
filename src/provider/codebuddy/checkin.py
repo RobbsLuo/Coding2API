@@ -15,6 +15,7 @@ from typing import Any
 import httpx
 
 from ...provider.base import CheckinResult
+from ..proxy import build_client
 from .client import build_headers
 from .credential import CodeBuddyCredential
 from .events import UpstreamProtocolViolation
@@ -153,8 +154,7 @@ class CodeBuddyCheckin:
     @property
     def _http(self) -> httpx.AsyncClient:
         if self._client is None:
-            self._client = httpx.AsyncClient(timeout=httpx.Timeout(30.0), trust_env=False,
-                                              proxy=self._proxy)
+            self._client = build_client(timeout=httpx.Timeout(30.0), proxy=self._proxy)
         return self._client
 
     async def aclose(self) -> None:

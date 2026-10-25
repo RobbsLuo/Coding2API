@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from urllib.parse import quote
@@ -39,6 +40,12 @@ class SignCredential:
 
 def sha256_hex(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def sdk_date(now: float | None = None) -> str:
+    """`X-Sdk-Date`：UTC `YYYYMMDDTHHMMSSZ`（签名与请求必须同值）。"""
+    return time.strftime("%Y%m%dT%H%M%SZ",
+                         time.gmtime(now if now is not None else time.time()))
 
 
 def hmac_sha256_hex(key: str, message: str) -> str:

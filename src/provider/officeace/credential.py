@@ -26,7 +26,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
-from ...provider.token_expiry import normalize_epoch
+from .. import credential_fields
 from ..base import UpstreamProtocolViolation
 from .events import CLIENT_ID
 
@@ -147,43 +147,10 @@ class OfficeAceCredential:
         return bool(self.model_app_key and self.model_app_secret)
 
 
-def _text(raw: dict[str, Any], *keys: str) -> str:
-    """按优先级取第一个非空字符串字段。"""
-    for key in keys:
-        value = raw.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return ""
-
-
-def _expiration_from_raw(raw: Any) -> int:
-    """到期时间归一：数字（epoch，可为毫秒）/ ISO8601 / 数字字符串 → 秒。"""
-    if isinstance(raw, bool):
-        return 0
-    if isinstance(raw, (int, float)):
-        return normalize_epoch(int(raw))
-    if isinstance(raw, str) and raw.strip():
-        text = raw.strip()
-        try:
-            return normalize_epoch(int(text))
-        except ValueError:
-            pass
-        from .events import epoch_from_iso
-
-        return epoch_from_iso(text)
-    return 0
-
-
-def _jwk_from_raw(raw: Any) -> dict[str, str]:
-    """DPoP 私钥 JWK：只收字符串字段，畸形输入返回空（由刷新时报错兜底）。"""
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-    if not isinstance(raw, dict):
-        return {}
-    return {str(key): value for key, value in raw.items() if isinstance(value, str)}
+# 两家华为云系渠道共用同一份解析（测试与旧调用方沿用原名）
+_text = credential_fields.text_field
+_expiration_from_raw = credential_fields.expiration_from_raw
+_jwk_from_raw = credential_fields.jwk_from_raw
 
 
 def parse_tokens(raw: dict[str, Any]) -> OfficeAceCredential:

@@ -13,12 +13,11 @@ CodeArts 的凭证不是 bearer token 而是**华为云 STS 临时 AK/SK**（登
 
 from __future__ import annotations
 
-import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
-from ...provider.token_expiry import normalize_epoch
+from .. import credential_fields
 from .events import CLIENT_ID, UpstreamProtocolViolation
 
 
@@ -120,37 +119,9 @@ class CodeArtsCredential:
         )
 
 
-def _expiration_from_raw(raw: Any) -> int:
-    """到期时间归一：数字（epoch，可为毫秒）/ ISO8601 / 数字字符串 → 秒。"""
-    if isinstance(raw, bool):
-        return 0
-    if isinstance(raw, (int, float)):
-        return normalize_epoch(int(raw))
-    if isinstance(raw, str) and raw.strip():
-        text = raw.strip()
-        try:
-            return normalize_epoch(int(text))
-        except ValueError:
-            pass
-        try:
-            from datetime import datetime
-
-            return int(datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp())
-        except ValueError:
-            return 0
-    return 0
-
-
-def _jwk_from_raw(raw: Any) -> dict[str, str]:
-    """DPoP 私钥 JWK：只收字符串字段，畸形输入返回空（由刷新时报错兜底）。"""
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except json.JSONDecodeError:
-            return {}
-    if not isinstance(raw, dict):
-        return {}
-    return {str(key): value for key, value in raw.items() if isinstance(value, str)}
+# 两家华为云系渠道共用同一份解析（测试与旧调用方沿用原名）
+_expiration_from_raw = credential_fields.expiration_from_raw
+_jwk_from_raw = credential_fields.jwk_from_raw
 
 
 def parse_credentials(raw: dict[str, Any]) -> CodeArtsCredential:

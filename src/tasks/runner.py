@@ -248,7 +248,9 @@ class TaskRunner:
             # 一次，由 `due()` 自己判定是否落在抖动窗口内。**不能**把周期改成
             # 「按最大时点间隔算」——服务恰在两个时点之间重启会直接漏签，而
             # 10 分钟空转的代价只是读一次配置（与 activity 的取舍同理）。
-            _LoopSpec("checkin", self._sync_checkin,
+            _LoopSpec("checkin",
+                      ((lambda: self._sync_checkin(manual=True)) if manual
+                       else self._sync_checkin),
                       lambda: self._interval_seconds("checkin")),
         ]
         if self._growth is not None:
@@ -320,12 +322,13 @@ class TaskRunner:
             return None
         return await self._activity.run_once()
 
-    async def _sync_checkin(self) -> object:
+    async def _sync_checkin(self, *, manual: bool = False) -> object:
         """签到一轮：有配置时点时只在窗口内跑，留空则全天每 10 分钟一轮。
 
         成功凭证当日封账（run_once 内跳过），失败凭证继续重试。
+        `manual=True`（管理台「立即运行」）绕过时点窗口：手动就是立刻跑。
         """
-        if not self._checkin.due():
+        if not manual and not self._checkin.due():
             return None
         return await self._checkin.run_once()
 

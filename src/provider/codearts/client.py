@@ -33,7 +33,7 @@ import httpx
 
 from ...provider import base
 from ...provider.base import Event, Model, Quota, UpstreamReloginRequired
-from ...provider.proxy import build_client
+from ...provider.proxy import SHORT_TIMEOUT, STREAM_TIMEOUT, build_client
 from . import auth as codearts_auth
 from . import events as codearts_events
 from . import signer
@@ -61,13 +61,11 @@ logger = logging.getLogger(__name__)
 # 写超时覆盖的是上传请求体阶段，不是首字等待：大上下文请求体可达数 MB，
 # 经代理链路 10s 会稳定超时；首字等待由 read=None +
 # stream_first_event_timeout_seconds 负责，两者不要混为一谈。
-STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0)
-SHORT_TIMEOUT = httpx.Timeout(30.0)
 
 
-def sdk_date(now: float | None = None) -> str:
-    """`X-Sdk-Date` 格式（UTC，`YYYYMMDDTHHMMSSZ`）。"""
-    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(now if now is not None else time.time()))
+
+# 签名与请求必须同值，实现归 signer（officeace 共用同一份）
+sdk_date = signer.sdk_date
 
 
 def new_chat_id() -> str:

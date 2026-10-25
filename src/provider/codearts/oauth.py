@@ -13,14 +13,13 @@
 from __future__ import annotations
 
 import logging
-import secrets
-import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlsplit
 
 import httpx
 
+from ...provider.auth_state import AuthStateStore as AuthStateStoreBase
 from ...provider.base import AuthFlow, AuthResult, AuthSession
 from ...provider.proxy import build_client
 from . import auth as codearts_auth
@@ -90,63 +89,28 @@ def parse_first_stage_callback(raw: str) -> tuple[str, str]:
 
 @dataclass
 class _Reservation:
-    username: str
-    created_at: int
+    """本渠道载荷：登录会话 + 门户首次回调下发的 secret。"""
+
     session: LoginSession
     # 门户首次回调下发的 secret（ticket 轮询必须用这份——本地生成的那份上游
     # 不认，实测恒回「无效 ticketId」）；""=尚未收到首次回调。
     portal_secret: str = ""
 
 
-class AuthStateStore:
+class AuthStateStore(AuthStateStoreBase[_Reservation]):
     """state 的归属校验、消费与过期清理（对齐 CodeBuddy 的同名实现语义）。"""
 
     def __init__(self, ttl_seconds: int = AUTH_STATE_TTL_SECONDS) -> None:
-        self._ttl = ttl_seconds
-        self._entries: dict[str, _Reservation] = {}
+        super().__init__(ttl_seconds)
 
     def begin(self, username: str, session: LoginSession,
               now: int | None = None) -> str:
-        self.cleanup(now)
-        reservation = secrets.token_urlsafe(18)
-        self._entries[reservation] = _Reservation(
-            username=username,
-            created_at=int(now if now is not None else time.time()),
-            session=session)
-        return reservation
-
-    def owner(self, auth_state: str, username: str, now: int | None = None) -> bool:
-        """归属校验，**含 TTL**（同 CodeBuddy）：过期 state 不得再轮询/重放。"""
-        entry = self._entries.get(auth_state)
-        if entry is None or entry.username != username:
-            return False
-        current = int(now if now is not None else time.time())
-        if current - entry.created_at >= self._ttl:
-            del self._entries[auth_state]
-            return False
-        return True
+        return super().begin(username, _Reservation(session=session), now)
 
     def session_entry(self, auth_state: str, username: str,
                       now: int | None = None) -> _Reservation | None:
-        if not self.owner(auth_state, username, now):
-            return None
-        return self._entries[auth_state]
-
-    def consume(self, auth_state: str, username: str, now: int | None = None) -> bool:
-        """消费：成功后该 state 不可再次轮询或重放。"""
-        if not self.owner(auth_state, username, now):
-            return False
-        del self._entries[auth_state]
-        return True
-
-    def cancel(self, auth_state: str, username: str, now: int | None = None) -> bool:
-        return self.consume(auth_state, username, now)
-
-    def cleanup(self, now: int | None = None) -> None:
-        current = int(now if now is not None else time.time())
-        for key in [k for k, v in self._entries.items()
-                    if current - v.created_at >= self._ttl]:
-            del self._entries[key]
+        entry = self.reservation(auth_state, username, now)
+        return None if entry is None else entry.payload
 
 
 class CodeArtsOAuth:
@@ -157,7 +121,7 @@ class CodeArtsOAuth:
                  proxy: str | None = None) -> None:
         self.config = config
         self.port = port
-        self.store = store or AuthStateStore()
+        self.store = store if store is not None else AuthStateStore()
         self._client = client
         # 登录后补账号身份（uid/user_name/nickname）的签名客户端：token 响应
         # 通常不带用户名，不补则凭证昵称为空、统计明细的凭证列空白。生产装配

@@ -12,13 +12,12 @@ state 的所有权与消费语义（AGENTS.md）：一旦取消或消费便不�
 
 from __future__ import annotations
 
-import secrets
-import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
+from ...provider.auth_state import AuthStateStore as AuthStateStoreBase
 from ...provider.base import AuthFlow, AuthResult, AuthSession
 from ...provider.proxy import build_client
 from .credential import CodeBuddyCredential, validate_domain
@@ -43,74 +42,36 @@ class AuthProgress:
 
 
 @dataclass
-class _Reservation:
-    username: str
-    created_at: int
+class _Payload:
+    """本渠道载荷：上游 state（轮询必用）+ 分阶段进度（可变）。"""
+
     upstream_state: str
     progress: AuthProgress = field(default_factory=AuthProgress)
 
 
-class AuthStateStore:
+class AuthStateStore(AuthStateStoreBase[_Payload]):
     """state 的归属校验、消费与过期清理。"""
 
     def __init__(self, ttl_seconds: int = AUTH_STATE_TTL_SECONDS) -> None:
-        self._ttl = ttl_seconds
-        self._entries: dict[str, _Reservation] = {}
+        super().__init__(ttl_seconds)
 
     def begin(self, username: str, upstream_state: str, now: int | None = None) -> str:
-        self.cleanup(now)
-        reservation = secrets.token_urlsafe(18)
-        self._entries[reservation] = _Reservation(
-            username=username, created_at=int(now if now is not None else time.time()),
-            upstream_state=upstream_state)
-        return reservation
+        return super().begin(username, _Payload(upstream_state=upstream_state), now)
 
     def upstream_state(self, auth_state: str, username: str,
                        now: int | None = None) -> str | None:
         """轮询上游时必须用上游发的 state，而不是本地的 reservation。"""
-        if not self.owner(auth_state, username, now):
-            return None
-        return self._entries[auth_state].upstream_state
-
-    def owner(self, auth_state: str, username: str, now: int | None = None) -> bool:
-        """归属校验，**含 TTL**：过期 reservation 不得再轮询/重放。
-
-        `cleanup()` 只在 `begin()` 时触发；若 owner 不判过期，一个过期的
-        state 在下次 begin 之前会一直可被轮询（每次轮询都打上游）。
-        """
-        entry = self._entries.get(auth_state)
-        if entry is None or entry.username != username:
-            return False
-        current = int(now if now is not None else time.time())
-        if current - entry.created_at >= self._ttl:
-            del self._entries[auth_state]          # 惰性清理，避免字典堆积
-            return False
-        return True
+        payload = self.payload(auth_state, username, now)
+        return None if payload is None else payload.upstream_state
 
     def progress(self, auth_state: str, username: str,
                  now: int | None = None) -> AuthProgress | None:
-        if not self.owner(auth_state, username, now):
-            return None
-        return self._entries[auth_state].progress
+        payload = self.payload(auth_state, username, now)
+        return None if payload is None else payload.progress
 
     def set_progress(self, auth_state: str, progress: AuthProgress) -> None:
         if auth_state in self._entries:
-            self._entries[auth_state].progress = progress
-
-    def consume(self, auth_state: str, username: str, now: int | None = None) -> bool:
-        """消费：成功后该 state 不可再次轮询或重放。"""
-        if not self.owner(auth_state, username, now):
-            return False
-        del self._entries[auth_state]
-        return True
-
-    def cancel(self, auth_state: str, username: str, now: int | None = None) -> bool:
-        return self.consume(auth_state, username, now)
-
-    def cleanup(self, now: int | None = None) -> None:
-        current = int(now if now is not None else time.time())
-        for key in [k for k, v in self._entries.items() if current - v.created_at >= self._ttl]:
-            del self._entries[key]
+            self._entries[auth_state].payload.progress = progress
 
 
 class CodeBuddyOAuth:
@@ -118,7 +79,7 @@ class CodeBuddyOAuth:
                  store: AuthStateStore | None = None,
                  proxy: str | None = None) -> None:
         self.endpoint = endpoint
-        self.store = store or AuthStateStore()
+        self.store = store if store is not None else AuthStateStore()
         self._client = client
         self._proxy = proxy
 

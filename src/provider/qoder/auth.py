@@ -20,7 +20,6 @@ import base64
 import hashlib
 import logging
 import os
-import secrets
 import time
 import uuid
 from dataclasses import dataclass
@@ -29,6 +28,7 @@ from urllib.parse import urlencode
 
 import httpx
 
+from ...provider.auth_state import AuthStateStore as AuthStateStoreBase
 from ...provider.base import AuthFlow, AuthResult, AuthSession
 from ...provider.proxy import build_client
 from .credential import QoderCredential, credential_from_device
@@ -118,62 +118,29 @@ def build_auth_url(realm: str, *, challenge: str, nonce: str,
 
 @dataclass
 class _Reservation:
-    username: str
-    created_at: int
+    """本渠道载荷：PKCE verifier + 设备码 nonce + 组织/机器标识。"""
+
     verifier: str
     nonce: str
     realm: str
     machine_id: str
 
 
-class AuthStateStore:
+class AuthStateStore(AuthStateStoreBase[_Reservation]):
     """state 的归属校验、消费与过期清理（与 CodeBuddy 同语义，不同存储载荷）。"""
 
     def __init__(self, ttl_seconds: int = AUTH_STATE_TTL_SECONDS) -> None:
-        self._ttl = ttl_seconds
-        self._entries: dict[str, _Reservation] = {}
+        super().__init__(ttl_seconds)
 
     def begin(self, username: str, *, verifier: str, nonce: str, realm: str,
               machine_id: str, now: int | None = None) -> str:
-        self.cleanup(now)
-        reservation = secrets.token_urlsafe(18)
-        self._entries[reservation] = _Reservation(
-            username=username, created_at=int(now if now is not None else time.time()),
-            verifier=verifier, nonce=nonce, realm=realm, machine_id=machine_id)
-        return reservation
-
-    def owner(self, auth_state: str, username: str, now: int | None = None) -> bool:
-        """归属校验，**含 TTL**（同 CodeBuddy）：过期 state 不得再轮询/重放。"""
-        entry = self._entries.get(auth_state)
-        if entry is None or entry.username != username:
-            return False
-        current = int(now if now is not None else time.time())
-        if current - entry.created_at >= self._ttl:
-            del self._entries[auth_state]
-            return False
-        return True
+        return super().begin(username, _Reservation(
+            verifier=verifier, nonce=nonce, realm=realm,
+            machine_id=machine_id), now)
 
     def reservation(self, auth_state: str, username: str,
                     now: int | None = None) -> _Reservation | None:
-        if not self.owner(auth_state, username, now):
-            return None
-        return self._entries[auth_state]
-
-    def consume(self, auth_state: str, username: str, now: int | None = None) -> bool:
-        """消费：成功后该 state 不可再次轮询或重放。"""
-        if not self.owner(auth_state, username, now):
-            return False
-        del self._entries[auth_state]
-        return True
-
-    def cancel(self, auth_state: str, username: str, now: int | None = None) -> bool:
-        return self.consume(auth_state, username, now)
-
-    def cleanup(self, now: int | None = None) -> None:
-        current = int(now if now is not None else time.time())
-        for key in [k for k, v in self._entries.items()
-                    if current - v.created_at >= self._ttl]:
-            del self._entries[key]
+        return self.payload(auth_state, username, now)
 
 
 class QoderOAuth:
@@ -201,7 +168,8 @@ class QoderOAuth:
         config = get_realm_config(realm)
         self.openapi = (openapi or config.openapi).rstrip("/")
         self.website = (website or config.website).rstrip("/")
-        self.store = store or AuthStateStore(ttl_seconds=ttl_seconds)
+        self.store = (store if store is not None
+                      else AuthStateStore(ttl_seconds=ttl_seconds))
         self._machine_id = machine_id
         self._client = client
         self._now = now or (lambda: int(time.time()))

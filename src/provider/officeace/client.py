@@ -39,8 +39,9 @@ from ...provider.base import (
     UpstreamProtocolViolation,
     UpstreamReloginRequired,
 )
-from ...provider.proxy import build_client
+from ...provider.proxy import SHORT_TIMEOUT, STREAM_TIMEOUT, build_client
 from .. import naming
+from ..codearts.signer import sdk_date
 from . import events as officeace_events
 from .credential import OfficeAceCredential, merge_refreshed
 from .events import (
@@ -58,8 +59,7 @@ logger = logging.getLogger(__name__)
 
 # 流式无总超时防长流截断；短请求 30s 防悬挂（与其余渠道同策略）。
 # 写超时覆盖上传请求体阶段，不覆盖首字等待（大上下文请求体可达数 MB）。
-STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0)
-SHORT_TIMEOUT = httpx.Timeout(30.0)
+
 
 #: 签到活动展示名（上游没给活动名时的兜底）。
 DEFAULT_CHECKIN_NAME = "每日签到有礼"
@@ -481,10 +481,8 @@ def _model_from_item(item: dict[str, Any], model_id: str,
     )
 
 
-def _sdk_date(moment: int | None = None) -> str:
-    """`X-Sdk-Date`：UTC `YYYYMMDDTHHMMSSZ`。"""
-    return time.strftime("%Y%m%dT%H%M%SZ",
-                        time.gmtime(moment if moment is not None else time.time()))
+# 签名与请求必须同值，实现归 codearts.signer（本渠道共用同一份）
+_sdk_date = sdk_date
 
 
 def _next_beijing_midnight(moment: int) -> int:

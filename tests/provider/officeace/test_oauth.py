@@ -150,7 +150,8 @@ def test_store_session_entry_returns_reservation():
     store = AuthStateStore()
     state = store.begin("alice", _session(), now=MOMENT)
     entry = store.session_entry(state, "alice", now=MOMENT)
-    assert entry is not None and entry.username == "alice"
+    # 归属校验：只有登记人拿得到载荷（归属人本身在基类 Reservation 上）
+    assert entry is not None and entry.session is not None
     assert store.session_entry(state, "bob", now=MOMENT) is None
 
 

@@ -31,7 +31,7 @@ from ...provider.base import (
     UpstreamProtocolViolation,
     Usage,
 )
-from ..openai_chunk import first_choice, is_blank_tool_call
+from ..openai_chunk import first_choice, is_blank_tool_call, usage_from_openai
 
 
 def parse_frame(frame: SSEFrame) -> Event | None:
@@ -140,22 +140,7 @@ def _error_event(error: dict[str, Any]) -> Event:
 
 
 def _usage(raw: dict[str, Any]) -> Usage:
-    def as_int(key: str) -> int | None:
-        value = raw.get(key)
-        return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-    # 缓存命中：OpenAI 惯例在 prompt_tokens_details.cached_tokens，顶层兜底
-    details = raw.get("prompt_tokens_details")
-    cached = (details or {}).get("cached_tokens") if isinstance(details, dict) else None
-    if not isinstance(cached, int) or isinstance(cached, bool):
-        cached = as_int("cached_tokens")
-
-    return Usage(
-        input_tokens=as_int("prompt_tokens"),
-        output_tokens=as_int("completion_tokens"),
-        reasoning_tokens=as_int("reasoning_tokens"),
-        cached_tokens=cached,
-    )
+    return usage_from_openai(raw)
 
 
 def classify_status(status: int, body: bytes = b"") -> ErrKind:

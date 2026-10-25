@@ -25,7 +25,7 @@ import httpx
 from ...engine.sse import iter_frames
 from ...provider import base
 from ...provider.base import ErrKind, Event, GrowthResult, Model, Quota
-from ...provider.proxy import build_client
+from ...provider.proxy import SHORT_TIMEOUT, STREAM_TIMEOUT, build_client
 from . import events as cb_events
 from .credential import CodeBuddyCredential, parse_credential
 from .events import UpstreamProtocolViolation
@@ -42,8 +42,7 @@ from .headers import (
 # 写超时覆盖的是上传请求体阶段，不是首字等待：大上下文请求体可达数 MB，
 # 经代理链路 10s 会稳定超时；首字等待由 read=None +
 # stream_first_event_timeout_seconds 负责，两者不要混为一谈。
-STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0)
-SHORT_TIMEOUT = httpx.Timeout(30.0)
+
 
 DEFAULT_MODELS: tuple[str, ...] = ("glm-5.2", "deepseek-v4-pro")
 EP_CONFIG = "/v3/config"

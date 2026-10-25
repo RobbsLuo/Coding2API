@@ -27,7 +27,7 @@ from ...provider.base import (
     Model,
     Quota,
 )
-from ...provider.proxy import build_client
+from ...provider.proxy import SHORT_TIMEOUT, STREAM_TIMEOUT, build_client
 from ...provider.token_expiry import normalize_epoch
 from . import events as trae_events
 from . import pricing
@@ -63,8 +63,7 @@ CHECKIN_ATTEMPTS = 2
 # 写超时覆盖的是上传请求体阶段，不是首字等待：大上下文请求体可达数 MB，
 # 经代理链路 10s 会稳定超时；首字等待由 read=None +
 # stream_first_event_timeout_seconds 负责，两者不要混为一谈。
-STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0)
-SHORT_TIMEOUT = httpx.Timeout(30.0)
+
 
 # SOLO 静态模型表（继承 trae2api-web；动态拉取失败时回退）
 STATIC_MODELS: tuple[str, ...] = (

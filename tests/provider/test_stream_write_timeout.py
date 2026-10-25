@@ -11,11 +11,12 @@ import importlib
 import httpx
 import pytest
 
-# 6 个渠道客户端模块，均导出 STREAM_TIMEOUT / SHORT_TIMEOUT
+# 7 个渠道客户端模块，均导出 STREAM_TIMEOUT / SHORT_TIMEOUT（同一份常量，见 proxy.py）
 CLIENT_MODULES = [
     "src.provider.codebuddy.client",
     "src.provider.codearts.client",
     "src.provider.kilo.client",
+    "src.provider.officeace.client",
     "src.provider.qoder.client",
     "src.provider.trae.client",
     "src.provider.zen.client",

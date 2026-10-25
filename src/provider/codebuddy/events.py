@@ -20,7 +20,7 @@ from ...provider.base import (
     body_hint,
     business_codes,
 )
-from ..openai_chunk import first_choice, is_blank_tool_call
+from ..openai_chunk import first_choice, is_blank_tool_call, usage_from_openai
 
 
 def parse_frame(frame: SSEFrame) -> Event | None:
@@ -94,33 +94,7 @@ def parse_all_events(frame: SSEFrame) -> list[Event]:
 
 
 def _usage(raw: dict[str, Any]) -> Usage:
-    def as_int(key: str) -> int | None:
-        value = raw.get(key)
-        return value if isinstance(value, int) and not isinstance(value, bool) else None
-
-    def details_int(details_key: str, key: str) -> int | None:
-        """OpenAI 惯例把这两个字段放在 details 子对象里，顶层同名字段兜底。
-
-        CB 实测顶层 `reasoning_tokens` 恒缺（早先据此误判为「CB 不回思考
-        token」），真值在 `completion_tokens_details`；`cached_tokens` 同构。
-        details 值非法（非数值 / bool）时回落顶层，仍缺则 None。
-        """
-        details = raw.get(details_key)
-        value = details.get(key) if isinstance(details, dict) else None
-        if isinstance(value, int) and not isinstance(value, bool):
-            return value
-        return as_int(key)
-
-    credit = raw.get("credit")
-
-    return Usage(
-        input_tokens=as_int("prompt_tokens"),
-        output_tokens=as_int("completion_tokens"),
-        reasoning_tokens=details_int("completion_tokens_details", "reasoning_tokens"),
-        cached_tokens=details_int("prompt_tokens_details", "cached_tokens"),
-        credit=float(credit) if isinstance(credit, (int, float)) and not isinstance(credit, bool)
-        else None,
-    )
+    return usage_from_openai(raw, credit=True)
 
 
 _MODEL_RATE_LIMIT_CODE = 6004       # 该模型用量超限 → 模型级软冷却

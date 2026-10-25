@@ -40,7 +40,7 @@ HEARTBEAT_SECONDS = 15.0
 # 非流式端点默认返回行数；上限由缓冲容量决定（不能超过实际保留的行）。
 DEFAULT_LOG_LIMIT = 200
 
-_DISABLED = {"error": {"message": "log page disabled", "code": "not_found", "status": 404}}
+_DISABLED = error_payload("log page disabled", "not_found", 404)
 
 
 def _sse_frame(line: dict[str, Any]) -> str:

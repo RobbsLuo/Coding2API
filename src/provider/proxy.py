@@ -57,3 +57,9 @@ def build_client(*, timeout: httpx.Timeout, proxy: str | None = None) -> httpx.A
     的全局代理意外劫持带 Token 的上游请求；按渠道代理只经 `proxy=` 显式生效。
     """
     return httpx.AsyncClient(timeout=timeout, trust_env=False, proxy=proxy)
+
+
+# 流式请求：读无上限（SSE 长连接），写 60s（大 payload 也要发完），连接/取池各 10s。
+STREAM_TIMEOUT = httpx.Timeout(connect=10.0, read=None, write=60.0, pool=10.0)
+# 短请求（探活 / 额度 / 模型列表）：整体 30s。
+SHORT_TIMEOUT = httpx.Timeout(30.0)
