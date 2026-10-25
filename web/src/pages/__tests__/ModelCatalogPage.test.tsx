@@ -552,6 +552,21 @@ describe("ModelCatalogPage（模型列表）", () => {
     expect(never).toHaveTextContent("未探过");
   });
 
+  it("探活面板：错误摘要限宽单行截断，hover 看全文", async () => {
+    stubProbePage();
+    renderPage(<ModelCatalogPage />);
+    await settle();
+
+    const error = screen.getByTestId("probe-error-trae-glm-5.2");
+    // 折行会把整列撑宽挤掉操作列，故必须 truncate
+    expect(error.className).toContain("truncate");
+    expect(error).toHaveTextContent("HTTP 404: model not found");
+
+    await userEvent.hover(error);
+    const tip = await screen.findByRole("tooltip");
+    expect(tip).toHaveTextContent("HTTP 404: model not found");
+  });
+
   it("探活面板：无记录时给出空态", async () => {
     stubProbePage({ rows: [] });
     renderPage(<ModelCatalogPage />);

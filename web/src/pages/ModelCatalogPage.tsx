@@ -26,7 +26,7 @@ import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { Pagination } from "../components/Pagination";
 import { SortableHead } from "../components/SortableHead";
-import { ColumnHint } from "../components/Tip";
+import { ColumnHint, LongTextTip } from "../components/Tip";
 import { ToastViewport, useToasts } from "../components/Toast";
 import { useSort } from "../hooks/useSort";
 import { DEFAULT_PAGE_SIZE } from "../lib/constants";
@@ -277,10 +277,16 @@ function ProbePanel({
                         <span className="text-muted-foreground">未探过</span>
                       )}
                       {row.last_error && (
-                        <div className="max-w-[16rem] text-muted-foreground break-words"
-                             title="最近一次探活的错误摘要（未脱敏前的上游原文已截断）">
-                          {row.last_error}
-                        </div>
+                        // 错误摘要可能很长（上游原文）：限宽单行截断，hover 看全文。
+                        // 不折行是必要的——折行会把整列撑宽，挤掉右侧操作列。
+                        <LongTextTip content={row.last_error}>
+                          <div
+                            className="max-w-[16rem] truncate text-muted-foreground"
+                            data-testid={`probe-error-${key}`}
+                          >
+                            {row.last_error}
+                          </div>
+                        </LongTextTip>
                       )}
                     </TableCell>
                     <TableCell label="操作" className="text-xs">
