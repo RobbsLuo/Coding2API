@@ -12,7 +12,7 @@ import re
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
-from datetime import UTC
+from datetime import UTC, datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from enum import StrEnum
 from typing import Any, ClassVar, Protocol, runtime_checkable
@@ -176,14 +176,62 @@ def parse_retry_after_seconds(headers: Any, now: int) -> float | None:
     return delta
 
 
-def retry_hints(headers: Any, now: int | None = None) -> dict[str, Any]:
+# 响应体里点名的重置时刻：CodeBuddy 国际站 `429 + 6004` 不回 `Retry-After`
+# 头，恢复时刻只写在正文里——`{"code":6004,"msg":"usage exceeds frequency
+# limit, but don't worry, your usage will reset at 2026-10-25 22:34:25 UTC+8,
+# alternatively, you can switch to the other models..."}`。
+# 只解析这一种带显式 UTC 偏移的形态：没有偏移的本地时刻无从判断时区，
+# 猜错会把冷却写到过去（立刻解冻）或几天后（长期移出池子），一律放弃。
+_RESET_AT_TEXT = re.compile(
+    r"reset\s+at\s+(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})"
+    r"\s*UTC\s*([+-])(\d{1,2})(?::?(\d{2}))?",
+    re.IGNORECASE)
+
+
+def parse_reset_at(body: bytes | str, now: int) -> int | None:
+    """响应体里的「usage will reset at … UTC+8」→ 恢复时刻 epoch；无则 None。
+
+    与 `parse_retry_after` 同一语义（「何时恢复」的绝对时刻），供
+    `retry_hints` 在**没有 `Retry-After` 头**时兜底。过去时刻 / 无法解析
+    返回 None：宁可回落本地常量冷却，也不要让一个坏正文把冷却写到过去。
+    """
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
+    if not text or "reset" not in text.lower():
+        return None
+    match = _RESET_AT_TEXT.search(text)
+    if match is None:
+        return None
+    year, month, day, hour, minute, second, sign, hours, minutes = match.groups()
+    try:
+        offset = timedelta(hours=int(hours), minutes=int(minutes or 0))
+        moment = datetime(int(year), int(month), int(day), int(hour), int(minute),
+                          int(second),
+                          tzinfo=timezone(-offset if sign == "-" else offset))
+    except ValueError:      # 2 月 30 日 / 偏移越界这类脏值
+        return None
+    return int(moment.timestamp()) if int(moment.timestamp()) > now else None
+
+
+def retry_hints(headers: Any, now: int | None = None,
+                body: bytes | str | None = None) -> dict[str, Any]:
     """`UpstreamHTTPError` 的 retry 关键字参数（无头时两值均为 None）。
 
     让各渠道的 raise 点保持一行：`**retry_hints(response.headers)`。
+
+    `body` 是**头缺失时的兜底来源**（见 `parse_reset_at`）：部分上游（CodeBuddy
+    国际站 429+6004）只把恢复时刻写在正文里，不给 `Retry-After` 头，不解析正文
+    就只能回落到固定 600s 基数、到期重试再撞一次 429。头优先于正文——头是协议
+    标准位，正文只是文案。
     """
     moment = int(time.time()) if now is None else now
-    return {"retry_at": parse_retry_after(headers, moment),
-            "retry_after_seconds": parse_retry_after_seconds(headers, moment)}
+    retry_at = parse_retry_after(headers, moment)
+    retry_after_seconds = parse_retry_after_seconds(headers, moment)
+    if retry_at is None and body is not None:
+        reset_at = parse_reset_at(body, moment)
+        if reset_at is not None:
+            retry_at = reset_at
+            retry_after_seconds = float(reset_at - moment)
+    return {"retry_at": retry_at, "retry_after_seconds": retry_after_seconds}
 
 
 async def read_body_bounded(response: Any, limit: int = BOUNDED_BODY_LIMIT) -> bytes:

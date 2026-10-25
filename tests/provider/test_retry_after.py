@@ -14,7 +14,9 @@ import httpx
 import pytest
 
 from src.provider.base import (
+    ErrKind,
     UpstreamHTTPError,
+    parse_reset_at,
     parse_retry_after,
     parse_retry_after_seconds,
     retry_hints,
@@ -196,3 +198,82 @@ def _credential_for(module_path: str):
     if "trae" in module_path:
         return {"accessToken": "t"}
     return {"bearer_token": "t"}
+
+
+# ------------------------------------------------- 响应体里的重置时刻（A2b）
+#
+# CodeBuddy 国际站 `429 + 6004` 不回 `Retry-After` 头，恢复时刻只在正文：
+# `... your usage will reset at 2026-10-25 22:34:25 UTC+8, alternatively ...`。
+# 不解析它就永远回落 600s 基数：实测同一号一天被爆 42 次，每次都「冷却到期
+# → 重试 → 又 429」。
+
+# 2026-10-25 22:34:25 UTC+8 = 14:34:25Z
+RESET_MOMENT = 1_792_938_865
+RESET_BODY = (
+    b'{"code":6004,"msg":"usage exceeds frequency limit, but don\'t worry, your '
+    b'usage will reset at 2026-10-25 22:34:25 UTC+8, alternatively, you can '
+    b'switch to the other models to continue using it.","requestId":"8967ac37"}'
+)
+
+
+def test_parse_reset_at_from_real_body():
+    assert parse_reset_at(RESET_BODY, NOW) == RESET_MOMENT
+    # 距现在多少秒 = 绝对时刻 - now（供诊断，不参与钳制）
+    assert retry_hints({}, NOW, body=RESET_BODY)["retry_after_seconds"] == (
+        RESET_MOMENT - NOW)
+
+
+def test_parse_reset_at_accepts_str_and_other_offsets():
+    """str 入参、`UTC+08:00` 写法、负偏移都要能解析。"""
+    text = "usage will reset at 2026-10-25 22:34:25 UTC+08:00"
+    assert parse_reset_at(text, NOW) == RESET_MOMENT
+    # UTC-5：同一墙钟时刻在 UTC-5 是 5 小时之后
+    negative = "reset at 2026-10-25 22:34:25 UTC-5"
+    assert parse_reset_at(negative, NOW) == RESET_MOMENT + 13 * 3600
+
+
+def test_parse_reset_at_rejects_past_and_garbage():
+    """过去时刻 / 无偏移 / 脏日期一律 None：交给调度器回落本地常量。"""
+    assert parse_reset_at("reset at 2020-01-01 00:00:00 UTC+8", NOW) is None
+    # 无 UTC 偏移：无法判断时区，不猜
+    assert parse_reset_at("reset at 2026-10-25 22:34:25", NOW) is None
+    # 非法日期（2 月 30 日）
+    assert parse_reset_at("reset at 2026-02-30 00:00:00 UTC+8", NOW) is None
+    assert parse_reset_at("", NOW) is None
+    assert parse_reset_at(b"", NOW) is None
+    assert parse_reset_at(b"no reset word here 2026-10-25 22:34:25 UTC+8", NOW) is None
+
+
+def test_retry_hints_prefers_header_over_body():
+    """头是协议标准位，正文只是文案：两者都有时以头为准。"""
+    hints = retry_hints({"Retry-After": "120"}, NOW, body=RESET_BODY)
+    assert hints == {"retry_at": NOW + 120, "retry_after_seconds": 120.0}
+
+
+def test_retry_hints_falls_back_to_body_without_header():
+    hints = retry_hints({}, NOW, body=RESET_BODY)
+    assert hints["retry_at"] == RESET_MOMENT
+    # body 不含重置时刻时仍是 None（行为与历史版本一致）
+    assert retry_hints({}, NOW, body=b'{"code":6004}') == {
+        "retry_at": None, "retry_after_seconds": None}
+    # 不传 body 与历史签名逐字节等价
+    assert retry_hints({}, NOW) == {"retry_at": None, "retry_after_seconds": None}
+
+
+async def test_codebuddy_stream_fills_retry_at_from_body():
+    """CodeBuddy 的 raise 点把 body 传给了 retry_hints：429+6004 冷却到重置时刻。"""
+    from src.provider.codebuddy.client import CodeBuddyClient, CodeBuddyCredential
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, content=RESET_BODY)
+
+    transport = httpx.AsyncClient(transport=httpx.MockTransport(handler), timeout=None)
+    client = CodeBuddyClient(stream_client=transport, short_client=transport)
+    before = int(time.time())
+    with pytest.raises(UpstreamHTTPError) as caught:
+        [event async for event in client.stream_chat(
+            CodeBuddyCredential(bearer_token="t"), {"messages": []},
+            "deepseek-v4.1-flash")]
+    assert caught.value.retry_at == RESET_MOMENT
+    assert caught.value.kind() is ErrKind.MODEL
+    assert caught.value.retry_at > before

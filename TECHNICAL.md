@@ -457,6 +457,7 @@ class Scheduler:
 - 登记名是**该凭证所属上游的原始模型名**（`_upstream_model`），CB 与 TRAE 大小写变体不同，归一名会漏判。
 - 选号路径：`executor._select` 逐凭证过滤 `is_selectable(now, 模型名)` 并注入 `Candidate.credit_rate`，再交 `Scheduler.select`；同时完成收窄、粘性命中与排序（`_sticky(...) or scheduler.select(...)`）。
 - 退避：`MODEL` 10m 起翻倍封顶 2h；`BLOCKED` 6h 起翻倍封顶 24h；`CONCURRENCY` 固定 60s 不翻倍。换 reason 重新计数。
+- **上游点名恢复时刻优先**：`Retry-After` 头 → `parse_retry_after`；头缺失时 CB 走 `parse_reset_at` 读正文 `reset at … UTC+8`（`retry_hints(headers, body=raw)`，仅 CodeBuddy 传 body，其余渠道签名不变）。两者都按 `clamp_retry_at` 钳制在 `[now + 常量, now + 24h]`，故 `MODEL` 的 600s 只是下限，上游说 22:34 恢复就冷却到 22:34。
 - 清除：`save_success(..., model=)` 只删 `reason='blocked'`；`revive` / 删除凭证 / 账号级冷却出现都清模型条目。留存任务每轮 `purge_expired_model_cooldowns()`；列表只下发未过期。
 - 无模型名可归因时退化为账号级 SOFT。
 - **进入模型级冷却的来源不止模型限流**：Qoder 节点故障（§5.3）也归 `MODEL`。全部候选只因该模型被排除时（`_all_model_cooled`）503 文案用 `model 'x' temporarily unavailable on upstream`；统计落 `error_type=model_unavailable`，其余耗尽仍 `no_healthy_credential`；**对外错误码不变**。

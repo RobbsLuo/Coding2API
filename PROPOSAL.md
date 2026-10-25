@@ -19,7 +19,7 @@
 - **成长中心**（`/v2/activity/growth`）：只读 `buddy/travel/status|config`、`tasks`、`streak`、`redeem/summary`、`lottery/chances`、`buddy/quota`、`energy`；写入 `buddy/travel/claim|depart`、`tasks/accept`、`/tasks/{code}/claim`、`makeup-cards/use`、`redeem`、`lottery/draw`、`buddy/open`。契约：`accept_status` 五态、`/tasks/accept` 收复数数组、`/redeem` 的 `tier` 是档位标识（`"7d"`/`"14d"`/`"28d"`）、实发字段为 `*_granted`；进程内 OAuth bearer 可直连。
 - **凭证身份可能为空**：OAuth 路径下上游未回填 `account_uid`/`user_id`，同账号隔离必须回落 `credential_id`。**活跃上报**（`POST /v2/report`，默认关）：body 为事件数组（`eventCode=chat_request_send`），`userId` 必填——缺失时 HTTP 200 `code:0` 但静默丢弃；身份为空时回落 JWT `sub`。
 - **reasoning 客户端给什么透传什么**；`reasoning_effort` 缺失时补 `medium`（不发则上游把思考写进 `delta.content`、`reasoning_content` 恒空、`reasoning_tokens` 恒 0）。**可选机制（默认全关）**：`REASONING_EFFORT_MAP`、`ANTHROPIC_THINKING_EFFORTS`、`FORCE_DISABLE_THINKING`，全关时行为逐字节不变。**输出上限键名不对称**：CB 忽略 `max_completion_tokens`，只认 `max_tokens`；TRAE 两个键都不生效——不做键映射。
-- 错误码：`6004` 模型用量超限、`14003` 模型饱和（均模型级）、`11102` 无此模型（负缓存）、`14018` 积分耗尽、`1005` 权益耗尽、`11101/11115/11128/11135` 请求级（不罚号）。`6004`/`14003` 落账号级会让整条凭证其他模型一起被冷却 60s。
+- 错误码：`6004` 模型用量超限、`14003` 模型饱和（均模型级）、`11102` 无此模型（负缓存）、`14018` 积分耗尽、`1005` 权益耗尽、`11101/11115/11128/11135` 请求级（不罚号）。`6004`/`14003` 落账号级会让整条凭证其他模型一起被冷却 60s。**`6004` 不给 `Retry-After` 头**，恢复时刻只在 `msg` 文案里（`usage will reset at 2026-10-25 22:34:25 UTC+8`），需从正文解析（见 §6 冷却）。
 
 ### 2.2 TRAE SOLO（`trae`）
 
@@ -125,7 +125,7 @@ Provider 承担上游私有部分：发请求、解析事件、分类错误、�
 4. **到期额度两级字典序**：先比主窗口（`QUOTA_EXPIRY_WINDOW_SECONDS`，默认 36h）内将过期的额度，打平再比次窗口（`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`，默认 7 天）。
 5. **健康度三态**：`known` > `unknown` > `exhausted`；打平按剩余积分多者优先，再按 `credential_id` 稳定。
 
-**为什么冷却分两层**：`429 + 6004` 是「这个模型在当前账号用超了」，`400/404 + 11102` 是「当前账号没这个模型」，一律记账号级会让一次模型级限流把整个账号踢出池。账号级写 `credentials.cooling_until`，模型级另建 `credential_model_cooldowns`；账号级冷却出现时清空该凭证的模型级条目，防「切模型」绕过。业务码识别只认 `"code": N` 键值形态。冷却时长：`PLAN` 12h、`SOFT` 60s、`OTHER` 连续 3 次→10m、`MODEL` 600s 起翻倍封顶 2h、`BLOCKED` 6h 起封顶 24h、`CONCURRENCY` 固定 60s、`CREDIT` 到次日 04:00。**传输层失败归 `SOFT`**：`httpx.TransportError` 与 `UpstreamTransportError` 统一在 `executor._classify` 兜住（异常从 `__aenter__`、`aiter_bytes()`、写请求体多处抛出，逐点包装必漏）；刻意不泛化到 `OSError` / `ConnectionError`。**上游重置时刻可覆盖常量**：`Retry-After`（整秒 / HTTP-date）或 `Try again in 17h 59m` 经 `parse_retry_after` 解析后按作用域写入，并双端钳制在 `[now + 常量, now + 24h]`。
+**为什么冷却分两层**：`429 + 6004` 是「这个模型在当前账号用超了」，`400/404 + 11102` 是「当前账号没这个模型」，一律记账号级会让一次模型级限流把整个账号踢出池。账号级写 `credentials.cooling_until`，模型级另建 `credential_model_cooldowns`；账号级冷却出现时清空该凭证的模型级条目，防「切模型」绕过。业务码识别只认 `"code": N` 键值形态。冷却时长：`PLAN` 12h、`SOFT` 60s、`OTHER` 连续 3 次→10m、`MODEL` 600s 起翻倍封顶 2h、`BLOCKED` 6h 起封顶 24h、`CONCURRENCY` 固定 60s、`CREDIT` 到次日 04:00。**传输层失败归 `SOFT`**：`httpx.TransportError` 与 `UpstreamTransportError` 统一在 `executor._classify` 兜住（异常从 `__aenter__`、`aiter_bytes()`、写请求体多处抛出，逐点包装必漏）；刻意不泛化到 `OSError` / `ConnectionError`。**上游重置时刻可覆盖常量**：`Retry-After`（整秒 / HTTP-date）或 `Try again in 17h 59m` 经 `parse_retry_after` 解析后按作用域写入，并双端钳制在 `[now + 常量, now + 24h]`。**头缺失时看响应体**：CB 国际站 `429+6004` 不给 `Retry-After`，恢复时刻只在正文（`your usage will reset at 2026-10-25 22:34:25 UTC+8`），由 `parse_reset_at` 解析同一种绝对时刻；头优先于正文，正文无偏移（`UTC±N`）则放弃。不解析正文的后果是固定 600s 基数到期重试、再撞一次 429（实测同一号一天被爆 42 次）。
 
 **为什么是「窗口内积分总量」**：实测 CB 额度是几十个各自独立到期的小包（每日 100 积分 × N），只存一个日期没有区分度。四个取舍：① 统计窗口内到期积分总量，账号间才可比；② 落库到期阶梯 `[(到期 epoch, 包剩余积分)]` 而非预计算数字；③ 过滤条件必须 `end > now` 且排除已用完的包；④ 两级窗口，只比 36h 会大量账号同为 0。**展示与调度指标分开存**：`quota_packages`（含包名 / 用量）与 `quota_expiry_ladder`（只有 `[到期, 剩余]`）。
 
