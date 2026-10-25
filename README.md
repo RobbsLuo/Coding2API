@@ -22,6 +22,26 @@
 
 协议层实现（私有信封、签名、门禁伪装等）见 [`TECHNICAL.md`](TECHNICAL.md)。
 
+## 界面预览
+
+管理台（截图取自本地实例，账号与 IP 已脱敏）：
+
+| 凭证管理：池概况与渠道分组 | 用量统计：请求 / token / 成本 |
+|---|---|
+| ![凭证管理](assets/screenshots/credentials.webp) | ![用量统计](assets/screenshots/stats.webp) |
+| **Playground：模型 × 渠道与倍率** | **模型列表：OpenRouter 刊例价与能力分** |
+| ![Playground](assets/screenshots/playground.webp) | ![模型列表](assets/screenshots/models.webp) |
+| **上游状态：区分上游故障与本服务问题** | **API Key：客户端接入说明与配额** |
+| ![上游状态](assets/screenshots/upstream.webp) | ![API Key](assets/screenshots/apikeys.webp) |
+| **用户管理：三角色与一次性激活** | **审计日志：登录成败都留痕** |
+| ![用户管理](assets/screenshots/users.webp) | ![审计日志](assets/screenshots/audit.webp) |
+| **服务端日志：环形缓冲 + 脱敏** | **运维告警：四类风险周期评估** |
+| ![服务端日志](assets/screenshots/logs.webp) | ![运维告警](assets/screenshots/alerts.webp) |
+
+**任务与配置：60+ 项可热更，DB 覆盖值优先于 `.env`**
+
+![任务与配置](assets/screenshots/settings.webp)
+
 ## 快速开始
 
 前置：Python 3.12+、[uv](https://docs.astral.sh/uv/)、Node.js 24+ 与 pnpm 10+（仅构建前端需要）。

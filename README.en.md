@@ -22,6 +22,26 @@ Wraps **CodeBuddy** (CN + international), **TRAE SOLO**, **OpenCode Zen**, **Kil
 
 Protocol-level implementation (private envelopes, signing, gate spoofing) is in [`TECHNICAL.md`](TECHNICAL.md) (Chinese).
 
+## Screenshots
+
+Admin console (captured from a local instance; accounts and IPs masked):
+
+| Credentials: pool overview, grouped by channel | Usage: requests, tokens, cost |
+|---|---|
+| ![Credentials](assets/screenshots/credentials.webp) | ![Usage](assets/screenshots/stats.webp) |
+| **Playground: models × channels and multipliers** | **Model list: OpenRouter list prices and ability score** |
+| ![Playground](assets/screenshots/playground.webp) | ![Model list](assets/screenshots/models.webp) |
+| **Upstream status: upstream outage vs. our problem** | **API keys: client setup and quotas** |
+| ![Upstream status](assets/screenshots/upstream.webp) | ![API keys](assets/screenshots/apikeys.webp) |
+| **Users: three roles, one-time activation** | **Audit log: successful and failed logins** |
+| ![Users](assets/screenshots/users.webp) | ![Audit log](assets/screenshots/audit.webp) |
+| **Server logs: ring buffer with redaction** | **Ops alerts: four risk rules, periodic** |
+| ![Server logs](assets/screenshots/logs.webp) | ![Ops alerts](assets/screenshots/alerts.webp) |
+
+**Tasks & settings: 60+ hot-reloadable options, DB overrides win over `.env`**
+
+![Tasks and settings](assets/screenshots/settings.webp)
+
 ## Quick start
 
 Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 24+ and pnpm 10+ (frontend build only).
