@@ -181,6 +181,38 @@ def test_adopted_moment_is_logged(caplog):
     assert any("采用上游时刻" in record.getMessage() for record in caplog.records)
 
 
+def test_adopted_moment_log_says_account_scope_for_soft(caplog):
+    """账号级分类即使传了模型名，日志也必须写「账号」。
+
+    实测 zen 免费层 429（SOFT）落的是账号级 `cooling_until`，旧日志却打
+    「模型 glm-5.3-flash-free」，读起来像模型级限流，排查时误判。
+    """
+    with caplog.at_level(logging.INFO, logger="src.engine.scheduler"):
+        Scheduler().note_error(cand(), ErrKind.SOFT, NOW, model="glm-5.3-flash-free",
+                               retry_at=NOW + 7200)
+    message = next(r.getMessage() for r in caplog.records if "采用上游时刻" in r.getMessage())
+    assert "作用域 账号" in message
+    assert "glm-5.3-flash-free" not in message
+
+
+def test_adopted_moment_log_says_model_scope_for_model_kind(caplog):
+    """模型级分类写模型名，与 `credential_model_cooldowns` 的写入位置一致。"""
+    with caplog.at_level(logging.INFO, logger="src.engine.scheduler"):
+        Scheduler().note_error(cand(), ErrKind.MODEL, NOW, model="deepseek-v4.1-flash",
+                               retry_at=NOW + 7200)
+    message = next(r.getMessage() for r in caplog.records if "采用上游时刻" in r.getMessage())
+    assert "模型 deepseek-v4.1-flash" in message
+    assert "作用域 账号" not in message
+
+
+def test_adopted_moment_log_says_account_when_model_scoped_kind_lacks_model(caplog):
+    """MODEL 无模型名时已退化为账号级软冷却，日志不能还写模型级。"""
+    with caplog.at_level(logging.INFO, logger="src.engine.scheduler"):
+        Scheduler().note_error(cand(), ErrKind.MODEL, NOW, retry_at=NOW + 7200)
+    message = next(r.getMessage() for r in caplog.records if "采用上游时刻" in r.getMessage())
+    assert "作用域 账号" in message
+
+
 def test_fallback_is_not_logged(caplog):
     with caplog.at_level(logging.INFO, logger="src.engine.scheduler"):
         Scheduler().note_error(cand(), ErrKind.SOFT, NOW)

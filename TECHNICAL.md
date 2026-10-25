@@ -134,6 +134,7 @@ MODEL_SCOPED_KINDS = frozenset({MODEL, BLOCKED, CONCURRENCY})
 - **zen / kilo 的 401 → `INVALID`**：两者无凭证，`401 Missing API key.` 只说明该模型要付费 key；归 `DEAD` 会让一次强制付费请求硬禁用整条免费渠道。
 - **kilo 429 与 502/503/504 → `MODEL`**：免费池是 OpenRouter 共享池，报错点名具体模型（`limit_source: upstream_provider_shared_pool`），同时刻其他免费模型仍可用。
 - **CodeArts 临时凭证过期 → `SOFT`**：`HTTP 400` + `APIG.0602 security token has expired`，识别在 `401/403 → DEAD` 之前（`_STS_EXPIRED_MARKERS`）。判 `DEAD` 会让 `RefreshTask` 跳过该凭证，断掉唯一自愈路径。
+- **TLS 中断（`ssl.SSLError`）→ `SOFT`**：`executor._classify` 与 `httpx.TransportError` 并列兜住。anyio 只把 `SSLEOFError` 转成 `BrokenResourceError`，其余（`record layer failure`、证书链握手失败）原样上抛，既不是 `httpx.TransportError` 也不在「只认具体类」的白名单里——不单列就一路逃到 `stream_guarded`，表现为一帧 `internal_error`：不换号、不冷却、`usage_events` 里零痕迹。仍不放开到 `OSError` 整体（磁盘满、句柄耗尽会误冷却健康凭证）。
 
 **业务码只从 `"code": N` 键值形态提取**（`provider.base.business_codes`）：裸搜数字会让 `"code":111020` 命中 `11102`。判定顺序即优先级，`429+6004` 先于 `429`，`402/14018` 先于状态码兜底。
 
@@ -457,7 +458,7 @@ class Scheduler:
 - 登记名是**该凭证所属上游的原始模型名**（`_upstream_model`），CB 与 TRAE 大小写变体不同，归一名会漏判。
 - 选号路径：`executor._select` 逐凭证过滤 `is_selectable(now, 模型名)` 并注入 `Candidate.credit_rate`，再交 `Scheduler.select`；同时完成收窄、粘性命中与排序（`_sticky(...) or scheduler.select(...)`）。
 - 退避：`MODEL` 10m 起翻倍封顶 2h；`BLOCKED` 6h 起翻倍封顶 24h；`CONCURRENCY` 固定 60s 不翻倍。换 reason 重新计数。
-- **上游点名恢复时刻优先**：`Retry-After` 头 → `parse_retry_after`；头缺失时 CB 走 `parse_reset_at` 读正文 `reset at … UTC+8`（`retry_hints(headers, body=raw)`，仅 CodeBuddy 传 body，其余渠道签名不变）。两者都按 `clamp_retry_at` 钳制在 `[now + 常量, now + 24h]`，故 `MODEL` 的 600s 只是下限，上游说 22:34 恢复就冷却到 22:34。
+- **上游点名恢复时刻优先**：`Retry-After` 头 → `parse_retry_after`；头缺失时 CB 走 `parse_reset_at` 读正文 `reset at … UTC+8`（`retry_hints(headers, body=raw)`，仅 CodeBuddy 传 body，其余渠道签名不变）。两者都按 `clamp_retry_at` 钳制在 `[now + 常量, now + 24h]`，故 `MODEL` 的 600s 只是下限，上游说 22:34 恢复就冷却到 22:34。日志按 `_scope_label` 打作用域：模型级写「模型 <名>」，账号级写「作用域 账号」——账号级分类的调用方同样传请求模型名，一律打 `模型` 会让 zen 429 这类账号级冷却读起来像模型级限流。
 - 清除：`save_success(..., model=)` 只删 `reason='blocked'`；`revive` / 删除凭证 / 账号级冷却出现都清模型条目。留存任务每轮 `purge_expired_model_cooldowns()`（删行）与 `purge_expired_account_cooldowns()`（账号级 `cooling_until` 置 NULL）；列表只下发未过期。账号级那条是**卫生清理**不是调度依赖——选号本就按 `cooling_until > now` 判断，但陈旧值会让管理台「冷却」排序失真。
 - 无模型名可归因时退化为账号级 SOFT。
 - **进入模型级冷却的来源不止模型限流**：Qoder 节点故障（§5.3）也归 `MODEL`。全部候选只因该模型被排除时（`_all_model_cooled`）503 文案用 `model 'x' temporarily unavailable on upstream`；统计落 `error_type=model_unavailable`，其余耗尽仍 `no_healthy_credential`；**对外错误码不变**。

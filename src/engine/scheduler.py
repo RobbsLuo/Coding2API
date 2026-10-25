@@ -409,10 +409,26 @@ class Scheduler:
         if adopted:
             # 只在真的采用上游时刻时打一行：普通错误每个都打会把日志刷满
             logger.info(
-                "采用上游时刻 %s（原常量 %s）：凭证 %s 模型 %s 分类 %s 冷却 %ss",
+                "采用上游时刻 %s（原常量 %s）：凭证 %s %s 分类 %s 冷却 %ss",
                 _format_moment(until), _format_moment(now + duration),
-                candidate.credential_id, model or "-", kind.value, until - now)
+                candidate.credential_id, _scope_label(kind, model), kind.value,
+                until - now)
         return until
+
+
+def _scope_label(kind: ErrKind, model: str | None) -> str:
+    """日志里的冷却作用域：模型级写模型名，账号级明确写「账号」。
+
+    不能一律打 `model`：账号级分类（SOFT / PLAN / CREDIT / OTHER）的调用方
+    同样把请求模型名传进来，日志于是读成「只锁了这个模型」，与
+    `credential_model_cooldowns` 的实际写入位置矛盾——实测 zen 免费层 429
+    落的是账号级 `cooling_until`，日志却写「模型 glm-5.3-flash-free」，排查时
+    极易误判成模型级限流。`MODEL` 缺模型名时已退化为账号级软冷却
+    （见 `note_error`），故无模型的模型级分类也按账号打。
+    """
+    if kind in MODEL_SCOPED_KINDS and model:
+        return f"模型 {model}"
+    return "作用域 账号"
 
 
 def _format_moment(moment: int) -> str:
