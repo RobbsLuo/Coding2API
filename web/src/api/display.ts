@@ -269,6 +269,7 @@ export const TASK_REPORT_LABEL: Record<string, string> = {
   rolled_up: "汇总小时",
   purged: "清理明细",
   expired_coolings: "回收冷却",
+  expired_account_coolings: "回收账号冷却",
   purged_credit_events: "回收流水",
   purged_alerts: "回收告警",
   evaluated: "评估",

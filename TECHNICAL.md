@@ -458,7 +458,7 @@ class Scheduler:
 - 选号路径：`executor._select` 逐凭证过滤 `is_selectable(now, 模型名)` 并注入 `Candidate.credit_rate`，再交 `Scheduler.select`；同时完成收窄、粘性命中与排序（`_sticky(...) or scheduler.select(...)`）。
 - 退避：`MODEL` 10m 起翻倍封顶 2h；`BLOCKED` 6h 起翻倍封顶 24h；`CONCURRENCY` 固定 60s 不翻倍。换 reason 重新计数。
 - **上游点名恢复时刻优先**：`Retry-After` 头 → `parse_retry_after`；头缺失时 CB 走 `parse_reset_at` 读正文 `reset at … UTC+8`（`retry_hints(headers, body=raw)`，仅 CodeBuddy 传 body，其余渠道签名不变）。两者都按 `clamp_retry_at` 钳制在 `[now + 常量, now + 24h]`，故 `MODEL` 的 600s 只是下限，上游说 22:34 恢复就冷却到 22:34。
-- 清除：`save_success(..., model=)` 只删 `reason='blocked'`；`revive` / 删除凭证 / 账号级冷却出现都清模型条目。留存任务每轮 `purge_expired_model_cooldowns()`；列表只下发未过期。
+- 清除：`save_success(..., model=)` 只删 `reason='blocked'`；`revive` / 删除凭证 / 账号级冷却出现都清模型条目。留存任务每轮 `purge_expired_model_cooldowns()`（删行）与 `purge_expired_account_cooldowns()`（账号级 `cooling_until` 置 NULL）；列表只下发未过期。账号级那条是**卫生清理**不是调度依赖——选号本就按 `cooling_until > now` 判断，但陈旧值会让管理台「冷却」排序失真。
 - 无模型名可归因时退化为账号级 SOFT。
 - **进入模型级冷却的来源不止模型限流**：Qoder 节点故障（§5.3）也归 `MODEL`。全部候选只因该模型被排除时（`_all_model_cooled`）503 文案用 `model 'x' temporarily unavailable on upstream`；统计落 `error_type=model_unavailable`，其余耗尽仍 `no_healthy_credential`；**对外错误码不变**。
 
@@ -652,7 +652,7 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 | 每日签到（checkin） | 每 10 分钟 | 成功即封账（`日期:scope` → 截止时刻，内存态，跨天清理）；渠道可回填 `seal_until`（Qoder 10:00 换窗口）；失败重试 |
 | 成长中心（growth） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5） | 仅 CB：7 类领取；落 `growth_events` + 回写 `growth_last_result` |
 | 活跃上报（activity，默认关） | 每 10 分钟醒，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点）窗口内执行 | CB + 国际版：补发 `chat_request_send`；按「endpoint + userId」隔离、当日封账 |
-| 明细清理（retention） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert）+ 90 天清理；同期限回收 `credit_events` / `audit_events` / `alert_events` / `growth_events`。跑在 `asyncio.to_thread` |
+| 明细清理（retention） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert）+ 90 天清理；同期限回收 `credit_events` / `audit_events` / `alert_events` / `growth_events`；顺带清过期冷却（模型级删行 + 账号级 `cooling_until` 置 NULL）。跑在 `asyncio.to_thread` |
 | 数据库备份（backup） | 每 `BACKUP_INTERVAL_MINUTES`（默认 1440，下限 60） | `VACUUM INTO` + `integrity_check` + 0600，保留 `BACKUP_KEEP`（默认 7）。跑在 `asyncio.to_thread` |
 | 渠道模型列表刷新（注入协程 `api/models.py::list_models`） | 每 `MODEL_CATALOG_MINUTES`（默认 30，下限 5） | 兜底重拉（TTL 门禁 + 逐渠道 publish + 落盘）。周期跟 zen 判活缓存（30 分钟）对齐 |
 | 模型目录刷新（注入协程） | 每 `OPENROUTER_CATALOG_MINUTES`（默认 1440，下限 60） | 拉 OpenRouter → 三张表 → 落盘 → 就地换入 |

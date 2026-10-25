@@ -153,6 +153,40 @@ def test_retention_task_purges_expired_model_cooldowns(repo):
     # 不传 credentials（旧调用方）时不报错，计数为 0
     assert RetentionTask(collector).run_once()["expired_coolings"] == 0
 
+def test_retention_task_clears_expired_account_cooldown(repo):
+    """账号级冷却过期后置 NULL：否则陈旧值会永久留在库里。
+
+    选号用 `cooling_until > now` 判断，过期值不挡凭证，但管理台列表下发的是
+    原始值——一条几周前的冷却会让该行在「冷却」维度排序失真。
+    """
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    now = int(time.time())
+    credentials.save_error(cid, ErrorOutcome(cooling_until=now - 10, err_count=0))
+    assert credentials.candidates()[0].cooling_until == now - 10
+
+    collector = StatsCollector(_db)
+    report = RetentionTask(collector, credentials=credentials).run_once()
+    assert report["expired_account_coolings"] == 1
+    assert credentials.candidates()[0].cooling_until is None
+    # 再跑一轮：已经没有过期值，计数归零（幂等）
+    assert RetentionTask(collector, credentials=credentials).run_once()[
+        "expired_account_coolings"] == 0
+
+def test_retention_task_keeps_active_account_cooldown(repo):
+    """仍在冷却期内的账号级冷却不能被清掉：清掉等于提前解冻一个被限流的号。"""
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    future = int(time.time()) + 3600
+    credentials.save_error(cid, ErrorOutcome(cooling_until=future, err_count=0))
+
+    collector = StatsCollector(_db)
+    report = RetentionTask(collector, credentials=credentials).run_once()
+    assert report["expired_account_coolings"] == 0
+    assert credentials.candidates()[0].cooling_until == future
+    # 未注入凭证仓储时同样不报错
+    assert RetentionTask(collector).run_once()["expired_account_coolings"] == 0
+
 def test_retention_task_prunes_audit_events(repo):
     """留存任务按保留期回收审计流水；未注入时计数为 0（README「审计保留 90 天」）。"""
     from src.db.repo import AuditRepository

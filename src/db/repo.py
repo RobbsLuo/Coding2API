@@ -353,6 +353,21 @@ class CredentialRepository:
                 (_now(now),))
         return cursor.rowcount
 
+    def purge_expired_account_cooldowns(self, now: int | None = None) -> int:
+        """清掉已过期的账号级 `cooling_until`（留存任务每轮调用）。
+
+        选号本身用 `cooling_until > now` 判断，过期值不会挡住凭证，但它会
+        长期留在库里：管理台列表下发的是原始值，一条几周前的陈旧冷却会让
+        该行在「冷却」维度上排序失真，也让「谁在冷却」这类人工排查看到
+        幽灵记录。与模型级条目分开计数，便于区分两类回收。
+        """
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE credentials SET cooling_until = NULL "
+                "WHERE cooling_until IS NOT NULL AND cooling_until <= ?",
+                (_now(now),))
+        return cursor.rowcount
+
     def model_cooldowns_for(self, credential_id: str,
                             now: int | None = None) -> dict[str, int]:
         """该凭证仍在生效的模型级冷却（model → 截止 epoch），供管理台展示。"""
