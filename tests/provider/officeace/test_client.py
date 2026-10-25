@@ -105,14 +105,14 @@ def test_client_normalises_bases_and_defaults():
 def test_client_lazy_clients_and_aclose():
     client = OfficeAceClient(cloud_base="https://cloud.test",
                             gateway="https://gw.test")
-    assert client._stream() is client._stream()
-    assert client._short() is client._short()
-    assert client._stream() is not client._short()
+    assert client._stream is client._stream
+    assert client._short is client._short
+    assert client._stream is not client._short
 
 
 async def test_client_aclose_closes_both_pools():
     client = _client(lambda request: httpx.Response(200, json={}))
-    stream = client._stream()
+    stream = client._stream
     await client.aclose()
     assert stream.is_closed
 

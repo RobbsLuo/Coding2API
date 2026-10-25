@@ -393,7 +393,7 @@ async def test_providers_release_http_pools_on_shutdown(tmp_path):
     trae = TraeProvider()
     # 触发惰性客户端创建
     assert codebuddy.client._stream is not None
-    assert trae.client._stream() is not None
+    assert trae.client._stream is not None
 
     await codebuddy.aclose()
     await trae.aclose()

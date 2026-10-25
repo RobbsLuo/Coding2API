@@ -27,8 +27,9 @@ from ...provider.base import (
     Model,
     Quota,
 )
-from ...provider.proxy import SHORT_TIMEOUT, STREAM_TIMEOUT, build_client
 from ...provider.token_expiry import normalize_epoch
+from ...tasks.pacer import paced
+from ..lazy_clients import LazyClients
 from . import events as trae_events
 from . import pricing
 from .callback import (
@@ -300,7 +301,7 @@ def oauth_headers() -> dict[str, str]:
     }
 
 
-class TraeClient:
+class TraeClient(LazyClients):
     """上游 HTTP 客户端。host 可覆盖，便于测试。"""
 
     def __init__(
@@ -320,21 +321,6 @@ class TraeClient:
         self._short_client = short_client
         self._proxy = proxy
 
-    def _stream(self) -> httpx.AsyncClient:
-        if self._stream_client is None:
-            self._stream_client = build_client(timeout=STREAM_TIMEOUT, proxy=self._proxy)
-        return self._stream_client
-
-    def _short(self) -> httpx.AsyncClient:
-        if self._short_client is None:
-            self._short_client = build_client(timeout=SHORT_TIMEOUT, proxy=self._proxy)
-        return self._short_client
-
-    async def aclose(self) -> None:
-        for client in (self._stream_client, self._short_client):
-            if client is not None:
-                await client.aclose()
-
     # ------------------------------------------------------------- 聊天流
 
     async def stream_chat(
@@ -343,7 +329,7 @@ class TraeClient:
         """POST llm_utils_chat 并逐事件产出中立 Event。非 2xx 抛 UpstreamHTTPError。"""
         body = prepare_body(payload, model)
         url = f"{self.agent_host}{EP_CHAT}"
-        async with self._stream().stream(
+        async with self._stream.stream(
             "POST", url, json=body, headers=solo_headers(credential),
         ) as response:
             if response.status_code >= 400:
@@ -518,7 +504,7 @@ class TraeClient:
 
     async def _post_json(self, url: str, body: dict[str, Any],
                          headers: dict[str, str]) -> dict[str, Any]:
-        response = await self._short().post(url, json=body, headers=headers)
+        response = await self._short.post(url, json=body, headers=headers)
         if response.status_code >= 400:
             raise UpstreamHTTPError(response.status_code,
                                     await base.read_body_bounded(response))
@@ -734,15 +720,9 @@ class TraeProvider:
         """引擎调用入口：dict 凭证 → 上游流 → 中立事件。"""
         credential = TraeCredential.from_dict(credential_data)
         key = _pacer_key(credential)
-        if self.pacer is not None:
-            await self.pacer.wait_turn(key)
-        try:
+        async with paced(self.pacer, key):
             async for event in self.client.stream_chat(credential, payload, model):
                 yield event
-        finally:
-            # 并发模式必须归还名额，否则该凭证被当成永远在途而失去节流
-            if self.pacer is not None:
-                self.pacer.release(key)
 
     async def refresh(self, credential_data: dict) -> dict:
         refreshed = await self.client.refresh_token(TraeCredential.from_dict(credential_data))

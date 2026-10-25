@@ -326,8 +326,8 @@ async def test_fetch_models_errors():
 async def test_client_lazy_clients_and_aclose():
     """未注入 client 时惰性创建；aclose 释放两侧连接池。"""
     client = ZenClient()
-    assert client._stream() is client._stream()      # noqa: SLF001 - 惰性复用同一实例
-    assert client._short() is client._short()        # noqa: SLF001
+    assert client._stream is client._stream      # noqa: SLF001 - 惰性复用同一实例
+    assert client._short is client._short        # noqa: SLF001
     await client.aclose()
 
     # 都没创建过：aclose 不报错（两个分支都为 None）

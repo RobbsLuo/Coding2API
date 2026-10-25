@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...provider.base import CheckinResult, ErrKind, Event, Model, Quota
+from ...tasks.pacer import paced
 from . import dpop
 from . import events as codearts_events
 from .client import CodeArtsClient
@@ -93,15 +94,9 @@ class CodeArtsProvider:
         """引擎调用入口：dict 凭证 → 上游流 → 中立事件。"""
         credential = CodeArtsCredential.from_dict(credential_data)
         key = credential_key(credential)
-        if self.pacer is not None:
-            await self.pacer.wait_turn(key)
-        try:
+        async with paced(self.pacer, key):
             async for event in self.client.stream_chat(credential, payload, model):
                 yield event
-        finally:
-            # 并发模式必须归还名额，否则该凭证被当成永远在途而失去节流
-            if self.pacer is not None:
-                self.pacer.release(key)
 
     async def refresh(self, credential_data: dict) -> dict:
         """预刷新：回写新 refresh_token 与临时凭证（一次性 token 必须轮转）。"""

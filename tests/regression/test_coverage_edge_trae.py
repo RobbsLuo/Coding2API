@@ -62,8 +62,8 @@ def test_ug_headers_carry_region_and_auth():
 
 async def test_client_aclose_is_idempotent():
     client = TraeClient()
-    client._stream()
-    client._short()
+    assert client._stream is not None      # 两条池都建起来
+    assert client._short is not None
     await client.aclose()
     await client.aclose()
 
@@ -158,7 +158,7 @@ def test_close_when_only_one_client_created():
     from src.provider.trae.client import TraeClient
 
     client = TraeClient()
-    client._stream()                     # 只实例化 stream 客户端
+    assert client._stream is not None   # 只实例化 stream 客户端
     asyncio.run(client.aclose())
 
 def test_build_login_url_missing_keys_still_builds():

@@ -246,6 +246,6 @@ def test_checkin_scope_unknown_identity_returns_empty():
 
 async def test_aclose_closes_client():
     client = _client(lambda request: httpx.Response(200))
-    stream = client._stream()
+    stream = client._stream
     await OfficeAceProvider(client=client).aclose()
     assert stream.is_closed

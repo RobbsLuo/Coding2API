@@ -7,7 +7,7 @@ import asyncio
 import pytest
 
 from src.tasks import TaskReport
-from src.tasks.pacer import JITTER_RATIO, Pacer, stable_key
+from src.tasks.pacer import JITTER_RATIO, Pacer, paced, stable_key
 
 
 async def test_pacer_disabled_is_noop():
@@ -400,3 +400,71 @@ def test_pacer_range_interval_is_not_jittered_further():
 
 def test_pacer_disabled_next_interval_is_zero():
     assert Pacer(0, 0).next_interval() == 0.0
+
+
+# ------------------------------------------------------------------ paced()
+
+
+class _RecordingPacer:
+    """只实现 provider 真正用到的两个接口（paced 不要求更多）。"""
+
+    def __init__(self) -> None:
+        self.waited: list[str | None] = []
+        self.released: list[str | None] = []
+
+    async def wait_turn(self, key: str | None = None) -> None:
+        self.waited.append(key)
+
+    def release(self, key: str | None = None) -> None:
+        self.released.append(key)
+
+
+async def test_paced_takes_and_releases_turn():
+    pacer = _RecordingPacer()
+    async with paced(pacer, "bucket"):
+        assert pacer.waited == ["bucket"]
+        assert pacer.released == []          # 还没出块
+
+    assert pacer.released == ["bucket"]
+
+
+async def test_paced_releases_even_when_body_raises():
+    """`finally` 归还名额：漏了会让该桶永久满载（「用了三次就限制」）。"""
+    pacer = _RecordingPacer()
+    with pytest.raises(RuntimeError):
+        async with paced(pacer, "b"):
+            raise RuntimeError("上游炸了")
+
+    assert pacer.released == ["b"]
+
+
+async def test_paced_releases_on_generator_early_close():
+    """`async for ... break` 不耗尽生成器：出块时必须已归还。"""
+    pacer = _RecordingPacer()
+
+    async def consume() -> None:
+        async with paced(pacer, "b"):
+            yield 1                          # noqa: B901 - 故意只产一个
+
+    gen = consume()
+    assert await gen.__anext__() == 1
+    await gen.aclose()                       # 模拟 break 后的显式关闭
+
+    assert pacer.released == ["b"]
+
+
+async def test_paced_without_pacer_is_passthrough():
+    """无凭证渠道 / 测试：pacer=None 直接放行，不报错。"""
+    ran = False
+    async with paced(None, "whatever"):
+        ran = True
+
+    assert ran is True
+
+
+async def test_paced_passes_key_through():
+    pacer = _RecordingPacer()
+    async with paced(pacer, None):
+        pass
+
+    assert pacer.waited == [None] and pacer.released == [None]

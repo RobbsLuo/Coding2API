@@ -46,7 +46,7 @@ from ...provider.base import (
     Quota,
     UpstreamTransportError,
 )
-from ...provider.proxy import SHORT_TIMEOUT, STREAM_TIMEOUT, build_client
+from ..lazy_clients import LazyClients
 from . import events as qoder_events
 from .cosy import CosySession, CosySessionCache, qoder_encode
 from .credential import QoderCredential, merge_refreshed
@@ -250,7 +250,7 @@ def build_chat_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
     return body
 
 
-class QoderClient:
+class QoderClient(LazyClients):
     """上游 HTTP 客户端。`host` = openapi（业务），`gateway` = 推理网关。
 
     主机与登录地址可覆盖（测试 / 灰度）；HTTP 客户端可注入 MockTransport。
@@ -278,23 +278,6 @@ class QoderClient:
         self._now = now or (lambda: int(time.time()))
         self._model_cache: dict[str, tuple[float, list[Model]]] = {}
         self._proxy = proxy
-
-    @property
-    def _stream(self) -> httpx.AsyncClient:
-        if self._stream_client is None:
-            self._stream_client = build_client(timeout=STREAM_TIMEOUT, proxy=self._proxy)
-        return self._stream_client
-
-    @property
-    def _short(self) -> httpx.AsyncClient:
-        if self._short_client is None:
-            self._short_client = build_client(timeout=SHORT_TIMEOUT, proxy=self._proxy)
-        return self._short_client
-
-    async def aclose(self) -> None:
-        for client in (self._stream_client, self._short_client):
-            if client is not None:
-                await client.aclose()
 
     # --------------------------------------------------------------- 推理流
 

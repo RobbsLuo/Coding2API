@@ -48,6 +48,7 @@ from ...provider.base import (
     Quota,
     UpstreamProtocolViolation,
 )
+from ...tasks.pacer import paced
 from ..codearts import dpop
 from . import events as officeace_events
 from .client import OfficeAceClient
@@ -127,15 +128,9 @@ class OfficeAceProvider:
         """引擎调用入口：dict 凭证 → 上游流 → 中立事件。"""
         credential = OfficeAceCredential.from_dict(credential_data)
         key = credential_key(credential)
-        if self.pacer is not None:
-            await self.pacer.wait_turn(key)
-        try:
+        async with paced(self.pacer, key):
             async for event in self.client.stream_chat(credential, payload, model):
                 yield event
-        finally:
-            # 并发模式必须归还名额，否则该凭证被当成永远在途而失去节流
-            if self.pacer is not None:
-                self.pacer.release(key)
 
     # -------------------------------------------------------- 额度探测
 

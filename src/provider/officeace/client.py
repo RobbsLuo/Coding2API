@@ -39,9 +39,9 @@ from ...provider.base import (
     UpstreamProtocolViolation,
     UpstreamReloginRequired,
 )
-from ...provider.proxy import SHORT_TIMEOUT, STREAM_TIMEOUT, build_client
 from .. import naming
 from ..codearts.signer import sdk_date
+from ..lazy_clients import LazyClients
 from . import events as officeace_events
 from .credential import OfficeAceCredential, merge_refreshed
 from .events import (
@@ -110,7 +110,7 @@ class UpstreamHTTPError(base.UpstreamHTTPError):
     classify_status = staticmethod(officeace_events.classify_status)
 
 
-class OfficeAceClient:
+class OfficeAceClient(LazyClients):
     """上游 HTTP 客户端。主机可覆盖，便于测试与灰度。"""
 
     def __init__(
@@ -136,22 +136,8 @@ class OfficeAceClient:
         # 模型费率负缓存：{小写模型名: cost_coefficient}；失败不清空（宁可旧值）
         self._rates: dict[str, float] = {}
 
-    def _stream(self) -> httpx.AsyncClient:
-        if self._stream_client is None:
-            self._stream_client = build_client(timeout=STREAM_TIMEOUT,
-                                               proxy=self._proxy)
-        return self._stream_client
 
-    def _short(self) -> httpx.AsyncClient:
-        if self._short_client is None:
-            self._short_client = build_client(timeout=SHORT_TIMEOUT,
-                                              proxy=self._proxy)
-        return self._short_client
 
-    async def aclose(self) -> None:
-        for client in (self._stream_client, self._short_client):
-            if client is not None:
-                await client.aclose()
 
     # ---------------------------------------------------------------- 聊天
 
@@ -173,7 +159,7 @@ class OfficeAceClient:
             logger.info("officeAce 调整 max_tokens：客户端 %s → 上游 %s（model=%s）",
                         payload.get("max_tokens", payload.get("max_completion_tokens")),
                         bumped, model)
-        async with self._stream().stream(
+        async with self._stream.stream(
             "POST", url, json=body, headers=request_headers(credential),
         ) as response:
             if response.status_code >= 400:
@@ -199,7 +185,7 @@ class OfficeAceClient:
                 "credential missing model_base_url",
                 public="该凭证缺少 officeAce 网关地址，请重新登录该账号")
         url = f"{self._gateway_of(credential)}{EP_MODELS}"
-        response = await self._short().get(
+        response = await self._short.get(
             url, headers={"Authorization": credential.authorization,
                           "Accept": "application/json"})
         if response.status_code >= 400:
@@ -368,7 +354,7 @@ class OfficeAceClient:
         """
         from .oauth import OfficeAceOAuth
 
-        oauth = OfficeAceOAuth(self.login, client=self._short())
+        oauth = OfficeAceOAuth(self.login, client=self._short)
         try:
             tokens = await oauth.refresh_tokens(
                 refresh_token=credential.refresh_token,
@@ -416,7 +402,7 @@ class OfficeAceClient:
             self._credential_sign(credential), method=method, url=url,
             headers=headers or {}, payload=body or b"",
             x_sdk_date=_sdk_date(self._now()), region=self.region)
-        response = await self._short().request(
+        response = await self._short.request(
             method, url, headers=signed, content=body if body is not None else None)
         if response.status_code >= 400:
             raise UpstreamHTTPError(response.status_code,

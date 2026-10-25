@@ -47,7 +47,8 @@ from ...provider.base import (
     Model,
     Quota,
 )
-from ...provider.proxy import SHORT_TIMEOUT, STREAM_TIMEOUT, build_client
+from ...tasks.pacer import paced
+from ..lazy_clients import LazyClients
 from . import events as zen_events
 
 logger = logging.getLogger(__name__)
@@ -323,7 +324,7 @@ class UpstreamHTTPError(base.UpstreamHTTPError):
     classify_status = staticmethod(zen_events.classify_status)
 
 
-class ZenClient:
+class ZenClient(LazyClients):
     """上游 HTTP 客户端。host / version 可覆盖，便于测试与灰度。"""
 
     def __init__(
@@ -347,21 +348,6 @@ class ZenClient:
         self._short_client = short_client
         self._proxy = proxy
 
-    def _stream(self) -> httpx.AsyncClient:
-        if self._stream_client is None:
-            self._stream_client = build_client(timeout=STREAM_TIMEOUT, proxy=self._proxy)
-        return self._stream_client
-
-    def _short(self) -> httpx.AsyncClient:
-        if self._short_client is None:
-            self._short_client = build_client(timeout=SHORT_TIMEOUT, proxy=self._proxy)
-        return self._short_client
-
-    async def aclose(self) -> None:
-        for client in (self._stream_client, self._short_client):
-            if client is not None:
-                await client.aclose()
-
     async def stream_chat(self, payload: dict[str, Any], model: str) -> AsyncIterator[Event]:
         """POST chat/completions 并逐事件产出中立 Event。非 2xx 抛 UpstreamHTTPError。"""
         body, injected = prepare_body(payload, model)
@@ -372,7 +358,7 @@ class ZenClient:
         kept_tool_calls = False
         attempt = 0
         while True:
-            async with self._stream().stream(
+            async with self._stream.stream(
                 "POST", f"{self.host}{EP_CHAT}", json=body,
                 headers=gate_headers(version=self.version),
             ) as response:
@@ -419,7 +405,7 @@ class ZenClient:
             cached_at, cached_models = self._models_cache
             if time.monotonic() - cached_at < self.models_cache_ttl:
                 return list(cached_models)
-        response = await self._short().get(
+        response = await self._short.get(
             f"{self.host}{EP_MODELS}", headers=gate_headers(version=self.version))
         if response.status_code >= 400:
             raise UpstreamHTTPError(response.status_code,
@@ -485,7 +471,7 @@ class ZenClient:
             {"messages": [{"role": "user", "content": PROBE_PROMPT}]}, model_id)
         try:
             async with asyncio.timeout(PROBE_TIMEOUT):
-                async with self._short().stream(
+                async with self._short.stream(
                     "POST", f"{self.host}{EP_CHAT}", json=body,
                     headers=gate_headers(version=self.version),
                 ) as response:
@@ -528,14 +514,9 @@ class ZenProvider:
 
     async def stream_chat(self, credential_data: dict, payload: dict,
                           model: str) -> AsyncIterator[Event]:
-        if self.pacer is not None:
-            await self.pacer.wait_turn("zen")
-        try:
+        async with paced(self.pacer, "zen"):
             async for event in self.client.stream_chat(payload, model):
                 yield event
-        finally:
-            if self.pacer is not None:
-                self.pacer.release("zen")
 
     async def aclose(self) -> None:
         await self.client.aclose()

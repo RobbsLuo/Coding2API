@@ -236,8 +236,8 @@ def test_client_defaults_and_chat_url():
 
 async def test_client_lazy_pools_and_aclose():
     client = CodeArtsClient(endpoint="https://snap.test")
-    assert client._stream() is client._stream()          # noqa: SLF001
-    assert client._short() is client._short()            # noqa: SLF001
+    assert client._stream is client._stream          # noqa: SLF001
+    assert client._short is client._short            # noqa: SLF001
     await client.aclose()
     await CodeArtsClient().aclose()                      # 两侧都没创建 → 不报错
 

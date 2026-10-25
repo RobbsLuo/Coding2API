@@ -44,7 +44,8 @@ import asyncio
 import hashlib
 import random
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 
 from ..config import live
 
@@ -66,6 +67,28 @@ def stable_key(provider: str, identity: str | None) -> str:
         return provider
     digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:16]
     return f"{provider}:{digest}"
+
+
+@asynccontextmanager
+async def paced(pacer: Pacer | None, key: str | None = None) -> AsyncIterator[None]:
+    """`wait_turn` + `finally release` 的配对封装（7 个渠道共用）。
+
+    provider 的 `stream_chat` 都要「取名额 → 消费上游流 → 归还」，手写时最容易
+    漏的是 `finally`：`async for ... break` 不关闭 async generator，`finally`
+    推迟到 GC 才跑，名额丢失会让该桶永久满载（见模块 docstring）。
+
+    `pacer=None` 表示不限速（无凭证渠道 / 测试），直接放行。
+    做成模块级函数而不是 `Pacer` 的方法：测试替身只需实现 `wait_turn` /
+    `release` 两个既有接口，不必跟着实现新方法。
+    """
+    if pacer is None:
+        yield
+        return
+    await pacer.wait_turn(key)
+    try:
+        yield
+    finally:
+        pacer.release(key)
 
 
 class Pacer:
@@ -291,3 +314,5 @@ class Pacer:
         else:
             return                            # 多余释放：不虚增名额
         self._wake.set()                      # 唤醒可能正等这个名额的请求
+
+

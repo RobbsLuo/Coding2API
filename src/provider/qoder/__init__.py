@@ -32,6 +32,7 @@ from ...provider.base import (
     Model,
     Quota,
 )
+from ...tasks.pacer import paced
 from . import events as qoder_events
 from .client import QoderClient, realm_for
 from .credential import QoderCredential, parse_credential
@@ -108,15 +109,9 @@ class QoderProvider:
                           model: str) -> AsyncIterator[Event]:
         credential = QoderCredential.from_dict(credential_data)
         key = credential_key(credential)
-        if self.pacer is not None:
-            await self.pacer.wait_turn(key)
-        try:
+        async with paced(self.pacer, key):
             async for event in self.client.stream_chat(credential, payload, model):
                 yield event
-        finally:
-            # 并发模式必须归还名额，否则该凭证被当成永远在途而失去节流
-            if self.pacer is not None:
-                self.pacer.release(key)
 
     # ---------------------------------------------------------------- 签到
 

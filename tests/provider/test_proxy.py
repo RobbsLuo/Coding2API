@@ -138,24 +138,27 @@ def _codearts_client(proxy):
     return CodeArtsClient(proxy=proxy)
 
 
-@pytest.mark.parametrize("factory,module_path,is_property", [
-    (_trae_client, "src.provider.trae.client", False),
-    (_zen_client, "src.provider.zen.client", False),
-    (_kilo_client, "src.provider.kilo.client", False),
-    (_codebuddy_client, "src.provider.codebuddy.client", True),
-    (_qoder_client, "src.provider.qoder.client", True),
-    (_codearts_client, "src.provider.codearts.client", False),
+@pytest.mark.parametrize("factory,module_path", [
+    (_trae_client, "src.provider.trae.client"),
+    (_zen_client, "src.provider.zen.client"),
+    (_kilo_client, "src.provider.kilo.client"),
+    (_codebuddy_client, "src.provider.codebuddy.client"),
+    (_qoder_client, "src.provider.qoder.client"),
+    (_codearts_client, "src.provider.codearts.client"),
 ])
-async def test_provider_client_forwards_proxy(monkeypatch, factory, module_path,
-                                              is_property):
+async def test_provider_client_forwards_proxy(monkeypatch, factory, module_path):
+    """代理按渠道转发：两条池都拿到同一个 proxy。
+
+    `build_client` 现在只在 `lazy_clients` 里调用（7 家共用一份懒建逻辑），
+    所以 patch 点在那里，`module_path` 只用来定位被测客户端类。
+    """
     import importlib
 
-    module = importlib.import_module(module_path)
-    calls = _capture_build(monkeypatch, module)
+    calls = _capture_build(monkeypatch,
+                           importlib.import_module("src.provider.lazy_clients"))
     client = factory("socks5://127.0.0.1:1080")
 
-    stream = client._stream if is_property else client._stream()
-    short = client._short if is_property else client._short()
+    stream, short = client._stream, client._short
     assert calls[0]["proxy"] == "socks5://127.0.0.1:1080"
     assert calls[1]["proxy"] == "socks5://127.0.0.1:1080"
     assert stream is not None and short is not None

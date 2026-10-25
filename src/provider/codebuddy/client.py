@@ -25,7 +25,8 @@ import httpx
 from ...engine.sse import iter_frames
 from ...provider import base
 from ...provider.base import ErrKind, Event, GrowthResult, Model, Quota
-from ...provider.proxy import SHORT_TIMEOUT, STREAM_TIMEOUT, build_client
+from ...tasks.pacer import paced
+from ..lazy_clients import LazyClients
 from . import events as cb_events
 from .credential import CodeBuddyCredential, parse_credential
 from .events import UpstreamProtocolViolation
@@ -206,7 +207,7 @@ def build_headers(credential: CodeBuddyCredential, endpoint: str, *,
     )
 
 
-class CodeBuddyClient:
+class CodeBuddyClient(LazyClients):
     def __init__(
         self,
         *,
@@ -223,23 +224,6 @@ class CodeBuddyClient:
         self.sanitize_markers = sanitize_markers
         self.require_leading_system = require_leading_system
         self._proxy = proxy
-
-    @property
-    def _stream(self) -> httpx.AsyncClient:
-        if self._stream_client is None:
-            self._stream_client = build_client(timeout=STREAM_TIMEOUT, proxy=self._proxy)
-        return self._stream_client
-
-    @property
-    def _short(self) -> httpx.AsyncClient:
-        if self._short_client is None:
-            self._short_client = build_client(timeout=SHORT_TIMEOUT, proxy=self._proxy)
-        return self._short_client
-
-    async def aclose(self) -> None:
-        for client in (self._stream_client, self._short_client):
-            if client is not None:
-                await client.aclose()
 
     # ------------------------------------------------------------- 聊天流
 
@@ -295,8 +279,12 @@ class CodeBuddyClient:
         ) as response:
             if response.status_code >= 400:
                 raw = await base.read_body_bounded(response)
+                # body 兜底：国际站 429+6004 只把重置时刻写在正文（`reset at
+                # … UTC+8`），不给 Retry-After 头；不传 body 就只能回落 600s
+                # 基数，到期重试再撞一次 429（实测同一号一天被爆 42 次）。
                 raise UpstreamHTTPError(response.status_code, raw,
-                                        **base.retry_hints(response.headers))
+                                        **base.retry_hints(response.headers,
+                                                           body=raw))
             async for frame in iter_frames(response.aiter_bytes()):
                 for event in cb_events.parse_all_events(frame):
                     yield event
@@ -795,15 +783,9 @@ class CodeBuddyProvider:
                           model: str) -> AsyncIterator[Event]:
         credential = CodeBuddyCredential.from_dict(credential_data)
         key = _pacer_key(self.id, credential)
-        if self.pacer is not None:
-            await self.pacer.wait_turn(key)
-        try:
+        async with paced(self.pacer, key):
             async for event in self.client.stream_chat(credential, payload, model):
                 yield event
-        finally:
-            # 并发模式必须归还名额，否则该凭证被当成永远在途而失去节流
-            if self.pacer is not None:
-                self.pacer.release(key)
 
     def host(self) -> str:
         return host_of(self.client.endpoint)

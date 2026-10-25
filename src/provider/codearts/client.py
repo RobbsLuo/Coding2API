@@ -33,7 +33,7 @@ import httpx
 
 from ...provider import base
 from ...provider.base import Event, Model, Quota, UpstreamReloginRequired
-from ...provider.proxy import SHORT_TIMEOUT, STREAM_TIMEOUT, build_client
+from ..lazy_clients import LazyClients
 from . import auth as codearts_auth
 from . import events as codearts_events
 from . import signer
@@ -210,7 +210,7 @@ class UpstreamHTTPError(base.UpstreamHTTPError):
     classify_status = staticmethod(codearts_events.classify_status)
 
 
-class CodeArtsClient:
+class CodeArtsClient(LazyClients):
     """上游 HTTP 客户端。主机与登录配置可覆盖，便于测试与灰度。"""
 
     def __init__(
@@ -233,21 +233,6 @@ class CodeArtsClient:
         self._stream_client = stream_client
         self._short_client = short_client
         self._proxy = proxy
-
-    def _stream(self) -> httpx.AsyncClient:
-        if self._stream_client is None:
-            self._stream_client = build_client(timeout=STREAM_TIMEOUT, proxy=self._proxy)
-        return self._stream_client
-
-    def _short(self) -> httpx.AsyncClient:
-        if self._short_client is None:
-            self._short_client = build_client(timeout=SHORT_TIMEOUT, proxy=self._proxy)
-        return self._short_client
-
-    async def aclose(self) -> None:
-        for client in (self._stream_client, self._short_client):
-            if client is not None:
-                await client.aclose()
 
     def chat_url(self) -> str:
         """本次聊天要用的完整地址（legacy 走 `/v1/chat/chat`）。"""
@@ -275,7 +260,7 @@ class CodeArtsClient:
             headers=chat_headers(credential, trace_id=secrets.token_hex(16)),
             payload=raw, x_sdk_date=sdk_date())
         snapshot = codearts_events.TextSnapshot()
-        async with self._stream().stream("POST", url, content=raw, headers=headers) as response:
+        async with self._stream.stream("POST", url, content=raw, headers=headers) as response:
             if response.status_code >= 400:
                 body_bytes = await base.read_body_bounded(response)
                 raise UpstreamHTTPError(response.status_code, body_bytes,
@@ -478,7 +463,7 @@ class CodeArtsClient:
         """
         try:
             tokens = await codearts_auth.refresh_tokens(
-                self._short(), self.login, refresh_token=credential.refresh_token,
+                self._short, self.login, refresh_token=credential.refresh_token,
                 dpop_private_jwk=credential.dpop_private_jwk,
                 code_verifier=credential.code_verifier)
         except codearts_auth.TokenEndpointError as error:
@@ -502,7 +487,7 @@ class CodeArtsClient:
         signed = signer.sign_headers(
             _sign_credential(credential), method=method, path=path, raw_query=query,
             headers=headers, payload=raw, x_sdk_date=sdk_date())
-        response = await self._short().request(method, url, content=raw if body is not None
+        response = await self._short.request(method, url, content=raw if body is not None
                                                else None, headers=signed)
         if response.status_code >= 400:
             raise UpstreamHTTPError(response.status_code,

@@ -343,8 +343,8 @@ async def test_post_json_surfaces_http_and_non_json_errors():
 
 async def test_client_lazy_and_close_paths():
     client = TraeClient()
-    assert client._stream() is client._stream()
-    assert client._short() is client._short()
+    assert client._stream is client._stream
+    assert client._short is client._short
     await client.aclose()
 
 async def test_provider_import_classify_and_models():

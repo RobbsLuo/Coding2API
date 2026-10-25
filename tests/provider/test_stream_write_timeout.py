@@ -9,23 +9,13 @@ from __future__ import annotations
 import importlib
 
 import httpx
-import pytest
 
-# 7 个渠道客户端模块，均导出 STREAM_TIMEOUT / SHORT_TIMEOUT（同一份常量，见 proxy.py）
-CLIENT_MODULES = [
-    "src.provider.codebuddy.client",
-    "src.provider.codearts.client",
-    "src.provider.kilo.client",
-    "src.provider.officeace.client",
-    "src.provider.qoder.client",
-    "src.provider.trae.client",
-    "src.provider.zen.client",
-]
+# 超时常量只有一份（proxy.py），所有渠道经 LazyClients 共用
+MODULE = "src.provider.proxy"
 
 
-@pytest.mark.parametrize("module_name", CLIENT_MODULES)
-def test_stream_timeout_allows_slow_body_upload(module_name: str) -> None:
-    module = importlib.import_module(module_name)
+def test_stream_timeout_allows_slow_body_upload() -> None:
+    module = importlib.import_module(MODULE)
     timeout = module.STREAM_TIMEOUT
 
     # 上传数 MB 请求体在代理链路上需要足够余量
@@ -35,9 +25,8 @@ def test_stream_timeout_allows_slow_body_upload(module_name: str) -> None:
     assert timeout.read is None
 
 
-@pytest.mark.parametrize("module_name", CLIENT_MODULES)
-def test_short_timeout_unchanged(module_name: str) -> None:
-    module = importlib.import_module(module_name)
+def test_short_timeout_unchanged() -> None:
+    module = importlib.import_module(MODULE)
 
     # 非流式短请求保持 30s，防止顺手改坏
     expected = httpx.Timeout(30.0)
