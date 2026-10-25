@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import ssl
 import time
 from collections.abc import AsyncIterator, Iterable, Iterator
 from dataclasses import dataclass, replace
@@ -1621,11 +1622,20 @@ def _classify(error: Exception) -> ErrKind | None:
     刻意**不**泛化到 `OSError` / `ConnectionError`：文件系统类错误（磁盘满、
     句柄耗尽）也是它们的子类，误判成上游故障会去冷却一个完全健康的凭证。
     `UpstreamTransportError` 自带 `kind()`，已被上面第一段覆盖。
+
+    **`ssl.SSLError` 单独列出**：TLS 层的 record layer failure / 证书链握手
+    失败在 anyio 的 `_call_sslobject_method` 里只有 `SSLEOFError` 被转成
+    `BrokenResourceError`，其余 `SSLError` 原样上抛（见 anyio/streams/tls.py）。
+    它是 `OSError` 子类但**不是** `httpx.TransportError`，落不进上面的判断——
+    实测 2026-10-25 15:50 两次 codebuddy_intl 走 7897 代理时 `[SSL] record
+    layer failure` 直接逃到 `stream_guarded`，表现为一帧 `internal_error`：
+    不换号、不冷却、不记统计，失败归因面板里连痕迹都没有。TLS 中断与读中断
+    同属链路瞬态，归 SOFT。仍然只认**具体类**，不放开到 `OSError` 整体。
     """
     kind_method = getattr(error, "kind", None)
     if callable(kind_method):
         return kind_method()
-    if isinstance(error, httpx.TransportError):
+    if isinstance(error, (httpx.TransportError, ssl.SSLError)):
         return ErrKind.SOFT
     return None
 
