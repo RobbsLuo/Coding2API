@@ -84,7 +84,15 @@ describe("keyQuota 纯函数", () => {
     expect(usageTodayLabel({ requests: 0, tokens: 0, cost_usd: 0 })).toBe("今日未用");
     expect(usageTodayLabel({ requests: 2, tokens: 30, cost_usd: 0 })).toBe("2 次 · 30 token");
     expect(usageTodayLabel({ requests: 2, tokens: 30, cost_usd: 0.5 }))
-      .toBe("2 次 · 30 token · $0.5000");
+      .toBe("2 次 · 30 token · $0.5");
+  });
+
+  it("usageTodayLabel 格式化大数：请求数千分位、token 紧凑、成本按量级取位数", () => {
+    expect(usageTodayLabel({ requests: 2974, tokens: 365_309_724, cost_usd: 7.4879 }))
+      .toBe("2,974 次 · 3.7亿 token · $7.49");
+    // 小额成本不能被两位小数抹成 $0
+    expect(usageTodayLabel({ requests: 1, tokens: 100, cost_usd: 0.0042 }))
+      .toBe("1 次 · 100 token · $0.0042");
   });
 });
 

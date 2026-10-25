@@ -10,6 +10,8 @@
  * 失败按不限制处理，与服务端 `load_key_quota` 同一方针）。
  */
 
+import { formatCompact, formatMoney, formatNumber } from "./display";
+
 /** 六项配额；0 或缺省 = 该项关闭。与服务端 `src/key_quota.py` 一一对应。 */
 export interface KeyQuota {
   daily_requests: number;
@@ -110,11 +112,18 @@ export function usageTodayOf(row: unknown): KeyUsageToday {
   };
 }
 
-/** 「当日已用」文案：请求数 + token（有成本时附上）。 */
+/**
+ * 「当日已用」文案：请求数 + token（有成本时附上）。
+ *
+ * 三个量级差得远，一律过格式化：请求数千分位（`2,974 次`）、token 走紧凑
+ * 单位（`3.7亿 token`，原样 `365309724` 会把这一列撑到几百 px）、成本按
+ * 绝对值自适应小数位（`$7.49` / 小额 `$0.0042`）。原样透传原始数字会让
+ * 表格在窄屏下被这一列挤变形。
+ */
 export function usageTodayLabel(usage: KeyUsageToday): string {
   if (!usage.requests) return "今日未用";
-  const parts = [`${usage.requests} 次`, `${usage.tokens} token`];
-  if (usage.cost_usd) parts.push(`$${usage.cost_usd.toFixed(4)}`);
+  const parts = [`${formatNumber(usage.requests)} 次`, `${formatCompact(usage.tokens)} token`];
+  if (usage.cost_usd) parts.push(formatMoney(usage.cost_usd, "USD", false));
   return parts.join(" · ");
 }
 
