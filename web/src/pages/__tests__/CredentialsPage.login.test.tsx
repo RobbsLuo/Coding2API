@@ -231,6 +231,46 @@ describe("渠道登录入口", () => {
     vi.useRealTimers();
   });
 
+  it("TRAE 回调打不开时：粘贴整条回调链接完成登录", async () => {
+    // issue #21 后半段：NAS 部署里 TRAE 跳回调直接「网络错误」，
+    // refreshToken 只在浏览器地址栏，粘回管理台由 /upstream/complete 兑换。
+    vi.stubGlobal("open", () => null);
+    let completed = false;
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/upstream/start")) {
+        return jsonResponse({
+          flow: "callback",
+          state: "machine:device",
+          auth_url: "https://trae.example/login",
+          interval: null,
+          callback_url: "http://127.0.0.1:8000/authorize",
+        });
+      }
+      if (url.includes("/upstream/complete")) {
+        completed = String(init?.body).includes("/authorize?refreshToken=RT1");
+        return jsonResponse({ status: "success", credential_id: "cred_new" });
+      }
+      return jsonResponse(listBody([makeCredential({ id: "c0" })]));
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+    await openAddDialog();
+    await userEvent.click(screen.getByTestId("start-login-trae"));
+
+    // 回调轨道同时给出粘贴入口（自动回调仍是主路径）
+    const input = await screen.findByTestId("paste-callback-input");
+    await userEvent.type(input, "/authorize?refreshToken=RT1&loginTraceID=abc");
+    await userEvent.click(screen.getByTestId("paste-callback-submit"));
+
+    expect(await screen.findByTestId("credentials-notice")).toHaveTextContent("登录成功");
+    expect(completed).toBe(true);
+    expect(screen.queryByTestId("paste-callback")).not.toBeInTheDocument();
+  });
+
   it("CodeArts 走 paste：展示粘贴框，提交回调链接完成登录", async () => {
     const opened: string[] = [];
     vi.stubGlobal("open", () => {

@@ -9,6 +9,7 @@ from __future__ import annotations
 import inspect
 import ipaddress
 import time
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
@@ -23,7 +24,10 @@ from ..auth.session import create_session_token
 from ..auth.users import create_password_hash, verify_password
 from ..compat.openai.request import InvalidRequest
 from ..config import Settings
+from ..provider.base import AuthResult
+from ..provider.trae.callback import login_trace_id
 from ..webapp.security import session_cookie_secure
+from .authorize import PENDING_CALLBACK_TTL_SECONDS
 from .deps import (
     SESSION_COOKIE,
     Services,
@@ -112,6 +116,48 @@ def _record_login(services: Services, *, username: str, ok: bool, ip: str) -> No
         actor=username, action=ACTION_LOGIN_SUCCESS if ok else ACTION_LOGIN_FAILURE,
         ip=ip or None, ok=ok,
         detail="" if ok else "密码错误或用户不存在")
+
+
+async def _complete_callback_paste(services: Services, pending: dict[str, tuple[float, str]],
+                                   username: str, provider_id: str,
+                                   raw_url: str, state: str) -> AuthResult:
+    """callback 轨道（TRAE）的粘贴兑换：按发起人的 pending 登录完成回调。
+
+    与 `/authorize` 的差别只在**入口**：那边是浏览器 302（无鉴权，靠
+    `loginTraceID` 绑定），这边是已鉴权的管理台写请求，因此用会话里的
+    用户名直接定位 pending。仍复用同一条 TTL，且 state 必须与 pending 一致
+    （`/authorize` 是从 pending 里取 state，这边是用户可能贴错链接）。
+
+    粘回来的地址若带 `loginTraceID`，必须与这次登录的 trace 相符——防止
+    用户把另一次登录（另一个浏览器标签）的回调贴进来，把两边的
+    machine/device id 搞混。
+    """
+    provider = services.registry.get(provider_id)
+    completer = getattr(provider, "complete_callback", None)
+    if provider is None or not callable(completer):
+        raise InvalidRequest(
+            f"provider {provider_id!r} does not support callback completion")
+    entry = pending.get(username)
+    if entry is None:
+        raise InvalidRequest(
+            "没有进行中的登录。请回到管理台重新点击「登录」，再把回调地址粘回来。")
+    started_at, pending_state = entry
+    if time.monotonic() - started_at > PENDING_CALLBACK_TTL_SECONDS:
+        pending.pop(username, None)
+        raise InvalidRequest(
+            f"这次登录已超过 {PENDING_CALLBACK_TTL_SECONDS // 60} 分钟有效期，"
+            "请回到管理台重新发起登录。")
+    if state and state != pending_state:
+        raise InvalidRequest(
+            "粘贴的回调地址不属于当前这次登录，请重新发起登录后再粘贴。")
+    pasted_trace = (parse_qs(urlparse(raw_url).query).get("loginTraceID") or [""])[0]
+    machine_id, _, device_id = pending_state.partition(":")
+    if pasted_trace and pasted_trace != login_trace_id(machine_id, device_id):
+        raise InvalidRequest(
+            "粘贴的回调地址不属于当前这次登录，请重新发起登录后再粘贴。")
+    pending.pop(username, None)
+    data = await completer(raw_url, pending_state)
+    return AuthResult(credential_data=data, nickname=str(data.get("nickname") or ""))
 
 
 def create_router(services: Services) -> APIRouter:
@@ -251,35 +297,57 @@ def create_router(services: Services) -> APIRouter:
         return {"status": "success", "credential_id": credential_id}
 
     @router.post("/api/auth/upstream/cancel")
-    async def upstream_auth_cancel(payload: dict,
+    async def upstream_auth_cancel(request: Request, payload: dict,
                                    _csrf: None = Depends(csrf_protected),
                                    principal=Depends(principal_from_request)):
         require_admin(principal)
-        oauth = services.upstream_auth.get(str(payload.get("provider") or ""))
+        provider_id = str(payload.get("provider") or "")
+        state = str(payload.get("state") or "")
+        oauth = services.upstream_auth.get(provider_id)
         if oauth is None:
+            # callback 轨道（TRAE）没有上游轮询会话可取消，但要清掉待完成
+            # 登录，否则取消后它还会挂到 TTL 到期，期间用户重新点「登录」
+            # 会被这条僵尸 pending 抢走（按用户名分键，后写覆盖前写，
+            # 本身不会错记，但残留条目会让「已取消」的假象持续）。
+            pending = request.app.state.pending_callbacks
+            entry = pending.get(principal.username)
+            if (provider_id in services.registry and entry is not None
+                    and (not state or entry[1] == state)):
+                pending.pop(principal.username, None)
+                return {"cancelled": True}
             raise InvalidRequest("provider does not support polling login")
-        cancelled = oauth.store.cancel(str(payload.get("state") or ""), principal.username)
+        cancelled = oauth.store.cancel(state, principal.username)
         return {"cancelled": cancelled}
 
     @router.post("/api/auth/upstream/complete")
-    async def upstream_auth_complete(payload: dict,
+    async def upstream_auth_complete(request: Request, payload: dict,
                                      _csrf: None = Depends(csrf_protected),
                                      principal=Depends(principal_from_request)):
-        """粘贴回调链接完成登录（CodeArts 等回调落不到本服务的渠道）。
+        """粘贴回调链接完成登录（回调落不到本服务、或浏览器打不开回调地址的渠道）。
 
-        用户把门户回跳地址（`http://127.0.0.1:{port}/oauth/callback?code=…`）
-        粘回来，服务端用其中的 code + start 时登记的 PKCE 私钥换 token，
+        两条路：
+
+        - **paste 轨道**（CodeArts 等）：服务端从 start 起就登记了 PKCE/ticket
+          会话，`oauth.complete_callback(url, state, username)` 自己按 state 找。
+        - **callback 轨道**（TRAE）：回调本应 302 回本服务 `/authorize`，但
+          远程 / NAS 部署里 TRAE 侧跳过去常直接「网络错误」，refreshToken 只
+          存在浏览器地址栏里，服务端永远收不到（issue #21 后半段）。用户把
+          那条地址整条粘回来，这里用与 `/authorize` 相同的 pending 绑定换 token。
+
         与 `poll` 一样直接落库、不回传 token。
         """
         require_admin(principal)
         provider_id = str(payload.get("provider") or "")
+        raw_url = str(payload.get("url") or "")
+        state = str(payload.get("state") or "")
         oauth = services.upstream_auth.get(provider_id)
         completer = getattr(oauth, "complete_callback", None)
-        if oauth is None or not callable(completer):
-            raise InvalidRequest(
-                f"provider {provider_id!r} does not support callback completion")
-        result = await completer(str(payload.get("url") or ""),
-                                 str(payload.get("state") or ""), principal.username)
+        if oauth is not None and callable(completer):
+            result = await completer(raw_url, state, principal.username)
+        else:
+            result = await _complete_callback_paste(
+                services, request.app.state.pending_callbacks,
+                principal.username, provider_id, raw_url, state)
         credential_id = services.credentials.add(
             provider=provider_id, credential_data=result.credential_data,
             nickname=result.nickname, added_by=principal.username)

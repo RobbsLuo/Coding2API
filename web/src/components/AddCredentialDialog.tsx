@@ -138,20 +138,28 @@ export function AddCredentialDialog({
         // 前端无法轮询渠道，改为轮询凭证列表，出现新凭证即视为完成。
         // 回调地址一并透出：它由服务端 PUBLIC_BASE_URL 决定，指错主机时
         // 浏览器会静默跳不回来（用户只看到「授权完成但没反应」）。
+        // 同时给出粘贴入口：远程 / NAS 部署里 TRAE 跳回调常直接「网络错误」，
+        // 那条地址只在浏览器地址栏里，服务端永远收不到（issue #21）。
+        setPasteProvider(provider);
+        setPasteUrl("");
         onNotice(started.callback_url
           ? `已在新标签页打开授权页，完成后本页自动刷新出凭证。`
-            + `若一直没有反应，请确认浏览器能打开回调地址 ${started.callback_url}。`
-          : "已在新标签页打开授权页，完成后本页自动刷新出凭证。");
+            + `若浏览器打不开回调地址 ${started.callback_url}（显示网络错误），`
+            + `把地址栏里的整条链接粘贴到下方即可。`
+          : "已在新标签页打开授权页，完成后本页自动刷新出凭证。"
+            + "若浏览器打不开回调地址，把地址栏里的整条链接粘贴到下方即可。");
         const deadline = Date.now() + 5 * 60 * 1000;
         const baseline = credentialCountRef.current;
         const timer = window.setInterval(async () => {
           const after = (await api.credentials()).credentials.length;
           if (after > baseline || Date.now() > deadline) {
             stopPolling(provider);
+            if (after > baseline) setPasteProvider(null);
             onNotice(after > baseline
               ? "登录成功，凭证已保存。"
               : "授权超时：浏览器没有回到本服务。请检查授权后地址栏是否跳转到回调地址，"
-                + "以及服务端 PUBLIC_BASE_URL 是否为浏览器可访问的地址。");
+                + "以及服务端 PUBLIC_BASE_URL 是否为浏览器可访问的地址；"
+                + "也可以把地址栏里的整条链接粘贴到下方完成登录。");
           }
         }, 3000);
         loginTimersRef.current[provider] = timer;
@@ -358,7 +366,8 @@ export function AddCredentialDialog({
             <p className="text-xs text-muted-foreground">
               CodeBuddy 走设备码轮询（自动检测完成）；TRAE 走浏览器回调
               （授权后由 <code>/authorize</code> 直接落库，本对话框轮询凭证列表，
-              期间勿关闭对话框）；Qoder 走设备码登录；CodeArts 走 OAuth2 授权码登录
+              期间勿关闭对话框；浏览器打不开回调地址时把地址栏整条链接粘回来）；
+              Qoder 走设备码登录；CodeArts 走 OAuth2 授权码登录
               （授权后把地址栏打不开的 127.0.0.1 回调链接粘回本对话框）；
               OfficeAce 由云端承接回调（本对话框轮询，多账号请用「换账号」）。
             </p>
@@ -370,7 +379,9 @@ export function AddCredentialDialog({
                     data-testid="paste-callback-input"
                     value={pasteUrl}
                     onChange={(event) => setPasteUrl(event.target.value)}
-                    placeholder="http://127.0.0.1:12800/oauth/callback?code=…&state=…"
+                    placeholder={pasteProvider === "trae"
+                      ? "/authorize?refreshToken=…&userInfo=…&loginTraceID=…"
+                      : "http://127.0.0.1:12800/oauth/callback?code=…&state=…"}
                   />
                 </Field>
                 <div className="flex items-center gap-2">
