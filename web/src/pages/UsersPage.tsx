@@ -290,7 +290,7 @@ export function UsersPage() {
                   <TableCell label="创建者" className="text-xs text-muted-foreground">
                     {user.created_by ?? "引导导入"}
                   </TableCell>
-                  <TableCell label="创建时间" className="text-xs">
+                  <TableCell label="创建时间" className="text-xs tabular-nums">
                     {formatTime(user.created_at)}
                   </TableCell>
                   <TableCell label="操作" className="text-right">

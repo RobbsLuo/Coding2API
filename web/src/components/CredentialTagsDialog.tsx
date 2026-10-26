@@ -124,9 +124,11 @@ export function CredentialTagsDialog({
 
         <Field
           label="标签"
+          htmlFor="credential-tags-input"
           hint={`逗号分隔，最多 ${MAX_TAGS} 个、每个不超 ${MAX_TAG_LENGTH} 字符；留空即清除。标签只用于筛选，不影响调度。`}
         >
           <Input
+            id="credential-tags-input"
             value={raw}
             data-testid="credential-tags-input"
             placeholder="生产, 备用, 低倍率"

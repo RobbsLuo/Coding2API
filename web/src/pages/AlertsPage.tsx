@@ -36,7 +36,7 @@ export function AlertsPage() {
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
   // 30 秒轮询：告警是「刚刚发生了什么」，用户停留时自动刷新。
-  const { data, isLoading, isFetching } = useAlerts(
+  const { data, isLoading, isFetching, isError } = useAlerts(
     session.username, 30_000, sort, order, pageSize, page * pageSize);
   const resolve = useResolveAlert(session.username);
 
@@ -78,6 +78,15 @@ export function AlertsPage() {
       >
         {isLoading ? (
           <PageSkeleton variant="table" rows={5} />
+        ) : isError ? (
+          // 加载失败不是「无告警」：此前显示「暂无告警记录…一切正常时保持空白」，
+          // 用户会把故障读成「系统健康」，故障被完全吞掉。
+          <EmptyState
+            icon={<BellRing className="size-5" />}
+            title="告警记录加载失败"
+            description="服务暂时不可用或会话已过期，请稍后重试。"
+            data-testid="alerts-error-state"
+          />
         ) : alerts.length === 0 ? (
           <EmptyState
             icon={<BellRing className="size-5" />}

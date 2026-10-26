@@ -64,7 +64,8 @@ export function SortMenuHead({
           >
             {label}
             {unit && (
-              <span className="text-[10px] font-normal text-muted-foreground/80">{unit}</span>
+              // 正文最小 12px（MASTER §3「正文最小 12px（text-xs），不得更小」）
+              <span className="text-xs font-normal text-muted-foreground/80">{unit}</span>
             )}
             {activeOption && (
               <span className="font-normal text-muted-foreground">· {activeOption.label}</span>

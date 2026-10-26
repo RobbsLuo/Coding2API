@@ -295,4 +295,24 @@ describe("ApiKeysPage 配额 UI", () => {
     await userEvent.click(screen.getByTestId("key-quota-close"));
     expect(screen.queryByTestId("key-quota-dialog")).not.toBeInTheDocument();
   });
+
+  it("Esc 关闭对话框（焦点管理：MASTER §6「对话框焦点管理与 Esc 关闭」）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "PUT") return jsonResponse({ ok: true });
+        return jsonResponse({ api_keys: [KEY] });
+      }),
+    );
+    renderPage(<ApiKeysPage />);
+    await settle();
+
+    await userEvent.click(screen.getByTestId("edit-quota-key_1"));
+    expect(screen.getByTestId("key-quota-dialog")).toBeInTheDocument();
+
+    // Esc 关闭：此前这个对话框没接 useDialogFocus，Esc 收不掉它
+    await userEvent.keyboard("{Escape}");
+    await waitFor(() =>
+      expect(screen.queryByTestId("key-quota-dialog")).not.toBeInTheDocument());
+  });
 });

@@ -162,7 +162,7 @@ export function AuditPage() {
               <TableBody>
                 {events.map((event) => (
                   <TableRow key={event.id} data-testid={`audit-row-${event.id}`}>
-                    <TableCell label="时间" className="whitespace-nowrap text-xs">
+                    <TableCell label="时间" className="whitespace-nowrap text-xs tabular-nums">
                       {formatTime(event.ts)}
                     </TableCell>
                     <TableCell label="操作者" className="text-xs">{event.actor}</TableCell>

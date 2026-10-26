@@ -335,7 +335,7 @@ export function CredentialsPage() {
       token_expires_at: "asc", growth_last_run_at: "desc" });
   // 30s 轮询：冷却倒计时 / token 剩余都是「随时间变化」的观测量，页面停留
   // 时应自动刷新（与 useTasks 同口径）。
-  const { data, isLoading } = useCredentials(session.username, 30_000, sort, order);
+  const { data, isLoading, isError } = useCredentials(session.username, 30_000, sort, order);
   // 组头「模型 N 个」：与 Playground / `/v1/models` 同源（只含有可用凭证且过
   // 当前黑名单的渠道），因此组里「有凭证」与「有模型」是同一口径，不必另算一套。
   const modelsQuery = usePlaygroundModels();
@@ -713,7 +713,15 @@ export function CredentialsPage() {
           <Notice tone="muted">只读模式：仅管理员与操作员可以导入、启停或删除凭证。</Notice>
         </div>
       )}
-      {credentials.length === 0 && canWrite && (
+      {isError && (
+        <div data-testid="credentials-load-error">
+          <Notice tone="danger">
+            凭证列表加载失败：服务可能暂时不可用或会话已过期。下面显示「没有凭证」
+            是取不到数据，不是真的空池——别据此以为凭证丢了。
+          </Notice>
+        </div>
+      )}
+      {!isError && credentials.length === 0 && canWrite && (
         <div data-testid="first-run-hint">
           <Notice tone="muted">
             还没有凭证。点凭证池右上角「添加凭证」登录渠道账号（CodeBuddy / TRAE /
@@ -740,7 +748,15 @@ export function CredentialsPage() {
           </Button>
         )}
       >
-        {credentials.length === 0 ? (
+        {isError ? (
+          // 加载失败不是「空池」：给出错误态，不显示「还没有凭证」
+          <EmptyState
+            icon={<Database className="size-5" />}
+            title="凭证列表加载失败"
+            description="服务暂时不可用或会话已过期，请稍后重试。"
+            data-testid="credentials-error-state"
+          />
+        ) : credentials.length === 0 ? (
           <EmptyState
             icon={<Database className="size-5" />}
             title="还没有凭证"

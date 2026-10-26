@@ -15,6 +15,7 @@ import { buildSections, displayName, modelValue } from "../components/ModelPicke
 import { PROVIDER_LABEL, PROVIDER_ORDER } from "../api/providers";
 import { buildCcSwitchLink, CCSWITCH_TARGETS } from "../lib/ccSwitch";
 import { DEFAULT_PAGE_SIZE } from "../lib/constants";
+import { errorText } from "../lib/errors";
 import {
   EMPTY_QUOTA,
   QUOTA_FIELDS,
@@ -395,10 +396,13 @@ function ModelSelect({
   value,
   onChange,
   testid,
+  id,
 }: {
   value: string;
   onChange: (value: string) => void;
   testid: string;
+  /** 供外层 `Field` 的 htmlFor 关联（读屏报字段名、点 label 聚焦控件）。 */
+  id?: string;
 }) {
   const modelsQuery = usePlaygroundModels();
   const fetched = modelsQuery.data?.data ?? [];
@@ -407,6 +411,7 @@ function ModelSelect({
 
   return (
     <Select
+      id={id}
       value={value}
       data-testid={testid}
       onChange={(event) => onChange(event.target.value)}
@@ -448,9 +453,15 @@ export function CcSwitchImportButtons({
     <div className="space-y-3" data-testid={`${testidPrefix}-import`}>
       <Field
         label="默认模型（可选）"
+        htmlFor={`${testidPrefix}-model-select`}
         hint="留空不写入。Claude Code 无模型名时回落内置列表；非原生模型建议选本服务模型。"
       >
-        <ModelSelect value={model} onChange={setModel} testid={`${testidPrefix}-model`} />
+        <ModelSelect
+          value={model}
+          onChange={setModel}
+          testid={`${testidPrefix}-model`}
+          id={`${testidPrefix}-model-select`}
+        />
       </Field>
       <div className="flex flex-wrap gap-2">
         {CCSWITCH_TARGETS.map((target) =>
@@ -610,8 +621,12 @@ export function ApiKeysPage() {
       setQuota({ ...EMPTY_QUOTA });
       setCopied(false);
       await client.invalidateQueries({ queryKey: ["admin"] });
-    } catch {
-      setError("创建失败：请检查渠道绑定、模型白名单、IP 白名单与到期时间格式（配额须为非负数字）");
+    } catch (caught) {
+      // 用 errorText 取后端受控文案（渠道绑定冲突、白名单格式错等都说得出
+      // 具体哪里不对）；只有非受控异常才回落通用兜底。裸 catch{} 会把后端
+      // 已经写好的原因丢掉，用户只能对着「创建失败」猜。
+      setError(errorText(caught,
+        "创建失败：请检查渠道绑定、模型白名单、IP 白名单与到期时间格式（配额须为非负数字）"));
     }
   };
 
@@ -667,6 +682,11 @@ export function ApiKeysPage() {
     setImportKey("");
   };
   const importDialogRef = useDialogFocus<HTMLDivElement>(closeImport, importing !== null);
+
+  const closeQuota = () => setEditingQuota(null);
+  // 配额对话框也要焦点管理与 Esc 关闭（MASTER §6「对话框焦点管理与 Esc 关闭」）：
+  // 此前只有「创建」「导入」两个对话框接了 useDialogFocus，配额这个漏了。
+  const quotaDialogRef = useDialogFocus<HTMLDivElement>(closeQuota, editingQuota !== null);
 
   return (
     <div className="space-y-6" data-testid="api-keys-page">
@@ -734,10 +754,10 @@ export function ApiKeysPage() {
                   <TableCell label="渠道" className="text-xs" data-testid={`key-binding-${key.id}`}>
                     {providerBindingLabel(key.provider_binding)}
                   </TableCell>
-                  <TableCell label="到期" className="text-xs" data-testid={`key-expires-${key.id}`}>
+                  <TableCell label="到期" className="text-xs tabular-nums" data-testid={`key-expires-${key.id}`}>
                     {key.expires_at ? formatTime(key.expires_at) : "永不过期"}
                   </TableCell>
-                  <TableCell label="最后使用" className="text-xs">
+                  <TableCell label="最后使用" className="text-xs tabular-nums">
                     {key.last_used_at ? formatTime(key.last_used_at) : "从未使用"}
                   </TableCell>
                   <TableCell label="来源 IP" className="font-mono text-xs" data-testid={`key-ips-${key.id}`}>
@@ -752,7 +772,7 @@ export function ApiKeysPage() {
                   <TableCell label="当日已用" className="text-xs" data-testid={`key-usage-${key.id}`}>
                     {usageTodayLabel(usageTodayOf(key))}
                   </TableCell>
-                  <TableCell label="创建时间" className="text-xs">
+                  <TableCell label="创建时间" className="text-xs tabular-nums">
                     {formatTime(key.created_at)}
                   </TableCell>
                   <TableCell label="操作" className="text-right">
@@ -951,6 +971,7 @@ export function ApiKeysPage() {
             aria-modal="true"
             aria-label="设置 Key 配额"
             data-testid="key-quota-dialog"
+            ref={quotaDialogRef}
             onClick={(event) => event.stopPropagation()}
             className="max-h-[90vh] w-full max-w-lg animate-in overflow-y-auto rounded-xl border border-border bg-card p-5 shadow-xl fade-in-0 zoom-in-95"
           >

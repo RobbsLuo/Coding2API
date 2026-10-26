@@ -213,12 +213,34 @@ describe("ApiKeysPage", () => {
     );
   });
 
-  it("创建失败时提示检查绑定与白名单格式", async () => {
+  it("创建失败时透出后端的受控原因（不只给通用兜底）", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
         if (init?.method === "POST") {
-          return jsonResponse({ error: { message: "bad" } }, 400);
+          return jsonResponse(
+            { error: { message: "渠道绑定与已有 Key 冲突" } }, 400);
+        }
+        return jsonResponse({ api_keys: [] });
+      }),
+    );
+    renderPage(<ApiKeysPage />);
+    await settle();
+    await openCreateDialog();
+
+    await userEvent.click(screen.getByRole("button", { name: "创建" }));
+    // 后端写好的受控文案要透出来：裸 catch{} 会把它丢掉，用户只能对着
+    // 「创建失败」猜到底是哪一项不对。
+    expect(await screen.findByText(/渠道绑定与已有 Key 冲突/)).toBeInTheDocument();
+  });
+
+  it("创建失败且后端无可用文案时回落通用兜底", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          // 非受控异常（网络层）：没有可展示的 message
+          throw new TypeError("Failed to fetch");
         }
         return jsonResponse({ api_keys: [] });
       }),

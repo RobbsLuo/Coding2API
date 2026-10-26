@@ -265,8 +265,9 @@ describe("ModelCatalogPage（模型列表）", () => {
     expect(row).toHaveTextContent("体 53.1");
     // 无分数的行只显示一个 —，不渲染三个
     const plain = screen.getByTestId("model-row-a-model");
-    expect(plain.querySelectorAll("div").length).toBeGreaterThan(0);
     expect(plain).not.toHaveTextContent("智 ");
+    expect(plain).not.toHaveTextContent("编 ");
+    expect(plain).not.toHaveTextContent("体 ");
     // 能力分来源指标卡（与价格同一次抓取）
     expect(screen.getByTestId("model-catalog-page")).toHaveTextContent("能力分来源");
   });

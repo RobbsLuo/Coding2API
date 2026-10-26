@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import { PROVIDER_LABEL } from "../api/providers";
 import type { Provider } from "../api/types";
 import { useDialogFocus } from "../hooks/useDialogFocus";
+import { safeHttpUrl } from "../lib/safeUrl";
 import { Button, Field, Input, Notice, Select, Tabs, Textarea } from "../ui";
 
 /** 支持「登录渠道账号」按钮 / JSON 导入下拉的渠道（有 poll 轨道或需人工导入的渠道）。 */
@@ -27,13 +28,7 @@ type TabValue = "login" | "import";
  * `javascript:` 之类的脚本执行（已由 scheme 校验挡住）——能把用户导去钓鱼站
  * 的攻击者已经掌握了上游响应，收益有限。 */
 function safeAuthUrl(raw: string | undefined): string | null {
-  if (!raw) return null;
-  try {
-    const url = new URL(raw);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
-  } catch {
-    return null;
-  }
+  return safeHttpUrl(raw);
 }
 
 /**
@@ -485,10 +480,12 @@ export function AddCredentialDialog({
             </div>
             <Field
               label="凭证 JSON"
+              htmlFor="import-payload"
               hint='CodeBuddy：{"token":"..."}（也接受 access_token / bearer_token）；TRAE：{"accessToken":"...","uid":"...","refreshToken":"..."}'
             >
               <Textarea
                 rows={4}
+                id="import-payload"
                 value={raw}
                 data-testid="import-payload"
                 className="font-mono text-xs"

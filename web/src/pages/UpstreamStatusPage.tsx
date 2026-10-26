@@ -28,6 +28,7 @@ import {
   Notice,
   Panel,
 } from "../ui";
+import { safeHttpUrl } from "../lib/safeUrl";
 import type {
   UpstreamIncident,
   UpstreamLevel,
@@ -156,9 +157,9 @@ function IncidentRow({ incident }: { incident: UpstreamIncident }) {
             {formatTime(incident.updated_at)}
           </span>
         )}
-        {incident.url && (
+        {incident.url && safeHttpUrl(incident.url) && (
           <a
-            href={incident.url}
+            href={safeHttpUrl(incident.url) ?? undefined}
             target="_blank"
             rel="noopener noreferrer"
             className="inline-flex items-center gap-0.5 text-xs text-primary hover:underline"
@@ -488,7 +489,7 @@ function OverviewStrip({
           只看异常
         </Label>
         {/* 过滤后的条数变化要被读屏播报，否则勾上开关只有视觉变化 */}
-        <span role="status" className="text-xs text-muted-foreground">
+        <span role="status" data-testid="upstream-hidden-count" className="text-xs text-muted-foreground">
           {onlyAbnormal ? `已隐藏 ${total - visibleCount} 个正常源` : ""}
         </span>
         <Button

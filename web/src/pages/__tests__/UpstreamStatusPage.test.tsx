@@ -204,6 +204,22 @@ describe("UpstreamStatusPage", () => {
     expect(row).toHaveTextContent("已恢复");
   });
 
+  it("事故链接只放行 http(s)：javascript: 协议不渲染成链接", async () => {
+    stubFetch(payload({
+      sources: [source({
+        level: "major",
+        incidents: [{ title: "恶意链接", level: "major", ongoing: true,
+                      updated_at: 1_700_000_000,
+                      url: "javascript:alert(1)", detail: null }],
+      })],
+    }));
+    renderPage(<UpstreamStatusPage />, { username: "root", is_admin: true });
+    await settle();
+
+    // 上游下发的 url 直接进 href 就能执行脚本，必须过协议白名单
+    expect(screen.queryByRole("link", { name: /原文/ })).toBeNull();
+  });
+
   it("没有进行中事故时明确说明，而不是留白", async () => {
     stubFetch(payload({
       sources: [source({
@@ -321,7 +337,7 @@ describe("UpstreamStatusPage", () => {
     await userEvent.click(screen.getByTestId("upstream-abnormal-toggle"));
 
     expect(screen.queryByTestId("upstream-attention")).not.toBeInTheDocument();
-    expect(screen.getByRole("status")).toHaveTextContent("已隐藏 1 个正常源");
+    expect(screen.getByTestId("upstream-hidden-count")).toHaveTextContent("已隐藏 1 个正常源");
   });
 
   it("刷新按钮触发重新抓取", async () => {

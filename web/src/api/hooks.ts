@@ -203,7 +203,7 @@ export function useResolveAlert(username?: string) {
 }
 
 export function useStatsOverview(username?: string, target?: string, since?: number,
-                                 until?: number) {
+                                 until?: number, enabled = true) {
   return useQuery({
     queryKey: adminKey(username, "stats-overview", target, since, until),
     queryFn: () => api.statsOverview(target, since, until),
@@ -211,55 +211,66 @@ export function useStatsOverview(username?: string, target?: string, since?: num
     // `overview.isLoading` 时整体切骨架屏，若不带占位数据，每次改时间都会把
     // 筛选控件一起卸载重挂——用户正在编辑的输入框会消失。
     placeholderData: keepPreviousData,
+    enabled,
   });
 }
 
 export function useStatsByProvider(username?: string, target?: string, since?: number,
-                                   until?: number, sort?: string, order?: string) {
+                                   until?: number, sort?: string, order?: string,
+                                   enabled = true) {
   return useQuery({
     queryKey: adminKey(username, "stats-providers", target, since, until, sort, order),
     queryFn: () => api.statsByProvider(target, since, until, sort, order),
+    enabled,
   });
 }
 
 export function useStatsByModel(username?: string, target?: string, since?: number,
-                                until?: number, sort?: string, order?: string) {
+                                until?: number, sort?: string, order?: string,
+                                enabled = true) {
   return useQuery({
     queryKey: adminKey(username, "stats-models", target, since, until, sort, order),
     queryFn: () => api.statsByModel(target, since, until, sort, order),
+    enabled,
   });
 }
 
 export function useStatsByUser(username?: string, target?: string, since?: number,
-                               until?: number, sort?: string, order?: string) {
+                               until?: number, sort?: string, order?: string,
+                               enabled = true) {
   return useQuery({
     queryKey: adminKey(username, "stats-users", target, since, until, sort, order),
     queryFn: () => api.statsByUser(target, since, until, sort, order),
+    enabled,
   });
 }
 
 /** 按凭证聚合：数据源是明细表（仅 90 天），非 admin/operator 看不到他人凭证。 */
 export function useStatsByCredential(username?: string, target?: string, since?: number,
-                                     until?: number, sort?: string, order?: string) {
+                                     until?: number, sort?: string, order?: string,
+                                     enabled = true) {
   return useQuery({
     queryKey: adminKey(username, "stats-credentials", target, since, until, sort, order),
     queryFn: () => api.statsByCredential(target, since, until, sort, order),
+    enabled,
   });
 }
 
 export function useStatsTimeline(username?: string, target?: string, since?: number,
-                                 until?: number, metric?: string) {
+                                 until?: number, metric?: string, enabled = true) {
   return useQuery({
     queryKey: adminKey(username, "stats-timeline", target, since, until, metric),
     queryFn: () => api.statsTimeline(target, since, until, metric as StatsMetric),
+    enabled,
   });
 }
 
 export function useStatsModelTimeline(username?: string, target?: string, since?: number,
-                                      until?: number, metric?: string) {
+                                      until?: number, metric?: string, enabled = true) {
   return useQuery({
     queryKey: adminKey(username, "stats-model-timeline", target, since, until, metric),
     queryFn: () => api.statsModelTimeline(target, since, until, metric as StatsMetric),
+    enabled,
   });
 }
 
@@ -289,7 +300,8 @@ export function useStatsPercentileTimeline(username?: string, target?: string,
 export function useStatsEvents(username?: string, since?: number, until?: number,
                                before?: number, limit?: number, sort?: string,
                                order?: string, offset?: number,
-                               filters?: StatsEventFilters & { ok?: number }) {
+                               filters?: StatsEventFilters & { ok?: number },
+                               enabled = true) {
   const provider = filters?.provider;
   const model = filters?.model;
   const credentialId = filters?.credential_id;
@@ -304,6 +316,7 @@ export function useStatsEvents(username?: string, since?: number, until?: number
                                    { provider, model, credential_id: credentialId,
                                      ok } as StatsEventFilters),
     placeholderData: keepPreviousData,
+    enabled,
   });
 }
 
