@@ -66,10 +66,14 @@ def validate_n(raw: dict[str, Any]) -> None:
 def validate_numeric_fields(raw: dict[str, Any]) -> None:
     """校验全部数值型顶层字段，拒绝 NaN/±Inf 与畸形值。
 
-    只在 `read_json_body` 的 `parse_constant` 之外补齐：`parse_constant` 只拦
-    字面量 `NaN`/`Infinity`，拦不住 JSON 溢出成 `inf` 的 `1e999`
-    （`json.loads('{"x":1e999}')` → `inf`）。这些值经本服务重新序列化会变成
-    非法 JSON `Infinity` 透传给上游，把本应 400 的输入变成上游 4xx。
+    已知键（temperature / top_p / 采样惩罚 / seed / logit_bias）的范围与
+    类型校验在这一层做：它们有业务边界（如 `temperature <= 1000`），不只是
+    「是不是有限数」。
+
+    **JSON 溢出成 inf 的 `1e999` 由更外层拦**（`api/deps.py::read_json_body`
+    的 `parse_float`）：那里是解析入口，三个出口共用，一处生效全生效；
+    逐字段补齐要各写一遍，且 chat 出口会把整个请求体透传给上游，未知键里的
+    inf 会一路带到 httpx 序列化那一步炸成 500。
     """
     for key in ("temperature", "top_p"):
         if key in raw:

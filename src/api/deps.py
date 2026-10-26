@@ -9,6 +9,7 @@ request 可用）。
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -269,14 +270,33 @@ async def read_json_body(request: Request) -> Any:
     但本项目的 /v1 与 playground 走原始 Request（需要透传任意字段），
     裸调 `request.json()` 会让 json.JSONDecodeError 冒泡成 500。
 
-    `parse_constant` 拒绝 `NaN` / `Infinity` / `-Infinity`（JSON 标准不允许，
-    但 Python json 默认接受）：这些值会经本服务重新序列化透传给上游，把
-    本应 400 的输入变成上游 4xx，污染凭证健康度与统计。
+    两道 JSON 层的数值把关：
+
+    - `parse_constant` 拒绝 `NaN` / `Infinity` / `-Infinity`（JSON 标准不允许，
+      但 Python json 默认接受）：这些值会经本服务重新序列化透传给上游，把
+      本应 400 的输入变成上游 4xx，污染凭证健康度与统计。
+    - `parse_float` 拒绝**溢出成 inf 的合法 JSON 数字**（`1e999`）：字面量拦不住
+      它（`json.loads('{"x":1e999}')` → `inf`），而 `httpx` 序列化时抛
+      `ValueError: Out of range float values are not JSON compliant` → 变 500。
+      逐字段校验（`compat/*/request.py`）只覆盖已知的几个键，chat 出口会把整个
+      请求体透传给上游，未知键里的 inf 会一路带到序列化那一步炸掉。
+
+    `parse_float` 拦在**解析层**而非逐字段：三个出口（chat / Anthropic /
+    Responses）共用这一个入口，一处生效全生效；逐字段补齐要各写一遍且仍会漏
+    掉 chat 出口的未知透传键。
     """
     def _reject_constant(token: str) -> Any:
         raise InvalidRequest(f"JSON value {token} is not allowed")
 
+    def _reject_non_finite(token: str) -> float:
+        # Python 的 json 在这里已把 1e999 解析成 inf（不抛 OverflowError）
+        value = float(token)
+        if not math.isfinite(value):
+            raise InvalidRequest(f"JSON number {token} is not finite")
+        return value
+
     try:
-        return json.loads(await request.body(), parse_constant=_reject_constant)
+        return json.loads(await request.body(), parse_constant=_reject_constant,
+                          parse_float=_reject_non_finite)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise InvalidRequest("request body is not valid JSON") from error
