@@ -73,6 +73,29 @@ def test_intl_whitelist_excludes_cn_site():
     assert validate_endpoint_allowed(intl, settings)
 
 
+def test_intl_whitelist_rejects_cn_host_even_if_listed():
+    """白名单里**混入**国内站主机 → 整个白名单作废（端点校验直接拒绝）。
+
+    只校验「端点在白名单里」不够：把国内站主机加进国际站白名单后，
+    端点校验会通过，国际站账号的 Token 照样发往国内站网关（跨站泄露）。
+    故白名单含国内站主机时一律拒绝。
+    """
+    settings = _settings(
+        CODEBUDDY_INTL_ALLOWED_ENDPOINTS=(
+            "https://www.codebuddy.ai,https://copilot.tencent.com"))
+    intl = "https://www.codebuddy.ai"
+    assert not validate_codebuddy_intl_endpoint_allowed(intl, settings)
+    # 带路径 / 端口 / 大小写 / 无 scheme 的国内站主机同样要识别出来
+    for variant in ("https://copilot.tencent.com:443/",
+                    "http://copilot.tencent.com",
+                    "https://Copilot.Tencent.COM",
+                    "copilot.tencent.com",
+                    "copilot.tencent.com:443/path"):
+        poisoned = _settings(
+            CODEBUDDY_INTL_ALLOWED_ENDPOINTS=f"https://www.codebuddy.ai,{variant}")
+        assert not validate_codebuddy_intl_endpoint_allowed(intl, poisoned), variant
+
+
 # --------------------------------------------------------------- 端点解析
 
 def test_resolve_intl_endpoint_returns_configured_host():

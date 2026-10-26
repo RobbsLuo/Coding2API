@@ -146,8 +146,12 @@ def _parse_json(response: httpx.Response) -> dict[str, Any]:
     try:
         data = response.json()
     except ValueError as error:
+        # 异常文本带上游端点 URL 只进日志；对外文案用受控标识（PROPOSAL §6
+        # 「错误响应不回流上游正文」）。同族调用点都传 public=（见
+        # codearts/client.py:500、trae/client.py:516）。
         raise UpstreamProtocolViolation(
-            f"non-JSON token response from {response.request.url}") from error
+            f"non-JSON token response from {response.request.url}",
+            public="upstream returned a non-JSON response") from error
     if not isinstance(data, dict):
         raise UpstreamProtocolViolation("token response is not an object")
     return data

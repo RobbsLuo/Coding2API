@@ -451,8 +451,31 @@ def validate_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
 
 
 def validate_codebuddy_intl_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
-    """国际站端点白名单校验（防把国内站 Token 发往国际站或反之）。"""
-    return endpoint.strip().rstrip("/") in settings.codebuddy_intl_allowed
+    """国际站端点白名单校验（防把国内站 Token 发往国际站或反之）。
+
+    **白名单本身也校验**：PROPOSAL §2.7「`CODEBUDDY_INTL_ALLOWED_ENDPOINTS`
+    默认只有国际站主机，填国内站启动时报错（跨站发送即凭证泄露）」。
+    只校验「端点在白名单里」不够——把国内站主机**加进**国际站白名单后，
+    端点校验会通过，Token 照样发往国内站（国际站账号的 Token 发到国内站
+    网关 = 跨站泄露）。故白名单里出现国内站主机时一律拒绝。
+    """
+    allowed = settings.codebuddy_intl_allowed
+    if any(_is_codebuddy_cn_host(entry) for entry in allowed):
+        return False
+    return endpoint.strip().rstrip("/") in allowed
+
+
+def _is_codebuddy_cn_host(endpoint: str) -> bool:
+    """该地址是不是国内站主机（`copilot.tencent.com`）。
+
+    比主机名而非整串：配置里可能带路径或端口（`https://copilot.tencent.com:443/`），
+    整串比较会漏判。国际站白名单里出现国内站主机 = 跨站发送，必须拒绝。
+    """
+    text = endpoint.strip()
+    if text.startswith(("http://", "https://")):
+        text = text.split("://", 1)[1]
+    host = text.split("/", 1)[0].split(":", 1)[0].strip().lower()
+    return host == _CODEBUDDY_CN.split("://", 1)[1].lower()
 
 
 def validate_zen_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
