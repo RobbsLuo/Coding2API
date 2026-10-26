@@ -27,6 +27,7 @@ CONTROLLED_ERROR_TYPES = frozenset({
     #   client_disconnect  — 客户端中途断开（executor.stream）
     #   credential_unavailable — session 失效（_error_type_for(DEAD)）
     #   invalid_request    — 请求无效（_record_invalid）
+    #   model_not_found   — 上游明确说「没有这个模型」（_error_type_for(BLOCKED)）
     #   no_healthy_credential — 无可用凭证（executor 耗尽轮换）
     #   model_unavailable     — 耗尽轮换但候选全部只因**该模型**的模型级
     #                            冷却不可用（_exhaust_error_type；换个模型即可用）
@@ -35,7 +36,8 @@ CONTROLLED_ERROR_TYPES = frozenset({
     #   upstream_first_event_timeout — 出帧前上游不吐首个数据事件（A1）
     #   upstream_idle_timeout        — 已出帧后上游停止吐数据（A1）
     "client_disconnect", "credential_unavailable",
-    "invalid_request", "no_healthy_credential", "model_unavailable",
+    "invalid_request", "model_not_found", "no_healthy_credential",
+    "model_unavailable",
     "rate_limit", "upstream_error", "upstream_protocol",
     "upstream_first_event_timeout", "upstream_idle_timeout",
 })

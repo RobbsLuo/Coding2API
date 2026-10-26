@@ -341,3 +341,48 @@ async def test_forced_provider_without_usable_credential_keeps_narrowing(dual_re
     with pytest.raises(NoHealthyCredential):
         await executor.complete(_request("deepseek-v4.1-flash@codebuddy"), username="u")
     assert (cb.calls, trae.calls) == (0, 0)
+
+
+async def test_probe_failed_model_still_narrows_to_its_owner(dual_repo):
+    """探活判死的模型仍收窄到持有它的渠道 → 不扇出到无此模型的渠道。
+
+    实测故障（2026-10-26 `deepseek-v4.1-flash-1017`）：officeAce 的
+    `/v2/models` 挂着它但推理端点直接 404 `ModelArts.81009`（上游目录撒谎）。
+    人工探活判死后，若别名登记跟着被摘掉，执行侧 `_narrow_providers` 因
+    「没有任何渠道登记该模型」回退成**全部渠道** → 请求扇出到 codebuddy /
+    codearts / codebuddy_intl，三家各回「无此模型」（11102 / not registered），
+    并被写上 (凭证, 模型) 负缓存——污染的是从没有该模型的渠道。
+
+    修好后：别名登记保留 → 收窄到 officeAce → 负缓存让该渠道的凭证不可选
+    → 快速 503「该模型暂时不可用」，其余渠道零调用、零负缓存。
+    """
+    repo, db = dual_repo
+    officeace_id = repo.add(provider="officeace", credential_data={"t": "x"})
+    repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    repo.add(provider="codearts", credential_data={"t": "x"})
+    # 负缓存（判死的前提）：officeAce 的这个模型被负缓存锁住
+    repo.save_error(officeace_id, ErrorOutcome(model_cooldowns={
+        "deepseek-v4.1-flash-1017": ModelCooldown(
+            cooling_until=int(time.time()) + 3600, hits=1, reason="blocked")}))
+    officeace = _RejectProvider("officeace", [GOOD])
+    cb = _RejectProvider("codebuddy", [GOOD])
+    codearts = _RejectProvider("codearts", [GOOD])
+    executor = Executor(ExecutorDeps(
+        providers={"officeace": officeace, "codebuddy": cb, "codearts": codearts},
+        credentials=repo, scheduler=Scheduler(),
+        default_model="deepseek-v4.1-flash-1017",
+        # 别名表保留判死渠道的归属（`api.models._hidden_aliases` 的产出）
+        model_aliases={"officeace": {"deepseek-v4.1-flash-1017":
+                                     "deepseek-v4.1-flash-1017"}},
+        upstream_model_name=lambda pid, name: {
+            "officeace": {"deepseek-v4.1-flash-1017": "deepseek-v4.1-flash-1017"}
+        }.get(pid, {}).get(name.lower(), name)))
+
+    with pytest.raises(NoHealthyCredential) as exc_info:
+        await executor.complete(_request("deepseek-v4.1-flash-1017"), username="u")
+    assert "temporarily unavailable on upstream" in str(exc_info.value)
+    # 只有持有该模型的渠道被考虑过；无此模型的渠道零调用
+    assert (officeace.calls, cb.calls, codearts.calls) == (0, 0, 0)
+    # 负缓存零新增：没给任何渠道写「该后端无此模型」
+    assert db.connect().execute(
+        "SELECT COUNT(*) FROM credential_model_cooldowns").fetchone()[0] == 1

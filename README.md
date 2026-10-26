@@ -417,7 +417,7 @@ Playground 与 `/v1/models` 走 stale-while-revalidate：有缓存立刻回旧�
 
 （`GET /api/model-catalog`，管理员 / 操作员）只读展示 OpenRouter 公开目录：刊例价、上下文 / 输出上限、模态、能力、知识截止、Artificial Analysis 三项指数（非本服务实测，不做排序）。每行带 `available` 布尔，页面提供默认关闭的「只看当前渠道」开关。
 
-**疑似下线视图**：`GET /api/models/availability`（operator）把最近 N 天（默认 7，可调 1–30）`upstream_blocked` / `invalid_request` 的失败按 `(渠道, 模型)` 聚合。行内「加入黑名单」把该模型追加到 `model_blocklist`，走既有设置接口并落审计。
+**疑似下线视图**：`GET /api/models/availability`（operator）把最近 N 天（默认 7，可调 1–30）`upstream_blocked` / `model_not_found` / `invalid_request` 失败按 `(渠道, 模型)` 聚合。行内「加入黑名单」→ 追加 `model_blocklist`，走既有设置接口 + 审计。
 
 **浮动别名取同族最新快照的分**：OpenRouter 对同一模型同时挂浮动别名与带日期快照，并用 `canonical_slug` 声明同属一次发布。本项目转发时推理默认开着，与 Max 变体同口径，故按 `canonical_slug` 的日期取同族最新快照的分；显式带日期戳的 id 仍用自己的分。家族只从带 `-YYYYMMDD` 的 canonical 派生。
 
@@ -478,7 +478,7 @@ Playground 与 `/v1/models` 走 stale-while-revalidate：有缓存立刻回旧�
 
 时间范围默认**最近 24 小时**（另有 7 天 / 30 天 / 全部 / 自定义）。自定义给两个 `datetime-local`（按浏览器本地时区），可只填一边；起点不早于终点时整窗作废并提示。所有统计端点接受 `until`（epoch 秒，半开上界 `[since, until)`）。
 
-**明细失败类型**是受控枚举（后端 `CONTROLLED_ERROR_TYPES`）：模型级冷却耗尽记 `model_unavailable`，凭证池真耗尽记 `no_healthy_credential`（对外错误码相同，仅统计口径区分）。
+**失败类型** = 受控枚举（`CONTROLLED_ERROR_TYPES`）：模型级冷却耗尽 → `model_unavailable`；池真耗尽 → `no_healthy_credential`；上游明确说「没这个模型」→ `model_not_found`（与「请求无效」分开：前者是模型下线，后者是请求写错）。对外码相同，仅统计口径不同。
 
 **请求 ID**：每个响应都带 `X-Request-ID`。入站合法则沿用，否则自生成；合法字符集 `[A-Za-z0-9._:-]`、长度 1–128。该 ID 落进 `usage_events.request_id`，明细时间列悬停可见。**不透传到上游**（各渠道出站头语义不同）。
 

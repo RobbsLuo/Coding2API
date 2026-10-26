@@ -452,6 +452,8 @@ class Scheduler:
 ### 6.2 候选收窄
 `Executor._narrow_providers`：**候选只信模型目录缓存**。目录能证明归属时，候选渠道只有它们——全部不可用直接 503，不再逐渠道试（各上游只会回 11102 / 4001 / 401，还会写下数小时负缓存）。目录未就绪或模型不在目录里按全部候选路由；`模型@渠道` 与 Key 绑定不受影响。新鲜度上限为 TTL 300s（`MODEL_LIST_TTL_SECONDS`）+ 后台兜底刷新。
 
+**「目录登记」的口径含探活判死的渠道**（§9.1.1）：判死只把它从**展示**里摘掉，别名登记保留——否则「没登记」回退成全部渠道扇出，正是收窄要防的那件事。
+
 ### 6.3 模型级冷却
 `credential_model_cooldowns(credential_id, model, cooling_until, hits, reason)` 按 **(凭证, 模型)** 建表——账号级 `cooling_until` 放不下「同账号其他模型仍可用」。`model_probes(...)` 是**观测记录**：冷却表是调度权威（真实失败驱动），探活表只供展示（探测失败未必是模型问题）。
 
@@ -580,6 +582,23 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 - **失败也进 TTL**（负缓存）：`model_list_fetched_at` 记上次尝试（成功或失败）。**连续失败按 2^(n-1)×TTL 退避**（`model_list_failures`，封顶 `MODEL_LIST_BACKOFF_MAX_SECONDS` 2h，成功清零）；日志首次 WARNING、其后 INFO。
 - **HTTP 出口 SWR**：TTL 到期后 `/v1/models` 与 `/api/playground/models` 走 `serve_models`：有缓存直接回旧列表，过期渠道丢后台（`_schedule_refresh`）。两条纪律：① 某渠道一条缓存都没有时才同步等（冷启动 / 新渠道）；② 后台刷新收敛在 `services.model_refresh_tasks`，`model_refreshing` 去重，`lifespan` 关闭时 `cancel()` + `await`。代价：列表最多滞后一个 TTL。
 - **逐渠道增量 publish**：每拉完一条渠道 `publish_aliases()` 一次（就地更新，executor 闭包引用同一 dict），不等最慢那条（zen 逐个探活可占 12–15s，期间别名表为空会让 `_narrow_providers` 按全部渠道放行）。合并逻辑收敛到 `merged_entries()`。
+
+### 9.1.1 探活判死只影响展示，不影响归属
+`model_probes.failed_and_blocked()`（判死 **且** 负缓存仍生效）命中的 (渠道, 模型) 从**展示**里摘掉（`merged_entries` 逐渠道抽掉），但**别名登记保留**（`api/models._hidden_aliases` → `_register_entry_alias`）。
+
+- **为什么必须保留**：别名表是执行侧 `_narrow_providers` 收窄候选的唯一依据。摘掉后「没有任何渠道登记该模型」→ 回退成**全部渠道扇出** → 请求被发到一堆根本没有该模型的上游，各回「无此模型」（CodeBuddy 11102 / officeAce 81004·81009 / CodeArts InferHub.002002009），并被写上 (凭证, 模型) 负缓存——污染的是**从没有该模型**的渠道。
+- **实测**（2026-10-26 `deepseek-v4.1-flash-1017`）：officeAce 的 `/v2/models` 挂着它（26 个之一）但推理端点直接 404 `ModelArts.81009`（上游目录撒谎）；人工探活判死后别名表丢了归属 → 扇出到 codebuddy / codearts / codebuddy_intl → 8 条负缓存写在了从没有该模型的渠道上。
+- **修好后**：收窄仍指向真正持有它的渠道 → 负缓存（判死的前提条件）让该渠道不可选 → 快速 503「该模型暂时不可用」，其余渠道零调用、零负缓存。
+- **补登记的键推导与真实条目同源**（`_register_entry_alias`）：两处各写一份迟早漂移，漂移表现是「用户按展示名请求时收窄失效」。**不覆盖**已有映射（真实条目优先）；**只登记有可用凭证的渠道**（与 `merged_entries` 同口径）。
+- **兜底清理**：`scripts/cleanup_stale_blocked.py` 删「该渠道目录里根本没有这个模型」的负缓存行（扇出留下的噪声）。判据保守：目录里**有**这个模型的行一律保留（那是上游真把它下架了，负缓存正是应有的避让）；目录快照读不出来 → 一律不删。
+
+### 9.1.2 「上游没这个模型」独立成 error_type
+`ErrKind.BLOCKED`（上游明确说没有这个模型）统计落 `error_type=model_not_found`，**不再并进 `invalid_request`**。后者是「请求无效」（`ErrKind.INVALID` / `ErrKind.REQUEST`），归因面板显示「请求无效」，读起来像客户端参数写错了——实际是上游把该模型下架了（实测 2026-10-26 officeAce 404 `ModelArts.81009` 被标成「请求无效」）。
+
+- 受控枚举 `CONTROLLED_ERROR_TYPES` 增 `model_not_found`（前端 `USAGE_ERROR_LABEL` 同步：「上游无此模型」）。
+- 可用性视图（`GET /api/models/availability`）的计入口径增 `model_not_found`：它**仍属**模型级失败，只是分类更准。
+- **收尾行不变**：轮换耗尽时那一行仍按 `_exhaust_error_type` 落 `model_unavailable` / `no_healthy_credential`——「上游没这个模型」（尝试级归因）与「这个模型现在全都不可用」（收尾行）是两件事。
+
 
 **单模型查询** `GET /v1/models/{model_id:path}`：与列表**共用** `_revalidated_providers` + `_served_entries`。命中三种写法（对外 id / 展示名 / 任一渠道 `raw_ids`），`strip().lower()` 比较。`:path` 容纳带命名空间的原代号（`dots-studio/dots-3-note-preview:free`）。**白名单外与不存在同形 404**（`model_not_found`），客户端无法探测池子。能力分与列表同源。
 

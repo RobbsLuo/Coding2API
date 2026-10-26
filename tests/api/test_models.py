@@ -413,6 +413,10 @@ def test_failed_probe_hides_model_for_that_channel_only(tmp_path):
 
     其它渠道正常时同一模型照常展示（多渠道条目退化成单渠道条目）；负缓存
     到期后自动回到列表（那之后没人再探，只看探活结论会永久隐藏）。
+
+    **但别名登记必须保留**（2026-10-26 实测故障）：摘掉别名后执行侧
+    `_narrow_providers` 找不到任何登记该模型的渠道 → 回退成全部渠道扇出，
+    请求被发到一堆不认该模型的上游，各回「无此模型」并被写上负缓存。
     """
     import time
 
@@ -455,14 +459,210 @@ def test_failed_probe_hides_model_for_that_channel_only(tmp_path):
         # 只剩 zen 提供：条目仍在，但 providers 里没有 trae
         entry = client.get("/v1/models", headers=auth).json()["data"][0]
         assert (entry["id"], entry["providers"]) == ("glm-5.3", ["zen"])
-        # 别名表同步收窄：执行侧 `_narrow_providers` 不再选 trae
-        assert "trae" not in services.model_aliases
+        # 别名表**保留** trae 的归属：执行侧 `_narrow_providers` 仍收窄到
+        # 真正持有该模型的渠道，不会因「没人登记」回退成全部渠道扇出
+        assert services.model_aliases["trae"]["glm-5.3"] == "glm-5.3"
 
         # 负缓存到期：自动回到列表（不依赖再次探活）
         with services.credentials._db.transaction() as conn:
             conn.execute("UPDATE credential_model_cooldowns SET cooling_until = 1")
         entry = client.get("/v1/models", headers=auth).json()["data"][0]
         assert entry["providers"] == ["trae", "zen"]
+
+
+def test_failed_probe_keeps_alias_so_narrowing_does_not_fan_out(tmp_path):
+    """判死模型的别名登记必须保留：否则执行侧收窄失效 → 全部渠道扇出。
+
+    实测故障（2026-10-26 `deepseek-v4.1-flash-1017`）：officeAce 的
+    `/v2/models` 挂着它（26 个之一）但推理端点直接 404 `ModelArts.81009`；
+    人工探活判死后别名表丢了 officeAce 的归属 → `_narrow_providers` 因
+    「没有任何渠道登记该模型」回退成**全部渠道** → 请求扇出到 codebuddy /
+    codearts / codebuddy_intl，三家各回「无此模型」（11102 / not registered），
+    并被写上 (凭证, 模型) 负缓存——8 条负缓存落在从没有该模型的渠道上。
+
+    本用例断言：判死后别名表仍有 officeAce 的归属（收窄依据在），而展示
+    里该模型已消失。
+    """
+    import time
+
+    from src.provider.base import Model
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        MODEL_BLOCKLIST="")
+
+    class Stub:
+        def __init__(self, pid: str):
+            self.id = pid
+
+        async def list_models(self, _data):
+            return [Model(id="deepseek-v4.1-flash-1017")]
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    app = build_app(settings, providers={"officeace": Stub("officeace"),
+                                         "codebuddy": Stub("codebuddy")})
+    for provider_id in ("officeace", "codebuddy"):
+        app.state.credentials.add(provider=provider_id, credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    auth = {"Authorization": f"Bearer {key}"}
+    with TestClient(app) as client:
+        services = app.state.services
+        # officeAce 独有该模型（codebuddy 的模型表里没有它）
+        services.model_list_cache["officeace"] = {
+            "deepseek-v4.1-flash-1017": Model(id="deepseek-v4.1-flash-1017")}
+        services.model_list_cache["codebuddy"] = {"deepseek-v4.1-flash": Model(
+            id="deepseek-v4.1-flash")}
+
+        services.model_probes.record(provider="officeace",
+                                     model="deepseek-v4.1-flash-1017", state="failed")
+        credential_id = services.credentials.candidates(["officeace"])[0].credential_id
+        with services.credentials._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO credential_model_cooldowns "
+                "(credential_id, model, cooling_until, hits, reason) "
+                "VALUES (?,?,?,?,'blocked')",
+                (credential_id, "deepseek-v4.1-flash-1017", int(time.time()) + 3600, 1))
+
+        client.get("/v1/models", headers=auth)          # 触发一次 publish
+
+        # 展示里该模型消失（判死 + 负缓存生效）
+        ids = {item["id"] for item in
+               client.get("/v1/models", headers=auth).json()["data"]}
+        assert "deepseek-v4.1-flash-1017" not in ids
+        # 但别名登记保留 → 执行侧仍收窄到 officeAce，不扇出到 codebuddy
+        assert services.model_aliases["officeace"]["deepseek-v4.1-flash-1017"] \
+            == "deepseek-v4.1-flash-1017"
+
+
+def test_hidden_alias_not_registered_for_channel_without_credentials(tmp_path):
+    """没有可用凭证的渠道不登记判死别名（与 `merged_entries` 同口径）。
+
+    给一个根本打不通的渠道登记归属，等于把请求指向一个死渠道。
+    """
+    import time
+
+    from src.provider.base import Model
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        MODEL_BLOCKLIST="")
+
+    class Stub:
+        id = "officeace"
+
+        async def list_models(self, _data):
+            return [Model(id="m-only")]
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    app = build_app(settings, providers={"officeace": Stub()})
+    key = app.state.api_keys.create("root")["api_key"]
+    auth = {"Authorization": f"Bearer {key}"}
+    with TestClient(app) as client:
+        services = app.state.services
+        # 渠道在缓存里，但没有凭证 → 不在 `connected` 里
+        services.model_list_cache["officeace"] = {"m-only": Model(id="m-only")}
+        services.model_probes.record(provider="officeace", model="m-only",
+                                     state="failed")
+        credential_id = app.state.credentials.add(
+            provider="officeace", credential_data={"t": "x"})
+        with services.credentials._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO credential_model_cooldowns "
+                "(credential_id, model, cooling_until, hits, reason) "
+                "VALUES (?,?,?,?,'blocked')",
+                (credential_id, "m-only", int(time.time()) + 3600, 1))
+        # 凭证被硬禁用 → 渠道不在 `connected`（无**可用**凭证）
+        with services.credentials._db.transaction() as conn:
+            conn.execute("UPDATE credentials SET disabled = 1 WHERE id = ?",
+                         (credential_id,))
+
+        client.get("/v1/models", headers=auth)
+        assert "officeace" not in services.model_aliases
+
+
+def test_hidden_alias_does_not_override_real_entry(tmp_path):
+    """判死补登记**不覆盖**真实条目的映射（真实条目优先）。"""
+    import time
+
+    from src.provider.base import Model
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        MODEL_BLOCKLIST="")
+
+    class Stub:
+        id = "trae"
+
+        async def list_models(self, _data):
+            return [Model(id="glm-5.3")]
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    app = build_app(settings, providers={"trae": Stub()})
+    app.state.credentials.add(provider="trae", credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    auth = {"Authorization": f"Bearer {key}"}
+    with TestClient(app) as client:
+        services = app.state.services
+        services.model_probes.record(provider="trae", model="glm-5.3", state="failed")
+        credential_id = services.credentials.candidates(["trae"])[0].credential_id
+        with services.credentials._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO credential_model_cooldowns "
+                "(credential_id, model, cooling_until, hits, reason) "
+                "VALUES (?,?,?,?,'blocked')",
+                (credential_id, "glm-5.3", int(time.time()) + 3600, 1))
+
+        client.get("/v1/models", headers=auth)
+        # 真实条目的映射原样保留（值仍是该渠道的原 id）
+        assert services.model_aliases["trae"]["glm-5.3"] == "glm-5.3"
+
+
+def test_hidden_alias_falls_back_to_raw_id_when_catalog_dropped_it(tmp_path):
+    """上游把模型从目录里撤了 → 判死别名按**原 id**登记（仍能收窄）。
+
+    目录里查不到该模型时无从得知它的对外 id 与展示名，退回按原 id 登记：
+    用户按原 id 请求仍收窄到该渠道；按展示名请求则收窄不到（那条路径本来
+    就没有「这个模型属于哪」的信息）。
+    """
+    import time
+
+    from src.provider.base import Model
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        MODEL_BLOCKLIST="")
+
+    class Stub:
+        id = "officeace"
+
+        async def list_models(self, _data):
+            return [Model(id="m-gone")]
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    app = build_app(settings, providers={"officeace": Stub()})
+    app.state.credentials.add(provider="officeace", credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    auth = {"Authorization": f"Bearer {key}"}
+    with TestClient(app) as client:
+        services = app.state.services
+        services.model_probes.record(provider="officeace", model="m-gone",
+                                     state="failed")
+        credential_id = services.credentials.candidates(["officeace"])[0].credential_id
+        with services.credentials._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO credential_model_cooldowns "
+                "(credential_id, model, cooling_until, hits, reason) "
+                "VALUES (?,?,?,?,'blocked')",
+                (credential_id, "m-gone", int(time.time()) + 3600, 1))
+        # 上游已把该模型从目录里撤掉：缓存里查不到
+        services.model_list_cache["officeace"] = {}
+
+        client.get("/v1/models", headers=auth)
+        assert services.model_aliases["officeace"]["m-gone"] == "m-gone"
 
 
 def test_probe_ok_does_not_hide_model(tmp_path):

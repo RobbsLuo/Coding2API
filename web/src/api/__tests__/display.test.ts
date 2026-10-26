@@ -425,6 +425,9 @@ describe("display helpers", () => {
     expect(usageErrorLabel("client_disconnect")).toBe("客户端中断");
     expect(usageErrorLabel("model_unavailable")).toBe("该模型暂时不可用");
     expect(usageErrorLabel("no_healthy_credential")).toBe("无可用凭证");
+    // 「上游没这个模型」与「请求无效」是两回事（2026-10-26 独立成类）
+    expect(usageErrorLabel("model_not_found")).toBe("上游无此模型");
+    expect(usageErrorLabel("invalid_request")).toBe("请求无效");
     // A1 流式超时：两个新枚举都要有中文文案（不能落到兜底「失败（xxx）」）
     expect(usageErrorLabel("upstream_first_event_timeout")).toBe("上游首字超时");
     expect(usageErrorLabel("upstream_idle_timeout")).toBe("上游流中断");

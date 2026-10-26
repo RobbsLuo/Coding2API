@@ -476,6 +476,7 @@ export type UsageErrorType =
   | "client_disconnect"
   | "credential_unavailable"
   | "invalid_request"
+  | "model_not_found"
   | "model_unavailable"
   | "no_healthy_credential"
   | "rate_limit"
@@ -489,6 +490,7 @@ export const USAGE_ERROR_LABEL: Record<UsageErrorType, string> = {
   client_disconnect: "客户端中断",
   credential_unavailable: "凭证失效",
   invalid_request: "请求无效",
+  model_not_found: "上游无此模型",
   model_unavailable: "该模型暂时不可用",
   no_healthy_credential: "无可用凭证",
   rate_limit: "额度耗尽",

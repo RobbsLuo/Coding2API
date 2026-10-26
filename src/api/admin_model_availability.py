@@ -10,10 +10,11 @@
   `since` 绝对时刻限定，走 `idx_usage_ts`；`days` 默认 7、上限 30，`limit`
   上限 200——聚合必须限窗口与行数，否则一张跑了一年的库会被这一个只读端点
   拖垮。
-* 只认 `error_type in ('upstream_blocked', 'invalid_request')`：前者是协议
-  预留值（provider 直接上报时自动纳入），后者是当前 executor 对
-  `ErrKind.BLOCKED` / `ErrKind.INVALID` 的统一归类——「上游不认这个模型」
-  目前就落在 `invalid_request` 里。
+* 只认 `error_type in ('upstream_blocked', 'model_not_found', 'invalid_request')`：
+  `model_not_found` 是 executor 对「上游明确说没有这个模型」（`ErrKind.BLOCKED`，
+  2026-10-26 从 `invalid_request` 里独立出来）的归类，`upstream_blocked` 是协议
+  预留值（provider 直接上报时自动纳入），`invalid_request` 是请求无效
+  （`ErrKind.INVALID` / `ErrKind.REQUEST`，上游 400 拒绝也落这里）。
 * `blocked` 是**现算**的：拿 `MODEL_BLOCKLIST`（热更）与记录里的模型名
   做 glob 匹配，与 `/v1/models` 的过滤同口径（归一键 / 展示名任一命中即算）。
   不在服务端缓存，改完黑名单下一次请求立即反映。
@@ -64,7 +65,7 @@ DEFAULT_LIMIT = 100
 MAX_LIMIT = 200
 
 # 计入「模型级失败」的 error_type（见模块 docstring）。
-FAILURE_ERROR_TYPES = ("upstream_blocked", "invalid_request")
+FAILURE_ERROR_TYPES = ("upstream_blocked", "model_not_found", "invalid_request")
 
 
 def _blocked(model: str, patterns: tuple[str, ...]) -> bool:

@@ -458,20 +458,30 @@ def _register_aliases(entries: list[dict[str, Any]],
     """
     for entry in entries:
         for provider_id in sorted(entry["providers"]):
-            provider_aliases = aliases.setdefault(provider_id, {})
-            raw_id = entry["raw_ids"][provider_id]
-            provider_aliases[entry["id"].lower()] = raw_id
-            provider_aliases[raw_id.lower()] = raw_id
-            # 「按展示名入键」的渠道额外登记展示名键：用户按 `Kimi K3` 或
-            # `kimi-k3` 直连都能落到该渠道。不登记同渠道重名项（CB 的
-            # `hy4-preview` / `hy4-preview-x` 都叫「Hy4 Preview」，登记任一个
-            # 都会指向错误模型）。
-            display = entry["meta"].get("name")
-            if provider_id in entry["name_keyed"] and display:
-                provider_aliases[str(display).lower()] = raw_id
-                label_key = normalize_model_key(str(display))
-                if label_key != str(display).lower():
-                    provider_aliases[label_key] = raw_id
+            _register_entry_alias(entry, provider_id, aliases)
+
+
+def _register_entry_alias(entry: dict[str, Any], provider_id: str,
+                           aliases: dict[str, dict[str, str]]) -> None:
+    """单个 (条目, 渠道) 的别名登记（`_register_aliases` 的单元）。
+
+    单独成函数是为了让「探活判死但仍要保留归属」的补登记走**同一套**键推导
+    （见 `api.models._hidden_aliases`）：两处各写一份键推导，迟早漂移。
+    """
+    raw_id = entry["raw_ids"][provider_id]
+    provider_aliases = aliases.setdefault(provider_id, {})
+    provider_aliases[entry["id"].lower()] = raw_id
+    provider_aliases[raw_id.lower()] = raw_id
+    # 「按展示名入键」的渠道额外登记展示名键：用户按 `Kimi K3` 或
+    # `kimi-k3` 直连都能落到该渠道。不登记同渠道重名项（CB 的
+    # `hy4-preview` / `hy4-preview-x` 都叫「Hy4 Preview」，登记任一个
+    # 都会指向错误模型）。
+    display = entry["meta"].get("name")
+    if provider_id in entry["name_keyed"] and display:
+        provider_aliases[str(display).lower()] = raw_id
+        label_key = normalize_model_key(str(display))
+        if label_key != str(display).lower():
+            provider_aliases[label_key] = raw_id
 
 
 def _build_aliases(entries: list[dict[str, Any]],

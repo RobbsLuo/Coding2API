@@ -415,7 +415,7 @@ Playground and `/v1/models` use stale-while-revalidate: cached lists return imme
 
 (`GET /api/model-catalog`, admin / operator) read-only view of the OpenRouter public catalog: list prices, context / output limits, modalities, capabilities, knowledge cutoff, and the three Artificial Analysis indices (not measured here, no sorting). Each row carries an `available` flag; a default-off *only current channels* switch narrows locally.
 
-**Suspected-offline view**: `GET /api/models/availability` (operator) aggregates `upstream_blocked` / `invalid_request` failures over the last N days (default 7, 1–30) by `(channel, model)`. *Add to blocklist* appends to `model_blocklist` through the settings endpoint and writes an audit row.
+**Suspected-offline view**: `GET /api/models/availability` (operator) aggregates `upstream_blocked` / `model_not_found` / `invalid_request` failures over last N days (default 7, 1–30) by `(channel, model)`. *Add to blocklist* appends to `model_blocklist` via settings endpoint + audit row.
 
 **Floating aliases take the newest snapshot score**: OpenRouter attaches both a floating alias and dated snapshots to one model, declaring them one release via `canonical_slug`. This gateway runs reasoning on by default, matching the Max variant, so it takes the newest snapshot in the family; ids with an explicit date stamp keep their own score. Families derive only from canonicals carrying `-YYYYMMDD`.
 
@@ -476,7 +476,7 @@ The sidebar is on every page. Several to-dos you would only notice by visiting a
 
 Default range is **the last 24 hours** (also 7 days / 30 days / all / custom). Custom takes two `datetime-local` inputs (browser-local timezone), one side may be empty; a start not earlier than the end voids the window with a message. Every stats endpoint accepts `until` (epoch seconds, half-open `[since, until)`).
 
-**Failure types** are a controlled enum: exhausted model-level cooldown → `model_unavailable`, genuinely empty pool → `no_healthy_credential` (same outbound error code, different stats meaning).
+**Failure types** = controlled enum: exhausted model-level cooldown → `model_unavailable`; genuinely empty pool → `no_healthy_credential`; upstream explicitly says "no such model" → `model_not_found` (kept apart from `invalid_request`: one means the model was withdrawn, the other means the request was malformed) — same outbound code, different stats meaning.
 
 **Request ID**: every response carries `X-Request-ID`. A valid inbound value is reused, otherwise one is generated; allowed charset `[A-Za-z0-9._:-]`, length 1–128. It lands in `usage_events.request_id` and shows on hover in the detail time column. **Never forwarded upstream** (outbound header semantics differ per channel).
 

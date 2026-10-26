@@ -114,6 +114,21 @@ def test_ignores_other_error_types_and_successes(admin_client):
     assert _rows(client)["rows"] == []
 
 
+def test_model_not_found_counts_as_model_level_failure(admin_client):
+    """「上游无此模型」（`model_not_found`）计入模型级失败。
+
+    2026-10-26 起该类从 `invalid_request` 里独立出来（此前被读成「客户端
+    参数写错了」），但**仍属**模型级失败，必须继续进可用性视图。
+    """
+    app, client = admin_client
+    _insert(app, provider="officeace", model="deepseek-v4.1-flash-1017",
+            error_type="model_not_found")
+    rows = _rows(client)["rows"]
+    assert len(rows) == 1
+    assert rows[0]["provider"] == "officeace"
+    assert rows[0]["failures"] == 1
+
+
 def test_window_excludes_old_failures(admin_client):
     app, client = admin_client
     now = int(time.time())
@@ -199,7 +214,8 @@ def test_blocked_matches_normalized_key_and_display_name(admin_client):
 def test_error_types_reported(admin_client):
     """响应里带口径说明，前端不必硬编码「哪几类算下线」。"""
     _app, client = admin_client
-    assert _rows(client)["error_types"] == ["upstream_blocked", "invalid_request"]
+    assert _rows(client)["error_types"] == [
+        "upstream_blocked", "model_not_found", "invalid_request"]
 
 
 # ------------------------------------------------------- 探活结论与人工接管

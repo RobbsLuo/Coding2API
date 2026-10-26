@@ -299,6 +299,17 @@ def test_error_type_mapping_covers_all_kinds():
     assert _error_type_for(ErrKind.DEAD) == "credential_unavailable"
     assert _error_type_for(ErrKind.SOFT) == "upstream_error"
     assert _error_type_for(ErrKind.OTHER) == "upstream_error"
+    # 「上游没这个模型」独立成类：与「请求无效」分开（2026-10-26）
+    assert _error_type_for(ErrKind.BLOCKED) == "model_not_found"
+    assert _error_type_for(ErrKind.INVALID) == "invalid_request"
+    assert _error_type_for(ErrKind.REQUEST) == "invalid_request"
+
+
+def test_blocked_error_type_is_controlled():
+    """新枚举必须在受控白名单里，否则 `record` 会把它置 None（统计里看不到）。"""
+    from src.stats.collector import CONTROLLED_ERROR_TYPES
+
+    assert "model_not_found" in CONTROLLED_ERROR_TYPES
 
 
 async def test_dead_credential_also_records_attribution_row(repo):
@@ -422,6 +433,64 @@ async def test_plan_error_records_rate_limit_error_type(repo):
             {"messages": [{"role": "user", "content": "hi"}]}))
     assert collector.events[-1]["error_type"] == "no_healthy_credential"
     assert credentials.candidates()[0].cooling_until is not None
+
+
+async def test_blocked_error_records_model_not_found(repo):
+    """上游说「没这个模型」→ 统计记 `model_not_found`（不是「请求无效」）。
+
+    实测 2026-10-26 officeAce `deepseek-v4.1-flash-1017` 404
+    `ModelArts.81009`：归到 `invalid_request` 时归因面板显示「请求无效」，
+    读起来像客户端参数写错了，实际是上游把该模型下架了。
+
+    走流式路径且轮换预算用尽（`max_rotate=1`）：那一行是**尝试级**归因，
+    类型取自最后一次上游错误的分类（`_stream_error_type`）。
+    """
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+
+    class Blocked(Exception):
+        def __init__(self) -> None:
+            super().__init__("model not registered")
+
+        def kind(self):
+            return ErrKind.BLOCKED
+
+    executor = _exec_with_stats(repo, [[Blocked()]], collector, max_rotate=1)
+    from src.compat.openai.request import parse_chat_request
+
+    async for _ in executor.stream(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}], "stream": True})):
+        pass
+    kinds = [event["error_type"] for event in collector.events]
+    assert "model_not_found" in kinds
+    assert "invalid_request" not in kinds
+    # 模型级负缓存照写（只锁这一个模型，不牵连整条凭证）
+    assert _db.connect().execute(
+        "SELECT COUNT(*) FROM credential_model_cooldowns").fetchone()[0] == 1
+
+
+async def test_blocked_exhaustion_still_records_model_unavailable(repo):
+    """轮换耗尽时的收尾行仍是 `model_unavailable`（口径不变）。
+
+    「上游没这个模型」与「这个模型现在全都不可用」是两件事：前者是尝试级
+    归因（`model_not_found`），后者是收尾行（`model_unavailable`）。
+    """
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+
+    class Blocked(Exception):
+        def kind(self):
+            return ErrKind.BLOCKED
+
+    executor = _exec_with_stats(repo, [[Blocked()]], collector)
+    from src.compat.openai.request import parse_chat_request
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+    assert collector.events[-1]["error_type"] == "model_unavailable"
 
 async def test_stream_plan_error_records_failure(repo):
     """流式路径的权益耗尽同样要落统计。"""

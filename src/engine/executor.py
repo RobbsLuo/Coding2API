@@ -1752,7 +1752,14 @@ def _error_type_for(kind: ErrKind) -> str:
         return "rate_limit"
     if kind is ErrKind.DEAD:
         return "credential_unavailable"
-    if kind in (ErrKind.INVALID, ErrKind.BLOCKED, ErrKind.REQUEST):
+    if kind is ErrKind.BLOCKED:
+        # 「该后端无此模型」（11102 / 81004 / 81009 / InferHub 002002009）：
+        # **不是**请求无效。归到 `invalid_request` 会让归因面板把「上游没这个
+        # 模型」读成「客户端参数写错了」（实测 2026-10-26 officeAce
+        # `deepseek-v4.1-flash-1017` 404 `ModelArts.81009` 就是被标成
+        # 「请求无效」）。独立成类才能让运维一眼看出是模型下线而非请求错。
+        return "model_not_found"
+    if kind in (ErrKind.INVALID, ErrKind.REQUEST):
         return "invalid_request"
     return "upstream_error"
 

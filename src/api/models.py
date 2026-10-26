@@ -43,12 +43,16 @@ from ..compat.openai.errors import error_payload
 from ..engine.reasoning import parse_effort_map
 from ..model_alias import parse_model_aliases
 from ..pricing import PriceTable
+from ..provider.base import Model
+from ..provider.naming import normalize_model_key
 from .deps import ApiKeyPrincipal, Services, api_key_user
 from .model_catalog import load_catalog, save_catalog
 from .model_merge import (
     _build_aliases,
     _entry_response,
     _merge_provider,
+    _model_label,
+    _register_entry_alias,
     _sort_key,
     _visible,
 )
@@ -96,8 +100,10 @@ def merged_entries(services: Services, connected: set[str]) -> list[dict[str, An
     **再叠一层「探活判死」过滤**（`probed_out`）：(渠道, 模型) 被探活判死且
     仍被 blocked 负缓存锁着时，把这条模型**从该渠道的表里抽掉**——只抽该渠道，
     别的渠道正常时同一模型照常展示（合并键跨渠道，多渠道条目退化成单渠道条目）。
-    隐藏条目时同时跳过它，别名表里也就没有「渠道 → 原名」，执行侧
-    `_narrow_providers` 自然不再选它。与黑名单同口径：点名直连指定模型不受影响。
+    与黑名单同口径：点名直连指定模型不受影响。
+
+    **但别名登记不能跟着摘**（见 `_hidden_aliases`）：摘掉后执行侧
+    `_narrow_providers` 会因「没有任何渠道登记该模型」回退成全部渠道扇出。
     """
     patterns = services.settings.blocklist_patterns
     probed_out = services.model_probes.failed_and_blocked()
@@ -116,12 +122,77 @@ def merged_entries(services: Services, connected: set[str]) -> list[dict[str, An
     return sorted(grouped.values(), key=_sort_key)
 
 
-def _publish(services: Services, entries: list[dict[str, Any]]) -> None:
+def _hidden_aliases(services: Services,
+                    probed_out: set[tuple[str, str]],
+                    connected: set[str]) -> dict[str, dict[str, str]]:
+    """探活判死的 (渠道, 模型) → 别名登记（**只影响执行侧收窄，不进展示**）。
+
+    「探活判死」把该 (渠道, 模型) 从模型列表里摘掉（`merged_entries`），若别名
+    登记也跟着摘，执行侧 `_narrow_providers` 就找不到任何登记该模型的渠道 →
+    **回退成全部渠道扇出**：请求被发到一堆根本没有该模型的上游，各回「无此
+    模型」，并被写上 (凭证, 模型) 负缓存——污染的是从未提供该模型的渠道。
+
+    实测 2026-10-26 `deepseek-v4.1-flash-1017`：officeAce 的 `/v2/models` 挂着
+    它（26 个模型之一）但推理端点直接 404 `ModelArts.81009`；人工探活判死后
+    别名表丢了 officeAce 的归属，请求扇出到 codebuddy / codearts /
+    codebuddy_intl，三家各回「无此模型」，8 条负缓存写在从没有该模型的渠道上。
+
+    故这里把判死的 (渠道, 模型) 补登记回别名表：请求仍**收窄**到真正持有它
+    的渠道，由负缓存（判死的前提条件）让该渠道不可选 → 快速 503「该模型暂
+    时不可用」，而不是打一轮无关上游。
+
+    键推导走 `_register_entry_alias`（与真实条目**同一套**）：两处各写一份
+    键推导，迟早漂移——漂移的表现是「用户按展示名请求时收窄失效」。
+    **不覆盖已有映射**：真实条目的登记优先。
+    **只登记有可用凭证的渠道**（`connected`）：与 `merged_entries` 的口径一致
+    （没凭证的渠道既不拉取也不展示），否则会给一个根本打不通的渠道登记归属。
+    """
+    aliases: dict[str, dict[str, str]] = {}
+    for provider_id, lower in sorted(probed_out):
+        if provider_id not in connected:
+            continue
+        table = services.model_list_cache.get(provider_id) or {}
+        entry = _hidden_entry(table.get(lower), lower, provider_id)
+        _register_entry_alias(entry, provider_id, aliases)
+    return aliases
+
+
+def _hidden_entry(model: Model | None, lower: str,
+                  provider_id: str) -> dict[str, Any]:
+    """判死模型 → 一个只含它自己的最小条目（供别名登记用）。
+
+    键的推导与真实条目同源（`_model_label` / `normalize_model_key`）：对外 id
+    取展示名的归一键，展示名取清洗后的文本；`name_keyed` 含该渠道（它按
+    展示名入的键，故展示名键也要登记）。
+
+    **目录里已经没有这个模型**（上游把它撤了，`model is None`）：无从得知它
+    的对外 id 与展示名，退回按原 id 登记（`lower`）。此时用户按原 id 请求
+    仍能收窄到该渠道；按展示名请求则收窄不到——但那条路径本来就没有「这个
+    模型属于哪」的信息可言。
+    """
+    if model is None:
+        return {"id": lower, "meta": {"name": ""},
+                "raw_ids": {provider_id: lower}, "name_keyed": set()}
+    label = _model_label(model)
+    return {
+        "id": normalize_model_key(label) or normalize_model_key(model.id),
+        "meta": {"name": label},
+        "raw_ids": {provider_id: model.id},
+        "name_keyed": {provider_id},
+    }
+
+
+def _publish(services: Services, entries: list[dict[str, Any]],
+             connected: set[str]) -> None:
     """定稿好的条目 → 就地更新别名表（executor 的闭包引用同一个 dict 对象）。
 
     先算好再 clear+update：`_build_aliases` 若抛错，不能让别名表停在「已清空、
     未写入」的中间态（那会让所有扁平名请求失去候选收窄）。对象身份必须保留，
     故不能整体替换 dict。
+
+    **判死的 (渠道, 模型) 补登记回别名表**（`_hidden_aliases`）：它们已从
+    展示里摘掉，但执行侧的候选收窄必须仍指向真正持有它们的渠道，否则请求
+    扇出到一堆不认该模型的上游（见 `_hidden_aliases` 的 docstring）。
 
     自定义别名（`MODEL_ALIASES`）**每次现读**运行态覆盖层再解析：这是热更
     项，改完下一次列表 / 单查就生效，不需要重启或等 TTL。解析结果同时进
@@ -129,6 +200,12 @@ def _publish(services: Services, entries: list[dict[str, Any]]) -> None:
     """
     custom = parse_model_aliases(str(getattr(services.settings, "model_aliases", "")))
     aliases = _build_aliases(entries, custom)
+    for provider_id, provider_aliases in _hidden_aliases(
+            services, services.model_probes.failed_and_blocked(),
+            connected).items():
+        target = aliases.setdefault(provider_id, {})
+        for key, raw_id in provider_aliases.items():
+            target.setdefault(key, raw_id)
     services.model_aliases.clear()
     services.model_aliases.update(aliases)
 
@@ -140,7 +217,7 @@ def publish_aliases(services: Services, connected: set[str]) -> None:
     zen 探活（十几秒）——那段时间里已拉好的渠道本该已经能收窄候选，否则扁平名
     请求会按「全部渠道」扇出，真实打一轮不认这个模型的上游。
     """
-    _publish(services, merged_entries(services, connected))
+    _publish(services, merged_entries(services, connected), connected)
 
 
 async def _refresh_provider(services: Services, provider_id: str, provider: Any) -> None:
@@ -304,7 +381,7 @@ def _served_entries(services: Services, connected: set[str],
     同一份「定稿后」条目（`_publish` 会就地 finalize，id 撞车消歧只发生一次）。
     """
     entries = merged_entries(services, connected)
-    _publish(services, entries)
+    _publish(services, entries, connected)
     if allowed_models:
         from ..auth.access import model_allowed
         entries = [entry for entry in entries

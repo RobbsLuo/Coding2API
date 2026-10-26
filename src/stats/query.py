@@ -589,10 +589,12 @@ class StatsQuery:
     def model_failures(self, *, since: int, limit: int = 200) -> list[dict[str, Any]]:
         """按 (provider, model) 聚合窗口内的模型级失败（可用性视图的数据源）。
 
-        只认两类错误：`invalid_request`（当前 executor 把上游「无此模型」的
-        `ErrKind.BLOCKED` 也归到这一类）与 `upstream_blocked`（协议预留值，
-        未来 provider 直接上报时自动纳入）。窗口由调用方给绝对时刻 `since`，
-        SQL 走 `idx_usage_ts`；`limit` 由调用方收敛，多取一条供判断截断。
+        只认三类错误：`model_not_found`（executor 对「上游明确说没有这个模型」
+        `ErrKind.BLOCKED` 的归类，2026-10-26 从 `invalid_request` 里独立出来）、
+        `invalid_request`（请求无效：`ErrKind.INVALID` / `ErrKind.REQUEST`，上游
+        400 拒绝也落这里）与 `upstream_blocked`（协议预留值，未来 provider
+        直接上报时自动纳入）。窗口由调用方给绝对时刻 `since`，SQL 走
+        `idx_usage_ts`；`limit` 由调用方收敛，多取一条供判断截断。
 
         `last_failed_at` 取该组内最大 `ts`；排序按失败次数降序，同次数按
         (provider, model) 升序，保证分页 / 快照稳定。
@@ -601,7 +603,8 @@ class StatsQuery:
             """
             SELECT provider, model, COUNT(*) AS failures, MAX(ts) AS last_failed_at
             FROM usage_events
-            WHERE ts >= ? AND error_type IN ('upstream_blocked', 'invalid_request')
+            WHERE ts >= ? AND error_type IN
+                  ('upstream_blocked', 'model_not_found', 'invalid_request')
             GROUP BY provider, model
             ORDER BY failures DESC, provider ASC, model ASC
             LIMIT ?
