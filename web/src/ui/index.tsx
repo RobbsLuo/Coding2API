@@ -312,16 +312,23 @@ export function Notice({
   className?: string;
   children: ReactNode;
 }) {
+  // 左侧语义色条（MASTER §5「Notice」行）：整圈边框看不出语气，色条一眼可辨。
+  // 用 border-l-4 而不是伪元素——不引入额外 DOM 层级。
   const cls: Record<Tone, string> = {
-    ok: "border-ok/30 bg-ok/10 text-ok-ink",
-    warn: "border-warn/40 bg-warn/12 text-warn-ink",
-    danger: "border-destructive/30 bg-destructive/10 text-danger-ink",
-    muted: "border-border bg-muted/50 text-muted-foreground",
-    accent: "border-primary/35 bg-primary/10 text-primary-ink",
+    ok: "border-ok/30 border-l-4 border-l-ok bg-ok/10 text-ok-ink",
+    warn: "border-warn/40 border-l-4 border-l-warn bg-warn/12 text-warn-ink",
+    danger:
+      "border-destructive/30 border-l-4 border-l-destructive bg-destructive/10 text-danger-ink",
+    muted: "border-border border-l-4 border-l-muted-foreground/40 bg-muted/50 text-muted-foreground",
+    accent: "border-primary/35 border-l-4 border-l-primary bg-primary/10 text-primary-ink",
   };
   return (
     <ShadAlert
       variant={tone === "danger" ? "destructive" : "default"}
+      // 只有 danger 是「错误」，用 role=alert 强播报；其余是信息/状态提示，
+      // 用 role=status（MASTER §5「Notice」行；role=alert 会把中性信息当告警
+      // 念给读屏用户）。role 由 tone 决定，不能在底层组件里写死。
+      role={tone === "danger" ? "alert" : "status"}
       className={cn("items-center", cls[tone], className)}
     >
       {children}

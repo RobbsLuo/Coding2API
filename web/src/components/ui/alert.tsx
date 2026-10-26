@@ -26,6 +26,9 @@ function Alert({
   return (
     <div
       data-slot="alert"
+      // 默认 role=alert（shadcn 原语语义），但**允许调用方覆盖**：上层
+      // `Notice` 按语气给 role（只有 danger 用 alert，其余 status），
+      // 这里写死会把中性信息当错误强播报给读屏用户。
       role="alert"
       className={cn(alertVariants({ variant }), className)}
       {...props}
