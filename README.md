@@ -96,7 +96,7 @@ python3 scripts/create_user.py --db data/x.sqlite3 ...
 echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-stdin
 ```
 
-`ADMIN_USERNAMES` 与 `secrets/users.txt` 仅引导期生效（首个管理员、老部署升级）；此后角色只来自 DB。
+`ADMIN_USERNAMES` 与 `secrets/users.txt` 仅引导期生效（首个管理员、老部署升级）；此后角色只来自 DB。引导期的判据是「库里还没有活跃 admin」——有了之后 env 不再改写任何人的角色，管理台做的降级不会被下一次重启撤销。
 
 ## 审计
 
@@ -516,7 +516,7 @@ Playground 与 `/v1/models` 走 stale-while-revalidate：有缓存立刻回旧�
 
 **输出速度（tok/s）** = `token 总量 ÷ 生成时间总和`，非逐条比值再平均。两口径同分母、异分子：**正文速度** `output_tokens - reasoning_tokens`；**总产出速度**含思考 token；前端一格 `正文 / 总产出`。仅算经本服务路由、产出 ≥ 1 token 的成功请求。生成时间 = `latency_ms - ttfb_ms`；剔除窗口 < 200 ms 或单条 > 1000 tok/s。`ttfb_ms` = `NULL` 不进主口径；无样本 → 估算口径（端到端为分母，前置 `≈`）；两口径皆无 → `—`。
 
-**图表指标**：请求次数 / Token / 成本 / 单请求成本 / 耗时 / 首字延迟 / 成功率 / 缓存命中率，切换看趋势。派生指标（成功率、缓存命中率、单请求成本）按**聚合后相除**算（`sum ÷ sum`），不是逐小时比率的平均；无样本给 `—`（断线），不画成 0。耗时 / 首字另配一张**分位图**（P50 中位数 + P95 上界，读明细表，仅 90 天）——均值会把长尾摊平。时间轴按小时补齐（空档保留位置，不压缩时间）。
+**图表指标**：请求次数 / Token / 成本 / 单请求成本 / 耗时 / 首字延迟 / 成功率 / 缓存命中率，切换看趋势。派生指标（成功率、缓存命中率、单请求成本）按**聚合后相除**算（`sum ÷ sum`），不是逐小时比率的平均；无样本给 `—`（断线），不画成 0。耗时 / 首字另配一张**分位图**（P50 中位数 + P95 上界，读明细表，仅 90 天）——均值会把长尾摊平。时间轴按小时补齐（空档保留位置，不压缩时间）。`metric` 参数取值域外显式 400（不静默回落到「请求次数」——否则拼错参数会拿到一份看起来正常的图）。自定义时间范围非法（起点 ≥ 终点）时**暂停取数**，不按「不限时间窗」发全量查询。
 
 聚合速度只能从逐请求明细算 → 仅 90 天（总览卡片同；其余读小时汇总）。明细表给每条请求自身速度，不回落估算；无生成窗口 → `—`。速度列可点表头排序（`sort=tps_visible` / `sort=tps`）。
 
@@ -628,7 +628,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `APP_SECRET` | **必填** | 凭证加密密钥，≥16 字符；丢失 = 凭证全废。拒低熵值 |
-| `ADMIN_USERNAMES` | 空 | 仅引导期：逗号分隔，首次启动提权 `admin` |
+| `ADMIN_USERNAMES` | 空 | 仅引导期（库里还没有活跃 admin）：逗号分隔，首次启动提权 `admin` |
 | `USERS_FILE` | `secrets/users.txt` | 仅引导期：老式用户文件，启动导入一次 |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | 浏览器可达地址；TRAE 登录回调用；https 下发 HSTS。不决定会话 Cookie 的 `Secure`。配回环 / `0.0.0.0` → 回调基址取当前请求 origin（见「部署注意」） |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |

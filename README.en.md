@@ -96,7 +96,7 @@ python3 scripts/create_user.py --db data/x.sqlite3 ...
 echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-stdin
 ```
 
-`ADMIN_USERNAMES` and `secrets/users.txt` are bootstrap-only; afterwards roles come from the DB alone.
+`ADMIN_USERNAMES` and `secrets/users.txt` are bootstrap-only; afterwards roles come from the DB alone. "Bootstrap" means the DB has no active admin yet — once one exists, env no longer rewrites anyone's role, so a role change made in the console is not undone by the next restart.
 
 ## Audit log
 
@@ -493,7 +493,7 @@ Default range **last 24 hours** (also 7 / 30 days, all, custom). Custom takes tw
 
 Aggregate speed can only come from per-request detail → covers last 90 days (overview card too; other cards read hourly rollup). Detail table shows each request's own speed, no fallback; rows without generation window show `—`. Speed columns sort via `sort=tps_visible` / `sort=tps`.
 
-**Chart metrics**: requests / tokens / cost / cost per request / latency / TTFB / success rate / cache hit rate — switch to compare trends. Derived metrics (success rate, cache hit rate, cost per request) divide **after** aggregation (`sum ÷ sum`), not an average of per-hour ratios; no samples → `—` (line breaks), never 0. Latency / TTFB get an extra **percentile chart** (P50 median + P95 upper bound, read from per-request detail, 90-day window) — the mean flattens the long tail. The time axis is padded per hour (gaps keep their position instead of being squeezed out of time).
+**Chart metrics**: requests / tokens / cost / cost per request / latency / TTFB / success rate / cache hit rate — switch to compare trends. Derived metrics (success rate, cache hit rate, cost per request) divide **after** aggregation (`sum ÷ sum`), not an average of per-hour ratios; no samples → `—` (line breaks), never 0. Latency / TTFB get an extra **percentile chart** (P50 median + P95 upper bound, read from per-request detail, 90-day window) — the mean flattens the long tail. The time axis is padded per hour (gaps keep their position instead of being squeezed out of time). A `metric` outside the accepted set returns 400 (no silent fallback to "requests" — a typo would otherwise yield a plausible-looking chart). An invalid custom range (start ≥ end) pauses fetching instead of issuing an unbounded query.
 
 ### Credit record
 
@@ -603,7 +603,7 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 | Variable | Default | Notes |
 |---|---|---|
 | `APP_SECRET` | **required** | Credential encryption key, ≥16 chars; losing it voids every credential. Low-entropy values rejected |
-| `ADMIN_USERNAMES` | empty | Bootstrap only: promoted to `admin` on first start |
+| `ADMIN_USERNAMES` | empty | Bootstrap only (no active admin in the DB yet): promoted to `admin` on first start |
 | `USERS_FILE` | `secrets/users.txt` | Bootstrap only: legacy user file imported once |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | Browser-reachable address; TRAE login callback; HSTS when https. Does not decide the session cookie `Secure` flag |
 | `DATA_DIR` | `./data` | SQLite and runtime data |

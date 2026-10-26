@@ -8,7 +8,7 @@
 
 **目标**：单一 OpenAI 兼容出口挂九个上游；`模型@渠道` 精确指定；凭证 admin 集中维护、全员共享；调度器自动挑健康号，上游死亡自动冷却；按人统计用量与估算成本。
 
-**非目标**：不做配额/限流（上游订阅制，成本不随 token 线性增长，靠统计页可见性约束滥用）；不做通用 provider 网关（只硬编码这八个）；不做货币换算（上游积分互不通用，分开记）；不做数据迁移、自更新、mTLS。
+**非目标**：不做配额/限流（上游订阅制，成本不随 token 线性增长，靠统计页可见性约束滥用）；不做通用 provider 网关（只硬编码这九个）；不做货币换算（上游积分互不通用，分开记）；不做数据迁移、自更新、mTLS。
 
 ## 2. 上游可行性核实
 
@@ -115,7 +115,7 @@
 
 一个 FastAPI 进程内三平面，共享同一份 SQLite（WAL + `busy_timeout=5000`）与 Provider 客户端：
 
-- **请求面**（API Key 鉴权）：`/v1/chat/completions` · `/v1/responses` · `/v1/messages` · `/v1/models` · `/v1/user/balance` → 协议层 → 执行引擎（调度 · 冷却 · 会话粘性 · 截断续写 · 统计采集）→ 中立事件流 → 八个 Provider。
+- **请求面**（API Key 鉴权）：`/v1/chat/completions` · `/v1/responses` · `/v1/messages` · `/v1/models` · `/v1/user/balance` → 协议层 → 执行引擎（调度 · 冷却 · 会话粘性 · 截断续写 · 统计采集）→ 中立事件流 → 九个 Provider。
 - **管理面**（会话 Cookie + RBAC）：React 管理台 → `/api/*`。
 - **后台面**（无 HTTP 入口，`TaskRunner` 起 11 类循环）：额度探测 · token 预刷新 · 签到 · 成长中心 · 活跃上报 · 明细清理 · 备份 · 渠道模型列表刷新 · 模型目录刷新 · 运维告警 · 上游状态聚合。
 
@@ -131,8 +131,8 @@ Provider 承担上游私有部分：发请求、解析事件、分类错误、�
 
 过滤后按序出号：
 
-1. **免费优先**：候选池有 `credit_rate == 0` → 免费渠道整体排前。`credit_rate=None` **不算免费**，与 `0.0` 严格区分。**排在到期额度之前的原因**：省下的真金白银比「几百积分快过期先用」值钱。
-2. **手动 pin 优先**；会话粘性命中且可选 → 直接复用，不参与排序。
+1. **手动 pin 优先**：候选池里存在 `pinned` → **只在 pinned 之间排序**（绝对过滤，不是排序档）。这是管理员的显式指定，优先于任何自动策略——指定了付费号就先用它，哪怕池里另有免费渠道。**排绝对过滤而非排序档的原因**：pin 的语义是「这个号我就是要用」，把它降级成「同档内提权」等于让免费档随时能顶掉指定，指定就变成了「偶尔生效」，与界面上「已指定」的语义不符。会话粘性命中且可选 → 直接复用，不参与排序。
+2. **免费优先**：无 pin 时，候选池有 `credit_rate == 0` → 免费渠道整体排前。`credit_rate=None` **不算免费**，与 `0.0` 严格区分。**排在到期额度之前的原因**：省下的真金白银比「几百积分快过期先用」值钱。
 3. **在途最少优先**：并发摊到空闲号。**排在到期额度之前的原因**：到期/健康度是静态指标，按它们排出的次序确定，并发会全压同一个号（实测 2 小时内一个号吃 180+ 次、其余闲置）；在途把它拆开，顺序请求（在途恒 0）不受影响。免费档仍压过在途。
 4. **到期额度两级字典序**：先比主窗口（`QUOTA_EXPIRY_WINDOW_SECONDS`，默认 36h）内将过期的额度，打平再比次窗口（`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`，默认 7 天）。
 5. **健康度三态**：`known` > `unknown` > `exhausted`；打平比剩余积分多者优先，再按 `credential_id` 稳定。
@@ -172,7 +172,7 @@ Provider 承担上游私有部分：发请求、解析事件、分类错误、�
 - **吊销不建会话表**：`users.session_epoch` 在改密/改角色/启停/硬删时 `+1`。
 - **建号与重置走一次性激活令牌**：库里只存 SHA-256 摘要 + 过期时间。被重置用户改密前只放行「看会话/改密/登出」。
 - **删除语义**：禁用是主路径（可逆、保住用量归属），硬删只在 CLI，管理台不暴露 `DELETE`；登录成败、账号变动、凭证写操作全部入 `audit_events`，绝不记密码或令牌明文。
-- **引导与防锁死**：`ADMIN_USERNAMES` 只在引导期提权；三层防锁死 = Web 端守卫 + CLI 拒绝硬删最后一个活跃 admin + bootstrap 发现无活跃 admin 直接启动失败。
+- **引导与防锁死**：`ADMIN_USERNAMES` 只在引导期提权（库里已有活跃 admin 就不再改写任何人的角色——否则管理台的降级会被下一次重启撤销）；三层防锁死 = Web 端守卫 + CLI 拒绝硬删最后一个活跃 admin + bootstrap 发现无活跃 admin 直接启动失败。
 
 ## 4. 数据模型
 
@@ -210,7 +210,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 13 张表，`SCHEMA_
 - 告警：`GET /api/alerts` + `POST /api/alerts/{id}/resolve`。`AlertTask` 启动时从库里未恢复的行重建集合。
 - 上游状态：`GET /api/upstream-status`（operator）返回内存快照 + 任务运行态；**不落盘**。四种解析器归一化到六档，加源只在 `SOURCE_SPECS` 加一行。
 - 统计：`GET /api/stats/{overview,by-provider,by-model,by-user,by-credential,timeline,model-timeline,percentile-timeline}`（延迟分位 P50/P90/P95/P99 可切，默认 P95；输出速度 `tps_visible` / `tps` / `tps_estimated`）、`GET /api/stats/errors`（失败归因，`limit` ≤ 5000；`failures` 为尝试口径，`rescued` 为同用户同 `request_id` 另有成功行的次数，`failures − rescued` 是未被救回的失败尝试数）、`GET /api/stats/events`（游标/OFFSET 双模式，钻取过滤，`ok=0`，`?format=csv`）、`GET /api/stats/events/stream`（SSE，订阅者有界缓冲 200、并发上限 8）。
-  - `timeline` / `model-timeline` 的 `metric` 取值：`requests` / `tokens` / `cost` / `latency` / `ttfb` / `success_rate` / `cache_rate` / `cost_per_request`。派生指标（成功率、缓存命中率、单请求成本）在**聚合后相除**（`sum/sum`），不是逐小时比率的平均；无样本给 `null` 而非 0。
+  - `timeline` / `model-timeline` 的 `metric` 取值：`requests` / `tokens` / `cost` / `latency` / `ttfb` / `success_rate` / `cache_rate` / `cost_per_request`；**取值域外的拼写显式 400**（不静默回落到 `requests`——否则客户端拼错参数会拿到一份「看起来正常」的请求数图，错误被完全吞掉）。`percentile-timeline` 只认 `latency` / `ttfb`。派生指标（成功率、缓存命中率、单请求成本）在**聚合后相除**（`sum/sum`），不是逐小时比率的平均；无样本给 `null` 而非 0。
   - 时间轴是**稠密**的：按小时补齐缺失桶（跨度上限 `MAX_DENSE_HOURS` = 92 天，超出则只回观测小时）。缺失桶按指标语义补值——可加量（`requests` / `tokens`）补 0，均值 / 比率 / 成本补 `null`（前端断线，不画成 0）。
   - `timeline` 每个点带 `__total`（全渠道合计）：均值与比率必须按同一小时的 `sum/count` 重新相除，前端不得把各渠道值相加。
   - `percentile-timeline`（`metric=latency|ttfb`）返回按小时的 `{hour, p50, p95, samples}`，读明细表（仅 90 天），只统计成功请求；供延迟图「中位数线 + P95 带」使用。
@@ -221,18 +221,18 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 13 张表，`SCHEMA_
 
 ## 6. 安全边界
 
-- **上游端点白名单**：真实 Token 只发往显式配置地址。CB 启动时强制校验；国际版白名单刻意不含国内站；TRAE 的 `apiHost` 导入时校验；Zen / Kilo / Qoder / CodeArts 各有独立白名单。
+- **上游端点白名单**：真实 Token 只发往显式配置地址。CB 启动时强制校验；国际版白名单刻意不含国内站（**白名单里出现国内站主机也一律拒绝**——只校验「端点在白名单里」不够，把国内站加进国际站白名单后端点校验会通过、Token 照样跨站发）；TRAE 的 `apiHost` 导入时校验；Zen / Kilo / Qoder / CodeArts 各有独立白名单。
 - **凭证加密**：Fernet，密钥走 `APP_SECRET`（≥16 字符，拒绝低熵）；**丢失 = 凭证全部不可解**，不做轮换。解密失败返回可行动错误码。
 - TLS 校验默认开；Host / Origin 白名单；CSP `frame-ancestors 'none'`、`object-src 'none'`、`base-uri 'self'`、`form-action 'self'`。**请求体上限**：登录 8KB、其余 16MB（ASGI 层按实际字节计数）。登录三级限流 + PBKDF2 并发上限；失败键有数量上限 + 过期淘汰。
 - **API Key 仅存摘要**，明文只在创建时返回一次；可限渠道、IP（默认不信 `X-Forwarded-For`，仅 `TRUST_PROXY=true` 时取最后一个）、模型（fnmatch，无法判定时 fail closed）、到期。
 - **会话**：`SameSite=Lax` + 写操作 CSRF（含 logout）；`Secure` 按请求实际协议动态判定；无 Cookie 的写端点（登录 / `/authorize`）也做跨站防护（登录按 Origin/Referer 同源校验，`/authorize` 按 `loginTraceID` 绑定）；会话与 Key 校验用户存在、启用且 epoch 一致。
-- **错误响应不回流上游正文**：只带受控标识，上游错误体摘要只进日志；未匹配的 `/api`、`/v1` 返回 JSON 404。**客户端读体断开不是服务端错误** → 回 `499 client_disconnected`。**日志脱敏**：不打印 Token、完整请求体；审计写 INFO，绝不记明文。
+- **错误响应不回流上游正文**：只带受控标识，上游错误体摘要只进日志；未匹配的 `/api`、`/v1` 返回 JSON 404（**任何 HTTP 方法**都如此——只注册 GET 时未匹配的 POST 会落到 Starlette 的 405 `{"detail":…}`，与统一错误体形状不符，调用方按 `error.code` 解析会踩空）。**客户端读体断开不是服务端错误** → 回 `499 client_disconnected`。**日志脱敏**：不打印 Token、完整请求体；审计写 INFO，绝不记明文。
 - **请求 ID 是客户端可写输入**：按 `[A-Za-z0-9._:-]{1,128}` 校验后才采信，不合法改用自生成。
 - **服务端日志页只出不进**：`redact_or_drop` 在行离开进程前整行过滤（独立敏感词、键值形态、`sk-…`、`Bearer <值>`），空行也丢。代价：「token 已刷新」这类正常行被一起吞掉——宁可漏一条，不把凭证推进浏览器。
 - **请求级结构化日志**（`REQUEST_LOG_ENABLED`）：一行 logfmt，含 `request_id` / 路由模板 / 状态码 / 耗时；**不写 query string、请求体、请求头、用户名**；未匹配路由回落为清洗截断的原始路径。
 - **租户隔离**：凭证昵称取自全局共享池，仅 admin/operator 可见；CSV 导出同样仅 admin/operator；SSE 广播 payload 不含昵称，仅 admin/operator 连接由服务端补 `credential_name`。
 - **热更写入即校验**：float 拒 NaN/±inf；字符串有长度上限；webhook 只接受 `http(s)` 并做 SSRF 校验（写入期拒内网/回环/保留地址，**投递前再按 DNS 解析复核**），外发载荷对 `nickname` 打码。告警出站 `trust_env=False`。
-- **上游流解析有界**：SSE 单行与单帧缓冲设上限，非 2xx 错误体有界读取；OAuth state store 有 TTL。**入站解析把关**：拒绝越界数值字段与 JSON 里的 `NaN`/`Infinity`。
+- **上游流解析有界**：SSE 单行与单帧缓冲设上限，非 2xx 错误体有界读取；OAuth state store 有 TTL。**入站解析把关**：拒绝越界数值字段与 JSON 里的 `NaN`/`Infinity`——**含 JSON 溢出成 `inf` 的合法数字（`1e999`）**：字面量闸拦不住它，httpx 序列化时会抛 `ValueError` 变 500；按解析层拦（三个出口共用一个入口），逐字段补齐既写三遍又漏掉 chat 出口的未知透传键。
 - **OAuth 弹窗**只允许 `http(s)`，`opener` 置空。**库版本守卫**：`user_version` 高于本程序时拒绝执行。`--password-stdin` 支持；拒绝含 `:` / 换行的用户名。
 - **不做**：mTLS；管理台与端口的 IP 限制（交给反向代理）；全量请求审计。
 
