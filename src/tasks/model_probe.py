@@ -31,6 +31,7 @@ import asyncio
 import logging
 from typing import Any
 
+from ..db.crypto import CredentialDecryptError
 from ..provider.base import ErrKind, EventKind, UpstreamHTTPError, event_error_kind
 from . import TaskReport
 
@@ -134,7 +135,14 @@ class ModelProbeTask:
         for candidates in (self._credentials.candidates([provider], selectable_only=True),
                            self._credentials.candidates([provider])):
             for candidate in candidates:
-                data = self._credentials.credential_data(candidate.credential_id)
+                # 解不开（APP_SECRET 换过 / 密文损坏）→ 跳过这条凭证：
+                # 一条坏凭证不该让整个探活任务失败。
+                try:
+                    data = self._credentials.credential_data(candidate.credential_id)
+                except CredentialDecryptError:
+                    logger.error("探活跳过 %s：凭证解密失败（APP_SECRET 是否被更换过？）",
+                                 candidate.credential_id)
+                    continue
                 if data is not None:
                     return data
         return None

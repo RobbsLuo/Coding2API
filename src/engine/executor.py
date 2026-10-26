@@ -20,6 +20,7 @@ from ..compat.openai.response import (
     aggregate,
 )
 from ..config import live
+from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
 from ..provider.base import (
     QUEUE_DEFAULT_WAIT_SECONDS,
@@ -612,7 +613,7 @@ class Executor:
                 # 会让三次排队就把整个请求打成 503。
                 credential_id, credential_data = pinned
                 pinned = None
-                if self._deps.credentials.credential_data(credential_id) is None:
+                if self._safe_credential_data(credential_id) is None:
                     continue
                 provider_id = self._deps.credentials.provider_of(credential_id)
                 state.provider, state.credential_id = provider_id or "-", credential_id
@@ -1005,7 +1006,7 @@ class Executor:
             if pinned is not None:
                 credential_id, credential_data = pinned
                 pinned = None
-                if self._deps.credentials.credential_data(credential_id) is None:
+                if self._safe_credential_data(credential_id) is None:
                     continue
                 provider_id = self._deps.credentials.provider_of(credential_id)
                 last_provider, last_credential = provider_id or "-", credential_id
@@ -1256,10 +1257,33 @@ class Executor:
                     return None
                 waited = True
                 continue
-            credential_data = self._deps.credentials.credential_data(credential_id)
+            credential_data = self._safe_credential_data(credential_id)
             if credential_data is not None:
                 return credential_id, credential_data
-            tried.add(credential_id)  # 并发删除：标记后重选
+            tried.add(credential_id)  # 并发删除 / 解不开：标记后重选
+
+    def _safe_credential_data(self, credential_id: str) -> dict[str, Any] | None:
+        """取凭证明文；**解不开**时跳过该凭证而不是让整个请求失败。
+
+        解密失败（APP_SECRET 换过 / 密文损坏）早先直接冒泡 → 一条坏凭证
+        就让**整个聊天请求**回 500（实测 2026-10-26 14:48：
+        `/v1/chat/completions` 500，栈顶「凭证解密失败：APP_SECRET 是否被
+        更换过？」），其余好凭证白白连坐。
+
+        这里吞掉它并返回 None（= 「这条凭证用不了」，与并发删除同义）→
+        选号继续找下一个号。单条探测端点仍把该错误如实报给管理员
+        （见 `webapp.handlers` 的可行动 500），两处口径不冲突：一个是
+        「这个号不能用，换一个」，一个是「请处理这个号」。
+
+        走 `credential_data`（而不是仓储的 `credential_data_or_skip`）：
+        测试替身只实现前者，后者是仓储层的具体能力。
+        """
+        try:
+            return self._deps.credentials.credential_data(credential_id)
+        except CredentialDecryptError:
+            logger.error("凭证解密失败（凭证 %s）：APP_SECRET 是否被更换过？"
+                         "该凭证已跳过，其余凭证不受影响", credential_id)
+            return None
 
     async def _wait_short_cooldown(self, target: ModelTarget,
                                    tried: set[str]) -> bool:

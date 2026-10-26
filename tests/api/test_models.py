@@ -49,6 +49,45 @@ def test_default_registry_contains_both_providers(tmp_path):
     # CB 的 list_models 抛错 → 该上游被跳过（不拖垮整个列表），TRAE 正常返回
     assert by_id["glm-5.3"] == ["trae"]
 
+def test_models_endpoint_survives_undecryptable_credential(tmp_path):
+    """凭证解不开（APP_SECRET 换过 / 密文损坏）→ 该上游跳过，整页不 500。
+
+    实测 2026-10-26 14:48：解密失败直接冒泡 → 整页模型列表 500，一条坏
+    凭证连累所有渠道。解不开的凭证只影响**它自己那个上游**。
+    """
+    from src.db.crypto import CredentialCipher
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class TraeStub:
+        id = "trae"
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            return [Model(id="glm-5.3")]
+
+        def import_credential(self, raw):  # pragma: no cover
+            return raw
+
+    app = build_app(settings, providers={"trae": TraeStub()})
+    credential_id = app.state.credentials.add(provider="trae",
+                                              credential_data={"accessToken": "a"})
+    # 换密钥加密 → 当前 APP_SECRET 解不开
+    other = CredentialCipher("a-completely-different-secret")
+    db = app.state.credentials._db
+    db.connect().execute("UPDATE credentials SET data_enc = ? WHERE id = ?",
+                         (other.encrypt(b'{"accessToken": "a"}'), credential_id))
+    db.connect().commit()
+
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        response = client.get("/v1/models", headers={"Authorization": f"Bearer {key}"})
+    assert response.status_code == 200
+    # 该上游没有可用凭证 → 不展示它的模型，但**整页不报错**
+    assert response.json()["data"] == []
+
+
 def test_models_endpoint_skips_providers_without_credentials(tmp_path):
     """模型列表按渠道凭证加载——没凭证的渠道既不拉取也不展示。
 

@@ -191,6 +191,8 @@ Free models at [Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`), no login. St
 
 **Upstream node failures**: Qoder sometimes wraps own node failures in a 400 (`[FAIL]node:…`) → model-scoped transient fault, only that model cools; exhausted candidates → 503 (`no_healthy_credential`).
 
+**Keepalive frames and queueing**: the upstream sends keepalive frames with `body:"null"` (outer status 200) mid-stream → skipped, never interrupting output; "queued" arrives as a 403 whose queue marker hides inside a **serialized string** → classified as QUEUE, waits the upstream's named seconds and reopens on the same credential instead of hard-disabling it.
+
 ### CodeArts (`codearts`)
 
 [Huawei Cloud CodeArts](https://codearts.huaweicloud.com), real account: *Log in to CodeArts*, authorize, then paste the **unreachable local URL** back; server exchanges it for STS credentials (AK/SK + security_token + refresh_token + DPoP key) and stores them encrypted.
@@ -362,6 +364,7 @@ The credentials page offers multi-select plus batch bar (probe / check-in / paus
 
 - **Endpoint**: `POST /api/credentials/batch`, body `{action: "probe"|"toggle"|"checkin"|"revive", ids: [...], enabled?}`. Up to 200 ids, duplicates deduped.
 - **Per-item isolation**: one failure never blocks the rest. Response `{action, total, succeeded, failed, results: [{id, ok, error?, detail?}]}`.
+- **A failed check-in is a result, not a failure**: an upstream refusal (account disabled / session expired / rate limited) returns `ok=false` with a readable `message`, never 500 — otherwise the console only says "check-in failed" and hides the real reason.
 - **Pause is explicit state, not toggle-flip**: `enabled` comes from body → bar has separate *Pause* / *Unpause* buttons.
 - **Revive ≠ unpause**: revive clears system hard-disable (needs re-login first); unpause sets `toggle enabled=true`.
 - Only actions with existing single-item endpoints: `refresh` and `delete` are excluded.
@@ -602,7 +605,7 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 
 | Variable | Default | Notes |
 |---|---|---|
-| `APP_SECRET` | **required** | Credential encryption key, ≥16 chars; losing it voids every credential. Low-entropy values rejected |
+| `APP_SECRET` | **required** | Credential encryption key, ≥16 chars; losing it voids every credential. Low-entropy values rejected. **After rotating it, old credentials no longer decrypt**: a single probe returns an actionable error code, while chat and background tasks just skip that one bad credential and carry on |
 | `ADMIN_USERNAMES` | empty | Bootstrap only (no active admin in the DB yet): promoted to `admin` on first start |
 | `USERS_FILE` | `secrets/users.txt` | Bootstrap only: legacy user file imported once |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | Browser-reachable address; TRAE login callback; HSTS when https. Does not decide the session cookie `Secure` flag |

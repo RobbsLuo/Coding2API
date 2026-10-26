@@ -290,12 +290,28 @@ def _queue_wait_in(node: Any, depth: int) -> float | None:
 
     只下钻 3 层：上游信封常见 `{"data": {"error": {...}}}`，再深就不是
     协议结构而是业务正文了，继续递归只会在长正文上白烧 CPU。
+
+    **字符串也要下钻**：上游常把内层报文**再序列化成字符串**（Qoder 的
+    排队报文就是 `{"code":"403","message":"{\\"code\\":\\"10605\\",…}"}`，
+    排队标记在第二层字符串里）。只认 dict/list 会漏判排队 → 403 被当成
+    硬失败 → **好凭证被硬禁用**（实测 2026-10-26：kmodel_latest 排队时
+    回 403 + `isQueued`，凭证被误判死）。
+
+    标记节点**没有**秒数时不立即回落兜底值，而是继续往深处找带秒数的
+    那一层（Qoder 的 `retryAfterSeconds:30` 在最内层），实在没有才用兜底。
     """
     if depth > 3:
         return None
     if isinstance(node, dict):
         if _is_queue_flag(node):
-            return _queue_wait_value(node)
+            wait = _queue_wait_seconds(node)
+            if wait is not None:
+                return wait
+            for value in node.values():
+                found = _queue_wait_in(value, depth + 1)
+                if found is not None:
+                    return found
+            return QUEUE_DEFAULT_WAIT_SECONDS
         for value in node.values():
             found = _queue_wait_in(value, depth + 1)
             if found is not None:
@@ -305,7 +321,28 @@ def _queue_wait_in(node: Any, depth: int) -> float | None:
             found = _queue_wait_in(item, depth + 1)
             if found is not None:
                 return found
+    elif isinstance(node, str):
+        found = _queue_wait_in_text(node, depth)
+        if found is not None:
+            return found
     return None
+
+
+def _queue_wait_in_text(text: str, depth: int) -> float | None:
+    """字符串里的 JSON 载荷 → 继续找排队标记（上游把内层报文再序列化）。
+
+    **不额外消耗深度**：串里套串（上游把排队报文序列化两次）是同一个协议
+    层级，计深度会让最内层的 `retryAfterSeconds` 落在预算外（实测 Qoder
+    排队报文串了两层，秒数在最内层）。真正的层级由 dict/list 分支计。
+    """
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "{[":
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    return _queue_wait_in(parsed, depth)
 
 
 def _is_queue_flag(node: dict[str, Any]) -> bool:
@@ -319,14 +356,15 @@ def _is_queue_flag(node: dict[str, Any]) -> bool:
     return False
 
 
-def _queue_wait_value(node: dict[str, Any]) -> float:
+def _queue_wait_seconds(node: dict[str, Any]) -> float | None:
+    """节点自带的等待秒数；没有则 None（由调用方决定回落策略）。"""
     for key in QUEUE_WAIT_KEYS:
         value = node.get(key)
         if isinstance(value, bool):
             continue
         if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0:
             return float(value)
-    return QUEUE_DEFAULT_WAIT_SECONDS
+    return None
 
 
 _BUSINESS_CODE_RE = re.compile(r'"code"\s*:\s*(-?\d+)')

@@ -301,6 +301,93 @@ async def test_stream_chat_top_level_done_and_blank_frames():
     events = [e async for e in handler_for(handler).stream_chat(cred(), {}, "m")]
     assert events == []
 
+async def test_stream_chat_skips_keepalive_null_body():
+    """上游保活帧 `body:"null"`（外层 200）必须跳过，不能打断正常输出。
+
+    实测（2026-10-26 16:29-16:53）：上游在流中发
+    `{"headers":…,"body":"null","statusCodeValue":200,"statusCode":"OK"}`。
+    早先把它当「内层不是对象」→ 抛 `UpstreamProtocolViolation` → 整条流
+    判失败（连续 13 次「流式响应失败: Qoder inner chunk is not an object」），
+    而模型其实已在正常输出。这正是「静默出错」：客户端只看到回复被截断。
+    """
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=(
+            envelope(inner({"content": "part"}))
+            + envelope("null")
+            + envelope("null")
+            + envelope(inner({"content": "more"}))
+            + envelope("[DONE]")))
+
+    events = [e async for e in handler_for(handler).stream_chat(cred(), {}, "m")]
+    assert [e.kind for e in events] == [EventKind.CONTENT, EventKind.CONTENT]
+    assert "".join(e.content or "" for e in events) == "partmore"
+
+async def test_stream_chat_keeps_content_after_empty_object_body():
+    """空对象 / 空数组内层同样是保活：跳过但不终止流。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=(
+            envelope("{}")
+            + envelope("[]")
+            + envelope(inner({"content": "ok"}))
+            + envelope("[DONE]")))
+
+    events = [e async for e in handler_for(handler).stream_chat(cred(), {}, "m")]
+    assert [e.kind for e in events] == [EventKind.CONTENT]
+    assert events[0].content == "ok"
+
+def test_is_keepalive_body_shape_table():
+    """保活判据用结构而非字符串前缀：非空对象 / 坏 JSON 都不是保活。"""
+    assert qoder_events.is_keepalive_body("null") is True
+    assert qoder_events.is_keepalive_body("{}") is True
+    assert qoder_events.is_keepalive_body("[]") is True
+    assert qoder_events.is_keepalive_body("  null  ") is True
+    assert qoder_events.is_keepalive_body('{"choices":[]}') is False
+    assert qoder_events.is_keepalive_body('{"code":"403"}') is False
+    assert qoder_events.is_keepalive_body("nope") is False
+    assert qoder_events.is_keepalive_body('"text"') is False
+    assert qoder_events.is_keepalive_body("0") is False
+
+async def test_stream_chat_queue_envelope_from_real_upstream_frame():
+    """上游真实排队帧（2026-10-26 抓取）：排队标记在**两层序列化字符串**里。
+
+    早先 `parse_queue_hint` 只认 dict/list，漏判 → 403 被 `classify_error_code`
+    判成 DEAD → **好凭证被硬禁用**。这里守两件事：归 QUEUE、且拿到上游点名的
+    等待秒数（最内层的 `retryAfterSeconds:30`，不是兜底 5s）。
+    """
+    inner_payload = json.dumps({
+        "isQueued": True, "modelKey": "kmodel_latest", "queueCount": 454,
+        "queueType": "p3", "retryAfterSeconds": 30, "serviceAvailable": True,
+        "subCode": "RESOURCE_LIMIT", "waitTime": 205})
+    body = json.dumps({
+        "code": "403",
+        "message": json.dumps({
+            "code": "10605",
+            "message": inner_payload,
+            "subCode": "RESOURCE_LIMIT"})})
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=envelope(body, status=403))
+
+    events = [e async for e in handler_for(handler).stream_chat(cred(), {}, "m")]
+    assert len(events) == 1
+    assert events[0].kind is EventKind.ERROR
+    assert events[0].error_kind is ErrKind.QUEUE
+    assert events[0].error_code == 403
+    # 上游点名 30s：不是兜底值 5s（兜底只用于「上游没给秒数」）
+    assert events[0].retry_after_seconds == 30.0
+
+def test_classify_status_recognizes_serialized_queue_envelope():
+    """HTTP 层（`classify_status`）同样要认出串了两层的排队报文。"""
+    inner_payload = json.dumps({"isQueued": True, "retryAfterSeconds": 30,
+                                "subCode": "RESOURCE_LIMIT"})
+    body = json.dumps({"code": "403",
+                       "message": json.dumps({"code": "10605",
+                                              "message": inner_payload})})
+    # 排队优先于状态码：403 不是硬失败
+    assert qoder_events.classify_status(403, body.encode()) is ErrKind.QUEUE
+    # 排队报文绝不能落到 DEAD（会把可自愈的凭证打进冷宫）
+    assert qoder_events.classify_error_code(403, body) is not ErrKind.DEAD
+
 async def test_stream_chat_http_error_is_classified():
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(429, content=b"slow")

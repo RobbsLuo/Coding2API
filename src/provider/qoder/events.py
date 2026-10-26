@@ -201,10 +201,18 @@ def classify_error_code(code: int | None, body: bytes | str = b"") -> ErrKind:
     * 400 且报文命中 `NODE_FAILURE_MARKERS` → MODEL：上游节点执行失败（如
       qfmodel 的 `[FAIL]node:… Execution failed`），属**模型级瞬时**故障，
       只冷却该模型、换模型立即可用，不能当成「模型不存在」直接 400
+    * 401/403 且报文带排队标记 → QUEUE：上游把「排队中」包成 403，而
+      403 按状态码看是「会话失效 → 硬禁用凭证」。排队恰恰说明号是好的、
+      只是忙——判成 DEAD 会把可自愈的凭证打进冷宫（实测 2026-10-26：
+      kmodel_latest 排队时回 403 + `isQueued`，凭证被误判死）。排队判据
+      放在这里（而不是只在调用点）才能保证**任何**入口都不会漏判。
     """
     if code == 402:
         return ErrKind.CREDIT
     if code in (401, 403):
+        text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
+        if parse_queue_hint(text) is not None:
+            return ErrKind.QUEUE
         return ErrKind.DEAD
     if code == 429:
         return ErrKind.MODEL
@@ -297,6 +305,33 @@ def _load_body(body: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise UpstreamProtocolViolation("Qoder inner chunk is not an object")
     return payload
+
+
+def is_keepalive_body(body: str) -> bool:
+    """内层 body 是否是上游的空载荷（保活帧），而非内容帧。
+
+    实测（2026-10-26）：上游在流中会发
+    `{"headers":…,"body":"null","statusCodeValue":200,"statusCode":"OK"}`
+    这样的**保活帧**——外层状态 200、内层是 JSON `null`。它不含任何内容，
+    只是让连接保持活跃。
+
+    早先把它当成「内层不是对象」→ 抛 `UpstreamProtocolViolation` → 整条流
+    被判失败（2026-10-26 16:29-16:53 连续 13 次「流式响应失败: Qoder
+    inner chunk is not an object」）。模型其实已经在正常输出，只是被保活帧
+    打断——这正是「静默出错」的典型形态。
+
+    判据用**结构**而不是字符串前缀：`json.loads` 成功且结果是 `None` /
+    空字典 / 空列表，都属于空载荷；非空对象不是。
+    """
+    try:
+        payload = json.loads(body)
+    except json.JSONDecodeError:
+        return False
+    if payload is None:
+        return True
+    if isinstance(payload, (dict, list)):
+        return not payload
+    return False
 
 
 def clean_delta(delta: dict[str, Any]) -> dict[str, Any]:

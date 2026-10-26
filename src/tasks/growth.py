@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 
 from ..config import live
+from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository, GrowthRepository
 from . import TaskReport
 from .pacer import Pacer
@@ -53,7 +54,15 @@ class GrowthTask:
             if candidate.disabled:
                 report.skipped += 1
                 continue
-            data = self._credentials.credential_data(candidate.credential_id)
+            # 解不开（APP_SECRET 换过 / 密文损坏）→ 跳过这条凭证：一条坏凭证
+            # 不该让整轮成长中心失败（早先直接冒泡 → 整轮任务挂掉）。
+            try:
+                data = self._credentials.credential_data(candidate.credential_id)
+            except CredentialDecryptError:
+                logger.error("成长中心跳过 %s：凭证解密失败（APP_SECRET 是否被更换过？）",
+                             candidate.credential_id)
+                report.skipped += 1
+                continue
             if data is None:
                 report.skipped += 1
                 continue

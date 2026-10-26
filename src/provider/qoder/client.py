@@ -357,6 +357,11 @@ class QoderClient(LazyClients):
                           error_message=envelope.body[:2000], error_kind=kind)]
         if envelope.body == "[DONE]":
             return []
+        # 保活帧：上游发 `body:"null"`（外层 200、内层 JSON null）保活，
+        # 不含内容。丢掉即可，绝不能当协议违规——那会把正常输出打断成
+        # 「流式响应失败」（2026-10-26 实测连续 13 次）。
+        if qoder_events.is_keepalive_body(envelope.body):
+            return []
         return qoder_events.parse_inner_chunk(envelope.body)
 
     # ------------------------------------------------------------ 模型发现

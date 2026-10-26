@@ -67,7 +67,7 @@ from .config import (
     validate_zen_endpoint_allowed,
 )
 from .db.conn import Database
-from .db.crypto import CredentialCipher
+from .db.crypto import CredentialCipher, CredentialDecryptError
 from .db.key_usage import KeyUsageRepository
 from .db.limits import LimitsRepository, day_usage
 from .db.migrate import apply_schema
@@ -744,7 +744,12 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         """
         provider_id = credentials.provider_of(credential_id)
         provider = registry.get(provider_id or "")
-        data = credentials.credential_data(credential_id)
+        # 解不开（APP_SECRET 换过 / 密文损坏）→ 跳过这条凭证，不让后台任务
+        # 因一条坏凭证整轮失败
+        try:
+            data = credentials.credential_data(credential_id)
+        except CredentialDecryptError:
+            return
         if provider is None or data is None:
             return
 

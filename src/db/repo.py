@@ -623,6 +623,14 @@ class CredentialRepository:
         return {"disabled": int(row["disabled"]), "exhausted": int(row["exhausted"])}
 
     def credential_data(self, credential_id: str) -> dict[str, Any] | None:
+        """取凭证明文；不存在返回 None。
+
+        解密失败**照旧抛** `CredentialDecryptError`：它表示 APP_SECRET 换过
+        或密文损坏，是需要人处理的状态（见 `webapp.handlers` 的可行动 500
+        映射）。「一条坏凭证不该连累整个请求」由**调用方**处理：引擎选号
+        与模型列表会捕获它并跳过该凭证（见 `executor._safe_credential_data`
+        / `api.models`），而单条探测端点把它如实报给管理员。
+        """
         row = self._db.connect().execute(
             "SELECT data_enc FROM credentials WHERE id = ?", (credential_id,)).fetchone()
         if row is None:

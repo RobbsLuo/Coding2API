@@ -9,6 +9,7 @@ from __future__ import annotations
 from fastapi.testclient import TestClient
 from starlette.requests import ClientDisconnect
 
+from src.db.crypto import CredentialDecryptError
 from src.main import build_app
 from tests.helpers.auth import isolated_settings
 
@@ -37,3 +38,29 @@ def test_client_disconnect_during_body_returns_499(tmp_path, monkeypatch):
     assert response.json()["error"]["code"] == "client_disconnected"
     assert response.json()["error"]["status"] == 499
     assert response.headers["x-request-id"] == "req-disconnect"
+
+
+def test_credential_decrypt_error_returns_actionable_500(tmp_path, monkeypatch):
+    """凭证解密失败 → 500 + 可行动提示（不是裸 traceback）。
+
+    解密失败本身已在仓储层被收成「跳过该凭证」（见
+    `CredentialRepository.credential_data`），故这条路径只剩**其它**解密
+    调用点（如直接用 cipher 的代码）冒泡到处理器时的兜底映射——处理器必须
+    仍在，否则异常会冒泡成默认 500 + 全量 ASGI Traceback。
+    """
+    settings = isolated_settings(tmp_path)
+    app = build_app(settings)
+    key = app.state.api_keys.create("root")["api_key"]
+
+    async def _boom(_request):
+        raise CredentialDecryptError("credential decryption failed")
+
+    monkeypatch.setattr("src.api.endpoints.read_json_body", _boom)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}", "X-Request-ID": "req-decrypt"},
+            json={"messages": [{"role": "user", "content": "hi"}]})
+    assert response.status_code == 500
+    assert response.json()["error"]["code"] == "credential_decrypt_failed"
+    assert response.headers["x-request-id"] == "req-decrypt"

@@ -140,6 +140,41 @@ def test_parse_queue_hint_ignores_bool_wait():
         QUEUE_DEFAULT_WAIT_SECONDS)
 
 
+def test_parse_queue_hint_descends_into_serialized_string():
+    """上游常把内层报文**再序列化成字符串**：排队标记在字符串里也必须命中。
+
+    实测（2026-10-26）：Qoder 的排队报文串了两层
+    （`{"code":"403","message":"{\"code\":\"10605\",\"message\":\"{…isQueued…}\"}"}`）。
+    早先只认 dict/list → 漏判排队 → 403 被当硬失败 → 好凭证被硬禁用。
+    """
+    inner = json.dumps({"isQueued": True, "retryAfterSeconds": 30,
+                        "subCode": "RESOURCE_LIMIT"})
+    body = json.dumps({"code": "403",
+                       "message": json.dumps({"code": "10605", "message": inner})})
+    assert parse_queue_hint(body) == 30.0
+
+
+def test_parse_queue_hint_serialized_string_wait_is_not_budgeted_out():
+    """串里套串**不额外消耗深度预算**：秒数在最内层也必须取到。
+
+    深度只按 dict/list 的协议层级计——串里套串是同一层级的再序列化。
+    """
+    inner = json.dumps({"isQueued": True, "retryAfterSeconds": 12})
+    body = json.dumps({"message": json.dumps({"message": inner})})
+    assert parse_queue_hint(body) == 12.0
+
+
+def test_parse_queue_hint_flag_without_seconds_still_defaults():
+    """标记节点自身没有秒数：先往深处找，实在没有才用兜底值。"""
+    body = json.dumps({"isQueued": True, "detail": json.dumps({"x": 1})})
+    assert parse_queue_hint(body) == QUEUE_DEFAULT_WAIT_SECONDS
+
+
+def test_parse_queue_hint_ignores_non_json_string_value():
+    """普通文本（不是 JSON）不该被当成载荷解析。"""
+    assert parse_queue_hint(json.dumps({"message": "plain text"})) is None
+
+
 @pytest.mark.parametrize("body", [
     b"",
     b"   ",

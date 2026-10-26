@@ -177,6 +177,35 @@ async def test_stream_records_failure_when_credentials_exhausted(repo):
     assert event["ok"] is False and event["error_type"] == "no_healthy_credential"
     assert event["username"] == "bob"
 
+async def test_stream_skips_undecryptable_credential_and_uses_another(repo):
+    """一条凭证解不开 → 跳过它换下一个号，**不让整个请求 500**。
+
+    实测 2026-10-26 14:48：解密失败（APP_SECRET 换过 / 密文损坏）早先直接
+    冒泡 → 整条聊天请求回 500，栈顶「凭证解密失败：APP_SECRET 是否被更换
+    过？」，其余好凭证白白连坐。
+    """
+    from src.compat.openai.request import parse_chat_request
+    from src.db.crypto import CredentialCipher
+
+    credentials, db = repo
+    broken = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    good = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t2"})
+    # 换密钥加密 → 当前 APP_SECRET 解不开
+    other = CredentialCipher("a-completely-different-secret")
+    with db.transaction() as conn:
+        conn.execute("UPDATE credentials SET data_enc = ? WHERE id = ?",
+                     (other.encrypt(b'{"bearer_token": "t"}'), broken))
+
+    collector = RecordingCollector()
+    executor = _exec_with_stats(repo, [GOOD_EVENTS], collector)
+    chunks = [chunk async for chunk in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
+    assert chunks
+    event = collector.events[-1]
+    assert event["ok"] is True
+    # 实际用的是那个好凭证（解不开的被跳过）
+    assert event["credential_id"] == good
+
 def _model_cool_one(credentials, model):
     """给唯一凭证写一条未过期的模型级冷却（耗尽轮换的前置条件）。"""
     from src.engine.scheduler import ErrorOutcome, ModelCooldown

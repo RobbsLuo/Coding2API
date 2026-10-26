@@ -19,6 +19,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from ..config import live
+from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository, GrowthRepository
 from ..provider.base import GrowthResult, GrowthStep, StepStatus
 from . import TaskReport
@@ -82,8 +83,16 @@ class ActivityTask:
                 report.skipped += 1
                 continue
             provider = self._providers.get(candidate.provider)
-            data = self._credentials.credential_data(candidate.credential_id)
             activity_scope = getattr(provider, "activity_scope", None)
+            # 解不开（APP_SECRET 换过 / 密文损坏）→ 跳过这条凭证：一条坏凭证
+            # 不该让整轮活跃上报失败（早先直接冒泡 → 整轮任务挂掉）。
+            try:
+                data = self._credentials.credential_data(candidate.credential_id)
+            except CredentialDecryptError:
+                logger.error("活跃上报跳过 %s：凭证解密失败（APP_SECRET 是否被更换过？）",
+                             candidate.credential_id)
+                report.skipped += 1
+                continue
             if provider is None or data is None or activity_scope is None:
                 report.skipped += 1
                 continue

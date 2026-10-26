@@ -12,6 +12,7 @@ import logging
 import time
 from collections.abc import Callable
 
+from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
 from ..provider.base import UpstreamReloginRequired
 from . import TaskReport
@@ -45,7 +46,15 @@ class RefreshTask:
                 report.skipped += 1
                 continue
             provider = self._providers.get(candidate.provider)
-            data = self._credentials.credential_data(candidate.credential_id)
+            # 解不开（APP_SECRET 换过 / 密文损坏）→ 跳过这条凭证：一条坏凭证
+            # 不该让整轮预刷新失败（早先直接冒泡 → 整轮任务挂掉）。
+            try:
+                data = self._credentials.credential_data(candidate.credential_id)
+            except CredentialDecryptError:
+                logger.error("预刷新跳过 %s：凭证解密失败（APP_SECRET 是否被更换过？）",
+                             candidate.credential_id)
+                report.skipped += 1
+                continue
             if provider is None or data is None:
                 report.skipped += 1
                 continue
@@ -62,7 +71,13 @@ class RefreshTask:
             async with self._credentials.edit_lock(candidate.credential_id):
                 # 持锁后重读：等锁期间可能已被别的写者改过（如刚切了账号），
                 # 用旧 data 刷新会把那次改动覆盖掉。
-                data = self._credentials.credential_data(candidate.credential_id)
+                try:
+                    data = self._credentials.credential_data(candidate.credential_id)
+                except CredentialDecryptError:
+                    logger.error("预刷新跳过 %s：凭证解密失败（APP_SECRET 是否被更换过？）",
+                                 candidate.credential_id)
+                    report.skipped += 1
+                    continue
                 if data is None:
                     report.skipped += 1
                     continue

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from src.auth.session import create_session_token
 from src.config import Settings
 from src.main import build_app
-from src.provider.base import Quota
+from src.provider.base import Quota, UpstreamHTTPError
 from src.provider.codebuddy.checkin import CheckinResult
 from src.provider.codebuddy.refresh import Account
 from tests.helpers.constants import SECRET
@@ -77,6 +77,38 @@ def test_credential_probe_and_checkin_endpoints(admin_client):
                               "already_checked_in": False, "status": None}
     assert client.post("/api/credentials/ghost/probe").status_code == 400
     assert client.post("/api/credentials/ghost/checkin").status_code == 400
+
+def test_credential_checkin_upstream_error_is_failed_result_not_500(admin_client):
+    """上游拒绝（账号被禁用 / 登录过期）→ `ok=False` 的正常结果，不是 500。
+
+    实测 2026-10-26 14:47：管理台点「签到」回 500 + 一整屏 ASGI traceback，
+    前端只弹「签到失败」，看不出真实原因（账号已被禁用）。上游对这条凭证的
+    答复是**正常结果**，前端本来就按 `ok` / `message` 渲染。
+    """
+    app, client = admin_client
+
+    class FailingCheckin:
+        id = "codebuddy"
+        endpoint = "https://e"
+
+        async def probe_quota(self, _data):
+            return Quota(remaining=7, total=10, probed_at=1)
+
+        async def checkin(self, _data):
+            raise UpstreamHTTPError(
+                403, '{"code":40302,"message":"账号已被禁用"}'.encode())
+
+    app.state.services.registry["codebuddy"] = FailingCheckin()
+    credential_id = app.state.credentials.add(
+        provider="codebuddy", credential_data={"bearer_token": "t"})
+    response = client.post(f"/api/credentials/{credential_id}/checkin")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is False
+    assert body["already_checked_in"] is False
+    # 403 → 「凭证失效，需要重新登录」；且不得回显上游原文
+    assert body["message"] == "签到失败：credential_rejected"
+    assert "账号已被禁用" not in body["message"]
 
 def test_credential_account_endpoints_unsupported_for_trae(admin_client):
     app, client = admin_client
@@ -425,6 +457,27 @@ def test_schedule_probe_returns_early_when_credential_unreadable(admin_client):
     before = len(app.state.pending_probes)
     app.state.credentials.credential_data = lambda _cid: None  # type: ignore[method-assign]
 
+    created = client.post("/api/credentials", json={
+        "provider": "codebuddy", "credential": {"token": "x"}})
+    assert created.status_code == 200
+    time.sleep(0.05)
+    assert len(app.state.pending_probes) == before
+
+
+def test_schedule_probe_returns_early_when_credential_undecryptable(admin_client):
+    """凭证解不开（APP_SECRET 换过 / 密文损坏）→ 不建探测任务，也不抛。
+
+    实测 2026-10-26 14:48：解密失败直接冒泡 → 导入凭证后的即时探测整个挂掉。
+    """
+    from src.db.crypto import CredentialDecryptError
+
+    app, client = admin_client
+    before = len(app.state.pending_probes)
+
+    def _boom(_cid):
+        raise CredentialDecryptError("credential decryption failed")
+
+    app.state.credentials.credential_data = _boom  # type: ignore[method-assign]
     created = client.post("/api/credentials", json={
         "provider": "codebuddy", "credential": {"token": "x"}})
     assert created.status_code == 200

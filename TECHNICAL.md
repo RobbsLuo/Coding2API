@@ -115,6 +115,8 @@ MODEL_SCOPED_KINDS = frozenset({MODEL, BLOCKED, CONCURRENCY})
 
 识别 `provider.base.parse_queue_hint`（信封可嵌套，最多下钻 3 层）：`isQueued: true` / `subCode ∈ {RESOURCE_LIMIT, RESOURCE_LIMIT_EXCEEDED}` 任一成立即认定。**宁可漏判不可误判**：识别不出走原分类，绝不把普通失败当排队无限等。Qoder `_decode_frame` 须**先于** `classify_error_code` 拦下——上游把排队包成 403，按状态码分类判 DEAD 硬禁用凭证。`Event.retry_after_seconds` 承载上游点名秒数。
 
+**排队标记可能藏在**序列化字符串**里**：上游常把内层报文再 `json.dumps` 一次（Qoder 排队报文串两层：`{"code":"403","message":"{\"code\":\"10605\",\"message\":\"{…isQueued…}\"}"}`）。只认 dict/list 会漏判 → 403 落 DEAD → **可自愈的凭证被硬禁用**。故 `parse_queue_hint` 下钻字符串；串里套串**不额外消耗深度预算**（深度只按 dict/list 的协议层级计，秒数常在最内层）。判据同时放进 `classify_error_code`（而非只在调用点），保证任何入口都不漏判。
+
 | 上游信号 | CB | TRAE | Kilo | ErrKind |
 |---|---|---|---|---|
 | 权益耗尽 | `code=1005` | `code:1005` | — | PLAN |
@@ -349,6 +351,7 @@ class Provider(Protocol):
 - 签名 `md5(payload_b64 + "\n" + cosy_key + "\n" + date + "\n" + body + "\n" + path)`（`path` 去 `/algo`，query 不参与）。`payload` = 键排序紧凑 JSON `{cosyVersion,ideVersion,info,requestId,version}`；`cosy_key` = 临时 AES 密钥经服务端 RSA 公钥加密；`info` = AES-128-CBC 加密的身份 JSON。复用 `cryptography`。
 - `cosy-machineid`/`cosy-machinetoken` 按 `uid` 稳定派生（随机机器码触发风控）。
 - **信封式 SSE**：`data:{"headers":…,"body":"<内层 OpenAI chunk>","statusCodeValue":200}`。逐帧解 `body`；`body=="[DONE]"` 结束；`statusCodeValue != 200` 判上游错误（HTTP 仍可能 200）。`clean_delta` 剔除空噪声 delta。
+- **保活帧 `body:"null"` 必须跳过**：上游在流中发 `{"headers":…,"body":"null","statusCodeValue":200,"statusCode":"OK"}` 保活（实测 2026-10-26）。它不含内容，早先当「内层不是对象」→ 抛 `UpstreamProtocolViolation` → 整条流判失败（16:29-16:53 连续 13 次「流式响应失败: Qoder inner chunk is not an object」），而模型其实已在正常输出——客户端只看到回复被截断。判据用**结构**（`json.loads` 后是 `None` / 空 dict / 空 list）而非字符串前缀，见 `events.is_keepalive_body`。
 - **模型发现** `GET {gateway}/algo/api/v2/model/list?Encode=1`，**须带整套 COSY 头**（签名 body = `qoder_encode("")`）；裸 GET 403，方法固定 GET（POST/PUT 400）。`id` 用 `key`（如 `qmodel_38max`）、`name` 用 `display_name`。`price_factor` = credit 消耗倍率（相对值，免费给 `0.0`）。
 - **签到（活动制）**：`GET /sash/api/v1/me/campaigns`（**须带 `Cosy-ClientType: 10`**，否则静默空列表）→ 筛 `actionType=="CLAIM_BENEFIT"` 且 `claimStatus=="CLAIMABLE"` → `POST .../{campaignId}/claim`（同样带头）。`replayed:true` 与 `BLOCKED`+`SAME_PERSON_ALREADY_CLAIMED` 归一为已签；其它 `BLOCKED` 才是失败。新协议无连续天数（`streak_days` 恒 None）。仅活动制接口 404/405/410 时回退旧 `daily-check-in`；两者都不可用记 skipped（`ok=False` 但不算失败）。**国际版该端点 404**。
 - **签到窗口 ≠ 自然日**：上游每日 **10:00（UTC+8）** 轮换 `campaignId`，窗口 `10:00 → 次日 09:59`。按自然日封账会在凌晨封掉整天 → `CheckinResult.seal_until` 回填 `checkin_window_end(payload)`（签到类活动里**最晚**的 `endAt`，不采信 `VIEW_DETAILS`）。`CheckinTask._done_scopes` = `dict[done_key → 截止时刻]`，判据 `_sealed()`（`until > now`）。
@@ -543,6 +546,7 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 
 - 连接：`threading.local()` 每线程一个 `sqlite3.Connection(row_factory=sqlite3.Row)`。写入统一走 `Database.transaction()`，无应用层写锁，并发由 SQLite 串行化。
 - 加密：`Fernet(base64.urlsafe_b64encode(sha256(APP_SECRET).digest()))`；APP_SECRET 丢失 = 凭证全部不可解。启动按熵拒弱密钥（长度 ≥16、不同字符数 ≥8，拒重复字符 / 短周期重复串）。
+- **解密失败按「这条凭证用不了」处理，不得连累整批**：早先 `credential_data` 抛 `CredentialDecryptError` 直达顶层 → 一条坏凭证就让整个聊天请求 500、整轮后台任务（额度探测 / 预刷新 / 签到 / 成长中心 / 活跃上报 / 模型探活）挂掉、整页模型列表 500（实测 2026-10-26 14:48）。现按路径分两种口径：**批处理路径**（选号、模型列表、后台任务、即时探测）捕获后**跳过该凭证**（记 skipped + 一条 ERROR 日志），其余照常；**单条探测端点**照旧如实报可行动的 500（`credential_decrypt_failed`，管理员该去处理这个号）。
 - `runtime_settings(key, value, updated_at)`：纯 key/value，只存管理台改过的 key，未出现回落 env；值由 `HOT_SETTINGS` 白名单校验，非法行读取时忽略并记日志。
 - 模型列表与目录不占表：进程内 TTL 缓存 + `DATA_DIR/model_catalog.json` / `openrouter_catalog.json`（§9.4）；签到去重由 `CheckinTask` 当日作用域集合实现。
 

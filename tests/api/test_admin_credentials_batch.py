@@ -318,7 +318,13 @@ def test_batch_upstream_exception_is_contained(batch_app):
     assert "abc123" not in str(body)
 
 def test_batch_non_upstream_exception_is_contained(batch_app):
-    """非探测路径的意外异常（如 checkin 抛错）也逐条兜住，不整批 500。"""
+    """非探测路径的意外异常（如 checkin 抛错）也逐条兜住，不整批 500。
+
+    签到失败现在由 `checkin_credential_once` 收成 `ok=False` 的**正常结果**
+    （见 `src/api/admin_credentials.py`）：上游拒绝是这条凭证的真实答复，
+    不是端点故障。故这里拿到的 detail 是失败结果而非 `action_failed`——
+    两种形态都不整批 500、都不回显上游原文。
+    """
     app, client = batch_app
     credential_id = _add(app)
 
@@ -334,8 +340,35 @@ def test_batch_non_upstream_exception_is_contained(batch_app):
                            json={"action": "checkin", "ids": [credential_id]})
     assert response.status_code == 200
     body = response.json()
-    assert body["results"][0] == {"id": credential_id, "ok": False, "error": "action_failed"}
+    row = body["results"][0]
+    assert row["id"] == credential_id and row["ok"] is False
+    # 失败原因可读，且不回显上游原文（可能带凭证片段）
+    assert row["detail"]["message"] == "签到失败：unknown_error"
     assert "abc123" not in response.text
+
+def test_batch_unexpected_exception_is_contained_per_item(batch_app):
+    """非签到/非探测路径的意外异常逐条兜住：整批仍 200，不回显异常原文。"""
+    app, client = batch_app
+    credential_id = _add(app)
+
+    def boom(_credential_id: str) -> bool:
+        raise RuntimeError("db exploded, secret abc123")
+
+    original = app.state.credentials.set_enabled
+    app.state.credentials.set_enabled = boom
+    try:
+        response = client.post("/api/credentials/batch",
+                               json={"action": "toggle", "ids": [credential_id],
+                                     "enabled": False})
+    finally:
+        app.state.credentials.set_enabled = original
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["results"][0] == {"id": credential_id, "ok": False,
+                                  "error": "action_failed"}
+    assert "abc123" not in response.text
+
 
 def test_batch_rejects_viewer(tmp_path):
     """viewer（非 operator）不能批量写：403。"""

@@ -8,6 +8,7 @@ import time
 from collections.abc import Callable
 
 from ..config import live
+from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
 from . import TaskReport
 from .pacer import Pacer
@@ -165,7 +166,15 @@ class CheckinTask:
                 continue
             provider = self._providers.get(candidate.provider)
             checkin_scope = getattr(provider, "checkin_scope", None)
-            data = self._credentials.credential_data(candidate.credential_id)
+            # 解不开（APP_SECRET 换过 / 密文损坏）→ 跳过这条凭证：一条坏凭证
+            # 不该让整轮签到失败（早先直接冒泡 → 整轮任务挂掉）。
+            try:
+                data = self._credentials.credential_data(candidate.credential_id)
+            except CredentialDecryptError:
+                logger.error("签到跳过 %s：凭证解密失败（APP_SECRET 是否被更换过？）",
+                             candidate.credential_id)
+                report.skipped += 1
+                continue
             if provider is None or data is None or checkin_scope is None:
                 report.skipped += 1
                 continue

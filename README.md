@@ -193,6 +193,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **上游节点故障**：Qoder 有时把自身节点故障包成 400（`[FAIL]node:…`）→ 判模型级瞬时故障，只冷却该模型。候选耗尽 → 503（`no_healthy_credential`）。
 
+**保活帧与排队**：上游在流中发 `body:"null"` 的保活帧（外层 200）→ 跳过、不打断输出；「排队中」包成 403 且排队标记藏在**序列化字符串**里 → 归 QUEUE 等上游点名的秒数后在原号重开，不硬禁用凭证。
+
 ### CodeArts（`codearts`）
 
 [华为云 CodeArts](https://codearts.huaweicloud.com)，需真实账号：点「登录 CodeArts」→ 授权后浏览器跳到打不开的本地地址 → **整条链接**粘回页面换 STS 凭证（AK/SK + security_token + refresh_token + DPoP 私钥），加密入库。
@@ -364,6 +366,7 @@ claude
 
 - **端点**：`POST /api/credentials/batch`，body `{action: "probe"|"toggle"|"checkin"|"revive", ids: [...], enabled?}`。一次 ≤200 条，重复 id 去重。
 - **逐条隔离**：单条失败不影响其余。响应 `{action, total, succeeded, failed, results: [{id, ok, error?, detail?}]}`。
+- **签到失败是结果不是故障**：上游拒绝（账号被禁用 / 登录过期 / 限流）回 `ok=false` + 可读 `message`，不 500——否则管理台只弹「签到失败」，看不出真实原因。
 - **暂停是显式状态而非取反**：`toggle` 的 `enabled` 由请求体给出 → 操作条拆「暂停」/「取消暂停」两按钮。
 - **「恢复」≠「取消暂停」**：前者 `revive`（解系统硬禁用，需先重新登录）；后者 `toggle enabled=true`。
 - 只收已有单条端点的动作：`refresh` / `delete` 不走此通道。
@@ -604,7 +607,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `APP_SECRET` | **必填** | 凭证加密密钥，≥16 字符；丢失 = 凭证全废。拒低熵值 |
+| `APP_SECRET` | **必填** | 凭证加密密钥，≥16 字符；丢失 = 凭证全废。拒低熵值。**换密钥后旧凭证解不开**：单条探测会回可行动的错误码，而对话 / 后台任务只跳过那条坏凭证，其余照常 |
 | `ADMIN_USERNAMES` | 空 | 仅引导期（库里还没有活跃 admin）：逗号分隔，首次启动提权 `admin` |
 | `USERS_FILE` | `secrets/users.txt` | 仅引导期：老式用户文件，启动导入一次 |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | 浏览器可达地址；TRAE 登录回调用；https 下发 HSTS。不决定会话 Cookie 的 `Secure`。配回环 / `0.0.0.0` → 回调基址取当前请求 origin（见「部署注意」） |

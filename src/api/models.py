@@ -40,6 +40,7 @@ from fastapi.responses import JSONResponse
 
 from ..benchmarks import BenchmarkTable
 from ..compat.openai.errors import error_payload
+from ..db.crypto import CredentialDecryptError
 from ..engine.reasoning import parse_effort_map
 from ..model_alias import parse_model_aliases
 from ..pricing import PriceTable
@@ -229,10 +230,22 @@ async def _refresh_provider(services: Services, provider_id: str, provider: Any)
     # 用该上游的一个可用凭证拉取（凭证有归属，模型列表是账号级的）
     # selectable_only：硬禁用/用户关闭的凭证取不到数据，只会白失败
     candidates = services.credentials.candidates([provider_id], selectable_only=True)
-    credential_data = (
-        services.credentials.credential_data(candidates[0].credential_id)
-        if candidates else {}
-    )
+    try:
+        credential_data = (
+            services.credentials.credential_data(candidates[0].credential_id)
+            if candidates else {}
+        )
+    except CredentialDecryptError:
+        # 解不开（APP_SECRET 换过 / 密文损坏）→ 本上游暂时拉不了清单，但
+        # **不该让整页模型列表 500**（实测 2026-10-26 14:48：一条坏凭证
+        # 连累所有渠道）。按「本次拉取失败」处理：保留旧缓存、记负缓存
+        # （避免每次请求都重试同一个坏凭证），其余上游照常。
+        logger.error("模型列表获取失败 %s: 凭证解密失败（APP_SECRET 是否被更换过？）",
+                     provider_id)
+        services.model_list_failures[provider_id] = (
+            services.model_list_failures.get(provider_id, 0) + 1)
+        services.model_list_fetched_at[provider_id] = time.monotonic()
+        return
     try:
         models = await provider.list_models(credential_data)
     except Exception as error:  # noqa: BLE001 - 单上游失败不影响其他

@@ -179,8 +179,25 @@ async def probe_credential_once(credentials, provider, data, credential_id: str)
 
 async def checkin_credential_once(credentials, provider, data, credential_id: str,
                                   schedule_probe) -> dict:
-    """签到一条凭证，返回对外响应体（单条与批量共用）。"""
-    result = await provider.checkin(data)
+    """签到一条凭证，返回对外响应体（单条与批量共用）。
+
+    **上游失败是正常结果，不是异常**：账号被禁用 / 登录过期 / 限流都是上游
+    对这条凭证的真实答复，直接抛出去会变成 ASGI 500 + 一整屏 traceback
+    （实测 2026-10-26 14:47 管理台点「签到」回 500，前端只弹「签到失败」，
+    看不出是账号被禁用）。这里把异常收成 `ok=False` + 可读 message：
+    前端本来就按 `ok` / `message` 渲染（见 `CredentialsPage` 的 checkin 分支），
+    批量端点也不必再单独兜一次。
+    """
+    try:
+        result = await provider.checkin(data)
+    except Exception as error:  # noqa: BLE001 - 上游失败 → 失败结果，非 500
+        reason = describe_probe_failure(error)
+        logger.info("签到失败 %s: %s", credential_id, reason)
+        # detail 只进服务端日志：上游原文可能回显凭证片段
+        logger.info("签到失败详情 %s: %s", credential_id, str(error)[:200])
+        return {"ok": False, "credit": None, "code": None,
+                "message": f"签到失败：{reason}", "already_checked_in": False,
+                "status": None}
     if result.ok and not result.already_checked_in:
         schedule_probe(credential_id)      # 只有真签到了才会发积分
     # already_checked_in 必须透传：前端靠它区分「刚签到」与「今天已签过」
