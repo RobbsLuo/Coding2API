@@ -1,6 +1,6 @@
 # Coding2API
 
-八个上游——**CodeBuddy**（国内 + 国际）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce**——封装成 OpenAI 兼容 API：公共凭证池、统一模型名与调度、按人用量统计。
+九个上游——**CodeBuddy**（国内 + 国际）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce**、**LobsterAI**——封装成 OpenAI 兼容 API：公共凭证池、统一模型名与调度、按人用量统计。
 
 > [!WARNING]
 > 逆向接口，仅供学习研究，未做安全审计；公网部署需反向代理 + 鉴权 + IP 白名单。
@@ -118,6 +118,7 @@ echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-
    - **TRAE**：粘凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（`apiHost` 只收官方地址）。
    - **Qoder / CodeArts**：设备码 / OAuth2 授权码登录（CodeArts 授权后把打不开的本地回调链接粘回页面）。
    - **OfficeAce**：点「登录 OfficeAce」走华为云授权（回调由云端承接）。
+   - **LobsterAI**：点「登录 LobsterAI」走有道账号授权（授权后把打不开的本地回调链接粘回页面）。
    - **OpenCode Zen / Kilo**：无需添加，启动自动出虚拟凭证（删了可在同面板补回）。
 2. 「API Key」建 `sk-...`（明文仅显示一次）。
 3. 调用：
@@ -169,7 +170,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ## 渠道
 
-> CodeBuddy（含国际）/ TRAE / Qoder / CodeArts / OfficeAce 需凭证；**Zen 与 Kilo 无凭证免费层**——池里一条虚拟占位行（调度 / 冷却 / 统计照常），额度列「免费层（无额度接口）」，健康度恒「无探测」。删虚拟行重启复活；永久停用 →「暂停」。
+> CodeBuddy（含国际）/ TRAE / Qoder / CodeArts / OfficeAce / LobsterAI 需凭证；**Zen 与 Kilo 无凭证免费层**——池里一条虚拟占位行（调度 / 冷却 / 统计照常），额度列「免费层（无额度接口）」，健康度恒「无探测」。删虚拟行重启复活；永久停用 →「暂停」。
 
 ### OpenCode Zen（`zen`）
 
@@ -238,6 +239,24 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **换账号**：登录按钮旁「换账号」（`force_login=true`），先清浏览器华为云会话再授权。
 
+### LobsterAI（`lobsterai`）
+
+[网易有道龙虾](https://lobsterai.youdao.com)（有道桌面级 Agent），需真实账号。点「登录 LobsterAI」打开有道授权页；门户只接受**回环地址**回调，授权后浏览器会跳到一个打不开的 `127.0.0.1` 地址——把地址栏整条链接粘回页面即可（与 CodeArts 同一条 paste 轨道）。
+
+**身份三元组是凭证的一部分**：`uuid` / `firstKeyfrom` / `latestKeyfrom` 由客户端生成、随凭证持久化，续期时**原样回放**（上游据此认定「同一台客户端」）。少一个 → 永远续不了期，故导入时当场拒绝，别等到续期失败才发现。手工导入的凭证必须从桌面客户端完整复制这三个字段。
+
+上游三处协议私有行为：
+
+- **只接受流式**：`stream:false` 上游回 500。请求体恒置 `stream=true`，非流式由本服务聚合。
+- **业务错误藏在 HTTP 200 的流首**：额度不足（40201）、未知模型（40300）等以错误帧表达 → 解析成错误事件交引擎换号 / 冷却，不当空回复放过。
+- **能力头必须带两个**：`kimi-k3-agentic-v1`（模型目录的准入条件）与 `thinking-level-control-v1`（关闭思考的前提，不带则服务端 500）。思考档位按远端 `thinkingConfig` 翻译（产品档位 `max` ↔ wire 值 `xhigh`），**翻译不出就删掉该字段**——发上游不认的档位会直接 500。
+
+**积分逐笔到期**：上游没有「总量」这个概念（积分来自每日签到、活动、订阅、加油包，各有各的到期日），故额度列只有「剩余」，`total` 恒空。签到发的积分**当天有效**。每日签到走三段式（`slot` → `context` → `check_in`），带幂等键 + 复核已签到状态。签到按 `clientVersion` 门禁——写死旧版本号会拿不到活动，版本号从官方更新接口动态取。
+
+**额度耗尽等签到恢复**：额度不足归「等次日签到恢复」的冷却语义，与本项目既有口径天然对齐。`LOBSTERAI_ALLOWED_ENDPOINTS` 须含三个主机（API 域 / 门户域 / 版本域）；`LOBSTERAI_CHAT_MIN_INTERVAL` 默认 0。
+
+**上游无官方开放 API**：本渠道走客户端私有协议，上游改协议即需同步跟进。
+
 ### CodeBuddy 国际（`codebuddy_intl`）
 
 [www.codebuddy.ai](https://www.codebuddy.ai)，同国内站协议，但两套独立账号体系（各自注册、各自计费）→ 独立渠道。登录链路同国内版（设备码）。
@@ -298,7 +317,7 @@ claude
 - **`count_tokens`**：本地估算，不转发上游。
 - **图片**：`image` 块归一为 chat `image_url`；`tool_result.content` 内图片同样保留。
 - **不支持**：`document` 块、`source.type=file`、Anthropic 服务端工具 → 400。
-- **`cache_control` 透传**（默认开）：落点同 Anthropic——`system`、消息内容块、`tool_result` 顶层、`tool_calls` 顶层、`tools` 顶层。只校验结构，不解释取值。八渠道实测 6 接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo）；zen 未验证、OfficeAce 未单测。脚本 `scripts/probe_cache_control.py`。
+- **`cache_control` 透传**（默认开）：落点同 Anthropic——`system`、消息内容块、`tool_result` 顶层、`tool_calls` 顶层、`tools` 顶层。只校验结构，不解释取值。已有八渠道实测 6 接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo）；zen 未验证、OfficeAce 与 LobsterAI 未单测。脚本 `scripts/probe_cache_control.py`。
 
 ### CC Switch 一键导入
 
@@ -403,7 +422,7 @@ claude
 
 ## 模型列表加载
 
-`GET /v1/models` 与 Playground 下拉只合并**当前有可用凭证**的渠道（至少一条未暂停、未失效）；冷却中的仍算。顺序：CodeBuddy、TRAE、Qoder、CodeArts、OfficeAce 在前；组内按名字典序；多渠道模型归最高优先级渠道。
+`GET /v1/models` 与 Playground 下拉只合并**当前有可用凭证**的渠道（至少一条未暂停、未失效）；冷却中的仍算。顺序：CodeBuddy、TRAE、Qoder、CodeArts、OfficeAce、LobsterAI 在前；组内按名字典序；多渠道模型归最高优先级渠道。
 
 **请求路由只认这份缓存**：目录能证明归属 → 候选只有那些渠道；全不可用 → 503，不逐渠道试。模型完全不在目录 → 仍按全部候选路由；直连指定与 Key 渠道绑定不受影响。
 
@@ -670,6 +689,11 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `OFFICEACE_API_ENDPOINT` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | OfficeAce 控制面 |
 | `OFFICEACE_ALLOWED_ENDPOINTS` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | 只需控制面（模型网关由上游下发） |
 | `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | OfficeAce 聊天最小间隔 |
+| `LOBSTERAI_API_ENDPOINT` | `https://lobsterai-server.youdao.com` | LobsterAI API 域（对话/积分/签到/令牌） |
+| `LOBSTERAI_PORTAL_ENDPOINT` | `https://lobsterai.youdao.com` | LobsterAI 门户域（登录页） |
+| `LOBSTERAI_VERSION_ENDPOINT` | `https://api-overmind.youdao.com/openapi/get/luna/hardware/lobsterai/prod/update` | LobsterAI 客户端版本号（签到门禁） |
+| `LOBSTERAI_ALLOWED_ENDPOINTS` | 三个主机全含（见 compose） | LobsterAI 白名单 |
+| `LOBSTERAI_CHAT_MIN_INTERVAL` | `0` | LobsterAI 聊天最小间隔 |
 | `PROVIDER_PROXIES` | `""` | 按渠道出站代理；启动期项 |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB 聊天节流（按凭证分桶） |
 | `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB 国际节流，独立 |

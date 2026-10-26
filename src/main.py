@@ -62,6 +62,7 @@ from .config import (
     validate_codebuddy_intl_endpoint_allowed,
     validate_endpoint_allowed,
     validate_kilo_endpoint_allowed,
+    validate_lobsterai_endpoint_allowed,
     validate_officeace_endpoint_allowed,
     validate_qoder_endpoint_allowed,
     validate_zen_endpoint_allowed,
@@ -96,6 +97,8 @@ from .provider.codebuddy.client import CodeBuddyClient, CodeBuddyProvider
 from .provider.codebuddy.intl import CodeBuddyIntlProvider
 from .provider.codebuddy.oauth import CodeBuddyOAuth
 from .provider.kilo.client import KiloClient, KiloProvider
+from .provider.lobsterai import LobsteraiProvider
+from .provider.lobsterai.client import LobsteraiClient
 from .provider.officeace import OfficeAceProvider
 from .provider.officeace.client import OfficeAceClient
 from .provider.officeace.oauth import OfficeAceOAuth
@@ -250,6 +253,18 @@ def _officeace_endpoint(config: Settings) -> str:
                              env_name="OFFICEACE_API_ENDPOINT",
                              allowed_name="OFFICEACE_ALLOWED_ENDPOINTS",
                              strip_slash=True)
+
+
+def _lobsterai_endpoint(config: Settings, attr: str, env_name: str) -> str:
+    """解析一个 LobsterAI 端点并强制白名单校验。
+
+    三个端点（API 域 / 门户域 / 版本域）各自独立配置，但共用一张白名单：
+    真实 Token 只发往 API 域，登录 URL 指向门户域，版本号查询打到版本域。
+    """
+    return _resolve_endpoint(config, attr=attr,
+                             validator=validate_lobsterai_endpoint_allowed,
+                             env_name=env_name,
+                             allowed_name="LOBSTERAI_ALLOWED_ENDPOINTS")
 
 
 def _seed_free_credential(credentials: CredentialRepository, *, provider: str,
@@ -411,6 +426,11 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     officeace_pacer = Pacer(lambda: runtime.officeace_chat_min_interval,
                             lambda: runtime.officeace_chat_min_interval,
                             allow_concurrent=True)
+    # LobsterAI 独立 pacer：真实账号渠道，上游按账号限流（额度耗尽 40201 /
+    # 429 都会落到本账号），默认不节流；与其余渠道互不排队。
+    lobsterai_pacer = Pacer(lambda: runtime.lobsterai_chat_min_interval,
+                            lambda: runtime.lobsterai_chat_min_interval,
+                            allow_concurrent=True)
     # 按渠道出站代理：启动期解析一次，装配时注入到各 provider 的
     # httpx client；运行中改值需重启（连接池已建立，见 provider/proxy.py）。
     proxies = parse_provider_proxies(config.provider_proxies, KNOWN_PROVIDERS)
@@ -453,6 +473,17 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             client=OfficeAceClient(cloud_base=_officeace_endpoint(config),
                                    proxy=proxies.get("officeace")),
             pacer=officeace_pacer),
+        "lobsterai": LobsteraiProvider(
+            client=LobsteraiClient(
+                api_base=_lobsterai_endpoint(
+                    config, "lobsterai_api_endpoint", "LOBSTERAI_API_ENDPOINT"),
+                portal_base=_lobsterai_endpoint(
+                    config, "lobsterai_portal_endpoint", "LOBSTERAI_PORTAL_ENDPOINT"),
+                version_api=_lobsterai_endpoint(
+                    config, "lobsterai_version_endpoint",
+                    "LOBSTERAI_VERSION_ENDPOINT"),
+                proxy=proxies.get("lobsterai")),
+            pacer=lobsterai_pacer),
     }
     # 默认装配路径（生产）才种子无凭证渠道的虚拟凭证：测试注入自定义 registry
     # 时不应凭空多出一条无对应 provider 的凭证行。

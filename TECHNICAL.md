@@ -36,6 +36,7 @@ PROPOSAL.md 定方向，本文定实现。只写**当前代码现状**。
 | `src/provider/qoder/` | `cosy.py` `client.py` `events.py` `credential.py` `auth.py` | COSY（自定义 Base64、AES/RSA、签名与会话头缓存）／上游 + 信封解包 + 额度·签到／信封 → chunk → Event／凭证解析／设备码 PKCE |
 | `src/provider/codearts/` | `signer.py` `dpop.py` `client.py` `events.py` `credential.py` `auth.py` `oauth.py` | SDK-HMAC-SHA256（纯函数）／ES256 DPoP（低 S）／上游 + 私有 SSE 还原 + 积分额度／SSE → 增量 Event（双形状）／凭证解析／OAuth2 PKCE／回调粘贴换 token |
 | `src/provider/officeace/` | `signer.py` `client.py` `events.py` `credential.py` `oauth.py` | 双签名（V11 + SDK-HMAC，纯函数）／上游 + 积分·签到·费率／错误分类 + `max_tokens` 改写／两套凭据 + 一次性 refresh／云端授权轮询（PKCE + DPoP + 开通校验） |
+| `src/provider/lobsterai/` | `client.py` `events.py` `credential.py` `oauth.py` | 上游（只流式）+ 积分·签到·目录／错误分类 + 信封解析／凭证 + 身份三元组／回环回调粘贴换 token |
 | `src/engine/` | `scheduler.py` `executor.py` `limits.py` `inflight.py` `affinity.py` `continuation.py` `compress.py` `model_resolver.py` `sse.py` | 选号 + 冷却状态机 + pin／执行 + 目录收窄 + 轮换 + fallback + 统计埋点／限额判定 + 快照缓存／在途租约／会话粘性／截断续写／上下文压缩／模型名解析／SSE 帧解析 |
 | `src/compat/` | `openai/{request,response,errors}.py` `responses/{request,response}.py` `anthropic/{request,response}.py` | Chat 校验·聚合·error shape／Responses 出口／Anthropic Messages 出口 |
 | `src/tasks/` | `pacer.py` `quota_probe.py` `checkin.py` `growth.py` `activity.py` `refresh.py` `retention.py` `backup.py` `alerting.py` `upstream_status.py` `model_probe.py` `status.py` `runner.py` | 全局节流器／额度探测／签到（`CHECKIN_TIMES` 空则每 10 分钟）／成长（仅 CB）／活跃上报／预刷新／小时汇总 + 90 天清理／备份／告警（四规则 + webhook）／上游状态聚合／模型探活／`TASK_SPECS` + 运行态／调度接入 lifespan |
@@ -225,7 +226,7 @@ def health_score(q: Quota | None) -> int | None:
 - `system`（字符串或 text 块）→ 首条 `system`；空则丢。
 - `messages[].content` 字符串直传；块数组：`text` → 文本；`tool_result` → `tool` 消息（`tool_use_id` → `tool_call_id`，内含图片同样归一）；`image` → `image_url`（`base64` 拼 `data:{media_type};base64,{data}`，`url` 直传）；`document` / `source.type=file` → 显式 400。user 连续块按类型**拆多条**；assistant 块**合并一条**（`thinking` → `reasoning_content`、`tool_use` → `tool_calls`、`redacted_thinking` 丢弃）。**纯文本仍折成字符串**——无图请求映射结果与加图片支持前逐字节一致。
 - `tools[].input_schema` → `function.parameters`；`tool_choice` `auto`/`none` 直传、`any` → `required`、`tool` → 嵌套；`stop_sequences` → `stop`；`max_tokens`/`temperature`/`top_p` 直传；`top_k` 丢弃。
-- **`cache_control` 原样透传**（默认开、无开关）：`system` 块、user/assistant 块、`tool_result`（挂 tool 消息顶层）、assistant `tool_calls` 元素、`tools` 元素。只校验结构（对象 + 非空 `type`，`ttl` 若给须字符串），取值不解释。无标记 → 映射逐字节不变。实测 6/8 渠道接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo）；zen 因 `FreeTierError` 不能验证、OfficeAce 未跑探针（`scripts/probe_cache_control.py`）。
+- **`cache_control` 原样透传**（默认开、无开关）：`system` 块、user/assistant 块、`tool_result`（挂 tool 消息顶层）、assistant `tool_calls` 元素、`tools` 元素。只校验结构（对象 + 非空 `type`，`ttl` 若给须字符串），取值不解释。无标记 → 映射逐字节不变。实测 6/8 渠道接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo）；zen 因 `FreeTierError` 不能验证、OfficeAce 与 LobsterAI 未跑探针（`scripts/probe_cache_control.py`）。
 
 **出口翻译**（`response.py`，实现 `StreamSink`）：`message_start` → `content_block_start`/`delta`/`stop`（`text_delta` / `thinking_delta` / `input_json_delta`）→ `message_delta`（`stop_reason` + usage）→ `message_stop`。无 `[DONE]`。thinking 块在 `content_block_stop` 前补占位 `signature_delta`（本网关不产真签名）。错误走 `event: error`。
 
@@ -308,7 +309,7 @@ class Provider(Protocol):
 - 凭证以 dict 传递（解密后的 `data_enc`）；`credential_from` 等能力还原为私有 dataclass，provider 不接触 sqlite。
 - `stream_chat` 只产 `Event`，产出前先查 HTTP 状态码；`classify` 由 executor 调用。
 - 可选能力**不实现即不定义**（不抛 `NotImplementedError`）：调用方 `getattr` 探测，缺失 → 400「该凭证不支持此操作」。当前可选集：`start_auth`/`poll_auth`、`complete_callback`（仅 TRAE）、`list_accounts`/`switch_account`（仅 CB）、`credential_from`/`checkin_scope`、`checkin`/`checkin_status`、`growth`（仅 CB）、`host`。
-- CodeBuddy / TRAE / Zen / Kilo / Qoder / OfficeAce 共用 `engine/sse.py` 帧解析；CodeArts 累计全文形状自实现 `iter_data_lines`，只复用 `MAX_SSE_LINE_BYTES` / `SSEFrameTooLarge`。
+- CodeBuddy / TRAE / Zen / Kilo / Qoder / OfficeAce / LobsterAI 共用 `engine/sse.py` 帧解析；CodeArts 累计全文形状自实现 `iter_data_lines`，只复用 `MAX_SSE_LINE_BYTES` / `SSEFrameTooLarge`。
 - Zen 与 Kilo 最薄：只实现 `import_credential`/`classify`/`probe_quota`/`list_models`/`stream_chat`/`aclose`；签到 / 成长 / 刷新靠方法缺失自然跳过。
 
 ## 5. 各渠道协议实现
@@ -422,6 +423,26 @@ class Provider(Protocol):
 **登录走 poll 轨道**：回调由**云端**承接（`/v1/claw/auth/callback`），无需本地端口或粘链接。`POST /v1/claw/auth/state` 要 state（本地造的回 `AgentArts.11000004`）→ PKCE challenge + DPoP 公钥拼 authorize URL，套 `{auth_host}/authui/login.html?service=<encode(...)>`；轮询 `GET /v1/claw/auth/code?state=`（202 = 未完成）；拿 code 后 `POST /v1/oauth2/tokens`（authorization_code + DPoP）换临时 AK/SK；再调 `client-permission-validate` 校验真开通（未开通 `subscription: null` 时明确报错）；存 `model_app_key`/`model_app_secret` 与网关地址。`AuthStateStore` 按 **username** 分键 reservation（TTL + pending 上限）：单槽全局态会让两管理员并发登录互相覆盖；并发轮询同一 state 只有一路 `consume` 成功。`force_login` 走 `/authui/logout?service=…`，默认 False。
 
 **配置**：`OFFICEACE_API_ENDPOINT` / `OFFICEACE_ALLOWED_ENDPOINTS` 只管控制面；`OFFICEACE_CHAT_MIN_INTERVAL`（热更，默认 0）独立 pacer。登录流量与聊天用**独立连接池**，共用出站代理。**单账号单用户**（官方《套餐管理》限制）。
+
+### 5.7 LobsterAI（`lobsterai`）
+
+**身份三元组随凭证持久化**：`uuid` / `firstKeyfrom` / `latestKeyfrom` 由**客户端生成**（`lobsterai/oauth.new_session`），exchange 与 refresh 时**原样回放**——上游把三者当同一台客户端的指纹，改了会被当成换了一台设备。故 `import_credential` 强制校验这三项（缺一个当场拒绝），而不是等续期失败才暴露。上游**可能不轮转** `refresh_token`：响应里没有就沿用旧值，丢掉等于让凭证失去续期能力。
+
+**只支持流式**：`prepare_body` 无条件置 `stream=true`（上游 `stream:false` 回 500），非流式由 `compat/openai/response.aggregate` 聚合。与 CodeArts 那种「上游非流式、本地合成 SSE」是**反方向**的。
+
+**错误藏在 200 的流首**：额度不足（`40201`）、未知模型（`40300`）以 `{"error":{...}}` / `event:error` 帧表达。`events._error_event` 把它变成 `EventKind.ERROR` 交引擎分类（换号 / 冷却），不当空回复放过。**分类顺序即优先级**：额度关键词**先于** 4xx（实测上游用 400 + 中文「积分不足」表达余额耗尽，只按状态码会判成可重试的 client 错误 → 反复重试同一个废号）；会话死亡（`40100`/`40101`）**先于** 429（会话已死时换号重试毫无意义）。
+
+**能力头与档位翻译**：请求头必带 `X-LobsterAI-Client-Capabilities: kimi-k3-agentic-v1,thinking-level-control-v1`（前者是模型目录准入条件，缺则目录里没有 `kimi-k3`；后者是关闭思考的前提，缺则服务端 500）。思考档位按远端 `thinkingConfig` 翻译（产品档位 `max` ↔ wire 值 `xhigh`，两者不是同一套命名），**翻译不出就删掉该字段**——发上游不认的档位会直接 500。
+
+**积分逐笔到期**：`profile-summary` 的 `totalCreditsRemaining` 是唯一真实余额（`/api/user/quota` 只含 300 的免费池）。**上游没有「总量」这个概念**（积分来自签到 / 活动 / 订阅 / 加油包，各有各的到期日）→ `Quota.total` 恒 `None`，健康度按「剩余为 0 = 已耗尽」处理。`creditItems` 按各自 `expiresAt` 进 `expiry_ladder`（选号「快过期的先用」）与 `packages`（悬浮明细）。额度不足归 `CREDIT`（等次日签到恢复），与既有冷却语义天然对齐。
+
+**签到三段式**：`client-activities/slot`（`placement=desktop_sidebar` + `clientVersion` + `containerApiVersion=2` + `platform=win32`）→ `{code}/context` → `{code}/actions/check_in`（带 `idempotencyKey`，**复核** `claimedToday` 翻转才算成功）。**签到按 `clientVersion` 门禁**：写死旧版本号会拿不到 `slotState=empty` → 版本号从官方更新接口动态取（只缓存成功结果）。签到的积分**当天有效** → `seal_until` = 下个本地 0 点。
+
+**登录走 paste 轨道**：门户只接受**回环地址** `redirect_uri`（`http://127.0.0.1:{port}/auth/callback`），本服务可能部署在远端 / 容器里 → 授权后浏览器跳到打不开的地址，用户把地址栏整条链接粘回来。无 PKCE、无 DPoP：上游只认 `authCode` + 身份三元组。`state` 编码三样东西（`uuid:first_keyfrom:upstream_state`，`:` 分隔），前两段是续期所需的身份、第三方是上游 state（校验回调属于那一次登录）。
+
+**模型目录有公开兜底**：`/api/models/pricing-catalog` **无需鉴权**（与鉴权目录同构，多 `imageModels` / `videoModels`）→ 凭证失效时模型清单仍在，管理台不会因此看不到这条渠道。`costMultiplier` 是**相对倍率**（实测 0.05 = 官方价的 5%），不是「免费」：置 0 会被调度器当成免费档优先选它，故原样透出。
+
+**配置**：`LOBSTERAI_API_ENDPOINT` / `LOBSTERAI_PORTAL_ENDPOINT` / `LOBSTERAI_VERSION_ENDPOINT` 三个端点各自独立配置，**共用一张白名单** `LOBSTERAI_ALLOWED_ENDPOINTS`（三个主机全含）；`LOBSTERAI_CHAT_MIN_INTERVAL`（热更，默认 0）独立 pacer。**上游无官方开放 API**：本渠道走客户端私有协议，上游改协议即需同步跟进。
 
 ## 6. 调度器
 ### 6.1 选号规格
@@ -561,7 +582,7 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 
 ## 9. 模型目录与模型名
 ### 9.1 三字段与归一键
-八渠道每模型统一三字段，规则在 `src/provider/naming.py`（纯函数，不 import provider 子模块）：
+九渠道每模型统一三字段，规则在 `src/provider/naming.py`（纯函数，不 import provider 子模块）：
 
 | 字段 | 函数 | 例 |
 |---|---|---|
@@ -571,12 +592,12 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 
 - `normalize_model_key` 剥上游噪声再 slug 化（空格/下划线/冒号/括号 → 连字符、小写）。**免费标记**四形态：尾缀 `-free`/`_free`、路径段 `.../free`、冒号尾缀 `:free`、括号词 `(free)`；同类还有 `new`。**命名空间前缀**非身份：路径式取末段；冒号式（冒号后须有空白）削前缀。只删整段/整词标记（`freeplay`/`newson` 不动）。点号非分隔（`glm-5.2` → `glm-5-2` 就换了模型）；非 ASCII 字母数字保留。剥完只剩噪声 → 回退原串小写。
 - `display_model_name` 清洗可读名（`Qwen3.8-Max` → `Qwen3.8 Max`）或由 id 派生；品牌按表纠正（机械 title-case 写错 `DeepSeek`/`MiMo`/`GLM`/`GPT`）。**幂等**。
-- **合并键 = 归一键，八渠道统一**：同一模型各渠道代号互不相同（Qoder `kmodel_latest` = TRAE `kimi-k3-1` = CB `kimi-k3`）→ 纯 id 规则无法对齐，只能靠展示名。zen / kilo 也参与（Zen `nemotron-3-ultra-free` vs Kilo `nvidia/nemotron-3-ultra-550b-a55b:free`，展示名都清洗成「Nemotron 3 Ultra」）。
+- **合并键 = 归一键，九渠道统一**：同一模型各渠道代号互不相同（Qoder `kmodel_latest` = TRAE `kimi-k3-1` = CB `kimi-k3`）→ 纯 id 规则无法对齐，只能靠展示名。zen / kilo 也参与（Zen `nemotron-3-ultra-free` vs Kilo `nvidia/nemotron-3-ultra-550b-a55b:free`，展示名都清洗成「Nemotron 3 Ultra」）。
 - **同模型异名显式规范**（`MODEL_SYNONYMS`）：如 Qoder `dfmodel` 上游名 `DeepSeek-Flash` vs 别家 `DeepSeek-V4.1-Flash`；表把「异名归一键 → (规范归一键, 规范展示名)」。另一类是空格式厂商前缀（`Xiaomi MiMo-V2.6-Pro` → `mimo-v2.6-pro`）。**只登记人工核实的，不做模糊匹配**。
 - **哨兵名不跨渠道合并**（`_SENTINEL_LABELS` = `auto` / `default`）：语义只在本渠道成立 → 退回原 id 归一键、各自单列。**同渠道内归一键重复 → 退回原 id 归一键**，且不登记歧义别名。
 - **对外 id 一律归一键**：多渠道取最短展示名的归一键；单渠道取该条；兜底/哨兵取原代号归一键。原代号不露面，转发经 `services.model_aliases` 映射回（`executor.upstream_model_name` 消费）；每渠道登记三键（对外 id、原代号、展示名及 slug 形式）。
 - **撞车消歧**（`_disambiguate`）：按 `_sort_key` 序保留先到者，后者依次取 `_fallback_ids`（原代号归一键 → 加渠道后缀 → 数字后缀）。兜底/哨兵条目用 `_scoped_key`（`渠道\0归一原代号`）隔离，对外 id 仍是原代号归一键。
-- **展示顺序**：`_PROVIDER_RANK`（codebuddy 0 → codebuddy_intl 1 → trae 2 → qoder 3 → codearts 4 → officeace 5 → 其余 6），多渠道取 `min`，同级按归一键字典序。只影响展示；调度选号顺序（`KNOWN_PROVIDERS`）不变。
+- **展示顺序**：`_PROVIDER_RANK`（codebuddy 0 → codebuddy_intl 1 → trae 2 → qoder 3 → codearts 4 → officeace 5 → lobsterai 6 → 其余 7），多渠道取 `min`，同级按归一键字典序。只影响展示；调度选号顺序（`KNOWN_PROVIDERS`）不变。
 
 ### 9.2 按凭证加载与 SWR
 `list_models` 先用 `credential_providers()` 求「当前有可用凭证」的渠道（`candidates(selectable_only=True)`：未暂停、未硬禁用；冷却中仍算）；`provider_id not in connected` 直接 `continue`——**没凭证不读缓存、不拉上游、不展示**。zen / kilo 有虚拟凭证。

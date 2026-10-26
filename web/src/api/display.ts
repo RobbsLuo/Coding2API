@@ -73,6 +73,11 @@ export function quotaSemantics(credential: Credential): string {
   if (credential.provider === "officeace") {
     return "积分余额（逐笔到期，新用户与每日签到各自计时）";
   }
+  // LobsterAI 的积分同样逐笔到期：每日签到发一笔（当天有效）、订阅与加油包
+  // 各有各的到期日。上游没有「周期重置」这回事，故也不说本周期。
+  if (credential.provider === "lobsterai") {
+    return "积分余额（逐笔到期，每日签到的积分当天有效）";
+  }
   // CodeBuddy / Qoder 随周期重置；未探测到重置时间时退化为本周期口径。
   if (!credential.quota_cycle_end) {
     return "本周期剩余（未探测到重置时间）";

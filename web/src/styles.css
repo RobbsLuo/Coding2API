@@ -68,6 +68,7 @@
   --chart-6: oklch(0.557 0.14 250);
   --chart-7: oklch(0.6 0.16 210);
   --chart-8: oklch(0.56 0.15 25);
+  --chart-9: oklch(0.55 0.16 150);
 }
 
 .dark {
@@ -107,6 +108,7 @@
   --chart-6: oklch(0.72 0.14 250);
   --chart-7: oklch(0.76 0.14 210);
   --chart-8: oklch(0.72 0.15 25);
+  --chart-9: oklch(0.74 0.16 150);
 }
 
 @theme inline {

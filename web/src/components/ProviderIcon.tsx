@@ -3,6 +3,7 @@ import CodeBuddyMono from "@lobehub/icons/es/CodeBuddy/components/Mono";
 import HuaweiCloudColor from "@lobehub/icons/es/HuaweiCloud/components/Color";
 import HuaweiCloudMono from "@lobehub/icons/es/HuaweiCloud/components/Mono";
 import KiloCodeMono from "@lobehub/icons/es/KiloCode/components/Mono";
+import OpenClawMono from "@lobehub/icons/es/OpenClaw/components/Mono";
 import OpenCodeMono from "@lobehub/icons/es/OpenCode/components/Mono";
 import QoderColor from "@lobehub/icons/es/Qoder/components/Color";
 import QoderMono from "@lobehub/icons/es/Qoder/components/Mono";
@@ -26,6 +27,9 @@ const BRAND: Record<string, { Main: BrandComp; Color: BrandComp }> = {
   codearts: { Main: HuaweiCloudMono, Color: HuaweiCloudColor },
   // officeAce 同为华为云产品（AgentArts 办公智能体），沿用母公司图标
   officeace: { Main: HuaweiCloudMono, Color: HuaweiCloudColor },
+  // LobsterAI（有道龙虾）无独立品牌图标，@lobehub/icons 也没有收录。
+  // 沿用 OpenClaw（同为「龙虾」系开源桌面 Agent）的图标，靠渠道名区分。
+  lobsterai: { Main: OpenClawMono, Color: OpenClawMono },
 };
 
 /**
