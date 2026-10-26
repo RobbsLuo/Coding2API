@@ -1,7 +1,7 @@
 # Design System — Coding2API 管理台
 
-> **LOGIC:** 构建具体页面前，先看 `design-system/coding2api/pages/[page-name].md`。
-> 存在则其规则**覆盖**本文件；否则严格遵循本文件。
+> **LOGIC:** 建页前先看 `design-system/coding2api/pages/[page-name].md`。
+> 存在 → 其规则**覆盖**本文件；否则严格遵循本文件。
 
 ---
 
@@ -10,22 +10,21 @@
 **Category:** Developer tool / API gateway control plane
 **Source of truth:** `web/src/styles.css`（token） + `web/src/ui/index.tsx`（组件适配层；底层原语在 `web/src/components/ui/`）
 
-> ⚠️ 本文件是**手工核定**的设计系统，不是 `search.py --design-system` 的自动输出。
-> 改 token 时**先改 `styles.css`**，再回写本表——不要反向操作。
+> ⚠️ 本文件**手工核定**，非 `search.py --design-system` 自动输出。
+> 改 token **先改 `styles.css`** 再回写本表——不要反向操作。
 
 ---
 
 ## 1. 设计方向：「Control Plane」工业化控制台
 
-产品故事是**多路渠道汇入单一出口**（gateway）。视觉语言要传达：**实时、可信、可扫读**。
+产品故事：**多路渠道汇入单一出口**（gateway）。视觉语言：**实时、可信、可扫读**。
 
-- **保留青绿品牌色**：是产品故事的视觉锚，不做通用蓝/紫。
-- **表面分层 > 装饰**：层级靠背景/卡面/浮层的明度梯度表达，不堆阴影或渐变。
+- **保留青绿品牌色**：视觉锚，不做通用蓝/紫。
+- **表面分层 > 装饰**：层级靠背景/卡面/浮层明度梯度，不堆阴影或渐变。
 - **克制的技术质感**：细刻度、通道色条、等宽数字。**不做** HUD/霓虹/发光。
 - **暗色是一等公民**：分层用明度梯度（非阴影），单独校验对比度。
 
-**反模式（禁用）**：emoji 当图标、低对比灰字、布局位移的 hover、`z-[9999]` 乱值、
-颜色作唯一状态指示、无 `prefers-reduced-motion` 降级。
+**反模式（禁用）**：emoji 当图标、低对比灰字、布局位移的 hover、`z-[9999]` 乱值、颜色作唯一状态指示、无 `prefers-reduced-motion` 降级。
 
 ---
 
@@ -37,24 +36,21 @@
 |---|---|---|---|
 | `--primary` | `oklch(0.52 0.13 190)` | `oklch(0.74 0.12 190)` | 品牌主色（青绿） |
 | `--primary-foreground` | `oklch(0.99 0 0)` | `oklch(0.17 0.012 258)` | 主色上的文字 |
-| `--ok` | `oklch(0.54 0.14 155)` | `oklch(0.70 0.14 155)` | 成功 / 可用 |
-| `--warn` | `oklch(0.566 0.15 65)` | `oklch(0.78 0.13 70)` | 警告 / 未探测 / 冷却 |
-| `--danger` | `oklch(0.55 0.21 25)` | `oklch(0.70 0.20 22)` | 错误 / 已耗尽 |
+| `--ok` | `oklch(0.54 0.14 155)` | `oklch(0.70 0.14 155)` | 成功/可用 |
+| `--warn` | `oklch(0.566 0.15 65)` | `oklch(0.78 0.13 70)` | 警告/未探测/冷却 |
+| `--danger` | `oklch(0.55 0.21 25)` | `oklch(0.70 0.20 22)` | 错误/已耗尽 |
 | `--ring` | `oklch(0.62 0.11 190)` | `oklch(0.66 0.11 190)` | 焦点环 |
 
-> **对比度约束（亮色）**：语义色若直接当文字用（`text-ok`/`text-warn` 等）必须满足
-> 对白底 ≥4.5:1，故亮色 `--ok`/`--warn` 明度比暗色更低一档。放在同色浅底
-> （`bg-ok/12` 之类）上的文字，额外混入 25% `--ink`（`text-ok-ink` 等，见
-> `styles.css` 的 `--color-*-ink`），因为纯色号在自身浅底上对比会掉到 ~3.4–4.4。
+> **对比度约束（亮色）**：语义色作文字（`text-ok`/`text-warn` 等）对白底 ≥4.5:1 → 亮色 `--ok`/`--warn` 明度低暗色一档。同色浅底（`bg-ok/12` 之类）上的文字混入 25% `--ink`（`text-ok-ink` 等，见 `styles.css` 的 `--color-*-ink`）——纯色号在自身浅底掉到 ~3.4–4.4。
 
 ### 2.2 三级表面（关键）
 
 | Token | 亮色 | 暗色 | 用途 |
 |---|---|---|---|
-| `--surface-sunken` | `oklch(0.968 0.004 252)` | `oklch(0.145 0.012 258)` | 页面底 / 内嵌区 / 代码块 |
+| `--surface-sunken` | `oklch(0.968 0.004 252)` | `oklch(0.145 0.012 258)` | 页面底/内嵌区/代码块 |
 | `--surface` | `oklch(0.985 0.003 252)` | `oklch(0.175 0.012 258)` | 页面背景 |
-| `--panel` | `oklch(1 0 0)` | `oklch(0.215 0.013 258)` | 卡片 / 面板 |
-| `--panel-raised` | `oklch(1 0 0)` | `oklch(0.245 0.014 258)` | 浮层 / 下拉 / 弹窗 |
+| `--panel` | `oklch(1 0 0)` | `oklch(0.215 0.013 258)` | 卡片/面板 |
+| `--panel-raised` | `oklch(1 0 0)` | `oklch(0.245 0.014 258)` | 浮层/下拉/弹窗 |
 
 ### 2.3 文字与描边
 
@@ -66,8 +62,8 @@
 
 ### 2.4 图表 / 渠道色
 
-渠道色**随渠道稳定**（`web/src/api/providers.ts` 为唯一来源）：`chart-1`..`chart-6`。
-新增渠道只改 `providers.ts`，不要在图表里写死颜色。
+渠道色**随渠道稳定**（`web/src/api/providers.ts` 唯一来源）：`chart-1`..`chart-6`。
+新增渠道只改 `providers.ts`，图表不写死颜色。
 
 ---
 
@@ -81,7 +77,7 @@
 
 - 基础字号 16px；正文 `leading-relaxed`（1.625）。
 - 正文最小 12px（`text-xs`），不得更小。
-- 数字列一律 `tabular-nums`（避免翻页时列宽抖动）。
+- 数字列一律 `tabular-nums`（防翻页列宽抖动）。
 
 ---
 
@@ -110,23 +106,23 @@
 
 ## 5. 组件规范
 
-组件统一从 `web/src/ui/index.tsx` 取（它是 shadcn 适配层）。**不要**在页面里直接拼裸样式。
+组件统一取 `web/src/ui/index.tsx`（shadcn 适配层）。**不要**页面直接拼裸样式。
 
 | 组件 | 规范 |
 |---|---|
 | `Panel` | 卡片容器；`rounded-xl` + `ring-1 ring-border` + `shadow-sm`；标题行 + `action` 槽 |
 | `Button` | 变体 `default`(描边)/`primary`/`danger`/`ghost`/`link`；焦点环可见 |
 | `Badge` | 语义色调 `ok/warn/danger/muted/accent`；**必须带文字**，色不单独表意 |
-| `NavBadge` | 侧栏「数据提醒」计数角标：数字用 `tabular-nums`（轮询刷新不抖宽）、`>99` 收敛成 `99+`、值为 0/空不渲染；可见数字 `aria-hidden` + `sr-only` 全语义文案（读屏读「运维告警 3 条告警尚未恢复」而非两段无关的话） |
+| `NavBadge` | 侧栏「数据提醒」计数角标：`tabular-nums`（轮询不抖宽）、`>99` → `99+`、0/空不渲染；可见数字 `aria-hidden` + `sr-only` 全语义文案（读屏读「运维告警 3 条告警尚未恢复」，不读两段无关的话） |
 | `Metric` | KPI 卡：标签 + 大号 `tabular-nums` 数值 + hint；可选 icon 与 tone |
 | `Notice` | 行内提示；`danger` 用 `role=alert`；左侧语义色条 |
-| `ToastViewport` + `useToasts` | 操作结果浮层（顶部居中，`web/src/components/Toast.tsx`）：数秒自动消失、可手动关闭；`danger` 用 `role=alert`、其余 `role=status`；同 `testId` 只保留最新一条；语气用 `Badge`/`Notice` 同款 tint 底 + `-ink` 图标（亮色口径色描边叠白底对比过低，不可只用描边） |
+| `ToastViewport` + `useToasts` | 操作结果浮层（顶部居中，`web/src/components/Toast.tsx`）：数秒自动消失、可手动关；`danger` 用 `role=alert`、其余 `role=status`；同 `testId` 只留最新一条；语气同 `Badge`/`Notice`：tint 底 + `-ink` 图标（亮色口径色描边叠白底对比过低，不可只用描边） |
 | `EmptyState` | 空态：图标 + 标题 + 描述 + 可选操作 |
 | `Tabs` | 分段器；激活项 `bg-background` + `shadow-sm` |
-| `Table` | 圆角容器 + 表头底色 + 行 hover；移动端横向滚动。窄屏（<768px）可开 `cards` 转卡片：列名变排序片、每格用 `TableCell label` 显示字段名（DOM 不变，见 `styles.css`「窄屏表 → 卡片」） |
+| `Table` | 圆角容器 + 表头底色 + 行 hover；移动端横向滚动。窄屏（<768px）`cards` 转卡片：列名变排序片、每格 `TableCell label` 显示字段名（DOM 不变，见 `styles.css`「窄屏表 → 卡片」） |
 | `PageHeader` | eyebrow（可选）+ 标题 + 说明 + 右侧操作槽 |
 | `PageSkeleton` | 加载骨架，替代纯文字「载入中…」 |
-| `Tip` / `LongTextTip` | 悬浮说明两档表面（`web/src/components/Tip.tsx` → `components/ui/tooltip.tsx` 的 `surface`）：**短提示走 `ink`**（反色气泡 + 箭头，一句话强对比）；**多行清单 / 明细走 `panel`**（`panel-raised` + `ring-border` + `shadow-lg`，与下拉 / 弹窗同层，**不出箭头**——箭头会盖住描边留缺口）。`panel` 档内容自带「头部（身份 + 条数胶囊）/ 限高内滚清单 / 脚注口径」，左对齐且 `items-start`：多行居中会让每行起点都不同，读不成列 |
+| `Tip` / `LongTextTip` | 悬浮说明两档表面（`web/src/components/Tip.tsx` → `components/ui/tooltip.tsx` 的 `surface`）：**短提示走 `ink`**（反色气泡 + 箭头，一句强对比）；**多行清单/明细走 `panel`**（`panel-raised` + `ring-border` + `shadow-lg`，与下拉/弹窗同层，**不出箭头**——箭头盖住描边留缺口）。`panel` 档自带「头部（身份 + 条数胶囊）/限高内滚清单/脚注口径」，左对齐 `items-start`：多行居中每行起点不同，读不成列 |
 
 ---
 
