@@ -195,6 +195,10 @@ async def test_stream_skips_undecryptable_credential_and_uses_another(repo):
     with db.transaction() as conn:
         conn.execute("UPDATE credentials SET data_enc = ? WHERE id = ?",
                      (other.encrypt(b'{"bearer_token": "t"}'), broken))
+    # **pin 住坏的那条**：选号必须先试它，否则「跳过解不开的凭证」这条分支
+    # 根本不会执行——而选号顺序取决于健康度 / 在途数 / 到期额度等一堆
+    # 动态因素，测试不能靠它们碰巧（CI 上曾因此漏测）。
+    assert credentials.set_pinned(broken) is True
 
     collector = RecordingCollector()
     executor = _exec_with_stats(repo, [GOOD_EVENTS], collector)
