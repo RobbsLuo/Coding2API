@@ -141,14 +141,6 @@ services:
       OFFICEACE_ALLOWED_ENDPOINTS: ${OFFICEACE_ALLOWED_ENDPOINTS:-https://agentarts.cn-southwest-2.myhuaweicloud.com}
       # officeAce 聊天最小间隔（秒）：真实账号渠道，独立节流器，默认 0
       OFFICEACE_CHAT_MIN_INTERVAL: ${OFFICEACE_CHAT_MIN_INTERVAL:-0}
-      # LobsterAI（有道龙虾）：三个端点各自独立配置，共用一张白名单——
-      # API 域（对话/积分/签到/令牌）、门户域（登录页）、版本域（签到门禁）。
-      LOBSTERAI_API_ENDPOINT: ${LOBSTERAI_API_ENDPOINT:-https://lobsterai-server.youdao.com}
-      LOBSTERAI_PORTAL_ENDPOINT: ${LOBSTERAI_PORTAL_ENDPOINT:-https://lobsterai.youdao.com}
-      LOBSTERAI_VERSION_ENDPOINT: ${LOBSTERAI_VERSION_ENDPOINT:-https://api-overmind.youdao.com/openapi/get/luna/hardware/lobsterai/prod/update}
-      LOBSTERAI_ALLOWED_ENDPOINTS: ${LOBSTERAI_ALLOWED_ENDPOINTS:-https://lobsterai-server.youdao.com,https://lobsterai.youdao.com,https://api-overmind.youdao.com/openapi/get/luna/hardware/lobsterai/prod/update}
-      # LobsterAI 聊天最小间隔（秒）：真实账号渠道，独立节流器，默认 0
-      LOBSTERAI_CHAT_MIN_INTERVAL: ${LOBSTERAI_CHAT_MIN_INTERVAL:-0}
       # 11128 内容风控自愈：中和出站正文里的伪装客户端指纹，false 关闭
       CODEBUDDY_SANITIZE_CHANNEL_MARKERS: ${CODEBUDDY_SANITIZE_CHANNEL_MARKERS:-true}
       # token 预刷新窗口（小时）

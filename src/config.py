@@ -92,21 +92,6 @@ class Settings(BaseSettings):
     officeace_allowed_endpoints: str = (
         "https://agentarts.cn-southwest-2.myhuaweicloud.com"
     )
-    # LobsterAI（有道龙虾）：API 域（对话 / 目录 / 积分 / 签到 / 令牌）与
-    # 门户域（登录页 SPA）**分开**配置——上游实现本身也把这两个地址分开，
-    # 且不排除未来分离部署。版本域（客户端版本号，签到按它门禁）同理。
-    # 白名单必须含三者：真实 Token 会发往 API 域，登录 URL 指向门户域，
-    # 版本号查询打到版本域。
-    lobsterai_api_endpoint: str = "https://lobsterai-server.youdao.com"
-    lobsterai_portal_endpoint: str = "https://lobsterai.youdao.com"
-    lobsterai_version_endpoint: str = (
-        "https://api-overmind.youdao.com/openapi/get/luna/hardware/lobsterai/prod/update"
-    )
-    lobsterai_allowed_endpoints: str = (
-        "https://lobsterai-server.youdao.com,"
-        "https://lobsterai.youdao.com,"
-        "https://api-overmind.youdao.com/openapi/get/luna/hardware/lobsterai/prod/update"
-    )
     # 按渠道出站代理（启动期项，见 provider/proxy.py）：格式
     # `渠道=代理URL;渠道2=代理URL2`，协议 http/https/socks5/socks5h；留空 = 直连。
     # 代理作用于连接池，运行中改值需重启，故不做热更。
@@ -242,10 +227,6 @@ class Settings(BaseSettings):
     # 直接放行即可；被限流时走伪 200 的 81111/81114（模型级短冷却），
     # 不需要靠本地节流兜。另有独立节流器，与其余渠道互不排队。
     officeace_chat_min_interval: float = 0
-    # LobsterAI 聊天最小间隔：真实账号渠道，上游按账号限流，额度耗尽回
-    # 40201（等签到恢复）而非冷却到期，故不需要靠本地节流兜。默认 0。
-    # 另有独立节流器，与其余渠道互不排队。
-    lobsterai_chat_min_interval: float = 0
     # CodeArts 每账号在途并发上限：上游硬限「并发会话数 3」，超限的请求直接
     # 400 TM.00001041 并发超限（实测 77% 失败率的主因）。默认 3 对齐上游；
     # 0 关闭上限（回到「有在途就放行」，会再次击穿）。可热更。
@@ -420,11 +401,6 @@ class Settings(BaseSettings):
                      if e.strip())
 
     @cached_property
-    def lobsterai_allowed(self) -> tuple[str, ...]:
-        return tuple(e.strip().rstrip("/") for e in self.lobsterai_allowed_endpoints.split(",")
-                     if e.strip())
-
-    @cached_property
     def blocklist_patterns(self) -> tuple[str, ...]:
         return tuple(p.strip() for p in self.model_blocklist.split(",") if p.strip())
 
@@ -501,16 +477,6 @@ def validate_codearts_endpoint_allowed(endpoint: str, settings: Settings) -> boo
 def validate_officeace_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
     """officeAce 控制面端点白名单校验（防把 AK/SK 签名请求发往未授权主机）。"""
     return endpoint.strip().rstrip("/") in settings.officeace_allowed
-
-
-def validate_lobsterai_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
-    """LobsterAI 端点白名单校验（防把 Bearer Token 发往未授权主机）。
-
-    白名单含三个主机：API 域（对话 / 积分 / 签到 / 令牌）、门户域（登录页
-    URL）与版本域（客户端版本号查询）。三者都要——只白名单 API 域会让
-    「改门户地址」变成一次静默的 Token 外泄面。
-    """
-    return endpoint.strip().rstrip("/") in settings.lobsterai_allowed
 
 
 def live(value: Any) -> Callable[[], Any]:

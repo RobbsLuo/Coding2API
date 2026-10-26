@@ -13,8 +13,7 @@ export type Provider =
   | "kilo"
   | "qoder"
   | "codearts"
-  | "officeace"
-  | "lobsterai";
+  | "officeace";
 
 /** 健康度三态：null = 未探测；-1 = 已耗尽；0-100 = 已知剩余百分比。
  * 展示层把 null 再分成「未探测」（付费渠道探测失败）与「无探测」（zen/kilo
