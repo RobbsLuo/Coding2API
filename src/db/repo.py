@@ -263,11 +263,32 @@ class CredentialRepository:
                 (1 if enabled else 0, credential_id))
         return cursor.rowcount > 0
 
-    def set_pinned(self, credential_id: str | None) -> None:
+    def set_pinned(self, credential_id: str | None) -> bool:
+        """指定唯一被 pin 的凭证（`None` = 取消指定）。
+
+        全库至多一条 pinned：先清全部再置目标行。
+
+        返回值 = 指定是否生效。`credential_id` 非空但库里没有这一行时返回
+        False，**且不改动任何既有 pin**：否则管理员会以为「已指定」生效了，
+        实际把别人的指定解除了，界面却显示成功。
+
+        查存在性与两次写入放在同一事务里：`BEGIN IMMEDIATE` 的写锁保证
+        「查到存在」到「清 pin + 置 pin」之间不被并发删除打断（否则目标行
+        在清完之后被删，pin 就落空了）。
+        """
         with self._db.transaction() as conn:
+            if credential_id is not None:
+                exists = conn.execute(
+                    "SELECT 1 FROM credentials WHERE id = ?",
+                    (credential_id,)).fetchone()
+                if exists is None:
+                    return False
             conn.execute("UPDATE credentials SET pinned = 0")
             if credential_id is not None:
-                conn.execute("UPDATE credentials SET pinned = 1 WHERE id = ?", (credential_id,))
+                conn.execute(
+                    "UPDATE credentials SET pinned = 1 WHERE id = ?",
+                    (credential_id,))
+            return True
 
     def revive(self, credential_id: str) -> bool:
         """解除硬禁用（session 死亡）与冷却，允许凭证重新参与调度。

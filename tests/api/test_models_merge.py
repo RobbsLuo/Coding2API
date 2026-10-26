@@ -375,6 +375,8 @@ def test_models_single_channel_outward_id_is_normalized(tmp_path):
             "Authorization": f"Bearer {key}"}).json()["data"]
     assert [m["id"] for m in data] == ["kimi-k3"]      # 对外 id 用归一键
     assert data[0]["name"] == "Kimi K3"                # 展示名统一清洗
+    # 单渠道也下发 by_provider（原代号对外可见，PROPOSAL §3.4）
+    assert data[0]["by_provider"] == {"qoder": {"raw_id": "kmodel_latest"}}
     aliases = app.state.services.model_aliases
     assert aliases["qoder"]["kimi-k3"] == "kmodel_latest"    # 对外 id → 原代号
     assert aliases["qoder"]["kmodel_latest"] == "kmodel_latest"  # 原代号也能直连
@@ -558,3 +560,23 @@ def test_models_outward_id_collision_falls_back_to_numeric_suffix():
     ]
     _disambiguate(entries)
     assert [e["id"] for e in entries] == ["x", "y", "y-p1", "x-2", "x-3"]
+
+
+def test_entry_response_omits_by_provider_when_empty():
+    """`provider_meta` 为空 → 不下发 `by_provider` 键（而不是给空对象）。
+
+    空对象会被前端读成「这个模型没有任何渠道」，与「渠道信息缺失」混淆。
+    """
+    from src.api.model_merge import _entry_response
+
+    entry = {
+        "id": "m", "providers": {"codebuddy"},
+        "meta": {"name": "M", "credit_rate": None, "max_input_tokens": None,
+                 "max_output_tokens": None, "supports_images": None,
+                 "supports_tool_call": None, "supports_reasoning": None,
+                 "default_effort": None},
+        "provider_meta": {}, "raw_ids": {}, "labels": {"M"},
+    }
+    result = _entry_response(entry)
+    assert "by_provider" not in result
+    assert result["id"] == "m"

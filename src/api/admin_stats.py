@@ -13,14 +13,32 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..auth.rbac import Principal, require_operator
 from ..compat.openai.errors import error_payload
+from ..compat.openai.request import InvalidRequest
 from ..stats.csv import CSV_BOM, EXPORT_HEADERS, csv_line, event_cells
 from ..stats.live import LiveEventHub, Subscription, TooManySubscribers
-from ..stats.query import ERROR_MAX_GROUPS, EXPORT_MAX_ROWS
+from ..stats.query import ERROR_MAX_GROUPS, EXPORT_MAX_ROWS, METRIC_KINDS
 from .deps import Services, principal_from_request
 
 # 心跳间隔：代理/浏览器对「长时间没数据」的连接会主动断（nginx 默认 60s）。
 # 15s 一条注释帧，既保活又不至于把流量抬起来。
 HEARTBEAT_SECONDS = 15.0
+
+# 分位时序只认这两个指标（读明细表按列取分位，其余列无分位语义）。
+PERCENTILE_METRICS = ("latency", "ttfb")
+
+
+def _check_metric(metric: str, *, allowed: tuple[str, ...] | None = None) -> str:
+    """校验 `metric` 取值域，非法值显式 400。
+
+    PROPOSAL §5 列死了 `timeline` / `model-timeline` 的 metric 取值集合。
+    之前未知取值静默回落到 `requests`（`METRIC_KINDS.get(metric, "sum_requests")`），
+    客户端拼错参数会拿到一份「看起来正常」的请求数图，错误被完全吞掉。
+    """
+    allowed = allowed or tuple(METRIC_KINDS)
+    if metric not in allowed:
+        raise InvalidRequest(
+            f"metric must be one of: {', '.join(allowed)}")
+    return metric
 
 
 def _scope(principal: Principal, username: str | None) -> str | None:
@@ -147,7 +165,8 @@ def create_router(services: Services) -> APIRouter:
                              until: int | None = None,
                              metric: str = "requests"):
         return {"points": stats_query.timeline(
-            username=_scope(principal, username), since=since, until=until, metric=metric)}
+            username=_scope(principal, username), since=since, until=until,
+            metric=_check_metric(metric))}
 
     @router.get("/api/stats/model-timeline")
     async def stats_model_timeline(principal=Depends(principal_from_request),
@@ -155,7 +174,8 @@ def create_router(services: Services) -> APIRouter:
                                    until: int | None = None,
                                    metric: str = "requests"):
         return stats_query.model_timeline(
-            username=_scope(principal, username), since=since, until=until, metric=metric)
+            username=_scope(principal, username), since=since, until=until,
+            metric=_check_metric(metric))
 
     @router.get("/api/stats/percentile-timeline")
     async def stats_percentile_timeline(principal=Depends(principal_from_request),
@@ -165,7 +185,8 @@ def create_router(services: Services) -> APIRouter:
                                         metric: str = "latency"):
         """延迟分位时序（P50 中位数 + P95 上界）：延迟图的「典型值 + 长尾」两层。"""
         return stats_query.percentile_timeline(
-            username=_scope(principal, username), since=since, until=until, metric=metric)
+            username=_scope(principal, username), since=since, until=until,
+            metric=_check_metric(metric, allowed=PERCENTILE_METRICS))
 
     @router.get("/api/stats/by-user")
     async def stats_by_user(principal=Depends(principal_from_request),

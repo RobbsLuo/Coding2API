@@ -575,7 +575,10 @@ def _entry_response(entry: dict[str, Any],
         if meta["credit_rate"] is not None:
             detail["credit_rate"] = meta["credit_rate"]
         by_provider[pid] = detail
-    if len(entry["providers"]) > 1 and by_provider:
+    # 单渠道也下发 by_provider：PROPOSAL §3.4「原代号进 by_provider.{渠道}.raw_id」
+    # 没有「多渠道才给」这条例外。以前只给多渠道，单渠道模型的原代号对外完全
+    # 不可见（前端 `providerRawId` 拿不到，排障时看不到实际请求的 key）。
+    if by_provider:
         result["by_provider"] = by_provider
     score = lookup(benchmarks or {}, entry["id"], entry["meta"].get("name"))
     if score is not None:

@@ -754,8 +754,10 @@ def test_stats_model_timeline_endpoint(admin_client):
     # metric 参数切换取值语义（默认请求次数 vs tokens 合计）
     tokens = client.get("/api/stats/model-timeline?metric=tokens").json()
     assert tokens["points"][0]["m"] == 15
-    # 非法 metric 回退请求次数
-    assert client.get("/api/stats/model-timeline?metric=bogus").json()["points"] == body["points"]
+    # 非法 metric 显式 400（此前静默回退 requests，错误被吞掉）
+    bad = client.get("/api/stats/model-timeline?metric=bogus")
+    assert bad.status_code == 400
+    assert bad.json()["error"]["code"] == "invalid_request"
 
 def test_stats_events_empty(stats):
     """空库：明细返回空页且无游标。"""

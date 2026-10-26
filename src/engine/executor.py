@@ -795,15 +795,19 @@ class Executor:
                         "invalid_request")
                     return
                 # 已出帧后收尾：上游可能已生成内容（真实计费），按已知用量记账，
-                # 否则这次尝试的 token 全部漏记（与断开路径同一理由）
-                usage = state.translator.usage
-                self._deps.record(
-                    username=state.username, provider=provider_id,
-                    credential_id=credential_id, model=target.model, ok=False,
-                    error_type=_stream_error_type(last_error),
-                    input_tokens=_usage_field(usage, "input_tokens"),
-                    output_tokens=_usage_field(usage, "output_tokens"),
-                    latency_ms=_elapsed_ms(state.started))
+                # 否则这次尝试的 token 全部漏记（与断开路径同一理由）。
+                # 未出帧且 DEAD 已落尝试行时不再落收尾行：一次请求两行会让
+                # usage_hourly.requests 虚高、成功率虚低，按 Key 计的日请求
+                # 额度被扣两次（与 _complete 的 should_rotate 分支同一口径）。
+                if emitted or not attributed:
+                    usage = state.translator.usage
+                    self._deps.record(
+                        username=state.username, provider=provider_id,
+                        credential_id=credential_id, model=target.model, ok=False,
+                        error_type=_stream_error_type(last_error),
+                        input_tokens=_usage_field(usage, "input_tokens"),
+                        output_tokens=_usage_field(usage, "output_tokens"),
+                        latency_ms=_elapsed_ms(state.started))
                 if isinstance(last_error, _StreamTimeout):
                     # 空闲超时（已出帧）：半截输出不可回滚，不换号，直接以错误帧
                     # 收尾；对外文案带上受控标识（A1 验收口径）
@@ -1199,11 +1203,16 @@ class Executor:
                     raise InvalidRequest(_reject_message(
                         target.model, last_error, self._suggestions(target.model)))
                 kind = _classify(last_error) if last_error is not None else None
-                self._deps.record(
-                    username=username, provider=provider_id, credential_id=credential_id,
-                    model=target.model, ok=False,
-                    error_type=_error_type_for(kind) if kind else "upstream_protocol",
-                    latency_ms=_elapsed_ms(started))
+                # DEAD 尝试行已落过明细时不再落收尾行：一次请求两行会让
+                # usage_hourly.requests 虚高、成功率虚低，按 Key 计的日请求
+                # 额度被扣两次（与 _stream_loop / _complete 的 pick-is-None
+                # 分支同一口径）。
+                if not attributed:
+                    self._deps.record(
+                        username=username, provider=provider_id, credential_id=credential_id,
+                        model=target.model, ok=False,
+                        error_type=_error_type_for(kind) if kind else "upstream_protocol",
+                        latency_ms=_elapsed_ms(started))
                 raise NoHealthyCredential(
                     self._unavailable_text(target, last_error))
 

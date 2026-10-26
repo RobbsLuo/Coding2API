@@ -357,10 +357,18 @@ def create_router(services: Services) -> APIRouter:
                              principal=Depends(principal_from_request)):
         require_operator(principal)
         pin = payload.get("credential_id")
-        credentials.set_pinned(pin)
+        # 类型收口：非字符串直接 400。放任 dict/list 进 set_pinned 会走到
+        # sqlite3 的参数绑定 → ProgrammingError → 500（客户端输入不该是 5xx）。
+        # None = 取消指定（合法），其余必须是字符串。
+        if pin is not None and not isinstance(pin, str):
+            raise InvalidRequest("credential_id must be a string or null")
+        # 存在性校验：不存在的 id 会被 set_pinned 的「先清全部 pin」顺带解除
+        # 其它凭证的指定，而端点仍回 200——管理员以为已指定，实则把指定清空了。
+        if not credentials.set_pinned(pin):
+            raise InvalidRequest("credential not found")
         logger.info("管理员 %s 固定凭证 %s", principal.username, pin)
         services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_PIN,
-                              target=pin if isinstance(pin, str) else None,
+                              target=pin,
                               detail=f"pinned={pin!r}")
         return {"ok": True}
 
