@@ -22,13 +22,13 @@
 from __future__ import annotations
 
 import secrets
-import time
 import uuid as uuid_module
 from dataclasses import dataclass
 from urllib.parse import parse_qs, quote, urlparse
 
 from ..base import UpstreamProtocolViolation
 from . import events as lobsterai_events
+from .events import DEFAULT_KEYFROM
 
 #: 登录超时（秒）：门户授权 + 用户切回浏览器完成粘贴，给足 10 分钟。
 AUTH_STATE_TTL_SECONDS = 600
@@ -50,17 +50,23 @@ class LobsteraiLoginSession:
 
     #: 客户端安装标识（exchange / refresh 都要带，丢了就续不了期）。
     uuid: str
-    #: 首次登录时间戳（毫秒字符串）。
-    first_keyfrom: str
+    #: 渠道归因来源（`official` 这类字符串，**不是时间戳**）。
+    keyfrom: str
     #: 上游 state（放进登录 URL，门户原样回显）。
     upstream_state: str
 
 
 def new_session() -> LobsteraiLoginSession:
-    """生成一次登录的客户端身份三元组 + 上游 state。"""
+    """生成一次登录的客户端身份（uuid）+ 归因 + 上游 state。
+
+    归因固定用 `official`（官方客户端的默认投放渠道，见
+    `src/shared/keyfrom/constants.ts`）：上游拿 `keyfrom` 做渠道统计，
+    合法值形如 `official` / `bilibili`，只允许 `a-z0-9_-`。写时间戳或空串
+    会被记成一个不存在的渠道。
+    """
     return LobsteraiLoginSession(
         uuid=str(uuid_module.uuid4()),
-        first_keyfrom=str(int(time.time() * 1000)),
+        keyfrom=DEFAULT_KEYFROM,
         upstream_state=secrets.token_urlsafe(16),
     )
 

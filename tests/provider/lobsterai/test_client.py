@@ -74,7 +74,7 @@ def test_prepare_body_drops_untranslatable_effort():
 def test_prepare_body_includes_identity_payload():
     body = prepare_body({"messages": []}, "m", _cred(), "2026.10.23")
     assert body["uuid"] == "uuid-1"
-    assert body["firstKeyfrom"] == "1700000000000"
+    assert body["firstKeyfrom"] == "official"
     assert body["version"] == "2026.10.23"
     assert body["userId"] == "user-1"
 
@@ -88,12 +88,15 @@ def test_keyfrom_body_omits_missing_identity_fields():
 
 def test_keyfrom_body_latest_falls_back_to_first():
     body = keyfrom_body(_cred(latest_keyfrom=""), "v")
-    assert body["latestKeyfrom"] == "1700000000000"
+    assert body["latestKeyfrom"] == "official"
 
 
-def test_keyfrom_body_now_ms_overrides_latest():
-    body = keyfrom_body(_cred(), "v", now_ms="999")
-    assert body["latestKeyfrom"] == "999"
+def test_keyfrom_body_falls_back_to_default_when_absent():
+    """归因缺失时回落到 `official`：上游只接受 `a-z0-9_-` 的合法值，
+    空串会被记成一个不存在的渠道。"""
+    body = keyfrom_body(_cred(first_keyfrom="", latest_keyfrom=""), "v")
+    assert body["firstKeyfrom"] == "official"
+    assert body["latestKeyfrom"] == "official"
 
 
 def test_chat_headers_carry_capabilities_and_version():
@@ -101,7 +104,17 @@ def test_chat_headers_carry_capabilities_and_version():
     assert headers["Authorization"] == "Bearer AT"
     assert headers["X-LobsterAI-Client-Capabilities"] == lobsterai_events.CLIENT_CAPABILITIES
     assert headers["X-LobsterAI-Client-Version"] == "2026.10.23"
+    # 官方客户端每个请求都带账号模式头，缺了服务端当成上下文不完整
+    assert headers["X-LobsterAI-Account-Mode"] == "personal"
     assert "X-Domain" not in headers
+
+
+def test_client_capabilities_include_virtual_models():
+    """三个能力都要：官方客户端的声明是 virtual-models-v1 + kimi-k3 + thinking。"""
+    capabilities = lobsterai_events.CLIENT_CAPABILITIES.split(",")
+    assert "virtual-models-v1" in capabilities
+    assert "kimi-k3-agentic-v1" in capabilities
+    assert "thinking-level-control-v1" in capabilities
 
 
 def test_auth_headers_have_no_authorization():
@@ -627,20 +640,21 @@ async def test_exchange_code_returns_credential():
         body = json.loads(request.content)
         assert body["authCode"] == "CODE"
         assert body["uuid"] == "uuid-1"
+        assert body["firstKeyfrom"] == "official"
         return httpx.Response(200, json=envelope({
             "accessToken": "AT2", "refreshToken": "RT2", "expiresIn": 3600,
             "user": {"id": "uid-2", "userId": "u2", "nickname": "bob"}}))
 
     client = _client(handler)
     credential = await client.exchange_code(
-        "CODE", uuid="uuid-1", first_keyfrom="F1")
+        "CODE", uuid="uuid-1", keyfrom="official")
     assert credential.access_token == "AT2"
     assert credential.refresh_token == "RT2"
     assert credential.uid == "uid-2"
     assert credential.user_id == "u2"
     assert credential.nickname == "bob"
     assert credential.uuid == "uuid-1"
-    assert credential.first_keyfrom == "F1"
+    assert credential.first_keyfrom == "official"
     assert credential.expires_at == MOMENT + 3600
     await client.aclose()
 
@@ -651,7 +665,7 @@ async def test_exchange_code_rejects_missing_access_token():
 
     client = _client(handler)
     with pytest.raises(UpstreamProtocolViolation):
-        await client.exchange_code("CODE", uuid="u", first_keyfrom="f")
+        await client.exchange_code("CODE", uuid="u", keyfrom="official")
     await client.aclose()
 
 
@@ -670,7 +684,7 @@ async def test_refresh_token_keeps_old_refresh_token_when_not_rotated():
     assert refreshed.access_token == "AT2"
     assert refreshed.refresh_token == "RT"
     assert refreshed.uuid == "uuid-1"
-    assert refreshed.first_keyfrom == "1700000000000"
+    assert refreshed.first_keyfrom == "official"
     assert refreshed.user_id == "user-1"
     assert refreshed.nickname == "alice"
     await client.aclose()
@@ -695,8 +709,8 @@ async def test_refresh_token_keeps_identity_when_response_omits_it():
     client = _client(handler)
     refreshed = await client.refresh_token(_cred())
     assert refreshed.uuid == "uuid-1"
-    assert refreshed.first_keyfrom == "1700000000000"
-    assert refreshed.latest_keyfrom == "1700000000000"
+    assert refreshed.first_keyfrom == "official"
+    assert refreshed.latest_keyfrom == "official"
     assert refreshed.user_id == "user-1"
     assert refreshed.nickname == "alice"
     await client.aclose()
@@ -748,7 +762,7 @@ async def test_exchange_code_falls_back_to_yid_for_user_id():
             "user": {"yid": "Y1"}}))
 
     client = _client(handler)
-    credential = await client.exchange_code("C", uuid="u", first_keyfrom="f")
+    credential = await client.exchange_code("C", uuid="u", keyfrom="official")
     assert credential.user_id == "Y1"
     assert credential.nickname == ""
     await client.aclose()

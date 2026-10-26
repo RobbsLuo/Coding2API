@@ -8,14 +8,19 @@
 | `access_token` | 上游签发 | `Authorization: Bearer` |
 | `refresh_token` | 上游签发 | 静默续期（**不保证轮转**，缺失时沿用旧值） |
 | `uuid` | **本地生成** | 设备/会话标识，exchange 与 refresh 都要带 |
-| `first_keyfrom` | **本地生成** | 首次登录时间戳（毫秒），续期时原样回放 |
-| `latest_keyfrom` | **本地生成** | 最近活动时间戳，续期时原样回放（不随续期更新） |
+| `first_keyfrom` | **本地生成** | 渠道归因（`official` 这类字符串），续期时原样回放 |
+| `latest_keyfrom` | **本地生成** | 最近一次归因，续期时原样回放（不随续期更新） |
 
 **丢一个身份字段的后果不是「少一个头」，而是「永远续不了期」**：上游把
 `uuid` / `firstKeyfrom` / `latestKeyfrom` 当作同一台客户端的指纹，缺失或
 不匹配时 refresh 直接被拒。因此这三个字段与 refresh_token 同等重要，
 缺任何一个的凭证导入时就要拒绝（`import_credential`），而不是等续期失败
 才暴露。
+
+**`firstKeyfrom` / `latestKeyfrom` 是「渠道归因」不是「时间戳」**：官方客户端的
+定义（`src/shared/keyfrom/constants.ts`）是本机的投放渠道来源，取值形如
+`official` / `bilibili`，只允许 `a-z0-9_-`、长度 1..64。写成时间戳会被
+上游记成一个不存在的渠道 —— 故这里默认 `official`（见 `events.DEFAULT_KEYFROM`）。
 
 `uid` 的取值按四级回落（`user.id` → `user.userId` → `user.yid` →
 `access_token` 的 sha256 前 16 位）。末级是**兜底**：不同账号形态下上游

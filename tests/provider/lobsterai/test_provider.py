@@ -229,8 +229,8 @@ def test_start_auth_builds_paste_login_url():
     assert session.interval is None
     assert session.callback_url is None
     assert "source=electron" in (session.auth_url or "")
-    uuid, first_keyfrom, upstream_state = session.state.split(":", 2)
-    assert uuid and first_keyfrom.isdigit() and upstream_state
+    uuid, keyfrom, upstream_state = session.state.split(":", 2)
+    assert uuid and keyfrom == "official" and upstream_state
 
 
 async def test_complete_callback_exchanges_code():
@@ -239,7 +239,7 @@ async def test_complete_callback_exchanges_code():
         body = json.loads(request.content)
         assert body["authCode"] == "CODE"
         assert body["uuid"] == "uuid-1"
-        assert body["firstKeyfrom"] == "F1"
+        assert body["firstKeyfrom"] == "official"
         return httpx.Response(200, json=envelope({
             "accessToken": "AT", "refreshToken": "RT", "expiresIn": 3600,
             "user": {"id": "u1", "nickname": "bob"}}))
@@ -247,7 +247,7 @@ async def test_complete_callback_exchanges_code():
     provider = LobsteraiProvider(client=_client(handler))
     data = await provider.complete_callback(
         "http://127.0.0.1:52641/auth/callback?code=CODE&state=S",
-        "uuid-1:F1:S")
+        "uuid-1:official:S")
     assert data["accessToken"] == "AT"
     assert data["uid"] == "u1"
     await provider.aclose()
@@ -259,7 +259,7 @@ async def test_complete_callback_rejects_mismatched_state():
     with pytest.raises(UpstreamProtocolViolation, match="state"):
         await provider.complete_callback(
             "http://127.0.0.1:52641/auth/callback?code=CODE&state=OTHER",
-            "uuid-1:F1:S")
+            "uuid-1:official:S")
     await provider.aclose()
 
 
@@ -273,7 +273,7 @@ async def test_complete_callback_allows_missing_state():
 
     provider = LobsteraiProvider(client=_client(handler))
     data = await provider.complete_callback(
-        "http://127.0.0.1:52641/auth/callback?code=CODE", "uuid-1:F1:S")
+        "http://127.0.0.1:52641/auth/callback?code=CODE", "uuid-1:official:S")
     assert data["accessToken"] == "AT"
     await provider.aclose()
 

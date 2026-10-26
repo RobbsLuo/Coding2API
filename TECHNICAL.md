@@ -428,6 +428,10 @@ class Provider(Protocol):
 
 **身份三元组随凭证持久化**：`uuid` / `firstKeyfrom` / `latestKeyfrom` 由**客户端生成**（`lobsterai/oauth.new_session`），exchange 与 refresh 时**原样回放**——上游把三者当同一台客户端的指纹，改了会被当成换了一台设备。故 `import_credential` 强制校验这三项（缺一个当场拒绝），而不是等续期失败才暴露。上游**可能不轮转** `refresh_token`：响应里没有就沿用旧值，丢掉等于让凭证失去续期能力。
 
+**`keyfrom` 是「渠道归因」不是「时间戳」**（2026-10-26 实测修正）：官方客户端的定义（`src/shared/keyfrom/constants.ts` 的 `DefaultKeyfrom`）是**本机的投放渠道来源**，取值形如 `official` / `bilibili`，只允许 `a-z0-9_-`、长度 1..64；官方包默认 `official`，首次写入后不再覆盖。写成时间戳会被上游记成一个不存在的渠道 → 本项目固定 `official`（`events.DEFAULT_KEYFROM`），缺失时回落该值而非空串。
+
+**请求头与官方客户端逐项对齐**（风控会按客户端形态归因）：`X-LobsterAI-Client-Capabilities` 三个能力（`virtual-models-v1` + `kimi-k3-agentic-v1` + `thinking-level-control-v1`，取自 `src/shared/providers/modelRuntimeProfiles.ts`）、`X-LobsterAI-Client-Version`、以及**每个请求都带**的 `X-LobsterAI-Account-Mode: personal`（取自 `src/shared/enterpriseAccount/constants.ts`；官方客户端企业号会带 `enterprise` + `X-LobsterAI-Enterprise-Id`，缺了回 `41612 AccountModeMismatch`）。
+
 **只支持流式**：`prepare_body` 无条件置 `stream=true`（上游 `stream:false` 回 500），非流式由 `compat/openai/response.aggregate` 聚合。与 CodeArts 那种「上游非流式、本地合成 SSE」是**反方向**的。
 
 **错误藏在 200 的流首**：额度不足（`40201`）、未知模型（`40300`）以 `{"error":{...}}` / `event:error` 帧表达。`events._error_event` 把它变成 `EventKind.ERROR` 交引擎分类（换号 / 冷却），不当空回复放过。**分类顺序即优先级**：额度关键词**先于** 4xx（实测上游用 400 + 中文「积分不足」表达余额耗尽，只按状态码会判成可重试的 client 错误 → 反复重试同一个废号）；会话死亡（`40100`/`40101`）**先于** 429（会话已死时换号重试毫无意义）。

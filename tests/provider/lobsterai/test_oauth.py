@@ -19,7 +19,8 @@ from src.provider.lobsterai.oauth import (
 def test_new_session_generates_identity_triple():
     session = new_session()
     assert session.uuid
-    assert session.first_keyfrom.isdigit()
+    # 归因是**渠道字符串**（不是时间戳）：上游只接受 `a-z0-9_-` 的合法值
+    assert session.keyfrom == "official"
     assert session.upstream_state
 
 

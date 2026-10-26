@@ -17,7 +17,7 @@ from tests.helpers.constants import SECRET
 
 CREDENTIAL = {
     "accessToken": "AT", "refreshToken": "RT", "uuid": "U",
-    "firstKeyfrom": "F", "latestKeyfrom": "L", "uid": "uid-1",
+    "firstKeyfrom": "official", "latestKeyfrom": "official", "uid": "uid-1",
     "nickname": "alice",
 }
 
@@ -77,14 +77,14 @@ def test_upstream_auth_complete_exchanges_code(tmp_path, monkeypatch):
     """粘贴回调 → 换 token → 落库（不回传 token 到响应体）。"""
     app = build_app(_settings(tmp_path))
 
-    async def fake_exchange(self, code, *, uuid, first_keyfrom):
+    async def fake_exchange(self, code, *, uuid, keyfrom):
         assert code == "CODE"
-        assert uuid and first_keyfrom.isdigit()
+        assert uuid and keyfrom == "official"
         from src.provider.lobsterai.credential import LobsteraiCredential
 
         return LobsteraiCredential.from_dict({
             "accessToken": "AT2", "refreshToken": "RT2", "uuid": uuid,
-            "firstKeyfrom": first_keyfrom, "latestKeyfrom": first_keyfrom,
+            "firstKeyfrom": keyfrom, "latestKeyfrom": keyfrom,
             "uid": "uid-9", "nickname": "bob"})
 
     monkeypatch.setattr(LobsteraiClient, "exchange_code", fake_exchange)
@@ -93,9 +93,9 @@ def test_upstream_auth_complete_exchanges_code(tmp_path, monkeypatch):
         started = client.post("/api/auth/upstream/start",
                               json={"provider": "lobsterai"}).json()
         state = started["state"]
-        # state 形如 uuid:first_keyfrom:upstream_state
-        uuid, first_keyfrom, upstream_state = state.split(":", 2)
-        assert uuid and first_keyfrom.isdigit() and upstream_state
+        # state 形如 uuid:keyfrom:upstream_state
+        uuid, keyfrom, upstream_state = state.split(":", 2)
+        assert uuid and keyfrom == "official" and upstream_state
         response = client.post("/api/auth/upstream/complete", json={
             "provider": "lobsterai", "state": state,
             "url": f"http://127.0.0.1:52641/auth/callback?code=CODE&state={upstream_state}"})

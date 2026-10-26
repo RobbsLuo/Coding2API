@@ -39,6 +39,7 @@ from ...provider.base import (
 from ..lazy_clients import LazyClients
 from . import events as lobsterai_events
 from .credential import LobsteraiCredential, resolve_uid
+from .events import DEFAULT_KEYFROM
 
 logger = logging.getLogger(__name__)
 
@@ -57,29 +58,31 @@ class UpstreamHTTPError(base.UpstreamHTTPError):
 
 
 def keyfrom_body(credential: LobsteraiCredential, client_version: str,
-                 *, now_ms: str | None = None) -> dict[str, str]:
+                 ) -> dict[str, str]:
     """身份载荷（exchange / refresh / 模型目录 query 共用）。
 
-    四个字段的语义：
+    四个字段的语义（**keyfrom 是渠道归因字符串，不是时间戳**）：
 
-    * `firstKeyfrom` / `latestKeyfrom`：登录时刻与最近活动时刻（毫秒时间戳）。
-      续期时**原样回放**（不取当前时刻）——上游把这两个值当同一台客户端的
-      指纹，改了会被当成换了一台设备。
+    * `firstKeyfrom` / `latestKeyfrom`：**渠道归因来源**。官方客户端的定义
+      （`src/shared/keyfrom/constants.ts`）是「本机首次 / 最近一次启动的
+      投放渠道」，取值形如 `official` / `bilibili` / `partner_a`，只允许
+      `a-z0-9_-`、长度 1..64；官方包默认 `official`，**首次写入后不再覆盖**。
+      上游拿它做渠道投放统计，因此**必须原样回放**（续期时也不改）——
+      写错格式（比如塞时间戳）会被当成一个不存在的渠道。
     * `version`：客户端版本号。
     * `uuid` / `userId`：缺失时**不带该键**（而非带空串）——空串可能被
       上游当成非法值。
     """
     body: dict[str, str] = {
-        "firstKeyfrom": credential.first_keyfrom,
-        "latestKeyfrom": credential.latest_keyfrom or credential.first_keyfrom,
+        "firstKeyfrom": credential.first_keyfrom or DEFAULT_KEYFROM,
+        "latestKeyfrom": (credential.latest_keyfrom
+                           or credential.first_keyfrom or DEFAULT_KEYFROM),
         "version": client_version,
     }
     if credential.uuid:
         body["uuid"] = credential.uuid
     if credential.user_id:
         body["userId"] = credential.user_id
-    if now_ms is not None:
-        body["latestKeyfrom"] = now_ms
     return body
 
 
@@ -88,8 +91,17 @@ def chat_headers(credential: LobsteraiCredential, client_version: str,
                  ) -> dict[str, str]:
     """对话 / 模型目录请求头。
 
-    只设五个头：LobsterAI **不认**腾讯系那套 `X-Domain` / `X-Product` /
-    `X-IDE-*` 归属头，带上不仅无用，还可能让服务端按错误的客户端形态归因。
+    头集与官方客户端一致（逐项对照 `src/shared/enterpriseAccount/constants.ts`
+    与 `src/shared/providers/modelRuntimeProfiles.ts`）：
+
+    * `X-LobsterAI-Client-Capabilities`：三个能力都要（见 `events` 模块头）；
+    * `X-LobsterAI-Client-Version`：客户端版本号；
+    * `X-LobsterAI-Account-Mode`：账号模式。官方客户端**每个请求都带**
+      （个人号 `personal` / 企业号 `enterprise`），缺了服务端会当成上下文
+      不完整（企业场景回 `41612 AccountModeMismatch`）。
+
+    **不设**腾讯系那套 `X-Domain` / `X-Product` / `X-IDE-*` 归属头：LobsterAI
+    不认，带上不仅无用，还可能让服务端按错误的客户端形态归因。
     """
     return {
         "Authorization": f"Bearer {credential.access_token}",
@@ -98,6 +110,7 @@ def chat_headers(credential: LobsteraiCredential, client_version: str,
         "User-Agent": lobsterai_events.USER_AGENT,
         "X-LobsterAI-Client-Capabilities": lobsterai_events.CLIENT_CAPABILITIES,
         "X-LobsterAI-Client-Version": client_version,
+        "X-LobsterAI-Account-Mode": lobsterai_events.ACCOUNT_MODE,
     }
 
 
@@ -113,8 +126,7 @@ def auth_headers(client_version: str) -> dict[str, str]:
 
 def prepare_body(payload: dict[str, Any], model: str,
                  credential: LobsteraiCredential, client_version: str,
-                 *, thinking_levels: dict[str, str] | None = None,
-                 now_ms: str | None = None) -> dict[str, Any]:
+                 *, thinking_levels: dict[str, str] | None = None) -> dict[str, Any]:
     """OpenAI 请求体 → LobsterAI 请求体。
 
     * `messages` 深拷贝：下游可能原地改写 messages，不能穿透回引擎持有的
@@ -140,7 +152,7 @@ def prepare_body(payload: dict[str, Any], model: str,
         else:
             body["reasoning_effort"] = wire
     # 身份载荷随对话一起发（上游据此归因）。
-    body.update(keyfrom_body(credential, client_version, now_ms=now_ms))
+    body.update(keyfrom_body(credential, client_version))
     return body
 
 
@@ -514,7 +526,7 @@ class LobsteraiClient(LazyClients):
 
     # ------------------------------------------------------------- 令牌
 
-    async def exchange_code(self, code: str, *, uuid: str, first_keyfrom: str,
+    async def exchange_code(self, code: str, *, uuid: str, keyfrom: str,
                             ) -> LobsteraiCredential:
         """授权码 → 凭证（登录）。
 
@@ -523,15 +535,15 @@ class LobsteraiClient(LazyClients):
         """
         version = await self.client_version()
         body = keyfrom_body(
-            LobsteraiCredential(uuid=uuid, first_keyfrom=first_keyfrom,
-                                latest_keyfrom=first_keyfrom),
-            version, now_ms=_now_ms(self._now))
+            LobsteraiCredential(uuid=uuid, first_keyfrom=keyfrom,
+                                latest_keyfrom=keyfrom),
+            version)
         body["authCode"] = code
         data = await self._envelope("POST", lobsterai_events.EP_EXCHANGE,
                                     None, version, body=body)
         data = lobsterai_events.expect_object(data, "LobsterAI 登录响应")
         return self._credential_from_payload(
-            data, uuid=uuid, first_keyfrom=first_keyfrom,
+            data, uuid=uuid, first_keyfrom=keyfrom,
             latest_keyfrom=body["latestKeyfrom"])
 
     async def refresh_token(self, credential: LobsteraiCredential,
@@ -690,11 +702,6 @@ def _granted_credits(data: Any) -> float:
         if isinstance(value, (int, float)) and not isinstance(value, bool):
             return float(value)
     return lobsterai_events.CHECKIN_REWARD_CREDITS
-
-
-def _now_ms(now: Any) -> str:
-    """当前时刻 → 毫秒时间戳串（上游的 keyfrom 格式）。"""
-    return str(int(float(now()) * 1000))
 
 
 def _next_local_midnight(moment: int) -> int:

@@ -73,8 +73,18 @@ EP_PROFILE_SUMMARY = "/api/user/profile-summary"
 EP_ACTIVITY_SLOT = "/api/client-activities/slot"
 EP_ACTIVITY_BASE = "/api/client-activities"
 
-#: 客户端能力声明（两个都必须，理由见模块头约束 3）。
-CLIENT_CAPABILITIES = "kimi-k3-agentic-v1,thinking-level-control-v1"
+#: 客户端能力声明（**三个都要**，理由见模块头约束 3）。
+#:
+#: 官方客户端（`src/shared/providers/modelRuntimeProfiles.ts`）的声明是
+#: `virtual-models-v1,kimi-k3-agentic-v1,thinking-level-control-v1`：
+#: - `kimi-k3-agentic-v1`：模型目录的准入条件（不带则目录里没有 `kimi-k3`）；
+#: - `thinking-level-control-v1`：关闭思考（`reasoning_effort:"off"`）的前提，
+#:   不带该能力时服务端直接回 500；
+#: - `virtual-models-v1`：虚拟模型（`yd-fast` / `yd-ultra` 预设入口）的能力，
+#:   缺了不影响普通模型，但**声明完整才与官方客户端一致**——风控按客户端
+#:   形态归因，头对不上本身就是「非官方客户端」的可疑特征。
+CLIENT_CAPABILITIES = (
+    "virtual-models-v1,kimi-k3-agentic-v1,thinking-level-control-v1")
 #: User-Agent（照抄上游客户端形态）。
 USER_AGENT = "LobsterAI/0.1.0"
 #: 版本号兜底常量：版本域取不到时用它。宁可版本略旧（签到活动可能拿不到），
@@ -90,6 +100,18 @@ SLOT_PLATFORM = "win32"
 #: 每日签到奖励积分（上游 `rewardCredits` 实测值）。上游每日发放一次，
 #: 积分**当天有效**（过期作废）。
 CHECKIN_REWARD_CREDITS = 100.0
+
+#: 渠道归因默认值（`keyfrom`）。官方客户端的默认投放渠道就是 `official`
+#: （见 `src/shared/keyfrom/constants.ts` 的 `DefaultKeyfrom.Official`）。
+#: 我们不是官方投放渠道，但**必须发一个合法值**——`keyfrom` 是上游做渠道
+#: 统计的字段，缺失或格式非法（上游只允许 `a-z0-9_-`、长度 1..64）都会
+#: 被记成一个不存在的渠道。
+DEFAULT_KEYFROM = "official"
+
+#: 账号模式头。官方客户端**每个请求都带**（个人号 `personal` / 企业号
+#: `enterprise`），缺了服务端当成上下文不完整（企业场景回 `41612`）。
+#: 本渠道只支持个人号，故固定 `personal`。
+ACCOUNT_MODE = "personal"
 
 # ---------------------------------------------------------------- 错误分类
 

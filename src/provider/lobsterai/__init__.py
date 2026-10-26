@@ -164,14 +164,14 @@ class LobsteraiProvider:
         门户会把浏览器重定向到一个打不开的回环地址，`code` 留在地址栏里，
         由用户粘贴回来。
 
-        `state` 编码三样东西（用 `:` 分隔）：客户端 `uuid`、首次登录时间戳、
-        上游 state。三者都要在回调时取回：前两个是续期所需的身份指纹，
+        `state` 编码三样东西（用 `:` 分隔）：客户端 `uuid`、渠道归因、
+        上游 state。三者都要在回调时取回：前两个是续期所需的身份字段，
         第三个用来把回调钉死在那一次登录（门户原样回显）。
         """
         session = new_session()
         return AuthSession(
             flow=AuthFlow.PASTE,
-            state=f"{session.uuid}:{session.first_keyfrom}:{session.upstream_state}",
+            state=f"{session.uuid}:{session.keyfrom}:{session.upstream_state}",
             auth_url=build_login_url(session, portal_base=self.client.portal_base),
             interval=None,
             callback_url=None,
@@ -180,17 +180,17 @@ class LobsteraiProvider:
     async def complete_callback(self, raw_url: str, state: str) -> dict:
         """粘贴的回调链接 → 授权码换 token → 归一化凭证。
 
-        `state` 形如 `uuid:first_keyfrom:upstream_state`：前两段是客户端
+        `state` 形如 `uuid:keyfrom:upstream_state`：前两段是客户端
         身份（换 token 时必须原样带上），第三段是上游 state（校验回调属于
         那一次登录）。
         """
-        uuid, first_keyfrom, upstream_state = _split_state(state)
+        uuid, keyfrom, upstream_state = _split_state(state)
         info = parse_callback_url(raw_url)
         if upstream_state and info.state and info.state != upstream_state:
             raise UpstreamProtocolViolation(
                 "callback state does not match the pending login")
         credential = await self.client.exchange_code(
-            info.code, uuid=uuid, first_keyfrom=first_keyfrom)
+            info.code, uuid=uuid, keyfrom=keyfrom)
         return credential.to_dict()
 
     async def aclose(self) -> None:
@@ -199,16 +199,17 @@ class LobsteraiProvider:
 
 
 def _split_state(state: str) -> tuple[str, str, str]:
-    """`state` → `(uuid, first_keyfrom, upstream_state)`。
+    """`state` → `(uuid, keyfrom, upstream_state)`。
 
-    段数不足时缺的段给空串（上游 state 缺失则跳过回调校验，其余两项
-    仍原样带给上游——由上游自己判）。
+    段数不足时缺的段给空串（上游 state 缺失则跳过回调校验；`keyfrom`
+    缺失时由 `keyfrom_body` 回落默认值 —— 上游只接受 `a-z0-9_-` 的
+    合法归因值，空串会被记成一个不存在的渠道）。
     """
     parts = (state or "").split(":", 2)
     uuid = parts[0] if parts else ""
-    first_keyfrom = parts[1] if len(parts) > 1 else ""
+    keyfrom = parts[1] if len(parts) > 1 else ""
     upstream_state = parts[2] if len(parts) > 2 else ""
-    return uuid, first_keyfrom, upstream_state
+    return uuid, keyfrom, upstream_state
 
 
 __all__ = ["LobsteraiProvider", "credential_key"]

@@ -22,8 +22,8 @@ def cred(**over) -> LobsteraiCredential:
         "refresh_token": "RT",
         "expires_at": MOMENT + 86400,
         "uuid": "uuid-1",
-        "first_keyfrom": "1700000000000",
-        "latest_keyfrom": "1700000000000",
+        "first_keyfrom": "official",
+        "latest_keyfrom": "official",
         "user_id": "user-1",
         "nickname": "alice",
     }
