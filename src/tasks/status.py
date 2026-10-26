@@ -48,9 +48,9 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
              "兜底重拉各渠道模型表：没有它，列表只在有人访问 /v1/models 或 "
              "Playground 时才刷新，纯 API 用法的部署会让归属表与落盘快照变陈旧。"),
     TaskSpec("model_probe", "模型可用性探活",
-             "对仍被负缓存（「上游无此模型」）的 (渠道, 模型) 发一次最小对话："
-             "成功即解除避让，额度/限流类失败只记 inconclusive 不禁用。"
-             "周期见「模型探活周期」。"),
+             "对仍被负缓存（「上游无此模型」）与已判死的 (渠道, 模型) 发一次最小"
+             "对话：成功即恢复展示并解除避让，额度/限流类失败只记 inconclusive"
+             " 不禁用。周期见「模型探活周期」。"),
     TaskSpec("openrouter_catalog", "模型目录刷新（OpenRouter）",
               "一次抓取 OpenRouter 公开模型列表，落盘三份数据：刊例价（成本估算）、"
               "明细元数据（「模型列表」页）、Artificial Analysis 能力指数"

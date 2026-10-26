@@ -227,9 +227,9 @@ CREATE INDEX IF NOT EXISTS idx_model_cooling_until
 -- `state`：ok（探活成功）/ failed（上游明确不认这个模型）/ inconclusive
 -- （额度、限流、网络等与模型无关的失败——**绝不能**据此禁用）。
 -- `manual`：人工接管标记（非空 = 跳过自动探活），见 src/api/admin_model_availability.py。
--- `failed` + 同 (渠道, 模型) 仍有生效中的 `credential_model_cooldowns`
--- （reason='blocked'）时，该 (渠道, 模型) 会被模型列表暂时摘掉；到期口径
--- 就是那条负缓存的 cooling_until，见 src/api/models.py::merged_entries。
+-- `failed` 时该 (渠道, 模型) 会被模型列表摘掉（**不看**同渠道的
+-- `credential_model_cooldowns` 是否仍生效）；恢复靠复探成功（`ModelProbeTask`
+-- 每轮探 failed 行），隐藏没有到期时间，见 src/api/models.py::merged_entries。
 CREATE TABLE IF NOT EXISTS model_probes (
     provider      TEXT NOT NULL,
     model         TEXT NOT NULL,

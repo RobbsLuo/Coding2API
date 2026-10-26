@@ -23,8 +23,11 @@ publish 别名表——否则启动预热跑完之前别名表是空的，扁平
 **缓存存的是未过滤列表，过滤在每个出口现做**：MODEL_BLOCKLIST 是可热更项
 （「改完立即生效」），若把过滤结果存进缓存，改完黑名单要等 TTL（300s）
 才反映到 Playground，且被滤掉的模型在 TTL 内会从「兜底缓存」里复活。
-「探活判死」同理现算（`model_probes.failed_and_blocked`），并**逐渠道**抽掉：
+「探活判死」同理现算（`model_probes.failed`），并**逐渠道**抽掉：
 (渠道, 模型) 判死只让这一对从该渠道消失，别的渠道正常时同一模型照常展示。
+判死不看到期、只看结论：恢复入口是复探成功（`ModelProbeTask` 每轮探判死行），
+不再挂在 blocked 负缓存的 `cooling_until` 上——负缓存过期后没人再探，旧口径
+等于永久隐藏。
 """
 
 from __future__ import annotations
@@ -98,16 +101,16 @@ def merged_entries(services: Services, connected: set[str]) -> list[dict[str, An
     TTL 复用、落盘恢复三条路径共用同一段合并逻辑，行为一致。渠道过滤用
     `connected`（有可用凭证），与 `list_models` 的拉取范围保持同口径。
 
-    **再叠一层「探活判死」过滤**（`probed_out`）：(渠道, 模型) 被探活判死且
-    仍被 blocked 负缓存锁着时，把这条模型**从该渠道的表里抽掉**——只抽该渠道，
-    别的渠道正常时同一模型照常展示（合并键跨渠道，多渠道条目退化成单渠道条目）。
-    与黑名单同口径：点名直连指定模型不受影响。
+    **再叠一层「探活判死」过滤**（`probed_out`）：(渠道, 模型) 被探活判死时，
+    把这条模型**从该渠道的表里抽掉**——只抽该渠道，别的渠道正常时同一模型照常
+    展示（合并键跨渠道，多渠道条目退化成单渠道条目）。与黑名单同口径：点名
+    直连指定模型不受影响。
 
     **但别名登记不能跟着摘**（见 `_hidden_aliases`）：摘掉后执行侧
     `_narrow_providers` 会因「没有任何渠道登记该模型」回退成全部渠道扇出。
     """
     patterns = services.settings.blocklist_patterns
-    probed_out = services.model_probes.failed_and_blocked()
+    probed_out = services.model_probes.failed()
     grouped: dict[str, dict[str, Any]] = {}   # 归一键 → {providers, meta, raw_ids, ...}
     for provider_id, table in services.model_list_cache.items():
         if provider_id in connected and table:
@@ -139,8 +142,9 @@ def _hidden_aliases(services: Services,
     codebuddy_intl，三家各回「无此模型」，8 条负缓存写在从没有该模型的渠道上。
 
     故这里把判死的 (渠道, 模型) 补登记回别名表：请求仍**收窄**到真正持有它
-    的渠道，由负缓存（判死的前提条件）让该渠道不可选 → 快速 503「该模型暂
-    时不可用」，而不是打一轮无关上游。
+    的渠道（多半有负缓存兜底 → 快速 503「该模型暂时不可用」），而不是打一轮
+    无关上游。判死不再要求挂负缓存（见 `ModelProbeRepository.failed`），故也可能
+    真打到该渠道并得到上游的原始错误——那仍比污染其它渠道好。
 
     键推导走 `_register_entry_alias`（与真实条目**同一套**）：两处各写一份
     键推导，迟早漂移——漂移的表现是「用户按展示名请求时收窄失效」。
@@ -202,7 +206,7 @@ def _publish(services: Services, entries: list[dict[str, Any]],
     custom = parse_model_aliases(str(getattr(services.settings, "model_aliases", "")))
     aliases = _build_aliases(entries, custom)
     for provider_id, provider_aliases in _hidden_aliases(
-            services, services.model_probes.failed_and_blocked(),
+            services, services.model_probes.failed(),
             connected).items():
         target = aliases.setdefault(provider_id, {})
         for key, raw_id in provider_aliases.items():

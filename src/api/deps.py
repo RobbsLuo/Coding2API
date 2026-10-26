@@ -99,9 +99,10 @@ class Services:
     alerts: AlertRepository
     # 凭证级限额护栏配置（/api/credentials/{id}/limits）。
     limits: LimitsRepository
-    # 主动探活结论（`model_probes`）：管理台展示 + 人工接管标记；`failed` 且
-    # 负缓存仍生效时，`merged_entries` 会把该 (渠道, 模型) 从列表里抽掉。与
-    # 调度侧的 `credential_model_cooldowns` 严格分开（见 src/tasks/model_probe.py）。
+    # 主动探活结论（`model_probes`）：管理台展示 + 人工接管标记；`failed` 时
+    # `merged_entries` 会把该 (渠道, 模型) 从列表里抽掉（不看负缓存是否还在，
+    # 恢复靠复探成功）。与调度侧的 `credential_model_cooldowns` 严格分开
+    # （见 src/tasks/model_probe.py）。
     model_probes: ModelProbeRepository
     # Key 级配额：准入判定（当日用量注入 KeyUsageRepository）+ 自助用量共用。
     # 进程内滑动窗口/在途计数在 guard 里，重启清零（单进程部署语义）。

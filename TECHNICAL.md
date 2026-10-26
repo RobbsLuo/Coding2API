@@ -590,11 +590,13 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 - **逐渠道增量 publish**：每拉完一条渠道 `publish_aliases()` 一次（就地更新，executor 闭包引用同一 dict），不等最慢那条（zen 逐个探活可占 12–15s；期间别名表为空会让 `_narrow_providers` 按全部渠道放行）。合并逻辑收敛到 `merged_entries()`。
 
 ### 9.1.1 探活判死只影响展示，不影响归属
-`model_probes.failed_and_blocked()`（判死 **且** 负缓存仍生效）命中的 (渠道, 模型) 从**展示**里摘掉（`merged_entries` 逐渠道抽掉），但**别名登记保留**（`api/models._hidden_aliases` → `_register_entry_alias`）。
+`model_probes.failed()`（只看 `state='failed'`，**不再**要求负缓存仍生效）命中的 (渠道, 模型) 从**展示**里摘掉（`merged_entries` 逐渠道抽掉），但**别名登记保留**（`api/models._hidden_aliases` → `_register_entry_alias`）。
 
-- **为什么必须保留**：别名表是执行侧 `_narrow_providers` 收窄候选的唯一依据。摘掉后「没有任何渠道登记该模型」→ 回退成**全部渠道扇出** → 请求被发到一堆根本没有该模型的上游，各回「无此模型」（CodeBuddy 11102 / officeAce 81004·81009 / CodeArts InferHub.002002009），并被写上 (凭证, 模型) 负缓存——污染的是**从没有该模型**的渠道。
+- **为什么去掉「负缓存仍生效」这个条件**：人工「立即探活」判死时通常没有负缓存（负缓存只由真实请求写入），旧口径下这些模型会一直留在 Playground——上游目录撒谎（officeAce 的 `/v2/models` 挂着 26 个模型，其中多个推理端点 404 `ModelArts.81009` / 403 `ModelArts.81004`）时最明显。
+- **到期口径改为复探**：隐藏没有时间上限，恢复入口只有「再探一次成功」——`ModelProbeTask.run_once` 每轮把 `state='failed'` 的行一起复探（`ModelProbeRepository.failed_rows`，用上游原名），`ok` 即恢复展示并清负缓存。若仍挂到期在负缓存上，负缓存过期后没人再探 = 永久隐藏。
+- **为什么别名必须保留**：别名表是执行侧 `_narrow_providers` 收窄候选的唯一依据。摘掉后「没有任何渠道登记该模型」→ 回退成**全部渠道扇出** → 请求被发到一堆根本没有该模型的上游，各回「无此模型」（CodeBuddy 11102 / officeAce 81004·81009 / CodeArts InferHub.002002009），并被写上 (凭证, 模型) 负缓存——污染的是**从没有该模型**的渠道。
 - **实测**（2026-10-26 `deepseek-v4.1-flash-1017`）：officeAce 的 `/v2/models` 挂着它（26 个之一）但推理端点直接 404 `ModelArts.81009`（上游目录撒谎）；人工探活判死后别名表丢了归属 → 扇出到 codebuddy / codearts / codebuddy_intl → 8 条负缓存写在了从没有该模型的渠道上。
-- **修好后**：收窄仍指向真正持有它的渠道 → 负缓存（判死的前提条件）让该渠道不可选 → 快速 503「该模型暂时不可用」，其余渠道零调用、零负缓存。
+- **修好后**：收窄仍指向真正持有它的渠道（多半有负缓存兜底 → 快速 503「该模型暂时不可用」），其余渠道零调用、零负缓存。
 - **补登记的键推导与真实条目同源**（`_register_entry_alias`）：两处各写一份迟早漂移，漂移表现是「用户按展示名请求时收窄失效」。**不覆盖**已有映射（真实条目优先）；**只登记有可用凭证的渠道**（与 `merged_entries` 同口径）。
 - **兜底清理**：`scripts/cleanup_stale_blocked.py` 删「该渠道目录里根本没有这个模型」的负缓存行（扇出留下的噪声）。判据保守：目录里**有**这个模型的行一律保留（那是上游真把它下架了，负缓存正是应有的避让）；目录快照读不出来 → 一律不删。
 

@@ -574,7 +574,7 @@ describe("ModelCatalogPage（模型列表）", () => {
     await settle();
 
     expect(screen.getByTestId("model-probe-empty")).toHaveTextContent(
-      "当前没有被负缓存锁住的模型");
+      "当前没有被负缓存锁住的模型，也没有判死 / 探活记录");
   });
 
   it("探活面板：接口失败时给专属错误提示（不影响目录表）", async () => {

@@ -426,17 +426,17 @@ Playground 与 `/v1/models` 走 stale-while-revalidate：有缓存立刻回旧�
 
 ### 主动探活与人工接管
 
-主动探活面板（`GET /api/models/probes`，operator）只探**仍被 `blocked` 负缓存锁住**的 (渠道, 模型)。
+主动探活面板（`GET /api/models/probes`，operator）探两类 (渠道, 模型)：**仍被 `blocked` 负缓存锁住**的，以及**已判死**的（`state='failed'`）。
 
 三态判定：
 
-- **成功** → 立即清该渠道 `blocked` 负缓存（唯一提前恢复入口）。
+- **成功** → 立即清该渠道 `blocked` 负缓存 + 该模型回到列表（唯一恢复入口）。
 - **`failed`**（上游明确 `BLOCKED` / `INVALID`）→ 留负缓存 + 累加连续失败。
 - **`inconclusive`**（额度、限流、网络、超时、空流、任何异常）→ 绝不禁用，连续失败归零。
 
 探活与生产完全隔离：直连 `provider.stream_chat`；不写 `usage_events`、不动冷却表、不改健康度。结论落独立 `model_probes` 表。面板不列命中 `MODEL_BLOCKLIST` 的模型。
 
-**判死的模型同时从模型列表摘掉**：`failed` 且仍被负缓存锁着 → 只抽该 (渠道, 模型)；负缓存过期即自动回列表。
+**判死的模型同时从模型列表摘掉**：只抽该 (渠道, 模型)，其它渠道正常时同一模型照常展示。**隐藏没有到期时间**——恢复只靠复探成功（后台周期会把判死行一起探），不再挂在负缓存的 `cooling_until` 上：负缓存过期后没人再探，等于永久隐藏。
 
 **人工接管**（`POST /api/models/probes/manual`）：接管后自动探活跳过该行，但不改负缓存。要立刻恢复 → 点「立即探活」。后台周期 `MODEL_PROBE_MINUTES`（默认 0 = 关闭）。
 
@@ -643,7 +643,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `UPSTREAM_STATUS_ENABLED` | `true` | 上游状态页开关 |
 | `UPSTREAM_STATUS_MINUTES` | `5` | 状态抓取周期（下限 1） |
 | `UPSTREAM_STATUS_TIMEOUT_SECONDS` | `10.0` | 单源 HTTP 超时 |
-| `MODEL_PROBE_MINUTES` | `0` | 主动探活周期（`0` = 关）。只探被 `blocked` 负缓存锁住的 (渠道, 模型)；成功即清负缓存，其余绝不禁用。可热更 |
+| `MODEL_PROBE_MINUTES` | `0` | 主动探活周期（`0` = 关）。探仍被 `blocked` 负缓存锁住与已判死的 (渠道, 模型)；成功即恢复展示并清负缓存，其余绝不禁用。可热更 |
 | `QUOTA_EXPIRY_WINDOW_SECONDS` | `129600` | 主到期排序窗口；`≤0` 关闭 |
 | `QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS` | `604800` | 次到期窗口；`≤0` 关闭 |
 | `CONVERSATION_STICKY_SECONDS` | `3600` | 会话粘性 TTL。优先级：请求体会话标识 > 请求头 > 消息前缀指纹；pin 最高。`≤0` 关 |

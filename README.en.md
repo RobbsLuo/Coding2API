@@ -424,17 +424,17 @@ Playground and `/v1/models` use stale-while-revalidate: cached lists return imme
 
 ### Active probing and manual takeover
 
-Probe panel (`GET /api/models/probes`, operator) only probes `(channel, model)` pairs still locked by `blocked` negative cache.
+Probe panel (`GET /api/models/probes`, operator) probes two kinds of `(channel, model)` pairs: those still locked by `blocked` negative cache, and those already declared dead (`state='failed'`).
 
 Three outcomes:
 
-- **Success** → clears that channel's `blocked` cache immediately (the only early-recovery path).
+- **Success** → clears that channel's `blocked` cache and returns the model to the list (the only recovery path).
 - **`failed`** (upstream says `BLOCKED` / `INVALID`) → keeps cache and increments consecutive failures.
 - **`inconclusive`** (quota, rate limit, network, timeout, empty stream, any exception) → never disables, resets consecutive counter.
 
 Probing is isolated from production: calls `provider.stream_chat` directly, writes no `usage_events`, touches no cooldown table, changes no health. Results go to separate `model_probes` table. Panel hides models matched by `MODEL_BLOCKLIST`.
 
-**Dead models also drop out of model list**: while `failed` and still cache-locked, that `(channel, model)` pair is hidden; cache expiry returns it automatically.
+**Dead models also drop out of model list**: only that `(channel, model)` pair is hidden — other channels serving the same model still show it. **Hiding has no expiry** — recovery only happens on a successful re-probe (the background loop re-probes dead rows), not on negative-cache `cooling_until` (nothing would re-probe after it expires, i.e. permanent hiding).
 
 **Manual takeover** (`POST /api/models/probes/manual`): skips automatic probing for that row, cache untouched. *Probe now* recovers immediately. Interval `MODEL_PROBE_MINUTES` (default 0 = off).
 
@@ -641,7 +641,7 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 | `UPSTREAM_STATUS_ENABLED` | `true` | Upstream status page on/off |
 | `UPSTREAM_STATUS_MINUTES` | `5` | Fetch period (min 1) |
 | `UPSTREAM_STATUS_TIMEOUT_SECONDS` | `10.0` | Per-source HTTP timeout |
-| `MODEL_PROBE_MINUTES` | `0` | Probe period (`0` = off). Only cache-locked `(channel, model)` pairs; success clears the cache, everything else never disables. Hot |
+| `MODEL_PROBE_MINUTES` | `0` | Probe period (`0` = off). Probes `(channel, model)` pairs locked by `blocked` cache or already declared dead; success restores the model and clears the cache, everything else never disables. Hot |
 | `QUOTA_EXPIRY_WINDOW_SECONDS` | `129600` | Main expiry window; `≤0` disables |
 | `QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS` | `604800` | Secondary window; `≤0` disables |
 | `CONVERSATION_STICKY_SECONDS` | `3600` | Stickiness TTL. Priority: body key > header > message-prefix fingerprint; pin wins. `≤0` disables |

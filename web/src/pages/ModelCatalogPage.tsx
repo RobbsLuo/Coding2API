@@ -200,9 +200,10 @@ function ProbePanel({
   return (
     <Panel title="主动探活">
       <p className="text-xs text-muted-foreground">
-        只探仍被「该后端无此模型」负缓存锁住的 (渠道, 模型)：成功即清负缓存、
-        模型立刻回到池子；上游明确说没这个模型才算失败；额度 / 限流 / 网络一律
-        「无法判定」，不禁用。
+        探两类 (渠道, 模型)：仍被「该后端无此模型」负缓存锁住的，以及已判死的。
+        成功即清负缓存、模型立刻回到池子；上游明确说没这个模型才算失败；额度 /
+        限流 / 网络一律「无法判定」，不禁用。判死即从模型列表摘掉且没有到期时间，
+        复探成功是唯一恢复入口。
       </p>
       {error ? (
         <div data-testid="model-probe-error">
@@ -212,7 +213,7 @@ function ProbePanel({
         <Empty data-testid="model-probe-loading">正在读取探活记录…</Empty>
       ) : rows.length === 0 ? (
         <Empty data-testid="model-probe-empty">
-          当前没有被负缓存锁住的模型，也没有探活记录
+          当前没有被负缓存锁住的模型，也没有判死 / 探活记录
         </Empty>
       ) : (
         <div className="space-y-2">

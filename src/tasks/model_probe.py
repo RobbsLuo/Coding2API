@@ -1,15 +1,18 @@
-"""模型可用性主动探活：只探「已被负缓存」的 (渠道, 模型)，成功即解除避让。
+"""模型可用性主动探活：探「已被负缓存」与「已判死」的 (渠道, 模型)。
 
-**为什么只探负缓存行**：遍历全量模型表 × 全量凭证要真发几百次对话，耗的是
+**为什么只探这两类**：遍历全量模型表 × 全量凭证要真发几百次对话，耗的是
 用户额度。而负缓存（`credential_model_cooldowns.reason='blocked'`，11102「该
 后端无此模型」）才是唯一会**静默锁死一个模型 6–24 小时**的状态——探它，就是
-回答「这个模型到底回来了没有」，同时也是唯一能让它提前恢复的入口。
+回答「这个模型到底回来了没有」，同时也是唯一能让它提前恢复的入口。**判死行**
+（`model_probes.state='failed'`）同理必须探：判死会把该 (渠道, 模型) 从
+`/v1/models` 与 Playground 里摘掉（见 `api.models.merged_entries`），而隐藏
+本身没有到期时间——不探就永远是隐藏的。
 
 **与生产完全隔离**：直连 provider 的 `stream_chat`，不经过 executor，因此
 不写 `usage_events`、不动冷却表、不改健康度。探活结论写进独立的
 `model_probes` 表；唯一的出口影响是列表展示——`failed` 期间该 (渠道, 模型)
-从 `/v1/models` 里暂时摘掉（到期口径是那条负缓存的 `cooling_until`，见
-`api.models.merged_entries`），不影响选号与凭证健康度。
+从 `/v1/models` 里摘掉，`ok` 即恢复（见 `api.models.merged_entries`），不影响
+选号与凭证健康度。
 
 **三态判定**（对应 `state`）：
 
@@ -58,7 +61,7 @@ def probe_payload() -> dict[str, Any]:
 
 
 class ModelProbeTask:
-    """探一轮仍被负缓存的 (渠道, 模型)，成功即清负缓存。"""
+    """探一轮仍被负缓存或已判死的 (渠道, 模型)，成功即清负缓存并恢复展示。"""
 
     def __init__(self, credentials, providers: dict, probes, *,
                  pacer=None, timeout: float = PROBE_TIMEOUT_SECONDS,
@@ -76,7 +79,7 @@ class ModelProbeTask:
         report = TaskReport()
         manual = self._probes.manual_marked()
         seen: set[tuple[str, str]] = set()
-        for row in self._credentials.blocked_cooldowns():
+        for row in self._targets():
             key = (row["provider"], row["model"])
             if key in manual or key in seen:
                 # 同一 (渠道, 模型) 可能挂着多个号的负缓存，只需探一次：结论
@@ -102,6 +105,27 @@ class ModelProbeTask:
             self._probes.record(provider=row["provider"], model=row["model"],
                                 state=state, error=error)
         return report
+
+    def _targets(self) -> list[dict[str, Any]]:
+        """本轮要探的 (渠道, 模型)：负缓存行 + 已判死行（去重）。
+
+        判死行必须一起探：判死即从列表摘掉且**没有到期时间**，唯一的恢复入口
+        就是复探成功。顺序上先负缓存行、再判死行——判死行多半也挂着负缓存，
+        去重后不会重复探；两类都去重后同一对只探一次。
+        """
+        targets: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for row in self._credentials.blocked_cooldowns():
+            key = (row["provider"], row["model"])
+            if key not in seen:
+                seen.add(key)
+                targets.append({"provider": row["provider"], "model": row["model"]})
+        for row in self._probes.failed_rows():
+            key = (row["provider"], row["model"])
+            if key not in seen:
+                seen.add(key)
+                targets.append(row)
+        return targets
 
     async def probe_now(self, provider_id: str, model: str) -> tuple[str, str]:
         """立即探一个 (渠道, 模型)（管理台「立即探活」/ 人工恢复前复核）。

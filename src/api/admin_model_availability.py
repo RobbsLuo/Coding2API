@@ -26,8 +26,9 @@
   判定里 `inconclusive` **绝不**触发禁用。
 * 探活与生产完全隔离：直连 provider，不写 `usage_events`、不动冷却表、不改
   健康度，结论只进独立的 `model_probes` 表。唯一的出口影响是**列表展示**：
-  判死（`failed`）且负缓存仍生效的 (渠道, 模型) 从 `/v1/models` 里摘掉，
-  到期口径是那条负缓存的 `cooling_until`（见 `api.models.merged_entries`）。
+  判死（`failed`）的 (渠道, 模型) 从 `/v1/models` 里摘掉，探活成功即恢复
+  （见 `api.models.merged_entries`）。判死行由后台周期一起复探——隐藏没有
+  到期时间，复探是唯一的恢复入口。
 * 探活**成功**才是恢复入口：它清掉该 (渠道, 模型) 的 blocked 负缓存，模型
   立即回到池子，不必等 6–24h 的 TTL 走完。
 * 人工接管（`manual != ''`）优先于自动探活：管理员点过「恢复」之后不希望

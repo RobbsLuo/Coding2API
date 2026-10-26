@@ -2,12 +2,14 @@
 
 口径见 `src/tasks/model_probe.py`：
 
-* 只探仍被 blocked 负缓存的 (渠道, 模型)，同一结论只探一次；
+* 探仍被 blocked 负缓存的 (渠道, 模型) 与**已判死**的行，同一结论只探一次；
 * 成功 → 清该渠道的 blocked 负缓存（恢复入口）；
 * 上游明确「无此模型」→ failed，保留负缓存；
 * 额度/限流/网络/超时/静默空流 → inconclusive，**绝不禁用**；
 * 人工接管（manual != ''）整行跳过；
-* 探活不写 usage_events、不动冷却（与生产隔离）。
+* 探活不写 usage_events、不动冷却（与生产隔离）；
+* 判死行即使没有负缓存也必须复探：判死即从列表摘掉且没有到期时间，复探
+  是唯一的恢复入口（`model_probes.failed` 只看 `state`）。
 """
 
 from __future__ import annotations
@@ -291,6 +293,73 @@ async def test_same_model_across_credentials_probed_once(repo):
     assert len(provider.calls) == 1
     # 清的时候按渠道整片清：两个号都恢复，而不是只恢复探活用的那个
     assert credentials.blocked_cooldowns() == []
+
+
+async def test_failed_probe_row_is_reprobed_and_recovers(repo):
+    """判死行即使没有负缓存也要复探：隐藏没有到期时间，复探是唯一恢复入口。
+
+    真实场景（officeAce `ModelArts.81009`）：上游 `/v2/models` 挂着模型但推理
+    端点 404，人工探活判死后该行没有负缓存兜底；旧口径下它永远留在 Playground。
+    """
+    credentials, db = repo
+    _add(credentials)
+    _probes(db).record(provider="codebuddy", model="Gone-Model", state="failed")
+    provider = FakeProvider()
+    task = ModelProbeTask(credentials, {"codebuddy": provider}, _probes(db))
+
+    report = await task.run_once()
+
+    assert report.attempted == 1
+    assert report.succeeded == 1
+    # 复探用**上游原名**（`model_probes` 存的就是原名），不做小写化
+    assert provider.calls[0][0] == "Gone-Model"
+    assert _probes(db).get("codebuddy", "Gone-Model")["state"] == "ok"
+    assert _probes(db).failed() == set()
+
+
+async def test_failed_probe_row_still_failed_keeps_hidden(repo):
+    """复探仍判死 → 结论继续是 failed，展示保持隐藏（不是「探过就放出来」）。"""
+    credentials, db = repo
+    _add(credentials)
+    _probes(db).record(provider="codebuddy", model="m", state="failed")
+    provider = FakeProvider([Event(EventKind.ERROR, error_message="no such model",
+                                   error_kind=ErrKind.BLOCKED)])
+    task = ModelProbeTask(credentials, {"codebuddy": provider}, _probes(db))
+
+    report = await task.run_once()
+
+    assert report.failed == 1
+    row = _probes(db).get("codebuddy", "m")
+    assert (row["state"], row["failures"]) == ("failed", 2)
+    assert _probes(db).failed() == {("codebuddy", "m")}
+
+
+async def test_blocked_and_failed_row_probed_only_once(repo):
+    """判死行同时挂着负缓存时只探一次（两类目标去重）。"""
+    credentials, db = repo
+    cid = _add(credentials)
+    _seed_blocked(credentials, credential_id=cid, model="m")
+    _probes(db).record(provider="codebuddy", model="m", state="failed")
+    provider = FakeProvider()
+    task = ModelProbeTask(credentials, {"codebuddy": provider}, _probes(db))
+
+    report = await task.run_once()
+
+    assert report.attempted == 1
+    assert len(provider.calls) == 1
+    assert credentials.blocked_cooldowns() == []
+
+
+async def test_failed_probe_row_without_credentials_is_skipped(repo):
+    """判死行所属渠道一个凭证都没有 → skipped（不炸，也不清任何东西）。"""
+    credentials, db = repo
+    _probes(db).record(provider="codebuddy", model="m", state="failed")
+    task = ModelProbeTask(credentials, {"codebuddy": FakeProvider()}, _probes(db))
+
+    report = await task.run_once()
+
+    assert (report.attempted, report.skipped) == (0, 1)
+    assert _probes(db).failed() == {("codebuddy", "m")}
 
 
 async def test_manual_takeover_skips_probe(repo):

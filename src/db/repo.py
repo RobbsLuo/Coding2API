@@ -1366,14 +1366,20 @@ class AuditRepository:
 
 class ModelProbeRepository:
     """主动探活结论（`model_probes`）：管理台展示 + 「探活成功清负缓存」+
-    判死期间从模型列表暂时摘除。
+    判死期间从模型列表摘除。
 
     与 `credential_model_cooldowns` 严格分工：那张表是调度**权威**状态（真实
     请求的失败驱动，直接决定选号），本表只是观测记录。把探测结论写进冷却表
     会让一次探测直接改变选号结果，而「探测失败」未必是模型本身的问题（额度
-    耗尽、限流、网络抖动都会失败）。唯一的出口影响是 `failed_and_blocked()`：
-    判死**且**负缓存仍生效的 (渠道, 模型) 从模型列表与别名表里整对抽掉，
-    到期口径仍是负缓存的 `cooling_until`，不引入第二套时间基准。
+    耗尽、限流、网络抖动都会失败）。唯一的出口影响是 `failed()`：判死的
+    (渠道, 模型) 从模型列表与别名表里整对抽掉，**不看负缓存是否仍在**——
+    上游目录撒谎（officeAce 的 `/v2/models` 挂着推理端点 404 的模型）时，
+    判死往往没有负缓存兜底，旧口径下这些模型会一直留在 Playground 里。
+
+    隐藏**没有到期时间**：恢复入口只有「再探一次成功」（`failed()` 的行由
+    `ModelProbeTask.run_once` 每轮复探，人工也可点「立即探活」）。到期口径
+    若挂在负缓存上，负缓存过期后没人再探，隐藏就变成了永久隐藏——现在两者
+    解耦：判死即隐藏，复探即恢复。
     """
 
     def __init__(self, db) -> None:
@@ -1436,30 +1442,34 @@ class ModelProbeRepository:
                 "manual = excluded.manual, updated_at = excluded.updated_at",
                 (provider, model, manual, stamp))
 
-    def failed_and_blocked(self, now: int | None = None
-                           ) -> set[tuple[str, str]]:
-        """「探活判死」且**仍被 blocked 负缓存锁着**的 `(渠道, 模型小写原名)`。
+    def failed(self) -> set[tuple[str, str]]:
+        """「探活判死」的 `(渠道, 模型小写原名)`：模型列表据此整对抽掉。
 
-        模型列表据此把该 (渠道, 模型) 整对抽掉（见 `api.models.merged_entries`）。
-        两个条件缺一不可：
+        判据只有 `state='failed'`（上游明确 `BLOCKED` / `INVALID`）。**不再**
+        要求同时挂着 blocked 负缓存：人工「立即探活」判死时通常没有负缓存
+        （负缓存只由真实请求写入），旧口径下这些模型会一直留在 Playground /
+        `/v1/models` 里——上游目录撒谎（officeAce `ModelArts.81009`）时尤其
+        明显。隐藏的到期由复探负责：`ModelProbeTask.run_once` 会把这些行一起
+        探，探活成功（`state='ok'`）即恢复展示。
 
-        * 只有 `state='failed'`：探活判死是观测结论，光它一个不会随时间恢复。
-        * 还必须**仍被负缓存锁着**：`cooling_until` 是这套隐藏的到期口径（6–24h
-          起步的退避），与调度侧的避让同一块表、同一个到期时刻。负缓存过期后
-          没人再探（`ModelProbeTask` 只探被锁的行），若隐藏只看探活结论，该模型
-          会永久消失——它其实只是还没被重新验证。
-
-        模型名取两表原样比对（`model_probes` 的行本来就来自
-        `blocked_cooldowns`），输出统一小写以匹配模型列表缓存的键。
+        模型名输出统一小写以匹配模型列表缓存的键（`model_probes.model` 存的是
+        上游原名）。
         """
         rows = self._db.connect().execute(
-            "SELECT DISTINCT cred.provider AS provider, LOWER(c.model) AS model "
-            "FROM credential_model_cooldowns c "
-            "JOIN credentials cred ON cred.id = c.credential_id "
-            "JOIN model_probes p ON p.provider = cred.provider AND p.model = c.model "
-            "WHERE c.reason = 'blocked' AND c.cooling_until > ? AND p.state = 'failed'",
-            (_now(now),)).fetchall()
+            "SELECT DISTINCT provider, LOWER(model) AS model "
+            "FROM model_probes WHERE state = 'failed'").fetchall()
         return {(row["provider"], row["model"]) for row in rows}
+
+    def failed_rows(self) -> list[dict[str, Any]]:
+        """判死行的 `(渠道, 模型原名)`：供探活任务复探（探活成功即恢复展示）。
+
+        与 `failed()` 同一判据、不同用途：那个给小写集合做展示过滤，这个给
+        探活任务回放上游原名（上游只认原名，小写可能打不通）。
+        """
+        rows = self._db.connect().execute(
+            "SELECT provider, model FROM model_probes WHERE state = 'failed' "
+            "ORDER BY provider, model").fetchall()
+        return [dict(row) for row in rows]
 
     def manual_marked(self) -> set[tuple[str, str]]:
         """被人工接管的 (渠道, 模型)：自动探活整行跳过。"""

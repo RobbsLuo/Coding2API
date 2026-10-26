@@ -448,10 +448,11 @@ def test_models_failure_backoff_stretches_retry_interval(tmp_path):
                           now=1000.0 + MODEL_LIST_BACKOFF_MAX_SECONDS + 1)
 
 def test_failed_probe_hides_model_for_that_channel_only(tmp_path):
-    """探活判死 + 仍被 blocked 负缓存锁着 → 只把该 (渠道, 模型) 从该渠道抽出。
+    """探活判死 → 只把该 (渠道, 模型) 从该渠道抽出，别的渠道照常展示。
 
-    其它渠道正常时同一模型照常展示（多渠道条目退化成单渠道条目）；负缓存
-    到期后自动回到列表（那之后没人再探，只看探活结论会永久隐藏）。
+    其它渠道正常时同一模型照常展示（多渠道条目退化成单渠道条目）；恢复入口
+    只有复探成功（`ModelProbeTask` 每轮探判死行），隐藏没有到期时间——不再
+    挂在 blocked 负缓存的 `cooling_until` 上。
 
     **但别名登记必须保留**（2026-10-26 实测故障）：摘掉别名后执行侧
     `_narrow_providers` 找不到任何登记该模型的渠道 → 回退成全部渠道扇出，
@@ -502,9 +503,14 @@ def test_failed_probe_hides_model_for_that_channel_only(tmp_path):
         # 真正持有该模型的渠道，不会因「没人登记」回退成全部渠道扇出
         assert services.model_aliases["trae"]["glm-5.3"] == "glm-5.3"
 
-        # 负缓存到期：自动回到列表（不依赖再次探活）
+        # 负缓存到期**不**自动回列表：隐藏口径只看探活结论（没有到期时间）
         with services.credentials._db.transaction() as conn:
             conn.execute("UPDATE credential_model_cooldowns SET cooling_until = 1")
+        entry = client.get("/v1/models", headers=auth).json()["data"][0]
+        assert entry["providers"] == ["zen"]
+
+        # 复探成功 → 立即回到列表
+        services.model_probes.record(provider="trae", model="glm-5.3", state="ok")
         entry = client.get("/v1/models", headers=auth).json()["data"][0]
         assert entry["providers"] == ["trae", "zen"]
 
@@ -705,7 +711,11 @@ def test_hidden_alias_falls_back_to_raw_id_when_catalog_dropped_it(tmp_path):
 
 
 def test_probe_ok_does_not_hide_model(tmp_path):
-    """探活成功（清了负缓存）不影响列表；判死但负缓存已清同样不隐藏。"""
+    """探活成功不影响列表；判死后隐藏不看负缓存是否还在。
+
+    旧口径要求「判死 + 负缓存仍生效」，负缓存过期后模型会自己回到列表——
+    那等于隐藏带到期时间。现在判死即隐藏，恢复只看复探成功。
+    """
     import time
 
     from src.provider.base import Model
@@ -732,7 +742,7 @@ def test_probe_ok_does_not_hide_model(tmp_path):
         assert client.get("/v1/models", headers=auth).json()["data"][0]["providers"] \
             == ["trae"]
 
-        # failed 但负缓存已过期（有人手动清了）：不当隐藏依据
+        # failed + 负缓存已过期：仍然隐藏（判死即隐藏，没有到期时间）
         services.model_probes.record(provider="trae", model="glm-5.3", state="failed")
         credential_id = services.credentials.candidates(["trae"])[0].credential_id
         with services.credentials._db.transaction() as conn:
@@ -741,6 +751,10 @@ def test_probe_ok_does_not_hide_model(tmp_path):
                 "(credential_id, model, cooling_until, hits, reason) "
                 "VALUES (?,?,?,?,'blocked')",
                 (credential_id, "glm-5.3", int(time.time()) - 1, 1))
+        assert client.get("/v1/models", headers=auth).json()["data"] == []
+
+        # 复探成功（`ok`）才回到列表
+        services.model_probes.record(provider="trae", model="glm-5.3", state="ok")
         assert client.get("/v1/models", headers=auth).json()["data"][0]["providers"] \
             == ["trae"]
 
