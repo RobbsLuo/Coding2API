@@ -16,13 +16,17 @@ import {
 } from "../api/display";
 import { formatTimeTick } from "./UsageChart";
 
+/**
+ * 模型线专用色（与渠道色 `--chart-N` 分开）。
+ *
+ * 渠道色在 `providers.ts` 里是「渠道 → 颜色」的唯一来源（MASTER §2.4），
+ * 语义是渠道；这张图上的线代表**模型**，复用渠道色会让同一页两张图的
+ * 颜色语义对不上（看图例的「青绿 = CB」与「青绿 = 某个模型」混在一起）。
+ */
 const COLORS = [
-  "var(--chart-1)",
-  "var(--chart-3)",
-  "var(--chart-2)",
-  "var(--chart-4)",
-  "var(--chart-5)",
-  "var(--primary)",
+  "var(--model-1)",
+  "var(--model-2)",
+  "var(--model-3)",
 ];
 
 /** Y 轴宽度：容下紧凑刻度（如「1500万」「850 ms」）。 */

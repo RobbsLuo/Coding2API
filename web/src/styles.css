@@ -69,6 +69,12 @@
   --chart-7: oklch(0.6 0.16 210);
   --chart-8: oklch(0.56 0.15 25);
   --chart-9: oklch(0.55 0.16 150);
+  /* 模型线专用色（按模型趋势图）。与 --chart-N 的渠道色分开：那张图上
+     渠道色代表渠道，模型图上代表模型，混用会让同一页两种图的颜色语义
+     对不上（MASTER §2.4「chart-N 为渠道色」）。 */
+  --model-1: oklch(0.55 0.15 40);
+  --model-2: oklch(0.52 0.14 285);
+  --model-3: oklch(0.56 0.13 200);
 }
 
 .dark {
@@ -109,6 +115,9 @@
   --chart-7: oklch(0.76 0.14 210);
   --chart-8: oklch(0.72 0.15 25);
   --chart-9: oklch(0.74 0.16 150);
+  --model-1: oklch(0.75 0.14 40);
+  --model-2: oklch(0.70 0.13 285);
+  --model-3: oklch(0.73 0.12 200);
 }
 
 @theme inline {

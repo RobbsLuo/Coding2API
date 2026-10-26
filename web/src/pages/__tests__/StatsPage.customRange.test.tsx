@@ -77,7 +77,7 @@ describe("StatsPage 自定义时间范围", () => {
     expect(params.get("until")).toBe(String(Math.floor(new Date("2026-01-03T03:04").getTime() / 1000)));
   });
 
-  it("起点晚于终点：提示非法并退回无时间参数（不静默查全量）", async () => {
+  it("起点晚于终点：提示非法并暂停取数（不发无时间窗的全量查询）", async () => {
     const spy = mockFetch(statsRoutes());
     renderPage(<StatsPage />, ADMIN);
     await settle();
@@ -85,15 +85,24 @@ describe("StatsPage 自定义时间范围", () => {
     await userEvent.click(screen.getByTestId("range-tabs-custom"));
     await settle();
 
+    // 先把起点改成一个**合法**窗口（终点还是预填的当前时刻），此时取数正常
     fireEvent.change(screen.getByTestId("custom-from"), { target: { value: "2026-01-03T03:04" } });
+    await settle();
+    await settle();
+    const before = spy.mock.calls.filter(([url]) =>
+      String(url).includes("/api/stats/overview")).length;
+
+    // 再把终点改到起点之前 → 窗口非法
     fireEvent.change(screen.getByTestId("custom-to"), { target: { value: "2026-01-02T03:04" } });
     await settle();
     await settle();
 
     expect(screen.getByTestId("custom-range-invalid")).toBeInTheDocument();
-    const url = lastCall(spy, "/api/stats/overview");
-    expect(url).not.toContain("since=");
-    expect(url).not.toContain("until=");
+    // 非法窗口**不再发请求**：此前 effectiveSince/Until 变 undefined，请求照发
+    // 且不带时间参数——等于静默查全量，还会在逐字编辑输入框时反复触发全表扫。
+    const after = spy.mock.calls.filter(([url]) =>
+      String(url).includes("/api/stats/overview")).length;
+    expect(after).toBe(before);
   });
 
   it("导出 CSV 带上当前自定义窗口", async () => {

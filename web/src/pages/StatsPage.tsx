@@ -363,12 +363,17 @@ export function StatsPage() {
   // 自定义输入非法（两个框都填了却解析不出）时，提示用户而不是静默退回全量
   const customInvalid = range === "custom" && custom === null
     && (customFrom.trim() !== "" || customTo.trim() !== "");
+  // 自定义范围非法时**暂停取数**：effectiveSince/Until 此时都是 undefined，
+  // 直接发出去等于「不限定时间窗」的全量统计——既与页面上「已暂停取数」的
+  // 文案矛盾，又会在用户逐字编辑输入框时反复触发无时间窗的全表扫描。
+  const rangeReady = !customInvalid;
 
   const events = useStatsEvents(
     drill.username, effectiveSince, effectiveUntil, eventBefore, pageSize,
     eventSort.sort, eventSort.order, eventOffset,
     { provider: drill.provider, model: drill.model,
-      credential_id: drill.credential_id, ok: drill.ok });
+      credential_id: drill.credential_id, ok: drill.ok },
+    rangeReady);
   const eventRows = events.data?.events ?? [];
   // 实时流：只保留最近 50 条（新→旧）。缓冲由前端自己管：页面长时间开着时
   // 不无限增长，且「刚发生的」永远在最上面。
@@ -472,26 +477,26 @@ export function StatsPage() {
   };
 
   const overview = useStatsOverview(session.username, undefined, effectiveSince,
-                                    effectiveUntil);
+                                    effectiveUntil, rangeReady);
   const byProvider = useStatsByProvider(
     session.username, undefined, effectiveSince, effectiveUntil,
-    groupSort.sort, groupSort.order);
+    groupSort.sort, groupSort.order, rangeReady);
   const byModel = useStatsByModel(
     session.username, undefined, effectiveSince, effectiveUntil,
-    groupSort.sort, groupSort.order);
+    groupSort.sort, groupSort.order, rangeReady);
   const byUser = useStatsByUser(
     session.username, undefined, effectiveSince, effectiveUntil,
-    groupSort.sort, groupSort.order);
+    groupSort.sort, groupSort.order, rangeReady);
   const byCredential = useStatsByCredential(
     session.username, undefined, effectiveSince, effectiveUntil,
-    groupSort.sort, groupSort.order);
+    groupSort.sort, groupSort.order, rangeReady);
   // 渠道构成卡片：只在请求量指标下出现（份额需要「请求数」这个分母）
   const showShare = metric === "requests"
     && (byProvider.data?.providers.length ?? 0) > 0;
   const timeline = useStatsTimeline(session.username, undefined, effectiveSince,
-                                    effectiveUntil, metric);
+                                    effectiveUntil, metric, rangeReady);
   const modelTimeline = useStatsModelTimeline(session.username, undefined, effectiveSince,
-                                              effectiveUntil, metric);
+                                              effectiveUntil, metric, rangeReady);
   // 延迟分位只在延迟类指标下取数（其余指标用不上，省一次明细表扫描）
   const latencyPercentile = useStatsPercentileTimeline(
     session.username, undefined, effectiveSince, effectiveUntil,
@@ -540,6 +545,9 @@ export function StatsPage() {
       </div>
     );
   }
+  // 总览请求失败：显式错误态。不判 isError 的话，失败会被渲染成「0 请求 / —」
+  // 的正常空数据——用户以为真的没有用量，而故障被完全吞掉。
+  const overviewFailed = overview.isError;
   const stats = overview.data;
   const rate =
     stats?.success_rate === null || stats?.success_rate === undefined
@@ -628,6 +636,15 @@ export function StatsPage() {
           </div>
         )}
       </Panel>
+
+      {overviewFailed && (
+        <div data-testid="stats-overview-error">
+          <Notice tone="danger">
+            总览数据加载失败：服务可能暂时不可用或会话已过期。
+            下方指标显示为「—」是取不到数，不是真的没有用量。
+          </Notice>
+        </div>
+      )}
 
       <section
         aria-label="用量概览统计"
