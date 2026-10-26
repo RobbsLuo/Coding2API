@@ -1,30 +1,30 @@
 # Coding2API
 
-Wraps **CodeBuddy** (CN + international), **TRAE SOLO**, **OpenCode Zen**, **Kilo**, **Qoder**, **CodeArts** and **OfficeAce** into an OpenAI-compatible API, with a shared credential pool, unified model names and scheduling, and per-user usage stats.
+Wraps **CodeBuddy** (CN + international), **TRAE SOLO**, **OpenCode Zen**, **Kilo**, **Qoder**, **CodeArts**, **OfficeAce** into an OpenAI-compatible API, with shared credential pool, unified model names and scheduling, per-user usage stats.
 
 > [!WARNING]
-> Reverse-engineered endpoints; study and research only, not security-audited. Public deployment needs a reverse proxy, authentication and an IP allowlist.
+> Reverse-engineered endpoints; study and research only, not security-audited. Public deployment needs reverse proxy + auth + IP allowlist.
 
 ## Features
 
 - **OpenAI-compatible surface**: `/v1/chat/completions` (streaming / non-streaming), `/v1/responses` (Codex CLI), `/v1/messages` (Claude Code), `/v1/models` (incl. single-model lookup), `/v1/user/balance`.
-- **Unified scheduling**: bare model names route by health, `model@provider` pins an upstream. Free channels first → least in-flight → expiring credits → health with tiered cooldowns → largest balance. A model-scoped limit sidelines only that model; multi-turn conversations stick to one credential and rotate only on error.
-- **Expiry-aware burn**: credits expiring within the main window (default 36h) burn first, ties fall to the 7-day window. Units unify to credits.
-- **Credential-gated model list**: only channels with a usable credential appear; no phantom models.
+- **Unified scheduling**: bare model names route by health; `model@provider` pins upstream. Free channels first → least in-flight → expiring credits → health with tiered cooldowns → largest balance. Model-scoped limit sidelines only that model; multi-turn sticks to one credential, rotates only on error.
+- **Expiry-aware burn**: credits expiring inside main window (default 36h) burn first; ties fall to 7-day window. Units unify to credits.
+- **Credential-gated model list**: only channels with usable credential appear; no phantom models.
 - **Shared credential pool**: admins maintain, everyone shares, encrypted at rest (`APP_SECRET`); device-code login, account switching, quota probing, daily check-in, token pre-refresh.
 - **Three roles**: `admin` / `operator` / `viewer` in SQLite; one-time activation links, forced password change on first login, role change or disable revokes sessions immediately; logins and writes audited.
 - **Growth center** (CodeBuddy only): travel gifts, Buddy dispatch, task rewards, streak repair/redemption, blind boxes; irreversible steps off via `GROWTH_IRREVERSIBLE_ACTIONS=false`.
-- **Privacy-preserving stats**: no conversation content; 90-day detail, permanent hourly rollups; per user / channel / model / credential views; cost from OpenRouter list prices; output speed in two scopes; SSE live stream in the detail panel.
+- **Privacy-preserving stats**: no conversation content; 90-day detail, permanent hourly rollups; per user / channel / model / credential views; cost from OpenRouter list prices; output speed in two scopes; SSE live stream in detail panel.
 - **Upstream status aggregation**: official status pages side by side, separating "upstream outage" from "our credential / quota problem". Explanation only, never scheduling; memory only.
 - **Sidebar to-dos**: count badges (re-login / exhausted, unresolved alerts, failed tasks, abnormal upstreams, pending activations, expiring keys, stale catalog), role-filtered. See [below](#sidebar-to-dos-navigation-badges).
 - **Admin hardening**: login rate limiting, CSRF checks, body limits, Host allowlist.
-- **Responsive tables**: below 768px one row becomes one card; column names collapse into tappable sort chips. DOM unchanged.
+- **Responsive tables**: below 768px one row = one card; column names collapse into tappable sort chips. DOM unchanged.
 
-Protocol-level implementation (private envelopes, signing, gate spoofing) is in [`TECHNICAL.md`](TECHNICAL.md) (Chinese).
+Protocol-level implementation (private envelopes, signing, gate spoofing) in [`TECHNICAL.md`](TECHNICAL.md) (Chinese).
 
 ## Screenshots
 
-Admin console (captured from a local instance; accounts and IPs masked):
+Admin console (captured from local instance; accounts and IPs masked):
 
 | Credentials: pool overview, grouped by channel | Usage: requests, tokens, cost |
 |---|---|
@@ -38,7 +38,7 @@ Admin console (captured from a local instance; accounts and IPs masked):
 | **Server logs: ring buffer with redaction** | **Ops alerts: four risk rules, periodic** |
 | ![Server logs](assets/screenshots/logs.webp) | ![Ops alerts](assets/screenshots/alerts.webp) |
 
-**Tasks & settings: 60+ hot-reloadable options, DB overrides win over `.env`**
+**Tasks & settings: 60+ hot options, DB overrides win over `.env`**
 
 ![Tasks and settings](assets/screenshots/settings.webp)
 
@@ -54,9 +54,9 @@ APP_SECRET="pick-a-random-string" \
   uv run python -m uvicorn src.main:build_app --factory --port 8000
 ```
 
-Open <http://127.0.0.1:8000>. Add the rest from the *Users* page.
+Open <http://127.0.0.1:8000>. Add rest from the *Users* page.
 
-`scripts/create_user.py` writes directly to SQLite (`--db`, or `DATA_DIR`; default `data/coding2api.sqlite3`). An existing `secrets/users.txt` is imported once on startup (never overwritten).
+`scripts/create_user.py` writes SQLite directly (`--db` or `DATA_DIR`; default `data/coding2api.sqlite3`). Existing `secrets/users.txt` imported once on startup (never overwritten).
 
 Docker:
 
@@ -69,7 +69,7 @@ docker compose up -d --build
 docker compose exec coding2api python scripts/create_user.py admin --role admin
 ```
 
-Pull the image: `docker compose pull` (or `docker pull ghcr.io/robbsluo/coding2api:v0.9.1`). Pushing a `v*` tag to main triggers `.github/workflows/publish.yml`, publishing `<tag>` and `:latest`.
+Pull image: `docker compose pull` (or `docker pull ghcr.io/robbsluo/coding2api:v0.9.1`). Pushing `v*` tag to main triggers `.github/workflows/publish.yml`, publishing `<tag>` + `:latest`.
 
 ## Users and roles
 
@@ -81,10 +81,10 @@ Accounts live in SQLite's `users` table; the *Users* page (admins only) handles 
 | `operator` | Credential read/write (import / delete / pause / check-in / growth / account switch), all stats, upstream status, model list |
 | `viewer` | Read-only: dashboard, credential list, stats, Playground |
 
-- **Adding users**: set username + role, get a one-time activation link (24h, shown once); the user opens `/activate` and sets their own password. No "admin knows an initial password" secret exists. Reset works the same way.
-- **Role change / disable**: all session cookies for that account are invalidated immediately. Disabling is the reversible default way to "remove" someone (usage stays attributed); hard delete is CLI-only.
+- **Adding users**: username + role → one-time activation link (24h, shown once); user opens `/activate`, sets own password. No "admin knows initial password" secret; reset same way.
+- **Role change / disable**: all session cookies invalidated immediately. Disable = reversible default "remove" (usage stays attributed); hard delete CLI-only.
 - **Self-service password change**: user menu → *Change password*, current password required.
-- **Lockout guard**: cannot disable or demote the last active admin, nor demote or disable yourself.
+- **Lockout guard**: cannot disable or demote last active admin, nor demote or disable yourself.
 
 CLI fallback:
 
@@ -100,16 +100,16 @@ echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-
 
 ## Audit log
 
-The *Audit log* page (admins only) records logins and writes, filterable by actor / action and paginated: logins (success and failure), account changes, credential writes, manual alert resolution. Each row has time, actor, action, target, detail and source IP. **No passwords or token plaintext** (activation tokens store only a SHA-256 digest). Retention matches request detail (90 days).
+*Audit log* page (admins only) records logins and writes, filterable by actor / action, paginated: logins (success and failure), account changes, credential writes, manual alert resolution. Each row: time, actor, action, target, detail, source IP. **No passwords or token plaintext** (activation tokens store only SHA-256 digest). Retention matches request detail (90 days).
 
 ## Server logs
 
-The *Server logs* page (`/logs`, admins only) is a read-only live view of this process's logging: `GET /api/logs` returns recent lines, `GET /api/logs/stream` is SSE (replay then live). Level filtering, keyword search, follow-latest, pause and clear — **no write entry point**.
+*Server logs* page (`/logs`, admins only) = read-only live view of this process's logging: `GET /api/logs` returns recent lines; `GET /api/logs/stream` is SSE (replay then live). Level filter, keyword search, follow-latest, pause, clear — **no write entry point**.
 
-- This process only; it never tails a file. Under multiple processes each sees its own slice.
-- **Redaction is a hard precondition**: lines matching `token` / `secret` / `authorization` / `cookie` / `password` / `api_key`, an `sk-…` shape or `Bearer <value>` are dropped whole.
-- Buffer size `LOG_BUFFER_LINES` (default 500, hot-reloadable), oldest overwritten first; `0` disables the page (both endpoints 404).
-- 4000 chars per line; each carries `seq`, timestamp, level, logger, `request_id`. Subscriber limit 4, beyond that 429 + `Retry-After`.
+- This process only; it never tails file. Under multiple processes each sees its own slice.
+- **Redaction is hard precondition**: lines matching `token` / `secret` / `authorization` / `cookie` / `password` / `api_key`, an `sk-…` shape or `Bearer <value>` dropped whole.
+- Buffer `LOG_BUFFER_LINES` (default 500, hot), oldest overwritten first; `0` disables page (both endpoints 404).
+- 4000 chars per line; each carries `seq`, timestamp, level, logger, `request_id`. Subscriber limit 4, beyond → 429 + `Retry-After`.
 
 ## Usage
 
@@ -129,85 +129,85 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"glm-5.2","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-`model@provider` pins an upstream (`glm-5.2@trae`, `mimo-v2.5-free@zen`); bare names route automatically. Any OpenAI-compatible client connects (Base URL `http://127.0.0.1:8000/v1`). *Playground* tests with the session login, no API key.
+`model@provider` pins upstream (`glm-5.2@trae`, `mimo-v2.5-free@zen`); bare names route automatically. Any OpenAI-compatible client connects (Base URL `http://127.0.0.1:8000/v1`). *Playground* tests with session login, no API key.
 
 ### Three model-name fields
 
-1. **Raw id** (`raw_id`): the key actually sent upstream, never changed. Raw ids differ per channel (Qoder `kmodel_latest` = TRAE `kimi-k3-1`) and may carry a namespace prefix (Kilo's `kilo-auto/free`).
-2. **Canonical key**: free-tier markers (`-free` / `free` path segment) and namespace prefixes stripped, then slugified (`kilo-auto`). The list merges by it.
+1. **Raw id** (`raw_id`): key actually sent upstream, never changed. Raw ids differ per channel (Qoder `kmodel_latest` = TRAE `kimi-k3-1`), may carry namespace prefix (Kilo `kilo-auto/free`).
+2. **Canonical key**: free-tier markers (`-free` / `free` path segment) + namespace prefixes stripped, then slugified (`kilo-auto`). List merges by it.
 3. **Display name** (`name`): cleaned readable text, from upstream when given, otherwise derived; brand casing normalized (`DeepSeek` / `MiMo` / `GLM` / `GPT`).
 
-Every `id` in `GET /v1/models` is the canonical key; requests translate back to the raw id (`by_provider.{channel}.raw_id`). **All three spellings are directly requestable.** Duplicate canonical keys within a channel fall back to the raw id.
+Every `id` in `GET /v1/models` is canonical key; requests translate back to raw id (`by_provider.{channel}.raw_id`). **All three spellings directly requestable.** Duplicate canonical keys within channel fall back to raw id.
 
-**Cost and levels**: entries may carry `cost {input, output, cache_read}` (USD / 1M tokens, same price table as cost estimation) and `reasoning_efforts` (effective levels for that channel). Present only when known.
+**Cost and levels**: entries may carry `cost {input, output, cache_read}` (USD / 1M tokens, same price table as cost estimation) + `reasoning_efforts` (effective levels for that channel). Only when known.
 
-**Custom aliases** (`MODEL_ALIASES`, hot-reloadable): `alias=model@channel;alias2=model`; `@channel` optional. List and request resolution share one table; entries carry `custom_alias: true`. Collisions, missing targets, or a channel not holding the model log ERROR and skip that segment; no alias chains.
+**Custom aliases** (`MODEL_ALIASES`, hot): `alias=model@channel;alias2=model`; `@channel` optional. List and request resolution share one table; entries carry `custom_alias: true`. Collisions, missing targets, or channel not holding model log ERROR and skip that segment; no alias chains.
 
-**Single-model lookup** (`GET /v1/models/{id}`): all three spellings plus custom aliases, case-insensitive, namespaced raw ids work. Missing or outside the key's allowlist → 404 (`code=model_not_found`), so a client cannot probe the pool.
+**Single-model lookup** (`GET /v1/models/{id}`): all three spellings + custom aliases, case-insensitive, namespaced raw ids work. Missing / outside key allowlist → 404 (`code=model_not_found`), so client cannot probe pool.
 
-**`n` only accepts 1**: the outbound shape produces a single choice; anything else is 400.
+**`n` only accepts 1**: the outbound shape produces single choice; anything else is 400.
 
 ### Streaming usage and reasoning tokens
 
-- After the finish chunk and before `data: [DONE]`, a `choices: []` usage frame is appended; nothing when the upstream reported no usage, and unreported fields are `null`.
-- Reasoning tokens need `reasoning_effort`; CodeBuddy defaults to `medium` when absent (otherwise reasoning lands in the visible answer). Explicit values pass through.
+- After finish chunk, before `data: [DONE]`, a `choices: []` usage frame is appended; nothing when upstream reported no usage; unreported fields are `null`.
+- Reasoning tokens need `reasoning_effort`; CodeBuddy defaults to `medium` when absent (otherwise reasoning lands in visible answer). Explicit values pass through.
 
 ### Streaming timeouts (off by default)
 
-Upstream reads use `read=None`, so the gateway supplies its own:
+Upstream reads use `read=None`, so gateway supplies its own:
 
-- **First-event timeout** (`STREAM_FIRST_EVENT_TIMEOUT_SECONDS`, default 0): fires before any content reaches the client, so retrying on another credential is safe. Comment frames / heartbeats do not reset it.
-- **Idle timeout** (`STREAM_IDLE_TIMEOUT_SECONDS`, default 0): after the first frame, the stream is closed with an error frame and **not** retried (partial output cannot be rolled back).
+- **First-event timeout** (`STREAM_FIRST_EVENT_TIMEOUT_SECONDS`, default 0): fires before any content reaches client → retrying on another credential is safe. Comment frames / heartbeats do not reset it.
+- **Idle timeout** (`STREAM_IDLE_TIMEOUT_SECONDS`, default 0): after first frame, stream closed with error frame, **not** retried (partial output cannot be rolled back).
 
-Both default to off on purpose: slow contexts measured 40–71s to first token. Enable per deployment (recommended 60 / 300).
+Both default off on purpose: slow contexts measured 40–71s to first token. Enable per deployment (recommended 60 / 300).
 
 ### Playground advanced parameters
 
-Optional `temperature` / `max_tokens` / `reasoning_effort`; **leaving one empty omits the key**. Client-side validation matches the backend (`temperature` ≤ 1000, `max_tokens` ≤ 4,000,000). The `reasoning_effort` control appears only for reasoning models and starts at "not sent".
+Optional `temperature` / `max_tokens` / `reasoning_effort`; **leaving one empty omits the key**. Client validation matches backend (`temperature` ≤ 1000, `max_tokens` ≤ 4,000,000). `reasoning_effort` appears only for reasoning models, starts at "not sent".
 
 ## Channels
 
-> CodeBuddy (incl. international) / TRAE / Qoder / CodeArts / OfficeAce need credentials; **OpenCode Zen and Kilo are credential-less free tiers** — one virtual placeholder row (scheduling / cooldown / stats work as usual), quota reads "free tier (no quota API)", health stays "no probe". The virtual row re-seeds on restart after deletion; use *pause* to disable permanently.
+> CodeBuddy (incl. international) / TRAE / Qoder / CodeArts / OfficeAce need credentials; **Zen and Kilo are credential-less free tiers** — one virtual placeholder row (scheduling / cooldown / stats as usual), quota reads "free tier (no quota API)", health stays "no probe". Virtual row re-seeds on restart after deletion; *pause* disables permanently.
 
 ### OpenCode Zen (`zen`)
 
-Free models at [opencode.ai/zen](https://opencode.ai), no login. The upstream list mixes unmarked paid models, so the gateway narrows by the `-free` suffix and probes each candidate, exposing only what answers anonymously (liveness cached 30 min; free models marked **x0**).
+Free models at [opencode.ai/zen](https://opencode.ai), no login. The upstream list mixes unmarked paid models, so gateway narrows by the `-free` suffix and probes each candidate, exposing only what answers anonymously (liveness cached 30 min; free models marked **x0**).
 
-**Free-tier gate**: the upstream wants the official client (UA version, session header, `stream:true`, `tools` with `bash`/`read`). The gateway satisfies this; injected `bash`/`read` are empty shells and their calls are filtered out. UA via `ZEN_OPENCODE_VERSION`, endpoint via `ZEN_API_ENDPOINT` (inside `ZEN_ALLOWED_ENDPOINTS`). Paid models return unavailable even when pinned.
+**Free-tier gate**: upstream wants official client (UA version, session header, `stream:true`, `tools` with `bash`/`read`). Gateway satisfies it; injected `bash`/`read` are empty shells, their calls filtered out. UA via `ZEN_OPENCODE_VERSION`; endpoint via `ZEN_API_ENDPOINT` (inside `ZEN_ALLOWED_ENDPOINTS`). Paid models return unavailable even when pinned.
 
 ### Kilo (`kilo`)
 
-Free models at [Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`), no login. Standard OpenAI protocol; `/models` carries `isFree`, so the gateway filters directly and **does not probe** (saves the tiny quota).
+Free models at [Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`), no login. Standard OpenAI protocol; `/models` carries `isFree` → gateway filters directly, **does not probe** (saves quota).
 
-**Quota**: gateway-wide ~200 requests/hour/IP. Upstream 429 and 502/503/504 are model-scoped — only the named model cools. Endpoint via `KILO_API_ENDPOINT` (inside the allowlist).
+**Quota**: gateway-wide ~200 requests/hour/IP. Upstream 429 and 502/503/504 are model-scoped → only named model cools. Endpoint via `KILO_API_ENDPOINT` (inside allowlist).
 
 ### Qoder (`qoder`)
 
-[Qoder](https://qoder.com), real account: *Log in to Qoder* for device-code authorization (the token never touches the browser). The upstream speaks a private COSY protocol, signed and unwrapped here; the surface stays OpenAI.
+[Qoder](https://qoder.com), real account: *Log in to Qoder* for device-code authorization (token never touches browser). Upstream speaks private COSY protocol, signed and unwrapped here; surface stays OpenAI.
 
-**Quota and check-in**: quota probing (`/api/v2/quota/usage`) and campaign-based daily check-in (credits accumulate). Campaigns (`/sash/api/v1/me/campaigns`), old `daily-check-in` as fallback. Campaigns **refresh daily at 10:00 (UTC+8)** (valid 30 days) and the task seals per that window. No streak count. **The international site has no check-in** (404), reported as "no such endpoint in this region".
+**Quota and check-in**: quota probing (`/api/v2/quota/usage`) and campaign-based check-in (credits accumulate). Campaigns (`/sash/api/v1/me/campaigns`), old `daily-check-in` as fallback. Campaigns **refresh daily at 10:00 (UTC+8)** (valid 30 days); task seals per that window. No streak count. **International site has no check-in** (404) → "no such endpoint in this region".
 
-**Endpoints and pacing**: CN by default (`openapi.qoder.com.cn` + `gateway.qoder.com.cn`); international via `QODER_API_ENDPOINT=https://openapi.qoder.sh` with the allowlist extended. `QODER_CHAT_MIN_INTERVAL` default 5, hot-updatable.
+**Endpoints and pacing**: CN by default (`openapi.qoder.com.cn` + `gateway.qoder.com.cn`); international via `QODER_API_ENDPOINT=https://openapi.qoder.sh` with allowlist extended. `QODER_CHAT_MIN_INTERVAL` default 5, hot.
 
-**Upstream node failures**: Qoder sometimes wraps its own node failures in a 400 (`[FAIL]node:…`). Treated as a model-scoped transient fault — only that model cools; an exhausted candidate set returns 503 (`no_healthy_credential`).
+**Upstream node failures**: Qoder sometimes wraps own node failures in a 400 (`[FAIL]node:…`) → model-scoped transient fault, only that model cools; exhausted candidates → 503 (`no_healthy_credential`).
 
 ### CodeArts (`codearts`)
 
-[Huawei Cloud CodeArts](https://codearts.huaweicloud.com), real account: *Log in to CodeArts*, authorize, then paste the **unreachable local URL** back; the server exchanges it for STS credentials (AK/SK + security_token + refresh_token + DPoP key) and stores them encrypted.
+[Huawei Cloud CodeArts](https://codearts.huaweicloud.com), real account: *Log in to CodeArts*, authorize, then paste the **unreachable local URL** back; server exchanges it for STS credentials (AK/SK + security_token + refresh_token + DPoP key) and stores them encrypted.
 
-**Token refresh is rigid**: refresh_token, `client_id=codearts-agent` and the DPoP key are bound and single-use; the new refresh_token must be written back. Handled by the pre-refresh task (DPoP ES256/P-256). The window is capped at 45 minutes and must be wider than the polling interval. A revoked credential is marked "re-login required" and stops automatic retries.
+**Token refresh is rigid**: refresh_token, `client_id=codearts-agent` and DPoP key are bound and single-use; new refresh_token must be written back. Handled by pre-refresh task (DPoP ES256/P-256). Window capped at 45 minutes and must be wider than polling interval. Revoked credential marked "re-login required", stops automatic retries.
 
 **Daily check-in**: `GET /v1/ops/delivery` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`. `CLAIMED` means claimed-but-unconfirmed, so both steps always run.
 
-**Quota = credit balance**: probing hits `GET {snap}/snap-manager/v1/statistics/plugin` (the `snap-manager` prefix is mandatory; header `Agent-Type: PromptCenter`). Upstream values are credits, no conversion; sub-packages go into a popover and the plan expiry date is registered (unused credits are voided too).
+**Quota = credit balance**: probing hits `GET {snap}/snap-manager/v1/statistics/plugin` (`snap-manager` prefix mandatory; header `Agent-Type: PromptCenter`). Upstream values are credits, no conversion; sub-packages go into popover, plan expiry registered (unused credits voided too).
 
-**Signing / cumulative SSE / pacing**: Huawei `SDK-HMAC-SHA256` (AK/SK + `X-Security-Token`); the allowlist needs the snap engine, STS and portal. Streaming `text` is cumulative (replace semantics), reduced to incremental events. The upstream hard-limits 3 concurrent sessions per account, hence `CODEARTS_MAX_CONCURRENCY` and `CODEARTS_REQUEST_WINDOW_SECONDS`.
+**Signing / cumulative SSE / pacing**: Huawei `SDK-HMAC-SHA256` (AK/SK + `X-Security-Token`); allowlist needs snap engine, STS, portal. Streaming `text` is cumulative (replace semantics) → reduced to incremental events. Upstream hard-limits 3 concurrent sessions per account → `CODEARTS_MAX_CONCURRENCY` + `CODEARTS_REQUEST_WINDOW_SECONDS`.
 
 ### OfficeAce (`officeace`)
 
-[Huawei Cloud OfficeAce](https://www.huaweicloud.com/product/agentarts.html), real account: *Log in to OfficeAce* and finish the Huawei Cloud authorization — **the callback is handled in the cloud**, so no local port and no URL to paste. The backend polls `/v1/claw/auth/code` every 2.5s.
+[Huawei Cloud OfficeAce](https://www.huaweicloud.com/product/agentarts.html), real account: *Log in to OfficeAce* and finish Huawei Cloud authorization — **callback handled in cloud**, so no local port and no URL to paste. Backend polls `/v1/claw/auth/code` every 2.5s.
 
-**Provisioning prerequisite**: the account must first sign in to the OfficeAce client and redeem an invitation code. An unprovisioned account completes the login but gets no model key; the service names the account and says it has not activated OfficeAce.
+**Provisioning prerequisite**: account must first sign in to OfficeAce client and redeem invitation code. Unprovisioned account completes login but gets no model key; service names the account and says OfficeAce not activated.
 
 **Two credential sets, very different lifetimes**:
 
@@ -216,41 +216,41 @@ Free models at [Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`), no login. St
 | `Basic model_app_key:model_app_secret` | never expires | chat forwarding |
 | temporary AK/SK + `security_token` + `project_id` | ~2 hours | quota lookup, check-in |
 
-Mixing them yields `APIG.0303 app not found`. The temporary half is renewed by the pre-refresh task; `refresh_token` is single-use and bound to `client_id=pdp5_for_agentarts` plus the DPoP key (not interchangeable with the CodeArts ticket).
+Mixing them yields `APIG.0303 app not found`. Temporary half renewed by pre-refresh task; `refresh_token` single-use, bound to `client_id=pdp5_for_agentarts` + DPoP key (not interchangeable with CodeArts ticket).
 
 The upstream is plain OpenAI protocol, with three quirks:
 
-- **Rate limits arrive as fake 200s**: HTTP 200 + `data:{"error":…}`. Error frames flow to the engine as usual; `81111`/`81114` cool only that credential × model.
-- **Model-level rejection must not kill the credential**: `81004` / `81009` arrive as 403/404; business codes are checked before status codes and classified as a model-level negative cache (cleared on success).
-- **`max_tokens` is a combined reasoning + answer budget**: `≥16` gets 1024 extra headroom clamped to the model ceiling; `<16` passes through; absent stays absent.
+- **Rate limits arrive as fake 200s**: HTTP 200 + `data:{"error":…}`. Error frames flow to engine as usual; `81111`/`81114` cool only that credential × model.
+- **Model-level rejection must not kill credential**: `81004` / `81009` arrive as 403/404; business codes checked before status codes → model-level negative cache (cleared on success).
+- **`max_tokens` = reasoning + answer budget**: `≥16` gets 1024 headroom clamped to model ceiling; `<16` passes through; absent stays absent.
 
-**Credits are the main ledger**: unit `officeace_points`; `remaining`/`total` are credits. Each reward expires independently, so the quota reads "per-reward expiry".
+**Credits are main ledger**: unit `officeace_points`; `remaining`/`total` are credits. Each reward expires independently → quota reads "per-reward expiry".
 
-**Daily check-in**: `POST /v1/subscription/bonus/claim` (a write — it really grants credits; body must be `` with JSON `Content-Type`). The upstream is idempotent for repeat claims on the same day. Gains are computed as a remainder delta. Sealed until the next Beijing midnight.
+**Daily check-in**: `POST /v1/subscription/bonus/claim` (a write — it really grants credits; body must be `` with JSON `Content-Type`). The upstream is idempotent for repeat claims on same day. Gains are computed as remainder delta. Sealed until next Beijing midnight.
 
 **No active probing / no credit estimation**: probing burns credits; the `cost_coefficient` × `tokens_per_point` relation is undocumented. Model-level rejections are handled by real requests via the `BLOCKED` negative cache.
 
-**Signing and endpoints**: control plane `/v1/claw/*` uses `SDK-HMAC-SHA256`; the model gateway accepts only `V11-HMAC-SHA256` (wrong one → `APIG.0624` or 401). `OFFICEACE_ALLOWED_ENDPOINTS` only needs the control-plane host (the model gateway is per-account and issued by the upstream). `OFFICEACE_CHAT_MIN_INTERVAL` default 0.
+**Signing and endpoints**: control plane `/v1/claw/*` uses `SDK-HMAC-SHA256`; model gateway accepts only `V11-HMAC-SHA256` (wrong one → `APIG.0624` or 401). `OFFICEACE_ALLOWED_ENDPOINTS` needs only control-plane host (model gateway is per-account, issued by upstream). `OFFICEACE_CHAT_MIN_INTERVAL` default 0.
 
 **Single account, single user**: the official plan limits one user per account; no sharing.
 
-**Switching accounts**: a *Switch account* button (`force_login=true`) clears the Huawei Cloud browser session first.
+**Switching accounts**: *Switch account* button (`force_login=true`) clears the Huawei Cloud browser session first.
 
 ### CodeBuddy international (`codebuddy_intl`)
 
-[www.codebuddy.ai](https://www.codebuddy.ai), same protocol as the CN site but a separate account system (separate registration and billing), hence a separate channel. Same device-code login.
+[www.codebuddy.ai](https://www.codebuddy.ai), same protocol as CN site but separate account system (separate registration and billing) → separate channel. Same device-code login.
 
-Why not one channel: `CODEBUDDY_API_ENDPOINT` is a single process-wide value, so switching would send every existing CN credential to the international site. Both sites can hold credentials simultaneously with their own endpoints, pacers and login flows.
+Why not one channel: `CODEBUDDY_API_ENDPOINT` is single process-wide value → switching would send every existing CN credential to international site. Both sites can hold credentials simultaneously with own endpoints, pacers, login flows.
 
-**Allowlists deliberately exclude each other**: `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` defaults to the international host only; adding the CN host fails at startup (cross-site sending leaks the credential).
+**Allowlists deliberately exclude each other**: `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` defaults to international host only; adding CN host fails at startup (cross-site sending leaks credential).
 
-**Capability differences**: chat, model list, quota probing, token refresh and activity reporting are enabled; **check-in and growth center are not** (no such campaign on this channel; the growth center cannot be verified and includes irreversible actions).
+**Capability differences**: chat, model list, quota probing, token refresh, activity reporting enabled; **check-in and growth center are not** (no such campaign on this channel; growth center unverifiable and includes irreversible actions).
 
-**Model list probes the plan**: each credential sends one minimal request per model and keeps only usable ones; `11158` (plan not allowed) and `11102` (no such model) are dropped, `429` / 5xx / timeouts keep the model. Results cached per account for 6 hours.
+**Model list probes plan**: each credential sends one minimal request per model, keeps only usable ones; `11158` (plan not allowed) and `11102` (no such model) dropped; `429` / 5xx / timeouts keep model. Results cached per account 6 hours.
 
-**Same-name models carry no channel suffix**: models on both sites are one row attached to both channels; genuinely different models (`-x` / `-sg`) get their own rows.
+**Same-name models carry no channel suffix**: models on both sites are one row attached to both channels; genuinely different models (`-x` / `-sg`) get own rows.
 
-**Pacing**: `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` default 5s, an independent pacer, hot-updatable.
+**Pacing**: `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` default 5s, independent pacer, hot.
 
 ### Per-channel outbound proxy (optional)
 
@@ -258,17 +258,17 @@ Why not one channel: `CODEBUDDY_API_ENDPOINT` is a single process-wide value, so
 PROVIDER_PROXIES="codebuddy=http://127.0.0.1:7890;qoder=socks5://127.0.0.1:1080"
 ```
 
-Format `channel=proxyURL;channel2=proxyURL2`; `http/https/socks5/socks5h` supported; empty = all direct. Applies to every outbound request of that channel (chat, quota, model fetch, background tasks, OAuth). **Startup-time setting.** Unknown channel / bad scheme / missing `=` fails startup. `HTTP_PROXY` and friends are ignored (`trust_env=False`).
+Format `channel=proxyURL;channel2=proxyURL2`; `http/https/socks5/socks5h`; empty = all direct. Applies to every outbound request of that channel (chat, quota, model fetch, background tasks, OAuth). **Startup-time.** Unknown channel / bad scheme / missing `=` fails startup. `HTTP_PROXY` and friends ignored (`trust_env=False`).
 
-> Inside containers `127.0.0.1` is the container itself. Use `host.docker.internal` for a host proxy:
+> Inside containers `127.0.0.1` is container itself. Use `host.docker.internal` for host proxy:
 > `PROVIDER_PROXIES="codebuddy=http://host.docker.internal:7897"`
-> compose declares `extra_hosts`. Parsing validates format only, so a wrong address does not fail startup.
+> compose declares `extra_hosts`. Parsing validates format only, so wrong address does not fail startup.
 
 ## Outbound protocols
 
 ### Responses API (Codex CLI)
 
-`POST /v1/responses` provides a Responses subset, sharing scheduling / cooldown / rotation / stats / stickiness with chat:
+`POST /v1/responses` provides a Responses subset; shares scheduling / cooldown / rotation / stats / stickiness with chat:
 
 ```bash
 export CODING2API_KEY=sk-your-key
@@ -276,11 +276,11 @@ codex -c "model_providers.coding2api={ name='coding2api', base_url='http://127.0
       -c model_provider=coding2api -c model='glm-5.2' 'your task'
 ```
 
-Supports text, streaming output, reasoning summaries, function tool calls and `finish_reason=length` → `response.incomplete`. `text.format` maps to chat's `response_format`. Content parts: `input_text` / `text` / `output_text` → text, `input_image` → `image_url`. **Unsupported**: `store=true`, `previous_response_id`, `input_file`, Responses-private tools — all explicit 400. `include=["reasoning.encrypted_content"]` is accepted and ignored.
+Supports text, streaming output, reasoning summaries, function tool calls, `finish_reason=length` → `response.incomplete`. `text.format` → chat `response_format`. Content parts: `input_text` / `text` / `output_text` → text; `input_image` → `image_url`. **Unsupported**: `store=true`, `previous_response_id`, `input_file`, Responses-private tools → explicit 400. `include=["reasoning.encrypted_content"]` accepted, ignored.
 
 ### chat `response_format` validation
 
-Only the three OpenAI shapes pass; malformed or unknown ones are explicit 400: `{"type":"text"}`, `{"type":"json_object"}`, `{"type":"json_schema","json_schema":{name, schema, description?, strict?}}` (unknown inner fields dropped). The Responses `text.format` path reuses the same validation.
+Only three OpenAI shapes pass; malformed / unknown → explicit 400: `{"type":"text"}`, `{"type":"json_object"}`, `{"type":"json_schema","json_schema":{name, schema, description?, strict?}}` (unknown inner fields dropped). Responses `text.format` reuses same validation.
 
 ### Anthropic Messages API (Claude Code)
 
@@ -291,20 +291,20 @@ claude
 ```
 
 - **Auth**: both `x-api-key` and `Authorization: Bearer`.
-- **Streaming**: `message_start` → `content_block_*` → `message_delta` → `message_stop`; no `[DONE]`; thinking blocks get a `signature_delta` before `content_block_stop`.
+- **Streaming**: `message_start` → `content_block_*` → `message_delta` → `message_stop`; no `[DONE]`; thinking blocks get `signature_delta` before `content_block_stop`.
 - **Cache hits**: usage splits in two — `input_tokens` counts misses only, hits go to `cache_read_input_tokens`.
 - **`count_tokens`**: estimated locally, never forwarded.
 - **Images**: `image` blocks normalize to chat `image_url`; images inside `tool_result.content` are preserved.
 - **Unsupported**: `document` blocks, `source.type=file`, Anthropic server tools — explicit 400.
-- **`cache_control` passthrough** (on by default): landing spots match Anthropic (`system`, message content blocks, `tool_result` top level, `tool_calls` top level, `tools` top level). Structure validated only, values not interpreted. 6 of 8 channels accept it (codebuddy / codebuddy_intl / trae / qoder / codearts / kilo); zen unverified, OfficeAce not separately probed. Script `scripts/probe_cache_control.py`.
+- **`cache_control` passthrough** (on by default): landing spots match Anthropic (`system`, message content blocks, `tool_result` top level, `tool_calls` top level, `tools` top level). Structure validated only; values not interpreted. 6 of 8 channels accept it (codebuddy / codebuddy_intl / trae / qoder / codearts / kilo); zen unverified, OfficeAce not separately probed. Script `scripts/probe_cache_control.py`.
 
 ### CC Switch one-click import
 
-The *API keys* page generates `ccswitch://` deep links (Claude Code / Codex CLI / OpenCode). Two entry points: the post-creation dialog and the per-row *Import to CC Switch* action. Links contain the plaintext key, so they are generated only on explicit user action. Requires CC Switch v4.0.10+. The endpoint form depends on `apiFormat`: Anthropic goes to the root (no `/v1`), OpenAI forms to `/v1`. No Gemini surface.
+*API keys* page generates `ccswitch://` deep links (Claude Code / Codex CLI / OpenCode). Entry points: post-creation dialog, per-row *Import to CC Switch*. Links contain plaintext key → generated only on explicit action. Requires CC Switch v4.0.10+. Endpoint form depends on `apiFormat`: Anthropic to root (no `/v1`); OpenAI to `/v1`. No Gemini surface.
 
 ### Balance query
 
-`GET /v1/user/balance` is DeepSeek-shaped, Bearer `sk-...`, for Cherry Studio / cc-switch. Values come from the cached quota probe, aggregated over usable credentials:
+`GET /v1/user/balance` is DeepSeek-shaped, Bearer `sk-...`, for Cherry Studio / cc-switch. Values from cached quota probe, aggregated over usable credentials:
 
 ```json
 {
@@ -323,13 +323,13 @@ The *API keys* page generates `ccswitch://` deep links (Claude Code / Codex CLI 
 - `GET /health`: `{"status":"ok"}`, for liveness probes.
 - `GET /healthz`: adds pool counts and returns 503 when `ready == 0` (readiness).
 
-Neither is authenticated and both accept `HEAD`. The five counts are mutually exclusive and sum to `total`, same as the scheduler. **Point liveness at `/health`**; use `/healthz` for readiness / alerting.
+Neither is authenticated; both accept `HEAD`. Five counts mutually exclusive, sum to `total`, same as scheduler. **Point liveness at `/health`**; `/healthz` for readiness / alerting.
 
 > Upgrade note: `/healthz` changed from always-200 to 503 when `ready=0`.
 
 ### Prometheus metrics (`GET /metrics`)
 
-On by default, **unauthenticated**; `METRICS_ENABLED=false` (hot-reloadable) returns 404.
+On by default, **unauthenticated**; `METRICS_ENABLED=false` (hot) returns 404.
 
 | Metric | Type | Labels | Source |
 | --- | --- | --- | --- |
@@ -339,120 +339,120 @@ On by default, **unauthenticated**; `METRICS_ENABLED=false` (hot-reloadable) ret
 | `coding2api_upstream_errors_total` | counter | `provider` / `kind` | in-process (resets on restart) |
 | `coding2api_task_failures_total` | counter | `task` | in-process task state |
 
-No `credential_id` / `api_key_id` / `username` (high cardinality). `requests_total` / `tokens_total` read the permanently retained hourly rollup and stay monotonic across restarts. Hourly rollups have no `error_type` dimension, so `kind` comes from an in-process counter.
+No `credential_id` / `api_key_id` / `username` (high cardinality). `requests_total` / `tokens_total` read permanently retained hourly rollup, monotonic across restarts. Rollups have no `error_type` dimension → `kind` from in-process counter.
 
 ## API key policy
 
-- **Channel binding**: the key only picks credentials from that channel; a model owned by another channel returns 400 naming the actual owner. Empty = cross-channel.
-- **Source IP allowlist**: comma-separated IPs or CIDR blocks, normalized on write (`10.0.0.1` → `10.0.0.1/32`); outside the list → 403. `X-Forwarded-For` is not trusted by default; only with `TRUST_PROXY=true`, taking the last entry.
+- **Channel binding**: the key only picks credentials from that channel; model owned by another channel returns 400 naming actual owner. Empty = cross-channel.
+- **Source IP allowlist**: comma-separated IPs or CIDR, normalized on write (`10.0.0.1` → `10.0.0.1/32`); outside → 403. `X-Forwarded-For` untrusted by default; only with `TRUST_PROXY=true`, last entry.
 - **Model allowlist**: comma-separated names or fnmatch globs (`glm-*,kimi-k3`), case-insensitive, `@channel` suffix ignored. Outside → 400; `/v1/models` filters too.
 - **Expiry**: epoch seconds; empty = never. Expired → 401 (same wording as "key not found").
-- **Quota**: six independent limits, `0` or empty = unlimited — `daily_requests` / `daily_tokens` / `daily_cost_usd` / `rpm` / `tpm` (estimated) / `max_concurrency`. Daily ones use the Beijing calendar day; rate and concurrency are in-process sliding windows. Over the limit → 429 + `quota_exceeded`, `Retry-After` points at the retry moment. A failing check always allows the request and logs a warning.
-- **Self-service**: `GET /v1/usage?days=1|7|30` returns your own usage, remaining quota and current rate usage (local detail only).
+- **Quota**: six independent limits, `0` or empty = unlimited — `daily_requests` / `daily_tokens` / `daily_cost_usd` / `rpm` / `tpm` (estimated) / `max_concurrency`. Daily ones use Beijing calendar day; rate / concurrency in-process sliding windows. Over limit → 429 + `quota_exceeded`, `Retry-After` points at retry moment. Failing check always allows and logs warning.
+- **Self-service**: `GET /v1/usage?days=1|7|30` returns own usage, remaining quota, current rate usage (local detail only).
 
 ## Credential pause
 
-*Pause* removes a credential from chat traffic and skips it in daily check-in / token pre-refresh; other background tasks (quota probe, growth center, activity reporting) keep running. Useful for "no chat, keep collecting credits". *Unpause* returns it to the pool immediately. Different from *disabled*, which is the channel-driven session-invalid state requiring *revive* after re-login. Same switch at `POST /api/credentials/{id}/toggle`.
+*Pause* removes credential from chat traffic and skips daily check-in / token pre-refresh; other background tasks (quota probe, growth center, activity reporting) keep running. Useful for "no chat, keep collecting credits". *Unpause* returns it to pool immediately. ≠ *disabled* — the channel-driven session-invalid state requiring *revive* after re-login. Same switch: `POST /api/credentials/{id}/toggle`.
 
-> Zen / Kilo are virtual rows; **pause is the only permanent disable** (deletion re-seeds on restart). Pausing also removes the channel from the model list.
+> Zen / Kilo are virtual rows; **pause is the only permanent disable** (deletion re-seeds on restart). Pausing also removes channel from model list.
 
 ## Credential batch operations
 
-The credentials page offers multi-select plus a batch bar (probe / check-in / pause / unpause / revive).
+The credentials page offers multi-select plus batch bar (probe / check-in / pause / unpause / revive).
 
-- **Endpoint**: `POST /api/credentials/batch`, body `{action: "probe"|"toggle"|"checkin"|"revive", ids: [...], enabled?}`. Up to 200 ids per request, duplicates deduped.
+- **Endpoint**: `POST /api/credentials/batch`, body `{action: "probe"|"toggle"|"checkin"|"revive", ids: [...], enabled?}`. Up to 200 ids, duplicates deduped.
 - **Per-item isolation**: one failure never blocks the rest. Response `{action, total, succeeded, failed, results: [{id, ok, error?, detail?}]}`.
-- **Pause is explicit state, not a toggle-flip**: `enabled` comes from the body, so the bar has separate *Pause* and *Unpause* buttons.
-- **Revive and unpause differ**: revive clears the system hard-disable (needs re-login first); unpause sets `toggle enabled=true`.
+- **Pause is explicit state, not toggle-flip**: `enabled` comes from body → bar has separate *Pause* / *Unpause* buttons.
+- **Revive ≠ unpause**: revive clears system hard-disable (needs re-login first); unpause sets `toggle enabled=true`.
 - Only actions with existing single-item endpoints: `refresh` and `delete` are excluded.
-- **Audit writes one summary row** (`toggle` / `revive`); an audit failure logs a warning and does not fail the operation.
+- **Audit writes one summary row** (`toggle` / `revive`); audit failure logs warning and does not fail operation.
 
 ## Credential limit guards
 
-Optional per-credential guards, configured from the row menu. Four independent limits; all empty = unlimited. Judged before selection; background tasks keep running.
+Optional per-credential guards, configured from row menu. Four independent limits; all empty = unlimited. Judged before selection; background tasks keep running.
 
-- **Reserve credits**: account remaining ≤ the value disables the whole credential. Unknown balance is never guessed.
-- **Daily token cap** / **daily credit cap**: whole credential disabled when the day's total is reached.
+- **Reserve credits**: account remaining ≤ the value disables whole credential. Unknown balance is never guessed.
+- **Daily token cap** / **daily credit cap**: whole credential disabled when day's total is reached.
 - **Per-model token cap**: `{model: limit}` disables only that model.
 - **"Day" = Beijing calendar day**, resetting at midnight.
-- When every candidate is filtered out, the response is `no_healthy_credential` 503; a model-level cooldown returns `model_unavailable`.
-- Written via `PUT /api/credentials/{id}/limits` (full replace; all four off deletes the row). Effective immediately. Audit action `credential.limits`.
+- All candidates filtered out → `no_healthy_credential` 503; model-level cooldown → `model_unavailable`.
+- Written via `PUT /api/credentials/{id}/limits` (full replace; all four off → deletes row). Effective immediately. Audit action `credential.limits`.
 
 ## Per-credential in-flight cap
 
-`MAX_INFLIGHT_PER_CREDENTIAL` (default 0 = unlimited): once a credential's concurrency reaches the cap it stops being selected.
+`MAX_INFLIGHT_PER_CREDENTIAL` (default 0 = unlimited): once credential concurrency reaches cap, it stops being selected.
 
 - In-process counting (single-instance semantics).
 - Leases release at request end, with a 600s TTL backstop.
-- All candidates saturated → 503, same as the limit guards.
-- Hot-reloadable.
-- **The count doubles as the load key**: ordered after "free first" and before expiring credits, so concurrency spreads to idle credentials.
+- All candidates saturated → 503, same as limit guards.
+- Hot.
+- **Count doubles as load key**: ordered after "free first", before expiring credits → concurrency spreads to idle credentials.
 
 ## Credential pool: filtering and grouping
 
-- **Filter bar**: search (nickname / channel / id) × channel × state × tag, all AND, front-end only. Shows "N of total after filter" and a *Clear* action. The tag dropdown renders only when tags exist. Tags do not participate in text search.
-- **Tags**: comma-separated, up to 16, each ≤ 24 chars. Used for filtering and display only, never scheduling. Two shown per row, the rest collapse to `+N`.
-- **Group sort**: reorders channel groups only, never rows within a group. Default by total quota descending, switchable to fixed channel order. Free tiers without a quota API sink to the bottom.
-- **Grouping by channel**: each header is a compact dashboard — icon + channel + account count, models (count + lowest rate, paid models only; "all free" only when the whole group is free; custom aliases are not separate models), state distribution, quota total, expiring credits (one block per 1.5 days in the main window; the 7-day window only when larger). Collapsed by default; filtering auto-expands matches. Click the header to collapse / expand.
-- **Column headers follow the expanded area**: headers render inside each expanded group and stick on scroll, sharing one sort state. The *Growth* column appears only for CodeBuddy; other channels keep an empty placeholder to preserve column widths.
-- **Long lists scroll**: table height 70vh, sticky headers and the action button stay visible.
+- **Filter bar**: search (nickname / channel / id) × channel × state × tag, all AND, front-end only. Shows "N of total after filter" + *Clear*. Tag dropdown renders only when tags exist. Tags do not participate in text search.
+- **Tags**: comma-separated, ≤16, each ≤24 chars. Filtering / display only, never scheduling. Two shown per row, rest collapse to `+N`.
+- **Group sort**: reorders channel groups only, never rows within group. Default by total quota descending, switchable to fixed channel order. Free tiers without quota API sink to bottom.
+- **Grouping by channel**: header = compact dashboard — icon + channel + account count, models (count + lowest rate, paid only; "all free" only when whole group free; custom aliases not separate models), state distribution, quota total, expiring credits (one block per 1.5 days in main window; 7-day window only when larger). Collapsed by default; filtering auto-expands. Click header to toggle.
+- **Column headers follow expanded area**: headers render inside each expanded group and stick on scroll, sharing one sort state. *Growth* column appears only for CodeBuddy; other channels keep empty placeholder to preserve column widths.
+- **Long lists scroll**: table height 70vh, sticky headers and action button stay visible.
 
-Quota numbers are underlined with a dotted line; hover shows the period semantics for that row.
+Quota numbers are underlined with dotted line; hover shows period semantics for that row.
 
 ## Model list loading
 
-`GET /v1/models` and the Playground dropdown merge only channels with a **currently usable credential** (at least one not paused, not session-invalid). Cooling credentials still count. Display order: CodeBuddy, TRAE, Qoder, CodeArts, OfficeAce first, then alphabetical within a group; multi-channel models take the highest-priority channel.
+`GET /v1/models` and Playground dropdown merge only channels with **currently usable credential** (≥1 not paused, not session-invalid). Cooling credentials still count. Order: CodeBuddy, TRAE, Qoder, CodeArts, OfficeAce first, then alphabetical within group; multi-channel models take highest-priority channel.
 
-**Request routing trusts this cache**: when the catalog proves ownership, only those channels are candidates; if all are unavailable the response is 503 instead of trying each channel. Models absent from the catalog still route across all candidates; explicit pinning and key channel binding are unaffected.
+**Request routing trusts this cache**: catalog-proven ownership → only those channels are candidates; all unavailable → 503 instead of trying each. Models absent from catalog still route across all candidates; explicit pinning and key channel binding unaffected.
 
 ### Catalog snapshot and startup
 
-Besides the in-process TTL cache (300s), every successful fetch writes `DATA_DIR/model_catalog.json` and reads it back synchronously at startup, so ownership is ready the moment the process restarts. A corrupt or >7-day-old snapshot just loses the cache. A `MODEL_CATALOG_MINUTES` background task keeps it fresh.
+Besides in-process TTL cache (300s), every successful fetch writes `DATA_DIR/model_catalog.json` and reads it back synchronously at startup → ownership ready the moment process restarts. Corrupt or >7-day-old snapshot just loses cache. `MODEL_CATALOG_MINUTES` background task keeps it fresh.
 
-Playground and `/v1/models` use stale-while-revalidate: cached lists return immediately and refresh in the background; only a channel with no cache at all waits synchronously. Repeated failures back off at 2^(n-1)×TTL (capped at 2 hours), logging WARNING on the first failure only.
+Playground and `/v1/models` use stale-while-revalidate: cached lists return immediately and refresh in background; only channel with no cache at all waits synchronously. Repeated failures back off at 2^(n-1)×TTL (capped at 2 hours), logging WARNING on first failure only.
 
 ### Admin *Model list* page
 
-(`GET /api/model-catalog`, admin / operator) read-only view of the OpenRouter public catalog: list prices, context / output limits, modalities, capabilities, knowledge cutoff, and the three Artificial Analysis indices (not measured here, no sorting). Each row carries an `available` flag; a default-off *only current channels* switch narrows locally.
+(`GET /api/model-catalog`, admin / operator) read-only OpenRouter catalog: list prices, context / output limits, modalities, capabilities, knowledge cutoff, three Artificial Analysis indices (not measured here, no sorting). Each row carries `available`; default-off *only current channels* switch narrows locally.
 
 **Suspected-offline view**: `GET /api/models/availability` (operator) aggregates `upstream_blocked` / `model_not_found` / `invalid_request` failures over last N days (default 7, 1–30) by `(channel, model)`. *Add to blocklist* appends to `model_blocklist` via settings endpoint + audit row.
 
-**Floating aliases take the newest snapshot score**: OpenRouter attaches both a floating alias and dated snapshots to one model, declaring them one release via `canonical_slug`. This gateway runs reasoning on by default, matching the Max variant, so it takes the newest snapshot in the family; ids with an explicit date stamp keep their own score. Families derive only from canonicals carrying `-YYYYMMDD`.
+**Floating aliases take newest snapshot score**: OpenRouter attaches both floating alias and dated snapshots to one model, declaring one release via `canonical_slug`. Gateway runs reasoning on by default, matching Max variant → takes newest snapshot in family; ids with explicit date stamp keep own score. Families derive only from canonicals carrying `-YYYYMMDD`.
 
 ### Active probing and manual takeover
 
-The probe panel (`GET /api/models/probes`, operator) only probes `(channel, model)` pairs still locked by the `blocked` negative cache.
+Probe panel (`GET /api/models/probes`, operator) only probes `(channel, model)` pairs still locked by `blocked` negative cache.
 
 Three outcomes:
 
 - **Success** → clears that channel's `blocked` cache immediately (the only early-recovery path).
-- **`failed`** (upstream says `BLOCKED` / `INVALID`) → keeps the cache and increments consecutive failures.
-- **`inconclusive`** (quota, rate limit, network, timeout, empty stream, any exception) → never disables, and resets the consecutive counter.
+- **`failed`** (upstream says `BLOCKED` / `INVALID`) → keeps cache and increments consecutive failures.
+- **`inconclusive`** (quota, rate limit, network, timeout, empty stream, any exception) → never disables, resets consecutive counter.
 
-Probing is fully isolated from production: it calls `provider.stream_chat` directly, writes no `usage_events`, touches no cooldown table, changes no health. Results go to the separate `model_probes` table. The panel hides models matched by `MODEL_BLOCKLIST`.
+Probing is isolated from production: calls `provider.stream_chat` directly, writes no `usage_events`, touches no cooldown table, changes no health. Results go to separate `model_probes` table. Panel hides models matched by `MODEL_BLOCKLIST`.
 
-**Dead models also drop out of the model list**: while `failed` and still cache-locked, that `(channel, model)` pair is hidden; when the cache expires it returns automatically.
+**Dead models also drop out of model list**: while `failed` and still cache-locked, that `(channel, model)` pair is hidden; cache expiry returns it automatically.
 
-**Manual takeover** (`POST /api/models/probes/manual`): skips automatic probing for that row without touching the cache. Use *Probe now* to recover immediately. Background interval `MODEL_PROBE_MINUTES` (default 0 = off).
+**Manual takeover** (`POST /api/models/probes/manual`): skips automatic probing for that row, cache untouched. *Probe now* recovers immediately. Interval `MODEL_PROBE_MINUTES` (default 0 = off).
 
 ### Admin *Upstream status* page
 
-(`GET /api/upstream-status`, admin / operator) aggregates official status pages to answer "is the upstream down, or is it my credential / quota".
+(`GET /api/upstream-status`, admin / operator) aggregates official status pages to answer "upstream down, or my credential / quota".
 
 - **Sources**: OpenCode Zen (per-model TTFT / tps), Kilo, Moonshot / Kimi, MiniMax, OpenAI, Anthropic, Together AI, DeepSeek. Grouped by `scope`: `channel` first, `model` after.
-- **Six normalized levels**: `operational` / `degraded` / `partial` / `major` / `maintenance` / `unknown`. The overall level is the worst source, with `unknown` last.
+- **Six normalized levels**: `operational` / `degraded` / `partial` / `major` / `maintenance` / `unknown`. Overall = worst source, `unknown` last.
 - **Explanation only, never decisions**; not part of scheduling or circuit breaking.
-- **Memory only**; a background task (`UPSTREAM_STATUS_MINUTES`, default 5) fetches, and a single failing source only marks its own row.
-- **Conclusion first, detail after**: a summary bar on top, then two scope groups with abnormal sources expanded; a *needs attention* strip hoists non-normal sources. Component detail beyond 6 items truncates (abnormal items first).
+- **Memory only**; background task (`UPSTREAM_STATUS_MINUTES`, default 5) fetches; single failing source only marks its own row.
+- **Conclusion first, detail after**: summary bar on top, then two scope groups with abnormal sources expanded; *needs attention* strip hoists non-normal sources. Component detail beyond 6 items truncates (abnormal first).
 - **Not covered**: sources that only offer HTML (Groq, Tencent Cloud, Alibaba Cloud, Huawei Cloud, SiliconFlow, Qoder, Zhipu, TRAE).
 
 ### Token expiry visibility
 
-The **token remaining** column shows how long the access token lasts, red below `TOKEN_EXPIRY_WARNING_SECONDS` (default 1 hour). Prefers the upstream `expires_at`, falls back to JWT `exp`; neither → `—`, never a guessed local TTL.
+The **token remaining** column shows how long access token lasts, red below `TOKEN_EXPIRY_WARNING_SECONDS` (default 1 hour). Prefers upstream `expires_at`, falls back to JWT `exp`; neither → `—`, never guessed local TTL.
 
 ## Sidebar to-dos (navigation badges)
 
-The sidebar is on every page. Several to-dos you would only notice by visiting a page show as count badges, fed by one aggregate endpoint `GET /api/nav-badges`, polled every 60s.
+Sidebar is on every page. To-dos you would only notice by visiting a page show as count badges, fed by one aggregate endpoint `GET /api/nav-badges`, polled every 60s.
 
 | Entry | Threshold | Badge |
 |---|---|---|
@@ -464,93 +464,95 @@ The sidebar is on every page. Several to-dos you would only notice by visiting a
 | API keys | everyone (own only) | keys expired or expiring within 7 days |
 | Model list | operator+ | stale snapshot (boolean text) |
 
-- **Role-filtered**: the backend sends only keys the role may see; a missing key means no permission (not 0). The credential badge is withheld from viewers.
-- **Counts only to-dos**: e.g. the alerts page `total` includes resolved history, the badge does not; tasks use "last run failed", not "consecutive failures ≥ threshold".
-- **Credential badge ≠ `/healthz` ready count**: the latter ignores health, so an out-of-quota credential still counts as `ready`.
+- **Role-filtered**: backend sends only keys the role may see; missing key = no permission (not 0). Credential badge withheld from viewers.
+- **Counts only to-dos**: alerts page `total` includes resolved history, badge does not; tasks use "last run failed", not "consecutive failures ≥ threshold".
+- **Credential badge ≠ `/healthz` ready count**: latter ignores health → out-of-quota credential still counts as `ready`.
 - **Alert badges self-heal**: `AlertTask` rebuilds its unresolved set from the DB at startup.
-- **Stale catalog**: never fetched is not stale; stale means 2× `OPENROUTER_CATALOG_MINUTES` without a refresh.
+- **Stale catalog**: never fetched is not stale; stale means 2× `OPENROUTER_CATALOG_MINUTES` without refresh.
 
 ## Stats
 
 ### Scope
 
-Default range is **the last 24 hours** (also 7 days / 30 days / all / custom). Custom takes two `datetime-local` inputs (browser-local timezone), one side may be empty; a start not earlier than the end voids the window with a message. Every stats endpoint accepts `until` (epoch seconds, half-open `[since, until)`).
+Default range **last 24 hours** (also 7 / 30 days, all, custom). Custom takes two `datetime-local` inputs (browser-local timezone), one side may be empty; start not earlier than end voids window with message. Every stats endpoint accepts `until` (epoch seconds, half-open `[since, until)`).
 
 **Failure types** = controlled enum: exhausted model-level cooldown → `model_unavailable`; genuinely empty pool → `no_healthy_credential`; upstream explicitly says "no such model" → `model_not_found` (kept apart from `invalid_request`: one means the model was withdrawn, the other means the request was malformed) — same outbound code, different stats meaning.
 
-**Request ID**: every response carries `X-Request-ID`. A valid inbound value is reused, otherwise one is generated; allowed charset `[A-Za-z0-9._:-]`, length 1–128. It lands in `usage_events.request_id` and shows on hover in the detail time column. **Never forwarded upstream** (outbound header semantics differ per channel).
+**Request ID**: every response carries `X-Request-ID`. Valid inbound value reused, else generated; charset `[A-Za-z0-9._:-]`, length 1–128. Lands in `usage_events.request_id`, shows on hover in detail time column. **Never forwarded upstream** (outbound header semantics differ per channel).
 
-**Credit**: CodeBuddy is the upstream truth; TRAE is derived from official unit prices and marked `≈` (table in `src/provider/trae/pricing.py`; unlisted models are not derived). Backfill history with `scripts/backfill_trae_credit.py`.
+**Credit**: CodeBuddy = upstream truth; TRAE derived from official unit prices, marked `≈` (table `src/provider/trae/pricing.py`; unlisted not derived). Backfill with `scripts/backfill_trae_credit.py`.
 
-**Cost (estimated, ≈)**: tokens × public list price, not the real charge. Prices come from the OpenRouter public catalog: `(input − cached) × input + cached × cache price + output × output price`, converted with the `USD_CNY_RATE` in effect at write time.
+**Cost (estimated, ≈)**: tokens × public list price, not real charge. Prices from OpenRouter public catalog: `(input − cached) × input + cached × cache price + output × output price`, converted with `USD_CNY_RATE` in effect at write time.
 
-- **Fixed at write time**: cost is computed when the detail row is written and never recalculated. Pre-release rows are `NULL`; backfill with `scripts/backfill_cost.py --apply`.
-- **No match, no cost**: local names match OpenRouter `id` / display name exactly (ambiguous matches are skipped); aggregate shows `—`, so cost is a lower bound. Channel-specific ids map to the base model only through explicit equivalence rules (verified ids only, no generic date/suffix stripping).
+- **Fixed at write time**: cost computed when detail row written, never recalculated. Pre-release rows `NULL`; backfill with `scripts/backfill_cost.py --apply`.
+- **No match, no cost**: local names match OpenRouter `id` / display name exactly (ambiguous skipped) → aggregate shows `—`, so cost is a lower bound. Channel-specific ids map to base model only via explicit equivalence rules (verified ids only, no generic date/suffix stripping).
 
-**Cache hit rate**: cached ÷ input tokens (1 decimal). `—` when unreported or input is 0. Group and detail tables show it next to tokens.
+**Cache hit rate**: cached ÷ input tokens (1 decimal). `—` when unreported or input 0. Group / detail tables show it next to tokens.
 
-**Output speed (tok/s)**: total tokens ÷ total generation time, not an average of per-request ratios. Same denominator, different numerators: **visible speed** uses `output_tokens - reasoning_tokens`, **total output speed** includes reasoning. The UI shows `visible / total`. Only successful requests routed here that produced ≥ 1 token. Generation time = `latency_ms - ttfb_ms`; windows under 200 ms or single samples over 1000 tok/s are dropped as unmeasurable. `ttfb_ms` of `NULL` is excluded from the primary scope; when a row or group has no primary sample, it falls back to end-to-end time (prefixed `≈`). No samples at all → `—`.
+**Output speed (tok/s)**: total tokens ÷ total generation time, not average of per-request ratios. Same denominator, different numerators: **visible speed** uses `output_tokens - reasoning_tokens`; **total output speed** includes reasoning. UI shows `visible / total`. Only successful requests routed here that produced ≥ 1 token. Generation time = `latency_ms - ttfb_ms`; windows under 200 ms or single samples over 1000 tok/s dropped as unmeasurable. `ttfb_ms` = `NULL` excluded from primary scope; row or group with no primary sample falls back to end-to-end time (prefixed `≈`). No samples → `—`.
 
-Aggregate speed can only be computed from per-request detail, so it covers the last 90 days (the overview card too; other cards read the hourly rollup). The detail table shows each request's own speed without the fallback; rows without a generation window show `—`. Speed columns sort via `sort=tps_visible` / `sort=tps`.
+Aggregate speed can only come from per-request detail → covers last 90 days (overview card too; other cards read hourly rollup). Detail table shows each request's own speed, no fallback; rows without generation window show `—`. Speed columns sort via `sort=tps_visible` / `sort=tps`.
+
+**Chart metrics**: requests / tokens / cost / cost per request / latency / TTFB / success rate / cache hit rate — switch to compare trends. Derived metrics (success rate, cache hit rate, cost per request) divide **after** aggregation (`sum ÷ sum`), not an average of per-hour ratios; no samples → `—` (line breaks), never 0. Latency / TTFB get an extra **percentile chart** (P50 median + P95 upper bound, read from per-request detail, 90-day window) — the mean flattens the long tail. The time axis is padded per hour (gaps keep their position instead of being squeezed out of time).
 
 ### Credit record
 
-The arrow after the quota number expands the change ledger, recording the **net change between two quota probes**, not an action attribution: check-in, growth and chat all change the balance and the upstream logs nothing, so the UI always says "net change". First probe only sets a baseline; unchanged balances are not recorded; an unknown balance is recorded without a delta; 90-day retention.
+Arrow after quota number expands change ledger = **net change between two quota probes**, not action attribution: check-in, growth and chat all change balance and upstream logs nothing → UI always says "net change". First probe only sets baseline; unchanged balances not recorded; unknown balance recorded without delta; 90-day retention.
 
-**Split by ledger**: rows carry `ledger` (`pool` / `credits`). CodeArts uses `credits`, others `pool`. Endpoint `GET /api/credentials/{id}/credit-events?ledger=` (default `pool`). The two ledgers differ in magnitude and meaning and must be read separately.
+**Split by ledger**: rows carry `ledger` (`pool` / `credits`). CodeArts uses `credits`, others `pool`. Endpoint `GET /api/credentials/{id}/credit-events?ledger=` (default `pool`). Two ledgers differ in magnitude and meaning → read separately.
 
 ### Grouping and re-rollup
 
-Four tabs (channel / model / user / credential) share one table (channel / requests / credit / cost / tokens / speed / average latency / P95 latency). Endpoints `GET /api/stats/by-provider|by-model|by-user|by-credential`. Default sort by requests descending; merged columns open a sub-column menu. **Latency percentile switches between P50 / P90 / P95 / P99** (default P95, nearest-rank, n = samples with a value). User and credential views are admin/operator only.
+Four tabs (channel / model / user / credential) share one table (channel / requests / credit / cost / tokens / speed / average latency / P95 latency). Endpoints `GET /api/stats/by-provider|by-model|by-user|by-credential`. Default sort by requests descending; merged columns open sub-column menu. **Latency percentile: P50 / P90 / P95 / P99** (default P95, nearest-rank, n = samples with value). User / credential views admin/operator only.
 
-**Scope differences**: channel / model / user read the hourly rollup (permanent, last 5 minutes not yet counted); credential reads the detail table (90 days only).
+**Scope differences**: channel / model / user read hourly rollup (permanent; last 5 minutes not yet counted); credential reads detail table (90 days only).
 
-**Two latency scopes**: successful requests only. Average latency = `latency_sum ÷ successes` (hourly rollup); percentile latency comes from per-request detail (90 days). `NULL` `ttfb_ms` ranks independently in each column. No samples → `—`.
+**Two latency scopes**: successful requests only. Average = `latency_sum ÷ successes` (hourly rollup); percentile from per-request detail (90 days). `NULL` `ttfb_ms` ranks independently in each column. No samples → `—`.
 
-**Failure attribution**: a panel below the group table, `GET /api/stats/errors` (operator+), aggregates `ok=0` detail by `(channel, model, error_type)` with failure count, **unrescued count** and last failure time (descending, `limit` ≤ 5000). **The failure count is per-attempt**: every upstream rejection lands a row even when a retry on another credential succeeds; a failure row whose `request_id` also has a success row for the **same user** counts as rescued, and `unrescued = failures − rescued` is the **number of failure attempts that were never rescued** (a request failing twice counts twice; this is not the number of lost requests). A hard credential failure (DEAD, e.g. 401) also lands a `credential_unavailable` row, counted as rescued if a retry succeeds elsewhere; the terminal row is not duplicated once rotation is exhausted. Clicking a row drills into the detail with *failed only* (`GET /api/stats/events?ok=0`). Rendered for admin/operator only. `/metrics` `upstream_errors_total` still uses the in-process counter; the two are not merged.
+**Failure attribution**: panel below group table, `GET /api/stats/errors` (operator+) aggregates `ok=0` detail by `(channel, model, error_type)` → failure count, **unrescued count**, last failure time (descending, `limit` ≤ 5000). **Failure count = per-attempt**: every upstream rejection lands row, even when retry on another credential succeeds; failure row whose `request_id` also has success row for **same user** counts as rescued; `unrescued = failures − rescued` = **failure attempts never rescued** (a request failing twice counts twice; not number of lost requests). Hard credential failure (DEAD, e.g. 401) also lands a `credential_unavailable` row, counted as rescued if retry succeeds elsewhere; terminal row not duplicated once rotation exhausted. Click row → detail with *failed only* (`GET /api/stats/events?ok=0`). Admin/operator only. `/metrics` `upstream_errors_total` still in-process counter; not merged.
 
-**Row drill-down**: clicking a group row filters the detail by that row (channel / model / credential; the user dimension uses scope), stacking conditions. `GET /api/stats/events` accepts `provider` / `model` / `credential_id` (AND) and `ok=0`.
+**Row drill-down**: clicking group row filters detail by that row (channel / model / credential; user dimension uses scope), stacking conditions. `GET /api/stats/events` accepts `provider` / `model` / `credential_id` (AND) + `ok=0`.
 
-**Merged detail columns**: tokens, latency, speed and channel / credential each merge into one column with a readable default and a hover breakdown. The time column splits into two lines (time / date). Clicking a merged header opens a sub-column sort menu (`sort=cache_rate` / `tps_visible` / `tps` / `provider` / `credential`).
+**Merged detail columns**: tokens, latency, speed and channel / credential each merge into one column with readable default + hover breakdown. Time column splits two lines (time / date). Clicking merged header opens sub-column sort menu (`sort=cache_rate` / `tps_visible` / `tps` / `provider` / `credential`).
 
-**CSV export**: `GET /api/stats/events?format=csv` (admin / operator only), honoring the current range and drill-down filters. UTF-8 BOM, `\r\n`, ISO 8601 timestamps (UTC), and text cells starting with `= + - @` get a leading quote to prevent formula injection. Capped at 10000 rows with `X-Export-Truncated: 1`.
+**CSV export**: `GET /api/stats/events?format=csv` (admin / operator only), honoring current range + drill-down filters. UTF-8 BOM, `\r\n`, ISO 8601 timestamps (UTC); text cells starting with `= + - @` get leading quote to prevent formula injection. Capped at 10000 rows with `X-Export-Truncated: 1`.
 
-**Live stream (SSE)**: `GET /api/stats/events/stream` shows requests that just landed within the current filter. Events are broadcast by the in-process `LiveEventHub` after `StatsCollector.record` commits; the UI keeps the latest 50.
+**Live stream (SSE)**: `GET /api/stats/events/stream` shows requests that just landed within current filter. Events are broadcast by in-process `LiveEventHub` after `StatsCollector.record` commits; the UI keeps latest 50.
 
 - Same scope and filters as `/api/stats/events`; changing filters reconnects.
-- The broadcast payload has no credential nickname; only admin/operator connections get `credential_name` filled in server-side.
+- Broadcast payload has no credential nickname; only admin/operator connections get `credential_name` server-side.
 - Bounded buffer of 200 per subscriber (oldest dropped); 8 concurrent subscribers, beyond that 429.
-- 15s comment frames keep the connection alive; `Cache-Control: no-store` + `X-Accel-Buffering: no`.
+- 15s comment frames keep connection alive; `Cache-Control: no-store` + `X-Accel-Buffering: no`.
 
-If history looks small, recompute with `python3 scripts/rollup_hourly.py --apply` (preview by default, backs up first, idempotent).
+History looks small → `python3 scripts/rollup_hourly.py --apply` (preview by default, backs up first, idempotent).
 
 ### List sorting
 
-Click a header to sort: first click uses the column's natural direction (numeric descending, text ascending), clicking again flips. Sorting happens server-side; list endpoints accept `sort` (allowlisted key) and `order` (`asc` / `desc`). Unknown `sort` or invalid `order` falls back to the default without an error.
+Click header to sort: first click uses column's natural direction (numeric descending, text ascending), second flips. Server-side; list endpoints accept `sort` (allowlisted key) + `order` (`asc` / `desc`). Unknown `sort` / invalid `order` falls back to default, no error.
 
 Applies to `/api/credentials`, `/api/users`, `/api/api-keys`, `/api/audit`, `/api/alerts`, `/api/model-catalog`, `/api/credentials/{id}/credit-events`, `/api/credentials/{id}/accounts`, `/api/stats/by-*`, `/api/stats/events`.
 
 ### Pagination
 
-Shared pagination: `page N / M`, 20 / 50 / 100 per page (default 50). Flat lists paginate server-side — endpoints accept `limit` + `offset` and return the filtered `total`. `/api/model-catalog` sorts in memory because its sort keys include derived fields, and also accepts `q` and `only_available`.
+Shared pagination: `page N / M`, 10 / 20 / 50 / 100 per page (default 50). Flat lists paginate server-side — endpoints accept `limit` + `offset` and return filtered `total`. `/api/model-catalog` sorts in memory (sort keys include derived fields) and also accepts `q` / `only_available`.
 
 Grouped tables (credentials by channel, stats group table) are not paginated.
 
 ## Background tasks
 
-Twelve task types — quota probe, token pre-refresh, daily check-in, growth center, activity reporting, detail cleanup, database backup, channel model refresh, model catalog refresh, operations alerts, upstream status, model probing — scheduled by `TaskRunner`, failures isolated. The *Tasks & settings* page shows last run time, result and error (refreshed every 30s); runtime state lives only in this process.
+Twelve task types — quota probe, token pre-refresh, daily check-in, growth center, activity reporting, detail cleanup, database backup, channel model refresh, model catalog refresh, operations alerts, upstream status, model probing — scheduled by `TaskRunner`, failures isolated. *Tasks & settings* page shows last run / result / error (30s refresh); runtime state lives only in this process.
 
-Each card has *Run now* (admin + CSRF): it bypasses the time window but not the on/off switch; if already running it returns `busy=true` without queueing.
+Each card has *Run now* (admin + CSRF): bypasses time window, not on/off switch; already running → `busy=true`, no queueing.
 
-**Channel model refresh** (`MODEL_CATALOG_MINUTES`, default 30) is a safety net so models update even with no traffic.
+**Channel model refresh** (`MODEL_CATALOG_MINUTES`, default 30) is safety net so models update even with no traffic.
 
 **Growth center** is CodeBuddy-only. Default period 60 minutes (`GROWTH_INTERVAL_MINUTES`). Irreversible actions are gated by `GROWTH_IRREVERSIBLE_ACTIONS=false`.
 
 ### Activity reporting (optional, off by default)
 
-With `ACTIVITY_REPORT_ENABLED=true`, each account gets one `chat_request_send` event per day in the `ACTIVITY_REPORT_HOUR` (default 10) window to keep the streak alive. Unrelated to credits or scheduling. Applies to CodeBuddy and the international site.
+With `ACTIVITY_REPORT_ENABLED=true`, each account gets one `chat_request_send` event per day in `ACTIVITY_REPORT_HOUR` (default 10) window to keep streak alive. Unrelated to credits or scheduling. Applies to CodeBuddy and international site.
 
-> **Risk**: the official terms forbid scripted tampering with activity data; penalties include disqualification and clawing back gifts. Off by default — assess the account risk first. Breaks as soon as the upstream changes. A missing `userId` makes the upstream silently discard the event; empty OAuth `user_id` falls back to the JWT `sub`, and skips when still missing.
+> **Risk**: official terms forbid scripted tampering with activity data; penalties include disqualification and clawing back gifts. Off by default — assess account risk first. Breaks as soon as upstream changes. Missing `userId` → upstream silently discards event; empty OAuth `user_id` falls back to JWT `sub`, skips when still missing.
 
 ### Operations alerts
 
@@ -564,18 +566,18 @@ Four rules are evaluated periodically and written to `alert_events` (the *Alerts
 | `error_rate` | failure share reaches `ALERT_ERROR_RATE_THRESHOLD` with enough samples |
 
 - **Silence window**: one row / push per `(rule, target)` per window.
-- **Hysteresis**: alerts fire after N consecutive hits and resolve after M consecutive misses. Resolution stamps `resolved_at` on every unresolved row for that `(rule, target)` and emits a `status="resolved"` webhook.
-- **Restart self-heal**: hysteresis counters are in-process; the unresolved set is rebuilt from the DB.
+- **Hysteresis**: alerts fire after N consecutive hits, resolve after M consecutive misses. Resolution stamps `resolved_at` on every unresolved row for that `(rule, target)` and emits `status="resolved"` webhook.
+- **Restart self-heal**: hysteresis counters are in-process; unresolved set is rebuilt from the DB.
 - **Manual resolution**: *Mark resolved* (admin + CSRF + audit) marks that row only.
 - **Retention**: same as request detail (90 days).
 
 ### Database backup and restore
 
-**Automatic** (`BACKUP_INTERVAL_MINUTES`, default daily) writes a consistent snapshot into `DATA_DIR/backups/`, keeping the newest `BACKUP_KEEP` (default 7).
+**Automatic** (`BACKUP_INTERVAL_MINUTES`, default daily) writes consistent snapshot into `DATA_DIR/backups/`, keeping newest `BACKUP_KEEP` (default 7).
 
-- Uses `VACUUM INTO`, not a file copy (WAL would lose uncheckpointed transactions).
-- Runs `PRAGMA integrity_check` immediately and deletes a bad snapshot. Files `0600`, directory `0700`.
-- Failures only log; the service keeps running.
+- Uses `VACUUM INTO`, not file copy (WAL would lose uncheckpointed transactions).
+- Runs `PRAGMA integrity_check` immediately and deletes bad snapshot. Files `0600`, directory `0700`.
+- Failures only log; service keeps running.
 
 Manual backup:
 
@@ -585,18 +587,18 @@ python3 scripts/backup_db.py --keep 14       # keep 14 (0 = never prune)
 python3 scripts/backup_db.py --out /path/dir
 ```
 
-Restore (**stop the service first**):
+Restore (**stop service first**):
 
 ```bash
 python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3            # preview: verify only
 python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --apply    # verify → safety copy → atomic replace
 ```
 
-The flow: verify integrity → take a `.pre-restore-<timestamp>` copy → replace atomically → remove stale `-wal`/`-shm`. **Restart afterwards.**
+Flow: verify integrity → `.pre-restore-<timestamp>` copy → atomic replace → remove stale `-wal`/`-shm`. **Restart afterwards.**
 
 ## Configuration
 
-Full list in `src/config.py` (authoritative); every item is wired through `docker-compose.yml`. Inside containers use `HOST`/`PORT` to change the listen address.
+Full list in `src/config.py` (authoritative); every item wired through `docker-compose.yml`. Inside containers use `HOST`/`PORT` to change listen address.
 
 | Variable | Default | Notes |
 |---|---|---|
@@ -611,14 +613,14 @@ Full list in `src/config.py` (authoritative); every item is wired through `docke
 | `MODEL_CATALOG_MINUTES` | `30` | Channel model refresh period (min 5) |
 | `OPENROUTER_CATALOG_MINUTES` | `1440` | Model catalog refresh period (min 60) |
 | `OPENROUTER_MODELS_URL` | `https://openrouter.ai/api/v1/models` | Catalog source (anonymous); restart required |
-| `USD_CNY_RATE` | `6.70` | Cost estimation rate; hot-reloadable, affects new rows only |
+| `USD_CNY_RATE` | `6.70` | Cost estimation rate; hot, affects new rows only |
 | `GROWTH_INTERVAL_MINUTES` | `60` | Growth center period (min 5) |
 | `GROWTH_IRREVERSIBLE_ACTIONS` | `true` | Allow lottery / streak redemption / blind boxes / makeup cards |
 | `ACTIVITY_REPORT_ENABLED` | `false` | Activity reporting, off by default |
 | `ACTIVITY_REPORT_HOUR` | `10` | Local hour window for activity reporting |
-| `CHECKIN_TIMES` | `""` | Check-in times `HH:MM`, comma-separated; empty = every 10 minutes. Hot-reloadable |
-| `CHECKIN_JITTER_MINUTES` | `0` | Jitter before the time point. Hot-reloadable |
-| `LOG_BUFFER_LINES` | `500` | Server log buffer lines; `0` disables the page. Hot-reloadable |
+| `CHECKIN_TIMES` | `""` | Check-in times `HH:MM`, comma-separated; empty = every 10 minutes. Hot |
+| `CHECKIN_JITTER_MINUTES` | `0` | Jitter before the time point. Hot |
+| `LOG_BUFFER_LINES` | `500` | Server log buffer lines; `0` disables the page. Hot |
 | `ALERT_ENABLED` | `true` | Operations alerts on/off |
 | `ALERT_WEBHOOK_URL` | empty | Webhooks, comma-separated (≤16, http(s) only, internal / loopback rejected), signed with `X-Coding2API-Signature` |
 | `ALERT_INTERVAL_MINUTES` | `5` | Alert evaluation period |
@@ -636,7 +638,7 @@ Full list in `src/config.py` (authoritative); every item is wired through `docke
 | `UPSTREAM_STATUS_ENABLED` | `true` | Upstream status page on/off |
 | `UPSTREAM_STATUS_MINUTES` | `5` | Fetch period (min 1) |
 | `UPSTREAM_STATUS_TIMEOUT_SECONDS` | `10.0` | Per-source HTTP timeout |
-| `MODEL_PROBE_MINUTES` | `0` | Probe period (`0` = off). Only cache-locked `(channel, model)` pairs; success clears the cache, everything else never disables. Hot-reloadable |
+| `MODEL_PROBE_MINUTES` | `0` | Probe period (`0` = off). Only cache-locked `(channel, model)` pairs; success clears the cache, everything else never disables. Hot |
 | `QUOTA_EXPIRY_WINDOW_SECONDS` | `129600` | Main expiry window; `≤0` disables |
 | `QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS` | `604800` | Secondary window; `≤0` disables |
 | `CONVERSATION_STICKY_SECONDS` | `3600` | Stickiness TTL. Priority: body key > header > message-prefix fingerprint; pin wins. `≤0` disables |
@@ -685,46 +687,46 @@ Full list in `src/config.py` (authoritative); every item is wired through `docke
 | `CONTEXT_COMPRESS_MIN_KEEP_MESSAGES` | `4` | Recent messages always kept |
 | `CONTEXT_COMPRESS_SAFETY_RATIO` | `0.95` | Budget share of the model limit |
 | `UPSTREAM_COMPLETE_TIMEOUT_SECONDS` | `600` | Non-streaming aggregate timeout; `≤0` disables |
-| `STREAM_FIRST_EVENT_TIMEOUT_SECONDS` | `0` | First-event timeout (retryable before any frame). **Keep off by default**, recommended 60. Hot-reloadable |
-| `STREAM_IDLE_TIMEOUT_SECONDS` | `0` | Idle timeout (closes, never retries), recommended 300. Hot-reloadable |
-| `SHORT_COOLDOWN_WAIT_SECONDS` | `0` | Wait when the whole pool is in short cooldown; `0` = fail fast. Hot-reloadable |
-| `NONSTREAM_KEEPALIVE_SECONDS` | `0` | Non-streaming responses switch to chunked with whitespace heartbeats after N seconds (leading whitespace is legal JSON); `0` = off, only needed behind a CDN, recommended 15. Hot-reloadable |
-| `MODEL_ALIASES` | `""` | Custom aliases; empty = off. Hot-reloadable |
+| `STREAM_FIRST_EVENT_TIMEOUT_SECONDS` | `0` | First-event timeout (retryable before any frame). **Keep off by default**, recommended 60. Hot |
+| `STREAM_IDLE_TIMEOUT_SECONDS` | `0` | Idle timeout (closes, never retries), recommended 300. Hot |
+| `SHORT_COOLDOWN_WAIT_SECONDS` | `0` | Wait when the whole pool is in short cooldown; `0` = fail fast. Hot |
+| `NONSTREAM_KEEPALIVE_SECONDS` | `0` | Non-streaming responses switch to chunked with whitespace heartbeats after N seconds (leading whitespace is legal JSON); `0` = off, only needed behind a CDN, recommended 15. Hot |
+| `MODEL_ALIASES` | `""` | Custom aliases; empty = off. Hot |
 | `MAX_INFLIGHT_PER_CREDENTIAL` | `0` | Per-account in-flight cap; `0` = unlimited. 600s TTL backstop |
-| `METRICS_ENABLED` | `true` | Expose `/metrics` (unauthenticated). Hot-reloadable |
-| `REQUEST_LOG_ENABLED` | `true` | Request-level logfmt logging; no query / body / username. Hot-reloadable |
-| `FORCE_DISABLE_THINKING` | `false` | Strip reasoning from responses only. Hot-reloadable |
-| `REASONING_EFFORT_MAP` | `""` | Outbound level mapping `channel=from:to;*=from:to`; `none` deletes the key. Hot-reloadable |
-| `ANTHROPIC_THINKING_EFFORTS` | `""` | Anthropic `thinking.budget_tokens` → upstream `reasoning_effort`. Hot-reloadable |
+| `METRICS_ENABLED` | `true` | Expose `/metrics` (unauthenticated). Hot |
+| `REQUEST_LOG_ENABLED` | `true` | Request-level logfmt logging; no query / body / username. Hot |
+| `FORCE_DISABLE_THINKING` | `false` | Strip reasoning from responses only. Hot |
+| `REASONING_EFFORT_MAP` | `""` | Outbound level mapping `channel=from:to;*=from:to`; `none` deletes the key. Hot |
+| `ANTHROPIC_THINKING_EFFORTS` | `""` | Anthropic `thinking.budget_tokens` → upstream `reasoning_effort`. Hot |
 
 ### Runtime settings (*Tasks & settings* page)
 
-The **60** items marked hot-reloadable above can be changed there without touching `.env` or restarting (the page lists them all).
+The **60** items marked hot above can be changed there without touching `.env` or restarting.
 
-Key points: **DB override beats `.env`** — once overridden, `.env` no longer applies to that item; the page marks it "DB override" and *Restore default* deletes the row. Values live in `runtime_settings` (plain key/value), so new hot settings need no migration; unknown keys and invalid types / out-of-range values are rejected before writing. Startup-time items (`APP_SECRET` / `PORT` / `DATA_DIR` / `USERS_FILE` / `OPENROUTER_MODELS_URL` / upstream allowlists) are not hot. Endpoints `GET /api/settings` and `PUT /api/settings` (admin + CSRF); `null` restores the default. The page also shows task runtime state (`GET /api/tasks`, in-process, refreshed every 30s).
+Key points: **DB override beats `.env`** — once overridden `.env` no longer applies to that item; page marks "DB override", *Restore default* deletes row. Values live in `runtime_settings`, so new hot settings need no migration; unknown keys and invalid types / out-of-range values rejected before writing. Startup-time items (`APP_SECRET` / `PORT` / `DATA_DIR` / `USERS_FILE` / `OPENROUTER_MODELS_URL` / upstream allowlists) not hot. `GET /api/settings` / `PUT /api/settings` (admin + CSRF); `null` restores default. Page also shows task runtime state (`GET /api/tasks`, in-process, 30s refresh).
 
 ## Deployment notes
 
-- **Mount ownership**: the container runs as uid 1001 (`appuser`), so `./data` and `./secrets` must be writable / readable:
+- **Mount ownership**: container runs as uid 1001 (`appuser`) → `./data` and `./secrets` must be writable / readable:
 
   ```bash
   mkdir -p data secrets && sudo chown -R 1001:1001 data secrets
   ```
 
-- **Timezone**: the image defaults to `TZ=Asia/Shanghai`; `.env` `TZ` is passed through. Check-in and quota cycles depend on "today at 9", so keep it aligned with the host.
-- **Port**: in compose `PORT` sets both the container listen port and the host mapping.
-- **Rebuild after code changes**: `docker compose up -d` without `--build` reuses the local image and runs old code. Use `docker compose up -d --build` after changing `src/` or the frontend.
+- **Timezone**: image defaults `TZ=Asia/Shanghai`; `.env` `TZ` passed through. Check-in and quota cycles depend on "today at 9" → keep aligned with host.
+- **Port**: in compose `PORT` sets both container listen port and host mapping.
+- **Rebuild after code changes**: `docker compose up -d` without `--build` reuses local image, runs old code. Use `docker compose up -d --build` after changing `src/` or frontend.
 
 ### Restart the backend after upgrading
 
-**Changes under `src/` require a process restart**, otherwise you get "new frontend + old backend": pages load but new endpoints 404. The frontend does not need a restart (the backend reads `web/dist` per request); the backend does.
+**Changes under `src/` require process restart**, otherwise you get "new frontend + old backend": pages load but new endpoints 404. The frontend does not need restart (the backend reads `web/dist` per request); backend does.
 
 ```bash
 docker compose up -d --force-recreate   # Docker / compose
 sudo systemctl restart coding2api       # systemd
 ```
 
-Confirm the upgrade:
+Confirm upgrade:
 
 ```bash
 sqlite3 data/coding2api.sqlite3 "PRAGMA user_version; SELECT username, role, enabled FROM users;"
@@ -733,20 +735,20 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users   # exp
 
 ### Frontend assets on the same port
 
-The backend serves the built frontend at `/` (reading from disk per request), so **frontend-only changes just need a build and a refresh**. `localhost:5173` is the Vite dev server; both can coexist.
+Backend serves built frontend at `/` (reads disk per request), so **frontend-only changes just need build + refresh**. `localhost:5173` is Vite dev server; both coexist.
 
 ```bash
 ./scripts/build-web.sh            # build only when stale
 ./scripts/build-web.sh --force    # unconditional rebuild
 ```
 
-> **`web/.npmrc` must not be deleted**: it disables `auto-install-peers` (otherwise `@lobehub/icons` drags in `@lobehub/ui` / `antd`). The setting is coupled to `settings.autoInstallPeers` in the lockfile, so the `Dockerfile` must `COPY web/.npmrc` or `--frozen-lockfile` fails with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`.
+> **`web/.npmrc` must not be deleted**: it disables `auto-install-peers` (else `@lobehub/icons` drags in `@lobehub/ui` / `antd`). Coupled to `settings.autoInstallPeers` in lockfile → `Dockerfile` must `COPY web/.npmrc`, or `--frozen-lockfile` fails with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`.
 
-> **Deployment notes for this machine**: process management, paths and tool versions are in `docs/local-environment.md` (gitignored).
+> **Deployment notes for this machine**: process management, paths, tool versions in `docs/local-environment.md` (gitignored).
 
 ## Public entry point (VPS + frp reverse tunnel)
 
-Behind CGNAT there is no inbound address, so the public entry must be an outbound tunnel. Cloudflare Tunnel's free tier routes mainland traffic via Los Angeles (measured 1.1–2.4s, ~60% loss); "offshore VPS entry + frp back to origin" gets to 80–150ms. Inbound only — outbound to upstreams still uses `PROVIDER_PROXIES`.
+Behind CGNAT there is no inbound address, so public entry must be outbound tunnel. Cloudflare Tunnel free tier routes mainland traffic via Los Angeles (measured 1.1–2.4s, ~60% loss); "offshore VPS entry + frp back to origin" gets 80–150ms. Inbound only — outbound still uses `PROVIDER_PROXIES`.
 
 ```
 client ──443/TLS──> VPS(nginx) ──frp tunnel──> home Mac:8000
@@ -772,7 +774,7 @@ sudo nginx -t && sudo systemctl reload nginx
 sudo certbot --nginx -d ai-api.example.com
 ```
 
-Point the DNS A record at the VPS public IP; an offshore VPS needs no ICP filing.
+Point the DNS A record at the VPS public IP; offshore VPS needs no ICP filing.
 
 Home Mac side:
 
@@ -783,7 +785,7 @@ launchctl print gui/$(id -u)/com.coding2api.frpc | grep -E 'state|pid'
 ./scripts/install-frpc.sh --uninstall
 ```
 
-`frpc.toml` reads `{{ .Envs.FRP_SERVER_ADDR }}`; address and token come from the plist, and the token lives in `secrets/frpc-token` (600, gitignored).
+`frpc.toml` reads `{{ .Envs.FRP_SERVER_ADDR }}`; address + token come from plist; token lives in `secrets/frpc-token` (600, gitignored).
 
 Three `.env` values to update:
 
@@ -793,7 +795,7 @@ Three `.env` values to update:
 | `PUBLIC_BASE_URL` | `https://<tunnel domain>` | wrong TRAE callback base, no HSTS |
 | `HOST` | keep `127.0.0.1` | the tunnel only needs to reach loopback |
 
-`TRUST_PROXY`: with exactly one nginx hop on the VPS you may set `true` so key `allowed_ips` sees real client IPs. Keep `false` if LAN direct access must stay safe.
+`TRUST_PROXY`: with exactly one nginx hop on VPS set `true` so key `allowed_ips` sees real client IPs. Keep `false` if LAN direct access must stay safe.
 
 ## Logs
 
@@ -816,15 +818,15 @@ Every business request (`/api/*`, `/v1/*`, `/authorize`) writes one logfmt line:
 event=request request_id=9f2c… method=POST route=/v1/chat/completions status=200 duration_ms=1234
 ```
 
-- `route` is the route template (`/api/credentials/{credential_id}`); unmatched requests fall back to a sanitized raw path.
-- No query string, request body, response body, headers or username; identity is recovered via `request_id` into `usage_events`.
+- `route` = route template (`/api/credentials/{credential_id}`); unmatched requests fall back to sanitized raw path.
+- No query string, request body, response body, headers or username; identity recovered via `request_id` into `usage_events`.
 - `request_id` matches the `X-Request-ID` response header.
 - `5xx` logs WARNING, everything else INFO.
 - Static assets and probes (`/health`, `/healthz`, `/metrics`) are skipped.
 - uvicorn's access log is disabled.
-- Switch `REQUEST_LOG_ENABLED` (default `true`, hot-reloadable).
+- Switch `REQUEST_LOG_ENABLED` (default `true`, hot).
 
-> `data/dumps/` (written by `DUMP_REQUEST_BODIES=true`) is outside the docker log system; the app keeps at most 200 files.
+> `data/dumps/` (written by `DUMP_REQUEST_BODIES=true`) is outside docker log system; app keeps at most 200 files.
 
 ## Development
 
