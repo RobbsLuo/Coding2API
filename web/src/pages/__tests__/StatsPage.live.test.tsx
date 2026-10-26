@@ -51,7 +51,7 @@ describe("StatsPage 实时明细", () => {
     // 实时行与分页明细表同列：速度按广播行自带的 tps / tps_visible 渲染
     const liveTable = screen.getByTestId("events-live-table");
     expect(liveTable).toHaveTextContent("速度");
-    expect(liveTable).toHaveTextContent("51.2 / 82.8 tok/s");
+    expect(liveTable).toHaveTextContent("51.2 / 82.8");
     // 时间两行（时刻优先、日期在下）、渠道/凭证合并列：实时表与分页表同一套渲染
     const liveCell = screen.getAllByTestId("live-row")[0]
       .querySelector("[data-label='时间']")!;

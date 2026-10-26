@@ -103,12 +103,14 @@ describe("StatsPage 失败归因", () => {
     });
   });
 
-  it("没有失败时给空态，不渲染表格", async () => {
+  it("没有失败时整张卡不渲染（不给空态占版面）", async () => {
     mockFetch(statsRoutes({ errors: [] }));
     renderPage(<StatsPage />, ADMIN);
     await settle();
 
-    expect(screen.getByTestId("no-errors")).toHaveTextContent("没有失败请求");
+    // 「零失败」不必占一张卡：空态 + 标题栏 + 口径说明约 239px，
+    // 把真正的数据推到更下面。无失败时整块隐藏。
+    expect(screen.queryByTestId("error-panel")).not.toBeInTheDocument();
     expect(screen.queryByTestId("error-table")).not.toBeInTheDocument();
   });
 

@@ -18,6 +18,7 @@ import {
   credentialState,
   formatDuration,
   formatNumber,
+  formatRate,
   formatTime,
   formatTimeParts,
   upstreamLevelLabel,
@@ -110,8 +111,30 @@ describe("formatChartValue", () => {
     expect(formatChartValue(12.34, "cost")).toBe("¥12.34 (元)");
   });
 
+  it("比率指标：0..1 转百分比（一位小数）；空值给 —", () => {
+    expect(formatChartValue(0.9567, "success_rate")).toBe("95.7%");
+    expect(formatChartValue(0.4, "cache_rate")).toBe("40.0%");
+  });
+
+  it("单请求成本：金额 + 「/ 次」", () => {
+    expect(formatChartValue(0.0312, "cost_per_request")).toBe("¥0.0312 / 次");
+  });
+
   it("未知指标回退请求次数", () => {
     expect(formatChartValue(12, "bogus")).toBe("12 (次)");
+  });
+});
+
+describe("formatRate", () => {
+  it("比率乘 100 保留一位小数", () => {
+    expect(formatRate(0.9)).toBe("90.0%");
+    expect(formatRate(1)).toBe("100.0%");
+    expect(formatRate(0)).toBe("0.0%");
+  });
+
+  it("无样本给 —（不渲染成 0%）", () => {
+    expect(formatRate(null)).toBe("—");
+    expect(formatRate(undefined)).toBe("—");
   });
 });
 
@@ -141,6 +164,17 @@ describe("formatAxisValue", () => {
   it("成本：保留两位小数（不用万/亿紧凑格式）", () => {
     expect(formatAxisValue(12.34, "cost")).toBe("12.34");
     expect(formatAxisValue(1500.5, "cost")).toBe("1,500.5");
+  });
+
+  it("单请求成本：按量级给 3–4 位小数（两位会让相邻刻度都显示 0.03）", () => {
+    expect(formatAxisValue(0.028, "cost_per_request")).toBe("0.028");
+    expect(formatAxisValue(0.0312, "cost_per_request")).toBe("0.0312");
+    expect(formatAxisValue(0.5, "cost_per_request")).toBe("0.5");
+  });
+
+  it("比率：整数百分比（轴宽有限）", () => {
+    expect(formatAxisValue(0.9, "success_rate")).toBe("90%");
+    expect(formatAxisValue(1, "cache_rate")).toBe("100%");
   });
 
   it("轴顶单位映射：耗时/首字不重复标单位", () => {

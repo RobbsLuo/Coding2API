@@ -10,6 +10,11 @@ import {
   CardHeader,
 } from "@/components/ui/card";
 import { Alert as ShadAlert } from "@/components/ui/alert";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
 
 import {
   Label,
@@ -102,13 +107,15 @@ export function Panel({
   return (
     <Card className={cn("rounded-xl shadow-sm", className)} {...rest}>
       {(title || action) && (
-        <CardHeader className="border-b border-border/70 pb-3">
+        // flex-wrap + basis：窄屏下标题与操作区各占一行，而不是把标题挤成
+        // 「指标趋 / 势」两行（CardHeader 的 grid 在极窄容器里会压标题列）。
+        <CardHeader className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 border-b border-border/70 pb-3">
           {title && (
-            <h2 className="text-sm font-semibold tracking-tight text-foreground">
+            <h2 className="text-sm font-semibold tracking-tight text-foreground whitespace-nowrap">
               {title}
             </h2>
           )}
-          <CardAction>{action}</CardAction>
+          {action && <CardAction className="ml-auto self-center">{action}</CardAction>}
         </CardHeader>
       )}
       <CardContent>{children}</CardContent>
@@ -262,7 +269,11 @@ export function Tabs({
     <div
       role="tablist"
       data-testid={testId}
-      className="inline-flex items-center gap-0.5 rounded-lg border border-border/70 bg-muted/60 p-0.5"
+      // max-w-full + flex-wrap：标签多于一屏时换行，而不是把整个页面撑宽
+      // （实测「图表指标」8 个标签 601px，在 420px 视口下会把文档顶到 613px，
+      // 全页横向滚动）。不用横向滚动：触屏上滚动条不可见，用户不知道右边还有
+      // 选项。按钮加 shrink-0，否则 flex 会把文字挤成换行。
+      className="inline-flex max-w-full flex-wrap items-center gap-0.5 rounded-lg border border-border/70 bg-muted/60 p-0.5"
     >
       {options.map((option) => (
         <button
@@ -273,9 +284,9 @@ export function Tabs({
           data-testid={testId ? `${testId}-${option.value}` : undefined}
           onClick={() => onChange(option.value)}
           className={cn(
-            // whitespace-nowrap：tab 行放不下时横向滚动（外层 overflow-x-auto），
+            // whitespace-nowrap + shrink-0：tab 行放不下时横向滚动（外层 overflow-x-auto），
             // 而不是把标签挤成多行
-            "rounded-md font-medium whitespace-nowrap transition-colors",
+            "shrink-0 rounded-md font-medium whitespace-nowrap transition-colors",
             compact ? "px-2 py-1 text-xs" : "px-3 py-1.5 text-sm",
             option.value === value
               ? "bg-background text-foreground shadow-sm ring-1 ring-border/60"
@@ -315,6 +326,40 @@ export function Notice({
     >
       {children}
     </ShadAlert>
+  );
+}
+
+// ================================================================ Footnote
+/**
+ * 表格/图表下方的口径说明。默认收起成一行「口径说明」，点击展开全文。
+ *
+ * 统计页每张表下面都挂着一大段口径解释（均值与分位口径差异、速度分子分母、
+ * 失败数按尝试计……），三四段加起来近 300px，把真正的数据推到首屏之外。
+ * 口径要保留（不写会被误读），但不该常驻占据版面：默认收起，需要时再点开。
+ */
+export function Footnote({
+  summary = "口径说明",
+  children,
+  className,
+  testId,
+}: {
+  summary?: string;
+  children: ReactNode;
+  className?: string;
+  testId?: string;
+}) {
+  return (
+    <Collapsible className={cn("mt-2", className)} data-testid={testId}>
+      <CollapsibleTrigger
+        className="inline-flex cursor-pointer select-none items-center gap-1 rounded text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+      >
+        <ChevronDown className="size-3.5" />
+        {summary}
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-1.5 space-y-1 text-xs leading-relaxed text-muted-foreground">
+        {children}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 

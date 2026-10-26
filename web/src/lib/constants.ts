@@ -11,7 +11,7 @@ export const MIN_PASSWORD_LENGTH = 8;
  * 所有列表页共用同一组：用户不该在「用量统计」看到 10/20/50/100、在「模型列表」
  * 又看到 20/50/100。默认值取 `DEFAULT_PAGE_SIZE`（见下），各页可显式覆盖。
  */
-export const PAGE_SIZE_OPTIONS = [20, 50, 100] as const;
+export const PAGE_SIZE_OPTIONS = [10, 20, 50, 100] as const;
 
 /** 默认每页条数（`PAGE_SIZE_OPTIONS` 中的一项）。 */
 export const DEFAULT_PAGE_SIZE = 50;

@@ -19,6 +19,7 @@ import {
  */
 export function SortMenuHead({
   label,
+  unit,
   options,
   activeKey,
   direction,
@@ -27,6 +28,11 @@ export function SortMenuHead({
   testId,
 }: {
   label: string;
+  /**
+   * 单位（如 `tok/s`）。以更小字号缀在列名后，而不是拼进 `label`：
+   * 「速度 tok/s」会把列头撑到 100px 以上，10 列的表里正好挤掉最后一列。
+   */
+  unit?: string;
   /** 子列：[{key: 后端排序键, label: 展示名}]，数组顺序即菜单顺序。 */
   options: { key: string; label: string }[];
   /** 当前排序键；不在 options 里时本列不显示激活态（别的列正在排序）。 */
@@ -57,6 +63,9 @@ export function SortMenuHead({
             )}
           >
             {label}
+            {unit && (
+              <span className="text-[10px] font-normal text-muted-foreground/80">{unit}</span>
+            )}
             {activeOption && (
               <span className="font-normal text-muted-foreground">· {activeOption.label}</span>
             )}

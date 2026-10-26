@@ -263,6 +263,21 @@ export function useStatsModelTimeline(username?: string, target?: string, since?
   });
 }
 
+/** 延迟分位时序（P50 中位数 + P95 上界）：读明细表，仅覆盖 90 天。
+ *
+ * `enabled=false` 时不发请求：该图只在延迟类指标下展示，其余指标用不上，
+ * 没必要为每次切指标都扫一遍明细表。 */
+export function useStatsPercentileTimeline(username?: string, target?: string,
+                                           since?: number, until?: number,
+                                           metric?: "latency" | "ttfb",
+                                           enabled = true) {
+  return useQuery({
+    queryKey: adminKey(username, "stats-percentile", target, since, until, metric),
+    queryFn: () => api.statsPercentileTimeline(target, since, until, metric),
+    enabled,
+  });
+}
+
 /** 逐请求明细：排序切换 rowid 游标 / offset 两套分页（见后端 events 文档）。
  *
  * `username` 是**作用域收窄**（钻取到某个用户时才有值）：为空则按会话作用域

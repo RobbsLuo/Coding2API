@@ -218,26 +218,56 @@ export interface CredentialStats extends GroupStats {
   credential_name: string | null;
 }
 
-/** 图表指标：请求次数 / token 消耗 / 成本 / 平均耗时 / 平均首字延迟。 */
-export type StatsMetric = "requests" | "tokens" | "cost" | "latency" | "ttfb";
+/** 图表指标：请求次数 / token 消耗 / 成本 / 平均耗时 / 平均首字延迟 / 成功率 / 缓存命中率 / 单请求成本。 */
+export type StatsMetric =
+  | "requests"
+  | "tokens"
+  | "cost"
+  | "latency"
+  | "ttfb"
+  | "success_rate"
+  | "cache_rate"
+  | "cost_per_request";
 
-/** 小时粒度时间序列点（usage_hourly 聚合，跨 model 汇合）。值语义随 metric 变化。 */
+/** 小时粒度时间序列点（usage_hourly 聚合，跨 model 汇合）。值语义随 metric 变化。
+ *
+ *  时间轴是**稠密**的：后端按小时补齐缺失桶（见 `StatsQuery.timeline`），
+ *  因此相邻点的 `hour` 差值恒为 3600。缺失桶的取值按指标语义区分——可加量
+ *  （请求数 / token）补 0，均值与比率补 `null`（前端据此断线，不画成 0）。 */
 export interface TimelinePoint {
   /** UTC 秒，对齐到小时起点 */
   hour: number;
-  /** 各渠道指标值（渠道名为动态键：codebuddy / trae / zen…） */
-  [provider: string]: number;
+  /** 各渠道指标值（渠道名为动态键：codebuddy / trae / zen…）；无样本为 null */
+  [provider: string]: number | null;
 }
 
 /** 按模型趋势：每小时各 Top N 模型的指标值（模型名为动态键）。 */
 export interface ModelTimelinePoint {
   hour: number;
-  [model: string]: number;
+  [model: string]: number | null;
 }
 
 export interface ModelTimelineResponse {
   models: string[];
   points: ModelTimelinePoint[];
+}
+
+/** 分位时序点：某小时的 P50（中位数）与 P95（上界）延迟，读明细表（仅 90 天）。 */
+export interface PercentilePoint {
+  hour: number;
+  /** 该小时 P50；无成功样本为 null（断线） */
+  p50: number | null;
+  /** 该小时 P95；无成功样本为 null（断线） */
+  p95: number | null;
+  /** 该小时的样本条数（0 = 空档），用于标注「样本很少」 */
+  samples: number;
+}
+
+export interface PercentileTimelineResponse {
+  points: PercentilePoint[];
+  metric: "latency" | "ttfb";
+  /** 明细保留期（天）：分位只能覆盖这段窗口 */
+  window_days: number;
 }
 
 /** 逐请求明细（usage_events，仅保留 90 天）。 */

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
-import { Activity, BarChart3, Coins, CreditCard, Download, Gauge, Timer, Wallet, X, Zap } from "lucide-react";
+import { Activity, BarChart3, ChevronDown, Coins, Download, Gauge, Timer, Wallet, X } from "lucide-react";
+import { cn } from "cn";
 import { useSessionContext } from "../Layout";
 import { useSort } from "../hooks/useSort";
 import {
@@ -11,11 +12,13 @@ import {
   useStatsEvents,
   useStatsModelTimeline,
   useStatsOverview,
+  useStatsPercentileTimeline,
   useStatsTimeline,
 } from "../api/hooks";
 import { formatCacheRate, formatCompact, formatCredit, formatLatency, formatMoney, formatNumber, formatSpeed, formatSpeedPair, formatTime, formatTimeParts, usageErrorLabel } from "../api/display";
 import { useStatsErrors, type StatsErrorRow } from "../api/statsErrors";
-import { ModelTrendChart } from "../components/ModelTrendChart";
+import { ModelLegend, ModelTrendChart } from "../components/ModelTrendChart";
+import { LatencyChart } from "../components/LatencyChart";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { Pagination } from "../components/Pagination";
@@ -23,7 +26,7 @@ import { ProviderIcon } from "../components/ProviderIcon";
 import { SortableHead } from "../components/SortableHead";
 import { SortMenuHead } from "../components/SortMenuHead";
 import { Tip } from "../components/Tip";
-import { UsageChart } from "../components/UsageChart";
+import { ProviderShare, UsageChart, chartProviders, hasData } from "../components/UsageChart";
 import { providerLabel } from "../api/providers";
 import { api } from "../api/client";
 import { buildCustomRange, toLocalInput } from "../lib/customRange";
@@ -31,8 +34,12 @@ import type { GroupStats, StatsDrill, StatsEventFilters, UsageEventRow } from ".
 import {
   Button,
   Checkbox,
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
   Empty,
   Field,
+  Footnote,
   Input,
   Label,
   Metric,
@@ -59,14 +66,26 @@ const RANGES = [
   { value: "custom", label: "自定义", seconds: -1 },
 ];
 
-/** 图表指标筛选：默认请求次数；均值类（耗时/首字）后端按成功请求归一。 */
+/**
+ * 图表指标：按「要回答什么问题」分组。
+ *
+ * 请求次数 / Token 回答「用量」；成本 / 单请求成本回答「花得值不值」；
+ * 耗时 / 首字回答「快不快」；成功率 / 缓存命中率回答「稳不稳、省不省」。
+ * 八个指标共用一张主图（切换而非叠加），渠道拆分由主图下方的渠道切换控制。
+ */
 const METRICS = [
   { value: "requests", label: "请求次数", icon: <BarChart3 className="size-3.5" /> },
   { value: "tokens", label: "Token", icon: <Coins className="size-3.5" /> },
   { value: "cost", label: "成本", icon: <Wallet className="size-3.5" /> },
+  { value: "cost_per_request", label: "单请求成本", icon: <Wallet className="size-3.5" /> },
   { value: "latency", label: "耗时", icon: <Timer className="size-3.5" /> },
   { value: "ttfb", label: "首字延迟", icon: <Gauge className="size-3.5" /> },
-];
+  { value: "success_rate", label: "成功率", icon: <Activity className="size-3.5" /> },
+  { value: "cache_rate", label: "缓存命中率", icon: <Coins className="size-3.5" /> },
+] as const;
+
+/** 延迟类指标：主图之外再画一张分位图（P50 中位数 + P95 上界）。 */
+const LATENCY_METRICS = new Set(["latency", "ttfb"]);
 
 /**
  * 请求明细的合并列：把同类列并成一列，默认值一眼可读，悬停展开全部子项。
@@ -203,9 +222,12 @@ function timeCell(row: UsageEventRow) {
  */
 function sourceCell(row: UsageEventRow) {
   return (
-    <TableCell label="渠道 / 凭证" className="max-w-48 truncate leading-tight"
+    <TableCell label="渠道 / 凭证" className="leading-tight"
                title={row.credential_id ?? undefined}>
-      <span className="block truncate">
+      {/* 固定宽度 + truncate 必须落在内层块元素上：`table-cell` 上的 max-width /
+          truncate 不生效，长邮箱（如 hongsheng900805@gmail.com）会把整列撑到
+          192px，逼得最后两列横向滚动。 */}
+      <span className="block w-32 truncate">
         {credentialCellLabel(row.credential_name, row.credential_id)}
       </span>
       <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -274,7 +296,8 @@ function eventSpeedCell(row: UsageEventRow) {
     <Tip content={row.tps === null
       ? "该请求的生成窗口不可测（无首字数据 / 没有输出 token / 生成窗口短于 200ms 或快得不合物理），不计算速度"
       : `正文 ${formatSpeed(row.tps_visible)} · 总产出（含思考）${formatSpeed(row.tps)}`}>
-      <span className="tabular-nums">{formatSpeedPair(row.tps_visible, row.tps)}</span>
+      {/* 单位交给列头（tok/s），行内只留数字：10 列的表里每行重复单位要多占 45px */}
+      <span className="tabular-nums">{formatSpeedPair(row.tps_visible, row.tps, false, false)}</span>
     </Tip>
   );
 }
@@ -288,15 +311,20 @@ export function StatsPage() {
   const [customFrom, setCustomFrom] = useState("");
   const [customTo, setCustomTo] = useState("");
   const [metric, setMetric] = useState("requests");
+  // 主图口径：默认「全部渠道」合计；切到某渠道则只看那一条曲线。
+  // 不做多系列叠加（7 天窗口下会互相遮挡），一次只画一条。
+  const [chartScope, setChartScope] = useState<string>("total");
   const [groupDimension, setGroupDimension] = useState("provider");
   // 分组统计默认按请求数降序（「用得最多」才是分组表的用途）
   const groupSort = useSort("requests", "desc", { group: "asc" });
   // 明细默认按时间（rowid）降序 → 走游标分页；换列则切 offset 分页
   const eventSort = useSort("time", "desc");
   // 明细分页：cursors[i] = 第 i 页的 before 游标（第 0 页为 undefined）；
-  // rowid 单调递增，游标栈支持双向翻页且不漏不重
+  // rowid 单调递增，游标栈支持双向翻页且不漏不重。
+  // 默认 10 条：明细行是两行文本（时间+日期、凭证+渠道），20 条就是 1140px，
+  // 把页面拉到近 4 屏。看明细通常是「扫最近几条」，需要更多可切 50/100。
   const [pageIndex, setPageIndex] = useState(0);
-  const [pageSize, setPageSize] = useState(20);
+  const [pageSize, setPageSize] = useState(10);
   const [cursors, setCursors] = useState<(number | undefined)[]>([undefined]);
   // 分组表分位档：默认 P95（既有观感）；四档后端一次算好，切换只换展示列
   const [percentile, setPercentile] = useState<Percentile>("p95");
@@ -457,10 +485,17 @@ export function StatsPage() {
   const byCredential = useStatsByCredential(
     session.username, undefined, effectiveSince, effectiveUntil,
     groupSort.sort, groupSort.order);
+  // 渠道构成卡片：只在请求量指标下出现（份额需要「请求数」这个分母）
+  const showShare = metric === "requests"
+    && (byProvider.data?.providers.length ?? 0) > 0;
   const timeline = useStatsTimeline(session.username, undefined, effectiveSince,
                                     effectiveUntil, metric);
   const modelTimeline = useStatsModelTimeline(session.username, undefined, effectiveSince,
                                               effectiveUntil, metric);
+  // 延迟分位只在延迟类指标下取数（其余指标用不上，省一次明细表扫描）
+  const latencyPercentile = useStatsPercentileTimeline(
+    session.username, undefined, effectiveSince, effectiveUntil,
+    metric === "ttfb" ? "ttfb" : "latency", LATENCY_METRICS.has(metric));
   // 失败归因：端点仅 operator+（viewer 打开会 403），故按角色禁用查询
   const errors = useStatsErrors(session.username, effectiveSince, effectiveUntil,
                                 undefined, session.is_operator);
@@ -486,6 +521,17 @@ export function StatsPage() {
       : group.value === "user"
         ? (byUser.data?.users ?? [])
         : (byCredential.data?.credentials ?? []);
+
+  // 主图的渠道切换候选：只列窗口内真有数据的渠道（全 0 / 全空的渠道不进选项，
+  // 否则切过去是一张空图）
+  const timelineProviders = useMemo(() => {
+    const points = timeline.data?.points ?? [];
+    return chartProviders(points).filter((provider) => hasData(points, provider));
+  }, [timeline.data]);
+  // 切走的渠道可能在新窗口里没有数据：此时回落到「全部渠道」，不留空白图
+  const effectiveScope = chartScope !== "total" && !timelineProviders.includes(chartScope)
+    ? "total"
+    : chartScope;
 
   if (overview.isLoading) {
     return (
@@ -522,15 +568,24 @@ export function StatsPage() {
         icon={<BarChart3 className="size-5" />}
       />
 
-      <Panel title="筛选">
-        {/* 「时间范围」label 后紧接 tabs（左右相邻，不拉开两端） */}
-        <div className="flex flex-wrap items-center gap-3">
+      {/* 筛选条：时间范围与图表指标合并在同一张卡里——两者都是「决定下面看什么」
+          的全局开关，分成两张卡会白占一整块高度和一条分隔线。 */}
+      <Panel>
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <span className="text-sm font-medium text-muted-foreground">时间范围</span>
           <Tabs
             value={range}
             options={RANGES.map(({ value, label }) => ({ value, label }))}
             onChange={changeRange}
             testId="range-tabs"
+          />
+          <span aria-hidden className="hidden h-4 w-px bg-border sm:block" />
+          <span className="text-sm font-medium text-muted-foreground">图表指标</span>
+          <Tabs
+            value={metric}
+            options={METRICS.map(({ value, label }) => ({ value, label }))}
+            onChange={setMetric}
+            testId="metric-tabs"
           />
         </div>
         {/* 自定义范围：两个 datetime-local，精确到分钟、按浏览器本地时区解析。
@@ -576,10 +631,15 @@ export function StatsPage() {
 
       <section
         aria-label="用量概览统计"
-        className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6"
+        className="grid grid-cols-2 gap-3 lg:grid-cols-4"
       >
+        {/* 四张主卡：请求数 / Token / 成本 / 耗时——正好对应「用了多少、花了多少、
+            快不快」三个问题。其余指标（输出速度、Credit、成功率）降为下方一条
+            状态条：它们的 hint 太长，占满六张卡会把每张压到 180px、hint 排成六行，
+            反而让主指标看不见。 */}
         <Metric label="请求数" value={formatNumber(stats?.requests)} tone="ok"
-                hint={`成功率 ${rateText}`} icon={<Activity className="size-4" />} />
+                hint={`成功 ${formatNumber(stats?.ok_count)} · 成功率 ${rateText}`}
+                icon={<Activity className="size-4" />} />
         <Metric
           label="Token 消耗"
           value={formatCompact(totalTokens)}
@@ -587,12 +647,10 @@ export function StatsPage() {
           icon={<Coins className="size-4" />}
         />
         <Metric
-          label="输出速度"
-          value={formatSpeed(stats?.tps_visible, stats?.tps_estimated)}
-          hint={stats?.tps === null
-            ? "该范围内没有可用的生成时间样本（需有输出 token 且生成窗口 ≥200ms），故不计算速度；换更长的时间范围再试"
-            : `正文 token ÷ 生成时间总和（非逐条平均）；总产出（含思考）${formatSpeed(stats?.tps, stats?.tps_estimated)}。≈ 为无首字数据时按端到端耗时估算（不设输出门槛），取自逐请求明细（仅 90 天）`}
-          icon={<Zap className="size-4" />}
+          label="成本（估算）"
+          value={formatMoney(stats?.cost_cny, "CNY")}
+          hint={`美元 ${formatMoney(stats?.cost_usd, "USD")} · 按 OpenRouter 刊例价折算`}
+          icon={<Wallet className="size-4" />}
         />
         <Metric
           label="平均耗时"
@@ -600,54 +658,141 @@ export function StatsPage() {
           hint={`首字延迟 ${formatLatency(stats?.avg_ttfb_ms)}`}
           icon={<Timer className="size-4" />}
         />
-        <Metric
-          label="Credit 消耗"
-          value={formatCredit(stats?.credit, stats?.credit_estimated)}
-          hint="渠道可选字段，可能不返回；≈ 为推算值（TRAE 按单价折算）"
-          icon={<CreditCard className="size-4" />}
-        />
-        <Metric
-          label="成本（估算）"
-          value={formatMoney(stats?.cost_cny, "CNY")}
-          hint={`美元 ${formatMoney(stats?.cost_usd, "USD")} · 按 OpenRouter 刊例价折算，未匹配定价的请求不计`}
-          icon={<Wallet className="size-4" />}
-        />
       </section>
 
-      <section className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-sm font-medium text-muted-foreground">图表指标</h2>
-        <Tabs
-          value={metric}
-          options={METRICS.map(({ value, label }) => ({ value, label }))}
-          onChange={setMetric}
-          testId="metric-tabs"
-        />
+      {/* 次要指标条：输出速度 / Credit / 缓存命中率。用一条分隔条而不是三张卡，
+          避免与上面四张主卡抢视觉权重。 */}
+      <section
+        aria-label="次要指标"
+        className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border/70 bg-border/70 text-sm sm:grid-cols-3"
+      >
+        <div className="bg-panel px-4 py-3" data-testid="stat-speed">
+          <div className="text-xs text-muted-foreground">输出速度</div>
+          <div className="mt-1 text-base font-semibold tabular-nums">
+            {formatSpeed(stats?.tps_visible, stats?.tps_estimated)}
+          </div>
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            {stats?.tps === null
+              ? "该范围内没有可用的生成时间样本"
+              : `总产出（含思考）${formatSpeed(stats?.tps, stats?.tps_estimated)}`}
+          </div>
+        </div>
+        <div className="bg-panel px-4 py-3" data-testid="stat-cache">
+          <div className="text-xs text-muted-foreground">缓存命中率</div>
+          <div className="mt-1 text-base font-semibold tabular-nums">
+            {formatCacheRate(cached, stats?.input_tokens)}
+          </div>
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            命中 {hitText} · 未命中 {missText}
+          </div>
+        </div>
+        <div className="bg-panel px-4 py-3 col-span-2 sm:col-span-1" data-testid="stat-credit">
+          <div className="text-xs text-muted-foreground">Credit 消耗</div>
+          <div className="mt-1 text-base font-semibold tabular-nums">
+            {formatCredit(stats?.credit, stats?.credit_estimated)}
+          </div>
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            渠道可选字段；≈ 为推算值
+          </div>
+        </div>
       </section>
 
-      <section className="grid gap-4 lg:grid-cols-2">
-        <Panel title="请求量趋势">
-          {(timeline.data?.points.length ?? 0) === 0 ? (
-            <Empty>该范围内没有小时汇总数据</Empty>
-          ) : (
-            <UsageChart points={timeline.data?.points ?? []} metric={metric} />
-          )}
-        </Panel>
+      <Panel
+        title="指标趋势"
+        action={
+          /* 渠道切换：一次只画一条线。默认「全部渠道」读后端的 `__total`
+             （均值/比率按同一小时的 sum/count 重新相除，不能前端相加）。 */
+          timelineProviders.length > 1 ? (
+            <Tabs
+              value={effectiveScope}
+              compact
+              options={[
+                { value: "total", label: "全部渠道" },
+                ...timelineProviders.map((provider) => ({
+                  value: provider, label: providerLabel(provider),
+                })),
+              ]}
+              onChange={setChartScope}
+              testId="chart-scope-tabs"
+            />
+          ) : undefined
+        }
+      >
+        {(timeline.data?.points.length ?? 0) === 0 ? (
+          <Empty>该范围内没有小时汇总数据</Empty>
+        ) : (
+          <>
+            <UsageChart points={timeline.data?.points ?? []} metric={metric}
+                        scope={effectiveScope} />
+            {/* 渠道构成只在请求量指标下出现（份额需要「请求数」这个分母）。
+                放在主图卡片底部而不是单独一张卡：它只有一行高度，独立成卡会多出
+                标题栏 + 上下内边距 + 外框，把一行内容撑成 123px。 */}
+            {showShare && (
+              <div className="mt-3 border-t border-border/70 pt-2.5" data-testid="provider-share-block">
+                <div className="mb-1.5 flex items-baseline justify-between">
+                  <span className="text-xs font-medium text-muted-foreground">渠道构成</span>
+                  <span className="text-xs text-muted-foreground">按请求数占比</span>
+                </div>
+                <ProviderShare
+                  rows={(byProvider.data?.providers ?? []).map((row) => ({
+                    provider: row.provider, value: row.requests,
+                  }))}
+                  total={(byProvider.data?.providers ?? []).reduce(
+                    (sum, row) => sum + row.requests, 0)}
+                />
+              </div>
+            )}
+          </>
+        )}
+      </Panel>
+
+      {/* 主图之外的两张辅助图：延迟类指标多一张分位图。
+          单张时必须占满整行——否则 `lg:grid-cols-2` 只放一个子元素，
+          右半边整块留白（900–1200px 下尤其明显）。 */}
+      {/* 辅助图区：延迟类指标并排「分位图 + 模型趋势」；其余指标只有模型趋势，
+          独占整行（否则 `lg:grid-cols-2` 只放一个子元素，右半边整块留白）。 */}
+      <section className={cn(
+        "grid gap-4",
+        LATENCY_METRICS.has(metric) && "lg:grid-cols-2",
+      )}>
+        {/* 延迟类指标：主图之外再给一张分位图（P50 中位数 + P95 上界）。
+            均值会摊平长尾，分位才看得出「有多少请求在受苦」。 */}
+        {LATENCY_METRICS.has(metric) && (
+          <Panel title={metric === "ttfb" ? "首字延迟分位" : "耗时分位"} action={
+            <span className="text-xs text-muted-foreground">
+              P50 中位数 · P95 上界 · 成功请求
+            </span>
+          }>
+            {(latencyPercentile.data?.points.length ?? 0) === 0 ? (
+              <Empty data-testid="no-latency-percentile">该范围内没有可用的延迟样本</Empty>
+            ) : (
+              <LatencyChart
+                points={latencyPercentile.data?.points ?? []}
+                metric={latencyPercentile.data?.metric ?? "latency"}
+                windowDays={latencyPercentile.data?.window_days ?? 90}
+              />
+            )}
+          </Panel>
+        )}
 
         <Panel title="按模型趋势" action={
           modelTimeline.data?.models.length ? (
             <span className="text-xs text-muted-foreground">
-              请求量 Top {modelTimeline.data.models.length} 模型
+              请求量 Top {Math.min(3, modelTimeline.data.models.length)} 模型
             </span>
           ) : undefined
         }>
           {(modelTimeline.data?.points.length ?? 0) === 0 ? (
             <Empty data-testid="no-model-trend">该范围内没有小时汇总数据</Empty>
           ) : (
-            <ModelTrendChart
-              points={modelTimeline.data?.points ?? []}
-              models={modelTimeline.data?.models ?? []}
-              metric={metric}
-            />
+            <>
+              <ModelTrendChart
+                points={modelTimeline.data?.points ?? []}
+                models={modelTimeline.data?.models ?? []}
+                metric={metric}
+              />
+              <ModelLegend models={modelTimeline.data?.models ?? []} />
+            </>
           )}
         </Panel>
       </section>
@@ -847,29 +992,34 @@ export function StatsPage() {
             </TableBody>
           </Table>
         )}
-        <p className="mt-2 text-xs text-muted-foreground">
-          {groupKey === "credential_id"
-            ? "凭证分组取自逐请求明细（仅保留 90 天），无凭证的预热失败等请求不计入。"
-            : "各维度数据源为小时汇总（永久保留），最近 5 分钟内的请求可能尚未计入。"}
-          {" "}点任意一行可钻取到下方「请求明细」。
-        </p>
-        {/* 延迟列的两套口径必须写明：均值永久、分位只覆盖 90 天，
-            混在同一行里不说明会被读成「同一个范围」。 */}
-        <p className="mt-1 text-xs text-muted-foreground">
-          延迟列只统计成功请求。平均耗时 / 平均首字取自小时汇总（与总览卡片同口径）；
-          分位为第 P50/P90/P95/P99 百分位（向上取整名次，默认 P95），取自逐请求明细，
-          只覆盖最近 90 天。速度列两个分子分母相同（生成时间总和，不是逐条平均），正文
-          token（output − reasoning）贴近屏幕上看到的刷新速度，总产出 token（含思考）
-          含思考成批吐出的部分；成功请求只要有产出就计入（不设输出量下限），并剔除生成
-          窗口 &lt;200ms 或单条 &gt;1000 tok/s 的样本——那是上游把内容攒成一批吐出、生成
-          时长根本不可测，不是「很快」。无首字数据时按端到端耗时估算（同样不设输出门槛，
-          分母含首字等待，前置 ≈），同样取自逐请求明细（仅 90 天）。
-        </p>
+        <Footnote summary="口径说明（数据源 · 延迟 · 速度）" testId="group-footnote">
+          <p>
+            {groupKey === "credential_id"
+              ? "凭证分组取自逐请求明细（仅保留 90 天），无凭证的预热失败等请求不计入。"
+              : "各维度数据源为小时汇总（永久保留），最近 5 分钟内的请求可能尚未计入。"}
+            {" "}点任意一行可钻取到下方「请求明细」。
+          </p>
+          {/* 延迟列的两套口径必须写明：均值永久、分位只覆盖 90 天，
+              混在同一行里不说明会被读成「同一个范围」。 */}
+          <p>
+            延迟列只统计成功请求。平均耗时 / 平均首字取自小时汇总（与总览卡片同口径）；
+            分位为第 P50/P90/P95/P99 百分位（向上取整名次，默认 P95），取自逐请求明细，
+            只覆盖最近 90 天。速度列两个分子分母相同（生成时间总和，不是逐条平均），正文
+            token（output − reasoning）贴近屏幕上看到的刷新速度，总产出 token（含思考）
+            含思考成批吐出的部分；成功请求只要有产出就计入（不设输出量下限），并剔除生成
+            窗口 &lt;200ms 或单条 &gt;1000 tok/s 的样本——那是上游把内容攒成一批吐出、生成
+            时长根本不可测，不是「很快」。无首字数据时按端到端耗时估算（同样不设输出门槛，
+            分母含首字等待，前置 ≈），同样取自逐请求明细（仅 90 天）。
+          </p>
+        </Footnote>
       </Panel>
 
       {/* 失败归因（operator+）：跨用户看「哪里在坏」。点行 → 钻取到该渠道+模型
-          的失败明细（ok=0），与下方「请求明细」联动。 */}
-      {session.is_operator && (
+          的失败明细（ok=0），与下方「请求明细」联动。
+          无失败时整张卡不渲染：一张只有「该范围内没有失败请求」的空卡仍占 239px
+          （标题栏 + 空态 + 口径说明），而「没有失败」本身就是好消息，不必占版面。
+          错误态仍要显示，否则加载失败会被误读成「零失败」。 */}
+      {session.is_operator && (errors.isError || (errors.data?.errors.length ?? 0) > 0) && (
         <Panel data-testid="error-panel" title="失败归因" action={
           <span className="text-xs text-muted-foreground">
             按渠道 / 模型 / 错误类型分组 · 取自逐请求明细（仅 90 天）
@@ -881,8 +1031,6 @@ export function StatsPage() {
                 失败归因加载失败，请刷新重试；若刚升级服务，请确认后端已重启加载新端点。
               </Notice>
             </div>
-          ) : (errors.data?.errors.length ?? 0) === 0 ? (
-            <Empty data-testid="no-errors">该范围内没有失败请求</Empty>
           ) : (
             <Table data-testid="error-table" cards>
               <TableHeader>
@@ -950,12 +1098,12 @@ export function StatsPage() {
               </TableBody>
             </Table>
           )}
-          <p className="mt-2 text-xs text-muted-foreground">
+          <Footnote summary="口径说明（失败数按尝试计）" testId="error-footnote">
             窗口缺省为最近 24 小时（与上方时间范围一致时按所选范围统计）；
             未上报错误类型的历史行显示为「失败」。失败数是<strong>尝试</strong>口径：
             换号重试每次上游拒绝都记一行，「未救回」是未被救回的失败尝试数
             （同一请求多次失败会算多次；同请求另有成功行即算救回）。点任意一行可钻取到下方「请求明细」（只看失败）。
-          </p>
+          </Footnote>
         </Panel>
       )}
 
@@ -1041,8 +1189,8 @@ export function StatsPage() {
                         <TableCell label="用户">{row.username}</TableCell>
                       )}
                       {sourceCell(row)}
-                      <TableCell label="模型" className="max-w-48 truncate">
-                        {row.model}
+                      <TableCell label="模型">
+                        <span className="block w-32 truncate" title={row.model}>{row.model}</span>
                       </TableCell>
                       <TableCell label="状态">{statusCell(row)}</TableCell>
                       <TableCell label="Token" className="text-right">{tokenCell(row)}</TableCell>
@@ -1073,7 +1221,11 @@ export function StatsPage() {
           <Empty data-testid="no-events">该范围内没有请求明细</Empty>
         ) : (
           <>
-            <Table data-testid="events-table" cards>
+            {/* 明细表列多（时间/用户/渠道凭证/模型/状态/Token/Credit/成本/延迟/速度），
+                默认单元格内边距在 1280px 下会让表比容器宽十几像素、逼出横向滚动。
+                这里收窄到 px-1.5：省下的正是最后两列被裁掉的宽度。 */}
+            <Table data-testid="events-table" cards
+                   className="[&_td]:px-1.5 [&_th]:px-1.5">
               <TableHeader>
                 <TableRow>
                   <SortableHead label="时间" columnKey="ts" active={eventSort.sort === "ts"}
@@ -1114,8 +1266,10 @@ export function StatsPage() {
                                 activeKey={eventSort.sort} direction={eventSort.order}
                                 onToggle={toggleEventSort} testId="event-sort-latency" />
                   {/* 速度合并列：正文 / 总产出（逐行按生成窗口算，无首字数据的
-                      请求不回落估算，直接 —）。列头下拉可选子列排序。 */}
-                  <SortMenuHead label="速度" options={[...SPEED_COLUMNS]}
+                      请求不回落估算，直接 —）。列头下拉可选子列排序。
+                      单位写进列头，行内只留数字（10 列的表每行重复 tok/s 要多占 45px）。
+                      用「速度」+ 小字 tok/s 两行，避免列头被撑宽挤掉数据列。 */}
+                  <SortMenuHead label="速度" unit="tok/s" options={[...SPEED_COLUMNS]}
                                 activeKey={eventSort.sort} direction={eventSort.order}
                                 onToggle={toggleEventSort} testId="event-sort-speed" />
                 </TableRow>
@@ -1128,8 +1282,8 @@ export function StatsPage() {
                       <TableCell label="用户">{row.username}</TableCell>
                     )}
                     {sourceCell(row)}
-                    <TableCell label="模型" className="max-w-48 truncate" title={row.model}>
-                      {row.model}
+                    <TableCell label="模型">
+                      <span className="block w-32 truncate" title={row.model}>{row.model}</span>
                     </TableCell>
                     <TableCell label="状态">{statusCell(row)}</TableCell>
                     <TableCell label="Token" className="text-right">
@@ -1173,25 +1327,36 @@ export function StatsPage() {
                 setPageIndex(next);
               }}
             />
-            <p className="mt-2 text-xs text-muted-foreground">
+            <Footnote summary="口径说明（速度的分子与分母）" testId="events-footnote">
               速度 = 输出 token ÷ 生成时间（耗时 − 首字）：左侧正文（不含思考）、右侧总产出
               （含思考），与分组表同规则（有输出 token、生成窗口 ≥200ms、单条 ≤1000 tok/s）。
               逐行不按端到端耗时估算——单条样本摊不平首字等待，故无生成窗口的请求显示 —。
-            </p>
+            </Footnote>
           </>
         )}
       </Panel>
 
-      <Notice tone="muted" className="items-start gap-1 px-3 py-2.5 text-xs">
-        <p>
-          隐私：不保存提示词、回答、请求头、Token、工具参数与原始错误体；逐请求明细保留 90 天，小时汇总永久保留；按 API Key 归属用户统计。
-        </p>
-        <p>
-          credit 为渠道可选字段，经常不返回；TRAE 上游不给单请求积分，带 ≈ 的数值是按官方单价折算（CodeBuddy 为上游返回的真值）。健康度只依赖额度探测接口，主指标是 token 数。缓存命中率 = 命中 token ÷ 输入 token，仅在上报过缓存时展示。
-        </p>
-        <p>
-          成本为估算：按 OpenRouter 的模型刊例价（USD / 百万 token）与本服务写入时生效的美元汇率折算，展示人民币、括号内为美元；不是上游真实扣费，未匹配到定价的模型不计入（显示 —）。汇率可在「任务与配置」页热更，仅影响之后写入的请求，历史成本不重算。
-        </p>
+      <Notice tone="muted" className="items-start px-3 py-2.5 text-xs" data-testid="stats-privacy">
+        <Collapsible className="w-full">
+          <CollapsibleTrigger className="flex w-full cursor-pointer select-none items-center gap-1.5 text-left transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
+            <ChevronDown className="size-3.5 shrink-0" />
+            <span className="font-medium">隐私与统计口径</span>
+            <span className="text-muted-foreground">
+              不保存提示词与回答 · 明细保留 90 天 · 成本为刊例价估算
+            </span>
+          </CollapsibleTrigger>
+          <CollapsibleContent className="mt-2 space-y-1.5 leading-relaxed">
+            <p>
+              隐私：不保存提示词、回答、请求头、Token、工具参数与原始错误体；逐请求明细保留 90 天，小时汇总永久保留；按 API Key 归属用户统计。
+            </p>
+            <p>
+              credit 为渠道可选字段，经常不返回；TRAE 上游不给单请求积分，带 ≈ 的数值是按官方单价折算（CodeBuddy 为上游返回的真值）。健康度只依赖额度探测接口，主指标是 token 数。缓存命中率 = 命中 token ÷ 输入 token，仅在上报过缓存时展示。
+            </p>
+            <p>
+              成本为估算：按 OpenRouter 的模型刊例价（USD / 百万 token）与本服务写入时生效的美元汇率折算，展示人民币、括号内为美元；不是上游真实扣费，未匹配到定价的模型不计入（显示 —）。汇率可在「任务与配置」页热更，仅影响之后写入的请求，历史成本不重算。
+            </p>
+          </CollapsibleContent>
+        </Collapsible>
       </Notice>
     </div>
   );

@@ -28,6 +28,7 @@ import type {
   StatsOverview,
   TimelinePoint,
   ModelTimelineResponse,
+  PercentileTimelineResponse,
   NavBadges,
   StatsEventsResponse,
   StatsEventFilters,
@@ -284,6 +285,11 @@ export const api = {
                        metric?: StatsMetric) =>
     request<ModelTimelineResponse>(
       `/api/stats/model-timeline${query({ username, since, until, metric })}`),
+  /** 延迟分位时序（P50 中位数 + P95 上界）：读明细表，仅覆盖 90 天。 */
+  statsPercentileTimeline: (username?: string, since?: number, until?: number,
+                            metric?: "latency" | "ttfb") =>
+    request<PercentileTimelineResponse>(
+      `/api/stats/percentile-timeline${query({ username, since, until, metric })}`),
   statsEvents: (username?: string, since?: number, until?: number, before?: number,
                 limit?: number, sort?: string, order?: string, offset?: number,
                 filters?: StatsEventFilters) =>

@@ -415,11 +415,14 @@ export function formatSpeedPair(
   visible: number | null | undefined,
   total: number | null | undefined,
   estimated = false,
+  withUnit = true,
 ): string {
   if (visible == null && total == null) return "—";
   const one = (value: number | null | undefined) =>
     value == null ? "—" : value.toFixed(1);
-  return `${estimated ? "≈" : ""}${one(visible)} / ${one(total)} tok/s`;
+  const body = `${estimated ? "≈" : ""}${one(visible)} / ${one(total)}`;
+  // withUnit=false：列头已经写了 tok/s，每行重复一遍要多占约 45px
+  return withUnit ? `${body} tok/s` : body;
 }
 
 /** 图表 hover 数值：按指标格式化，单位用 () 包裹（耗时/首字数已含 ms/s）。 */
@@ -432,9 +435,26 @@ export function formatChartValue(value: number, metric: string): string {
     case "ttfb":
     case "latency":
       return formatLatency(value);
+    case "success_rate":
+    case "cache_rate":
+      return formatRate(value);
+    case "cost_per_request":
+      return `${formatMoney(value, "CNY", false)} / 次`;
     default:
       return `${formatCompact(value)} (次)`;
   }
+}
+
+/**
+ * 比率指标的展示：入参是 0..1 的小数，输出百分比。
+ *
+ * 与 `formatCacheRate` 的区别：那个收「命中 / 输入」两个原始计数并自己相除，
+ * 用于表格；这里收**后端已算好的比率**（图表值），两者不能混用——把 0.4 再
+ * 除一次输入会得到 0.4%。空值（无样本）给 —，不渲染 0%。
+ */
+export function formatRate(value: number | null | undefined): string {
+  if (value === null || value === undefined) return "—";
+  return `${(value * 100).toFixed(1)}%`;
 }
 
 /**
@@ -448,13 +468,27 @@ export function formatChartValue(value: number, metric: string): string {
  * - 成本：保留两位小数（单请求常是零点几元，`formatCompact` 的「万/亿」不适用）
  * - 耗时 / 首字：复用 `formatLatency`，与 hover 完全同口径（`850 ms` / `8.2 s`），
  *   刻度自带单位所以不再另标
+ * - 比率：整百分比（轴刻度不需要小数，`40%` 比 `40.0%` 更省宽度）
+ * - 单请求成本：四位有效小数的金额（量级常在 0.01–0.3 元，两位会全变成 0.00）
  */
 export function formatAxisValue(value: number, metric: string): string {
   if (metric === "ttfb" || metric === "latency") {
     return formatLatency(value);
   }
+  if (metric === "cost_per_request") {
+    // 单请求成本量级常在 0.01–0.3 元：两位小数会让 0.028 与 0.031 都显示
+    // 「0.03」，刻度看起来重复且无法分辨。按量级给 3–4 位小数。
+    const digits = Math.abs(value) >= 0.1 ? 3 : 4;
+    return value.toLocaleString("zh-CN", {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: digits,
+    });
+  }
   if (metric === "cost") {
     return value.toLocaleString("zh-CN", { maximumFractionDigits: 2 });
+  }
+  if (metric === "success_rate" || metric === "cache_rate") {
+    return `${Math.round(value * 100)}%`;
   }
   return formatCompact(value);
 }
@@ -463,12 +497,27 @@ export function formatAxisValue(value: number, metric: string): string {
  * 图表 Y 轴单位文案，写在轴顶（刻度本身不带单位，避免每格重复）。
  *
  * 耗时 / 首字不出现在这里：它们的刻度自带 `ms` / `s`，再标一次是啰嗦。
+ * 比率同理（刻度自带 `%`）。
  */
 export const METRIC_AXIS_UNIT: Record<string, string> = {
   requests: "次",
   tokens: "tokens",
   cost: "元",
+  cost_per_request: "元/次",
 };
+
+/** 比率类指标（0..1）：Y 轴与 hover 都要乘 100，且空值要断线而非归零。 */
+export const RATE_METRICS = new Set(["success_rate", "cache_rate"]);
+
+/** 均值 / 比率类指标：空档（null）代表「无样本」，不是 0，图线必须断开。 */
+export const SPARSE_METRICS = new Set([
+  "latency",
+  "ttfb",
+  "success_rate",
+  "cache_rate",
+  "cost_per_request",
+  "cost",
+]);
 
 /** 统计明细的失败类型（线值，来自后端 CONTROLLED_ERROR_TYPES）。
  *  注意与 ProbeFailureReason 不是同一套：那是探测失败，这是请求失败。 */

@@ -11,8 +11,10 @@ import {
   MODEL_TIMELINE,
   MODELS,
   OVERVIEW,
+  PERCENTILE_TIMELINE,
   PROVIDERS,
   READER,
+  TIMELINE,
   USERS,
 } from "@/test-utils/stats";
 
@@ -37,14 +39,16 @@ describe("StatsPage", () => {
 
     expect(screen.getByTestId("stats-page")).toHaveTextContent("120");
     // 成功率并入请求数卡片 hint；Token 三项并入 Token 消耗卡片
-    expect(screen.getByText("成功率 95.0%")).toBeInTheDocument();
+    expect(screen.getByText("成功 114 · 成功率 95.0%")).toBeInTheDocument();
     expect(screen.getByText(/输入 1000（命中 400 · 未命中 600） · 输出 2000 · 推理 300 · 缓存命中率 40.0%/))
       .toBeInTheDocument();
     expect(screen.getByText(/首字延迟 220 ms/)).toBeInTheDocument();
-    // 输出速度卡片：正文 token ÷ 生成时间总和（非逐条平均），总产出在 hint 里
-    const speedCard = screen.getByText("输出速度").closest("[data-slot=card]")!;
+    // 输出速度：正文 token ÷ 生成时间总和（非逐条平均），总产出在副行里
+    const speedCard = screen.getByTestId("stat-speed");
     expect(speedCard).toHaveTextContent("52.0 tok/s");
     expect(speedCard).toHaveTextContent("总产出（含思考）94.1 tok/s");
+    // 缓存命中率单列一格（P1 新增指标）
+    expect(screen.getByTestId("stat-cache")).toHaveTextContent("40.0%");
     expect(screen.getByTestId("group-table")).toHaveTextContent("CodeBuddy");
     expect(screen.getByTestId("group-table")).toHaveTextContent("TRAE");
   });
@@ -108,7 +112,7 @@ describe("StatsPage", () => {
     const row = within(table).getAllByText("TRAE")[0].closest("tr")!;
     expect(row).toHaveTextContent("—");
     // 总览未探测到 credit
-    expect(screen.getByText("Credit 消耗").closest("[data-slot=card]")).toHaveTextContent("—");
+    expect(screen.getByTestId("stat-credit")).toHaveTextContent("—");
   });
 
   it("推算 credit 显示 ≈ 前缀（TRAE 无上游积分）", async () => {
@@ -125,7 +129,7 @@ describe("StatsPage", () => {
     await settle();
 
     // 总览卡片与按渠道表对推算值都标 ≈
-    expect(screen.getByText("Credit 消耗").closest("[data-slot=card]")).toHaveTextContent("≈5.25");
+    expect(screen.getByTestId("stat-credit")).toHaveTextContent("≈5.25");
     const table = screen.getByTestId("group-table");
     const traeRow = within(table).getAllByText("TRAE")[0].closest("tr")!;
     expect(traeRow).toHaveTextContent("≈5.25");
@@ -204,7 +208,7 @@ describe("StatsPage", () => {
     expect(screen.getByText("请求数").closest("[data-slot=card]")).toHaveTextContent("成功率 —");
     expect(screen.getByText("平均耗时").closest("[data-slot=card]")).toHaveTextContent("首字延迟 —");
     // 速度无样本：显示 —，并在 hint 里说明「为什么没有」而不是留白
-    const speedCard = screen.getByText("输出速度").closest("[data-slot=card]")!;
+    const speedCard = screen.getByTestId("stat-speed");
     expect(speedCard).toHaveTextContent("—");
     expect(speedCard).toHaveTextContent("没有可用的生成时间样本");
     expect(screen.getByTestId("no-group-stats")).toBeInTheDocument();
@@ -289,6 +293,132 @@ describe("StatsPage", () => {
     expect(screen.getByTestId("metric-tabs-cost")).toHaveAttribute("aria-selected", "true");
   });
 
+  it("新增派生指标可选：成功率 / 缓存命中率 / 单请求成本", async () => {
+    const fetchSpy = mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/timeline": TIMELINE,
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    renderPage(<StatsPage />, READER);
+    await settle();
+    fetchSpy.mockClear();
+
+    for (const metric of ["success_rate", "cache_rate", "cost_per_request"]) {
+      await userEvent.click(screen.getByTestId(`metric-tabs-${metric}`));
+      await waitFor(() =>
+        expect(fetchSpy.mock.calls.some(([url]) =>
+          String(url).includes(`metric=${metric}`))).toBe(true),
+      );
+    }
+  });
+
+  it("主图默认画全部渠道合计，可切到单个渠道", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/timeline": TIMELINE,
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    renderPage(<StatsPage />, READER);
+    await settle();
+
+    // 渠道数 > 1 时出现切换条，默认选中「全部渠道」
+    expect(screen.getByTestId("chart-scope-tabs-total"))
+      .toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("usage-chart-legend")).toHaveTextContent("全部渠道");
+
+    await userEvent.click(screen.getByTestId("chart-scope-tabs-trae"));
+    await waitFor(() =>
+      expect(screen.getByTestId("usage-chart-legend")).toHaveTextContent("TRAE"),
+    );
+  });
+
+  it("延迟类指标额外展示分位图（P50 中位数 + P95 上界）", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/timeline": TIMELINE,
+      "/api/stats/percentile-timeline": PERCENTILE_TIMELINE,
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    renderPage(<StatsPage />, READER);
+    await settle();
+
+    // 默认请求次数指标下不展示分位图
+    expect(screen.queryByTestId("latency-chart")).toBeNull();
+
+    await userEvent.click(screen.getByTestId("metric-tabs-latency"));
+    await waitFor(() => expect(screen.getByTestId("latency-chart")).toBeInTheDocument());
+    expect(screen.getByTestId("latency-chart-legend")).toHaveTextContent("P50 中位数");
+    expect(screen.getByTestId("latency-chart-legend")).toHaveTextContent("P95 上界");
+  });
+
+  it("请求量指标下展示渠道构成（按请求数占比）", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/timeline": TIMELINE,
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    renderPage(<StatsPage />, READER);
+    await settle();
+
+    // 70 / (70+50) = 58.3%
+    const share = screen.getByTestId("provider-share");
+    expect(share).toHaveTextContent("TRAE");
+    expect(share).toHaveTextContent("58.3%");
+
+    // 换到非请求量指标后不展示（份额没有同一个分母）
+    await userEvent.click(screen.getByTestId("metric-tabs-latency"));
+    await waitFor(() => expect(screen.queryByTestId("provider-share")).toBeNull());
+  });
+
+  it("分组表点行下钻到该渠道的明细（键盘同样可触发）", async () => {
+    const fetchSpy = mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/timeline": TIMELINE,
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    renderPage(<StatsPage />, READER);
+    await settle();
+    fetchSpy.mockClear();
+
+    // 点击：明细请求带 provider 过滤
+    await userEvent.click(screen.getByLabelText("查看 trae 的请求明细"));
+    await waitFor(() => expect(fetchSpy.mock.calls.some(([url]) =>
+      String(url).includes("provider=trae"))).toBe(true));
+
+    // 键盘：Enter 触发同一下钻（不只是鼠标可点）
+    fetchSpy.mockClear();
+    const cell = screen.getByLabelText("查看 codebuddy 的请求明细");
+    cell.focus();
+    await userEvent.keyboard("{Enter}");
+    await waitFor(() => expect(fetchSpy.mock.calls.some(([url]) =>
+      String(url).includes("provider=codebuddy"))).toBe(true));
+  });
+
   it("请求明细：成本列显示人民币，缺失显示 —", async () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
@@ -344,11 +474,14 @@ describe("StatsPage", () => {
     await settle();
 
     const table = screen.getByTestId("events-table");
+    // 单位以小字缀在列头（tok/s），行内只留数字
     expect(within(table).getByText("速度")).toBeInTheDocument();
+    expect(within(table).getByText("tok/s")).toBeInTheDocument();
     // 成功行：后端算好的 正文 51.2 / 总产出 82.8 tok/s；悬停展开口径
     const okRow = within(table).getByText("glm-5.2").closest("tr")!;
-    expect(okRow).toHaveTextContent("51.2 / 82.8 tok/s");
-    await userEvent.hover(within(okRow).getByText("51.2 / 82.8 tok/s"));
+    // 单位在列头（tok/s），行内只留数字——10 列的表每行重复单位要多占 45px
+    expect(okRow).toHaveTextContent("51.2 / 82.8");
+    await userEvent.hover(within(okRow).getByText("51.2 / 82.8"));
     expect(await screen.findByRole("tooltip")).toHaveTextContent("总产出（含思考）82.8 tok/s");
     // 失败行没有输出 → 生成窗口不可测，整格 —
     const failedRow = within(table).getByText("额度耗尽").closest("tr")!;

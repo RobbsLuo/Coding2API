@@ -60,6 +60,24 @@ export const MODEL_TIMELINE = {
   ],
 };
 
+/** 主图时间序列：渠道为动态键 + 后端算好的 `__total` 全渠道合计。 */
+export const TIMELINE = {
+  points: [
+    { hour: 1700000000, __total: 3, trae: 2, codebuddy: 1 },
+    { hour: 1700003600, __total: 7, trae: 4, codebuddy: 3 },
+  ],
+};
+
+/** 延迟分位时序：P50 中位数 + P95 上界（读明细表，仅 90 天）。 */
+export const PERCENTILE_TIMELINE = {
+  metric: "latency",
+  window_days: 90,
+  points: [
+    { hour: 1700000000, p50: 1200, p95: 5200, samples: 40 },
+    { hour: 1700003600, p50: 2400, p95: 9800, samples: 12 },
+  ],
+};
+
 export const EVENTS_EMPTY = { events: [], next_before: null };
 export const BASE_TS = 1_700_000_000;
 
