@@ -25,6 +25,14 @@ PBKDF2_MAX_ITERATIONS = 1_000_000
 PBKDF2_SALT_BYTES = 16
 PBKDF2_DIGEST_BYTES = 32
 
+# 用户名里禁止的字符（PROPOSAL §6「拒绝含 `:` / 换行的用户名」）。
+#
+# 冒号会截断 users.txt 的 `用户名:hash` 字段；换行/回车会注入额外记录。
+# 放在这里（而不是某个脚本里）是这套规则唯一的家：写 users.txt 的脚本
+# （hash_password.py）与写 DB 的脚本（create_user.py）都必须拒同一批字符，
+# 否则「CLI 建号能过的名字」和「用户文件能写的名字」口径就不一致。
+FORBIDDEN_USERNAME_CHARS = (":", "\n", "\r")
+
 
 class UsersFileError(RuntimeError):
     """用户文件缺失、格式非法或无有效用户。"""

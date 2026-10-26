@@ -28,7 +28,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.audit.actions import ACTION_USER_CREATE, ACTION_USER_DELETE  # noqa: E402
 from src.auth.rbac import ROLE_ADMIN, ROLES  # noqa: E402
-from src.auth.users import create_password_hash  # noqa: E402
+from src.auth.users import (  # noqa: E402
+    FORBIDDEN_USERNAME_CHARS,
+    create_password_hash,
+)
 from src.db.conn import Database  # noqa: E402
 from src.db.migrate import apply_schema  # noqa: E402
 from src.db.repo import AuditRepository, UserRepository  # noqa: E402
@@ -153,8 +156,11 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("缺少用户名（或用 --list）")
         if username != args.username:
             parser.error("用户名不能包含首尾空白")
-        if any(ch in username for ch in ("\n", "\r")):
-            parser.error("用户名不能包含换行/回车")
+        # 禁字符与写 users.txt 的脚本同源（`src/auth/users.py`）：冒号会截断
+        # `用户名:hash` 字段、换行会注入额外记录（PROPOSAL §6）。
+        for char in FORBIDDEN_USERNAME_CHARS:
+            if char in username:
+                parser.error(f"用户名不能包含 {char!r}")
 
         if args.delete:
             if not args.force:

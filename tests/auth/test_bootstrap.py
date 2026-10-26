@@ -181,6 +181,29 @@ def test_bootstrap_imports_viewer_then_promotes_env_admin(tmp_path):
     db.close()
 
 
+def test_bootstrap_skips_promotion_when_already_admin(tmp_path):
+    """提权名单里的用户**本来就是 admin** → 不重复改角色。
+
+    重复 `update_role` 会 bump epoch 把人踢下线，故已是 admin 的必须跳过。
+    构造：库里没有活跃 admin（走提权分支），名单里一个已是 admin（禁用态）、
+    一个是 viewer —— 前者命中「跳过」，后者被提权，兜住「无活跃 admin」的报错。
+    """
+    db, repo = _repo(tmp_path)
+    repo.create("aaa", create_password_hash("a"), role=ROLE_ADMIN, now=1)
+    repo.set_enabled("aaa", False)
+    repo.create("zzz", create_password_hash("z"), role=ROLE_VIEWER, now=1)
+    store = _file(tmp_path, [("aaa", create_password_hash("a")),
+                             ("zzz", create_password_hash("z"))])
+    logs: list[str] = []
+    bootstrap_users(_Config(["aaa", "zzz"]), repo, file_store=store,
+                    log=lambda msg, *args: logs.append(msg % args))
+    assert repo.get("aaa")["role"] == ROLE_ADMIN
+    assert repo.get("zzz")["role"] == ROLE_ADMIN
+    # 只提权了 zzz；aaa 已是 admin 不重复提权
+    assert any("提权为 admin：zzz" in line for line in logs)
+    db.close()
+
+
 def test_bootstrap_is_idempotent_and_keeps_managed_changes(tmp_path):
     """重复引导不得把管理台改过的密码/角色冲回文件值。"""
     db, repo = _repo(tmp_path)

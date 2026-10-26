@@ -19,13 +19,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.auth.users import PBKDF2_ITERATIONS, create_password_hash  # noqa: E402
+from src.auth.users import (  # noqa: E402
+    FORBIDDEN_USERNAME_CHARS,
+    PBKDF2_ITERATIONS,
+    create_password_hash,
+)
 
 DEFAULT_OUTPUT = "secrets/users.txt"
 
 # 用户名会写进 `用户名:hash` 行：冒号会截断字段、换行/回车会注入额外记录，
-# 控制字符一律拒绝。
-_FORBIDDEN_USERNAME_CHARS = (":", "\n", "\r")
+# 控制字符一律拒绝。规则本体在 `src/auth/users.py`（与 CLI 建号脚本同源）。
+_FORBIDDEN_USERNAME_CHARS = FORBIDDEN_USERNAME_CHARS
 
 
 def read_password(parser: argparse.ArgumentParser, args: argparse.Namespace) -> str:

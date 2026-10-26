@@ -94,9 +94,19 @@ def test_password_stdin_empty_rejected(db_path, monkeypatch):
 
 
 def test_username_with_control_chars_rejected(db_path):
-    """换行/回车会污染审计与日志，create_user 拒绝（冒号在 DB 用户名里合法）。"""
+    """换行/回车会污染审计与日志，create_user 拒绝。"""
     with pytest.raises(SystemExit):
         SCRIPT_MODULE.main(["a\nb", "--password", "pw", "--db", str(db_path)])
+
+
+def test_username_with_colon_rejected(db_path):
+    """冒号也拒绝：用户名会写进 users.txt 的 `用户名:hash` 行，冒号会截断字段。
+
+    规则本体在 `src/auth/users.py`（与写 users.txt 的 `hash_password.py` 同源），
+    PROPOSAL §6「拒绝含 `:` / 换行的用户名」。
+    """
+    with pytest.raises(SystemExit):
+        SCRIPT_MODULE.main(["a:b", "--password", "pw", "--db", str(db_path)])
 
 
 def test_delete_requires_force(db_path):
