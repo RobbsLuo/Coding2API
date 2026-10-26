@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.auth.session import create_session_token
 from src.config import Settings
 from src.main import build_app
 from src.stats.collector import StatsCollector
-from src.stats.query import StatsQuery
+from src.stats.query import MAX_DENSE_HOURS, StatsQuery
 from src.tasks.retention import RetentionTask
 from tests.helpers.constants import SECRET
 
@@ -414,7 +415,10 @@ def test_stats_until_filters_groups_and_timeline(stats):
     collector.rollup_hourly()
     # 小时汇总路径：桶 0 与桶 7200，until=7200 只留桶 0
     assert query.by_provider(username="u", until=7200)[0]["requests"] == 1
-    assert len(query.timeline(username="u", until=7200)) == 1
+    # 时间轴按小时补齐：桶 0 有数据、桶 3600 补 0，桶 7200 被 until 排除
+    points = query.timeline(username="u", until=7200)
+    assert [point["hour"] for point in points] == [0, 3600]
+    assert points[0]["trae"] == 1 and points[1]["trae"] == 0
     # 明细路径（ts 列）：凭证维度读 usage_events，until 也按 ts 过滤
     by_cred = query.by_credential(username="u", until=7200)
     assert sum(row["requests"] for row in by_cred) == 0  # 明细无 credential_id 不分组
@@ -438,13 +442,15 @@ def test_stats_hourly_rolls_via_retention(stats):
     collector.record(username="u", provider="codebuddy", model="m", ok=True,
                      now=1_700_003_602, input_tokens=7, output_tokens=3,
                      credit=0.5, latency_ms=100)
-    # 增量累加：最新小时立即可见（不需等 5 分钟一轮的 rollup）
+    # 增量累加：最新小时立即可见（不需等 5 分钟一轮的 rollup）。
+    # 时间轴按 since 补齐：since=1_700_000_000 落在桶 1699999200，故首桶是空的
     points = query.timeline(username="u", since=1_700_000_000)
-    assert len(points) == 1 and points[0]["trae"] == 2 and points[0]["codebuddy"] == 1
+    assert [point["hour"] for point in points] == [1699999200, 1700002800]
+    assert points[1]["trae"] == 2 and points[1]["codebuddy"] == 1
     # 全量重算与该小时的增量值一致（幂等，不双计）
     RetentionTask(collector, retention_days=90).run_once()
     points = query.timeline(username="u", since=1_700_000_000)
-    assert len(points) == 1 and points[0]["trae"] == 2 and points[0]["codebuddy"] == 1
+    assert points[1]["trae"] == 2 and points[1]["codebuddy"] == 1
     bucket = collector._db.connect().execute(
         "SELECT SUM(requests), SUM(ok_count), SUM(input_tokens), SUM(output_tokens), "
         "SUM(credit_known), SUM(latency_sum) FROM usage_hourly").fetchone()
@@ -496,10 +502,169 @@ def test_stats_timeline_metric_dimensions(stats):
     # 非法 metric 回退请求次数
     assert query.timeline(username="u", metric="bogus") == req
 
+
+def test_stats_timeline_derived_metrics(stats):
+    """派生指标：成功率 / 缓存命中率 / 单请求成本，均为「先聚合后相除」。"""
+    collector, query = stats
+    base = 1_699_999_200          # 整点：与 usage_hourly 的 hour 桶对齐
+    # codebuddy：3 次请求 2 成功，输入 100 命中 40，单次成本由 pricing 决定
+    collector.record(username="u", provider="codebuddy", model="glm-5.2", ok=True,
+                     input_tokens=40, cached_tokens=40, now=base)
+    collector.record(username="u", provider="codebuddy", model="glm-5.2", ok=True,
+                     input_tokens=40, cached_tokens=0, now=base)
+    collector.record(username="u", provider="codebuddy", model="glm-5.2", ok=False,
+                     error_type="rate_limit", input_tokens=20, now=base)
+    collector.rollup_hourly()
+
+    rate = query.timeline(username="u", metric="success_rate")[0]
+    # 3 请求 2 成功 → 0.6667（不是逐小时平均，而是 sum/sum）
+    assert rate["codebuddy"] == pytest.approx(0.6667)
+    cache = query.timeline(username="u", metric="cache_rate")[0]
+    # 命中 40 / 输入 100 → 0.4
+    assert cache["codebuddy"] == pytest.approx(0.4)
+
+
+def test_stats_timeline_derived_metrics_no_sample_is_none(stats):
+    """无样本的派生指标给 None（断线），不画成 0%。"""
+    collector, query = stats
+    # 未上报缓存 → cache_rate 为 None；无请求的小时在稠密轴上同样是 None
+    collector.record(username="u", provider="trae", model="unpriced", ok=True,
+                     input_tokens=100, now=1_700_000_000)
+    collector.rollup_hourly()
+    assert query.timeline(username="u", metric="cache_rate")[0]["trae"] is None
+    # 无可定价明细 → 单请求成本 None
+    assert query.timeline(username="u", metric="cost_per_request")[0]["trae"] is None
+    # 全失败的小时：均值类为 None（不是 0 ms）
+    collector.record(username="u", provider="trae", model="m", ok=False,
+                     error_type="upstream_error", now=1_700_003_600)
+    collector.rollup_hourly()
+    lat = query.timeline(username="u", metric="latency", since=1_700_000_000)
+    assert lat[1]["trae"] is None
+
+
+def test_stats_timeline_dense_hours(stats):
+    """时间轴稠密：缺失小时补桶，可加量补 0、均值补 None。"""
+    collector, query = stats
+    base = 1_699_999_200          # 整点：与 usage_hourly 的 hour 桶对齐
+    collector.record(username="u", provider="trae", model="m", ok=True, now=base)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     now=base + 5 * 3600)      # 中间空 4 小时
+    collector.rollup_hourly()
+
+    points = query.timeline(username="u")
+    assert len(points) == 6                     # 首末之间每小时一个点
+    assert [point["hour"] for point in points] == [base + i * 3600 for i in range(6)]
+    # 请求数：空档补 0
+    assert [point["trae"] for point in points] == [1, 0, 0, 0, 0, 1]
+    # 均值：空档补 None（不是 0 ms）
+    lat = query.timeline(username="u", metric="latency")
+    assert lat[1]["trae"] is None
+
+
+def test_stats_timeline_total_recomputes_ratio(stats):
+    """`__total` 按同一小时的 sum/count 重新相除，不是各渠道值相加。"""
+    collector, query = stats
+    base = 1_699_999_200
+    # codebuddy：2 请求全成功、各 100ms；trae：2 请求 1 成功、各 900ms
+    for _ in range(2):
+        collector.record(username="u", provider="codebuddy", model="m", ok=True,
+                         latency_ms=100, now=base)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     latency_ms=900, now=base)
+    collector.record(username="u", provider="trae", model="m", ok=False,
+                     error_type="rate_limit", latency_ms=900, now=base)
+    collector.rollup_hourly()
+
+    # 请求数：可加 → 4
+    req = query.timeline(username="u")[0]
+    assert req["codebuddy"] == 2 and req["trae"] == 2 and req["__total"] == 4
+    # 耗时：全池加权均值 (100+100+900)/3 = 366.67 → 367；相加会得到 1000
+    lat = query.timeline(username="u", metric="latency")[0]
+    assert lat["__total"] == 367
+    # 成功率：3 成功 / 4 请求 = 0.75；相加会得到 1.5
+    rate = query.timeline(username="u", metric="success_rate")[0]
+    assert rate["__total"] == pytest.approx(0.75)
+
+
+def test_stats_timeline_dense_hours_respects_window(stats):
+    """稠密轴按 since/until 补齐窗口两端；跨度超上限时退回已观测小时。"""
+    collector, query = stats
+    base = 1_699_999_200          # 整点：与 usage_hourly 的 hour 桶对齐
+    collector.record(username="u", provider="trae", model="m", ok=True, now=base)
+    collector.rollup_hourly()
+
+    # 窗口从更早开始 → 前面补空桶
+    points = query.timeline(username="u", since=base - 2 * 3600)
+    assert [point["hour"] for point in points] == [base - 7200, base - 3600, base]
+    assert points[0]["trae"] == 0
+    # 跨度超 MAX_DENSE_HOURS（92 天）→ 不补，只回已观测小时
+    wide = query.timeline(username="u", since=base - MAX_DENSE_HOURS * 3600)
+    assert [point["hour"] for point in wide] == [base]
+
+
+def test_stats_model_timeline_dense_and_derived(stats):
+    """model_timeline 同样稠密补桶，派生指标语义与 timeline 一致。"""
+    collector, query = stats
+    base = 1_699_999_200          # 整点：与 usage_hourly 的 hour 桶对齐
+    collector.record(username="u", provider="trae", model="a", ok=True,
+                     input_tokens=50, cached_tokens=25, now=base)
+    collector.record(username="u", provider="trae", model="a", ok=False,
+                     error_type="rate_limit", now=base + 2 * 3600)
+    collector.rollup_hourly()
+
+    result = query.model_timeline(username="u", metric="success_rate")
+    assert [point["hour"] for point in result["points"]] == [
+        base, base + 3600, base + 7200]
+    assert result["points"][0]["a"] == 1.0
+    assert result["points"][1]["a"] is None     # 空档：比率断线
+    assert result["points"][2]["a"] == 0.0
+    cache = query.model_timeline(username="u", metric="cache_rate")
+    assert cache["points"][0]["a"] == pytest.approx(0.5)
+
+
+def test_stats_percentile_timeline(stats):
+    """分位时序：P50/P95 按小时算，只统计成功请求，缺失小时补 None。"""
+    collector, query = stats
+    base = 1_699_999_200          # 整点：与 usage_hourly 的 hour 桶对齐
+    for latency in (100, 200, 300, 400, 1000):
+        collector.record(username="u", provider="trae", model="m", ok=True,
+                         latency_ms=latency, now=base)
+    # 失败请求的延迟不计入（ok=0）
+    collector.record(username="u", provider="trae", model="m", ok=False,
+                     error_type="rate_limit", latency_ms=99999, now=base)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     latency_ms=700, now=base + 2 * 3600)
+
+    result = query.percentile_timeline(username="u")
+    assert result["metric"] == "latency" and result["window_days"] == 90
+    points = result["points"]
+    assert [point["hour"] for point in points] == [base, base + 3600, base + 7200]
+    # 5 个样本：P50 = ⌈0.5·5⌉ = 第 3 小 = 300；P95 = ⌈0.95·5⌉ = 第 5 小 = 1000
+    assert points[0]["p50"] == 300 and points[0]["p95"] == 1000
+    assert points[0]["samples"] == 5
+    assert points[1]["p50"] is None and points[1]["samples"] == 0
+    assert points[2]["p50"] == 700
+    # ttfb 口径：无 ttfb 数据 → 全 None
+    assert all(point["p50"] is None
+               for point in query.percentile_timeline(username="u",
+                                                      metric="ttfb")["points"])
+
+
+def test_stats_percentile_timeline_endpoint(admin_client):
+    """percentile-timeline 端点：作用域与 metric 透传。"""
+    _app, client = admin_client
+    collector = client.app.state.stats_collector
+    collector.record(username="root", provider="trae", model="m", ok=True,
+                     latency_ms=500, ttfb_ms=120)
+    body = client.get("/api/stats/percentile-timeline").json()
+    assert body["metric"] == "latency" and body["points"][0]["p50"] == 500
+    ttfb = client.get("/api/stats/percentile-timeline?metric=ttfb").json()
+    assert ttfb["metric"] == "ttfb" and ttfb["points"][0]["p95"] == 120
+
 def test_stats_model_timeline_metric_and_ttfb_rollup(stats):
     """model_timeline 指标切换 + ttfb 聚合进小时表（老库补列后可用）。"""
     collector, query = stats
-    base = 1_700_000_000
+    base = 1_699_999_200          # 整点：与 usage_hourly 的 hour 桶对齐
     collector.record(username="u", provider="codebuddy", model="glm-5.2", ok=True,
                      input_tokens=10, output_tokens=5, latency_ms=100, ttfb_ms=40, now=base)
     collector.record(username="u", provider="codebuddy", model="glm-5.2", ok=True,
@@ -520,7 +685,7 @@ def test_stats_model_timeline_metric_and_ttfb_rollup(stats):
 def test_stats_model_timeline_top_models_and_points(stats):
     """按模型趋势：Top N 宽表点列，按总量降序；其余模型不出线。"""
     collector, query = stats
-    base = 1_700_000_000
+    base = 1_699_999_200          # 整点：与 usage_hourly 的 hour 桶对齐
     # glm-5.2 共 4 次（最热）、kimi-k3 共 2 次、legacy-old 共 1 次（超出 Top 2）
     for _ in range(4):
         collector.record(username="u", provider="codebuddy", model="glm-5.2", ok=True, now=base)

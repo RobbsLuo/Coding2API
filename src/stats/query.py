@@ -7,20 +7,46 @@ from typing import Any
 
 from ..sorting import parse_sort_order, sql_order
 
-METRIC_COLUMNS: dict[str, str] = {
-    # metric 参数 → usage_hourly 上的取值表达式
-    "requests": "requests",
-    "tokens": "input_tokens + output_tokens",
-    "latency": "latency_sum",      # 均值由调用方除以 ok_count
-    "ttfb": "ttfb_sum",            # 同上
+# 图表指标 → 取值语义。小时汇总只存 sum / count，因此**派生比率必须在聚合后
+# 相除**：先按小时求比率再平均是另一种口径（会被低量小时等权带偏），不能混用。
+METRIC_KINDS: dict[str, str] = {
+    "requests": "sum_requests",
+    "tokens": "sum_tokens",
     # 成本默认口径是人民币（与本模块展示一致）；仅含可定价明细的小时才有值。
-    "cost": "cost_cny_sum",
+    "cost": "sum_cost",
+    "latency": "mean_latency",     # 均值由 ok_count 归一
+    "ttfb": "mean_ttfb",           # 同上
+    # 派生指标（P1）：成功率 / 缓存命中率 / 单请求成本。
+    "success_rate": "ratio_ok",
+    "cache_rate": "ratio_cache",
+    "cost_per_request": "per_request_cost",
 }
 
-# 分组统计下发的分位档：P50 / P90 / P95 / P99（latency 与 ttfb 各一组列）。
-# **不加进 METRIC_COLUMNS**：图表指标读小时汇总，只存 sum/count，数学上无法
-# 还原分布；分位只能从明细表算（见 `_percentile_join`）。
+# 三个图表查询（timeline / model_timeline）共用的聚合列。
+#
+# 为什么一次取全：派生指标要的是**多个 sum 相除**，只选 `SUM(expr)` 一个值就
+# 得为每个 metric 拼不同的 SQL，三处（timeline、model_timeline、将来新增的）
+# 迟早会分叉。这里固定取齐 10 列，取值语义留给 `_metric_value` 决定。
+_METRIC_AGGREGATES = """
+                   SUM(requests) AS requests,
+                   SUM(ok_count) AS ok_count,
+                   SUM(input_tokens) AS input_tokens,
+                   SUM(output_tokens) AS output_tokens,
+                   SUM(cached_tokens) AS cached_tokens,
+                   SUM(cached_known) AS cached_known,
+                   SUM(cost_cny_sum) AS cost_cny_sum,
+                   SUM(cost_known) AS cost_known,
+                   SUM(latency_sum) AS latency_sum,
+                   SUM(ttfb_sum) AS ttfb_sum"""
+
+# 分位档：图表时序用的分位（延迟图要「中位数线 + P95 带」）。
+# **不加进 METRIC_KINDS**：分位读明细表（小时汇总只存 sum/count，数学上无法
+# 还原分布），见 `percentile_timeline`。
 PERCENTILES: tuple[int, ...] = (50, 90, 95, 99)
+
+# 稠密时间轴上限：`timeline` 按小时补桶，超过这个跨度就不再补（「全部」范围
+# 可能横跨几个月，几万个空点只会拖垮图表）。约 92 天，覆盖最长的 90 天窗口。
+MAX_DENSE_HOURS = 92 * 24
 
 # 明细聚合子查询（分位 + 输出速度）在主查询里的 JOIN 别名：`_percentile_join`
 # 与两个分组路径共用，别名固定。
@@ -406,23 +432,46 @@ class StatsQuery:
     def __init__(self, db) -> None:
         self._db = db
 
-    def _metric_sql(self, metric: str) -> tuple[str, bool]:
-        """返回 (取值表达式, 是否均值语义)。非法 metric 回退 requests。"""
-        expr = METRIC_COLUMNS.get(metric, "requests")
-        return expr, metric in ("latency", "ttfb")
+    def _metric_value(self, metric: str, row: Any) -> Any:
+        """把一行聚合结果按 metric 归一成图表值；无有效样本给 `None`。
 
-    def _metric_value(self, metric: str, expr_value, ok_count, cost_known: int = 0) -> Any:
-        """把 SQL 原始值按 metric 归一：均值类除以 ok_count，无成功则 0。
+        入参是**整行**（`_METRIC_AGGREGATES` 的 10 列），不再只给单个
+        `SUM(expr)`：成功率、缓存命中率、单请求成本都是两个 sum 相除，先聚合
+        后相除才是池级口径（先逐小时相除再平均会被低量小时等权带偏）。
 
-        成本是**部分可定价**的：某小时/模型若一条明细都没匹配到价表
-        （`cost_known=0`），聚合值只是 0，直接展示会被读成「免费」；这里回 None
-        让前端显示 —。只要有一条可定价，就按可定价部分求和（宁可少算不虚报）。
+        「无样本」一律给 `None` 而不是 0——前端据此断线（不画成 0 值），
+        否则一个没上报缓存的渠道会显示成「命中率 0%」。
+
+        - `requests` / `tokens`：sum，恒有值
+        - `latency` / `ttfb`：成功请求均值，无成功 → None（原实现给 0，会画成
+          「0 ms」的假低谷，与「该小时没有成功请求」是两件事）
+        - `cost`：仅含可定价明细的小时才有值（部分可定价时按已定价部分求和）
+        - `success_rate`：ok_count / requests，requests 为 0 → None
+        - `cache_rate`：cached / input，无上报（cached_known=0）或输入为 0 → None
+        - `cost_per_request`：cost / requests，无定价或请求为 0 → None
         """
-        if metric in ("latency", "ttfb"):
-            return round(expr_value / ok_count) if ok_count else 0
-        if metric == "cost" and not cost_known:
-            return None
-        return expr_value
+        kind = METRIC_KINDS.get(metric, "sum_requests")
+        if kind == "sum_requests":
+            return row["requests"]
+        if kind == "sum_tokens":
+            return row["input_tokens"] + row["output_tokens"]
+        if kind == "sum_cost":
+            return row["cost_cny_sum"] if row["cost_known"] else None
+        if kind == "mean_latency":
+            return round(row["latency_sum"] / row["ok_count"]) if row["ok_count"] else None
+        if kind == "mean_ttfb":
+            return round(row["ttfb_sum"] / row["ok_count"]) if row["ok_count"] else None
+        if kind == "ratio_ok":
+            return round(row["ok_count"] / row["requests"], 4) if row["requests"] else None
+        if kind == "ratio_cache":
+            if not row["cached_known"] or not row["input_tokens"]:
+                return None
+            return round(row["cached_tokens"] / row["input_tokens"], 4)
+        if kind == "per_request_cost":
+            if not row["cost_known"] or not row["requests"]:
+                return None
+            return round(row["cost_cny_sum"] / row["requests"], 6)
+        raise ValueError(f"未知指标语义: {kind!r}")  # pragma: no cover - 词表封闭
 
     @staticmethod
     def _where(*, username: str | None = None, provider: str | None = None,
@@ -801,38 +850,88 @@ class StatsQuery:
                  metric: str = "requests") -> list[dict[str, Any]]:
         """按小时的指标时间序列（usage_hourly 聚合，跨 model 汇总）。
 
-        每个点含当日出现过的各渠道指标值（按 metric 变化：请求数 / 总 token /
-        平均耗时 ms / 平均首字延迟 ms），供前端绘制曲线。渠道集合动态取自
-        数据（新增渠道无需改 SQL），返回结构形如 {hour, codebuddy, trae, qoder}；
-        某渠道在该小时没有数据时补 0，保证同一批点的键集合一致，前端画线不
-        会因缺键断线。
+        每个点含该小时各渠道的指标值（按 metric 变化，语义见 `METRIC_KINDS`），
+        供前端绘制曲线。渠道集合动态取自数据（新增渠道无需改 SQL），返回结构
+        形如 `{hour, codebuddy, trae, qoder}`。
+
+        **时间轴是稠密的**：`usage_hourly` 只在有请求时才有行，稀疏下发会让前端
+        把「空档 5 小时」和「相邻 1 小时」画成一样宽（分类轴压缩时间）。这里按
+        小时补齐缺失的桶，让每个点等距：
+
+        - 给了 `since` / `until` 就按窗口补齐（含两端）；
+        - 都没给（「全部」）就补在首个到末个观测小时之间；
+        - 跨度超过 `MAX_DENSE_HOURS` 时不补（几万个空点只会拖垮图表），
+          前端仍按时间戳定位，只是空档不插点。
+
+        缺失桶的取值按指标语义区分（`_empty_value`）：请求数 / token 补 0（没流量
+        就是 0），均值与比率补 `None`（「没有样本」不是 0，前端据此断线）。
+
+        每个点还带一个 `__total` 键 = **全渠道合计**（单独按小时聚合一次）。为什么
+        不在前端把各渠道值相加：均值（耗时 / 首字）与比率（成功率 / 命中率）相加
+        没有意义，必须用同一小时的 sum/count 重新相除。前端「总量」视图读这个键。
         """
-        expr, _as_mean = self._metric_sql(metric)
         where, params = self._where(username=username, since=since, since_col="hour_utc",
                                     until=until, until_col="hour_utc")
         rows = self._db.connect().execute(
             f"""
-            SELECT hour_utc, provider,
-                   SUM({expr}) AS value, SUM(ok_count) AS ok_count,
-                   SUM(cost_known) AS cost_known
+            SELECT hour_utc, provider,{_METRIC_AGGREGATES}
             FROM usage_hourly {where}
             GROUP BY hour_utc, provider
             ORDER BY hour_utc
             """, params).fetchall()
+        # 全渠道合计：均值/比率必须重新相除，不能把各渠道的值相加
+        total_rows = self._db.connect().execute(
+            f"""
+            SELECT hour_utc,{_METRIC_AGGREGATES}
+            FROM usage_hourly {where}
+            GROUP BY hour_utc
+            ORDER BY hour_utc
+            """, params).fetchall()
         raw: dict[int, dict[str, Any]] = {}
+        totals: dict[int, Any] = {}
         providers: set[str] = set()
         for row in rows:
             hour = row["hour_utc"]
             provider = row["provider"]
             providers.add(provider)
-            raw.setdefault(hour, {})[provider] = self._metric_value(
-                metric, row["value"], row["ok_count"], row["cost_known"])
+            raw.setdefault(hour, {})[provider] = self._metric_value(metric, row)
+        for row in total_rows:
+            totals[row["hour_utc"]] = self._metric_value(metric, row)
         # 渠道按名排序：同一批点的键顺序稳定（与渠道注册顺序无关）
         ordered = sorted(providers)
+        empty = self._empty_value(metric)
         return [
-            {"hour": hour, **{p: raw[hour].get(p, 0) for p in ordered}}
-            for hour in sorted(raw)
+            {"hour": hour,
+             "__total": totals.get(hour, empty),
+             **{p: raw.get(hour, {}).get(p, empty) for p in ordered}}
+            for hour in self._dense_hours(raw, since=since, until=until)
         ]
+
+    @staticmethod
+    def _dense_hours(observed: dict[int, Any], *, since: int | None,
+                     until: int | None) -> list[int]:
+        """补齐小时桶（见 `timeline` 文档）。跨度超限时退回已观测的小时。"""
+        if not observed:
+            return []
+        hours = sorted(observed)
+        start = (since // 3600) * 3600 if since is not None else hours[0]
+        if until is not None:
+            # 半开区间：until 整点本身不算（与 `_where` 的 `< until` 一致）
+            end = ((until - 1) // 3600) * 3600 if until > start else start
+        else:
+            end = hours[-1]
+        # 走到这里必有 end ≥ start：观测到的小时都落在 [since, until) 内，
+        # 首末观测小时天然被两端夹住，无需再判空
+        count = (end - start) // 3600 + 1
+        if count > MAX_DENSE_HOURS:
+            return hours
+        return [start + index * 3600 for index in range(count)]
+
+    @staticmethod
+    def _empty_value(metric: str) -> Any:
+        """缺失小时桶的取值：可加量补 0，均值 / 比率 / 成本补 None（断线）。"""
+        return 0 if METRIC_KINDS.get(metric) in ("sum_requests", "sum_tokens") else None
+
 
     def events(self, *, username: str | None = None, since: int | None = None,
                until: int | None = None,
@@ -1016,35 +1115,85 @@ class StatsQuery:
         """按小时的各模型指标趋势（usage_hourly 聚合）。
 
         Top N 模型按「请求数」排序（排序口径固定，与图表指标解耦）；
-        曲线值按 metric 变化（请求数 / 总 token / 平均耗时 / 平均首字延迟）。
-        返回结构 {models, points} 不变。
+        曲线值按 metric 变化（语义见 `METRIC_KINDS`）。返回结构 `{models, points}`
+        不变。时间轴与 `timeline` 同样按小时补齐（见其文档）。
         """
-        expr, as_mean = self._metric_sql(metric)
         where, params = self._where(username=username, since=since, since_col="hour_utc",
                                     until=until, until_col="hour_utc")
         rows = self._db.connect().execute(
             f"""
-            SELECT hour_utc, model, SUM(requests) AS requests,
-                   SUM({expr}) AS value, SUM(ok_count) AS ok_count,
-                   SUM(cost_known) AS cost_known
+            SELECT hour_utc, model,{_METRIC_AGGREGATES}
             FROM usage_hourly {where}
             GROUP BY hour_utc, model
             ORDER BY hour_utc
             """, params).fetchall()
         totals: dict[str, int] = {}
-        series: dict[str, dict[int, int]] = {}
-        hours: list[int] = []
+        series: dict[str, dict[int, Any]] = {}
+        observed: dict[int, dict[str, Any]] = {}
         for row in rows:
             hour, model = row["hour_utc"], row["model"]
-            if not hours or hours[-1] != hour:
-                hours.append(hour)
             totals[model] = totals.get(model, 0) + row["requests"]
-            series.setdefault(model, {})[hour] = (
-                self._metric_value(metric, row["value"], row["ok_count"], row["cost_known"]))
+            series.setdefault(model, {})[hour] = self._metric_value(metric, row)
+            observed.setdefault(hour, {})[model] = True
         # Top N 模型：按总量降序；总量相同按名字稳定排序
         top_models = sorted(totals, key=lambda m: (-totals[m], m))[:top]
+        empty = self._empty_value(metric)
         points = [
-            {"hour": hour, **{m: series.get(m, {}).get(hour, 0) for m in top_models}}
-            for hour in hours
+            {"hour": hour, **{m: series.get(m, {}).get(hour, empty) for m in top_models}}
+            for hour in self._dense_hours(observed, since=since, until=until)
         ]
         return {"models": top_models, "points": points}
+
+    def percentile_timeline(self, *, username: str | None = None,
+                            since: int | None = None, until: int | None = None,
+                            metric: str = "latency") -> dict[str, Any]:
+        """按小时的分位时序（P50 中位数 + P95 上界），读明细表。
+
+        延迟图只画均值会盖住长尾：池级均值 10 s 时 P95 可能 40 s，而「少数请求
+        卡住」正是最该看见的故障形态。故一张图给「中位数线 + P95 上界带」。
+
+        **只能读明细表**（`usage_events`，仅 90 天）：小时汇总只存 sum/count，
+        数学上无法还原分布。`metric` 只接受 `latency` / `ttfb`（其余回退
+        `latency`）；口径与分组表分位一致——只统计成功请求、nearest-rank
+        （`⌈pct·n/100⌉`）、NULL 不参与排名。
+
+        返回 `{"points": [{hour, p50, p95, samples}], "metric": ..., "window_days": 90}`；
+        缺失小时补 None（前端断线，不画成 0）。`samples` 是该小时的样本数，
+        前端可据此说明「该点样本很少」。
+        """
+        column = "ttfb_ms" if metric == "ttfb" else "latency_ms"
+        where, params = self._where(username=username, ok=1, since=since, until=until)
+        clause = f"AND {where[6:]}" if where else ""
+        rows = self._db.connect().execute(
+            f"""
+            SELECT hour_utc,
+                   MAX(CASE WHEN rn = (50 * n + 99) / 100 THEN val END) AS p50,
+                   MAX(CASE WHEN rn = (95 * n + 99) / 100 THEN val END) AS p95,
+                   MAX(n) AS samples
+            FROM (
+                SELECT (ts / 3600) * 3600 AS hour_utc, {column} AS val,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY (ts / 3600) * 3600 ORDER BY {column}
+                       ) AS rn,
+                       COUNT({column}) OVER (
+                           PARTITION BY (ts / 3600) * 3600
+                       ) AS n
+                FROM usage_events
+                WHERE {column} IS NOT NULL {clause}
+            ) AS ranked
+            GROUP BY hour_utc
+            ORDER BY hour_utc
+            """, params).fetchall()
+        observed = {row["hour_utc"]: True for row in rows}
+        by_hour = {row["hour_utc"]: row for row in rows}
+        points = []
+        for hour in self._dense_hours(observed, since=since, until=until):
+            row = by_hour.get(hour)
+            points.append({
+                "hour": hour,
+                "p50": row["p50"] if row else None,
+                "p95": row["p95"] if row else None,
+                "samples": row["samples"] if row else 0,
+            })
+        return {"points": points, "metric": column.removesuffix("_ms"),
+                "window_days": 90}

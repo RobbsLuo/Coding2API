@@ -157,6 +157,16 @@ def create_router(services: Services) -> APIRouter:
         return stats_query.model_timeline(
             username=_scope(principal, username), since=since, until=until, metric=metric)
 
+    @router.get("/api/stats/percentile-timeline")
+    async def stats_percentile_timeline(principal=Depends(principal_from_request),
+                                        username: str | None = None,
+                                        since: int | None = None,
+                                        until: int | None = None,
+                                        metric: str = "latency"):
+        """延迟分位时序（P50 中位数 + P95 上界）：延迟图的「典型值 + 长尾」两层。"""
+        return stats_query.percentile_timeline(
+            username=_scope(principal, username), since=since, until=until, metric=metric)
+
     @router.get("/api/stats/by-user")
     async def stats_by_user(principal=Depends(principal_from_request),
                             username: str | None = None, since: int | None = None,

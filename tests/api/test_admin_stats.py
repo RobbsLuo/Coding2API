@@ -45,8 +45,10 @@ def test_stats_endpoints_scope_by_principal(admin_client):
     assert client.get("/api/stats/by-credential").json() == {"credentials": []}
     timeline = client.get("/api/stats/timeline").json()
     assert timeline["points"]
-    # 渠道列动态取自数据（本用例只写了 trae），不再固定为两渠道
-    assert list(timeline["points"][0].keys()) == ["hour", "trae"]
+    # 渠道列动态取自数据（本用例只写了 trae），不再固定为两渠道；
+    # `__total` 是全渠道合计（均值/比率必须按同一小时的 sum/count 重新相除，
+    # 前端不能把各渠道的值相加）
+    assert list(timeline["points"][0].keys()) == ["hour", "__total", "trae"]
 
 def test_stats_endpoints_restrict_non_admin(tmp_path):
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))

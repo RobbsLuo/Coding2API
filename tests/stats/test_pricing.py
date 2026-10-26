@@ -235,6 +235,29 @@ def test_query_model_timeline_cost_unpriced_is_none(collector_query):
     assert result["points"][0]["unpriced"] is None
 
 
+def test_query_timeline_cost_per_request(collector_query):
+    """单请求成本 = 已定价成本 ÷ 请求数（先聚合后相除）；无可定价明细给 None。"""
+    collector, query, _db = collector_query
+    hour = 1_699_999_200                    # 整点，与小时桶对齐
+    # 两条可定价（各 1M 输入 = 1 USD = 6.7 CNY）+ 一条不可定价
+    for offset in (0, 1):
+        collector.record(username="u", provider="trae", model="glm-5.2", ok=True,
+                         input_tokens=1_000_000, output_tokens=0, now=hour + offset)
+    collector.record(username="u", provider="trae", model="unpriced", ok=True,
+                     input_tokens=1_000_000, output_tokens=0, now=hour + 2)
+    points = query.timeline(username="u", metric="cost_per_request")
+    # 成本只算可定价部分（13.4 CNY），请求数 3 → 4.466667
+    assert points[0]["trae"] == pytest.approx(13.4 / 3, rel=1e-4)
+
+    # 全部不可定价 → None（不是 0 元）
+    other_hour = hour + 3600
+    collector.record(username="u", provider="trae", model="unpriced", ok=True,
+                     input_tokens=100, output_tokens=0, now=other_hour)
+    points = query.timeline(username="u", metric="cost_per_request",
+                            since=other_hour)
+    assert points[0]["trae"] is None
+
+
 def test_collector_rollup_preserves_cost(collector_query):
     collector, query, db = collector_query
     now = int(time.time())
