@@ -483,6 +483,16 @@ async def test_client_request_json_error_paths():
     with pytest.raises(codearts_events.UpstreamProtocolViolation, match="non-JSON"):
         await _client(non_json).caller_identity(_cred())
 
+    # 对外文案不得带上游端点 URL（PROPOSAL §6「错误响应不回流上游正文」）：
+    # 异常文本只进日志，public_message 才是回客户端的受控标识。
+    def non_json_capture(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="nope")
+
+    with pytest.raises(codearts_events.UpstreamProtocolViolation) as caught:
+        await _client(non_json_capture).caller_identity(_cred())
+    assert caught.value.public_message == "upstream returned a non-JSON response"
+    assert "http" not in caught.value.public_message
+
     def non_object(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json=[1, 2])
 

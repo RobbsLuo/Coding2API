@@ -98,3 +98,22 @@ def register_spa_routes(app: FastAPI) -> None:
         if not index.is_file():
             return HTMLResponse(_FRONTEND_MISSING_HTML, status_code=503)
         return FileResponse(index, headers=_INDEX_CACHE_HEADERS)
+
+    # 写方法同样兜到 JSON 404：只注册 GET 时，未匹配的 POST /api/** 会落到
+    # Starlette 的 405 `{"detail":"Method Not Allowed"}`（FastAPI 的默认
+    # 路由匹配行为），与 PROPOSAL §6「未匹配的 /api、/v1 返回 JSON 404」不符：
+    # 客户端拼错端点 + 错方法时拿到的是 HTML/裸 detail 形状，不是本服务的
+    # 统一错误体（`error.code`），调用方按错误体解析会踩空。
+    @app.api_route("/{path:path}", methods=["POST", "PUT", "PATCH", "DELETE"],
+                   include_in_schema=False)
+    async def spa_write(path: str):
+        """写方法：/api、/v1 前缀回 JSON 404，其余按 SPA 处理。"""
+        if path.startswith(_API_PREFIXES) or path in ("api", "v1"):
+            return api_not_found(path)
+        dist = frontend_dist()
+        if dist is None:
+            return HTMLResponse(_FRONTEND_MISSING_HTML, status_code=503)
+        index = dist / "index.html"
+        if not index.is_file():
+            return HTMLResponse(_FRONTEND_MISSING_HTML, status_code=503)
+        return FileResponse(index, headers=_INDEX_CACHE_HEADERS)

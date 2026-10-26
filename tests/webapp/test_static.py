@@ -96,3 +96,54 @@ def test_frontend_dist_falls_back_to_container_and_cwd(tmp_path, monkeypatch):
 
     found = static.frontend_dist()
     assert found is not None and found.name == "dist"
+
+
+def test_unmatched_write_method_on_api_prefix_returns_json_404(tmp_path, monkeypatch):
+    """未匹配的写方法也要回 JSON 404（此前是 405 `{"detail":…}`）。
+
+    PROPOSAL §6「未匹配的 /api、/v1 返回 JSON 404」：客户端拼错端点 + 错
+    方法时若拿到裸 `detail` 形状，按统一错误体解析的调用方会踩空。
+    """
+    with _spa_client(tmp_path, monkeypatch=monkeypatch) as client:
+        for method in ("post", "put", "patch", "delete"):
+            response = getattr(client, method)("/api/nonexistent")
+            assert response.status_code == 404, method
+            body = response.json()
+            assert body["error"]["code"] == "invalid_request"
+            assert body["error"]["status"] == 404
+
+
+def test_unmatched_write_method_on_v1_prefix_returns_json_404(tmp_path, monkeypatch):
+    with _spa_client(tmp_path, monkeypatch=monkeypatch) as client:
+        response = client.post("/v1/nonexistent")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_unmatched_write_method_on_plain_path_serves_spa(tmp_path, monkeypatch):
+    """非 API 前缀的写方法仍走 SPA（前端路由回 index.html）。"""
+    with _spa_client(tmp_path, monkeypatch=monkeypatch) as client:
+        response = client.post("/some-page")
+    assert response.status_code == 200
+    assert "spa" in response.text
+
+
+def test_unmatched_write_method_without_frontend_build_reports_missing(
+        tmp_path, monkeypatch):
+    """前端没构建时，写方法也给出可执行提示（不是 404 掩盖「前端缺失」）。"""
+    with _spa_client(tmp_path, build=False, monkeypatch=monkeypatch) as client:
+        response = client.post("/some-page")
+    assert response.status_code == 503
+    assert "pnpm build" in response.text
+
+
+def test_unmatched_write_method_without_index_reports_missing(tmp_path, monkeypatch):
+    """产物目录在但 index.html 缺失：同样回可执行提示（不是 404/500）。"""
+    dist = tmp_path / "dist"
+    dist.mkdir(parents=True)
+    monkeypatch.setattr("src.webapp.static.frontend_dist", lambda: dist)
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+    with TestClient(build_app(settings)) as client:
+        response = client.post("/some-page")
+    assert response.status_code == 503
+    assert "pnpm build" in response.text
