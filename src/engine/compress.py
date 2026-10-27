@@ -13,7 +13,9 @@
    其实装不下」，压缩根本不触发。
 2. 超过「模型上限 × safety_ratio − reserve_for_output」时从**最老**的消息
    开始丢弃；`system` 永远保留（丢了会改变模型行为），至少保留最近 N 条
-   （保证当前这轮对话完整）。回填从最新往最老，装不下就跳过继续往前看。
+   （保证当前这轮对话完整）。保留集合**必须是连续后缀**：跳着留（捞更老的
+   小消息）会在集合里留洞，下一轮重算时洞变了，发往上游的前缀整段失效，
+   上游前缀缓存只能命中 system 段。
 3. `assistant.tool_calls` 与其 `tool` 结果同生共死：按「组」处理，只删一半
    会让上游报 tool_call_id 找不到。
 4. 裁剪后仍超限（system / 最近 N 条本身太大）→ 截断最长的那条消息内容
@@ -189,6 +191,56 @@ def _group_atomic(messages: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     return groups
 
 
+def trim_to_budget(
+    messages: list[dict[str, Any]],
+    *,
+    budget: float,
+    min_keep_messages: int = DEFAULT_MIN_KEEP_MESSAGES,
+) -> tuple[list[dict[str, Any]], int]:
+    """按预算保留尾部；返回 `(结果, 第一条被保留正文消息在 body 中的绝对序号)`。
+
+    `system` 全部保留且不计入 body 序号；`assistant.tool_calls` 与其后连续
+    `tool` 结果同生共死；至少保留最近 `min_keep_messages` 条；保留集合是**连续
+    后缀**（装不下就停，不跳着捞更老的小消息，否则前缀带洞、缓存无法复用）。
+    仍超预算时按单条内容截断（`_truncate_to_budget`）。
+
+    序号是给**粘性裁剪**记窗口起点用的（见 `engine/sticky_trim.py`）：下一轮
+    只要该位置的消息没变、且裁后总量仍在预算内，就能复用同一前缀，上游前缀
+    缓存才命中得上。调用方保证 `budget > 0`。
+    """
+    system_messages = [m for m in messages if m.get("role") == "system"]
+    body = [m for m in messages if m.get("role") != "system"]
+
+    groups = _group_atomic(body)
+    starts: list[int] = []
+    cursor = 0
+    for group in groups:
+        starts.append(cursor)
+        cursor += len(group)
+
+    running = estimate_messages(system_messages)
+    kept_groups: list[list[dict[str, Any]]] = []
+    kept_count = 0
+    start_index = len(body)
+    # 从最新往最老回填，**只保留连续后缀**：装不下就停，不再跳过去捞更老的
+    # 小消息。跳着留会让「保留集合」带洞，下一轮重算时洞的位置一变，发往上游
+    # 的前缀就整段失效（前缀缓存只能命中 system 段）；连续后缀则只会在尾部
+    # 增长，配合粘性裁剪可以长期复用同一前缀。
+    # 最近 min_keep_messages 条无条件保留（保证当前这轮对话完整）。
+    for position in range(len(groups) - 1, -1, -1):
+        group = groups[position]
+        cost = estimate_messages(group)
+        if kept_count >= min_keep_messages and running + cost > budget:
+            break
+        kept_groups.append(group)
+        running += cost
+        kept_count += len(group)
+        start_index = starts[position]
+    kept_groups.reverse()
+    result = [*system_messages, *[m for group in kept_groups for m in group]]
+    return _truncate_to_budget(result, budget), start_index
+
+
 def compress_messages(
     messages: list[dict[str, Any]],
     *,
@@ -207,20 +259,6 @@ def compress_messages(
     if budget <= 0 or estimate_messages(messages) <= budget:
         return messages
 
-    system_messages = [m for m in messages if m.get("role") == "system"]
-    body = [m for m in messages if m.get("role") != "system"]
-
-    running = estimate_messages(system_messages)
-    kept_groups: list[list[dict[str, Any]]] = []
-    kept_count = 0
-    # 从最新往最老回填：最近 min_keep_messages 条无条件保留（保证当前这轮对话
-    # 完整），其后再装得下就继续往前留；装不下就跳过看更老的（贪心）
-    for group in reversed(_group_atomic(body)):
-        cost = estimate_messages(group)
-        if kept_count < min_keep_messages or running + cost <= budget:
-            kept_groups.append(group)
-            running += cost
-            kept_count += len(group)
-    kept_groups.reverse()
-    result = [*system_messages, *[m for group in kept_groups for m in group]]
-    return _truncate_to_budget(result, budget)
+    trimmed, _start = trim_to_budget(messages, budget=budget,
+                                     min_keep_messages=min_keep_messages)
+    return trimmed

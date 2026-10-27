@@ -261,12 +261,28 @@ def health_score(q: Quota | None) -> int | None:
 
 - **估算**：中文 0.55 tok/字、数字 0.33、其他 0.25（英文「3 字符 ≈ 1 token」把中文低估 1.6 倍）。**图片 part 按 URL/base64 长度计入**（按 100 字符估 → 图片会话永不触发压缩）。
 - **预算** = `模型上限 × safety_ratio − reserve_for_output`。
-- **裁剪**：`system` 永久保留；`assistant.tool_calls` 与其后连续 `tool` 结果**同生共死**；至少留最近 `min_keep_messages` 条；其外从新到老贪心回填。仍超限 → 截断最长**非 system** 消息（留头尾 + 标记）。
+- **裁剪**：`system` 永久保留；`assistant.tool_calls` 与其后连续 `tool` 结果**同生共死**；至少留最近 `min_keep_messages` 条；其外从新到老回填，**只保留连续后缀**——装不下就停，不跳着捞更老的小消息。跳着留会在保留集合里留洞，下一轮重算时洞的位置一变，发往上游的前缀整段失效（缓存只剩 system 段）。仍超限 → 截断最长**非 system** 消息（留头尾 + 标记）。
 - **未知上限不压缩**：目录查不到 `max_input_tokens` → 直接跳过，零副作用。
 - **声明值 ≠ 可用量**：TRAE 声明 200000/232768，实测 1,450,000 字符（约 1,035,544 token）仍可读，1,470,000 才报 `4022`/`4026`。故 `_CHANNEL_WINDOW_FLOOR` 按渠道抬到实测下限（TRAE `1_048_576`），**只抬不压**，只影响压缩预算（`/v1/models` 仍宣告声明值）。TRAE `context_window_tokens` 有 `{dev, max}` 两档，`dev` 保守档：取 `max`（`max > dev` 时）；否则 1M 上下文模型被报成 200K。
 - **按实际渠道取值**：压缩在 executor **选号之后**执行（`ExecutorDeps.context_compress`）；路由前只能取 min 口径 → 反复误裁大窗口渠道。每轮从原文重压；affinity 指纹读未压缩原文。
 
-热更：`CONTEXT_COMPRESS_ENABLED`（true）/ `CONTEXT_COMPRESS_RESERVE_TOKENS`（4096）/ `CONTEXT_COMPRESS_MIN_KEEP_MESSAGES`（4）/ `CONTEXT_COMPRESS_SAFETY_RATIO`（0.95）。
+热更：`CONTEXT_COMPRESS_ENABLED`（true）/ `CONTEXT_COMPRESS_RESERVE_TOKENS`（4096）/ `CONTEXT_COMPRESS_MIN_KEEP_MESSAGES`（4）/ `CONTEXT_COMPRESS_SAFETY_RATIO`（0.95）/ `CONTEXT_COMPRESS_STICKY_ENABLED`（true）。
+
+**粘性裁剪**（`engine/sticky_trim.py`，默认开）：上面「每轮按当轮预算重算最近 N 条」有一个致命副作用——客户端每轮**重发完整历史**时，多一轮就多一条消息，保留窗口的起点每轮前移一条，发往上游的前缀从第 2 条消息起就变了，上游前缀缓存只剩 `system` 段可命中。实测 qoder 单号 32 条请求里 21 条 `reusable=1`（命中率 25%）。
+
+改为：只在超预算时裁，且一次裁到 `budget × 0.6`，把保留窗口的起点（正文绝对序号）与该条消息摘要记进进程内 LRU（按「渠道 + 模型 + 会话身份」）。之后每轮只要起点消息没变、仍是消息组边界、裁后总量仍在预算内，就沿同一起点——前缀逐字相同，缓存正常命中；直到新增消息把总量顶回预算才再裁一次。历史被改写（摘要对不上）或分组变了就丢弃记忆重裁，宁可多裁一次也不发错上下文。关闭开关即回到旧行为。
+
+配套前提是保留集合**连续**（见上「裁剪」）：跳着捞更老的小消息会留洞，洞的位置每轮都在变，粘性起点也无法复用。实测（qoder / deepseek-v4.1-flash，客户端每轮重发 1.88M token 全量历史）：修复前该会话 32 条请求里 21 条 `reusable=1`、单号命中率 25%；修复后每次裁剪到 97K token（预算的 58%），后续每轮 `reusable=257/259`，上游 `cached_tokens/input_tokens` 稳定在 **99%+**，单号聚合从 63% 升到 99%。日志里 `reason=no_memory|digest_changed|not_group_start|over_budget` 可直接看出为什么没复用。
+
+### 3.9.1 前缀缓存诊断
+
+命中率按**单请求**看才有意义：`cached_tokens / input_tokens` 聚合后，一条「每轮都裁掉一条老消息、只命中 system 段」的长会话就能把单号拉低一半以上（实测 qoder 单号 25.4%，同时刻同渠道其他号 62%）。网关只落 `input_tokens` / `cached_tokens` 两个数字，看不到前缀在哪条消息分叉，所以提供按需诊断（`PREFIX_DEBUG_ENABLED`，默认关）。
+
+- **只记摘要**：逐条消息 `sha256` 前 16 位、system/tools 摘要、`lcp`（与**同凭证同模型**上一条请求连续相同的消息条数）、`reusable`、`split`（分叉点消息摘要）。不落正文，避免把用户代码写进日志。
+- **`reusable` 与 `lcp` 分开**：tools 定义排在 system 之后，`tools` 变了等于正文全部失效，故 `reusable = min(lcp, 1)`。
+- **首条没有基准**：`lcp` / `reusable` / `split` 记 `None`，不把「这条是第一条」误报成「前缀完全变了」。
+- **压缩会留证据**：`api/context.py` 裁剪成功时另写一行 `前缀诊断·压缩 … messages=N→M 估算=A→B sticky=… reason=…`；同一条流连续多轮都在裁 ⇒ 就是它把命中打没了，`reason` 直接给出为什么没复用上一次的窗口起点（`no_memory` / `digest_changed` / `not_group_start` / `over_budget`）。
+- **开销**：关时每请求只多一次属性读取；开时 INFO 级、每请求一行，状态是进程内 LRU（64 个 `凭证+模型` 键）。
 
 ### 3.10 API Key 策略
 | 列 | 取值 | 空值语义 |
@@ -367,6 +383,7 @@ class Provider(Protocol):
 - **签到窗口 ≠ 自然日**：上游每日 **10:00（UTC+8）** 轮换 `campaignId`，窗口 `10:00 → 次日 09:59`。按自然日封账会在凌晨封掉整天 → `CheckinResult.seal_until` 回填 `checkin_window_end(payload)`（签到类活动里**最晚**的 `endAt`，不采信 `VIEW_DETAILS`）。`CheckinTask._done_scopes` = `dict[done_key → 截止时刻]`，判据 `_sealed()`（`until > now`）。
 - **额度** `GET {openapi}/api/v2/quota/usage`：`userQuota` + `addOnQuota` 合成 `remaining`/`total`，`cycle_end` 取最早 `expiresAt`。
 - **节点故障归类**：Qoder 把自身节点故障包成 400（`{"code":"400","message":"[FAIL]node:… msg:Execution failed: null"}`，HTTP 与 `statusCodeValue` 都是 400）。`classify_error_code` 对 400/404/422 加响应体判据：命中 `NODE_FAILURE_MARKERS = ("[FAIL]node:", "Execution failed")` → `ErrKind.MODEL`；否则 `INVALID`。乱码模型名不带该标记 → 不误伤。全候选只因该模型冷却 → 503 文案 `model 'x' temporarily unavailable on upstream`。
+- **403 判定统一（HTTP 与流内信封同一判据）**：`statusCodeValue` 403 早先由 `_decode_frame` 直接调 `classify_error_code` 判 DEAD（硬禁用），而 HTTP 403 走 `classify_status` 判 SOFT——同一个码两条路径两种后果。现在信封也走 `classify_status`，优先级：排队 → QUEUE、`DAILY_QUOTA_MARKERS`（`Billing daily count exceeded`，`code 110`「每日计费次数用尽」）→ CREDIT（冷却到次日 04:00）、带 `SESSION_DEAD_MARKERS`（`TOKEN_EXPIRE` / `12153` / `Offline user session not found`）→ DEAD、其余 → SOFT。实测 2026-10-27 15:39 `{"code":"110","message":"Billing daily count exceeded"}` 被流内路径判死，qoder `nick5080166916` 硬禁用，只能人工 revive。
 - **`content: null` 须归一为空串**：Qoder 拒收带 `tool_calls` 的 assistant 把 `content` 置 `null`（OpenAI 允许）。上游把该消息当「无正文」跳过 → 紧随 `role:"tool"` 成孤儿；报文却是 `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`——指向 tool 配对，真因在 assistant 的 null content。出站前 `build_chat_body` 的 `_normalize_null_content` 把 assistant/tool 的 `null` 改成 `""`（语义等价）。2026-10-23 实测：同一请求体只把 `null` 换成 `""` 即 400 → 200；与 `reasoning_content` / 并行调用 / 轮数无关。codebuddy_intl、trae、officeace 不敏感。
 - 白名单 `QODER_ALLOWED_ENDPOINTS` 含国内 openapi+gateway 与国际版，启动时校验；`QODER_CHAT_MIN_INTERVAL`（热更，默认 5s）独立 pacer。
 

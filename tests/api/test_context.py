@@ -18,7 +18,7 @@ from src.engine.compress import (
     estimate_messages,
     estimate_tokens,
 )
-from src.provider.base import Model
+from src.provider.base import Model, Usage
 
 
 def _user(text: str) -> dict:
@@ -134,6 +134,15 @@ def test_compress_backfill_keeps_older_small_message_when_it_fits():
     assert tighter == [_user("x" * 40)]          # 只能容下最近一条
 
 
+def test_compress_keeps_only_contiguous_suffix():
+    """保留集合不许带洞：跳过装不下的大消息去捞更老的小消息，前缀就复用不了。"""
+    messages = [_user("small"), _user("b" * 400), _user("new")]
+    result = compress_messages(messages, max_input_tokens=8, reserve_for_output=0,
+                               min_keep_messages=1, safety_ratio=1.0)
+    # 装不下 "b"*400 就停：更老的 "small" 不再被捞进来
+    assert result == [_user("new")]
+
+
 def test_compress_keeps_at_least_min_keep_messages_even_when_over_budget():
     messages = [_user("a" * 100), _user("b" * 100), _user("c" * 100)]
     result = compress_messages(messages, max_input_tokens=1, reserve_for_output=0,
@@ -209,11 +218,14 @@ class _CacheStub:
 
 
 class _SettingsStub:
-    def __init__(self, *, enabled=True, reserve=0, min_keep=4, ratio=1.0):
+    def __init__(self, *, enabled=True, reserve=0, min_keep=4, ratio=1.0,
+                 prefix_debug=False, sticky=True):
         self.context_compress_enabled = enabled
         self.context_compress_reserve_tokens = reserve
         self.context_compress_min_keep_messages = min_keep
         self.context_compress_safety_ratio = ratio
+        self.context_compress_sticky_enabled = sticky
+        self.prefix_debug_enabled = prefix_debug
 
 
 def test_context_window_looks_up_by_normalized_and_raw_name():
@@ -375,6 +387,36 @@ def _big_request():
                        raw={"messages": messages})
 
 
+# --------------------------------------------------------- 粘性裁剪（默认开）
+
+def test_sticky_compressor_keeps_prefix_across_turns():
+    """追加消息后前缀不变——这才是上游缓存能命中的前提。"""
+    cache = {"qoder": {"m": Model(id="m", max_input_tokens=400)}}
+    compress = build_context_compressor(
+        cache, {"qoder": {"m": "m"}}, _SettingsStub(min_keep=1, ratio=1.0, reserve=0))
+    history = [_user(f"{index}-" + "x" * 400) for index in range(20)]
+    first = compress("qoder", "m", {"messages": history})["messages"]
+    second = compress("qoder", "m", {"messages": [*history, _user("next")]})["messages"]
+    assert second[:len(first)] == first
+    assert len(second) == len(first) + 1
+
+
+def test_non_sticky_compressor_rewrites_prefix_every_turn():
+    """对照：关掉粘性就是旧行为——每轮窗口边界都跟着新消息前移。"""
+    cache = {"qoder": {"m": Model(id="m", max_input_tokens=400)}}
+    compress = build_context_compressor(
+        cache, {"qoder": {"m": "m"}},
+        _SettingsStub(min_keep=1, ratio=1.0, reserve=0, sticky=False))
+    history = [_user(f"{index}-" + "x" * 400) for index in range(20)]
+    first = compress("qoder", "m", {"messages": history})["messages"]
+    second = compress("qoder", "m",
+                      {"messages": [*history, _user("y" * 400)]})["messages"]
+    assert second[:len(first)] != first
+
+
+# ------------------------------------------------------------- executor 接线
+
+
 @pytest.mark.asyncio
 async def test_executor_compresses_after_pick_with_provider_window():
     """executor 在选号后按该渠道窗口压缩，上游收到的是压缩后的载荷。"""
@@ -428,3 +470,86 @@ async def test_executor_without_compressor_sends_raw_payload():
         pass
     # 未压缩时上游收到的就是原文 messages（_with_model 只补 model 键的浅拷）
     assert seen[0]["messages"] is request.raw["messages"]
+
+
+# ------------------------------------------------------------ 前缀诊断接线
+
+def test_compressor_logs_trim_when_prefix_debug_enabled(caplog):
+    """压缩每轮裁一条 = 前缀边界每轮前移：诊断开启时必须留下证据。"""
+    messages = [_user("old " * 500), _user("new")]
+    cache = {"codebuddy": {"m": Model(id="m", max_input_tokens=50)}}
+    compress = build_context_compressor(
+        cache, {"codebuddy": {"m": "m"}}, _SettingsStub(min_keep=1, prefix_debug=True))
+    with caplog.at_level("INFO"):
+        compress("codebuddy", "m", {"messages": messages})
+    lines = [line for line in caplog.text.splitlines() if "前缀诊断·压缩" in line]
+    assert len(lines) == 1
+    assert "provider=codebuddy" in lines[0]
+    assert "window=50" in lines[0]
+    assert "messages=2→1" in lines[0]
+
+
+def test_compressor_logs_nothing_when_prefix_debug_disabled(caplog):
+    messages = [_user("old " * 500), _user("new")]
+    cache = {"codebuddy": {"m": Model(id="m", max_input_tokens=50)}}
+    compress = build_context_compressor(
+        cache, {"codebuddy": {"m": "m"}}, _SettingsStub(min_keep=1))
+    with caplog.at_level("INFO"):
+        compress("codebuddy", "m", {"messages": messages})
+    assert "前缀诊断" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_executor_reports_prefix_after_compression():
+    """诊断报告的是**发往上游**的那份载荷（压缩后），不是客户端原文。"""
+    from src.engine.executor import Executor, ExecutorDeps
+    from src.provider.base import Event, EventKind
+
+    reports = []
+
+    class Provider:
+        id = "codebuddy"
+
+        async def stream_chat(self, credential_data, payload, model):
+            yield Event(kind=EventKind.CONTENT, content="ok")
+
+    cache = {"codebuddy": {"m": Model(id="m", max_input_tokens=50)}}
+    compress = build_context_compressor(
+        cache, {"codebuddy": {"m": "m"}}, _SettingsStub(min_keep=1))
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": Provider()}, credentials=_FakeCredentials(),
+        scheduler=_Scheduler(), context_compress=compress,
+        prefix_debug=lambda *args: reports.append(args)))
+    async for _frame in executor.stream(_big_request(), username="alice"):
+        pass
+    assert len(reports) == 1
+    credential_id, provider_id, model, payload = reports[0]
+    assert (credential_id, provider_id, model) == ("c1", "codebuddy", "m")
+    assert payload["messages"] == [_user("new")]
+
+
+@pytest.mark.asyncio
+async def test_executor_reports_prefix_on_nonstream_path():
+    """非流式聚合路径同样上报（两条主链各一次，不重复报同一轮）。"""
+    from src.engine.executor import Executor, ExecutorDeps
+    from src.provider.base import Event, EventKind
+
+    reports = []
+
+    class Provider:
+        id = "codebuddy"
+
+        async def stream_chat(self, credential_data, payload, model):
+            yield Event(kind=EventKind.CONTENT, content="ok")
+            yield Event(kind=EventKind.USAGE,
+                        usage=Usage(input_tokens=1, output_tokens=1))
+
+    messages = [_user("old " * 500), _user("new")]
+    request = ChatRequest(model="m", messages=messages, stream=False,
+                          raw={"messages": messages})
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": Provider()}, credentials=_FakeCredentials(),
+        scheduler=_Scheduler(), prefix_debug=lambda *args: reports.append(args)))
+    await executor.complete(request, username="alice")
+    assert len(reports) == 1
+    assert reports[0][3]["messages"] is messages

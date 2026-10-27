@@ -43,7 +43,7 @@ from .api import (
     responses,
     usage,
 )
-from .api.context import build_context_compressor
+from .api.context import build_context_compressor, build_prefix_observer
 from .api.deps import Services
 from .auth.throttle import LoginThrottle
 from .benchmarks import (
@@ -554,6 +554,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                      # 开关与四个参数每请求现读（热更）
                                      context_compress=build_context_compressor(
                                          model_cache, model_aliases, runtime),
+                                     # 前缀缓存诊断（默认关）：命中率异常时
+                                     # 在管理台打开，日志里就能看到前缀在哪条
+                                     # 消息分叉、压缩是否每轮都在裁
+                                     prefix_debug=build_prefix_observer(runtime),
                                      limits=limit_guard,
                                      inflight=inflight_guard))
 

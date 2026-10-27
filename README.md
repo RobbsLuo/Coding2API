@@ -193,7 +193,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **上游节点故障**：Qoder 有时把自身节点故障包成 400（`[FAIL]node:…`）→ 判模型级瞬时故障，只冷却该模型。候选耗尽 → 503（`no_healthy_credential`）。
 
-**保活帧与排队**：上游在流中发 `body:"null"` 的保活帧（外层 200）→ 跳过、不打断输出；「排队中」包成 403 且排队标记藏在**序列化字符串**里 → 归 QUEUE 等上游点名的秒数后在原号重开，不硬禁用凭证。
+**保活帧与排队**：上游在流中发 `body:"null"` 的保活帧（外层 200）→ 跳过、不打断输出；「排队中」包成 403 且排队标记藏在**序列化字符串**里 → 归 QUEUE 等上游点名的秒数后在原号重开，不硬禁用凭证。「每日计费次数用尽」（403 `code 110`，`Billing daily count exceeded`）→ 归额度类，冷却到次日 04:00，同样不硬禁用（HTTP 与流内信封同一判据）。
 
 ### CodeArts（`codearts`）
 
@@ -691,6 +691,8 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `CONTEXT_COMPRESS_RESERVE_TOKENS` | `4096` | 为回复预留的输出 token |
 | `CONTEXT_COMPRESS_MIN_KEEP_MESSAGES` | `4` | 无论多长都保留的最近消息条数 |
 | `CONTEXT_COMPRESS_SAFETY_RATIO` | `0.95` | 压缩预算占模型上限比例 |
+| `CONTEXT_COMPRESS_STICKY_ENABLED` | `true` | 粘性裁剪：一次裁到预算 60% 并锁定窗口起点，跨轮前缀不变以命中上游缓存 |
+| `PREFIX_DEBUG_ENABLED` | `false` | 前缀缓存诊断：每请求一行载荷指纹（只记摘要），定位命中率异常的分叉点。可热更 |
 | `UPSTREAM_COMPLETE_TIMEOUT_SECONDS` | `600` | 非流式聚合整体超时；`≤0` 关闭 |
 | `STREAM_FIRST_EVENT_TIMEOUT_SECONDS` | `0` | 首事件超时（出帧前可换号）。**默认必须保持关闭**，推荐 60。可热更 |
 | `STREAM_IDLE_TIMEOUT_SECONDS` | `0` | 流内空闲超时（已出帧只断流不换号），推荐 300。可热更 |

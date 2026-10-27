@@ -93,6 +93,12 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("context_compress_safety_ratio", float, "上下文压缩：安全系数",
                "按模型上限的百分比计算压缩预算，给 token 估算误差留余量。",
                minimum=0.0, maximum=1.0, group="routing"),
+    HotSetting("context_compress_sticky_enabled", bool, "上下文压缩：粘性裁剪",
+               "开启后一次裁到预算的 60% 并记住保留窗口的起点，跨轮前缀不变，"
+               "上游前缀缓存才能命中（客户端每轮重发完整历史时，不粘性就只有 "
+               "system 段可复用，命中率会掉到个位数）。关闭 = 每轮按当轮预算"
+               "重算，只有前缀本来就单调增长时才划算。",
+               group="routing"),
     HotSetting("model_fallback_groups", str, "跨渠道 fallback 兼容组",
                "请求模型在主渠道全部不可用时，按兼容组依次回退到组内其他模型。"
                "格式 `组名=成员1,成员2;组名2=成员3`；成员可带 `@渠道` 固定回退渠道。"
@@ -295,6 +301,12 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "并发抓取全部状态源的一轮间隔；官方状态页本身是分钟级更新，抓得"
                "更密只是白打别人的接口。下限 1 分钟。", minimum=1,
                task="upstream_status", floor=1),
+    HotSetting("prefix_debug_enabled", bool, "前缀缓存诊断",
+               "每次请求往日志写一行载荷指纹：消息数、system/tools 摘要、与同凭证"
+               "同模型上一条请求的最长公共前缀消息序号、分叉处消息摘要（全部是"
+               "sha256 前 16 位，不含正文）。用来定位命中率异常时前缀在哪条消息"
+               "分叉、压缩是否每轮都在裁剪。默认关。",
+               group="observability"),
     HotSetting("metrics_enabled", bool, "Prometheus 指标出口",
                "是否暴露 `GET /metrics`（Prometheus text 格式：请求/token/凭证池/"
                "失败计数）。**不鉴权**，与 /healthz 同口径；指标已禁用高基数标签"
@@ -684,6 +696,10 @@ class RuntimeSettings:
         return bool(self.get("context_compress_enabled"))
 
     @property
+    def prefix_debug_enabled(self) -> bool:
+        return bool(self.get("prefix_debug_enabled"))
+
+    @property
     def context_compress_reserve_tokens(self) -> int:
         return int(self.get("context_compress_reserve_tokens"))
 
@@ -694,6 +710,10 @@ class RuntimeSettings:
     @property
     def context_compress_safety_ratio(self) -> float:
         return float(self.get("context_compress_safety_ratio"))
+
+    @property
+    def context_compress_sticky_enabled(self) -> bool:
+        return bool(self.get("context_compress_sticky_enabled"))
 
     @property
     def conversation_sticky_seconds(self) -> int:

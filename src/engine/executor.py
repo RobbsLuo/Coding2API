@@ -244,6 +244,10 @@ class ExecutorDeps:
     # 必须返回新对象或原样返回，不得原地改入参——同一请求可能在轮换/回退里
     # 对不同渠道各压一次，且 affinity 指纹读的是未压缩原文
     context_compress: Any | None = None
+    # 前缀缓存诊断（src/engine/prefix_debug.py）：(凭证, 渠道, 模型, payload) →
+    # None，写一行指纹日志。None 表示未装配（默认，零开销）；实现在闭包里现读
+    # 运行态开关，关时连摘要都不算。
+    prefix_debug: Any | None = None
     # 凭证级限额护栏（src/engine/limits.py 的 LimitGuard）：选号前过滤掉
     # 「当日用量/余额触顶」的候选；None 表示不启用（向后兼容）。
     limits: Any | None = None
@@ -662,6 +666,9 @@ class Executor:
             # 档位映射放在选号之后：目标档位依赖**实际服务渠道**（同名模型
             # 跨渠道接受的档位不同）。返回值可能是新 dict，不改 `request.raw`
             payload = self._map_effort(provider_id, payload)
+            # 前缀诊断报告压缩后的载荷（见 _debug_prefix）：压缩每轮裁一条
+            # 就会让上游只能命中 system 段，这里记录的就是上游实际看到的前缀
+            self._debug_prefix(credential_id, provider_id, target.model, payload)
             # 显式持有迭代器并在 finally 里关闭：下面两处 `break`（流内错误）
             # 只跳出 `async for`，不会关闭上游 async generator，provider 的
             # 节流名额归还（pacer.release 在其 finally 里）会推迟到 GC。
@@ -912,6 +919,17 @@ class Executor:
             return request.raw
         return self._deps.context_compress(provider_id or "-", model, request.raw)
 
+    def _debug_prefix(self, credential_id: str, provider_id: str | None,
+                      model: str, payload: dict[str, Any]) -> None:
+        """前缀缓存诊断（默认关）：未装配时零开销，装配后由闭包现读热更开关。
+
+        报告**压缩后**、即将发往上游的那份载荷——诊断要回答的是「上游看到了
+        什么前缀」，而不是客户端发了什么。
+        """
+        if self._deps.prefix_debug is None:
+            return
+        self._deps.prefix_debug(credential_id, provider_id or "-", model, payload)
+
     def _thinking_disabled(self) -> bool:
         """出站是否剥离思考内容（热更）。未装配 / 标量 False 时即关闭。"""
         return bool(live(self._deps.force_disable_thinking)())
@@ -1072,6 +1090,7 @@ class Executor:
             # 但实现必须无副作用——每轮都从原文出发），再按实际服务渠道映射档位
             payload = self._compress_payload(request, provider_id, target.model)
             payload = self._map_effort(provider_id, payload)
+            self._debug_prefix(credential_id, provider_id, target.model, payload)
             events: list[Event] = []
             # 与 _stream_loop 同理：显式关闭上游流，让节流名额在每次尝试
             # 结束时同步归还，不依赖 GC 的 asyncgen finalize
