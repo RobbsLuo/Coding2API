@@ -26,6 +26,7 @@ CONTROLLED_ERROR_TYPES = frozenset({
     # 实际会写入的取值（与 executor / api 层的 error_type 一一对应）：
     #   client_disconnect  — 客户端中途断开（executor.stream）
     #   credential_unavailable — session 失效（_error_type_for(DEAD)）
+    #   account_restricted — 账号被上游风控限制（_error_type_for(RESTRICTED)）
     #   invalid_request    — 请求无效（_record_invalid）
     #   model_not_found   — 上游明确说「没有这个模型」（_error_type_for(BLOCKED)）
     #   no_healthy_credential — 无可用凭证（executor 耗尽轮换）
@@ -36,6 +37,7 @@ CONTROLLED_ERROR_TYPES = frozenset({
     #   upstream_first_event_timeout — 出帧前上游不吐首个数据事件（A1）
     #   upstream_idle_timeout        — 已出帧后上游停止吐数据（A1）
     "client_disconnect", "credential_unavailable",
+    "account_restricted",
     "invalid_request", "model_not_found", "no_healthy_credential",
     "model_unavailable",
     "rate_limit", "upstream_error", "upstream_protocol",

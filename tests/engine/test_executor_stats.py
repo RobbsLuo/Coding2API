@@ -330,6 +330,7 @@ def test_error_type_mapping_covers_all_kinds():
     assert _error_type_for(ErrKind.MODEL) == "rate_limit"
     assert _error_type_for(ErrKind.CONCURRENCY) == "rate_limit"
     assert _error_type_for(ErrKind.DEAD) == "credential_unavailable"
+    assert _error_type_for(ErrKind.RESTRICTED) == "account_restricted"
     assert _error_type_for(ErrKind.SOFT) == "upstream_error"
     assert _error_type_for(ErrKind.OTHER) == "upstream_error"
     # 「上游没这个模型」独立成类：与「请求无效」分开（2026-10-26）
@@ -343,6 +344,7 @@ def test_blocked_error_type_is_controlled():
     from src.stats.collector import CONTROLLED_ERROR_TYPES
 
     assert "model_not_found" in CONTROLLED_ERROR_TYPES
+    assert "account_restricted" in CONTROLLED_ERROR_TYPES
 
 
 async def test_dead_credential_also_records_attribution_row(repo):
@@ -592,28 +594,33 @@ async def test_complete_inline_request_error_records_real_type(repo):
     assert collector.events[-1]["error_type"] == "invalid_request"
     assert credentials.candidates()[0].cooling_until is None
 
-async def test_dead_account_restriction_writes_actionable_reason(repo):
-    """403/11140 落库写「账号被上游限制，需申诉」，而不是 session dead。
+async def test_restricted_11140_cools_account_and_skips_channel(repo):
+    """403/11140（账号被上游限制）：2h 账号级冷却 + 跳过该渠道，不换号去撞。
 
-    上游 11140 的 displayMsg 是「Your account has been restricted due to
-    unusual activity」，重登无效；原因由 provider 识别后经 ErrorOutcome 落库，
-    管理台直接显示这个字段。
+    与 DEAD 的关键差别：**不写 disabled**——禁用是不可逆的人工状态，而这类限制
+    由上游自行解除（maiphucgiang/codebuddy2api、magpie、10router 的处理一致：
+    本地无解，等恢复或换号）；且同渠道其余凭证一次都不打，逐个号换着撞只会
+    在上游多留风控记录（实测一次请求连打 3 个号全 403，新号 3 分钟就被封）。
     """
     from src.compat.openai.request import parse_chat_request
     from src.engine.executor import Executor, ExecutorDeps
-    from src.engine.scheduler import Scheduler
+    from src.engine.scheduler import RESTRICTED_COOLDOWN_SECONDS, Scheduler
     from src.provider.codebuddy import events as cb_events
     from src.provider.codebuddy.client import UpstreamHTTPError
 
     credentials, db = repo
-    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "u"})
+    collector = RecordingCollector()
     body = (b'{"code":11140,"msg":"request illegal",'
             b'"displayMsg":{"en":"Your account has been restricted due to unusual activity"}}')
 
     class Restricted:
         id = "codebuddy"
+        calls = 0
 
         async def stream_chat(self, _data, _payload, _model):
+            Restricted.calls += 1
             raise UpstreamHTTPError(403, body)
             yield  # pragma: no cover - 抛错后的不可达分支，只为保持异步生成器形态
 
@@ -622,16 +629,68 @@ async def test_dead_account_restriction_writes_actionable_reason(repo):
 
     executor = Executor(ExecutorDeps(
         providers={"codebuddy": Restricted()}, credentials=credentials,
-        scheduler=Scheduler(), default_model="glm-5.2", stats=RecordingCollector()))
+        scheduler=Scheduler(), default_model="glm-5.2", stats=collector))
 
+    started = int(time.time())
     with pytest.raises(NoHealthyCredential):
         await executor.complete(parse_chat_request(
             {"messages": [{"role": "user", "content": "hi"}]}))
 
-    row = db.connect().execute(
-        "SELECT disabled_reason FROM credentials WHERE id = ?", (cid,)).fetchone()
-    assert "账号被上游限制" in row["disabled_reason"]
-    assert "申诉" in row["disabled_reason"]
+    assert Restricted.calls == 1            # 同渠道其余号没有被拿去撞
+    assert [event["error_type"] for event in collector.events] == ["account_restricted"]
+    rows = db.connect().execute(
+        "SELECT disabled, cooling_until FROM credentials").fetchall()
+    assert all(row["disabled"] == 0 for row in rows)     # 不禁用，等上游解除
+    cooled = [row["cooling_until"] for row in rows if row["cooling_until"] is not None]
+    # 第一次命中只冷却触发的那个号（渠道级暂停要窗口内第二次命中才升级）
+    assert len(cooled) == 1
+    assert started + RESTRICTED_COOLDOWN_SECONDS - 60 <= cooled[0] \
+        <= started + RESTRICTED_COOLDOWN_SECONDS + 60
+
+
+async def test_restricted_burst_pauses_whole_provider(repo):
+    """窗口内第二次命中受限 → 整渠道暂停 24h，剩余号不再被逐个拿去撞。"""
+    from src.compat.openai.request import parse_chat_request
+    from src.engine.executor import (
+        RESTRICTED_PROVIDER_PAUSE_SECONDS,
+        Executor,
+        ExecutorDeps,
+    )
+    from src.engine.scheduler import Scheduler
+    from src.provider.codebuddy.client import UpstreamHTTPError
+
+    credentials, db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "u"})
+
+    class Restricted:
+        id = "codebuddy"
+        calls = 0
+
+        async def stream_chat(self, _data, _payload, _model):
+            Restricted.calls += 1
+            raise UpstreamHTTPError(403, b'{"code":11140}')
+            yield  # pragma: no cover - 抛错后的不可达分支，只为保持异步生成器形态
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": Restricted()}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2", stats=RecordingCollector()))
+    request = {"messages": [{"role": "user", "content": "hi"}]}
+
+    started = int(time.time())
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(request))
+    assert Restricted.calls == 1            # 第一次：只冷却触发的号
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(request))
+    assert Restricted.calls == 2            # 第二次命中另一个号 → 触发升级
+
+    rows = db.connect().execute(
+        "SELECT cooling_until FROM credentials").fetchall()
+    assert all(row["cooling_until"] is not None for row in rows)
+    for row in rows:
+        assert started + RESTRICTED_PROVIDER_PAUSE_SECONDS - 60 \
+            <= row["cooling_until"] <= started + RESTRICTED_PROVIDER_PAUSE_SECONDS + 60
 
 
 async def test_dead_unrecognised_403_keeps_session_dead(repo):
@@ -675,7 +734,8 @@ async def test_dead_http_error_without_provider_hint_keeps_session_dead(repo):
     credentials, db = repo
     cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
     executor = _exec_with_stats(
-        repo, [[UpstreamHTTPError(403, b'{"code":11140}')]], RecordingCollector())
+        repo, [[UpstreamHTTPError(403, b'{"code":403,"msg":"forbidden"}')]],
+        RecordingCollector())
 
     with pytest.raises(NoHealthyCredential):
         await executor.complete(parse_chat_request(
@@ -684,3 +744,100 @@ async def test_dead_http_error_without_provider_hint_keeps_session_dead(repo):
     row = db.connect().execute(
         "SELECT disabled_reason FROM credentials WHERE id = ?", (cid,)).fetchone()
     assert row["disabled_reason"] == "session dead"
+
+async def test_stream_inband_restricted_skips_channel(repo):
+    """流内 error 事件标了 RESTRICTED：同样跳过该渠道，不逐个号撞。"""
+    from src.compat.openai.request import parse_chat_request
+    from src.engine.executor import Executor, ExecutorDeps
+    from src.engine.scheduler import Scheduler
+
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "u"})
+    collector = RecordingCollector()
+    restricted = Event(kind=EventKind.ERROR, error_kind=ErrKind.RESTRICTED,
+                       error_code=11140, error_message="request illegal")
+
+    class Inband:
+        id = "codebuddy"
+        calls = 0
+
+        async def stream_chat(self, _data, _payload, _model):
+            Inband.calls += 1
+            yield restricted
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": Inband()}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2", stats=collector))
+    chunks = [chunk async for chunk in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
+
+    assert chunks                     # 以错误帧收尾，不是静默断开
+    assert Inband.calls == 1          # 同渠道第二个号没有被拿去撞
+    assert [event["error_type"] for event in collector.events] == ["account_restricted"]
+
+
+async def test_stream_http_restricted_skips_channel(repo):
+    """流式 HTTP 403/11140：与流内事件同一处置（跳过渠道 + account_restricted）。"""
+    from src.compat.openai.request import parse_chat_request
+    from src.engine.executor import Executor, ExecutorDeps
+    from src.engine.scheduler import Scheduler
+    from src.provider.codebuddy.client import UpstreamHTTPError
+
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "u"})
+    collector = RecordingCollector()
+
+    class HttpRestricted:
+        id = "codebuddy"
+        calls = 0
+
+        async def stream_chat(self, _data, _payload, _model):
+            HttpRestricted.calls += 1
+            raise UpstreamHTTPError(403, b'{"code":11140}')
+            yield  # pragma: no cover - 抛错后的不可达分支，只为保持异步生成器形态
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": HttpRestricted()}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2", stats=collector))
+    chunks = [chunk async for chunk in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
+
+    assert chunks
+    assert HttpRestricted.calls == 1
+    assert [event["error_type"] for event in collector.events] == ["account_restricted"]
+
+
+async def test_complete_inband_restricted_skips_channel(repo):
+    """非流式聚合遇到流内 RESTRICTED：同样跳过渠道，不重复落收尾行。"""
+    from src.compat.openai.request import parse_chat_request
+    from src.engine.executor import Executor, ExecutorDeps
+    from src.engine.scheduler import Scheduler
+
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "u"})
+    collector = RecordingCollector()
+    restricted = Event(kind=EventKind.ERROR, error_kind=ErrKind.RESTRICTED,
+                       error_code=11140, error_message="request illegal")
+
+    class Inband:
+        id = "codebuddy"
+        calls = 0
+
+        async def stream_chat(self, _data, _payload, _model):
+            Inband.calls += 1
+            yield restricted
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": Inband()}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2", stats=collector))
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+
+    assert Inband.calls == 1
+    # 尝试行已归因，收尾行不再重复落（否则 requests 与 Key 日额度双计）
+    assert [event["error_type"] for event in collector.events] == ["account_restricted"]

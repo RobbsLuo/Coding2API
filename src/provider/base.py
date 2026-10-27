@@ -30,7 +30,7 @@ class EventKind(StrEnum):
 class ErrKind(StrEnum):
     """错误分类 → 冷却时长。
 
-    分类的粒度决定冷却的作用域：账号级（PLAN/SOFT/DEAD/OTHER）与
+    分类的粒度决定冷却的作用域：账号级（PLAN/SOFT/DEAD/OTHER/RESTRICTED）与
     模型级（MODEL/BLOCKED）必须分开，否则单个模型打满会连累同账号的
     其他模型（实测 6004 只冷却触发的那个模型）。
     """
@@ -40,6 +40,11 @@ class ErrKind(StrEnum):
     CREDIT = "credit"
     SOFT = "soft"      # 限流/404 → 60s，不累计错误数
     DEAD = "dead"      # session 失效 → 硬禁用
+    # 账号被上游风控限制（CodeBuddy 11140「request illegal」）：账号级长冷却、
+    # **当前请求不再换号**。与 DEAD 的区别：DEAD 是凭据本身失效（重登可恢复，
+    # 因此永久禁用 + 人工 revive），RESTRICTED 是上游按账号/IP 拉黑（本地无解，
+    # 到期自动半开，逐个号去撞只会扩大标记面）。
+    RESTRICTED = "restricted"
     OTHER = "other"    # 其他 4xx/5xx → 累计，连续 3 次 → 10m
     INVALID = "invalid"  # 请求无效（如模型不存在）→ 不冷却凭证，直接 400 回客户端
     # 模型级限流（6004）：只冷却触发的那个模型，切其他模型立即可用

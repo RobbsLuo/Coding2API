@@ -91,7 +91,8 @@ class ErrKind(StrEnum):
     PLAN = "plan"        # 权益耗尽（1005）→ 冷却 12h
     CREDIT = "credit"    # 余额不足（402/14018）→ 冷却到次日 04:00（等签到恢复）
     SOFT = "soft"        # 限流/404 → 冷却 60s，不累计错误数
-    DEAD = "dead"        # session 失效 / 账号被上游限制 → 硬禁用 disabled=1
+    DEAD = "dead"        # session 失效（重登可恢复）→ 硬禁用 disabled=1
+    RESTRICTED = "restricted"  # 账号被上游风控限制（11140）→ 账号级 2h 冷却，当前请求不再换号
     OTHER = "other"      # 其他 4xx/5xx → 累计，连续 3 次 → 冷却 10m
     INVALID = "invalid"  # 请求无效（模型不存在等）→ 不冷却凭证，跳过该上游；全拒 → 400
     MODEL = "model"      # 该模型用量超限（429+6004）→ 只冷却 (凭证, 模型)，10m 起翻倍封顶 2h
@@ -105,7 +106,14 @@ MODEL_SCOPED_KINDS = frozenset({MODEL, BLOCKED, CONCURRENCY})
 
 `MODEL_SCOPED_KINDS` 只写 `credential_model_cooldowns`（§6.3），不碰账号级 `cooling_until`。账号级冷却出现 → 清该凭证模型级条目；不清 → 切模型绕过账号级限流。
 
-**硬禁用的可操作原因（`disabled_reason`）**：401/403 不都是 session 过期——CodeBuddy 11140「request illegal」的 displayMsg 是「账号存在异常行为，已被限制使用」，重登无效，只能申诉或换号。DEAD 时 executor 把 `UpstreamHTTPError.body` 交给 provider 的 `disabled_reason()` 识别（CodeBuddy 已实现），命中就写「账号被上游限制（账号异常行为），需提交申诉；重新登录无效」；识别不到（其他渠道、流内错误、无 body）回落历史文案 `session dead`。管理台 `CredentialsPage` 原样展示该字段，写错会把人引向错误的修复动作。只回受控文案，不拼接上游正文。
+**账号被上游风控限制（RESTRICTED，CodeBuddy 11140）**：`403 request illegal` 的字面像「这条请求非法」，实际是上游按账号（多号同源时按出口 IP/设备）拉黑——换模型、换请求形态、换代理都无效（techysy/10router、yetone/magpie、maiphucgiang/codebuddy2api 三个项目的实测结论一致）。
+
+- **必须拦在 `401/403 → DEAD` 之前**：判 DEAD 会写不可逆的 `disabled=1`，而这类限制由上游自行解除，写成禁用就变成「必须有人点恢复」，还会诱使运维反复 revive 去撞。
+- **账号级 2h 冷却**（`RESTRICTED_COOLDOWN_SECONDS`），上游给 `Retry-After` 时采用并夹在 24h 内；到期自动回到候选，不做任何人工动作。
+- **当前请求不再换号**：`executor` 命中后 `_skip_provider` 跳过该渠道剩余凭证，继续试其它渠道。逐个号换着撞会扩大标记面（实测一次请求连打 3 个号全 403，新号加入 3 分钟即被封）。
+- **窗口内第二次命中升级为渠道级暂停 24h**（`_pause_provider_on_burst` + `cool_provider`）：只冷却、不写 `disabled`，所有号一起退避。
+
+**硬禁用的可操作原因（`disabled_reason`）**：真 session 失效（401 / token 过期）仍是 DEAD，`disabled_reason` 写「session dead」或 provider 识别出的具体原因（CodeBuddy 的 `disabled_reason()` 识别 11140 文案，作为非 RESTRICTED 入口的兜底）。管理台 `CredentialsPage` 原样展示该字段，写错会把人引向错误的修复动作。只回受控文案，不拼接上游正文。
 
 **排队语义（QUEUE）**：上游回排队中 + 建议等待秒数 = 号满，等 N 秒重打。非账号故障、非请求错误。
 
@@ -655,7 +663,7 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 - **分组表合并列**：`请求`（数 · 成功率）、`Token`（输入/输出 · 命中率）、`速度`（正文/总产出）、`平均延迟`（耗时/首字）、`P95 延迟`，14 → 8 列。排序走 `SortMenuHead`，子列键即 `GROUP_SORT_COLUMNS` 白名单键。延迟拆两列：均值读小时汇总、P95 读明细，口径与覆盖期不同。
 - **明细合并列**：`Token` / `延迟` / `速度` / `渠道 / 凭证`，15 → 约 10 列。`时间` 拆两行（`HH:mm:ss` 在上、日期在下），请求 ID 提示挂该格。`SortMenuHead` 让一个列头承载多个排序键。命中率走 `EVENT_SORT_COLUMNS["cache_rate"]`：`CASE WHEN e.input_tokens > 0 THEN CAST(e.cached_tokens AS REAL) / e.input_tokens ELSE NULL END`；速度两列由 `_row_speed_sql("e.")` 生成，与 `events()` 的 SELECT **同一片段**。
 - **请求 ID**：`X-Request-ID`（`webapp/request_id.py` 最外层）。入站合法（`[A-Za-z0-9._:-]{1,128}`）沿用，否则 `uuid4().hex`；同一中间件把会话标识头写进 contextvar 供粘性读取；ID 经 `request_context` 传进 `usage_events.request_id`。**不透传上游**。
-- **失败归因**（`GET /api/stats/errors`，operator+）：按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` 明细。`failures` 是**尝试**口径（每次上游拒绝一行）；`rescued` = 同用户同 `request_id` 另有成功行的行数（不叠加时间窗，走 `idx_usage_request`）；`failures − rescued` = 未被救回的失败尝试数（同一请求多次失败算多次）。DEAD（硬禁用）额外落一行 `credential_unavailable`；轮换耗尽时不再重复落收尾行，避免 `requests` 与 Key 日额度双计。
+- **失败归因**（`GET /api/stats/errors`，operator+）：按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` 明细。`failures` 是**尝试**口径（每次上游拒绝一行）；`rescued` = 同用户同 `request_id` 另有成功行的行数（不叠加时间窗，走 `idx_usage_request`）；`failures − rescued` = 未被救回的失败尝试数（同一请求多次失败算多次）。DEAD（硬禁用）额外落一行 `credential_unavailable`；账号被上游风控限制（11140）落 `account_restricted` 并整渠道退避，不写 `disabled`；轮换耗尽时不再重复落收尾行，避免 `requests` 与 Key 日额度双计。
 - **延迟均值只算成功请求**（`SUM(latency_ms WHERE ok=1)` / `ok_count`）。
 - **图表时序指标**（`timeline` / `model-timeline`）：`METRIC_KINDS` 一张表定语义，查询侧固定取齐 10 列聚合（`_METRIC_AGGREGATES`），由 `_metric_value(metric, row)` 归一。派生指标**在聚合后相除**（成功率 `ok_count/requests`、缓存命中率 `cached/input`、单请求成本 `cost/requests`），不是逐小时比率的平均——后者会被低量小时等权带偏。无样本一律给 `null` 而非 0（均值给 0 会画成「0 ms」的假低谷，比率给 0 会显示成「0%」）。
 - **图表时间轴稠密**：`usage_hourly` 只在有请求时才有行，稀疏下发会让前端把「空档 5 小时」和「相邻 1 小时」画成一样宽（分类轴压缩时间）。`_dense_hours()` 按 `since`/`until` 补齐小时桶（都不给则补首末观测之间），跨度超 `MAX_DENSE_HOURS`（92 天）时退回观测小时。缺失桶取值由 `_empty_value()` 按语义给：可加量补 0，均值/比率/成本补 `null`（前端 `connectNulls={false}` 断线）。前端 X 轴用 `type="number"` + `scale="time"` + 毫秒时间戳，按真实时间定位。

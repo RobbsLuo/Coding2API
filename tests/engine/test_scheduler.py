@@ -278,6 +278,29 @@ def test_note_error_dead_disables():
     out = Scheduler().note_error(cand(), ErrKind.DEAD, NOW)
     assert out.disabled and out.cooling_until is None and out.err_count == 0
 
+def test_note_error_restricted_cools_without_disabling():
+    """账号被上游风控限制（11140）：冷却 2h、绝不 disabled。
+
+    禁用是不可逆的人工状态，而这类限制由上游自行解除；写成 disabled 就变成
+    「必须有人去点恢复」，还会诱使运维反复 revive 去撞（每次都可能再留记录）。
+    """
+    from src.engine.scheduler import RESTRICTED_COOLDOWN_SECONDS
+
+    out = Scheduler().note_error(cand(), ErrKind.RESTRICTED, NOW)
+    assert not out.disabled
+    assert out.cooling_until == NOW + RESTRICTED_COOLDOWN_SECONDS
+    assert out.err_count == 0
+    assert out.model_cooldowns is None      # 账号级作用域，不写模型级条目
+
+def test_note_error_restricted_honours_upstream_retry_at_within_cap():
+    """上游给了更晚的恢复时刻就用它，但仍夹在 24h 上界内。"""
+    out = Scheduler().note_error(
+        cand(), ErrKind.RESTRICTED, NOW, retry_at=NOW + 3 * 3600)
+    assert out.cooling_until == NOW + 3 * 3600
+    capped = Scheduler().note_error(
+        cand(), ErrKind.RESTRICTED, NOW, retry_at=NOW + 7 * 24 * 3600)
+    assert capped.cooling_until == NOW + 24 * 3600
+
 def test_note_error_plan_long_cooldown():
     out = Scheduler().note_error(cand(), ErrKind.PLAN, NOW)
     assert out.cooling_until == NOW + PLAN_COOLDOWN_SECONDS and not out.disabled

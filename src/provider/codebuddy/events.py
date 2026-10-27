@@ -74,6 +74,7 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
     * 402 / 14018 → 余额不足（冷却到次日 04:00，等签到恢复）
     * 1005 → 权益耗尽（12h 长冷却）
     * 11102「该后端无此模型」→ (账号, 模型) 负缓存（400/404 形态）
+    * 11140「账号被风控限制」→ 账号级长冷却，**当前请求不再换号**
     * 401/403 → session 失效（硬禁用）
     * 404 → 软冷却，不累计错误数
     * 429 + 6004/14003 → 模型级限流（用量超限 / 模型饱和）；429 其他 → 账号级软限流
@@ -87,6 +88,11 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
         return ErrKind.PLAN
     if status in (400, 404) and _MODEL_BLOCKED_CODE in codes:
         return ErrKind.BLOCKED
+    if status >= 400 and _is_account_restricted(body):
+        # 必须拦在 401/403 → DEAD 之前：11140 是上游按账号/IP 拉黑，不是凭据
+        # 失效——判 DEAD 会永久硬禁用并让 executor 逐个号换着撞（实测一次
+        # 请求连打 3 个号全 403，新号 3 分钟后也被封）。
+        return ErrKind.RESTRICTED
     if status in (401, 403):
         return ErrKind.DEAD
     if status == 404:
@@ -105,6 +111,12 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
     return ErrKind.OTHER
 
 
+def _is_account_restricted(body: bytes) -> bool:
+    """响应体是不是 CodeBuddy 的「账号被风控限制」（11140 / 三语文案）。"""
+    text = body.decode("utf-8", errors="replace").lower()
+    return any(marker in text for marker in _ACCOUNT_RESTRICTED_MARKERS)
+
+
 def disabled_reason(body: bytes = b"") -> str:
     """401/403 响应体 → 硬禁用时展示的可操作原因；识别不到返回空串。
 
@@ -113,7 +125,6 @@ def disabled_reason(body: bytes = b"") -> str:
     只会白折腾，实际动作是提交申诉或换号。这里只回**受控文案**，不拼接上游
     正文（与 `relogin_required` 同口径）。
     """
-    text = body.decode("utf-8", errors="replace").lower()
-    if any(marker in text for marker in _ACCOUNT_RESTRICTED_MARKERS):
+    if _is_account_restricted(body):
         return "账号被上游限制（账号异常行为），需提交申诉；重新登录无效"
     return ""

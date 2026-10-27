@@ -230,3 +230,29 @@ def test_save_error_disabled_uses_actionable_reason(repo):
     row = db.connect().execute(
         "SELECT disabled_reason FROM credentials WHERE id = ?", (other,)).fetchone()
     assert row["disabled_reason"] == "session dead"
+
+def test_cool_provider_cools_whole_channel_without_disabling(repo):
+    """渠道级冷却：同渠道所有号一起推后，但不写 disabled（到期自动回来）。
+
+    11140 这类账号/IP 级风控不是单号问题，逐个号冷却挡不住下一个请求换号继续
+    撞；同时绝不能落 disabled——那是人工状态，会把「等上游解除」变成「必须有人
+    去点恢复」。
+    """
+    credentials, db = repo
+    first = credentials.add(provider="codebuddy_intl", credential_data={"bearer_token": "t"})
+    second = credentials.add(provider="codebuddy_intl", credential_data={"bearer_token": "u"})
+    other = credentials.add(provider="codebuddy", credential_data={"bearer_token": "v"})
+    # 已有更晚冷却的号不能被渠道级暂停缩短
+    far = int(time.time()) + 30 * 86400
+    db.connect().execute("UPDATE credentials SET cooling_until = ? WHERE id = ?", (far, second))
+    db.connect().commit()
+
+    until = int(time.time()) + 24 * 3600
+    assert credentials.cool_provider("codebuddy_intl", until=until) == 1
+
+    rows = {row["id"]: row for row in db.connect().execute(
+        "SELECT id, disabled, cooling_until FROM credentials").fetchall()}
+    assert rows[first]["cooling_until"] == until
+    assert rows[second]["cooling_until"] == far          # 更晚的冷却不被缩短
+    assert rows[other]["cooling_until"] is None          # 其它渠道不受影响
+    assert all(row["disabled"] == 0 for row in rows.values())

@@ -522,6 +522,7 @@ export const SPARSE_METRICS = new Set([
 /** 统计明细的失败类型（线值，来自后端 CONTROLLED_ERROR_TYPES）。
  *  注意与 ProbeFailureReason 不是同一套：那是探测失败，这是请求失败。 */
 export type UsageErrorType =
+  | "account_restricted"
   | "client_disconnect"
   | "credential_unavailable"
   | "invalid_request"
@@ -536,6 +537,7 @@ export type UsageErrorType =
 
 /** 明细失败类型的中文说明（TECHNICAL §11.2：界面只展示稳定枚举的翻译）。 */
 export const USAGE_ERROR_LABEL: Record<UsageErrorType, string> = {
+  account_restricted: "账号被上游限制",
   client_disconnect: "客户端中断",
   credential_unavailable: "凭证失效",
   invalid_request: "请求无效",

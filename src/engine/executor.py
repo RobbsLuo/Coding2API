@@ -45,6 +45,14 @@ from .scheduler import Scheduler
 
 logger = logging.getLogger(__name__)
 
+# 同一渠道两次「账号被上游风控限制」的间隔窗口：窗口内再次命中说明不是单号
+# 偶发，而是整批同源账号（同出口 IP / 同设备）被上游拉黑，此时继续放剩余号
+# 去撞只会扩大标记面。实测一次请求连打 3 个号全 403，新号加入 3 分钟即封。
+RESTRICTED_BURST_WINDOW_SECONDS = 10 * 60
+# 渠道级暂停时长：只冷却、不禁用，到期自动恢复。比单号 2h 长一个量级，
+# 给运维留出换出口 / 申诉的时间。
+RESTRICTED_PROVIDER_PAUSE_SECONDS = 24 * 3600
+
 
 class StreamSink(Protocol):
     """出口形状的注入缝：把中立 `Event` 翻成某个协议的 SSE 帧。
@@ -271,6 +279,10 @@ class Executor:
         # 流式超时的时钟：默认真实单调钟，测试可换成假时钟以精确断言
         # 「只有数据事件重置计时」而不必真的等满窗口（见 test_executor_stream_timeout）
         self._clock = time.monotonic
+        # provider → 最近一次「账号被上游风控限制」的时刻：同渠道在窗口内第二次
+        # 命中升级为渠道级长暂停（见 `_note_upstream_error`）。只在进程内，
+        # 重启丢失无所谓——它只是「别让剩余号继续撞」的加速器。
+        self._restricted_hits: dict[str, int] = {}
 
     def _record_invalid(self, username: str, provider_id: str, credential_id: str,
                         model: str, started: float, error: object) -> None:
@@ -705,6 +717,21 @@ class Executor:
                             self._skip_provider(provider_id, tried)
                             broken = True
                             break
+                        if kind is ErrKind.RESTRICTED:
+                            # 账号被上游风控限制：同渠道其余号大概率同样被限，
+                            # 逐个换号只会在上游多留几条记录（见 _note_upstream_error）
+                            logger.warning(
+                                "上游 %s 流内限制账号（凭证 %s 跳过该渠道）: code=%s %s",
+                                provider_id, credential_id,
+                                event.error_code, event.error_message)
+                            attributed = self._note_upstream_error(
+                                credential_id, kind, provider_id, target.model, event,
+                                username=state.username, started=state.started) or attributed
+                            last_error = UpstreamStreamError(event)
+                            last_kind = kind
+                            self._skip_provider(provider_id, tried)
+                            broken = True
+                            break
                         logger.warning(
                             "上游 %s 流内错误（凭证 %s，kind=%s）: code=%s %s",
                             provider_id, credential_id, kind,
@@ -764,6 +791,16 @@ class Executor:
                     self._record_invalid(state.username, provider_id, credential_id,
                                          target.model, state.started, error)
                     last_error, last_kind = error, ErrKind.INVALID
+                    self._skip_provider(provider_id, tried)
+                elif kind is ErrKind.RESTRICTED:
+                    # 账号被上游风控限制：跳过该渠道，别让同渠道其它号继续撞
+                    logger.warning("上游 %s 限制账号（凭证 %s 跳过该渠道）: %s",
+                                   provider_id, credential_id, _error_detail(error))
+                    attributed = self._note_upstream_error(
+                        credential_id, kind, provider_id, target.model,
+                        error, username=state.username,
+                        started=state.started) or attributed
+                    last_error, last_kind = error, kind
                     self._skip_provider(provider_id, tried)
                 else:
                     logger.warning("上游 %s 错误（凭证 %s，kind=%s）: %s",
@@ -1134,6 +1171,15 @@ class Executor:
                                          target.model, started, error)
                     last_error, last_kind = error, ErrKind.INVALID
                     self._skip_provider(provider_id, tried)
+                elif kind is ErrKind.RESTRICTED:
+                    # 账号被上游风控限制：跳过该渠道，别让同渠道其它号继续撞
+                    logger.warning("上游 %s 限制账号（凭证 %s 跳过该渠道）: %s",
+                                   provider_id, credential_id, _error_detail(error))
+                    attributed = self._note_upstream_error(
+                        credential_id, kind, provider_id, target.model,
+                        error, username=username, started=started) or attributed
+                    last_error, last_kind = error, kind
+                    self._skip_provider(provider_id, tried)
                 else:
                     logger.warning("上游 %s 错误（凭证 %s，kind=%s）: %s",
                                    provider_id, credential_id, kind,
@@ -1156,6 +1202,17 @@ class Executor:
                         self._record_invalid(username, provider_id, credential_id,
                                              target.model, started, error)
                         last_error, last_kind = error, ErrKind.INVALID
+                        self._skip_provider(provider_id, tried)
+                    elif kind is ErrKind.RESTRICTED:
+                        # 流内账号限制：跳过该渠道，别让其它号继续撞
+                        logger.warning(
+                            "上游 %s 流内限制账号（凭证 %s 跳过该渠道）: code=%s %s",
+                            provider_id, credential_id,
+                            error.event.error_code, error.event.error_message)
+                        attributed = self._note_upstream_error(
+                            credential_id, kind, provider_id, target.model, error,
+                            username=username, started=started) or attributed
+                        last_error, last_kind = error, kind
                         self._skip_provider(provider_id, tried)
                     else:
                         attributed = self._note_upstream_error(
@@ -1533,13 +1590,36 @@ class Executor:
             # 看到 "session dead" 会误以为是重登能解决的事。原因由 provider 识别。
             outcome = replace(outcome, disabled_reason=self._disabled_reason(provider_id, error))
         self._deps.credentials.save_error(credential_id, outcome)
-        if kind is not ErrKind.DEAD:
+        if kind is ErrKind.RESTRICTED:
+            # 同渠道短时间第二次受限 → 整渠道暂停（见 `_pause_provider_on_burst`）。
+            # 必须在这里做而不是调用方：流式/非流式两条路径都汇到这里。
+            self._pause_provider_on_burst(provider_id)
+        if kind not in (ErrKind.DEAD, ErrKind.RESTRICTED):
             return False
         self._deps.record(
             username=username, provider=provider_id, credential_id=credential_id,
             model=model, ok=False, error_type=_error_type_for(kind),
             latency_ms=_elapsed_ms(started))
         return True
+
+    def _pause_provider_on_burst(self, provider_id: str) -> None:
+        """同渠道短时间内重复「账号被上游限制」→ 整渠道冷却，别让剩余号去撞。
+
+        单号 2h 冷却只挡住这一个号：下一个请求会挑同渠道另一个号继续撞，
+        每次都在上游留一条风控记录（实测 08:21 一次请求连打 3 个号、08:38
+        再来一轮，08:41 新号 3 分钟就被封）。窗口内第二次命中就说明是整批
+        同源账号，此时该渠道整体退避 24h 才是止损。
+        """
+        now = int(time.time())
+        previous = self._restricted_hits.get(provider_id)
+        self._restricted_hits[provider_id] = now
+        if previous is None or now - previous > RESTRICTED_BURST_WINDOW_SECONDS:
+            return
+        until = now + RESTRICTED_PROVIDER_PAUSE_SECONDS
+        paused = self._deps.credentials.cool_provider(provider_id, until=until)
+        logger.warning(
+            "渠道 %s 在 %d 秒内重复被上游风控限制：整渠道暂停 %d 秒（%d 条凭证）",
+            provider_id, now - previous, RESTRICTED_PROVIDER_PAUSE_SECONDS, paused)
 
     def _disabled_reason(self, provider_id: str, error: Exception | None) -> str:
         """DEAD 的可操作原因：交由 provider 识别上游点名的账号级限制。
@@ -1805,6 +1885,10 @@ def _error_type_for(kind: ErrKind) -> str:
         return "rate_limit"
     if kind is ErrKind.DEAD:
         return "credential_unavailable"
+    if kind is ErrKind.RESTRICTED:
+        # 账号被上游风控限制：与「凭证失效」分开——前者换号/重登都无效，
+        # 归到 credential_unavailable 会让运维去重新登录一个被拉黑的账号。
+        return "account_restricted"
     if kind is ErrKind.BLOCKED:
         # 「该后端无此模型」（11102 / 81004 / 81009 / InferHub 002002009）：
         # **不是**请求无效。归到 `invalid_request` 会让归因面板把「上游没这个

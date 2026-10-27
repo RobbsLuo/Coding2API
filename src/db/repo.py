@@ -357,6 +357,28 @@ class CredentialRepository:
             if outcome.cooling_until is not None:
                 _clear_model_cooldowns(conn, credential_id)
 
+    def cool_provider(self, provider: str, *, until: int) -> int:
+        """渠道级冷却：把该渠道所有凭证的账号级冷却一起推后，返回受影响行数。
+
+        用于「整批同源账号被上游风控限制」（CodeBuddy 11140）：逐个号冷却挡不住
+        下一个请求换同渠道另一个号继续撞，每次都在上游多留一条风控记录。只写
+        `cooling_until`，不动 `disabled`——禁用是不可逆的人工状态，而这类限制
+        会由上游自行解除，到期必须能自动回到候选。
+
+        只在比现有冷却更晚时覆盖（`cooling_until < until`）：渠道级暂停不该
+        缩短某个号已经更晚的冷却。账号级冷却出现要清掉模型级条目，否则模型级
+        豁免会泄漏成「换模型绕过账号级限制」。
+        """
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE credentials SET cooling_until = ?, err_count = 0 "
+                "WHERE provider = ? AND (cooling_until IS NULL OR cooling_until < ?)",
+                (until, provider, until))
+            conn.execute(
+                "DELETE FROM credential_model_cooldowns WHERE credential_id IN "
+                "(SELECT id FROM credentials WHERE provider = ?)", (provider,))
+        return cursor.rowcount
+
     def save_success(self, credential_id: str, *, model: str | None = None) -> None:
         """成功：清账号级错误累计；`model` 命中负缓存条目时一并清除。
 

@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 PLAN_COOLDOWN_SECONDS = 12 * 3600
 SOFT_COOLDOWN_SECONDS = 60
 OTHER_COOLDOWN_SECONDS = 10 * 60
+# 账号被上游风控限制（CodeBuddy 11140）：2 小时起步。取 2h 而不是永久禁用——
+# 上游解除时间不可控、也不会通知，永久 disabled 只能人工 revive，反而逼着人
+# 去反复撞（每次 revive 都可能再留一条风控记录）。到期自然回到候选，试探一次
+# 的成本远低于长期静默。
+RESTRICTED_COOLDOWN_SECONDS = 2 * 3600
 ERR_THRESHOLD = 3
 MAX_ROTATE = 3
 # 模型级限流（6004）软冷却基数与封顶（有界指数退避）
@@ -321,6 +326,8 @@ class Scheduler:
         """按错误分类更新冷却/禁用状态。
 
         DEAD    → 硬禁用
+        RESTRICTED → 账号级 2h 冷却（上游按账号/IP 风控限制，到期自动半开；
+                    executor 另外跳过该渠道其余凭证，不逐个号去撞）
         PLAN    → 12h 长冷却，清空 err_count（权益耗尽）
         CREDIT  → 冷却到次日 04:00（余额不足，等签到恢复）
         SOFT    → 短冷却，不累计 err_count（防雪崩）
@@ -347,6 +354,15 @@ class Scheduler:
             return ErrorOutcome(err_count=candidate.err_count)
         if kind is ErrKind.DEAD:
             return ErrorOutcome(disabled=True, err_count=0)
+        if kind is ErrKind.RESTRICTED:
+            # 账号级风控限制：只冷却、不禁用。禁用是不可逆的人工状态，而这类
+            # 限制会由上游自行解除；看 `Retry-After`（上游有时给）但夹在
+            # [常量, 24h] 内，避免上游给个离谱值把号锁一天以上。
+            return ErrorOutcome(
+                cooling_until=self._cooling_until(
+                    candidate, kind, now, retry_at,
+                    RESTRICTED_COOLDOWN_SECONDS, None),
+                err_count=0)
         if kind is ErrKind.CREDIT:
             return ErrorOutcome(
                 cooling_until=self._cooling_until(

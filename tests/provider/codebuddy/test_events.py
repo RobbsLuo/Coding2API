@@ -322,3 +322,20 @@ def test_disabled_reason_empty_for_plain_403_and_garbage():
     assert cb_events.disabled_reason(b'{"code":11128}') == ""
     assert cb_events.disabled_reason(b"") == ""
     assert cb_events.disabled_reason(b"\xff\xfe") == ""
+
+
+def test_classify_11140_is_account_restricted_not_dead():
+    """403 + 11140 → RESTRICTED（账号级风控），不能判 DEAD 永久硬禁用。
+
+    DEAD 的处置是 disabled=1 + 人工 revive，而 11140 由上游自行解除；判错会
+    把「等它自己好」变成「必须有人去点恢复」。普通 403 仍是 DEAD。
+    """
+    body = (b'{"code":11140,"msg":"request illegal",'
+            b'"displayMsg":{"en":"Your account has been restricted due to unusual activity"}}')
+    assert cb_events.classify_status(403, body) is ErrKind.RESTRICTED
+    assert cb_events.classify_status(400, body) is ErrKind.RESTRICTED
+    # 三语文案任一条命中即算（上游不同入口的措辞不一致）
+    assert cb_events.classify_status(
+        403, '{"displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}'.encode()
+    ) is ErrKind.RESTRICTED
+    assert cb_events.classify_status(403, b'{"code":403}') is ErrKind.DEAD
