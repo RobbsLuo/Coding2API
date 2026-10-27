@@ -202,6 +202,10 @@ class ErrorOutcome:
     """note_error 的结果：调用方据此持久化。"""
 
     disabled: bool = False
+    # 硬禁用时写进 `credentials.disabled_reason` 的**可操作原因**；空串表示
+    # 调用方没有更精确的说法，落库回落到历史的 "session dead"。由 executor
+    # 在 DEAD 时按 provider 识别（如 CodeBuddy 11140 = 账号被风控限制，需申诉）。
+    disabled_reason: str = ""
     cooling_until: int | None = None
     err_count: int = 0
     # 模型级条目：model → ModelCooldown（仅 MODEL/BLOCKED 产生），

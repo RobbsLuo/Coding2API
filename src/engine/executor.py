@@ -1528,6 +1528,10 @@ class Executor:
             self._candidate(credential_id), kind, int(time.time()),
             model=self._model_scope(provider_id, model),
             retry_at=getattr(error, "retry_at", None))
+        if kind is ErrKind.DEAD:
+            # 401/403 不都是 session 过期：11140 是账号被上游风控限制，管理台
+            # 看到 "session dead" 会误以为是重登能解决的事。原因由 provider 识别。
+            outcome = replace(outcome, disabled_reason=self._disabled_reason(provider_id, error))
         self._deps.credentials.save_error(credential_id, outcome)
         if kind is not ErrKind.DEAD:
             return False
@@ -1536,6 +1540,22 @@ class Executor:
             model=model, ok=False, error_type=_error_type_for(kind),
             latency_ms=_elapsed_ms(started))
         return True
+
+    def _disabled_reason(self, provider_id: str, error: Exception | None) -> str:
+        """DEAD 的可操作原因：交由 provider 识别上游点名的账号级限制。
+
+        识别不到返回空串，落库回落到历史的 "session dead"。只接受 `bytes`
+        的 `body`（`UpstreamHTTPError.body`）：流内错误 / 传输异常没有 body，
+        自然回落，不会把上游正文写进管理台字段。
+        """
+        body = getattr(error, "body", None)
+        if not isinstance(body, bytes):
+            return ""
+        resolver = getattr(self._deps.providers.get(provider_id),
+                           "disabled_reason", None)
+        if not callable(resolver):
+            return ""
+        return str(resolver(body) or "")
 
     def _queue_wait(self, retry_after: float | None, emitted: bool,
                     rounds: int) -> float | None:

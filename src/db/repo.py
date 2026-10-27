@@ -327,6 +327,10 @@ class CredentialRepository:
         `outcome.model_cooldowns` 非空表示模型级冷却：只写 (凭证, 模型) 表，
         不动账号级 cooling_until；反之账号级冷却会清空该凭证的模型级条目
         （账号级限流不允许被「切模型」绕过）。
+
+        硬禁用（DEAD）优先写 `outcome.disabled_reason`，为空才回落历史的
+        "session dead"：401/403 里有「账号被风控限制」这类重登解决不了的原因，
+        管理台直接显示该字段，写错会把人引向错误的修复动作。
         """
         with self._db.transaction() as conn:
             if outcome.model_cooldowns:
@@ -344,7 +348,8 @@ class CredentialRepository:
             if outcome.disabled:
                 conn.execute(
                     "UPDATE credentials SET disabled = 1, disabled_reason = ?, err_count = 0, "
-                    "cooling_until = NULL WHERE id = ?", ("session dead", credential_id))
+                    "cooling_until = NULL WHERE id = ?",
+                    (outcome.disabled_reason or "session dead", credential_id))
             else:
                 conn.execute(
                     "UPDATE credentials SET cooling_until = ?, err_count = ? WHERE id = ?",

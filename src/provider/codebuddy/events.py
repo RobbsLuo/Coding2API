@@ -53,6 +53,16 @@ _PLAN_EXHAUSTED_CODE = 1005         # 权益/套餐耗尽
 # （若归 INVALID，executor 会跳过该上游全部凭证、零重试直接 400）
 _REQUEST_LEVEL_CODES = frozenset({11101, 11115, 11128, 11135})
 _BAD_PARAMS_PHRASE = "unmarshal chat params failed"
+# 账号级风控限制（403/11140「request illegal」）：displayMsg 是
+# `Your account has been restricted due to unusual activity` /
+# 「账号存在异常行为，已被限制使用」，displayTips 引导 SUBMIT_FEEDBACK。
+# 与 session 过期不同：重新登录无效，只能申诉或换号。
+_ACCOUNT_RESTRICTED_MARKERS: tuple[str, ...] = (
+    "11140",
+    "account has been restricted",
+    "账号存在异常行为",
+    "帳號存在異常行為",
+)
 
 
 def classify_status(status: int, body: bytes = b"") -> ErrKind:
@@ -93,3 +103,17 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
         # 请求无效（如模型不存在）是客户端错误，冷却凭证只会误伤健康凭证
         return ErrKind.INVALID
     return ErrKind.OTHER
+
+
+def disabled_reason(body: bytes = b"") -> str:
+    """401/403 响应体 → 硬禁用时展示的可操作原因；识别不到返回空串。
+
+    为什么需要它：`disabled_reason` 原先一律写 "session dead"，而 11140 的
+    真实含义是「账号被上游风控限制」——管理台按 "session dead" 去重新登录
+    只会白折腾，实际动作是提交申诉或换号。这里只回**受控文案**，不拼接上游
+    正文（与 `relogin_required` 同口径）。
+    """
+    text = body.decode("utf-8", errors="replace").lower()
+    if any(marker in text for marker in _ACCOUNT_RESTRICTED_MARKERS):
+        return "账号被上游限制（账号异常行为），需提交申诉；重新登录无效"
+    return ""

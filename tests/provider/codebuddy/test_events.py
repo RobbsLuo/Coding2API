@@ -296,3 +296,29 @@ def test_provider_classify_routes_14003_to_model():
     assert CodeBuddyProvider().classify(429, body) is ErrKind.MODEL
     assert CodeBuddyIntlProvider().classify(429, body) is ErrKind.MODEL
     assert CodeBuddyIntlProvider().classify(429, b'{"code":9999}') is ErrKind.SOFT
+
+
+def test_disabled_reason_flags_account_restriction():
+    """403/11140「账号异常行为被限制」→ 可操作原因，不能写成 session dead。
+
+    实测 2026-10-27 08:21 codebuddy_intl 六个号同时回
+    `{"code":11140,...,"displayMsg":{"en":"Your account has been restricted
+    due to unusual activity","zh":"账号存在异常行为，已被限制使用"}}`：重登无效，
+    只能申诉或换号，管理台必须显示真实动作。
+    """
+    body = (b'{"code":11140,"msg":"request illegal",'
+            b'"displayMsg":{"en":"Your account has been restricted due to unusual activity",'
+            b'"zh":"\xe8\xb4\xa6\xe5\x8f\xb7\xe5\xad\x98\xe5\x9c\xa8\xe5\xbc\x82\xe5\xb8\xb8'
+            b'\xe8\xa1\x8c\xe4\xb8\xba\xef\xbc\x8c\xe5\xb7\xb2\xe8\xa2\xab\xe9\x99\x90'
+            b'\xe5\x88\xb6\xe4\xbd\xbf\xe7\x94\xa8"}}')
+    reason = cb_events.disabled_reason(body)
+    assert "账号被上游限制" in reason and "申诉" in reason
+    # 国际版子类走同一实现
+    assert CodeBuddyIntlProvider().disabled_reason(body) == reason
+
+
+def test_disabled_reason_empty_for_plain_403_and_garbage():
+    """认不出原因就返回空串（落库回落 session dead），并且不因坏字节崩。"""
+    assert cb_events.disabled_reason(b'{"code":11128}') == ""
+    assert cb_events.disabled_reason(b"") == ""
+    assert cb_events.disabled_reason(b"\xff\xfe") == ""

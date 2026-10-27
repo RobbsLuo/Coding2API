@@ -210,3 +210,23 @@ def test_credential_edit_lock_is_reused_per_id(repo):
     assert credentials.edit_lock("cred_a") is first
     assert credentials.edit_lock("cred_b") is not first
     db.close()
+
+def test_save_error_disabled_uses_actionable_reason(repo):
+    """硬禁用优先写 outcome 的可操作原因，缺失才回落 "session dead"。
+
+    管理台直接展示 `disabled_reason`：11140「账号被上游限制」写成 session dead
+    会把人引向「重新登录」，而实际动作是申诉或换号。
+    """
+    credentials, db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.save_error(cid, ErrorOutcome(disabled=True,
+                                             disabled_reason="账号被上游限制，需申诉"))
+    row = db.connect().execute(
+        "SELECT disabled, disabled_reason FROM credentials WHERE id = ?", (cid,)).fetchone()
+    assert (row["disabled"], row["disabled_reason"]) == (1, "账号被上游限制，需申诉")
+
+    other = credentials.add(provider="codebuddy", credential_data={"bearer_token": "u"})
+    credentials.save_error(other, ErrorOutcome(disabled=True))
+    row = db.connect().execute(
+        "SELECT disabled_reason FROM credentials WHERE id = ?", (other,)).fetchone()
+    assert row["disabled_reason"] == "session dead"

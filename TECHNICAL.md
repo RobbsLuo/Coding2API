@@ -91,7 +91,7 @@ class ErrKind(StrEnum):
     PLAN = "plan"        # 权益耗尽（1005）→ 冷却 12h
     CREDIT = "credit"    # 余额不足（402/14018）→ 冷却到次日 04:00（等签到恢复）
     SOFT = "soft"        # 限流/404 → 冷却 60s，不累计错误数
-    DEAD = "dead"        # session 失效 → 硬禁用 disabled=1
+    DEAD = "dead"        # session 失效 / 账号被上游限制 → 硬禁用 disabled=1
     OTHER = "other"      # 其他 4xx/5xx → 累计，连续 3 次 → 冷却 10m
     INVALID = "invalid"  # 请求无效（模型不存在等）→ 不冷却凭证，跳过该上游；全拒 → 400
     MODEL = "model"      # 该模型用量超限（429+6004）→ 只冷却 (凭证, 模型)，10m 起翻倍封顶 2h
@@ -104,6 +104,8 @@ MODEL_SCOPED_KINDS = frozenset({MODEL, BLOCKED, CONCURRENCY})
 ```
 
 `MODEL_SCOPED_KINDS` 只写 `credential_model_cooldowns`（§6.3），不碰账号级 `cooling_until`。账号级冷却出现 → 清该凭证模型级条目；不清 → 切模型绕过账号级限流。
+
+**硬禁用的可操作原因（`disabled_reason`）**：401/403 不都是 session 过期——CodeBuddy 11140「request illegal」的 displayMsg 是「账号存在异常行为，已被限制使用」，重登无效，只能申诉或换号。DEAD 时 executor 把 `UpstreamHTTPError.body` 交给 provider 的 `disabled_reason()` 识别（CodeBuddy 已实现），命中就写「账号被上游限制（账号异常行为），需提交申诉；重新登录无效」；识别不到（其他渠道、流内错误、无 body）回落历史文案 `session dead`。管理台 `CredentialsPage` 原样展示该字段，写错会把人引向错误的修复动作。只回受控文案，不拼接上游正文。
 
 **排队语义（QUEUE）**：上游回排队中 + 建议等待秒数 = 号满，等 N 秒重打。非账号故障、非请求错误。
 

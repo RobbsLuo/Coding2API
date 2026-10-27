@@ -591,3 +591,96 @@ async def test_complete_inline_request_error_records_real_type(repo):
             {"messages": [{"role": "user", "content": "hi"}]}), username="erin")
     assert collector.events[-1]["error_type"] == "invalid_request"
     assert credentials.candidates()[0].cooling_until is None
+
+async def test_dead_account_restriction_writes_actionable_reason(repo):
+    """403/11140 落库写「账号被上游限制，需申诉」，而不是 session dead。
+
+    上游 11140 的 displayMsg 是「Your account has been restricted due to
+    unusual activity」，重登无效；原因由 provider 识别后经 ErrorOutcome 落库，
+    管理台直接显示这个字段。
+    """
+    from src.compat.openai.request import parse_chat_request
+    from src.engine.executor import Executor, ExecutorDeps
+    from src.engine.scheduler import Scheduler
+    from src.provider.codebuddy import events as cb_events
+    from src.provider.codebuddy.client import UpstreamHTTPError
+
+    credentials, db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    body = (b'{"code":11140,"msg":"request illegal",'
+            b'"displayMsg":{"en":"Your account has been restricted due to unusual activity"}}')
+
+    class Restricted:
+        id = "codebuddy"
+
+        async def stream_chat(self, _data, _payload, _model):
+            raise UpstreamHTTPError(403, body)
+            yield  # pragma: no cover - 抛错后的不可达分支，只为保持异步生成器形态
+
+        def disabled_reason(self, raw: bytes) -> str:
+            return cb_events.disabled_reason(raw)
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": Restricted()}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2", stats=RecordingCollector()))
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+
+    row = db.connect().execute(
+        "SELECT disabled_reason FROM credentials WHERE id = ?", (cid,)).fetchone()
+    assert "账号被上游限制" in row["disabled_reason"]
+    assert "申诉" in row["disabled_reason"]
+
+
+async def test_dead_unrecognised_403_keeps_session_dead(repo):
+    """provider 认不出的 403（没有可操作话术）回落 "session dead"，不写空串。"""
+    from src.compat.openai.request import parse_chat_request
+    from src.engine.executor import Executor, ExecutorDeps
+    from src.engine.scheduler import Scheduler
+    from src.provider.codebuddy import events as cb_events
+    from src.provider.codebuddy.client import UpstreamHTTPError
+
+    credentials, db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+
+    class PlainDenied:
+        id = "codebuddy"
+
+        async def stream_chat(self, _data, _payload, _model):
+            raise UpstreamHTTPError(403, b'{"code":403,"msg":"forbidden"}')
+            yield  # pragma: no cover - 抛错后的不可达分支，只为保持异步生成器形态
+
+        def disabled_reason(self, raw: bytes) -> str:
+            return cb_events.disabled_reason(raw)
+
+    executor = Executor(ExecutorDeps(
+        providers={"codebuddy": PlainDenied()}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2", stats=RecordingCollector()))
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+
+    row = db.connect().execute(
+        "SELECT disabled_reason FROM credentials WHERE id = ?", (cid,)).fetchone()
+    assert row["disabled_reason"] == "session dead"
+
+async def test_dead_http_error_without_provider_hint_keeps_session_dead(repo):
+    """provider 没实现 disabled_reason 时：即使 HTTP 有 body 也回落默认文案。"""
+    from src.compat.openai.request import parse_chat_request
+    from src.provider.codebuddy.client import UpstreamHTTPError
+
+    credentials, db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    executor = _exec_with_stats(
+        repo, [[UpstreamHTTPError(403, b'{"code":11140}')]], RecordingCollector())
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+
+    row = db.connect().execute(
+        "SELECT disabled_reason FROM credentials WHERE id = ?", (cid,)).fetchone()
+    assert row["disabled_reason"] == "session dead"

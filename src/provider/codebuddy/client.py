@@ -765,6 +765,10 @@ class CodeBuddyProvider:
     def classify(self, status: int, body: bytes) -> ErrKind:
         return cb_events.classify_status(status, body)
 
+    def disabled_reason(self, body: bytes) -> str:
+        """401/403 的账号级可操作原因（管理台 `disabled_reason` 用）。"""
+        return cb_events.disabled_reason(body)
+
     async def probe_quota(self, credential_data: dict) -> Quota:
         return await self.client.fetch_quota(CodeBuddyCredential.from_dict(credential_data))
 
