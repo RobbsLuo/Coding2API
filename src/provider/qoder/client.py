@@ -349,7 +349,10 @@ class QoderClient(LazyClients):
                               error_message=envelope.body[:2000],
                               error_kind=ErrKind.QUEUE,
                               retry_after_seconds=queue_wait)]
-            kind = qoder_events.classify_error_code(envelope.status, envelope.body)
+            # 信封错误与 HTTP 错误必须同一判据：早先这里直接调
+            # `classify_error_code`，403 不看会话失效标记就判 DEAD——「每日计费
+            # 次数用尽」这类次日自愈的号被硬禁用（实测 2026-10-27 15:39）。
+            kind = qoder_events.classify_status(envelope.status, envelope.body.encode())
             # 200 字符只够看到外层 `"details":"{\"error\":{\"message\":...`——上游把
             # 真实原因嵌在转义的 details 里，截断后根因（如缺哪个 tool_call_id）
             # 永久丢失，排障时等于没打。放宽到 2000。

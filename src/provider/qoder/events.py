@@ -15,9 +15,12 @@ Qoder 与 CodeBuddy / TRAE 的关键差异在这一层：
 
 错误分类沿用本项目中立层（`provider.base.ErrKind`）语义；Qoder 没有观测到
 CB/TRAE 那套 `1005/6004/11102` 业务码，信封里的 `statusCodeValue` 本身就是
-HTTP 状态语义，故按状态码分类。唯一例外：上游会把**自身节点执行故障**也包成
-400（`[FAIL]node:… msg:Execution failed`），这类按 `NODE_FAILURE_MARKERS` 识别后
-归模型级瞬时故障（`ErrKind.MODEL`），见 `classify_error_code`。
+HTTP 状态语义，故按状态码分类——**HTTP 非 2xx 与流内信封共用 `classify_status`
+一套判据**（排队 / 每日计费耗尽 / 会话失效 / 其余 SOFT 的优先级见该函数）。
+两个例外：上游会把**自身节点执行故障**包成 400（`[FAIL]node:… msg:Execution failed`），
+这类按 `NODE_FAILURE_MARKERS` 识别后归模型级瞬时故障（`ErrKind.MODEL`）；
+「每日计费次数用尽」（403 `{"code":"110","message":"Billing daily count exceeded"}`）
+按 `DAILY_QUOTA_MARKERS` 归 `ErrKind.CREDIT`，等次日恢复而不是硬禁用。
 """
 
 from __future__ import annotations
@@ -150,6 +153,12 @@ SESSION_DEAD_MARKERS = ("TOKEN_EXPIRE", "12153", "Offline user session not found
 # 完全不同：换凭证不解决问题但会自愈，必须归为模型级瞬时冷却而非 INVALID。
 NODE_FAILURE_MARKERS = ("[FAIL]node:", "Execution failed")
 
+# 上游「每日计费次数用尽」（实测 2026-10-27 15:39，流内信封 403
+# `{"code":"110","message":"Billing daily count exceeded"}`）：号本身没坏，
+# 额度按上游日边界恢复——重登无效，硬禁用会把一个明天就能用的号踢出池子。
+# 归 CREDIT（冷却到次日 04:00），不进 DEAD。
+DAILY_QUOTA_MARKERS = ("Billing daily count exceeded",)
+
 # 信封内层 delta 的空占位键（只在取值为空/假时才剔除，非空值一律保留）。
 NOISE_KEYS = ("extra_fields", "refusal", "reasoning_content")
 
@@ -185,15 +194,23 @@ def is_session_dead(text: str) -> bool:
     return any(marker in text for marker in SESSION_DEAD_MARKERS)
 
 
+def is_daily_quota_exceeded(text: str) -> bool:
+    """响应体是否为「每日计费次数用尽」（次日自动恢复，与凭证状态无关）。"""
+    return any(marker in text for marker in DAILY_QUOTA_MARKERS)
+
+
 def is_node_failure(text: str) -> bool:
     """响应体是否为「上游节点故障」包装的 400（见 `NODE_FAILURE_MARKERS`）。"""
     return any(marker in text for marker in NODE_FAILURE_MARKERS)
 
 
 def classify_error_code(code: int | None, body: bytes | str = b"") -> ErrKind:
-    """状态/信封码 → ErrKind（401/403 的会话失效细节由 `classify_status` 补全）。
+    """状态/信封码 → ErrKind（HTTP 与流内信封共用，判据必须一视同仁）。
 
     * 402 → 余额不足（等签到恢复）
+    * 报文命中 `DAILY_QUOTA_MARKERS` → CREDIT：「每日计费次数用尽」
+      （403 `{"code":"110","message":"Billing daily count exceeded"}`），
+      号没坏、次日自动恢复，重登无效也不能硬禁用
     * 429 → 模型级限流（上游频控点名具体模型，换模型立即可用）
     * 418/500/502/503/504 → SOFT：上游把自身故障包装成 418/5xx，属瞬时类，
       短冷却换号即可，不该累计成「连续 3 次 → 10m」
@@ -206,26 +223,31 @@ def classify_error_code(code: int | None, body: bytes | str = b"") -> ErrKind:
       只是忙——判成 DEAD 会把可自愈的凭证打进冷宫（实测 2026-10-26：
       kmodel_latest 排队时回 403 + `isQueued`，凭证被误判死）。排队判据
       放在这里（而不是只在调用点）才能保证**任何**入口都不会漏判。
+    * 401/403 且带会话失效标记 → DEAD（硬禁用，需重新登录）
+    * 401/403 其余情况 → SOFT：实测 Qoder 的 401/403 多数是上游瞬时/风控
+      抖动，直接硬禁用会把可自愈的凭证打进冷宫。**流内信封也走这里**
+      （`client._decode_frame` 调 `classify_status`），两条路径必须同一判据。
     """
+    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
     if code == 402:
         return ErrKind.CREDIT
+    if is_daily_quota_exceeded(text):
+        return ErrKind.CREDIT
     if code in (401, 403):
-        text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
         if parse_queue_hint(text) is not None:
             return ErrKind.QUEUE
-        return ErrKind.DEAD
+        return ErrKind.DEAD if is_session_dead(text) else ErrKind.SOFT
     if code == 429:
         return ErrKind.MODEL
     if code in (418, 500, 502, 503, 504):
         return ErrKind.SOFT
     if code in (400, 404, 422):
-        text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
         return ErrKind.MODEL if is_node_failure(text) else ErrKind.INVALID
     return ErrKind.OTHER
 
 
 def classify_status(status: int, body: bytes = b"") -> ErrKind:
-    """HTTP 状态码分类。
+    """HTTP 状态码分类（流内信封错误同样走这里）。
 
     401/403 只有**明确带会话失效标记**时才归 DEAD（硬禁用）；否则按 SOFT
     短冷却轮换——实测 Qoder 的 401/403 多数是上游瞬时/风控抖动，直接硬禁用
@@ -233,12 +255,12 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
 
     排队信号（`isQueued` / `RESOURCE_LIMIT`）优先于状态码：上游把「排队中」
     也包成 403，按状态码分类会硬禁用凭证——排队恰恰说明号是好的，只是忙。
+    「每日计费次数用尽」同理，优先于 401/403 的通用分支（见
+    `classify_error_code`）。
     """
     text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
     if parse_queue_hint(text) is not None:
         return ErrKind.QUEUE
-    if status in (401, 403) and not is_session_dead(text):
-        return ErrKind.SOFT
     return classify_error_code(status, body)
 
 

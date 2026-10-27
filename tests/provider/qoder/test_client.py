@@ -631,6 +631,49 @@ def test_classify_status_queue_hint_wins_over_403():
     assert qoder_events.classify_status(403, b"") is ErrKind.SOFT
 
 
+def test_inner_403_without_session_marker_is_soft_not_dead():
+    """流内 403 未带会话失效标记 → SOFT，和 HTTP 层同一判据。
+
+    早先 `_decode_frame` 直接调 `classify_error_code`，403 不看标记就判 DEAD，
+    把一个还能用的号永久禁用（2026-10-27 实测）。
+    """
+    body = '{"code":"403","message":"upstream risk control"}'
+    assert qoder_events.classify_error_code(403, body) is ErrKind.SOFT
+    assert qoder_events.classify_status(403, body.encode()) is ErrKind.SOFT
+    # 带会话失效标记才是真的 DEAD
+    dead = '{"code":"403","message":"Offline user session not found"}'
+    assert qoder_events.classify_error_code(403, dead) is ErrKind.DEAD
+    assert qoder_events.classify_status(403, dead.encode()) is ErrKind.DEAD
+
+
+def test_daily_quota_exceeded_is_credit_not_dead():
+    """「每日计费次数用尽」→ CREDIT（冷却到次日），不是 session 死亡。
+
+    实测 2026-10-27：403 `{"code":"110","message":"Billing daily count exceeded"}`
+    被流内分类判成 DEAD，qoder 号 nick5080166916 被硬禁用后需人工 revive。
+    """
+    body = '{"code":"110","message":"Billing daily count exceeded"}'
+    assert qoder_events.is_daily_quota_exceeded(body) is True
+    assert qoder_events.is_daily_quota_exceeded("ordinary error") is False
+    assert qoder_events.classify_error_code(403, body) is ErrKind.CREDIT
+    assert qoder_events.classify_error_code(403, body.encode()) is ErrKind.CREDIT
+    assert qoder_events.classify_status(403, body.encode()) is ErrKind.CREDIT
+
+
+async def test_stream_chat_daily_quota_envelope_yields_credit():
+    """流内 403 每日计费耗尽 → CREDIT 事件（不硬禁用凭证）。"""
+    body = json.dumps({"code": "110", "message": "Billing daily count exceeded"})
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=envelope(body, status=403))
+
+    events = [e async for e in handler_for(handler).stream_chat(cred(), {}, "m")]
+    assert len(events) == 1
+    assert events[0].kind is EventKind.ERROR
+    assert events[0].error_kind is ErrKind.CREDIT
+    assert events[0].error_code == 403
+
+
 def test_to_status_variants():
     assert qoder_events._to_status(None) == 200
     assert qoder_events._to_status(True) == 502
