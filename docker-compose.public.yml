@@ -1,0 +1,62 @@
+# 公网部署覆盖文件（Docker）：在基础 compose 上叠一个 Caddy 入口。
+#
+#   docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
+#
+# .env 新增两项：PUBLIC_DOMAIN（必填，域名，A/AAAA 记录已指向本机）、
+# ACME_EMAIL（必填，Let's Encrypt 到期通知）。详见 README「公网部署（Docker）」。
+#
+# 需要 Docker Compose ≥ 2.24（下方 `!override` 标签；老版本读不了会报错）。
+
+services:
+  coding2api:
+    # 应用端口只绑宿主机回环：入口只能走 Caddy。绑 0.0.0.0 会留一条明文 http
+    # 旁路（TRUST_PROXY 已开，直连还能伪造 XFF 绕过 Key 的 allowed_ips）。
+    ports: !override
+      - "127.0.0.1:${PORT:-8000}:${PORT:-8000}"
+    environment:
+      # PUBLIC_BASE_URL 决定 TRAE 登录回调基址与 HSTS 下发；https 才发 HSTS。
+      # 它的主机名也自动进入 Host 白名单（ALLOWED_HOSTS 留空时的口径）。
+      PUBLIC_BASE_URL: https://${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env (e.g. ai-api.example.com)}
+      # 前恰好一层 Caddy 且应用端口只在回环 → 采信 XFF 是安全的
+      TRUST_PROXY: "true"
+      # Caddy 反代走 compose 网络，容器内必须监听 0.0.0.0；.env 里沿用
+      # .env.example 的 HOST=127.0.0.1 会让容器只监听回环、Caddy 连不上。
+      HOST: 0.0.0.0
+      # 显式列全：非空即「完全替换」语义——若 .env 里已有 ALLOWED_HOSTS，
+      # 不补这一条会漏掉域名（全站 400 invalid host header）；漏掉回环地址
+      # 会让容器 healthcheck 打的 127.0.0.1 判 400 → 永远 unhealthy
+      # （Caddy 依赖应用 healthy，也就永远不启动）
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-},${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env},127.0.0.1,localhost
+
+  caddy:
+    image: caddy:2.11.7-alpine
+    container_name: coding2api-caddy
+    restart: unless-stopped
+    # 应用 healthy 后再起入口：否则 Caddy 会在应用预热期持续 502 并刷日志
+    depends_on:
+      coding2api:
+        condition: service_healthy
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env (Let's Encrypt expiry notices)}
+      PORT: ${PORT:-8000}
+    ports:
+      # 80：ACME HTTP-01 挑战 + 之后 308 跳 https；443/udp 是 HTTP/3
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # 证书、ACME 账号与 Caddy 状态：必须持久化，否则每次重建都重新签发
+      - caddy_data:/data
+      - caddy_config:/config
+    # 与 coding2api 同口径的日志轮转（json-file 默认无上限）
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  caddy_data:
+  caddy_config:
