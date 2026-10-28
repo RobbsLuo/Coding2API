@@ -25,6 +25,7 @@ from typing import Any
 from ..engine.compress import compress_messages, estimate_messages
 from ..engine.prefix_debug import PrefixDebugTracker
 from ..engine.sticky_trim import StickyTrimmer, conversation_key
+from ..engine.tool_output import compress_tool_outputs
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,15 @@ def build_context_compressor(
     trimmer = StickyTrimmer()
 
     def compress(provider_id: str, model: str, payload: dict) -> dict:
+        if settings.tool_output_compress_enabled:
+            # tool 输出压缩与窗口无关（省的是 token 不是长度），必须在
+            # 「未超限就原样返回」之前做，否则永远等不到触发条件。
+            messages = payload.get("messages")
+            if isinstance(messages, list):
+                squashed = compress_tool_outputs(
+                    messages, max_chars=int(settings.tool_output_compress_max_chars))
+                if squashed is not messages:
+                    payload = {**payload, "messages": squashed}
         if not settings.context_compress_enabled:
             return payload
         window = context_window_for(cache, aliases, provider_id, model)

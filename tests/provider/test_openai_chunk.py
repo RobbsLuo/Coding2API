@@ -158,3 +158,25 @@ def test_openai_events_does_not_duplicate_usage_or_finish():
 
 def test_openai_events_empty_frame_returns_no_events():
     assert openai_events(_frame("[DONE]"), "X") == []
+
+
+def test_openai_event_attaches_upstream_reported_model():
+    """上游自报模型挂到事件上（executor 用它做静默替换观测）。"""
+    event = openai_event({"model": "glm-4.6",
+                          "choices": [{"delta": {"content": "x"}}]})
+    assert event.model == "glm-4.6"
+    # 没报模型 / 空串：保持 None
+    assert openai_event({"choices": [{"delta": {"content": "x"}}]}).model is None
+    assert openai_event({"model": "",
+                         "choices": [{"delta": {"content": "x"}}]}).model is None
+
+
+def test_openai_events_attaches_model_to_appended_usage_and_finish():
+    frame = _frame(json.dumps({
+        "model": "m-1",
+        "choices": [{"delta": {}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 2},
+    }))
+    events = openai_events(frame, "Test")
+    assert events, "finish/usage 帧必须产出事件"
+    assert all(event.model == "m-1" for event in events)

@@ -268,3 +268,17 @@ async def test_events_iter_data_lines_skips_non_data_lines_only():
         yield b"event: ping\n"
         yield b": comment\n"
     assert [line async for line in codearts_events.iter_data_lines(gen())] == []
+
+
+def test_parse_line_attaches_upstream_reported_model():
+    """CodeArts 载荷带 model 时挂到事件上（观测用，不改语义）。"""
+    snapshot = codearts_events.TextSnapshot()
+    events = codearts_events.parse_line(json.dumps({
+        "model": "DeepSeek-V4.1",
+        "choices": [{"delta": {"content": "hi"}}],
+    }), snapshot)
+    assert events[0].content == "hi"
+    assert events[0].model == "DeepSeek-V4.1"
+    # 不报模型时保持 None
+    plain = codearts_events.parse_line('{"text": "hi"}', snapshot)
+    assert plain[0].model is None

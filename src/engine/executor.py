@@ -41,7 +41,12 @@ from .model_resolver import (
     ordered_fallback_chain,
     resolve,
 )
-from .reasoning import map_effort, parse_effort_map
+from .reasoning import (
+    downgrade_effort,
+    is_effort_rejection,
+    map_effort,
+    parse_effort_map,
+)
 from .scheduler import Scheduler
 
 logger = logging.getLogger(__name__)
@@ -593,7 +598,8 @@ class Executor:
                             self._deps.credentials.save_success(state.credential_id)
                             self._confirm_probe(state.credential_id)
                         self._record_success(attempt, state, state.provider,
-                                             state.credential_id or "-")
+                                             state.credential_id or "-",
+                                             truncated=not state.saw_finish)
                     else:
                         self._record_disconnect(attempt, state)
                 raise
@@ -637,6 +643,10 @@ class Executor:
         # `queued_wait` 是本轮要等的秒数（等完 `continue`）。
         queue_rounds = 0
         pinned: tuple[str, dict[str, Any]] | None = None
+        # 推理档位降级（默认从不触发）：只有上游明确拒绝该档位时才降一档，
+        # 原号重试一次；`effort_cap` 覆盖后续轮次的出站档位。
+        effort_cap: str | None = None
+        effort_retried = False
 
         def terminal(message: str, code: str) -> bytes:
             """终帧：本项未出帧时抛信号让外层试下一链项；已出帧则写错误帧收尾。"""
@@ -689,6 +699,7 @@ class Executor:
             # 档位映射放在选号之后：目标档位依赖**实际服务渠道**（同名模型
             # 跨渠道接受的档位不同）。返回值可能是新 dict，不改 `request.raw`
             payload = self._map_effort(provider_id, payload)
+            payload = self._clamp_effort(payload, effort_cap)
             # 前缀诊断报告压缩后的载荷（见 _debug_prefix）：压缩每轮裁一条
             # 就会让上游只能命中 system 段，这里记录的就是上游实际看到的前缀
             self._debug_prefix(credential_id, provider_id, target.model, payload)
@@ -705,6 +716,8 @@ class Executor:
             self._lease(credential_id)
             reader = _TimedReader(iterator)
             state.deadline = None
+            # 终态标记按尝试重置：上一次尝试的 FINISH 不能替这一次背书
+            state.saw_finish = False
             broken = False
             queued_wait: float | None = None
             try:
@@ -715,6 +728,10 @@ class Executor:
                     if hide_reasoning and event.kind is EventKind.REASONING:
                         # 出站剥离思考：上游仍照常生成，只是不交给客户端
                         continue
+                    if event.model and state.observed_model is None:
+                        state.observed_model = event.model
+                        self._check_model_substitution(
+                            target.model, event.model, provider_id, credential_id)
                     if event.kind is EventKind.ERROR:
                         kind = _event_kind(event)
                         if kind is ErrKind.QUEUE:
@@ -735,6 +752,20 @@ class Executor:
                                 break
                             kind = ErrKind.SOFT
                         if kind is ErrKind.INVALID:
+                            # 推理档位被拒：原号降一档重试一次（不换号、不冷却）。
+                            # 上游拒绝的是档位而不是凭证或模型，换号再撞只会
+                            # 让同一条请求在多个号上各失败一次。
+                            lower = (None if emitted else self._downgrade_effort(
+                                payload, event.error_message, effort_retried))
+                            if lower is not None:
+                                logger.warning(
+                                    "上游 %s 不认推理档位 %s（凭证 %s）→ 降到 %s 原号重试",
+                                    provider_id, payload.get("reasoning_effort"),
+                                    credential_id, lower)
+                                effort_cap, effort_retried = lower, True
+                                pinned = (credential_id, credential_data)
+                                broken = True
+                                break
                             # 流内 4001 等参数/模型错误：换凭证没用，
                             # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
                             logger.warning(
@@ -770,6 +801,8 @@ class Executor:
                         last_error = UpstreamStreamError(event)
                         broken = True
                         break
+                    if event.kind is EventKind.FINISH:
+                        state.saw_finish = True
                     if event.kind is EventKind.CONTENT and event.content:
                         state.content_chars += len(event.content)
                     for frame in state.translator.translate(event):
@@ -782,7 +815,16 @@ class Executor:
                         credential_id, model=self._model_scope(provider_id, target.model))
                     self._confirm_probe(credential_id)
                     self._remember(request, state.username, credential_id)
-                    self._record_success(target, state, provider_id, credential_id)
+                    truncated = not state.saw_finish
+                    if truncated:
+                        # 连接正常结束但没走到终态事件：响应不完整，但上游没报错，
+                        # 凭证照常算健康（不冷却、不换号），只在统计里留痕。
+                        logger.warning(
+                            "上游 %s 流未走到终态即结束（凭证 %s，模型 %s）"
+                            "——按截断记账，不冷却凭证",
+                            provider_id, credential_id, target.model)
+                    self._record_success(target, state, provider_id, credential_id,
+                                         truncated=truncated)
                     for frame in state.translator.finish():
                         emitted = True
                         yield frame
@@ -816,6 +858,18 @@ class Executor:
                 elif kind is ErrKind.INVALID:
                     # 请求无效（如该上游不认识模型）：不冷却凭证，
                     # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
+                    # 推理档位被拒：原号降一档重试一次（HTTP 400 形态，
+                    # 与流内 error 事件同一套语义）
+                    lower = (None if emitted else self._downgrade_effort(
+                        payload, _error_detail(error), effort_retried))
+                    if lower is not None:
+                        logger.warning(
+                            "上游 %s 不认推理档位 %s（凭证 %s）→ 降到 %s 原号重试",
+                            provider_id, payload.get("reasoning_effort"),
+                            credential_id, lower)
+                        effort_cap, effort_retried = lower, True
+                        pinned = (credential_id, credential_data)
+                        continue
                     logger.warning("上游 %s 拒绝模型 %s（凭证 %s 跳过）: %s",
                                    provider_id, target.model, credential_id,
                                    _error_detail(error))
@@ -983,6 +1037,46 @@ class Executor:
             updated["reasoning_effort"] = mapped
         return updated
 
+    def _check_model_substitution(self, requested: str, observed: str,
+                                  provider_id: str, credential_id: str) -> None:
+        """上游自报模型 ≠ 请求模型：只告警（不改响应、不冷却、不写 error_type）。
+
+        与 `_check_usage_consistency` 同口径：这是观测信号，不是确定失败。
+        乱写失败归因会让成功率虚低，告警日志足够定位。
+        """
+        if not _model_mismatch(requested, observed):
+            return
+        logger.warning(
+            "上游 %s 返回模型 %s 与请求模型 %s 不一致（凭证 %s）"
+            "——疑似静默替换，仅告警不改响应",
+            provider_id, observed, requested, credential_id)
+
+    def _clamp_effort(self, payload: dict[str, Any],
+                      cap: str | None) -> dict[str, Any]:
+        """把出站档位压到 `cap`（降级重试后的上限）；未设置时原样返回。"""
+        if cap is None:
+            return payload
+        effort = payload.get("reasoning_effort")
+        if not isinstance(effort, str) or not effort or effort == cap:
+            return payload
+        # 只可能由 `_downgrade_effort` 设值，cap 一定低于当时档位：
+        # 直接覆盖，不做二次排序比较（未知档位不参与推断）。
+        updated = dict(payload)
+        updated["reasoning_effort"] = cap
+        return updated
+
+    def _downgrade_effort(self, payload: dict[str, Any], message: str | None,
+                          already: bool) -> str | None:
+        """上游拒收档位时给出降一档的目标；不该降（已降过 / 无档位 / 非档位错）→ None。"""
+        if already:
+            return None
+        effort = payload.get("reasoning_effort")
+        if not isinstance(effort, str) or not effort:
+            return None
+        if not is_effort_rejection(message):
+            return None
+        return downgrade_effort(effort)
+
     def _stream_source(self, provider_id: str, credential_data: dict[str, Any],
                        payload: dict[str, Any], model: str,
                        credential_id: str | None = None) -> AsyncIterator[Event]:
@@ -1007,12 +1101,19 @@ class Executor:
             upstream_model, max_continues=max_continues)
 
     def _record_success(self, target: ModelTarget, state: _StreamState,
-                        provider_id: str, credential_id: str) -> None:
+                        provider_id: str, credential_id: str, *,
+                        truncated: bool = False) -> None:
         state.recorded = True
         usage = state.translator.usage
+        fields: dict[str, Any] = {}
+        if truncated:
+            # 只有截断才带 error_type：正常成功保持「无该键」（统计落库为 NULL），
+            # 与历史上成功行的形状一致。
+            fields["error_type"] = "truncated_stream"
         self._deps.record(
             username=state.username, provider=provider_id, credential_id=credential_id,
-            model=target.model, ok=True,
+            model=target.model, ok=not truncated,
+            **fields,
             input_tokens=_usage_field(usage, "input_tokens"),
             output_tokens=_usage_field(usage, "output_tokens"),
             reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
@@ -1121,6 +1222,9 @@ class Executor:
         # 当成流内错误，直接冷却换号。
         queue_rounds = 0
         pinned: tuple[str, dict[str, Any]] | None = None
+        # 推理档位降级：与 _stream_loop 同口径（上游拒档 → 原号降一档重试一次）
+        effort_cap: str | None = None
+        effort_retried = False
 
         while True:
             if pinned is not None:
@@ -1155,8 +1259,11 @@ class Executor:
             # 但实现必须无副作用——每轮都从原文出发），再按实际服务渠道映射档位
             payload = self._compress_payload(request, provider_id, target.model)
             payload = self._map_effort(provider_id, payload)
+            payload = self._clamp_effort(payload, effort_cap)
             self._debug_prefix(credential_id, provider_id, target.model, payload)
             events: list[Event] = []
+            # 上游自报模型名（首个带 model 的事件）：只用于静默替换观测
+            observed_model: str | None = None
             # 与 _stream_loop 同理：显式关闭上游流，让节流名额在每次尝试
             # 结束时同步归还，不依赖 GC 的 asyncgen finalize
             iterator = self._stream_source(
@@ -1176,6 +1283,10 @@ class Executor:
                         if hide_reasoning and event.kind is EventKind.REASONING:
                             # 出站剥离思考：上游仍照常生成，只是不交给客户端
                             continue
+                        if event.model and observed_model is None:
+                            observed_model = event.model
+                            self._check_model_substitution(
+                                target.model, event.model, provider_id, credential_id)
                         if (event.kind is EventKind.ERROR
                                 and _event_kind(event) is ErrKind.QUEUE):
                             # 排队信号必须在入 events **之前**拦下：进了 events
@@ -1247,6 +1358,17 @@ class Executor:
                                                   username=username, started=started)
                         last_error = error
                 elif kind is ErrKind.INVALID:
+                    # 推理档位被拒：原号降一档重试一次（非流式同一口径）
+                    lower = self._downgrade_effort(
+                        payload, _error_detail(error), effort_retried)
+                    if lower is not None:
+                        logger.warning(
+                            "上游 %s 不认推理档位 %s（凭证 %s）→ 降到 %s 原号重试",
+                            provider_id, payload.get("reasoning_effort"),
+                            credential_id, lower)
+                        effort_cap, effort_retried = lower, True
+                        pinned = (credential_id, credential_data)
+                        continue
                     # 请求无效（如该上游不认识模型）：不冷却凭证，
                     # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
                     logger.warning("上游 %s 拒绝模型 %s（凭证 %s 跳过）: %s",
@@ -1278,6 +1400,17 @@ class Executor:
                 except UpstreamStreamError as error:
                     kind = _event_kind(error.event)
                     if kind is ErrKind.INVALID:
+                        # 推理档位被拒（流内 error 事件形态）：原号降一档重试一次
+                        lower = self._downgrade_effort(
+                            payload, error.event.error_message, effort_retried)
+                        if lower is not None:
+                            logger.warning(
+                                "上游 %s 不认推理档位 %s（凭证 %s）→ 降到 %s 原号重试",
+                                provider_id, payload.get("reasoning_effort"),
+                                credential_id, lower)
+                            effort_cap, effort_retried = lower, True
+                            pinned = (credential_id, credential_data)
+                            continue
                         # 流内参数/模型错误：跳过该上游继续轮换，不冷却
                         logger.warning(
                             "上游 %s 流内拒绝模型 %s（凭证 %s 跳过）: code=%s %s",
@@ -1901,6 +2034,11 @@ class _StreamState:
     # 本次尝试输出的正文字符数：成功时与上游上报的 output_tokens 对账，
     # 比例离谱说明上游静默换了模型/截断（见 `_check_usage_consistency`）
     content_chars: int = 0
+    # 本次尝试是否见过终态事件（FINISH）：正常结束必须见过；没见过说明上游
+    # 连接正常关闭但响应不完整（见 `_record_success` 的 truncated 口径）
+    saw_finish: bool = False
+    # 上游自报的模型名（首个带 model 的事件）：只用于「静默替换」观测
+    observed_model: str | None = None
 
     def mark_first_byte(self) -> None:
         if self._first_byte_at is None:
@@ -1939,6 +2077,26 @@ def _event_kind(event: Event) -> ErrKind:
     `UpstreamStreamError.kind()` 共用 `event_error_kind`，避免两处兜底漂移。
     """
     return event_error_kind(event)
+
+
+# 上游把「未指定/自动路由」回显成这些占位名（实测 Qoder 每帧都回 `auto`）：
+# 占位名不构成「替换」证据，忽略，否则每条请求都刷一条假告警。
+_MODEL_PLACEHOLDERS = frozenset({"auto", "default", "unknown", "none"})
+
+
+def _model_mismatch(requested: str, observed: str) -> bool:
+    """上游自报模型与请求模型是否「明显不是同一个」。
+
+    容忍大小写与版本/日期后缀（`glm-5.2` vs `glm-5.2-20261001`）：双向都不
+    构成前缀关系才判为不一致——真正的静默替换（换成别的模型）才会命中。
+    """
+    left = requested.strip().lower()
+    right = observed.strip().lower()
+    if not left or not right or left == right:
+        return False
+    if right in _MODEL_PLACEHOLDERS:
+        return False
+    return not (left.startswith(right) or right.startswith(left))
 
 
 def _classify(error: Exception) -> ErrKind | None:

@@ -196,6 +196,16 @@ def parse_line(line: str, snapshot: TextSnapshot) -> list[Event]:
 
 
 def _events_from_payload(payload: dict[str, Any], snapshot: TextSnapshot) -> list[Event]:
+    events = _events_from_payload_raw(payload, snapshot)
+    model = payload.get("model")
+    if isinstance(model, str) and model:
+        for event in events:
+            event.model = model
+    return events
+
+
+def _events_from_payload_raw(payload: dict[str, Any],
+                             snapshot: TextSnapshot) -> list[Event]:
     error_code = payload.get("error_code")
     if isinstance(error_code, str) and error_code not in ("", "0"):
         # 业务错误内嵌在 HTTP 200 的流里：分类在解析时定死（单一来源）。

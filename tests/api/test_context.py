@@ -243,13 +243,16 @@ class _CacheStub:
 
 class _SettingsStub:
     def __init__(self, *, enabled=True, reserve=0, min_keep=4, ratio=1.0,
-                 prefix_debug=False, sticky=True):
+                 prefix_debug=False, sticky=True, tool_compress=False,
+                 tool_max_chars=8000):
         self.context_compress_enabled = enabled
         self.context_compress_reserve_tokens = reserve
         self.context_compress_min_keep_messages = min_keep
         self.context_compress_safety_ratio = ratio
         self.context_compress_sticky_enabled = sticky
         self.prefix_debug_enabled = prefix_debug
+        self.tool_output_compress_enabled = tool_compress
+        self.tool_output_compress_max_chars = tool_max_chars
 
 
 def test_context_window_looks_up_by_normalized_and_raw_name():
@@ -343,6 +346,45 @@ def test_compressor_skips_when_window_unknown_or_messages_missing():
         cache, {"codebuddy": {"m": "m"}}, _SettingsStub())
     payload2 = {}
     assert compress2("codebuddy", "m", payload2) is payload2
+
+
+def test_tool_compression_applies_even_when_context_compression_off():
+    """tool 输出压缩与窗口无关：上下文压缩关闭时也要生效（省 token 不复用裁剪）。"""
+    noisy = {"role": "tool", "content": "\x1b[31mfatal\x1b[0m\n" * 200}
+    payload = {"messages": [_user("hi"), noisy]}
+    compress = build_context_compressor(
+        {}, {}, _SettingsStub(enabled=False, tool_compress=True,
+                              tool_max_chars=100))
+
+    out = compress("codebuddy", "m", payload)
+
+    assert out is not payload
+    assert "\x1b[" not in out["messages"][1]["content"]
+    assert "fatal" in out["messages"][1]["content"]
+    # 入参不被修改
+    assert "\x1b[" in noisy["content"]
+
+
+def test_tool_compression_off_keeps_payload_identity():
+    noisy = {"role": "tool", "content": "fatal\n" * 200}
+    payload = {"messages": [noisy]}
+    compress = build_context_compressor({}, {}, _SettingsStub())
+    assert compress("codebuddy", "m", payload) is payload
+
+
+def test_tool_compression_noop_when_under_threshold():
+    """开关打开但 tool 结果没超阈值：零拷贝返回（不能为此重建 payload）。"""
+    payload = {"messages": [{"role": "tool", "content": "ok"}]}
+    compress = build_context_compressor(
+        {}, {}, _SettingsStub(enabled=False, tool_compress=True, tool_max_chars=100))
+    assert compress("codebuddy", "m", payload) is payload
+
+
+def test_tool_compression_ignores_non_list_messages():
+    payload = {"messages": "not-a-list"}
+    compress = build_context_compressor(
+        {}, {}, _SettingsStub(enabled=False, tool_compress=True))
+    assert compress("codebuddy", "m", payload) is payload
 
 
 def test_compressor_under_budget_is_noop():

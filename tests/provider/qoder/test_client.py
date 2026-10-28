@@ -855,3 +855,16 @@ async def test_stream_chat_succeeds_on_middle_gateway():
     assert [e.kind for e in events] == [EventKind.CONTENT, EventKind.FINISH]
     assert seen == ["gw1.test", "gw2.test"]                   # 中途主机成功即止
     await client.aclose()
+
+
+def test_parse_inner_chunk_attaches_upstream_reported_model():
+    events = qoder_events.parse_inner_chunk(json.dumps({
+        "model": "qwen3-coder",
+        "choices": [{"delta": {"content": "hi"}}],
+    }))
+    assert events[0].content == "hi"
+    assert events[0].model == "qwen3-coder"
+    # 不报模型时保持 None
+    plain = qoder_events.parse_inner_chunk(
+        json.dumps({"choices": [{"delta": {"content": "hi"}}]}))
+    assert plain[0].model is None

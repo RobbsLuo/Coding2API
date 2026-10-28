@@ -132,3 +132,33 @@ def thinking_effort(raw: str, thinking: object) -> str | None:
         if budget >= threshold:
             return None if effort == DELETE_EFFORT else effort
     return None
+
+
+# 档位从高到低（只覆盖已确认存在的档位）。降级链只在这条链上走一步：
+# 未知档位（渠道私有写法）不猜，直接放弃重试——猜错会把「高」降成别的语义。
+EFFORT_ORDER: tuple[str, ...] = ("xhigh", "high", "medium", "low", "minimal")
+
+# 「上游拒收该推理档位」的错误文案特征。保守到只认点名 effort / budget 的写法：
+# 泛化到「invalid」会把普通的参数错误也当成档位问题，白白多打一次上游。
+_EFFORT_REJECTION_MARKERS: tuple[str, ...] = (
+    "reasoning_effort", "reasoning effort", "unsupported effort",
+    "invalid effort", "effort level", "budget_tokens", "thinking budget",
+    "思考强度", "推理强度", "思考档位", "推理档位",
+)
+
+
+def downgrade_effort(effort: str) -> str | None:
+    """降一档；已是最低档 / 未知档位返回 None（调用方据此放弃重试）。"""
+    try:
+        index = EFFORT_ORDER.index(effort.strip().lower())
+    except ValueError:
+        return None
+    return EFFORT_ORDER[index + 1] if index + 1 < len(EFFORT_ORDER) else None
+
+
+def is_effort_rejection(message: str | None) -> bool:
+    """错误文案是否「不认这个推理档位」（大小写不敏感，None 视为否）。"""
+    if not isinstance(message, str) or not message:
+        return False
+    text = message.lower()
+    return any(marker in text for marker in _EFFORT_REJECTION_MARKERS)

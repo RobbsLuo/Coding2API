@@ -530,6 +530,7 @@ export type UsageErrorType =
   | "model_unavailable"
   | "no_healthy_credential"
   | "rate_limit"
+  | "truncated_stream"
   | "upstream_error"
   | "upstream_protocol"
   | "upstream_first_event_timeout"
@@ -545,6 +546,7 @@ export const USAGE_ERROR_LABEL: Record<UsageErrorType, string> = {
   model_unavailable: "该模型暂时不可用",
   no_healthy_credential: "无可用凭证",
   rate_limit: "额度耗尽",
+  truncated_stream: "上游截断",
   upstream_error: "渠道错误",
   upstream_protocol: "渠道响应异常",
   upstream_first_event_timeout: "上游首字超时",

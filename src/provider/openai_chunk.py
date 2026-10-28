@@ -123,7 +123,7 @@ def payload_of(frame: SSEFrame, label: str) -> dict[str, Any] | None:
     return payload
 
 
-def openai_event(
+def _parse_openai_event(
     payload: dict[str, Any],
     *,
     reasoning_keys: tuple[str, ...] = ("reasoning_content",),
@@ -197,7 +197,7 @@ def openai_events(
     payload = payload_of(frame, label)
     if payload is None:
         return []
-    representative = openai_event(
+    representative = _parse_openai_event(
         payload, reasoning_keys=reasoning_keys, error_event=error_event,
         error_as_string=error_as_string, usage=usage)
     events: list[Event] = [e for e in (representative,) if e is not None]
@@ -211,4 +211,31 @@ def openai_events(
     finish_reason = choice.get("finish_reason") if choice else None
     if isinstance(finish_reason, str) and finish_reason and not has_finish:
         events.append(Event(kind=EventKind.FINISH, finish_reason=finish_reason))
+    model = _payload_model(payload)
+    if model is not None:
+        for event in events:
+            event.model = model
     return events
+
+
+def _payload_model(payload: dict[str, Any]) -> str | None:
+    """上游 chunk 里自报的模型名（非空字符串才算；各渠道字段都叫 `model`）。"""
+    value = payload.get("model")
+    return value if isinstance(value, str) and value else None
+
+
+def openai_event(
+    payload: dict[str, Any],
+    *,
+    reasoning_keys: tuple[str, ...] = ("reasoning_content",),
+    error_event: Callable[[dict[str, Any]], Event] | None = None,
+    error_as_string: bool = False,
+    usage: Callable[[dict[str, Any]], Usage] = usage_from_openai,
+) -> Event | None:
+    """`_parse_openai_event` + 上游自报模型名（观测用，不参与任何改写）。"""
+    event = _parse_openai_event(
+        payload, reasoning_keys=reasoning_keys, error_event=error_event,
+        error_as_string=error_as_string, usage=usage)
+    if event is not None:
+        event.model = _payload_model(payload)
+    return event

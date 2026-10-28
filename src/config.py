@@ -364,6 +364,11 @@ class Settings(BaseSettings):
     # 前缀缓存才能命中（见 engine/sticky_trim.py）。关闭 = 旧行为（每轮按当轮
     # 预算重算，客户端每轮重发完整历史时只有 system 段可复用）。
     context_compress_sticky_enabled: bool = True
+    # tool 输出压缩（默认关）：只压 `role=tool` 且超过 max_chars 的纯文本，
+    # 去 ANSI + 折叠连续重复行 + 保留命中错误关键字的行。确定性：同输入同
+    # 输出，不破坏上游前缀缓存。max_chars ≤ 0 视为关闭（防御）。
+    tool_output_compress_enabled: bool = False
+    tool_output_compress_max_chars: int = 8000
     # 前缀缓存诊断：每个请求往日志写一行载荷指纹（消息数、system/tools 摘要、
     # 与同凭证同模型上一条请求的最长公共前缀序号、分叉处消息摘要）。只记摘要
     # 不记正文，用来定位命中率异常时前缀在哪条消息分叉。默认关（INFO 级噪音）。

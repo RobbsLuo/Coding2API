@@ -269,6 +269,8 @@ def health_score(q: Quota | None) -> int | None:
 
 热更：`CONTEXT_COMPRESS_ENABLED`（true）/ `CONTEXT_COMPRESS_RESERVE_TOKENS`（4096）/ `CONTEXT_COMPRESS_MIN_KEEP_MESSAGES`（4）/ `CONTEXT_COMPRESS_SAFETY_RATIO`（0.95）/ `CONTEXT_COMPRESS_STICKY_ENABLED`（true）。
 
+**tool 输出压缩**（`engine/tool_output.py`，默认关）：只压 `role=tool` 且超过 `TOOL_OUTPUT_COMPRESS_MAX_CHARS`（8000）的纯文本 content——去 ANSI 转义、折叠连续重复行（`xxx (×N)`）、超长时保留「头 40 行 + 尾 40 行 + 命中错误关键字的行」并标注 `[... 省略 K 行 ...]`。错误行永不丢（避免把「为什么失败」压没）。压缩是**确定性**的：同输入同输出，客户端每轮重发完整历史时压出的前缀逐字相同，不破坏上游前缀缓存；不做模型化摘要。与窗口无关，窗口未知/未超限也生效（省的是 token 不是长度）；关闭时载荷逐字节不变。
+
 **粘性裁剪**（`engine/sticky_trim.py`，默认开）：上面「每轮按当轮预算重算最近 N 条」有一个致命副作用——客户端每轮**重发完整历史**时，多一轮就多一条消息，保留窗口的起点每轮前移一条，发往上游的前缀从第 2 条消息起就变了，上游前缀缓存只剩 `system` 段可命中。实测 qoder 单号 32 条请求里 21 条 `reusable=1`（命中率 25%）。
 
 改为：只在超预算时裁，且一次裁到 `budget × 0.6`，把保留窗口的起点（正文绝对序号）与该条消息摘要记进进程内 LRU（按「渠道 + 模型 + 会话身份」）。之后每轮只要起点消息没变、仍是消息组边界、裁后总量仍在预算内，就沿同一起点——前缀逐字相同，缓存正常命中；直到新增消息把总量顶回预算才再裁一次。历史被改写（摘要对不上）或分组变了就丢弃记忆重裁，宁可多裁一次也不发错上下文。关闭开关即回到旧行为。
@@ -308,6 +310,8 @@ def health_score(q: Quota | None) -> int | None:
 **③ `ANTHROPIC_THINKING_EFFORTS`**（默认空）：`budget_tokens` → `reasoning_effort`，格式 `预算:档位,…,disabled:档位`；取「阈值 ≤ budget 的最大档」，低于最小阈值不映射。**留空 = 完全不映射**。Anthropic 只规定 `budget_tokens ≥ 1024`、未给对应表 → 阈值须显式配置。未知 `thinking.type` 与非法预算不映射。结果写入 `ChatRequest.raw` → 再经 ② 映射。
 
 解析宽容：`engine/reasoning.py` 忽略空段 / 缺分隔符 / 非整数阈值 → 一行笔误不连累其他条目，不抛异常。
+
+**④ 档位自适应降级**（默认行为，无需配置）：上游明确拒收 `reasoning_effort`（HTTP 400 或流内 error 事件，文案命中 `reasoning_effort` / `effort level` / `budget_tokens` / 「推理档位」等标记）时，在**原号**上降一档重试一次（`xhigh→high→medium→low→minimal`），不换号、不冷却、不计入轮换预算。降级后的档位作为本次请求剩余尝试的上限（`_clamp_effort`）。只降一档：第二次仍被拒或已是最低档/未知档位 → 走既有 INVALID 路径（换上游，全拒才 400）。已出帧（`emitted`）后不重试（半截输出不可回滚）。
 
 ## 4. Provider 协议
 ```python
@@ -562,6 +566,10 @@ class Scheduler:
 ```
 
 客户端断连：生成器关闭 / 取消 → 统计 `error_type=client_disconnect` + 关闭上游流；例外：`[DONE]` 已产出后的收尾断开（框架在结束帧 `more_body=False` 前有一拍竞态）按成功记账。
+
+流截断：上游 HTTP 200 正常关闭、但本次尝试从未产出终态事件（`EventKind.FINISH`）→ 响应不完整。凭证照常 `save_success`（上游没报错，冷却只会误伤健康号），统计记 `ok=False` + `error_type=truncated_stream`，客户端仍收到收尾帧与 `[DONE]`。
+
+上游模型观测：`Event.model`（各渠道协议里有 `model` 就填）与请求模型做一次按尝试的比较；双向都不构成前缀关系（`glm-5.2` vs `glm-5.2-20261001` 视为一致）时只写 WARNING「疑似静默替换」——不改响应、不冷却凭证、不写 `error_type`（与用量对账 `_check_usage_consistency` 同口径：观测信号不进失败归因，避免成功率虚低）。
 
 ## 8. 数据库
 DDL 以 `src/db/schema.sql` 为准。`SCHEMA_VERSION = 29`，13 张表：`api_keys` / `credentials` / `credential_limits` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `model_probes` / `runtime_settings` / `alert_events`。

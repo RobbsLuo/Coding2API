@@ -465,6 +465,8 @@ describe("display helpers", () => {
     // A1 流式超时：两个新枚举都要有中文文案（不能落到兜底「失败（xxx）」）
     expect(usageErrorLabel("upstream_first_event_timeout")).toBe("上游首字超时");
     expect(usageErrorLabel("upstream_idle_timeout")).toBe("上游流中断");
+    // 截断流：上游正常关闭但没走到终态（2026-10-28 新增，不冷却凭证）
+    expect(usageErrorLabel("truncated_stream")).toBe("上游截断");
     expect(usageErrorLabel(null)).toBe("失败");
     expect(usageErrorLabel(undefined)).toBe("失败");
     // 后端新增枚举时前端不能显示空白：兜底文案带原值便于对照排查

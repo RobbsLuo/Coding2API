@@ -75,6 +75,38 @@ async def test_stream_records_success_with_usage_and_username(repo):
     assert event["latency_ms"] is not None
     assert event["ttfb_ms"] is not None
 
+async def test_stream_without_finish_frame_records_truncated_stream(repo):
+    """上游正常关闭但没走到终态：不冷却凭证，但按 truncated_stream 留痕。
+
+    口径（2026-10-28）：连接正常结束 ≠ 响应完整。凭证照常 save_success
+    （上游没报错，冷却只会误伤健康号），统计里记 ok=False + truncated_stream，
+    客户端仍收到收尾帧。
+    """
+    credentials, _db = repo
+    credential_id = credentials.add(provider="codebuddy",
+                                    credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+    executor = _exec_with_stats(
+        repo, [[Event(kind=EventKind.CONTENT, content="hi"),
+                Event(kind=EventKind.USAGE, usage=Usage(11, 22, 3))]], collector)
+
+    from src.compat.openai.request import parse_chat_request
+
+    frames = [frame async for frame in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}),
+        username="alice")]
+
+    event = collector.events[-1]
+    assert event["ok"] is False and event["error_type"] == "truncated_stream"
+    # tokens 如实记录（已收到的用量仍要计费）
+    assert event["input_tokens"] == 11 and event["output_tokens"] == 22
+    # 凭证健康不受影响：不计错、不冷却
+    candidate = next(c for c in credentials.candidates()
+                     if c.credential_id == credential_id)
+    assert candidate.err_count == 0 and candidate.cooling_until is None
+    # 客户端仍收到 [DONE] 收尾帧
+    assert b"[DONE]" in b"".join(frames)
+
 async def test_stream_without_usage_frame_records_null_tokens(repo):
     """上游没给 usage 时统计字段为 None，不能崩也不能写 0。"""
     credentials, _db = repo
@@ -345,6 +377,7 @@ def test_blocked_error_type_is_controlled():
 
     assert "model_not_found" in CONTROLLED_ERROR_TYPES
     assert "account_restricted" in CONTROLLED_ERROR_TYPES
+    assert "truncated_stream" in CONTROLLED_ERROR_TYPES
 
 
 async def test_dead_credential_also_records_attribution_row(repo):

@@ -511,6 +511,9 @@ class Event:
     # 上游点名「过多久再来」（秒）：目前只有排队信号带它。executor 据此决定
     # 在原号上等多久再重开；None 表示上游没给，按 `QUEUE_DEFAULT_WAIT_SECONDS`。
     retry_after_seconds: float | None = None
+    # 上游响应的模型名（协议里有就填，缺省 None）：executor 只用来做
+    # 「静默替换模型」观测，不一致时只告警、不改响应、不冷却凭证。
+    model: str | None = None
 
 
 def event_error_kind(event: Event) -> ErrKind:

@@ -106,6 +106,16 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "system 段可复用，命中率会掉到个位数）。关闭 = 每轮按当轮预算"
                "重算，只有前缀本来就单调增长时才划算。",
                group="compress"),
+    HotSetting("tool_output_compress_enabled", bool, "tool 输出压缩",
+               "开启后只压缩 `role=tool` 且超过阈值（下一项）的纯文本结果："
+               "去掉 ANSI 转义、折叠连续重复行、保留命中错误关键字的行。"
+               "确定性压缩（同输入同输出），不破坏上游前缀缓存；"
+               "默认关，关闭时载荷逐字节不变。",
+               group="compress"),
+    HotSetting("tool_output_compress_max_chars", int, "tool 输出压缩：字符阈值",
+               "单条 tool 结果超过该字符数才压缩（≤0 视为关闭）。"
+               "默认 8000（约 2K token 纯 ASCII）。",
+               minimum=0, group="compress"),
     HotSetting("model_fallback_groups", str, "跨渠道 fallback 兼容组",
                "请求模型在主渠道全部不可用时，按兼容组依次回退到组内其他模型。"
                "格式 `组名=成员1,成员2;组名2=成员3`；成员可带 `@渠道` 固定回退渠道。"
@@ -776,6 +786,14 @@ class RuntimeSettings:
     @property
     def context_compress_sticky_enabled(self) -> bool:
         return bool(self.get("context_compress_sticky_enabled"))
+
+    @property
+    def tool_output_compress_enabled(self) -> bool:
+        return bool(self.get("tool_output_compress_enabled"))
+
+    @property
+    def tool_output_compress_max_chars(self) -> int:
+        return int(self.get("tool_output_compress_max_chars"))
 
     @property
     def conversation_sticky_seconds(self) -> int:

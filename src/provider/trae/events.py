@@ -66,24 +66,25 @@ def parse_frame(frame: SSEFrame) -> Event | None:
         raise UpstreamProtocolViolation(f"SSE data for {name!r} is not an object")
 
     if name == "output":
-        return _parse_output(payload)
+        return _attach_model(_parse_output(payload), payload)
     if name == "token_usage":
-        return Event(kind=EventKind.USAGE, usage=_parse_usage(payload))
+        return _attach_model(Event(kind=EventKind.USAGE, usage=_parse_usage(payload)),
+                             payload)
     if name == "done":
         reason = payload.get("finish_reason")
         finish = reason if isinstance(reason, str) else None
-        return Event(kind=EventKind.FINISH, finish_reason=finish)
+        return _attach_model(Event(kind=EventKind.FINISH, finish_reason=finish), payload)
     if name == "error":
         code = payload.get("code")
         message = payload.get("message")
         normalized_code = code if isinstance(code, int) and not isinstance(code, bool) else None
-        return Event(
+        return _attach_model(Event(
             kind=EventKind.ERROR,
             error_code=normalized_code,
             error_message=message if isinstance(message, str) else None,
             # 分类在解析时定死（单一来源）；executor 直接消费
             error_kind=classify_error_code(normalized_code),
-        )
+        ), payload)
     # name ∈ KNOWN_EVENT_NAMES，上面分支已穷尽；防御未来新增名字漏写分支
     raise UpstreamProtocolViolation(  # pragma: no cover
         f"unhandled known event {name!r}")
@@ -257,3 +258,11 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
         # 换凭证没用 → 跳过该上游；其余 400 同样按请求无效处理
         return ErrKind.INVALID
     return ErrKind.OTHER
+
+
+def _attach_model(event: Event | None, payload: dict[str, Any]) -> Event | None:
+    """把上游自报的模型名挂到事件上（观测用；缺省保持 None）。"""
+    model = payload.get("model")
+    if event is not None and isinstance(model, str) and model:
+        event.model = model
+    return event

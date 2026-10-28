@@ -152,3 +152,14 @@ def test_blank_nameless_tool_call_is_dropped(arguments):
     events = trae_events.parse_all_events(
         trae_events.SSEFrame(event="output", data=payload))
     assert EventKind.TOOL_CALLS not in [e.kind for e in events]
+
+
+def test_output_frame_attaches_upstream_reported_model():
+    """TRAE 帧里带 model 时挂到事件上（观测用）。"""
+    frame = trae_events.SSEFrame(
+        event="output",
+        data='{"model":"trae-model","response":"hi","reasoning_content":"",'
+             '"tool_calls":null}')
+    assert trae_events.parse_frame(frame).model == "trae-model"
+    plain = trae_events.SSEFrame(event="output", data='{"response":"hi"}')
+    assert trae_events.parse_frame(plain).model is None

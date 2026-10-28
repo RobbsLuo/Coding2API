@@ -36,12 +36,14 @@ CONTROLLED_ERROR_TYPES = frozenset({
     #   upstream_error / upstream_protocol — 其它上游失败
     #   upstream_first_event_timeout — 出帧前上游不吐首个数据事件（A1）
     #   upstream_idle_timeout        — 已出帧后上游停止吐数据（A1）
+    #   truncated_stream             — 流正常关闭但没走到终态（不冷却凭证，只留痕）
     "client_disconnect", "credential_unavailable",
     "account_restricted",
     "invalid_request", "model_not_found", "no_healthy_credential",
     "model_unavailable",
     "rate_limit", "upstream_error", "upstream_protocol",
     "upstream_first_event_timeout", "upstream_idle_timeout",
+    "truncated_stream",
 })
 MAX_MODEL_LENGTH = 64
 

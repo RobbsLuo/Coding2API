@@ -428,6 +428,10 @@ def parse_inner_chunk(body: str) -> list[Event]:
         events.append(Event(kind=EventKind.USAGE, usage=_usage(usage)))
     if finish_reason is not None:
         events.append(Event(kind=EventKind.FINISH, finish_reason=finish_reason))
+    model = payload.get("model")
+    if isinstance(model, str) and model:
+        for event in events:
+            event.model = model
     return events
 
 
