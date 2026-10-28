@@ -1,0 +1,43 @@
+# 公网入口（Docker）：Caddy 终止 TLS，反代到同网络的 coding2api:PORT。
+#
+# 由 `docker compose -f docker-compose.yml -f docker-compose.public.yml` 启动，
+# 环境变量来自 compose（PUBLIC_DOMAIN / ACME_EMAIL / PORT，见 .env）。
+# 证书与 ACME 账号落 /data（compose 具名卷 caddy_data）——**别 `down -v`**，
+# 清掉会重新申请，撞 Let's Encrypt 每周同域名 5 次的下发限额。
+#
+# 本地校验语法（不起服务）：
+#   docker run --rm -e PUBLIC_DOMAIN=ai-api.example.com -e ACME_EMAIL=ops@example.com \
+#     -e PORT=8000 -v "$PWD/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+#     caddy:2.11.7-alpine caddy validate --config /etc/caddy/Caddyfile
+{
+	# Let's Encrypt 到期通知收件人；compose 侧已要求必填（留空时 email 指令会少参数报错）
+	email {$ACME_EMAIL}
+}
+
+{$PUBLIC_DOMAIN} {
+	# /metrics 无鉴权，公网入口直接摘掉，需要时从宿主 127.0.0.1:${PORT} 直取
+	@metrics path /metrics
+	respond @metrics 404
+
+	# 压缩：SSE 响应不落这条（Caddy 跳过 event-stream）
+	encode zstd gzip
+
+	# 上游超时一律交给应用自己的口径（STREAM_*_TIMEOUT_SECONDS /
+	# UPSTREAM_COMPLETE_TIMEOUT_SECONDS）——反代再加一层会先掐断长请求
+	reverse_proxy coding2api:{$PORT} {
+		# 关掉响应缓冲：逐帧下发，否则流式首字要等到缓冲区满
+		flush_interval -1
+		# 客户端可自带 XFF 伪造来源 IP（API Key 的 allowed_ips）：只认直连对端，
+		# 覆盖式写入单值。TRUST_PROXY=true 才让应用采信它。
+		header_up X-Forwarded-For {http.request.remote.host}
+		header_up X-Forwarded-Proto {scheme}
+		transport http {
+			dial_timeout 10s
+		}
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}
