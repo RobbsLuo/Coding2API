@@ -181,6 +181,10 @@ class Settings(BaseSettings):
     # webhook。webhook 留空 = 只留站内记录、不外推。
     alert_enabled: bool = True
     alert_webhook_url: str = ""
+    # 额外出口：飞书 / Slack 的入站 Webhook 地址（留空 = 不启用）。消息体
+    # 按各自格式单独构造，通用 webhook 仍发完整 JSON + 签名。
+    alert_feishu_webhook_url: str = ""
+    alert_slack_webhook_url: str = ""
     alert_interval_minutes: int = 5         # 评估周期（分钟），下限 1
     alert_silence_minutes: int = 30         # 同一 (规则, 对象) 的静默窗（分钟）
     # 告警迟滞：连续命中 N 轮才告警、连续 M 轮未命中才确认恢复。

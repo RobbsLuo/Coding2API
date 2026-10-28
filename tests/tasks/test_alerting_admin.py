@@ -347,3 +347,22 @@ def test_env_webhook_url_is_validated_at_load(tmp_path):
     with pytest.raises(InvalidSetting, match="内网/回环/保留"):
         load_runtime_settings(base, RuntimeSettingsRepository(db))
     db.close()
+
+
+def test_feishu_and_slack_urls_share_webhook_validation(tmp_path):
+    """新增出口与通用 webhook 同一套 URL 校验，不能成为 SSRF 侧门。"""
+    from src.db.repo import RuntimeSettingsRepository
+    from src.runtime_settings import InvalidSetting, load_runtime_settings
+
+    db = Database(tmp_path / "t2.sqlite3")
+    apply_schema(db.connect())
+    base = Settings(_env_file=None, APP_SECRET=SECRET)
+    runtime = load_runtime_settings(base, RuntimeSettingsRepository(db))
+    for key in ("alert_feishu_webhook_url", "alert_slack_webhook_url"):
+        with pytest.raises(InvalidSetting, match="只支持 http/https"):
+            runtime.set_many({key: "file:///etc/passwd"})
+        with pytest.raises(InvalidSetting, match="内网/回环/保留"):
+            runtime.set_many({key: "http://127.0.0.1/x"})
+        runtime.set_many({key: "https://hooks.example/x"})
+        assert getattr(runtime, key) == "https://hooks.example/x"
+    db.close()

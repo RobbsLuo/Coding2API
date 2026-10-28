@@ -46,6 +46,8 @@ services:
       # webhook 留空 = 只留站内记录、不外推（多个地址用逗号分隔）
       ALERT_ENABLED: ${ALERT_ENABLED:-true}
       ALERT_WEBHOOK_URL: ${ALERT_WEBHOOK_URL:-}
+      ALERT_FEISHU_WEBHOOK_URL: ${ALERT_FEISHU_WEBHOOK_URL:-}
+      ALERT_SLACK_WEBHOOK_URL: ${ALERT_SLACK_WEBHOOK_URL:-}
       ALERT_INTERVAL_MINUTES: ${ALERT_INTERVAL_MINUTES:-5}
       # 同一 (规则, 对象) 的静默窗（分钟）；0 关闭静默（每轮都报）
       ALERT_SILENCE_MINUTES: ${ALERT_SILENCE_MINUTES:-30}

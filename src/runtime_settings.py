@@ -271,6 +271,13 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("alert_webhook_url", str, "告警 Webhook 地址",
                "命中告警时 POST JSON 的地址，多个用逗号分隔；留空 = 只在管理台"
                "留站内记录、不外推。", task="alert", section="基础与迟滞"),
+    HotSetting("alert_feishu_webhook_url", str, "飞书机器人 Webhook",
+               "飞书群自定义机器人的入站地址；留空 = 不推飞书。消息按飞书"
+               "文本卡片格式发送（msg_type=text）。",
+               task="alert", section="基础与迟滞"),
+    HotSetting("alert_slack_webhook_url", str, "Slack Incoming Webhook",
+               "Slack 入站 Webhook 地址；留空 = 不推 Slack。消息体为 {text}。",
+               task="alert", section="基础与迟滞"),
     HotSetting("alert_interval_minutes", int, "运维告警周期（分钟）",
                "后台评估四类风险的一轮间隔；下限 1 分钟。", minimum=1,
                task="alert", section="基础与迟滞", floor=1),
@@ -453,7 +460,8 @@ def _coerce(spec: HotSetting, raw: Any) -> Any:
         raise InvalidSetting(f"{spec.key} 不能小于 {spec.minimum}")
     if spec.maximum is not None and value > spec.maximum:
         raise InvalidSetting(f"{spec.key} 不能大于 {spec.maximum}")
-    if spec.key == "alert_webhook_url":
+    if spec.key in ("alert_webhook_url", "alert_feishu_webhook_url",
+                    "alert_slack_webhook_url"):
         _validate_webhook_urls(value)
     return value
 
@@ -908,6 +916,14 @@ class RuntimeSettings:
     @property
     def alert_webhook_url(self) -> str:
         return str(self.get("alert_webhook_url"))
+
+    @property
+    def alert_feishu_webhook_url(self) -> str:
+        return str(self.get("alert_feishu_webhook_url"))
+
+    @property
+    def alert_slack_webhook_url(self) -> str:
+        return str(self.get("alert_slack_webhook_url"))
 
     @property
     def alert_interval_minutes(self) -> int:

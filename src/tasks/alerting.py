@@ -381,6 +381,8 @@ class AlertTask:
         task_status: TaskStatusStore,
         enabled: Callable[[], bool] = lambda: True,
         webhook_url: Callable[[], str] = lambda: "",
+        feishu_url: Callable[[], str] = lambda: "",
+        slack_url: Callable[[], str] = lambda: "",
         pool_ready_min: Callable[[], int] = lambda: 1,
         task_failures: Callable[[], int] = lambda: 3,
         token_expiry_hours: Callable[[], int] = lambda: 24,
@@ -407,6 +409,8 @@ class AlertTask:
         self._task_status = task_status
         self._enabled = enabled
         self._webhook_url = webhook_url
+        self._feishu_url = feishu_url
+        self._slack_url = slack_url
         self._pool_ready_min = pool_ready_min
         self._task_failures = task_failures
         self._token_expiry_hours = token_expiry_hours
@@ -566,22 +570,16 @@ class AlertTask:
         只等单次超时；总预算再兜一层，防止 `_post` 的自建 client 路径
         （其 timeout 是每请求的）在地址很多时累积超时。
         """
-        urls = [u.strip() for u in self._webhook_url().split(",") if u.strip()]
-        if not urls:
+        targets = self._targets(alert, status, now)
+        if not targets:
             return False, None
-        resolved = status == "resolved"
-        payload = {
-            "service": "coding2api", "rule": alert.rule, "severity": alert.severity,
-            "scope": alert.scope, "status": status,
-            "message": (f"已恢复：{alert.public_message()}" if resolved
-                        else alert.public_message()),
-            "detail": _public_detail(alert.detail), "ts": now,
-        }
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        signature = sign_webhook_body(self._app_secret(), body)
         try:
             results = await asyncio.wait_for(
-                asyncio.gather(*(self._deliver_one(url, body, signature) for url in urls)),
+                asyncio.gather(*(
+                    self._deliver_one(url, body,
+                                      sign_webhook_body(self._app_secret(), body))
+                    for url, body in targets
+                )),
                 timeout=_WEBHOOK_TOTAL_BUDGET,
             )
         except TimeoutError:
@@ -590,6 +588,39 @@ class AlertTask:
             return False, "TimeoutError: webhook delivery budget exceeded"
         errors = [error for error in results if error is not None]
         return (not errors), (errors[0] if errors else None)
+
+    def _targets(self, alert: Alert, status: str, now: int) -> list[tuple[str, bytes]]:
+        """本轮全部投递目标 → [(地址, 预序列化 body)]。
+
+        通用 webhook 发完整 JSON（带签名，收端可复算）；飞书 / Slack 各自只认
+        自己的格式，故按渠道单独构造。不同渠道 body 不同、签名逐 body 计算，
+        签名仍覆盖实际发送的字节。未配置任何渠道时返回空列表（仅站内记录）。
+        """
+        resolved = status == "resolved"
+        message = (f"已恢复：{alert.public_message()}" if resolved
+                   else alert.public_message())
+        targets: list[tuple[str, bytes]] = []
+        for url in (item.strip() for item in self._webhook_url().split(",")):
+            if not url:
+                continue
+            payload = {
+                "service": "coding2api", "rule": alert.rule,
+                "severity": alert.severity, "scope": alert.scope, "status": status,
+                "message": message,
+                "detail": _public_detail(alert.detail), "ts": now,
+            }
+            targets.append((url, json.dumps(payload, ensure_ascii=False).encode("utf-8")))
+        feishu = self._feishu_url().strip()
+        if feishu:
+            # 飞书自定义机器人文本消息；不带 detail（可能含内部标识）
+            targets.append((feishu, json.dumps(
+                {"msg_type": "text", "content": {"text": f"Coding2API · {message}"}},
+                ensure_ascii=False).encode("utf-8")))
+        slack = self._slack_url().strip()
+        if slack:
+            targets.append((slack, json.dumps(
+                {"text": f"Coding2API · {message}"}, ensure_ascii=False).encode("utf-8")))
+        return targets
 
     async def _deliver_one(self, url: str, body: bytes, signature: str) -> str | None:
         """投递单个地址；失败只记日志并返回脱敏后的错误串，不抛出。

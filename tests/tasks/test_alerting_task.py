@@ -707,3 +707,53 @@ async def test_alert_task_budget_level_upgrade_resolves_old_level(tmp_path):
     # 50% 档已被写成恢复（resolved_at 非空），不再算未恢复
     unresolved = [row["scope"] for row in alerts.unresolved()]
     assert unresolved == ["budget_80"]
+
+async def test_alert_task_delivers_feishu_and_slack_shapes(tmp_path):
+    """飞书 / Slack 各按自己的消息格式发送，仍带签名头。"""
+    seen: list[tuple[str, dict, str | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append((request.url.host, json.loads(request.content),
+                     request.headers.get("X-Coding2API-Signature")))
+        return httpx.Response(200)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    task, alerts, db = _task(
+        tmp_path, credentials=_StubCredentials(counts={"total": 1, "ready": 0}),
+        feishu_url=lambda: "https://open.feishu.cn/hook/f",
+        slack_url=lambda: "https://hooks.slack.example/s",
+        client=client, now=lambda: 5, app_secret=lambda: "secret")
+    report = await task.run_once()
+    assert report["delivered"] == 1
+    assert alerts.recent()[0]["delivered"] == 1
+
+    by_host = {host: body for host, body, _ in seen}
+    feishu = by_host["open.feishu.cn"]
+    assert feishu["msg_type"] == "text"
+    assert "Coding2API" in feishu["content"]["text"]
+    slack = by_host["hooks.slack.example"]
+    assert set(slack) == {"text"} and "Coding2API" in slack["text"]
+    assert all(signature for _, _, signature in seen)
+    await client.aclose()
+    db.close()
+
+async def test_alert_task_channel_failure_isolated(tmp_path):
+    """一个渠道失败不影响其它渠道发送，但整体不算投递成功。"""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.host)
+        return httpx.Response(500 if request.url.host.endswith("feishu.cn") else 200)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    task, alerts, db = _task(
+        tmp_path, credentials=_StubCredentials(counts={"total": 1, "ready": 0}),
+        feishu_url=lambda: "https://open.feishu.cn/hook/f",
+        slack_url=lambda: "https://hooks.slack.example/s",
+        client=client, now=lambda: 5)
+    report = await task.run_once()
+    assert sorted(calls) == ["hooks.slack.example", "open.feishu.cn"]
+    assert report["delivered"] == 0
+    assert alerts.recent()[0]["delivery_error"] is not None
+    await client.aclose()
+    db.close()

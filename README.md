@@ -579,6 +579,7 @@ tabs 切四维（渠道 / 模型 / 用户 / 凭证），共用一表（渠道 / 
 
 - **静默窗**：同一 `(规则, 对象)` 窗口内只落库 / 推送一次。
 - **迟滞**：连续命中 N 轮才告警；连续未命中 M 轮才确认恢复。恢复时给该 `(规则, 对象)` 全部未恢复行写 `resolved_at`，并外推 `status="resolved"` webhook。
+- **多出口**：通用 Webhook（完整 JSON + 签名）+ 飞书机器人（文本消息）+ Slack Incoming Webhook 可同时配置；任一渠道失败不影响其它渠道发送，但整体记为未投递成功。
 - **重启自愈**：迟滞计数进程内维护；「哪些未恢复」从库里重建。
 - **人工处置**：「标记恢复」（admin + CSRF + 审计）只标该行。
 - **保留期**：同请求明细（默认 90 天）。
@@ -634,7 +635,9 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `CHECKIN_JITTER_MINUTES` | `0` | 签到抖动（分钟），时点前随机提前。可热更 |
 | `LOG_BUFFER_LINES` | `500` | 服务端日志页缓冲行数；`0` 关该页。可热更 |
 | `ALERT_ENABLED` | `true` | 运维告警开关 |
-| `ALERT_WEBHOOK_URL` | 空 | Webhook，逗号分隔（≤16，仅 http(s)，拒内网 / 回环防 SSRF），带 `X-Coding2API-Signature` |
+| `ALERT_WEBHOOK_URL` | 空 | 通用 Webhook，逗号分隔（≤16，仅 http(s)，拒内网 / 回环防 SSRF），带 `X-Coding2API-Signature` |
+| `ALERT_FEISHU_WEBHOOK_URL` | 空 | 飞书群机器人地址；按 `msg_type=text` 发送，URL 校验同通用 Webhook |
+| `ALERT_SLACK_WEBHOOK_URL` | 空 | Slack Incoming Webhook 地址；按 `{text}` 发送，URL 校验同通用 Webhook |
 | `ALERT_INTERVAL_MINUTES` | `5` | 告警评估周期 |
 | `ALERT_SILENCE_MINUTES` | `30` | 同 `(规则, 对象)` 静默窗；`0` 关闭 |
 | `ALERT_FOR_TICKS` | `1` | 进入迟滞轮数 |
