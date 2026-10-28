@@ -45,3 +45,31 @@ def test_credential_data_round_trip(repo):
 def test_credential_data_returns_none_for_missing_credential(repo):
     credentials, _db = repo
     assert credentials.credential_data("cred_missing") is None
+
+
+def test_has_same_credential_matches_provider_and_content(repo):
+    """批量导入去重：同渠道 + 解密后内容完全一致才命中。"""
+    credentials, _db = repo
+    credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    credentials.add(provider="qoder", credential_data={"accessToken": "a"})
+
+    assert credentials.has_same_credential("trae", {"accessToken": "a"}) is True
+    assert credentials.has_same_credential("trae", {"accessToken": "b"}) is False
+    # 同内容不同渠道不算重复
+    assert credentials.has_same_credential("codebuddy", {"accessToken": "a"}) is False
+
+
+def test_has_same_credential_skips_undecryptable_rows(repo):
+    """坏密文行跳过，不阻断整批导入（继续比对后面的好行）。"""
+    credentials, db = repo
+    other = CredentialCipher("a-completely-different-secret")
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO credentials (id, provider, nickname, data_enc, created_at, "
+            "added_by, tags) VALUES ('cred_bad', 'trae', '', ?, 1, '', '')",
+            (other.encrypt(b'{"accessToken": "broken"}'),),
+        )
+    credentials.add(provider="trae", credential_data={"accessToken": "good"})
+
+    assert credentials.has_same_credential("trae", {"accessToken": "good"}) is True
+    assert credentials.has_same_credential("trae", {"accessToken": "nope"}) is False

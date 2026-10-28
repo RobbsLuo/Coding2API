@@ -195,6 +195,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 13 张表，`SCHEMA_
 - 账号：`GET|POST /api/users`、`PATCH /api/users/{username}`、`PUT /api/users/{username}/policy`（用户级模型白名单 + 配额）、`POST /api/users/{username}/{disable|enable|reset-password}`（**无 DELETE**）；`POST /api/auth/password`；`GET|POST /api/auth/activate`；`GET /api/audit`。
 - 凭证运维：`POST /api/credentials/{id}/checkin|toggle|revive|probe|accounts/select`、`PUT /api/credentials/{id}/limits`、`GET|POST /api/credentials/{id}/growth`、`GET /api/credentials/{id}/credit-events|accounts`。
 - 批量：`POST /api/credentials/batch`（`probe|toggle|checkin|revive`）。逐条隔离，响应 `{total, succeeded, failed, results[]}`；`toggle`/`revive` 落一条汇总审计。
+- 批量导入：`POST /api/credentials/batch-import`（`items[]`，≤100 条）。逐条校验，响应 `{created[], skipped[], failed[]}` 均带 `index`；同渠道内容完全一致去重；逐条审计 + 入队探测。
 - 配置与任务：`GET|PUT /api/settings` + `GET /api/tasks` + `POST /api/tasks/{key}/run`。列表端点统一 `sort` + `order`；未知键回落默认。回调：`GET /authorize`。
 - 告警：`GET /api/alerts` + `POST /api/alerts/{id}/resolve`。`AlertTask` 启动时从库里未恢复的行重建集合。规则八类：池耗尽、任务连续失败、token 到期、上游错误率、单 Key 用量暴涨、非工作时段请求、**预算分层（50/80/95/100%）**（后三类默认阈值 0 = 关闭；不存 IP，故不做「多 IP 同 Key」）。
 - 上游状态：`GET /api/upstream-status`（operator）返回内存快照 + 任务运行态；**不落盘**。四种解析器归一化到六档，加源只在 `SOURCE_SPECS` 加一行。

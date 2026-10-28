@@ -609,6 +609,24 @@ class CredentialRepository:
             "SELECT provider FROM credentials WHERE id = ?", (credential_id,)).fetchone()
         return row["provider"] if row else None
 
+    def has_same_credential(self, provider: str, credential_data: dict[str, Any]) -> bool:
+        """同渠道是否已有内容完全相同的凭证（批量导入去重用）。
+
+        逐行解密比对是 O(渠道内凭证数)：批量导入是低频操作，且只跑一次；
+        为它加指纹列/索引不划算。某行密文损坏（换过 APP_SECRET 等）时跳过该行，
+        不能让一条坏数据把整批导入挡住。
+        """
+        rows = self._db.connect().execute(
+            "SELECT data_enc FROM credentials WHERE provider = ?", (provider,)).fetchall()
+        for row in rows:
+            try:
+                existing = json.loads(self._cipher.decrypt(row["data_enc"]).decode("utf-8"))
+            except Exception:  # noqa: BLE001 - 坏行跳过，见 docstring
+                continue
+            if existing == credential_data:
+                return True
+        return False
+
     def pool_counts(self, now: int | None = None) -> dict[str, int]:
         """池健康计数（/healthz）：四类互斥且合计等于 total。
 

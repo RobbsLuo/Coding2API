@@ -28,6 +28,7 @@ import {
   ToggleLeft,
   Trash2,
   TriangleAlert,
+  Upload,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -48,6 +49,7 @@ import { useSessionContext } from "../Layout";
 import { useCredentials, usePlaygroundModels, useQueryClient } from "../api/hooks";
 import { PoolOverview } from "../components/PoolOverview";
 import { AddCredentialDialog } from "../components/AddCredentialDialog";
+import { BatchImportDialog } from "../components/BatchImportDialog";
 import { CredentialLimitsDialog } from "../components/CredentialLimitsDialog";
 import { CredentialTagsDialog } from "../components/CredentialTagsDialog";
 import { groupModelsByProvider, rateLabel, rateSummary } from "../components/ModelPicker";
@@ -347,6 +349,8 @@ export function CredentialsPage() {
   // `?new=1`：首启向导的深链，进来直接开新增对话框，随后把参数清掉
   const [searchParams, setSearchParams] = useSearchParams();
   const [addOpen, setAddOpen] = useState(() => searchParams.get("new") === "1");
+  // 批量导入：多行 JSON / 文件，逐条校验 + 去重，失败行可回填重试
+  const [batchOpen, setBatchOpen] = useState(false);
   useEffect(() => {
     if (searchParams.get("new") === "1") setSearchParams({}, { replace: true });
   }, [searchParams, setSearchParams]);
@@ -743,15 +747,26 @@ export function CredentialsPage() {
       <Panel
         title="凭证池"
         action={canWrite && (
-          <Button
-            size="sm"
-            variant="primary"
-            data-testid="open-add-dialog"
-            disabled={busy}
-            onClick={() => setAddOpen(true)}
-          >
-            <Plus className="size-4" /> 添加凭证
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              size="sm"
+              variant="ghost"
+              data-testid="open-batch-import"
+              disabled={busy}
+              onClick={() => setBatchOpen(true)}
+            >
+              <Upload className="size-4" /> 批量导入
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              data-testid="open-add-dialog"
+              disabled={busy}
+              onClick={() => setAddOpen(true)}
+            >
+              <Plus className="size-4" /> 添加凭证
+            </Button>
+          </div>
         )}
       >
         {isError ? (
@@ -1316,6 +1331,17 @@ export function CredentialsPage() {
             void refresh();
           }}
           onError={(message) => showError(message)}
+        />
+      )}
+
+      {canWrite && batchOpen && (
+        <BatchImportDialog
+          onClose={() => setBatchOpen(false)}
+          onImported={(message) => {
+            showNotice(message);
+            void refresh();
+          }}
+          onNotice={showNotice}
         />
       )}
 

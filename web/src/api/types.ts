@@ -422,6 +422,20 @@ export interface ActivationDescribe {
 }
 
 /** 渠道 ToS 风险登记（运营判断）：导入对话框展示，不参与调度。 */
+export interface BatchImportEntry {
+  provider: string;
+  credential: unknown;
+  nickname?: string;
+  tags?: string[];
+}
+
+/** 批量导入结果：下标对应提交数组，前端按行保留失败/跳过项供重试。 */
+export interface BatchImportResult {
+  created: { index: number; id: string; tos: TosRisk }[];
+  skipped: { index: number; reason: string }[];
+  failed: { index: number; reason: string }[];
+}
+
 export interface TosRisk {
   level: "green" | "gray" | "red";
   reason: string;

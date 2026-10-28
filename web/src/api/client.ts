@@ -6,6 +6,8 @@ import type {
   AlertsResponse,
   AuditResponse,
   BatchAction,
+  BatchImportEntry,
+  BatchImportResult,
   BatchResult,
   CheckinResult,
   CheckinStatus,
@@ -165,6 +167,12 @@ export const api = {
     request<{ id: string; tos: TosRisk }>("/api/credentials", {
       method: "POST",
       ...json({ provider, credential, nickname }),
+    }),
+  /** 批量导入：逐条校验，坏条目只进 failed、不连累其他条目。 */
+  batchImportCredentials: (items: BatchImportEntry[]) =>
+    request<BatchImportResult>("/api/credentials/batch-import", {
+      method: "POST",
+      ...json({ items }),
     }),
   reviveCredential: (id: string) =>
     request<{ ok: boolean }>(`/api/credentials/${id}/revive`, { method: "POST" }),

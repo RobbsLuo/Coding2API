@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import math
 
@@ -54,6 +55,10 @@ BATCH_ACTIONS = frozenset({"probe", "toggle", "checkin", "revive"})
 # 探测/签到都会真的出网，没有上限时前端一个「全选」就能把整池凭证的请求
 # 同时排进事件循环。
 BATCH_MAX_IDS = 200
+
+# 批量导入上限：每条都要解密去重 + 写库 + 入队探测，允许无上限等于允许一次
+# 请求里塞几千次数据库写。100 条覆盖正常「换号」场景，又不会把事件循环占死。
+BATCH_IMPORT_MAX_ITEMS = 100
 
 # 批量的在途并发上限。后台任务用 Pacer 严格串行化上游请求，但那是跨任务
 # 节流；批量端点由操作员手动触发，若完全串行则 50 个号要等几分钟才返回。
@@ -274,24 +279,30 @@ def create_router(services: Services) -> APIRouter:
                 # 不参与调度、不阻断导入（红线渠道本就没接）。
                 "tos_risks": {pid: tos_for(pid).as_dict() for pid in registry}}
 
-    @router.post("/api/credentials")
-    async def import_credential(payload: dict,
-                                _csrf: None = Depends(csrf_protected),
-                                principal=Depends(principal_from_request)):
-        require_operator(principal)
-        provider_id = str(payload.get("provider") or "")
+    def prepare_import(item: dict) -> tuple[str, dict, list[str]]:
+        """校验一条导入项 → (渠道, 标准化后的凭证, 标签)。
+
+        单条与批量导入共用：映射失败（渠道不认识模型/字段）、标签非法都在这里
+        收敛成 400 文案，批量端点只需带上下标即可。
+        """
+        provider_id = str(item.get("provider") or "")
         if provider_id not in registry:
             raise InvalidRequest(f"unknown provider {provider_id!r}")
         credential_data = registry[provider_id].import_credential(
-            payload.get("credential") or {})
+            item.get("credential") or {})
         try:
             # 导入时可选带标签（列表页「添加」对话框不填即为空）
-            tags = parse_tags(payload.get("tags"))
+            tags = parse_tags(item.get("tags"))
         except ValueError as error:
             raise InvalidRequest(str(error)) from error
+        return provider_id, credential_data, tags
+
+    def register_import(provider_id: str, credential_data: dict, tags: list[str],
+                        nickname: str, principal) -> dict:
+        """落库 + 审计 + 探测入队；返回新凭证 id 与 ToS 风险。"""
         credential_id = credentials.add(provider=provider_id,
                                         credential_data=credential_data,
-                                        nickname=str(payload.get("nickname") or ""),
+                                        nickname=nickname,
                                         added_by=principal.username, tags=tags)
         logger.info("管理员 %s 新增凭证 %s（上游 %s）", principal.username, credential_id,
                     provider_id)
@@ -306,6 +317,60 @@ def create_router(services: Services) -> APIRouter:
                            provider_id, credential_id, risk.level, risk.reason)
         schedule_probe(credential_id)
         return {"id": credential_id, "tos": risk.as_dict()}
+
+    @router.post("/api/credentials")
+    async def import_credential(payload: dict,
+                                _csrf: None = Depends(csrf_protected),
+                                principal=Depends(principal_from_request)):
+        require_operator(principal)
+        provider_id, credential_data, tags = prepare_import(payload)
+        return register_import(provider_id, credential_data, tags,
+                               str(payload.get("nickname") or ""), principal)
+
+    @router.post("/api/credentials/batch-import")
+    async def batch_import_credentials(payload: dict,
+                                       _csrf: None = Depends(csrf_protected),
+                                       principal=Depends(principal_from_request)):
+        """批量导入：逐条校验，坏条目只进 failed、不连累其他条目。
+
+        去重口径 = 同渠道且解密后内容完全一致（批内重复 + 与库里已有凭证
+        重复都跳过）。返回带下标的 created/skipped/failed，前端据此原样
+        保留失败行供重试。
+        """
+        require_operator(principal)
+        items = payload.get("items")
+        if not isinstance(items, list) or not items:
+            raise InvalidRequest("items must be a non-empty array")
+        if len(items) > BATCH_IMPORT_MAX_ITEMS:
+            raise InvalidRequest(f"一次最多导入 {BATCH_IMPORT_MAX_ITEMS} 条")
+        created: list[dict] = []
+        skipped: list[dict] = []
+        failed: list[dict] = []
+        seen: set[str] = set()
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                failed.append({"index": index, "reason": "entry must be an object"})
+                continue
+            try:
+                provider_id, credential_data, tags = prepare_import(item)
+            except InvalidRequest as error:
+                failed.append({"index": index, "reason": str(error)})
+                continue
+            fingerprint = (
+                f"{provider_id}:"
+                + json.dumps(credential_data, sort_keys=True, ensure_ascii=False)
+            )
+            if fingerprint in seen or credentials.has_same_credential(
+                    provider_id, credential_data):
+                skipped.append({"index": index, "reason": "duplicate"})
+                continue
+            seen.add(fingerprint)
+            row = register_import(provider_id, credential_data, tags,
+                                  str(item.get("nickname") or ""), principal)
+            created.append({"index": index, **row})
+        logger.info("管理员 %s 批量导入：成功 %d，跳过 %d，失败 %d",
+                    principal.username, len(created), len(skipped), len(failed))
+        return {"created": created, "skipped": skipped, "failed": failed}
 
     @router.post("/api/credentials/{credential_id}/toggle")
     async def toggle_credential(credential_id: str, payload: dict,

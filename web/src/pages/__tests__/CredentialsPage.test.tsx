@@ -1627,3 +1627,20 @@ describe("CredentialsPage 首启向导深链", () => {
     expect(await screen.findByTestId("add-credential-dialog")).toBeInTheDocument();
   });
 });
+
+describe("CredentialsPage 批量导入", () => {
+  it("操作员点「批量导入」打开对话框", async () => {
+    mockFetch({ "/api/credentials": listBody([]) });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await userEvent.click(screen.getByTestId("open-batch-import"));
+    expect(await screen.findByTestId("batch-import-dialog")).toBeInTheDocument();
+  });
+
+  it("只读角色看不到批量导入入口", async () => {
+    mockFetch({ "/api/credentials": listBody([], false) });
+    renderPage(<CredentialsPage />, READER);
+    await settle();
+    expect(screen.queryByTestId("open-batch-import")).not.toBeInTheDocument();
+  });
+});

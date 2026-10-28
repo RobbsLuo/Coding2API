@@ -371,6 +371,7 @@ claude
 凭证页支持多选 + 批量操作条（探测额度 / 每日签到 / 暂停 / 取消暂停 / 恢复）。
 
 - **端点**：`POST /api/credentials/batch`，body `{action: "probe"|"toggle"|"checkin"|"revive", ids: [...], enabled?}`。一次 ≤200 条，重复 id 去重。
+- **批量导入**：`POST /api/credentials/batch-import`，body `{items: [{provider, credential, nickname?, tags?}]}`。一次 ≤100 条；逐条校验，坏条目只进 `failed`（带 `index` 与原因）；同渠道解密后内容完全一致视为重复，进 `skipped`。管理台凭证页「批量导入」支持粘贴 JSON 数组 / JSONL 或选文件。
 - **逐条隔离**：单条失败不影响其余。响应 `{action, total, succeeded, failed, results: [{id, ok, error?, detail?}]}`。
 - **签到失败是结果不是故障**：上游拒绝（账号被禁用 / 登录过期 / 限流）回 `ok=false` + 可读 `message`，不 500——否则管理台只弹「签到失败」，看不出真实原因。
 - **暂停是显式状态而非取反**：`toggle` 的 `enabled` 由请求体给出 → 操作条拆「暂停」/「取消暂停」两按钮。
