@@ -15,6 +15,7 @@ from collections.abc import Callable
 from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
 from ..provider.base import UpstreamReloginRequired
+from ..request_context import credential_scope
 from . import TaskReport
 from .pacer import Pacer
 
@@ -82,7 +83,8 @@ class RefreshTask:
                     report.skipped += 1
                     continue
                 try:
-                    refreshed = await provider.refresh(data)
+                    with credential_scope(candidate.credential_id):
+                        refreshed = await provider.refresh(data)
                 except UpstreamReloginRequired as error:
                     # 续期凭据已作废：重试无意义，且重试只会继续污染凭证状态。
                     # 标记成需重新登录后本任务下轮直接跳过（candidates 的 disabled

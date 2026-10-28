@@ -11,6 +11,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable
 
 import httpx
@@ -48,6 +49,76 @@ def parse_provider_proxies(raw: str, known: Iterable[str]) -> dict[str, str]:
                 f"（可选: {', '.join(PROXY_SCHEMES)}）")
         result[provider] = url
     return result
+
+
+def parse_proxy_pool(raw: str) -> tuple[str, ...]:
+    """`CREDENTIAL_PROXY_POOL` 文本 → 代理 URL 元组（启动期配置）。
+
+    格式与 `PROVIDER_PROXIES` 一致（分号分隔、严格协议校验、忽略空段），
+    但没有 `渠道=` 前缀：这是一个**全局出口池**，按凭证 id 稳定哈希取桶。
+    重复项按首次出现去重（池子写重了不会让某出口被抽中两次）。
+    """
+    urls: list[str] = []
+    for segment in raw.split(";"):
+        segment = segment.strip()
+        if not segment:
+            continue
+        scheme = segment.split("://", 1)[0].lower() if "://" in segment else ""
+        if scheme not in PROXY_SCHEMES:
+            raise ValueError(
+                f"CREDENTIAL_PROXY_POOL 代理协议不支持: {segment!r}"
+                f"（可选: {', '.join(PROXY_SCHEMES)}）")
+        if segment not in urls:
+            urls.append(segment)
+    return tuple(urls)
+
+
+class CredentialProxyPool:
+    """按凭证 id 稳定分配出口（「一号一出口」）。
+
+    分配用 `sha256(credential_id)` 取模而不是哈希表轮转：同一凭证在**重启后**
+    仍落在同一出口——出口稳定性正是上游风控在看的信号，进程内轮转会让每次
+    重启都换 IP，等于没做。池子增删成员会让部分凭证换桶，这是可接受的运维
+    代价（改池子本身就是要换出口）。
+
+    空池 / 无凭证 id（虚拟凭证、后台无上下文）→ None，调用方回落渠道级代理。
+    """
+
+    def __init__(self, urls: Iterable[str] = ()) -> None:
+        self._urls = tuple(urls)
+
+    def __bool__(self) -> bool:
+        return bool(self._urls)
+
+    def __len__(self) -> int:
+        return len(self._urls)
+
+    def for_credential(self, credential_id: str | None) -> str | None:
+        if not self._urls or not credential_id:
+            return None
+        digest = hashlib.sha256(credential_id.encode("utf-8")).digest()
+        index = int.from_bytes(digest[:8], "big") % len(self._urls)
+        return self._urls[index]
+
+
+# 启动期全局池：provider 构造时不逐个传参（8 个渠道 × 构造点太多），
+# 与 `PROVIDER_PROXIES` 同生命周期——改值必须重启。
+_POOL = CredentialProxyPool()
+
+
+def set_proxy_pool(pool: CredentialProxyPool) -> None:
+    """装配全局出口池（`build_app` 启动时调用一次；测试可直接替换）。"""
+    global _POOL
+    _POOL = pool
+
+
+def get_proxy_pool() -> CredentialProxyPool:
+    return _POOL
+
+
+def credential_proxy(credential_id: str | None) -> str | None:
+    """凭证 → 出口代理 URL；未配置池或虚拟凭证返回 None。"""
+    return _POOL.for_credential(credential_id)
 
 
 def build_client(*, timeout: httpx.Timeout, proxy: str | None = None) -> httpx.AsyncClient:

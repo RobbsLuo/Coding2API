@@ -7,6 +7,7 @@ import logging
 from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
 from ..provider.base import Quota
+from ..request_context import credential_scope
 from . import TaskReport
 from .pacer import Pacer
 
@@ -45,7 +46,9 @@ class QuotaProbeTask:
             if apply_pacing and self._pacer is not None:
                 await self._pacer.wait_turn()
             try:
-                quota = await provider.probe_quota(data)
+                # 出口 IP 粘性：探活与推理必须走同一出口（见 provider/proxy.py）
+                with credential_scope(candidate.credential_id):
+                    quota = await provider.probe_quota(data)
             except Exception as error:  # noqa: BLE001 - 探测失败不能中断整批
                 logger.warning("quota probe failed for %s: %s", candidate.credential_id, error)
                 # 探测失败 → health 置 NULL（unknown），绝不当作 0 分

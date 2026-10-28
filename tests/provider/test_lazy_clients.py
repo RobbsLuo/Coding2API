@@ -84,3 +84,114 @@ def test_pools_ignore_environment_proxy(attr):
     """`trust_env=False` 是既有约定：不吃 HTTP_PROXY，避免劫持带 Token 的请求。"""
     client = _Client()
     assert getattr(client, attr).trust_env is False
+
+
+# --------------------------------------------- 出口 IP 粘性：按凭证分池
+
+
+@pytest.fixture()
+def pool(monkeypatch):
+    """装一个两成员出口池；退出时清空，避免污染其它用例。"""
+    from src.provider.proxy import CredentialProxyPool, set_proxy_pool
+
+    set_proxy_pool(CredentialProxyPool(("http://a:1", "http://b:2")))
+    try:
+        yield
+    finally:
+        set_proxy_pool(CredentialProxyPool())
+
+
+def test_same_credential_reuses_one_pool_per_proxy(pool, monkeypatch):
+    from src.request_context import credential_scope
+
+    calls: list[str | None] = []
+
+    def fake(**kwargs):
+        calls.append(kwargs.get("proxy"))
+        return httpx.AsyncClient()
+
+    monkeypatch.setattr("src.provider.lazy_clients.build_client", fake)
+    client = _Client()
+
+    with credential_scope("cred_a"):
+        first = client._stream
+        again = client._stream
+    assert first is again                      # 同一凭证复用同一条池
+    assert calls == [calls[0]]                 # 只建了一次
+    assert calls[0] in ("http://a:1", "http://b:2")
+
+    with credential_scope("cred_b"):
+        stream_b = client._stream
+    # cred_b 落在同一出口时复用池，落在另一出口时新建——两种都合法，
+    # 但出口必须与池分配一致
+    from src.provider.proxy import credential_proxy
+
+    assert calls[-1] == credential_proxy("cred_b")
+    if credential_proxy("cred_b") == calls[0]:
+        assert stream_b is first
+    else:
+        assert stream_b is not first
+
+
+def test_credential_pool_overrides_channel_proxy(pool, monkeypatch):
+    calls: list[str | None] = []
+    monkeypatch.setattr(
+        "src.provider.lazy_clients.build_client",
+        lambda **kw: calls.append(kw.get("proxy")) or httpx.AsyncClient())
+    from src.request_context import credential_scope
+
+    client = _Client(proxy="http://channel:9")
+    with credential_scope("cred_x"):
+        assert client._short is not None
+    assert calls[0] in ("http://a:1", "http://b:2")
+
+
+def test_without_pool_falls_back_to_channel_proxy(monkeypatch):
+    calls: list[str | None] = []
+    monkeypatch.setattr(
+        "src.provider.lazy_clients.build_client",
+        lambda **kw: calls.append(kw.get("proxy")) or httpx.AsyncClient())
+    from src.request_context import credential_scope
+
+    client = _Client(proxy="http://channel:9")
+    with credential_scope("cred_x"):
+        assert client._stream is not None
+    assert calls == ["http://channel:9"]
+
+
+def test_no_credential_context_uses_channel_proxy(pool, monkeypatch):
+    calls: list[str | None] = []
+    monkeypatch.setattr(
+        "src.provider.lazy_clients.build_client",
+        lambda **kw: calls.append(kw.get("proxy")) or httpx.AsyncClient())
+
+    client = _Client(proxy="http://channel:9")
+    assert client._stream is not None
+    assert calls == ["http://channel:9"]
+
+
+async def test_aclose_closes_every_per_proxy_pool(pool, monkeypatch):
+    from src.request_context import credential_scope
+
+    created: list[httpx.AsyncClient] = []
+
+    def fake(**kwargs):
+        client = httpx.AsyncClient()
+        created.append(client)
+        return client
+
+    monkeypatch.setattr("src.provider.lazy_clients.build_client", fake)
+    client = _Client()
+    from src.provider.proxy import credential_proxy
+
+    # 覆盖两个出口（找一个落在另一桶的凭证）
+    with credential_scope("cred_a"):
+        assert client._stream is not None
+    other = next(
+        f"cred_{i}" for i in range(100)
+        if credential_proxy(f"cred_{i}") != credential_proxy("cred_a"))
+    with credential_scope(other):
+        assert client._stream is not None
+
+    await client.aclose()
+    assert created and all(item.is_closed for item in created)

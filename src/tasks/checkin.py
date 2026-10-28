@@ -10,6 +10,7 @@ from collections.abc import Callable
 from ..config import live
 from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
+from ..request_context import credential_scope
 from . import TaskReport
 from .pacer import Pacer
 
@@ -196,7 +197,8 @@ class CheckinTask:
             if self._pacer is not None:
                 await self._pacer.wait_turn()
             try:
-                result = await provider.checkin(data)
+                with credential_scope(candidate.credential_id):
+                    result = await provider.checkin(data)
             except Exception as error:  # noqa: BLE001
                 logger.warning("checkin failed for %s: %s", candidate.credential_id, error)
                 report.failed += 1

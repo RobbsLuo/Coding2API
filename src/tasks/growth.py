@@ -13,6 +13,7 @@ import logging
 from ..config import live
 from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository, GrowthRepository
+from ..request_context import credential_scope
 from . import TaskReport
 from .pacer import Pacer
 
@@ -78,7 +79,8 @@ class GrowthTask:
             if self._pacer is not None:
                 await self._pacer.wait_turn()
             try:
-                result = await growth(data, allow_irreversible=self.allow_irreversible)
+                with credential_scope(candidate.credential_id):
+                    result = await growth(data, allow_irreversible=self.allow_irreversible)
             except Exception as error:  # noqa: BLE001 - 一个凭证失败不拖累其余
                 logger.warning("growth failed for %s: %s", candidate.credential_id, error)
                 report.failed += 1

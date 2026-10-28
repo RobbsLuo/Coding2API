@@ -58,3 +58,25 @@ async def test_quota_probe_skips_when_credential_vanished(repo):
     report = await task.run_once()
     credentials.credential_data = original                # type: ignore[method-assign]
     assert report.skipped == 1
+
+
+async def test_quota_probe_scopes_credential_for_proxy_stickiness(repo):
+    """探活必须在「该凭证」的上下文里发（出口 IP 与推理一致）。"""
+    from src.request_context import get_credential_id
+
+    credentials, _db = repo
+    credential_id = credentials.add(
+        provider="codebuddy", credential_data={"bearer_token": "t"})
+    seen: list[str | None] = []
+
+    class _Scoped:
+        async def probe_quota(self, data):
+            seen.append(get_credential_id())
+            from src.provider.base import Quota
+            return Quota(remaining=1, total=2, probed_at=1)
+
+    task = QuotaProbeTask(credentials, {"codebuddy": _Scoped()})
+    await task.run_once()
+    assert seen == [credential_id]
+    # 退出循环后归还上下文，不把凭证 id 泄漏给后续任务
+    assert get_credential_id() is None
