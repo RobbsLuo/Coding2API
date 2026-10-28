@@ -29,10 +29,23 @@ from .streaming import respond_with_keepalive, with_keepalive
 def ensure_model_allowed(chat_request: ChatRequest, principal: ApiKeyPrincipal,
                          settings: Settings | RuntimeSettings) -> None:
     """模型白名单校验：不通过即 400（三个出口与 count_tokens 同一口径）。"""
-    if not model_allowed(chat_request.model, principal.allowed_models,
+    ensure_model_allowed_for(chat_request, principal.allowed_models, settings,
+                             subject="this api key")
+
+
+def ensure_model_allowed_for(chat_request: ChatRequest, allowed_models: str,
+                             settings: Settings | RuntimeSettings, *,
+                             subject: str) -> None:
+    """白名单校验的共用实现：错误文案里的主体（Key / 用户）由调用方给。
+
+    两种主体共用同一判据：`api_keys.allowed_models`（外部 Key）与
+    `users.allowed_models`（管理台 Playground 的会话直连）。分开写两份实现必然
+    漂移——其中一份漏了「省略模型名即默认模型」的绕过口子，白名单就等于没有。
+    """
+    if not model_allowed(chat_request.model, allowed_models,
                          default_model=settings.default_model):
         raise InvalidRequest(
-            f"model {chat_request.model!r} is not allowed for this api key")
+            f"model {chat_request.model!r} is not allowed for {subject}")
 
 
 def estimated_tokens(chat_request: ChatRequest) -> int:

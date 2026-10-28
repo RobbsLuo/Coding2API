@@ -224,5 +224,27 @@ def test_schema_v14_adds_users_and_audit_tables(tmp_path):
         "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"users", "audit_events"} <= tables
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 29
+    assert SCHEMA_VERSION == 30
+    db.close()
+
+
+def test_set_policy_replaces_models_and_quota(tmp_path):
+    """`set_policy` 整体替换用户级策略（Playground 的模型白名单 + 配额）。
+
+    只动这两列：角色/启停/密码都不受影响——策略写入不该顺带踢掉会话或改权限。
+    """
+    db, repo, _audit = _open(tmp_path)
+    repo.create("alice", "pbkdf2$hash", role="viewer", now=1)
+    assert repo.set_policy("alice", allowed_models="glm-5.3*",
+                           quota='{"rpm": 5}', now=2) is True
+    row = repo.get("alice")
+    assert row["allowed_models"] == "glm-5.3*" and row["quota"] == '{"rpm": 5}'
+    assert row["role"] == "viewer" and row["enabled"] == 1
+    assert row["session_epoch"] == 0                  # 策略变更不 bump epoch
+    assert row["updated_at"] == 2
+    # 空串 = 回到「不限制」
+    assert repo.set_policy("alice", allowed_models="", quota="", now=3) is True
+    assert repo.get("alice")["allowed_models"] == "" and repo.get("alice")["quota"] == ""
+    # 用户不存在 → False（端点据此回 400）
+    assert repo.set_policy("ghost", allowed_models="", quota="") is False
     db.close()

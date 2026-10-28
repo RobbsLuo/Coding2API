@@ -1295,6 +1295,22 @@ class UserRepository:
             )
         return cursor.rowcount > 0
 
+    def set_policy(self, username: str, *, allowed_models: str, quota: str,
+                   now: int | None = None) -> bool:
+        """整体替换用户级策略（模型白名单 + 配额），空串 = 不限制。
+
+        只影响该用户在管理台 Playground 的会话直连；其 API Key 的策略在
+        `api_keys` 行上，是另一套（Key 可单独设白名单/配额，两者互不覆盖）。
+        返回 False 表示用户不存在。
+        """
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE users SET allowed_models = ?, quota = ?, updated_at = ? "
+                "WHERE username = ?",
+                (allowed_models, quota, _now(now), username),
+            )
+        return cursor.rowcount > 0
+
     def find_by_activation(self, digest: str) -> dict[str, Any] | None:
         """按令牌摘要定位用户（/activate 用）。不校验过期——调用方比 now。"""
         row = self._db.connect().execute(

@@ -13,6 +13,7 @@ from src.api.context import build_context_compressor, context_window_for
 from src.compat.openai.request import ChatRequest
 from src.engine.compress import (
     _content_text,
+    _content_tokens,
     _truncate_content,
     compress_messages,
     estimate_messages,
@@ -66,6 +67,29 @@ def test_content_text_counts_image_url_bytes():
     # 畸形 image_url（缺 url / url 非字符串）记 0，不抛异常
     assert _content_text([{"type": "image_url", "image_url": {"url": 5}}]) == ""
     assert _content_text([{"type": "image_url"}]) == ""
+
+
+def test_content_tokens_counts_images_by_length_without_per_char_loop():
+    """token 估算对图片按长度一次算完（逐字符会在大 base64 上阻塞事件循环）。
+
+    权重取 `_OTHER_WEIGHT`（base64 只含字母数字 `+/=`），与逐字符加权的偏差
+    在纯启发式估算里可忽略；口径仍是「图片计入、不按 0 / 固定占位」。
+    """
+    url = "data:image/png;base64," + "A" * 1000
+    content = [{"type": "text", "text": "看图"},
+               {"type": "image_url", "image_url": {"url": url}}]
+    assert _content_tokens(content) == pytest.approx(estimate_tokens("看图") + 0.25 * len(url))
+    # 与 _message_tokens 的接线：整条消息的估算口径一致
+    assert estimate_messages([_user(content)]) == pytest.approx(
+        estimate_tokens("看图") + 0.25 * len(url))
+    # 畸形 part（缺 url / url 非字符串 / 非 dict / text 非字符串）记 0，不抛异常
+    assert _content_tokens([{"type": "image_url", "image_url": {"url": 5}}]) == 0.0
+    assert _content_tokens([{"type": "image_url"}]) == 0.0
+    assert _content_tokens([{"text": 2}]) == 0.0
+    assert _content_tokens([1]) == 0.0
+    assert _content_tokens("x") == estimate_tokens("x")
+    assert _content_tokens(None) == 0.0
+    assert _content_tokens(5) == estimate_tokens("5")
 
 
 def test_estimate_messages_counts_reasoning_tools_and_ids():

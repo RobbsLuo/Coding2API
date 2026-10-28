@@ -23,8 +23,10 @@ from ..audit.actions import (
     ACTION_USER_DISABLE,
     ACTION_USER_ENABLE,
     ACTION_USER_PASSWORD_RESET,
+    ACTION_USER_POLICY,
     ACTION_USER_ROLE_CHANGE,
 )
+from ..auth.access import normalize_allowed_models
 from ..auth.rbac import (
     ROLE_ADMIN,
     ROLES,
@@ -34,6 +36,7 @@ from ..auth.rbac import (
 )
 from ..auth.users import create_password_hash
 from ..compat.openai.request import InvalidRequest
+from ..key_quota import KeyQuota, parse_key_quota, quota_text
 from .admin_auth import ACTIVATION_TTL_SECONDS
 from .deps import Services, csrf_protected, principal_from_request, request_ip
 
@@ -57,7 +60,27 @@ def _public_view(row: dict) -> dict:
         "created_by": row["created_by"],
         # 是否有待激活令牌（不泄露摘要本身）
         "pending_activation": row["activation_digest"] is not None,
+        # 用户级策略（Playground）：模型白名单与配额，界面直接可编
+        "allowed_models": row.get("allowed_models") or "",
+        "quota": row.get("quota") or "",
     }
+
+
+def _policy_detail(models: str, quota: KeyQuota) -> str:
+    """用户策略的审计明细：一行说清「这个人在 Playground 能碰什么」。
+
+    不含密码/令牌——审计的 detail 只放可读策略，不放凭据。
+    """
+    parts = [f"模型白名单 {models}" if models else "模型不限"]
+    if quota.is_empty():
+        parts.append("配额不限")
+    else:
+        labels = (("daily_requests", "每日请求"), ("daily_tokens", "每日 token"),
+                  ("daily_cost_usd", "每日成本 USD"), ("rpm", "RPM"),
+                  ("tpm", "TPM"), ("max_concurrency", "并发"))
+        parts.append("；".join(f"{label} {getattr(quota, name):g}"
+                               for name, label in labels if getattr(quota, name)))
+    return "；".join(parts)
 
 
 def create_router(services: Services) -> APIRouter:
@@ -192,6 +215,37 @@ def create_router(services: Services) -> APIRouter:
                               ip=request_ip(request, services.settings) or None)
         return {"username": username, "activate_token": token,
                 "expires_at": issued + ACTIVATION_TTL_SECONDS}
+
+    @router.put("/api/users/{username}/policy")
+    async def set_user_policy(username: str, request: Request, payload: dict,
+                              _csrf: None = Depends(csrf_protected),
+                              principal=Depends(principal_from_request)):
+        """用户级策略：管理台 Playground 的模型白名单 + 配额（整体替换）。
+
+        为什么策略挂在**用户**上而不是 Key 上：Playground 走会话 Cookie、不经过
+        Key 鉴权，只按 Key 判策略等于给每个登录用户留一条无限直连通道。语义与
+        Key 那套一致（白名单是 fnmatch glob，配额是同一份六项 JSON），但两者
+        独立：Key 的策略管外部调用，这里的策略管这个人在管理台里能干什么。
+
+        配额用量按用户名聚合，该用户经由任何入口（含自己的 Key）的流量都计入。
+        """
+        _require(principal)
+        if services.user_repo.get(username) is None:
+            raise InvalidRequest(f"user {username!r} not found")
+        try:
+            models = normalize_allowed_models(str(payload.get("allowed_models") or ""))
+        except ValueError as error:
+            raise InvalidRequest(str(error)) from error
+        try:
+            quota = parse_key_quota(payload.get("quota"))
+        except ValueError as error:
+            raise InvalidRequest(str(error)) from error
+        services.user_repo.set_policy(username, allowed_models=models,
+                                      quota=quota_text(quota))
+        services.audit.record(actor=principal.username, action=ACTION_USER_POLICY,
+                              target=username, detail=_policy_detail(models, quota),
+                              ip=request_ip(request, services.settings) or None)
+        return {"ok": True, "allowed_models": models, "quota": quota.as_dict()}
 
     # 故意不提供 DELETE：硬删会让 usage_events 里留下查不到用户名的孤儿统计，
     # 而「停用账号」的实际需求已被 disable 完全覆盖。硬删只走 CLI。

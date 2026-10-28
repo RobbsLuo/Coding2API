@@ -69,7 +69,10 @@ SCHEMA_NAME = "schema.sql"
 # （`quota_credits_remaining` / `quota_credits_total` / `quota_credits_expiry_ladder`）。
 # 积分账成为 CodeArts 唯一的额度来源，直接落在通用列（`quota_remaining` 等）上，
 # 故这三列不再有读者；见 `_MIGRATION_COLUMN_DROPS`。
-SCHEMA_VERSION = 29
+# 30：users 新增 allowed_models / quota（用户级策略：约束管理台 Playground 的
+# 会话直连，补上「viewer 用 Cookie 直调任意模型」绕过 Key 白名单与配额的口子）。
+# 两列默认 '' = 不限制，老库补列后 Playground 行为与补列前完全一致。
+SCHEMA_VERSION = 30
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -127,6 +130,10 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("usage_events", "api_key_id TEXT"),
     # Key 级配额（JSON 文本）：老库补 '' ＝「不限制」，出口行为不变。
     ("api_keys", "quota TEXT NOT NULL DEFAULT ''"),
+    # 用户级策略（仅约束 Playground 会话直连）：老库补 '' ＝「不限制」，
+    # Playground 行为与补列前一致（原先不校验任何按人策略）。
+    ("users", "allowed_models TEXT NOT NULL DEFAULT ''"),
+    ("users", "quota TEXT NOT NULL DEFAULT ''"),
 )
 
 # 已废弃的表：schema.sql 里已删定义，但老库里可能还留着，必须显式清理。

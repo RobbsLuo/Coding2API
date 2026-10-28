@@ -403,3 +403,94 @@ def test_credential_writes_are_audited(tmp_path, monkeypatch):
     actions = [e["action"] for e in app.state.audit.query()]
     assert "credential.toggle" not in actions          # 失败不记
     assert "login.success" in actions
+
+
+# ------------------------------------------------------------ 用户级策略
+
+def test_set_user_policy_stores_and_audits(tmp_path, monkeypatch):
+    """PUT policy：写白名单 + 配额，回显规范化结果，并落一条审计。
+
+    这是补上「viewer 用会话 Cookie 直调任意模型」的那个口子所依赖的配置入口，
+    没有它 Playground 的按人判定只能靠改库。
+    """
+    from src.audit.actions import ACTION_USER_POLICY
+
+    app = _app(tmp_path, monkeypatch, users=[
+        ("root", "rootpw", ROLE_ADMIN, True),
+        ("alice", "alicepw", ROLE_VIEWER, True),
+    ])
+    with TestClient(app) as client:
+        _login(client, "root", "rootpw")
+        response = client.put("/api/users/alice/policy", json={
+            "allowed_models": "glm-5.3*, deepseek-v4.1-flash",
+            "quota": {"daily_requests": 200, "rpm": 5},
+        })
+        assert response.status_code == 200, response.text
+        assert response.json()["allowed_models"] == "glm-5.3*,deepseek-v4.1-flash"
+        assert response.json()["quota"] == {
+            "daily_requests": 200, "daily_tokens": 0, "daily_cost_usd": 0.0,
+            "rpm": 5, "tpm": 0, "max_concurrency": 0,
+        }
+        listed = [u for u in client.get("/api/users").json()["users"]
+                  if u["username"] == "alice"][0]
+        assert listed["allowed_models"] == "glm-5.3*,deepseek-v4.1-flash"
+        assert '"rpm": 5' in listed["quota"]
+
+    events = app.state.audit.query(action=ACTION_USER_POLICY)
+    assert [e["target"] for e in events] == ["alice"]
+    assert "模型白名单 glm-5.3*,deepseek-v4.1-flash" in events[0]["detail"]
+    assert "每日请求 200" in events[0]["detail"] and "RPM 5" in events[0]["detail"]
+
+
+def test_set_user_policy_clears_with_empty_values(tmp_path, monkeypatch):
+    """空值 = 恢复「不限制」（与 Key 配额同一语义：'' 即不受约束）。"""
+    app = _app(tmp_path, monkeypatch, users=[("root", "rootpw", ROLE_ADMIN, True)])
+    with TestClient(app) as client:
+        _login(client, "root", "rootpw")
+        assert client.put("/api/users/root/policy", json={
+            "allowed_models": "glm-*", "quota": {"rpm": 3}}).status_code == 200
+        cleared = client.put("/api/users/root/policy",
+                             json={"allowed_models": "", "quota": None})
+        assert cleared.status_code == 200
+        assert cleared.json() == {
+            "ok": True, "allowed_models": "",
+            "quota": {"daily_requests": 0, "daily_tokens": 0, "daily_cost_usd": 0.0,
+                      "rpm": 0, "tpm": 0, "max_concurrency": 0},
+        }
+
+    events = app.state.audit.query(action="user.policy")
+    # 同一秒内两条记录，顺序不保证；只校验两条明细都在
+    assert sorted(e["detail"] for e in events) == [
+        "模型不限；配额不限",
+        "模型白名单 glm-*；RPM 3",
+    ]
+
+
+@pytest.mark.parametrize("payload, message", [
+    ({"allowed_models": "x" * 300}, "过长的模型名"),
+    ({"quota": {"nope": 1}}, "未知配额项"),
+    ({"quota": "not json"}, "quota 必须是 JSON 对象"),
+    ({"quota": {"rpm": -1}}, "不能为负数"),
+])
+def test_set_user_policy_validates(payload, message, tmp_path, monkeypatch):
+    """校验失败一律 400（含未知配额键）：写错键名静默忽略会让用户以为配额生效。"""
+    app = _app(tmp_path, monkeypatch, users=[("root", "rootpw", ROLE_ADMIN, True)])
+    with TestClient(app) as client:
+        _login(client, "root", "rootpw")
+        response = client.put("/api/users/root/policy", json=payload)
+        assert response.status_code == 400
+        assert message in response.json()["error"]["message"]
+
+
+def test_set_user_policy_unknown_user_and_non_admin(tmp_path, monkeypatch):
+    """不存在的用户 400；viewer 不能用（策略只能由 admin 设）。"""
+    app = _app(tmp_path, monkeypatch, users=[
+        ("root", "rootpw", ROLE_ADMIN, True),
+        ("viewer", "viewerpw", ROLE_VIEWER, True),
+    ])
+    with TestClient(app) as client:
+        _login(client, "root", "rootpw")
+        assert client.put("/api/users/ghost/policy", json={}).status_code == 400
+        client.cookies.clear()
+        _login(client, "viewer", "viewerpw")
+        assert client.put("/api/users/root/policy", json={}).status_code == 403

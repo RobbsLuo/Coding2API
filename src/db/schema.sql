@@ -55,7 +55,7 @@ CREATE TABLE IF NOT EXISTS credentials (
     quota_total      REAL,
     quota_cycle_end  INTEGER,                      -- 最早到期 epoch；渠道无此信息为 NULL
     quota_expiry_ladder TEXT,                      -- 到期阶梯 JSON [[epoch, 剩余积分]]；无到期信息为 NULL
-    quota_packages   TEXT,                      -- 额度包明细 JSON [{"name","total","used","end"}]，仅展示
+    quota_packages   TEXT,                      -- 额度包明细 JSON [{"name","total","used","end","expiring"}]，仅展示
     quota_probed_at  INTEGER,
     token_expires_at INTEGER,                   -- access token 到期 epoch；NULL=老库未回填，0=未知
     token_issued_at  INTEGER,                   -- access token 签发 epoch（JWT iat）：进度条满量程与「最后续期」
@@ -280,7 +280,16 @@ CREATE TABLE IF NOT EXISTS users (
     activation_expires_at INTEGER,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL,
-    created_by           TEXT                     -- 建号者用户名；引导导入为 NULL
+    created_by           TEXT,                    -- 建号者用户名；引导导入为 NULL
+    -- 用户级策略（仅约束**管理台 Playground** 的会话直连，不影响该用户的 API Key）：
+    -- 没有这两列时，viewer 用会话 Cookie 直调任意模型就绕过了 Key 的模型白名单与
+    -- 配额——管理台是「人能进门」的地方，出站策略必须按人再判一次。
+    -- allowed_models：fnmatch glob，逗号分隔，'' = 不限制（与 api_keys 同语法）。
+    allowed_models       TEXT NOT NULL DEFAULT '',
+    -- quota：JSON 文本，'' = 不限制；结构见 src/key_quota.py（当日请求/token/成本、
+    -- rpm/tpm/并发）。用量按**用户名**聚合：该用户经由任何入口（含自己的 Key）
+    -- 产生的用量都计入，配额语义是「这个人一天能用多少」，不是「这把 Key」。
+    quota                TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_role_enabled ON users(role, enabled);

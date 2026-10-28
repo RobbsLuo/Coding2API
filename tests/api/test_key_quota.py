@@ -263,3 +263,21 @@ def test_non_streaming_upstream_failure_releases_lease(client, app):
     # 池为空 → 503，名额仍须归还
     assert _chat(client, created["api_key"]).status_code == 503
     assert app.state.services.key_quota.inflight(created["id"]) == 0
+
+
+# ------------------------------------------------------- 用户级聚合（Playground）
+
+def test_for_user_aggregates_across_entry_points(db, usage):
+    """按用户名聚合：该用户经任何入口的用量都计入用户级配额。
+
+    Playground 的会话直连 `api_key_id` 为 NULL，若照 Key 那样过滤
+    `api_key_id IS NOT NULL`，它自己的流量就不吃自己那份配额——配额形同虚设。
+    """
+    _record(db, key_id="key_a", ts=1000, username="alice")
+    _record(db, key_id=None, ts=1001, username="alice")          # Playground 直连
+    _record(db, key_id="key_b", ts=1002, username="bob")         # 别人的流量不计
+    alice = usage.for_user("alice", since=0)
+    assert (alice.requests, alice.tokens) == (2, 30)
+    # until 上界与 since 下界都生效
+    assert usage.for_user("alice", since=0, until=1001).requests == 1
+    assert usage.for_user("alice", since=2000).requests == 0

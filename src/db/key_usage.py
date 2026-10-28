@@ -42,6 +42,27 @@ class KeyUsageRepository:
             (key_id, int(since), until, until)).fetchone()
         return _row_usage(row)
 
+    def for_user(self, username: str, *, since: int,
+                 until: int | None = None) -> KeyUsage:
+        """聚合某个**用户**在 `[since, until)` 内的用量（用户级配额用）。
+
+        与 `for_key` 的口径差别就是要按人而不是按 Key：该用户经由任何入口产生
+        的行都算（自己 Key 的请求 + 管理台 Playground 的会话直连请求——后者的
+        `api_key_id` 为 NULL）。所以这里不按 `api_key_id IS NOT NULL` 过滤，
+        否则 Playground 自己的流量不吃自己那份配额，配额形同虚设。
+        """
+        row = self._db.connect().execute(
+            "SELECT COUNT(*) AS requests, "
+            "COALESCE(SUM(CASE WHEN ok = 1 THEN 1 ELSE 0 END), 0) AS ok, "
+            "COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS failed, "
+            "COALESCE(SUM(input_tokens), 0) AS input_tokens, "
+            "COALESCE(SUM(output_tokens), 0) AS output_tokens, "
+            "COALESCE(SUM(cost_usd), 0) AS cost_usd "
+            "FROM usage_events WHERE username = ? AND ts >= ? "
+            "AND (? IS NULL OR ts < ?)",
+            (username, int(since), until, until)).fetchone()
+        return _row_usage(row)
+
     def map_for(self, key_ids: list[str], *, since: int) -> dict[str, KeyUsage]:
         """批量聚合（管理台列表「当日已用」一列）：一次查询，避免逐行 N+1。"""
         ids = [key_id for key_id in key_ids if key_id]

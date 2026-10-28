@@ -511,3 +511,45 @@ def test_legacy_db_upgrade_adds_api_key_policy_columns(tmp_path):
 
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     db.close()
+
+
+def test_legacy_db_upgrade_adds_user_policy_columns(tmp_path):
+    """老库升级：users 无 allowed_models / quota 时幂等补列（Playground 按人判定用）。
+
+    两列都是 `NOT NULL DEFAULT ''`：补列后老用户立刻回到「不限制」的原行为——
+    Playground 的按人判定读的就是它们，缺列会让启动直接失败。
+    """
+    db = Database(tmp_path / "legacy_users.sqlite3")
+    conn = sqlite3.connect(db.path)
+    conn.execute("""
+        CREATE TABLE users (
+            username TEXT PRIMARY KEY, password_hash TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'viewer', enabled INTEGER NOT NULL DEFAULT 1,
+            must_change_password INTEGER NOT NULL DEFAULT 0,
+            session_epoch INTEGER NOT NULL DEFAULT 0,
+            activation_digest TEXT, activation_expires_at INTEGER,
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, created_by TEXT)
+    """)
+    conn.execute("INSERT INTO users (username, password_hash, created_at, updated_at) "
+                 "VALUES ('alice', 'pbkdf2$old', 1, 1)")
+    conn.commit()
+    conn.close()
+
+    apply_schema(db.connect())
+    columns = {row[1] for row in db.connect().execute("PRAGMA table_info(users)")}
+    assert {"allowed_models", "quota"} <= columns
+    legacy = db.connect().execute(
+        "SELECT allowed_models, quota FROM users WHERE username = 'alice'").fetchone()
+    assert tuple(legacy) == ("", "")
+    # 补列后可写可读
+    db.connect().execute(
+        "UPDATE users SET allowed_models = 'glm-*', quota = '{\"rpm\": 3}' "
+        "WHERE username = 'alice'")
+    db.connect().commit()
+    assert tuple(db.connect().execute(
+        "SELECT allowed_models, quota FROM users WHERE username = 'alice'").fetchone()) \
+        == ("glm-*", '{"rpm": 3}')
+    from src.db.migrate import SCHEMA_VERSION
+
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    db.close()

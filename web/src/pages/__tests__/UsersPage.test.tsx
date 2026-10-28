@@ -236,3 +236,49 @@ async function openCreateUserDialog() {
   await userEvent.click(screen.getByTestId("open-create-user-dialog"));
   expect(await screen.findByTestId("create-user-dialog")).toBeInTheDocument();
 }
+
+  it("编辑用户策略：预填现值、提交 PUT 并关闭对话框", async () => {
+    const spy = stubFetch({
+      "PUT /api/users/alice/policy": () => jsonResponse({ ok: true }),
+      "GET /api/users": () => jsonResponse(USERS),
+    });
+    renderPage(<UsersPage />, { username: "root", is_admin: true });
+    await settle();
+
+    await userEvent.click(screen.getByTestId("policy-alice"));
+    const dialog = await screen.findByTestId("user-policy-dialog");
+    expect(dialog).toBeInTheDocument();
+    // 未设过策略时两个字段都是空串（= 不限制）
+    expect(screen.getByTestId("user-policy-models")).toHaveValue("");
+    expect(screen.getByTestId("user-policy-quota")).toHaveValue("");
+
+    await userEvent.type(screen.getByTestId("user-policy-models"), "glm-5.3*");
+    // `{` / `}` 在 userEvent.type 里是修饰符语法，JSON 用 paste 写入
+    await userEvent.click(screen.getByTestId("user-policy-quota"));
+    await userEvent.paste('{"rpm": 5}');
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      const call = spy.mock.calls.find(([, init]) => init?.method === "PUT");
+      expect(call?.[0]).toBe("/api/users/alice/policy");
+      expect(JSON.parse(String(call?.[1]?.body))).toEqual({
+        allowed_models: "glm-5.3*", quota: '{"rpm": 5}',
+      });
+    });
+    await waitFor(() => expect(screen.queryByTestId("user-policy-dialog")).not.toBeInTheDocument());
+  });
+
+  it("策略保存失败（配额 JSON 写错）时在对话框内提示", async () => {
+    stubFetch({
+      "PUT /api/users/alice/policy": () =>
+        jsonResponse({ error: { code: "invalid_request", message: "quota 必须是 JSON 对象" } }, 400),
+      "GET /api/users": () => jsonResponse(USERS),
+    });
+    renderPage(<UsersPage />, { username: "root", is_admin: true });
+    await settle();
+
+    await userEvent.click(screen.getByTestId("policy-alice"));
+    await userEvent.type(await screen.findByTestId("user-policy-quota"), "nope");
+    await userEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByTestId("user-policy-error")).toHaveTextContent("保存用户策略失败");
+  });

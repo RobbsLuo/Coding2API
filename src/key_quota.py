@@ -202,43 +202,48 @@ class KeyQuotaGuard:
     # ------------------------------------------------------------ 准入
 
     def admit(self, key_id: str, quota: KeyQuota, *,
-              tokens: int = 0) -> Lease:
+              tokens: int = 0, subject: str = "key") -> Lease:
         """判定并登记一次请求；超限抛 `QuotaExceeded`，放行返回 `Lease`。
 
         `tokens` 是本次请求的**预估** token 数（输入估算 + 输出上限），因为
         真实用量要等响应结束才知道，而 TPM 必须在转发前判定。预估偏大时
         略保守、偏小时略宽松，都不影响「同一分钟内不超发」的语义。
 
+        `subject` 只进 429 文案（`key` / `user`）：同一个 guard 同时服务
+        Key 级配额与用户级配额（Playground），调用方能一眼看出超的是哪一层。
+
         判定过程中的任何异常（当日聚合查库失败、脏配置等）一律**放行**并记
         warning：配额是流量治理而非安全边界，判定挂了不能把出口锁死。
         """
         try:
-            return self._admit(key_id, quota, tokens=max(0, tokens))
+            return self._admit(key_id, quota, tokens=max(0, tokens),
+                               subject=subject)
         except QuotaExceeded:
             raise
         except Exception as error:  # noqa: BLE001 - 配额判定失败必须放行
             logger.warning("Key 配额判定失败，本次放行: %s", error)
             return Lease(self, key_id, counted=False)
 
-    def _admit(self, key_id: str, quota: KeyQuota, *, tokens: int) -> Lease:
+    def _admit(self, key_id: str, quota: KeyQuota, *, tokens: int,
+               subject: str) -> Lease:
         moment = self._now()
         if quota.is_empty():
             return Lease(self, key_id, counted=False)
-        self._check_daily(key_id, quota, moment)
+        self._check_daily(key_id, quota, moment, subject)
         events = self._prune(key_id, moment)
         if quota.rpm and len(events) >= quota.rpm:
             raise QuotaExceeded(
-                f"key quota exceeded: {quota.rpm} requests per minute",
+                f"{subject} quota exceeded: {quota.rpm} requests per minute",
                 _window_retry(events, moment, self._window))
         used_tokens = sum(count for _, count in events)
         if quota.tpm and used_tokens + tokens > quota.tpm:
             raise QuotaExceeded(
-                f"key quota exceeded: {quota.tpm} tokens per minute",
+                f"{subject} quota exceeded: {quota.tpm} tokens per minute",
                 _window_retry(events, moment, self._window))
         if quota.max_concurrency and self.inflight(key_id) >= quota.max_concurrency:
             # 并发名额随请求结束释放，正常几秒内就有空位；给 1 秒让客户端退避。
             raise QuotaExceeded(
-                f"key quota exceeded: {quota.max_concurrency} concurrent requests",
+                f"{subject} quota exceeded: {quota.max_concurrency} concurrent requests",
                 1)
         self._events.setdefault(key_id, deque()).append((moment, tokens))
         self._inflight[key_id] = self.inflight(key_id) + 1
@@ -253,7 +258,8 @@ class KeyQuotaGuard:
 
     # ------------------------------------------------------------ 内部
 
-    def _check_daily(self, key_id: str, quota: KeyQuota, moment: float) -> None:
+    def _check_daily(self, key_id: str, quota: KeyQuota, moment: float,
+                     subject: str) -> None:
         """当日累计配额：查一次聚合（只有配了当日类限额才查）。"""
         if not (quota.daily_requests or quota.daily_tokens or quota.daily_cost_usd):
             return
@@ -263,13 +269,13 @@ class KeyQuotaGuard:
         retry = int(day_start(int(moment)) + 86400 - moment)
         if quota.daily_requests and usage.requests >= quota.daily_requests:
             raise QuotaExceeded(
-                f"key quota exceeded: {quota.daily_requests} requests per day", retry)
+                f"{subject} quota exceeded: {quota.daily_requests} requests per day", retry)
         if quota.daily_tokens and usage.tokens >= quota.daily_tokens:
             raise QuotaExceeded(
-                f"key quota exceeded: {quota.daily_tokens} tokens per day", retry)
+                f"{subject} quota exceeded: {quota.daily_tokens} tokens per day", retry)
         if quota.daily_cost_usd and usage.cost_usd >= quota.daily_cost_usd:
             raise QuotaExceeded(
-                f"key quota exceeded: ${quota.daily_cost_usd:g} per day", retry)
+                f"{subject} quota exceeded: ${quota.daily_cost_usd:g} per day", retry)
 
     def _prune(self, key_id: str, moment: float) -> deque[tuple[float, int]]:
         """丢弃窗口外的事件；窗口空了就把该 Key 的条目一起删掉（防无界增长）。"""
