@@ -4,7 +4,7 @@ OpenAI Chat Completions 本身无会话概念，客户端（agent/CLI）的「�
 三种可识别形态，按可靠性依次取用：
 
 1. **请求体显式会话标识**：`conversation_id` / `conversationId` /
-   `prompt_cache_key`（`metadata` 对象内或请求体顶层）。客户端直接给出
+   `prompt_cache_key` / `session_id`（`metadata` 对象内或请求体顶层）。客户端直接给出
    会话身份，最可靠——即便消息数组被裁剪/压缩也能粘住。
 2. **请求头会话标识**（E1）：`x-session-id` / `x-opencode-session` /
    `x-session-affinity` / `conversation-id` / `conversation_id`。由请求入口
@@ -24,9 +24,9 @@ reasoning_effort，**不含任何会话标识键**，故后两项无法用本地
 - `prompt_cache_key`：OpenAI 官方顶层参数，**已核实**（chat/completions
   与 responses 均支持）
 - `metadata.user_id`：Anthropic Messages API 官方字段，**已核实**
-- `conversation_id` / `conversationId` / 顶层 `user_id`：非 OpenAI/Anthropic
-  标准键，属客户端惯用约定，**未在真实流量中观测到**；作为网关兼容性
-  探测一并接受（命中即用，未命中无害）
+- `conversation_id` / `conversationId` / 顶层 `user_id` / `session_id`：非
+  OpenAI/Anthropic 标准键，属客户端惯用约定，**未在真实流量中观测到**；
+  作为网关兼容性探测一并接受（命中即用，未命中无害）
 
 键里掺入用户名，防止不同 API 用户的相同标识/消息数组串到同一凭证。
 TTL 内没有后续轮次即视为对话结束，条目过期；条目数有上限，超量先淘汰
@@ -57,8 +57,11 @@ from typing import Any
 from ..config import live
 from ..request_context import get_session_id, sanitize_session_id
 
-# 请求体里的显式会话标识键名，按优先级排列（前两个等价，客户端实现不一）
-_EXPLICIT_KEYS: tuple[str, ...] = ("conversation_id", "conversationId", "prompt_cache_key")
+# 请求体里的显式会话标识键名，按优先级排列（前两个等价，客户端实现不一）。
+# `session_id` 排最后：它是部分客户端（jasonxu 系）惯用的通用键，前三个是
+# 官方/生态已核实的键，同值时优先按更具体的语义取。
+_EXPLICIT_KEYS: tuple[str, ...] = ("conversation_id", "conversationId",
+                                   "prompt_cache_key", "session_id")
 
 # 请求头来源键的前缀：与 body 键同值也不撞键（`header:abc` ≠ `conversation_id:abc`）
 _HEADER_SOURCE = "header"

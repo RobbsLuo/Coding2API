@@ -189,7 +189,7 @@ def health_score(q: Quota | None) -> int | None:
 **`reasoning_effort` 缺失补 `medium`**：不发该字段 → CB 把思考写进 `delta.content`（`reasoning_content` 恒空、`reasoning_tokens` 恒 0）。`stream_chat` 用 `setdefault`，不覆盖显式值。
 
 ### 3.5 会话粘性键
-（`engine/affinity.py`）优先级：① 请求体 `conversation_id` > `conversationId` > `prompt_cache_key`（同键名先 `metadata` 再顶层）→ ② 请求头 `x-session-id` / `x-opencode-session` / `x-session-affinity` / `conversation-id` / `conversation_id`（首个合法值，须匹配 `[A-Za-z0-9._:-]{1,128}`）→ ③ 消息增量前缀指纹。
+（`engine/affinity.py`）优先级：① 请求体 `conversation_id` > `conversationId` > `prompt_cache_key` > `session_id`（同键名先 `metadata` 再顶层）→ ② 请求头 `x-session-id` / `x-opencode-session` / `x-session-affinity` / `conversation-id` / `conversation_id`（首个合法值，须匹配 `[A-Za-z0-9._:-]{1,128}`）→ ③ 消息增量前缀指纹。
 
 - 头经 `request_context` contextvar 传入（`RequestIdMiddleware` 设置、请求结束复原）；键带 `header:` 前缀避免与 body 撞键。
 - 带 `user_id`（顶层或 `metadata`）**不派生前缀兜底键**（头照常生效）；否则同用户并行对话误钉同一凭证。

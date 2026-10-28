@@ -103,9 +103,11 @@ def test_eviction_drops_expired_first_then_oldest():
     ("metadata", "conversation_id"),
     ("metadata", "conversationId"),
     ("metadata", "prompt_cache_key"),
+    ("metadata", "session_id"),
     ("top", "conversation_id"),
     ("top", "conversationId"),
     ("top", "prompt_cache_key"),
+    ("top", "session_id"),
 ])
 def test_explicit_key_sources(container, key):
     from src.engine.affinity import explicit_key
@@ -120,6 +122,9 @@ def test_explicit_key_priority_and_container_order():
     # conversation_id 优先于 conversationId / prompt_cache_key
     assert explicit_key({"conversation_id": "a", "conversationId": "b",
                          "prompt_cache_key": "c"}) == "conversation_id:a"
+    # session_id 是最低优先级：前面任一键存在时不看它
+    assert explicit_key({"prompt_cache_key": "p", "session_id": "s"}) == "prompt_cache_key:p"
+    assert explicit_key({"session_id": "s"}) == "session_id:s"
     # metadata 优先于顶层（同键名）
     assert explicit_key({"metadata": {"conversation_id": "m"},
                          "conversation_id": "t"}) == "conversation_id:m"
