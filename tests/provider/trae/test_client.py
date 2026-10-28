@@ -525,3 +525,28 @@ async def test_client_stream_chat_fills_estimated_credit():
     usage = next(e.usage for e in events if e.kind is EventKind.USAGE)
     assert usage.credit is not None
     assert usage.credit_estimated is True
+
+
+async def test_client_stamps_metadata_model_hint_on_later_events():
+    """extra_info 回显的真实模型名贴到后续 usage / finish 事件（观测用）。"""
+    sse = (
+        'event: metadata\ndata: {"model":""}\n\n'
+        'event: output\ndata: {"response":"hi","reasoning_content":"","tool_calls":null}\n\n'
+        'event: extra_info\ndata: {"model":"glm-5.2-real","input_token":1}\n\n'
+        'event: token_usage\ndata: {"prompt_tokens":1,"completion_tokens":1}\n\n'
+        'event: done\ndata: {"finish_reason":"stop"}\n\n'
+    )
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=sse)
+
+    events = [e async for e in _client(handler).stream_chat(
+        TraeCredential(access_token="a"), {"messages": []}, "glm-5.2")]
+    content = next(e for e in events if e.kind is EventKind.CONTENT)
+    usage = next(e for e in events if e.kind is EventKind.USAGE)
+    finish = next(e for e in events if e.kind is EventKind.FINISH)
+    # 内容帧在 extra_info 之前，拿不到提示
+    assert content.model is None
+    # extra_info 之后的事件都带上真实模型名
+    assert usage.model == "glm-5.2-real"
+    assert finish.model == "glm-5.2-real"

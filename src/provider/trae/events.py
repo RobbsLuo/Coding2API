@@ -266,3 +266,26 @@ def _attach_model(event: Event | None, payload: dict[str, Any]) -> Event | None:
     if event is not None and isinstance(model, str) and model:
         event.model = model
     return event
+
+
+# 实测 TRAE 只有元数据帧回显真实模型：`metadata.model`（偶发空串）、
+# `extra_info.model`（真实模型名）、`timing_cost.provider_model_name`。
+# output / done / token_usage 帧都不带 → 由 client 把这里取到的名字贴到后续事件。
+_MODEL_HINT_EVENTS = frozenset({"metadata", "timing_cost", "extra_info"})
+
+
+def frame_model(frame: SSEFrame) -> str | None:
+    """元数据帧里回显的真实模型名；缺帧 / 空串 / 坏 JSON 一律 None。"""
+    if frame.event.strip() not in _MODEL_HINT_EVENTS or not frame.data:
+        return None
+    try:
+        payload = json.loads(frame.data)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    for key in ("model", "provider_model_name"):
+        value = payload.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return None

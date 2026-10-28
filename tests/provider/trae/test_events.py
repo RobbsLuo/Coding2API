@@ -163,3 +163,23 @@ def test_output_frame_attaches_upstream_reported_model():
     assert trae_events.parse_frame(frame).model == "trae-model"
     plain = trae_events.SSEFrame(event="output", data='{"response":"hi"}')
     assert trae_events.parse_frame(plain).model is None
+
+
+def test_frame_model_reads_metadata_frames_only():
+    """元数据帧回显的真实模型名：extra_info / timing_cost 可读，其余帧不看。"""
+    extra = trae_events.SSEFrame(event="extra_info",
+                                 data='{"model":"glm-5.2","version":"x"}')
+    assert trae_events.frame_model(extra) == "glm-5.2"
+    timing = trae_events.SSEFrame(event="timing_cost",
+                                 data='{"provider_model_name":"glm-5.2"}')
+    assert trae_events.frame_model(timing) == "glm-5.2"
+    # 空串 / 缺键 / 坏 JSON / 非对象 / 非元数据帧 / 无 data 一律 None
+    for frame in (
+        trae_events.SSEFrame(event="metadata", data='{"model":""}'),
+        trae_events.SSEFrame(event="extra_info", data='{}'),
+        trae_events.SSEFrame(event="extra_info", data="{broken"),
+        trae_events.SSEFrame(event="extra_info", data="[1]"),
+        trae_events.SSEFrame(event="output", data='{"model":"glm-5.2"}'),
+        trae_events.SSEFrame(event="extra_info", data=""),
+    ):
+        assert trae_events.frame_model(frame) is None

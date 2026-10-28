@@ -99,6 +99,17 @@ def build_context_compressor(
                 squashed = compress_tool_outputs(
                     messages, max_chars=int(settings.tool_output_compress_max_chars))
                 if squashed is not messages:
+                    before = sum(len(m["content"]) for m in messages
+                                 if isinstance(m, dict)
+                                 and isinstance(m.get("content"), str))
+                    after = sum(len(m["content"]) for m in squashed
+                                if isinstance(m, dict)
+                                and isinstance(m.get("content"), str))
+                    # 只在真的压了才记：长会话里 tool 输出超阈值本就少见，
+                    # 这行直接给出「压了多少字符」，验收收益不用翻库
+                    logger.info(
+                        "tool 输出压缩 provider=%s model=%s messages=%d 字符 %d→%d",
+                        provider_id, model, len(messages), before, after)
                     payload = {**payload, "messages": squashed}
         if not settings.context_compress_enabled:
             return payload

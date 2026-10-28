@@ -336,8 +336,16 @@ class TraeClient(LazyClients):
                 raw = await base.read_body_bounded(response)
                 raise UpstreamHTTPError(response.status_code, raw,
                                         **base.retry_hints(response.headers))
+            model_hint: str | None = None
             async for frame in iter_frames(response.aiter_bytes()):
+                # 元数据帧（extra_info 等）回显的真实模型名：贴到后续事件上，
+                # 供 executor 做「静默替换」观测（帧本身无下游语义，不产出事件）
+                hint = trae_events.frame_model(frame)
+                if hint is not None:
+                    model_hint = hint
                 for event in trae_events.parse_all_events(frame):
+                    if event.model is None and model_hint is not None:
+                        event.model = model_hint
                     _fill_estimated_credit(event, model)
                     yield event
 
