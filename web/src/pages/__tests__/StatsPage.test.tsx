@@ -71,6 +71,31 @@ describe("StatsPage", () => {
     expect(screen.getByTestId("model-trend-chart")).toBeInTheDocument();
   });
 
+  it("成功率趋势 Y 轴截断时图例标注「Y 轴自 90% 起」", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/timeline": TIMELINE,
+      "/api/stats/model-timeline": {
+        models: ["glm-5.2", "kimi-k3"],
+        points: [
+          { hour: 1700000000, "glm-5.2": 0.985, "kimi-k3": 0.999 },
+          { hour: 1700003600, "glm-5.2": 0.995, "kimi-k3": null },
+        ],
+      },
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    await userEvent.click(screen.getByTestId("metric-tabs-success_rate"));
+    await waitFor(() => expect(screen.getByTestId("model-trend-axis-note"))
+      .toHaveTextContent("Y 轴自 90% 起"));
+  });
+
   it("token 大数用紧凑格式显示（万）", async () => {
     mockFetch({
       "/api/stats/overview": { ...OVERVIEW, input_tokens: 123456, output_tokens: 7890123,

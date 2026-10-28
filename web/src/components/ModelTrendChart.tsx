@@ -12,9 +12,10 @@ import {
   formatAxisValue,
   formatChartValue,
   METRIC_AXIS_UNIT,
+  RATE_METRICS,
   SPARSE_METRICS,
 } from "../api/display";
-import { formatTimeTick } from "./UsageChart";
+import { formatTimeTick, niceCostCeiling, rateAxisDomain } from "./UsageChart";
 
 /**
  * 模型线专用色（与渠道色 `--chart-N` 分开）。
@@ -41,6 +42,47 @@ const Y_AXIS_WIDTH = 56;
  */
 const MAX_LINES = 3;
 
+/** 在画的模型线上的全部有限值（`null` 是「无样本」，不参与定义域）。 */
+function visibleValues(points: ModelTimelinePoint[], models: string[]): number[] {
+  const values: number[] = [];
+  for (const point of points) {
+    for (const model of models) {
+      const value = point[model];
+      if (typeof value === "number" && Number.isFinite(value)) values.push(value);
+    }
+  }
+  return values;
+}
+
+/**
+ * 模型趋势图的 Y 轴定义域。
+ *
+ * 不能只给 `dataKey` 再让 recharts `"auto"`：那只会按**一条**线算上限
+ * （早先是 `models[0]`），Top2/Top3 在耗时 / 成本类指标上峰值更高时会顶出
+ * 绘图区被裁掉。上限取所有在画的模型的**公共最大值**。
+ *
+ * 比率 / 单请求成本复用主图的口径（`rateAxisDomain` / `niceCostCeiling`）：
+ * 否则 98%–100% 会贴顶成直线、成本刻度会碎成 `0.0085 / 0.017`。
+ */
+export function modelTrendAxis(
+  points: ModelTimelinePoint[],
+  models: string[],
+  metric: string,
+): { domain: [number, number]; ticks: number[] | undefined; truncated: boolean } {
+  const values = visibleValues(points, models.slice(0, MAX_LINES));
+  if (RATE_METRICS.has(metric)) return rateAxisDomain(values);
+  if (metric === "cost_per_request") {
+    return {
+      domain: [0, niceCostCeiling(Math.max(0, ...values))],
+      ticks: undefined,
+      truncated: false,
+    };
+  }
+  const max = Math.max(0, ...values);
+  // 全空 / 全 0 时给 [0, 1]，避免退化成一个点的轴
+  return { domain: [0, max > 0 ? max : 1], ticks: undefined, truncated: false };
+}
+
 /**
  * 按模型指标趋势（recharts）。
  *
@@ -48,7 +90,8 @@ const MAX_LINES = 3;
  * 缺测小时表现为空位而不是被压缩成等宽（与 `UsageChart` 同口径）。
  *
  * **最多 3 条线**（`MAX_LINES`）：模型数超过 3 时只画请求量 Top 3，其余在
- * 「按模型」分组表里看。单系列时不画图例——标题与 Top 文案已经说明是哪条。
+ * 「按模型」分组表里看。单系列时不列模型名——标题与 Top 文案已经说明是哪条
+ * （轴口径说明仍要渲染，见 `ModelLegend`）。
  */
 export function ModelTrendChart({
   points,
@@ -61,10 +104,12 @@ export function ModelTrendChart({
 }) {
   const currentMetric = metric ?? "requests";
   const sparse = SPARSE_METRICS.has(currentMetric);
+  const isRate = RATE_METRICS.has(currentMetric);
   const data = points.map((point) => ({ ...point, time: point.hour * 1000 }));
   // 单位标签只对不自带单位的指标（计数 / token）显示；耗时/首字的刻度已含 ms/s
   const axisUnit = METRIC_AXIS_UNIT[currentMetric];
   const shown = models.slice(0, MAX_LINES);
+  const axis = modelTrendAxis(points, models, currentMetric);
 
   return (
     <div className="h-56 w-full sm:h-52" data-testid="model-trend-chart">
@@ -83,11 +128,12 @@ export function ModelTrendChart({
             minTickGap={40}
           />
           <YAxis
-            allowDecimals={false}
+            allowDecimals={!isRate}
             width={Y_AXIS_WIDTH}
-            // 显式 dataKey：不指定时 recharts 会把 hour / time 也纳入定义域
-            dataKey={shown[0]}
-            domain={[0, "auto"]}
+            // 显式数值定义域：交给 recharts 的 `dataKey` + `"auto"` 只会按一条线
+            // 算上限，其余模型线会被裁掉（见 modelTrendAxis）
+            domain={axis.domain}
+            ticks={axis.ticks}
             tick={{ fontSize: 11, fill: "var(--muted-foreground)" }}
             tickLine={false}
             axisLine={false}
@@ -136,16 +182,18 @@ export function ModelTrendChart({
   );
 }
 
-/** 图例：每个模型一个色点（单系列时由标题说明，不渲染）。 */
-export function ModelLegend({ models }: { models: string[] }) {
+/** 图例：每个模型一个色点（单系列时由标题说明，不渲染名字）+ 轴口径说明。 */
+export function ModelLegend({ models, note }: { models: string[]; note?: string }) {
   const shown = models.slice(0, MAX_LINES);
-  if (shown.length <= 1) return null;
+  const multi = shown.length > 1;
+  // 单系列且无说明：标题已说明是哪条，整行不渲染
+  if (!multi && !note) return null;
   return (
     <div
       className="mt-2 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-xs text-muted-foreground"
       data-testid="model-trend-legend"
     >
-      {shown.map((model, index) => (
+      {multi && shown.map((model, index) => (
         <span key={model} className="inline-flex items-center gap-1.5">
           <span
             aria-hidden
@@ -155,6 +203,7 @@ export function ModelLegend({ models }: { models: string[] }) {
           <span className="max-w-40 truncate" title={model}>{model}</span>
         </span>
       ))}
+      {note && <span data-testid="model-trend-axis-note">{note}</span>}
     </div>
   );
 }

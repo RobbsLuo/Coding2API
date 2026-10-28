@@ -17,7 +17,7 @@ import {
 } from "../api/hooks";
 import { formatCacheRate, formatCompact, formatCredit, formatLatency, formatMoney, formatNumber, formatSpeed, formatSpeedPair, formatTime, formatTimeParts, usageErrorLabel } from "../api/display";
 import { useStatsErrors, type StatsErrorRow } from "../api/statsErrors";
-import { ModelLegend, ModelTrendChart } from "../components/ModelTrendChart";
+import { ModelLegend, ModelTrendChart, modelTrendAxis } from "../components/ModelTrendChart";
 import { LatencyChart } from "../components/LatencyChart";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
@@ -537,6 +537,12 @@ export function StatsPage() {
   const effectiveScope = chartScope !== "total" && !timelineProviders.includes(chartScope)
     ? "total"
     : chartScope;
+  // 模型趋势的 Y 轴口径：图与图例说明共用一份（比率截断时必须在图例标注）
+  const modelAxis = useMemo(() => modelTrendAxis(
+    modelTimeline.data?.points ?? [],
+    modelTimeline.data?.models ?? [],
+    metric,
+  ), [modelTimeline.data, metric]);
 
   if (overview.isLoading) {
     return (
@@ -808,7 +814,10 @@ export function StatsPage() {
                 models={modelTimeline.data?.models ?? []}
                 metric={metric}
               />
-              <ModelLegend models={modelTimeline.data?.models ?? []} />
+              <ModelLegend
+                models={modelTimeline.data?.models ?? []}
+                note={modelAxis.truncated ? "Y 轴自 90% 起（便于看清窄幅波动）" : undefined}
+              />
             </>
           )}
         </Panel>
