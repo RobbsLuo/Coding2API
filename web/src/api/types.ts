@@ -422,6 +422,24 @@ export interface ActivationDescribe {
 }
 
 /** 渠道 ToS 风险登记（运营判断）：导入对话框展示，不参与调度。 */
+export interface BackupEntry {
+  name: string;
+  size: number;
+  created_at: number;
+}
+
+export interface PendingRestore {
+  filename: string;
+  size: number;
+  uploaded_at: number;
+}
+
+export interface BackupListResponse {
+  backups: BackupEntry[];
+  /** 已上传、等重启生效的恢复文件；没有则为 null */
+  pending: PendingRestore | null;
+}
+
 export interface BatchImportEntry {
   provider: string;
   credential: unknown;

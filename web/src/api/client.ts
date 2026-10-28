@@ -5,6 +5,9 @@ import type {
   ActivationIssued,
   AlertsResponse,
   AuditResponse,
+  BackupEntry,
+  BackupListResponse,
+  PendingRestore,
   BatchAction,
   BatchImportEntry,
   BatchImportResult,
@@ -168,6 +171,47 @@ export const api = {
       method: "POST",
       ...json({ provider, credential, nickname }),
     }),
+  // ---------------------------------------------------------------- 备份
+  backups: () => request<BackupListResponse>("/api/backups"),
+  createBackup: () =>
+    request<{ backup: BackupEntry }>("/api/backups", { method: "POST", ...json({}) }),
+  deleteBackup: (name: string) =>
+    request<{ ok: boolean }>(`/api/backups/${encodeURIComponent(name)}`, { method: "DELETE" }),
+  /** 上传备份文件：原始字节 + 自定义头（CSRF 纵深），重启后生效。 */
+  restoreBackup: async (file: Blob, filename: string) => {
+    const response = await fetch(
+      `/api/backups/restore?filename=${encodeURIComponent(filename)}`,
+      {
+        method: "POST",
+        body: file,
+        credentials: "same-origin",
+        headers: {
+          "X-Requested-With": "XMLHttpRequest",
+          "Content-Type": "application/octet-stream",
+        },
+      },
+    );
+    if (!response.ok) {
+      let message = `恢复失败（HTTP ${response.status}）`;
+      try {
+        const body = await response.json();
+        if (body?.error?.message) message = body.error.message;
+      } catch {
+        // 非 JSON 错误体：保留 HTTP 状态提示
+      }
+      throw new ApiError(response.status, "restore_failed", message);
+    }
+    return (await response.json()) as { staged: boolean; restart_required: boolean }
+      & PendingRestore;
+  },
+  /** 下载已有备份的字节（「一键恢复」先取回再上传）。 */
+  downloadBackup: async (name: string) => {
+    const response = await fetch(`/api/backups/${encodeURIComponent(name)}`, {
+      credentials: "same-origin",
+    });
+    if (!response.ok) throw new ApiError(response.status, "download_failed", "下载备份失败");
+    return response.blob();
+  },
   /** 批量导入：逐条校验，坏条目只进 failed、不连累其他条目。 */
   batchImportCredentials: (items: BatchImportEntry[]) =>
     request<BatchImportResult>("/api/credentials/batch-import", {

@@ -19,12 +19,16 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import sqlite3
 import time
 from contextlib import closing, suppress
 from datetime import UTC, datetime
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 # 默认保留份数（后台任务与 CLI 的默认值；可经 BACKUP_KEEP 覆盖）。
 DEFAULT_KEEP = 7
@@ -173,4 +177,127 @@ def restore_database(db_path: str | Path, source: str | Path, *,
         temp.unlink(missing_ok=True)
     for sidecar in (f"{target.name}-wal", f"{target.name}-shm"):
         Path(target.parent, sidecar).unlink(missing_ok=True)
+    return safety
+
+
+# ---------------------------------------------------------------- 管理台恢复
+# 运行中直接换库不安全：旧连接/未 checkpoint 的 WAL 会把新库拼坏。管理台上传
+# 的备份先落 `DATA_DIR/restore/pending.sqlite3`，**下次启动、建连接之前**由
+# `apply_pending_restore` 走 `restore_database` 原子替换；期间服务照常用老库。
+
+PENDING_DIRNAME = "restore"
+PENDING_NAME = "pending.sqlite3"
+PENDING_META = "pending.json"
+# 恢复要求的最小表集合：一份「随便什么 sqlite 文件」不能当备份恢复
+REQUIRED_TABLES = ("credentials", "api_keys", "users")
+
+
+def pending_restore_path(db_path: str | Path) -> Path:
+    return Path(db_path).resolve().parent / PENDING_DIRNAME / PENDING_NAME
+
+
+def verify_app_database(path: str | Path) -> None:
+    """完整性 + 「确实是本服务的库」双校验。
+
+    - `PRAGMA integrity_check`（同 `verify_database`）；
+    - 必含核心表（防止把任意 sqlite 文件恢复进生产）；
+    - `user_version` 不高于当前程序支持的版本（更高的库说明来自更新的版本，
+      老程序不认识的列/迁移会直接把服务启动打挂）。
+    """
+    from .migrate import SCHEMA_VERSION  # 延迟导入：migrate 也会 import 本模块
+
+    try:
+        with closing(sqlite3.connect(f"file:{Path(path)}?mode=ro", uri=True)) as conn:
+            row = conn.execute("PRAGMA integrity_check").fetchone()
+            if (row[0] if row else None) != "ok":
+                raise RuntimeError(
+                    f"数据库完整性校验未通过: {path}: {row[0] if row else None!r}")
+            tables = {item[0] for item in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'")}
+            version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    except sqlite3.Error as error:
+        raise RuntimeError(f"数据库无法读取: {path}: {error}") from error
+    missing = [name for name in REQUIRED_TABLES if name not in tables]
+    if missing:
+        raise RuntimeError(f"不是本服务的数据库（缺少表 {', '.join(missing)}）")
+    if version > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"备份的 schema 版本 {version} 高于本程序支持的 {SCHEMA_VERSION}，"
+            "请先升级程序再恢复")
+
+
+def stage_restore(db_path: str | Path, data: bytes, *, filename: str = "",
+                  now: float | None = None) -> dict:
+    """把上传文件校验后落到待恢复位置；返回可展示的元信息。
+
+    校验失败抛 `RuntimeError`（不留下任何文件）；成功后旧待恢复文件被覆盖。
+    """
+    if not data:
+        raise RuntimeError("上传内容为空")
+    pending = pending_restore_path(db_path)
+    pending.parent.mkdir(parents=True, exist_ok=True)
+    _chmod(pending.parent, 0o700)
+    temp = pending.with_suffix(".uploading")
+    try:
+        temp.write_bytes(data)
+        _chmod(temp, 0o600)
+        verify_app_database(temp)
+        os.replace(temp, pending)
+    finally:
+        temp.unlink(missing_ok=True)
+    meta = {
+        "filename": Path(filename).name if filename else pending.name,
+        "size": len(data),
+        "uploaded_at": int(now if now is not None else time.time()),
+    }
+    meta_path = pending.with_name(PENDING_META)
+    meta_path.write_text(json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    _chmod(meta_path, 0o600)
+    return meta
+
+
+def pending_restore_info(db_path: str | Path) -> dict | None:
+    """待恢复文件元信息；没有待恢复文件返回 None（meta 缺失也能读大小/时间）。"""
+    pending = pending_restore_path(db_path)
+    if not pending.is_file():
+        return None
+    meta_path = pending.with_name(PENDING_META)
+    meta: dict = {}
+    if meta_path.is_file():
+        try:
+            loaded = json.loads(meta_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                meta = loaded
+        except (OSError, ValueError):
+            meta = {}
+    stat = pending.stat()
+    return {
+        "filename": str(meta.get("filename") or pending.name),
+        "size": int(meta.get("size") or stat.st_size),
+        "uploaded_at": int(meta.get("uploaded_at") or stat.st_mtime),
+    }
+
+
+def apply_pending_restore(db_path: str | Path, *,
+                          now: float | None = None) -> Path | None:
+    """启动时应用待恢复文件；返回安全副本路径（未恢复 / 主库原本不存在时为 None）。
+
+    待恢复文件校验不过时**不阻断启动**：改名留档后返回 None，服务继续用当前库。
+    否则一个坏上传会让服务再也起不来，恰好与「备份恢复」的目的相反。
+    """
+    pending = pending_restore_path(db_path)
+    if not pending.is_file():
+        return None
+    try:
+        safety = restore_database(db_path, pending, now=now)
+    except (RuntimeError, OSError, sqlite3.Error) as error:
+        rejected = pending.with_name(f"{PENDING_NAME}.rejected-{_stamp(now)}")
+        with suppress(OSError):
+            pending.replace(rejected)
+        pending.with_name(PENDING_META).unlink(missing_ok=True)
+        logger.warning("待恢复备份不可用，已留档为 %s：%s", rejected, error)
+        return None
+    pending.unlink(missing_ok=True)
+    pending.with_name(PENDING_META).unlink(missing_ok=True)
+    logger.warning("已应用待恢复备份；恢复前安全副本：%s", safety)
     return safety

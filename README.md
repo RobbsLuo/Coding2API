@@ -609,6 +609,13 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 
 恢复流程：校验完整性 → 现有主库 `.pre-restore-<时间戳>` 副本 → 原子替换 → 删 `-wal`/`-shm` 残留。**恢复后重启服务。**
 
+管理台「备份与恢复」页（admin）提供同一能力的界面：
+
+- `GET /api/backups`：列出 `backups/*.sqlite3` + 当前待恢复文件（`pending`）。
+- `POST /api/backups`：立即备份一次。
+- `GET /api/backups/{name}` / `DELETE /api/backups/{name}`：下载 / 删除（只认目录内普通文件，拒绝路径与符号链接）。
+- `POST /api/backups/restore?filename=…`：原始字节上传 → 完整性 + 核心表 + schema 版本校验 → 暂存 `DATA_DIR/restore/pending.sqlite3`。**运行中不换库**，重启启动时在建连接之前原子替换；待恢复文件校验不过会留档 `.rejected-*` 并继续用当前库，不会把服务钉死在启动失败。
+
 ## 配置
 
 完整项见 `src/config.py`（权威），每项都透传 `docker-compose.yml`。容器内改监听地址用 `HOST`/`PORT`。

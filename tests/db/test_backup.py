@@ -12,11 +12,18 @@ import pytest
 from src.db.backup import (
     BACKUP_DIRNAME,
     DEFAULT_KEEP,
+    apply_pending_restore,
     backup_database,
     backup_dir,
+    pending_restore_info,
+    pending_restore_path,
     restore_database,
+    stage_restore,
+    verify_app_database,
     verify_database,
 )
+from src.db.conn import Database
+from src.db.migrate import SCHEMA_VERSION, apply_schema
 
 
 def _seed(db_path: Path, value: str = "hello") -> None:
@@ -259,3 +266,132 @@ def test_restore_cleans_temp_on_write_failure(tmp_path, monkeypatch):
 
 def test_default_keep_is_seven():
     assert DEFAULT_KEEP == 7
+
+
+# ---------------------------------------------------------------- 管理台恢复
+
+
+def _app_db(tmp_path: Path, name: str = "app.sqlite3") -> Path:
+    path = tmp_path / name
+    db = Database(path)
+    apply_schema(db.connect())
+    db.close()
+    return path
+
+
+def test_verify_app_database_accepts_real_schema(tmp_path):
+    verify_app_database(_app_db(tmp_path))
+
+
+def test_verify_app_database_rejects_foreign_sqlite(tmp_path):
+    path = tmp_path / "plain.sqlite3"
+    _seed(path)
+    with pytest.raises(RuntimeError, match="缺少表"):
+        verify_app_database(path)
+
+
+def test_verify_app_database_rejects_newer_schema(tmp_path):
+    path = _app_db(tmp_path)
+    conn = sqlite3.connect(str(path))
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION + 1}")
+    conn.commit()
+    conn.close()
+    with pytest.raises(RuntimeError, match="高于本程序支持"):
+        verify_app_database(path)
+
+
+def test_stage_restore_validates_and_writes_pending(tmp_path):
+    source = _app_db(tmp_path)
+    db_path = tmp_path / "main.sqlite3"
+    meta = stage_restore(db_path, source.read_bytes(), filename="../evil.sqlite3",
+                         now=1234)
+    assert meta == {"filename": "evil.sqlite3", "size": source.stat().st_size,
+                    "uploaded_at": 1234}
+    pending = pending_restore_path(db_path)
+    assert pending.is_file()
+    assert pending.stat().st_mode & stat.S_IRWXO == 0
+    assert pending_restore_info(db_path)["filename"] == "evil.sqlite3"
+
+
+def test_stage_restore_rejects_empty_and_corrupt(tmp_path):
+    db_path = tmp_path / "main.sqlite3"
+    with pytest.raises(RuntimeError, match="为空"):
+        stage_restore(db_path, b"")
+    with pytest.raises(RuntimeError):
+        stage_restore(db_path, b"not a database")
+    assert not pending_restore_path(db_path).exists()
+
+
+def test_pending_restore_info_falls_back_without_or_with_broken_meta(tmp_path):
+    db_path = tmp_path / "main.sqlite3"
+    assert pending_restore_info(db_path) is None
+    pending = pending_restore_path(db_path)
+    pending.parent.mkdir(parents=True)
+    pending.write_bytes(b"abc")
+    info = pending_restore_info(db_path)  # 没有 meta → 用文件大小/mtime
+    assert info["filename"] == pending.name and info["size"] == 3
+    pending.with_name("pending.json").write_text("{broken", encoding="utf-8")
+    assert pending_restore_info(db_path)["size"] == 3
+
+
+def test_apply_pending_restore_replaces_db_and_keeps_safety_copy(tmp_path):
+    db_path = _app_db(tmp_path, "main.sqlite3")
+    source = _app_db(tmp_path, "source.sqlite3")
+    conn = sqlite3.connect(str(source))
+    conn.execute("CREATE TABLE marker (x TEXT)")
+    conn.execute("INSERT INTO marker VALUES ('restored')")
+    conn.commit()
+    conn.close()
+
+    stage_restore(db_path, source.read_bytes(), now=5)
+    safety = apply_pending_restore(db_path, now=6)
+
+    assert safety is not None and safety.is_file()
+    assert not pending_restore_path(db_path).exists()
+    conn = sqlite3.connect(str(db_path))
+    assert conn.execute("SELECT x FROM marker").fetchone()[0] == "restored"
+    conn.close()
+
+
+def test_apply_pending_restore_rejects_corrupt_without_blocking_start(tmp_path):
+    db_path = _app_db(tmp_path, "main.sqlite3")
+    pending = pending_restore_path(db_path)
+    pending.parent.mkdir(parents=True)
+    pending.write_bytes(b"corrupt")
+
+    assert apply_pending_restore(db_path, now=7) is None
+    assert not pending.exists()
+    rejected = list(pending.parent.glob("pending.sqlite3.rejected-*"))
+    assert len(rejected) == 1
+    # 老库仍在，且能正常打开
+    conn = sqlite3.connect(str(db_path))
+    assert conn.execute("SELECT 1").fetchone()[0] == 1
+    conn.close()
+
+
+def test_pending_restore_info_ignores_non_object_meta(tmp_path):
+    db_path = tmp_path / "main.sqlite3"
+    pending = pending_restore_path(db_path)
+    pending.parent.mkdir(parents=True)
+    pending.write_bytes(b"abc")
+    pending.with_name("pending.json").write_text("[]", encoding="utf-8")
+    info = pending_restore_info(db_path)  # 顶层不是对象 → 回落文件信息
+    assert info["filename"] == pending.name and info["size"] == 3
+
+
+def test_verify_app_database_reports_integrity_failure(tmp_path, monkeypatch):
+    """`PRAGMA integrity_check` 返回非 ok（文件能打开但有逻辑损坏）→ RuntimeError。"""
+    class _Result:
+        def fetchone(self):
+            return ("wrong page type",)
+
+    class _Conn:
+        def execute(self, _sql, *_args):
+            return _Result()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("src.db.backup.sqlite3.connect", lambda *_a, **_k: _Conn())
+    with pytest.raises(RuntimeError, match="完整性校验未通过"):
+        verify_app_database(tmp_path / "x.sqlite3")

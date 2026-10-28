@@ -23,6 +23,7 @@ from .api import (
     admin_alerts,
     admin_audit,
     admin_auth,
+    admin_backups,
     admin_badges,
     admin_billing,
     admin_credentials,
@@ -67,6 +68,7 @@ from .config import (
     validate_qoder_endpoint_allowed,
     validate_zen_endpoint_allowed,
 )
+from .db.backup import apply_pending_restore
 from .db.conn import Database
 from .db.crypto import CredentialCipher, CredentialDecryptError
 from .db.key_usage import KeyUsageRepository
@@ -362,6 +364,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 容器 / systemd 均如此），不经过 run()，否则审计等 INFO 日志仍被丢弃。
     # 幂等，测试反复调用 build_app 不会叠加 handler。
     configure_logging(config.log_level)
+    # 管理台上传的待恢复备份在**建连接之前**应用；坏文件只留档、不阻断启动
+    apply_pending_restore(config.db_path)
     db = Database(config.db_path)
     apply_schema(db.connect())
     # 运行时配置覆盖层：热更键读 DB 覆盖值，其余透明委托给 env 快照。
@@ -868,6 +872,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.include_router(admin_credentials.create_router(services))
     app.include_router(admin_keys.create_router(services))
     app.include_router(admin_settings.create_router(services))
+    app.include_router(admin_backups.create_router(services))
     app.include_router(admin_model_catalog.create_router(services))
     app.include_router(admin_model_availability.create_router(services))
     app.include_router(admin_alerts.create_router(services))
