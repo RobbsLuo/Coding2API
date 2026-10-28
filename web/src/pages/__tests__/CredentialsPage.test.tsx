@@ -1619,3 +1619,11 @@ describe("CredentialsPage", () => {
 });
 
 
+
+describe("CredentialsPage 首启向导深链", () => {
+  it("?new=1 进来直接打开新增对话框", async () => {
+    mockFetch({ "/api/credentials": listBody([]) });
+    renderPage(<CredentialsPage />, ADMIN, "/?new=1");
+    expect(await screen.findByTestId("add-credential-dialog")).toBeInTheDocument();
+  });
+});

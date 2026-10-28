@@ -1,5 +1,6 @@
 import { Check, ChevronDown, Copy, Gauge, KeyRound, Plus, Share2, Trash2, X } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { Button as RawButton } from "../components/ui/button";
 import { useApiKeys, usePlaygroundModels, useQueryClient } from "../api/hooks";
@@ -590,7 +591,12 @@ export function ApiKeysPage() {
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   // 创建 Key 收进对话框（低频动作不常驻占屏），由「我的 API Key」右上角触发
-  const [createOpen, setCreateOpen] = useState(false);
+  // `?new=1`：首启向导的深链，进来直接开创建对话框，随后把参数清掉
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [createOpen, setCreateOpen] = useState(() => searchParams.get("new") === "1");
+  useEffect(() => {
+    if (searchParams.get("new") === "1") setSearchParams({}, { replace: true });
+  }, [searchParams, setSearchParams]);
   // 列表行「导入 CC Switch」对话框：列表只有脱敏 preview，明文由用户自己粘贴
   const [importing, setImporting] = useState<ApiKey | null>(null);
   const [importKey, setImportKey] = useState("");

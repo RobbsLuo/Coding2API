@@ -1,4 +1,5 @@
-import { Fragment, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import type { ReactNode } from "react";
 import {
   Activity,
@@ -343,7 +344,12 @@ export function CredentialsPage() {
   const [busy, setBusy] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   // 添加凭证对话框（登录渠道 / JSON 导入 / 免费层补回都收在里面）
-  const [addOpen, setAddOpen] = useState(false);
+  // `?new=1`：首启向导的深链，进来直接开新增对话框，随后把参数清掉
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [addOpen, setAddOpen] = useState(() => searchParams.get("new") === "1");
+  useEffect(() => {
+    if (searchParams.get("new") === "1") setSearchParams({}, { replace: true });
+  }, [searchParams, setSearchParams]);
   // 限额护栏对话框：一次只编辑一条（存凭证 id，轮询替换列表后仍能取到最新值）
   const [limitsFor, setLimitsFor] = useState<string | null>(null);
   // 标签编辑对话框：同样存 id，取最新快照

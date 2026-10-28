@@ -316,3 +316,11 @@ it("创建 Key 对话框支持 Esc 关闭", async () => {
   await userEvent.keyboard("{Escape}");
   expect(screen.queryByTestId("create-key-dialog")).not.toBeInTheDocument();
 });
+
+describe("ApiKeysPage 首启向导深链", () => {
+  it("?new=1 进来直接打开创建对话框", async () => {
+    mockFetch({ "/api/api-keys": { api_keys: [] } });
+    renderPage(<ApiKeysPage />, { username: "root", is_admin: true }, "/?new=1");
+    expect(await screen.findByTestId("create-key-dialog")).toBeInTheDocument();
+  });
+});

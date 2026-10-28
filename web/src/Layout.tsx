@@ -9,6 +9,7 @@ import { ChangePasswordDialog } from "./components/ChangePasswordDialog";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { UserMenu } from "./components/UserMenu";
 import { BrandMark, SidebarNav } from "./components/Sidebar";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { useDialogFocus } from "./hooks/useDialogFocus";
 
 // 兼容既有引用（登录页/激活页从 Layout 取品牌标记）
@@ -105,7 +106,10 @@ export function Layout({ session }: { session: SessionInfo }) {
           </aside>
           <div className="flex min-w-0 flex-1 flex-col">
             <main ref={mainRef} tabIndex={-1} className="flex-1 focus:outline-none">
-              <Outlet context={session} />
+              {/* key=pathname：切换页面即重建边界，把上一页的错误态清掉 */}
+              <ErrorBoundary key={location.pathname}>
+                <Outlet context={session} />
+              </ErrorBoundary>
             </main>
             <footer className="pt-6 pb-2 text-xs text-muted-foreground">
               Coding2API · 仅供学习研究，未做安全审计

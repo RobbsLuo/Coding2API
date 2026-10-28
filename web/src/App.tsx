@@ -3,6 +3,7 @@ import { Navigate, Route, Routes } from "react-router-dom";
 import { Layout } from "./Layout";
 import { useSession } from "./api/hooks";
 import { ChangePasswordDialog } from "./components/ChangePasswordDialog";
+import { FirstRunWizard } from "./components/FirstRunWizard";
 import { ActivatePage } from "./pages/ActivatePage";
 import { LoginPage } from "./pages/LoginPage";
 
@@ -69,7 +70,9 @@ export function App() {
   }
 
   return (
-    <Suspense fallback={LOADING}>
+    <>
+      <FirstRunWizard username={session.data.username} isAdmin={session.data.is_admin} />
+      <Suspense fallback={LOADING}>
       <Routes>
         <Route path="/login" element={<Navigate to="/" replace />} />
         <Route element={<Layout session={session.data} />}>
@@ -89,6 +92,7 @@ export function App() {
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-    </Suspense>
+      </Suspense>
+    </>
   );
 }

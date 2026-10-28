@@ -38,16 +38,18 @@ export function fullSession(session: TestSession): SessionInfo {
 }
 
 /** 在 Layout 下渲染页面，让 useSessionContext 拿到会话。 */
-export function renderPage(ui: ReactNode, session: TestSession = { username: "root", is_admin: true }) {
+export function renderPage(ui: ReactNode, session: TestSession = { username: "root", is_admin: true },
+                           path = "/page") {
   return render(
     <QueryClientProvider client={makeClient()}>
-      <MemoryRouter initialEntries={["/page"]}>
+      <MemoryRouter initialEntries={[path]}>
         <Routes>
           <Route element={<Layout session={fullSession(session)} />}>
             <Route path="/page" element={ui} />
+            {/* 兜住其它入口（含「/?new=1」这类带查询串的深链），且必须在
+                Layout 里，页面才能通过 useOutletContext 拿到会话 */}
+            <Route path="*" element={ui} />
           </Route>
-          {/* Layout 顶部导航含指向「/」的链接（凭证管理是首页），缺这条路由会告警 */}
-          <Route path="/" element={ui} />
         </Routes>
       </MemoryRouter>
     </QueryClientProvider>,
