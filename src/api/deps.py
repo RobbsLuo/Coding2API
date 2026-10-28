@@ -9,6 +9,7 @@ request 可用）。
 from __future__ import annotations
 
 import json
+import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -62,6 +63,8 @@ PASSWORD_CHANGE_ALLOWLIST = frozenset({
     ("POST", "/api/auth/logout"),
 })
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Services:
@@ -107,6 +110,10 @@ class Services:
     # Key 级配额：准入判定（当日用量注入 KeyUsageRepository）+ 自助用量共用。
     # 进程内滑动窗口/在途计数在 guard 里，重启清零（单进程部署语义）。
     key_quota: KeyQuotaGuard
+    # 用户级配额：只用于管理台 Playground 的会话直连（`users.quota`），用量按
+    # **用户名**聚合（该用户经由任何入口的流量都算）。独立 guard 实例 =
+    # 独立的滑动窗口/在途计数，与 Key 的窗口互不干扰。
+    user_quota: KeyQuotaGuard
     # 按 API Key 聚合用量（Key 配额判定与 GET /v1/usage 的数据源）。
     key_usage: KeyUsageRepository
     # 同一个限流护栏实例（executor 也持它）：管理台改完限额后 invalidate()
@@ -203,9 +210,34 @@ class ApiKeyPrincipal:
     quota: KeyQuota = field(default_factory=KeyQuota)  # 该 Key 的配额（全关=不受限）
 
 
+class ServicePaused(Exception):
+    """全站暂停（kill switch，`gateway_paused`）：/v1 一律 503。
+
+    管理台走会话鉴权、不经过这里，因此**暂停期间运维仍能进去关掉它**。
+    对外只回受控文案，不回显运维写的原因（可能含事故编号等内部信息）；
+    原因进服务端日志。
+    """
+
+    def __init__(self, reason: str = "") -> None:
+        super().__init__("service temporarily paused by operator")
+        self.reason = reason
+
+
+def _ensure_not_paused(services: Services) -> None:
+    """暂停期拦掉 /v1：放在鉴权依赖里而不是各端点，避免新端点漏拦。"""
+    settings = services.settings
+    if not getattr(settings, "gateway_paused", False):
+        return
+    reason = str(getattr(settings, "gateway_pause_reason", "") or "")
+    logger.warning("网关暂停中（kill switch），拒绝 /v1 请求：%s",
+                   reason or "(未填原因)")
+    raise ServicePaused(reason)
+
+
 def _api_key_principal(services: Services, request: Request,
                        raw_key: str) -> ApiKeyPrincipal:
     """校验裸 Key 文本并组装 Principal（Bearer 与 x-api-key 两条入口共用）。"""
+    _ensure_not_paused(services)
     record = services.api_keys.authenticate(raw_key)
     # 用户被删除或禁用后旧 Key 必须立即失效（同会话 Cookie 的理由）
     if not record or not services.users.is_active(record["username"]):

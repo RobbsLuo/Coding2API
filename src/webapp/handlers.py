@@ -13,6 +13,7 @@ from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from starlette.requests import ClientDisconnect
 
+from ..api.deps import ServicePaused
 from ..auth.csrf import CsrfRejectedError
 from ..auth.rbac import (
     ForbiddenError,
@@ -67,6 +68,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         # _model_cooled_message），只带最后一次错误的受控标识，不含上游正文。
         return JSONResponse(status_code=503,
                             content=error_payload(str(error), "no_healthy_credential", 503))
+
+    @app.exception_handler(ServicePaused)
+    async def _paused(_request, error: ServicePaused):
+        """kill switch：503 + 受控文案。原因只进日志（见 deps._ensure_not_paused），
+        不回显——运维备注可能含事故编号或内部链接。"""
+        return JSONResponse(status_code=503,
+                            content=error_payload(str(error), "service_paused", 503))
 
     @app.exception_handler(NoProviderForModel)
     async def _no_provider(_request, error: NoProviderForModel):

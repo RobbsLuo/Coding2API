@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from pathlib import Path
 
 import httpx
 import pytest
@@ -419,15 +418,48 @@ def test_dump_request_body_trims_to_keep_limit(tmp_path):
     remaining = list((tmp_path / "dumps").glob("*.json"))
     assert 0 < len(remaining) <= chat.DUMP_KEEP_FILES
 
-def test_dump_request_body_survives_unwritable_dir(tmp_path, monkeypatch):
-    """诊断落盘失败不影响聊天请求。"""
+def test_dump_request_body_survives_unwritable_dir(tmp_path):
+    """诊断落盘失败不影响聊天请求（路径不可用 → OSError 被吞掉）。
+
+    `DATA_DIR/dumps` 已被占成普通文件时 `mkdir` 抛 `FileExistsError`：诊断失败
+    绝不能把请求带崩，也不能向外抛任何异常。
+    """
     from src.api import chat
 
-    def boom(*args, **kwargs):
-        raise OSError("read-only file system")
-
-    monkeypatch.setattr(Path, "write_text", boom)
+    (tmp_path / "dumps").write_text("not a directory", encoding="utf-8")
     chat.dump_request_body(tmp_path, {"a": 1})      # 不应抛异常
+    assert (tmp_path / "dumps").is_file()
+
+
+def test_dump_files_are_owner_only_and_expire_after_a_day(tmp_path):
+    """请求体含完整对话：目录 0700、文件 0600；条数没超也要按 24h 过期清理。"""
+    import os
+    import time as _time
+
+    from src.api import chat
+
+    chat.dump_request_body(tmp_path, {"messages": [{"role": "user", "content": "hi"}]})
+    dump_dir = tmp_path / "dumps"
+    written = list(dump_dir.glob("*.json"))
+    assert len(written) == 1
+    assert dump_dir.stat().st_mode & 0o777 == 0o700
+    assert written[0].stat().st_mode & 0o777 == 0o600
+
+    # 老版本建过 0755 的目录：下一次落盘必须把它收紧（mkdir 的 mode 只影响新建）
+    dump_dir.chmod(0o755)
+    chat.dump_request_body(tmp_path, {"a": 1})
+    assert dump_dir.stat().st_mode & 0o777 == 0o700
+
+    # 条数没超，但超过 24h 的文件也要被清掉（按 mtime 判）
+    fresh = sorted(dump_dir.glob("*.json"))[-1]
+    old = dump_dir / "0000000000001.json"
+    old.write_text("old", encoding="utf-8")
+    _time.sleep(0)
+    os.utime(old, (0, 0))                    # mtime 归零 = 远超 24h
+    chat.dump_request_body(tmp_path, {"b": 2})
+    remaining = {item.name for item in dump_dir.glob("*.json")}
+    assert old.name not in remaining
+    assert fresh.name in remaining
 
 def test_dump_request_body_trims_ignoring_unlink_errors(tmp_path, monkeypatch):
     """淘汰旧文件时遇到错误不抛出（suppress 分支）。"""

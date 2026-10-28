@@ -11,13 +11,14 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from ..audit.actions import ACTION_DATA_EXPORT
 from ..auth.rbac import Principal, require_operator
 from ..compat.openai.errors import error_payload
 from ..compat.openai.request import InvalidRequest
 from ..stats.csv import CSV_BOM, EXPORT_HEADERS, csv_line, event_cells
 from ..stats.live import LiveEventHub, Subscription, TooManySubscribers
 from ..stats.query import ERROR_MAX_GROUPS, EXPORT_MAX_ROWS, METRIC_KINDS
-from .deps import Services, principal_from_request
+from .deps import Services, principal_from_request, request_ip
 
 # 心跳间隔：代理/浏览器对「长时间没数据」的连接会主动断（nginx 默认 60s）。
 # 15s 一条注释帧，既保活又不至于把流量抬起来。
@@ -227,7 +228,8 @@ def create_router(services: Services) -> APIRouter:
             limit=max(1, min(limit, ERROR_MAX_GROUPS)))}
 
     @router.get("/api/stats/events")
-    async def stats_events(principal=Depends(principal_from_request),
+    async def stats_events(request: Request,
+                           principal=Depends(principal_from_request),
                            username: str | None = None, since: int | None = None,
                            until: int | None = None,
                            before: int | None = None, limit: int = 50,
@@ -251,6 +253,14 @@ def create_router(services: Services) -> APIRouter:
             truncated = len(rows) > EXPORT_MAX_ROWS
             rows = rows[:EXPORT_MAX_ROWS]
             now = int(datetime.now(tz=UTC).timestamp())
+            # 整份明细导出的大窗口（`export_events` 不过滤用户名时能拿到全池
+            # 记录）必须留痕：谁在什么时候把多少行拉走了。
+            services.audit.record(
+                actor=principal.username, action=ACTION_DATA_EXPORT,
+                target="usage_events",
+                detail=(f"CSV 明细 {len(rows)} 行"
+                        + ("（已截断）" if truncated else "")),
+                ip=request_ip(request, services.settings))
             headers = {
                 "Content-Disposition": f'attachment; filename="{_export_filename(now)}"',
                 "X-Export-Row-Count": str(len(rows)),

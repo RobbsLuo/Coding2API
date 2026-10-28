@@ -59,6 +59,18 @@ def create_router(services: Services) -> APIRouter:
             raise InvalidRequest(str(error)) from error
         keys = ", ".join(sorted(values)) or "(空)"
         logger.info("管理员 %s 更新运行时配置 %s（DB 覆盖 .env）", principal.username, keys)
+        if "dump_request_bodies" in values:
+            # 这是全服务唯一「把用户对话落盘」的开关：开关动作既进审计（下面那条
+            # settings.update 带 keys），也在日志里单独喊一声——排查完没关是运维
+            # 事故，日志里必须一眼可见。
+            logger.warning("管理员 %s 把「请求体诊断落盘」改为 %s（DATA_DIR/dumps 将保存"
+                           "完整请求体，含对话内容）",
+                           principal.username, runtime.get("dump_request_bodies"))
+        if "gateway_paused" in values:
+            # kill switch 的两个方向都要留痕：开启是止血动作，关闭同样要能追到人。
+            logger.warning("管理员 %s 把「网关暂停」改为 %s（原因：%s）",
+                           principal.username, runtime.get("gateway_paused"),
+                           runtime.get("gateway_pause_reason") or "未填原因")
         # 配置写入本身就是一次「谁能改网关行为」的变更，必须留痕：模型黑名单
         # （C3 的一键黑名单按钮也走这条接口）与告警 webhook 被改掉却不进审计，
         # 事后无法回答「是谁把它关的」。
