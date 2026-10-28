@@ -9,6 +9,24 @@ from ...engine.sse import SSE_DONE, format_openai_frame
 from ...provider.base import ErrKind, Event, event_error_kind
 
 
+class InvalidToolArguments(Exception):
+    """上游给出的工具调用参数不是合法 JSON 对象（协议级失败）。
+
+    **fail-closed**：不把坏 `arguments` 透传给客户端去执行，也不冷却凭证
+    （不是账号的错）。分类为 INVALID：换号/换上游重试，全部失败时对外 400
+    `invalid_request`，客户端能明确知道「这次调用不可用」而不是拿到半截 JSON。
+    """
+
+    def __init__(self, function: str, arguments: Any) -> None:
+        super().__init__(
+            f"tool call {function!r} returned invalid JSON arguments: {arguments!r}")
+        self.function = function
+        self.arguments = arguments
+
+    def kind(self) -> ErrKind:
+        return ErrKind.INVALID
+
+
 class UpstreamStreamError(Exception):
     """流内业务错误（聚合路径抛出，由 executor 转成冷却 + 轮换）。
 

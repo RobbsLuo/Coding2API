@@ -18,7 +18,8 @@ from typing import Any
 
 from ...engine.sse import SSE_COMMENT, SSE_DONE, format_openai_frame
 from ...provider.base import Event, EventKind, Usage
-from .errors import UpstreamStreamError, stream_error_frame
+from . import dsml
+from .errors import InvalidToolArguments, UpstreamStreamError, stream_error_frame
 
 ROLE_CHUNK = {"role": "assistant", "content": ""}
 
@@ -123,10 +124,8 @@ class StreamTranslator:
         self.usage: Usage | None = None
         # [DONE] 已产出：客户端此后断开属正常收尾（拿到回调即关连接）
         self.done_sent = False
-    @staticmethod
-    def _is_empty_payload(event: Event) -> bool:
-        """空内容不消耗首帧 role 标记，避免发出无意义 chunk。"""
-        return not (event.content or event.tool_calls)
+        # DSML 泄漏回读：普通正文零缓冲，只有出现标记才进入缓冲态
+        self._dsml = dsml.DsmlStreamFilter()
 
     def translate(self, event: Event) -> Iterator[bytes]:
         if event.kind is EventKind.ERROR:
@@ -145,19 +144,30 @@ class StreamTranslator:
             yield from self._close(event.finish_reason or "stop")
             return
 
+        text = event.content
+        recovered: list[dict[str, Any]] = []
+        if event.kind is EventKind.CONTENT and text:
+            # DSML 泄漏回读：可见正文照常流式放行，回读出的调用另起一帧
+            text, recovered = self._dsml.feed(text)
+            if not text and not recovered:
+                return
         delta: dict[str, Any] = {}
-        if not self._sent_role and not self._is_empty_payload(event):
+        if not self._sent_role and (text or event.tool_calls or recovered):
             delta.update(ROLE_CHUNK)
             self._sent_role = True
-        if event.kind is EventKind.CONTENT and event.content:
-            delta["content"] = event.content
+        if event.kind is EventKind.CONTENT and text:
+            delta["content"] = text
         elif event.kind is EventKind.REASONING and event.content:
             delta["reasoning_content"] = event.content
         elif event.kind is EventKind.TOOL_CALLS and event.tool_calls:
             delta["tool_calls"] = [self._tool_index.resolve(tc)[0] for tc in event.tool_calls]
-        if not delta:
-            return
-        yield format_openai_frame(json.dumps(_chunk(self.model, delta), ensure_ascii=False))
+        if delta:
+            yield format_openai_frame(
+                json.dumps(_chunk(self.model, delta), ensure_ascii=False))
+        if recovered:
+            calls = [self._tool_index.resolve(tc)[0] for tc in recovered]
+            yield format_openai_frame(json.dumps(
+                _chunk(self.model, {"tool_calls": calls}), ensure_ascii=False))
 
     def finish(self) -> Iterator[bytes]:
         """上游未发 done 就断流：补一个结束帧，保证客户端不会挂住。"""
@@ -180,6 +190,19 @@ class StreamTranslator:
         return stream_error_frame(message, code)
 
     def _close(self, finish_reason: str) -> Iterator[bytes]:
+        # 缓冲里剩下的正文（不完整的 DSML 标记）原样交出，绝不吞用户内容
+        pending = self._dsml.flush()
+        if pending:
+            delta: dict[str, Any] = {}
+            if not self._sent_role:
+                delta.update(ROLE_CHUNK)
+                self._sent_role = True
+            delta["content"] = pending
+            yield format_openai_frame(
+                json.dumps(_chunk(self.model, delta), ensure_ascii=False))
+        if self._dsml.recovered and finish_reason == "stop":
+            # 回读出了工具调用：把 stop 改成 tool_calls，否则客户端不执行
+            finish_reason = "tool_calls"
         yield format_openai_frame(json.dumps(
             _chunk(self.model, {}, finish_reason=finish_reason), ensure_ascii=False))
         # OpenAI 标准形态：include_usage 时收尾帧之后、[DONE] 之前补一帧
@@ -232,12 +255,30 @@ def aggregate(events: Iterable[Event], model: str) -> dict[str, Any]:
                         current["function"]["arguments"] = (
                             (current["function"].get("arguments") or "") + fragment)
 
+    # DSML 泄漏回读：模型把工具调用写成文本时还原成结构化调用，并从正文剥掉
+    content_text = "".join(content_parts)
+    recovered, content_text = dsml.extract(content_text)
+    if recovered:
+        next_index = max(tool_calls) + 1 if tool_calls else 0
+        for offset, call in enumerate(recovered):
+            call = dict(call)
+            call["index"] = next_index + offset
+            tool_calls[call["index"]] = call
+        if finish_reason == "stop":
+            finish_reason = "tool_calls"
+    ordered = [tool_calls[i] for i in sorted(tool_calls)]
+    for call in ordered:
+        function = call.get("function") or {}
+        if not dsml.is_valid_arguments(function.get("arguments")):
+            # fail-closed：坏参数不递交给客户端执行，按协议级失败处理
+            raise InvalidToolArguments(function.get("name") or "-",
+                                       function.get("arguments"))
     message: dict[str, Any] = {"role": "assistant",
-                              "content": "".join(content_parts) or None}
+                              "content": content_text or None}
     if reasoning_parts:
         message["reasoning_content"] = "".join(reasoning_parts)
-    if tool_calls:
-        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
+    if ordered:
+        message["tool_calls"] = ordered
     result: dict[str, Any] = {
         "id": _completion_id(),
         "object": "chat.completion",

@@ -20,8 +20,11 @@ from typing import Any
 _DIGEST_LEN = 16
 # 同一进程里同时在跑的会话数远小于这个值；LRU 只是防止凭证反复增删时无界增长
 _DEFAULT_CAPACITY = 64
-# 缺省 tools 的固定摘要：不参与比较的哨兵值，避免和真实摘要撞车
-_NO_TOOLS = "-"
+# 缺省 tools 的固定摘要：不参与比较的哨兵值，避免和真实摘要撞车。
+# 与 `_EMPTY` **必须不同**：两者同值时日志里分不清「本次没带 tools」与
+# 「没有 system 消息」（前者 tools_changed 恒 false 会被静默吞掉）。
+_NO_TOOLS = "no-tools"
+# 无 system / 无分叉点时的占位
 _EMPTY = "-"
 
 

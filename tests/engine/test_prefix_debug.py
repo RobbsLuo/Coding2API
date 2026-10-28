@@ -43,11 +43,12 @@ def test_message_digests_are_stable_and_shape_safe():
 
 
 def test_tools_digest_treats_missing_and_empty_alike():
-    assert tools_digest({}) == "-"
-    assert tools_digest({"tools": []}) == "-"
-    assert tools_digest({"tools": None}) == "-"
+    # 哨兵值与「无 system」的 `"-"` 不同：日志里两者必须可区分
+    assert tools_digest({}) == "no-tools"
+    assert tools_digest({"tools": []}) == "no-tools"
+    assert tools_digest({"tools": None}) == "no-tools"
     defined = tools_digest({"tools": [{"type": "function", "function": {"name": "f"}}]})
-    assert defined != "-"
+    assert defined != "no-tools"
     assert defined == tools_digest(
         {"tools": [{"function": {"name": "f"}, "type": "function"}]})
 
@@ -67,7 +68,7 @@ def test_first_request_has_no_baseline():
     report = tracker.observe("c1", {"messages": [_msg("system", "s"), _msg("user", "u")]})
     assert report["messages"] == 2
     assert report["system"] == message_digests([_msg("system", "s")])[0]
-    assert report["tools"] == "-"
+    assert report["tools"] == "no-tools"
     # 没有上一条就没有基准：一律 None，不把「第一条」报成「前缀全变」
     assert report["lcp"] is None
     assert report["reusable"] is None

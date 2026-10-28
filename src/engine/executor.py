@@ -33,6 +33,7 @@ from ..provider.base import (
     aclose_stream,
     event_error_kind,
 )
+from ..request_context import set_credential_id
 from .continuation import ContinuationStream
 from .model_resolver import (
     ModelTarget,
@@ -45,10 +46,20 @@ from .scheduler import Scheduler
 
 logger = logging.getLogger(__name__)
 
+# 用量对账：正文少于该字符数不判定（短回复的 token/字符比噪声极大）
+USAGE_MIN_CHARS = 200
+# 正常中英文混合约 1–4 字符/token；超过该比值视为 usage 低估或静默替换
+USAGE_UNDERREPORT_RATIO = 12.0
+
 # 同一渠道两次「账号被上游风控限制」的间隔窗口：窗口内再次命中说明不是单号
 # 偶发，而是整批同源账号（同出口 IP / 同设备）被上游拉黑，此时继续放剩余号
 # 去撞只会扩大标记面。实测一次请求连打 3 个号全 403，新号加入 3 分钟即封。
 RESTRICTED_BURST_WINDOW_SECONDS = 10 * 60
+# 窗口内**不同凭证**命中受限的最少个数：同一个号连撞两次不算「整批同源账号」
+# （单号 2h 冷却已经挡住重复撞），必须是第二个号也中，才说明是整批被拉黑。
+# 用「不同凭证数」而不是「命中次数」，是为了不让单一凭证/单一租户的连续两个
+# 请求直接升级成整渠道 24h 暂停。
+RESTRICTED_BURST_CREDENTIALS = 2
 # 渠道级暂停时长：只冷却、不禁用，到期自动恢复。比单号 2h 长一个量级，
 # 给运维留出换出口 / 申诉的时间。
 RESTRICTED_PROVIDER_PAUSE_SECONDS = 24 * 3600
@@ -256,6 +267,10 @@ class ExecutorDeps:
     # 在途计数同时注入候选快照供调度器做「最少连接」负载均衡。None 表示
     # 不启用（向后兼容，此时无过滤也无负载键）。
     inflight: Any | None = None
+    # 冷却到期半开探测（src/engine/half_open.py 的 HalfOpenGuard）：冷却刚
+    # 到期的凭证先只放 1 个在途请求，成功后再全量回池；None 表示不启用
+    # （向后兼容，届时到期即全量回池）。
+    half_open: Any | None = None
     # 出站剥离思考内容：真值 → 丢掉 `EventKind.REASONING` 事件（三个出口
     # 一致生效，流式/非流式都覆盖）。**只过滤响应、不改请求体**：上游仍照常
     # 思考（reasoning_effort 原样透传），只是不交给客户端。零参 callable 时
@@ -283,10 +298,17 @@ class Executor:
         # 流式超时的时钟：默认真实单调钟，测试可换成假时钟以精确断言
         # 「只有数据事件重置计时」而不必真的等满窗口（见 test_executor_stream_timeout）
         self._clock = time.monotonic
-        # provider → 最近一次「账号被上游风控限制」的时刻：同渠道在窗口内第二次
-        # 命中升级为渠道级长暂停（见 `_note_upstream_error`）。只在进程内，
+        # provider → (窗口起点, 窗口内命中受限的凭证集合)：窗口内**第二个不同
+        # 凭证**命中时升级为渠道级长暂停（见 `_note_upstream_error`）。按凭证
+        # 集合而不是计数：同一个号重复命中不该升级（单号 2h 冷却已挡住重复撞），
+        # 否则单一租户/单一凭证的两个请求就能把整渠道暂停 24h。只在进程内，
         # 重启丢失无所谓——它只是「别让剩余号继续撞」的加速器。
-        self._restricted_hits: dict[str, int] = {}
+        self._restricted_hits: dict[str, tuple[int, set[str]]] = {}
+        # 半开探测：`_select` 选中后、`_lease` 登记前暂存 key（同一事件循环
+        # 内同步传递，不会有并发交错）；`_probe_leases` 是请求存活期间的
+        # 探测位（按凭证分组，先进后出释放）。
+        self._pending_probe: dict[str, tuple[str, str]] = {}
+        self._probe_leases: dict[str, list[tuple[str, str]]] = {}
 
     def _record_invalid(self, username: str, provider_id: str, credential_id: str,
                         model: str, started: float, error: object) -> None:
@@ -569,6 +591,7 @@ class Executor:
                         # [DONE] 已产出：客户端收尾断开，按成功记账（tokens 如实记录）
                         if state.credential_id is not None:
                             self._deps.credentials.save_success(state.credential_id)
+                            self._confirm_probe(state.credential_id)
                         self._record_success(attempt, state, state.provider,
                                              state.credential_id or "-")
                     else:
@@ -675,7 +698,8 @@ class Executor:
             # 轮换重试每次都要重新 wait_turn，泄漏累积到 max_concurrency 后
             # 新请求永久阻塞——「用了三次就限制」。见 aclose_stream 注释。
             iterator = self._stream_source(
-                provider_id, credential_data, payload, target.model).__aiter__()
+                provider_id, credential_data, payload, target.model,
+                credential_id).__aiter__()
             # 在途登记放在创建迭代器之后、`try` 之前：选号到此全同步，不会与
             # 并发请求交错超额；释放统一走下面的 finally，覆盖成功/轮换/断开。
             self._lease(credential_id)
@@ -726,17 +750,14 @@ class Executor:
                             break
                         if kind is ErrKind.RESTRICTED:
                             # 账号被上游风控限制：同渠道其余号大概率同样被限，
-                            # 逐个换号只会在上游多留几条记录（见 _note_upstream_error）
-                            logger.warning(
-                                "上游 %s 流内限制账号（凭证 %s 跳过该渠道）: code=%s %s",
-                                provider_id, credential_id,
-                                event.error_code, event.error_message)
-                            attributed = self._note_upstream_error(
-                                credential_id, kind, provider_id, target.model, event,
-                                username=state.username, started=state.started) or attributed
+                            # 逐个换号只会在上游多留几条记录（见 _handle_restricted）
+                            attributed = self._handle_restricted(
+                                provider_id=provider_id, credential_id=credential_id,
+                                model=target.model, error=event,
+                                username=state.username, started=state.started,
+                                attributed=attributed, tried=tried)
                             last_error = UpstreamStreamError(event)
                             last_kind = kind
-                            self._skip_provider(provider_id, tried)
                             broken = True
                             break
                         logger.warning(
@@ -749,6 +770,8 @@ class Executor:
                         last_error = UpstreamStreamError(event)
                         broken = True
                         break
+                    if event.kind is EventKind.CONTENT and event.content:
+                        state.content_chars += len(event.content)
                     for frame in state.translator.translate(event):
                         state.mark_first_byte()
                         emitted = True
@@ -757,6 +780,7 @@ class Executor:
                     # 上游正常结束：清错误累计、重新粘定、按成功记账并收尾
                     self._deps.credentials.save_success(
                         credential_id, model=self._model_scope(provider_id, target.model))
+                    self._confirm_probe(credential_id)
                     self._remember(request, state.username, credential_id)
                     self._record_success(target, state, provider_id, credential_id)
                     for frame in state.translator.finish():
@@ -801,14 +825,12 @@ class Executor:
                     self._skip_provider(provider_id, tried)
                 elif kind is ErrKind.RESTRICTED:
                     # 账号被上游风控限制：跳过该渠道，别让同渠道其它号继续撞
-                    logger.warning("上游 %s 限制账号（凭证 %s 跳过该渠道）: %s",
-                                   provider_id, credential_id, _error_detail(error))
-                    attributed = self._note_upstream_error(
-                        credential_id, kind, provider_id, target.model,
-                        error, username=state.username,
-                        started=state.started) or attributed
+                    attributed = self._handle_restricted(
+                        provider_id=provider_id, credential_id=credential_id,
+                        model=target.model, error=error,
+                        username=state.username, started=state.started,
+                        attributed=attributed, tried=tried)
                     last_error, last_kind = error, kind
-                    self._skip_provider(provider_id, tried)
                 else:
                     logger.warning("上游 %s 错误（凭证 %s，kind=%s）: %s",
                                    provider_id, credential_id, kind,
@@ -962,12 +984,17 @@ class Executor:
         return updated
 
     def _stream_source(self, provider_id: str, credential_data: dict[str, Any],
-                       payload: dict[str, Any], model: str) -> AsyncIterator[Event]:
+                       payload: dict[str, Any], model: str,
+                       credential_id: str | None = None) -> AsyncIterator[Event]:
         """上游事件流入口；开启截断续写时包一层。
 
         续写在包装器内固定用同一凭证续发请求，因此凭证轮换/记账/统计
         逻辑完全不需要感知它——executor 只会看到一条更长的流。
+
+        `credential_id` 写进 contextvar 供 provider 选出口代理（一号一出口）：
+        换号重试时每次调用都会重设，不会沿用上一个凭证的出口。
         """
+        set_credential_id(credential_id)
         upstream_model = self._upstream_model(provider_id, model)
         stream = self._deps.providers[provider_id].stream_chat(
             credential_data, payload, upstream_model)
@@ -993,6 +1020,44 @@ class Executor:
             credit=_usage_field(usage, "credit"),
             credit_estimated=bool(_usage_field(usage, "credit_estimated")),
             ttfb_ms=state.ttfb_ms(), latency_ms=_elapsed_ms(state.started))
+        self._check_usage_consistency(
+            provider_id=provider_id, credential_id=credential_id, model=target.model,
+            content_chars=state.content_chars,
+            output_tokens=_usage_field(usage, "output_tokens"))
+
+    def _check_usage_consistency(self, *, provider_id: str, credential_id: str,
+                                 model: str, content_chars: int,
+                                 output_tokens: int | None) -> None:
+        """成功请求的「用量 ↔ 正文体量」对账（只告警，不改响应）。
+
+        **上游静默替换/截断**没有可靠的直接信号（中立事件层不带上游返回的
+        `model`，各渠道的 SSE 字段也各不相同），但两条间接特征足够明显：
+
+        - 正文很长却**一个输出 token 都没报**：上游把 usage 吞了，或只回了一
+          小段就收尾（截断）；
+        - 上报的 token 数远小于正文长度（> `USAGE_UNDERREPORT_RATIO` 字符/token）：
+          正常中英文混合约 1–4 字符/token，超过 12 基本只能解释为「usage 被
+          低估」或「响应被上游换成了更小的模型再截断」。
+
+        刻意**不**写 `error_type`、不改响应、不冷却：这是观测信号，不是确定的
+        失败（乱报会让归因面板和成功率失真）。正文 < `USAGE_MIN_CHARS` 时不判定
+        ——短回复的 token/字符比噪声极大。
+        """
+        if content_chars < USAGE_MIN_CHARS:
+            return
+        if not output_tokens:
+            logger.warning(
+                "上游 %s 输出 %d 字符但未上报输出 token（凭证 %s，模型 %s）"
+                "——疑似 usage 被吞或响应被截断",
+                provider_id, content_chars, credential_id, model)
+            return
+        ratio = content_chars / output_tokens
+        if ratio > USAGE_UNDERREPORT_RATIO:
+            logger.warning(
+                "上游 %s 输出 %d 字符仅上报 %d 输出 token（%.1f 字符/token，"
+                "凭证 %s，模型 %s）——疑似 usage 低估或模型被静默替换",
+                provider_id, content_chars, output_tokens, ratio,
+                credential_id, model)
 
     def _record_disconnect(self, target: ModelTarget, state: _StreamState) -> None:
         """客户端断开：按已知用量记账，标记 client_disconnect。"""
@@ -1095,7 +1160,8 @@ class Executor:
             # 与 _stream_loop 同理：显式关闭上游流，让节流名额在每次尝试
             # 结束时同步归还，不依赖 GC 的 asyncgen finalize
             iterator = self._stream_source(
-                provider_id, credential_data, payload, target.model).__aiter__()
+                provider_id, credential_data, payload, target.model,
+                credential_id).__aiter__()
             # 与 _stream_loop 同理：在途登记 + finally 释放（含超时/断开）
             self._lease(credential_id)
             queued_wait: float | None = None
@@ -1192,13 +1258,12 @@ class Executor:
                     self._skip_provider(provider_id, tried)
                 elif kind is ErrKind.RESTRICTED:
                     # 账号被上游风控限制：跳过该渠道，别让同渠道其它号继续撞
-                    logger.warning("上游 %s 限制账号（凭证 %s 跳过该渠道）: %s",
-                                   provider_id, credential_id, _error_detail(error))
-                    attributed = self._note_upstream_error(
-                        credential_id, kind, provider_id, target.model,
-                        error, username=username, started=started) or attributed
+                    attributed = self._handle_restricted(
+                        provider_id=provider_id, credential_id=credential_id,
+                        model=target.model, error=error,
+                        username=username, started=started,
+                        attributed=attributed, tried=tried)
                     last_error, last_kind = error, kind
-                    self._skip_provider(provider_id, tried)
                 else:
                     logger.warning("上游 %s 错误（凭证 %s，kind=%s）: %s",
                                    provider_id, credential_id, kind,
@@ -1224,15 +1289,12 @@ class Executor:
                         self._skip_provider(provider_id, tried)
                     elif kind is ErrKind.RESTRICTED:
                         # 流内账号限制：跳过该渠道，别让其它号继续撞
-                        logger.warning(
-                            "上游 %s 流内限制账号（凭证 %s 跳过该渠道）: code=%s %s",
-                            provider_id, credential_id,
-                            error.event.error_code, error.event.error_message)
-                        attributed = self._note_upstream_error(
-                            credential_id, kind, provider_id, target.model, error,
-                            username=username, started=started) or attributed
+                        attributed = self._handle_restricted(
+                            provider_id=provider_id, credential_id=credential_id,
+                            model=target.model, error=error,
+                            username=username, started=started,
+                            attributed=attributed, tried=tried)
                         last_error, last_kind = error, kind
-                        self._skip_provider(provider_id, tried)
                     else:
                         attributed = self._note_upstream_error(
                             credential_id, kind, provider_id, target.model, error,
@@ -1241,6 +1303,7 @@ class Executor:
                 else:
                     self._deps.credentials.save_success(
                         credential_id, model=self._model_scope(provider_id, target.model))
+                    self._confirm_probe(credential_id)
                     self._remember(request, username, credential_id)
                     usage = result.get("usage") or {}
                     # credit 不在对外响应里（客户端不需要，见 compat 出口），
@@ -1267,6 +1330,14 @@ class Executor:
                         ttfb_ms=(int((first_event_at - started) * 1000)
                                  if first_event_at is not None else None),
                         latency_ms=_elapsed_ms(started))
+                    # 与流式路径同一口径：成功请求的用量 ↔ 正文体量对账
+                    self._check_usage_consistency(
+                        provider_id=provider_id, credential_id=credential_id,
+                        model=target.model,
+                        content_chars=sum(
+                            len(e.content) for e in events
+                            if e.kind is EventKind.CONTENT and e.content),
+                        output_tokens=usage.get("completion_tokens"))
                     return result
             finally:
                 await aclose_stream(iterator)
@@ -1336,6 +1407,8 @@ class Executor:
             credential_data = self._safe_credential_data(credential_id)
             if credential_data is not None:
                 return credential_id, credential_data
+            # 选中的号在真正使用前被淘汰：半开探测位不能跟着卡住
+            self._drop_probe(credential_id)
             tried.add(credential_id)  # 并发删除 / 解不开：标记后重选
 
     def _safe_credential_data(self, credential_id: str) -> dict[str, Any] | None:
@@ -1519,8 +1592,55 @@ class Executor:
                                   target, now)
         if not usable:
             return None
-        return (self._sticky(usable, tried, affinity_id)
-                or self._deps.scheduler.select(usable, tried, now))
+        return self._choose(usable, target, tried, affinity_id, now)
+
+    def _choose(self, usable: list, target: ModelTarget, tried: set[str],
+                affinity_id: str | None, now: int) -> str | None:
+        """在可用的候选里选号，并处理冷却到期的**半开探测**。
+
+        候选集里「冷却刚过期」的凭证（`cooling_until <= now`，库里那一行还没
+        被留存任务清掉）不直接回池，而是先只放 1 个请求：探测位被别的请求
+        占着就换下一个号；没有别的号时按「无可用」返回（客户端重试）。探通
+        后的 `RECOVERED_TTL_SECONDS` 内正常放行，避免刚恢复的号被逐个排队。
+        只有被选中的候选才会占用探测位——未选中的请求不占，也就不会泄漏。
+        """
+        guard = self._deps.half_open
+        while usable:
+            credential_id = (self._sticky(usable, tried, affinity_id)
+                             or self._deps.scheduler.select(usable, tried, now))
+            if credential_id is None:
+                return None
+            if guard is None:
+                return credential_id
+            candidate = next(c for c in usable
+                             if c.credential_id == credential_id)
+            key = self._half_open_key(candidate, target, now)
+            if key is None or guard.recovered(key):
+                return credential_id
+            if guard.acquire(key):
+                self._pending_probe[credential_id] = key
+                return credential_id
+            # 探测位被占：本次请求换别的号，别跟着一起撞刚解冻的账号
+            usable = [c for c in usable
+                      if c.credential_id != credential_id]
+        return None
+
+    def _half_open_key(self, candidate, target: ModelTarget,
+                       now: int) -> tuple[str, str] | None:
+        """该候选是否处在「冷却已过期」的半开窗口；是则返回探测键。
+
+        账号级优先于模型级：账号级冷却覆盖全部模型，先恢复它。`scope` 用
+        上游原始模型名，与 `credential_model_cooldowns` 的登记键一致。
+        """
+        credential_id = candidate.credential_id
+        cooling = candidate.cooling_until
+        if cooling is not None and cooling <= now:
+            return (credential_id, "")
+        scope = self._model_scope(candidate.provider, target.model)
+        model_until = candidate.model_cooling_until(scope)
+        if model_until is not None and model_until <= now:
+            return (credential_id, scope)
+        return None
 
     def _selectable(self, candidates: list, target: ModelTarget, now: int) -> list:
         """按「该凭证所属上游的原始模型名」过滤出当前可选的候选。
@@ -1561,11 +1681,33 @@ class Executor:
         """请求开始：登记一个在途租约（未装配护栏则跳过）。"""
         if self._deps.inflight is not None:
             self._deps.inflight.acquire(credential_id)
+        key = self._pending_probe.pop(credential_id, None)
+        if key is not None:
+            self._probe_leases.setdefault(credential_id, []).append(key)
 
     def _release(self, credential_id: str) -> None:
         """请求结束（成功/轮换/异常/断开）：释放一个在途租约（幂等）。"""
         if self._deps.inflight is not None:
             self._deps.inflight.release(credential_id)
+        keys = self._probe_leases.get(credential_id)
+        if keys:
+            self._deps.half_open.release(keys.pop())
+            if not keys:
+                self._probe_leases.pop(credential_id, None)
+
+    def _drop_probe(self, credential_id: str) -> None:
+        """选中的凭证在真正使用前被淘汰（并发删除/解不开）：归还探测位。"""
+        key = self._pending_probe.pop(credential_id, None)
+        if key is not None:
+            self._deps.half_open.release(key)
+
+    def _confirm_probe(self, credential_id: str | None) -> None:
+        """请求成功：该号若在探测中则标记「已恢复」，后续请求不再排队。"""
+        if credential_id is None:
+            return
+        keys = self._probe_leases.get(credential_id)
+        if keys:
+            self._deps.half_open.confirm(keys[-1])
 
     def _note_upstream_error(self, credential_id: str, kind: ErrKind,
                              provider_id: str, model: str,
@@ -1600,6 +1742,12 @@ class Executor:
         """
         if kind is ErrKind.REQUEST:
             return False
+        if self._deps.half_open is not None and kind is not ErrKind.QUEUE:
+            # 又记了一次错误 → 之前「已探通」的结论作废，下次到期重新半开。
+            # QUEUE 是「等几秒原号重开」，不是凭证故障，不必重置。
+            scope = self._model_scope(provider_id, model)
+            self._deps.half_open.reset(credential_id, "")
+            self._deps.half_open.reset(credential_id, scope)
         outcome = self._deps.scheduler.note_error(
             self._candidate(credential_id), kind, int(time.time()),
             model=self._model_scope(provider_id, model),
@@ -1610,9 +1758,10 @@ class Executor:
             outcome = replace(outcome, disabled_reason=self._disabled_reason(provider_id, error))
         self._deps.credentials.save_error(credential_id, outcome)
         if kind is ErrKind.RESTRICTED:
-            # 同渠道短时间第二次受限 → 整渠道暂停（见 `_pause_provider_on_burst`）。
-            # 必须在这里做而不是调用方：流式/非流式两条路径都汇到这里。
-            self._pause_provider_on_burst(provider_id)
+            # 同渠道短时间**第二个不同凭证**受限 → 整渠道暂停
+            # （见 `_pause_provider_on_burst`）。必须在这里做而不是调用方：
+            # 流式/非流式两条路径都汇到这里。
+            self._pause_provider_on_burst(provider_id, credential_id)
         if kind not in (ErrKind.DEAD, ErrKind.RESTRICTED):
             return False
         self._deps.record(
@@ -1621,24 +1770,55 @@ class Executor:
             latency_ms=_elapsed_ms(started))
         return True
 
-    def _pause_provider_on_burst(self, provider_id: str) -> None:
-        """同渠道短时间内重复「账号被上游限制」→ 整渠道冷却，别让剩余号去撞。
+    def _pause_provider_on_burst(self, provider_id: str, credential_id: str) -> None:
+        """同渠道窗口内第二个**不同凭证**被上游限制 → 整渠道冷却。
 
         单号 2h 冷却只挡住这一个号：下一个请求会挑同渠道另一个号继续撞，
         每次都在上游留一条风控记录（实测 08:21 一次请求连打 3 个号、08:38
-        再来一轮，08:41 新号 3 分钟就被封）。窗口内第二次命中就说明是整批
-        同源账号，此时该渠道整体退避 24h 才是止损。
+        再来一轮，08:41 新号 3 分钟就被封）。**另一个号**也在窗口内中招，
+        才说明是整批同源账号，此时该渠道整体退避 24h 才是止损。
+
+        判据是「窗口内不同凭证的个数」而不是「命中次数」：同一个号重复中招
+        不算整批同源（它已被 2h 单号冷却挡住），只按命中次数升级会让单一
+        凭证/单一租户的两个连续请求把整渠道暂停 24h——那是跨用户的停服面。
         """
         now = int(time.time())
-        previous = self._restricted_hits.get(provider_id)
-        self._restricted_hits[provider_id] = now
-        if previous is None or now - previous > RESTRICTED_BURST_WINDOW_SECONDS:
+        window_start, hit = self._restricted_hits.get(provider_id, (now, set()))
+        if now - window_start > RESTRICTED_BURST_WINDOW_SECONDS:
+            # 窗口过期：重新开窗，别把上一轮的号算进本轮
+            window_start, hit = now, set()
+        hit.add(credential_id)
+        self._restricted_hits[provider_id] = (window_start, hit)
+        if len(hit) < RESTRICTED_BURST_CREDENTIALS:
             return
         until = now + RESTRICTED_PROVIDER_PAUSE_SECONDS
         paused = self._deps.credentials.cool_provider(provider_id, until=until)
         logger.warning(
-            "渠道 %s 在 %d 秒内重复被上游风控限制：整渠道暂停 %d 秒（%d 条凭证）",
-            provider_id, now - previous, RESTRICTED_PROVIDER_PAUSE_SECONDS, paused)
+            "渠道 %s 在 %d 秒内被 %d 个凭证相继受限：整渠道暂停 %d 秒（%d 条凭证）",
+            provider_id, now - window_start, len(hit),
+            RESTRICTED_PROVIDER_PAUSE_SECONDS, paused)
+
+    def _handle_restricted(self, *, provider_id: str, credential_id: str,
+                           model: str, error: Exception, username: str,
+                           started: float, attributed: bool,
+                           tried: set[str]) -> bool:
+        """账号被上游风控限制的统一处置：记错误 + 跳过整个渠道。
+
+        四个调用点（流式 HTTP / 流式信封 / 非流式 HTTP / 非流式聚合）共用：
+        处置必须一致，散着写很容易只改一处（历史教训：信封路径跳渠道而 HTTP
+        路径继续换号，同一个号被反复拿去撞上游）。首号 2h 冷却、同渠道第二个
+        不同凭证也中招时升级整渠道 24h 暂停，都在 `_note_upstream_error` 内。
+
+        日志只打**受控标识**（业务码 / 状态码 / 异常类名，见
+        `_restricted_summary`）：上游 body 可能回显用户内容或请求回显，与
+        prefix_debug「只记摘要」的口径一致。返回调用方新的 `attributed`。
+        """
+        logger.warning("上游 %s 限制账号（凭证 %s 跳过该渠道）: %s",
+                       provider_id, credential_id, _restricted_summary(error))
+        self._skip_provider(provider_id, tried)
+        return self._note_upstream_error(
+            credential_id, ErrKind.RESTRICTED, provider_id, model, error,
+            username=username, started=started) or attributed
 
     def _disabled_reason(self, provider_id: str, error: Exception | None) -> str:
         """DEAD 的可操作原因：交由 provider 识别上游点名的账号级限制。
@@ -1718,6 +1898,9 @@ class _StreamState:
     # 流式超时的截止时刻（monotonic）：None = 下一次取事件时重新计时。
     # 只被数据事件重置（见 `_is_data_event`），跨尝试由 _stream_loop 显式清空
     deadline: float | None = None
+    # 本次尝试输出的正文字符数：成功时与上游上报的 output_tokens 对账，
+    # 比例离谱说明上游静默换了模型/截断（见 `_check_usage_consistency`）
+    content_chars: int = 0
 
     def mark_first_byte(self) -> None:
         if self._first_byte_at is None:
@@ -1790,6 +1973,23 @@ def _classify(error: Exception) -> ErrKind | None:
     if isinstance(error, (httpx.TransportError, ssl.SSLError)):
         return ErrKind.SOFT
     return None
+
+
+def _restricted_summary(error: object) -> str:
+    """受限错误的**受控标识**：上游业务码 / HTTP 状态码 / 异常类名。
+
+    不给上游正文：`error_message` / `body_hint` 可能是回显的用户内容或被上游
+    回显的请求片段，与 `_error_summary`（对外文案）同一口径，只是这条进服务端
+    日志。正常输入必然命中前两支（信封事件带 `error_code`，`UpstreamStreamError`
+    经 `.event` 取码，HTTP 错误带 `status`），末支只兜住测试桩等无码对象。
+    """
+    code = getattr(getattr(error, "event", error), "error_code", None)
+    if code:
+        return f"code={code}"
+    status = getattr(error, "status", None)
+    if isinstance(status, int) and status > 0:
+        return f"status={status}"
+    return f"kind={type(error).__name__}"
 
 
 def _error_detail(error: Exception | None) -> str:

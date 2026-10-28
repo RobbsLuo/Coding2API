@@ -95,8 +95,46 @@ def _content_text(content: Any) -> str:
     return str(content)
 
 
+def _part_tokens(part: Any) -> float:
+    """单个 content part 的 token 估算。
+
+    图片 part 按 base64 正文长度线性计入：早期实现对非文本 part 一律记 100
+    字符，而一张 1MB 的图 base64 后约 1.4M 字符，按 100 估等于「永远不触发
+    压缩」——图片会话会一路撞上游输入上限。上游按图片的实际 token 计费，
+    这里用 base64 长度作代理。
+
+    **按长度一次算完，不逐字符加权**：请求体上限 16MB
+    （`BodySizeLimitMiddleware`），逐字符跑 `estimate_tokens` 是千万级 Python
+    迭代，会在事件循环里阻塞整个进程。base64 字符集只有字母数字 `+/=`，
+    按 `_OTHER_WEIGHT` 记与逐字符加权（中文/数字权重）的偏差在纯启发式估算
+    里可忽略。
+    """
+    if not isinstance(part, dict):
+        return estimate_tokens(part) if isinstance(part, str) else 0.0
+    text = part.get("text")
+    if isinstance(text, str):
+        return estimate_tokens(text)
+    if part.get("type") == "image_url":
+        image = part.get("image_url")
+        url = image.get("url") if isinstance(image, dict) else None
+        if isinstance(url, str):
+            return _OTHER_WEIGHT * len(url)
+    return 0.0
+
+
+def _content_tokens(content: Any) -> float:
+    """一条 message 的 content（字符串或 part 数组）→ 估算 token 数。"""
+    if isinstance(content, str):
+        return estimate_tokens(content)
+    if isinstance(content, list):
+        return sum(_part_tokens(part) for part in content)
+    if content is None:
+        return 0.0
+    return estimate_tokens(str(content))
+
+
 def _message_tokens(message: dict[str, Any]) -> float:
-    total = estimate_tokens(_content_text(message.get("content")))
+    total = _content_tokens(message.get("content"))
     reasoning = message.get("reasoning_content")
     if isinstance(reasoning, str):
         total += estimate_tokens(reasoning)

@@ -53,10 +53,11 @@ def test_aggregate_tool_call_fragment_when_function_missing():
     result = aggregate([
         Event(kind=EventKind.TOOL_CALLS, tool_calls=[{"id": "a", "index": 0}]),
         Event(kind=EventKind.TOOL_CALLS,
-              tool_calls=[{"id": "a", "index": 0, "function": {"arguments": "1"}}]),
+              tool_calls=[{"id": "a", "index": 0,
+                           "function": {"arguments": '{"a": 1}'}}]),
     ], "m")
     message = result["choices"][0]["message"]
-    assert message["tool_calls"][0]["function"]["arguments"] == "1"
+    assert message["tool_calls"][0]["function"]["arguments"] == '{"a": 1}'
 
 def test_aggregate_reasoning_after_tool_calls():
     """tool_calls 之后再有 reasoning（response 146 分支顺序）。"""

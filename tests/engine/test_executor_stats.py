@@ -841,3 +841,72 @@ async def test_complete_inband_restricted_skips_channel(repo):
     assert Inband.calls == 1
     # 尝试行已归因，收尾行不再重复落（否则 requests 与 Key 日额度双计）
     assert [event["error_type"] for event in collector.events] == ["account_restricted"]
+
+
+def test_restricted_summary_never_echoes_upstream_body():
+    """受限日志只打受控标识：业务码 → 状态码 → 异常类名，绝不含 body。
+
+    上游 body 可能回显用户内容（`body_hint` 还会截取正文），打进日志等于把
+    用户数据落到服务端日志里。
+    """
+    from src.engine.executor import _restricted_summary
+    from src.provider.codebuddy.client import UpstreamHTTPError
+
+    class NoCode(Exception):
+        pass
+
+    assert _restricted_summary(Event(kind=EventKind.ERROR, error_code=11140,
+                                      error_message="secret user text")) == "code=11140"
+    assert _restricted_summary(UpstreamHTTPError(403, b'{"code":11140}')) == "status=403"
+    assert _restricted_summary(NoCode("secret")) == "kind=NoCode"
+    # UpstreamStreamError 经 `.event` 取码（不是把异常描述打进日志）
+    from src.compat.openai.errors import UpstreamStreamError
+    wrapped = UpstreamStreamError(Event(kind=EventKind.ERROR, error_code=11140,
+                                        error_message="secret user text"))
+    assert _restricted_summary(wrapped) == "code=11140"
+
+
+def test_restricted_burst_needs_two_distinct_credentials(repo):
+    """同一个凭证重复中招不升级整渠道暂停：判据是「窗口内不同凭证数」。
+
+    单号 2h 冷却已经挡住重复撞，按命中次数升级等于让单一租户/单一凭证的两个
+    连续请求把整渠道停掉 24h（跨用户停服）。窗口过期后重新开窗，不累计上一轮。
+    """
+    from src.engine.executor import (
+        RESTRICTED_BURST_WINDOW_SECONDS,
+        Executor,
+        ExecutorDeps,
+    )
+    from src.engine.scheduler import Scheduler
+
+    credentials, db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "u"})
+
+    executor = Executor(ExecutorDeps(
+        providers={}, credentials=credentials, scheduler=Scheduler(),
+        default_model="glm-5.2", stats=RecordingCollector()))
+
+    def cooled():
+        rows = db.connect().execute(
+            "SELECT cooling_until FROM credentials").fetchall()
+        return any(row["cooling_until"] is not None for row in rows)
+
+    now = int(time.time())
+    executor._pause_provider_on_burst("codebuddy", "c1")   # noqa: SLF001
+    executor._pause_provider_on_burst("codebuddy", "c1")   # noqa: SLF001
+    assert not cooled()                                    # 同号两次不升级
+
+    # 窗口过期：上一轮的凭证集合清零，同号再来一次也不升级
+    executor._restricted_hits["codebuddy"] = (            # noqa: SLF001
+        now - RESTRICTED_BURST_WINDOW_SECONDS - 1, {"c1"})
+    executor._pause_provider_on_burst("codebuddy", "c1")   # noqa: SLF001
+    assert not cooled()
+
+    # 第二个**不同**凭证在窗口内中招 → 整渠道暂停，但不禁用
+    executor._pause_provider_on_burst("codebuddy", "c2")   # noqa: SLF001
+    rows = db.connect().execute(
+        "SELECT disabled, cooling_until FROM credentials").fetchall()
+    assert all(row["disabled"] == 0 for row in rows)       # 只冷却，不禁用
+    assert all(now + 3600 <= row["cooling_until"] <= now + 24 * 3600 + 60
+               for row in rows)

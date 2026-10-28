@@ -250,11 +250,12 @@ async def test_executor_skips_concurrently_deleted_credential(repo):
 def test_aggregate_tool_call_without_index_merges_by_generated_position():
     result = aggregate([
         Event(kind=EventKind.TOOL_CALLS,
-              tool_calls=[{"id": "x", "function": {"name": "f", "arguments": "1"}}]),
+              tool_calls=[{"id": "x", "function": {"name": "f", "arguments": '{"a": '}}]),
         Event(kind=EventKind.TOOL_CALLS,
-              tool_calls=[{"id": "x", "function": {"arguments": "2"}}]),
+              tool_calls=[{"id": "x", "function": {"arguments": "1}"}}]),
     ], "m")
-    assert result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"] == "12"
+    assert (result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            == '{"a": 1}')
 
 
 def test_stream_translator_tool_call_without_id_uses_next_slot():
