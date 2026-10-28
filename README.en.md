@@ -434,7 +434,7 @@ Three outcomes:
 
 Probing is isolated from production: calls `provider.stream_chat` directly, writes no `usage_events`, touches no cooldown table, changes no health. Results go to separate `model_probes` table. Panel hides models matched by `MODEL_BLOCKLIST`.
 
-**Dead models also drop out of model list**: only that `(channel, model)` pair is hidden — other channels serving the same model still show it. **Hiding has no expiry** — recovery only happens on a successful re-probe (the background loop re-probes dead rows), not on negative-cache `cooling_until` (nothing would re-probe after it expires, i.e. permanent hiding).
+**Dead models also drop out of model list**: only that `(channel, model)` pair is hidden — other channels serving the same model still show it. **Hiding has no expiry** — recovery only happens on a successful re-probe, not on negative-cache `cooling_until` (nothing would re-probe after it expires, i.e. permanent hiding). The background loop does re-probe dead rows, but its interval `MODEL_PROBE_MINUTES` defaults to `0` (off), so on a default deployment the only way back is *Probe now*.
 
 **Manual takeover** (`POST /api/models/probes/manual`): skips automatic probing for that row, cache untouched. *Probe now* recovers immediately. Interval `MODEL_PROBE_MINUTES` (default 0 = off).
 
@@ -689,6 +689,11 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 | `CONTEXT_COMPRESS_RESERVE_TOKENS` | `4096` | Output tokens reserved in the compression budget |
 | `CONTEXT_COMPRESS_MIN_KEEP_MESSAGES` | `4` | Recent messages always kept |
 | `CONTEXT_COMPRESS_SAFETY_RATIO` | `0.95` | Budget share of the model limit |
+| `CONTEXT_COMPRESS_STICKY_ENABLED` | `true` | Sticky trim: cut once to 60% of budget, lock the window start, keep the cross-turn prefix stable so upstream prefix cache hits |
+| `PREFIX_DEBUG_ENABLED` | `false` | Prefix-cache diagnostics: one payload-fingerprint line per request (digests only), to locate the divergence point when hit rate is off. Hot-reloadable |
+| `DUMP_REQUEST_BODIES` | `false` | Dump the raw `/v1` request body (full conversation) to `DATA_DIR/dumps/` — diagnostics only. Hot-reloadable; dir 0700 / files 0600 / 200 files and 24h max; the toggle is audited |
+| `GATEWAY_PAUSED` | `false` | Kill switch: every API-key-authenticated `/v1` endpoint returns 503 (`code=service_paused`) while the admin console and login keep working. Hot-reloadable; audited and logged |
+| `GATEWAY_PAUSE_REASON` | empty | Why the gateway is paused — logs and audit only, never echoed to callers |
 | `UPSTREAM_COMPLETE_TIMEOUT_SECONDS` | `600` | Non-streaming aggregate timeout; `≤0` disables |
 | `STREAM_FIRST_EVENT_TIMEOUT_SECONDS` | `0` | First-event timeout (retryable before any frame). **Keep off by default**, recommended 60. Hot |
 | `STREAM_IDLE_TIMEOUT_SECONDS` | `0` | Idle timeout (closes, never retries), recommended 300. Hot |

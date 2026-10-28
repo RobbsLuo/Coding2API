@@ -19,7 +19,7 @@
 - **成长中心**（`/v2/activity/growth`）：只读 `buddy/travel/status|config`、`tasks`、`streak`、`redeem/summary`、`lottery/chances`、`buddy/quota`、`energy`；写入 `buddy/travel/claim|depart`、`tasks/accept`、`/tasks/{code}/claim`、`makeup-cards/use`、`redeem`、`lottery/draw`、`buddy/open`。契约：`accept_status` 五态、`/tasks/accept` 收复数数组、`/redeem` 的 `tier` 是档位标识（`"7d"`/`"14d"`/`"28d"`）、实发字段 `*_granted`；进程内 OAuth bearer 可直连。
 - **凭证身份可能为空**：OAuth 路径上游未回填 `account_uid`/`user_id` → 同账号隔离回落 `credential_id`。**活跃上报**（`POST /v2/report`，默认关）：body 事件数组（`eventCode=chat_request_send`），`userId` 必填——缺失 → HTTP 200 `code:0` 但静默丢弃；身份为空回落 JWT `sub`。
 - **reasoning 客户端给什么透传什么**；`reasoning_effort` 缺失补 `medium`（不发则上游把思考写进 `delta.content`、`reasoning_content` 恒空、`reasoning_tokens` 恒 0）。**可选机制（默认全关）**：`REASONING_EFFORT_MAP`、`ANTHROPIC_THINKING_EFFORTS`、`FORCE_DISABLE_THINKING`；全关行为逐字节不变。**输出上限键名不对称**：CB 忽略 `max_completion_tokens`，只认 `max_tokens`；TRAE 两键都不生效——不做键映射。
-- 错误码：`6004` 模型用量超限、`14003` 模型饱和（均模型级）、`11102` 无此模型（负缓存）、`14018` 积分耗尽、`1005` 权益耗尽、`11101/11115/11128/11135` 请求级（不罚号）。`6004`/`14003` 落账号级 → 整条凭证其他模型一起冷却 60s。**`6004` 不给 `Retry-After` 头**，恢复时刻只在 `msg` 文案（`usage will reset at 2026-10-25 22:34:25 UTC+8`）→ 须解析正文（§6 冷却）。
+- 错误码：`6004` 模型用量超限、`14003` 模型饱和（均模型级）、`11102` 无此模型（负缓存）、`14018` 积分耗尽、`1005` 权益耗尽、`11140` 账号被上游风控限制（账号级，**换号/重登无效**）、`11101/11115/11128/11135` 请求级（不罚号）。`6004`/`14003` 落账号级 → 整条凭证其他模型一起冷却 60s。**`6004` 不给 `Retry-After` 头**，恢复时刻只在 `msg` 文案（`usage will reset at 2026-10-25 22:34:25 UTC+8`）→ 须解析正文（§6 冷却）。
 
 ### 2.2 TRAE SOLO（`trae`）
 
@@ -34,13 +34,14 @@
 - **入站消息归一**：`build_chat_body` 丢弃孤立 `tool` 消息（无紧邻声明该 `tool_call_id` 的 `assistant.tool_calls`）——上游对这类历史一律 400。只丢弃、不重排、不改 content；丢弃条数记 warning，不落正文。并行 tool_calls 与 `/v1/responses` 拆出的连续 assistant 声明按并集识别。流内错误正文保留到 2000 字符。
 - 签到（活动制）：`GET /sash/api/v1/me/campaigns` → 筛 `actionType=="CLAIM_BENEFIT"` 且 `claimStatus=="CLAIMABLE"` → `POST .../{campaignId}/claim`；**两个请求都必须带 `Cosy-ClientType: 10`**（缺则静默返回空列表）；`replayed:true` 与 `BLOCKED`+`SAME_PERSON_ALREADY_CLAIMED` 归一为已签。旧 `daily-check-in` 仅作回退。**活动每日 10:00（UTC+8）刷新**，封账到窗口结束而非自然日。**国际版该端点 404 → 本区域无此接口**。
 - **上游节点故障包成 400**（`[FAIL]node:…`）归模型级瞬时故障，不误判为模型不存在。
+- **状态码分类不对称**：`401` 一律 `DEAD`（实测只有凭据/会话失效形态，放宽会让被吊销的 token 在 60s 轮换里反复撞）；`403` 只在带会话失效标记时 `DEAD`，其余 `SOFT`（多为瞬时/风控抖动）。排队信号（`isQueued` / `RESOURCE_LIMIT`）优先于两者。
 
 ### 2.4 CodeArts（`codearts`）
 
 - 域：snap 引擎 `snap-access.cn-north-4.myhuaweicloud.com`、STS `sts.cn-north-4.myhuaweicloud.com`、门户 `codearts.huaweicloud.com`。聊天 `POST /api/v2/chat/completions`；鉴权 `SDK-HMAC-SHA256`（AK/SK + `X-Security-Token`）。OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens` 换 AK/SK/security_token/refresh_token。模型 `GET {snap}/v1/model/builtin`（头 `Agent-Type: PromptCenter`）；额度 `GET {snap}/snap-manager/v1/statistics/plugin`。
 - **令牌刷新刚性**：`refresh_token` 与 `client_id=codearts-agent` + DPoP 私钥三者绑定、一次性，走 DPoP ES256/P-256；刷后必须回写新 `refresh_token`，由预刷新任务独占轮转。被作废 → 标记「需重新登录」并停止自动重试。
 - **每日签到**：`GET {snap}/v1/ops/delivery?channel=IDE` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`；`/v1/ops/*` 挂 snap 引擎根、不带 `snap-manager`。`ELIGIBLE`→claim+confirm；`CLAIMED`（已领未确认，非终态）→只补 confirm；`CONFIRMED`/`CONSUMED`→已签。**claim 时积分即到账**，confirm 只推进状态；业务码走 HTTP 200。
-- **额度＝积分**：`usageTotalPackageCredit` 直接进 `quota_remaining`/`quota_total`，不做单位折算；分项包走 `quota_packages`，套餐 `end_date` 进到期阶梯（积分用不完作废）。
+- **额度＝积分**：`usageTotalPackageCredit` 直接进 `quota_remaining`/`quota_total`，不做单位折算；分项包走 `quota_packages`，套餐 `end_date` 进到期阶梯（积分用不完作废）。**福利积分按批次到账、各自到期**，顶层 `end_date` 只是整份套餐的到期日：分项自带的 `package_credit_expiring_amount`（7 天内到期量）落进 `packages[].expiring` 供展示；上游没有逐批到期日，逐笔明细只在 Web 控制台「套餐与用量 → 获取明细」（需浏览器登录，AK/SK 取不到）。
 - **凭证页一个渠道一个组**：不拆两条凭证行——`refresh_token` 一次性，两条会各刷一次、第二条必报 `the refresh token has been used` 并烧掉票据。
 - **并发上限**：上游硬限每账号每约 60s 最多 3 个会话，超出 `400 TM.00001041`；配 `CODEARTS_MAX_CONCURRENCY` 与 `CODEARTS_REQUEST_WINDOW_SECONDS`。流式 `text` 是**累计全文（替换语义）**，解析层还原增量。
 - **流内业务错误分类**：错误内嵌 HTTP 200 的 SSE（`InferHub.<码>`），分类由 `Event.error_kind` 承载，`UpstreamStreamError.kind()` 与 `executor._event_kind` 共用 `provider.base.event_error_kind` 兜底。非多模态模型收图片归 `REQUEST`：不冷却、不累计、不落库，仍换号重试。
@@ -125,7 +126,7 @@ Provider 承担上游私有部分：发请求、解析事件、分类错误、�
 4. **到期额度两级字典序**：先比主窗口（`QUOTA_EXPIRY_WINDOW_SECONDS`，默认 36h）内将过期的额度，打平再比次窗口（`QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS`，默认 7 天）。
 5. **健康度三态**：`known` > `unknown` > `exhausted`；打平比剩余积分多者优先，再按 `credential_id` 稳定。
 
-**冷却分两层的原因**：`429 + 6004` 是「此模型在当前账号用超」，`400/404 + 11102` 是「当前账号没此模型」；一律记账号级 → 一次模型级限流踢出整号。账号级写 `credentials.cooling_until`，模型级另建 `credential_model_cooldowns`；账号级冷却出现时清空该凭证模型级条目，防「切模型」绕过。业务码只认 `"code": N` 键值形态。冷却时长：`PLAN` 12h、`SOFT` 60s、`OTHER` 连续 3 次→10m、`MODEL` 600s 起翻倍封顶 2h、`BLOCKED` 6h 起封顶 24h、`CONCURRENCY` 固定 60s、`CREDIT` 到次日 04:00。**传输层失败归 `SOFT`**：`httpx.TransportError`、`ssl.SSLError` 与 `UpstreamTransportError` 统一在 `executor._classify` 兜住（异常从 `__aenter__`、`aiter_bytes()`、写请求体多处抛出，逐点包装必漏）；不泛化到 `OSError` / `ConnectionError`。`ssl.SSLError` 必须单列：anyio 只把 `SSLEOFError` 转 `BrokenResourceError`，其余 TLS 中断（`record layer failure` 等）原样上抛，既非 `TransportError` 也非白名单具体类 → 不列就逃到 `stream_guarded` 变 `internal_error`：不换号、不冷却、统计零痕迹。**上游重置时刻可覆盖常量**：`Retry-After`（整秒/HTTP-date）或 `Try again in 17h 59m` 经 `parse_retry_after` 解析后按作用域写入，双端钳制 `[now + 常量, now + 24h]`。**头缺失看响应体**：CB 国际站 `429+6004` 不给 `Retry-After`，恢复时刻只在正文（`your usage will reset at 2026-10-25 22:34:25 UTC+8`），由 `parse_reset_at` 解析同一种绝对时刻；头优先于正文，正文无偏移（`UTC±N`）则放弃。不解析正文 → 固定 600s 到期重试、再撞 429（实测同一号一天被爆 42 次）。
+**冷却分两层的原因**：`429 + 6004` 是「此模型在当前账号用超」，`400/404 + 11102` 是「当前账号没此模型」；一律记账号级 → 一次模型级限流踢出整号。账号级写 `credentials.cooling_until`，模型级另建 `credential_model_cooldowns`；账号级冷却出现时清空该凭证模型级条目，防「切模型」绕过。业务码只认 `"code": N` 键值形态。冷却时长：`PLAN` 12h、`SOFT` 60s、`OTHER` 连续 3 次→10m、`MODEL` 600s 起翻倍封顶 2h、`BLOCKED` 6h 起封顶 24h、`CONCURRENCY` 固定 60s、`CREDIT` 到次日 04:00、`RESTRICTED` 2h（同渠道窗口内第二个不同凭证再中招 → 该渠道整体 24h，见 §3 风控限制）。**传输层失败归 `SOFT`**：`httpx.TransportError`、`ssl.SSLError` 与 `UpstreamTransportError` 统一在 `executor._classify` 兜住（异常从 `__aenter__`、`aiter_bytes()`、写请求体多处抛出，逐点包装必漏）；不泛化到 `OSError` / `ConnectionError`。`ssl.SSLError` 必须单列：anyio 只把 `SSLEOFError` 转 `BrokenResourceError`，其余 TLS 中断（`record layer failure` 等）原样上抛，既非 `TransportError` 也非白名单具体类 → 不列就逃到 `stream_guarded` 变 `internal_error`：不换号、不冷却、统计零痕迹。**上游重置时刻可覆盖常量**：`Retry-After`（整秒/HTTP-date）或 `Try again in 17h 59m` 经 `parse_retry_after` 解析后按作用域写入，双端钳制 `[now + 常量, now + 24h]`。**头缺失看响应体**：CB 国际站 `429+6004` 不给 `Retry-After`，恢复时刻只在正文（`your usage will reset at 2026-10-25 22:34:25 UTC+8`），由 `parse_reset_at` 解析同一种绝对时刻；头优先于正文，正文无偏移（`UTC±N`）则放弃。不解析正文 → 固定 600s 到期重试、再撞 429（实测同一号一天被爆 42 次）。
 
 **「窗口内积分总量」的原因**：实测 CB 额度是几十个各自独立到期的小包（每日 100 积分 × N），只存一个日期没有区分度。四个取舍：① 统计窗口内到期积分总量，账号间才可比；② 落库到期阶梯 `[(到期 epoch, 包剩余积分)]` 而非预计算数字；③ 过滤条件必须 `end > now` 且排除已用完的包；④ 两级窗口，只比 36h 会大量账号同为 0。**展示与调度指标分开存**：`quota_packages`（含包名/用量）与 `quota_expiry_ladder`（只有 `[到期, 剩余]`）。
 
@@ -189,19 +190,20 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 13 张表，`SCHEMA_
 
 **外部（API Key）**：`POST /v1/chat/completions`（`n` 只接受 1）、`POST /v1/responses`、`POST /v1/messages` + `POST /v1/messages/count_tokens`（本地估算）——三者共用同一调度链路；`GET /v1/models`（`id` 为归一键 + `name` + `providers` + `by_provider` + 可选 `benchmarks` / `cost` / `reasoning_efforts`；自定义别名带 `custom_alias: true`）；`GET /v1/models/{id}`（`:path` 容纳带命名空间的原代号；四种写法、大小写不敏感；不存在或不在 Key 白名单内一律 404 + `model_not_found`）；`GET /v1/usage?days=1|7|30`（只查该 Key 自己的本地明细）；`GET /v1/user/balance`（读探测缓存）；`GET /health`、`GET /healthz`、`GET /metrics`（均无鉴权，`METRICS_ENABLED=false` 关闭）。
 
-**管理台（Cookie + RBAC）**：凭证管理、API Key（含六项配额，超限 429 + `Retry-After`，判定异常一律放行并记 warning）、用量统计、Playground、模型列表、用户管理、审计、告警、上游状态、任务与配置、服务端日志。
+**管理台（Cookie + RBAC）**：凭证管理、API Key（含六项配额，超限 429 + `Retry-After`，判定异常一律放行并记 warning）、用量统计、月度账单、Playground、模型列表、用户管理、审计、告警、上游状态、任务与配置、服务端日志。**出口 IP 粘性**（`CREDENTIAL_PROXY_POOL`）：按凭证 id 稳定分配出口，推理与后台任务同出口。
 
-- 账号：`GET|POST /api/users`、`PATCH /api/users/{username}`、`POST /api/users/{username}/{disable|enable|reset-password}`（**无 DELETE**）；`POST /api/auth/password`；`GET|POST /api/auth/activate`；`GET /api/audit`。
+- 账号：`GET|POST /api/users`、`PATCH /api/users/{username}`、`PUT /api/users/{username}/policy`（用户级模型白名单 + 配额）、`POST /api/users/{username}/{disable|enable|reset-password}`（**无 DELETE**）；`POST /api/auth/password`；`GET|POST /api/auth/activate`；`GET /api/audit`。
 - 凭证运维：`POST /api/credentials/{id}/checkin|toggle|revive|probe|accounts/select`、`PUT /api/credentials/{id}/limits`、`GET|POST /api/credentials/{id}/growth`、`GET /api/credentials/{id}/credit-events|accounts`。
 - 批量：`POST /api/credentials/batch`（`probe|toggle|checkin|revive`）。逐条隔离，响应 `{total, succeeded, failed, results[]}`；`toggle`/`revive` 落一条汇总审计。
 - 配置与任务：`GET|PUT /api/settings` + `GET /api/tasks` + `POST /api/tasks/{key}/run`。列表端点统一 `sort` + `order`；未知键回落默认。回调：`GET /authorize`。
-- 告警：`GET /api/alerts` + `POST /api/alerts/{id}/resolve`。`AlertTask` 启动时从库里未恢复的行重建集合。
+- 告警：`GET /api/alerts` + `POST /api/alerts/{id}/resolve`。`AlertTask` 启动时从库里未恢复的行重建集合。规则八类：池耗尽、任务连续失败、token 到期、上游错误率、单 Key 用量暴涨、非工作时段请求、**预算分层（50/80/95/100%）**（后三类默认阈值 0 = 关闭；不存 IP，故不做「多 IP 同 Key」）。
 - 上游状态：`GET /api/upstream-status`（operator）返回内存快照 + 任务运行态；**不落盘**。四种解析器归一化到六档，加源只在 `SOURCE_SPECS` 加一行。
 - 统计：`GET /api/stats/{overview,by-provider,by-model,by-user,by-credential,timeline,model-timeline,percentile-timeline}`（延迟分位 P50/P90/P95/P99 可切，默认 P95；输出速度 `tps_visible` / `tps` / `tps_estimated`）、`GET /api/stats/errors`（失败归因，`limit` ≤ 5000；`failures` 为尝试口径，`rescued` 为同用户同 `request_id` 另有成功行的次数，`failures − rescued` 是未被救回的失败尝试数）、`GET /api/stats/events`（游标/OFFSET 双模式，钻取过滤，`ok=0`，`?format=csv`）、`GET /api/stats/events/stream`（SSE，订阅者有界缓冲 200、并发上限 8）。
   - `timeline` / `model-timeline` 的 `metric` 取值：`requests` / `tokens` / `cost` / `latency` / `ttfb` / `success_rate` / `cache_rate` / `cost_per_request`；**取值域外的拼写显式 400**（不静默回落到 `requests`——否则客户端拼错参数会拿到一份「看起来正常」的请求数图，错误被完全吞掉）。`percentile-timeline` 只认 `latency` / `ttfb`。派生指标（成功率、缓存命中率、单请求成本）在**聚合后相除**（`sum/sum`），不是逐小时比率的平均；无样本给 `null` 而非 0。
   - 时间轴是**稠密**的：按小时补齐缺失桶（跨度上限 `MAX_DENSE_HOURS` = 92 天，超出则只回观测小时）。缺失桶按指标语义补值——可加量（`requests` / `tokens`）补 0，均值 / 比率 / 成本补 `null`（前端断线，不画成 0）。
   - `timeline` 每个点带 `__total`（全渠道合计）：均值与比率必须按同一小时的 `sum/count` 重新相除，前端不得把各渠道值相加。
   - `percentile-timeline`（`metric=latency|ttfb`）返回按小时的 `{hour, p50, p95, samples}`，读明细表（仅 90 天），只统计成功请求；供延迟图「中位数线 + P95 带」使用。
+- 账单：`GET /api/billing?month=YYYY-MM&format=json|csv|jsonl`（operator）。按人读小时汇总、按 Key 读明细（90 天）并补归属用户与 Key 名；`csv` 按人带 BOM、`jsonl` 逐条明细；两种导出都写 `ACTION_DATA_EXPORT` 审计。
 - 日志：`GET /api/logs` + `GET /api/logs/stream`（只读、admin-only，`LOG_BUFFER_LINES=0` 时 404）。
 - 侧栏提醒：`GET /api/nav-badges`，**按角色裁剪 payload**（缺失 = 无权看），不做整体 403。各计数只数「待办」，与页面数据不是同一口径。
 
@@ -212,7 +214,9 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 13 张表，`SCHEMA_
 - **上游端点白名单**：真实 Token 只发往显式配置地址。CB 启动时强制校验；国际版白名单刻意不含国内站（**白名单里出现国内站主机也一律拒绝**——只校验「端点在白名单里」不够，把国内站加进国际站白名单后端点校验会通过、Token 照样跨站发）；TRAE 的 `apiHost` 导入时校验；Zen / Kilo / Qoder / CodeArts 各有独立白名单。
 - **凭证加密**：Fernet，密钥走 `APP_SECRET`（≥16 字符，拒绝低熵）；**丢失 = 凭证全部不可解**，不做轮换。解密失败返回可行动错误码。
 - TLS 校验默认开；Host / Origin 白名单；CSP `frame-ancestors 'none'`、`object-src 'none'`、`base-uri 'self'`、`form-action 'self'`。**请求体上限**：登录 8KB、其余 16MB（ASGI 层按实际字节计数）。登录三级限流 + PBKDF2 并发上限；失败键有数量上限 + 过期淘汰。
-- **API Key 仅存摘要**，明文只在创建时返回一次；可限渠道、IP（默认不信 `X-Forwarded-For`，仅 `TRUST_PROXY=true` 时取最后一个）、模型（fnmatch，无法判定时 fail closed）、到期。
+- **API Key 仅存摘要**，明文只在创建时返回一次；可限渠道、IP（默认不信 `X-Forwarded-For`，仅 `TRUST_PROXY=true` 时取最后一个）、模型（fnmatch，无法判定时 fail closed）、到期。**发 / 删 Key 与明细导出都进审计**：明文只回显一次，事后只能靠审计行回答「这把能刷全模型的 Key 是谁建的」。
+- **用户级策略**（`users.allowed_models` / `users.quota`，`PUT /api/users/{username}/policy`）：会话 Cookie 只回答「你是谁」，Playground 是**免 Key** 的会话直连入口，因此模型白名单与配额必须落在人身上——否则任何登录用户（含 viewer）都能直调任意模型，把 Key 的白名单与配额整体绕过。配额用量按用户名聚合（该用户经任何入口的流量都计入），与 Key 那套同判据、同 429 形状。
+- **kill switch**（`GATEWAY_PAUSED` + `GATEWAY_PAUSE_REASON`，热更）：开启后所有 Key 鉴权的 `/v1` 终点立即返 503 `service_paused`，**管理台与登录保持可用**（否则开了就关不上）。开关动作进审计并单独记 WARNING；暂停原因只进日志，不回显给调用方。
 - **会话**：`SameSite=Lax` + 写操作 CSRF（含 logout）；`Secure` 按请求实际协议动态判定；无 Cookie 的写端点（登录 / `/authorize`）也做跨站防护（登录按 Origin/Referer 同源校验，`/authorize` 按 `loginTraceID` 绑定）；会话与 Key 校验用户存在、启用且 epoch 一致。
 - **错误响应不回流上游正文**：只带受控标识，上游错误体摘要只进日志；未匹配的 `/api`、`/v1` 返回 JSON 404（**任何 HTTP 方法**都如此——只注册 GET 时未匹配的 POST 会落到 Starlette 的 405 `{"detail":…}`，与统一错误体形状不符，调用方按 `error.code` 解析会踩空）。**客户端读体断开不是服务端错误** → 回 `499 client_disconnected`。**日志脱敏**：不打印 Token、完整请求体；审计写 INFO，绝不记明文。
 - **请求 ID 是客户端可写输入**：按 `[A-Za-z0-9._:-]{1,128}` 校验后才采信，不合法改用自生成。

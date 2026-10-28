@@ -26,8 +26,10 @@ export interface QuotaPackage {
   name: string;
   total: number;
   used: number;
-  /** 到期 epoch；无到期信息为 null */
+  /** 到期 epoch；无到期信息为 null。CodeArts 为整份套餐到期日，非每笔积分到期日 */
   end: number | null;
+  /** 7 天内即将到期的积分（CodeArts 分项包才给）；上游未提供为 null */
+  expiring?: number | null;
 }
 
 /** 一条 (凭证, 模型) 级冷却：模型级限流或「该渠道无此模型」负缓存。 */
@@ -378,6 +380,10 @@ export interface UserRow {
   created_by: string | null;
   /** 是否有待使用的一次性激活令牌（摘要本身不会下发） */
   pending_activation: boolean;
+  /** 用户级模型白名单（Playground 直连用；fnmatch glob，逗号分隔，'' = 不限制） */
+  allowed_models: string;
+  /** 用户级配额（JSON 文本，'' = 不限制）；用量按用户名聚合 */
+  quota: string;
 }
 
 /** 创建/重置用户时返回：明文令牌只出现这一次。 */
@@ -415,6 +421,46 @@ export interface ActivationDescribe {
   valid: boolean;
 }
 
+/** 渠道 ToS 风险登记（运营判断）：导入对话框展示，不参与调度。 */
+export interface TosRisk {
+  level: "green" | "gray" | "red";
+  reason: string;
+  basis: string;
+}
+
+/** 账单里的一行（按人 / 按 Key 共用形状；Key 行多 `key_name`）。 */
+export interface BillingRow {
+  username?: string | null;
+  api_key_id?: string;
+  key_name?: string | null;
+  requests: number;
+  ok_count: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number | null;
+  credit: number | null;
+  cost_usd: number | null;
+  cost_cny: number | null;
+  success_rate?: number | null;
+  [key: string]: unknown;
+}
+
+export interface BillingReport {
+  month: string;
+  start: number;
+  end: number;
+  users: BillingRow[];
+  keys: BillingRow[];
+  totals: {
+    requests: number;
+    input_tokens: number;
+    output_tokens: number;
+    cost_cny: number;
+    cost_usd: number;
+    success_rate: number | null;
+  };
+}
+
 export interface CredentialsResponse {
   credentials: Credential[];
   /** 调度主到期排序窗口（秒）；与列表中各凭证的到期积分同一口径 */
@@ -427,6 +473,8 @@ export interface CredentialsResponse {
   is_admin: boolean;
   /** 凭证写门槛（admin 或 operator）：与后端 require_operator 同口径 */
   is_operator: boolean;
+  /** 渠道 → ToS 风险（green/gray/red + 理由），导入前提示 */
+  tos_risks: Record<string, TosRisk>;
 }
 
 export interface UpstreamAuthStart {

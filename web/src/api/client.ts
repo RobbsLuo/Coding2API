@@ -27,6 +27,8 @@ import type {
   StatsMetric,
   StatsOverview,
   TimelinePoint,
+  TosRisk,
+  BillingReport,
   ModelTimelineResponse,
   PercentileTimelineResponse,
   NavBadges,
@@ -127,6 +129,12 @@ export const api = {
       `/api/users/${encodeURIComponent(username)}/reset-password`,
       { method: "POST" },
     ),
+  /** 用户级策略（Playground）：模型白名单 + 配额。传空串 = 不限制。 */
+  setUserPolicy: (username: string, allowedModels: string, quota: string) =>
+    request<{ ok: boolean }>(`/api/users/${encodeURIComponent(username)}/policy`, {
+      method: "PUT",
+      ...json({ allowed_models: allowedModels, quota }),
+    }),
 
   // ---------------------------------------------------------------- 审计
   audit: (filters: { actor?: string; action?: string; limit?: number; offset?: number;
@@ -135,8 +143,26 @@ export const api = {
   // ---------------------------------------------------------------- 凭证
   credentials: (sort?: string, order?: string) =>
     request<CredentialsResponse>(`/api/credentials${query({ sort, order })}`),
+  billing: (month?: string) =>
+    request<BillingReport>(`/api/billing${query({ month })}`),
+  /** 账单导出：返回原始响应，页面自己落盘（CSV 有 BOM，JSONL 逐行）。 */
+  billingExport: async (month: string, format: "csv" | "jsonl") => {
+    const response = await fetch(
+      `/api/billing${query({ month, format })}`, { credentials: "same-origin" });
+    if (!response.ok) {
+      let message = `导出失败（HTTP ${response.status}）`;
+      try {
+        const body = await response.json();
+        if (body?.error?.message) message = body.error.message;
+      } catch {
+        // 非 JSON 错误体：保留 HTTP 状态提示
+      }
+      throw new ApiError(response.status, "export_failed", message);
+    }
+    return { blob: await response.blob(), rowCount: response.headers.get("X-Export-Row-Count") };
+  },
   importCredential: (provider: string, credential: unknown, nickname = "") =>
-    request<{ id: string }>("/api/credentials", {
+    request<{ id: string; tos: TosRisk }>("/api/credentials", {
       method: "POST",
       ...json({ provider, credential, nickname }),
     }),

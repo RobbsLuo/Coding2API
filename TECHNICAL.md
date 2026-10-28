@@ -109,9 +109,9 @@ MODEL_SCOPED_KINDS = frozenset({MODEL, BLOCKED, CONCURRENCY})
 **账号被上游风控限制（RESTRICTED，CodeBuddy 11140）**：`403 request illegal` 的字面像「这条请求非法」，实际是上游按账号（多号同源时按出口 IP/设备）拉黑——换模型、换请求形态、换代理都无效（techysy/10router、yetone/magpie、maiphucgiang/codebuddy2api 三个项目的实测结论一致）。
 
 - **必须拦在 `401/403 → DEAD` 之前**：判 DEAD 会写不可逆的 `disabled=1`，而这类限制由上游自行解除，写成禁用就变成「必须有人点恢复」，还会诱使运维反复 revive 去撞。
-- **账号级 2h 冷却**（`RESTRICTED_COOLDOWN_SECONDS`），上游给 `Retry-After` 时采用并夹在 24h 内；到期自动回到候选，不做任何人工动作。
+- **账号级 2h 冷却**（`RESTRICTED_COOLDOWN_SECONDS`），上游给 `Retry-After` 时采用并夹在 `[now + 该方法常量, now + 24h]` 内（比常量还短的上游值一律回落常量，防止 `Retry-After: 0` 让同一个号在冷却刚写下的瞬间又变可选）；到期自动回到候选，不做任何人工动作。
 - **当前请求不再换号**：`executor` 命中后 `_skip_provider` 跳过该渠道剩余凭证，继续试其它渠道。逐个号换着撞会扩大标记面（实测一次请求连打 3 个号全 403，新号加入 3 分钟即被封）。
-- **窗口内第二次命中升级为渠道级暂停 24h**（`_pause_provider_on_burst` + `cool_provider`）：只冷却、不写 `disabled`，所有号一起退避。
+- **窗口内第二个不同凭证也命中 → 升级为渠道级暂停 24h**（`_pause_provider_on_burst` + `cool_provider`）：只冷却、不写 `disabled`，所有号一起退避。判据是窗口内**不同凭证的个数**而不是命中次数——同一个号重复中招不算整批同源（单号 2h 冷却已挡住重复撞），按命中次数升级会让单一凭证/单一租户的两个连续请求把整渠道停掉。
 
 **硬禁用的可操作原因（`disabled_reason`）**：真 session 失效（401 / token 过期）仍是 DEAD，`disabled_reason` 写「session dead」或 provider 识别出的具体原因（CodeBuddy 的 `disabled_reason()` 识别 11140 文案，作为非 RESTRICTED 入口的兜底）。管理台 `CredentialsPage` 原样展示该字段，写错会把人引向错误的修复动作。只回受控文案，不拼接上游正文。
 
@@ -146,6 +146,7 @@ MODEL_SCOPED_KINDS = frozenset({MODEL, BLOCKED, CONCURRENCY})
 - **zen / kilo 401 → `INVALID`**：两者无凭证；`401 Missing API key.` 只说明该模型要付费 key。归 `DEAD` → 一次强制付费请求硬禁用整条免费渠道。
 - **kilo 429 与 502/503/504 → `MODEL`**：免费池 = OpenRouter 共享池，报错点名具体模型（`limit_source: upstream_provider_shared_pool`）；此时其他免费模型仍可用。
 - **CodeArts 临时凭证过期 → `SOFT`**：`HTTP 400` + `APIG.0602 security token has expired`，识别先于 `401/403 → DEAD`（`_STS_EXPIRED_MARKERS`）。判 `DEAD` → `RefreshTask` 跳过该凭证 → 断唯一自愈路径。
+- **Qoder 401 与 403 不对称**：`401` 一律 `DEAD`（实测只有凭据/会话失效一种形态：`TOKEN_EXPIRE` 等；放宽等于让被吊销的 token 在 60s 轮换里反复撞上游）；`403` 只在带会话失效标记时 `DEAD`，其余 `SOFT`。排队信号优先于两者（见上）。`classify_status` 只是 `classify_error_code` 的转发，判据只写一处，HTTP 与流内信封不可能漂移。
 - **TLS 中断（`ssl.SSLError`）→ `SOFT`**：`executor._classify` 与 `httpx.TransportError` 并列兜住。anyio 只把 `SSLEOFError` 转 `BrokenResourceError`；其余（`record layer failure`、证书链握手失败）原样上抛，既非 `httpx.TransportError` 也不在「只认具体类」白名单。不单列 → 逃到 `stream_guarded`，一帧 `internal_error`：不换号、不冷却、`usage_events` 零痕迹。不放开到 `OSError` 整体（磁盘满、句柄耗尽误冷却健康凭证）。
 
 **业务码只从 `"code": N` 键值形态提取**（`provider.base.business_codes`）：裸搜数字 → `"code":111020` 命中 `11102`。判定顺序即优先级：`429+6004` 先于 `429`；`402/14018` 先于状态码兜底。
@@ -357,6 +358,7 @@ class Provider(Protocol):
 
 - UA 走 `ZEN_OPENCODE_VERSION`，端点走 `ZEN_API_ENDPOINT`（受 `ZEN_ALLOWED_ENDPOINTS` 校验）。Zen **不携带任何用户 Token**，白名单只为防误配。
 - **403 FreeTierError 抖动客户端内消化**：403 归 `REQUEST`（不冷却不跳渠道），但 zen 只有一条虚拟凭证 → 轮换立刻耗尽 → 503。故 `stream_chat` 退避 `GATE_403_RETRY_DELAY`（1s）后换新 session id 重发一次（`GATE_403_RETRIES=1`），仍 403 才上抛；其余状态码不重试。
+- **门禁三处可配**（移动靶，改完重启即换、随时回退）：UA 模板 `ZEN_USER_AGENT`（`{version}` 代入 `ZEN_OPENCODE_VERSION`，空 = `opencode/<version>`）、API 根 `ZEN_API_ROOT`（默认 `/zen/v1`，可切 `/inference/v1`；2026-10-28 实测两路径 `GET /models` 均 200）、工具集合 `ZEN_GATE_TOOLS`（默认 `bash,read`，可切第三方实测的 `bash,glob,grep,read`）。默认值 = 本仓实测通过的形态；tools 逐字节 hash 上游是否校验**未核实**，故不实现假 hash。
 - **注入空壳 + 改写/过滤回包**：门禁要 `bash`/`read`（客户端工具叫 `shell`，注入可能伪造）。① 有同义工具（`TOOL_SYNONYMS`：`bash`→`shell`/`execute`、`read`→`read_file`）→ 注入名 tool_call **改写**成同义工具透传，注入时复制其 description/parameters；② 无同义工具 → 整块丢弃 + WARNING。只在**缺失时**补骨架；按 `index` 跟踪分片；整条流无真 tool_call → `finish_reason=tool_calls` 收敛为 `stop`。
 - **免费清单全动态**：`/zen/v1/models` 免鉴权但返回全部模型且**无免费标记**（`owned_by` 恒 `opencode`，无 cost）。唯一权威信号 = 匿名可用性（付费恒 401 `Missing API key.`）。两步过滤：`-free` 后缀收窄 → 并发探活只留 2xx。无静态白名单；探活为空抛协议错，列表用缓存兜底。**判活缓存 30 分钟**（`MODELS_CACHE_TTL_SECONDS`，比服务层 300s 长一档）。免费模型标 `credit_rate=0.0`（非 `None`）。
 
@@ -680,13 +682,13 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 - **分组表合并列**：`请求`（数 · 成功率）、`Token`（输入/输出 · 命中率）、`速度`（正文/总产出）、`平均延迟`（耗时/首字）、`P95 延迟`，14 → 8 列。排序走 `SortMenuHead`，子列键即 `GROUP_SORT_COLUMNS` 白名单键。延迟拆两列：均值读小时汇总、P95 读明细，口径与覆盖期不同。
 - **明细合并列**：`Token` / `延迟` / `速度` / `渠道 / 凭证`，15 → 约 10 列。`时间` 拆两行（`HH:mm:ss` 在上、日期在下），请求 ID 提示挂该格。`SortMenuHead` 让一个列头承载多个排序键。命中率走 `EVENT_SORT_COLUMNS["cache_rate"]`：`CASE WHEN e.input_tokens > 0 THEN CAST(e.cached_tokens AS REAL) / e.input_tokens ELSE NULL END`；速度两列由 `_row_speed_sql("e.")` 生成，与 `events()` 的 SELECT **同一片段**。
 - **请求 ID**：`X-Request-ID`（`webapp/request_id.py` 最外层）。入站合法（`[A-Za-z0-9._:-]{1,128}`）沿用，否则 `uuid4().hex`；同一中间件把会话标识头写进 contextvar 供粘性读取；ID 经 `request_context` 传进 `usage_events.request_id`。**不透传上游**。
-- **失败归因**（`GET /api/stats/errors`，operator+）：按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` 明细。`failures` 是**尝试**口径（每次上游拒绝一行）；`rescued` = 同用户同 `request_id` 另有成功行的行数（不叠加时间窗，走 `idx_usage_request`）；`failures − rescued` = 未被救回的失败尝试数（同一请求多次失败算多次）。DEAD（硬禁用）额外落一行 `credential_unavailable`；账号被上游风控限制（11140）落 `account_restricted` 并整渠道退避，不写 `disabled`；轮换耗尽时不再重复落收尾行，避免 `requests` 与 Key 日额度双计。
+- **失败归因**（`GET /api/stats/errors`，operator+）：按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` 明细。`failures` 是**尝试**口径（每次上游拒绝一行）；`rescued` = 同用户同 `request_id` 另有成功行的行数（不叠加时间窗，走 `idx_usage_request`）；`failures − rescued` = 未被救回的失败尝试数（同一请求多次失败算多次）。DEAD（硬禁用）额外落一行 `credential_unavailable`；账号被上游风控限制（11140）落 `account_restricted`，该凭证 2h 冷却且当前请求不再换号；同渠道窗口内**第二个不同凭证**也中招才整渠道退避 24h，不写 `disabled`；轮换耗尽时不再重复落收尾行，避免 `requests` 与 Key 日额度双计。
 - **延迟均值只算成功请求**（`SUM(latency_ms WHERE ok=1)` / `ok_count`）。
 - **图表时序指标**（`timeline` / `model-timeline`）：`METRIC_KINDS` 一张表定语义，查询侧固定取齐 10 列聚合（`_METRIC_AGGREGATES`），由 `_metric_value(metric, row)` 归一。派生指标**在聚合后相除**（成功率 `ok_count/requests`、缓存命中率 `cached/input`、单请求成本 `cost/requests`），不是逐小时比率的平均——后者会被低量小时等权带偏。无样本一律给 `null` 而非 0（均值给 0 会画成「0 ms」的假低谷，比率给 0 会显示成「0%」）。
 - **图表时间轴稠密**：`usage_hourly` 只在有请求时才有行，稀疏下发会让前端把「空档 5 小时」和「相邻 1 小时」画成一样宽（分类轴压缩时间）。`_dense_hours()` 按 `since`/`until` 补齐小时桶（都不给则补首末观测之间），跨度超 `MAX_DENSE_HOURS`（92 天）时退回观测小时。缺失桶取值由 `_empty_value()` 按语义给：可加量补 0，均值/比率/成本补 `null`（前端 `connectNulls={false}` 断线）。前端 X 轴用 `type="number"` + `scale="time"` + 毫秒时间戳，按真实时间定位。
 - **`timeline` 的 `__total`**：全渠道合计单独按小时聚合一次（`GROUP BY hour_utc`），**不是前端把各渠道值相加**——均值与比率相加没有意义，必须用同一小时的 `sum/count` 重新相除。
 - **延迟分位时序**（`percentile-timeline`，`metric=latency|ttfb`）：按小时在 `usage_events` 上算 P50/P95（`ROW_NUMBER() OVER (PARTITION BY 小时 ORDER BY col)` + `COUNT(col) OVER`，nearest-rank `(95*n+99)/100`），只统计成功请求，仅覆盖明细保留期（90 天）。供前端「P50 中位数线 + P95 上界带」——均值会把长尾摊平（实测均值 10 s 时 P95 达 21 s）。
-- **图表可读性约束**（前端）：一张图一个系列，多系列改为控件切换（渠道切换读 `__total` / 单渠道）；模型趋势最多 3 条线，其余交给分组表；曲线一律 `type="linear"`（`monotone` 会凭空造值）；比率轴在数据全部 ≥ 90% 时截断下界并在图例标注「Y 轴自 90% 起」（否则 98%–100% 的波动贴在顶边看不出，固定 0–100% 又是一条直线）。Y 轴必须显式给 `dataKey`，否则 recharts 会把毫秒时间戳纳入定义域（曾算出 400% 的上界）。
+- **图表可读性约束**（前端）：一张图一个系列，多系列改为控件切换（渠道切换读 `__total` / 单渠道）；模型趋势最多 3 条线，其余交给分组表；曲线一律 `type="linear"`（`monotone` 会凭空造值）；比率轴在数据全部 ≥ 90% 时截断下界并在图例标注「Y 轴自 90% 起」（否则 98%–100% 的波动贴在顶边看不出，固定 0–100% 又是一条直线）。Y 轴必须显式给 `dataKey` 或数值 `domain`，否则 recharts 会把毫秒时间戳纳入定义域（曾算出 400% 的上界）；模型趋势**不能只给单条线的 `dataKey` + `auto`**——上限会按那一条算，Top2/Top3 峰值更高时被裁掉，故按所有在画线的公共最大值定 `domain`（`modelTrendAxis`，比率 / 单请求成本复用主图口径）。
 - **分组表延迟四列**（`avg_latency_ms` / `avg_ttfb_ms` / `p95_latency_ms` / `p95_ttfb_ms`）：均值读小时汇总；**分位只能从明细算**（`usage_hourly` 只有 `latency_sum` / `ttfb_sum`）。`_percentile_join()` 生成「按维度分组在 `usage_events` 排名」的 LEFT JOIN 子查询，**独立**应用作用域与时间窗（列 `ts`）；用 LEFT JOIN 而非 INNER（全失败组仍要出现）。排名用 `ROW_NUMBER() OVER (PARTITION BY key ORDER BY (col IS NULL), col)` + `COUNT(col) OVER (...)`（SQLite ≥3.25）；nearest-rank 用整数 `(95 * n + 99) / 100`。`ttfb_ms` NULL 时 latency 与 ttfb **各自独立排名**。实测本地 5.7 万行按渠道 P95 约 0.09s，加 24h 窗约 0.006s。
 - **输出速度**（`tps` / `tps_visible` / `tps_estimated`）：`tokens ÷ 生成时间总和`，**非逐条比值平均**。同分母两列：`tps_visible` = `MAX(output_tokens - reasoning_tokens, 0)` 之和；`tps` = `output_tokens` 之和（思考计入总产出；占 50–67% 时两者约 190 与 63 tok/s）。主口径只算经路由的成功请求且 `output_tokens > 0`，分母 `latency_ms - ttfb_ms`；两道下限：窗口 < `SPEED_MIN_GEN_MS`（200ms）或单样本 > `SPEED_MAX_TPS`（1000 tok/s）剔除（实测 901 token / 3ms = 30 万 tok/s 属测量失效）。`ttfb_ms` NULL 不进主口径。某组无样本 → 回落端到端 `latency_ms` + `tps_estimated=1`（前端加 `≈`）。两套聚合在 `_percentile_join()` 同一次扫描算完；`overview()` 另在 `usage_events` 跑 `_speed_aggregates(ref="")`。`_speed_value()` 对每分子单独判空（正文 0 → `None`，显示 `—`）。
 - **逐请求速度**：`events()` 每行带 `tps` / `tps_visible`，由 `_row_speed_sql("e.")` 同时供 SELECT 与排序键。规则同源（`_routed_guard`）但**不回落估算**：无生成窗口（`ttfb_ms` NULL、输出 < 100、窗口 < 200ms 或 > 1000 tok/s）给 `NULL`；正文 0 用 `NULLIF(…, 0)` 给 `NULL`，不拿 0 冒充速度。实时流不查库，`StatsCollector._notify` 广播前调 `row_speed()`（Python 版，同一判定）。
@@ -814,6 +816,21 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 - **SSE 同范式**：先发注释帧，再回放快照转实时；回放与实时按 `seq` 去重。15s 保活；订阅者上限 4，超限 429 + `Retry-After: 10`；响应带 `Cache-Control: no-store` 与 `X-Accel-Buffering: no`。`finally` 注销订阅。
 - **行内容**：`seq` / `ts` / `level` / `logger` / `message`（已脱敏、截断 4000 字符）/ `request_id`。前端只做筛选、搜索、跟随最新、暂停与清空，**无写入入口**。
 
+### 11.3e 预算分层告警
+`ALERT_BUDGET_CNY` 非空时按**本地自然月**累计 `usage_hourly.cost_cny_sum`，达到 `ALERT_BUDGET_LEVELS`（默认 50/80/95/100）中任一档即告警：
+
+- 只报**当前达到的最高档**（`rule=budget`, `scope=budget_{level}`）。升级到更高档时旧档不再命中，由迟滞状态机写成「已恢复」，不会四条并存。100%（含超支）为 critical。
+- 成本只覆盖匹配到价表与汇率的明细；未定价模型不计入 → 预算消耗会被低估。`window_cost` 同时返回可定价小时数，供后续在 detail 里暴露覆盖率。
+- 月初成本归零 → 上月末的预算告警自然恢复。
+
+### 11.3d 月度账单（`GET /api/billing`）
+`require_operator`。`?month=YYYY-MM`（默认当月，按**服务器本地时区**整月）+ `?format=json|csv|jsonl`：
+
+- `json`：`{month, start, end, users, keys, totals}`。按人读小时汇总（永久保留）；按 Key 读明细（小时汇总主键无 `api_key_id`，明细只留 90 天）并补 `username` / `key_name`。
+- `csv`：按人汇总，带 BOM（Excel 中文表头）；`jsonl`：该月逐条明细（`export_events`，一行一个对象）。
+- 两种导出都写 `ACTION_DATA_EXPORT` 审计；文件名 `billing-<month>.<ext>`；`Cache-Control: no-store`。
+- `month` 格式 / 取值范围非法 → 400 `invalid_request`；未知 `format` → 400。
+
 ### 11.4 面向用户的错误语义
 管理端点失败原因须是**稳定的机器可读枚举**，不能是异常类名。`POST /api/credentials/{id}/probe` 的失败响应：
 
@@ -835,6 +852,20 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 **客户端读体中途断开**（`ClientDisconnect`）不是服务端错误：回 `499` + `client_disconnected`，不落 500（以前会冒泡到 `ServerErrorMiddleware`，刷屏且污染错误统计）。
 
 `detail` 仅供排查，界面不得当主提示。前端 `probeFailureLabel()` 翻中文并对未知值兜底。对外 400/503 文案只带受控标识，**不回显上游正文**。
+
+### 11.4b 出口 IP 粘性（一号一出口，`provider/proxy.py`）
+`CREDENTIAL_PROXY_POOL`（启动期，分号分隔）非空时，同一凭证固定走同一出口：
+
+- 分配 = `sha256(credential_id) → int % len(pool)`，**不依赖进程状态**，重启后不漂移（进程内轮转会等于没做）。池成员增删会让部分凭证换桶——改池子本身就是要换出口。
+- 凭证 id 走 contextvar（`request_context.set_credential_id`），由 engine / 任务层设置：推理（executor `_stream_source`，每次换号重试都重设）、额度探测、签到、token 预刷新、成长中心、管理台单条 probe/checkin。**不依赖凭证 data 里的账号字段**（八个渠道字段名不统一，缺失就会静默回落直连）。
+- `httpx` 的代理是连接池级参数，所以 `LazyClients` 按 `(流/短, 代理)` 维护多份池（`_pools`）；未配池时只有一条池，行为与之前逐字节一致。显式注入的 client（测试替身）永远优先。
+- 优先级：凭证池分配 → `PROVIDER_PROXIES[渠道]` → 直连。**OAuth 登录阶段不覆盖**：登录时凭证还没入库（没有 id），仍走渠道级代理/直连。
+
+### 11.5 工具调用健壮性（`src/compat/openai/`）
+- **`id` 缺失**：按 index 生成 `call_{index}_{seq}` 并记忆，每片复用同一个值（聚合型客户端按 id 拼片，空 id 会把一次调用拆成两条）。
+- **DSML 泄漏回读**（`dsml.py`）：DeepSeek V3.2/V4 偶发把工具调用写成 `〈｜｜DSML｜｜tool_calls〉…` 文本。解析单/双竖线两种方言、`parameter` 标签与 V4 的「自闭合 `invoke` 带 `string` 属性」、以及缺外层包装的裸 `invoke` 块；可见正文剥掉标记。流式用增量过滤器：普通文本零缓冲，只有出现标记（或结尾停在标记前缀上）才缓冲；不完整的标记在收尾时原样放行，绝不吞正文。回读出调用时 `finish_reason` 从 `stop` 改写为 `tool_calls`（否则客户端不执行）。
+- **坏参数 fail-closed**：非流式 `aggregate` 校验每个调用的 `arguments`（空串 → 合法；其余必须是 JSON **对象**），非法 → `InvalidToolArguments`（`kind()=INVALID`）：换上游重试、全部失败对外 400，**不冷却凭证**、不把坏 JSON 递给客户端。流式分片天然不完整，不逐片校验。
+- **用量对账**（`engine/executor.py::_check_usage_consistency`）：成功请求比较正文体量与上报的 `output_tokens`——≥200 字符却无 token、或 >12 字符/token → WARNING（上游吞 usage / 静默替换模型的间接信号）。只告警，不改响应、不写 `error_type`。
 
 ## 12. 测试策略
 **目录**：`tests/` 按 `src/` 子包镜像（`api/ auth/ compat/ config/ db/ deploy/ engine/ provider/<渠道>/ scripts/ stats/ tasks/ webapp/`），每目录一个 `__init__.py`。跨模块回归集中 `tests/regression/`；逐字节等价的常量/纯函数收敛 `tests/helpers/`；夹具按作用域放 `conftest.py`；私有替身放非收集模块 `_support.py`。**真连上游豁免**：默认全 mock；需真探活的用例标 `@pytest.mark.real_upstream("zen" | "kilo" | "openrouter")`（已注册，`--strict-markers` 生效）。
@@ -901,7 +932,13 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
 
 **一次性激活令牌**：建号 / 重置写随机占位密码 + 32 字节 URL-safe 令牌；库里只存 SHA-256 摘要 + 过期时间（TTL 24h）；明文只在响应回显一次，前端拼 `/activate?token=...`。**首登强制改密**：`must_change_password=1` 时精确白名单放行（`GET /api/auth/session`、`POST /api/auth/password`、`POST /api/auth/logout`），其余 403 `password_change_required`。
 
-**审计** `audit_events(id, ts, actor, action, target, detail, ip, ok)`，动作常量在 `audit/actions.py`。覆盖登录成功/失败、账号建/激活/改角色/启停/改密/重置/硬删、凭证导入/删除/启停/pin/复活/切换账号、告警人工恢复。**绝不记密码或令牌明文**。保留期同 `usage_events`。**防锁死三层**：Web 端 `_guard_last_admin` + `SelfTargetError`；CLI 删最后活跃 admin 拒绝；bootstrap 无活跃 admin 启动失败。硬删只在 `scripts/create_user.py --delete --force`（`usage_events.username` 裸文本无外键 → 硬删留孤儿统计 → UI 不暴露 DELETE）。
+**审计** `audit_events(id, ts, actor, action, target, detail, ip, ok)`，动作常量在 `audit/actions.py`。覆盖登录成功/失败、账号建/激活/改角色/启停/改密/重置/硬删、凭证导入/删除/启停/pin/复活/切换账号、告警人工恢复，以及**API Key 发/删**（`api_key.create` / `api_key.delete`：明文只回显一次，事后只能靠审计行追责）、**用户策略**（`user.policy`）、**运行时配置**（`settings.update`，含 kill switch 与请求体落盘开关）、**明细导出**（`data.export`）。**绝不记密码或令牌明文**。保留期同 `usage_events`。
+
+**用户级策略（`users.allowed_models` / `users.quota`）**：Playground 是免 Key 的会话直连入口，`PUT /api/users/{username}/policy` 给每个登录用户再判一次出站策略——模型白名单走与 Key 相同的 `ensure_model_allowed_for`（含「省略模型名即默认模型」的绕过口子），配额走独立的 `services.user_quota`，用量按**用户名**聚合（该用户经任何入口的流量都计入）。缺这层时 viewer 用 Cookie 就能直调任意模型、绕过 Key 的白名单与配额。
+
+**kill switch（`gateway_paused` / `gateway_pause_reason`，热更）**：拦在 API Key 鉴权依赖里（`api/deps._ensure_not_paused`）而不是各端点——新端点不会漏拦；返 503 `service_paused` 受控文案（原因只进日志），管理台走会话鉴权因此**暂停期间仍可关掉开关**。开关动作进审计并单独记 WARNING。
+
+**请求体诊断落盘（`dump_request_bodies`，热更）**：全服务唯一把对话写进磁盘的开关，目录 0700 / 文件 0600 （含对已存在目录的收紧）、保留 200 份且不超过 24h；开关动作进审计并单独记 WARNING。**防锁死三层**：Web 端 `_guard_last_admin` + `SelfTargetError`；CLI 删最后活跃 admin 拒绝；bootstrap 无活跃 admin 启动失败。硬删只在 `scripts/create_user.py --delete --force`（`usage_events.username` 裸文本无外键 → 硬删留孤儿统计 → UI 不暴露 DELETE）。
 
 ## 14. 已知取舍
 - **同步 sqlite3 而非 aiosqlite**：本地微秒级操作，asyncio 封装开销大于收益。

@@ -63,6 +63,17 @@ services:
       ALERT_ERROR_RATE_THRESHOLD: ${ALERT_ERROR_RATE_THRESHOLD:-0.5}
       ALERT_ERROR_RATE_MIN_REQUESTS: ${ALERT_ERROR_RATE_MIN_REQUESTS:-20}
       ALERT_ERROR_RATE_WINDOW_MINUTES: ${ALERT_ERROR_RATE_WINDOW_MINUTES:-15}
+      # 单 Key 用量暴涨：窗内 token 总量达到阈值告警；0 关闭该规则
+      ALERT_KEY_BURST_TOKENS: ${ALERT_KEY_BURST_TOKENS:-0}
+      ALERT_KEY_BURST_WINDOW_MINUTES: ${ALERT_KEY_BURST_WINDOW_MINUTES:-15}
+      # 非工作时段请求：工作时间 [start, end) 本地时区，start == end 关闭；
+      # 非工作时段请求数达到最小样本才告警（0 关闭）
+      ALERT_OFF_HOURS_START: ${ALERT_OFF_HOURS_START:-0}
+      ALERT_OFF_HOURS_END: ${ALERT_OFF_HOURS_END:-0}
+      ALERT_OFF_HOURS_MIN_REQUESTS: ${ALERT_OFF_HOURS_MIN_REQUESTS:-0}
+      # 预算分层告警：当月原始成本预算（元）；0 关闭。分档默认 50,80,95,100
+      ALERT_BUDGET_CNY: ${ALERT_BUDGET_CNY:-0}
+      ALERT_BUDGET_LEVELS: ${ALERT_BUDGET_LEVELS:-50,80,95,100}
       # SQLite 备份后台任务：周期（分钟）与保留份数；0 份表示不清理
       BACKUP_INTERVAL_MINUTES: ${BACKUP_INTERVAL_MINUTES:-1440}
       BACKUP_KEEP: ${BACKUP_KEEP:-7}
@@ -104,6 +115,10 @@ services:
       ZEN_ALLOWED_ENDPOINTS: ${ZEN_ALLOWED_ENDPOINTS:-https://opencode.ai}
       # Zen 门禁要求的 UA 版本（低于上游阈值会被 426 拒绝）
       ZEN_OPENCODE_VERSION: ${ZEN_OPENCODE_VERSION:-1.18.0}
+      # 门禁移动靶：根路径 / 工具集合 / UA 模板（默认值即仓库实测通过的形态）
+      ZEN_API_ROOT: ${ZEN_API_ROOT:-/zen/v1}
+      ZEN_GATE_TOOLS: ${ZEN_GATE_TOOLS:-bash,read}
+      ZEN_USER_AGENT: ${ZEN_USER_AGENT:-}
       # Kilo Gateway 免费层端点与其白名单（无凭证；白名单仅防误配）
       KILO_API_ENDPOINT: ${KILO_API_ENDPOINT:-https://api.kilo.ai/api/gateway}
       KILO_ALLOWED_ENDPOINTS: ${KILO_ALLOWED_ENDPOINTS:-https://api.kilo.ai/api/gateway}
@@ -150,6 +165,11 @@ services:
       PACER_MAX_SECONDS: ${PACER_MAX_SECONDS:-20}
       # 诊断：把 /v1 原始请求体落盘到 data/dumps/（含对话内容，仅排查用）
       DUMP_REQUEST_BODIES: ${DUMP_REQUEST_BODIES:-false}
+      # 全站暂停（kill switch）：所有 Key 鉴权的 /v1 端点返 503，管理台仍可用。
+      # 一般由管理台热更开关，这里透传只为「容器重建后仍保持暂停状态」。
+      GATEWAY_PAUSED: ${GATEWAY_PAUSED:-false}
+      # 暂停原因：只进日志与审计，不回显给调用方
+      GATEWAY_PAUSE_REASON: ${GATEWAY_PAUSE_REASON:-}
       # 截断续写：上游 finish_reason=length 时同凭证自动续写的最多次数；0 关闭
       AUTO_CONTINUE_MAX: ${AUTO_CONTINUE_MAX:-10}
       UPSTREAM_COMPLETE_TIMEOUT_SECONDS: ${UPSTREAM_COMPLETE_TIMEOUT_SECONDS:-600}
@@ -191,6 +211,8 @@ services:
       MODEL_ALIASES: ${MODEL_ALIASES:-}
       # 按渠道出站代理（启动期）：渠道=代理URL;渠道2=代理URL2，留空直连
       PROVIDER_PROXIES: ${PROVIDER_PROXIES:-}
+      # 出口 IP 粘性：全局代理池，按凭证 id 稳定哈希分配；留空 = 直连/渠道代理
+      CREDENTIAL_PROXY_POOL: ${CREDENTIAL_PROXY_POOL:-}
       ENABLE_DOCS: ${ENABLE_DOCS:-false}
       # 服务监听地址（容器内必须 0.0.0.0 才能被映射访问）
       HOST: ${HOST:-0.0.0.0}

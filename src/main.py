@@ -24,6 +24,7 @@ from .api import (
     admin_audit,
     admin_auth,
     admin_badges,
+    admin_billing,
     admin_credentials,
     admin_keys,
     admin_model_availability,
@@ -84,6 +85,7 @@ from .db.repo import (
 )
 from .engine.affinity import ConversationAffinity
 from .engine.executor import Executor, ExecutorDeps
+from .engine.half_open import HalfOpenGuard
 from .engine.inflight import InflightGuard
 from .engine.limits import LimitGuard
 from .engine.model_resolver import KNOWN_PROVIDERS, parse_fallback_groups
@@ -99,7 +101,12 @@ from .provider.kilo.client import KiloClient, KiloProvider
 from .provider.officeace import OfficeAceProvider
 from .provider.officeace.client import OfficeAceClient
 from .provider.officeace.oauth import OfficeAceOAuth
-from .provider.proxy import parse_provider_proxies
+from .provider.proxy import (
+    CredentialProxyPool,
+    parse_provider_proxies,
+    parse_proxy_pool,
+    set_proxy_pool,
+)
 from .provider.qoder import QoderProvider
 from .provider.qoder.auth import QoderOAuth
 from .provider.qoder.client import QoderClient
@@ -414,6 +421,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 按渠道出站代理：启动期解析一次，装配时注入到各 provider 的
     # httpx client；运行中改值需重启（连接池已建立，见 provider/proxy.py）。
     proxies = parse_provider_proxies(config.provider_proxies, KNOWN_PROVIDERS)
+    # 出口 IP 粘性：池按凭证 id 稳定分配，装配期一次设定（连接池已建，改值需重启）
+    set_proxy_pool(CredentialProxyPool(parse_proxy_pool(config.credential_proxy_pool)))
     registry = providers if providers is not None else {
         "trae": TraeProvider(
             client=TraeClient(proxy=proxies.get("trae")), pacer=chat_pacer),
@@ -434,6 +443,11 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         "zen": ZenProvider(
             client=ZenClient(host=_zen_endpoint(config),
                              version=config.zen_opencode_version,
+                             api_root=config.zen_api_root,
+                             gate_tools=tuple(
+                                 t.strip() for t in config.zen_gate_tools.split(",")
+                                 if t.strip()) or ("bash", "read"),
+                             user_agent=config.zen_user_agent,
                              proxy=proxies.get("zen")),
             pacer=zen_pacer),
         "kilo": KiloProvider(
@@ -507,9 +521,15 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 滑动窗口——不落库、重启清零，单进程部署下即精确。
     key_usage = KeyUsageRepository(db)
     key_quota = KeyQuotaGuard(key_usage.for_key)
+    # 用户级配额（Playground 会话直连）：按用户名聚合当日用量——该用户经任何
+    # 入口的流量都计入，否则「你自己 Key 刷爆了但仍能用 Playground 无限调」。
+    user_quota = KeyQuotaGuard(key_usage.for_user)
     # 凭证在途租约：跨渠道的「单账号并发上限」，选号前过滤 + 请求结束释放。
     # 上限现读运行态覆盖层，管理台改完下一请求即生效（无快照，无需 invalidate）。
     inflight_guard = InflightGuard(lambda: runtime.max_inflight_per_credential)
+    # 冷却到期半开探测：到期先放 1 个请求，成功再全量回池（进程内状态，
+    # 重启丢失只会让每个号多探一次）。
+    half_open_guard = HalfOpenGuard()
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
                                      scheduler=Scheduler(
                                          expiry_window=lambda: runtime.quota_expiry_window_seconds,
@@ -559,7 +579,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                      # 消息分叉、压缩是否每轮都在裁
                                      prefix_debug=build_prefix_observer(runtime),
                                      limits=limit_guard,
-                                     inflight=inflight_guard))
+                                     inflight=inflight_guard,
+                                     half_open=half_open_guard))
 
     @asynccontextmanager
     async def lifespan(app_: FastAPI):
@@ -788,6 +809,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         limit_guard=limit_guard,
         key_quota=key_quota,
         key_usage=key_usage,
+        user_quota=user_quota,
         stats_query=app.state.stats_query,
         login_throttle=app.state.login_throttle,
         live_events=live_events,
@@ -852,6 +874,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.include_router(admin_badges.create_router(services))
     app.include_router(admin_upstream.create_router(services))
     app.include_router(admin_stats.create_router(services))
+    app.include_router(admin_billing.create_router(services))
     app.include_router(admin_users.create_router(services))
     app.include_router(admin_audit.create_router(services))
     # 服务端日志页（E3）：admin-only 只读视图；`log_buffer_lines=0` 时回 404。

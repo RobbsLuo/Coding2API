@@ -15,6 +15,10 @@
 - **三角色**：`admin` / `operator` / `viewer`，存 SQLite；一次性激活链接、首登强制改密、改角色 / 停用即时吊销会话；登录与写操作留审计。
 - **成长中心**（仅 CodeBuddy）：领礼、派 Buddy、领任务奖、断登补登、连登兑换、开盲盒。不可逆动作 `GROWTH_IRREVERSIBLE_ACTIONS=false` 关停。
 - **脱敏统计**：不存对话；明细 90 天、小时汇总永久；按人 / 渠道 / 模型 / 凭证可视化；成本按 OpenRouter 刊例价估算；速度分正文 / 总产出；明细走 SSE。
+- **月度账单**（`operator` 起）：按月按人 / 按 API Key 汇总请求、token 与成本；CSV（按人）/ JSONL（逐条明细）导出并写审计。按 Key 明细受 90 天保留期限制。
+- **工具调用健壮性**：`id` 缺失按 index 补并记忆；DeepSeek DSML 泄漏回读成结构化调用并改写 `finish_reason`；非流式坏 `arguments` fail-closed（400，不冷却凭证）。
+- **渠道 ToS 风险登记**：导入凭证时展示 green / gray / red 与理由（运营判断），审计留等级；只提示不阻断调度。
+- **出口 IP 粘性**（可选）：`CREDENTIAL_PROXY_POOL` 非空时一号一出口（sha256 稳定分配，重启不漂移）；推理、探活、签到、预刷新、成长、管理台单条动作都走同一出口。
 - **上游状态聚合**：并排官方状态页，区分「上游故障」与「本服务凭证 / 额度问题」。只解释、不调度；只存内存。
 - **侧栏数据提醒**：待办角标（需重登 / 耗尽、未恢复告警、任务失败、异常上游、待激活账号、将到期 Key、目录陈旧），按角色裁剪。[口径](#侧栏数据提醒导航角标)
 - **管理台加固**：登录限流、CSRF、请求体上限、Host 白名单。
@@ -80,6 +84,8 @@ docker compose exec coding2api python scripts/create_user.py admin --role admin
 | `admin` | 用户管理、任务与配置、凭证读写、全部统计、审计日志、服务端日志、上游状态、模型列表 |
 | `operator` | 凭证读写（导入 / 删除 / 启停 / 签到 / 成长 / 切换账号）、全部统计、上游状态、模型列表 |
 | `viewer` | 只读：仪表盘、凭证列表、统计、Playground |
+
+「月度账单」与「上游状态」「模型列表」同门槛（`operator` 起）：账单是池级数据，`viewer` 只在自己的统计里看到本人用量。
 
 - **加人**：用户名 + 角色 → 一次性激活链接（24 小时有效，只显示一次）；对方开 `/activate` 自设密码。无「管理员知道、用户不知道」的初始密码；重置同理。
 - **改角色 / 停用**：即时作废该账号全部会话 Cookie。停用 = 可逆的默认「删人」（用量统计仍归该用户名）；硬删只在 CLI。
@@ -175,7 +181,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 [opencode.ai/zen](https://opencode.ai) 免费模型，免登录。上游清单混付费、无免费标记 → `-free` 后缀收窄 → 逐个探活 → 匿名可用者进 `/v1/models`（判活缓存 30 分钟；免费模型 **x0**）。
 
-**免费层门禁**：上游要伪装官方客户端（UA 版本、会话头、`stream:true`、tools 含 `bash`/`read`）→ 自动满足。注入 `bash`/`read` 空壳，真调用被过滤。UA `ZEN_OPENCODE_VERSION`；端点 `ZEN_API_ENDPOINT`（须在 `ZEN_ALLOWED_ENDPOINTS` 内）。付费模型强制 `模型@zen` 也只报不可用。
+**免费层门禁**：上游要伪装官方客户端（UA 形态、会话头、`stream:true`、tools 含门禁工具）→ 自动满足。注入空壳工具，真调用被过滤。门禁是**移动靶**，三处都做成配置（改完重启即换、随时回退）：UA 形态 `ZEN_USER_AGENT`（模板，`{version}` 代入 `ZEN_OPENCODE_VERSION`）、API 根 `ZEN_API_ROOT`、工具集合 `ZEN_GATE_TOOLS`。默认值 = 本仓实测通过的形态（`opencode/<version>`、`/zen/v1`、`bash,read`）。端点 `ZEN_API_ENDPOINT`（须在 `ZEN_ALLOWED_ENDPOINTS` 内）。付费模型强制 `模型@zen` 也只报不可用。
 
 ### Kilo（`kilo`）
 
@@ -436,7 +442,7 @@ Playground 与 `/v1/models` 走 stale-while-revalidate：有缓存立刻回旧�
 
 探活与生产完全隔离：直连 `provider.stream_chat`；不写 `usage_events`、不动冷却表、不改健康度。结论落独立 `model_probes` 表。面板不列命中 `MODEL_BLOCKLIST` 的模型。
 
-**判死的模型同时从模型列表摘掉**：只抽该 (渠道, 模型)，其它渠道正常时同一模型照常展示。**隐藏没有到期时间**——恢复只靠复探成功（后台周期会把判死行一起探），不再挂在负缓存的 `cooling_until` 上：负缓存过期后没人再探，等于永久隐藏。
+**判死的模型同时从模型列表摘掉**：只抽该 (渠道, 模型)，其它渠道正常时同一模型照常展示。**隐藏没有到期时间**——恢复只靠复探成功，不再挂在负缓存的 `cooling_until` 上：负缓存过期后没人再探，等于永久隐藏。后台周期确实会把判死行一起探，但周期 `MODEL_PROBE_MINUTES` 默认 `0`（关闭），默认部署下唯一的恢复入口是面板上的「立即探活」。
 
 **人工接管**（`POST /api/models/probes/manual`）：接管后自动探活跳过该行，但不改负缓存。要立刻恢复 → 点「立即探活」。后台周期 `MODEL_PROBE_MINUTES`（默认 0 = 关闭）。
 
@@ -514,7 +520,7 @@ tabs 切四维（渠道 / 模型 / 用户 / 凭证），共用一表（渠道 / 
 
 **延迟两类口径**：只统计成功请求。平均 = `latency_sum ÷ 成功数`（小时汇总）；分位从逐请求明细算（仅 90 天）。`ttfb_ms` = `NULL` 的两列各自独立排名。无样本 → `—`。
 
-**失败归因**：`GET /api/stats/errors`（operator+）按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` → 失败次数 / **未救回数** / 最近失败时刻（降序，`limit` ≤ 5000）。**失败数 = 尝试口径**：换号重试每次上游拒绝各落一行；同用户同 `request_id` 另有成功行 = 已救回。`未救回 = 失败数 − 救回数`（同请求多次失败算多次，≠ 受损请求数）。凭证 401 硬禁用（DEAD）也落 `credential_unavailable`；账号被上游风控限制（CodeBuddy 11140）落 `account_restricted`，账号级 2h 冷却、当前请求不再换号，同渠道窗口内二次命中整渠道退避；换号成功算已救回；轮换耗尽不重复落收尾行。点行钻取 +「只看失败」（`GET /api/stats/events?ok=0`）。仅 admin / operator。`/metrics` 的 `upstream_errors_total` 取进程内计数，不合并。
+**失败归因**：`GET /api/stats/errors`（operator+）按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` → 失败次数 / **未救回数** / 最近失败时刻（降序，`limit` ≤ 5000）。**失败数 = 尝试口径**：换号重试每次上游拒绝各落一行；同用户同 `request_id` 另有成功行 = 已救回。`未救回 = 失败数 − 救回数`（同请求多次失败算多次，≠ 受损请求数）。凭证 401 硬禁用（DEAD）也落 `credential_unavailable`；账号被上游风控限制（CodeBuddy 11140）落 `account_restricted`，账号级 2h 冷却、当前请求不再换号，同渠道窗口内**第二个不同凭证**也中招时整渠道退避 24h；换号成功算已救回；轮换耗尽不重复落收尾行。点行钻取 +「只看失败」（`GET /api/stats/events?ok=0`）。仅 admin / operator。`/metrics` 的 `upstream_errors_total` 取进程内计数，不合并。
 
 **点行钻取**：点分组表任一行 → 明细按该行过滤（渠道 / 模型 / 凭证；用户维度走作用域参数），条件可叠加。`GET /api/stats/events` 接受 `provider` / `model` / `credential_id`（AND）+ `ok=0`。
 
@@ -638,6 +644,12 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `ALERT_ERROR_RATE_THRESHOLD` | `0.5` | 错误率阈值；`0` 关闭 |
 | `ALERT_ERROR_RATE_MIN_REQUESTS` | `20` | 错误率最小样本 |
 | `ALERT_ERROR_RATE_WINDOW_MINUTES` | `15` | 错误率统计窗 |
+| `ALERT_KEY_BURST_TOKENS` | `0` | 单 Key 用量暴涨阈值（token）；`0` 关闭 |
+| `ALERT_KEY_BURST_WINDOW_MINUTES` | `15` | 单 Key 用量统计窗；`0` 关闭 |
+| `ALERT_OFF_HOURS_START` / `_END` | `0` / `0` | 工作时间 `[start, end)`（本地时区，可跨零点）；相等 = 关闭 |
+| `ALERT_OFF_HOURS_MIN_REQUESTS` | `0` | 非工作时段请求数阈值；`0` 关闭 |
+| `ALERT_BUDGET_CNY` | `0` | 当月成本预算（元）；`0` 关闭。仅计可定价明细 |
+| `ALERT_BUDGET_LEVELS` | `50,80,95,100` | 预算分层档位；只报当前最高档，100% 为 critical |
 | `BACKUP_INTERVAL_MINUTES` | `1440` | 备份周期（下限 60） |
 | `BACKUP_KEEP` | `7` | 备份保留份数；`0` = 不清理 |
 | `UPSTREAM_STATUS_ENABLED` | `true` | 上游状态页开关 |
@@ -653,7 +665,9 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `ALLOW_TEST_HOST` | `false` | 放行 `testserver`，仅测试用 |
 | `TRUST_PROXY` | `false` | 是否采信 `X-Forwarded-For`；仅「前恰好一层受信反代」时开 |
 | `ENABLE_DOCS` | `false` | 暴露 `/docs` 与 `/openapi.json` |
-| `DUMP_REQUEST_BODIES` | `false` | `/v1` 原始请求体落盘（含对话，仅排查） |
+| `DUMP_REQUEST_BODIES` | `false` | `/v1` 原始请求体落盘（含对话，仅排查）。**可热更**（管理台「可观测性」），目录 0700 / 文件 0600 / 保留 200 份且不超 24h；改动进审计 `settings.update` |
+| `GATEWAY_PAUSED` | `false` | 全站暂停（kill switch）：所有 API Key 鉴权的 `/v1` 端点返 503 （`code=service_paused`），管理台与登录照常可用。**可热更**，一键止血；改动进审计并单独记 WARNING |
+| `GATEWAY_PAUSE_REASON` | 空 | 暂停原因，只进日志与审计（不回显给调用方）；留空按「未填原因」记 |
 | `LOG_LEVEL` | `INFO` | 日志级别；审计日志是 INFO，调到 WARNING 一并关 |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | 监听地址与端口（compose 默认 `0.0.0.0`）；`PORT` 同时决定宿主映射 |
 | `CODEBUDDY_API_ENDPOINT` | `https://copilot.tencent.com` | 上游地址；改动须同步白名单 |
@@ -663,6 +677,9 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `ZEN_API_ENDPOINT` | `https://opencode.ai` | Zen 上游地址 |
 | `ZEN_ALLOWED_ENDPOINTS` | `https://opencode.ai` | Zen 白名单 |
 | `ZEN_OPENCODE_VERSION` | `1.18.0` | 门禁伪装 UA 版本（低于阈值 → 426） |
+| `ZEN_API_ROOT` | `/zen/v1` | 上游 API 根；可切 `/inference/v1`（两路径当前都返回 200） |
+| `ZEN_GATE_TOOLS` | `bash,read` | 门禁 tools 集合；上游收紧时可切 `bash,glob,grep,read` |
+| `ZEN_USER_AGENT` | 空 | UA 模板（`{version}` 代入版本号）；空 = `opencode/<version>` |
 | `KILO_API_ENDPOINT` | `https://api.kilo.ai/api/gateway` | Kilo 上游地址 |
 | `KILO_ALLOWED_ENDPOINTS` | `https://api.kilo.ai/api/gateway` | Kilo 白名单 |
 | `QODER_API_ENDPOINT` | `https://openapi.qoder.com.cn` | Qoder openapi（额度 / 登录）；国际站 `https://openapi.qoder.sh` |
@@ -674,6 +691,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `OFFICEACE_ALLOWED_ENDPOINTS` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | 只需控制面（模型网关由上游下发） |
 | `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | OfficeAce 聊天最小间隔 |
 | `PROVIDER_PROXIES` | `""` | 按渠道出站代理；启动期项 |
+| `CREDENTIAL_PROXY_POOL` | `""` | 出口 IP 粘性：全局代理池（分号分隔），按凭证 id 稳定哈希分配；启动期项 |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB 聊天节流（按凭证分桶） |
 | `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB 国际节流，独立 |
 | `ZEN_CHAT_MIN_INTERVAL` | `0` | Zen 节流 |
@@ -834,7 +852,7 @@ event=request request_id=9f2c… method=POST route=/v1/chat/completions status=2
 - uvicorn access log 已关。
 - 开关 `REQUEST_LOG_ENABLED`（默认 `true`，可热更）。
 
-> 容器里 `data/dumps/`（`DUMP_REQUEST_BODIES=true` 写入）不在 docker 日志体系；应用自行保持最多 200 份。
+> 容器里 `data/dumps/`（`DUMP_REQUEST_BODIES=true` 写入）不在 docker 日志体系；应用自行保持最多 200 份**且不超过 24 小时**（按 mtime），目录 0700、文件 0600——这是唯一把对话写进磁盘的开关，排查完请立刻关闭。
 
 ## 开发
 

@@ -60,6 +60,15 @@ class Settings(BaseSettings):
     zen_api_endpoint: str = "https://opencode.ai"
     zen_allowed_endpoints: str = "https://opencode.ai"
     zen_opencode_version: str = "1.18.0"
+    # 门禁的移动靶部分做成配置（改完重启即生效，无需改代码）：
+    # - 根路径：`/zen/v1`（默认，本仓 2026-10-28 实测 200）或 `/inference/v1`
+    #   （第三方实测称已迁移；两条路径当前都 200，保留可切）；
+    # - 门禁工具名：上游 10-14 收紧后第三方实测要求 `bash,glob,grep,read`
+    #   四件套，本仓仍以两件套通过 —— 冲突未复验，默认不变；
+    # - UA 模板：`{version}` 占位符代入版本号；空 = `opencode/<version>`。
+    zen_api_root: str = "/zen/v1"
+    zen_gate_tools: str = "bash,read"
+    zen_user_agent: str = ""
     # Kilo Gateway 免费层：标准 OpenAI 协议、无门禁、无凭证，端点白名单同样
     # 只为防误配。免费模型由上游 `isFree` 标记识别（见 provider/kilo/client.py）。
     kilo_api_endpoint: str = "https://api.kilo.ai/api/gateway"
@@ -96,6 +105,10 @@ class Settings(BaseSettings):
     # `渠道=代理URL;渠道2=代理URL2`，协议 http/https/socks5/socks5h；留空 = 直连。
     # 代理作用于连接池，运行中改值需重启，故不做热更。
     provider_proxies: str = ""
+    # 出口 IP 粘性（「一号一出口」）：全局代理池，分号分隔；按凭证 id 稳定哈希
+    # 分配，同一凭证重启后仍走同一出口。未配 = 沿用 `PROVIDER_PROXIES`/直连。
+    # 注意：池成员增删会让部分凭证换桶（改池子本身就是要换出口）。
+    credential_proxy_pool: str = ""
 
     # 路由与调度
     # 默认模型：六条渠道都已上架 `deepseek-v4.1-flash`（CB / TRAE / CodeArts /
@@ -185,6 +198,21 @@ class Settings(BaseSettings):
     alert_error_rate_threshold: float = 0.5
     alert_error_rate_min_requests: int = 20
     alert_error_rate_window_minutes: int = 15
+    # 单 Key 用量暴涨：窗口内某把 Key 的 token 总量越过阈值即告警（0 关闭）。
+    # 这是滥用/泄露信号（Key 被贴到仓库、多人共用），不是上游错误。
+    alert_key_burst_tokens: int = 0
+    alert_key_burst_window_minutes: int = 15
+    # 非工作时段仍有请求：`[start, end)` 为工作时间（本地时区，跨零点合法），
+    # start == end 关闭该规则；非工作时段请求数达到最小样本才告警（0 关闭）。
+    # 刻意不做「多 IP 同 Key」：usage_events 不存 IP（零知识口径），审计里有
+    # IP 但只覆盖登录/写操作，拿它做用量归因不可靠。
+    alert_off_hours_start: int = 0
+    alert_off_hours_end: int = 0
+    alert_off_hours_min_requests: int = 0
+    # 预算分层告警：当月（本地自然月）成本预算，达到 50/80/95/100% 分档告警。
+    # 0 关闭该规则；成本只覆盖可定价明细（未匹配价表的不计入），detail 里给覆盖度。
+    alert_budget_cny: float = 0.0
+    alert_budget_levels: str = "50,80,95,100"
     # SQLite 备份后台任务：周期性把主库一致性快照（VACUUM INTO）写进
     # DATA_DIR/backups/，保留最近 BACKUP_KEEP 份。默认每日一次、留 7 份。
     # 备份周期取整日是因为库本身不大（几十 MB 量级），更密只是白占磁盘。
@@ -282,8 +310,15 @@ class Settings(BaseSettings):
         "laguna*,qwen3-vl-235b,seed-2.1*,xing4.0-29b-a4,glyph-cluster,"
         "qwen3.8-flash,seed-evolving"
     )
-    # 诊断：把 /v1 入口的原始请求体落到 data/dumps/（排查客户端差异用）
+    # 诊断：把 /v1 入口的原始请求体落到 data/dumps/（排查客户端差异用）。
+    # 热更项（管理台可开关，改动进审计）；落盘目录 0700、文件 0600、
+    # 保留 200 个且不超过 24h——这是全服务唯一把用户对话写进磁盘的开关。
     dump_request_bodies: bool = False
+    # 全站暂停（kill switch）：所有 API Key 鉴权的 /v1 端点立即返 503，
+    # 管理台与登录保留可用——异常消耗/上游事故时一键止血。热更项。
+    gateway_paused: bool = False
+    # 暂停原因（只进日志与审计，不回显给调用方；留空按「未填原因」记）
+    gateway_pause_reason: str = ""
     # 截断续写：上游以 finish_reason=length 截断时，同凭证自动续写，
     # 最多该次数后收尾；0 关闭。仅 length 触发（其余"空正文/代码块未闭合"
     # 判据经实测无支撑，未实现，见 TECHNICAL.md §3.4）

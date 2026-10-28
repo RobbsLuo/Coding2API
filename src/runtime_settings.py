@@ -285,6 +285,28 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("alert_error_rate_window_minutes", int, "错误率统计窗（分钟）",
                "计算上游错误率的时间窗；0 表示只看当前瞬间（无样本，不触发）。",
                minimum=0, task="alert"),
+    HotSetting("alert_key_burst_tokens", int, "单 Key 用量暴涨阈值（token）",
+               "统计窗内某把 API Key 的 token 总量达到该值即告警（Key 泄露/"
+               "多人共用的信号）；0 关闭该规则。", minimum=0, task="alert"),
+    HotSetting("alert_key_burst_window_minutes", int, "单 Key 用量统计窗（分钟）",
+               "按 Key 聚合 token 的时间窗；0 关闭该规则。", minimum=0, task="alert"),
+    HotSetting("alert_off_hours_start", int, "非工作时段起点（时）",
+               "与「终点」一起定义工作时间 `[start, end)`（本地时区，可跨零点，"
+               "如 9 → 19）。起点与终点相等 = 关闭该规则。", minimum=0,
+               maximum=23, task="alert"),
+    HotSetting("alert_off_hours_end", int, "非工作时段终点（时）",
+               "工作时间区间的右端（不含）。与起点相等 = 关闭该规则。",
+               minimum=0, maximum=23, task="alert"),
+    HotSetting("alert_off_hours_min_requests", int, "非工作时段请求数阈值",
+               "非工作时段内请求数达到该值才告警（避免个别重试误报）；0 关闭。",
+               minimum=0, task="alert"),
+    HotSetting("alert_budget_cny", float, "月度成本预算（元）",
+               "按本地自然月累计可定价成本，达到分层阈值时告警；0 关闭该规则。"
+               "只统计匹配到价表与汇率的明细，未定价模型不计入。", minimum=0.0,
+               task="alert"),
+    HotSetting("alert_budget_levels", str, "预算分层（%）",
+               "逗号分隔的百分比档位，默认 50,80,95,100；只报当前达到的最高档，"
+               "100% 为 critical。留空 = 不分层（规则不生效）。", task="alert"),
     # SQLite 备份：改周期时人就在看这个任务最近备份了什么。
     HotSetting("backup_interval_minutes", int, "备份周期（分钟）",
                "后台把主库一致性快照（VACUUM INTO）写进 DATA_DIR/backups/ 的"
@@ -306,6 +328,22 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "同模型上一条请求的最长公共前缀消息序号、分叉处消息摘要（全部是"
                "sha256 前 16 位，不含正文）。用来定位命中率异常时前缀在哪条消息"
                "分叉、压缩是否每轮都在裁剪。默认关。",
+               group="observability"),
+    HotSetting("gateway_paused", bool, "网关暂停（kill switch）",
+               "开启后所有 API Key 鉴权的 `/v1` 端点（chat / messages / responses /"
+               " models / usage / balance）立即返 503（`type=service_paused`），"
+               "管理台与登录照常可用——异常消耗或上游事故时一键止血。暂停原因"
+               "写进日志与审计，不回显给调用方。默认关。",
+               group="routing"),
+    HotSetting("gateway_pause_reason", str, "暂停原因",
+               "配合「网关暂停」使用：写清为什么停（事故编号 / 上游状态页链接），"
+               "只进服务端日志与审计。留空按「未填原因」记录。",
+               group="routing"),
+    HotSetting("dump_request_bodies", bool, "请求体诊断落盘",
+               "把每次 `/v1/chat/completions` 的**原始请求体**（含完整对话内容）"
+               "写到 `DATA_DIR/dumps/`，目录 0700、文件 0600、保留 200 个且不超过 "
+               "24 小时。只用于排查客户端差异，**排查完立刻关**：这是本服务唯一"
+               "把用户对话落盘的开关。改动会进审计。默认关。",
                group="observability"),
     HotSetting("metrics_enabled", bool, "Prometheus 指标出口",
                "是否暴露 `GET /metrics`（Prometheus text 格式：请求/token/凭证池/"
@@ -700,6 +738,18 @@ class RuntimeSettings:
         return bool(self.get("prefix_debug_enabled"))
 
     @property
+    def dump_request_bodies(self) -> bool:
+        return bool(self.get("dump_request_bodies"))
+
+    @property
+    def gateway_paused(self) -> bool:
+        return bool(self.get("gateway_paused"))
+
+    @property
+    def gateway_pause_reason(self) -> str:
+        return str(self.get("gateway_pause_reason") or "")
+
+    @property
     def context_compress_reserve_tokens(self) -> int:
         return int(self.get("context_compress_reserve_tokens"))
 
@@ -868,6 +918,34 @@ class RuntimeSettings:
     @property
     def alert_error_rate_window_minutes(self) -> int:
         return int(self.get("alert_error_rate_window_minutes"))
+
+    @property
+    def alert_key_burst_tokens(self) -> int:
+        return int(self.get("alert_key_burst_tokens"))
+
+    @property
+    def alert_key_burst_window_minutes(self) -> int:
+        return int(self.get("alert_key_burst_window_minutes"))
+
+    @property
+    def alert_off_hours_start(self) -> int:
+        return int(self.get("alert_off_hours_start"))
+
+    @property
+    def alert_off_hours_end(self) -> int:
+        return int(self.get("alert_off_hours_end"))
+
+    @property
+    def alert_off_hours_min_requests(self) -> int:
+        return int(self.get("alert_off_hours_min_requests"))
+
+    @property
+    def alert_budget_cny(self) -> float:
+        return float(self.get("alert_budget_cny"))
+
+    @property
+    def alert_budget_levels(self) -> str:
+        return str(self.get("alert_budget_levels"))
 
     # ---------------------------------------------------------- SQLite 备份
 
