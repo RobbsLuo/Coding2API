@@ -44,10 +44,22 @@ export const SETTINGS = [
 
 /** 后端下发的网关卡组（顺序即展示顺序）。 */
 export const GROUPS = [
-  { value: "routing", label: "模型路由" },
+  { value: "model_routing", label: "模型与回退" },
+  { value: "compress", label: "上下文压缩" },
+  { value: "stream_thinking", label: "流式与思考" },
+  { value: "gateway_control", label: "网关与计费" },
   { value: "affinity", label: "选号与会话" },
-  { value: "channels", label: "渠道节流" },
+  { value: "chat_throttle", label: "聊天节流" },
+  { value: "codearts_throttle", label: "CodeArts 节流" },
   { value: "pacer", label: "后台任务节流" },
+  { value: "observability", label: "可观测性" },
+];
+
+/** 后端下发的任务业务分组（顺序即展示顺序）。 */
+export const TASK_GROUPS = [
+  { value: "account", label: "账号维护" },
+  { value: "model", label: "模型与渠道" },
+  { value: "ops", label: "运维与数据" },
 ];
 
 export const SERVER_TIME = 1_700_000_000;
@@ -58,6 +70,7 @@ export const TASKS = {
       key: "quota_probe",
       name: "额度探测",
       description: "探测上游剩余额度并写回凭证健康度。",
+      group: "account",
       interval_seconds: 3600,
       enabled: true,
       running: false,
@@ -72,6 +85,7 @@ export const TASKS = {
       key: "checkin",
       name: "每日签到",
       description: "全天每 10 分钟检查一次。",
+      group: "account",
       interval_seconds: 600,
       enabled: true,
       running: false,
@@ -86,6 +100,7 @@ export const TASKS = {
       key: "activity",
       name: "活跃上报",
       description: "按配置时点补发对话事件。",
+      group: "account",
       interval_seconds: 600,
       enabled: false,
       running: false,
@@ -97,6 +112,7 @@ export const TASKS = {
       last_error: null,
     },
   ],
+  groups: TASK_GROUPS,
   server_time: SERVER_TIME,
 };
 
@@ -151,7 +167,19 @@ export function withSettings(settings: unknown[]) {
   return spy;
 }
 
-/** 切换到某个 tab（testId = settings-tabs-<任务 key | gateway-<分组> | settings-other>）。 */
-export async function switchTab(testId: string) {
-  await userEvent.click(screen.getByTestId(testId));
+/** 切到某个任务：一级「后台任务」→ 业务分组 → 任务（单任务分组无第三排）。 */
+export async function openTask(group: string, key: string) {
+  const section = screen.queryByTestId("settings-sections-tasks");
+  if (section) await userEvent.click(section);
+  const groupTab = screen.queryByTestId(`settings-task-groups-${group}`);
+  if (groupTab) await userEvent.click(groupTab);
+  const taskTab = screen.queryByTestId(`settings-task-tabs-${key}`);
+  if (taskTab) await userEvent.click(taskTab);
+}
+
+/** 切到某个网关配置分组（其他 → settings-other）。 */
+export async function openGateway(value: string) {
+  const section = screen.queryByTestId("settings-sections-gateway");
+  if (section) await userEvent.click(section);
+  await userEvent.click(screen.getByTestId(`settings-gateway-groups-${value}`));
 }

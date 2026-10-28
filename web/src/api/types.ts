@@ -764,6 +764,8 @@ export interface RuntimeSetting {
   task: string | null;
   /** task 为 null 时的网关卡组 key（见 SettingsResponse.groups）；task 非空时为 null */
   group: string | null;
+  /** 任务卡片内的分节标题（同一任务内聚合）；null = 不分组 */
+  section: string | null;
 }
 
 /** 网关卡组（后端下发顺序与文案），用于把无任务归属的项拆成一级 tab。 */
@@ -791,6 +793,8 @@ export interface TaskStatus {
   key: string;
   name: string;
   description: string;
+  /** 业务分组 key（见 TasksResponse.groups），页面二级 tab 用 */
+  group: string;
   interval_seconds: number;
   /** 开关类任务（目前只有活跃上报）的当前状态；其余恒为 true */
   enabled: boolean;
@@ -807,6 +811,8 @@ export interface TaskStatus {
 
 export interface TasksResponse {
   tasks: TaskStatus[];
+  /** 任务业务分组（顺序即展示顺序）；空列表 = 无已装配任务 */
+  groups: SettingsGroup[];
   /** 服务端当前时间（epoch 秒）：算「距今多久」用服务端时钟，避免浏览器偏移 */
   server_time: number;
 }

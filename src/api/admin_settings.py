@@ -6,8 +6,9 @@
 
 同一页还展示 `/api/tasks` 的**后台任务运行态**（进程内）：任务清单与周期来自
 同一份 `HOT_SETTINGS.task` 归属，非任务项按 `HotSetting.group` 归入网关卡组
-（`GATEWAY_GROUPS`）；页面把两者拼成「任务与配置」，每个任务 / 每个网关卡组
-各一个 tab——看周期的人就在看这个任务最近跑得怎么样，分开两页反而要来回跳。
+（`GATEWAY_GROUPS`）；页面把两者拼成「任务与配置」，一级 tab 分「后台任务 /
+网关配置」，任务再按业务分组（`TASK_GROUPS`）二级切换、组内每个任务一个 tab——
+看周期的人就在看这个任务最近跑得怎么样，分开两页反而要来回跳。
 """
 
 from __future__ import annotations
@@ -22,6 +23,7 @@ from ..auth.rbac import require_admin
 from ..compat.openai.request import InvalidRequest
 from ..runtime_settings import GATEWAY_GROUPS, InvalidSetting
 from ..tasks.runner import UnknownTaskError
+from ..tasks.status import TASK_GROUPS
 from .deps import Services, csrf_protected, principal_from_request, request_ip
 
 logger = logging.getLogger(__name__)
@@ -92,6 +94,9 @@ def create_router(services: Services) -> APIRouter:
         runner = getattr(request.app.state, "task_runner", None)
         return {
             "tasks": runner.task_status() if runner is not None else [],
+            # 任务业务分组随响应下发：前端据此把任务拆成二级 tab，
+            # 不在前端硬编码 key→分组映射（后端加任务/改归属不用动前端）。
+            "groups": [{"value": key, "label": label} for key, label in TASK_GROUPS],
             "server_time": int(time.time()),
         }
 

@@ -472,6 +472,7 @@ class TaskRunner:
             "key": spec.key,
             "name": spec.name,
             "description": spec.description,
+            "group": spec.group,
             "interval_seconds": self._interval_seconds(spec.key),
             "enabled": self._task_enabled(spec.key),
             "running": spec.key in self._running,

@@ -89,6 +89,17 @@ def test_grouping_is_partitioned_between_tasks_and_gateway_groups():
             assert item.group in group_keys, item.key
 
 
+def test_sections_only_inside_task_cards():
+    """卡片内分节只用于任务项；告警 19 项必须有节标题，否则又变回一长列。"""
+    for item in HOT_SETTINGS:
+        if item.section is not None:
+            assert item.task is not None, item.key
+            assert item.section.strip(), item.key
+    alert_sections = [item.section for item in HOT_SETTINGS if item.task == "alert"]
+    assert alert_sections == [
+        "基础与迟滞"] * 6 + ["规则阈值"] * 6 + ["单 Key 与时段"] * 5 + ["月度预算"] * 2
+
+
 # ------------------------------------------------------------ 值解析与校验
 
 def test_parse_value_parses_each_supported_kind():

@@ -20,53 +20,75 @@ from typing import Any
 
 @dataclass(frozen=True)
 class TaskSpec:
-    """一个后台任务的静态描述（名称 + 一句话说明）。"""
+    """一个后台任务的静态描述（名称 + 一句话说明 + 业务分组）。"""
 
     key: str
     name: str
     description: str
+    group: str                          # 业务分组 key（见 TASK_GROUPS），管理台二级 tab
+
+
+# 任务在管理台「任务与配置」里的业务分组：key → 二级 tab 名。顺序即展示顺序；
+# 分组与归属由后端定义，前端不硬编码 key 列表，后端加任务/改归属不用动前端。
+TASK_GROUPS: tuple[tuple[str, str], ...] = (
+    ("account", "账号维护"),
+    ("model", "模型与渠道"),
+    ("ops", "运维与数据"),
+)
 
 
 # 与 TaskRunner.start() 里建立的循环一一对应。这里只描述「有哪些任务」，
 # 周期与开关是运行态（可热更），由 TaskRunner.task_status() 现算。
 TASK_SPECS: tuple[TaskSpec, ...] = (
     TaskSpec("quota_probe", "额度探测",
-             "探测上游剩余额度并写回凭证健康度；周期见「额度探测周期」。"),
+             "探测上游剩余额度并写回凭证健康度；周期见「额度探测周期」。",
+             group="account"),
     TaskSpec("refresh", "token 预刷新",
-             "到期前窗口内轮换 refresh token；只在进入窗口时真正调用上游。"),
+             "到期前窗口内轮换 refresh token；只在进入窗口时真正调用上游。",
+             group="account"),
     TaskSpec("checkin", "每日签到",
              "按配置时点（留空 = 全天每 10 分钟）检查；抖动提前 0..N 分钟，"
-             "同一时点每天只跑一次。成功后该凭证当日封账，失败持续重试。"),
+             "同一时点每天只跑一次。成功后该凭证当日封账，失败持续重试。",
+             group="account"),
     TaskSpec("growth", "成长中心",
              "领旅行礼物 / 派 Buddy / 领任务奖 / 补登 / 兑换 / 抽奖 / 开盲盒；"
-             "周期见「成长中心周期」。"),
+             "周期见「成长中心周期」。",
+             group="account"),
     TaskSpec("activity", "活跃上报",
-             "按配置时点为 CodeBuddy 账号补发对话事件；关闭时每轮都是 no-op。"),
+             "按配置时点为 CodeBuddy 账号补发对话事件；关闭时每轮都是 no-op。",
+             group="account"),
     TaskSpec("retention", "明细清理",
-             "小时汇总 + 90 天明细清理，顺带回收过期冷却与积分流水。"),
+             "小时汇总 + 90 天明细清理，顺带回收过期冷却与积分流水。",
+             group="ops"),
     TaskSpec("model_catalog", "渠道模型列表刷新",
              "兜底重拉各渠道模型表：没有它，列表只在有人访问 /v1/models 或 "
-             "Playground 时才刷新，纯 API 用法的部署会让归属表与落盘快照变陈旧。"),
+             "Playground 时才刷新，纯 API 用法的部署会让归属表与落盘快照变陈旧。",
+             group="model"),
     TaskSpec("model_probe", "模型可用性探活",
              "对仍被负缓存（「上游无此模型」）与已判死的 (渠道, 模型) 发一次最小"
              "对话：成功即恢复展示并解除避让，额度/限流类失败只记 inconclusive"
-             " 不禁用。周期见「模型探活周期」。"),
+             " 不禁用。周期见「模型探活周期」。",
+             group="model"),
     TaskSpec("openrouter_catalog", "模型目录刷新（OpenRouter）",
               "一次抓取 OpenRouter 公开模型列表，落盘三份数据：刊例价（成本估算）、"
               "明细元数据（「模型列表」页）、Artificial Analysis 能力指数"
               "（Playground 与 /v1/models 的 benchmarks）。拉取失败只是成本与"
-              "分数显示 —，不影响模型列表。"),
+              "分数显示 —，不影响模型列表。",
+              group="model"),
     TaskSpec("alert", "运维告警",
              "周期评估四类风险（池耗尽 / 任务连续失败 / token 临近到期 / 上游"
-             "错误率骤升），命中落站内记录并可推送 webhook；周期见「运维告警周期」。"),
+             "错误率骤升），命中落站内记录并可推送 webhook；周期见「运维告警周期」。",
+             group="ops"),
     TaskSpec("backup", "数据库备份",
              "周期性把主库一致性快照（VACUUM INTO）写进 DATA_DIR/backups/，"
-             "并只保留最近 N 份；周期与保留份数见「备份周期」「备份保留份数」。"),
+             "并只保留最近 N 份；周期与保留份数见「备份周期」「备份保留份数」。",
+             group="ops"),
     TaskSpec("upstream_status", "上游状态页",
              "并发抓各模型 / 网关提供方的官方状态接口（OpenCode Zen / Kilo / "
              "DeepSeek / Together / Moonshot / MiniMax / OpenAI / Anthropic），"
              "归一化后存内存供「上游状态」页展示。只做解释不做决策，不参与选号；"
-             "周期见「上游状态页周期」。"),
+             "周期见「上游状态页周期」。",
+             group="ops"),
 )
 
 TASK_BY_KEY: dict[str, TaskSpec] = {spec.key: spec for spec in TASK_SPECS}

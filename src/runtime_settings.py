@@ -49,6 +49,9 @@ class HotSetting:
     maximum: float | None = None
     task: str | None = None             # 所属后台任务 key（见 tasks/status.py）；None=网关/调度配置
     group: str | None = None            # task 为 None 时的分组 key（见 GATEWAY_GROUPS）
+    # 任务卡片内的分节标题（同一任务内聚合，如运维告警的「规则阈值」）：
+    # 19 项平铺一列太长；None = 不分组。只对 task 非空的项有意义。
+    section: str | None = None
     # 生效下限（读时钳制）：存量覆盖值可能低于现行下限（旧版 minimum 更宽时
     # 写入），读路径直接钳到 floor 自愈——否则 UI 回显写入值、实际跑钳制值，
     # 两者静默分叉。floor ≥ minimum 恒成立。
@@ -59,13 +62,17 @@ class HotSetting:
         return self.key.upper()
 
 
-# 无任务归属的配置项（`task is None`）在管理台里的分组：key → 界面上的一级 tab
-# 名。顺序即前端展示顺序；分组归属与标签由后端定义，前端不硬编码 key 列表，
-# 后端加项/改归属不用动前端。留空的分组不渲染。
+# 无任务归属的配置项（`task is None`）在管理台里的分组：key → 「网关配置」下的
+# 二级 tab 名。顺序即前端展示顺序；分组归属与标签由后端定义，前端不硬编码 key
+# 列表，后端加项/改归属不用动前端。留空的分组不渲染。
 GATEWAY_GROUPS: tuple[tuple[str, str], ...] = (
-    ("routing", "模型路由"),
+    ("model_routing", "模型与回退"),
+    ("compress", "上下文压缩"),
+    ("stream_thinking", "流式与思考"),
+    ("gateway_control", "网关与计费"),
     ("affinity", "选号与会话"),
-    ("channels", "渠道节流"),
+    ("chat_throttle", "聊天节流"),
+    ("codearts_throttle", "CodeArts 节流"),
     ("pacer", "后台任务节流"),
     ("observability", "可观测性"),
 )
@@ -75,49 +82,49 @@ GATEWAY_GROUPS: tuple[tuple[str, str], ...] = (
 HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("default_model", str, "默认模型",
                "请求未指定 model（或为 auto/空）时使用的模型名。",
-               group="routing"),
+               group="model_routing"),
     HotSetting("model_blocklist", str, "模型黑名单",
                "fnmatch glob，逗号分隔；只影响 /v1/models 与 Playground 列表，"
                "直连指定不受影响。留空表示不过滤。",
-               group="routing"),
+               group="model_routing"),
     HotSetting("context_compress_enabled", bool, "上下文压缩",
                "按模型目录里的输入上限裁剪过长对话，避免撞上游硬限制"
                "（CodeBuddy 11115 prompt is too long）。目录里查不到上限的模型"
-               "不受影响。", group="routing"),
+               "不受影响。", group="compress"),
     HotSetting("context_compress_reserve_tokens", int, "上下文压缩：预留输出 token",
                "压缩预算里为模型回复预留的输出 token 数。", minimum=0,
-               group="routing"),
+               group="compress"),
     HotSetting("context_compress_min_keep_messages", int, "上下文压缩：至少保留消息数",
                "无论多长都保留的最近消息条数（保证当前这轮对话完整）。",
-               minimum=0, group="routing"),
+               minimum=0, group="compress"),
     HotSetting("context_compress_safety_ratio", float, "上下文压缩：安全系数",
                "按模型上限的百分比计算压缩预算，给 token 估算误差留余量。",
-               minimum=0.0, maximum=1.0, group="routing"),
+               minimum=0.0, maximum=1.0, group="compress"),
     HotSetting("context_compress_sticky_enabled", bool, "上下文压缩：粘性裁剪",
                "开启后一次裁到预算的 60% 并记住保留窗口的起点，跨轮前缀不变，"
                "上游前缀缓存才能命中（客户端每轮重发完整历史时，不粘性就只有 "
                "system 段可复用，命中率会掉到个位数）。关闭 = 每轮按当轮预算"
                "重算，只有前缀本来就单调增长时才划算。",
-               group="routing"),
+               group="compress"),
     HotSetting("model_fallback_groups", str, "跨渠道 fallback 兼容组",
                "请求模型在主渠道全部不可用时，按兼容组依次回退到组内其他模型。"
                "格式 `组名=成员1,成员2;组名2=成员3`；成员可带 `@渠道` 固定回退渠道。"
                "留空 = 不启用。回退会用尽该组（×3 轮换预算）后正常 503。",
-               group="routing"),
+               group="model_routing"),
     HotSetting("model_aliases", str, "自定义模型别名",
                "给客户端一个稳定的对外模型名（上游改 id 时只改这里）。格式 "
                "`对外名=模型@渠道;对外名2=模型`；列表与请求解析用同一份。"
                "与真实模型 id 或自动别名撞车视为配置错误，不静默覆盖。"
-               "留空 = 不启用。", group="routing"),
+               "留空 = 不启用。", group="model_routing"),
     HotSetting("stream_first_event_timeout_seconds", float, "流式首事件超时（秒）",
                "上游接了连接却长时间不吐第一个数据帧时，在**出帧前**换号重试"
                "（此时切换安全）。注释帧/心跳不重置计时。0 = 关闭；实测慢上下文"
                "首字可达 40–71s，内置默认必须保持关闭，用时按部署实际填（推荐 60）。",
-               minimum=0.0, group="routing"),
+               minimum=0.0, group="stream_thinking"),
     HotSetting("stream_idle_timeout_seconds", float, "流式空闲超时（秒）",
                "**已出帧**后上游长时间不再吐数据时断流并以错误帧收尾——半截输出"
                "不可回滚，换号会把两个账号的内容拼给客户端。0 = 关闭（推荐 300）。",
-               minimum=0.0, group="routing"),
+               minimum=0.0, group="stream_thinking"),
     HotSetting("short_cooldown_wait_seconds", float, "短冷却等待上限（秒）",
                "全池都在短冷却、没有任何立即可用候选时，最短剩余冷却不超过该值"
                "则等待后续上（而非直接 503）。等待期间不占在途租约。0 = 关闭"
@@ -127,7 +134,7 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "超时会切连接。设为 N>0 时，N 秒内没完成就转 chunked，先吐空白"
                "再补 JSON 正文——空白是合法 JSON 前导（RFC 8259），解析器照常"
                "工作。0 = 关闭（本部署 nginx 3600s + frp TCP 无此问题）；"
-               "只在 CDN 后面需要，推荐 15。", minimum=0.0, group="routing"),
+               "只在 CDN 后面需要，推荐 15。", minimum=0.0, group="stream_thinking"),
     HotSetting("quota_expiry_window_seconds", int, "到期积分主窗口（秒）",
                "把「距到期 ≤ 该秒数」的积分加总作为选号第一排序指标；"
                "≤0 关闭整套到期排序（次窗口一并失效）。", minimum=0,
@@ -182,44 +189,44 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("usd_cny_rate", float, "美元兑人民币汇率",
                "成本估算里把 OpenRouter 的美元刊例价折成人民币的汇率"
                "（1 USD = 该值 CNY）；改后只影响之后写入的请求，历史成本不重算。",
-               minimum=0.000001, group="routing"),
+               minimum=0.000001, group="gateway_control"),
     HotSetting("codebuddy_chat_min_interval", float, "CodeBuddy 聊天最小间隔（秒）",
                "同渠道同凭证顺序连发的最小请求间隔（0 关闭）；按凭证分桶、桶内"
                "允许并发，故同渠道同模型的并发请求不会被串行化。",
-               minimum=0.0, group="channels"),
+               minimum=0.0, group="chat_throttle"),
     HotSetting("codebuddy_intl_chat_min_interval", float,
                "CodeBuddy 国际聊天最小间隔（秒）",
                "国际站（www.codebuddy.ai）专用节流（默认 5s，0 关闭）。与国内站"
                "各自独立、不共享——共用会让两站请求排进同一条队列互相空等。",
-               minimum=0.0, group="channels"),
+               minimum=0.0, group="chat_throttle"),
     HotSetting("zen_chat_min_interval", float, "Zen 聊天最小间隔（秒）",
                "zen 匿名免费层专用节流（0 关闭，默认）。与 CodeBuddy/TRAE 各自"
                "独立、不共享——共享会让 zen 请求排在 CB/TRAE 之后空等最小间隔。",
-               minimum=0.0, group="channels"),
+               minimum=0.0, group="chat_throttle"),
     HotSetting("kilo_chat_min_interval", float, "Kilo 聊天最小间隔（秒）",
                "Kilo 匿名免费层专用节流（0 关闭，默认）。与 zen / CodeBuddy / TRAE"
-               "各自独立，不共享。", minimum=0.0, group="channels"),
+               "各自独立，不共享。", minimum=0.0, group="chat_throttle"),
     HotSetting("qoder_chat_min_interval", float, "Qoder 聊天最小间隔（秒）",
                "Qoder 真实账号渠道专用节流（默认 5s，0 关闭）。与其余渠道各自"
-               "独立，不共享。", minimum=0.0, group="channels"),
+               "独立，不共享。", minimum=0.0, group="chat_throttle"),
     HotSetting("codearts_chat_min_interval", float, "CodeArts 聊天最小间隔（秒）",
                "CodeArts 真实账号渠道专用节流（默认 5s，0 关闭）。与其余渠道各自"
-               "独立，不共享。", minimum=0.0, group="channels"),
+               "独立，不共享。", minimum=0.0, group="codearts_throttle"),
     HotSetting("officeace_chat_min_interval", float,
                "OfficeAce 聊天最小间隔（秒）",
                "OfficeAce 真实账号渠道专用节流（默认 0 关闭）。上游没有 CodeArts "
                "那种硬并发限，被限流时走伪 200 的模型级短冷却；与其余渠道各自"
-               "独立，不共享。", minimum=0.0, group="channels"),
+               "独立，不共享。", minimum=0.0, group="chat_throttle"),
     HotSetting("codearts_max_concurrency", int, "CodeArts 每账号并发上限",
                "CodeArts 上游硬限每账号并发会话数 3，超限请求直接 400 "
                "TM.00001041（实测 77% 失败率主因）。默认 3 对齐上游；0 关闭上限"
                "（回到「有在途即放行」，会再次击穿）。", minimum=0,
-               group="channels"),
+               group="codearts_throttle"),
     HotSetting("codearts_request_window_seconds", float, "CodeArts 账号节流窗口（秒）",
                "与「每账号并发上限」组合成滑动窗口：最近这么多秒内最多启动 N 次。"
                "上游口径是「每账号每约 60s 最多 3 个会话」（会话在流结束后仍滞留"
                "数十秒），纯在途上限挡不住突发，故默认 60s；0 关闭窗口口径。",
-               minimum=0.0, group="channels"),
+               minimum=0.0, group="codearts_throttle"),
     HotSetting("pacer_min_seconds", float, "后台任务节流下限（秒）",
                "后台任务相邻上游请求的最小间隔；0 关闭节流。", minimum=0.0,
                group="pacer"),
@@ -250,63 +257,66 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     # 这个任务最近报了什么。webhook 留空 = 只留站内记录、不外推。
     HotSetting("alert_enabled", bool, "运维告警开关",
                "是否启用后台告警评估。关闭后不落站内记录也不推送 webhook。",
-               task="alert"),
+               task="alert", section="基础与迟滞"),
     HotSetting("alert_webhook_url", str, "告警 Webhook 地址",
                "命中告警时 POST JSON 的地址，多个用逗号分隔；留空 = 只在管理台"
-               "留站内记录、不外推。", task="alert"),
+               "留站内记录、不外推。", task="alert", section="基础与迟滞"),
     HotSetting("alert_interval_minutes", int, "运维告警周期（分钟）",
                "后台评估四类风险的一轮间隔；下限 1 分钟。", minimum=1,
-               task="alert", floor=1),
+               task="alert", section="基础与迟滞", floor=1),
     HotSetting("alert_silence_minutes", int, "告警静默窗（分钟）",
                "同一条告警（规则 + 对象）在该窗口内只落库/推送一次，避免持续"
-               "状态每轮刷屏；0 关闭静默（每轮都报）。", minimum=0, task="alert"),
+               "状态每轮刷屏；0 关闭静默（每轮都报）。", minimum=0, task="alert",
+               section="基础与迟滞"),
     HotSetting("alert_for_ticks", int, "告警进入迟滞（连续命中轮数）",
                "同一条告警连续命中这么多轮才真正告警（滤掉单轮毛刺）；"
-               "1 = 不迟滞、首轮即报。", minimum=1, task="alert", floor=1),
+               "1 = 不迟滞、首轮即报。", minimum=1, task="alert", section="基础与迟滞", floor=1),
     HotSetting("alert_clear_ticks", int, "告警恢复迟滞（连续未命中轮数）",
                "告警中的条目连续这么多轮不再命中才确认恢复（写 resolved_at "
                "并外推恢复通知），避免单轮抖动误撤。", minimum=1,
-               task="alert", floor=1),
+               task="alert", section="基础与迟滞", floor=1),
     HotSetting("alert_pool_ready_min", int, "池耗尽阈值（可用数）",
                "凭证池可用数少于该值时告警（服务活着但用不了）；0 关闭该规则。",
-               minimum=0, task="alert"),
+               minimum=0, task="alert", section="规则阈值"),
     HotSetting("alert_task_failures", int, "任务连续失败阈值",
                "某后台任务连续失败达到该次数时告警（成功一轮清零）；0 关闭该规则。",
-               minimum=0, task="alert"),
+               minimum=0, task="alert", section="规则阈值"),
     HotSetting("alert_token_expiry_hours", int, "token 到期预警窗口（小时）",
                "凭证 token 剩余时间少于该小时数时告警；0 关闭该规则。",
-               minimum=0, task="alert"),
+               minimum=0, task="alert", section="规则阈值"),
     HotSetting("alert_error_rate_threshold", float, "上游错误率阈值",
                "统计窗内失败占比达到该值时告警；0 关闭该规则。", minimum=0.0,
-               maximum=1.0, task="alert"),
+               maximum=1.0, task="alert", section="规则阈值"),
     HotSetting("alert_error_rate_min_requests", int, "错误率最小样本数",
                "统计窗内请求数少于该值时不判错误率（样本太小无意义）。",
-               minimum=1, task="alert"),
+               minimum=1, task="alert", section="规则阈值"),
     HotSetting("alert_error_rate_window_minutes", int, "错误率统计窗（分钟）",
                "计算上游错误率的时间窗；0 表示只看当前瞬间（无样本，不触发）。",
-               minimum=0, task="alert"),
+               minimum=0, task="alert", section="规则阈值"),
     HotSetting("alert_key_burst_tokens", int, "单 Key 用量暴涨阈值（token）",
                "统计窗内某把 API Key 的 token 总量达到该值即告警（Key 泄露/"
-               "多人共用的信号）；0 关闭该规则。", minimum=0, task="alert"),
+               "多人共用的信号）；0 关闭该规则。", minimum=0, task="alert",
+               section="单 Key 与时段"),
     HotSetting("alert_key_burst_window_minutes", int, "单 Key 用量统计窗（分钟）",
-               "按 Key 聚合 token 的时间窗；0 关闭该规则。", minimum=0, task="alert"),
+               "按 Key 聚合 token 的时间窗；0 关闭该规则。", minimum=0, task="alert",
+               section="单 Key 与时段"),
     HotSetting("alert_off_hours_start", int, "非工作时段起点（时）",
                "与「终点」一起定义工作时间 `[start, end)`（本地时区，可跨零点，"
                "如 9 → 19）。起点与终点相等 = 关闭该规则。", minimum=0,
-               maximum=23, task="alert"),
+               maximum=23, task="alert", section="单 Key 与时段"),
     HotSetting("alert_off_hours_end", int, "非工作时段终点（时）",
                "工作时间区间的右端（不含）。与起点相等 = 关闭该规则。",
-               minimum=0, maximum=23, task="alert"),
+               minimum=0, maximum=23, task="alert", section="单 Key 与时段"),
     HotSetting("alert_off_hours_min_requests", int, "非工作时段请求数阈值",
                "非工作时段内请求数达到该值才告警（避免个别重试误报）；0 关闭。",
-               minimum=0, task="alert"),
+               minimum=0, task="alert", section="单 Key 与时段"),
     HotSetting("alert_budget_cny", float, "月度成本预算（元）",
                "按本地自然月累计可定价成本，达到分层阈值时告警；0 关闭该规则。"
                "只统计匹配到价表与汇率的明细，未定价模型不计入。", minimum=0.0,
-               task="alert"),
+               task="alert", section="月度预算"),
     HotSetting("alert_budget_levels", str, "预算分层（%）",
                "逗号分隔的百分比档位，默认 50,80,95,100；只报当前达到的最高档，"
-               "100% 为 critical。留空 = 不分层（规则不生效）。", task="alert"),
+               "100% 为 critical。留空 = 不分层（规则不生效）。", task="alert", section="月度预算"),
     # SQLite 备份：改周期时人就在看这个任务最近备份了什么。
     HotSetting("backup_interval_minutes", int, "备份周期（分钟）",
                "后台把主库一致性快照（VACUUM INTO）写进 DATA_DIR/backups/ 的"
@@ -334,11 +344,11 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                " models / usage / balance）立即返 503（`type=service_paused`），"
                "管理台与登录照常可用——异常消耗或上游事故时一键止血。暂停原因"
                "写进日志与审计，不回显给调用方。默认关。",
-               group="routing"),
+               group="gateway_control"),
     HotSetting("gateway_pause_reason", str, "暂停原因",
                "配合「网关暂停」使用：写清为什么停（事故编号 / 上游状态页链接），"
                "只进服务端日志与审计。留空按「未填原因」记录。",
-               group="routing"),
+               group="gateway_control"),
     HotSetting("dump_request_bodies", bool, "请求体诊断落盘",
                "把每次 `/v1/chat/completions` 的**原始请求体**（含完整对话内容）"
                "写到 `DATA_DIR/dumps/`，目录 0700、文件 0600、保留 200 个且不超过 "
@@ -362,13 +372,13 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "开启后出站响应不再包含模型的思考内容（chat 的 reasoning_content / "
                "Anthropic 的 thinking 块 / Responses 的 reasoning item 一并过滤）。"
                "**只过滤响应、不改写请求体**：上游仍照常思考，只是不交给客户端。",
-               group="routing"),
+               group="stream_thinking"),
     HotSetting("reasoning_effort_map", str, "档位映射（出站）",
                "把客户端显式给的 `reasoning_effort` 改写成渠道期望的档位。格式 "
                "`渠道=from:to,from:to;*=from:to`（渠道取 KNOWN_PROVIDERS，`*` 兜底）；"
                "目标写 `none` 表示删除该键、走渠道默认。留空 = 原样透传。只改写"
                "客户端显式值，渠道自身补的默认档不受影响。",
-               group="routing"),
+               group="stream_thinking"),
     HotSetting("anthropic_thinking_efforts", str, "Anthropic thinking→档位",
                "把 Anthropic 入站的 `thinking.budget_tokens` 翻成上游 "
                "`reasoning_effort`。格式 `预算:档位,预算:档位,disabled:档位`："
@@ -376,7 +386,7 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "budget_tokens 中最大的那一档」，低于最小阈值则不映射。留空 = "
                "完全不映射（`thinking` 照旧忽略）。Anthropic 未给档位对应表，"
                "阈值由使用者自行决定。",
-               group="routing"),
+               group="stream_thinking"),
 )
 
 HOT_BY_KEY: dict[str, HotSetting] = {item.key: item for item in HOT_SETTINGS}
@@ -672,8 +682,10 @@ class RuntimeSettings:
                 "overridden": self.is_overridden(spec.key),
                 # 所属后台任务（管理台据此把配置归到任务卡片下）；None = 网关/调度项
                 "task": spec.task,
-                # task 为 None 时的分组 key（见 GATEWAY_GROUPS）；前端据此分一级 tab
+                # task 为 None 时的分组 key（见 GATEWAY_GROUPS）；前端据此分组展示
                 "group": spec.group,
+                # 任务卡片内的分节标题；None = 不分组
+                "section": spec.section,
             }
             for spec in HOT_SETTINGS
         ]

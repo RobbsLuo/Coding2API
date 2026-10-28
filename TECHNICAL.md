@@ -727,7 +727,7 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 
 **签到 / 成长的同账号隔离键**：`checkin_scope(data) or f"credential|{credential_id}"`（provider 身份未知时返回空串；共享空 scope 会让第二个账号被 `seen` 永久跳过）。
 
-**记录口径**：`_guarded` 在任务返回 `None` 时**不入账**（`sleep` 到点但 `due()=False` 是 no-op；当成成功会让页面显示「签到刚跑过」而当天一次没签）。`TaskRun` 只在真实执行或抛异常时写入；计数 `runs` 同样只涨真实执行。运行态只在本进程内，重启归零。`TASK_SPECS` 是静态描述，与 `TaskRunner.start()` 循环一一对应；周期与开关运行时现算。`GET /api/tasks` 返回带 `server_time`（前端用服务端时钟算「距今多久」）。
+**记录口径**：`_guarded` 在任务返回 `None` 时**不入账**（`sleep` 到点但 `due()=False` 是 no-op；当成成功会让页面显示「签到刚跑过」而当天一次没签）。`TaskRun` 只在真实执行或抛异常时写入；计数 `runs` 同样只涨真实执行。运行态只在本进程内，重启归零。`TASK_SPECS` 是静态描述，与 `TaskRunner.start()` 循环一一对应；`group` 字段归属 `TASK_GROUPS`（账号维护 / 模型与渠道 / 运维与数据），随 `/api/tasks` 的 `groups` 下发，供前端二级 tab 使用；周期与开关运行时现算。`GET /api/tasks` 返回带 `server_time`（前端用服务端时钟算「距今多久」）。
 
 **手动触发** `POST /api/tasks/{key}/run`（admin + CSRF）返回 `{...运行态, ran, busy}`，未知 key 400。复用 `_loop_specs()`；差别只有 `manual=True` 时 `activity` 绕过 `due()`，以及开关**不绕**（`run_once` 返回 `None` 记 `ran=false`）。**并发**：`self._running: set[str]` 占 key（asyncio 单线程下「查 + 加」原子），撞上直接跳过本轮；手动触发在 `_run_guarded` 之前先查，命中回 `busy=true` 不等结果。`ran` 口径 = 「真跑了一轮（含失败）」。
 
@@ -893,7 +893,7 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 **校验**：白名单外 key 拒绝；类型与范围写入前校验；跨字段组合（`pacer_min ≤ pacer_max`）用「这批写完之后」的对端值比较，失败整批不落库。坏行读取时跳过并记警告。**接口**：`GET /api/settings` 返回 `snapshot()`（`key`/`env_name`/`label`/`description`/`kind`/`value`/`default`/`overridden`/`task`/`group`）+ 覆盖计数 + `groups`；`PUT /api/settings` body `{"values": {key: 标量 | null}}`，`null` 恢复默认，写操作记审计。网关卡组表即 `GATEWAY_GROUPS`。不变量：每项**要么**属一个任务、**要么**落一个网关卡组，互斥且都有归属。
 
 ### 13.2 后台任务可视化
-`SettingsPage` 一排 tabs：每任务一个 tab（运行态 + 配置项）；无任务归属的按网关卡组各占一个。无配置项的分组不出 tab；归属对不上落「其他」，绝不吞掉配置。保存按钮与「N 项待保存」常驻顶部，草稿跨 tab 保留。`useTasks` 以 `refetchInterval: 30_000` 刷新；`/api/settings` 不自动刷新。任务卡片「立即运行」，运行中 / 已关闭时禁用；结果三态——**已跑一轮**（带 `last_report`）、**没排上**（`busy=true`）、**跑了但 no-op**（`ran=false`）。把第三种说成「已运行」就是谎报。
+`SettingsPage` 两级 tabs：一级「后台任务 / 网关配置」；任务按后端下发的业务分组（`TASK_GROUPS`：账号维护 / 模型与渠道 / 运维与数据）二级切换，组内每个任务一个 tab（运行态 + 配置项），组内只有一个任务时省掉第三排；网关配置按 `GATEWAY_GROUPS` 二级切换。无配置项的分组、无已装配任务的分组不出 tab；归属对不上落「其他」，绝不吞掉配置。任务卡片内的配置项可按后端下发的 `section` 分节（运维告警 19 项 → 基础与迟滞 / 规则阈值 / 单 Key 与时段 / 月度预算），避免一长列。保存按钮与「N 项待保存」常驻顶部，草稿跨 tab 保留。`useTasks` 以 `refetchInterval: 30_000` 刷新；`/api/settings` 不自动刷新。任务卡片「立即运行」，运行中 / 已关闭时禁用；结果三态——**已跑一轮**（带 `last_report`）、**没排上**（`busy=true`）、**跑了但 no-op**（`ran=false`）。把第三种说成「已运行」就是谎报。
 
 ### 13.3 按渠道出站代理
 `PROVIDER_PROXIES`（启动期，默认 `""` 直连）：`渠道=代理URL;渠道2=代理URL2`，渠道取 `KNOWN_PROVIDERS`，协议 `http/https/socks5/socks5h`。作用于该渠道**全部出站请求**（聊天、额度/模型、后台任务、OAuth）。**严格解析**：未知渠道 / 非法协议 / 缺 `=` / 空 URL 一律 `ValueError`，只忽略空段。工厂 `build_client(timeout, proxy)` 统一构造 `httpx.AsyncClient(..., trust_env=False, proxy=proxy)`。**为什么启动期**：代理作用于连接池；运行中改需重建 6 个客户端 + 3 个 OAuth 流。

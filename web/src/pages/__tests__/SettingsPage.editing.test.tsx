@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsPage } from "../SettingsPage";
 import { jsonResponse, renderPage, settle, userEvent } from "@/test-utils";
-import { body, mockAll, switchTab } from "@/test-utils/settings";
+import { body, mockAll, openGateway, openTask } from "@/test-utils/settings";
 
 describe("SettingsPage 保存与热更", () => {
   beforeEach(() => {
@@ -35,7 +35,7 @@ describe("SettingsPage 保存与热更", () => {
     await userEvent.type(input, "15");
 
     // 换到另一个任务的 tab 再改，草稿跨 tab 保留，保存按钮统一汇总
-    await switchTab("settings-tabs-activity");
+    await openTask("account", "activity");
     await userEvent.selectOptions(screen.getByTestId("input-activity_report_enabled"), "true");
 
     expect(screen.getByTestId("dirty-count")).toHaveTextContent("2 项待保存");
@@ -58,7 +58,7 @@ describe("SettingsPage 保存与热更", () => {
 
     renderPage(<SettingsPage />);
     await settle();
-    await switchTab("settings-tabs-gateway-pacer");
+    await openGateway("gateway-pacer");
     await userEvent.click(screen.getByTestId("reset-pacer_max_seconds"));
 
     expect(await screen.findByTestId("settings-notice")).toHaveTextContent("恢复 .env 默认值");
@@ -71,7 +71,7 @@ describe("SettingsPage 保存与热更", () => {
 
     expect(screen.getByTestId("reset-quota_probe_minutes")).toBeDisabled();
 
-    await switchTab("settings-tabs-gateway-pacer");
+    await openGateway("gateway-pacer");
     expect(screen.getByTestId("reset-pacer_max_seconds")).toBeEnabled();
   });
 

@@ -21,7 +21,7 @@ from src.tasks.quota_probe import QuotaProbeTask
 from src.tasks.refresh import RefreshTask
 from src.tasks.retention import RetentionTask
 from src.tasks.runner import TaskRunner, build_runner
-from src.tasks.status import TASK_BY_KEY, TASK_SPECS, TaskStatusStore
+from src.tasks.status import TASK_BY_KEY, TASK_GROUPS, TASK_SPECS, TaskStatusStore
 from tests.helpers.constants import SECRET
 
 
@@ -188,6 +188,8 @@ def test_task_status_lists_assembled_tasks_with_intervals(repo):
         "quota_probe", "refresh", "checkin", "retention"]
     by_key = {item["key"]: item for item in status}
     assert by_key["quota_probe"]["interval_seconds"] == 3600.0
+    assert by_key["quota_probe"]["group"] == "account"
+    assert by_key["retention"]["group"] == "ops"
     assert by_key["checkin"]["interval_seconds"] == 600.0
     assert by_key["retention"]["interval_seconds"] == 300.0
     assert by_key["quota_probe"]["enabled"] is True
@@ -288,8 +290,11 @@ def test_runner_reuses_injected_status_store(repo):
 
 def test_task_specs_are_unique_and_named():
     assert len({spec.key for spec in TASK_SPECS}) == len(TASK_SPECS)
+    group_keys = {key for key, _ in TASK_GROUPS}
     for spec in TASK_SPECS:
         assert spec.name and spec.description
+        # 分组必须真实存在：否则管理台二级 tab 里会出现「无主」任务
+        assert spec.group in group_keys, spec.key
         assert TASK_BY_KEY[spec.key] is spec
 
 
@@ -315,10 +320,16 @@ def test_tasks_returns_runtime_snapshot(admin_client):
     _app, client = admin_client
     body = client.get("/api/tasks").json()
     assert isinstance(body["server_time"], int) and body["server_time"] > 0
+    assert body["groups"] == [
+        {"value": "account", "label": "账号维护"},
+        {"value": "model", "label": "模型与渠道"},
+        {"value": "ops", "label": "运维与数据"},
+    ]
     keys = [item["key"] for item in body["tasks"]]
     assert "quota_probe" in keys and "retention" in keys
     probe = next(item for item in body["tasks"] if item["key"] == "quota_probe")
     assert probe["name"] == "额度探测"
+    assert probe["group"] == "account"
     assert probe["interval_seconds"] == 3600.0
     assert probe["last_ok"] is True            # 启动首轮探测（zen/kilo 虚拟凭证）也是真实执行
     assert probe["last_report"] == {
@@ -358,9 +369,16 @@ def test_settings_snapshot_carries_task_owner(tmp_path):
     assert by_key["activity_report_enabled"]["task"] == "activity"
     assert by_key["default_model"]["task"] is None
     # 无任务归属的项带网关卡组，供前端分一级 tab
-    assert by_key["default_model"]["group"] == "routing"
-    assert by_key["codebuddy_chat_min_interval"]["group"] == "channels"
+    assert by_key["default_model"]["group"] == "model_routing"
+    assert by_key["context_compress_enabled"]["group"] == "compress"
+    assert by_key["stream_idle_timeout_seconds"]["group"] == "stream_thinking"
+    assert by_key["gateway_paused"]["group"] == "gateway_control"
+    assert by_key["codebuddy_chat_min_interval"]["group"] == "chat_throttle"
+    assert by_key["codearts_chat_min_interval"]["group"] == "codearts_throttle"
     assert by_key["quota_probe_minutes"]["group"] is None
+    # 卡片内分节只对任务项下发
+    assert by_key["alert_for_ticks"]["section"] == "基础与迟滞"
+    assert by_key["default_model"]["section"] is None
 
 
 def test_build_runner_accepts_shared_status_store(repo):

@@ -3,7 +3,7 @@ import { screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SettingsPage } from "../SettingsPage";
 import { jsonResponse, mockFetch, renderPage, settle, userEvent } from "@/test-utils";
-import { SETTINGS, SERVER_TIME, body, mockAll, runBody, switchTab, tasksBody, withSettings } from "@/test-utils/settings";
+import { GROUPS, SETTINGS, SERVER_TIME, TASK_GROUPS, body, mockAll, openGateway, openTask, runBody, tasksBody, withSettings } from "@/test-utils/settings";
 
 describe("SettingsPage", () => {
   beforeEach(() => {
@@ -15,49 +15,110 @@ describe("SettingsPage", () => {
     renderPage(<SettingsPage />);
     await settle();
 
-    // 默认落在第一个任务 tab（额度探测）
+    // 默认落在第一个任务（额度探测）
     expect(screen.getByTestId("setting-quota_probe_minutes")).toBeInTheDocument();
     expect(screen.getByTestId("source-quota_probe_minutes")).toHaveTextContent("来自 .env");
 
-    await switchTab("settings-tabs-gateway-pacer");
+    await openGateway("gateway-pacer");
     expect(screen.getByTestId("setting-pacer_max_seconds")).toBeInTheDocument();
     expect(screen.getByTestId("source-pacer_max_seconds")).toHaveTextContent("DB 覆盖");
     expect(screen.getByTestId("default-pacer_max_seconds")).toHaveTextContent("20");
 
-    await switchTab("settings-tabs-activity");
+    await openTask("account", "activity");
     expect(screen.getByTestId("setting-activity_report_enabled")).toBeInTheDocument();
   });
 
-  it("每个任务一个 tab，配置按后端下发的归属进各自 tab，无归属的按网关卡组进 tab", async () => {
+  it("一级 tab 分后台任务 / 网关配置，两边内容不混排", async () => {
     mockAll();
     renderPage(<SettingsPage />);
     await settle();
 
-    // 额度探测 tab：只有它自己的配置
+    // 默认在「后台任务」：只有任务分组与任务卡，没有配置分组
+    expect(screen.getByTestId("settings-sections-tasks")).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByTestId("settings-task-groups-account")).toBeInTheDocument();
+    expect(screen.queryByTestId("settings-gateway-groups-gateway-pacer")).not.toBeInTheDocument();
+
+    await openGateway("gateway-pacer");
+    expect(screen.getByTestId("settings-sections-gateway")).toHaveAttribute("aria-selected", "true");
+    expect(screen.queryByTestId("task-quota_probe")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("settings-task-groups-account")).not.toBeInTheDocument();
+  });
+
+  it("任务按后端下发的业务分组二级切换，配置按归属进各自任务", async () => {
+    mockAll();
+    renderPage(<SettingsPage />);
+    await settle();
+
+    // 额度探测：只有它自己的配置
     const probe = screen.getByTestId("task-quota_probe");
     expect(within(probe).getByTestId("setting-quota_probe_minutes")).toBeInTheDocument();
     expect(within(probe).queryByTestId("setting-pacer_max_seconds")).not.toBeInTheDocument();
 
-    await switchTab("settings-tabs-activity");
+    await openTask("account", "activity");
     expect(
       within(screen.getByTestId("task-activity")).getByTestId("setting-activity_report_enabled"),
     ).toBeInTheDocument();
 
-    // 节流项不属于任何任务：只在「后台任务节流」这个网关 tab 出现
-    await switchTab("settings-tabs-gateway-pacer");
+    // 节流项不属于任何任务：只在「后台任务节流」这个配置分组出现
+    await openGateway("gateway-pacer");
     expect(screen.getByTestId("setting-pacer_max_seconds")).toBeInTheDocument();
     expect(screen.queryByTestId("task-quota_probe")).not.toBeInTheDocument();
   });
 
-  it("网关卡组按后端下发拆成多个一级 tab，空分组不出 tab", async () => {
+  it("任务分组只列已装配任务的分组，配置分组只列有配置项的分组", async () => {
     mockAll();
     renderPage(<SettingsPage />);
     await settle();
 
-    // 有配置项的 pacer 分组有 tab；routing / affinity / channels 当前无配置项，不出现
+    // 样例任务都在 account；model / ops 分组没有已装配任务 → 不出 tab
+    expect(screen.getByRole("tab", { name: "账号维护" })).toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "模型与渠道" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "运维与数据" })).not.toBeInTheDocument();
+
+    await openGateway("gateway-pacer");
+    // 有配置项的 pacer 分组有 tab；模型/渠道等当前无配置项，不出现
     expect(screen.getByRole("tab", { name: "后台任务节流" })).toBeInTheDocument();
-    expect(screen.queryByRole("tab", { name: "模型路由" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "模型与回退" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("tab", { name: "上下文压缩" })).not.toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "渠道节流" })).not.toBeInTheDocument();
+  });
+
+  it("组内只有一个任务时不渲染第三排任务 tab", async () => {
+    const spy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/api/tasks")) {
+        return jsonResponse({
+          tasks: [
+            {
+              key: "backup",
+              name: "数据库备份",
+              description: "周期性备份主库。",
+              group: "ops",
+              interval_seconds: 86400,
+              enabled: true,
+              running: false,
+              runs: 0,
+              last_started_at: null,
+              last_finished_at: null,
+              last_ok: null,
+              last_report: null,
+              last_error: null,
+            },
+          ],
+          groups: TASK_GROUPS,
+          server_time: SERVER_TIME,
+        });
+      }
+      return jsonResponse(body());
+    });
+    vi.stubGlobal("fetch", spy);
+
+    renderPage(<SettingsPage />);
+    await settle();
+
+    expect(screen.getByTestId("settings-task-groups-ops")).toBeInTheDocument();
+    expect(screen.queryByTestId("settings-task-tabs")).not.toBeInTheDocument();
+    expect(screen.getByTestId("task-backup")).toBeInTheDocument();
   });
 
   it("tab 文案去掉任务名的括号补充、过长的用简称；卡片标题保留完整名", async () => {
@@ -70,6 +131,7 @@ describe("SettingsPage", () => {
               key: "model_catalog",
               name: "渠道模型列表刷新",
               description: "兜底重拉各渠道模型表。",
+              group: "model",
               interval_seconds: 1800,
               enabled: true,
               running: false,
@@ -84,6 +146,7 @@ describe("SettingsPage", () => {
               key: "openrouter_catalog",
               name: "模型目录刷新（OpenRouter）",
               description: "拉取 OpenRouter 模型目录。",
+              group: "model",
               interval_seconds: 86400,
               enabled: true,
               running: false,
@@ -95,6 +158,7 @@ describe("SettingsPage", () => {
               last_error: null,
             },
           ],
+          groups: TASK_GROUPS,
           server_time: SERVER_TIME,
         });
       }
@@ -114,7 +178,7 @@ describe("SettingsPage", () => {
     // 卡片标题仍用完整名（默认落在第一个任务 model_catalog）
     expect(screen.getByTestId("task-model_catalog")).toHaveTextContent("渠道模型列表刷新");
 
-    await switchTab("settings-tabs-openrouter_catalog");
+    await openTask("model", "openrouter_catalog");
     expect(screen.getByTestId("task-openrouter_catalog")).toHaveTextContent(
       "模型目录刷新（OpenRouter）",
     );
@@ -137,7 +201,7 @@ describe("SettingsPage", () => {
     mockAll();
     renderPage(<SettingsPage />);
     await settle();
-    await switchTab("settings-tabs-checkin");
+    await openTask("account", "checkin");
 
     const checkin = screen.getByTestId("task-checkin");
     expect(checkin).toHaveTextContent("上次失败");
@@ -148,7 +212,7 @@ describe("SettingsPage", () => {
     mockAll();
     renderPage(<SettingsPage />);
     await settle();
-    await switchTab("settings-tabs-activity");
+    await openTask("account", "activity");
 
     const activity = screen.getByTestId("task-activity");
     expect(activity).toHaveTextContent("已关闭");
@@ -159,15 +223,99 @@ describe("SettingsPage", () => {
     mockAll();
     renderPage(<SettingsPage />);
     await settle();
-    await switchTab("settings-tabs-checkin");
+    await openTask("account", "checkin");
 
     expect(screen.getByTestId("task-noconfig-checkin")).toHaveTextContent("无可热更配置");
+  });
+
+  it("任务卡片内按后端下发的分节标题聚合配置项", async () => {
+    const alertSettings = [
+      {
+        key: "alert_enabled",
+        env_name: "ALERT_ENABLED",
+        label: "运维告警开关",
+        description: "是否启用告警评估。",
+        kind: "bool",
+        value: true,
+        default: true,
+        overridden: false,
+        task: "alert",
+        group: null,
+        section: "基础与迟滞",
+      },
+      {
+        key: "alert_for_ticks",
+        env_name: "ALERT_FOR_TICKS",
+        label: "告警进入迟滞",
+        description: "连续命中轮数。",
+        kind: "int",
+        value: 2,
+        default: 2,
+        overridden: false,
+        task: "alert",
+        group: null,
+        section: "基础与迟滞",
+      },
+      {
+        key: "alert_pool_ready_min",
+        env_name: "ALERT_POOL_READY_MIN",
+        label: "池耗尽阈值",
+        description: "可用数下限。",
+        kind: "int",
+        value: 2,
+        default: 2,
+        overridden: false,
+        task: "alert",
+        group: null,
+        section: "规则阈值",
+      },
+    ];
+    const spy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = typeof input === "string" ? input : input.toString();
+      if (url.includes("/api/tasks")) {
+        return jsonResponse({
+          tasks: [
+            {
+              key: "alert",
+              name: "运维告警",
+              description: "周期评估风险。",
+              group: "ops",
+              interval_seconds: 600,
+              enabled: true,
+              running: false,
+              runs: 0,
+              last_started_at: null,
+              last_finished_at: null,
+              last_ok: null,
+              last_report: null,
+              last_error: null,
+            },
+          ],
+          groups: TASK_GROUPS,
+          server_time: SERVER_TIME,
+        });
+      }
+      return jsonResponse({ settings: alertSettings, overridden: 0, groups: GROUPS });
+    });
+    vi.stubGlobal("fetch", spy);
+
+    renderPage(<SettingsPage />);
+    await settle();
+
+    // 同节只出一个标题，节内保持后端下发顺序
+    expect(screen.getByTestId("setting-section-alert_enabled")).toHaveTextContent("基础与迟滞");
+    expect(screen.getAllByText("基础与迟滞")).toHaveLength(1);
+    expect(screen.getByTestId("setting-alert_enabled")).toBeInTheDocument();
+    expect(screen.getByTestId("setting-alert_for_ticks")).toBeInTheDocument();
+    expect(screen.getByTestId("setting-section-alert_pool_ready_min")).toHaveTextContent("规则阈值");
   });
 
   it("拿不到任务运行态时列出提示，配置项仍留在页面上", async () => {
     const spy = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("/api/tasks")) return jsonResponse({ tasks: [], server_time: SERVER_TIME });
+      if (url.includes("/api/tasks")) {
+        return jsonResponse({ tasks: [], groups: [], server_time: SERVER_TIME });
+      }
       return jsonResponse(body());
     });
     vi.stubGlobal("fetch", spy);
@@ -176,10 +324,12 @@ describe("SettingsPage", () => {
     await settle();
 
     expect(screen.getByTestId("no-tasks")).toBeInTheDocument();
+    // 只有配置一边有内容：不渲染一级 tab，直接落在网关配置
+    expect(screen.queryByTestId("settings-sections")).not.toBeInTheDocument();
     // 有内容的网关 tab 仍在
     expect(screen.getByTestId("setting-pacer_max_seconds")).toBeInTheDocument();
     // 任务归属项因任务清单不可用落到「其他」，不会被吞掉
-    await switchTab("settings-tabs-settings-other");
+    await openGateway("settings-other");
     expect(screen.getByTestId("setting-quota_probe_minutes")).toBeInTheDocument();
   });
 
@@ -203,7 +353,7 @@ describe("SettingsPage", () => {
     renderPage(<SettingsPage />);
     await settle();
 
-    await switchTab("settings-tabs-settings-other");
+    await openGateway("settings-other");
     expect(screen.getByTestId("setting-orphan_setting")).toBeInTheDocument();
     expect(screen.queryByTestId("task-quota_probe")).not.toBeInTheDocument();
   });
@@ -214,7 +364,7 @@ describe("SettingsPage", () => {
     await settle();
     expect(screen.getByTestId("input-quota_probe_minutes").tagName).toBe("INPUT");
 
-    await switchTab("settings-tabs-activity");
+    await openTask("account", "activity");
     expect(screen.getByTestId("input-activity_report_enabled").tagName).toBe("SELECT");
   });
 
@@ -262,7 +412,7 @@ describe("SettingsPage", () => {
     mockAll();
     renderPage(<SettingsPage />);
     await settle();
-    await switchTab("settings-tabs-activity");
+    await openTask("account", "activity");
 
     // activity 在样例数据里 enabled=false
     expect(screen.getByTestId("task-run-activity")).toBeDisabled();
