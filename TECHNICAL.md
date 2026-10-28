@@ -23,7 +23,7 @@ PROPOSAL.md 定方向，本文定实现。只写**当前代码现状**。
 | 路径 | 文件 | 职责 |
 |---|---|---|
 | `pyproject.toml` | — | uv 项目；`[tool.pytest.ini_options]` 设 coverage 目标 |
-| 仓库根 | `Dockerfile`、`docker-compose.yml` | compose build context 依赖根目录 |
+| 仓库根 | `Dockerfile`、`docker-compose.yml`、`docker-compose.public.yml` | compose build context 依赖根目录／公网部署覆盖文件（叠 Caddy 入口） |
 | `src/` | `main.py` `config.py` `runtime_settings.py` `version.py` | 组装·lifespan·路由挂载／pydantic-settings 全部 env + `live()` 归一化／运行时配置覆盖层（DB > env + 白名单 + snapshot）／版本号（`pyproject.toml` 真源） |
 | `src/webapp/` | `limits.py` `security.py` `request_id.py` `access_log.py` `log_buffer.py` `handlers.py` `logging.py` `static.py` | 请求体上限 ASGI（登录 8KB / 其余 16MB）／Host 白名单 + CSP·nosniff／请求 ID（最外层，含 413/400）+ 会话 contextvar／请求级 logfmt／日志环形缓冲 + `redact_or_drop`／异常 → 稳定错误码／root logger／SPA catch-all（排除 `/api`、`/v1`） |
 | `src/db/` | `schema.sql` `conn.py` `migrate.py` `repo.py` `limits.py` `crypto.py` `backup.py` | DDL（只加不改）／线程本地连接 + WAL + busy_timeout + `transaction()`／迁移（**补列之后**建索引）／持久化手写 SQL／限额 CRUD + 当日聚合／Fernet／备份恢复（`VACUUM INTO` + integrity_check + 0600） |
@@ -44,7 +44,7 @@ PROPOSAL.md 定方向，本文定实现。只写**当前代码现状**。
 | `src/api/` | `deps.py` `endpoints.py` `chat.py` `responses.py` `messages.py` `context.py` `models.py` `model_merge.py` `model_catalog.py` `balance.py` `authorize.py` `admin_credentials.py` `admin_keys.py` `admin_settings.py` `admin_users.py` `admin_audit.py` `admin_alerts.py` `admin_badges.py` `admin_upstream.py` `admin_model_catalog.py` `admin_model_availability.py` `logs.py` `activate.py` `admin_stats.py` `admin_auth.py` `playground.py` `streaming.py` `metrics.py` | Services 容器 + 鉴权依赖／`dispatch_compat` 骨架／三个 /v1 出口／压缩接线／`GET /v1/models`（SWR + 落盘 + 白名单）／归一·合并·别名（纯函数）／目录快照／余额／TRAE 回调／凭证运维／Key CRUD／配置与任务／用户／审计／告警／角标／上游状态／模型目录 + 探活／激活／统计／登录 + 上游登录／Playground／SSE 包装／`/metrics` |
 | `src/audit/actions.py` | — | 审计动作常量 + 中文标签 |
 | `web/` | — | React 前端。**`.npmrc` 的 `auto-install-peers=false` 与 lock 的 `settings.autoInstallPeers` 强耦合**（避免拉 `@lobehub/ui`/`antd` 子树）；`Dockerfile` 必须 `COPY web/.npmrc`，否则 `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH` |
-| `deploy/` | — | launchd / newsyslog / logrotate / systemd 模板 |
+| `deploy/` | — | launchd / newsyslog / logrotate / systemd 模板；`caddy/` 为公网 Docker 部署的入口配置 |
 | `diagrams/` | — | 架构图 / 时序图 / 状态机（HTML + 源 JSON） |
 | `scripts/` | — | 建号、回填、运维脚本 |
 | `tests/` | — | 按 `src/` 子包镜像 |
