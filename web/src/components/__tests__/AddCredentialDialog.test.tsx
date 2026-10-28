@@ -155,3 +155,38 @@ describe("AddCredentialDialog", () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("ToS 风险提示", () => {
+  it("选择渠道后展示评级与理由（灰区用 warn 语气）", async () => {
+    renderDialog({
+      tosRisks: {
+        codebuddy: { level: "gray", reason: "复用客户端私有协议", basis: "docs/x.md" },
+        codebuddy_intl: { level: "gray", reason: "独立账号体系", basis: "运营判断" },
+      },
+    });
+    await userEvent.click(screen.getByTestId("add-credential-tab-import"));
+    expect(screen.getByTestId("import-tos-risk")).toHaveTextContent("gray");
+    expect(screen.getByTestId("import-tos-risk")).toHaveTextContent("复用客户端私有协议");
+    // 依据不是「运营判断」时补上出处
+    expect(screen.getByTestId("import-tos-risk")).toHaveTextContent("docs/x.md");
+    await userEvent.selectOptions(screen.getByTestId("import-provider"), "codebuddy_intl");
+    expect(screen.getByTestId("import-tos-risk")).toHaveTextContent("独立账号体系");
+    expect(screen.getByTestId("import-tos-risk")).not.toHaveTextContent("依据");
+  });
+
+  it("导入成功时把灰区评级带进提示", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({
+      id: "c1",
+      tos: { level: "gray", reason: "条款未明确允许", basis: "运营判断" },
+    })));
+    const props = renderDialog();
+    await userEvent.click(screen.getByTestId("add-credential-tab-import"));
+    await userEvent.click(screen.getByTestId("import-payload"));
+    await userEvent.paste('{"token":"x"}');
+    await userEvent.click(screen.getByTestId("import-submit"));
+
+    expect(props.onImported).toHaveBeenCalledWith(
+      expect.stringContaining("ToS 评级为 gray"),
+    );
+  });
+});

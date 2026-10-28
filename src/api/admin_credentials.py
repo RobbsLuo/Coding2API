@@ -29,6 +29,8 @@ from ..audit.actions import (
 from ..auth.rbac import require_operator
 from ..compat.openai.request import InvalidRequest
 from ..provider.base import GrowthResult, GrowthStep, StepStatus
+from ..provider.tos import tos_for
+from ..request_context import credential_scope
 from ..sorting import sort_rows
 from ..tags import parse_tags
 from .deps import Services, csrf_protected, principal_from_request
@@ -163,7 +165,8 @@ async def probe_credential_once(credentials, provider, data, credential_id: str)
     把 Python 类名当 reason 吐给用户。
     """
     try:
-        quota = await provider.probe_quota(data)
+        with credential_scope(credential_id):
+            quota = await provider.probe_quota(data)
     except Exception as error:  # noqa: BLE001 - 探测失败 → unknown，不当作 0
         credentials.mark_probe_failed(credential_id)
         reason = describe_probe_failure(error)
@@ -189,7 +192,8 @@ async def checkin_credential_once(credentials, provider, data, credential_id: st
     批量端点也不必再单独兜一次。
     """
     try:
-        result = await provider.checkin(data)
+        with credential_scope(credential_id):
+            result = await provider.checkin(data)
     except Exception as error:  # noqa: BLE001 - 上游失败 → 失败结果，非 500
         reason = describe_probe_failure(error)
         logger.info("签到失败 %s: %s", credential_id, reason)
@@ -264,7 +268,11 @@ def create_router(services: Services) -> APIRouter:
                 "is_admin": principal.is_admin,
                 # 凭证写门槛（admin 或 operator）：前端据此决定是否显示
                 # 导入/启停/删除等写操作，与后端 require_operator 同一口径。
-                "is_operator": principal.is_operator}
+                "is_operator": principal.is_operator,
+                # 渠道 ToS 风险登记（green/gray/red + 理由）：导入对话框在管理员
+                # 选渠道时直接展示，避免「加完号才发现是灰区」。只做提示与审计，
+                # 不参与调度、不阻断导入（红线渠道本就没接）。
+                "tos_risks": {pid: tos_for(pid).as_dict() for pid in registry}}
 
     @router.post("/api/credentials")
     async def import_credential(payload: dict,
@@ -287,10 +295,17 @@ def create_router(services: Services) -> APIRouter:
                                         added_by=principal.username, tags=tags)
         logger.info("管理员 %s 新增凭证 %s（上游 %s）", principal.username, credential_id,
                     provider_id)
+        risk = tos_for(provider_id)
         services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_IMPORT,
-                              target=credential_id, detail=f"上游 {provider_id}")
+                              target=credential_id,
+                              detail=f"上游 {provider_id}；合规={risk.level}（{risk.reason}）")
+        if risk.level != "green":
+            # 灰区不是每次都能被管理员看到（列表页「添加」可能走批量脚本），
+            # 日志留一条，事后能回答「这号当时知不知道是灰区」
+            logger.warning("导入 %s 凭证 %s：ToS 评级 %s —— %s",
+                           provider_id, credential_id, risk.level, risk.reason)
         schedule_probe(credential_id)
-        return {"id": credential_id}
+        return {"id": credential_id, "tos": risk.as_dict()}
 
     @router.post("/api/credentials/{credential_id}/toggle")
     async def toggle_credential(credential_id: str, payload: dict,

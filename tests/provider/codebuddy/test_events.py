@@ -339,3 +339,17 @@ def test_classify_11140_is_account_restricted_not_dead():
         403, '{"displayMsg":{"zh":"账号存在异常行为，已被限制使用"}}'.encode()
     ) is ErrKind.RESTRICTED
     assert cb_events.classify_status(403, b'{"code":403}') is ErrKind.DEAD
+
+
+def test_bare_11140_substring_is_not_account_restricted():
+    """正文里恰好出现 `11140`（非业务码字段）不能判 RESTRICTED。
+
+    整段子串匹配时，request id / 时间戳 / 用户回显内容里带这五个数字就会把这
+    个凭证按账号级风控处理：2h 冷却、窗口内第二次即整渠道 24h 暂停，且换号
+    无效。只有 `"code":11140` 形态或点名话术才算。
+    """
+    body = b'{"code":400,"msg":"bad params, request id 11140"}'
+    assert cb_events.classify_status(400, body) is not ErrKind.RESTRICTED
+    assert cb_events.disabled_reason(body) == ""
+    # 数字 token 必须整个相等（`"code":111401` 不是 11140）
+    assert cb_events.classify_status(403, b'{"code":111401}') is ErrKind.DEAD

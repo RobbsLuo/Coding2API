@@ -53,12 +53,16 @@ _PLAN_EXHAUSTED_CODE = 1005         # 权益/套餐耗尽
 # （若归 INVALID，executor 会跳过该上游全部凭证、零重试直接 400）
 _REQUEST_LEVEL_CODES = frozenset({11101, 11115, 11128, 11135})
 _BAD_PARAMS_PHRASE = "unmarshal chat params failed"
-# 账号级风控限制（403/11140「request illegal」）：displayMsg 是
+# 账号级风控限制（403 + `"code":11140`「request illegal」）：displayMsg 是
 # `Your account has been restricted due to unusual activity` /
 # 「账号存在异常行为，已被限制使用」，displayTips 引导 SUBMIT_FEEDBACK。
 # 与 session 过期不同：重新登录无效，只能申诉或换号。
-_ACCOUNT_RESTRICTED_MARKERS: tuple[str, ...] = (
-    "11140",
+#
+# 业务码与文案分开存：`"11140"` **不做整段正文子串匹配**——request id、时间戳、
+# 用户回显内容里出现这五个数字就会把普通错误判成 RESTRICTED（2h 冷却、两次即
+# 升级整渠道 24h 暂停）。正文只认三语文案（上游点名人类可读文案时给的兜底）。
+_ACCOUNT_RESTRICTED_CODE = 11140
+_ACCOUNT_RESTRICTED_PHRASES: tuple[str, ...] = (
     "account has been restricted",
     "账号存在异常行为",
     "帳號存在異常行為",
@@ -112,9 +116,18 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
 
 
 def _is_account_restricted(body: bytes) -> bool:
-    """响应体是不是 CodeBuddy 的「账号被风控限制」（11140 / 三语文案）。"""
-    text = body.decode("utf-8", errors="replace").lower()
-    return any(marker in text for marker in _ACCOUNT_RESTRICTED_MARKERS)
+    """响应体是不是 CodeBuddy 的「账号被风控限制」（11140 / 三语文案）。
+
+    业务码走 `business_codes`（只认 `"code": N` 键值形态）而不是整段正文子串：
+    正文里任何位置出现 `11140` 都算的话，一次普通 400/5xx（body 回显用户内容
+    或带 request id）就会误判 RESTRICTED → 该凭证 2h 冷却、两次即整渠道 24h
+    暂停。文案匹配是上游只给人类可读文案时的兜底，同样不认裸数字。
+    """
+    text = body.decode("utf-8", errors="replace")
+    if _ACCOUNT_RESTRICTED_CODE in business_codes(text):
+        return True
+    lowered = text.lower()
+    return any(phrase in lowered for phrase in _ACCOUNT_RESTRICTED_PHRASES)
 
 
 def disabled_reason(body: bytes = b"") -> str:

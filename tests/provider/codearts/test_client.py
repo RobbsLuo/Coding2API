@@ -149,7 +149,8 @@ def test_client_parse_credits_real_shape():
              "package_credit_remain": 0.0, "show": True},
             {"name": "usageBonusPackageCredit", "value": 0,
              "package_credit_amount": 13000.0, "package_credit_used": 1.28,
-             "package_credit_remain": 12998.72, "show": True},
+             "package_credit_remain": 12998.72,
+             "package_credit_expiring_amount": 496.9, "show": True},
         ],
         "start_date": "2026-10-01", "end_date": "2026-11-02",
         "package": {"package_name_cn": "体验版", "is_credit_package": True},
@@ -166,7 +167,10 @@ def test_client_parse_credits_real_shape():
     # 分项包带中文名与共用到期日；合计项本身不进 packages（否则重复计数）
     assert [p["name"] for p in quota.packages] == ["基础积分", "按需积分", "福利积分"]
     assert quota.packages[0] == {"name": "基础积分", "total": 500.0, "used": 0.0,
-                                 "end": quota.cycle_end}
+                                 "end": quota.cycle_end, "expiring": None}
+    # 福利积分的「7 天内到期量」原样透传：它证明 end_date 不是每一笔的到期日
+    assert quota.packages[2]["expiring"] == pytest.approx(496.9)
+    assert quota.packages[2]["end"] == quota.cycle_end
     # token 量级的 metric（usageTokenChatMessages）没有 credit 字段 → 不进 packages
     assert all(p["name"] != "usageTokenChatMessages" for p in quota.packages)
 
@@ -209,6 +213,14 @@ def test_client_parse_credits_unknown_and_edge_shapes():
         {"name": "usageTotalPackageCredit", "package_credit_amount": 5.0,
          "package_credit_remain": 4.0}], "end_date": "2026-13-45"})
     assert bad_date.cycle_end is None
+    # `expiring` 畸形（布尔/字符串）按「未提供」处理，不混进展示数字
+    bad_expiring = parse_credits({"metrics": [
+        {"name": "usageBonusPackageCredit", "package_credit_amount": 9.0,
+         "package_credit_used": 1.0, "package_credit_expiring_amount": True},
+        {"name": "usageTotalPackageCredit", "package_credit_amount": 9.0,
+         "package_credit_remain": 8.0}]})
+    assert bad_expiring.packages == [
+        {"name": "福利积分", "total": 9.0, "used": 1.0, "end": None, "expiring": None}]
     assert [p["name"] for p in bad_date.packages] == ["usageNewPackageCredit"]
     # end_date 非字符串（上游换形状）同样当无到期信息
     assert parse_credits({"metrics": [

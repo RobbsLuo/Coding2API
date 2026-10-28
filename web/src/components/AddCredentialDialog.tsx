@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { api } from "../api/client";
 import { PROVIDER_LABEL } from "../api/providers";
-import type { Provider } from "../api/types";
+import type { Provider, TosRisk } from "../api/types";
 import { useDialogFocus } from "../hooks/useDialogFocus";
 import { safeHttpUrl } from "../lib/safeUrl";
 import { Button, Field, Input, Notice, Select, Tabs, Textarea } from "../ui";
@@ -49,6 +49,7 @@ export function AddCredentialDialog({
   onImported,
   onNotice,
   onError,
+  tosRisks = {},
 }: {
   open: boolean;
   onClose: () => void;
@@ -58,6 +59,8 @@ export function AddCredentialDialog({
   hasKilo: boolean;
   /** 登录/导入成功后回调（关对话框；列表刷新由调用方统一做）。 */
   onImported: (message: string) => void;
+  /** 渠道 → ToS 风险登记（来自 `GET /api/credentials`）：导入前提示灰区。 */
+  tosRisks?: Record<string, TosRisk>;
   /** 登录过程消息透出到页面横幅。 */
   onNotice: (message: string) => void;
   onError: (message: string) => void;
@@ -259,10 +262,12 @@ export function AddCredentialDialog({
     }
     setBusy(true);
     try {
-      await api.importCredential(importProvider, parsed, nickname);
+      const created = await api.importCredential(importProvider, parsed, nickname);
       setRaw("");
       setNickname("");
-      onImported("凭证已导入。");
+      onImported(created?.tos && created.tos.level !== "green"
+        ? `凭证已导入。注意：该渠道 ToS 评级为 ${created.tos.level} —— ${created.tos.reason}`
+        : "凭证已导入。");
     } catch (caught) {
       onError(caught instanceof Error ? caught.message : "导入失败");
     } finally {
@@ -477,6 +482,18 @@ export function AddCredentialDialog({
                 </Field>
               </div>
             </div>
+            {(() => {
+              const risk = tosRisks[importProvider];
+              if (!risk) return null;
+              return (
+                <div data-testid="import-tos-risk">
+                  <Notice tone={risk.level === "green" ? "ok" : "warn"}>
+                    ToS 评级：{risk.level} —— {risk.reason}
+                    {risk.basis !== "运营判断" ? `（依据：${risk.basis}）` : ""}
+                  </Notice>
+                </div>
+              );
+            })()}
             <Field
               label="凭证 JSON"
               htmlFor="import-payload"

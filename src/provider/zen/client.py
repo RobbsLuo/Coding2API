@@ -59,8 +59,15 @@ EP_CHAT = "/zen/v1/chat/completions"
 EP_MODELS = "/zen/v1/models"
 # 门禁要求的 UA 版本下限；实测 1.18.0 及以上通过，1.17.9 返回 426
 MIN_OPENCODE_VERSION = "1.18.0"
-# 门禁要求 tools 里必须出现的工具名（大小写敏感）
+# 门禁要求 tools 里必须出现的工具名（大小写敏感）。列表可经
+# `ZEN_GATE_TOOLS` 覆盖：第三方实测上游在 10-14 收紧后要求
+# `bash/glob/grep/read` 四件套，本仓实测仍以两件套通过 —— 属移动靶，
+# 故做成配置而非硬编码（改完重启即换，无需改代码）。
 REQUIRED_TOOLS: tuple[str, ...] = ("bash", "read")
+# 上游 API 根。`/zen/v1` 与 `/inference/v1` 当前都返回 200（2026-10-28 实测
+# `GET /models`），第三方实测称前者已死、后者可用 —— 结论冲突且免费额度耗尽
+# 无法端到端复验，故默认保持现状，另经 `ZEN_API_ROOT` 可切，随时回退。
+DEFAULT_API_ROOT = "/zen/v1"
 # 注入名 → 客户端常见同义工具名（按优先级）。模型调了我们注入的伪工具时，
 # 改写成客户端真实声明的同义工具再透传，避免「调用被吞 → 空 stop → 客户端
 # 提前结束回合」。键是门禁名，值只收录各 agent 客户端的真实工具名。
@@ -127,6 +134,21 @@ _SESSION_TIME_SHIFT = 0x1000
 _SESSION_TIME_MASK = (1 << 48) - 1
 
 
+def _normalize_api_root(root: str) -> str:
+    """校验 API 根：必须 `/` 开头、不含 query/fragment/空白，去掉尾部斜杠。
+
+    配置错误在启动时就报错，而不是把畸形 URL 发给上游（那只会得到 404，
+    看起来像「上游挂了」）。
+    """
+    value = root.strip().rstrip("/")
+    if not value:
+        return DEFAULT_API_ROOT
+    if (not value.startswith("/") or "?" in value or "#" in value
+            or any(ch.isspace() for ch in value)):
+        raise ValueError(f"ZEN_API_ROOT 必须是 / 开头的路径，收到 {root!r}")
+    return value
+
+
 def _session_time_prefix(now_ms: int) -> str:
     """毫秒时间戳 → 会话 id 的 12 位十六进制前缀（官方编码的复刻）。"""
     value = (~(now_ms * _SESSION_TIME_SHIFT + 1)) & _SESSION_TIME_MASK
@@ -145,12 +167,22 @@ def new_session_id(*, now_ms: int | None = None) -> str:
 
 
 def gate_headers(*, version: str = MIN_OPENCODE_VERSION,
-                 session_id: str | None = None) -> dict[str, str]:
-    """免费层门禁头。每次请求新生成 session（门禁只校验格式，不校验归属）。"""
+                 session_id: str | None = None,
+                 user_agent: str = "") -> dict[str, str]:
+    """免费层门禁头。每次请求新生成 session（门禁只校验格式，不校验归属）。
+
+    `user_agent` 为空 → `opencode/<version>`（实测通过的形态）；非空时按模板
+    渲染，模板里出现 `{version}` 就代入版本号（如
+    `opencode/latest/{version}/cli`），没有占位符则原样使用。UA 形态同样是
+    移动靶，交给 `ZEN_USER_AGENT` 配置而不是硬编码。
+    """
+    agent = user_agent or "opencode/{version}"
+    if "{version}" in agent:
+        agent = agent.replace("{version}", version)
     return {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
-        "User-Agent": f"opencode/{version}",
+        "User-Agent": agent,
         "x-opencode-session": session_id or new_session_id(),
         # 匿名也通；带公开占位符比完全省略更稳（避免网关把无 Authorization
         # 的请求路由到别的鉴权分支）
@@ -223,7 +255,8 @@ def _find_synonym(tools: list[Any], names: tuple[str, ...]) -> dict[str, Any] | 
     return None
 
 
-def ensure_gate_tools(body: dict[str, Any]) -> frozenset[str]:
+def ensure_gate_tools(body: dict[str, Any],
+                      required: tuple[str, ...] = REQUIRED_TOOLS) -> frozenset[str]:
     """确保 body.tools 同时含 `bash`/`read`，返回**本次注入**的名字集合。
 
     只补缺、不覆盖：用户自带同名工具时视为真实工具，不注入也不过滤。
@@ -234,7 +267,7 @@ def ensure_gate_tools(body: dict[str, Any]) -> frozenset[str]:
     tools = list(existing) if isinstance(existing, list) else []
     present = _tool_names(tools)
     injected: set[str] = set()
-    for name in REQUIRED_TOOLS:
+    for name in required:
         if name not in present:
             proto = _find_synonym(tools, TOOL_SYNONYMS.get(name, ()))
             tools.append(_empty_tool(name, proto))
@@ -260,6 +293,7 @@ def gate_aliases(tools: list[Any] | None,
 
 
 def prepare_body(payload: dict[str, Any], model: str,
+                 required: tuple[str, ...] = REQUIRED_TOOLS,
                  ) -> tuple[dict[str, Any], frozenset[str]]:
     """上游请求体：深拷 messages、强制 stream、注入门禁工具。
 
@@ -271,7 +305,7 @@ def prepare_body(payload: dict[str, Any], model: str,
     body["messages"] = copy.deepcopy(payload.get("messages"))
     body["model"] = model
     body["stream"] = True
-    injected = ensure_gate_tools(body)
+    injected = ensure_gate_tools(body, required)
     return body, injected
 
 
@@ -332,6 +366,9 @@ class ZenClient(LazyClients):
         *,
         host: str = ZEN_HOST,
         version: str = MIN_OPENCODE_VERSION,
+        api_root: str = DEFAULT_API_ROOT,
+        gate_tools: tuple[str, ...] = REQUIRED_TOOLS,
+        user_agent: str = "",
         free_suffix: str = FREE_MODEL_SUFFIX,
         models_cache_ttl: float = MODELS_CACHE_TTL_SECONDS,
         stream_client: httpx.AsyncClient | None = None,
@@ -340,6 +377,9 @@ class ZenClient(LazyClients):
     ) -> None:
         self.host = host.rstrip("/")
         self.version = version
+        self.api_root = _normalize_api_root(api_root)
+        self.gate_tools = tuple(gate_tools) or REQUIRED_TOOLS
+        self.user_agent = user_agent
         self.free_suffix = free_suffix
         self.models_cache_ttl = models_cache_ttl
         # 上次判活的 (monotonic 时间, 模型表)；TTL 内直接复用，不再重探。
@@ -348,9 +388,18 @@ class ZenClient(LazyClients):
         self._short_client = short_client
         self._proxy = proxy
 
+    def _chat_url(self) -> str:
+        return f"{self.host}{self.api_root}/chat/completions"
+
+    def _models_url(self) -> str:
+        return f"{self.host}{self.api_root}/models"
+
+    def _gate_headers(self) -> dict[str, str]:
+        return gate_headers(version=self.version, user_agent=self.user_agent)
+
     async def stream_chat(self, payload: dict[str, Any], model: str) -> AsyncIterator[Event]:
         """POST chat/completions 并逐事件产出中立 Event。非 2xx 抛 UpstreamHTTPError。"""
-        body, injected = prepare_body(payload, model)
+        body, injected = prepare_body(payload, model, self.gate_tools)
         tool_filter = _InjectedToolFilter(
             injected, gate_aliases(body.get("tools"), injected))
         # 有实际（保留或改写）tool_call 时才允许 finish_reason=tool_calls；
@@ -359,8 +408,8 @@ class ZenClient(LazyClients):
         attempt = 0
         while True:
             async with self._stream.stream(
-                "POST", f"{self.host}{EP_CHAT}", json=body,
-                headers=gate_headers(version=self.version),
+                "POST", self._chat_url(), json=body,
+                headers=self._gate_headers(),
             ) as response:
                 if response.status_code == 403 and attempt < GATE_403_RETRIES:
                     # 门禁抖动重试：正文**不读**直接退避——httpx 退出 context 时
@@ -406,7 +455,7 @@ class ZenClient(LazyClients):
             if time.monotonic() - cached_at < self.models_cache_ttl:
                 return list(cached_models)
         response = await self._short.get(
-            f"{self.host}{EP_MODELS}", headers=gate_headers(version=self.version))
+            self._models_url(), headers=self._gate_headers())
         if response.status_code >= 400:
             raise UpstreamHTTPError(response.status_code,
                                     await base.read_body_bounded(response))
@@ -468,12 +517,13 @@ class ZenClient(LazyClients):
         整体套 `asyncio.timeout`：首字过慢按不可用，不拖垮启动与 /health。
         """
         body, _ = prepare_body(
-            {"messages": [{"role": "user", "content": PROBE_PROMPT}]}, model_id)
+            {"messages": [{"role": "user", "content": PROBE_PROMPT}]}, model_id,
+            self.gate_tools)
         try:
             async with asyncio.timeout(PROBE_TIMEOUT):
                 async with self._short.stream(
-                    "POST", f"{self.host}{EP_CHAT}", json=body,
-                    headers=gate_headers(version=self.version),
+                    "POST", self._chat_url(), json=body,
+                    headers=self._gate_headers(),
                 ) as response:
                     return response.status_code < 300
         except (httpx.HTTPError, TimeoutError):

@@ -245,7 +245,7 @@ describe("CredentialsPage", () => {
           // 故意逆序 + 一个无到期时间：有到期的按先后排，无到期的排最后
           quota_packages: [
             { name: "签到奖励", total: 150, used: 0, end: day + 200_000 },
-            { name: "福利积分", total: 2000, used: 0, end: day },
+            { name: "福利积分", total: 2000, used: 0, end: day, expiring: 300 },
             { name: "每月登录", total: 500, used: 76.564, end: day + 100_000 },
             { name: "无到期包", total: 100, used: 10, end: null },
             // 已消耗成 0 的包不展示（也不计入「套餐 N 个」）
@@ -281,6 +281,9 @@ describe("CredentialsPage", () => {
     // 按到期升序：最近到期的「福利积分」排第一，无到期时间的「无到期包」排最后
     expect(items[0]).toHaveTextContent("福利积分");
     expect(items[0]).toHaveTextContent("2,000");
+    // 上游只给「7 天内到期量」：与套餐到期日并排展示，把分批到期的部分说清楚
+    expect(items[0]).toHaveTextContent("7 天内到期 300");
+    expect(items[1]).not.toHaveTextContent("7 天内到期");
     expect(items[1]).toHaveTextContent("每月登录");
     expect(items[1]).toHaveTextContent("已用 76.56");
     expect(items[3]).toHaveTextContent("无到期包");

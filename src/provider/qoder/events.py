@@ -218,24 +218,30 @@ def classify_error_code(code: int | None, body: bytes | str = b"") -> ErrKind:
     * 400 且报文命中 `NODE_FAILURE_MARKERS` → MODEL：上游节点执行失败（如
       qfmodel 的 `[FAIL]node:… Execution failed`），属**模型级瞬时**故障，
       只冷却该模型、换模型立即可用，不能当成「模型不存在」直接 400
-    * 401/403 且报文带排队标记 → QUEUE：上游把「排队中」包成 403，而
-      403 按状态码看是「会话失效 → 硬禁用凭证」。排队恰恰说明号是好的、
-      只是忙——判成 DEAD 会把可自愈的凭证打进冷宫（实测 2026-10-26：
-      kmodel_latest 排队时回 403 + `isQueued`，凭证被误判死）。排队判据
-      放在这里（而不是只在调用点）才能保证**任何**入口都不会漏判。
-    * 401/403 且带会话失效标记 → DEAD（硬禁用，需重新登录）
-    * 401/403 其余情况 → SOFT：实测 Qoder 的 401/403 多数是上游瞬时/风控
-      抖动，直接硬禁用会把可自愈的凭证打进冷宫。**流内信封也走这里**
-      （`client._decode_frame` 调 `classify_status`），两条路径必须同一判据。
+    * 报文带排队标记 → QUEUE：上游把「排队中」包成 403，而 403 按状态码看是
+      「会话失效 → 硬禁用凭证」。排队恰恰说明号是好的、只是忙——判成 DEAD
+      会把可自愈的凭证打进冷宫（实测 2026-10-26：kmodel_latest 排队时回
+      403 + `isQueued`，凭证被误判死）。排队判据放在这里（而不是只在调用
+      点）才能保证**任何**入口都不会漏判，`classify_status` 因此只做转发。
+    * 401 → DEAD（硬禁用，需重新登录）：401 是凭据/会话失效的确定信号，
+      实测没有「瞬时抖动」形态（`TOKEN_EXPIRE` 等，见
+      `tests/provider/qoder/test_client.py`）。放宽它只会让已被吊销的凭据
+      在 60s 轮换里反复撞上游（fail-open）。
+    * 403 且带会话失效标记 → DEAD；其余 403 → SOFT：实测 Qoder 的 403 多数
+      是上游瞬时/风控抖动，直接硬禁用会把可自愈的凭证打进冷宫。**流内信封
+      也走这里**（`client._decode_frame` 调 `classify_status`），两条路径必须
+      同一判据。
     """
     text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
     if code == 402:
         return ErrKind.CREDIT
     if is_daily_quota_exceeded(text):
         return ErrKind.CREDIT
-    if code in (401, 403):
-        if parse_queue_hint(text) is not None:
-            return ErrKind.QUEUE
+    if parse_queue_hint(text) is not None:
+        return ErrKind.QUEUE
+    if code == 401:
+        return ErrKind.DEAD
+    if code == 403:
         return ErrKind.DEAD if is_session_dead(text) else ErrKind.SOFT
     if code == 429:
         return ErrKind.MODEL
@@ -249,18 +255,11 @@ def classify_error_code(code: int | None, body: bytes | str = b"") -> ErrKind:
 def classify_status(status: int, body: bytes = b"") -> ErrKind:
     """HTTP 状态码分类（流内信封错误同样走这里）。
 
-    401/403 只有**明确带会话失效标记**时才归 DEAD（硬禁用）；否则按 SOFT
-    短冷却轮换——实测 Qoder 的 401/403 多数是上游瞬时/风控抖动，直接硬禁用
-    会把可自愈的凭证打进冷宫。
-
-    排队信号（`isQueued` / `RESOURCE_LIMIT`）优先于状态码：上游把「排队中」
-    也包成 403，按状态码分类会硬禁用凭证——排队恰恰说明号是好的，只是忙。
-    「每日计费次数用尽」同理，优先于 401/403 的通用分支（见
-    `classify_error_code`）。
+    只是 `classify_error_code` 的转发：判据只写一处，HTTP 与流内信封两条
+    路径不可能漂移（历史教训：判据散在两处时，流内 403 被判 DEAD 而 HTTP
+    路径已放宽，同一个号一半请求被硬禁用）。排队 / 计费次数用尽的优先级
+    见 `classify_error_code`。
     """
-    text = body.decode("utf-8", errors="replace") if isinstance(body, bytes) else body
-    if parse_queue_hint(text) is not None:
-        return ErrKind.QUEUE
     return classify_error_code(status, body)
 
 

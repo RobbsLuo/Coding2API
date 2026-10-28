@@ -1320,6 +1320,7 @@ export function CredentialsPage() {
           credentialCount={credentials.length}
           hasZen={hasZen}
           hasKilo={hasKilo}
+          tosRisks={data?.tos_risks ?? {}}
           onImported={(message) => {
             setAddOpen(false);
             showNotice(message);
@@ -1382,6 +1383,13 @@ function PackageLadder({ credential }: { credential: Credential }) {
                   <span className="text-muted-foreground">（已用 {formatNumber(item.used)}）</span>
                 )}
                 <span className="text-muted-foreground"> · {packageExpiry(item.end)} 到期</span>
+                {(item.expiring ?? 0) > 0 && (
+                  // 福利积分按批次到账：同一个「套餐到期日」下仍有更早作废的部分，
+                  // 这个数字是上游唯一给出的「最近要过期多少」。
+                  <span className="text-destructive" data-testid={`package-expiring-${credential.id}`}>
+                    {" "}· 7 天内到期 {formatNumber(item.expiring ?? 0)}
+                  </span>
+                )}
               </li>
             ))}
           </ul>

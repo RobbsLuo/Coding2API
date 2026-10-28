@@ -631,6 +631,19 @@ def test_classify_status_queue_hint_wins_over_403():
     assert qoder_events.classify_status(403, b"") is ErrKind.SOFT
 
 
+def test_401_stays_dead_while_403_is_relaxed():
+    """401 一律 DEAD，只有 403 放宽——401 是凭据失效的确定信号，不能 fail-open。
+
+    放宽 401 会让已被吊销的 token 在 60s 轮换里反复撞上游（凭证永不退出
+    候选池），而 401 从未出现「瞬时抖动」形态。排队信封仍优先于 401。
+    """
+    assert qoder_events.classify_error_code(401, b"") is ErrKind.DEAD
+    assert qoder_events.classify_status(401, b"") is ErrKind.DEAD
+    assert qoder_events.classify_error_code(401, "some other failure") is ErrKind.DEAD
+    queued = b'{"isQueued": true, "retryAfterSeconds": 3}'
+    assert qoder_events.classify_error_code(401, queued) is ErrKind.QUEUE
+
+
 def test_inner_403_without_session_marker_is_soft_not_dead():
     """流内 403 未带会话失效标记 → SOFT，和 HTTP 层同一判据。
 

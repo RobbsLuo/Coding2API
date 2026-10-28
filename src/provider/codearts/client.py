@@ -615,6 +615,11 @@ def parse_credits(data: dict[str, Any], *, now: int | None = None) -> Quota:
     登记到期阶梯——顶层 `end_date` 是整份套餐的到期日（实测每账号不同，如
     `2026-11-02`），积分用不完同样作废，应参与「快过期先用」。
 
+    福利积分按批次到账、各自到期：实测某账号 24960.9 福利积分里只有 4960.9
+    在 7 天内到期，说明顶层 `end_date` 并不是每一笔积分的到期日。分项还带
+    `package_credit_expiring_amount`（7 天内到期量），原样记进 `expiring`
+    供展示——上游**没有**逐包/逐批到期的精确日期，别把 `end_date` 当成它。
+
     取不到合计项、或合计项无有效数值时返回 `probe_failed=True`（**未知**），
     绝不返回 `remaining=0` 被判「已耗尽」——积分账缺失不代表内置模型不能用。
     """
@@ -649,6 +654,9 @@ def parse_credits(data: dict[str, Any], *, now: int | None = None) -> Quota:
             "total": amount or 0.0,
             "used": used or 0.0,
             "end": end,
+            # 7 天内到期的积分。福利积分按批次到账、各自到期，顶层 end_date 只是
+            # 整份套餐的到期日；这个字段才是「最近要作废多少」的唯一上游口径。
+            "expiring": _opt_number(item, "package_credit_expiring_amount"),
         })
     ladder = [(end, remaining)] if end and remaining and remaining > 0 else None
     return Quota(remaining=remaining, total=total, cycle_end=end,

@@ -23,7 +23,7 @@ async def test_provider_classify_import_and_credential_from():
     provider = QoderProvider()
     assert provider.id == "qoder"
     assert provider.classify(402, b"") is ErrKind.CREDIT
-    assert provider.classify(401, b"") is ErrKind.SOFT
+    assert provider.classify(401, b"") is ErrKind.DEAD
     assert provider.classify(429, b"") is ErrKind.MODEL
     imported = provider.import_credential({"token": "t", "uid": "u", "realm": "intl"})
     assert imported["access_token"] == "t" and imported["realm"] == "intl"
