@@ -584,3 +584,126 @@ def test_alert_severity_warning_constant():
     assert SEVERITY_WARNING == "warning"
     assert SEVERITY_CRITICAL == "critical"
     assert isinstance(time.time(), float)
+
+class _KeyStats:
+    """统计替身：错误率固定 0，按 Key 用量可注入并记录调用窗口。"""
+
+    def __init__(self, key_usage=None):
+        self.calls: list[int] = []
+        self._key_usage = key_usage or []
+
+    def window_error_rate(self, *, since):
+        return (0, 0)
+
+    def window_key_usage(self, *, since, limit=50):
+        self.calls.append(since)
+        return self._key_usage
+
+
+async def test_alert_task_key_burst_rule_uses_its_own_window(tmp_path):
+    stats = _KeyStats([{"api_key_id": "k1", "username": "alice",
+                        "requests": 5, "tokens": 900_000}])
+    task, alerts, db = _task(
+        tmp_path, stats=stats, now=lambda: 10_000,
+        key_burst_tokens=lambda: 500_000,
+        key_burst_window_minutes=lambda: 10,
+    )
+    await task.run_once()
+    row = alerts.recent()[0]
+    assert row["rule"] == "key_burst"
+    # 窗口用 key_burst_window_minutes（10 分钟），不是错误率窗口
+    assert stats.calls == [10_000 - 600]
+
+
+async def test_alert_task_key_burst_skipped_when_window_closed(tmp_path):
+    stats = _KeyStats([{"api_key_id": "k1", "username": "a",
+                        "requests": 5, "tokens": 900_000}])
+    task, alerts, db = _task(
+        tmp_path, stats=stats, now=lambda: 10_000,
+        key_burst_tokens=lambda: 500_000,
+        key_burst_window_minutes=lambda: 0,
+    )
+    await task.run_once()
+    assert stats.calls == []
+    assert alerts.recent() == []
+
+
+async def test_alert_task_off_hours_rule_reads_local_clock(tmp_path):
+    """非工作时段按本地时钟判定：构造一个明确在工作时间外的时刻。"""
+
+    def noon_like_utc() -> int:
+        # 取本地时区 03:00 的时刻（任何时区下 `hour == 3` 都成立）
+        local = time.localtime()
+        return int(time.mktime((local.tm_year, local.tm_mon, local.tm_mday,
+                                3, 0, 0, 0, 0, -1)))
+
+    class _BusyStats:
+        def window_error_rate(self, *, since):
+            return (30, 0)
+
+    task, alerts, db = _task(
+        tmp_path, stats=_BusyStats(), now=noon_like_utc,
+        off_hours_start=lambda: 9, off_hours_end=lambda: 19,
+        off_hours_min_requests=lambda: 20,
+    )
+    await task.run_once()
+    assert [row["rule"] for row in alerts.recent()] == ["off_hours"]
+
+
+class _CostStats:
+    """统计替身：成本按月起点聚合，记录调用窗口。"""
+
+    def __init__(self, spent=0.0):
+        self.calls: list[int] = []
+        self._spent = spent
+
+    def window_error_rate(self, *, since):
+        return (0, 0)
+
+    def window_cost(self, *, since):
+        self.calls.append(since)
+        return (self._spent, 1, 1)
+
+
+async def test_alert_task_budget_uses_month_start(tmp_path):
+    from src.tasks.alerting import month_start
+
+    stats = _CostStats(85.0)
+    task, alerts, db = _task(
+        tmp_path, stats=stats, now=lambda: 1_790_000_000,
+        budget_cny=lambda: 100.0, budget_levels=lambda: "50,80,95,100",
+    )
+    await task.run_once()
+    assert stats.calls == [month_start(1_790_000_000)]
+    row = alerts.recent()[0]
+    assert row["rule"] == "budget"
+    assert row["scope"] == "budget_80"
+
+
+async def test_alert_task_budget_disabled_skips_query(tmp_path):
+    stats = _CostStats(999.0)
+    task, alerts, db = _task(tmp_path, stats=stats, now=lambda: 1_790_000_000,
+                             budget_cny=lambda: 0.0)
+    await task.run_once()
+    assert stats.calls == []
+    assert alerts.recent() == []
+
+
+async def test_alert_task_budget_level_upgrade_resolves_old_level(tmp_path):
+    """50% 档告警后升到 80%：旧档不再命中，一轮迟滞后写成已恢复。"""
+    stats = _CostStats(60.0)
+    task, alerts, db = _task(
+        tmp_path, stats=stats, now=lambda: 1_790_000_000,
+        budget_cny=lambda: 100.0, budget_levels=lambda: "50,80,100",
+        clear_ticks=lambda: 1, silence_minutes=lambda: 0,
+    )
+    await task.run_once()
+    assert [row["scope"] for row in alerts.recent()] == ["budget_50"]
+
+    stats._spent = 85.0
+    await task.run_once()
+    scopes = [row["scope"] for row in alerts.recent()]
+    assert "budget_80" in scopes
+    # 50% 档已被写成恢复（resolved_at 非空），不再算未恢复
+    unresolved = [row["scope"] for row in alerts.unresolved()]
+    assert unresolved == ["budget_80"]

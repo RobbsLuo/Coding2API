@@ -232,7 +232,8 @@ EVENT_SORT_COLUMNS: dict[str, str] = {
 # 分组键白名单：`_group_hourly` / `_group_events` 把 key 直接拼进 SQL（列名无法
 # 参数绑定），调用点全是本模块内的字面量。留一份显式白名单并在入口断言，未来
 # 若有人把外部输入当 key 传进来，会当场炸而不是拼出注入语句。
-_GROUP_KEYS = frozenset({"provider", "model", "username", "credential_id"})
+_GROUP_KEYS = frozenset({"provider", "model", "username", "credential_id",
+                        "api_key_id"})
 
 # CSV 导出单次上限：明细只留 90 天，但全量导出（几万行）会一次性拉进内存并
 # 撑爆响应。超上限时明确告知「被截断、请收窄条件」，而不是静默给半份文件。
@@ -830,6 +831,39 @@ class StatsQuery:
         """按用户聚合（读小时汇总，与总览/图表同源）。"""
         return self._group_hourly("username", username=username, since=since, until=until,
                                   sort=sort, order=order)
+
+    def billing(self, *, start: int, end: int) -> dict[str, Any]:
+        """月度账单：按人 + 按 Key 两套聚合 + 总计（时间窗 `[start, end)`）。
+
+        - 按人读小时汇总（永久保留，与统计页同源）；
+        - 按 Key 只能读明细（小时汇总主键没有 api_key_id，明细保留 90 天——
+          跨月账单超过 90 天前会变空，这是保留策略的直接后果，不是查询 bug）；
+          行里补 `key_name`（api_keys.name，空串保持空串）与本 Key 的归属用户，
+          便于对账时不需要再查出 Key 是谁的。
+        """
+        users = self._group_hourly("username", since=start, until=end)
+        keys = self._group_events("api_key_id", since=start, until=end)
+        ownership = {
+            row["id"]: (row["username"], row["name"])
+            for row in self._db.connect().execute(
+                "SELECT id, username, name FROM api_keys").fetchall()
+        }
+        for row in keys:
+            owner, name = ownership.get(row["api_key_id"], (None, None))
+            row["username"] = owner
+            row["key_name"] = name
+        totals = {
+            "requests": sum(row["requests"] for row in users),
+            "input_tokens": sum(row["input_tokens"] for row in users),
+            "output_tokens": sum(row["output_tokens"] for row in users),
+            "cost_cny": round(sum(row.get("cost_cny") or 0 for row in users), 6),
+            "cost_usd": round(sum(row.get("cost_usd") or 0 for row in users), 6),
+        }
+        ok_count = sum(row["ok_count"] for row in users)
+        totals["success_rate"] = (
+            round(ok_count / totals["requests"], 4) if totals["requests"] else None)
+        return {"users": users, "keys": keys, "totals": totals,
+                "start": start, "end": end}
 
     def by_credential(self, *, username: str | None = None,
                       since: int | None = None, until: int | None = None,

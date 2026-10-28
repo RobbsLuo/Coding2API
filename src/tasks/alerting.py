@@ -8,6 +8,9 @@
    severity=warning。
 3. **token 临近到期**：某凭证的 access token 剩余时间落在窗口内。severity=warning。
 4. **上游错误率骤升**：统计窗内失败占比超过阈值且样本数足够。severity=warning。
+5. **单 Key 用量暴涨**：统计窗内某把 Key 的 token 总量越过阈值（泄露/共用信号）。
+6. **非工作时段请求**：工作时间区间之外的请求数达到最小样本。
+7. **预算分层**：当月成本达到预算的 50/80/95/100% 档；只报最高档，100% 为 critical。
 
 投递（用户选的「Webhook + 站内」）：
 - **站内**：每条命中落 `alert_events`，管理台「站内告警记录」回看（重启不丢）。
@@ -180,6 +183,45 @@ def _humanize(seconds: int) -> str:
     return f"{seconds} 秒"
 
 
+def month_start(now: int) -> int:
+    """本地时区当月起点（epoch 秒）：预算按自然月结算，与账单页同口径。"""
+    tm = time.localtime(now)
+    return int(time.mktime((tm.tm_year, tm.tm_mon, 1, 0, 0, 0, 0, 0, -1)))
+
+
+def parse_levels(raw: str) -> tuple[int, ...]:
+    """`"50,80,95,100"` → `(50, 80, 95, 100)`；非法项丢弃、去重、升序、限 1..100。
+
+    预算分层是运营参数，写错不该让告警任务崩：解析失败按空处理（= 该规则
+    不生效），由设置页的校验兜住正常入口。100 以上不设层（超支仍算 100%）。
+    """
+    values: set[int] = set()
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            level = int(part)
+        except ValueError:
+            continue
+        if 1 <= level <= 100:
+            values.add(level)
+    return tuple(sorted(values))
+
+
+def in_off_hours(hour: int, start: int, end: int) -> bool:
+    """`hour` 是否落在「非工作时段」；`start == end` 表示该规则关闭。
+
+    跨零点写法（如 22 → 7）合法：`hour >= start or hour < end`。区间是
+    **半开** `[start, end)`，与项目里其他时间窗口径一致。
+    """
+    if start == end:
+        return False
+    if start < end:
+        return not (start <= hour < end)
+    return not (hour >= start or hour < end)
+
+
 def evaluate_alerts(
     *,
     pool: dict[str, int],
@@ -189,6 +231,13 @@ def evaluate_alerts(
     error_counts: tuple[int, int],
     error_rate_threshold: float,
     error_rate_min_requests: int,
+    key_usage: list[dict[str, Any]] | None = None,
+    key_burst_tokens: int = 0,
+    off_hours: bool = False,
+    off_hours_min_requests: int = 0,
+    budget_cny: float = 0.0,
+    budget_spent: float = 0.0,
+    budget_levels: tuple[int, ...] = (),
 ) -> list[Alert]:
     """按四类规则把信号快照判成告警列表（纯函数，不碰 IO）。
 
@@ -198,6 +247,12 @@ def evaluate_alerts(
     - `failing_tasks`：`(key, name, streak)`，调用方已按阈值过滤。
     - `expiring`：`[{id, nickname, token_expires_at, ...}]`，已按窗口过滤。
     - `error_counts`：`(requests, failed)`，窗口口径由调用方给定。
+    - `key_usage`：`[{api_key_id, username, requests, tokens}]`，按 Key 聚合。
+    - `off_hours`：调用方按本地时钟算好的「当前是否非工作时段」；纯函数不碰
+      时钟，测试可以任意构造。
+    - `budget_*`：当月成本预算与已花费（调用方按月起点聚合）。只报**已达成的
+      最高层**——低层在高一层触发时自然不再命中，由迟滞状态机写成「已恢复」，
+      避免 50/80/95/100 四条同时挂着。
     """
     alerts: list[Alert] = []
 
@@ -249,6 +304,56 @@ def evaluate_alerts(
                         "rate": round(rate, 4), "threshold": error_rate_threshold},
             ))
 
+    # 单 Key 用量暴涨：窗口内总 token 越过阈值。**不是**错误，是滥用/泄露信号
+    # （Key 被贴到公共仓库、多人共用一把 Key）。阈值 0 关闭。
+    if key_burst_tokens > 0:
+        for row in key_usage or ():
+            tokens = int(row.get("tokens") or 0)
+            if tokens < key_burst_tokens:
+                continue
+            alerts.append(Alert(
+                rule="key_burst", severity=SEVERITY_WARNING,
+                scope=row.get("api_key_id") or "unknown",
+                message=(f"API Key 在统计窗内消耗 {tokens} token"
+                         f"（{row.get('requests', 0)} 次请求，用户 "
+                         f"{row.get('username') or '-'}，阈值 {key_burst_tokens}）"),
+                detail={"api_key_id": row.get("api_key_id"),
+                        "username": row.get("username"),
+                        "tokens": tokens,
+                        "requests": int(row.get("requests") or 0),
+                        "threshold": key_burst_tokens},
+            ))
+
+    # 非工作时段仍有请求：可能是定时任务/自动化，也可能是 Key 被外部使用。
+    # 只报「窗口内请求数达到最小样本」的次数，避免个别重试就报警。
+    requests_total, _failed = error_counts
+    if off_hours and off_hours_min_requests > 0 and requests_total >= off_hours_min_requests:
+        alerts.append(Alert(
+            rule="off_hours", severity=SEVERITY_WARNING, scope="pool",
+            message=(f"非工作时段仍有 {requests_total} 次请求"
+                     f"（阈值 {off_hours_min_requests}）"),
+            detail={"requests": requests_total,
+                    "threshold": off_hours_min_requests},
+        ))
+
+    # 预算分层：50/80/95/100%。只报当前达到的最高层；100%（含超支）为 critical。
+    if budget_cny > 0 and budget_levels and budget_spent > 0:
+        percent = budget_spent / budget_cny * 100
+        reached = [level for level in budget_levels if percent >= level]
+        if reached:
+            level = max(reached)
+            alerts.append(Alert(
+                rule="budget",
+                severity=SEVERITY_CRITICAL if level >= 100 else SEVERITY_WARNING,
+                scope=f"budget_{level}",
+                message=(f"当月成本已达预算的 {percent:.0f}%"
+                         f"（¥{budget_spent:.2f} / ¥{budget_cny:.2f}，"
+                         f"触发 {level}% 档）"),
+                detail={"level": level, "percent": round(percent, 2),
+                        "spent_cny": round(budget_spent, 4),
+                        "budget_cny": budget_cny},
+            ))
+
     return alerts
 
 
@@ -282,6 +387,13 @@ class AlertTask:
         error_rate_threshold: Callable[[], float] = lambda: 0.5,
         error_rate_min_requests: Callable[[], int] = lambda: 20,
         error_rate_window_minutes: Callable[[], int] = lambda: 15,
+        key_burst_tokens: Callable[[], int] = lambda: 0,
+        key_burst_window_minutes: Callable[[], int] = lambda: 15,
+        off_hours_start: Callable[[], int] = lambda: 0,
+        off_hours_end: Callable[[], int] = lambda: 0,
+        off_hours_min_requests: Callable[[], int] = lambda: 0,
+        budget_cny: Callable[[], float] = lambda: 0.0,
+        budget_levels: Callable[[], str] = lambda: "50,80,95,100",
         silence_minutes: Callable[[], int] = lambda: 30,
         for_ticks: Callable[[], int] = lambda: DEFAULT_FOR_TICKS,
         clear_ticks: Callable[[], int] = lambda: DEFAULT_CLEAR_TICKS,
@@ -301,6 +413,13 @@ class AlertTask:
         self._error_rate_threshold = error_rate_threshold
         self._error_rate_min_requests = error_rate_min_requests
         self._error_rate_window_minutes = error_rate_window_minutes
+        self._key_burst_tokens = key_burst_tokens
+        self._key_burst_window_minutes = key_burst_window_minutes
+        self._off_hours_start = off_hours_start
+        self._off_hours_end = off_hours_end
+        self._off_hours_min_requests = off_hours_min_requests
+        self._budget_cny = budget_cny
+        self._budget_levels = budget_levels
         self._silence_minutes = silence_minutes
         self._for_ticks = for_ticks
         self._clear_ticks = clear_ticks
@@ -332,6 +451,17 @@ class AlertTask:
         ]
         window_minutes = max(0, self._error_rate_window_minutes())
         expiring_seconds = max(0, self._token_expiry_hours()) * 3600
+        # 单 Key 暴涨用**自己的**窗口（与错误率窗口解耦：错误率看几分钟，
+        # 用量暴涨看十几分钟到一小时更合理）。
+        burst_minutes = max(0, self._key_burst_window_minutes())
+        key_usage = (self._stats.window_key_usage(since=now - burst_minutes * 60)
+                     if self._key_burst_tokens() > 0 and burst_minutes > 0 else [])
+        start, end = self._off_hours_start(), self._off_hours_end()
+        off_hours = in_off_hours(time.localtime(now).tm_hour, start, end)
+        # 预算按自然月（本地）：月初成本归零 → 上月的预算告警自然恢复
+        budget_cny = max(0.0, self._budget_cny())
+        budget_spent = (self._stats.window_cost(since=month_start(now))[0]
+                        if budget_cny > 0 else 0.0)
         alerts = evaluate_alerts(
             pool=self._credentials.pool_counts(now),
             pool_ready_min=self._pool_ready_min(),
@@ -341,6 +471,13 @@ class AlertTask:
                 since=now - window_minutes * 60),
             error_rate_threshold=self._error_rate_threshold(),
             error_rate_min_requests=self._error_rate_min_requests(),
+            key_usage=key_usage,
+            key_burst_tokens=self._key_burst_tokens(),
+            off_hours=off_hours,
+            off_hours_min_requests=self._off_hours_min_requests(),
+            budget_cny=budget_cny,
+            budget_spent=budget_spent,
+            budget_levels=parse_levels(self._budget_levels()),
         )
         return await self._dispatch(alerts, now)
 

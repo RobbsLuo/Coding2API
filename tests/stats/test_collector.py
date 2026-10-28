@@ -269,3 +269,37 @@ def test_record_publishes_normalized_model_and_error_type(stats):
                      error_type="not-controlled")
     assert published[0]["model"] == "unknown"
     assert published[0]["error_type"] is None
+
+
+def test_window_key_usage_groups_by_key_and_orders_by_tokens(stats):
+    """按 Key 告警的数据源：只统计带 Key 的明细，token 降序。"""
+    from src.request_context import set_api_key_id
+
+    collector, _query = stats
+    for key_id, tokens in (("k1", 10), ("k1", 30), ("k2", 999), (None, 5000)):
+        set_api_key_id(key_id)
+        try:
+            collector.record(username=f"u-{key_id}", provider="trae", model="m",
+                             ok=True, input_tokens=tokens, output_tokens=0)
+        finally:
+            set_api_key_id(None)
+    rows = collector.window_key_usage(since=0)
+    assert [row["api_key_id"] for row in rows] == ["k2", "k1"]
+    assert rows[1]["tokens"] == 40
+    assert rows[1]["requests"] == 2
+    # 窗口外不返回（since 取未来）
+    assert collector.window_key_usage(since=int(time.time()) + 3600) == []
+
+
+def test_window_cost_sums_known_hours(stats):
+    """预算告警的数据源：窗口内成本求和 + 可定价小时数。"""
+    collector, _query = stats
+    collector.record(username="u", provider="trae", model="deepseek-v4.1-flash",
+                     ok=True, input_tokens=100, output_tokens=10)
+    collector.rollup_hourly()
+    spent, known, hours = collector.window_cost(since=0)
+    assert spent >= 0
+    assert hours == 1
+    assert known in (0, 1)          # 价表未装配时 cost 为 NULL → known=0
+    # 窗口外（未来）→ 全 0，不是 None
+    assert collector.window_cost(since=int(time.time()) + 3600) == (0.0, 0, 0)

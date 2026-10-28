@@ -314,6 +314,41 @@ class StatsCollector:
             "FROM usage_events WHERE ts >= ?", (since,)).fetchone()
         return int(row["requests"] or 0), int(row["failed"] or 0)
 
+    def window_key_usage(self, *, since: int,
+                         limit: int = 50) -> list[dict[str, Any]]:
+        """近窗口内按 API Key 聚合的用量（token 降序），供「单 Key 暴涨」告警。
+
+        只统计带 `api_key_id` 的明细：Cookie 会话（Playground）没有 Key，
+        按 Key 告警对它们无意义。`tokens` 是输入+输出之和，缺字段按 0 计
+        （上游未上报时不给假数据，0 就是 0）。`limit` 只捞最重的几个 Key——
+        告警不需要全量列表，全量在按 Key 统计页。
+        """
+        rows = self._db.connect().execute(
+            "SELECT api_key_id, username, COUNT(*) AS requests, "
+            "COALESCE(SUM(COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0)), 0)"
+            " AS tokens "
+            "FROM usage_events WHERE ts >= ? AND api_key_id IS NOT NULL "
+            "GROUP BY api_key_id, username ORDER BY tokens DESC LIMIT ?",
+            (since, max(1, limit))).fetchall()
+        return [{"api_key_id": row["api_key_id"], "username": row["username"],
+                 "requests": int(row["requests"] or 0),
+                 "tokens": int(row["tokens"] or 0)} for row in rows]
+
+    def window_cost(self, *, since: int) -> tuple[float, int, int]:
+        """近窗口成本（人民币）：`(已花费, 可定价小时数, 总小时数)`。
+
+        读小时汇总（永久保留，与统计页同口径）。后两项给告警文案用：成本只
+        覆盖「匹配到 OpenRouter 刊例价 + 当时汇率」的明细，未定价模型是 0 贡献，
+        覆盖率低时预算告警会偏乐观——detail 里写明覆盖情况，不假装准确。
+        """
+        row = self._db.connect().execute(
+            "SELECT COALESCE(SUM(cost_cny_sum), 0) AS spent, "
+            "COALESCE(SUM(CASE WHEN cost_known > 0 THEN 1 ELSE 0 END), 0) AS known, "
+            "COUNT(*) AS hours "
+            "FROM usage_hourly WHERE hour_utc >= ?", (since,)).fetchone()
+        return (float(row["spent"] or 0), int(row["known"] or 0),
+                int(row["hours"] or 0))
+
     def error_totals(self) -> list[tuple[str, str, int]]:
         """进程内「渠道 × 失败原因」累计计数（稳定排序）。
 
