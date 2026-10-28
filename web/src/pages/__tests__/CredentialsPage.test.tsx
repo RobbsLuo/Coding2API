@@ -248,6 +248,8 @@ describe("CredentialsPage", () => {
             { name: "福利积分", total: 2000, used: 0, end: day },
             { name: "每月登录", total: 500, used: 76.564, end: day + 100_000 },
             { name: "无到期包", total: 100, used: 10, end: null },
+            // 已消耗成 0 的包不展示（也不计入「套餐 N 个」）
+            { name: "已用完包", total: 300, used: 300, end: day + 300_000 },
           ],
         }),
         makeCredential({ id: "tr", provider: "trae", quota_packages: null }),
@@ -274,6 +276,8 @@ describe("CredentialsPage", () => {
     const tip = await screen.findByRole("tooltip");
     const items = within(tip).getAllByTestId("package-cb");
     expect(items).toHaveLength(4);
+    // 已消耗成 0 的包被过滤：明细与计数里都不出现
+    expect(within(tip).queryByText(/已用完包/)).not.toBeInTheDocument();
     // 按到期升序：最近到期的「福利积分」排第一，无到期时间的「无到期包」排最后
     expect(items[0]).toHaveTextContent("福利积分");
     expect(items[0]).toHaveTextContent("2,000");

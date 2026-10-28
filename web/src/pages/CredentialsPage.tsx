@@ -1339,7 +1339,11 @@ export function CredentialsPage() {
  * 几十行不能挤进单元格。无明细（未探测/上游未提供）时不渲染。
  */
 function PackageLadder({ credential }: { credential: Credential }) {
-  const packages = credential.quota_packages ?? [];
+  // 已消耗完（剩余 ≤ 0）的包不再展示：它们只是上游按期返回的历史残留，
+  // 既不带可用积分、也不会再被消耗，堆在弹层里只会淹没还有余额的包。
+  const packages = (credential.quota_packages ?? []).filter(
+    (item) => item.total - item.used > 0,
+  );
   if (packages.length === 0) return null;
   // 展示按到期升序：快过期的排最前（无到期信息的排最后）
   const ordered = [...packages].sort(

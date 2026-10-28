@@ -329,8 +329,9 @@ class CodeBuddyClient(LazyClients):
             remaining += package_remaining
             end = _cycle_end_epoch(account.get("CycleEndTime"))
             # 展示明细：比调度阶梯（下面的 ladder）宽——已用完但仍有效的包
-            # 也要显示。但「已过期且已用完」的包既不携带积分也不可能再被
-            # 消耗，只是上游的历史残留，不堆进弹层。
+            # 也会下发（前端按「剩余 0」再过滤掉，只保留还有余额的）。但
+            # 「已过期且已用完」的包既不携带积分也不可能再被消耗，只是上游
+            # 的历史残留，连数据都不留。
             if package_remaining > 0 or (end is not None and end > now_epoch):
                 packages.append({
                     "name": str(account.get("PackageName") or ""),
