@@ -55,13 +55,14 @@ describe("StatsPage 实时明细", () => {
     // 时间两行（时刻优先、日期在下）、渠道/凭证合并列：实时表与分页表同一套渲染
     const liveCell = screen.getAllByTestId("live-row")[0]
       .querySelector("[data-label='时间']")!;
-    expect(liveCell.children).toHaveLength(2);
-    expect(liveCell.children[0].textContent).toMatch(/^\d{2}:\d{2}:\d{2}$/);
-    expect(liveCell.children[1].textContent).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    const liveTimeBlock = liveCell.querySelector(":scope > span")!;
+    expect(liveTimeBlock.children).toHaveLength(2);
+    expect(liveTimeBlock.children[0].textContent).toMatch(/^\d{2}:\d{2}:\d{2}$/);
+    expect(liveTimeBlock.children[1].textContent).toMatch(/^\d{4}-\d{2}-\d{2}$/);
     const liveRow = screen.getAllByTestId("live-row")[0];
     expect(liveRow.querySelector("[data-label='凭证']")).toBeNull();
     const liveSource = liveRow.querySelector("[data-label='渠道 / 凭证']")!;
-    expect(liveSource.children[0].textContent).toBe("主账号");
+    expect(liveSource.querySelector(":scope > span")!.children[0].textContent).toBe("主账号");
     expect(liveSource.textContent).toContain("CodeBuddy");
   });
 

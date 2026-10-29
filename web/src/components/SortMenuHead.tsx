@@ -58,10 +58,17 @@ export function SortMenuHead({
             className={cn(
               "inline-flex items-center gap-1 rounded-sm transition-colors hover:text-foreground",
               "focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
-              align === "right" && "flex-row-reverse",
               active && "text-foreground",
             )}
           >
+            {/* 右对齐列的箭头放最左：用 flex-row-reverse 会把「速度 + tok/s」也倒过来，
+                读成「tok/s 速度」，故只调换箭头位置。 */}
+            {align === "right" && (
+              <Icon
+                className={cn("size-3.5 shrink-0", active ? "opacity-100" : "opacity-40")}
+                aria-hidden
+              />
+            )}
             {label}
             {unit && (
               // 正文最小 12px（MASTER §3「正文最小 12px（text-xs），不得更小」）
@@ -70,10 +77,12 @@ export function SortMenuHead({
             {activeOption && (
               <span className="font-normal text-muted-foreground">· {activeOption.label}</span>
             )}
-            <Icon
-              className={cn("size-3.5 shrink-0", active ? "opacity-100" : "opacity-40")}
-              aria-hidden
-            />
+            {align === "left" && (
+              <Icon
+                className={cn("size-3.5 shrink-0", active ? "opacity-100" : "opacity-40")}
+                aria-hidden
+              />
+            )}
           </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align={align === "right" ? "end" : "start"}>

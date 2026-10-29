@@ -511,6 +511,10 @@ describe("StatsPage", () => {
     // 失败行没有输出 → 生成窗口不可测，整格 —
     const failedRow = within(table).getByText("额度耗尽").closest("tr")!;
     expect(failedRow).toHaveTextContent("—");
+    // 失败行整行标色（左缘 2px 色条 + 淡红底），成功行不标：整表扫读时「哪条坏了」
+    // 要能一眼定位，不能只藏在状态列两个红字里。
+    expect(failedRow.className).toContain("bg-destructive/[0.04]");
+    expect(okRow.className).not.toContain("bg-destructive/[0.04]");
   });
 
   it("请求明细：推算 credit 标 ≈，真实 credit 不标", async () => {
@@ -580,6 +584,35 @@ describe("StatsPage", () => {
     expect(screen.getByTestId("events-next")).toBeEnabled();
   });
 
+  it("请求明细：失败行整行标记（语义底 + 左色条），成功行不标记，状态列色不单独表意", async () => {
+    mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": EVENTS_PAGE1,
+    });
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    const table = screen.getByTestId("events-table");
+    const okRow = within(table).getByText("glm-5.2").closest("tr")!;
+    const failRow = within(table).getByText("额度耗尽").closest("tr")!;
+
+    // 成功是默认态：文字降为次要色，只留一个绿点（不抢视线）
+    expect(okRow.className).not.toContain("bg-destructive");
+    expect(within(okRow).getByText("成功").className).toContain("text-muted-foreground");
+    // 失败行整行标记：底色 + 左侧 inset 色条
+    expect(failRow.className).toContain("bg-destructive/[0.04]");
+    expect(failRow.className).toContain("shadow-[inset_2px_0_0_var(--destructive)]");
+    // 悬停时语义底不被基类 hover:bg-muted/50 洗掉
+    expect(failRow.className).toContain("hover:bg-destructive/10");
+    // 色不单独表意：失败文案本身在
+    expect(within(failRow).getByText("额度耗尽").className).toContain("text-danger-ink");
+  });
+
   it("请求明细：时间拆成时刻 / 日期两行（时刻优先），渠道与凭证合并成一列（凭证优先）", async () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,
@@ -596,9 +629,11 @@ describe("StatsPage", () => {
     const table = screen.getByTestId("events-table");
     const okRow = within(table).getByText("glm-5.2").closest("tr")!;
 
-    // 时间格：第一行是具体时刻（正常色），第二行是日期（次要色）
+    // 时间格：第一行是具体时刻（正常色），第二行是日期（次要色）；
+    // 两行同包在一个块里（卡片模式才对得起「字段名 : 值」一行）
     const timeCellEl = okRow.querySelector("[data-label='时间']")!;
-    const [clockEl, dateEl] = Array.from(timeCellEl.children) as HTMLElement[];
+    const timeBlock = timeCellEl.querySelector(":scope > span")!;
+    const [clockEl, dateEl] = Array.from(timeBlock.children) as HTMLElement[];
     expect(clockEl.className).toContain("block");
     expect(clockEl.textContent).toMatch(/^\d{2}:\d{2}:\d{2}$/);
     expect(clockEl.className).not.toContain("muted-foreground");
@@ -607,7 +642,8 @@ describe("StatsPage", () => {
 
     // 渠道 / 凭证：只有一列，凭证在主行、渠道（icon + 名）在副行，完整凭证 ID 落在 title
     const sourceCellEl = okRow.querySelector("[data-label='渠道 / 凭证']")!;
-    const [credEl, providerEl] = Array.from(sourceCellEl.children) as HTMLElement[];
+    const sourceBlock = sourceCellEl.querySelector(":scope > span")!;
+    const [credEl, providerEl] = Array.from(sourceBlock.children) as HTMLElement[];
     expect(credEl.textContent).toBe("主账号");
     expect(credEl.className).not.toContain("muted-foreground");
     expect(providerEl.textContent).toContain("CodeBuddy");

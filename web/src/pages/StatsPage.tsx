@@ -206,8 +206,12 @@ function timeCell(row: UsageEventRow) {
   return (
     <TableCell label="时间" className="whitespace-nowrap tabular-nums leading-tight"
                title={row.request_id ? `请求 ID：${row.request_id}` : undefined}>
-      <span className="block">{clock}</span>
-      <span className="block text-xs text-muted-foreground">{date}</span>
+      {/* 两行包进同一个块：卡片模式里 td 是 flex 且 space-between，两块子元素会被
+          拉到卡片两端（时刻靠左、日期靠右），读起来像两个字段。 */}
+      <span className="block">
+        <span className="block">{clock}</span>
+        <span className="block text-xs text-muted-foreground">{date}</span>
+      </span>
     </TableCell>
   );
 }
@@ -224,26 +228,57 @@ function sourceCell(row: UsageEventRow) {
   return (
     <TableCell label="渠道 / 凭证" className="leading-tight"
                title={row.credential_id ?? undefined}>
-      {/* 固定宽度 + truncate 必须落在内层块元素上：`table-cell` 上的 max-width /
-          truncate 不生效，长邮箱（如 hongsheng900805@gmail.com）会把整列撑到
-          192px，逼得最后两列横向滚动。 */}
-      <span className="block w-32 truncate">
-        {credentialCellLabel(row.credential_name, row.credential_id)}
-      </span>
-      <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
-        <ProviderIcon provider={row.provider} size={13} />
-        {providerLabel(row.provider)}
+      <span className="block min-w-0">
+        {/* 固定宽度 + truncate 必须落在内层块元素上：`table-cell` 上的 max-width /
+            truncate 不生效，长邮箱（如 hongsheng900805@gmail.com）会把整列撑到
+            192px，逼得最后两列横向滚动。窄屏卡片里交给列宽，不再截断。 */}
+        <span className="block w-32 truncate max-md:w-auto">
+          {credentialCellLabel(row.credential_name, row.credential_id)}
+        </span>
+        <span className="inline-flex items-center gap-1.5 text-xs whitespace-nowrap text-muted-foreground">
+          <ProviderIcon provider={row.provider} size={13} />
+          {providerLabel(row.provider)}
+        </span>
       </span>
     </TableCell>
   );
 }
 
-/** 明细状态列：成功固定文案；失败展示受控错误类型的中文说明（脱敏，不含原始错误体）。 */
+/**
+ * 明细状态列：成功固定文案；失败展示受控错误类型的中文说明（脱敏，不含原始错误体）。
+ *
+ * 成功是默认态、一屏十行都是它，用绿色文字会满屏噪点，故降为「绿点 + 次要色文字」；
+ * 失败反过来用语义色文字 + 红点，让异常行在扫读时先跳出来（色不单独表意，文字始终在）。
+ */
 function statusCell(row: UsageEventRow) {
   if (row.ok) {
-    return <span className="text-ok">成功</span>;
+    return (
+      <span className="inline-flex items-center gap-1.5 text-muted-foreground">
+        <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-ok" />
+        成功
+      </span>
+    );
   }
-  return <span className="text-destructive">{usageErrorLabel(row.error_type)}</span>;
+  return (
+    <span className="inline-flex items-center gap-1.5 text-danger-ink">
+      <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-destructive" />
+      {usageErrorLabel(row.error_type)}
+    </span>
+  );
+}
+
+/**
+ * 失败行整行标记：左侧 2px 色条 + 极淡语义底。
+ *
+ * 明细表按时间流排列，失败行散落在成功行之间；只靠状态列一个字上色，扫一屏
+ * 十几行时容易漏。整行标记把「这条坏了」变成行级信号，同时保持文字为主信息。
+ */
+function rowToneClass(row: UsageEventRow) {
+  return row.ok
+    ? undefined
+    // hover 也要保住色条与底色：基类 TableRow 的 hover:bg-muted/50 会把语义底洗掉，
+    // 鼠标停在失败行上时正好失去「这条坏了」的信号。cn 合并时本行覆盖基类。
+    : "bg-destructive/[0.04] hover:bg-destructive/10 shadow-[inset_2px_0_0_var(--destructive)]";
 }
 
 /**
@@ -276,6 +311,60 @@ function latencyCell(row: UsageEventRow) {
         <span className="text-muted-foreground"> / {formatLatency(row.ttfb_ms)}</span>
       </span>
     </Tip>
+  );
+}
+
+/**
+ * 数值列的空值弱化：整格都是占位符（—）时降到次要色。
+ *
+ * 明细表里空值很多（失败的请求没有 token / 成本，Qoder 不上报 credit）。占位符与
+ * 真值同色时，一列「—」和一列数字的视觉重量一样，扫读数字反而更费劲。降一档色
+ * 让真值浮起来——用 `text-muted-foreground`（不透明度不低于 60%），保证占位符
+ * 仍是可读文本而不是装饰。
+ */
+function dashTone(empty: boolean) {
+  return empty ? "text-muted-foreground" : undefined;
+}
+
+/**
+ * 明细行单元格（分页表与实时表共用）：两处结构完全一致，抽出来保证同一行
+ * 在「历史」与「实时」里显示成同一副样子（列宽、空值色、合并列规则都不会走偏）。
+ */
+function eventRowCells(row: UsageEventRow, showUser: boolean) {
+  return (
+    <>
+      {timeCell(row)}
+      {showUser && <TableCell label="用户">{row.username}</TableCell>}
+      {sourceCell(row)}
+      <TableCell label="模型">
+        <span className="block max-w-44 truncate" title={row.model}>{row.model}</span>
+      </TableCell>
+      <TableCell label="状态">{statusCell(row)}</TableCell>
+      <TableCell label="Token"
+                 className={cn("text-right", dashTone(
+                   row.input_tokens == null && row.output_tokens == null))}>
+        {tokenCell(row)}
+      </TableCell>
+      <TableCell label="Credit"
+                 className={cn("text-right tabular-nums", dashTone(row.credit == null))}>
+        {formatCredit(row.credit, row.credit_estimated)}
+      </TableCell>
+      <TableCell label="成本"
+                 className={cn("text-right tabular-nums", dashTone(row.cost_cny == null))}
+                 title={row.cost_usd == null ? undefined : `美元 ${formatMoney(row.cost_usd, "USD")}`}>
+        {formatMoney(row.cost_cny, "CNY")}
+      </TableCell>
+      <TableCell label="延迟"
+                 className={cn("text-right", dashTone(
+                   row.latency_ms == null && row.ttfb_ms == null))}>
+        {latencyCell(row)}
+      </TableCell>
+      <TableCell label="速度"
+                 className={cn("text-right", dashTone(
+                   row.tps == null && row.tps_visible == null))}>
+        {eventSpeedCell(row)}
+      </TableCell>
+    </>
   );
 }
 
@@ -1209,29 +1298,9 @@ export function StatsPage() {
                 </TableHeader>
                 <TableBody>
                   {liveRows.map((row) => (
-                    <TableRow key={`live-${row.rowid}`} data-testid="live-row">
-                      {timeCell(row)}
-                      {session.is_operator && (
-                        <TableCell label="用户">{row.username}</TableCell>
-                      )}
-                      {sourceCell(row)}
-                      <TableCell label="模型">
-                        <span className="block w-32 truncate" title={row.model}>{row.model}</span>
-                      </TableCell>
-                      <TableCell label="状态">{statusCell(row)}</TableCell>
-                      <TableCell label="Token" className="text-right">{tokenCell(row)}</TableCell>
-                      <TableCell label="Credit" className="text-right tabular-nums">
-                        {formatCredit(row.credit, row.credit_estimated)}
-                      </TableCell>
-                      <TableCell label="成本" className="text-right tabular-nums">
-                        {formatMoney(row.cost_cny, "CNY")}
-                      </TableCell>
-                      <TableCell label="延迟" className="text-right">
-                        {latencyCell(row)}
-                      </TableCell>
-                      <TableCell label="速度" className="text-right">
-                        {eventSpeedCell(row)}
-                      </TableCell>
+                    <TableRow key={`live-${row.rowid}`} data-testid="live-row"
+                              className={rowToneClass(row)}>
+                      {eventRowCells(row, session.is_operator)}
                     </TableRow>
                   ))}
                 </TableBody>
@@ -1302,32 +1371,9 @@ export function StatsPage() {
               </TableHeader>
               <TableBody>
                 {eventRows.map((row) => (
-                  <TableRow key={row.rowid} data-testid="event-row">
-                    {timeCell(row)}
-                    {session.is_operator && (
-                      <TableCell label="用户">{row.username}</TableCell>
-                    )}
-                    {sourceCell(row)}
-                    <TableCell label="模型">
-                      <span className="block w-32 truncate" title={row.model}>{row.model}</span>
-                    </TableCell>
-                    <TableCell label="状态">{statusCell(row)}</TableCell>
-                    <TableCell label="Token" className="text-right">
-                      {tokenCell(row)}
-                    </TableCell>
-                    <TableCell label="Credit" className="text-right tabular-nums">
-                      {formatCredit(row.credit, row.credit_estimated)}
-                    </TableCell>
-                    <TableCell label="成本" className="text-right tabular-nums"
-                               title={`美元 ${formatMoney(row.cost_usd, "USD")}`}>
-                      {formatMoney(row.cost_cny, "CNY")}
-                    </TableCell>
-                    <TableCell label="延迟" className="text-right">
-                      {latencyCell(row)}
-                    </TableCell>
-                    <TableCell label="速度" className="text-right">
-                      {eventSpeedCell(row)}
-                    </TableCell>
+                  <TableRow key={row.rowid} data-testid="event-row"
+                            className={rowToneClass(row)}>
+                    {eventRowCells(row, session.is_operator)}
                   </TableRow>
                 ))}
               </TableBody>
