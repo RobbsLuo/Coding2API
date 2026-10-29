@@ -32,7 +32,7 @@ from ...tasks.pacer import paced
 from ..lazy_clients import LazyClients
 from . import events as cb_events
 from .credential import CodeBuddyCredential, parse_credential
-from .events import UpstreamProtocolViolation
+from .events import MODEL_BLOCKED_CODES, UpstreamProtocolViolation
 from .headers import (
     CN_ENDPOINT,
     EP_CHAT,
@@ -69,7 +69,9 @@ MODEL_ACCESS_CACHE_TTL_SECONDS = 6 * 3600
 MODEL_ACCESS_CACHE_MAX_ENTRIES = 256
 MODEL_ACCESS_PROBE_TIMEOUT = 5.0
 MODEL_ACCESS_PROBE_CONCURRENCY = 4
-MODEL_ACCESS_DENIED_CODES = frozenset({11102, 11158})
+# 判活与错误分类共用同一个业务码集合（`events.MODEL_BLOCKED_CODES`）：两边
+# 各写一份曾让 11158 在探活里算「不可用」、在请求里算「请求无效」。
+MODEL_ACCESS_DENIED_CODES = MODEL_BLOCKED_CODES
 _MODEL_ACCESS_CACHE: dict[tuple[str, str], tuple[float, dict[str, bool | None]]] = {}
 _PROBE_PROMPT = "hi"
 

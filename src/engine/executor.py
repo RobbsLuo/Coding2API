@@ -398,6 +398,21 @@ class Executor:
         for candidate in self._deps.credentials.candidates([provider_id]):
             tried.add(candidate.credential_id)
 
+    def _attribution_provider(self, target: ModelTarget, observed: str) -> str:
+        """失败明细里的渠道名：真打过就用实际渠道，一次都没选中就用候选渠道。
+
+        `_pick` **首轮**返回 None（候选全在冷却 / 一个凭证都没有）时，渠道名
+        还停在占位 `"-"`：归因面板只剩一个横杠，看不出是哪个渠道挂的（实测
+        2026-10-29 10:18 `deepseek-v4.1-flash-sg`——唯一持有它的
+        codebuddy_intl 两个号刚因 ConnectTimeout 进 SOFT 冷却，明细落成
+        `provider="-"`）。收窄后的候选按声明顺序取第一个：那是「本该服务它」
+        的渠道，也是运维该去查的那个。
+
+        候选必然非空：`_select` 在无注册上游时先抛 `NoProviderForModel`，
+        走到 `_pick` 返回 None 的分支时注册集已校验过。
+        """
+        return observed if observed != "-" else self._registered(target)[0]
+
     def _upstream_model(self, provider_id: str, model: str) -> str:
         """归一模型名 → 该上游注册的原始 id（大小写变体映射，未知则原样）。"""
         if self._deps.upstream_model_name is None:
@@ -681,7 +696,8 @@ class Executor:
                             "invalid_request")
                     if not attributed:
                         self._deps.record(
-                            username=state.username, provider=state.provider,
+                            username=state.username,
+                            provider=self._attribution_provider(target, state.provider),
                             credential_id=state.credential_id, model=target.model, ok=False,
                             error_type=self._exhaust_error_type(target),
                             latency_ms=_elapsed_ms(state.started))
@@ -1243,7 +1259,8 @@ class Executor:
                             target.model, last_error, self._suggestions(target.model)))
                     if not attributed:
                         self._deps.record(
-                            username=username, provider=last_provider,
+                            username=username,
+                            provider=self._attribution_provider(target, last_provider),
                             credential_id=last_credential,
                             model=target.model, ok=False,
                             error_type=self._exhaust_error_type(target),

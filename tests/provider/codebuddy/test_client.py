@@ -44,6 +44,10 @@ def test_classify_body_markers():
     # 「该后端无此模型」：(账号, 模型) 负缓存
     (400, b'{"code": 11102}', ErrKind.BLOCKED),
     (404, b'{"code": 11102}', ErrKind.BLOCKED),
+    # 「套餐不允许」：对**当前凭证**与 11102 等价（重试无意义、换号才有用）
+    (400, b'{"code": 11158, "msg": "model [gpt-6-luna] is not allowed for user '
+          b'type [personal_free_user]"}', ErrKind.BLOCKED),
+    (404, b'{"code": 11158}', ErrKind.BLOCKED),
     # 请求级错误：不罚号，仍换号（请求体坏 / 上下文超限 / 渠道风控 / 图片无效）
     (400, b'{"code": 11101}', ErrKind.REQUEST),
     (400, b'{"code": 500, "msg": "Unmarshal chat params failed"}', ErrKind.REQUEST),
@@ -55,6 +59,7 @@ def test_classify_body_markers():
     # 裸数字不误伤：111020 不是 11102（要求带 "code": 键值形态）
     (400, b'{"trace": 1110201}', ErrKind.INVALID),
     (400, b'{"code": 111020}', ErrKind.INVALID),
+    (400, b'{"code": 111580}', ErrKind.INVALID),
     # 嵌套信封：业务码在内层，按集合成员判断不漏
     (400, b'{"code": 0, "data": {"code": 11102}}', ErrKind.BLOCKED),
     (404, b"not json at all", ErrKind.SOFT),

@@ -521,7 +521,7 @@ tabs 切四维（渠道 / 模型 / 用户 / 凭证），共用一表（渠道 / 
 
 **延迟两类口径**：只统计成功请求。平均 = `latency_sum ÷ 成功数`（小时汇总）；分位从逐请求明细算（仅 90 天）。`ttfb_ms` = `NULL` 的两列各自独立排名。无样本 → `—`。
 
-**失败归因**：`GET /api/stats/errors`（operator+）按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` → 失败次数 / **未救回数** / 最近失败时刻（降序，`limit` ≤ 5000）。**失败数 = 尝试口径**：换号重试每次上游拒绝各落一行；同用户同 `request_id` 另有成功行 = 已救回。`未救回 = 失败数 − 救回数`（同请求多次失败算多次，≠ 受损请求数）。凭证 401 硬禁用（DEAD）也落 `credential_unavailable`；账号被上游风控限制（CodeBuddy 11140）落 `account_restricted`，账号级 2h 冷却、当前请求不再换号，同渠道窗口内**第二个不同凭证**也中招时整渠道退避 24h；换号成功算已救回；轮换耗尽不重复落收尾行。点行钻取 +「只看失败」（`GET /api/stats/events?ok=0`）。仅 admin / operator。`/metrics` 的 `upstream_errors_total` 取进程内计数，不合并。
+**失败归因**：`GET /api/stats/errors`（operator+）按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` → 失败次数 / **未救回数** / 最近失败时刻（降序，`limit` ≤ 5000）。**失败数 = 尝试口径**：换号重试每次上游拒绝各落一行；同用户同 `request_id` 另有成功行 = 已救回。`未救回 = 失败数 − 救回数`（同请求多次失败算多次，≠ 受损请求数）。凭证 401 硬禁用（DEAD）也落 `credential_unavailable`；账号被上游风控限制（CodeBuddy 11140）落 `account_restricted`，账号级 2h 冷却、当前请求不再换号，同渠道窗口内**第二个不同凭证**也中招时整渠道退避 24h；上游明确说该号用不了这个模型（11102 无此模型 / 11158 套餐不允许）落 `model_not_found`，写 (账号, 模型) 负缓存而非冷却账号；一次都没选中凭证就耗尽时（候选全在冷却 / 池子为空）明细落**候选渠道**而不是 `-`；换号成功算已救回；轮换耗尽不重复落收尾行。点行钻取 +「只看失败」（`GET /api/stats/events?ok=0`）。仅 admin / operator。`/metrics` 的 `upstream_errors_total` 取进程内计数，不合并。
 
 **点行钻取**：点分组表任一行 → 明细按该行过滤（渠道 / 模型 / 凭证；用户维度走作用域参数），条件可叠加。`GET /api/stats/events` 接受 `provider` / `model` / `credential_id`（AND）+ `ok=0`。
 

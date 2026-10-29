@@ -652,6 +652,7 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 `ErrKind.BLOCKED`（上游明确说没有这个模型）统计落 `error_type=model_not_found`，**不再并进 `invalid_request`**。后者是「请求无效」（`ErrKind.INVALID` / `ErrKind.REQUEST`），归因面板显示「请求无效」，读起来像客户端参数写错了——实际是上游把该模型下架了（实测 2026-10-26 officeAce 404 `ModelArts.81009` 被标成「请求无效」）。
 
 - 受控枚举 `CONTROLLED_ERROR_TYPES` 增 `model_not_found`（前端 `USAGE_ERROR_LABEL` 同步：「上游无此模型」）。
+- **套餐不允许也归这里**（2026-10-29）：CodeBuddy 11158 `model [...] is not allowed for user type [personal_free_user]` 与 11102「该后端无此模型」对**当前凭证**是同一件事——重试无意义、换号才有用、与账号健康无关。此前 11158 落进 `400 其他 → ErrKind.INVALID`，归因面板显示「请求无效」（实测 10:36 / 10:37 国际站免费号请求 `gpt-6-luna`、`gemini-3.8-flash`）。现在两者共用 `codebuddy.events.MODEL_BLOCKED_CODES`，列表探活（`client.filter_available_models`）也读同一个集合，不再各写一份。
 - 可用性视图（`GET /api/models/availability`）的计入口径增 `model_not_found`：它**仍属**模型级失败，只是分类更准。
 - **收尾行不变**：轮换耗尽时那一行仍按 `_exhaust_error_type` 落 `model_unavailable` / `no_healthy_credential`——「上游没这个模型」（尝试级归因）与「这个模型现在全都不可用」（收尾行）是两件事。
 

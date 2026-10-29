@@ -43,7 +43,16 @@ _MODEL_RATE_LIMIT_CODE = 6004       # 该模型用量超限 → 模型级软冷�
 # saturated」。上游明确要求「switch models」，说明同凭证其他模型可用，
 # 落账号级 SOFT 会让整张凭证 60s 内全部模型一起不可用。
 _MODEL_SATURATED_CODE = 14003
-_MODEL_BLOCKED_CODE = 11102         # 该后端无此模型 → (账号, 模型) 负缓存
+# 「这个号用不了这个模型」→ (账号, 模型) 负缓存。两个业务码同义：
+#   11102 该后端无此模型（上游根本没部署）
+#   11158 套餐不允许：`model [gpt-6-luna] is not allowed for user type
+#         [personal_free_user]`（国际站免费号实测 2026-10-29 10:36 / 10:37）
+# 两者对**当前凭证**的结论完全一样——重试多少次都失败，换号才有意义，且与
+# 账号健康无关（不能落账号级冷却）。此前只认 11102，11158 掉进 `400 其他`
+# 被归成 `invalid_request`，归因面板显示「请求无效」，读起来像客户端参数
+# 写错了（与 2026-10-26 officeAce 81009 同一类误判）。
+# 列表探活（client.filter_available_models）共用本集合，口径不会再漂。
+MODEL_BLOCKED_CODES = frozenset({11102, 11158})
 _CREDITS_EXHAUSTED_CODE = 14018     # 积分耗尽 → 冷却到次日签到
 _PLAN_EXHAUSTED_CODE = 1005         # 权益/套餐耗尽
 # 请求级错误（不是账号的问题）：请求体坏 / 上下文超限 / 图片无效 / 渠道风控。
@@ -77,7 +86,7 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
 
     * 402 / 14018 → 余额不足（冷却到次日 04:00，等签到恢复）
     * 1005 → 权益耗尽（12h 长冷却）
-    * 11102「该后端无此模型」→ (账号, 模型) 负缓存（400/404 形态）
+    * 11102/11158「该号用不了这个模型」→ (账号, 模型) 负缓存（400/404 形态）
     * 11140「账号被风控限制」→ 账号级长冷却，**当前请求不再换号**
     * 401/403 → session 失效（硬禁用）
     * 404 → 软冷却，不累计错误数
@@ -90,7 +99,7 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
         return ErrKind.CREDIT
     if _PLAN_EXHAUSTED_CODE in codes:
         return ErrKind.PLAN
-    if status in (400, 404) and _MODEL_BLOCKED_CODE in codes:
+    if status in (400, 404) and codes & MODEL_BLOCKED_CODES:
         return ErrKind.BLOCKED
     if status >= 400 and _is_account_restricted(body):
         # 必须拦在 401/403 → DEAD 之前：11140 是上游按账号/IP 拉黑，不是凭据

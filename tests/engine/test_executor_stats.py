@@ -290,6 +290,58 @@ async def test_complete_all_model_cooled_records_model_unavailable(repo):
             {"messages": [{"role": "user", "content": "hi"}]}))
     assert collector.events[-1]["error_type"] == "model_unavailable"
 
+async def test_stream_exhaustion_without_any_pick_records_candidate_provider(repo):
+    """一次都没选中凭证（候选全在冷却 / 池子为空）时，明细要落**候选渠道**。
+
+    `_pick` 首轮返回 None 时渠道名还停在占位 `"-"`：归因面板只剩一个横杠，
+    看不出是哪个渠道挂的（实测 2026-10-29 10:18 `deepseek-v4.1-flash-sg`
+    落成 `provider="-"`，而它只在 codebuddy_intl 上有）。
+    """
+    credentials, _db = repo
+    collector = RecordingCollector()
+    executor = _exec_with_stats(repo, [GOOD_EVENTS], collector)
+
+    from src.compat.openai.request import parse_chat_request
+
+    async for _ in executor.stream(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}], "stream": True})):
+        pass
+    event = collector.events[-1]
+    assert event["ok"] is False and event["provider"] == "codebuddy"
+    assert event["credential_id"] is None
+
+async def test_complete_exhaustion_without_any_pick_records_candidate_provider(repo):
+    """非流式同口径：没有选中凭证时明细仍能指出是哪个渠道。"""
+    credentials, _db = repo
+    collector = RecordingCollector()
+    executor = _exec_with_stats(repo, [GOOD_EVENTS], collector)
+
+    from src.compat.openai.request import parse_chat_request
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+    assert collector.events[-1]["provider"] == "codebuddy"
+
+async def test_exhaustion_after_a_tried_credential_keeps_actual_provider(repo):
+    """真打过上游时明细记**实际**渠道，不被候选渠道顶掉。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+
+    class Soft(Exception):
+        def kind(self):
+            return ErrKind.SOFT
+
+    executor = _exec_with_stats(repo, [[Soft()]], collector, max_rotate=1)
+    from src.compat.openai.request import parse_chat_request
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+    assert collector.events[-1]["provider"] == "codebuddy"
+    assert collector.events[-1]["credential_id"] is not None
+
 async def test_complete_records_success_and_failure(repo):
     credentials, _db = repo
     credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
