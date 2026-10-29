@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import gzip
 import hashlib
+import json
 import logging
 import time
 import weakref
@@ -22,6 +24,7 @@ if TYPE_CHECKING:
 
 import httpx
 
+from ...engine.affinity import resolve_explicit
 from ...engine.sse import iter_frames
 from ...provider import base
 from ...provider.base import ErrKind, Event, GrowthResult, Model, Quota
@@ -39,6 +42,7 @@ from .headers import (
     generate_headers,
     host_of,
 )
+from .model_access_store import ModelAccessStore
 
 # 写超时覆盖的是上传请求体阶段，不是首字等待：大上下文请求体可达数 MB，
 # 经代理链路 10s 会稳定超时；首字等待由 read=None +
@@ -197,14 +201,49 @@ def sanitize_channel_markers(body: dict[str, Any]) -> int:
 
 
 def build_headers(credential: CodeBuddyCredential, endpoint: str, *,
-                  quota_only: bool = False) -> dict[str, str]:
-    """头构造统一入口：X-Domain 与 Host 由同一 endpoint 派生。"""
+                  quota_only: bool = False, intl: bool = False,
+                  conversation_seed: str | None = None,
+                  model: str | None = None) -> dict[str, str]:
+    """头构造统一入口：X-Domain 与 Host 由同一 endpoint 派生。
+
+    intl=True 走国际站指纹（版本常量、稳定会话 id、官方会话/模型头、JWT uid
+    回退），国内站默认参数下逐字节不变。
+    """
     return generate_headers(
         endpoint=endpoint, bearer_token=credential.bearer_token,
         user_id=credential.user_id or None, account_uid=credential.account_uid or None,
         domain=credential.domain or None, enterprise_id=credential.enterprise_id or None,
-        department_full_name=credential.department_full_name or None, quota_only=quota_only,
+        department_full_name=credential.department_full_name or None,
+        quota_only=quota_only, intl=intl,
+        conversation_seed=conversation_seed, model=model,
     )
+
+
+def conversation_seed(payload: dict[str, Any]) -> str | None:
+    """请求体 → 会话种子（用于国际站稳定的 `X-Conversation-ID`）。
+
+    优先级：显式会话键 / 会话头（`engine.affinity.resolve_explicit`）→
+    首条非 system 消息的哈希。多轮对话每轮都会重发完整历史，首条用户消息
+    不变，故两者都能让同一对话在重试、换号、重启后仍得到同一个 id；都没有
+    （空 messages）时返回 None，调用方回落随机 id。
+
+    与 `retry`/换号无关：conversation id 属于**对话**，不属于某次请求或某个
+    凭证，换号重试必须沿用同一个。
+    """
+    explicit = resolve_explicit(payload)
+    if explicit is not None:
+        return explicit
+    messages = payload.get("messages")
+    if not isinstance(messages, list):
+        return None
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") in ("system", "developer"):
+            continue
+        canonical = json.dumps(message, ensure_ascii=False, sort_keys=True)
+        return "first:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
+    return None
 
 
 class CodeBuddyClient(LazyClients):
@@ -217,6 +256,9 @@ class CodeBuddyClient(LazyClients):
         sanitize_markers: bool = True,
         require_leading_system: bool = False,
         proxy: str | None = None,
+        intl: bool = False,
+        gzip_body: bool = False,
+        access_cache_path: str | None = None,
     ) -> None:
         self.endpoint = endpoint
         self._stream_client = stream_client
@@ -224,6 +266,22 @@ class CodeBuddyClient(LazyClients):
         self.sanitize_markers = sanitize_markers
         self.require_leading_system = require_leading_system
         self._proxy = proxy
+        # 国际站指纹开关：版本常量、稳定会话 id、官方会话/模型头、uid 回退
+        self.intl = intl
+        # 官方 CLI 用 Content-Encoding: gzip 发请求；只在显式开启时压缩
+        self.gzip_body = gzip_body
+        # 探活结果落盘缓存（None = 纯进程内，行为与历史一致）
+        self._access_store = (
+            ModelAccessStore(access_cache_path, MODEL_ACCESS_CACHE_TTL_SECONDS)
+            if access_cache_path else None)
+
+    def _headers(self, credential: CodeBuddyCredential, *,
+                 conversation_seed: str | None = None,
+                 model: str | None = None) -> dict[str, str]:
+        """按渠道指纹构造请求头；intl 通道补稳定会话 id 与当前模型。"""
+        return build_headers(
+            credential, self.endpoint, intl=self.intl,
+            conversation_seed=conversation_seed, model=model)
 
     # ------------------------------------------------------------- 聊天流
 
@@ -274,9 +332,20 @@ class CodeBuddyClient(LazyClients):
             "include_usage": True,
         }
         url = f"{self.endpoint}{EP_CHAT}"
-        async with self._stream.stream(
-            "POST", url, json=body, headers=build_headers(credential, self.endpoint),
-        ) as response:
+        headers = self._headers(credential,
+                                conversation_seed=conversation_seed(payload),
+                                model=model)
+        if self.gzip_body:
+            # 官方 CLI 发 gzip 体；只在 intl 通道开启（见 main.py 装配）
+            headers["Content-Encoding"] = "gzip"
+            content = gzip.compress(
+                json.dumps(body, ensure_ascii=False).encode("utf-8"))
+            request = self._stream.stream(
+                "POST", url, content=content, headers=headers)
+        else:
+            request = self._stream.stream(
+                "POST", url, json=body, headers=headers)
+        async with request as response:
             if response.status_code >= 400:
                 raw = await base.read_body_bounded(response)
                 # body 兜底：国际站 429+6004 只把重置时刻写在正文（`reset at
@@ -376,7 +445,7 @@ class CodeBuddyClient(LazyClients):
         if cached and now - cached[0] < MODEL_CACHE_TTL_SECONDS:
             return cached[1]
 
-        headers = build_headers(credential, self.endpoint)
+        headers = self._headers(credential)
         host = host_of(self.endpoint)
         headers.update({
             "Host": host,
@@ -454,12 +523,21 @@ class CodeBuddyClient(LazyClients):
         cache_key = self._model_access_cache_key(credential)
         now = time.time()
         cached = _MODEL_ACCESS_CACHE.get(cache_key)
+        if cached is None and self._access_store is not None:
+            # 重启后从落盘缓存恢复：进程内缓存清空即重打 20 连发探活，而那一刻
+            # 的「同 IP + 秒级窗口 + 并发 4」正是上游风控的自动化特征
+            stored = self._access_store.get(cache_key)
+            if stored is not None:
+                cached = stored
+                _MODEL_ACCESS_CACHE[cache_key] = stored
         if cached and now - cached[0] < MODEL_ACCESS_CACHE_TTL_SECONDS:
             access = cached[1]
         else:
             access = await self._probe_model_accesses(
                 credential, [model.id for model in models])
             self._remember_model_access(cache_key, now, access)
+            if self._access_store is not None:
+                self._access_store.put(cache_key, now, access)
         kept = [model for model in models if access.get(model.id) is not False]
         if not kept:
             # 全被拒绝多半是探活整体异常或账号刚降级：保留全量，避免渠道
@@ -517,7 +595,7 @@ class CodeBuddyClient(LazyClients):
             async with asyncio.timeout(MODEL_ACCESS_PROBE_TIMEOUT):
                 async with self._short.stream(
                         "POST", f"{self.endpoint}{EP_CHAT}", json=body,
-                        headers=build_headers(credential, self.endpoint)) as response:
+                        headers=self._headers(credential, model=model_id)) as response:
                     if response.status_code < 400:
                         return True
                     raw = await base.read_body_bounded(response)
@@ -542,7 +620,8 @@ class CodeBuddyClient(LazyClients):
     async def _post_json(self, url: str, payload: dict[str, Any],
                          credential: CodeBuddyCredential, *,
                          quota_only: bool = False) -> dict[str, Any]:
-        headers = build_headers(credential, self.endpoint, quota_only=quota_only)
+        headers = build_headers(credential, self.endpoint, quota_only=quota_only,
+                                intl=self.intl)
         response = await self._short.post(url, json=payload, headers=headers)
         if response.status_code >= 400:
             raise UpstreamHTTPError(response.status_code,

@@ -98,6 +98,9 @@ from .provider.codearts.client import CodeArtsClient
 from .provider.codearts.oauth import CodeArtsOAuth
 from .provider.codebuddy.client import CodeBuddyClient, CodeBuddyProvider
 from .provider.codebuddy.intl import CodeBuddyIntlProvider
+from .provider.codebuddy.model_access_store import (
+    cache_path as model_access_cache_path,
+)
 from .provider.codebuddy.oauth import CodeBuddyOAuth
 from .provider.kilo.client import KiloClient, KiloProvider
 from .provider.officeace import OfficeAceProvider
@@ -443,6 +446,11 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                 # 国际站网关硬性要求首条 system（实测 400/11128），国内站无此要求
                 require_leading_system=True,
                 proxy=proxies.get("codebuddy_intl"),
+                # 国际站指纹：稳定会话 id + 官方版本常量 + 会话/模型头 + JWT uid；
+                # 体走 gzip（官方 CLI 形态）；探活结果落盘，避免重启后 20 连发
+                intl=True,
+                gzip_body=True,
+                access_cache_path=model_access_cache_path(config.data_dir),
             ), pacer=codebuddy_intl_pacer),
         "zen": ZenProvider(
             client=ZenClient(host=_zen_endpoint(config),

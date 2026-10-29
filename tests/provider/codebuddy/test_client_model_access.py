@@ -237,3 +237,36 @@ async def test_cn_provider_does_not_probe_models():
     models = await provider.list_models({"bearer_token": "cn-token"})
     assert [model.id for model in models] == ["glm-5.2", "glm-5.3"]
     assert paths == ["/v3/config"]
+
+
+# --------------------------------------------- 探活结果落盘（2026-10-29）
+
+async def test_probe_result_persists_and_survives_restart(tmp_path):
+    """探活写盘；新进程（新 client）直接读盘，不再重打 20 连发。"""
+    from src.provider.codebuddy.client import CodeBuddyClient
+    from tests.helpers.http import provider_client
+
+    path = str(tmp_path / "access.json")
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(_body(request)["model"])
+        if _body(request)["model"] == "denied":
+            return httpx.Response(400, json={"code": 11158})
+        return httpx.Response(200, content=b"data: {}\n\n")
+
+    credential = CodeBuddyCredential(bearer_token="t", nickname="acct")
+    first = provider_client(CodeBuddyClient, handler,
+                            access_cache_path=path)
+    kept = await first.filter_available_models(
+        credential, _models("ok", "denied"))
+    assert [model.id for model in kept] == ["ok"]
+    assert sorted(calls) == ["denied", "ok"]
+
+    # 「重启」：新的 provider/client 实例 + 空的进程内缓存
+    _MODEL_ACCESS_CACHE.clear()
+    second = provider_client(CodeBuddyClient, lambda _r: pytest.fail("不应重新探活"),
+                             access_cache_path=path)
+    kept_again = await second.filter_available_models(
+        credential, _models("ok", "denied"))
+    assert [model.id for model in kept_again] == ["ok"]

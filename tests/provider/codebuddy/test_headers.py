@@ -99,3 +99,118 @@ def test_stainless_fingerprint_variants():
         assert h._stainless_os() == "Linux"
     with mock.patch.object(h.platform, "system", return_value="SunOS"):
         assert h._stainless_os() == "SunOS"
+
+
+# ------------------------------------------------- 国际站指纹（2026-10-29）
+
+def _jwt(claims: dict) -> str:
+    import base64
+    import json
+
+    payload = base64.urlsafe_b64encode(
+        json.dumps(claims).encode()).decode().rstrip("=")
+    return f"header.{payload}.sig"
+
+
+def test_intl_profile_uses_current_cli_versions_and_extra_headers():
+    """国际站换官方现行版本常量，并补会话/模型/链路头（缺一即自动化信号）。"""
+    headers = build_headers(
+        CodeBuddyCredential(bearer_token="t"), "https://www.codebuddy.ai",
+        intl=True, conversation_seed="sess-1", model="deepseek-v4.1-flash")
+    assert headers["User-Agent"] == "CLI/2.178.0 CodeBuddy/2.178.0"
+    assert headers["X-IDE-Version"] == "2.178.0"
+    assert headers["X-Product-Version"] == "2.178.0"
+    assert headers["x-stainless-package-version"] == "7.39.0"
+    assert headers["x-stainless-runtime-version"] == "v26.7.0"
+    assert headers["X-Trace-ID"] == headers["X-Request-ID"]
+    assert headers["X-Session-ID"] == headers["X-Conversation-ID"]
+    assert headers["X-Model-ID"] == "deepseek-v4.1-flash"
+
+
+def test_intl_conversation_id_is_stable_uuid_v1_per_session():
+    """同一会话每轮同一个 id（官方 CLI 形态）；不同会话互不相同。"""
+    first = build_headers(CodeBuddyCredential(bearer_token="t"),
+                          "https://www.codebuddy.ai", intl=True,
+                          conversation_seed="conv-a")
+    second = build_headers(CodeBuddyCredential(bearer_token="t"),
+                           "https://www.codebuddy.ai", intl=True,
+                           conversation_seed="conv-a")
+    other = build_headers(CodeBuddyCredential(bearer_token="t"),
+                          "https://www.codebuddy.ai", intl=True,
+                          conversation_seed="conv-b")
+    assert first["X-Conversation-ID"] == second["X-Conversation-ID"]
+    assert other["X-Conversation-ID"] != first["X-Conversation-ID"]
+    # v1 的版本位在第三段首位
+    assert first["X-Conversation-ID"].split("-")[2][0] == "1"
+    assert len(first["X-Conversation-ID"]) == 36
+
+
+def test_intl_without_seed_falls_back_to_random_conversation_id():
+    a = build_headers(CodeBuddyCredential(bearer_token="t"),
+                      "https://www.codebuddy.ai", intl=True)
+    b = build_headers(CodeBuddyCredential(bearer_token="t"),
+                      "https://www.codebuddy.ai", intl=True)
+    assert a["X-Conversation-ID"] != b["X-Conversation-ID"]
+    assert "X-Model-ID" not in a
+
+
+def test_cn_profile_stays_byte_identical():
+    """国内站正在稳定工作：版本常量与「逐请求随机」的行为都不动。"""
+    headers = build_headers(CodeBuddyCredential(bearer_token="t"),
+                            "https://copilot.tencent.com")
+    assert headers["User-Agent"] == "CLI/2.107.0 CodeBuddy/2.107.0"
+    assert headers["x-stainless-package-version"] == "6.25.0"
+    for extra in ("X-Session-ID", "X-Trace-ID", "X-Product-Version", "X-Model-ID"):
+        assert extra not in headers
+    again = build_headers(CodeBuddyCredential(bearer_token="t"),
+                          "https://copilot.tencent.com")
+    assert again["X-Conversation-ID"] != headers["X-Conversation-ID"]
+
+
+def test_intl_user_id_falls_back_to_jwt_sub():
+    """本地 intl 凭证的 user_id/account_uid 都是空串；官方 CLI 每请求都发 uid。"""
+    token = _jwt({"sub": "3455d334-5b72-49f9", "iss": "https://www.codebuddy.ai"})
+    headers = build_headers(CodeBuddyCredential(bearer_token=token),
+                            "https://www.codebuddy.ai", intl=True)
+    assert headers["X-User-Id"] == "3455d334-5b72-49f9"
+    # 显式 uid 优先
+    explicit = build_headers(
+        CodeBuddyCredential(bearer_token=token, account_uid="acct"),
+        "https://www.codebuddy.ai", intl=True)
+    assert explicit["X-User-Id"] == "acct"
+    # 国内站不回退：历史形态逐字节不变
+    assert "X-User-Id" not in build_headers(CodeBuddyCredential(bearer_token=token),
+                                            "https://copilot.tencent.com")
+
+
+def test_intl_quota_only_headers_skip_identity():
+    headers = build_headers(
+        CodeBuddyCredential(bearer_token=_jwt({"sub": "u"})),
+        "https://www.codebuddy.ai", intl=True, quota_only=True)
+    assert "X-User-Id" not in headers
+    assert headers["X-Session-ID"]  # 指纹头照发，只有身份头在 quota_only 下不发
+
+
+def test_uid_from_token_rejects_malformed_input():
+    from src.provider.codebuddy.headers import uid_from_token
+
+    assert uid_from_token("") == ""
+    assert uid_from_token("only.two") == ""
+    assert uid_from_token("a.!!!.c") == ""
+    assert uid_from_token(_jwt(["not", "an", "object"])) == ""
+    assert uid_from_token(_jwt({"sub": 42})) == ""
+    assert uid_from_token(_jwt({"iss": "x"})) == ""
+    assert uid_from_token(_jwt({"sub": "u-1"})) == "u-1"
+
+
+def test_conversation_uuid_cache_is_bounded(monkeypatch):
+    """条目上限：超量整体清空（会话 id 只是指纹，清空只影响一次）。"""
+    from src.provider.codebuddy import headers as hdrs
+
+    monkeypatch.setattr(hdrs, "_CONVERSATION_CREATED_AT", {})
+    monkeypatch.setattr(hdrs, "_CONVERSATION_CACHE_MAX", 2)
+    hdrs.conversation_uuid("a")
+    hdrs.conversation_uuid("b")
+    assert len(hdrs._CONVERSATION_CREATED_AT) == 2
+    hdrs.conversation_uuid("c")
+    assert list(hdrs._CONVERSATION_CREATED_AT) == ["c"]

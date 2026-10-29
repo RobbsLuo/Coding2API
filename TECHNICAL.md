@@ -109,7 +109,7 @@ MODEL_SCOPED_KINDS = frozenset({MODEL, BLOCKED, CONCURRENCY})
 **账号被上游风控限制（RESTRICTED，CodeBuddy 11140）**：`403 request illegal` 的字面像「这条请求非法」，实际是上游按账号（多号同源时按出口 IP/设备）拉黑——换模型、换请求形态、换代理都无效（techysy/10router、yetone/magpie、maiphucgiang/codebuddy2api 三个项目的实测结论一致）。
 
 - **必须拦在 `401/403 → DEAD` 之前**：判 DEAD 会写不可逆的 `disabled=1`，而这类限制由上游自行解除，写成禁用就变成「必须有人点恢复」，还会诱使运维反复 revive 去撞。
-- **账号级 2h 冷却**（`RESTRICTED_COOLDOWN_SECONDS`），上游给 `Retry-After` 时采用并夹在 `[now + 该方法常量, now + 24h]` 内（比常量还短的上游值一律回落常量，防止 `Retry-After: 0` 让同一个号在冷却刚写下的瞬间又变可选）；到期自动回到候选，不做任何人工动作。
+- **账号级指数冷却**（`RESTRICTED_COOLDOWN_SECONDS` = 2h 起，按该凭证命中次数翻倍，封顶 `RESTRICTED_COOLDOWN_MAX_SECONDS` = 7 天），上游给 `Retry-After` 时采用并夹在 `[now + 本次时长, now + 24h]` 内（比本次时长还短的上游值一律回落该时长，防止 `Retry-After: 0` 让同一个号在冷却刚写下的瞬间又变可选）；到期自动回到候选，不做任何人工动作。固定 2h 会让整批同源账号每 2h 被原样重试一遍，而重复撞击已被封的账号正是上游判「自动化」的证据（2026-10-27 实测一天撞了 4 轮）。`save_success` 清 `err_count` → 真恢复后退避计数归零。
 - **当前请求不再换号**：`executor` 命中后 `_skip_provider` 跳过该渠道剩余凭证，继续试其它渠道。逐个号换着撞会扩大标记面（实测一次请求连打 3 个号全 403，新号加入 3 分钟即被封）。
 - **窗口内第二个不同凭证也命中 → 升级为渠道级暂停 24h**（`_pause_provider_on_burst` + `cool_provider`）：只冷却、不写 `disabled`，所有号一起退避。判据是窗口内**不同凭证的个数**而不是命中次数——同一个号重复中招不算整批同源（单号 2h 冷却已挡住重复撞），按命中次数升级会让单一凭证/单一租户的两个连续请求把整渠道停掉。
 
@@ -432,6 +432,17 @@ class Provider(Protocol):
 **协议零复制**：同一套后端（同一 Keycloak realm `copilot`、同一组路径 `/v2/chat/completions`、`/v3/config`、`/v2/plugin/auth/*`、`/v2/billing/*`、`/billing/meter/*`）→ `CodeBuddyIntlProvider` = `CodeBuddyProvider` 的数据类子类（`provider/codebuddy/intl.py`），只覆渠道 id 与三项能力。**路由存在性判据**：已注册路径回 401（openresty/APISIX）；未注册回 `{"error_msg":"404 Route Not Found"}`。前缀级挂认证时 401 不带信息（`/v2/activity/*` 整前缀挂认证）→ 须另找同前缀对照路径。
 
 **唯一行为差异：首条 system 强制注入**。国际站要求 `messages[0]` 是 system，否则 `400` + `{"code":11128,"msg":"first message is not system prompt"}`。client 构造参数 `require_leading_system` 只在国际站开；`ensure_leading_system` 仅在首条非 system 时补 `DEFAULT_LEADING_SYSTEM = "You are a helpful assistant."`。三约束：① 判首条须在 `developer → system` 归一**之后**；② 客户端自带 system 不注入、不覆盖、不重排；③ 正文不带厂商指纹（否则撞 11128）。只改 deepcopy 的出站副本，不穿透回 `request.raw`。
+
+**国际站指纹（2026-10-29）**：国际站自 2026-10-15 加渠道校验后，`X-Conversation-*` 三件套只是**入场券**（缺任一 → `400/11128`，补齐 → `200`，decola/9router #5005 的 A/B）；账号是否被判自动化看的是**指纹可信度**。`CodeBuddyClient(intl=True)` 只作用于国际站，国内站逐字节不变：
+
+- **会话 id 稳定**：`X-Conversation-ID` 由 `conversation_seed`（显式会话键 / 会话头 / 首条非 system 消息哈希，见 `client.conversation_seed`）派生 **UUID v1**，同一对话每轮同一个 id、换号重试也沿用；逐请求随机等于「每问一句开一个新对话」，是最显眼的自动化特征。
+- **版本常量对齐官方现行 CLI**：`INTL_CLI_VERSION` / `INTL_OPENAI_JS_PACKAGE_VERSION` / `INTL_NODE_RUNTIME_VERSION`（UA、`X-IDE-Version`、`X-Product-Version`、`x-stainless-*` 同源）。国内站继续用 2.107.0 那套。
+- **补官方头**：`X-Session-ID`（= 会话 id）、`X-Model-ID`（当前模型）、`X-Trace-ID`（= `X-Request-ID`）、`X-Product-Version`；值不明的 `X-Agent-Type` / `X-Data-Tag` / `X-Root-Request-ID` **不发**——发一个官方从不发的头本身就是信号。
+- **`X-User-Id` 回退 JWT `sub`**：本地 intl 凭证的 `user_id` / `account_uid` 都是空串，而官方 CLI 每请求都发该头（上游据此把请求关联到账号）。只在国际站回退，国内站历史形态不变。
+- **请求体 gzip**：官方 CLI 用 `Content-Encoding: gzip`（`gzip_body=True`，仅 intl 装配）。
+- **探活结果落盘**：`filter_available_models` 的 20 连发结果除进程内缓存外写 `{data_dir}/codebuddy-model-access.json`（`model_access_store.py`，原子写、TTL 6h、坏文件降级为空）。否则每次重启都对每个账号重放一轮「同 IP、秒级窗口、并发 4」的探活，正是风控眼里的自动化（2026-10-27 当天 11 次重启 ≈ 1320 次）。
+
+**11140 无客户端解**：账号一旦被定性，换头、换模型、换体形态都无效（多实现一致结论；`SUBMIT_FEEDBACK` 申诉是唯一路径）。2026-10-27 六个国际站账号全中（含一个零聊天记录、余额未动的新号），止损见 `docs/codebuddy-intl-analysis-2026-10-29.md`。
 
 **能力边界**：
 - **签到渠道级缺席**：路径存在（`/billing/meter/checkin-activity-status` 回 `code=0`），活动没有（`active: false`，`season`/`theme_name`/`start_time`/`end_time`/`activity_name` 全空；CLAIM 回 `{"code":10001,"msg":"签到活动未开启或已过期"}`）→ `checkin` / `checkin_scope` / `checkin_status` 三项置 `None`（保留只会每 10 分钟失败一次，触发 `task_failed` 噪音）。

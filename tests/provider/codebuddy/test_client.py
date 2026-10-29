@@ -159,3 +159,75 @@ def test_error_type_for_invalid():
     from src.engine.executor import _error_type_for
 
     assert _error_type_for(ErrKind.INVALID) == "invalid_request"
+
+
+# ------------------------------------------- 国际站指纹（2026-10-29）
+
+def test_conversation_seed_prefers_explicit_then_first_message():
+    from src.provider.codebuddy.client import conversation_seed
+
+    explicit = conversation_seed({
+        "prompt_cache_key": "p1",
+        "messages": [{"role": "user", "content": "hi"}]})
+    assert explicit == "prompt_cache_key:p1"
+
+    seeded = conversation_seed({"messages": [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "同一个问题"}]})
+    assert seeded is not None and seeded.startswith("first:")
+    # 多轮追加后首条用户消息不变 → 仍是同一个会话种子（换号/重试不换 id）
+    grown = conversation_seed({"messages": [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "同一个问题"},
+        {"role": "assistant", "content": "答"},
+        {"role": "user", "content": "追问"}]})
+    assert grown == seeded
+
+    assert conversation_seed({}) is None
+    assert conversation_seed({"messages": "not a list"}) is None
+    # 脏消息（非 dict）跳过，继续找第一条可用的
+    assert conversation_seed({"messages": ["junk", {"role": "user", "content": "x"}]}
+                             ).startswith("first:")
+    assert conversation_seed({"messages": [{"role": "system", "content": "s"}]}) is None
+
+
+async def test_stream_chat_intl_gzips_body_and_keeps_conversation_id():
+    """官方 CLI 形态：gzip 体 + 同一会话复用 conversation id、每轮换 request id。"""
+    import gzip
+
+    from tests.helpers.http import provider_client
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, text=fixture("chat-basic.sse"))
+
+    client = provider_client(CodeBuddyClient, handler, intl=True, gzip_body=True)
+    payload = {"messages": [{"role": "user", "content": "hi"}]}
+    for _ in range(2):
+        [event async for event in client.stream_chat(
+            CodeBuddyCredential(bearer_token="t"), payload, "glm-5.2")]
+
+    first, second = seen
+    assert first.headers["content-encoding"] == "gzip"
+    assert json.loads(gzip.decompress(first.content))["stream"] is True
+    assert first.headers["x-conversation-id"] == second.headers["x-conversation-id"]
+    assert first.headers["x-request-id"] != second.headers["x-request-id"]
+    assert first.headers["x-model-id"] == "glm-5.2"
+    assert first.headers["user-agent"].startswith("CLI/2.178.0")
+
+
+async def test_stream_chat_cn_keeps_plain_json_body():
+    """国内站不受国际指纹改动影响：明文 JSON、无 Content-Encoding。"""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["encoding"] = request.headers.get("content-encoding")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, text=fixture("chat-basic.sse"))
+
+    [event async for event in _client(handler).stream_chat(
+        CodeBuddyCredential(bearer_token="t"), {"messages": []}, "glm-5.2")]
+    assert seen["encoding"] is None
+    assert seen["body"]["model"] == "glm-5.2"

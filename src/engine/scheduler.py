@@ -24,6 +24,10 @@ OTHER_COOLDOWN_SECONDS = 10 * 60
 # 去反复撞（每次 revive 都可能再留一条风控记录）。到期自然回到候选，试探一次
 # 的成本远低于长期静默。
 RESTRICTED_COOLDOWN_SECONDS = 2 * 3600
+# 11140 是「账号被上游定性」而不是定时冷却：同一账号反复被限说明整批账号同源，
+# 每次到期原样再撞正是上游点名的自动化重试模式（2026-10-27 实测一天撞了 4 轮）。
+# 按命中次数指数退避，封顶 7 天；上游真的给了更晚的 Retry-After 仍按 24h 上限采纳。
+RESTRICTED_COOLDOWN_MAX_SECONDS = 7 * 86400
 ERR_THRESHOLD = 3
 MAX_ROTATE = 3
 # 模型级限流（6004）软冷却基数与封顶（有界指数退避）
@@ -326,7 +330,7 @@ class Scheduler:
         """按错误分类更新冷却/禁用状态。
 
         DEAD    → 硬禁用
-        RESTRICTED → 账号级 2h 冷却（上游按账号/IP 风控限制，到期自动半开；
+        RESTRICTED → 账号级指数冷却（2h 起按命中次数翻倍，封顶 7 天；
                     executor 另外跳过该渠道其余凭证，不逐个号去撞）
         PLAN    → 12h 长冷却，清空 err_count（权益耗尽）
         CREDIT  → 冷却到次日 04:00（余额不足，等签到恢复）
@@ -356,13 +360,17 @@ class Scheduler:
             return ErrorOutcome(disabled=True, err_count=0)
         if kind is ErrKind.RESTRICTED:
             # 账号级风控限制：只冷却、不禁用。禁用是不可逆的人工状态，而这类
-            # 限制会由上游自行解除；看 `Retry-After`（上游有时给）但夹在
-            # [常量, 24h] 内，避免上游给个离谱值把号锁一天以上。
+            # 限制会由上游自行解除；但**冷却时长按命中次数指数退避**（2h 起，
+            # 翻倍封顶 7 天）：固定 2h 会让整批同源账号每 2h 被重试一遍，
+            # 而重复撞击已经被封的账号正是上游判「自动化」的证据。
+            # 上游给 `Retry-After` 时仍夹在 [本次时长, 24h]。
+            level = max(candidate.err_count, 0)
+            duration = min(RESTRICTED_COOLDOWN_SECONDS * (2 ** min(level, 8)),
+                           RESTRICTED_COOLDOWN_MAX_SECONDS)
             return ErrorOutcome(
                 cooling_until=self._cooling_until(
-                    candidate, kind, now, retry_at,
-                    RESTRICTED_COOLDOWN_SECONDS, None),
-                err_count=0)
+                    candidate, kind, now, retry_at, duration, None),
+                err_count=level + 1)
         if kind is ErrKind.CREDIT:
             return ErrorOutcome(
                 cooling_until=self._cooling_until(
