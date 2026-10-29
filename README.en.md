@@ -71,6 +71,8 @@ docker compose exec coding2api python scripts/create_user.py admin --role admin
 
 Pull image: `docker compose pull` (or `docker pull ghcr.io/robbsluo/coding2api:v0.10.0`). Pushing `v*` tag to main triggers `.github/workflows/publish.yml`, publishing `<tag>` + `:latest`.
 
+Running the container on a **VPS with a public IP** and wanting an https edge → see [Public deployment (Docker + Caddy)](#public-deployment-docker--caddy-automatic-https).
+
 ## Users and roles
 
 Accounts live in SQLite's `users` table; the *Users* page (admins only) handles management.
@@ -753,6 +755,49 @@ Backend serves built frontend at `/` (reads disk per request), so **frontend-onl
 > **`web/.npmrc` must not be deleted**: it disables `auto-install-peers` (else `@lobehub/icons` drags in `@lobehub/ui` / `antd`). Coupled to `settings.autoInstallPeers` in lockfile → `Dockerfile` must `COPY web/.npmrc`, or `--frozen-lockfile` fails with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`.
 
 > **Deployment notes for this machine**: process management, paths, tool versions in `docs/local-environment.md` (gitignored).
+
+## Public deployment (Docker + Caddy automatic HTTPS)
+
+For a VPS with a public IP: one compose command starts "Caddy edge + app", certificates are issued / renewed automatically, and the app port is not exposed.
+
+```
+client ──443/TLS──> Caddy (TLS termination) ──compose network──> coding2api:8000
+```
+
+Prerequisites: Docker Compose ≥ 2.24 (the override uses `!override`), DNS A / AAAA record pointing at this host, ports 80 and 443 (tcp + udp) free (80 is needed for the ACME HTTP-01 challenge).
+
+Two more `.env` entries (everything else as in *Quick start*):
+
+```bash
+PUBLIC_DOMAIN=ai-api.example.com     # required: the certificate is issued for it
+ACME_EMAIL=ops@example.com           # required: Let's Encrypt expiry notices
+# Leave ALLOWED_HOSTS empty: empty = loopback + the PUBLIC_BASE_URL hostname
+```
+
+Start it and watch certificate issuance:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
+docker compose -f docker-compose.yml -f docker-compose.public.yml logs -f caddy
+curl -fsS https://ai-api.example.com/health
+```
+
+What the override (`docker-compose.public.yml`) changes:
+
+| Change | Why |
+|---|---|
+| App port bound to `127.0.0.1:${PORT}` | No plaintext-http bypass left; the only way in is Caddy |
+| `TRUST_PROXY=true` | Exactly one Caddy in front (and the app port is loopback-only, so it cannot be reached directly), so API keys' `allowed_ips` see the real client IP |
+| `ALLOWED_HOSTS` extended with the domain + `127.0.0.1` | Non-empty means *full replacement*: a value already in `.env` would drop the domain (site-wide 400); missing loopback makes the container healthcheck fail → permanently unhealthy |
+| `HOST=0.0.0.0` | `.env.example` ships `HOST=127.0.0.1`, which would make the container listen on loopback only and Caddy's upstream unreachable |
+| New Caddy service (`deploy/caddy/Caddyfile`) | Automatic HTTPS + HTTP→HTTPS 308; `flush_interval -1` keeps streaming frame-by-frame; `X-Forwarded-For` is overwritten so client spoofing is ignored; no proxy-level timeouts (those stay with the app's `STREAM_*` / `UPSTREAM_COMPLETE_TIMEOUT_SECONDS`) |
+| `/metrics` returns 404 | That endpoint has no auth; grab it from the host with `curl 127.0.0.1:${PORT}/metrics` when needed |
+
+Notes:
+
+- **Certificates live in the named volume `caddy_data`**: never `docker compose ... down -v` — re-issuing hits the Let's Encrypt limit of 5 certificates per domain per week.
+- **After changing `src/`, rebuild the app container**: `... up -d --build` (or at least `docker compose ... restart coding2api`); restarting Caddy alone does nothing.
+- Behind CGNAT there is no inbound address, so this path is unavailable → use the frp tunnel below.
 
 ## Public entry point (VPS + frp reverse tunnel)
 

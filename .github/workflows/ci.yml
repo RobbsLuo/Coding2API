@@ -67,6 +67,21 @@ jobs:
         run: docker compose config --quiet
         env:
           APP_SECRET: ci-placeholder-secret
+      - name: 校验 compose 公网覆盖文件语法（Caddy 入口）
+        run: docker compose -f docker-compose.yml -f docker-compose.public.yml config --quiet
+        env:
+          APP_SECRET: ci-placeholder-secret
+          PUBLIC_DOMAIN: ai-api.example.com
+          ACME_EMAIL: ops@example.com
+      - name: 校验 Caddyfile 语法
+        run: |
+          # 只 validate、不起服务：占位域名不申请证书（validate 不联网签发）
+          docker run --rm \
+            -e PUBLIC_DOMAIN=ai-api.example.com \
+            -e ACME_EMAIL=ops@example.com \
+            -e PORT=8000 \
+            -v "$PWD/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+            caddy:2.11.7-alpine caddy validate --config /etc/caddy/Caddyfile
       - name: 构建镜像并启动（验证 compose 可真实运行）
         run: |
           mkdir -p data secrets
