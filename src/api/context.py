@@ -105,9 +105,10 @@ def build_context_compressor(
                     after = sum(len(m["content"]) for m in squashed
                                 if isinstance(m, dict)
                                 and isinstance(m.get("content"), str))
-                    # 只在真的压了才记：长会话里 tool 输出超阈值本就少见，
-                    # 这行直接给出「压了多少字符」，验收收益不用翻库
-                    logger.info(
+                    # 只在真的压了才记。DEBUG 而非 INFO：长会话里这是**常态**
+                    # 而非异常，实测 1 小时内 749 行、占 err.log 的 19%，把真
+                    # WARNING 挤出视野；验收收益要数字时按需打开 DEBUG 即可。
+                    logger.debug(
                         "tool 输出压缩 provider=%s model=%s messages=%d 字符 %d→%d",
                         provider_id, model, len(messages), before, after)
                     payload = {**payload, "messages": squashed}
