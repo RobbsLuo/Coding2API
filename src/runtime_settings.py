@@ -279,7 +279,7 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "Slack 入站 Webhook 地址；留空 = 不推 Slack。消息体为 {text}。",
                task="alert", section="基础与迟滞"),
     HotSetting("alert_interval_minutes", int, "运维告警周期（分钟）",
-               "后台评估四类风险的一轮间隔；下限 1 分钟。", minimum=1,
+               "后台评估七类规则的一轮间隔；下限 1 分钟。", minimum=1,
                task="alert", section="基础与迟滞", floor=1),
     HotSetting("alert_silence_minutes", int, "告警静默窗（分钟）",
                "同一条告警（规则 + 对象）在该窗口内只落库/推送一次，避免持续"

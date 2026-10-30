@@ -177,7 +177,7 @@ class Settings(BaseSettings):
     # 服务端日志页（「任务与配置」→ 日志）：进程内环形缓冲的保留行数，
     # 0 = 关闭该页（端点返回 404）。只收本进程 logging 记录，不读文件。
     log_buffer_lines: int = 500
-    # 运维告警：周期评估四类风险，命中即落 alert_events 并可选推送
+    # 运维告警：周期评估七类规则，命中即落 alert_events 并可选推送
     # webhook。webhook 留空 = 只留站内记录、不外推。
     alert_enabled: bool = True
     alert_webhook_url: str = ""

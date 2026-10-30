@@ -76,8 +76,9 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
               "分数显示 —，不影响模型列表。",
               group="model"),
     TaskSpec("alert", "运维告警",
-             "周期评估四类风险（池耗尽 / 任务连续失败 / token 临近到期 / 上游"
-             "错误率骤升），命中落站内记录并可推送 webhook；周期见「运维告警周期」。",
+             "周期评估七类规则（池耗尽 / 任务连续失败 / token 临近到期 / 上游"
+             "错误率骤升 / 单 Key 用量暴涨 / 非工作时段请求 / 预算分层），"
+             "命中落站内记录并可推送 webhook；周期见「运维告警周期」。",
              group="ops"),
     TaskSpec("backup", "数据库备份",
              "周期性把主库一致性快照（VACUUM INTO）写进 DATA_DIR/backups/，"

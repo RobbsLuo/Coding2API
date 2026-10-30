@@ -314,8 +314,9 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_events(actor, ts);
 
--- 运维告警事件：后台周期评估四类风险（池耗尽 / 任务连续失败 / token
--- 临近到期 / 上游错误率骤升），命中即落一行，供管理台「站内告警记录」回看。
+-- 运维告警事件：后台周期评估七类规则（池耗尽 / 任务连续失败 / token
+-- 临近到期 / 上游错误率骤升 / 单 Key 用量暴涨 / 非工作时段 / 预算分层），
+-- 命中即落一行，供管理台「站内告警记录」回看。
 --
 -- 为什么落库而不是像 TaskStatusStore 只留内存：告警的价值恰在「错过的那段
 -- 时间发生了什么」——夜里池子耗尽、某任务连挂几轮，运维醒来要能看见，而
