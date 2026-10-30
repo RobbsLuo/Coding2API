@@ -1,6 +1,6 @@
 [project]
 name = "coding2api"
-version = "0.10.0"
+version = "0.10.1"
 description = "把 CodeBuddy（国内站 + 国际）、TRAE SOLO、OpenCode Zen、Kilo、Qoder、CodeArts、OfficeAce 八个上游渠道统一封装为 OpenAI / Responses / Anthropic 兼容 API"
 readme = "README.md"
 requires-python = ">=3.12"
