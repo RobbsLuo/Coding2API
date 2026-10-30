@@ -54,11 +54,12 @@ Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 24+ and pn
 uv sync
 uv run python scripts/create_user.py admin --role admin   # first admin
 cd web && pnpm install && pnpm build && cd ..
-APP_SECRET="pick-a-random-string" \
-  uv run python -m uvicorn src.main:build_app --factory --port 8000
+APP_SECRET="pick-a-random-string" uv run python -m src.main
 ```
 
 Open <http://127.0.0.1:8000>. Add rest from the *Users* page.
+
+> Use `python -m src.main`, not `uvicorn src.main:build_app`: the former reads `HOST`/`PORT` from `.env` and holds the single-instance lock (`data/.instance.lock`). One `DATA_DIR` admits one process — two instances each run background tasks, probe the same credentials twice and overwrite each other's stats. A second instance prints "another instance is already using data (PID xxx)" and exits cleanly.
 
 `scripts/create_user.py` writes SQLite directly (`--db` or `DATA_DIR`; default `data/coding2api.sqlite3`). Existing `secrets/users.txt` imported once on startup (never overwritten).
 

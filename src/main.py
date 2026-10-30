@@ -92,6 +92,7 @@ from .engine.inflight import InflightGuard
 from .engine.limits import LimitGuard
 from .engine.model_resolver import KNOWN_PROVIDERS, parse_fallback_groups
 from .engine.scheduler import Scheduler
+from .instance_lock import AlreadyRunning, hold_instance_lock
 from .key_quota import KeyQuotaGuard
 from .provider.codearts import CodeArtsProvider
 from .provider.codearts.client import CodeArtsClient
@@ -1000,24 +1001,43 @@ def _load_users(*, settings: Settings, user_repo):
 
 def run() -> None:
     """本地启动入口：python -m src.main 或 coding2api 命令。"""
+    import sys
+
     import uvicorn
 
     config = load_settings()
     # 应用日志（审计、上游错误等）在此之前无 handler 会被丢弃
     configure_logging(config.log_level)
-    uvicorn.run(
-        build_app(config), host=config.host, port=config.port,
-        log_level=config.log_level.lower(),
-        # 关掉 uvicorn 自带 access log：请求级留痕已由 RequestLogMiddleware
-        # 覆盖（logfmt，带时间戳与 request_id，可与 usage_events 关联），而
-        # uvicorn 的裸行无时间戳、含完整 query string，只是把同样的请求再写满
-        # 另一个轮转文件。
-        access_log=False,
-        # 收到 SIGTERM 后先停止接受新连接，给在途请求（含长流）最多
-        # GRACEFUL_SHUTDOWN_SECONDS 秒收尾，再强关。默认 None 是无限等，
-        # 配合容器/launchd 的停机超时会变成「卡住直到被 SIGKILL」。
-        timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
-    )
+    # 单实例保护必须在 build_app 之前：后者会建库、跑迁移、应用待恢复备份，
+    # 这些写操作在第二个实例上重复执行就是双写（见 src/instance_lock.py）。
+    try:
+        instance_lock = hold_instance_lock(config.data_dir)
+    except AlreadyRunning as error:
+        # **退出码 0 而不是非零**：这是「已经有人在服务」，不是故障。
+        # 三条启动路径的守护策略都是「非零退出才重拉」
+        # （launchd KeepAlive.SuccessfulExit=false、systemd Restart=on-failure、
+        #   compose restart），用非零退出会变回每 10s 一次的重启循环——
+        # 实测 2026-09-19~10-17 刷了 2377 条 `[Errno 48]`，完整 traceback
+        # 把真正的故障挤出视野。真崩溃仍然是非零退出，照样被拉起来。
+        logger.error("%s", error)
+        print(f"启动中止（这不是故障，已有实例在服务）：{error}", file=sys.stderr)
+        return
+    try:
+        uvicorn.run(
+            build_app(config), host=config.host, port=config.port,
+            log_level=config.log_level.lower(),
+            # 关掉 uvicorn 自带 access log：请求级留痕已由 RequestLogMiddleware
+            # 覆盖（logfmt，带时间戳与 request_id，可与 usage_events 关联），而
+            # uvicorn 的裸行无时间戳、含完整 query string，只是把同样的请求再写满
+            # 另一个轮转文件。
+            access_log=False,
+            # 收到 SIGTERM 后先停止接受新连接，给在途请求（含长流）最多
+            # GRACEFUL_SHUTDOWN_SECONDS 秒收尾，再强关。默认 None 是无限等，
+            # 配合容器/launchd 的停机超时会变成「卡住直到被 SIGKILL」。
+            timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
+        )
+    finally:
+        instance_lock.release()
 
 
 if __name__ == "__main__":  # pragma: no cover

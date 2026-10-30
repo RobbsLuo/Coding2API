@@ -54,11 +54,12 @@
 uv sync
 uv run python scripts/create_user.py admin --role admin   # 建首个管理员
 cd web && pnpm install && pnpm build && cd ..
-APP_SECRET="换成你自己的随机字符串" \
-  uv run python -m uvicorn src.main:build_app --factory --port 8000
+APP_SECRET="换成你自己的随机字符串" uv run python -m src.main
 ```
 
 开 <http://127.0.0.1:8000> 登录；加人走「用户管理」页。
+
+> 用 `python -m src.main` 而不是 `uvicorn src.main:build_app`：前者读 `.env` 的 `HOST`/`PORT`，并持有单实例锁（`data/.instance.lock`）。同一 `DATA_DIR` 只能起一个进程——两个实例会各自跑后台任务、重复探测凭证并互相覆盖统计。第二个实例会打印「另一个实例已在使用 data（PID xxx）」后干净退出。
 
 `scripts/create_user.py` 直写 SQLite（`--db` 或 `DATA_DIR`；默认 `data/coding2api.sqlite3`）。老部署 `secrets/users.txt` 启动导入一次，不覆盖已存在。
 

@@ -532,6 +532,93 @@ def test_run_entry_point_starts_uvicorn(monkeypatch, tmp_path):
     assert captured["timeout_graceful_shutdown"] == main.GRACEFUL_SHUTDOWN_SECONDS
 
 
+def test_run_releases_instance_lock_after_uvicorn_returns(monkeypatch, tmp_path):
+    """uvicorn 退出后必须释放锁，否则重启永远起不来。"""
+    import sys
+    import types
+
+    from src import main
+    from src.instance_lock import LOCK_NAME, InstanceLock
+
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.run = lambda app, **kwargs: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    monkeypatch.setenv("APP_SECRET", SECRET)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    main.run()
+
+    # 能再次取到锁 = 上次确实释放了
+    lock = InstanceLock(tmp_path)
+    lock.acquire()
+    lock.release()
+    assert (tmp_path / LOCK_NAME).is_file()
+
+
+def test_run_aborts_when_another_instance_holds_lock(monkeypatch, tmp_path, capsys):
+    """已有实例持锁时 run() 干净返回，绝不进 build_app（避免双写库）。
+
+    这是崩溃循环的止损点：若这里以非零退出，launchd（SuccessfulExit=false）/
+    systemd（Restart=on-failure）会把「另一个实例在跑」当成崩溃每 10s 重拉，
+    实测刷过 2377 条 `[Errno 48]`。所以必须退出码 0。
+    """
+    import sys
+    import types
+
+    from src import main
+    from src.instance_lock import InstanceLock
+
+    started: list[int] = []
+
+    def fake_run(app, **kwargs):
+        started.append(1)
+
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.run = fake_run  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    monkeypatch.setenv("APP_SECRET", SECRET)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    holder = InstanceLock(tmp_path)
+    holder.acquire()
+    try:
+        main.run()          # 不得抛 SystemExit（非零退出会触发重拉循环）
+    finally:
+        holder.release()
+
+    assert started == [], "取锁失败时不得启动 uvicorn"
+    err = capsys.readouterr().err
+    assert "启动中止" in err
+    assert "另一个实例" in err
+
+
+def test_run_releases_lock_when_build_app_raises(monkeypatch, tmp_path):
+    """build_app 抛异常也要释放锁（finally 覆盖，不是只在正常路径）。"""
+    import sys
+    import types
+
+    from src import main
+    from src.instance_lock import InstanceLock
+
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.run = lambda app, **kwargs: None  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    monkeypatch.setenv("APP_SECRET", SECRET)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+
+    def boom(_config):
+        raise RuntimeError("组装失败")
+
+    monkeypatch.setattr(main, "build_app", boom)
+
+    with pytest.raises(RuntimeError):
+        main.run()
+
+    lock = InstanceLock(tmp_path)
+    lock.acquire()
+    lock.release()
+
+
 async def test_loop_executes_runner_after_interval(repo):
     """循环体在 sleep 之后必须真的调用 runner（runner 76）。"""
     runner, _collector = _runner(repo, StubProvider())

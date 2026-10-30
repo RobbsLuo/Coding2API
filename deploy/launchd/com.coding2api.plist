@@ -27,9 +27,17 @@
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- 进程退出/崩溃后自动拉起 -->
+    <!-- 进程退出/崩溃后自动拉起。
+         SuccessfulExit=false 意为「**只在非零退出时**重拉」：真崩溃照样救回来，
+         但「另一个实例已在使用该 DATA_DIR」（退出码 2）不再每 10s 重拉一次。
+         此前用 KeepAlive=true 无条件重拉，端口被占时实测刷出 2377 条
+         `[Errno 48] address already in use`（2026-09-19~10-17），每条都堆着
+         完整 traceback，把真正的故障挤出了视野。 -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 
     <key>ThrottleInterval</key>
     <integer>10</integer>

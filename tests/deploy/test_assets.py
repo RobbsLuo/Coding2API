@@ -254,7 +254,11 @@ def test_launchd_template_exists_and_is_valid_plist():
         data = plistlib.load(handle)
     assert data["Label"] == "com.coding2api"
     assert data["RunAtLoad"] is True
-    assert data["KeepAlive"] is True
+    # KeepAlive 必须是条件式：SuccessfulExit=false = 只在非零退出时重拉。
+    # 无条件 true 会让「另一个实例占用 DATA_DIR」（退出码 2）每 10s 重拉一次。
+    keep_alive = data["KeepAlive"]
+    assert isinstance(keep_alive, dict), "KeepAlive 应为条件字典，不能无条件重拉"
+    assert keep_alive["SuccessfulExit"] is False
     # 日志路径必须与轮转脚本覆盖的一致（改一处漏一处最难查）
     assert data["StandardOutPath"].endswith("logs/launchd.out.log")
     assert data["StandardErrorPath"].endswith("logs/launchd.err.log")
@@ -700,6 +704,15 @@ def test_rotate_script_rejects_unknown_flag():
     assert "未知参数" in result.stderr
 
 
+def test_systemd_restart_policy_skips_already_running_exit():
+    """systemd 只在失败时重拉：退出码 0（另一实例持锁）不该触发重启循环。
+
+    与 launchd 的 `KeepAlive.SuccessfulExit=false` 同口径。
+    """
+    text = SYSTEMD_UNIT.read_text(encoding="utf-8")
+    assert "Restart=on-failure" in text, "Restart=always 会把「另一实例在跑」也重拉"
+
+
 def test_logrotate_rule_uses_copytruncate():
     """Linux 侧：进程持有 fd（>> 重定向）时 rename 不会让它换文件，必须 copytruncate。"""
     text = LOGROTATE.read_text(encoding="utf-8")
@@ -713,7 +726,7 @@ def test_systemd_unit_sends_logs_to_journal():
     text = SYSTEMD_UNIT.read_text(encoding="utf-8")
     assert "StandardOutput=journal" in text
     assert "StandardError=journal" in text
-    assert "ExecStart=" in text and "build_app" in text
+    assert "ExecStart=" in text and "src.main" in text
     # 密钥不得写进 unit（systemctl cat 会暴露给所有用户）
     assert "APP_SECRET=" not in text
 
@@ -730,15 +743,16 @@ def test_graceful_shutdown_timeout_consistent_across_entrypoints():
     from src.main import GRACEFUL_SHUTDOWN_SECONDS
 
     assert GRACEFUL_SHUTDOWN_SECONDS > 0
-    # launchd 与 Docker 都走 src.main:run，flag 由 run() 内部传入，脚本里没有
-    # 这个数字可对；systemd 仍直接跑 uvicorn CLI，必须显式带同一个 flag。
+    # 三条路径（Docker CMD / launchd wrapper / systemd ExecStart）现在统一走
+    # src.main:run，排空时长由 run() 内部传入，任何一处再出现 uvicorn CLI
+    # 就会让数字分裂，且绕过单实例锁。
     text = SYSTEMD_UNIT.read_text(encoding="utf-8")
-    found = _re.search(r"--timeout-graceful-shutdown (\d+)", text)
-    assert found, f"{SYSTEMD_UNIT.name} 缺 --timeout-graceful-shutdown"
-    assert int(found.group(1)) == GRACEFUL_SHUTDOWN_SECONDS, SYSTEMD_UNIT.name
-    # launchd 走 run() 的前提：脚本代码里不得再出现 uvicorn CLI（否则数字又分裂）
+    assert "uvicorn" not in text, "systemd 应走 src.main:run（含单实例锁）"
+    assert "-m src.main" in text, SYSTEMD_UNIT.name
     launchd = _shell_code_lines(ROOT / "scripts" / "launchd-server.sh")
     assert "uvicorn" not in launchd, "launchd 改走 src.main:run 后不应再出现 uvicorn CLI"
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "src.main" in dockerfile and "uvicorn src.main" not in dockerfile
     # Docker：stop_grace_period 是容器给进程的停机窗口，必须 >= 应用排空窗口
     compose = COMPOSE.read_text(encoding="utf-8")
     grace = _re.search(r"stop_grace_period: (\d+)s", compose)
