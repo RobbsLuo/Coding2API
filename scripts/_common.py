@@ -17,11 +17,16 @@ from contextlib import contextmanager
 from pathlib import Path
 
 
-def backup(db_path: Path) -> Path:
+def backup(db_path: Path, *, keep: int = 5) -> Path:
     """写库前备份主库文件到同目录（`.bak-<时间戳>`），失败即中止。
 
     用 SQLite 在线备份 API 而不是复制文件：WAL 模式下直接 copy 主库文件会
     丢掉尚未 checkpoint 的已提交事务。
+
+    `keep` 份保留：这些脚本是一次性运维工具，每跑一次落一份 40MB+ 的快照。
+    早先不清理，本机实测攒到 28 份 / 870MB（同名 `.bak-*` 从不清），
+    首次排障时 `du -sh data` 全是它。按 mtime 倒序只留最近 `keep` 份；
+    `keep <= 0` 表示不清理。清理失败（权限/竞态）不阻断备份本身。
     """
     target = db_path.with_name(f"{db_path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
     source = sqlite3.connect(str(db_path))
@@ -33,7 +38,26 @@ def backup(db_path: Path) -> Path:
             destination.close()
     finally:
         source.close()
+    if keep > 0:
+        _prune_backups(db_path, keep=keep)
     return target
+
+
+def _prune_backups(db_path: Path, *, keep: int) -> None:
+    """只保留最近 `keep` 份 `.bak-*`，按 mtime 倒序（名字带时间戳但 mtime 更稳）。"""
+    try:
+        existing = sorted(
+            db_path.parent.glob(f"{db_path.name}.bak-*"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    except OSError:
+        return
+    for stale in existing[keep:]:
+        try:
+            stale.unlink()
+        except OSError:
+            continue
 
 
 class DbAdapter:
