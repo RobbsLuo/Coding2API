@@ -6,8 +6,9 @@
   `/v1/chat/chat` 走 §4 的 `task=chat` 形状，作为兼容路径保留。
 * **模型发现** `GET {snap}/v1/model/builtin`（`Agent-Type: PromptCenter`）。
 * **额度** `GET {snap}/snap-manager/v1/statistics/plugin`（`Agent-Type:
-  PromptCenter`），单位本身就是积分（内置模型计费）；积分包带独立到期日，
-  登记成 `expiry_ladder` 参与调度「快过期的先用」。**每日签到**
+  PromptCenter`），单位本身就是积分（内置模型计费）；上游只给「7 天内到期量」
+  （`package_credit_expiring_amount`），按该口径登记成 `expiry_ladder` 参与调度
+  「快过期的先用」。**每日签到**
   走另一套接口（`GET {snap}/v1/ops/delivery` → `claim` → `confirm`，见下），
   临时凭证的续期由 `tasks.refresh.RefreshTask` 独占（先落库再同步）；
   额度探测只读余额，绝不在此刷新一次性 refresh_token，见 `probe_quota`。
@@ -296,7 +297,8 @@ class CodeArtsClient(LazyClients):
         """积分余额（只读，不刷新）。
 
         走 `{snap}/snap-manager/v1/statistics/plugin`：内置模型按积分计费，
-        积分包带独立到期日，登记成 `expiry_ladder` 参与「快过期先用」的选号排序。
+        上游只给「7 天内到期量」，登记成 `expiry_ladder` 参与「快过期先用」
+        的选号排序（顶层 `end_date` 不进阶梯，见 `parse_credits`）。
 
         临时凭证的续期**不在**这里做：refresh_token 是一次性的，必须由
         `tasks.refresh.RefreshTask`（先落库再同步）独占轮转。若此处顺手刷新，
@@ -600,6 +602,9 @@ _CREDIT_PACKAGE_NAMES: dict[str, str] = {
     "usageOnDemandPackageCredit": "按需积分",
     "usageBonusPackageCredit": "福利积分",
 }
+#: `package_credit_expiring_amount` 的口径：上游固定统计「7 天内到期量」。
+#: 阶梯只能按这个窗口登记（上游不给逐批到期日），见 `parse_credits`。
+CREDIT_EXPIRING_WINDOW_SECONDS = 7 * 86400
 
 
 def parse_credits(data: dict[str, Any], *, now: int | None = None) -> Quota:
@@ -611,14 +616,20 @@ def parse_credits(data: dict[str, Any], *, now: int | None = None) -> Quota:
     形状（实测 2026-10-15）：
     `metrics[]` 每项含 `package_credit_amount` / `_used` / `_remain`，其中
     `usageTotalPackageCredit` 是合计，其余（Basic/OnDemand/Bonus）是分项包。
-    故 `remaining/total` 取合计项，分项写进 `packages`（展示用），并给积分包
-    登记到期阶梯——顶层 `end_date` 是整份套餐的到期日（实测每账号不同，如
-    `2026-11-02`），积分用不完同样作废，应参与「快过期先用」。
+    故 `remaining/total` 取合计项，分项写进 `packages`（展示用）；分项自带的
+    `package_credit_expiring_amount`（7 天内到期量）原样透传到 `packages[].expiring`
+    供悬浮明细展示。
 
-    福利积分按批次到账、各自到期：实测某账号 24960.9 福利积分里只有 4960.9
-    在 7 天内到期，说明顶层 `end_date` 并不是每一笔积分的到期日。分项还带
-    `package_credit_expiring_amount`（7 天内到期量），原样记进 `expiring`
-    供展示——上游**没有**逐包/逐批到期的精确日期，别把 `end_date` 当成它。
+    **到期阶梯只认上游的「7 天内到期量」，不认顶层 `end_date`。** 实测同一响应
+    里两者自相矛盾：某账号 `end_date` 距探测只有 2.5 天，而 `expiring` 只有
+    4,868 / 24,391；若 `end_date` 真会把整份余额清零，7 天内到期量必然等于全部
+    余额。结论：`end_date` 是套餐/账期到期日，**不是**逐笔积分的作废时刻（福利
+    积分按批次到账、各自到期），拿它给整份剩余记阶梯会虚构「36 小时内全部作废」
+    的告警，并把选号排序带偏。
+
+    上游没有逐批到期日，只给一个窗口量，故把合计挂到「探测时刻 + 7 天」这一个
+    桶上：36h 窗口不会误报，7 天窗口拿到真实数字，随着探测推进该桶会自然逼近
+    真实到期时刻（epoch 不变、now 前进）。
 
     取不到合计项、或合计项无有效数值时返回 `probe_failed=True`（**未知**），
     绝不返回 `remaining=0` 被判「已耗尽」——积分账缺失不代表内置模型不能用。
@@ -639,6 +650,9 @@ def parse_credits(data: dict[str, Any], *, now: int | None = None) -> Quota:
         return Quota(probe_failed=True, probed_at=stamp)
     end = _package_end_date(data.get("end_date"))
     packages: list[dict[str, Any]] = []
+    # 上游只给「7 天内到期量」且不给逐批日期：合计后挂在探测时刻 + 7 天这一个桶上
+    # （见 docstring）。已过期/零量不登记，避免 0 值把阶梯变成「有到期信息」。
+    expiring_total = 0.0
     for item in metrics:
         if not isinstance(item, dict):
             continue
@@ -647,6 +661,9 @@ def parse_credits(data: dict[str, Any], *, now: int | None = None) -> Quota:
             continue
         amount = _opt_number(item, "package_credit_amount")
         used = _opt_number(item, "package_credit_used")
+        expiring = _opt_number(item, "package_credit_expiring_amount")
+        if expiring is not None:
+            expiring_total += max(0.0, expiring)
         if amount is None and used is None:
             continue
         packages.append({
@@ -656,9 +673,11 @@ def parse_credits(data: dict[str, Any], *, now: int | None = None) -> Quota:
             "end": end,
             # 7 天内到期的积分。福利积分按批次到账、各自到期，顶层 end_date 只是
             # 整份套餐的到期日；这个字段才是「最近要作废多少」的唯一上游口径。
-            "expiring": _opt_number(item, "package_credit_expiring_amount"),
+            "expiring": expiring,
         })
-    ladder = [(end, remaining)] if end and remaining and remaining > 0 else None
+    ladder = (
+        [(stamp + CREDIT_EXPIRING_WINDOW_SECONDS, expiring_total)]
+        if expiring_total > 0 and remaining and remaining > 0 else None)
     return Quota(remaining=remaining, total=total, cycle_end=end,
                  expiry_ladder=ladder, packages=packages or None, probed_at=stamp)
 

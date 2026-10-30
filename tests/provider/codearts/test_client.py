@@ -12,6 +12,7 @@ from src.provider.base import ErrKind, EventKind, UpstreamReloginRequired
 from src.provider.codearts import auth as codearts_auth
 from src.provider.codearts import events as codearts_events
 from src.provider.codearts.client import (
+    CREDIT_EXPIRING_WINDOW_SECONDS,
     CodeArtsClient,
     UpstreamHTTPError,
     _credit_rate,
@@ -160,10 +161,12 @@ def test_client_parse_credits_real_shape():
     assert quota.remaining == pytest.approx(13498.72)   # 积分原值，不折 token
     assert quota.total == pytest.approx(13500.0)
     assert quota.probed_at == noon
-    # 到期日：本地 0 点，且进到期阶梯（积分用不完同样作废）
+    # 到期日只作套餐展示（cycle_end）；**不进阶梯**——上游自己给的「7 天内
+    # 到期量」远小于余额，证明 end_date 不是逐笔积分的作废时刻。
     end = time.localtime(quota.cycle_end)
     assert (end.tm_year, end.tm_mon, end.tm_mday, end.tm_hour) == (2026, 11, 2, 0)
-    assert quota.expiry_ladder == [(quota.cycle_end, pytest.approx(13498.72))]
+    assert quota.expiry_ladder == [
+        (noon + CREDIT_EXPIRING_WINDOW_SECONDS, pytest.approx(496.9))]
     # 分项包带中文名与共用到期日；合计项本身不进 packages（否则重复计数）
     assert [p["name"] for p in quota.packages] == ["基础积分", "按需积分", "福利积分"]
     assert quota.packages[0] == {"name": "基础积分", "total": 500.0, "used": 0.0,
@@ -194,6 +197,30 @@ def test_client_parse_credits_unknown_and_edge_shapes():
         {"name": "usageTotalPackageCredit", "package_credit_amount": 10.0,
          "package_credit_remain": 3.0}]})
     assert no_date.cycle_end is None and no_date.expiry_ladder is None
+    # 有到期日、有余额，但上游没给「7 天内到期量」→ 仍不登记阶梯：end_date 不是
+    # 逐笔积分的作废时刻，拿它记阶梯会虚构「36 小时内全部作废」的告警
+    no_expiring = parse_credits({"metrics": [
+        {"name": "usageTotalPackageCredit", "package_credit_amount": 10.0,
+         "package_credit_remain": 3.0}], "end_date": "2026-11-02"})
+    assert no_expiring.cycle_end is not None and no_expiring.expiry_ladder is None
+    # 到期量按分项求和（布尔/负数不参与），挂到「探测时刻 + 7 天」这一个桶
+    summed = parse_credits({"metrics": [
+        {"name": "usageBonusPackageCredit", "package_credit_amount": 9.0,
+         "package_credit_used": 1.0, "package_credit_expiring_amount": 4.0},
+        {"name": "usageBasicPackageCredit", "package_credit_amount": 5.0,
+         "package_credit_used": 0.0, "package_credit_expiring_amount": 2.0},
+        {"name": "usageOnDemandPackageCredit", "package_credit_amount": 1.0,
+         "package_credit_used": 0.0, "package_credit_expiring_amount": -3.0},
+        {"name": "usageTotalPackageCredit", "package_credit_amount": 15.0,
+         "package_credit_remain": 14.0}]}, now=1000)
+    assert summed.expiry_ladder == [
+        (1000 + CREDIT_EXPIRING_WINDOW_SECONDS, pytest.approx(6.0))]
+    # 只有到期量、剩余未知（合计项缺 remain）→ 无可消耗额度，不登记阶梯
+    no_remain = parse_credits({"metrics": [
+        {"name": "usageBonusPackageCredit", "package_credit_amount": 9.0,
+         "package_credit_used": 0.0, "package_credit_expiring_amount": 4.0},
+        {"name": "usageTotalPackageCredit", "package_credit_amount": 9.0}]}, now=1000)
+    assert no_remain.remaining is None and no_remain.expiry_ladder is None
     # 剩余为 0：不携带可消耗额度 → 不进到期排序（与每日池同口径）
     drained = parse_credits({"metrics": [
         {"name": "usageTotalPackageCredit", "package_credit_amount": 10.0,

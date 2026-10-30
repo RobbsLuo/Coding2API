@@ -535,7 +535,8 @@ class Quota:
     total: float | None = None
     cycle_end: int | None = None      # 最早到期（epoch）；无到期信息的渠道为 None
     # 到期阶梯 [(到期 epoch, 该套餐剩余积分)]：选号按"窗口内即将到期积分"排序。
-    # 按包独立到期的渠道（CodeBuddy、TRAE 的权益包）有值；企业版等无此信息为 None。
+    # 按包独立到期的渠道（CodeBuddy、TRAE 的权益包）有值；上游只给窗口量的渠道
+    # （CodeArts 的「7 天内到期量」）把合计挂在该窗口右端；无到期信息为 None。
     expiry_ladder: list[tuple[int, float]] | None = None
     # 额度明细包：[{"name", "total", "used", "end"}]，仅用于展示。
     # 与 expiry_ladder 分开存：后者的结构装不下名称，且两者口径不同
