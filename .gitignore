@@ -52,3 +52,6 @@ web/node_modules/
 web/dist/
 web/coverage/
 web/*.tsbuildinfo
+
+# Archify 工作目录（中间产物与截图）
+.archify/

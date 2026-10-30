@@ -893,6 +893,10 @@ pnpm build
 | [`PROPOSAL.md`](PROPOSAL.md) | 目标与非目标、上游可行性、架构、数据模型、安全边界 |
 | [`TECHNICAL.md`](TECHNICAL.md) | 技术栈、模块规格、Provider 协议、请求时序、测试策略 |
 | [`diagrams/coding2api-architecture.html`](diagrams/coding2api-architecture.html) | 系统架构图 |
+| [`diagrams/coding2api-request-flow.html`](diagrams/coding2api-request-flow.html) | 请求主链路（/v1/responses、/v1/messages 共用主链） |
+| [`diagrams/coding2api-account-flow.html`](diagrams/coding2api-account-flow.html) | 账号与 API Key 生命周期 |
+| [`diagrams/coding2api-data-model.html`](diagrams/coding2api-data-model.html) | 数据模型（13 张表 + 归属关系） |
+| [`diagrams/coding2api-permission-matrix.html`](diagrams/coding2api-permission-matrix.html) | 三角色权限矩阵 |
 | [`diagrams/coding2api-request-sequence.html`](diagrams/coding2api-request-sequence.html) | 请求主链路时序图 |
 | [`diagrams/coding2api-credential-lifecycle.html`](diagrams/coding2api-credential-lifecycle.html) | 凭证调度状态机 |
 

@@ -1,0 +1,417 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "对外请求业务流：从 API Key 到上游回帧",
+    "subtitle": "POST /v1/chat/completions · /v1/messages · /v1/responses 共用同一条准入与选号链路",
+    "locale": "zh-CN",
+    "output": "diagrams/coding2api-request-flow.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:RobbsLuo/Coding2API.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "82cf0efd063e13f5323c69940666e9b64a8d1a68"
+    },
+    "views": [
+      {
+        "id": "admission",
+        "label": "准入",
+        "focus": [
+          "sdk",
+          "auth",
+          "gate",
+          "deny"
+        ],
+        "note": "Key 鉴权先于任何上游动作；配额与模型白名单在读体之后判定，超限直接 429。"
+      },
+      {
+        "id": "routing",
+        "label": "选号",
+        "focus": [
+          "resolve",
+          "pick",
+          "upstream"
+        ],
+        "note": "模型名先解析成渠道优先级链，再按健康度与冷却从凭证池选一个号。"
+      },
+      {
+        "id": "failure",
+        "label": "失败与换号",
+        "focus": [
+          "upstream",
+          "cooldown",
+          "pick",
+          "deny"
+        ],
+        "note": "上游错误按类别冷却：账号级 / 模型级分开，最多换 3 次号。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "client",
+      "label": "调用方"
+    },
+    {
+      "id": "edge",
+      "label": "接入与准入"
+    },
+    {
+      "id": "engine",
+      "label": "调度引擎"
+    },
+    {
+      "id": "provider",
+      "label": "渠道适配"
+    },
+    {
+      "id": "store",
+      "label": "计量与状态"
+    }
+  ],
+  "phases": [
+    {
+      "id": "ph_intake",
+      "label": "接入",
+      "fromCol": 0,
+      "toCol": 1
+    },
+    {
+      "id": "ph_gate",
+      "label": "准入判定",
+      "fromCol": 2,
+      "toCol": 2,
+      "variant": "security"
+    },
+    {
+      "id": "ph_route",
+      "label": "解析与选号",
+      "fromCol": 3,
+      "toCol": 4
+    },
+    {
+      "id": "ph_deliver",
+      "label": "上游与回帧",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "emphasis"
+    }
+  ],
+  "groups": [
+    {
+      "id": "grp_reject",
+      "label": "不触达上游即返回",
+      "lane": "edge",
+      "fromCol": 2,
+      "toCol": 2,
+      "variant": "security"
+    },
+    {
+      "id": "grp_rotate",
+      "label": "换号预算 3 次",
+      "lane": "provider",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "dashed"
+    }
+  ],
+  "mainPath": [
+    "sdk",
+    "auth",
+    "gate",
+    "resolve",
+    "pick",
+    "upstream",
+    "relay",
+    "reply"
+  ],
+  "nodes": [
+    {
+      "id": "sdk",
+      "lane": "client",
+      "col": 0,
+      "type": "external",
+      "label": "客户端 SDK",
+      "sublabel": "OpenAI · Anthropic · Codex",
+      "width": 152
+    },
+    {
+      "id": "deny",
+      "lane": "client",
+      "col": 2,
+      "type": "security",
+      "label": "拒绝响应",
+      "sublabel": "401 / 403 / 429 / 503",
+      "width": 132
+    },
+    {
+      "id": "reply",
+      "lane": "client",
+      "col": 5,
+      "type": "frontend",
+      "label": "响应流",
+      "sublabel": "SSE 帧 / JSON",
+      "width": 132
+    },
+    {
+      "id": "auth",
+      "lane": "edge",
+      "col": 1,
+      "type": "security",
+      "label": "Key 鉴权",
+      "sublabel": "摘要 · 到期 · IP 白名单",
+      "tag": "用户停用即失效",
+      "width": 152,
+      "sources": [
+        {
+          "path": "src/api/deps.py",
+          "line": 237,
+          "label": "Key 鉴权"
+        }
+      ]
+    },
+    {
+      "id": "gate",
+      "lane": "edge",
+      "col": 2,
+      "type": "security",
+      "label": "准入闸门",
+      "sublabel": "模型白名单 · RPM/TPM · 并发",
+      "tag": "超限不耗上游",
+      "width": 168,
+      "sources": [
+        {
+          "path": "src/api/endpoints.py",
+          "line": 98,
+          "label": "模型白名单"
+        },
+        {
+          "path": "src/api/endpoints.py",
+          "line": 150,
+          "label": "配额准入"
+        }
+      ]
+    },
+    {
+      "id": "resolve",
+      "lane": "engine",
+      "col": 3,
+      "type": "backend",
+      "label": "目标解析",
+      "sublabel": "别名 → 渠道优先级链",
+      "width": 152,
+      "sources": [
+        {
+          "path": "src/engine/executor.py",
+          "line": 422,
+          "label": "resolve_target"
+        }
+      ]
+    },
+    {
+      "id": "pick",
+      "lane": "engine",
+      "col": 4,
+      "type": "backend",
+      "label": "选号",
+      "sublabel": "健康度 · 冷却 · 到期积分",
+      "tag": "粘性 / 手动 pin 优先",
+      "width": 164,
+      "sources": [
+        {
+          "path": "src/engine/scheduler.py",
+          "line": 262,
+          "label": "select"
+        }
+      ]
+    },
+    {
+      "id": "relay",
+      "lane": "engine",
+      "col": 5,
+      "type": "backend",
+      "label": "事件转译",
+      "sublabel": "SSE 帧 · 保活 · 错误帧",
+      "width": 152,
+      "sources": [
+        {
+          "path": "src/engine/executor.py",
+          "line": 634,
+          "label": "_stream_loop"
+        }
+      ]
+    },
+    {
+      "id": "upstream",
+      "lane": "provider",
+      "col": 4,
+      "type": "cloud",
+      "label": "上游渠道",
+      "sublabel": "八家 provider · 会话续期",
+      "width": 168,
+      "sources": [
+        {
+          "path": "src/engine/executor.py",
+          "line": 1096,
+          "label": "_stream_source"
+        }
+      ]
+    },
+    {
+      "id": "cooldown",
+      "lane": "provider",
+      "col": 5,
+      "type": "messagebus",
+      "label": "错误归类",
+      "sublabel": "账号级 / 模型级冷却",
+      "tag": "负缓存与半开",
+      "width": 152,
+      "sources": [
+        {
+          "path": "src/engine/scheduler.py",
+          "line": 327,
+          "label": "note_error"
+        }
+      ]
+    },
+    {
+      "id": "usage",
+      "lane": "store",
+      "col": 5,
+      "type": "database",
+      "label": "计量落库",
+      "sublabel": "usage_events + usage_hourly",
+      "width": 176,
+      "sources": [
+        {
+          "path": "src/stats/collector.py",
+          "line": 136,
+          "label": "collector.record"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_post",
+      "from": "sdk",
+      "to": "auth",
+      "label": "POST /v1/*",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e_authed",
+      "from": "auth",
+      "to": "gate",
+      "label": "已认证",
+      "variant": "default",
+      "role": "main"
+    },
+    {
+      "id": "e_reject",
+      "from": "gate",
+      "to": "deny",
+      "label": "超限 / 策略不符",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e_pass",
+      "from": "gate",
+      "to": "resolve",
+      "label": "放行",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e_chain",
+      "from": "resolve",
+      "to": "pick",
+      "label": "候选链",
+      "variant": "default",
+      "role": "main"
+    },
+    {
+      "id": "e_cred",
+      "from": "pick",
+      "to": "upstream",
+      "label": "选中凭证",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e_frames",
+      "from": "upstream",
+      "to": "relay",
+      "label": "上游 SSE",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e_reply",
+      "from": "relay",
+      "to": "reply",
+      "label": "帧转发",
+      "variant": "emphasis",
+      "role": "return"
+    },
+    {
+      "id": "e_classify",
+      "from": "upstream",
+      "to": "cooldown",
+      "label": "失败归类",
+      "variant": "security",
+      "role": "error"
+    },
+    {
+      "id": "e_rotate",
+      "from": "cooldown",
+      "to": "pick",
+      "label": "换号重试 ≤ 3",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "e_meter",
+      "from": "upstream",
+      "to": "usage",
+      "label": "成功 / 断开都记账",
+      "variant": "dashed",
+      "role": "async"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "rose",
+      "title": "准入红线",
+      "items": [
+        "用户被禁用或删除：该用户名下所有 Key 立即 401，不查缓存",
+        "Key 到期 / 来源 IP 不在白名单：401 / 403，不进入配额判定",
+        "模型不在 allowed_models（fnmatch glob）：400，不选号",
+        "配额或并发超限：429，且本次不消耗任何上游调用"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "失败归类决定冷却范围",
+      "items": [
+        "DEAD 会话失效：凭证硬禁用，等人工复活",
+        "RESTRICTED 上游风控：账号级长冷却，当前请求不再换号",
+        "MODEL / BLOCKED：只记 (凭证, 模型) 级冷却或负缓存",
+        "INVALID：请求本身无效，直接 400，不冷却凭证",
+        "QUEUE：等上游点名的秒数在原号重开，不占换号预算"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "收尾记账",
+      "items": [
+        "每个请求落一行明细（含 request_id 与 api_key_id），并累加小时汇总",
+        "客户端中途断开也按已产生的 token / credit 记账",
+        "换号成功记「已救回」；一次都没选中凭证时归因到候选渠道"
+      ]
+    }
+  ]
+}

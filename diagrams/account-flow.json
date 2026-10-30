@@ -1,0 +1,449 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "账号开通与角色治理流程",
+    "subtitle": "一次性激活令牌 → 登录签发会话 → 每请求现读角色 → 改角色/禁用即时吊销",
+    "locale": "zh-CN",
+    "output": "diagrams/coding2api-account-flow.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:RobbsLuo/Coding2API.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "82cf0efd063e13f5323c69940666e9b64a8d1a68"
+    },
+    "views": [
+      {
+        "id": "onboarding",
+        "label": "开通",
+        "focus": [
+          "a_create",
+          "s_create",
+          "d_user",
+          "u_activate",
+          "s_activate"
+        ],
+        "note": "建号只产生一次性令牌摘要；用户自设密码后令牌立即作废。"
+      },
+      {
+        "id": "session",
+        "label": "登录与会话",
+        "focus": [
+          "u_login",
+          "s_login",
+          "d_audit",
+          "s_session",
+          "s_guard"
+        ],
+        "note": "会话 Cookie 带 epoch；角色不入 Cookie，每次请求从库里现读。"
+      },
+      {
+        "id": "revoke",
+        "label": "变更与吊销",
+        "focus": [
+          "a_change",
+          "d_epoch",
+          "s_guard",
+          "u_selfpwd"
+        ],
+        "note": "改角色、禁用、重置密码都让 epoch +1，旧 Cookie 下一次请求即 401。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "adm",
+      "label": "管理员"
+    },
+    {
+      "id": "usr",
+      "label": "被邀请用户"
+    },
+    {
+      "id": "svc",
+      "label": "账号与鉴权服务"
+    },
+    {
+      "id": "db",
+      "label": "数据与审计"
+    }
+  ],
+  "phases": [
+    {
+      "id": "ph_create",
+      "label": "建号",
+      "fromCol": 0,
+      "toCol": 0
+    },
+    {
+      "id": "ph_store",
+      "label": "落库",
+      "fromCol": 1,
+      "toCol": 1
+    },
+    {
+      "id": "ph_activate",
+      "label": "激活",
+      "fromCol": 2,
+      "toCol": 2
+    },
+    {
+      "id": "ph_login",
+      "label": "登录",
+      "fromCol": 3,
+      "toCol": 3,
+      "variant": "emphasis"
+    },
+    {
+      "id": "ph_session",
+      "label": "会话",
+      "fromCol": 4,
+      "toCol": 4
+    },
+    {
+      "id": "ph_guard",
+      "label": "鉴权与吊销",
+      "fromCol": 5,
+      "toCol": 5,
+      "variant": "security"
+    }
+  ],
+  "mainPath": [
+    "a_create",
+    "s_create",
+    "u_activate",
+    "s_activate",
+    "u_login",
+    "s_login",
+    "s_session",
+    "s_guard"
+  ],
+  "nodes": [
+    {
+      "id": "a_create",
+      "lane": "adm",
+      "col": 0,
+      "type": "frontend",
+      "label": "新建用户",
+      "sublabel": "用户名 + 角色 → 一次性链接",
+      "tag": "带外转交",
+      "width": 144
+    },
+    {
+      "id": "a_change",
+      "lane": "adm",
+      "col": 5,
+      "type": "frontend",
+      "label": "改角色 / 禁用 / 重置",
+      "sublabel": "降级必须立刻可信",
+      "width": 144,
+      "sources": [
+        {
+          "path": "src/db/repo.py",
+          "line": 1273,
+          "label": "role / epoch 更新"
+        }
+      ]
+    },
+    {
+      "id": "u_activate",
+      "lane": "usr",
+      "col": 2,
+      "type": "external",
+      "label": "打开 /activate",
+      "sublabel": "自设密码（≥ 8 位）",
+      "width": 144
+    },
+    {
+      "id": "u_login",
+      "lane": "usr",
+      "col": 3,
+      "type": "external",
+      "label": "登录",
+      "sublabel": "用户名 + 密码",
+      "width": 132
+    },
+    {
+      "id": "u_selfpwd",
+      "lane": "usr",
+      "col": 4,
+      "type": "external",
+      "label": "首登强制改密",
+      "sublabel": "其余端点一律 403",
+      "width": 144
+    },
+    {
+      "id": "s_create",
+      "lane": "svc",
+      "col": 1,
+      "type": "security",
+      "label": "创建账号",
+      "sublabel": "随机占位密码 + 令牌摘要",
+      "tag": "管理员也不知道初始密码",
+      "width": 144,
+      "sources": [
+        {
+          "path": "src/api/admin_users.py",
+          "line": 116,
+          "label": "create_user"
+        }
+      ]
+    },
+    {
+      "id": "s_activate",
+      "lane": "svc",
+      "col": 2,
+      "type": "security",
+      "label": "校验令牌",
+      "sublabel": "摘要匹配 · TTL · 一次性",
+      "width": 144,
+      "sources": [
+        {
+          "path": "src/api/activate.py",
+          "line": 43,
+          "label": "activate"
+        }
+      ]
+    },
+    {
+      "id": "s_login",
+      "lane": "svc",
+      "col": 3,
+      "type": "security",
+      "label": "验密与限流",
+      "sublabel": "PBKDF2 · IP / 用户窗口",
+      "tag": "先卡传输层再做哈希",
+      "width": 144,
+      "sources": [
+        {
+          "path": "src/api/admin_auth.py",
+          "line": 166,
+          "label": "login"
+        }
+      ]
+    },
+    {
+      "id": "s_session",
+      "lane": "svc",
+      "col": 4,
+      "type": "backend",
+      "label": "签发会话 Cookie",
+      "sublabel": "签名 + session_epoch",
+      "tag": "角色不进 Cookie",
+      "width": 144,
+      "sources": [
+        {
+          "path": "src/auth/session.py",
+          "line": 27,
+          "label": "create_session_token"
+        },
+        {
+          "path": "src/api/admin_auth.py",
+          "line": 99,
+          "label": "issue_session"
+        }
+      ]
+    },
+    {
+      "id": "s_guard",
+      "lane": "svc",
+      "col": 5,
+      "type": "security",
+      "label": "四道校验",
+      "sublabel": "签名 · 禁用 · epoch · 角色",
+      "tag": "require_admin / require_operator",
+      "width": 144,
+      "sources": [
+        {
+          "path": "src/api/deps.py",
+          "line": 159,
+          "label": "principal_from_request"
+        }
+      ]
+    },
+    {
+      "id": "d_user",
+      "lane": "db",
+      "col": 1,
+      "type": "database",
+      "label": "users 行",
+      "sublabel": "role · enabled · 摘要 · TTL",
+      "width": 144,
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 270,
+          "label": "users"
+        }
+      ]
+    },
+    {
+      "id": "d_audit",
+      "lane": "db",
+      "col": 3,
+      "type": "database",
+      "label": "audit_events",
+      "sublabel": "登录成败都留痕",
+      "width": 144,
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 303,
+          "label": "audit_events"
+        }
+      ]
+    },
+    {
+      "id": "d_epoch",
+      "lane": "db",
+      "col": 5,
+      "type": "database",
+      "label": "users 行",
+      "sublabel": "role · enabled · epoch + 1",
+      "width": 144,
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 270,
+          "label": "users.session_epoch"
+        }
+      ]
+    }
+  ],
+  "edges": [
+    {
+      "id": "e_form",
+      "from": "a_create",
+      "to": "s_create",
+      "label": "POST /api/users",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e_store",
+      "from": "s_create",
+      "to": "d_user",
+      "label": "落库",
+      "variant": "dashed",
+      "role": "async"
+    },
+    {
+      "id": "e_handoff",
+      "from": "s_create",
+      "to": "u_activate",
+      "label": "明文令牌只回显一次",
+      "variant": "default",
+      "role": "main"
+    },
+    {
+      "id": "e_redeem",
+      "from": "u_activate",
+      "to": "s_activate",
+      "label": "token + 新密码",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e_consume",
+      "from": "s_activate",
+      "to": "d_user",
+      "label": "写哈希 · 清摘要",
+      "variant": "dashed",
+      "role": "branch"
+    },
+    {
+      "id": "e_signin",
+      "from": "u_login",
+      "to": "s_login",
+      "label": "提交密码",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e_track",
+      "from": "s_login",
+      "to": "d_audit",
+      "label": "login.success / failure",
+      "variant": "dashed",
+      "role": "async"
+    },
+    {
+      "id": "e_cookie",
+      "from": "s_login",
+      "to": "s_session",
+      "label": "验密通过",
+      "variant": "emphasis",
+      "role": "main"
+    },
+    {
+      "id": "e_percall",
+      "from": "s_session",
+      "to": "s_guard",
+      "label": "Cookie 随每请求",
+      "variant": "default",
+      "role": "main"
+    },
+    {
+      "id": "e_forcepwd",
+      "from": "s_guard",
+      "to": "u_selfpwd",
+      "label": "must_change_password=1",
+      "variant": "security",
+      "role": "branch"
+    },
+    {
+      "id": "e_changed",
+      "from": "a_change",
+      "to": "s_guard",
+      "label": "旧 Cookie 立即 401",
+      "variant": "security",
+      "role": "main"
+    },
+    {
+      "id": "e_bump",
+      "from": "a_change",
+      "to": "d_epoch",
+      "label": "改角色 / 禁用",
+      "variant": "dashed",
+      "role": "async"
+    },
+    {
+      "id": "e_tologin",
+      "from": "s_activate",
+      "to": "u_login",
+      "label": "激活完成 → 登录",
+      "variant": "default",
+      "role": "main"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "violet",
+      "title": "角色边界",
+      "items": [
+        "admin：用户管理、任务与配置、审计、日志、告警、备份、上游 OAuth 登录",
+        "operator：凭证读写、全站统计、账单、上游状态、模型列表与探活",
+        "viewer：只读；统计强制收敛到本人，凭证昵称不下发"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "防锁死与撤销",
+      "items": [
+        "不能停用或降级最后一个活跃管理员，也不能对自己降级 / 停用",
+        "改角色、改密、禁用都会 bump epoch —— 代价是重新登录，这是有意的",
+        "ADMIN_USERNAMES 与 users.txt 只在「库里还没有活跃 admin」的引导期生效"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "为什么不用共享初始密码",
+      "items": [
+        "建号时写随机占位密码，管理员也不知道，用户只能用令牌自设",
+        "令牌只存 SHA-256 摘要，明文仅在创建响应里出现一次，24 小时过期",
+        "登录同样校验 Origin，防 login CSRF"
+      ]
+    }
+  ]
+}

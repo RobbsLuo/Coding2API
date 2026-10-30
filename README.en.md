@@ -891,6 +891,10 @@ pnpm build
 | [`PROPOSAL.md`](PROPOSAL.md) | Goals and non-goals, upstream feasibility, architecture, data model, security boundary |
 | [`TECHNICAL.md`](TECHNICAL.md) | Stack, module specs, provider protocols, request sequence, test strategy |
 | [`diagrams/coding2api-architecture.html`](diagrams/coding2api-architecture.html) | Architecture diagram |
+| [`diagrams/coding2api-request-flow.html`](diagrams/coding2api-request-flow.html) | Main request flow (`/v1/responses` and `/v1/messages` share the chain) |
+| [`diagrams/coding2api-account-flow.html`](diagrams/coding2api-account-flow.html) | Account and API key lifecycle |
+| [`diagrams/coding2api-data-model.html`](diagrams/coding2api-data-model.html) | Data model (13 tables with ownership relations) |
+| [`diagrams/coding2api-permission-matrix.html`](diagrams/coding2api-permission-matrix.html) | Three-role permission matrix |
 | [`diagrams/coding2api-request-sequence.html`](diagrams/coding2api-request-sequence.html) | Main request sequence |
 | [`diagrams/coding2api-credential-lifecycle.html`](diagrams/coding2api-credential-lifecycle.html) | Credential scheduling state machine |
 

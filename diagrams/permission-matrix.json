@@ -1,0 +1,562 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "权限点 × 角色矩阵",
+    "subtitle": "行 = 权限点，列 = 角色；空白 = 无该权限。管理员包含操作员与只读的全部权限",
+    "locale": "zh-CN",
+    "output": "diagrams/coding2api-permission-matrix.html",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "git@github.com:RobbsLuo/Coding2API.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "82cf0efd063e13f5323c69940666e9b64a8d1a68"
+    },
+    "legend": {
+      "entries": {
+        "frontend": {
+          "label": "任意角色可用（含 viewer）"
+        },
+        "backend": {
+          "label": "operator 起（admin 也含）"
+        },
+        "security": {
+          "label": "仅 admin"
+        }
+      }
+    },
+    "views": [
+      {
+        "id": "read",
+        "label": "只读与自助",
+        "focus": [
+          "login",
+          "session",
+          "firstpwd",
+          "ownkeys",
+          "poolview",
+          "stats",
+          "gateway"
+        ],
+        "note": "viewer 能进管理台、看自己的用量与 Key，但看不到他人数据与凭证昵称。"
+      },
+      {
+        "id": "ops",
+        "label": "运营面",
+        "focus": [
+          "poolwrite",
+          "poolpolicy",
+          "probe",
+          "errors",
+          "billing",
+          "catalog"
+        ],
+        "note": "凭证池、统计全量、失败归因、账单、上游状态与模型目录都要 operator 起。"
+      },
+      {
+        "id": "governance",
+        "label": "治理面",
+        "focus": [
+          "users",
+          "audit",
+          "opslog",
+          "backup",
+          "settings",
+          "upstreamoauth"
+        ],
+        "note": "账号、审计、日志告警、备份、热更配置、上游 OAuth 登录只给 admin。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "login",
+      "label": "登录与自助改密"
+    },
+    {
+      "id": "users",
+      "label": "用户与角色管理"
+    },
+    {
+      "id": "firstpwd",
+      "label": "首登强制改密"
+    },
+    {
+      "id": "ownkeys",
+      "label": "自己的 API Key"
+    },
+    {
+      "id": "poolview",
+      "label": "查看凭证池"
+    },
+    {
+      "id": "poolwrite",
+      "label": "凭证写操作"
+    },
+    {
+      "id": "poolpolicy",
+      "label": "凭证策略与运营"
+    },
+    {
+      "id": "probe",
+      "label": "模型探活"
+    },
+    {
+      "id": "stats",
+      "label": "用量统计"
+    },
+    {
+      "id": "errors",
+      "label": "失败归因与事件流"
+    },
+    {
+      "id": "billing",
+      "label": "账单与上游状态"
+    },
+    {
+      "id": "catalog",
+      "label": "模型列表与目录"
+    },
+    {
+      "id": "audit",
+      "label": "审计日志"
+    },
+    {
+      "id": "opslog",
+      "label": "服务端日志与告警"
+    },
+    {
+      "id": "backup",
+      "label": "备份与恢复"
+    },
+    {
+      "id": "settings",
+      "label": "任务与配置热更"
+    },
+    {
+      "id": "upstreamoauth",
+      "label": "上游 OAuth 登录"
+    },
+    {
+      "id": "gateway",
+      "label": "/v1 网关调用"
+    }
+  ],
+  "phases": [
+    {
+      "id": "col_admin",
+      "label": "admin",
+      "fromCol": 0,
+      "toCol": 0,
+      "variant": "security"
+    },
+    {
+      "id": "col_operator",
+      "label": "operator",
+      "fromCol": 2,
+      "toCol": 2,
+      "variant": "emphasis"
+    },
+    {
+      "id": "col_viewer",
+      "label": "viewer",
+      "fromCol": 4,
+      "toCol": 4,
+      "variant": "default"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "m_login_a",
+      "lane": "login",
+      "col": 0,
+      "type": "frontend",
+      "label": "允许",
+      "width": 252
+    },
+    {
+      "id": "m_login_o",
+      "lane": "login",
+      "col": 2,
+      "type": "frontend",
+      "label": "允许",
+      "width": 252
+    },
+    {
+      "id": "m_login_v",
+      "lane": "login",
+      "col": 4,
+      "type": "frontend",
+      "label": "允许",
+      "width": 252
+    },
+    {
+      "id": "m_users_a",
+      "lane": "users",
+      "col": 0,
+      "type": "security",
+      "label": "允许",
+      "sublabel": "建号 · 改角色 · 禁用",
+      "width": 252,
+      "sources": [
+        {
+          "path": "src/api/admin_users.py",
+          "line": 90,
+          "label": "require_admin"
+        }
+      ]
+    },
+    {
+      "id": "m_first_a",
+      "lane": "firstpwd",
+      "col": 0,
+      "type": "frontend",
+      "label": "允许",
+      "width": 252
+    },
+    {
+      "id": "m_first_o",
+      "lane": "firstpwd",
+      "col": 2,
+      "type": "frontend",
+      "label": "允许",
+      "width": 252
+    },
+    {
+      "id": "m_first_v",
+      "lane": "firstpwd",
+      "col": 4,
+      "type": "frontend",
+      "label": "允许",
+      "width": 252
+    },
+    {
+      "id": "m_keys_a",
+      "lane": "ownkeys",
+      "col": 0,
+      "type": "frontend",
+      "label": "允许",
+      "sublabel": "增删 · 配额 · 白名单",
+      "width": 252
+    },
+    {
+      "id": "m_keys_o",
+      "lane": "ownkeys",
+      "col": 2,
+      "type": "frontend",
+      "label": "允许",
+      "width": 252
+    },
+    {
+      "id": "m_keys_v",
+      "lane": "ownkeys",
+      "col": 4,
+      "type": "frontend",
+      "label": "允许",
+      "width": 252,
+      "sources": [
+        {
+          "path": "src/api/admin_keys.py",
+          "line": 101,
+          "label": "list_keys 仅本人"
+        }
+      ]
+    },
+    {
+      "id": "m_poolv_a",
+      "lane": "poolview",
+      "col": 0,
+      "type": "frontend",
+      "label": "全量",
+      "sublabel": "含昵称与额度",
+      "width": 252
+    },
+    {
+      "id": "m_poolv_o",
+      "lane": "poolview",
+      "col": 2,
+      "type": "frontend",
+      "label": "全量",
+      "width": 252
+    },
+    {
+      "id": "m_poolv_v",
+      "lane": "poolview",
+      "col": 4,
+      "type": "frontend",
+      "label": "脱敏",
+      "sublabel": "昵称不下发",
+      "width": 252,
+      "sources": [
+        {
+          "path": "src/api/admin_credentials.py",
+          "line": 259,
+          "label": "昵称仅 operator"
+        }
+      ]
+    },
+    {
+      "id": "m_poolw_a",
+      "lane": "poolwrite",
+      "col": 0,
+      "type": "backend",
+      "label": "允许",
+      "sublabel": "导入 · 删除 · 启停 · 复活",
+      "width": 252
+    },
+    {
+      "id": "m_poolw_o",
+      "lane": "poolwrite",
+      "col": 2,
+      "type": "backend",
+      "label": "允许",
+      "width": 252,
+      "sources": [
+        {
+          "path": "src/api/admin_credentials.py",
+          "line": 325,
+          "label": "require_operator"
+        }
+      ]
+    },
+    {
+      "id": "m_policy_a",
+      "lane": "poolpolicy",
+      "col": 0,
+      "type": "backend",
+      "label": "允许",
+      "sublabel": "限额 · 标签 · pin · 签到 · 成长",
+      "width": 252
+    },
+    {
+      "id": "m_policy_o",
+      "lane": "poolpolicy",
+      "col": 2,
+      "type": "backend",
+      "label": "允许",
+      "width": 252
+    },
+    {
+      "id": "m_probe_a",
+      "lane": "probe",
+      "col": 0,
+      "type": "backend",
+      "label": "允许",
+      "sublabel": "探活 · 人工接管",
+      "width": 252
+    },
+    {
+      "id": "m_probe_o",
+      "lane": "probe",
+      "col": 2,
+      "type": "backend",
+      "label": "允许",
+      "width": 252
+    },
+    {
+      "id": "m_stats_a",
+      "lane": "stats",
+      "col": 0,
+      "type": "frontend",
+      "label": "全站",
+      "sublabel": "可按用户切换",
+      "width": 252
+    },
+    {
+      "id": "m_stats_o",
+      "lane": "stats",
+      "col": 2,
+      "type": "frontend",
+      "label": "全站",
+      "width": 252
+    },
+    {
+      "id": "m_stats_v",
+      "lane": "stats",
+      "col": 4,
+      "type": "frontend",
+      "label": "仅本人",
+      "sublabel": "强制收敛",
+      "width": 252,
+      "sources": [
+        {
+          "path": "src/api/admin_stats.py",
+          "line": 51,
+          "label": "_scope"
+        }
+      ]
+    },
+    {
+      "id": "m_err_a",
+      "lane": "errors",
+      "col": 0,
+      "type": "backend",
+      "label": "允许",
+      "sublabel": "归因 · SSE · CSV",
+      "width": 252
+    },
+    {
+      "id": "m_err_o",
+      "lane": "errors",
+      "col": 2,
+      "type": "backend",
+      "label": "允许",
+      "width": 252
+    },
+    {
+      "id": "m_bill_a",
+      "lane": "billing",
+      "col": 0,
+      "type": "backend",
+      "label": "允许",
+      "sublabel": "账单导出 · 上游状态",
+      "width": 252
+    },
+    {
+      "id": "m_bill_o",
+      "lane": "billing",
+      "col": 2,
+      "type": "backend",
+      "label": "允许",
+      "width": 252,
+      "sources": [
+        {
+          "path": "src/api/admin_billing.py",
+          "line": 82,
+          "label": "require_operator"
+        }
+      ]
+    },
+    {
+      "id": "m_cat_a",
+      "lane": "catalog",
+      "col": 0,
+      "type": "backend",
+      "label": "允许",
+      "sublabel": "目录 · 可用性",
+      "width": 252
+    },
+    {
+      "id": "m_cat_o",
+      "lane": "catalog",
+      "col": 2,
+      "type": "backend",
+      "label": "允许",
+      "width": 252
+    },
+    {
+      "id": "m_audit_a",
+      "lane": "audit",
+      "col": 0,
+      "type": "security",
+      "label": "允许",
+      "sublabel": "登录成败与写操作",
+      "width": 252,
+      "sources": [
+        {
+          "path": "src/api/admin_audit.py",
+          "line": 24,
+          "label": "require_admin"
+        }
+      ]
+    },
+    {
+      "id": "m_opslog_a",
+      "lane": "opslog",
+      "col": 0,
+      "type": "security",
+      "label": "允许",
+      "sublabel": "日志流 · 告警回看",
+      "width": 252
+    },
+    {
+      "id": "m_backup_a",
+      "lane": "backup",
+      "col": 0,
+      "type": "security",
+      "label": "允许",
+      "sublabel": "创建 · 下载 · 恢复",
+      "width": 252
+    },
+    {
+      "id": "m_settings_a",
+      "lane": "settings",
+      "col": 0,
+      "type": "security",
+      "label": "允许",
+      "sublabel": "热更 · 手动跑任务",
+      "width": 252
+    },
+    {
+      "id": "m_oauth_a",
+      "lane": "upstreamoauth",
+      "col": 0,
+      "type": "security",
+      "label": "允许",
+      "sublabel": "TRAE 浏览器登录",
+      "width": 252
+    },
+    {
+      "id": "m_gateway_a",
+      "lane": "gateway",
+      "col": 0,
+      "type": "frontend",
+      "label": "凭 Key",
+      "width": 252,
+      "sources": [
+        {
+          "path": "src/api/deps.py",
+          "line": 237,
+          "label": "API Key 鉴权"
+        }
+      ]
+    },
+    {
+      "id": "m_gateway_o",
+      "lane": "gateway",
+      "col": 2,
+      "type": "frontend",
+      "label": "凭 Key",
+      "width": 252
+    },
+    {
+      "id": "m_gateway_v",
+      "lane": "gateway",
+      "col": 4,
+      "type": "frontend",
+      "label": "凭 Key",
+      "width": 252
+    }
+  ],
+  "edges": [],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "读法",
+      "items": [
+        "行是权限点，列是角色；每一格都对应一个真实端点或页面",
+        "空白 = 该角色没有这个权限，后端 403、前端也不露出入口",
+        "权限累积：admin 拥有 operator 与 viewer 的全部能力"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "门槛实现",
+      "items": [
+        "require_admin：用户、审计、日志、告警、备份、配置、上游登录",
+        "require_operator：凭证写、账单、上游状态、模型目录与探活",
+        "viewer 走同一批统计端点，但 _scope() 把 username 强制改回本人"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "数据面与管理面分开",
+      "items": [
+        "/v1 网关的身份是 API Key，角色只决定管理台能做什么",
+        "Key 的模型白名单、IP、到期与配额对三种角色一视同仁",
+        "角色每请求从库里现读，改角色后旧会话立即失效"
+      ]
+    }
+  ]
+}

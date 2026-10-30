@@ -1,0 +1,1064 @@
+{
+  "schema_version": 1,
+  "diagram_type": "erd",
+  "meta": {
+    "title": "coding2api 数据模型（13 张表）",
+    "subtitle": "SQLite 单库；表间归属由应用层校验，数据库不建外键（虚线）",
+    "locale": "zh-CN",
+    "output": "diagrams/coding2api-data-model.html",
+    "quality_profile": "standard",
+    "repository": {
+      "url": "git@github.com:RobbsLuo/Coding2API.git",
+      "provider": "github",
+      "link_mode": "local-only",
+      "revision": "82cf0efd063e13f5323c69940666e9b64a8d1a68"
+    },
+    "views": [
+      {
+        "id": "identity",
+        "label": "身份与出口钥匙",
+        "focus": [
+          "users",
+          "api_keys",
+          "usage_events"
+        ],
+        "note": "账号是唯一权威身份源；API Key 指向账号，可被停用、到期或按 IP 收窄。"
+      },
+      {
+        "id": "pool",
+        "label": "凭证池与护栏",
+        "focus": [
+          "credentials",
+          "credential_limits",
+          "credential_model_cooldowns",
+          "model_probes"
+        ],
+        "note": "凭证主体、凭证级限额、模型级冷却、探活结论四层分离，互不覆盖。"
+      },
+      {
+        "id": "metering",
+        "label": "计量链路",
+        "focus": [
+          "usage_events",
+          "usage_hourly",
+          "api_keys"
+        ],
+        "note": "明细按请求落一行并保留 90 天；小时汇总永久保留，读侧优先读汇总。"
+      },
+      {
+        "id": "ops",
+        "label": "运营与审计",
+        "focus": [
+          "growth_events",
+          "credit_events",
+          "audit_events",
+          "alert_events",
+          "runtime_settings"
+        ],
+        "note": "活动记录、额度流水、审计与告警都是追加写；配置覆盖只存管理台改过的键。"
+      }
+    ],
+    "legend": {
+      "entries": {
+        "pk": {
+          "label": "主键"
+        },
+        "fk": {
+          "label": "逻辑外键（应用层校验）"
+        },
+        "uk": {
+          "label": "唯一键"
+        },
+        "one": {
+          "label": "一"
+        },
+        "many": {
+          "label": "多"
+        },
+        "optional": {
+          "label": "可空 / 可缺行"
+        }
+      }
+    }
+  },
+  "layout": {
+    "mode": "grid",
+    "gapX": 56,
+    "gapY": 40,
+    "entityW": 264,
+    "headerH": 38,
+    "rowH": 18
+  },
+  "entities": [
+    {
+      "id": "users",
+      "label": "users",
+      "sublabel": "管理台账号 · 三角色",
+      "tag": "身份",
+      "row": 0,
+      "col": 0,
+      "attributes": [
+        {
+          "name": "username",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "password_hash",
+          "type": "TEXT"
+        },
+        {
+          "name": "role",
+          "type": "TEXT"
+        },
+        {
+          "name": "enabled",
+          "type": "INTEGER"
+        },
+        {
+          "name": "must_change_password",
+          "type": "INTEGER"
+        },
+        {
+          "name": "session_epoch",
+          "type": "INTEGER"
+        },
+        {
+          "name": "activation_digest",
+          "type": "TEXT"
+        },
+        {
+          "name": "activation_expires_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "created_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "updated_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "created_by",
+          "type": "TEXT"
+        },
+        {
+          "name": "allowed_models",
+          "type": "TEXT"
+        },
+        {
+          "name": "quota",
+          "type": "TEXT"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 270,
+          "label": "users"
+        }
+      ]
+    },
+    {
+      "id": "api_keys",
+      "label": "api_keys",
+      "sublabel": "出口 Key · 策略与配额",
+      "tag": "身份",
+      "row": 1,
+      "col": 0,
+      "attributes": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "username",
+          "type": "TEXT",
+          "key": "fk",
+          "references": "users.username"
+        },
+        {
+          "name": "name",
+          "type": "TEXT"
+        },
+        {
+          "name": "key_digest",
+          "type": "TEXT",
+          "key": "uk"
+        },
+        {
+          "name": "preview",
+          "type": "TEXT"
+        },
+        {
+          "name": "created_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "last_used_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "provider_binding",
+          "type": "TEXT"
+        },
+        {
+          "name": "allowed_ips",
+          "type": "TEXT"
+        },
+        {
+          "name": "allowed_models",
+          "type": "TEXT"
+        },
+        {
+          "name": "expires_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "quota",
+          "type": "TEXT"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 18,
+          "label": "api_keys"
+        }
+      ]
+    },
+    {
+      "id": "credentials",
+      "label": "credentials",
+      "sublabel": "上游账号池 · 加密凭证",
+      "tag": "凭证池",
+      "row": 0,
+      "col": 1,
+      "attributes": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "provider",
+          "type": "TEXT"
+        },
+        {
+          "name": "nickname",
+          "type": "TEXT"
+        },
+        {
+          "name": "data_enc",
+          "type": "BLOB"
+        },
+        {
+          "name": "enabled",
+          "type": "INTEGER"
+        },
+        {
+          "name": "disabled",
+          "type": "INTEGER"
+        },
+        {
+          "name": "disabled_reason",
+          "type": "TEXT"
+        },
+        {
+          "name": "pinned",
+          "type": "INTEGER"
+        },
+        {
+          "name": "health",
+          "type": "INTEGER"
+        },
+        {
+          "name": "cooling_until",
+          "type": "INTEGER"
+        },
+        {
+          "name": "err_count",
+          "type": "INTEGER"
+        },
+        {
+          "name": "quota_remaining",
+          "type": "REAL"
+        },
+        {
+          "name": "quota_total",
+          "type": "REAL"
+        },
+        {
+          "name": "quota_cycle_end",
+          "type": "INTEGER"
+        },
+        {
+          "name": "quota_expiry_ladder",
+          "type": "TEXT"
+        },
+        {
+          "name": "quota_packages",
+          "type": "TEXT"
+        },
+        {
+          "name": "quota_probed_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "token_expires_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "token_issued_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "growth_last_run_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "growth_last_result",
+          "type": "TEXT"
+        },
+        {
+          "name": "tags",
+          "type": "TEXT"
+        },
+        {
+          "name": "created_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "added_by",
+          "type": "TEXT"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 42,
+          "label": "credentials"
+        }
+      ]
+    },
+    {
+      "id": "credential_limits",
+      "label": "credential_limits",
+      "sublabel": "凭证级限额（缺行=不限）",
+      "tag": "凭证策略",
+      "row": 0,
+      "col": 2,
+      "attributes": [
+        {
+          "name": "credential_id",
+          "type": "TEXT",
+          "key": [
+            "pk",
+            "fk"
+          ],
+          "references": "credentials.id"
+        },
+        {
+          "name": "keep_credits",
+          "type": "REAL"
+        },
+        {
+          "name": "daily_tokens",
+          "type": "INTEGER"
+        },
+        {
+          "name": "daily_credits",
+          "type": "REAL"
+        },
+        {
+          "name": "per_model_tokens",
+          "type": "TEXT"
+        },
+        {
+          "name": "updated_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "updated_by",
+          "type": "TEXT"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 82,
+          "label": "credential_limits"
+        }
+      ]
+    },
+    {
+      "id": "credential_model_cooldowns",
+      "label": "credential_model_cooldowns",
+      "sublabel": "(凭证, 模型) 级冷却",
+      "tag": "凭证策略",
+      "row": 1,
+      "col": 2,
+      "attributes": [
+        {
+          "name": "credential_id",
+          "type": "TEXT",
+          "key": [
+            "pk",
+            "fk"
+          ],
+          "references": "credentials.id"
+        },
+        {
+          "name": "model",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "cooling_until",
+          "type": "INTEGER"
+        },
+        {
+          "name": "hits",
+          "type": "INTEGER"
+        },
+        {
+          "name": "reason",
+          "type": "TEXT"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 207,
+          "label": "credential_model_cooldowns"
+        }
+      ]
+    },
+    {
+      "id": "model_probes",
+      "label": "model_probes",
+      "sublabel": "主动探活结论 · 与调度隔离",
+      "tag": "凭证策略",
+      "row": 2,
+      "col": 2,
+      "attributes": [
+        {
+          "name": "provider",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "model",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "state",
+          "type": "TEXT"
+        },
+        {
+          "name": "failures",
+          "type": "INTEGER"
+        },
+        {
+          "name": "last_probe_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "last_ok_at",
+          "type": "INTEGER"
+        },
+        {
+          "name": "last_error",
+          "type": "TEXT"
+        },
+        {
+          "name": "manual",
+          "type": "TEXT"
+        },
+        {
+          "name": "updated_at",
+          "type": "INTEGER"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 233,
+          "label": "model_probes"
+        }
+      ]
+    },
+    {
+      "id": "usage_events",
+      "label": "usage_events",
+      "sublabel": "逐请求明细 · 保留 90 天",
+      "tag": "用量明细",
+      "row": 0,
+      "col": 3,
+      "attributes": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "ts",
+          "type": "INTEGER"
+        },
+        {
+          "name": "username",
+          "type": "TEXT",
+          "key": "fk",
+          "references": "users.username"
+        },
+        {
+          "name": "provider",
+          "type": "TEXT"
+        },
+        {
+          "name": "credential_id",
+          "type": "TEXT",
+          "key": "fk",
+          "references": "credentials.id"
+        },
+        {
+          "name": "model",
+          "type": "TEXT"
+        },
+        {
+          "name": "ok",
+          "type": "INTEGER"
+        },
+        {
+          "name": "error_type",
+          "type": "TEXT"
+        },
+        {
+          "name": "input_tokens",
+          "type": "INTEGER"
+        },
+        {
+          "name": "output_tokens",
+          "type": "INTEGER"
+        },
+        {
+          "name": "reasoning_tokens",
+          "type": "INTEGER"
+        },
+        {
+          "name": "cached_tokens",
+          "type": "INTEGER"
+        },
+        {
+          "name": "credit",
+          "type": "REAL"
+        },
+        {
+          "name": "credit_estimated",
+          "type": "INTEGER"
+        },
+        {
+          "name": "cost_usd",
+          "type": "REAL"
+        },
+        {
+          "name": "cost_cny",
+          "type": "REAL"
+        },
+        {
+          "name": "latency_ms",
+          "type": "INTEGER"
+        },
+        {
+          "name": "ttfb_ms",
+          "type": "INTEGER"
+        },
+        {
+          "name": "request_id",
+          "type": "TEXT"
+        },
+        {
+          "name": "api_key_id",
+          "type": "TEXT",
+          "key": "fk",
+          "references": "api_keys.id"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 92,
+          "label": "usage_events"
+        }
+      ]
+    },
+    {
+      "id": "usage_hourly",
+      "label": "usage_hourly",
+      "sublabel": "小时汇总 · 永久保留",
+      "tag": "用量汇总",
+      "row": 1,
+      "col": 3,
+      "attributes": [
+        {
+          "name": "hour_utc",
+          "type": "INTEGER",
+          "key": "pk"
+        },
+        {
+          "name": "username",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "provider",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "model",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "requests",
+          "type": "INTEGER"
+        },
+        {
+          "name": "ok_count",
+          "type": "INTEGER"
+        },
+        {
+          "name": "input_tokens",
+          "type": "INTEGER"
+        },
+        {
+          "name": "output_tokens",
+          "type": "INTEGER"
+        },
+        {
+          "name": "reasoning_tokens",
+          "type": "INTEGER"
+        },
+        {
+          "name": "cached_tokens",
+          "type": "INTEGER"
+        },
+        {
+          "name": "cached_known",
+          "type": "INTEGER"
+        },
+        {
+          "name": "credit_sum",
+          "type": "REAL"
+        },
+        {
+          "name": "credit_known",
+          "type": "INTEGER"
+        },
+        {
+          "name": "credit_estimated_known",
+          "type": "INTEGER"
+        },
+        {
+          "name": "cost_usd_sum",
+          "type": "REAL"
+        },
+        {
+          "name": "cost_cny_sum",
+          "type": "REAL"
+        },
+        {
+          "name": "cost_known",
+          "type": "INTEGER"
+        },
+        {
+          "name": "latency_sum",
+          "type": "INTEGER"
+        },
+        {
+          "name": "ttfb_sum",
+          "type": "INTEGER"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 128,
+          "label": "usage_hourly"
+        }
+      ]
+    },
+    {
+      "id": "growth_events",
+      "label": "growth_events",
+      "sublabel": "成长中心一轮一行",
+      "tag": "运营事件",
+      "row": 0,
+      "col": 4,
+      "attributes": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "credential_id",
+          "type": "TEXT",
+          "key": "fk",
+          "references": "credentials.id"
+        },
+        {
+          "name": "ts",
+          "type": "INTEGER"
+        },
+        {
+          "name": "ok",
+          "type": "INTEGER"
+        },
+        {
+          "name": "session_dead",
+          "type": "INTEGER"
+        },
+        {
+          "name": "report",
+          "type": "TEXT"
+        },
+        {
+          "name": "credit",
+          "type": "REAL"
+        },
+        {
+          "name": "energy",
+          "type": "INTEGER"
+        },
+        {
+          "name": "streak_days",
+          "type": "INTEGER"
+        },
+        {
+          "name": "trigger",
+          "type": "TEXT"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 156,
+          "label": "growth_events"
+        }
+      ]
+    },
+    {
+      "id": "credit_events",
+      "label": "credit_events",
+      "sublabel": "额度探测净变化 · 双账本",
+      "tag": "运营事件",
+      "row": 1,
+      "col": 4,
+      "attributes": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "credential_id",
+          "type": "TEXT",
+          "key": "fk",
+          "references": "credentials.id"
+        },
+        {
+          "name": "ts",
+          "type": "INTEGER"
+        },
+        {
+          "name": "window_start",
+          "type": "INTEGER"
+        },
+        {
+          "name": "before",
+          "type": "REAL"
+        },
+        {
+          "name": "after",
+          "type": "REAL"
+        },
+        {
+          "name": "delta",
+          "type": "REAL"
+        },
+        {
+          "name": "source",
+          "type": "TEXT"
+        },
+        {
+          "name": "ledger",
+          "type": "TEXT"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 185,
+          "label": "credit_events"
+        }
+      ]
+    },
+    {
+      "id": "audit_events",
+      "label": "audit_events",
+      "sublabel": "登录与写操作留痕",
+      "tag": "运维审计",
+      "row": 2,
+      "col": 4,
+      "attributes": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "ts",
+          "type": "INTEGER"
+        },
+        {
+          "name": "actor",
+          "type": "TEXT"
+        },
+        {
+          "name": "action",
+          "type": "TEXT"
+        },
+        {
+          "name": "target",
+          "type": "TEXT"
+        },
+        {
+          "name": "detail",
+          "type": "TEXT"
+        },
+        {
+          "name": "ip",
+          "type": "TEXT"
+        },
+        {
+          "name": "ok",
+          "type": "INTEGER"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 303,
+          "label": "audit_events"
+        }
+      ]
+    },
+    {
+      "id": "alert_events",
+      "label": "alert_events",
+      "sublabel": "七类运维告警 · 静默去重",
+      "tag": "运维审计",
+      "row": 3,
+      "col": 4,
+      "attributes": [
+        {
+          "name": "id",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "ts",
+          "type": "INTEGER"
+        },
+        {
+          "name": "rule",
+          "type": "TEXT"
+        },
+        {
+          "name": "severity",
+          "type": "TEXT"
+        },
+        {
+          "name": "scope",
+          "type": "TEXT"
+        },
+        {
+          "name": "message",
+          "type": "TEXT"
+        },
+        {
+          "name": "detail",
+          "type": "TEXT"
+        },
+        {
+          "name": "delivered",
+          "type": "INTEGER"
+        },
+        {
+          "name": "delivery_error",
+          "type": "TEXT"
+        },
+        {
+          "name": "resolved_at",
+          "type": "INTEGER"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 325,
+          "label": "alert_events"
+        }
+      ]
+    },
+    {
+      "id": "runtime_settings",
+      "label": "runtime_settings",
+      "sublabel": "热更配置覆盖 · 白名单校验",
+      "tag": "运维审计",
+      "row": 4,
+      "col": 4,
+      "attributes": [
+        {
+          "name": "key",
+          "type": "TEXT",
+          "key": "pk"
+        },
+        {
+          "name": "value",
+          "type": "TEXT"
+        },
+        {
+          "name": "updated_at",
+          "type": "INTEGER"
+        }
+      ],
+      "sources": [
+        {
+          "path": "src/db/schema.sql",
+          "line": 253,
+          "label": "runtime_settings"
+        }
+      ]
+    }
+  ],
+  "relationships": [
+    {
+      "id": "rel_key_owner",
+      "from": "api_keys",
+      "to": "users",
+      "label": "归属",
+      "fromCardinality": "many",
+      "toCardinality": "one",
+      "identifying": false
+    },
+    {
+      "id": "rel_cred_adder",
+      "from": "credentials",
+      "to": "users",
+      "label": "添加人",
+      "fromCardinality": "many",
+      "toCardinality": "one",
+      "toOptional": true,
+      "identifying": false
+    },
+    {
+      "id": "rel_limit_cred",
+      "from": "credential_limits",
+      "to": "credentials",
+      "label": "护栏",
+      "fromCardinality": "one",
+      "toCardinality": "one",
+      "fromOptional": true,
+      "identifying": false
+    },
+    {
+      "id": "rel_cooldown_cred",
+      "from": "credential_model_cooldowns",
+      "to": "credentials",
+      "label": "模型冷却",
+      "fromCardinality": "many",
+      "toCardinality": "one",
+      "identifying": false
+    },
+    {
+      "id": "rel_usage_user",
+      "from": "usage_events",
+      "to": "users",
+      "label": "计量归属",
+      "fromCardinality": "many",
+      "toCardinality": "one",
+      "identifying": false
+    },
+    {
+      "id": "rel_usage_key",
+      "from": "usage_events",
+      "to": "api_keys",
+      "label": "Key 归属",
+      "fromCardinality": "many",
+      "toCardinality": "one",
+      "fromOptional": true,
+      "identifying": false
+    },
+    {
+      "id": "rel_usage_cred",
+      "from": "usage_events",
+      "to": "credentials",
+      "label": "落点凭证",
+      "fromCardinality": "many",
+      "toCardinality": "one",
+      "fromOptional": true,
+      "identifying": false
+    },
+    {
+      "id": "rel_growth_cred",
+      "from": "growth_events",
+      "to": "credentials",
+      "label": "活动记录",
+      "fromCardinality": "many",
+      "toCardinality": "one",
+      "identifying": false
+    },
+    {
+      "id": "rel_credit_cred",
+      "from": "credit_events",
+      "to": "credentials",
+      "label": "额度流水",
+      "fromCardinality": "many",
+      "toCardinality": "one",
+      "identifying": false
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "约束分工",
+      "items": [
+        "库内只有主键与唯一键；跨表归属由仓储层校验（schema.sql 注释明确不加外键）",
+        "策略类字段存 JSON 文本：quota、per_model_tokens、quota_expiry_ladder、quota_packages"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "读写归属",
+      "items": [
+        "users / api_keys / credentials 由管理台与鉴权层读写",
+        "usage_events 由统计采集器写；usage_hourly 由同一采集器聚合，保留期不同",
+        "audit_events / alert_events 只追加，管理台只读回看"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "保留与一致性",
+      "items": [
+        "明细 90 天后由 retention 任务清理；小时汇总永久保留",
+        "信用/额度流水记的是两次探测的净变化，不是动作归因"
+      ]
+    }
+  ]
+}
