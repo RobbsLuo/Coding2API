@@ -26,6 +26,13 @@ class QuotaProbeTask:
     async def run_once(self, *, apply_pacing: bool = True) -> TaskReport:
         report = TaskReport()
         for candidate in self._credentials.candidates():
+            # 硬禁用与用户软暂停（enabled=0）都跳过，口径与 refresh / checkin /
+            # growth / activity 一致：这些号一定探测失败，只会白打上游并把
+            # 每小时一条 WARNING 灌进日志（实测容器实例对一条 10-15 就过期的
+            # 号探了 160 次）。探测价值在「活号还有多少额度」，死号没有。
+            if candidate.disabled or not candidate.enabled:
+                report.skipped += 1
+                continue
             provider = self._providers.get(candidate.provider)
             if provider is None:
                 report.skipped += 1

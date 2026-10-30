@@ -238,7 +238,7 @@ def test_ci_compose_job_builds_fresh_image_with_admin_user():
 
 LAUNCHD_TEMPLATE = ROOT / "deploy" / "launchd" / "com.coding2api.plist"
 FRPC_PLIST_TEMPLATE = ROOT / "deploy" / "launchd" / "com.coding2api.frpc.plist"
-# newsyslog 的日志路径可以来自任一个 launchd 模板（本体 / frpc 隧道）
+# 日志路径来自任一个 launchd 模板（本体 / frpc 隧道），由轮转脚本覆盖
 LAUNCHD_TEMPLATES = (LAUNCHD_TEMPLATE, FRPC_PLIST_TEMPLATE)
 LAUNCHD_AGENTS = Path.home() / "Library" / "LaunchAgents"
 BUILD_WEB = ROOT / "scripts" / "build-web.sh"
@@ -255,7 +255,7 @@ def test_launchd_template_exists_and_is_valid_plist():
     assert data["Label"] == "com.coding2api"
     assert data["RunAtLoad"] is True
     assert data["KeepAlive"] is True
-    # 日志路径必须与本机 plist / newsyslog 规则一致（改一处漏一处最难查）
+    # 日志路径必须与轮转脚本覆盖的一致（改一处漏一处最难查）
     assert data["StandardOutPath"].endswith("logs/launchd.out.log")
     assert data["StandardErrorPath"].endswith("logs/launchd.err.log")
 
@@ -272,7 +272,7 @@ def test_deploy_templates_contain_no_personal_absolute_paths():
     """全仓库不得混入开发机的个人家目录路径（macOS 的 Users、Linux 的 home）。
 
     这类路径只在开发机成立，进仓库后别人无法复现；需要绝对路径的场景
-    （launchd / newsyslog 不展开环境变量）改用 __PROJECT_ROOT__ 占位符，
+    （launchd 不展开环境变量）改用 __PROJECT_ROOT__ 占位符，
     由 scripts/install-*.sh 在安装时渲染。
     """
     import subprocess
@@ -308,13 +308,6 @@ def test_launchd_install_script_renders_placeholder():
     assert PROJECT_ROOT_TOKEN in body, "脚本必须替换 __PROJECT_ROOT__"
     assert "Library/LaunchAgents" in body
     assert "--uninstall" in body
-
-
-def test_newsyslog_install_script_renders_placeholders():
-    """newsyslog 安装脚本必须同时替换路径与属主占位符。"""
-    body = (ROOT / "scripts" / "install-newsyslog.sh").read_text(encoding="utf-8")
-    assert PROJECT_ROOT_TOKEN in body, "脚本必须替换 __PROJECT_ROOT__"
-    assert LOG_OWNER_TOKEN in body, "脚本必须替换 __LOG_OWNER__"
 
 
 def test_launchd_template_starts_via_wrapper_not_bare_uvicorn():
@@ -467,6 +460,10 @@ def test_describe_probe_failure_handles_timeout_and_unknown():
 NEWSYSLOG = ROOT / "deploy" / "newsyslog" / "coding2api.conf"
 LOGROTATE = ROOT / "deploy" / "logrotate" / "coding2api"
 SYSTEMD_UNIT = ROOT / "deploy" / "systemd" / "coding2api.service"
+# macOS 截断式轮转：newsyslog 只做 rename，会丢日志（见 scripts/rotate-logs.sh）
+ROTATE_SCRIPT = ROOT / "scripts" / "rotate-logs.sh"
+INSTALL_ROTATE = ROOT / "scripts" / "install-logrotate.sh"
+ROTATE_PLIST = ROOT / "deploy" / "launchd" / "com.coding2api.logrotate.plist"
 
 # 部署模板里的占位符（安装脚本渲染成实际值，见 scripts/install-*.sh）。
 # 模板不得写死开发机路径，否则克隆到别处就不可用。
@@ -501,43 +498,199 @@ def _plist_label(template: Path) -> str:
         return str(plistlib.load(handle)["Label"])
 
 
-def test_newsyslog_rule_matches_launchd_plist_paths():
-    """轮转路径必须与 launchd 实际写的文件一致，否则规则永远不生效。"""
-    # 模板对模板：两处用的是同一个 __PROJECT_ROOT__ 占位符，渲染后必须一致。
-    # 路径可能来自任一 launchd 模板（本体或 frpc 隧道），逐个模板查。
-    template = NEWSYSLOG.read_text(encoding="utf-8")
-    plist_templates = "\n".join(t.read_text(encoding="utf-8") for t in LAUNCHD_TEMPLATES)
-    template_paths = [line.split()[0] for line in template.splitlines()
-                      if line.strip() and not line.startswith("#")]
-    assert template_paths, "newsyslog 模板里没有有效条目"
-    for path in template_paths:
-        assert path in plist_templates, f"newsyslog 模板里的 {path} 不在任何 launchd 模板中"
+def test_rotate_script_covers_every_launchd_log_path():
+    """轮转脚本必须覆盖 launchd 实际写的每个日志，否则那个文件会无限涨。
 
-    # 渲染后与本机实际安装的 plist 对齐：只校验「该路径所属的模板已安装」的那些
-    # （例如 frpc 尚未启用时其 plist 不存在，无法对照，跳过而不是误报）。
-    # CI 上两个 plist 都不存在，整段跳过。
-    rendered = _render_template(template)
-    paths = [line.split()[0] for line in rendered.splitlines()
-             if line.strip() and not line.startswith("#")]
-    for launchd_template in LAUNCHD_TEMPLATES:
-        label = _plist_label(launchd_template)
-        installed = LAUNCHD_AGENTS / f"{label}.plist"
-        if not installed.is_file():
-            continue
-        owned = [p for p in paths
-                 if p in _render_template(launchd_template.read_text(encoding="utf-8"))]
-        installed_text = installed.read_text(encoding="utf-8")
-        for path in owned:
-            assert path in installed_text, \
-                f"newsyslog 规则里的 {path} 不在已安装的 {label} plist 中"
-    # 每条规则必须有 7 个字段（路径 属主 权限 份数 大小 时间 标志）
-    for line in rendered.splitlines():
-        if line.strip() and not line.startswith("#"):
-            assert len(line.split()) == 7, f"newsyslog 字段数不对（需 7 列）: {line}"
+    口径：从 launchd 模板取 StandardOutPath / StandardErrorPath，逐个断言
+    scripts/rotate-logs.sh 里有对应的文件名。改名一处漏一处是最难查的坑。
+    """
+    import plistlib
+
+    script = ROTATE_SCRIPT.read_text(encoding="utf-8")
+    covered = 0
+    for template in LAUNCHD_TEMPLATES:
+        with template.open("rb") as handle:
+            data = plistlib.load(handle)
+        for key in ("StandardOutPath", "StandardErrorPath"):
+            path = data.get(key)
+            if not path:
+                continue
+            name = path.rsplit("/", 1)[-1]
+            assert name in script, f"rotate-logs.sh 未覆盖 {name}（来自 {template.name}）"
+            covered += 1
+    assert covered >= 2, "launchd 模板里没有找到日志路径"
+
+
+def test_rotate_script_uses_truncate_not_rename():
+    """macOS 只能截断式轮转：rename 会让进程继续写旧 inode，日志直接丢。
+
+    实测（2026-10-30）：mv app.log app.log.old 后进程仍写 app.log.old，
+    新路径文件不存在；newsyslog 的 flags 只有 B C D G J N U Z，没有
+    copytruncate。所以本项目自建脚本，必须看到「拷贝 → 压缩 → 截断」的顺序。
+    """
+    script = ROTATE_SCRIPT.read_text(encoding="utf-8")
+    code = _shell_code_lines(ROTATE_SCRIPT)
+    # 必须截断当前文件（: > file），不能只 mv/rename
+    assert ": > " in code, "缺少截断步骤（rename 会丢日志）"
+    assert "cp -p" in code, "缺少拷贝步骤（先归档再截断）"
+    assert "bzip2" in code, "缺少压缩步骤"
+    # 截断必须晚于压缩成功：否则压缩失败就把未归档的日志清掉了
+    assert code.index("bzip2 -f") < code.index(": > "), "截断早于压缩成功"
+    # 不得出现 rename 式轮转
+    assert "mv " not in code, "不得使用 mv/rename 轮转"
+    # 轮转目标目录可覆盖：否则测试会把真实 logs/ 轮转掉
+    assert "ROTATE_LOGS_DIR" in script, "缺少 ROTATE_LOGS_DIR 覆盖（测试隔离用）"
+
+
+def test_rotate_script_is_bash32_compatible():
+    """launchd 用 /bin/bash（macOS 自带 3.2），不能用 mapfile / readarray。"""
+    code = _shell_code_lines(ROTATE_SCRIPT)
+    assert "mapfile" not in code, "bash 3.2 没有 mapfile"
+    assert "readarray" not in code, "bash 3.2 没有 readarray"
+    assert "${archives[@]}" not in code, "数组切片在 3.2 上行为不同，用 while read"
+
+
+def test_rotate_plist_schedules_without_keepalive():
+    """定时任务必须跑完即退：KeepAlive 会让它被立刻反复重拉。"""
+    import plistlib
+
+    with ROTATE_PLIST.open("rb") as handle:
+        data = plistlib.load(handle)
+    assert data["Label"] == "com.coding2api.logrotate"
+    assert not data.get("KeepAlive"), "轮转是一次性任务，不能 KeepAlive"
+    assert data.get("RunAtLoad") is False, "登录时不必立刻轮转（阈值未到）"
+    intervals = data.get("StartCalendarInterval")
+    assert intervals, "缺少定时触发"
+    assert len(intervals) >= 2, "至少两个时点，避免只在一个时段轮转"
+    # 走 /bin/bash 而不是 exec 脚本本身：脚本 shebang 用 bash，但显式声明更稳
+    assert data["ProgramArguments"][0] == "/bin/bash"
+    assert data["ProgramArguments"][-1].endswith("scripts/rotate-logs.sh")
+
+
+def test_rotate_install_script_renders_placeholder():
+    """安装脚本必须渲染 __PROJECT_ROOT__ 并写进 LaunchAgents。"""
+    assert INSTALL_ROTATE.is_file()
+    assert INSTALL_ROTATE.stat().st_mode & 0o111, "安装脚本没有执行位"
+    body = INSTALL_ROTATE.read_text(encoding="utf-8")
+    assert PROJECT_ROOT_TOKEN in body
+    assert "Library/LaunchAgents" in body
+    assert "--uninstall" in body
+    assert "launchctl bootstrap" in body and "launchctl bootout" in body
+
+
+def test_newsyslog_rules_removed():
+    """macOS 不再用 newsyslog：它只做 rename，会让服务继续写旧 inode。
+
+    回归护栏——如果有人把 newsyslog 规则加回来，说明又踩回丢日志的坑。
+    """
+    assert not NEWSYSLOG.exists(), "macOS 侧已改用 scripts/rotate-logs.sh，不应再有 newsyslog 规则"
+    assert not (ROOT / "scripts" / "install-newsyslog.sh").exists()
+
+
+def test_rotate_script_actually_rotates_in_isolation(tmp_path):
+    """真跑一次：内容归档、当前文件被截断、超额归档被清理。
+
+    **必须用 ROTATE_LOGS_DIR 指到临时目录**：脚本按自身位置解析仓库根，
+    在别的 cwd 里跑也照样作用于真实 logs/（这条坑是 2026-10-30 实际踩过的，
+    当场轮转掉本机日志并误删了 4 份历史归档）。
+    """
+    import subprocess
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    payload = "x" * 4096
+    (logs / "launchd.err.log").write_text(payload, encoding="utf-8")
+    env = {
+        **__import__("os").environ,
+        "ROTATE_LOGS_DIR": str(logs),
+        "ROTATE_MAX_KB": "1",
+        "ROTATE_KEEP": "2",
+    }
+    result = subprocess.run(["bash", str(ROTATE_SCRIPT)], env=env,
+                            capture_output=True, text=True, check=True)
+    assert "已轮转" in result.stdout
+    # 当前文件被截断为空，归档里有完整内容
+    assert (logs / "launchd.err.log").read_text(encoding="utf-8") == ""
+    archives = list(logs.glob("launchd.err.log.*.bz2"))
+    assert len(archives) == 1
+    import bz2
+
+    assert bz2.decompress(archives[0].read_bytes()).decode() == payload
+
+
+def test_rotate_script_dry_run_leaves_files_untouched(tmp_path):
+    """--dry-run 只报告，不归档也不截断。"""
+    import subprocess
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "launchd.err.log").write_text("y" * 4096, encoding="utf-8")
+    env = {
+        **__import__("os").environ,
+        "ROTATE_LOGS_DIR": str(logs),
+        "ROTATE_MAX_KB": "1",
+    }
+    result = subprocess.run(["bash", str(ROTATE_SCRIPT), "--dry-run"], env=env,
+                            capture_output=True, text=True, check=True)
+    assert "[dry-run]" in result.stdout
+    assert (logs / "launchd.err.log").read_text(encoding="utf-8") == "y" * 4096
+    assert not list(logs.glob("*.bz2"))
+
+
+def test_rotate_script_skips_empty_and_small_files(tmp_path):
+    """空文件与未超阈值的文件都不轮转（notifempty / size 语义）。"""
+    import subprocess
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "launchd.err.log").write_text("", encoding="utf-8")
+    (logs / "launchd.out.log").write_text("z" * 512, encoding="utf-8")
+    env = {
+        **__import__("os").environ,
+        "ROTATE_LOGS_DIR": str(logs),
+        "ROTATE_MAX_KB": "10240",
+    }
+    subprocess.run(["bash", str(ROTATE_SCRIPT)], env=env,
+                   capture_output=True, text=True, check=True)
+    assert not list(logs.glob("*.bz2"))
+
+
+def test_rotate_script_prunes_old_archives(tmp_path):
+    """超过 KEEP 的归档按 mtime 倒序清理，只留最近 KEEP 份。"""
+    import subprocess
+    import time
+
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    # 先造 3 份旧归档，再触发一次轮转（KEEP=2 → 最后应剩 2 份）
+    for index in range(3):
+        archive = logs / f"launchd.err.log.2026010{index + 1}-000000.bz2"
+        archive.write_bytes(b"old")
+        time.sleep(0.01)
+    (logs / "launchd.err.log").write_text("w" * 4096, encoding="utf-8")
+    env = {
+        **__import__("os").environ,
+        "ROTATE_LOGS_DIR": str(logs),
+        "ROTATE_MAX_KB": "1",
+        "ROTATE_KEEP": "2",
+    }
+    subprocess.run(["bash", str(ROTATE_SCRIPT)], env=env,
+                   capture_output=True, text=True, check=True)
+    assert len(list(logs.glob("launchd.err.log.*.bz2"))) == 2
+
+
+def test_rotate_script_rejects_unknown_flag():
+    """未知参数直接退 2，避免拼错的 --dryrun 被当成真跑。"""
+    import subprocess
+
+    result = subprocess.run(["bash", str(ROTATE_SCRIPT), "--nope"],
+                            capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "未知参数" in result.stderr
 
 
 def test_logrotate_rule_uses_copytruncate():
-    """进程持有 fd（>> 重定向）时 rename 不会让它换文件，必须 copytruncate。"""
+    """Linux 侧：进程持有 fd（>> 重定向）时 rename 不会让它换文件，必须 copytruncate。"""
     text = LOGROTATE.read_text(encoding="utf-8")
     assert "copytruncate" in text
     assert "rotate " in text and "maxsize" in text
@@ -584,44 +737,23 @@ def test_graceful_shutdown_timeout_consistent_across_entrypoints():
     unit = SYSTEMD_UNIT.read_text(encoding="utf-8")
     stop = _re.search(r"TimeoutStopSec=(\d+)", unit)
     assert stop and int(stop.group(1)) >= GRACEFUL_SHUTDOWN_SECONDS
+    # launchd 的 ExitTimeOut 同理：默认约 20s，短于排空窗口就会 SIGKILL 长流
+    plist = LAUNCHD_TEMPLATE.read_text(encoding="utf-8")
+    exit_timeout = _re.search(r"<key>ExitTimeOut</key>\s*<integer>(\d+)</integer>", plist)
+    assert exit_timeout, f"{LAUNCHD_TEMPLATE.name} 缺 ExitTimeOut"
+    assert int(exit_timeout.group(1)) >= GRACEFUL_SHUTDOWN_SECONDS
 
 
-def test_newsyslog_install_script_is_executable():
-    """安装脚本必须可执行，否则 README 里的用法会失败。"""
-    script = ROOT / "scripts" / "install-newsyslog.sh"
-    assert script.is_file()
-    assert script.stat().st_mode & 0o111, "安装脚本没有执行位"
-    body = script.read_text(encoding="utf-8")
-    assert "/etc/newsyslog.d/" in body      # 装到 newsyslog 会读的目录
-    assert "--uninstall" in body
-
-
-def test_newsyslog_owner_matches_actual_log_owner():
-    """owned:group 必须与文件实际属主一致，否则 newsyslog 会跳过该条目。
-
-    本机日志由 launchd 以当前用户身份写入，规则写成 root:wheel 就永远不会
-    轮转（newsyslog 静默跳过），是很容易埋下的坑。
-    """
-    text = _render_template(NEWSYSLOG.read_text(encoding="utf-8"))
-    entries = [line.split() for line in text.splitlines()
-               if line.strip() and not line.startswith("#")]
-    assert entries
-    for path, owner in ((e[0], e[1]) for e in entries):
-        target = Path(path)
-        if not target.exists():
-            continue                      # 未部署到本机的路径跳过
-        import grp
-        import pwd
-
-        stat = target.stat()
-        actual = f"{pwd.getpwuid(stat.st_uid).pw_name}:{grp.getgrgid(stat.st_gid).gr_name}"
-        assert owner == actual, f"{path} 规则写 {owner}，实际是 {actual}"
+def test_rotate_script_preserves_file_owner():
+    """截断式轮转用 cp -p：属主/权限跟着归档走，不因轮转变成 root 或丢权限。"""
+    code = _shell_code_lines(ROTATE_SCRIPT)
+    assert "cp -p" in code, "必须保留属主与权限（cp -p），否则归档属主错乱"
 
 
 def test_webapp_logging_module_does_not_open_files():
     """应用只写 stderr：不得引入 RotatingFileHandler / FileHandler。
 
-    文件与轮转交给平台（launchd+newsyslog / systemd+journald / docker json-file）。
+    文件与轮转交给平台（launchd+rotate-logs.sh / systemd+journald / docker json-file）。
     应用自己写文件会与平台轮转争抢同一文件，容器里还会写进镜像层重启即丢。
     """
     src = (ROOT / "src" / "webapp" / "logging.py").read_text(encoding="utf-8")
@@ -846,13 +978,13 @@ def test_frpc_plist_template_is_valid_and_renders():
         "plist 只应注入 token 文件路径，不得注入 token 值"
 
 
-def test_frpc_plist_writes_logs_covered_by_newsyslog():
-    """launchd 写的 frpc 日志必须与 newsyslog 规则一致，否则日志无限增长。"""
+def test_frpc_plist_writes_logs_covered_by_rotate_script():
+    """launchd 写的 frpc 日志必须被轮转脚本覆盖，否则日志无限增长。"""
     plist_text = _render_template(FRPC_PLIST_TEMPLATE.read_text(encoding="utf-8"))
-    newsyslog = NEWSYSLOG.read_text(encoding="utf-8")
+    rotate = ROTATE_SCRIPT.read_text(encoding="utf-8")
     for suffix in ("frpc.out.log", "frpc.err.log"):
         assert f"logs/{suffix}" in plist_text, f"plist 未把日志写到 logs/{suffix}"
-        assert f"logs/{suffix}" in newsyslog, f"newsyslog 缺少 logs/{suffix} 的轮转规则"
+        assert suffix in rotate, f"rotate-logs.sh 缺少 logs/{suffix} 的轮转"
 
 
 def test_frpc_run_resolves_binary_and_execs():

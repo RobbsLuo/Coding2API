@@ -843,7 +843,10 @@ launchctl print gui/$(id -u)/com.coding2api.frpc | grep -E 'state|pid'
 | Docker / compose | `docker logs coding2api` | json-file（10m × 5） | 无需操作 |
 | Linux（systemd） | `journalctl -u coding2api` | journald 自带 | 无需操作 |
 | Linux（非 systemd） | 重定向到文件 | `logrotate` | `sudo cp deploy/logrotate/coding2api /etc/logrotate.d/` |
+| macOS（launchd） | `logs/launchd.{out,err}.log` | `scripts/rotate-logs.sh` | `./scripts/install-logrotate.sh` |
 | 裸跑 | 终端 stderr | 无 | 自行重定向并轮转 |
+
+> **macOS 不要用 newsyslog**：它只做 rename 式轮转，而 launchd 给进程的 fd 仍指向旧 inode —— 轮转后进程继续往已归档的文件里写，新路径的文件直到下次重启才出现，中间日志全丢（本机实测丢过 21.7h）。`rotate-logs.sh` 走「拷贝 → 压缩 → 截断」，与 Linux 侧 `copytruncate` 同语义。
 
 级别用 `LOG_LEVEL`（默认 `INFO`）。**审计日志 = INFO 级**，调到 `WARNING` 一并关掉。
 

@@ -814,7 +814,10 @@ The app writes **stdout / stderr** only, never files, and does not rotate.
 | Docker / compose | `docker logs coding2api` | json-file (10m × 5) | none |
 | Linux (systemd) | `journalctl -u coding2api` | journald | none |
 | Linux (non-systemd) | redirected to files | `logrotate` | `sudo cp deploy/logrotate/coding2api /etc/logrotate.d/` |
+| macOS (launchd) | `logs/launchd.{out,err}.log` | `scripts/rotate-logs.sh` | `./scripts/install-logrotate.sh` |
 | Bare process | terminal stderr | none | redirect and rotate yourself |
+
+> **Do not use newsyslog on macOS**: it only does rename-based rotation, but the fd launchd handed the process still points at the old inode — after rotation the process keeps writing into the archived file, the new path only appears on the next restart, and everything in between is lost (21.7h observed locally). `rotate-logs.sh` copies → compresses → truncates, matching `copytruncate` on the Linux side.
 
 Level via `LOG_LEVEL` (default `INFO`). **Audit logging is INFO** and disappears at `WARNING`.
 

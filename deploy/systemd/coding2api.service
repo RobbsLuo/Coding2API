@@ -37,13 +37,13 @@ Environment=HOST=127.0.0.1
 Environment=PORT=8000
 Environment=DATA_DIR=/opt/coding2api/data
 
-ExecStart=/opt/coding2api/.venv/bin/python -m uvicorn src.main:build_app --factory --timeout-graceful-shutdown 30
+ExecStart=/opt/coding2api/.venv/bin/python -m uvicorn src.main:build_app --factory --timeout-graceful-shutdown 90
 Restart=always
 RestartSec=5
 
-# SIGTERM 后在途请求排空窗口：必须 >= uvicorn 的 --timeout-graceful-shutdown(30)，
+# SIGTERM 后在途请求排空窗口：必须 >= uvicorn 的 --timeout-graceful-shutdown(90)，
 # 否则 systemd 会在 uvicorn 排空完成前 SIGKILL，长流请求被硬断、统计落不下来。
-TimeoutStopSec=35
+TimeoutStopSec=95
 
 # 日志交给 journald（自带轮转）
 StandardOutput=journal

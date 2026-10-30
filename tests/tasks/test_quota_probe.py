@@ -60,6 +60,35 @@ async def test_quota_probe_skips_when_credential_vanished(repo):
     assert report.skipped == 1
 
 
+async def test_quota_probe_skips_disabled_and_paused_credentials(repo):
+    """硬禁用与用户软暂停的号不探测：必然失败，只会白打上游并刷 WARNING。
+
+    口径与 refresh / checkin / growth / activity 一致（实测容器实例对一条
+    10-15 就过期的硬禁用号每小时探一次，7 天 160 次必然 401）。
+    """
+    from src.engine.scheduler import ErrorOutcome
+
+    credentials, _db = repo
+    alive = credentials.add(provider="codebuddy", credential_data={"bearer_token": "a"})
+    dead = credentials.add(provider="codebuddy", credential_data={"bearer_token": "d"})
+    paused = credentials.add(provider="codebuddy", credential_data={"bearer_token": "p"})
+    credentials.save_error(dead, ErrorOutcome(disabled=True))
+    credentials.set_enabled(paused, False)
+    provider = ProbeProvider()
+    task = QuotaProbeTask(credentials, {"codebuddy": provider})
+
+    report = await task.run_once()
+
+    assert report.attempted == 1
+    assert report.succeeded == 1
+    assert report.skipped == 2
+    # 死号/暂停号的 health 不被探测改写（保持原值）
+    healths = {c.credential_id: c.health for c in credentials.candidates()}
+    assert healths[dead] is None
+    assert healths[paused] is None
+    assert healths[alive] == 80
+
+
 async def test_quota_probe_scopes_credential_for_proxy_stickiness(repo):
     """探活必须在「该凭证」的上下文里发（出口 IP 与推理一致）。"""
     from src.request_context import get_credential_id

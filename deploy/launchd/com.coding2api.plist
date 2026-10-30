@@ -34,6 +34,14 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
 
+    <!-- SIGTERM → SIGKILL 的等待窗口。launchd 默认约 20s，短于应用侧的
+         排空窗口（src/main.py GRACEFUL_SHUTDOWN_SECONDS=90），长流请求会被
+         硬断、统计落不下来。这里给 95s（= 排空窗口 + 5s 余量），与
+         docker-compose 的 stop_grace_period、systemd 的 TimeoutStopSec 同口径。
+         tests/deploy/test_assets.py 锁定三处 >= 应用侧窗口。 -->
+    <key>ExitTimeOut</key>
+    <integer>95</integer>
+
     <key>StandardOutPath</key>
     <string>__PROJECT_ROOT__/logs/launchd.out.log</string>
     <key>StandardErrorPath</key>

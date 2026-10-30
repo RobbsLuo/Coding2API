@@ -141,10 +141,17 @@ from .webapp.security import host_allowed, security_middleware
 
 logger = logging.getLogger(__name__)
 
-# SIGTERM 后允许在途请求（含长流）收尾的最长秒数。三处必须一致：
-# 本常量、deploy/systemd 的 TimeoutStopSec、docker-compose 的 stop_grace_period
-# （后者是容器给进程的停机窗口，必须 >= 本值，否则 SIGKILL 会打断排空）。
-GRACEFUL_SHUTDOWN_SECONDS = 30
+# SIGTERM 后允许在途请求（含长流）收尾的最长秒数。四处必须一致：
+# 本常量、deploy/launchd 的 ExitTimeOut、deploy/systemd 的 TimeoutStopSec、
+# docker-compose 的 stop_grace_period（后三者是「平台给进程的停机窗口」，
+# 必须 >= 本值，否则 SIGKILL 会打断排空）。
+#
+# 30s 的来历已不成立：实测 p99 延迟 57.7s、7 天内 27 次请求超过 120s
+# （`usage_events.latency_ms`），30s 窗口下日志留下 38 次
+# `Cancel N running task(s), timeout graceful shutdown exceeded` —— 每次重启
+# 都在硬砍长流请求，统计也落不下来。90s 覆盖到 p99 以上，超过这个量级的
+# 只剩「客户端本来就会断开」的极长会话。
+GRACEFUL_SHUTDOWN_SECONDS = 90
 
 # --------------------------------------------------------------- 向后兼容再导出
 # 这些名字历史上住在 main.py，测试与外部脚本直接 import。真实定义已移到

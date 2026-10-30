@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- 模板：绝对路径写成 __PROJECT_ROOT__ 占位符，避免把开发机的路径带进仓库。
+     安装时用 scripts/install-logrotate.sh 渲染成本机路径，写入
+     ~/Library/LaunchAgents/ 并加载。
+
+     为什么要有这个任务：macOS 的 newsyslog 只做 rename 式轮转，而 launchd
+     重定向给服务的 fd 仍指向旧 inode —— 轮转后进程继续往已归档的文件里写，
+     新路径的文件直到下次重启才出现，中间的日志直接丢失（实测丢过 21.7h）。
+     本任务定时跑 scripts/rotate-logs.sh 做截断式轮转，语义与 Linux 侧
+     deploy/logrotate/coding2api 的 copytruncate 一致。
+
+     StartCalendarInterval 而非 StartInterval：日志增长是缓慢的，每 6 小时看
+     一次足够（10MB 阈值 ≈ 3 天一轮）。按整点跑便于与日志时间戳对照。 -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.coding2api.logrotate</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>__PROJECT_ROOT__/scripts/rotate-logs.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>__PROJECT_ROOT__</string>
+
+    <!-- 每 6 小时一次：00/06/12/18 点 -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key><integer>0</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>6</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>12</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+        <dict>
+            <key>Hour</key><integer>18</integer>
+            <key>Minute</key><integer>17</integer>
+        </dict>
+    </array>
+
+    <!-- 轮转是幂等的一次性任务，跑完即退：不要 KeepAlive（会被立刻重拉） -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- 轮转自身的日志：只记结果行，几十字节/次，无需轮转 -->
+    <key>StandardOutPath</key>
+    <string>__PROJECT_ROOT__/logs/logrotate.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__PROJECT_ROOT__/logs/logrotate.err.log</string>
+</dict>
+</plist>

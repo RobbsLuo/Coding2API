@@ -141,7 +141,7 @@ def test_build_chat_body_normalizes_null_tool_content(caplog):
         {"role": "tool", "tool_call_id": "a", "content": None},
         {"role": "assistant", "content": None},
     ]
-    with caplog.at_level("INFO", logger=qoder_client.__name__):
+    with caplog.at_level("DEBUG", logger=qoder_client.__name__):
         body = build_chat_body({"messages": messages}, "m")
     assert [m["content"] for m in body["messages"]] == ["", "", ""]
     assert any("null content" in r.getMessage() and "3" in r.getMessage()

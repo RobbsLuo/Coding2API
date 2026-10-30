@@ -231,9 +231,9 @@ services:
       # 应用监听 9000、映射却指向 8000，容器永远不 healthy。
       - "${PORT:-8000}:${PORT:-8000}"
     # 停机排空窗口：docker 发 SIGTERM 后等这么久再 SIGKILL。必须 >= 应用侧
-    # uvicorn --timeout-graceful-shutdown(30，见 src/main.py GRACEFUL_SHUTDOWN_SECONDS)，
+    # uvicorn --timeout-graceful-shutdown(90，见 src/main.py GRACEFUL_SHUTDOWN_SECONDS)，
     # 留 5s 余量让 uvicorn 排空完成、统计落库，再被强杀。
-    stop_grace_period: 35s
+    stop_grace_period: 95s
     volumes:
       # 凭证与统计（SQLite）与用户文件分开挂载
       - ./data:/app/data

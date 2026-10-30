@@ -218,8 +218,12 @@ def build_chat_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
         rewritten = _normalize_null_content(messages)
         messages, dropped = _drop_orphan_tool_messages(messages)
     if rewritten:
-        logger.info("Qoder 请求把 %d 条消息的 null content 归一为空串"
-                    "（上游会把它当空消息跳过、再报 tool 配对 400）", rewritten)
+        # DEBUG 而非 INFO：这是每请求都可能命中一次的「已自动修复」提示，不是
+        # 故障。实测 Qoder 长会话下每请求都打（7 天 10309 行），占 err.log 的
+        # 19%，把真正的 WARNING 挤出视野。归一是**成功路径**，排障时按需
+        # 打开 DEBUG 即可。
+        logger.debug("Qoder 请求把 %d 条消息的 null content 归一为空串"
+                     "（上游会把它当空消息跳过、再报 tool 配对 400）", rewritten)
     if dropped:
         # 只记条数：正文里可能有用户数据，日志不落消息内容
         logger.warning("Qoder 请求含 %d 条孤立 tool 消息，已丢弃（上游会以 400 拒绝）",
