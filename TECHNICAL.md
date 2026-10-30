@@ -5,10 +5,10 @@ PROPOSAL.md 定方向，本文定实现。只写**当前代码现状**。
 ## 1. 技术栈
 | 层 | 选型 | 版本 | 说明 |
 |---|---|---|---|
-| 运行时 | Python | 3.12（`requires-python >=3.12`；CI 3.12，Dockerfile 3.14-slim） | |
+| 运行时 | Python | 3.12（`requires-python >=3.12`；`.python-version` 3.12，Dockerfile 3.14-slim） | |
 | 包管理 | uv（venv + pyproject.toml + uv.lock） | 见 `uv.lock` | |
-| Web | FastAPI + Uvicorn | 0.143.3 / 0.54.0 | |
-| 配置 | pydantic-settings | 2.16.0 | `Settings` 为 frozen |
+| Web | FastAPI + Uvicorn | 0.162.0 / 0.54.0 | |
+| 配置 | pydantic-settings | 2.16.1 | `Settings` 为 frozen |
 | HTTP | httpx 双客户端（流式/短请求分离）；`httpx[socks]` 提供按渠道 SOCKS5 | 0.28.1 / socksio | 共享 `trust_env=False` |
 | 数据库 | 标准库 sqlite3（WAL）+ 手写 SQL | 内置 | |
 | 加密 | cryptography Fernet | 50.0.2 | |
@@ -24,30 +24,30 @@ PROPOSAL.md 定方向，本文定实现。只写**当前代码现状**。
 |---|---|---|
 | `pyproject.toml` | — | uv 项目；`[tool.pytest.ini_options]` 设 coverage 目标 |
 | 仓库根 | `Dockerfile`、`docker-compose.yml` | compose build context 依赖根目录 |
-| `src/` | `main.py` `config.py` `runtime_settings.py` `version.py` | 组装·lifespan·路由挂载／pydantic-settings 全部 env + `live()` 归一化／运行时配置覆盖层（DB > env + 白名单 + snapshot）／版本号（`pyproject.toml` 真源） |
+| `src/` | `main.py` `config.py` `runtime_settings.py` `version.py`（其余顶层模块见下「`src/` 顶层」） | 组装·lifespan·路由挂载／pydantic-settings 全部 env + `live()` 归一化／运行时配置覆盖层（DB > env + 白名单 + snapshot）／版本号（`pyproject.toml` 真源） |
 | `src/webapp/` | `limits.py` `security.py` `request_id.py` `access_log.py` `log_buffer.py` `handlers.py` `logging.py` `static.py` | 请求体上限 ASGI（登录 8KB / 其余 16MB）／Host 白名单 + CSP·nosniff／请求 ID（最外层，含 413/400）+ 会话 contextvar／请求级 logfmt／日志环形缓冲 + `redact_or_drop`／异常 → 稳定错误码／root logger／SPA catch-all（排除 `/api`、`/v1`） |
-| `src/db/` | `schema.sql` `conn.py` `migrate.py` `repo.py` `limits.py` `crypto.py` `backup.py` | DDL（只加不改）／线程本地连接 + WAL + busy_timeout + `transaction()`／迁移（**补列之后**建索引）／持久化手写 SQL／限额 CRUD + 当日聚合／Fernet／备份恢复（`VACUUM INTO` + integrity_check + 0600） |
+| `src/db/` | `schema.sql` `conn.py` `migrate.py` `repo.py` `limits.py` `key_usage.py` `crypto.py` `backup.py` | DDL（只加不改）／线程本地连接 + WAL + busy_timeout + `transaction()`／迁移（**补列之后**建索引）／持久化手写 SQL／限额 CRUD + 当日聚合／按 `api_key_id` 聚合明细（Key 配额与 `/v1/usage` 唯一数据源）／Fernet／备份恢复（`VACUUM INTO` + integrity_check + 0600） |
 | `src/auth/` | `users.py` `bootstrap.py` `session.py` `api_key.py` `csrf.py` `throttle.py` `rbac.py` `access.py` | DbUserStore + users.txt 导入／引导（导入 → `ADMIN_USERNAMES` 提权 → 无活跃 admin 报错）／会话 HMAC（含 `session_epoch`）／`sk-` 摘要 + 常量时间校验／CSRF／登录三级限流 + PBKDF2 并发上限／三角色／IP 与模型白名单（纯函数） |
-| `src/provider/` | `base.py` `proxy.py` `naming.py` `token_expiry.py` `openai_chunk.py` `fixtures/` | Provider 协议·Event·ErrKind·Quota·HealthScore／按渠道代理（`PROVIDER_PROXIES`）／模型名归一／到期提取（`expires_at` → JWT `exp`）／OpenAI chunk 共享原语／真实样本 |
-| `src/provider/codebuddy/` | `client.py` `intl.py` `events.py` `credential.py` `headers.py` `oauth.py` `checkin.py` `activity.py` `growth.py` `growth_runner.py` `refresh.py` | 上游 + SSE + 额度探测 + 风控指纹清洗／国际版子类（覆渠道 id 与能力 None）／SSE → Event + 分类／凭证解析／常量与头／设备码／签到／活跃上报／成长中心（15 端点）／成长编排（7 类领取）／刷新 + 多账号切换 |
+| `src/provider/` | `base.py` `proxy.py` `naming.py` `token_expiry.py` `openai_chunk.py` `auth_state.py` `credential_fields.py` `lazy_clients.py` `tos.py` `fixtures/` | Provider 协议·Event·ErrKind·Quota·HealthScore／按渠道代理（`PROVIDER_PROXIES`）+ 凭证出口粘性／模型名归一／到期提取（`expires_at` → JWT `exp`）／OpenAI chunk 共享原语／OAuth pending 登录登记基类（owner·consume·cancel·cleanup 一份）／华为云系凭证字段解析／懒建连接池（按出口代理分池）／渠道 ToS 评级（导入凭证时展示，不参与调度）／真实样本 |
+| `src/provider/codebuddy/` | `client.py` `intl.py` `events.py` `credential.py` `headers.py` `oauth.py` `checkin.py` `activity.py` `growth.py` `growth_runner.py` `model_access_store.py` `refresh.py` | 上游 + SSE + 额度探测 + 风控指纹清洗／国际版子类（覆渠道 id 与能力 None）／SSE → Event + 分类／凭证解析／常量与头／设备码／签到／活跃上报／成长中心（15 端点）／成长编排（7 类领取）／探活结果落盘（TTL 6h）／刷新 + 多账号切换 |
 | `src/provider/trae/` | `client.py` `events.py` `credential.py` `pricing.py` `backfill.py` `callback.py` | 上游 + 额度／自定义 SSE → Event／凭证解析 + 原子写回 + 签到设备号／单请求积分推算／历史回填／登录 URL + 回调解析 |
 | `src/provider/zen/` | `client.py` `events.py` | 上游 + 门禁伪装 + 注入工具回包过滤／标准 SSE → Event |
 | `src/provider/kilo/` | `client.py` `events.py` | 上游（标准 OpenAI）+ `isFree` 过滤（不探活）／SSE → Event（`delta.reasoning`） |
 | `src/provider/qoder/` | `cosy.py` `client.py` `events.py` `credential.py` `auth.py` | COSY（自定义 Base64、AES/RSA、签名与会话头缓存）／上游 + 信封解包 + 额度·签到／信封 → chunk → Event／凭证解析／设备码 PKCE |
 | `src/provider/codearts/` | `signer.py` `dpop.py` `client.py` `events.py` `credential.py` `auth.py` `oauth.py` | SDK-HMAC-SHA256（纯函数）／ES256 DPoP（低 S）／上游 + 私有 SSE 还原 + 积分额度／SSE → 增量 Event（双形状）／凭证解析／OAuth2 PKCE／回调粘贴换 token |
 | `src/provider/officeace/` | `signer.py` `client.py` `events.py` `credential.py` `oauth.py` | 双签名（V11 + SDK-HMAC，纯函数）／上游 + 积分·签到·费率／错误分类 + `max_tokens` 改写／两套凭据 + 一次性 refresh／云端授权轮询（PKCE + DPoP + 开通校验） |
-| `src/engine/` | `scheduler.py` `executor.py` `limits.py` `inflight.py` `affinity.py` `continuation.py` `compress.py` `model_resolver.py` `sse.py` | 选号 + 冷却状态机 + pin／执行 + 目录收窄 + 轮换 + fallback + 统计埋点／限额判定 + 快照缓存／在途租约／会话粘性／截断续写／上下文压缩／模型名解析／SSE 帧解析 |
-| `src/compat/` | `openai/{request,response,errors}.py` `responses/{request,response}.py` `anthropic/{request,response}.py` | Chat 校验·聚合·error shape／Responses 出口／Anthropic Messages 出口 |
-| `src/tasks/` | `pacer.py` `quota_probe.py` `checkin.py` `growth.py` `activity.py` `refresh.py` `retention.py` `backup.py` `alerting.py` `upstream_status.py` `model_probe.py` `status.py` `runner.py` | 全局节流器／额度探测／签到（`CHECKIN_TIMES` 空则每 10 分钟）／成长（仅 CB）／活跃上报／预刷新／小时汇总 + 90 天清理／备份／告警（四规则 + webhook）／上游状态聚合／模型探活／`TASK_SPECS` + 运行态／调度接入 lifespan |
+| `src/engine/` | `scheduler.py` `executor.py` `limits.py` `inflight.py` `half_open.py` `affinity.py` `continuation.py` `compress.py` `sticky_trim.py` `tool_output.py` `model_resolver.py` `reasoning.py` `prefix_debug.py` `sse.py` | 选号 + 冷却状态机 + pin／执行 + 目录收窄 + 轮换 + fallback + 统计埋点／限额判定 + 快照缓存／在途租约／冷却到期半开探测／会话粘性／截断续写／上下文压缩／粘性裁剪／tool 输出压缩／模型名解析／档位映射解析／前缀缓存诊断／SSE 帧解析 |
+| `src/compat/` | `openai/{request,response,errors,dsml}.py` `responses/{request,response}.py` `anthropic/{request,response}.py` | Chat 校验·聚合·error shape·DSML 泄漏回读／Responses 出口／Anthropic Messages 出口 |
+| `src/tasks/` | `pacer.py` `quota_probe.py` `checkin.py` `growth.py` `activity.py` `refresh.py` `retention.py` `backup.py` `alerting.py` `upstream_status.py` `model_probe.py` `status.py` `runner.py` | 全局节流器／额度探测／签到（`CHECKIN_TIMES` 空则每 10 分钟）／成长（仅 CB）／活跃上报／预刷新／小时汇总 + 90 天清理／备份／告警（七类规则 + webhook）／上游状态聚合／模型探活／`TASK_SPECS` + 运行态／调度接入 lifespan |
 | `src/stats/` | `backfill.py` `collector.py` `live.py` `query.py` `csv.py` | 历史回填／明细写入 + 小时双写 + 提交后广播／进程内实时广播／各类统计查询／CSV（公式注入防护） |
-| `src/` 顶层 | `sorting.py` `benchmarks.py` `pricing.py` `model_match.py` `request_context.py` `upstream_status.py` | `sort`/`order` 白名单／OpenRouter 目录（价 + 元数据 + 能力分 + 快照）／成本估算（USD→CNY）／模型名匹配／请求 ID contextvar／状态页聚合 |
-| `src/api/` | `deps.py` `endpoints.py` `chat.py` `responses.py` `messages.py` `context.py` `models.py` `model_merge.py` `model_catalog.py` `balance.py` `authorize.py` `admin_credentials.py` `admin_keys.py` `admin_settings.py` `admin_users.py` `admin_audit.py` `admin_alerts.py` `admin_badges.py` `admin_upstream.py` `admin_model_catalog.py` `admin_model_availability.py` `logs.py` `activate.py` `admin_stats.py` `admin_auth.py` `playground.py` `streaming.py` `metrics.py` | Services 容器 + 鉴权依赖／`dispatch_compat` 骨架／三个 /v1 出口／压缩接线／`GET /v1/models`（SWR + 落盘 + 白名单）／归一·合并·别名（纯函数）／目录快照／余额／TRAE 回调／凭证运维／Key CRUD／配置与任务／用户／审计／告警／角标／上游状态／模型目录 + 探活／激活／统计／登录 + 上游登录／Playground／SSE 包装／`/metrics` |
+| `src/` 顶层 | `sorting.py` `benchmarks.py` `pricing.py` `model_match.py` `model_alias.py` `key_quota.py` `tags.py` `request_context.py` `upstream_status.py` | `sort`/`order` 白名单／OpenRouter 目录（价 + 元数据 + 能力分 + 快照）／成本估算（USD→CNY）／模型名匹配／`MODEL_ALIASES` 文本解析／Key 级配额（六项，准入 + 进程内滑动窗口）／凭证标签纯函数／请求 ID + 凭证 id contextvar／状态页聚合 |
+| `src/api/` | `deps.py` `endpoints.py` `chat.py` `responses.py` `messages.py` `context.py` `models.py` `model_merge.py` `model_catalog.py` `balance.py` `authorize.py` `usage.py` `admin_credentials.py` `admin_keys.py` `admin_settings.py` `admin_users.py` `admin_audit.py` `admin_alerts.py` `admin_badges.py` `admin_upstream.py` `admin_model_catalog.py` `admin_model_availability.py` `admin_backups.py` `admin_billing.py` `logs.py` `activate.py` `admin_stats.py` `admin_auth.py` `playground.py` `streaming.py` `metrics.py` | Services 容器 + 鉴权依赖／`dispatch_compat` 骨架／三个 /v1 出口／压缩接线／`GET /v1/models`（SWR + 落盘 + 白名单）／归一·合并·别名（纯函数）／目录快照／余额／TRAE 回调／`GET /v1/usage` 自助用量／凭证运维／Key CRUD／配置与任务／用户／审计／告警／角标／上游状态／模型目录 + 探活／备份与恢复／月度账单／日志页／激活／统计／登录 + 上游登录／Playground／SSE 包装／`/metrics` |
 | `src/audit/actions.py` | — | 审计动作常量 + 中文标签 |
 | `web/` | — | React 前端。**`.npmrc` 的 `auto-install-peers=false` 与 lock 的 `settings.autoInstallPeers` 强耦合**（避免拉 `@lobehub/ui`/`antd` 子树）；`Dockerfile` 必须 `COPY web/.npmrc`，否则 `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH` |
 | `deploy/` | — | launchd / logrotate / systemd 模板 |
 | `diagrams/` | — | 架构图 / 时序图 / 状态机（HTML + 源 JSON） |
 | `scripts/` | — | 建号、回填、运维脚本 |
-| `tests/` | — | 按 `src/` 子包镜像 |
+| `tests/` | — | 按 `src/` 子包镜像，外加 `test_key_quota.py` / `test_model_alias.py` / `test_upstream_status.py` 这类顶层模块对应用例 |
 
 ## 3. 核心类型
 ### 3.1 中立事件层（`provider/base.py`）
@@ -70,6 +70,8 @@ class Event:
     error_code: int | None = None
     error_message: str | None = None
     error_kind: ErrKind | None = None   # 流内错误的分类，executor 直接消费
+    retry_after_seconds: float | None = None  # 上游点名「过多久再来」（仅排队信号带）
+    model: str | None = None           # 上游响应里的模型名，只用于「静默替换」观测
 
 @dataclass(slots=True)
 class Usage:
@@ -293,12 +295,14 @@ def health_score(q: Quota | None) -> int | None:
 | `provider_binding` | 见 `KNOWN_PROVIDERS` | 空 = 跨渠道 |
 | `allowed_ips` | 逗号分隔 IP/CIDR | 空 = 不限 |
 | `allowed_models` | fnmatch glob、逗号分隔 | 空 = 不限 |
+| `quota` | JSON 文本，六项（`daily_requests`/`daily_tokens`/`daily_cost_usd`/`rpm`/`tpm`/`max_concurrency`） | 空 / 0 = 该项关闭 |
 | `expires_at` | epoch 秒 | NULL = 永不过期 |
 
 - **渠道绑定**：只在绑定渠道选号；模型属他渠道 → 400 并指出归属；`模型@渠道` 冲突同样 400。执行 `Executor._apply_binding`，与 `@provider` 共用收窄路径并置 `forced`（跳过目录收窄）。目录未就绪 → 保守放行。
 - **来源 IP**：`deps.api_key_user` 当场判。**默认不采信 `X-Forwarded-For`**；仅 `TRUST_PROXY=true` 取**最后一个**条目。写入 `normalize_allowed_ips` 规范化（`10.0.0.1` → `10.0.0.1/32`）；读取宽松，整份白名单解析不出 → **拒绝**（fail closed）。失败 403。
 - **模型白名单**：三个 /v1 出口解析后校验；空名 / `auto` 按 `default_model` 判定（不能借空名绕过）；大小写不敏感，`@渠道` 后缀不参与；`/v1/models` 同样过滤。
 - **到期**：过期与「Key 不存在」**统一 401 文案**。
+- **Key 级配额**（`key_quota.py`）：六项独立；当日类按北京自然日从 `usage_events` 聚合，速率 / 并发是进程内滑动窗口（重启清零，多副本各算各的）。超限 429 + `quota_exceeded`；**判定异常一律放行 + warning**（配额是旁路治理，安全边界在鉴权与 IP 白名单那边 fail closed）。自助查询见 `GET /v1/usage?days=1|7|30`（只读自己的明细，不暴露池结构）。
 
 ### 3.11 reasoning 控制
 只给机制不给策略：三项默认关 / 留空。内置默认矩阵（哪个渠道认哪些档位）一律不做（未实测即编造）。
@@ -501,13 +505,12 @@ class Scheduler:
 
 **「目录登记」的口径含探活判死的渠道**（§9.1.1）：判死只把它从**展示**里摘掉，别名登记保留——否则「没登记」回退成全部渠道扇出，正是收窄要防的那件事。
 
-**「目录登记」的口径含探活判死的渠道**（§9.1.1）：判死只把它从**展示**里摘掉，别名登记保留——否则「没登记」回退成全部渠道扇出，正是收窄要防的那件事。
-
 ### 6.3 模型级冷却
 `credential_model_cooldowns(credential_id, model, cooling_until, hits, reason)` 按 **(凭证, 模型)** 建表——账号级 `cooling_until` 放不下「同账号其他模型仍可用」。`model_probes(...)` 是**观测记录**：冷却表为调度权威（真实失败驱动）；探活表只供展示（探测失败未必是模型问题）。
 
 - 登记名 = **该凭证所属上游的原始模型名**（`_upstream_model`）；CB 与 TRAE 大小写变体不同，归一名漏判。
 - 选号路径：`executor._select` 逐凭证过滤 `is_selectable(now, 模型名)` + 注入 `Candidate.credit_rate` → 交 `Scheduler.select`；同时完成收窄、粘性命中与排序（`_sticky(...) or scheduler.select(...)`）。
+- **冷却到期先半开**（`engine/half_open.py`，`(凭证, 作用域)` 粒度；作用域空串 = 账号级、非空 = 该模型）：到期后只放行**一个**探测请求，其余请求看见占用即换号（唯一候选时按无可用返回）。成功记「已探通」120s，期内直接放行；失败由上游写新冷却、探测位立刻释放。探测位 TTL 600s 兜住 GC 泄漏。理由：冷却一到期就全量回池，会把刚解冻的号再次打进限流（锯齿）。进程内集合，重启只让每个号多探一次。
 - 退避：`MODEL` 10m 起翻倍封顶 2h；`BLOCKED` 6h 起翻倍封顶 24h；`CONCURRENCY` 固定 60s 不翻倍。换 reason 重新计数。
 - **上游点名恢复时刻优先**：`Retry-After` → `parse_retry_after`；头缺失时 CB 走 `parse_reset_at` 读正文 `reset at … UTC+8`（`retry_hints(headers, body=raw)`，仅 CodeBuddy 传 body）。两者经 `clamp_retry_at` 钳在 `[now + 常量, now + 24h]` → `MODEL` 的 600s 只是下限，上游说 22:34 恢复即冷却到 22:34。日志按 `_scope_label` 打作用域：模型级「模型 <名>」，账号级「作用域 账号」——账号级分类的调用方同样传模型名，一律打 `模型` 会让 zen 429 读起来像模型级限流。
 - 清除：`save_success(..., model=)` 只删 `reason='blocked'`；`revive` / 删除凭证 / 账号级冷却出现都清模型条目。留存任务每轮 `purge_expired_model_cooldowns()`（删行）+ `purge_expired_account_cooldowns()`（`cooling_until` 置 NULL）；列表只下发未过期。账号级那条是**卫生清理**非调度依赖——选号按 `cooling_until > now` 判断，但陈旧值让管理台「冷却」排序失真。
@@ -583,13 +586,13 @@ class Scheduler:
 上游模型观测：`Event.model`（各渠道协议里有 `model` 就填）与请求模型做一次按尝试的比较；双向都不构成前缀关系（`glm-5.2` vs `glm-5.2-20261001` 视为一致）时只写 WARNING「疑似静默替换」——不改响应、不冷却凭证、不写 `error_type`（与用量对账 `_check_usage_consistency` 同口径：观测信号不进失败归因，避免成功率虚低）。占位名（`auto` / `default` / `unknown` / `none`）不算证据。**TRAE 的真实模型只在元数据帧回显**（`extra_info.model`、`timing_cost.provider_model_name`），这些帧本身无下游语义，故 `TraeClient` 在流循环里先取提示、再贴到后续事件（output/done/usage 帧都不带模型）。**Qoder 实测只有 `model:"auto"`**（信封 headers 与 chunk 其它字段均无模型名），该渠道天然是观测盲区。
 
 ## 8. 数据库
-DDL 以 `src/db/schema.sql` 为准。`SCHEMA_VERSION = 29`，13 张表：`api_keys` / `credentials` / `credential_limits` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `model_probes` / `runtime_settings` / `alert_events`。
+DDL 以 `src/db/schema.sql` 为准。`SCHEMA_VERSION = 30`（v29 删了福利链路的积分三列，v30 加用户级策略两列），13 张表：`api_keys` / `credentials` / `credential_limits` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `model_probes` / `runtime_settings` / `alert_events`。
 
 ```sql
 -- conn.py 打开时执行
 PRAGMA journal_mode = WAL;
 PRAGMA busy_timeout = 5000;
-PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_keys 仍在应用层校验）
+PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 等关系全在应用层校验
 ```
 
 - 连接：`threading.local()` 每线程一个 `sqlite3.Connection(row_factory=sqlite3.Row)`。写入统一走 `Database.transaction()`，无应用层写锁，并发由 SQLite 串行化。
@@ -598,15 +601,16 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 - `runtime_settings(key, value, updated_at)`：纯 key/value，只存管理台改过的 key，未出现回落 env；值由 `HOT_SETTINGS` 白名单校验，非法行读取时忽略并记日志。
 - 模型列表与目录不占表：进程内 TTL 缓存 + `DATA_DIR/model_catalog.json` / `openrouter_catalog.json`（§9.4）；签到去重由 `CheckinTask` 当日作用域集合实现。
 
-**备份与恢复**（`db/backup.py`，任务与 `scripts/` 共用）：`VACUUM INTO` 写一致性快照（WAL 下直接 `cp` 丢未 checkpoint 事务）；落盘后立即 `PRAGMA integrity_check`（不过则删半成品并抛错）；产物 `0600` 目录 `0700`；每 `BACKUP_INTERVAL_MINUTES` 备份、按 mtime 保留 `BACKUP_KEEP` 份。恢复 `scripts/restore_db.py`：校验 → `.pre-restore-<ts>` 安全副本 → `os.replace` 原子替换 → 删 `-wal`/`-shm` 残留；默认预览，`--apply` 才写。**不做「服务在跑」探测**；文档要求恢复前停服、恢复后重启。
+**备份与恢复**（`db/backup.py`，任务 / 管理台 / `scripts/` 共用）：`VACUUM INTO` 写一致性快照（WAL 下直接 `cp` 丢未 checkpoint 事务）；落盘即 `PRAGMA integrity_check`（不过则删半成品并抛错）；产物 `0600` 目录 `0700`；每 `BACKUP_INTERVAL_MINUTES` 备份、按 mtime 保留 `BACKUP_KEEP` 份。恢复 `scripts/restore_db.py`：校验 → `.pre-restore-<ts>` 安全副本 → `os.replace` → 删 `-wal`/`-shm` 残留；默认预览，`--apply` 才写。**不做「服务在跑」探测**：要求恢复前停服、恢复后重启。端点与「上传后重启才换库」语义见 README「数据库备份与恢复」，此处不重复。
 
-**凭证标签**（`credentials.tags`，v22；纯函数 `src/tags.py`）：逗号分隔，`MAX_TAGS=16` / `MAX_TAG_LENGTH=24`。**写入校验、读取容错**——`parse_tags` 对越界项抛 `ValueError`（端点转 400）；`tags_value` 只丢弃坏项不抛错。去重大小写不敏感、保留首次写法。半角/全角逗号与分号都当分隔符；含分隔符的列表项写入前被拒。**标签不参与调度与鉴权**。端点 `PUT /api/credentials/{id}/tags`（整体替换，`require_operator`），审计 `credential.tags`。列表响应 `tags` 是数组。
+**凭证标签**（`credentials.tags`，v22；纯函数 `src/tags.py`）：逗号分隔，`MAX_TAGS=16` / `MAX_TAG_LENGTH=24`。**写入校验、读取容错**——`parse_tags` 对越界项抛 `ValueError`（端点转 400）；`tags_value` 只丢弃坏项不抛错。去重大小写不敏感、保留首次写法。半角/全角逗号与分号都当分隔符；含分隔符的列表项写入前被拒。**标签不参与调度与鉴权**。端点 `PUT /api/credentials/{credential_id}/tags`（整体替换，`require_operator`），审计 `credential.tags`。列表响应 `tags` 是数组。
 
 **迁移纪律**（`migrate.py`）：
 - 启动读 `schema.sql` 逐条 `CREATE TABLE IF NOT EXISTS`（只加不改）。
 - 新增**列**写进 `_MIGRATION_COLUMNS`，走 `ALTER TABLE ... ADD COLUMN`；`SCHEMA_VERSION + 1`。
 - 新增**表**不需 `_MIGRATION_COLUMNS`：建表即完成迁移，只需 `SCHEMA_VERSION + 1` + 老库升级测试。
 - 删除**表**写进 `_MIGRATION_DROPS`，走 `DROP TABLE IF EXISTS`；`SCHEMA_VERSION + 1`。
+- 删除**列**写进 `_MIGRATION_COLUMN_DROPS`，走 `ALTER TABLE ... DROP COLUMN`；`SCHEMA_VERSION + 1`（v29 就这样删掉积分三列）。
 - 版本记在 `PRAGMA user_version`；库版本高于本程序 → 启动报错。
 - 删除凭证显式清理其模型级冷却行（无外键级联），否则重建同 id 继承旧冷却。
 - **升级只在启动时发生**：迁移与 bootstrap 挂 `build_app`；「改了 schema 但没重启」= 老库 + 新前端。
@@ -629,6 +633,7 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 - **对外 id 一律归一键**：多渠道取最短展示名的归一键；单渠道取该条；兜底/哨兵取原代号归一键。原代号不露面，转发经 `services.model_aliases` 映射回（`executor.upstream_model_name` 消费）；每渠道登记三键（对外 id、原代号、展示名及 slug 形式）。
 - **撞车消歧**（`_disambiguate`）：按 `_sort_key` 序保留先到者，后者依次取 `_fallback_ids`（原代号归一键 → 加渠道后缀 → 数字后缀）。兜底/哨兵条目用 `_scoped_key`（`渠道\0归一原代号`）隔离，对外 id 仍是原代号归一键。
 - **展示顺序**：`_PROVIDER_RANK`（codebuddy 0 → codebuddy_intl 1 → trae 2 → qoder 3 → codearts 4 → officeace 5 → 其余 6），多渠道取 `min`，同级按归一键字典序。只影响展示；调度选号顺序（`KNOWN_PROVIDERS`）不变。
+- **自定义别名**（`MODEL_ALIASES`，热更，`model_alias.py` 解析 + `api/model_merge._apply_custom_aliases` 注入）：`对外名=模型@渠道;对外名2=模型`，`@渠道` 可省。解析宽容（坏段忽略 + warning），注入期判撞名 / 目标不存在 / 渠道不持有 → 该段 ERROR 跳过；条目带 `custom_alias: true`。**无别名链**。用法见 README「模型名三字段」。
 
 ### 9.2 按凭证加载与 SWR
 `list_models` 先用 `credential_providers()` 求「当前有可用凭证」的渠道（`candidates(selectable_only=True)`：未暂停、未硬禁用；冷却中仍算）；`provider_id not in connected` 直接 `continue`——**没凭证不读缓存、不拉上游、不展示**。zen / kilo 有虚拟凭证。
@@ -691,7 +696,7 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 - **账本由渠道决定**（`quota_ledger`）：`pool` = 套餐/每日余额（CodeArts 之外），`credits` = 积分（CodeArts）。两本账量级与语义不同，混读会被当成同一本账。
 - **归因纪律**：diff 只能看到 `[上次探测, 本次探测]` 的**净变化**（其间签到、成长、对话可能同时发生）。`source` 只表达归因已知度：`observed`（净变化，delta 可正可负或 NULL）、`sync`（首次建基线，delta NULL）。前端文案一律「净变化」，不写「签到 +5」。
 - **只记有信息量的行**：首次记 `sync`；余额未变不记；变化记 `observed`；任一端未知记（delta NULL）；两端都未知不记；凭证被并发删除不记。`window_start` = **上次探测时刻**。
-- 接口 `GET /api/credentials/{id}/credit-events?limit=20&ledger=pool|credits`（未知凭证 400，未知 `ledger` 回落 `pool`）。保留期 90 天（`purged_credit_events`）。
+- 接口 `GET /api/credentials/{credential_id}/credit-events?limit=20&ledger=pool|credits`（未知凭证 400，未知 `ledger` 回落 `pool`）。保留期 90 天（`purged_credit_events`）。
 
 ### 9.7 用量统计与成本
 - **口径**：`overview` / `by_provider` / `by_model` / `by_user` / `timeline` / `model-timeline` 读**小时汇总**（`usage_hourly`，永久）；只有 `events` 读明细（90 天）。代价：最近 ≤5 分钟未进汇总的不计入。**凭证维度读明细表**（小时汇总主键无 `credential_id`），只覆盖 90 天。
@@ -718,7 +723,7 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 - **实时流（SSE）** `GET /api/stats/events/stream`：**进程内广播**而非轮询；`StatsCollector.record` 在**事务提交后**调 `LiveEventHub.publish` → 回滚行不漏出。**背压**：每订阅者有界 deque（`MAX_BUFFERED = 200`），满则丢**最旧**；唤醒用 `asyncio.Event`。**并发上限** `MAX_SUBSCRIBERS = 8`，超出 429 + `Retry-After: 10`。**作用域与过滤在订阅者侧**（`_scope` + 三过滤，`None` 不限制）；`since`/`until` 不参与。**脱敏**：payload 不含 `credential_name`，仅 admin/operator 由端点逐条补。15s 注释帧保活；`Cache-Control: no-store` + `X-Accel-Buffering: no`。生成器 `finally` 注销订阅。**单进程限制**：多进程各推自己写入的行。
 
 ### 9.8 列表排序
-所有 `GET` 列表接受 `sort`（白名单键）+ `order`（`asc`/`desc`）。**未知 `sort` 或非法 `order` 回落默认，不报错**；`sort` 是白名单键而非 SQL 列名 → 用户输入永不进 SQL。契约在 `src/sorting.py`：`parse_sort_order`（唯一入口）、`sql_order`（`tiebreak` 稳定次序）、`sort_rows`（`None` 值无论升降序都排最后）。明细默认（`time` 降序）走 rowid 游标返回 `next_before`；按其它列 / 时间升序 / 显式 `offset` 改 `LIMIT/OFFSET` 并返回 `total`。适用：`/api/credentials`、`/api/users`、`/api/api-keys`、`/api/audit`、`/api/alerts`、`/api/model-catalog`、`/api/credentials/{id}/credit-events`、`/api/credentials/{id}/accounts`、`/api/stats/by-*`、`/api/stats/events`。
+所有 `GET` 列表接受 `sort`（白名单键）+ `order`（`asc`/`desc`）。**未知 `sort` 或非法 `order` 回落默认，不报错**；`sort` 是白名单键而非 SQL 列名 → 用户输入永不进 SQL。契约在 `src/sorting.py`：`parse_sort_order`（唯一入口）、`sql_order`（`tiebreak` 稳定次序）、`sort_rows`（`None` 值无论升降序都排最后）。明细默认（`time` 降序）走 rowid 游标返回 `next_before`；按其它列 / 时间升序 / 显式 `offset` 改 `LIMIT/OFFSET` 并返回 `total`。适用：`/api/credentials`、`/api/users`、`/api/api-keys`、`/api/audit`、`/api/alerts`、`/api/model-catalog`、`/api/credentials/{credential_id}/credit-events`、`/api/credentials/{credential_id}/accounts`、`/api/stats/by-*`、`/api/stats/events`。
 
 ### 9.9 列表分页
 扁平列表统一后端分页，前端共享 `Pagination`（`PAGE_SIZE_OPTIONS = [10, 20, 50, 100]`，`DEFAULT_PAGE_SIZE = 50`）。契约：`GET` 接受 `limit` + `offset`；响应在原列表键旁新增 `total`（**筛选后**条数）。仓储 `limit=None` 表示不分页。实现分流：`users` / `api-keys` / `alerts` / `audit` 走 SQL `LIMIT/OFFSET` + 独立 `count`；`model-catalog` 排序键含派生字段 → 先 `sort_rows` 再内存切片（`_filter_catalog` 支持 `q` 与 `only_available`；顶层 `count` 仍是目录全量）。游标分页的明细端点无总页数，文案退化为 `第 N 页`。分组类表不分页。
@@ -728,16 +733,16 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 
 | 任务 | 周期 | 行为 |
 |---|---|---|
-| 额度探测（quota_probe） | 启动立即一轮（不节流）+ 每 `QUOTA_PROBE_MINUTES`（默认 60） | 写 `credentials.quota_*` / `quota_expiry_ladder` / `quota_packages` / `health` |
+| 额度探测（quota_probe） | 启动立即一轮（不节流）+ 每 `QUOTA_PROBE_MINUTES`（默认 60） | 写 `credentials.quota_*` / `quota_expiry_ladder` / `quota_packages` / `health`；硬禁用与 `enabled=0` 直接跳过（口径同 refresh / checkin / growth / activity——死号只会白打上游并灌日志） |
 | token 预刷新（refresh） | 每 `REFRESH_INTERVAL_MINUTES`（默认 30，下限 5） | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换；短寿命渠道自行封顶（CodeArts 2700s，必须**严格宽于**本周期）；`UpstreamReloginRequired` 时标记并硬禁用 |
-| 每日签到（checkin） | 每 10 分钟 | 成功即封账（`日期:scope` → 截止时刻，内存态，跨天清理）；渠道可回填 `seal_until`（Qoder 10:00 换窗口）；失败重试 |
+| 每日签到（checkin） | `CHECKIN_TIMES` 留空 → 每 10 分钟；配了时点 → 每 1 分钟醒（窗口 `[时点−抖动, 时点]`，10 分钟周期会整轮错开、一天一次都不签） | 成功即封账（`日期:scope` → 截止时刻，内存态，跨天清理）；渠道可回填 `seal_until`（Qoder 10:00 换窗口）；失败重试 |
 | 成长中心（growth） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5） | 仅 CB：7 类领取；落 `growth_events` + 回写 `growth_last_result` |
 | 活跃上报（activity，默认关） | 每 10 分钟醒，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点）窗口内执行 | CB + 国际版：补发 `chat_request_send`；按「endpoint + userId」隔离、当日封账 |
 | 明细清理（retention） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert）+ 90 天清理；同期限回收 `credit_events` / `audit_events` / `alert_events` / `growth_events`；顺带清过期冷却（模型级删行 + 账号级 `cooling_until` 置 NULL）。跑在 `asyncio.to_thread` |
 | 数据库备份（backup） | 每 `BACKUP_INTERVAL_MINUTES`（默认 1440，下限 60） | `VACUUM INTO` + `integrity_check` + 0600，保留 `BACKUP_KEEP`（默认 7）。跑在 `asyncio.to_thread` |
 | 渠道模型列表刷新（注入协程 `api/models.py::list_models`） | 每 `MODEL_CATALOG_MINUTES`（默认 30，下限 5） | 兜底重拉（TTL 门禁 + 逐渠道 publish + 落盘）。周期跟 zen 判活缓存（30 分钟）对齐 |
 | 模型目录刷新（注入协程） | 每 `OPENROUTER_CATALOG_MINUTES`（默认 1440，下限 60） | 拉 OpenRouter → 三张表 → 落盘 → 就地换入 |
-| 运维告警（alert） | 每 `ALERT_INTERVAL_MINUTES`（默认 5，下限 1） | 评估四类风险，命中落 `alert_events` 并可推 webhook；同 `(规则, 对象)` 静默窗内只报一次 |
+| 运维告警（alert） | 每 `ALERT_INTERVAL_MINUTES`（默认 5，下限 1） | 评估七类规则（下表 6 类 + §11.3e 预算分层），命中落 `alert_events` 并可推 webhook；同 `(规则, 对象)` 静默窗内只报一次 |
 | 上游状态聚合（upstream_status） | 每 `UPSTREAM_STATUS_MINUTES`（默认 5，下限 1） | 并发抓官方状态（单源超时 `UPSTREAM_STATUS_TIMEOUT_SECONDS`）→ 归一 → 原子替换内存快照；单源失败只记该源 `error`，**整轮永不抛**。启动预热一轮 |
 | 模型主动探活（model_probe） | 每 `MODEL_PROBE_MINUTES`（默认 0 关闭，下限 1） | 只探仍被 `blocked` 锁住的 (渠道, 模型)：`max_tokens=16` 最小对话 → 三态判定 → 落 `model_probes`。不写 `usage_events`、不动冷却、不改健康度。`manual != ''` 跳过 |
 
@@ -759,13 +764,16 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 | `task_failed` | 某任务连续失败 ≥ `ALERT_TASK_FAILURES` | `TaskStatusStore.failing`（成功一轮清零） |
 | `token_expiring` | token 剩余落在 `(now, now+ALERT_TOKEN_EXPIRY_HOURS]` | `CredentialRepository.expiring_tokens` |
 | `error_rate` | 窗内失败占比 ≥ `ALERT_ERROR_RATE_THRESHOLD` 且样本 ≥ `ALERT_ERROR_RATE_MIN_REQUESTS` | `StatsCollector.window_error_rate` |
+| `key_burst` | 单 Key 窗内 token ≥ `ALERT_KEY_BURST_TOKENS`（窗口 `ALERT_KEY_BURST_WINDOW_MINUTES`，与错误率窗口解耦） | `StatsCollector.window_key_usage`（滥用 / Key 泄露信号，不是错误） |
+| `off_hours` | 本地时区落在 `[ALERT_OFF_HOURS_START, END)` **之外**且请求数 ≥ `ALERT_OFF_HOURS_MIN_REQUESTS` | `StatsCollector.window_error_rate` 的请求数 |
 
 - `pool_empty` 取 `total>0`：一个凭证都没有是「没配」而非「耗尽」。
 - `task_failed` 只列真跑过且达阈值的 key。
 - `token_expiring`：NULL 时从密文派生，派生不出视为未知；硬禁用排除；**寿命本就短于窗口**的排除（CodeArts STS 2h vs 默认窗口 24h）。
 - `error_rate` 读 `usage_events` **明细**（告警窗是分钟级）。
+- `key_burst` / `off_hours` 都是「用量形态异常」而非上游故障，默认阈值 0 = 关闭；跨零点写法（22 → 7）合法，区间半开、`start == end` 关闭。
 
-**投递**：每条命中落 `alert_events`（落库而非只留内存）；webhook 配置 `ALERT_WEBHOOK_URL` 时逐地址 POST（多个逗号分隔，全部成功才算 delivered）；**投递失败只记 `delivery_error`**。**静默去重**：同 `(rule, scope)` 在 `ALERT_SILENCE_MINUTES` 内只落库 / 推送一次。`AlertTask` **与运行态共享同一个 `TaskStatusStore`**（自建 store 会让「任务连续失败」永远读到 0）。
+**投递**：每条命中落 `alert_events`（落库而非只留内存）；`ALERT_WEBHOOK_URL`（多个逗号分隔）逐地址 POST 完整 JSON + 签名，全部成功才算 delivered；飞书 / Slack（`ALERT_FEISHU_WEBHOOK_URL` / `ALERT_SLACK_WEBHOOK_URL`）各自只认自己的格式（飞书 `msg_type=text`、Slack `{"text":…}`，**只带标题行、不带 detail**），签名按各自实际 body 重算；**投递失败只记 `delivery_error`**。**静默去重**：同 `(rule, scope)` 在 `ALERT_SILENCE_MINUTES` 内只落库 / 推送一次。`AlertTask` **与运行态共享同一个 `TaskStatusStore`**（自建 store 会让「任务连续失败」永远读到 0）。
 
 **迟滞与恢复**（`ALERT_FOR_TICKS` / `ALERT_CLEAR_TICKS`）：「连续 for_ticks 轮命中」才告警（默认 1）；「连续 clear_ticks 轮不命中」才确认恢复（默认 2）。恢复时给该 `(rule, scope)` **全部未恢复**行写 `resolved_at` 并外推 `status="resolved"` webhook；管理台把 `resolved_at` 非空显示为「已恢复」。**迟滞计数**进程内、重启归零；「哪些仍未恢复」是落库事实 → `AlertTask` 构造时从 `unresolved()` 重建 `_active`（不重建 → 重启后恢复分支遍历空集，历史行永远等不到 `resolved_at`）。重建只恢复集合与通知文案（PII 片段按 `_PII_DETAIL_KEYS` 反推），不恢复连击计数。
 
@@ -793,7 +801,7 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 }
 ```
 
-五类计数互斥、合计 = `total`；判定优先级 `disabled → paused → cooling → ready`。口径**复用调度器的 `Candidate.is_selectable`**（`CredentialRepository.pool_counts`），不另写 SQL。
+四类计数互斥（`ready` / `cooling` / `paused` / `disabled`）、合计 = `total`；判定优先级 `disabled → paused → cooling → ready`。口径**复用调度器的 `Candidate.is_selectable`**（`CredentialRepository.pool_counts`），不另写 SQL。
 
 > ⚠️ **`/healthz` 的 `ready` 不看 `health`**：额度耗尽的号（`health < 0`）仍算 `ready`。侧栏「凭证管理」角标是**另一套口径**（`attention_counts`：`disabled + health < 0`）——一个问「能不能打上游」，一个问「有没有待办」，不一致不是 bug。
 
@@ -837,22 +845,17 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 - **行内容**：`seq` / `ts` / `level` / `logger` / `message`（已脱敏、截断 4000 字符）/ `request_id`。前端只做筛选、搜索、跟随最新、暂停与清空，**无写入入口**。
 
 ### 11.3e 预算分层告警
-`ALERT_BUDGET_CNY` 非空时按**本地自然月**累计 `usage_hourly.cost_cny_sum`，达到 `ALERT_BUDGET_LEVELS`（默认 50/80/95/100）中任一档即告警：
+`ALERT_BUDGET_CNY` > 0 时按**本地自然月**累计 `usage_hourly.cost_cny_sum`，达到 `ALERT_BUDGET_LEVELS`（默认 50/80/95/100）任一档即告警：
 
-- 只报**当前达到的最高档**（`rule=budget`, `scope=budget_{level}`）。升级到更高档时旧档不再命中，由迟滞状态机写成「已恢复」，不会四条并存。100%（含超支）为 critical。
-- 成本只覆盖匹配到价表与汇率的明细；未定价模型不计入 → 预算消耗会被低估。`window_cost` 同时返回可定价小时数，供后续在 detail 里暴露覆盖率。
+- 只报**当前达到的最高档**（`rule=budget`, `scope=budget_{level}`）；升级到更高档时旧档不再命中，由迟滞状态机写成「已恢复」，不会多档并存。100%（含超支）为 critical。
+- 成本只覆盖匹配到价表与汇率的明细 → 未定价模型不计入，预算消耗偏低。`window_cost` 另返回可定价小时数备用。
 - 月初成本归零 → 上月末的预算告警自然恢复。
 
 ### 11.3d 月度账单（`GET /api/billing`）
-`require_operator`。`?month=YYYY-MM`（默认当月，按**服务器本地时区**整月）+ `?format=json|csv|jsonl`：
-
-- `json`：`{month, start, end, users, keys, totals}`。按人读小时汇总（永久保留）；按 Key 读明细（小时汇总主键无 `api_key_id`，明细只留 90 天）并补 `username` / `key_name`。
-- `csv`：按人汇总，带 BOM（Excel 中文表头）；`jsonl`：该月逐条明细（`export_events`，一行一个对象）。
-- 两种导出都写 `ACTION_DATA_EXPORT` 审计；文件名 `billing-<month>.<ext>`；`Cache-Control: no-store`。
-- `month` 格式 / 取值范围非法 → 400 `invalid_request`；未知 `format` → 400。
+`require_operator`。`?month=YYYY-MM`（默认当月，**服务器本地时区**整月）+ `?format=json|csv|jsonl`：`json` 给 `{month,start,end,users,keys,totals}`（按人读小时汇总，按 Key 读明细——小时汇总主键无 `api_key_id`，明细只留 90 天）；`csv` 按人汇总（带 BOM）；`jsonl` 该月逐条明细。两种导出都写 `ACTION_DATA_EXPORT` 审计，文件名 `billing-<month>.<ext>`，`Cache-Control: no-store`。非法 `month` / `format` → 400 `invalid_request`。面向用户在 README「月度账单」。
 
 ### 11.4 面向用户的错误语义
-管理端点失败原因须是**稳定的机器可读枚举**，不能是异常类名。`POST /api/credentials/{id}/probe` 的失败响应：
+管理端点失败原因须是**稳定的机器可读枚举**，不能是异常类名。`POST /api/credentials/{credential_id}/probe` 的失败响应：
 
 ```json
 { "probed": false, "reason": "credential_rejected", "detail": "upstream http 401" }
@@ -906,14 +909,14 @@ PRAGMA foreign_keys = ON;      -- 仅 api_keys 之外无外键（users 与 api_k
 | 类别 | 例子 | 位置 | 变更方式 |
 |---|---|---|---|
 | 启动期不可变 | `APP_SECRET` / `HOST` / `PORT` / `DATA_DIR` / `USERS_FILE` / 上游端点白名单 / `PROVIDER_PROXIES` | `config.Settings`（frozen） | 改 env + 重启；**不进白名单** |
-| 运行时可覆盖 | `runtime_settings.HOT_SETTINGS`（60 项） | `RuntimeSettings` 覆盖层 | 管理台改，立即生效 |
+| 运行时可覆盖 | `runtime_settings.HOT_SETTINGS`（77 项） | `RuntimeSettings` 覆盖层 | 管理台改，立即生效 |
 
-启动期项拒绝热更：它们决定进程如何启动或作用于连接池；运行期变更只会让「当前进程」与「磁盘配置」静默分叉。**优先级**：`runtime_settings` 表 > `.env`。覆盖行只有被改过的 key；「恢复默认」= 删行。**读取**：`RuntimeSettings` 对热更 key 返回覆盖值，其余 `__getattr__` 委托 `Settings`；覆盖值内存缓存，写入后 `reload()`，读取不查库。**消费端** `config.live(value)` 把标量或零参 callable 统一成取值器；生产传 `lambda: runtime.xxx`。已接线点：`Scheduler.expiry_window` / `secondary_expiry_window`、`ConversationAffinity.ttl_seconds`、`Pacer.min/max_seconds`、`Executor.default_model` / `max_auto_continues` / `force_disable_thinking` / `reasoning_effort_map`、`GrowthTask.allow_irreversible`、`TaskRunner` 周期与活跃上报时点、上下文压缩四项、`USD_CNY_RATE`、`anthropic_thinking_efforts`。
+启动期项拒绝热更：它们决定进程如何启动或作用于连接池；运行期变更只会让「当前进程」与「磁盘配置」静默分叉。**优先级**：`runtime_settings` 表 > `.env`。覆盖行只有被改过的 key；「恢复默认」= 删行。**读取**：`RuntimeSettings` 对热更 key 返回覆盖值，其余 `__getattr__` 委托 `Settings`；覆盖值内存缓存，写入后 `reload()`，读取不查库。**消费端** `config.live(value)` 把标量或零参 callable 统一成取值器；生产传 `lambda: runtime.xxx`。已接线点：`Scheduler.expiry_window` / `secondary_expiry_window`、`ConversationAffinity.ttl_seconds`、`Pacer.min/max_seconds`、`Executor.default_model` / `force_disable_thinking` / `reasoning_effort_map`、`GrowthTask.allow_irreversible`、`TaskRunner` 周期与活跃上报时点、上下文压缩五项、`USD_CNY_RATE`、`anthropic_thinking_efforts`、`nonstream_keepalive_seconds`、`max_inflight_per_credential`、`model_blocklist`、`metrics_enabled` / `request_log_enabled` / `log_buffer_lines` / `prefix_debug_enabled`、`upstream_status_enabled`。**不在白名单**（改 env + 重启）：`AUTO_CONTINUE_MAX`、各渠道端点与 `*_ALLOWED_ENDPOINTS`。`QUEUE_MAX_ROUNDS` / `MODEL_COOLDOWN_*` / `SPEED_*` 这类引擎常量写死在代码里，改要改源码 + 重启。
 
 **校验**：白名单外 key 拒绝；类型与范围写入前校验；跨字段组合（`pacer_min ≤ pacer_max`）用「这批写完之后」的对端值比较，失败整批不落库。坏行读取时跳过并记警告。**接口**：`GET /api/settings` 返回 `snapshot()`（`key`/`env_name`/`label`/`description`/`kind`/`value`/`default`/`overridden`/`task`/`group`）+ 覆盖计数 + `groups`；`PUT /api/settings` body `{"values": {key: 标量 | null}}`，`null` 恢复默认，写操作记审计。网关卡组表即 `GATEWAY_GROUPS`。不变量：每项**要么**属一个任务、**要么**落一个网关卡组，互斥且都有归属。
 
 ### 13.2 后台任务可视化
-`SettingsPage` 两级 tabs：一级「后台任务 / 网关配置」；任务按后端下发的业务分组（`TASK_GROUPS`：账号维护 / 模型与渠道 / 运维与数据）二级切换，组内每个任务一个 tab（运行态 + 配置项），组内只有一个任务时省掉第三排；网关配置按 `GATEWAY_GROUPS` 二级切换。无配置项的分组、无已装配任务的分组不出 tab；归属对不上落「其他」，绝不吞掉配置。任务卡片内的配置项可按后端下发的 `section` 分节（运维告警 19 项 → 基础与迟滞 / 规则阈值 / 单 Key 与时段 / 月度预算），避免一长列。保存按钮与「N 项待保存」常驻顶部，草稿跨 tab 保留。`useTasks` 以 `refetchInterval: 30_000` 刷新；`/api/settings` 不自动刷新。任务卡片「立即运行」，运行中 / 已关闭时禁用；结果三态——**已跑一轮**（带 `last_report`）、**没排上**（`busy=true`）、**跑了但 no-op**（`ran=false`）。把第三种说成「已运行」就是谎报。
+`SettingsPage` 两级 tabs：一级「后台任务 / 网关配置」；任务按后端下发的业务分组（`TASK_GROUPS`：账号维护 / 模型与渠道 / 运维与数据）二级切换，组内每个任务一个 tab（运行态 + 配置项），组内只有一个任务时省掉第三排；网关配置按 `GATEWAY_GROUPS` 二级切换。无配置项的分组、无已装配任务的分组不出 tab；归属对不上落「其他」，绝不吞掉配置。任务卡片内的配置项可按后端下发的 `section` 分节（运维告警 21 项 → 基础与迟滞 / 规则阈值 / 单 Key 与时段 / 月度预算），避免一长列。保存按钮与「N 项待保存」常驻顶部，草稿跨 tab 保留。`useTasks` 以 `refetchInterval: 30_000` 刷新；`/api/settings` 不自动刷新。任务卡片「立即运行」，运行中 / 已关闭时禁用；结果三态——**已跑一轮**（带 `last_report`）、**没排上**（`busy=true`）、**跑了但 no-op**（`ran=false`）。把第三种说成「已运行」就是谎报。
 
 ### 13.3 按渠道出站代理
 `PROVIDER_PROXIES`（启动期，默认 `""` 直连）：`渠道=代理URL;渠道2=代理URL2`，渠道取 `KNOWN_PROVIDERS`，协议 `http/https/socks5/socks5h`。作用于该渠道**全部出站请求**（聊天、额度/模型、后台任务、OAuth）。**严格解析**：未知渠道 / 非法协议 / 缺 `=` / 空 URL 一律 `ValueError`，只忽略空段。工厂 `build_client(timeout, proxy)` 统一构造 `httpx.AsyncClient(..., trust_env=False, proxy=proxy)`。**为什么启动期**：代理作用于连接池；运行中改需重建 6 个客户端 + 3 个 OAuth 流。
@@ -934,7 +937,7 @@ sudo systemctl restart coding2api       # systemd
 诊断顺序（先确认版本再查业务）：
 
 ```bash
-# 1) schema 版本已迁移（期望 29）且账号已导入
+# 1) schema 版本已迁移（期望 30）且账号已导入
 sqlite3 data/coding2api.sqlite3 "PRAGMA user_version; SELECT username, role, enabled FROM users;"
 # 2) 路由存在：期望 401（未登录），404 = 旧后端进程
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
@@ -963,7 +966,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
 ## 14. 已知取舍
 - **同步 sqlite3 而非 aiosqlite**：本地微秒级操作，asyncio 封装开销大于收益。
 - **双 httpx 客户端**：聊天流 `read=None` 防长流截断；短请求总超时 30s 防悬挂；共享 `trust_env=False`。非流式由引擎聚合同一流式上游；悬挂兜底 = `UPSTREAM_COMPLETE_TIMEOUT_SECONDS`（默认 600s，超时按瞬态错误换号）+ 事件条数上限（`complete_max_events`）。
-- **手写 SQL 而非 ORM**：11 张表规模下 ORM 收益为负。
+- **手写 SQL 而非 ORM**：13 张表规模下 ORM 收益为负。
 - **polling OAuth 不转回调**：上游协议决定。TRAE 回调走主端口 + `PUBLIC_BASE_URL`（基址为回环 / `0.0.0.0` 时用请求自身 origin）。`/authorize` 无鉴权，防滥用三条：无进行中登录一律拒；pending 600s TTL；回调须带匹配 `loginTraceID`。绑定优先会话 Cookie；Cookie 不在回调入口（LAN 发起 / 隧道回调）时按 `loginTraceID` 反查——trace 只见于发起那次 auth_url，等价一次性凭证。浏览器顶层导航（`Accept: text/html`）返回中文说明页，程序化客户端拿 JSON。**刻意不用 Origin/Referer 判同源**（回调本就跨源 302，`no-referrer` 可绕过）。`app.state` 只保 pending state。回调地址在浏览器侧打不开（NAS / 远程部署常见「网络错误」，refreshToken 只留在地址栏）时走粘贴兜底：`POST /api/auth/upstream/complete` 已鉴权，按会话用户名取同一条 pending，校验 state 与 `loginTraceID` 后调 `provider.complete_callback`；`/upstream/cancel` 对回调轨道只清 pending。
 - **Responses / Anthropic 出口只做各自客户端子集**：不做 `store=true` / `previous_response_id`；`include=["reasoning.encrypted_content"]` 接受并忽略；不发 `[DONE]`。**未经真实 Codex CLI 端到端验证**。
 - **effort 映射默认不做，但缺省补值 + 可选机制**：`setdefault` 补 `medium`，只补缺省不覆盖显式值；内置默认矩阵不做，改为默认关闭的三项机制（§3.11）。

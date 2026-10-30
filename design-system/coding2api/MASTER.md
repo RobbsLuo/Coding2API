@@ -1,12 +1,11 @@
 # Design System — Coding2API 管理台
 
-> **LOGIC:** 建页前先看 `design-system/coding2api/pages/[page-name].md`。
-> 存在 → 其规则**覆盖**本文件；否则严格遵循本文件。
+> **LOGIC:** 全仓唯一设计规范，建页一律遵循本文件（早期按页面拆分的 `pages/*.md` 从未落地，已废弃）。
 
 ---
 
 **Project:** Coding2API
-**Updated:** 2026-10-22
+**Updated:** 2026-10-30（对照 `web/src/styles.css` 与实际组件核过）
 **Category:** Developer tool / API gateway control plane
 **Source of truth:** `web/src/styles.css`（token） + `web/src/ui/index.tsx`（组件适配层；底层原语在 `web/src/components/ui/`）
 

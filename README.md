@@ -39,10 +39,10 @@
 | ![上游状态](assets/screenshots/upstream.webp) | ![API Key](assets/screenshots/apikeys.webp) |
 | **用户管理：三角色与一次性激活** | **审计日志：登录成败都留痕** |
 | ![用户管理](assets/screenshots/users.webp) | ![审计日志](assets/screenshots/audit.webp) |
-| **服务端日志：环形缓冲 + 脱敏** | **运维告警：四类风险周期评估** |
+| **服务端日志：环形缓冲 + 脱敏** | **运维告警：七类风险周期评估** |
 | ![服务端日志](assets/screenshots/logs.webp) | ![运维告警](assets/screenshots/alerts.webp) |
 
-**任务与配置：60+ 项可热更，DB 覆盖值优先于 `.env`**
+**任务与配置：77 项可热更，DB 覆盖值优先于 `.env`**
 
 ![任务与配置](assets/screenshots/settings.webp)
 
@@ -236,7 +236,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **积分即主账**：单位 `officeace_points`；`remaining`/`total` 直接是积分。每笔奖励独立到期、不合并重置 → 额度口径「逐笔到期」。
 
-**每日签到**：`POST /v1/subscription/bonus/claim`——写操作，调用即真发积分；body 必须 `` + JSON `Content-Type`。上游对当日重复领取幂等。收获按剩余量增量算。封账到下个北京时间 0 点。
+**每日签到**：`POST /v1/subscription/bonus/claim`——写操作，调用即真发积分；body 必须是 `{}` 且带 JSON `Content-Type`。上游对当日重复领取幂等。收获按剩余量增量算。封账到下个北京时间 0 点。
 
 **不主动探活 / 不估 credit**：探活要真发推理烧积分；`cost_coefficient` × `tokens_per_point` 关系官方未说明。模型级拒绝改由真实请求按 `BLOCKED` 负缓存处理。
 
@@ -333,7 +333,7 @@ claude
 - `GET /health`：只回 `{"status":"ok"}`，适合存活探针。
 - `GET /healthz`：额外给凭证池计数，`ready == 0` → 503（就绪探针）。
 
-两端点都不鉴权，都接受 `HEAD`。五类计数互斥，合计 = `total`，与调度器同口径。**存活探针配 `/health`**；`/healthz` 用作就绪 / 告警。
+两端点都不鉴权，都接受 `HEAD`。四类计数互斥（`ready` / `cooling` / `paused` / `disabled`），合计 = `total`，与调度器同口径。**存活探针配 `/health`**；`/healthz` 用作就绪 / 告警。
 
 > 升级注意：`/healthz` 从「恒 200」→「ready=0 时 503」。
 
@@ -445,7 +445,7 @@ Playground 与 `/v1/models` 走 stale-while-revalidate：有缓存立刻回旧�
 
 **判死的模型同时从模型列表摘掉**：只抽该 (渠道, 模型)，其它渠道正常时同一模型照常展示。**隐藏没有到期时间**——恢复只靠复探成功，不再挂在负缓存的 `cooling_until` 上：负缓存过期后没人再探，等于永久隐藏。后台周期确实会把判死行一起探，但周期 `MODEL_PROBE_MINUTES` 默认 `0`（关闭），默认部署下唯一的恢复入口是面板上的「立即探活」。
 
-**人工接管**（`POST /api/models/probes/manual`）：接管后自动探活跳过该行，但不改负缓存。要立刻恢复 → 点「立即探活」。后台周期 `MODEL_PROBE_MINUTES`（默认 0 = 关闭）。
+**人工接管**（`POST /api/models/probes/manual`）：接管后自动探活跳过该行，但不改负缓存。要立刻恢复 → 点「立即探活」。
 
 ### 管理台「上游状态」页
 
@@ -558,7 +558,7 @@ tabs 切四维（渠道 / 模型 / 用户 / 凭证），共用一表（渠道 / 
 
 **渠道模型列表刷新**（`MODEL_CATALOG_MINUTES`，默认 30）兜底保鲜，无人访问也更新。
 
-**成长中心**仅 CodeBuddy。周期默认 60 分钟（`GROWTH_INTERVAL_MINUTES`）。不可逆动作由 `GROWTH_IRREVERSIBLE_ACTIONS=false` 关停。
+**成长中心**仅 CodeBuddy。周期默认 60 分钟（`GROWTH_INTERVAL_MINUTES`）。
 
 ### 活跃上报（可选，默认关闭）
 
@@ -568,7 +568,7 @@ tabs 切四维（渠道 / 模型 / 用户 / 凭证），共用一表（渠道 / 
 
 ### 运维告警
 
-后台周期评估四类风险 → `alert_events`（「运维告警」页，admin-only）：
+后台周期评估七类风险 → `alert_events`（「运维告警」页，admin-only）：
 
 | 规则 | 触发条件 |
 |---|---|
@@ -576,6 +576,9 @@ tabs 切四维（渠道 / 模型 / 用户 / 凭证），共用一表（渠道 / 
 | `task_failed` | 某任务连续失败达到 `ALERT_TASK_FAILURES` 次 |
 | `token_expiring` | token 剩余寿命落在 `ALERT_TOKEN_EXPIRY_HOURS` 内 |
 | `error_rate` | 统计窗内失败占比达到 `ALERT_ERROR_RATE_THRESHOLD` 且样本足够 |
+| `key_burst` | 单 Key 窗口内 token 用量达到 `ALERT_KEY_BURST_TOKENS`（滥用 / 泄露信号，不是错误） |
+| `off_hours` | 工作时间 `[ALERT_OFF_HOURS_START, ALERT_OFF_HOURS_END)` 之外请求数达到 `ALERT_OFF_HOURS_MIN_REQUESTS` |
+| `budget` | 当月成本达 `ALERT_BUDGET_CNY` 的某一 `ALERT_BUDGET_LEVELS` 档，只报最高档；100% 为 critical |
 
 - **静默窗**：同一 `(规则, 对象)` 窗口内只落库 / 推送一次。
 - **迟滞**：连续命中 N 轮才告警；连续未命中 M 轮才确认恢复。恢复时给该 `(规则, 对象)` 全部未恢复行写 `resolved_at`，并外推 `status="resolved"` webhook。
@@ -737,7 +740,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 
 ### 管理台热更（「任务与配置」页）
 
-上表带「可热更」的 **60 项**可不改 `.env`、不重启，直接在「任务与配置」页改。
+上表只给常用项标了「可热更」；管理台共 **77 项**可不改 `.env`、不重启，直接在「任务与配置」页改。
 
 **优先级 `DB 覆盖值 > .env`**：覆盖后 .env 失效，页面标「DB 覆盖」；点「恢复默认」删覆盖行才回落 .env。值存 `runtime_settings` → 新增项免迁移。白名单外 key、非法类型 / 越界值写入前即拒。启动期项不在白名单：`APP_SECRET` / `PORT` / `DATA_DIR` / `USERS_FILE` / `OPENROUTER_MODELS_URL` / 上游端点白名单。`GET /api/settings` 读快照；`PUT /api/settings` 写（admin + CSRF），`null` 恢复默认。同页展示任务态（`GET /api/tasks`，30s 刷新）。
 

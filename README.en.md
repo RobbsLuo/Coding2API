@@ -15,6 +15,10 @@ Wraps **CodeBuddy** (CN + international), **TRAE SOLO**, **OpenCode Zen**, **Kil
 - **Three roles**: `admin` / `operator` / `viewer` in SQLite; one-time activation links, forced password change on first login, role change or disable revokes sessions immediately; logins and writes audited.
 - **Growth center** (CodeBuddy only): travel gifts, Buddy dispatch, task rewards, streak repair/redemption, blind boxes; irreversible steps off via `GROWTH_IRREVERSIBLE_ACTIONS=false`.
 - **Privacy-preserving stats**: no conversation content; 90-day detail, permanent hourly rollups; per user / channel / model / credential views; cost from OpenRouter list prices; output speed in two scopes; SSE live stream in detail panel.
+- **Monthly billing** (`operator`+): requests, tokens and cost by month, per user / per API key; CSV (per user) / JSONL (row-level detail) export, audited. Key-level rows are limited by the 90-day detail retention.
+- **Tool-call robustness**: missing `id` filled from index and remembered; leaked DeepSeek DSML read back into structured calls with `finish_reason` rewritten; malformed non-streaming `arguments` fail closed (400, credential not cooled).
+- **Channel ToS risk registry**: import shows green / gray / red with reasons (operational judgement) and the level is audited; advisory only, never blocks scheduling.
+- **Egress IP stickiness** (optional): with non-empty `CREDENTIAL_PROXY_POOL`, one credential per egress (sha256-stable, survives restarts); chat, probing, check-in, pre-refresh, growth and single-item console actions all use it.
 - **Upstream status aggregation**: official status pages side by side, separating "upstream outage" from "our credential / quota problem". Explanation only, never scheduling; memory only.
 - **Sidebar to-dos**: count badges (re-login / exhausted, unresolved alerts, failed tasks, abnormal upstreams, pending activations, expiring keys, stale catalog), role-filtered. See [below](#sidebar-to-dos-navigation-badges).
 - **Admin hardening**: login rate limiting, CSRF checks, body limits, Host allowlist.
@@ -35,10 +39,10 @@ Admin console (captured from local instance; accounts and IPs masked):
 | ![Upstream status](assets/screenshots/upstream.webp) | ![API keys](assets/screenshots/apikeys.webp) |
 | **Users: three roles, one-time activation** | **Audit log: successful and failed logins** |
 | ![Users](assets/screenshots/users.webp) | ![Audit log](assets/screenshots/audit.webp) |
-| **Server logs: ring buffer with redaction** | **Ops alerts: four risk rules, periodic** |
+| **Server logs: ring buffer with redaction** | **Ops alerts: seven risk rules, periodic** |
 | ![Server logs](assets/screenshots/logs.webp) | ![Ops alerts](assets/screenshots/alerts.webp) |
 
-**Tasks & settings: 60+ hot options, DB overrides win over `.env`**
+**Tasks & settings: 77 hot options, DB overrides win over `.env`**
 
 ![Tasks and settings](assets/screenshots/settings.webp)
 
@@ -80,6 +84,8 @@ Accounts live in SQLite's `users` table; the *Users* page (admins only) handles 
 | `admin` | User management, tasks & settings, credential read/write, all stats, audit log, server logs, upstream status, model list |
 | `operator` | Credential read/write (import / delete / pause / check-in / growth / account switch), all stats, upstream status, model list |
 | `viewer` | Read-only: dashboard, credential list, stats, Playground |
+
+*Monthly billing* has the same floor as *Upstream status* / *Model list* (`operator`+): billing is pool-level data, while a `viewer` only sees their own usage in their own stats.
 
 - **Adding users**: username + role → one-time activation link (24h, shown once); user opens `/activate`, sets own password. No "admin knows initial password" secret; reset same way.
 - **Role change / disable**: all session cookies invalidated immediately. Disable = reversible default "remove" (usage stays attributed); hard delete CLI-only.
@@ -191,7 +197,7 @@ Free models at [Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`), no login. St
 
 **Upstream node failures**: Qoder sometimes wraps own node failures in a 400 (`[FAIL]node:…`) → model-scoped transient fault, only that model cools; exhausted candidates → 503 (`no_healthy_credential`).
 
-**Keepalive frames and queueing**: the upstream sends keepalive frames with `body:"null"` (outer status 200) mid-stream → skipped, never interrupting output; "queued" arrives as a 403 whose queue marker hides inside a **serialized string** → classified as QUEUE, waits the upstream's named seconds and reopens on the same credential instead of hard-disabling it.
+**Keepalive frames and queueing**: the upstream sends keepalive frames with `body:"null"` (outer status 200) mid-stream → skipped, never interrupting output; "queued" arrives as a 403 whose queue marker hides inside a **serialized string** → classified as QUEUE, waits the upstream's named seconds and reopens on the same credential instead of hard-disabling it. "Daily billing count exhausted" (403 `code 110`, `Billing daily count exceeded`) counts as quota → cools until 04:00 next day, likewise never hard-disabling (same predicate for HTTP and in-stream envelopes).
 
 ### CodeArts (`codearts`)
 
@@ -228,7 +234,7 @@ The upstream is plain OpenAI protocol, with three quirks:
 
 **Credits are main ledger**: unit `officeace_points`; `remaining`/`total` are credits. Each reward expires independently → quota reads "per-reward expiry".
 
-**Daily check-in**: `POST /v1/subscription/bonus/claim` (a write — it really grants credits; body must be `` with JSON `Content-Type`). The upstream is idempotent for repeat claims on same day. Gains are computed as remainder delta. Sealed until next Beijing midnight.
+**Daily check-in**: `POST /v1/subscription/bonus/claim` (a write — it really grants credits; body must be `{}` with a JSON `Content-Type`). The upstream is idempotent for repeat claims on same day. Gains are computed as remainder delta. Sealed until next Beijing midnight.
 
 **No active probing / no credit estimation**: probing burns credits; the `cost_coefficient` × `tokens_per_point` relation is undocumented. Model-level rejections are handled by real requests via the `BLOCKED` negative cache.
 
@@ -325,7 +331,7 @@ claude
 - `GET /health`: `{"status":"ok"}`, for liveness probes.
 - `GET /healthz`: adds pool counts and returns 503 when `ready == 0` (readiness).
 
-Neither is authenticated; both accept `HEAD`. Five counts mutually exclusive, sum to `total`, same as scheduler. **Point liveness at `/health`**; `/healthz` for readiness / alerting.
+Neither is authenticated; both accept `HEAD`. Four mutually exclusive counts (`ready` / `cooling` / `paused` / `disabled`) sum to `total`, same as scheduler. **Point liveness at `/health`**; `/healthz` for readiness / alerting.
 
 > Upgrade note: `/healthz` changed from always-200 to 503 when `ready=0`.
 
@@ -363,6 +369,7 @@ No `credential_id` / `api_key_id` / `username` (high cardinality). `requests_tot
 The credentials page offers multi-select plus batch bar (probe / check-in / pause / unpause / revive).
 
 - **Endpoint**: `POST /api/credentials/batch`, body `{action: "probe"|"toggle"|"checkin"|"revive", ids: [...], enabled?}`. Up to 200 ids, duplicates deduped.
+- **Batch import**: `POST /api/credentials/batch-import`, body `{items: [{provider, credential, nickname?, tags?}]}`. Up to 100 items; validated one by one, bad entries only land in `failed` (with `index` and reason); identical decrypted content within one channel counts as duplicate → `skipped`. The credentials page's *Batch import* accepts a JSON array / JSONL or a file.
 - **Per-item isolation**: one failure never blocks the rest. Response `{action, total, succeeded, failed, results: [{id, ok, error?, detail?}]}`.
 - **A failed check-in is a result, not a failure**: an upstream refusal (account disabled / session expired / rate limited) returns `ok=false` with a readable `message`, never 500 — otherwise the console only says "check-in failed" and hides the real reason.
 - **Pause is explicit state, not toggle-flip**: `enabled` comes from body → bar has separate *Pause* / *Unpause* buttons.
@@ -436,7 +443,7 @@ Probing is isolated from production: calls `provider.stream_chat` directly, writ
 
 **Dead models also drop out of model list**: only that `(channel, model)` pair is hidden — other channels serving the same model still show it. **Hiding has no expiry** — recovery only happens on a successful re-probe, not on negative-cache `cooling_until` (nothing would re-probe after it expires, i.e. permanent hiding). The background loop does re-probe dead rows, but its interval `MODEL_PROBE_MINUTES` defaults to `0` (off), so on a default deployment the only way back is *Probe now*.
 
-**Manual takeover** (`POST /api/models/probes/manual`): skips automatic probing for that row, cache untouched. *Probe now* recovers immediately. Interval `MODEL_PROBE_MINUTES` (default 0 = off).
+**Manual takeover** (`POST /api/models/probes/manual`): skips automatic probing for that row, cache untouched. *Probe now* recovers immediately.
 
 ### Admin *Upstream status* page
 
@@ -549,7 +556,7 @@ Each card has *Run now* (admin + CSRF): bypasses time window, not on/off switch;
 
 **Channel model refresh** (`MODEL_CATALOG_MINUTES`, default 30) is safety net so models update even with no traffic.
 
-**Growth center** is CodeBuddy-only. Default period 60 minutes (`GROWTH_INTERVAL_MINUTES`). Irreversible actions are gated by `GROWTH_IRREVERSIBLE_ACTIONS=false`.
+**Growth center** is CodeBuddy-only. Default period 60 minutes (`GROWTH_INTERVAL_MINUTES`).
 
 ### Activity reporting (optional, off by default)
 
@@ -559,7 +566,7 @@ With `ACTIVITY_REPORT_ENABLED=true`, each account gets one `chat_request_send` e
 
 ### Operations alerts
 
-Four rules are evaluated periodically and written to `alert_events` (the *Alerts* page, admin-only):
+Seven rules are evaluated periodically and written to `alert_events` (the *Alerts* page, admin-only):
 
 | Rule | Trigger |
 |---|---|
@@ -567,9 +574,13 @@ Four rules are evaluated periodically and written to `alert_events` (the *Alerts
 | `task_failed` | a task fails `ALERT_TASK_FAILURES` times consecutively |
 | `token_expiring` | token lifetime within `ALERT_TOKEN_EXPIRY_HOURS` |
 | `error_rate` | failure share reaches `ALERT_ERROR_RATE_THRESHOLD` with enough samples |
+| `key_burst` | one API key burns `ALERT_KEY_BURST_TOKENS` within the window (abuse / leak signal, not an error) |
+| `off_hours` | requests outside `[ALERT_OFF_HOURS_START, ALERT_OFF_HOURS_END)` reach `ALERT_OFF_HOURS_MIN_REQUESTS` |
+| `budget` | monthly cost reaches a level in `ALERT_BUDGET_LEVELS` of `ALERT_BUDGET_CNY`, highest level only; 100% is critical |
 
 - **Silence window**: one row / push per `(rule, target)` per window.
 - **Hysteresis**: alerts fire after N consecutive hits, resolve after M consecutive misses. Resolution stamps `resolved_at` on every unresolved row for that `(rule, target)` and emits `status="resolved"` webhook.
+- **Multiple sinks**: generic webhook (full JSON + signature) + Feishu bot (text) + Slack incoming webhook can be configured together; one failing sink does not stop the others, but the run is still recorded as undelivered.
 - **Restart self-heal**: hysteresis counters are in-process; unresolved set is rebuilt from the DB.
 - **Manual resolution**: *Mark resolved* (admin + CSRF + audit) marks that row only.
 - **Retention**: same as request detail (90 days).
@@ -599,6 +610,13 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 
 Flow: verify integrity → `.pre-restore-<timestamp>` copy → atomic replace → remove stale `-wal`/`-shm`. **Restart afterwards.**
 
+The *Backup & restore* page (admin) offers the same capability:
+
+- `GET /api/backups`: lists `backups/*.sqlite3` plus the pending restore file (`pending`).
+- `POST /api/backups`: back up now.
+- `GET /api/backups/{name}` / `DELETE /api/backups/{name}`: download / delete (regular files inside the directory only; paths and symlinks rejected).
+- `POST /api/backups/restore?filename=…`: raw byte upload → integrity + core table + schema version checks → staged at `DATA_DIR/restore/pending.sqlite3`. **No live swap**: the next start replaces the DB atomically before opening connections. A pending file that fails validation is archived as `.rejected-*` and the current DB is kept, so a bad upload never pins the service in a startup-failure loop.
+
 ## Configuration
 
 Full list in `src/config.py` (authoritative); every item wired through `docker-compose.yml`. Inside containers use `HOST`/`PORT` to change listen address.
@@ -626,6 +644,8 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 | `LOG_BUFFER_LINES` | `500` | Server log buffer lines; `0` disables the page. Hot |
 | `ALERT_ENABLED` | `true` | Operations alerts on/off |
 | `ALERT_WEBHOOK_URL` | empty | Webhooks, comma-separated (≤16, http(s) only, internal / loopback rejected), signed with `X-Coding2API-Signature` |
+| `ALERT_FEISHU_WEBHOOK_URL` | empty | Feishu bot webhook; sends `msg_type=text`, URL validated like the generic webhook |
+| `ALERT_SLACK_WEBHOOK_URL` | empty | Slack incoming webhook; sends `{text}`, URL validated like the generic webhook |
 | `ALERT_INTERVAL_MINUTES` | `5` | Alert evaluation period |
 | `ALERT_SILENCE_MINUTES` | `30` | Silence window per `(rule, target)`; `0` disables |
 | `ALERT_FOR_TICKS` | `1` | Hits before firing |
@@ -636,6 +656,12 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 | `ALERT_ERROR_RATE_THRESHOLD` | `0.5` | Error rate threshold; `0` disables |
 | `ALERT_ERROR_RATE_MIN_REQUESTS` | `20` | Minimum samples |
 | `ALERT_ERROR_RATE_WINDOW_MINUTES` | `15` | Error rate window |
+| `ALERT_KEY_BURST_TOKENS` | `0` | Single-key burst threshold (tokens); `0` disables |
+| `ALERT_KEY_BURST_WINDOW_MINUTES` | `15` | Single-key usage window; `0` disables |
+| `ALERT_OFF_HOURS_START` / `_END` | `0` / `0` | Working hours `[start, end)` (local time, may cross midnight); equal = off |
+| `ALERT_OFF_HOURS_MIN_REQUESTS` | `0` | Off-hours request threshold; `0` disables |
+| `ALERT_BUDGET_CNY` | `0` | Monthly cost budget (CNY); `0` disables. Priced rows only |
+| `ALERT_BUDGET_LEVELS` | `50,80,95,100` | Budget tiers; only the highest reached tier fires, 100% is critical |
 | `BACKUP_INTERVAL_MINUTES` | `1440` | Backup period (min 60) |
 | `BACKUP_KEEP` | `7` | Snapshots retained; `0` = never prune |
 | `UPSTREAM_STATUS_ENABLED` | `true` | Upstream status page on/off |
@@ -651,7 +677,6 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 | `ALLOW_TEST_HOST` | `false` | Allow `testserver`; tests only |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-For`; only behind exactly one trusted proxy |
 | `ENABLE_DOCS` | `false` | Expose `/docs` and `/openapi.json` |
-| `DUMP_REQUEST_BODIES` | `false` | Dump raw `/v1` bodies (contains conversations; diagnostics only) |
 | `LOG_LEVEL` | `INFO` | Log level; audit logging is INFO and disappears at WARNING |
 | `HOST` / `PORT` | `127.0.0.1` / `8000` | Listen address and port (compose defaults to `0.0.0.0`); `PORT` also sets the host mapping |
 | `CODEBUDDY_API_ENDPOINT` | `https://copilot.tencent.com` | Upstream address; update the allowlist too |
@@ -661,6 +686,9 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 | `ZEN_API_ENDPOINT` | `https://opencode.ai` | Zen upstream |
 | `ZEN_ALLOWED_ENDPOINTS` | `https://opencode.ai` | Zen allowlist |
 | `ZEN_OPENCODE_VERSION` | `1.18.0` | Gate-spoofing UA version (below threshold → 426) |
+| `ZEN_API_ROOT` | `/zen/v1` | Upstream API root; can switch to `/inference/v1` (both return 200 today) |
+| `ZEN_GATE_TOOLS` | `bash,read` | Gate `tools` set; switch to `bash,glob,grep,read` if upstream tightens |
+| `ZEN_USER_AGENT` | empty | UA template (`{version}` substituted); empty = `opencode/<version>` |
 | `KILO_API_ENDPOINT` | `https://api.kilo.ai/api/gateway` | Kilo upstream |
 | `KILO_ALLOWED_ENDPOINTS` | same | Kilo allowlist |
 | `QODER_API_ENDPOINT` | `https://openapi.qoder.com.cn` | Qoder openapi (quota / login); international `https://openapi.qoder.sh` |
@@ -672,6 +700,7 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 | `OFFICEACE_ALLOWED_ENDPOINTS` | the control-plane host only | Control plane only (the model gateway is issued upstream) |
 | `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | OfficeAce chat pacing |
 | `PROVIDER_PROXIES` | `""` | Per-channel outbound proxy; startup-time |
+| `CREDENTIAL_PROXY_POOL` | `""` | Egress IP stickiness: global proxy pool (semicolon-separated), assigned by stable hash of credential id; startup-time |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB chat pacing (per-credential buckets) |
 | `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB international pacing, independent |
 | `ZEN_CHAT_MIN_INTERVAL` | `0` | Zen pacing |
@@ -709,7 +738,7 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 
 ### Runtime settings (*Tasks & settings* page)
 
-The **60** items marked hot above can be changed there without touching `.env` or restarting.
+The console exposes **77** hot items (the table above tags only the common ones); they can be changed without touching `.env` or restarting.
 
 Key points: **DB override beats `.env`** — once overridden `.env` no longer applies to that item; page marks "DB override", *Restore default* deletes row. Values live in `runtime_settings`, so new hot settings need no migration; unknown keys and invalid types / out-of-range values rejected before writing. Startup-time items (`APP_SECRET` / `PORT` / `DATA_DIR` / `USERS_FILE` / `OPENROUTER_MODELS_URL` / upstream allowlists) not hot. `GET /api/settings` / `PUT /api/settings` (admin + CSRF); `null` restores default. Page also shows task runtime state (`GET /api/tasks`, in-process, 30s refresh).
 
@@ -722,6 +751,7 @@ Key points: **DB override beats `.env`** — once overridden `.env` no longer ap
   ```
 
 - **Timezone**: image defaults `TZ=Asia/Shanghai`; `.env` `TZ` passed through. Check-in and quota cycles depend on "today at 9" → keep aligned with host.
+- **TRAE callback URL**: the default `PUBLIC_BASE_URL=http://127.0.0.1:8000` only works locally; remote / container deployments need a browser-reachable address. **Forgetting it fails loudly, not silently**: when the base is loopback / `0.0.0.0` the callback falls back to the current request origin (LAN IP or tunnel domain), *Add credential* shows the actual address, and an authorization timeout names `PUBLIC_BASE_URL`. **If the callback URL is unreachable from the browser** (common on NAS / remote hosts, where TRAE shows a network error and the refreshToken stays in the address bar), paste the whole address-bar URL into the TRAE field in *Add credential* — login completes without the browser ever reaching this service.
 - **Port**: in compose `PORT` sets both container listen port and host mapping.
 - **Rebuild after code changes**: `docker compose up -d` without `--build` reuses local image, runs old code. Use `docker compose up -d --build` after changing `src/` or frontend.
 
@@ -837,7 +867,7 @@ event=request request_id=9f2c… method=POST route=/v1/chat/completions status=2
 - uvicorn's access log is disabled.
 - Switch `REQUEST_LOG_ENABLED` (default `true`, hot).
 
-> `data/dumps/` (written by `DUMP_REQUEST_BODIES=true`) is outside docker log system; app keeps at most 200 files.
+> `data/dumps/` (written by `DUMP_REQUEST_BODIES=true`) is outside docker log system; the app keeps at most 200 files and no longer than 24 hours (by mtime), directory 0700 / files 0600. This is the only switch that writes conversations to disk — turn it back off right after diagnosing.
 
 ## Development
 
