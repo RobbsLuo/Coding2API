@@ -51,6 +51,14 @@ done
 STAMP="$(date +%Y%m%d-%H%M%S)"
 rotated=0
 
+# 取文件字节数。不用 stat：BSD 是 `-f %z`、GNU 是 `-c %s`，而 GNU 的
+# `stat -f` 会**成功**返回文件系统信息（不是报错），`||` 兜底不会触发。
+# `wc -c` 两边行为一致。本脚本只在 macOS 跑，但测试在 Linux CI 真跑，
+# 所以必须跨平台——不要为了「只在 macOS」而让 CI 红。
+file_size() {
+    wc -c < "$1" | tr -d ' '
+}
+
 # 固定四个日志（本体两路 + frpc 两路），不 glob：glob 在无匹配时会让
 # 后续 ls 把当前目录当成参数，从而误删。
 LOGS_LIST="launchd.out.log launchd.err.log frpc.out.log frpc.err.log"
@@ -59,7 +67,7 @@ for name in $LOGS_LIST; do
     file="$LOGS/$name"
     [[ -f "$file" ]] || continue
 
-    bytes=$(stat -f %z "$file")
+    bytes=$(file_size "$file")
     # 空文件不值得归档（notifempty 的等价物）
     (( bytes == 0 )) && continue
 

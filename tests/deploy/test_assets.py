@@ -542,6 +542,17 @@ def test_rotate_script_uses_truncate_not_rename():
     assert "ROTATE_LOGS_DIR" in script, "缺少 ROTATE_LOGS_DIR 覆盖（测试隔离用）"
 
 
+def test_rotate_script_avoids_platform_specific_stat():
+    """不能依赖 `stat -f %z`：GNU 的 `stat -f` 会**成功**返回文件系统信息。
+
+    CI 在 ubuntu 上真跑本脚本（上面的行为用例），BSD/GNU 差异会直接红。
+    这条与 bash 3.2 兼容性同理：脚本本体只服务 macOS，测试却跨平台。
+    """
+    code = _shell_code_lines(ROTATE_SCRIPT)
+    assert "stat -f" not in code, "BSD 专用的 stat -f 在 GNU 上不报错但结果错"
+    assert "wc -c" in code, "文件大小用 wc -c（两边行为一致）"
+
+
 def test_rotate_script_is_bash32_compatible():
     """launchd 用 /bin/bash（macOS 自带 3.2），不能用 mapfile / readarray。"""
     code = _shell_code_lines(ROTATE_SCRIPT)
