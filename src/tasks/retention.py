@@ -2,7 +2,19 @@
 
 from __future__ import annotations
 
+import time
+
 from ..stats.collector import StatsCollector
+
+# 周期 rollup 只重算最近窗口（秒）。
+#
+# `record()` 已经在同一事务里增量维护 `usage_hourly`，周期任务的重算只是
+# 对账。此前每 5 分钟做一次**全表** GROUP BY（最多 90 天明细）：事务期间持有
+# SQLite 写锁，期间的 `record()` 撞上 busy_timeout 后异常被上层吞掉 → 这段
+# 时间的用量直接丢失。窗口取 2 小时且按整点对齐：边界小时必须整小时都进入
+# 重算，否则 REPLACE 会把该小时覆盖成「只剩窗口内那部分」的偏小值。
+# 历史全量重算走 `scripts/rollup_hourly.py`（诊断/修复用，不在周期路径上）。
+ROLLUP_OVERLAP_SECONDS = 2 * 3600
 
 
 class RetentionTask:
@@ -37,9 +49,18 @@ class RetentionTask:
         self._alerts = alerts
         self._growth_events = growth_events
 
-    def run_once(self) -> dict[str, int]:
+    @staticmethod
+    def rollup_since(now: int | None = None) -> int:
+        """本轮 rollup 的起点（整点对齐，见 `ROLLUP_OVERLAP_SECONDS`）。"""
+        raw = int(now if now is not None else time.time()) - ROLLUP_OVERLAP_SECONDS
+        if raw <= 0:
+            # 早期时间戳（测试/时钟异常）：退回全量重算，绝不漏数据。
+            return 0
+        return (raw // 3600) * 3600
+
+    def run_once(self, *, now: int | None = None) -> dict[str, int]:
         """同步执行一轮（CPU/IO 密集，调用方负责放到线程池，见）。"""
-        rolled = self._collector.rollup_hourly()
+        rolled = self._collector.rollup_hourly(since=self.rollup_since(now))
         purged = self._collector.purge_expired(self.retention_days)
         expired_coolings = (
             self._credentials.purge_expired_model_cooldowns()

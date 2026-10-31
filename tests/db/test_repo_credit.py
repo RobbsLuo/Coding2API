@@ -314,7 +314,8 @@ def test_retention_task_prunes_credit_events(tmp_path):
     credentials.save_quota(cid, Quota(remaining=2, total=2, probed_at=now))
 
     class FakeCollector:
-        def rollup_hourly(self) -> int:
+        # 周期 rollup 现在带增量窗口（since）；替身按新签名实现
+        def rollup_hourly(self, since: int | None = None) -> int:
             return 3
 
         def purge_expired(self, days: int) -> int:

@@ -119,7 +119,9 @@ def test_stats_retention_and_rollup(stats):
     collector.record(username="u", provider="trae", model="m", ok=True, input_tokens=5,
                      latency_ms=20, now=2000)
     task = RetentionTask(collector, retention_days=90)
-    first = task.run_once()
+    # 周期 rollup 只重算最近窗口（见 ROLLUP_OVERLAP_SECONDS）：本用例的时间戳
+    # 是 1970 年，必须显式给 now，否则窗口外什么都扫不到。
+    first = task.run_once(now=10_000)
     assert first["rolled_up"] >= 1
     rows = query._db.connect().execute(
         "SELECT requests, input_tokens FROM usage_hourly").fetchall()
