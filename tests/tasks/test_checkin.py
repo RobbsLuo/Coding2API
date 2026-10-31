@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from src.provider.codebuddy.checkin import CheckinResult
-from src.tasks.checkin import CheckinTask
+from src.tasks.checkin import CheckinTask, _cn_now
 from tests.helpers.scheduler import disabled_outcome as _disabled_outcome
 from tests.tasks._support import ProbeProvider
 
@@ -219,3 +221,37 @@ async def test_checkin_on_success_callback_fires(repo):
     task = CheckinTask(credentials, {"codebuddy": ProbeProvider()}, on_success=seen.append)
     report = await task.run_once()
     assert report.succeeded == 1 and len(seen) == 1
+
+
+async def test_checkin_day_boundary_is_beijing_regardless_of_local_tz(repo, monkeypatch):
+    """日界固定北京时间：进程 TZ 改成 UTC 也不得偏移。
+
+    上游「每日一次」按北京时间切。此前用 `time.localtime()`，TZ≠CN 时
+    日界会偏几小时（UTC 下 16:00 之后的签到被算成次日 → 每天漏签一次）。
+    """
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "a",
+                                                          "account_uid": "cb"})
+    provider = ProbeProvider()
+    task = CheckinTask(credentials, {"codebuddy": provider})
+    # 北京时间 2026-09-11 00:30 = UTC 2026-09-10 16:30
+    early = int(datetime(2026, 9, 11, 0, 30, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    try:
+        assert task._day_key(_cn_now(early)) == "2026-09-11"
+        assert task._day_key(_cn_now(early + 3600)) == "2026-09-11"
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+def test_checkin_day_end_handles_month_end():
+    """月末不能构造出「32 号」：`datetime` 不做溢出归一（mktime 才会）。"""
+    task = CheckinTask(None, {})                       # 只算日期，不用仓储
+    last_day = time.struct_time((2026, 9, 30, 23, 0, 0, 2, 273, 0))
+    end = task._day_end(last_day)
+    assert datetime.fromtimestamp(end, ZoneInfo("Asia/Shanghai")).day == 1
+    # 2026-10-01 00:00 北京时间
+    assert end == int(datetime(2026, 10, 1, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())

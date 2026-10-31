@@ -10,11 +10,16 @@ import logging
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from ..config import live
 from ..provider.base import MODEL_SCOPED_KINDS, ErrKind
 
 logger = logging.getLogger(__name__)
+
+# 与签到、限额护栏同一时区：上游的「每日」按北京时间切（见 tasks/checkin）。
+_CN_TZ = ZoneInfo("Asia/Shanghai")
 
 PLAN_COOLDOWN_SECONDS = 12 * 3600
 SOFT_COOLDOWN_SECONDS = 60
@@ -104,17 +109,21 @@ class ModelCooldown:
 
 
 def next_credit_reset(now: int) -> int:
-    """距现在最近的下一个本地 04:00（余额耗尽等签到恢复）。
+    """距现在最近的下一个**北京时间** 04:00（余额耗尽等签到恢复）。
 
     凌晨 00:00–04:00 之间返回当天 04:00（此时签到尚未跑，等当天签到即可恢复）；
-    04:00 及之后返回次日 04:00。用本地时区（与签到任务的日边界一致）。
+    04:00 及之后返回次日 04:00。
+
+    时区固定 Asia/Shanghai，**不看进程本地时区**：签到任务的日界是北京时间
+    （见 `tasks/checkin`），两者必须同源。此前用 `time.localtime/mktime`，
+    容器 TZ≠CN 时冷却会比签到早或晚几小时解除，出现「刚重置又撞额度」或
+    「签到已恢复但号还在冷却」。
     """
-    local = time.localtime(now)
-    reset = time.mktime((local.tm_year, local.tm_mon, local.tm_mday,
-                         CREDIT_RESET_HOUR, 0, 0, 0, 0, -1))
-    if local.tm_hour >= CREDIT_RESET_HOUR:
-        reset += 86400
-    return int(reset)
+    local = datetime.fromtimestamp(now, _CN_TZ)
+    reset = local.replace(hour=CREDIT_RESET_HOUR, minute=0, second=0, microsecond=0)
+    if local.hour >= CREDIT_RESET_HOUR:
+        reset += timedelta(days=1)
+    return int(reset.timestamp())
 
 
 def model_cooldown_duration(hits: int) -> int:

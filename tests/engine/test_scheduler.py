@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -476,12 +478,28 @@ def test_note_error_credit_cools_until_next_4am():
     (23, 1),
 ])
 def test_next_credit_reset_boundaries(hour, expected_offset_days):
-    local = time.localtime(NOW)
-    today_4am = int(time.mktime((local.tm_year, local.tm_mon, local.tm_mday,
-                                 4, 0, 0, 0, 0, -1)))
+    # 04:00 是**北京时间**（与签到日界同源），断言也必须按北京时区算：
+    # 用 time.localtime/mktime 在 TZ≠CN 的机器上会整体偏 8 小时。
+    local = datetime.fromtimestamp(NOW, ZoneInfo("Asia/Shanghai"))
+    today_4am = int(local.replace(hour=4, minute=0, second=0,
+                                  microsecond=0).timestamp())
     now_at_hour = today_4am + (hour - 4) * 3600
     expected = today_4am + expected_offset_days * 86400
     assert next_credit_reset(now_at_hour) == expected
+
+
+def test_next_credit_reset_ignores_process_timezone(monkeypatch):
+    """进程 TZ 改成 UTC 也不偏移：上游按北京时间重置。"""
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    try:
+        # 北京时间 2026-09-21 03:00 = UTC 2026-09-20 19:00
+        moment = int(datetime(2026, 9, 21, 3, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+        assert next_credit_reset(moment) == int(
+            datetime(2026, 9, 21, 4, 0, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+    finally:
+        monkeypatch.undo()
+        time.tzset()
 
 def test_select_skips_model_cooled_credential_when_filtered():
     """端到端：调用方按模型过滤后，被冷却的凭证不再被选中，换模型仍最优。"""

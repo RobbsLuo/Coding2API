@@ -6,6 +6,8 @@ import logging
 import random
 import time
 from collections.abc import Callable
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from ..config import live
 from ..db.crypto import CredentialDecryptError
@@ -15,6 +17,31 @@ from . import TaskReport
 from .pacer import Pacer
 
 logger = logging.getLogger(__name__)
+
+# 签到日边界固定北京时间：上游（CodeBuddy / OfficeAce）的「每日一次」按北京时间
+# 切，与本服务进程的 TZ 无关。此前用 `time.localtime()`，容器/宿主 TZ≠CN 时
+# 日界会偏移数小时，出现「上游已重置但本服务认为今天已签」或反之的静默漏签。
+# 与 `engine/limits.day_start`、`tasks/activity` 同一口径。
+_CN_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def _cn_now(now: int | None = None) -> time.struct_time:
+    """当前时刻的北京时间 struct_time（测试可注入 epoch 秒）。
+
+    统一入口：`due` 与 `run_once` 都用它，保证「该不该跑」和「算哪天」同源。
+    """
+    moment = datetime.fromtimestamp(int(now if now is not None else time.time()),
+                                   _CN_TZ)
+    return moment.timetuple()
+
+
+def _cn_epoch(moment: time.struct_time) -> int:
+    """北京时间 struct_time → epoch 秒。
+
+    不能用 `time.mktime`：它按**进程本地时区**解释 struct_time，TZ≠CN 时
+    算出来的封账截止会偏几小时（签到每天可能漏一次或签两次）。
+    """
+    return int(datetime(*moment[:6], tzinfo=_CN_TZ).timestamp())
 
 
 def parse_checkin_times(text: str) -> tuple[int, ...]:
@@ -79,7 +106,7 @@ class CheckinTask:
         """是否配置了签到时点（决定 runner 的醒转周期：配了就要 1 分钟精度）。"""
         return bool(parse_checkin_times(self._times()))
 
-    def due(self, *, now: time.struct_time | None = None) -> bool:
+    def due(self, *, now: time.struct_time | int | None = None) -> bool:
         """是否该跑一轮签到。
 
         - `checkin_times` 留空 → 恒 True，保持「全天每 10 分钟一轮」的旧行为
@@ -97,7 +124,7 @@ class CheckinTask:
         times = parse_checkin_times(self._times())
         if not times:
             return True                      # 留空 = 旧行为
-        current = now or time.localtime()
+        current = now if isinstance(now, time.struct_time) else _cn_now(now)
         day = self._day_key(current)
         self._prune_slots(day)
         moment = current.tm_hour * 60 + current.tm_min
@@ -134,9 +161,14 @@ class CheckinTask:
         return f"{day}:{scope}"
 
     def _day_end(self, now: time.struct_time) -> int:
-        """本地当日 24:00 的 epoch 秒（默认封账截止 = 当天结束）。"""
-        return int(time.mktime((now.tm_year, now.tm_mon, now.tm_mday + 1,
-                                0, 0, 0, 0, 1, -1)))
+        """北京时间当日 24:00 的 epoch 秒（默认封账截止 = 当天结束）。
+
+        用 `datetime + timedelta` 而不是「tm_mday + 1」：后者在月末（31 号）
+        构造出 32 号，`datetime` 不做溢出归一（`time.mktime` 才会），直接抛
+        `ValueError: day is out of range for month`——每月最后一天签到全挂。
+        """
+        midnight = datetime(now.tm_year, now.tm_mon, now.tm_mday, tzinfo=_CN_TZ)
+        return int((midnight + timedelta(days=1)).timestamp())
 
     def _prune(self, now: time.struct_time) -> None:
         """丢掉非当天的封账记录：done_key 以日期开头，跨天后不可能再命中，
@@ -149,11 +181,11 @@ class CheckinTask:
     def _sealed(self, done_key: str, now: time.struct_time) -> bool:
         """该作用域是否已封账且封账未到期。"""
         until = self._done_scopes.get(done_key)
-        return until is not None and until > time.mktime(now)
+        return until is not None and until > _cn_epoch(now)
 
-    async def run_once(self, *, now: time.struct_time | None = None) -> TaskReport:
+    async def run_once(self, *, now: time.struct_time | int | None = None) -> TaskReport:
         """签到一轮：已成功（当日封账）的作用域直接跳过；失败的留到下轮重试。"""
-        current = now or time.localtime()
+        current = now if isinstance(now, time.struct_time) else _cn_now(now)
         day = self._day_key(current)
         report = TaskReport()
         seen: set[str] = set()
