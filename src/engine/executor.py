@@ -47,7 +47,7 @@ from .reasoning import (
     map_effort,
     parse_effort_map,
 )
-from .scheduler import Scheduler
+from .scheduler import Candidate, Scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -1709,11 +1709,20 @@ class Executor:
                 rates[pid] = model.credit_rate
         return rates
 
-    def _candidate(self, credential_id: str):
+    def _candidate_or_none(self, credential_id: str, provider_id: str = "") -> Candidate:
+        """同 `_candidate`，但凭证已被并发删除时用占位候选而不是抛异常。
+
+        用于「记错误」这类旁路：凭证在请求过程中被管理员删掉是正常竞态，
+        此时再抛 `NoHealthyCredential` 会把这个信息性异常冒泡成 503
+        （流式路径更糟：响应头已发出，只能断流），而真正原因是一次删除。
+        占位候选只承载「哪个渠道、哪条凭证」——`note_error` 用它算冷却时长
+        与命中次数，写库那一步本来就按 credential_id 定位（行已不存在时
+        写入是 no-op）。
+        """
         for candidate in self._deps.credentials.candidates():
             if candidate.credential_id == credential_id:
                 return candidate
-        raise NoHealthyCredential(f"credential {credential_id} disappeared")
+        return Candidate(credential_id=credential_id, provider=provider_id)
 
     def _select(self, target: ModelTarget, tried: set[str],
                 affinity_id: str | None = None) -> str | None:
@@ -1899,7 +1908,8 @@ class Executor:
             self._deps.half_open.reset(credential_id, "")
             self._deps.half_open.reset(credential_id, scope)
         outcome = self._deps.scheduler.note_error(
-            self._candidate(credential_id), kind, int(time.time()),
+            self._candidate_or_none(credential_id, provider_id),
+            kind, int(time.time()),
             model=self._model_scope(provider_id, model),
             retry_at=getattr(error, "retry_at", None))
         if kind is ErrKind.DEAD:
