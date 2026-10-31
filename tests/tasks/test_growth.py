@@ -39,6 +39,35 @@ async def test_growth_task_skips_providers_without_growth_and_disabled(growth_re
     assert report.attempted == 0 and report.skipped == 2
     assert provider.calls == 0
 
+async def test_growth_task_skips_soft_disabled_credentials(growth_repo):
+    """`enabled=0`（用户软暂停）不参与成长中心：暂停不能只停调度。
+
+    与 checkin / refresh / quota_probe 同口径。此前只判 `disabled`，于是
+    「暂停」的号仍被后台任务拿去领积分。
+    """
+    credentials, events = growth_repo
+    paused_id = credentials.add(provider="codebuddy", credential_data={"bearer_token": "p"})
+    assert credentials.set_enabled(paused_id, False)
+    provider = _StubGrowthProvider()
+    report = await GrowthTask(credentials, {"codebuddy": provider}, events).run_once()
+    assert report.attempted == 0 and report.skipped == 1
+    assert provider.calls == 0
+
+
+async def test_growth_task_paused_does_not_claim_shared_account_scope(growth_repo):
+    """暂停凭证必须早于 `seen.add` 跳过，否则会白占同账号的名额。"""
+    credentials, events = growth_repo
+    paused_id = credentials.add(provider="codebuddy",
+                                credential_data={"bearer_token": "a", "account_uid": "same"})
+    credentials.set_enabled(paused_id, False)
+    credentials.add(provider="codebuddy",
+                    credential_data={"bearer_token": "b", "account_uid": "same"})
+    provider = _StubGrowthProvider()
+    report = await GrowthTask(credentials, {"codebuddy": provider}, events).run_once()
+    assert report.attempted == 1 and report.succeeded == 1
+    assert provider.calls == 1
+
+
 async def test_growth_task_dedupes_same_upstream_account(growth_repo):
     """同上游账号多凭证共享一轮：避免重复领取与多余请求。"""
     credentials, events = growth_repo

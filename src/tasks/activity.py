@@ -79,7 +79,9 @@ class ActivityTask:
         self._prune(day)                 # 跨天后旧封账记录不再有用
         seen: set[str] = set()
         for candidate in self._credentials.candidates():
-            if candidate.disabled:
+            # 与 growth / 签到 / 刷新同口径：`enabled=0`（用户软暂停）不参与
+            # 活跃上报。且必须早于 `seen` 记录（见 checkin 的同类注释）。
+            if candidate.disabled or not candidate.enabled:
                 report.skipped += 1
                 continue
             provider = self._providers.get(candidate.provider)
