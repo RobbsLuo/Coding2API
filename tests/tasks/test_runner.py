@@ -23,6 +23,19 @@ from src.tasks.runner import TaskRunner, build_runner
 from tests.helpers.constants import SECRET
 
 
+def _cn_epoch_of(year: int, month: int, day: int, hour: int, minute: int = 0) -> int:
+    """北京时间某刻的 epoch 秒（签到日界固定 Asia/Shanghai，与进程 TZ 无关）。
+
+    不能用 `time.mktime`：它按本地时区解释，CI（UTC）上会差 8 小时，让
+    「封账未到期」的用例假失败。
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    return int(datetime(year, month, day, hour, minute,
+                        tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+
+
 class StubProvider:
     id = "codebuddy"
 
@@ -759,7 +772,9 @@ async def test_checkin_seal_until_shortens_day_and_prunes_stale_days(repo):
                              message="今日已签到", seal_until=window_end)
 
     midnight = time.struct_time((2026, 10, 8, 0, 5, 0, 0, 1, -1))
-    window_end = int(time.mktime((2026, 10, 8, 10, 5, 0, 0, 1, -1)))
+    # 期望值按北京时间算：`_sealed` 用 `_cn_epoch` 解释 struct_time，CI（UTC）
+    # 上若用 time.mktime 会整体差 8 小时，封账立刻过期 → 用例假失败
+    window_end = _cn_epoch_of(2026, 10, 8, 10, 5)
     provider.checkin = sealed_checkin
     task = CheckinTask(credentials, {"codebuddy": provider})
 
@@ -792,7 +807,7 @@ async def test_checkin_seal_expired_entry_is_not_treated_as_sealed(repo):
     async def checkin(_data):
         calls.append(1)
         return CheckinResult(ok=True, credit=1, code=0,
-                             seal_until=int(time.mktime((2026, 10, 8, 0, 10, 0, 0, 1, -1))))
+                             seal_until=_cn_epoch_of(2026, 10, 8, 0, 10))
 
     provider.checkin = checkin
     task = CheckinTask(credentials, {"codebuddy": provider})
@@ -803,11 +818,14 @@ async def test_checkin_seal_expired_entry_is_not_treated_as_sealed(repo):
     assert len(calls) == 2
 
 
-def test_checkin_day_end_is_next_local_midnight():
-    """默认封账截止 = 当日 24:00（渠道不给 seal_until 时的兜底）。"""
+def test_checkin_day_end_is_next_beijing_midnight():
+    """默认封账截止 = 当日 24:00（渠道不给 seal_until 时的兜底）。
+
+    日界是**北京时间**，与进程 TZ 无关（CI runner 是 UTC）。
+    """
     task = CheckinTask.__new__(CheckinTask)
     now = time.struct_time((2026, 10, 8, 23, 30, 0, 0, 1, -1))
-    assert task._day_end(now) == int(time.mktime((2026, 10, 9, 0, 0, 0, 0, 1, -1)))
+    assert task._day_end(now) == _cn_epoch_of(2026, 10, 9, 0, 0)
 
 
 class RecordingPacer:
