@@ -28,9 +28,17 @@ from .streaming import respond_with_keepalive, with_keepalive
 
 def ensure_model_allowed(chat_request: ChatRequest, principal: ApiKeyPrincipal,
                          settings: Settings | RuntimeSettings) -> None:
-    """模型白名单校验：不通过即 400（三个出口与 count_tokens 同一口径）。"""
+    """模型白名单校验：不通过即 400（三个出口与 count_tokens 同一口径）。
+
+    两层策略**同时**生效，缺一不可：
+    - `api_keys.allowed_models`：这把 Key 自己被授予的范围；
+    - `users.allowed_models`：管理员按人设的范围（自助建 Key 时由本人填写，
+      所以不能只看 Key 自己的白名单，否则设一个空列表即可越权）。
+    """
     ensure_model_allowed_for(chat_request, principal.allowed_models, settings,
                              subject="this api key")
+    ensure_model_allowed_for(chat_request, principal.user_allowed_models, settings,
+                             subject="this user")
 
 
 def ensure_model_allowed_for(chat_request: ChatRequest, allowed_models: str,

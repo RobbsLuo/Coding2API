@@ -385,9 +385,16 @@ class Settings(BaseSettings):
     # 上游改 id 时只改这里。格式 `对外名=模型@渠道;...`；留空 = 不启用。
     # 与真实对外 id 或自动别名撞车视为配置错误（不静默覆盖）。可热更。
     model_aliases: str = ""
-    # Prometheus 指标出口（GET /metrics）：默认开启。与 /healthz 同口径**不鉴权**，
-    # 指标已禁用高基数标签（不含凭证 ID / 用户名）。关闭后端点返回 404。可热更。
+    # Prometheus 指标出口（GET /metrics）：默认开启。默认与 /healthz 同口径
+    # **不鉴权**，指标已禁用高基数标签（不含凭证 ID / 用户名）。关闭后端点返回 404。
+    # 对外部署建议同时设置 METRICS_TOKEN（见下），否则任何人都能读到渠道/模型
+    # 清单与凭证池规模。可热更。
     metrics_enabled: bool = True
+    # /metrics 的可选 Bearer 令牌：留空 = 保持公开；配置后抓取方必须带
+    # `Authorization: Bearer <token>`（Prometheus `authorization.credentials`）。
+    # **启动期项**，不进热更表：热更值会落 DB 并被 /api/settings 回显，
+    # 令牌不该出现在管理台页面上。
+    metrics_token: str = ""
     # 请求级结构化日志（logfmt，见 src/webapp/access_log.py）：默认开启。
     # 只记 /api、/v1、/authorize 这些业务请求，每行含 request_id / 路由模板 /
     # 状态码 / 耗时；**不写 query string、请求体、用户名**（脱敏口径见

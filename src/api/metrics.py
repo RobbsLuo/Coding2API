@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import hmac
+
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
 
@@ -107,17 +109,41 @@ def render_metrics(
     return "\n".join(lines) + "\n"
 
 
+def _token_matches(header: str, expected: str) -> bool:
+    """Bearer 头校验（恒时比较；前缀大小写不敏感，Prometheus 发 `Bearer`）。
+
+    编码成 bytes：`hmac.compare_digest` 对含非 ASCII 的 `str` 会抛 TypeError，
+    而这里的输入完全来自外部请求头。
+    """
+    prefix = "bearer "
+    if not header.lower().startswith(prefix):
+        return False
+    supplied = header[len(prefix):].strip()
+    return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
+
+
 def create_router(services: Services) -> APIRouter:
     router = APIRouter()
 
     @router.get("/metrics", include_in_schema=False)
     async def metrics(request: Request):
-        """Prometheus 抓取端点。**不鉴权**——与同样裸暴露的 `/healthz` 同口径，
-        且指标已禁用高基数标签（只有渠道 / 模型 / 状态等有限集合）。"""
+        """Prometheus 抓取端点。
+
+        默认**不鉴权**——与同样裸暴露的 `/healthz` 同口径，且指标已禁用高基数
+        标签（只有渠道 / 模型 / 状态等有限集合）。但端点会暴露渠道与模型清单、
+        凭证池四态计数，对外部署可设 `METRICS_TOKEN` 收口：配置后必须带
+        `Authorization: Bearer <token>`（缺失或错误一律 401，不回显差在哪）。
+        """
         if not bool(services.settings.metrics_enabled):
             return JSONResponse(status_code=404,
                                 content=error_payload("metrics disabled",
                                                       "invalid_request", 404))
+        token = str(services.settings.metrics_token or "")
+        if token and not _token_matches(
+                request.headers.get("authorization", ""), token):
+            return JSONResponse(status_code=401,
+                                content=error_payload("metrics unauthorized",
+                                                      "unauthorized", 401))
         stats = request.app.state.stats_collector
         runner = getattr(request.app.state, "task_runner", None)
         # 只报**已装配**的任务（与 /api/tasks 同源）：未装配的 key 恒 0 会

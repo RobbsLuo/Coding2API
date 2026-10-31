@@ -387,22 +387,24 @@ def _schedule_refresh(services: Services, connected: set[str],
 
 
 def _served_entries(services: Services, connected: set[str],
-                    allowed_models: str = "") -> list[dict[str, Any]]:
-    """合并 + 定稿 + 就地 publish 别名表，并按 Key 白名单过滤。
+                    allowed_models: str = "",
+                    user_allowed_models: str = "") -> list[dict[str, Any]]:
+    """合并 + 定稿 + 就地 publish 别名表，并按白名单过滤。
 
-    `allowed_models` 非空时按该 Key 的模型白名单过滤展示：白名单是
-    Key 级策略，执行时的权威判定在出口（`model_allowed`），这里只是让
-    `/v1/models` 与 Key 实际能用的模型一致。
+    `allowed_models`（Key 级）与 `user_allowed_models`（用户级，admin 按人设）
+    同时生效：两者都要放行。执行时的权威判定在出口（`model_allowed`），这里
+    只是让 `/v1/models` 与实际能用的模型一致。
 
     列表与单模型查询（`serve_model`）共用这一段，保证两条出口看到的是
     同一份「定稿后」条目（`_publish` 会就地 finalize，id 撞车消歧只发生一次）。
     """
     entries = merged_entries(services, connected)
     _publish(services, entries, connected)
-    if allowed_models:
-        from ..auth.access import model_allowed
-        entries = [entry for entry in entries
-                   if model_allowed(entry["id"], allowed_models)]
+    for spec in (allowed_models, user_allowed_models):
+        if spec:
+            from ..auth.access import model_allowed
+            entries = [entry for entry in entries
+                       if model_allowed(entry["id"], spec)]
     return entries
 
 
@@ -410,7 +412,8 @@ def _build_response(services: Services, connected: set[str],
                     allowed_models: str = "",
                     benchmarks: BenchmarkTable | None = None,
                     prices: PriceTable | None = None,
-                    efforts: dict[str, dict[str, str]] | None = None) -> dict:
+                    efforts: dict[str, dict[str, str]] | None = None,
+                    user_allowed_models: str = "") -> dict:
     """按当前缓存合并出响应（不碰上游），并就地 publish 别名表。
 
     `benchmarks` 为能力分表（`app.state.model_benchmarks`）；None/空表时条目
@@ -418,7 +421,8 @@ def _build_response(services: Services, connected: set[str],
     `efforts`（生效中的档位映射）同理：缺省时条目不带 `cost` /
     `reasoning_efforts`。
     """
-    entries = _served_entries(services, connected, allowed_models)
+    entries = _served_entries(services, connected, allowed_models,
+                              user_allowed_models)
     return {"object": "list",
             "data": [_entry_response(entry, benchmarks, prices, efforts)
                      for entry in entries]}
@@ -479,7 +483,8 @@ def _efforts_of(services: Services) -> dict[str, dict[str, str]] | None:
 
 
 async def serve_models(services: Services, allowed_models: str = "",
-                       request: Request | None = None) -> dict:
+                       request: Request | None = None, *,
+                       user_allowed_models: str = "") -> dict:
     """HTTP 出口（`/v1/models`、Playground）：先回旧列表，过期渠道后台刷。
 
     stale-while-revalidate：TTL 到期不再把 zen 探活的十几秒压在请求上。只有某
@@ -499,11 +504,13 @@ async def serve_models(services: Services, allowed_models: str = "",
     connected = await _revalidated_providers(services)
     return _build_response(services, connected, allowed_models,
                            _benchmarks_of(request), _prices_of(request),
-                           _efforts_of(services))
+                           _efforts_of(services),
+                           user_allowed_models=user_allowed_models)
 
 
 async def serve_model(services: Services, model_id: str, allowed_models: str = "",
-                      request: Request | None = None) -> dict[str, Any] | None:
+                      request: Request | None = None, *,
+                      user_allowed_models: str = "") -> dict[str, Any] | None:
     """单模型查询（`GET /v1/models/{id}`）：命中返回条目，否则 None。
 
     刷新与合并完全复用列表那一段（`_revalidated_providers` + `_served_entries`）：
@@ -514,7 +521,8 @@ async def serve_model(services: Services, model_id: str, allowed_models: str = "
     「池子里还有哪些模型」。
     """
     connected = await _revalidated_providers(services)
-    entry = _match_entry(_served_entries(services, connected, allowed_models), model_id)
+    entry = _match_entry(_served_entries(services, connected, allowed_models,
+                                         user_allowed_models), model_id)
     if entry is None:
         return None
     return _entry_response(entry, _benchmarks_of(request), _prices_of(request),
@@ -555,7 +563,8 @@ def create_router(services: Services) -> APIRouter:
     @router.get("/v1/models")
     async def list_v1_models(request: Request,
                              principal: ApiKeyPrincipal = Depends(api_key_user)):
-        return await serve_models(services, principal.allowed_models, request)
+        return await serve_models(services, principal.allowed_models, request,
+                                  user_allowed_models=principal.user_allowed_models)
 
     @router.get("/v1/models/{model_id:path}")
     async def get_v1_model(model_id: str, request: Request,
@@ -569,7 +578,8 @@ def create_router(services: Services) -> APIRouter:
         找不到（或不在该 Key 的白名单内）一律 404 + OpenAI 错误形状：白名单外
         的模型不能靠单查探测出「池子里有它」。
         """
-        item = await serve_model(services, model_id, principal.allowed_models, request)
+        item = await serve_model(services, model_id, principal.allowed_models, request,
+                                 user_allowed_models=principal.user_allowed_models)
         if item is None:
             return JSONResponse(
                 status_code=404,
