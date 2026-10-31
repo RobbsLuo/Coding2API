@@ -150,6 +150,53 @@ def test_db_user_store_rejects_disabled(tmp_path):
     db.close()
 
 
+def test_db_user_store_verify_runs_pbkdf2_for_missing_user(tmp_path, monkeypatch):
+    """不存在/禁用的响应必须与「存在但密码错」同耗时，否则可计时枚举用户名。
+
+    600k 迭代 PBKDF2 约 45ms：直接 return False 比真实验证快 ~7000×。修复是
+    给不存在/禁用用户跑一次 dummy 哈希（进程内构造一次，随机口令永远对不上）。
+    """
+    import src.auth.users as users_mod
+
+    db, repo = _repo(tmp_path)
+    repo.create("alice", create_password_hash("pw"), enabled=False, now=1)
+    store = DbUserStore(repo)
+
+    hash_calls: list[str] = []
+    verify_calls: list[str] = []
+    real_hash = users_mod.create_password_hash
+    real_verify = users_mod.verify_password
+
+    def spy_hash(password):
+        hash_calls.append(password)
+        return real_hash(password)
+
+    def spy_verify(password, encoded):
+        verify_calls.append(encoded)
+        return real_verify(password, encoded)
+
+    monkeypatch.setattr(users_mod, "create_password_hash", spy_hash)
+    monkeypatch.setattr(users_mod, "verify_password", spy_verify)
+    monkeypatch.setattr(users_mod, "_DUMMY_HASH_CACHE", [])
+
+    # 不存在：照常跑了一次完整 PBKDF2（dummy 哈希，存进缓存）
+    assert store.verify("ghost", "pw") is False
+    dummy = users_mod._DUMMY_HASH_CACHE[0]
+    assert len(hash_calls) == 1            # 生成 dummy（随机口令）
+    assert verify_calls == [dummy]
+
+    # 第二次不存在的用户：dummy 从缓存来，只有 verify
+    assert store.verify("ghost", "pw") is False
+    assert len(hash_calls) == 1
+    assert verify_calls == [dummy, dummy]
+
+    # 禁用用户同口径：不试真实哈希（不透出「存在但被禁用」）
+    disabled_hash = repo.get("alice")["password_hash"]
+    assert store.verify("alice", "pw") is False
+    assert disabled_hash not in verify_calls
+    db.close()
+
+
 def test_db_user_store_reports_must_change(tmp_path):
     db, repo = _repo(tmp_path)
     repo.create("alice", create_password_hash("pw"), must_change_password=True, now=1)

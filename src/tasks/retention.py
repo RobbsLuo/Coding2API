@@ -61,7 +61,9 @@ class RetentionTask:
     def run_once(self, *, now: int | None = None) -> dict[str, int]:
         """同步执行一轮（CPU/IO 密集，调用方负责放到线程池，见）。"""
         rolled = self._collector.rollup_hourly(since=self.rollup_since(now))
-        purged = self._collector.purge_expired(self.retention_days)
+        # now 同样传播给清理：调用方注入 now（测试/手动触发）时清理必须跟随，
+        # 否则这里会用真实时间删掉测试里的早期明细——测试输出依赖系统时钟。
+        purged = self._collector.purge_expired(self.retention_days, now=now)
         expired_coolings = (
             self._credentials.purge_expired_model_cooldowns()
             if self._credentials is not None else 0)

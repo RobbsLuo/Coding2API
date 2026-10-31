@@ -143,6 +143,19 @@ class UsersFileStore:
         self._load_if_needed()
 
 
+#: 时序对齐用的 dummy 哈希缓存（见 `_dummy_password_hash`）。
+_DUMMY_HASH_CACHE: list[str] = []
+
+
+def _dummy_password_hash() -> str:
+    """进程内只造一次的 PBKDF2 哈希（随机口令，永远对不上）。"""
+    if not _DUMMY_HASH_CACHE:
+        # lazy 而非模块级：`create_password_hash` 是 600k 迭代（约 45ms），
+        # import 期每进程多付一次可接受，放 import 会拖累所有收集模块的测试。
+        _DUMMY_HASH_CACHE.append(create_password_hash(secrets.token_urlsafe(32)))
+    return _DUMMY_HASH_CACHE[0]
+
+
 class DbUserStore:
     """SQLite 用户存储：DB 是唯一权威源。
 
@@ -157,6 +170,10 @@ class DbUserStore:
     def verify(self, username: str, password: str) -> bool:
         row = self._repo.get(username)
         if row is None or not row["enabled"]:
+            # 不存在 / 被禁用也要完整跑一遍 PBKDF2：600k 迭代实测量级 ~45ms，
+            # 直接 return False 的响应比「存在但密码错」快两个数量级，攻击者
+            # 据此计时即可枚举有效用户名（实测时序差 ~7000×）。
+            verify_password(password, _dummy_password_hash())
             return False
         return verify_password(password, row["password_hash"])
 

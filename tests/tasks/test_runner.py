@@ -402,6 +402,56 @@ async def test_providers_release_http_pools_on_shutdown(tmp_path):
     await trae.aclose()
 
 
+def test_lifespan_starts_task_runner_in_background(monkeypatch, tmp_path):
+    """lifespan 必须把 runner.start() 放到后台，不能在 startup 里 await。
+
+    `start()` 首轮是两个真实的上游网络调用（额度探测 + token 预刷新），最慢
+    十几秒；内联会让 lifespan startup 不结束 → uvicorn 尚未 accept，容器健康
+    探针在窗口内判 unhealthy。放后台后 /health 在 start 完成前就是可达的；
+    关闭期则先收尾 start 再 stop（否则 stop 先跑会产生孤儿循环任务）。
+    """
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from src.main import build_app
+    from tests.helpers.auth import isolated_settings
+
+    # 探测预算（远大于一次 /health 往返）：请求返回时首轮探测「仍在跑」
+    SLOW_START_SECONDS = 0.5
+
+    class FakeRunner:
+        """只实现 lifespan 用到的面：start / stop（与 state 引用）。"""
+
+        def __init__(self):
+            self.start_entered = asyncio.Event()
+            self.start_completed = False
+            self.stopped = False
+            self.stop_after_start = False        # stop 必须晚于 start 完成
+
+        async def start(self):
+            self.start_entered.set()
+            await asyncio.sleep(SLOW_START_SECONDS)   # 模拟首轮上游 IO
+            self.start_completed = True
+
+        async def stop(self):
+            self.stopped = True
+            self.stop_after_start = self.start_completed
+
+    fake = FakeRunner()
+    monkeypatch.setattr("src.main.build_runner", lambda *a, **k: fake)
+
+    app = build_app(isolated_settings(tmp_path))
+    with TestClient(app) as http:
+        http.get("/health")
+        # start 已被调度（create_task 执行过至少一次调度点），但仍在首轮探测中
+        assert fake.start_entered.is_set(), "runner.start 未被调度"
+        assert not fake.start_completed, "startup 又变成了内联 await"
+
+    # 关闭期：先等 start 收尾，再 stop（顺序即不产生孤儿循环）
+    assert fake.start_completed and fake.stopped and fake.stop_after_start
+
+
 def test_run_entry_point_exists_and_is_callable():
     """pyproject 的 [project.scripts] 指向 src.main:run，它必须存在。"""
     import inspect
@@ -530,6 +580,10 @@ def test_run_entry_point_starts_uvicorn(monkeypatch, tmp_path):
     assert captured["access_log"] is False
     # 停机排空：不给 timeout_graceful_shutdown 就是无限等（长流卡住直到 SIGKILL）
     assert captured["timeout_graceful_shutdown"] == main.GRACEFUL_SHUTDOWN_SECONDS
+    # uvicorn 自带 proxy_headers=True 会把回环对端请求的 scope["client"] 改写成
+    # X-Forwarded-For 尾条目，绕过应用层 `TRUST_PROXY` 判定（来源 IP 白名单 /
+    # 登录限流可被回环调用方伪造）。必须显式关掉，来源解析只归 access.client_ip。
+    assert captured["proxy_headers"] is False
 
 
 def test_run_releases_instance_lock_after_uvicorn_returns(monkeypatch, tmp_path):

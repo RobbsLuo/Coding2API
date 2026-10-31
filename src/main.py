@@ -678,7 +678,14 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                               openrouter_catalog_minutes=(
                                   lambda: runtime.openrouter_catalog_minutes))
         app_.state.task_runner = runner
-        await runner.start()
+        # **首轮探测/刷新放后台**：`start()` 内联 await 的是两个真实的上游网络
+        # 调用（quota_probe 每凭证一个请求、token 预刷新同样出网），最慢十几秒；
+        # 内联会让 lifespan startup 一直不结束 → uvicorn 还没开始 accept，
+        # 容器/launchd 的健康探针在窗口内判 unhealthy（重启循环）。这也与上面
+        # 预热三兄弟「不内联 await」的口径一致。
+        # 关闭期先收尾这个 task 再停循环（见 finally）：否则 stop 先跑，
+        # start 又把周期循环建出来，那些循环没人 cancel。
+        app_.state.task_runner_start_task = asyncio.create_task(runner.start())
         # 预热模型别名表：放后台跑（force 绕过 TTL）。
         # 不内联 await 的原因：zen 免费层探活最慢的模型可占十几秒，内联会让应用
         # 在这段时间里不响应 /health，容器存活探针可能误判；动态拉取失败仅记日志。
@@ -696,6 +703,14 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         try:
             yield
         finally:
+            # **先等 start 收尾**：start 未完成时周期循环多半还没建出来，
+            # 先 stop 是 no-op，随后 start 把循环建出来 → 无人 cancel 的孤儿
+            # 任务带着事件循环跑。start 里的两个 run_once 均在 `_guarded`
+            # 内（异常已吞），这里即使抛 CancelledError 也要继续 stop。
+            start_task = getattr(app_.state, "task_runner_start_task", None)
+            if start_task is not None and not start_task.done():
+                with contextlib.suppress(Exception):
+                    await start_task
             await runner.stop()
             warmup = getattr(app_.state, "model_warmup_task", None)
             if warmup is not None and not warmup.done():
@@ -1035,6 +1050,15 @@ def run() -> None:
             # GRACEFUL_SHUTDOWN_SECONDS 秒收尾，再强关。默认 None 是无限等，
             # 配合容器/launchd 的停机超时会变成「卡住直到被 SIGKILL」。
             timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS,
+            # **必须关**：uvicorn 自带的 proxy_headers=True 会把对端 ∈
+            # forwarded_allow_ips（默认 127.0.0.1）请求的 `scope["client"]`
+            # 改写成 `X-Forwarded-For` 尾条目——于是「采信不采信 XFF」就轮不到
+            # 应用层的 `TRUST_PROXY` 判定了（nginx/frpc 回源、容器 healthcheck、
+            # 本机 curl 全命中回环）。后果：`TRUST_PROXY=false` 部署下，能连进
+            # 回环端口的调用方自带一个 XFF 头即可伪造来源 IP，绕过 api_keys 的
+            # IP 白名单与登录限流桶。来源解析统一收归 `access.client_ip`：
+            # `TRUST_PROXY` 决定一切，uvicorn 只做搬运。
+            proxy_headers=False,
         )
     finally:
         instance_lock.release()

@@ -18,12 +18,14 @@ class _RecordingCollector:
 
     def __init__(self) -> None:
         self.since: int | None = -1
+        self.purged_now: int | None = -1     # run_once 必须把 now 也传给清理
 
     def rollup_hourly(self, since: int | None = None) -> int:
         self.since = since
         return 0
 
-    def purge_expired(self, _days: int) -> int:
+    def purge_expired(self, _days: int, now: int | None = None) -> int:
+        self.purged_now = now
         return 0
 
 
@@ -47,6 +49,8 @@ def test_run_once_passes_window_to_rollup():
     task = RetentionTask(collector)          # type: ignore[arg-type]
     report = task.run_once(now=1_700_000_000)
     assert collector.since == RetentionTask.rollup_since(1_700_000_000)
+    # now 同样传播给清理：不传 on 就会用真实时间（测试输出依赖系统时钟）
+    assert collector.purged_now == 1_700_000_000
     assert report["rolled_up"] == 0
 
 

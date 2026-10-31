@@ -126,7 +126,10 @@ def test_stats_retention_and_rollup(stats):
     rows = query._db.connect().execute(
         "SELECT requests, input_tokens FROM usage_hourly").fetchall()
     assert sum(r["requests"] for r in rows) == 2
-    # 清理：把 now 推到 91 天之后
+    # 显式 now 同样传播给清理：run_once 不得用真实时间聪明地删掉 1970 年明细
+    # （此前会），否则下面「再写一条再清」的计数是两段真实时刻的杂凑。
+    assert collector.purge_expired(90, now=10_000 + 91 * 86400) == 2
+    # 再写一条（同 ts=1000，尚未清理过的新明细）
     collector.record(username="u", provider="trae", model="m", ok=True, now=1000)
     assert collector.purge_expired(90, now=1000 + 91 * 86400) == 1
     # 小时汇总永久保留

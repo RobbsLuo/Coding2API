@@ -318,7 +318,8 @@ def test_retention_task_prunes_credit_events(tmp_path):
         def rollup_hourly(self, since: int | None = None) -> int:
             return 3
 
-        def purge_expired(self, days: int) -> int:
+        # `now` 由 run_once 传播；本用例不传 now（真实时间路径）
+        def purge_expired(self, days: int, now: int | None = None) -> int:
             return 7
 
     task = RetentionTask(FakeCollector(), retention_days=90,
