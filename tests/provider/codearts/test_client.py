@@ -65,7 +65,9 @@ def test_client_prepare_body_v2_and_legacy():
     assert body["stream"] is True and body["model"] == "m"
     assert body["chat_id"] == "c" and body["prompt_cache_key"] == "c"
     assert body["tool_stream"] is True and body["temperature"] == 0.5
-    assert "unknown" not in body
+    # 透传为默认：只有必须改写的键被拦，未知键也照发（上游是 OpenAI 形状，
+    # 白名单会把上游支持的字段静默丢掉）
+    assert body["unknown"] == 1
     body["messages"][0]["content"] = "changed"          # 深拷贝
     assert messages[0]["content"] == "hi"
 
@@ -75,6 +77,28 @@ def test_client_prepare_body_v2_and_legacy():
     assert legacy["messages"][0] == {"type": "text", "text": "hi"}
     assert "user_id" not in prepare_body({"messages": []}, "m", chat_id="c",
                                          legacy=True)
+
+
+def test_client_prepare_body_forwards_sampling_and_usage_fields():
+    """v2 不再用白名单：采样 / 工具 / 用量相关字段必须原样到达上游。"""
+    payload = {
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_completion_tokens": 64,
+        "top_k": 20,
+        "seed": 7,
+        "parallel_tool_calls": False,
+        "stream_options": {"include_usage": True},
+        "model": "被解析后的模型名",
+        "chat_id": "不应透传",
+    }
+    body = prepare_body(payload, "resolved", chat_id="derived")
+    assert body["max_completion_tokens"] == 64
+    assert body["top_k"] == 20 and body["seed"] == 7
+    assert body["parallel_tool_calls"] is False
+    assert body["stream_options"] == {"include_usage": True}
+    # 必须改写的键由本渠道决定，下游同名字段不得覆盖
+    assert body["model"] == "resolved"
+    assert body["chat_id"] == "derived" and body["prompt_cache_key"] == "derived"
 
 def test_client_legacy_blocks_and_flatten():
     assert _legacy_blocks("nope") == []

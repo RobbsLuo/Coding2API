@@ -135,10 +135,16 @@ def prepare_body(payload: dict[str, Any], model: str, *,
             body["user_id"] = user_id
         return body
 
-    body = {key: value for key, value in payload.items()
-            if key in ("temperature", "top_p", "max_tokens", "reasoning_effort",
-                       "tools", "tool_choice", "stop", "presence_penalty",
-                       "frequency_penalty", "response_format")}
+    # 只挡「必须由本渠道改写/注入」的键，其余原样透传。
+    #
+    # 这里曾经是 9 个键的白名单：上游是原生 OpenAI 形状，白名单会把
+    # `top_k` / `seed` / `parallel_tool_calls` / `max_completion_tokens` /
+    # `stream_options` 等**上游其实支持**的字段静默丢弃——客户端不报错，只是
+    # 行为悄悄变了（采样参数失效、用量拿不到）。黑名单把「透传」设为默认，
+    # 新字段不需要再回来改这一行。
+    _OVERRIDDEN = ("model", "stream", "messages", "chat_id",
+                   "prompt_cache_key", "tool_stream")
+    body = {key: value for key, value in payload.items() if key not in _OVERRIDDEN}
     body.update({
         "model": model,
         "stream": True,
