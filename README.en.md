@@ -338,7 +338,7 @@ Neither is authenticated; both accept `HEAD`. Four mutually exclusive counts (`r
 
 ### Prometheus metrics (`GET /metrics`)
 
-On by default, **unauthenticated**; `METRICS_ENABLED=false` (hot) returns 404.
+On by default, **unauthenticated**; `METRICS_ENABLED=false` (hot) returns 404. Set `METRICS_TOKEN` to require `Authorization: Bearer <token>` (401 otherwise).
 
 | Metric | Type | Labels | Source |
 | --- | --- | --- | --- |
@@ -731,7 +731,8 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 | `NONSTREAM_KEEPALIVE_SECONDS` | `0` | Non-streaming responses switch to chunked with whitespace heartbeats after N seconds (leading whitespace is legal JSON); `0` = off, only needed behind a CDN, recommended 15. Hot |
 | `MODEL_ALIASES` | `""` | Custom aliases; empty = off. Hot |
 | `MAX_INFLIGHT_PER_CREDENTIAL` | `0` | Per-account in-flight cap; `0` = unlimited. 600s TTL backstop |
-| `METRICS_ENABLED` | `true` | Expose `/metrics` (unauthenticated). Hot |
+| `METRICS_ENABLED` | `true` | Expose `/metrics`. Hot |
+| `METRICS_TOKEN` | empty | When set, `/metrics` requires `Authorization: Bearer <token>`; empty = public (same as `/healthz`). Startup-only |
 | `REQUEST_LOG_ENABLED` | `true` | Request-level logfmt logging; no query / body / username. Hot |
 | `FORCE_DISABLE_THINKING` | `false` | Strip reasoning from responses only. Hot |
 | `REASONING_EFFORT_MAP` | `""` | Outbound level mapping `channel=from:to;*=from:to`; `none` deletes the key. Hot |

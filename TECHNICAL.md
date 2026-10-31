@@ -816,7 +816,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 - **前端防御**：`count()` 显式校验 `typeof === "number"` + 有限正数；非数字静默不渲染。
 
 ### 11.3 Prometheus 指标（`GET /metrics`）
-`src/api/metrics.py` 零依赖手写 text 格式（不引 `prometheus_client`）。默认开、**不鉴权**；`METRICS_ENABLED=false`（可热更）时 404。路由注册在 SPA catch-all 之前。
+`src/api/metrics.py` 零依赖手写 text 格式（不引 `prometheus_client`）。默认开、默认**不鉴权**；`METRICS_ENABLED=false`（可热更）时 404；`METRICS_TOKEN` 非空时要求 `Authorization: Bearer <token>`（恒时比较，错误 401），用于对外部署时收口。路由注册在 SPA catch-all 之前。
 
 | 指标 | 类型 | 标签 | 数据源 |
 |---|---|---|---|
@@ -957,7 +957,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
 
 **审计** `audit_events(id, ts, actor, action, target, detail, ip, ok)`，动作常量在 `audit/actions.py`。覆盖登录成功/失败、账号建/激活/改角色/启停/改密/重置/硬删、凭证导入/删除/启停/pin/复活/切换账号、告警人工恢复，以及**API Key 发/删**（`api_key.create` / `api_key.delete`：明文只回显一次，事后只能靠审计行追责）、**用户策略**（`user.policy`）、**运行时配置**（`settings.update`，含 kill switch 与请求体落盘开关）、**明细导出**（`data.export`）。**绝不记密码或令牌明文**。保留期同 `usage_events`。
 
-**用户级策略（`users.allowed_models` / `users.quota`）**：Playground 是免 Key 的会话直连入口，`PUT /api/users/{username}/policy` 给每个登录用户再判一次出站策略——模型白名单走与 Key 相同的 `ensure_model_allowed_for`（含「省略模型名即默认模型」的绕过口子），配额走独立的 `services.user_quota`，用量按**用户名**聚合（该用户经任何入口的流量都计入）。缺这层时 viewer 用 Cookie 就能直调任意模型、绕过 Key 的白名单与配额。
+**用户级策略（`users.allowed_models` / `users.quota`）**：`PUT /api/users/{username}/policy` 按人设出站策略，两条入口都判：Playground（免 Key 会话直连）与 `/v1`（API Key）。模型白名单走与 Key 相同的 `ensure_model_allowed_for`（含「省略模型名即默认模型」的绕过口子），且与 Key 自己的白名单**同时**生效（两个都要放行）——只看 Key 的话，用户自签一个空白名单的 Key 就绕开了管理员的按人设限；`/v1/models` 与单模型查询也按两层过滤，避免「列表看得到、调用 400」。配额走独立的 `services.user_quota`，用量按**用户名**聚合（该用户经任何入口的流量都计入）。缺这层时 viewer 用 Cookie 就能直调任意模型、绕过 Key 的白名单与配额。
 
 **kill switch（`gateway_paused` / `gateway_pause_reason`，热更）**：拦在 API Key 鉴权依赖里（`api/deps._ensure_not_paused`）而不是各端点——新端点不会漏拦；返 503 `service_paused` 受控文案（原因只进日志），管理台走会话鉴权因此**暂停期间仍可关掉开关**。开关动作进审计并单独记 WARNING。
 

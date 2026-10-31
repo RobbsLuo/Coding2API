@@ -20,7 +20,7 @@ services:
       CODEBUDDY_API_ENDPOINT: ${CODEBUDDY_API_ENDPOINT:-https://copilot.tencent.com}
       DEFAULT_MODEL: ${DEFAULT_MODEL:-deepseek-v4.1-flash}
       # 模型列表黑名单（fnmatch glob，逗号分隔，完全替换语义）
-      MODEL_BLOCKLIST: ${MODEL_BLOCKLIST:-custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,seed-code-pro-*,sagitta,aquila,glm-4.*,glm-5,glm-5-turbo,glm-5.0*,glm-5.1,glm-5v-*,kimi-k2.5,kimi-k2.6,kimi-k2-thinking,minimax-m2.5,deepseek-v3-*,hunyuan-*,hy3*,deepseek-v4-*,qwen3.7-*,auto,nemotron-3-*,glm-5.2*,nemotron-3*,lfm2*,north-mini-code,openrouter-models-router,fast,balanced,deep,primary,hy4-preview,inkling-small,minimax-m2.7,kimi-k2.*,minimax-m3,gpt-5.4,gpt-5.5,laguna*,qwen3-vl-235b,seed-2.1*,xing4.0-29b-a4,glyph-cluster,qwen3.8-flash,seed-evolving}
+      MODEL_BLOCKLIST: ${MODEL_BLOCKLIST:-custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,fast,balanced,deep,primary,auto,sagitta,aquila,glm-4.*,glm-5,glm-5-turbo,glm-5.0*,glm-5.1,glm-5v-*,glm-5.2*,glm.5.2*,kimi-k2.*,kimi-k2.5,kimi-k2.6,kimi-k2-thinking,kimi-k3,minimax-m2.5,minimax-m2.7,minimax-m3,deepseek-v3-*,deepseek-v4-*,qwen3.7-*,qwen3-*,qwen3.6*,qwen3-vl-235b,gpt-5.4,gpt-5.5,gpt-5.6*,hy3*,hy4-preview,hunyuan-*,seed-2.1*,seed-2-1-turbo,doubao-seed-2.1-turbo,seed-code-pro-*,seed-evolving,space-bunny,nemotron-3-*,nemotron-3*,lfm2*,laguna*,north-mini-code,inkling-small,xing4.0-29b-a4,glyph-cluster,openrouter-models-router,deepseek-v4.1-flash-0930,deepseek-v4.1-flash-bnt,glm-5.3-test,glm-5.3-zx,kimi-k3-test-1009,kimi-k3-1019}
       QUOTA_PROBE_MINUTES: ${QUOTA_PROBE_MINUTES:-60}
       # token 预刷新轮询周期（分钟）：短寿命渠道（CodeArts STS 2h）的预刷新
       # 窗口会被封顶，窗口必须窄于该周期才不会整轮漏过、拖到到期才刷
@@ -187,6 +187,8 @@ services:
       MAX_INFLIGHT_PER_CREDENTIAL: ${MAX_INFLIGHT_PER_CREDENTIAL:-0}
       # Prometheus 指标出口（GET /metrics，无鉴权，与 /healthz 同口径）；false 关闭
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
+      # 留空 = /metrics 公开；设置后抓取需 Authorization: Bearer <token>
+      METRICS_TOKEN: ${METRICS_TOKEN:-}
       # 请求级结构化日志（logfmt，只记 /api、/v1、/authorize；不写 query/正文/用户名）
       REQUEST_LOG_ENABLED: ${REQUEST_LOG_ENABLED:-true}
       # 签到定时：本地 HH:MM 逗号分隔，留空 = 全天每 10 分钟（旧行为）；抖动分钟

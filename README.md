@@ -340,7 +340,7 @@ claude
 
 ### Prometheus 指标（`GET /metrics`）
 
-默认开启、**不鉴权**；`METRICS_ENABLED=false`（可热更）→ 404。
+默认开启、默认**不鉴权**；`METRICS_ENABLED=false`（可热更）→ 404。设 `METRICS_TOKEN` 后抓取须带 `Authorization: Bearer <token>`（不匹配 401）。
 
 | 指标 | 类型 | 标签 | 数据源 |
 | --- | --- | --- | --- |
@@ -637,6 +637,8 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `MODEL_CATALOG_MINUTES` | `30` | 渠道模型列表兜底刷新周期（下限 5） |
 | `OPENROUTER_CATALOG_MINUTES` | `1440` | 模型目录刷新周期（下限 60） |
 | `OPENROUTER_MODELS_URL` | `https://openrouter.ai/api/v1/models` | 目录来源（匿名可读）；改后重启 |
+| `TOOL_OUTPUT_COMPRESS_ENABLED` | `false` | 压缩 `role=tool` 的超长纯文本（去 ANSI + 折叠重复行）；可热更 |
+| `TOOL_OUTPUT_COMPRESS_MAX_CHARS` | `8000` | 触发压缩的字符阈值，≤0 视为关闭；可热更 |
 | `USD_CNY_RATE` | `6.70` | 成本估算汇率；可热更，只影响之后写入 |
 | `GROWTH_INTERVAL_MINUTES` | `60` | 成长中心周期（下限 5） |
 | `GROWTH_IRREVERSIBLE_ACTIONS` | `true` | 允许抽奖 / 连登兑换 / 开盲盒 / 消耗补登卡 |
@@ -733,7 +735,8 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `NONSTREAM_KEEPALIVE_SECONDS` | `0` | 非流式出口 N 秒未完成 → 转 chunked 吐空白心跳（JSON 前导空白合法）；`0` = 关，仅 CDN 后需要，推荐 15。可热更 |
 | `MODEL_ALIASES` | `""` | 自定义别名；留空不启用。可热更 |
 | `MAX_INFLIGHT_PER_CREDENTIAL` | `0` | 单账号在途上限；`0` = 不限。600s TTL 兜底 |
-| `METRICS_ENABLED` | `true` | 暴露 `/metrics`（不鉴权）。可热更 |
+| `METRICS_ENABLED` | `true` | 暴露 `/metrics`。可热更 |
+| `METRICS_TOKEN` | 空 | 设置后 `/metrics` 要求 `Authorization: Bearer <token>`；空 = 公开（与 `/healthz` 同口径）。启动期项 |
 | `REQUEST_LOG_ENABLED` | `true` | 请求级结构化日志（logfmt）；不写 query / 请求体 / 用户名。可热更 |
 | `FORCE_DISABLE_THINKING` | `false` | 出站剥离思考内容；只过滤响应，不改请求。可热更 |
 | `REASONING_EFFORT_MAP` | `""` | 出站档位映射 `渠道=from:to;*=from:to`（渠道取 `KNOWN_PROVIDERS`）；`none` = 删键。可热更 |
