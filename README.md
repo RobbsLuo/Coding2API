@@ -626,7 +626,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `APP_SECRET` | **必填** | 凭证加密密钥，≥16 字符；丢失 = 凭证全废。拒低熵值。**换密钥后旧凭证解不开**：单条探测会回可行动的错误码，而对话 / 后台任务只跳过那条坏凭证，其余照常 |
+| `APP_SECRET` | **必填** | 凭证加密密钥，≥16 字符；丢失 = 凭证全废。拒低熵值与已知占位值（`.env.example` 里那些）。**换密钥后旧凭证解不开**：先用 `scripts/rotate_app_secret.py` 重加密（停机 + 备份），否则单条探测回可行动的错误码、对话 / 后台任务只跳过坏凭证 |
 | `ADMIN_USERNAMES` | 空 | 仅引导期（库里还没有活跃 admin）：逗号分隔，首次启动提权 `admin` |
 | `USERS_FILE` | `secrets/users.txt` | 仅引导期：老式用户文件，启动导入一次 |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | 浏览器可达地址；TRAE 登录回调用；https 下发 HSTS。不决定会话 Cookie 的 `Secure`。配回环 / `0.0.0.0` → 回调基址取当前请求 origin（见「部署注意」） |
@@ -676,7 +676,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `QUOTA_EXPIRY_WINDOW_SECONDS` | `129600` | 主到期排序窗口；`≤0` 关闭 |
 | `QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS` | `604800` | 次到期窗口；`≤0` 关闭 |
 | `CONVERSATION_STICKY_SECONDS` | `3600` | 会话粘性 TTL。优先级：请求体会话标识 > 请求头 > 消息前缀指纹；pin 最高。`≤0` 关 |
-| `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,seed-code-pro-*,sagitta,aquila,glm-4.*,glm-5,glm-5-turbo,glm-5.0*,glm-5.1,glm-5v-*,kimi-k2.5,kimi-k2.6,kimi-k2-thinking,minimax-m2.5,deepseek-v3-*,hunyuan-*,hy3*,deepseek-v4-*,qwen3.7-*,auto,nemotron-3-*,glm-5.2*,nemotron-3*,lfm2*,north-mini-code,openrouter-models-router,fast,balanced,deep,primary,hy4-preview,inkling-small,minimax-m2.7,kimi-k2.*,minimax-m3,gpt-5.4,gpt-5.5,laguna*,qwen3-vl-235b,seed-2.1*,xing4.0-29b-a4,glyph-cluster,qwen3.8-flash,seed-evolving` | 列表黑名单（fnmatch，仅影响展示），按归一后写法匹配 |
+| `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,fast,balanced,deep,primary,auto,sagitta,aquila,glm-4.*,glm-5,glm-5-turbo,glm-5.0*,glm-5.1,glm-5v-*,glm-5.2*,glm.5.2*,kimi-k2.*,kimi-k2.5,kimi-k2.6,kimi-k2-thinking,kimi-k3,minimax-m2.5,minimax-m2.7,minimax-m3,deepseek-v3-*,deepseek-v4-*,qwen3.7-*,qwen3-*,qwen3.6*,qwen3-vl-235b,gpt-5.4,gpt-5.5,gpt-5.6*,hy3*,hy4-preview,hunyuan-*,seed-2.1*,seed-2-1-turbo,doubao-seed-2.1-turbo,seed-code-pro-*,seed-evolving,space-bunny,nemotron-3-*,nemotron-3*,lfm2*,laguna*,north-mini-code,inkling-small,xing4.0-29b-a4,glyph-cluster,openrouter-models-router,deepseek-v4.1-flash-0930,deepseek-v4.1-flash-bnt,glm-5.3-test,glm-5.3-zx,kimi-k3-test-1009,kimi-k3-1019` | 列表黑名单（fnmatch，仅影响展示），按归一后写法匹配 |
 | `MODEL_FALLBACK_GROUPS` | `""` | 跨渠道 fallback 组：`组名=成员1,成员2;…`。留空不启用 |
 | `ALLOWED_HOSTS` | 空 | Host 白名单，防 DNS rebinding |
 | `ALLOW_TEST_HOST` | `false` | 放行 `testserver`，仅测试用 |
@@ -761,8 +761,23 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 - **端口**：compose 里 `PORT` 同时决定容器内监听端口与宿主映射端口。
 - **改代码后重建镜像**：`docker compose up -d` 不带 `--build` 用本地已有镜像跑旧代码。改 `src/` 或前端后必须 `docker compose up -d --build`。
 
-### 升级后必须重启后端
+### 轮换 APP_SECRET（仅在怀疑密钥外泄时）
 
+`APP_SECRET` 是 Fernet 密钥的唯一来源（无盐 SHA-256），**直接换值会让已存凭证全部不可解**。要换必须重加密：
+
+```bash
+python3 scripts/backup_db.py                      # 1. 先留一致性备份
+sudo systemctl stop coding2api                    # 2. 停机（运行中的进程会用旧密钥写库）
+python3 scripts/rotate_app_secret.py \
+    --db data/coding2api.sqlite3 \
+    --old-secret-file /path/to/old.env \
+    --new-secret-file /path/to/new.env            # 3. 全解 → 校验 → 单事务重写
+# 4. .env 换新值、chmod 600 .env、重启
+```
+
+任一条解不开就整体回滚，库保持原样。脚本接受 `.env` 或只含密钥的单行文件；不要把密钥写在命令行（会进 history 与 `ps`）。
+
+### 升级后必须重启后端
 **改 `src/` 后必须重启进程**，否则「新前端 + 旧后端」错配：页面能开，新端点全 404。前端不需重启（后端每次请求现读 `web/dist`）；后端不是。
 
 ```bash

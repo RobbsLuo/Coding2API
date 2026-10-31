@@ -26,7 +26,11 @@ jobs:
       - name: bandit（中危及以上，配置见 pyproject [tool.bandit]）
         run: uvx bandit -c pyproject.toml -r src scripts -ll
       - name: pip-audit（已知漏洞，含 dev 依赖）
-        run: uvx pip-audit --skip-editable
+        # 必须用 `uv run --with`：`uvx pip-audit` 会在**自己的临时环境**里跑，
+        # 扫到的是 pip-audit 的依赖树（实测 28 个包，含 pip-audit/rich/requests），
+        # 项目依赖（fastapi/uvicorn/httpx/cryptography）一个都不在内 —— 门一直是
+        # 绿的，但没有任何防线。`uv run --with` 注入项目 .venv，实测扫到 58 个包。
+        run: uv run --with pip-audit pip-audit --skip-editable
 
   frontend:
     runs-on: ubuntu-latest

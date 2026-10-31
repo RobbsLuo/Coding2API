@@ -40,3 +40,27 @@ def test_cipher_rejects_low_entropy_secret():
 def test_cipher_accepts_high_entropy_secret():
     """字符集足够大的长密钥正常通过。"""
     assert CredentialCipher("x9Q2mZ7pL4vT8wR1sK6n").encrypt(b"ok")
+
+
+def test_cipher_rejects_known_placeholder_secret():
+    """已知占位值必须直接拒启动，即使长度与熵都过关。
+
+    `local-dev-secret-change-me` 是 26 字符 / 15 种字符，`_looks_low_entropy`
+    放行；实测用它可解开真实库里的全部凭证（详见 `KNOWN_WEAK_SECRETS`）。
+    """
+    from src.db.crypto import KNOWN_WEAK_SECRETS, WeakSecretError
+
+    assert "local-dev-secret-change-me" in KNOWN_WEAK_SECRETS
+    for weak in KNOWN_WEAK_SECRETS:
+        with pytest.raises(WeakSecretError, match="placeholder"):
+            CredentialCipher(weak)
+
+
+def test_cipher_placeholder_check_ignores_case_and_whitespace():
+    """`.env` 里带引号/首尾空白也算命中，不能靠大小写绕过。"""
+    from src.db.crypto import WeakSecretError
+
+    for variant in ("  local-dev-secret-change-me  ",
+                    "LOCAL-DEV-SECRET-CHANGE-ME"):
+        with pytest.raises(WeakSecretError, match="placeholder"):
+            CredentialCipher(variant)

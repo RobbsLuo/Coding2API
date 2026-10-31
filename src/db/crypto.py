@@ -31,6 +31,22 @@ MIN_SECRET_LENGTH = 16
 # 无熵」的密钥同样能被秒破，单看长度拦不住。
 MIN_SECRET_DISTINCT_CHARS = 8
 
+# 已知占位值 / 示例值 / 常见弱口令：`.env.example` 与文档里出现过，或
+# 「够长且字符够杂」刚好骗过上面两条启发式。实测 `local-dev-secret-change-me`
+# （26 字符 / 15 种字符）能通过长度与熵检查，然后用它解开真实库的全部凭证。
+# 长度与熵是启发式，这里是**确定性的**兜底：命中即拒绝启动。
+KNOWN_WEAK_SECRETS = frozenset({
+    "local-dev-secret-change-me",
+    "change-me-please-change-me",
+    "please-change-me-change-me",
+    "changeme-change-me-1234",
+    "password123456789",
+    "secretsecretsecret",
+    "your-secret-key-here",
+    "replace-with-a-real-secret",
+    "development-secret-key",
+})
+
 
 def _looks_low_entropy(app_secret: str) -> bool:
     """长度够但熵极低：重复字符、整串是短周期重复、或字符集过小。"""
@@ -45,18 +61,38 @@ def _looks_low_entropy(app_secret: str) -> bool:
     return False
 
 
+def _is_known_weak(app_secret: str) -> bool:
+    """已知占位值 / 示例值（大小写与首尾空白不敏感）。
+
+    与 `_looks_low_entropy` 分开：那条是**统计特征**，这条是**已知名单**。
+    名单拦截的是「够长、字符够杂、但公开可查」的占位值——它们在任何熵指标上
+    都像真密钥，只有枚举才能识别。
+    """
+    return app_secret.strip().lower() in KNOWN_WEAK_SECRETS
+
+
 class WeakSecretError(ValueError):
     """APP_SECRET 过短（占位值/手滑），拒绝启动。"""
 
 
 class CredentialCipher:
-    def __init__(self, app_secret: str) -> None:
+    def __init__(self, app_secret: str, *, allow_known_weak: bool = False) -> None:
+        """`allow_known_weak=True` 只给**轮换脚本**用：它必须能用旧（可能已被
+        列入黑名单的）密钥解密存量数据，否则永远修不了。业务路径一律用默认值。
+        """
         if not app_secret:
             raise ValueError("APP_SECRET must not be empty")
         if len(app_secret) < MIN_SECRET_LENGTH:
             raise WeakSecretError(
                 f"APP_SECRET must be at least {MIN_SECRET_LENGTH} characters")
-        if _looks_low_entropy(app_secret):
+        if not allow_known_weak and _is_known_weak(app_secret):
+            # 已知占位值优先判：它比「低熵」更具体，文案能直接指向怎么修。
+            # 与 `.env.example` / 文档里的占位值同名：长度与熵都够，但公开可查。
+            # 用它加密等于把凭证交给任何读过本仓库的人。
+            raise WeakSecretError(
+                "APP_SECRET is a known placeholder/example value; generate a "
+                "real one (python -c \"import secrets;print(secrets.token_urlsafe(48))\")")
+        if not allow_known_weak and _looks_low_entropy(app_secret):
             raise WeakSecretError(
                 "APP_SECRET looks low-entropy (repeated/cyclic or too few "
                 f"distinct characters, need >= {MIN_SECRET_DISTINCT_CHARS})")

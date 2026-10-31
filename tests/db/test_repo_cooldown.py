@@ -80,6 +80,35 @@ def test_repo_account_cooldown_clears_model_entries(repo):
     assert db.connect().execute(
         "SELECT COUNT(*) AS c FROM credential_model_cooldowns").fetchone()["c"] == 0
 
+
+def test_repo_low_threshold_error_keeps_existing_cooldown(repo):
+    """低于阈值的 OTHER 错误（cooling_until=None）不得抹掉已有账号级冷却。
+
+    `note_error` 对低于阈值的 OTHER 返回 `ErrorOutcome(err_count=count)`，
+    `cooling_until` 是 None。原实现无条件 `SET cooling_until = ?`，于是两个
+    并发请求落在同一凭证时，后到的这次会把前一次刚写入的 RESTRICTED/SOFT
+    冷却（2h~7d）擦成 NULL，账号立刻回池继续撞上游风控。
+    """
+    credentials, db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.save_error(cid, ErrorOutcome(cooling_until=7200, err_count=1))
+    credentials.save_error(cid, ErrorOutcome(cooling_until=None, err_count=1))
+    row = db.connect().execute(
+        "SELECT cooling_until, err_count FROM credentials WHERE id = ?",
+        (cid,)).fetchone()
+    assert row["cooling_until"] == 7200      # 冷却保留
+    assert row["err_count"] == 1             # 计数照常更新
+
+
+def test_repo_new_cooldown_overwrites_older(repo):
+    """显式给冷却时照常覆盖（COALESCE 只拦 None，不影响正常升级）。"""
+    credentials, db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.save_error(cid, ErrorOutcome(cooling_until=7200, err_count=1))
+    credentials.save_error(cid, ErrorOutcome(cooling_until=9999, err_count=0))
+    assert db.connect().execute(
+        "SELECT cooling_until FROM credentials WHERE id = ?", (cid,)).fetchone()[0] == 9999
+
 def test_repo_save_success_clears_blocked_only(repo):
     """成功清除 negative cache，但不清 6004 模型级限流（对齐上游重置）。"""
     from src.engine.scheduler import ModelCooldown

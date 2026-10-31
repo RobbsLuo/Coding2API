@@ -225,6 +225,60 @@ def test_unlimited_key_is_untouched(client, app):
         assert _chat(client, created["api_key"]).status_code == 200
 
 
+# ------------------------------------------------ 用户级配额（/v1 也要判）
+
+def test_user_quota_applies_to_v1_even_with_unlimited_key(client, app):
+    """管理员按人设的配额必须在 `/v1` 生效。
+
+    自助建 Key 时配额由本人填写，只看 Key 自己的 quota 就等于让用户造一把
+    空配额的 Key 绕开人均配额（Playground 早已判，`/v1` 原来漏了）。
+    """
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    app.state.user_repo.set_policy("root", allowed_models="",
+                                   quota=json.dumps({"daily_requests": 1}))
+    created = _key(app)                       # Key 本身不限额
+    _record_via_collector(app, created["id"])
+    blocked = _chat(client, created["api_key"])
+    assert blocked.status_code == 429
+    assert "user" in blocked.json()["error"]["message"]
+
+
+def test_user_quota_rpm_blocks_v1(client, app):
+    """用户级 rpm 同样作用于 /v1：换一把 Key 也不能绕过。"""
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    app.state.user_repo.set_policy("root", allowed_models="",
+                                   quota=json.dumps({"rpm": 1}))
+    first = _key(app)
+    second = _key(app)
+    assert _chat(client, first["api_key"]).status_code == 200
+    blocked = _chat(client, second["api_key"])   # 另一把 Key，同一用户
+    assert blocked.status_code == 429
+    assert "user" in blocked.json()["error"]["message"]
+
+
+def test_user_quota_release_returns_both_layers(client, app):
+    """两层租约必须同时归还：否则用户级并发名额会被自己占死。"""
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    app.state.user_repo.set_policy("root", allowed_models="",
+                                   quota=json.dumps({"max_concurrency": 1}))
+    created = _key(app)
+    for _ in range(3):        # 串行请求：每次都归还两层名额
+        assert _chat(client, created["api_key"]).status_code == 200
+    assert app.state.services.user_quota.inflight("root") == 0
+
+
+def test_user_quota_rejected_releases_key_slot(client, app):
+    """用户级拒绝时 Key 级的在途名额要立刻归还，不能泄漏。"""
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    app.state.user_repo.set_policy("root", allowed_models="",
+                                   quota=json.dumps({"max_concurrency": 1}))
+    created = _key(app, quota=json.dumps({"max_concurrency": 5}))
+    app.state.services.user_quota.admit("root", KeyQuota(max_concurrency=1))
+    blocked = _chat(client, created["api_key"])
+    assert blocked.status_code == 429
+    assert app.state.services.key_quota.inflight(created["id"]) == 0
+
+
 def test_dirty_quota_text_degrades_to_unlimited(client, app, caplog):
     app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
     created = _key(app, quota="{not json")

@@ -635,7 +635,7 @@ def test_stats_percentile_timeline(stats):
     collector.record(username="u", provider="trae", model="m", ok=True,
                      latency_ms=700, now=base + 2 * 3600)
 
-    result = query.percentile_timeline(username="u")
+    result = query.percentile_timeline(username="u", since=base)
     assert result["metric"] == "latency" and result["window_days"] == 90
     points = result["points"]
     assert [point["hour"] for point in points] == [base, base + 3600, base + 7200]
@@ -647,19 +647,45 @@ def test_stats_percentile_timeline(stats):
     # ttfb 口径：无 ttfb 数据 → 全 None
     assert all(point["p50"] is None
                for point in query.percentile_timeline(username="u",
+                                                      since=base,
                                                       metric="ttfb")["points"])
+
+
+def test_percentile_timeline_defaults_to_recent_window(stats):
+    """`since` 缺省必须收敛到最近 24h：否则会对 90 天明细全表跑窗口函数。
+
+    这条 SQL 带 `ROW_NUMBER() OVER (PARTITION BY 小时)`，无窗口时是全表排序；
+    任意登录用户（含 viewer）都能反复触发，是现成的 DB CPU DoS。
+    """
+    collector, query = stats
+    now = 1_700_000_000
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     latency_ms=100, now=now - 1000)      # 窗口内
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     latency_ms=900, now=now - 3 * 86400)  # 3 天前：默认窗口外
+    result = query.percentile_timeline(username="u", now=now)
+    samples = sum(point["samples"] for point in result["points"])
+    assert samples == 1, "默认窗口外（3 天前）的行不应参与统计"
 
 
 def test_stats_percentile_timeline_endpoint(admin_client):
     """percentile-timeline 端点：作用域与 metric 透传。"""
     _app, client = admin_client
     collector = client.app.state.stats_collector
+    # 默认窗口是最近 24h，写入时要给当前时刻，否则会被窗口过滤掉
     collector.record(username="root", provider="trae", model="m", ok=True,
                      latency_ms=500, ttfb_ms=120)
+
+    def _observed(body):
+        """取有样本的那个小时：默认窗口会补齐 24 个空小时（前端断线用）。"""
+        return next(point for point in body["points"] if point["samples"])
+
     body = client.get("/api/stats/percentile-timeline").json()
-    assert body["metric"] == "latency" and body["points"][0]["p50"] == 500
+    assert body["metric"] == "latency" and _observed(body)["p50"] == 500
     ttfb = client.get("/api/stats/percentile-timeline?metric=ttfb").json()
-    assert ttfb["metric"] == "ttfb" and ttfb["points"][0]["p95"] == 120
+    assert ttfb["metric"] == "ttfb" and _observed(ttfb)["p95"] == 120
+    # 默认窗口必须收敛（不再是对全表跑窗口函数）：24h 窗口按整点对齐最多 25 桶
+    assert len(body["points"]) <= 25
 
 def test_stats_model_timeline_metric_and_ttfb_rollup(stats):
     """model_timeline 指标切换 + ttfb 聚合进小时表（老库补列后可用）。"""

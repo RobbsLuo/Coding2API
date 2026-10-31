@@ -455,6 +455,12 @@ def test_upstream_auth_complete_endpoint_registered_and_guarded(admin_client):
         "provider": "codearts", "state": fake.state, "url": "http://127.0.0.1/cb?code=abc"})
     assert response.status_code == 200
     assert response.json()["status"] == "success"
+    # OAuth 落库必须写审计：否则「谁什么时候把号塞进池子」在审计页上查不到
+    # （手工导入 `credential.import` 一直有，登录进来的号原来完全缺失）。
+    credential_id = response.json()["credential_id"]
+    rows = app.state.services.audit.query(action="credential.import", limit=10)
+    assert any(row["target"] == credential_id
+               and "OAuth" in (row["detail"] or "") for row in rows)
     # 未注册该能力的渠道 → 400
     assert client.post("/api/auth/upstream/complete", json={
         "provider": "unknown", "state": "x", "url": "y"}).status_code == 400

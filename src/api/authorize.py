@@ -8,6 +8,7 @@ from html import escape
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
+from ..audit.actions import ACTION_CREDENTIAL_IMPORT
 from ..auth.session import SESSION_COOKIE, verify_session_token
 from ..compat.openai.errors import error_payload
 from ..provider.trae.callback import login_trace_id
@@ -182,6 +183,12 @@ def create_router(services: Services) -> APIRouter:
             provider="trae", credential_data=credential_data,
             nickname=str(credential_data.get("nickname") or ""),
             added_by=username)
+        # 审计：OAuth 落库的凭证与手工导入同 action，否则「谁什么时候把号
+        # 塞进池子」在审计页上只剩手工导入那一条（见 admin_auth 的
+        # `_record_oauth_import`，两边口径一致）。
+        services.audit.record(actor=username, action=ACTION_CREDENTIAL_IMPORT,
+                              target=credential_id,
+                              detail="上游 trae；来源 OAuth 回调")
         services.schedule_probe(credential_id)
         if _wants_html(request):
             return _page(200, "TRAE 登录成功",

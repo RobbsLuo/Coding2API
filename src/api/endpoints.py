@@ -150,13 +150,47 @@ async def dispatch_compat(
 
 def _admit_quota(request: Request, principal: ApiKeyPrincipal,
                  chat_request: ChatRequest) -> Lease:
-    """按 Key 配额准入；超限抛 `QuotaExceeded`，放行返回 Lease（不受限时不计数）。
+    """按 Key 配额 + 用户配额准入；超限抛 `QuotaExceeded`。
+
+    两层**同时**生效，缺一不可：
+    - `api_keys.quota`：这把 Key 自己被授予的上限；
+    - `users.quota`：管理员按人设的上限（自助建 Key 时由本人填写，所以不能
+      只看 Key 自己的配额，否则造一把空配额的 Key 即绕开人均配额）。
+
+    与 Playground 同一判据（`services.user_quota`，用量按**用户名**聚合）。
+    先判 Key 再判用户：两者都通过才计数，任一失败立即释放已占名额。
 
     不受限的 Key（配额全关）也返回 Lease——`counted=False`，`release()` 是
     空操作，调用方不必到处判空。
     """
-    return get_services(request).key_quota.admit(
-        principal.key_id, principal.quota, tokens=estimated_tokens(chat_request))
+    services = get_services(request)
+    tokens = estimated_tokens(chat_request)
+    lease = services.key_quota.admit(
+        principal.key_id, principal.quota, tokens=tokens)
+    # 用户级配额全关时 `admit` 直接返回 counted=False 的 Lease（不查库），
+    # 所以这里不必先判空——省一条分支，也省得两处口径分叉。
+    try:
+        user_lease = services.user_quota.admit(
+            principal.username, principal.user_quota, tokens=tokens, subject="user")
+    except QuotaExceeded:
+        lease.release()              # 用户级拒绝不该占着 Key 的并发名额
+        raise
+    return _CombinedLease(lease, user_lease)
+
+
+class _CombinedLease:
+    """Key 级 + 用户级两层配额的合成租约：`release()` 同时归还两层名额。
+
+    只实现调用方用到的那一个方法（`release`）——`counted` 之类的内部分支
+    调用方从不读，实现了反而是没人测的死代码。
+    """
+
+    def __init__(self, *leases) -> None:
+        self._leases = leases
+
+    def release(self) -> None:
+        for lease in self._leases:
+            lease.release()
 
 
 async def _release_when_done(frames, lease: Lease):

@@ -117,6 +117,10 @@ def test_authorize_completes_trae_login_end_to_end(tmp_path):
         # 响应与列表都不得泄漏 token
         assert "ACCESS" not in response.text
         assert "data_enc" not in listed[0]
+        # OAuth 回调落库必须留审计（与手工导入同 action）
+        rows = app.state.services.audit.query(action="credential.import", limit=10)
+        assert any(row["target"] == listed[0]["id"]
+                   and "OAuth" in (row["detail"] or "") for row in rows)
 
     # state 已消费，同一回调不可重放
     with TestClient(app) as replay:

@@ -504,7 +504,20 @@ def _is_blocked_webhook_host(host: str) -> bool:
         return False                    # 域名：写入期解析不了，交给投递前复核
     return (address.is_private or address.is_loopback
             or address.is_link_local or address.is_reserved
-            or address.is_multicast or address.is_unspecified)
+            or address.is_multicast or address.is_unspecified
+            # `is_private` 不覆盖 CGNAT 共享地址段 100.64.0.0/10（RFC 6598）：
+            # `ipaddress` 只对 10/8、172.16/12、192.168/16 等回 True。该段在
+            # 部分云厂商内是可达的内网地址（实测 100.100.100.200 能通），
+            # 不补这条就是 SSRF 绕过的现成口子。
+            or address in _CGNAT_SHARED
+            # 非 global 的地址一律拦：覆盖 198.18.0.0/15（基准测试段）、
+            # 203.0.113.0/24（文档段）等「保留但 is_private=False」的段。
+            or not address.is_global)
+
+
+#: RFC 6598 运营商级 NAT 共享地址段。单独列出是因为 `ipaddress` 的
+#: `is_private` / `is_global` 对它的判定随 Python 版本有过变化，写死更稳。
+_CGNAT_SHARED = ipaddress.ip_network("100.64.0.0/10")
 
 
 def blocked_webhook_host(url: str) -> bool:

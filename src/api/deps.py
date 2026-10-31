@@ -210,6 +210,10 @@ class ApiKeyPrincipal:
     # 与 Key 白名单**同时**生效（两个都要放行）。缺这层时用户自签一个空
     # 白名单的 Key 就能绕开管理员按人设的模型策略。
     user_allowed_models: str = ""
+    # 用户级配额（`users.quota`）：与 Key 配额**同时**生效。缺这层时用户自签
+    # 一把空配额的 Key 就能把管理员按人设的日配额整体绕过（Playground 已判，
+    # 而 /v1 原来只判 Key 自己的 quota）。
+    user_quota: KeyQuota = field(default_factory=KeyQuota)
     key_id: str = ""                # api_keys.id（Key 级配额与自助用量的归属）
     quota: KeyQuota = field(default_factory=KeyQuota)  # 该 Key 的配额（全关=不受限）
 
@@ -252,14 +256,16 @@ def _api_key_principal(services: Services, request: Request,
     if not ip_allowed(source, record.get("allowed_ips") or ""):
         raise ForbiddenError("source ip not allowed for this api key")
     # 用户级策略现读（与角色/禁用同一口径，不进 Cookie）：admin 按人设的模型
-    # 白名单必须在 /v1 也生效，否则用户自签 Key 即可绕开。取不到策略行按不限制
-    # 放行——与 Playground 的宽容读路径一致，脏数据不该把出口锁死。
+    # 白名单与配额都必须在 /v1 也生效，否则用户自签一把空策略的 Key 即可绕开。
+    # 取不到策略行按不限制放行——与 Playground 的宽容读路径一致，脏数据不该
+    # 把出口锁死。
     policy = services.user_repo.get(record["username"]) or {}
     principal = ApiKeyPrincipal(username=record["username"],
                                 provider_binding=record.get("provider_binding") or "",
                                 allowed_models=record.get("allowed_models") or "",
                                 user_allowed_models=str(
                                     policy.get("allowed_models") or ""),
+                                user_quota=load_key_quota(policy.get("quota")),
                                 key_id=record["id"],
                                 quota=load_key_quota(record.get("quota")))
     # 归属权只认鉴权结果（绝不读入站头）：统计写入经 contextvar 现读，

@@ -441,6 +441,74 @@ def test_change_password_rejects_short_new_password(tmp_path, monkeypatch):
     db.close()
 
 
+def test_change_password_runs_pbkdf2_off_the_event_loop(tmp_path, monkeypatch):
+    """PBKDF2 必须走线程池：同步执行会独占事件循环，SSE/健康检查全被拖住。
+
+    实测 10 次同步 `verify_password` 期间 1ms 心跳一次都没跑起来；20 并发改密
+    足以让容器探针判 unhealthy。登录路径早已用 `throttle.verify`，这里同口径。
+    """
+    monkeypatch.setenv("USERS_FILE", str(tmp_path / "none.txt"))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    db = Database(settings.db_path)
+    apply_schema(db.connect())
+    UserRepository(db).create("root", create_password_hash("rootpw"),
+                              role=ROLE_ADMIN, now=1)
+    token = create_session_token("root", SECRET, epoch=0)
+
+    from src.auth import throttle as throttle_module
+
+    calls: list[str] = []
+    real_to_thread = throttle_module.asyncio.to_thread
+
+    async def spy(func, *args):
+        calls.append(getattr(func, "__name__", "?"))
+        return await real_to_thread(func, *args)
+
+    monkeypatch.setattr(throttle_module.asyncio, "to_thread", spy)
+    app = build_app(settings)
+    with TestClient(app) as client:
+        client.cookies.set("coding2api_session", token)
+        response = client.post("/api/auth/password",
+                               json={"current_password": "rootpw",
+                                     "new_password": "brand-new-pw"})
+        assert response.status_code == 200
+    # 校验旧密码与生成新哈希都必须离开事件循环
+    assert "verify_password" in calls
+    assert "create_password_hash" in calls
+    db.close()
+
+
+def test_change_password_counts_failures_for_throttling(tmp_path, monkeypatch):
+    """猜当前密码要计入限流：会话被盗后不能无限次试。
+
+    与登录共用 `LoginThrottle` 的用户名窗口（max_per_user=5 / 60s），超限后
+    直接 429，不再跑 PBKDF2。
+    """
+    monkeypatch.setenv("USERS_FILE", str(tmp_path / "none.txt"))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    db = Database(settings.db_path)
+    apply_schema(db.connect())
+    UserRepository(db).create("root", create_password_hash("rootpw"),
+                              role=ROLE_ADMIN, now=1)
+    token = create_session_token("root", SECRET, epoch=0)
+
+    app = build_app(settings)
+    with TestClient(app) as client:
+        client.cookies.set("coding2api_session", token)
+        for _ in range(5):
+            response = client.post("/api/auth/password",
+                                   json={"current_password": "wrong",
+                                         "new_password": "brand-new-pw"})
+            assert response.status_code == 400
+        blocked = client.post("/api/auth/password",
+                              json={"current_password": "wrong",
+                                    "new_password": "brand-new-pw"})
+        assert blocked.status_code == 429
+    db.close()
+
+
 def test_login_response_exposes_role_and_flag(tmp_path, monkeypatch):
     monkeypatch.setenv("USERS_FILE", str(tmp_path / "none.txt"))
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),

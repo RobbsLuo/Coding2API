@@ -21,14 +21,60 @@
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import time
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
+from urllib.parse import urlsplit
 
 from .. import credential_fields
 from ..base import UpstreamProtocolViolation
 from .events import CLIENT_ID
+
+
+def validate_gateway_url(url: str) -> str:
+    """校验 `model_base_url`（模型网关地址）并归一化。
+
+    这个值有两处来源：上游 `client-permission-validate` 下发，以及**手工导入**
+    （`POST /api/credentials`，operator 即可写）。聊天把它拼成
+    `{gateway}/v2/chat/completions` 并带上 `Authorization: Basic
+    base64(app_key:app_secret)`，而 `model_app_secret` **不过期**。所以它是一张
+    能发到任意主机的长期凭据：不校验就等于给 operator 一个 SSRF 跳板
+    （`http://169.254.169.254` 探云元数据）外加把上游密钥递给任意主机。
+
+    口径（不做主机白名单：网关按账号/区域下发，写死域名会在上游变更时打断功能）：
+
+    - 必须 `https`——`http` 等于明文传长期密钥（本机调试也走 https 隧道）；
+    - 必须带主机名，且拒绝内网 / 回环 / 链路本地 / 保留地址（与告警 webhook
+      的 SSRF 口径一致，见 `runtime_settings._is_blocked_webhook_host`）；
+    - 域名不在此处解析（解析要 IO，且 DNS 可变）：字面量 IP 直接判，域名交给
+      运行期的出口校验。
+
+    只做校验，不改写存储形状——`/v2` 尾缀的归一仍由
+    `OfficeAceClient._gateway_of` 负责（两条导入路径形状不同，见那里）。
+    """
+    text = (url or "").strip().rstrip("/")
+    if not text:
+        raise UpstreamProtocolViolation("credential missing model_base_url (officeAce 网关地址)")
+    parts = urlsplit(text)
+    if parts.scheme != "https":
+        raise UpstreamProtocolViolation(
+            "model_base_url must use https:// (refusing to send credentials in clear text)")
+    host = (parts.hostname or "").strip().lower()
+    if not host:
+        raise UpstreamProtocolViolation("model_base_url has no host")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        if (address.is_private or address.is_loopback or address.is_link_local
+                or address.is_reserved or address.is_multicast
+                or address.is_unspecified or not address.is_global):
+            raise UpstreamProtocolViolation(
+                "model_base_url must not point at a private/loopback/reserved address")
+    return text
 
 
 @dataclass(slots=True)

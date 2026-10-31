@@ -43,7 +43,7 @@ from .. import naming
 from ..codearts.signer import sdk_date
 from ..lazy_clients import LazyClients
 from . import events as officeace_events
-from .credential import OfficeAceCredential, merge_refreshed
+from .credential import OfficeAceCredential, merge_refreshed, validate_gateway_url
 from .events import (
     EP_BONUS_CLAIM,
     EP_CHAT,
@@ -383,11 +383,14 @@ class OfficeAceClient(LazyClients):
         validate` 下发的是裸主机（`https://modelgw-xxx...`），而桌面端的
         `models.json` 里 `api_base` 自带 `/v2`。不归一就会拼出
         `/v2/v2/chat/completions`（实测 404）。
+
+        出口再校验一次（`validate_gateway_url`）：导入期的校验只覆盖新写入的
+        凭证，**升级前落库的旧行**没经过它，而这里每次请求都会走到。
         """
         base = (credential.model_base_url or self.gateway).rstrip("/")
         if base.endswith("/v2"):
             base = base[:-3]
-        return base
+        return validate_gateway_url(base)
 
     async def _v11_json(self, method: str, path: str,
                         credential: OfficeAceCredential,

@@ -13,6 +13,7 @@ from src.provider.officeace.credential import (
     _jwk_from_raw,
     merge_refreshed,
     parse_tokens,
+    validate_gateway_url,
 )
 from src.provider.officeace.events import CLIENT_ID
 from tests.provider.officeace._support import MOMENT
@@ -40,6 +41,20 @@ def test_from_dict_accepts_camel_case():
 def test_from_dict_rejects_non_object():
     with pytest.raises(UpstreamProtocolViolation):
         OfficeAceCredential.from_dict("nope")  # type: ignore[arg-type]
+
+
+def test_validate_gateway_url_rejects_empty():
+    with pytest.raises(UpstreamProtocolViolation):
+        validate_gateway_url("")
+    with pytest.raises(UpstreamProtocolViolation):
+        validate_gateway_url("   /  ")
+
+
+def test_validate_gateway_url_accepts_public_host():
+    """公网域名原样返回（不改写形状，`/v2` 归一在 `_gateway_of`）。"""
+    assert validate_gateway_url("https://gw.test/v2/") == "https://gw.test/v2"
+    # 公网字面量 IP 也放行（走 `else` 分支的条件为假）
+    assert validate_gateway_url("https://8.8.8.8/v2") == "https://8.8.8.8/v2"
 
 
 def test_from_dict_defaults_client_id():

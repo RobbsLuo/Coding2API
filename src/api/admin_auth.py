@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import inspect
 import ipaddress
+import logging
 import time
 from urllib.parse import parse_qs, urlparse
 
@@ -15,6 +16,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 
 from ..audit.actions import (
+    ACTION_CREDENTIAL_IMPORT,
     ACTION_LOGIN_FAILURE,
     ACTION_LOGIN_SUCCESS,
     ACTION_USER_PASSWORD_CHANGE,
@@ -30,6 +32,7 @@ from ..webapp.security import session_cookie_secure
 from .authorize import PENDING_CALLBACK_TTL_SECONDS
 from .deps import (
     SESSION_COOKIE,
+    Principal,
     Services,
     csrf_protected,
     origin_protected,
@@ -39,6 +42,8 @@ from .deps import (
 
 MIN_PASSWORD_LENGTH = 8
 ACTIVATION_TTL_SECONDS = 24 * 3600
+
+logger = logging.getLogger(__name__)
 
 
 # 浏览器打不开的基址主机：回环与通配监听。PUBLIC_BASE_URL 默认值就是
@@ -73,6 +78,22 @@ def _request_origin(request: Request) -> str:
         proto = request.url.scheme
     authority = request.headers.get("host", "") or request.url.netloc
     return f"{proto}://{authority}"
+
+
+def _record_oauth_import(services: Services, principal: Principal, provider_id: str,
+                         credential_id: str) -> None:
+    """OAuth 登录落库的审计行（与手工导入 `credential.import` 同一 action）。
+
+    三条 OAuth 路径（poll / 粘贴回调 / `/authorize`）原来都**不写审计**，于是
+    「谁什么时候把号塞进池子」只能从手工导入那一条回答——登录进来的号在审计
+    页上完全消失。这里统一补上，action 与手工导入一致，管理台的「导入凭证」
+    过滤能同时看到两条来源，detail 里区分渠道。
+    """
+    logger.info("管理员 %s 通过 OAuth 新增凭证 %s（上游 %s）",
+                principal.username, credential_id, provider_id)
+    services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_IMPORT,
+                          target=credential_id,
+                          detail=f"上游 {provider_id}；来源 OAuth 登录")
 
 
 def resolve_public_callback_url(settings: Settings,
@@ -222,6 +243,12 @@ def create_router(services: Services) -> APIRouter:
         """自助改密：当前密码 + 新密码。任意角色可用（首登强制改密也走这里）。
 
         当前密码必须正确：会话被盗时不能直接改密把主人锁在外面。
+
+        **PBKDF2 必须离开事件循环**：`verify_password` / `create_password_hash`
+        各 600k 迭代（实测单次约 45ms，两次近 100ms）。同步调用会独占事件循环
+        ——实测 10 次连续调用期间 1ms 心跳一次都没跑起来，20 并发改密足以让
+        SSE、`/health`、`/v1` 全部排队。登录路径早已用 `throttle.verify`
+        （线程池 + 信号量）躲开这个坑，这里必须同口径。
         """
         current = str(payload.get("current_password") or "")
         new_password = str(payload.get("new_password") or "")
@@ -229,10 +256,20 @@ def create_router(services: Services) -> APIRouter:
             raise InvalidRequest(
                 f"new password must be at least {MIN_PASSWORD_LENGTH} characters")
         row = services.user_repo.get(principal.username)
-        if row is None or not verify_password(current, row["password_hash"]):
+        # 复用登录限流器：它同时给出「线程池 + PBKDF2 并发上限」与「猜当前密码
+        # 的失败计数」。后者原先完全缺失——会话被盗后可无限次试当前密码。
+        # 这里可以**先查后验**（登录路径必须后查）：调用方已通过会话认证为该用户，
+        # 用户名窗口只会被他自己或攻击者用同一用户名抬高，与登录同口径接受。
+        throttle = services.login_throttle
+        source_ip = request_ip(request, services.settings)
+        throttle.check(ip=source_ip, username=principal.username)
+        verified = (row is not None and await throttle.verify(
+            verify_password, current, row["password_hash"]))
+        if not verified:
+            throttle.record_failure(ip=source_ip, username=principal.username)
             raise InvalidRequest("current password is incorrect")
-        services.user_repo.set_password(
-            principal.username, create_password_hash(new_password))
+        hashed = await throttle.verify(create_password_hash, new_password)
+        services.user_repo.set_password(principal.username, hashed)
         services.audit.record(actor=principal.username,
                               action=ACTION_USER_PASSWORD_CHANGE,
                               target=principal.username,
@@ -293,6 +330,7 @@ def create_router(services: Services) -> APIRouter:
         credential_id = services.credentials.add(
             provider=provider_id, credential_data=result.credential_data,
             nickname=result.nickname, added_by=principal.username)
+        _record_oauth_import(services, principal, provider_id, credential_id)
         services.schedule_probe(credential_id)
         return {"status": "success", "credential_id": credential_id}
 
@@ -351,6 +389,7 @@ def create_router(services: Services) -> APIRouter:
         credential_id = services.credentials.add(
             provider=provider_id, credential_data=result.credential_data,
             nickname=result.nickname, added_by=principal.username)
+        _record_oauth_import(services, principal, provider_id, credential_id)
         services.schedule_probe(credential_id)
         return {"status": "success", "credential_id": credential_id}
 

@@ -52,7 +52,7 @@ from ...tasks.pacer import paced
 from ..codearts import dpop
 from . import events as officeace_events
 from .client import OfficeAceClient
-from .credential import OfficeAceCredential
+from .credential import OfficeAceCredential, validate_gateway_url
 from .oauth import AuthStateStore
 
 
@@ -92,6 +92,9 @@ class OfficeAceProvider:
         if not credential.model_base_url:
             raise UpstreamProtocolViolation(
                 "credential missing model_base_url (officeAce 网关地址)")
+        # 网关地址是**长期**凭据的收件方（Basic app_key:app_secret 不过期），
+        # 手工导入时必须是 https 且不指向内网——见 `validate_gateway_url`。
+        validate_gateway_url(credential.model_base_url)
         # DPoP 私钥有效性在导入时校验：坏 JWK 只有到刷新才暴露，而那时用户
         # 已经以为登录成功了（`InvalidDPoPHeader` 只在 STS 端出现）。
         if credential.dpop_private_jwk:

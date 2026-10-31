@@ -1180,7 +1180,8 @@ class StatsQuery:
 
     def percentile_timeline(self, *, username: str | None = None,
                             since: int | None = None, until: int | None = None,
-                            metric: str = "latency") -> dict[str, Any]:
+                            metric: str = "latency",
+                            now: int | None = None) -> dict[str, Any]:
         """按小时的分位时序（P50 中位数 + P95 上界），读明细表。
 
         延迟图只画均值会盖住长尾：池级均值 10 s 时 P95 可能 40 s，而「少数请求
@@ -1191,10 +1192,17 @@ class StatsQuery:
         `latency`）；口径与分组表分位一致——只统计成功请求、nearest-rank
         （`⌈pct·n/100⌉`）、NULL 不参与排名。
 
+        `since` 缺省时强制「最近 24 小时」（与 `errors` 同口径）：这条 SQL 带
+        `ROW_NUMBER() OVER (PARTITION BY 小时)`，无窗口时会对 90 天明细全表做
+        窗口函数排序；**任意登录用户（含 viewer）**都能反复触发，是现成的 DB
+        CPU DoS。`now` 可注入（测试确定性），只在缺省时用于推算窗口。
+
         返回 `{"points": [{hour, p50, p95, samples}], "metric": ..., "window_days": 90}`；
         缺失小时补 None（前端断线，不画成 0）。`samples` 是该小时的样本数，
         前端可据此说明「该点样本很少」。
         """
+        if since is None:
+            since = (now if now is not None else int(time.time())) - ERROR_WINDOW_SECONDS
         column = "ttfb_ms" if metric == "ttfb" else "latency_ms"
         where, params = self._where(username=username, ok=1, since=since, until=until)
         clause = f"AND {where[6:]}" if where else ""

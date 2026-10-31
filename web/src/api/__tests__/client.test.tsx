@@ -128,6 +128,28 @@ describe("api client", () => {
     expect((error as ApiError).message).toBe("Bad Gateway");
   });
 
+  it("2xx 但不是 JSON 时抛错，不能把故障伪装成空数据", async () => {
+    // 反代 try_files 回落 SPA、网关截断都会返回 200 + HTML。若当成 `null`
+    // 成功返回，凭证页会显示「还没有凭证」、session 会判未登录——「请求挂了」
+    // 重新变成「没有数据」，正是本次要消灭的故障形态。
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("<html>index</html>", { status: 200 })),
+    );
+    const error = await api.credentials().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).code).toBe("invalid_response");
+    expect((error as ApiError).status).toBe(200);
+  });
+
+  it("合法的 null 响应体照常返回，不被误判成非 JSON", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("null", { status: 200 })),
+    );
+    await expect(api.credentials()).resolves.toBeNull();
+  });
+
   it("请求超时归一为 ApiError(timeout)，不把页面挂在 loading", async () => {
     vi.useFakeTimers();
     vi.stubGlobal(

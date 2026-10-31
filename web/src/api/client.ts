@@ -101,20 +101,26 @@ function timeoutGuard(init: RequestInit): {
 /**
  * 读响应体：非 JSON（反向代理 HTML 错误页、网关截断）时不抛 `SyntaxError`，
  * 否则真实的 HTTP 状态会被解析异常掩盖成「未知错误」。
+ *
+ * 返回 `undefined` 表示「响应体不是合法 JSON」——与 `null`（合法的 `null`
+ * 字面量）区分开，调用方据此在 2xx 上抛错而不是把故障当成功数据返回。
  */
+const NOT_JSON = Symbol("not-json");
+
 async function readBody(response: Response): Promise<unknown> {
   const text = await response.text();
   if (!text) return null;
   try {
     return JSON.parse(text) as unknown;
   } catch {
-    return null;
+    return NOT_JSON;
   }
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const guard = timeoutGuard(init);
   let response: Response;
+  let body: unknown;
   try {
     response = await fetch(path, {
       ...init,
@@ -128,6 +134,9 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       },
       credentials: "same-origin",
     });
+    // 读体也在超时窗口内：反代「头秒回、体挂住」时，只给 fetch 加超时
+    // 等于没加——定时器在响应头到达时就被 dispose 了，页面照样永久 loading。
+    body = await readBody(response);
   } catch (error) {
     // 超时归一为可展示的 ApiError；调用方主动取消（切页/翻页）原样上抛，
     // react-query 依赖它是 AbortError 来判定「取消」而非「失败」。
@@ -139,8 +148,6 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     guard.dispose();
   }
 
-  const body = await readBody(response);
-
   if (!response.ok) {
     if (isSessionExpiry(path, response.status)) notifyUnauthorized();
     const error = (body as { error?: { code?: string; message?: string } } | null)?.error;
@@ -148,6 +155,16 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
       response.status,
       error?.code ?? "unknown",
       error?.message || response.statusText || `HTTP ${response.status}`,
+    );
+  }
+  // 2xx 但不是 JSON：反代/网关的 HTML 错误页、被截断的响应。必须抛错，
+  // 不能把 `null` 当成功数据返回——那会让「请求挂了」重新伪装成「没有数据」
+  // （凭证页显示「还没有凭证」、session 判未登录），正是本次要消灭的故障形态。
+  if (body === NOT_JSON) {
+    throw new ApiError(
+      response.status,
+      "invalid_response",
+      "服务端返回了非 JSON 响应（可能是反向代理错误页），请检查服务是否正常。",
     );
   }
   return body as T;

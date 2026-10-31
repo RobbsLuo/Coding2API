@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 
 # 上传上限：备份是整库文件，正常几十 MB；512MB 足够兜住异常体积又不至于让
 # 单请求把内存吃光（FastAPI 的原始 body 读取是全量的）。
+# **必须与 `webapp/limits.BACKUP_UPLOAD_LIMIT` 同值**：中间件先于端点裁决，
+# 不同值时端点声称的 512MB 永远不可达，大库的「恢复备份」静默失效。
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 
 

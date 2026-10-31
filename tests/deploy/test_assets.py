@@ -954,11 +954,26 @@ def test_nginx_read_timeout_covers_longest_conversation():
 
 def test_nginx_body_limit_aligns_with_app_middleware():
     """两侧同值才能让超限统一由应用裁决（否则 nginx 先返回 HTML 形状的 413）。"""
-    from src.webapp.limits import DEFAULT_BODY_LIMIT
+    from src.webapp.limits import BACKUP_UPLOAD_LIMIT, DEFAULT_BODY_LIMIT
 
     text = NGINX_CONF.read_text(encoding="utf-8")
     expected = f"client_max_body_size {DEFAULT_BODY_LIMIT // (1024 * 1024)}m;"
     assert expected in text, f"nginx 上传上限应与应用对齐（{expected}）"
+    # 备份恢复是例外：端点 512MB，nginx 必须单独放宽，否则公网入口下永远 413
+    backup = f"client_max_body_size {BACKUP_UPLOAD_LIMIT // (1024 * 1024)}m;"
+    assert backup in text, f"备份恢复路径的上传上限应与应用对齐（{backup}）"
+
+
+def test_backup_upload_limit_matches_middleware():
+    """端点声明的上限必须真的可达：中间件先裁决，不同值即静默失效。"""
+    from src.api.admin_backups import MAX_UPLOAD_BYTES
+    from src.webapp.limits import BACKUP_UPLOAD_LIMIT, _body_limit
+
+    assert MAX_UPLOAD_BYTES == BACKUP_UPLOAD_LIMIT
+    assert _body_limit("/api/backups/restore") == BACKUP_UPLOAD_LIMIT
+    assert _body_limit("/api/backups/restore/") == BACKUP_UPLOAD_LIMIT
+    # 其余端点不受影响
+    assert _body_limit("/v1/chat/completions") != BACKUP_UPLOAD_LIMIT
 
 
 def test_nginx_uses_domain_placeholder_not_hardcoded_host():

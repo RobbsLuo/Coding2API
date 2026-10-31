@@ -351,8 +351,15 @@ class CredentialRepository:
                     "cooling_until = NULL WHERE id = ?",
                     (outcome.disabled_reason or "session dead", credential_id))
             else:
+                # `cooling_until = NULL` 的语义是「本次不动冷却」，不是「清掉冷却」：
+                # 低于阈值的 OTHER 类错误（`note_error` 返回 err_count=count、
+                # cooling_until=None）原来会无条件覆盖，把并发请求刚写入的
+                # RESTRICTED/SOFT 冷却（2h~7d）擦成 NULL，账号立刻回池继续撞。
+                # 与 `executor._note_upstream_error` 里 REQUEST 分支的顾虑同源。
+                # 要**主动解除**冷却走 `revive()` / `purge_expired_*`，不靠这里。
                 conn.execute(
-                    "UPDATE credentials SET cooling_until = ?, err_count = ? WHERE id = ?",
+                    "UPDATE credentials SET cooling_until = COALESCE(?, cooling_until), "
+                    "err_count = ? WHERE id = ?",
                     (outcome.cooling_until, outcome.err_count, credential_id))
             if outcome.cooling_until is not None:
                 _clear_model_cooldowns(conn, credential_id)

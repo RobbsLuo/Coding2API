@@ -89,6 +89,33 @@ def test_import_credential_requires_chat_fields(over, hint):
     assert hint in str(caught.value)
 
 
+@pytest.mark.parametrize("url", [
+    "http://gw.test",                       # 明文传长期密钥
+    "https://169.254.169.254",              # 云元数据
+    "https://127.0.0.1:8080",               # 回环
+    "https://10.0.0.9/v2",                  # 内网
+    "https://100.100.100.200",              # 共享地址段（is_global=False）
+    "ftp://gw.test",                        # 非 http(s)
+    "https://",                             # 无主机
+])
+def test_import_credential_rejects_unsafe_gateway(url):
+    """网关地址是长期凭据的收件方：手工导入必须 https 且不指向内网/保留地址。
+
+    不校验等于给 operator 一个 SSRF 跳板，并把不过期的 `model_app_secret`
+    递给任意主机（见 `validate_gateway_url`）。
+    """
+    with pytest.raises(UpstreamProtocolViolation):
+        OfficeAceProvider().import_credential(_importable(model_base_url=url))
+
+
+def test_import_credential_accepts_public_gateway():
+    """公网域名照常放行：网关按账号/区域下发，写死主机名会在上游变更时打断功能。"""
+    saved = OfficeAceProvider().import_credential(
+        _importable(model_base_url="https://modelgw-0004.officeace.cn-southwest-2"
+                                  ".huaweicloud-agentarts.com"))
+    assert saved["model_base_url"].startswith("https://modelgw-0004")
+
+
 def test_import_credential_validates_dpop_key():
     """坏 JWK 只有到刷新才暴露，而那时用户已以为登录成功。"""
     with pytest.raises(UpstreamProtocolViolation) as caught:

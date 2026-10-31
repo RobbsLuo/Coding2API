@@ -335,6 +335,31 @@ def test_blocked_webhook_host_covers_literal_and_resolved_paths(monkeypatch):
     assert blocked_webhook_host("https://unresolvable.example/x") is True
 
 
+def test_blocked_webhook_host_covers_non_global_ranges(monkeypatch):
+    """`is_private` 覆盖不到的段必须显式拦，否则是现成的 SSRF 口子。
+
+    `ipaddress.is_private` 对 CGNAT 共享段（100.64.0.0/10）与若干保留段返回
+    False；而这些地址在部分云厂商内是可达的内网（实测 100.100.100.200 能通）。
+    """
+    from src.runtime_settings import blocked_webhook_host
+
+    for url in ("http://100.64.0.1/hook",        # RFC 6598 CGNAT
+                "http://100.100.100.200/hook",   # 实测可达的云内地址
+                "http://198.18.0.1/hook",        # 基准测试段
+                "http://203.0.113.5/hook"):      # 文档段
+        assert blocked_webhook_host(url) is True, url
+
+    # 解析到这些段的域名同样拦
+    monkeypatch.setattr("src.runtime_settings.socket.getaddrinfo",
+                        lambda host, port: [(2, 1, 6, "", ("100.100.100.200", 0))])
+    assert blocked_webhook_host("https://cgnat.example/x") is True
+
+    # 公网地址照常放行（不误伤）
+    monkeypatch.setattr("src.runtime_settings.socket.getaddrinfo",
+                        lambda host, port: [(2, 1, 6, "", ("93.184.216.34", 0))])
+    assert blocked_webhook_host("https://hook.example/a") is False
+
+
 def test_env_webhook_url_is_validated_at_load(tmp_path):
     """env 提供的 ALERT_WEBHOOK_URL 也要过校验（不能只靠运行时失败兜底）。"""
     from src.db.repo import RuntimeSettingsRepository
