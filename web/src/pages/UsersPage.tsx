@@ -13,6 +13,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { Pagination } from "../components/Pagination";
 import { SortableHead } from "../components/SortableHead";
 import { DEFAULT_PAGE_SIZE } from "../lib/constants";
+import { errorText } from "../lib/errors";
 import {
   Badge,
   Button,
@@ -21,6 +22,7 @@ import {
   Input,
   Notice,
   Panel,
+  QueryErrorState,
   Select,
   Table,
   TableBody,
@@ -75,8 +77,8 @@ export function UsersPage() {
     { created_at: "desc", enabled: "desc" });
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const { data, isLoading, isFetching } = useUsers(session.username, sort, order,
-                                                   pageSize, page * pageSize);
+  const { data, isLoading, isError, error: queryError, refetch, isFetching } =
+    useUsers(session.username, sort, order, pageSize, page * pageSize);
   const [username, setUsername] = useState("");
   const [role, setRole] = useState<Role>("viewer");
   const [issued, setIssued] = useState<ActivationIssued | null>(null);
@@ -261,6 +263,13 @@ export function UsersPage() {
       >
         {isLoading ? (
           <PageSkeleton variant="table" rows={6} />
+        ) : isError ? (
+          <QueryErrorState
+            title="用户列表加载失败"
+            description={errorText(queryError, "拿不到用户列表，请稍后重试。")}
+            onRetry={() => void refetch()}
+            data-testid="users-error-state"
+          />
         ) : users.length === 0 ? (
           <EmptyState
             icon={<KeyRound className="size-5" />}

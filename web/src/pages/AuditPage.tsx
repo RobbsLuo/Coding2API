@@ -9,6 +9,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { Pagination } from "../components/Pagination";
 import { SortableHead } from "../components/SortableHead";
 import { DEFAULT_PAGE_SIZE } from "../lib/constants";
+import { errorText } from "../lib/errors";
 import {
   Badge,
   Button,
@@ -17,6 +18,7 @@ import {
   Input,
   Notice,
   Panel,
+  QueryErrorState,
   Select,
   Table,
   TableBody,
@@ -36,7 +38,7 @@ export function AuditPage() {
 
   // actor 用输入框，提交时才进查询（避免每敲一个字都打一次接口）
   const [actorDraft, setActorDraft] = useState("");
-  const { data, isLoading, isFetching } = useAudit(session.username, {
+  const { data, isLoading, isError, error, refetch, isFetching } = useAudit(session.username, {
     actor: actor || undefined,
     action: action || undefined,
     limit: pageSize,
@@ -134,6 +136,13 @@ export function AuditPage() {
       <Panel title={`记录${data ? `（本页 ${events.length} 条）` : ""}`} aria-label="审计记录">
         {isLoading ? (
           <PageSkeleton variant="table" rows={6} />
+        ) : isError ? (
+          <QueryErrorState
+            title="审计记录加载失败"
+            description={errorText(error, "拿不到审计记录；缺失的证据不等于没有操作，请重试。")}
+            onRetry={() => void refetch()}
+            data-testid="audit-error-state"
+          />
         ) : events.length === 0 ? (
           <EmptyState
             icon={<ScrollText className="size-5" />}

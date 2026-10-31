@@ -49,6 +49,7 @@ import type {
   UserStats,
   UserRow,
 } from "./types";
+import { isSessionExpiry, notifyUnauthorized } from "./unauthorized";
 
 export class ApiError extends Error {
   constructor(
@@ -61,25 +62,93 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    headers: {
-      // CSRF 纵深（服务端要求写请求带自定义头，PROPOSAL §6）：
-      // 浏览器跨站表单/简单请求无法携带自定义头
-      "X-Requested-With": "XMLHttpRequest",
-      ...(init.body ? { "Content-Type": "application/json" } : {}),
-      ...init.headers,
-    },
-    credentials: "same-origin",
-  });
+/**
+ * 管理台请求超时：后端挂死（连接池耗尽、上游不返回）时不能让页面永久 loading。
+ *
+ * 只作用于 `request()` 走的一般端点；SSE（`/api/stats/events/stream`）与 CSV
+ * 导出各有独立实现，不受此值影响（长流不能被 30s 砍断）。
+ */
+export const REQUEST_TIMEOUT_MS = 30_000;
 
+/** 把「调用方 signal（react-query 取消）」与「超时」合成一个 signal，并可清理定时器。 */
+function timeoutGuard(init: RequestInit): {
+  signal: AbortSignal;
+  dispose: () => void;
+  timedOut: () => boolean;
+} {
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, REQUEST_TIMEOUT_MS);
+  const external = init.signal;
+  const forward = () => controller.abort();
+  if (external) {
+    if (external.aborted) controller.abort();
+    else external.addEventListener("abort", forward, { once: true });
+  }
+  return {
+    signal: controller.signal,
+    dispose: () => {
+      clearTimeout(timer);
+      external?.removeEventListener("abort", forward);
+    },
+    timedOut: () => timedOut,
+  };
+}
+
+/**
+ * 读响应体：非 JSON（反向代理 HTML 错误页、网关截断）时不抛 `SyntaxError`，
+ * 否则真实的 HTTP 状态会被解析异常掩盖成「未知错误」。
+ */
+async function readBody(response: Response): Promise<unknown> {
   const text = await response.text();
-  const body = text ? (JSON.parse(text) as unknown) : null;
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+}
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const guard = timeoutGuard(init);
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      signal: guard.signal,
+      headers: {
+        // CSRF 纵深（服务端要求写请求带自定义头，PROPOSAL §6）：
+        // 浏览器跨站表单/简单请求无法携带自定义头
+        "X-Requested-With": "XMLHttpRequest",
+        ...(init.body ? { "Content-Type": "application/json" } : {}),
+        ...init.headers,
+      },
+      credentials: "same-origin",
+    });
+  } catch (error) {
+    // 超时归一为可展示的 ApiError；调用方主动取消（切页/翻页）原样上抛，
+    // react-query 依赖它是 AbortError 来判定「取消」而非「失败」。
+    if (guard.timedOut()) {
+      throw new ApiError(0, "timeout", `请求超时（${REQUEST_TIMEOUT_MS / 1000} 秒）`);
+    }
+    throw error;
+  } finally {
+    guard.dispose();
+  }
+
+  const body = await readBody(response);
 
   if (!response.ok) {
+    if (isSessionExpiry(path, response.status)) notifyUnauthorized();
     const error = (body as { error?: { code?: string; message?: string } } | null)?.error;
-    throw new ApiError(response.status, error?.code ?? "unknown", error?.message ?? response.statusText);
+    throw new ApiError(
+      response.status,
+      error?.code ?? "unknown",
+      error?.message || response.statusText || `HTTP ${response.status}`,
+    );
   }
   return body as T;
 }

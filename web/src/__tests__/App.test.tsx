@@ -1,10 +1,11 @@
-import { render, screen, waitFor, within } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { App } from "../App";
 import { Layout } from "../Layout";
+import { notifyUnauthorized } from "../api/unauthorized";
 
 function renderWithProviders(ui: React.ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -194,6 +195,33 @@ describe("App 路由守卫", () => {
     );
     renderWithProviders(<App />);
     expect(await screen.findByTestId("credentials-page")).toBeInTheDocument();
+  });
+
+  it("会话过期（任意页面 401）后回到登录页，而不是停在错误态", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "/api/auth/session") {
+          return new Response(JSON.stringify({
+            username: "root", is_admin: true, is_operator: true, role: "admin",
+            must_change_password: false,
+          }), { status: 200 });
+        }
+        if (url === "/api/nav-badges") return new Response(JSON.stringify({}), { status: 200 });
+        return new Response(JSON.stringify({ credentials: [], viewer: "root", is_admin: true }), {
+          status: 200,
+        });
+      }),
+    );
+    renderWithProviders(<App />);
+    expect(await screen.findByTestId("credentials-page")).toBeInTheDocument();
+
+    // 模拟「停留期间会话被撤销」：某次请求 401 → client 通知 → App 清缓存回登录
+    await act(async () => notifyUnauthorized());
+
+    expect(await screen.findByTestId("login-username")).toBeInTheDocument();
+    expect(screen.queryByTestId("credentials-page")).not.toBeInTheDocument();
   });
 
   it("会话加载中显示载入提示", () => {

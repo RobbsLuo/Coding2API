@@ -40,6 +40,7 @@ import {
   Input,
   Notice,
   Panel,
+  QueryErrorState,
   Select,
   Table,
   TableBody,
@@ -565,7 +566,7 @@ export function ApiKeysPage() {
   const { sort, order, toggle } = useSort("created_at", "asc", { last_used_at: "desc" });
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const { data, isLoading, isFetching } = useApiKeys(undefined, sort, order,
+  const { data, isLoading, isError, error: queryError, refetch, isFetching } = useApiKeys(undefined, sort, order,
                                                      pageSize, page * pageSize);
   const client = useQueryClient();
   // 换排序 = 换数据集：回到第一页，避免停在越界页码上（空白）
@@ -720,6 +721,13 @@ export function ApiKeysPage() {
       >
         {isLoading ? (
           <PageSkeleton variant="table" rows={4} />
+        ) : isError ? (
+          <QueryErrorState
+            title="API Key 列表加载失败"
+            description={errorText(queryError, "拿不到 API Key 列表，请稍后重试。")}
+            onRetry={() => void refetch()}
+            data-testid="api-keys-error-state"
+          />
         ) : keys.length === 0 ? (
           <EmptyState
             icon={<KeyRound className="size-5" />}

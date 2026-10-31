@@ -9,7 +9,7 @@ import { useSessionContext } from "../Layout";
 import type { RuntimeSetting, TaskRunResult, TaskStatus } from "../api/types";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { Badge, Button, Card, EmptyState, Field, Input, Notice, Panel, Select, Tabs } from "../ui";
+import { Badge, Button, Card, EmptyState, Field, Input, Notice, Panel, QueryErrorState, Select, Tabs } from "../ui";
 
 /** 网关卡在 tabs 里的值：加前缀避免与任务 key 撞车（如任务与分组同名）。 */
 const groupTabValue = (key: string) => `gateway-${key}`;
@@ -250,7 +250,8 @@ function TaskCard({
 
 export function SettingsPage() {
   const session = useSessionContext();
-  const { data, isLoading } = useSettings(session.username);
+  const { data, isLoading, isError, error: settingsError, refetch } =
+    useSettings(session.username);
   const tasksQuery = useTasks(session.username);
   const runTask = useRunTask(session.username);
   const client = useQueryClient();
@@ -481,6 +482,13 @@ export function SettingsPage() {
         )}
         {isLoading ? (
           <PageSkeleton variant="table" rows={5} />
+        ) : isError ? (
+          <QueryErrorState
+            title="运行时配置加载失败"
+            description={errorText(settingsError, "拿不到运行时配置，请稍后重试。")}
+            onRetry={() => void refetch()}
+            data-testid="settings-error-state"
+          />
         ) : settings.length === 0 ? (
           <EmptyState
             icon={<SlidersHorizontal className="size-5" />}

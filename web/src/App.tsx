@@ -1,7 +1,9 @@
-import { lazy, Suspense } from "react";
+import { useEffect, lazy, Suspense } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
+import { useQueryClient } from "@tanstack/react-query";
 import { Layout } from "./Layout";
 import { useSession } from "./api/hooks";
+import { setUnauthorizedHandler } from "./api/unauthorized";
 import { ChangePasswordDialog } from "./components/ChangePasswordDialog";
 import { FirstRunWizard } from "./components/FirstRunWizard";
 import { ActivatePage } from "./pages/ActivatePage";
@@ -48,6 +50,22 @@ function RequireOperator({ isOperator, children }: {
 
 export function App() {
   const session = useSession();
+  const queryClient = useQueryClient();
+
+  // 会话过期（任意页面请求 401）→ 清掉带权限的缓存并让 session 立即变「未登录」，
+  // 下面的分支随之渲染登录页。不做整页跳转：路由本来就跟 session 数据走，
+  // 而 window.location 跳转会丢 SPA 状态且绕开 MemoryRouter（测试里也会炸）。
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      // 只丢受保护数据，保留 session key 并显式置空：删掉 session 查询会让
+      // observer 立刻重取，而 Cookie 已经失效，等于白发一次 401 请求。
+      queryClient.removeQueries({
+        predicate: (query) => query.queryKey[0] !== "session",
+      });
+      queryClient.setQueryData(["session"], null);
+    });
+    return () => setUnauthorizedHandler(null);
+  }, [queryClient]);
 
   if (session.isLoading) {
     return LOADING;

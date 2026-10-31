@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError } from "../client";
+import { api, ApiError, REQUEST_TIMEOUT_MS } from "../client";
+import { setUnauthorizedHandler } from "../unauthorized";
 
 describe("api client", () => {
   beforeEach(() => {
@@ -109,5 +110,91 @@ describe("api client", () => {
       "/api/upstream-status",
       expect.objectContaining({ credentials: "same-origin" }),
     );
+  });
+
+  it("错误体不是 JSON（反代 HTML 页）时仍保留真实 HTTP 状态", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("<html>502 Bad Gateway</html>", {
+        status: 502,
+        statusText: "Bad Gateway",
+      })),
+    );
+    const error = await api.credentials().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(502);
+    expect((error as ApiError).code).toBe("unknown");
+    // 兜底文案不能是空串：至少给 statusText，页面才不会弹一个空白提示
+    expect((error as ApiError).message).toBe("Bad Gateway");
+  });
+
+  it("请求超时归一为 ApiError(timeout)，不把页面挂在 loading", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        })),
+    );
+    // 先挂上断言再推进定时器：否则 rejection 先发生、处理器后挂上，
+    // vitest 会把这次「超时」记成未处理拒绝（假报错）。
+    const assertion = expect(api.credentials()).rejects.toMatchObject({
+      name: "ApiError",
+      status: 0,
+      code: "timeout",
+    });
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS);
+    await assertion;
+    vi.useRealTimers();
+  });
+
+  it("调用方主动取消时原样上抛 AbortError（不被误判为超时）", async () => {
+    const controller = new AbortController();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        })),
+    );
+    const pending = api.playgroundModels(controller.signal);
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("受保护端点 401 触发会话过期处理器", async () => {
+    const handler = vi.fn();
+    setUnauthorizedHandler(handler);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ error: { code: "unauthorized" } }), { status: 401 }),
+      ),
+    );
+
+    await expect(api.users()).rejects.toMatchObject({ status: 401 });
+    expect(handler).toHaveBeenCalledTimes(1);
+    setUnauthorizedHandler(null);
+  });
+
+  it("登录/会话端点的 401 不触发会话过期（密码错不该踢人）", async () => {
+    const handler = vi.fn();
+    setUnauthorizedHandler(handler);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response(JSON.stringify({ error: { code: "unauthorized" } }), { status: 401 }),
+      ),
+    );
+
+    await expect(api.login("root", "wrong")).rejects.toMatchObject({ status: 401 });
+    await expect(api.session()).rejects.toMatchObject({ status: 401 });
+    expect(handler).not.toHaveBeenCalled();
+    setUnauthorizedHandler(null);
   });
 });

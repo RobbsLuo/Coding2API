@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { ChevronDown, Inbox } from "lucide-react";
+import { ChevronDown, Inbox, TriangleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button as ShadButton } from "@/components/ui/button";
 import { Badge as ShadBadge } from "@/components/ui/badge";
@@ -420,6 +420,45 @@ export function EmptyState({
       )}
       {action && <div className="mt-1">{action}</div>}
     </div>
+  );
+}
+
+/**
+ * 取数失败态：与 `EmptyState` 视觉与文案都区分开。
+ *
+ * 页面把「请求失败」渲染成「还没有数据」会把故障讲成空数据（审计页尤其危险：
+ * 缺证据和没有记录看起来一样），所以失败必须有自己的图标、文案与重试入口。
+ */
+export function QueryErrorState({
+  title = "数据加载失败",
+  description,
+  onRetry,
+  className,
+  ...rest
+}: {
+  title?: string;
+  description?: string;
+  onRetry?: () => void;
+  className?: string;
+} & React.HTMLAttributes<HTMLDivElement>) {
+  return (
+    <EmptyState
+      {...rest}
+      role="alert"
+      className={cn("text-destructive", className)}
+      icon={<TriangleAlert className="size-5" />}
+      title={title}
+      description={
+        description ?? "请稍后重试；若持续失败，到「服务端日志与告警」查看后端原因。"
+      }
+      action={
+        onRetry ? (
+          <Button size="sm" onClick={onRetry}>
+            重试
+          </Button>
+        ) : undefined
+      }
+    />
   );
 }
 
