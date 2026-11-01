@@ -93,21 +93,36 @@ jobs:
         run: docker compose config --quiet
         env:
           APP_SECRET: ci-placeholder-secret
-      - name: 校验 compose 公网覆盖文件语法（Caddy 入口）
-        run: docker compose -f docker-compose.yml -f docker-compose.public.yml config --quiet
+      - name: 校验 compose 公网覆盖文件语法（Caddy 入口，两种 TLS 模式）
         env:
           APP_SECRET: ci-placeholder-secret
-          PUBLIC_DOMAIN: ai-api.example.com
-          ACME_EMAIL: ops@example.com
-      - name: 校验 Caddyfile 语法
+        run: |
+          # acme（域名）：PUBLIC_DOMAIN + ACME_EMAIL
+          PUBLIC_DOMAIN=ai-api.example.com ACME_EMAIL=ops@example.com \
+            docker compose -f docker-compose.yml -f docker-compose.public.yml config --quiet
+          # internal（公网 IP、自签）：不设 ACME_EMAIL——自签模式用不到，必须能拼出来
+          PUBLIC_DOMAIN=203.0.113.10 TLS_MODE=internal \
+            docker compose -f docker-compose.yml -f docker-compose.public.yml config --quiet
+          # 缺 PUBLIC_DOMAIN 必须报错（覆盖文件里 :? 断言的回归保护）
+          if docker compose -f docker-compose.yml -f docker-compose.public.yml config --quiet 2>/dev/null; then
+            echo "::error::缺 PUBLIC_DOMAIN 时 compose 本应报错，却通过了"
+            exit 1
+          fi
+      - name: 校验 Caddyfile 语法（域名 / 自签两种模式）
         run: |
           # 只 validate、不起服务：占位域名不申请证书（validate 不联网签发）
-          docker run --rm \
-            -e PUBLIC_DOMAIN=ai-api.example.com \
-            -e ACME_EMAIL=ops@example.com \
-            -e PORT=8000 \
-            -v "$PWD/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
-            caddy:2.11.7-alpine caddy validate --config /etc/caddy/Caddyfile
+          for mode in acme internal; do
+            case "$mode" in
+              acme)     domain=ai-api.example.com; email=ops@example.com ;;
+              # 自签模式站址是公网 IP，且刻意不传 ACME_EMAIL（tls_internal 片段不引用它）
+              internal) domain=203.0.113.10;       email= ;;
+            esac
+            docker run --rm \
+              -e PUBLIC_DOMAIN="$domain" -e ACME_EMAIL="$email" \
+              -e PORT=8000 -e TLS_MODE="$mode" \
+              -v "$PWD/deploy/caddy:/etc/caddy:ro" \
+              caddy:2.11.7-alpine caddy validate --config /etc/caddy/Caddyfile
+          done
       - name: 构建镜像并启动（验证 compose 可真实运行）
         run: |
           mkdir -p data secrets

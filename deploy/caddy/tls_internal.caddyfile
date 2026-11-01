@@ -1,0 +1,11 @@
+# TLS 模式 internal（TLS_MODE=internal）：站点地址是公网 IP、没有域名时用。
+#
+# 由 deploy/caddy/Caddyfile 的站点块 import。Caddy 用自带 CA 自签证书：
+# 链路加密，但证书不在任何公共信任库里——浏览器告警，命令行客户端要 `-k`
+# 或把根证书装进客户端信任（根证书在 caddy_data 卷里：
+# `/data/pki/authorities/local/root.crt`）。
+#
+# 想要**被信任**的证书又没有自己的域名：把 PUBLIC_DOMAIN 填成 sslip.io / nip.io
+# 这类公共通配 DNS 名（如 `203-0-113-10.sslip.io`，它解析到 203.0.113.10），
+# 不用改模式、Caddy 照常走 ACME。详见 README「公网部署（Docker）」。
+tls internal

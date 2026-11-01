@@ -1,21 +1,35 @@
 # 公网入口（Docker）：Caddy 终止 TLS，反代到同网络的 coding2api:PORT。
 #
 # 由 `docker compose -f docker-compose.yml -f docker-compose.public.yml` 启动，
-# 环境变量来自 compose（PUBLIC_DOMAIN / ACME_EMAIL / PORT，见 .env）。
+# 环境变量来自 compose（PUBLIC_DOMAIN / ACME_EMAIL / TLS_MODE / PORT，见 .env）。
 # 证书与 ACME 账号落 /data（compose 具名卷 caddy_data）——**别 `down -v`**，
 # 清掉会重新申请，撞 Let's Encrypt 每周同域名 5 次的下发限额。
 #
-# 本地校验语法（不起服务）：
+# TLS 两种模式（站点块首行按 TLS_MODE 二选一 import）：
+#   - acme（默认）：站点地址是域名（或 sslip.io / nip.io 这类通配 DNS 名）→
+#     自动向 Let's Encrypt 申请 / 续期，ACME_EMAIL 收到期通知。
+#   - internal：站点地址是**公网 IP**、没有域名 → Caddy 用自带 CA 自签。
+#     证书浏览器不认（告警 / 需 `curl -k` 或装根证书），但链路仍是加密的。
+#     Caddy 对 IP 站点地址本来就不会走 ACME，`tls internal` 只是显式声明。
+#
+# 本地校验语法（不起服务、不联网签发）：
 #   docker run --rm -e PUBLIC_DOMAIN=ai-api.example.com -e ACME_EMAIL=ops@example.com \
-#     -e PORT=8000 -v "$PWD/deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro" \
+#     -e PORT=8000 -e TLS_MODE=acme -v "$PWD/deploy/caddy:/etc/caddy:ro" \
 #     caddy:2.11.7-alpine caddy validate --config /etc/caddy/Caddyfile
+
 {
-	# Let's Encrypt 到期通知收件人；compose 侧已要求必填（留空时 email 指令会少参数报错）
-	email {$ACME_EMAIL}
+	# 无 SNI 的客户端要有个默认站点名来选证书。浏览器与 curl 对 **IP 字面量**
+	# 一律不发 SNI（RFC 6066 只允许主机名），自签模式（站点是公网 IP）没有这行
+	# 握手会直接失败（客户端只看到 `tlsv1 alert internal error`）。
+	default_sni {$PUBLIC_DOMAIN}
 }
 
 {$PUBLIC_DOMAIN} {
-	# /metrics 无鉴权，公网入口直接摘掉，需要时从宿主 127.0.0.1:${PORT} 直取
+	# tls_acme.caddyfile：issuer acme + ACME_EMAIL；tls_internal.caddyfile：tls internal
+	import /etc/caddy/tls_{$TLS_MODE}.caddyfile
+
+	# /metrics 默认无鉴权（可选 METRICS_TOKEN，见 .env.example），公网入口直接摘掉，
+	# 需要时从宿主 127.0.0.1:${PORT} 直取（或自己按令牌放行）。
 	@metrics path /metrics
 	respond @metrics 404
 
@@ -28,7 +42,8 @@
 		# 关掉响应缓冲：逐帧下发，否则流式首字要等到缓冲区满
 		flush_interval -1
 		# 客户端可自带 XFF 伪造来源 IP（API Key 的 allowed_ips）：只认直连对端，
-		# 覆盖式写入单值。TRUST_PROXY=true 才让应用采信它。
+		# 覆盖式写入单值（Caddy 默认也会忽略入站 X-Forwarded-For，这行是显式挡一层）。
+		# TRUST_PROXY=true 才让应用采信它。
 		header_up X-Forwarded-For {http.request.remote.host}
 		header_up X-Forwarded-Proto {scheme}
 		transport http {

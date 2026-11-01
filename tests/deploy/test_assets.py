@@ -1048,3 +1048,146 @@ def test_install_frpc_renders_placeholders_and_installs_agent():
     assert 'TOKEN_FILE="$ROOT/secrets/frpc-token"' in text
     assert "umask 077" in text, "token 文件必须按 600 落盘"
     assert INSTALL_FRPC.stat().st_mode & 0o111, "安装脚本必须可执行"
+
+
+# ------------------------------------------------- 公网部署（Docker + Caddy 自动 HTTPS）
+#
+# 有公网 IP 的 VPS 用覆盖文件在基础 compose 上叠一个 Caddy 入口：Caddy 终止 TLS、
+# 应用端口只绑回环、证书长期落具名卷。这里锁死的是「改了就出事且 CI 不一定报」
+# 的不变量：回环绑定（不给明文旁路）、ALLOWED_HOSTS 补回环（否则 healthcheck
+# 永远 400 → 应用永远 unhealthy → Caddy 永远不启动）、XFF 覆盖式写入（否则
+# 客户端可伪造来源 IP 绕过 Key 的 allowed_ips）、default_sni（否则 IP 字面量
+# 客户端握手直接失败）。
+
+PUBLIC_COMPOSE = ROOT / "docker-compose.public.yml"
+CADDY_DIR = ROOT / "deploy" / "caddy"
+CADDYFILE = CADDY_DIR / "Caddyfile"
+CADDYFILE_ACME = CADDY_DIR / "tls_acme.caddyfile"
+CADDYFILE_INTERNAL = CADDY_DIR / "tls_internal.caddyfile"
+
+
+def test_public_compose_needs_compose_tls_override_tag():
+    """`!override` 需要 Compose ≥ 2.24；老版本读不懂会直接报错。"""
+    text = PUBLIC_COMPOSE.read_text(encoding="utf-8")
+    assert "ports: !override" in text, "替换基础 compose 的端口映射必须用 !override"
+    assert "2.24" in text, "依赖的 Compose 最低版本要写在文件头注释里"
+
+
+def test_public_compose_binds_app_port_to_loopback_only():
+    """应用端口只绑 127.0.0.1：绑 0.0.0.0 会留一条明文 http 旁路。
+
+    TRUST_PROXY=true 后直连还能自带伪造的 X-Forwarded-For 绕过 Key 的
+    allowed_ips，所以这条旁路必须彻底关掉。
+    """
+    text = PUBLIC_COMPOSE.read_text(encoding="utf-8")
+    assert '"127.0.0.1:${PORT:-8000}:${PORT:-8000}"' in text
+    bindings = re.findall(r'^\s+-\s+"?([^"\n]*\$\{PORT[^"\n]*)"?$', text, re.MULTILINE)
+    assert bindings, "覆盖文件里应有应用端口映射"
+    assert not [b for b in bindings if b.startswith("0.0.0.0:")], \
+        f"应用端口不得绑 0.0.0.0（明文旁路）: {bindings}"
+
+
+def test_public_compose_trusts_proxy_and_pins_allowed_hosts():
+    """HOST/PORT 重心、ALLOWED_HOSTS 必须显式补域名与回环。
+
+    非空即「完全替换」语义：漏掉域名 → 全站 400 invalid host header；
+    漏掉 127.0.0.1 → 容器 healthcheck 判 400 → 永远 unhealthy，
+    而 Caddy `depends_on: service_healthy` 也就永远不启动。
+    """
+    text = PUBLIC_COMPOSE.read_text(encoding="utf-8")
+    assert 'TRUST_PROXY: "true"' in text
+    assert "HOST: 0.0.0.0" in text
+    allowed = re.search(r"^\s+ALLOWED_HOSTS: (.+)$", text, re.MULTILINE)
+    assert allowed, "覆盖文件必须显式覆盖 ALLOWED_HOSTS"
+    value = allowed.group(1)
+    assert "${PUBLIC_DOMAIN:?" in value and "127.0.0.1" in value, value
+
+
+def test_public_compose_does_not_require_acme_email_for_self_signed_mode():
+    """ACME_EMAIL 只在域名模式必填：自签模式（公网 IP）用不到它。
+
+    要求写成 `${ACME_EMAIL:-}`（可空）——写成 `${ACME_EMAIL:?}` 会让「没有域名」
+    的部署也必须编一个邮箱，而 tls_internal 片段根本不引用它。
+    """
+    text = PUBLIC_COMPOSE.read_text(encoding="utf-8")
+    assert "${ACME_EMAIL:-}" in text
+    assert "${ACME_EMAIL:?" not in text, "自签模式不该被 ACME_EMAIL 卡住"
+    assert "TLS_MODE: ${TLS_MODE:-acme}" in text, "TLS_MODE 默认必须是 acme"
+
+
+def test_public_compose_requires_public_domain():
+    text = PUBLIC_COMPOSE.read_text(encoding="utf-8")
+    assert "${PUBLIC_DOMAIN:?" in text, "缺 PUBLIC_DOMAIN 必须直接失败，不能静默用默认值"
+
+
+def test_public_compose_mounts_whole_caddy_dir_and_cert_volumes():
+    """整个 deploy/caddy 必须挂进去（站点块要按 TLS_MODE import 片段）。"""
+    text = PUBLIC_COMPOSE.read_text(encoding="utf-8")
+    assert "./deploy/caddy:/etc/caddy:ro" in text
+    assert "caddy_data:/data" in text and "caddy_config:/config" in text
+    # 证书落具名卷才不随重建重新签发（撞 Let's Encrypt 每周 5 次限额）
+    assert re.search(r"^volumes:\s*$", text, re.MULTILINE)
+
+
+def test_public_compose_waits_for_healthy_app_and_rotates_caddy_logs():
+    text = PUBLIC_COMPOSE.read_text(encoding="utf-8")
+    assert re.search(r"coding2api:\s*\n\s+condition: service_healthy", text), \
+        "Caddy 必须等应用 healthy，否则预热期持续 502"
+    assert 'max-size: "10m"' in text, "Caddy 也要有 json-file 日志上限（默认无上限）"
+    assert 'max-file: "5"' in text
+
+
+def test_caddyfile_hides_metrics_and_streams_sse():
+    text = CADDYFILE.read_text(encoding="utf-8")
+    assert "@metrics path /metrics" in text and "respond @metrics 404" in text
+    assert "flush_interval -1" in text, "不关响应缓冲会让流式首字等到缓冲区满"
+    assert "encode zstd gzip" in text
+
+
+def test_caddyfile_overwrites_forwarded_for_and_proto():
+    """客户端可自带伪造的 X-Forwarded-For：必须覆盖式写入单值。"""
+    text = CADDYFILE.read_text(encoding="utf-8")
+    assert "header_up X-Forwarded-For {http.request.remote.host}" in text
+    assert "header_up X-Forwarded-Proto {scheme}" in text
+
+
+def test_caddyfile_sets_default_sni_for_ip_literal_clients():
+    """浏览器 / curl 对 IP 字面量不发 SNI（RFC 6066 只允许主机名）。
+
+    自签模式（站点是公网 IP）没有 default_sni 就选不出证书，客户端只看到
+    `tlsv1 alert internal error` ——握手直接失败，不是「证书不受信任」。
+    """
+    text = CADDYFILE.read_text(encoding="utf-8")
+    assert "default_sni {$PUBLIC_DOMAIN}" in text
+
+
+def test_caddyfile_selects_tls_snippet_by_mode():
+    text = CADDYFILE.read_text(encoding="utf-8")
+    assert "import /etc/caddy/tls_{$TLS_MODE}.caddyfile" in text
+
+
+def test_caddy_tls_snippets_cover_both_modes():
+    """acme 走 Let's Encrypt、internal 自签；两个片段都要在，且互不越界。"""
+    acme = CADDYFILE_ACME.read_text(encoding="utf-8")
+    internal = CADDYFILE_INTERNAL.read_text(encoding="utf-8")
+    assert "issuer acme" in acme and "email {$ACME_EMAIL}" in acme
+    assert "tls internal" in internal
+    # 片段只该管 TLS，别把站点级指令也塞进来（两处配置必须同源）
+    assert "reverse_proxy" not in acme + internal
+    # internal 片段不得引用 ACME_EMAIL：自签模式没配它，引用就会解析失败
+    assert "{$ACME_EMAIL}" not in internal
+
+
+def test_env_example_documents_public_deploy_knobs():
+    text = (ROOT / ".env.example").read_text(encoding="utf-8")
+    for name in ("PUBLIC_DOMAIN=", "ACME_EMAIL=", "TLS_MODE="):
+        assert name in text, f".env.example 缺少 {name}"
+
+
+def test_ci_validates_public_deploy_in_both_tls_modes():
+    """CI 必须把两种 TLS 模式都 validate 一遍，否则改了片段 CI 也不会报。"""
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "for mode in acme internal" in workflow
+    assert 'TLS_MODE="$mode"' in workflow
+    assert "-v \"$PWD/deploy/caddy:/etc/caddy:ro\"" in workflow
+    assert "TLS_MODE=internal" in workflow, "compose 覆盖文件也要按自签模式拼一遍"

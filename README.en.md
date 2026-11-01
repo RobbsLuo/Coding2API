@@ -796,13 +796,14 @@ For a VPS with a public IP: one compose command starts "Caddy edge + app", certi
 client ──443/TLS──> Caddy (TLS termination) ──compose network──> coding2api:8000
 ```
 
-Prerequisites: Docker Compose ≥ 2.24 (the override uses `!override`), DNS A / AAAA record pointing at this host, ports 80 and 443 (tcp + udp) free (80 is needed for the ACME HTTP-01 challenge).
+Prerequisites: Docker Compose ≥ 2.24 (the override uses `!override`), a DNS A / AAAA record pointing at this host for the site address (a domain, or see *Public IP only, no domain* below), ports 80 and 443 (tcp + udp) free (80 is needed for the ACME HTTP-01 challenge).
 
 Two more `.env` entries (everything else as in *Quick start*):
 
 ```bash
-PUBLIC_DOMAIN=ai-api.example.com     # required: the certificate is issued for it
-ACME_EMAIL=ops@example.com           # required: Let's Encrypt expiry notices
+PUBLIC_DOMAIN=ai-api.example.com     # required: the certificate is issued for it (public IP when you have no domain)
+ACME_EMAIL=ops@example.com           # required with a domain: Let's Encrypt expiry notices
+# TLS_MODE=                          # empty = automatic certificates; set internal for a public IP (see below)
 # Leave ALLOWED_HOSTS empty: empty = loopback + the PUBLIC_BASE_URL hostname
 ```
 
@@ -822,8 +823,18 @@ What the override (`docker-compose.public.yml`) changes:
 | `TRUST_PROXY=true` | Exactly one Caddy in front (and the app port is loopback-only, so it cannot be reached directly), so API keys' `allowed_ips` see the real client IP |
 | `ALLOWED_HOSTS` extended with the domain + `127.0.0.1` | Non-empty means *full replacement*: a value already in `.env` would drop the domain (site-wide 400); missing loopback makes the container healthcheck fail → permanently unhealthy |
 | `HOST=0.0.0.0` | `.env.example` ships `HOST=127.0.0.1`, which would make the container listen on loopback only and Caddy's upstream unreachable |
-| New Caddy service (`deploy/caddy/Caddyfile`) | Automatic HTTPS + HTTP→HTTPS 308; `flush_interval -1` keeps streaming frame-by-frame; `X-Forwarded-For` is overwritten so client spoofing is ignored; no proxy-level timeouts (those stay with the app's `STREAM_*` / `UPSTREAM_COMPLETE_TIMEOUT_SECONDS`) |
-| `/metrics` returns 404 | That endpoint has no auth; grab it from the host with `curl 127.0.0.1:${PORT}/metrics` when needed |
+| New Caddy service (`deploy/caddy/`) | Automatic HTTPS + HTTP→HTTPS 308; `flush_interval -1` keeps streaming frame-by-frame; `X-Forwarded-For` is overwritten so client spoofing is ignored; no proxy-level timeouts (those stay with the app's `STREAM_*` / `UPSTREAM_COMPLETE_TIMEOUT_SECONDS`) |
+| `TLS_MODE` picks the certificate source | `acme` (default, domain) requests Let's Encrypt automatically; `internal` (public IP) signs with Caddy's built-in CA |
+| `/metrics` returns 404 | That endpoint has no auth by default (`METRICS_TOKEN` can tighten it); grab it from the host with `curl 127.0.0.1:${PORT}/metrics` when needed |
+
+### Public IP only, no domain
+
+Caddy's automatic certificates (ACME) only work for domain names — it will not issue for a bare IP. Two options:
+
+1. **A certificate browsers trust** → use a public wildcard-DNS name such as sslip.io / nip.io: `203-0-113-10.sslip.io` (or `203.0.113.10.sslip.io` / `.nip.io` — both spellings work) resolves to `203.0.113.10` automatically. Set `PUBLIC_DOMAIN` to it and keep `ACME_EMAIL`; this is plain ACME. Trade-off: certificates are rate-limited per *registered domain*, and sslip.io / nip.io are two domains **shared by every user** (exhausted once in Feb 2026; both got quota increases since) — if issuance fails, switch to the other, or fall back to self-signed.
+2. **API clients only, untrusted certificate is fine** → `PUBLIC_DOMAIN=<public IP>` + `TLS_MODE=internal`. Caddy signs with its built-in CA: the connection is still encrypted, but the certificate is in no public trust store — browsers warn, `curl` needs `-k`, or install the root CA into the client (it lives in the `caddy_data` volume: `docker compose -f docker-compose.yml -f docker-compose.public.yml exec caddy cat /data/pki/authorities/local/root.crt`).
+
+> The self-signed mode relies on `default_sni {$PUBLIC_DOMAIN}` in the Caddyfile: browsers and curl **send no SNI for IP literals** (RFC 6066 allows hostnames only), so without it Caddy cannot pick a certificate and the client only sees `tlsv1 alert internal error`. It is already in the shipped Caddyfile.
 
 Notes:
 

@@ -1,0 +1,13 @@
+# TLS 模式 acme（TLS_MODE=acme，默认）：站点地址是域名 → 自动申请 / 续期证书。
+#
+# 由 deploy/caddy/Caddyfile 的站点块 import。显式写 issuer 是为了固定签发方：
+# 不写时 Caddy 默认会同时注册 Let's Encrypt 与 ZeroSSL 两个 ACME 账号（后者
+# 多数情况用不上，却会占一个账号）。只留 Let's Encrypt，靠站点地址判定签发。
+#
+# ACME_EMAIL 必填（域名模式）：既是 Let's Encrypt 的到期通知收件人，也是 ACME
+# 账号标识。留空会在这里解析失败——报错指向本文件，属预期。
+tls {
+	issuer acme {
+		email {$ACME_EMAIL}
+	}
+}
