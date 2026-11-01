@@ -2,8 +2,9 @@
 #
 #   docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
 #
-# .env 新增两项：PUBLIC_DOMAIN（必填，域名，A/AAAA 记录已指向本机）、
-# ACME_EMAIL（必填，Let's Encrypt 到期通知）。详见 README「公网部署（Docker）」。
+# .env 新增：PUBLIC_DOMAIN（必填，域名或公网 IP；A / AAAA 记录已指向本机）、
+# ACME_EMAIL（域名模式必填，Let's Encrypt 到期通知）、TLS_MODE（可选，
+# acme 默认 / internal 自签）。详见 README「公网部署（Docker）」。
 #
 # 需要 Docker Compose ≥ 2.24（下方 `!override` 标签；老版本读不了会报错）。
 
@@ -16,7 +17,7 @@ services:
     environment:
       # PUBLIC_BASE_URL 决定 TRAE 登录回调基址与 HSTS 下发；https 才发 HSTS。
       # 它的主机名也自动进入 Host 白名单（ALLOWED_HOSTS 留空时的口径）。
-      PUBLIC_BASE_URL: https://${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env (e.g. ai-api.example.com)}
+      PUBLIC_BASE_URL: https://${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env (domain, or public IP with TLS_MODE=internal)}
       # 前恰好一层 Caddy 且应用端口只在回环 → 采信 XFF 是安全的
       TRUST_PROXY: "true"
       # Caddy 反代走 compose 网络，容器内必须监听 0.0.0.0；.env 里沿用
@@ -37,8 +38,11 @@ services:
       coding2api:
         condition: service_healthy
     environment:
-      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env}
-      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL in .env (Let's Encrypt expiry notices)}
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env (domain, or public IP with TLS_MODE=internal)}
+      ACME_EMAIL: ${ACME_EMAIL:-}
+      # acme（默认）：站点地址是域名 → 自动申请 / 续期；ACME_EMAIL 必填。
+      # internal：站点地址是公网 IP → 用 Caddy 自带 CA 自签（浏览器告警）。
+      TLS_MODE: ${TLS_MODE:-acme}
       PORT: ${PORT:-8000}
     ports:
       # 80：ACME HTTP-01 挑战 + 之后 308 跳 https；443/udp 是 HTTP/3
@@ -46,7 +50,8 @@ services:
       - "443:443"
       - "443:443/udp"
     volumes:
-      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # 整个目录挂进去：站点块按 TLS_MODE import tls_{$TLS_MODE}.caddyfile
+      - ./deploy/caddy:/etc/caddy:ro
       # 证书、ACME 账号与 Caddy 状态：必须持久化，否则每次重建都重新签发
       - caddy_data:/data
       - caddy_config:/config
