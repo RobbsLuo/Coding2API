@@ -96,7 +96,7 @@ class ErrKind(StrEnum):
     DEAD = "dead"        # session 失效（重登可恢复）→ 硬禁用 disabled=1
     RESTRICTED = "restricted"  # 账号被上游风控限制（11140）→ 账号级 2h 冷却，当前请求不再换号
     OTHER = "other"      # 其他 4xx/5xx → 累计，连续 3 次 → 冷却 10m
-    INVALID = "invalid"  # 请求无效（模型不存在等）→ 不冷却凭证，跳过该上游；全拒 → 400
+    INVALID = "invalid"  # 请求无效 / 模型能力拒绝（不存在、非多模态）→ 不冷却凭证，跳过该上游；全拒 → 400
     MODEL = "model"      # 该模型用量超限（429+6004）→ 只冷却 (凭证, 模型)，10m 起翻倍封顶 2h
     CONCURRENCY = "concurrency"  # 并发会话打满 → 固定 60s 模型级短冷却，不翻倍
     BLOCKED = "blocked"  # 该账号无此模型（400/404+11102）→ (凭证, 模型) 负缓存，6h 起翻倍封顶 24h
@@ -142,10 +142,12 @@ MODEL_SCOPED_KINDS = frozenset({MODEL, BLOCKED, CONCURRENCY})
 | 会话失效 | 401/403 | 401 | — | DEAD |
 | 服务端错误 | 5xx | 5xx | 500 | OTHER |
 | 请求自身无效 | 400 | 400（含 4001） | 400/404/422 | INVALID |
+| 模型能力拒绝（带图→非多模态） | — | — | — | INVALID（CodeArts `InferHub.001001020.406`） |
 | 排队中 | — | — | — | QUEUE（Qoder `isQueued` / `RESOURCE_LIMIT`） |
 | 流内错误事件 | SSE error 事件 | `event:error` 业务码 | `{"error":{...}}` 帧 | 同上映射（单一来源 `Event.error_kind`，缺失回落 OTHER） |
 
 - **zen / kilo 401 → `INVALID`**：两者无凭证；`401 Missing API key.` 只说明该模型要付费 key。归 `DEAD` → 一次强制付费请求硬禁用整条免费渠道。
+- **模型能力拒绝 → `INVALID`，不是 `REQUEST`**：CodeArts `InferHub.001001020.406 The request model is not multimodal` 是「这个模型收不了图片」，同渠道换任何一个号都会回同一条错误。归 `REQUEST`（换号重试）会让同一渠道的 N 条凭证各撞一次，`MAX_ROTATE = 3` 被它吃满，请求永远轮不到 `supports_images=True` 的渠道——2026-11-01 22:18–22:20 四个带图请求就是这样全部 400 收尾的（明细 4 条 `invalid_request`，`rescued=0`）。归 `INVALID` 一次尝试即 `_skip_provider` 跳过整条渠道，剩余预算留给真正支持图片的上游。同一错误走 HTTP 400 时本就落 `INVALID`，两条路径现在一致。
 - **kilo 429 与 502/503/504 → `MODEL`**：免费池 = OpenRouter 共享池，报错点名具体模型（`limit_source: upstream_provider_shared_pool`）；此时其他免费模型仍可用。
 - **CodeArts 临时凭证过期 → `SOFT`**：`HTTP 400` + `APIG.0602 security token has expired`，识别先于 `401/403 → DEAD`（`_STS_EXPIRED_MARKERS`）。判 `DEAD` → `RefreshTask` 跳过该凭证 → 断唯一自愈路径。
 - **Qoder 401 与 403 不对称**：`401` 一律 `DEAD`（实测只有凭据/会话失效一种形态：`TOKEN_EXPIRE` 等；放宽等于让被吊销的 token 在 60s 轮换里反复撞上游）；`403` 只在带会话失效标记时 `DEAD`，其余 `SOFT`。排队信号优先于两者（见上）。`classify_status` 只是 `classify_error_code` 的转发，判据只写一处，HTTP 与流内信封不可能漂移。
@@ -207,7 +209,7 @@ def health_score(q: Quota | None) -> int | None:
 - `supported_efforts` **不实现**：上游只给默认档不给清单。CB `onlyReasoning` / `canDisableThinking` 同样不透传（语义未核实）。
 - **唯一例外 Playground 入参控件**（`web/src/lib/playgroundParams.ts`）：档位候选固定 OpenAI 三档（`low`/`medium`/`high`），上游 `default_effort` 不在其中则追加；`supports_reasoning !== true` 且无 `default_effort` 不渲染，默认「不发送」。三个高级参数留空即不发键；前端校验边界与 `compat/openai/request.py` 对齐（`temperature` ≤ 1000、`max_tokens` 1–4e6）。
 - 逐字段补缺：多上游同名模型先到先填，后到只补 None。
-- **黑名单**（`MODEL_BLOCKLIST`，fnmatch glob，只影响展示，直连不受影响）。默认只展示在售新模型，三类滤掉：① 上游内部/代理模型——`custom_model_*` / `*sub*agent*` / `summary` / `browser_use_*` / `file_search_agent`，及各渠道自动路由占位 `default` / `default-model` / `fast-model` / `balanced-model` / `primary-model` / `deep-model` / `auto`；② 已被取代的老模型——`glm-4.*` / `glm-5` / `glm-5.0*` / `glm-5.1` / `glm-5.2*` / `glm-5v-*` / `glm-5-turbo`、`kimi-k2.*`、`minimax-m2.5`/`m2.7`/`m3`、`deepseek-v3-*` / `deepseek-v4-*`（`v4.1` 不受影响）、`qwen3.7-*`、`gpt-5.4`/`gpt-5.5`、`hy3*` / `hy4-preview`、`hunyuan-*`、`seed-2.1*` / `seed-code-pro-*` / `seed-evolving`、`qwen3-vl-235b`、`nemotron-3*` / `lfm2*` / `laguna*` / `north-mini-code` / `inkling-small` / `xing4.0-29b-a4` / `openrouter-models-router`；③ 实测不可用——`glyph-cluster`（121s 后 408）、`qwen3.8-flash`（Qoder `qfmodel` 400）。在售主力刻意不加：`deepseek-v4.1-flash` / `kimi-k3` / `glm-5.3*` / `mimo-v2.6*` / `qwen3.8-max` / `openpangu-2.0-*`。
+- **黑名单**（`MODEL_BLOCKLIST`，fnmatch glob，只影响展示，直连不受影响）。默认只展示在售新模型，四类滤掉：① 上游内部/代理模型——`custom_model_*` / `*sub*agent*` / `summary` / `browser_use_*` / `file_search_agent`，及各渠道自动路由占位 `default` / `default-model` / `fast-model` / `balanced-model` / `primary-model` / `deep-model` / `auto`；② 已被新一代取代的老模型——`glm-4.*` / `glm-5` / `glm-5.0*` / `glm-5.1` / `glm-5.2*` / `glm-5v-*` / `glm-5-turbo`、`kimi-k2.*` / `kimi-k3`（→ `kimi-k3.1-pro`）、`minimax-m2.5`/`m2.7`/`m3`、`deepseek-v3-*` / `deepseek-v4-*`（`v4.1` 不受影响）、`qwen3.7-*` / `qwen3-*` / `qwen3.6*`、`gpt-5.4`/`5.5`/`5.6*`、`hy3*` / `hy4-preview`、`hunyuan-*`、`seed-2.1*` / `seed-code-pro-*` / `seed-evolving`、`qwen3-vl-235b`；③ 已下架的免费池与开源小模型——`space-bunny`、`nemotron-3*` / `lfm2*` / `laguna*` / `north-mini-code` / `inkling-small` / `xing4.0-29b-a4` / `openrouter-models-router`、`glyph-cluster`（121s 后 408）；④ 渠道测试号与区域/日期快照代号——`deepseek-v4.1-flash-0930` / `-bnt`、`glm-5.3-test` / `-zx`、`kimi-k3-test-1009` / `-1019`（逐条登记，不用通用剥尾，`deepseek-v4.1-flash-1017` 是另一价位快照仍在售）。在售主力刻意不加：`deepseek-v4.1-flash` / `kimi-k3.1-pro` / `glm-5.3*`（含 flashx）/ `mimo-v2.6*` / `qwen3.8-max` / `qwen3.8-flash` / `openpangu-2.0-*` / `gpt-6-*` / `grok-4.7` / `gemini-3.8-flash`。`qwen3.8-flash` 2026-10-27 实测 chat 成功，原「400 Execution failed」判断已失效故移出。
 - **按归一后的对外写法匹配**（`_block_names`）：原代号、原代号归一键、展示名、展示名归一键四种取并集（默认规则带下划线；归一键把下划线换成连字符后不命中）。清洗后为空的名字不参与。
 - **非模型级问题不进黑名单**：CodeArts `InferHub.4291.200 insufficient quota` 与 `TM.00001041` 是账号级；Kilo `poolside/laguna-xs-2.1` / `nemotron-3-nano-omni` 的 429·502 与 `thinkingmachines/inkling-small` 的 `limit_rpd` 自行恢复。
 

@@ -46,8 +46,10 @@ def _app(tmp_path, aliases: str = ""):
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root", MODEL_ALIASES=aliases)
     app = build_app(settings, providers={
-        "trae": _Stub("trae", [("glm-5.3", "GLM 5.3"), ("kimi-k3-1", "Kimi-K3")]),
-        "kilo": _Stub("kilo", [("stealth/space-bunny-alpha", "Space Bunny")]),
+        "trae": _Stub("trae", [("glm-5.3", "GLM 5.3"),
+                               ("kimi-k3.1-pro", "Kimi-K3.1-Pro")]),
+        "kilo": _Stub("kilo", [("recursive/flint-v1.0:free",
+                                "Recursive: Flint (free)")]),
     })
     for provider in ("trae", "kilo"):
         app.state.credentials.add(provider=provider,
@@ -98,21 +100,21 @@ def test_real_entries_do_not_carry_custom_alias_flag(tmp_path):
 
 def test_alias_without_provider_keeps_all_target_channels(tmp_path):
     """不钉渠道：目标模型在哪些渠道，别名就在哪些渠道（列表显示并集）。"""
-    app = _app(tmp_path, "bunny=space-bunny")
+    app = _app(tmp_path, "team-flint=flint")
     with TestClient(app) as client:
         items = _ids(client, app)
-    assert items["bunny"]["providers"] == ["kilo"]
-    assert items["bunny"]["custom_alias"] is True
+    assert items["team-flint"]["providers"] == ["kilo"]
+    assert items["team-flint"]["custom_alias"] is True
 
 
 def test_alias_target_may_be_raw_upstream_id_or_display_name(tmp_path):
     """目标写成任一渠道原 id / 展示名都能命中（与 `_match_entry` 同口径）。"""
     app = _app(tmp_path,
-               "by-raw=stealth/space-bunny-alpha;by-name=Kimi K3")
+               "by-raw=recursive/flint-v1.0:free;by-name=Kimi K3.1 Pro")
     with TestClient(app) as client:
         items = _ids(client, app)
-    assert items["by-raw"]["alias_target"] == "space-bunny"
-    assert items["by-name"]["alias_target"] == "kimi-k3"
+    assert items["by-raw"]["alias_target"] == "flint"
+    assert items["by-name"]["alias_target"] == "kimi-k3.1-pro"
 
 
 # ---------------------------------------------------------------- 执行侧
@@ -124,11 +126,11 @@ def test_alias_routes_chat_to_pinned_provider(tmp_path):
     kilo = RejectProvider("kilo", [GOOD])
     app = build_app(settings, providers={"trae": trae, "kilo": kilo})
     app.state.runtime_settings.set("model_aliases",
-                                   "team-bunny=space-bunny-alpha@kilo")
+                                   "team-flint=flint-v1.0@kilo")
     services = app.state.services
     services.model_list_cache["trae"] = {"glm-5.3": Model(id="glm-5.3")}
     services.model_list_cache["kilo"] = {
-        "stealth/space-bunny-alpha": Model(id="stealth/space-bunny-alpha")}
+        "recursive/flint-v1.0:free": Model(id="recursive/flint-v1.0:free")}
     app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
     app.state.credentials.add(provider="kilo", credential_data={"token": "t"})
     key = app.state.api_keys.create("root")["api_key"]
@@ -136,10 +138,10 @@ def test_alias_routes_chat_to_pinned_provider(tmp_path):
     with TestClient(app) as client:
         # 先拉一次列表把别名表 publish 出来（真实流程也是这样：客户端先列模型）
         listed = client.get("/v1/models", headers={"Authorization": f"Bearer {key}"})
-        assert "team-bunny" in {item["id"] for item in listed.json()["data"]}
+        assert "team-flint" in {item["id"] for item in listed.json()["data"]}
         response = client.post("/v1/chat/completions",
                                headers={"Authorization": f"Bearer {key}"},
-                               json={"model": "team-bunny",
+                               json={"model": "team-flint",
                                      "messages": [{"role": "user", "content": "hi"}]})
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"] == "ok"
@@ -162,22 +164,22 @@ async def test_executor_maps_alias_to_target_raw_id(dual_repo):
     kilo = _Recording("kilo", [GOOD])
     executor = Executor(ExecutorDeps(
         providers={"kilo": kilo}, credentials=repo, scheduler=Scheduler(),
-        default_model="team-bunny",
-        model_aliases={"kilo": {"team-bunny": "stealth/space-bunny-alpha"}},
+        default_model="team-flint",
+        model_aliases={"kilo": {"team-flint": "recursive/flint-v1.0:free"}},
         upstream_model_name=lambda provider_id, model: (
-            {"kilo": {"team-bunny": "stealth/space-bunny-alpha"}}
+            {"kilo": {"team-flint": "recursive/flint-v1.0:free"}}
             .get(provider_id, {}).get(model.lower(), model))))
 
-    result = await executor.complete(chat_request("team-bunny"), username="u")
+    result = await executor.complete(chat_request("team-flint"), username="u")
     assert result["choices"][0]["message"]["content"] == "ok"
-    assert seen == ["stealth/space-bunny-alpha"]
+    assert seen == ["recursive/flint-v1.0:free"]
 
 
 # ------------------------------------------------------------------ 撞车
 
 def test_alias_colliding_with_real_id_is_skipped(tmp_path, caplog):
     """与真实对外 id 撞车：跳过该段、记错误，**不覆盖**真实条目。"""
-    app = _app(tmp_path, "glm-5.3=kimi-k3;good=glm-5.3@trae")
+    app = _app(tmp_path, "glm-5.3=kimi-k3.1-pro;good=glm-5.3@trae")
     with caplog.at_level(logging.ERROR), TestClient(app) as client:
         items = _ids(client, app)
     assert "custom_alias" not in items["glm-5.3"]     # 真实条目未被别名覆盖
@@ -188,7 +190,7 @@ def test_alias_colliding_with_real_id_is_skipped(tmp_path, caplog):
 
 def test_alias_colliding_with_auto_alias_is_skipped(tmp_path, caplog):
     """与已存在的自动别名撞车（这里是展示名键）同样跳过并记错误。"""
-    app = _app(tmp_path, "GLM 5.3=kimi-k3;good=glm-5.3@trae")
+    app = _app(tmp_path, "GLM 5.3=kimi-k3.1-pro;good=glm-5.3@trae")
     with caplog.at_level(logging.ERROR), TestClient(app) as client:
         items = _ids(client, app)
     assert "GLM 5.3" not in items
@@ -243,7 +245,7 @@ def test_broken_segment_does_not_break_other_aliases(tmp_path, caplog):
     assert "good" in items
     assert "bad" not in items
     # 整个列表仍然完整（真实模型一条不少）
-    assert {"glm-5.3", "kimi-k3", "space-bunny"} <= set(items)
+    assert {"glm-5.3", "kimi-k3.1-pro", "flint"} <= set(items)
 
 
 # ------------------------------------------------------------------ 热更
@@ -253,13 +255,13 @@ def test_alias_config_is_hot_reloadable(tmp_path):
     app = _app(tmp_path)
     with TestClient(app) as client:
         assert "later" not in _ids(client, app)
-        app.state.runtime_settings.set("model_aliases", "later=kimi-k3@trae")
+        app.state.runtime_settings.set("model_aliases", "later=kimi-k3.1-pro@trae")
         assert "later" in _ids(client, app)
         assert client.get("/v1/models/later", headers=_key(app)).status_code == 200
         # 清空覆盖 → 别名消失，真实模型仍在
         app.state.runtime_settings.set("model_aliases", "")
         items = _ids(client, app)
-        assert "later" not in items and "kimi-k3" in items
+        assert "later" not in items and "kimi-k3.1-pro" in items
 
 
 def test_find_target_entry_blank_target_is_none():
@@ -280,7 +282,7 @@ def test_alias_listed_for_key_allowlist(tmp_path):
         ids = {item["id"] for item in client.get("/v1/models", headers=headers).json()["data"]}
         assert ids == {"team-fast"}
         # 白名单外的真实模型单查 404（不能拿单查探测池子）
-        assert client.get("/v1/models/kimi-k3", headers=headers).status_code == 404
+        assert client.get("/v1/models/kimi-k3.1-pro", headers=headers).status_code == 404
         # 用目标渠道原 id 单查：命中的是白名单内的别名条目（与列表同一份）
         by_raw = client.get("/v1/models/glm-5.3", headers=headers)
         assert by_raw.status_code == 200 and by_raw.json()["id"] == "team-fast"

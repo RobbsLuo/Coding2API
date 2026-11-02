@@ -194,17 +194,29 @@ def test_events_classify_error_code_branches():
     assert classify("ChatAgent.99999999") is ErrKind.OTHER
 
 def test_events_classify_request_marker_is_not_credential_fault():
-    """`InferHub.001001020.406 not multimodal` 是请求侧错误（实测原文）。
+    """`InferHub.001001020.406 not multimodal` 是模型能力拒绝 → INVALID。
 
-    判成 OTHER 会让正常用户带图请求 3 次后把整条渠道拉进 10min 冷却；
-    REQUEST 不冷却、不累计、不落库，仍换号重试。
+    判成 OTHER 会让正常用户带图请求 3 次后把整条渠道拉进 10min 冷却；判成
+    REQUEST 则会**逐个号去撞**（2026-11-01 22:18–22:20 实测：4 个带图请求在
+    codearts 的 3 条凭证上各失败一次，`MAX_ROTATE = 3` 被同一渠道吃满，请求
+    永远轮不到支持图片的 codebuddy）。正确语义是「这个模型收不了图片」——
+    同渠道换号无用，跳过整个上游继续试其它渠道。
     """
     classify = codearts_events.classify_error_code
-    assert classify("InferHub.001001020.406") is ErrKind.REQUEST
+    assert classify("InferHub.001001020.406") is ErrKind.INVALID
     assert classify(
         "InferHub.001001020.406 The request model is not multimodal"
-    ) is ErrKind.REQUEST
-    assert classify("The request model is not multimodal") is ErrKind.REQUEST
+    ) is ErrKind.INVALID
+    assert classify("The request model is not multimodal") is ErrKind.INVALID
+
+
+def test_events_multimodal_rejection_skips_provider_instead_of_rotating():
+    """HTTP 400 与流内两条路径对同一错误给出同一分类（都跳过该上游）。"""
+    body = (b'{"error_code":"InferHub.001001020.406",'
+            b'"error_msg":"The request model is not multimodal"}')
+    assert codearts_events.classify_status(400, body) is ErrKind.INVALID
+    assert codearts_events.classify_error_code(
+        "InferHub.001001020.406 The request model is not multimodal") is ErrKind.INVALID
 
 def test_events_relogin_required_markers():
     """令牌端点终态判定：只有点名的一次性票据失效类错误才算不可自愈。"""

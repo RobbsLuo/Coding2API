@@ -257,6 +257,53 @@ async def test_invalid_provider_with_many_creds_keeps_rotation_budget(repo):
     db.close()
 
 @pytest.mark.asyncio
+async def test_multimodal_rejection_skips_whole_channel_instead_of_rotating(repo):
+    """带图请求打到非多模态渠道：跳过整个上游，轮换预算留给别的渠道。
+
+    回归 2026-11-01 22:18–22:20：四个带图请求全部 400 收尾。真实原因是
+    `InferHub.001001020.406 not multimodal` 被归成 REQUEST（换号重试），
+    codearts 的 3 条凭证各撞一次就把 `MAX_ROTATE = 3` 吃满，请求永远轮不到
+    `supports_images=True` 的 codebuddy。归类改为 INVALID 后一次尝试即跳过
+    整个渠道，剩下的预算留给真正能处理图片的上游。
+    """
+    from src.provider.codearts import events as codearts_events
+
+    credentials, db = repo
+    for token in ("a", "b", "c"):
+        _add(credentials, "codearts", token)
+    _add(credentials, "codebuddy", "cb")
+    # 三条 codearts 全 pin：pin 集合优先于常规排序，保证它们排在 codebuddy
+    # 前面被逐个选中（否则按 credential_id 字典序选号，测试结果不确定）
+    db.connect().execute("UPDATE credentials SET pinned = 1 WHERE provider = 'codearts'")
+
+    rejected = [Event(kind=EventKind.ERROR, error_code=None,
+                      error_message="InferHub.001001020.406 "
+                                    "The request model is not multimodal",
+                      error_kind=codearts_events.classify_error_code(
+                          "InferHub.001001020.406 The request model is not multimodal"))]
+    ca = ScriptedProvider("codearts", [rejected])
+    cb = ScriptedProvider("codebuddy", [GOOD])
+    executor = _executor(
+        {"codearts": ca, "codebuddy": cb}, credentials, {},
+        {"codearts": {"glm-5.3-flash": "glm-5.3-flash"},
+         "codebuddy": {"glm-5.3-flash": "glm-5.3-flash"}})
+
+    frames = [f async for f in executor.stream(
+        _request("glm-5.3-flash"), username="u")]
+    joined = b"".join(frames).decode()
+    assert "ok" in joined and "error" not in joined
+    # 只打一次 codearts 就跳过整条渠道。归 REQUEST 时这里会是 3（三条凭证
+    # 各撞一次，正好吃满 max_rotate=3），然后以 invalid_request 收尾。
+    assert ca.calls == 1
+    assert cb.calls == 1
+    # 请求侧错误不惩罚任何凭证
+    rows = db.connect().execute(
+        "SELECT cooling_until, err_count, disabled FROM credentials").fetchall()
+    assert [tuple(row) for row in rows] == [(None, 0, 0)] * 4
+    db.close()
+
+
+@pytest.mark.asyncio
 async def test_invalid_provider_many_creds_stream_keeps_rotation_budget(repo):
     """H2 流式路径同非流式：跳过的不认模型上游不占满轮换预算。"""
     credentials, db = repo

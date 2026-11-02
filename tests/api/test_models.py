@@ -211,7 +211,7 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
         async def list_models(self, _data):
             from src.provider.base import Model
 
-            return [Model(id="glm-5.3"), Model(id="kimi-k3"),
+            return [Model(id="glm-5.3"), Model(id="kimi-k3.1-pro"),
                     Model(id="custom_model_claude"),
                     Model(id="explore_sub_agent_v13"), Model(id="summary"),
                     Model(id="file_search_agent"), Model(id="default"),
@@ -233,26 +233,27 @@ def test_models_blocklist_filters_noise_and_old(tmp_path):
     assert "file_search_agent" not in ids
     assert "default" not in ids
     assert "hunyuan-image-alpha" not in ids
-    assert {"glm-5.3", "kimi-k3"} <= ids
+    assert {"glm-5.3", "kimi-k3.1-pro"} <= ids
 
     # 覆盖黑名单：额外滤在售模型（完全替换语义，需重写噪音规则）
     settings2 = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
-                         MODEL_BLOCKLIST="custom_model_*,*sub*agent*,summary,kimi-k3")
+                         MODEL_BLOCKLIST="custom_model_*,*sub*agent*,summary,kimi-k3.1-pro")
     app2 = build_app(settings2, providers={"trae": NoisyProvider()})
     app2.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
     key2 = app2.state.api_keys.create("root")["api_key"]
     with TestClient(app2) as client:
         ids2 = {item["id"] for item in client.get(
             "/v1/models", headers={"Authorization": f"Bearer {key2}"}).json()["data"]}
-    assert "kimi-k3" not in ids2 and "glm-5.3" in ids2
+    assert "kimi-k3.1-pro" not in ids2 and "glm-5.3" in ids2
 
 def test_models_blocklist_default_covers_retired_upstream_models(tmp_path):
-    """默认黑名单含 2026-10-10 复测补入的三条「上游已下架」。
+    """默认黑名单滤掉已下架 / 已退役的模型，且不误伤在售近邻。
 
     `hy4-preview-x`（CB 400 11102）与 `hy4-preview` 只差后缀，默认两条都滤
-    （`hy4-preview` 已停售）；`qwen3.8-flash` 只命中 Qoder 的 qfmodel，
-    CB/TRAE 的 `qwen3.8-max` 不受影响；`glyph-cluster` 按 kilo 展示名清洗出的
-    归一键命中，不误伤同渠道其它模型。
+    （`hy4-preview` 已停售）；`glyph-cluster` 按 kilo 展示名清洗出的归一键命中；
+    `space-bunny` 是 Kilo 已退役的免费档；`kimi-k3` 已被 `kimi-k3.1-pro` 取代。
+    `qwen3.8-flash`（Qoder qfmodel）2026-10-27 实测 chat 成功，已从默认黑名单
+    移出，故此处必须保留。
     """
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
 
@@ -276,9 +277,13 @@ def test_models_blocklist_default_covers_retired_upstream_models(tmp_path):
                                 Model(id="qmodel_38max", name="Qwen3.8-Max")]),
         "kilo": Stub("kilo", [Model(id="stealth/glyph-cluster",
                                     name="Stealth: Glyph Cluster (free)"),
+                               Model(id="stealth/space-bunny-alpha",
+                                     name="Space Bunny"),
                                Model(id="kilo-auto/free", name="Auto Free")]),
+        "trae": Stub("trae", [Model(id="kimi-k3", name="Kimi-K3"),
+                              Model(id="kimi-k3.1-pro", name="Kimi-K3.1-Pro")]),
     })
-    for pid in ("codebuddy", "qoder", "kilo"):
+    for pid in ("codebuddy", "qoder", "kilo", "trae"):
         app.state.credentials.add(provider=pid, credential_data={"accessToken": "a"})
     key = app.state.api_keys.create("root")["api_key"]
     with TestClient(app) as client:
@@ -287,10 +292,12 @@ def test_models_blocklist_default_covers_retired_upstream_models(tmp_path):
 
     assert "hy4-preview-x" not in ids
     assert "hy4-preview" not in ids          # 已停售，默认一并滤掉
-    assert "qwen3.8-flash" not in ids
     assert "glyph-cluster" not in ids
-    # 近邻模型不受牵连：qwen3.8-max 仍在售，`auto` 只命中占位符本身
-    assert "qwen3.8-max" in ids
+    assert "space-bunny" not in ids          # Kilo 已退役
+    assert "kimi-k3" not in ids              # 已被 kimi-k3.1-pro 取代
+    # 近邻模型不受牵连：qwen3.8-flash 实测可用、qwen3.8-max 在售、k3.1 是新代，
+    # `auto` 只命中占位符本身
+    assert {"qwen3.8-flash", "qwen3.8-max", "kimi-k3.1-pro"} <= ids
 
 def test_models_blocklist_matches_normalized_id_and_display_name(tmp_path):
     """黑名单按**归一后的对外写法**匹配，且两边忽略大小写。
@@ -354,7 +361,7 @@ def test_models_blocklist_hot_reload_applies_without_waiting_for_ttl(tmp_path):
 
             if self.fail:
                 raise RuntimeError("upstream down")
-            return [Model(id="glm-5.3"), Model(id="kimi-k3")]
+            return [Model(id="glm-5.3"), Model(id="kimi-k3.1-pro")]
 
         def import_credential(self, raw):
             return raw
@@ -367,12 +374,13 @@ def test_models_blocklist_hot_reload_applies_without_waiting_for_ttl(tmp_path):
     with TestClient(app) as client:
         client.cookies.set("coding2api_session", create_session_token("root", SECRET))
         first = client.get("/v1/models", headers=auth).json()["data"]
-        assert {item["id"] for item in first} == {"glm-5.3", "kimi-k3"}
+        assert {item["id"] for item in first} == {"glm-5.3", "kimi-k3.1-pro"}
         # 缓存存的是**未过滤**表（两条都在），否则热更在 TTL 内无法生效
-        assert set(app.state.services.model_list_cache["trae"]) == {"glm-5.3", "kimi-k3"}
+        assert set(app.state.services.model_list_cache["trae"]) == {
+            "glm-5.3", "kimi-k3.1-pro"}
 
         # TTL 未过（刚拉过），此时改黑名单
-        client.put("/api/settings", json={"values": {"model_blocklist": "kimi-k3"}},
+        client.put("/api/settings", json={"values": {"model_blocklist": "kimi-k3.1-pro"}},
                    headers={"Referer": "http://testserver/"})
         second = client.get("/v1/models", headers=auth).json()["data"]
         assert {item["id"] for item in second} == {"glm-5.3"}   # 立即生效
@@ -386,7 +394,7 @@ def test_models_blocklist_hot_reload_applies_without_waiting_for_ttl(tmp_path):
         client.put("/api/settings", json={"values": {"model_blocklist": ""}},
                    headers={"Referer": "http://testserver/"})
         fourth = client.get("/v1/models", headers=auth).json()["data"]
-        assert {item["id"] for item in fourth} == {"glm-5.3", "kimi-k3"}
+        assert {item["id"] for item in fourth} == {"glm-5.3", "kimi-k3.1-pro"}
 
 def test_codebuddy_import_via_api(tmp_path):
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),

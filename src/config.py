@@ -286,33 +286,50 @@ class Settings(BaseSettings):
     # 原代号的归一键、展示名、展示名的归一键四种写法任一命中即滤——用户照列表
     # 里看到的 `kimi-k3` / `Kimi K3` 写就能生效，老规则按原代号写也仍生效。
     # 覆盖此值时为完全替换（含默认噪音规则），增删请重写全量。
-    # 默认口径（2026-10-19 与线上生效值对齐）：**只展示当前在售的新模型**，
-    # 三类一律滤掉——
-    #   1. 上游内部/代理模型：custom_model_* / *sub*agent* / summary /
-    #      browser_use_* / file_search_agent（chat 报 3003 / 非用户模型）；
+    # 默认口径（2026-10-31 与线上生效值等值，62 条；顺序按来源分组，fnmatch
+    # 无语义差别）：**只展示当前在售的新模型**，四类一律滤掉——
+    #   1. 上游内部/代理模型与自动路由占位：custom_model_* / *sub*agent* /
+    #      summary / browser_use_* / file_search_agent（chat 报 3003 / 非用户模型）；
     #      default 与 codebuddy_intl 的 default-model/fast-model/balanced-model/
     #      primary-model/deep-model、Qoder 的 auto 是各上游的「自动路由」占位。
-    #   2. 已停售/被新一代取代的老模型：glm-4.* / glm-5 / glm-5.0* / glm-5.1 /
-    #      glm-5.2* / glm-5v-* / glm-5-turbo、kimi-k2.*（含 k2.5/2.6/k2-thinking）、
-    #      minimax-m2.5/m2.7/m3、deepseek-v3-* / deepseek-v4-*（v4.1 不受影响）、
-    #      qwen3.7-*、gpt-5.4/5.5、hy3* / hy4-preview、hunyuan-*、
-    #      seed-2.1* / seed-code-pro-* / seed-evolving、qwen3-vl-235b、
-    #      openpangu 之外的开源小模型（nemotron-3* / lfm2* / laguna* /
-    #      north-mini-code / inkling-small / xing4.0-29b-a4 / openrouter-models-router）。
-    #   3. 实测不可用的噪音：glyph-cluster（Kilo 两次 121s 后 408）、
-    #      hunyuan-*（含 hunyuan-image-* 的 400 11103 backend not supported）。
-    # 刻意不加的：deepseek-v4.1-flash / kimi-k3 / glm-5.3* / mimo-v2.6* /
-    #   qwen3.8-max / openpangu-2.0-*（在售主力，2026-10-19 实测正常 chat）。
+    #   2. 已被新一代取代的老模型：glm-4.* / glm-5 / glm-5.0* / glm-5.1 /
+    #      glm-5.2* / glm-5v-* / glm-5-turbo（→ glm-5.3）、kimi-k2.* /
+    #      kimi-k3（→ kimi-k3.1-pro）、minimax-m2.5/m2.7/m3（→ m3.1-flash）、
+    #      deepseek-v3-* / deepseek-v4-*（→ v4.1-flash）、qwen3.7-* / qwen3-* /
+    #      qwen3.6*（→ qwen3.8-max）、gpt-5.4/5.5/5.6*（→ gpt-6-sol / 6.1-sol）、
+    #      hy3* / hy4-preview / hunyuan-*、seed-2.1* / seed-code-pro-* /
+    #      seed-evolving（豆包整族已停售，无后继）、qwen3-vl-235b。
+    #   3. 已下架的免费池与开源小模型：space-bunny（Kilo 已退役）、
+    #      nemotron-3* / lfm2* / laguna* / north-mini-code / inkling-small /
+    #      xing4.0-29b-a4 / glyph-cluster（Kilo 两次 121s 后 408）/
+    #      openrouter-models-router。
+    #   4. 渠道侧测试号与区域/日期快照代号（同一模型已有主名，留着只会让用户
+    #      选中另一个价位）：deepseek-v4.1-flash-0930 / -bnt、glm-5.3-test /
+    #      -zx、kimi-k3-test-1009 / -1019。**逐条登记，不用通用剥日期 / 剥区域
+    #      尾缀**——`deepseek-v4.1-flash-1017` 是另一个价位的快照，仍在售。
+    # 刻意不加的：deepseek-v4.1-flash（含 -1017 / -sg）/ kimi-k3.1-pro /
+    #   glm-5.3*（含 flashx）/ mimo-v2.6* / qwen3.8-max / qwen3.8-flash /
+    #   openpangu-2.0-* / gpt-6-* / grok-4.7 / gemini-3.8-flash（在售）。
+    #   `qwen3.8-flash`（Qoder qfmodel）2026-10-27 实测 chat 成功（63→117 token），
+    #   原先按「400 Execution failed」滤掉的判断已失效，故移出黑名单。
     model_blocklist: str = (
+        # ① 内部 / 代理模型与自动路由占位
         "custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,"
-        "default,seed-code-pro-*,sagitta,aquila,glm-4.*,glm-5,glm-5-turbo,"
-        "glm-5.0*,glm-5.1,glm-5v-*,kimi-k2.5,kimi-k2.6,kimi-k2-thinking,"
-        "minimax-m2.5,deepseek-v3-*,hunyuan-*,hy3*,deepseek-v4-*,qwen3.7-*,auto,"
-        "nemotron-3-*,glm-5.2*,nemotron-3*,lfm2*,north-mini-code,"
-        "openrouter-models-router,fast,balanced,deep,primary,hy4-preview,"
-        "inkling-small,minimax-m2.7,kimi-k2.*,minimax-m3,gpt-5.4,gpt-5.5,"
-        "laguna*,qwen3-vl-235b,seed-2.1*,xing4.0-29b-a4,glyph-cluster,"
-        "qwen3.8-flash,seed-evolving"
+        "default,fast,balanced,deep,primary,auto,sagitta,aquila,"
+        # ② 已被新一代取代的老模型
+        "glm-4.*,glm-5,glm-5-turbo,glm-5.0*,glm-5.1,glm-5v-*,glm-5.2*,glm.5.2*,"
+        "kimi-k2.*,kimi-k2.5,kimi-k2.6,kimi-k2-thinking,kimi-k3,"
+        "minimax-m2.5,minimax-m2.7,minimax-m3,deepseek-v3-*,deepseek-v4-*,"
+        "qwen3.7-*,qwen3-*,qwen3.6*,qwen3-vl-235b,"
+        "gpt-5.4,gpt-5.5,gpt-5.6*,hy3*,hy4-preview,hunyuan-*,"
+        "seed-2.1*,seed-2-1-turbo,doubao-seed-2.1-turbo,seed-code-pro-*,"
+        "seed-evolving,"
+        # ③ 已下架的免费池 / 开源小模型
+        "space-bunny,nemotron-3-*,nemotron-3*,lfm2*,laguna*,north-mini-code,"
+        "inkling-small,xing4.0-29b-a4,glyph-cluster,openrouter-models-router,"
+        # ④ 渠道测试号与区域 / 日期快照代号
+        "deepseek-v4.1-flash-0930,deepseek-v4.1-flash-bnt,"
+        "glm-5.3-test,glm-5.3-zx,kimi-k3-test-1009,kimi-k3-1019"
     )
     # 诊断：把 /v1 入口的原始请求体落到 data/dumps/（排查客户端差异用）。
     # 热更项（管理台可开关，改动进审计）；落盘目录 0700、文件 0600、

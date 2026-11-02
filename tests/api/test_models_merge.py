@@ -53,8 +53,12 @@ def test_models_merge_by_readable_name_across_channels(tmp_path):
     各渠道同一模型内部代号互不相同（`kimi-k3-1` / `kimi-k3` /
     `kmodel_latest`），只有可读名能对齐；请求转发到某渠道时再经别名表
     换回该渠道自己的原 id（Qoder 仍发 `kmodel_latest`）。
+
+    `kimi-k3` 已被默认黑名单滤掉（→ `kimi-k3.1-pro`），本用例只验合并口径，
+    故清空黑名单。
     """
-    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        MODEL_BLOCKLIST="")
 
     class Stub:
         def __init__(self, pid: str, models):
@@ -348,9 +352,10 @@ def test_models_single_channel_outward_id_is_normalized(tmp_path):
     """单渠道条目的对外 id 也是归一键（Qoder `kmodel_latest` → `kimi-k3`）。
 
     原代号只留在别名表与 `by_provider.raw_id`，转发时换回；用户按原代号直连
-    仍能命中。
+    仍能命中。`kimi-k3` 已被默认黑名单滤掉，本用例只验归一口径，故清空黑名单。
     """
-    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        MODEL_BLOCKLIST="")
 
     class Stub:
         def __init__(self, pid: str, models):

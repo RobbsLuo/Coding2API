@@ -91,11 +91,18 @@ _MODEL_ABSENT_MARKERS = ("002002009", "not registered", "4004.200", "benefit not
 _CONCURRENCY_MARKERS = ("00001041", "并发")
 # 模型级限流：上游点名当前模型（TPM、429 等），配额类限流恢复慢，走 MODEL。
 _MODEL_THROTTLE_MARKERS = ("tpm", "429", "rate limit", "throttl")
-# 请求本身不合法（换账号 / 重试都没用）→ REQUEST，不冷却、不累计。
+# 请求与**模型能力**不匹配（换账号没用、重试也没用）→ INVALID，跳过该上游。
 # `InferHub.001001020.406 The request model is not multimodal` 是实测原文：
-# 请求带了图片而该模型不支持多模态。判成其它类型会让正常用户请求把整条渠道
-# 拉进冷却（3 次 OTHER → 10min 冷却），故按请求侧错误单独分类。
-_REQUEST_MARKERS = ("001001020", "not multimodal")
+# 请求带了图片而该模型不支持多模态。这是「模型 + 请求形态」的确定性拒绝，
+# 同渠道换任何一个号都会回同一条错误，所以必须跳过**整个上游**去试真正
+# 支持图片的渠道。
+#
+# 曾归 `REQUEST`（换号重试）——那是按「请求体坏 / 渠道风控」的经验套的，对
+# 多模态错误是错的：2026-11-01 22:18–22:20 四个带图请求，每条都在 codearts
+# 的 3 条凭证上各失败一次，`MAX_ROTATE = 3` 被同一渠道吃满，请求根本没机会
+# 落到 `supports_images=True` 的 codebuddy，最终 400 收尾（4 条未救回失败）。
+# 与 `classify_status` 一致：同样的错误走 HTTP 400 时本来就走 INVALID。
+_MODEL_CAPABILITY_MARKERS = ("001001020", "not multimodal")
 # HTTP 状态码侧的限流/并发标记。与流内业务码不同，这里判的是**响应体文本**：
 # 上游把并发超限放在 HTTP 400（不是 429），命中即应算可重试的限流。
 # 并发与否的区分见 _CONCURRENCY_MARKERS（先判并发，再判模型级限流）。
@@ -327,8 +334,11 @@ def classify_error_code(code: str | None) -> ErrKind:
         return ErrKind.CONCURRENCY
     if any(marker in text for marker in _MODEL_THROTTLE_MARKERS):
         return ErrKind.MODEL
-    if any(marker in text for marker in _REQUEST_MARKERS):
-        return ErrKind.REQUEST
+    if any(marker in text for marker in _MODEL_CAPABILITY_MARKERS):
+        # 模型能力不匹配（带图请求打到非多模态模型）：换同渠道任何一个号
+        # 都会回同一条错误，必须跳过整个上游。判 REQUEST 会逐个号去撞，
+        # 3 条凭证正好吃满 max_rotate（见 _MODEL_CAPABILITY_MARKERS 注释）。
+        return ErrKind.INVALID
     if "1005" in text or "quota" in text or "insufficient" in text:
         return ErrKind.PLAN
     if "apig.0301" in text or "decrypt token" in text:
