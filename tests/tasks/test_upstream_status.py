@@ -218,6 +218,38 @@ def test_shutdown_cancels_pending_upstream_warmup(tmp_path, monkeypatch):
     assert warmup.cancelled() or warmup.done()
 
 
+def test_shutdown_cancels_all_pending_warmups(tmp_path, monkeypatch):
+    """关闭时三个后台预热（模型列表 / 价表 / 上游状态）都要取消。
+
+    三个都 monkeypatch 成挂住，是为了让**取消分支确定性覆盖**：此前只挂上游
+    状态页，模型/价表预热靠「关闭时正好还没跑完」才走到取消块——CI（无 `.env`、
+    无外网）里它们先跑完，`main` 的取消分支变成未覆盖，100% 门槛随机红
+    （实测 2026-11-02 CI 报 `src/main.py 717-719` 缺失）。
+    """
+    import asyncio
+
+    from fastapi.testclient import TestClient
+
+    from src.config import Settings
+    from src.main import build_app
+    from tests.helpers.constants import SECRET
+
+    async def hang(*_args, **_kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr("src.main._warm_model_list", hang)
+    monkeypatch.setattr("src.main._warm_model_catalog", hang)
+    monkeypatch.setattr(UpstreamStatusTask, "run_once", hang)
+    app = build_app(Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path)))
+
+    with TestClient(app):
+        warmups = [app.state.model_warmup_task, app.state.catalog_warmup_task,
+                   app.state.upstream_warmup_task]
+        assert all(not task.done() for task in warmups)
+
+    assert all(task.cancelled() or task.done() for task in warmups)
+
+
 @pytest.mark.parametrize("level", [LEVEL_OPERATIONAL, LEVEL_DEGRADED])
 async def test_run_once_counts_operational_as_normal(level):
     """operational 之外才算异常——包括维护与未知。"""
