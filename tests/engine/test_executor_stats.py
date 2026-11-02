@@ -484,6 +484,114 @@ async def test_stream_dead_error_does_not_duplicate_terminal_row(repo):
         "credential_unavailable"]
 
 
+def test_dead_as_credit_switches_only_when_quota_proven_exhausted():
+    """判据只有两条分支：探明耗尽 → CREDIT，其余 → DEAD（不猜）。"""
+    from src.engine.executor import _dead_as_credit
+
+    assert _dead_as_credit(quota_exhausted=True) is ErrKind.CREDIT
+    assert _dead_as_credit(quota_exhausted=False) is ErrKind.DEAD
+
+
+def test_quota_exhausted_is_three_state_and_tolerates_deleted_credential(repo):
+    """`_quota_exhausted` 三态：未探测 ≠ 耗尽；探到 0 / health=-1 才算。"""
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy",
+                          credential_data={"bearer_token": "t"})
+    executor = _exec_with_stats(repo, [], None)
+
+    # 没探测过：未知，不能当「用完了」的证据（否则真坏的 AppKey 会被静默成等签到）
+    assert executor._quota_exhausted(cid, "codebuddy") is False
+    credentials.save_quota(cid, Quota(remaining=100, total=4100, probed_at=1))
+    assert executor._quota_exhausted(cid, "codebuddy") is False
+    credentials.save_quota(cid, Quota(remaining=0, total=4100, probed_at=2))
+    assert executor._quota_exhausted(cid, "codebuddy") is True
+    # 总量缺失（上游没给分母）＝ `health == -1` 已耗尽
+    credentials.save_quota(cid, Quota(remaining=None, total=None, probed_at=3))
+    assert executor._quota_exhausted(cid, "codebuddy") is True
+    # 凭证被并发删除（请求途中）：占位候选额度未知 → 不降级
+    assert executor._quota_exhausted("cred_gone", "codebuddy") is False
+
+
+async def test_dead_with_exhausted_quota_cools_instead_of_hard_disabling(repo):
+    """额度已探明耗尽的 401 按 CREDIT 处理：不硬禁用，冷却到次日 04:00。
+
+    回归 2026-11-02 officeace：三条凭证 `quota_remaining = 0 / quota_total =
+    4100`，上游回 `401 APIG.1009 AppKey or AppSecret is invalid`（同一条错误
+    也出现在模型列表接口上）。旧口径判 DEAD → 硬禁用 + 落
+    `credential_unavailable`，面板读成「凭证不可用」→ 运维 revive 5 次 +
+    OAuth 重登 1 次，401 照旧（积分是 0，重登无解）。判 CREDIT 后冷却到次日
+    04:00 等签到恢复，凭证留在池子里。
+    """
+    from src.engine.scheduler import next_credit_reset
+
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy",
+                          credential_data={"bearer_token": "t"})
+    credentials.save_quota(cid, Quota(remaining=0, total=4100,
+                                      probed_at=int(time.time())))
+    collector = RecordingCollector()
+
+    class Dead(Exception):
+        def kind(self):
+            return ErrKind.DEAD
+
+    executor = _exec_with_stats(repo, [[Dead()]], collector)
+    from src.compat.openai.request import parse_chat_request
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+
+    row = credentials.candidates()[0]
+    assert row.disabled is False                      # 没被硬禁用
+    assert row.cooling_until == next_credit_reset(int(time.time()))
+    # 归因不再指向「凭证坏了」：DEAD 的尝试行只在真判 DEAD 时落，
+    # 改判 CREDIT 后由轮换耗尽/冷却耗尽的收尾行覆盖（与普通额度耗尽同口径）
+    kinds = [event["error_type"] for event in collector.events]
+    assert kinds == ["no_healthy_credential"]
+    assert "credential_unavailable" not in kinds
+
+
+async def test_stream_dead_with_exhausted_quota_records_rate_limit(repo):
+    """流式同样不因「额度耗尽的 401」硬禁用凭证（与尝试行同一判据）。"""
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy",
+                          credential_data={"bearer_token": "t"})
+    credentials.save_quota(cid, Quota(remaining=0, total=4100,
+                                      probed_at=int(time.time())))
+    collector = RecordingCollector()
+
+    class Dead(Exception):
+        def kind(self):
+            return ErrKind.DEAD
+
+    executor = _exec_with_stats(repo, [[Dead()]], collector)
+    from src.compat.openai.request import parse_chat_request
+
+    chunks = [chunk async for chunk in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
+    assert chunks
+    kinds = [event["error_type"] for event in collector.events]
+    assert kinds == ["no_healthy_credential"]
+    assert credentials.candidates()[0].disabled is False
+
+
+def test_stream_error_type_follows_quota_evidence_on_dead():
+    """收尾行与尝试行同判据：额度耗尽的 DEAD 记 rate_limit，否则 credential_unavailable。
+
+    两侧不一致会让同一次请求出现「尝试行说凭证失效、收尾行说额度耗尽」的矛盾
+    （见 `_dead_as_credit`）。
+    """
+    from src.engine.executor import _stream_error_type
+
+    class Dead(Exception):
+        def kind(self):
+            return ErrKind.DEAD
+
+    assert _stream_error_type(Dead(), quota_exhausted=True) == "rate_limit"
+    assert _stream_error_type(Dead(), quota_exhausted=False) == "credential_unavailable"
+
+
 async def test_soft_error_does_not_record_attribution_row(repo):
     """SOFT 等其它分类不落尝试级明细：一次请求可能触发多次，落行会灌满噪声。
 

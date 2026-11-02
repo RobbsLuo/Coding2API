@@ -18,11 +18,20 @@
 | `ModelArts.81009` | 模型名上游不认 | **模型** |
 | `ModelArts.81111/81114` | 该模型 TPM 限流 | 模型（短冷却） |
 | `ModelArts.81113` | 请求体过大 | 请求 |
-| `APIG.1009` / `AppKey or AppSecret is invalid` | 凭据真坏了 | **账号** |
+| `APIG.1009` / `AppKey or AppSecret is invalid` | 凭据真坏了，**或积分耗尽** | **账号**（见下） |
 | `APIG.0303` | app 不存在（把 STS 当 Basic 用） | **账号**（配置错） |
 
 `81004`/`81009` 走 HTTP 403/404，若按状态码直接判 DEAD 会把整条凭据打
 死——而它们其实只说明「这个号没这个模型」。故业务码判定必须**先于**状态码。
+
+**`APIG.1009` 有两种成因，分类层只认 DEAD**：积分耗尽时上游回的是同一条
+`401 AppKey or AppSecret is invalid`（实测 2026-11-02：三条凭证
+`quota_remaining = 0 / quota_total = 4100`，同一条错误也出现在模型列表接口
+上）。分类层没有额度上下文，判 `CREDIT` 会让「AppKey 真的坏了」静默成
+「等签到」；而判 `DEAD` 会导致硬禁用 + 运维重登（积分是 0，重登无解）。
+故这里保持 DEAD（凭据级），由引擎按**已探明额度**收口：`health == -1` 或
+`quota_remaining <= 0` 时降级为 `CREDIT`（冷却到次日 04:00，不硬禁用），
+判据只写一处，见 `src/engine/executor.py::_dead_as_credit`。
 
 **限流走伪 200**：华为网关限流时会 HTTP 200 + `data:{"error":...}`，
 首帧正常、第二帧才是错误也出现过。解析层因此不能假设「2xx 就是好流」，
@@ -91,6 +100,8 @@ _MODEL_REJECT_MARKERS: tuple[str, ...] = ("81004", "81009")
 #: 模型级限流（TPM）。只冷却「凭据 × 模型」，其它模型不受影响。
 _MODEL_THROTTLE_MARKERS: tuple[str, ...] = ("81111", "81112", "81114")
 #: 凭据级故障：app key 坏了 / 网关分片换了。
+#: `APIG.1009` 也是「积分耗尽」的报错形态（同一条 401 文案，见模块 docstring）：
+#: 这里照判 DEAD（没有额度上下文），由 executor 按已探明额度降级为 CREDIT。
 _AUTH_DEAD_MARKERS: tuple[str, ...] = (
     "apig.1009",
     "appkey or appsecret is invalid",

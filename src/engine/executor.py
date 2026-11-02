@@ -23,6 +23,7 @@ from ..config import live
 from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
 from ..provider.base import (
+    EXHAUSTED,
     QUEUE_DEFAULT_WAIT_SECONDS,
     QUEUE_MAX_ROUNDS,
     QUEUE_MAX_WAIT_SECONDS,
@@ -749,7 +750,8 @@ class Executor:
                         self._check_model_substitution(
                             target.model, event.model, provider_id, credential_id)
                     if event.kind is EventKind.ERROR:
-                        kind = _event_kind(event)
+                        kind = self._credit_if_exhausted(
+                            _event_kind(event), credential_id, provider_id)
                         if kind is ErrKind.QUEUE:
                             # 排队：上游点名「等 N 秒再来」。未出帧时在原号上
                             # 重开，不冷却、不换号、不占轮换预算；已出帧则
@@ -846,7 +848,8 @@ class Executor:
                         yield frame
                     return
             except Exception as error:  # noqa: BLE001 - 统一转为冷却或上抛
-                kind = _classify(error)
+                kind = self._credit_if_exhausted(
+                    _classify(error), credential_id, provider_id)
                 if kind is None:
                     raise
                 if kind is ErrKind.QUEUE:
@@ -941,7 +944,10 @@ class Executor:
                     self._deps.record(
                         username=state.username, provider=provider_id,
                         credential_id=credential_id, model=target.model, ok=False,
-                        error_type=_stream_error_type(last_error),
+                        error_type=_stream_error_type(
+                            last_error,
+                            quota_exhausted=self._quota_exhausted(
+                                credential_id, provider_id)),
                         input_tokens=_usage_field(usage, "input_tokens"),
                         output_tokens=_usage_field(usage, "output_tokens"),
                         latency_ms=_elapsed_ms(state.started))
@@ -1352,7 +1358,8 @@ class Executor:
                     error_message=(f"upstream complete exceeded "
                                    f"{overflow.limit} events")))
             except Exception as error:  # noqa: BLE001
-                kind = _classify(error)
+                kind = self._credit_if_exhausted(
+                    _classify(error), credential_id, provider_id)
                 if kind is None:
                     raise
                 if kind is ErrKind.QUEUE:
@@ -1415,7 +1422,8 @@ class Executor:
                 try:
                     result = aggregate(events, target.model)
                 except UpstreamStreamError as error:
-                    kind = _event_kind(error.event)
+                    kind = self._credit_if_exhausted(
+                        _event_kind(error.event), credential_id, provider_id)
                     if kind is ErrKind.INVALID:
                         # 推理档位被拒（流内 error 事件形态）：原号降一档重试一次
                         lower = self._downgrade_effort(
@@ -1500,7 +1508,9 @@ class Executor:
                 if last_kind is ErrKind.INVALID:
                     raise InvalidRequest(_reject_message(
                         target.model, last_error, self._suggestions(target.model)))
-                kind = _classify(last_error) if last_error is not None else None
+                kind = (self._credit_if_exhausted(
+                    _classify(last_error), credential_id, provider_id)
+                    if last_error is not None else None)
                 # DEAD 尝试行已落过明细时不再落收尾行：一次请求两行会让
                 # usage_hourly.requests 虚高、成功率虚低，按 Key 计的日请求
                 # 额度被扣两次（与 _stream_loop / _complete 的 pick-is-None
@@ -1723,6 +1733,32 @@ class Executor:
             if candidate.credential_id == credential_id:
                 return candidate
         return Candidate(credential_id=credential_id, provider=provider_id)
+
+    def _quota_exhausted(self, credential_id: str,
+                         provider_id: str = "") -> bool:
+        """该凭证额度是否**已探明**耗尽（`health == -1` 或 `quota_remaining <= 0`）。
+
+        没探测过（`quota_remaining is None`）＝未知，返回 False：未知不等于
+        耗尽，不能拿「没测过」当「用完了」的证据（与 `health_score` 的三态
+        口径一致：None 未知 / -1 耗尽 / 0-100 已知）。
+        """
+        candidate = self._candidate_or_none(credential_id, provider_id)
+        if candidate.health == EXHAUSTED:
+            return True
+        return (candidate.quota_remaining is not None
+                and candidate.quota_remaining <= 0)
+
+    def _credit_if_exhausted(self, kind: ErrKind | None, credential_id: str,
+                             provider_id: str) -> ErrKind | None:
+        """DEAD 且该凭证额度已探明耗尽 → CREDIT；其余分类原样返回。
+
+        非 DEAD 直接返回，不做候选查询：这条判据只在「凭据失效」这一分类上
+        需要额度证据（见 `_dead_as_credit`），其它分类的冷却口径不受影响。
+        """
+        if kind is not ErrKind.DEAD:
+            return kind
+        return _dead_as_credit(
+            quota_exhausted=self._quota_exhausted(credential_id, provider_id))
 
     def _select(self, target: ModelTarget, tried: set[str],
                 affinity_id: str | None = None) -> str | None:
@@ -2266,16 +2302,45 @@ def _reject_message(model: str, last_error: Exception | None,
     return message
 
 
-def _stream_error_type(error: Exception | None) -> str:
+def _dead_as_credit(*, quota_exhausted: bool) -> ErrKind:
+    """DEAD 的凭证额度**已探明**耗尽 → 改判 CREDIT（不硬禁用）。
+
+    上游把「额度用完」写成了凭据失效：officeace 积分耗尽时回 `HTTP 401
+    APIG.1009 AppKey or AppSecret is invalid`（实测 2026-11-02：三条凭证
+    `quota_remaining = 0 / quota_total = 4100`，同一条错误同时出现在模型列表
+    接口上），而 `APIG.1009` 正是 officeace 的「凭据真坏了」标记 → 判 DEAD。
+    DEAD 的处置是**硬禁用**（`scheduler.note_error`）＋归因落
+    `credential_unavailable`：面板读成「凭证不可用」，运维于是 revive／重登
+    ——积分仍是 0，重登无解（当天实测 revive 5 次 + OAuth 重登换号 1 次，
+    401 照旧）。判 CREDIT 的处置是「冷却到次日 04:00 等签到恢复」，与真实
+    恢复路径一致，也不会把一条额度会回来的凭证永久踢出池子。
+
+    只在**已探明**额度为 0 时降级（`health == -1` 或 `quota_remaining <= 0`）：
+    没探测过（None）时保持 DEAD——宁可硬禁用一条额度不明的凭证，也不能把
+    「AppKey 真坏了」静默成「等签到」。判据只看额度证据，不看渠道名，任何
+    渠道「DEAD 与额度耗尽同时成立」都按额度处理。
+    """
+    return ErrKind.CREDIT if quota_exhausted else ErrKind.DEAD
+
+
+def _stream_error_type(error: Exception | None, *,
+                       quota_exhausted: bool = False) -> str:
     """流已开始后的失败类型：流式超时单独成类，其余沿用通用映射。
 
     `_StreamTimeout.kind()` 是 SOFT（冷却口径），但统计页要把「上游首字超时」
     与「上游流中断」分开看（A1 验收），所以这里先按异常类型分流，再落到
     `_error_type_for`。三个取值都在 collector 的受控白名单里。
+
+    `quota_exhausted` 与 `_credit_if_exhausted` 同一判据：收尾行（调用方在
+    DEAD/CREDIT 未落尝试行时补的失败明细）必须与尝试行的归因一致，否则同一次
+    请求会出现「第一次记 credential_unavailable、收尾记 rate_limit」的矛盾
+    （见 `_dead_as_credit`）。
     """
     if isinstance(error, _StreamTimeout):
         return error.error_code
     kind = _classify(error) if error is not None else None
+    if kind is ErrKind.DEAD:
+        kind = _dead_as_credit(quota_exhausted=quota_exhausted)
     return _error_type_for(kind) if kind else "upstream_protocol"
 
 
