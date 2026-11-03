@@ -94,7 +94,8 @@ class ErrKind(StrEnum):
     CREDIT = "credit"    # 余额不足（402/14018）→ 冷却到次日 04:00（等签到恢复）
     SOFT = "soft"        # 限流/404 → 冷却 60s，不累计错误数
     DEAD = "dead"        # session 失效（重登可恢复）→ 硬禁用 disabled=1；
-                         # 额度已探明为 0 时 executor 先降级为 CREDIT（见 _dead_as_credit）
+                         # 额度耗尽的证据成立时 executor 先降级为 CREDIT
+                         # （证据陈旧会先现场复探，见 _credit_if_exhausted）
     RESTRICTED = "restricted"  # 账号被上游风控限制（11140）→ 账号级 2h 冷却，当前请求不再换号
     OTHER = "other"      # 其他 4xx/5xx → 累计，连续 3 次 → 冷却 10m
     INVALID = "invalid"  # 请求无效 / 模型能力拒绝（不存在、非多模态）→ 不冷却凭证，跳过该上游；全拒 → 400
@@ -149,7 +150,7 @@ MODEL_SCOPED_KINDS = frozenset({MODEL, BLOCKED, CONCURRENCY})
 
 - **zen / kilo 401 → `INVALID`**：两者无凭证；`401 Missing API key.` 只说明该模型要付费 key。归 `DEAD` → 一次强制付费请求硬禁用整条免费渠道。
 - **模型能力拒绝 → `INVALID`，不是 `REQUEST`**：CodeArts `InferHub.001001020.406 The request model is not multimodal` 是「这个模型收不了图片」，同渠道换任何一个号都会回同一条错误。归 `REQUEST`（换号重试）会让同一渠道的 N 条凭证各撞一次，`MAX_ROTATE = 3` 被它吃满，请求永远轮不到 `supports_images=True` 的渠道——2026-11-01 22:18–22:20 四个带图请求就是这样全部 400 收尾的（明细 4 条 `invalid_request`，`rescued=0`）。归 `INVALID` 一次尝试即 `_skip_provider` 跳过整条渠道，剩余预算留给真正支持图片的上游。同一错误走 HTTP 400 时本就落 `INVALID`，两条路径现在一致。
-- **额度耗尽写成凭据失效 → 分类层仍 `DEAD`，引擎收口为 `CREDIT`**：officeace 积分耗尽回的是 `401 APIG.1009 AppKey or AppSecret is invalid`（与「AppKey 真坏了」同一条文案），实测 2026-11-02 三条凭证 `quota_remaining = 0 / quota_total = 4100`，同一条错误也出现在模型列表接口上。分类层没有额度上下文，放宽成 `CREDIT` 会让真坏的 AppKey 静默成「等签到」，故 provider 照判 `DEAD`；由 `executor._dead_as_credit` 按**已探明额度**收口：`health == -1` 或 `quota_remaining <= 0` → `CREDIT`（冷却到次日 04:00，不硬禁用），未探测过（None）保持 `DEAD`（未知 ≠ 耗尽）。收尾行（`_stream_error_type` / 轮换耗尽行）与尝试行同判据，不会出现「尝试行说凭证失效、收尾行说额度耗尽」。旧口径的代价实测：硬禁用 + 落 `credential_unavailable` → 运维 revive 5 次 + OAuth 重登换号 1 次，401 照旧。判据只看额度证据、不看渠道名。
+- **额度耗尽写成凭据失效 → 分类层仍 `DEAD`，引擎按**新鲜**额度证据收口为 `CREDIT`**：officeace 积分耗尽回的是 `401 APIG.1009 AppKey or AppSecret is invalid`（与「AppKey 真坏了」同一条文案），实测 2026-11-02 三条凭证 `quota_remaining = 0 / quota_total = 4100`，同一条错误也出现在模型列表接口上。分类层没有额度上下文，放宽成 `CREDIT` 会让真坏的 AppKey 静默成「等签到」，故 provider 照判 `DEAD`；由 `executor._credit_if_exhausted` 收口：本地 `health == -1` 或 `quota_remaining <= 0` 直接改判 `CREDIT`（冷却到次日 04:00，不硬禁用，不出网）；**证据陈旧（正数或未探测）时先现场复探一次**（`_probe_quota_now`，写回 `quota_*` 后再判）——积分是分钟级烧完的，而周期探额 60 分钟一轮，401 常常早于下一次探测（实测 2026-11-03：三条凭证 07:39/08:00/08:25 被硬禁用，401 前最后一次探额分别是 56.66 / 100 / 51.37，复探立刻为 0）。复探仍为正数、复探失败、无探测能力、凭证已并发删除，一律保持 `DEAD`（未知 ≠ 耗尽；`probe_failed` 不入库，免得一次网络抖动把已探明的正数抹成未知）；同号并发 401 在 60s 窗口内共用一次复探（`DEAD_QUOTA_PROBE_TTL_SECONDS`），避免对着同一账号并发打 N 次订阅接口。收尾行（`_stream_error_type` / 轮换耗尽行）与尝试行同判据，不会出现「尝试行说凭证失效、收尾行说额度耗尽」。旧口径的代价实测：硬禁用 + 落 `credential_unavailable` → 运维 revive 5 次 + OAuth 重登换号 1 次，401 照旧。判据只看额度证据、不看渠道名。
 - **kilo 429 与 502/503/504 → `MODEL`**：免费池 = OpenRouter 共享池，报错点名具体模型（`limit_source: upstream_provider_shared_pool`）；此时其他免费模型仍可用。
 - **CodeArts 临时凭证过期 → `SOFT`**：`HTTP 400` + `APIG.0602 security token has expired`，识别先于 `401/403 → DEAD`（`_STS_EXPIRED_MARKERS`）。判 `DEAD` → `RefreshTask` 跳过该凭证 → 断唯一自愈路径。
 - **Qoder 401 与 403 不对称**：`401` 一律 `DEAD`（实测只有凭据/会话失效一种形态：`TOKEN_EXPIRE` 等；放宽等于让被吊销的 token 在 60s 轮换里反复撞上游）；`403` 只在带会话失效标记时 `DEAD`，其余 `SOFT`。排队信号优先于两者（见上）。`classify_status` 只是 `classify_error_code` 的转发，判据只写一处，HTTP 与流内信封不可能漂移。
@@ -468,7 +469,7 @@ class Provider(Protocol):
 
 **网关地址归一**：`client-permission-validate` 下发的 `api_base` 带 `/v2` → `_gateway_of()` 去尾部 `/v2` 再拼端点（否则 `/v2/v2/chat/completions`）。每账号一个网关主机 → 不进 `OFFICEACE_ALLOWED_ENDPOINTS`（白名单只管控制面）。
 
-**错误分类**：限流走**伪 200**（HTTP 200 + `data:{"error":{...}}`），且有「首帧正常、第二帧才 error」形态 → 不能首帧成功后停检查。`81004`（无模型权限）/ `81009`（模型名不认）→ `BLOCKED` 模型级负缓存；`81111`/`81112`/`81114` → 限流；`14018` → `CREDIT`。不做主动探活（耗积分）；模型目录按 `/v2/models` + 实际请求成败收敛。
+**错误分类**：限流走**伪 200**（HTTP 200 + `data:{"error":{...}}`），且有「首帧正常、第二帧才 error」形态 → 不能首帧成功后停检查。`81004`（无模型权限）/ `81009`（模型名不认）→ `BLOCKED` 模型级负缓存；`81111`/`81112`/`81114` → 限流；`14018` → `CREDIT`。不做主动探活（耗积分）；模型目录按 `/v2/models` + 实际请求成败收敛。**唯一的例外是 `APIG.1009` 的 DEAD 收口**：积分耗尽与 AppKey 真坏同文案，引擎在本地额度证据陈旧（正数 / 未探测）时现场复探一次 `GET /v1/subscription`（只读、不耗积分、不刷新凭据）再判，见 §3.2「额度耗尽写成凭据失效」。
 
 **`max_tokens` 改写**（`clamp_max_tokens`）：`>= 16` 追加 1024 headroom 再夹到模型上限；`< 16` 原样；未给不补。`max_completion_tokens` 归一成 `max_tokens`。上限表：`glm-5*` 131072、`qwen3*` 65536、其余 393216。
 
@@ -711,7 +712,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 - **分组表合并列**：`请求`（数 · 成功率）、`Token`（输入/输出 · 命中率）、`速度`（正文/总产出）、`平均延迟`（耗时/首字）、`P95 延迟`，14 → 8 列。排序走 `SortMenuHead`，子列键即 `GROUP_SORT_COLUMNS` 白名单键。延迟拆两列：均值读小时汇总、P95 读明细，口径与覆盖期不同。
 - **明细合并列**：`Token` / `延迟` / `速度` / `渠道 / 凭证`，15 → 约 10 列。`时间` 拆两行（`HH:mm:ss` 在上、日期在下），请求 ID 提示挂该格。`SortMenuHead` 让一个列头承载多个排序键。命中率走 `EVENT_SORT_COLUMNS["cache_rate"]`：`CASE WHEN e.input_tokens > 0 THEN CAST(e.cached_tokens AS REAL) / e.input_tokens ELSE NULL END`；速度两列由 `_row_speed_sql("e.")` 生成，与 `events()` 的 SELECT **同一片段**。
 - **请求 ID**：`X-Request-ID`（`webapp/request_id.py` 最外层）。入站合法（`[A-Za-z0-9._:-]{1,128}`）沿用，否则 `uuid4().hex`；同一中间件把会话标识头写进 contextvar 供粘性读取；ID 经 `request_context` 传进 `usage_events.request_id`。**不透传上游**。
-- **失败归因**（`GET /api/stats/errors`，operator+）：按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` 明细。`failures` 是**尝试**口径（每次上游拒绝一行）；`rescued` = 同用户同 `request_id` 另有成功行的行数（不叠加时间窗，走 `idx_usage_request`）；`failures − rescued` = 未被救回的失败尝试数（同一请求多次失败算多次）。DEAD（硬禁用）额外落一行 `credential_unavailable`（额度已探明耗尽的 DEAD 例外：降级为 `CREDIT`，不硬禁用、不落该归因，见上文「额度耗尽写成凭据失效」）；账号被上游风控限制（11140）落 `account_restricted`，该凭证 2h 冷却且当前请求不再换号；同渠道窗口内**第二个不同凭证**也中招才整渠道退避 24h，不写 `disabled`；轮换耗尽时不再重复落收尾行，避免 `requests` 与 Key 日额度双计。
+- **失败归因**（`GET /api/stats/errors`，operator+）：按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` 明细。`failures` 是**尝试**口径（每次上游拒绝一行）；`rescued` = 同用户同 `request_id` 另有成功行的行数（不叠加时间窗，走 `idx_usage_request`）；`failures − rescued` = 未被救回的失败尝试数（同一请求多次失败算多次）。DEAD（硬禁用）额外落一行 `credential_unavailable`（额度耗尽证据成立的 DEAD 例外：降级为 `CREDIT`，不硬禁用、不落该归因，见上文「额度耗尽写成凭据失效」）；账号被上游风控限制（11140）落 `account_restricted`，该凭证 2h 冷却且当前请求不再换号；同渠道窗口内**第二个不同凭证**也中招才整渠道退避 24h，不写 `disabled`；轮换耗尽时不再重复落收尾行，避免 `requests` 与 Key 日额度双计。
 - **延迟均值只算成功请求**（`SUM(latency_ms WHERE ok=1)` / `ok_count`）。
 - **图表时序指标**（`timeline` / `model-timeline`）：`METRIC_KINDS` 一张表定语义，查询侧固定取齐 10 列聚合（`_METRIC_AGGREGATES`），由 `_metric_value(metric, row)` 归一。派生指标**在聚合后相除**（成功率 `ok_count/requests`、缓存命中率 `cached/input`、单请求成本 `cost/requests`），不是逐小时比率的平均——后者会被低量小时等权带偏。无样本一律给 `null` 而非 0（均值给 0 会画成「0 ms」的假低谷，比率给 0 会显示成「0%」）。
 - **图表时间轴稠密**：`usage_hourly` 只在有请求时才有行，稀疏下发会让前端把「空档 5 小时」和「相邻 1 小时」画成一样宽（分类轴压缩时间）。`_dense_hours()` 按 `since`/`until` 补齐小时桶（都不给则补首末观测之间），跨度超 `MAX_DENSE_HOURS`（92 天）时退回观测小时。缺失桶取值由 `_empty_value()` 按语义给：可加量补 0，均值/比率/成本补 `null`（前端 `connectNulls={false}` 断线）。前端 X 轴用 `type="number"` + `scale="time"` + 毫秒时间戳，按真实时间定位。

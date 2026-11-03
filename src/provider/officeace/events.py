@@ -29,9 +29,10 @@
 `quota_remaining = 0 / quota_total = 4100`，同一条错误也出现在模型列表接口
 上）。分类层没有额度上下文，判 `CREDIT` 会让「AppKey 真的坏了」静默成
 「等签到」；而判 `DEAD` 会导致硬禁用 + 运维重登（积分是 0，重登无解）。
-故这里保持 DEAD（凭据级），由引擎按**已探明额度**收口：`health == -1` 或
-`quota_remaining <= 0` 时降级为 `CREDIT`（冷却到次日 04:00，不硬禁用），
-判据只写一处，见 `src/engine/executor.py::_dead_as_credit`。
+故这里保持 DEAD（凭据级），由引擎按**新鲜额度证据**收口：本地
+`health == -1` 或 `quota_remaining <= 0` 直接降级为 `CREDIT`（冷却到次日
+04:00，不硬禁用）；证据陈旧（正数 / 未探测）时先现场复探一次再判（见
+`src/engine/executor.py::_credit_if_exhausted` / `_probe_quota_now`）。
 
 **限流走伪 200**：华为网关限流时会 HTTP 200 + `data:{"error":...}`，
 首帧正常、第二帧才是错误也出现过。解析层因此不能假设「2xx 就是好流」，
@@ -101,7 +102,8 @@ _MODEL_REJECT_MARKERS: tuple[str, ...] = ("81004", "81009")
 _MODEL_THROTTLE_MARKERS: tuple[str, ...] = ("81111", "81112", "81114")
 #: 凭据级故障：app key 坏了 / 网关分片换了。
 #: `APIG.1009` 也是「积分耗尽」的报错形态（同一条 401 文案，见模块 docstring）：
-#: 这里照判 DEAD（没有额度上下文），由 executor 按已探明额度降级为 CREDIT。
+#: 这里照判 DEAD（没有额度上下文），由 executor 按额度证据降级为 CREDIT
+#: （证据陈旧时先现场复探，见 executor._credit_if_exhausted）。
 _AUTH_DEAD_MARKERS: tuple[str, ...] = (
     "apig.1009",
     "appkey or appsecret is invalid",

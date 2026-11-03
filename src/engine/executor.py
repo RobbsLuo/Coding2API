@@ -34,7 +34,7 @@ from ..provider.base import (
     aclose_stream,
     event_error_kind,
 )
-from ..request_context import set_credential_id
+from ..request_context import credential_scope, set_credential_id
 from .continuation import ContinuationStream
 from .model_resolver import (
     ModelTarget,
@@ -69,6 +69,11 @@ RESTRICTED_BURST_CREDENTIALS = 2
 # 渠道级暂停时长：只冷却、不禁用，到期自动恢复。比单号 2h 长一个量级，
 # 给运维留出换出口 / 申诉的时间。
 RESTRICTED_PROVIDER_PAUSE_SECONDS = 24 * 3600
+# DEAD 现场复探额度的节流窗口（秒）：重负载下同一凭证会**同时**收到多个 401
+# （正是积分被烧光的场景），不去重就会对同一账号并发打 N 次订阅接口。
+# 只影响「复探失败 / 复探仍是正数」两种情形（结论都是 DEAD，去重安全）：
+# 复探出 0 会立刻写回，后续请求在 `_quota_exhausted` 处就短路，不会进这里。
+DEAD_QUOTA_PROBE_TTL_SECONDS = 60.0
 
 
 class StreamSink(Protocol):
@@ -315,6 +320,9 @@ class Executor:
         # 探测位（按凭证分组，先进后出释放）。
         self._pending_probe: dict[str, tuple[str, str]] = {}
         self._probe_leases: dict[str, list[tuple[str, str]]] = {}
+        # DEAD 现场复探额度的在途/最近一次结果：{credential_id: (完成时刻, 是否耗尽)}。
+        # 同号并发 401 共用一次探测（见 `DEAD_QUOTA_PROBE_TTL_SECONDS`）。
+        self._dead_quota_probes: dict[str, tuple[float, bool]] = {}
 
     def _record_invalid(self, username: str, provider_id: str, credential_id: str,
                         model: str, started: float, error: object) -> None:
@@ -750,7 +758,7 @@ class Executor:
                         self._check_model_substitution(
                             target.model, event.model, provider_id, credential_id)
                     if event.kind is EventKind.ERROR:
-                        kind = self._credit_if_exhausted(
+                        kind = await self._credit_if_exhausted(
                             _event_kind(event), credential_id, provider_id)
                         if kind is ErrKind.QUEUE:
                             # 排队：上游点名「等 N 秒再来」。未出帧时在原号上
@@ -848,7 +856,7 @@ class Executor:
                         yield frame
                     return
             except Exception as error:  # noqa: BLE001 - 统一转为冷却或上抛
-                kind = self._credit_if_exhausted(
+                kind = await self._credit_if_exhausted(
                     _classify(error), credential_id, provider_id)
                 if kind is None:
                     raise
@@ -1358,7 +1366,7 @@ class Executor:
                     error_message=(f"upstream complete exceeded "
                                    f"{overflow.limit} events")))
             except Exception as error:  # noqa: BLE001
-                kind = self._credit_if_exhausted(
+                kind = await self._credit_if_exhausted(
                     _classify(error), credential_id, provider_id)
                 if kind is None:
                     raise
@@ -1422,7 +1430,7 @@ class Executor:
                 try:
                     result = aggregate(events, target.model)
                 except UpstreamStreamError as error:
-                    kind = self._credit_if_exhausted(
+                    kind = await self._credit_if_exhausted(
                         _event_kind(error.event), credential_id, provider_id)
                     if kind is ErrKind.INVALID:
                         # 推理档位被拒（流内 error 事件形态）：原号降一档重试一次
@@ -1508,7 +1516,7 @@ class Executor:
                 if last_kind is ErrKind.INVALID:
                     raise InvalidRequest(_reject_message(
                         target.model, last_error, self._suggestions(target.model)))
-                kind = (self._credit_if_exhausted(
+                kind = (await self._credit_if_exhausted(
                     _classify(last_error), credential_id, provider_id)
                     if last_error is not None else None)
                 # DEAD 尝试行已落过明细时不再落收尾行：一次请求两行会让
@@ -1748,17 +1756,74 @@ class Executor:
         return (candidate.quota_remaining is not None
                 and candidate.quota_remaining <= 0)
 
-    def _credit_if_exhausted(self, kind: ErrKind | None, credential_id: str,
-                             provider_id: str) -> ErrKind | None:
-        """DEAD 且该凭证额度已探明耗尽 → CREDIT；其余分类原样返回。
+    async def _credit_if_exhausted(self, kind: ErrKind | None, credential_id: str,
+                                   provider_id: str) -> ErrKind | None:
+        """DEAD 且额度证据成立 → CREDIT；证据不成立时以现场复探收口。
 
         非 DEAD 直接返回，不做候选查询：这条判据只在「凭据失效」这一分类上
         需要额度证据（见 `_dead_as_credit`），其它分类的冷却口径不受影响。
+
+        本地已探明耗尽（`_quota_exhausted`）就直接降级，不再出网。**证据陈旧**
+        （`quota_remaining` 还是正数或未探测）时必须现场复探一次：积分是分钟级
+        烧完的，而周期探额 60 分钟一轮，401 往往早于下一次探测（见
+        `_probe_quota_now`）。复探失败＝证据仍不明 → 保持 DEAD。
         """
         if kind is not ErrKind.DEAD:
             return kind
+        if self._quota_exhausted(credential_id, provider_id):
+            return ErrKind.CREDIT
         return _dead_as_credit(
-            quota_exhausted=self._quota_exhausted(credential_id, provider_id))
+            quota_exhausted=await self._probe_quota_now(credential_id, provider_id))
+
+    async def _probe_quota_now(self, credential_id: str,
+                               provider_id: str) -> bool:
+        """DEAD 现场复探该凭证额度，写回后按**新鲜证据**再判是否耗尽。
+
+        为什么必须现场探：officeAce 积分耗尽写成 `401 APIG.1009`（与 AppKey
+        真坏同文案），判据只能是额度证据；而周期探额 60 分钟一轮，重负载下几十
+        个请求几分钟就能把剩余积分烧光——401 到达时库里往往还是正数，
+        `_dead_as_credit` 收不了口（实测 2026-11-03：三条凭证 07:39/08:00/08:25
+        被硬禁用，401 前最后一次探额分别是 56.66 / 100 / 51.37，复探立刻为 0）。
+
+        探测能力缺失（provider 没有 `probe_quota`）、凭证取不到（并发删除 /
+        解不开）、或探测本身失败，都返回 False＝保持 DEAD：宁可硬禁用一条额度
+        不明的凭证，也不能把「AppKey 真坏了」静默成「等签到」。`probe_failed`
+        的结果不入库，免得把已探明的正数被一次网络抖动抹成未知。
+
+        **同号并发去重**：积分烧光时同一凭证会同时收到多个 401，逐个去探等于
+        对同一账号并发打 N 次订阅接口。`DEAD_QUOTA_PROBE_TTL_SECONDS` 内复用
+        最近一次结论；复探出 0 时立刻写回额度，后续请求在 `_quota_exhausted`
+        就短路，不会走到这里。
+        """
+        now = time.monotonic()
+        cached = self._dead_quota_probes.get(credential_id)
+        if cached is not None and now - cached[0] < DEAD_QUOTA_PROBE_TTL_SECONDS:
+            return cached[1]
+        exhausted = await self._probe_quota_uncached(credential_id, provider_id)
+        self._dead_quota_probes[credential_id] = (time.monotonic(), exhausted)
+        return exhausted
+
+    async def _probe_quota_uncached(self, credential_id: str,
+                                    provider_id: str) -> bool:
+        """`_probe_quota_now` 的实际探测体（不看去重缓存）。"""
+        provider = self._deps.providers.get(provider_id)
+        probe = getattr(provider, "probe_quota", None)
+        if probe is None:
+            return False
+        data = self._safe_credential_data(credential_id)
+        if data is None:
+            return False
+        try:
+            # 出口 IP 粘性：复探与推理必须走同一出口（见 provider/proxy.py）
+            with credential_scope(credential_id):
+                quota = await probe(data)
+        except Exception as error:  # noqa: BLE001 - 探测失败＝证据仍不明
+            logger.warning("DEAD 现场复探额度失败（凭证 %s）: %s",
+                           credential_id, _error_detail(error))
+            return False
+        if not quota.probe_failed:
+            self._deps.credentials.save_quota(credential_id, quota)
+        return self._quota_exhausted(credential_id, provider_id)
 
     def _select(self, target: ModelTarget, tried: set[str],
                 affinity_id: str | None = None) -> str | None:
@@ -2303,7 +2368,7 @@ def _reject_message(model: str, last_error: Exception | None,
 
 
 def _dead_as_credit(*, quota_exhausted: bool) -> ErrKind:
-    """DEAD 的凭证额度**已探明**耗尽 → 改判 CREDIT（不硬禁用）。
+    """DEAD 的额度证据成立 → 改判 CREDIT（不硬禁用）。
 
     上游把「额度用完」写成了凭据失效：officeace 积分耗尽时回 `HTTP 401
     APIG.1009 AppKey or AppSecret is invalid`（实测 2026-11-02：三条凭证
@@ -2315,10 +2380,11 @@ def _dead_as_credit(*, quota_exhausted: bool) -> ErrKind:
     401 照旧）。判 CREDIT 的处置是「冷却到次日 04:00 等签到恢复」，与真实
     恢复路径一致，也不会把一条额度会回来的凭证永久踢出池子。
 
-    只在**已探明**额度为 0 时降级（`health == -1` 或 `quota_remaining <= 0`）：
-    没探测过（None）时保持 DEAD——宁可硬禁用一条额度不明的凭证，也不能把
-    「AppKey 真坏了」静默成「等签到」。判据只看额度证据，不看渠道名，任何
-    渠道「DEAD 与额度耗尽同时成立」都按额度处理。
+    `quota_exhausted` 由调用方给**新鲜**证据：`_credit_if_exhausted` 先看本地
+    额度，证据陈旧（正数 / 未探测）时现场复探一次再传进来。没探测过（None）
+    且复探失败时保持 DEAD——宁可硬禁用一条额度不明的凭证，也不能把「AppKey
+    真坏了」静默成「等签到」。判据只看额度证据，不看渠道名，任何渠道
+    「DEAD 与额度耗尽同时成立」都按额度处理。
     """
     return ErrKind.CREDIT if quota_exhausted else ErrKind.DEAD
 

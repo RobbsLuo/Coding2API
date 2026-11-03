@@ -37,6 +37,9 @@ def _exec_with_stats(repo_tuple, script, collector, **kw):
 
         def __init__(self) -> None:
             self.calls = 0
+            # DEAD 现场复探的注入点：默认不提供 `probe_quota`（= 无探测能力），
+            # 需要的用例通过 `probe` 参数挂一个假实现。
+            self.probe = kw.pop("probe", None)
 
         async def stream_chat(self, _data, _payload, _model):
             index = min(self.calls, len(script) - 1)
@@ -49,8 +52,11 @@ def _exec_with_stats(repo_tuple, script, collector, **kw):
         def list_models(self, _data):  # pragma: no cover
             return []
 
+    streaming = Streaming()
+    if streaming.probe is not None:
+        streaming.probe_quota = streaming.probe
     executor = Executor(ExecutorDeps(
-        providers={"codebuddy": Streaming()}, credentials=credentials,
+        providers={"codebuddy": streaming}, credentials=credentials,
         scheduler=Scheduler(**kw), default_model="glm-5.2", stats=collector))
     return executor
 
@@ -566,6 +572,210 @@ async def test_stream_dead_with_exhausted_quota_records_rate_limit(repo):
             return ErrKind.DEAD
 
     executor = _exec_with_stats(repo, [[Dead()]], collector)
+    from src.compat.openai.request import parse_chat_request
+
+    chunks = [chunk async for chunk in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
+    assert chunks
+    kinds = [event["error_type"] for event in collector.events]
+    assert kinds == ["no_healthy_credential"]
+    assert credentials.candidates()[0].disabled is False
+
+
+async def test_dead_probes_quota_now_when_local_evidence_is_stale(repo):
+    """DEAD 且本地额度还是正数（证据陈旧）→ 现场复探一次再判。
+
+    回归 2026-11-03 officeace：三条凭证 07:39/08:00/08:25 收到
+    `401 APIG.1009`，401 前最后一次探额分别是 56.66 / 100 / 51.37（周期探额
+    60 分钟一轮，重负载几分钟就烧光），`_dead_as_credit` 因证据为「正数」
+    收不了口 → 硬禁用 + `credential_unavailable`，只能人工 revive。
+    现场复探得 0 → 改判 CREDIT，凭证留在池子里等次日签到。
+    """
+    from src.engine.scheduler import next_credit_reset
+    from src.request_context import get_credential_id
+
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy",
+                          credential_data={"bearer_token": "t"})
+    credentials.save_quota(cid, Quota(remaining=56.66, total=4100, probed_at=1))
+    seen: list[str | None] = []
+
+    async def probe(_data):
+        # 复探必须走该凭证自己的出口（一号一出口）
+        seen.append(get_credential_id())
+        return Quota(remaining=0, total=4100, probed_at=int(time.time()))
+
+    collector = RecordingCollector()
+
+    class Dead(Exception):
+        def kind(self):
+            return ErrKind.DEAD
+
+    executor = _exec_with_stats(repo, [[Dead()]], collector, probe=probe)
+    from src.compat.openai.request import parse_chat_request
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+
+    assert seen == [cid]                       # 复探在凭证作用域内执行
+    row = credentials.candidates()[0]
+    assert row.disabled is False
+    assert row.cooling_until == next_credit_reset(int(time.time()))
+    assert row.quota_remaining == 0            # 新鲜证据已写回
+    assert "credential_unavailable" not in [
+        event["error_type"] for event in collector.events]
+
+
+async def test_dead_probe_keeps_dead_when_quota_still_positive(repo):
+    """复探仍是正数 → AppKey 真坏了，保持 DEAD（不静默成「等签到」）。"""
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy",
+                          credential_data={"bearer_token": "t"})
+    credentials.save_quota(cid, Quota(remaining=100, total=4100, probed_at=1))
+
+    async def probe(_data):
+        return Quota(remaining=100, total=4100, probed_at=int(time.time()))
+
+    collector = RecordingCollector()
+
+    class Dead(Exception):
+        def kind(self):
+            return ErrKind.DEAD
+
+    executor = _exec_with_stats(repo, [[Dead()]], collector, probe=probe)
+    from src.compat.openai.request import parse_chat_request
+
+    chunks = [chunk async for chunk in executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
+    assert chunks
+    assert credentials.candidates()[0].disabled is True
+    assert "credential_unavailable" in [
+        event["error_type"] for event in collector.events]
+
+
+async def test_dead_probe_failure_keeps_dead_and_keeps_known_quota(repo):
+    """复探抛错 / 探测失败 / 无探测能力 / 凭证已删 → 一律保持 DEAD。
+
+    未知不等于耗尽：宁可硬禁用一条额度不明的凭证，也不能把「AppKey 真坏了」
+    静默成「等签到」。探测失败也不写库——一次网络抖动不该把已探明的正数抹成未知。
+    """
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy",
+                          credential_data={"bearer_token": "t"})
+    credentials.save_quota(cid, Quota(remaining=100, total=4100, probed_at=1))
+
+    async def boom(_data):
+        raise RuntimeError("upstream down")
+
+    async def failed(_data):
+        return Quota(probe_failed=True, probed_at=int(time.time()))
+
+    executor = _exec_with_stats(repo, [], None, probe=boom)
+    assert await executor._credit_if_exhausted(ErrKind.DEAD, cid,
+                                               "codebuddy") is ErrKind.DEAD
+    # 探测失败：额度保持上次已知值（不被抹成未知）
+    executor = _exec_with_stats(repo, [], None, probe=failed)
+    assert await executor._credit_if_exhausted(ErrKind.DEAD, cid,
+                                               "codebuddy") is ErrKind.DEAD
+    assert credentials.candidates()[0].quota_remaining == 100
+    # provider 没有 probe_quota（zen / kilo 之外的自定义装配）
+    executor = _exec_with_stats(repo, [], None)
+    assert await executor._credit_if_exhausted(ErrKind.DEAD, cid,
+                                               "codebuddy") is ErrKind.DEAD
+    # 凭证在请求途中被并发删除：取不到明文，不能凭空探一个不存在的号
+    executor = _exec_with_stats(repo, [], None, probe=failed)
+    assert await executor._credit_if_exhausted(
+        ErrKind.DEAD, "cred_gone", "codebuddy") is ErrKind.DEAD
+
+
+async def test_dead_probe_is_deduplicated_per_credential(repo):
+    """同号并发 401 共用一次复探：积分烧光时同一账号会同时收到多个 401。
+
+    不去重就是对着同一账号并发打 N 次订阅接口——正是最容易触发上游风控的形态。
+    复探结论为 DEAD 时也必须去重（结论相同，重复探测毫无收益）。
+    """
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy",
+                          credential_data={"bearer_token": "t"})
+    credentials.save_quota(cid, Quota(remaining=100, total=4100, probed_at=1))
+    calls: list[dict] = []
+
+    async def probe(_data):
+        calls.append({})
+        return Quota(remaining=100, total=4100, probed_at=int(time.time()))
+
+    executor = _exec_with_stats(repo, [], None, probe=probe)
+    for _ in range(3):
+        assert await executor._credit_if_exhausted(
+            ErrKind.DEAD, cid, "codebuddy") is ErrKind.DEAD
+    assert len(calls) == 1                   # 三次 401 只探一次
+
+
+async def test_dead_probe_cache_expires(repo):
+    """去重窗口过后重新探测：额度会随签到恢复，结论不能永久缓存。"""
+    from src.engine import executor as executor_module
+
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy",
+                          credential_data={"bearer_token": "t"})
+    credentials.save_quota(cid, Quota(remaining=100, total=4100, probed_at=1))
+    calls: list[dict] = []
+
+    async def probe(_data):
+        calls.append({})
+        return Quota(remaining=100, total=4100, probed_at=int(time.time()))
+
+    executor = _exec_with_stats(repo, [], None, probe=probe)
+    await executor._credit_if_exhausted(ErrKind.DEAD, cid, "codebuddy")
+    # 把缓存时刻拨到窗口之外（等价于「上一次复探已过 TTL」）
+    executor._dead_quota_probes[cid] = (
+        time.monotonic() - executor_module.DEAD_QUOTA_PROBE_TTL_SECONDS - 1, False)
+    await executor._credit_if_exhausted(ErrKind.DEAD, cid, "codebuddy")
+    assert len(calls) == 2
+
+
+async def test_credit_if_exhausted_short_circuits_non_dead_and_known_exhaustion(repo):
+    """非 DEAD 与「本地已探明耗尽」都不出网：复探只为补陈旧的额度证据。"""
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy",
+                          credential_data={"bearer_token": "t"})
+    calls: list[dict] = []
+
+    async def probe(_data):
+        calls.append({})
+        return Quota(remaining=0, total=4100, probed_at=1)
+
+    executor = _exec_with_stats(repo, [], None, probe=probe)
+    # 非 DEAD：原样返回，连候选都不查（其它分类的冷却口径不受影响）
+    assert await executor._credit_if_exhausted(ErrKind.SOFT, cid,
+                                               "codebuddy") is ErrKind.SOFT
+    assert await executor._credit_if_exhausted(None, cid, "codebuddy") is None
+    assert calls == []
+    # 本地已探明耗尽：直接降级，不再出网
+    credentials.save_quota(cid, Quota(remaining=0, total=4100, probed_at=1))
+    assert await executor._credit_if_exhausted(ErrKind.DEAD, cid,
+                                               "codebuddy") is ErrKind.CREDIT
+    assert calls == []
+
+
+async def test_stream_dead_with_stale_quota_probes_and_records_rate_limit(repo):
+    """流式同判据：证据陈旧时先复探，收尾行按复探结果记 rate_limit。"""
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy",
+                          credential_data={"bearer_token": "t"})
+    credentials.save_quota(cid, Quota(remaining=51.37, total=4100, probed_at=1))
+
+    async def probe(_data):
+        return Quota(remaining=0, total=4100, probed_at=int(time.time()))
+
+    collector = RecordingCollector()
+
+    class Dead(Exception):
+        def kind(self):
+            return ErrKind.DEAD
+
+    executor = _exec_with_stats(repo, [[Dead()]], collector, probe=probe)
     from src.compat.openai.request import parse_chat_request
 
     chunks = [chunk async for chunk in executor.stream(parse_chat_request(

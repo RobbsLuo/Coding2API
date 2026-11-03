@@ -83,7 +83,7 @@
 - **未开通的账号要可行动**：`subscription: null` → 提示「请先在客户端兑换邀请码」，不用含糊的登录失败。
 - **三种上游特例**：① 限流走伪 200（HTTP 200 + `data:{"error":…}`，也见过首帧正常、第二帧才错）；② `81004`/`81009` 走 403/404 但属模型级，业务码判定先于状态码；③ `max_tokens` 是推理 + 正文总预算，`≥16` 追加 1024 再夹到模型硬上限，`<16` 原样透传，未给不补。
 - **积分即主账**：单位 `officeace_points`，`Quota.remaining`/`total` 直接是积分；每笔奖励独立到期。签到 `POST /v1/subscription/bonus/claim` 是写操作，body 必须给 `` + JSON `Content-Type`（空 body 会 500），上游对当日重复领取幂等；收获按 `bonus_skus` 剩余量增量算。
-- **不做主动探活 / 不做 credit 估算**：探活要真发推理消耗积分；`cost_coefficient` 与 `tokens_per_point` 叠乘关系官方未说明。
+- **不做主动探活 / 不做 credit 估算**：探活要真发推理消耗积分；`cost_coefficient` 与 `tokens_per_point` 叠乘关系官方未说明。（`GET /v1/subscription` 读余额是**只读**、不耗积分，不在此列——它也是 `APIG.1009` 的 DEAD 收口时现场复探用的接口。）
 - **单账号单用户**：官方《套餐管理》限制单账号单用户，每人各加自己凭证。
 
 ### 2.9 冲突与陷阱

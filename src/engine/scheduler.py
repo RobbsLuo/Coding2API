@@ -338,8 +338,8 @@ class Scheduler:
                    retry_at: int | None = None) -> ErrorOutcome:
         """按错误分类更新冷却/禁用状态。
 
-        DEAD    → 硬禁用（额度**已探明**耗尽的 DEAD 由 executor 先降级为 CREDIT，
-                   见 `executor._dead_as_credit`——被积分耗尽误判成凭据失效时，
+        DEAD    → 硬禁用（额度耗尽的 DEAD 由 executor 先降级为 CREDIT，
+                   见 `executor._credit_if_exhausted`——被积分耗尽误判成凭据失效时，
                    重登/换号都救不回来，硬禁用只会逼运维做无效动作）
         RESTRICTED → 账号级指数冷却（2h 起按命中次数翻倍，封顶 7 天；
                     executor 另外跳过该渠道其余凭证，不逐个号去撞）
