@@ -199,7 +199,7 @@ describe("CredentialsPage", () => {
     expect(screen.queryByTestId("quota-expiring")).not.toBeInTheDocument();
     const secondary = screen.getAllByTestId("quota-expiring-secondary");
     expect(secondary).toHaveLength(1);
-    expect(secondary[0]).toHaveTextContent("7.0 天内共 140 积分将过期");
+    expect(secondary[0]).toHaveTextContent("7.0 天窗口内共 140 积分将到期");
   });
 
   it("主窗口有数字时不重复渲染次窗口（次窗口是主窗口的超集）", async () => {

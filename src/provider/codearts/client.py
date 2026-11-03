@@ -68,6 +68,11 @@ logger = logging.getLogger(__name__)
 # 签名与请求必须同值，实现归 signer（officeace 共用同一份）
 sdk_date = signer.sdk_date
 
+#: claim 成功但 confirm 未完成时 `claim_daily_credit` 回的业务码。上游业务码
+#: 恒为非负（`-1` 已用于「上游没给 code」），故取 -2 作本地标记；非 0 即可让
+#: `checkin()` 归失败。见 `claim_daily_credit` / `_confirm_daily_credit`。
+CONFIRM_FAILED_CODE = -2
+
 
 def new_chat_id() -> str:
     """32 位十六进制 chat_id（UUID 去连字符）；上游对格式有硬校验。"""
@@ -351,6 +356,10 @@ class CodeArtsClient(LazyClients):
         业务码取上游 `code`（`0` 为成功）。非 0 是**业务**失败而非签名失败——
         实测有 `40001尚未到达权益刷新时间` 这类码，走 HTTP 200，所以不能只看
         HTTP 状态码。
+
+        confirm 失败**回 `CONFIRM_FAILED_CODE`**（见该常量的注释）：早先吞掉它的
+        返回值，会让 `checkin()` 报「签到成功」而积分实际未确认到账（实测用户反馈：
+        界面显示成功、官网不加积分）。
         """
         url = f"{self.endpoint}{EP_OPS_CLAIM}"
         key = (f"claim_{CAMPAIGN_DAILY_CREDIT}"
@@ -364,7 +373,11 @@ class CodeArtsClient(LazyClients):
         message = str(data.get("message") or "")
         if code != 0:
             return (-1 if code is None else code), (message or "领取失败")
-        await self._confirm_daily_credit(credential)
+        # confirm 是领取的第二步，它的结果**必须上抛**：回非 0 让 checkin() 归
+        # 失败、CheckinTask 当轮不封账；下轮上游 status 已是 CLAIMED，走「只补
+        # confirm」分支把状态收尾。吞掉失败则当日封账、再也不补确认。
+        if not await self._confirm_daily_credit(credential):
+            return CONFIRM_FAILED_CODE, "签到确认失败，稍后重试"
         return 0, message
 
     async def _confirm_daily_credit(self, credential: CodeArtsCredential) -> bool:
@@ -372,8 +385,9 @@ class CodeArtsClient(LazyClients):
 
         积分在 **claim 时就已到账**（实测：claim 后总额 +1000），confirm 只把
         状态从 `CLAIMED` 推到 `CONFIRMED`。所以 confirm 失败不丢积分，但它决定
-        本方法返回值——`checkin()` 的 `CLAIMED` 分支要靠它决定是否封账，吞掉失败
-        会让 `CheckinTask` 当天封账后再也不补确认。
+        两个调用方的返回值——`checkin()` 的 `CLAIMED` 分支与 `claim_daily_credit`
+        的 claim 分支都靠它决定是否封账，吞掉失败会让 `CheckinTask` 当天封账后
+        再也不补确认。
         """
         try:
             await self._request_json(

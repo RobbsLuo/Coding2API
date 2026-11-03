@@ -96,6 +96,11 @@ export const QUOTA_UNIT = "积分";
  * 主/次两个窗口共用一个函数：措辞区分开，否则两行同样的句式看不出
  * 谁是第一优先级（主窗口 36h 打平时才轮到次窗口 7 天）。
  *
+ * **措辞必须带「窗口」二字**：这里的时长是调度窗口（主 36h / 次 7 天），不是
+ * 某笔额度的剩余到期时间。早先写成「将在 1.5 天内过期」会被读成倒计时——
+ * 实测用户反馈「积分今天到期，显示到期 1.5 天」。窗口是「在此时间段内会到期」，
+ * 其中可能今天到期、也可能第 7 天才到期。
+ *
  * `unit` 默认「积分」，全渠道同口径。
  */
 export function expiringQuotaLabel(
@@ -109,8 +114,8 @@ export function expiringQuotaLabel(
   const amount = formatNumber(credits);
   const window = formatDuration(windowSeconds);
   return wording === "secondary"
-    ? `${window}内共 ${amount} ${unit}将过期`
-    : `${amount} ${unit}将在 ${window}内过期`;
+    ? `${window}窗口内共 ${amount} ${unit}将到期`
+    : `${amount} ${unit}将在 ${window}窗口内到期`;
 }
 
 export function cooldownRemaining(coolingUntil: number | null, now = Date.now() / 1000): number {

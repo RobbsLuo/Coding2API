@@ -96,6 +96,12 @@ PROBE_CONCURRENCY = 12
 # 预热在应用开始服务 /health 之前，不能无限等首字（实测正常 1–12s，偶发 >100s）。
 # 超时按不可用处理：宁可少显示一个慢模型，也不拖垮启动与健康检查。
 PROBE_TIMEOUT = 20.0
+# 探活判定「该模型由此主机确定不可用」的状态码：付费/需鉴权（401）、已下线
+# （400/404）、区域限制（403）。命中即从免费候选里剔除。
+# 其余非 2xx（429 匿名免费额度耗尽、5xx、连接超时）按「暂不可判定」保留——
+# 上游限流或抖动不该把整条免费渠道清空（实测 2026-11-03 匿名探测全线
+# `429 FreeUsageLimitError`，旧口径要求 2xx 会让 Zen 显示「无模型」）。
+PROBE_DEAD_STATUSES = frozenset({400, 401, 403, 404})
 # 探活用最小请求（真发一次流式对话；只看响应头，不读 body）。
 PROBE_PROMPT = "hi"
 # 探活结果缓存时长（秒）：探活是整条模型列表链路里最贵的一步——逐个真发一次
@@ -439,11 +445,16 @@ class ZenClient(LazyClients):
                 return
 
     async def fetch_models(self) -> list[Model]:
-        """GET /zen/v1/models，只返回**探活可用**的免费模型。
+        """GET /zen/v1/models，只返回**免费候选**（探活确认不可用的才剔除）。
 
         上游清单含全部（含付费）模型且无任何免费标记，直接透传会把 70 多个
         选不得的付费模型塞进 Playground（选中即 401）。此处按后缀收窄候选，
-        再逐个探活，只有真正匿名可用的才对下游可见：
+        再逐个探活，只有**确定不可用**（付费 401 / 下线 400 / 区域限制 403）的
+        才从结果里剔除；`429`（匿名免费额度耗尽）/ 5xx / 连接超时一律保留——
+        上游限流或抖动不该把整条免费渠道清空（实测 2026-11-03 匿名探测全线
+        `429 FreeUsageLimitError`，旧口径要求 2xx 会让 Zen 显示「无模型」）。
+        与 CodeBuddy 国际「429 / 5xx / 超时保留」同一取向。
+
         `fetch_models` 的结果同时也是引擎登记模型归属的来源，过滤后扁平名
         请求不会再被路由到 zen 的付费模型上（否则 401 会误伤虚拟凭证）。
 
@@ -483,38 +494,40 @@ class ZenClient(LazyClients):
                                         credit_rate=0.0))
         if not candidates:
             raise zen_events.UpstreamProtocolViolation("models api returned no free candidates")
-        alive = await self._probe_alive([model.id for model in candidates])
-        models = [model for model in candidates if model.id in alive]
+        available = await self._probe_available([model.id for model in candidates])
+        models = [model for model in candidates if model.id in available]
         if not models:
-            # 全部探活失败：多半是上游整体故障而非真的没有免费模型，
-            # 抛出让上层用上次成功的缓存兜底，避免 zen 从列表里消失。
+            # 候选全被**确定**判死（付费 401 / 下线 400 / 区域 403）：多半是上游
+            # 真实下架或本机网络受限。抛出让上层用上次成功的缓存兜底。
             raise zen_events.UpstreamProtocolViolation("no free model passed liveness probe")
         self._models_cache = (time.monotonic(), list(models))
         return models
 
-    async def _probe_alive(self, model_ids: list[str]) -> set[str]:
-        """并发探活：只留下**匿名请求返回 2xx** 的模型。
+    async def _probe_available(self, model_ids: list[str]) -> set[str]:
+        """并发探活：剔除**确定不可用**的模型，保留可用与暂不可判定的。
 
-        付费模型恒 401、已下线 400、区域限制 403、上游故障 5xx，一律不算
-        可用；连接/超时按不可用处理。用于模型列表展示，不触达业务统计。
+        `_probe_one` 判 `False`（付费 401 / 下线 400 / 区域 403）才剔除；
+        `True`（2xx）与 `None`（429 / 5xx / 连接超时——暂不可判定）都保留。
+        用于模型列表展示，不触达业务统计。
         """
         semaphore = asyncio.Semaphore(PROBE_CONCURRENCY)
 
         async def one(model_id: str) -> str | None:
             async with semaphore:
-                if await self._probe_one(model_id):
-                    return model_id
-                return None
+                if await self._probe_one(model_id) is False:
+                    return None
+                return model_id
 
         results = await asyncio.gather(*(one(model_id) for model_id in model_ids))
         return {model_id for model_id in results if model_id is not None}
 
-    async def _probe_one(self, model_id: str) -> bool:
-        """单模型探活：真发一次最小流式请求，2xx 即算可用。
+    async def _probe_one(self, model_id: str) -> bool | None:
+        """单模型探活：`True` 可用 / `False` 确定不可用 / `None` 暂不可判定。
 
         只看状态行、**不读 body**：进 context 即拿到响应头，随即关闭连接，
-        不会等整段生成跑完（付费 401 / 下线 400 都在响应头就定性）。
-        整体套 `asyncio.timeout`：首字过慢按不可用，不拖垮启动与 /health。
+        不会等整段生成跑完（付费 401 / 下线 400 / 区域 403 都在响应头就定性）。
+        整体套 `asyncio.timeout`：首字过慢按 `None`（暂不可判定，保留模型），
+        不拖垮启动与 /health。
         """
         body, _ = prepare_body(
             {"messages": [{"role": "user", "content": PROBE_PROMPT}]}, model_id,
@@ -525,9 +538,16 @@ class ZenClient(LazyClients):
                     "POST", self._chat_url(), json=body,
                     headers=self._gate_headers(),
                 ) as response:
-                    return response.status_code < 300
+                    status = response.status_code
+                    if status < 300:
+                        return True
+                    if status in PROBE_DEAD_STATUSES:
+                        return False
+                    logger.warning("zen 探活 %s 暂不可判定：HTTP %s", model_id, status)
+                    return None
         except (httpx.HTTPError, TimeoutError):
-            return False
+            logger.warning("zen 探活 %s 暂不可判定：连接失败/超时", model_id)
+            return None
 
 
 @dataclass(slots=True)

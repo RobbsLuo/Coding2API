@@ -938,8 +938,12 @@ export function CredentialsPage() {
                     const isCollapsed = !expanded.has(group.key);
                     // 到期积分：以「窗口 + 数字」两个图块呈现，比一行长句更像仪表盘。
                     // 主/次窗口措辞区分开（主窗口 36h 是次窗口 7 天的子集）。
-                    const primaryWindowLabel = `${formatDuration(expiryWindow)}内过期`;
-                    const secondaryWindowLabel = `${formatDuration(expirySecondaryWindow)}内过期`;
+                    // 措辞必须点明「窗口」：它是调度窗口（36h / 7d），不是某笔额度的
+                    // 剩余到期时间——实测「1.5天」被读成倒计时（积分今天到期却显示 1.5 天）。
+                    const primaryWindowLabel =
+                      `${formatDuration(expiryWindow)}窗口内到期`;
+                    const secondaryWindowLabel =
+                      `${formatDuration(expirySecondaryWindow)}窗口内到期`;
                     // 到期积分按本组那本账取：CodeArts（credits）的到期阶梯与其余渠道（pool）
 // 同源，直接对通用字段求和即可；免费层无额度接口，恒无到期积分。
                     const hasExpiring = (group.expiring ?? 0) > 0;
@@ -1120,7 +1124,7 @@ export function CredentialsPage() {
                                   <span
                                     className="flex w-36 shrink-0 items-center gap-2"
                                     data-testid={`group-${group.key}-expiring`}
-                                    title={`组内各号主窗口（${formatDuration(expiryWindow)}）内将过期的积分合计`}
+                                    title={`组内各号主窗口（${formatDuration(expiryWindow)}）内将到期的积分合计（调度窗口，非单笔到期时刻）`}
                                   >
                                     <span className="grid size-7 shrink-0 place-items-center rounded-md bg-warn/12 text-warn ring-1 ring-warn/25">
                                       <Hourglass className="size-3.5" aria-hidden />
@@ -1139,7 +1143,7 @@ export function CredentialsPage() {
                                   <span
                                     className="flex w-36 shrink-0 items-center gap-2"
                                     data-testid={`group-${group.key}-expiring-secondary`}
-                                    title={`组内各号次窗口（${formatDuration(expirySecondaryWindow)}）内将过期的积分合计，含主窗口的部分`}
+                                    title={`组内各号次窗口（${formatDuration(expirySecondaryWindow)}）内将到期的积分合计，含主窗口的部分（调度窗口，非单笔到期时刻）`}
                                   >
                                     <span className="grid size-7 shrink-0 place-items-center rounded-md bg-warn/12 text-warn ring-1 ring-warn/25">
                                       <CalendarClock className="size-3.5" aria-hidden />

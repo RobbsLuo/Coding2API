@@ -187,18 +187,18 @@ describe("formatAxisValue", () => {
 });
 
 describe("expiringQuotaLabel", () => {
-  it("窗口内有过期积分时给出量级与剩余时间", () => {
-    expect(expiringQuotaLabel(100, 129600)).toBe("100 积分将在 1.5 天内过期");
-    expect(expiringQuotaLabel(25.5, 3600)).toBe("25.5 积分将在 1.0 小时内过期");
+  it("窗口内有过期积分时给出量级与窗口（措辞点明是窗口，非倒计时）", () => {
+    expect(expiringQuotaLabel(100, 129600)).toBe("100 积分将在 1.5 天窗口内到期");
+    expect(expiringQuotaLabel(25.5, 3600)).toBe("25.5 积分将在 1.0 小时窗口内到期");
   });
 
   it("次窗口措辞区分开，避免两行同句式分不出优先级", () => {
-    expect(expiringQuotaLabel(140, 604800, "secondary")).toBe("7.0 天内共 140 积分将过期");
+    expect(expiringQuotaLabel(140, 604800, "secondary")).toBe("7.0 天窗口内共 140 积分将到期");
   });
 
   it("CodeArts 折成积分后与其余渠道同单位（默认措辞即为积分）", () => {
-    expect(expiringQuotaLabel(999.5, 3600)).toBe("999.5 积分将在 1.0 小时内过期");
-    expect(expiringQuotaLabel(140, 604800, "secondary")).toBe("7.0 天内共 140 积分将过期");
+    expect(expiringQuotaLabel(999.5, 3600)).toBe("999.5 积分将在 1.0 小时窗口内到期");
+    expect(expiringQuotaLabel(140, 604800, "secondary")).toBe("7.0 天窗口内共 140 积分将到期");
   });
 
   it("无到期信息、窗口关闭或零积分时不展示", () => {

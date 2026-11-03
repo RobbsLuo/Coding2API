@@ -182,7 +182,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ### OpenCode Zen（`zen`）
 
-[opencode.ai/zen](https://opencode.ai) 免费模型，免登录。上游清单混付费、无免费标记 → `-free` 后缀收窄 → 逐个探活 → 匿名可用者进 `/v1/models`（判活缓存 30 分钟；免费模型 **x0**）。
+[opencode.ai/zen](https://opencode.ai) 免费模型，免登录。上游清单混付费、无免费标记 → `-free` 后缀收窄 → 逐个探活 → **只剔除确定不可用**（付费 401 / 下线 400 / 区域 403）者进 `/v1/models`；`429`（匿名免费额度耗尽）/ 5xx / 超时**保留**（限流或抖动不该清空整条渠道；判活缓存 30 分钟；免费模型 **x0**）。
 
 **免费层门禁**：上游要伪装官方客户端（UA 形态、会话头、`stream:true`、tools 含门禁工具）→ 自动满足。注入空壳工具，真调用被过滤。门禁是**移动靶**，三处都做成配置（改完重启即换、随时回退）：UA 形态 `ZEN_USER_AGENT`（模板，`{version}` 代入 `ZEN_OPENCODE_VERSION`）、API 根 `ZEN_API_ROOT`、工具集合 `ZEN_GATE_TOOLS`。默认值 = 本仓实测通过的形态（`opencode/<version>`、`/zen/v1`、`bash,read`）。端点 `ZEN_API_ENDPOINT`（须在 `ZEN_ALLOWED_ENDPOINTS` 内）。付费模型强制 `模型@zen` 也只报不可用。
 
@@ -210,7 +210,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **令牌刷新刚性**：refresh_token 与 `client_id=codearts-agent`、DPoP 私钥三者绑定、一次性；刷新后必须回写新 refresh_token。预刷新任务自动完成（DPoP ES256/P-256）。窗口封顶 45 分钟，须宽于轮询周期。凭据作废 → 标「需重新登录」+ 停重试。
 
-**每日签到**：`GET /v1/ops/delivery` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`，后台每日自动领。`CLAIMED` =「已领未确认」→ 两步一起做。
+**每日签到**：`GET /v1/ops/delivery` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`，后台每日自动领。`CLAIMED` =「已领未确认」→ 两步一起做；**claim 成功但 confirm 失败按失败处理**（不回「签到成功」），下一轮补确认，避免「界面显示成功、积分未到账」（实测用户反馈）。
 
 **额度＝积分余额**：探测 `GET {snap}/snap-manager/v1/statistics/plugin`（前缀必须带 `snap-manager`；头 `Agent-Type: PromptCenter`）。上游数值即积分，不折算。分项包走悬浮明细；登记套餐到期日（积分过期同废）。
 

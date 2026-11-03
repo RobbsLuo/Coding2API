@@ -146,6 +146,44 @@ async def test_client_confirm_daily_credit_swallows_upstream_failure():
     assert await client._confirm_daily_credit(_cred()) is False
     await client.aclose()
 
+
+async def test_client_claim_daily_credit_confirm_failure_is_surfaced():
+    """claim 成功但 confirm 失败 → 回 CONFIRM_FAILED_CODE，不吞成「签到成功」。
+
+    实测用户反馈：界面显示签到成功、官网积分未到账。confirm 是领取的第二步，
+    失败必须让 checkin() 归失败，CheckinTask 才会当轮不封账、下轮补确认。
+    """
+    from src.provider.codearts.client import CONFIRM_FAILED_CODE
+
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/v1/ops/claim":
+            return httpx.Response(200, json={"code": 0, "message": "ok"})
+        return httpx.Response(500, json={"error_msg": "boom"})
+
+    client = _client(handler)
+    code, message = await client.claim_daily_credit(_cred())
+    assert code == CONFIRM_FAILED_CODE and "确认失败" in message
+    assert calls == ["/v1/ops/claim", "/v1/ops/confirm"]
+    await client.aclose()
+
+
+async def test_client_checkin_claim_confirm_failure_is_failure():
+    """ELIGIBLE → claim 成功但 confirm 失败：整轮判失败，留给下一轮补确认。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/ops/delivery":
+            return httpx.Response(200, json=_delivery(_campaign()))
+        if request.url.path == "/v1/ops/claim":
+            return httpx.Response(200, json={"code": 0, "message": "ok"})
+        return httpx.Response(500, json={"error_msg": "boom"})
+
+    client = _client(handler)
+    result = await client.checkin(_cred())
+    assert result.ok is False and "确认失败" in result.message
+    await client.aclose()
+
 async def test_client_checkin_state_machine_branches():
     """四种 status + 活动过期 + 不存在，各自归一（CheckinTask 直接消费）。"""
     # ELIGIBLE 且 claimable → claim + confirm，带回 1000 积分
