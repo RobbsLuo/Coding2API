@@ -51,6 +51,10 @@ CREATE TABLE IF NOT EXISTS credentials (
     pinned           INTEGER NOT NULL DEFAULT 0,   -- 手动指定当前凭证
     health           INTEGER,                      -- NULL=unknown；0-100=known；-1=exhausted
     cooling_until    INTEGER,
+    -- 冷却来源（ErrKind 值：soft / credit / plan / restricted / other / ...）：
+    -- 上游点名的恢复时刻属于「等一会就好」，人工 revive 不该顺手解掉。
+    -- NULL = 无冷却或老库未回填（按「本地冷却」处理，revive 照旧清除）。
+    cooling_kind     TEXT,
     err_count        INTEGER NOT NULL DEFAULT 0,
     quota_remaining  REAL,
     quota_total      REAL,

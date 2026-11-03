@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 
 import httpx
 import pytest
@@ -216,6 +217,28 @@ def test_revive_credential_endpoint(client):
 
 def test_revive_unknown_credential_is_400(client):
     assert client.post("/api/credentials/cred_missing/revive").status_code == 400
+
+
+def test_revive_keeps_upstream_cooldown_unless_forced(client):
+    """默认「恢复」保留上游点名的冷却；`force=true` 才清除（见 repo.revive）。"""
+    created = client.post("/api/credentials", json={
+        "provider": "codebuddy", "credential": {"token": "t"}}).json()["id"]
+    db = client.app.state.credentials._db
+    future = int(time.time()) + 3600
+    db.connect().execute(
+        "UPDATE credentials SET disabled = 1, cooling_until = ?, cooling_kind = 'soft' "
+        "WHERE id = ?", (future, created))
+    db.connect().commit()
+
+    client.post(f"/api/credentials/{created}/revive")
+    row = db.connect().execute("SELECT disabled, cooling_until FROM credentials "
+                               "WHERE id = ?", (created,)).fetchone()
+    assert row["disabled"] == 0 and row["cooling_until"] == future
+
+    client.post(f"/api/credentials/{created}/revive", json={"force": True})
+    row = db.connect().execute("SELECT cooling_until FROM credentials "
+                               "WHERE id = ?", (created,)).fetchone()
+    assert row["cooling_until"] is None
 
 # ------------------------------------------------------------- #24 429
 

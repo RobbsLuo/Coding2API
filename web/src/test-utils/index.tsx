@@ -125,6 +125,7 @@ export function makeCredential(overrides: Record<string, unknown> = {}) {
     pinned: 0,
     health: 62,
     cooling_until: null,
+    cooling_kind: null,
     err_count: 0,
     quota_remaining: 62,
     quota_total: 100,

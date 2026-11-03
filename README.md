@@ -373,12 +373,13 @@ claude
 
 凭证页支持多选 + 批量操作条（探测额度 / 每日签到 / 暂停 / 取消暂停 / 恢复）。
 
-- **端点**：`POST /api/credentials/batch`，body `{action: "probe"|"toggle"|"checkin"|"revive", ids: [...], enabled?}`。一次 ≤200 条，重复 id 去重。
+- **端点**：`POST /api/credentials/batch`，body `{action: "probe"|"toggle"|"checkin"|"revive", ids: [...], enabled?, force?}`。一次 ≤200 条，重复 id 去重。`force` 只对 `revive` 有效（见下）。
 - **批量导入**：`POST /api/credentials/batch-import`，body `{items: [{provider, credential, nickname?, tags?}]}`。一次 ≤100 条；逐条校验，坏条目只进 `failed`（带 `index` 与原因）；同渠道解密后内容完全一致视为重复，进 `skipped`。管理台凭证页「批量导入」支持粘贴 JSON 数组 / JSONL 或选文件。
 - **逐条隔离**：单条失败不影响其余。响应 `{action, total, succeeded, failed, results: [{id, ok, error?, detail?}]}`。
 - **签到失败是结果不是故障**：上游拒绝（账号被禁用 / 登录过期 / 限流）回 `ok=false` + 可读 `message`，不 500——否则管理台只弹「签到失败」，看不出真实原因。
 - **暂停是显式状态而非取反**：`toggle` 的 `enabled` 由请求体给出 → 操作条拆「暂停」/「取消暂停」两按钮。
 - **「恢复」≠「取消暂停」**：前者 `revive`（解系统硬禁用，需先重新登录）；后者 `toggle enabled=true`。
+- **「恢复」默认保留上游点名的冷却**：`revive` 只解硬禁用、清本地冷却与模型级条目；冷却来源属于「上游点名恢复时刻」（限流 / 余额 / 权益 / 风控，即 `cooling_kind` ∈ `UPSTREAM_COOLDOWN_KINDS`）时**保留**——清掉只会立刻再撞一次上游（实测 2026-11-03 12:22–12:23 三次恢复 zen 凭证，每次都在恢复时顺手解掉刚写入的 429 冷却，下一请求再撞同一个 429）。要强制清除走 `force=true`（单条端点请求体 / 批量 `force`，前端菜单项「强制恢复」）。
 - 只收已有单条端点的动作：`refresh` / `delete` 不走此通道。
 - **审计只记一条汇总**（`toggle` / `revive`）。审计写失败只记 warning，不影响操作结果。
 
@@ -390,7 +391,7 @@ claude
 - **每日 token 上限** / **每日积分上限**：当日累计达到即整号停用。
 - **按模型 token 上限**：`{模型: 上限}`，只停该模型。
 - **当日 = 北京时间自然日**，0 点刷新。
-- 候选全因限额跳过 → `no_healthy_credential` 503；模型级冷却 → `model_unavailable`。
+- 候选全因限额跳过 → `no_healthy_credential` 503；模型级冷却 → `model_unavailable`；上游限流/额度类冷却 → 统计记 `rate_limit`（对外码仍是 `no_healthy_credential`）。
 - 写入 `PUT /api/credentials/{id}/limits`（整体替换；四个全关 → 删配置行）。即时生效。审计动作 `credential.limits`。
 
 ## 凭证在途上限
@@ -491,7 +492,7 @@ Playground 与 `/v1/models` 走 stale-while-revalidate：有缓存立刻回旧�
 
 默认**最近 24 小时**（另有 7 / 30 天、全部、自定义）。自定义 = 两个 `datetime-local`（浏览器时区），可只填一边；起点不早于终点 → 整窗作废 + 提示。端点全收 `until`（epoch 秒，半开 `[since, until)`）。
 
-**失败类型** = 受控枚举（`CONTROLLED_ERROR_TYPES`）：模型级冷却耗尽 → `model_unavailable`；池真耗尽 → `no_healthy_credential`；上游明确说「没这个模型」→ `model_not_found`（与「请求无效」分开：前者是模型下线，后者是请求写错）。对外码相同，仅统计口径不同。
+**失败类型** = 受控枚举（`CONTROLLED_ERROR_TYPES`）：收尾行取**最后一次错误的真实归因**——模型级冷却耗尽 → `model_unavailable`；上游限流（SOFT / 429）→ `rate_limit`；链路层瞬态（连接超时 / 读超时 / TLS 中断）→ `upstream_timeout`；上下文超限（CodeBuddy 11115）→ `context_overflow`；模型不支持该请求形态（CodeArts 001001020 not multimodal）→ `model_capability`；上游明确说「没这个模型」→ `model_not_found`（与「请求无效」分开：前者是模型下线，后者是请求写错）。只有**一次都没选中凭证**（候选全在冷却 / 池子为空）才回落 `no_healthy_credential`。对外码相同，仅统计口径不同。
 
 **请求 ID**：响应带 `X-Request-ID`。入站合法沿用，否则自生成；字符集 `[A-Za-z0-9._:-]`、长 1–128。落 `usage_events.request_id`，明细时间列悬停可见。**不透传上游**——各渠道出站头语义不同。
 
@@ -526,7 +527,7 @@ tabs 切四维（渠道 / 模型 / 用户 / 凭证），共用一表（渠道 / 
 
 **延迟两类口径**：只统计成功请求。平均 = `latency_sum ÷ 成功数`（小时汇总）；分位从逐请求明细算（仅 90 天）。`ttfb_ms` = `NULL` 的两列各自独立排名。无样本 → `—`。
 
-**失败归因**：`GET /api/stats/errors`（operator+）按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` → 失败次数 / **未救回数** / 最近失败时刻（降序，`limit` ≤ 5000）。**失败数 = 尝试口径**：换号重试每次上游拒绝各落一行；同用户同 `request_id` 另有成功行 = 已救回。`未救回 = 失败数 − 救回数`（同请求多次失败算多次，≠ 受损请求数）。凭证 401 硬禁用（DEAD）也落 `credential_unavailable`（**额度耗尽证据成立的凭证除外**：officeace 积分耗尽回的是同一条 `401 APIG.1009`，此时按 `CREDIT` 处理——冷却到次日 04:00 等签到，不硬禁用、不落该归因；本地额度还是正数时先现场复探一次再判，复探仍为正 / 复探失败才保持 DEAD）；账号被上游风控限制（CodeBuddy 11140）落 `account_restricted`，账号级 2h 冷却、当前请求不再换号，同渠道窗口内**第二个不同凭证**也中招时整渠道退避 24h；上游明确说该号用不了这个模型（11102 无此模型 / 11158 套餐不允许）落 `model_not_found`，写 (账号, 模型) 负缓存而非冷却账号；一次都没选中凭证就耗尽时（候选全在冷却 / 池子为空）明细落**候选渠道**而不是 `-`；换号成功算已救回；轮换耗尽不重复落收尾行。点行钻取 +「只看失败」（`GET /api/stats/events?ok=0`）。仅 admin / operator。`/metrics` 的 `upstream_errors_total` 取进程内计数，不合并。
+**失败归因**：`GET /api/stats/errors`（operator+）按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` → 失败次数 / **未救回数** / 最近失败时刻（降序，`limit` ≤ 5000）。**失败明细口径**：硬失败（DEAD `credential_unavailable` / RESTRICTED `account_restricted` / INVALID `invalid_request` / CAPABILITY `model_capability`）**每次尝试各落一行**（换号重试每次上游拒绝一行）；限流 / 额度 / 超时 / 上下文超限等其余分类**每次请求仅一行**（轮换耗尽时的收尾行，类型取最后一次错误的真实归因），不逐次落行——否则一次请求三行会把 `usage_hourly.requests` 与 Key 日请求额度一起刷高。同用户同 `request_id` 另有成功行 = 已救回。`未救回 = 失败数 − 救回数`（同请求多次失败算多次，≠ 受损请求数）。凭证 401 硬禁用（DEAD）也落 `credential_unavailable`（**额度耗尽证据成立的凭证除外**：officeace 积分耗尽回的是同一条 `401 APIG.1009`，此时按 `CREDIT` 处理——冷却到次日 04:00 等签到，不硬禁用、不落该归因；本地额度还是正数时先现场复探一次再判，复探仍为正 / 复探失败才保持 DEAD）；账号被上游风控限制（CodeBuddy 11140）落 `account_restricted`，账号级 2h 冷却、当前请求不再换号，同渠道窗口内**第二个不同凭证**也中招时整渠道退避 24h；上游明确说该号用不了这个模型（11102 无此模型 / 11158 套餐不允许）落 `model_not_found`，写 (账号, 模型) 负缓存而非冷却账号；上下文超限（CodeBuddy 11115）落 `context_overflow`、模型能力不匹配（CodeArts 001001020）落 `model_capability`，两者都不惩罚凭证；一次都没选中凭证就耗尽时（候选全在冷却 / 池子为空）明细落**候选渠道**而不是 `-`；换号成功算已救回；轮换耗尽不重复落收尾行。点行钻取 +「只看失败」（`GET /api/stats/events?ok=0`）。仅 admin / operator。`/metrics` 的 `upstream_errors_total` 取进程内计数，不合并。
 
 **点行钻取**：点分组表任一行 → 明细按该行过滤（渠道 / 模型 / 凭证；用户维度走作用域参数），条件可叠加。`GET /api/stats/events` 接受 `provider` / `model` / `credential_id`（AND）+ `ok=0`。
 

@@ -24,12 +24,15 @@ from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
 from ..provider.base import (
     EXHAUSTED,
+    NO_PENALTY_KINDS,
     QUEUE_DEFAULT_WAIT_SECONDS,
     QUEUE_MAX_ROUNDS,
     QUEUE_MAX_WAIT_SECONDS,
+    REJECT_KINDS,
     ErrKind,
     Event,
     EventKind,
+    UpstreamTransportError,
     Usage,
     aclose_stream,
     event_error_kind,
@@ -325,11 +328,12 @@ class Executor:
         self._dead_quota_probes: dict[str, tuple[float, bool]] = {}
 
     def _record_invalid(self, username: str, provider_id: str, credential_id: str,
-                        model: str, started: float, error: object) -> None:
-        """请求无效：只记统计（invalid_request），绝不冷却/禁用凭证。"""
+                        model: str, started: float, error: object,
+                        kind: ErrKind = ErrKind.INVALID) -> None:
+        """请求无效：只记统计（invalid_request / model_capability 等），绝不冷却/禁用凭证。"""
         self._deps.record(
             username=username, provider=provider_id, credential_id=credential_id,
-            model=model, ok=False, error_type="invalid_request",
+            model=model, ok=False, error_type=_error_type_for(kind),
             latency_ms=_elapsed_ms(started))
 
     def _suggestions(self, model: str) -> list[str] | None:
@@ -354,19 +358,27 @@ class Executor:
                                          self._suggestions(target.model))
         return _unavailable_message(last_error)
 
-    def _exhaust_error_type(self, target: ModelTarget) -> str:
+    def _exhaust_error_type(self, target: ModelTarget,
+                            last_kind: ErrKind | None = None,
+                            last_error: Exception | None = None) -> str:
         """轮换耗尽时落统计的受控 error_type（与 503 文案分流同源）。
 
         所有候选都只因**该模型的模型级冷却**被排除时（`_all_model_cooled`，
-        与 `_unavailable_text` 同一判据）记 `model_unavailable`，否则记
-        `no_healthy_credential`——统计页此前一律显示「无可用凭证」，把
-        「换个模型就好」的上游限流误读成整池凭证挂了（实测 2026-10-13
-        `ling-3.1-flash`：kilo 唯一凭证被 Novita 429 写模型级冷却后，
-        明细每条都标「无可用凭证」）。对外错误码不变（仍
-        `no_healthy_credential`，兼容层映射依赖它）。
+        与 `_unavailable_text` 同一判据）记 `model_unavailable`，否则按**导致
+        耗尽的真实原因**归类：`last_kind` 有值时走 `_failure_type`（SOFT →
+        rate_limit、传输异常 → upstream_timeout、CONTEXT → context_overflow…），
+        一次都没选中凭证（`last_kind is None`）才回落 `no_healthy_credential`。
+
+        为什么不再一律 `no_healthy_credential`：该标签读起来是「整池凭证挂了」，
+        而实测 2026-11-03 zen 单凭证被 429 冷却到次日 08:00 后，每一条明细都标
+        「无可用凭证」，运维去查凭证池只会白折腾——真实原因是上游限流等额度。
+        对外错误码不变（仍 `no_healthy_credential`，兼容层映射依赖它）。
         """
-        return ("model_unavailable" if self._all_model_cooled(target)
-                else "no_healthy_credential")
+        if self._all_model_cooled(target):
+            return "model_unavailable"
+        if last_kind is None:
+            return "no_healthy_credential"
+        return _failure_type(last_kind, last_error)
 
     def _model_cooled_only(self, providers: Iterable[str],
                            target: ModelTarget, now: int) -> bool:
@@ -697,8 +709,8 @@ class Executor:
                     # not should_rotate` 就 return 了，所以 `terminal()` 在这里**必定**
                     # 抛 `_ModelExhausted`（交给回退链下一项）。直接抛，不留永远
                     # 走不到的 `yield`+`return`。
-                    if last_kind is ErrKind.INVALID:
-                        # 所有候选上游都拒绝了该模型：400 语义而非 503
+                    if last_kind in REJECT_KINDS:
+                        # 所有候选上游都拒绝了该模型 / 这次请求形态：400 语义而非 503
                         raise _ModelExhausted(
                             _reject_message(target.model, last_error,
                                             self._suggestions(target.model)),
@@ -708,7 +720,8 @@ class Executor:
                             username=state.username,
                             provider=self._attribution_provider(target, state.provider),
                             credential_id=state.credential_id, model=target.model, ok=False,
-                            error_type=self._exhaust_error_type(target),
+                            error_type=self._exhaust_error_type(
+                                target, last_kind, last_error),
                             latency_ms=_elapsed_ms(state.started))
                     raise _ModelExhausted(
                         self._unavailable_text(target, last_error),
@@ -777,7 +790,7 @@ class Executor:
                                 broken = True
                                 break
                             kind = ErrKind.SOFT
-                        if kind is ErrKind.INVALID:
+                        if kind in REJECT_KINDS:
                             # 推理档位被拒：原号降一档重试一次（不换号、不冷却）。
                             # 上游拒绝的是档位而不是凭证或模型，换号再撞只会
                             # 让同一条请求在多个号上各失败一次。
@@ -799,9 +812,9 @@ class Executor:
                                 provider_id, target.model, credential_id,
                                 event.error_code, event.error_message)
                             self._record_invalid(state.username, provider_id, credential_id,
-                                                 target.model, state.started, event)
+                                                 target.model, state.started, event, kind)
                             last_error = UpstreamStreamError(event)
-                            last_kind = ErrKind.INVALID
+                            last_kind = kind
                             self._skip_provider(provider_id, tried)
                             broken = True
                             break
@@ -881,10 +894,10 @@ class Executor:
                                                   target.model, error,
                                                   username=state.username,
                                                   started=state.started)
-                        last_error = error
-                elif kind is ErrKind.INVALID:
-                    # 请求无效（如该上游不认识模型）：不冷却凭证，
-                    # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
+                        last_error, last_kind = error, kind
+                elif kind in REJECT_KINDS:
+                    # 请求无效（如该上游不认识模型 / 模型不支持该请求形态）：
+                    # 不冷却凭证，跳过该上游继续试其他上游；全部拒绝才以 400 结束
                     # 推理档位被拒：原号降一档重试一次（HTTP 400 形态，
                     # 与流内 error 事件同一套语义）
                     lower = (None if emitted else self._downgrade_effort(
@@ -901,8 +914,8 @@ class Executor:
                                    provider_id, target.model, credential_id,
                                    _error_detail(error))
                     self._record_invalid(state.username, provider_id, credential_id,
-                                         target.model, state.started, error)
-                    last_error, last_kind = error, ErrKind.INVALID
+                                         target.model, state.started, error, kind)
+                    last_error, last_kind = error, kind
                     self._skip_provider(provider_id, tried)
                 elif kind is ErrKind.RESTRICTED:
                     # 账号被上游风控限制：跳过该渠道，别让同渠道其它号继续撞
@@ -920,7 +933,7 @@ class Executor:
                         credential_id, kind, provider_id, target.model,
                         error, username=state.username,
                         started=state.started) or attributed
-                    last_error = error
+                    last_error, last_kind = error, kind
             finally:
                 # break / 异常 / 客户端断开都走到这里：先清掉在途的取帧任务
                 # （超时后它可能还在等上游），再关闭上游流归还节流名额。
@@ -935,7 +948,7 @@ class Executor:
                 await asyncio.sleep(queued_wait)
                 continue
             if not self._deps.scheduler.should_rotate(attempts) or emitted:
-                if last_kind is ErrKind.INVALID:
+                if last_kind in REJECT_KINDS:
                     # 流已开始（200 已发出），以 invalid_request 错误帧结束
                     yield terminal(
                         _reject_message(target.model, last_error,
@@ -1267,7 +1280,7 @@ class Executor:
             else:
                 pick = await self._pick(target, tried, affinity_id)
                 if pick is None:
-                    if last_kind is ErrKind.INVALID:
+                    if last_kind in REJECT_KINDS:
                         # 所有候选上游都拒绝了该模型：400 而非 503
                         raise InvalidRequest(_reject_message(
                             target.model, last_error, self._suggestions(target.model)))
@@ -1277,7 +1290,8 @@ class Executor:
                             provider=self._attribution_provider(target, last_provider),
                             credential_id=last_credential,
                             model=target.model, ok=False,
-                            error_type=self._exhaust_error_type(target),
+                            error_type=self._exhaust_error_type(
+                                target, last_kind, last_error),
                             latency_ms=_elapsed_ms(started))
                     raise NoHealthyCredential(
                         self._unavailable_text(target, last_error))
@@ -1388,8 +1402,8 @@ class Executor:
                         self._note_upstream_error(credential_id, ErrKind.SOFT,
                                                   provider_id, target.model, error,
                                                   username=username, started=started)
-                        last_error = error
-                elif kind is ErrKind.INVALID:
+                        last_error, last_kind = error, ErrKind.SOFT
+                elif kind in REJECT_KINDS:
                     # 推理档位被拒：原号降一档重试一次（非流式同一口径）
                     lower = self._downgrade_effort(
                         payload, _error_detail(error), effort_retried)
@@ -1401,14 +1415,14 @@ class Executor:
                         effort_cap, effort_retried = lower, True
                         pinned = (credential_id, credential_data)
                         continue
-                    # 请求无效（如该上游不认识模型）：不冷却凭证，
-                    # 跳过该上游继续试其他上游；全部拒绝才以 400 结束
+                    # 请求无效（如该上游不认识模型 / 模型不支持该请求形态）：
+                    # 不冷却凭证，跳过该上游继续试其他上游；全部拒绝才以 400 结束
                     logger.warning("上游 %s 拒绝模型 %s（凭证 %s 跳过）: %s",
                                    provider_id, target.model, credential_id,
                                    _error_detail(error))
                     self._record_invalid(username, provider_id, credential_id,
-                                         target.model, started, error)
-                    last_error, last_kind = error, ErrKind.INVALID
+                                         target.model, started, error, kind)
+                    last_error, last_kind = error, kind
                     self._skip_provider(provider_id, tried)
                 elif kind is ErrKind.RESTRICTED:
                     # 账号被上游风控限制：跳过该渠道，别让同渠道其它号继续撞
@@ -1425,14 +1439,14 @@ class Executor:
                     attributed = self._note_upstream_error(
                         credential_id, kind, provider_id, target.model,
                         error, username=username, started=started) or attributed
-                    last_error = error
+                    last_error, last_kind = error, kind
             else:
                 try:
                     result = aggregate(events, target.model)
                 except UpstreamStreamError as error:
                     kind = await self._credit_if_exhausted(
                         _event_kind(error.event), credential_id, provider_id)
-                    if kind is ErrKind.INVALID:
+                    if kind in REJECT_KINDS:
                         # 推理档位被拒（流内 error 事件形态）：原号降一档重试一次
                         lower = self._downgrade_effort(
                             payload, error.event.error_message, effort_retried)
@@ -1450,8 +1464,8 @@ class Executor:
                             provider_id, target.model, credential_id,
                             error.event.error_code, error.event.error_message)
                         self._record_invalid(username, provider_id, credential_id,
-                                             target.model, started, error)
-                        last_error, last_kind = error, ErrKind.INVALID
+                                             target.model, started, error, kind)
+                        last_error, last_kind = error, kind
                         self._skip_provider(provider_id, tried)
                     elif kind is ErrKind.RESTRICTED:
                         # 流内账号限制：跳过该渠道，别让其它号继续撞
@@ -1465,7 +1479,7 @@ class Executor:
                         attributed = self._note_upstream_error(
                             credential_id, kind, provider_id, target.model, error,
                             username=username, started=started) or attributed
-                        last_error = error
+                        last_error, last_kind = error, kind
                 else:
                     self._deps.credentials.save_success(
                         credential_id, model=self._model_scope(provider_id, target.model))
@@ -1513,7 +1527,7 @@ class Executor:
                 await asyncio.sleep(queued_wait)
                 continue
             if not self._deps.scheduler.should_rotate(attempts):
-                if last_kind is ErrKind.INVALID:
+                if last_kind in REJECT_KINDS:
                     raise InvalidRequest(_reject_message(
                         target.model, last_error, self._suggestions(target.model)))
                 kind = (await self._credit_if_exhausted(
@@ -1527,7 +1541,7 @@ class Executor:
                     self._deps.record(
                         username=username, provider=provider_id, credential_id=credential_id,
                         model=target.model, ok=False,
-                        error_type=_error_type_for(kind) if kind else "upstream_protocol",
+                        error_type=_failure_type(kind, last_error),
                         latency_ms=_elapsed_ms(started))
                 raise NoHealthyCredential(
                     self._unavailable_text(target, last_error))
@@ -1973,25 +1987,26 @@ class Executor:
                              provider_id: str, model: str,
                              error: Exception | None = None, *,
                              username: str, started: float) -> bool:
-        """对一次上游错误作出反应：记账 + 落库（DEAD 另落一条统计），REQUEST 类零动作。
+        """对一次上游错误作出反应：记账 + 落库（DEAD/RESTRICTED 另落一条统计）。
+        REQUEST / CONTEXT 类零动作。
 
-        返回值 = **本次是否落了尝试级明细**（仅 DEAD 为真）。调用方据此在轮换
-        耗尽时跳过收尾行，避免同一个请求在 `requests` 里被算两次、Key 配额被
-        扣两次。
+        返回值 = **本次是否落了尝试级明细**（仅 DEAD/RESTRICTED 为真）。调用方
+        据此在轮换耗尽时跳过收尾行，避免同一个请求在 `requests` 里被算两次、
+        Key 配额被扣两次。
 
-        请求级错误（11101 请求体坏 / 11115 上下文超限 / 11128 渠道风控 /
+        请求级/上下文错误（11101 请求体坏 / 11115 上下文超限 / 11128 渠道风控 /
         11135 图片无效）不是账号的问题：冷却或累计错误数都会在阈值处把健康
         凭证踢掉。
         也绝不落库——save_error 会把已有 cooling_until 写成 NULL，
         等于顺手解掉别的错误留下的冷却。调用方只换号重试。
 
-        **DEAD 额外落一条 `credential_unavailable` 明细**：硬禁用只写
-        `credentials.disabled`，归因卡片读的是 `usage_events`，不落明细就完全
-        看不到（实测 2026-10-23 officeace 两次 401 `AppKey or AppSecret is
-        invalid` 在统计页零痕迹）。与 `invalid_request` 同口径：**每次尝试**
-        落一行，换号成功后由 `errors()` 的 `rescued` 标为「已救回」。其他分类
-        （SOFT / CREDIT / PLAN / MODEL）不在此落行——它们每次请求可能触发多次，
-        落行会把明细表灌满噪声；这些请求的失败仍由轮换耗尽时的收尾行覆盖。
+        **DEAD / RESTRICTED 额外落一条明细**：硬禁用只写 `credentials.disabled`，
+        归因卡片读的是 `usage_events`，不落明细就完全看不到（实测 2026-10-23
+        officeace 两次 401 `AppKey or AppSecret is invalid` 在统计页零痕迹）。
+        **每次尝试**落一行，换号成功后由 `errors()` 的 `rescued` 标为「已救回」。
+        其他分类（SOFT / CREDIT / PLAN / MODEL）不在此落行——它们每次请求可能
+        触发多次，落行会把明细表灌满噪声；这些请求的失败由轮换耗尽时的收尾行
+        覆盖，收尾行的类型取**最后一次错误的真实归因**（见 `_exhaust_error_type`）。
 
         **换号耗尽时收尾行不再落**（调用方看返回值）：否则一次请求两行，
         `usage_hourly.requests` 虚高、成功率虚低，按 Key 计的日请求额度也会
@@ -2000,7 +2015,10 @@ class Executor:
         `error` 带 `retry_at` 时（上游 `Retry-After`，见 provider.base）交给
         调度器在**该错误分类的作用域**内覆盖冷却时长；缺失/过去时刻回落常量。
         """
-        if kind is ErrKind.REQUEST:
+        if kind in NO_PENALTY_KINDS:
+            # REQUEST / CONTEXT 不是账号的问题：不冷却、不累计、不落错写库。
+            # 也绝不落库——save_error 会把已有 cooling_until 写成 NULL，
+            # 等于顺手解掉别的错误留下的冷却。调用方只换号重试。
             return False
         if self._deps.half_open is not None and kind is not ErrKind.QUEUE:
             # 又记了一次错误 → 之前「已探通」的结论作废，下次到期重新半开。
@@ -2405,18 +2423,52 @@ def _stream_error_type(error: Exception | None, *,
     if isinstance(error, _StreamTimeout):
         return error.error_code
     kind = _classify(error) if error is not None else None
+    return _failure_type(kind, error, quota_exhausted=quota_exhausted)
+
+
+def _failure_type(kind: ErrKind | None, error: Exception | None = None, *,
+                  quota_exhausted: bool = False) -> str:
+    """一次失败的受控统计类型：先按**异常形态**分流，再落 ErrKind 映射。
+
+    链路层瞬态（`httpx.TransportError` / TLS 中断）与上游限流在 ErrKind 上都
+    是 SOFT，但处置动作完全相反（一个去查代理、一个去等额度）。传输异常是
+    `_classify` 里明确单列的几类，这里在 SOFT 之前先兜住：
+    `upstream_timeout` 而不是 `rate_limit`。
+    """
+    if _is_transport_error(error):
+        return "upstream_timeout"
     if kind is ErrKind.DEAD:
         kind = _dead_as_credit(quota_exhausted=quota_exhausted)
     return _error_type_for(kind) if kind else "upstream_protocol"
 
 
+def _is_transport_error(error: Exception | None) -> bool:
+    """是不是链路层瞬态（连接超时 / DNS / 读超时 / TLS 中断）。
+
+    只认**具体类型**，不放开到 `OSError` 整体：文件系统类错误（磁盘满、句柄
+    耗尽）也是它的子类，误判成上游故障会去冷却一条完全健康的凭证（与
+    `_classify` 同一纪律）。
+    """
+    if error is None:
+        return False
+    return isinstance(error, (UpstreamTransportError, httpx.TransportError, ssl.SSLError))
+
+
 def _error_type_for(kind: ErrKind) -> str:
-    """ErrKind → 受控的统计失败类型（web/src/api/display.ts 同步维护）。"""
+    """ErrKind → 受控的统计失败类型（web/src/api/display.ts 同步维护）。
+
+    链路层瞬态（`httpx.TransportError` / TLS 中断）不在这里分流——它归 SOFT，
+    由 `_failure_type` 先按异常类型判成 `upstream_timeout`，否则会被误读成
+    「上游限流」。参见 `_failure_type`。
+    """
     if kind in (ErrKind.PLAN, ErrKind.CREDIT, ErrKind.MODEL,
-                ErrKind.CONCURRENCY, ErrKind.QUEUE):
+                ErrKind.CONCURRENCY, ErrKind.QUEUE, ErrKind.SOFT):
         # MODEL / CONCURRENCY 都是模型级限流，展示口径同为额度类；
         # QUEUE 是「上游排队中」，同属容量不足，与额度类同档展示。
-        # 冷却作用域与时长差异在 schema 层
+        # SOFT 是上游限流/软限流（429 等）——比笼统的「渠道错误」更可行动：
+        # 运维看到「额度耗尽」知道要等冷却或换号，看到「渠道错误」只会去查
+        # 渠道配置（实测 2026-11-03 zen 免费层 429 走 SOFT，归因面板此前
+        # 记 `upstream_error`，读不出「等额度」）。冷却作用域与时长差异在 schema 层。
         return "rate_limit"
     if kind is ErrKind.DEAD:
         return "credential_unavailable"
@@ -2431,6 +2483,14 @@ def _error_type_for(kind: ErrKind) -> str:
         # `deepseek-v4.1-flash-1017` 404 `ModelArts.81009` 就是被标成
         # 「请求无效」）。独立成类才能让运维一眼看出是模型下线而非请求错。
         return "model_not_found"
+    if kind is ErrKind.CONTEXT:
+        # 上下文超限（11115）：动作是「精简上下文 / 换长窗口模型」，
+        # 与「请求写错了」分开，否则运维会去查参数写法。
+        return "context_overflow"
+    if kind is ErrKind.CAPABILITY:
+        # 模型能力不匹配（001001020 not multimodal）：动作是「换支持该形态的
+        # 模型 / 渠道」，同样不能混进「请求无效」。
+        return "model_capability"
     if kind in (ErrKind.INVALID, ErrKind.REQUEST):
         return "invalid_request"
     return "upstream_error"

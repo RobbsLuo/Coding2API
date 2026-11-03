@@ -77,7 +77,11 @@ SCHEMA_NAME = "schema.sql"
 # 对老库同样生效），无需迁移动作；老库升级后表为空 =「升级前无签到日志」，
 # 不影响签到本身（去重仍是 CheckinTask 当日作用域集合）。与已删除的 `checkins`
 # 去重表无关（`_MIGRATION_DROPS` 里的那张）。
-SCHEMA_VERSION = 31
+# 32：credentials 新增 cooling_kind（冷却来源 ErrKind）。老库补 NULL = 来源未知，
+# `revive` 按补列前行为清除冷却；新写入的冷却带上来源，`revive` 保留
+# 「上游点名恢复时刻」的那些（soft/credit/plan/restricted），避免人工恢复后
+# 立刻再撞一次上游 429（实测 2026-11-03 12:22–12:23 三次 revive + 三次 429）。
+SCHEMA_VERSION = 32
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -139,6 +143,9 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # Playground 行为与补列前一致（原先不校验任何按人策略）。
     ("users", "allowed_models TEXT NOT NULL DEFAULT ''"),
     ("users", "quota TEXT NOT NULL DEFAULT ''"),
+    # 冷却来源（ErrKind 值）：老库补列后为 NULL = 未知来源，人工 revive 照旧
+    # 清除冷却（与补列前行为一致），不把历史冷却误判成上游点名的那种。
+    ("credentials", "cooling_kind TEXT"),
 )
 
 # 已废弃的表：schema.sql 里已删定义，但老库里可能还留着，必须显式清理。

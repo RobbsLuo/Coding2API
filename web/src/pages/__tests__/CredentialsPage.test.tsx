@@ -547,6 +547,35 @@ describe("CredentialsPage", () => {
     );
   });
 
+  it("「强制恢复」连上游点名的冷却一起清除（force=true）", async () => {
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/revive")) return jsonResponse({ ok: true });
+      return jsonResponse(listBody([
+        makeCredential({
+          id: "cred_1", disabled: 1, disabled_reason: "session dead",
+          cooling_until: 9_999_999_999, cooling_kind: "soft",
+        }),
+      ]));
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "强制恢复" }));
+
+    const call = await waitFor(() => {
+      const found = fetchSpy.mock.calls.find(
+        ([input]) => String(input) === "/api/credentials/cred_1/revive",
+      );
+      expect(found).toBeTruthy();
+      return found!;
+    });
+    expect(JSON.parse(String((call[1] as RequestInit).body))).toEqual({ force: true });
+  });
+
   it("健康凭证不显示「恢复」入口", async () => {
     mockFetch({ "/api/credentials": listBody([makeCredential({ id: "cred_1" })]) });
     renderPage(<CredentialsPage />, ADMIN);

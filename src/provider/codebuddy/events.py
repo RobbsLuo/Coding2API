@@ -60,7 +60,12 @@ _PLAN_EXHAUSTED_CODE = 1005         # 权益/套餐耗尽
 # 拦截：同凭证同时刻换模型即可成功、同 (凭证, 模型) 秒级交替成功/失败、窗口
 # 内自愈，绝不是凭证或模型的问题。归请求级 → 零动作、仅换号重试。
 # （若归 INVALID，executor 会跳过该上游全部凭证、零重试直接 400）
-_REQUEST_LEVEL_CODES = frozenset({11101, 11115, 11128, 11135})
+_REQUEST_LEVEL_CODES = frozenset({11101, 11128, 11135})
+# 上下文超限（`prompt is too long: 1056943 tokens > 1048576 maximum`）：
+# 处置与请求级错误一致（不罚号、仍换号），但**统计单独成类**——归进
+# `invalid_request` 时归因面板显示「请求无效」，运维会去查参数写法，实际
+# 动作是「精简上下文 / 换长窗口模型」（实测 2026-11-02 23:32 国际站）。
+_CONTEXT_OVERFLOW_CODE = 11115
 _BAD_PARAMS_PHRASE = "unmarshal chat params failed"
 # 账号级风控限制（403 + `"code":11140`「request illegal」）：displayMsg 是
 # `Your account has been restricted due to unusual activity` /
@@ -115,6 +120,10 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
                 if _MODEL_RATE_LIMIT_CODE in codes or _MODEL_SATURATED_CODE in codes
                 else ErrKind.SOFT)
     if status == 400:
+        if _CONTEXT_OVERFLOW_CODE in codes:
+            # 上下文超限：处置同请求级错误（不罚号、仍换号），统计单独成类
+            # （见 `_CONTEXT_OVERFLOW_CODE`）。
+            return ErrKind.CONTEXT
         if (codes & _REQUEST_LEVEL_CODES
                 or _BAD_PARAMS_PHRASE in body_hint(body).lower()):
             # 发给上游的 body 有问题：换号也大概率一样，但不罚号（仍轮转试一次）

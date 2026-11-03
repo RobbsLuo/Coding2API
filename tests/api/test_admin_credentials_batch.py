@@ -201,6 +201,31 @@ def test_batch_revive_reports_missing_credential(batch_app):
     events = app.state.audit.query(action="credential.revive")
     assert len(events) == 1 and events[0]["detail"] == "批量 revive：1/2 成功"
 
+def test_batch_revive_force_clears_upstream_cooldown(batch_app):
+    """批量 revive 也支持 `force`：默认保留上游点名的冷却，force 才清。"""
+    import time
+
+    app, client = batch_app
+    credential_id = _add(app)
+    future = int(time.time()) + 3600
+    db = app.state.credentials._db
+    db.connect().execute(
+        "UPDATE credentials SET disabled = 1, cooling_until = ?, cooling_kind = 'soft' "
+        "WHERE id = ?", (future, credential_id))
+    db.connect().commit()
+
+    client.post("/api/credentials/batch",
+                json={"action": "revive", "ids": [credential_id]})
+    rows = {row["id"]: row for row in app.state.credentials.list_all()}
+    assert rows[credential_id]["disabled"] == 0
+    assert rows[credential_id]["cooling_until"] == future
+
+    client.post("/api/credentials/batch",
+                json={"action": "revive", "ids": [credential_id], "force": True})
+    rows = {row["id"]: row for row in app.state.credentials.list_all()}
+    assert rows[credential_id]["cooling_until"] is None
+
+
 def test_batch_toggle_resume_writes_enabled_direction(batch_app):
     """批量「取消暂停」（enabled=true）与「暂停」是同一动作，靠审计方向区分。
 

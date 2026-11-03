@@ -421,12 +421,18 @@ def test_error_type_mapping_covers_all_kinds():
     assert _error_type_for(ErrKind.CONCURRENCY) == "rate_limit"
     assert _error_type_for(ErrKind.DEAD) == "credential_unavailable"
     assert _error_type_for(ErrKind.RESTRICTED) == "account_restricted"
-    assert _error_type_for(ErrKind.SOFT) == "upstream_error"
+    # SOFT 是上游限流/软限流（429 等）：记 rate_limit 而不是笼统的 upstream_error，
+    # 运维一眼能看出是「等额度」而不是「查渠道配置」。链路层瞬态由 `_failure_type`
+    # 按异常类型先判成 upstream_timeout，不会落到这里。
+    assert _error_type_for(ErrKind.SOFT) == "rate_limit"
     assert _error_type_for(ErrKind.OTHER) == "upstream_error"
     # 「上游没这个模型」独立成类：与「请求无效」分开（2026-10-26）
     assert _error_type_for(ErrKind.BLOCKED) == "model_not_found"
     assert _error_type_for(ErrKind.INVALID) == "invalid_request"
     assert _error_type_for(ErrKind.REQUEST) == "invalid_request"
+    # 上下文超限 / 模型能力不匹配（2026-11-03 从 invalid_request 里独立出来）
+    assert _error_type_for(ErrKind.CONTEXT) == "context_overflow"
+    assert _error_type_for(ErrKind.CAPABILITY) == "model_capability"
 
 
 def test_blocked_error_type_is_controlled():
@@ -551,10 +557,10 @@ async def test_dead_with_exhausted_quota_cools_instead_of_hard_disabling(repo):
     row = credentials.candidates()[0]
     assert row.disabled is False                      # 没被硬禁用
     assert row.cooling_until == next_credit_reset(int(time.time()))
-    # 归因不再指向「凭证坏了」：DEAD 的尝试行只在真判 DEAD 时落，
-    # 改判 CREDIT 后由轮换耗尽/冷却耗尽的收尾行覆盖（与普通额度耗尽同口径）
+    # 收尾行按**最后一次错误的真实归因**落：改判 CREDIT（额度耗尽）→ rate_limit，
+    # 不再笼统 `no_healthy_credential`（见 `_exhaust_error_type`）。
     kinds = [event["error_type"] for event in collector.events]
-    assert kinds == ["no_healthy_credential"]
+    assert kinds == ["rate_limit"]
     assert "credential_unavailable" not in kinds
 
 
@@ -578,7 +584,7 @@ async def test_stream_dead_with_exhausted_quota_records_rate_limit(repo):
         {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
     assert chunks
     kinds = [event["error_type"] for event in collector.events]
-    assert kinds == ["no_healthy_credential"]
+    assert kinds == ["rate_limit"]
     assert credentials.candidates()[0].disabled is False
 
 
@@ -782,7 +788,7 @@ async def test_stream_dead_with_stale_quota_probes_and_records_rate_limit(repo):
         {"messages": [{"role": "user", "content": "hi"}], "stream": True}))]
     assert chunks
     kinds = [event["error_type"] for event in collector.events]
-    assert kinds == ["no_healthy_credential"]
+    assert kinds == ["rate_limit"]
     assert credentials.candidates()[0].disabled is False
 
 
@@ -824,7 +830,8 @@ async def test_soft_error_does_not_record_attribution_row(repo):
 
     kinds = [event["error_type"] for event in collector.events]
     assert "upstream_error" not in kinds       # 尝试级不落行
-    assert kinds[-1] == "no_healthy_credential"
+    # 收尾行按最后一次错误类型落：SOFT（限流）→ rate_limit
+    assert kinds[-1] == "rate_limit"
 
 
 def test_error_detail_includes_exception_class_for_empty_message():
@@ -869,7 +876,7 @@ async def test_plan_error_records_rate_limit_error_type(repo):
     with pytest.raises(NoHealthyCredential):
         await executor.complete(parse_chat_request(
             {"messages": [{"role": "user", "content": "hi"}]}))
-    assert collector.events[-1]["error_type"] == "no_healthy_credential"
+    assert collector.events[-1]["error_type"] == "rate_limit"
     assert credentials.candidates()[0].cooling_until is not None
 
 
@@ -929,6 +936,79 @@ async def test_blocked_exhaustion_still_records_model_unavailable(repo):
         await executor.complete(parse_chat_request(
             {"messages": [{"role": "user", "content": "hi"}]}))
     assert collector.events[-1]["error_type"] == "model_unavailable"
+
+async def test_context_overflow_exhaustion_records_context_overflow(repo):
+    """上下文超限（11115 / ErrKind.CONTEXT）轮换耗尽 → 归因记 context_overflow。
+
+    处置同请求级错误（不冷却、只换号），但统计不能混进「请求无效」——否则
+    运维会去查参数写法，实际动作是「精简上下文 / 换长窗口模型」。收尾行取
+    最后一次错误的真实归因（`_exhaust_error_type`）。
+    """
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+
+    class Context(Exception):
+        def kind(self):
+            return ErrKind.CONTEXT
+
+    executor = _exec_with_stats(repo, [[Context()]], collector, max_rotate=1)
+    from src.compat.openai.request import parse_chat_request
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+    assert collector.events[-1]["error_type"] == "context_overflow"
+    # 零动作：不冷却凭证
+    assert credentials.candidates()[0].cooling_until is None
+
+
+async def test_capability_rejection_skips_provider_and_records_model_capability(repo):
+    """模型能力不匹配（001001020 / ErrKind.CAPABILITY）→ 跳过整个上游 + 400。
+
+    换号无用（同渠道每个号都回同一条），所以走 REJECT_KINDS 分支：记一条
+    `model_capability` 尝试行后 `_skip_provider`，全部拒绝时抛 400。
+    """
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+
+    class Capability(Exception):
+        def kind(self):
+            return ErrKind.CAPABILITY
+
+    executor = _exec_with_stats(repo, [[Capability()]], collector)
+    from src.compat.openai.request import InvalidRequest as OpenAIInvalidRequest
+    from src.compat.openai.request import parse_chat_request
+
+    with pytest.raises(OpenAIInvalidRequest):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+    assert [event["error_type"] for event in collector.events] == ["model_capability"]
+    assert credentials.candidates()[0].cooling_until is None
+
+
+async def test_transport_timeout_exhaustion_records_upstream_timeout(repo):
+    """链路层瞬态（httpx.TransportError）耗尽 → upstream_timeout，不是 rate_limit。
+
+    SOFT 同时承载「上游限流」与「链路超时」，两者动作相反（等额度 vs 查代理）：
+    `_failure_type` 先按异常类型兜住传输异常，不能落成「额度耗尽」。
+    """
+    import httpx
+
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+
+    executor = _exec_with_stats(repo, [[httpx.ConnectTimeout("boom")]], collector,
+                                max_rotate=1)
+    from src.compat.openai.request import parse_chat_request
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+    assert collector.events[-1]["error_type"] == "upstream_timeout"
+
 
 async def test_stream_plan_error_records_failure(repo):
     """流式路径的权益耗尽同样要落统计。"""

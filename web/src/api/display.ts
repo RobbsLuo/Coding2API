@@ -529,8 +529,10 @@ export const SPARSE_METRICS = new Set([
 export type UsageErrorType =
   | "account_restricted"
   | "client_disconnect"
+  | "context_overflow"
   | "credential_unavailable"
   | "invalid_request"
+  | "model_capability"
   | "model_not_found"
   | "model_unavailable"
   | "no_healthy_credential"
@@ -538,6 +540,7 @@ export type UsageErrorType =
   | "truncated_stream"
   | "upstream_error"
   | "upstream_protocol"
+  | "upstream_timeout"
   | "upstream_first_event_timeout"
   | "upstream_idle_timeout";
 
@@ -545,8 +548,10 @@ export type UsageErrorType =
 export const USAGE_ERROR_LABEL: Record<UsageErrorType, string> = {
   account_restricted: "账号被上游限制",
   client_disconnect: "客户端中断",
+  context_overflow: "上下文超限",
   credential_unavailable: "凭证失效",
   invalid_request: "请求无效",
+  model_capability: "模型不支持该形态",
   model_not_found: "上游无此模型",
   model_unavailable: "该模型暂时不可用",
   no_healthy_credential: "无可用凭证",
@@ -554,6 +559,7 @@ export const USAGE_ERROR_LABEL: Record<UsageErrorType, string> = {
   truncated_stream: "上游截断",
   upstream_error: "渠道错误",
   upstream_protocol: "渠道响应异常",
+  upstream_timeout: "上游超时",
   upstream_first_event_timeout: "上游首字超时",
   upstream_idle_timeout: "上游流中断",
 };

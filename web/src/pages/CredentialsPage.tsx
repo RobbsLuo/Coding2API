@@ -319,6 +319,7 @@ function GrowthToastContent({ result }: { result: GrowthRunResult }) {
 
 interface Actions {
   revive: (credential: Credential) => void;
+  forceRevive: (credential: Credential) => void;
   toggle: (credential: Credential) => void;
   pin: (credential: Credential) => void;
   remove: (credential: Credential) => void;
@@ -585,9 +586,15 @@ export function CredentialsPage() {
 
   const actions: Actions = {
     // 会话失效被硬禁用的凭证：重新登录后用「恢复」放回池子，
-    // 不必删除重建（以前只能删除）。
+    // 不必删除重建（以前只能删除）。**保留**上游点名的冷却（限流/余额/
+    // 权益/风控）——清掉只会立刻再撞一次上游；要强制清走「强制恢复」。
     revive: (credential) =>
       void run(() => api.reviveCredential(credential.id), "已恢复该凭证，可参与调度。"),
+    forceRevive: (credential) =>
+      void run(
+        () => api.reviveCredential(credential.id, true),
+        "已强制恢复：上游点名的冷却（限流/余额/权益/风控）也一并清除，请留意可能立刻再撞上游。",
+      ),
     toggle: (credential) =>
       void run(
         () => api.toggleCredential(credential.id, credential.enabled !== 1),
@@ -1967,6 +1974,14 @@ function Row({
                     {credential.disabled === 1 && (
                       <DropdownMenuItem onSelect={() => actions.revive(credential)}>
                         <HeartPulse className="size-4" /> 恢复
+                      </DropdownMenuItem>
+                    )}
+                    {credential.disabled === 1 && (
+                      <DropdownMenuItem
+                        onSelect={() => actions.forceRevive(credential)}
+                        title="连上游点名的冷却（限流/余额/权益/风控）一起清除；清除后可能立刻再撞一次上游"
+                      >
+                        <HeartPulse className="size-4" /> 强制恢复
                       </DropdownMenuItem>
                     )}
                     <DropdownMenuItem onSelect={() => actions.toggle(credential)}>

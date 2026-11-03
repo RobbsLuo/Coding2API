@@ -15,13 +15,14 @@ from typing import Any
 from ..auth.api_key import digest_api_key, generate_api_key, preview_api_key
 from ..db.crypto import CredentialCipher, CredentialDecryptError
 from ..engine.scheduler import (
+    UPSTREAM_COOLDOWN_KINDS,
     Candidate,
     ErrorOutcome,
     ModelCooldown,
     expiring_credits,
     expiry_windows,
 )
-from ..provider.base import Quota, health_score
+from ..provider.base import ErrKind, Quota, health_score
 from ..provider.token_expiry import credential_token_times
 from ..sorting import sort_rows, sql_order
 from ..tags import tags_text, tags_value
@@ -290,19 +291,38 @@ class CredentialRepository:
                     (credential_id,))
             return True
 
-    def revive(self, credential_id: str) -> bool:
-        """解除硬禁用（session 死亡）与冷却，允许凭证重新参与调度。
+    def revive(self, credential_id: str, *, force: bool = False) -> bool:
+        """解除硬禁用（session 死亡）；冷却按来源决定是否一并清除。
 
         没有这个入口时，凭证一旦因 session 失效被硬禁用就只能删除重建，
         重新登录后也无法复用同一条记录。模型级冷却一并清空：管理员显式
-        「恢复」的意图包含该凭证的全部冷却状态。
+        「恢复」的意图包含该凭证的全部模型级冷却状态。
+
+        **账号级冷却不再无条件清除**：`cooling_kind` 属于上游点名恢复时刻的
+        那几类（`UPSTREAM_COOLDOWN_KINDS`：限流/余额/权益/风控）时保留——
+        实测 2026-11-03 12:22–12:23 管理员连续三次批量恢复 zen 凭证，每次都
+        顺手解掉刚写入的 429 冷却（上游已点名到次日 08:00），下一次请求立刻
+        再撞一次同一个 429。要强制清除走 `force=True`（前端「强制恢复」）。
+        `cooling_kind` 为 NULL（老库 / 本地 OTHER 冷却）时照旧清除，与补列前一致。
         """
         with self._db.transaction() as conn:
-            cursor = conn.execute(
-                "UPDATE credentials SET disabled = 0, disabled_reason = NULL, "
-                "cooling_until = NULL, err_count = 0 WHERE id = ?", (credential_id,))
+            row = conn.execute(
+                "SELECT cooling_kind FROM credentials WHERE id = ?",
+                (credential_id,)).fetchone()
+            if row is None:
+                return False
+            keep_cooldown = (not force) and row["cooling_kind"] in UPSTREAM_COOLDOWN_KINDS
+            if keep_cooldown:
+                conn.execute(
+                    "UPDATE credentials SET disabled = 0, disabled_reason = NULL, "
+                    "err_count = 0 WHERE id = ?", (credential_id,))
+            else:
+                conn.execute(
+                    "UPDATE credentials SET disabled = 0, disabled_reason = NULL, "
+                    "cooling_until = NULL, cooling_kind = NULL, err_count = 0 "
+                    "WHERE id = ?", (credential_id,))
             _clear_model_cooldowns(conn, credential_id)
-        return cursor.rowcount > 0
+        return True
 
     def mark_relogin_required(self, credential_id: str, reason: str) -> None:
         """标记「需重新登录」：硬禁用 + 可操作原因，停止一切自动重试。
@@ -318,7 +338,7 @@ class CredentialRepository:
         with self._db.transaction() as conn:
             conn.execute(
                 "UPDATE credentials SET disabled = 1, disabled_reason = ?, err_count = 0, "
-                "cooling_until = NULL WHERE id = ?", (reason, credential_id))
+                "cooling_until = NULL, cooling_kind = NULL WHERE id = ?", (reason, credential_id))
             _clear_model_cooldowns(conn, credential_id)
 
     def save_error(self, credential_id: str, outcome: ErrorOutcome) -> None:
@@ -328,9 +348,12 @@ class CredentialRepository:
         不动账号级 cooling_until；反之账号级冷却会清空该凭证的模型级条目
         （账号级限流不允许被「切模型」绕过）。
 
-        硬禁用（DEAD）优先写 `outcome.disabled_reason`，为空才回落历史的
+        hard禁用（DEAD）优先写 `outcome.disabled_reason`，为空才回落历史的
         "session dead"：401/403 里有「账号被风控限制」这类重登解决不了的原因，
         管理台直接显示该字段，写错会把人引向错误的修复动作。
+
+        写账号级冷却时同步写 `cooling_kind`（ErrKind 值）：`revive` 据此保留
+        「上游点名恢复时刻」的冷却（见 `UPSTREAM_COOLDOWN_KINDS`）。
         """
         with self._db.transaction() as conn:
             if outcome.model_cooldowns:
@@ -348,7 +371,7 @@ class CredentialRepository:
             if outcome.disabled:
                 conn.execute(
                     "UPDATE credentials SET disabled = 1, disabled_reason = ?, err_count = 0, "
-                    "cooling_until = NULL WHERE id = ?",
+                    "cooling_until = NULL, cooling_kind = NULL WHERE id = ?",
                     (outcome.disabled_reason or "session dead", credential_id))
             else:
                 # `cooling_until = NULL` 的语义是「本次不动冷却」，不是「清掉冷却」：
@@ -357,10 +380,13 @@ class CredentialRepository:
                 # RESTRICTED/SOFT 冷却（2h~7d）擦成 NULL，账号立刻回池继续撞。
                 # 与 `executor._note_upstream_error` 里 REQUEST 分支的顾虑同源。
                 # 要**主动解除**冷却走 `revive()` / `purge_expired_*`，不靠这里。
+                # `cooling_kind` 同 COALESCE 语义：本次不动冷却时也不动来源标签。
                 conn.execute(
                     "UPDATE credentials SET cooling_until = COALESCE(?, cooling_until), "
+                    "cooling_kind = COALESCE(?, cooling_kind), "
                     "err_count = ? WHERE id = ?",
-                    (outcome.cooling_until, outcome.err_count, credential_id))
+                    (outcome.cooling_until, outcome.cooling_kind or None,
+                     outcome.err_count, credential_id))
             if outcome.cooling_until is not None:
                 _clear_model_cooldowns(conn, credential_id)
 
@@ -378,9 +404,9 @@ class CredentialRepository:
         """
         with self._db.transaction() as conn:
             cursor = conn.execute(
-                "UPDATE credentials SET cooling_until = ?, err_count = 0 "
+                "UPDATE credentials SET cooling_until = ?, cooling_kind = ?, err_count = 0 "
                 "WHERE provider = ? AND (cooling_until IS NULL OR cooling_until < ?)",
-                (until, provider, until))
+                (until, ErrKind.RESTRICTED.value, provider, until))
             conn.execute(
                 "DELETE FROM credential_model_cooldowns WHERE credential_id IN "
                 "(SELECT id FROM credentials WHERE provider = ?)", (provider,))
@@ -418,7 +444,7 @@ class CredentialRepository:
         """
         with self._db.transaction() as conn:
             cursor = conn.execute(
-                "UPDATE credentials SET cooling_until = NULL "
+                "UPDATE credentials SET cooling_until = NULL, cooling_kind = NULL "
                 "WHERE cooling_until IS NOT NULL AND cooling_until <= ?",
                 (_now(now),))
         return cursor.rowcount
@@ -733,7 +759,8 @@ class CredentialRepository:
         now = int(now or time.time())
         rows = self._db.connect().execute(
             "SELECT id, provider, nickname, enabled, disabled, disabled_reason, pinned, "
-            "health, cooling_until, err_count, quota_remaining, quota_total, quota_cycle_end, "
+            "health, cooling_until, cooling_kind, err_count, quota_remaining, "
+            "quota_total, quota_cycle_end, "
             "quota_probed_at, growth_last_run_at, growth_last_result, created_at, added_by, "
             "quota_expiry_ladder, quota_packages, data_enc, "
             "token_expires_at, token_issued_at, "

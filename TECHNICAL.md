@@ -518,9 +518,10 @@ class Scheduler:
 - **冷却到期先半开**（`engine/half_open.py`，`(凭证, 作用域)` 粒度；作用域空串 = 账号级、非空 = 该模型）：到期后只放行**一个**探测请求，其余请求看见占用即换号（唯一候选时按无可用返回）。成功记「已探通」120s，期内直接放行；失败由上游写新冷却、探测位立刻释放。探测位 TTL 600s 兜住 GC 泄漏。理由：冷却一到期就全量回池，会把刚解冻的号再次打进限流（锯齿）。进程内集合，重启只让每个号多探一次。
 - 退避：`MODEL` 10m 起翻倍封顶 2h；`BLOCKED` 6h 起翻倍封顶 24h；`CONCURRENCY` 固定 60s 不翻倍。换 reason 重新计数。
 - **上游点名恢复时刻优先**：`Retry-After` → `parse_retry_after`；头缺失时 CB 走 `parse_reset_at` 读正文 `reset at … UTC+8`（`retry_hints(headers, body=raw)`，仅 CodeBuddy 传 body）。两者经 `clamp_retry_at` 钳在 `[now + 常量, now + 24h]` → `MODEL` 的 600s 只是下限，上游说 22:34 恢复即冷却到 22:34。日志按 `_scope_label` 打作用域：模型级「模型 <名>」，账号级「作用域 账号」——账号级分类的调用方同样传模型名，一律打 `模型` 会让 zen 429 读起来像模型级限流。
-- 清除：`save_success(..., model=)` 只删 `reason='blocked'`；`revive` / 删除凭证 / 账号级冷却出现都清模型条目。留存任务每轮 `purge_expired_model_cooldowns()`（删行）+ `purge_expired_account_cooldowns()`（`cooling_until` 置 NULL）；列表只下发未过期。账号级那条是**卫生清理**非调度依赖——选号按 `cooling_until > now` 判断，但陈旧值让管理台「冷却」排序失真。
+- 清除：`save_success(..., model=)` 只删 `reason='blocked'`；删除凭证 / 账号级冷却出现都清模型条目，`revive` 亦然。留存任务每轮 `purge_expired_model_cooldowns()`（删行）+ `purge_expired_account_cooldowns()`（`cooling_until` 与 `cooling_kind` 一起置 NULL）；列表只下发未过期。账号级那条是**卫生清理**非调度依赖——选号按 `cooling_until > now` 判断，但陈旧值让管理台「冷却」排序失真。
+- **账号级冷却带来源标签** `credentials.cooling_kind`（ErrKind 值）：`revive` 对 `UPSTREAM_COOLDOWN_KINDS`（soft/credit/plan/restricted）**保留**冷却，只解硬禁用与本地冷却；`force=True` 才清。此前一律清除，导致「恢复」后立刻再撞同一个 429（2026-11-03 12:22–12:23 实测）。老库补列后为 NULL = 来源未知，按旧行为清除。
 - 无模型名可归因 → 退化为账号级 SOFT。
-- **模型级冷却来源不止模型限流**：Qoder 节点故障（§5.3）也归 `MODEL`。全部候选只因该模型被排除（`_all_model_cooled`）→ 503 文案 `model 'x' temporarily unavailable on upstream`；统计落 `error_type=model_unavailable`，其余耗尽仍 `no_healthy_credential`；**对外错误码不变**。
+- **模型级冷却来源不止模型限流**：Qoder 节点故障（§5.3）也归 `MODEL`。全部候选只因该模型被排除（`_all_model_cooled`）→ 503 文案 `model 'x' temporarily unavailable on upstream`；统计落 `error_type=model_unavailable`；其余耗尽按**最后一次错误的真实归因**落统计（见 §9.1.3），只有一次都没选中凭证才 `no_healthy_credential`；**对外错误码不变**。
 
 ### 6.4 跨渠道 fallback 兼容组
 热更 `MODEL_FALLBACK_GROUPS`（默认 `""` 关闭）：`组名=成员1,成员2;组名2=成员3`。
@@ -664,7 +665,16 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 - 受控枚举 `CONTROLLED_ERROR_TYPES` 增 `model_not_found`（前端 `USAGE_ERROR_LABEL` 同步：「上游无此模型」）。
 - **套餐不允许也归这里**（2026-10-29）：CodeBuddy 11158 `model [...] is not allowed for user type [personal_free_user]` 与 11102「该后端无此模型」对**当前凭证**是同一件事——重试无意义、换号才有用、与账号健康无关。此前 11158 落进 `400 其他 → ErrKind.INVALID`，归因面板显示「请求无效」（实测 10:36 / 10:37 国际站免费号请求 `gpt-6-luna`、`gemini-3.8-flash`）。现在两者共用 `codebuddy.events.MODEL_BLOCKED_CODES`，列表探活（`client.filter_available_models`）也读同一个集合，不再各写一份。
 - 可用性视图（`GET /api/models/availability`）的计入口径增 `model_not_found`：它**仍属**模型级失败，只是分类更准。
-- **收尾行不变**：轮换耗尽时那一行仍按 `_exhaust_error_type` 落 `model_unavailable` / `no_healthy_credential`——「上游没这个模型」（尝试级归因）与「这个模型现在全都不可用」（收尾行）是两件事。
+- **收尾行按真实原因落**（2026-11-03 修）：轮换耗尽时那一行由 `_exhaust_error_type` 取最后一次错误的类型——模型级冷却耗尽 → `model_unavailable`，否则走 `_failure_type`；只有一次都没选中凭证才 `no_healthy_credential`。此前一律 `no_healthy_credential`，把 zen 单凭证 429 冷却到次日这种「上游限流」也写成「无可用凭证」，运维去查凭证池只会白折腾。「上游没这个模型」（尝试级归因）与「这个模型现在全都不可用」（收尾行）仍是两件事。
+
+### 9.1.3 收尾行按真实归因 + 限流/超时/上下文类独立成类
+`_failure_type(kind, error)` = 收尾行的受控类型：先按**异常形态**判链路层瞬态（`httpx.TransportError` / `ssl.SSLError` / `UpstreamTransportError` → `upstream_timeout`），再落 `_error_type_for(kind)`。
+
+- `ErrKind.SOFT` → `rate_limit`：SOFT 主要是上游 429/限流，记「额度耗尽」比笼统 `upstream_error`（「渠道错误」）可行动；链路层超时被上一步拦走，不会误标。
+- `ErrKind.CONTEXT`（CodeBuddy 11115 `prompt is too long`）→ `context_overflow`；处置同请求级错误（不罚号、仍换号），但不能再混进「请求无效」。
+- `ErrKind.CAPABILITY`（CodeArts 001001020 not multimodal）→ `model_capability`；处置同 INVALID（`REJECT_KINDS` 一起跳过整个上游），但「模型不支持该请求形态」不是「请求写错了」。
+- 三个新值进 `CONTROLLED_ERROR_TYPES`（前端 `USAGE_ERROR_LABEL` 同步）；`model_capability` 计入模型可用性视图，`context_overflow` 不计（客户端上下文问题，与「上游不认模型」无关）。
+- **明细口径**：硬失败（DEAD/RESTRICTED/INVALID/CAPABILITY）每次尝试各落一行；限流 / 额度 / 超时 / 上下文等其余分类每次请求仅一行（收尾行），不逐次落——逐次落会把 `usage_hourly.requests` 与 Key 日请求额度一起刷高。
 
 **单模型查询** `GET /v1/models/{model_id:path}`：与列表**共用** `_revalidated_providers` + `_served_entries`。命中三种写法（对外 id / 展示名 / 任一渠道 `raw_ids`），`strip().lower()` 较。`:path` 容纳带命名空间的原代号（`dots-studio/dots-3-note-preview:free`）。**白名单外与不存在同形 404**（`model_not_found`），客户端无法探测池子。能力分与列表同源。
 

@@ -305,8 +305,11 @@ export const api = {
       method: "POST",
       ...json({ items }),
     }),
-  reviveCredential: (id: string) =>
-    request<{ ok: boolean }>(`/api/credentials/${id}/revive`, { method: "POST" }),
+  reviveCredential: (id: string, force = false) =>
+    request<{ ok: boolean }>(`/api/credentials/${id}/revive`, {
+      method: "POST",
+      ...json({ force }),
+    }),
   toggleCredential: (id: string, enabled: boolean) =>
     request<{ ok: boolean }>(`/api/credentials/${id}/toggle`, { method: "POST", ...json({ enabled }) }),
   pinCredential: (id: string | null) =>

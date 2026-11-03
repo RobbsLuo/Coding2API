@@ -215,7 +215,7 @@ def test_error_types_reported(admin_client):
     """响应里带口径说明，前端不必硬编码「哪几类算下线」。"""
     _app, client = admin_client
     assert _rows(client)["error_types"] == [
-        "upstream_blocked", "model_not_found", "invalid_request"]
+        "upstream_blocked", "model_not_found", "model_capability", "invalid_request"]
 
 
 # ------------------------------------------------------- 探活结论与人工接管

@@ -338,7 +338,9 @@ def classify_error_code(code: str | None) -> ErrKind:
         # 模型能力不匹配（带图请求打到非多模态模型）：换同渠道任何一个号
         # 都会回同一条错误，必须跳过整个上游。判 REQUEST 会逐个号去撞，
         # 3 条凭证正好吃满 max_rotate（见 _MODEL_CAPABILITY_MARKERS 注释）。
-        return ErrKind.INVALID
+        # 统计口径独立成 `model_capability`：处置同 INVALID（跳过上游 + 400），
+        # 但归因面板要说「这个模型不支持这次请求形态」而不是「请求写错了」。
+        return ErrKind.CAPABILITY
     if "1005" in text or "quota" in text or "insufficient" in text:
         return ErrKind.PLAN
     if "apig.0301" in text or "decrypt token" in text:
@@ -375,6 +377,10 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
         return ErrKind.CREDIT
     if 1005 in codes:
         return ErrKind.PLAN
+    if any(m in lowered for m in _MODEL_CAPABILITY_MARKERS):
+        # 与流内 `classify_error_code` 同判据：模型能力不匹配（带图请求打到
+        # 非多模态模型）换号无用，跳过整个上游；统计记 `model_capability`。
+        return ErrKind.CAPABILITY
     if status in (400, 404) and (
            11102 in codes or any(m in lowered for m in _MODEL_ABSENT_MARKERS)):
         return ErrKind.BLOCKED

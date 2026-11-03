@@ -379,6 +379,37 @@ def test_legacy_db_upgrade_adds_credential_tags(tmp_path):
     db.close()
 
 
+def test_legacy_db_upgrade_adds_cooling_kind(tmp_path):
+    """老库升级：credentials 无 cooling_kind 列时幂等补列，历史行为 NULL。
+
+    NULL = 冷却来源未知（老库 / 本地 OTHER），`revive` 照旧清除该冷却，与补列前
+    完全一致；新写入的冷却带上 ErrKind 来源，`revive` 才会保留「上游点名恢复
+    时刻」的那些（见 `UPSTREAM_COOLDOWN_KINDS`）。
+    """
+    from src.db.migrate import SCHEMA_VERSION
+
+    db = Database(tmp_path / "legacy.sqlite3")
+    conn = sqlite3.connect(db.path)
+    conn.execute(
+        "CREATE TABLE credentials (id TEXT PRIMARY KEY, provider TEXT NOT NULL,"
+        " data_enc BLOB NOT NULL, created_at INTEGER NOT NULL,"
+        " cooling_until INTEGER)")
+    conn.execute("INSERT INTO credentials (id, provider, data_enc, created_at,"
+                 " cooling_until) VALUES ('cred_old', 'trae', x'00', 1, 9999)")
+    conn.commit()
+    conn.close()
+
+    apply_schema(db.connect())
+    columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
+    assert "cooling_kind" in columns
+    row = db.connect().execute(
+        "SELECT cooling_kind, cooling_until FROM credentials WHERE id = 'cred_old'"
+    ).fetchone()
+    assert row[0] is None and row[1] == 9999
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    db.close()
+
+
 def test_legacy_db_upgrade_drops_credits_columns(tmp_path):
     """老库升级：credentials 上遗留的三列积分账被删列，版本推进到 29。
 

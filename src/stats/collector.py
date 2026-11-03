@@ -32,7 +32,11 @@ CONTROLLED_ERROR_TYPES = frozenset({
     #   no_healthy_credential — 无可用凭证（executor 耗尽轮换）
     #   model_unavailable     — 耗尽轮换但候选全部只因**该模型**的模型级
     #                            冷却不可用（_exhaust_error_type；换个模型即可用）
-    #   rate_limit         — 权益耗尽（_error_type_for(PLAN)）
+    #   rate_limit         — 权益/额度耗尽（_error_type_for(PLAN/CREDIT/MODEL/
+    #                        CONCURRENCY/QUEUE)）或上游限流（SOFT）
+    #   context_overflow   — 上下文超限（11115 prompt too long）
+    #   model_capability   — 模型不支持该请求形态（CodeArts 001001020 not multimodal）
+    #   upstream_timeout   — 链路层瞬态（连接超时 / 读超时 / TLS 中断；只看异常类型）
     #   upstream_error / upstream_protocol — 其它上游失败
     #   upstream_first_event_timeout — 出帧前上游不吐首个数据事件（A1）
     #   upstream_idle_timeout        — 已出帧后上游停止吐数据（A1）
@@ -40,8 +44,8 @@ CONTROLLED_ERROR_TYPES = frozenset({
     "client_disconnect", "credential_unavailable",
     "account_restricted",
     "invalid_request", "model_not_found", "no_healthy_credential",
-    "model_unavailable",
-    "rate_limit", "upstream_error", "upstream_protocol",
+    "model_unavailable", "context_overflow", "model_capability",
+    "rate_limit", "upstream_error", "upstream_protocol", "upstream_timeout",
     "upstream_first_event_timeout", "upstream_idle_timeout",
     "truncated_stream",
 })

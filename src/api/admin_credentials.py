@@ -396,14 +396,21 @@ def create_router(services: Services) -> APIRouter:
         return {"ok": True}
 
     @router.post("/api/credentials/{credential_id}/revive")
-    async def revive_credential(credential_id: str,
+    async def revive_credential(credential_id: str, payload: dict | None = None,
                                 _csrf: None = Depends(csrf_protected),
                                 principal=Depends(principal_from_request)):
-        """解除硬禁用/冷却，让重新登录后的凭证回到池子。"""
+        """解除硬禁用，让重新登录后的凭证回到池子。
+
+        `force=True`（可选请求体字段）才连带清除**上游点名恢复时刻**的冷却
+        （限流 / 余额 / 权益 / 风控）：默认保留，否则刚解除禁用就会立刻再撞一次
+        上游同一个 429。默认清除只影响本地冷却（见 `repo.revive`）。
+        """
         require_operator(principal)
-        if not credentials.revive(credential_id):
+        force = bool((payload or {}).get("force"))
+        if not credentials.revive(credential_id, force=force):
             raise InvalidRequest("credential not found")
-        logger.info("管理员 %s 恢复了凭证 %s", principal.username, credential_id)
+        logger.info("管理员 %s 恢复了凭证 %s（force=%s）",
+                    principal.username, credential_id, force)
         services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_REVIVE,
                               target=credential_id)
         return {"ok": True}
@@ -541,6 +548,8 @@ def create_router(services: Services) -> APIRouter:
         if len(ids) > BATCH_MAX_IDS:
             raise InvalidRequest(f"too many credentials (max {BATCH_MAX_IDS})")
         enabled = bool(payload.get("enabled", True))
+        # force 只对 revive 有效：清掉「上游点名恢复时刻」的冷却（见 repo.revive）
+        force_revive = bool(payload.get("force"))
         semaphore = asyncio.Semaphore(BATCH_CONCURRENCY)
 
         async def run_one(credential_id: str) -> dict:
@@ -550,7 +559,7 @@ def create_router(services: Services) -> APIRouter:
                         return {"id": credential_id, "ok": False, "error": "credential not found"}
                     return {"id": credential_id, "ok": True}
                 if action == "revive":
-                    if not credentials.revive(credential_id):
+                    if not credentials.revive(credential_id, force=force_revive):
                         return {"id": credential_id, "ok": False, "error": "credential not found"}
                     return {"id": credential_id, "ok": True}
                 # probe / checkin 会真的出网：在途上限只约束这两类动作。

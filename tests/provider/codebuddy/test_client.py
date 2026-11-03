@@ -48,10 +48,11 @@ def test_classify_body_markers():
     (400, b'{"code": 11158, "msg": "model [gpt-6-luna] is not allowed for user '
           b'type [personal_free_user]"}', ErrKind.BLOCKED),
     (404, b'{"code": 11158}', ErrKind.BLOCKED),
-    # 请求级错误：不罚号，仍换号（请求体坏 / 上下文超限 / 渠道风控 / 图片无效）
+    # 请求级错误：不罚号，仍换号（请求体坏 / 渠道风控 / 图片无效）
     (400, b'{"code": 11101}', ErrKind.REQUEST),
     (400, b'{"code": 500, "msg": "Unmarshal chat params failed"}', ErrKind.REQUEST),
-    (400, b'{"code": 11115, "msg": "prompt is too long"}', ErrKind.REQUEST),
+    # 上下文超限（11115）：处置同请求级错误，统计独立成 CONTEXT
+    (400, b'{"code": 11115, "msg": "prompt is too long"}', ErrKind.CONTEXT),
     # 渠道风控（瞬时，窗口内自愈）：曾误落 INVALID → 零重试直接 400，实测误伤
     (400, b'{"code": 11128, "msg": "Illegal API invocation from an unapproved channel"}',
      ErrKind.REQUEST),

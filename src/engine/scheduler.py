@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from ..config import live
-from ..provider.base import MODEL_SCOPED_KINDS, ErrKind
+from ..provider.base import MODEL_SCOPED_KINDS, NO_PENALTY_KINDS, ErrKind
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +35,17 @@ RESTRICTED_COOLDOWN_SECONDS = 2 * 3600
 RESTRICTED_COOLDOWN_MAX_SECONDS = 7 * 86400
 ERR_THRESHOLD = 3
 MAX_ROTATE = 3
+
+# 冷却来源属于「上游点名恢复时刻」的分类：人工 `revive` **保留**这些冷却
+# （清掉只会立刻再撞一次上游），要强制清除须显式 `force=True`。
+# 不含 MODEL/BLOCKED/CONCURRENCY（模型级条目，revive 一律清）、REQUEST/CONTEXT/
+# CAPABILITY/QUEUE（零冷却）、OTHER（本地累计冷却，清掉无害）。
+# 与 `note_error` 里写 `cooling_kind` 的分支必须同步：漏一处，该类的冷却
+# 就会被 revive 静默解掉。
+UPSTREAM_COOLDOWN_KINDS = frozenset({
+    ErrKind.SOFT.value, ErrKind.CREDIT.value,
+    ErrKind.PLAN.value, ErrKind.RESTRICTED.value,
+})
 # 模型级限流（6004）软冷却基数与封顶（有界指数退避）
 MODEL_COOLDOWN_SECONDS = 600
 MODEL_COOLDOWN_MAX_SECONDS = 2 * 3600
@@ -225,6 +236,10 @@ class ErrorOutcome:
     # 在 DEAD 时按 provider 识别（如 CodeBuddy 11140 = 账号被风控限制，需申诉）。
     disabled_reason: str = ""
     cooling_until: int | None = None
+    # 冷却来源（ErrKind 值），写入 `credentials.cooling_kind`：`revive` 据此
+    # 区分「上游点名恢复时刻」的冷却（soft/credit/plan/restricted，保留）与
+    # 其余本地冷却（清除）。空串 = 本次不写该列。
+    cooling_kind: str = ""
     err_count: int = 0
     # 模型级条目：model → ModelCooldown（仅 MODEL/BLOCKED 产生），
     # 由调用方按该映射写库；账号级冷却出现时这里恒为空（互斥）
@@ -361,7 +376,8 @@ class Scheduler:
         历史版本逐字节一致。DEAD / REQUEST 不看它：硬禁用与请求级错误都不是
         「等一会就恢复」。
         """
-        if kind is ErrKind.REQUEST:
+        if kind in NO_PENALTY_KINDS:
+            # REQUEST / CONTEXT 不是账号的问题：不冷却、不累计、只换号重试。
             return ErrorOutcome(err_count=candidate.err_count)
         if kind is ErrKind.QUEUE:
             # 排队不是失败：不冷却、不累计。真正的「等多久再打」由 executor
@@ -381,17 +397,20 @@ class Scheduler:
             return ErrorOutcome(
                 cooling_until=self._cooling_until(
                     candidate, kind, now, retry_at, duration, None),
+                cooling_kind=kind.value,
                 err_count=level + 1)
         if kind is ErrKind.CREDIT:
             return ErrorOutcome(
                 cooling_until=self._cooling_until(
                     candidate, kind, now, retry_at,
                     max(next_credit_reset(now) - now, 0), model),
+                cooling_kind=kind.value,
                 err_count=0)
         if kind is ErrKind.PLAN:
             return ErrorOutcome(
                 cooling_until=self._cooling_until(
                     candidate, kind, now, retry_at, self._cooldowns[ErrKind.PLAN], model),
+                cooling_kind=kind.value,
                 err_count=0)
         if kind in MODEL_SCOPED_KINDS:
             if not model:
@@ -401,6 +420,7 @@ class Scheduler:
                     cooling_until=self._cooling_until(
                         candidate, kind, now, retry_at,
                         self._cooldowns[ErrKind.SOFT], None),
+                    cooling_kind=kind.value,
                     err_count=candidate.err_count)
             if kind is ErrKind.BLOCKED:
                 reason = "blocked"
@@ -429,6 +449,7 @@ class Scheduler:
                 cooling_until=self._cooling_until(
                     candidate, kind, now, retry_at,
                     self._cooldowns[ErrKind.SOFT], model),
+                cooling_kind=kind.value,
                 err_count=candidate.err_count)
         count = candidate.err_count + 1
         if count >= self.err_threshold:
@@ -436,6 +457,7 @@ class Scheduler:
                 cooling_until=self._cooling_until(
                     candidate, kind, now, retry_at,
                     self._cooldowns[ErrKind.OTHER], model),
+                cooling_kind=kind.value,
                 err_count=0)
         return ErrorOutcome(err_count=count)
 

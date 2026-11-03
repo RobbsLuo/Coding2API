@@ -145,6 +145,56 @@ def test_repo_revive_and_delete_clear_model_cooldowns(repo):
     assert db.connect().execute(
         "SELECT COUNT(*) AS c FROM credential_model_cooldowns").fetchone()["c"] == 0
 
+def test_repo_revive_keeps_upstream_cooldown_unless_forced(repo):
+    """`revive` 保留「上游点名恢复时刻」的冷却，`force=True` 才清。
+
+    回归 2026-11-03 12:22–12:23：管理员连续三次批量恢复 zen 凭证，每次都在
+    恢复的同时顺手解掉刚写入的 429 冷却（上游已点名到次日 08:00），下一次
+    请求立刻再撞一次同一个 429。本地冷却（`cooling_kind` 为 NULL / other）
+    照旧清除，与补列前行为一致。
+    """
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    future = int(time.time()) + 3600
+    credentials.save_error(cid, ErrorOutcome(
+        cooling_until=future, cooling_kind=ErrKind.SOFT.value, err_count=0))
+
+    assert credentials.revive(cid) is True
+    row = credentials.candidates()[0]
+    assert row.disabled is False
+    assert row.cooling_until == future            # 上游冷却被保留
+
+    assert credentials.revive(cid, force=True) is True
+    assert credentials.candidates()[0].cooling_until is None
+
+def test_repo_revive_clears_local_cooldown_and_missing_credential(repo):
+    """本地冷却（cooling_kind NULL / other）在恢复时一并清掉；不存在的凭证返回 False。"""
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    credentials.save_error(cid, ErrorOutcome(
+        cooling_until=int(time.time()) + 3600, cooling_kind=ErrKind.OTHER.value))
+
+    assert credentials.revive(cid) is True
+    assert credentials.candidates()[0].cooling_until is None
+    assert credentials.revive("cred_missing") is False
+
+def test_repo_account_cooling_kind_is_recorded_and_purged(repo):
+    """账号级冷却写入来源标签；过期回收时标签一起清掉（避免陈旧来源误导 revive）。"""
+    credentials, _db = repo
+    cid = credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    past = int(time.time()) - 10
+    credentials.save_error(cid, ErrorOutcome(
+        cooling_until=past, cooling_kind=ErrKind.CREDIT.value))
+    row = _db.connect().execute(
+        "SELECT cooling_kind FROM credentials WHERE id = ?", (cid,)).fetchone()
+    assert row["cooling_kind"] == ErrKind.CREDIT.value
+
+    assert credentials.purge_expired_account_cooldowns() == 1
+    row = _db.connect().execute(
+        "SELECT cooling_kind, cooling_until FROM credentials WHERE id = ?",
+        (cid,)).fetchone()
+    assert row["cooling_until"] is None and row["cooling_kind"] is None
+
 def test_repo_purges_only_expired_model_cooldowns(repo):
     from src.engine.scheduler import ModelCooldown
 

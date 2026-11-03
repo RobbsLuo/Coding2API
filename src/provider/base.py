@@ -54,11 +54,22 @@ class ErrKind(StrEnum):
     CONCURRENCY = "concurrency"
     # 该后端无此模型（11102）：(账号, 模型) 负缓存，重试无意义
     BLOCKED = "blocked"
-    # 请求级错误（请求体坏 11101 / 上下文超限 11115 / 渠道风控 11128 /
-    # 图片无效 11135）：不是账号的问题，不冷却、不累计；仍会换号重试。
-    # **不含**「模型不支持多模态」（CodeArts 001001020）：那是模型能力拒绝，
-    # 换同渠道任何一个号都会回同一条错误，归 INVALID 跳过整个上游。
+    # 请求级错误（请求体坏 11101 / 渠道风控 11128 / 图片无效 11135）：不是
+    # 账号的问题，不冷却、不累计；仍会换号重试。上下文超限（11115）走
+    # CONTEXT、模型能力拒绝（CodeArts 001001020）走 CAPABILITY，三者处置
+    # 相同但统计口径分开（见各自定义）。
     REQUEST = "request"
+    # 上下文超限（CodeBuddy 11115 `prompt is too long: N > M maximum`）：与
+    # REQUEST 同一处置（不冷却、不累计、换号重试），但统计要单独成类——
+    # 归进 `invalid_request` 时归因面板显示「请求无效」，读起来像客户端参数
+    # 写错了，实际动作是「精简上下文或换长窗口模型」（实测 2026-11-02 23:32
+    # `1056943 tokens > 1048576 maximum`）。
+    CONTEXT = "context"
+    # 模型能力不匹配（CodeArts `InferHub.001001020.406 The request model is not
+    # multimodal`）：与 INVALID 同一处置（跳过整个上游、全部拒绝才 400），
+    # 但统计单独成类——「请求无效」会让运维去查参数，实际是「这个模型不支持
+    # 这次请求形态（带图），换支持多模态的模型/渠道」。
+    CAPABILITY = "capability"
     # 排队中（上游明确回 `isQueued` / `RESOURCE_LIMIT` + `retryAfterSeconds`）：
     # 既不是账号故障也不是请求错误，是「这个号现在满了，等 N 秒再打它」。
     # 不冷却、不累计、不占轮换预算，等在原号上重开（见 executor 的排队重开）。
@@ -70,6 +81,15 @@ class ErrKind(StrEnum):
 # 账号级冷却必须显式清空模型级条目（见 scheduler.note_error），
 # 否则上一次模型级限流的豁免会泄漏到本次账号级冷却上（换模型错误绕过）。
 MODEL_SCOPED_KINDS = frozenset({ErrKind.MODEL, ErrKind.BLOCKED, ErrKind.CONCURRENCY})
+
+# 零动作分类：不是账号/凭证的错，不冷却、不累计，只换号重试。
+# REQUEST = 请求体坏 / 渠道风控；CONTEXT = 上下文超限（11115）。
+# 与 INVALID 的区别：INVALID 跳过**整个上游**（换号也回同一条），这两个只换号。
+NO_PENALTY_KINDS = frozenset({ErrKind.REQUEST, ErrKind.CONTEXT})
+
+# 「这次请求形态上游不接受」→ 换号无用，跳过整个上游。EXECUTOR 对这两类都
+# `_skip_provider` + 以 400 收尾；统计口径分开（invalid_request / model_capability）。
+REJECT_KINDS = frozenset({ErrKind.INVALID, ErrKind.CAPABILITY})
 
 
 def body_hint(body: bytes, limit: int = 2048) -> str:

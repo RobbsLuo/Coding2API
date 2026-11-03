@@ -56,6 +56,8 @@ export interface Credential {
   pinned: 0 | 1;
   health: Health;
   cooling_until: number | null;
+  /** 冷却来源（ErrKind 值，如 soft/credit/plan/restricted）；null=无冷却或来源未知 */
+  cooling_kind: string | null;
   err_count: number;
   quota_remaining: number | null;
   quota_total: number | null;
