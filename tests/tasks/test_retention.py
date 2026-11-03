@@ -84,3 +84,23 @@ def test_periodic_rollup_does_not_rewrite_old_hours(tmp_path):
     assert old["requests"] == 999               # 窗口外：完全不参与重算
     assert recent["requests"] == 1 and recent["input_tokens"] == 5
     db.close()
+
+
+def test_retention_prunes_checkin_events():
+    """签到审计日志按保留期清理；未装配时不做任何清理。"""
+    class _Events:
+        def __init__(self) -> None:
+            self.keep: int | None = None
+
+        def prune(self, *, keep_days: int) -> int:
+            self.keep = keep_days
+            return 5
+
+    events = _Events()
+    report = RetentionTask(_RecordingCollector(), checkin_events=events,
+                           retention_days=30).run_once(now=1_700_000_000)
+    assert events.keep == 30 and report["purged_checkin_events"] == 5
+
+    # 老调用方（不传 checkin_events）不清理，报告里计 0
+    bare = RetentionTask(_RecordingCollector()).run_once(now=1_700_000_000)
+    assert bare["purged_checkin_events"] == 0

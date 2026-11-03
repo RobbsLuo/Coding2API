@@ -14,6 +14,7 @@ import {
   Flame,
   Gauge,
   HeartPulse,
+  History,
   Hourglass,
   MoreHorizontal,
   Pin,
@@ -88,7 +89,7 @@ import {
   tokenExpiryView,
 } from "../api/display";
 import type { CredentialState, TokenExpiryView } from "../api/display";
-import type { BatchAction, BatchResult, Credential, CreditEvent, GrowthRunResult } from "../api/types";
+import type { BatchAction, BatchResult, CheckinEvent, Credential, CreditEvent, GrowthRunResult } from "../api/types";
 import {
   Badge,
   Button,
@@ -326,6 +327,7 @@ interface Actions {
   growth: (credential: Credential) => void;
   activity: (credential: Credential) => void;
   credits: (credential: Credential, ledger: Ledger) => void;
+  checkinLog: (credential: Credential) => void;
   limits: (credential: Credential) => void;
   tags: (credential: Credential) => void;
 }
@@ -389,6 +391,13 @@ export function CredentialsPage() {
     events: CreditEvent[];
     sort: string;
     order: string;
+  } | null>(null);
+  // 签到记录抽屉：与变动流水同形（一次只开一个、行内展开）。读的是本地落库的
+  // 审计日志（`checkin_events`），不触发上游请求——凭证据此能回看「上次签到
+  // 几点、领了多少、上游回了什么码」，正是「显示成功却没加积分」类问题的证据。
+  const [checkinLog, setCheckinLog] = useState<{
+    credentialId: string;
+    events: CheckinEvent[];
   } | null>(null);
 
   const credentials = data?.credentials ?? [];
@@ -684,6 +693,21 @@ export function CredentialsPage() {
           });
         } catch (caught) {
           showError(caught instanceof Error ? caught.message : "流水读取失败");
+        }
+      })(),
+    // 签到记录：读本地落库的审计日志（不发上游请求，故对已失效凭证也能查）。
+    // 与流水同形——再点一次即收起。
+    checkinLog: (credential) =>
+      void (async () => {
+        if (checkinLog?.credentialId === credential.id) {
+          setCheckinLog(null);
+          return;
+        }
+        try {
+          const result = await api.checkinEvents(credential.id);
+          setCheckinLog({ credentialId: credential.id, events: result.events });
+        } catch (caught) {
+          showError(caught instanceof Error ? caught.message : "签到记录读取失败");
         }
       })(),
     activity: (credential) =>
@@ -1294,6 +1318,18 @@ export function CredentialsPage() {
                                         order={creditEvents.order}
                                         onSort={sortCredits}
                                         onClose={() => actions.credits(credential, creditEvents.ledger)}
+                                      />
+                                    </TableCell>
+                                  </TableRow>
+                                )}
+                                {/* 签到记录抽屉：与流水同为「独立下一行」，一次只开一个。 */}
+                                {checkinLog?.credentialId === credential.id && (
+                                  <TableRow data-testid={`checkin-row-${credential.id}`}>
+                                    <TableCell colSpan={columnCount} className="p-0">
+                                      <CheckinLogDrawer
+                                        credentialId={credential.id}
+                                        events={checkinLog.events}
+                                        onClose={() => actions.checkinLog(credential)}
                                       />
                                     </TableCell>
                                   </TableRow>
@@ -1919,6 +1955,14 @@ function Row({
                         <Radio className="size-4" /> 活跃上报
                       </DropdownMenuItem>
                     )}
+                    {supportsCheckin(credential.provider) && (
+                      <DropdownMenuItem
+                        onSelect={() => actions.checkinLog(credential)}
+                        title="签到审计日志：最近几次签到的时间/结果/领取积分/上游业务码"
+                      >
+                        <History className="size-4" /> 签到记录
+                      </DropdownMenuItem>
+                    )}
                     <DropdownMenuSeparator />
                     {credential.disabled === 1 && (
                       <DropdownMenuItem onSelect={() => actions.revive(credential)}>
@@ -2053,6 +2097,89 @@ function CreditDrawer({
                 </TableCell>
                 <TableCell label="说明" className="text-xs text-muted-foreground">
                   {CREDIT_SOURCE_LABEL[event.source] ?? event.source}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+    </Card>
+  );
+}
+
+/**
+ * 签到记录抽屉：同一行内展开，不弹层。
+ *
+ * 数据来自本地落库的 `checkin_events`（每次签到落一行），**不实时查上游**——
+ * 因此对已失效 / 未探测的凭证也能回看历史。像「界面显示签到成功但没加积分」
+ * 这类问题，答案就在这张表里：时间 + 结果 + 领取积分 + 上游业务码。
+ *
+ * 只读：不动上游。手动签到仍在行内的「签到」按钮（本抽屉只是把它记下的结果
+ * 摊开看）。
+ */
+function CheckinLogDrawer({
+  credentialId,
+  events,
+  onClose,
+}: {
+  credentialId: string;
+  events: CheckinEvent[];
+  onClose: () => void;
+}) {
+  return (
+    <Card
+      className="mt-4 gap-0 bg-muted/30 p-3 ring-border/60"
+      data-testid={`checkin-drawer-${credentialId}`}
+    >
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-sm font-medium">
+          签到记录
+          <span className="ml-2 text-xs text-muted-foreground">
+            本地落库的签到审计日志（定时任务与手动签到都记），保留 90 天
+          </span>
+        </div>
+        <Button size="sm" variant="ghost" onClick={onClose}
+                data-testid="checkin-drawer-close">
+          关闭
+        </Button>
+      </div>
+      {events.length === 0 ? (
+        <Empty data-testid="checkin-drawer-empty">
+          还没有记录。签到（定时或手动）后这里会留下时间、结果与领取积分。
+        </Empty>
+      ) : (
+        <Table data-testid="checkin-drawer-table" cards>
+          <TableHeader>
+            <TableRow>
+              <TableHead>时间</TableHead>
+              <TableHead>结果</TableHead>
+              <TableHead>领取</TableHead>
+              <TableHead>上游码</TableHead>
+              <TableHead>触发</TableHead>
+              <TableHead>说明</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {events.map((event) => (
+              <TableRow key={event.id} data-testid={`checkin-event-${event.id}`}>
+                <TableCell label="时间" className="text-xs">
+                  {formatTime(event.ts)}
+                </TableCell>
+                <TableCell label="结果"
+                            className={`text-xs ${event.ok ? "text-ok" : "text-warn"}`}>
+                  {event.ok ? (event.already ? "今日已签" : "签到成功") : "签到失败"}
+                </TableCell>
+                <TableCell label="领取" className="text-xs tabular-nums">
+                  {event.credit === null ? "—" : `+${formatNumber(event.credit)}`}
+                </TableCell>
+                <TableCell label="上游码" className="text-xs tabular-nums text-muted-foreground">
+                  {event.code === null ? "—" : event.code}
+                </TableCell>
+                <TableCell label="触发" className="text-xs text-muted-foreground">
+                  {event.trigger === "manual" ? "手动" : "定时"}
+                </TableCell>
+                <TableCell label="说明" className="text-xs text-muted-foreground">
+                  {event.message || "—"}
                 </TableCell>
               </TableRow>
             ))}

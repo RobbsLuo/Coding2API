@@ -78,6 +78,7 @@ from .db.repo import (
     AlertRepository,
     ApiKeyRepository,
     AuditRepository,
+    CheckinEventRepository,
     CredentialRepository,
     CreditEventRepository,
     GrowthRepository,
@@ -386,6 +387,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     credentials = CredentialRepository(db, cipher)
     growth_events = GrowthRepository(db)
     credit_events = CreditEventRepository(db)
+    checkin_events = CheckinEventRepository(db)
     api_keys = ApiKeyRepository(db)
     user_repo = UserRepository(db)
     audit = AuditRepository(db)
@@ -666,6 +668,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         runner = build_runner(credentials, registry, app_.state.stats_collector, runtime,
                               growth_events=app_.state.growth_events,
                               credit_events=credit_events,
+                              checkin_events=checkin_events,
                               audit=audit,
                               alerts=alerts,
                               backup=BackupTask(config.db_path,
@@ -773,6 +776,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.executor = executor
     app.state.stats_collector = stats_collector
     app.state.growth_events = growth_events
+    app.state.checkin_events = checkin_events
     app.state.stats_query = StatsQuery(db)
     # SSE 实时流的订阅中心（与 StatsCollector 的 on_record 同源）
     app.state.live_events = live_events
@@ -832,6 +836,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         credentials=credentials,
         growth_events=growth_events,
         credit_events=credit_events,
+        checkin_events=checkin_events,
         api_keys=api_keys,
         executor=executor,
         registry=registry,

@@ -36,11 +36,14 @@ class RetentionTask:
 
     `growth_events` 非 None 时按同一保留期清理成长中心运行记录：每轮探测
     都可能落一行，不回收同样无界增长。
+
+    `checkin_events` 非 None 时按同一保留期清理签到审计日志：每轮签到都可能
+    落一行，不回收同样无界增长。
     """
 
     def __init__(self, collector: StatsCollector, *, retention_days: int = 90,
                  credentials=None, credit_events=None, audit=None,
-                 alerts=None, growth_events=None) -> None:
+                 alerts=None, growth_events=None, checkin_events=None) -> None:
         self._collector = collector
         self.retention_days = retention_days
         self._credentials = credentials
@@ -48,6 +51,7 @@ class RetentionTask:
         self._audit = audit
         self._alerts = alerts
         self._growth_events = growth_events
+        self._checkin_events = checkin_events
 
     @staticmethod
     def rollup_since(now: int | None = None) -> int:
@@ -82,10 +86,14 @@ class RetentionTask:
         purged_growth = (
             self._growth_events.prune(keep_days=self.retention_days)
             if self._growth_events is not None else 0)
+        purged_checkin_events = (
+            self._checkin_events.prune(keep_days=self.retention_days)
+            if self._checkin_events is not None else 0)
         return {"rolled_up": rolled, "purged": purged,
                 "expired_coolings": expired_coolings,
                 "expired_account_coolings": expired_account_coolings,
                 "purged_credit_events": purged_credit_events,
                 "purged_audit": purged_audit,
                 "purged_alerts": purged_alerts,
-                "purged_growth_events": purged_growth}
+                "purged_growth_events": purged_growth,
+                "purged_checkin_events": purged_checkin_events}

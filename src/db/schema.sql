@@ -9,6 +9,7 @@
 -- 注：不建 checkins / model_cache 表——签到去重由 CheckinTask 的当日作用域
 -- 集合实现（上游 status 为准）；模型列表是「进程内 TTL 缓存 + DATA_DIR 落盘
 -- 快照（model_catalog.json）」，不占表（见 src/api/model_catalog.py）。
+-- 签到**审计日志**是另一回事，见 `checkin_events`（只增不改、不参与去重）。
 
 -- 用户建表：users.txt（PBKDF2）降级为「引导输入」，启动时一次性导入，
 -- 之后 DB 是唯一权威源。ADMIN_USERNAMES env 降级为「引导期角色来源 + 防锁死
@@ -167,6 +168,29 @@ CREATE TABLE IF NOT EXISTS growth_events (
 );
 
 CREATE INDEX IF NOT EXISTS idx_growth_cred_ts ON growth_events(credential_id, ts);
+
+-- 每日签到运行记录（checkin_events）：每次对一条凭证执行签到就落一行。
+--
+-- 为什么落库：签到「界面显示成功却加不到积分」是实测过的用户反馈，而任务报告
+-- 只有聚合计数（attempted/succeeded/failed/skipped），事后无法回答「这个号昨天
+-- 几点签的、领了多少、上游回了什么码」。故按凭证逐次记一行，保留期与请求明细
+-- 一致（RetentionTask 清理）。
+-- 只存汇总：不落上游原始响应体（可能回显凭证片段）。
+-- 与已删除的 `checkins` 表无关：那张表是**去重**用（现由 CheckinTask 当日作用域
+-- 集合承担），本表是**审计日志**，只增不改、不参与去重。
+CREATE TABLE IF NOT EXISTS checkin_events (
+    id             TEXT PRIMARY KEY,
+    credential_id  TEXT NOT NULL,
+    ts             INTEGER NOT NULL,
+    ok             INTEGER NOT NULL,
+    already        INTEGER NOT NULL DEFAULT 0,   -- 上游判「今日已签」（已签不算错误）
+    credit         REAL,                         -- 本次领取积分（可缺）
+    code           INTEGER,                      -- 上游业务码（可缺）
+    message        TEXT NOT NULL DEFAULT '',     -- 一行中文/上游文案
+    trigger        TEXT NOT NULL DEFAULT 'auto'  -- auto=定时 | manual=管理台手动
+);
+
+CREATE INDEX IF NOT EXISTS idx_checkin_cred_ts ON checkin_events(credential_id, ts);
 
 -- 变动流水：额度探测写回时比对余额，每本账各增记一条。
 --

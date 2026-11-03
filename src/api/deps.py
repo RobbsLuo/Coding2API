@@ -37,6 +37,7 @@ from ..db.repo import (
     AlertRepository,
     ApiKeyRepository,
     AuditRepository,
+    CheckinEventRepository,
     CredentialRepository,
     CreditEventRepository,
     GrowthRepository,
@@ -79,6 +80,8 @@ class Services:
     credentials: CredentialRepository
     growth_events: GrowthRepository
     credit_events: CreditEventRepository
+    # 签到审计日志（checkin_events）：每轮签到落一行，/api/credentials/{id}/checkin-events 回看。
+    checkin_events: CheckinEventRepository
     api_keys: ApiKeyRepository
     executor: Executor
     registry: dict[str, Any]

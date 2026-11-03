@@ -78,6 +78,7 @@ class CheckinTask:
 
     def __init__(self, credentials: CredentialRepository, providers: dict,
                  *, on_success: Callable[[str], None] | None = None,
+                 events=None,
                  pacer: Pacer | None = None,
                  times: str | Callable[[], str] = "",
                  jitter_minutes: int | Callable[[], int] = 0,
@@ -85,6 +86,9 @@ class CheckinTask:
         self._credentials = credentials
         self._providers = providers
         self._on_success = on_success
+        # 签到审计日志仓储（CheckinEventRepository）：None 时（老调用方/测试）
+        # 不落库，只跑签到本身——生产路径总是传入。
+        self._events = events
         self._pacer = pacer
         # 时点与抖动可热更：存取值器，due() 每次现读（不是装配快照）。
         self._times = live(times)
@@ -183,8 +187,13 @@ class CheckinTask:
         until = self._done_scopes.get(done_key)
         return until is not None and until > _cn_epoch(now)
 
-    async def run_once(self, *, now: time.struct_time | int | None = None) -> TaskReport:
-        """签到一轮：已成功（当日封账）的作用域直接跳过；失败的留到下轮重试。"""
+    async def run_once(self, *, now: time.struct_time | int | None = None,
+                       trigger: str = "auto") -> TaskReport:
+        """签到一轮：已成功（当日封账）的作用域直接跳过；失败的留到下轮重试。
+
+        `trigger` 只进审计日志（auto=定时 / manual=管理台「立即运行」），不参与
+        任何判定。
+        """
         current = now if isinstance(now, time.struct_time) else _cn_now(now)
         day = self._day_key(current)
         report = TaskReport()
@@ -247,4 +256,9 @@ class CheckinTask:
                 report.failed += 1
                 logger.warning("checkin failed for %s: %s",
                                candidate.credential_id, result.message or "未知原因")
+            # 审计日志：成功/失败/已签都记一行（上游异常没有 result 时不记）。
+            # 失败也要记是刻意的——「这个号连续几天签到都失败」正是要回看的东西。
+            if self._events is not None:
+                self._events.record(credential_id=candidate.credential_id,
+                                    result=result, trigger=trigger)
         return report

@@ -516,6 +516,8 @@ Playground 与 `/v1/models` 走 stale-while-revalidate：有缓存立刻回旧�
 
 **按账本分流**：流水带 `ledger`（`pool` / `credits`）。CodeArts 记 `credits`，其余 `pool`。接口 `GET /api/credentials/{id}/credit-events?ledger=`（缺省 `pool`）。两本账量级 / 语义不同 → 分开读。
 
+**签到记录**：凭证行「更多操作 → 签到记录」展开**签到审计日志**（每轮签到落一行：时间 / 结果 / 领取积分 / 上游业务码 / 文案 / 触发方式，定时与手动都记；保留 90 天）。接口 `GET /api/credentials/{id}/checkin-events?limit=`。与「变动流水」不同，这是**动作的逐次结果**（签到自己回的 code / credit），不依赖余额 diff，故「显示成功却没加积分」这类问题能直接对着上游答复定位。
+
 ### 分组维度与重新汇总
 
 tabs 切四维（渠道 / 模型 / 用户 / 凭证），共用一表（渠道 / 请求 / Credit / 成本 / Token / 速度 / 平均延迟 / P95 延迟）。端点 `GET /api/stats/by-provider|by-model|by-user|by-credential`。默认请求数降序；点列头切排序；合并列弹菜单选子列。**延迟分位 P50 / P90 / P95 / P99**（默认 P95，nearest-rank，n = 有值样本）。用户 / 凭证维度仅 admin / operator。

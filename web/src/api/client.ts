@@ -12,6 +12,7 @@ import type {
   BatchImportEntry,
   BatchImportResult,
   BatchResult,
+  CheckinEvent,
   CheckinResult,
   CheckinStatus,
   CredentialLimits,
@@ -336,6 +337,9 @@ export const api = {
     request<CheckinResult>(`/api/credentials/${id}/checkin`, { method: "POST" }),
   checkinStatus: (id: string) =>
     request<{ status: CheckinStatus }>(`/api/credentials/${id}/checkin`),
+  checkinEvents: (id: string, limit?: number) =>
+    request<{ events: CheckinEvent[] }>(
+      `/api/credentials/${id}/checkin-events${query({ limit })}`),
   runGrowth: (id: string) =>
     request<GrowthRunResult>(`/api/credentials/${id}/growth`, { method: "POST" }),
   growthHistory: (id: string) =>

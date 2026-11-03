@@ -72,7 +72,12 @@ SCHEMA_NAME = "schema.sql"
 # 30：users 新增 allowed_models / quota（用户级策略：约束管理台 Playground 的
 # 会话直连，补上「viewer 用 Cookie 直调任意模型」绕过 Key 白名单与配额的口子）。
 # 两列默认 '' = 不限制，老库补列后 Playground 行为与补列前完全一致。
-SCHEMA_VERSION = 30
+# 31：新增 checkin_events 表（每日签到的逐次审计日志：时间/结果/领取积分/上游
+# 业务码/文案/触发方式）。新增表只需进 schema.sql（CREATE TABLE IF NOT EXISTS
+# 对老库同样生效），无需迁移动作；老库升级后表为空 =「升级前无签到日志」，
+# 不影响签到本身（去重仍是 CheckinTask 当日作用域集合）。与已删除的 `checkins`
+# 去重表无关（`_MIGRATION_DROPS` 里的那张）。
+SCHEMA_VERSION = 31
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (

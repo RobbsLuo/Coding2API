@@ -332,7 +332,7 @@ class TaskRunner:
         """
         if not manual and not self._checkin.due():
             return None
-        return await self._checkin.run_once()
+        return await self._checkin.run_once(trigger="manual" if manual else "auto")
 
     async def _sync_retention(self) -> object:
         """明细清理：整表 GROUP BY / DELETE 是同步 SQLite，放线程池跑。
@@ -547,7 +547,7 @@ def _as_report(result: object) -> dict[str, Any]:
 
 
 def build_runner(credentials, providers: dict, stats_collector, config,
-                 growth_events=None, credit_events=None, audit=None,
+                 growth_events=None, credit_events=None, checkin_events=None, audit=None,
                  model_catalog: Callable[[], Awaitable[object]] | None = None,
                  openrouter_catalog: Callable[[], Awaitable[object]] | None = None,
                  openrouter_catalog_minutes: int | Callable[[], int] = 1440,
@@ -564,6 +564,9 @@ def build_runner(credentials, providers: dict, stats_collector, config,
 
     credit_events 同理：为 None 时保留流水清理不启用（表仍会随探测增长，
     但不影响功能；生产路径总是传入）。
+
+    checkin_events 同理：为 None 时签到不落审计日志、也不清理该表（老调用方与
+    测试保持原行为）；生产路径总是传入。
 
     audit 同理：为 None 时不清理审计流水（表仍会随登录/写操作增长；
     生产路径总是传入）。
@@ -636,6 +639,7 @@ def build_runner(credentials, providers: dict, stats_collector, config,
     return TaskRunner(
         quota_probe=QuotaProbeTask(credentials, providers, pacer),
         checkin=CheckinTask(credentials, providers, pacer=pacer,
+                            events=checkin_events,
                             times=lambda: config.checkin_times,
                             jitter_minutes=lambda: config.checkin_jitter_minutes),
         growth=growth,
@@ -643,7 +647,8 @@ def build_runner(credentials, providers: dict, stats_collector, config,
         refresh=RefreshTask(credentials, providers, skew_seconds=config.refresh_skew_hours * 3600,
                             now=lambda: int(time.time()), pacer=pacer),
         retention=RetentionTask(stats_collector, credentials=credentials,
-                                credit_events=credit_events, audit=audit,
+                                credit_events=credit_events,
+                                checkin_events=checkin_events, audit=audit,
                                 alerts=alerts, growth_events=growth_events),
         quota_probe_minutes=lambda: config.quota_probe_minutes,
         refresh_interval_minutes=lambda: config.refresh_interval_minutes,

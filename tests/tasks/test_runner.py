@@ -518,7 +518,7 @@ async def test_runner_checkin_fires_when_due(repo, monkeypatch):
     provider = StubProvider()
     calls: list[int] = []
 
-    async def fake_run_once(*, now=None):
+    async def fake_run_once(*, now=None, trigger="auto"):
         calls.append(1)
         from src.tasks import TaskReport
 

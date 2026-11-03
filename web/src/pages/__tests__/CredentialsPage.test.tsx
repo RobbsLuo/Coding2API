@@ -392,6 +392,67 @@ describe("CredentialsPage", () => {
       expect.stringContaining("ledger=pool"), expect.anything());
   });
 
+  it("签到记录菜单打开审计抽屉：列出结果/领取/上游码，请求 checkin-events", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const checkinUrl = "/api/credentials/cred_1/checkin-events";
+    mockFetch({
+      "/checkin-events": { events: [
+        { id: "chk_1", credential_id: "cred_1", ts: now, ok: 1, already: 0,
+          credit: 1000, code: 0, message: "领取成功", trigger: "manual" },
+        { id: "chk_0", credential_id: "cred_1", ts: now - 60, ok: 0, already: 0,
+          credit: null, code: 40001, message: "尚未到达权益刷新时间", trigger: "auto" },
+        { id: "chk_2", credential_id: "cred_1", ts: now - 120, ok: 1, already: 1,
+          credit: null, code: 0, message: "今日已签到", trigger: "auto" },
+      ] },
+      "/api/credentials": listBody([makeCredential({ id: "cred_1" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "签到记录" }));
+
+    const drawer = await screen.findByTestId("checkin-drawer-cred_1");
+    await waitFor(() =>
+      expect(fetch).toHaveBeenCalledWith(
+        checkinUrl, expect.anything()));
+    expect(drawer).toHaveTextContent("签到成功");
+    expect(drawer).toHaveTextContent("签到失败");
+    expect(drawer).toHaveTextContent("今日已签");
+    expect(drawer).toHaveTextContent("+1,000");
+    expect(drawer).toHaveTextContent("40001");
+    expect(drawer).toHaveTextContent("尚未到达权益刷新时间");
+    // 触发方式区分定时与手动
+    expect(drawer).toHaveTextContent("手动");
+
+    // 再入口点一次即收起（与流水抽屉同形）
+    await userEvent.click(screen.getByTestId("checkin-drawer-close"));
+    expect(screen.queryByTestId("checkin-drawer-cred_1")).not.toBeInTheDocument();
+  });
+
+  it("签到记录菜单只在支持签到的渠道出现、空历史给出空态", async () => {
+    mockFetch({
+      "/checkin-events": { events: [] },
+      "/api/credentials": listBody([
+        makeCredential({ id: "cred_1", provider: "codebuddy_intl" }),
+        makeCredential({ id: "cred_2", provider: "codebuddy" }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+
+    // codebuddy_intl 渠道侧无签到活动 → 不提供入口
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    expect(screen.queryByRole("menuitem", { name: "签到记录" })).not.toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+
+    await userEvent.click(screen.getByTestId("actions-cred_2"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "签到记录" }));
+    expect(await screen.findByTestId("checkin-drawer-empty")).toBeInTheDocument();
+  });
+
   it("额度列不再显示「探测于」时间戳", async () => {
     mockFetch({ "/api/credentials": listBody([makeCredential({ id: "cb" })]) });
     renderPage(<CredentialsPage />, ADMIN);

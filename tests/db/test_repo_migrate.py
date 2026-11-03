@@ -553,3 +553,31 @@ def test_legacy_db_upgrade_adds_user_policy_columns(tmp_path):
 
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     db.close()
+
+
+def test_legacy_db_upgrade_creates_checkin_events(tmp_path):
+    """老库升级：缺 checkin_events 表时补齐（新表走 CREATE TABLE IF NOT EXISTS）。
+
+    该表是「每次签到一行」的审计日志：升级后表为空 =「升级前没有日志」，
+    不影响签到本身（去重仍是 CheckinTask 的当日作用域集合）。二次执行幂等。
+    """
+    db = Database(tmp_path / "legacy_checkin.sqlite3")
+    # 先建到当前形状，再把新表与版本号退回到第 30 版，模拟升级前的老库
+    apply_schema(db.connect())
+    db.connect().execute("DROP TABLE checkin_events")
+    db.connect().execute("PRAGMA user_version = 30")
+    db.connect().commit()
+
+    apply_schema(db.connect())
+    tables = {row[0] for row in db.connect().execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "checkin_events" in tables
+    columns = {row[1] for row in db.connect().execute(
+        "PRAGMA table_info(checkin_events)")}
+    assert {"id", "credential_id", "ts", "ok", "already", "credit", "code",
+            "message", "trigger"} <= columns
+    from src.db.migrate import SCHEMA_VERSION
+
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    apply_schema(db.connect())                        # 二次执行不抛错
+    db.close()

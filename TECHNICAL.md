@@ -591,7 +591,7 @@ class Scheduler:
 上游模型观测：`Event.model`（各渠道协议里有 `model` 就填）与请求模型做一次按尝试的比较；双向都不构成前缀关系（`glm-5.2` vs `glm-5.2-20261001` 视为一致）时只写 WARNING「疑似静默替换」——不改响应、不冷却凭证、不写 `error_type`（与用量对账 `_check_usage_consistency` 同口径：观测信号不进失败归因，避免成功率虚低）。占位名（`auto` / `default` / `unknown` / `none`）不算证据。**TRAE 的真实模型只在元数据帧回显**（`extra_info.model`、`timing_cost.provider_model_name`），这些帧本身无下游语义，故 `TraeClient` 在流循环里先取提示、再贴到后续事件（output/done/usage 帧都不带模型）。**Qoder 实测只有 `model:"auto"`**（信封 headers 与 chunk 其它字段均无模型名），该渠道天然是观测盲区。
 
 ## 8. 数据库
-DDL 以 `src/db/schema.sql` 为准。`SCHEMA_VERSION = 30`（v29 删了福利链路的积分三列，v30 加用户级策略两列），13 张表：`api_keys` / `credentials` / `credential_limits` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `credit_events` / `credential_model_cooldowns` / `model_probes` / `runtime_settings` / `alert_events`。
+DDL 以 `src/db/schema.sql` 为准。`SCHEMA_VERSION = 31`（v29 删了福利链路的积分三列，v30 加用户级策略两列，v31 加 `checkin_events` 签到审计日志表），14 张表：`api_keys` / `credentials` / `credential_limits` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `checkin_events` / `credit_events` / `credential_model_cooldowns` / `model_probes` / `runtime_settings` / `alert_events`。
 
 ```sql
 -- conn.py 打开时执行
@@ -740,10 +740,10 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 |---|---|---|
 | 额度探测（quota_probe） | 启动立即一轮（不节流）+ 每 `QUOTA_PROBE_MINUTES`（默认 60） | 写 `credentials.quota_*` / `quota_expiry_ladder` / `quota_packages` / `health`；硬禁用与 `enabled=0` 直接跳过（口径同 refresh / checkin / growth / activity——死号只会白打上游并灌日志） |
 | token 预刷新（refresh） | 每 `REFRESH_INTERVAL_MINUTES`（默认 30，下限 5） | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换；短寿命渠道自行封顶（CodeArts 2700s，必须**严格宽于**本周期）；`UpstreamReloginRequired` 时标记并硬禁用 |
-| 每日签到（checkin） | `CHECKIN_TIMES` 留空 → 每 10 分钟；配了时点 → 每 1 分钟醒（窗口 `[时点−抖动, 时点]`，10 分钟周期会整轮错开、一天一次都不签） | 成功即封账（`日期:scope` → 截止时刻，内存态，跨天清理）；渠道可回填 `seal_until`（Qoder 10:00 换窗口）；失败重试 |
+| 每日签到（checkin） | `CHECKIN_TIMES` 留空 → 每 10 分钟；配了时点 → 每 1 分钟醒（窗口 `[时点−抖动, 时点]`，10 分钟周期会整轮错开、一天一次都不签） | 成功即封账（`日期:scope` → 截止时刻，内存态，跨天清理）；渠道可回填 `seal_until`（Qoder 10:00 换窗口）；失败重试。每次签到落一行 `checkin_events`（成功/失败/已签都记，手动签到 `trigger=manual`） |
 | 成长中心（growth） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5） | 仅 CB：7 类领取；落 `growth_events` + 回写 `growth_last_result` |
 | 活跃上报（activity，默认关） | 每 10 分钟醒，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点）窗口内执行 | CB + 国际版：补发 `chat_request_send`；按「endpoint + userId」隔离、当日封账 |
-| 明细清理（retention） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert）+ 90 天清理；同期限回收 `credit_events` / `audit_events` / `alert_events` / `growth_events`；顺带清过期冷却（模型级删行 + 账号级 `cooling_until` 置 NULL）。跑在 `asyncio.to_thread` |
+| 明细清理（retention） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert）+ 90 天清理；同期限回收 `credit_events` / `audit_events` / `alert_events` / `growth_events` / `checkin_events`；顺带清过期冷却（模型级删行 + 账号级 `cooling_until` 置 NULL）。跑在 `asyncio.to_thread` |
 | 数据库备份（backup） | 每 `BACKUP_INTERVAL_MINUTES`（默认 1440，下限 60） | `VACUUM INTO` + `integrity_check` + 0600，保留 `BACKUP_KEEP`（默认 7）。跑在 `asyncio.to_thread` |
 | 渠道模型列表刷新（注入协程 `api/models.py::list_models`） | 每 `MODEL_CATALOG_MINUTES`（默认 30，下限 5） | 兜底重拉（TTL 门禁 + 逐渠道 publish + 落盘）。周期跟 zen 判活缓存（30 分钟）对齐 |
 | 模型目录刷新（注入协程） | 每 `OPENROUTER_CATALOG_MINUTES`（默认 1440，下限 60） | 拉 OpenRouter → 三张表 → 落盘 → 就地换入 |

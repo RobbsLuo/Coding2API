@@ -164,7 +164,7 @@ Provider 承担上游私有部分：发请求、解析事件、分类错误、�
 
 ## 4. 数据模型
 
-DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 13 张表，`SCHEMA_VERSION = 30`。变更纪律：schema.sql **只加不改**；新增列走 `_MIGRATION_COLUMNS` 幂等补列，删表须在 `_MIGRATION_DROPS` 补一条并 `SCHEMA_VERSION + 1`。
+DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 14 张表，`SCHEMA_VERSION = 31`。变更纪律：schema.sql **只加不改**；新增列走 `_MIGRATION_COLUMNS` 幂等补列，删表须在 `_MIGRATION_DROPS` 补一条并 `SCHEMA_VERSION + 1`。
 
 | 表 | 用途 |
 |---|---|
@@ -174,6 +174,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 13 张表，`SCHEMA_
 | `usage_events` | 请求明细，保留 90 天 |
 | `usage_hourly` | 小时汇总（永久），渠道/模型/用户维度读此表 |
 | `growth_events` | 成长中心每轮一行（仅 CodeBuddy）；活跃上报复用 |
+| `checkin_events` | 签到审计日志：每次签到一行（结果 / 领取积分 / 上游业务码 / 触发方式），成功失败都记 |
 | `credit_events` | 两次探测之间的**净变化**（`window_start`、`source`、`ledger`），不是动作归因 |
 | `credential_model_cooldowns` | (凭证, 模型) 级冷却与「无此模型」负缓存，含 `hits` 供指数退避 |
 | `model_probes` | 模型可用性探活状态（`state` / `failures` / 人工接管 `manual`），决定「恢复展示 / 继续避让」 |
@@ -182,7 +183,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 13 张表，`SCHEMA_
 | `audit_events` | 审计流水 |
 | `alert_events` | 告警事件（七类规则；`resolved_at` 非空 = 迟滞确认恢复） |
 
-- 调度状态与到期阶梯**落库**，重启不丢；签到去重、模型列表缓存、任务运行态**进程内**（重启归零，不编造记录）。
+- 调度状态与到期阶梯**落库**，重启不丢；签到**去重**、模型列表缓存、任务运行态**进程内**（重启归零，不编造记录）——去重是运行态，与 `checkin_events` 的审计日志是两回事。
 - 模型目录落盘 `DATA_DIR/model_catalog.json`，OpenRouter 目录落盘 `data/openrouter_catalog.json`。
 - **脱敏纪律**：不存提示词、回答、请求头、Token、工具参数、原始错误体、会话 ID。唯一例外 `DUMP_REQUEST_BODIES=true`（默认关，有界保留 200 份，含完整对话内容，不得长期开启）。
 
@@ -193,7 +194,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 13 张表，`SCHEMA_
 **管理台（Cookie + RBAC）**：凭证管理、API Key（含六项配额，超限 429 + `Retry-After`，判定异常一律放行并记 warning）、用量统计、月度账单、Playground、模型列表、用户管理、审计、告警、上游状态、任务与配置、服务端日志。**出口 IP 粘性**（`CREDENTIAL_PROXY_POOL`）：按凭证 id 稳定分配出口，推理与后台任务同出口。
 
 - 账号：`GET|POST /api/users`、`PATCH /api/users/{username}`、`PUT /api/users/{username}/policy`（用户级模型白名单 + 配额）、`POST /api/users/{username}/{disable|enable|reset-password}`（**无 DELETE**）；`POST /api/auth/password`；`GET|POST /api/auth/activate`；`GET /api/audit`。
-- 凭证运维：`GET|POST /api/credentials`（列表 / 新增）+ `DELETE /api/credentials/{id}`；动作端点 `checkin`（GET 查状态 / POST 执行）、`toggle`、`revive`、`probe`、`activity`、`pin`、`accounts/select`；`PUT /api/credentials/{id}/limits|tags`、`GET|POST /api/credentials/{id}/growth`、`GET /api/credentials/{id}/credit-events|accounts`。
+- 凭证运维：`GET|POST /api/credentials`（列表 / 新增）+ `DELETE /api/credentials/{id}`；动作端点 `checkin`（GET 查状态 / POST 执行）、`toggle`、`revive`、`probe`、`activity`、`pin`、`accounts/select`；`PUT /api/credentials/{id}/limits|tags`、`GET|POST /api/credentials/{id}/growth`、`GET /api/credentials/{id}/credit-events|checkin-events|accounts`。
 - 模型：`GET /api/model-catalog`、`GET /api/models/availability`、`POST /api/models/probes/{probe,manual}`（`manual=on|off` 人工接管，优先于自动探活）。
 - 批量：`POST /api/credentials/batch`（`probe|toggle|checkin|revive`）。逐条隔离，响应 `{total, succeeded, failed, results[]}`；`toggle`/`revive` 落一条汇总审计。
 - 批量导入：`POST /api/credentials/batch-import`（`items[]`，≤100 条）。逐条校验，响应 `{created[], skipped[], failed[]}` 均带 `index`；同渠道内容完全一致去重；逐条审计 + 入队探测。

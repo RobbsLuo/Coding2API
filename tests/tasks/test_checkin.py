@@ -255,3 +255,42 @@ def test_checkin_day_end_handles_month_end():
     assert datetime.fromtimestamp(end, ZoneInfo("Asia/Shanghai")).day == 1
     # 2026-10-01 00:00 北京时间
     assert end == int(datetime(2026, 10, 1, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+
+
+async def test_checkin_records_audit_events(repo):
+    """每轮签到落一行审计日志：成功与失败都记，trigger=auto。
+
+    「签到显示成功却没加积分」类问题要靠逐次记录定位；只记成功会让失败静默。
+    """
+    from src.db.repo import CheckinEventRepository
+
+    credentials, db = repo
+    credentials.add(provider="codebuddy",
+                    credential_data={"bearer_token": "a", "account_uid": "a"})
+    credentials.add(provider="codebuddy",
+                    credential_data={"bearer_token": "b", "account_uid": "b"})
+
+    class Provider:
+        id = "codebuddy"
+
+        async def checkin(self, data):
+            if data["bearer_token"] == "b":
+                return CheckinResult(ok=False, code=7, message="上游忙")
+            return CheckinResult(ok=True, credit=1000.0, code=0, message="签到成功")
+
+        def checkin_scope(self, data):
+            return f"cb|{data['account_uid']}"
+
+    events = CheckinEventRepository(db)
+    task = CheckinTask(credentials, {"codebuddy": Provider()}, events=events)
+    report = await task.run_once()
+    assert report.succeeded == 1 and report.failed == 1
+
+    rows = [events.recent(candidate.credential_id)[0]
+            for candidate in credentials.candidates()]
+    assert {(row["ok"], row["trigger"]) for row in rows} == {(1, "auto"), (0, "auto")}
+    # 成功行的领取积分如实落库；失败行 code/文案保留
+    success = next(row for row in rows if row["ok"] == 1)
+    failure = next(row for row in rows if row["ok"] == 0)
+    assert success["credit"] == 1000.0 and success["code"] == 0
+    assert failure["code"] == 7 and failure["message"] == "上游忙"

@@ -596,6 +596,24 @@ export interface GrowthEvent {
   trigger: string;
 }
 
+/** 签到审计日志（checkin_events 表一行） */
+export interface CheckinEvent {
+  id: string;
+  credential_id: string;
+  /** 执行时刻（epoch 秒） */
+  ts: number;
+  ok: 0 | 1;
+  /** 1=上游判「今日已签」（已签不算错误） */
+  already: 0 | 1;
+  /** 本次领取积分；上游未给数量时为 null */
+  credit: number | null;
+  /** 上游业务码；无此信息时为 null */
+  code: number | null;
+  message: string;
+  /** auto=定时任务；manual=管理台手动执行 */
+  trigger: string;
+}
+
 /** 变动流水：两次额度探测之间的**净变化**，不是动作归因。 */
 export interface CreditEvent {
   id: string;

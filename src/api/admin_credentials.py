@@ -29,7 +29,7 @@ from ..audit.actions import (
 )
 from ..auth.rbac import require_operator
 from ..compat.openai.request import InvalidRequest
-from ..provider.base import GrowthResult, GrowthStep, StepStatus
+from ..provider.base import CheckinResult, GrowthResult, GrowthStep, StepStatus
 from ..provider.tos import tos_for
 from ..request_context import credential_scope
 from ..sorting import sort_rows
@@ -186,7 +186,7 @@ async def probe_credential_once(credentials, provider, data, credential_id: str)
 
 
 async def checkin_credential_once(credentials, provider, data, credential_id: str,
-                                  schedule_probe) -> dict:
+                                  schedule_probe, checkin_events) -> dict:
     """签到一条凭证，返回对外响应体（单条与批量共用）。
 
     **上游失败是正常结果，不是异常**：账号被禁用 / 登录过期 / 限流都是上游
@@ -195,6 +195,10 @@ async def checkin_credential_once(credentials, provider, data, credential_id: st
     看不出是账号被禁用）。这里把异常收成 `ok=False` + 可读 message：
     前端本来就按 `ok` / `message` 渲染（见 `CredentialsPage` 的 checkin 分支），
     批量端点也不必再单独兜一次。
+
+    `checkin_events` 是签到审计日志仓储：成功/失败/已签都落一行（trigger=manual），
+    逐次结果落库后，管理台「签到记录」才能回答「这个号上次签到是什么时候、
+    领了多少、上游回了什么」。
     """
     try:
         with credential_scope(credential_id):
@@ -204,11 +208,16 @@ async def checkin_credential_once(credentials, provider, data, credential_id: st
         logger.info("签到失败 %s: %s", credential_id, reason)
         # detail 只进服务端日志：上游原文可能回显凭证片段
         logger.info("签到失败详情 %s: %s", credential_id, str(error)[:200])
+        checkin_events.record(
+            credential_id=credential_id,
+            result=CheckinResult(ok=False, message=f"签到失败：{reason}"),
+            trigger="manual")
         return {"ok": False, "credit": None, "code": None,
                 "message": f"签到失败：{reason}", "already_checked_in": False,
                 "status": None}
     if result.ok and not result.already_checked_in:
         schedule_probe(credential_id)      # 只有真签到了才会发积分
+    checkin_events.record(credential_id=credential_id, result=result, trigger="manual")
     # already_checked_in 必须透传：前端靠它区分「刚签到」与「今天已签过」
     return {"ok": result.ok, "credit": result.credit, "code": result.code,
             "message": result.message,
@@ -496,7 +505,8 @@ def create_router(services: Services) -> APIRouter:
         require_operator(principal)
         provider, data = provider_for(credential_id, "checkin")
         return await checkin_credential_once(credentials, provider, data,
-                                             credential_id, schedule_probe)
+                                             credential_id, schedule_probe,
+                                             services.checkin_events)
 
     @router.post("/api/credentials/batch")
     async def batch_credentials(payload: dict,
@@ -554,7 +564,8 @@ def create_router(services: Services) -> APIRouter:
                                 "detail": detail}
                     provider, data = provider_for(credential_id, "checkin")
                     detail = await checkin_credential_once(
-                        credentials, provider, data, credential_id, schedule_probe)
+                        credentials, provider, data, credential_id, schedule_probe,
+                        services.checkin_events)
                     return {"id": credential_id, "ok": bool(detail["ok"]), "detail": detail}
             except InvalidRequest as error:
                 # 凭证不存在 / 渠道不支持该能力：可预期的逐条失败，原因直接可读
@@ -595,6 +606,20 @@ def create_router(services: Services) -> APIRouter:
             credential_id, "checkin_status",
             error="credential does not support checkin status")
         return {"status": await provider.checkin_status(data)}
+
+    @router.get("/api/credentials/{credential_id}/checkin-events")
+    async def checkin_events_history(credential_id: str, limit: int = 20,
+                                     principal=Depends(principal_from_request)):
+        """签到审计日志：最近几次签到的时间/结果/领取积分/上游业务码（倒序）。
+
+        与 `GET .../checkin`（实时查上游活动状态）不同：这里读的是**本地落库的
+        历史**，回答「这个号上次签到是什么时候、领了多少、上游回了什么」，
+        不触发任何上游请求，故对已失效凭证也能查到过去记录。
+        """
+        require_operator(principal)
+        if services.credentials.provider_of(credential_id) is None:
+            raise InvalidRequest("credential not found")
+        return {"events": services.checkin_events.recent(credential_id, limit=limit)}
 
     @router.get("/api/credentials/{credential_id}/growth")
     async def growth_history(credential_id: str, limit: int = 20,

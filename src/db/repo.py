@@ -984,6 +984,52 @@ class GrowthRepository:
         return [dict(row) for row in rows]
 
 
+class CheckinEventRepository:
+    """每日签到审计日志（checkin_events）。
+
+    每轮对一条凭证执行签到就落一行（成功/失败/已签都记），供管理台回看
+    「这个号昨天几点签的、领了多少、上游回了什么码」。
+
+    与已删除的 `checkins` 去重表无关：去重仍由 `CheckinTask` 的当日作用域集合
+    承担，本表只增不改、不参与任何判定。只存汇总，不落上游原始响应体。
+    """
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def record(self, *, credential_id: str, result, trigger: str = "auto",
+               now: int | None = None) -> str:
+        """记一行签到结果（`result` 为 provider 的 CheckinResult）。"""
+        event_id = _new_id("checkin")
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO checkin_events (id, credential_id, ts, ok, already, "
+                "credit, code, message, trigger) VALUES (?,?,?,?,?,?,?,?,?)",
+                (event_id, credential_id, _now(now),
+                 1 if result.ok else 0, 1 if result.already_checked_in else 0,
+                 result.credit, result.code, result.message, trigger),
+            )
+        return event_id
+
+    def prune(self, *, keep_days: int, now: int | None = None) -> int:
+        """删除超过保留期的签到日志（与 usage_events 同一保留策略入口）。
+
+        每次签到都可能落一行，不回收会无界增长（读侧有 LIMIT，但表本身会
+        一直变大）；保留期与请求明细一致，避免「签到日志比请求明细还久」。
+        """
+        cutoff = _now(now) - keep_days * 86400
+        with self._db.transaction() as conn:
+            cursor = conn.execute("DELETE FROM checkin_events WHERE ts < ?", (cutoff,))
+        return cursor.rowcount
+
+    def recent(self, credential_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        """默认倒序返回最近记录；limit 收敛到 [1, 200] 防止一次拉爆前端。"""
+        rows = self._db.connect().execute(
+            "SELECT * FROM checkin_events WHERE credential_id = ? ORDER BY ts DESC LIMIT ?",
+            (credential_id, max(1, min(200, limit)))).fetchall()
+        return [dict(row) for row in rows]
+
+
 class CreditEventRepository:
     """积分变动流水（credit_events）：只读查询，写入在 save_quota 事务内完成。
 
