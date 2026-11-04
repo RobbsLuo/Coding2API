@@ -69,8 +69,11 @@ MODEL_SYNONYMS: dict[str, tuple[str, str]] = {
     "sn-glm-5-3": ("glm-5.3", "GLM 5.3"),
     "sn-glm-5-3-flash": ("glm-5.3-flash", "GLM 5.3 Flash"),
     "sn-kimi-k3": ("kimi-k3", "Kimi K3"),
-    "sn-deepseek-v4-1-flash-1017": ("deepseek-v4.1-flash-1017",
-                                    "DeepSeek V4.1 Flash 1017"),
+    # `1017` 是快照日期、不是模型身份：小浣熊的这个档位就是 DeepSeek V4.1 Flash
+    # 本身（与 CodeArts 的 `deepseek-v4.1-flash` 同倍率 0.18x）。不收敛会让同一
+    # 模型多出一条 `deepseek-v4.1-flash-1017` 的对外条目。
+    "sn-deepseek-v4-1-flash-1017": ("deepseek-v4.1-flash",
+                                    "DeepSeek V4.1 Flash"),
     "sn-sensenova-6-8-flash": ("sensenova-6.8-flash", "Sensenova 6.8 Flash"),
     "sn-sensenova-6-8-flash-lite": ("sensenova-6.8-flash-lite",
                                     "Sensenova 6.8 Flash Lite"),
