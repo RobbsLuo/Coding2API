@@ -74,7 +74,7 @@ docker compose up -d --build
 docker compose exec coding2api python scripts/create_user.py admin --role admin
 ```
 
-Pull image: `docker compose pull` (or `docker pull ghcr.io/robbsluo/coding2api:v0.10.1`). Pushing `v*` tag to main triggers `.github/workflows/publish.yml`, publishing `<tag>` + `:latest`.
+Pull image: `docker compose pull` (or `docker pull ghcr.io/robbsluo/coding2api:v0.10.2`). Pushing `v*` tag to main triggers `.github/workflows/publish.yml`, publishing `<tag>` + `:latest`.
 
 Running the container on a **VPS with a public IP** and wanting an https edge → see [Public deployment (Docker + Caddy)](#public-deployment-docker--caddy-automatic-https).
 
