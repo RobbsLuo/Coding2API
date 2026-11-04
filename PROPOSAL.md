@@ -131,7 +131,7 @@ Provider 承担上游私有部分：发请求、解析事件、分类错误、�
 
 **健康度归一化**：`known(0-100) | unknown | exhausted`。CB 取 `CycleCapacityRemainPrecise`/`CycleCapacitySizePrecise`，TRAE 取 `credits_limit - credits_amount` / `credits_limit`。**不用 `TotalDosage`**：它 = Σ(size − CapacityUsed)，`CapacityUsed` 是上周期口径 → 出现 `remaining == total`、健康度恒 100。**必须三态**：探测失败算 0 分会让其永远轮不到。
 
-**会话粘性**：三级识别——① 请求体 `conversation_id` / `conversationId` / `prompt_cache_key`；② 请求头 `x-session-id` / `x-opencode-session` / `x-session-affinity` / `conversation-id`（须匹配 `[A-Za-z0-9._:-]{1,128}`，经 contextvar 传入，键带 `header:` 前缀避免与 body 撞键）；③ 消息增量前缀指纹。**头夹中间的原因**：body 显式键最精确；头是客户端主动声明的身份，比指纹可靠。头值掺 `username` 再哈希——否则一个用户可靠猜头值占用别人账号。TTL（`CONVERSATION_STICKY_SECONDS`）默认 1h。带 `user_id` 时**不派生**前缀兜底键（同用户并行对话前缀可能相同）。手动 pin 优先；凭证报错仍走轮换；条目纯内存。
+**会话粘性**：三级识别——① 请求体 `conversation_id` / `conversationId` / `prompt_cache_key`；② 请求头 `x-session-id` / `x-opencode-session` / `x-session-affinity` / `thread-id` / `session-id` / `conversation-id`（须匹配 `[A-Za-z0-9._:-]{1,128}`，经 contextvar 传入，键带 `header:` 前缀避免与 body 撞键）；③ 消息增量前缀指纹。**头夹中间的原因**：body 显式键最精确；头是客户端主动声明的身份，比指纹可靠。头值掺 `username` 再哈希——否则一个用户可靠猜头值占用别人账号。TTL（`CONVERSATION_STICKY_SECONDS`）默认 1h。带 `user_id` 时**不派生**前缀兜底键（同用户并行对话前缀可能相同）。手动 pin 优先；凭证报错仍走轮换；条目纯内存。
 
 ### 3.4 模型名三字段
 

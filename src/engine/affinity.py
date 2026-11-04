@@ -7,11 +7,11 @@ OpenAI Chat Completions 本身无会话概念，客户端（agent/CLI）的「�
    `prompt_cache_key` / `session_id`（`metadata` 对象内或请求体顶层）。客户端直接给出
    会话身份，最可靠——即便消息数组被裁剪/压缩也能粘住。
 2. **请求头会话标识**（E1）：`x-session-id` / `x-opencode-session` /
-   `x-session-affinity` / `conversation-id` / `conversation_id`。由请求入口
-   中间件校验后放进 contextvar（`request_context.set_session_id`），这里经
-   `get_session_id()` 读——**不给 `pin_for`/`remember` 加 headers 参数**，
-   否则参数要一路穿过路由 → executor → 调度等中间层，签名被污染且新增调用
-   点容易漏传（与 `request_id` 同一范式）。
+   `x-session-affinity` / `thread-id` / `session-id` / `conversation-id` /
+   `conversation_id`。由请求入口中间件校验后放进 contextvar
+   （`request_context.set_session_id`），这里经 `get_session_id()` 读——**不给
+   `pin_for`/`remember` 加 headers 参数**，否则参数要一路穿过路由 → executor →
+   调度等中间层，签名被污染且新增调用点容易漏传（与 `request_id` 同一范式）。
 3. **回落：消息数组的增量前缀指纹**：下一轮的 messages 以上一轮的完整
    messages 为前缀再追加，据此匹配。仅当请求体**没有** `user_id`（顶层或
    `metadata` 内）时才使用——同一用户的并行对话消息前缀可能相同，派生

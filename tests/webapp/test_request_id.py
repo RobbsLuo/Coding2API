@@ -266,6 +266,24 @@ def test_session_id_from_headers_prefers_earlier_header_names():
     assert session_id_from_headers([(b"X-Session-Id", b"mixed")]) == "mixed"
 
 
+def test_session_id_from_headers_accepts_codex_hyphenated_headers():
+    """Codex 自 2026 起只发 `thread-id` / `session-id`（openai/codex#22193）。"""
+    from src.request_context import session_id_from_headers
+
+    assert session_id_from_headers([(b"thread-id", b"t-1")]) == "t-1"
+    assert session_id_from_headers([(b"session-id", b"s-1")]) == "s-1"
+    # 带前缀的 x-session-id 语义更具体，仍排第一
+    assert session_id_from_headers([(b"thread-id", b"t"), (b"session-id", b"s"),
+                                    (b"x-session-id", b"x")]) == "x"
+    # thread-id 比 session-id / conversation-id 更具体，两者都在时选它
+    assert session_id_from_headers([(b"session-id", b"s"),
+                                    (b"thread-id", b"t")]) == "t"
+    assert session_id_from_headers([(b"conversation-id", b"c"),
+                                    (b"thread-id", b"t")]) == "t"
+    # 头名大小写不敏感
+    assert session_id_from_headers([(b"Thread-Id", b"mixed")]) == "mixed"
+
+
 def test_session_id_from_headers_skips_invalid_and_returns_none():
     from src.request_context import session_id_from_headers
 
@@ -293,5 +311,7 @@ def test_middleware_sets_and_clears_session_id():
     with _TestClient(app) as client:
         response = client.get("/sess", headers={"x-session-id": "abc-123"})
         assert response.json()["session"] == "abc-123"
+        # Codex 现行写法（连字符形式）同样经中间件进入 contextvar
+        assert client.get("/sess", headers={"thread-id": "t-9"}).json()["session"] == "t-9"
         # 复原：下一个请求不带头时读不到上一次的值
         assert client.get("/sess").json()["session"] is None
