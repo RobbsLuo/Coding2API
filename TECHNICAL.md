@@ -673,6 +673,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 - `ErrKind.SOFT` → `rate_limit`：SOFT 主要是上游 429/限流，记「额度耗尽」比笼统 `upstream_error`（「渠道错误」）可行动；链路层超时被上一步拦走，不会误标。
 - `ErrKind.CONTEXT`（CodeBuddy 11115 `prompt is too long`）→ `context_overflow`；处置同请求级错误（不罚号、仍换号），但不能再混进「请求无效」。
 - `ErrKind.CAPABILITY`（CodeArts 001001020 not multimodal）→ `model_capability`；处置同 INVALID（`REJECT_KINDS` 一起跳过整个上游），但「模型不支持该请求形态」不是「请求写错了」。
+- **CodeArts `InferHub.001001005.400 param is invalid` → INVALID**（2026-11-04 修）：`classify_error_code` 的 `"1005" in text` 是**裸子串**判据，而 `001001005` 是上游错误码前缀、子串里含 `1005`，于是「请求参数不合法」被判成 `PLAN` → 12h 账号级冷却。实测 2026-11-03 14:41–14:55 三条 codearts 凭证相继命中，整条渠道（约 2.2 万剩余积分）静默下线 12h。现以 `_PARAM_INVALID_MARKERS = ("001001005", "param is invalid")` 前置判 INVALID（位置在 `_MODEL_CAPABILITY_MARKERS` 之后、`"1005" in text` 之前）；真业务码 `1005`（权益耗尽）仍判 PLAN。与 `001001020` 同一手法：点分「前缀 + 子码」形态**不能**用裸子串匹配。
 - 三个新值进 `CONTROLLED_ERROR_TYPES`（前端 `USAGE_ERROR_LABEL` 同步）；`model_capability` 计入模型可用性视图，`context_overflow` 不计（客户端上下文问题，与「上游不认模型」无关）。
 - **明细口径**：硬失败（DEAD/RESTRICTED/INVALID/CAPABILITY）每次尝试各落一行；限流 / 额度 / 超时 / 上下文等其余分类每次请求仅一行（收尾行），不逐次落——逐次落会把 `usage_hourly.requests` 与 Key 日请求额度一起刷高。
 

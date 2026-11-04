@@ -214,6 +214,36 @@ def test_events_classify_request_marker_is_not_credential_fault():
     assert classify("The request model is not multimodal") is ErrKind.CAPABILITY
 
 
+def test_events_param_invalid_is_not_plan():
+    """`InferHub.001001005.400 param is invalid` 是请求侧错误 → INVALID，不是 PLAN。
+
+    `001001005` 是点分错误码前缀，子串里含 `1005`；此前靠
+    `"1005" in text` 判据直接落到「权益耗尽」→ **12h 账号级冷却**。实测
+    2026-11-03 14:41–14:55 三条 codearts 凭证相继命中，整条渠道静默下线 12h
+    （见 docs/oss-feature-migration-scan-2026-11-03.md §0.1）。
+
+    判 INVALID 的处置是「换号无用、跳过整个上游、以 400 收尾」，与「等额度」
+    完全相反；同时真正的业务码 1005（权益耗尽）必须仍然判 PLAN。
+    """
+    classify = codearts_events.classify_error_code
+    assert classify(
+        "InferHub.001001005.400 The request param is invalid, Please check it"
+    ) is ErrKind.INVALID
+    assert classify("001001005") is ErrKind.INVALID
+    assert classify("The request param is invalid") is ErrKind.INVALID
+    # 防回归：真 PLAN 不能被放宽的 marker 抢走（`00001005` 只含 1005 子串）
+    assert classify("1005") is ErrKind.PLAN
+    assert classify("1005 quota exceeded") is ErrKind.PLAN
+    assert classify("insufficient balance") is ErrKind.PLAN
+
+
+def test_events_param_invalid_status_path_is_invalid():
+    """HTTP 400 形态的同一错误也判 INVALID（`classify_status` 与流内同口径）。"""
+    body = (b'{"error_code":"InferHub.001001005.400",'
+            b'"error_msg":"The request param is invalid, Please check it"}')
+    assert codearts_events.classify_status(400, body) is ErrKind.INVALID
+
+
 def test_events_multimodal_rejection_skips_provider_instead_of_rotating():
     """HTTP 400 与流内两条路径对同一错误给出同一分类（都跳过该上游）。"""
     body = (b'{"error_code":"InferHub.001001020.406",'

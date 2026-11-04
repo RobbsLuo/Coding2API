@@ -103,6 +103,19 @@ _MODEL_THROTTLE_MARKERS = ("tpm", "429", "rate limit", "throttl")
 # 落到 `supports_images=True` 的 codebuddy，最终 400 收尾（4 条未救回失败）。
 # 与 `classify_status` 一致：同样的错误走 HTTP 400 时本来就走 INVALID。
 _MODEL_CAPABILITY_MARKERS = ("001001020", "not multimodal")
+# 请求参数本身不合法：`InferHub.001001005.400 The request param is invalid,
+# Please check it`（实测原文，2026-11-03 14:41 三条 codearts 凭证相继命中）。
+#
+# 必须排在下面的 `"1005" in text` 之前：`001001005` 是上游错误码前缀，子串里
+# 含 `1005`，会命中「权益耗尽」那条**子串**判据 → PLAN → 12h 账号级冷却。
+# 实测后果是三条凭证依次被判「套餐耗尽」，整条渠道（约 2.2 万剩余积分）空转
+# 12h，全部负载压到 codebuddy。语义上这条是请求侧问题：换号无用、换渠道/改
+# 请求才有用，判 INVALID（REJECT_KINDS：跳过整个上游并以 400 收尾）。
+#
+# 与 `001001020`（能力不匹配）同一手法：都用错误码前缀做前置 marker，不靠
+# 业务码数字匹配——`CODE.001001005.400` 这种「点分前缀 + 子码」形态里，任何
+# 裸子串判据都会误伤。
+_PARAM_INVALID_MARKERS = ("001001005", "param is invalid")
 # HTTP 状态码侧的限流/并发标记。与流内业务码不同，这里判的是**响应体文本**：
 # 上游把并发超限放在 HTTP 400（不是 429），命中即应算可重试的限流。
 # 并发与否的区分见 _CONCURRENCY_MARKERS（先判并发，再判模型级限流）。
@@ -341,6 +354,10 @@ def classify_error_code(code: str | None) -> ErrKind:
         # 统计口径独立成 `model_capability`：处置同 INVALID（跳过上游 + 400），
         # 但归因面板要说「这个模型不支持这次请求形态」而不是「请求写错了」。
         return ErrKind.CAPABILITY
+    if any(marker in text for marker in _PARAM_INVALID_MARKERS):
+        # 请求参数不合法（001001005）：见 _PARAM_INVALID_MARKERS 注释。必须排在
+        # `"1005" in text` 之前，否则子串 `1005` 会把「参数无效」判成「权益耗尽」。
+        return ErrKind.INVALID
     if "1005" in text or "quota" in text or "insufficient" in text:
         return ErrKind.PLAN
     if "apig.0301" in text or "decrypt token" in text:
