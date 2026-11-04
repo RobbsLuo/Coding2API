@@ -11,6 +11,7 @@ import {
   CircleCheck,
   Coins,
   Database,
+  Download,
   Flame,
   Gauge,
   HeartPulse,
@@ -331,6 +332,7 @@ interface Actions {
   checkinLog: (credential: Credential) => void;
   limits: (credential: Credential) => void;
   tags: (credential: Credential) => void;
+  export: (credential: Credential) => void;
 }
 
 export function CredentialsPage() {
@@ -735,6 +737,25 @@ export function CredentialsPage() {
     // 只开对话框；保存与刷新由对话框自己回调（见 CredentialLimitsDialog）
     limits: (credential) => setLimitsFor(credential.id),
     tags: (credential) => setTagsFor(credential.id),
+    // 单条导出：文件内容与「批量导入」的条目同形，可原样再导入。
+    export: (credential) =>
+      void (async () => {
+        try {
+          const { blob } = await api.exportCredential(credential.id);
+          const url = URL.createObjectURL(blob);
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download =
+            `coding2api-credential-${credential.provider}-${credential.id}.json`;
+          document.body.appendChild(anchor);
+          anchor.click();
+          anchor.remove();
+          URL.revokeObjectURL(url);
+          showNotice("已导出凭证 JSON（含明文令牌，请妥善保管）");
+        } catch (caught) {
+          showError(caught instanceof Error ? caught.message : "导出凭证失败");
+        }
+      })(),
   };
 
   if (isLoading) return <PageSkeleton variant="cards" />;
@@ -1999,6 +2020,12 @@ function Row({
                     <DropdownMenuItem onSelect={() => actions.tags(credential)}>
                       <Tag className="size-4" />
                       {credential.tags.length ? "编辑标签" : "设置标签"}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() => actions.export(credential)}
+                      title="导出为 JSON（含明文令牌，可原样再导入；操作会记审计）"
+                    >
+                      <Download className="size-4" /> 导出凭证
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
                     <DropdownMenuItem

@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CredentialsPage } from "../CredentialsPage";
 import {
   expandCredentialGroups, jsonResponse, makeCredential, renderPage, settle, userEvent,
@@ -26,6 +26,12 @@ async function openAddDialog() {
   await userEvent.click(screen.getByTestId("open-add-dialog"));
   await screen.findByTestId("add-credential-dialog");
 }
+
+// 导出用例会替换全局 URL（createObjectURL 在 jsdom 缺失）；不在用例末尾
+// 手动恢复的话，后续 describe 的 useSearchParams 会拿到残缺的 URL 构造器。
+afterEach(() => {
+  vi.unstubAllGlobals();
+});
 
 describe("CredentialsPage", () => {
   beforeEach(() => {
@@ -1705,6 +1711,36 @@ describe("CredentialsPage", () => {
     // 但标签徽章与筛选对只读用户可见
     expect(screen.getByTestId("tags-cred_1")).toBeInTheDocument();
     expect(screen.getByTestId("credential-tag-filter")).toBeInTheDocument();
+  });
+
+  it("导出凭证：请求 export 端点并落盘 JSON", async () => {
+    const blobs: string[] = [];
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: () => { blobs.push("blob"); return "blob:x"; },
+      revokeObjectURL: () => undefined,
+    });
+    const fetchSpy = mockFetch({
+      "/export": {
+        provider: "trae", nickname: "主账号", tags: ["生产"],
+        credential: { accessToken: "secret" },
+      },
+      "/api/credentials": listBody([makeCredential({ id: "cred_1", provider: "trae" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "导出凭证" }));
+
+    await waitFor(() => {
+      expect(fetchSpy.mock.calls.some(([url]) =>
+        String(url).includes("/api/credentials/cred_1/export"))).toBe(true);
+    });
+    await waitFor(() => expect(blobs).toHaveLength(1));
+    expect(await screen.findByTestId("credentials-notice"))
+      .toHaveTextContent("已导出凭证 JSON");
   });
 });
 

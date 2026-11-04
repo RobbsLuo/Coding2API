@@ -716,6 +716,23 @@ class CredentialRepository:
         plaintext = self._cipher.decrypt(row["data_enc"])
         return json.loads(plaintext.decode("utf-8"))
 
+    def export_entry(self, credential_id: str) -> dict[str, Any] | None:
+        """单条凭证导出：与 `POST /api/credentials` 的导入项同形，可原样再导入。
+
+        复用 `import_credential` 接受的结构（`provider` + `credential` +
+        `nickname` + `tags`），因此导出的文件既能备份，也能直接粘进「批量导入」。
+        解密失败照旧抛 `CredentialDecryptError`，与 `credential_data` 同一口径。
+        """
+        row = self._db.connect().execute(
+            "SELECT provider, nickname, tags, data_enc FROM credentials WHERE id = ?",
+            (credential_id,)).fetchone()
+        if row is None:
+            return None
+        plaintext = self._cipher.decrypt(row["data_enc"])
+        return {"provider": row["provider"], "nickname": row["nickname"],
+                "tags": tags_value(row["tags"]),
+                "credential": json.loads(plaintext.decode("utf-8"))}
+
     def nickname_of(self, credential_id: str) -> str | None:
         """单条凭证昵称（供实时流按需补名字，避免每事件拉整份列表）。
 

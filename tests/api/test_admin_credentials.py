@@ -119,6 +119,33 @@ def test_credential_account_endpoints_unsupported_for_trae(admin_client):
                        json={"account_id": "a"}).status_code == 400
     assert client.get("/api/credentials/ghost/accounts").status_code == 400
 
+
+def test_credential_export_returns_importable_json_and_audits(admin_client):
+    """单条导出：与批量导入同形的明文条目 + 存文件头 + 审计留痕。"""
+    from src.audit.actions import ACTION_CREDENTIAL_EXPORT
+
+    app, client = admin_client
+    credential_id = app.state.credentials.add(
+        provider="codebuddy", credential_data={"bearer_token": "secret-token"},
+        nickname="主账号", tags=["团队", "备用"])
+    response = client.get(f"/api/credentials/{credential_id}/export")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert response.json() == {
+        "provider": "codebuddy", "nickname": "主账号", "tags": ["团队", "备用"],
+        "credential": {"bearer_token": "secret-token"},
+    }
+    rows = app.state.services.audit.query(action=ACTION_CREDENTIAL_EXPORT)
+    assert len(rows) == 1
+    assert rows[0]["actor"] == "root" and rows[0]["target"] == credential_id
+
+    assert client.get("/api/credentials/ghost/export").status_code == 400
+
+    # viewer 不能把令牌带出系统（与写操作同一道 require_operator）
+    client.cookies.set("coding2api_session", create_session_token("guest", SECRET))
+    assert client.get(f"/api/credentials/{credential_id}/export").status_code == 403
+
 def test_select_account_rejects_vanished_credential(admin_client):
     """provider 支持切换但持锁后凭证已消失 → 400，不拿 None 去打上游。"""
     app, client = admin_client

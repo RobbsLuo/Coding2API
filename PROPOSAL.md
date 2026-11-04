@@ -194,7 +194,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 14 张表，`SCHEMA_
 **管理台（Cookie + RBAC）**：凭证管理、API Key（含六项配额，超限 429 + `Retry-After`，判定异常一律放行并记 warning）、用量统计、月度账单、Playground、模型列表、用户管理、审计、告警、上游状态、任务与配置、服务端日志。**出口 IP 粘性**（`CREDENTIAL_PROXY_POOL`）：按凭证 id 稳定分配出口，推理与后台任务同出口。
 
 - 账号：`GET|POST /api/users`、`PATCH /api/users/{username}`、`PUT /api/users/{username}/policy`（用户级模型白名单 + 配额）、`POST /api/users/{username}/{disable|enable|reset-password}`（**无 DELETE**）；`POST /api/auth/password`；`GET|POST /api/auth/activate`；`GET /api/audit`。
-- 凭证运维：`GET|POST /api/credentials`（列表 / 新增）+ `DELETE /api/credentials/{id}`；动作端点 `checkin`（GET 查状态 / POST 执行）、`toggle`、`revive`、`probe`、`activity`、`pin`、`accounts/select`；`PUT /api/credentials/{id}/limits|tags`、`GET|POST /api/credentials/{id}/growth`、`GET /api/credentials/{id}/credit-events|checkin-events|accounts`。
+- 凭证运维：`GET|POST /api/credentials`（列表 / 新增）+ `DELETE /api/credentials/{id}`；动作端点 `checkin`（GET 查状态 / POST 执行）、`toggle`、`revive`、`probe`、`activity`、`pin`、`accounts/select`、`export`（单条 JSON 导出）；`PUT /api/credentials/{id}/limits|tags`、`GET|POST /api/credentials/{id}/growth`、`GET /api/credentials/{id}/credit-events|checkin-events|accounts`。
 - 模型：`GET /api/model-catalog`、`GET /api/models/availability`、`POST /api/models/probes/{probe,manual}`（`manual=on|off` 人工接管，优先于自动探活）。
 - 批量：`POST /api/credentials/batch`（`probe|toggle|checkin|revive`）。逐条隔离，响应 `{total, succeeded, failed, results[]}`；`toggle`/`revive` 落一条汇总审计。
 - 批量导入：`POST /api/credentials/batch-import`（`items[]`，≤100 条）。逐条校验，响应 `{created[], skipped[], failed[]}` 均带 `index`；同渠道内容完全一致去重；逐条审计 + 入队探测。

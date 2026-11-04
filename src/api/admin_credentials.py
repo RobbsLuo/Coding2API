@@ -16,9 +16,11 @@ import math
 
 import httpx
 from fastapi import APIRouter, Depends
+from fastapi.responses import JSONResponse
 
 from ..audit.actions import (
     ACTION_CREDENTIAL_DELETE,
+    ACTION_CREDENTIAL_EXPORT,
     ACTION_CREDENTIAL_IMPORT,
     ACTION_CREDENTIAL_LIMITS,
     ACTION_CREDENTIAL_PIN,
@@ -629,6 +631,31 @@ def create_router(services: Services) -> APIRouter:
         if services.credentials.provider_of(credential_id) is None:
             raise InvalidRequest("credential not found")
         return {"events": services.checkin_events.recent(credential_id, limit=limit)}
+
+    @router.get("/api/credentials/{credential_id}/export")
+    async def export_credential(credential_id: str,
+                                principal=Depends(principal_from_request)):
+        """单条凭证导出（JSON）：与「批量导入」的条目同形，可原样再导入。
+
+        导出**明文凭证**，因此只对 admin/operator 开放，并落一条
+        `credential.export` 审计（谁把哪个号的令牌带出了系统）。响应带
+        `Content-Disposition` 便于浏览器直接存文件，`no-store` 防中间层缓存。
+        """
+        require_operator(principal)
+        entry = services.credentials.export_entry(credential_id)
+        if entry is None:
+            raise InvalidRequest("credential not found")
+        services.audit.record(actor=principal.username,
+                              action=ACTION_CREDENTIAL_EXPORT,
+                              target=credential_id,
+                              detail=f"上游 {entry['provider']}")
+        logger.info("管理员 %s 导出凭证 %s（上游 %s）", principal.username,
+                    credential_id, entry["provider"])
+        return JSONResponse(entry, headers={
+            "Content-Disposition":
+                f'attachment; filename="coding2api-credential-{credential_id}.json"',
+            "Cache-Control": "no-store",
+        })
 
     @router.get("/api/credentials/{credential_id}/growth")
     async def growth_history(credential_id: str, limit: int = 20,

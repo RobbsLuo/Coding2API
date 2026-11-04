@@ -258,6 +258,23 @@ export const api = {
       method: "POST",
       ...json({ provider, credential, nickname }),
     }),
+  /** 单条凭证导出：返回 JSON 文件内容，页面触发下载（含明文令牌）。 */
+  exportCredential: async (id: string) => {
+    const response = await fetch(
+      `/api/credentials/${encodeURIComponent(id)}/export`,
+      { credentials: "same-origin" });
+    if (!response.ok) {
+      let message = `导出失败（HTTP ${response.status}）`;
+      try {
+        const body = await response.json();
+        if (body?.error?.message) message = body.error.message;
+      } catch {
+        // 非 JSON 错误体：保留 HTTP 状态提示
+      }
+      throw new ApiError(response.status, "export_failed", message);
+    }
+    return { blob: await response.blob() };
+  },
   // ---------------------------------------------------------------- 备份
   backups: () => request<BackupListResponse>("/api/backups"),
   createBackup: () =>

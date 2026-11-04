@@ -375,6 +375,7 @@ claude
 
 - **端点**：`POST /api/credentials/batch`，body `{action: "probe"|"toggle"|"checkin"|"revive", ids: [...], enabled?, force?}`。一次 ≤200 条，重复 id 去重。`force` 只对 `revive` 有效（见下）。
 - **批量导入**：`POST /api/credentials/batch-import`，body `{items: [{provider, credential, nickname?, tags?}]}`。一次 ≤100 条；逐条校验，坏条目只进 `failed`（带 `index` 与原因）；同渠道解密后内容完全一致视为重复，进 `skipped`。管理台凭证页「批量导入」支持粘贴 JSON 数组 / JSONL 或选文件。
+- **单条导出**：`GET /api/credentials/{id}/export` 返回与批量导入**同形**的 JSON（`provider` / `credential` / `nickname` / `tags`），可原样再导入。响应带 `Content-Disposition` 附件头与 `no-store`，内容是**明文凭证**——只对 admin/operator 开放，且落 `credential.export` 审计。管理台入口：凭证行「更多操作 → 导出凭证」。
 - **逐条隔离**：单条失败不影响其余。响应 `{action, total, succeeded, failed, results: [{id, ok, error?, detail?}]}`。
 - **签到失败是结果不是故障**：上游拒绝（账号被禁用 / 登录过期 / 限流）回 `ok=false` + 可读 `message`，不 500——否则管理台只弹「签到失败」，看不出真实原因。
 - **暂停是显式状态而非取反**：`toggle` 的 `enabled` 由请求体给出 → 操作条拆「暂停」/「取消暂停」两按钮。
