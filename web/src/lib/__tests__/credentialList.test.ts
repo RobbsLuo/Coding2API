@@ -239,8 +239,9 @@ describe("groupByProvider", () => {
 });
 
 describe("providerLedger", () => {
-  it("CodeArts 记积分账，其余渠道（含未知）记套餐池账", () => {
+  it("CodeArts 与小浣熊记积分账，其余渠道（含未知）记套餐池账", () => {
     expect(providerLedger("codearts")).toBe("credits");
+    expect(providerLedger("raccoon")).toBe("credits");
     for (const provider of [
       "codebuddy", "codebuddy_intl", "trae", "zen", "kilo", "qoder", "officeace", "mystery",
     ]) {

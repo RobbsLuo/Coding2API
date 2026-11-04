@@ -7,7 +7,7 @@ import { useDialogFocus } from "../hooks/useDialogFocus";
 import { safeHttpUrl } from "../lib/safeUrl";
 import { Button, Field, Input, Notice, Select, Tabs, Textarea } from "../ui";
 
-/** 支持「登录渠道账号」按钮 / JSON 导入下拉的渠道（有 poll 轨道或需人工导入的渠道）。 */
+/** 支持「登录渠道账号」按钮的渠道（有 poll / callback / paste 轨道的渠道）。 */
 const LOGIN_PROVIDERS: Provider[] = [
   "codebuddy",
   "codebuddy_intl",
@@ -16,6 +16,14 @@ const LOGIN_PROVIDERS: Provider[] = [
   "codearts",
   "officeace",
 ];
+
+/**
+ * JSON 导入下拉的渠道：登录渠道 + 只能手工粘贴凭据的渠道。
+ *
+ * 小浣熊没有登录轨道（凭据是网页会话 JWT），只能从浏览器 DevTools 复制后
+ * 粘贴，故不放进 `LOGIN_PROVIDERS`（那里会生成一个点了必然失败的登录按钮）。
+ */
+const IMPORT_PROVIDERS: Provider[] = [...LOGIN_PROVIDERS, "raccoon"];
 
 type TabValue = "login" | "import";
 
@@ -463,7 +471,7 @@ export function AddCredentialDialog({
                     data-testid="import-provider"
                     onChange={(event) => setImportProvider(event.target.value as Provider)}
                   >
-                    {LOGIN_PROVIDERS.map((item) => (
+                    {IMPORT_PROVIDERS.map((item) => (
                       <option key={item} value={item}>
                         {PROVIDER_LABEL[item]}
                       </option>
@@ -497,7 +505,7 @@ export function AddCredentialDialog({
             <Field
               label="凭证 JSON"
               htmlFor="import-payload"
-              hint='CodeBuddy：{"token":"..."}（也接受 access_token / bearer_token）；TRAE：{"accessToken":"...","uid":"...","refreshToken":"..."}'
+              hint='CodeBuddy：{"token":"..."}（也接受 access_token / bearer_token）；TRAE：{"accessToken":"...","uid":"...","refreshToken":"..."}；小浣熊：{"access_token":"<浏览器 cookie xhx_token 的值>"}'
             >
               <Textarea
                 rows={4}

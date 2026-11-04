@@ -33,7 +33,7 @@ describe("渠道展示元数据", () => {
     const providers = Object.keys(PROVIDER_LABEL);
     expect(providers.sort()).toEqual([
       "codearts", "codebuddy", "codebuddy_intl", "kilo", "officeace", "qoder",
-      "trae", "zen",
+      "raccoon", "trae", "zen",
     ]);
     for (const provider of providers) {
       expect(PROVIDER_ABBR[provider as keyof typeof PROVIDER_ABBR]).toBeTruthy();

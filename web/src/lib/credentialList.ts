@@ -83,8 +83,8 @@ export function filterCredentials(
 /**
  * 一个渠道组展示的是哪本账。
  *
- * `pool`＝套餐 / 每日池口径的余额（CodeArts 之外的渠道），`credits`＝CodeArts
- * 积分（该渠道唯一的额度来源）。组头额度合计、行内额度数字、变动流水都按它取。
+ * `pool`＝套餐 / 每日池口径的余额，`credits`＝积分口径（CodeArts 与
+ * 小浣熊：两家都按积分扣费，与套餐/每日池不是同一本账）。组头额度合计、行内额度数字、变动流水都按它取。
  */
 export type Ledger = "pool" | "credits";
 
@@ -94,7 +94,7 @@ export type Ledger = "pool" | "credits";
  * 两套接口、数值量级也不同，混读会被当成同一本账的连续读数。
  */
 export function providerLedger(provider: string): Ledger {
-  return provider === "codearts" ? "credits" : "pool";
+  return provider === "codearts" || provider === "raccoon" ? "credits" : "pool";
 }
 
 /** 组间顺序：按全站渠道顺序，最后按 key 定序（同渠道只有一组，用于兜底稳定排序）。 */

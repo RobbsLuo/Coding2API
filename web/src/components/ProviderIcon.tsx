@@ -5,6 +5,7 @@ import HuaweiCloudMono from "@lobehub/icons/es/HuaweiCloud/components/Mono";
 import KiloCodeMono from "@lobehub/icons/es/KiloCode/components/Mono";
 import OpenCodeMono from "@lobehub/icons/es/OpenCode/components/Mono";
 import QoderColor from "@lobehub/icons/es/Qoder/components/Color";
+import SenseNovaMono from "@lobehub/icons/es/SenseNova/components/Mono";
 import QoderMono from "@lobehub/icons/es/Qoder/components/Mono";
 import TraeColor from "@lobehub/icons/es/Trae/components/Color";
 import TraeMono from "@lobehub/icons/es/Trae/components/Mono";
@@ -26,6 +27,8 @@ const BRAND: Record<string, { Main: BrandComp; Color: BrandComp }> = {
   codearts: { Main: HuaweiCloudMono, Color: HuaweiCloudColor },
   // officeAce 同为华为云产品（AgentArts 办公智能体），沿用母公司图标
   officeace: { Main: HuaweiCloudMono, Color: HuaweiCloudColor },
+  // 小浣熊（商汤）：用母公司 SenseNova 图标（库内只有 Mono 变体）
+  raccoon: { Main: SenseNovaMono, Color: SenseNovaMono },
 };
 
 /**
