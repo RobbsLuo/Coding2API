@@ -1,6 +1,6 @@
 # Coding2API
 
-Wraps **CodeBuddy** (CN + international), **TRAE SOLO**, **OpenCode Zen**, **Kilo**, **Qoder**, **CodeArts**, **OfficeAce** into an OpenAI-compatible API, with shared credential pool, unified model names and scheduling, per-user usage stats.
+Wraps **CodeBuddy** (CN + international), **TRAE SOLO**, **OpenCode Zen**, **Kilo**, **Qoder**, **CodeArts**, **OfficeAce**, **Raccoon** into an OpenAI-compatible API, with shared credential pool, unified model names and scheduling, per-user usage stats.
 
 > [!WARNING]
 > Reverse-engineered endpoints; study and research only, not security-audited. Public deployment needs reverse proxy + auth + IP allowlist.
@@ -74,7 +74,7 @@ docker compose up -d --build
 docker compose exec coding2api python scripts/create_user.py admin --role admin
 ```
 
-Pull image: `docker compose pull` (or `docker pull ghcr.io/robbsluo/coding2api:v0.10.2`). Pushing `v*` tag to main triggers `.github/workflows/publish.yml`, publishing `<tag>` + `:latest`.
+Pull image: `docker compose pull` (or `docker pull ghcr.io/robbsluo/coding2api:v0.11.0`). Pushing `v*` tag to main triggers `.github/workflows/publish.yml`, publishing `<tag>` + `:latest`.
 
 Running the container on a **VPS with a public IP** and wanting an https edge → see [Public deployment (Docker + Caddy)](#public-deployment-docker--caddy-automatic-https).
 
@@ -176,7 +176,7 @@ Optional `temperature` / `max_tokens` / `reasoning_effort`; **leaving one empty 
 
 ## Channels
 
-> CodeBuddy (incl. international) / TRAE / Qoder / CodeArts / OfficeAce need credentials; **Zen and Kilo are credential-less free tiers** — one virtual placeholder row (scheduling / cooldown / stats as usual), quota reads "free tier (no quota API)", health stays "no probe". Virtual row re-seeds on restart after deletion; *pause* disables permanently.
+> CodeBuddy (incl. international) / TRAE / Qoder / CodeArts / OfficeAce / Raccoon need credentials; **Zen and Kilo are credential-less free tiers** — one virtual placeholder row (scheduling / cooldown / stats as usual), quota reads "free tier (no quota API)", health stays "no probe". Virtual row re-seeds on restart after deletion; *pause* disables permanently.
 
 ### OpenCode Zen (`zen`)
 
@@ -247,6 +247,24 @@ The upstream is plain OpenAI protocol, with three quirks:
 
 **Switching accounts**: *Switch account* button (`force_login=true`) clears the Huawei Cloud browser session first.
 
+### Raccoon (`raccoon`)
+
+[SenseTime Raccoon](https://xiaohuanxiong.com), real account (web login is enough). **No login button**: the credential is a web session JWT, importable only by hand — DevTools → Application → Cookies → copy the `xhx_token` value and paste `{"access_token":"<value>"}` into *JSON import* (a bare JWT or the whole cookie string also works). Expires in ~30 days; grab a fresh one then.
+
+**Protocol**: plain OpenAI-compatible (`/api/web/llm/v2/chat/completions`), no signing, no device fingerprint. Streaming/non-streaming `tool_calls`, `role=tool` echo, `include_usage` all verified; 411K-token input returned in 14.2s.
+
+**Unknown models silently fall back to the default** (observed): a bogus model name still returns 200 with a different model. Two layers of interception — validate against the catalog before sending, then compare the echoed `model` on the first frame; a mismatch fails rather than answering B for A.
+
+**Quota = credits**: each request costs 1 point regardless of tokens; 300 points granted daily at 00:00 (valid 7 days); ledger records credits. `billing_effective_multiplier` from the catalog becomes the multiplier directly, **0 = free tier** (e.g. `sn-sensenova-6-8-flash` free until 11-30) → the scheduler prefers it.
+
+**Quota breakdown**: upstream splits credits into four pools (daily / reward / monthly / top-up); per-grant expiry (7-day validity) is derived from `daily_grant.expire_at` in the bills and feeds the "expiring first" ordering. Pools (`quota_packages`) and expiry ladder (`expiry_ladder`) have different semantics and are stored separately.
+
+**Daily check-in**: there is no claim endpoint — the daily 300 is lazily granted by the server on the first points-service hit of the day. So "check-in" = touch the balance (trigger the grant) + read the bills to confirm today's `daily_grant` actually landed; **bills are the only evidence, HTTP 200 is not**. Three states: granted by this call / granted earlier today / not granted yet (retryable).
+
+**Activity reporting**: `POST /api/web/auth/v1/devices_current_heartbeat` (the web client's real device heartbeat); with the `x-client-*` header family it returns 200 and is idempotent, refreshing `last_login_at`. Off by default; shares `ACTIVITY_REPORT_ENABLED` / `ACTIVITY_REPORT_HOUR` with CodeBuddy. Device id is derived stably from uid (a random one is treated as a new device).
+
+**Concurrency cap ~5** (the 6th concurrent request returns `429 user_model_rate_limited`) → `RACCOON_MAX_CONCURRENCY` defaults to 2, with its own pacer.
+
 ### CodeBuddy international (`codebuddy_intl`)
 
 [www.codebuddy.ai](https://www.codebuddy.ai), same protocol as CN site but separate account system (separate registration and billing) → separate channel. Same device-code login.
@@ -307,7 +325,7 @@ claude
 - **`count_tokens`**: estimated locally, never forwarded.
 - **Images**: `image` blocks normalize to chat `image_url`; images inside `tool_result.content` are preserved.
 - **Unsupported**: `document` blocks, `source.type=file`, Anthropic server tools — explicit 400.
-- **`cache_control` passthrough** (on by default): landing spots match Anthropic (`system`, message content blocks, `tool_result` top level, `tool_calls` top level, `tools` top level). Structure validated only; values not interpreted. 6 of 8 channels accept it (codebuddy / codebuddy_intl / trae / qoder / codearts / kilo); zen unverified, OfficeAce not separately probed. Script `scripts/probe_cache_control.py`.
+- **`cache_control` passthrough** (on by default): landing spots match Anthropic (`system`, message content blocks, `tool_result` top level, `tool_calls` top level, `tools` top level). Structure validated only; values not interpreted. 6 of 9 channels accept it (codebuddy / codebuddy_intl / trae / qoder / codearts / kilo); zen and Raccoon unverified, OfficeAce not separately probed. Script `scripts/probe_cache_control.py`.
 
 ### CC Switch one-click import
 
@@ -414,7 +432,7 @@ Quota numbers are underlined with dotted line; hover shows period semantics for 
 
 ## Model list loading
 
-`GET /v1/models` and Playground dropdown merge only channels with **currently usable credential** (≥1 not paused, not session-invalid). Cooling credentials still count. Order: CodeBuddy, TRAE, Qoder, CodeArts, OfficeAce first, then alphabetical within group; multi-channel models take highest-priority channel.
+`GET /v1/models` and Playground dropdown merge only channels with **currently usable credential** (≥1 not paused, not session-invalid). Cooling credentials still count. Order: CodeBuddy, TRAE, Qoder, CodeArts, OfficeAce, Raccoon first, then alphabetical within group; multi-channel models take highest-priority channel.
 
 **Request routing trusts this cache**: catalog-proven ownership → only those channels are candidates; all unavailable → 503 instead of trying each. Models absent from catalog still route across all candidates; explicit pinning and key channel binding unaffected.
 
@@ -708,6 +726,10 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 | `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB international pacing, independent |
 | `ZEN_CHAT_MIN_INTERVAL` | `0` | Zen pacing |
 | `KILO_CHAT_MIN_INTERVAL` | `0` | Kilo pacing |
+| `RACCOON_API_ENDPOINT` | `https://xiaohuanxiong.com` | Raccoon upstream |
+| `RACCOON_ALLOWED_ENDPOINTS` | `https://xiaohuanxiong.com` | Raccoon allowlist |
+| `RACCOON_CHAT_MIN_INTERVAL` | `0` | Raccoon chat pacing |
+| `RACCOON_MAX_CONCURRENCY` | `2` | Raccoon in-flight cap per account; `0` disables |
 | `QODER_CHAT_MIN_INTERVAL` | `5` | Qoder pacing |
 | `CODEARTS_CHAT_MIN_INTERVAL` | `5` | CodeArts pacing |
 | `CODEARTS_MAX_CONCURRENCY` | `3` | CodeArts in-flight cap per account; `0` disables |

@@ -636,7 +636,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 
 ## 9. 模型目录与模型名
 ### 9.1 三字段与归一键
-八渠道每模型统一三字段，规则在 `src/provider/naming.py`（纯函数，不 import provider 子模块）：
+九渠道每模型统一三字段，规则在 `src/provider/naming.py`（纯函数，不 import provider 子模块）：
 
 | 字段 | 函数 | 例 |
 |---|---|---|
@@ -646,7 +646,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 
 - `normalize_model_key` 剥上游噪声再 slug 化（空格/下划线/冒号/括号 → 连字符、小写）。**免费标记**四形态：尾缀 `-free`/`_free`、路径段 `.../free`、冒号尾缀 `:free`、括号词 `(free)`；同类还有 `new`。**命名空间前缀**非身份：路径式取末段；冒号式（冒号后须有空白）削前缀。只删整段/整词标记（`freeplay`/`newson` 不动）。点号非分隔（`glm-5.2` → `glm-5-2` 就换了模型）；非 ASCII 字母数字保留。剥完只剩噪声 → 回退原串小写。
 - `display_model_name` 清洗可读名（`Qwen3.8-Max` → `Qwen3.8 Max`）或由 id 派生；品牌按表纠正（机械 title-case 写错 `DeepSeek`/`MiMo`/`GLM`/`GPT`）。**幂等**。
-- **合并键 = 归一键，八渠道统一**：同一模型各渠道代号互不相同（Qoder `kmodel_latest` = TRAE `kimi-k3-1` = CB `kimi-k3`）→ 纯 id 规则无法对齐，只能靠展示名。zen / kilo 也参与（Zen `nemotron-3-ultra-free` vs Kilo `nvidia/nemotron-3-ultra-550b-a55b:free`，展示名都清洗成「Nemotron 3 Ultra」）。
+- **合并键 = 归一键，九渠道统一**：同一模型各渠道代号互不相同（Qoder `kmodel_latest` = TRAE `kimi-k3-1` = CB `kimi-k3`）→ 纯 id 规则无法对齐，只能靠展示名。zen / kilo 也参与（Zen `nemotron-3-ultra-free` vs Kilo `nvidia/nemotron-3-ultra-550b-a55b:free`，展示名都清洗成「Nemotron 3 Ultra」）。
 - **同模型异名显式规范**（`MODEL_SYNONYMS`）：如 Qoder `dfmodel` 上游名 `DeepSeek-Flash` vs 别家 `DeepSeek-V4.1-Flash`；表把「异名归一键 → (规范归一键, 规范展示名)」。另一类是空格式厂商前缀（`Xiaomi MiMo-V2.6-Pro` → `mimo-v2.6-pro`）。**只登记人工核实的，不做模糊匹配**。
 - **哨兵名不跨渠道合并**（`_SENTINEL_LABELS` = `auto` / `default`）：语义只在本渠道成立 → 退回原 id 归一键、各自单列。**同渠道内归一键重复 → 退回原 id 归一键**，且不登记歧义别名。
 - **对外 id 一律归一键**：多渠道取最短展示名的归一键；单渠道取该条；兜底/哨兵取原代号归一键。原代号不露面，转发经 `services.model_aliases` 映射回（`executor.upstream_model_name` 消费）；每渠道登记三键（对外 id、原代号、展示名及 slug 形式）。
@@ -825,7 +825,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 
 ```json
 {
-  "status": "ok", "service": "coding2api", "version": "0.10.2",
+  "status": "ok", "service": "coding2api", "version": "0.11.0",
   "credentials": {"total": 5, "ready": 4, "cooling": 1, "paused": 0, "disabled": 0}
 }
 ```
@@ -909,7 +909,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 `CREDENTIAL_PROXY_POOL`（启动期，分号分隔）非空时，同一凭证固定走同一出口：
 
 - 分配 = `sha256(credential_id) → int % len(pool)`，**不依赖进程状态**，重启后不漂移（进程内轮转会等于没做）。池成员增删会让部分凭证换桶——改池子本身就是要换出口。
-- 凭证 id 走 contextvar（`request_context.set_credential_id`），由 engine / 任务层设置：推理（executor `_stream_source`，每次换号重试都重设）、额度探测、签到、token 预刷新、成长中心、管理台单条 probe/checkin。**不依赖凭证 data 里的账号字段**（八个渠道字段名不统一，缺失就会静默回落直连）。
+- 凭证 id 走 contextvar（`request_context.set_credential_id`），由 engine / 任务层设置：推理（executor `_stream_source`，每次换号重试都重设）、额度探测、签到、token 预刷新、成长中心、管理台单条 probe/checkin。**不依赖凭证 data 里的账号字段**（九个渠道字段名不统一，缺失就会静默回落直连）。
 - `httpx` 的代理是连接池级参数，所以 `LazyClients` 按 `(流/短, 代理)` 维护多份池（`_pools`）；未配池时只有一条池，行为与之前逐字节一致。显式注入的 client（测试替身）永远优先。
 - 优先级：凭证池分配 → `PROVIDER_PROXIES[渠道]` → 直连。**OAuth 登录阶段不覆盖**：登录时凭证还没入库（没有 id），仍走渠道级代理/直连。
 

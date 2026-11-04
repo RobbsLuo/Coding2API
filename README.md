@@ -74,7 +74,7 @@ docker compose up -d --build
 docker compose exec coding2api python scripts/create_user.py admin --role admin
 ```
 
-拉镜像：`docker compose pull`（或 `docker pull ghcr.io/robbsluo/coding2api:v0.10.2`）。tag `v*` 推 main → `.github/workflows/publish.yml` → 发 `<tag>` + `:latest`。
+拉镜像：`docker compose pull`（或 `docker pull ghcr.io/robbsluo/coding2api:v0.11.0`）。tag `v*` 推 main → `.github/workflows/publish.yml` → 发 `<tag>` + `:latest`。
 
 容器跑在**有公网 IP 的 VPS** 上要 https 入口 → 见「[公网部署（Docker + Caddy 自动 HTTPS）](#公网部署docker--caddy-自动-https)」。
 
@@ -327,7 +327,7 @@ claude
 - **`count_tokens`**：本地估算，不转发上游。
 - **图片**：`image` 块归一为 chat `image_url`；`tool_result.content` 内图片同样保留。
 - **不支持**：`document` 块、`source.type=file`、Anthropic 服务端工具 → 400。
-- **`cache_control` 透传**（默认开）：落点同 Anthropic——`system`、消息内容块、`tool_result` 顶层、`tool_calls` 顶层、`tools` 顶层。只校验结构，不解释取值。八渠道实测 6 接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo）；zen 未验证、OfficeAce 未单测。脚本 `scripts/probe_cache_control.py`。
+- **`cache_control` 透传**（默认开）：落点同 Anthropic——`system`、消息内容块、`tool_result` 顶层、`tool_calls` 顶层、`tools` 顶层。只校验结构，不解释取值。九渠道实测 6 接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo）；zen 与小浣熊未验证、OfficeAce 未单测。脚本 `scripts/probe_cache_control.py`。
 
 ### CC Switch 一键导入
 
@@ -737,6 +737,10 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB 国际节流，独立 |
 | `ZEN_CHAT_MIN_INTERVAL` | `0` | Zen 节流 |
 | `KILO_CHAT_MIN_INTERVAL` | `0` | Kilo 节流 |
+| `RACCOON_API_ENDPOINT` | `https://xiaohuanxiong.com` | 小浣熊上游地址 |
+| `RACCOON_ALLOWED_ENDPOINTS` | `https://xiaohuanxiong.com` | 小浣熊白名单 |
+| `RACCOON_CHAT_MIN_INTERVAL` | `0` | 小浣熊聊天最小间隔 |
+| `RACCOON_MAX_CONCURRENCY` | `2` | 小浣熊每账号在途并发上限；`0` 关闭 |
 | `QODER_CHAT_MIN_INTERVAL` | `5` | Qoder 节流 |
 | `CODEARTS_CHAT_MIN_INTERVAL` | `5` | CodeArts 节流 |
 | `CODEARTS_MAX_CONCURRENCY` | `3` | CodeArts 每账号在途并发上限；`0` 关闭 |
