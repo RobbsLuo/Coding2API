@@ -73,6 +73,11 @@ CHANNEL_TOS: dict[str, TosRisk] = {
         "gray",
         "AgentArts 控制面开通的应用凭据，按账号下发；条款未明确允许中转",
         basis="运营判断"),
+    "raccoon": TosRisk(
+        "gray",
+        "复用网页端登录态（xhx_token 会话 JWT）调官方托管模型网关；条款未明确"
+        "允许第三方转发与多用户共享，且凭据约 30 天到期需重取",
+        basis="运营判断"),
 }
 
 _UNKNOWN = TosRisk("gray", "渠道未登记 ToS 风险（按保守档处理）", basis="未登记")

@@ -1,6 +1,6 @@
 # Coding2API
 
-八个上游——**CodeBuddy**（国内 + 国际）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce**——封装成 OpenAI 兼容 API：公共凭证池、统一模型名与调度、按人用量统计。
+九个上游——**CodeBuddy**（国内 + 国际）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce**、**小浣熊**——封装成 OpenAI 兼容 API：公共凭证池、统一模型名与调度、按人用量统计。
 
 > [!WARNING]
 > 逆向接口，仅供学习研究，未做安全审计；公网部署需反向代理 + 鉴权 + IP 白名单。
@@ -178,7 +178,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ## 渠道
 
-> CodeBuddy（含国际）/ TRAE / Qoder / CodeArts / OfficeAce 需凭证；**Zen 与 Kilo 无凭证免费层**——池里一条虚拟占位行（调度 / 冷却 / 统计照常），额度列「免费层（无额度接口）」，健康度恒「无探测」。删虚拟行重启复活；永久停用 →「暂停」。
+> CodeBuddy（含国际）/ TRAE / Qoder / CodeArts / OfficeAce / 小浣熊 需凭证；**Zen 与 Kilo 无凭证免费层**——池里一条虚拟占位行（调度 / 冷却 / 统计照常），额度列「免费层（无额度接口）」，健康度恒「无探测」。删虚拟行重启复活；永久停用 →「暂停」。
 
 ### OpenCode Zen（`zen`）
 
@@ -248,6 +248,18 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 **单账号单用户**：官方《套餐管理》限制单账号单用户 → 不共用。
 
 **换账号**：登录按钮旁「换账号」（`force_login=true`），先清浏览器华为云会话再授权。
+
+### 小浣熊（`raccoon`）
+
+[商汤小浣熊](https://xiaohuanxiong.com)，需真实账号（网页端登录即可）。**没有登录按钮**：凭据是网页会话 JWT，只能手工导入——浏览器 DevTools → Application → Cookies → 复制 `xhx_token` 的值，在「JSON 导入」里粘 `{"access_token":"<值>"}`（也接受裸 JWT 或整段 cookie）。约 30 天到期，到期重新取一次。
+
+**协议**：标准 OpenAI 兼容（`/api/web/llm/v2/chat/completions`），无签名、无设备指纹。`tool_calls` 流式/非流式、`role=tool` 回传、`include_usage` 全部实测通过；411K token 输入 14.2 秒返回。
+
+**未知模型会静默回落默认模型**（实测）：写错模型名上游回 200 但换成默认模型。本服务两层拦截——发请求前按目录校验，回包首帧再比对 `model` 回显，不一致直接失败，不会「问 A 答 B」。
+
+**额度＝积分**：每笔请求扣 1 分（与 token 量无关），每日 00:00 发 300 分（7 天有效），账本记「积分」。模型目录里的 `billing_effective_multiplier` 直接当倍率，**0 = 限免**（如 `sn-sensenova-6-8-flash` 限免至 11-30），调度器会优先选。
+
+**并发上限约 5**（第 6 个回 `429 user_model_rate_limited`）→ `RACCOON_MAX_CONCURRENCY` 默认 2，独立节流器。
 
 ### CodeBuddy 国际（`codebuddy_intl`）
 
@@ -418,7 +430,7 @@ claude
 
 ## 模型列表加载
 
-`GET /v1/models` 与 Playground 下拉只合并**当前有可用凭证**的渠道（至少一条未暂停、未失效）；冷却中的仍算。顺序：CodeBuddy、TRAE、Qoder、CodeArts、OfficeAce 在前；组内按名字典序；多渠道模型归最高优先级渠道。
+`GET /v1/models` 与 Playground 下拉只合并**当前有可用凭证**的渠道（至少一条未暂停、未失效）；冷却中的仍算。顺序：CodeBuddy、TRAE、Qoder、CodeArts、OfficeAce、小浣熊 在前；组内按名字典序；多渠道模型归最高优先级渠道。
 
 **请求路由只认这份缓存**：目录能证明归属 → 候选只有那些渠道；全不可用 → 503，不逐渠道试。模型完全不在目录 → 仍按全部候选路由；直连指定与 Key 渠道绑定不受影响。
 
@@ -516,7 +528,7 @@ Playground 与 `/v1/models` 走 stale-while-revalidate：有缓存立刻回旧�
 
 额度数字后下箭头展开「变动流水」= **两次额度探测之间的净变化**，非动作归因：签到、成长、对话都改余额而上游不打日志 → 界面一律写「净变化」。首次探测只建基线；余额没变不记；变「未知」仍记但不填变化量；留 90 天。
 
-**按账本分流**：流水带 `ledger`（`pool` / `credits`）。CodeArts 记 `credits`，其余 `pool`。接口 `GET /api/credentials/{id}/credit-events?ledger=`（缺省 `pool`）。两本账量级 / 语义不同 → 分开读。
+**按账本分流**：流水带 `ledger`（`pool` / `credits`）。CodeArts 与小浣熊记 `credits`（两家额度都是积分），其余 `pool`。接口 `GET /api/credentials/{id}/credit-events?ledger=`（缺省 `pool`）。两本账量级 / 语义不同 → 分开读。
 
 **签到记录**：凭证行「更多操作 → 签到记录」展开**签到审计日志**（每轮签到落一行：时间 / 结果 / 领取积分 / 上游业务码 / 文案 / 触发方式，定时与手动都记；保留 90 天）。接口 `GET /api/credentials/{id}/checkin-events?limit=`。与「变动流水」不同，这是**动作的逐次结果**（签到自己回的 code / credit），不依赖余额 diff，故「显示成功却没加积分」这类问题能直接对着上游答复定位。
 

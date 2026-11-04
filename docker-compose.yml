@@ -124,6 +124,10 @@ services:
       # Kilo Gateway 免费层端点与其白名单（无凭证；白名单仅防误配）
       KILO_API_ENDPOINT: ${KILO_API_ENDPOINT:-https://api.kilo.ai/api/gateway}
       KILO_ALLOWED_ENDPOINTS: ${KILO_ALLOWED_ENDPOINTS:-https://api.kilo.ai/api/gateway}
+      # 小浣熊（商汤）：标准 OpenAI 兼容网关，鉴权是网页会话 JWT。白名单只为
+      # 防误配（避免把用户的会话 JWT 发往未授权主机）。
+      RACCOON_API_ENDPOINT: ${RACCOON_API_ENDPOINT:-https://xiaohuanxiong.com}
+      RACCOON_ALLOWED_ENDPOINTS: ${RACCOON_ALLOWED_ENDPOINTS:-https://xiaohuanxiong.com}
       # Qoder（阿里，COSY 私有协议）：真实账号渠道。默认国内 openapi 网关；
       # 国际版改 QODER_API_ENDPOINT=https://openapi.qoder.sh 并把国际版域名
       # 保留在白名单里。推理走 gateway.*，额度/登录走 openapi.*。白名单防把
@@ -143,6 +147,9 @@ services:
       ZEN_CHAT_MIN_INTERVAL: ${ZEN_CHAT_MIN_INTERVAL:-0}
       # Kilo 聊天最小间隔（秒）：独立节流器，0（默认）关闭
       KILO_CHAT_MIN_INTERVAL: ${KILO_CHAT_MIN_INTERVAL:-0}
+      # 小浣熊聊天最小间隔（秒）与每账号并发上限（实测 5 并发放行、第 6 个 429）
+      RACCOON_CHAT_MIN_INTERVAL: ${RACCOON_CHAT_MIN_INTERVAL:-0}
+      RACCOON_MAX_CONCURRENCY: ${RACCOON_MAX_CONCURRENCY:-2}
       # Qoder / CodeArts 聊天最小间隔（秒）：真实账号渠道，独立节流器
       QODER_CHAT_MIN_INTERVAL: ${QODER_CHAT_MIN_INTERVAL:-5}
       CODEARTS_CHAT_MIN_INTERVAL: ${CODEARTS_CHAT_MIN_INTERVAL:-5}

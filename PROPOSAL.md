@@ -86,7 +86,17 @@
 - **不做主动探活 / 不做 credit 估算**：探活要真发推理消耗积分；`cost_coefficient` 与 `tokens_per_point` 叠乘关系官方未说明。（`GET /v1/subscription` 读余额是**只读**、不耗积分，不在此列——它也是 `APIG.1009` 的 DEAD 收口时现场复探用的接口。）
 - **单账号单用户**：官方《套餐管理》限制单账号单用户，每人各加自己凭证。
 
-### 2.9 冲突与陷阱
+### 2.9 小浣熊（`raccoon`）
+
+- 端点：`https://xiaohuanxiong.com`（网页与 API 同域）。推理 `POST /api/web/llm/v2/chat/completions`、模型目录 `GET /api/web/llm/v2/model_catalog`、积分余额 `GET /api/web/points/v1/balance`，**标准 OpenAI 兼容**，无私有信封、无签名、无设备指纹。
+- **凭据是网页会话 JWT**：浏览器 cookie `xhx_token`（`iss=xiaohuanxiong.com/iam`，约 30 天）直接当 `Authorization: Bearer`。没有官方 API Key，也没有可用的 OAuth 回调（桌面端只注册 `gateway.qwenwork.cn` 那一类服务端回调），故**只能手工导入**：管理台「JSON 导入」粘贴 `{"access_token":"<cookie 值>"}`（也接受裸 JWT / 整段 cookie）。到期需重新登录取值。
+- **未知模型会静默回落默认模型**（实测 `definitely-not-a-model` → 200 + `model=raccoon-090dd3`）：provider 发请求前按目录校验，流首帧再比对上游回显的 `model`，不一致即失败——宁可这次报错，也不让客户端「问 A 答 B」。
+- **计费按请求**：每笔 LLM 调用记 `points=-1`，与 token 量无关（4K 与 205K token 同价）；每日 00:00 发 300 积分（2026-11 起 7 天有效）。`Quota.remaining`/`total` = 可用积分，账本记 `credits`。目录的 `billing_effective_multiplier` 直接当 `credit_rate`（0 = 限免，调度器优先选）。
+- **并发上限约 5**（6 并发第 6 个 `429 user_model_rate_limited`）：pacer 用 `RACCOON_MAX_CONCURRENCY`（默认 2）+ `CONCURRENCY` 固定短冷却；不是账号故障。
+- **登录轨道不实现**：没有 `start_auth`/`poll_auth`/`complete_callback`——写了也只是永远不被调用的死代码（与 Zen/Kilo 同一分工）。
+- 能力实测（2026-11-04）：非流式/流式 `tool_calls`、`role=tool` 回传、`stream_options.include_usage` 全通；411K token 输入 14.2s 返回。
+
+### 2.10 冲突与陷阱
 
 | 问题 | 事实 | 对策 |
 |---|---|---|

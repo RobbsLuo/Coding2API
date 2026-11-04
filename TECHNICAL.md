@@ -36,6 +36,7 @@ PROPOSAL.md 定方向，本文定实现。只写**当前代码现状**。
 | `src/provider/qoder/` | `cosy.py` `client.py` `events.py` `credential.py` `auth.py` | COSY（自定义 Base64、AES/RSA、签名与会话头缓存）／上游 + 信封解包 + 额度·签到／信封 → chunk → Event／凭证解析／设备码 PKCE |
 | `src/provider/codearts/` | `signer.py` `dpop.py` `client.py` `events.py` `credential.py` `auth.py` `oauth.py` | SDK-HMAC-SHA256（纯函数）／ES256 DPoP（低 S）／上游 + 私有 SSE 还原 + 积分额度／SSE → 增量 Event（双形状）／凭证解析／OAuth2 PKCE／回调粘贴换 token |
 | `src/provider/officeace/` | `signer.py` `client.py` `events.py` `credential.py` `oauth.py` | 双签名（V11 + SDK-HMAC，纯函数）／上游 + 积分·签到·费率／错误分类 + `max_tokens` 改写／两套凭据 + 一次性 refresh／云端授权轮询（PKCE + DPoP + 开通校验） |
+| `src/provider/raccoon/` | `client.py` `events.py` `credential.py` | 标准 OpenAI 上游 + 积分余额／SSE → Event + 分类（`user_model_rate_limited` → CONCURRENCY）／会话 JWT 归一 + claims 提取 |
 | `src/engine/` | `scheduler.py` `executor.py` `limits.py` `inflight.py` `half_open.py` `affinity.py` `continuation.py` `compress.py` `sticky_trim.py` `tool_output.py` `model_resolver.py` `reasoning.py` `prefix_debug.py` `sse.py` | 选号 + 冷却状态机 + pin／执行 + 目录收窄 + 轮换 + fallback + 统计埋点／限额判定 + 快照缓存／在途租约／冷却到期半开探测／会话粘性／截断续写／上下文压缩／粘性裁剪／tool 输出压缩／模型名解析／档位映射解析／前缀缓存诊断／SSE 帧解析 |
 | `src/compat/` | `openai/{request,response,errors,dsml}.py` `responses/{request,response}.py` `anthropic/{request,response}.py` | Chat 校验·聚合·error shape·DSML 泄漏回读／Responses 出口／Anthropic Messages 出口 |
 | `src/tasks/` | `pacer.py` `quota_probe.py` `checkin.py` `growth.py` `activity.py` `refresh.py` `retention.py` `backup.py` `alerting.py` `upstream_status.py` `model_probe.py` `status.py` `runner.py` | 全局节流器／额度探测／签到（`CHECKIN_TIMES` 空则每 10 分钟）／成长（仅 CB）／活跃上报／预刷新／小时汇总 + 90 天清理／备份／告警（七类规则 + webhook）／上游状态聚合／模型探活／`TASK_SPECS` + 运行态／调度接入 lifespan |
@@ -479,6 +480,15 @@ class Provider(Protocol):
 
 **配置**：`OFFICEACE_API_ENDPOINT` / `OFFICEACE_ALLOWED_ENDPOINTS` 只管控制面；`OFFICEACE_CHAT_MIN_INTERVAL`（热更，默认 0）独立 pacer。登录流量与聊天用**独立连接池**，共用出站代理。**单账号单用户**（官方《套餐管理》限制）。
 
+### 5.7 小浣熊（`raccoon`）
+**标准 OpenAI 协议 + 网页会话 JWT**。三处渠道特例，其余与 Zen/Kilo 同构：
+
+- **凭据归一**（`credential.py`）：入参接受裸 JWT / `{"access_token":"…"}` / `{"token":…}` / `{"xhx_token":…}` / 整段 cookie（`xhx_token=…; …`）。`uid`、`expires_at` 从 JWT claims 解出（`sub`/`uid`、`exp`），**不验签**（验签是上游的事；这里只当元数据）。无登录轨道，只能 JSON 导入。
+- **未知模型防护**：上游对不认识的模型名静默回落默认模型并回 200（实测 `definitely-not-a-model` → `model=raccoon-090dd3`）。两层拦截：① `stream_chat` 前按最近一次目录（`known_models`，小写集合）校验，不在目录里直接抛 404/INVALID（不发上游）；② 流首帧比对上游回显的 `model`，不一致抛 `UpstreamProtocolViolation`。目录未拉过（集合为空）时放行，真实保护靠第 ② 层。
+- **额度口径**：`available_points` 即积分余额，`Quota.total = remaining`（上游没有总量口径，不编造），账本记 `credits`（与 CodeArts 同账）。`billing_effective_multiplier` 直接当 `credit_rate`，0 = 限免，调度器优先选。**按请求计费**（每笔 `points=-1`，与 token 量无关），故不做 token 折算。
+- **错误分类**：`user identity could not be verified` / 401 → `DEAD`（会话 JWT 过期，只能重取）；积分耗尽类文案 → `CREDIT`；`429 user_model_rate_limited` → `CONCURRENCY`（固定短冷却，模型级）；其余 429 → `SOFT`；400/404/422 → `INVALID`。
+- **并发**：实测 5 并发放行、第 6 个 429 → `RACCOON_MAX_CONCURRENCY`（热更，默认 2）+ 独立 pacer（**不**与其他渠道共享）。
+
 ## 6. 调度器
 ### 6.1 选号规格
 ```python
@@ -638,7 +648,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 - **哨兵名不跨渠道合并**（`_SENTINEL_LABELS` = `auto` / `default`）：语义只在本渠道成立 → 退回原 id 归一键、各自单列。**同渠道内归一键重复 → 退回原 id 归一键**，且不登记歧义别名。
 - **对外 id 一律归一键**：多渠道取最短展示名的归一键；单渠道取该条；兜底/哨兵取原代号归一键。原代号不露面，转发经 `services.model_aliases` 映射回（`executor.upstream_model_name` 消费）；每渠道登记三键（对外 id、原代号、展示名及 slug 形式）。
 - **撞车消歧**（`_disambiguate`）：按 `_sort_key` 序保留先到者，后者依次取 `_fallback_ids`（原代号归一键 → 加渠道后缀 → 数字后缀）。兜底/哨兵条目用 `_scoped_key`（`渠道\0归一原代号`）隔离，对外 id 仍是原代号归一键。
-- **展示顺序**：`_PROVIDER_RANK`（codebuddy 0 → codebuddy_intl 1 → trae 2 → qoder 3 → codearts 4 → officeace 5 → 其余 6），多渠道取 `min`，同级按归一键字典序。只影响展示；调度选号顺序（`KNOWN_PROVIDERS`）不变。
+- **展示顺序**：`_PROVIDER_RANK`（codebuddy 0 → codebuddy_intl 1 → trae 2 → qoder 3 → codearts 4 → officeace 5 → raccoon 6 → 其余 7），多渠道取 `min`，同级按归一键字典序。只影响展示；调度选号顺序（`KNOWN_PROVIDERS`）不变。
 - **自定义别名**（`MODEL_ALIASES`，热更，`model_alias.py` 解析 + `api/model_merge._apply_custom_aliases` 注入）：`对外名=模型@渠道;对外名2=模型`，`@渠道` 可省。解析宽容（坏段忽略 + warning），注入期判撞名 / 目标不存在 / 渠道不持有 → 该段 ERROR 跳过；条目带 `custom_alias: true`。**无别名链**。用法见 README「模型名三字段」。
 
 ### 9.2 按凭证加载与 SWR

@@ -66,6 +66,8 @@ def test_quota_ledger_maps_codearts_to_credits():
     from src.db.repo import quota_ledger
 
     assert quota_ledger("codearts") == "credits"
+    # 小浣熊按积分扣费，与 CodeArts 同账
+    assert quota_ledger("raccoon") == "credits"
     assert quota_ledger("codebuddy") == "pool"
     assert quota_ledger("trae") == "pool"
 

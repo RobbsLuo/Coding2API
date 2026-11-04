@@ -216,6 +216,13 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("kilo_chat_min_interval", float, "Kilo 聊天最小间隔（秒）",
                "Kilo 匿名免费层专用节流（0 关闭，默认）。与 zen / CodeBuddy / TRAE"
                "各自独立，不共享。", minimum=0.0, group="chat_throttle"),
+    HotSetting("raccoon_chat_min_interval", float, "小浣熊聊天最小间隔（秒）",
+               "小浣熊真实账号渠道专用节流（0 关闭，默认）。与其余渠道各自独立，"
+               "不共享。", minimum=0.0, group="chat_throttle"),
+    HotSetting("raccoon_max_concurrency", int, "小浣熊每账号并发上限",
+               "上游按请求频率限流（实测 5 并发放行、第 6 个 429 "
+               "user_model_rate_limited）。默认 2 留余量；0 关闭上限。",
+               minimum=0, group="codearts_throttle"),
     HotSetting("qoder_chat_min_interval", float, "Qoder 聊天最小间隔（秒）",
                "Qoder 真实账号渠道专用节流（默认 5s，0 关闭）。与其余渠道各自"
                "独立，不共享。", minimum=0.0, group="chat_throttle"),
@@ -871,6 +878,14 @@ class RuntimeSettings:
     @property
     def kilo_chat_min_interval(self) -> float:
         return float(self.get("kilo_chat_min_interval"))
+
+    @property
+    def raccoon_chat_min_interval(self) -> float:
+        return float(self.get("raccoon_chat_min_interval"))
+
+    @property
+    def raccoon_max_concurrency(self) -> int:
+        return int(self.get("raccoon_max_concurrency"))
 
     @property
     def qoder_chat_min_interval(self) -> float:

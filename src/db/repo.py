@@ -196,11 +196,12 @@ def quota_ledger(provider: str) -> str:
     """该渠道的额度记在哪本账（`credit_events.ledger`）。
 
     CodeArts 的额度来自积分接口（`/snap-manager/v1/statistics/plugin`，内置模型
-    按积分计费），记 `credits`；其余渠道是套餐 / 每日池口径的余额，记 `pool`。
+    按积分计费），小浣熊的额度来自积分余额（每请求扣 1 分），两家都记 `credits`；
+    其余渠道是套餐 / 每日池口径的余额，记 `pool`。
     老库里 CodeArts 的 `pool` 行是已下线的每日 token 池口径，不再展示（量级与
     语义都和积分不同，混读会被当成同一本账的连续读数）。
     """
-    return "credits" if provider == "codearts" else "pool"
+    return "credits" if provider in ("codearts", "raccoon") else "pool"
 
 
 class CredentialRepository:

@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     # 只为防误配。免费模型由上游 `isFree` 标记识别（见 provider/kilo/client.py）。
     kilo_api_endpoint: str = "https://api.kilo.ai/api/gateway"
     kilo_allowed_endpoints: str = "https://api.kilo.ai/api/gateway"
+    # 小浣熊（商汤）：标准 OpenAI 兼容网关，鉴权是网页会话 JWT（cookie
+    # `xhx_token`）。白名单只为防误配，避免把用户的会话 JWT 发往未授权主机。
+    raccoon_api_endpoint: str = "https://xiaohuanxiong.com"
+    raccoon_allowed_endpoints: str = "https://xiaohuanxiong.com"
     # Qoder（阿里，COSY 私有协议）：真实账号渠道，端点白名单防止误把带 COSY
     # 签名的请求发往未授权主机。默认取国内版；国际版改这两个值并把国际版域名
     # 一并加入白名单。推理走 gateway.*，额度/登录走 openapi.*。
@@ -250,6 +254,13 @@ class Settings(BaseSettings):
     # Kilo 聊天最小间隔：同为匿名免费层（网关级 200 req/h/IP），默认 0。
     # 与 zen 各自独立：两条免费渠道互不排队。
     kilo_chat_min_interval: float = 0
+    # 小浣熊聊天最小间隔：真实账号渠道，上游按**请求频率**限流（实测 6 并发
+    # 即 429 `user_model_rate_limited`），并发上限由 pacer 的 max_concurrency
+    # 兜住（默认 2），不需要额外的最小间隔。
+    raccoon_chat_min_interval: float = 0
+    # 小浣熊每账号并发上限：实测 5 并发放行、第 6 个 429。取 2 留余量，避免
+    # 与用户其它客户端抢同一账号的并发额度。0 关闭上限。
+    raccoon_max_concurrency: int = 2
     # Qoder 聊天最小间隔：真实账号渠道，上游有账号级频率风控，默认 5s
     # （对齐 CodeBuddy）。与 CB/TRAE/zen/kilo 各自独立，互不排队。
     qoder_chat_min_interval: float = 5
@@ -463,6 +474,11 @@ class Settings(BaseSettings):
                      if e.strip())
 
     @cached_property
+    def raccoon_allowed(self) -> tuple[str, ...]:
+        return tuple(e.strip().rstrip("/")
+                     for e in self.raccoon_allowed_endpoints.split(",") if e.strip())
+
+    @cached_property
     def qoder_allowed(self) -> tuple[str, ...]:
         return tuple(e.strip().rstrip("/") for e in self.qoder_allowed_endpoints.split(",")
                      if e.strip())
@@ -539,6 +555,11 @@ def validate_zen_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
 def validate_kilo_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
     """Kilo 端点白名单校验（防误配；Kilo 不携带真实 Token，风险面小于 CB）。"""
     return endpoint.strip().rstrip("/") in settings.kilo_allowed
+
+
+def validate_raccoon_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
+    """小浣熊端点白名单校验（防把用户的会话 JWT 发往未授权主机）。"""
+    return endpoint.strip().rstrip("/") in settings.raccoon_allowed
 
 
 def validate_qoder_endpoint_allowed(endpoint: str, settings: Settings) -> bool:

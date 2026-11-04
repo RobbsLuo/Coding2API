@@ -66,6 +66,7 @@ from .config import (
     validate_kilo_endpoint_allowed,
     validate_officeace_endpoint_allowed,
     validate_qoder_endpoint_allowed,
+    validate_raccoon_endpoint_allowed,
     validate_zen_endpoint_allowed,
 )
 from .db.backup import apply_pending_restore
@@ -118,6 +119,7 @@ from .provider.qoder import QoderProvider
 from .provider.qoder.auth import QoderOAuth
 from .provider.qoder.client import QoderClient
 from .provider.qoder.events import detect_realm_from_domain
+from .provider.raccoon.client import RaccoonClient, RaccoonProvider
 from .provider.trae.client import TraeClient, TraeProvider
 from .provider.zen.client import ZenClient, ZenProvider
 from .runtime_settings import load_runtime_settings
@@ -234,6 +236,14 @@ def _kilo_endpoint(config: Settings) -> str:
                              validator=validate_kilo_endpoint_allowed,
                              env_name="KILO_API_ENDPOINT",
                              allowed_name="KILO_ALLOWED_ENDPOINTS")
+
+
+def _raccoon_endpoint(config: Settings) -> str:
+    """解析小浣熊端点并强制白名单校验（防把用户会话 JWT 发往未授权主机）。"""
+    return _resolve_endpoint(config, attr="raccoon_api_endpoint",
+                             validator=validate_raccoon_endpoint_allowed,
+                             env_name="RACCOON_API_ENDPOINT",
+                             allowed_name="RACCOON_ALLOWED_ENDPOINTS")
 
 
 def _qoder_host(config: Settings) -> str:
@@ -420,6 +430,12 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     kilo_pacer = Pacer(lambda: runtime.kilo_chat_min_interval,
                        lambda: runtime.kilo_chat_min_interval,
                        allow_concurrent=True)
+    # 小浣熊独立 pacer：真实账号渠道，上游并发上限约 5（实测第 6 个 429），
+    # 用 max_concurrency 兜住；与其余渠道互不排队。
+    raccoon_pacer = Pacer(lambda: runtime.raccoon_chat_min_interval,
+                          lambda: runtime.raccoon_chat_min_interval,
+                          allow_concurrent=True,
+                          max_concurrency=lambda: runtime.raccoon_max_concurrency)
     # Qoder / CodeArts 是真实账号渠道，上游按账号频控；各自独立 pacer，
     # 与其余渠道互不排队（同渠道同凭证共桶、桶内允许并发）。
     qoder_pacer = Pacer(lambda: runtime.qoder_chat_min_interval,
@@ -485,6 +501,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             client=CodeArtsClient(endpoint=_codearts_endpoint(config),
                                   proxy=proxies.get("codearts")),
             pacer=codearts_pacer),
+        "raccoon": RaccoonProvider(
+            client=RaccoonClient(host=_raccoon_endpoint(config),
+                                 proxy=proxies.get("raccoon")),
+            pacer=raccoon_pacer),
         "officeace": OfficeAceProvider(
             client=OfficeAceClient(cloud_base=_officeace_endpoint(config),
                                    proxy=proxies.get("officeace")),

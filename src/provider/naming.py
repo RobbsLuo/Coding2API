@@ -63,6 +63,17 @@ MODEL_SYNONYMS: dict[str, tuple[str, str]] = {
     # `MiMo-V2.6-Pro`：`Vendor: Model` 的冒号式前缀削不到它，键会多出
     # `xiaomi-`，同一模型被拆成两条（对外多出 `xiaomi-mimo-v2.6-pro`）。
     "xiaomi-mimo-v2.6-pro": ("mimo-v2.6-pro", "MiMo V2.6 Pro"),
+    # 小浣熊（商汤）把托管模型统一加 `sn-` 前缀，且版本号用连字符（`5-3`）
+    # 而非点号（`5.3`）：不登记就是「同一模型两条对外条目」，用户得挑渠道才
+    # 路由得通。右侧取其余渠道已在用的写法（CodeArts 的 `glm-5.3` 等）。
+    "sn-glm-5-3": ("glm-5.3", "GLM 5.3"),
+    "sn-glm-5-3-flash": ("glm-5.3-flash", "GLM 5.3 Flash"),
+    "sn-kimi-k3": ("kimi-k3", "Kimi K3"),
+    "sn-deepseek-v4-1-flash-1017": ("deepseek-v4.1-flash-1017",
+                                    "DeepSeek V4.1 Flash 1017"),
+    "sn-sensenova-6-8-flash": ("sensenova-6.8-flash", "Sensenova 6.8 Flash"),
+    "sn-sensenova-6-8-flash-lite": ("sensenova-6.8-flash-lite",
+                                    "Sensenova 6.8 Flash Lite"),
 }
 _SYNONYM_DISPLAY: dict[str, str] = {
     key: display for key, (_, display) in MODEL_SYNONYMS.items()}
