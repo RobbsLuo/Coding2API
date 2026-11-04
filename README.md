@@ -259,6 +259,12 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **额度＝积分**：每笔请求扣 1 分（与 token 量无关），每日 00:00 发 300 分（7 天有效），账本记「积分」。模型目录里的 `billing_effective_multiplier` 直接当倍率，**0 = 限免**（如 `sn-sensenova-6-8-flash` 限免至 11-30），调度器会优先选。
 
+**额度明细**：上游把积分分成四个池（每日 / 奖励 / 月度 / 充值），各自可查；逐笔到期（每日积分 7 天有效期）从流水 `daily_grant` 的 `expire_at` 推导，参与「快过期先用」的选号排序。池（`quota_packages`）与到期阶梯（`expiry_ladder`）口径不同，分开存。
+
+**每日签到**：上游没有「点击领取」的签到接口——每日 300 积分由服务端**懒发放**：当天首次触达积分服务时补写一条流水。所以本服务的「签到」= 摸一次余额（触发补发）+ 读流水核对当日 `daily_grant` 是否真到账，**只认流水、不看 HTTP 200**。三天态：本次触发新增 / 今天早些时候已发 / 今日未发（可重试）。
+
+**活跃上报**：`POST /api/web/auth/v1/devices_current_heartbeat`（网页端真实设备心跳），补 `x-client-*` 头族即 200、幂等，`last_login_at` 随之刷新。默认关闭，与 CodeBuddy 共用 `ACTIVITY_REPORT_ENABLED` / `ACTIVITY_REPORT_HOUR`。设备 id 由 uid 稳定派生（随机值会被上游当成新设备）。
+
 **并发上限约 5**（第 6 个回 `429 user_model_rate_limited`）→ `RACCOON_MAX_CONCURRENCY` 默认 2，独立节流器。
 
 ### CodeBuddy 国际（`codebuddy_intl`）

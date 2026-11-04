@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -123,3 +124,18 @@ class RaccoonCredential:
 
 def _text(value: Any) -> str:
     return value.strip() if isinstance(value, str) and value.strip() else ""
+
+
+def derive_device_id(uid: str) -> str:
+    """由 uid 稳定派生设备 id（心跳头 `x-client-device-id` 必填）。
+
+    与 Qoder 的机器码同一取向：**随机值会触发风控**（同一账号每次换设备）。
+    上游实测的形态是 `dev<32hex>-<uuid>`，这里按同形态稳定派生。
+    缺 uid 时用 `anonymous` 占位（可用但会被关联，登录后应补齐）。
+    """
+    seed = f"raccoon-device:{uid or 'anonymous'}"
+    digest = hashlib.md5(seed.encode("utf-8"), usedforsecurity=False).hexdigest()
+    # uuid 形态的固定值（由同一 digest 派生，保证跨进程稳定）
+    tail = (hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32])
+    formatted = f"{tail[:8]}-{tail[8:12]}-{tail[12:16]}-{tail[16:20]}-{tail[20:32]}"
+    return f"dev{digest}-{formatted}"

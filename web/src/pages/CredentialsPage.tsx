@@ -120,6 +120,7 @@ import {
  * 这里同步隐藏按钮，避免给一个必然失败的操作出口。
  */
 function supportsCheckin(provider: Credential["provider"]): boolean {
+  // 小浣熊有签到（服务端懒发放 + 流水核对），见 provider/raccoon/activity.py
   return provider !== "codebuddy_intl";
 }
 
@@ -133,7 +134,9 @@ function supportsCheckin(provider: Credential["provider"]): boolean {
  * 而后端其实可以跑（用户报的正是这个错配）。
  */
 function supportsActivity(provider: Credential["provider"]): boolean {
-  return provider === "codebuddy" || provider === "codebuddy_intl";
+  // 小浣熊发设备心跳（网页端真实接口），见 provider/raccoon/activity.py
+  return provider === "codebuddy" || provider === "codebuddy_intl"
+    || provider === "raccoon";
 }
 
 /**
@@ -1483,6 +1486,12 @@ function PackageLadder({ credential }: { credential: Credential }) {
                   <span className="text-muted-foreground">（已用 {formatNumber(item.used)}）</span>
                 )}
                 <span className="text-muted-foreground"> · {packageExpiry(item.end)} 到期</span>
+                {item.usable === false && (
+                  // 小浣熊的充值池被冻结：额度在，但用不了。与「已用完」分开标
+                  <span className="text-destructive" data-testid={`package-frozen-${credential.id}`}>
+                    {" "}· 已冻结
+                  </span>
+                )}
                 {(item.expiring ?? 0) > 0 && (
                   // 福利积分按批次到账：同一个「套餐到期日」下仍有更早作废的部分，
                   // 这个数字是上游唯一给出的「最近要过期多少」。

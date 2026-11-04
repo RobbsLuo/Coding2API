@@ -608,6 +608,20 @@ class CheckinResult:
 
 
 @dataclass(slots=True)
+class ActivityResult:
+    """活跃上报一条的结果。ok=False 时 message 必为一句人话。
+
+    放中立层（而不是某个渠道模块）是因为两个渠道都要用：CodeBuddy 补发
+    对话事件、小浣熊发设备心跳——语义相同（「让上游看到这个账号今天活跃过」），
+    形状也相同，各写一份只会漂移。
+    """
+
+    ok: bool
+    message: str = ""
+    user_id: str = ""
+
+
+@dataclass(slots=True)
 class CheckinStatus:
     """签到活动状态。全字段可缺失：上游改版时不该因此报错。"""
 

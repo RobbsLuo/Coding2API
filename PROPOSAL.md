@@ -94,6 +94,9 @@
 - **计费按请求**：每笔 LLM 调用记 `points=-1`，与 token 量无关（4K 与 205K token 同价）；每日 00:00 发 300 积分（2026-11 起 7 天有效）。`Quota.remaining`/`total` = 可用积分，账本记 `credits`。目录的 `billing_effective_multiplier` 直接当 `credit_rate`（0 = 限免，调度器优先选）。
 - **并发上限约 5**（6 并发第 6 个 `429 user_model_rate_limited`）：pacer 用 `RACCOON_MAX_CONCURRENCY`（默认 2）+ `CONCURRENCY` 固定短冷却；不是账号故障。
 - **登录轨道不实现**：没有 `start_auth`/`poll_auth`/`complete_callback`——写了也只是永远不被调用的死代码（与 Zen/Kilo 同一分工）。
+- **签到＝懒发放核对**：上游没有领取接口；每日 300 由服务端在当天首次触达积分服务时补写流水。故 `checkin` = 摸一次余额 + 读流水核对 `daily_grant`，只认流水（同 CodeArts「claim 成功但 confirm 失败按失败报」的纪律）。
+- **活跃上报＝设备心跳**：`POST /api/web/auth/v1/devices_current_heartbeat`，缺 `x-client-device-id` 等头族回 `100002 params_invalid_error`；device_id 由 uid 稳定派生（随机值会被当成新设备）。
+- **额度明细**：`balance` 给四个池（每日/奖励/月度/充值）→ `quota_packages`；逐笔到期只在流水里（`daily_grant.expire_at`）→ `expiry_ladder`。两者口径不同，分开取；流水失败不阻断余额结论。
 - 能力实测（2026-11-04）：非流式/流式 `tool_calls`、`role=tool` 回传、`stream_options.include_usage` 全通；411K token 输入 14.2s 返回。
 
 ### 2.10 冲突与陷阱

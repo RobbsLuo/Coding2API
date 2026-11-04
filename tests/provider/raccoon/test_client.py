@@ -10,7 +10,9 @@ import pytest
 from src.provider.base import ErrKind, EventKind
 from src.provider.raccoon.client import (
     EP_BALANCE,
+    EP_BILLS,
     EP_CHAT,
+    EP_HEARTBEAT,
     EP_MODELS,
     RaccoonClient,
     UpstreamHTTPError,
@@ -191,26 +193,56 @@ async def test_fetch_models_errors():
         await _client(empty).fetch_models("tok")
 
 
-async def test_fetch_quota_reports_balance():
+async def test_fetch_quota_reports_balance_and_pools():
+    """余额 + 四个池的明细；流水给出逐笔到期阶梯。"""
+
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == EP_BALANCE
-        return httpx.Response(200, json={"code": 0, "data": {
-            "available_points": 4800, "daily_points": 300}})
+        if request.url.path == EP_BALANCE:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "available_points": 4800, "daily_points": 300,
+                "reward_points": 4500, "monthly_points": 0, "topup_points": 0,
+                "topup_frozen": False}})
+        assert request.url.path == EP_BILLS
+        return httpx.Response(200, json={"code": 0, "data": {"items": [
+            {"biz_type": "daily_grant", "points": 300,
+             "grant_at": "2026-11-04T00:00:00+08:00",
+             "created_at": "2026-11-04T21:41:38+08:00",
+             "expire_at": "2026-11-10T23:59:59+08:00"},
+        ]}})
 
     quota = await _client(handler).fetch_quota("tok")
     assert quota.remaining == 4800
     assert quota.total == 4800
     assert quota.probe_failed is False
-    assert quota.packages == [{"name": "积分余额", "total": 4800, "used": 0.0,
-                              "end": None}]
+    # 四个池里只列出非 0 的（monthly / topup 都是 0）
+    assert [p["name"] for p in quota.packages] == ["每日额度", "奖励积分"]
+    assert quota.packages[0]["total"] == 300
+    # 逐笔到期阶梯来自流水的 daily_grant
+    assert quota.expiry_ladder is not None
+    assert quota.expiry_ladder[0][1] == 300
+
+
+async def test_fetch_quota_survives_bills_failure():
+    """流水失败不该拖垮余额结论（阶梯只是调度排序的加分项）。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_BALANCE:
+            return httpx.Response(200, json={"data": {"available_points": 100}})
+        return httpx.Response(500, content=b"boom")
+
+    quota = await _client(handler).fetch_quota("tok")
+    assert quota.remaining == 100
+    assert quota.expiry_ladder is None
 
 
 async def test_fetch_quota_zero_points_has_no_packages():
-    def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"data": {"available_points": 0}})
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_BALANCE:
+            return httpx.Response(200, json={"data": {"available_points": 0}})
+        return httpx.Response(200, json={"data": {"items": []}})
 
     quota = await _client(handler).fetch_quota("tok")
-    assert (quota.remaining, quota.total, quota.packages) == (0.0, 0.0, [])
+    assert (quota.remaining, quota.total, quota.packages) == (0.0, 0.0, None)
     # 0/0 时 health_score 会判「已耗尽」，这正是想要的语义
     from src.provider.base import health_score
     assert health_score(quota) == -1
@@ -247,3 +279,67 @@ async def test_client_lazy_pools_and_aclose():
     assert client._stream is client._stream      # noqa: SLF001 - 惰性复用
     assert client._short is client._short        # noqa: SLF001
     await client.aclose()
+
+async def test_fetch_bills_returns_items():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == EP_BILLS
+        assert request.url.params["type"] == "all"
+        return httpx.Response(200, json={"data": {"items": [{"biz_type": "desktop"}]}})
+
+    items = await _client(handler).fetch_bills("tok")
+    assert items == [{"biz_type": "desktop"}]
+
+
+async def test_fetch_bills_errors():
+    def http_error(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, content=b'{"message":"unauthorized"}')
+
+    with pytest.raises(UpstreamHTTPError):
+        await _client(http_error).fetch_bills("tok")
+
+    def non_json(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="nope")
+
+    with pytest.raises(UpstreamProtocolViolation):
+        await _client(non_json).fetch_bills("tok")
+
+    def no_items(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {}})
+
+    with pytest.raises(UpstreamProtocolViolation):
+        await _client(no_items).fetch_bills("tok")
+
+
+async def test_heartbeat_sends_client_headers():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == EP_HEARTBEAT
+        assert request.method == "POST"
+        # 缺 x-client-device-id 上游回 100002
+        assert request.headers["x-client-device-id"] == "dev-x"
+        assert request.headers["x-client-platform"] == "web"
+        return httpx.Response(200, json={"code": 0, "data": {
+            "device_id": "dev-x", "trusted_device": True,
+            "last_seen_at": "2026-11-04T23:20:49+08:00"}})
+
+    payload = await _client(handler).heartbeat("tok", "dev-x")
+    assert payload["trusted_device"] is True
+
+
+async def test_heartbeat_errors():
+    def http_error(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, content=b'{"code":100002}')
+
+    with pytest.raises(UpstreamHTTPError):
+        await _client(http_error).heartbeat("tok", "dev-x")
+
+    def non_json(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="nope")
+
+    with pytest.raises(UpstreamProtocolViolation):
+        await _client(non_json).heartbeat("tok", "dev-x")
+
+    def no_data(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 0})
+
+    # 没有 data 段不算失败：心跳只要 200 就成立
+    assert await _client(no_data).heartbeat("tok", "dev-x") == {}

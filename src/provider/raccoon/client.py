@@ -17,9 +17,11 @@ import httpx
 
 from ...engine.sse import iter_frames
 from ...provider import base
-from ...provider.base import ErrKind, Event, Model, Quota
+from ...provider.base import ActivityResult, CheckinResult, ErrKind, Event, Model, Quota
 from ...tasks.pacer import paced
 from ..lazy_clients import LazyClients
+from . import activity as raccoon_activity
+from . import credential as raccoon_credential
 from . import events as raccoon_events
 from .credential import RaccoonCredential
 
@@ -28,6 +30,8 @@ RACCOON_HOST = "https://xiaohuanxiong.com"
 EP_CHAT = "/api/web/llm/v2/chat/completions"
 EP_MODELS = "/api/web/llm/v2/model_catalog"
 EP_BALANCE = "/api/web/points/v1/balance"
+EP_BILLS = "/api/web/points/v2/bills"
+EP_HEARTBEAT = "/api/web/auth/v1/devices_current_heartbeat"
 
 #: 官方 LLM 子进程的 User-Agent（openai SDK 形态）；不带也不影响调用，
 #: 带上只是为了不把自己标成脚本——本渠道没有其它指纹伪装。
@@ -143,12 +147,16 @@ class RaccoonClient(LazyClients):
         return list(models.values())
 
     async def fetch_quota(self, token: str) -> Quota:
-        """GET 积分余额。
+        """GET 积分余额 + 流水 → 额度（含四个池的明细与逐笔到期阶梯）。
 
-        上游只给「可用积分」一个数字，没有总量/消费口径；按 `total=remaining`
-        报（健康度恒 100 直到 0），再给一个「积分余额」包供展示。**不编造**
-        `total` 的其它来源：日额度耗尽与余额耗尽是两回事，猜错会让调度把备用
-        渠道误判为已耗尽。
+        上游只给「当前可用」一个总数，没有总量/消费口径；`total=remaining`
+        （健康度恒 100 直到 0）。**不编造**其它来源：日额度耗尽与余额耗尽是
+        两回事，猜错会让调度把备用渠道误判为已耗尽。
+
+        明细（`packages`）来自 balance 的四个池，逐笔到期（`expiry_ladder`）
+        来自流水的 `daily_grant`——两者口径不同，不能互相换算，故分开取。
+        流水失败**不影响**余额结论（余额是本接口的主要产物，到期阶梯只是
+        调度排序的加分项）：流水拿不到就退化成「无阶梯」。
         """
         response = await self._short.get(
             f"{self.host}{EP_BALANCE}",
@@ -166,10 +174,58 @@ class RaccoonClient(LazyClients):
             raise UpstreamProtocolViolation("balance response missing available_points")
         remaining = float(points)
         now = int(time.time())
-        packages = ([{"name": "积分余额", "total": remaining, "used": 0.0, "end": None}]
-                    if remaining > 0 else [])
-        return Quota(remaining=remaining, total=remaining, packages=packages,
-                     probed_at=now)
+        packages = raccoon_activity.quota_packages(payload)
+        ladder = await self._fetch_expiry_ladder(token)
+        return Quota(remaining=remaining, total=remaining, packages=packages or None,
+                     expiry_ladder=ladder, probed_at=now)
+
+    async def _fetch_expiry_ladder(self, token: str) -> list[tuple[int, float]] | None:
+        """流水 → 逐笔到期阶梯；失败返回 None（不阻断额度探测）。"""
+        try:
+            items = await self.fetch_bills(token)
+        except (UpstreamHTTPError, UpstreamProtocolViolation):
+            return None
+        return raccoon_activity.expiry_ladder_from_bills(items)
+
+    async def fetch_bills(self, token: str,
+                          limit: int = raccoon_activity.BILL_LOOKBACK) -> list[Any]:
+        """GET 积分流水（最近 `limit` 条，`type=all`）。"""
+        response = await self._short.get(
+            f"{self.host}{EP_BILLS}",
+            params={"paging.limit": limit, "type": "all"},
+            headers=request_headers(token, accept="application/json"))
+        if response.status_code >= 400:
+            raise UpstreamHTTPError(response.status_code,
+                                    await base.read_body_bounded(response))
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise UpstreamProtocolViolation("non-JSON bills response") from error
+        payload = data.get("data") if isinstance(data, dict) else None
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            raise UpstreamProtocolViolation("bills response missing items")
+        return items
+
+    async def heartbeat(self, token: str, device_id: str) -> dict[str, Any]:
+        """POST 设备心跳（网页端真实接口，幂等）。
+
+        缺 `x-client-*` 头族会回 `100002 params_invalid_error` /
+        `param client headers required invalid`——实测 2026-11-04。
+        """
+        headers = request_headers(token, accept="application/json")
+        headers.update(raccoon_activity.heartbeat_headers(device_id))
+        response = await self._short.post(
+            f"{self.host}{EP_HEARTBEAT}", headers=headers)
+        if response.status_code >= 400:
+            raise UpstreamHTTPError(response.status_code,
+                                    await base.read_body_bounded(response))
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise UpstreamProtocolViolation("non-JSON heartbeat response") from error
+        payload = data.get("data") if isinstance(data, dict) else None
+        return payload if isinstance(payload, dict) else {}
 
 
 def _model_from_item(item: Any) -> Model | None:
@@ -238,6 +294,95 @@ class RaccoonProvider:
         if not credential.access_token:
             return Quota(probe_failed=True, probed_at=int(time.time()))
         return await self.client.fetch_quota(credential.access_token)
+
+    # ---------------------------------------------------------- 签到 / 活跃
+
+    async def checkin(self, credential_data: dict) -> CheckinResult:
+        """「签到」= 摸一次积分服务触发懒发放，再核对当日流水是否真到账。
+
+        上游没有领取接口（见 `activity.py` 模块文档），故本方法是**幂等只读**
+        的组合：balance 触发补写 → bills 核对 `daily_grant`。只认流水，
+        不看 HTTP 200——否则会重演「界面显示签到成功、积分没到」。
+        """
+        credential = RaccoonCredential.from_dict(credential_data)
+        if not credential.access_token:
+            return CheckinResult(ok=False, message="凭证缺少 token")
+        started = time.time()
+        # ① 触达积分服务：服务端在此补写当天的 daily_grant
+        await self.client.fetch_quota(credential.access_token)
+        # ② 读流水核对：签到是否真到账
+        try:
+            items = await self.client.fetch_bills(credential.access_token)
+        except UpstreamHTTPError as error:
+            return CheckinResult(ok=False, message=f"流水查询失败（HTTP {error.status}）")
+        except UpstreamProtocolViolation:
+            return CheckinResult(ok=False, message="流水响应格式异常")
+        return raccoon_activity.checkin_result(items, started)
+
+    async def checkin_status(self, credential_data: dict) -> dict:
+        """只读签到状态：「今天发放过没有」+ 发了多少。
+
+        与 `checkin` 的区别：这里不判「是不是本次触发的」——状态查询只关心
+        今日是否已发放，不需要触发懒发放（`started` 参数在 checkin 里才用）。
+        """
+        credential = RaccoonCredential.from_dict(credential_data)
+        if not credential.access_token:
+            return {"active": False, "today_checked_in": False}
+        items = await self.client.fetch_bills(credential.access_token)
+        row = raccoon_activity.pick_today_grant(items, raccoon_activity.now_cst())
+        if row is None:
+            return {"active": True, "today_checked_in": False,
+                    "today_credit": None,
+                    "activity_name": "每日积分（服务端懒发放）"}
+        points = row.get("points")
+        return {
+            "active": True,
+            "today_checked_in": True,
+            "today_credit": float(points) if isinstance(points, (int, float))
+            and not isinstance(points, bool) else None,
+            "activity_name": "每日积分（服务端懒发放）",
+        }
+
+    def checkin_scope(self, credential_data: dict) -> str:
+        """签到隔离键：uid；身份未知返回空串（调用方回落凭证 ID）。
+
+        与 CodeArts / Qoder 同取向：返回空串而非 `raccoon|`——后者会让同渠道
+        所有身份未知的凭证算出同一 scope，`CheckinTask` 的 seen 集合只跑第一个。
+        """
+        uid = RaccoonCredential.from_dict(credential_data).uid
+        return f"raccoon|{uid}" if uid else ""
+
+    async def activity(self, credential_data: dict) -> ActivityResult:
+        """活跃上报：发一次设备心跳（网页端真实接口，幂等）。
+
+        上游没有「对话事件上报」，心跳是唯一可用的活跃手段；`user_info` 的
+        `last_login_at` 会随之刷新。device_id 由 uid 稳定派生，随机值会被
+        当成新设备（风控）。
+        """
+        credential = RaccoonCredential.from_dict(credential_data)
+        if not credential.access_token:
+            return ActivityResult(ok=False, message="凭证缺少 token")
+        try:
+            payload = await self.client.heartbeat(
+                credential.access_token,
+                raccoon_credential.derive_device_id(credential.uid))
+        except UpstreamHTTPError as error:
+            return ActivityResult(ok=False, message=f"心跳失败（HTTP {error.status}）")
+        except UpstreamProtocolViolation:
+            return ActivityResult(ok=False, message="心跳响应格式异常")
+        seen = payload.get("last_seen_at")
+        trusted = payload.get("trusted_device")
+        detail = "设备心跳已上报"
+        if isinstance(seen, str) and seen:
+            detail += f"（上游 last_seen_at={seen}）"
+        if trusted is False:
+            detail += "；注意：该设备未被上游信任"
+        return ActivityResult(ok=True, message=detail, user_id=credential.uid)
+
+    def activity_scope(self, credential_data: dict) -> str:
+        """活跃上报隔离键：uid（同账号多凭证共享「每天一次」）。"""
+        uid = RaccoonCredential.from_dict(credential_data).uid
+        return f"raccoon|{uid}" if uid else ""
 
     async def list_models(self, credential_data: dict) -> list[Model]:
         credential = RaccoonCredential.from_dict(credential_data)

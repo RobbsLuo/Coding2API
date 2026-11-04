@@ -111,3 +111,18 @@ def test_from_token_falls_back_to_uid_claim_and_nickname():
     assert credential.uid == "u3"
     assert credential.nickname == "nick"
     assert credential.expires_at == 0
+
+def test_derive_device_id_is_stable_and_shaped_like_upstream():
+    from src.provider.raccoon.credential import derive_device_id
+
+    first = derive_device_id("pu-01a")
+    assert first == derive_device_id("pu-01a")          # 同一账号永远同一台「设备」
+    assert first != derive_device_id("pu-other")        # 不同账号不能撞设备
+    # 上游实测形态：dev<32hex>-<uuid>
+    assert first.startswith("dev")
+    body = first[3:]
+    hex_part, _, uuid_part = body.partition("-")
+    assert len(hex_part) == 32 and all(c in "0123456789abcdef" for c in hex_part)
+    assert len(uuid_part.split("-")) == 5
+    # uid 缺失时用 anonymous 占位（可用但会被关联），不是随机值
+    assert derive_device_id("") == derive_device_id("")

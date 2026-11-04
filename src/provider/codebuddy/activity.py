@@ -30,14 +30,18 @@ import json
 import logging
 import time
 import uuid
-from dataclasses import dataclass
 from typing import Any
 
 import httpx
 
+from ..base import ActivityResult
 from ..proxy import build_client
 from .client import build_headers
 from .credential import CodeBuddyCredential
+
+# 中立层定义、本模块再导出：既有调用点（provider.client 的 `from .activity
+# import ActivityResult`）与测试都不必改。
+__all__ = ["ActivityResult", "resolve_user_id", "user_id_from_token"]
 from .events import UpstreamProtocolViolation
 
 logger = logging.getLogger(__name__)
@@ -56,15 +60,6 @@ class ActivityRejected(Exception):
         super().__init__(message or f"HTTP {status}")
         self.status = status
         self.message = message
-
-
-@dataclass(slots=True)
-class ActivityResult:
-    """一条上报的结果。ok=False 时 message 必为一句人话。"""
-
-    ok: bool
-    message: str = ""
-    user_id: str = ""
 
 
 def user_id_from_token(token: str) -> str:

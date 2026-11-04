@@ -169,3 +169,164 @@ async def test_stream_chat_uses_pacer():
     assert [e.kind for e in events] == [EventKind.CONTENT]
     assert spy.keys == ["u"]          # 按凭证 uid 分桶
     assert spy.released == ["u"]
+
+# ------------------------------------------------------------------ 签到 / 活跃
+
+
+class CheckinFakeClient(FakeClient):
+    """签到/活跃用的替身：bills 与 heartbeat 分别可控。"""
+
+    def __init__(self, *, bills=None, heartbeat_payload=None, error=None):
+        super().__init__()
+        self.bills = bills if bills is not None else []
+        # 显式区分「空字典」与「未传」：`or` 会把 {} 换成默认值
+        self.heartbeat_payload = (heartbeat_payload if heartbeat_payload is not None
+                                  else {"trusted_device": True,
+                                        "last_seen_at": "2026-11-04T23:20:49+08:00"})
+        self.error = error
+
+    async def fetch_bills(self, token, limit=60):
+        self.calls.append(("bills", token))
+        if self.error is not None:
+            raise self.error
+        return self.bills
+
+    async def heartbeat(self, token, device_id):
+        self.calls.append(("heartbeat", token, device_id))
+        if self.error is not None:
+            raise self.error
+        return self.heartbeat_payload
+
+
+def _grant(points=300, created="2026-11-04T21:59:30+08:00"):
+    return {"biz_type": "daily_grant", "points": points,
+            "grant_at": "2026-11-04T00:00:00+08:00",
+            "created_at": created, "expire_at": "2026-11-10T23:59:59+08:00"}
+
+
+async def test_checkin_triggers_lazy_grant_then_reads_bills():
+    fake = CheckinFakeClient(bills=[_grant()])
+    provider = RaccoonProvider(client=fake)
+    result = await provider.checkin(DATA)
+    assert result.ok and result.credit == 300
+    # 先摸余额（触发懒发放），再读流水核对
+    assert fake.calls[0] == ("quota", TOKEN)
+    assert fake.calls[1] == ("bills", TOKEN)
+
+
+async def test_checkin_reports_already_when_grant_is_old():
+    fake = CheckinFakeClient(bills=[_grant(created="2026-11-04T08:00:00+08:00")])
+    provider = RaccoonProvider(client=fake)
+    result = await provider.checkin(DATA)
+    assert result.ok and result.already_checked_in
+
+
+async def test_checkin_fails_when_no_grant_today():
+    provider = RaccoonProvider(client=CheckinFakeClient(bills=[]))
+    result = await provider.checkin(DATA)
+    assert not result.ok and "尚未发放" in result.message
+
+
+async def test_checkin_without_token():
+    provider = RaccoonProvider(client=CheckinFakeClient())
+    result = await provider.checkin({})
+    assert not result.ok and "token" in result.message
+
+
+class BillsErrorClient(FakeClient):
+    """只让 bills 失败（余额探测正常）：验证流水的失败会变成可读的签到失败。"""
+
+    def __init__(self, error: Exception) -> None:
+        super().__init__()
+        self.error = error
+
+    async def fetch_quota(self, token):
+        # 余额探测必须成功：签到先摸余额触发懒发放，失败的是随后的流水
+        self.calls.append(("quota", token))
+        return self.quota
+
+    async def fetch_bills(self, token, limit=60):
+        raise self.error
+
+
+async def test_checkin_bills_http_error_and_protocol_violation():
+    http_error = BillsErrorClient(UpstreamHTTPError(500, b"boom"))
+    result = await RaccoonProvider(client=http_error).checkin(DATA)
+    assert not result.ok and "HTTP 500" in result.message
+
+    bad = BillsErrorClient(UpstreamProtocolViolation("bad"))
+    result = await RaccoonProvider(client=bad).checkin(DATA)
+    assert not result.ok and "格式异常" in result.message
+
+
+async def test_checkin_status_reads_bills():
+    """状态查询只看「今天发过没有」，不依赖本次是否触发。"""
+    provider = RaccoonProvider(client=CheckinFakeClient(bills=[_grant()]))
+    status = await provider.checkin_status(DATA)
+    assert status["active"] is True
+    assert status["today_checked_in"] is True
+    assert status["today_credit"] == 300
+
+
+async def test_checkin_status_when_nothing_granted_today():
+    provider = RaccoonProvider(client=CheckinFakeClient(bills=[]))
+    status = await provider.checkin_status(DATA)
+    assert status["active"] is True
+    assert status["today_checked_in"] is False
+    assert status["today_credit"] is None
+
+
+async def test_checkin_status_without_token():
+    provider = RaccoonProvider(client=CheckinFakeClient())
+    status = await provider.checkin_status({})
+    assert status == {"active": False, "today_checked_in": False}
+
+
+def test_checkin_scope_and_activity_scope_use_uid():
+    provider = RaccoonProvider(client=FakeClient())
+    assert provider.checkin_scope(DATA) == "raccoon|u"
+    assert provider.activity_scope(DATA) == "raccoon|u"
+    # 身份未知返回空串（调用方回落凭证 ID），绝不让所有凭证算出同一 scope
+    assert provider.checkin_scope({}) == ""
+    assert provider.activity_scope({}) == ""
+
+
+async def test_activity_sends_stable_device_id():
+    fake = CheckinFakeClient()
+    provider = RaccoonProvider(client=fake)
+    result = await provider.activity(DATA)
+    assert result.ok and result.user_id == "u"
+    call = fake.calls[0]
+    assert call[0] == "heartbeat"
+    # 设备 id 由 uid 稳定派生：两次调用必须一致（随机值会被当成新设备）
+    assert call[2].startswith("dev")
+    second = await provider.activity(DATA)
+    assert second.ok and fake.calls[1][2] == call[2]
+
+
+async def test_activity_without_token():
+    provider = RaccoonProvider(client=CheckinFakeClient())
+    result = await provider.activity({})
+    assert not result.ok and "token" in result.message
+
+
+async def test_activity_reports_untrusted_device():
+    fake = CheckinFakeClient(heartbeat_payload={"trusted_device": False})
+    result = await RaccoonProvider(client=fake).activity(DATA)
+    assert result.ok and "未被上游信任" in result.message
+
+
+async def test_activity_errors():
+    http_error = CheckinFakeClient(error=UpstreamHTTPError(400, b"boom"))
+    result = await RaccoonProvider(client=http_error).activity(DATA)
+    assert not result.ok and "HTTP 400" in result.message
+
+    bad = CheckinFakeClient(error=UpstreamProtocolViolation("bad"))
+    result = await RaccoonProvider(client=bad).activity(DATA)
+    assert not result.ok and "格式异常" in result.message
+
+
+async def test_activity_message_without_last_seen():
+    fake = CheckinFakeClient(heartbeat_payload={})
+    result = await RaccoonProvider(client=fake).activity(DATA)
+    assert result.ok and result.message == "设备心跳已上报"

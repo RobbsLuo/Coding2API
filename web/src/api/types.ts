@@ -31,6 +31,9 @@ export interface QuotaPackage {
   end: number | null;
   /** 7 天内即将到期的积分（CodeArts 分项包才给）；上游未提供为 null */
   expiring?: number | null;
+  /** 该池是否真的可用（缺省视为可用）。小浣熊的充值池被冻结时为 false ——
+   * 「看得见用不了」，与「已用完」不是一回事。 */
+  usable?: boolean;
 }
 
 /** 一条 (凭证, 模型) 级冷却：模型级限流或「该渠道无此模型」负缓存。 */
