@@ -338,8 +338,8 @@ class RaccoonProvider:
         return {
             "active": True,
             "today_checked_in": True,
-            "today_credit": float(points) if isinstance(points, (int, float))
-            and not isinstance(points, bool) else None,
+            # `pick_today_grant` 只放行非 bool 的正数，这里无需再防御
+            "today_credit": float(points),
             "activity_name": "每日积分（服务端懒发放）",
         }
 

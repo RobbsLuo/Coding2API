@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import types
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Any
 
 import pytest
 
 from src.provider.base import ErrKind, Event, EventKind, Model, Quota
+from src.provider.raccoon import activity as raccoon_activity
+from src.provider.raccoon import client as raccoon_client
 from src.provider.raccoon.client import (
     RaccoonProvider,
     UpstreamHTTPError,
@@ -204,7 +208,24 @@ def _grant(points=300, created="2026-11-04T21:59:30+08:00"):
             "created_at": created, "expire_at": "2026-11-10T23:59:59+08:00"}
 
 
-async def test_checkin_triggers_lazy_grant_then_reads_bills():
+#: 固定「现在」：签到结论依赖「今天」，真实时钟会让用例隔天失效
+NOW = datetime.fromisoformat("2026-11-04T22:00:00+08:00")
+
+
+@pytest.fixture
+def frozen_now(monkeypatch):
+    """把签到用到的两个时间源都钉在 NOW。
+
+    `now_cst` 决定「今天」，`client.time.time` 决定本次调用的 started；
+    两者不一致会让「本次触发」的判定飘掉。`time` 换成替身而非打补丁到
+    真模块，避免影响同进程里的其他代码。
+    """
+    monkeypatch.setattr(raccoon_activity, "now_cst", lambda: NOW)
+    monkeypatch.setattr(raccoon_client, "time",
+                        types.SimpleNamespace(time=lambda: NOW.timestamp()))
+
+
+async def test_checkin_triggers_lazy_grant_then_reads_bills(frozen_now):
     fake = CheckinFakeClient(bills=[_grant()])
     provider = RaccoonProvider(client=fake)
     result = await provider.checkin(DATA)
@@ -214,14 +235,14 @@ async def test_checkin_triggers_lazy_grant_then_reads_bills():
     assert fake.calls[1] == ("bills", TOKEN)
 
 
-async def test_checkin_reports_already_when_grant_is_old():
+async def test_checkin_reports_already_when_grant_is_old(frozen_now):
     fake = CheckinFakeClient(bills=[_grant(created="2026-11-04T08:00:00+08:00")])
     provider = RaccoonProvider(client=fake)
     result = await provider.checkin(DATA)
     assert result.ok and result.already_checked_in
 
 
-async def test_checkin_fails_when_no_grant_today():
+async def test_checkin_fails_when_no_grant_today(frozen_now):
     provider = RaccoonProvider(client=CheckinFakeClient(bills=[]))
     result = await provider.checkin(DATA)
     assert not result.ok and "尚未发放" in result.message
@@ -259,7 +280,7 @@ async def test_checkin_bills_http_error_and_protocol_violation():
     assert not result.ok and "格式异常" in result.message
 
 
-async def test_checkin_status_reads_bills():
+async def test_checkin_status_reads_bills(frozen_now):
     """状态查询只看「今天发过没有」，不依赖本次是否触发。"""
     provider = RaccoonProvider(client=CheckinFakeClient(bills=[_grant()]))
     status = await provider.checkin_status(DATA)
@@ -268,7 +289,7 @@ async def test_checkin_status_reads_bills():
     assert status["today_credit"] == 300
 
 
-async def test_checkin_status_when_nothing_granted_today():
+async def test_checkin_status_when_nothing_granted_today(frozen_now):
     provider = RaccoonProvider(client=CheckinFakeClient(bills=[]))
     status = await provider.checkin_status(DATA)
     assert status["active"] is True
