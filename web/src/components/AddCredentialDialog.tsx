@@ -20,8 +20,9 @@ const LOGIN_PROVIDERS: Provider[] = [
 /**
  * JSON 导入下拉的渠道：登录渠道 + 只能手工粘贴凭据的渠道。
  *
- * 小浣熊没有登录轨道（凭据是网页会话 JWT），只能从浏览器 DevTools 复制后
- * 粘贴，故不放进 `LOGIN_PROVIDERS`（那里会生成一个点了必然失败的登录按钮）。
+ * 小浣熊没有登录轨道（凭据是网页会话 JWT），不能放进 `LOGIN_PROVIDERS`
+ * ——那里会生成一个点了必然失败的「登录」按钮。它的入口是「登录渠道」页底部
+ * 的粘贴框（见 `add-raccoon`），因为用户点「添加凭证」默认看到的就是那一页。
  */
 const IMPORT_PROVIDERS: Provider[] = [...LOGIN_PROVIDERS, "raccoon"];
 
@@ -82,6 +83,8 @@ export function AddCredentialDialog({
   // CodeArts paste 轨道：授权后把浏览器地址栏里打不开的 127.0.0.1 回调链接粘回来
   const [pasteProvider, setPasteProvider] = useState<Provider | null>(null);
   const [pasteUrl, setPasteUrl] = useState("");
+  // 小浣熊：没有 OAuth 轨道，凭据是网页会话 JWT，直接在「登录渠道」页粘贴
+  const [raccoonToken, setRaccoonToken] = useState("");
   // JSON 导入（原 ImportPanel 逻辑）
   const [importProvider, setImportProvider] = useState<Provider>("codebuddy");
   const [nickname, setNickname] = useState("");
@@ -413,6 +416,46 @@ export function AddCredentialDialog({
                 </div>
               </div>
             )}
+            <div className="border-t border-border pt-3">
+              <div className="mb-2 text-xs text-muted-foreground">
+                小浣熊没有 OAuth 登录轨道，凭据是网页会话 JWT：在浏览器 DevTools →
+                Application → Cookies 里复制 <code>xhx_token</code> 的值，粘到下方。
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="w-64">
+                  <Input
+                    data-testid="raccoon-token"
+                    value={raccoonToken}
+                    placeholder="粘贴 xhx_token 的值（或整段 cookie）"
+                    onChange={(event) => setRaccoonToken(event.target.value)}
+                  />
+                </div>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  data-testid="add-raccoon"
+                  disabled={busy || raccoonToken.trim().length === 0}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      await api.importCredential(
+                        "raccoon",
+                        { access_token: raccoonToken.trim() },
+                        "小浣熊",
+                      );
+                      setRaccoonToken("");
+                      onImported("已添加小浣熊渠道");
+                    } catch (caught) {
+                      onError(caught instanceof Error ? caught.message : "添加失败");
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  添加小浣熊
+                </Button>
+              </div>
+            </div>
             <div className="border-t border-border pt-3">
               <div className="mb-2 text-xs text-muted-foreground">
                 OpenCode Zen / Kilo 免费层无需凭证/登录，删除其虚拟凭证后点下方按钮补回

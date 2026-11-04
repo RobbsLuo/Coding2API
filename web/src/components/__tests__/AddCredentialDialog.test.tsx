@@ -33,8 +33,32 @@ describe("AddCredentialDialog", () => {
     expect(screen.getByTestId("start-login-codebuddy")).toBeInTheDocument();
   });
 
-  it("非法 JSON 本地拦截（不触发 onImported）", async () => {
-    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
+  it("小浣熊在「登录渠道」页可直接粘贴 token 添加（无 OAuth 轨道）", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return jsonResponse({ id: "cred_1", tos: { level: "gray", reason: "r", basis: "b" } });
+    }));
+    const props = renderDialog();
+
+    // 入口在登录页（用户点「添加凭证」默认看到的那一页），不在 JSON 导入页
+    expect(screen.getByTestId("add-raccoon")).toBeInTheDocument();
+    // token 为空时不可提交
+    expect(screen.getByTestId("add-raccoon")).toBeDisabled();
+
+    await userEvent.click(screen.getByTestId("raccoon-token"));
+    await userEvent.paste("eyJhbGciOi.payload.sig");
+    await userEvent.click(screen.getByTestId("add-raccoon"));
+
+    const posted = calls.find((call) => call.url.includes("/api/credentials"));
+    expect(posted?.body).toMatchObject({
+      provider: "raccoon",
+      credential: { access_token: "eyJhbGciOi.payload.sig" },
+    });
+    expect(props.onImported).toHaveBeenCalledWith("已添加小浣熊渠道");
+  });
+
+  it("非法 JSON 本地拦截（不触发 onImported）", async () => {    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
     renderDialog();
     await userEvent.click(screen.getByTestId("add-credential-tab-import"));
     await userEvent.click(screen.getByTestId("import-payload"));
