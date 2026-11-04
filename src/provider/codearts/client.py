@@ -556,16 +556,30 @@ def _models_from_items(items: Any) -> list[Model]:
     return models
 
 
+# 常规档标记：缺省（字段缺失）/ 空串 / `"default"`。其余（`off_peak` 等）是
+# 折扣或分时档，其 `ratio_display` 不是模型的常规价，一律不采信。
+_REGULAR_TIME_SLOTS: tuple[Any, ...] = (None, "", "default")
+
+
 def _credit_rate(credit: Any) -> float | None:
     """内置条目的 `credit[]` → 消耗倍率（`ratio_display` 形如 `"0.7x"`）。
 
     多档（按上下文长度分段计费）时取首条：同一模型的各档倍率一致，取哪档都一样。
     上游换成纯数字或去掉了 `x` 后缀时按同义处理；取不到返回 None（不猜）。
+
+    **必须跳过时段档**（`time_slot_id` 非 default）：2026-11-04 真号实测
+    `deepseek-v4.1-flash` 等模型的 `credit[]` 里，`off_peak` 行是**折扣价**
+    （0.18x → 0.09x，原价写在 `before_display_ratio`）。取到它会让
+    `credit_rate` 比常规价低一半；若上游出现「错峰 x0」，`scheduler` 的
+    `credit_rate == 0 → 免费渠道整体优先` 会把它当**永久免费**，整池流量
+    打到该渠道。当前上游恰好把 default 排在前面，但那是顺序巧合，不是契约。
     """
     if not isinstance(credit, list):
         return None
     for tier in credit:
         if not isinstance(tier, dict):
+            continue
+        if tier.get("time_slot_id") not in _REGULAR_TIME_SLOTS:
             continue
         rate = _parse_ratio(tier.get("ratio_display"))
         if rate is not None:

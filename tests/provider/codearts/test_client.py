@@ -142,6 +142,21 @@ def test_client_credit_rate_and_ratio_parsing():
     assert _credit_rate([1]) is None              # 非 dict 档位跳过
     assert _credit_rate("nope") is None
     assert _credit_rate([]) is None
+    # 时段档（off_peak）是折扣价，不是模型常规价：即使排在前面也必须跳过。
+    # 实测形状来自 2026-11-04 codearts 模型目录（0.18x 常规 / 0.09x 错峰）。
+    assert _credit_rate([
+        {"time_slot_id": "off_peak", "ratio_display": "0.09x",
+         "before_display_ratio": "0.18x"},
+        {"time_slot_id": "default", "ratio_display": "0.18x"},
+    ]) == 0.18
+    # 只有时段档 → 不猜（错峰若出现 x0，绝不能当成永久免费）
+    assert _credit_rate([{"time_slot_id": "off_peak", "ratio_display": "0x"}]) is None
+    # 常规档的三种写法（缺字段 / 空串 / "default"）都认
+    assert _credit_rate([{"time_slot_id": "", "ratio_display": "0.7x"}]) == 0.7
+    assert _credit_rate([{"time_slot_id": None, "ratio_display": "0.7x"}]) == 0.7
+    # 畸形 time_slot_id（非字符串）同样按「非默认档」丢弃，不落回猜值
+    assert _credit_rate([{"time_slot_id": {"x": 1}, "ratio_display": "0.7x"},
+                         {"time_slot_id": "default", "ratio_display": "0.5x"}]) == 0.5
     # 纯数字 / 无 x 后缀 / 布尔 / 非数字串 / 非法小数
     assert _parse_ratio("0.7") == 0.7
     assert _parse_ratio(0.5) == 0.5
