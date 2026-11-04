@@ -169,17 +169,17 @@ async def principal_from_request(request: Request) -> Principal:
     3. 会话 epoch 与 DB 一致——改密/禁用/改角色后旧 Cookie 立即失效。
        缺 `ep` 的老 Cookie 按 0 处理（升级平滑），因此引导期签发的 Cookie
        仍然有效。
-    4. 角色从 DB 现读，不进 Cookie——降级立即生效。
+    4. 会话签发时间不早于账号创建——整库重建（服务器重置 / 换机）后 epoch
+       归零，只靠第 3 条会让上一个库签的 Cookie 重新生效（issue #37）。
+    5. 角色从 DB 现读，不进 Cookie——降级立即生效。
     """
     services = get_services(request)
     token = request.cookies.get(SESSION_COOKIE, "")
     verified = verify_session_token(token, services.settings.app_secret)
     if verified is None:
         raise UnauthorizedError("session missing or expired")
-    username, epoch = verified
-    if not services.users.is_active(username):
-        raise UnauthorizedError("session missing or expired")
-    if services.users.session_epoch(username) != epoch:
+    username, epoch, issued_at = verified
+    if not services.users.session_valid(username, epoch, issued_at):
         raise UnauthorizedError("session missing or expired")
     role = services.users.role_of(username)
     principal = Principal(username=username, is_admin=role == ROLE_ADMIN, role=role)

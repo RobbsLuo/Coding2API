@@ -33,6 +33,10 @@ PBKDF2_DIGEST_BYTES = 32
 # 否则「CLI 建号能过的名字」和「用户文件能写的名字」口径就不一致。
 FORBIDDEN_USERNAME_CHARS = (":", "\n", "\r")
 
+# 会话签发时间与账号创建时间的允许误差（见 `DbUserStore.session_valid`）。
+# 同秒精度 + 测试夹具「先签 Cookie 再启动建号」的正常时序都落在余量内。
+SESSION_CLOCK_SLACK_SECONDS = 60
+
 
 class UsersFileError(RuntimeError):
     """用户文件缺失、格式非法或无有效用户。"""
@@ -189,6 +193,29 @@ class DbUserStore:
     def session_epoch(self, username: str) -> int | None:
         row = self._repo.get(username)
         return int(row["session_epoch"]) if row else None
+
+    def session_valid(self, username: str, epoch: int,
+                      issued_at: int | None) -> bool:
+        """会话是否仍有效：存在且启用 + epoch 未作废 + 不早于账号创建。
+
+        前两条与原来 `is_active` + `session_epoch ==` 等价。第三条补的是整库
+        重建场景：服务器重置 / 换机后 SQLite 是新的，`session_epoch` 从 0
+        重来；若 `APP_SECRET` 还是旧值，历史 Cookie 的 `ep=0` 会重新匹配新
+        账号，旧浏览器无需重新登录（issue #37）。`iat` 早于当前账号 `created_at`
+        的会话必然是上一个库签发的，直接拒绝。
+
+        `issued_at=None`（升级前的老 Cookie 没有 `iat`）：跳过该项，保持
+        与「缺 ep 按 0 放行」同一平滑口径。留 60s 余量吸收签发与建号同秒 /
+        测试夹具先签 Cookie 再启动建号的正常时序。
+        """
+        row = self._repo.get(username)
+        if row is None or not row["enabled"]:
+            return False
+        if int(row["session_epoch"]) != epoch:
+            return False
+        if issued_at is None:
+            return True
+        return issued_at >= int(row["created_at"] or 0) - SESSION_CLOCK_SLACK_SECONDS
 
     def must_change_password(self, username: str) -> bool:
         row = self._repo.get(username)

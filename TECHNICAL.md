@@ -967,11 +967,11 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users
 ### 13.6 账号体系与审计
 三层引导：① 导入 `users.txt`；② `ADMIN_USERNAMES` 点名提权为 `admin`（只剩引导期语义）；③ **仍无活跃 admin → 启动失败**。`require_admin` 管用户管理、配置、审计、告警；`require_operator` 管凭证写与只读运维页；`Principal.is_operator` 是派生 property，统计口径同界。
 
-**会话吊销不建会话表**：`users.session_epoch` 进 Cookie 的 `ep` 声明，改密 / 降级 / 启停 / 硬删一律 `+1`；`principal_from_request` 每请求比一次。**角色不进 Cookie，每请求现读 DB**（塞进已签名 Cookie 会让降级延迟生效）。老 Cookie 无 `ep` 按 0 处理。
+**会话吊销不建会话表**：`users.session_epoch` 进 Cookie 的 `ep` 声明，改密 / 降级 / 启停 / 硬删一律 `+1`；`principal_from_request` 每请求比一次。**角色不进 Cookie，每请求现读 DB**（塞进已签名 Cookie 会让降级延迟生效）。老 Cookie 无 `ep` 按 0 处理。**整库重建**（服务器重置 / 换机）时新库 epoch 从 0 重来，只比 `ep` 会让上一个库签的 Cookie 重新生效（issue #37）——故同时校验 `iat` 不早于当前账号 `created_at`（留 60s 时钟余量）；老 Cookie 无 `iat` 跳过该项。
 
 **一次性激活令牌**：建号 / 重置写随机占位密码 + 32 字节 URL-safe 令牌；库里只存 SHA-256 摘要 + 过期时间（TTL 24h）；明文只在响应回显一次，前端拼 `/activate?token=...`。**首登强制改密**：`must_change_password=1` 时精确白名单放行（`GET /api/auth/session`、`POST /api/auth/password`、`POST /api/auth/logout`），其余 403 `password_change_required`。
 
-**审计** `audit_events(id, ts, actor, action, target, detail, ip, ok)`，动作常量在 `audit/actions.py`。覆盖登录成功/失败、账号建/激活/改角色/启停/改密/重置/硬删、凭证导入/删除/启停/pin/复活/切换账号、告警人工恢复，以及**API Key 发/删**（`api_key.create` / `api_key.delete`：明文只回显一次，事后只能靠审计行追责）、**用户策略**（`user.policy`）、**运行时配置**（`settings.update`，含 kill switch 与请求体落盘开关）、**明细导出**（`data.export`）。**绝不记密码或令牌明文**。保留期同 `usage_events`。
+**审计** `audit_events(id, ts, actor, action, target, detail, ip, ok)`，动作常量在 `audit/actions.py`。覆盖登录成功/失败、账号建/激活/改角色/启停/改密/重置/硬删、凭证导入/导出/删除/启停/pin/复活/切换账号、告警人工恢复，以及**API Key 发/删**（`api_key.create` / `api_key.delete`：明文只回显一次，事后只能靠审计行追责）、**用户策略**（`user.policy`）、**运行时配置**（`settings.update`，含 kill switch 与请求体落盘开关）、**明细导出**（`data.export`）。**绝不记密码或令牌明文**。保留期同 `usage_events`。
 
 **用户级策略（`users.allowed_models` / `users.quota`）**：`PUT /api/users/{username}/policy` 按人设出站策略，两条入口都判：Playground（免 Key 会话直连）与 `/v1`（API Key）。模型白名单走与 Key 相同的 `ensure_model_allowed_for`（含「省略模型名即默认模型」的绕过口子），且与 Key 自己的白名单**同时**生效（两个都要放行）——只看 Key 的话，用户自签一个空白名单的 Key 就绕开了管理员的按人设限；`/v1/models` 与单模型查询也按两层过滤，避免「列表看得到、调用 400」。配额走独立的 `services.user_quota`，用量按**用户名**聚合（该用户经任何入口的流量都计入）。缺这层时 viewer 用 Cookie 就能直调任意模型、绕过 Key 的白名单与配额。
 

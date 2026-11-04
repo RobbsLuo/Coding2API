@@ -297,7 +297,7 @@ def test_authorize_without_pending_login_still_rejected(tmp_path):
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request"
 
-def test_authorize_rejects_revoked_session(tmp_path, monkeypatch):
+def test_authorize_rejects_revoked_session(tmp_path):
     """签名有效但发起人已禁用：不得完成兑换（与 principal_from_request 同口径）。"""
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
@@ -306,8 +306,8 @@ def test_authorize_rejects_revoked_session(tmp_path, monkeypatch):
         client.post("/api/auth/login", json={"username": "root", "password": "rootpw"})
         started = client.post("/api/auth/upstream/start",
                               json={"provider": "trae"}).json()
-        # Cookie 仍有效（签名/过期都 OK），但发起人已被禁用
-        monkeypatch.setattr(app.state.services.users, "is_active", lambda _u: False)
+        # Cookie 仍有效（签名/过期都 OK），但发起人已被禁用（epoch 同步 +1）
+        app.state.user_repo.set_enabled("root", False)
         response = client.get(f"/authorize?refreshToken=RT&state={started['state']}")
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request"

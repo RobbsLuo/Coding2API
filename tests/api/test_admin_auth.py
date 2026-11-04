@@ -91,6 +91,23 @@ def test_session_endpoint_requires_login(tmp_path):
     with TestClient(app) as client:
         assert client.get("/api/auth/session").status_code == 401
 
+def test_session_from_previous_database_rejected(tmp_path):
+    """服务器重置 / 换机后整库重建：同 APP_SECRET 下旧 Cookie 不得再进后台。
+
+    issue #37：新库 session_epoch 从 0 重来，旧 Cookie 的 ep=0 会重新匹配；
+    账号名字不变、只是密码变了的情况下，浏览器刷新就直接进了后台。
+    签发时间早于当前账号创建 → 必然是上一个库签的，按未认证处理。
+    """
+    from src.auth.session import create_session_token
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings)
+    with TestClient(app) as client:
+        stale = create_session_token("root", SECRET, issued_at=1)
+        client.cookies.set("coding2api_session", stale)
+        assert client.get("/api/auth/session").status_code == 401
+
 def test_build_app_fails_without_users_file(tmp_path, monkeypatch):
     """文件缺失**且**库为空才是致命错误（库非空时文件缺失可正常启动）。"""
     from src.auth.users import UsersFileError

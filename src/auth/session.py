@@ -6,6 +6,11 @@ payload 里的 `ep` 是 users.session_epoch 的快照：Cookie 无状态，
 
 兼容性：老版本签的 Cookie 没有 `ep` 字段，一律按 0 处理而不是判非法——
 否则升级后所有已登录用户会被集体登出。新字段的值非法（类型错/负数）才拒绝。
+
+`iat`（签发时间）供 `session_valid()` 判断会话是否早于账号创建：服务器重置 /
+换机后整库重建，`session_epoch` 从 0 重来，而 `APP_SECRET` 没换时旧 Cookie
+的 `ep=0` 会重新匹配新账号（issue #37）。老 Cookie 缺 `iat` 时返回 None，
+调用方跳过这项校验以保持平滑升级。
 """
 
 from __future__ import annotations
@@ -36,8 +41,13 @@ def create_session_token(username: str, secret: str, *, epoch: int = 0,
 
 
 def verify_session_token(token: str, secret: str, *,
-                         now: int | None = None) -> tuple[str, int] | None:
-    """返回 `(用户名, 会话 epoch)`；签名无效、过期或格式错误返回 None。"""
+                         now: int | None = None,
+                         ) -> tuple[str, int, int | None] | None:
+    """返回 `(用户名, 会话 epoch, 签发时间)`；签名无效、过期或格式错误返回 None。
+
+    签发时间对没有该字段的老 Cookie 返回 None（调用方据此跳过「早于账号创建」
+    校验），显式写了非法值才判非法。
+    """
     if not token or "." not in token:
         return None
     payload_b64, _, signature = token.partition(".")
@@ -70,4 +80,10 @@ def verify_session_token(token: str, secret: str, *,
     epoch = payload.get("ep", 0)
     if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 0:
         return None
-    return username, epoch
+    # iat 缺失 = 升级前的老 Cookie（跳过创建时间校验）；显式非法值才拒绝
+    issued_at = payload.get("iat")
+    if issued_at is not None and (
+            not isinstance(issued_at, int) or isinstance(issued_at, bool)
+            or issued_at < 0):
+        return None
+    return username, epoch, issued_at

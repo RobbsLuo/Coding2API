@@ -50,7 +50,9 @@ def test_session_rejects_bad_claims(payload):
 
 def test_session_uses_wall_clock_when_now_omitted():
     token = session_mod.create_session_token("a", "sec")
-    assert session_mod.verify_session_token(token, "sec") == ("a", 0)
+    username, epoch, issued_at = session_mod.verify_session_token(token, "sec")
+    assert (username, epoch) == ("a", 0)
+    assert isinstance(issued_at, int)
 
 
 # -------------------------------------------------------------------- users

@@ -90,7 +90,7 @@ def test_require_admin_accepts_legacy_positional():
 
 def test_session_embeds_and_returns_epoch():
     token = create_session_token("alice", "sec", epoch=7, issued_at=1000, ttl_seconds=60)
-    assert verify_session_token(token, "sec", now=1030) == ("alice", 7)
+    assert verify_session_token(token, "sec", now=1030) == ("alice", 7, 1000)
 
 
 def test_session_token_without_epoch_defaults_to_zero():
@@ -104,7 +104,7 @@ def test_session_token_without_epoch_defaults_to_zero():
                      separators=(",", ":")).encode("utf-8")
     payload_b64 = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
     legacy = f"{payload_b64}.{session_mod._sign(payload_b64, 'sec')}"
-    assert verify_session_token(legacy, "sec", now=1500) == ("alice", 0)
+    assert verify_session_token(legacy, "sec", now=1500) == ("alice", 0, 1000)
 
 
 @pytest.mark.parametrize("epoch", ["7", True, -1])
@@ -147,6 +147,22 @@ def test_db_user_store_rejects_disabled(tmp_path):
     store = DbUserStore(repo)
     assert store.verify("alice", "pw") is False
     assert store.is_active("alice") is False   # 存在但被禁用 → 非活跃
+    db.close()
+
+
+def test_db_user_store_session_valid(tmp_path):
+    """整库重建后旧 Cookie 的 ep 会重新匹配，必须靠签发时间兜住（issue #37）。"""
+    db, repo = _repo(tmp_path)
+    repo.create("alice", create_password_hash("pw"), now=1000)
+    store = DbUserStore(repo)
+    assert store.session_valid("alice", 0, 1000) is True
+    assert store.session_valid("alice", 0, 940) is True    # 60s 时钟余量内
+    assert store.session_valid("alice", 0, 939) is False   # 早于账号创建
+    assert store.session_valid("alice", 0, None) is True   # 老 Cookie 跳过时间校验
+    assert store.session_valid("alice", 1, 1000) is False  # epoch 已作废
+    assert store.session_valid("ghost", 0, 1000) is False  # 账号不存在
+    repo.set_enabled("alice", False)
+    assert store.session_valid("alice", 1, 1000) is False  # 已禁用
     db.close()
 
 

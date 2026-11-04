@@ -137,9 +137,8 @@ def create_router(services: Services) -> APIRouter:
             request.cookies.get(SESSION_COOKIE, ""), services.settings.app_secret)
         username = ""
         if verified is not None:
-            candidate, epoch = verified
-            if (services.users.is_active(candidate)
-                    and services.users.session_epoch(candidate) == epoch):
+            candidate, epoch, issued_at = verified
+            if services.users.session_valid(candidate, epoch, issued_at):
                 username = candidate
         entry = pending.get(username) if username else None
         if entry is None:
