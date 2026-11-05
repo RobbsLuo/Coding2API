@@ -1,0 +1,137 @@
+name: Bug 报告
+description: 功能不符合预期、报错、崩溃、数据不对
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        填之前先确认两件事，能省一轮来回：
+
+        1. **改过 `src/` 之后重启过后端吗？** 只改代码不重启 = 老后端 + 新前端，
+           新端点会 404、页面弹无关兜底文案。升级含 migration 的版本同理。
+        2. **`/healthz` 里 `ready` 是不是 0？** 池子没可用凭证时很多现象是
+           「没号可调度」而不是 bug。
+
+        漏洞与凭证泄露**不要**贴在这里，走 [私密报告](https://github.com/RobbsLuo/Coding2API/security/advisories/new)。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 期望发生什么，实际发生了什么。有报错就贴原文（错误码、`error_type`、上游返回体）。
+      placeholder: |
+        期望：/v1/chat/completions 返回 200
+        实际：503 no_healthy_credential，但池子里有 3 个 ready 凭证
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 越具体越好。涉及推理请求请给**脱敏后**的 curl（保留 model、消息结构、关键参数，去掉 Key 与正文）。
+      placeholder: |
+        1. 管理台 → 凭证 → 添加 Qoder 凭证
+        2. 用模型 qwen3.8-max@qoder 发一次请求
+        3. ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: channel
+    attributes:
+      label: 涉及的渠道
+      description: 与渠道无关（管理台、统计、鉴权等）选「与渠道无关」。
+      multiple: true
+      options:
+        - 与渠道无关
+        - codebuddy
+        - codebuddy_intl
+        - trae
+        - zen
+        - kilo
+        - qoder
+        - codearts
+        - officeace
+        - raccoon
+        - 不确定
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: 出问题的面
+      multiple: true
+      options:
+        - 推理请求（/v1/chat/completions · /v1/responses · /v1/messages）
+        - 管理台前端（页面 / 交互）
+        - 管理台 API（/api/*）
+        - 凭证导入 / 登录 / 刷新
+        - 额度探测 / 签到 / 活跃上报
+        - 统计与账单
+        - 后台任务（TaskRunner）
+        - 部署（Docker / Caddy / 反向代理）
+        - 其他
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: 镜像 tag 或 commit。`/healthz` 的 `version` 字段与 `git rev-parse --short HEAD` 都行。
+      placeholder: v0.11.0 / 85cb083
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deploy
+    attributes:
+      label: 部署形态
+      options:
+        - Docker Compose
+        - Docker Compose + Caddy（公网）
+        - Linux systemd
+        - macOS launchd
+        - 裸跑（uv run / python -m src）
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: healthz
+    attributes:
+      label: /healthz 输出
+      description: |
+        `curl -s http://127.0.0.1:8000/healthz | jq` 的输出。
+        只含计数与版本号，不含凭证内容。没有 jq 就直接贴原文。
+      render: json
+      placeholder: |
+        {"status":"ok","service":"coding2api","version":"0.11.0",
+         "credentials":{"ready":3,"cooling":0,"paused":0,"disabled":0,"total":3}}
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志
+      description: |
+        `docker logs coding2api --tail 200` 或 `journalctl -u coding2api -n 200`。
+        **先脱敏**：删掉 `Authorization`、cookie、Key 明文、上游返回里的账号标识。
+        有 `X-Request-ID` 的话贴那几行就够。
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: 提交前自查
+      options:
+        - label: 改过 `src/` 的话，后端已重启
+          required: true
+        - label: 已脱敏（无 Key、cookie、凭证、对话正文）
+          required: true
+        - label: 搜过已有 issue，没有重复
+          required: true

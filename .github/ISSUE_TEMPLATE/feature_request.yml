@@ -1,0 +1,64 @@
+name: 功能建议
+description: 想要新能力、新渠道、改现有行为
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        先看一眼 `PROPOSAL.md` 的「非目标」：按 token 计量计费、上游积分→货币换算、
+        通用 provider 网关（只硬编码已知渠道）、语义缓存、正文落盘这些是**明确不做**的。
+        落在非目标里的建议会被直接关掉。
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: 类型
+      options:
+        - 新渠道接入
+        - 现有渠道的行为 / 兼容性
+        - 管理台功能
+        - 调度与凭证池
+        - 统计与账单
+        - 部署与运维
+        - 文档
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: 要解决什么问题
+      description: 描述场景与当前卡点，不要直接跳到实现方案。有实际请求/响应样例最好。
+      placeholder: |
+        用 Claude Code 走本服务时，上游返回的 tool_calls 里 arguments 是流式分片，
+        客户端拼不起来 → 想加一个分片合并
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议的做法
+      description: 如果有想法写这里。新渠道请附上游协议事实（端点、鉴权方式、额度接口），能实测的写实测结果。
+    validations:
+      required: false
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 考虑过的替代方案
+      description: 为什么不用现成做法 / 别的渠道 / 客户端侧解决。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: 范围确认
+      options:
+        - label: 这不是「非目标」清单里的条目
+          required: true
+        - label: 涉及新渠道的话，我读过 `PROPOSAL.md` 的渠道登记格式，愿意提供实测事实
+          required: false

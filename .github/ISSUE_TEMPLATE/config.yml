@@ -1,0 +1,13 @@
+# Issue 入口配置：关掉空白 issue，逼着填模板（否则「XX 不能用」这种一句话
+# 报告无法定位，来回追问的轮次比填表还多）。
+blank_issues_enabled: false
+contact_links:
+  - name: 安全问题（不要开公开 Issue）
+    url: https://github.com/RobbsLuo/Coding2API/security/advisories/new
+    about: 漏洞、凭证泄露、越权等走私密报告，见 SECURITY.md
+  - name: 使用与部署文档
+    url: https://github.com/RobbsLuo/Coding2API/blob/main/README.md
+    about: 安装、配置、各渠道接入方式、公网部署（Docker + Caddy）
+  - name: 设计与实现说明
+    url: https://github.com/RobbsLuo/Coding2API/blob/main/TECHNICAL.md
+    about: 模块规格、Provider 协议、请求时序、数据模型

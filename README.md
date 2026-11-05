@@ -1,5 +1,10 @@
 # Coding2API
 
+[![CI](https://github.com/RobbsLuo/Coding2API/actions/workflows/ci.yml/badge.svg)](https://github.com/RobbsLuo/Coding2API/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/RobbsLuo/Coding2API)](https://github.com/RobbsLuo/Coding2API/releases)
+[![License: MIT](https://img.shields.io/github/license/RobbsLuo/Coding2API)](LICENSE)
+[![Image](https://img.shields.io/badge/image-ghcr.io%2Frobbsluo%2Fcoding2api-blue)](https://github.com/RobbsLuo/Coding2API/pkgs/container/coding2api)
+
 九个上游——**CodeBuddy**（国内 + 国际）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce**、**小浣熊**——封装成 OpenAI 兼容 API：公共凭证池、统一模型名与调度、按人用量统计。
 
 > [!WARNING]
@@ -986,6 +991,8 @@ pnpm exec vitest run
 pnpm build
 ```
 
+参与贡献（提 issue / PR 门槛 / schema 约束）见 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+
 ## 文档
 
 | 文档 | 内容 |
@@ -999,6 +1006,9 @@ pnpm build
 | [`diagrams/coding2api-permission-matrix.html`](diagrams/coding2api-permission-matrix.html) | 三角色权限矩阵 |
 | [`diagrams/coding2api-request-sequence.html`](diagrams/coding2api-request-sequence.html) | 请求主链路时序图 |
 | [`diagrams/coding2api-credential-lifecycle.html`](diagrams/coding2api-credential-lifecycle.html) | 凭证调度状态机 |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | 提 issue / PR 的流程与门槛 |
+| [`SECURITY.md`](SECURITY.md) | 漏洞报告渠道与部署方信任边界 |
+| [`CITATION.cff`](CITATION.cff) | 引用信息（GitHub「Cite this repository」） |
 
 ## 授权协议
 

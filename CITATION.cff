@@ -1,0 +1,42 @@
+cff-version: 1.2.0
+message: "引用本服务时请使用下列信息（版本号以 /healthz 的 version 字段为准）。"
+title: "Coding2API"
+abstract: >-
+  把 CodeBuddy（国内站 + 国际）、TRAE SOLO、OpenCode Zen、Kilo、Qoder、
+  CodeArts、OfficeAce、小浣熊等上游渠道封装为 OpenAI / Responses / Anthropic
+  兼容 API 的单进程网关：公共凭证池、统一模型名与调度、按人用量统计。
+  上游均为逆向接口，仅供学习研究。
+type: software
+license: MIT
+repository-code: "https://github.com/RobbsLuo/Coding2API"
+url: "https://github.com/RobbsLuo/Coding2API"
+version: "0.11.0"
+date-released: "2026-11-04"
+keywords:
+  - api-gateway
+  - openai-compatible
+  - anthropic
+  - llm
+  - reverse-engineering
+  - codebuddy
+  - trae
+  - qoder
+  - codearts
+  - raccoon
+authors:
+  - family-names: Luo
+    given-names: Hongsheng
+    alias: RobbsLuo
+    email: work@robbs.vip
+    website: "https://github.com/RobbsLuo"
+preferred-citation:
+  type: software
+  title: "Coding2API"
+  year: 2026
+  authors:
+    - family-names: Luo
+      given-names: Hongsheng
+      alias: RobbsLuo
+  version: "0.11.0"
+  url: "https://github.com/RobbsLuo/Coding2API"
+  license: MIT

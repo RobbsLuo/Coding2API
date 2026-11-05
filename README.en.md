@@ -1,5 +1,10 @@
 # Coding2API
 
+[![CI](https://github.com/RobbsLuo/Coding2API/actions/workflows/ci.yml/badge.svg)](https://github.com/RobbsLuo/Coding2API/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/RobbsLuo/Coding2API)](https://github.com/RobbsLuo/Coding2API/releases)
+[![License: MIT](https://img.shields.io/github/license/RobbsLuo/Coding2API)](LICENSE)
+[![Image](https://img.shields.io/badge/image-ghcr.io%2Frobbsluo%2Fcoding2api-blue)](https://github.com/RobbsLuo/Coding2API/pkgs/container/coding2api)
+
 Wraps **CodeBuddy** (CN + international), **TRAE SOLO**, **OpenCode Zen**, **Kilo**, **Qoder**, **CodeArts**, **OfficeAce**, **Raccoon** into an OpenAI-compatible API, with shared credential pool, unified model names and scheduling, per-user usage stats.
 
 > [!WARNING]
@@ -963,6 +968,8 @@ pnpm exec vitest run
 pnpm build
 ```
 
+Contributing (issue templates, PR gates, schema rules): see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
 ## Documentation
 
 | Document | Contents |
@@ -976,6 +983,9 @@ pnpm build
 | [`diagrams/coding2api-permission-matrix.html`](diagrams/coding2api-permission-matrix.html) | Three-role permission matrix |
 | [`diagrams/coding2api-request-sequence.html`](diagrams/coding2api-request-sequence.html) | Main request sequence |
 | [`diagrams/coding2api-credential-lifecycle.html`](diagrams/coding2api-credential-lifecycle.html) | Credential scheduling state machine |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Issue / PR flow and gates |
+| [`SECURITY.md`](SECURITY.md) | Vulnerability reporting and deployer trust boundary |
+| [`CITATION.cff`](CITATION.cff) | Citation metadata (GitHub "Cite this repository") |
 
 ## License
 

@@ -1,0 +1,107 @@
+name: 渠道接入
+description: 新上游渠道的可行性核实与登记
+title: "channel: "
+labels: ["enhancement", "new-channel"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        本仓接渠道的前提是**上游协议已实测**，不是「文档说支持 OpenAI 兼容」。
+        没实测过的条目进 `PROPOSAL.md` 时会被标成未验证，调度与错误分类也写不准。
+
+        提之前请先读 `PROPOSAL.md` 的「上游可行性核实」章节：现有九个渠道各写了
+        端点、鉴权、额度口径、错误码与实测结论，照着那个粒度填。
+
+  - type: input
+    id: channel-name
+    attributes:
+      label: 渠道名与厂商
+      description: 渠道键（`src/engine/model_resolver.py` 的 `KNOWN_PROVIDERS` 里的写法）+ 产品名。
+      placeholder: raccoon / 商汤小浣熊
+    validations:
+      required: true
+
+  - type: textarea
+    id: endpoints
+    attributes:
+      label: 端点
+      description: 推理、模型目录、额度、签到、刷新各是哪个 URL。同域还是分域、是否需要特殊 header。
+      placeholder: |
+        推理：POST https://example.com/api/web/llm/v2/chat/completions
+        目录：GET  https://example.com/api/web/llm/v2/model_catalog
+        额度：GET  https://example.com/api/web/points/v1/balance
+    validations:
+      required: true
+
+  - type: dropdown
+    id: auth
+    attributes:
+      label: 鉴权方式
+      description: 决定能不能做「登录按钮」，以及 token 过期后怎么办。
+      options:
+        - 标准 API Key（长期有效）
+        - Bearer token + refresh_token（可自动刷新）
+        - 网页会话 JWT / cookie（只能手工导入，到期重取）
+        - OAuth 授权码（可做登录按钮 + 回调）
+        - 设备码
+        - 请求签名（HMAC / 私有签名）
+        - 不确定
+    validations:
+      required: true
+
+  - type: dropdown
+    id: protocol
+    attributes:
+      label: 协议形态
+      options:
+        - 标准 OpenAI 兼容（无信封、无签名）
+        - OpenAI 兼容 + 私有信封 / 特殊字段
+        - 私有协议（需要单独写事件解析）
+        - 不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: quota
+    attributes:
+      label: 额度口径
+      description: 余额接口返回什么、单位是什么、有没有总量、是否逐笔到期。没有额度接口就写「无」。
+      placeholder: |
+        available_points=4800，单位积分，无总量口径；
+        每日 00:00 发 300，7 天有效，逐笔到期在流水 daily_grant.expire_at
+    validations:
+      required: true
+
+  - type: textarea
+    id: measurements
+    attributes:
+      label: 实测结果
+      description: |
+        至少覆盖：流式 / 非流式、`tool_calls`、`role=tool` 回传、`stream_options.include_usage`、
+        并发上限、限流与额度的错误码原文。写「未测」比编一个结论好。
+      placeholder: |
+        流式 tool_calls：通
+        role=tool 回传：通
+        include_usage：通
+        并发：5 并发放行，第 6 个 429 user_model_rate_limited
+        未知模型：静默回落默认模型并回 200（需两层拦截）
+    validations:
+      required: true
+
+  - type: textarea
+    id: tos
+    attributes:
+      label: 条款与风险
+      description: 官方条款是否允许第三方转发 / 多用户共享。没写清楚就写「条款未明确」——本仓按 gray 档登记，不假装是 white。
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: 确认
+      options:
+        - label: 上面的实测是我自己跑出来的，不是从文档抄的
+          required: true
+        - label: 我接受该渠道按「逆向接口，仅供学习研究」口径登记，不承诺长期可用
+          required: true

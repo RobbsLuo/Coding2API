@@ -1,0 +1,12 @@
+# 默认归属：所有路径由维护者评审。
+*       @RobbsLuo
+
+# 敏感路径单独列出，避免以后加了其他 owner 后被静默改掉。
+/.github/               @RobbsLuo
+/Dockerfile             @RobbsLuo
+/docker-compose*.yml    @RobbsLuo
+/deploy/                @RobbsLuo
+/src/db/schema.sql      @RobbsLuo
+/src/db/migrate.py      @RobbsLuo
+/src/auth/              @RobbsLuo
+/src/webapp/security.py @RobbsLuo
