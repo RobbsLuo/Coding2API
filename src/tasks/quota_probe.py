@@ -6,6 +6,7 @@ import logging
 
 from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
+from ..error_text import error_text
 from ..provider.base import Quota
 from ..request_context import credential_scope
 from . import TaskReport
@@ -57,7 +58,8 @@ class QuotaProbeTask:
                 with credential_scope(candidate.credential_id):
                     quota = await provider.probe_quota(data)
             except Exception as error:  # noqa: BLE001 - 探测失败不能中断整批
-                logger.warning("quota probe failed for %s: %s", candidate.credential_id, error)
+                logger.warning("quota probe failed for %s: %s", candidate.credential_id,
+                               error_text(error))
                 # 探测失败 → health 置 NULL（unknown），绝不当作 0 分
                 self._credentials.mark_probe_failed(candidate.credential_id)
                 report.failed += 1

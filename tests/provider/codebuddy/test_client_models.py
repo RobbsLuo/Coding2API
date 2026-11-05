@@ -146,3 +146,16 @@ async def test_fetch_models_rejects_non_object_config():
 
     with pytest.raises(UpstreamProtocolViolation):
         await _client(handler).fetch_models(CodeBuddyCredential(bearer_token="t"))
+
+
+async def test_provider_list_models_log_includes_type_when_message_empty(caplog):
+    """裸 `TimeoutError` 消息为空 → 回退日志仍要带类名，不能只剩「: 」。"""
+    class _Client:
+        async def fetch_models(self, _credential):
+            raise TimeoutError()
+
+    provider = CodeBuddyProvider(client=_Client())
+    with caplog.at_level("WARNING", logger="src.provider.codebuddy.client"):
+        models = await provider.list_models({"bearer_token": "t"})
+    assert [m.id for m in models] == list(DEFAULT_MODELS)
+    assert any("TimeoutError" in record.getMessage() for record in caplog.records)

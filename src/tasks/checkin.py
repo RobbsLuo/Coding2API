@@ -12,6 +12,7 @@ from zoneinfo import ZoneInfo
 from ..config import live
 from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
+from ..error_text import error_text
 from ..request_context import credential_scope
 from . import TaskReport
 from .pacer import Pacer
@@ -23,6 +24,13 @@ logger = logging.getLogger(__name__)
 # 日界会偏移数小时，出现「上游已重置但本服务认为今天已签」或反之的静默漏签。
 # 与 `engine/limits.day_start`、`tasks/activity` 同一口径。
 _CN_TZ = ZoneInfo("Asia/Shanghai")
+
+#: 失败重试退避：首轮失败后 10 分钟再试，连续失败翻倍，封顶 1 小时。
+#: 上游对「今日积分尚未发放」会一直回同一句（实测 2026-11-05 两个号从 00:29
+#: 到 17:54 每 10 分钟锤一次 → 145 条 WARNING + 几千次无效上游调用）。
+#: 退避后一天最多 ~7 次/账号，仍能在当天补签；`trigger="manual"` 不受限制。
+_FAIL_BACKOFF_BASE = 10 * 60
+_FAIL_BACKOFF_MAX = 60 * 60
 
 
 def _cn_now(now: int | None = None) -> time.struct_time:
@@ -101,6 +109,9 @@ class CheckinTask:
         # 注意与下面的「时点放行」是两套键：这里是每个凭证/G 作用域的封账，
         # 那边是「今天这个时点已经触发过一轮」，语义不能合并。
         self._done_scopes: dict[str, int] = {}
+        # done_key → (连续失败次数, 下次允许重试的 epoch 秒)。失败退避，成功清零；
+        # 与 `_done_scopes` 同键同生命周期，跨天 prune 时一起清。
+        self._failures: dict[str, tuple[int, int]] = {}
         # 时点放行：键固定为「本地日期 + 时点分钟数」，抖动只改窗口、不改归属，
         # 所以执行时刻落在窗口里哪个分钟都不会让同一时点跑两次。
         self._slot_offsets: dict[str, int] = {}   # 当日该时点抽到的抖动偏移（分钟）
@@ -178,26 +189,52 @@ class CheckinTask:
         """丢掉非当天的封账记录：done_key 以日期开头，跨天后不可能再命中，
         长驻进程否则每天每账号各攒一条（无上限）。"""
         day = self._day_key(now)
-        stale = [key for key in self._done_scopes if not key.startswith(f"{day}:")]
+        prefix = f"{day}:"
+        stale = [key for key in self._done_scopes if not key.startswith(prefix)]
         for key in stale:
             del self._done_scopes[key]
+        for key in [key for key in self._failures if not key.startswith(prefix)]:
+            del self._failures[key]
 
     def _sealed(self, done_key: str, now: time.struct_time) -> bool:
         """该作用域是否已封账且封账未到期。"""
         until = self._done_scopes.get(done_key)
         return until is not None and until > _cn_epoch(now)
 
+    def _backed_off(self, done_key: str, now: time.struct_time,
+                    *, manual: bool) -> bool:
+        """失败退避未到期 → 本轮跳过；管理台「立即运行」不受退避限制。"""
+        if manual:
+            return False
+        state = self._failures.get(done_key)
+        return state is not None and state[1] > _cn_epoch(now)
+
+    def _note_failure(self, done_key: str, now: time.struct_time) -> None:
+        """记一次失败并按连续失败次数翻倍退避（10m → 20m → 40m → 封顶 1h）。"""
+        streak = self._failures.get(done_key, (0, 0))[0] + 1
+        delay = min(_FAIL_BACKOFF_BASE * 2 ** min(streak - 1, 6), _FAIL_BACKOFF_MAX)
+        self._failures[done_key] = (streak, _cn_epoch(now) + delay)
+
+    def _clear_failure(self, done_key: str) -> None:
+        """成功即清零：下次再失败从 10 分钟重新起算，不继承旧的退避档位。"""
+        self._failures.pop(done_key, None)
+
     async def run_once(self, *, now: time.struct_time | int | None = None,
                        trigger: str = "auto") -> TaskReport:
         """签到一轮：已成功（当日封账）的作用域直接跳过；失败的留到下轮重试。
 
-        `trigger` 只进审计日志（auto=定时 / manual=管理台「立即运行」），不参与
-        任何判定。
+        失败按连续次数做指数退避（10m → 20m → 40m → 封顶 1h），避免上游
+        一直回「积分尚未发放」时每 10 分钟空锤一次；`trigger="manual"`
+        （管理台立即运行）绕过退避。失败不封账，成功才封账。
+
+        `trigger` 只进审计日志（auto=定时 / manual=管理台「立即运行」），
+        除绕过失败退避外不参与任何判定。
         """
         current = now if isinstance(now, time.struct_time) else _cn_now(now)
         day = self._day_key(current)
         report = TaskReport()
         seen: set[str] = set()
+        manual = trigger == "manual"
         self._prune(current)
         for candidate in self._credentials.candidates():
             # `enabled=0`（用户软暂停）同样跳过，口径与调度器 is_selectable 一致。
@@ -232,6 +269,9 @@ class CheckinTask:
                 report.skipped += 1                      # 同一轮同上游账号只签一次
                 continue
             seen.add(scope)
+            if self._backed_off(done_key, current, manual=manual):
+                report.skipped += 1                      # 退避未到期，不调上游
+                continue
             report.attempted += 1
             # 签到一轮含 status+claim+回查三次上游调用，与 quota_probe/growth
             # 共用同一 Pacer，避免绕开全局频率风控对策
@@ -241,11 +281,14 @@ class CheckinTask:
                 with credential_scope(candidate.credential_id):
                     result = await provider.checkin(data)
             except Exception as error:  # noqa: BLE001
-                logger.warning("checkin failed for %s: %s", candidate.credential_id, error)
+                logger.warning("checkin failed for %s: %s", candidate.credential_id,
+                               error_text(error))
+                self._note_failure(done_key, current)
                 report.failed += 1
                 continue
             if result.ok:
                 report.succeeded += 1
+                self._clear_failure(done_key)
                 # 成功即封账该作用域：封账期内不再重试，失败凭证不受影响可继续
                 # 重试。渠道给了 `seal_until` 就按它封（签到周期 ≠ 自然日，
                 # 见 `CheckinResult.seal_until`），否则封到本地当日结束。
@@ -254,6 +297,7 @@ class CheckinTask:
                     self._on_success(candidate.credential_id)
             else:
                 report.failed += 1
+                self._note_failure(done_key, current)
                 logger.warning("checkin failed for %s: %s",
                                candidate.credential_id, result.message or "未知原因")
             # 审计日志：成功/失败/已签都记一行（上游异常没有 result 时不记）。

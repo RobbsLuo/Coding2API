@@ -26,6 +26,7 @@ import httpx
 
 from ...engine.affinity import resolve_explicit
 from ...engine.sse import iter_frames
+from ...error_text import error_text
 from ...provider import base
 from ...provider.base import ErrKind, Event, GrowthResult, Model, Quota
 from ...tasks.pacer import paced
@@ -862,7 +863,8 @@ class CodeBuddyProvider:
         except Exception as error:  # noqa: BLE001 - 兜底不是静默：错误会带上抛路径
             import logging
 
-            logging.getLogger(__name__).warning("动态模型拉取失败，回退静态表: %s", error)
+            logging.getLogger(__name__).warning("动态模型拉取失败，回退静态表: %s",
+                                                error_text(error))
             return [Model(id=mid) for mid in DEFAULT_MODELS]
 
     async def stream_chat(self, credential_data: dict, payload: dict,

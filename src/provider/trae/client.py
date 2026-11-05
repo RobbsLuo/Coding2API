@@ -16,6 +16,7 @@ from typing import Any
 import httpx
 
 from ...engine.sse import iter_frames
+from ...error_text import error_text
 from ...provider import base
 from ...provider.base import (
     AuthFlow,
@@ -696,7 +697,7 @@ class TraeProvider:
 
                 self._dynamic_models_blocked_until = time.monotonic() + 300
                 logging.getLogger(__name__).warning(
-                    "TRAE 动态模型拉取失败，回退静态表 5 分钟: %s", error)
+                    "TRAE 动态模型拉取失败，回退静态表 5 分钟: %s", error_text(error))
         # 静态表：重名时 id 用实测大小写，元数据优先取动态结果，
         # 其次取上次成功的动态拉取（负缓存期倍率不丢）
         merged: list[Model] = []

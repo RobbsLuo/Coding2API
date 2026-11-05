@@ -199,11 +199,12 @@ async def test_checkin_success_locks_scope_for_the_day(repo):
     now = time.struct_time((2026, 9, 11, 10, 0, 0, 3, 254, 0))
     first = await task.run_once(now=now)
     assert first.succeeded == 1 and first.failed == 1
-    # 第二轮：ok 已封账（skipped），bad 重试成功
-    second = await task.run_once(now=now)
+    # 第二轮：ok 已封账（skipped），bad 在 10 分钟退避到期后重试成功
+    retry_at = time.struct_time((2026, 9, 11, 10, 10, 0, 3, 254, 0))
+    second = await task.run_once(now=retry_at)
     assert second.skipped == 1 and second.succeeded == 1 and second.failed == 0
     # 第三轮：全部封账，不再调上游
-    third = await task.run_once(now=now)
+    third = await task.run_once(now=retry_at)
     assert third.attempted == 0 and third.skipped == 2
     assert provider.calls == {"ok": 1, "bad": 2}
     # 次日清账：所有 scope 重新可签
@@ -294,3 +295,142 @@ async def test_checkin_records_audit_events(repo):
     failure = next(row for row in rows if row["ok"] == 0)
     assert success["credit"] == 1000.0 and success["code"] == 0
     assert failure["code"] == 7 and failure["message"] == "上游忙"
+
+
+async def test_checkin_failure_backoff_skips_then_retries(repo):
+    """连续失败按 10m → 20m 退避：到期前跳过且不调上游，到期后重试。
+
+    回归 2026-11-05：raccoon 两个号从 00:29 到 17:54 每 10 分钟锤一次
+    「今日积分尚未发放」，一天 145 条 WARNING。
+    """
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "a",
+                                                          "account_uid": "x"})
+    provider = ProbeProvider(checkin_ok=False)
+    task = CheckinTask(credentials, {"codebuddy": provider})
+    t0 = time.struct_time((2026, 9, 11, 10, 0, 0, 3, 254, 0))
+    t9 = time.struct_time((2026, 9, 11, 10, 9, 0, 3, 254, 0))
+    t10 = time.struct_time((2026, 9, 11, 10, 10, 0, 3, 254, 0))
+    t29 = time.struct_time((2026, 9, 11, 10, 29, 0, 3, 254, 0))
+    t30 = time.struct_time((2026, 9, 11, 10, 30, 0, 3, 254, 0))
+
+    assert (await task.run_once(now=t0)).failed == 1
+    assert provider.checkin_calls == 1
+
+    skipped = await task.run_once(now=t9)               # 10 分钟退避未到期
+    assert skipped.attempted == 0 and skipped.skipped == 1
+    assert provider.checkin_calls == 1
+
+    assert (await task.run_once(now=t10)).failed == 1   # 到期 → 重试，退避翻倍
+    assert provider.checkin_calls == 2
+
+    skipped = await task.run_once(now=t29)              # 20 分钟退避未到期
+    assert skipped.attempted == 0 and provider.checkin_calls == 2
+    assert (await task.run_once(now=t30)).failed == 1
+    assert provider.checkin_calls == 3
+
+
+async def test_checkin_manual_trigger_bypasses_failure_backoff(repo):
+    """管理台「立即运行」不受失败退避限制（管理员要能当场重试）。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "a",
+                                                          "account_uid": "x"})
+    provider = ProbeProvider(checkin_ok=False)
+    task = CheckinTask(credentials, {"codebuddy": provider})
+    t0 = time.struct_time((2026, 9, 11, 10, 0, 0, 3, 254, 0))
+    t1 = time.struct_time((2026, 9, 11, 10, 1, 0, 3, 254, 0))
+
+    assert (await task.run_once(now=t0)).failed == 1
+    manual = await task.run_once(now=t1, trigger="manual")
+    assert manual.attempted == 1 and manual.failed == 1
+    assert provider.checkin_calls == 2
+
+
+async def test_checkin_success_clears_failure_backoff(repo):
+    """成功清零连续失败计数：再次失败从 10 分钟重新起算，不继承旧档位。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "a",
+                                                          "account_uid": "x"})
+
+    class Sequence(ProbeProvider):
+        def __init__(self) -> None:
+            super().__init__()
+            self.results: list[CheckinResult] = []
+            self.seal_until: int | None = None
+
+        async def checkin(self, _data):
+            self.checkin_calls += 1
+            if self.results:
+                return self.results.pop(0)
+            return CheckinResult(ok=False, message="上游忙")
+
+    provider = Sequence()
+    task = CheckinTask(credentials, {"codebuddy": provider})
+    t0 = time.struct_time((2026, 9, 11, 10, 0, 0, 3, 254, 0))
+    t10 = time.struct_time((2026, 9, 11, 10, 10, 0, 3, 254, 0))
+    t11 = time.struct_time((2026, 9, 11, 10, 11, 0, 3, 254, 0))
+    t20 = time.struct_time((2026, 9, 11, 10, 20, 0, 3, 254, 0))
+    t21 = time.struct_time((2026, 9, 11, 10, 21, 0, 3, 254, 0))
+
+    assert (await task.run_once(now=t0)).failed == 1
+    # 10:10 成功，但封账只到同一时刻 → 下一轮立即可再试（模拟短周期渠道）
+    provider.results.append(CheckinResult(ok=True, credit=10,
+                                          seal_until=int(datetime(
+                                              2026, 9, 11, 10, 10,
+                                              tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())))
+    assert (await task.run_once(now=t10)).succeeded == 1
+    # 10:11 再失败：退避应回到基础 10 分钟（10:21），而不是旧的 20 分钟
+    assert (await task.run_once(now=t11)).failed == 1
+    skipped = await task.run_once(now=t20)
+    assert skipped.attempted == 0 and skipped.skipped == 1
+    assert (await task.run_once(now=t21)).failed == 1
+    assert provider.checkin_calls == 4
+
+
+def test_checkin_backoff_delay_doubles_and_caps_at_one_hour():
+    """退避档位 10m → 20m → 40m → 封顶 1h（不再增长，避免整天不重试）。"""
+    from src.tasks.checkin import _cn_epoch
+
+    task = CheckinTask(None, {})                       # 只测状态机，不用仓储
+    now = time.struct_time((2026, 9, 11, 10, 0, 0, 3, 254, 0))
+    delays = []
+    for _ in range(6):
+        task._note_failure("2026-09-11:x", now)
+        delays.append(task._failures["2026-09-11:x"][1] - _cn_epoch(now))
+        assert task._backed_off("2026-09-11:x", now, manual=False) is True
+        assert task._backed_off("2026-09-11:x", now, manual=True) is False
+    assert delays == [600, 1200, 2400, 3600, 3600, 3600]
+
+
+async def test_checkin_failure_state_pruned_on_new_day(repo):
+    """跨天清退避：昨天的失败不能把今天的首次签到挡掉。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "a",
+                                                          "account_uid": "x"})
+    provider = ProbeProvider(checkin_ok=False)
+    task = CheckinTask(credentials, {"codebuddy": provider})
+    today = time.struct_time((2026, 9, 11, 23, 55, 0, 4, 255, 0))
+    tomorrow = time.struct_time((2026, 9, 12, 0, 1, 0, 5, 256, 0))
+
+    assert (await task.run_once(now=today)).failed == 1
+    assert any(key.startswith("2026-09-11:") for key in task._failures)
+    report = await task.run_once(now=tomorrow)
+    assert report.attempted == 1 and report.failed == 1
+    assert not any(key.startswith("2026-09-11:") for key in task._failures)
+
+
+async def test_checkin_exception_log_includes_type_when_message_empty(repo, caplog):
+    """异常消息为空时日志仍要带类名（原先只打空串，排障看不到原因）。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "a",
+                                                          "account_uid": "x"})
+
+    class Boom(ProbeProvider):
+        async def checkin(self, _data):
+            raise TimeoutError()
+
+    task = CheckinTask(credentials, {"codebuddy": Boom()})
+    with caplog.at_level("WARNING", logger="src.tasks.checkin"):
+        report = await task.run_once()
+    assert report.failed == 1
+    assert any("TimeoutError" in record.getMessage() for record in caplog.records)

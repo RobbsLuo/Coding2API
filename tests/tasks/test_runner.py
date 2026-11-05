@@ -740,17 +740,18 @@ async def test_checkin_task_soft_failure_retries_same_day(repo, monkeypatch):
     runner, _collector = _runner(repo, provider)
     task = runner._checkin
     task._done_scopes.clear()
-    now = _time.localtime()
+    now = _time.struct_time((2026, 9, 11, 10, 0, 0, 3, 254, 0))
     report = await task.run_once(now=now)
     assert report.failed == 1 and report.succeeded == 0
     assert task._day_key(now) not in task._done_scopes   # 未封账 → 下轮重试
 
-    # 下一轮成功 → 封账
+    # 下一轮（退避 10 分钟后）成功 → 封账
     async def ok_checkin(_data):
         return CheckinResult(ok=True, credit=200, code=0)
 
     provider.checkin = ok_checkin
-    report2 = await task.run_once(now=now)
+    retry_at = _time.struct_time((2026, 9, 11, 10, 10, 0, 3, 254, 0))
+    report2 = await task.run_once(now=retry_at)
     assert report2.succeeded == 1 and report2.failed == 0
     assert any(key.startswith(f"{task._day_key(now)}:") for key in task._done_scopes)
 

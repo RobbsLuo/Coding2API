@@ -550,3 +550,16 @@ async def test_client_stamps_metadata_model_hint_on_later_events():
     # extra_info 之后的事件都带上真实模型名
     assert usage.model == "glm-5.2-real"
     assert finish.model == "glm-5.2-real"
+
+
+async def test_provider_model_failure_log_includes_type_when_message_empty(caplog):
+    """裸 `TimeoutError` 消息为空 → 回退日志仍要带类名，不能只剩「: 」。"""
+    class _Client:
+        async def fetch_models(self, _credential):
+            raise TimeoutError()
+
+    provider = TraeProvider(client=_Client())
+    with caplog.at_level("WARNING", logger="src.provider.trae.client"):
+        models = await provider.list_models({"accessToken": "a", "uid": "u"})
+    assert [m.id for m in models] == list(STATIC_MODELS)
+    assert any("TimeoutError" in record.getMessage() for record in caplog.records)

@@ -109,3 +109,17 @@ async def test_quota_probe_scopes_credential_for_proxy_stickiness(repo):
     assert seen == [credential_id]
     # 退出循环后归还上下文，不把凭证 id 泄漏给后续任务
     assert get_credential_id() is None
+
+
+async def test_quota_probe_log_includes_type_when_message_empty(repo, caplog):
+    """裸 `TimeoutError` 的 str 为空，日志必须补类名（否则只剩「: 」）。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    task = QuotaProbeTask(credentials,
+                          {"codebuddy": ProbeProvider(error=TimeoutError())})
+    with caplog.at_level("WARNING", logger="src.tasks.quota_probe"):
+        report = await task.run_once()
+    assert report.failed == 1
+    message = next(r.getMessage() for r in caplog.records
+                   if "quota probe failed" in r.getMessage())
+    assert message.endswith("TimeoutError")
