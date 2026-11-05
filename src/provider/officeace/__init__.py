@@ -50,6 +50,7 @@ from ...provider.base import (
 )
 from ...tasks.pacer import paced
 from ..codearts import dpop
+from ..login_identity import login_identity_for
 from . import events as officeace_events
 from .client import OfficeAceClient
 from .credential import OfficeAceCredential, validate_gateway_url
@@ -153,6 +154,14 @@ class OfficeAceProvider:
         return refreshed.to_dict()
 
     # ------------------------------------------------------------ 签到
+
+    def login_identity(self, credential_data: dict) -> str:
+        """重新登录合并键：上游账号 `account_id`（`principal_id` 兜底）。
+
+        判据统一在 `provider/login_identity.py`（登录合并与历史重复清理共用
+        同一套），门面这里只做转发。
+        """
+        return login_identity_for(self.id, credential_data)
 
     async def checkin(self, credential_data: dict) -> CheckinResult:
         return await self.client.claim_bonus(

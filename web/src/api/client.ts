@@ -389,7 +389,7 @@ export const api = {
       ...json({ provider, state }),
     }),
   upstreamComplete: (provider: string, state: string, url: string) =>
-    request<{ status: "success"; credential_id: string }>("/api/auth/upstream/complete", {
+    request<{ status: "success"; credential_id: string; merged?: boolean }>("/api/auth/upstream/complete", {
       method: "POST",
       ...json({ provider, state, url }),
     }),

@@ -16,6 +16,15 @@ from tests.provider.codearts._support import jwk as _jwk
 from tests.provider.codearts._support import token_response as _token_response
 
 
+def test_login_identity_prefers_uid_then_domain_and_name():
+    """重新登录合并键：uid 稳定；老凭证缺 uid 时用 domain_id|user_name。"""
+    provider = CodeArtsProvider()
+    assert provider.login_identity({"uid": "u1", "domain_id": "d", "user_name": "n"}) == "u1"
+    assert provider.login_identity({"uid": "", "domain_id": "d", "user_name": "n"}) == "d|n"
+    assert provider.login_identity({"uid": "", "domain_id": "d", "user_name": ""}) == ""
+    assert provider.login_identity({}) == ""
+
+
 def test_provider_id_classify_credential_from_and_key():
     provider = CodeArtsProvider()
     assert provider.id == "codearts"

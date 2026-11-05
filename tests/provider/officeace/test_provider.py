@@ -22,6 +22,16 @@ async def _empty_stream(handler, **kw):
 
 # ------------------------------------------------------------------ 身份
 
+def test_login_identity_prefers_account_id_then_principal():
+    """重新登录合并键：account_id；缺失时用 principal_id；都没有返回空串。"""
+    provider = OfficeAceProvider()
+    assert provider.login_identity(
+        {"account_id": "a1", "principal_id": "p1"}) == "a1"
+    assert provider.login_identity(
+        {"account_id": "", "principal_id": "p1"}) == "p1"
+    assert provider.login_identity({}) == ""
+
+
 def test_credential_key_prefers_account_id():
     assert credential_key(_cred(account_id="acct")) == credential_key(
         _cred(account_id="acct", model_app_key="other"))

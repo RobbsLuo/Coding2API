@@ -507,6 +507,70 @@ class CredentialRepository:
                 "token_issued_at = ? WHERE id = ?",
                 (self._cipher.encrypt(payload), expires_at, issued_at, credential_id))
 
+    def find_login_credential(self, provider: str,
+                              identity: Callable[[dict[str, Any]], str],
+                              target: str) -> str | None:
+        """同渠道里找出同一上游账号的既有凭证（重新登录时合并用）。
+
+        `identity` 由 provider 提供（CodeArts 用 `uid`，OfficeAce 用
+        `account_id`）：**不能比对整份 JSON**，重新登录后 access token /
+        refresh_token / DPoP 私钥都会变，整份比对永远不相等。
+
+        多行命中（历史遗留的重复凭证）时的优先级：先挑 `disabled=1`（正是这次
+        重新登录要救的那条），再挑 `pinned`，最后取最早创建的一条（统计流水与
+        变量的归属都挂在最早的 id 上）。没有身份或没有命中返回 None，调用方
+        退回新增，绝不猜。
+        """
+        rows = self._db.connect().execute(
+            "SELECT id, disabled, pinned, data_enc FROM credentials "
+            "WHERE provider = ? ORDER BY created_at ASC", (provider,)).fetchall()
+        matches: list[Any] = []
+        for row in rows:
+            try:
+                existing = json.loads(self._cipher.decrypt(row["data_enc"]).decode("utf-8"))
+            except Exception:  # noqa: BLE001 - 坏行跳过：一条坏数据不该挡住登录
+                continue
+            try:
+                if identity(existing) == target:
+                    matches.append(row)
+            except Exception:  # noqa: BLE001 - 解析失败的行同样跳过
+                continue
+        for row in matches:
+            if row["disabled"]:
+                return row["id"]
+        for row in matches:
+            if row["pinned"]:
+                return row["id"]
+        return matches[0]["id"] if matches else None
+
+    def merge_login_credential(self, credential_id: str, credential_data: dict,
+                               nickname: str = "") -> bool:
+        """重新登录成功后就地更新既有凭证；返回是否命中该行。
+
+        与 `save_credential_data` 的差别是语义：重新登录 = 上游重新签发了整份
+        凭证，理所当然要**解除**「需重新登录」硬禁用、清掉冷却与模型级负缓存
+        （与 `revive` 同口径，且这里是管理员显式动作，直接 `force`），否则
+        新凭证落库了却仍选不中。`enabled`（用户主动暂停）/ `pinned` / `tags` /
+        `added_by` / `created_at` 一概保留——合并只换凭证内容，不改运维状态。
+
+        昵称为空时保留旧值（登录接口偶尔拿不到用户名，不能因此清空展示名）。
+        """
+        payload = json.dumps(credential_data, ensure_ascii=False).encode("utf-8")
+        issued_at, expires_at = credential_token_times(credential_data)
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE credentials SET data_enc = ?, token_expires_at = ?, "
+                "token_issued_at = ?, "
+                "nickname = CASE WHEN ? = '' THEN nickname ELSE ? END, "
+                "disabled = 0, disabled_reason = NULL, "
+                "cooling_until = NULL, cooling_kind = NULL, err_count = 0 "
+                "WHERE id = ?",
+                (self._cipher.encrypt(payload), expires_at, issued_at,
+                 nickname, nickname, credential_id))
+            if cursor.rowcount > 0:
+                _clear_model_cooldowns(conn, credential_id)
+        return cursor.rowcount > 0
+
     def save_quota(self, credential_id: str, quota: Quota) -> None:
         """写回额度，并顺带记一条变动流水。
 

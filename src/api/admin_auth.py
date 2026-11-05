@@ -30,6 +30,7 @@ from ..provider.base import AuthResult
 from ..provider.trae.callback import login_trace_id
 from ..webapp.security import session_cookie_secure
 from .authorize import PENDING_CALLBACK_TTL_SECONDS
+from .credential_login import save_login_credential
 from .deps import (
     SESSION_COOKIE,
     Principal,
@@ -81,14 +82,21 @@ def _request_origin(request: Request) -> str:
 
 
 def _record_oauth_import(services: Services, principal: Principal, provider_id: str,
-                         credential_id: str) -> None:
+                         credential_id: str, *, merged: bool = False) -> None:
     """OAuth 登录落库的审计行（与手工导入 `credential.import` 同一 action）。
 
     三条 OAuth 路径（poll / 粘贴回调 / `/authorize`）原来都**不写审计**，于是
     「谁什么时候把号塞进池子」只能从手工导入那一条回答——登录进来的号在审计
     页上完全消失。这里统一补上，action 与手工导入一致，管理台的「导入凭证」
-    过滤能同时看到两条来源，detail 里区分渠道。
+    过滤能同时看到两条来源，detail 里区分渠道与「新增 / 重新登录合并」。
     """
+    if merged:
+        logger.info("管理员 %s 通过 OAuth 重新登录并更新凭证 %s（上游 %s）",
+                    principal.username, credential_id, provider_id)
+        services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_IMPORT,
+                              target=credential_id,
+                              detail=f"上游 {provider_id}；来源 OAuth 重新登录（合并已有凭证）")
+        return
     logger.info("管理员 %s 通过 OAuth 新增凭证 %s（上游 %s）",
                 principal.username, credential_id, provider_id)
     services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_IMPORT,
@@ -326,13 +334,16 @@ def create_router(services: Services) -> APIRouter:
         result = await oauth.poll(state, principal.username)
         if result is None:
             return {"status": "pending"}
-        # 登录成功：直接落库，绝不在响应里回传 token
-        credential_id = services.credentials.add(
-            provider=provider_id, credential_data=result.credential_data,
+        # 登录成功：直接落库，绝不在响应里回传 token。
+        # 同一上游账号再次登录 = 更新既有凭证，避免池子里出现重复账号。
+        credential_id, merged = await save_login_credential(
+            services, provider_id=provider_id,
+            credential_data=result.credential_data,
             nickname=result.nickname, added_by=principal.username)
-        _record_oauth_import(services, principal, provider_id, credential_id)
+        _record_oauth_import(services, principal, provider_id, credential_id,
+                             merged=merged)
         services.schedule_probe(credential_id)
-        return {"status": "success", "credential_id": credential_id}
+        return {"status": "success", "credential_id": credential_id, "merged": merged}
 
     @router.post("/api/auth/upstream/cancel")
     async def upstream_auth_cancel(request: Request, payload: dict,
@@ -386,11 +397,13 @@ def create_router(services: Services) -> APIRouter:
             result = await _complete_callback_paste(
                 services, request.app.state.pending_callbacks,
                 principal.username, provider_id, raw_url, state)
-        credential_id = services.credentials.add(
-            provider=provider_id, credential_data=result.credential_data,
+        credential_id, merged = await save_login_credential(
+            services, provider_id=provider_id,
+            credential_data=result.credential_data,
             nickname=result.nickname, added_by=principal.username)
-        _record_oauth_import(services, principal, provider_id, credential_id)
+        _record_oauth_import(services, principal, provider_id, credential_id,
+                             merged=merged)
         services.schedule_probe(credential_id)
-        return {"status": "success", "credential_id": credential_id}
+        return {"status": "success", "credential_id": credential_id, "merged": merged}
 
     return router

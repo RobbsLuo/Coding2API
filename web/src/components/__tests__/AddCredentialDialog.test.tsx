@@ -110,6 +110,27 @@ describe("AddCredentialDialog", () => {
     vi.useRealTimers();
   });
 
+  it("poll 重新登录同一账号 → 提示已更新既有凭证", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/upstream/start")) {
+        return jsonResponse({ flow: "poll", state: "s", auth_url: "https://a", interval: 1 });
+      }
+      if (url.includes("/upstream/poll")) {
+        return jsonResponse({ status: "success", credential_id: "cred_old", merged: true });
+      }
+      return jsonResponse({ credentials: [], viewer: "root", is_admin: true });
+    }));
+    vi.stubGlobal("open", () => null);
+    const props = renderDialog();
+    await userEvent.click(screen.getByTestId("start-login-codebuddy"));
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(props.onImported).toHaveBeenCalledWith("登录成功，已更新该账号的凭证。");
+    vi.useRealTimers();
+  });
+
   it("poll 失败时透出上游可行动原因，而不是兜底文案", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {

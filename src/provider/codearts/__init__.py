@@ -9,10 +9,11 @@
    `tasks.refresh.RefreshTask`（唯一持有者，**先落库再同步**）承担，额度探测
    等旁路**不得**顺手刷新——否则一个一次性 refresh_token 被两个地方各消费一次，
    后到的必然报 `the refresh token has been used`，DB 里的 token 也被烧掉。
-3. **每日签到领 1000 积分**（`/v1/ops/delivery` → `claim` → `confirm`）。
+3. **每日签到**（`/v1/ops/delivery` → `claim` → `confirm`）。
    `CheckinTask` 与管理台靠 `getattr` 自动发现，故这里实现 `checkin` /
    `checkin_status` / `checkin_scope`；`claim` 后**必须** `confirm`，否则积分
-   可能不到账（上游 `CLAIMED` 是「已领未确认」而非终态）。
+   可能不到账（上游 `CLAIMED` 是「已领未确认」而非终态）。活动按
+   `type=USER_LOGIN` 挑、`campaignId` 取当轮响应（上游换过 ID 与面额）。
 4. **SSE 不是标准分隔**（逐行 `data:`、无空行），且 `text` 是**累计全文**，
    解析层必须做替换语义的差量，见 `events.TextSnapshot`。
 
@@ -29,6 +30,7 @@ from typing import Any
 
 from ...provider.base import CheckinResult, ErrKind, Event, Model, Quota
 from ...tasks.pacer import paced
+from ..login_identity import login_identity_for
 from . import dpop
 from . import events as codearts_events
 from .client import CodeArtsClient
@@ -105,6 +107,14 @@ class CodeArtsProvider:
         return refreshed.to_dict()
 
     # ---------------------------------------------------------------- 签到
+
+    def login_identity(self, credential_data: dict) -> str:
+        """重新登录合并键：上游账号 `uid`（caller-identity 的 principal_id）。
+
+        判据统一在 `provider/login_identity.py`（登录合并与历史重复清理共用
+        同一套），门面这里只做转发。
+        """
+        return login_identity_for(self.id, credential_data)
 
     async def checkin(self, credential_data: dict) -> CheckinResult:
         return await self.client.checkin(

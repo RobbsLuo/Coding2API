@@ -528,6 +528,8 @@ export interface UpstreamAuthStart {
 export interface UpstreamAuthPoll {
   status: "pending" | "success";
   credential_id?: string;
+  /** true = 同一上游账号重新登录，已更新既有凭证而非新建。 */
+  merged?: boolean;
 }
 
 /** 后端保证是稳定的机器可读枚举，不是 Python 异常类名。 */

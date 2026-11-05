@@ -13,6 +13,7 @@ from ..auth.session import SESSION_COOKIE, verify_session_token
 from ..compat.openai.errors import error_payload
 from ..provider.trae.callback import login_trace_id
 from ..provider.trae.events import UpstreamProtocolViolation
+from .credential_login import save_login_credential
 from .deps import Services
 
 # 待完成回调的有效期：/authorize 无鉴权（浏览器 302 不带 key），长期挂着
@@ -178,8 +179,8 @@ def create_router(services: Services) -> APIRouter:
                 request, error.public_message,
                 f"换取 TRAE 凭证失败：{error.public_message}",
                 code="invalid_credential")
-        credential_id = services.credentials.add(
-            provider="trae", credential_data=credential_data,
+        credential_id, merged = await save_login_credential(
+            services, provider_id="trae", credential_data=credential_data,
             nickname=str(credential_data.get("nickname") or ""),
             added_by=username)
         # 审计：OAuth 落库的凭证与手工导入同 action，否则「谁什么时候把号
@@ -187,7 +188,8 @@ def create_router(services: Services) -> APIRouter:
         # `_record_oauth_import`，两边口径一致）。
         services.audit.record(actor=username, action=ACTION_CREDENTIAL_IMPORT,
                               target=credential_id,
-                              detail="上游 trae；来源 OAuth 回调")
+                              detail=("上游 trae；来源 OAuth 回调（合并已有凭证）"
+                                      if merged else "上游 trae；来源 OAuth 回调"))
         services.schedule_probe(credential_id)
         if _wants_html(request):
             return _page(200, "TRAE 登录成功",

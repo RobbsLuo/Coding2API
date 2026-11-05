@@ -195,8 +195,11 @@ export function AddCredentialDialog({
           const result = await api.upstreamPoll(provider, started.state);
           if (result.status === "success") {
             stopPolling(provider);
-            onNotice("登录成功，凭证已保存。");
-            onImported("登录成功，凭证已保存。");
+            const message = result.merged
+              ? "登录成功，已更新该账号的凭证。"
+              : "登录成功，凭证已保存。";
+            onNotice(message);
+            onImported(message);
           }
         } catch (caught) {
           stopPolling(provider);
@@ -247,13 +250,16 @@ export function AddCredentialDialog({
     setBusy(true);
     onError("");
     try {
-      await api.upstreamComplete(pasteProvider, state, pasteUrl.trim());
+      const result = await api.upstreamComplete(pasteProvider, state, pasteUrl.trim());
       delete loginStatesRef.current[pasteProvider];
       stopPolling(pasteProvider);
       setPasteProvider(null);
       setPasteUrl("");
-      onNotice("登录成功，凭证已保存。");
-      onImported("登录成功，凭证已保存。");
+      const message = result.merged
+        ? "登录成功，已更新该账号的凭证。"
+        : "登录成功，凭证已保存。";
+      onNotice(message);
+      onImported(message);
     } catch (caught) {
       onError(caught instanceof Error ? caught.message : "登录失败，请检查粘贴的链接。");
     } finally {
