@@ -75,6 +75,7 @@ from .db.crypto import CredentialCipher, CredentialDecryptError
 from .db.key_usage import KeyUsageRepository
 from .db.limits import LimitsRepository, day_usage
 from .db.migrate import apply_schema
+from .db.paid_models import PaidModelRepository
 from .db.repo import (
     AlertRepository,
     ApiKeyRepository,
@@ -572,6 +573,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 冷却到期半开探测：到期先放 1 个请求，成功再全量回池（进程内状态，
     # 重启丢失只会让每个号多探一次）。
     half_open_guard = HalfOpenGuard()
+    # 目录 x0 的实测校准：上游改计费不改目录时，用 `usage_events` 里
+    # `credit_estimated=0` 的真实扣费把「免费」纠正成实际倍率，否则免费档
+    # 会一直压过到期积分（见 `db/paid_models.py` 的模块 docstring）。
+    paid_models = PaidModelRepository(db)
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
                                      scheduler=Scheduler(
                                          expiry_window=lambda: runtime.quota_expiry_window_seconds,
@@ -611,6 +616,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                      # 同一份 dict 的引用：模型目录恢复 / 拉取后
                                      # executor 立即可见（倍率查询走它）
                                      model_list_cache=model_cache,
+                                     # 实测扣费校准：目录写 x0 但最近 24h 有真实
+                                     # 扣费的 (渠道, 模型) 按实测均值覆盖，见
+                                     # `Executor._observed_paid_rate`
+                                     paid_models=paid_models.observed_rates,
                                      # 上下文压缩（修订）：选号后按实际服务
                                      # 渠道的窗口裁剪；settings 传运行态覆盖层，
                                      # 开关与四个参数每请求现读（热更）

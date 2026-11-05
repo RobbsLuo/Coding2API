@@ -37,6 +37,7 @@ from ..provider.base import (
     aclose_stream,
     event_error_kind,
 )
+from ..provider.naming import normalize_model_key
 from ..request_context import credential_scope, set_credential_id
 from .continuation import ContinuationStream
 from .model_resolver import (
@@ -236,6 +237,11 @@ class ExecutorDeps:
     # 免费优先档（候选中存在 x0 渠道时优先选它）注入 credit_rate；None / 空
     # 表示目录未就绪，倍率未知，调度退回原排序（向后兼容）。
     model_list_cache: dict[str, dict[str, Any]] | None = None
+    # 实测扣费校准（`db/paid_models.py`）：() → {(渠道, 归一键): 均值}。
+    # 目录写 x0 但最近 24h 有上游明确扣费（`credit_estimated=0` 且 credit>0）
+    # 的模型，注入时按实测均值覆盖——否则一条过期的目录数据就会让该渠道
+    # 永远占住免费档，压过所有到期积分。None = 不校准（测试与旧装配兼容）。
+    paid_models: Any | None = None
     # 会话粘性（ConversationAffinity）；None 表示关闭。对话进行中固定用原
     # 凭证，出错才轮换，成功后重新粘定实际服务的凭证
     affinity: Any | None = None
@@ -1725,6 +1731,11 @@ class Executor:
         别名表换回）。目录里查不到的渠道（该模型不在其登记表 / 目录未就绪 /
         上游没给倍率）记 None——调度端未知倍率不参与免费优先，与 0（确认
         免费）严格区分。免费渠道（zen / kilo）的条目显式标 0.0。
+
+        **目录的 x0 会被实测扣费覆盖**（`_observed_paid_rate`）：上游改计费
+        策略时不改目录，x0 就一直留在快照里，而免费档压过全部到期积分——
+        实测 2026-11-03 起 intl 的 `deepseek-v4.1-flash` 目录写 x0、每次实扣
+        0.14 积分，officeace 15.8 小时内到期的 100 积分包整夜闲置。
         """
         aliases = self._deps.model_aliases
         cache = self._deps.model_list_cache
@@ -1737,9 +1748,31 @@ class Executor:
             if raw is None:
                 continue
             model = cache.get(pid, {}).get(raw.lower())
-            if model is not None:
-                rates[pid] = model.credit_rate
+            if model is None:
+                continue
+            rate = model.credit_rate
+            if rate == 0:
+                rate = self._observed_paid_rate(pid, target.model, rate)
+            rates[pid] = rate
         return rates
+
+    def _observed_paid_rate(self, provider_id: str, model: str,
+                            declared: float | None) -> float | None:
+        """目录说 x0 时，用最近窗口内的实测扣费把它纠正成真实倍率。
+
+        只对 `declared == 0` 生效：目录给的正数已经是上游自报的倍率，实测
+        均值反而更粗（受缓存命中率影响）；None（目录未给倍率）也**不能**被
+        实测值补成「免费」或「收费」——未知就该继续未知。
+
+        校准数据源缺失（未装配）或窗口内没有该 (渠道, 模型) 的实扣记录时
+        原样返回 0：宁可信目录，也不凭「没观测到扣费」判免费（夜里没人用
+        就没有观测行，那不是免费的证据）。
+        """
+        source = self._deps.paid_models
+        if declared != 0 or source is None:
+            return declared
+        observed = source().get((provider_id, normalize_model_key(model)))
+        return observed if observed is not None else declared
 
     def _candidate_or_none(self, credential_id: str, provider_id: str = "") -> Candidate:
         """同 `_candidate`，但凭证已被并发删除时用占位候选而不是抛异常。

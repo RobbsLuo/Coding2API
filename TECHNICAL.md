@@ -508,7 +508,7 @@ class Scheduler:
 ```
 
 排序键（`_free_first_rank` 起，字典序）：
-1. **免费优先档**：候选含 `credit_rate == 0` → 免费渠道整体排前（`None` 不算免费）。仅候选带倍率数据生效。
+1. **免费优先档**：候选含 `credit_rate == 0` → 免费渠道整体排前（`None` 不算免费）。仅候选带倍率数据生效。**x0 会被实测扣费校准**：目录说 0、但最近 24h `usage_events` 里有该 (渠道, 归一键) 的 `credit > 0 AND credit_estimated = 0`（上游真值，非本服务推算）时，注入实测均值（`db/paid_models.py`，快照 TTL 600s）。上游改计费不改目录 → 目录的 x0 会永久占住免费档、压过所有到期积分（实测 2026-11-03 起 intl `deepseek-v4.1-flash` 目录写 x0、每次实扣 ~0.14，officeace 15.8 小时内到期的 100 积分包整夜闲置）。无观测行时仍信目录：夜里没人用不是免费的证据。目录给正数或 `None` 时一律不校准。
 2. **到期额度（两级字典序）**：`expiry_ladder` 中「距到期 ≤ 主窗口」（`QUOTA_EXPIRY_WINDOW_SECONDS`，默认 36h）额度加总，多者先用；打平比次窗口（默认 7 天）；无到期信息计 0；主窗口 ≤0 → 次窗口失效。CB / TRAE / CodeArts（积分包按 `end_date`）均落阶梯。
 3. **健康度三态**：`known(0-100) DESC > unknown > exhausted(-1)`。
 4. **账户剩余积分**多者优先——只作健康度**打平键**。

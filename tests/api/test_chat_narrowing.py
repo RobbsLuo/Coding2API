@@ -386,3 +386,46 @@ async def test_probe_failed_model_still_narrows_to_its_owner(dual_repo):
     # 负缓存零新增：没给任何渠道写「该后端无此模型」
     assert db.connect().execute(
         "SELECT COUNT(*) FROM credential_model_cooldowns").fetchone()[0] == 1
+
+async def test_catalog_x0_overridden_by_observed_charge(dual_repo):
+    """目录写 x0、但上游实际在扣费 → 按实测倍率纠正，免费档不再生效。
+
+    实测故障（2026-11-03 起）：`codebuddy_intl/deepseek-v4.1-flash` 目录仍标
+    x0，每次请求却实扣 ~0.14 积分（`credit_estimated=0`）。免费档压过全部
+    到期积分 → officeace 15.8 小时内到期的 100 积分包整夜闲置。校准后 intl
+    回到付费档，健康度重新决定选号。
+    """
+    repo, db = dual_repo
+    cb_id = repo.add(provider="codebuddy", credential_data={"bearer_token": "cb"})
+    intl_id = repo.add(provider="codebuddy_intl",
+                       credential_data={"bearer_token": "intl"})
+    # 健康度拉开差距：校准前免费档赢，校准后健康度高者赢——两种结果可区分
+    db.connect().execute("UPDATE credentials SET health = 100 WHERE id = ?", (cb_id,))
+    db.connect().execute("UPDATE credentials SET health = 50 WHERE id = ?", (intl_id,))
+    cb = _RejectProvider("codebuddy", [GOOD])
+    intl = _RejectProvider("codebuddy_intl", [GOOD])
+
+    def deps(paid_models):
+        return ExecutorDeps(
+            providers={"codebuddy": cb, "codebuddy_intl": intl}, credentials=repo,
+            scheduler=Scheduler(), default_model="deepseek-v4.1-flash",
+            model_aliases={
+                "codebuddy": {"deepseek-v4.1-flash": "deepseek-v4.1-flash"},
+                "codebuddy_intl": {"deepseek-v4.1-flash": "deepseek-v4.1-flash"}},
+            model_list_cache={
+                "codebuddy": {"deepseek-v4.1-flash": Model(
+                    id="deepseek-v4.1-flash", credit_rate=0.11)},
+                "codebuddy_intl": {"deepseek-v4.1-flash": Model(
+                    id="deepseek-v4.1-flash", credit_rate=0.0)}},
+            paid_models=paid_models)
+
+    # 无实扣记录 → 信目录：intl 是 x0，免费档压过健康度
+    executor = Executor(deps(lambda: {}))
+    await executor.complete(_request("deepseek-v4.1-flash"), username="u")
+    assert (cb.calls, intl.calls) == (0, 1)
+
+    # 有实扣记录 → intl 按实测倍率当付费，健康度 100 的 codebuddy 胜出
+    cb.calls = intl.calls = 0
+    executor = Executor(deps(lambda: {("codebuddy_intl", "deepseek-v4.1-flash"): 0.14}))
+    await executor.complete(_request("deepseek-v4.1-flash"), username="u")
+    assert (cb.calls, intl.calls) == (1, 0)
