@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import socket
 import ssl
 import time
 from collections.abc import AsyncIterator, Iterable, Iterator
@@ -372,7 +373,8 @@ class Executor:
         所有候选都只因**该模型的模型级冷却**被排除时（`_all_model_cooled`，
         与 `_unavailable_text` 同一判据）记 `model_unavailable`，否则按**导致
         耗尽的真实原因**归类：`last_kind` 有值时走 `_failure_type`（SOFT →
-        rate_limit、传输异常 → upstream_timeout、CONTEXT → context_overflow…），
+        rate_limit、传输异常 → upstream_timeout、本机网络失败 → network_error、
+        CONTEXT → context_overflow…），
         一次都没选中凭证（`last_kind is None`）才回落 `no_healthy_credential`。
 
         为什么不再一律 `no_healthy_credential`：该标签读起来是「整池凭证挂了」，
@@ -2021,7 +2023,7 @@ class Executor:
                              error: Exception | None = None, *,
                              username: str, started: float) -> bool:
         """对一次上游错误作出反应：记账 + 落库（DEAD/RESTRICTED 另落一条统计）。
-        REQUEST / CONTEXT 类零动作。
+        REQUEST / CONTEXT / NETWORK 类零动作。
 
         返回值 = **本次是否落了尝试级明细**（仅 DEAD/RESTRICTED 为真）。调用方
         据此在轮换耗尽时跳过收尾行，避免同一个请求在 `requests` 里被算两次、
@@ -2049,9 +2051,10 @@ class Executor:
         调度器在**该错误分类的作用域**内覆盖冷却时长；缺失/过去时刻回落常量。
         """
         if kind in NO_PENALTY_KINDS:
-            # REQUEST / CONTEXT 不是账号的问题：不冷却、不累计、不落错写库。
-            # 也绝不落库——save_error 会把已有 cooling_until 写成 NULL，
-            # 等于顺手解掉别的错误留下的冷却。调用方只换号重试。
+            # REQUEST / CONTEXT / NETWORK 不是账号的问题：不冷却、不累计、
+            # 不落错写库。NETWORK 是本机 DNS/连接失败，惩罚凭证会把一次网络
+            # 抖动放大成整池「无可用凭证」。也绝不落库——save_error 会把已有
+            # cooling_until 写成 NULL，等于顺手解掉别的错误留下的冷却。
             return False
         if self._deps.half_open is not None and kind is not ErrKind.QUEUE:
             # 又记了一次错误 → 之前「已探通」的结论作废，下次到期重新半开。
@@ -2281,9 +2284,11 @@ def _model_mismatch(requested: str, observed: str) -> bool:
 def _classify(error: Exception) -> ErrKind | None:
     """上游错误 → ErrKind；不认识的原样上抛。
 
-    `kind()` 优先（provider 自己按上游错误码语义分类）。之后兜住
-    `httpx.TransportError`：连接超时 / DNS 失败 / 写请求体超时 / 读超时
-    都是链路瞬态，与具体账号无关，按 SOFT 短冷却换号重试。
+    本机网络/DNS 失败（`ConnectError` / `gaierror`）先单独归 `NETWORK`：它不是
+    凭证或上游服务的问题，冷却凭证只会把网络抖动放大成「整池无可用凭证」。
+    `kind()` 次之（provider 自己按上游错误码语义分类）。之后兜住
+    `httpx.TransportError`：连接超时 / 写请求体超时 / 读超时是链路瞬态，
+    与具体账号无关，按 SOFT 短冷却换号重试。
 
     **为什么统一放在这里，而不是让每个 provider 各自包装**：httpx 的传输
     异常会从 `client.stream()` 的 `__aenter__`、`aiter_bytes()`、写请求体
@@ -2305,6 +2310,11 @@ def _classify(error: Exception) -> ErrKind | None:
     同属链路瞬态，归 SOFT。仍然只认**具体类**，不放开到 `OSError` 整体。
     """
     kind_method = getattr(error, "kind", None)
+    if _is_network_error(error):
+        # DNS / TCP 连接失败发生在拿到响应之前：本机代理、DNS、网络切换都可能
+        # 造成，与账号额度、上游限流无关。优先于 provider 的 kind()，否则被
+        # 包成 `UpstreamTransportError`（固定 SOFT）时仍会冷却健康凭证。
+        return ErrKind.NETWORK
     if callable(kind_method):
         return kind_method()
     if isinstance(error, (httpx.TransportError, ssl.SSLError)):
@@ -2463,16 +2473,35 @@ def _failure_type(kind: ErrKind | None, error: Exception | None = None, *,
                   quota_exhausted: bool = False) -> str:
     """一次失败的受控统计类型：先按**异常形态**分流，再落 ErrKind 映射。
 
-    链路层瞬态（`httpx.TransportError` / TLS 中断）与上游限流在 ErrKind 上都
-    是 SOFT，但处置动作完全相反（一个去查代理、一个去等额度）。传输异常是
-    `_classify` 里明确单列的几类，这里在 SOFT 之前先兜住：
-    `upstream_timeout` 而不是 `rate_limit`。
+    本机网络/DNS 失败与链路层瞬态（`httpx.TransportError` / TLS 中断）必须先
+    分开：都表现为「连不上」，但一个该查本机 DNS/代理，一个该查上游链路。
+    归因面板若都记 `upstream_timeout`，运维会去排查上游（实测 2026-11-05
+    睡眠唤醒后六渠道同时 ENOTFOUND，面板全显示「上游超时」）。传输异常随后
+    在 SOFT 之前兜住：`upstream_timeout` 而不是 `rate_limit`。
     """
+    if _is_network_error(error):
+        return "network_error"
     if _is_transport_error(error):
         return "upstream_timeout"
     if kind is ErrKind.DEAD:
         kind = _dead_as_credit(quota_exhausted=quota_exhausted)
     return _error_type_for(kind) if kind else "upstream_protocol"
+
+
+def _is_network_error(error: Exception | None) -> bool:
+    """是不是本机 DNS / 连接建立失败（而非上游返回错误或读超时）。
+
+    只认 `httpx.ConnectError` 与底层 `socket.gaierror`：前者是 TCP/DNS 建连
+    失败，后者是解析失败。`ConnectTimeout` 不在此列——它可能是上游慢，沿用
+    `upstream_timeout`。`__cause__` 也看一层：provider 把原始异常包成
+    `UpstreamTransportError` 时仍要识别出网络根因。
+    """
+    if error is None:
+        return False
+    kinds = (httpx.ConnectError, socket.gaierror)
+    if isinstance(error, kinds):
+        return True
+    return isinstance(error.__cause__, kinds)
 
 
 def _is_transport_error(error: Exception | None) -> bool:
@@ -2490,10 +2519,13 @@ def _is_transport_error(error: Exception | None) -> bool:
 def _error_type_for(kind: ErrKind) -> str:
     """ErrKind → 受控的统计失败类型（web/src/api/display.ts 同步维护）。
 
-    链路层瞬态（`httpx.TransportError` / TLS 中断）不在这里分流——它归 SOFT，
-    由 `_failure_type` 先按异常类型判成 `upstream_timeout`，否则会被误读成
-    「上游限流」。参见 `_failure_type`。
+    本机网络/DNS 失败（NETWORK）独立成 `network_error`：它发生在连上游之前，
+    不能混进「上游超时」——后者指向渠道，前者指向本机代理/DNS。链路层瞬态
+    （`httpx.TransportError` / TLS 中断）不在这里分流——由 `_failure_type`
+    先按异常形态判成 `upstream_timeout`，否则会被误读成「上游限流」。
     """
+    if kind is ErrKind.NETWORK:
+        return "network_error"
     if kind in (ErrKind.PLAN, ErrKind.CREDIT, ErrKind.MODEL,
                 ErrKind.CONCURRENCY, ErrKind.QUEUE, ErrKind.SOFT):
         # MODEL / CONCURRENCY 都是模型级限流，展示口径同为额度类；

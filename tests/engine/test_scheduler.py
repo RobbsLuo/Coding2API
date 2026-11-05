@@ -465,6 +465,12 @@ def test_note_error_request_kind_is_zero_action():
     assert (out.cooling_until, out.err_count, out.disabled) == (None, 2, False)
     assert out.model_cooldowns is None
 
+def test_note_error_network_kind_is_zero_action():
+    """本机 DNS/连接失败不是凭证的问题：不能冷却，否则网络抖动会清空整池。"""
+    out = Scheduler().note_error(cand(err_count=2), ErrKind.NETWORK, NOW)
+    assert (out.cooling_until, out.err_count, out.disabled) == (None, 2, False)
+    assert out.model_cooldowns is None
+
 def test_note_error_credit_cools_until_next_4am():
     """余额不足：冷却到次日签到时刻，而不是固定 12h。"""
     out = Scheduler().note_error(cand(), ErrKind.CREDIT, NOW)

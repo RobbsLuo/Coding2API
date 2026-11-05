@@ -91,8 +91,12 @@ def test_upstream_transport_error_is_soft():
     assert UpstreamTransportError("x").kind() is ErrKind.SOFT
 
 
-async def test_stream_rotates_and_cools_on_connect_error(repo):
-    """首个凭证 ConnectError → 换号成功，且只有它进入 SOFT 冷却。"""
+async def test_stream_rotates_on_connect_error_without_cooling(repo):
+    """首个凭证 ConnectError（本机 DNS/建连失败）→ 换号成功，但不冷却凭证。
+
+    网络故障不是账号的问题；旧行为按 SOFT 冷却，会让一次 DNS 抖动冷却整池
+    健康号（2026-11-05 睡眠唤醒后实测）。仍然换号重试，所以第二个号能成功。
+    """
     credentials, _db = repo
     # 选号在健康度/余额都相同时按 credential_id 兜底排序，先选哪张不固定：
     # 断言按「第一次实际用的 token」反查凭证，不能假定 first 一定先被选中
@@ -105,11 +109,12 @@ async def test_stream_rotates_and_cools_on_connect_error(repo):
     assert provider.calls == 2
     assert frames[-1] == SSE_DONE
     assert b'"hi"' in b"".join(frames)
-    # 被冷却的只有**实际失败的那张**（第一次调用用的 token 对应的凭证）
+    # 实际失败的那张不冷却、不累计（NETWORK 属于零动作分类）
     failed_id = ids[provider.tokens[0]]
-    assert cooled_ids(credentials) == {failed_id}
-    cooled = next(c for c in credentials.candidates() if c.credential_id == failed_id)
-    assert cooled.err_count == 0          # SOFT 不累计错误数
+    assert cooled_ids(credentials) == set()
+    failed = next(c for c in credentials.candidates() if c.credential_id == failed_id)
+    assert failed.err_count == 0
+    assert failed.cooling_until is None
     assert provider.tokens[1] != provider.tokens[0]
 
 

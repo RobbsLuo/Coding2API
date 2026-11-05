@@ -433,6 +433,8 @@ def test_error_type_mapping_covers_all_kinds():
     # 上下文超限 / 模型能力不匹配（2026-11-03 从 invalid_request 里独立出来）
     assert _error_type_for(ErrKind.CONTEXT) == "context_overflow"
     assert _error_type_for(ErrKind.CAPABILITY) == "model_capability"
+    # 本机 DNS/连接失败独立成类；否则归因面板会把它读成「上游超时」。
+    assert _error_type_for(ErrKind.NETWORK) == "network_error"
 
 
 def test_blocked_error_type_is_controlled():
@@ -442,6 +444,25 @@ def test_blocked_error_type_is_controlled():
     assert "model_not_found" in CONTROLLED_ERROR_TYPES
     assert "account_restricted" in CONTROLLED_ERROR_TYPES
     assert "truncated_stream" in CONTROLLED_ERROR_TYPES
+    assert "network_error" in CONTROLLED_ERROR_TYPES
+
+
+def test_network_connect_error_is_classified_and_not_penalized():
+    """DNS/建连失败 → NETWORK/network_error；包成 UpstreamTransportError 也认。"""
+    import httpx
+
+    from src.engine.executor import _classify, _failure_type
+    from src.provider.base import UpstreamTransportError
+
+    error = httpx.ConnectError("[Errno 8] nodename nor servname provided")
+    assert _classify(error) is ErrKind.NETWORK
+    assert _failure_type(ErrKind.NETWORK, error) == "network_error"
+    wrapped = UpstreamTransportError("connect failed")
+    wrapped.__cause__ = error
+    assert _classify(wrapped) is ErrKind.NETWORK
+    assert _failure_type(ErrKind.NETWORK, wrapped) == "network_error"
+    # ConnectTimeout 不是建连失败：可能是上游慢，沿用 upstream_timeout。
+    assert _classify(httpx.ConnectTimeout("boom")) is ErrKind.SOFT
 
 
 async def test_dead_credential_also_records_attribution_row(repo):
@@ -1008,6 +1029,30 @@ async def test_transport_timeout_exhaustion_records_upstream_timeout(repo):
         await executor.complete(parse_chat_request(
             {"messages": [{"role": "user", "content": "hi"}]}))
     assert collector.events[-1]["error_type"] == "upstream_timeout"
+
+
+async def test_dns_connect_error_records_network_error_and_does_not_cool(repo):
+    """DNS 解析失败（ConnectError）→ network_error，且不冷却凭证。
+
+    这是本机代理/DNS 的问题，不是账号额度或上游限流。若按 SOFT 冷却，一次
+    睡眠唤醒后的解析失败会把同渠道所有健康号短冷却成「无可用凭证」。
+    """
+    import httpx
+
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+
+    executor = _exec_with_stats(
+        repo, [[httpx.ConnectError("[Errno 8] nodename nor servname provided")]],
+        collector, max_rotate=1)
+    from src.compat.openai.request import parse_chat_request
+
+    with pytest.raises(NoHealthyCredential):
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+    assert collector.events[-1]["error_type"] == "network_error"
+    assert credentials.candidates()[0].cooling_until is None
 
 
 async def test_stream_plan_error_records_failure(repo):

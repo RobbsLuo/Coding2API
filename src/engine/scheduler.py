@@ -39,7 +39,7 @@ MAX_ROTATE = 3
 # 冷却来源属于「上游点名恢复时刻」的分类：人工 `revive` **保留**这些冷却
 # （清掉只会立刻再撞一次上游），要强制清除须显式 `force=True`。
 # 不含 MODEL/BLOCKED/CONCURRENCY（模型级条目，revive 一律清）、REQUEST/CONTEXT/
-# CAPABILITY/QUEUE（零冷却）、OTHER（本地累计冷却，清掉无害）。
+# NETWORK/CAPABILITY/QUEUE（零冷却）、OTHER（本地累计冷却，清掉无害）。
 # 与 `note_error` 里写 `cooling_kind` 的分支必须同步：漏一处，该类的冷却
 # 就会被 revive 静默解掉。
 UPSTREAM_COOLDOWN_KINDS = frozenset({
@@ -378,6 +378,7 @@ class Scheduler:
         """
         if kind in NO_PENALTY_KINDS:
             # REQUEST / CONTEXT 不是账号的问题：不冷却、不累计、只换号重试。
+            # NETWORK（本机 DNS/连接失败）同理，见 NO_PENALTY_KINDS。
             return ErrorOutcome(err_count=candidate.err_count)
         if kind is ErrKind.QUEUE:
             # 排队不是失败：不冷却、不累计。真正的「等多久再打」由 executor

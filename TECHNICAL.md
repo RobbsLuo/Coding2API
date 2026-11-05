@@ -687,7 +687,9 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 - **收尾行按真实原因落**（2026-11-03 修）：轮换耗尽时那一行由 `_exhaust_error_type` 取最后一次错误的类型——模型级冷却耗尽 → `model_unavailable`，否则走 `_failure_type`；只有一次都没选中凭证才 `no_healthy_credential`。此前一律 `no_healthy_credential`，把 zen 单凭证 429 冷却到次日这种「上游限流」也写成「无可用凭证」，运维去查凭证池只会白折腾。「上游没这个模型」（尝试级归因）与「这个模型现在全都不可用」（收尾行）仍是两件事。
 
 ### 9.1.3 收尾行按真实归因 + 限流/超时/上下文类独立成类
-`_failure_type(kind, error)` = 收尾行的受控类型：先按**异常形态**判链路层瞬态（`httpx.TransportError` / `ssl.SSLError` / `UpstreamTransportError` → `upstream_timeout`），再落 `_error_type_for(kind)`。
+`_failure_type(kind, error)` = 收尾行的受控类型：先判**本机网络/DNS 失败**（`httpx.ConnectError` / `socket.gaierror`，含 `UpstreamTransportError.__cause__`）→ `network_error`，再按异常形态判链路层瞬态（`httpx.TransportError` / `ssl.SSLError` / `UpstreamTransportError` → `upstream_timeout`），最后落 `_error_type_for(kind)`。
+
+- `ErrKind.NETWORK` → `network_error`，且属于 `NO_PENALTY_KINDS`：DNS 解析失败 / TCP 建连失败发生在拿到响应之前，与凭证额度、上游限流无关。按 SOFT 冷却会把一次网络抖动放大成整池「无可用凭证」（实测 2026-11-05 睡眠唤醒后六渠道同时 `ENOTFOUND`）。`ConnectTimeout` 不在此列（可能是上游慢），仍归 `upstream_timeout`。
 
 - `ErrKind.SOFT` → `rate_limit`：SOFT 主要是上游 429/限流，记「额度耗尽」比笼统 `upstream_error`（「渠道错误」）可行动；链路层超时被上一步拦走，不会误标。
 - `ErrKind.CONTEXT`（CodeBuddy 11115 `prompt is too long`）→ `context_overflow`；处置同请求级错误（不罚号、仍换号），但不能再混进「请求无效」。

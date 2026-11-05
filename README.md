@@ -520,7 +520,7 @@ Playground 与 `/v1/models` 走 stale-while-revalidate：有缓存立刻回旧�
 
 默认**最近 24 小时**（另有 7 / 30 天、全部、自定义）。自定义 = 两个 `datetime-local`（浏览器时区），可只填一边；起点不早于终点 → 整窗作废 + 提示。端点全收 `until`（epoch 秒，半开 `[since, until)`）。
 
-**失败类型** = 受控枚举（`CONTROLLED_ERROR_TYPES`）：收尾行取**最后一次错误的真实归因**——模型级冷却耗尽 → `model_unavailable`；上游限流（SOFT / 429）→ `rate_limit`；链路层瞬态（连接超时 / 读超时 / TLS 中断）→ `upstream_timeout`；上下文超限（CodeBuddy 11115）→ `context_overflow`；模型不支持该请求形态（CodeArts 001001020 not multimodal）→ `model_capability`；上游明确说「没这个模型」→ `model_not_found`（与「请求无效」分开：前者是模型下线，后者是请求写错）。只有**一次都没选中凭证**（候选全在冷却 / 池子为空）才回落 `no_healthy_credential`。对外码相同，仅统计口径不同。
+**失败类型** = 受控枚举（`CONTROLLED_ERROR_TYPES`）：收尾行取**最后一次错误的真实归因**——模型级冷却耗尽 → `model_unavailable`；上游限流（SOFT / 429）→ `rate_limit`；链路层瞬态（连接超时 / 读超时 / TLS 中断）→ `upstream_timeout`；本机 DNS/连接失败（`ConnectError` / `gaierror`，连上游之前就失败）→ `network_error`（不冷却凭证）；上下文超限（CodeBuddy 11115）→ `context_overflow`；模型不支持该请求形态（CodeArts 001001020 not multimodal）→ `model_capability`；上游明确说「没这个模型」→ `model_not_found`（与「请求无效」分开：前者是模型下线，后者是请求写错）。只有**一次都没选中凭证**（候选全在冷却 / 池子为空）才回落 `no_healthy_credential`。对外码相同，仅统计口径不同。
 
 **请求 ID**：响应带 `X-Request-ID`。入站合法沿用，否则自生成；字符集 `[A-Za-z0-9._:-]`、长 1–128。落 `usage_events.request_id`，明细时间列悬停可见。**不透传上游**——各渠道出站头语义不同。
 

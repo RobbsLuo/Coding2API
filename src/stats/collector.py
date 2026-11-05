@@ -37,6 +37,7 @@ CONTROLLED_ERROR_TYPES = frozenset({
     #   context_overflow   — 上下文超限（11115 prompt too long）
     #   model_capability   — 模型不支持该请求形态（CodeArts 001001020 not multimodal）
     #   upstream_timeout   — 链路层瞬态（连接超时 / 读超时 / TLS 中断；只看异常类型）
+    #   network_error      — 本机 DNS/连接失败（ConnectError/gaierror，连上游之前）
     #   upstream_error / upstream_protocol — 其它上游失败
     #   upstream_first_event_timeout — 出帧前上游不吐首个数据事件（A1）
     #   upstream_idle_timeout        — 已出帧后上游停止吐数据（A1）
@@ -46,6 +47,7 @@ CONTROLLED_ERROR_TYPES = frozenset({
     "invalid_request", "model_not_found", "no_healthy_credential",
     "model_unavailable", "context_overflow", "model_capability",
     "rate_limit", "upstream_error", "upstream_protocol", "upstream_timeout",
+    "network_error",
     "upstream_first_event_timeout", "upstream_idle_timeout",
     "truncated_stream",
 })

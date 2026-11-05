@@ -75,6 +75,12 @@ class ErrKind(StrEnum):
     # 不冷却、不累计、不占轮换预算，等在原号上重开（见 executor 的排队重开）。
     # 与 SOFT 的关键差别：SOFT 冷却 60s 且换号，排队按上游点名的秒数等在原号。
     QUEUE = "queue"
+    # 本机网络/DNS 故障（`httpx.ConnectError` / `socket.gaierror`）：失败发生在
+    # 连上游之前，与具体凭证无关。归 SOFT 会冷却整池健康号（实测 2026-11-05
+    # 睡眠唤醒后 DNS 未就绪，六渠道同时 ENOTFOUND，短冷却把 codebuddy 全部号
+    # 打成「无可用凭证」）。与 REQUEST/CONTEXT 同为**零动作**，但统计口径单独
+    # 成类，避免归因面板把本机故障读成「上游超时」。
+    NETWORK = "network"
 
 
 # 冷却作用域是「(凭证, 模型)」而非整个凭证的错误类别。
@@ -83,9 +89,10 @@ class ErrKind(StrEnum):
 MODEL_SCOPED_KINDS = frozenset({ErrKind.MODEL, ErrKind.BLOCKED, ErrKind.CONCURRENCY})
 
 # 零动作分类：不是账号/凭证的错，不冷却、不累计，只换号重试。
-# REQUEST = 请求体坏 / 渠道风控；CONTEXT = 上下文超限（11115）。
-# 与 INVALID 的区别：INVALID 跳过**整个上游**（换号也回同一条），这两个只换号。
-NO_PENALTY_KINDS = frozenset({ErrKind.REQUEST, ErrKind.CONTEXT})
+# REQUEST = 请求体坏 / 渠道风控；CONTEXT = 上下文超限（11115）；
+# NETWORK = 本机 DNS/连接失败（连上游之前就失败，惩罚凭证只会放大网络抖动）。
+# 与 INVALID 的区别：INVALID 跳过**整个上游**（换号也回同一条），这些只换号。
+NO_PENALTY_KINDS = frozenset({ErrKind.REQUEST, ErrKind.CONTEXT, ErrKind.NETWORK})
 
 # 「这次请求形态上游不接受」→ 换号无用，跳过整个上游。EXECUTOR 对这两类都
 # `_skip_provider` + 以 400 收尾；统计口径分开（invalid_request / model_capability）。

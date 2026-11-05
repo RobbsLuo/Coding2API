@@ -535,6 +535,7 @@ export type UsageErrorType =
   | "model_capability"
   | "model_not_found"
   | "model_unavailable"
+  | "network_error"
   | "no_healthy_credential"
   | "rate_limit"
   | "truncated_stream"
@@ -554,6 +555,7 @@ export const USAGE_ERROR_LABEL: Record<UsageErrorType, string> = {
   model_capability: "模型不支持该形态",
   model_not_found: "上游无此模型",
   model_unavailable: "该模型暂时不可用",
+  network_error: "本机网络故障",
   no_healthy_credential: "无可用凭证",
   rate_limit: "额度耗尽",
   truncated_stream: "上游截断",
