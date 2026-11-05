@@ -20,20 +20,20 @@ def _delivery(campaign: dict | None = None, *, extra_items: list | None = None) 
 
 def _campaign(**over) -> dict:
     base = {
-        "campaignId": 1, "title": "每日签到领1000 积分", "type": "USER_LOGIN",
-        "benefitAmount": 1000, "benefitUnit": "CREDIT",
-        "claimable": True, "status": "ELIGIBLE", "pendingTotalAmount": 1000.0,
+        "campaignId": 34, "title": "每日签到领100积分", "type": "USER_LOGIN",
+        "benefitAmount": 100, "benefitUnit": "CREDIT",
+        "claimable": True, "status": "ELIGIBLE", "pendingTotalAmount": 100.0,
         "extra": {"endTime": "2026-12-30T16:00:00Z",
                   "triggerMode": "MANUAL_CLAIM", "consumePriority": 100},
     }
     base.update(over)
     return base
 
-def test_events_daily_credit_campaign_picks_id_and_tolerates_shape():
+def test_events_daily_credit_campaign_picks_by_type_not_id_and_tolerates_shape():
     other = {"campaignId": 3, "title": "推荐码上有礼", "status": "ELIGIBLE"}
     data = _delivery(_campaign(), extra_items=[other])
-    assert codearts_events.daily_credit_campaign(data)["title"] == "每日签到领1000 积分"
-    # 只有别的活动 → None（不靠标题匹配，id 精确挑）
+    assert codearts_events.daily_credit_campaign(data)["title"] == "每日签到领100积分"
+    # 只有别的活动 → None（不靠标题匹配，靠 type=USER_LOGIN）
     assert codearts_events.daily_credit_campaign(_delivery(None, extra_items=[other])) is None
     # 形状退化一律 None，不抛（上游改版不该让签到任务炸）
     for bad in (None, {}, {"data": None}, {"data": []}, {"data": {"items": None}},
@@ -42,6 +42,33 @@ def test_events_daily_credit_campaign_picks_id_and_tolerates_shape():
     # campaignId 是 bool 不算 id（_as_int 排除 bool）
     assert codearts_events.daily_credit_campaign(
         _delivery(None, extra_items=[{"campaignId": True}])) is None
+
+def test_events_daily_credit_campaign_survives_id_and_amount_changes():
+    """上游换 ID / 改面额时签到不能失效（2026-11：ID 1→34、1000→100 积分）。"""
+    # 新 ID + 新面额，靠 type 命中
+    new_id = _campaign(campaignId=34, benefitAmount=100)
+    assert codearts_events.daily_credit_campaign(
+        _delivery(new_id))["campaignId"] == 34
+    # 再来一次换 ID：仍然命中，不写死任何一个 ID
+    assert codearts_events.daily_credit_campaign(
+        _delivery(_campaign(campaignId=99)))["campaignId"] == 99
+    # 极老响应没有 type：仍按历史 ID 1 兜底
+    legacy = {"campaignId": 1, "status": "ELIGIBLE", "claimable": True}
+    assert codearts_events.daily_credit_campaign(_delivery(legacy)) is not None
+    # 有 type 但不是 USER_LOGIN（新用户/邀请/学生认证）→ 不当签到
+    for other_type in ("NEW_USER_REGISTER", "INVITE_USER", "STUDENT_CERTIFIED"):
+        assert codearts_events.daily_credit_campaign(
+            _delivery(_campaign(type=other_type))) is None
+    # 同类型多条：优先今天还没领的那条
+    claimed = _campaign(campaignId=7, status="CONFIRMED", claimable=False)
+    eligible = _campaign(campaignId=34)
+    picked = codearts_events.daily_credit_campaign(
+        _delivery(eligible, extra_items=[claimed]))
+    assert picked["campaignId"] == 34
+    # 全部已领 → 取第一条（当「已签到」处理，不当作活动不存在）
+    only_claimed = _campaign(campaignId=7, status="CONFIRMED", claimable=False)
+    assert codearts_events.daily_credit_campaign(
+        _delivery(only_claimed))["campaignId"] == 7
 
 def test_events_campaign_field_accessors_tolerate_missing():
     good = _campaign()
@@ -52,13 +79,27 @@ def test_events_campaign_field_accessors_tolerate_missing():
     assert codearts_events.campaign_claimable(good) is True
     assert codearts_events.campaign_claimable({"claimable": "true"}) is False
     assert codearts_events.campaign_claimable(None) is False
-    assert codearts_events.campaign_credit(good) == 1000.0
+    assert codearts_events.campaign_credit(good) == 100.0
     assert codearts_events.campaign_credit({"benefitAmount": True}) is None
     assert codearts_events.campaign_credit({"benefitAmount": "1000"}) is None
     assert codearts_events.campaign_credit(None) is None
-    assert codearts_events.campaign_name(good) == "每日签到领1000 积分"
+    assert codearts_events.campaign_name(good) == "每日签到领100积分"
     assert codearts_events.campaign_name({"title": "  "}) == "每日签到领积分"
     assert codearts_events.campaign_name(None) == "每日签到领积分"
+
+def test_events_campaign_type_and_id_accessors_tolerate_missing():
+    """claim/confirm 必须带当轮真实 ID；缺失时给 0（该轮失败好过打错活动）。"""
+    good = _campaign()
+    assert codearts_events.campaign_type(good) == "USER_LOGIN"
+    assert codearts_events.campaign_type({"type": "  USER_LOGIN  "}) == "USER_LOGIN"
+    assert codearts_events.campaign_type({"type": 5}) == ""
+    assert codearts_events.campaign_type(None) == ""
+    assert codearts_events.campaign_id(good) == 34
+    assert codearts_events.campaign_id({"campaignId": 99}) == 99
+    assert codearts_events.campaign_id({"campaignId": True}) == 0
+    assert codearts_events.campaign_id({"campaignId": "34"}) == 0
+    assert codearts_events.campaign_id({}) == 0
+    assert codearts_events.campaign_id(None) == 0
 
 def test_events_campaign_end_epoch_parses_utc_and_degrades():
     # 2026-12-30T16:00:00Z == 2026-12-31 00:00 +08（活动截止，实测原文）
@@ -85,7 +126,7 @@ async def test_client_fetch_checkin_status_uses_ops_path_without_prefix():
 
     client = _client(handler)
     campaign = await client.fetch_checkin_status(_cred())
-    assert campaign is not None and campaign["campaignId"] == 1
+    assert campaign is not None and campaign["campaignId"] == 34
     assert seen == ["https://snap.test/v1/ops/delivery?channel=IDE"]
     await client.aclose()
 
@@ -102,15 +143,15 @@ async def test_client_claim_daily_credit_calls_claim_then_confirm():
                                          "data": {"status": "CONFIRMED"}})
 
     client = _client(handler)
-    code, message = await client.claim_daily_credit(_cred())
+    code, message = await client.claim_daily_credit(_cred(), 34)
     assert (code, message) == (0, "ok")
     assert [path for path, _ in calls] == ["/v1/ops/claim", "/v1/ops/confirm"]
     # idempotentKey 格式由前端 JS 定死：claim_<campaignId>_<毫秒时间戳>
     claim_body = calls[0][1]
-    assert claim_body["campaignId"] == 1 and claim_body["channel"] == "IDE"
-    assert claim_body["idempotentKey"].startswith("claim_1_")
+    assert claim_body["campaignId"] == 34 and claim_body["channel"] == "IDE"
+    assert claim_body["idempotentKey"].startswith("claim_34_")
     assert claim_body["idempotentKey"].rsplit("_", 1)[1].isdigit()
-    assert calls[1][1] == {"campaignId": 1}
+    assert calls[1][1] == {"campaignId": 34}
     await client.aclose()
 
 async def test_client_claim_daily_credit_business_error_skips_confirm():
@@ -123,7 +164,7 @@ async def test_client_claim_daily_credit_business_error_skips_confirm():
                                          "message": "尚未到达权益刷新时间，暂时无法领取"})
 
     client = _client(handler)
-    code, message = await client.claim_daily_credit(_cred())
+    code, message = await client.claim_daily_credit(_cred(), 34)
     assert code == 40001 and "刷新时间" in message
     assert calls == ["/v1/ops/claim"]        # 失败不 confirm
     await client.aclose()
@@ -134,7 +175,7 @@ async def test_client_claim_daily_credit_missing_code_is_failure():
         return httpx.Response(200, json={"message": ""})
 
     client = _client(handler)
-    assert await client.claim_daily_credit(_cred()) == (-1, "领取失败")
+    assert await client.claim_daily_credit(_cred(), 34) == (-1, "领取失败")
     await client.aclose()
 
 async def test_client_confirm_daily_credit_swallows_upstream_failure():
@@ -143,7 +184,7 @@ async def test_client_confirm_daily_credit_swallows_upstream_failure():
         return httpx.Response(500, json={"error_msg": "boom"})
 
     client = _client(handler)
-    assert await client._confirm_daily_credit(_cred()) is False
+    assert await client._confirm_daily_credit(_cred(), 34) is False
     await client.aclose()
 
 
@@ -164,7 +205,7 @@ async def test_client_claim_daily_credit_confirm_failure_is_surfaced():
         return httpx.Response(500, json={"error_msg": "boom"})
 
     client = _client(handler)
-    code, message = await client.claim_daily_credit(_cred())
+    code, message = await client.claim_daily_credit(_cred(), 34)
     assert code == CONFIRM_FAILED_CODE and "确认失败" in message
     assert calls == ["/v1/ops/claim", "/v1/ops/confirm"]
     await client.aclose()
@@ -186,7 +227,7 @@ async def test_client_checkin_claim_confirm_failure_is_failure():
 
 async def test_client_checkin_state_machine_branches():
     """四种 status + 活动过期 + 不存在，各自归一（CheckinTask 直接消费）。"""
-    # ELIGIBLE 且 claimable → claim + confirm，带回 1000 积分
+    # ELIGIBLE 且 claimable → claim + confirm，带回 100 积分
     def eligible(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/ops/delivery":
             return httpx.Response(200, json=_delivery(_campaign()))
@@ -194,7 +235,7 @@ async def test_client_checkin_state_machine_branches():
 
     client = _client(eligible)
     result = await client.checkin(_cred())
-    assert result.ok and not result.already_checked_in and result.credit == 1000.0
+    assert result.ok and not result.already_checked_in and result.credit == 100.0
     await client.aclose()
 
     # CLAIMED（已领未确认）→ 只补 confirm，算成功
@@ -207,6 +248,8 @@ async def test_client_checkin_state_machine_branches():
     client = _client(claimed)
     result = await client.checkin(_cred())
     assert result.ok and not result.already_checked_in and result.message == "已补确认签到"
+    # 补确认也要回填本次面额，管理台才不会显示「签到成功、积分 -」
+    assert result.credit == 100.0
     await client.aclose()
 
     # CLAIMED 但 confirm 失败 → ok=False，否则 CheckinTask 当日封账不再补
@@ -253,7 +296,7 @@ async def test_client_checkin_state_machine_branches():
     assert result.ok is False and result.message == "当前不可领取"
     await client.aclose()
 
-    # 未知 status → 失败重试（漏签 1000 积分代价高于多刷日志）
+    # 未知 status → 失败重试（漏签 100 积分代价高于多刷日志）
     weird = _campaign(status="SOMETHING_NEW")
     client = _client(lambda _r: httpx.Response(200, json=_delivery(weird)))
     result = await client.checkin(_cred())
@@ -271,12 +314,50 @@ async def test_client_checkin_claim_business_error_is_failure():
     assert result.ok is False and result.code == 40001
     await client.aclose()
 
+async def test_client_checkin_uses_campaign_id_from_delivery_response():
+    """claim/confirm 的 campaignId 必须取当轮响应，不能写死旧 ID 1。
+
+    2026-11 上游把签到活动从 ID 1 换成 ID 34（面额 1000 → 100）。写死 ID 会
+    让 status 查询照常、claim 打到不存在的活动，最终表现为「任务在、积分不涨」。
+    """
+    claimed: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/ops/delivery":
+            return httpx.Response(200, json=_delivery(_campaign(campaignId=34)))
+        claimed.append(json.loads(request.content)["campaignId"])
+        return httpx.Response(200, json={"code": 0, "message": "ok"})
+
+    client = _client(handler)
+    result = await client.checkin(_cred())
+    assert result.ok and result.credit == 100.0
+    assert claimed == [34, 34]                 # claim + confirm 都用当轮 ID
+    await client.aclose()
+
+async def test_client_checkin_missing_campaign_id_still_fails_cleanly():
+    """响应缺 `campaignId` → 按 0 发（该轮失败），绝不静默打旧活动。"""
+    sent: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/ops/delivery":
+            campaign = _campaign()
+            campaign.pop("campaignId")
+            return httpx.Response(200, json=_delivery(campaign))
+        sent.append(json.loads(request.content)["campaignId"])
+        return httpx.Response(200, json={"code": 0, "message": "ok"})
+
+    client = _client(handler)
+    result = await client.checkin(_cred())
+    assert result.ok and result.credit == 100.0
+    assert sent == [0, 0]
+    await client.aclose()
+
 async def test_provider_checkin_status_and_scope():
     provider = CodeArtsProvider(client=_client(
         lambda _r: httpx.Response(200, json=_delivery(_campaign()))))
     status = await provider.checkin_status(_cred().to_dict())
     assert status == {"active": True, "today_checked_in": False,
-                      "today_credit": 1000.0, "activity_name": "每日签到领1000 积分"}
+                      "today_credit": 100.0, "activity_name": "每日签到领100积分"}
     # uid 隔离；身份未知回落凭证 ID（空串，绝不让两个未知账号共享 scope）
     assert provider.checkin_scope(_cred(uid="u9").to_dict()) == "codearts|u9"
     assert provider.checkin_scope(_cred(uid="").to_dict()) == ""
@@ -298,5 +379,5 @@ async def test_provider_checkin_delegates_to_client():
 
     provider = CodeArtsProvider(client=_client(handler))
     result = await provider.checkin(_cred().to_dict())
-    assert result.ok and result.credit == 1000.0
+    assert result.ok and result.credit == 100.0
     await provider.aclose()

@@ -41,7 +41,6 @@ from . import signer
 from .credential import CodeArtsCredential, merge_refreshed
 from .events import (
     AGENT_TYPE_PROMPT_CENTER,
-    CAMPAIGN_DAILY_CREDIT,
     EP_CHAT,
     EP_CHAT_V2,
     EP_CURRENT_USER,
@@ -334,7 +333,7 @@ class CodeArtsClient(LazyClients):
 
     async def fetch_checkin_status(self, credential: CodeArtsCredential,
                                    ) -> dict[str, Any] | None:
-        """查「每日签到领1000 积分」活动（只读）；上游没有/改版返回 None。
+        """查每日签到活动（只读）；上游没有/改版返回 None。
 
         走 `snap` 根的 `/v1/ops/delivery`——**不带 `snap-manager` 前缀**（带了
         回 APIG.0101）。
@@ -346,8 +345,13 @@ class CodeArtsClient(LazyClients):
         return codearts_events.daily_credit_campaign(data)
 
     async def claim_daily_credit(self, credential: CodeArtsCredential,
+                                 campaign_id: int,
                                  ) -> tuple[int, str]:
         """领取当日签到积分，返回 `(业务码, 提示文案)`。
+
+        `campaign_id` 必须来自当轮 delivery 响应：上游会换 ID（2026-11 从 1 换成
+        34），写死会让 claim 打到不存在的活动上。调用方（`checkin`）已拿到活动
+        条目，这里不再二次查询。
 
         **claim 之后必须 confirm**：`CLAIMED`（已领未确认）是上游真实存在的
         状态（实测三账号之一正卡在这一档），漏掉 confirm 积分可能不到账。
@@ -362,9 +366,8 @@ class CodeArtsClient(LazyClients):
         界面显示成功、官网不加积分）。
         """
         url = f"{self.endpoint}{EP_OPS_CLAIM}"
-        key = (f"claim_{CAMPAIGN_DAILY_CREDIT}"
-               f"_{int(time.time() * 1000)}")
-        body = {"campaignId": CAMPAIGN_DAILY_CREDIT,
+        key = f"claim_{campaign_id}_{int(time.time() * 1000)}"
+        body = {"campaignId": campaign_id,
                 "idempotentKey": key, "channel": OPS_CHANNEL}
         data = await self._request_json(
             "POST", url, credential,
@@ -376,14 +379,15 @@ class CodeArtsClient(LazyClients):
         # confirm 是领取的第二步，它的结果**必须上抛**：回非 0 让 checkin() 归
         # 失败、CheckinTask 当轮不封账；下轮上游 status 已是 CLAIMED，走「只补
         # confirm」分支把状态收尾。吞掉失败则当日封账、再也不补确认。
-        if not await self._confirm_daily_credit(credential):
+        if not await self._confirm_daily_credit(credential, campaign_id):
             return CONFIRM_FAILED_CODE, "签到确认失败，稍后重试"
         return 0, message
 
-    async def _confirm_daily_credit(self, credential: CodeArtsCredential) -> bool:
+    async def _confirm_daily_credit(self, credential: CodeArtsCredential,
+                                    campaign_id: int) -> bool:
         """确认已领积分（claim 的第二步）；返回是否成功。
 
-        积分在 **claim 时就已到账**（实测：claim 后总额 +1000），confirm 只把
+        积分在 **claim 时就已到账**（实测：claim 后总额增加当轮面额），confirm 只把
         状态从 `CLAIMED` 推到 `CONFIRMED`。所以 confirm 失败不丢积分，但它决定
         两个调用方的返回值——`checkin()` 的 `CLAIMED` 分支与 `claim_daily_credit`
         的 claim 分支都靠它决定是否封账，吞掉失败会让 `CheckinTask` 当天封账后
@@ -393,7 +397,7 @@ class CodeArtsClient(LazyClients):
             await self._request_json(
                 "POST", f"{self.endpoint}{EP_OPS_CONFIRM}", credential,
                 short_headers(AGENT_TYPE_PROMPT_CENTER),
-                {"campaignId": CAMPAIGN_DAILY_CREDIT})
+                {"campaignId": campaign_id})
         except (UpstreamHTTPError, UpstreamProtocolViolation) as error:
             logger.warning("CodeArts 签到确认失败: %s", error)
             return False
@@ -414,11 +418,16 @@ class CodeArtsClient(LazyClients):
 
         活动不存在 / 已过期一律 `ok=True`（不是错误），否则后台任务会每 10 分钟
         刷失败日志；`ELIGIBLE` 但不可领、或未知 status 归 `ok=False` 让任务重试
-        —— 漏签一天 1000 积分的代价高于多刷几行日志。
+        —— 漏签一天 100 积分的代价高于多刷几行日志。
         """
         campaign = await self.fetch_checkin_status(credential)
         if campaign is None:
+            # 活动列表里没有签到活动，多半是上游换了 campaignId/类型的标识；
+            # 归成功封账是为了不刷失败日志，但会掩盖「任务在、积分不涨」。
+            # 因此这条只在**确实没有签到活动**时出现，`campaign_type` 兜底见
+            # `daily_credit_campaign`（按 type 而不是 ID 挑）。
             return base.CheckinResult(ok=True, message="官方签到活动未开放")
+        campaign_id = codearts_events.campaign_id(campaign)
         stamp = int(time.time()) if now is None else now
         end = codearts_events.campaign_end_epoch(campaign)
         if end is not None and end <= stamp:
@@ -430,13 +439,14 @@ class CodeArtsClient(LazyClients):
         if status == codearts_events.CHECKIN_CLAIMED:
             # 已领未确认：补齐第二步。confirm 失败要 ok=False，否则 CheckinTask
             # 当日封账、再也不会补确认（积分已在 claim 时到账，这里只是状态收尾）。
-            confirmed = await self._confirm_daily_credit(credential)
+            confirmed = await self._confirm_daily_credit(credential, campaign_id)
             if not confirmed:
                 return base.CheckinResult(ok=False, message="签到确认失败，稍后重试")
-            return base.CheckinResult(ok=True, code=0, message="已补确认签到")
+            return base.CheckinResult(ok=True, code=0, message="已补确认签到",
+                                      credit=codearts_events.campaign_credit(campaign))
         if (status == codearts_events.CHECKIN_ELIGIBLE
                 and codearts_events.campaign_claimable(campaign)):
-            code, message = await self.claim_daily_credit(credential)
+            code, message = await self.claim_daily_credit(credential, campaign_id)
             if code != 0:
                 return base.CheckinResult(ok=False, code=code, message=message)
             return base.CheckinResult(

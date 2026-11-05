@@ -70,9 +70,17 @@ EP_OPS_CLAIM = "/v1/ops/claim"
 EP_OPS_CONFIRM = "/v1/ops/confirm"
 # delivery 查询的渠道参数（上游按渠道返回可领活动，实测固定 `IDE`）。
 OPS_CHANNEL = "IDE"
-# 「每日签到领1000 积分」的活动 ID（实测：delivery 同时返回推荐码 3 /
-# 新用户 4 / 学生认证 2 / 每日签到 1，只有这个每天可领）。
-CAMPAIGN_DAILY_CREDIT = 1
+# 每日签到活动的**历史** ID。早期活动 ID 是 1（「每日签到领1000 积分」）；2026-11
+# 上游把它换成 ID 34（「每日签到领100积分」），旧常量匹配不到任何条目 →
+# `daily_credit_campaign` 恒返回 None → checkin() 回「官方签到活动未开放」并按
+# 成功封账，于是**签到任务看起来永远成功、积分却不增加**（web 端任务仍在）。
+#
+# 所以不能再按 ID 挑：上游会换 ID、也会改积分面额（1000 → 100），只有
+# `type` = `USER_LOGIN`（`extra.triggerEvent` = `user.login`）是签到活动的稳定标识。
+# ID 1 只作为极老响应的兜底保留。
+CAMPAIGN_DAILY_CREDIT_LEGACY = 1
+# 签到活动的类型标识（上游字段 `type`，与 `extra.triggerEvent` 同源）。
+CAMPAIGN_TYPE_DAILY_LOGIN = "USER_LOGIN"
 
 # 内置模型接口要求（逆向记录 §7）。
 AGENT_TYPE_PROMPT_CENTER = "PromptCenter"
@@ -442,11 +450,36 @@ CHECKIN_CLAIMED = "CLAIMED"
 CHECKIN_DONE = ("CONFIRMED", "CONSUMED")
 
 
+def campaign_type(campaign: dict[str, Any] | None) -> str:
+    """活动 `type` → 归一后的字符串；缺失/非字符串返回空串。"""
+    if not isinstance(campaign, dict):
+        return ""
+    value = campaign.get("type")
+    return value.strip() if isinstance(value, str) else ""
+
+
+def campaign_id(campaign: dict[str, Any] | None) -> int:
+    """活动 `campaignId` → int；缺失/非 int 返回 0。
+
+    claim / confirm 的 body 必须带当轮响应里的真实 ID（上游会换：2026-11 从
+    1 换成 34）。0 表示「上游没给」，该轮必然失败而不是打着旧 ID 去打错活动。
+    """
+    if not isinstance(campaign, dict):
+        return 0
+    return _as_int(campaign.get("campaignId")) or 0
+
+
 def daily_credit_campaign(data: dict[str, Any]) -> dict[str, Any] | None:
-    """delivery 响应 → 「每日签到领1000 积分」活动条目；找不到返回 None。
+    """delivery 响应 → 每日签到活动条目；找不到返回 None。
 
     上游把活动列表包在 `data.items`（不是顶层），实测同时返回推荐码 / 新用户 /
-    学生认证 / 每日签到四条，按 `campaignId` 精确挑，不靠标题匹配——标题会改。
+    学生认证 / 每日签到四条。**不按 `campaignId` 挑**：上游会换 ID（2026-11 从
+    1 换成 34）也会改面额（1000 → 100 积分），按 ID 匹配会让签到静默失效——
+    表现为任务每天「成功」封账、官网任务仍在、积分不增加。稳定标识只有
+    `type == USER_LOGIN`（等价于 `extra.triggerEvent == user.login`）。
+
+    同类型命中多条时优先 `claimable=true`（今天还没领的那条），否则取第一条；
+    `campaignId` 1 只作为极老响应的兼容兜底（那时上游还没有 `type` 字段）。
     字段缺失或形状不对一律返回 None（上游改版不该让签到任务抛异常，调用方把
     None 归一为「活动未开放」）。
     """
@@ -458,11 +491,22 @@ def daily_credit_campaign(data: dict[str, Any]) -> dict[str, Any] | None:
     items = envelope.get("items")
     if not isinstance(items, list):
         return None
+    candidates: list[dict[str, Any]] = []
     for item in items:
-        if (isinstance(item, dict)
-                and _as_int(item.get("campaignId")) == CAMPAIGN_DAILY_CREDIT):
-            return item
-    return None
+        if not isinstance(item, dict):
+            continue
+        kind = campaign_type(item)
+        if (kind == CAMPAIGN_TYPE_DAILY_LOGIN
+                or (not kind
+                    and _as_int(item.get("campaignId"))
+                    == CAMPAIGN_DAILY_CREDIT_LEGACY)):
+            candidates.append(item)
+    if not candidates:
+        return None
+    for candidate in candidates:
+        if campaign_claimable(candidate):
+            return candidate
+    return candidates[0]
 
 
 def campaign_status(campaign: dict[str, Any] | None) -> str:
@@ -496,7 +540,7 @@ def campaign_end_epoch(campaign: dict[str, Any] | None) -> int | None:
     """活动 `extra.endTime`（ISO8601 UTC）→ epoch；缺失/畸形返回 None。
 
     用于「活动已结束就别再去 claim」。返回 None 时调用方**不**按过期处理——
-    宁可多调一次上游（幂等），也不因为解析失败把每天 1000 积分白白丢掉。
+    宁可多调一次上游（幂等），也不因为解析失败把当天积分白白丢掉。
     """
     if not isinstance(campaign, dict):
         return None
