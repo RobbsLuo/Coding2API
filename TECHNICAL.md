@@ -417,8 +417,10 @@ class Provider(Protocol):
 | 用途 | 端点 | 备注 |
 |---|---|---|
 | 查活动 | `GET {snap}/v1/ops/delivery?channel=IDE` | 回 `data.items[]` |
-| 领取 | `POST {snap}/v1/ops/claim` | body `{campaignId:1, idempotentKey:"claim_1_<ms>", channel:"IDE"}` |
-| 确认 | `POST {snap}/v1/ops/confirm` | body `{campaignId:1}` |
+| 领取 | `POST {snap}/v1/ops/claim` | body `{campaignId:<当轮活动 ID>, idempotentKey:"claim_<id>_<ms>", channel:"IDE"}` |
+| 确认 | `POST {snap}/v1/ops/confirm` | body `{campaignId:<当轮活动 ID>}` |
+
+**活动 ID 必须取当轮响应，不能写死**：2026-11 上游把每日签到活动从 `campaignId=1`（「每日签到领1000 积分」）换成 **34**（「每日签到领100积分」），面额同时从 1000 降到 100。旧实现按 ID 1 精确挑活动，换 ID 后 `daily_credit_campaign` 恒返回 `None` → `checkin()` 回「官方签到活动未开放」并按成功封账 → 表现为**签到任务每天成功、web 端任务仍在、积分不增加**（线上 `checkin_events` 全是「官方签到活动未开放」）。现按 `type == "USER_LOGIN"`（等价 `extra.triggerEvent == user.login`）挑活动，`campaignId` 1 只作无 `type` 字段的极老响应兜底；claim/confirm 的 `campaignId` 一律取当轮条目。
 
 `idempotentKey` 格式 `claim_<campaignId>_<Date.now()>`；头 `agent-type: PromptCenter`。**四态**：`ELIGIBLE` → claim + confirm；**`CLAIMED`（已领未确认）→ 只补 confirm**；`CONFIRMED`/`CONSUMED` → 已签。**claim 时积分即到账**，confirm 只推进状态 → confirm 失败不丢积分但仍返回 `ok=False` 让下轮补。活动不存在 / 已过期 `ok=True`；`ELIGIBLE` 但 `claimable=false` 或未知 status → `ok=False`。业务码走 HTTP 200（如 `40001`）。`seal_until` 留空。`checkin_scope` 用 `uid`。**签到之外的活动操作未接入**。
 
@@ -427,6 +429,8 @@ class Provider(Protocol):
 **倍率**：`GET {snap}/v1/model/builtin`（头 `Agent-Type: PromptCenter`）每条带 `credit[]`，取首档 `ratio_display`（如 `"0.7x"`）。空列表按协议违规上抛。
 
 **登录**：OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens`（authorization_code）换 `{access_key_id, secret_access_key, security_token, expiration, refresh_token}`；DPoP 私钥随 credential 生成并加密入库。回调 302 到 `http://127.0.0.1:{port}/oauth/callback`（服务端监听不到）→ **paste 轨道**：用户把打不开的回调链接粘回，`POST /api/auth/upstream/complete` 用 code + `code_verifier` + DPoP 私钥换 token。登录后用 `caller_identity`（不可用回落 `current_user`）尽力补 `uid`/`user_name`/`nickname`；失败不阻断。
+
+**重新登录合并**：三条 OAuth 落库路径（poll / 粘贴回调 / `/authorize`）统一走 `api/credential_login.py`。provider 声明稳定身份（CodeArts `uid`，缺省回落 `domain_id|user_name`；OfficeAce `account_id`/`principal_id`）→ 命中同渠道既有凭证就地更新（整份凭证 + token 时间），并解除硬禁用、账号/模型级冷却；`enabled` / `pinned` / `tags` / `added_by` / `created_at` 保留。多行命中优先 `disabled`（本次要救的那条）→ `pinned` → 最早创建。身份缺失/解析失败/未命中 → 新增。
 
 **一次性票终态**：`client.refresh_token` 捕获 `TokenEndpointError` 后经 `events.relogin_required(body)` 判定，只认 `_RELOGIN_MARKERS`（`STS5.1806 the refresh token has been used` / `invalid client id` / `InvalidDPoPHeader` / `invalid_grant`）。网络 / 5xx / 限流 / 普通 4xx 仍可重试（误判会让偶发故障永久废掉好凭证）。`RefreshTask` 捕获后 `mark_relogin_required`：写可操作 `disabled_reason`、硬禁用、清模型级冷却。
 
@@ -475,6 +479,8 @@ class Provider(Protocol):
 **`max_tokens` 改写**（`clamp_max_tokens`）：`>= 16` 追加 1024 headroom 再夹到模型上限；`< 16` 原样；未给不补。`max_completion_tokens` 归一成 `max_tokens`。上限表：`glm-5*` 131072、`qwen3*` 65536、其余 393216。
 
 **积分即主账**：单位 `officeace_points`；`Quota.remaining`/`total` 直接是积分。来源：新用户一次性 4000 + 每日签到 1000，各自独立到期（口径「逐笔到期」）。**不做 credit 估算**：`cost_coefficient` 与 `tokens_per_point` 的叠乘关系官方未说明。签到 `POST {gateway}/v1/subscription/bonus/claim` 是**写操作**；body 必须为空 JSON `` + `Content-Type: application/json`（无 body 回 500 `OfficeAce.11020001`）；当日重复领取幂等。收获按 `bonus_skus` 的**剩余量增量**算（`points` 是累计发放量，会虚高）。`seal_until` = 下个北京时间 0 点。`checkin_scope` 用 `account_id`；身份未知返回**空串**。
+
+**重新登录合并**：与 CodeArts 同一套 `credential_login` 策略，合并键为 `account_id`（缺省 `principal_id`）——同账号重新登录更新既有行并解除硬禁用/冷却，不新增重复凭证。
 
 **登录走 poll 轨道**：回调由**云端**承接（`/v1/claw/auth/callback`），无需本地端口或粘链接。`POST /v1/claw/auth/state` 要 state（本地造的回 `AgentArts.11000004`）→ PKCE challenge + DPoP 公钥拼 authorize URL，套 `{auth_host}/authui/login.html?service=<encode(...)>`；轮询 `GET /v1/claw/auth/code?state=`（202 = 未完成）；拿 code 后 `POST /v1/oauth2/tokens`（authorization_code + DPoP）换临时 AK/SK；再调 `client-permission-validate` 校验真开通（未开通 `subscription: null` 时明确报错）；存 `model_app_key`/`model_app_secret` 与网关地址。`AuthStateStore` 按 **username** 分键 reservation（TTL + pending 上限）：单槽全局态会让两管理员并发登录互相覆盖；并发轮询同一 state 只有一路 `consume` 成功。`force_login` 走 `/authui/logout?service=…`，默认 False。
 

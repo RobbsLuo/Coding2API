@@ -213,7 +213,7 @@ Free models at [Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`), no login. St
 
 **Token refresh is rigid**: refresh_token, `client_id=codearts-agent` and DPoP key are bound and single-use; new refresh_token must be written back. Handled by pre-refresh task (DPoP ES256/P-256). Window capped at 45 minutes and must be wider than polling interval. Revoked credential marked "re-login required", stops automatic retries.
 
-**Daily check-in**: `GET /v1/ops/delivery` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`. `CLAIMED` means claimed-but-unconfirmed, so both steps always run.
+**Daily check-in**: `GET /v1/ops/delivery` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`. The campaign is picked by `type=USER_LOGIN` and **`campaignId` comes from that response** (upstream switched it from 1 to 34 and the reward from 1000 to 100 credits in Nov 2026; hard-coding the id made check-in report success while the web task stayed pending and credits never grew). `CLAIMED` means claimed-but-unconfirmed, so both steps always run. **Re-login merges**: the same upstream account (`uid`) updates its existing credential row (fresh tokens, revival from "re-login required"), keeping paused/pinned/tags/stats attribution; only a different account creates a new row.
 
 **Quota = credit balance**: probing hits `GET {snap}/snap-manager/v1/statistics/plugin` (`snap-manager` prefix mandatory; header `Agent-Type: PromptCenter`). Upstream values are credits, no conversion; sub-packages go into popover, plan expiry registered (unused credits voided too).
 
@@ -224,6 +224,8 @@ Free models at [Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`), no login. St
 [Huawei Cloud OfficeAce](https://www.huaweicloud.com/product/agentarts.html), real account: *Log in to OfficeAce* and finish Huawei Cloud authorization — **callback handled in cloud**, so no local port and no URL to paste. Backend polls `/v1/claw/auth/code` every 2.5s.
 
 **Provisioning prerequisite**: account must first sign in to OfficeAce client and redeem invitation code. Unprovisioned account completes login but gets no model key; service names the account and says OfficeAce not activated.
+
+**Re-login merges the existing credential**: signing in again with the same account (`account_id`) updates that row in place (model keys, temporary AK/SK, refresh_token, DPoP key) and clears "re-login required"/cooldowns instead of adding a duplicate. `paused` / `pinned` / tags / stats attribution are preserved.
 
 **Two credential sets, very different lifetimes**:
 

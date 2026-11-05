@@ -40,7 +40,7 @@
 
 - 域：snap 引擎 `snap-access.cn-north-4.myhuaweicloud.com`、STS `sts.cn-north-4.myhuaweicloud.com`、门户 `codearts.huaweicloud.com`。聊天 `POST /api/v2/chat/completions`；鉴权 `SDK-HMAC-SHA256`（AK/SK + `X-Security-Token`）。OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens` 换 AK/SK/security_token/refresh_token。模型 `GET {snap}/v1/model/builtin`（头 `Agent-Type: PromptCenter`）；额度 `GET {snap}/snap-manager/v1/statistics/plugin`。
 - **令牌刷新刚性**：`refresh_token` 与 `client_id=codearts-agent` + DPoP 私钥三者绑定、一次性，走 DPoP ES256/P-256；刷后必须回写新 `refresh_token`，由预刷新任务独占轮转。被作废 → 标记「需重新登录」并停止自动重试。
-- **每日签到**：`GET {snap}/v1/ops/delivery?channel=IDE` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`；`/v1/ops/*` 挂 snap 引擎根、不带 `snap-manager`。`ELIGIBLE`→claim+confirm；`CLAIMED`（已领未确认，非终态）→只补 confirm；`CONFIRMED`/`CONSUMED`→已签。**claim 时积分即到账**，confirm 只推进状态；业务码走 HTTP 200。
+- **每日签到**：`GET {snap}/v1/ops/delivery?channel=IDE` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`；`/v1/ops/*` 挂 snap 引擎根、不带 `snap-manager`。活动按 `type=USER_LOGIN` 挑、`campaignId` 取当轮响应（上游改过 ID：1→34，面额 1000→100，写死 ID 会让签到静默失效）。`ELIGIBLE`→claim+confirm；`CLAIMED`（已领未确认，非终态）→只补 confirm；`CONFIRMED`/`CONSUMED`→已签。**claim 时积分即到账**，confirm 只推进状态；业务码走 HTTP 200。**同一账号重新登录按 `uid` 合并既有凭证**（更新整份凭证并解除硬禁用/冷却，保留 paused/pinned/标签/统计归属），不新增重复行。
 - **额度＝积分**：`usageTotalPackageCredit` 直接进 `quota_remaining`/`quota_total`，不做单位折算；分项包走 `quota_packages`，`end_date` 只作套餐到期日展示（`cycle_end` / `packages[].end`），**不进到期阶梯**。**福利积分按批次到账、各自到期**：实测同一响应里 `end_date` 距今 2.5 天而「7 天内到期量」只有 4,868 / 24,391，若 `end_date` 会清零整份余额，7 天内到期量必然等于全部余额——故 `end_date` 不是逐笔积分的作废时刻。到期阶梯只认 `package_credit_expiring_amount`（7 天内到期量，分项求和后挂到「探测时刻 + 7 天」这一个桶：36h 窗口不误报，7 天窗口拿到真实数字）；上游没有逐批到期日，逐笔明细只在 Web 控制台「套餐与用量 → 获取明细」（需浏览器登录，AK/SK 取不到）。
 - **凭证页一个渠道一个组**：不拆两条凭证行——`refresh_token` 一次性，两条会各刷一次、第二条必报 `the refresh token has been used` 并烧掉票据。
 - **并发上限**：上游硬限每账号每约 60s 最多 3 个会话，超出 `400 TM.00001041`；配 `CODEARTS_MAX_CONCURRENCY` 与 `CODEARTS_REQUEST_WINDOW_SECONDS`。流式 `text` 是**累计全文（替换语义）**，解析层还原增量。
@@ -82,7 +82,7 @@
 - **登录（poll 轨道）**：`POST /v1/claw/auth/state` → 本地生成 PKCE + DPoP → 浏览器授权 → `GET /v1/claw/auth/code?state=`（202 = 未登完）→ STS `POST /v1/oauth2/tokens` → `client-permission-validate` 取网关与 app key。回调由云端承接，不监听端口。`client_id=pdp5_for_agentarts`，refresh_token 与 CodeArts **互不通用**（混用回 `STS5.1806`），只复用 `codearts/dpop.py` 的 ES256 低 S 签名原语。
 - **未开通的账号要可行动**：`subscription: null` → 提示「请先在客户端兑换邀请码」，不用含糊的登录失败。
 - **三种上游特例**：① 限流走伪 200（HTTP 200 + `data:{"error":…}`，也见过首帧正常、第二帧才错）；② `81004`/`81009` 走 403/404 但属模型级，业务码判定先于状态码；③ `max_tokens` 是推理 + 正文总预算，`≥16` 追加 1024 再夹到模型硬上限，`<16` 原样透传，未给不补。
-- **积分即主账**：单位 `officeace_points`，`Quota.remaining`/`total` 直接是积分；每笔奖励独立到期。签到 `POST /v1/subscription/bonus/claim` 是写操作，body 必须给 `` + JSON `Content-Type`（空 body 会 500），上游对当日重复领取幂等；收获按 `bonus_skus` 剩余量增量算。
+- **积分即主账**：单位 `officeace_points`，`Quota.remaining`/`total` 直接是积分；每笔奖励独立到期。签到 `POST /v1/subscription/bonus/claim` 是写操作，body 必须给 `` + JSON `Content-Type`（空 body 会 500），上游对当日重复领取幂等；收获按 `bonus_skus` 剩余量增量算。**同一账号重新登录按 `account_id` 合并既有凭证**，不新增重复行。
 - **不做主动探活 / 不做 credit 估算**：探活要真发推理消耗积分；`cost_coefficient` 与 `tokens_per_point` 叠乘关系官方未说明。（`GET /v1/subscription` 读余额是**只读**、不耗积分，不在此列——它也是 `APIG.1009` 的 DEAD 收口时现场复探用的接口。）
 - **单账号单用户**：官方《套餐管理》限制单账号单用户，每人各加自己凭证。
 

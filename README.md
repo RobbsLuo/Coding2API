@@ -215,7 +215,9 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **令牌刷新刚性**：refresh_token 与 `client_id=codearts-agent`、DPoP 私钥三者绑定、一次性；刷新后必须回写新 refresh_token。预刷新任务自动完成（DPoP ES256/P-256）。窗口封顶 45 分钟，须宽于轮询周期。凭据作废 → 标「需重新登录」+ 停重试。
 
-**每日签到**：`GET /v1/ops/delivery` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`，后台每日自动领。`CLAIMED` =「已领未确认」→ 两步一起做；**claim 成功但 confirm 失败按失败处理**（不回「签到成功」），下一轮补确认，避免「界面显示成功、积分未到账」（实测用户反馈）。
+**每日签到**：`GET /v1/ops/delivery` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`，后台每日自动领。活动按 `type=USER_LOGIN` 挑，**`campaignId` 取当轮响应**（上游 2026-11 把签到活动从 ID 1 换成 34、面额 1000 → 100；写死 ID 会导致「签到显示成功、官网任务仍在、积分不涨」）。`CLAIMED` =「已领未确认」→ 两步一起做；**claim 成功但 confirm 失败按失败处理**（不回「签到成功」），下一轮补确认，避免「界面显示成功、积分未到账」（实测用户反馈）。
+
+**重新登录合并**：同一华为云账号（`uid`）再次登录时**就地更新既有凭证**（新 token / refresh_token / DPoP 私钥），同时解除「需重新登录」硬禁用与冷却；不会在池子里新增一条重复账号。`paused` / `pinned` / 标签 / 统计归属保持不变。不同账号仍新增。
 
 **额度＝积分余额**：探测 `GET {snap}/snap-manager/v1/statistics/plugin`（前缀必须带 `snap-manager`；头 `Agent-Type: PromptCenter`）。上游数值即积分，不折算。分项包走悬浮明细；登记套餐到期日（积分过期同废）。
 
@@ -226,6 +228,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 [华为云 OfficeAce](https://www.huaweicloud.com/product/agentarts.html)，需真实账号：点「登录 OfficeAce」完成华为云授权即可；回调由云端承接，不监听本地端口。后端 2.5s 轮询 `/v1/claw/auth/code` 取授权码。
 
 **开通前提**：账号必须先在 OfficeAce 客户端登录并兑换邀请码。未开通的账号登录「成功」但拿不到模型密钥 → 点名报「华为云账号 xxx 还没开通 OfficeAce 服务」。
+
+**重新登录合并**：同一账号（`account_id`）再次登录时就地更新既有凭证（模型密钥 + 临时 AK/SK + refresh_token + DPoP 私钥），并解除「需重新登录」/冷却，不新增重复账号；`paused` / `pinned` / 标签 / 统计归属保留。
 
 **两套凭据，寿命不同**：
 
