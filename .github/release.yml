@@ -1,0 +1,33 @@
+# 自动生成 Release Notes 的分类规则（GitHub「Generate release notes」使用）。
+#
+# 只影响自动汇总，不改变手工写的 release body：本仓发版以 `git tag -a` 的
+# 附注为准（见 v0.11.0 的 tag message），这里用于需要快速汇总时的兜底。
+#
+# 提交类型约定（Conventional Commits）：feat / fix / perf / docs / chore / test / refactor。
+changelog:
+  exclude:
+    labels:
+      - dependencies
+    authors:
+      - dependabot
+  categories:
+    - title: 新渠道
+      labels:
+        - new-channel
+    - title: 新能力
+      labels:
+        - enhancement
+    - title: 修复
+      labels:
+        - bug
+    - title: 文档
+      labels:
+        - documentation
+    - title: 依赖与构建
+      labels:
+        - dependencies
+        - docker
+        - github_actions
+    - title: 其他变更
+      labels:
+        - "*"
