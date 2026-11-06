@@ -13,7 +13,8 @@
   → chat `image_url`（`image_url` 直传，上游已实测接受 data URL 与 http URL）；
   `input_file` 需服务端文件存储，本网关无此能力 → 400
 - `tools` 的 `{type:"function", name, description, parameters}` → chat
-  `{type:"function", function:{...}}`；非 function 工具（web_search 等）→ 400
+  `{type:"function", function:{...}}`；**托管工具与非 function 类型一律跳过**
+  （`web_search` / `tool_search` / `namespace` / `custom`，见 `_map_tools`）
 - `reasoning.effort` → 顶层 `reasoning_effort`（出口侧字段名映射）
 - `text.format` → `response_format`（`text`/`json_object` 直通，`json_schema`
   展开成 chat 的嵌套结构；无法表达的形状显式 400）
@@ -27,6 +28,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ..openai.request import (
@@ -38,6 +40,8 @@ from ..openai.request import (
     require_finite_number,
     require_positive_int,
 )
+
+logger = logging.getLogger(__name__)
 
 # Responses 里合法但本网关无法无损转成 chat 的 input item 类型。
 # 依据 openai/codex（codex-rs/protocol/src/models.rs 的 ResponseItem 与
@@ -223,23 +227,99 @@ def _map_input_item(item: Any) -> dict[str, Any] | None:
 
 
 def _map_tools(tools: Any) -> list[dict[str, Any]]:
+    """Responses 工具表 → chat 工具表。
+
+    **只翻译 chat 表达得了的 function**，其余类型跳过并记 debug（不报错）：
+
+    * `function`：直译（历史上唯一被接受的类型）。
+    * `namespace`：Codex 0.135+ 对自定义 responses provider **默认下发**
+      （Responses-Lite 的 `functions` 组、`multi_agent_v1` 子代理组、MCP 组）。
+      **只展平默认命名空间 `functions`**：它等价于无命名空间，成员就是普通
+      function，模型调用时客户端按 `functions` 查到同一个工具。
+      其余命名空间的成员不加前缀、直接丢弃——chat 出口只能给出扁平工具名，
+      而客户端是按 `(namespace, name)` 二元组查登记表的（`registry.rs`
+      `ToolName::new(namespace, name)`）：展平成 `{ns}__{name}` 在客户端看来
+      是一个「默认命名空间里不存在的新工具」，模型一旦调用就是
+      `unsupported call`，比不提供更糟。
+    * 其余（`web_search` / `tool_search` / `image_generation` / `file_search` /
+      `custom` …）：托管工具由**推理服务端**执行，本网关没有该能力；
+      `custom` 是 freeform 工具（`apply_patch` 的 lark 语法），chat 的
+      `function.parameters` 表达不了「整段自由文本」还不破坏 Codex 的
+      `custom_tool_call` 配对。跳过是降级，但 400 会让**整轮请求失败**——
+      Codex 默认配置必带 `web_search`，客户端也不会降级重试（实测 0.135–0.167）。
+    """
     mapped: list[dict[str, Any]] = []
+    seen: set[str] = set()
     for index, tool in enumerate(tools):
         if not isinstance(tool, dict):
             raise InvalidRequest(f"tools[{index}] must be an object")
-        if tool.get("type") != "function":
-            raise InvalidRequest(
-                f"tool type {tool.get('type')!r} is not supported by this gateway")
-        name = tool.get("name")
-        if not isinstance(name, str) or not name:
-            raise InvalidRequest(f"tools[{index}].name must be a non-empty string")
-        function: dict[str, Any] = {"name": name}
-        if isinstance(tool.get("description"), str):
-            function["description"] = tool["description"]
-        if isinstance(tool.get("parameters"), dict):
-            function["parameters"] = tool["parameters"]
+        kind = tool.get("type")
+        if kind == "namespace":
+            for name, function in _namespace_functions(tool, f"tools[{index}]"):
+                if name in seen:
+                    continue
+                seen.add(name)
+                mapped.append({"type": "function", "function": function})
+            continue
+        if kind != "function":
+            logger.debug("responses: 跳过无法翻译的工具类型 %r（tools[%d]）",
+                         kind, index)
+            continue
+        function = _function_tool(tool, f"tools[{index}]")
+        if function["name"] in seen:
+            continue
+        seen.add(function["name"])
         mapped.append({"type": "function", "function": function})
     return mapped
+
+
+def _function_tool(tool: dict[str, Any], where: str) -> dict[str, Any]:
+    """`{type:"function", name, description, parameters}` → chat `function`。"""
+    name = tool.get("name")
+    if not isinstance(name, str) or not name:
+        raise InvalidRequest(f"{where}.name must be a non-empty string")
+    function: dict[str, Any] = {"name": name}
+    if isinstance(tool.get("description"), str):
+        function["description"] = tool["description"]
+    if isinstance(tool.get("parameters"), dict):
+        function["parameters"] = tool["parameters"]
+    return function
+
+
+def _namespace_functions(tool: dict[str, Any],
+                         where: str) -> list[tuple[str, dict[str, Any]]]:
+    """`namespace` 工具组 → `[(chat 函数名, chat function)]`。
+
+    **只展开默认命名空间 `functions`**；其他命名空间返回空表（调用方据此
+    记 debug 日志）。原因见 `_map_tools`：chat 只有扁平名字，客户端却按
+    `(namespace, name)` 查登记表，展平名会被当成「不存在的工具」。
+
+    组内只认 `function` 成员；`custom`（freeform）成员跳过。
+    """
+    namespace = tool.get("name")
+    if not isinstance(namespace, str) or not namespace:
+        raise InvalidRequest(f"{where}.name must be a non-empty string")
+    members = tool.get("tools")
+    if members is None:
+        return []
+    if not isinstance(members, list):
+        raise InvalidRequest(f"{where}.tools must be an array")
+    if namespace != "functions":
+        logger.debug("responses: 跳过非默认命名空间 %r（%s 共 %d 个成员）",
+                     namespace, where, len(members))
+        return []
+    entries: list[tuple[str, dict[str, Any]]] = []
+    for index, member in enumerate(members):
+        member_where = f"{where}.tools[{index}]"
+        if not isinstance(member, dict):
+            raise InvalidRequest(f"{member_where} must be an object")
+        if member.get("type") != "function":
+            logger.debug("responses: 跳过命名空间 %r 内的工具类型 %r",
+                         namespace, member.get("type"))
+            continue
+        function = _function_tool(member, member_where)
+        entries.append((function["name"], function))
+    return entries
 
 
 def _map_response_format(text_config: dict[str, Any]) -> dict[str, Any] | None:

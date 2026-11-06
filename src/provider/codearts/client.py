@@ -106,6 +106,14 @@ def request_path(url: str) -> tuple[str, str]:
     return split.path or "/", split.query
 
 
+# 输出上限硬上限：目录里 11 个内置模型的 `max_tokens` **全部**是 65536，
+# 上游把它当上限而非默认值（客户端给 384000 会被拒收）。下游只校验全局
+# `MAX_OUTPUT_TOKENS = 4_000_000`，故必须在这里按渠道夹取——直接拒收会让
+# 客户端以为整条渠道不可用（判「参数无效」跳过）。取不到目录时也用这个值：
+# 它同时是全量内置模型的最小与最大值。
+MAX_OUTPUT_TOKENS = 65536
+
+
 def prepare_body(payload: dict[str, Any], model: str, *,
                  chat_id: str, user_id: str = "",
                  legacy: bool = False) -> dict[str, Any]:
@@ -157,6 +165,12 @@ def prepare_body(payload: dict[str, Any], model: str, *,
         "prompt_cache_key": chat_id,
         "tool_stream": True,
     })
+    # 输出上限必须夹取：上游把 65536 当**上限**（目录 11 个模型全是这个值），
+    # 超出的 `max_tokens` / `max_completion_tokens` 一律收到上限，不拒单。
+    for key in ("max_tokens", "max_completion_tokens"):
+        value = body.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            body[key] = min(value, MAX_OUTPUT_TOKENS)
     return body
 
 
@@ -428,6 +442,12 @@ class CodeArtsClient(LazyClients):
             # `daily_credit_campaign`（按 type 而不是 ID 挑）。
             return base.CheckinResult(ok=True, message="官方签到活动未开放")
         campaign_id = codearts_events.campaign_id(campaign)
+        if not campaign_id:
+            # `campaignId` 缺失 = 上游形状变了，这一轮必然失败。**不能**带着 0
+            # 去打 claim：那是一个真实写请求（`{"campaignId": 0}` + 幂等键），
+            # 白打一次上游、还可能命中别的活动；`ok=False` 让任务重试并留痕。
+            return base.CheckinResult(
+                ok=False, message="上游未返回签到活动 campaignId，稍后重试")
         stamp = int(time.time()) if now is None else now
         end = codearts_events.campaign_end_epoch(campaign)
         if end is not None and end <= stamp:

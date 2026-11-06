@@ -61,16 +61,63 @@ def test_parse_string_content_by_role():
     assert [m["role"] for m in parsed.messages] == ["user", "assistant"]
 
 def test_parse_rejects_unknown_role_and_bad_message():
-    with pytest.raises(InvalidRequest, match="role 'system' is not supported"):
-        parse_messages_request(_body(messages=[{"role": "system", "content": "x"}]))
+    with pytest.raises(InvalidRequest, match="role 'tool' is not supported"):
+        parse_messages_request(_body(messages=[{"role": "tool", "content": "x"}]))
     # 数组 content 下的非法 role 走另一分支
-    with pytest.raises(InvalidRequest, match="role 'system' is not supported"):
-        parse_messages_request(_body(messages=[{"role": "system", "content": [
+    with pytest.raises(InvalidRequest, match="role 'tool' is not supported"):
+        parse_messages_request(_body(messages=[{"role": "tool", "content": [
             {"type": "text", "text": "x"}]}]))
     with pytest.raises(InvalidRequest, match=r"messages\[0\] must be an object"):
         parse_messages_request(_body(messages=["x"]))
     with pytest.raises(InvalidRequest, match="string or an array"):
         parse_messages_request(_body(messages=[{"role": "user", "content": 5}]))
+
+
+def test_parse_mid_conversation_system_role():
+    """Claude Code 2.1.318 起在新会话首轮发 `role:"system"`（特性
+    `mid-conversation-system-2026-04-07`）。就地转成 system 消息，不重排。
+
+    此前 400 会让客户端白打一次往返（它收到 400 就重发去掉该消息并永久
+    关掉特性）。
+    """
+    parsed = parse_messages_request(_body(messages=[
+        {"role": "user", "content": "hi"},
+        {"role": "system", "content": "be terse"},
+        {"role": "assistant", "content": "ok"},
+    ]))
+    assert parsed.messages == [
+        {"role": "user", "content": "hi"},
+        {"role": "system", "content": "be terse"},
+        {"role": "assistant", "content": "ok"},
+    ]
+
+
+def test_parse_mid_conversation_system_block_content():
+    parsed = parse_messages_request(_body(messages=[
+        {"role": "system", "content": [{"type": "text", "text": "a"},
+                                       {"type": "text", "text": "b"}]},
+    ]))
+    assert parsed.messages == [{"role": "system", "content": "ab"}]
+
+    parsed = parse_messages_request(_body(messages=[
+        {"role": "system", "content": None},
+        {"role": "user", "content": "hi"},
+    ]))
+    assert parsed.messages == [{"role": "system", "content": ""},
+                               {"role": "user", "content": "hi"}]
+
+
+def test_parse_mid_conversation_system_rejects_bad_shapes():
+    with pytest.raises(InvalidRequest, match="string or an array"):
+        parse_messages_request(_body(messages=[{"role": "system", "content": 5}]))
+    with pytest.raises(InvalidRequest, match=r"content\[0\] must be an object"):
+        parse_messages_request(_body(messages=[{"role": "system", "content": [1]}]))
+    with pytest.raises(InvalidRequest, match="not supported in a system message"):
+        parse_messages_request(_body(messages=[{"role": "system", "content": [
+            {"type": "image"}]}]))
+    with pytest.raises(InvalidRequest, match="text must be a string"):
+        parse_messages_request(_body(messages=[{"role": "system", "content": [
+            {"type": "text", "text": 1}]}]))
 
 def test_parse_user_blocks_split_text_and_tool_results():
     parsed = parse_messages_request(_body(messages=[{"role": "user", "content": [
@@ -102,9 +149,6 @@ def test_parse_user_blocks_reject_bad_entries():
     with pytest.raises(InvalidRequest, match="tool_use_id must be a non-empty"):
         parse_messages_request(_body(messages=[{"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": ""}]}]))
-    with pytest.raises(InvalidRequest, match="not supported"):
-        parse_messages_request(_body(messages=[{"role": "user", "content": [
-            {"type": "document"}]}]))
     with pytest.raises(InvalidRequest, match="unknown content block type"):
         parse_messages_request(_body(messages=[{"role": "user", "content": [
             {"type": "bogus"}]}]))
@@ -166,10 +210,6 @@ def test_parse_tool_result_content_bad_shapes():
     with pytest.raises(InvalidRequest, match=r"content\[0\] must be an object"):
         parse_messages_request(_body(messages=[{"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": "t", "content": [1]}]}]))
-    with pytest.raises(InvalidRequest, match="not supported"):
-        parse_messages_request(_body(messages=[{"role": "user", "content": [
-            {"type": "tool_result", "tool_use_id": "t",
-             "content": [{"type": "document"}]}]}]))
     with pytest.raises(InvalidRequest, match="unknown tool_result.content type"):
         parse_messages_request(_body(messages=[{"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": "t",
@@ -177,6 +217,42 @@ def test_parse_tool_result_content_bad_shapes():
     with pytest.raises(InvalidRequest, match="string or an array"):
         parse_messages_request(_body(messages=[{"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": "t", "content": 5}]}]))
+
+
+def test_parse_document_and_tool_reference_become_placeholders():
+    """`document` / `tool_reference` 不再整轮 400。
+
+    chat 没有「文档」与「服务端 tool_search 结果」的等价物；显式 400 会让
+    客户端整轮重发一次（`tool_reference` 实测 28/30 次 400 都出在它身上）。
+    改成中性占位文本，模型至少知道这里原本有个附件 / 工具引用。
+    """
+    parsed = parse_messages_request(_body(messages=[
+        {"role": "user", "content": [
+            {"type": "document", "title": "resume.pdf",
+             "source": {"type": "base64", "media_type": "application/pdf",
+                        "data": "AAA"}},
+            {"type": "tool_reference", "tool_name": "mcp__fs__read"},
+            {"type": "tool_reference"},
+        ]},
+        {"role": "assistant", "content": [
+            {"type": "tool_reference"},
+            {"type": "text", "text": "done"},
+        ]},
+    ]))
+    # 全是文本（占位也是文本）→ 按既有规则折成字符串，与旧行为一致
+    assert parsed.messages[0] == {"role": "user", "content": (
+        "[resume.pdf omitted: this gateway cannot forward document content]"
+        "[tool available: mcp__fs__read][tool available]")}
+    # assistant 侧的 tool_reference 直接丢（不占上下文）
+    assert parsed.messages[1] == {"role": "assistant", "content": "done"}
+
+
+def test_parse_document_inside_tool_result_is_placeholder():
+    parsed = parse_messages_request(_body(messages=[{"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "t", "content": [
+            {"type": "document", "source": {"type": "text", "data": "x"}}]}]}]))
+    assert parsed.messages[0]["content"] == (
+        "[document omitted: this gateway cannot forward document content]")
 
 
 def test_parse_tool_result_with_image():

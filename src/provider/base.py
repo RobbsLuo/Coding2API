@@ -400,7 +400,19 @@ def _queue_wait_seconds(node: dict[str, Any]) -> float | None:
     return None
 
 
-_BUSINESS_CODE_RE = re.compile(r'"code"\s*:\s*(-?\d+)')
+_BUSINESS_CODE_RE = re.compile(r'"code"\s*:\s*"?(-?\d+(?:-\d+)*)"?')
+
+
+def _code_value(token: str) -> int:
+    """业务码文本 → 整数。
+
+    上游会用连字符分组写同一族码（`11-128` 即 `11128`，2026-11-02 实测
+    出现在 403 的 body 里）。带连字符时按「去掉分隔符」还原；纯负数
+    （`-3`）保持原义。
+    """
+    if "-" in token[1:]:
+        return int(token.replace("-", ""))
+    return int(token)
 
 
 def business_codes(text: str) -> frozenset[int]:
@@ -413,8 +425,13 @@ def business_codes(text: str) -> frozenset[int]:
     不搜裸数字：时间戳、流水号里也会出现 11102 这类片段，直接 substring
     匹配会把无关响应判成模型错误（例如 `"code":111020` 含有 `11102`）。
     只认 `"code":` 键值形态，且要求整个数字 token 相等。
+
+    **字符串码与连字符码同样认**（2026-11-02 上游已在 wire 上发
+    `{"code":"11-128"}`）：漏认的后果不对称——403/401 分支会把「请求级
+    风控」误判成 `ErrKind.DEAD` 并**硬禁用整池好号**，而多认一个码最多是
+    多一次冷却。故数字前后的引号视为可选，连字符按分组符还原。
     """
-    return frozenset(int(match) for match in _BUSINESS_CODE_RE.findall(text))
+    return frozenset(_code_value(match) for match in _BUSINESS_CODE_RE.findall(text))
 
 
 async def aclose_stream(stream: Any) -> None:

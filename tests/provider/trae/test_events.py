@@ -93,6 +93,10 @@ def test_classify_status_detects_1005_in_body():
     (429, b'{"code": 6004}', ErrKind.MODEL),
     (429, b'{"code": 500}', ErrKind.SOFT),
     (500, b'{"code": 14018}', ErrKind.CREDIT),      # 业务码优先于状态码
+    # 字符串 / 连字符形态的业务码同样认（与 CodeBuddy 共用的 `business_codes`）
+    (400, b'{"code": "11102"}', ErrKind.BLOCKED),
+    (400, b'{"code": "11-102"}', ErrKind.BLOCKED),
+    (402, b'{"code": "14018"}', ErrKind.CREDIT),
     (403, b'{"code": 4008, "message": "Your requests have exceeded the quota."}',
      ErrKind.CREDIT),                                # 配额耗尽：HTTP 形态同样判 CREDIT
 ])

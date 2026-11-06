@@ -28,7 +28,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from ...engine.reasoning import thinking_effort
+from ...engine.reasoning import output_config_effort, thinking_effort
 from ..openai.request import (
     MAX_OUTPUT_TOKENS,
     MAX_TEMPERATURE,
@@ -161,6 +161,30 @@ def _merge_parts(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
     return list(parts)
 
 
+def _placeholder_text(kind: str, block: dict[str, Any]) -> str:
+    """本网关无法转成 chat 表达的内容块 → 一段中性占位文本。
+
+    Claude Code 2.1.31x 起会在会话里回灌两类块：
+
+    * `tool_reference`（服务端 tool_search 命中的工具名，`{type, tool_name}`）：
+      它只是「这个工具可用」的提示，chat 没有对应语义，丢掉也不影响模型已
+      看到的工具表。
+    * `document`（PDF / 纯文本附件）：chat 只有 `image_url`，转不了文档。
+
+    两者此前都显式 400，而客户端遇到 400 会**整轮重发一次**并永久关掉该特性
+    （`tool_reference` 实测 28/30 次 400 都出自它）。改成占位文本后模型至少
+    知道「这里原本有个附件/工具引用」，比白打一轮往返好。
+    """
+    if kind == "tool_reference":
+        name = block.get("tool_name")
+        if isinstance(name, str) and name:
+            return f"[tool available: {name}]"
+        return "[tool available]"
+    title = block.get("title")
+    label = title if isinstance(title, str) and title else kind
+    return f"[{label} omitted: this gateway cannot forward {kind} content]"
+
+
 def _tool_result_text(content: Any) -> str | list[dict[str, Any]]:
     """`tool_result.content`：字符串或 text/image 块数组。
 
@@ -183,9 +207,9 @@ def _tool_result_text(content: Any) -> str | list[dict[str, Any]]:
                 parts.append(_text_part(block, where))
             elif kind == "image":
                 parts.append(_image_part(block, where))
-            elif kind == "document":
-                raise InvalidRequest(
-                    f"tool_result.content type {kind!r} is not supported by this gateway")
+            elif kind in ("document", "tool_reference"):
+                parts.append({"type": "text",
+                              "text": _placeholder_text(kind, block)})
             else:
                 raise InvalidRequest(
                     f"unknown tool_result.content type {kind!r}")
@@ -247,8 +271,11 @@ def _user_messages(blocks: list[Any]) -> list[dict[str, Any]]:
                 tool_message["cache_control"] = marker
             messages.append(tool_message)
         elif kind == "document":
-            raise InvalidRequest(
-                f"content block type {kind!r} is not supported by this gateway")
+            # user 消息里的 document（附件）：chat 只有 image_url，见
+            # `_placeholder_text`。此前显式 400 会打死整轮。
+            pending.append({"type": "text", "text": _placeholder_text(kind, block)})
+        elif kind == "tool_reference":
+            pending.append({"type": "text", "text": _placeholder_text(kind, block)})
         else:
             raise InvalidRequest(f"unknown content block type {kind!r}")
     flush()
@@ -294,6 +321,10 @@ def _assistant_message(blocks: list[Any]) -> dict[str, Any] | None:
             if marker is not None:
                 tool_call["cache_control"] = marker
             tool_calls.append(tool_call)
+        elif kind == "tool_reference":
+            # 服务端 tool_search 的「该工具可用」提示：chat 无对应语义，
+            # assistant 侧直接丢（不占上下文，也不影响下一轮调用）
+            continue
         else:
             raise InvalidRequest(f"unknown content block type {kind!r}")
     if not content_parts and not reasoning_parts and not tool_calls:
@@ -318,6 +349,15 @@ def _map_messages(raw_messages: list[Any]) -> list[dict[str, Any]]:
             raise InvalidRequest(f"messages[{index}] must be an object")
         role = item.get("role")
         content = item.get("content")
+        if role == "system":
+            # Claude Code 2.1.318 起在新会话首轮发 mid-conversation system
+            # 消息（`mid-conversation-system-2026-04-07` 特性）。chat 只在
+            # 开头认 system，但**整轮 400 会让客户端白打一次往返**——它收到
+            # 400 会去掉该消息重发并永久关掉特性。这里就地转成 system 消息
+            # 按原位置插入：上游对此宽容，`role` 顺序本就是客户端的意图。
+            messages.append({"role": "system",
+                             "content": _system_block_content(content, index)})
+            continue
         if isinstance(content, str):
             if role not in ("user", "assistant"):
                 raise InvalidRequest(f"message role {role!r} is not supported")
@@ -335,6 +375,37 @@ def _map_messages(raw_messages: list[Any]) -> list[dict[str, Any]]:
         else:
             raise InvalidRequest(f"message role {role!r} is not supported")
     return messages
+
+
+def _system_block_content(content: Any, index: int) -> str:
+    """会话中途 system 消息的 content → 纯文本。
+
+    只接受字符串与 text 块数组（与顶层 `system` 同形）；其他块类型属于
+    客户端把非文本塞进 system 的畸形输入，显式 400 而不是猜。
+    """
+    if isinstance(content, str):
+        return content
+    if content is None:
+        return ""
+    if not isinstance(content, list):
+        raise InvalidRequest(
+            f"messages[{index}].content must be a string or an array")
+    parts: list[str] = []
+    for block_index, block in enumerate(content):
+        if not isinstance(block, dict):
+            raise InvalidRequest(
+                f"messages[{index}].content[{block_index}] must be an object")
+        kind = block.get("type")
+        if kind != "text":
+            raise InvalidRequest(
+                f"messages[{index}].content[{block_index}] type {kind!r} is "
+                f"not supported in a system message")
+        text = block.get("text")
+        if not isinstance(text, str):
+            raise InvalidRequest(
+                f"messages[{index}].content[{block_index}].text must be a string")
+        parts.append(text)
+    return "".join(parts)
 
 
 def _map_tools(tools: Any) -> list[dict[str, Any]]:
@@ -444,10 +515,16 @@ def parse_messages_request(body: Any, *, thinking_efforts: str = "") -> ChatRequ
     choice = _map_tool_choice(body.get("tool_choice"))
     if choice is not None:
         upstream["tool_choice"] = choice
-    # thinking → reasoning_effort（默认不映射）：Anthropic 只规定 budget_tokens
-    # ≥1024、没给「预算 ↔ 档位」对应表，阈值只能由使用者显式配置；留空时这里
-    # 一个字段都不写，`thinking` 与现状一样被忽略
-    effort = thinking_effort(thinking_efforts, body.get("thinking"))
+    # 档位来源优先级：
+    # 1. `output_config.effort`（Claude Code 2.1.318 起 `/effort` 的真实落点，
+    #    与 `thinking:{type:"adaptive"}` 同时出现；此前整块被丢弃 → 用户选的
+    #    档位静默失效，且不报错）
+    # 2. `thinking.budget_tokens` → 阈值表（默认不映射）：Anthropic 只规定
+    #    budget_tokens ≥1024、没给「预算 ↔ 档位」对应表，阈值只能由使用者显式
+    #    配置；留空时一个字段都不写，`thinking` 与现状一样被忽略
+    effort = output_config_effort(body.get("output_config"))
+    if effort is None:
+        effort = thinking_effort(thinking_efforts, body.get("thinking"))
     if effort is not None:
         upstream["reasoning_effort"] = effort
     return ChatRequest(model=model or "", messages=messages, stream=stream,

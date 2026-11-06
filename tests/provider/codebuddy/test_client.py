@@ -63,6 +63,18 @@ def test_classify_body_markers():
     (400, b'{"code": 111580}', ErrKind.INVALID),
     # 嵌套信封：业务码在内层，按集合成员判断不漏
     (400, b'{"code": 0, "data": {"code": 11102}}', ErrKind.BLOCKED),
+    # 字符串形态的业务码（2026-11-02 上游已这么发）
+    (400, b'{"code": "11128"}', ErrKind.REQUEST),
+    (400, b'{"code": "14018"}', ErrKind.CREDIT),
+    # 403 上的渠道风控：必须拦在 DEAD 之前，否则一次命中硬禁用整池好号
+    (403, b'{"code":"11-128","msg":"request illegal"}', ErrKind.REQUEST),
+    (403, b'{"code": 11128}', ErrKind.REQUEST),
+    # 403 的其他形态仍是凭据失效；401 不受上面那条影响
+    (403, b'{"code": 1001, "msg": "session expired"}', ErrKind.DEAD),
+    (403, b"forbidden", ErrKind.DEAD),
+    (401, b'{"code":"11-128"}', ErrKind.DEAD),
+    # 11140 的风控优先级仍高于 403 的请求级分支
+    (403, b'{"code": 11140, "msg": "request illegal"}', ErrKind.RESTRICTED),
     (404, b"not json at all", ErrKind.SOFT),
     (500, b'{"code": 9999}', ErrKind.OTHER),
 ])

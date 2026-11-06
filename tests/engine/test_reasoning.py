@@ -128,6 +128,58 @@ def test_thinking_effort_blank_table_never_maps():
     assert thinking_effort("", {"type": "enabled", "budget_tokens": 32768}) is None
 
 
+# ---------------------------------------------------- output_config.effort
+
+
+def test_output_config_effort_passes_through():
+    """Claude Code 2.1.318 的 `/effort` 落在 `output_config.effort`。
+
+    此前整块被丢弃 → 用户选档位静默失效且不报错（比 400 更难排查）。
+    """
+    parsed = parse_messages_request({
+        "model": "m", "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}],
+        "output_config": {"effort": "low"},
+        "thinking": {"type": "adaptive"},
+    })
+    assert parsed.raw["reasoning_effort"] == "low"
+
+
+def test_output_config_effort_wins_over_thinking_table():
+    """两个来源同时存在时以 `output_config` 为准（那是用户显式选的档位）。"""
+    parsed = parse_messages_request({
+        "model": "m", "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}],
+        "output_config": {"effort": "HIGH"},
+        "thinking": {"type": "enabled", "budget_tokens": 4096},
+    }, thinking_efforts="4096:minimal")
+    assert parsed.raw["reasoning_effort"] == "high"
+
+
+@pytest.mark.parametrize("output_config", [
+    None, "effort", [], {"effort": ""}, {"effort": "  "}, {"effort": 5}, {},
+    {"format": {"type": "json"}},
+])
+def test_output_config_effort_absent_or_malformed_never_maps(output_config):
+    """缺 `effort` / 非字符串一律不映射：`output_config` 其余成员仍忽略。"""
+    body = {"model": "m", "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]}
+    if output_config is not None:
+        body["output_config"] = output_config
+    assert "reasoning_effort" not in parse_messages_request(body).raw
+
+
+def test_output_config_effort_falls_back_to_thinking_table():
+    """`output_config` 没给 effort 时，`thinking.budget_tokens` 映射照旧生效。"""
+    parsed = parse_messages_request({
+        "model": "m", "max_tokens": 8,
+        "messages": [{"role": "user", "content": "hi"}],
+        "output_config": {"format": {"type": "json"}},
+        "thinking": {"type": "enabled", "budget_tokens": 4096},
+    }, thinking_efforts="4096:low")
+    assert parsed.raw["reasoning_effort"] == "low"
+
+
 def test_parse_messages_request_maps_thinking_budget():
     parsed = parse_messages_request(
         {"model": "m", "messages": [{"role": "user", "content": "hi"}],

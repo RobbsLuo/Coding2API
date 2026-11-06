@@ -105,6 +105,25 @@ def parse_thinking_efforts(raw: str) -> tuple[str | None, tuple[tuple[int, str],
     return disabled, tuple(sorted(thresholds.items(), reverse=True))
 
 
+def output_config_effort(output_config: object) -> str | None:
+    """Anthropic `output_config` → `reasoning_effort`；`None` = 不映射。
+
+    Claude Code 2.1.318 起「`/effort` 选了哪档」落在 `output_config.effort`
+    （取值 `low|medium|high|xhigh|max`），并与 `thinking:{type:"adaptive"}`
+    一起发送。此前本网关整块丢弃 `output_config`，用户改档位**静默无效**且
+    没有任何报错——比 400 更难排查，故这里原样透传取值。
+
+    只认 `effort` 一个键：`output_config` 的其他成员（格式等）chat 无对应
+    表达，仍按原样忽略，避免把未核实的语义猜成上游字段。
+    """
+    if not isinstance(output_config, dict):
+        return None
+    effort = output_config.get("effort")
+    if not isinstance(effort, str) or not effort.strip():
+        return None
+    return effort.strip().lower()
+
+
 def thinking_effort(raw: str, thinking: object) -> str | None:
     """Anthropic `thinking` 对象 → `reasoning_effort`；`None` = 不映射。
 
@@ -136,7 +155,17 @@ def thinking_effort(raw: str, thinking: object) -> str | None:
 
 # 档位从高到低（只覆盖已确认存在的档位）。降级链只在这条链上走一步：
 # 未知档位（渠道私有写法）不猜，直接放弃重试——猜错会把「高」降成别的语义。
-EFFORT_ORDER: tuple[str, ...] = ("xhigh", "high", "medium", "low", "minimal")
+# `max` 是 Codex 0.16x 起的新顶档（`codex-rs/protocol/src/openai_models.rs`
+# 的 `ReasoningEffort::Max`），必须排在 `xhigh` 之上，否则「max 被拒」时
+# 降级链直接放弃重试，用户只看到 400。
+EFFORT_ORDER: tuple[str, ...] = ("max", "xhigh", "high", "medium", "low", "minimal")
+
+# 客户端新写法 → 线上档位。只收**语义明确**的别名：
+# `ultra`（Codex 的 Ultra）是「最高档」的另一种叫法，落到 `max`；
+# `persistent` 在 Codex 里序列化成线上值 `"disabled"`（见
+# `client_tests.rs::reasoning_effort_for_requests_preserves_non_ultra_and_persistent_behavior`），
+# 它不是「更高」的档位，无法参与降级链，故不映射（保留 None = 放弃重试）。
+_EFFORT_ALIASES: dict[str, str] = {"ultra": "max"}
 
 # 「上游拒收该推理档位」的错误文案特征。保守到只认点名 effort / budget 的写法：
 # 泛化到「invalid」会把普通的参数错误也当成档位问题，白白多打一次上游。
@@ -149,8 +178,10 @@ _EFFORT_REJECTION_MARKERS: tuple[str, ...] = (
 
 def downgrade_effort(effort: str) -> str | None:
     """降一档；已是最低档 / 未知档位返回 None（调用方据此放弃重试）。"""
+    normalized = effort.strip().lower()
+    normalized = _EFFORT_ALIASES.get(normalized, normalized)
     try:
-        index = EFFORT_ORDER.index(effort.strip().lower())
+        index = EFFORT_ORDER.index(normalized)
     except ValueError:
         return None
     return EFFORT_ORDER[index + 1] if index + 1 < len(EFFORT_ORDER) else None

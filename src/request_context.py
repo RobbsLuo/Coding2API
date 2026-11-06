@@ -120,14 +120,17 @@ def credential_scope(credential_id: str | None) -> Iterator[None]:
 SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 # 接受的头名，按优先级排列。前三个是 opencode / Codex 生态实际在用的写法；
-# `thread-id` / `session-id` 是 **Codex 2026 起的现行写法**（openai/codex#22193：
-# 官方只发连字符形式，下划线别名已被移除 —— 部分代理拒收 `_`）；后两个是
-# conversation_id 的头形式（部分客户端把它放头里）。
-# 带前缀的 `x-session-id` 仍排第一：语义更具体，且历史客户端一直在用。
+# `x-claude-code-session-id` 是 Claude Code 2.1.x 起的会话头（body 只有
+# `metadata.user_id` 的 JSON 串，粘性只能靠它，否则退化到「消息前缀」兜底，
+# 上下文被压缩/裁剪后就断粘）；`thread-id` / `session-id` 是 **Codex 2026 起
+# 的现行写法**（openai/codex#22193：官方只发连字符形式，下划线别名已被移除
+# ——部分代理拒收 `_`）；后两个是 conversation_id 的头形式（部分客户端把它
+# 放头里）。带前缀的 `x-session-id` 仍排第一：语义更具体，且历史客户端一直在用。
 SESSION_ID_HEADERS: tuple[bytes, ...] = (
     b"x-session-id",
     b"x-opencode-session",
     b"x-session-affinity",
+    b"x-claude-code-session-id",
     b"thread-id",
     b"session-id",
     b"conversation-id",

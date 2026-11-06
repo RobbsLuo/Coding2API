@@ -175,11 +175,16 @@ def sanitize_channel_markers(body: dict[str, Any]) -> int:
     见 TECHNICAL.md §3.2）。content 为文本块列表（{"type": "text", ...}）
     时逐块处理——块形态指纹同样触发（2026-09-21 直证）。只改写出站副本，
     客户端会话历史保持原样。返回替换处数（用于日志与测试）。
+
+    除 message 正文，`tools[].function.description` 也是同一类指纹的高发区
+    （客户端把「你是 Claude Code…」写进工具说明）：不洗的话，只要客户端带
+    自定义工具就会被上游整单拒。**只洗 description**，不碰 `parameters`
+    schema——那是模型调用契约，逐串替换会把枚举/示例值改坏。
     """
+    replaced_total = _sanitize_tool_descriptions(body.get("tools"))
     messages = body.get("messages")
     if not isinstance(messages, list):
-        return 0
-    replaced_total = 0
+        return replaced_total
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -201,6 +206,31 @@ def sanitize_channel_markers(body: dict[str, Any]) -> int:
                     replaced_total += hits
                     block["text"] = replaced
     return replaced_total
+
+
+def _sanitize_tool_descriptions(tools: Any) -> int:
+    """洗工具说明里的厂商指纹；返回命中处数。
+
+    只处理 OpenAI 形状（`{"type":"function","function":{...,"description":…}}`），
+    不碰 `parameters`：JSON Schema 里的逐串替换会改坏枚举与示例值。
+    """
+    if not isinstance(tools, list):
+        return 0
+    hits_total = 0
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            continue
+        description = function.get("description")
+        if not isinstance(description, str):
+            continue
+        replaced, hits = _neutralize_text(description)
+        if hits:
+            hits_total += hits
+            function["description"] = replaced
+    return hits_total
 
 
 def build_headers(credential: CodeBuddyCredential, endpoint: str, *,

@@ -284,6 +284,26 @@ def test_session_id_from_headers_accepts_codex_hyphenated_headers():
     assert session_id_from_headers([(b"Thread-Id", b"mixed")]) == "mixed"
 
 
+def test_session_id_from_headers_accepts_claude_code_session_header():
+    """Claude Code 2.1.x 只在头 `X-Claude-Code-Session-Id` 里给会话标识。
+
+    body 只剩 `metadata.user_id` 的 JSON 串，不收这个头就只能靠「消息前缀」
+    兜底，上下文被压缩/裁剪后粘性会断。
+    """
+    from src.request_context import session_id_from_headers
+
+    assert session_id_from_headers(
+        [(b"x-claude-code-session-id", b"cc-1")]) == "cc-1"
+    assert session_id_from_headers(
+        [(b"X-Claude-Code-Session-Id", b"cc-2")]) == "cc-2"
+    # 更具体的 x-session-id 仍然优先
+    assert session_id_from_headers([
+        (b"x-claude-code-session-id", b"cc"), (b"x-session-id", b"x")]) == "x"
+    # Codex 的 thread-id 排在它之后
+    assert session_id_from_headers([
+        (b"thread-id", b"t"), (b"x-claude-code-session-id", b"cc")]) == "cc"
+
+
 def test_session_id_from_headers_skips_invalid_and_returns_none():
     from src.request_context import session_id_from_headers
 

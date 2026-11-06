@@ -141,6 +141,101 @@ def test_empty_tools_are_omitted():
     request = parse_responses_request({"input": "hi", "tools": []})
     assert "tools" not in request.raw
 
+
+# ------------------------------------------------- 托管 / 命名空间工具（Codex）
+
+
+def test_namespace_tools_flatten_only_default_functions_group():
+    """Codex 0.135+ 对自定义 responses provider 默认下发 `namespace` 工具组。
+
+    实测 0.135→0.167 全版本必发；此前非 `function` 一律 400，整轮请求失败
+    且客户端不降级（它只会重试同一请求两次）。
+
+    **只展平默认命名空间 `functions`**：客户端按 `(namespace, name)` 查
+    登记表（`codex-rs/core/src/tools/registry.rs`），chat 上游只回扁平名字、
+    带不回 namespace——展平成 `{ns}__{name}` 会被客户端当成「默认命名空间
+    里不存在的新工具」，模型调用即 `unsupported call`，比不提供更糟。
+    """
+    request = parse_responses_request({"input": "hi", "tools": [
+        {"type": "function", "name": "exec_command"},
+        {"type": "namespace", "name": "functions", "tools": [
+            {"type": "function", "name": "write_stdin", "description": "d"},
+            {"type": "custom", "name": "apply_patch"},
+        ]},
+        {"type": "namespace", "name": "multi_agent_v1", "tools": [
+            {"type": "function", "name": "send_input",
+             "parameters": {"type": "object"}},
+        ]},
+    ]})
+    assert request.raw["tools"] == [
+        {"type": "function", "function": {"name": "exec_command"}},
+        {"type": "function", "function": {"name": "write_stdin",
+                                          "description": "d"}},
+    ]
+
+
+def test_hosted_tools_are_skipped_not_rejected():
+    """`web_search` / `tool_search` / `custom` 是托管或 freeform 工具。
+
+    本网关没有服务端搜索能力，chat 也表达不了 freeform 的「整段自由文本」；
+    跳过是降级，400 会打死整轮（Codex 默认配置必带 `web_search`）。
+    """
+    request = parse_responses_request({"input": "hi", "tools": [
+        {"type": "web_search"},
+        {"type": "tool_search", "execution": "local", "description": "d",
+         "parameters": {}},
+        {"type": "custom", "name": "apply_patch",
+         "format": {"type": "grammar", "syntax": "lark", "definition": "x"}},
+        {"type": "function", "name": "keep"},
+    ]})
+    assert request.raw["tools"] == [{"type": "function",
+                                     "function": {"name": "keep"}}]
+
+
+def test_only_hosted_tools_means_no_tools_key():
+    """全是托管工具时不要塞空数组（上游对 `tools: []` 的处理不一致）。"""
+    request = parse_responses_request(
+        {"input": "hi", "tools": [{"type": "web_search"}]})
+    assert "tools" not in request.raw
+
+
+def test_duplicate_tool_names_keep_first():
+    """命名空间展平后可能与顶层同名：保留先出现的，避免上游 schema 冲突。"""
+    request = parse_responses_request({"input": "hi", "tools": [
+        {"type": "function", "name": "dup", "description": "first"},
+        {"type": "function", "name": "dup", "description": "second"},
+        {"type": "namespace", "name": "functions",
+         "tools": [{"type": "function", "name": "dup", "description": "third"}]},
+    ]})
+    assert request.raw["tools"] == [{"type": "function", "function": {
+        "name": "dup", "description": "first"}}]
+
+
+def test_namespace_without_members_is_empty():
+    """`namespace` 没带 `tools` 键 → 空组（不报错、不产出空壳工具）。"""
+    request = parse_responses_request({"input": "hi", "tools": [
+        {"type": "namespace", "name": "empty"},
+        {"type": "function", "name": "keep"},
+    ]})
+    assert request.raw["tools"] == [{"type": "function",
+                                     "function": {"name": "keep"}}]
+
+
+@pytest.mark.parametrize("tools, fragment", [
+    ([{"type": "namespace"}], r"tools\[0\]\.name"),
+    ([{"type": "namespace", "name": ""}], r"tools\[0\]\.name"),
+    ([{"type": "namespace", "name": "functions", "tools": {}}],
+     r"tools\[0\]\.tools"),
+    ([{"type": "namespace", "name": "functions", "tools": [5]}],
+     r"tools\[0\]\.tools\[0\]"),
+    ([{"type": "namespace", "name": "functions",
+       "tools": [{"type": "function"}]}], r"name must be a non-empty"),
+])
+def test_malformed_namespace_tools_rejected(tools, fragment):
+    """结构性错误仍 400：放过它们会让上游看到畸形工具表。"""
+    with pytest.raises(InvalidRequest, match=fragment):
+        parse_responses_request({"input": "hi", "tools": tools})
+
 def test_text_format_text_and_json_object_pass_through():
     for kind in ("text", "json_object"):
         request = parse_responses_request(
@@ -195,7 +290,6 @@ def test_stream_flag_flows_through():
     ({"input": "hi", "model": 5}, "model must be a string"),
     ({"input": "hi", "stream": "yes"}, "stream must be a boolean"),
     ({"input": "hi", "messages": "x", "tools": {}}, "tools must be an array"),
-    ({"input": "hi", "tools": [{"type": "web_search"}]}, "web_search"),
     ({"input": "hi", "tools": [5]}, "tools[0] must be an object"),
     ({"input": "hi", "tools": [{"type": "function"}]}, "name must be a non-empty"),
     ({"input": "hi", "tool_choice": {"type": "mcp"}}, "tool_choice form"),

@@ -100,6 +100,35 @@ def test_client_prepare_body_forwards_sampling_and_usage_fields():
     assert body["model"] == "resolved"
     assert body["chat_id"] == "derived" and body["prompt_cache_key"] == "derived"
 
+def test_client_prepare_body_clamps_output_tokens():
+    """输出上限按渠道夹取到 65536（目录里 11 个模型全是这个上限）。
+
+    下游只校验全局 `MAX_OUTPUT_TOKENS = 4_000_000`，原样透传会让客户端给
+    384000 的请求被上游确定性拒收，进而被判「参数无效」跳过整条渠道。
+    """
+    from src.provider.codearts.client import MAX_OUTPUT_TOKENS
+
+    assert MAX_OUTPUT_TOKENS == 65536
+    body = prepare_body({"messages": [], "max_tokens": 384_000,
+                         "max_completion_tokens": 1_000_000}, "m", chat_id="c")
+    assert body["max_tokens"] == 65536
+    assert body["max_completion_tokens"] == 65536
+    # 上限以下原样保留
+    body = prepare_body({"messages": [], "max_tokens": 4096,
+                         "max_completion_tokens": 512}, "m", chat_id="c")
+    assert body["max_tokens"] == 4096
+    assert body["max_completion_tokens"] == 512
+    # 非 int（bool / str / None）不动：交给上游裁决，本层只挡已知上限
+    body = prepare_body({"messages": [], "max_tokens": True,
+                         "max_completion_tokens": "x"}, "m", chat_id="c")
+    assert body["max_tokens"] is True
+    assert body["max_completion_tokens"] == "x"
+    # legacy 形状不夹取（不是 OpenAI 载荷，没有这两个键的语义）
+    legacy = prepare_body({"messages": [], "max_tokens": 384_000}, "m",
+                          chat_id="c", legacy=True)
+    assert "max_tokens" not in legacy
+
+
 def test_client_legacy_blocks_and_flatten():
     assert _legacy_blocks("nope") == []
     blocks = _legacy_blocks([

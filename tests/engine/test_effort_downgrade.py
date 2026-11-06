@@ -82,6 +82,7 @@ _STREAM_REJECT = [Event(kind=EventKind.ERROR, error_kind=ErrKind.INVALID,
 # ------------------------------------------------------------------ 纯函数
 
 def test_downgrade_effort_walks_one_step_down():
+    assert downgrade_effort("max") == "xhigh"
     assert downgrade_effort("xhigh") == "high"
     assert downgrade_effort("high") == "medium"
     assert downgrade_effort("medium") == "low"
@@ -90,6 +91,17 @@ def test_downgrade_effort_walks_one_step_down():
     # 已是链底 / 未知档位：不猜，直接放弃重试
     assert downgrade_effort("minimal") is None
     assert downgrade_effort("turbo") is None
+
+
+def test_downgrade_effort_aliases_codex_ultra_to_max():
+    """`ultra` 是 Codex 对最高档的另一种叫法（ReasoningEffort::Ultra）。
+
+    不映射的话「ultra 被上游拒收」会直接放弃重试，用户只看到 400。
+    `persistent` 在 Codex 里序列化成线上值 `disabled`，不是更高档，仍不映射。
+    """
+    assert downgrade_effort("ultra") == "xhigh"
+    assert downgrade_effort(" ULTRA ") == "xhigh"
+    assert downgrade_effort("persistent") is None
 
 
 def test_is_effort_rejection_matches_only_explicit_markers():

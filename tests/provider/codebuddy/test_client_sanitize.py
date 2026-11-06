@@ -77,3 +77,44 @@ def test_sanitize_channel_markers_counts_repeats_and_skips_noise():
 
     assert sanitize_channel_markers({}) == 0
     assert sanitize_channel_markers({"messages": "nope"}) == 0
+
+
+def test_sanitize_channel_markers_covers_tool_descriptions():
+    """`tools[].function.description` 是同一类指纹的高发区（客户端写进去的
+    「你是 Claude Code…」），不洗会被上游整单 11128 拒。
+
+    `parameters` 属模型调用契约，逐串替换会改坏枚举/示例值，故不动。
+    """
+    from src.provider.codebuddy.client import CHANNEL_MARKERS, sanitize_channel_markers
+
+    marker = CHANNEL_MARKERS[0]
+    body = {"messages": [], "tools": [
+        {"type": "function", "function": {
+            "name": "f", "description": f"说明 {marker} 结束",
+            "parameters": {"type": "object", "description": marker}}},
+        {"type": "function", "function": {"name": "bare"}},          # 无 description
+        {"type": "function", "function": {"name": "g", "description": 5}},
+        {"type": "function", "function": {"name": "clean",
+                                          "description": "无指纹"}},
+        {"type": "function", "function": "not-a-dict"},
+        "junk",
+        {"function": {"description": marker}},                       # 无 type 也洗
+    ]}
+    assert sanitize_channel_markers(body) == 2
+    tools = body["tools"]
+    assert tools[0]["function"]["description"] == "说明 [external-client-identity] 结束"
+    assert tools[0]["function"]["parameters"]["description"] == marker
+    assert tools[1]["function"] == {"name": "bare"}
+    assert tools[2]["function"]["description"] == 5
+    assert tools[3]["function"]["description"] == "无指纹"
+    assert tools[4]["function"] == "not-a-dict"
+    assert tools[5] == "junk"
+    assert tools[6]["function"]["description"] == "[external-client-identity]"
+
+
+def test_sanitize_channel_markers_tolerates_bad_tools_shape():
+    """`tools` 非数组 / 元素非 dict 时不炸（出站载荷可能来自宽松客户端）。"""
+    from src.provider.codebuddy.client import sanitize_channel_markers
+
+    assert sanitize_channel_markers({"messages": [], "tools": "nope"}) == 0
+    assert sanitize_channel_markers({"messages": [], "tools": [5, None]}) == 0
