@@ -549,9 +549,15 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             load_catalog_snapshot(config.data_dir))
     except Exception as error:  # noqa: BLE001 - 价表是加速手段，失败不阻断服务
         logger.warning("恢复落盘模型目录失败: %s", error)
+    # 目录 x0 的实测校准：上游改计费不改目录时，用 `usage_events` 里
+    # `credit_estimated=0` 的真实扣费把「免费」纠正成实际倍率，否则免费档
+    # 会一直压过到期积分（见 `db/paid_models.py` 的模块 docstring）。
+    # 先于 StatsCollector 创建：写入回调要 `invalidate()` 它，让「刚观测到的
+    # 真扣费」立刻参与选号，而不是等 600s 快照 TTL。
+    paid_models = PaidModelRepository(db)
     stats_collector = StatsCollector(
         db, prices=lambda: price_table, usd_cny_rate=lambda: runtime.usd_cny_rate,
-        on_record=live_events.publish)
+        on_record=live_events.publish, on_write=paid_models.invalidate)
     # 凭证级限额护栏：配置表 + 当日用量聚合注入 LimitGuard（快照缓存），
     # executor 选号前用它过滤触顶候选；管理台改完 invalidate() 立即生效。
     limits_repo = LimitsRepository(db)
@@ -573,10 +579,6 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 冷却到期半开探测：到期先放 1 个请求，成功再全量回池（进程内状态，
     # 重启丢失只会让每个号多探一次）。
     half_open_guard = HalfOpenGuard()
-    # 目录 x0 的实测校准：上游改计费不改目录时，用 `usage_events` 里
-    # `credit_estimated=0` 的真实扣费把「免费」纠正成实际倍率，否则免费档
-    # 会一直压过到期积分（见 `db/paid_models.py` 的模块 docstring）。
-    paid_models = PaidModelRepository(db)
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
                                      scheduler=Scheduler(
                                          expiry_window=lambda: runtime.quota_expiry_window_seconds,

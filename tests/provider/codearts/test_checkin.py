@@ -101,6 +101,33 @@ def test_events_campaign_type_and_id_accessors_tolerate_missing():
     assert codearts_events.campaign_id({}) == 0
     assert codearts_events.campaign_id(None) == 0
 
+
+def test_events_campaign_type_falls_back_to_trigger_event():
+    """`type` 缺失时读 `extra.triggerEvent`：两者是同一标识的两个字段。
+
+    只认 `type` 时，一次只剩 `triggerEvent` 的响应会落到 campaignId==1 兼容
+    分支，报「活动未开放」并 ok=True 封账——签到从此静默失效。
+    """
+    assert codearts_events.campaign_type(
+        {"extra": {"triggerEvent": "user.login"}}) == "USER_LOGIN"
+    assert codearts_events.campaign_type(
+        {"type": "", "extra": {"triggerEvent": " user.login "}}) == "USER_LOGIN"
+    # type 优先，不被 triggerEvent 覆盖
+    assert codearts_events.campaign_type(
+        {"type": "NEW_USER_REGISTER",
+         "extra": {"triggerEvent": "user.login"}}) == "NEW_USER_REGISTER"
+    # 形状不对一律空串（不抛）
+    for bad in ({"extra": None}, {"extra": "user.login"}, {"extra": {}},
+                {"extra": {"triggerEvent": 5}},
+                {"extra": {"triggerEvent": "  "}}):
+        assert codearts_events.campaign_type(bad) == ""
+
+    # 端到端：只有 triggerEvent 的签到活动同样被挑中
+    only_trigger = {"campaignId": 34, "status": "ELIGIBLE", "claimable": True,
+                    "extra": {"triggerEvent": "user.login"}}
+    picked = codearts_events.daily_credit_campaign(_delivery(only_trigger))
+    assert picked is not None and picked["campaignId"] == 34
+
 def test_events_campaign_end_epoch_parses_utc_and_degrades():
     # 2026-12-30T16:00:00Z == 2026-12-31 00:00 +08（活动截止，实测原文）
     assert codearts_events.campaign_end_epoch(_campaign()) == 1798646400
@@ -314,6 +341,7 @@ async def test_client_checkin_claim_business_error_is_failure():
     assert result.ok is False and result.code == 40001
     await client.aclose()
 
+
 async def test_client_checkin_uses_campaign_id_from_delivery_response():
     """claim/confirm 的 campaignId 必须取当轮响应，不能写死旧 ID 1。
 
@@ -335,7 +363,7 @@ async def test_client_checkin_uses_campaign_id_from_delivery_response():
     await client.aclose()
 
 async def test_client_checkin_missing_campaign_id_still_fails_cleanly():
-    """响应缺 `campaignId` → 按 0 发（该轮失败），绝不静默打旧活动。"""
+    """响应缺 `campaignId` → 判失败重试，绝不带 0 去打写接口。"""
     sent: list[int] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -348,8 +376,8 @@ async def test_client_checkin_missing_campaign_id_still_fails_cleanly():
 
     client = _client(handler)
     result = await client.checkin(_cred())
-    assert result.ok and result.credit == 100.0
-    assert sent == [0, 0]
+    assert result.ok is False and "campaignId" in result.message
+    assert sent == []                          # 没有写调用
     await client.aclose()
 
 async def test_provider_checkin_status_and_scope():

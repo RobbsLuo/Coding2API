@@ -264,6 +264,40 @@ def test_record_swallows_publish_failure(stats):
     assert stats[1].overview(username="u")["requests"] == 1
 
 
+def test_record_notifies_paid_snapshot_after_commit(stats):
+    """每写一行明细就失效实测扣费快照：否则新观测要等 600s TTL 才生效。
+
+    目录 x0 数据烧额度的窗口正是这段延迟——`invalidate()` 的 docstring 承诺
+    「刚写完一条明细的调用方用」，装配点必须真的接上。
+    """
+    from src.stats.collector import StatsCollector
+
+    calls: list[int] = []
+    collector = StatsCollector(stats[0]._db, on_write=lambda: calls.append(1))
+    collector.record(username="u", provider="trae", model="m", ok=True)
+    collector.record(username="u", provider="trae", model="m", ok=True)
+    assert calls == [1, 1]
+
+
+def test_record_swallows_paid_snapshot_failure(stats):
+    """快照失效失败同样不能影响统计写入。"""
+    from src.stats.collector import StatsCollector
+
+    def boom():
+        raise RuntimeError("invalidate exploded")
+
+    collector = StatsCollector(stats[0]._db, on_write=boom)
+    collector.record(username="u", provider="trae", model="m", ok=True)
+    assert stats[1].overview(username="u")["requests"] == 1
+
+
+def test_record_notifies_paid_snapshot_writer_is_optional(stats):
+    """未装配 `on_write`（脚本 / 老装配）：写入照常，不报错。"""
+    collector, query = stats
+    collector.record(username="u", provider="trae", model="m", ok=True)
+    assert query.overview(username="u")["requests"] == 1
+
+
 def test_record_publishes_normalized_model_and_error_type(stats):
     """广播的是**归一后**的值（与明细表一致），不是调用方原始入参。"""
     from src.stats.collector import StatsCollector

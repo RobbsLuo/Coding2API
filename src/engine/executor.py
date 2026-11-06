@@ -8,7 +8,7 @@ import logging
 import socket
 import ssl
 import time
-from collections.abc import AsyncIterator, Iterable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
@@ -242,7 +242,7 @@ class ExecutorDeps:
     # 目录写 x0 但最近 24h 有上游明确扣费（`credit_estimated=0` 且 credit>0）
     # 的模型，注入时按实测均值覆盖——否则一条过期的目录数据就会让该渠道
     # 永远占住免费档，压过所有到期积分。None = 不校准（测试与旧装配兼容）。
-    paid_models: Any | None = None
+    paid_models: Callable[[], dict[tuple[str, str], float]] | None = None
     # 会话粘性（ConversationAffinity）；None 表示关闭。对话进行中固定用原
     # 凭证，出错才轮换，成功后重新粘定实际服务的凭证
     affinity: Any | None = None
@@ -2491,14 +2491,16 @@ def _failure_type(kind: ErrKind | None, error: Exception | None = None, *,
 def _is_network_error(error: Exception | None) -> bool:
     """是不是本机 DNS / 连接建立失败（而非上游返回错误或读超时）。
 
-    只认 `httpx.ConnectError` 与底层 `socket.gaierror`：前者是 TCP/DNS 建连
-    失败，后者是解析失败。`ConnectTimeout` 不在此列——它可能是上游慢，沿用
-    `upstream_timeout`。`__cause__` 也看一层：provider 把原始异常包成
+    只认具体类：`httpx.ConnectError`（TCP/DNS 建连失败）、`httpx.ProxyError`
+    （本机代理通道不可用——2026-11 实测代理进程挂掉时走的是这一类，不是
+    `ConnectError`，漏掉它会让健康凭证按 `upstream_timeout` 冷却）与底层
+    `socket.gaierror`（解析失败）。`ConnectTimeout` 不在此列——它可能是上游慢，
+    沿用 `upstream_timeout`。`__cause__` 也看一层：provider 把原始异常包成
     `UpstreamTransportError` 时仍要识别出网络根因。
     """
     if error is None:
         return False
-    kinds = (httpx.ConnectError, socket.gaierror)
+    kinds = (httpx.ConnectError, httpx.ProxyError, socket.gaierror)
     if isinstance(error, kinds):
         return True
     return isinstance(error.__cause__, kinds)

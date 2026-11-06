@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from src.api.credential_login import provider_supports_merge, save_login_credential
+import asyncio
+
+from src.api.credential_login import save_login_credential
 from src.provider.base import AuthResult, Quota
 
 
@@ -65,6 +67,55 @@ async def test_save_login_credential_adds_for_unsupported_or_unknown_identity(
     assert merged is False and fresh != blank
 
 
+async def test_save_login_credential_merges_when_only_fallback_identity_matches(admin_client):
+    """身份补全失败、只能给出兜底键时，仍然合并到老行（不新增重复凭证）。
+
+    老行有 `uid`，这次登录的 token 响应没带 uid（`_fill_identity` 网络失败），
+    只能推出 `domain_id|user_name`。单键比较必然错开 → 重复行。
+    """
+    services = _services(admin_client)
+    old_id = services.credentials.add(
+        provider="codearts",
+        credential_data={"uid": "u1", "domain_id": "d", "user_name": "n"},
+        nickname="old")
+
+    credential_id, merged = await save_login_credential(
+        services, provider_id="codearts",
+        credential_data={"domain_id": "d", "user_name": "n", "token": "new"},
+        nickname="new", added_by="root")
+
+    assert merged is True and credential_id == old_id
+    assert [row["id"] for row in services.credentials.list_all()
+            if row["provider"] == "codearts"] == [old_id]
+
+
+async def test_save_login_credential_serializes_concurrent_same_account_logins(
+        admin_client):
+    """同一渠道并发登录串行化：不会各查到 None 再各插一行。
+
+    没有渠道锁时两个 coroutine 都会在 `find_login_credential` 里读到空库，
+    然后各走 `add()` —— 池子里两条同账号凭证（本功能要消除的重复）。
+    """
+    services = _services(admin_client)
+
+    first, second = await asyncio.gather(
+        save_login_credential(
+            services, provider_id="codearts",
+            credential_data={"uid": "u1", "token": "a"},
+            nickname="n", added_by="root"),
+        save_login_credential(
+            services, provider_id="codearts",
+            credential_data={"uid": "u1", "token": "b"},
+            nickname="n", added_by="root"))
+
+    rows = [row for row in services.credentials.list_all()
+            if row["provider"] == "codearts"]
+    assert len(rows) == 1
+    # 先落库的那次新增，后一次命中同一条 → 合并
+    assert {first[0], second[0]} == {rows[0]["id"]}
+    assert sorted([first[1], second[1]]) == [False, True]
+
+
 async def test_save_login_credential_falls_back_when_merge_row_vanished(admin_client):
     """查到 id 到加锁更新之间被删除 → 不能报成功，退回新增。"""
     services = _services(admin_client)
@@ -80,12 +131,6 @@ async def test_save_login_credential_falls_back_when_merge_row_vanished(admin_cl
     assert merged is False
     assert credential_id != "cred_ghost"
     assert services.credentials.provider_of(credential_id) == "codearts"
-
-
-def test_provider_supports_merge_only_for_identity_channels():
-    assert provider_supports_merge("codearts") is True
-    assert provider_supports_merge("officeace") is True
-    assert provider_supports_merge("trae") is False
 
 
 def test_upstream_poll_merges_relogin_and_revives_credential(admin_client):

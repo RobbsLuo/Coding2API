@@ -91,6 +91,26 @@ def test_upstream_transport_error_is_soft():
     assert UpstreamTransportError("x").kind() is ErrKind.SOFT
 
 
+def test_is_network_error_includes_proxy_error():
+    """本机代理挂掉走 `httpx.ProxyError`，不是 `ConnectError`。
+
+    漏掉它时这类失败落 `upstream_timeout` 并 SOFT 冷却健康凭证——与
+    「本机网络故障不冷却」的口径直接矛盾（2026-11 实测代理进程退出）。
+    `ConnectTimeout` 仍不算（可能是上游慢），保持原有边界。
+    """
+    from src.engine.executor import _is_network_error
+
+    assert _is_network_error(httpx.ProxyError("proxy connect failed")) is True
+    assert _is_network_error(httpx.ConnectError("connect failed")) is True
+    assert _is_network_error(httpx.ConnectTimeout("timed out")) is False
+    assert _is_network_error(httpx.ReadTimeout("read timed out")) is False
+    assert _is_network_error(None) is False
+    # 包装形态：provider 把根因挂在 __cause__ 上
+    wrapped = UpstreamTransportError("wrapped")
+    wrapped.__cause__ = httpx.ProxyError("proxy down")
+    assert _is_network_error(wrapped) is True
+
+
 async def test_stream_rotates_on_connect_error_without_cooling(repo):
     """首个凭证 ConnectError（本机 DNS/建连失败）→ 换号成功，但不冷却凭证。
 

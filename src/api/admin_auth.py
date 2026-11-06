@@ -89,19 +89,17 @@ def _record_oauth_import(services: Services, principal: Principal, provider_id: 
     「谁什么时候把号塞进池子」只能从手工导入那一条回答——登录进来的号在审计
     页上完全消失。这里统一补上，action 与手工导入一致，管理台的「导入凭证」
     过滤能同时看到两条来源，detail 里区分渠道与「新增 / 重新登录合并」。
+
+    两条分支只差「动作名 + detail」，日志与审计的其余字段一致：合并写一处，
+    以后再改字段不必同时动两段。
     """
-    if merged:
-        logger.info("管理员 %s 通过 OAuth 重新登录并更新凭证 %s（上游 %s）",
-                    principal.username, credential_id, provider_id)
-        services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_IMPORT,
-                              target=credential_id,
-                              detail=f"上游 {provider_id}；来源 OAuth 重新登录（合并已有凭证）")
-        return
-    logger.info("管理员 %s 通过 OAuth 新增凭证 %s（上游 %s）",
-                principal.username, credential_id, provider_id)
+    action = "重新登录并更新" if merged else "新增"
+    outcome = "合并已有凭证" if merged else "登录"
+    logger.info("管理员 %s 通过 OAuth %s凭证 %s（上游 %s）",
+                principal.username, action, credential_id, provider_id)
     services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_IMPORT,
                           target=credential_id,
-                          detail=f"上游 {provider_id}；来源 OAuth 登录")
+                          detail=f"上游 {provider_id}；来源 OAuth {outcome}")
 
 
 def resolve_public_callback_url(settings: Settings,

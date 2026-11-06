@@ -432,7 +432,7 @@ class Provider(Protocol):
 
 **登录**：OAuth2 PKCE → `POST {snap-manager}/v1/oauth2/tokens`（authorization_code）换 `{access_key_id, secret_access_key, security_token, expiration, refresh_token}`；DPoP 私钥随 credential 生成并加密入库。回调 302 到 `http://127.0.0.1:{port}/oauth/callback`（服务端监听不到）→ **paste 轨道**：用户把打不开的回调链接粘回，`POST /api/auth/upstream/complete` 用 code + `code_verifier` + DPoP 私钥换 token。登录后用 `caller_identity`（不可用回落 `current_user`）尽力补 `uid`/`user_name`/`nickname`；失败不阻断。
 
-**重新登录合并**：三条 OAuth 落库路径（poll / 粘贴回调 / `/authorize`）统一走 `api/credential_login.py`。provider 声明稳定身份（CodeArts `uid`，缺省回落 `domain_id|user_name`；OfficeAce `account_id`/`principal_id`）→ 命中同渠道既有凭证就地更新（整份凭证 + token 时间），并解除硬禁用、账号/模型级冷却；`enabled` / `pinned` / `tags` / `added_by` / `created_at` 保留。多行命中优先 `disabled`（本次要救的那条）→ `pinned` → 最早创建。身份缺失/解析失败/未命中 → 新增。
+**重新登录合并**：三条 OAuth 落库路径（poll / 粘贴回调 / `/authorize`）统一走 `api/credential_login.py`。provider 声明稳定身份（CodeArts `uid`，兜底 `domain_id|user_name`；OfficeAce `account_id`/`principal_id`）→ 命中同渠道既有凭证就地更新（整份凭证 + token 时间），并解除硬禁用、清 `err_count` 与模型级负缓存。**账号级冷却按来源决定**：`UPSTREAM_COOLDOWN_KINDS`（限流/余额/权益/风控，上游点名的恢复时刻）保留，与 `revive(force=False)` 同口径——重登换的是凭证不是配额，顺手解掉刚写入的 429 冷却会让下一个请求立刻再撞一次；其余（本地 OTHER / `cooling_kind` 为 NULL 的老库）照旧清除。`enabled` / `pinned` / `tags` / `added_by` / `created_at` 保留。多行命中优先 `disabled`（本次要救的那条）→ `pinned` → 最早创建。**身份按别名集合取交集**（不只是首选键）：身份补全接口偶发失败时新登录只有兜底键，单键比较会与老行的首选键错开而新增重复行。身份缺失/解析失败/未命中 → 新增。查→合并→新增整段持渠道级登录锁，同渠道并发登录不产生重复行。
 
 **一次性票终态**：`client.refresh_token` 捕获 `TokenEndpointError` 后经 `events.relogin_required(body)` 判定，只认 `_RELOGIN_MARKERS`（`STS5.1806 the refresh token has been used` / `invalid client id` / `InvalidDPoPHeader` / `invalid_grant`）。网络 / 5xx / 限流 / 普通 4xx 仍可重试（误判会让偶发故障永久废掉好凭证）。`RefreshTask` 捕获后 `mark_relogin_required`：写可操作 `disabled_reason`、硬禁用、清模型级冷却。
 
@@ -482,7 +482,7 @@ class Provider(Protocol):
 
 **积分即主账**：单位 `officeace_points`；`Quota.remaining`/`total` 直接是积分。来源：新用户一次性 4000 + 每日签到 1000，各自独立到期（口径「逐笔到期」）。**不做 credit 估算**：`cost_coefficient` 与 `tokens_per_point` 的叠乘关系官方未说明。签到 `POST {gateway}/v1/subscription/bonus/claim` 是**写操作**；body 必须为空 JSON `` + `Content-Type: application/json`（无 body 回 500 `OfficeAce.11020001`）；当日重复领取幂等。收获按 `bonus_skus` 的**剩余量增量**算（`points` 是累计发放量，会虚高）。`seal_until` = 下个北京时间 0 点。`checkin_scope` 用 `account_id`；身份未知返回**空串**。
 
-**重新登录合并**：与 CodeArts 同一套 `credential_login` 策略，合并键为 `account_id`（缺省 `principal_id`）——同账号重新登录更新既有行并解除硬禁用/冷却，不新增重复凭证。
+**重新登录合并**：与 CodeArts 同一套 `credential_login` 策略，合并键为 `account_id`（缺省 `principal_id`）——同账号重新登录更新既有行、解除硬禁用，账号级冷却按来源保留（见上文 CodeArts 口径），不新增重复凭证。
 
 **登录走 poll 轨道**：回调由**云端**承接（`/v1/claw/auth/callback`），无需本地端口或粘链接。`POST /v1/claw/auth/state` 要 state（本地造的回 `AgentArts.11000004`）→ PKCE challenge + DPoP 公钥拼 authorize URL，套 `{auth_host}/authui/login.html?service=<encode(...)>`；轮询 `GET /v1/claw/auth/code?state=`（202 = 未完成）；拿 code 后 `POST /v1/oauth2/tokens`（authorization_code + DPoP）换临时 AK/SK；再调 `client-permission-validate` 校验真开通（未开通 `subscription: null` 时明确报错）；存 `model_app_key`/`model_app_secret` 与网关地址。`AuthStateStore` 按 **username** 分键 reservation（TTL + pending 上限）：单槽全局态会让两管理员并发登录互相覆盖；并发轮询同一 state 只有一路 `consume` 成功。`force_login` 走 `/authui/logout?service=…`，默认 False。
 
@@ -774,7 +774,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 |---|---|---|
 | 额度探测（quota_probe） | 启动立即一轮（不节流）+ 每 `QUOTA_PROBE_MINUTES`（默认 60） | 写 `credentials.quota_*` / `quota_expiry_ladder` / `quota_packages` / `health`；硬禁用与 `enabled=0` 直接跳过（口径同 refresh / checkin / growth / activity——死号只会白打上游并灌日志） |
 | token 预刷新（refresh） | 每 `REFRESH_INTERVAL_MINUTES`（默认 30，下限 5） | 到期前 `REFRESH_SKEW_HOURS`（默认 24h）窗口内轮换；短寿命渠道自行封顶（CodeArts 2700s，必须**严格宽于**本周期）；`UpstreamReloginRequired` 时标记并硬禁用 |
-| 每日签到（checkin） | `CHECKIN_TIMES` 留空 → 每 10 分钟；配了时点 → 每 1 分钟醒（窗口 `[时点−抖动, 时点]`，10 分钟周期会整轮错开、一天一次都不签） | 成功即封账（`日期:scope` → 截止时刻，内存态，跨天清理）；渠道可回填 `seal_until`（Qoder 10:00 换窗口）；失败重试。每次签到落一行 `checkin_events`（成功/失败/已签都记，手动签到 `trigger=manual`） |
+| 每日签到（checkin） | `CHECKIN_TIMES` 留空 → 每 10 分钟；配了时点 → 每 1 分钟醒（窗口 `[时点−抖动, 时点]`，10 分钟周期会整轮错开、一天一次都不签） | 成功即封账（`日期:scope` → 截止时刻，内存态，跨天清理）；渠道可回填 `seal_until`（Qoder 10:00 换窗口）；**失败按连续次数指数退避**（10m → 20m → 40m → 封顶 1h，成功清零；管理台「立即运行」`trigger=manual` 不受限制），避免上游一直回「今日积分尚未发放」时每 10 分钟空锤一次。每次签到落一行 `checkin_events`（成功/失败/已签都记） |
 | 成长中心（growth） | 每 `GROWTH_INTERVAL_MINUTES`（默认 60，下限 5） | 仅 CB：7 类领取；落 `growth_events` + 回写 `growth_last_result` |
 | 活跃上报（activity，默认关） | 每 10 分钟醒，仅 `ACTIVITY_REPORT_HOUR`（默认 10 点）窗口内执行 | CB + 国际版：补发 `chat_request_send`；按「endpoint + userId」隔离、当日封账 |
 | 明细清理（retention） | 每 5 分钟 | `usage_events` 全量重算小时汇总（幂等 upsert）+ 90 天清理；同期限回收 `credit_events` / `audit_events` / `alert_events` / `growth_events` / `checkin_events`；顺带清过期冷却（模型级删行 + 账号级 `cooling_until` 置 NULL）。跑在 `asyncio.to_thread` |

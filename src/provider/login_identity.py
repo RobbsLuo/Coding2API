@@ -9,12 +9,21 @@ import 本模块，否则成环），只按落盘 JSON 的字段名取值——�
 
 为什么不能比对整份凭证 JSON：重新登录后 access token / refresh_token /
 DPoP 私钥必然全变，整份比对永远不相等，结果是每次登录都新增一条。
+
+**为什么是身份集合而不是单个键**：CodeArts 的 `uid` 优先、`domain_id|user_name`
+兜底。若只认首选键，一次身份补全接口失败（`oauth._fill_identity` 尽力而为，
+网络错误只记日志）的登录拿不到 `uid`，落库键退化成 `domain_id|user_name`，
+与老行的 `uid` 键**永远不相等** → 又新增一条重复凭证，正是本功能要消除的
+回归。故两侧都给出**全部可推导别名**，按交集判定同一账号。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
+
+#: 同一账号的别名集合；空集 = 无法安全合并。
+IdentitySet = frozenset[str]
 
 
 def _text(raw: dict[str, Any], *keys: str) -> str:
@@ -25,39 +34,88 @@ def _text(raw: dict[str, Any], *keys: str) -> str:
     return ""
 
 
-def codearts_login_identity(credential_data: dict[str, Any]) -> str:
-    """CodeArts：`uid`（caller-identity 的 principal_id）；缺则 `domain_id|user_name`。"""
-    uid = _text(credential_data, "uid", "user_id", "userId")
-    if uid:
-        return uid
-    domain_id = _text(credential_data, "domain_id", "domainId")
-    user_name = _text(credential_data, "user_name", "userName")
+def _domain_name(raw: dict[str, Any]) -> str:
+    domain_id = _text(raw, "domain_id", "domainId")
+    user_name = _text(raw, "user_name", "userName")
     return f"{domain_id}|{user_name}" if domain_id and user_name else ""
 
 
+def codearts_login_identity(credential_data: dict[str, Any]) -> str:
+    """CodeArts 首选身份：`uid`（caller-identity 的 principal_id）；缺则 `domain_id|user_name`。"""
+    uid = _text(credential_data, "uid", "user_id", "userId")
+    return uid or _domain_name(credential_data)
+
+
+def codearts_login_identities(credential_data: dict[str, Any]) -> IdentitySet:
+    """CodeArts 全部别名：`uid` 与 `domain_id|user_name` 都给出（有才给）。
+
+    两者不互斥：老行可能只有 `uid`，新登录可能只有 `domain|user`，交集非空
+    即同一账号。
+    """
+    aliases = {
+        _text(credential_data, "uid", "user_id", "userId"),
+        _domain_name(credential_data),
+    }
+    return frozenset(alias for alias in aliases if alias)
+
+
 def officeace_login_identity(credential_data: dict[str, Any]) -> str:
-    """OfficeAce：`account_id`；缺则 `principal_id`。"""
+    """OfficeAce 首选身份：`account_id`；缺则 `principal_id`。"""
     return _text(credential_data, "account_id", "accountId",
                  "principal_id", "principalId")
 
 
-#: 只有声明了身份的渠道才参与重新登录合并 / 历史重复清理。
+def officeace_login_identities(credential_data: dict[str, Any]) -> IdentitySet:
+    """OfficeAce 全部别名：`account_id` 与 `principal_id` 都给出（有才给）。"""
+    return frozenset(
+        alias for alias in (
+            _text(credential_data, "account_id", "accountId"),
+            _text(credential_data, "principal_id", "principalId"),
+        ) if alias)
+
+
+#: 首选身份（展示 / 门面转发用）；只有声明了身份的渠道才参与重新登录合并。
 LOGIN_IDENTITIES: dict[str, Callable[[dict[str, Any]], str]] = {
     "codearts": codearts_login_identity,
     "officeace": officeace_login_identity,
 }
 
+#: 别名集合（合并匹配用）：与 `LOGIN_IDENTITIES` 必须覆盖同一批渠道。
+LOGIN_IDENTITY_SETS: dict[str, Callable[[dict[str, Any]], IdentitySet]] = {
+    "codearts": codearts_login_identities,
+    "officeace": officeace_login_identities,
+}
+
+
+def _safe_call(getter: Callable[[dict[str, Any]], Any],
+               credential_data: dict[str, Any]) -> Any:
+    """畸形凭证不抛：登录路径不能因为一条脏数据整体失败。"""
+    try:
+        return getter(credential_data)
+    except Exception:  # noqa: BLE001 - 畸形凭证不影响登录本身
+        return None
+
 
 def login_identity_for(provider_id: str, credential_data: dict[str, Any]) -> str:
-    """取该渠道的稳定身份；渠道未声明 / 解析失败 / 空值一律返回空串。
+    """取该渠道的首选身份；渠道未声明 / 解析失败 / 空值一律返回空串。
 
     返回空串 = 无法安全合并，调用方退回「新增」或「跳过」，绝不猜。
     """
     getter = LOGIN_IDENTITIES.get(provider_id)
     if getter is None:
         return ""
-    try:
-        value = getter(credential_data)
-    except Exception:  # noqa: BLE001 - 畸形凭证不影响登录本身
-        return ""
+    value = _safe_call(getter, credential_data)
     return value if isinstance(value, str) else ""
+
+
+def login_identities_for(provider_id: str,
+                         credential_data: dict[str, Any]) -> IdentitySet:
+    """取该渠道的全部身份别名；渠道未声明 / 解析失败 / 全部为空 → 空集。"""
+    getter = LOGIN_IDENTITY_SETS.get(provider_id)
+    if getter is None:
+        return frozenset()
+    value = _safe_call(getter, credential_data)
+    if not isinstance(value, Iterable) or isinstance(value, (str, bytes)):
+        return frozenset()
+    return frozenset(alias for alias in value
+                     if isinstance(alias, str) and alias)

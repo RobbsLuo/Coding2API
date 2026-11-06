@@ -96,7 +96,8 @@ class StatsCollector:
     def __init__(self, db, *,
                  prices: Callable[[], Mapping[str, tuple[float, float, float]]] | None = None,
                  usd_cny_rate: Callable[[], float] | None = None,
-                 on_record: Callable[[dict[str, Any]], None] | None = None) -> None:
+                 on_record: Callable[[dict[str, Any]], None] | None = None,
+                 on_write: Callable[[], None] | None = None) -> None:
         """`prices` / `usd_cny_rate` 是零参取值器（热更：每写一条现读当前价表
         与汇率）。两者都缺省为 None = 不估算成本（既有测试与老装配保持原行为，
         cost 两列恒为 NULL）。
@@ -105,11 +106,17 @@ class StatsCollector:
         供 `GET /api/stats/events/stream` 的 SSE 实时流）。回调拿到的是**已脱敏**
         的行字典（与 `/api/stats/events` 同一字段集，另带 rowid），且异常被吞
         ——统计写入绝不能因为一个订阅者出问题而失败。
+
+        `on_write` 是「任何一行落库后」的零参通知（装配时接
+        `PaidModelRepository.invalidate`）：实测扣费校准的快照 TTL 是 600s，
+        不失效的话「刚观测到上游真扣费」要等 10 分钟才影响选号，而这正是
+        目录 x0 数据烧额度的窗口。异常同样吞掉。
         """
         self._db = db
         self._prices = prices
         self._usd_cny_rate = usd_cny_rate
         self._on_record = on_record
+        self._on_write = on_write
         # 进程内「失败请求 × 原因」计数（供 /metrics 的 errors_total）。
         # 为什么不落库、不读明细表：① usage_hourly 没有 error_type 维度；
         # ② usage_events 只留 90 天，用它算 `_total` 会让计数器随裁剪**下降**
@@ -215,7 +222,20 @@ class StatsCollector:
             # 事务内拿 rowid，提交后再广播：订阅者拿到的是「已落库」的行，
             # 与随后刷新 `/api/stats/events` 看到的是同一条（含 rowid 游标）。
             rowid = cursor.lastrowid
+        self._invalidate_paid_snapshot()
         self._notify(rowid, event)
+
+    def _invalidate_paid_snapshot(self) -> None:
+        """通知「实测扣费」快照作废（未装配 / 出问题都不影响写入）。
+
+        放在事务提交之后：快照查询要读到这一行才有意义。
+        """
+        if self._on_write is None:
+            return
+        try:
+            self._on_write()
+        except Exception as error:  # noqa: BLE001 - 快照失效失败不能影响统计写入
+            logger.warning("实测扣费快照失效失败: %s", error)
 
     def _notify(self, rowid: int | None, event: UsageEvent) -> None:
         """把刚写入的明细推给实时流订阅者（未装配 / 出问题都不影响写入）。

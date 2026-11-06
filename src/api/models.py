@@ -45,6 +45,7 @@ from ..benchmarks import BenchmarkTable
 from ..compat.openai.errors import error_payload
 from ..db.crypto import CredentialDecryptError
 from ..engine.reasoning import parse_effort_map
+from ..error_text import error_text
 from ..model_alias import parse_model_aliases
 from ..pricing import PriceTable
 from ..provider.base import Model
@@ -370,7 +371,7 @@ def _schedule_refresh(services: Services, connected: set[str],
         try:
             await _refresh_providers(services, connected)
         except Exception as error:  # noqa: BLE001 - 后台刷新失败只记日志
-            logger.warning("后台模型列表刷新失败: %s", error)
+            logger.warning("后台模型列表刷新失败: %s", error_text(error))
         finally:
             services.model_refreshing.difference_update(stale)
 

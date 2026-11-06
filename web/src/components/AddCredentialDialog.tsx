@@ -39,6 +39,13 @@ function safeAuthUrl(raw: string | undefined): string | null {
   return safeHttpUrl(raw);
 }
 
+/** 登录成功提示：合并更新与新增必须区分，否则用户不知道池子里是否多了一条。 */
+function loginSuccessNotice(merged: boolean | undefined): string {
+  return merged
+    ? "登录成功，已更新该账号的凭证。"
+    : "登录成功，凭证已保存。";
+}
+
 /**
  * 添加凭证对话框：登录渠道 / JSON 导入两分区 + 免费层一键补回。
  *
@@ -195,9 +202,7 @@ export function AddCredentialDialog({
           const result = await api.upstreamPoll(provider, started.state);
           if (result.status === "success") {
             stopPolling(provider);
-            const message = result.merged
-              ? "登录成功，已更新该账号的凭证。"
-              : "登录成功，凭证已保存。";
+            const message = loginSuccessNotice(result.merged);
             onNotice(message);
             onImported(message);
           }
@@ -255,9 +260,7 @@ export function AddCredentialDialog({
       stopPolling(pasteProvider);
       setPasteProvider(null);
       setPasteUrl("");
-      const message = result.merged
-        ? "登录成功，已更新该账号的凭证。"
-        : "登录成功，凭证已保存。";
+      const message = loginSuccessNotice(result.merged);
       onNotice(message);
       onImported(message);
     } catch (caught) {

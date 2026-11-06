@@ -451,11 +451,26 @@ CHECKIN_DONE = ("CONFIRMED", "CONSUMED")
 
 
 def campaign_type(campaign: dict[str, Any] | None) -> str:
-    """活动 `type` → 归一后的字符串；缺失/非字符串返回空串。"""
+    """活动类型标识 → 归一后的字符串；缺失/形状不对返回空串。
+
+    优先 `type`；退化时读 `extra.triggerEvent`（`user.login` → `USER_LOGIN`）。
+    两者是上游同一件事的两个字段，实测同时出现；只认 `type` 时，一次只剩
+    `triggerEvent` 的响应会落到 `campaignId == 1` 兼容分支，报「活动未开放」
+    并按成功封账——签到从此静默失效。
+    """
     if not isinstance(campaign, dict):
         return ""
     value = campaign.get("type")
-    return value.strip() if isinstance(value, str) else ""
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    extra = campaign.get("extra")
+    if not isinstance(extra, dict):
+        return ""
+    trigger = extra.get("triggerEvent")
+    if not isinstance(trigger, str) or not trigger.strip():
+        return ""
+    # `user.login` → `USER_LOGIN`：上游两种写法指同一个活动类型。
+    return trigger.strip().replace(".", "_").upper()
 
 
 def campaign_id(campaign: dict[str, Any] | None) -> int:
@@ -482,6 +497,10 @@ def daily_credit_campaign(data: dict[str, Any]) -> dict[str, Any] | None:
     `campaignId` 1 只作为极老响应的兼容兜底（那时上游还没有 `type` 字段）。
     字段缺失或形状不对一律返回 None（上游改版不该让签到任务抛异常，调用方把
     None 归一为「活动未开放」）。
+
+    **`type` 与 `extra.triggerEvent` 等价**（均已由 `campaign_type` 归一）：
+    `type` 缺失只有 `triggerEvent` 时同样命中，否则一次字段调整就会让签到
+    静默失效（见 `campaign_type` 的注释）。
     """
     if not isinstance(data, dict):
         return None
