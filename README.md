@@ -316,7 +316,9 @@ codex -c "model_providers.coding2api={ name='coding2api', base_url='http://127.0
       -c model_provider=coding2api -c model='glm-5.2' '你的任务'
 ```
 
-支持文本、流式正文、思考摘要、函数工具调用、`finish_reason=length` → `response.incomplete`。`text.format` → chat `response_format`。part：`input_text` / `text` / `output_text` → text；`input_image` → `image_url`。**不支持** `store=true`、`previous_response_id`、`input_file`、Responses 私有工具 → 400。`include=["reasoning.encrypted_content"]` 收但忽略。
+支持文本、流式正文、思考摘要、函数工具调用、`finish_reason=length` → `response.incomplete`。`text.format` → chat `response_format`。part：`input_text` / `text` / `output_text` → text；`input_image` → `image_url`。**不支持** `store=true`、`previous_response_id`、`input_file` → 400。`include=["reasoning.encrypted_content"]` 收但忽略。
+
+工具表：`function` 直译；`namespace` 只展开默认 `functions` 组（Codex 0.135+ 默认下发；其余命名空间丢弃——客户端按 `(namespace, name)` 查登记表，展平名会被当成不存在的工具）；`web_search` / `tool_search` / `custom`（freeform `apply_patch`）等托管工具**跳过不报错**（本网关无服务端搜索 / freeform 执行能力；400 会让整轮请求死掉，客户端不降级）。
 
 ### chat `response_format` 收口
 

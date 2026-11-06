@@ -230,6 +230,8 @@ def health_score(q: Quota | None) -> int | None:
 | `input[].type=function_call_output` | `tool` 消息（part 可含 `input_image`） |
 | `input[].type=reasoning` | assistant `reasoning_content`（仅明文） |
 | `tools[].type=function`（扁平） | 嵌套 `{type:function, function:{...}}` |
+| `tools[].type=namespace`（默认 `functions` 组） | 成员直译为 `function`；**非默认命名空间丢弃**（客户端按 `(namespace,name)` 查登记表，chat 带不回 namespace） |
+| `tools[].type=web_search/tool_search/custom` | **跳过**（托管 / freeform，本网关无对应能力；400 会打死整轮） |
 | `tool_choice` 字符串 / `{type:function,name}` | 同名 / 嵌套 |
 | `max_output_tokens` | `max_tokens` |
 | `reasoning.effort` | `reasoning_effort` |
