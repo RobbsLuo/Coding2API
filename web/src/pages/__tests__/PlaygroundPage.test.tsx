@@ -365,7 +365,12 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
 
     const current = screen.getByTestId("model-current");
     expect(current).toHaveTextContent("kilo-auto/free");
-    expect(within(current).getByTestId("channel-pill-kilo")).toHaveTextContent("免");
+    const pill = within(current).getByTestId("channel-pill-kilo");
+    expect(pill).toHaveTextContent("免");
+    // 单渠道把徽章拆成「渠道｜倍率」两段（左右不同底色），不是一个胶囊里
+    // 再套一个倍率小块
+    expect(pill.children).toHaveLength(2);
+    expect(pill.children[1]).toHaveTextContent("免");
     // 单渠道模型不显示「自动路由」标
     expect(current).not.toHaveTextContent("自动路由");
   });
@@ -395,7 +400,7 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(screen.getByTestId("provider-pin-trae")).toBeInTheDocument();
     await userEvent.click(screen.getByTestId("provider-pin-trae"));
     expect(screen.getByTestId("provider-pin-trae")).toHaveAttribute("aria-pressed", "true");
-    expect(screen.getByTestId("model-current")).toHaveTextContent("已强制 TRAE");
+    expect(screen.getByTestId("model-current-pinned")).toHaveTextContent("TRAE");
 
     await fillPromptAndSend("hi");
     const chat = calls.find((item) => item.url.includes("/api/playground/chat/completions"));
@@ -758,6 +763,32 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
           .getByTestId(`channel-pill-${provider}`),
       ).toBeInTheDocument();
     }
+  });
+
+  it("当前选择条分三栏：当前选择 | 渠道 | 强制，强制栏有选择才出现", async () => {
+    mockFetch({ "/api/playground/models": MODELS });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    const current = screen.getByTestId("model-current");
+    const [identityCol, channelCol] = Array.from(current.children) as HTMLElement[];
+    // 渠道控件不与身份挤同一栏：渠道多时只在自己栏内折行
+    expect(channelCol).toContainElement(screen.getByTestId("provider-pin"));
+    expect(identityCol).not.toContainElement(screen.getByTestId("provider-pin"));
+    expect(identityCol).toHaveTextContent("glm-5.2");
+    // 自动路由：没有强制栏（有选择才显示，不留空位）
+    expect(screen.queryByTestId("model-current-pinned")).not.toBeInTheDocument();
+    expect(current.children).toHaveLength(2);
+
+    await userEvent.click(screen.getByTestId("provider-pin-trae"));
+    // 强制后多出第三栏，内容是「强制 + 渠道名」，不与前两栏混在一起
+    const pinnedCol = screen.getByTestId("model-current-pinned");
+    expect(current.children).toHaveLength(3);
+    expect(current.children[2]).toBe(pinnedCol);
+    expect(pinnedCol).toHaveTextContent("强制");
+    expect(pinnedCol).toHaveTextContent("TRAE");
+    expect(identityCol).not.toHaveTextContent("强制");
+    expect(channelCol).not.toHaveTextContent("强制");
   });
 
   it("请求进行中再次提交被忽略，不重复发请求", async () => {
