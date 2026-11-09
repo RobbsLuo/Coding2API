@@ -1,9 +1,14 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Plus, X } from "lucide-react";
 import { api } from "../api/client";
 import { PROVIDER_LABEL } from "../api/providers";
 import type { Provider, TosRisk } from "../api/types";
 import { useDialogFocus } from "../hooks/useDialogFocus";
+import {
+  IMPORT_PROVIDERS,
+  detectProvider,
+  parseCredentialInput,
+} from "../lib/credentialImport";
 import { safeHttpUrl } from "../lib/safeUrl";
 import { Button, Field, Input, Notice, Select, Tabs, Textarea } from "../ui";
 
@@ -17,14 +22,18 @@ const LOGIN_PROVIDERS: Provider[] = [
   "officeace",
 ];
 
-/**
- * JSON 导入下拉的渠道：登录渠道 + 只能手工粘贴凭据的渠道。
- *
- * 小浣熊没有登录轨道（凭据是网页会话 JWT），不能放进 `LOGIN_PROVIDERS`
- * ——那里会生成一个点了必然失败的「登录」按钮。它的入口是「登录渠道」页底部
- * 的粘贴框（见 `add-raccoon`），因为用户点「添加凭证」默认看到的就是那一页。
- */
-const IMPORT_PROVIDERS: Provider[] = [...LOGIN_PROVIDERS, "raccoon", "lingxi"];
+/** 上次成功导入的渠道：重复加号时不用每次重新选。 */
+const IMPORT_PROVIDER_KEY = "coding2api.importProvider";
+
+function storedImportProvider(): Provider {
+  try {
+    const saved = localStorage.getItem(IMPORT_PROVIDER_KEY);
+    if (saved && IMPORT_PROVIDERS.includes(saved as Provider)) return saved as Provider;
+  } catch {
+    // 隐私模式 / 存储被禁用：退回默认渠道即可，不影响导入
+  }
+  return "codebuddy";
+}
 
 /**
  * JSON 导入的默认模板：选定渠道时填进输入框。
@@ -82,6 +91,7 @@ export function AddCredentialDialog({
   credentialCount,
   hasZen,
   hasKilo,
+  lingxiCount = 0,
   onImported,
   onNotice,
   onError,
@@ -93,6 +103,8 @@ export function AddCredentialDialog({
   credentialCount: number;
   hasZen: boolean;
   hasKilo: boolean;
+  /** 已有灵犀凭证数：新增前提示 WPS 单浏览器会话会被新登录顶掉。 */
+  lingxiCount?: number;
   /** 登录/导入成功后回调（关对话框；列表刷新由调用方统一做）。 */
   onImported: (message: string) => void;
   /** 渠道 → ToS 风险登记（来自 `GET /api/credentials`）：导入前提示灰区。 */
@@ -114,11 +126,15 @@ export function AddCredentialDialog({
   const [raccoonToken, setRaccoonToken] = useState("");
   // WPS 灵犀：没有 OAuth 轨道，凭据是 WPS 账号 cookie（wps_sid），直接粘贴
   const [lingxiCookie, setLingxiCookie] = useState("");
-  // JSON 导入（原 ImportPanel 逻辑）
-  const [importProvider, setImportProvider] = useState<Provider>("codebuddy");
+  // JSON / Cookie / cURL 导入（原 ImportPanel 逻辑）
+  const [importProvider, setImportProvider] = useState<Provider>(storedImportProvider);
+  // 手选渠道优先于自动识别：用户改了输入就清掉，重新按内容识别
+  const [manualProvider, setManualProvider] = useState<Provider | null>(null);
   const [nickname, setNickname] = useState("");
   const [raw, setRaw] = useState("");
   const [importError, setImportError] = useState<string | null>(null);
+  const detected = useMemo(() => detectProvider(raw), [raw]);
+  const effectiveProvider = manualProvider ?? detected ?? importProvider;
   // TRAE 轮询要比较「登录发起时 vs 现在」的凭证数量；ref 让 interval 里
   // 读到的始终是最新值而不触发重渲染。
   const credentialCountRef = useRef(credentialCount);
@@ -295,18 +311,24 @@ export function AddCredentialDialog({
   const submitImport = async (event: React.FormEvent) => {
     event.preventDefault();
     setImportError(null);
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(raw);
-    } catch {
-      setImportError('凭证必须是合法 JSON。CodeBuddy 可填 {"token":"..."}，TRAE 填完整凭证对象');
+    const parsed = parseCredentialInput(raw, effectiveProvider, manualProvider === null);
+    if (!parsed.ok) {
+      setImportError(parsed.error);
       return;
     }
     setBusy(true);
     try {
-      const created = await api.importCredential(importProvider, parsed, nickname);
+      const created = await api.importCredential(
+        parsed.provider, parsed.credential, nickname);
       setRaw("");
       setNickname("");
+      setManualProvider(null);
+      setImportProvider(parsed.provider);
+      try {
+        localStorage.setItem(IMPORT_PROVIDER_KEY, parsed.provider);
+      } catch {
+        // 存储不可用不影响导入本身
+      }
       onImported(created?.tos && created.tos.level !== "green"
         ? `凭证已导入。注意：该渠道 ToS 评级为 ${created.tos.level} —— ${created.tos.reason}`
         : "凭证已导入。");
@@ -582,10 +604,11 @@ export function AddCredentialDialog({
                 <Field label="渠道" htmlFor="import-provider-select">
                   <Select
                     id="import-provider-select"
-                    value={importProvider}
+                    value={effectiveProvider}
                     data-testid="import-provider"
                     onChange={(event) => {
                       const next = event.target.value as Provider;
+                      setManualProvider(next);
                       setImportProvider(next);
                       // 空内容或仍是上一渠道模板 → 换成新渠道模板；手写内容保留
                       const template = IMPORT_TEMPLATES[next] ?? "";
@@ -615,8 +638,17 @@ export function AddCredentialDialog({
                 </Field>
               </div>
             </div>
+            {effectiveProvider === "lingxi" && lingxiCount > 0 && (
+              <div data-testid="import-lingxi-warning">
+                <Notice tone="warn">
+                  WPS 同一浏览器只保留最近一次登录：新登录会顶掉旧灵犀会话。
+                  多账号请用不同浏览器配置 / 无痕窗口分别登录后各取一次 Cookie；
+                  旧凭证会在复探确认 401 后标记「需重新登录」。
+                </Notice>
+              </div>
+            )}
             {(() => {
-              const risk = tosRisks[importProvider];
+              const risk = tosRisks[effectiveProvider];
               if (!risk) return null;
               return (
                 <div data-testid="import-tos-risk">
@@ -628,20 +660,35 @@ export function AddCredentialDialog({
               );
             })()}
             <Field
-              label="凭证 JSON"
+              label="凭证 JSON / Cookie / cURL"
               htmlFor="import-payload"
-              hint='选择渠道后自动填入该渠道的模板（已手写内容不会被覆盖）。CodeBuddy：{"token":"..."}（也接受 access_token / bearer_token）；TRAE：{"accessToken":"...","uid":"...","refreshToken":"..."}；小浣熊：{"access_token":"<浏览器 cookie xhx_token 的值>"}；灵犀：{"cookie":"wps_sid=…; uid=…"}（整段 Cookie 也可）'
+              hint='三种粘法都收：① 渠道 JSON（选渠道自动填模板，已手写内容不会被覆盖）；② 整段 Cookie（灵犀 wps_sid、小浣熊 xhx_token）；③ 浏览器 DevTools → Network → 右键请求 → Copy as cURL (bash)（含 HttpOnly Cookie，最省事）。识别到渠道会自动切换。'
             >
               <Textarea
-                rows={4}
+                rows={5}
                 id="import-payload"
                 value={raw}
                 data-testid="import-payload"
                 className="font-mono text-xs"
-                placeholder='{"token":"..."}'
-                onChange={(event) => setRaw(event.target.value)}
+                placeholder='{"token":"..."}，或 wps_sid=…; uid=…，或 curl …'
+                onChange={(event) => {
+                  setRaw(event.target.value);
+                  // 改了输入就重新信任内容识别，不再压着手选的渠道
+                  setManualProvider(null);
+                }}
               />
             </Field>
+            {detected && (
+              <p
+                className="text-xs text-muted-foreground"
+                data-testid="import-detected"
+              >
+                已识别为 {PROVIDER_LABEL[detected]}
+                {manualProvider !== null && manualProvider !== detected
+                  ? "（当前按手选渠道导入）"
+                  : ""}
+              </p>
+            )}
             {importError && (
               <div data-testid="import-error">
                 <Notice tone="danger">{importError}</Notice>

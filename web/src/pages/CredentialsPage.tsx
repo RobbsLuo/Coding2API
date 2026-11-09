@@ -1423,6 +1423,7 @@ export function CredentialsPage() {
           credentialCount={credentials.length}
           hasZen={hasZen}
           hasKilo={hasKilo}
+          lingxiCount={credentials.filter((row) => row.provider === "lingxi").length}
           tosRisks={data?.tos_risks ?? {}}
           onImported={(message) => {
             setAddOpen(false);

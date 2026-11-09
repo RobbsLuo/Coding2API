@@ -133,6 +133,7 @@ echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-
    - **Qoder / CodeArts**：设备码 / OAuth2 授权码登录（CodeArts 授权后把打不开的本地回调链接粘回页面）。
    - **OfficeAce**：点「登录 OfficeAce」走华为云授权（回调由云端承接）。
    - **小浣熊 / 灵犀**：无登录按钮，只能粘网页会话凭据（小浣熊 `{"access_token":"<xhx_token>"}`，灵犀整段 Cookie 或裸 `wps_sid`）。
+   - **通用粘法**：「JSON 导入」框同时接受整段 Cookie 和浏览器 DevTools → Network → 右键请求 → **Copy as cURL (bash)**。后者带 `Cookie:` / `Authorization:` 头，HttpOnly cookie 也能拿到；内容有明确特征（`wps_sid` / `xhx_token` / TRAE 字段 / AK·SK 等）时自动识别渠道，成功导入后会记住该渠道。
    - **OpenCode Zen / Kilo**：无需添加，启动自动出虚拟凭证（删了可在同面板补回）。
 2. 「API Key」建 `sk-...`（明文仅显示一次）。
 3. 调用：
@@ -261,7 +262,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ### 小浣熊（`raccoon`）
 
-[商汤小浣熊](https://xiaohuanxiong.com)，需真实账号（网页端登录即可）。**没有登录按钮**：凭据是网页会话 JWT，只能手工导入——浏览器 DevTools → Application → Cookies → 复制 `xhx_token` 的值，在「JSON 导入」里粘 `{"access_token":"<值>"}`（也接受裸 JWT 或整段 cookie）。约 30 天到期，到期重新取一次。
+[商汤小浣熊](https://xiaohuanxiong.com)，需真实账号（网页端登录即可）。**没有登录按钮**：凭据是网页会话 JWT，只能手工导入——浏览器 DevTools → Application → Cookies → 复制 `xhx_token` 的值，在「JSON 导入」里粘 `{"access_token":"<值>"}`（也接受裸 JWT、整段 cookie，或直接在 Network 里对该站点请求「Copy as cURL」整段贴入）。约 30 天到期，到期重新取一次。
 
 **协议**：标准 OpenAI 兼容（`/api/web/llm/v2/chat/completions`），无签名、无设备指纹。`tool_calls` 流式/非流式、`role=tool` 回传、`include_usage` 全部实测通过；411K token 输入 14.2 秒返回。
 
@@ -280,6 +281,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ### 灵犀（`lingxi`）
 
 [WPS 灵犀](https://lingxi.wps.cn)，需真实 WPS 账号。**没有登录按钮**：凭据是 WPS 账号 cookie `wps_sid`，在网页版（`lingxi.kdocs.cn` 同样可用）登录后 DevTools → Application → Cookies 复制整段，粘进「登录渠道」页（整段 Cookie 或裸 sid 均可）。上游**没有 refresh 接口**，且不按时长猜过期——真正的判据是上游 401，过期重贴即可。
+
+**同一浏览器只保留最近一次登录**：在同一个浏览器配置里登录另一个 WPS 账号，会让上一次的 `wps_sid` 立刻 401（实测）。多账号需用不同浏览器配置 / 无痕窗口分别登录后各取一次 Cookie；已入库的旧凭证会在新号导入后的复探中确认 401 并标记「需重新登录」，不再参与调度。
 
 **一次对话三条请求**：建 cowork 会话 → 领 credits run → `agent-runtime/chat/completions`（私有 SSE）。上游**按 run 计费**：一个 run 内多次调用只扣一次智点 → 会话 + run 按「账号 × 模型」缓存 1 小时（不滑动续期）+ 并发单飞；上游回 `SQLNoRows` /「会话不存在」时丢弃缓存重建一次。
 

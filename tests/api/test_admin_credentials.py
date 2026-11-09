@@ -345,6 +345,132 @@ def test_upstream_auth_poll_unknown_provider(admin_client):
                            json={"provider": "trae", "state": "x"})
     assert response.status_code == 400
 
+def test_probe_endpoint_disables_on_dead_login(admin_client):
+    """额度探测拿到 401 → 硬禁用并写可操作原因，不再停在「未知」。"""
+    from src.provider.lingxi.client import UpstreamHTTPError as LingxiHTTPError
+
+    app, client = admin_client
+    credential_id = app.state.credentials.add(
+        provider="lingxi", credential_data={"wps_sid": "sid", "uid": "u1"})
+
+    class Boom:
+        id = "lingxi"
+        endpoint = "https://e"
+
+        async def probe_quota(self, _data):
+            raise LingxiHTTPError(401, b"")
+
+    app.state.executor._deps.providers["lingxi"] = Boom()
+    body = client.post(f"/api/credentials/{credential_id}/probe").json()
+
+    assert body["probed"] is False
+    row = next(r for r in app.state.credentials.list_all() if r["id"] == credential_id)
+    assert row["disabled"]
+    assert "WPS" in row["disabled_reason"]
+
+
+def test_lingxi_import_merges_same_uid(admin_client):
+    """手工导入即灵犀的重新登录：uid 相同更新既有行，不新增重复凭证。"""
+    from src.provider.base import Quota
+    from src.provider.lingxi.credential import LingxiCredential
+
+    app, client = admin_client
+
+    class Stub:
+        id = "lingxi"
+        endpoint = "https://e"
+
+        def import_credential(self, raw):
+            return LingxiCredential.from_import(raw).to_dict()
+
+        async def probe_quota(self, _data):
+            return Quota(remaining=1, total=2, probed_at=1)
+
+    app.state.executor._deps.providers["lingxi"] = Stub()
+    first = client.post("/api/credentials", json={
+        "provider": "lingxi", "credential": {"cookie": "wps_sid=a; uid=42"}}).json()
+    second = client.post("/api/credentials", json={
+        "provider": "lingxi", "credential": {"cookie": "wps_sid=b; uid=42"}}).json()
+
+    assert first["merged"] is False
+    assert second["merged"] is True
+    assert second["id"] == first["id"]
+    rows = [r for r in app.state.credentials.list_all() if r["provider"] == "lingxi"]
+    assert len(rows) == 1
+    assert app.state.credentials.credential_data(first["id"])["wps_sid"] == "b"
+
+
+def test_lingxi_import_falls_back_when_merge_misses(admin_client, monkeypatch):
+    """命中了身份但合并失败（并发删除）→ 退回新增，不能丢导入。"""
+    from src.provider.base import Quota
+    from src.provider.lingxi.credential import LingxiCredential
+
+    app, client = admin_client
+
+    class Stub:
+        id = "lingxi"
+        endpoint = "https://e"
+
+        def import_credential(self, raw):
+            return LingxiCredential.from_import(raw).to_dict()
+
+        async def probe_quota(self, _data):
+            return Quota(remaining=1, total=2, probed_at=1)
+
+    app.state.executor._deps.providers["lingxi"] = Stub()
+    client.post("/api/credentials", json={
+        "provider": "lingxi", "credential": {"cookie": "wps_sid=a; uid=42"}})
+    monkeypatch.setattr(app.state.credentials, "merge_login_credential",
+                        lambda *_args, **_kwargs: False)
+
+    second = client.post("/api/credentials", json={
+        "provider": "lingxi", "credential": {"cookie": "wps_sid=b; uid=42"}}).json()
+
+    assert second["merged"] is False
+    rows = [r for r in app.state.credentials.list_all() if r["provider"] == "lingxi"]
+    assert len(rows) == 2
+
+
+def test_lingxi_import_disables_kicked_siblings(admin_client):
+    """导入新会话后复探旧灵犀号：401 的旧号立刻硬禁用，不误伤仍有效的号。"""
+    from src.provider.base import Quota
+    from src.provider.lingxi.client import UpstreamHTTPError as LingxiHTTPError
+    from src.provider.lingxi.credential import LingxiCredential
+
+    app, client = admin_client
+    dead = app.state.credentials.add(
+        provider="lingxi", credential_data={"wps_sid": "old", "uid": "u-old"})
+    alive = app.state.credentials.add(
+        provider="lingxi", credential_data={"wps_sid": "alive", "uid": "u-alive"})
+
+    class Stub:
+        id = "lingxi"
+        endpoint = "https://e"
+
+        def import_credential(self, raw):
+            return LingxiCredential.from_import(raw).to_dict()
+
+        async def probe_quota(self, data):
+            if data.get("wps_sid") == "old":
+                raise LingxiHTTPError(401, b"")
+            return Quota(remaining=1, total=2, probed_at=1)
+
+    app.state.executor._deps.providers["lingxi"] = Stub()
+    created = client.post("/api/credentials", json={
+        "provider": "lingxi", "credential": {"cookie": "wps_sid=new; uid=u-new"}})
+    assert created.status_code == 200
+
+    for _ in range(50):
+        row = next(r for r in app.state.credentials.list_all() if r["id"] == dead)
+        if row["disabled"]:
+            break
+        time.sleep(0.02)
+    assert row["disabled"]
+    assert "WPS" in row["disabled_reason"]
+    alive_row = next(r for r in app.state.credentials.list_all() if r["id"] == alive)
+    assert not alive_row["disabled"]
+
+
 def test_probe_endpoint_returns_quota_fields(admin_client):
     """探测成功路径的响应字段（main 271-272）。"""
     app, client = admin_client

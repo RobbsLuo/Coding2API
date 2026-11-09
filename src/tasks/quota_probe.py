@@ -8,6 +8,7 @@ from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
 from ..error_text import error_text
 from ..provider.base import Quota
+from ..provider.probe_failure import relogin_reason
 from ..request_context import credential_scope
 from . import TaskReport
 from .pacer import Pacer
@@ -60,8 +61,15 @@ class QuotaProbeTask:
             except Exception as error:  # noqa: BLE001 - 探测失败不能中断整批
                 logger.warning("quota probe failed for %s: %s", candidate.credential_id,
                                error_text(error))
-                # 探测失败 → health 置 NULL（unknown），绝不当作 0 分
-                self._credentials.mark_probe_failed(candidate.credential_id)
+                reason = relogin_reason(candidate.provider, error)
+                if reason:
+                    # DEAD 是确定性的登录态死亡：端口探测已经证实，留着它
+                    # 只会每小时再撞一次。硬禁用后管理台显示可操作原因。
+                    self._credentials.mark_relogin_required(
+                        candidate.credential_id, reason)
+                else:
+                    # 其余探测失败 → health 置 NULL（unknown），绝不当作 0 分
+                    self._credentials.mark_probe_failed(candidate.credential_id)
                 report.failed += 1
                 continue
             self._apply(candidate.credential_id, quota)

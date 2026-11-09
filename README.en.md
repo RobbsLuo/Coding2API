@@ -133,6 +133,7 @@ echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-
    - **Qoder / CodeArts**: device-code / OAuth2 authorization-code login (CodeArts: paste the unreachable local callback URL back).
    - **OfficeAce**: *Log in to OfficeAce*, Huawei Cloud authorization (callback handled in the cloud).
    - **Raccoon / Lingxi**: no login button — paste a web session credential instead (Raccoon `{"access_token":"<xhx_token>"}`, Lingxi the whole Cookie or a bare `wps_sid`).
+   - **Any channel**: the *JSON import* box also accepts a raw Cookie header and a browser DevTools → Network → right-click request → **Copy as cURL (bash)** command. The latter carries the `Cookie:` / `Authorization:` header, so HttpOnly cookies work too; unambiguous markers (`wps_sid`, `xhx_token`, TRAE fields, AK/SK) auto-select the channel, and the last used channel is remembered.
    - **OpenCode Zen / Kilo**: nothing to add — a virtual credential is seeded at startup (re-addable from the same panel).
 2. **API keys** — create an `sk-...` (plaintext shown once).
 3. Call it:
@@ -257,7 +258,7 @@ The upstream is plain OpenAI protocol, with three quirks:
 
 ### Raccoon (`raccoon`)
 
-[SenseTime Raccoon](https://xiaohuanxiong.com), real account (web login is enough). **No login button**: the credential is a web session JWT, importable only by hand — DevTools → Application → Cookies → copy the `xhx_token` value and paste `{"access_token":"<value>"}` into *JSON import* (a bare JWT or the whole cookie string also works). Expires in ~30 days; grab a fresh one then.
+[SenseTime Raccoon](https://xiaohuanxiong.com), real account (web login is enough). **No login button**: the credential is a web session JWT, importable only by hand — DevTools → Application → Cookies → copy the `xhx_token` value and paste `{"access_token":"<value>"}` into *JSON import* (a bare JWT, the whole cookie string, or a *Copy as cURL* of a request to that site all work). Expires in ~30 days; grab a fresh one then.
 
 **Protocol**: plain OpenAI-compatible (`/api/web/llm/v2/chat/completions`), no signing, no device fingerprint. Streaming/non-streaming `tool_calls`, `role=tool` echo, `include_usage` all verified; 411K-token input returned in 14.2s.
 
@@ -276,6 +277,8 @@ The upstream is plain OpenAI protocol, with three quirks:
 ### Lingxi (`lingxi`)
 
 [WPS Lingxi](https://lingxi.wps.cn), real WPS account required. **No login button**: the credential is the WPS account cookie `wps_sid` — log in on the web app (`lingxi.kdocs.cn` works as well), copy the whole Cookie from DevTools → Application → Cookies, and paste it into the *Login channels* panel (whole cookie string or a bare sid both work). Upstream has **no refresh endpoint**, and expiry is never guessed from age — the only real signal is a 401, after which you paste a fresh cookie.
+
+**One active login per browser profile**: signing into another WPS account in the same browser profile immediately invalidates the previous `wps_sid` (verified). For multiple accounts, log in from separate browser profiles / incognito windows and capture one Cookie from each; an old credential that now returns 401 is re-probed after a new import and marked *relogin required* instead of staying in the scheduler pool.
 
 **One conversation = three requests**: create a cowork session → claim a credits run → `agent-runtime/chat/completions` (private SSE). Upstream **bills per run** (several calls inside one run charge one credit), so sessions + runs are cached per account × model for 1 hour (no sliding renewal) with in-flight single-flight; `SQLNoRows` / "session not found" drops the cache and rebuilds once.
 

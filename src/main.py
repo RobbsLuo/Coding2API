@@ -113,6 +113,7 @@ from .provider.lingxi.client import LingxiClient
 from .provider.officeace import OfficeAceProvider
 from .provider.officeace.client import OfficeAceClient
 from .provider.officeace.oauth import OfficeAceOAuth
+from .provider.probe_failure import relogin_reason
 from .provider.proxy import (
     CredentialProxyPool,
     parse_provider_proxies,
@@ -877,7 +878,13 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                 quota = await provider.probe_quota(data)
             except Exception as error:  # noqa: BLE001 - 探测失败标记为未探测
                 logger.warning("即时额度探测失败 %s: %s", credential_id, error)
-                credentials.mark_probe_failed(credential_id)
+                reason = relogin_reason(provider_id or "", error)
+                if reason:
+                    # 刚导入 / 刚签到的号若已 401，立即停用：否则下一轮调度
+                    # 还会挑中它再撞一次，管理台也要等聊天失败才知道要重贴。
+                    credentials.mark_relogin_required(credential_id, reason)
+                else:
+                    credentials.mark_probe_failed(credential_id)
                 return
             credentials.save_quota(credential_id, quota)
 

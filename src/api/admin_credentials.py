@@ -32,6 +32,8 @@ from ..audit.actions import (
 from ..auth.rbac import require_operator
 from ..compat.openai.request import InvalidRequest
 from ..provider.base import CheckinResult, GrowthResult, GrowthStep, StepStatus
+from ..provider.login_identity import login_identities_for
+from ..provider.probe_failure import relogin_reason
 from ..provider.tos import tos_for
 from ..request_context import credential_scope
 from ..sorting import sort_rows
@@ -175,7 +177,14 @@ async def probe_credential_once(credentials, provider, data, credential_id: str)
         with credential_scope(credential_id):
             quota = await provider.probe_quota(data)
     except Exception as error:  # noqa: BLE001 - 探测失败 → unknown，不当作 0
-        credentials.mark_probe_failed(credential_id)
+        # DEAD（401）已经是确定性结论：和聊天路径一样硬禁用，管理台直接显示
+        #「重新粘贴 Cookie」，而不是停留在「未探测到额度」继续被调度。
+        login_reason = relogin_reason(
+            credentials.provider_of(credential_id) or "", error)
+        if login_reason:
+            credentials.mark_relogin_required(credential_id, login_reason)
+        else:
+            credentials.mark_probe_failed(credential_id)
         reason = describe_probe_failure(error)
         logger.info("额度探测失败 %s: %s", credential_id, reason)
         # detail 只在**服务端日志**里带上游原文（可能是 2048 字的响应体摘要）；
@@ -310,13 +319,32 @@ def create_router(services: Services) -> APIRouter:
 
     def register_import(provider_id: str, credential_data: dict, tags: list[str],
                         nickname: str, principal) -> dict:
-        """落库 + 审计 + 探测入队；返回新凭证 id 与 ToS 风险。"""
-        credential_id = credentials.add(provider=provider_id,
-                                        credential_data=credential_data,
-                                        nickname=nickname,
-                                        added_by=principal.username, tags=tags)
-        logger.info("管理员 %s 新增凭证 %s（上游 %s）", principal.username, credential_id,
-                    provider_id)
+        """落库 + 审计 + 探测入队；返回凭证 id、ToS 风险与是否就地合并。
+
+        灵犀没有 OAuth 轨道，手工导入就是它的「重新登录」：`uid` 相同的凭据
+        必须更新既有行而不是新增。否则同一个账号重登一次就多一条重复凭证，
+        旧行的 Cookie 已被新登录顶掉、只能等下一次 401 才被硬禁用。
+        """
+        merged = False
+        credential_id = ""
+        if provider_id == "lingxi":
+            target = login_identities_for(provider_id, credential_data)
+            existing = credentials.find_login_credential(
+                provider_id,
+                lambda data: login_identities_for(provider_id, data),
+                target) if target else None
+            if existing is not None:
+                merged = credentials.merge_login_credential(
+                    existing, credential_data, nickname)
+                if merged:
+                    credential_id = existing
+        if not merged:
+            credential_id = credentials.add(provider=provider_id,
+                                            credential_data=credential_data,
+                                            nickname=nickname,
+                                            added_by=principal.username, tags=tags)
+        logger.info("管理员 %s %s凭证 %s（上游 %s）", principal.username,
+                    "更新" if merged else "新增", credential_id, provider_id)
         risk = tos_for(provider_id)
         services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_IMPORT,
                               target=credential_id,
@@ -327,7 +355,15 @@ def create_router(services: Services) -> APIRouter:
             logger.warning("导入 %s 凭证 %s：ToS 评级 %s —— %s",
                            provider_id, credential_id, risk.level, risk.reason)
         schedule_probe(credential_id)
-        return {"id": credential_id, "tos": risk.as_dict()}
+        # 灵犀：同一浏览器登录新账号会顶掉旧会话。新号导入后顺手复探其它
+        # 灵犀凭证——只有探测确认 401 才硬禁用，不用「新登录＝旧号必死」
+        # 的猜测误伤同时有效的多账号（例如各自独立浏览器配置导出的 Cookie）。
+        if provider_id == "lingxi":
+            for candidate in credentials.candidates(providers=["lingxi"]):
+                if (candidate.credential_id != credential_id
+                        and candidate.enabled and not candidate.disabled):
+                    schedule_probe(candidate.credential_id)
+        return {"id": credential_id, "tos": risk.as_dict(), "merged": merged}
 
     @router.post("/api/credentials")
     async def import_credential(payload: dict,

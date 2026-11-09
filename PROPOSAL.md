@@ -103,6 +103,7 @@
 
 - 端点：账号面 `https://lingxi.wps.cn`（kdocs 账号回落 `https://lingxi.kdocs.cn`）。**三条请求才是一次对话**：建 cowork 会话 `POST /api/aioffice/v1/cowork/sessions` → 领 run `POST /api/public/v1/credits/runs` → 对话 `POST /api/public/v1/agent-runtime/chat/completions`（私有 SSE）。模型目录 `GET /api/aioffice/v1/sessions/plans`、智点余额 `GET /api/public/v1/credits/balance`、任务中心 `GET /api/public/v1/tasks` + `POST …/{key}/claim`。
 - **凭据只有 `wps_sid` cookie，没有 refresh 接口**：与网页版同一套 WPS 账号 SSO，程序换不出新票。插件实测有效期约一年（无官方承诺），真正的判据是上游 401；故不写死过期时间（按时长猜会把还能用的号摘掉），过期只能重新粘贴。登录轨道不实现，走管理台粘贴（裸 sid / 整段 Cookie 均可）。
+- **同一浏览器只保留最近一次登录**（2026-11-09 实测）：同一浏览器配置里登录另一个 WPS 账号后，旧 `wps_sid` 立刻 401，且额度探测同样 401。多账号必须用独立浏览器配置 / 无痕窗口分别登录后各取一次 Cookie；手工导入按 `uid` 就地合并（同一账号重登不新增行），新号导入后复探其它灵犀凭证，确认 401 的旧号硬禁用并显示「需重新登录」，不靠「新登录＝旧号必死」的猜测误伤仍有效的多账号。
 - **按 run 计费**：一个 run 内多次调用只扣一次智点 → 会话 + run 按「账号 × 模型」缓存 1 小时（**不滑动续期**）+ 并发单飞；上游回 `SQLNoRows` /「会话不存在」时丢弃缓存重建一次。
 - **伪装桌面客户端**：`X-Client-Type: lingxi_claw` + `x-kso-app-name/app-version/device-id`（固定可复现值）。这是私有通路的代价，也是 ToS 灰区（见 `provider/tos.py`）。
 - **三个必须照抄、改了就坏**：① `usage.total_tokens` 是**当前上下文大小**，必须自算 `prompt+completion`（否则用量虚高几十倍）；② `cached_tokens` / `reasoning_tokens` 是扁平字段，方向与 OpenAI 相反；③ `max_tokens` 要塞进 `base_llm_arguments`、`reasoning_effort` 顶层与 `llm_arguments` 各一份，**工具 schema 必须先压平**（`anyOf`/`oneOf`/`$ref`/数组型 `type` 会让整轮失败，只回一句「AI服务异常」）。

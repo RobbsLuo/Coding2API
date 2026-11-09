@@ -24,6 +24,25 @@ async def test_quota_probe_failure_marks_unknown_not_zero(repo):
     assert report.failed == 1
     assert credentials.candidates()[0].health is None
 
+async def test_quota_probe_dead_401_marks_relogin_required(repo):
+    """401 = 登录态死亡：额度探测直接硬禁用并写可操作原因，不停在「未知」。"""
+    from src.provider.lingxi.client import UpstreamHTTPError
+
+    credentials, _db = repo
+    credential_id = credentials.add(
+        provider="lingxi", credential_data={"wps_sid": "sid", "uid": "u1"})
+    task = QuotaProbeTask(
+        credentials, {"lingxi": ProbeProvider(error=UpstreamHTTPError(401, b""))})
+    report = await task.run_once()
+
+    assert report.failed == 1
+    row = next(r for r in credentials.list_all() if r["id"] == credential_id)
+    assert row["disabled"]
+    assert "WPS" in row["disabled_reason"]
+    # 硬禁用后不再进候选池，下一轮也不会再探
+    assert credentials.candidates(selectable_only=True) == []
+
+
 async def test_quota_probe_skips_unknown_provider_and_missing_data(repo):
     credentials, _db = repo
     credentials.add(provider="ghost", credential_data={"x": 1})

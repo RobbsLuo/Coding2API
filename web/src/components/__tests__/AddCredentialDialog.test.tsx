@@ -1,6 +1,6 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AddCredentialDialog } from "../AddCredentialDialog";
 import { jsonResponse, renderPage } from "@/test-utils";
 
@@ -21,6 +21,8 @@ function renderDialog(overrides: Partial<Parameters<typeof AddCredentialDialog>[
 }
 
 describe("AddCredentialDialog", () => {
+  beforeEach(() => localStorage.clear());
+
   it("登录分区与 JSON 导入分区通过 Tabs 切换", async () => {
     renderDialog();
     expect(screen.getByTestId("start-login-codebuddy")).toBeInTheDocument();
@@ -99,6 +101,53 @@ describe("AddCredentialDialog", () => {
     await userEvent.type(payload, '{{"access_token":"typed"}');
     await userEvent.selectOptions(screen.getByTestId("import-provider"), "lingxi");
     expect(payload).toHaveValue('{"access_token":"typed"}');
+  });
+
+  it("粘贴 Copy as cURL 自动识别灵犀并导入（HttpOnly Cookie 也可）", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return jsonResponse({ id: "cred_curl", tos: { level: "gray", reason: "r", basis: "b" } });
+    }));
+    const props = renderDialog();
+    await userEvent.click(screen.getByTestId("add-credential-tab-import"));
+    await userEvent.click(screen.getByTestId("import-payload"));
+    await userEvent.paste(
+      "curl 'https://lingxi.wps.cn/api' -H 'cookie: wps_sid=abc; uid=1'",
+    );
+
+    // 识别结果直接反映到渠道下拉与提示，不用回头再选
+    expect(screen.getByTestId("import-detected")).toHaveTextContent("灵犀");
+    expect(screen.getByTestId("import-provider")).toHaveValue("lingxi");
+
+    await userEvent.click(screen.getByTestId("import-submit"));
+    const posted = calls.find((call) => call.url.endsWith("/api/credentials"));
+    expect(posted?.body).toMatchObject({
+      provider: "lingxi",
+      credential: { cookie: "wps_sid=abc; uid=1" },
+    });
+    expect(props.onImported).toHaveBeenCalledWith(expect.stringContaining("凭证已导入"));
+    expect(localStorage.getItem("coding2api.importProvider")).toBe("lingxi");
+  });
+
+  it("已有灵犀凭证时提示新登录会顶掉旧会话", async () => {
+    renderDialog({ lingxiCount: 1 });
+    await userEvent.click(screen.getByTestId("add-credential-tab-import"));
+    await userEvent.selectOptions(screen.getByTestId("import-provider"), "lingxi");
+
+    const warning = screen.getByTestId("import-lingxi-warning");
+    expect(warning).toHaveTextContent("同一浏览器只保留最近一次登录");
+    expect(warning).toHaveTextContent("不同浏览器配置");
+
+    await userEvent.selectOptions(screen.getByTestId("import-provider"), "codebuddy");
+    expect(screen.queryByTestId("import-lingxi-warning")).not.toBeInTheDocument();
+  });
+
+it("记住上次成功导入的渠道", async () => {
+    localStorage.setItem("coding2api.importProvider", "raccoon");
+    renderDialog();
+    await userEvent.click(screen.getByTestId("add-credential-tab-import"));
+    expect(screen.getByTestId("import-provider")).toHaveValue("raccoon");
   });
 
   it("非法 JSON 本地拦截（不触发 onImported）", async () => {    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
