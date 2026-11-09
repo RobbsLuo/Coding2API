@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/github/license/RobbsLuo/Coding2API)](LICENSE)
 [![Image](https://img.shields.io/badge/image-ghcr.io%2Frobbsluo%2Fcoding2api-blue)](https://github.com/RobbsLuo/Coding2API/pkgs/container/coding2api)
 
-十个上游——**CodeBuddy**（国内 + 国际）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce**、**小浣熊**、**灵犀**——封装成 OpenAI 兼容 API：公共凭证池、统一模型名与调度、按人用量统计。
+十路渠道——**CodeBuddy**（国内 + 国际，两个独立渠道）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce**、**小浣熊**、**灵犀**——封装成 OpenAI 兼容 API：公共凭证池、统一模型名与调度、按人用量统计。
 
 > [!WARNING]
 > 逆向接口，仅供学习研究，未做安全审计；公网部署需反向代理 + 鉴权 + IP 白名单。
@@ -47,7 +47,7 @@
 | **服务端日志：环形缓冲 + 脱敏** | **运维告警：九类风险周期评估** |
 | ![服务端日志](assets/screenshots/logs.webp) | ![运维告警](assets/screenshots/alerts.webp) |
 
-**任务与配置：77 项可热更，DB 覆盖值优先于 `.env`**
+**任务与配置：85 项可热更，DB 覆盖值优先于 `.env`**
 
 ![任务与配置](assets/screenshots/settings.webp)
 
@@ -132,6 +132,7 @@ echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-
    - **TRAE**：粘凭证 JSON（`accessToken`/`uid`/`refreshToken`）或回调链接（`apiHost` 只收官方地址）。
    - **Qoder / CodeArts**：设备码 / OAuth2 授权码登录（CodeArts 授权后把打不开的本地回调链接粘回页面）。
    - **OfficeAce**：点「登录 OfficeAce」走华为云授权（回调由云端承接）。
+   - **小浣熊 / 灵犀**：无登录按钮，只能粘网页会话凭据（小浣熊 `{"access_token":"<xhx_token>"}`，灵犀整段 Cookie 或裸 `wps_sid`）。
    - **OpenCode Zen / Kilo**：无需添加，启动自动出虚拟凭证（删了可在同面板补回）。
 2. 「API Key」建 `sk-...`（明文仅显示一次）。
 3. 调用：
@@ -170,7 +171,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ### 流式超时（默认关闭）
 
-八条渠道上游流读取都是 `read=None` → 网关自兜：
+上游流读取不设读超时（HTTP 读超时交给网关自兜）：
 
 - **首事件超时**（`STREAM_FIRST_EVENT_TIMEOUT_SECONDS`，默认 0）：客户端未收到内容时超时 → 可安全换号重试，记 `upstream_first_event_timeout`。注释帧 / 心跳不重置计时。
 - **流内空闲超时**（`STREAM_IDLE_TIMEOUT_SECONDS`，默认 0）：已出帧后超时 → 断流 + 错误帧收尾，**不换号**（半截输出无法回滚）。
@@ -203,7 +204,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **额度与签到**：探测 `/api/v2/quota/usage`；签到为活动制 `/sash/api/v1/me/campaigns`（积分累积），旧 `daily-check-in` 仅回退。**活动每日 10:00（UTC+8）刷新**，领取后 30 天有效；后台按该窗口封账。新协议无连续天数。**国际站无签到接口**（404）→「本区域无此接口」。
 
-**端点与节流**：默认国内版（`openapi.qoder.com.cn` + `gateway.qoder.com.cn`）。国际站改 `QODER_API_ENDPOINT=https://openapi.qoder.sh`，域名加进白名单。`QODER_CHAT_MIN_INTERVAL` 默认 5，可热更。
+**端点**：默认国内版（`openapi.qoder.com.cn` + `gateway.qoder.com.cn`）。国际站改 `QODER_API_ENDPOINT=https://openapi.qoder.sh`，域名加进白名单。
 
 **上游节点故障**：Qoder 有时把自身节点故障包成 400（`[FAIL]node:…`）→ 判模型级瞬时故障，只冷却该模型。候选耗尽 → 503（`no_healthy_credential`）。
 
@@ -252,7 +253,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **不主动探活 / 不估 credit**：探活要真发推理烧积分；`cost_coefficient` × `tokens_per_point` 关系官方未说明。模型级拒绝改由真实请求按 `BLOCKED` 负缓存处理。
 
-**签名与端点**：控制面 `/v1/claw/*` 用 `SDK-HMAC-SHA256`；模型网关只认 `V11-HMAC-SHA256`，用错 → `APIG.0624` 或 401。`OFFICEACE_ALLOWED_ENDPOINTS` 只需控制面主机（模型网关每账号不同，由上游签发存凭证）。`OFFICEACE_CHAT_MIN_INTERVAL` 默认 0。
+**签名与端点**：控制面 `/v1/claw/*` 用 `SDK-HMAC-SHA256`；模型网关只认 `V11-HMAC-SHA256`，用错 → `APIG.0624` 或 401。`OFFICEACE_ALLOWED_ENDPOINTS` 只需控制面主机（模型网关每账号不同，由上游签发存凭证）。
 
 **单账号单用户**：官方《套餐管理》限制单账号单用户 → 不共用。
 
@@ -294,8 +295,6 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **ToS 灰区**：复用桌面 / 网页登录态并伪装桌面客户端（`X-Client-Type: lingxi_claw` + `x-kso-app-name/app-version/device-id` 固定可复现值），见 `provider/tos.py`。
 
-**节流**：`LINGXI_CHAT_MIN_INTERVAL` 默认 0，独立节流器，可热更。
-
 ### CodeBuddy 国际（`codebuddy_intl`）
 
 [www.codebuddy.ai](https://www.codebuddy.ai)，同国内站协议，但两套独立账号体系（各自注册、各自计费）→ 独立渠道。登录链路同国内版（设备码）。
@@ -309,8 +308,6 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 **模型列表按套餐探活**：当前凭证逐个发一次最小请求，只留真可用模型；`11158`（套餐不允许）、`11102`（无此模型）剔除；`429` / 5xx / 超时保留。结论按账号缓存 6 小时。
 
 **同名模型不带渠道后缀**：两站共有模型在 `/v1/models` 一条、挂两渠道；`-x` / `-sg` 这类真不同的各占一条。
-
-**节流**：`CODEBUDDY_INTL_CHAT_MIN_INTERVAL` 默认 5s，独立节流器，可热更。
 
 ### 按渠道出站代理（可选）
 
@@ -358,7 +355,7 @@ claude
 - **`count_tokens`**：本地估算，不转发上游。
 - **图片**：`image` 块归一为 chat `image_url`；`tool_result.content` 内图片同样保留。
 - **不支持**：`document` 块、`source.type=file`、Anthropic 服务端工具 → 400。
-- **`cache_control` 透传**（默认开）：落点同 Anthropic——`system`、消息内容块、`tool_result` 顶层、`tool_calls` 顶层、`tools` 顶层。只校验结构，不解释取值。九渠道实测 6 接受（codebuddy / codebuddy_intl / trae / qoder / codearts / kilo）；zen 与小浣熊未验证、OfficeAce 未单测。脚本 `scripts/probe_cache_control.py`。
+- **`cache_control` 透传**（默认开）：落点同 Anthropic——`system`、消息内容块、`tool_result` 顶层、`tool_calls` 顶层、`tools` 顶层。只校验结构，不解释取值。实测 codebuddy / codebuddy_intl / trae / qoder / codearts / kilo 6 家接受；zen、小浣熊、灵犀未验证，OfficeAce 未单测。脚本 `scripts/probe_cache_control.py`。
 
 ### CC Switch 一键导入
 
@@ -467,7 +464,7 @@ claude
 
 ## 模型列表加载
 
-`GET /v1/models` 与 Playground 下拉只合并**当前有可用凭证**的渠道（至少一条未暂停、未失效）；冷却中的仍算。顺序：CodeBuddy、TRAE、Qoder、CodeArts、OfficeAce、小浣熊 在前；组内按名字典序；多渠道模型归最高优先级渠道。
+`GET /v1/models` 与 Playground 下拉只合并**当前有可用凭证**的渠道（至少一条未暂停、未失效）；冷却中的仍算。顺序：CodeBuddy（国内 → 国际）、TRAE、Qoder、CodeArts、OfficeAce、小浣熊、灵犀，Zen / Kilo 垫底；组内按名字典序；多渠道模型归最高优先级渠道（`src/api/model_merge.py` 的 `_PROVIDER_RANK`）。
 
 **请求路由只认这份缓存**：目录能证明归属 → 候选只有那些渠道；全不可用 → 503，不逐渠道试。模型完全不在目录 → 仍按全部候选路由；直连指定与 Key 渠道绑定不受影响。
 
@@ -577,7 +574,7 @@ tabs 切四维（渠道 / 模型 / 用户 / 凭证），共用一表（渠道 / 
 
 **延迟两类口径**：只统计成功请求。平均 = `latency_sum ÷ 成功数`（小时汇总）；分位从逐请求明细算（仅 90 天）。`ttfb_ms` = `NULL` 的两列各自独立排名。无样本 → `—`。
 
-**失败归因**：`GET /api/stats/errors`（operator+）按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0` → 失败次数 / **未救回数** / 最近失败时刻（降序，`limit` ≤ 5000）。**失败明细口径**：硬失败（DEAD `credential_unavailable` / RESTRICTED `account_restricted` / INVALID `invalid_request` / CAPABILITY `model_capability`）**每次尝试各落一行**（换号重试每次上游拒绝一行）；限流 / 额度 / 超时 / 上下文超限等其余分类**每次请求仅一行**（轮换耗尽时的收尾行，类型取最后一次错误的真实归因），不逐次落行——否则一次请求三行会把 `usage_hourly.requests` 与 Key 日请求额度一起刷高。同用户同 `request_id` 另有成功行 = 已救回。`未救回 = 失败数 − 救回数`（同请求多次失败算多次，≠ 受损请求数）。凭证 401 硬禁用（DEAD）也落 `credential_unavailable`（**额度耗尽证据成立的凭证除外**：officeace 积分耗尽回的是同一条 `401 APIG.1009`，此时按 `CREDIT` 处理——冷却到次日 04:00 等签到，不硬禁用、不落该归因；本地额度还是正数时先现场复探一次再判，复探仍为正 / 复探失败才保持 DEAD）；账号被上游风控限制（CodeBuddy 11140）落 `account_restricted`，账号级 2h 冷却、当前请求不再换号，同渠道窗口内**第二个不同凭证**也中招时整渠道退避 24h；上游明确说该号用不了这个模型（11102 无此模型 / 11158 套餐不允许）落 `model_not_found`，写 (账号, 模型) 负缓存而非冷却账号；上下文超限（CodeBuddy 11115）落 `context_overflow`、模型能力不匹配（CodeArts 001001020）落 `model_capability`，两者都不惩罚凭证；一次都没选中凭证就耗尽时（候选全在冷却 / 池子为空）明细落**候选渠道**而不是 `-`；换号成功算已救回；轮换耗尽不重复落收尾行。点行钻取 +「只看失败」（`GET /api/stats/events?ok=0`）。仅 admin / operator。`/metrics` 的 `upstream_errors_total` 取进程内计数，不合并。
+**失败归因**（`GET /api/stats/errors`，operator+）：按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0`，返回失败次数 / **未救回数** / 最近失败时刻（降序，`limit` ≤ 5000）。**落行口径**：硬失败（`credential_unavailable` / `account_restricted` / `invalid_request` / `model_capability`）**每次尝试各一行**；限流 / 额度 / 超时 / 上下文超限等其余分类**每次请求只落收尾一行**（类型取最后一次错误的真实归因）——否则一次请求三行会把 `usage_hourly.requests` 与 Key 日请求额度一起刷高。同用户同 `request_id` 另有成功行 = 已救回；`未救回 = 失败数 − 救回数`（同一请求多次失败算多次，≠ 受损请求数）。几处特殊判据：凭证 401 落 `credential_unavailable`，**但额度耗尽证据成立时**（officeace 积分耗尽同一条 `401 APIG.1009`）改判 `CREDIT`——冷却到次日 04:00、不硬禁用；本地额度为正 / 未探测时先现场复探再判，仍为正或复探失败才保持 DEAD。风控限制（11140）落 `account_restricted`：2h 账号级冷却、当前请求不再换号，同渠道第二个凭证也中招才整渠道退避 24h。11102 / 11158 落 `model_not_found`（写 (账号, 模型) 负缓存，不冷却账号）；11115 落 `context_overflow`、001001020 落 `model_capability`，两者都不惩罚凭证；一次凭证都没选中时明细落**候选渠道**而不是 `-`。完整分类与冷却时长见 TECHNICAL.md §3.2。点行钻取 +「只看失败」（`GET /api/stats/events?ok=0`）；仅 admin / operator。`/metrics` 的 `upstream_errors_total` 取进程内计数，不合并。
 
 **点行钻取**：点分组表任一行 → 明细按该行过滤（渠道 / 模型 / 凭证；用户维度走作用域参数），条件可叠加。`GET /api/stats/events` 接受 `provider` / `model` / `credential_id`（AND）+ `ok=0`。
 
@@ -768,21 +765,24 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `CODEARTS_ALLOWED_ENDPOINTS` | snap 引擎 + STS + 门户（见 compose） | CodeArts 白名单 |
 | `OFFICEACE_API_ENDPOINT` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | OfficeAce 控制面 |
 | `OFFICEACE_ALLOWED_ENDPOINTS` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | 只需控制面（模型网关由上游下发） |
-| `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | OfficeAce 聊天最小间隔 |
+| `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | OfficeAce 聊天最小间隔；可热更 |
 | `PROVIDER_PROXIES` | `""` | 按渠道出站代理；启动期项 |
 | `CREDENTIAL_PROXY_POOL` | `""` | 出口 IP 粘性：全局代理池（分号分隔），按凭证 id 稳定哈希分配；启动期项 |
-| `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB 聊天节流（按凭证分桶） |
-| `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB 国际节流，独立 |
-| `ZEN_CHAT_MIN_INTERVAL` | `0` | Zen 节流 |
-| `KILO_CHAT_MIN_INTERVAL` | `0` | Kilo 节流 |
+| `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB 聊天节流（按凭证分桶）；可热更 |
+| `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB 国际节流，独立；可热更 |
+| `ZEN_CHAT_MIN_INTERVAL` | `0` | Zen 节流；可热更 |
+| `KILO_CHAT_MIN_INTERVAL` | `0` | Kilo 节流；可热更 |
 | `RACCOON_API_ENDPOINT` | `https://xiaohuanxiong.com` | 小浣熊上游地址 |
 | `RACCOON_ALLOWED_ENDPOINTS` | `https://xiaohuanxiong.com` | 小浣熊白名单 |
-| `RACCOON_CHAT_MIN_INTERVAL` | `0` | 小浣熊聊天最小间隔 |
-| `RACCOON_MAX_CONCURRENCY` | `2` | 小浣熊每账号在途并发上限；`0` 关闭 |
-| `QODER_CHAT_MIN_INTERVAL` | `5` | Qoder 节流 |
-| `CODEARTS_CHAT_MIN_INTERVAL` | `5` | CodeArts 节流 |
-| `CODEARTS_MAX_CONCURRENCY` | `3` | CodeArts 每账号在途并发上限；`0` 关闭 |
-| `CODEARTS_REQUEST_WINDOW_SECONDS` | `60` | CodeArts 账号滑动窗口；`0` 关闭 |
+| `RACCOON_CHAT_MIN_INTERVAL` | `0` | 小浣熊聊天最小间隔；可热更 |
+| `RACCOON_MAX_CONCURRENCY` | `2` | 小浣熊每账号在途并发上限；`0` 关闭；可热更 |
+| `LINGXI_API_ENDPOINT` | `https://lingxi.wps.cn` | 灵犀上游地址 |
+| `LINGXI_ALLOWED_ENDPOINTS` | `https://lingxi.wps.cn,https://lingxi.kdocs.cn` | 灵犀白名单（对话面按两域顺序回落） |
+| `LINGXI_CHAT_MIN_INTERVAL` | `0` | 灵犀聊天最小间隔；可热更 |
+| `QODER_CHAT_MIN_INTERVAL` | `5` | Qoder 节流；可热更 |
+| `CODEARTS_CHAT_MIN_INTERVAL` | `5` | CodeArts 节流；可热更 |
+| `CODEARTS_MAX_CONCURRENCY` | `3` | CodeArts 每账号在途并发上限；`0` 关闭；可热更 |
+| `CODEARTS_REQUEST_WINDOW_SECONDS` | `60` | CodeArts 账号滑动窗口；`0` 关闭；可热更 |
 | `CODEBUDDY_SANITIZE_CHANNEL_MARKERS` | `true` | 出站正文命中「伪装官方客户端」指纹 → 替换（上游 11128 风控） |
 | `REFRESH_SKEW_HOURS` | `24` | token 到期前该窗口预刷新；短寿命渠道自封顶 |
 | `TOKEN_EXPIRY_WARNING_SECONDS` | `3600` | 到期预警阈值；`≤0` 关。纯展示 |
@@ -810,7 +810,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 
 ### 管理台热更（「任务与配置」页）
 
-上表只给常用项标了「可热更」；管理台共 **77 项**可不改 `.env`、不重启，直接在「任务与配置」页改。
+上表只给常用项标了「可热更」；管理台共 **85 项**（`src/runtime_settings.py` 的 `HOT_SETTINGS`）可不改 `.env`、不重启，直接在「任务与配置」页改。
 
 **优先级 `DB 覆盖值 > .env`**：覆盖后 .env 失效，页面标「DB 覆盖」；点「恢复默认」删覆盖行才回落 .env。值存 `runtime_settings` → 新增项免迁移。白名单外 key、非法类型 / 越界值写入前即拒。启动期项不在白名单：`APP_SECRET` / `PORT` / `DATA_DIR` / `USERS_FILE` / `OPENROUTER_MODELS_URL` / 上游端点白名单。`GET /api/settings` 读快照；`PUT /api/settings` 写（admin + CSRF），`null` 恢复默认。同页展示任务态（`GET /api/tasks`，30s 刷新）。
 
@@ -922,7 +922,7 @@ Caddy 的自动申请（ACME）只认域名，不给裸 IP 签发。两条路自
 注意：
 
 - **证书落具名卷 `caddy_data`**：别 `docker compose ... down -v` —— 会重新签发，撞 Let's Encrypt 每域名每周 5 次的下发限额。
-- **改 `src/` 后必须重建应用容器**：`... up -d --build`（或至少 `docker compose ... restart coding2api`）；只重启 Caddy 无效。
+- **改 `src/` 后必须重建应用容器**：`... up -d --build`；只重启 Caddy 无效（重启后端本身见上文「升级后必须重启后端」）。
 - 家宽 CGNAT 无入站地址走不了这条 → 用下一节的 frp 隧道方案。
 
 ## 公网入口（VPS + frp 反向隧道）
@@ -1035,7 +1035,7 @@ pnpm build
 | [`diagrams/coding2api-architecture.html`](diagrams/coding2api-architecture.html) | 系统架构图 |
 | [`diagrams/coding2api-request-flow.html`](diagrams/coding2api-request-flow.html) | 请求主链路（/v1/responses、/v1/messages 共用主链） |
 | [`diagrams/coding2api-account-flow.html`](diagrams/coding2api-account-flow.html) | 账号与 API Key 生命周期 |
-| [`diagrams/coding2api-data-model.html`](diagrams/coding2api-data-model.html) | 数据模型（13 张表 + 归属关系） |
+| [`diagrams/coding2api-data-model.html`](diagrams/coding2api-data-model.html) | 数据模型（图示 13 张表 + 归属关系；`checkin_events` 尚未画入，以 `src/db/schema.sql` 的 14 张为准） |
 | [`diagrams/coding2api-permission-matrix.html`](diagrams/coding2api-permission-matrix.html) | 三角色权限矩阵 |
 | [`diagrams/coding2api-request-sequence.html`](diagrams/coding2api-request-sequence.html) | 请求主链路时序图 |
 | [`diagrams/coding2api-credential-lifecycle.html`](diagrams/coding2api-credential-lifecycle.html) | 凭证调度状态机 |
