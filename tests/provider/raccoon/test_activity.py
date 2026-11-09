@@ -89,6 +89,84 @@ def test_checkin_result_without_expire_date():
     assert "到期" not in result.message
 
 
+def test_pick_active_grants_keeps_only_unexpired_and_unconsumed():
+    items = [
+        # 仍有效的两笔（不同到期日）
+        _grant(grant_at="2026-11-04T00:00:00+08:00",
+               expire_at="2026-11-10T23:59:59+08:00"),
+        _grant(grant_at="2026-11-05T00:00:00+08:00",
+               expire_at="2026-11-11T23:59:59+08:00"),
+        # 已过期
+        _grant(grant_at="2026-11-01T00:00:00+08:00",
+               expire_at="2026-11-02T23:59:59+08:00"),
+        # 缺 expire_at：无法判断有效期，不算「可用」
+        _grant(grant_at="2026-11-06T00:00:00+08:00", expire_at=None),
+        # 已被同一天同额度的 daily_expire 清零
+        _grant(grant_at="2026-11-03T00:00:00+08:00",
+               expire_at="2026-11-09T23:59:59+08:00"),
+        {"biz_type": "daily_expire", "points": -300,
+         "grant_at": "2026-11-03T00:00:00+08:00"},
+        # 非 daily_grant / 非正点数
+        {"biz_type": "reward_grant", "points": 1500,
+         "expire_at": "2026-12-01T00:00:00+08:00"},
+        {"biz_type": "daily_grant", "points": True,
+         "expire_at": "2026-11-12T23:59:59+08:00"},
+    ]
+    active = raccoon_activity.pick_active_grants(items, NOW)
+    assert [item["points"] for item in active] == [300, 300]
+    # 按到期升序：11-10 在前、11-11 在后
+    assert active[0]["expire_at"] < active[1]["expire_at"]
+
+
+def test_checkin_result_uses_active_grant_when_today_missing():
+    """今天没有新发放，但还有未过期积分 → 视为已签，不再报失败。"""
+    items = [_grant(grant_at="2026-11-02T00:00:00+08:00",
+                    expire_at="2026-11-10T23:59:59+08:00"),
+             _grant(grant_at="2026-11-03T00:00:00+08:00",
+                    expire_at="2026-11-11T23:59:59+08:00")]
+    result = raccoon_activity.checkin_result(items, NOW.timestamp(), now=NOW)
+    assert result.ok and result.already_checked_in
+    assert result.credit == 600
+    assert "今日额度可用 600" in result.message
+    assert "本次未产生新发放" in result.message
+    # 22:00 已过宽限，直接封到当日结束（seal_until=None）
+    assert result.seal_until is None
+
+
+def test_checkin_result_active_grant_before_grace_delays_seal():
+    """凌晨 00:10 看到旧积分：先算已签，但封账只到 01:30，等账单同步后再核。"""
+    early = datetime.fromisoformat("2026-11-05T00:10:00+08:00")
+    items = [_grant(grant_at="2026-11-04T00:00:00+08:00",
+                    expire_at="2026-11-10T23:59:59+08:00")]
+    result = raccoon_activity.checkin_result(items, early.timestamp(), now=early)
+    assert result.ok and result.already_checked_in
+    grace = raccoon_activity.grant_grace_at(early)
+    assert result.seal_until == int(grace.timestamp())
+
+
+def test_checkin_result_missing_before_grace_sets_retry_at():
+    early = datetime.fromisoformat("2026-11-05T00:10:00+08:00")
+    result = raccoon_activity.checkin_result([], early.timestamp(), now=early)
+    assert not result.ok
+    grace = raccoon_activity.grant_grace_at(early)
+    assert result.retry_at == int(grace.timestamp())
+
+
+def test_checkin_result_missing_after_grace_has_no_retry_at():
+    assert raccoon_activity.checkin_result(
+        [], NOW.timestamp(), now=NOW).retry_at is None
+
+
+def test_grant_grace_at_is_cst_0130():
+    early = datetime.fromisoformat("2026-11-05T00:10:00+08:00")
+    grace = raccoon_activity.grant_grace_at(early)
+    assert grace.isoformat() == "2026-11-05T01:30:00+08:00"
+    # UTC 输入也归一成 CST
+    utc = datetime.fromisoformat("2026-11-04T16:10:00+00:00")
+    assert raccoon_activity.grant_grace_at(utc).isoformat() == \
+        "2026-11-05T01:30:00+08:00"
+
+
 def test_quota_packages_maps_four_pools():
     packages = raccoon_activity.quota_packages({
         "daily_points": 274, "reward_points": 6000,

@@ -91,11 +91,11 @@
 - 端点：`https://xiaohuanxiong.com`（网页与 API 同域）。推理 `POST /api/web/llm/v2/chat/completions`、模型目录 `GET /api/web/llm/v2/model_catalog`、积分余额 `GET /api/web/points/v1/balance`，**标准 OpenAI 兼容**，无私有信封、无签名、无设备指纹。
 - **凭据是网页会话 JWT**：浏览器 cookie `xhx_token`（`iss=xiaohuanxiong.com/iam`，约 30 天）直接当 `Authorization: Bearer`。没有官方 API Key，也没有可用的 OAuth 回调（桌面端只注册 `gateway.qwenwork.cn` 那一类服务端回调），故**只能手工导入**：管理台「JSON 导入」粘贴 `{"access_token":"<cookie 值>"}`（也接受裸 JWT / 整段 cookie）。到期需重新登录取值。
 - **未知模型会静默回落默认模型**（实测 `definitely-not-a-model` → 200 + `model=raccoon-090dd3`）：provider 发请求前按目录校验，流首帧再比对上游回显的 `model`，不一致即失败——宁可这次报错，也不让客户端「问 A 答 B」。
-- **计费按请求**：每笔 LLM 调用记 `points=-1`，与 token 量无关（4K 与 205K token 同价）；每日 00:00 发 300 积分（2026-11 起 7 天有效）。`Quota.remaining`/`total` = 可用积分，账本记 `credits`。目录的 `billing_effective_multiplier` 直接当 `credit_rate`（0 = 限免，调度器优先选）。
+- **计费按请求**：每笔 LLM 调用记 `points=-1`，与 token 量无关（4K 与 205K token 同价）；每日 00:00 发 300 积分，**当天登录过才延期到 7 天**（未登录当日 24:00 清零，实测心跳不算登录）。`Quota.remaining`/`total` = 可用积分，账本记 `credits`。目录的 `billing_effective_multiplier` 直接当 `credit_rate`（0 = 限免，调度器优先选）。
 - **并发上限约 5**（6 并发第 6 个 `429 user_model_rate_limited`）：pacer 用 `RACCOON_MAX_CONCURRENCY`（默认 2）+ `CONCURRENCY` 固定短冷却；不是账号故障。
 - **登录轨道不实现**：没有 `start_auth`/`poll_auth`/`complete_callback`——写了也只是永远不被调用的死代码（与 Zen/Kilo 同一分工）。
-- **签到＝懒发放核对**：上游没有领取接口；每日 300 由服务端在当天首次触达积分服务时补写流水。故 `checkin` = 摸一次余额 + 读流水核对 `daily_grant`，只认流水（同 CodeArts「claim 成功但 confirm 失败按失败报」的纪律）。
-- **活跃上报＝设备心跳**：`POST /api/web/auth/v1/devices_current_heartbeat`，缺 `x-client-device-id` 等头族回 `100002 params_invalid_error`；device_id 由 uid 稳定派生（随机值会被当成新设备）。
+- **签到＝页面访问 + 流水核对**：上游没有领取接口；每日 300 在 00:00 自动发放，当天登录过才延期到 7 天。`checkin` = `user_info`（页面级访问，触发延期/账单物化）→ 摸余额 → 读流水；只认流水（同 CodeArts「claim 成功但 confirm 失败按失败报」的纪律）。今天没有新发放但仍有未过期 `daily_grant` 视为已签；凌晨 00:00~01:30 只封账到 01:30，避免 00:02 误报。
+- **活跃上报＝页面访问 + 设备心跳**：`GET /api/web/auth/v1/user_info` 后 `POST /api/web/auth/v1/devices_current_heartbeat`；缺 `x-client-device-id` 等头族回 `100002 params_invalid_error`；device_id 由 uid 稳定派生（随机值会被当成新设备）。心跳只刷 `last_seen_at`，**不算登录**，延期每日积分靠页面访问。
 - **额度明细**：`balance` 给四个池（每日/奖励/月度/充值）→ `quota_packages`；逐笔到期只在流水里（`daily_grant.expire_at`）→ `expiry_ladder`。两者口径不同，分开取；流水失败不阻断余额结论。
 - 能力实测（2026-11-04）：非流式/流式 `tool_calls`、`role=tool` 回传、`stream_options.include_usage` 全通；411K token 输入 14.2s 返回。
 

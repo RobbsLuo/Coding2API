@@ -453,6 +453,26 @@ def test_checkin_backoff_delay_doubles_and_caps_at_one_hour():
     assert delays == [600, 1200, 2400, 3600, 3600, 3600]
 
 
+def test_checkin_failure_retry_at_delays_past_local_backoff():
+    """渠道点名的重试时刻（小浣熊 01:30）只能延后、不能提前本地退避。"""
+    from src.tasks.checkin import _cn_epoch
+
+    task = CheckinTask(None, {})
+    now = time.struct_time((2026, 9, 11, 0, 2, 0, 4, 254, 0))
+    grace = int(datetime(2026, 9, 11, 1, 30,
+                         tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+    task._note_failure("2026-09-11:x", now, retry_at=grace)
+    assert task._failures["2026-09-11:x"][1] == grace
+    before = time.struct_time((2026, 9, 11, 1, 20, 0, 4, 254, 0))
+    after = time.struct_time((2026, 9, 11, 1, 30, 0, 4, 254, 0))
+    assert task._backed_off("2026-09-11:x", before, manual=False) is True
+    assert task._backed_off("2026-09-11:x", after, manual=False) is False
+
+    # 渠道给的时刻比本地退避更早 → 仍按 10 分钟退避，不被缩短
+    task._note_failure("2026-09-11:y", now, retry_at=_cn_epoch(now))
+    assert task._failures["2026-09-11:y"][1] == _cn_epoch(now) + 600
+
+
 async def test_checkin_failure_state_pruned_on_new_day(repo):
     """跨天清退避：昨天的失败不能把今天的首次签到挡掉。"""
     credentials, _db = repo

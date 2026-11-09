@@ -222,11 +222,20 @@ class CheckinTask:
         state = self._failures.get(done_key)
         return state is not None and state[1] > _cn_epoch(now)
 
-    def _note_failure(self, done_key: str, now: time.struct_time) -> None:
-        """记一次失败并按连续失败次数翻倍退避（10m → 20m → 40m → 封顶 1h）。"""
+    def _note_failure(self, done_key: str, now: time.struct_time,
+                      *, retry_at: int | None = None) -> None:
+        """记一次失败并按连续失败次数翻倍退避（10m → 20m → 40m → 封顶 1h）。
+
+        `retry_at` 是渠道给出的「最早再试时刻」（如小浣熊每日积分账单要等到
+        01:30 才同步稳定）。与本地退避取较晚者：既保留指数退避，也绝不在
+        渠道点名的时间之前空锤。
+        """
         streak = self._failures.get(done_key, (0, 0))[0] + 1
         delay = min(_FAIL_BACKOFF_BASE * 2 ** min(streak - 1, 6), _FAIL_BACKOFF_MAX)
-        self._failures[done_key] = (streak, _cn_epoch(now) + delay)
+        until = _cn_epoch(now) + delay
+        if retry_at is not None:
+            until = max(until, retry_at)
+        self._failures[done_key] = (streak, until)
 
     def _clear_failure(self, done_key: str) -> None:
         """成功即清零：下次再失败从 10 分钟重新起算，不继承旧的退避档位。"""
@@ -315,7 +324,7 @@ class CheckinTask:
                     self._on_success(candidate.credential_id)
             else:
                 report.failed += 1
-                self._note_failure(done_key, current)
+                self._note_failure(done_key, current, retry_at=result.retry_at)
                 logger.warning("checkin failed for %s: %s",
                                candidate.credential_id, result.message or "未知原因")
             # 审计日志：成功/失败/已签都记一行（上游异常没有 result 时不记）。

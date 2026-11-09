@@ -3,21 +3,32 @@
 ## 签到（`checkin`）
 
 上游**没有**「点击领取」接口（官方前端 points 客户端只有 `getBalance` /
-`getBills`，整包搜不到「签到」）。每日 300 积分由服务端**懒发放**：当天首次
-触达积分服务时补写一条流水 `biz_type="daily_grant"`、`points=300`，
-`grant_at` 是当天 00:00、`created_at` 才是真正落账时刻（实测 21:41:38，
-等于当天第一次用它）。
+`getBills`，整包搜不到「签到」）。每日 300 积分由服务端在 00:00 自动发放，
+**当天登录过**才会把有效期延长到 7 天；没登录则当日 24:00 清零（官方规则
+与实测一致）。
 
-所以「签到」= 摸一次积分服务（触发懒发放）→ 读流水核对当日是否真到账。
-**只认 `daily_grant` 这一行，不看 HTTP 200**——这与 CodeArts 的
-「claim 成功但 confirm 失败按失败处理」是同一条纪律。
+关键：**账单同步有几分钟延迟**。实测 11-06~11-08 的 `daily_grant` 直到
+11-09 01:11 才出现在 `bills` 里，凌晨 00:02 核对必然误报。故 `checkin`
+不再要求「当天必须出现新 `daily_grant`」：
+
+* 今天有发放 → 按 `created_at` 是否在本次窗口内区分「本次触发」/「早些已发」；
+* 今天没有新发放，但存在**未过期**的 `daily_grant` → 视为已签到（积分可用，
+  只是今天这笔还没落账/还没延期）；
+* 两者都没有 → 失败，但把最早重试时刻推到 `GRANT_GRACE`（01:30），
+  不让任务从 00:02 起每 10 分钟空锤。
+
+「只认流水、不看 HTTP 200」的纪律保持不变——余额接口 200 不等于有积分。
 
 ## 活跃上报（`activity`）
 
 `POST /api/web/auth/v1/devices_current_heartbeat` 是网页端真实的设备心跳
 （前端每轮页面加载都发）。只缺 `x-client-*` 头族，补上即 200、幂等。
-`user_info` 里的 `last_login_at` 也会随之刷新——这是本渠道唯一可用的
-「保持账号活跃」手段。
+
+但**心跳只刷新设备 `last_seen_at`，不算「当天登录」**：实测连续几天只发
+心跳，`daily_grant` 仍然在当日 24:00 清零。真正能延期的是网页会话级接口
+（`GET /api/web/auth/v1/user_info` 等），所以活跃上报现在先做一次页面访问、
+再发心跳。`checkin` 也会先访问一次（best-effort），保证即使活跃任务关闭
+也有一次「登录」。
 
 ## 积分套餐明细（`quota_packages`）
 
@@ -47,6 +58,11 @@ BILL_LOOKBACK = 60
 DAILY_GRANT = "daily_grant"
 #: 到期清零
 DAILY_EXPIRE = "daily_expire"
+
+#: 凌晨判定宽限：账单同步有几分钟延迟；00:00 刚过就判必然误报。
+#: 实测 11-06~11-08 的 daily_grant 直到 11-09 01:11 才出现在 bills 里。
+GRANT_GRACE_HOUR = 1
+GRANT_GRACE_MINUTE = 30
 
 
 def now_cst() -> datetime:
@@ -89,34 +105,89 @@ def pick_today_grant(items: list[Any], now: datetime) -> dict[str, Any] | None:
     return best
 
 
+def grant_grace_at(now: datetime) -> datetime:
+    """当日判定宽限时刻（01:30 +08:00）。"""
+    current = now.astimezone(CST)
+    return current.replace(hour=GRANT_GRACE_HOUR, minute=GRANT_GRACE_MINUTE,
+                           second=0, microsecond=0)
+
+
+def pick_active_grants(items: list[Any], now: datetime) -> list[dict[str, Any]]:
+    """所有**未过期、未被清零**的 `daily_grant`，按到期升序。
+
+    已过期（`expire_at <= now`）、缺 `expire_at`、点数非正、以及已被同一天
+    同额度的 `daily_expire` 配对的条目都不算。返回列表而非单条：上游允许
+    多笔每日积分并存（页面登录延期后跨日保留），判断「今天有没有可用积分」
+    要看它们的合计。
+    """
+    current = now.astimezone(CST)
+    stamp = current.timestamp()
+    expired = _expired_keys(items)
+    active: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict) or item.get("biz_type") != DAILY_GRANT:
+            continue
+        points = item.get("points")
+        if not isinstance(points, (int, float)) or isinstance(points, bool) or points <= 0:
+            continue
+        expire = parse_iso(item.get("expire_at"))
+        if expire is None or expire.timestamp() <= stamp:
+            continue
+        if _grant_key(item) in expired:
+            continue                        # 已被到期清零消费掉
+        active.append(item)
+    active.sort(key=lambda item: parse_iso(item.get("expire_at")).timestamp())
+    return active
+
+
 def checkin_result(items: list[Any], started: float, *,
                    now: datetime | None = None) -> CheckinResult:
     """流水 + 调用开始时刻 → 签到结论。
 
-    三态必须能分清，否则用户无法判断「这次摸出来了」还是「今天早些时候
+    四态必须能分清，否则用户无法判断「这次摸出来了」还是「今天早些时候
     已经发过」：
 
     * 今日有发放且落账时间在本次调用窗口内 → `already_checked_in=False`
-      （本次触发的懒发放，`credit` 是本轮所得）
+      （本次触发/本次首次看到，`credit` 是这笔所得）
     * 今日有发放但落账更早 → `already_checked_in=True`
-    * 今日没有发放 → `ok=False`，提示「稍后重试」（上游可能还没跑到补发逻辑）
+    * 今日没有新发放，但账户里还有**未过期**的每日积分 → `ok=True` +
+      `already_checked_in=True`（积分可用；只是今天这笔还没落账/还没延期）。
+      凌晨 00:00~01:30 之间把 `seal_until` 设到 01:30，让任务在账单同步后
+      再确认一次今天这笔。
+    * 今日没有发放且没有未过期积分 → `ok=False`；凌晨同样把 `retry_at`
+      推到 01:30，避免 00:02 起每 10 分钟空锤。
     """
     current = now or now_cst()
     row = pick_today_grant(items, current)
-    if row is None:
-        return CheckinResult(
-            ok=False, message="上游今日每日积分尚未发放（稍后重试）")
-    points = float(row.get("points") or 0)
-    created = parse_iso(row.get("created_at"))
-    fresh = (created is not None
-             and created.timestamp() >= started - CLAIMED_WINDOW_SECONDS)
-    expire = parse_iso(row.get("expire_at"))
-    suffix = f"（{expire.astimezone(CST):%Y-%m-%d} 到期）" if expire else ""
-    if fresh:
-        return CheckinResult(ok=True, credit=points, already_checked_in=False,
-                             message=f"每日积分 +{points:g}{suffix}")
-    return CheckinResult(ok=True, credit=points, already_checked_in=True,
-                         message=f"今日已发放 {points:g}（不是本次触发）{suffix}")
+    if row is not None:
+        points = float(row.get("points") or 0)
+        created = parse_iso(row.get("created_at"))
+        fresh = (created is not None
+                 and created.timestamp() >= started - CLAIMED_WINDOW_SECONDS)
+        expire = parse_iso(row.get("expire_at"))
+        suffix = f"（{expire.astimezone(CST):%Y-%m-%d} 到期）" if expire else ""
+        if fresh:
+            return CheckinResult(ok=True, credit=points, already_checked_in=False,
+                                 message=f"每日积分 +{points:g}{suffix}")
+        return CheckinResult(ok=True, credit=points, already_checked_in=True,
+                             message=f"今日已发放 {points:g}（不是本次触发）{suffix}")
+
+    active = pick_active_grants(items, current)
+    if active:
+        total = sum(float(item.get("points") or 0) for item in active)
+        nearest = parse_iso(active[0].get("expire_at"))
+        suffix = (f"（最早 {nearest.astimezone(CST):%Y-%m-%d} 到期）"
+                  if nearest else "")
+        grace = grant_grace_at(current)
+        seal = int(grace.timestamp()) if current < grace else None
+        return CheckinResult(ok=True, credit=total, already_checked_in=True,
+                             seal_until=seal,
+                             message=f"今日额度可用 {total:g}{suffix}（本次未产生新发放）")
+
+    grace = grant_grace_at(current)
+    retry_at = int(grace.timestamp()) if current < grace else None
+    return CheckinResult(ok=False, retry_at=retry_at,
+                         message="上游今日每日积分尚未发放（稍后重试）")
 
 
 def quota_packages(balance: dict[str, Any]) -> list[dict[str, Any]]:

@@ -14,6 +14,7 @@ from src.provider.raccoon.client import (
     EP_CHAT,
     EP_HEARTBEAT,
     EP_MODELS,
+    EP_USER_INFO,
     RaccoonClient,
     UpstreamHTTPError,
     UpstreamProtocolViolation,
@@ -308,6 +309,36 @@ async def test_fetch_bills_errors():
 
     with pytest.raises(UpstreamProtocolViolation):
         await _client(no_items).fetch_bills("tok")
+
+
+async def test_visit_gets_user_info_and_returns_data():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == EP_USER_INFO
+        assert request.method == "GET"
+        assert request.headers["Authorization"] == "Bearer tok"
+        return httpx.Response(200, json={"code": 0, "data": {"id": "1"}})
+
+    assert await _client(handler).visit("tok") == {"id": "1"}
+
+
+async def test_visit_errors_and_missing_data():
+    def http_error(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, content=b'{"code":401}')
+
+    with pytest.raises(UpstreamHTTPError):
+        await _client(http_error).visit("tok")
+
+    def non_json(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="nope")
+
+    with pytest.raises(UpstreamProtocolViolation):
+        await _client(non_json).visit("tok")
+
+    def no_data(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 0})
+
+    # 没有 data 段不算失败：200 即成立
+    assert await _client(no_data).visit("tok") == {}
 
 
 async def test_heartbeat_sends_client_headers():

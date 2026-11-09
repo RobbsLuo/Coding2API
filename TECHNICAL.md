@@ -36,7 +36,7 @@ PROPOSAL.md 定方向，本文定实现。只写**当前代码现状**。
 | `src/provider/qoder/` | `cosy.py` `client.py` `events.py` `credential.py` `auth.py` | COSY（自定义 Base64、AES/RSA、签名与会话头缓存）／上游 + 信封解包 + 额度·签到／信封 → chunk → Event／凭证解析／设备码 PKCE |
 | `src/provider/codearts/` | `signer.py` `dpop.py` `client.py` `events.py` `credential.py` `auth.py` `oauth.py` | SDK-HMAC-SHA256（纯函数）／ES256 DPoP（低 S）／上游 + 私有 SSE 还原 + 积分额度／SSE → 增量 Event（双形状）／凭证解析／OAuth2 PKCE／回调粘贴换 token |
 | `src/provider/officeace/` | `signer.py` `client.py` `events.py` `credential.py` `oauth.py` | 双签名（V11 + SDK-HMAC，纯函数）／上游 + 积分·签到·费率／错误分类 + `max_tokens` 改写／两套凭据 + 一次性 refresh／云端授权轮询（PKCE + DPoP + 开通校验） |
-| `src/provider/raccoon/` | `client.py` `events.py` `credential.py` `activity.py` | 标准 OpenAI 上游 + 积分余额·流水·心跳／SSE → Event + 分类（`user_model_rate_limited` → CONCURRENCY）／会话 JWT 归一 + claims 提取 + 稳定设备 id／懒发放签到核对 + 四池明细 + 到期阶梯 |
+| `src/provider/raccoon/` | `client.py` `events.py` `credential.py` `activity.py` | 标准 OpenAI 上游 + 积分余额·流水·心跳／SSE → Event + 分类（`user_model_rate_limited` → CONCURRENCY）／会话 JWT 归一 + claims 提取 + 稳定设备 id／页面访问+流水核对签到 + 四池明细 + 到期阶梯 |
 | `src/provider/lingxi/` | `client.py` `events.py` `credential.py` | 上游 + 私有 SSE（`choices[].text`、无 `[DONE]`）+ 智点额度·签到／SSE → Event + 错误分类／wps_sid Cookie 归一 + uid / sid 哈希身份 |
 | `src/engine/` | `scheduler.py` `executor.py` `limits.py` `inflight.py` `half_open.py` `affinity.py` `continuation.py` `compress.py` `sticky_trim.py` `tool_output.py` `model_resolver.py` `reasoning.py` `prefix_debug.py` `sse.py` | 选号 + 冷却状态机 + pin／执行 + 目录收窄 + 轮换 + fallback + 统计埋点／限额判定 + 快照缓存／在途租约／冷却到期半开探测／会话粘性／截断续写／上下文压缩／粘性裁剪／tool 输出压缩／模型名解析／档位映射解析／前缀缓存诊断／SSE 帧解析 |
 | `src/compat/` | `openai/{request,response,errors,dsml}.py` `responses/{request,response}.py` `anthropic/{request,response}.py` | Chat 校验·聚合·error shape·DSML 泄漏回读／Responses 出口／Anthropic Messages 出口 |
@@ -497,8 +497,8 @@ class Provider(Protocol):
 - **额度口径**：`available_points` 即积分余额，`Quota.total = remaining`（上游没有总量口径，不编造），账本记 `credits`（与 CodeArts 同账）。`billing_effective_multiplier` 直接当 `credit_rate`，0 = 限免，调度器优先选。**按请求计费**（每笔 `points=-1`，与 token 量无关），故不做 token 折算。
 - **错误分类**：`user identity could not be verified` / 401 → `DEAD`（会话 JWT 过期，只能重取）；积分耗尽类文案 → `CREDIT`；`429 user_model_rate_limited` → `CONCURRENCY`（固定短冷却，模型级）；其余 429 → `SOFT`；400/404/422 → `INVALID`。
 - **并发**：实测 5 并发放行、第 6 个 429 → `RACCOON_MAX_CONCURRENCY`（热更，默认 2）+ 独立 pacer（**不**与其他渠道共享）。
-- **签到**（`activity.py`）：上游无领取接口，每日 300 积分由服务端**懒发放**（当天首次触达积分服务时补写 `daily_grant`）。`checkin` = `fetch_quota` → `fetch_bills` → `checkin_result()`；只认流水、不看 200。三态：本次触发（created_at 在 90s 窗口内）/ 今天早些时候已发 / 今日未发（可重试）。
-- **活跃上报**：`POST /api/web/auth/v1/devices_current_heartbeat`；头族 `x-client-device-id`（必填，缺了 `100002 params_invalid_error`）/ `x-client-platform: web` / `x-client-version` / `x-raccoon-language`。device_id 用 `derive_device_id(uid)` 稳定派生。
+- **签到**（`activity.py`）：上游无领取接口，每日 300 积分由服务端 00:00 自动发放；当天登录过才延期到 7 天，否则当日 24:00 清零。`checkin` = `visit`（`user_info`，页面级访问）→ `fetch_quota` → `fetch_bills` → `checkin_result()`；只认流水、不看 200。四态：本次触发（created_at 在 90s 窗口内）/ 今天早些时候已发 / 今天无新发放但仍有未过期 `daily_grant`（视为已签，凌晨封账到 01:30 再确认）/ 完全无可用积分（失败，重试推到 01:30）。
+- **活跃上报**：`POST /api/web/auth/v1/devices_current_heartbeat`；头族 `x-client-device-id`（必填，缺了 `100002 params_invalid_error`）/ `x-client-platform: web` / `x-client-version` / `x-raccoon-language`。device_id 用 `derive_device_id(uid)` 稳定派生。**心跳不算登录**（只刷 `last_seen_at`），故 `activity` 先做一次 `GET /api/web/auth/v1/user_info` 页面访问再发心跳；访问失败按活跃失败返回，让任务在同一小时窗口内重试。
 - **额度明细**：`balance` 的四个池 → `Quota.packages`（0 的池不出条目；`topup_frozen` 时标 `usable=False`）；`daily_grant.expire_at` → `Quota.expiry_ladder`（已被 `daily_expire` 消费的不计）。
 
 ### 5.8 灵犀（`lingxi`）
