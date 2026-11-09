@@ -67,15 +67,18 @@ def test_models_list_orders_cb_then_trae_first(tmp_path):
         # 故意让 zen 的模型名字典序最小、CB 的最大，证明排序按渠道权重而非名字
         "codebuddy": Stub("codebuddy", ["z-cb", "a-cb"]),
         "trae": Stub("trae", ["m-trae"]),
+        "lingxi": Stub("lingxi", ["aaa-lingxi"]),
         "zen": Stub("zen", ["aaa-zen"]),
     })
-    for provider_id in ("codebuddy", "trae", "zen"):
+    for provider_id in ("codebuddy", "trae", "lingxi", "zen"):
         app.state.credentials.add(provider=provider_id, credential_data={"t": "x"})
     key = app.state.api_keys.create("root")["api_key"]
     with TestClient(app) as client:
         ids = [item["id"] for item in client.get(
             "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]]
-    assert ids == ["a-cb", "z-cb", "m-trae", "aaa-zen"]
+    # lingxi 有专属权重（7）→ 排在 zen/kilo 这类「其余」渠道（8）之前，
+    # 即使名字字典序更大
+    assert ids == ["a-cb", "z-cb", "m-trae", "aaa-lingxi", "aaa-zen"]
 
 def test_models_list_orders_dual_provider_by_highest_rank(tmp_path):
     """多渠道模型按最高优先级渠道归位：含 CB 进第一段，仅 TR 的进第二段。"""
