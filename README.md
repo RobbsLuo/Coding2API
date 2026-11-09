@@ -79,7 +79,7 @@ docker compose up -d --build
 docker compose exec coding2api python scripts/create_user.py admin --role admin
 ```
 
-拉镜像：`docker compose pull`（或 `docker pull ghcr.io/robbsluo/coding2api:v0.11.0`）。tag `v*` 推 main → `.github/workflows/publish.yml` → 发 `<tag>` + `:latest`。
+拉镜像：`docker compose pull`（或 `docker pull ghcr.io/robbsluo/coding2api:v0.13.1`）。tag `v*` 推 main → `.github/workflows/publish.yml` → 发 `<tag>` + `:latest`。
 
 容器跑在**有公网 IP 的 VPS** 上要 https 入口 → 见「[公网部署（Docker + Caddy 自动 HTTPS）](#公网部署docker--caddy-自动-https)」。
 

@@ -82,7 +82,7 @@ body:
     attributes:
       label: 版本
       description: 镜像 tag 或 commit。`/healthz` 的 `version` 字段与 `git rev-parse --short HEAD` 都行。
-      placeholder: v0.11.0 / 85cb083
+      placeholder: v0.13.1 / 6ac9766
     validations:
       required: true
 
@@ -109,7 +109,7 @@ body:
         只含计数与版本号，不含凭证内容。没有 jq 就直接贴原文。
       render: json
       placeholder: |
-        {"status":"ok","service":"coding2api","version":"0.11.0",
+        {"status":"ok","service":"coding2api","version":"0.13.1",
          "credentials":{"ready":3,"cooling":0,"paused":0,"disabled":0,"total":3}}
 
   - type: textarea

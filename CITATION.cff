@@ -10,8 +10,8 @@ type: software
 license: MIT
 repository-code: "https://github.com/RobbsLuo/Coding2API"
 url: "https://github.com/RobbsLuo/Coding2API"
-version: "0.11.0"
-date-released: "2026-11-04"
+version: "0.13.1"
+date-released: "2026-11-09"
 keywords:
   - api-gateway
   - openai-compatible
@@ -39,6 +39,6 @@ preferred-citation:
     - family-names: Luo
       given-names: Hongsheng
       alias: RobbsLuo
-  version: "0.11.0"
+  version: "0.13.1"
   url: "https://github.com/RobbsLuo/Coding2API"
   license: MIT
