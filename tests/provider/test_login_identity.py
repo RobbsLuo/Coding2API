@@ -17,7 +17,7 @@ from src.provider.officeace import OfficeAceProvider
 
 
 def test_registry_declares_only_mergeable_channels():
-    assert set(LOGIN_IDENTITIES) == {"codearts", "officeace"}
+    assert set(LOGIN_IDENTITIES) == {"codearts", "officeace", "lingxi"}
     # 首选身份与别名集合必须覆盖同一批渠道，否则「能合并」与「找得到」会错开
     assert set(LOGIN_IDENTITY_SETS) == set(LOGIN_IDENTITIES)
 

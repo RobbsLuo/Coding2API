@@ -64,6 +64,7 @@ from .config import (
     validate_codebuddy_intl_endpoint_allowed,
     validate_endpoint_allowed,
     validate_kilo_endpoint_allowed,
+    validate_lingxi_endpoint_allowed,
     validate_officeace_endpoint_allowed,
     validate_qoder_endpoint_allowed,
     validate_raccoon_endpoint_allowed,
@@ -107,6 +108,8 @@ from .provider.codebuddy.model_access_store import (
 )
 from .provider.codebuddy.oauth import CodeBuddyOAuth
 from .provider.kilo.client import KiloClient, KiloProvider
+from .provider.lingxi import LingxiProvider
+from .provider.lingxi.client import LingxiClient
 from .provider.officeace import OfficeAceProvider
 from .provider.officeace.client import OfficeAceClient
 from .provider.officeace.oauth import OfficeAceOAuth
@@ -245,6 +248,19 @@ def _raccoon_endpoint(config: Settings) -> str:
                              validator=validate_raccoon_endpoint_allowed,
                              env_name="RACCOON_API_ENDPOINT",
                              allowed_name="RACCOON_ALLOWED_ENDPOINTS")
+
+
+def _lingxi_endpoint(config: Settings) -> str:
+    """解析灵犀端点并强制白名单校验（防把 WPS 登录态发往未授权主机）。
+
+    回落域（`lingxi.kdocs.cn`）不在这里解析：它由客户端的 `bases()` 固定追加，
+    同一份白名单校验（漏收会让回落直接 404）。
+    """
+    return _resolve_endpoint(config, attr="lingxi_api_endpoint",
+                             validator=validate_lingxi_endpoint_allowed,
+                             env_name="LINGXI_API_ENDPOINT",
+                             allowed_name="LINGXI_ALLOWED_ENDPOINTS",
+                             strip_slash=True)
 
 
 def _qoder_host(config: Settings) -> str:
@@ -437,6 +453,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                           lambda: runtime.raccoon_chat_min_interval,
                           allow_concurrent=True,
                           max_concurrency=lambda: runtime.raccoon_max_concurrency)
+    # 灵犀独立 pacer：真实账号渠道（按 run 计费），默认不节流；与其余渠道互不排队。
+    lingxi_pacer = Pacer(lambda: runtime.lingxi_chat_min_interval,
+                         lambda: runtime.lingxi_chat_min_interval,
+                         allow_concurrent=True)
     # Qoder / CodeArts 是真实账号渠道，上游按账号频控；各自独立 pacer，
     # 与其余渠道互不排队（同渠道同凭证共桶、桶内允许并发）。
     qoder_pacer = Pacer(lambda: runtime.qoder_chat_min_interval,
@@ -506,6 +526,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             client=RaccoonClient(host=_raccoon_endpoint(config),
                                  proxy=proxies.get("raccoon")),
             pacer=raccoon_pacer),
+        "lingxi": LingxiProvider(
+            client=LingxiClient(host=_lingxi_endpoint(config),
+                                proxy=proxies.get("lingxi")),
+            pacer=lingxi_pacer),
         "officeace": OfficeAceProvider(
             client=OfficeAceClient(cloud_base=_officeace_endpoint(config),
                                    proxy=proxies.get("officeace")),

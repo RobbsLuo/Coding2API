@@ -128,6 +128,10 @@ services:
       # 防误配（避免把用户的会话 JWT 发往未授权主机）。
       RACCOON_API_ENDPOINT: ${RACCOON_API_ENDPOINT:-https://xiaohuanxiong.com}
       RACCOON_ALLOWED_ENDPOINTS: ${RACCOON_ALLOWED_ENDPOINTS:-https://xiaohuanxiong.com}
+      # WPS 灵犀：桌面端 agent-runtime 私有通路，鉴权是 WPS 账号 cookie。
+      # 白名单必须同时含主域与 kdocs 回落域（对话面按这两个域顺序回落）。
+      LINGXI_API_ENDPOINT: ${LINGXI_API_ENDPOINT:-https://lingxi.wps.cn}
+      LINGXI_ALLOWED_ENDPOINTS: ${LINGXI_ALLOWED_ENDPOINTS:-https://lingxi.wps.cn,https://lingxi.kdocs.cn}
       # Qoder（阿里，COSY 私有协议）：真实账号渠道。默认国内 openapi 网关；
       # 国际版改 QODER_API_ENDPOINT=https://openapi.qoder.sh 并把国际版域名
       # 保留在白名单里。推理走 gateway.*，额度/登录走 openapi.*。白名单防把
@@ -150,6 +154,8 @@ services:
       # 小浣熊聊天最小间隔（秒）与每账号并发上限（实测 5 并发放行、第 6 个 429）
       RACCOON_CHAT_MIN_INTERVAL: ${RACCOON_CHAT_MIN_INTERVAL:-0}
       RACCOON_MAX_CONCURRENCY: ${RACCOON_MAX_CONCURRENCY:-2}
+      # 灵犀聊天最小间隔（秒）：独立节流器，0（默认）关闭
+      LINGXI_CHAT_MIN_INTERVAL: ${LINGXI_CHAT_MIN_INTERVAL:-0}
       # Qoder / CodeArts 聊天最小间隔（秒）：真实账号渠道，独立节流器
       QODER_CHAT_MIN_INTERVAL: ${QODER_CHAT_MIN_INTERVAL:-5}
       CODEARTS_CHAT_MIN_INTERVAL: ${CODEARTS_CHAT_MIN_INTERVAL:-5}

@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     # `xhx_token`）。白名单只为防误配，避免把用户的会话 JWT 发往未授权主机。
     raccoon_api_endpoint: str = "https://xiaohuanxiong.com"
     raccoon_allowed_endpoints: str = "https://xiaohuanxiong.com"
+    # WPS 灵犀：桌面端 agent-runtime 通路（三条请求一次对话），鉴权是 WPS 账号
+    # cookie `wps_sid`。白名单同时收主域与 kdocs 回落域——对话面按这两个域
+    # 顺序回落（kdocs 账号的集群在 lingxi.kdocs.cn），漏收会让回落直接 404。
+    lingxi_api_endpoint: str = "https://lingxi.wps.cn"
+    lingxi_allowed_endpoints: str = (
+        "https://lingxi.wps.cn,https://lingxi.kdocs.cn"
+    )
     # Qoder（阿里，COSY 私有协议）：真实账号渠道，端点白名单防止误把带 COSY
     # 签名的请求发往未授权主机。默认取国内版；国际版改这两个值并把国际版域名
     # 一并加入白名单。推理走 gateway.*，额度/登录走 openapi.*。
@@ -258,6 +265,9 @@ class Settings(BaseSettings):
     # 即 429 `user_model_rate_limited`），并发上限由 pacer 的 max_concurrency
     # 兜住（默认 2），不需要额外的最小间隔。
     raccoon_chat_min_interval: float = 0
+    # WPS 灵犀聊天最小间隔：真实账号渠道，上游按 run 计费且并发未取证，默认 0；
+    # 需要给同一账号限速时调大（run 缓存与单飞已把重复计费压在客户端）。
+    lingxi_chat_min_interval: float = 0
     # 小浣熊每账号并发上限：实测 5 并发放行、第 6 个 429。取 2 留余量，避免
     # 与用户其它客户端抢同一账号的并发额度。0 关闭上限。
     raccoon_max_concurrency: int = 2
@@ -479,6 +489,11 @@ class Settings(BaseSettings):
                      for e in self.raccoon_allowed_endpoints.split(",") if e.strip())
 
     @cached_property
+    def lingxi_allowed(self) -> tuple[str, ...]:
+        return tuple(e.strip().rstrip("/")
+                     for e in self.lingxi_allowed_endpoints.split(",") if e.strip())
+
+    @cached_property
     def qoder_allowed(self) -> tuple[str, ...]:
         return tuple(e.strip().rstrip("/") for e in self.qoder_allowed_endpoints.split(",")
                      if e.strip())
@@ -560,6 +575,11 @@ def validate_kilo_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
 def validate_raccoon_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
     """小浣熊端点白名单校验（防把用户的会话 JWT 发往未授权主机）。"""
     return endpoint.strip().rstrip("/") in settings.raccoon_allowed
+
+
+def validate_lingxi_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
+    """灵犀端点白名单校验（防把 WPS 登录态 cookie 发往未授权主机）。"""
+    return endpoint.strip().rstrip("/") in settings.lingxi_allowed
 
 
 def validate_qoder_endpoint_allowed(endpoint: str, settings: Settings) -> bool:

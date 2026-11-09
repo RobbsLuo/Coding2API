@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 KNOWN_PROVIDERS = ("codebuddy", "codebuddy_intl", "trae", "zen", "kilo", "qoder",
-                   "codearts", "officeace", "raccoon")
+                   "codearts", "officeace", "raccoon", "lingxi")
 
 
 class UnknownModelError(ValueError):

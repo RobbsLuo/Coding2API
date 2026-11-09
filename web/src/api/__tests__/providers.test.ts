@@ -32,14 +32,14 @@ describe("渠道展示元数据", () => {
   it("每个已知渠道都有标签、缩写与专属配色（三者对齐）", () => {
     const providers = Object.keys(PROVIDER_LABEL);
     expect(providers.sort()).toEqual([
-      "codearts", "codebuddy", "codebuddy_intl", "kilo", "officeace", "qoder",
-      "raccoon", "trae", "zen",
+      "codearts", "codebuddy", "codebuddy_intl", "kilo", "lingxi", "officeace",
+      "qoder", "raccoon", "trae", "zen",
     ]);
     for (const provider of providers) {
       expect(PROVIDER_ABBR[provider as keyof typeof PROVIDER_ABBR]).toBeTruthy();
       expect(
         PROVIDER_CHART_COLOR[provider as keyof typeof PROVIDER_CHART_COLOR],
-      ).toMatch(/^var\(--chart-\d\)$/);
+      ).toMatch(/^var\(--chart-\d+\)$/);
     }
   });
 

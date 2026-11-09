@@ -201,7 +201,7 @@ def quota_ledger(provider: str) -> str:
     老库里 CodeArts 的 `pool` 行是已下线的每日 token 池口径，不再展示（量级与
     语义都和积分不同，混读会被当成同一本账的连续读数）。
     """
-    return "credits" if provider in ("codearts", "raccoon") else "pool"
+    return "credits" if provider in ("codearts", "raccoon", "lingxi") else "pool"
 
 
 class CredentialRepository:

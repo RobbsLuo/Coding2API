@@ -17,6 +17,7 @@ export const PROVIDER_LABEL: Record<Provider, string> = {
   codearts: "CodeArts",
   officeace: "OfficeAce",
   raccoon: "小浣熊",
+  lingxi: "灵犀",
 };
 
 /** 模型下拉里的渠道缩写（如 `CB x0.29`）。 */
@@ -30,6 +31,7 @@ export const PROVIDER_ABBR: Record<Provider, string> = {
   codearts: "CA",
   officeace: "OA",
   raccoon: "RC",
+  lingxi: "LX",
 };
 
 /**
@@ -48,6 +50,7 @@ export const PROVIDER_CHART_COLOR: Record<Provider, string> = {
   codearts: "var(--chart-6)",
   officeace: "var(--chart-8)",
   raccoon: "var(--chart-9)",
+  lingxi: "var(--chart-10)",
 };
 
 /** 未知渠道（老数据/未来渠道）的兜底色。 */
@@ -71,6 +74,7 @@ export const PROVIDER_ORDER: Provider[] = [
   "codearts",
   "officeace",
   "raccoon",
+  "lingxi",
 ];
 
 /** 渠道排序权重；未知渠道排在已知渠道之后。 */

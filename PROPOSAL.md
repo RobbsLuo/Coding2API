@@ -1,14 +1,14 @@
 # Coding2API 设计文档
 
-**CodeBuddy**（国内 `codebuddy` + 国际 `codebuddy_intl`）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce**、**小浣熊** 九个上游 → OpenAI 兼容 API：公共凭证池、统一模型名与调度、按人用量统计。
+**CodeBuddy**（国内 `codebuddy` + 国际 `codebuddy_intl`）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce**、**小浣熊**、**灵犀** 十个上游 → OpenAI 兼容 API：公共凭证池、统一模型名与调度、按人用量统计。
 
 > 只记仍成立的目标、上游事实、架构与约束。实现见 [TECHNICAL.md](TECHNICAL.md)，使用与部署见 [README.md](README.md)。
 
 ## 1. 目标与非目标
 
-**目标**：单一 OpenAI 兼容出口挂九个上游；`模型@渠道` 精确指定；凭证 admin 集中维护、全员共享；调度器自动挑健康号，上游死亡自动冷却；按人统计用量与估算成本。
+**目标**：单一 OpenAI 兼容出口挂十个上游；`模型@渠道` 精确指定；凭证 admin 集中维护、全员共享；调度器自动挑健康号，上游死亡自动冷却；按人统计用量与估算成本。
 
-**非目标**：不做按 token 的计量计费（上游订阅制，成本不随 token 线性增长；Key / 用户级配额只是可选的旁路治理，默认全关、判定异常放行，**不是安全边界**）；不做通用 provider 网关（只硬编码这九个）；不做**上游积分 → 货币**的换算（各渠道积分互不通用，分开记流水）；成本只按刊例价估算，USD 落库并按可配汇率另记一份 CNY 展示值；不做数据迁移、自更新、mTLS。
+**非目标**：不做按 token 的计量计费（上游订阅制，成本不随 token 线性增长；Key / 用户级配额只是可选的旁路治理，默认全关、判定异常放行，**不是安全边界**）；不做通用 provider 网关（只硬编码这十个）；不做**上游积分 → 货币**的换算（各渠道积分互不通用，分开记流水）；成本只按刊例价估算，USD 落库并按可配汇率另记一份 CNY 展示值；不做数据迁移、自更新、mTLS。
 
 ## 2. 上游可行性核实
 
@@ -99,7 +99,19 @@
 - **额度明细**：`balance` 给四个池（每日/奖励/月度/充值）→ `quota_packages`；逐笔到期只在流水里（`daily_grant.expire_at`）→ `expiry_ladder`。两者口径不同，分开取；流水失败不阻断余额结论。
 - 能力实测（2026-11-04）：非流式/流式 `tool_calls`、`role=tool` 回传、`stream_options.include_usage` 全通；411K token 输入 14.2s 返回。
 
-### 2.10 冲突与陷阱
+### 2.10 灵犀（`lingxi`）
+
+- 端点：账号面 `https://lingxi.wps.cn`（kdocs 账号回落 `https://lingxi.kdocs.cn`）。**三条请求才是一次对话**：建 cowork 会话 `POST /api/aioffice/v1/cowork/sessions` → 领 run `POST /api/public/v1/credits/runs` → 对话 `POST /api/public/v1/agent-runtime/chat/completions`（私有 SSE）。模型目录 `GET /api/aioffice/v1/sessions/plans`、智点余额 `GET /api/public/v1/credits/balance`、任务中心 `GET /api/public/v1/tasks` + `POST …/{key}/claim`。
+- **凭据只有 `wps_sid` cookie，没有 refresh 接口**：与网页版同一套 WPS 账号 SSO，程序换不出新票。插件实测有效期约一年（无官方承诺），真正的判据是上游 401；故不写死过期时间（按时长猜会把还能用的号摘掉），过期只能重新粘贴。登录轨道不实现，走管理台粘贴（裸 sid / 整段 Cookie 均可）。
+- **按 run 计费**：一个 run 内多次调用只扣一次智点 → 会话 + run 按「账号 × 模型」缓存 1 小时（**不滑动续期**）+ 并发单飞；上游回 `SQLNoRows` /「会话不存在」时丢弃缓存重建一次。
+- **伪装桌面客户端**：`X-Client-Type: lingxi_claw` + `x-kso-app-name/app-version/device-id`（固定可复现值）。这是私有通路的代价，也是 ToS 灰区（见 `provider/tos.py`）。
+- **三个必须照抄、改了就坏**：① `usage.total_tokens` 是**当前上下文大小**，必须自算 `prompt+completion`（否则用量虚高几十倍）；② `cached_tokens` / `reasoning_tokens` 是扁平字段，方向与 OpenAI 相反；③ `max_tokens` 要塞进 `base_llm_arguments`、`reasoning_effort` 顶层与 `llm_arguments` 各一份，**工具 schema 必须先压平**（`anyOf`/`oneOf`/`$ref`/数组型 `type` 会让整轮失败，只回一句「AI服务异常」）。
+- **私有 SSE**：正文在 `choices[].text`（不是 `delta.content`），**不发 `[DONE]`**（收尾靠 `finish_reason`）；帧内 `code != Success` 是业务错误，走 `classify_code`。上游每帧是单行 `data:{…}`，不能用「空行分帧」的通用解析器（会吞帧）。
+- **错误分类**：401 → `DEAD`（重贴 Cookie）；402/额度文案 → `CREDIT`；403 → `SOFT`；404 → `INVALID`；429 → `MODEL`（点名模型）；审核拦截（`AuditFailed`）→ `INVALID`（换号无用）；run 过期 → `SOFT` + 重建一次。
+- **额度＝智点**：`total_balance` 直接进 `remaining`，赠送批次 `bonus_credits[].expire_time` 进到期阶梯（15 天内窗口）；账本记 `credits`，不做 token 换算。模型目录的 `multiplier` 直接当 `credit_rate`。
+- **签到**：任务中心 `daily_check_in`，`status=claimed` 即今日已签；上游对重复领取回 200 假成功（`result=ok` 而余额不动），故奖励按**领前/领后余额差**算，差为 0 时读任务状态判「已签」，绝不看 HTTP 200。
+
+### 2.11 冲突与陷阱
 
 | 问题 | 事实 | 对策 |
 |---|---|---|
@@ -116,7 +128,7 @@
 
 一个 FastAPI 进程内三平面，共享同一份 SQLite（WAL + `busy_timeout=5000`）与 Provider 客户端：
 
-- **请求面**（API Key 鉴权）：`/v1/chat/completions` · `/v1/responses` · `/v1/messages` · `/v1/models` · `/v1/user/balance` → 协议层 → 执行引擎（调度 · 冷却 · 会话粘性 · 截断续写 · 统计采集）→ 中立事件流 → 九个 Provider。
+- **请求面**（API Key 鉴权）：`/v1/chat/completions` · `/v1/responses` · `/v1/messages` · `/v1/models` · `/v1/user/balance` → 协议层 → 执行引擎（调度 · 冷却 · 会话粘性 · 截断续写 · 统计采集）→ 中立事件流 → 十个 Provider。
 - **管理面**（会话 Cookie + RBAC）：React 管理台 → `/api/*`。
 - **后台面**（无 HTTP 入口，`TaskRunner` 起 12 类循环）：额度探测 · token 预刷新 · 签到 · 成长中心 · 活跃上报 · 明细清理 · 备份 · 渠道模型列表兜底刷新 · 模型可用性探活 · 模型目录刷新（OpenRouter 刊例价 + 能力分）· 运维告警 · 上游状态聚合。列表与 `src/tasks/status.py` 的 `TASK_SPECS` 一一对应。
 

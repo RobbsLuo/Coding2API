@@ -78,6 +78,12 @@ CHANNEL_TOS: dict[str, TosRisk] = {
         "复用网页端登录态（xhx_token 会话 JWT）调官方托管模型网关；条款未明确"
         "允许第三方转发与多用户共享，且凭据约 30 天到期需重取",
         basis="运营判断"),
+    "lingxi": TosRisk(
+        "gray",
+        "复用 WPS 灵犀桌面/网页登录态（wps_sid Cookie）调 agent-runtime 私有"
+        "通路，并伪装桌面客户端请求头；条款未明确允许第三方转发与多用户共享，"
+        "无刷新接口（cookie 约一年，失效只能重贴）",
+        basis="运营判断"),
 }
 
 _UNKNOWN = TosRisk("gray", "渠道未登记 ToS 风险（按保守档处理）", basis="未登记")

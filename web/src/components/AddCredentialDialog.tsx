@@ -24,7 +24,27 @@ const LOGIN_PROVIDERS: Provider[] = [
  * ——那里会生成一个点了必然失败的「登录」按钮。它的入口是「登录渠道」页底部
  * 的粘贴框（见 `add-raccoon`），因为用户点「添加凭证」默认看到的就是那一页。
  */
-const IMPORT_PROVIDERS: Provider[] = [...LOGIN_PROVIDERS, "raccoon"];
+const IMPORT_PROVIDERS: Provider[] = [...LOGIN_PROVIDERS, "raccoon", "lingxi"];
+
+/**
+ * JSON 导入的默认模板：选定渠道时填进输入框。
+ *
+ * 只在「用户还没写、或内容仍是上一渠道的模板」时替换——切渠道不该把已经
+ * 粘贴好的真实凭据冲掉（凭据不可恢复，误清一次就得重新取）。键与各渠道
+ * `import_credential` 的必填字段一致（见后端各 provider 的 credential 模块）。
+ */
+const IMPORT_TEMPLATES: Partial<Record<Provider, string>> = {
+  codebuddy: '{\n  "token": ""\n}',
+  codebuddy_intl: '{\n  "token": ""\n}',
+  trae: '{\n  "accessToken": "",\n  "uid": "",\n  "refreshToken": ""\n}',
+  qoder: '{\n  "access_token": ""\n}',
+  codearts:
+    '{\n  "access_key_id": "",\n  "secret_access_key": "",\n  "security_token": ""\n}',
+  officeace:
+    '{\n  "model_app_key": "",\n  "model_app_secret": "",\n  "model_base_url": "https://modelgw-xxxx.officeace.cn-southwest-2.huaweicloud-agentarts.com"\n}',
+  raccoon: '{\n  "access_token": ""\n}',
+  lingxi: '{\n  "cookie": "wps_sid=…; uid=…"\n}',
+};
 
 type TabValue = "login" | "import";
 
@@ -92,6 +112,8 @@ export function AddCredentialDialog({
   const [pasteUrl, setPasteUrl] = useState("");
   // 小浣熊：没有 OAuth 轨道，凭据是网页会话 JWT，直接在「登录渠道」页粘贴
   const [raccoonToken, setRaccoonToken] = useState("");
+  // WPS 灵犀：没有 OAuth 轨道，凭据是 WPS 账号 cookie（wps_sid），直接粘贴
+  const [lingxiCookie, setLingxiCookie] = useState("");
   // JSON 导入（原 ImportPanel 逻辑）
   const [importProvider, setImportProvider] = useState<Provider>("codebuddy");
   const [nickname, setNickname] = useState("");
@@ -467,6 +489,47 @@ export function AddCredentialDialog({
             </div>
             <div className="border-t border-border pt-3">
               <div className="mb-2 text-xs text-muted-foreground">
+                灵犀没有 OAuth 登录轨道，凭据是 WPS 账号 cookie：在浏览器打开
+                lingxi.kdocs.cn 登录后，DevTools → Application → Cookies 里复制整段
+                Cookie（含 <code>wps_sid</code>），粘到下方。有效期约一年，失效后重贴即可。
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="w-64">
+                  <Input
+                    data-testid="lingxi-cookie"
+                    value={lingxiCookie}
+                    placeholder="粘贴 Cookie 或 wps_sid 的值"
+                    onChange={(event) => setLingxiCookie(event.target.value)}
+                  />
+                </div>
+                <Button
+                  size="sm"
+                  variant="primary"
+                  data-testid="add-lingxi"
+                  disabled={busy || lingxiCookie.trim().length === 0}
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      await api.importCredential(
+                        "lingxi",
+                        { cookie: lingxiCookie.trim() },
+                        "灵犀",
+                      );
+                      setLingxiCookie("");
+                      onImported("已添加灵犀渠道");
+                    } catch (caught) {
+                      onError(caught instanceof Error ? caught.message : "添加失败");
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  添加灵犀
+                </Button>
+              </div>
+            </div>
+            <div className="border-t border-border pt-3">
+              <div className="mb-2 text-xs text-muted-foreground">
                 OpenCode Zen / Kilo 免费层无需凭证/登录，删除其虚拟凭证后点下方按钮补回
                 （永久停用请改用「暂停」）。
               </div>
@@ -521,7 +584,17 @@ export function AddCredentialDialog({
                     id="import-provider-select"
                     value={importProvider}
                     data-testid="import-provider"
-                    onChange={(event) => setImportProvider(event.target.value as Provider)}
+                    onChange={(event) => {
+                      const next = event.target.value as Provider;
+                      setImportProvider(next);
+                      // 空内容或仍是上一渠道模板 → 换成新渠道模板；手写内容保留
+                      const template = IMPORT_TEMPLATES[next] ?? "";
+                      setRaw((current) =>
+                        current.trim() === "" || current === IMPORT_TEMPLATES[importProvider]
+                          ? template
+                          : current,
+                      );
+                    }}
                   >
                     {IMPORT_PROVIDERS.map((item) => (
                       <option key={item} value={item}>
@@ -557,7 +630,7 @@ export function AddCredentialDialog({
             <Field
               label="凭证 JSON"
               htmlFor="import-payload"
-              hint='CodeBuddy：{"token":"..."}（也接受 access_token / bearer_token）；TRAE：{"accessToken":"...","uid":"...","refreshToken":"..."}；小浣熊：{"access_token":"<浏览器 cookie xhx_token 的值>"}'
+              hint='选择渠道后自动填入该渠道的模板（已手写内容不会被覆盖）。CodeBuddy：{"token":"..."}（也接受 access_token / bearer_token）；TRAE：{"accessToken":"...","uid":"...","refreshToken":"..."}；小浣熊：{"access_token":"<浏览器 cookie xhx_token 的值>"}；灵犀：{"cookie":"wps_sid=…; uid=…"}（整段 Cookie 也可）'
             >
               <Textarea
                 rows={4}

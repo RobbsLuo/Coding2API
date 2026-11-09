@@ -58,6 +58,49 @@ describe("AddCredentialDialog", () => {
     expect(props.onImported).toHaveBeenCalledWith("已添加小浣熊渠道");
   });
 
+  it("灵犀在「登录渠道」页粘贴 Cookie 即可添加（无 OAuth 轨道）", async () => {
+    const calls: Array<{ url: string; body: unknown }> = [];
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(input), body: init?.body ? JSON.parse(String(init.body)) : null });
+      return jsonResponse({ id: "cred_2", tos: { level: "gray", reason: "r", basis: "b" } });
+    }));
+    const props = renderDialog();
+
+    expect(screen.getByTestId("add-lingxi")).toBeInTheDocument();
+    expect(screen.getByTestId("add-lingxi")).toBeDisabled();
+
+    await userEvent.click(screen.getByTestId("lingxi-cookie"));
+    await userEvent.paste("wps_sid=abc; uid=42");
+    await userEvent.click(screen.getByTestId("add-lingxi"));
+
+    const posted = calls.find((call) => call.url.includes("/api/credentials"));
+    expect(posted?.body).toMatchObject({
+      provider: "lingxi",
+      credential: { cookie: "wps_sid=abc; uid=42" },
+    });
+    expect(props.onImported).toHaveBeenCalledWith("已添加灵犀渠道");
+  });
+
+  it("JSON 导入选择渠道后自动填入默认模板，且不覆盖已手写内容", async () => {
+    renderDialog();
+    await userEvent.click(screen.getByTestId("add-credential-tab-import"));
+    const payload = screen.getByTestId("import-payload");
+
+    // 下拉切到灵犀：空输入框 → 填 lingxi 模板
+    await userEvent.selectOptions(screen.getByTestId("import-provider"), "lingxi");
+    expect(payload).toHaveValue('{\n  "cookie": "wps_sid=…; uid=…"\n}');
+
+    // 仍是上一渠道模板 → 跟随渠道换成新模板
+    await userEvent.selectOptions(screen.getByTestId("import-provider"), "raccoon");
+    expect(payload).toHaveValue('{\n  "access_token": ""\n}');
+
+    // 已手写内容 → 切渠道不覆盖（凭据不可恢复，误清要重新取）
+    await userEvent.clear(payload);
+    await userEvent.type(payload, '{{"access_token":"typed"}');
+    await userEvent.selectOptions(screen.getByTestId("import-provider"), "lingxi");
+    expect(payload).toHaveValue('{"access_token":"typed"}');
+  });
+
   it("非法 JSON 本地拦截（不触发 onImported）", async () => {    vi.stubGlobal("fetch", vi.fn(async () => jsonResponse({})));
     renderDialog();
     await userEvent.click(screen.getByTestId("add-credential-tab-import"));

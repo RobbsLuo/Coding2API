@@ -10,8 +10,17 @@ import QoderMono from "@lobehub/icons/es/Qoder/components/Mono";
 import TraeColor from "@lobehub/icons/es/Trae/components/Color";
 import TraeMono from "@lobehub/icons/es/Trae/components/Mono";
 import type { ComponentType } from "react";
+import lingxiLogo from "../assets/lingxi.png";
 
 type BrandComp = ComponentType<{ size?: number | string; className?: string }>;
+
+/**
+ * 灵犀（WPS 灵犀）没有 @lobehub 图标，用官方 CDN 的 logo 本地打包：
+ * CSP 的 `img-src` 只放行 `'self' data:`，不能直连 CDN。
+ */
+function LingxiLogo({ size = 14, className }: { size?: number | string; className?: string }) {
+  return <img src={lingxiLogo} alt="" aria-hidden width={size} height={size} className={className} />;
+}
 
 const BRAND: Record<string, { Main: BrandComp; Color: BrandComp }> = {
   codebuddy: { Main: CodeBuddyMono, Color: CodeBuddyColor },
@@ -29,12 +38,14 @@ const BRAND: Record<string, { Main: BrandComp; Color: BrandComp }> = {
   officeace: { Main: HuaweiCloudMono, Color: HuaweiCloudColor },
   // 小浣熊（商汤）：用母公司 SenseNova 图标（库内只有 Mono 变体）
   raccoon: { Main: SenseNovaMono, Color: SenseNovaMono },
+  // WPS 灵犀：库内无品牌图标，用官方 logo（彩色 PNG，无 Mono 变体）
+  lingxi: { Main: LingxiLogo, Color: LingxiLogo },
 };
 
 /**
- * 渠道品牌 logo（@lobehub/icons）：默认品牌彩色版；未知渠道不渲染。
- * 深路径 import 绕开 Avatar 变体（其依赖 @lobehub/ui 的 emoji-mart JSON
- * 在 vitest/node 下无法加载）。
+ * 渠道品牌 logo：默认品牌彩色版；未知渠道不渲染。图标来自 @lobehub/icons，
+ * 库里没有的渠道用本地打包的官方 logo（如灵犀）。深路径 import 绕开 Avatar
+ * 变体（其依赖 @lobehub/ui 的 emoji-mart JSON 在 vitest/node 下无法加载）。
  */
 export function ProviderIcon({
   provider,

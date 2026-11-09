@@ -94,7 +94,8 @@ export type Ledger = "pool" | "credits";
  * 两套接口、数值量级也不同，混读会被当成同一本账的连续读数。
  */
 export function providerLedger(provider: string): Ledger {
-  return provider === "codearts" || provider === "raccoon" ? "credits" : "pool";
+  return provider === "codearts" || provider === "raccoon"
+    || provider === "lingxi" ? "credits" : "pool";
 }
 
 /** 组间顺序：按全站渠道顺序，最后按 key 定序（同渠道只有一组，用于兜底稳定排序）。 */

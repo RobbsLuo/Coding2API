@@ -19,6 +19,7 @@ DPoP 私钥必然全变，整份比对永远不相等，结果是每次登录都
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -74,16 +75,42 @@ def officeace_login_identities(credential_data: dict[str, Any]) -> IdentitySet:
         ) if alias)
 
 
+def _lingxi_sid_identity(raw: dict[str, Any]) -> str:
+    """sid 哈希身份：`sid-<sha256 前 16 位>`（与 `lingxi/credential.identity` 同口径）。
+
+    刻意不 import `lingxi` 子包（门面反向 import 本模块，会成环），故在这里
+    复制同一段纯函数；两处改口径必须同步（有测试钉住）。
+    """
+    sid = _text(raw, "wps_sid")
+    if not sid:
+        return ""
+    return "sid-" + hashlib.sha256(sid.encode("utf-8")).hexdigest()[:16]
+
+
+def lingxi_login_identity(credential_data: dict[str, Any]) -> str:
+    """灵犀首选身份：`uid`；缺则 sid 哈希（重新登录后 sid 会变，仅兜底）。"""
+    return _text(credential_data, "uid") or _lingxi_sid_identity(credential_data)
+
+
+def lingxi_login_identities(credential_data: dict[str, Any]) -> IdentitySet:
+    """灵犀全部别名：`uid` 与 sid 哈希（老行只有 sid 时靠它合并）。"""
+    aliases = {_text(credential_data, "uid"),
+               _lingxi_sid_identity(credential_data)}
+    return frozenset(alias for alias in aliases if alias)
+
+
 #: 首选身份（展示 / 门面转发用）；只有声明了身份的渠道才参与重新登录合并。
 LOGIN_IDENTITIES: dict[str, Callable[[dict[str, Any]], str]] = {
     "codearts": codearts_login_identity,
     "officeace": officeace_login_identity,
+    "lingxi": lingxi_login_identity,
 }
 
 #: 别名集合（合并匹配用）：与 `LOGIN_IDENTITIES` 必须覆盖同一批渠道。
 LOGIN_IDENTITY_SETS: dict[str, Callable[[dict[str, Any]], IdentitySet]] = {
     "codearts": codearts_login_identities,
     "officeace": officeace_login_identities,
+    "lingxi": lingxi_login_identities,
 }
 
 
