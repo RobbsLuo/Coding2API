@@ -183,7 +183,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ## 渠道
 
-> CodeBuddy（含国际）/ TRAE / Qoder / CodeArts / OfficeAce / 小浣熊 需凭证；**Zen 与 Kilo 无凭证免费层**——池里一条虚拟占位行（调度 / 冷却 / 统计照常），额度列「免费层（无额度接口）」，健康度恒「无探测」。删虚拟行重启复活；永久停用 →「暂停」。
+> CodeBuddy（含国际）/ TRAE / Qoder / CodeArts / OfficeAce / 小浣熊 / 灵犀 需凭证；**Zen 与 Kilo 无凭证免费层**——池里一条虚拟占位行（调度 / 冷却 / 统计照常），额度列「免费层（无额度接口）」，健康度恒「无探测」。删虚拟行重启复活；永久停用 →「暂停」。
 
 ### OpenCode Zen（`zen`）
 
@@ -275,6 +275,26 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 **活跃上报**：`POST /api/web/auth/v1/devices_current_heartbeat`（网页端真实设备心跳），补 `x-client-*` 头族即 200、幂等，`last_login_at` 随之刷新。默认关闭，与 CodeBuddy 共用 `ACTIVITY_REPORT_ENABLED` / `ACTIVITY_REPORT_HOUR`。设备 id 由 uid 稳定派生（随机值会被上游当成新设备）。
 
 **并发上限约 5**（第 6 个回 `429 user_model_rate_limited`）→ `RACCOON_MAX_CONCURRENCY` 默认 2，独立节流器。
+
+### 灵犀（`lingxi`）
+
+[WPS 灵犀](https://lingxi.wps.cn)，需真实 WPS 账号。**没有登录按钮**：凭据是 WPS 账号 cookie `wps_sid`，在网页版（`lingxi.kdocs.cn` 同样可用）登录后 DevTools → Application → Cookies 复制整段，粘进「登录渠道」页（整段 Cookie 或裸 sid 均可）。上游**没有 refresh 接口**，且不按时长猜过期——真正的判据是上游 401，过期重贴即可。
+
+**一次对话三条请求**：建 cowork 会话 → 领 credits run → `agent-runtime/chat/completions`（私有 SSE）。上游**按 run 计费**：一个 run 内多次调用只扣一次智点 → 会话 + run 按「账号 × 模型」缓存 1 小时（不滑动续期）+ 并发单飞；上游回 `SQLNoRows` /「会话不存在」时丢弃缓存重建一次。
+
+**私有 SSE 与用量口径**：正文在 `choices[].text`（不是 `delta.content`），**不发 `[DONE]`**（靠 `finish_reason` 收尾）；`usage.total_tokens` 是**当前上下文大小** → 自算 `prompt+completion`；`cached_tokens` / `reasoning_tokens` 是扁平字段，方向与 OpenAI 相反。
+
+**工具 schema 必须先压平**：`anyOf` / `oneOf` / `$ref` / 数组型 `type` 会让上游整轮回「AI服务异常」，只回一句错误；`max_tokens` 要塞进 `base_llm_arguments`，`reasoning_effort` 顶层与 `llm_arguments` 各一份。
+
+**额度＝智点**：`total_balance` 直接进余额，赠送批次 `bonus_credits[].expire_time` 进到期阶梯（15 天内窗口）；账本记「积分」，不做 token 换算。模型目录 `multiplier` 直接当倍率。
+
+**签到**：任务中心 `daily_check_in`，`status=claimed` 即今日已签。上游对重复领取回 200 假成功（`result=ok` 而余额不动），故奖励按**领前 / 领后余额差**算，差为 0 时读任务状态判「已签」，绝不看 HTTP 200。
+
+**错误分类**：401 → 凭证失效（重贴 Cookie）；402 / 额度文案 → 额度耗尽；403 → 瞬时；404 → 请求无效；429 → 点名模型；审核拦截（`AuditFailed`）换号无用；run 过期 → 重建一次。
+
+**ToS 灰区**：复用桌面 / 网页登录态并伪装桌面客户端（`X-Client-Type: lingxi_claw` + `x-kso-app-name/app-version/device-id` 固定可复现值），见 `provider/tos.py`。
+
+**节流**：`LINGXI_CHAT_MIN_INTERVAL` 默认 0，独立节流器，可热更。
 
 ### CodeBuddy 国际（`codebuddy_intl`）
 

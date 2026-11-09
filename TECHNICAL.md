@@ -37,6 +37,7 @@ PROPOSAL.md 定方向，本文定实现。只写**当前代码现状**。
 | `src/provider/codearts/` | `signer.py` `dpop.py` `client.py` `events.py` `credential.py` `auth.py` `oauth.py` | SDK-HMAC-SHA256（纯函数）／ES256 DPoP（低 S）／上游 + 私有 SSE 还原 + 积分额度／SSE → 增量 Event（双形状）／凭证解析／OAuth2 PKCE／回调粘贴换 token |
 | `src/provider/officeace/` | `signer.py` `client.py` `events.py` `credential.py` `oauth.py` | 双签名（V11 + SDK-HMAC，纯函数）／上游 + 积分·签到·费率／错误分类 + `max_tokens` 改写／两套凭据 + 一次性 refresh／云端授权轮询（PKCE + DPoP + 开通校验） |
 | `src/provider/raccoon/` | `client.py` `events.py` `credential.py` `activity.py` | 标准 OpenAI 上游 + 积分余额·流水·心跳／SSE → Event + 分类（`user_model_rate_limited` → CONCURRENCY）／会话 JWT 归一 + claims 提取 + 稳定设备 id／懒发放签到核对 + 四池明细 + 到期阶梯 |
+| `src/provider/lingxi/` | `client.py` `events.py` `credential.py` | 上游 + 私有 SSE（`choices[].text`、无 `[DONE]`）+ 智点额度·签到／SSE → Event + 错误分类／wps_sid Cookie 归一 + uid / sid 哈希身份 |
 | `src/engine/` | `scheduler.py` `executor.py` `limits.py` `inflight.py` `half_open.py` `affinity.py` `continuation.py` `compress.py` `sticky_trim.py` `tool_output.py` `model_resolver.py` `reasoning.py` `prefix_debug.py` `sse.py` | 选号 + 冷却状态机 + pin／执行 + 目录收窄 + 轮换 + fallback + 统计埋点／限额判定 + 快照缓存／在途租约／冷却到期半开探测／会话粘性／截断续写／上下文压缩／粘性裁剪／tool 输出压缩／模型名解析／档位映射解析／前缀缓存诊断／SSE 帧解析 |
 | `src/compat/` | `openai/{request,response,errors,dsml}.py` `responses/{request,response}.py` `anthropic/{request,response}.py` | Chat 校验·聚合·error shape·DSML 泄漏回读／Responses 出口／Anthropic Messages 出口 |
 | `src/tasks/` | `pacer.py` `quota_probe.py` `checkin.py` `growth.py` `activity.py` `refresh.py` `retention.py` `backup.py` `alerting.py` `upstream_status.py` `model_probe.py` `status.py` `runner.py` | 全局节流器／额度探测／签到（`CHECKIN_TIMES` 空则每 10 分钟）／成长（仅 CB）／活跃上报／预刷新／小时汇总 + 90 天清理／备份／告警（七类规则 + webhook）／上游状态聚合／模型探活／`TASK_SPECS` + 运行态／调度接入 lifespan |
@@ -500,6 +501,17 @@ class Provider(Protocol):
 - **活跃上报**：`POST /api/web/auth/v1/devices_current_heartbeat`；头族 `x-client-device-id`（必填，缺了 `100002 params_invalid_error`）/ `x-client-platform: web` / `x-client-version` / `x-raccoon-language`。device_id 用 `derive_device_id(uid)` 稳定派生。
 - **额度明细**：`balance` 的四个池 → `Quota.packages`（0 的池不出条目；`topup_frozen` 时标 `usable=False`）；`daily_grant.expire_at` → `Quota.expiry_ladder`（已被 `daily_expire` 消费的不计）。
 
+### 5.8 灵犀（`lingxi`）
+**WPS 账号 cookie + 一次对话三条请求**，差异集中在 `client.py`：
+
+- **凭据**（`credential.py`）：接受整段 Cookie / 裸 `wps_sid`；`uid` 从 Cookie 段取，重登合并首选 `uid`、兜底 `sid-<sha256 前 16 位>`（与 `login_identity` 同口径）。**没有 refresh 接口**，过期只能重贴；判定只看上游 401，不按时长猜（猜错会把还能用的号摘掉）。
+- **三条请求**：`POST /api/aioffice/v1/cowork/sessions`（建 cowork 会话）→ `POST /api/public/v1/credits/runs`（领 run）→ `POST /api/public/v1/agent-runtime/chat/completions`。上游**按 run 计费**（一个 run 内多次调用只扣一次智点）→ `ensure_run` 按「账号 × 模型」缓存 1h（**不滑动续期**）+ 并发单飞；`SQLNoRows` /「会话不存在」丢弃缓存重建一次。
+- **伪装桌面端**：`X-Client-Type: lingxi_claw` + `x-kso-app-name/app-version/device-id`（固定可复现值）。端点默认 `https://lingxi.wps.cn`；账号面按主域 → `lingxi.kdocs.cn` 顺序回落（kdocs 账号的集群），白名单必须两者都含，漏收会让回落直接 404。
+- **SSE**（`events.py`）：正文在 `choices[].text`（非 `delta.content`）、**不发 `[DONE]`**（靠 `finish_reason` 收尾）；`usage.total_tokens` 是**当前上下文大小** → 自算 `prompt+completion`；`cached_tokens` / `reasoning_tokens` 是扁平字段。上游每帧是单行 `data:{…}`，不能用「空行分帧」的通用解析器（会吞帧）。
+- **工具 schema 压平**（`client.sanitize_schema`）：`anyOf` / `oneOf` / `$ref` / 数组型 `type` 会让整轮回「AI服务异常」；`max_tokens` 注入 `base_llm_arguments`，`reasoning_effort` 顶层与 `llm_arguments` 各一份。
+- **错误分类**：401 → `DEAD`；402 / 额度文案 → `CREDIT`；403 → `SOFT`；404/422 → `INVALID`；429 → `MODEL`（点名模型）；审核拦截（`AuditFailed`）→ `INVALID`（换号无用）；run 过期 → `SOFT` + 重建一次。
+- **额度 / 签到**：`total_balance` 即智点余额，赠送批次 `bonus_credits[].expire_time` → 到期阶梯（15 天内窗口）；账本记 `credits`，目录 `multiplier` 直接当 `credit_rate`。签到走任务中心 `daily_check_in`（`status=claimed` 即已签），奖励按**领前/领后余额差**算，差 0 时读任务状态——上游对重复领取回 200 假成功（`result=ok` 而余额不动），绝不看 HTTP 200。
+
 ## 6. 调度器
 ### 6.1 选号规格
 ```python
@@ -659,7 +671,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 - **哨兵名不跨渠道合并**（`_SENTINEL_LABELS` = `auto` / `default`）：语义只在本渠道成立 → 退回原 id 归一键、各自单列。**同渠道内归一键重复 → 退回原 id 归一键**，且不登记歧义别名。
 - **对外 id 一律归一键**：多渠道取最短展示名的归一键；单渠道取该条；兜底/哨兵取原代号归一键。原代号不露面，转发经 `services.model_aliases` 映射回（`executor.upstream_model_name` 消费）；每渠道登记三键（对外 id、原代号、展示名及 slug 形式）。
 - **撞车消歧**（`_disambiguate`）：按 `_sort_key` 序保留先到者，后者依次取 `_fallback_ids`（原代号归一键 → 加渠道后缀 → 数字后缀）。兜底/哨兵条目用 `_scoped_key`（`渠道\0归一原代号`）隔离，对外 id 仍是原代号归一键。
-- **展示顺序**：`_PROVIDER_RANK`（codebuddy 0 → codebuddy_intl 1 → trae 2 → qoder 3 → codearts 4 → officeace 5 → raccoon 6 → 其余 7），多渠道取 `min`，同级按归一键字典序。只影响展示；调度选号顺序（`KNOWN_PROVIDERS`）不变。
+- **展示顺序**：`_PROVIDER_RANK`（codebuddy 0 → codebuddy_intl 1 → trae 2 → qoder 3 → codearts 4 → officeace 5 → raccoon 6 → lingxi 7 → 其余 8），多渠道取 `min`，同级按归一键字典序。只影响展示；调度选号顺序（`KNOWN_PROVIDERS`）不变。
 - **自定义别名**（`MODEL_ALIASES`，热更，`model_alias.py` 解析 + `api/model_merge._apply_custom_aliases` 注入）：`对外名=模型@渠道;对外名2=模型`，`@渠道` 可省。解析宽容（坏段忽略 + warning），注入期判撞名 / 目标不存在 / 渠道不持有 → 该段 ERROR 跳过；条目带 `custom_alias: true`。**无别名链**。用法见 README「模型名三字段」。
 
 ### 9.2 按凭证加载与 SWR
@@ -919,7 +931,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 `CREDENTIAL_PROXY_POOL`（启动期，分号分隔）非空时，同一凭证固定走同一出口：
 
 - 分配 = `sha256(credential_id) → int % len(pool)`，**不依赖进程状态**，重启后不漂移（进程内轮转会等于没做）。池成员增删会让部分凭证换桶——改池子本身就是要换出口。
-- 凭证 id 走 contextvar（`request_context.set_credential_id`），由 engine / 任务层设置：推理（executor `_stream_source`，每次换号重试都重设）、额度探测、签到、token 预刷新、成长中心、管理台单条 probe/checkin。**不依赖凭证 data 里的账号字段**（九个渠道字段名不统一，缺失就会静默回落直连）。
+- 凭证 id 走 contextvar（`request_context.set_credential_id`），由 engine / 任务层设置：推理（executor `_stream_source`，每次换号重试都重设）、额度探测、签到、token 预刷新、成长中心、管理台单条 probe/checkin。**不依赖凭证 data 里的账号字段**（十个渠道字段名不统一，缺失就会静默回落直连）。
 - `httpx` 的代理是连接池级参数，所以 `LazyClients` 按 `(流/短, 代理)` 维护多份池（`_pools`）；未配池时只有一条池，行为与之前逐字节一致。显式注入的 client（测试替身）永远优先。
 - 优先级：凭证池分配 → `PROVIDER_PROXIES[渠道]` → 直连。**OAuth 登录阶段不覆盖**：登录时凭证还没入库（没有 id），仍走渠道级代理/直连。
 

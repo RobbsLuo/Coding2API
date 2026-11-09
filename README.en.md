@@ -181,7 +181,7 @@ Optional `temperature` / `max_tokens` / `reasoning_effort`; **leaving one empty 
 
 ## Channels
 
-> CodeBuddy (incl. international) / TRAE / Qoder / CodeArts / OfficeAce / Raccoon need credentials; **Zen and Kilo are credential-less free tiers** — one virtual placeholder row (scheduling / cooldown / stats as usual), quota reads "free tier (no quota API)", health stays "no probe". Virtual row re-seeds on restart after deletion; *pause* disables permanently.
+> CodeBuddy (incl. international) / TRAE / Qoder / CodeArts / OfficeAce / Raccoon / Lingxi need credentials; **Zen and Kilo are credential-less free tiers** — one virtual placeholder row (scheduling / cooldown / stats as usual), quota reads "free tier (no quota API)", health stays "no probe". Virtual row re-seeds on restart after deletion; *pause* disables permanently.
 
 ### OpenCode Zen (`zen`)
 
@@ -272,6 +272,26 @@ The upstream is plain OpenAI protocol, with three quirks:
 
 **Concurrency cap ~5** (the 6th concurrent request returns `429 user_model_rate_limited`) → `RACCOON_MAX_CONCURRENCY` defaults to 2, with its own pacer.
 
+### Lingxi (`lingxi`)
+
+[WPS Lingxi](https://lingxi.wps.cn), real WPS account required. **No login button**: the credential is the WPS account cookie `wps_sid` — log in on the web app (`lingxi.kdocs.cn` works as well), copy the whole Cookie from DevTools → Application → Cookies, and paste it into the *Login channels* panel (whole cookie string or a bare sid both work). Upstream has **no refresh endpoint**, and expiry is never guessed from age — the only real signal is a 401, after which you paste a fresh cookie.
+
+**One conversation = three requests**: create a cowork session → claim a credits run → `agent-runtime/chat/completions` (private SSE). Upstream **bills per run** (several calls inside one run charge one credit), so sessions + runs are cached per account × model for 1 hour (no sliding renewal) with in-flight single-flight; `SQLNoRows` / "session not found" drops the cache and rebuilds once.
+
+**Private SSE and usage semantics**: the text lives in `choices[].text` (not `delta.content`) and **no `[DONE]` is sent** (the stream ends on `finish_reason`); `usage.total_tokens` is the **current context size**, so it is recomputed as `prompt+completion`; `cached_tokens` / `reasoning_tokens` are flat fields with the opposite direction from OpenAI.
+
+**Tool schemas must be flattened first**: `anyOf` / `oneOf` / `$ref` / array-valued `type` make the whole round fail with a single "AI service error"; `max_tokens` goes into `base_llm_arguments`, while `reasoning_effort` is sent at top level *and* inside `llm_arguments`.
+
+**Quota = credits (智点)**: `total_balance` maps straight to remaining, bonus batches carry `bonus_credits[].expire_time` into the expiry ladder (15-day window); the ledger records credits, no token conversion. The catalog `multiplier` becomes the rate directly.
+
+**Check-in**: the task center exposes `daily_check_in`; `status=claimed` means already checked in. Upstream answers duplicate claims with a fake 200 (`result=ok` while the balance does not move), so the reward is the **balance delta before/after**, and a zero delta falls back to the task status — HTTP 200 is never trusted.
+
+**Error classification**: 401 → dead credential (re-paste cookie); 402 / quota wording → credit exhausted; 403 → transient; 404 → invalid request; 429 → named model only; audit rejection (`AuditFailed`) is not fixed by switching accounts; run expiry rebuilds once.
+
+**ToS grey area**: reuses the desktop / web login state and impersonates the desktop client (`X-Client-Type: lingxi_claw` plus `x-kso-app-name/app-version/device-id`), see `provider/tos.py`.
+
+**Pacing**: `LINGXI_CHAT_MIN_INTERVAL` defaults to 0 with its own pacer, hot-reloadable.
+
 ### CodeBuddy international (`codebuddy_intl`)
 
 [www.codebuddy.ai](https://www.codebuddy.ai), same protocol as CN site but separate account system (separate registration and billing) → separate channel. Same device-code login.
@@ -332,7 +352,7 @@ claude
 - **`count_tokens`**: estimated locally, never forwarded.
 - **Images**: `image` blocks normalize to chat `image_url`; images inside `tool_result.content` are preserved.
 - **Unsupported**: `document` blocks, `source.type=file`, Anthropic server tools — explicit 400.
-- **`cache_control` passthrough** (on by default): landing spots match Anthropic (`system`, message content blocks, `tool_result` top level, `tool_calls` top level, `tools` top level). Structure validated only; values not interpreted. 6 of 9 channels accept it (codebuddy / codebuddy_intl / trae / qoder / codearts / kilo); zen and Raccoon unverified, OfficeAce not separately probed. Script `scripts/probe_cache_control.py`.
+- **`cache_control` passthrough** (on by default): landing spots match Anthropic (`system`, message content blocks, `tool_result` top level, `tool_calls` top level, `tools` top level). Structure validated only; values not interpreted. 6 of 10 channels accept it (codebuddy / codebuddy_intl / trae / qoder / codearts / kilo); zen, Raccoon and Lingxi unverified, OfficeAce not separately probed. Script `scripts/probe_cache_control.py`.
 
 ### CC Switch one-click import
 
