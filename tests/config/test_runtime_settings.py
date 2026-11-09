@@ -97,7 +97,8 @@ def test_sections_only_inside_task_cards():
             assert item.section.strip(), item.key
     alert_sections = [item.section for item in HOT_SETTINGS if item.task == "alert"]
     assert alert_sections == [
-        "基础与迟滞"] * 8 + ["规则阈值"] * 6 + ["单 Key 与时段"] * 5 + ["月度预算"] * 2
+        "基础与迟滞"] * 8 + ["规则阈值"] * 6 + ["单 Key 与时段"] * 5 + \
+        ["月度预算"] * 2 + ["渠道与签到"] * 4
 
 
 # ------------------------------------------------------------ 值解析与校验

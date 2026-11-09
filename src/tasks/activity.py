@@ -21,6 +21,7 @@ from zoneinfo import ZoneInfo
 from ..config import live
 from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository, GrowthRepository
+from ..error_text import error_text
 from ..provider.base import GrowthResult, GrowthStep, StepStatus
 from . import TaskReport
 
@@ -110,8 +111,11 @@ class ActivityTask:
             try:
                 result = await provider.activity(data)
             except Exception as error:  # noqa: BLE001 - 单号失败不拖累其余
+                # 必须走 error_text：裸 `%s` 打 httpx.ConnectError / TimeoutError
+                # 时 str 为空，日志只剩「activity report failed for cred_x: 」，
+                # 分不清是代理抖动还是上游拒绝（同 checkin / quota_probe 口径）。
                 logger.warning("activity report failed for %s: %s",
-                               candidate.credential_id, error)
+                               candidate.credential_id, error_text(error))
                 report.failed += 1
                 continue
             if result.ok:

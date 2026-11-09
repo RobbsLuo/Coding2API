@@ -107,6 +107,57 @@ async def test_checkin_skips_disabled(repo):
     assert report.attempted == 0
     assert report.skipped == 1
 
+async def test_checkin_skip_providers_stops_only_that_channel(repo):
+    """渠道级止损：点名渠道不调上游，其它渠道照常签，且聊天能力不受影响。
+
+    回归 2026-11-09：raccoon 上游自 11-05 停止写 daily_grant，三个号每轮
+    都回「今日每日积分尚未发放」，7 天 484 次尝试仅 10 次成功。停用签到
+    但又不能暂停凭证——`enabled=0` 会连聊天一起停掉。
+    """
+    credentials, _db = repo
+    credentials.add(provider="raccoon", credential_data={"bearer_token": "r",
+                                                        "uid": "u1"})
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "c",
+                                                          "account_uid": "u2"})
+
+    class TwoChannelProvider:
+        id = "codebuddy"
+
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def checkin(self, data):
+            self.calls.append(data["bearer_token"])
+            return CheckinResult(ok=True, credit=100)
+
+        def checkin_scope(self, data):
+            return data.get("uid") or data.get("account_uid") or ""
+
+    raccoon = TwoChannelProvider()
+    raccoon.id = "raccoon"
+    codebuddy = TwoChannelProvider()
+    task = CheckinTask(credentials, {"raccoon": raccoon, "codebuddy": codebuddy},
+                       skip_providers=" raccoon , ")
+    report = await task.run_once()
+
+    assert raccoon.calls == []                     # 点名渠道一次都没打
+    assert codebuddy.calls == ["c"]                # 其它渠道照常
+    assert report.succeeded == 1 and report.skipped >= 1
+
+async def test_checkin_skip_providers_is_hot_reloadable(repo):
+    """取值器每轮现读：热更关掉跳过 → 下一轮就能重新签。"""
+    credentials, _db = repo
+    credentials.add(provider="raccoon", credential_data={"bearer_token": "r",
+                                                        "uid": "u1"})
+    provider = ProbeProvider()
+    provider.id = "raccoon"
+    enabled = {"skip": True}
+    task = CheckinTask(credentials, {"raccoon": provider},
+                       skip_providers=lambda: "raccoon" if enabled["skip"] else "")
+    assert (await task.run_once()).attempted == 0
+    enabled["skip"] = False
+    assert (await task.run_once()).attempted == 1
+
 async def test_checkin_supports_both_providers(repo):
     """TRAE 与 CodeBuddy 都实现签到后，任务要能覆盖两个上游。"""
     credentials, _db = repo

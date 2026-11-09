@@ -246,3 +246,46 @@ def test_evaluate_budget_disabled_by_zero_budget_or_empty_levels():
                       budget_levels=()) == []
     assert _no_alerts(budget_cny=100.0, budget_spent=0.0,
                       budget_levels=(50,)) == []
+
+
+def test_evaluate_channel_dead_fires_for_zero_success_channel():
+    """渠道零成功 → critical；`last_ok` 进 detail 供「多久没成功」定位。"""
+    alerts = _no_alerts(dead_channels=[
+        {"provider": "officeace", "requests": 551, "last_ok": 1793000000}])
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.rule == "channel_dead" and alert.severity == SEVERITY_CRITICAL
+    assert alert.scope == "officeace"
+    assert alert.detail["requests"] == 551
+    assert "551 次请求全部失败" in alert.message
+
+
+def test_evaluate_channel_dead_never_succeeded_wording():
+    alerts = _no_alerts(dead_channels=[
+        {"provider": "zen", "requests": 40, "last_ok": None}])
+    assert "从未成功过" in alerts[0].message
+
+
+def test_evaluate_channel_dead_absent_when_no_rows():
+    assert _no_alerts(dead_channels=[]) == []
+    assert _no_alerts(dead_channels=None) == []
+
+
+def test_evaluate_checkin_fails_above_streak_threshold():
+    alerts = _no_alerts(
+        checkin_failures=[{"credential_id": "cred_a", "streak": 18,
+                           "message": "上游今日每日积分尚未发放（稍后重试）"}],
+        checkin_fail_min_streak=3)
+    assert len(alerts) == 1
+    alert = alerts[0]
+    assert alert.rule == "checkin_failing" and alert.severity == SEVERITY_WARNING
+    assert alert.scope == "cred_a"
+    assert "连续 18 轮签到失败" in alert.message
+    assert alert.detail["streak"] == 18
+
+
+def test_evaluate_checkin_fails_below_threshold_or_rule_off():
+    rows = [{"credential_id": "cred_a", "streak": 2, "message": "x"}]
+    assert _no_alerts(checkin_failures=rows, checkin_fail_min_streak=3) == []
+    # 规则关闭（阈值 0）→ 即使调用方误传数据也不报
+    assert _no_alerts(checkin_failures=rows, checkin_fail_min_streak=0) == []

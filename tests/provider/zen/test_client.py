@@ -242,6 +242,40 @@ async def test_fetch_models_probe_429_keeps_candidates():
     models = await _client(handler).fetch_models()
     assert [m.id for m in models] == ["a-free"]
 
+async def test_fetch_models_probe_429_does_not_log_warning(caplog):
+    """429 是已知稳态，只记 DEBUG：否则每轮 8 条 WARNING 淹没真问题。
+
+    实测 2026-11-08 一天 224 条 `zen 探活 … 暂不可判定：HTTP 429`，占全部
+    WARNING 的 73%；而 zen 渠道自 10-23 后无流量，纯噪声。
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_MODELS:
+            return httpx.Response(200, json={"data": [{"id": "a-free"}]})
+        return httpx.Response(429, json={"error": {"type": "FreeUsageLimitError"}})
+
+    with caplog.at_level("DEBUG", logger="src.provider.zen.client"):
+        await _client(handler).fetch_models()
+
+    levels = {record.levelname for record in caplog.records
+              if "zen 探活" in record.getMessage()}
+    assert "WARNING" not in levels
+    assert "DEBUG" in levels
+
+async def test_fetch_models_probe_5xx_logs_warning(caplog):
+    """非 429 的暂不可判定（5xx）仍打 WARNING：那才是要人看的信号。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_MODELS:
+            return httpx.Response(200, json={"data": [{"id": "a-free"}]})
+        return httpx.Response(503, json={"error": {"type": "ServerError"}})
+
+    with caplog.at_level("DEBUG", logger="src.provider.zen.client"):
+        models = await _client(handler).fetch_models()
+
+    assert [m.id for m in models] == ["a-free"]
+    warnings = [record for record in caplog.records
+                if record.levelname == "WARNING" and "zen 探活" in record.getMessage()]
+    assert warnings and "HTTP 503" in warnings[0].getMessage()
+
 async def test_fetch_models_probe_timeout_keeps_candidates(monkeypatch):
     """探活首字超时按「暂不可判定」保留：不拖垮启动，也不清空渠道。"""
     from src.provider.zen import client as zen_client

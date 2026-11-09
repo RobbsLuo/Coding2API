@@ -269,6 +269,10 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "在时点**之前**提前一个 0..N 分钟的随机偏移执行，避免多部署"
                "同一分钟齐打上游。按「日期 + 时点」去重，抖动不会让同一时点"
                "跑两次。0 = 不抖。", minimum=0, maximum=1440, task="checkin"),
+    HotSetting("checkin_skip_providers", str, "跳过签到的渠道",
+               "逗号分隔的渠道名（如 `raccoon`）。上游长期停发每日积分时用它"
+               "止损：只跳过这些渠道的签到，聊天与其它渠道不受影响。留空 = 全签。",
+               task="checkin"),
     HotSetting("log_buffer_lines", int, "日志页保留行数",
                "「任务与配置」→ 日志页的进程内环形缓冲行数（只收本进程日志，"
                "不读文件）。0 = 关闭该页（端点返回 404）。日志行发出前经脱敏"
@@ -345,6 +349,21 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
     HotSetting("alert_budget_levels", str, "预算分层（%）",
                "逗号分隔的百分比档位，默认 50,80,95,100；只报当前达到的最高档，"
                "100% 为 critical。留空 = 不分层（规则不生效）。", task="alert", section="月度预算"),
+    HotSetting("alert_channel_dead_min_requests", int, "渠道零成功最小样本数",
+               "统计窗内某渠道请求数达到该值且**一次都没成功**才告警；"
+               "0 = 关闭该规则。用于抓「渠道整体挂了」——积分耗尽整批 401 这类"
+               "故障会被错误率阈值稀释。", minimum=0,
+               task="alert", section="渠道与签到"),
+    HotSetting("alert_channel_dead_window_minutes", int, "渠道零成功统计窗（分钟）",
+               "判定「渠道死亡」的回看窗口。渠道故障通常是小时级，比错误率窗长。",
+               minimum=1, task="alert", section="渠道与签到", floor=1),
+    HotSetting("alert_checkin_fail_min_streak", int, "签到连续失败轮数阈值",
+               "同一凭证最近连续这么多轮签到都失败才告警（中间成功一次即清零）；"
+               "0 = 关闭该规则。补「任务跑成功但上游业务返回失败」的盲区。",
+               minimum=0, task="alert", section="渠道与签到"),
+    HotSetting("alert_checkin_fail_window_hours", int, "签到失败回看窗（小时）",
+               "只统计该窗口内的签到记录，避免长期失败凭证在保留期边缘反复进出。",
+               minimum=1, task="alert", section="渠道与签到", floor=1),
     # SQLite 备份：改周期时人就在看这个任务最近备份了什么。
     HotSetting("backup_interval_minutes", int, "备份周期（分钟）",
                "后台把主库一致性快照（VACUUM INTO）写进 DATA_DIR/backups/ 的"
@@ -940,6 +959,10 @@ class RuntimeSettings:
         return int(self.get("checkin_jitter_minutes"))
 
     @property
+    def checkin_skip_providers(self) -> str:
+        return str(self.get("checkin_skip_providers"))
+
+    @property
     def log_buffer_lines(self) -> int:
         return int(self.get("log_buffer_lines"))
 
@@ -1028,6 +1051,22 @@ class RuntimeSettings:
     @property
     def alert_budget_levels(self) -> str:
         return str(self.get("alert_budget_levels"))
+
+    @property
+    def alert_channel_dead_min_requests(self) -> int:
+        return int(self.get("alert_channel_dead_min_requests"))
+
+    @property
+    def alert_channel_dead_window_minutes(self) -> int:
+        return int(self.get("alert_channel_dead_window_minutes"))
+
+    @property
+    def alert_checkin_fail_min_streak(self) -> int:
+        return int(self.get("alert_checkin_fail_min_streak"))
+
+    @property
+    def alert_checkin_fail_window_hours(self) -> int:
+        return int(self.get("alert_checkin_fail_window_hours"))
 
     # ---------------------------------------------------------- SQLite 备份
 

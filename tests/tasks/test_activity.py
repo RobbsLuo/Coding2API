@@ -163,6 +163,23 @@ async def test_activity_task_failure_retries_and_does_not_abort(activity_repo):
     again = await task.run_once()
     assert again.attempted == 2
 
+async def test_activity_task_exception_log_keeps_class_name(activity_repo, caplog):
+    """抛出的异常必须记成 `类名: 消息`，不能只剩一个空尾巴。
+
+    回归 2026-11-09：日志是
+    `activity report failed for cred_x: `（冒号后为空）——上游 `ConnectError`
+    的 `str()` 为空，运维无法判断是代理抖动还是上游拒绝。与 checkin /
+    quota_probe 统一走 `error_text`。
+    """
+    _add(activity_repo, token="b")
+    task = ActivityTask(activity_repo, {"codebuddy": _DispatchProvider()}, hour=10)
+    with caplog.at_level("WARNING", logger="src.tasks.activity"):
+        await task.run_once()
+    messages = [record.getMessage() for record in caplog.records
+                if "activity report failed" in record.getMessage()]
+    assert messages, "未记录失败日志"
+    assert any("RuntimeError: boom" in message for message in messages)
+
 async def test_activity_task_records_growth_event_on_success(activity_repo):
     _add(activity_repo)
     events = GrowthRepository(activity_repo._db)  # noqa: SLF001

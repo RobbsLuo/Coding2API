@@ -58,3 +58,40 @@ def test_checkin_events_index_exists(tmp_path):
         "SELECT name FROM sqlite_master WHERE type = 'index'")}
     assert "idx_checkin_cred_ts" in indexes
     db.close()
+
+def test_consecutive_failures_counts_only_trailing_streak(tmp_path):
+    """只数最近一段连续失败：中间成功一次即清零，窗口外不参与。"""
+    db = Database(tmp_path / "streak.sqlite3")
+    apply_schema(db.connect())
+    events = CheckinEventRepository(db)
+    now = 1_700_000_000
+
+    def row(credential_id: str, ok: bool, offset: int, message: str = "") -> None:
+        events.record(credential_id=credential_id,
+                      result=CheckinResult(ok=ok, message=message), now=now + offset)
+
+    # c1：失败、失败、失败（连续 3）
+    row("c1", False, 0)
+    row("c1", False, 10)
+    row("c1", False, 20)
+    # c2：失败、成功、失败 → 最近一次成功 → 不算
+    row("c2", False, 0)
+    row("c2", True, 10)
+    row("c2", False, 20)
+    # c3：只有 1 次失败（不到阈值）
+    row("c3", False, 30, "上游繁忙")
+    # c4：窗口外的连续失败不计
+    row("c4", False, -10_000)
+    row("c4", False, -9_000)
+
+    rows = events.consecutive_failures(min_streak=2, since=now)
+    assert rows == [{"credential_id": "c1", "streak": 3, "last_ts": now + 20,
+                     "message": ""}]
+    # 阈值 1：c3 也进来（c2 最近一次成功仍排除）
+    short = events.consecutive_failures(min_streak=1, since=now)
+    assert {item["credential_id"] for item in short} == {"c1", "c3"}
+    assert short[0]["credential_id"] == "c1"          # 按 streak 降序
+    assert "上游繁忙" in {item["message"] for item in short}
+    # 规则关闭：阈值 0 恒空
+    assert events.consecutive_failures(min_streak=0, since=now) == []
+    db.close()

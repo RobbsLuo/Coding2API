@@ -19,6 +19,17 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# 残留的 newsyslog 规则会静默吞日志：它只做 rename，launchd 给进程的 fd 仍
+# 指向旧 inode → 轮转后到下次重启之间的日志全部丢失（本机实测丢过 19h，见
+# scripts/rotate-logs.sh 顶部）。仓库侧已删干净并有测试守着，但 /etc 下的
+# 副本属于本机状态、仓库管不到，只能在启动时吼一声，否则又要靠翻日志才发现。
+NEWSYSLOG_RULE="/etc/newsyslog.d/coding2api.conf"
+if [[ -f "$NEWSYSLOG_RULE" ]]; then
+    echo "launchd-server: 警告：检测到残留的 newsyslog 规则 $NEWSYSLOG_RULE" >&2
+    echo "launchd-server: 警告：它会 rename 轮转导致日志丢失，请执行：" >&2
+    echo "launchd-server:   sudo rm $NEWSYSLOG_RULE && sudo launchctl kickstart -k system/com.apple.newsyslog" >&2
+fi
+
 echo "launchd-server: 构建前端（失败不阻断启动）…"
 if ! "$ROOT/scripts/build-web.sh"; then
     echo "launchd-server: 警告：前端构建失败，将使用 web/dist 里的既有产物启动" >&2

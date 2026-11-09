@@ -391,3 +391,29 @@ def test_feishu_and_slack_urls_share_webhook_validation(tmp_path):
         runtime.set_many({key: "https://hooks.example/x"})
         assert getattr(runtime, key) == "https://hooks.example/x"
     db.close()
+
+
+def test_window_dead_channels_zero_success_only(repo):
+    """零成功的渠道才报：有任一成功即排除；样本不足也排除。"""
+    _credentials, db = repo
+    stats = StatsCollector(db)
+    # officeace：3 次全失败
+    for offset in (0, 10, 20):
+        stats.record(username="u", provider="officeace", model="m", ok=False,
+                     now=1000 + offset)
+    # codebuddy：失败 2 次 + 成功 1 次 → 有成功，不算死亡
+    stats.record(username="u", provider="codebuddy", model="m", ok=False, now=1000)
+    stats.record(username="u", provider="codebuddy", model="m", ok=False, now=1010)
+    stats.record(username="u", provider="codebuddy", model="m", ok=True, now=1020)
+    # trae：只有 1 次失败 → 样本不足
+    stats.record(username="u", provider="trae", model="m", ok=False, now=1030)
+
+    rows = stats.window_dead_channels(since=1000, min_requests=2)
+    assert [row["provider"] for row in rows] == ["officeace"]
+    assert rows[0]["requests"] == 3
+    # 窗口内的成功时刻会带出来（无成功则为 None）
+    assert rows[0]["last_ok"] is None
+    assert [row["provider"] for row in stats.window_dead_channels(
+        since=1000, min_requests=1)] == ["officeace", "trae"]
+    # 窗口外不计
+    assert stats.window_dead_channels(since=2000, min_requests=1) == []

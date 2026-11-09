@@ -206,7 +206,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 14 张表，`SCHEMA_
 | `runtime_settings` | 运行时配置覆盖（纯 key/value），白名单在 `runtime_settings.HOT_SETTINGS` |
 | `users` | 账号（PBKDF2 + `role` + `enabled` + `must_change_password` + `session_epoch` + 激活令牌摘要） |
 | `audit_events` | 审计流水 |
-| `alert_events` | 告警事件（七类规则；`resolved_at` 非空 = 迟滞确认恢复） |
+| `alert_events` | 告警事件（九类规则；`resolved_at` 非空 = 迟滞确认恢复） |
 
 - 调度状态与到期阶梯**落库**，重启不丢；签到**去重**、模型列表缓存、任务运行态**进程内**（重启归零，不编造记录）——去重是运行态，与 `checkin_events` 的审计日志是两回事。
 - 模型目录落盘 `DATA_DIR/model_catalog.json`，OpenRouter 目录落盘 `data/openrouter_catalog.json`。
@@ -225,7 +225,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 14 张表，`SCHEMA_
 - 批量导入：`POST /api/credentials/batch-import`（`items[]`，≤100 条）。逐条校验，响应 `{created[], skipped[], failed[]}` 均带 `index`；同渠道内容完全一致去重；逐条审计 + 入队探测。
 - 备份：`GET/POST /api/backups`、`GET/DELETE /api/backups/{name}`、`POST /api/backups/restore`（原始字节，≤512MB）。恢复用「校验 → 暂存 → 下次启动应用」而不是运行中换库；启动应用失败只留档、不阻断（`db/backup.apply_pending_restore`）。
 - 配置与任务：`GET|PUT /api/settings` + `GET /api/tasks` + `POST /api/tasks/{key}/run`。列表端点统一 `sort` + `order`；未知键回落默认。回调：`GET /authorize`。
-- 告警：`GET /api/alerts` + `POST /api/alerts/{id}/resolve`。`AlertTask` 启动时从库里未恢复的行重建集合。规则七类：池耗尽、任务连续失败、token 到期、上游错误率、单 Key 用量暴涨、非工作时段请求、**预算分层（50/80/95/100%）**（后三类默认阈值 0 = 关闭；不存 IP，故不做「多 IP 同 Key」）。
+- 告警：`GET /api/alerts` + `POST /api/alerts/{id}/resolve`。`AlertTask` 启动时从库里未恢复的行重建集合。规则九类：池耗尽、任务连续失败、token 到期、上游错误率、单 Key 用量暴涨、非工作时段请求、**预算分层（50/80/95/100%）**、**渠道零成功（`channel_dead`：窗口内有流量但一次都没成功）**、**签到连续失败（`checkin_failing`：同一凭证连续 N 轮业务失败，「任务跑成功但上游回失败」任务级计数看不见）**（单 Key / 非工作时段 / 预算三类默认阈值 0 = 关闭；渠道零成功与签到连续失败默认开启；不存 IP，故不做「多 IP 同 Key」）。
 - 上游状态：`GET /api/upstream-status`（operator）返回内存快照 + 任务运行态；**不落盘**。四种解析器归一化到六档，加源只在 `SOURCE_SPECS` 加一行。
 - 统计：`GET /api/stats/{overview,by-provider,by-model,by-user,by-credential,timeline,model-timeline,percentile-timeline}`（延迟分位 P50/P90/P95/P99 可切，默认 P95；输出速度 `tps_visible` / `tps` / `tps_estimated`）、`GET /api/stats/errors`（失败归因，`limit` ≤ 5000；硬失败 DEAD/RESTRICTED/INVALID/CAPABILITY 每次尝试一行，限流/额度/超时/上下文等其余分类每次请求一行且类型取最后一次错误的真实归因，`rescued` 为同用户同 `request_id` 另有成功行的次数，`failures − rescued` 是未被救回的失败尝试数）、`GET /api/stats/events`（游标/OFFSET 双模式，钻取过滤，`ok=0`，`?format=csv`）、`GET /api/stats/events/stream`（SSE，订阅者有界缓冲 200、并发上限 8）。
   - `timeline` / `model-timeline` 的 `metric` 取值：`requests` / `tokens` / `cost` / `latency` / `ttfb` / `success_rate` / `cache_rate` / `cost_per_request`；**取值域外的拼写显式 400**（不静默回落到 `requests`——否则客户端拼错参数会拿到一份「看起来正常」的请求数图，错误被完全吞掉）。`percentile-timeline` 只认 `latency` / `ttfb`。派生指标（成功率、缓存命中率、单请求成本）在**聚合后相除**（`sum/sum`），不是逐小时比率的平均；无样本给 `null` 而非 0。

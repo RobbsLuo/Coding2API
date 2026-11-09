@@ -342,6 +342,32 @@ class StatsCollector:
             "FROM usage_events WHERE ts >= ?", (since,)).fetchone()
         return int(row["requests"] or 0), int(row["failed"] or 0)
 
+    def window_dead_channels(self, *, since: int,
+                            min_requests: int) -> list[dict[str, Any]]:
+        """近窗口内「有流量但一次都没成功」的渠道，供渠道死亡告警。
+
+        判据是**零成功**而不是错误率：officeace 2026-11-08 积分耗尽后回的是
+        流内 401，请求记录 `ok=0`；同类故障也可能整批走 fallback 而完全不落在
+        本渠道的 `ok=1` 上。按错误率算会被 `failed/requests` 的高阈值稀释，
+        而「这个渠道在当前窗口内一次都没成功」是一个不会误判的信号。
+
+        `min_requests` 过滤掉样本过少的渠道（一次失败就报警等于噪声）。返回
+        `[{provider, requests, last_ok}]`，`last_ok` 供文案说明「多久没成功」。
+        """
+        rows = self._db.connect().execute(
+            "SELECT provider, COUNT(*) AS requests, "
+            "COALESCE(SUM(CASE WHEN ok = 1 THEN 1 ELSE 0 END), 0) AS ok_count, "
+            "MAX(CASE WHEN ok = 1 THEN ts END) AS last_ok "
+            "FROM usage_events WHERE ts >= ? GROUP BY provider",
+            (since,)).fetchall()
+        return [
+            {"provider": row["provider"], "requests": int(row["requests"] or 0),
+             "last_ok": int(row["last_ok"]) if row["last_ok"] is not None else None}
+            for row in rows
+            if int(row["requests"] or 0) >= max(1, min_requests)
+            and int(row["ok_count"] or 0) == 0
+        ]
+
     def window_key_usage(self, *, since: int,
                          limit: int = 50) -> list[dict[str, Any]]:
         """近窗口内按 API Key 聚合的用量（token 降序），供「单 Key 暴涨」告警。

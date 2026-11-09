@@ -185,6 +185,10 @@ class Settings(BaseSettings):
     # 一堆部署在同一分钟齐刷刷打上游。按「日期 + 时点」记去重键，抖动只改
     # 执行时刻、不改归属，不会让同一时点跑两次。
     checkin_jitter_minutes: int = 0
+    # 跳过签到的渠道（逗号分隔，如 `raccoon,lingxi`）。上游长期停发时用它止损：
+    # 签到任务照常跑、其它渠道不受影响，只把点名的渠道从签到里摘出去。
+    # 与「暂停凭证」不同——`enabled=0` 会连聊天一起停掉，而这里只停签到。
+    checkin_skip_providers: str = ""
     # 服务端日志页（「任务与配置」→ 日志）：进程内环形缓冲的保留行数，
     # 0 = 关闭该页（端点返回 404）。只收本进程 logging 记录，不读文件。
     log_buffer_lines: int = 500
@@ -228,6 +232,15 @@ class Settings(BaseSettings):
     # 0 关闭该规则；成本只覆盖可定价明细（未匹配价表的不计入），detail 里给覆盖度。
     alert_budget_cny: float = 0.0
     alert_budget_levels: str = "50,80,95,100"
+    # 渠道死亡告警：统计窗内该渠道有流量但**一次都没成功**。0 关闭该规则。
+    # 与错误率互补：officeace 积分耗尽整批回 401，会被 fallback 稀释掉。
+    # 默认开启：20 次请求全失败已足够说明渠道挂了，再少容易误报。
+    alert_channel_dead_min_requests: int = 20
+    alert_channel_dead_window_minutes: int = 60
+    # 签到连续失败告警：同一凭证最近连续 N 轮签到都失败（成功一次即清零）。
+    # 0 关闭。补 task_failed 看不见的「任务跑成功、上游业务返回失败」。
+    alert_checkin_fail_min_streak: int = 3
+    alert_checkin_fail_window_hours: int = 24
     # SQLite 备份后台任务：周期性把主库一致性快照（VACUUM INTO）写进
     # DATA_DIR/backups/，保留最近 BACKUP_KEEP 份。默认每日一次、留 7 份。
     # 备份周期取整日是因为库本身不大（几十 MB 量级），更密只是白占磁盘。

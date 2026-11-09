@@ -757,3 +757,80 @@ async def test_alert_task_channel_failure_isolated(tmp_path):
     assert alerts.recent()[0]["delivery_error"] is not None
     await client.aclose()
     db.close()
+
+
+class _DeadChannelStats:
+    """统计替身：只提供新规则需要的 `window_dead_channels`。"""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.calls: list[dict] = []
+
+    def window_dead_channels(self, *, since, min_requests):
+        self.calls.append({"since": since, "min_requests": min_requests})
+        return list(self._rows)
+
+    def window_error_rate(self, *, since):
+        return (0, 0)
+
+
+async def test_alert_task_reports_dead_channel(tmp_path):
+    """渠道零成功进入告警；静默窗内不重复落库。"""
+    stats = _DeadChannelStats([
+        {"provider": "officeace", "requests": 551, "last_ok": 1793000000}])
+    task, alerts, db = _task(
+        tmp_path, stats=stats, now=lambda: 1794000000,
+        channel_dead_min_requests=lambda: 20,
+        channel_dead_window_minutes=lambda: 60)
+    report = await task.run_once()
+    assert report["fired"] == 1
+    assert alerts.recent()[0]["rule"] == "channel_dead"
+    assert stats.calls == [{"since": 1794000000 - 60 * 60, "min_requests": 20}]
+    # 第二轮仍在静默窗内 → 抑制
+    assert (await task.run_once())["suppressed"] == 1
+    db.close()
+
+
+async def test_alert_task_dead_channel_rule_off_skips_query(tmp_path):
+    """阈值 0 = 关闭：连查询都不发（避免无谓扫表）。"""
+    stats = _DeadChannelStats([{"provider": "x", "requests": 99, "last_ok": None}])
+    task, alerts, db = _task(
+        tmp_path, stats=stats, now=lambda: 1794000000,
+        channel_dead_min_requests=lambda: 0)
+    assert (await task.run_once())["evaluated"] == 0
+    assert stats.calls == []
+    assert alerts.recent() == []
+    db.close()
+
+
+async def test_alert_task_reports_checkin_failure_streak(tmp_path):
+    """签到连续失败走独立规则；仓储为 None 时安静跳过。"""
+    class _Checkins:
+        def __init__(self, rows):
+            self._rows = rows
+            self.calls: list[dict] = []
+
+        def consecutive_failures(self, *, min_streak, since):
+            self.calls.append({"min_streak": min_streak, "since": since})
+            return list(self._rows)
+
+    checkins = _Checkins([{"credential_id": "cred_a", "streak": 18,
+                           "last_ts": 1794000000, "message": "上游未发放"}])
+    task, alerts, db = _task(
+        tmp_path, now=lambda: 1794000000, checkins=checkins,
+        checkin_fail_min_streak=lambda: 3,
+        checkin_fail_window_hours=lambda: 24)
+    report = await task.run_once()
+    assert report["fired"] == 1
+    row = alerts.recent()[0]
+    assert row["rule"] == "checkin_failing" and row["scope"] == "cred_a"
+    assert checkins.calls == [{"min_streak": 3,
+                               "since": 1794000000 - 24 * 3600}]
+    db.close()
+
+    # 未注入仓储：规则不生效，也不崩（共用同一个库，只断言本轮无新增评估）
+    off, off_alerts, off_db = _task(
+        tmp_path, now=lambda: 1794000000, checkins=None,
+        checkin_fail_min_streak=lambda: 3)
+    assert (await off.run_once())["evaluated"] == 0
+    off_db.close()

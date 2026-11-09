@@ -543,6 +543,13 @@ class ZenClient(LazyClients):
                         return True
                     if status in PROBE_DEAD_STATUSES:
                         return False
+                    # 429 = 匿名免费额度耗尽。它是**已知的稳态**（同一批免费模型
+                    # 会持续回 429，每轮 8 条），打 WARNING 只会把真问题挤出视野
+                    # ——实测 2026-11-08 一天 224 条，占全部 WARNING 的 73%。
+                    # 降级为 DEBUG：还保留「哪个模型被限流」的排障线索。
+                    if status == 429:
+                        logger.debug("zen 探活 %s 暂不可判定：HTTP 429", model_id)
+                        return None
                     logger.warning("zen 探活 %s 暂不可判定：HTTP %s", model_id, status)
                     return None
         except (httpx.HTTPError, TimeoutError):

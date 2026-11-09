@@ -44,7 +44,7 @@
 | ![上游状态](assets/screenshots/upstream.webp) | ![API Key](assets/screenshots/apikeys.webp) |
 | **用户管理：三角色与一次性激活** | **审计日志：登录成败都留痕** |
 | ![用户管理](assets/screenshots/users.webp) | ![审计日志](assets/screenshots/audit.webp) |
-| **服务端日志：环形缓冲 + 脱敏** | **运维告警：七类风险周期评估** |
+| **服务端日志：环形缓冲 + 脱敏** | **运维告警：九类风险周期评估** |
 | ![服务端日志](assets/screenshots/logs.webp) | ![运维告警](assets/screenshots/alerts.webp) |
 
 **任务与配置：77 项可热更，DB 覆盖值优先于 `.env`**
@@ -604,7 +604,7 @@ tabs 切四维（渠道 / 模型 / 用户 / 凭证），共用一表（渠道 / 
 
 ### 运维告警
 
-后台周期评估七类风险 → `alert_events`（「运维告警」页，admin-only）：
+后台周期评估九类风险 → `alert_events`（「运维告警」页，admin-only）：
 
 | 规则 | 触发条件 |
 |---|---|
@@ -615,6 +615,8 @@ tabs 切四维（渠道 / 模型 / 用户 / 凭证），共用一表（渠道 / 
 | `key_burst` | 单 Key 窗口内 token 用量达到 `ALERT_KEY_BURST_TOKENS`（滥用 / 泄露信号，不是错误） |
 | `off_hours` | 工作时间 `[ALERT_OFF_HOURS_START, ALERT_OFF_HOURS_END)` 之外请求数达到 `ALERT_OFF_HOURS_MIN_REQUESTS` |
 | `budget` | 当月成本达 `ALERT_BUDGET_CNY` 的某一 `ALERT_BUDGET_LEVELS` 档，只报最高档；100% 为 critical |
+| `channel_dead` | 统计窗内某渠道请求数达到 `ALERT_CHANNEL_DEAD_MIN_REQUESTS` 且**一次都没成功**（抓「渠道整体挂了」：积分耗尽整批 401 会被 fallback 稀释掉错误率） |
+| `checkin_failing` | 同一凭证最近连续 `ALERT_CHECKIN_FAIL_MIN_STREAK` 轮签到都失败（中间成功一次即清零；补「任务跑成功、上游业务返回失败」的盲区） |
 
 - **静默窗**：同一 `(规则, 对象)` 窗口内只落库 / 推送一次。
 - **迟滞**：连续命中 N 轮才告警；连续未命中 M 轮才确认恢复。恢复时给该 `(规则, 对象)` 全部未恢复行写 `resolved_at`，并外推 `status="resolved"` webhook。
@@ -681,6 +683,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `ACTIVITY_REPORT_HOUR` | `10` | 活跃上报本地整点窗口 |
 | `CHECKIN_TIMES` | `""` | 签到时点 `HH:MM` 逗号分隔；留空 = 全天每 10 分钟查。可热更 |
 | `CHECKIN_JITTER_MINUTES` | `0` | 签到抖动（分钟），时点前随机提前。可热更 |
+| `CHECKIN_SKIP_PROVIDERS` | `""` | 跳过签到的渠道（逗号分隔，如 `raccoon`）：只停签到，聊天不受影响。可热更 |
 | `LOG_BUFFER_LINES` | `500` | 服务端日志页缓冲行数；`0` 关该页。可热更 |
 | `ALERT_ENABLED` | `true` | 运维告警开关 |
 | `ALERT_WEBHOOK_URL` | 空 | 通用 Webhook，逗号分隔（≤16，仅 http(s)，拒内网 / 回环防 SSRF），带 `X-Coding2API-Signature` |
@@ -698,6 +701,10 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `ALERT_ERROR_RATE_WINDOW_MINUTES` | `15` | 错误率统计窗 |
 | `ALERT_KEY_BURST_TOKENS` | `0` | 单 Key 用量暴涨阈值（token）；`0` 关闭 |
 | `ALERT_KEY_BURST_WINDOW_MINUTES` | `15` | 单 Key 用量统计窗；`0` 关闭 |
+| `ALERT_CHANNEL_DEAD_MIN_REQUESTS` | `20` | 渠道零成功告警的最小样本（窗口内请求数）；`0` 关闭 |
+| `ALERT_CHANNEL_DEAD_WINDOW_MINUTES` | `60` | 渠道零成功统计窗（分钟） |
+| `ALERT_CHECKIN_FAIL_MIN_STREAK` | `3` | 签到连续失败轮数阈值；`0` 关闭 |
+| `ALERT_CHECKIN_FAIL_WINDOW_HOURS` | `24` | 签到失败回看窗（小时） |
 | `ALERT_OFF_HOURS_START` / `_END` | `0` / `0` | 工作时间 `[start, end)`（本地时区，可跨零点）；相等 = 关闭 |
 | `ALERT_OFF_HOURS_MIN_REQUESTS` | `0` | 非工作时段请求数阈值；`0` 关闭 |
 | `ALERT_BUDGET_CNY` | `0` | 当月成本预算（元）；`0` 关闭。仅计可定价明细 |

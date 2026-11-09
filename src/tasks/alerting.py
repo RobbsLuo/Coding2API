@@ -238,6 +238,9 @@ def evaluate_alerts(
     budget_cny: float = 0.0,
     budget_spent: float = 0.0,
     budget_levels: tuple[int, ...] = (),
+    dead_channels: list[dict[str, Any]] | None = None,
+    checkin_failures: list[dict[str, Any]] | None = None,
+    checkin_fail_min_streak: int = 0,
 ) -> list[Alert]:
     """按四类规则把信号快照判成告警列表（纯函数，不碰 IO）。
 
@@ -253,6 +256,9 @@ def evaluate_alerts(
     - `budget_*`：当月成本预算与已花费（调用方按月起点聚合）。只报**已达成的
       最高层**——低层在高一层触发时自然不再命中，由迟滞状态机写成「已恢复」，
       避免 50/80/95/100 四条同时挂着。
+    - `dead_channels`：窗口内零成功的渠道（调用方已按最小样本过滤）。
+    - `checkin_failures`：签到连续失败凭证（调用方已按最小连续轮数过滤，
+      纯函数再按 `checkin_fail_min_streak` 兜一次，0 = 关闭）。
     """
     alerts: list[Alert] = []
 
@@ -354,6 +360,43 @@ def evaluate_alerts(
                         "budget_cny": budget_cny},
             ))
 
+    # 渠道死亡：窗口内该渠道有流量但**一次都没成功**（零成功，不看错误率）。
+    # 2026-11-08 officeace 积分耗尽后 8 小时无成功、raccoon 签到 5 天全失败，
+    # 现有规则一条都没报——error_rate 被 fallback 稀释，task_failed 只看任务
+    # 连续失败（签到「跑成功但业务失败」不算）。
+    for row in dead_channels or ():
+        provider = str(row.get("provider") or "")
+        requests = int(row.get("requests") or 0)
+        last_ok = row.get("last_ok")
+        silence = ("从未成功过" if last_ok is None else
+                   "最近一次成功是 "
+                   f"{time.strftime('%m-%d %H:%M', time.localtime(int(last_ok)))}")
+        alerts.append(Alert(
+            rule="channel_dead", severity=SEVERITY_CRITICAL, scope=provider,
+            message=(f"渠道 {provider} 在统计窗内 {requests} 次请求全部失败"
+                     f"（{silence}）"),
+            detail={"provider": provider, "requests": requests,
+                    "last_ok": last_ok},
+        ))
+
+    # 签到连续失败：同一凭证最近连续 N 轮签到都是失败（中间成功一次即清零）。
+    # 与 task_failed 的区别：签到任务本身「跑成功了」，是上游业务返回失败
+    # （如 raccoon「今日积分尚未发放」），任务级计数永远看不见。
+    for row in checkin_failures or ():
+        streak = int(row.get("streak") or 0)
+        if checkin_fail_min_streak <= 0 or streak < checkin_fail_min_streak:
+            continue
+        credential_id = str(row.get("credential_id") or "")
+        alerts.append(Alert(
+            rule="checkin_failing", severity=SEVERITY_WARNING,
+            scope=credential_id,
+            message=(f"凭证 {credential_id} 连续 {streak} 轮签到失败："
+                     f"{row.get('message') or '未知原因'}"),
+            detail={"credential_id": credential_id, "streak": streak,
+                    "message": row.get("message") or "",
+                    "threshold": checkin_fail_min_streak},
+        ))
+
     return alerts
 
 
@@ -396,6 +439,11 @@ class AlertTask:
         off_hours_min_requests: Callable[[], int] = lambda: 0,
         budget_cny: Callable[[], float] = lambda: 0.0,
         budget_levels: Callable[[], str] = lambda: "50,80,95,100",
+        channel_dead_min_requests: Callable[[], int] = lambda: 0,
+        channel_dead_window_minutes: Callable[[], int] = lambda: 60,
+        checkin_fail_min_streak: Callable[[], int] = lambda: 0,
+        checkin_fail_window_hours: Callable[[], int] = lambda: 24,
+        checkins: Any = None,
         silence_minutes: Callable[[], int] = lambda: 30,
         for_ticks: Callable[[], int] = lambda: DEFAULT_FOR_TICKS,
         clear_ticks: Callable[[], int] = lambda: DEFAULT_CLEAR_TICKS,
@@ -424,6 +472,12 @@ class AlertTask:
         self._off_hours_min_requests = off_hours_min_requests
         self._budget_cny = budget_cny
         self._budget_levels = budget_levels
+        self._channel_dead_min_requests = channel_dead_min_requests
+        self._channel_dead_window_minutes = channel_dead_window_minutes
+        self._checkin_fail_min_streak = checkin_fail_min_streak
+        self._checkin_fail_window_hours = checkin_fail_window_hours
+        # 签到审计仓储（CheckinEventRepository）：只读取连续失败，None 时跳过该规则。
+        self._checkins = checkins
         self._silence_minutes = silence_minutes
         self._for_ticks = for_ticks
         self._clear_ticks = clear_ticks
@@ -455,6 +509,21 @@ class AlertTask:
         ]
         window_minutes = max(0, self._error_rate_window_minutes())
         expiring_seconds = max(0, self._token_expiry_hours()) * 3600
+        # 渠道死亡窗口独立于错误率窗：渠道挂掉通常是小时级，15 分钟太短。
+        dead_minutes = max(0, self._channel_dead_window_minutes())
+        dead_min_requests = max(0, self._channel_dead_min_requests())
+        dead_channels = (
+            self._stats.window_dead_channels(
+                since=now - dead_minutes * 60, min_requests=dead_min_requests)
+            if dead_minutes > 0 and dead_min_requests > 0 else [])
+        # 签到连续失败：窗口按小时（一天 24 轮自动重试已足够暴露问题）。
+        fail_hours = max(0, self._checkin_fail_window_hours())
+        fail_min_streak = max(0, self._checkin_fail_min_streak())
+        checkin_failures = (
+            self._checkins.consecutive_failures(
+                min_streak=fail_min_streak, since=now - fail_hours * 3600)
+            if self._checkins is not None and fail_min_streak > 0
+            and fail_hours > 0 else [])
         # 单 Key 暴涨用**自己的**窗口（与错误率窗口解耦：错误率看几分钟，
         # 用量暴涨看十几分钟到一小时更合理）。
         burst_minutes = max(0, self._key_burst_window_minutes())
@@ -482,6 +551,9 @@ class AlertTask:
             budget_cny=budget_cny,
             budget_spent=budget_spent,
             budget_levels=parse_levels(self._budget_levels()),
+            dead_channels=dead_channels,
+            checkin_failures=checkin_failures,
+            checkin_fail_min_streak=fail_min_streak,
         )
         return await self._dispatch(alerts, now)
 

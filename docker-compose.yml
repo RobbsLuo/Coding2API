@@ -76,6 +76,12 @@ services:
       # 预算分层告警：当月原始成本预算（元）；0 关闭。分档默认 50,80,95,100
       ALERT_BUDGET_CNY: ${ALERT_BUDGET_CNY:-0}
       ALERT_BUDGET_LEVELS: ${ALERT_BUDGET_LEVELS:-50,80,95,100}
+      # 渠道零成功告警：窗口内请求数达最小样本且一次都没成功才报；0 关闭
+      ALERT_CHANNEL_DEAD_MIN_REQUESTS: ${ALERT_CHANNEL_DEAD_MIN_REQUESTS:-20}
+      ALERT_CHANNEL_DEAD_WINDOW_MINUTES: ${ALERT_CHANNEL_DEAD_WINDOW_MINUTES:-60}
+      # 签到连续失败告警：同一凭证连续 N 轮失败（成功一次清零）；0 关闭
+      ALERT_CHECKIN_FAIL_MIN_STREAK: ${ALERT_CHECKIN_FAIL_MIN_STREAK:-3}
+      ALERT_CHECKIN_FAIL_WINDOW_HOURS: ${ALERT_CHECKIN_FAIL_WINDOW_HOURS:-24}
       # SQLite 备份后台任务：周期（分钟）与保留份数；0 份表示不清理
       BACKUP_INTERVAL_MINUTES: ${BACKUP_INTERVAL_MINUTES:-1440}
       BACKUP_KEEP: ${BACKUP_KEEP:-7}
@@ -207,6 +213,8 @@ services:
       # 签到定时：本地 HH:MM 逗号分隔，留空 = 全天每 10 分钟（旧行为）；抖动分钟
       CHECKIN_TIMES: ${CHECKIN_TIMES:-}
       CHECKIN_JITTER_MINUTES: ${CHECKIN_JITTER_MINUTES:-0}
+      # 跳过签到的渠道（逗号分隔，如 raccoon）：只停签到，聊天不受影响
+      CHECKIN_SKIP_PROVIDERS: ${CHECKIN_SKIP_PROVIDERS:-}
       # 管理台日志页环形缓冲行数（0 关闭该页）
       LOG_BUFFER_LINES: ${LOG_BUFFER_LINES:-500}
       # 出站剥离思考内容（只过滤响应、不改请求体）；true 开启

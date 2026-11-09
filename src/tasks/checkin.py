@@ -52,6 +52,15 @@ def _cn_epoch(moment: time.struct_time) -> int:
     return int(datetime(*moment[:6], tzinfo=_CN_TZ).timestamp())
 
 
+def _parse_providers(text: str) -> frozenset[str]:
+    """`raccoon, lingxi` → `{"raccoon", "lingxi"}`（小写、去空段）。
+
+    宽容解析：写错一个渠道名不该让整轮签到停摆（`skip_providers` 本身是
+    止损手段，配置写错最多等于没配）。
+    """
+    return frozenset(part.strip().lower() for part in text.split(",") if part.strip())
+
+
 def parse_checkin_times(text: str) -> tuple[int, ...]:
     """`HH:MM,HH:MM` → 距 0 点的分钟数（升序去重）。坏段忽略 + warning。
 
@@ -90,6 +99,7 @@ class CheckinTask:
                  pacer: Pacer | None = None,
                  times: str | Callable[[], str] = "",
                  jitter_minutes: int | Callable[[], int] = 0,
+                 skip_providers: str | Callable[[], str] = "",
                  rng: Callable[[int], int] | None = None) -> None:
         self._credentials = credentials
         self._providers = providers
@@ -101,6 +111,9 @@ class CheckinTask:
         # 时点与抖动可热更：存取值器，due() 每次现读（不是装配快照）。
         self._times = live(times)
         self._jitter = live(jitter_minutes)
+        # 跳过签到的渠道：每轮 run_once 现读。上游长期停发（raccoon 2026-11-05
+        # 起 daily_grant 断供）时用它止损，不影响聊天与其它渠道。
+        self._skip_providers = live(skip_providers)
         # 抖动偏移的随机源：`rng(上限)` 返回 0..上限。可注入，测试不依赖真随机。
         self._rng = rng or (lambda span: random.randint(0, span))
         # done_key → 封账截止的 epoch 秒。原先是 set（只有「当天封/不封」），
@@ -235,12 +248,17 @@ class CheckinTask:
         report = TaskReport()
         seen: set[str] = set()
         manual = trigger == "manual"
+        skipped_providers = _parse_providers(self._skip_providers())
         self._prune(current)
         for candidate in self._credentials.candidates():
             # `enabled=0`（用户软暂停）同样跳过，口径与调度器 is_selectable 一致。
             # 必须早于 seen.add：否则暂停凭证会白占上游账号的本轮名额，后面那条
             # 启用中的同账号凭证每轮都被 seen 挡下 → 该渠道签到永久静默失效。
             if candidate.disabled or not candidate.enabled:
+                report.skipped += 1
+                continue
+            # 渠道级止损：上游长期停发时不必每轮空锤（仅跳过签到，聊天照常）。
+            if candidate.provider in skipped_providers:
                 report.skipped += 1
                 continue
             provider = self._providers.get(candidate.provider)

@@ -602,6 +602,18 @@ def test_newsyslog_rules_removed():
     assert not (ROOT / "scripts" / "install-newsyslog.sh").exists()
 
 
+def test_launchd_wrapper_warns_about_installed_newsyslog_copy():
+    """本机 /etc 下的残留规则仓库删不掉，启动时必须吼一声。
+
+    仓库侧删干净了（上一用例），但用老脚本装到 /etc 的副本会一直留在本机：
+    它继续 rename 轮转 → 日志静默丢失且无任何报错（2026-11-09 扫日志发现
+    11-07 15:30~11-08 10:29 整整 19h 空白）。只在启动 stderr 提醒，不阻断启动。
+    """
+    code = _shell_code_lines(ROOT / "scripts" / "launchd-server.sh")
+    assert "/etc/newsyslog.d/coding2api.conf" in code
+    assert "sudo rm" in code
+
+
 def test_rotate_script_actually_rotates_in_isolation(tmp_path):
     """真跑一次：内容归档、当前文件被截断、超额归档被清理。
 

@@ -1154,6 +1154,42 @@ class CheckinEventRepository:
             (credential_id, max(1, min(200, limit)))).fetchall()
         return [dict(row) for row in rows]
 
+    def consecutive_failures(self, *, min_streak: int,
+                             since: int) -> list[dict[str, Any]]:
+        """近窗口内**连续失败**达到阈值的凭证，供签到失败告警。
+
+        只数**最近一段**连续 `ok=0`：中间只要成功过一次就清零（第二次成功
+        即修复，不该继续挂着告警）。`since` 之外的行不参与，避免长期失败
+        凭证在保留期边缘反复进出。返回 `[{credential_id, streak, last_ts,
+        message}]`，按失败次数降序（最严重的排前面）。
+        """
+        if min_streak <= 0:
+            return []
+        rows = self._db.connect().execute(
+            "SELECT credential_id, ts, ok, message FROM checkin_events "
+            "WHERE ts >= ? ORDER BY credential_id, ts DESC", (since,)).fetchall()
+        streaks: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            credential_id = row["credential_id"]
+            state = streaks.get(credential_id)
+            if state is not None and state.get("done"):
+                continue                      # 该凭证已遇到成功，后面更早的行无关
+            if row["ok"]:
+                streaks[credential_id] = {"done": True}
+                continue
+            if state is None:
+                state = streaks[credential_id] = {
+                    "streak": 0, "last_ts": int(row["ts"]),
+                    "message": row["message"] or ""}
+            state["streak"] += 1
+        result = [
+            {"credential_id": credential_id, "streak": state["streak"],
+             "last_ts": state["last_ts"], "message": state["message"]}
+            for credential_id, state in streaks.items()
+            if not state.get("done") and state["streak"] >= min_streak
+        ]
+        return sorted(result, key=lambda item: item["streak"], reverse=True)
+
 
 class CreditEventRepository:
     """积分变动流水（credit_events）：只读查询，写入在 save_quota 事务内完成。
