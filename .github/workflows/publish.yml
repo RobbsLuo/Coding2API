@@ -45,6 +45,25 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
         if: steps.meta.outputs.tag != 'skip'
 
+      # tag 与 pyproject.toml 的 project.version 必须一致，否则镜像 tag 会与
+      # /healthz 自报版本自相矛盾（v0.12.0、v0.13.0 就漏 bump 过）。
+      - name: 校验 tag 与版本号一致
+        if: steps.meta.outputs.tag != 'skip'
+        shell: bash
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          PYVER=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -n1)
+          if [ -z "$PYVER" ]; then
+            echo "::error::读不到 pyproject.toml 的 project.version"
+            exit 1
+          fi
+          if [ "$TAG" != "v$PYVER" ]; then
+            echo "::error::tag=$TAG 与 pyproject.toml 的 version=$PYVER 不一致，先补 chore(release)"
+            exit 1
+          fi
+          echo "版本一致：$TAG"
+
       # tag push 到 v* 时跑后端测试，避免把坏代码发到 GHCR。
       # 前端由 Dockerfile 的 vite build 兜底，这里不重复。
       - name: 后端测试（tag push 场景）
