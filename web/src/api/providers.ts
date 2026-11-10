@@ -77,6 +77,25 @@ export const PROVIDER_ORDER: Provider[] = [
   "lingxi",
 ];
 
+/**
+ * 支持每日签到的渠道（与后端能力探测同口径：provider 上有 `checkin` /
+ * `checkin_scope` 才会被签到任务跑到）。
+ *
+ * Zen / Kilo 最薄，没有签到接口；CodeBuddy 国际站上游活动为空
+ * （`active: false`，后端把 `checkin*` 三项置 None）。其余渠道都接了签到。
+ * 集中在这里而不是在页面里写死：组头汇总、行内按钮、批量操作都按同一份
+ * 判定，否则会出现「组头算它是未签、行内却没有签到按钮」的错配。
+ */
+export const CHECKIN_PROVIDERS: ReadonlySet<string> = new Set([
+  "codebuddy",
+  "trae",
+  "qoder",
+  "codearts",
+  "officeace",
+  "raccoon",
+  "lingxi",
+]);
+
 /** 渠道排序权重；未知渠道排在已知渠道之后。 */
 export function providerRank(provider: string): number {
   const index = PROVIDER_ORDER.indexOf(provider as Provider);

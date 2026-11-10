@@ -867,7 +867,7 @@ describe("CredentialsPage", () => {
     // -model-count 等），否则它们也会被这条正则匹配进来。
     const headers = screen
       .getAllByTestId(/^group-[a-z-]+$/)
-      .filter((node) => !/-state-|-quota-pct|-expiring|-select-|-toggle-|-model/.test(
+      .filter((node) => !/-state-|-quota-pct|-expiring|-select-|-toggle-|-model|-checkin/.test(
         node.getAttribute("data-testid") ?? ""));
     expect(headers.map((node) => node.getAttribute("data-testid"))).toEqual([
       "group-trae",
@@ -952,6 +952,40 @@ describe("CredentialsPage", () => {
     }
   });
 
+  it("组头显示今日签到：已签/该签 + 失败数，暂停号不进分母，无签到能力的渠道不渲染", async () => {
+    const checkinToday = (ts: number, ok: 0 | 1) => ({
+      id: `checkin_${ts}`, credential_id: "x", ts, ok, already: 0,
+      credit: null, code: null, message: "", trigger: "auto",
+    });
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ id: "cb1", provider: "codebuddy",
+          checkin_today: checkinToday(1_700_000_000, 1) }),
+        makeCredential({ id: "cb2", provider: "codebuddy",
+          checkin_today: checkinToday(1_700_000_060, 0) }),
+        makeCredential({ id: "cb3", provider: "codebuddy" }),      // 今日未签
+        makeCredential({ id: "cb4", provider: "codebuddy", enabled: 0 }), // 暂停
+        makeCredential({ id: "z1", provider: "zen" }),             // 渠道无签到
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+
+    // 折叠态就可见：3 个该签（暂停的不算），1 已签 / 1 失败 / 1 未签
+    const block = screen.getByTestId("group-codebuddy-checkin");
+    expect(block).toHaveTextContent("今日签到");
+    expect(block).toHaveTextContent("1/3");
+    expect(block).toHaveTextContent("1 失败");
+    // 最近一条是失败那条（ts 更大）
+    expect(block.getAttribute("title")).toContain("已签 1 / 3");
+    // 位置：在折叠按钮之外的右簇里（与模型一起贴右），不是指标区的一格
+    const toggle = screen.getByTestId("group-toggle-codebuddy");
+    expect(toggle.contains(block)).toBe(false);
+    expect(toggle.nextElementSibling).toBe(block.parentElement);
+    // Zen 没有签到能力：整块不渲染（不显示永远 0/N 的假仪表）
+    expect(screen.queryByTestId("group-zen-checkin")).not.toBeInTheDocument();
+  });
+
   it("组头显示该渠道当前能提供的模型数与最低倍率，hover 看逐条倍率", async () => {
     mockFetch({
       "/api/credentials": listBody([
@@ -979,6 +1013,12 @@ describe("CredentialsPage", () => {
     const cbCount = screen.getByTestId("group-codebuddy-model-count");
     expect(cbCount).toHaveTextContent("2 个");
     expect(cbCount).toHaveTextContent("最低 x0.29");
+    // 今日签到与模型同处右侧一簇：签到在模型左边，两者一起贴右
+    const cbCheckin = screen.getByTestId("group-codebuddy-checkin");
+    expect(cbCheckin.parentElement).toContainElement(cbCount);
+    expect(
+      cbCheckin.compareDocumentPosition(cbCount) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
     const trCount = screen.getByTestId("group-trae-model-count");
     expect(trCount).toHaveTextContent("2 个");
     // 免费额度不参与取最低：TRAE 有 1 个免费 + 1 个 x0.5，最低写 x0.5 而不是「免」
@@ -1216,19 +1256,20 @@ describe("CredentialsPage", () => {
     expect(screen.queryByTestId("column-header-codebuddy")).not.toBeInTheDocument();
   });
 
-  it("组头指标块等宽：各渠道的「状态 / 额度 / 到期」成列对齐", async () => {
+  it("组头指标块等宽：各渠道的「状态 / 签到 / 额度 / 到期」成列对齐", async () => {
     mockFetch({
       "/api/credentials": listBody([
         makeCredential({ id: "cb1", provider: "codebuddy" }),
         // 更长的渠道名 + 更多状态：内容宽度不同，也不该把后面的指标推来推去
         makeCredential({ id: "cb2", provider: "codebuddy", cooling_until: 9_999_999_999 }),
+        makeCredential({ id: "tr1", provider: "trae" }),
         makeCredential({ id: "z", provider: "zen", quota_remaining: null, quota_total: null }),
       ]),
     });
     renderPage(<CredentialsPage />, ADMIN);
     await settle();
 
-    // 身份块与状态 / 额度 / 到期块都用固定宽度（w-* shrink-0），不随内容伸缩——
+    // 身份块与状态 / 签到 / 额度 / 到期块都用固定宽度（w-* shrink-0），不随内容伸缩——
     // jsdom 无排版，用类名锁住这个契约；真实对齐在浏览器里验证。
     const fixedWidths = (provider: string) => {
       const toggle = screen.getByTestId(`group-toggle-${provider}`);
@@ -1243,18 +1284,21 @@ describe("CredentialsPage", () => {
           return match ? [{ cls, width: match[1] }] : [];
         });
     };
-    for (const provider of ["codebuddy", "zen"]) {
+    for (const provider of ["codebuddy", "trae", "zen"]) {
       const fixed = fixedWidths(provider);
-      // 身份 + 状态 + 额度（zen 无到期块）
+      // 身份 + 状态 + 额度（zen 无签到块 / 无到期块）
       expect(fixed.length).toBeGreaterThanOrEqual(3);
       for (const block of fixed) {
         expect(block.cls).toContain("shrink-0");
       }
     }
 
-    // 两个渠道的指标块宽度完全一致（同一套类名），故各组起点对齐
+    // 两个支持签到的渠道指标块宽度完全一致（同一套类名），故各组起点对齐；
+    // zen 没有签到能力，组头不渲染签到块（不显示恒 0/N 的假仪表）
     expect(fixedWidths("codebuddy").map((b) => b.width))
-      .toEqual(fixedWidths("zen").map((b) => b.width));
+      .toEqual(fixedWidths("trae").map((b) => b.width));
+    expect(screen.queryByTestId("group-zen-checkin")).not.toBeInTheDocument();
+    expect(screen.getByTestId("group-trae-checkin")).toBeInTheDocument();
   });
 
   it("组排序：默认「额度从高到低」，可切回渠道顺序，免费层垫底", async () => {

@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import math
+import time
 
 import httpx
 from fastapi import APIRouter, Depends
@@ -31,6 +32,7 @@ from ..audit.actions import (
 )
 from ..auth.rbac import require_operator
 from ..compat.openai.request import InvalidRequest
+from ..engine.limits import day_start
 from ..provider.base import CheckinResult, GrowthResult, GrowthStep, StepStatus
 from ..provider.login_identity import login_identities_for
 from ..provider.probe_failure import relogin_reason
@@ -226,8 +228,11 @@ async def checkin_credential_once(credentials, provider, data, credential_id: st
         return {"ok": False, "credit": None, "code": None,
                 "message": f"签到失败：{reason}", "already_checked_in": False,
                 "status": None}
-    if result.ok and not result.already_checked_in:
-        schedule_probe(credential_id)      # 只有真签到了才会发积分
+    if result.ok:
+        # 签到成功就会改变额度（领到积分 / 确认今日已发）：立刻重探测一次，
+        # 套餐明细与额度合计不必等下一轮周期探测。`already_checked_in` 也照样
+        # 重探——它同样意味着「上游那边有积分了」。
+        schedule_probe(credential_id)
     checkin_events.record(credential_id=credential_id, result=result, trigger="manual")
     # already_checked_in 必须透传：前端靠它区分「刚签到」与「今天已签过」
     return {"ok": result.ok, "credit": result.credit, "code": result.code,
@@ -280,9 +285,17 @@ def create_router(services: Services) -> APIRouter:
         # 限额配置按凭证附带（缺行 = null = 不受限）：管理台据此显示护栏与
         # 编辑入口；吊销/未配置的渠道不额外占字段。
         limits_map = services.limits.map()
+        # 今日签到：组头要「一眼确认签没签成功」，故按凭证附带本地审计日志里
+        # **今天（北京时间）最近一条**结果。不发上游请求——30s 轮询不该为几十个
+        # 号各打一次签到场，也不看 HTTP 200，只看落库的结论（与「签到记录」
+        # 抽屉同一份数据）。今日无记录 = 缺席（任务未轮到 / 暂停 / 渠道不支持），
+        # 不是失败。
+        checkin_today = services.checkin_events.latest_since(
+            day_start(int(time.time())))
         for row in rows:
             record = limits_map.get(row["id"])
             row["limits"] = record.as_dict() if record is not None else None
+            row["checkin_today"] = checkin_today.get(row["id"])
         return {"credentials": rows,
                 "expiry_window_seconds": window,
                 "expiry_secondary_window_seconds": secondary,

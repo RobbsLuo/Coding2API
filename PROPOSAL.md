@@ -94,9 +94,9 @@
 - **计费按请求**：每笔 LLM 调用记 `points=-1`，与 token 量无关（4K 与 205K token 同价）；每日 00:00 发 300 积分，**当天登录过才延期到 7 天**（未登录当日 24:00 清零，实测心跳不算登录）。`Quota.remaining`/`total` = 可用积分，账本记 `credits`。目录的 `billing_effective_multiplier` 直接当 `credit_rate`（0 = 限免，调度器优先选）。
 - **并发上限约 5**（6 并发第 6 个 `429 user_model_rate_limited`）：pacer 用 `RACCOON_MAX_CONCURRENCY`（默认 2）+ `CONCURRENCY` 固定短冷却；不是账号故障。
 - **登录轨道不实现**：没有 `start_auth`/`poll_auth`/`complete_callback`——写了也只是永远不被调用的死代码（与 Zen/Kilo 同一分工）。
-- **签到＝页面访问 + 流水核对**：上游没有领取接口，`checkin` = `user_info`（页面级访问，触发延期/账单物化）→ 摸余额 → 读流水；只认流水（同 CodeArts「claim 成功但 confirm 失败按失败报」的纪律，发放规则见上条）。今天没有新发放但仍有未过期 `daily_grant` 视为已签；凌晨 00:00~01:30 只封账到 01:30，避免 00:02 误报。
+- **签到＝页面访问 + 流水核对**：上游没有领取接口，`checkin` = `user_info`（页面级访问，触发延期/账单物化）→ 摸余额 → 读流水；只认流水（同 CodeArts「claim 成功但 confirm 失败按失败报」的纪律，发放规则见上条）。今天没有新发放但仍有未过期 `daily_grant` 视为已签；凌晨 00:00~01:30 只封账到 01:30，避免 00:02 误报。流水用上游服务端过滤 **`type=income`**（只留 `daily_grant` / `reward_grant`）——`type=all` 里消费流水挤占条数窗口，活跃账号的每日发放会看不到（2026-11-10 实测排到第 62 条，60 条窗口内为空，误报「尚未发放」）。**换新 token（重新登录）会立刻补发当天 300**（`created_at` 是登录后几秒、`grant_at` 回填 00:00）；只拿旧 token 访问 `user_info` / `home` / 心跳不触发，故缺当日发放的号只能人工重登。
 - **活跃上报＝页面访问 + 设备心跳**：`GET /api/web/auth/v1/user_info` 后 `POST /api/web/auth/v1/devices_current_heartbeat`；缺 `x-client-device-id` 等头族回 `100002 params_invalid_error`；device_id 由 uid 稳定派生（随机值会被当成新设备）。心跳只刷 `last_seen_at`，不算登录。
-- **额度明细**：`balance` 给四个池（每日/奖励/月度/充值）→ `quota_packages`；逐笔到期只在流水里（`daily_grant.expire_at`）→ `expiry_ladder`。两者口径不同，分开取；流水失败不阻断余额结论。
+- **额度明细**：`balance` 给四个池（每日/奖励/月度/充值）；`quota_packages` **按 `type=income` 的发放流水逐笔展开**（每笔带真实 `expire_at`）。上游不给逐笔剩余，每日积分的池内消耗按「到期早的先消耗」分摊（各笔剩余之和 = `daily_points`，推断）；奖励积分池值等于各笔之和。流水拿不到时退回四池口径；流水失败不阻断余额结论。到期阶梯（`expiry_ladder`）由明细派生（每笔 `total - used`）：组头「1.5 天 / 7 天窗口内到期」按它汇总，与明细、额度合计口径一致，也用于「快过期先用」的选号排序。
 - 能力实测（2026-11-04）：非流式/流式 `tool_calls`、`role=tool` 回传、`stream_options.include_usage` 全通；411K token 输入 14.2s 返回。
 
 ### 2.10 灵犀（`lingxi`）
@@ -220,7 +220,7 @@ DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准，共 14 张表，`SCHEMA_
 **管理台（Cookie + RBAC）**：凭证管理、API Key（含六项配额，超限 429 + `Retry-After`，判定异常一律放行并记 warning）、用量统计、月度账单、Playground、模型列表、用户管理、审计、告警、上游状态、任务与配置、服务端日志。**出口 IP 粘性**（`CREDENTIAL_PROXY_POOL`）：按凭证 id 稳定分配出口，推理与后台任务同出口。
 
 - 账号：`GET|POST /api/users`、`PATCH /api/users/{username}`、`PUT /api/users/{username}/policy`（用户级模型白名单 + 配额）、`POST /api/users/{username}/{disable|enable|reset-password}`（**无 DELETE**）；`POST /api/auth/password`；`GET|POST /api/auth/activate`；`GET /api/audit`。
-- 凭证运维：`GET|POST /api/credentials`（列表 / 新增）+ `DELETE /api/credentials/{id}`；动作端点 `checkin`（GET 查状态 / POST 执行）、`toggle`、`revive`、`probe`、`activity`、`pin`、`accounts/select`、`export`（单条 JSON 导出）；`PUT /api/credentials/{id}/limits|tags`、`GET|POST /api/credentials/{id}/growth`、`GET /api/credentials/{id}/credit-events|checkin-events|accounts`。
+- 凭证运维：`GET|POST /api/credentials`（列表 / 新增；列表每条附 `checkin_today` = 今日（北京时间）最近一条签到结果，供组头汇总）+ `DELETE /api/credentials/{id}`；动作端点 `checkin`（GET 查状态 / POST 执行）、`toggle`、`revive`、`probe`、`activity`、`pin`、`accounts/select`、`export`（单条 JSON 导出）；`PUT /api/credentials/{id}/limits|tags`、`GET|POST /api/credentials/{id}/growth`、`GET /api/credentials/{id}/credit-events|checkin-events|accounts`。
 - 模型：`GET /api/model-catalog`、`GET /api/models/availability`、`POST /api/models/probes/{probe,manual}`（`manual=on|off` 人工接管，优先于自动探活）。
 - 批量：`POST /api/credentials/batch`（`probe|toggle|checkin|revive`）。逐条隔离，响应 `{total, succeeded, failed, results[]}`；`toggle`/`revive` 落一条汇总审计。
 - 批量导入：`POST /api/credentials/batch-import`（`items[]`，≤100 条）。逐条校验，响应 `{created[], skipped[], failed[]}` 均带 `index`；同渠道内容完全一致去重；逐条审计 + 入队探测。

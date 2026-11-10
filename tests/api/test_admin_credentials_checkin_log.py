@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import time
+
+from src.engine.limits import day_start
 from src.provider.base import CheckinResult, Quota
 
 
@@ -47,6 +50,39 @@ def test_manual_checkin_records_and_lists_history(admin_client):
 
     # 不存在的凭证 → 400（与其它历史端点同口径）
     assert client.get("/api/credentials/ghost/checkin-events").status_code == 400
+
+
+def test_credentials_list_attaches_today_checkin_result(admin_client):
+    """列表按凭证下发「今日最近一条签到结果」：今日无记录/只有昨天记录都是 null。
+
+    组头靠它汇总「已签 / 失败 / 未签」，所以边界必须准：昨天的成功不能冒充
+    今天（否则凌晨会显示已签、任务实际没跑）；没有记录也不能硬填成失败。
+    """
+    app, client = admin_client
+    first = app.state.credentials.add(
+        provider="codebuddy", credential_data={"bearer_token": "t", "account_uid": "u1"})
+    second = app.state.credentials.add(
+        provider="codebuddy", credential_data={"bearer_token": "t", "account_uid": "u2"})
+    unsign = app.state.credentials.add(
+        provider="codebuddy", credential_data={"bearer_token": "t", "account_uid": "u3"})
+    events = app.state.checkin_events
+    midnight = day_start(int(time.time()))
+    # 失败后又补签成功：最新一条才是「签没签成功」的答案
+    events.record(credential_id=first, now=midnight + 1,
+                  result=CheckinResult(ok=False, code=40001, message="尚未刷新"))
+    events.record(credential_id=first, now=midnight + 2,
+                  result=CheckinResult(ok=True, credit=100.0, code=0, message="领取成功"))
+    # 第二张只有昨天的记录（午夜前 1 秒）→ 今天应视为没有结论
+    events.record(credential_id=second, now=midnight - 1,
+                  result=CheckinResult(ok=True, credit=100.0, message="昨天领的"))
+
+    rows = {row["id"]: row
+            for row in client.get("/api/credentials").json()["credentials"]}
+    assert rows[first]["checkin_today"]["ok"] == 1
+    assert rows[first]["checkin_today"]["credit"] == 100.0
+    assert rows[first]["checkin_today"]["message"] == "领取成功"
+    assert rows[second]["checkin_today"] is None
+    assert rows[unsign]["checkin_today"] is None
 
 
 def test_checkin_history_empty_for_new_credential(admin_client):

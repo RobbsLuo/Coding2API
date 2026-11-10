@@ -19,6 +19,17 @@
 
 「只认流水、不看 HTTP 200」的纪律保持不变——余额接口 200 不等于有积分。
 
+流水用**上游的服务端过滤** `type=income`（只留 `daily_grant` /
+`reward_grant`）。用 `type=all` 时消费流水会挤占条数窗口：实测 2026-11-10
+055920 的 11-09 那笔排在第 62 条，60 条窗口里一条 grant 都看不到，于是
+误报「今日尚未发放」（账户里其实还有 521 分可用）。`income` 里每笔
+`daily_grant` 自带 `expire_at`，到期判定只需看这个字段。
+
+另外一个实测事实：**换新 token（登录）会立刻补发当天这笔**——`created_at`
+是登录后几秒，`grant_at` 回填 00:00。只拿旧 token 访问 `user_info` /
+`home` / 心跳不会触发（实测 75s 内余额不动）。故「没发」的号要人工重新
+登录拿 token，本服务不代登录。
+
 ## 活跃上报（`activity`）
 
 `POST /api/web/auth/v1/devices_current_heartbeat` 是网页端真实的设备心跳
@@ -33,9 +44,13 @@
 ## 积分套餐明细（`quota_packages`）
 
 `/api/web/points/v1/balance` 把额度分成四个池（每日 / 月度 / 奖励 / 充值），
-每个池都是**一个数字**，没有逐笔到期信息。逐笔到期只在流水里：
-`daily_grant` 行带 `expire_at`。故明细按「池」展示（与 balance 一一对应），
-到期阶梯另由 `expiry_ladder` 从流水推导——两者口径不同，不能混。
+每个池都是**一个数字**，没有逐笔到期信息。逐笔只在流水里：
+`type=income` 的 `daily_grant` 行带 `expire_at`、`reward_grant` 带发放额。
+故明细**按发放流水逐笔展开**（`quota_packages(balance, items)`），每日积分的
+池内消耗按「到期早的先消耗」分摊到各笔——上游不提供逐笔剩余，这是推断；
+奖励积分直接按发放额列（池值等于各笔之和）。流水拿不到时才退回四个池。
+`expiry_ladder` 与明细同源：由明细里每笔的**剩余**（`total - used`）派生，
+组头「窗口内到期」与明细、额度合计三者口径一致。
 """
 
 from __future__ import annotations
@@ -51,11 +66,16 @@ CST = timezone(timedelta(hours=8))
 #: 判定「本次摸出来的」时间窗：流水 created_at 落在 [调用开始-该窗, 现在] 内
 CLAIMED_WINDOW_SECONDS = 90
 
-#: 读多少条流水。日常一天几十条，60 足够覆盖当天那条 daily_grant
+#: 读多少条流水。日常一天几十条，60 足够覆盖当天那条 daily_grant。
+#: **必须配合 `type=income` 使用**：`all` 里消费流水会挤占窗口（实测
+#: 2026-11-10 活跃账号的每日发放排到第 62 条，60 条窗口内一条都不剩）。
+#: 只算发放时一条/天，60 条覆盖约两个月。
 BILL_LOOKBACK = 60
 
 #: 每日发放的流水类型
 DAILY_GRANT = "daily_grant"
+#: 奖励发放（邀请 / 活动），无到期
+REWARD_GRANT = "reward_grant"
 #: 到期清零
 DAILY_EXPIRE = "daily_expire"
 
@@ -190,14 +210,28 @@ def checkin_result(items: list[Any], started: float, *,
                          message="上游今日每日积分尚未发放（稍后重试）")
 
 
-def quota_packages(balance: dict[str, Any]) -> list[dict[str, Any]]:
-    """`balance.data` → 明细包（四个池各一条）。
+def quota_packages(balance: dict[str, Any], items: list[Any] | None = None,
+                   now: datetime | None = None) -> list[dict[str, Any]]:
+    """`balance.data` + 发放流水 → 明细包。
 
-    与 `Quota.packages` 的形状一致（`name` / `total` / `used` / `end`）。
-    上游每个池只给「当前可用量」一个数字，没有「已用」，故 `used=0`；
-    到期信息也不在这里（逐笔到期在流水里，见 `expiry_ladder_from_bills`）。
-    数量为 0 的池不出条目（避免面板上挂一排 0）。
+    `items`（`type=income` 的流水）非 None 时**按逐笔发放展开**：每条
+    `daily_grant` / `reward_grant` 一行，`end` 是该笔真实到期。上游只给池的
+    当前可用量、不给逐笔剩余，故：
+
+    * 每日积分按「到期早的先消耗」把池内消耗分摊到各笔（各笔剩余之和恒等于
+      `daily_points`，与顶部额度合计一致）。这是推断而非上游明示——上游的
+      流水只有整笔发放，没有单笔扣减记录。
+    * 奖励积分实测是「每日额度用光后才扣」：池值等于未到期各笔之和，直接
+      按发放额列。
+
+    `items` 为 None（流水取不到）时退化为四个池各一行——老口径，`end` 只能是
+    null，明细里看不到各笔到期。
     """
+    if items is not None:
+        packages = _grant_packages(balance, items, now or now_cst())
+        if packages:
+            return packages
+        # 没有任何发放流水（新号/流水异常）时仍退回池口径，不让明细空白
     pools = (
         ("每日额度", "daily_points", True),
         ("奖励积分", "reward_points", True),
@@ -205,7 +239,7 @@ def quota_packages(balance: dict[str, Any]) -> list[dict[str, Any]]:
         # 充值池被冻结时「看得见用不了」：照常列出，但标记不可用
         ("充值积分", "topup_points", not balance.get("topup_frozen")),
     )
-    packages: list[dict[str, Any]] = []
+    packages = []
     for name, key, usable in pools:
         value = balance.get(key)
         if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
@@ -215,41 +249,107 @@ def quota_packages(balance: dict[str, Any]) -> list[dict[str, Any]]:
     return packages
 
 
-def expiry_ladder_from_bills(items: list[Any], now: datetime | None = None,
-                             ) -> list[tuple[int, float]] | None:
-    """未到期的 `daily_grant` → `[(到期 epoch, 该笔剩余), …]`，按到期升序。
+def _points(value: Any) -> float:
+    """非负数值字段 → float；坏值按 0（与 `quota_packages` 的宽容口径一致）。"""
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0:
+        return float(value)
+    return 0.0
 
-    为什么只认 `daily_grant`：其余流水（充值 / 邀请奖励）的 `expire_at`
-    实测缺失或与每日额度混在同一池，混进来会让「快过期先用」的排序失真。
-    同一笔的到期清零（`daily_expire`）已消费掉时不再计入——按 `biz_id` 前缀
-    对齐（`daily_expire` 的 `biz_id` 形如 `20261103:free:300`，与 grant 的
-    数字 id 对不上，故改按「同日 + 同额度」配对，见 `_expired_keys`）。
 
-    没有任何未到期条目时返回 None（而不是空列表）：空列表会被读成「全都过期了」。
+def _grant_name(prefix: str, item: dict[str, Any]) -> str:
+    """`每日积分 11-09` / `奖励积分 11-04 10:02`：同一天可能多笔，时间能把它们区分开。
+
+    每日积分有 `grant_at`（回填到当天 00:00），只取日期；奖励积分没有
+    `grant_at`，用 `created_at` 的「日期 + 时分」。
     """
-    current = now or now_cst()
-    stamp = current.timestamp()
-    expired = _expired_keys(items)
-    ladder: list[tuple[int, float]] = []
-    for item in items:
-        if not isinstance(item, dict) or item.get("biz_type") != DAILY_GRANT:
-            continue
-        points = item.get("points")
-        if not isinstance(points, (int, float)) or isinstance(points, bool) or points <= 0:
-            continue
+    granted = parse_iso(item.get("grant_at"))
+    if granted is not None:
+        return f"{prefix} {granted.astimezone(CST):%m-%d}"
+    created = parse_iso(item.get("created_at"))
+    return (f"{prefix} {created.astimezone(CST):%m-%d %H:%M}"
+            if created else prefix)
+
+
+def _grant_packages(balance: dict[str, Any], items: list[Any],
+                    current: datetime) -> list[dict[str, Any]]:
+    """逐笔发放 → 明细包；每日积分的消耗按到期先后分摊。"""
+    grants = pick_active_grants(items, current)
+    rewards = [item for item in items
+               if isinstance(item, dict)
+               and item.get("biz_type") == REWARD_GRANT
+               and _points(item.get("points")) > 0]
+    if not grants and not rewards:
+        # 一条发放流水都没有（新号 / 流水异常）：交给调用方退回池口径，
+        # 否则会渲染出一堆「流水未覆盖」，读起来像上游在欠账。
+        return []
+    packages: list[dict[str, Any]] = []
+    pool_left = _points(balance.get("daily_points"))
+    granted = sum(_points(grant.get("points")) for grant in grants)
+    remaining_pool = pool_left if pool_left else granted
+    consume = max(0.0, granted - remaining_pool)
+    for grant in grants:                       # 已按到期升序
+        points = _points(grant.get("points"))
+        used = min(consume, points)
+        consume -= used
+        expire = parse_iso(grant.get("expire_at"))
+        packages.append({
+            "name": _grant_name("每日积分", grant),
+            "total": points,
+            "used": used,
+            "end": int(expire.timestamp()) if expire else None,
+            "usable": True,
+        })
+    leftover = remaining_pool - granted
+    if leftover > 0:
+        # 池里的可用量比流水能解释的还多（流水同步延迟）：补一行无到期余额，
+        # 宁可少一条到期信息，也不要让明细合计与额度合计对不上。
+        packages.append({"name": "每日积分（流水未覆盖）", "total": leftover,
+                         "used": 0.0, "end": None, "usable": True})
+    for item in rewards:
+        points = _points(item.get("points"))
         expire = parse_iso(item.get("expire_at"))
-        if expire is None:
+        packages.append({
+            "name": _grant_name("奖励积分", item),
+            "total": points,
+            "used": 0.0,
+            "end": int(expire.timestamp()) if expire else None,
+            "usable": True,
+        })
+    leftover = _points(balance.get("reward_points")) - sum(
+        _points(item.get("points")) for item in rewards)
+    if leftover > 0:
+        packages.append({"name": "奖励积分（流水未覆盖）", "total": leftover,
+                         "used": 0.0, "end": None, "usable": True})
+    # 月度 / 充值池没有逐笔流水，仍按池列（数量为 0 不出条目）
+    for name, key, usable in (("月度积分", "monthly_points", True),
+                              ("充值积分", "topup_points",
+                               not balance.get("topup_frozen"))):
+        value = _points(balance.get(key))
+        if value > 0:
+            packages.append({"name": name, "total": value, "used": 0.0,
+                             "end": None, "usable": bool(usable)})
+    return packages
+
+
+def ladder_from_packages(packages: list[dict[str, Any]],
+                         ) -> list[tuple[int, float]] | None:
+    """明细包 → `[(到期 epoch, 剩余), …]`，按到期升序。
+
+    **与明细同源**：剩余取 `total - used`（每日池的消耗已在明细里按到期先后
+    分摊过），否则阶梯会比明细和额度合计还大——组头「窗口内到期」正是拿它算的。
+
+    无到期信息的包（奖励 / 月度 / 充值）跳过；没有可用的返回 None
+    （而不是空列表：空列表会被读成「全都过期了」）。
+    """
+    ladder: list[tuple[int, float]] = []
+    for item in packages:
+        end = item.get("end")
+        left = float(item.get("total") or 0) - float(item.get("used") or 0)
+        if not isinstance(end, int) or isinstance(end, bool) or left <= 0:
             continue
-        epoch = int(expire.timestamp())
-        if epoch <= stamp:
-            continue                        # 已过期，不算「即将到期」
-        if _grant_key(item) in expired:
-            continue                        # 已被到期清零消费掉
-        ladder.append((epoch, float(points)))
-    if not ladder:
-        return None
+        ladder.append((end, left))
     ladder.sort(key=lambda pair: pair[0])
-    return ladder
+    return ladder or None
 
 
 def _grant_key(item: dict[str, Any]) -> tuple[str, float]:

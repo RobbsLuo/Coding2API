@@ -201,8 +201,8 @@ class CheckinFakeClient(FakeClient):
             raise self.visit_error
         return {}
 
-    async def fetch_bills(self, token, limit=60):
-        self.calls.append(("bills", token))
+    async def fetch_bills(self, token, limit=60, bill_type="all"):
+        self.calls.append(("bills", token, bill_type))
         if self.error is not None:
             raise self.error
         return self.bills
@@ -245,7 +245,7 @@ async def test_checkin_triggers_lazy_grant_then_reads_bills(frozen_now):
     # 先做页面访问（触发延期），再摸余额，最后读流水核对
     assert fake.calls[0] == ("visit", TOKEN)
     assert fake.calls[1] == ("quota", TOKEN)
-    assert fake.calls[2] == ("bills", TOKEN)
+    assert fake.calls[2] == ("bills", TOKEN, "income")
 
 
 async def test_checkin_ignores_visit_failure(frozen_now):
@@ -297,7 +297,7 @@ class BillsErrorClient(FakeClient):
         self.calls.append(("quota", token))
         return self.quota
 
-    async def fetch_bills(self, token, limit=60):
+    async def fetch_bills(self, token, limit=60, bill_type="all"):
         raise self.error
 
 

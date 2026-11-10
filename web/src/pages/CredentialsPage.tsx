@@ -47,6 +47,7 @@ import {
 } from "../lib/credentialList";
 import type { GroupSort, Ledger } from "../lib/credentialList";
 import { api } from "../api/client";
+import { CHECKIN_PROVIDERS } from "../api/providers";
 import { useSessionContext } from "../Layout";
 import { useCredentials, usePlaygroundModels, useQueryClient } from "../api/hooks";
 import { PoolOverview } from "../components/PoolOverview";
@@ -79,6 +80,7 @@ import {
   formatDuration,
   formatNumber,
   formatTime,
+  formatTimeParts,
   hasQuotaProbe,
   healthView,
   modelCooldownLabel,
@@ -114,14 +116,15 @@ import {
  * 渠道是否支持每日签到。
  *
  * CodeArts 已接入 `/v1/ops/delivery`（此前「上游没有签到接口」的结论
- * 已推翻）。CodeBuddy 国际站（`codebuddy_intl`）**不支持**：上游
- * `/billing/meter/checkin-activity-status` 回 `active: false` 且活动字段全空
- * （渠道侧无此活动，非账号级未开启），后端相应把该渠道的 `checkin*` 置 None，
- * 这里同步隐藏按钮，避免给一个必然失败的操作出口。
+ * 已推翻）。能力清单见 `CHECKIN_PROVIDERS`：CodeBuddy 国际站（`codebuddy_intl`）
+ * **不支持**（上游 `/billing/meter/checkin-activity-status` 回 `active: false`
+ * 且活动字段全空，后端把该渠道的 `checkin*` 置 None）；Zen / Kilo 无签到接口。
+ * 这里同步隐藏按钮与组头汇总，避免给一个必然失败的出口 / 一个永远 0/N 的仪表。
  */
-function supportsCheckin(provider: Credential["provider"]): boolean {
-  // 小浣熊有签到（服务端懒发放 + 流水核对），见 provider/raccoon/activity.py
-  return provider !== "codebuddy_intl";
+function supportsCheckin(provider: string): boolean {
+  // 能力清单与后端同源（Zen / Kilo 无签到接口、国际站上游无活动），
+  // 集中定义在 `api/providers.ts`，组头汇总与行内按钮共用一份判定。
+  return CHECKIN_PROVIDERS.has(provider);
 }
 
 /**
@@ -1035,11 +1038,26 @@ export function CredentialsPage() {
                       group.remaining !== null && group.total !== null && group.total > 0
                         ? Math.min(100, Math.max(0, (group.remaining / group.total) * 100))
                         : null;
+                    // 今日签到：分母是「该签的号」（暂停 / 硬禁用已由聚合跳过）。
+                    // 渠道本就不支持签到（Zen / Kilo / 国际站）时整块不渲染——
+                    // 永远 0/N 的仪表会被读成「这些号今天漏签了」。
+                    const checkin = group.checkin;
+                    const checkinTotal = checkin.done + checkin.failed + checkin.pending;
+                    const showCheckin = supportsCheckin(group.provider) && checkinTotal > 0;
+                    // 三态配色：有失败先红（那才是要处置的），全签完才绿。
+                    const checkinIconClass = checkin.failed > 0
+                      ? "bg-destructive/12 text-danger-ink ring-1 ring-destructive/25"
+                      : checkin.done === checkinTotal
+                        ? "bg-ok/12 text-ok-ink ring-1 ring-ok/25"
+                        : "bg-background text-muted-foreground ring-1 ring-border/70";
+                    const checkinTitle = checkin.failed > 0
+                      ? `今日签到（北京时间）：已签 ${checkin.done} / ${checkinTotal}，失败 ${checkin.failed}，未签 ${checkin.pending}。失败原因见行内「签到记录」。`
+                      : `今日签到（北京时间）：已签 ${checkin.done} / ${checkinTotal}，未签 ${checkin.pending}（任务未轮到也算未签）。`;
                     return (
                       <Fragment key={group.key}>
                         {/* 组头：折叠时的「渠道仪表盘」——身份 + 状态分布 + 额度合计 +
-                            1.5 天 / 7 天内将过期的积分。每个指标一个带图标的图块，
-                            比一行纯文字更好扫读；点击展开该渠道（默认全折叠）。 */}
+                            1.5 天 / 7 天内将过期的积分 + 今日签到（最右）。每个指标一个带
+                            图标的图块，比一行纯文字更好扫读；点击展开该渠道（默认全折叠）。 */}
                         <TableRow data-testid={`group-${group.key}`}>
                           <TableCell
                             colSpan={columnCount}
@@ -1094,7 +1112,8 @@ export function CredentialsPage() {
                               {/* 指标区：状态 / 额度 / 到期，每个都是「图标 + 标签 + 数值」。
                                   每块**固定宽度**（`w-* shrink-0`），否则内容宽度随渠道变化，
                                   各组的「状态 / 额度 / 到期」起点会各错各的、读起来不成列。
-                                  窄屏放不下时按整块换行，块内仍保持同一套对齐。 */}
+                                  窄屏放不下时按整块换行，块内仍保持同一套对齐。
+                                  （今日签到在右簇，与模型一起贴右，见折叠按钮之后。） */}
                               <span className="flex flex-wrap items-center gap-x-4 gap-y-2">
                                 {/* 状态分布：只列出现过的态，图标语义与行内状态徽章同源 */}
                                 <span className="flex w-40 shrink-0 items-center gap-2">
@@ -1215,94 +1234,135 @@ export function CredentialsPage() {
                                 )}
                               </span>
                             </button>
-                            {/* 本渠道当前能提供的模型：只给数量，全量清单进 hover。
-                                模型多的渠道有几十条，铺在组头会把这一行撑成十几行；
-                                而「几个模型、最便宜多少」正是判断这渠道值不值得展开的
-                                第一信息。清单里每条带**该渠道的**倍率（与模型选择器
-                                同口径，多渠道模型各渠道倍率不同，不能拿合并值冒充）。
-                                取不到模型列表时整块不渲染（不显示「0 个」——那会被读成
-                                这渠道没有模型，实际只是列表还没回来）。
-
-                                **必须在折叠按钮外面**：它自己是个可聚焦按钮（键盘能
-                                打开清单），按钮套按钮会让 HTML 解析直接拆掉外层结构。
-
-                                触屏没有 hover，点击又会被 Radix 的 pointerdown 关掉，
-                                所以移动端打不开清单（与页面其它 hover 明细同一限制）；
-                                真要在手机上看，需要换成 Popover（点击开合）。 */}
-                            {groupModels.length > 0 && (
-                              <LongTextTip
-                                className="w-80 max-w-[min(90vw,20rem)] p-0"
-                                content={
-                                  <div data-testid={`group-${group.key}-models`}>
-                                    {/* 头部：渠道身份 + 条数，吸顶不随清单滚走——
-                                        几十条模型滚到中段时仍知道「这是哪个渠道的清单」 */}
-                                    <div className="flex items-center gap-2 border-b border-border px-3 py-2">
-                                      <ProviderIcon provider={group.provider} size={14} />
-                                      <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">
-                                        {group.label}
-                                      </span>
-                                      <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
-                                        {groupModels.length} 个模型
-                                      </span>
-                                    </div>
-                                    {/* 清单：限高内滚（不把弹层顶出视口），行间细分隔线 */}
-                                    <ul className="max-h-64 divide-y divide-border/60 overflow-y-auto">
-                                      {groupModels.map((model) => (
-                                        <li
-                                          key={model.id}
-                                          data-testid={`group-${group.key}-model`}
-                                          className="flex items-baseline justify-between gap-3 px-3 py-1"
-                                        >
-                                          <span className="min-w-0 truncate text-xs text-foreground">
-                                            {model.label}
-                                          </span>
-                                          {/* 倍率做成数值胶囊：等宽数字 + 免费额度单独着色，
-                                              扫一列倍率时数字右对齐、颜色分档一眼可辨 */}
-                                          <span
-                                            className={cn(
-                                              "shrink-0 rounded px-1 text-[11px] font-semibold tabular-nums",
-                                              model.rate === undefined
-                                                ? "text-muted-foreground"
-                                                : model.rate === 0
-                                                  ? "bg-ok/12 text-ok-ink"
-                                                  : "bg-muted text-foreground",
-                                            )}
-                                          >
-                                            {model.rate === undefined ? "—" : rateLabel(model.rate)}
-                                          </span>
-                                        </li>
-                                      ))}
-                                    </ul>
-                                    {/* 脚注：口径说明，避免「免 / —」被误读 */}
-                                    <div className="border-t border-border px-3 py-1.5 text-[11px] leading-snug text-muted-foreground">
-                                      倍率＝该渠道的消耗倍率；<span className="text-ok-ink">免</span>＝免费额度，
-                                      — ＝上游未给倍率
-                                    </div>
-                                  </div>
-                                }
-                              >
-                                <button
-                                  type="button"
-                                  className="flex w-40 shrink-0 cursor-help items-center gap-2 rounded-md py-2 pr-3 pl-1 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
-                                  data-testid={`group-${group.key}-model-count`}
+                            {/* 右簇：今日签到 + 模型。两者都贴右，和模型成一对——
+                                「这渠道今天签成功没有、还能打什么模型」是同一类收尾确认，
+                                放在指标区外面还免去它与额度块抢宽度（窄屏时指标区先换行，
+                                右簇始终贴边）。
+                                签到「已签 / 该签」是主数字；失败单独标红——那才是要处置
+                                的东西（失败在 30s 轮询里会随下一轮补签自动回落）。
+                                最近时刻只给 HH:MM，日期对「今天」是冗余的。 */}
+                            <span className="flex shrink-0 items-center">
+                              {showCheckin && (
+                                <span
+                                  className="flex w-40 shrink-0 items-center gap-2 pr-3"
+                                  data-testid={`group-${group.key}-checkin`}
+                                  title={checkinTitle}
                                 >
-                                  <span className="grid size-7 shrink-0 place-items-center rounded-md bg-background text-muted-foreground ring-1 ring-border/70">
-                                    <Sparkles className="size-3.5" aria-hidden />
+                                  <span className={cn(
+                                    "grid size-7 shrink-0 place-items-center rounded-md",
+                                    checkinIconClass,
+                                  )}>
+                                    <CalendarCheck className="size-3.5" aria-hidden />
                                   </span>
                                   <span className="min-w-0">
-                                    <span className="block text-[11px] leading-tight text-muted-foreground">模型</span>
+                                    <span className="block text-[11px] leading-tight text-muted-foreground">
+                                      今日签到
+                                    </span>
                                     <span className="block truncate text-xs leading-tight font-medium tabular-nums text-foreground">
-                                      {groupModels.length} 个
-                                      {rateText !== null && (
-                                        <span className="ml-1 font-normal text-muted-foreground">
-                                          · {rateText}
+                                      {checkin.done}/{checkinTotal}
+                                      {checkin.failed > 0 && (
+                                        <span className="ml-1.5 font-normal text-danger-ink">
+                                          {checkin.failed} 失败
+                                        </span>
+                                      )}
+                                      {checkin.lastAt !== null && (
+                                        <span className="ml-1.5 font-normal text-muted-foreground">
+                                          {formatTimeParts(checkin.lastAt)[1].slice(0, 5)}
                                         </span>
                                       )}
                                     </span>
                                   </span>
-                                </button>
-                              </LongTextTip>
-                            )}
+                                </span>
+                              )}
+                              {/* 本渠道当前能提供的模型：只给数量，全量清单进 hover。
+                                  模型多的渠道有几十条，铺在组头会把这一行撑成十几行；
+                                  而「几个模型、最便宜多少」正是判断这渠道值不值得展开的
+                                  第一信息。清单里每条带**该渠道的**倍率（与模型选择器
+                                  同口径，多渠道模型各渠道倍率不同，不能拿合并值冒充）。
+                                  取不到模型列表时整块不渲染（不显示「0 个」——那会被读成
+                                  这渠道没有模型，实际只是列表还没回来）。
+
+                                  **必须在折叠按钮外面**：它自己是个可聚焦按钮（键盘能
+                                  打开清单），按钮套按钮会让 HTML 解析直接拆掉外层结构。
+
+                                  触屏没有 hover，点击又会被 Radix 的 pointerdown 关掉，
+                                  所以移动端打不开清单（与页面其它 hover 明细同一限制）；
+                                  真要在手机上看，需要换成 Popover（点击开合）。 */}
+                              {groupModels.length > 0 && (
+                                <LongTextTip
+                                  className="w-80 max-w-[min(90vw,20rem)] p-0"
+                                  content={
+                                    <div data-testid={`group-${group.key}-models`}>
+                                      {/* 头部：渠道身份 + 条数，吸顶不随清单滚走——
+                                          几十条模型滚到中段时仍知道「这是哪个渠道的清单」 */}
+                                      <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+                                        <ProviderIcon provider={group.provider} size={14} />
+                                        <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">
+                                          {group.label}
+                                        </span>
+                                        <span className="shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-muted-foreground">
+                                          {groupModels.length} 个模型
+                                        </span>
+                                      </div>
+                                      {/* 清单：限高内滚（不把弹层顶出视口），行间细分隔线 */}
+                                      <ul className="max-h-64 divide-y divide-border/60 overflow-y-auto">
+                                        {groupModels.map((model) => (
+                                          <li
+                                            key={model.id}
+                                            data-testid={`group-${group.key}-model`}
+                                            className="flex items-baseline justify-between gap-3 px-3 py-1"
+                                          >
+                                            <span className="min-w-0 truncate text-xs text-foreground">
+                                              {model.label}
+                                            </span>
+                                            {/* 倍率做成数值胶囊：等宽数字 + 免费额度单独着色，
+                                                扫一列倍率时数字右对齐、颜色分档一眼可辨 */}
+                                            <span
+                                              className={cn(
+                                                "shrink-0 rounded px-1 text-[11px] font-semibold tabular-nums",
+                                                model.rate === undefined
+                                                  ? "text-muted-foreground"
+                                                  : model.rate === 0
+                                                    ? "bg-ok/12 text-ok-ink"
+                                                    : "bg-muted text-foreground",
+                                              )}
+                                            >
+                                              {model.rate === undefined ? "—" : rateLabel(model.rate)}
+                                            </span>
+                                          </li>
+                                        ))}
+                                      </ul>
+                                      {/* 脚注：口径说明，避免「免 / —」被误读 */}
+                                      <div className="border-t border-border px-3 py-1.5 text-[11px] leading-snug text-muted-foreground">
+                                        倍率＝该渠道的消耗倍率；<span className="text-ok-ink">免</span>＝免费额度，
+                                        — ＝上游未给倍率
+                                      </div>
+                                    </div>
+                                  }
+                                >
+                                  <button
+                                    type="button"
+                                    className="flex w-40 shrink-0 cursor-help items-center gap-2 rounded-md py-2 pr-3 pl-1 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+                                    data-testid={`group-${group.key}-model-count`}
+                                  >
+                                    <span className="grid size-7 shrink-0 place-items-center rounded-md bg-background text-muted-foreground ring-1 ring-border/70">
+                                      <Sparkles className="size-3.5" aria-hidden />
+                                    </span>
+                                    <span className="min-w-0">
+                                      <span className="block text-[11px] leading-tight text-muted-foreground">模型</span>
+                                      <span className="block truncate text-xs leading-tight font-medium tabular-nums text-foreground">
+                                        {groupModels.length} 个
+                                        {rateText !== null && (
+                                          <span className="ml-1 font-normal text-muted-foreground">
+                                            · {rateText}
+                                          </span>
+                                        )}
+                                      </span>
+                                    </span>
+                                  </button>
+                                </LongTextTip>
+                              )}
+                            </span>
                             </div>
                           </TableCell>
                         </TableRow>

@@ -236,6 +236,47 @@ describe("groupByProvider", () => {
     expect(groups[0].expiring).toBe(150);
     expect(groups[0].expiringSecondary).toBe(200);
   });
+
+  it("今日签到：按最近一条记录归已签 / 失败 / 未签，暂停与硬禁用不进分母", () => {
+    const today = (ts: number, ok: 0 | 1) => ({
+      id: `checkin_${ts}`, credential_id: "x", ts, ok, already: 0,
+      credit: null, code: null, message: "", trigger: "auto",
+    });
+    const group = groupByProvider(
+      [
+        credential({
+          id: "signed", provider: "trae",
+          checkin_today: today(NOW - 300, 1),
+        }),
+        credential({
+          id: "failed", provider: "trae",
+          checkin_today: today(NOW - 60, 0),
+        }),
+        credential({ id: "pending", provider: "trae" }),
+        // 暂停（enabled=0）与硬禁用都被签到任务跳过，不该算「未签」
+        credential({ id: "paused", provider: "trae", enabled: 0 }),
+        credential({ id: "dead", provider: "trae", disabled: 1 }),
+      ],
+      NOW,
+    )[0];
+    expect(group.checkin).toEqual({
+      done: 1, failed: 1, pending: 1, lastAt: NOW - 60,
+    });
+  });
+
+  it("今日签到：全组无记录时三项都为 0、时刻为 null（不是失败）", () => {
+    const group = groupByProvider(
+      [credential({ id: "a", provider: "trae" })], NOW)[0];
+    expect(group.checkin).toEqual({
+      done: 0, failed: 0, pending: 1, lastAt: null,
+    });
+    // 全部暂停的组：分母为 0（组头据此不渲染签到块）
+    const paused = groupByProvider(
+      [credential({ id: "b", provider: "trae", enabled: 0 })], NOW)[0];
+    expect(paused.checkin).toEqual({
+      done: 0, failed: 0, pending: 0, lastAt: null,
+    });
+  });
 });
 
 describe("providerLedger", () => {
@@ -251,16 +292,18 @@ describe("providerLedger", () => {
 });
 
 describe("sortGroups", () => {
+  /** 手写分组用的「无今日签到数据」占位（排序用例不关心签到）。 */
+  const idleCheckin = { done: 0, failed: 0, pending: 0, lastAt: null };
   const groups = (): ProviderGroup[] => [
     { key: "codebuddy", provider: "codebuddy", label: "CodeBuddy",
       ledger: "pool", items: [], states: {}, remaining: 50, total: 100,
-      expiring: null, expiringSecondary: null },
+      expiring: null, expiringSecondary: null, checkin: idleCheckin },
     { key: "trae", provider: "trae", label: "TRAE",
       ledger: "pool", items: [], states: {}, remaining: 900, total: 1000,
-      expiring: null, expiringSecondary: null },
+      expiring: null, expiringSecondary: null, checkin: idleCheckin },
     { key: "zen", provider: "zen", label: "OpenCode Zen",
       ledger: "pool", items: [], states: {}, remaining: null, total: null,
-      expiring: null, expiringSecondary: null },
+      expiring: null, expiringSecondary: null, checkin: idleCheckin },
   ];
 
   it("provider 口径原样返回（groupByProvider 已排好）", () => {
@@ -285,10 +328,10 @@ describe("sortGroups", () => {
       [
         { key: "zen", provider: "zen", label: "OpenCode Zen",
           ledger: "pool", items: [], states: {}, remaining: null, total: null,
-          expiring: null, expiringSecondary: null },
+          expiring: null, expiringSecondary: null, checkin: idleCheckin },
         { key: "codebuddy", provider: "codebuddy", label: "CodeBuddy",
           ledger: "pool", items: [], states: {}, remaining: 0, total: 100,
-          expiring: null, expiringSecondary: null },
+          expiring: null, expiringSecondary: null, checkin: idleCheckin },
       ] as ProviderGroup[],
       "quota",
     );
@@ -301,10 +344,10 @@ describe("sortGroups", () => {
       [
         { key: "zen", provider: "zen", label: "OpenCode Zen",
           ledger: "pool", items: [], states: {}, remaining: null, total: null,
-          expiring: null, expiringSecondary: null },
+          expiring: null, expiringSecondary: null, checkin: idleCheckin },
         { key: "kilo", provider: "kilo", label: "Kilo",
           ledger: "pool", items: [], states: {}, remaining: null, total: null,
-          expiring: null, expiringSecondary: null },
+          expiring: null, expiringSecondary: null, checkin: idleCheckin },
       ] as ProviderGroup[],
       "quota",
     );
@@ -317,10 +360,10 @@ describe("sortGroups", () => {
       [
         { key: "mystery-b", provider: "mystery-b", label: "mystery-b",
           ledger: "pool", items: [], states: {}, remaining: 100,
-          total: 1000, expiring: null, expiringSecondary: null },
+          total: 1000, expiring: null, expiringSecondary: null, checkin: idleCheckin },
         { key: "mystery-a", provider: "mystery-a", label: "mystery-a",
           ledger: "pool", items: [], states: {}, remaining: 100,
-          total: 1000, expiring: null, expiringSecondary: null },
+          total: 1000, expiring: null, expiringSecondary: null, checkin: idleCheckin },
       ] as ProviderGroup[],
       "quota",
     );

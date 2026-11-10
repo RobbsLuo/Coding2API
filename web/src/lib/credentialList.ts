@@ -125,6 +125,20 @@ export interface ProviderGroup {
   expiring: number | null;
   /** 组内 7 天（次窗口）内将过期的积分合计；全为 null 时为 null */
   expiringSecondary: number | null;
+  /**
+   * 今日签到分布。只数「该签的号」（启用且未硬禁用）：暂停与硬禁用本就被
+   * 签到任务跳过，算进「未签」会让分母永远差几个，读起来像任务漏签。
+   */
+  checkin: {
+    /** 今日已签（含上游回「今日已签」） */
+    done: number;
+    /** 今日最近一轮失败 */
+    failed: number;
+    /** 今日还没有任何记录：任务未轮到 / 尚未运行 */
+    pending: number;
+    /** 组内今日最近一条记录的时刻；无记录为 null */
+    lastAt: number | null;
+  };
 }
 
 /**
@@ -168,9 +182,33 @@ export function groupByProvider(
         expiring: sumDefined(items, (item) => item.quota_expiring_credits),
         expiringSecondary: sumDefined(
           items, (item) => item.quota_expiring_credits_secondary),
+        checkin: checkinSummary(items),
       };
     })
     .sort(compareGroups);
+}
+
+/**
+ * 今日签到分布：按凭证的 `checkin_today`（今日最近一条审计日志）归三类。
+ *
+ * `ok=1` 是成功（含上游回「今日已签」——那是 already 字段，ok 仍为真）；
+ * 有记录但 ok=0 是失败；没有记录是「还没结论」，不能说成失败。最近时刻
+ * 取组内最大 ts，让组头能显示「几点签的」。
+ */
+function checkinSummary(items: Credential[]): ProviderGroup["checkin"] {
+  const summary = { done: 0, failed: 0, pending: 0, lastAt: null as number | null };
+  for (const item of items) {
+    if (item.enabled === 0 || item.disabled === 1) continue;
+    const today = item.checkin_today ?? null;
+    if (today === null) {
+      summary.pending += 1;
+      continue;
+    }
+    if (today.ok) summary.done += 1;
+    else summary.failed += 1;
+    if (summary.lastAt === null || today.ts > summary.lastAt) summary.lastAt = today.ts;
+  }
+  return summary;
 }
 
 /**

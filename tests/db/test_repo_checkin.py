@@ -59,6 +59,38 @@ def test_checkin_events_index_exists(tmp_path):
     assert "idx_checkin_cred_ts" in indexes
     db.close()
 
+def test_checkin_events_latest_since_picks_newest_per_credential(tmp_path):
+    """只取窗口内每凭证最新一条：带结果给列表页「今日签到」，缺席 = 没结论。
+
+    窗口前的行不参与（昨天的成功不能冒充今天）；同凭证多行取 ts 最大那条
+    ——签到失败后重试成功是常见序列，取错会把已签的号显示成失败。
+    """
+    db = Database(tmp_path / "latest.sqlite3")
+    apply_schema(db.connect())
+    events = CheckinEventRepository(db)
+    now = 1_700_000_000
+
+    events.record(credential_id="c1",
+                  result=CheckinResult(ok=False, message="昨天的失败"),
+                  now=now - 10)
+    events.record(credential_id="c1",
+                  result=CheckinResult(ok=False, code=40001, message="尚未到达权益刷新时间"),
+                  now=now)
+    events.record(credential_id="c1",
+                  result=CheckinResult(ok=True, credit=100.0, code=0, message="领取成功"),
+                  now=now + 60)
+    events.record(credential_id="c2", result=CheckinResult(ok=True),
+                  now=now - 5)
+
+    latest = events.latest_since(now)
+    assert set(latest) == {"c1"}                       # c2 只有窗口前的行 → 缺席
+    assert latest["c1"]["ok"] == 1 and latest["c1"]["credit"] == 100.0
+    assert latest["c1"]["message"] == "领取成功" and latest["c1"]["ts"] == now + 60
+    # 空窗口返回空字典（不抛错、不返回 None）
+    assert events.latest_since(now + 10_000) == {}
+    db.close()
+
+
 def test_consecutive_failures_counts_only_trailing_streak(tmp_path):
     """只数最近一段连续失败：中间成功一次即清零，窗口外不参与。"""
     db = Database(tmp_path / "streak.sqlite3")

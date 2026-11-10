@@ -87,6 +87,12 @@ export interface Credential {
   growth_last_run_at: number | null;
   /** 该轮一行中文汇报 */
   growth_last_result: string | null;
+  /**
+   * 今日签到（北京时间自然日）本地审计日志里的最近一条结果；今日无记录为
+   * null（任务未轮到 / 已暂停 / 渠道不支持都算「没有结论」，不是失败）。
+   * 组头据此汇总「已签 / 失败 / 未签」，行内「签到记录」抽屉是同一份数据。
+   */
+  checkin_today?: CheckinEvent | null;
   created_at: number;
   added_by: string | null;
   /** 凭证级限额护栏；null = 未配置（不受限） */

@@ -126,18 +126,23 @@ def test_batch_checkin_failure_keeps_ok_false(batch_app):
     assert body["results"][0]["ok"] is False
     assert body["succeeded"] == 0
 
-def test_batch_checkin_already_checked_in_does_not_schedule(batch_app):
-    """今天已签过：ok=True 但不触发探测（重复签到不发积分）。"""
+def test_batch_checkin_already_checked_in_still_refreshes_quota(batch_app):
+    """今天已签过：ok=True 也要重探测——套餐明细/额度合计要跟着刷新。"""
     app, client = batch_app
     credential_id = _add(app)
-    app.state.executor._deps.providers["codebuddy"] = _StubProvider(
+    stub = _StubProvider(
         checkin=CheckinResult(ok=True, credit=0, already_checked_in=True))
-    before = len(app.state.pending_probes)
+    app.state.executor._deps.providers["codebuddy"] = stub
 
     body = client.post("/api/credentials/batch",
                        json={"action": "checkin", "ids": [credential_id]}).json()
     assert body["results"][0]["detail"]["already_checked_in"] is True
-    assert len(app.state.pending_probes) == before
+    # 即时探测是后台 Task，完成即摘除；看桩被调用而不是看 pending 列表
+    for _ in range(50):
+        if stub.probed:
+            break
+        time.sleep(0.02)
+    assert stub.probed == ["called"]
 
 def test_batch_toggle_sets_explicit_state(batch_app):
     app, client = batch_app

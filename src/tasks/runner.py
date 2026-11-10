@@ -556,7 +556,8 @@ def build_runner(credentials, providers: dict, stats_collector, config,
                  upstream_status: UpstreamStatusTask | None = None,
                  model_probe: ModelProbeTask | None = None,
                  model_probe_minutes: int | Callable[[], int] = 0,
-                 status: TaskStatusStore | None = None) -> TaskRunner:
+                 status: TaskStatusStore | None = None,
+                 on_checkin_success: Callable[[str], None] | None = None) -> TaskRunner:
     """按配置装配后台任务（Pacer 由两个 provider 共享）。
 
     growth_events 为 None 时（老调用方/测试）不装配成长中心任务：没有落库目标
@@ -651,7 +652,8 @@ def build_runner(credentials, providers: dict, stats_collector, config,
                             events=checkin_events,
                             times=lambda: config.checkin_times,
                             jitter_minutes=lambda: config.checkin_jitter_minutes,
-                            skip_providers=lambda: config.checkin_skip_providers),
+                            skip_providers=lambda: config.checkin_skip_providers,
+                            on_success=on_checkin_success),
         growth=growth,
         activity=activity,
         refresh=RefreshTask(credentials, providers, skew_seconds=config.refresh_skew_hours * 3600,

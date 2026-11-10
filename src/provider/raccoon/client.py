@@ -32,6 +32,9 @@ EP_CHAT = "/api/web/llm/v2/chat/completions"
 EP_MODELS = "/api/web/llm/v2/model_catalog"
 EP_BALANCE = "/api/web/points/v1/balance"
 EP_BILLS = "/api/web/points/v2/bills"
+#: 流水过滤口径：`all` 混消费；`income` 只留发放（签到/到期阶梯用后者）
+BILL_TYPE_ALL = "all"
+BILL_TYPE_INCOME = "income"
 EP_HEARTBEAT = "/api/web/auth/v1/devices_current_heartbeat"
 #: 网页会话级「页面访问」：每日积分延期/账单物化的触发点（心跳不算）
 EP_USER_INFO = "/api/web/auth/v1/user_info"
@@ -177,25 +180,37 @@ class RaccoonClient(LazyClients):
             raise UpstreamProtocolViolation("balance response missing available_points")
         remaining = float(points)
         now = int(time.time())
-        packages = raccoon_activity.quota_packages(payload)
-        ladder = await self._fetch_expiry_ladder(token)
+        # 流水只取一次：明细（逐笔发放 + 到期）与到期阶梯同一份数据，避免
+        # 两个请求之间上游又发了一笔导致面板与阶梯对不上。
+        items = await self._fetch_income(token)
+        packages = raccoon_activity.quota_packages(payload, items)
+        # 阶梯与明细同源：组头「窗口内到期」按明细里每笔的**剩余**算，
+        # 不再用「发放额」（那样会把已消耗的部分也算成将要过期）。
+        ladder = raccoon_activity.ladder_from_packages(packages)
         return Quota(remaining=remaining, total=remaining, packages=packages or None,
                      expiry_ladder=ladder, probed_at=now)
 
-    async def _fetch_expiry_ladder(self, token: str) -> list[tuple[int, float]] | None:
-        """流水 → 逐笔到期阶梯；失败返回 None（不阻断额度探测）。"""
+    async def _fetch_income(self, token: str) -> list[Any] | None:
+        """发放流水（`type=income`）；失败返回 None（不阻断额度探测）。"""
         try:
-            items = await self.fetch_bills(token)
+            return await self.fetch_bills(token, bill_type=BILL_TYPE_INCOME)
         except (UpstreamHTTPError, UpstreamProtocolViolation):
             return None
-        return raccoon_activity.expiry_ladder_from_bills(items)
 
     async def fetch_bills(self, token: str,
-                          limit: int = raccoon_activity.BILL_LOOKBACK) -> list[Any]:
-        """GET 积分流水（最近 `limit` 条，`type=all`）。"""
+                          limit: int = raccoon_activity.BILL_LOOKBACK,
+                          bill_type: str = BILL_TYPE_ALL) -> list[Any]:
+        """GET 积分流水（最近 `limit` 条）。
+
+        `type` 是上游的**服务端过滤**：`all` 混着逐次调用的消费流水，
+        `income` 只留发放（`daily_grant` / `reward_grant`）。签到与到期阶梯
+        必须用 `income`——`all` 里消费占绝大多数，活跃账号的每日发放会被
+        挤出条数窗口（实测 2026-11-10：055920 的 11-09 那笔排在第 62 条，
+        60 条窗口里一条 grant 都看不到，于是误报「今日尚未发放」）。
+        """
         response = await self._short.get(
             f"{self.host}{EP_BILLS}",
-            params={"paging.limit": limit, "type": "all"},
+            params={"paging.limit": limit, "type": bill_type},
             headers=request_headers(token, accept="application/json"))
         if response.status_code >= 400:
             raise UpstreamHTTPError(response.status_code,
@@ -341,9 +356,11 @@ class RaccoonProvider:
             await self.client.visit(credential.access_token)
         # ② 触达积分服务：服务端在此刷新余额/补写当天流水
         await self.client.fetch_quota(credential.access_token)
-        # ③ 读流水核对：签到是否真到账
+        # ③ 读流水核对：签到是否真到账。必须用 `income` 过滤——`all` 里
+        # 消费流水占绝大多数，活跃账号的每日发放会被挤出条数窗口。
         try:
-            items = await self.client.fetch_bills(credential.access_token)
+            items = await self.client.fetch_bills(credential.access_token,
+                                                  bill_type=BILL_TYPE_INCOME)
         except UpstreamHTTPError as error:
             return CheckinResult(ok=False, message=f"流水查询失败（HTTP {error.status}）")
         except UpstreamProtocolViolation:
@@ -360,7 +377,8 @@ class RaccoonProvider:
         credential = RaccoonCredential.from_dict(credential_data)
         if not credential.access_token:
             return {"active": False, "today_checked_in": False}
-        items = await self.client.fetch_bills(credential.access_token)
+        items = await self.client.fetch_bills(credential.access_token,
+                                              bill_type=BILL_TYPE_INCOME)
         now = raccoon_activity.now_cst()
         row = raccoon_activity.pick_today_grant(items, now)
         if row is not None:

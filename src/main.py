@@ -660,6 +660,46 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                                      inflight=inflight_guard,
                                      half_open=half_open_guard))
 
+    # 即时额度探测：新增凭证 / OAuth 保存 / 账号切换 / 签到成功后重探测。
+    # 定义在 lifespan 之前：签到任务要在装配时拿到它（签到=积分变化的那一刻，
+    # 等下一轮周期探测会让「套餐明细」和额度合计最多旧一小时）。
+    def schedule_probe(credential_id: str) -> None:
+        """新增凭证 / OAuth 保存 / 账号切换 / 签到后立即重探测（不阻塞响应）。
+
+        周期扫描是 60 分钟一轮，若不等这一轮，刚加进来的凭证在界面上会一直
+        显示「未探测到额度」，调度器也只能把它排在 known 之后。
+        """
+        provider_id = credentials.provider_of(credential_id)
+        provider = registry.get(provider_id or "")
+        # 解不开（APP_SECRET 换过 / 密文损坏）→ 跳过这条凭证，不让后台任务
+        # 因一条坏凭证整轮失败
+        try:
+            data = credentials.credential_data(credential_id)
+        except CredentialDecryptError:
+            return
+        if provider is None or data is None:
+            return
+
+        async def probe() -> None:
+            try:
+                quota = await provider.probe_quota(data)
+            except Exception as error:  # noqa: BLE001 - 探测失败标记为未探测
+                logger.warning("即时额度探测失败 %s: %s", credential_id, error)
+                reason = relogin_reason(provider_id or "", error)
+                if reason:
+                    # 刚导入 / 刚签到的号若已 401，立即停用：否则下一轮调度
+                    # 还会挑中它再撞一次，管理台也要等聊天失败才知道要重贴。
+                    credentials.mark_relogin_required(credential_id, reason)
+                else:
+                    credentials.mark_probe_failed(credential_id)
+                return
+            credentials.save_quota(credential_id, quota)
+
+        # 完成后从列表里摘除：否则长时间运行会无限累积已完成的 Task 对象
+        task = asyncio.create_task(probe())
+        app.state.pending_probes.append(task)
+        task.add_done_callback(lambda done: _forget_task(done, app.state.pending_probes))
+
     @asynccontextmanager
     async def lifespan(app_: FastAPI):
         services_ = app_.state.services
@@ -734,6 +774,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                               model_probe_minutes=lambda: runtime.model_probe_minutes,
                               model_catalog=_refresh_channel_models,
                               openrouter_catalog=_refresh_model_catalog,
+                              on_checkin_success=schedule_probe,
                               openrouter_catalog_minutes=(
                                   lambda: runtime.openrouter_catalog_minutes))
         app_.state.task_runner = runner
@@ -856,43 +897,6 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.upstream_status = upstream_status_store
 
     # 路由层共享依赖容器（TECHNICAL §2 deps.py）
-    def schedule_probe(credential_id: str) -> None:
-        """新增凭证 / OAuth 保存 / 账号切换 / 签到后立即重探测（不阻塞响应）。
-
-        周期扫描是 60 分钟一轮，若不等这一轮，刚加进来的凭证在界面上会一直
-        显示「未探测到额度」，调度器也只能把它排在 known 之后。
-        """
-        provider_id = credentials.provider_of(credential_id)
-        provider = registry.get(provider_id or "")
-        # 解不开（APP_SECRET 换过 / 密文损坏）→ 跳过这条凭证，不让后台任务
-        # 因一条坏凭证整轮失败
-        try:
-            data = credentials.credential_data(credential_id)
-        except CredentialDecryptError:
-            return
-        if provider is None or data is None:
-            return
-
-        async def probe() -> None:
-            try:
-                quota = await provider.probe_quota(data)
-            except Exception as error:  # noqa: BLE001 - 探测失败标记为未探测
-                logger.warning("即时额度探测失败 %s: %s", credential_id, error)
-                reason = relogin_reason(provider_id or "", error)
-                if reason:
-                    # 刚导入 / 刚签到的号若已 401，立即停用：否则下一轮调度
-                    # 还会挑中它再撞一次，管理台也要等聊天失败才知道要重贴。
-                    credentials.mark_relogin_required(credential_id, reason)
-                else:
-                    credentials.mark_probe_failed(credential_id)
-                return
-            credentials.save_quota(credential_id, quota)
-
-        # 完成后从列表里摘除：否则长时间运行会无限累积已完成的 Task 对象
-        task = asyncio.create_task(probe())
-        app.state.pending_probes.append(task)
-        task.add_done_callback(lambda done: _forget_task(done, app.state.pending_probes))
-
     services = Services(
         settings=runtime,
         credentials=credentials,

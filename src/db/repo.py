@@ -1154,6 +1154,25 @@ class CheckinEventRepository:
             (credential_id, max(1, min(200, limit)))).fetchall()
         return [dict(row) for row in rows]
 
+    def latest_since(self, since: int) -> dict[str, dict[str, Any]]:
+        """某时刻之后每条凭证**最新一条**记录，供管理台「今日签到」汇总。
+
+        返回 `{credential_id: 行}`；没有记录的凭证**缺席**——缺席 ≠ 失败
+        （今日任务还没轮到、凭证被暂停、渠道本就不支持签到都可能），调用方
+        据此区分「未签」与「签挂」。跨渠道的「今日」口径由调用方给 `since`
+        （北京时间 0 点，见 `engine.limits.day_start`），本方法不做时区判断。
+
+        一次取全量再在内存里按凭证取首行（整体 `ts DESC`，首行即最新），
+        而不是逐凭证一条 SQL：池子几十上百条时往返次数才是瓶颈，行数很小。
+        """
+        rows = self._db.connect().execute(
+            "SELECT * FROM checkin_events WHERE ts >= ? ORDER BY ts DESC",
+            (int(since),)).fetchall()
+        latest: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            latest.setdefault(row["credential_id"], dict(row))
+        return latest
+
     def consecutive_failures(self, *, min_streak: int,
                              since: int) -> list[dict[str, Any]]:
         """近窗口内**连续失败**达到阈值的凭证，供签到失败告警。

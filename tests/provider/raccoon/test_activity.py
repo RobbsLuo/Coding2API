@@ -178,62 +178,99 @@ def test_quota_packages_maps_four_pools():
     assert packages[0]["usable"] is True
 
 
+def test_quota_packages_expands_grants_with_expiry_and_fifo_usage():
+    """按发放流水逐笔展开：每笔带真实到期；每日池的消耗从最早到期那笔扣。"""
+    items = [
+        _grant(points=300, grant_at="2026-11-04T00:00:00+08:00",
+               expire_at="2026-11-10T23:59:59+08:00"),
+        _grant(points=300, grant_at="2026-11-03T00:00:00+08:00",
+               expire_at="2026-11-09T23:59:59+08:00"),
+        _grant(points=1500, grant_at=None,
+               created_at="2026-11-02T15:58:54+08:00",
+               expire_at=None, biz_type="reward_grant"),
+        # 0 点奖励（上游偶发）：不进明细
+        _grant(points=0, grant_at=None,
+               created_at="2026-11-02T15:58:55+08:00",
+               expire_at=None, biz_type="reward_grant"),
+        # 奖励也可能带到期（活动积分）：照常展示到期
+        _grant(points=200, grant_at=None,
+               created_at="2026-11-01T09:30:00+08:00",
+               expire_at="2026-12-01T23:59:59+08:00",
+               biz_type="reward_grant"),
+        # 已过期：不进明细
+        _grant(points=300, grant_at="2026-10-01T00:00:00+08:00",
+               expire_at="2026-10-07T23:59:59+08:00"),
+    ]
+    packages = raccoon_activity.quota_packages(
+        {"daily_points": 450, "reward_points": 1500}, items, NOW)
+    daily = [p for p in packages if p["name"].startswith("每日积分")]
+    assert [p["name"] for p in daily] == ["每日积分 11-03", "每日积分 11-04"]
+    # 已消耗 150：最早到期那笔先扣
+    assert [p["total"] - p["used"] for p in daily] == [150, 300]
+    assert daily[0]["end"] == 1794239999        # 2026-11-09T23:59:59+08:00
+    reward = [p for p in packages if p["name"].startswith("奖励积分")]
+    assert reward[0]["total"] == 1500 and reward[0]["end"] is None
+
+
+def test_quota_packages_adds_pool_rows_without_grant_coverage():
+    """池里的可用量比流水多（同步延迟）：补一条无到期余额，合计仍与池值一致。"""
+    items = [_grant(points=300, grant_at="2026-11-04T00:00:00+08:00")]
+    packages = raccoon_activity.quota_packages(
+        {"daily_points": 800, "monthly_points": 50}, items, NOW)
+    daily = next(p for p in packages if p["name"].startswith("每日积分 11-04"))
+    assert daily["total"] - daily["used"] == 300
+    rest = next(p for p in packages if p["name"].startswith("每日积分（流水未覆盖）"))
+    assert rest["total"] == 500 and rest["end"] is None
+    assert any(p["name"] == "月度积分" for p in packages)
+
+
+def test_quota_packages_treats_missing_pool_as_grant_sum():
+    """余额没给池字段：按发放额合计，不把所有发放都算成已用完。"""
+    packages = raccoon_activity.quota_packages(
+        {}, [_grant(points=300)], NOW)
+    assert packages[0]["total"] - packages[0]["used"] == 300
+
+
+def test_quota_packages_lists_uncovered_pool_balances():
+    """流水取不到（None）或没有任何发放 → 退回四池口径。"""
+    balance = {"daily_points": 300, "reward_points": 1500}
+    assert [p["name"] for p in raccoon_activity.quota_packages(balance, None)] == \
+        ["每日额度", "奖励积分"]
+    assert [p["name"] for p in raccoon_activity.quota_packages(
+        balance, [{"biz_type": "desktop", "points": -1}], NOW)] == \
+        ["每日额度", "奖励积分"]
+
+
 def test_quota_packages_ignores_bad_values():
     assert raccoon_activity.quota_packages({}) == []
     assert raccoon_activity.quota_packages(
         {"daily_points": True, "reward_points": "300", "monthly_points": -5}) == []
 
 
-def test_expiry_ladder_from_bills_sorts_and_filters():
-    items = [
-        _grant(expire_at="2026-11-10T23:59:59+08:00"),
-        _grant(grant_at="2026-11-05T00:00:00+08:00",
-               expire_at="2026-11-11T23:59:59+08:00"),
-        # 已过期
-        _grant(grant_at="2026-11-01T00:00:00+08:00",
-               expire_at="2026-11-02T23:59:59+08:00"),
-        # 非 daily_grant 不参与
-        {"biz_type": "reward_grant", "points": 1500,
-         "expire_at": "2026-12-01T00:00:00+08:00"},
-        # 缺 expire_at
-        _grant(grant_at="2026-11-06T00:00:00+08:00", expire_at=None),
-    ]
-    ladder = raccoon_activity.expiry_ladder_from_bills(items, NOW)
-    assert ladder is not None
-    assert [points for _, points in ladder] == [300, 300]
-    # 按到期升序
-    assert ladder[0][0] < ladder[1][0]
+def test_ladder_from_packages_uses_remaining_and_sorts():
+    """阶梯与明细同源：取 total-used（不是发放额），按到期升序，跳过无到期/已用完。"""
+    ladder = raccoon_activity.ladder_from_packages([
+        {"name": "每日积分 11-09", "total": 300.0, "used": 0.0,
+         "end": 1794326399, "usable": True},
+        {"name": "每日积分 11-04", "total": 300.0, "used": 126.0,
+         "end": 1794239999, "usable": True},
+        {"name": "奖励积分 11-05", "total": 1500.0, "used": 0.0,
+         "end": None, "usable": True},
+        {"name": "每日积分 10-01", "total": 300.0, "used": 300.0,
+         "end": 1790000000, "usable": True},
+    ])
+    assert ladder == [(1794239999, 174.0), (1794326399, 300.0)]
 
 
-def test_expiry_ladder_skips_already_expired_pairs():
-    """已被 daily_expire 清零的那笔不再算「即将到期」。"""
-    items = [
-        _grant(grant_at="2026-11-03T00:00:00+08:00",
-               expire_at="2026-11-09T23:59:59+08:00"),
-        {"biz_type": "daily_expire", "points": -300,
-         "grant_at": "2026-11-03T00:00:00+08:00"},
-    ]
-    assert raccoon_activity.expiry_ladder_from_bills(items, NOW) is None
+def test_ladder_from_packages_none_when_no_expiry():
+    assert raccoon_activity.ladder_from_packages([]) is None
+    assert raccoon_activity.ladder_from_packages([
+        {"name": "奖励积分", "total": 100.0, "used": 0.0, "end": None},
+    ]) is None
 
 
-def test_expiry_ladder_returns_none_when_empty():
-    assert raccoon_activity.expiry_ladder_from_bills([], NOW) is None
-    assert raccoon_activity.expiry_ladder_from_bills(["junk"], NOW) is None
-
-
-def test_expiry_ladder_ignores_non_positive_and_bad_grants():
-    """`daily_grant` 但点数非正 / 非数值 → 不进阶梯（防御上游畸形数据）。"""
-    items = [
-        {"biz_type": "daily_grant", "points": 0,
-         "expire_at": "2026-11-10T23:59:59+08:00"},
-        {"biz_type": "daily_grant", "points": True,
-         "expire_at": "2026-11-10T23:59:59+08:00"},
-    ]
-    assert raccoon_activity.expiry_ladder_from_bills(items, NOW) is None
-
-
-def test_expired_keys_ignores_bad_points():
-    """`daily_expire` 点数非数值 → 跳过，不影响其余配对。"""
+def test_pick_active_grants_ignores_malformed_expire_rows():
+    """`daily_expire` 点数非数值 → 跳过，不把对应发放误判为已清零。"""
     items = [
         _grant(grant_at="2026-11-03T00:00:00+08:00",
                expire_at="2026-11-09T23:59:59+08:00"),
@@ -242,9 +279,8 @@ def test_expired_keys_ignores_bad_points():
         {"biz_type": "daily_expire", "points": True,
          "grant_at": "2026-11-03T00:00:00+08:00"},
     ]
-    # 坏点数不算「已清零」，那笔 grant 仍在阶梯里
-    ladder = raccoon_activity.expiry_ladder_from_bills(items, NOW)
-    assert ladder is not None and ladder[0][1] == 300
+    active = raccoon_activity.pick_active_grants(items, NOW)
+    assert len(active) == 1 and active[0]["points"] == 300
 
 
 def test_heartbeat_headers_include_required_client_headers():

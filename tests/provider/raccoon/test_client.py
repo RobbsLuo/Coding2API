@@ -204,6 +204,8 @@ async def test_fetch_quota_reports_balance_and_pools():
                 "reward_points": 4500, "monthly_points": 0, "topup_points": 0,
                 "topup_frozen": False}})
         assert request.url.path == EP_BILLS
+        # 到期阶梯只要发放：用 income 过滤，避免消费流水挤占窗口
+        assert request.url.params["type"] == "income"
         return httpx.Response(200, json={"code": 0, "data": {"items": [
             {"biz_type": "daily_grant", "points": 300,
              "grant_at": "2026-11-04T00:00:00+08:00",
@@ -215,9 +217,13 @@ async def test_fetch_quota_reports_balance_and_pools():
     assert quota.remaining == 4800
     assert quota.total == 4800
     assert quota.probe_failed is False
-    # 四个池里只列出非 0 的（monthly / topup 都是 0）
-    assert [p["name"] for p in quota.packages] == ["每日额度", "奖励积分"]
+    # 明细按发放流水逐笔展开：每日积分带真实到期；奖励池没有发放流水 →
+    # 补一条「流水未覆盖」的余额行，避免 4500 分从明细里消失。
+    assert [p["name"] for p in quota.packages] == [
+        "每日积分 11-04", "奖励积分（流水未覆盖）"]
     assert quota.packages[0]["total"] == 300
+    assert quota.packages[0]["end"] == 1794326399   # 2026-11-10T23:59:59+08:00
+    assert quota.packages[1]["total"] == 4500
     # 逐笔到期阶梯来自流水的 daily_grant
     assert quota.expiry_ladder is not None
     assert quota.expiry_ladder[0][1] == 300
@@ -289,6 +295,18 @@ async def test_fetch_bills_returns_items():
 
     items = await _client(handler).fetch_bills("tok")
     assert items == [{"biz_type": "desktop"}]
+
+
+async def test_fetch_bills_income_filter_passes_type():
+    """签到用 `income`：上游服务端过滤只留发放，消费不会挤占条数窗口。"""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["type"] == "income"
+        return httpx.Response(200, json={"data": {"items": [
+            {"biz_type": "daily_grant", "points": 300}]}})
+
+    items = await _client(handler).fetch_bills("tok", bill_type="income")
+    assert items == [{"biz_type": "daily_grant", "points": 300}]
 
 
 async def test_fetch_bills_errors():
