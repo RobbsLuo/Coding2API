@@ -34,15 +34,22 @@ const LEVEL_TONE: Record<string, Tone> = {
   CRITICAL: "danger",
 };
 
-/** 按级别集合与关键字过滤（纯函数，页面与测试共用）。 */
+/** 按级别集合与关键字过滤（纯函数，页面与测试共用）。
+ *
+ * 关键字同时匹配 message / logger / request_id：排查一条请求跨渠道重试时，
+ * 直接把响应头的 `X-Request-ID`（或页面上显示的 8 位前缀）贴进来，就能收起
+ * 该请求的全部服务端日志——executor 每次换号、冷却、降级都带同一个上下文。
+ */
 export function filterLines(lines: LogLine[], levels: ReadonlySet<string>,
                              keyword: string): LogLine[] {
   const needle = keyword.trim().toLowerCase();
+  const bare = needle.replace(/^#/, "");
   return lines.filter((line) => {
     if (!levels.has(line.level)) return false;
     if (!needle) return true;
     return line.message.toLowerCase().includes(needle)
-      || line.logger.toLowerCase().includes(needle);
+      || line.logger.toLowerCase().includes(needle)
+      || (line.request_id ?? "").toLowerCase().includes(bare);
   });
 }
 
@@ -197,7 +204,7 @@ export function LogsPage() {
                   id="logs-keyword"
                   data-testid="logs-keyword"
                   value={keyword}
-                  placeholder="按消息或 logger 过滤"
+                  placeholder="按消息 / logger / request_id 过滤"
                   onChange={(event) => setKeyword(event.target.value)}
                 />
               </Field>
@@ -270,13 +277,15 @@ export function LogsPage() {
                     {line.message}
                   </span>
                   {line.request_id && (
-                    <span
-                      className="shrink-0 text-muted-foreground/80"
-                      title={`request_id=${line.request_id}`}
+                    <button
+                      type="button"
+                      className="shrink-0 rounded px-1 text-muted-foreground/80 underline-offset-2 hover:text-foreground hover:underline"
+                      title={`只看这条请求的全部日志（request_id=${line.request_id}）`}
                       data-testid="log-request-id"
+                      onClick={() => setKeyword(line.request_id ?? "")}
                     >
                       #{line.request_id.slice(0, 8)}
-                    </span>
+                    </button>
                   )}
                 </li>
               ))}

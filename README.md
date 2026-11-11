@@ -123,7 +123,7 @@ echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-
 - 只收本进程 `logging`；不读文件、不 tail。多进程各看各的。
 - **脱敏是硬前提**：每行发出前过白名单。命中 `token` / `secret` / `authorization` / `cookie` / `password` / `api_key`、`sk-…` 形状或 `Bearer <值>` → 整行丢弃。
 - 缓冲 `LOG_BUFFER_LINES`（默认 500，可热更），环形覆盖最旧。`0` 关整页（两端点 404）。
-- 单行上限 4000 字符；每行带 `seq`、时间、级别、logger、`request_id`。订阅者上限 4，超限 429 + `Retry-After`。
+- 单行上限 4000 字符；每行带 `seq`、时间、级别、logger、`request_id`。**点行尾的 `#前8位`** 即按该 request_id 过滤，收起一次请求的全部日志（executor 每次换号 / 冷却 / 降级都带同一个 ID）；也可以直接把响应头 `X-Request-ID` 粘进关键字框。stdout / journald / launchd 文件同样带 `[request_id]`（后台任务为 `-`）。订阅者上限 4，超限 429 + `Retry-After`。
 
 ## 使用
 

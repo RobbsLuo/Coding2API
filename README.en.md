@@ -123,7 +123,7 @@ echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-
 - This process only; it never tails file. Under multiple processes each sees its own slice.
 - **Redaction is hard precondition**: lines matching `token` / `secret` / `authorization` / `cookie` / `password` / `api_key`, an `sk-…` shape or `Bearer <value>` dropped whole.
 - Buffer `LOG_BUFFER_LINES` (default 500, hot), oldest overwritten first; `0` disables page (both endpoints 404).
-- 4000 chars per line; each carries `seq`, timestamp, level, logger, `request_id`. Subscriber limit 4, beyond → 429 + `Retry-After`.
+- 4000 chars per line; each carries `seq`, timestamp, level, logger, `request_id`. **Click the `#first8` chip** to filter by that request id and collapse one request's whole chain (every rotation / cooldown / downgrade in the executor shares it); pasting the `X-Request-ID` response header into the keyword box does the same. stdout / journald / launchd files carry `[request_id]` too (background tasks show `-`). Subscriber limit 4, beyond → 429 + `Retry-After`.
 
 ## Usage
 

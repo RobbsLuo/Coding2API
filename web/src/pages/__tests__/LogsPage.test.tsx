@@ -38,6 +38,19 @@ describe("LogsPage 纯函数", () => {
       .toEqual([1]);
   });
 
+  it("按 request_id 过滤整条请求链路（支持页面上的 # 前缀）", () => {
+    const lines = [
+      line({ seq: 1, message: "换号 cred_a", request_id: "ab12cd34ef" }),
+      line({ seq: 2, message: "换号 cred_b", request_id: "ab12cd34ef" }),
+      line({ seq: 3, message: "另一条请求", request_id: "ff00ff00ff" }),
+      line({ seq: 4, message: "后台任务（无请求上下文）" }),
+    ];
+    expect(filterLines(lines, new Set(["INFO"]), "ab12cd34").map((item) => item.seq))
+      .toEqual([1, 2]);
+    expect(filterLines(lines, new Set(["INFO"]), "#AB12CD34").map((item) => item.seq))
+      .toEqual([1, 2]);
+  });
+
   it("时间戳格式化到毫秒，非法值给破折号", () => {
     expect(formatLogTime(0)).toMatch(/^\d{2}:\d{2}:\d{2}\.\d{3}$/);
     expect(formatLogTime(Number.NaN)).toBe("—");
@@ -175,7 +188,29 @@ describe("LogsPage", () => {
     await settle();
     const chip = screen.getByTestId("log-request-id");
     expect(chip).toHaveTextContent("#abcdef01");
-    expect(chip).toHaveAttribute("title", "request_id=abcdef0123456789");
+    expect(chip).toHaveAttribute(
+      "title", "只看这条请求的全部日志（request_id=abcdef0123456789）");
+  });
+
+  it("点 request_id 徽标即筛出该请求的整条链路", async () => {
+    mockFetch({
+      "/api/logs": {
+        capacity: 10, limit: 10,
+        lines: [
+          line({ seq: 1, message: "换号 cred_a", request_id: "abcdef0123456789" }),
+          line({ seq: 2, message: "另一条请求", request_id: "1234567890abcdef" }),
+        ],
+      },
+    });
+    renderPage(<LogsPage />, { username: "root", is_admin: true });
+    await settle();
+    expect(screen.getAllByTestId("log-row")).toHaveLength(2);
+
+    await userEvent.click(screen.getAllByTestId("log-request-id")[0]);
+    expect(screen.getByTestId("logs-keyword")).toHaveValue("abcdef0123456789");
+    await waitFor(() => {
+      expect(screen.getAllByTestId("log-row")).toHaveLength(1);
+    });
   });
 
   it("跟随最新可关闭（不改变已渲染内容）", async () => {

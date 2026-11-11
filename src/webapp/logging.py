@@ -27,9 +27,14 @@ from __future__ import annotations
 import logging
 import sys
 
+from ..request_context import get_request_id
+
 # 带时间戳：launchd/newsyslog 重定向的文件里只有进程自己写的内容，
-# 没有 journald/docker 那种外部时间戳，格式必须自立
-LOG_FORMAT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+# 没有 journald/docker 那种外部时间戳，格式必须自立。
+# `request_id` 让平台日志（journald / launchd 文件）也能按一次请求串起来：
+# executor 每次换号、冷却、降级都带同一个上下文，与响应头 `X-Request-ID`
+# 和日志页的过滤值是同一个 ID。后台任务没有请求上下文 → 显示 `-`。
+LOG_FORMAT = "%(asctime)s %(levelname)-7s [%(request_id)s] %(name)s: %(message)s"
 DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 # 第三方库降噪：root 升到 INFO 后 httpx/httpcore 会给每个上游请求打一条
@@ -46,6 +51,19 @@ class _RootHandler(logging.StreamHandler):
     """
 
 
+class _RequestIdFilter(logging.Filter):
+    """把请求上下文里的 `request_id` 注进每条记录（后台任务为 `-`）。
+
+    不放进 formatter 的逻辑：`LogRecord` 是 logging 构造的，模块级 filter 是
+    唯一能在格式化前改记录的地方；放 filter 里也保证「代码随手 new 一个
+    LogRecord 直接 format」不会因缺属性抛 KeyError（`defaults` 兜底）。
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = get_request_id() or "-"
+        return True
+
+
 def configure_logging(level: str = "INFO") -> None:
     """配置 root logger：应用日志走 stderr（平台采集/轮转）。
 
@@ -60,8 +78,13 @@ def configure_logging(level: str = "INFO") -> None:
     handler = next((h for h in root.handlers if isinstance(h, _RootHandler)), None)
     if handler is None:
         handler = _RootHandler(sys.stderr)
-        handler.setFormatter(logging.Formatter(LOG_FORMAT, DATE_FORMAT))
+        # defaults：手工 format 一个没有 request_id 的 LogRecord 也能渲染
+        handler.setFormatter(logging.Formatter(
+            LOG_FORMAT, DATE_FORMAT, defaults={"request_id": "-"}))
         root.addHandler(handler)
+    # 幂等：重复 configure 不能再叠加 filter（否则每条日志设两次，无害但脏）
+    if not any(isinstance(item, _RequestIdFilter) for item in handler.filters):
+        handler.addFilter(_RequestIdFilter())
     handler.setLevel(normalized)
 
     # 降噪而非禁用：默认（INFO 及以上）把这两个库压到 WARNING；
