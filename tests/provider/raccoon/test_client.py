@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 
 import httpx
 import pytest
 
 from src.provider.base import ErrKind, EventKind
+from src.provider.raccoon.activity import CST
 from src.provider.raccoon.client import (
     EP_BALANCE,
     EP_BILLS,
@@ -197,6 +199,17 @@ async def test_fetch_models_errors():
 async def test_fetch_quota_reports_balance_and_pools():
     """余额 + 四个池的明细；流水给出逐笔到期阶梯。"""
 
+    # 日期相对今天构造：固定日期会随时间流逝变成「已过期」，把用例变成定时
+    # 炸弹（实测 2026-11-11 这条 expire_at=11-10 已过期，get_quota 正确过滤后
+    # 明细退回无流水口径，断言全崩）。
+    now = datetime.now(CST)
+    granted = (now - timedelta(days=7)).replace(hour=0, minute=0, second=0,
+                                                microsecond=0)
+    expires = (now + timedelta(days=3)).replace(hour=23, minute=59, second=59,
+                                                microsecond=0)
+    grant_at = granted.isoformat()
+    expire_at = expires.isoformat()
+
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == EP_BALANCE:
             return httpx.Response(200, json={"code": 0, "data": {
@@ -208,9 +221,10 @@ async def test_fetch_quota_reports_balance_and_pools():
         assert request.url.params["type"] == "income"
         return httpx.Response(200, json={"code": 0, "data": {"items": [
             {"biz_type": "daily_grant", "points": 300,
-             "grant_at": "2026-11-04T00:00:00+08:00",
-             "created_at": "2026-11-04T21:41:38+08:00",
-             "expire_at": "2026-11-10T23:59:59+08:00"},
+             "grant_at": grant_at,
+             "created_at": (granted + timedelta(hours=21, minutes=41,
+                                                seconds=38)).isoformat(),
+             "expire_at": expire_at},
         ]}})
 
     quota = await _client(handler).fetch_quota("tok")
@@ -220,9 +234,9 @@ async def test_fetch_quota_reports_balance_and_pools():
     # 明细按发放流水逐笔展开：每日积分带真实到期；奖励池没有发放流水 →
     # 补一条「流水未覆盖」的余额行，避免 4500 分从明细里消失。
     assert [p["name"] for p in quota.packages] == [
-        "每日积分 11-04", "奖励积分（流水未覆盖）"]
+        f"每日积分 {granted:%m-%d}", "奖励积分（流水未覆盖）"]
     assert quota.packages[0]["total"] == 300
-    assert quota.packages[0]["end"] == 1794326399   # 2026-11-10T23:59:59+08:00
+    assert quota.packages[0]["end"] == int(expires.timestamp())
     assert quota.packages[1]["total"] == 4500
     # 逐笔到期阶梯来自流水的 daily_grant
     assert quota.expiry_ladder is not None
