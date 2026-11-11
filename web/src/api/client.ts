@@ -347,6 +347,12 @@ export const api = {
       method: "PUT",
       ...json({ tags }),
     }),
+  /** 写入 / 清除 Qoder 网页 Cookie（空串 = 清除）；Cookie 不回显，只提交。 */
+  setCredentialWebCookie: (id: string, cookie: string) =>
+    request<{ ok: boolean }>(`/api/credentials/${id}/web-cookie`, {
+      method: "PUT",
+      ...json({ cookie }),
+    }),
   /** 批量运维：一次对多条凭证执行同一动作，后端逐条隔离返回结果。 */
   batchCredentials: (action: BatchAction, ids: string[], enabled?: boolean) =>
     request<BatchResult>("/api/credentials/batch", {

@@ -73,7 +73,17 @@ export function quotaSemantics(credential: Credential): string {
   if (credential.provider === "officeace") {
     return "积分余额（逐笔到期，新用户与每日签到各自计时）";
   }
-  // CodeBuddy / Qoder 随周期重置；未探测到重置时间时退化为本周期口径。
+  // Qoder：套餐内额度按周期重置，但签到/活动赠送的积分逐笔到期；网页 Cookie
+  // 探测时 `quota_cycle_end` 是**最早一个包的到期日**，不是重置日，所以文案
+  // 必须说「到期」而不是「重置」。
+  if (credential.provider === "qoder") {
+    if (!credential.quota_cycle_end) {
+      return "积分余额（签到/赠送逐笔到期）";
+    }
+    const date = new Date(credential.quota_cycle_end * 1000).toLocaleDateString("zh-CN");
+    return `积分余额（签到/赠送逐笔到期），最早 ${date} 到期`;
+  }
+  // CodeBuddy 随周期重置；未探测到重置时间时退化为本周期口径。
   if (!credential.quota_cycle_end) {
     return "本周期剩余（未探测到重置时间）";
   }

@@ -76,6 +76,8 @@ export interface Credential {
   quota_expiry_ladder: [number, number][] | null;
   /** 额度包明细（含包名，仅供展示）；未探测或上游未提供时为 null */
   quota_packages: QuotaPackage[] | null;
+  /** 网页明细源状态：null=未配置/未知，ok=正常，expired=网页会话失效（仅提示） */
+  web_cookie_state: "ok" | "expired" | null;
   /** 生效中的模型级冷却（模型级限流/负缓存）；无则为空数组 */
   model_cooldowns: ModelCooldown[];
   quota_probed_at: number | null;

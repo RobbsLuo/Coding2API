@@ -397,11 +397,15 @@ describe("display helpers", () => {
       provider: "kilo", quota_cycle_end: null }) as never);
     expect(kilo).toBe("免费层（无额度接口）");
 
-    // Qoder 与 CodeBuddy 同属周期重置（未探测到重置时间时退化口径）
+    // Qoder：签到/赠送积分逐笔到期；cycle_end 是最早到期日，不是重置日
     const qoder = quotaSemantics(makeCredential({
+      provider: "qoder", quota_cycle_end: 1_800_000_000 }) as never);
+    expect(qoder).toContain("逐笔到期");
+    expect(qoder).toContain("最早");
+    expect(qoder).not.toContain("重置");
+    const qoderNoEnd = quotaSemantics(makeCredential({
       provider: "qoder", quota_cycle_end: null }) as never);
-    expect(qoder).toContain("本周期剩余");
-    expect(qoder).not.toContain("单调递减");
+    expect(qoderNoEnd).toBe("积分余额（签到/赠送逐笔到期）");
 
     // CodeArts 是积分余额（内置模型按积分计费），按积分包到期日作废；
     // 有 cycle_end 时点出最早到期日，不说「本周期」也不套「每日额度池」

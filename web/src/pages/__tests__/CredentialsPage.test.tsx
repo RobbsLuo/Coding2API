@@ -275,8 +275,9 @@ describe("CredentialsPage", () => {
     // 数字那侧多包了一层 inline-flex（对齐积分记录图标按钮），所以要上溯一层
     const row = screen.getByTestId("row-cb");
     const quotaSpan = within(row).getByText("62 / 100");
-    expect(quotaSpan.parentElement?.parentElement).toBe(toggle.parentElement);
-    expect(toggle.parentElement).toHaveClass("flex-wrap");
+    // 包明细外面多了一层 flex（失效提示与触发元素并排），两者仍在同一额度容器
+    expect(toggle.parentElement?.parentElement).toBe(quotaSpan.parentElement?.parentElement);
+    expect(toggle.parentElement?.parentElement).toHaveClass("flex-wrap");
 
     await userEvent.hover(toggle);
     const tip = await screen.findByRole("tooltip");
@@ -316,6 +317,30 @@ describe("CredentialsPage", () => {
     await expandCredentialGroups();
 
     expect(screen.queryByTestId("packages-toggle-empty")).not.toBeInTheDocument();
+  });
+
+  it("网页 Cookie 失效时在额度包处提示重贴", async () => {
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({
+          id: "ca",
+          provider: "codearts",
+          web_cookie_state: "expired",
+          quota_packages: [
+            { name: "福利积分", total: 1000, used: 0, end: null },
+          ],
+        }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+
+    expect(screen.getByTestId("web-cookie-expired-ca")).toHaveTextContent(
+      "网页 Cookie 已失效，请重贴",
+    );
+    // 汇总口径的「套餐 N 个」照常可用，不受失效标记影响
+    expect(screen.getByTestId("packages-toggle-ca")).toHaveTextContent("套餐 1 个");
   });
 
   it("CodeArts 单组头条读通用额度字段，口径说明是积分余额", async () => {

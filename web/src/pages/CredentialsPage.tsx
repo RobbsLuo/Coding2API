@@ -10,6 +10,7 @@ import {
   ChevronRight,
   CircleCheck,
   Coins,
+  Cookie,
   Database,
   Download,
   Flame,
@@ -55,6 +56,7 @@ import { AddCredentialDialog } from "../components/AddCredentialDialog";
 import { BatchImportDialog } from "../components/BatchImportDialog";
 import { CredentialLimitsDialog } from "../components/CredentialLimitsDialog";
 import { CredentialTagsDialog } from "../components/CredentialTagsDialog";
+import { CredentialWebCookieDialog } from "../components/CredentialWebCookieDialog";
 import { groupModelsByProvider, rateLabel, rateSummary } from "../components/ModelPicker";
 import { ToastViewport, useToasts } from "../components/Toast";
 import { ColumnHint, LongTextTip } from "../components/Tip";
@@ -338,6 +340,7 @@ interface Actions {
   checkinLog: (credential: Credential) => void;
   limits: (credential: Credential) => void;
   tags: (credential: Credential) => void;
+  webCookie: (credential: Credential) => void;
   export: (credential: Credential) => void;
 }
 
@@ -369,6 +372,8 @@ export function CredentialsPage() {
   const [limitsFor, setLimitsFor] = useState<string | null>(null);
   // 标签编辑对话框：同样存 id，取最新快照
   const [tagsFor, setTagsFor] = useState<string | null>(null);
+  // Qoder 网页 Cookie 对话框：同样存 id，取最新快照
+  const [webCookieFor, setWebCookieFor] = useState<string | null>(null);
   // 列表筛选：池子一大就没有「找到某个号」的路径，这里收搜索 + 渠道 + 状态 + 标签四件套。
   // 筛选是纯展示层收敛，不改后端排序（后端仍按 sort/order 给全量）。
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
@@ -466,6 +471,11 @@ export function CredentialsPage() {
   const tagsCredential = useMemo(
     () => credentials.find((item) => item.id === tagsFor) ?? null,
     [credentials, tagsFor],
+  );
+  // 网页 Cookie 对话框当前编辑的凭证：同上
+  const webCookieCredential = useMemo(
+    () => credentials.find((item) => item.id === webCookieFor) ?? null,
+    [credentials, webCookieFor],
   );
   // 是否有任何筛选生效：决定「N / 总数」计数与「清空」入口是否出现
   const filtering =
@@ -744,6 +754,8 @@ export function CredentialsPage() {
     limits: (credential) => setLimitsFor(credential.id),
     tags: (credential) => setTagsFor(credential.id),
     // 单条导出：文件内容与「批量导入」的条目同形，可原样再导入。
+    // 只开对话框；保存与探测由对话框/后端负责
+    webCookie: (credential) => setWebCookieFor(credential.id),
     export: (credential) =>
       void (async () => {
         try {
@@ -1465,6 +1477,19 @@ export function CredentialsPage() {
         />
       )}
 
+      {canWrite && webCookieCredential && (
+        <CredentialWebCookieDialog
+          credential={webCookieCredential}
+          onClose={() => setWebCookieFor(null)}
+          onSaved={(message) => {
+            setWebCookieFor(null);
+            showNotice(message);
+            void refresh();
+          }}
+          onError={(message) => showError(message)}
+        />
+      )}
+
       {canWrite && batchOpen && (
         <BatchImportDialog
           onClose={() => setBatchOpen(false)}
@@ -1509,12 +1534,15 @@ function PackageLadder({ credential }: { credential: Credential }) {
   const packages = (credential.quota_packages ?? []).filter(
     (item) => item.total - item.used > 0,
   );
-  if (packages.length === 0) return null;
+  const cookieExpired = credential.web_cookie_state === "expired";
+  if (packages.length === 0 && !cookieExpired) return null;
   // 展示按到期升序：快过期的排最前（无到期信息的排最后）
   const ordered = [...packages].sort(
     (left, right) => (left.end ?? Infinity) - (right.end ?? Infinity),
   );
   return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {packages.length > 0 && (
     <LongTextTip
       // 明细行（包名 + 剩余/总量 + 已用 + 到期）比默认 max-w-sm 宽得多，
       // 用窄弹层会每行折成两三行；这里放宽并禁止折行，超出视口时内层横向滚动。
@@ -1575,6 +1603,17 @@ function PackageLadder({ credential }: { credential: Credential }) {
         套餐 {packages.length} 个
       </Button>
     </LongTextTip>
+      )}
+      {cookieExpired && (
+        <span
+          className="text-xs text-destructive"
+          data-testid={`web-cookie-expired-${credential.id}`}
+          title="网页 Cookie 已失效（控制台会话过期）。点「更多 → 网页 Cookie」重新粘贴即可恢复逐笔明细；额度汇总不受影响。"
+        >
+          网页 Cookie 已失效，请重贴
+        </span>
+      )}
+    </div>
   );
 }
 /** 生效中的模型级冷却（6004 模型限流 / 11102 该账号无此模型）。
@@ -2091,6 +2130,17 @@ function Row({
                       <Tag className="size-4" />
                       {credential.tags.length ? "编辑标签" : "设置标签"}
                     </DropdownMenuItem>
+                    {["qoder", "codearts"].includes(credential.provider) && (
+                      <DropdownMenuItem
+                        onSelect={() => actions.webCookie(credential)}
+                        title="写入网页 Cookie 后额度探测改用网页接口，可拿到每个积分包的独立到期日"
+                      >
+                        <Cookie className="size-4" /> 网页 Cookie
+                        {credential.web_cookie_state === "expired" && (
+                          <span className="text-destructive">（已失效）</span>
+                        )}
+                      </DropdownMenuItem>
+                    )}
                     <DropdownMenuItem
                       onSelect={() => actions.export(credential)}
                       title="导出为 JSON（含明文令牌，可原样再导入；操作会记审计）"
