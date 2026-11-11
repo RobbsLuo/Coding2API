@@ -205,6 +205,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **额度与签到**：探测 `/api/v2/quota/usage`；签到为活动制 `/sash/api/v1/me/campaigns`（积分累积），旧 `daily-check-in` 仅回退。**活动每日 10:00（UTC+8）刷新**，领取后 30 天有效；后台按该窗口封账。新协议无连续天数。**国际站无签到接口**（404）→「本区域无此接口」。
 
+**逐包到期（网页 Cookie）**：`/api/v2/quota/usage` 只给两桶汇总，顶层 `expiresAt` 是周期重置哨兵（实测 `9999-12-31`），看不到「哪笔积分什么时候作废」。网页账号页的 `GET {website}/api/v2/me/usages/big_model_credits` 才有逐包 `expires_at`，但它**只认网页登录会话**（device token 401）。凭证行「更多 → 网页 Cookie」粘贴该请求的完整 `Cookie` 头后，额度探测改走网页接口：明细按包展开、到期阶梯参与「快过期先用」排序；Cookie 加密落库、不回显、**导出凭证不含它**。网页会话过期（401）时静默回退汇总口径，重新粘贴即可。
+
 **端点**：默认国内版（`openapi.qoder.com.cn` + `gateway.qoder.com.cn`）。国际站改 `QODER_API_ENDPOINT=https://openapi.qoder.sh`，域名加进白名单。
 
 **上游节点故障**：Qoder 有时把自身节点故障包成 400（`[FAIL]node:…`）→ 判模型级瞬时故障，只冷却该模型。候选耗尽 → 503（`no_healthy_credential`）。
@@ -222,6 +224,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 **重新登录合并**：同一华为云账号（`uid`）再次登录时**就地更新既有凭证**（新 token / refresh_token / DPoP 私钥），同时解除「需重新登录」硬禁用；账号级冷却里**上游点名的几类（限流/余额/权益/风控）保留**（重登换的是凭证不是配额），本地冷却照常清除。不会在池子里新增一条重复账号。`paused` / `pinned` / 标签 / 统计归属保持不变。不同账号仍新增。
 
 **额度＝积分余额**：探测 `GET {snap}/snap-manager/v1/statistics/plugin`（前缀必须带 `snap-manager`；头 `Agent-Type: PromptCenter`）。上游数值即积分，不折算。分项包走悬浮明细；登记套餐到期日（积分过期同废）。
+
+**逐笔到期（网页 Cookie）**：statistics 只给「7 天内到期量」，逐笔 `expireAt` 只在网页控制台 portal——`GET /portal/promptcenter/v1/ops/credit/overview` 列活动，`GET .../campaign/{id}?pageNum=&pageSize=` 分页给每次发放（`claimedAmount` / `consumedAmount` / `expiredAmount` / `expireAt`）。portal **只认控制台会话 Cookie**（AK/SK 签名打不通，且必须带 `X-Requested-With: XMLHttpRequest`）。凭证行「更多 → 网页 Cookie」粘贴后，探测改走 portal：福利积分按笔展开、真实到期参与「快过期先用」，基础/按需仍取汇总；Cookie 失效/改版**静默回退** 7 天窗口口径，不判探测失败。`expiredAmount` 与 `status` 会滞后（实测过期后仍为 0 / `CLAIMED`），判死只看 `expireAt <= now`；已过期的逐笔**不再展示**。Cookie 失效（portal 回登录页/空响应）时，凭证行标「网页 Cookie 已失效，请重贴」；重新粘贴后状态复位，额度汇总不受影响（控制台会话无法自动刷新）。
 
 **签名 / 累计全文 SSE / 节流**：华为云 `SDK-HMAC-SHA256`（AK/SK + `X-Security-Token`）；白名单须含 snap 引擎、STS、门户。流式 `text` 为累计全文（替换语义）→ 还原增量。上游硬限每账号并发 3 → `CODEARTS_MAX_CONCURRENCY` + `CODEARTS_REQUEST_WINDOW_SECONDS`。
 
@@ -694,6 +698,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `QUOTA_PROBE_MINUTES` | `60` | 额度探测周期（下限 1） |
 | `REFRESH_INTERVAL_MINUTES` | `30` | token 预刷新轮询周期（下限 5） |
 | `MODEL_CATALOG_MINUTES` | `30` | 渠道模型列表兜底刷新周期（下限 5） |
+| `SHORT_COOLDOWN_WAIT_SECONDS` | `60` | 全池都在短冷却时原地等最短剩余冷却（≤ 该值），等到的号解禁后重取一次，而不是直接 503；轮换试过的号同样参与。等待期不占在途租约。`0` = 关闭。可热更；非流式请求建议同时开 `NONSTREAM_KEEPALIVE_SECONDS=15` 免得中间盒先掐连接 |
 | `OPENROUTER_CATALOG_MINUTES` | `1440` | 模型目录刷新周期（下限 60） |
 | `OPENROUTER_MODELS_URL` | `https://openrouter.ai/api/v1/models` | 目录来源（匿名可读）；改后重启 |
 | `TOOL_OUTPUT_COMPRESS_ENABLED` | `false` | 压缩 `role=tool` 的超长纯文本（去 ANSI + 折叠重复行）；可热更 |

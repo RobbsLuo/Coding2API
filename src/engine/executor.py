@@ -1584,15 +1584,22 @@ class Executor:
           按真正打过的凭证数计，这里不碰。
         - 只重取一次：到期后仍有别的请求抢走名额就照常返回 None（503），
           不做「等第二轮」，否则慢请求会在池子打满时层层排队。
+        - 等到的号**从 `tried` 解禁**再重取（B1）：轮换刚把唯一/最后一个号
+          打进软冷却时，不解禁的话重取仍按「本轮试过」排除它，等于白等一轮
+          再 503。
         """
         waited = False
         while True:
             credential_id = self._select(target, tried, affinity_id)
             if credential_id is None:
                 # 没有立即可用候选：短冷却「等待续上」只允许一次（见 docstring）
-                if waited or not await self._wait_short_cooldown(target, tried):
+                retry_id = None if waited else await self._wait_short_cooldown(target)
+                if retry_id is None:
                     return None
                 waited = True
+                # 等待前被轮换拉黑的号到期后必须解禁，否则重取还是选不到它；
+                # 它若已不在候选池（并发删除）则 discard 是空操作。
+                tried.discard(retry_id)
                 continue
             credential_data = self._safe_credential_data(credential_id)
             if credential_data is not None:
@@ -1624,30 +1631,36 @@ class Executor:
                          "该凭证已跳过，其余凭证不受影响", credential_id)
             return None
 
-    async def _wait_short_cooldown(self, target: ModelTarget,
-                                   tried: set[str]) -> bool:
-        """没有立即可用候选时，若最短剩余冷却够短则等它到期；返回是否等待过。
+    async def _wait_short_cooldown(self, target: ModelTarget) -> str | None:
+        """没有立即可用候选时，若最短剩余冷却够短则等它到期；返回可复用凭证。
 
-        `remaining` 取**所有候选里最短的**剩余冷却（账号级与模型级取小）：
+        `remaining` 取**所有候选里最短的**剩余冷却（账号级与模型级取较晚者）：
         池子里只要有一个号 N 秒后可用，等 N 秒就能续上；上限是热更的
         `short_cooldown_wait_seconds`（≤0 关闭，直接快速失败）。
 
-        候选来源与 `_select` 完全一致（`_selectable` 过滤掉限额/在途之后），
-        但这里刻意**不套 `_selectable`**：被在途占满的号不是「等几秒就好」
-        （它要等一个完整请求跑完，可能几分钟），把它算进等待会放大排队。
-        因此只统计「冷却中 / 启用中」的候选，并按 `tried` 排除本轮已试过的。
+        候选来源与 `_select` 一致（限额/在途过滤相同），但刻意**不套
+        `_selectable`**：被在途占满的号不是「等几秒就好」（它要等一个完整
+        请求跑完，可能几分钟），把它算进等待会放大排队。
+
+        **本轮试过的号同样参与**（B1）：轮换把每个 429 过的号塞进 `tried`
+        后，旧的「按 `tried` 排除」口径会得出「没有可等的号」直接 503——
+        而「一轮试完、全池都在短冷却」恰恰是最需要等待续上的场景。真正
+        不该等的是 DEAD / INVALID / 额度耗尽这类长冷却，它们的剩余时间
+        远超上限，由 `remaining > limit` 自然挡掉，不额外特判错误类型。
+
+        返回要复用的凭证 id（调用方须先从 `tried` 解禁再重取）；不值得等
+        时返回 None。
         """
         limit = float(live(self._deps.short_cooldown_wait_seconds)() or 0)
         if limit <= 0:
-            return False
+            return None
         registered = self._registered(target)
         if not registered:
-            return False
+            return None
         now = int(time.time())
         remaining: int | None = None
+        retry_id: str | None = None
         for candidate in self._deps.credentials.candidates(registered):
-            if candidate.credential_id in tried:
-                continue
             if candidate.disabled or not candidate.enabled:
                 continue
             if (self._deps.limits is not None
@@ -1669,12 +1682,13 @@ class Executor:
             wait = until - now
             if remaining is None or wait < remaining:
                 remaining = wait
+                retry_id = candidate.credential_id
         if remaining is None or remaining > limit:
-            return False
+            return None
         logger.info("全部候选处于短冷却（最短剩余 %ss ≤ %.0fs），等待续上",
                     remaining, limit)
         await asyncio.sleep(remaining)
-        return True
+        return retry_id
 
     def _sticky(self, candidates: list, tried: set[str],
                 affinity_id: str | None) -> str | None:

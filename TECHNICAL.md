@@ -33,7 +33,7 @@ PROPOSAL.md 定方向，本文定实现。只写**当前代码现状**。
 | `src/provider/trae/` | `client.py` `events.py` `credential.py` `pricing.py` `backfill.py` `callback.py` | 上游 + 额度／自定义 SSE → Event／凭证解析 + 原子写回 + 签到设备号／单请求积分推算／历史回填／登录 URL + 回调解析 |
 | `src/provider/zen/` | `client.py` `events.py` | 上游 + 门禁伪装 + 注入工具回包过滤／标准 SSE → Event |
 | `src/provider/kilo/` | `client.py` `events.py` | 上游（标准 OpenAI）+ `isFree` 过滤（不探活）／SSE → Event（`delta.reasoning`） |
-| `src/provider/qoder/` | `cosy.py` `client.py` `events.py` `credential.py` `auth.py` | COSY（自定义 Base64、AES/RSA、签名与会话头缓存）／上游 + 信封解包 + 额度·签到／信封 → chunk → Event／凭证解析／设备码 PKCE |
+| `src/provider/qoder/` | `cosy.py` `client.py` `events.py` `credential.py` `auth.py` | COSY（自定义 Base64、AES/RSA、签名与会话头缓存）／上游 + 信封解包 + 额度·签到（网页 Cookie 时逐包到期）／信封 → chunk → Event／凭证解析／设备码 PKCE |
 | `src/provider/codearts/` | `signer.py` `dpop.py` `client.py` `events.py` `credential.py` `auth.py` `oauth.py` | SDK-HMAC-SHA256（纯函数）／ES256 DPoP（低 S）／上游 + 私有 SSE 还原 + 积分额度／SSE → 增量 Event（双形状）／凭证解析／OAuth2 PKCE／回调粘贴换 token |
 | `src/provider/officeace/` | `signer.py` `client.py` `events.py` `credential.py` `oauth.py` | 双签名（V11 + SDK-HMAC，纯函数）／上游 + 积分·签到·费率／错误分类 + `max_tokens` 改写／两套凭据 + 一次性 refresh／云端授权轮询（PKCE + DPoP + 开通校验） |
 | `src/provider/raccoon/` | `client.py` `events.py` `credential.py` `activity.py` | 标准 OpenAI 上游 + 积分余额·流水·心跳／SSE → Event + 分类（`user_model_rate_limited` → CONCURRENCY）／会话 JWT 归一 + claims 提取 + 稳定设备 id／页面访问 + 流水核对签到 + 四池明细 + 到期阶梯 |
@@ -132,6 +132,14 @@ NO_PENALTY_KINDS = frozenset({REQUEST, CONTEXT, NETWORK})
 - **不占轮换预算**：排队轮次不计 `attempts`；计则三次排队吃满 `max_rotate` → 503。
 - **有界**：`QUEUE_MAX_ROUNDS = 3` 轮、单轮封顶 `QUEUE_MAX_WAIT_SECONDS = 60s`。
 - **已出帧不重开**：半截输出不可回滚 → 降级 SOFT 收尾。
+
+**短冷却原地等（A4）**：没有任何**立即可用**候选、但最短剩余冷却不超过 `SHORT_COOLDOWN_WAIT_SECONDS`（默认 60）时，在原连接上等它到期后重取一次，而不是直接 503。
+
+- **有可用号绝不等待**——等冷却中的号等于白降吞吐。
+- **本轮 `tried` 里的号同样参与等待**（B1）：旧口径按 `tried` 排除，导致「轮换把最后一个号打进软冷却」这个最常见的耗尽场景直接 503。DEAD / INVALID / 额度耗尽属长冷却，剩余时间远超上限，由 `remaining > limit` 自然挡掉，不按错误类型特判。
+- **等到的号必须先 `tried.discard`** 再重取，否则选号仍按「本轮试过」排除它，白等一轮再 503。
+- **只重取一次**：睡醒后名额被别的请求抢走就照常 503，不做第二轮排队。
+- 等待期**不占在途租约**、**不计 `attempts`**；`0` = 关闭（快速失败）。非流式请求建议同时开 `NONSTREAM_KEEPALIVE_SECONDS`，否则中间盒可能先掐连接。
 
 识别 `provider.base.parse_queue_hint`（信封可嵌套，最多下钻 3 层）：`isQueued: true` / `subCode ∈ {RESOURCE_LIMIT, RESOURCE_LIMIT_EXCEEDED}` 任一成立即认定；**宁可漏判不可误判**，识别不出走原分类。Qoder `_decode_frame` 须**先于** `classify_error_code` 拦下——上游把排队包成 403，按状态码分类判 DEAD 会硬禁用凭证。`Event.retry_after_seconds` 承载上游点名秒数。
 
@@ -432,7 +440,9 @@ class Provider(Protocol):
 
 `idempotentKey` 格式 `claim_<campaignId>_<Date.now()>`；头 `agent-type: PromptCenter`。**四态**：`ELIGIBLE` → claim + confirm；**`CLAIMED`（已领未确认）→ 只补 confirm**；`CONFIRMED`/`CONSUMED` → 已签。**claim 时积分即到账**，confirm 只推进状态 → confirm 失败不丢积分但仍返回 `ok=False` 让下轮补。活动不存在 / 已过期 `ok=True`；`ELIGIBLE` 但 `claimable=false` 或未知 status → `ok=False`。业务码走 HTTP 200（如 `40001`）。`seal_until` 留空。`checkin_scope` 用 `uid`。**签到之外的活动操作未接入**。
 
-**额度＝积分**（`parse_credits`）：`GET {snap}/snap-manager/v1/statistics/plugin`（**须带 `snap-manager` 前缀**，头 `Agent-Type: PromptCenter`）回 `metrics[]`；`usageTotalPackageCredit` = 合计，其余（Basic/OnDemand/Bonus）= 分项包。数值即积分，**不做单位折算**；合计进 `Quota.remaining/total`，分项进 `Quota.packages`，顶层 `end_date`（如 `2026-11-02`）进 `expiry_ladder`。取不到合计项或数值无效 → `probe_failed=True`（绝不填 0）。官方只给积分系数（GLM-5.2 0.7 / OpenPangu-2.0-Flash 0.32）无公式 → **不猜**，逐请求 `credit` 保 `None`。「保活」只由 `RefreshTask` 承担（一次性 token 两处消费会烧成废票），`probe_quota` 只读余额。
+**额度＝积分**（`parse_credits`）：`GET {snap}/snap-manager/v1/statistics/plugin`（**须带 `snap-manager` 前缀**，头 `Agent-Type: PromptCenter`）回 `metrics[]`；`usageTotalPackageCredit` = 合计，其余（Basic/OnDemand/Bonus）= 分项包。数值即积分，**不做单位折算**；合计进 `Quota.remaining/total`，分项进 `Quota.packages`，顶层 `end_date`（如 `2026-11-02`）只进 `cycle_end`/`packages[].end`，**不进阶梯**（它不是逐笔作废时刻）。取不到合计项或数值无效 → `probe_failed=True`（绝不填 0）。
+
+**逐笔明细（`parse_web_credits`）**：有 `web_cookie` 时优先 portal `overview` + `campaign/{id}` 分页，福利包按笔展开（`total/used/end/expiring`），`expiry_ladder` 用真实 `expireAt`；`expiredAmount`/`status` 会滞后，判死只看 `expireAt <= now`；已过期条目不进 `packages`。portal 未登录（3xx/401/403/HTML/空 body/业务码 401|403）→ `Quota.web_cookie_state="expired"` 落 `credentials.web_cookie_state` 供管理台提示，其他失败保持 NULL/旧状态；重贴 Cookie 时 API 复位为 NULL。无 Cookie 或 portal 失败 → 回退 statistics 的 7 天窗口桶，**不把探测判失败**。portal 只认控制台会话 Cookie，AK/SK 签名打不通，且必须带 `X-Requested-With: XMLHttpRequest`。官方只给积分系数（GLM-5.2 0.7 / OpenPangu-2.0-Flash 0.32）无公式 → **不猜**，逐请求 `credit` 保 `None`。「保活」只由 `RefreshTask` 承担（一次性 token 两处消费会烧成废票），`probe_quota` 只读余额。
 
 **倍率**：`GET {snap}/v1/model/builtin`（头 `Agent-Type: PromptCenter`）每条带 `credit[]`，取首档 `ratio_display`（如 `"0.7x"`）。空列表按协议违规上抛。
 

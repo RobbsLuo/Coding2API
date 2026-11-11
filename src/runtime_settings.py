@@ -137,8 +137,9 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                minimum=0.0, group="stream_thinking"),
     HotSetting("short_cooldown_wait_seconds", float, "短冷却等待上限（秒）",
                "全池都在短冷却、没有任何立即可用候选时，最短剩余冷却不超过该值"
-               "则等待后续上（而非直接 503）。等待期间不占在途租约。0 = 关闭"
-               "（快速失败，保持旧行为）。", minimum=0.0, group="affinity"),
+               "则等待后续上（而非直接 503）。本轮轮换试过的号同样参与，等到的"
+               "号会解禁重取一次。等待期间不占在途租约。默认 60；0 = 关闭"
+               "（快速失败）。", minimum=0.0, group="affinity"),
     HotSetting("nonstream_keepalive_seconds", float, "非流式保活（秒）",
                "`stream=false` 的请求在聚合完成前不发任何字节，CDN / 反代的空闲"
                "超时会切连接。设为 N>0 时，N 秒内没完成就转 chunked，先吐空白"

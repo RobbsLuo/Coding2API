@@ -113,12 +113,12 @@ def _unit_executor(credentials, **deps) -> Executor:
 
 
 async def test_no_wait_when_limit_disabled(repo, clock):
-    """上限 0（默认）= 关闭：直接返回 False，一秒都不等。"""
+    """上限 0 = 关闭：直接返回 None，一秒都不等。"""
     credentials, db = repo
     cid = credentials.add(provider="trae", credential_data={"accessToken": "a"})
     _cool(credentials, cid, 3)
-    executor = _unit_executor(credentials)
-    assert await executor._wait_short_cooldown(_TARGET, set()) is False
+    executor = _unit_executor(credentials, short_cooldown_wait_seconds=0)
+    assert await executor._wait_short_cooldown(_TARGET) is None
     assert clock.sleeps == []
     db.close()
 
@@ -129,7 +129,7 @@ async def test_no_wait_when_no_registered_provider(repo, clock):
     executor = Executor(ExecutorDeps(providers={}, credentials=credentials,
                                      scheduler=Scheduler(), default_model="glm-5.2",
                                      short_cooldown_wait_seconds=10))
-    assert await executor._wait_short_cooldown(_TARGET, set()) is False
+    assert await executor._wait_short_cooldown(_TARGET) is None
     assert clock.sleeps == []
     db.close()
 
@@ -142,7 +142,7 @@ async def test_waits_for_shortest_cooldown(repo, clock):
     _cool(credentials, slow, 8)
     _cool(credentials, fast, 3)
     executor = _unit_executor(credentials, short_cooldown_wait_seconds=10)
-    assert await executor._wait_short_cooldown(_TARGET, set()) is True
+    assert await executor._wait_short_cooldown(_TARGET) == fast
     assert clock.sleeps == [3]
     db.close()
 
@@ -155,7 +155,7 @@ async def test_shorter_first_then_longer_keeps_the_minimum(repo, clock):
     _cool(credentials, fast, 2)
     _cool(credentials, slow, 9)
     executor = _unit_executor(credentials, short_cooldown_wait_seconds=10)
-    assert await executor._wait_short_cooldown(_TARGET, set()) is True
+    assert await executor._wait_short_cooldown(_TARGET) == fast
     assert clock.sleeps == [2]
     db.close()
 
@@ -166,7 +166,7 @@ async def test_waits_only_when_remaining_within_limit(repo, clock):
     cid = credentials.add(provider="trae", credential_data={"accessToken": "a"})
     _cool(credentials, cid, 30)
     executor = _unit_executor(credentials, short_cooldown_wait_seconds=10)
-    assert await executor._wait_short_cooldown(_TARGET, set()) is False
+    assert await executor._wait_short_cooldown(_TARGET) is None
     assert clock.sleeps == []
     db.close()
 
@@ -179,9 +179,9 @@ async def test_wait_limit_is_read_per_call(repo, clock):
     limit = {"value": 0}
     executor = _unit_executor(credentials,
                               short_cooldown_wait_seconds=lambda: limit["value"])
-    assert await executor._wait_short_cooldown(_TARGET, set()) is False
+    assert await executor._wait_short_cooldown(_TARGET) is None
     limit["value"] = 5
-    assert await executor._wait_short_cooldown(_TARGET, set()) is True
+    assert await executor._wait_short_cooldown(_TARGET) is not None
     assert clock.sleeps == [5]
     db.close()
 
@@ -192,7 +192,7 @@ async def test_model_level_cooldown_counts_toward_wait(repo, clock):
     cid = credentials.add(provider="trae", credential_data={"accessToken": "a"})
     _cool_model(credentials, cid, "glm-5.2", 4)
     executor = _unit_executor(credentials, short_cooldown_wait_seconds=10)
-    assert await executor._wait_short_cooldown(_TARGET, set()) is True
+    assert await executor._wait_short_cooldown(_TARGET) is not None
     assert clock.sleeps == [4]
     db.close()
 
@@ -204,18 +204,36 @@ async def test_account_and_model_cooldown_take_the_later_one(repo, clock):
     _cool(credentials, cid, 2)
     _cool_model(credentials, cid, "glm-5.2", 6)
     executor = _unit_executor(credentials, short_cooldown_wait_seconds=10)
-    assert await executor._wait_short_cooldown(_TARGET, set()) is True
+    assert await executor._wait_short_cooldown(_TARGET) is not None
     assert clock.sleeps == [6]
     db.close()
 
 
-async def test_tried_credentials_are_ignored(repo, clock):
-    """本轮已经试过的凭证不再算进等待（它刚失败，等它也续不上）。"""
+async def test_tried_credential_in_cooldown_still_counts(repo, clock):
+    """本轮轮换试过、但已进短冷却的号**仍然参与等待**（B1）。
+
+    旧口径按 `tried` 排除，导致「一轮试完、全池都在软冷却」这个最常见的
+    耗尽场景直接 503，等待机制永远触发不到。
+    """
     credentials, db = repo
     cid = credentials.add(provider="trae", credential_data={"accessToken": "a"})
     _cool(credentials, cid, 3)
     executor = _unit_executor(credentials, short_cooldown_wait_seconds=10)
-    assert await executor._wait_short_cooldown(_TARGET, {cid}) is False
+    assert await executor._wait_short_cooldown(_TARGET) == cid
+    assert clock.sleeps == [3]
+    db.close()
+
+
+async def test_tried_dead_credential_with_long_cooldown_fails_fast(repo, clock):
+    """DEAD / INVALID 这类长冷却仍在 `tried` 里：剩余时间远超上限 → 不等。
+
+    不需要按错误类型特判——`remaining > limit` 自然挡掉。
+    """
+    credentials, db = repo
+    cid = credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    _cool(credentials, cid, 3600)
+    executor = _unit_executor(credentials, short_cooldown_wait_seconds=60)
+    assert await executor._wait_short_cooldown(_TARGET) is None
     assert clock.sleeps == []
     db.close()
 
@@ -231,7 +249,7 @@ async def test_disabled_credentials_are_ignored(repo, clock):
     _cool(credentials, hard, 3)
     _cool(credentials, soft, 3)
     executor = _unit_executor(credentials, short_cooldown_wait_seconds=10)
-    assert await executor._wait_short_cooldown(_TARGET, set()) is False
+    assert await executor._wait_short_cooldown(_TARGET) is None
     assert clock.sleeps == []
     db.close()
 
@@ -248,7 +266,7 @@ async def test_limit_blocked_credentials_are_ignored(repo, clock):
 
     executor = _unit_executor(credentials, short_cooldown_wait_seconds=10,
                               limits=AllBlocked())
-    assert await executor._wait_short_cooldown(_TARGET, set()) is False
+    assert await executor._wait_short_cooldown(_TARGET) is None
     assert clock.sleeps == []
     db.close()
 
@@ -262,7 +280,7 @@ async def test_inflight_blocked_credentials_are_ignored(repo, clock):
     guard.acquire(cid)
     executor = _unit_executor(credentials, short_cooldown_wait_seconds=10,
                               inflight=guard)
-    assert await executor._wait_short_cooldown(_TARGET, set()) is False
+    assert await executor._wait_short_cooldown(_TARGET) is None
     assert clock.sleeps == []
     db.close()
 
@@ -273,7 +291,7 @@ async def test_expired_cooldown_is_not_waited_for(repo, clock):
     cid = credentials.add(provider="trae", credential_data={"accessToken": "a"})
     _cool(credentials, cid, -5)                   # 已过期
     executor = _unit_executor(credentials, short_cooldown_wait_seconds=10)
-    assert await executor._wait_short_cooldown(_TARGET, set()) is False
+    assert await executor._wait_short_cooldown(_TARGET) is None
     assert clock.sleeps == []
     db.close()
 
@@ -282,7 +300,7 @@ async def test_no_cooldown_at_all_is_not_waited_for(repo, clock):
     """候选既无冷却也未被试过，但池子为空（无凭证）：没有「等到就好」的目标。"""
     credentials, db = repo
     executor = _unit_executor(credentials, short_cooldown_wait_seconds=10)
-    assert await executor._wait_short_cooldown(_TARGET, set()) is False
+    assert await executor._wait_short_cooldown(_TARGET) is None
     assert clock.sleeps == []
     db.close()
 
@@ -333,13 +351,13 @@ async def test_long_cooldown_still_fails_fast(repo, clock):
     db.close()
 
 
-async def test_disabled_wait_keeps_old_behaviour(repo, clock):
-    """上限 0（默认）→ 与历史版本一致：全池短冷却时立刻 503。"""
+async def test_disabled_wait_keeps_fast_failure(repo, clock):
+    """显式 0 → 关闭：全池短冷却时立刻 503（不睡、不排队）。"""
     credentials, db = repo
     cid = credentials.add(provider="trae", credential_data={"accessToken": "a"})
     _cool(credentials, cid, 3)
     provider = _Provider()
-    executor = _executor(credentials, provider)
+    executor = _executor(credentials, provider, short_cooldown_wait_seconds=0)
     with pytest.raises(NoHealthyCredential):
         await executor.complete(_request())
     assert provider.calls == 0
@@ -465,4 +483,33 @@ async def test_inflight_tracker_counts_released_after_wait(repo, clock):
                          short_cooldown_wait_seconds=10)
     await executor.complete(_request())
     assert tracker.count(cid) == 0
+    db.close()
+
+
+async def test_pick_reuses_tried_credential_after_wait(repo, clock):
+    """`_pick` 等到号后必须先从 `tried` 解禁，否则重取仍选不到它（B1 核心）。"""
+    credentials, db = repo
+    cid = credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    _cool(credentials, cid, 3)
+    executor = _unit_executor(credentials, short_cooldown_wait_seconds=10)
+    tried = {cid}
+    picked = await executor._pick(_TARGET, tried)
+    assert picked is not None and picked[0] == cid
+    assert clock.sleeps == [3]
+    db.close()
+
+
+async def test_pick_waits_only_once_when_tried(repo, clock):
+    """`tried` 号等完仍不可用：只等一次就返回 None（不二次排队）。"""
+    credentials, db = repo
+    cid = credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    _cool(credentials, cid, 3)
+    executor = _unit_executor(credentials, short_cooldown_wait_seconds=10)
+
+    def _freeze() -> None:
+        clock.now -= clock.sleeps[-1]
+
+    clock.on_sleep = _freeze
+    assert await executor._pick(_TARGET, {cid}) is None
+    assert clock.sleeps == [3]
     db.close()

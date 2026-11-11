@@ -219,6 +219,8 @@ Free models at [Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`), no login. St
 
 **Quota = credit balance**: probing hits `GET {snap}/snap-manager/v1/statistics/plugin` (`snap-manager` prefix mandatory; header `Agent-Type: PromptCenter`). Upstream values are credits, no conversion; sub-packages go into popover, plan expiry registered (unused credits voided too).
 
+**Per-batch expiry (web cookie)**: the statistics API only gives a 7-day expiring total. Per-grant `expireAt` lives in the web console portal: `GET /portal/promptcenter/v1/ops/credit/overview` lists campaigns, `GET .../campaign/{id}?pageNum=&pageSize=` pages through grants (`claimedAmount` / `consumedAmount` / `expiredAmount` / `expireAt`). The portal accepts **console session cookies only** (AK/SK signatures do not work; `X-Requested-With: XMLHttpRequest` is required). After pasting via *More → Web Cookie*, probing uses the portal: bonus credits expand per grant and real expiry drives the expire-first ranking, while base/on-demand stay on the summary. An expired cookie or changed shape silently falls back to the 7-day window; probing is never marked failed. `expiredAmount` and `status` lag behind (observed 0 / `CLAIMED` after expiry) — death is decided by `expireAt <= now` only; expired grants are **not shown**. When the cookie dies (portal redirects to login or returns an empty body), the credential row shows "web cookie expired, paste it again"; re-pasting resets the state and quota totals are unaffected (console sessions cannot be refreshed automatically).
+
 **Signing / cumulative SSE / pacing**: Huawei `SDK-HMAC-SHA256` (AK/SK + `X-Security-Token`); allowlist needs snap engine, STS, portal. Streaming `text` is cumulative (replace semantics) → reduced to incremental events. Upstream hard-limits 3 concurrent sessions per account → `CODEARTS_MAX_CONCURRENCY` + `CODEARTS_REQUEST_WINDOW_SECONDS`.
 
 ### OfficeAce (`officeace`)
@@ -682,6 +684,7 @@ Full list in `src/config.py` (authoritative); every item wired through `docker-c
 | `QUOTA_PROBE_MINUTES` | `60` | Quota probe period (min 1) |
 | `REFRESH_INTERVAL_MINUTES` | `30` | Token pre-refresh poll period (min 5) |
 | `MODEL_CATALOG_MINUTES` | `30` | Channel model refresh period (min 5) |
+| `SHORT_COOLDOWN_WAIT_SECONDS` | `60` | When the whole pool is in short cooldown, wait in place for the shortest remaining one (≤ this value), then re-pick once with the credential released from `tried`, instead of failing with 503. Waiting holds no in-flight lease. `0` = off. Hot-reloadable; for non-streaming requests also enable `NONSTREAM_KEEPALIVE_SECONDS=15` so middleboxes don't drop the connection first |
 | `OPENROUTER_CATALOG_MINUTES` | `1440` | Model catalog refresh period (min 60) |
 | `OPENROUTER_MODELS_URL` | `https://openrouter.ai/api/v1/models` | Catalog source (anonymous); restart required |
 | `USD_CNY_RATE` | `6.70` | Cost estimation rate; hot, affects new rows only |
