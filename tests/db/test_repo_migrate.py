@@ -612,3 +612,31 @@ def test_legacy_db_upgrade_creates_checkin_events(tmp_path):
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     apply_schema(db.connect())                        # 二次执行不抛错
     db.close()
+
+
+def test_legacy_db_upgrade_adds_web_cookie_state(tmp_path):
+    """老库升级：credentials 无 web_cookie_state 时补列，历史行为 NULL（未知）。"""
+    db = Database(tmp_path / "legacy.sqlite3")
+    conn = sqlite3.connect(db.path)
+    conn.execute(
+        "CREATE TABLE credentials (id TEXT PRIMARY KEY, provider TEXT NOT NULL,"
+        " data_enc BLOB NOT NULL, created_at INTEGER NOT NULL)")
+    conn.execute("INSERT INTO credentials (id, provider, data_enc, created_at)"
+                 " VALUES ('cred_old', 'codearts', x'00', 1)")
+    conn.commit()
+    conn.close()
+
+    apply_schema(db.connect())
+    columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
+    assert "web_cookie_state" in columns
+    assert db.connect().execute(
+        "SELECT web_cookie_state FROM credentials WHERE id = 'cred_old'").fetchone()[0] is None
+    db.connect().execute(
+        "UPDATE credentials SET web_cookie_state = 'expired' WHERE id = 'cred_old'")
+    db.connect().commit()
+    assert db.connect().execute(
+        "SELECT web_cookie_state FROM credentials WHERE id = 'cred_old'").fetchone()[0] == "expired"
+    from src.db.migrate import SCHEMA_VERSION
+
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+    db.close()

@@ -41,6 +41,11 @@ class CodeArtsCredential:
     domain: str = ""
     domain_id: str = ""
     nickname: str = ""
+    # 网页控制台 Cookie（可选）：`/portal/promptcenter/v1/ops/credit/*` 只认
+    # 华为云控制台会话，AK/SK 签名打不通。有它才能拿到**逐笔积分到期**
+    # （campaign benefits 的 expireAt），缺失时额度探测保持 statistics 汇总口径
+    # （7 天内到期量挂在单个窗口桶上）。
+    web_cookie: str = ""
 
     def token_expires_at(self) -> int:
         """STS 临时凭证到期 epoch（秒）；未知为 0。
@@ -95,6 +100,7 @@ class CodeArtsCredential:
             "dpop_private_jwk": dict(self.dpop_private_jwk),
             "domain": self.domain, "domain_id": self.domain_id,
             "nickname": self.nickname,
+            "web_cookie": self.web_cookie,
         }
 
     @classmethod
@@ -116,6 +122,8 @@ class CodeArtsCredential:
             domain=str(raw.get("domain") or ""),
             domain_id=str(raw.get("domain_id") or raw.get("domainId") or ""),
             nickname=str(raw.get("nickname") or ""),
+            web_cookie=str(raw.get("web_cookie") or raw.get("webCookie")
+                           or raw.get("cookie") or ""),
         )
 
 
@@ -181,4 +189,6 @@ def merge_refreshed(
         domain=refreshed.domain or credential.domain,
         domain_id=refreshed.domain_id or credential.domain_id,
         nickname=credential.nickname,
+        # 网页 Cookie 与令牌轮转无关：刷新不能把用户粘贴的会话丢掉。
+        web_cookie=credential.web_cookie,
     )

@@ -61,6 +61,7 @@ CREATE TABLE IF NOT EXISTS credentials (
     quota_cycle_end  INTEGER,                      -- 最早到期 epoch；渠道无此信息为 NULL
     quota_expiry_ladder TEXT,                      -- 到期阶梯 JSON [[epoch, 剩余积分]]；无到期信息为 NULL
     quota_packages   TEXT,                      -- 额度包明细 JSON [{"name","total","used","end","expiring"}]，仅展示
+    web_cookie_state TEXT,                      -- 网页明细源状态：NULL=未配置/未知，ok=正常，expired=会话失效（仅提示）
     quota_probed_at  INTEGER,
     token_expires_at INTEGER,                   -- access token 到期 epoch；NULL=老库未回填，0=未知
     token_issued_at  INTEGER,                   -- access token 签发 epoch（JWT iat）：进度条满量程与「最后续期」

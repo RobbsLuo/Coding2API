@@ -91,6 +91,17 @@ class CodeArtsProvider:
         credential = CodeArtsCredential.from_dict(credential_data)
         return await self.client.probe_quota(credential)
 
+    def set_web_cookie(self, credential_data: dict, cookie: str) -> dict:
+        """写入/清除网页控制台 Cookie（逐笔积分到期的数据源）。
+
+        只改这一个字段，不重走 `from_dict` 归一（与 Qoder 同纪律）：避免把老
+        凭证里未识别的字段丢掉，导出/再导入的可逆性靠这条保证。空串 = 清除，
+        额度探测回到 statistics 的汇总口径。
+        """
+        data = dict(credential_data)
+        data["web_cookie"] = cookie
+        return data
+
     async def stream_chat(self, credential_data: dict, payload: dict,
                           model: str) -> AsyncIterator[Event]:
         """引擎调用入口：dict 凭证 → 上游流 → 中立事件。"""

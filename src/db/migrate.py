@@ -81,7 +81,10 @@ SCHEMA_NAME = "schema.sql"
 # `revive` 按补列前行为清除冷却；新写入的冷却带上来源，`revive` 保留
 # 「上游点名恢复时刻」的那些（soft/credit/plan/restricted），避免人工恢复后
 # 立刻再撞一次上游 429（实测 2026-11-03 12:22–12:23 三次 revive + 三次 429）。
-SCHEMA_VERSION = 32
+# 33：credentials 新增 web_cookie_state（网页 Cookie 状态：NULL/ok/expired）。
+# 只在管理台提示「网页会话已失效，重贴 Cookie」，不参与调度；老库补 NULL =
+# 未知（下次探测写入）。额度本身仍以 statistics 汇总口径为准。
+SCHEMA_VERSION = 33
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -102,6 +105,7 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # 额度包明细（展示用，含包名）：与选号指标 quota_expiry_ladder 分开，
     # 避免为管理台展示改动调度排序行为
     ("credentials", "quota_packages TEXT"),
+    ("credentials", "web_cookie_state TEXT"),  # 网页明细源状态：NULL/ok/expired
     # access token 签发/到期时间：上游显式 expires_at 缺失时回落
     # JWT 的 iat/exp；NULL=老库未回填（列表读到按需派生），0=确实未知
     ("credentials", "token_expires_at INTEGER"),

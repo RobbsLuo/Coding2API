@@ -430,9 +430,43 @@ class QoderClient(LazyClients):
     # ---------------------------------------------------------------- 额度
 
     async def probe_quota(self, credential: QoderCredential) -> Quota:
-        """`GET {openapi}/api/v2/quota/usage`（`userQuota` + `addOnQuota`）。"""
+        """额度探测：优先网页接口（逐包到期），回退 device token 的汇总接口。
+
+        网页账号页的 `/api/v2/me/usages/big_model_credits` 才给 per-package
+        `expires_at`；device token 的 `/api/v2/quota/usage` 只有两桶汇总，顶层
+        `expiresAt` 是周期重置值（实测 9999-12-31），不能当包级到期用。前者
+        需要网页登录 Cookie，且会过期——打不通就静默回退，不影响出号。
+        """
+        if credential.web_cookie:
+            web = await self._probe_web_quota(credential)
+            if web is not None:
+                return web
         data = await self._get_json(f"{self.host}{EP_QUOTA}", credential)
         return qoder_events.parse_quota(data, now=self._now())
+
+    async def _probe_web_quota(self, credential: QoderCredential) -> Quota | None:
+        """网页额度接口；Cookie 失效/形状变化一律返回 None（由调用方回退）。"""
+        config = credential.realm_config()
+        url = f"{config.website}{qoder_events.EP_CREDITS_WEB}"
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "Cookie": credential.web_cookie,
+            "User-Agent": qoder_events.WEB_ACCOUNT_UA,
+            "Origin": config.website,
+            "Referer": config.website + "/account/usage",
+        }
+        try:
+            response = await self._short.get(url, headers=headers)
+            data = await _parse_json_response(response, url)
+        except (base.UpstreamHTTPError, base.UpstreamTransportError,
+                qoder_events.UpstreamProtocolViolation, httpx.HTTPError) as error:
+            # Cookie 会过期（网页会话寿命，不是 token 寿命），上游也可能删接口。
+            # 这里只是「少一份明细」，不是凭证问题：不回写失败、不冷却、不告警，
+            # 回退到汇总接口继续出号。
+            logger.info("qoder 网页额度接口不可用（%s: %s），回退 /quota/usage",
+                        type(error).__name__, error)
+            return None
+        return qoder_events.parse_web_quota(data, now=self._now())
 
     # ---------------------------------------------------------------- 签到
 

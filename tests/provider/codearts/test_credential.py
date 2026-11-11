@@ -121,3 +121,15 @@ def test_credential_merge_refreshed_rewrites_rotating_fields():
     assert merged.code_verifier == "cv" and merged.domain == "d"
     # 刷新回包无 expiration → 沿用旧的
     assert merged.expiration == old.expiration
+
+
+def test_credential_web_cookie_roundtrip_and_aliases():
+    assert _cred(web_cookie="sid=1").to_dict()["web_cookie"] == "sid=1"
+    assert CodeArtsCredential.from_dict({"webCookie": "a=1"}).web_cookie == "a=1"
+    assert CodeArtsCredential.from_dict({"cookie": "b=2"}).web_cookie == "b=2"
+    assert CodeArtsCredential.from_dict({}).web_cookie == ""
+
+
+def test_merge_refreshed_preserves_web_cookie():
+    old = _cred(web_cookie="sid=1", refresh_token="rt", dpop_private_jwk=_jwk())
+    assert merge_refreshed(old, _token_response()).web_cookie == "sid=1"

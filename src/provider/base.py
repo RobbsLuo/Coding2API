@@ -587,6 +587,9 @@ class Quota:
     # 与 expiry_ladder 分开存：后者的结构装不下名称，且两者口径不同
     # （明细额外含「已过期但仍有余额」与「已用完但仍有效」的包）。
     packages: list[dict[str, Any]] | None = None
+    # 网页明细源状态：None = 未配置网页 Cookie 或失败原因未知；"ok" = 网页明细
+    # 正常；"expired" = 网页会话失效（凭证行提示重贴，额度仍以汇总口径为准）。
+    web_cookie_state: str | None = None
     probed_at: int | None = None
     probe_failed: bool = False
 

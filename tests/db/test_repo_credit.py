@@ -333,3 +333,24 @@ def test_retention_task_prunes_credit_events(tmp_path):
     bare = RetentionTask(FakeCollector(), retention_days=90, credentials=credentials)
     assert bare.run_once()["purged_credit_events"] == 0
     db.close()
+
+
+def test_save_quota_persists_web_cookie_state(tmp_path):
+    """网页 Cookie 状态随额度探测落库，供管理台提示；可单独清除。"""
+    db = Database(tmp_path / "t.sqlite3")
+    apply_schema(db.connect())
+    credentials = CredentialRepository(db, CredentialCipher(SECRET))
+    now = int(time.time())
+    cid = credentials.add(provider="codearts", credential_data={"x": 1}, now=now)
+
+    credentials.save_quota(cid, Quota(remaining=1.0, total=2.0, probed_at=now,
+                                      web_cookie_state="ok"))
+    assert credentials.list_all()[0]["web_cookie_state"] == "ok"
+
+    credentials.save_quota(cid, Quota(remaining=1.0, total=2.0, probed_at=now + 60,
+                                      web_cookie_state="expired"))
+    assert credentials.list_all()[0]["web_cookie_state"] == "expired"
+
+    # 重新粘贴/清除 Cookie 时由 API 复位为 NULL，下一轮探测再写
+    credentials.set_web_cookie_state(cid, None)
+    assert credentials.list_all()[0]["web_cookie_state"] is None

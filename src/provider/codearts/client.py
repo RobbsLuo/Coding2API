@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import copy
+import datetime
 import hashlib
 import json
 import logging
@@ -27,6 +28,7 @@ import re
 import secrets
 import time
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -43,15 +45,21 @@ from .events import (
     AGENT_TYPE_PROMPT_CENTER,
     EP_CHAT,
     EP_CHAT_V2,
+    EP_CREDIT_CAMPAIGN,
+    EP_CREDIT_OVERVIEW,
     EP_CURRENT_USER,
     EP_MODEL_BUILTIN,
     EP_OPS_CLAIM,
     EP_OPS_CONFIRM,
     EP_OPS_DELIVERY,
     EP_STATISTICS_PLUGIN,
+    MAX_WEB_CREDIT_PAGES,
     OPS_CHANNEL,
+    PORTAL_HOST,
     SNAP_ENGINE_HOST,
     STS_HOST,
+    WEB_CREDIT_PAGE_SIZE,
+    WEB_PORTAL_UA,
     UpstreamProtocolViolation,
 )
 
@@ -235,6 +243,16 @@ class UpstreamHTTPError(base.UpstreamHTTPError):
     classify_status = staticmethod(codearts_events.classify_status)
 
 
+class _WebCookieExpired(Exception):
+    """portal 会话失效（未登录）。
+
+    portal 未登录不是 401：实测带失效 Cookie + XHR 头回 **200 空 body**，
+    页面导航请求回 SPA HTML，登录跳转则回 3xx 到 `auth.huaweicloud.com`。
+    这些形态都归「需要重贴 Cookie」，与 5xx/网络/形状变化（只是暂时拿不到
+    明细）分开，前者才在管理台打「已失效」标记。
+    """
+
+
 class CodeArtsClient(LazyClients):
     """上游 HTTP 客户端。主机与登录配置可覆盖，便于测试与灰度。"""
 
@@ -318,11 +336,16 @@ class CodeArtsClient(LazyClients):
     # ------------------------------------------------------------ 额度
 
     async def probe_quota(self, credential: CodeArtsCredential) -> Quota:
-        """积分余额（只读，不刷新）。
+        """积分余额（只读，不刷新）；有网页 Cookie 时叠加逐笔到期明细。
 
-        走 `{snap}/snap-manager/v1/statistics/plugin`：内置模型按积分计费，
-        上游只给「7 天内到期量」，登记成 `expiry_ladder` 参与「快过期先用」
-        的选号排序（顶层 `end_date` 不进阶梯，见 `parse_credits`）。
+        `statistics/plugin` 是**汇总口径的唯一来源**（remaining / total /
+        套餐到期日），网页明细只负责「哪一笔积分什么时候到期」：
+
+        * 无 `web_cookie` → 原样返回 statistics 结果，`expiry_ladder` 仍是
+          「7 天内到期量挂在探测时刻 + 7 天」的近似桶；
+        * 有 `web_cookie` → 拉 portal 的 activities/benefits，用真实 `expireAt`
+          构造逐包明细与到期阶梯；Cookie 失效/形状变化**静默回退**，不把
+          额度探测判失败（那会让账号看起来耗尽）。
 
         临时凭证的续期**不在**这里做：refresh_token 是一次性的，必须由
         `tasks.refresh.RefreshTask`（先落库再同步）独占轮转。若此处顺手刷新，
@@ -330,7 +353,25 @@ class CodeArtsClient(LazyClients):
         `the refresh token has been used`，且此处刷新结果不落库、DB 里的
         token 被烧成废票——实测由此把整条渠道打成 APIG.0602 硬失效。
         """
-        return await self._fetch_credits(credential)
+        quota = await self._fetch_credits(credential)
+        if not credential.web_cookie:
+            return quota
+        try:
+            detail = await self._probe_web_credits(credential)
+        except _WebCookieExpired as error:
+            # 会话过期只能重贴（portal 只认浏览器登录态，STS/refresh_token
+            # 都换不出新会话，实测）。这里只打标记供管理台提示，额度继续用汇总。
+            logger.warning("CodeArts 网页 Cookie 已失效（%s），额度详情节回退汇总口径；"
+                           "请在管理台重新粘贴", error)
+            return replace(quota, web_cookie_state="expired")
+        except (httpx.HTTPError, ValueError, UpstreamProtocolViolation) as error:
+            logger.info("CodeArts 网页额度接口不可用（%s: %s），回退汇总口径",
+                        type(error).__name__, error)
+            return quota
+        if detail is None:
+            return replace(quota, web_cookie_state="ok")
+        packages, ladder = detail
+        return _merge_web_credits(quota, packages, ladder, "ok")
 
     async def _fetch_credits(self, credential: CodeArtsCredential) -> Quota:
         """`/snap-manager/v1/statistics/plugin` → 额度（单位已是积分）。
@@ -342,6 +383,93 @@ class CodeArtsClient(LazyClients):
         data = await self._get_json(
             url, credential, short_headers(AGENT_TYPE_PROMPT_CENTER))
         return parse_credits(data)
+
+    async def _probe_web_credits(
+        self, credential: CodeArtsCredential,
+    ) -> tuple[list[dict[str, Any]], list[tuple[int, float]] | None] | None:
+        """网页控制台逐笔积分；无活动/无有效条目返回 None。
+
+        `_WebCookieExpired` 单独上抛（由 `probe_quota` 标记状态）；其余失败
+        （5xx、网络、形状变化）也上抛，由调用方回退汇总口径，不判探测失败。
+        """
+        overview = await self._portal_json(credential, EP_CREDIT_OVERVIEW)
+        rows: list[tuple[Any, Any]] = []
+        for campaign_id in _campaign_ids(overview):
+            rows.extend(await self._web_campaign_rows(credential, campaign_id))
+        return parse_web_credits(rows)
+
+    async def _web_campaign_rows(
+        self, credential: CodeArtsCredential, campaign_id: int,
+    ) -> list[tuple[Any, Any]]:
+        """单个活动的逐笔积分（按 `total` 翻页，页大小 100）。"""
+        rows: list[tuple[Any, Any]] = []
+        page = 1
+        while page <= MAX_WEB_CREDIT_PAGES:
+            data = await self._portal_json(
+                credential, f"{EP_CREDIT_CAMPAIGN}/{campaign_id}",
+                params={"pageNum": page, "pageSize": WEB_CREDIT_PAGE_SIZE})
+            benefits = data.get("benefits")
+            if not isinstance(benefits, list):
+                raise UpstreamProtocolViolation(
+                    "credit campaign response missing benefits")
+            title = data.get("campaignTitle")
+            rows.extend((title, item) for item in benefits)
+            if not benefits:
+                break
+            total = data.get("total")
+            if isinstance(total, int) and not isinstance(total, bool):
+                if len(rows) >= total:
+                    break
+            elif len(benefits) < WEB_CREDIT_PAGE_SIZE:
+                break
+            page += 1
+        return rows
+
+    async def _portal_json(self, credential: CodeArtsCredential, path: str, *,
+                           params: dict[str, Any] | None = None) -> dict[str, Any]:
+        """portal（控制台会话）GET → `data`；非 0 业务码按协议违规上抛。
+
+        必须带 `X-Requested-With`：缺了它 portal 把请求当页面导航，回 SPA
+        首页 HTML。AK/SK 签名对这些端点无效，**不要**在这里加签。
+        """
+        url = f"{PORTAL_HOST}{path}"
+        origin = _origin(PORTAL_HOST)
+        headers = {
+            "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
+            "Cookie": credential.web_cookie,
+            "User-Agent": WEB_PORTAL_UA,
+            "Origin": origin,
+            "Referer": f"{origin}/",
+        }
+        response = await self._short.get(url, headers=headers, params=params)
+        # 3xx 是跳登录/门户首页；401/403 是显式拒绝。都说明会话已失效。
+        if response.status_code in (301, 302, 303, 307, 308, 401, 403):
+            raise _WebCookieExpired(f"HTTP {response.status_code} from {path}")
+        response.raise_for_status()
+        text = response.text
+        # 未登录时 portal 回 SPA 首页（HTML）或 200 空 body（XHR + 失效 Cookie）。
+        if not text.strip() or text.lstrip().startswith("<"):
+            raise _WebCookieExpired(f"login/HTML response from {path}")
+        try:
+            payload = response.json()
+        except ValueError as error:
+            raise UpstreamProtocolViolation(
+                f"non-JSON response from {url}") from error
+        if not isinstance(payload, dict):
+            raise UpstreamProtocolViolation(
+                f"unexpected response from {url}")
+        code = payload.get("code")
+        if code in (401, 403):
+            raise _WebCookieExpired(f"business code {code} from {path}")
+        if code != 0:
+            raise UpstreamProtocolViolation(
+                f"unexpected response from {url}")
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            raise UpstreamProtocolViolation(
+                f"missing data from {url}")
+        return data
 
     # ------------------------------------------------------------ 每日签到
 
@@ -752,6 +880,120 @@ def _opt_number(obj: dict[str, Any], key: str) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return float(value)
+
+
+# 网页明细替换掉的分项包：portal 的 campaign benefits 就是福利积分，
+# 用它逐笔展开替代 statistics 里那一行汇总（基础/按需仍保留汇总口径）。
+_CREDIT_BONUS_PACKAGE = "福利积分"
+
+
+def parse_web_credits(
+    rows: list[tuple[Any, Any]], *, now: int | None = None,
+) -> tuple[list[dict[str, Any]], list[tuple[int, float]] | None] | None:
+    """portal campaign benefits → `(packages, expiry_ladder)`；无有效条目返回 None。
+
+    每条 benefit 是一次发放：`claimedAmount` 面额、`consumedAmount` 已用、
+    `expiredAmount` 已作废、`expireAt` 真实到期时刻。**逐笔到期只能在这里拿到**
+    （statistics 只给「7 天内到期量」总量）。
+
+    口径（实测 2026-11-11）：
+
+    * `expiredAmount` 不可信：已过 `expireAt` 的条目仍可能是 0，`status` 也
+      停在 `CLAIMED`/`CONFIRMED`。判死只看 `expireAt <= now`，不依赖这两个字段。
+    * 阶梯只收「还在有效期内且有剩余」的条目；**已过期的条目整体丢弃**（不展示），
+      剩余 = 面额 − 已用 − 已作废，
+      夹紧到 [0, 面额]，上游数值偶有超出（消耗统计滞后）。
+    * `expiring`（7 天内到期）由同一份明细按窗口算，替代 statistics 的
+      汇总窗口量，展示与阶梯因此同源。
+    """
+    stamp = int(time.time()) if now is None else now
+    packages: list[dict[str, Any]] = []
+    ladder: list[tuple[int, float]] = []
+    for title, item in rows:
+        if not isinstance(item, dict):
+            continue
+        claimed = _opt_number(item, "claimedAmount")
+        if claimed is None or claimed <= 0:
+            continue
+        consumed = _opt_number(item, "consumedAmount") or 0.0
+        expired = _opt_number(item, "expiredAmount") or 0.0
+        used = min(claimed, max(0.0, consumed + expired))
+        remaining = claimed - used
+        end = _iso_epoch(item.get("expireAt"))
+        # 已过期的逐笔积分不展示：`expiredAmount`/`status` 会滞后（过期后仍可能
+        # 是 0 / CLAIMED），只能按 `expireAt` 判死；留着只会把「早已作废、
+        # 上游还没回填」的余额画成可用额度。
+        if end is not None and end <= stamp:
+            continue
+        expiring: float | None = None
+        if end is not None and remaining > 0:
+            ladder.append((end, remaining))
+            if end - stamp <= CREDIT_EXPIRING_WINDOW_SECONDS:
+                expiring = remaining
+        name = item.get("benefitText")
+        packages.append({
+            "name": name if isinstance(name, str) and name.strip()
+                    else (title if isinstance(title, str) else ""),
+            "total": claimed,
+            "used": used,
+            "end": end,
+            "expiring": expiring,
+        })
+    if not packages:
+        return None
+    ladder.sort()
+    return packages, (ladder or None)
+
+
+def _merge_web_credits(
+    quota: Quota, packages: list[dict[str, Any]],
+    ladder: list[tuple[int, float]] | None,
+    state: str,
+) -> Quota:
+    """web 逐笔明细替换汇总里的福利包；余额/总量仍以 statistics 为准。"""
+    kept = [item for item in (quota.packages or [])
+            if item.get("name") != _CREDIT_BONUS_PACKAGE]
+    return Quota(remaining=quota.remaining, total=quota.total,
+                 cycle_end=quota.cycle_end, expiry_ladder=ladder,
+                 packages=(kept + packages) or None, probed_at=quota.probed_at,
+                 probe_failed=quota.probe_failed, web_cookie_state=state)
+
+
+def _campaign_ids(overview: dict[str, Any]) -> list[int]:
+    """overview `items[]` → 去重后的 campaignId 列表（畸形条目跳过）。"""
+    items = overview.get("items")
+    if not isinstance(items, list):
+        return []
+    ids: list[int] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        campaign_id = _opt_int(item.get("campaignId"))
+        if campaign_id is not None and campaign_id > 0 and campaign_id not in ids:
+            ids.append(campaign_id)
+    return ids
+
+
+def _iso_epoch(value: Any) -> int | None:
+    """ISO8601（`2026-11-11T16:10:13.866Z`）→ epoch 秒；不可解析返回 None。"""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=datetime.UTC)
+    return int(parsed.timestamp())
+
+
+def _origin(url: str) -> str:
+    """`https://host/portal` → `https://host`（Origin / Referer 用）。"""
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
 
 
 def _package_end_date(value: Any) -> int | None:

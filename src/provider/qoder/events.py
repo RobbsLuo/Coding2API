@@ -107,6 +107,10 @@ EP_DEVICE_POLL = "/api/v1/deviceToken/poll"
 EP_DEVICE_REFRESH = "/api/v1/deviceToken/refresh"
 EP_USERINFO = "/api/v1/userinfo"
 EP_QUOTA = "/api/v2/quota/usage"
+# 网页账号页的额度接口（需网页登录 Cookie，device token 打不通）：只有它给
+# **逐包到期**（`quota_detail[].expires_at`），device token 的 /quota/usage 只给
+# 两桶汇总。见 parse_web_quota。
+EP_CREDITS_WEB = "/api/v2/me/usages/big_model_credits"
 EP_PLAN = "/api/v2/user/plan"
 EP_CHECKIN_STATUS = "/sash/api/v1/me/daily-check-in/status"
 EP_CHECKIN_CLAIM = "/sash/api/v1/me/daily-check-in/claim"
@@ -141,6 +145,11 @@ EP_MODELS = "/algo/api/v2/model/list?Encode=1"
 MODELS_SIGN_PLAIN = b""
 
 CLIENT_UA = "Go-http-client/2.0"
+# 网页账号页的 UA：额度接口按网页会话鉴权，用 CLI 的 Go-http-client UA 会被
+# 风控挡（实测同 Cookie 下浏览器 UA 200）。只用于 `EP_CREDITS_WEB`。
+WEB_ACCOUNT_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) "
+                  "Chrome/131.0.0.0 Safari/537.36")
 DEFAULT_USER_TYPE = "personal_professional_trial"
 
 # 上游主动吊销离线会话的标记：命中则刷新无意义，需要重新登录。
@@ -513,12 +522,16 @@ def parse_quota(payload: dict[str, Any], *, now: int) -> Quota:
 
     明细包只作展示（各自独立到期，汇总数字看不出是哪些包），`cycle_end`
     取 `expiresAt`（毫秒自动归一）。
+
+    **这里没有逐包到期**：实测该接口只给两桶汇总，`expiresAt` 是周期重置
+    （实测值 9999-12-31），不承载任何包级到期。要逐包到期必须走网页账号页
+    接口，见 `parse_web_quota`。
     """
     base = _obj(payload.get("userQuota"))
     addon = _obj(payload.get("addOnQuota"))
     remaining = _num(base, "remaining") + _num(addon, "remaining")
     total = _num(base, "total") + _num(addon, "total")
-    end = _opt_epoch(payload.get("expiresAt"))
+    end = _real_epoch(payload.get("expiresAt"))
     packages = [
         {"name": "基础额度", "total": _num(base, "total"),
          "used": _num(base, "used"), "end": end},
@@ -526,6 +539,119 @@ def parse_quota(payload: dict[str, Any], *, now: int) -> Quota:
          "used": _num(addon, "used"), "end": end},
     ]
     return Quota(remaining=max(0.0, remaining), total=total, cycle_end=end,
+                 packages=packages, probed_at=now)
+
+
+# 网页额度接口的容器：顺序即展示顺序。国内版实测三个容器都返回（额度为 0 的
+# 也返回），缺键时当作空容器。
+_WEB_QUOTA_CONTAINERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("套餐内积分", ("plan_quota", "planQuota")),
+    ("资源包", ("resource_package_quota", "resourcePackageQuota")),
+    ("SOTA 专属积分",
+     ("dedicated_resource_package_quota", "dedicatedResourcePackageQuota")),
+)
+
+# `quota_detail[].source` 的中文名：同一个容器里的包来源可能不同（套餐内也有
+# 赠送来源），包名直接写来源更便于判断「哪一笔先过期」。未知来源退回容器名。
+_WEB_QUOTA_SOURCES: dict[str, str] = {
+    "PLAN": "套餐内积分",
+    "RESOURCE_PACKAGE_SOURCE_BONUS": "赠送积分",
+    "RESOURCE_PACKAGE_SOURCE_PURCHASE": "购买积分",
+}
+
+
+def _first_num(source: dict[str, Any], *keys: str) -> float:
+    """取第一个数值字段（兼容 snake_case / camelCase 两套上游拼法）。"""
+    for key in keys:
+        value = source.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return float(value)
+    return 0.0
+
+
+def _first_epoch(source: dict[str, Any], *keys: str) -> int | None:
+    for key in keys:
+        epoch = _opt_epoch(source.get(key))
+        if epoch is not None:
+            return epoch
+    return None
+
+
+# 上游「无到期」哨兵：253402214400000 毫秒 = 9999-12-31。真实重置不会在 70 年
+# 之后，任何 ≥ 2100-01-01 的到期值一律按「无到期信息」处理，否则界面会显示
+# 「9999/12/31 重置」这种等于没说的日期。
+EXPIRY_SENTINEL_MIN = 4_102_444_800
+
+
+def _real_epoch(value: Any) -> int | None:
+    epoch = _opt_epoch(value)
+    if epoch is None or epoch >= EXPIRY_SENTINEL_MIN:
+        return None
+    return epoch
+
+
+def parse_web_quota(payload: dict[str, Any], *, now: int) -> Quota | None:
+    """网页账号页额度接口 → Quota（**逐包到期** + 到期阶梯）。
+
+    `GET {website}/api/v2/me/usages/big_model_credits`（需网页登录 Cookie，
+    device token 打不通；见 `client.QoderClient._probe_web_quota`）。响应按容器
+    分组（套餐内 / 资源包 / SOTA），每容器 `quota_detail[]` 给逐包的
+    `limit_value` / `used_value` / `remaining_value` / `expires_at`（毫秒）/
+    `is_active`。只有这个接口能回答「哪笔积分什么时候作废」，`/quota/usage`
+    的顶层 `expiresAt` 做不到。
+
+    口径：
+    - `remaining` / `total` 用各容器 summary 求和（上游已按容器汇总；不再叠加
+      顶层 `total_quota`，那是三者的合计，会翻倍）；
+    - 明细包按 `quota_detail` 逐条展开，`end` 取该包自己的 `expires_at`；
+      `is_active=False` 的包不计入阶梯（上游已判失效，不能再被消耗），但仍
+      保留在 `packages` 里展示——「过期了还剩多少」是排查时最想知道的一条；
+    - `expiry_ladder` 只收 `is_active=True`、剩余 > 0、有到期时间的包，
+      供选号「快过期先用」；
+    - `cycle_end` 取阶梯里最早到期时刻（Quota 的定义）。
+    """
+    packages: list[dict[str, Any]] = []
+    ladder: list[tuple[int, float]] = []
+    total = used = remaining = 0.0
+    for label, keys in _WEB_QUOTA_CONTAINERS:
+        container = _obj(next((payload[key] for key in keys
+                               if isinstance(payload.get(key), dict)), None))
+        summary = _obj(container.get("quota_summary")
+                       or container.get("quotaSummary"))
+        total += _first_num(summary, "limit_value", "limitValue")
+        used += _first_num(summary, "used_value", "usedValue")
+        remaining += _first_num(summary, "remaining_value", "remainingValue")
+        detail = container.get("quota_detail") or container.get("quotaDetail")
+        if not isinstance(detail, list):
+            continue
+        for item in detail:
+            if not isinstance(item, dict):
+                continue
+            limit = _first_num(item, "limit_value", "limitValue")
+            used_value = _first_num(item, "used_value", "usedValue")
+            remain = _first_num(item, "remaining_value", "remainingValue")
+            end = _first_epoch(item, "expires_at", "expiresAt")
+            if end is not None and end >= EXPIRY_SENTINEL_MIN:
+                end = None
+            source = str(item.get("source") or "")
+            active = item.get("is_active", item.get("isActive"))
+            packages.append({
+                "name": _WEB_QUOTA_SOURCES.get(source, label),
+                "total": limit,
+                "used": used_value,
+                "end": end,
+            })
+            if active is False or remain <= 0 or end is None:
+                continue
+            ladder.append((end, remain))
+    if not packages:
+        # 空响应（容器全缺）不是额度 0：返回 None 让调用方回退 `/quota/usage`，
+        # 避免把「上游换了形状」显示成「余额耗尽」。
+        return None
+    cycle_end = min((stamp for stamp, _ in ladder), default=None)
+    return Quota(remaining=max(0.0, remaining), total=total,
+                 cycle_end=cycle_end,
+                 expiry_ladder=sorted(ladder) if ladder else None,
                  packages=packages, probed_at=now)
 
 

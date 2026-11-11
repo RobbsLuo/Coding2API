@@ -149,3 +149,13 @@ async def test_provider_stream_chat_pacer_pairing_and_release_on_error():
     _ = [e async for e in plain.stream_chat(
         {"access_key_id": "AK", "secret_access_key": "SK"}, {}, "m")]
     await plain.aclose()
+
+
+def test_provider_set_web_cookie_only_touches_that_field():
+    """与 Qoder 同纪律：只改 web_cookie，不重走归一（老字段原样保留）。"""
+    provider = CodeArtsProvider(client=_client(lambda _request: httpx.Response(200)))
+    data = {"access_key_id": "AK", "unknown_future": 1}
+    assert provider.set_web_cookie(data, " sid=1 ") == {
+        "access_key_id": "AK", "unknown_future": 1, "web_cookie": " sid=1 "}
+    assert "web_cookie" not in data
+    assert provider.set_web_cookie({"web_cookie": "x"}, "")["web_cookie"] == ""

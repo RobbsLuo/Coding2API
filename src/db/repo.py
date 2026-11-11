@@ -507,6 +507,12 @@ class CredentialRepository:
                 "token_issued_at = ? WHERE id = ?",
                 (self._cipher.encrypt(payload), expires_at, issued_at, credential_id))
 
+    def set_web_cookie_state(self, credential_id: str, state: str | None) -> None:
+        """写入/清除网页 Cookie 状态（管理台提示用，不参与调度）。"""
+        with self._db.transaction() as conn:
+            conn.execute("UPDATE credentials SET web_cookie_state = ? WHERE id = ?",
+                         (state, credential_id))
+
     def find_login_credential(self, provider: str,
                               identity: Callable[[dict[str, Any]], frozenset[str]],
                               target: frozenset[str]) -> str | None:
@@ -603,10 +609,12 @@ class CredentialRepository:
             conn.execute(
                 "UPDATE credentials SET quota_remaining = ?, quota_total = ?, "
                 "quota_cycle_end = ?, quota_expiry_ladder = ?, quota_packages = ?, "
+                "web_cookie_state = ?, "
                 "quota_probed_at = ?, health = ? "
                 "WHERE id = ?",
                 (quota.remaining, quota.total, quota.cycle_end,
                  _ladder_text(quota.expiry_ladder), _packages_text(quota.packages),
+                 quota.web_cookie_state,
                  quota.probed_at,
                  health_score(quota), credential_id),
             )
@@ -810,9 +818,13 @@ class CredentialRepository:
         if row is None:
             return None
         plaintext = self._cipher.decrypt(row["data_enc"])
+        credential = json.loads(plaintext.decode("utf-8"))
+        # 网页 Cookie 是浏览器会话凭据（能读账号页全部数据，权限比推理 token
+        # 更宽），导出件默认不带：少一处明文泄漏面，重装后重新粘贴即可。
+        if row["provider"] in ("qoder", "codearts"):
+            credential.pop("web_cookie", None)
         return {"provider": row["provider"], "nickname": row["nickname"],
-                "tags": tags_value(row["tags"]),
-                "credential": json.loads(plaintext.decode("utf-8"))}
+                "tags": tags_value(row["tags"]), "credential": credential}
 
     def nickname_of(self, credential_id: str) -> str | None:
         """单条凭证昵称（供实时流按需补名字，避免每事件拉整份列表）。
@@ -861,6 +873,7 @@ class CredentialRepository:
             "quota_total, quota_cycle_end, "
             "quota_probed_at, growth_last_run_at, growth_last_result, created_at, added_by, "
             "quota_expiry_ladder, quota_packages, data_enc, "
+            "web_cookie_state, "
             "token_expires_at, token_issued_at, "
             "tags "
             "FROM credentials ORDER BY created_at").fetchall()

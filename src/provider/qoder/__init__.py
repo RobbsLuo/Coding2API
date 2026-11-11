@@ -101,6 +101,16 @@ class QoderProvider:
     async def probe_quota(self, credential_data: dict) -> Quota:
         return await self.client.probe_quota(QoderCredential.from_dict(credential_data))
 
+    def set_web_cookie(self, credential_data: dict, cookie: str) -> dict:
+        """写入/清除网页 Cookie（逐包到期的数据源，见 `client.probe_quota`）。
+
+        只改这一个字段：不重走 `from_dict` 归一，避免把老凭证里未识别的字段
+        丢掉（导出/再导入的可逆性靠这条保证）。空串 = 清除，回到汇总口径。
+        """
+        data = dict(credential_data)
+        data["web_cookie"] = cookie
+        return data
+
     async def list_models(self, credential_data: dict) -> list[Model]:
         return await self.client.fetch_models(
             QoderCredential.from_dict(credential_data))

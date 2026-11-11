@@ -70,6 +70,21 @@ EP_OPS_CLAIM = "/v1/ops/claim"
 EP_OPS_CONFIRM = "/v1/ops/confirm"
 # delivery 查询的渠道参数（上游按渠道返回可领活动，实测固定 `IDE`）。
 OPS_CHANNEL = "IDE"
+
+# 网页控制台（portal）积分明细：`/portal/promptcenter/v1/ops/credit/*`。
+# **只认控制台会话 Cookie**（`devclouddevuibjJ_SESSION_ID` 等），AK/SK 签名
+# 打不通（实测：带签名 + XHR 头回 200 空 body）。还必须带
+# `X-Requested-With: XMLHttpRequest`，否则 portal 回 SPA 首页 HTML。
+# overview 动态列出账号参与过的活动，campaign 按 ID 分页返回逐笔积分。
+EP_CREDIT_OVERVIEW = "/promptcenter/v1/ops/credit/overview"
+EP_CREDIT_CAMPAIGN = "/promptcenter/v1/ops/credit/campaign"
+WEB_CREDIT_PAGE_SIZE = 100
+# 翻页上限：100 条/页 × 20 页 = 2000 笔，签到账号数年也用不满；防上游
+# `total` 异常导致死循环。
+MAX_WEB_CREDIT_PAGES = 20
+WEB_PORTAL_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                 "AppleWebKit/537.36 (KHTML, like Gecko) "
+                 "Chrome/130.0.0.0 Safari/537.36")
 # 每日签到活动的**历史** ID。早期活动 ID 是 1（「每日签到领1000 积分」）；2026-11
 # 上游把它换成 ID 34（「每日签到领100积分」），旧常量匹配不到任何条目 →
 # `daily_credit_campaign` 恒返回 None → checkin() 回「官方签到活动未开放」并按

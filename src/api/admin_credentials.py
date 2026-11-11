@@ -29,6 +29,7 @@ from ..audit.actions import (
     ACTION_CREDENTIAL_SWITCH_ACCOUNT,
     ACTION_CREDENTIAL_TAGS,
     ACTION_CREDENTIAL_TOGGLE,
+    ACTION_CREDENTIAL_WEB_COOKIE,
 )
 from ..auth.rbac import require_operator
 from ..compat.openai.request import InvalidRequest
@@ -65,6 +66,10 @@ BATCH_MAX_IDS = 200
 # 批量导入上限：每条都要解密去重 + 写库 + 入队探测，允许无上限等于允许一次
 # 请求里塞几千次数据库写。100 条覆盖正常「换号」场景，又不会把事件循环占死。
 BATCH_IMPORT_MAX_ITEMS = 100
+
+# 网页 Cookie 的最大长度：正常一条 Qoder 会话 Cookie 几百字符，1 万已远超；
+# 上限只为拦住误粘贴整段请求头/文件内容，不做格式校验（Cookie 结构随上游变）。
+WEB_COOKIE_MAX_LENGTH = 10_000
 
 # 批量的在途并发上限。后台任务用 Pacer 严格串行化上游请求，但那是跨任务
 # 节流；批量端点由操作员手动触发，若完全串行则 50 个号要等几分钟才返回。
@@ -514,6 +519,43 @@ def create_router(services: Services) -> APIRouter:
         services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_TAGS,
                               target=credential_id, detail=",".join(tags) or "（清空）")
         return {"tags": tags}
+
+    @router.put("/api/credentials/{credential_id}/web-cookie")
+    async def set_web_cookie(credential_id: str, payload: dict,
+                             _csrf: None = Depends(csrf_protected),
+                             principal=Depends(principal_from_request)):
+        """写入/清除网页 Cookie（逐包/逐笔到期数据源）。
+
+        Qoder：device token 打不通网页额度接口；CodeArts：AK/SK 签名打不通
+        控制台 portal。只有网页登录会话能拿到「哪笔积分什么时候过期」。
+        Cookie 属于凭证数据（加密落库），不进返回体、不进审计 detail。空串 =
+        清除，额度探测回退到汇总接口口径。
+        """
+        require_operator(principal)
+        provider, data = provider_for(
+            credential_id, "set_web_cookie",
+            error="credential does not support web cookie")
+        cookie = payload.get("cookie")
+        if not isinstance(cookie, str):
+            raise InvalidRequest("cookie must be a string")
+        cookie = cookie.strip()
+        if len(cookie) > WEB_COOKIE_MAX_LENGTH:
+            raise InvalidRequest(
+                f"cookie too long (max {WEB_COOKIE_MAX_LENGTH} characters)")
+        credentials.save_credential_data(
+            credential_id, provider.set_web_cookie(data, cookie))
+        # 新 Cookie 的有效性以下一轮探测为准：先清掉旧状态，避免「刚粘贴仍显示
+        # 已失效」；清除 Cookie 时同样回到无状态。
+        credentials.set_web_cookie_state(credential_id, None)
+        logger.info("管理员 %s 设置凭证 %s 网页 Cookie: %s",
+                    principal.username, credential_id,
+                    "已设置" if cookie else "已清除")
+        services.audit.record(actor=principal.username,
+                              action=ACTION_CREDENTIAL_WEB_COOKIE,
+                              target=credential_id,
+                              detail="已设置" if cookie else "已清除")
+        schedule_probe(credential_id)
+        return {"ok": True}
 
     @router.post("/api/credentials/pin")
     async def pin_credential(payload: dict,

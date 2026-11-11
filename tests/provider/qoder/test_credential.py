@@ -128,3 +128,20 @@ def test_credential_from_dict_rejects_non_dict():
 
 def test_detect_realm_from_plain_qoder_com():
     assert qoder_events.detect_realm_from_domain("www.qoder.com") == "intl"
+
+
+def test_web_cookie_roundtrip_and_aliases():
+    """网页 Cookie 随凭证加密落库；导出/再导入与刷新都不丢它。"""
+    raw = {"access_token": "t", "web_cookie": "qoder_session_cookie=abc"}
+    assert QoderCredential.from_dict(raw).to_dict()["web_cookie"] == (
+        "qoder_session_cookie=abc")
+    # 兼容 cookie 别名
+    assert QoderCredential.from_dict({"access_token": "t",
+                                      "cookie": "sid=1"}).web_cookie == "sid=1"
+    # 缺字段 = 空串（没有网页会话，额度探测走汇总接口）
+    assert QoderCredential.from_dict({"access_token": "t"}).web_cookie == ""
+
+
+def test_merge_refreshed_preserves_web_cookie():
+    old = cred(web_cookie="qoder_session_cookie=abc")
+    assert merge_refreshed(old, {"token": "dt-new"}).web_cookie == old.web_cookie

@@ -69,6 +69,10 @@ class QoderCredential:
     organization_id: str = ""
     organization_name: str = ""
     domain: str = ""
+    # 网页账号页 Cookie（可选）：/api/v2/me/usages/big_model_credits 只认网页
+    # 登录会话，device token 打不通。有它才能拿到**逐包到期**（见
+    # events.parse_web_quota）；缺失时额度探测照旧走 /quota/usage。
+    web_cookie: str = ""
 
     @property
     def is_oauth(self) -> bool:
@@ -115,6 +119,7 @@ class QoderCredential:
             "organization_id": self.organization_id,
             "organization_name": self.organization_name,
             "domain": self.domain,
+            "web_cookie": self.web_cookie,
         }
 
     @classmethod
@@ -141,6 +146,7 @@ class QoderCredential:
             organization_id=_opt_str(raw, "organization_id", "organizationId"),
             organization_name=_opt_str(raw, "organization_name", "organizationName"),
             domain=domain,
+            web_cookie=_opt_str(raw, "web_cookie", "webCookie", "cookie"),
         )
 
 
@@ -232,6 +238,7 @@ def merge_refreshed(
         organization_id=credential.organization_id,
         organization_name=credential.organization_name,
         domain=credential.domain or get_realm_config(credential.realm).domain,
+        web_cookie=credential.web_cookie,
     )
 
 

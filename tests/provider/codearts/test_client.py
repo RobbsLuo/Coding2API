@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import time
 
@@ -17,6 +18,7 @@ from src.provider.codearts.client import (
     UpstreamHTTPError,
     _credit_rate,
     _flatten_content,
+    _iso_epoch,
     _legacy_blocks,
     _models_from_items,
     _parse_ratio,
@@ -24,6 +26,7 @@ from src.provider.codearts.client import (
     derive_chat_id,
     new_chat_id,
     parse_credits,
+    parse_web_credits,
     prepare_body,
     request_path,
     sdk_date,
@@ -605,3 +608,314 @@ async def test_client_request_json_error_paths():
 
     with pytest.raises(codearts_events.UpstreamProtocolViolation, match="shape"):
         await _client(non_object).caller_identity(_cred())
+
+
+# ---------------------------------------------------------------- 网页额度明细
+
+def _web_stats(*, expiring: float | None = None) -> dict:
+    bonus: dict = {"name": "usageBonusPackageCredit",
+                   "package_credit_amount": 15000.0,
+                   "package_credit_used": 100.0}
+    if expiring is not None:
+        bonus["package_credit_expiring_amount"] = expiring
+    return {
+        "metrics": [
+            {"name": "usageTotalPackageCredit",
+             "package_credit_amount": 15500.0,
+             "package_credit_remain": 15400.0},
+            {"name": "usageBasicPackageCredit",
+             "package_credit_amount": 500.0,
+             "package_credit_used": 0.0},
+            bonus,
+        ],
+        "end_date": "2030-12-01",
+    }
+
+
+def _iso(epoch: int) -> str:
+    return datetime.datetime.fromtimestamp(
+        epoch, datetime.UTC).isoformat().replace("+00:00", "Z")
+
+
+def _web_client(*, overview: dict, campaigns: dict, stats: dict | None = None,
+                on_overview=None):
+    """portal 明细路由；campaign 值可以是单页 dict 或按页排列的 list。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == codearts_events.EP_STATISTICS_PLUGIN:
+            return httpx.Response(200, json=stats or _web_stats())
+        assert request.headers["Cookie"] == "DEVCLOUD=abc"
+        assert request.headers["X-Requested-With"] == "XMLHttpRequest"
+        assert request.headers["User-Agent"] == codearts_events.WEB_PORTAL_UA
+        # 网页控制台只认会话 Cookie：绝不能带 AK/SK 签名头
+        assert "Authorization" not in request.headers
+        assert "X-Security-Token" not in request.headers
+        if path.endswith(codearts_events.EP_CREDIT_OVERVIEW):
+            if on_overview is not None:
+                return on_overview(request)
+            return httpx.Response(200, json={"code": 0, "data": overview})
+        for campaign_id, pages in campaigns.items():
+            if path.endswith(f"{codearts_events.EP_CREDIT_CAMPAIGN}/{campaign_id}"):
+                page = int(request.url.params["pageNum"])
+                payload = pages[page - 1] if isinstance(pages, list) else pages
+                return httpx.Response(200, json={"code": 0, "data": payload})
+        return httpx.Response(404)
+    return _client(handler)
+
+
+def _web_cred():
+    return _cred(web_cookie="DEVCLOUD=abc")
+
+
+async def test_probe_quota_uses_web_credits_when_cookie_present():
+    """有 Cookie：福利包换成逐笔明细，阶梯用真实 expireAt（余额仍走汇总）。"""
+    active = _iso(int(time.time()) + 30 * 86400)
+    older = _iso(int(time.time()) + 60 * 86400)
+    expired = _iso(int(time.time()) - 86400)
+    overview = {"items": [
+        {"campaignId": 34}, {"campaignId": 1},
+        {"campaignId": "bad"}, "junk", {"campaignId": True}, {"campaignId": 1},
+    ]}
+    campaigns = {
+        34: {"campaignTitle": "每日签到领100积分", "total": 2, "benefits": [
+            {"benefitId": 1, "claimedAmount": 100.0, "consumedAmount": 40.0,
+             "expiredAmount": 0.0, "expireAt": active,
+             "benefitText": "每日签到领100积分"},
+            {"benefitId": 2, "claimedAmount": 100.0, "consumedAmount": 100.0,
+             "expiredAmount": 0.0, "expireAt": expired,
+             "benefitText": "已用尽"},
+        ]},
+        # 没有 benefitText：回落 campaignTitle
+        1: {"campaignTitle": "每日签到领积分", "total": 1, "benefits": [
+            {"benefitId": 3, "claimedAmount": 1000.0, "consumedAmount": 0.0,
+             "expiredAmount": 0.0, "expireAt": older},
+        ]},
+    }
+    quota = await _web_client(overview=overview, campaigns=campaigns
+                              ).probe_quota(_web_cred())
+
+    assert quota.remaining == pytest.approx(15400.0)
+    assert quota.total == pytest.approx(15500.0)
+    names = [item["name"] for item in quota.packages]
+    # 已过期（benefitId=2，expireAt 在昨天）整条丢弃：
+    assert names == ["基础积分", "每日签到领100积分", "每日签到领积分"]
+    assert "福利积分" not in names
+    assert quota.expiry_ladder == [(_iso_epoch(active), 60.0),
+                                   (_iso_epoch(older), 1000.0)]
+    assert quota.web_cookie_state == "ok"
+
+
+async def test_probe_quota_web_credits_paginates_until_total():
+    """按 total 翻页；total 非 int 时靠「不满一页」收尾。"""
+    requested_pages: list[int] = []
+    first = [{"claimedAmount": 1.0, "expireAt": "2030-01-01T00:00:00Z"}
+             for _ in range(100)]
+    second = [{"claimedAmount": 1.0, "expireAt": "2030-01-02T00:00:00Z"}
+              for _ in range(50)]
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == codearts_events.EP_STATISTICS_PLUGIN:
+            return httpx.Response(200, json=_web_stats())
+        if path.endswith(codearts_events.EP_CREDIT_OVERVIEW):
+            return httpx.Response(200, json={"code": 0,
+                                             "data": {"items": [{"campaignId": 7}]}})
+        page = int(request.url.params["pageNum"])
+        assert request.url.params["pageSize"] == str(
+            codearts_events.WEB_CREDIT_PAGE_SIZE)
+        requested_pages.append(page)
+        if page == 1:
+            return httpx.Response(200, json={"code": 0, "data": {
+                "campaignTitle": "活动", "total": 150, "benefits": first}})
+        return httpx.Response(200, json={"code": 0, "data": {
+            "campaignTitle": "活动", "total": 150, "benefits": second}})
+
+    quota = await _client(handler).probe_quota(_web_cred())
+    assert requested_pages == [1, 2]
+    assert len(quota.packages) == 1 + 150  # 基础积分 + 两页逐笔
+    assert quota.expiry_ladder and len(quota.expiry_ladder) == 150  # 逐笔各一档
+
+
+async def test_web_campaign_rows_pagination_edges(monkeypatch):
+    """空页、非数值 total 的短页、翻页上限都要能收尾（不死循环）。"""
+    def handler_factory(pages):
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == codearts_events.EP_STATISTICS_PLUGIN:
+                return httpx.Response(200, json=_web_stats(expiring=500.0))
+            if request.url.path.endswith(codearts_events.EP_CREDIT_OVERVIEW):
+                return httpx.Response(200, json={"code": 0,
+                                                 "data": {"items": [{"campaignId": 7}]}})
+            page = int(request.url.params["pageNum"])
+            return httpx.Response(200, json={"code": 0, "data": pages[page - 1]})
+        return handler
+
+    # 空页：立即收尾，整体回退（没有可用明细）
+    empty = await _client(handler_factory([
+        {"campaignTitle": "空", "total": 0, "benefits": []},
+    ])).probe_quota(_web_cred())
+    assert "福利积分" in [item["name"] for item in empty.packages]
+
+    # total 不是整数：满页继续，靠「不满一页」收尾
+    full = [{"claimedAmount": 1.0, "expireAt": "2030-01-01T00:00:00Z"}
+            for _ in range(codearts_events.WEB_CREDIT_PAGE_SIZE)]
+    short = await _client(handler_factory([
+        {"campaignTitle": "短页", "total": "bad", "benefits": full},
+        {"campaignTitle": "短页", "total": "bad",
+         "benefits": [{"claimedAmount": 1.0, "expireAt": "2030-01-01T00:00:00Z"}]},
+    ])).probe_quota(_web_cred())
+    assert len(short.packages) == 1 + codearts_events.WEB_CREDIT_PAGE_SIZE + 1
+
+    # 翻页上限：total 远大于实际，仍会在 MAX 页后停
+    monkeypatch.setattr("src.provider.codearts.client.MAX_WEB_CREDIT_PAGES", 1)
+    capped = await _client(handler_factory([
+        {"campaignTitle": "长", "total": 999,
+         "benefits": [{"claimedAmount": 1.0, "expireAt": "2030-01-01T00:00:00Z"}
+                      for _ in range(codearts_events.WEB_CREDIT_PAGE_SIZE)]},
+        {"campaignTitle": "长", "total": 999, "benefits": []},
+    ])).probe_quota(_web_cred())
+    assert len(capped.packages) == 1 + codearts_events.WEB_CREDIT_PAGE_SIZE
+
+
+async def test_probe_quota_web_credits_fall_back_on_any_failure():
+    """Cookie 失效 / 形状变化 / 网络错误都只丢明细，额度仍走汇总口径。"""
+    def status_401(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, content=b'{"code":401}')
+
+    def non_json(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="nope")
+
+    def bad_code(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 1, "message": "denied"})
+
+    def missing_data(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 0})
+
+    def network_boom(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom", request=request)
+
+    def non_object(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[1, 2])
+
+    def server_error(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, content=b"down")
+
+    for overview_handler, state in (
+            (status_401, "expired"),
+            (non_json, None),
+            (non_object, None),
+            (server_error, None),
+            (bad_code, None),
+            (missing_data, None),
+            (network_boom, None)):
+        before = int(time.time())
+        quota = await _web_client(overview={}, campaigns={},
+                                  stats=_web_stats(expiring=500.0),
+                                  on_overview=overview_handler
+                                  ).probe_quota(_web_cred())
+        assert quota.remaining == pytest.approx(15400.0)
+        assert [item["name"] for item in quota.packages] == ["基础积分", "福利积分"]
+        assert len(quota.expiry_ladder) == 1
+        assert quota.expiry_ladder[0][1] == pytest.approx(500.0)
+        assert before + CREDIT_EXPIRING_WINDOW_SECONDS <= quota.expiry_ladder[0][0]
+        assert quota.web_cookie_state == state
+
+    # 活动页形状坏了也整体回退（不能在缺数据时拼出半份明细）
+    def no_benefits(request: httpx.Request) -> httpx.Response:
+        if request.url.path == codearts_events.EP_STATISTICS_PLUGIN:
+            return httpx.Response(200, json=_web_stats(expiring=500.0))
+        if request.url.path.endswith(codearts_events.EP_CREDIT_OVERVIEW):
+            return httpx.Response(200, json={"code": 0,
+                                             "data": {"items": [{"campaignId": 34}]}})
+        return httpx.Response(200, json={"code": 0, "data": {"benefits": "bad"}})
+
+    quota = await _client(no_benefits).probe_quota(_web_cred())
+    assert quota.expiry_ladder and quota.expiry_ladder[0][1] == pytest.approx(500.0)
+
+
+async def test_probe_quota_web_credits_empty_overview_falls_back():
+    """overview 没有任何 campaign（或 items 形状不对）→ 汇总口径。"""
+    for overview in ({"items": []}, {"items": "bad"}, {}):
+        quota = await _web_client(overview=overview, campaigns={}
+                                  ).probe_quota(_web_cred())
+        assert quota.remaining == pytest.approx(15400.0)
+        assert "福利积分" in [item["name"] for item in quota.packages]
+        # 会话本身可用（只是没有活动）→ 不应误报失效
+        assert quota.web_cookie_state == "ok"
+
+
+def test_parse_web_credits_edges_and_clamps():
+    """逐笔解析：过滤脏条目、消耗夹紧、过期剔除、命名回落。"""
+    now = 1_000_000
+    within = _iso(now + 86400)
+    rows = [
+        ("标题", {"claimedAmount": 10.0, "consumedAmount": 4.0,
+                  "expiredAmount": 2.0, "expireAt": within}),
+        ("用完", {"claimedAmount": 5.0, "consumedAmount": 99.0}),
+        (None, {"claimedAmount": 7.0, "benefitText": "  "}),
+        ("only-title", {"claimedAmount": 3.0, "benefitText": 123}),
+        ("零", {"claimedAmount": 0.0}),
+        ("布尔", {"claimedAmount": True}),
+        ("坏条目", "bad"),
+        ("坏日期", {"claimedAmount": 1.0, "expireAt": "not-a-date"}),
+        ("已过期", {"claimedAmount": 9.0, "consumedAmount": 1.0,
+                    "expireAt": _iso(now - 1)}),
+        ("负消耗", {"claimedAmount": 1.0, "consumedAmount": -5.0}),
+        ("远期", {"claimedAmount": 2.0, "benefitText": "远期",
+                  "expireAt": "2030-01-01T00:00:00"}),
+    ]
+    packages, ladder = parse_web_credits(rows, now=now)
+    assert [item["name"] for item in packages] == [
+        "标题", "用完", "", "only-title", "坏日期", "负消耗", "远期"]
+    assert "已过期" not in [item["name"] for item in packages]
+    assert packages[0]["used"] == pytest.approx(6.0)
+    assert packages[0]["expiring"] == pytest.approx(4.0)
+    assert packages[1]["used"] == pytest.approx(5.0)
+    assert packages[2]["end"] is None and packages[2]["expiring"] is None
+    assert packages[6]["end"] == _iso_epoch("2030-01-01T00:00:00Z")
+    assert ladder == [(now + 86400, 4.0),
+                      (_iso_epoch("2030-01-01T00:00:00Z"), 2.0)]
+    # 空输入 / 全是无效条目 → None（调用方回退）
+    assert parse_web_credits([], now=now) is None
+    assert parse_web_credits([("x", {"claimedAmount": 0})], now=now) is None
+
+
+async def test_probe_quota_web_detail_keeps_probe_failed_flag():
+    """汇总接口判「未知」时，网页明细不能把它洗成「成功但余额空」。"""
+    stats = {"metrics": [{"name": "usageUnknown", "x": 1}]}
+    quota = await _web_client(
+        overview={"items": [{"campaignId": 34}]},
+        campaigns={34: {"campaignTitle": "x", "total": 1, "benefits": [
+            {"claimedAmount": 10.0, "expireAt": "2030-01-01T00:00:00Z"}]}},
+        stats=stats,
+    ).probe_quota(_web_cred())
+    assert quota.probe_failed is True and quota.remaining is None
+    assert quota.web_cookie_state == "ok"
+    assert quota.packages and quota.packages[-1]["total"] == pytest.approx(10.0)
+
+
+async def test_probe_quota_marks_web_cookie_expired_on_login_shapes():
+    """portal 未登录的四种形态都打「已失效」，其余失败保持未知。"""
+    def empty(_request):
+        return httpx.Response(200, content=b"")
+
+    def html(_request):
+        return httpx.Response(200, text="<!DOCTYPE html><html></html>")
+
+    def redirect(_request):
+        return httpx.Response(302, headers={"Location": "https://auth.huaweicloud.com/authui/login"})
+
+    def business_401(_request):
+        return httpx.Response(200, json={"code": 401, "message": "login"})
+
+    def business_403(_request):
+        return httpx.Response(200, json={"code": 403, "message": "forbidden"})
+
+    def forbidden(_request):
+        return httpx.Response(403, content=b"no")
+
+    for handler in (empty, html, redirect, business_401, business_403, forbidden):
+        quota = await _web_client(overview={}, campaigns={},
+                                  on_overview=handler).probe_quota(_web_cred())
+        assert quota.web_cookie_state == "expired"
+        assert "福利积分" in [item["name"] for item in quota.packages]
+        assert quota.remaining == pytest.approx(15400.0)

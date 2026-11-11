@@ -868,3 +868,91 @@ def test_parse_inner_chunk_attaches_upstream_reported_model():
     plain = qoder_events.parse_inner_chunk(
         json.dumps({"choices": [{"delta": {"content": "hi"}}]}))
     assert plain[0].model is None
+
+
+# ------------------------------------------------- 网页额度接口（逐包到期）
+
+WEB_QUOTA = {
+    "quota_key": "big_model_credits",
+    "plan_quota": {
+        "quota_summary": {"limit_value": 0, "used_value": 0, "remaining_value": 0},
+        "quota_detail": [{"limit_value": 0, "used_value": 0, "remaining_value": 0,
+                          "expires_at": 0, "is_active": True, "source": "PLAN"}],
+    },
+    "resource_package_quota": {
+        "quota_summary": {"limit_value": 200, "used_value": 0, "remaining_value": 200},
+        "quota_detail": [
+            {"limit_value": 100, "used_value": 0, "remaining_value": 100,
+             "expires_at": 1_795_000_000_000, "is_active": True,
+             "source": "RESOURCE_PACKAGE_SOURCE_BONUS"},
+            {"limit_value": 100, "used_value": 0, "remaining_value": 100,
+             "expires_at": 1_796_000_000_000, "is_active": True,
+             "source": "RESOURCE_PACKAGE_SOURCE_BONUS"},
+        ],
+    },
+}
+
+DEVICE_QUOTA = {
+    "userQuota": {"total": 0, "used": 0, "remaining": 0},
+    "addOnQuota": {"total": 999, "used": 0, "remaining": 999},
+    "expiresAt": 253_402_214_400_000,
+}
+
+
+def _web_cookie_cred():
+    return cred(web_cookie="qoder_session_cookie=abc; other=1")
+
+
+def _web_handler(web_response, device_response=DEVICE_QUOTA):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == qoder_events.EP_CREDITS_WEB:
+            assert request.url.host == "qoder.cn"      # cn 区域网页站
+            assert request.headers["Cookie"] == "qoder_session_cookie=abc; other=1"
+            # 网页接口按浏览器会话鉴权：不能带 CLI 的 Go UA，也不带 Bearer
+            assert request.headers["User-Agent"] == qoder_events.WEB_ACCOUNT_UA
+            assert "Authorization" not in request.headers
+            return web_response(request)
+        assert request.url.path == qoder_events.EP_QUOTA
+        return httpx.Response(200, json=device_response)
+    return handler
+
+
+async def test_probe_quota_prefers_web_endpoint_when_cookie_present():
+    client = handler_for(_web_handler(lambda _r: httpx.Response(200, json=WEB_QUOTA)))
+    quota = await client.probe_quota(_web_cookie_cred())
+    # 逐包到期：cycle_end 是最早的包到期日，而不是 9999 哨兵
+    assert quota.remaining == 200 and quota.total == 200
+    assert quota.cycle_end == 1_795_000_000
+    assert quota.expiry_ladder == [(1_795_000_000, 100.0),
+                                   (1_796_000_000, 100.0)]
+
+
+async def test_probe_quota_falls_back_when_web_cookie_expired():
+    """Cookie 过期（401）只丢明细，不冷却也不硬禁用：回退汇总接口继续出号。"""
+    client = handler_for(_web_handler(
+        lambda _r: httpx.Response(401, content=b'{"errorCode":"Unauthorized"}')))
+    quota = await client.probe_quota(_web_cookie_cred())
+    assert quota.remaining == 999 and quota.total == 999
+    assert quota.cycle_end is None          # 9999 哨兵归一成未知
+
+
+async def test_probe_quota_falls_back_when_web_endpoint_unusable():
+    """形状变了 / 非 JSON / 网络错误都只回退，不把探测判失败。"""
+    for bad in (
+        lambda _r: httpx.Response(404, content=b"gone"),
+        lambda _r: httpx.Response(200, text="nope"),
+        lambda _r: httpx.Response(200, json={"quota_key": "big_model_credits"}),
+        lambda request: (_ for _ in ()).throw(httpx.ConnectError("boom",
+                                                                 request=request)),
+    ):
+        quota = await handler_for(_web_handler(bad)).probe_quota(_web_cookie_cred())
+        assert quota.remaining == 999
+
+
+async def test_probe_quota_skips_web_endpoint_without_cookie():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == qoder_events.EP_QUOTA   # 不出网到网页接口
+        return httpx.Response(200, json=DEVICE_QUOTA)
+
+    quota = await handler_for(handler).probe_quota(cred())
+    assert quota.remaining == 999
