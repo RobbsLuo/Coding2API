@@ -353,6 +353,12 @@ export const api = {
       method: "PUT",
       ...json({ cookie }),
     }),
+  /** 调度权重（null = 恢复默认）；只改同健康档内的选号次序。 */
+  setCredentialWeight: (id: string, weight: number | null) =>
+    request<{ routing_weight: number | null }>(`/api/credentials/${id}/weight`, {
+      method: "PUT",
+      ...json({ weight }),
+    }),
   /** 批量运维：一次对多条凭证执行同一动作，后端逐条隔离返回结果。 */
   batchCredentials: (action: BatchAction, ids: string[], enabled?: boolean) =>
     request<BatchResult>("/api/credentials/batch", {

@@ -518,3 +518,50 @@ def test_select_skips_model_cooled_credential_when_filtered():
     # 同一份候选换模型：a 的模型级冷却不生效，健康度更高者胜出
     usable = [c for c in (cooled_a, b) if c.is_selectable(NOW, "kimi-k2")]
     assert s.select(usable, set(), NOW) == "a"
+
+
+# ---------------------------------------------------------------- 管理员权重
+
+
+def test_select_weight_reorders_within_health_tier():
+    """同健康档内高权重优先：压过到期积分与在途分摊。"""
+    pool = [
+        cand("hot", health=90, routing_weight=50),
+        cand("expiring", health=90, expiry_ladder=[(NOW + 600, 500.0)]),
+        cand("busy", health=90, routing_weight=50, inflight=3),
+    ]
+    # hot 与 busy 同权重，退到原链按在途少者（hot 0 < busy 3）
+    assert Scheduler().select(pool, set(), NOW) == "hot"
+    # 高权重仍然压过「到期积分多」：busy(50) > expiring(0)
+    assert Scheduler().select([c for c in pool if c.credential_id != "hot"],
+                              set(), NOW) == "busy"
+    # 权重打平才退回原链：到期积分多者优先
+    tied = [cand("a", health=90, routing_weight=5),
+            cand("b", health=90, routing_weight=5,
+                 expiry_ladder=[(NOW + 600, 500.0)])]
+    assert Scheduler().select(tied, set(), NOW) == "b"
+
+
+def test_select_negative_weight_ranks_last_in_tier():
+    """负权重 = 备用号：同档内排最后，哪怕它到期积分最多。"""
+    pool = [cand("normal", health=90),
+            cand("standby", health=90, routing_weight=-10,
+                 expiry_ladder=[(NOW + 600, 999.0)])]
+    assert Scheduler().select(pool, set(), NOW) == "normal"
+
+
+def test_select_weight_never_crosses_health_tier():
+    """权重不是准入条件：exhausted / unknown 号即使权重拉满也不能越过 known。"""
+    pool = [cand("known", health=60),
+            cand("dead", health=EXHAUSTED, routing_weight=1000),
+            cand("unknown", health=None, routing_weight=1000)]
+    assert Scheduler().select(pool, set(), NOW) == "known"
+    assert Scheduler().select([pool[1], pool[2]], set(), NOW) == "unknown"
+
+
+def test_select_without_weight_keeps_existing_order():
+    """全默认（None/0）时排序与补该列前一致：到期积分仍压过健康度。"""
+    pool = [cand("steady", health=95),
+            cand("burn", health=10, expiry_ladder=[(NOW + 600, 100.0)]),
+            cand("zero", health=99, routing_weight=0)]
+    assert Scheduler().select(pool, set(), NOW) == "burn"

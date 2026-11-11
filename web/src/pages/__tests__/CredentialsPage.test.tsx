@@ -1839,3 +1839,35 @@ describe("CredentialsPage 批量导入", () => {
     expect(screen.queryByTestId("open-batch-import")).not.toBeInTheDocument();
   });
 });
+
+  it("设置调度权重：菜单打开对话框并提交 PUT", async () => {
+    const fetchSpy = mockFetch({
+      "/api/credentials/cred_1/weight": { routing_weight: 5 },
+      "/api/credentials": listBody([makeCredential({ id: "cred_1" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    await userEvent.click(screen.getByRole("menuitem", { name: "设置权重" }));
+    await screen.findByTestId("credential-weight-dialog");
+
+    await userEvent.type(screen.getByTestId("credential-weight-input"), "5");
+    await userEvent.click(screen.getByTestId("credential-weight-save"));
+
+    await waitFor(() =>
+      expect(fetchSpy).toHaveBeenCalledWith(
+        "/api/credentials/cred_1/weight",
+        expect.objectContaining({ method: "PUT", body: JSON.stringify({ weight: 5 }) }),
+      ),
+    );
+  });
+
+  it("已有权重的凭证在菜单里显示当前值", async () => {
+    mockFetch({ "/api/credentials": listBody([makeCredential({ id: "cred_1", routing_weight: -3 })]) });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+    await userEvent.click(screen.getByTestId("actions-cred_1"));
+    expect(screen.getByRole("menuitem", { name: "权重 -3" })).toBeInTheDocument();
+  });

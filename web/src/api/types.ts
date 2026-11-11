@@ -101,6 +101,8 @@ export interface Credential {
   limits: CredentialLimits | null;
   /** 运维标签（仅列表展示与筛选，不参与调度）；无标签为空数组 */
   tags: string[];
+  /** 调度权重：null = 默认；正数越优先、负数当备用（同健康档内生效） */
+  routing_weight: number | null;
 }
 
 /** 凭证级限额护栏（全部按北京自然日；0/null = 该护栏关闭）。 */

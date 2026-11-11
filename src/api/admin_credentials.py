@@ -30,6 +30,7 @@ from ..audit.actions import (
     ACTION_CREDENTIAL_TAGS,
     ACTION_CREDENTIAL_TOGGLE,
     ACTION_CREDENTIAL_WEB_COOKIE,
+    ACTION_CREDENTIAL_WEIGHT,
 )
 from ..auth.rbac import require_operator
 from ..compat.openai.request import InvalidRequest
@@ -70,6 +71,11 @@ BATCH_IMPORT_MAX_ITEMS = 100
 # 网页 Cookie 的最大长度：正常一条 Qoder 会话 Cookie 几百字符，1 万已远超；
 # 上限只为拦住误粘贴整段请求头/文件内容，不做格式校验（Cookie 结构随上游变）。
 WEB_COOKIE_MAX_LENGTH = 10_000
+
+# 调度权重范围：正数越优先、负数越靠后，0 = 默认。上限只为拦住误输入，
+# 不参与归一化（同档内按数值稳定排序）。
+WEIGHT_MIN = -1000
+WEIGHT_MAX = 1000
 
 # 批量的在途并发上限。后台任务用 Pacer 严格串行化上游请求，但那是跨任务
 # 节流；批量端点由操作员手动触发，若完全串行则 50 个号要等几分钟才返回。
@@ -497,6 +503,33 @@ def create_router(services: Services) -> APIRouter:
                               target=credential_id, detail=_limits_detail(limits))
         record = services.limits.get(credential_id)
         return {"limits": record.as_dict() if record is not None else None}
+
+    @router.put("/api/credentials/{credential_id}/weight")
+    async def set_credential_weight(credential_id: str, payload: dict,
+                                    _csrf: None = Depends(csrf_protected),
+                                    principal=Depends(principal_from_request)):
+        """设置调度权重（`null` = 恢复默认）。
+
+        只影响选号顺序，不改变可调度性：同一健康分档内权重高者优先，档外
+        次序不变（exhausted / unknown 仍垫底）。改完立即生效——选号每轮都从
+        库里读候选，没有需要失效的缓存。
+        """
+        require_operator(principal)
+        weight = payload.get("weight")
+        if weight is not None:
+            if isinstance(weight, bool) or not isinstance(weight, int):
+                raise InvalidRequest("weight must be an integer or null")
+            if not WEIGHT_MIN <= weight <= WEIGHT_MAX:
+                raise InvalidRequest(
+                    f"weight must be within [{WEIGHT_MIN}, {WEIGHT_MAX}]")
+        if not credentials.set_routing_weight(credential_id, weight):
+            raise InvalidRequest("credential not found")
+        label = "（默认）" if weight is None else str(weight)
+        logger.info("管理员 %s 设置凭证 %s 调度权重: %s",
+                    principal.username, credential_id, label)
+        services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_WEIGHT,
+                              target=credential_id, detail=label)
+        return {"routing_weight": weight}
 
     @router.put("/api/credentials/{credential_id}/tags")
     async def set_credential_tags(credential_id: str, payload: dict,

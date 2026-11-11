@@ -84,7 +84,10 @@ SCHEMA_NAME = "schema.sql"
 # 33：credentials 新增 web_cookie_state（网页 Cookie 状态：NULL/ok/expired）。
 # 只在管理台提示「网页会话已失效，重贴 Cookie」，不参与调度；老库补 NULL =
 # 未知（下次探测写入）。额度本身仍以 statistics 汇总口径为准。
-SCHEMA_VERSION = 33
+# 34：credentials 新增 routing_weight（调度权重）。NULL/0 = 默认，正数越大越先
+# 被选中，用于管理员的显式偏好（灰度、保留备用号）。老库补 NULL 后选号顺序与
+# 补列前完全一致（所有比较键相等时仍按原链 cid 排序）。
+SCHEMA_VERSION = 34
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -106,6 +109,8 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # 避免为管理台展示改动调度排序行为
     ("credentials", "quota_packages TEXT"),
     ("credentials", "web_cookie_state TEXT"),  # 网页明细源状态：NULL/ok/expired
+    # 调度权重：NULL/0 = 默认；正数越大越优先（管理员显式偏好，见 Scheduler.select）
+    ("credentials", "routing_weight INTEGER"),
     # access token 签发/到期时间：上游显式 expires_at 缺失时回落
     # JWT 的 iat/exp；NULL=老库未回填（列表读到按需派生），0=确实未知
     ("credentials", "token_expires_at INTEGER"),
