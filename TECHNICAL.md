@@ -549,6 +549,8 @@ class Scheduler:
 4. **账户剩余积分**多者优先——只作健康度**打平键**。
 5. 仍同分按 `credential_id` 稳定。
 
+**管理员权重**（`credentials.routing_weight`，`-1000..1000`，NULL/0 = 默认）不参与上表的键比较，而是在排完序后再做一次**同健康档内的稳定重排**：取当前第一名所在的 `_rank` 档，档内按 `-weight` 重排，再接回其余档。因此权重能压过免费优先 / 在途 / 到期额度，但永远不能把 exhausted 或 unknown 的号越过 known 档（权重是偏好，不是准入条件）；全 0 时排序与补列前逐字节一致。
+
 **手动 pin 优先**：有 `pinned` → 只在 pinned 间排序。到期积分只算一处 `expiring_credits()`：选号走 `Candidate.expiry_credits()`；列表走 `GET /api/credentials` 的 `quota_expiring_credits` / `_secondary`；共用 `expiry_windows()`。无到期信息 → `null`；窗口关闭或确无临近过期 → `0`（均不显示）。
 
 > **TRAE 也落 `quota_expiry_ladder`**（权益包各自独立到期），两列同时填，口径「未过期 + 有余额」。`quota_cycle_end` 仍 `NULL`（各包未必共享重置点）。

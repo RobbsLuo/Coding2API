@@ -13,7 +13,7 @@ Ten channels — **CodeBuddy** (CN + international, two separate channels), **TR
 ## Features
 
 - **OpenAI-compatible surface**: `/v1/chat/completions` (streaming / non-streaming), `/v1/responses` (Codex CLI), `/v1/messages` (Claude Code), `/v1/models` (incl. single-model lookup), `/v1/user/balance`.
-- **Unified scheduling**: bare model names route by health; `model@provider` pins upstream. Free channels first → least in-flight → expiring credits → health with tiered cooldowns → largest balance. Catalog x0 rates are calibrated against actual charges in the last 24h, so an upstream that changed billing without updating its catalog can't hold the free tier forever. Model-scoped limit sidelines only that model; multi-turn sticks to one credential, rotates only on error.
+- **Unified scheduling**: bare model names route by health; `model@provider` pins upstream. Free channels first → least in-flight → expiring credits → health with tiered cooldowns → largest balance. Admins can set a per-credential **weight** (`-1000..1000`): it only reorders within the same health tier (positive first, negative as standby) and never promotes cooling or exhausted credentials. Catalog x0 rates are calibrated against actual charges in the last 24h, so an upstream that changed billing without updating its catalog can't hold the free tier forever. Model-scoped limit sidelines only that model; multi-turn sticks to one credential, rotates only on error.
 - **Expiry-aware burn**: credits expiring inside main window (default 36h) burn first; ties fall to 7-day window. Units unify to credits.
 - **Credential-gated model list**: only channels with usable credential appear; no phantom models.
 - **Shared credential pool**: admins maintain, everyone shares, encrypted at rest (`APP_SECRET`); device-code login, account switching, quota probing, daily check-in, token pre-refresh.
@@ -123,7 +123,7 @@ echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-
 - This process only; it never tails file. Under multiple processes each sees its own slice.
 - **Redaction is hard precondition**: lines matching `token` / `secret` / `authorization` / `cookie` / `password` / `api_key`, an `sk-…` shape or `Bearer <value>` dropped whole.
 - Buffer `LOG_BUFFER_LINES` (default 500, hot), oldest overwritten first; `0` disables page (both endpoints 404).
-- 4000 chars per line; each carries `seq`, timestamp, level, logger, `request_id`. Subscriber limit 4, beyond → 429 + `Retry-After`.
+- 4000 chars per line; each carries `seq`, timestamp, level, logger, `request_id`. **Click the `#first8` chip** to filter by that request id and collapse one request's whole chain (every rotation / cooldown / downgrade in the executor shares it); pasting the `X-Request-ID` response header into the keyword box does the same. stdout / journald / launchd files carry `[request_id]` too (background tasks show `-`). Subscriber limit 4, beyond → 429 + `Retry-After`.
 
 ## Usage
 

@@ -250,6 +250,17 @@ class CredentialRepository:
                                   (tags_text(tags), credential_id))
         return cursor.rowcount > 0
 
+    def set_routing_weight(self, credential_id: str, weight: int | None) -> bool:
+        """设置调度权重（None = 恢复默认）。返回是否命中该凭证。
+
+        权重只影响**选号顺序**，不是准入条件：低于任一「可调度」前提（健康、
+        冷却、启用）不产生任何效果，也不会把低健康度的号顶上去。
+        """
+        with self._db.transaction() as conn:
+            cursor = conn.execute("UPDATE credentials SET routing_weight = ? WHERE id = ?",
+                                  (weight, credential_id))
+        return cursor.rowcount > 0
+
     def delete(self, credential_id: str) -> bool:
         with self._db.transaction() as conn:
             cursor = conn.execute("DELETE FROM credentials WHERE id = ?", (credential_id,))
@@ -695,7 +706,8 @@ class CredentialRepository:
         """
         rows = self._db.connect().execute(
             "SELECT id, provider, health, cooling_until, disabled, enabled, err_count, pinned, "
-            "quota_remaining, quota_cycle_end, quota_expiry_ladder FROM credentials").fetchall()
+            "quota_remaining, quota_cycle_end, quota_expiry_ladder, routing_weight "
+            "FROM credentials").fetchall()
         allowed = set(providers) if providers is not None else None
         # 模型级冷却整表读一次（表很小：只在模型限流/负缓存时才有行），
         # 按凭证聚合后挂到 Candidate 上；每选一次号查一次库会抵消选号的开销优势。
@@ -718,6 +730,7 @@ class CredentialRepository:
                 pinned=bool(row["pinned"]), cycle_end=row["quota_cycle_end"],
                 quota_remaining=row["quota_remaining"],
                 expiry_ladder=_ladder_value(row["quota_expiry_ladder"]),
+                routing_weight=row["routing_weight"],
                 model_cooldowns=by_credential.get(row["id"]),
             )
             for row in rows if allowed is None or row["provider"] in allowed
@@ -873,7 +886,7 @@ class CredentialRepository:
             "quota_total, quota_cycle_end, "
             "quota_probed_at, growth_last_run_at, growth_last_result, created_at, added_by, "
             "quota_expiry_ladder, quota_packages, data_enc, "
-            "web_cookie_state, "
+            "web_cookie_state, routing_weight, "
             "token_expires_at, token_issued_at, "
             "tags "
             "FROM credentials ORDER BY created_at").fetchall()

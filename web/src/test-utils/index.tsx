@@ -145,6 +145,7 @@ export function makeCredential(overrides: Record<string, unknown> = {}) {
     added_by: "root",
     limits: null,
     tags: [],
+    routing_weight: null,
     ...overrides,
   };
 }

@@ -199,6 +199,11 @@ class Candidate:
     # 键：并发请求摊到空闲号，避免全部压在同一凭证上（见 Scheduler.select）。
     # 0 = 空闲（含未装配在途护栏的部署，此时恒 0，排序退回原链）。
     inflight: int = 0
+    # 管理员的显式调度权重（credentials.routing_weight）：NULL/0 = 默认，
+    # 正数越优先、负数越靠后。排在健康分档之后、其余偏好之前（见 select），
+    # 因此能压过免费优先 / 在途分摊 / 到期额度，但永远不能把 exhausted（-1）
+    # 或 unknown 的号顶到 known 前面。
+    routing_weight: int | None = None
     # (凭证, 模型) 冷却表：model → ModelCooldown。模型级限流只写这里，
     # 不写 cooling_until，因此同账号的其他模型仍然可选
     model_cooldowns: Mapping[str, ModelCooldown] | None = None
@@ -314,6 +319,11 @@ class Scheduler:
         模型级冷却的过滤由调用方在候选集上完成（executor._select）：
         每个候选要按**自己所属上游**的原始模型名查冷却表，选号器不掌握
         provider→模型名 的映射，硬塞进来只会造成两处各查一半。
+
+        **管理员权重**（`Candidate.routing_weight`）：只在**同一健康分档内**做
+        稳定重排（权重高者优先），再接回其余档。因此高权重能压过免费优先 /
+        在途分摊 / 到期额度，但永远不能让 exhausted 或 unknown 的号越过 known
+        档——权重是偏好，不是准入条件。全 0（默认）时排序与无该字段时一致。
         """
         pool = [
             c for c in candidates
@@ -334,6 +344,15 @@ class Scheduler:
                            _rank(c.health), -(_health_value(c.health)),
                            -_remaining_value(c.quota_remaining), c.credential_id),
         )
+        # 管理员权重只调整**同一健康分档内**的次序：先把该档按权重稳定重排，
+        # 再接回其余档。这样默认（全 0）时排序与补该列前逐字节一致，也永远
+        # 不会让 exhausted / unknown 的号借权重越过 known 档（权重是偏好，
+        # 不是准入条件，见 Candidate.routing_weight）。
+        if any(c.routing_weight for c in chosen):
+            lead = _rank(chosen[0].health)
+            same = [c for c in chosen if _rank(c.health) == lead]
+            same.sort(key=lambda c: -_weight_value(c.routing_weight))
+            chosen = same + [c for c in chosen if _rank(c.health) != lead]
         return chosen[0].credential_id
 
     def should_rotate(self, attempts: int) -> bool:
@@ -521,6 +540,11 @@ def _remaining_value(remaining: float | None) -> float:
     （见 `expiring_credits`），此处沿用同一口径。
     """
     return remaining if remaining is not None else 0.0
+
+
+def _weight_value(weight: int | None) -> int:
+    """管理员权重：NULL/0 = 默认。只用于同健康档内的稳定重排。"""
+    return weight or 0
 
 
 def _free_first_rank(candidate: Candidate, free_present: bool) -> int:

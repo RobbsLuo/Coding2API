@@ -640,3 +640,23 @@ def test_legacy_db_upgrade_adds_web_cookie_state(tmp_path):
 
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     db.close()
+
+
+def test_legacy_db_upgrade_adds_routing_weight(tmp_path):
+    """老库升级：credentials 无 routing_weight 时补列，历史行 NULL = 默认权重。"""
+    db = Database(tmp_path / "legacy.sqlite3")
+    conn = sqlite3.connect(db.path)
+    conn.execute(
+        "CREATE TABLE credentials (id TEXT PRIMARY KEY, provider TEXT NOT NULL,"
+        " data_enc BLOB NOT NULL, created_at INTEGER NOT NULL)")
+    conn.execute("INSERT INTO credentials (id, provider, data_enc, created_at)"
+                 " VALUES ('cred_old', 'trae', x'00', 1)")
+    conn.commit()
+    conn.close()
+
+    apply_schema(db.connect())
+    columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
+    assert "routing_weight" in columns
+    assert db.connect().execute(
+        "SELECT routing_weight FROM credentials WHERE id = 'cred_old'").fetchone()[0] is None
+    db.close()

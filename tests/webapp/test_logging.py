@@ -141,3 +141,49 @@ def test_audit_logger_not_downgraded():
     logging.getLogger().handlers = []
     configure_logging("INFO")
     assert logging.getLogger("src.api.admin_credentials").getEffectiveLevel() == logging.INFO
+
+
+def test_log_line_carries_request_id_from_context():
+    """平台日志（journald / launchd 文件）也能按一次请求串起来。
+
+    值必须与响应头 `X-Request-ID`、日志页过滤用的是同一个 ID，否则两种视图
+    对不上；format 走真实 handler（filter 在 emit 前注入）。
+    """
+    from src.request_context import set_request_id
+
+    logging.getLogger().handlers = []
+    configure_logging("INFO")
+    handler = _root_handlers()[0]
+
+    set_request_id("req-abc-123")
+    record = logging.LogRecord("src.engine.executor", logging.INFO, __file__, 1,
+                               "换号 cred_1", None, None)
+    handler.handle(record)                        # 会走 filter + formatter
+    assert record.request_id == "req-abc-123"
+    assert "[req-abc-123]" in handler.format(record)
+
+
+def test_log_line_without_request_context_uses_dash():
+    """后台任务没有请求上下文 → `-`，不能把上一次请求的 ID 留在日志里。"""
+    from src.request_context import set_request_id
+
+    logging.getLogger().handlers = []
+    configure_logging("INFO")
+    handler = _root_handlers()[0]
+
+    set_request_id(None)                          # 模拟后台任务（无入站请求）
+    record = logging.LogRecord("src.tasks.runner", logging.INFO, __file__, 1,
+                               "签到任务完成", None, None)
+    handler.handle(record)
+    assert record.request_id == "-"
+    assert "[-]" in handler.format(record)
+
+
+def test_request_id_filter_is_not_duplicated():
+    """重复 configure（每个测试一次 build_app）不能叠加 filter。"""
+    logging.getLogger().handlers = []
+    configure_logging("INFO")
+    configure_logging("INFO")
+    handler = _root_handlers()[0]
+    filters = [item for item in handler.filters if item.__class__.__name__ == "_RequestIdFilter"]
+    assert len(filters) == 1

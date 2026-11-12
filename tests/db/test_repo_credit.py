@@ -354,3 +354,24 @@ def test_save_quota_persists_web_cookie_state(tmp_path):
     # 重新粘贴/清除 Cookie 时由 API 复位为 NULL，下一轮探测再写
     credentials.set_web_cookie_state(cid, None)
     assert credentials.list_all()[0]["web_cookie_state"] is None
+
+
+def test_routing_weight_round_trip(tmp_path):
+    """权重随凭证落库：列表与调度候选都带出同值，None = 恢复默认。"""
+    db = Database(tmp_path / "t.sqlite3")
+    apply_schema(db.connect())
+    credentials = CredentialRepository(db, CredentialCipher(SECRET))
+    cid = credentials.add(provider="trae", credential_data={"accessToken": "t"})
+
+    assert credentials.candidates()[0].routing_weight is None
+    assert credentials.set_routing_weight(cid, 7) is True
+    assert credentials.candidates()[0].routing_weight == 7
+    assert credentials.list_all()[0]["routing_weight"] == 7
+    # 负数 = 备用（靠后），与默认 0 区分
+    credentials.set_routing_weight(cid, -3)
+    assert credentials.candidates()[0].routing_weight == -3
+    credentials.set_routing_weight(cid, None)
+    assert credentials.candidates()[0].routing_weight is None
+    assert credentials.list_all()[0]["routing_weight"] is None
+    assert credentials.set_routing_weight("ghost", 1) is False
+    db.close()

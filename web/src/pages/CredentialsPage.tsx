@@ -56,6 +56,7 @@ import { AddCredentialDialog } from "../components/AddCredentialDialog";
 import { BatchImportDialog } from "../components/BatchImportDialog";
 import { CredentialLimitsDialog } from "../components/CredentialLimitsDialog";
 import { CredentialTagsDialog } from "../components/CredentialTagsDialog";
+import { CredentialWeightDialog } from "../components/CredentialWeightDialog";
 import { CredentialWebCookieDialog } from "../components/CredentialWebCookieDialog";
 import { groupModelsByProvider, rateLabel, rateSummary } from "../components/ModelPicker";
 import { ToastViewport, useToasts } from "../components/Toast";
@@ -340,6 +341,7 @@ interface Actions {
   checkinLog: (credential: Credential) => void;
   limits: (credential: Credential) => void;
   tags: (credential: Credential) => void;
+  weight: (credential: Credential) => void;
   webCookie: (credential: Credential) => void;
   export: (credential: Credential) => void;
 }
@@ -372,6 +374,8 @@ export function CredentialsPage() {
   const [limitsFor, setLimitsFor] = useState<string | null>(null);
   // 标签编辑对话框：同样存 id，取最新快照
   const [tagsFor, setTagsFor] = useState<string | null>(null);
+  // 调度权重对话框：同样存 id，取最新快照
+  const [weightFor, setWeightFor] = useState<string | null>(null);
   // Qoder 网页 Cookie 对话框：同样存 id，取最新快照
   const [webCookieFor, setWebCookieFor] = useState<string | null>(null);
   // 列表筛选：池子一大就没有「找到某个号」的路径，这里收搜索 + 渠道 + 状态 + 标签四件套。
@@ -471,6 +475,10 @@ export function CredentialsPage() {
   const tagsCredential = useMemo(
     () => credentials.find((item) => item.id === tagsFor) ?? null,
     [credentials, tagsFor],
+  );
+  const weightCredential = useMemo(
+    () => credentials.find((item) => item.id === weightFor) ?? null,
+    [credentials, weightFor],
   );
   // 网页 Cookie 对话框当前编辑的凭证：同上
   const webCookieCredential = useMemo(
@@ -753,6 +761,7 @@ export function CredentialsPage() {
     // 只开对话框；保存与刷新由对话框自己回调（见 CredentialLimitsDialog）
     limits: (credential) => setLimitsFor(credential.id),
     tags: (credential) => setTagsFor(credential.id),
+    weight: (credential) => setWeightFor(credential.id),
     // 单条导出：文件内容与「批量导入」的条目同形，可原样再导入。
     // 只开对话框；保存与探测由对话框/后端负责
     webCookie: (credential) => setWebCookieFor(credential.id),
@@ -1477,6 +1486,19 @@ export function CredentialsPage() {
         />
       )}
 
+      {canWrite && weightCredential && (
+        <CredentialWeightDialog
+          credential={weightCredential}
+          onClose={() => setWeightFor(null)}
+          onSaved={(message) => {
+            setWeightFor(null);
+            showNotice(message);
+            void refresh();
+          }}
+          onError={(message) => showError(message)}
+        />
+      )}
+
       {canWrite && webCookieCredential && (
         <CredentialWebCookieDialog
           credential={webCookieCredential}
@@ -2129,6 +2151,15 @@ function Row({
                     <DropdownMenuItem onSelect={() => actions.tags(credential)}>
                       <Tag className="size-4" />
                       {credential.tags.length ? "编辑标签" : "设置标签"}
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      onSelect={() => actions.weight(credential)}
+                      title="只调整同健康档内的选号次序：正数越优先、负数当备用，不会把不可用的号顶上来"
+                    >
+                      <Gauge className="size-4" />
+                      {credential.routing_weight
+                        ? `权重 ${credential.routing_weight}`
+                        : "设置权重"}
                     </DropdownMenuItem>
                     {["qoder", "codearts"].includes(credential.provider) && (
                       <DropdownMenuItem
