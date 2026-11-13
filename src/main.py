@@ -98,6 +98,7 @@ from .engine.model_resolver import KNOWN_PROVIDERS, parse_fallback_groups
 from .engine.scheduler import Scheduler
 from .instance_lock import AlreadyRunning, hold_instance_lock
 from .key_quota import KeyQuotaGuard
+from .platform_support import require_supported_platform
 from .provider.codearts import CodeArtsProvider
 from .provider.codearts.client import CodeArtsClient
 from .provider.codearts.oauth import CodeArtsOAuth
@@ -400,6 +401,10 @@ def _restore_model_list(services) -> None:
 def build_app(settings: Settings | None = None, *, providers: dict | None = None,
               users: object | None = None) -> FastAPI:
     config = settings or load_settings()
+    # 与 `run()` 同一道门禁，覆盖 `uvicorn src.main:build_app --factory` 这条
+    # 生产路径：它不经过 run()，若不拦，Windows 上会绕过单实例锁直接起服务
+    # ——正是 issue #46 说的「升级到保护静默失效」。
+    require_supported_platform()
     # 这里必须配：生产路径是 `uvicorn src.main:build_app --factory`（launchd /
     # 容器 / systemd 均如此），不经过 run()，否则审计等 INFO 日志仍被丢弃。
     # 幂等，测试反复调用 build_app 不会叠加 handler。
@@ -1090,6 +1095,12 @@ def run() -> None:
     import sys
 
     import uvicorn
+
+    # 平台门禁放在最前：单实例锁依赖 flock（POSIX 专有）。放在 load_settings
+    # 之前，是因为「平台不支持」比「APP_SECRET 没配」更根本——在 Windows 上
+    # 应该先看到这一句，而不是被 .env 的必填校验挡住（见 issue #46）。
+    # `SystemExit` 的文案直接进 stderr，不依赖 configure_logging。
+    require_supported_platform()
 
     config = load_settings()
     # 应用日志（审计、上游错误等）在此之前无 handler 会被丢弃

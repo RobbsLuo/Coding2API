@@ -28,6 +28,8 @@ from contextlib import closing, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..security.private_files import secure_dir, secure_file
+
 logger = logging.getLogger(__name__)
 
 # 默认保留份数（后台任务与 CLI 的默认值；可经 BACKUP_KEEP 覆盖）。
@@ -89,9 +91,17 @@ def _unique_target(directory: Path, stem: str, stamp: str) -> Path:
 
 
 def _chmod(path: Path, mode: int) -> None:
-    """chmod；失败（共享目录、他人属主）不阻断——与 Database.__init__ 同口径。"""
-    with suppress(OSError):
-        os.chmod(path, mode)
+    """收紧权限；失败（共享目录、他人属主、平台不支持）只告警不阻断。
+
+    实现统一走 `src.security.private_files`：POSIX 是 chmod + 读回校验，Windows
+    是 `icacls` 替换 DACL 并切断继承。**告警不能省**——Windows 上 `os.chmod`
+    对 ACL 无效，静默吞异常会让 `SECURITY.md` 的 `0600` 承诺在 Windows 上
+    完全不成立且无人知晓（issue #45）。
+    """
+    if mode == 0o700:
+        secure_dir(path)
+    else:
+        secure_file(path)
 
 
 def _prune(directory: Path, stem: str, keep: int) -> int:

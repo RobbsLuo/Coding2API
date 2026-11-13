@@ -686,6 +686,33 @@ def test_run_releases_lock_when_build_app_raises(monkeypatch, tmp_path):
     lock.release()
 
 
+def test_run_refuses_to_start_on_unsupported_platform(monkeypatch, tmp_path, capsys):
+    """非 POSIX 平台（#46）：入口给可读中文后退出，绝不靠静默 no-op 起服务。
+
+    这里走真实的 `require_supported_platform()`（只 patch `sys.platform`），
+    确保「platform_support → run」这条链路是通的，而不是各自单测通过、串起来错。
+    """
+    import sys
+    import types
+
+    from src import main
+
+    started: list[int] = []
+    fake_uvicorn = types.ModuleType("uvicorn")
+    fake_uvicorn.run = lambda app, **kwargs: started.append(1)  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "uvicorn", fake_uvicorn)
+    monkeypatch.setenv("APP_SECRET", SECRET)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(sys, "platform", "win32")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main.run()
+
+    assert "仅 Linux / macOS" in str(excinfo.value.code)
+    assert started == [], "不支持的平台上不得启动 uvicorn"
+    assert not (tmp_path / ".instance.lock").exists()
+
+
 async def test_loop_executes_runner_after_interval(repo):
     """循环体在 sleep 之后必须真的调用 runner（runner 76）。"""
     runner, _collector = _runner(repo, StubProvider())

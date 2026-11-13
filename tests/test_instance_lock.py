@@ -134,3 +134,50 @@ def test_already_running_message_is_actionable(tmp_path):
         assert "删掉" in text
     finally:
         first.release()
+
+
+# ------------------------------------------------------- 平台分支（issue #46）
+
+
+def test_module_is_importable_without_fcntl(monkeypatch, tmp_path):
+    """`fcntl` 缺失时模块仍可导入，但 `LOCK_SUPPORTED` 为假。
+
+    模块级 import 失败会让 `build_app --factory` 与所有 `scripts/*` 在 Windows
+    上直接炸掉（连一句自己的错误都打不出来），所以导入必须宽容。
+    """
+    import importlib
+    import sys
+
+    from src import instance_lock
+
+    monkeypatch.delitem(sys.modules, "instance_lock", raising=False)
+    monkeypatch.setitem(sys.modules, "fcntl", None)  # import fcntl 抛 ImportError
+    reloaded = importlib.reload(instance_lock)
+    try:
+        assert reloaded.LOCK_SUPPORTED is False
+    finally:
+        monkeypatch.undo()
+        importlib.reload(instance_lock)
+
+
+def test_acquire_refuses_to_silently_noop_without_fcntl(monkeypatch, tmp_path):
+    """不支持时**必须抛错**，绝不能 no-op 偷跑：后者等于静默放弃单实例保护。"""
+    from src import instance_lock
+
+    monkeypatch.setattr(instance_lock, "LOCK_SUPPORTED", False)
+    with pytest.raises(instance_lock.LockUnsupported) as excinfo:
+        instance_lock.InstanceLock(tmp_path).acquire()
+    text = str(excinfo.value)
+    assert "不支持文件锁" in text
+    assert "WSL2" in text or "Docker" in text
+    # 抛错前不该留下锁文件（否则下次会看到一个空的陈旧锁）
+    assert not (tmp_path / LOCK_NAME).exists()
+
+
+def test_hold_instance_lock_propagates_unsupported(monkeypatch, tmp_path):
+    """`hold_instance_lock` 不吞异常：调用方需要拿到它决定退出码。"""
+    from src import instance_lock
+
+    monkeypatch.setattr(instance_lock, "LOCK_SUPPORTED", False)
+    with pytest.raises(instance_lock.LockUnsupported):
+        instance_lock.hold_instance_lock(tmp_path)

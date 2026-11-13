@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, Depends, Request
 
 from ..compat.openai.request import parse_chat_request
+from ..security.private_files import secure_dir
 from .deps import ApiKeyPrincipal, Services, api_key_user
 from .endpoints import dispatch_compat
 
@@ -41,10 +42,11 @@ def dump_request_body(data_dir: Path, body: object) -> None:
         dump_dir.mkdir(parents=True, exist_ok=True, mode=DUMP_DIR_MODE)
         # mkdir 的 mode 只影响**新建**目录，且会被 umask 削；已存在的目录
         # （老版本建的、或数据目录搬迁带过来的）必须显式收紧。
-        dump_dir.chmod(DUMP_DIR_MODE)
+        secure_dir(dump_dir, mode=DUMP_DIR_MODE)
         path = dump_dir / f"{int(time.time() * 1000)}.json"
         # 用 os.open 建文件而不是 write_text：要先落权限再写内容，避免
-        # 「先写后 chmod」窗口内同机其它用户能读到对话正文。
+        # 「先写后 chmod」窗口内同机其它用户能读到对话正文。Windows 上
+        # 新文件从已收紧的 `dumps/` 继承受保护 ACL（`(OI)(CI)`），同样没有窗口。
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, DUMP_FILE_MODE)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps(body, ensure_ascii=False, indent=1))

@@ -53,7 +53,7 @@
 
 ## 快速开始
 
-前置：Python 3.12+、[uv](https://docs.astral.sh/uv/)、Node.js 24+、pnpm 10+（仅前端构建）。
+前置：**Linux 或 macOS**（Windows 请用 WSL2 / Docker 部署，见「部署注意」）、Python 3.12+、[uv](https://docs.astral.sh/uv/)、Node.js 24+、pnpm 10+（仅前端构建）。
 
 ```bash
 uv sync
@@ -826,6 +826,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 
 ## 部署注意
 
+- **平台范围：仅 Linux / macOS**。单实例锁（`src/instance_lock.py`）依赖 `flock`，Windows 上没有可靠等价物；直接跑会以一句可读中文退出而不是启动。Windows 请用 WSL2 或 Docker（容器内是 Linux）。同理，`data/` 的 `0700` 信任边界按 POSIX 权限表述——Windows 下由 `src/security/private_files.py` 改用 `icacls` 收紧 ACL，见「[文件权限](#文件权限posix-与-windows)`。
 - **挂载属主**：容器内 uid 1001（`appuser`）→ `./data` 与 `./secrets` 必须可写 / 可读：
 
   ```bash
@@ -836,6 +837,38 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 - **TRAE 回调地址**：默认 `PUBLIC_BASE_URL=http://127.0.0.1:8000` 只在本机可用。远程 / 容器部署改成浏览器能开的地址。**忘改也不会静默失败**：基址落回环 / `0.0.0.0` → 回调改用当前请求 origin（LAN IP 或隧道域名）；「添加凭证」显示实际地址；授权超时点名查 `PUBLIC_BASE_URL`。**回调地址在浏览器侧打不开时**（NAS / 远程部署常见 TRAE 跳转「网络错误」，refreshToken 只留在地址栏）：「添加凭证」里的 TRAE 粘贴框把地址栏整条链接粘回即可完成登录，不依赖浏览器能否访问本服务。
 - **端口**：compose 里 `PORT` 同时决定容器内监听端口与宿主映射端口。
 - **改代码后重建镜像**：`docker compose up -d` 不带 `--build` 用本地已有镜像跑旧代码。改 `src/` 或前端后必须 `docker compose up -d --build`。
+
+### 启动前自检（doctor）
+
+`/healthz` 只能回答「起没起来」，而起不来的常见原因（端口被占、`APP_SECRET` 缺失、`web/dist` 落后一个 release、库版本落后）都在服务启动之前就注定了。部署前先跑一条只读自检：
+
+```bash
+python3 scripts/doctor.py                 # 全量检查，PASS/WARN/FAIL + 退出码
+python3 scripts/doctor.py --skip-upstream # 离线 / 内网部署：跳过上游连通性
+python3 scripts/doctor.py --json          # 机读输出（CI / 部署脚本当门禁）
+```
+
+逐项覆盖：Python 版本与关键依赖可 import、`APP_SECRET` 强度（与服务启动同一套弱密钥判定）、`DATA_DIR` 可写与权限口径、`PUBLIC_BASE_URL` 与 `ALLOWED_HOSTS` 是否一致、SQLite `integrity_check` + 待执行迁移条数、端口能否 `bind`、`web/dist/index.html` 引用的 js/css 是否真在磁盘上、各渠道端点连通性（只报可达 / TLS 失败 / DNS 失败 / 4xx，不带凭证）。
+
+- **只读**：不迁移、不写 `runtime_settings`、不落凭证明文——否则 doctor 自己会变成第二个故障源。
+- 退出码 `0` = 没有 FAIL（WARN 不拦），`1` = 有 FAIL。
+- 上游探测不带凭证，因此 `401/403` 判为**通过**（链路是通的，鉴权由服务承担）。
+
+### 文件权限（POSIX 与 Windows）
+
+同一套收口实现（`src/security/private_files.py`）被 `data/`、`backups/`、`dumps/` 共用：
+
+- **Linux / macOS**：`chmod` 后**读回校验** `mode & 0o077 == 0`；
+- **Windows**：`icacls /inheritance:r` 把 DACL 替换成「仅当前用户 + SYSTEM」，再读回校验没有继承 ACE、没有多余主体。
+
+**为什么不能只靠 `os.chmod`**：它在 Windows 上只影响只读位、不改 ACL，而 `data/` 与 `.env` 的 ACE 通常是从上级目录继承来的 `Everyone:(F)`——密文凭证与 `APP_SECRET` 一起可读，等价于明文。
+
+收紧结果分两级：
+
+- **`data/`（信任边界）**：校验不通过则**启动失败**，并在报错里给出「怎么手工修」。这是运维能修的确定问题，不是需要降级的不确定状态。
+- ** backups / dumps 等旁路产物**：失败只 `logger.warning`（不拿诊断/备份的失败去拖垮主流程）。
+
+`scripts/doctor.py` 会在启动前只读复核：`data/` 权限不达标报 FAIL（与服务同口径），其余产物不参与判定。
 
 ### 轮换 APP_SECRET（仅在怀疑密钥外泄时）
 

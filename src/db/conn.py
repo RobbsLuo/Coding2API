@@ -5,12 +5,13 @@
 
 from __future__ import annotations
 
-import os
 import sqlite3
 import threading
 from collections.abc import Iterator
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from pathlib import Path
+
+from ..security.private_files import secure_dir
 
 PRAGMAS = (
     "PRAGMA journal_mode = WAL",
@@ -20,7 +21,7 @@ PRAGMAS = (
 
 
 class Database:
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, *, strict_permissions: bool = True) -> None:
         # 线程本地必须按实例隔离：模块级变量会让不同 Database 共用同一连接
         self._local = threading.local()
         # 所有线程建过的连接都登记在这里：`close()` 要能一次收干净。只关「当前
@@ -37,9 +38,10 @@ class Database:
         if str(parent) not in ("", "."):
             parent.mkdir(parents=True, exist_ok=True)
             # 库内是凭证密文 + 明文用量/审计/用户名：目录不对同机其他用户开放。
-            # chmod 失败（共享目录、他人属主）不阻断启动。
-            with suppress(OSError):
-                os.chmod(parent, 0o700)
+            # 校验失败默认**阻断启动**（issue #45 的口径）：这是运维能修的确定
+            # 问题，不是需要降级的不确定状态。旁路场景（测试替身、只读运维脚本
+            # 打开别人的库）可显式传 `strict_permissions=False` 放宽。
+            secure_dir(parent, strict=strict_permissions)
 
     def connect(self) -> sqlite3.Connection:
         """返回当前线程的专属连接（同线程复用）。"""

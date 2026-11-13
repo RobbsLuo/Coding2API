@@ -35,6 +35,37 @@ jobs:
       - name: 测试与覆盖率（门槛 100%）
         run: uv run pytest -q --cov=src --cov-report=term --cov-fail-under=100
 
+  # 平台门禁必须有真机验证：其余 job 全在 ubuntu-latest，正是 issue #46 的
+  # 成因——Windows 上的 `ModuleNotFoundError: No module named 'fcntl'` 在
+  # Linux CI 里永远看不见。这个 job 不装项目依赖：两个断言都只用标准库，
+  # 跑得快，且正好验证「导入期不炸、入口给可读中文」这两条。
+  platform:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/setup-python@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: 无 fcntl 时模块仍可导入（否则 build_app / scripts 全线起不来）
+        shell: bash
+        run: |
+          PYTHONPATH=. python -c "import src.instance_lock as m; assert m.LOCK_SUPPORTED is False"
+      - name: 入口必须给一句可读中文而不是 ModuleNotFoundError
+        shell: bash
+        run: |
+          set +e
+          output=$(PYTHONPATH=. python -c "from src.platform_support import require_supported_platform; require_supported_platform()" 2>&1)
+          code=$?
+          set -e
+          echo "$output"
+          test "$code" -ne 0
+          echo "$output" | grep -q "仅 Linux / macOS"
+          if echo "$output" | grep -q "ModuleNotFoundError"; then
+            echo "::error::Windows 上仍出现 ModuleNotFoundError（issue #46 回归）"
+            exit 1
+          fi
+
   security:
     runs-on: ubuntu-latest
     timeout-minutes: 15
