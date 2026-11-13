@@ -42,6 +42,10 @@ jobs:
   platform:
     runs-on: windows-latest
     timeout-minutes: 5
+    env:
+      # 中文文案在英文区域设置下会被 Python 的 backslashreplace 转义成 \uXXXX，
+      # 打开 UTF-8 模式让日志里看到的是人能读的中文（不影响被测逻辑）。
+      PYTHONUTF8: "1"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7.1.0
@@ -60,7 +64,9 @@ jobs:
           set -e
           echo "$output"
           test "$code" -ne 0
-          echo "$output" | grep -q "仅 Linux / macOS"
+          # 只断言 ASCII 片段：Windows 英文区域设置下中文会被转义成 \uXXXX，
+          # 用中文 grep 会因编码而假失败（PYTHONUTF8 只管本项目自己的输出）。
+          echo "$output" | grep -q "Linux / macOS"
           if echo "$output" | grep -q "ModuleNotFoundError"; then
             echo "::error::Windows 上仍出现 ModuleNotFoundError（issue #46 回归）"
             exit 1
