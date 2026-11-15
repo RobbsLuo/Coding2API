@@ -11,6 +11,9 @@ import pytest
 from src.engine.scheduler import (
     BLOCKED_BASE_SECONDS,
     BLOCKED_MAX_SECONDS,
+    CONCURRENCY_BURST_WINDOW_SECONDS,
+    CONCURRENCY_CHAIN_GAP_SECONDS,
+    CONCURRENCY_COOLDOWN_MAX_SECONDS,
     CONCURRENCY_COOLDOWN_SECONDS,
     EXPIRY_WINDOW_SECONDS,
     MODEL_COOLDOWN_MAX_SECONDS,
@@ -392,11 +395,11 @@ def test_model_cooldown_without_model_degrades_to_soft():
     assert out.cooling_until == NOW + SOFT_COOLDOWN_SECONDS
     assert out.model_cooldowns is None
 
-def test_concurrency_cooldown_is_short_and_fixed():
-    """并发打满（TM.00001041）固定短冷却、不翻倍：在途排空即恢复。
+def test_concurrency_cooldown_starts_short_and_escalates_on_chain():
+    """并发打满：首枪 60s，同一条命中链翻倍，封顶 5min。
 
-    一次打满锁 10min（MODEL 基数）太久；60s 覆盖在途排空（实测最大 38s）
-    加余量。重复打满只重 armed，不 escalates。
+    首枪不套 MODEL 的 600s 基数（在途排空实测 9–38s，一次打满锁 10min 太久）；
+    「冷却到期后立刻又被立刻打满」说明上游窗口还没恢复，继续 60s 白撞。
     """
     s = Scheduler()
     out = s.note_error(cand(), ErrKind.CONCURRENCY, NOW, model="deepseek-v4.1-flash")
@@ -406,20 +409,106 @@ def test_concurrency_cooldown_is_short_and_fixed():
     assert CONCURRENCY_COOLDOWN_SECONDS == 60
     # 模型级条目不得顺带写账号级冷却
     assert out.cooling_until is None and not out.disabled
-    # 重复打满：hits 累计（可观测），时长仍固定、不翻倍
+    # 到期后立刻又被打满（gap 0 ≤ 240s）：命中链延续，时长翻倍
     again = s.note_error(
         _with_model_cooldown(cand(), "deepseek-v4.1-flash", cooling_until=NOW,
                              hits=1, reason="concurrency"),
         ErrKind.CONCURRENCY, NOW, model="deepseek-v4.1-flash")
     entry = again.model_cooldowns["deepseek-v4.1-flash"]
-    assert (entry.cooling_until, entry.hits) == (NOW + CONCURRENCY_COOLDOWN_SECONDS, 2)
-    # hits 很大也不翻倍封顶
+    assert (entry.cooling_until, entry.hits) == (NOW + 2 * CONCURRENCY_COOLDOWN_SECONDS, 2)
+    # hits 很大时封顶，不能无限翻倍
     huge = s.note_error(
         _with_model_cooldown(cand(), "deepseek-v4.1-flash", cooling_until=NOW,
                              hits=99, reason="concurrency"),
         ErrKind.CONCURRENCY, NOW, model="deepseek-v4.1-flash")
     assert huge.model_cooldowns["deepseek-v4.1-flash"].cooling_until == (
-        NOW + CONCURRENCY_COOLDOWN_SECONDS)
+        NOW + CONCURRENCY_COOLDOWN_MAX_SECONDS)
+
+def test_concurrency_chain_covers_five_minute_gaps():
+    """间隔 5min 内仍算同一条链：raccoon 实测 151–300s 的 41 个间隔要能被覆盖。
+
+    首枪冷却 60s，`CONCURRENCY_CHAIN_GAP_SECONDS=240` 等价于「相邻命中间隔
+    ≤300s」。用 90s 门槛时这批全部漏掉（122 个间隔只覆盖 38 个）。
+    """
+    s = Scheduler()
+    assert CONCURRENCY_CHAIN_GAP_SECONDS == 240
+    stale = _with_model_cooldown(
+        cand(), "m", cooling_until=NOW - CONCURRENCY_CHAIN_GAP_SECONDS,
+        hits=1, reason="concurrency")
+    out = s.note_error(stale, ErrKind.CONCURRENCY, NOW, model="m")
+    entry = out.model_cooldowns["m"]
+    assert (entry.hits, entry.cooling_until) == (
+        2, NOW + 2 * CONCURRENCY_COOLDOWN_SECONDS)
+
+def test_concurrency_burst_second_credential_escalates_to_cap():
+    """整组打满：同 (provider, model) 第二个不同凭证在窗口内再命中 → 封顶档。
+
+    raccoon 实测 14 波三凭证同秒 429：第一个号按首枪 60s 冷却，第二、三个号
+    若也各自 60s，会在一分钟内再被选上、逐个白撞。爆出 burst 后直接 5min。
+    """
+    s = Scheduler()
+    first = s.note_error(
+        cand("a", provider="raccoon"), ErrKind.CONCURRENCY, NOW, model="m")
+    assert (first.model_cooldowns["m"].cooling_until
+            == NOW + CONCURRENCY_COOLDOWN_SECONDS)
+    # 第二个不同凭证：整组信号 → 封顶
+    second = s.note_error(
+        cand("b", provider="raccoon"), ErrKind.CONCURRENCY, NOW + 5, model="m")
+    entry = second.model_cooldowns["m"]
+    assert (entry.cooling_until, entry.hits) == (
+        NOW + 5 + CONCURRENCY_COOLDOWN_MAX_SECONDS, 3)
+    # 第三个不同凭证同样升封顶
+    third = s.note_error(
+        cand("c", provider="raccoon"), ErrKind.CONCURRENCY, NOW + 6, model="m")
+    assert (third.model_cooldowns["m"].cooling_until
+            == NOW + 6 + CONCURRENCY_COOLDOWN_MAX_SECONDS)
+    # 不同 provider 不构成整组信号，走首枪
+    other = s.note_error(
+        cand("d", provider="trae"), ErrKind.CONCURRENCY, NOW + 5, model="m")
+    assert (other.model_cooldowns["m"].cooling_until
+            == NOW + 5 + CONCURRENCY_COOLDOWN_SECONDS)
+
+
+def test_concurrency_burst_same_credential_stays_chain():
+    """同一凭证重复命中不是整组信号：走命中链，不升封顶。"""
+    s = Scheduler()
+    s.note_error(cand("a", provider="raccoon"), ErrKind.CONCURRENCY, NOW, model="m")
+    again = s.note_error(
+        _with_model_cooldown(cand("a", provider="raccoon"), "m",
+                             cooling_until=NOW + CONCURRENCY_COOLDOWN_SECONDS,
+                             hits=1, reason="concurrency"),
+        ErrKind.CONCURRENCY, NOW + 5, model="m")
+    entry = again.model_cooldowns["m"]
+    assert (entry.hits, entry.cooling_until) == (
+        2, NOW + 5 + 2 * CONCURRENCY_COOLDOWN_SECONDS)
+
+
+def test_concurrency_burst_window_expiry_starts_new_round():
+    """窗口过去后再被第二个凭证打满 = 新一轮，不算整组，走首枪。"""
+    s = Scheduler()
+    s.note_error(cand("a", provider="raccoon"), ErrKind.CONCURRENCY, NOW, model="m")
+    late = s.note_error(
+        cand("b", provider="raccoon"),
+        ErrKind.CONCURRENCY, NOW + CONCURRENCY_BURST_WINDOW_SECONDS + 1, model="m")
+    assert (late.model_cooldowns["m"].cooling_until
+            == NOW + CONCURRENCY_BURST_WINDOW_SECONDS + 1
+            + CONCURRENCY_COOLDOWN_SECONDS)
+
+
+def test_concurrency_chain_breaks_after_idle_gap():
+    """冷却过去久了再打满算新的一轮：hits 归 1，时长回落到 60s。
+
+    `hits` 只增不减，若不做链判定，任何一次偶发打满都会把该凭证永久
+    抬到封顶 5 分钟。
+    """
+    s = Scheduler()
+    stale = _with_model_cooldown(
+        cand(), "m", cooling_until=NOW - CONCURRENCY_CHAIN_GAP_SECONDS - 1,
+        hits=7, reason="concurrency")
+    out = s.note_error(stale, ErrKind.CONCURRENCY, NOW, model="m")
+    entry = out.model_cooldowns["m"]
+    assert (entry.hits, entry.cooling_until) == (
+        1, NOW + CONCURRENCY_COOLDOWN_SECONDS)
 
 def test_concurrency_cooldown_reason_switch_resets_hits():
     """原因切换重新计数：MODEL 6004 的 hits 不能带到并发短冷却里。"""

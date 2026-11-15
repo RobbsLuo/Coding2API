@@ -49,11 +49,25 @@ UPSTREAM_COOLDOWN_KINDS = frozenset({
 # 模型级限流（6004）软冷却基数与封顶（有界指数退避）
 MODEL_COOLDOWN_SECONDS = 600
 MODEL_COOLDOWN_MAX_SECONDS = 2 * 3600
-# 并发会话打满（CodeArts TM.00001041）固定短冷却：它是「在途满了」的瞬态信号，
-# 不是额度耗尽——在途请求排空即恢复（实测 CodeArts 平均 9s、最大 38s），60s
-# 覆盖排空加余量。刻意**不翻倍**：重复打满说明持续高并发，重 armed 60s 即可；
-# 套 MODEL 的 600s 起步、翻倍到 2h 会把一次瞬态打满变成 10min 起的长时间不可用。
+# 并发会话打满（CodeArts TM.00001041）：它是「在途满了」的瞬态信号，不是额度
+# 耗尽——在途请求排空即恢复（实测 CodeArts 平均 9s、最大 38s），首枪 60s 覆盖
+# 排空加余量，**不套 MODEL 的 600s 起步**（会把一次瞬态打满变成 10min 起不可用）。
 CONCURRENCY_COOLDOWN_SECONDS = 60
+# 但「冷却到期后不久又被打满」不是瞬态：上游的窗口还没恢复，继续 60s 重 armed
+# 只是白撞。raccoon 实测（logs/launchd.err.log，2026-11-15）：125 次
+# `user_model_rate_limited` 分布在 3 个凭证上，相邻命中间隔 122 个——≤150s 38 个、
+# 151–300s 41 个、>300s 43 个。间隔 >300s 才算新的一轮（该号空闲足够久，偶发
+# 打满不该被永久抬到封顶）。
+# 因此同一命中链按 2 倍升级、封顶 5 分钟。链判定用「到期后 240s 内再次命中」：
+# 首枪冷却 60s，等价于相邻间隔 ≤300s，实测覆盖 79/122 个间隔（原 90s 门槛只
+# 覆盖 38 个，注释里「间隔多在 121–300s」那批全部漏掉）。
+CONCURRENCY_COOLDOWN_MAX_SECONDS = 300
+CONCURRENCY_CHAIN_GAP_SECONDS = 240
+# 同一 (provider, model) 的并发打满在短窗口内被**第二个不同凭证**再命中：
+# 是上游对整组限流（raccoon 实测 2026-11-15：14 波三凭证同秒 429），单凭证链式
+# 冷却治不了——升到封顶档，别让剩余号逐个白撞。窗口用 90s：burst 三号常在同秒
+# 触发，90s 足够捕获整波又不至于把后续偶发打满误判成整组限流。
+CONCURRENCY_BURST_WINDOW_SECONDS = 90
 # 「该后端无此模型」（11102）负缓存：6h 起，翻倍封顶 24h
 BLOCKED_BASE_SECONDS = 6 * 3600
 BLOCKED_MAX_SECONDS = 24 * 3600
@@ -148,6 +162,17 @@ def blocked_backoff_duration(hits: int) -> int:
     """负缓存 TTL：BLOCKED_BASE 起按 `1 << min(hits-1, BLOCKED_SHIFT_MAX)` 放大，封顶。"""
     shift = min(max(hits - 1, 0), BLOCKED_SHIFT_MAX)
     return min(BLOCKED_BASE_SECONDS << shift, BLOCKED_MAX_SECONDS)
+
+
+def concurrency_cooldown_duration(hits: int) -> int:
+    """并发打满的冷却时长：首枪 60s，同一命中链按 2 倍升级，封顶 5 分钟。
+
+    `hits` 是该 (凭证, 模型) 命中链内的第几次（链的界定见
+    `CONCURRENCY_CHAIN_GAP_SECONDS`）。封顶低于 MODEL 的 2h：再长也只是
+    「上游窗口没排空」，不是额度或账号问题，长时间移出池子不划算。
+    """
+    return min(CONCURRENCY_COOLDOWN_SECONDS << max(hits - 1, 0),
+               CONCURRENCY_COOLDOWN_MAX_SECONDS)
 
 
 def clamp_retry_at(retry_at: int | None, now: int, fallback: int) -> tuple[int, bool]:
@@ -275,6 +300,10 @@ class Scheduler:
             ErrKind.SOFT: soft_cooldown,
             ErrKind.OTHER: other_cooldown,
         }
+        # 整组并发打满的检测状态（进程内，重启即清——429 是瞬态，丢了无害）：
+        # (provider, model) → (首中时刻, 已命中的凭证集合)。只在 CONCURRENCY
+        # 命中时写，见 `_concurrency_burst`。
+        self._concurrency_bursts: dict[tuple[str, str], tuple[int, set[str]]] = {}
 
     @property
     def expiry_window(self) -> int:
@@ -367,6 +396,25 @@ class Scheduler:
 
     # ------------------------------------------------------------ 结果反馈
 
+    def _concurrency_burst(self, provider: str, model: str, credential_id: str,
+                           now: int) -> bool:
+        """(provider, model) 在窗口内已被**另一个不同凭证**打满 → 整组限流。
+
+        返回 True 时调用方应把本次冷却升到封顶档。首个命中只登记（False）；
+        窗口过期或未见过则作为新一轮起点（False）。同一凭证重复命中不算
+        整组信号（那是它自己的命中链，走 `concurrency_cooldown_duration`）。
+        """
+        key = (provider, model)
+        state = self._concurrency_bursts.get(key)
+        if state is None or now - state[0] > CONCURRENCY_BURST_WINDOW_SECONDS:
+            self._concurrency_bursts[key] = (now, {credential_id})
+            return False
+        seen = state[1]
+        if credential_id in seen:
+            return False
+        seen.add(credential_id)
+        return True
+
     def note_error(self, candidate: Candidate, kind: ErrKind, now: int, *,
                    model: str | None = None,
                    retry_at: int | None = None) -> ErrorOutcome:
@@ -382,7 +430,8 @@ class Scheduler:
         SOFT    → 短冷却，不累计 err_count（防雪崩）
         OTHER   → 累计，达到阈值 → 中冷却
         MODEL / BLOCKED / CONCURRENCY → 只写 (凭证, 模型) 条目，不动账号级状态；
-                           其中 CONCURRENCY 用固定短冷却，不翻倍
+                           其中 CONCURRENCY 首枪 60s，**冷却到期后又被立刻打满**
+                           才按命中链翻倍（封顶 5min，见 `concurrency_cooldown_duration`）
                           账号级冷却出现时清空模型级条目（防豁免泄漏）
         REQUEST → 零动作：不是账号的问题，换号但绝不惩罚凭证
         QUEUE   → 零动作：上游只是排队，等 `retryAfterSeconds` 后原号重开；
@@ -451,12 +500,26 @@ class Scheduler:
             existing = (candidate.model_cooldowns or {}).get(model)
             # 换了原因就重新计数：限流与「无此模型」的退避基数/封顶完全不同，
             # 沿用对方的 hits 会得到既非 600s 也非 6h 的第三种时长
-            hits = (existing.hits + 1
-                    if existing is not None and existing.reason == reason else 1)
-            # 并发打满固定短冷却、不翻倍：在途排空即恢复，重复打满重 armed 即可
+            same_reason = existing is not None and existing.reason == reason
             if kind is ErrKind.CONCURRENCY:
-                duration = CONCURRENCY_COOLDOWN_SECONDS
+                # 命中链判定：上一次并发冷却到期后 240s 内又被打满 = 上游窗口
+                # 还没排空，沿用并升级 hits；否则是新的一轮，从 1 起算。
+                # 不能用 `same_reason` 单独判：hits 只增不减，任何一次偶发
+                # 打满都会把该凭证永久抬到封顶时长。
+                chained = (same_reason and existing is not None
+                           and now - existing.cooling_until
+                           <= CONCURRENCY_CHAIN_GAP_SECONDS)
+                if self._concurrency_burst(candidate.provider, model,
+                                           candidate.credential_id, now):
+                    # 同一 (provider, model) 已被另一个不同凭证打满：整组限流，
+                    # 直接升封顶档，避免剩余号逐个白撞
+                    hits = 3
+                    duration = CONCURRENCY_COOLDOWN_MAX_SECONDS
+                else:
+                    hits = existing.hits + 1 if chained else 1
+                    duration = concurrency_cooldown_duration(hits)
             else:
+                hits = existing.hits + 1 if same_reason else 1
                 duration = (blocked_backoff_duration(hits) if kind is ErrKind.BLOCKED
                             else model_cooldown_duration(hits))
             return ErrorOutcome(err_count=candidate.err_count,

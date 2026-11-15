@@ -58,6 +58,30 @@ def test_model_mismatch_tolerates_version_suffixes():
     assert _model_mismatch("glm-5.2", "DEFAULT") is False
 
 
+def test_model_mismatch_tolerates_channel_naming():
+    """渠道命名差异不算替换：厂商前缀/点号转连字符/发布号尾缀/部署 ID。
+
+    实测 2026-11-15 日志里 1481 条「疑似静默替换」告警全部是这一类，归一后
+    只剩真替换才会命中。
+    """
+    assert _model_mismatch(
+        "deepseek-v4.1-flash", "sn-deepseek-v4-1-flash-1017") is False
+    assert _model_mismatch("glm-5.3-flash", "sn-glm-5-3-flash") is False
+    # trae 回的是部署端点 ID，不含模型信息，不构成证据
+    assert _model_mismatch(
+        "deepseek-v4.1-flash", "ep-20261020194436-p4fjc") is False
+    # OpenAI 兼容层的 `models/` 前缀、下划线写法、多余连字符
+    assert _model_mismatch("gpt-4o", "models/gpt-4o") is False
+    assert _model_mismatch("gpt_4o", "gpt-4o") is False
+    assert _model_mismatch("gpt--4o", "gpt-4o") is False
+    assert _model_mismatch("-glm-5", "glm-5") is False
+    # 多段发布号尾缀循环剥离
+    assert _model_mismatch("glm-5-20261001-1017", "glm-5") is False
+    # 前缀归一后仍是另一个模型，照样命中
+    assert _model_mismatch(
+        "deepseek-v4.1-flash", "sn-glm-5-3-flash") is True
+
+
 async def test_stream_warns_when_upstream_reports_other_model(repo, caplog):
     provider = _Provider([
         Event(kind=EventKind.CONTENT, content="ok", model="glm-4.6"),

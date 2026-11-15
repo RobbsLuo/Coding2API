@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import socket
 import ssl
 import time
@@ -2278,19 +2279,54 @@ def _event_kind(event: Event) -> ErrKind:
 # 上游把「未指定/自动路由」回显成这些占位名（实测 Qoder 每帧都回 `auto`）：
 # 占位名不构成「替换」证据，忽略，否则每条请求都刷一条假告警。
 _MODEL_PLACEHOLDERS = frozenset({"auto", "default", "unknown", "none"})
+# 部署端点 ID（trae 实测回 `ep-20261020194436-p4fjc`）不含模型信息，同样不是
+# 「换成了别的模型」的证据；不识别会把每条 trae 请求都记成疑似替换。
+_DEPLOYMENT_MODEL_ID = re.compile(r"^ep-\d{12,}-[a-z0-9]+$")
+# 版本/日期尾缀：`glm-5.2-20261001`、raccoon 的 `sn-deepseek-v4-1-flash-1017`
+# 都是同一模型的不同发布号，4 位起才算（避免剥掉 `-7b` 这类参数量）。
+_MODEL_RELEASE_SUFFIX = re.compile(r"-\d{4,}$")
+
+
+def _normalize_model_id(name: str) -> str:
+    """把模型名归一成可比较形式；返回 `""` 表示「没有可比信息」。
+
+    渠道命名习惯不同，直接比较会满屏假告警（实测 raccoon/trae 的告警里
+    1481 条全是这一种）：厂商前缀 `sn-`、点号转连字符
+    （`deepseek-v4.1-flash` vs `sn-deepseek-v4-1-flash-1017`）、发布号尾缀。
+    归一只做这些**无损**变换，不猜别名——真换成别的模型（如 `glm-5.2` →
+    `glm-4.6`）归一后仍不构成前缀关系，照样命中。
+    """
+    value = name.strip().lower()
+    if not value:
+        return ""
+    if value.startswith("models/"):
+        value = value[len("models/"):]
+    if _DEPLOYMENT_MODEL_ID.match(value):
+        return ""
+    if value.startswith("sn-"):
+        value = value[len("sn-"):]
+    value = value.replace(".", "-").replace("_", "-")
+    while True:
+        stripped = _MODEL_RELEASE_SUFFIX.sub("", value)
+        if stripped == value:
+            break
+        value = stripped
+    return re.sub(r"-{2,}", "-", value).strip("-")
 
 
 def _model_mismatch(requested: str, observed: str) -> bool:
     """上游自报模型与请求模型是否「明显不是同一个」。
 
-    容忍大小写与版本/日期后缀（`glm-5.2` vs `glm-5.2-20261001`）：双向都不
-    构成前缀关系才判为不一致——真正的静默替换（换成别的模型）才会命中。
+    两侧先归一（见 `_normalize_model_id`），再按大小写无关的前缀关系判定：
+    容忍版本/日期后缀（`glm-5.2` vs `glm-5.2-20261001`）——双向都不构成前缀
+    关系才判为不一致，真正的静默替换（换成别的模型）才会命中。
     """
-    left = requested.strip().lower()
-    right = observed.strip().lower()
-    if not left or not right or left == right:
+    raw_right = observed.strip().lower()
+    if raw_right in _MODEL_PLACEHOLDERS:
         return False
-    if right in _MODEL_PLACEHOLDERS:
+    left = _normalize_model_id(requested)
+    right = _normalize_model_id(observed)
+    if not left or not right or left == right:
         return False
     return not (left.startswith(right) or right.startswith(left))
 

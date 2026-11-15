@@ -103,7 +103,7 @@ class ErrKind(StrEnum):
     OTHER = "other"      # 其他 4xx/5xx → 累计，连续 3 次 → 冷却 10m
     INVALID = "invalid"  # 请求无效（不存在等）→ 不冷却凭证，跳过该上游；全拒 → 400
     MODEL = "model"      # 该模型用量超限（429+6004）→ 只冷却 (凭证, 模型)，10m 起翻倍封顶 2h
-    CONCURRENCY = "concurrency"  # 并发会话打满 → 固定 60s 模型级短冷却，不翻倍
+    CONCURRENCY = "concurrency"  # 并发会话打满 → 只冷却 (凭证, 模型)：首枪 60s，同链翻倍封顶 5m
     BLOCKED = "blocked"  # 该账号无此模型（400/404+11102）→ (凭证, 模型) 负缓存，6h 起翻倍封顶 24h
     REQUEST = "request"  # 请求级错误（11101/11128/11135）→ 零动作：不冷却、不累计，仅换号
     CONTEXT = "context"  # 上下文超限（11115 `prompt is too long`）→ 同 REQUEST 处置，统计独立成类
@@ -417,6 +417,7 @@ class Provider(Protocol):
 - **额度** `GET {openapi}/api/v2/quota/usage`：`userQuota` + `addOnQuota` 合成 `remaining`/`total`，`cycle_end` 取最早 `expiresAt`。
 - **节点故障归类**：Qoder 把自身节点故障包成 400（`{"code":"400","message":"[FAIL]node:… msg:Execution failed: null"}`，HTTP 与 `statusCodeValue` 都是 400）。`classify_error_code` 对 400/404/422 加响应体判据：命中 `NODE_FAILURE_MARKERS = ("[FAIL]node:", "Execution failed")` → `ErrKind.MODEL`；否则 `INVALID`。乱码模型名不带该标记 → 不误伤。
 - **403 判定统一（HTTP 与流内信封同一判据）**：`statusCodeValue` 403 早先由 `_decode_frame` 直接调 `classify_error_code` 判 DEAD（硬禁用），HTTP 403 却走 `classify_status` 判 SOFT——同码两后果。现信封也走 `classify_status`，优先级：排队 → QUEUE；`DAILY_QUOTA_MARKERS`（`Billing daily count exceeded`，`code 110`「每日计费次数用尽」）→ CREDIT（冷却到次日 04:00）；`SESSION_DEAD_MARKERS`（`TOKEN_EXPIRE` / `12153` / `Offline user session not found`）→ DEAD；其余 → SOFT。实测 2026-10-27 15:39 `{"code":"110","message":"Billing daily count exceeded"}` 被流内路径判死，qoder `nick5080166916` 硬禁用。
+- **`role: "developer"` 须归一为 `system`**：OpenAI 的 developer 角色（PI 一类客户端对 reasoning 模型会把 system 转成 developer）上游不认，实测 2026-11-11 14:16 直接 400 `messages[0].role: unknown variant 'developer', expected one of 'system', 'user', 'assistant', 'tool', 'latest_reminder'`（同分钟 codearts 以 `InferHub.001001044` 拒绝同一报文）。出站前 `build_chat_body._normalize_developer_role` 就地改写（语义等价、无损），codebuddy / trae 早已各自做同一归一。
 - **`content: null` 须归一为空串**：Qoder 拒收带 `tool_calls` 的 assistant 把 `content` 置 `null`（OpenAI 允许）。上游把该消息当「无正文」跳过 → 紧随的 `role:"tool"` 成孤儿，报文却报 `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`——指向 tool 配对，真因在 assistant 的 null content。出站前 `build_chat_body._normalize_null_content` 把 assistant/tool 的 `null` 改成 `""`（语义等价）。2026-10-23 实测：同一请求体只把 `null` 换成 `""` 即 400 → 200，与 `reasoning_content` / 并行调用 / 轮数无关。codebuddy_intl、trae、officeace 不敏感。
 - 白名单 `QODER_ALLOWED_ENDPOINTS` 含国内 openapi+gateway 与国际版，启动时校验；`QODER_CHAT_MIN_INTERVAL`（热更，默认 5s）独立 pacer。
 
@@ -511,7 +512,7 @@ class Provider(Protocol):
 - **凭据归一**（`credential.py`）：入参接受裸 JWT / `{"access_token":"…"}` / `{"token":…}` / `{"xhx_token":…}` / 整段 cookie（`xhx_token=…; …`）。`uid`、`expires_at` 从 JWT claims 解出（`sub`/`uid`、`exp`），**不验签**（验签是上游的事；这里只当元数据）。无登录轨道，只能 JSON 导入。
 - **未知模型防护**：上游对不认识的模型名静默回落默认模型并回 200（实测 `definitely-not-a-model` → `model=raccoon-090dd3`）。两层拦截：① `stream_chat` 前按最近一次目录（`known_models`，小写集合）校验，不在目录里直接抛 404/INVALID（不发上游）；② 流首帧比对上游回显的 `model`，不一致抛 `UpstreamProtocolViolation`。目录未拉过（集合为空）时放行，真实保护靠第 ② 层。
 - **额度口径**：`available_points` 即积分余额，`Quota.total = remaining`（上游没有总量口径，不编造），账本记 `credits`（与 CodeArts 同账）。`billing_effective_multiplier` 直接当 `credit_rate`，0 = 限免，调度器优先选。**按请求计费**（每笔 `points=-1`，与 token 量无关），故不做 token 折算。
-- **错误分类**：`user identity could not be verified` / 401 → `DEAD`（会话 JWT 过期，只能重取）；积分耗尽类文案 → `CREDIT`；`429 user_model_rate_limited` → `CONCURRENCY`（固定短冷却，模型级）；其余 429 → `SOFT`；400/404/422 → `INVALID`。
+- **错误分类**：`user identity could not be verified` / 401 → `DEAD`（会话 JWT 过期，只能重取）；积分耗尽类文案 → `CREDIT`；`429 user_model_rate_limited` → `CONCURRENCY`（模型级，首枪 60s、同链翻倍封顶 5min，见 §6.3）；其余 429 → `SOFT`；400/404/422 → `INVALID`。
 - **并发**：实测 5 并发放行、第 6 个 429 → `RACCOON_MAX_CONCURRENCY`（热更，默认 2）+ 独立 pacer（**不**与其他渠道共享）。
 - **签到**（`activity.py`）：上游无领取接口，每日 300 积分由服务端 00:00 自动发放；当天登录过才延期到 7 天，否则当日 24:00 清零。`checkin` = `visit`（`user_info`，页面级访问）→ `fetch_quota` → `fetch_bills` → `checkin_result()`；只认流水、不看 200。四态：本次触发（created_at 在 90s 窗口内）/ 今天早些时候已发 / 今天无新发放但仍有未过期 `daily_grant`（视为已签，凌晨封账到 01:30 再确认）/ 完全无可用积分（失败，重试推到 01:30）。
 - **活跃上报**：`POST /api/web/auth/v1/devices_current_heartbeat`；头族 `x-client-device-id`（必填，缺了 `100002 params_invalid_error`）/ `x-client-platform: web` / `x-client-version` / `x-raccoon-language`。device_id 用 `derive_device_id(uid)` 稳定派生。**心跳不算登录**（只刷 `last_seen_at`），故 `activity` 先做一次 `GET /api/web/auth/v1/user_info` 页面访问再发心跳；访问失败按活跃失败返回，让任务在同一小时窗口内重试。
@@ -567,7 +568,7 @@ class Scheduler:
 - 登记名 = **该凭证所属上游的原始模型名**（`_upstream_model`）；CB 与 TRAE 大小写变体不同，归一名漏判。
 - 选号路径：`executor._select` 逐凭证过滤 `is_selectable(now, 模型名)` + 注入 `Candidate.credit_rate` → 交 `Scheduler.select`；同时完成收窄、粘性命中与排序（`_sticky(...) or scheduler.select(...)`）。
 - **冷却到期先半开**（`engine/half_open.py`，`(凭证, 作用域)` 粒度；作用域空串 = 账号级、非空 = 该模型）：到期后只放行**一个**探测请求，其余请求见占用即换号（唯一候选时按无可用返回）。成功记「已探通」120s 期内直放；失败由上游写新冷却、探测位立刻释放。探测位 TTL 600s 兜 GC 泄漏。理由：到期即全量回池会把刚解冻的号再打进限流（锯齿）。进程内集合，重启只让每个号多探一次。
-- 退避：`MODEL` 10m 起翻倍封顶 2h；`BLOCKED` 6h 起翻倍封顶 24h；`CONCURRENCY` 固定 60s 不翻倍。换 reason 重新计数。
+- 退避：`MODEL` 10m 起翻倍封顶 2h；`BLOCKED` 6h 起翻倍封顶 24h；`CONCURRENCY` 首枪 60s，**同一条命中链**才翻倍（封顶 5min）。换 reason 重新计数。命中链 = 上一次 (凭证, 模型) 并发冷却到期后 240s 内又被打满（首枪冷却 60s，等价于相邻命中间隔 ≤300s）：说明上游窗口还没排空，继续 60s 重 armed 只是白撞（raccoon 实测 2026-11-15：125 次 `user_model_rate_limited`、相邻间隔 122 个——≤150s 38 个、151–300s 41 个、>300s 43 个；240s 门槛覆盖 79 个，原 90s 只覆盖 38 个）。中间成功过或空闲久了即新的一轮，hits 归 1——否则偶发打满会把该凭证永久抬到封顶。**整组打满**：同 (provider, model) 在 90s 窗口内被第二个不同凭证再命中（raccoon 实测 14 波三凭证同秒 429）→ 直接升封顶档，别让剩余号逐个白撞；检测状态在进程内，重启即清（429 是瞬态）。
 - **上游点名恢复时刻优先**：`Retry-After` → `parse_retry_after`；头缺失时 CB 走 `parse_reset_at` 读正文 `reset at … UTC+8`（`retry_hints(headers, body=raw)`，仅 CodeBuddy 传 body）。两者经 `clamp_retry_at` 钳在 `[now + 常量, now + 24h]` → `MODEL` 的 600s 只是下限，上游说 22:34 恢复即冷却到 22:34。日志按 `_scope_label` 打作用域：模型级「模型 <名>」，账号级「作用域 账号」——账号级分类的调用方同样传模型名，一律打 `模型` 会让 zen 429 读起来像模型级限流。
 - 清除：`save_success(..., model=)` 只删 `reason='blocked'`；删除凭证 / 账号级冷却出现都清模型条目，`revive` 亦然。留存任务每轮 `purge_expired_model_cooldowns()`（删行）+ `purge_expired_account_cooldowns()`（`cooling_until` 与 `cooling_kind` 一起置 NULL）；列表只下发未过期。账号级那条是**卫生清理**非调度依赖——选号按 `cooling_until > now` 判断，但陈旧值让管理台「冷却」排序失真。
 - **账号级冷却带来源标签** `credentials.cooling_kind`（ErrKind 值）：`revive` 对 `UPSTREAM_COOLDOWN_KINDS`（soft/credit/plan/restricted）**保留**冷却，只解硬禁用与本地冷却；`force=True` 才清。此前一律清除，导致「恢复」后立刻再撞同一个 429（2026-11-03 12:22–12:23 实测）。老库补列后为 NULL = 来源未知，按旧行为清除。
@@ -641,7 +642,7 @@ class Scheduler:
 
 流截断：上游 HTTP 200 正常关闭、但本次尝试从未产出终态事件（`EventKind.FINISH`）→ 响应不完整。凭证照常 `save_success`（上游没报错，冷却只会误伤健康号），统计记 `ok=False` + `error_type=truncated_stream`，客户端仍收到收尾帧与 `[DONE]`。
 
-上游模型观测：`Event.model`（协议里有 `model` 就填）与请求模型按尝试比较；双向都不构成前缀关系（`glm-5.2` vs `glm-5.2-20261001` 视为一致）时只写 WARNING「疑似静默替换」，不改响应、不冷却凭证、不写 `error_type`（与用量对账 `_check_usage_consistency` 同口径：观测信号不进失败归因）。占位名（`auto` / `default` / `unknown` / `none`）不算证据。**TRAE 的真实模型只在元数据帧回显**（`extra_info.model`、`timing_cost.provider_model_name`），这些帧无下游语义，故 `TraeClient` 先在流循环取提示再贴到后续事件（output/done/usage 帧都不带模型）。**Qoder 实测只有 `model:"auto"`**（信封 headers 与 chunk 均无模型名），天然是观测盲区。
+上游模型观测：`Event.model`（协议里有 `model` 就填）与请求模型按尝试比较；两侧先做**无损归一**（去 `models/` 前缀、厂商前缀 `sn-`、部署端点 ID `ep-…`、`.``_` 转连字符、4 位起的版本/日期尾缀），再按双向前缀关系判定——`glm-5.2` vs `glm-5.2-20261001`、`deepseek-v4.1-flash` vs `sn-deepseek-v4-1-flash-1017` 视为一致；真换成别的模型才写 WARNING「疑似静默替换」，不改响应、不冷却凭证、不写 `error_type`（与用量对账 `_check_usage_consistency` 同口径：观测信号不进失败归因）。占位名（`auto` / `default` / `unknown` / `none`）不算证据。**TRAE 的真实模型只在元数据帧回显**（`extra_info.model`、`timing_cost.provider_model_name`），这些帧无下游语义，故 `TraeClient` 先在流循环取提示再贴到后续事件（output/done/usage 帧都不带模型）；其回显的 `ep-<时间戳>-<id>` 是部署端点 ID，归一后视为无信息。**Qoder 实测只有 `model:"auto"`**（信封 headers 与 chunk 均无模型名），天然是观测盲区。
 
 ## 8. 数据库
 DDL 以 `src/db/schema.sql` 为准。`SCHEMA_VERSION = 32`（v29 删了福利链路的积分三列，v30 加用户级策略两列，v31 加 `checkin_events` 签到审计日志表，v32 加 `credentials.cooling_kind` 冷却来源），14 张表：`api_keys` / `credentials` / `credential_limits` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `checkin_events` / `credit_events` / `credential_model_cooldowns` / `model_probes` / `runtime_settings` / `alert_events`。
