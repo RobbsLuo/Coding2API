@@ -209,6 +209,8 @@ Free models at [Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`), no login. St
 
 **Keepalive frames and queueing**: the upstream sends keepalive frames with `body:"null"` (outer status 200) mid-stream → skipped, never interrupting output; "queued" arrives as a 403 whose queue marker hides inside a **serialized string** → classified as QUEUE, waits the upstream's named seconds and reopens on the same credential instead of hard-disabling it. "Daily billing count exhausted" (403 `code 110`, `Billing daily count exceeded`) counts as quota → cools until 04:00 next day, likewise never hard-disabling (same predicate for HTTP and in-stream envelopes).
 
+**Message shape**: an assistant `content: null` that carries `tool_calls` is normalized to an empty string; `role:"developer"` is normalized to `system` (the upstream rejects the variant — `unknown variant 'developer'`; CodeArts rejects the same body the same minute). Both rewrites happen on the outbound copy and are lossless.
+
 ### CodeArts (`codearts`)
 
 [Huawei Cloud CodeArts](https://codearts.huaweicloud.com), real account: *Log in to CodeArts*, authorize, then paste the **unreachable local URL** back; server exchanges it for STS credentials (AK/SK + security_token + refresh_token + DPoP key) and stores them encrypted.
@@ -274,7 +276,7 @@ The upstream is plain OpenAI protocol, with three quirks:
 
 **Activity reporting**: `POST /api/web/auth/v1/devices_current_heartbeat` (the web client's real device heartbeat); with the `x-client-*` header family it returns 200 and is idempotent, refreshing `last_login_at`. Off by default; shares `ACTIVITY_REPORT_ENABLED` / `ACTIVITY_REPORT_HOUR` with CodeBuddy. Device id is derived stably from uid (a random one is treated as a new device).
 
-**Concurrency cap ~5** (the 6th concurrent request returns `429 user_model_rate_limited`) → `RACCOON_MAX_CONCURRENCY` defaults to 2, with its own pacer.
+**Concurrency cap ~5** (the 6th concurrent request returns `429 user_model_rate_limited`) → `RACCOON_MAX_CONCURRENCY` defaults to 2, with its own pacer. That 429 is really a per-account-per-model rate window (measured recovery median 25 min), so the `CONCURRENCY` cooldown starts at 60s, doubles along a hit chain, and caps at 30 min.
 
 ### Lingxi (`lingxi`)
 

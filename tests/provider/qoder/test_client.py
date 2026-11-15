@@ -147,6 +147,24 @@ def test_build_chat_body_normalizes_null_tool_content(caplog):
     assert any("null content" in r.getMessage() and "3" in r.getMessage()
                for r in caplog.records)
 
+def test_build_chat_body_normalizes_developer_role(caplog):
+    """`role:"developer"` 归一为 `system`：上游不认这个变体（实测 400）。
+
+    Qoder 的 400 原文：`messages[0].role: unknown variant 'developer', expected
+    one of 'system', 'user', 'assistant', 'tool', 'latest_reminder'`。
+    """
+    messages = [
+        {"role": "developer", "content": "你是助手"},
+        {"role": "user", "content": "hi"},
+    ]
+    with caplog.at_level("DEBUG", logger=qoder_client.__name__):
+        body = build_chat_body({"messages": messages}, "m")
+    assert [m["role"] for m in body["messages"]] == ["system", "user"]
+    assert any("developer" in r.getMessage() and "1" in r.getMessage()
+               for r in caplog.records)
+    # 入参不被改写（build_chat_body 深拷贝）
+    assert messages[0]["role"] == "developer"
+
 def test_build_chat_body_leaves_other_roles_content_untouched():
     """只归一 assistant/tool：user/system 的 null 原样交给上游裁决。"""
     messages = [

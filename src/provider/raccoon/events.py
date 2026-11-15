@@ -16,7 +16,7 @@
 |---|---|---|
 | 401 / 403 + 身份校验失败 | `DEAD` | 会话 JWT 过期或被撤销，只能重新登录后重贴 |
 | 402 / 余额不足（points、积分、insufficient、balance） | `CREDIT` | 等次日积分发放，不是凭证坏了 |
-| 429 + `user_model_rate_limited` | `CONCURRENCY` | 请求频率超限（并发约 5），排空即恢复 |
+| 429 + `user_model_rate_limited` | `CONCURRENCY` | 账号×模型频率窗口：中位恢复 25min，封顶 30min |
 | 429 其他 | `SOFT` | 账号级短限流 |
 | 400 / 404 / 422 | `INVALID` | 请求或模型名不对，换号无用 |
 | 5xx | `OTHER` | 上游故障，累计 3 次冷却 |
@@ -36,7 +36,9 @@ from ...provider.base import (
 )
 from ..openai_chunk import openai_events, usage_from_openai
 
-#: 429 的并发限流标记（实测 `{"error":{"code":"user_model_rate_limited"}}`）
+#: 429 的频率限流标记（实测 `{"error":{"code":"user_model_rate_limited"}}`）：
+#: 这是账号×模型的**分钟级窗口**，不是 CodeArts 那种「在途满了」，冷却封顶
+#: 30min（见 scheduler.CONCURRENCY_LONG_WINDOW_PROVIDERS）。
 _RATE_LIMIT_MARKERS = ("user_model_rate_limited", "请求频率超限", "rate_limit")
 #: 身份校验失败标记：会话 JWT 不可用
 _IDENTITY_MARKERS = ("identity could not be verified", "invalid token",

@@ -153,6 +153,25 @@ def _normalize_null_content(messages: list[dict[str, Any]]) -> int:
     return rewritten
 
 
+def _normalize_developer_role(messages: list[dict[str, Any]]) -> int:
+    """把 `role: "developer"` 归一为 `system`（返回改写条数）。
+
+    OpenAI 在 chat 协议里新增了 `developer`（PI 一类客户端对 reasoning 模型会
+    把 system 转成 developer），Qoder 上游不认这个变体：实测 2026-11-11 14:16
+    直接 400 `messages[0].role: unknown variant 'developer', expected one of
+    'system', 'user', 'assistant', 'tool', 'latest_reminder'`（同分钟的
+    codearts 也以 `InferHub.001001044` 拒绝同一报文）。`developer` 与 `system`
+    语义等价（开发者指令优先于用户消息），归一无损；codebuddy / trae 早已
+    各自做同一归一见两处实现。
+    """
+    rewritten = 0
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "developer":
+            message["role"] = "system"
+            rewritten += 1
+    return rewritten
+
+
 def _drop_orphan_tool_messages(
         messages: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
     """丢弃没有对应 `assistant.tool_calls` 的 `role:"tool"` 消息。
@@ -212,11 +231,16 @@ def build_chat_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
     # 非 list 形状（畸形请求）交给上游裁决，不做结构假设
     dropped = 0
     rewritten = 0
+    developers = 0
     if isinstance(messages, list):
         # 必须先归一 null content：上游把 content:null 的 assistant 当空消息跳过，
         # 其后的 tool 结果就成了孤儿并被报成 tool 配对错误（见函数 docstring）
         rewritten = _normalize_null_content(messages)
+        developers = _normalize_developer_role(messages)
         messages, dropped = _drop_orphan_tool_messages(messages)
+    if developers:
+        # DEBUG：归一属于成功路径（同 null content），不该占 INFO/WARNING
+        logger.debug("Qoder 请求把 %d 条 developer 角色归一为 system", developers)
     if rewritten:
         # DEBUG 而非 INFO：这是每请求都可能命中一次的「已自动修复」提示，不是
         # 故障。实测 Qoder 长会话下每请求都打（7 天 10309 行），占 err.log 的

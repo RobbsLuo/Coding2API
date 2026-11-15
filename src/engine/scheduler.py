@@ -58,11 +58,19 @@ CONCURRENCY_COOLDOWN_SECONDS = 60
 # `user_model_rate_limited` 分布在 3 个凭证上，相邻命中间隔 122 个——≤150s 38 个、
 # 151–300s 41 个、>300s 43 个。间隔 >300s 才算新的一轮（该号空闲足够久，偶发
 # 打满不该被永久抬到封顶）。
-# 因此同一命中链按 2 倍升级、封顶 5 分钟。链判定用「到期后 240s 内再次命中」：
-# 首枪冷却 60s，等价于相邻间隔 ≤300s，实测覆盖 79/122 个间隔（原 90s 门槛只
-# 覆盖 38 个，注释里「间隔多在 121–300s」那批全部漏掉）。
+# 因此同一命中链按 2 倍升级；封顶按渠道分档（默认 5min，长窗口渠道见下）。
+# 链判定用「到期后 240s 内再次命中」：首枪冷却 60s，等价于相邻间隔 ≤300s，
+# 实测覆盖 79/122 个间隔（原 90s 门槛只覆盖 38 个）。
 CONCURRENCY_COOLDOWN_MAX_SECONDS = 300
 CONCURRENCY_CHAIN_GAP_SECONDS = 240
+# 上游窗口长度按渠道分档：CodeArts 的「并发会话数」在排空后数十秒内恢复，5min 封顶
+# 足够；小浣熊的 429 `user_model_rate_limited` 不是「在途满了」而是**账号×模型的
+# 频率窗口**——2026-11-15 实测：三个凭证闲置 28 分钟后首个请求仍全部 429，且
+# 156 次 429 到同凭证下次成功的间隔中位数 1522s（10% 分位 231s、75% 分位 2530s），
+# 只有 22/156 在 5 分钟内恢复。按 5min 封顶等于每 5 分钟白撞一次（一波三号 = 3 次）。
+# 故该渠道封顶抬到 30min：首枪仍 60s（快速试错），链式翻倍收敛到实测恢复量级。
+CONCURRENCY_LONG_WINDOW_PROVIDERS = frozenset({"raccoon"})
+CONCURRENCY_LONG_WINDOW_MAX_SECONDS = 30 * 60
 # 同一 (provider, model) 的并发打满在短窗口内被**第二个不同凭证**再命中：
 # 是上游对整组限流（raccoon 实测 2026-11-15：14 波三凭证同秒 429），单凭证链式
 # 冷却治不了——升到封顶档，别让剩余号逐个白撞。窗口用 90s：burst 三号常在同秒
@@ -164,15 +172,25 @@ def blocked_backoff_duration(hits: int) -> int:
     return min(BLOCKED_BASE_SECONDS << shift, BLOCKED_MAX_SECONDS)
 
 
-def concurrency_cooldown_duration(hits: int) -> int:
-    """并发打满的冷却时长：首枪 60s，同一命中链按 2 倍升级，封顶 5 分钟。
+def concurrency_cooldown_cap(provider: str | None = None) -> int:
+    """并发/频率打满的冷却封顶：长窗口渠道 30min，其余 5min（见常量注释）。"""
+    return (CONCURRENCY_LONG_WINDOW_MAX_SECONDS
+            if provider in CONCURRENCY_LONG_WINDOW_PROVIDERS
+            else CONCURRENCY_COOLDOWN_MAX_SECONDS)
+
+
+def concurrency_cooldown_duration(hits: int, provider: str | None = None) -> int:
+    """并发/频率打满的冷却时长：首枪 60s，同一命中链按 2 倍升级，按渠道封顶。
 
     `hits` 是该 (凭证, 模型) 命中链内的第几次（链的界定见
-    `CONCURRENCY_CHAIN_GAP_SECONDS`）。封顶低于 MODEL 的 2h：再长也只是
-    「上游窗口没排空」，不是额度或账号问题，长时间移出池子不划算。
+    `CONCURRENCY_CHAIN_GAP_SECONDS`）。封顶分两档：默认 5min（CodeArts 一类
+    「在途排空即恢复」的并发上限）；`CONCURRENCY_LONG_WINDOW_PROVIDERS`
+    里的渠道是账号×模型的分钟级频率窗口（小浣熊实测恢复中位数 25min），
+    封顶 30min——继续 5min 重 armed 只是白撞。两档都低于 MODEL 的 2h：
+    这仍是窗口限流，不是额度或账号故障。
     """
-    return min(CONCURRENCY_COOLDOWN_SECONDS << max(hits - 1, 0),
-               CONCURRENCY_COOLDOWN_MAX_SECONDS)
+    cap = concurrency_cooldown_cap(provider)
+    return min(CONCURRENCY_COOLDOWN_SECONDS << max(hits - 1, 0), cap)
 
 
 def clamp_retry_at(retry_at: int | None, now: int, fallback: int) -> tuple[int, bool]:
@@ -431,7 +449,8 @@ class Scheduler:
         OTHER   → 累计，达到阈值 → 中冷却
         MODEL / BLOCKED / CONCURRENCY → 只写 (凭证, 模型) 条目，不动账号级状态；
                            其中 CONCURRENCY 首枪 60s，**冷却到期后又被立刻打满**
-                           才按命中链翻倍（封顶 5min，见 `concurrency_cooldown_duration`）
+                           才按命中链翻倍（封顶按渠道分档：默认 5min、长窗口渠道 30min，
+                           见 `concurrency_cooldown_duration`）
                           账号级冷却出现时清空模型级条目（防豁免泄漏）
         REQUEST → 零动作：不是账号的问题，换号但绝不惩罚凭证
         QUEUE   → 零动作：上游只是排队，等 `retryAfterSeconds` 后原号重开；
@@ -512,12 +531,13 @@ class Scheduler:
                 if self._concurrency_burst(candidate.provider, model,
                                            candidate.credential_id, now):
                     # 同一 (provider, model) 已被另一个不同凭证打满：整组限流，
-                    # 直接升封顶档，避免剩余号逐个白撞
+                    # 直接升封顶档，避免剩余号逐个白撞（小浣熊整组同秒 429 实测）
                     hits = 3
-                    duration = CONCURRENCY_COOLDOWN_MAX_SECONDS
+                    duration = concurrency_cooldown_cap(candidate.provider)
                 else:
                     hits = existing.hits + 1 if chained else 1
-                    duration = concurrency_cooldown_duration(hits)
+                    duration = concurrency_cooldown_duration(
+                        hits, candidate.provider)
             else:
                 hits = existing.hits + 1 if same_reason else 1
                 duration = (blocked_backoff_duration(hits) if kind is ErrKind.BLOCKED

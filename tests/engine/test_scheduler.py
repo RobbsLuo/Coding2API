@@ -15,6 +15,7 @@ from src.engine.scheduler import (
     CONCURRENCY_CHAIN_GAP_SECONDS,
     CONCURRENCY_COOLDOWN_MAX_SECONDS,
     CONCURRENCY_COOLDOWN_SECONDS,
+    CONCURRENCY_LONG_WINDOW_MAX_SECONDS,
     EXPIRY_WINDOW_SECONDS,
     MODEL_COOLDOWN_MAX_SECONDS,
     MODEL_COOLDOWN_SECONDS,
@@ -24,6 +25,7 @@ from src.engine.scheduler import (
     Candidate,
     ModelCooldown,
     Scheduler,
+    concurrency_cooldown_duration,
     next_credit_reset,
 )
 from src.provider.base import (
@@ -444,7 +446,8 @@ def test_concurrency_burst_second_credential_escalates_to_cap():
     """整组打满：同 (provider, model) 第二个不同凭证在窗口内再命中 → 封顶档。
 
     raccoon 实测 14 波三凭证同秒 429：第一个号按首枪 60s 冷却，第二、三个号
-    若也各自 60s，会在一分钟内再被选上、逐个白撞。爆出 burst 后直接 5min。
+    若也各自 60s，会在一分钟内再被选上、逐个白撞。爆出 burst 后直接升封顶
+    （raccoon 是长窗口渠道，封顶 30min；其余渠道 5min）。
     """
     s = Scheduler()
     first = s.note_error(
@@ -456,17 +459,44 @@ def test_concurrency_burst_second_credential_escalates_to_cap():
         cand("b", provider="raccoon"), ErrKind.CONCURRENCY, NOW + 5, model="m")
     entry = second.model_cooldowns["m"]
     assert (entry.cooling_until, entry.hits) == (
-        NOW + 5 + CONCURRENCY_COOLDOWN_MAX_SECONDS, 3)
+        NOW + 5 + CONCURRENCY_LONG_WINDOW_MAX_SECONDS, 3)
     # 第三个不同凭证同样升封顶
     third = s.note_error(
         cand("c", provider="raccoon"), ErrKind.CONCURRENCY, NOW + 6, model="m")
     assert (third.model_cooldowns["m"].cooling_until
-            == NOW + 6 + CONCURRENCY_COOLDOWN_MAX_SECONDS)
-    # 不同 provider 不构成整组信号，走首枪
+            == NOW + 6 + CONCURRENCY_LONG_WINDOW_MAX_SECONDS)
+    # 不同 provider 不构成整组信号，走首枪（且按该渠道自己的封顶：默认 5min）
     other = s.note_error(
         cand("d", provider="trae"), ErrKind.CONCURRENCY, NOW + 5, model="m")
     assert (other.model_cooldowns["m"].cooling_until
             == NOW + 5 + CONCURRENCY_COOLDOWN_SECONDS)
+
+
+def test_concurrency_long_window_provider_caps_at_thirty_minutes():
+    """长窗口渠道（raccoon）的封顶是 30min：实测恢复中位数 1522s。
+
+    156 次 `user_model_rate_limited` 到同凭证下次成功的间隔：10% 分位 231s、
+    中位数 1522s、75% 分位 2530s，只有 22/156 在 5min 内恢复。5min 封顶会每
+    5 分钟白撞一波；30min 才落在实测恢复量级内。
+    """
+    s = Scheduler()
+    assert CONCURRENCY_LONG_WINDOW_MAX_SECONDS == 1800
+    # hits=5 → 60s<<4 = 960s，还没到顶
+    mid = s.note_error(
+        _with_model_cooldown(cand("a", provider="raccoon"), "m",
+                             cooling_until=NOW, hits=4, reason="concurrency"),
+        ErrKind.CONCURRENCY, NOW, model="m")
+    assert mid.model_cooldowns["m"].cooling_until == NOW + 960
+    # hits=6 → 1920s，封顶 1800s
+    capped = s.note_error(
+        _with_model_cooldown(cand("a", provider="raccoon"), "m",
+                             cooling_until=NOW, hits=5, reason="concurrency"),
+        ErrKind.CONCURRENCY, NOW, model="m")
+    assert capped.model_cooldowns["m"].cooling_until == NOW + (30 * 60)
+    # 默认渠道仍是 5min 封顶
+    assert (concurrency_cooldown_duration(6) == CONCURRENCY_COOLDOWN_MAX_SECONDS
+            == 300)
+    assert concurrency_cooldown_duration(6, "raccoon") == 1800
 
 
 def test_concurrency_burst_same_credential_stays_chain():

@@ -110,7 +110,7 @@ DONE_TEXT = "[DONE]"
 # 文案（福利链路已下线，仍保留：命中即模型确实拿不到，值得负缓存）。
 _MODEL_ABSENT_MARKERS = ("002002009", "not registered", "4004.200", "benefit not found")
 # 并发会话打满：上游点名「在途满了」（`TM.00001041`、并发），排空即恢复，
-# 走固定短冷却的 CONCURRENCY，不套 MODEL 的翻倍退避（一次打满锁 10min 太久）。
+# 走 CONCURRENCY 的 60s 首枪冷却，不套 MODEL 的翻倍退避（一次打满锁 10min 太久）。
 _CONCURRENCY_MARKERS = ("00001041", "并发")
 # 模型级限流：上游点名当前模型（TPM、429 等），配额类限流恢复慢，走 MODEL。
 _MODEL_THROTTLE_MARKERS = ("tpm", "429", "rate limit", "throttl")
@@ -440,7 +440,7 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
     # 限流/并发会话标记：HTTP 400 与 429 都可能承载（实测并发超限走 400 +
     # `TM.00001041`）。统一判为可重试的限流，避免 400 落进 INVALID → 换号重试
     # 也没用、且不触发冷却（与流内 classify_error_code 一致）；其中并发打满
-    # 另判 CONCURRENCY（固定短冷却），不套 MODEL 的翻倍退避。
+    # 另判 CONCURRENCY（60s 首枪、同链升级），不套 MODEL 的翻倍退避。
     if status in (400, 429) and any(
             m in lowered for m in _STATUS_THROTTLE_MARKERS):
         if any(m in lowered for m in _CONCURRENCY_MARKERS):

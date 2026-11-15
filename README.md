@@ -213,6 +213,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **保活帧与排队**：上游在流中发 `body:"null"` 的保活帧（外层 200）→ 跳过、不打断输出；「排队中」包成 403 且排队标记藏在**序列化字符串**里 → 归 QUEUE 等上游点名的秒数后在原号重开，不硬禁用凭证。「每日计费次数用尽」（403 `code 110`，`Billing daily count exceeded`）→ 归额度类，冷却到次日 04:00，同样不硬禁用（HTTP 与流内信封同一判据）。
 
+**报文形状**：带 `tool_calls` 的 assistant `content: null` 归一为空串；`role:"developer"` 归一为 `system`（上游不认这个变体，实测 400 `unknown variant 'developer'`，同分钟 codearts 亦拒）。两者都是出站副本上的无损改写。
+
 ### CodeArts（`codearts`）
 
 [华为云 CodeArts](https://codearts.huaweicloud.com)，需真实账号：点「登录 CodeArts」→ 授权后浏览器跳到打不开的本地地址 → **整条链接**粘回页面换 STS 凭证（AK/SK + security_token + refresh_token + DPoP 私钥），加密入库。
@@ -280,7 +282,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **活跃上报**：`POST /api/web/auth/v1/devices_current_heartbeat`（网页端真实设备心跳），补 `x-client-*` 头族即 200、幂等，`last_login_at` 随之刷新。默认关闭，与 CodeBuddy 共用 `ACTIVITY_REPORT_ENABLED` / `ACTIVITY_REPORT_HOUR`。设备 id 由 uid 稳定派生（随机值会被上游当成新设备）。
 
-**并发上限约 5**（第 6 个回 `429 user_model_rate_limited`）→ `RACCOON_MAX_CONCURRENCY` 默认 2，独立节流器。
+**并发上限约 5**（第 6 个回 `429 user_model_rate_limited`）→ `RACCOON_MAX_CONCURRENCY` 默认 2，独立节流器。该 429 实为账号×模型的频率窗口（实测恢复中位数 25min），冷却按 `CONCURRENCY` 首枪 60s、同链翻倍、封顶 30min。
 
 ### 灵犀（`lingxi`）
 
