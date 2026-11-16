@@ -466,6 +466,11 @@ class Settings(BaseSettings):
     # 目标 `none` = 删除该键（走渠道默认）。只给机制不给策略：内置默认矩阵
     # 未经上游核实，写了就是编造。可热更。
     reasoning_effort_map: str = ""
+    # 出站隐私脱敏规则（默认空 = 关闭，逐字节不变）：逗号/空格分隔的
+    # `url_credentials` / `email` / `cn_mobile` / `private_ip`。只改**出站副本**
+    # 的 messages 正文与 tools 描述，`request.raw` 与 `tool_calls` 参数不动；
+    # 占位符单向、不做还原。实现见 `engine/privacy.py`。可热更。
+    privacy_rules: str = ""
     # Anthropic 入站 `thinking.budget_tokens` → `reasoning_effort` 的映射
     # （默认空 = 完全不映射，`thinking` 照旧被忽略）。格式
     # `预算:档位,预算:档位,disabled:档位`：`disabled` 匹配 `thinking.type==

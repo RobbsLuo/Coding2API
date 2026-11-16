@@ -285,6 +285,86 @@ async def test_recovery_seconds_none_when_no_provider_registered(repo_trae):
         default_model="glm-5.2"))
     assert executor._recovery_seconds(resolve("glm-5.2@trae", "glm-5.2")) is None
 
+async def test_privacy_rules_mask_outbound_copy_only(repo_trae):
+    """出站脱敏只改发往上游的副本：`request.raw` 保持原样（粘性/续写读它）。"""
+    credentials, _keys, _db = repo_trae
+    add_credential(credentials)
+    seen: list[dict] = []
+
+    class Provider:
+        id = "trae"
+
+        async def stream_chat(self, _credential_data, payload, _model):
+            seen.append(payload)
+            for event in GOOD_trae:
+                yield event
+
+    executor = Executor(ExecutorDeps(
+        providers={"trae": Provider()}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2",
+        privacy_rules=lambda: "email,cn_mobile"))
+    request = parse_chat_request({"messages": [
+        {"role": "user", "content": "mail a@b.com or 13800138000"}]})
+    await executor.complete(request)
+    assert seen[0]["messages"][0]["content"] == "mail [email] or [phone]"
+    assert request.raw["messages"][0]["content"] == "mail a@b.com or 13800138000"
+
+    # 规则开着但没有命中：同样不动（且不该产生副本副作用）
+    seen.clear()
+    await executor.complete(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hello"}]}))
+    assert seen[0]["messages"][0]["content"] == "hello"
+
+
+async def test_privacy_rules_apply_on_stream_path(repo_trae):
+    """流式路径同一落点：脱敏在压缩/档位映射之后、发上游之前。"""
+    credentials, _keys, _db = repo_trae
+    add_credential(credentials)
+    seen: list[dict] = []
+
+    class Provider:
+        id = "trae"
+
+        async def stream_chat(self, _credential_data, payload, _model):
+            seen.append(payload)
+            for event in GOOD_trae:
+                yield event
+
+    executor = Executor(ExecutorDeps(
+        providers={"trae": Provider()}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2",
+        privacy_rules=lambda: "private_ip"))
+    async for _ in executor.stream(parse_chat_request(
+            {"messages": [{"role": "user", "content": "host 10.1.2.3"}],
+             "stream": True})):
+        pass
+    assert seen[0]["messages"][0]["content"] == "host [private-ip]"
+
+
+async def test_privacy_rules_empty_keeps_payload_untouched(repo_trae):
+    """热更值是空串（默认）时零拷贝：payload 对象与 `request.raw` 同引用。"""
+    credentials, _keys, _db = repo_trae
+    add_credential(credentials)
+    seen: list[dict] = []
+
+    class Provider:
+        id = "trae"
+
+        async def stream_chat(self, _credential_data, payload, _model):
+            seen.append(payload)
+            for event in GOOD_trae:
+                yield event
+
+    executor = Executor(ExecutorDeps(
+        providers={"trae": Provider()}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2",
+        privacy_rules=lambda: ""))
+    request = parse_chat_request({"messages": [{"role": "user", "content": "a@b.com"}]})
+    await executor.complete(request)
+    assert seen[0]["messages"] == request.raw["messages"]
+    assert seen[0]["messages"][0]["content"] == "a@b.com"
+
+
 async def test_executor_rejects_model_without_provider(repo_trae):
     add_credential(repo_trae[0])
     executor, _provider, _credentials = build_executor(repo_trae, [GOOD_trae])

@@ -71,6 +71,7 @@ GATEWAY_GROUPS: tuple[tuple[str, str], ...] = (
     ("stream_thinking", "流式与思考"),
     ("gateway_control", "网关与计费"),
     ("affinity", "选号与会话"),
+    ("privacy", "出站隐私"),
     ("chat_throttle", "聊天节流"),
     ("codearts_throttle", "CodeArts 节流"),
     ("pacer", "后台任务节流"),
@@ -403,6 +404,12 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "24 小时。只用于排查客户端差异，**排查完立刻关**：这是本服务唯一"
                "把用户对话落盘的开关。改动会进审计。默认关。",
                group="observability"),
+    HotSetting("privacy_rules", str, "出站隐私脱敏规则",
+               "逗号/空格分隔：`url_credentials` / `email` / `cn_mobile` / "
+               "`private_ip`。只改**出站副本**（messages 正文与 tools 描述），"
+               "不改 request.raw、不做还原；`tool_calls` 参数与 JSON schema 不动。"
+               "留空 = 关闭（默认，逐字节不变）。开启后上游与客户端看到的是占位符。",
+               group="privacy"),
     HotSetting("metrics_enabled", bool, "Prometheus 指标出口",
                "是否暴露 `GET /metrics`（Prometheus text 格式：请求/token/凭证池/"
                "失败计数）。**不鉴权**，与 /healthz 同口径；指标已禁用高基数标签"
@@ -1092,6 +1099,10 @@ class RuntimeSettings:
     @property
     def metrics_enabled(self) -> bool:
         return bool(self.get("metrics_enabled"))
+
+    @property
+    def privacy_rules(self) -> str:
+        return str(self.get("privacy_rules"))
 
     @property
     def request_log_enabled(self) -> bool:

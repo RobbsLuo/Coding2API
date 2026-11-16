@@ -221,6 +221,7 @@ services:
       FORCE_DISABLE_THINKING: ${FORCE_DISABLE_THINKING:-false}
       # 出站 reasoning_effort 档位映射：渠道=from:to,from:to;*=from:to；留空原样透传
       REASONING_EFFORT_MAP: ${REASONING_EFFORT_MAP:-}
+      PRIVACY_RULES: ${PRIVACY_RULES:-}
       # Anthropic thinking.budget_tokens → reasoning_effort：预算:档位,...；留空不映射
       ANTHROPIC_THINKING_EFFORTS: ${ANTHROPIC_THINKING_EFFORTS:-}
       # 上下文压缩：按模型目录里的输入上限裁剪过长对话，避免撞上游硬限制

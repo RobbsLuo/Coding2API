@@ -41,6 +41,7 @@ from ..provider.base import (
 )
 from ..provider.naming import normalize_model_key
 from ..request_context import credential_scope, set_credential_id
+from . import privacy
 from .continuation import ContinuationStream
 from .model_resolver import (
     ModelTarget,
@@ -318,6 +319,10 @@ class ExecutorDeps:
     # `none` 表示删除该键。None / 空文本 = 原样透传。零参 callable 时每次
     # 请求现读（热更）。解析见 src/engine/reasoning.py。
     reasoning_effort_map: Any | None = None
+    # 出站隐私脱敏规则文本（逗号/空格分隔；空 = 关闭，默认）。只改出站副本：
+    # messages 正文与 tools 描述，`request.raw` / `tool_calls` 参数 / JSON schema
+    # 都不动（见 src/engine/privacy.py）。零参 callable 时每次请求现读（热更）。
+    privacy_rules: Any | None = None
 
     def record(self, **fields: Any) -> None:
         """统计写入失败绝不能影响聊天响应。"""
@@ -797,6 +802,7 @@ class Executor:
             # 跨渠道接受的档位不同）。返回值可能是新 dict，不改 `request.raw`
             payload = self._map_effort(provider_id, payload)
             payload = self._clamp_effort(payload, effort_cap)
+            payload = self._redact_payload(payload, provider_id)
             # 前缀诊断报告压缩后的载荷（见 _debug_prefix）：压缩每轮裁一条
             # 就会让上游只能命中 system 段，这里记录的就是上游实际看到的前缀
             self._debug_prefix(credential_id, provider_id, target.model, payload)
@@ -1098,6 +1104,27 @@ class Executor:
             return request.raw
         return self._deps.context_compress(provider_id or "-", model, request.raw)
 
+    def _redact_payload(self, payload: dict[str, Any],
+                        provider_id: str | None) -> dict[str, Any]:
+        """出站隐私脱敏（默认关）：返回副本，绝不改 `request.raw`。
+
+        放在压缩/档位映射之后：这两步都可能换掉 dict 引用；脱敏必须作用于
+        **最终要发出去的那份**。`request.raw` 是会话粘性指纹与续写的输入，
+        改它会静默改变选号与续写行为。
+
+        命中数只进 debug 日志：每个请求一行 info 会把日志刷满，而无命中时
+        连 debug 都不打（零开销是默认关的一部分）。
+        """
+        if self._deps.privacy_rules is None:
+            return payload
+        raw_rules = live(self._deps.privacy_rules)()
+        if not raw_rules:
+            return payload
+        redacted, hits = privacy.redact_payload(payload, raw_rules)
+        if hits:
+            logger.debug("出站隐私脱敏 %d 处（上游 %s）", hits, provider_id)
+        return redacted
+
     def _debug_prefix(self, credential_id: str, provider_id: str | None,
                       model: str, payload: dict[str, Any]) -> None:
         """前缀缓存诊断（默认关）：未装配时零开销，装配后由闭包现读热更开关。
@@ -1366,6 +1393,7 @@ class Executor:
             payload = self._compress_payload(request, provider_id, target.model)
             payload = self._map_effort(provider_id, payload)
             payload = self._clamp_effort(payload, effort_cap)
+            payload = self._redact_payload(payload, provider_id)
             self._debug_prefix(credential_id, provider_id, target.model, payload)
             events: list[Event] = []
             # 上游自报模型名（首个带 model 的事件）：只用于静默替换观测

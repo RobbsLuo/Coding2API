@@ -582,6 +582,8 @@ class Scheduler:
 
 **503 带 `Retry-After`**：`NoHealthyCredential` 携带 `_recovery_seconds(target)` 的结果——**所有候选里最早的自动恢复点**（账号级与模型级冷却取较晚者；禁用 / 限额停用 / 在途占满不参与，它们不是「等几秒就好」）。handler 直接写响应头。缺这个头时 OpenAI SDK / Claude Code 会立即重试，把一次限流放大成请求风暴；取「最后一次尝试的提示」又会多等——池里另一个号可能 20 秒后就到期。没有任何会自行恢复的候选（全被人工停用/禁用）时不发该头。
 
+**出站隐私脱敏（`PRIVACY_RULES`，默认空 = 关）**：`engine/privacy.py` 在压缩 / 档位映射**之后**、发上游之前对请求体做副本级打码；规则 `url_credentials`（`scheme://user:pass@` 的 userinfo）/ `email` / `cn_mobile`（11 位，前后不得紧贴数字）/ `private_ip`（仅 RFC1918）。只处理 `messages[].content` 文本（含 text 块）与 `tools[].function.description`；`request.raw`（粘性指纹与续写输入）、`tool_calls.arguments`、JSON Schema **一律不动**。占位符单向、不做还原——可还原的映射表留在进程里就是另一份泄漏面。规则名拼错/为空一律忽略，绝不因配置笔误打死请求；命中数只进 debug 日志。
+
 ### 6.4 跨渠道 fallback 兼容组
 热更 `MODEL_FALLBACK_GROUPS`（默认 `""` 关闭）：`组名=成员1,成员2;组名2=成员3`。
 

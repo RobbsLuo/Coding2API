@@ -565,6 +565,7 @@ def test_every_hot_setting_is_read_lazily_not_baked_at_startup(admin_app):
         "activity_report_hour": 5,
         "conversation_sticky_seconds": 99,
         "model_blocklist": "foo*",
+        "privacy_rules": "email,cn_mobile",
     }})
 
     # Executor 侧：默认模型每次请求现读
@@ -601,6 +602,8 @@ def test_every_hot_setting_is_read_lazily_not_baked_at_startup(admin_app):
     assert runner._upstream_status_interval == 5 * 60   # noqa: SLF001
     client.put("/api/settings", json={"values": {"upstream_status_minutes": 11}})
     assert runner._upstream_status_interval == 11 * 60  # noqa: SLF001
+    # 出站隐私脱敏：装配传的是 lambda，改完下一请求即生效
+    assert deps.privacy_rules() == "email,cn_mobile"
     # 模型黑名单基于生效值重算（不是 Settings 的 cached_property）
     assert runtime.blocklist_patterns == ("foo*",)
     assert app.state.services.settings.blocklist_patterns == ("foo*",)
