@@ -220,7 +220,7 @@ def health_score(q: Quota | None) -> int | None:
 - 带 `user_id`（顶层或 `metadata`）**不派生前缀兜底键**（头照常生效）；否则同用户并行对话误钉同一凭证。
 - 键掺用户名（**头值同样掺**）：头是客户端可写输入；不掺就能靠猜占用他人账号。
 - TTL `CONVERSATION_STICKY_SECONDS` 内存态，重启只影响一轮选号；条目上限 512，超量先淘汰过期再按最旧。
-- **请求级错误不搬粘性**：本次请求若因 `REQUEST` / `CONTEXT` / `NETWORK`（`NO_PENALTY_KINDS`，与账号无关）换号，成功后**不重绑**——换到新号只是这一次的绕行，下一轮大概率回原号；否则上游前缀缓存按账号隔离，命中率会从 97–99% 掉到 0–12%（`misakano7545/workbuddy2api-panel` 2b210e9 实测）。`recover` 类错误（SOFT/DEAD 等）照旧重绑。
+- **请求级错误不搬粘性**：本次请求若因 `REQUEST` / `CONTEXT`（`STICKY_KEEP_KINDS`，与账号无关）换号，成功后**不重绑**——换到新号只是这一次的绕行，下一轮大概率回原号；否则上游前缀缓存按账号隔离，命中率会从 97–99% 掉到 0–12%（`misakano7545/workbuddy2api-panel` 2b210e9 实测）。其余分类照旧重绑；`NETWORK` 也不保粘性（本仓按凭证分配出口代理，网络失败可能是该号出口挂了）。
 
 ### 3.6 模型元数据与黑名单
 | 字段 | CB 来源 | TRAE 来源 | 取值 |

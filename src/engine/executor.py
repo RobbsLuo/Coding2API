@@ -80,6 +80,12 @@ RESTRICTED_PROVIDER_PAUSE_SECONDS = 24 * 3600
 # 只影响「复探失败 / 复探仍是正数」两种情形（结论都是 DEAD，去重安全）：
 # 复探出 0 会立刻写回，后续请求在 `_quota_exhausted` 处就短路，不会进这里。
 DEAD_QUOTA_PROBE_TTL_SECONDS = 60.0
+# 与账号无关、但会触发换号的失败：换号成功后**不把会话粘性搬到新号**。
+# 上游前缀缓存按账号隔离（`misakano7545/workbuddy2api-panel` 实测换号后
+# 命中 97–99% → 0–12%），而这些错误下一轮大概率不再出现，搬走等于白丢缓存。
+# NETWORK 刻意不在此列：本仓按凭证分配出口代理，网络失败可能是该号出口挂了，
+# 继续粘它会让每条请求都先白撞一次。
+STICKY_KEEP_KINDS = frozenset({ErrKind.REQUEST, ErrKind.CONTEXT})
 
 
 class StreamSink(Protocol):
@@ -907,7 +913,7 @@ class Executor:
                         credential_id, model=self._model_scope(provider_id, target.model))
                     self._confirm_probe(credential_id)
                     self._remember(request, state.username, credential_id,
-                                   keep_existing=last_kind in NO_PENALTY_KINDS)
+                                   keep_existing=last_kind in STICKY_KEEP_KINDS)
                     truncated = not state.saw_finish
                     if truncated:
                         # 连接正常结束但没走到终态事件：响应不完整，但上游没报错，
@@ -1540,7 +1546,7 @@ class Executor:
                         credential_id, model=self._model_scope(provider_id, target.model))
                     self._confirm_probe(credential_id)
                     self._remember(request, username, credential_id,
-                                   keep_existing=last_kind in NO_PENALTY_KINDS)
+                                   keep_existing=last_kind in STICKY_KEEP_KINDS)
                     usage = result.get("usage") or {}
                     # credit 不在对外响应里（客户端不需要，见 compat 出口），
                     # 但统计要记：从 USAGE 事件取，非流式路径否则会整条漏掉。
@@ -1610,7 +1616,7 @@ class Executor:
         """成功后把本对话粘到实际服务的凭证（轮换降级后随之换粘）。
 
         `keep_existing=True` 表示**本次请求里发生过与账号无关的失败**
-        （内容风控 / 上下文超限 / 坏图 / 工具结果不匹配），换号只是这一次的
+        （内容风控 / 上下文超限，见 `STICKY_KEEP_KINDS`），换号只是这一次的
         绕行，不该把整段对话的粘性永久搬到新号：
         上游前缀缓存按账号隔离，`misakano7545/workbuddy2api-panel` 实测
         换号后命中率 97–99% → 0–12%，而这类错误在下一轮大概率不再出现。
