@@ -303,6 +303,32 @@ async def test_first_event_timeout_rotates_to_second_credential(repo):
     db.close()
 
 
+async def test_role_only_frames_do_not_switch_to_idle_budget(repo):
+    """上游只发空 role/空 delta（无正文）时仍按**首事件**窗口计时。
+
+    R93（`ruo40018293/OmniGate` 7e574baf）为同类上游补了独立的「首内容截止」；
+    本仓的 role 帧不会变成可发送事件——`StreamTranslator.translate` 对空 content
+    不产帧，`emitted` 保持 False，故天然沿用 first_event 预算，不需要额外截止。
+    """
+    credentials, db = repo
+    credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    credentials.add(provider="trae", credential_data={"accessToken": "b"})
+    provider = _StallProvider(first=[Event(kind=EventKind.CONTENT),
+                                      Event(kind=EventKind.CONTENT)],
+                              later=GOOD)
+    executor = _executor(credentials, provider,
+                         first_event_timeout_seconds=STALL,
+                         stream_idle_timeout_seconds=0,   # 空闲窗口关闭
+                         short_cooldown_wait_seconds=0)
+
+    frames = await _drain(executor)
+
+    assert _content_of(frames) == "ok"           # 空帧之后仍按首事件超时换号
+    assert provider.calls == 2
+    assert _error_of(frames) is None
+    db.close()
+
+
 async def test_first_event_timeout_without_candidates_is_503(repo):
     """唯一凭证首事件超时且无候选 → 受控 503 帧（文案含超时标识）。"""
     credentials, db = repo
