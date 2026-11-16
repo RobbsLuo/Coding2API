@@ -39,6 +39,18 @@ async def test_growth_task_skips_providers_without_growth_and_disabled(growth_re
     assert report.attempted == 0 and report.skipped == 2
     assert provider.calls == 0
 
+async def test_growth_task_skips_enterprise_accounts(growth_repo):
+    """企业版账号没有成长中心：跳过，白耗 Pacer 也算浪费。"""
+    credentials, events = growth_repo
+    credentials.add(provider="codebuddy",
+                    credential_data={"bearer_token": "t",
+                                     "quota_probe_mode": "enterprise"})
+    provider = _StubGrowthProvider()
+    report = await GrowthTask(credentials, {"codebuddy": provider}, events).run_once()
+    assert report.attempted == 0 and report.skipped == 1
+    assert provider.calls == 0
+
+
 async def test_growth_task_skips_soft_disabled_credentials(growth_repo):
     """`enabled=0`（用户软暂停）不参与成长中心：暂停不能只停调度。
 

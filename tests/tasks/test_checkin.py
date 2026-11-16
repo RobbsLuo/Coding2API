@@ -41,6 +41,18 @@ async def test_checkin_empty_scope_falls_back_to_credential_id(repo):
     assert report.attempted == 2 and report.succeeded == 2 and report.skipped == 0
     assert provider.calls == 2
 
+async def test_checkin_skips_enterprise_accounts(repo):
+    """企业版账号没有个人版签到活动：跳过，不打上游、不触发失败告警。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy",
+                    credential_data={"bearer_token": "e",
+                                     "quota_probe_mode": "enterprise"})
+    provider = ProbeProvider()
+    task = CheckinTask(credentials, {"codebuddy": provider})
+    report = await task.run_once()
+    assert report.attempted == 0 and report.skipped == 1
+    assert provider.checkin_calls == 0
+
 async def test_checkin_dedupes_same_upstream_account(repo):
     """同上游账号的多张凭证只签一次（AGENTS.md 约束）。"""
     credentials, _db = repo

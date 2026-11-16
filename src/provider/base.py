@@ -287,6 +287,10 @@ async def read_body_bounded(response: Any, limit: int = BOUNDED_BODY_LIMIT) -> b
 # 这是跨渠道的**协议形状**而非某家私有码，故放中立层。
 QUEUE_FLAG_KEYS = ("isQueued", "is_queued", "queued")
 QUEUE_WAIT_KEYS = ("retryAfterSeconds", "retry_after_seconds", "retryAfter", "retry_after")
+# 队列位置：`queueCount: 0` = 已经排到队首，上游仍会给 `retryAfterSeconds`
+# 但照等就是白等（2026-10-31 `mmqz/cpa-multi-plugins` 实测，本仓 10-30/11-03
+# 日志里 92 次 30s 硬等全是这一类）。`null` 是「未上报」，不能当 0。
+QUEUE_COUNT_KEYS = ("queueCount", "queue_count")
 QUEUE_SUB_CODES = ("RESOURCE_LIMIT", "RESOURCE_LIMIT_EXCEEDED")
 # 上游只说「排队」不给秒数时的兜底等待（秒）。取 5s：比 SOFT 的 60s 短得多，
 # 又足以让排队轮次真正错开，不至于变成忙等。
@@ -392,7 +396,16 @@ def _is_queue_flag(node: dict[str, Any]) -> bool:
 
 
 def _queue_wait_seconds(node: dict[str, Any]) -> float | None:
-    """节点自带的等待秒数；没有则 None（由调用方决定回落策略）。"""
+    """节点自带的等待秒数；没有则 None（由调用方决定回落策略）。
+
+    `queueCount == 0` 优先：已经排到队首时上游仍可能给 `retryAfterSeconds`，
+    照等就是白等（本仓实测 92 次 30s 空等）。`queueCount: null` 是「未上报」，
+    不能当 0，继续看秒数。
+    """
+    for key in QUEUE_COUNT_KEYS:
+        value = node.get(key)
+        if isinstance(value, int) and not isinstance(value, bool) and value == 0:
+            return 0.0
     for key in QUEUE_WAIT_KEYS:
         value = node.get(key)
         if isinstance(value, bool):

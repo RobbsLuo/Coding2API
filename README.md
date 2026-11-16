@@ -18,7 +18,7 @@
 - **模型列表按凭证加载**：只列有可用凭证的渠道 → 无幽灵模型。
 - **公共凭证池**：admin 维护、全员共享、加密入库（`APP_SECRET`）；设备码登录、多账号切换、额度探测、签到、token 预刷新。
 - **三角色**：`admin` / `operator` / `viewer`，存 SQLite；一次性激活链接、首登强制改密、改角色 / 停用即时吊销会话；登录与写操作留审计。
-- **成长中心**（仅 CodeBuddy）：领礼、派 Buddy、领任务奖、断登补登、连登兑换、开盲盒。不可逆动作 `GROWTH_IRREVERSIBLE_ACTIONS=false` 关停。
+- **成长中心**（仅 CodeBuddy）：领礼、派 Buddy、领任务奖、断登补登、连登兑换、开盲盒。不可逆动作 `GROWTH_IRREVERSIBLE_ACTIONS=false` 关停。企业版账号自动跳过（个人版活动企业号没有入口）。
 - **脱敏统计**：不存对话；明细 90 天、小时汇总永久；按人 / 渠道 / 模型 / 凭证可视化；成本按 OpenRouter 刊例价估算；速度分正文 / 总产出；明细走 SSE。
 - **月度账单**（`operator` 起）：按月按人 / 按 API Key 汇总请求、token 与成本；CSV（按人）/ JSONL（逐条明细）导出并写审计。按 Key 明细受 90 天保留期限制。
 - **工具调用健壮性**：`id` 缺失按 index 补并记忆；DeepSeek DSML 泄漏回读成结构化调用并改写 `finish_reason`；非流式坏 `arguments` fail-closed（400，不冷却凭证）。

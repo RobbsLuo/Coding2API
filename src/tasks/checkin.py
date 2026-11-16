@@ -15,6 +15,7 @@ from ..db.repo import CredentialRepository
 from ..error_text import error_text
 from ..request_context import credential_scope
 from . import TaskReport
+from .account_shape import is_enterprise_account
 from .pacer import Pacer
 
 logger = logging.getLogger(__name__)
@@ -282,6 +283,11 @@ class CheckinTask:
                 report.skipped += 1
                 continue
             if provider is None or data is None or checkin_scope is None:
+                report.skipped += 1
+                continue
+            # 企业版账号没有个人版签到活动：硬跑必然失败，会把「今日全成功」
+            # 涂黑并触发 checkin_failing 告警（见 `account_shape`）。
+            if is_enterprise_account(data):
                 report.skipped += 1
                 continue
             # 身份未知（provider 返回空 scope）时绝不共享：共享会让第二个账号被

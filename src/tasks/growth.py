@@ -15,6 +15,7 @@ from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository, GrowthRepository
 from ..request_context import credential_scope
 from . import TaskReport
+from .account_shape import is_enterprise_account
 from .pacer import Pacer
 
 logger = logging.getLogger(__name__)
@@ -68,6 +69,10 @@ class GrowthTask:
                 report.skipped += 1
                 continue
             if data is None:
+                report.skipped += 1
+                continue
+            # 企业版账号没有成长中心（个人版活动）：跳过，别白耗 Pacer。
+            if is_enterprise_account(data):
                 report.skipped += 1
                 continue
             # 同上游账号多凭证共享一轮：重复领会被上游拒绝，但要额外打一串请求

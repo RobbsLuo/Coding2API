@@ -134,6 +134,35 @@ def test_parse_queue_hint_defaults_when_no_seconds():
     assert parse_queue_hint('{"isQueued": true}') == QUEUE_DEFAULT_WAIT_SECONDS
 
 
+def test_parse_queue_hint_queue_count_zero_means_no_wait():
+    """`queueCount: 0` = 已排到队首：不能再按 `retryAfterSeconds` 硬等 30s。
+
+    本仓 10-30/11-03 日志里 92 次 30s 空等全是这一类（上游给 `isQueued` +
+    `retryAfterSeconds:30`，同时 `queueCount:0`）。
+    """
+    body = json.dumps({"isQueued": True, "queueCount": 0, "retryAfterSeconds": 30})
+    assert parse_queue_hint(body) == 0.0
+    # 驼峰与下划线两种写法都认
+    assert parse_queue_hint(json.dumps({"isQueued": True, "queue_count": 0,
+                                        "retryAfterSeconds": 30})) == 0.0
+
+
+def test_parse_queue_hint_queue_count_null_is_unreported():
+    """`queueCount: null` 是「未上报」，不能当 0——照常采用上游秒数。"""
+    assert parse_queue_hint(json.dumps({"isQueued": True, "queueCount": None,
+                                        "retryAfterSeconds": 30})) == 30.0
+    assert parse_queue_hint(json.dumps({"isQueued": True, "queueCount": 3,
+                                        "retryAfterSeconds": 30})) == 30.0
+    # 字符串/布尔不算数值
+    assert parse_queue_hint(json.dumps({"isQueued": True, "queueCount": "0",
+                                        "retryAfterSeconds": 30})) == 30.0
+    assert parse_queue_hint(json.dumps({"isQueued": True, "queueCount": False,
+                                        "retryAfterSeconds": 30})) == 30.0
+    # 队列长度在但没给秒数：0 依然立即放行
+    assert parse_queue_hint(json.dumps({"isQueued": True,
+                                        "queueCount": 0})) == 0.0
+
+
 def test_parse_queue_hint_ignores_bool_wait():
     """`retryAfterSeconds: true` 不是秒数，回落到兜底值。"""
     assert parse_queue_hint('{"isQueued": true, "retryAfterSeconds": true}') == (

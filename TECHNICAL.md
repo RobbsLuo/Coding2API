@@ -133,6 +133,7 @@ CodeBuddy `code=11134`（供应商过载）也归这一类：实测 15 分钟内
 - **不换号**：`executor` 用 `pinned` 记住被点名凭证，等完原号重开。
 - **不占轮换预算**：排队轮次不计 `attempts`；计则三次排队吃满 `max_rotate` → 503。
 - **有界**：`QUEUE_MAX_ROUNDS = 3` 轮、单轮封顶 `QUEUE_MAX_WAIT_SECONDS = 60s`。
+- **`queueCount == 0` 不等**：已经排到队首时上游仍会给 `retryAfterSeconds`，照等就是白等（本仓 10-30/11-03 日志 92 次 30s 空等全属此类）；`queueCount: null` 是「未上报」，不能当 0。
 - **已出帧不重开**：半截输出不可回滚 → 降级 SOFT 收尾。
 
 **短冷却原地等（A4）**：没有任何**立即可用**候选、但最短剩余冷却不超过 `SHORT_COOLDOWN_WAIT_SECONDS`（默认 60）时，在原连接上等它到期后重取一次，而不是直接 503。
