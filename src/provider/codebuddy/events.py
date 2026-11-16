@@ -73,6 +73,14 @@ _FORBIDDEN_REQUEST_CODES = frozenset({11128})
 # 动作是「精简上下文 / 换长窗口模型」（实测 2026-11-02 23:32 国际站）。
 _CONTEXT_OVERFLOW_CODE = 11115
 _BAD_PARAMS_PHRASE = "unmarshal chat params failed"
+# 供应商过载（`"code":11134`）：整家上游暂时吃不下请求，与**账号**无关。
+# 2026-11-07 `misakano7545/workbuddy2api-panel` 实测：15 分钟内 6 个不同账号
+# 同时命中，且上游同时回 `retry_after`/`retry_policy.retry_after` 引导晚点再来。
+# 判账号级 SOFT 会冷却健康凭证并换号——换到别的号照样 11134（同一家上游），
+# 白烧轮换预算；换号成功后粘性还会漂到新号，上游前缀缓存按账号隔离
+# （实测命中率 97–99% → 0–12%）。故复用排队语义：不罚号、原号等一轮再开。
+_UPSTREAM_BUSY_CODE = 11134
+
 # 账号级风控限制（403 + `"code":11140`「request illegal」）：displayMsg 是
 # `Your account has been restricted due to unusual activity` /
 # 「账号存在异常行为，已被限制使用」，displayTips 引导 SUBMIT_FEEDBACK。
@@ -98,6 +106,7 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
     * 402 / 14018 → 余额不足（冷却到次日 04:00，等签到恢复）
     * 1005 → 权益耗尽（12h 长冷却）
     * 11102/11158「该号用不了这个模型」→ (账号, 模型) 负缓存（400/404 形态）
+    * 11134「供应商过载」→ 排队语义：不罚号、原号等一轮再开
     * 11140「账号被风控限制」→ 账号级长冷却，**当前请求不再换号**
     * 401/403 → session 失效（硬禁用）
     * 404 → 软冷却，不累计错误数
@@ -110,6 +119,10 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
         return ErrKind.CREDIT
     if _PLAN_EXHAUSTED_CODE in codes:
         return ErrKind.PLAN
+    if _UPSTREAM_BUSY_CODE in codes:
+        # 供应商过载：整家上游吃不下，不是这个号的问题。复用排队语义
+        # （不罚号、原号等一轮再开），理由见 `_UPSTREAM_BUSY_CODE`。
+        return ErrKind.QUEUE
     if status in (400, 404) and codes & MODEL_BLOCKED_CODES:
         return ErrKind.BLOCKED
     if status >= 400 and _is_account_restricted(body):

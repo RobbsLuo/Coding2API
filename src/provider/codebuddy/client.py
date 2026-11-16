@@ -84,6 +84,12 @@ CHANNEL_MARKERS: tuple[str, ...] = (
     "You are Claude Code, Anthropic's official CLI for Claude.",
     "x-anthropic-billing-header",
     "Main branch (you will usually use this for PRs):",
+    # `@路径` 指纹族（2026-10-31 `mmqz/cpa-multi-plugins` 真机复现）：
+    # 这两句各自单独出站不会触发，只有**同时**出现在同一个 system/assistant
+    # 字段块里才被 11128 拒绝。本仓是逐串独立替换，天然把配对拆散，故单串
+    # 入表即可；`9Ashwin/flow-one` e8aa939 用「同现」判据做 A/B 也证实了这点。
+    "Tokens prefixed with @ are paths the user explicitly referenced",
+    "Relative paths resolve from the workspace root",
 )
 _CHANNEL_MARKER_STANDIN = "[external-client-identity]"
 

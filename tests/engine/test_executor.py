@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
 from src.compat.openai.request import parse_chat_request
@@ -205,6 +207,83 @@ async def test_executor_reports_no_credential_as_service_unavailable(repo_trae):
     with pytest.raises(NoHealthyCredential):
         await executor.complete(parse_chat_request(
             {"messages": [{"role": "user", "content": "hi"}]}))
+
+async def test_no_healthy_credential_carries_earliest_recovery(repo_trae):
+    """全池冷却 → 503 带 `Retry-After`：取**所有候选里最早**的恢复点。
+
+    客户端（OpenAI SDK / Claude Code）拿不到这个头会立刻重试，把一次限流
+    放大成请求风暴；取「最后一次尝试的提示」则会多等——另一个号可能已经
+    快到期了。
+    """
+    credentials, _keys, _db = repo_trae
+    add_credential(credentials)
+    add_credential(credentials)
+    executor, _provider, _credentials = build_executor(
+        repo_trae, [[UpstreamError(ErrKind.PLAN)]])
+    with pytest.raises(NoHealthyCredential) as info:
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+    retry_after = info.value.retry_after
+    assert retry_after is not None
+    # PLAN 冷却 12h；取最早恢复点，允许几秒的执行漂移
+    assert 12 * 3600 - 5 <= retry_after <= 12 * 3600
+
+async def test_no_healthy_credential_without_recovery_has_none(repo_trae):
+    """行还在但不启用（人工停用）→ 没有自动恢复点，不给 `Retry-After`。"""
+    credentials, _keys, _db = repo_trae
+    credential_id = add_credential(credentials)
+    credentials.set_enabled(credential_id, False)
+    executor, _provider, _credentials = build_executor(repo_trae, [GOOD_trae])
+    with pytest.raises(NoHealthyCredential) as info:
+        await executor.complete(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}]}))
+    assert info.value.retry_after is None
+
+async def test_recovery_seconds_skips_limit_blocked_and_model_scope(repo_trae):
+    """`Retry-After` 跳过限额停用的号；模型级与账号级冷却取较晚者。"""
+    from src.engine.model_resolver import resolve
+    from src.engine.scheduler import ErrorOutcome, ModelCooldown
+
+    credentials, _keys, _db = repo_trae
+    blocked = add_credential(credentials)
+    cooling = add_credential(credentials)
+    model_cooled = add_credential(credentials)
+    busy = add_credential(credentials)
+
+    class Guard:
+        def blocked(self, candidate, model):
+            return candidate.credential_id == blocked
+
+    class Inflight:
+        def blocked(self, credential_id):
+            return credential_id == busy
+
+    now = int(time.time())
+    credentials.save_error(blocked, ErrorOutcome(
+        cooling_until=now + 9999, cooling_kind=ErrKind.SOFT.value))
+    credentials.save_error(cooling, ErrorOutcome(
+        cooling_until=now + 60, cooling_kind=ErrKind.SOFT.value))
+    credentials.save_error(model_cooled, ErrorOutcome(
+        model_cooldowns={"glm-5.2": ModelCooldown(
+            cooling_until=now + 180, hits=1, reason="model")}))
+
+    executor = Executor(ExecutorDeps(
+        providers={"trae": FakeProvider([GOOD_trae])}, credentials=credentials,
+        scheduler=Scheduler(), default_model="glm-5.2", limits=Guard(),
+        inflight=Inflight(), short_cooldown_wait_seconds=0))
+    target = resolve("glm-5.2@trae", "glm-5.2")
+    assert executor._recovery_seconds(target) == pytest.approx(60, abs=5)
+
+
+async def test_recovery_seconds_none_when_no_provider_registered(repo_trae):
+    """一个上游都没注册时没有恢复点可言（executor 侧 400 语义，不是 503）。"""
+    from src.engine.model_resolver import resolve
+
+    credentials, _keys, _db = repo_trae
+    executor = Executor(ExecutorDeps(
+        providers={}, credentials=credentials, scheduler=Scheduler(),
+        default_model="glm-5.2"))
+    assert executor._recovery_seconds(resolve("glm-5.2@trae", "glm-5.2")) is None
 
 async def test_executor_rejects_model_without_provider(repo_trae):
     add_credential(repo_trae[0])

@@ -304,6 +304,54 @@ async def test_stream_rotates_off_sticky_credential_and_repins():
     assert affinity.remembered == ["c_z"]
 
 
+@dataclass
+class RequestError(Exception):
+    """请求级错误（内容风控 / 上下文超限）：与账号无关，但要换号。"""
+
+    def kind(self) -> ErrKind:
+        return ErrKind.REQUEST
+
+
+@dataclass
+class _RequestFailingProvider:
+    fail_on: str
+
+    async def stream_chat(self, credential_data, payload, model):
+        if credential_data["id"] == self.fail_on:
+            raise RequestError()
+        yield Event(kind=EventKind.CONTENT, content="hi")
+        yield Event(kind=EventKind.USAGE, usage=Usage(input_tokens=1, output_tokens=1))
+        yield Event(kind=EventKind.FINISH, finish_reason="stop")
+
+
+@pytest.mark.asyncio
+async def test_request_level_error_keeps_existing_binding():
+    """请求级错误导致换号时，不把对话的粘性永久搬到新号。
+
+    上游前缀缓存按账号隔离（`misakano7545/workbuddy2api-panel` 实测换号后
+    命中 97–99% → 0–12%）：内容风控 / 上下文超限这类错误下一轮大概率不再
+    出现，把 binding 搬走等于白丢缓存。
+    """
+    affinity = FakeAffinity(pinned="c_a")
+    executor = Executor(ExecutorDeps(
+        providers={"trae": _RequestFailingProvider("c_a")},
+        credentials=_repo("c_a", "c_z"),
+        scheduler=Scheduler(), affinity=affinity))
+    await _drain(executor.stream(_request(TURN1), username="alice"))
+    assert affinity.remembered == []          # 绑定保留在 c_a
+
+
+@pytest.mark.asyncio
+async def test_request_level_error_without_existing_binding_still_remembers():
+    """没有旧绑定时照常粘定实际服务的凭证——没有缓存可保，别丢新绑定。"""
+    affinity = FakeAffinity(pinned=None)
+    executor = Executor(ExecutorDeps(
+        providers={"trae": _RequestFailingProvider("c_a")},
+        credentials=_repo("c_a", "c_z"),
+        scheduler=Scheduler(), affinity=affinity))
+    await _drain(executor.stream(_request(TURN1), username="alice"))
+    assert affinity.remembered == ["c_z"]
+
 @pytest.mark.asyncio
 async def test_stream_ignores_sticky_when_credential_cooling():
     """粘住的凭证冷却中不强行复用，回退常规调度并重新粘定。"""

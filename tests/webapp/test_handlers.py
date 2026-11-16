@@ -40,6 +40,53 @@ def test_client_disconnect_during_body_returns_499(tmp_path, monkeypatch):
     assert response.headers["x-request-id"] == "req-disconnect"
 
 
+def test_no_healthy_credential_adds_retry_after(tmp_path, monkeypatch):
+    """全池耗尽 → 503 + `Retry-After`：没有这个头，客户端会立刻重试。
+
+    `retry_after` 由 executor 取「所有候选里最早的自动恢复点」；这里只验证
+    handler 把它搬进响应头（取值的分支在 `tests/engine` 里测）。
+    """
+    from src.engine.executor import Executor, NoHealthyCredential
+
+    settings = isolated_settings(tmp_path)
+    app = build_app(settings)
+    key = app.state.api_keys.create("root")["api_key"]
+
+    async def _exhausted(_self, *_args, **_kwargs):
+        raise NoHealthyCredential("all credentials unavailable", retry_after=42)
+
+    monkeypatch.setattr(Executor, "complete", _exhausted)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"messages": [{"role": "user", "content": "hi"}]})
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "42"
+    assert response.json()["error"]["code"] == "no_healthy_credential"
+
+
+def test_no_healthy_credential_without_recovery_omits_retry_after(tmp_path, monkeypatch):
+    """没有会自行恢复的候选（全被禁用）时不编造 `Retry-After`。"""
+    from src.engine.executor import Executor, NoHealthyCredential
+
+    settings = isolated_settings(tmp_path)
+    app = build_app(settings)
+    key = app.state.api_keys.create("root")["api_key"]
+
+    async def _exhausted(_self, *_args, **_kwargs):
+        raise NoHealthyCredential("all credentials unavailable")
+
+    monkeypatch.setattr(Executor, "complete", _exhausted)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"messages": [{"role": "user", "content": "hi"}]})
+    assert response.status_code == 503
+    assert "Retry-After" not in response.headers
+
+
 def test_credential_decrypt_error_returns_actionable_500(tmp_path, monkeypatch):
     """凭证解密失败 → 500 + 可行动提示（不是裸 traceback）。
 

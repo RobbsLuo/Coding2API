@@ -127,6 +127,7 @@ NO_PENALTY_KINDS = frozenset({REQUEST, CONTEXT, NETWORK})
 **硬禁用的可操作原因（`disabled_reason`）**：真 session 失效（401 / token 过期）仍是 DEAD，`disabled_reason` 写「session dead」或 provider 识别的具体原因（CodeBuddy `disabled_reason()` 识别 11140 文案，作非 RESTRICTED 入口兜底）。管理台 `CredentialsPage` 原样展示，写错会把人引向错误修复动作；只回受控文案，不拼上游正文。
 
 **排队语义（QUEUE）**：上游回排队中 + 建议等待秒数 = 号满，等 N 秒重打，非账号故障、非请求错误。
+CodeBuddy `code=11134`（供应商过载）也归这一类：实测 15 分钟内跨 6 个账号同时命中，换号与冷却都只会白烧好号、并把粘性搬走（上游前缀缓存按账号隔离）。
 
 - **不冷却**：`scheduler.note_error` 对 QUEUE 零动作（同 REQUEST）。
 - **不换号**：`executor` 用 `pinned` 记住被点名凭证，等完原号重开。
@@ -151,6 +152,7 @@ NO_PENALTY_KINDS = frozenset({REQUEST, CONTEXT, NETWORK})
 | 权益耗尽 | `code=1005` | `code:1005` | — | PLAN |
 | 余额不足 | 402 / `code=14018` | 402 / `code=14018` | — | CREDIT |
 | 模型级限流 | 429 + `code=6004` | 429 + `code=6004` | 429 / 502/503/504（点名模型） | MODEL |
+| 供应商过载 | 429/5xx + `code=11134` | — | — | QUEUE（不罚号、原号等一轮再开） |
 | 并发打满 | — | — | — | CONCURRENCY（CodeArts `TM.00001041`） |
 | 该账号无此模型 | 400/404 + `code=11102` | 400/404 + `code=11102` | — | BLOCKED |
 | 请求级错误 | 400 + 11101/`Unmarshal chat params failed`/11128/11135 | — | 403 | REQUEST |
@@ -174,7 +176,7 @@ NO_PENALTY_KINDS = frozenset({REQUEST, CONTEXT, NETWORK})
 
 **业务码只从 `"code": N` 键值形态提取**（`provider.base.business_codes`）：裸搜数字会让 `"code":111020` 命中 `11102`。判定顺序即优先级：`429+6004` 先于 `429`，`402/14018` 先于状态码兜底。
 
-**内容风控指纹（11128）**：`400 + 11128 Illegal API invocation from an unapproved channel` → REQUEST。主因 `system`/`assistant` 正文含「伪装其他厂商官方客户端」指纹串（身份声明行、billing 头字段名、git 上下文行）：与凭证无关、确定性复现、只在两角色 `content` 命中（`tool_calls` 与 reasoning 不触发），写进历史则后续每轮都 11128。处置：出站前 `sanitize_channel_markers` 替换占位符（`CODEBUDDY_SANITIZE_CHANNEL_MARKERS=false` 关闭），客户端历史不受影响，文本块列表逐块处理。清单在 `provider/codebuddy/client.py::CHANNEL_MARKERS`——刻意不写原文，以免污染读本文件的会话。
+**内容风控指纹（11128）**：`400 + 11128 Illegal API invocation from an unapproved channel` → REQUEST。主因 `system`/`assistant` 正文含「伪装其他厂商官方客户端」指纹串（身份声明行、billing 头字段名、git 上下文行）：与凭证无关、确定性复现、只在两角色 `content` 命中（`tool_calls` 与 reasoning 不触发），写进历史则后续每轮都 11128。处置：出站前 `sanitize_channel_markers` 替换占位符（`CODEBUDDY_SANITIZE_CHANNEL_MARKERS=false` 关闭），客户端历史不受影响，文本块列表逐块处理；`tools[].function.description` 同为高发区（只洗描述，不碰 `parameters` schema）。清单在 `provider/codebuddy/client.py::CHANNEL_MARKERS`——刻意不写原文，以免污染读本文件的会话。`@路径` 指纹族是**两句同现**才触发（2026-10-31 真机 A/B）；本仓逐串独立替换天然拆散配对，故两条单列入表即可。
 
 ### 3.3 三态健康度
 ```python
@@ -218,6 +220,7 @@ def health_score(q: Quota | None) -> int | None:
 - 带 `user_id`（顶层或 `metadata`）**不派生前缀兜底键**（头照常生效）；否则同用户并行对话误钉同一凭证。
 - 键掺用户名（**头值同样掺**）：头是客户端可写输入；不掺就能靠猜占用他人账号。
 - TTL `CONVERSATION_STICKY_SECONDS` 内存态，重启只影响一轮选号；条目上限 512，超量先淘汰过期再按最旧。
+- **请求级错误不搬粘性**：本次请求若因 `REQUEST` / `CONTEXT` / `NETWORK`（`NO_PENALTY_KINDS`，与账号无关）换号，成功后**不重绑**——换到新号只是这一次的绕行，下一轮大概率回原号；否则上游前缀缓存按账号隔离，命中率会从 97–99% 掉到 0–12%（`misakano7545/workbuddy2api-panel` 2b210e9 实测）。`recover` 类错误（SOFT/DEAD 等）照旧重绑。
 
 ### 3.6 模型元数据与黑名单
 | 字段 | CB 来源 | TRAE 来源 | 取值 |
@@ -575,6 +578,8 @@ class Scheduler:
 - 无模型名可归因 → 退化为账号级 SOFT。
 
 **轮换耗尽与错误归因**：模型级冷却来源不止模型限流（Qoder 节点故障 §5.3 也归 `MODEL`）。全部候选只因该模型被排除（`_all_model_cooled`）→ 503 文案 `model 'x' temporarily unavailable on upstream`，统计落 `error_type=model_unavailable`；其余耗尽按最后一次错误的真实归因落统计（§9.1.3），只有一次都没选中凭证才 `no_healthy_credential`；对外错误码不变。
+
+**503 带 `Retry-After`**：`NoHealthyCredential` 携带 `_recovery_seconds(target)` 的结果——**所有候选里最早的自动恢复点**（账号级与模型级冷却取较晚者；禁用 / 限额停用 / 在途占满不参与，它们不是「等几秒就好」）。handler 直接写响应头。缺这个头时 OpenAI SDK / Claude Code 会立即重试，把一次限流放大成请求风暴；取「最后一次尝试的提示」又会多等——池里另一个号可能 20 秒后就到期。没有任何会自行恢复的候选（全被人工停用/禁用）时不发该头。
 
 ### 6.4 跨渠道 fallback 兼容组
 热更 `MODEL_FALLBACK_GROUPS`（默认 `""` 关闭）：`组名=成员1,成员2;组名2=成员3`。

@@ -102,7 +102,16 @@ class StreamSink(Protocol):
 
 
 class NoHealthyCredential(Exception):
-    pass
+    """池内无可用凭证 → 503。
+
+    `retry_after`：最早一个候选的自动恢复秒数（账号级与模型级取较晚者）。
+    客户端（OpenAI SDK / Claude Code）据此退避；缺失时它们会立即重试，
+    把一次限流放大成请求风暴。None = 没有会自行恢复的候选（全被禁用）。
+    """
+
+    def __init__(self, message: str, retry_after: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class NoProviderForModel(Exception):
@@ -352,6 +361,41 @@ class Executor:
             return self._deps.model_suggestions(model) or None
         except Exception:  # noqa: BLE001 - 建议失败不影响主错误
             return None
+
+    def _recovery_seconds(self, target: ModelTarget) -> int | None:
+        """全池耗尽时，最早一个候选**自动恢复**的秒数（给 503 的 `Retry-After`）。
+
+        口径与 `_wait_short_cooldown` 一致：账号级与模型级冷却取较晚者；
+        只统计「真的在冷却」的候选——禁用 / 限额停用 / 在途占满都不是时间
+        问题，等几秒不会变好，不参与。没有任何会自行恢复的候选时返回 None
+        （此时 `Retry-After` 缺失比给一个错的值更有用）。
+
+        为什么不是「最后一次尝试的提示」：那次尝试可能只是个立刻失败的
+        子集，而池里另一个号 20 秒后就到期。取所有候选里的最小值，客户端
+        一次退避就能等到最近的恢复点。
+        """
+        registered = self._registered(target)
+        if not registered:
+            return None
+        now = int(time.time())
+        remaining: int | None = None
+        for candidate in self._deps.credentials.candidates(registered):
+            if candidate.disabled or not candidate.enabled:
+                continue
+            if (self._deps.limits is not None
+                    and self._deps.limits.blocked(candidate, target.model)):
+                continue
+            until = candidate.cooling_until
+            model_until = candidate.model_cooling_until(
+                self._model_scope(candidate.provider, target.model))
+            if model_until is not None:
+                until = model_until if until is None else max(until, model_until)
+            if until is None or until <= now:
+                continue
+            wait = until - now
+            if remaining is None or wait < remaining:
+                remaining = wait
+        return remaining
 
     def _unavailable_text(self, target: ModelTarget, last_error: Exception | None) -> str:
         """耗尽轮换后的 503 文案。
@@ -862,7 +906,8 @@ class Executor:
                     self._deps.credentials.save_success(
                         credential_id, model=self._model_scope(provider_id, target.model))
                     self._confirm_probe(credential_id)
-                    self._remember(request, state.username, credential_id)
+                    self._remember(request, state.username, credential_id,
+                                   keep_existing=last_kind in NO_PENALTY_KINDS)
                     truncated = not state.saw_finish
                     if truncated:
                         # 连接正常结束但没走到终态事件：响应不完整，但上游没报错，
@@ -1303,7 +1348,8 @@ class Executor:
                                 target, last_kind, last_error),
                             latency_ms=_elapsed_ms(started))
                     raise NoHealthyCredential(
-                        self._unavailable_text(target, last_error))
+                        self._unavailable_text(target, last_error),
+                        retry_after=self._recovery_seconds(target))
                 credential_id, credential_data = pick
                 tried.add(credential_id)
                 attempts += 1
@@ -1493,7 +1539,8 @@ class Executor:
                     self._deps.credentials.save_success(
                         credential_id, model=self._model_scope(provider_id, target.model))
                     self._confirm_probe(credential_id)
-                    self._remember(request, username, credential_id)
+                    self._remember(request, username, credential_id,
+                                   keep_existing=last_kind in NO_PENALTY_KINDS)
                     usage = result.get("usage") or {}
                     # credit 不在对外响应里（客户端不需要，见 compat 出口），
                     # 但统计要记：从 USAGE 事件取，非流式路径否则会整条漏掉。
@@ -1553,14 +1600,27 @@ class Executor:
                         error_type=_failure_type(kind, last_error),
                         latency_ms=_elapsed_ms(started))
                 raise NoHealthyCredential(
-                    self._unavailable_text(target, last_error))
+                    self._unavailable_text(target, last_error),
+                    retry_after=self._recovery_seconds(target))
 
     # -------------------------------------------------------------- 内部
 
-    def _remember(self, request: ChatRequest, username: str, credential_id: str) -> None:
-        """成功后把本对话粘到实际服务的凭证（轮换降级后随之换粘）。"""
-        if self._deps.affinity is not None:
-            self._deps.affinity.remember(request.raw, username, credential_id)
+    def _remember(self, request: ChatRequest, username: str, credential_id: str,
+                  *, keep_existing: bool = False) -> None:
+        """成功后把本对话粘到实际服务的凭证（轮换降级后随之换粘）。
+
+        `keep_existing=True` 表示**本次请求里发生过与账号无关的失败**
+        （内容风控 / 上下文超限 / 坏图 / 工具结果不匹配），换号只是这一次的
+        绕行，不该把整段对话的粘性永久搬到新号：
+        上游前缀缓存按账号隔离，`misakano7545/workbuddy2api-panel` 实测
+        换号后命中率 97–99% → 0–12%，而这类错误在下一轮大概率不再出现。
+        """
+        if self._deps.affinity is None:
+            return
+        if keep_existing and self._deps.affinity.pin_for(
+                request.raw, username) is not None:
+            return
+        self._deps.affinity.remember(request.raw, username, credential_id)
 
     async def _pick(self, target: ModelTarget, tried: set[str],
                     affinity_id: str | None = None):

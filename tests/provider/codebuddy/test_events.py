@@ -290,6 +290,25 @@ def test_classify_429_unknown_code_stays_soft():
     assert cb_events.classify_status(429, b'{"code":9999}') is ErrKind.SOFT
     assert cb_events.classify_status(429, b"") is ErrKind.SOFT
 
+def test_classify_provider_busy_is_queue_not_account_penalty():
+    """`11134` 供应商过载 → 排队语义（不罚号、原号等一轮再开）。
+
+    上游实测 15 分钟内跨 6 个账号同时命中：换号无意义，冷却健康号更错。
+    复用 QUEUE 是因为它的语义恰好是「不冷却、不换号、等 retry_after 后
+    原号重开」（见 `scheduler.note_error` 的 QUEUE 分支）。
+    """
+    assert cb_events.classify_status(429, b'{"code":11134}') is ErrKind.QUEUE
+    # 500/503 形态同样按排队（业务码优先于状态码）
+    assert cb_events.classify_status(500, b'{"code":11134}') is ErrKind.QUEUE
+    assert cb_events.classify_status(503, b'{"code":11134}') is ErrKind.QUEUE
+    # intl 子类走同一分类
+    assert CodeBuddyIntlProvider().classify(429, b'{"code":11134}') is ErrKind.QUEUE
+    # 优先级：余额/权益码仍排在供应过载之前
+    assert cb_events.classify_status(
+        402, b'{"code":11134,"error":"no credit"}') is ErrKind.CREDIT
+    assert cb_events.classify_status(
+        400, b'{"code":1005}') is ErrKind.PLAN
+
 def test_provider_classify_routes_14003_to_model():
     """国际版复用同一分类：provider 入口（含 intl 子类）同样是模型级。"""
     body = b'{"code":14003,"msg":"too many requests"}'

@@ -57,6 +57,24 @@ def test_sanitize_channel_markers_neutralizes_text_blocks():
     assert assistant_blocks[1]["text"] == "[external-client-identity] x[external-client-identity]"
     assert body["messages"][2]["content"][0]["text"] == marker
 
+def test_sanitize_covers_at_path_marker_pair():
+    """`@路径` 指纹族：两句各自 200，同块同现才拦（2026-10-31 真机复现）。
+
+    本仓逐串独立替换，天然拆散配对；这里只锁「两条都已入表且都会被洗」，
+    防止后续有人把新增 marker 误删。
+    """
+    from src.provider.codebuddy.client import CHANNEL_MARKERS, sanitize_channel_markers
+
+    first = "Tokens prefixed with @ are paths the user explicitly referenced"
+    second = "Relative paths resolve from the workspace root"
+    assert first in CHANNEL_MARKERS and second in CHANNEL_MARKERS
+
+    body = {"messages": [{"role": "system", "content": f"{first}\n{second}"}]}
+    assert sanitize_channel_markers(body) == 2
+    assert body["messages"][0]["content"] == (
+        "[external-client-identity]\n[external-client-identity]")
+
+
 def test_sanitize_channel_markers_counts_repeats_and_skips_noise():
     """同条消息多指纹多出处计数；非 list/非 dict/非 str content 安全跳过。"""
     from src.provider.codebuddy.client import CHANNEL_MARKERS, sanitize_channel_markers

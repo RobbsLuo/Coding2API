@@ -66,8 +66,14 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def _no_health(_request, error: NoHealthyCredential):
         # str(error) 由 executor 用受控文案构造（_unavailable_message /
         # _model_cooled_message），只带最后一次错误的受控标识，不含上游正文。
-        return JSONResponse(status_code=503,
-                            content=error_payload(str(error), "no_healthy_credential", 503))
+        response = JSONResponse(
+            status_code=503,
+            content=error_payload(str(error), "no_healthy_credential", 503))
+        # 池内还有会自行恢复的候选时给出最早恢复秒数：缺这个头，OpenAI SDK /
+        # Claude Code 会立即重试，把一次限流放大成请求风暴。
+        if getattr(error, "retry_after", None) is not None:
+            response.headers["Retry-After"] = str(error.retry_after)
+        return response
 
     @app.exception_handler(ServicePaused)
     async def _paused(_request, error: ServicePaused):
