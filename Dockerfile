@@ -24,7 +24,7 @@ RUN npm install -g corepack@0.36.0 && corepack enable \
 COPY web/ ./
 RUN pnpm exec vite build
 
-FROM python:3.14-slim AS runtime
+FROM python:3.15-slim AS runtime
 
 # tzdata 是 CHECKIN_HOUR / 额度周期正确性的前提：任务用 time.localtime() 判断
 # "今天 9 点"，基础镜像不带 zoneinfo 时 TZ 会被静默忽略、退回 UTC。
