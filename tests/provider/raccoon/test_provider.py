@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import types
 from collections.abc import AsyncIterator
 from datetime import datetime
@@ -481,12 +482,17 @@ class LoginFakeClient(CheckinFakeClient):
         self.login_token = token
         self.login_error = error
         self.logins: list[tuple[str, str]] = []
+        self.binds: list[tuple[str, str]] = []
 
     async def login(self, phone, password):
         self.logins.append((phone, password))
         if self.login_error is not None:
             raise self.login_error
         return {"access_token": self.login_token}
+
+    async def bind_device(self, token, device_id):
+        self.binds.append((token, device_id))
+        return {"device_id": device_id}
 
 
 async def test_relogin_returns_none_without_credentials():
@@ -523,3 +529,30 @@ async def test_relogin_propagates_login_rejection():
     data = {**DATA, "phone": "13900000001", "password": "Abcd123456"}
     with pytest.raises(LoginRejected):
         await RaccoonProvider(client=fake).relogin(data)
+
+
+async def test_relogin_binds_device_after_login():
+    """登录后必须绑设备：不绑的会话 trusted=false、心跳 400、也不延期。
+
+    用真 JWT（带 sub）才能走到绑定；设备 id 必须是派生值且 ≤64 字符
+    （上游 devices_current_bind 对超长值回 500）。
+    """
+    import base64
+
+    def _jwt(claims: dict) -> str:
+        def seg(data: dict) -> str:
+            raw = json.dumps(data).encode()
+            return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+        return f"{seg({'alg': 'HS256'})}.{seg(claims)}.sig"
+
+    token = _jwt({"sub": "pu-01a1", "exp": 1796398080})
+    fake = LoginFakeClient(token=token)
+    data = {**DATA, "phone": "13900000001", "password": "Abcd123456"}
+
+    stored = await RaccoonProvider(client=fake).relogin(data)
+
+    assert stored["uid"] == "pu-01a1"
+    assert len(fake.binds) == 1
+    bound_token, device_id = fake.binds[0]
+    assert bound_token == token
+    assert device_id.startswith("dev") and len(device_id) <= 64

@@ -119,11 +119,14 @@ def test_derive_device_id_is_stable_and_shaped_like_upstream():
     first = derive_device_id("pu-01a")
     assert first == derive_device_id("pu-01a")          # 同一账号永远同一台「设备」
     assert first != derive_device_id("pu-other")        # 不同账号不能撞设备
-    # 上游实测形态：dev<32hex>-<uuid>
+    # 上游实测形态：dev<hex>-<uuid>，且**必须 ≤ 64 字符**
+    # （devices_current_bind 超长回 500 "value too long for character varying(64)"，
+    #  绑定失败 → 会话 session_without_bound_device、心跳恒 400）
     assert first.startswith("dev")
+    assert len(first) <= 64
     body = first[3:]
     hex_part, _, uuid_part = body.partition("-")
-    assert len(hex_part) == 32 and all(c in "0123456789abcdef" for c in hex_part)
+    assert len(hex_part) == 16 and all(c in "0123456789abcdef" for c in hex_part)
     assert len(uuid_part.split("-")) == 5
     # uid 缺失时用 anonymous 占位（可用但会被关联），不是随机值
     assert derive_device_id("") == derive_device_id("")

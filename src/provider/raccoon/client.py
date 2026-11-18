@@ -42,6 +42,9 @@ EP_USER_INFO = "/api/web/auth/v1/user_info"
 #: 密码登录：`{nation_code, phone, password}`（后两者 AES-CFB 加密，见 `login.py`）。
 #: 服务端在登录时补发当天 `daily_grant`——这是「模拟登录」唯一可自动化的入口。
 EP_LOGIN = "/api/web/auth/v1/login_with_password"
+#: 设备绑定：浏览器登录后立刻调用，把**新会话**绑到当前设备上。不绑的会话是
+#: `session_without_bound_device`（`trusted=false`），心跳恒 400，也不能延期。
+EP_BIND_DEVICE = "/api/web/auth/v1/devices_current_bind"
 
 #: 官方 LLM 子进程的 User-Agent（openai SDK 形态）；不带也不影响调用，
 #: 带上只是为了不把自己标成脚本——本渠道没有其它指纹伪装。
@@ -285,6 +288,48 @@ class RaccoonClient(LazyClients):
         payload = data.get("data") if isinstance(data, dict) else None
         return payload if isinstance(payload, dict) else {}
 
+    async def bind_device(self, token: str, device_id: str) -> dict[str, Any] | None:
+        """把当前会话绑定到一台设备（浏览器登录后立刻做的动作，幂等）。
+
+        为什么登录后必须绑：实测新登录的会话是 `session_without_bound_device`
+        （`needs_bind=true`, `trusted=false`），此时心跳恒回
+        `400 200811 device_bind_required`，且「当天登录后延期 7 天」的判定也
+        不成立——浏览器正是靠这一步把会话变成 trusted。
+
+        失败返回 None 而不是抛：绑定只影响「会话可信」，登录本身已经成功
+        （token 能聊天、能触发当天补发），不该因为绑定失败把登录整体判负。
+        """
+        headers = request_headers(token, accept="application/json")
+        headers.update({
+            "x-client-device-id": device_id,
+            "x-client-platform": "web",
+            "x-client-version": "156.0.0.0",
+        })
+        payload = {
+            "application": "web",
+            "client_device_id": device_id,
+            "client_device_id_source": device_id,
+            "client_platform": "web",
+            "client_version": "156.0.0.0",
+            "device_name": "Chrome",
+            "os": "macOS",
+            "os_version": "10.15.7",
+            "push_permission": "granted",
+        }
+        try:
+            response = await self._short.post(
+                f"{self.host}{EP_BIND_DEVICE}", json=payload, headers=headers)
+        except httpx.HTTPError:
+            return None
+        if response.status_code >= 400:
+            return None
+        try:
+            data = response.json()
+        except ValueError:
+            return None
+        body = data.get("data") if isinstance(data, dict) else None
+        return body if isinstance(body, dict) else {}
+
     async def login(self, phone: str, password: str) -> dict[str, Any]:
         """手机号 + 密码登录 → `{access_token, refresh_token}`（新会话）。
 
@@ -511,6 +556,12 @@ class RaccoonProvider:
             "password": credential.password,
             "nickname": credential.nickname,
         })
+        # 登录后立刻绑设备（浏览器同款流程）：不绑的会话 trusted=false、心跳 400，
+        # 「当天登录 → 延期 7 天」也不成立。绑定失败不判登录失败（token 已可用）。
+        if refreshed.uid:
+            await self.client.bind_device(
+                refreshed.access_token,
+                raccoon_credential.derive_device_id(refreshed.uid))
         return refreshed.to_dict()
 
     async def activity(self, credential_data: dict) -> ActivityResult:

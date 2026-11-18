@@ -13,6 +13,7 @@ from src.provider.raccoon.activity import CST
 from src.provider.raccoon.client import (
     EP_BALANCE,
     EP_BILLS,
+    EP_BIND_DEVICE,
     EP_CHAT,
     EP_HEARTBEAT,
     EP_LOGIN,
@@ -500,3 +501,52 @@ async def test_login_protocol_violations():
 
     with pytest.raises(UpstreamProtocolViolation, match="access_token"):
         await _client(blank_token).login("13900000001", "Abcd123456")
+
+
+async def test_bind_device_posts_session_and_device_headers():
+    """绑定：带 x-client-* 头族与浏览器同形的 body（登录后必须走这一步）。"""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["dev_header"] = request.headers.get("x-client-device-id")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"code": 0,
+                                         "data": {"device_id": "dev-x"}})
+
+    payload = await _client(handler).bind_device("tok", "dev-x")
+
+    assert seen["path"] == EP_BIND_DEVICE
+    assert seen["dev_header"] == "dev-x"
+    body = seen["body"]
+    assert isinstance(body, dict)
+    assert body["client_device_id"] == "dev-x"
+    assert body["client_platform"] == "web"
+    assert body["application"] == "web"
+    assert payload == {"device_id": "dev-x"}
+
+
+async def test_bind_device_failures_are_swallowed():
+    """绑定失败不该把登录判负：返回 None（token 已能用、当天补发已触发）。"""
+    def http_error(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"code": 999999})
+
+    assert await _client(http_error).bind_device("tok", "dev-x") is None
+
+    def non_json(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="nope")
+
+    assert await _client(non_json).bind_device("tok", "dev-x") is None
+
+    def no_data(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 0})
+
+    # 200 但没 data：按「绑上了但现在没内容」处理，不算失败
+    assert await _client(no_data).bind_device("tok", "dev-x") == {}
+
+
+async def test_bind_device_transport_error_returns_none():
+    def boom(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom")
+
+    assert await _client(boom).bind_device("tok", "dev-x") is None

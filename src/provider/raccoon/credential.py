@@ -146,10 +146,14 @@ def _text(value: Any) -> str:
 
 
 def derive_device_id(uid: str) -> str:
-    """由 uid 稳定派生设备 id（心跳头 `x-client-device-id` 必填）。
+    """由 uid 稳定派生设备 id（心跳 / 设备绑定头 `x-client-device-id` 必填）。
 
     与 Qoder 的机器码同一取向：**随机值会触发风控**（同一账号每次换设备）。
-    上游实测的形态是 `dev<32hex>-<uuid>`，这里按同形态稳定派生。
+    形态跟上游一致（`dev<hex>-<uuid>`），但**长度必须 ≤ 64**：实测
+    `devices_current_bind` 对超长值回 `500 value too long for type
+    character varying(64)`，绑定失败 → 会话停在 `session_without_bound_device`、
+    心跳恒 400。旧实现用 32 位 hex + 完整 uuid 共 73 字符，正好越界。
+
     缺 uid 时用 `anonymous` 占位（可用但会被关联，登录后应补齐）。
     """
     seed = f"raccoon-device:{uid or 'anonymous'}"
@@ -157,4 +161,5 @@ def derive_device_id(uid: str) -> str:
     # uuid 形态的固定值（由同一 digest 派生，保证跨进程稳定）
     tail = (hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32])
     formatted = f"{tail[:8]}-{tail[8:12]}-{tail[12:16]}-{tail[16:20]}-{tail[20:32]}"
-    return f"dev{digest}-{formatted}"
+    # hex 只取前 16 位：`dev`(3) + 16 + `-`(1) + uuid(36) = 56 ≤ 64
+    return f"dev{digest[:16]}-{formatted}"
