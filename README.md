@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/github/license/RobbsLuo/Coding2API)](LICENSE)
 [![Image](https://img.shields.io/badge/image-ghcr.io%2Frobbsluo%2Fcoding2api-blue)](https://github.com/RobbsLuo/Coding2API/pkgs/container/coding2api)
 
-十路渠道——**CodeBuddy**（国内 + 国际，两个独立渠道）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce**、**小浣熊**、**灵犀**——封装成 OpenAI 兼容 API：公共凭证池、统一模型名与调度、按人用量统计。
+十路渠道——**CodeBuddy**（国内 + 国际，两个独立渠道）、**TRAE SOLO**、**OpenCode Zen**、**Kilo**、**Qoder**、**CodeArts**、**OfficeAce**、**小浣熊**、**灵犀**，外加可选的**通用 OpenAI 兼容上游**——封装成 OpenAI 兼容 API：公共凭证池、统一模型名与调度、按人用量统计。
 
 > [!WARNING]
 > 逆向接口，仅供学习研究，未做安全审计；公网部署需反向代理 + 鉴权 + IP 白名单。
@@ -322,6 +322,25 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 **错误分类**：401 → 凭证失效（重贴 Cookie）；402 / 额度文案 → 额度耗尽；403 → 瞬时；404 → 请求无效；429 → 点名模型；审核拦截（`AuditFailed`）换号无用；run 过期 → 重建一次。
 
 **ToS 灰区**：复用桌面 / 网页登录态并伪装桌面客户端（`X-Client-Type: lingxi_claw` + `x-kso-app-name/app-version/device-id` 固定可复现值），见 `provider/tos.py`。
+
+### 通用上游（`generic`，可选）
+
+接**标准 OpenAI 兼容端点**：Command Code、Kimi Code、MiniMax、智谱免费档、自建 vLLM / LiteLLM 等。与十路渠道不同，这里没有逆向、没有私有协议——端点由部署者自己填，凭证是本部署持有的真实 API key。
+
+```bash
+# .env
+GENERIC_API_ENDPOINT=https://api.example.com/v1
+GENERIC_MODELS=gpt-6.2,kimi-k3.1-pro     # 可选：上游没有 /models 时的静态表
+GENERIC_CHAT_MIN_INTERVAL=0               # 可选：压低 RPM，默认不节流
+```
+
+- **留空 = 不启用**：`GENERIC_API_ENDPOINT` 为空的部署里没有这条渠道，`/v1/models`、凭证页、ToS 提示都不出现它。
+- **凭证**：`{"api_key": "sk-…"}`（也接受裸 key / `token` / `accessToken`），进加密凭证池，可多把轮换。
+- **端点校验**：`GENERIC_ALLOWED_ENDPOINTS` 非空时只放行名单内的地址；留空时放行任意 `http(s)`（接内网自建就是它的用途），但仍拒绝 `file://` 之类非 HTTP scheme——凭证是真 key，发错地方等于泄密。
+- **错误分类与 Zen / Kilo 相反**：那两家无凭证，401 只是「这个模型要付费 key」→ 跳过渠道；这里是 **401/403 = key 废了 → 硬禁用**（否则坏 key 会一直参与轮换、每次白撞一次）。402 → 余额不足，429 → 限流，5xx → 其它。
+- **能力**：聊天（流式 / 非流式）、模型列表。没有签到 / 成长 / 活跃上报 / token 刷新 / 额度查询（标准端点不提供），对应任务自动跳过。
+- **限制**：一个部署只配一条（渠道 id 固定 `generic`）。要多接几家，请拆成多个部署。
+
 
 ### CodeBuddy 国际（`codebuddy_intl`）
 
@@ -818,6 +837,11 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `OFFICEACE_API_ENDPOINT` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | OfficeAce 控制面 |
 | `OFFICEACE_ALLOWED_ENDPOINTS` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | 只需控制面（模型网关由上游下发） |
 | `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | OfficeAce 聊天最小间隔；可热更 |
+| `GENERIC_API_ENDPOINT` | `""` | 通用 OpenAI 兼容上游；留空 = 不启用该渠道 |
+| `GENERIC_ALLOWED_ENDPOINTS` | `""` | 通用上游白名单；留空 = 放行任意 http(s) |
+| `GENERIC_MODELS` | `""` | 上游无 `/models` 时的静态模型表（逗号分隔） |
+| `GENERIC_USER_AGENT` | `""` | 覆盖出站 UA；空 = 不发自定义 UA |
+| `GENERIC_CHAT_MIN_INTERVAL` | `0` | 通用上游聊天最小间隔；可热更 |
 | `PROVIDER_PROXIES` | `""` | 按渠道出站代理；启动期项 |
 | `CREDENTIAL_PROXY_POOL` | `""` | 出口 IP 粘性：全局代理池（分号分隔），按凭证 id 稳定哈希分配；启动期项 |
 | `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB 聊天节流（按凭证分桶）；可热更 |

@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/github/license/RobbsLuo/Coding2API)](LICENSE)
 [![Image](https://img.shields.io/badge/image-ghcr.io%2Frobbsluo%2Fcoding2api-blue)](https://github.com/RobbsLuo/Coding2API/pkgs/container/coding2api)
 
-Ten channels — **CodeBuddy** (CN + international, two separate channels), **TRAE SOLO**, **OpenCode Zen**, **Kilo**, **Qoder**, **CodeArts**, **OfficeAce**, **Raccoon**, **Lingxi** — wrapped into an OpenAI-compatible API, with shared credential pool, unified model names and scheduling, per-user usage stats.
+Ten channels — **CodeBuddy** (CN + international, two separate channels), **TRAE SOLO**, **OpenCode Zen**, **Kilo**, **Qoder**, **CodeArts**, **OfficeAce**, **Raccoon**, **Lingxi** — plus an optional **generic OpenAI-compatible upstream** — wrapped into an OpenAI-compatible API, with shared credential pool, unified model names and scheduling, per-user usage stats.
 
 > [!WARNING]
 > Reverse-engineered endpoints; study and research only, not security-audited. Public deployment needs reverse proxy + auth + IP allowlist.
@@ -317,7 +317,26 @@ The upstream is plain OpenAI protocol, with three quirks:
 
 **ToS grey area**: reuses the desktop / web login state and impersonates the desktop client (`X-Client-Type: lingxi_claw` plus `x-kso-app-name/app-version/device-id`), see `provider/tos.py`.
 
+### Generic upstream (`generic`, optional)
+
+Wraps any **standard OpenAI-compatible endpoint**: Command Code, Kimi Code, MiniMax, Zhipu free tier, self-hosted vLLM / LiteLLM. Unlike the ten channels there is no reverse engineering — you supply the endpoint and the credential is a real API key you own.
+
+```bash
+# .env
+GENERIC_API_ENDPOINT=https://api.example.com/v1
+GENERIC_MODELS=gpt-6.2,kimi-k3.1-pro     # optional: static list when upstream has no /models
+GENERIC_CHAT_MIN_INTERVAL=0               # optional: throttle RPM, default off
+```
+
+- **Empty = disabled**: without `GENERIC_API_ENDPOINT` the channel does not exist (no `/v1/models` entry, no credential row, no ToS notice).
+- **Credential**: `{"api_key": "sk-…"}` (also a bare key / `token` / `accessToken`), stored encrypted and poolable.
+- **Endpoint validation**: with `GENERIC_ALLOWED_ENDPOINTS` set only listed hosts pass; empty means any `http(s)` (that's the point — internal gateways), but non-HTTP schemes are rejected since a real key would leak.
+- **Error classification is the inverse of Zen / Kilo**: those have no credential, so 401 only means "this model needs a paid key" → skip channel; here **401/403 means the key is dead → hard-disable**, otherwise a bad key keeps taking turns and burning a request each time. 402 → insufficient balance, 429 → rate limit, 5xx → other.
+- **Capabilities**: chat (streaming / non-streaming) and model list. No check-in / growth / activity reporting / token refresh / quota probe — tasks skip it automatically.
+- **Limit**: one per deployment (channel id is fixed to `generic`). For several upstreams, run several deployments.
+
 ### CodeBuddy international (`codebuddy_intl`)
+
 
 [www.codebuddy.ai](https://www.codebuddy.ai), same protocol as CN site but separate account system (separate registration and billing) → separate channel. Same device-code login.
 

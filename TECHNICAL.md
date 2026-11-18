@@ -366,6 +366,19 @@ def health_score(q: Quota | None) -> int | None:
 
 **④ 档位自适应降级**（默认行为，无需配置）：上游明确拒收 `reasoning_effort`（HTTP 400 或流内 error 事件，文案命中 `reasoning_effort` / `effort level` / `budget_tokens` / 「推理档位」等标记）时，在**原号**上降一档重试一次（`xhigh→high→medium→low→minimal`），不换号、不冷却、不计入轮换预算。降级后的档位作为本次请求剩余尝试的上限（`_clamp_effort`）。只降一档：第二次仍被拒或已是最低档/未知档位 → 走既有 INVALID 路径（换上游，全拒才 400）。已出帧（`emitted`）后不重试（半截输出不可回滚）。
 
+### 3.10c 通用上游渠道（`generic`，可选）
+
+`src/provider/generic/client.py`。标准 OpenAI 兼容端点，**非逆向**：`{base}/chat/completions` + `{base}/models`，凭证是部署者自己的 API key（`{"api_key": …}`，加密落库、可多把轮换）。
+
+- **启用条件**：`GENERIC_API_ENDPOINT` 非空。装配期解析一次，返回值同时决定「是否注册进 registry」与 client 的 base_url——两处分别判空会漂移，且会让空值分支成为不可达代码。
+- **分类与 Zen / Kilo 相反**：那两家无凭证，401 = 「该模型要付费 key」→ `INVALID`（`_skip_provider` 跳过渠道）；这里 401/403 = key 失效 → `DEAD`（硬禁用，交给刷新任务 / 人工 revive）。402 → `CREDIT`，400/404/422 → `INVALID`，429 → `SOFT`，5xx → `OTHER`。
+- **端点校验**（`validate_generic_endpoint_allowed`）：白名单非空时只放行名单内地址；白名单为空时放行任意 `http(s)`（内网自建就是用途），但拒绝非 HTTP scheme——凭证是真 key，`file://` 之类会让 httpx 出网到非 HTTP 目标。
+- **请求体**：`prepare_body` 深拷 messages + 强制 `stream=true`（与 Kilo / Zen 同一条纪律：不能穿透回引擎持有的 `request.raw`，会话粘性指纹读它）。
+- **流式解析**：复用 `provider/openai_chunk.openai_events`（含 `reasoning_content`），不另写一份。
+- **模型表**：`/models` 失败或端点没有该 API 时回落 `GENERIC_MODELS` 静态表；两者都没有则抛出，由上层用上次缓存兜底。
+- **未实现**：签到 / 成长 / 活跃上报 / token 刷新 / 额度探测——标准端点不提供，任务层按方法缺失自动跳过。
+- **限制**：一个部署只配一条（渠道 id 固定 `generic`）。多接几家需把 `KNOWN_PROVIDERS` 动态化。
+
 ## 4. Provider 协议
 ```python
 class Provider(Protocol):
