@@ -12,7 +12,7 @@
 
 ## 特性
 
-- **OpenAI 兼容出口**：`/v1/chat/completions`（流式 / 非流式）、`/v1/responses`（Codex CLI）、`/v1/messages`（Claude Code）、`/v1/models`（含单模型查询）、`/v1/user/balance`。
+- **OpenAI 兼容出口**：`/v1/chat/completions`（流式 / 非流式）、`/v1/responses`（Codex CLI）、`/v1/messages`（Claude Code）、`/v1beta/models/{m}:generateContent`（Gemini SDK）、`/v1/models`（含单模型查询）、`/v1/user/balance`。
 - **统一调度**：扁平名按健康度选号；`模型@渠道` 强制。优先级：免费渠道 → 在途最少 → 到期额度 → 健康度 + 分级冷却 → 余额多者。管理员可给凭证设**权重**（`-1000..1000`）：只在同一健康档内重排（正数优先、负数当备用），不会把冷却/耗尽的号顶上来。目录里的 x0 会被最近 24h 的实测扣费校准（上游改计费不改目录时不至于永远占住免费档）。模型级限流只避让该模型；多轮对话粘同一凭证，出错才轮换。
 - **到期额度优先**：主窗口（默认 36h）先烧将过期额度；打平再比 7 天窗口。单位统一积分。
 - **模型列表按凭证加载**：只列有可用凭证的渠道 → 无幽灵模型。
@@ -297,6 +297,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **会话需重登**：`GET /api/web/auth/v1/user_info` 的 `trusted_device` 会直说会话状态——`trusted=false` / `device_bind_state=suspicious` / `needs_relogin=true` / `reason=device_session_mismatch`。进入该状态后设备心跳恒回 `400 200811 device_bind_required`，当天也不会有 `daily_grant`，且**没有自愈通道**（`devices_current_bind` 对 `device_session_mismatch` 同样 400；`refresh` 只是原样换回同一张 token，sid 不变）。签到与活跃上报都会读这个信号，直接把「需在网页端重新登录后重新导入凭据」写进结果，不再只回一句「心跳失败（HTTP 400）」。**重新登录会立刻补发当天这笔**（几秒内落账、`grant_at` 回填 00:00）。
 
+**按需登录（可选，默认关）**：靠上面那条「只有新登录才补发」，服务可以自己完成登录——导入时在 JSON 里额外带上 `{"phone":"139…","password":"…"}`（也接受 `phone_number`），打开 `RACCOON_AUTO_LOGIN` 后，签到发现「今天没发」就会调用 `POST /api/web/auth/v1/login_with_password` 换一份新会话，落库后立刻重核一次，当天 300 分当轮到账。口径全部实测：请求里的 `phone`/`password` 是 **AES-CFB（key `senseraccoon2023`、16 字节随机 IV 前置、Base64）**，密码下限 8 位；该接口**不需要验证码**（阿里云验证码只挂在短信表单上）。限制与代价：每天每凭证最多一次（密码错了再试只会累积风控）；上游明确拒绝（`200004 phone_or_password_verify_error`）会把凭证标成「需重新登录」并停手；`password_status=unset` 的账号填了也登不进（只能短信/扫码）；脚本化登录的 ToS 灰度比贴 cookie 更重，故默认关闭、按需再开。
+
 **活跃上报**：`POST /api/web/auth/v1/devices_current_heartbeat`（网页端真实设备心跳），补 `x-client-*` 头族即 200、幂等，`last_login_at` 随之刷新。默认关闭，与 CodeBuddy 共用 `ACTIVITY_REPORT_ENABLED` / `ACTIVITY_REPORT_HOUR`。设备 id 由 uid 稳定派生（随机值会被上游当成新设备）。
 
 **并发上限约 5**（第 6 个回 `429 user_model_rate_limited`）→ `RACCOON_MAX_CONCURRENCY` 默认 2，独立节流器。该 429 实为账号×模型的频率窗口（实测恢复中位数 25min），冷却按 `CONCURRENCY` 首枪 60s、同链翻倍、封顶 30min。
@@ -382,6 +384,19 @@ claude
 - **图片**：`image` 块归一为 chat `image_url`；`tool_result.content` 内图片同样保留。
 - **不支持**：`document` 块、`source.type=file`、Anthropic 服务端工具 → 400。
 - **`cache_control` 透传**（默认开）：落点同 Anthropic——`system`、消息内容块、`tool_result` 顶层、`tool_calls` 顶层、`tools` 顶层。只校验结构，不解释取值。实测 codebuddy / codebuddy_intl / trae / qoder / codearts / kilo 6 家接受；zen、小浣熊、灵犀未验证，OfficeAce 未单测。脚本 `scripts/probe_cache_control.py`。
+
+### Gemini（google-genai / REST）
+
+```bash
+export GEMINI_API_KEY=sk-你的key
+export GOOGLE_GENAI_BASE_URL=http://127.0.0.1:8000   # SDK 会自拼 /v1beta
+```
+
+- **入口**：`POST /v1beta/models/{model}:generateContent`、`:streamGenerateContent`（`?alt=sse`）、`:countTokens`；`GET /v1beta/models`（SDK 启动时会调）。
+- **鉴权**：`x-goog-api-key` → `?key=` → `Authorization: Bearer`，三种都认。
+- **入站映射**：`contents[].parts` 的 `text` / `inlineData`（image_url）/ `functionCall` / `functionResponse`；`systemInstruction`、`generationConfig`（temperature / topP / maxOutputTokens / stopSequences / 采样惩罚 / `responseMimeType` / `responseSchema`）、`tools[].functionDeclarations`、`toolConfig.functionCallingConfig`。
+- **出站**：`candidates[].content.parts`（text / thought / functionCall）+ `finishReason` + `usageMetadata`；流式每帧一个完整 `GenerateContentResponse`，终止帧带 `finishReason`（无 `[DONE]`）。
+- **不支持 → 400**：服务端工具（`googleSearch` / `codeExecution` / `retrieval`）、`candidateCount != 1`、`responseMimeType` 既非 `text/plain` 也非 `application/json`。`thinkingConfig` / `topK` 丢弃（chat 无等价语义，不冒充支持）。
 
 ### CC Switch 一键导入
 
@@ -602,7 +617,7 @@ tabs 切四维（渠道 / 模型 / 用户 / 凭证），共用一表（渠道 / 
 
 **延迟两类口径**：只统计成功请求。平均 = `latency_sum ÷ 成功数`（小时汇总）；分位从逐请求明细算（仅 90 天）。`ttfb_ms` = `NULL` 的两列各自独立排名。无样本 → `—`。
 
-**失败归因**（`GET /api/stats/errors`，operator+）：按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0`，返回失败次数 / **未救回数** / 最近失败时刻（降序，`limit` ≤ 5000）。**落行口径**：硬失败（`credential_unavailable` / `account_restricted` / `invalid_request` / `model_capability`）**每次尝试各一行**；限流 / 额度 / 超时 / 上下文超限等其余分类**每次请求只落收尾一行**（类型取最后一次错误的真实归因）——否则一次请求三行会把 `usage_hourly.requests` 与 Key 日请求额度一起刷高。同用户同 `request_id` 另有成功行 = 已救回；`未救回 = 失败数 − 救回数`（同一请求多次失败算多次，≠ 受损请求数）。几处特殊判据：凭证 401 落 `credential_unavailable`，**但额度耗尽证据成立时**（officeace 积分耗尽同一条 `401 APIG.1009`）改判 `CREDIT`——冷却到次日 04:00、不硬禁用；本地额度为正 / 未探测时先现场复探再判，仍为正或复探失败才保持 DEAD。风控限制（11140）落 `account_restricted`：2h 账号级冷却、当前请求不再换号，同渠道第二个凭证也中招才整渠道退避 24h。11102 / 11158 落 `model_not_found`（写 (账号, 模型) 负缓存，不冷却账号）；11115 落 `context_overflow`、001001020 落 `model_capability`，两者都不惩罚凭证；一次凭证都没选中时明细落**候选渠道**而不是 `-`。完整分类与冷却时长见 TECHNICAL.md §3.2。点行钻取 +「只看失败」（`GET /api/stats/events?ok=0`）；仅 admin / operator。`/metrics` 的 `upstream_errors_total` 取进程内计数，不合并。
+**失败归因**（`GET /api/stats/errors`，operator+）：按 `(渠道, 模型, 错误类型)` 聚合窗口内 `ok=0`，返回失败次数 / **未救回数** / 最近失败时刻（降序，`limit` ≤ 5000）。**落行口径**：硬失败（`credential_unavailable` / `account_restricted` / `invalid_request` / `model_capability`）**每次尝试各一行**；限流 / 额度 / 超时 / 上下文超限等其余分类**每次请求只落收尾一行**（类型取最后一次错误的真实归因）——否则一次请求三行会把 `usage_hourly.requests` 与 Key 日请求额度一起刷高。同用户同 `request_id` 另有成功行 = 已救回；`未救回 = 失败数 − 救回数`（同一请求多次失败算多次，≠ 受损请求数）。几处特殊判据：凭证 401 落 `credential_unavailable`，**但额度耗尽证据成立时**（officeace 积分耗尽同一条 `401 APIG.1009`）改判 `CREDIT`——冷却到次日 04:00、不硬禁用；本地额度为正 / 未探测时先现场复探再判，仍为正或复探失败才保持 DEAD。风控限制（11140）落 `account_restricted`：2h 账号级冷却、当前请求不再换号，同渠道第二个凭证也中招才整渠道退避 24h。11102 / 11158 落 `model_not_found`（写 (账号, 模型) 负缓存，不冷却账号）；11115 落 `context_overflow`、001001020 落 `model_capability`，两者都不惩罚凭证；`001001044`（消息角色不合法，OpenAI `developer` 角色触发）落 `invalid_request`——codearts 出站已把 `developer` 归一为 `system`，兜底分类只防其它形态；一次凭证都没选中时明细落**候选渠道**而不是 `-`。完整分类与冷却时长见 TECHNICAL.md §3.2。点行钻取 +「只看失败」（`GET /api/stats/events?ok=0`）；仅 admin / operator。`/metrics` 的 `upstream_errors_total` 取进程内计数，不合并。
 
 **点行钻取**：点分组表任一行 → 明细按该行过滤（渠道 / 模型 / 凭证；用户维度走作用域参数），条件可叠加。`GET /api/stats/events` 接受 `provider` / `model` / `credential_id`（AND）+ `ok=0`。
 
@@ -805,6 +820,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `RACCOON_ALLOWED_ENDPOINTS` | `https://xiaohuanxiong.com` | 小浣熊白名单 |
 | `RACCOON_CHAT_MIN_INTERVAL` | `0` | 小浣熊聊天最小间隔；可热更 |
 | `RACCOON_MAX_CONCURRENCY` | `2` | 小浣熊每账号在途并发上限；`0` 关闭；可热更 |
+| `RACCOON_AUTO_LOGIN` | `false` | 小浣熊按需登录：当天没拿到每日积分时用凭证里的 `phone`/`password` 登录一次换新会话；每天每凭证最多一次，密码被拒即标「需重登」停手。**可热更**；开启等于把账号密码纳入 `APP_SECRET` 信任面 |
 | `LINGXI_API_ENDPOINT` | `https://lingxi.wps.cn` | 灵犀上游地址 |
 | `LINGXI_ALLOWED_ENDPOINTS` | `https://lingxi.wps.cn,https://lingxi.kdocs.cn` | 灵犀白名单（对话面按两域顺序回落） |
 | `LINGXI_CHAT_MIN_INTERVAL` | `0` | 灵犀聊天最小间隔；可热更 |

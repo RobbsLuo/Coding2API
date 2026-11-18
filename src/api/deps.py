@@ -303,6 +303,21 @@ async def api_key_user_anthropic(request: Request) -> ApiKeyPrincipal:
     return await api_key_user(request)
 
 
+async def api_key_user_gemini(request: Request) -> ApiKeyPrincipal:
+    """Gemini 客户端鉴权：`x-goog-api-key` → `?key=` → `Authorization: Bearer`。
+
+    google-genai / 官方 SDK 默认发 `x-goog-api-key`；REST 示例与部分旧版客户端
+    用 query `?key=`（Gemini 的官方约定，不能当泄漏处理——它是 SDK 的默认形态）。
+    """
+    key = request.headers.get("x-goog-api-key")
+    if key and key.strip():
+        return _api_key_principal(get_services(request), request, key.strip())
+    query_key = request.query_params.get("key")
+    if query_key and query_key.strip():
+        return _api_key_principal(get_services(request), request, query_key.strip())
+    return await api_key_user(request)
+
+
 async def csrf_protected(request: Request) -> None:
     """写操作 CSRF 校验（仅对带会话 cookie 的请求生效）。"""
     check_csrf(request)
