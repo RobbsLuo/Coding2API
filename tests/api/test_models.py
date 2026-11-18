@@ -819,3 +819,35 @@ def test_models_refresh_failure_counts_and_logs_once(tmp_path, caplog):
     asyncio.run(_refresh_provider(services, "trae", provider))
     assert "trae" not in services.model_list_failures
     assert set(services.model_list_cache["trae"]) == {"glm-5.3"}
+
+
+def test_models_accepts_anthropic_style_x_api_key(tmp_path):
+    """Anthropic SDK `models.list()` 固定把 Key 放 `x-api-key`。
+
+    此前两个 models 路由只用 Bearer 依赖 → Claude 客户端列模型必 401，
+    而 `/v1/messages` 早已兼容两种头。这里锁住两个路由都认 `x-api-key`。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class TraeStub:
+        id = "trae"
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            return [Model(id="glm-5.3")]
+
+        def import_credential(self, raw):  # pragma: no cover
+            return raw
+
+    app = build_app(settings, providers={"trae": TraeStub()})
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        listing = client.get("/v1/models", headers={"x-api-key": key})
+        detail = client.get("/v1/models/glm-5.3", headers={"x-api-key": key})
+        rejected = client.get("/v1/models", headers={"x-api-key": "not-a-key"})
+    assert listing.status_code == 200
+    assert "glm-5.3" in {item["id"] for item in listing.json()["data"]}
+    assert detail.status_code == 200
+    assert rejected.status_code == 401

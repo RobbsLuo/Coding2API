@@ -99,11 +99,25 @@ def lingxi_login_identities(credential_data: dict[str, Any]) -> IdentitySet:
     return frozenset(alias for alias in aliases if alias)
 
 
+def raccoon_login_identity(credential_data: dict[str, Any]) -> str:
+    """小浣熊首选身份：JWT `sub` 解出的 `uid`（同一账号的会话会轮换）。"""
+    return _text(credential_data, "uid", "user_id")
+
+
+def raccoon_login_identities(credential_data: dict[str, Any]) -> IdentitySet:
+    """小浣熊全部别名：只有 `uid`；没有它就无法安全合并（`from_import` 偶发
+    解不出 claims 时留空），调用方退回新增。
+    """
+    uid = _text(credential_data, "uid", "user_id")
+    return frozenset({uid}) if uid else frozenset()
+
+
 #: 首选身份（展示 / 门面转发用）；只有声明了身份的渠道才参与重新登录合并。
 LOGIN_IDENTITIES: dict[str, Callable[[dict[str, Any]], str]] = {
     "codearts": codearts_login_identity,
     "officeace": officeace_login_identity,
     "lingxi": lingxi_login_identity,
+    "raccoon": raccoon_login_identity,
 }
 
 #: 别名集合（合并匹配用）：与 `LOGIN_IDENTITIES` 必须覆盖同一批渠道。
@@ -111,7 +125,14 @@ LOGIN_IDENTITY_SETS: dict[str, Callable[[dict[str, Any]], IdentitySet]] = {
     "codearts": codearts_login_identities,
     "officeace": officeace_login_identities,
     "lingxi": lingxi_login_identities,
+    "raccoon": raccoon_login_identities,
 }
+
+#: **手工导入即「重新登录」**的渠道：没有 OAuth 轨道，用户每粘一次新会话
+#: 就是顶掉旧会话（灵犀 Cookie / 小浣熊 `xhx_token`，约 30 天到期需重取）。
+#: 只有它们走「同身份就地合并」；CodeArts / OfficeAce 手工导入的是 AK/SK，
+#: 同账号可并存多把密钥，合并会吞掉一把，故不在此列。
+MANUAL_MERGE_PROVIDERS: frozenset[str] = frozenset({"lingxi", "raccoon"})
 
 
 def _safe_call(getter: Callable[[dict[str, Any]], Any],

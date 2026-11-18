@@ -50,7 +50,7 @@ from ..model_alias import parse_model_aliases
 from ..pricing import PriceTable
 from ..provider.base import Model
 from ..provider.naming import normalize_model_key
-from .deps import ApiKeyPrincipal, Services, api_key_user
+from .deps import ApiKeyPrincipal, Services, api_key_user_anthropic
 from .model_catalog import load_catalog, save_catalog
 from .model_merge import (
     _build_aliases,
@@ -561,15 +561,17 @@ async def list_models(services: Services,
 def create_router(services: Services) -> APIRouter:
     router = APIRouter()
 
+    # 两个路由都收 `x-api-key`：Anthropic SDK 的 `client.models.list()` 固定
+    # 把 Key 放这里（`/v1/messages` 早已双向兼容，models 漏了会直接 401）。
     @router.get("/v1/models")
     async def list_v1_models(request: Request,
-                             principal: ApiKeyPrincipal = Depends(api_key_user)):
+                             principal: ApiKeyPrincipal = Depends(api_key_user_anthropic)):
         return await serve_models(services, principal.allowed_models, request,
                                   user_allowed_models=principal.user_allowed_models)
 
     @router.get("/v1/models/{model_id:path}")
     async def get_v1_model(model_id: str, request: Request,
-                           principal: ApiKeyPrincipal = Depends(api_key_user)):
+                           principal: ApiKeyPrincipal = Depends(api_key_user_anthropic)):
         """单模型查询（OpenAI `GET /v1/models/{model}` 同形）。
 
         `:path` 而非普通路径参数：上游原 id 允许带命名空间（kilo 的

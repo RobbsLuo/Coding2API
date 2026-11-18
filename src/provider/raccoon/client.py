@@ -340,20 +340,25 @@ class RaccoonProvider:
         """「签到」= 页面访问 + 摸一次积分服务 + 核对流水。
 
         上游没有领取接口（见 `activity.py` 模块文档），故本方法是**幂等只读**
-        的组合：`user_info`（会话级访问，触发延期/账单物化）→ balance（触发
-        余额刷新）→ bills 核对 `daily_grant`。只认流水，不看 HTTP 200——
-        否则会重演「界面显示签到成功、积分没到」。
+        的组合：`user_info`（顺带读会话信任状态）→ balance（触发余额刷新）→
+        bills 核对 `daily_grant`。只认流水，不看 HTTP 200——否则会重演
+        「界面显示签到成功、积分没到」。
 
-        页面访问失败不阻断核对：活跃任务每天还会再访问一次；这里只是让
-        签到本身也带一次「登录」，避免活跃任务被关闭时完全没有延期动作。
+        **不能把「账户里还有旧积分」当今天已签**：上游当天没登录就不会补发
+        `daily_grant`（2026-11-18 复测，见 `activity.py`）。旧实现这么做，导致
+        缺当天登录的号连续两天报「今日额度可用 300」的假绿。
+
+        页面访问失败不阻断核对：签到本身还带了余额与流水两个请求，只要流水能
+        读出来就照样能判定；失败原因会经 `user_info` 的 `trusted_device` 反映。
         """
         credential = RaccoonCredential.from_dict(credential_data)
         if not credential.access_token:
             return CheckinResult(ok=False, message="凭证缺少 token")
         started = time.time()
-        # ① 页面级访问：当天这笔积分只有被会话访问才延期到 7 天
+        # ① 页面级访问，同时拿到会话信任状态（需重登的唯一机器可读信号）
+        user_info: dict[str, Any] | None = None
         with contextlib.suppress(UpstreamHTTPError, UpstreamProtocolViolation):
-            await self.client.visit(credential.access_token)
+            user_info = await self.client.visit(credential.access_token)
         # ② 触达积分服务：服务端在此刷新余额/补写当天流水
         await self.client.fetch_quota(credential.access_token)
         # ③ 读流水核对：签到是否真到账。必须用 `income` 过滤——`all` 里
@@ -365,33 +370,27 @@ class RaccoonProvider:
             return CheckinResult(ok=False, message=f"流水查询失败（HTTP {error.status}）")
         except UpstreamProtocolViolation:
             return CheckinResult(ok=False, message="流水响应格式异常")
-        return raccoon_activity.checkin_result(items, started)
+        return raccoon_activity.checkin_result(items, started, user_info=user_info)
 
     async def checkin_status(self, credential_data: dict) -> dict:
-        """只读签到状态：「今天有没有可用积分」+ 有多少。
+        """只读签到状态：「今天到底有没有发过积分」。
 
-        与 `checkin` 的区别：这里不判「是不是本次触发的」——状态查询只关心
-        今日是否已签/有没有可用积分，不需要触发访问或余额探测。今天没有新
-        发放但仍有未过期每日积分时也算已签（积分可用，只是今天还没落账）。
+        与 `checkin` 的区别：这里不触发任何访问，只读流水。判据与 `checkin`
+        **同一口径**（`pick_today_grant`）——今天没有 `daily_grant` 就是未签，
+        绝不拿「账户里还有旧积分」冒充今天已签（旧实现这么干，见 `activity.py`）。
         """
         credential = RaccoonCredential.from_dict(credential_data)
         if not credential.access_token:
             return {"active": False, "today_checked_in": False}
         items = await self.client.fetch_bills(credential.access_token,
                                               bill_type=BILL_TYPE_INCOME)
-        now = raccoon_activity.now_cst()
-        row = raccoon_activity.pick_today_grant(items, now)
-        if row is not None:
-            credit: float | None = float(row.get("points") or 0)
-        else:
-            active = raccoon_activity.pick_active_grants(items, now)
-            credit = (sum(float(item.get("points") or 0) for item in active)
-                      if active else None)
+        row = raccoon_activity.pick_today_grant(items, raccoon_activity.now_cst())
+        credit = float(row.get("points") or 0) if row is not None else None
         return {
             "active": True,
             "today_checked_in": credit is not None,
             "today_credit": credit,
-            "activity_name": "每日积分（服务端发放/登录延期）",
+            "activity_name": "每日积分（当天网页登录后发放）",
         }
 
     def checkin_scope(self, credential_data: dict) -> str:
@@ -406,27 +405,38 @@ class RaccoonProvider:
     async def activity(self, credential_data: dict) -> ActivityResult:
         """活跃上报：页面访问 + 设备心跳（都幂等、只读）。
 
-        为什么不是只发心跳：心跳只刷新设备 `last_seen_at`，不算「当天登录」；
-        实测连续几天只发心跳时，每日积分仍会在当日 24:00 清零。网页会话级
-        的 `user_info` 访问才触发延期。故先访问、再心跳；访问失败按活跃失败
-        返回，让任务在同一小时窗口内重试（心跳本身仍会照发）。
+        心跳只刷新设备 `last_seen_at`；`user_info` 的 `trusted_device` 才是会话
+        状态的真相（`needs_relogin` / `device_bind_state`）。进入
+        `device_session_mismatch` 后心跳恒回 `400 200811 device_bind_required`，
+        而该状态**无法自愈**（`devices_current_bind` 同样 400、`refresh` 只换同一
+        张 token）——只能让用户在网页重新登录后重新导入，故这里点名说出来，
+        而不是回一句「心跳失败（HTTP 400）」。
         """
         credential = RaccoonCredential.from_dict(credential_data)
         if not credential.access_token:
             return ActivityResult(ok=False, message="凭证缺少 token")
         token = credential.access_token
         visit_error: str | None = None
+        user_info: dict[str, Any] | None = None
         try:
-            await self.client.visit(token)
+            user_info = await self.client.visit(token)
         except UpstreamHTTPError as error:
             visit_error = f"页面访问失败（HTTP {error.status}）"
         except UpstreamProtocolViolation:
             visit_error = "页面访问响应格式异常"
+        relogin = raccoon_activity.session_needs_relogin(user_info)
+        if relogin:
+            # 心跳在这种会话下必然 400：不再白发一次，直接报可操作原因。
+            # 走到这里说明 visit 成功并拿到了 trusted_device，故没有 visit_error
+            # 可拼（visit 抛异常时 user_info 为空，relogin 也必为空）。
+            return ActivityResult(ok=False, user_id=credential.uid, message=relogin)
         try:
             payload = await self.client.heartbeat(
                 token, raccoon_credential.derive_device_id(credential.uid))
         except UpstreamHTTPError as error:
             message = f"心跳失败（HTTP {error.status}）"
+            if raccoon_activity.heartbeat_needs_relogin(error.body):
+                message += f"；{raccoon_activity.RELOGIN_HINT}"
             if visit_error:
                 message += f"；{visit_error}"
             return ActivityResult(ok=False, message=message)
@@ -441,7 +451,7 @@ class RaccoonProvider:
         if isinstance(seen, str) and seen:
             detail += f"（上游 last_seen_at={seen}）"
         if trusted is False:
-            detail += "；注意：该设备未被上游信任"
+            detail += f"；{raccoon_activity.RELOGIN_HINT}"
         if visit_error:
             return ActivityResult(ok=False, user_id=credential.uid,
                                   message=f"{visit_error}；{detail}")

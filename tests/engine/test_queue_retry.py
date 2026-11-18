@@ -624,3 +624,31 @@ def test_error_type_for_queue_is_rate_limit():
     from src.engine.executor import _error_type_for
 
     assert _error_type_for(ErrKind.QUEUE) == "rate_limit"
+
+
+async def test_stream_terminal_hook_reports_invalid_request(repo):
+    """整条链未出帧就用尽时，`on_terminal` 必须收到 (code, message)。
+
+    出口靠这次回调把「首帧请求级错误」改判 400；回调若发生在 yield 之后，
+    调用方已从流里拿到 200 错误帧，状态码就改不回来了。
+    """
+    credentials, db = repo
+    credentials.add(provider="trae", credential_data={"accessToken": "a"})
+
+    class RejectProvider:
+        id = "trae"
+
+        async def stream_chat(self, _credential_data, _payload, _model):
+            yield Event(kind=EventKind.ERROR, error_code=11101,
+                        error_kind=ErrKind.INVALID)
+
+    executor = _executor(credentials, RejectProvider())
+    seen: list[tuple[str, str]] = []
+
+    frames = [frame async for frame in executor.stream(
+        _request(), on_terminal=lambda code, message: seen.append((code, message)))]
+
+    assert [code for code, _ in seen] == ["invalid_request"]
+    assert "not available on any configured upstream" in seen[0][1]
+    assert b"invalid_request" in b"".join(frames)
+    db.close()

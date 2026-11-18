@@ -152,7 +152,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 ### Three model-name fields
 
 1. **Raw id** (`raw_id`): key actually sent upstream, never changed. Raw ids differ per channel (Qoder `kmodel_latest` = TRAE `kimi-k3-1`), may carry namespace prefix (Kilo `kilo-auto/free`).
-2. **Canonical key**: free-tier markers (`-free` / `free` path segment) + namespace prefixes stripped, then slugified (`kilo-auto`). List merges by it.
+2. **Canonical key**: free-tier markers (`-free` / `free` path segment) + namespace prefixes (including Raccoon's `sn-`) stripped, then slugified (`kilo-auto`). List merges by it.
 3. **Display name** (`name`): cleaned readable text, from upstream when given, otherwise derived; brand casing normalized (`DeepSeek` / `MiMo` / `GLM` / `GPT`).
 
 Every `id` in `GET /v1/models` is canonical key; requests translate back to raw id (`by_provider.{channel}.raw_id`). **All three spellings directly requestable.** Duplicate canonical keys within channel fall back to raw id.
@@ -161,7 +161,7 @@ Every `id` in `GET /v1/models` is canonical key; requests translate back to raw 
 
 **Custom aliases** (`MODEL_ALIASES`, hot): `alias=model@channel;alias2=model`; `@channel` optional. List and request resolution share one table; entries carry `custom_alias: true`. Collisions, missing targets, or channel not holding model log ERROR and skip that segment; no alias chains.
 
-**Single-model lookup** (`GET /v1/models/{id}`): all three spellings + custom aliases, case-insensitive, namespaced raw ids work. Missing / outside key allowlist → 404 (`code=model_not_found`), so client cannot probe pool.
+**Single-model lookup** (`GET /v1/models/{id}`): all three spellings + custom aliases, case-insensitive, namespaced raw ids work. Missing / outside key allowlist → 404 (`code=model_not_found`), so client cannot probe pool. Both models routes accept `x-api-key` and `Authorization: Bearer`.
 
 **`n` only accepts 1**: the outbound shape produces single choice; anything else is 400.
 
@@ -178,6 +178,15 @@ Upstream streams have no read timeout, so the gateway supplies its own:
 - **Idle timeout** (`STREAM_IDLE_TIMEOUT_SECONDS`, default 0): after first frame, stream closed with error frame, **not** retried (partial output cannot be rolled back).
 
 Both default off on purpose: slow contexts measured 40–71s to first token. Enable per deployment (recommended 60 / 300).
+
+### Deferred response headers (request-level errors return a real 400)
+
+Streaming endpoints no longer send the 200 header immediately; they wait for the upstream's first frame (5s grace, `api/streaming.STREAM_START_GRACE_SECONDS`):
+
+- If that first frame is a **request-level error** (content guard 11128, context overflow 11115, bad image 11135, tool-schema rejection 11129, model not served by that upstream 4001, …) → returns **400 JSON** (`invalid_request`) instead of `200 + data:{"error"}`. Previously SDKs treated these rejections as successful responses and kept retrying.
+- No frame within the grace window → sends 200 and keeps streaming; the in-flight frame fetch is **not** cancelled, so slow first tokens are unaffected.
+- Errors after the first emitted frame keep the old semantics (200 + error frame); partial output cannot be rolled back.
+- Other terminal states (whole pool exhausted, etc.) stay 200 error frames with unchanged `Retry-After` semantics.
 
 ### Playground advanced parameters
 
@@ -274,7 +283,9 @@ The upstream is plain OpenAI protocol, with three quirks:
 
 **Quota breakdown**: upstream splits credits into four pools (daily / reward / monthly / top-up); per-grant expiry (7-day validity) is derived from `daily_grant.expire_at` in the bills and feeds the "expiring first" ordering. Pools (`quota_packages`) and expiry ladder (`expiry_ladder`) have different semantics and are stored separately.
 
-**Daily check-in**: there is no claim endpoint — the daily 300 is granted automatically at 00:00, and is only extended to 7 days if the account logs in that day; otherwise it expires at 24:00. A device heartbeat only refreshes `last_seen_at`, **not** login (observed: several days of heartbeat-only still lost every grant at midnight), so activity reporting now does a page visit (`GET /api/web/auth/v1/user_info`) before the heartbeat, and check-in also visits once. Bill sync is delayed by minutes: the 11-06..11-08 `daily_grant` rows only appeared at 11-09 01:11. "Check-in" = visit → balance probe → bills read; **bills are the only evidence, HTTP 200 is not**. If there is no new grant today but an **unexpired** `daily_grant` remains, it counts as already checked in; before 01:30 the task only seals until 01:30, and a missing grant defers retry to 01:30 instead of hammering from 00:02.
+**Daily check-in**: there is no claim endpoint — the daily 300 is granted when the account **first logs in on the web that day**; a day with no login gets no `daily_grant` row at all (the earlier "granted at 00:00, login only extends it" reading was disproved on 2026-11-18 with real accounts). Evidence: each `daily_grant.created_at` lines up to the second with the upstream `sessions[].login_at`; 67 seconds of `user_info` / `balance` / `tasks` / `model_catalog` / `refresh` / free-model chat on an old token left the bills untouched; accounts that never logged in that day had no grant for two days running. So "check-in" = visit → balance probe → bills read; **bills are the only evidence, HTTP 200 is not**, and **no `daily_grant` today means failure** (yesterday's unspent credits do not count as today's check-in). Before 01:30 the retry is deferred to 01:30 to let bill sync catch up.
+
+**Session needs re-login**: `GET /api/web/auth/v1/user_info` states it in `trusted_device` — `trusted=false` / `device_bind_state=suspicious` / `needs_relogin=true` / `reason=device_session_mismatch`. In that state the device heartbeat always returns `400 200811 device_bind_required`, no `daily_grant` appears that day, and there is **no self-healing path** (`devices_current_bind` also returns 400 for `device_session_mismatch`; `refresh` just hands back the same token with an unchanged sid). Check-in and activity reporting both read that signal and report "re-login on the web, then re-import the credential" instead of a bare "heartbeat failed (HTTP 400)". **Logging in again grants that day's credits immediately** (settles within seconds, `grant_at` backfilled to 00:00).
 
 **Activity reporting**: `POST /api/web/auth/v1/devices_current_heartbeat` (the web client's real device heartbeat); with the `x-client-*` header family it returns 200 and is idempotent, refreshing `last_login_at`. Off by default; shares `ACTIVITY_REPORT_ENABLED` / `ACTIVITY_REPORT_HOUR` with CodeBuddy. Device id is derived stably from uid (a random one is treated as a new device).
 
@@ -352,7 +363,7 @@ export ANTHROPIC_AUTH_TOKEN=sk-your-key     # or ANTHROPIC_API_KEY (x-api-key he
 claude
 ```
 
-- **Auth**: both `x-api-key` and `Authorization: Bearer`.
+- **Auth**: both `x-api-key` and `Authorization: Bearer`. `/v1/models` and single-model lookup accept both too (Anthropic SDK `client.models.list()` always sends `x-api-key`).
 - **Streaming**: `message_start` → `content_block_*` → `message_delta` → `message_stop`; no `[DONE]`; thinking blocks get `signature_delta` before `content_block_stop`.
 - **Cache hits**: usage splits in two — `input_tokens` counts misses only, hits go to `cache_read_input_tokens`.
 - **`count_tokens`**: estimated locally, never forwarded.

@@ -6,20 +6,38 @@ from src.provider.codearts import CodeArtsProvider
 from src.provider.login_identity import (
     LOGIN_IDENTITIES,
     LOGIN_IDENTITY_SETS,
+    MANUAL_MERGE_PROVIDERS,
     codearts_login_identities,
     codearts_login_identity,
     login_identities_for,
     login_identity_for,
     officeace_login_identities,
     officeace_login_identity,
+    raccoon_login_identities,
+    raccoon_login_identity,
 )
 from src.provider.officeace import OfficeAceProvider
 
 
 def test_registry_declares_only_mergeable_channels():
-    assert set(LOGIN_IDENTITIES) == {"codearts", "officeace", "lingxi"}
+    assert set(LOGIN_IDENTITIES) == {"codearts", "officeace", "lingxi", "raccoon"}
     # 首选身份与别名集合必须覆盖同一批渠道，否则「能合并」与「找得到」会错开
     assert set(LOGIN_IDENTITY_SETS) == set(LOGIN_IDENTITIES)
+    # 手工导入即重登的渠道只能是「没有 OAuth 轨道」的两家：CodeArts /
+    # OfficeAce 手工导入的是 AK/SK，同账号可并存多把密钥，合并会吞掉一把。
+    assert set(MANUAL_MERGE_PROVIDERS) == {"lingxi", "raccoon"}
+    assert set(LOGIN_IDENTITIES) >= MANUAL_MERGE_PROVIDERS
+
+
+def test_raccoon_identity_is_jwt_uid():
+    assert raccoon_login_identity({"uid": "pu-1"}) == "pu-1"
+    assert raccoon_login_identity({"user_id": "pu-2"}) == "pu-2"
+    assert raccoon_login_identity({}) == ""
+    assert raccoon_login_identities({"uid": "pu-1"}) == {"pu-1"}
+    # 解不出 uid（非 JWT / claims 坏）→ 空集，导入退回新增
+    assert raccoon_login_identities({}) == frozenset()
+    assert raccoon_login_identities({"uid": "  "}) == frozenset()
+    assert login_identity_for("raccoon", {"uid": "pu-1"}) == "pu-1"
 
 
 def test_codearts_identity_prefers_uid_then_domain_and_name():

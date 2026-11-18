@@ -118,30 +118,80 @@ def test_pick_active_grants_keeps_only_unexpired_and_unconsumed():
     assert active[0]["expire_at"] < active[1]["expire_at"]
 
 
-def test_checkin_result_uses_active_grant_when_today_missing():
-    """今天没有新发放，但还有未过期积分 → 视为已签，不再报失败。"""
+def test_checkin_result_unexpired_old_grant_is_not_today_checkin():
+    """今天没有新发放 → 失败。账户里昨天没花完的积分不算今天签到。
+
+    上游未登录的那天不补发 `daily_grant`（2026-11-18 真号复测），旧实现把
+    「还有未过期旧积分」判成已签，导致缺登录的号连续两天报假绿。
+    """
     items = [_grant(grant_at="2026-11-02T00:00:00+08:00",
                     expire_at="2026-11-10T23:59:59+08:00"),
              _grant(grant_at="2026-11-03T00:00:00+08:00",
                     expire_at="2026-11-11T23:59:59+08:00")]
     result = raccoon_activity.checkin_result(items, NOW.timestamp(), now=NOW)
-    assert result.ok and result.already_checked_in
-    assert result.credit == 600
-    assert "今日额度可用 600" in result.message
-    assert "本次未产生新发放" in result.message
-    # 22:00 已过宽限，直接封到当日结束（seal_until=None）
-    assert result.seal_until is None
+    assert not result.ok
+    assert result.credit is None
+    assert "尚未发放" in result.message
+    # 22:00 已过宽限，不再另设重试时刻（交给任务指数退避）
+    assert result.retry_at is None
 
 
-def test_checkin_result_active_grant_before_grace_delays_seal():
-    """凌晨 00:10 看到旧积分：先算已签，但封账只到 01:30，等账单同步后再核。"""
+def test_checkin_result_names_relogin_when_session_untrusted():
+    """上游说会话不被信任 → 失败文案必须点出「重新登录」。"""
     early = datetime.fromisoformat("2026-11-05T00:10:00+08:00")
-    items = [_grant(grant_at="2026-11-04T00:00:00+08:00",
-                    expire_at="2026-11-10T23:59:59+08:00")]
-    result = raccoon_activity.checkin_result(items, early.timestamp(), now=early)
-    assert result.ok and result.already_checked_in
-    grace = raccoon_activity.grant_grace_at(early)
-    assert result.seal_until == int(grace.timestamp())
+    result = raccoon_activity.checkin_result(
+        [], early.timestamp(), now=early,
+        user_info={"trusted_device": {
+            "trusted": False, "device_bind_state": "suspicious",
+            "needs_relogin": True, "reason": "device_session_mismatch"}})
+    assert not result.ok
+    assert "重新登录" in result.message
+    assert "device_session_mismatch" in result.message
+    # 凌晨仍要把重试推到宽限时刻，避免账单同步前空锤
+    assert result.retry_at == int(raccoon_activity.grant_grace_at(early).timestamp())
+
+
+def test_checkin_result_grant_wins_over_untrusted_session():
+    """当天这笔已经发下来了：即便会话状态可疑也照样算已签。"""
+    result = raccoon_activity.checkin_result(
+        [_grant(created_at="2026-11-04T21:59:30+08:00")], NOW.timestamp(),
+        now=NOW,
+        user_info={"trusted_device": {"trusted": False,
+                                      "device_bind_state": "suspicious"}})
+    assert result.ok and not result.already_checked_in
+
+
+def test_session_needs_relogin_reads_only_explicit_signals():
+    """只在字段明确说「不信任」时才报重登；缺字段/正常一律空串。"""
+    is_relogin = raccoon_activity.session_needs_relogin
+
+    assert is_relogin(None) == ""
+    assert is_relogin({}) == ""
+    assert is_relogin({"trusted_device": "junk"}) == ""
+    assert is_relogin({"trusted_device": {"trusted": True,
+                                          "device_bind_state": "bound"}}) == ""
+    assert is_relogin({"trusted_device": {"needs_relogin": False,
+                                          "device_bind_state": "bound"}}) == ""
+
+    reason = is_relogin({"trusted_device": {"trusted": False}})
+    assert "重新登录" in reason
+    # 有 state/reason 就带上，便于对日志定位上游到底怎么判的
+    assert "unbound" in is_relogin(
+        {"trusted_device": {"device_bind_state": "unbound"}})
+    assert "device_session_mismatch" in is_relogin(
+        {"trusted_device": {"needs_relogin": True,
+                            "reason": "device_session_mismatch"}})
+
+
+def test_heartbeat_needs_relogin_matches_bind_required_body():
+    needs = raccoon_activity.heartbeat_needs_relogin
+    body = b'{"code":200811,"message":"device_bind_required",' \
+           b'"details":"current session requires trusted device binding"}'
+    assert needs(body) is True
+    assert needs(body.decode()) is True
+    assert needs(b'{"code":100002}') is False
+    assert needs("") is False
+    assert needs(None) is False
 
 
 def test_checkin_result_missing_before_grace_sets_retry_at():

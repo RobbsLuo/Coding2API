@@ -30,7 +30,10 @@ NODE_RUNTIME_VERSION = "v24.11.1"
 # PanRouter 的 intl executor 原文：a handful of static headers, one IDE/version
 # string forever, huge repeated payloads）。这里取官方 2.17x 实测值，只作用于
 # 国际站，出问题可单独回退。
-INTL_CLI_VERSION = "2.178.0"
+# 2026-11-18 对齐官方 npm latest（`@tencent-ai/codebuddy-code` 2.185.0，直查
+# registry 核实）；解包确认 X-IDE-Version / X-Client-Version / X-Product-Version
+# 常量名未变，只是值随包版本注入。回退只需把本常量改回 2.178.0。
+INTL_CLI_VERSION = "2.185.0"
 INTL_OPENAI_JS_PACKAGE_VERSION = "7.39.0"
 INTL_NODE_RUNTIME_VERSION = "v26.7.0"
 EP_CHAT = "/v2/chat/completions"

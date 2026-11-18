@@ -154,7 +154,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 每个模型三个字段：
 
 1. **原代号**（`raw_id`）：渠道真发的 key，永不改动。各渠道不同（Qoder `kmodel_latest` = TRAE `kimi-k3-1`），可带命名空间前缀（Kilo `kilo-auto/free`）。
-2. **归一键**：剥免费档标记（`-free` / `free` 路径段）与命名空间前缀 → slug 化，如 `kilo-auto`。模型列表按它判同模型、合并。
+2. **归一键**：剥免费档标记（`-free` / `free` 路径段）与命名空间前缀（含小浣熊的 `sn-`）→ slug 化，如 `kilo-auto`。模型列表按它判同模型、合并。
 3. **展示名**（`name`）：清洗后可读文本，如 `LongCat 2.5 Preview`。上游给就用，否则从原代号派生；品牌写法从官方（`DeepSeek` / `MiMo` / `GLM` / `GPT`）。
 
 `GET /v1/models` 的 `id` 全是归一键；转发自动换回原代号，`by_provider.{渠道}.raw_id` 可见。**三种写法都能直接请求**。同渠道内归一键重复 → 退回原代号。
@@ -163,7 +163,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **自定义别名**（`MODEL_ALIASES`，可热更）：`对外名=模型@渠道;对外名2=模型`，`@渠道` 可省。列表与请求解析共用一份；条目带 `custom_alias: true`。撞名 / 目标不存在 / 渠道不持有 → 该段 ERROR 跳过。无别名链。
 
-**单模型查询**（`GET /v1/models/{id}`）：三种写法 + 自定义别名都认；大小写不敏感；带命名空间的原代号也能查。找不到 / 不在 Key 白名单 → 404（`code=model_not_found`），不泄露池内容。
+**单模型查询**（`GET /v1/models/{id}`）：三种写法 + 自定义别名都认；大小写不敏感；带命名空间的原代号也能查。找不到 / 不在 Key 白名单 → 404（`code=model_not_found`），不泄露池内容。两个 models 路由都接受 `x-api-key` 与 `Authorization: Bearer`（Anthropic SDK 列模型走前者）。
 
 **`n` 只接受 1**：出口结构只产生一个候选，`n != 1` → 400。
 
@@ -180,6 +180,15 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 - **流内空闲超时**（`STREAM_IDLE_TIMEOUT_SECONDS`，默认 0）：已出帧后超时 → 断流 + 错误帧收尾，**不换号**（半截输出无法回滚）。
 
 默认关是刻意的：实测慢上下文首字 40–71s。要用在管理台按部署打开（推荐 60 / 300）。
+
+### 首帧延迟发头（请求级错误返回真 400）
+
+流式出口不再立刻发 200 头，而是先等上游第一帧（宽限 5s，`api/streaming.STREAM_START_GRACE_SECONDS`）：
+
+- 首帧就是**请求级错误**（内容风控 11128、上下文超限 11115、坏图 11135、工具 schema 拒收 11129、模型不属于该上游 4001 等）→ 直接回 **400 JSON**（`invalid_request`），不再以 `200 + data:{"error"}` 收尾。此前 SDK 会把这类拒绝当成成功响应继续重试。
+- 宽限内没有帧 → 照旧发 200 继续流；**不取消在途取帧任务**，慢首字请求不受影响。
+- 已出帧后的错误维持原语义（200 + 错误帧），半截输出不可回滚。
+- 其余终态（全池耗尽等）仍是 200 错误帧，`Retry-After` 语义不变。
 
 ### Playground 高级参数
 
@@ -270,7 +279,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ### 小浣熊（`raccoon`）
 
-[商汤小浣熊](https://xiaohuanxiong.com)，需真实账号（网页端登录即可）。**没有登录按钮**：凭据是网页会话 JWT，只能手工导入——浏览器 DevTools → Application → Cookies → 复制 `xhx_token` 的值，在「JSON 导入」里粘 `{"access_token":"<值>"}`（也接受裸 JWT、整段 cookie，或直接在 Network 里对该站点请求「Copy as cURL」整段贴入）。约 30 天到期，到期重新取一次。
+[商汤小浣熊](https://xiaohuanxiong.com)，需真实账号（网页端登录即可）。**没有登录按钮**：凭据是网页会话 JWT，只能手工导入——浏览器 DevTools → Application → Cookies → 复制 `xhx_token` 的值，在「JSON 导入」里粘 `{"access_token":"<值>"}`（也接受裸 JWT、整段 cookie，或直接在 Network 里对该站点请求「Copy as cURL」整段贴入）。约 30 天到期，到期重新取一次。**重取后直接再导入即可**：同 `uid`（JWT `sub`）会就地更新既有行（凭证内容、到期时间，并解除「需重新登录」硬禁用），不会多出重复凭证——重复行会让同一账号被当成两个号并发，既翻倍统计积分又绕过节流器按账号算的并发上限。
 
 **协议**：标准 OpenAI 兼容（`/api/web/llm/v2/chat/completions`），无签名、无设备指纹。`tool_calls` 流式/非流式、`role=tool` 回传、`include_usage` 全部实测通过；411K token 输入 14.2 秒返回。
 
@@ -280,7 +289,9 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **额度明细**：上游把积分分成四个池（每日 / 奖励 / 月度 / 充值），各自可查；**套餐明细按发放流水逐笔展开**（`type=income` 的 `daily_grant` / `reward_grant`），每笔带真实到期（每日积分 7 天有效）。上游不提供逐笔剩余，只有池的总可用量，故每日积分的消耗按「到期早的先消耗」分摊到各笔（各笔剩余之和 = 池值，这是推断）；奖励积分实测「每日额度用光后才扣」，直接按发放额列。流水拿不到时才退回四个池。到期阶梯（`expiry_ladder`）与明细同源（每笔的 `total - used`），组头「1.5 天 / 7 天窗口内到期」按它汇总，因而与明细、额度合计口径一致；同时参与「快过期先用」的选号排序。
 
-**每日签到**：上游没有「点击领取」的签到接口——每日 300 积分由服务端 **00:00 自动发放**；当天登录过才延期到 7 天，没登录则当日 24:00 清零。设备心跳只刷新 `last_seen_at`，**不算登录**（实测连续几天只发心跳，积分仍在 24:00 清零）→ 活跃上报改为「页面访问 `GET /api/web/auth/v1/user_info` + 心跳」，签到本身也先访问一次。账单同步有几分钟延迟：11-06~11-08 的 `daily_grant` 直到 11-09 01:11 才出现。故「签到」= 访问 → 摸余额 → 读流水核对，**只认流水、不看 HTTP 200**；今天没有新发放但仍有**未过期** `daily_grant` 也算已签，凌晨 00:00~01:30 之间只封账到 01:30，没积分则重试也推到 01:30（不再 00:02 起每 10 分钟空锤）。流水用上游的 `type=income` 过滤（只留发放）——`type=all` 里消费流水会把每日发放挤出条数窗口，活跃账号会被误判「未发放」。**重新登录（换新 token）会立刻补发当天这笔**（几秒内落账、`grant_at` 回填 00:00）；只拿旧 token 访问页面 / 心跳不触发，缺当日发放的号需人工重登后重新导入。
+**每日签到**：上游没有「点击领取」的签到接口——每日 300 积分在**当天第一次网页登录**时补发一笔 `daily_grant`，当天没登录就没有这一笔（**不是**「00:00 自动发放、登录只是延期」；该旧结论已于 2026-11-18 真号复测推翻）。证据：三张号的 `daily_grant.created_at` 与上游 `sessions[].login_at` 秒级对齐；只拿旧 token 打 `user_info` / `balance` / `tasks` / `model_catalog` / `refresh` / 免费模型 chat 共 67 秒几十次请求，流水零变化；当天无登录的号连续两天一条 `daily_grant` 都没有。故「签到」= 页面访问 → 摸余额 → 读流水核对，**只认流水、不看 HTTP 200**；**今天没有 `daily_grant` 就是失败**（账户里昨天没花完的积分不算今天签到），凌晨 00:00~01:30 之间把重试推到 01:30 等账单同步。流水用上游的 `type=income` 过滤（只留发放）——`type=all` 里消费流水会把每日发放挤出条数窗口。
+
+**会话需重登**：`GET /api/web/auth/v1/user_info` 的 `trusted_device` 会直说会话状态——`trusted=false` / `device_bind_state=suspicious` / `needs_relogin=true` / `reason=device_session_mismatch`。进入该状态后设备心跳恒回 `400 200811 device_bind_required`，当天也不会有 `daily_grant`，且**没有自愈通道**（`devices_current_bind` 对 `device_session_mismatch` 同样 400；`refresh` 只是原样换回同一张 token，sid 不变）。签到与活跃上报都会读这个信号，直接把「需在网页端重新登录后重新导入凭据」写进结果，不再只回一句「心跳失败（HTTP 400）」。**重新登录会立刻补发当天这笔**（几秒内落账、`grant_at` 回填 00:00）。
 
 **活跃上报**：`POST /api/web/auth/v1/devices_current_heartbeat`（网页端真实设备心跳），补 `x-client-*` 头族即 200、幂等，`last_login_at` 随之刷新。默认关闭，与 CodeBuddy 共用 `ACTIVITY_REPORT_ENABLED` / `ACTIVITY_REPORT_HOUR`。设备 id 由 uid 稳定派生（随机值会被上游当成新设备）。
 
@@ -360,7 +371,7 @@ export ANTHROPIC_AUTH_TOKEN=sk-你的key     # 或 ANTHROPIC_API_KEY（走 x-api
 claude
 ```
 
-- **鉴权**：`x-api-key` 与 `Authorization: Bearer` 都接受。
+- **鉴权**：`x-api-key` 与 `Authorization: Bearer` 都接受。`/v1/models` 与单模型查询同样认两者（Anthropic SDK `client.models.list()` 固定带 `x-api-key`）。
 - **流式**：`message_start` → `content_block_*` → `message_delta` → `message_stop`；无 `[DONE]`。thinking 块在 `content_block_stop` 前补 `signature_delta`。
 - **缓存命中**：出口 usage 拆两笔——`input_tokens` 只计未命中，命中另记 `cache_read_input_tokens`。
 - **`count_tokens`**：本地估算，不转发上游。

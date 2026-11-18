@@ -471,6 +471,83 @@ def test_lingxi_import_disables_kicked_siblings(admin_client):
     assert not alive_row["disabled"]
 
 
+def test_raccoon_import_merges_same_uid(admin_client):
+    """小浣熊手工重取 JWT（约 30 天到期）同样是「重新登录」：uid 相同更新
+    既有行，不能每次换 token 就多一条重复凭证（重复行会被当两个号并发）。"""
+    from src.provider.base import Quota
+    from src.provider.raccoon.credential import RaccoonCredential
+
+    app, client = admin_client
+
+    class Stub:
+        id = "raccoon"
+        endpoint = "https://e"
+
+        def import_credential(self, raw):
+            credential = RaccoonCredential.from_import(raw)
+            if not credential.access_token:
+                raise ValueError("missing access token")
+            return credential.to_dict()
+
+        async def probe_quota(self, _data):
+            return Quota(remaining=1, total=2, probed_at=1)
+
+    app.state.executor._deps.providers["raccoon"] = Stub()
+    first = client.post("/api/credentials", json={
+        "provider": "raccoon",
+        "credential": {"access_token": _jwt({"sub": "pu-1", "exp": 1})}}).json()
+    second = client.post("/api/credentials", json={
+        "provider": "raccoon",
+        "credential": {"access_token": _jwt({"sub": "pu-1", "exp": 2})}}).json()
+
+    assert first["merged"] is False
+    assert second["merged"] is True
+    assert second["id"] == first["id"]
+    rows = [r for r in app.state.credentials.list_all() if r["provider"] == "raccoon"]
+    assert len(rows) == 1
+    assert app.state.credentials.credential_data(first["id"])["expires_at"] == 2
+
+
+def test_raccoon_import_without_uid_does_not_merge(admin_client):
+    """解不出 uid（非 JWT / claims 坏）→ 无法安全合并，退回新增（绝不猜）。"""
+    from src.provider.base import Quota
+    from src.provider.raccoon.credential import RaccoonCredential
+
+    app, client = admin_client
+
+    class Stub:
+        id = "raccoon"
+        endpoint = "https://e"
+
+        def import_credential(self, raw):
+            return RaccoonCredential.from_import(raw).to_dict()
+
+        async def probe_quota(self, _data):
+            return Quota(remaining=1, total=2, probed_at=1)
+
+    app.state.executor._deps.providers["raccoon"] = Stub()
+    client.post("/api/credentials", json={
+        "provider": "raccoon", "credential": {"access_token": "opaque-a"}})
+    second = client.post("/api/credentials", json={
+        "provider": "raccoon", "credential": {"access_token": "opaque-b"}}).json()
+
+    assert second["merged"] is False
+    rows = [r for r in app.state.credentials.list_all() if r["provider"] == "raccoon"]
+    assert len(rows) == 2
+
+
+def _jwt(claims: dict) -> str:
+    """构造只带 claims 的 JWT（不验签，测试只需要中间段可解析）。"""
+    import base64
+    import json
+
+    def segment(data: dict) -> str:
+        text = json.dumps(data).encode("utf-8")
+        return base64.urlsafe_b64encode(text).decode("ascii").rstrip("=")
+
+    return f"{segment({'alg': 'HS256', 'typ': 'JWT'})}.{segment(claims)}.sig"
+
+
 def test_probe_endpoint_returns_quota_fields(admin_client):
     """探测成功路径的响应字段（main 271-272）。"""
     app, client = admin_client

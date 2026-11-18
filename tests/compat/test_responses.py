@@ -182,8 +182,13 @@ def test_endpoint_malformed_json_400(tmp_path):
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_request"
 
-def test_stream_midway_rejection_emits_failed_event(tmp_path):
-    """流内 4001（模型不属于该上游）：400 语义以 response.failed 事件表达。"""
+def test_stream_request_level_rejection_returns_400_before_headers(tmp_path):
+    """首帧就是请求级错误（4001）：现在直接在头阶段回 400 JSON。
+
+    此前 200 头先发出，只能以 `response.failed` 事件收尾，Codex 会把「模型
+    不属于该上游」当成成功响应继续重试。延迟发头后，未出帧的请求级错误
+    可返回真正的 400。
+    """
 
     class Rejecting(_Provider):
         async def stream_chat(self, credential_data, payload, model):
@@ -199,9 +204,33 @@ def test_stream_midway_rejection_emits_failed_event(tmp_path):
         response = client.post("/v1/responses", headers=_auth(app),
                                json={"model": "glm-5.2@codebuddy", "input": "hi",
                                      "stream": True})
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert "response.failed" not in response.text
+
+
+def test_stream_midway_rejection_emits_failed_event(tmp_path):
+    """已出帧后再遇请求级错误：半截输出不可回滚，仍以 response.failed 收尾。"""
+
+    class MidwayRejecting(_Provider):
+        async def stream_chat(self, credential_data, payload, model):
+            yield Event(kind=EventKind.CONTENT, content="partial")
+            yield Event(kind=EventKind.ERROR, error_code=4001,
+                        error_message="model not available",
+                        error_kind=ErrKind.INVALID)
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings, providers={"codebuddy": MidwayRejecting()})
+    app.state.credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    with TestClient(app) as client:
+        response = client.post("/v1/responses", headers=_auth(app),
+                               json={"model": "glm-5.2@codebuddy", "input": "hi",
+                                     "stream": True})
     assert response.status_code == 200
     assert "response.failed" in response.text
     assert '"invalid_request"' in response.text
+    assert "partial" in response.text
 
 def test_endpoint_model_alias_and_session_indicator(tmp_path):
     """prompt_cache_key 透传到上游，供会话粘性使用。"""

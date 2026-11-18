@@ -117,9 +117,9 @@ def test_intl_profile_uses_current_cli_versions_and_extra_headers():
     headers = build_headers(
         CodeBuddyCredential(bearer_token="t"), "https://www.codebuddy.ai",
         intl=True, conversation_seed="sess-1", model="deepseek-v4.1-flash")
-    assert headers["User-Agent"] == "CLI/2.178.0 CodeBuddy/2.178.0"
-    assert headers["X-IDE-Version"] == "2.178.0"
-    assert headers["X-Product-Version"] == "2.178.0"
+    assert headers["User-Agent"] == "CLI/2.185.0 CodeBuddy/2.185.0"
+    assert headers["X-IDE-Version"] == "2.185.0"
+    assert headers["X-Product-Version"] == "2.185.0"
     assert headers["x-stainless-package-version"] == "7.39.0"
     assert headers["x-stainless-runtime-version"] == "v26.7.0"
     assert headers["X-Trace-ID"] == headers["X-Request-ID"]

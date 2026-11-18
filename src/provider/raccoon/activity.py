@@ -3,21 +3,44 @@
 ## 签到（`checkin`）
 
 上游**没有**「点击领取」接口（官方前端 points 客户端只有 `getBalance` /
-`getBills`，整包搜不到「签到」）。每日 300 积分由服务端在 00:00 自动发放，
-**当天登录过**才会把有效期延长到 7 天；没登录则当日 24:00 清零（官方规则
-与实测一致）。
+`getBills`，整包搜不到「签到」）。每日 300 积分在**当天第一次网页登录**时
+补发一笔 `biz_type="daily_grant"`；当天没登录就没有这一笔。
 
-关键：**账单同步有几分钟延迟**。实测 11-06~11-08 的 `daily_grant` 直到
-11-09 01:11 才出现在 `bills` 里，凌晨 00:02 核对必然误报。故 `checkin`
-不再要求「当天必须出现新 `daily_grant`」：
+**2026-11-18 更正（旧结论有误，勿回退）**：旧版本这里写的是「服务端 00:00
+自动发放、当天登录只是把有效期延长到 7 天」，据此把「今天没有新发放但还有
+未过期旧积分」判成「已签（积分可用）」。真号复测证明那是假的：
 
-* 今天有发放 → 按 `created_at` 是否在本次窗口内区分「本次触发」/「早些已发」；
-* 今天没有新发放，但存在**未过期**的 `daily_grant` → 视为已签到（积分可用，
-  只是今天这笔还没落账/还没延期）；
-* 两者都没有 → 失败，但把最早重试时刻推到 `GRANT_GRACE`（01:30），
-  不让任务从 00:02 起每 10 分钟空锤。
+* 三张号的 `daily_grant.created_at` 与上游 `sessions[].login_at` **秒级对齐**
+  （09:41:38 登录 → 09:41:40 发放）；当天没有任何登录的号，11-16 ~ 11-18
+  一条 `daily_grant` 都没有；
+* 光用旧 token 打 `user_info` / `balance` / `tasks` / `model_catalog` / `refresh`
+  / 免费模型 chat，连续 67 秒、几十次请求，流水**零变化**；
+* 官方规则原文（前端 i18n）：`每日积分每天 00:00 发放，默认当日 24:00 清零，
+  当天登录后有效期延长至 7 天` —— 未登录的那天连「当天 24:00 清零」那条
+  发放记录都不会有，也就是当天 **0 积分**。
+
+所以签到只有两种真实结论，绝不能拿「账户里还有昨天没花完的」冒充今天已签：
+
+* 今天有 `daily_grant` → 已签（再按 `created_at` 是否在本次窗口内区分
+  「本次触发」/「早些已发」）；
+* 今天没有 `daily_grant` → **失败**，并明确告诉用户「需在网页重新登录」。
+  重试时刻推到 `GRANT_GRACE`（01:30），给账单同步留出延迟窗口。
 
 「只认流水、不看 HTTP 200」的纪律保持不变——余额接口 200 不等于有积分。
+
+## 会话需要重登的信号
+
+上游在 `GET /api/web/auth/v1/user_info` 的 `trusted_device` 里直说会话状态：
+
+```json
+{"device_bind_state": "suspicious", "trusted": false,
+ "needs_relogin": true, "needs_bind": true, "reason": "device_session_mismatch"}
+```
+
+进入这个状态后设备心跳恒回 `400 200811 device_bind_required`，且**当天不会再
+有 `daily_grant`**（绑定接口本身也拒绝自愈：实测 `devices_current_bind` 对
+`device_session_mismatch` 一律 400）。这正是「网页上重新登录一次才有积分」
+的机器可读版本，故 `checkin` / `activity` 都要读它并如实上报。
 
 流水用**上游的服务端过滤** `type=income`（只留 `daily_grant` /
 `reward_grant`）。用 `type=all` 时消费流水会挤占条数窗口：实测 2026-11-10
@@ -25,21 +48,23 @@
 误报「今日尚未发放」（账户里其实还有 521 分可用）。`income` 里每笔
 `daily_grant` 自带 `expire_at`，到期判定只需看这个字段。
 
-另外一个实测事实：**换新 token（登录）会立刻补发当天这笔**——`created_at`
-是登录后几秒，`grant_at` 回填 00:00。只拿旧 token 访问 `user_info` /
-`home` / 心跳不会触发（实测 75s 内余额不动）。故「没发」的号要人工重新
-登录拿 token，本服务不代登录。
+这一课也解释了为什么「重新登录才有积分」：未登录那天上游压根不写发放流水，
+只有新会话才会触发补发。
 
 ## 活跃上报（`activity`）
 
 `POST /api/web/auth/v1/devices_current_heartbeat` 是网页端真实的设备心跳
 （前端每轮页面加载都发）。只缺 `x-client-*` 头族，补上即 200、幂等。
 
-但**心跳只刷新设备 `last_seen_at`，不算「当天登录」**：实测连续几天只发
-心跳，`daily_grant` 仍然在当日 24:00 清零。真正能延期的是网页会话级接口
-（`GET /api/web/auth/v1/user_info` 等），所以活跃上报现在先做一次页面访问、
-再发心跳。`checkin` 也会先访问一次（best-effort），保证即使活跃任务关闭
-也有一次「登录」。
+但**心跳只刷新设备 `last_seen_at`，不会补发积分、也不延长有效期**：实测连续
+几天只发心跳，`daily_grant` 照样缺席。页面访问（`GET /api/web/auth/v1/user_info`）
+同样**不触发补发**——2026-11-18 复测：拿旧 token 打 `user_info` / `balance` /
+`tasks` / `model_catalog` / `refresh` / 免费模型 chat 共几十次、67 秒，流水零变化。
+补发只发生在**新登录会话**（`created_at` 与 `sessions[].login_at` 秒级对齐）。
+
+故活跃上报保留「先页面访问、再心跳」只为维持网页端真实行为与设备 `last_seen_at`
+（以及读出 `trusted_device` 的会话状态），**不要指望它签出积分**——那是签到任务
+报「需重新登录」的场景。
 
 ## 积分套餐明细（`quota_packages`）
 
@@ -132,13 +157,46 @@ def grant_grace_at(now: datetime) -> datetime:
                            second=0, microsecond=0)
 
 
+def session_needs_relogin(user_info: dict[str, Any] | None) -> str:
+    """`user_info.data` → 「会话需重登」的可操作原因；不需要时返回空串。
+
+    上游 `trusted_device` 是这块唯一可信的信号源（实测 2026-11-18）：
+
+    * `needs_relogin=true` / `trusted=false` / `device_bind_state` ∈
+      {`suspicious`, `unbound`} —— 会话与设备对不上，上游拒绝心跳
+      （`400 200811 device_bind_required`），当天也不会补发 `daily_grant`；
+    * 此时**没有**自愈通道：`devices_current_bind` 对 `device_session_mismatch`
+      同样回 400，`refresh` 也只是原样换同一张 token（sid 不变）。只能让用户
+      在网页重新登录后重新导入凭据。
+
+    字段缺失（老账号 / 上游改版）时不猜，返回空串走原有判定。
+    """
+    if not isinstance(user_info, dict):
+        return ""
+    device = user_info.get("trusted_device")
+    if not isinstance(device, dict):
+        return ""
+    reason = device.get("reason")
+    state = device.get("device_bind_state")
+    needs = bool(device.get("needs_relogin")) or device.get("trusted") is False \
+        or state in ("suspicious", "unbound")
+    if not needs:
+        return ""
+    detail = "、".join(str(item) for item in (state, reason) if item)
+    suffix = f"（上游 {detail}）" if detail else ""
+    return ("会话已不被上游信任，需在网页端重新登录后重新导入凭据" + suffix)
+
+
 def pick_active_grants(items: list[Any], now: datetime) -> list[dict[str, Any]]:
     """所有**未过期、未被清零**的 `daily_grant`，按到期升序。
 
+    只给**积分明细**（`quota_packages`）用：账户里还有多少张未到期的每日积分券。
+    它**不代表今天签过到**——当天没登录就没有今天这笔（见模块文档），签到判定
+    只认 `pick_today_grant`。
+
     已过期（`expire_at <= now`）、缺 `expire_at`、点数非正、以及已被同一天
-    同额度的 `daily_expire` 配对的条目都不算。返回列表而非单条：上游允许
-    多笔每日积分并存（页面登录延期后跨日保留），判断「今天有没有可用积分」
-    要看它们的合计。
+    同额度的 `daily_expire` 配对的条目都不算。返回列表而非单条：上游允许多笔
+    每日积分并存，明细要逐笔展示。
     """
     current = now.astimezone(CST)
     stamp = current.timestamp()
@@ -161,23 +219,23 @@ def pick_active_grants(items: list[Any], now: datetime) -> list[dict[str, Any]]:
 
 
 def checkin_result(items: list[Any], started: float, *,
-                   now: datetime | None = None) -> CheckinResult:
+                   now: datetime | None = None,
+                   user_info: dict[str, Any] | None = None) -> CheckinResult:
     """流水 + 调用开始时刻 → 签到结论。
 
-    四态必须能分清，否则用户无法判断「这次摸出来了」还是「今天早些时候
-    已经发过」：
+    三态必须能分清，否则用户无法判断「这次摸出来了」「今天早些时候已经发过」
+    「今天压根没登录」：
 
     * 今日有发放且落账时间在本次调用窗口内 → `already_checked_in=False`
-      （本次触发/本次首次看到，`credit` 是这笔所得）
+      （本次触发，`credit` 是这笔所得）
     * 今日有发放但落账更早 → `already_checked_in=True`
-    * 今日没有新发放，但账户里还有**未过期**的每日积分 → `ok=True` +
-      `already_checked_in=True`（积分可用；只是今天这笔还没落账/还没延期）。
-      凌晨 00:00~01:30 之间把 `seal_until` 设到 01:30，让任务在账单同步后
-      再确认一次今天这笔。
-    * 今日没有发放且没有未过期积分 → `ok=False`；凌晨同样把 `retry_at`
-      推到 01:30，避免 00:02 起每 10 分钟空锤。
+    * 今日没有发放 → **失败**。账户里昨天没花完的积分不算今天签到：上游未登录
+      的那天不补发 `daily_grant`（见模块文档）。凌晨 00:00~01:30 之间把
+      `retry_at` 推到 01:30，避免在账单同步前空锤；会话已不被信任时直接点名
+      「需重新登录」，让人立刻知道该做什么。
     """
     current = now or now_cst()
+    relogin = session_needs_relogin(user_info)
     row = pick_today_grant(items, current)
     if row is not None:
         points = float(row.get("points") or 0)
@@ -192,22 +250,13 @@ def checkin_result(items: list[Any], started: float, *,
         return CheckinResult(ok=True, credit=points, already_checked_in=True,
                              message=f"今日已发放 {points:g}（不是本次触发）{suffix}")
 
-    active = pick_active_grants(items, current)
-    if active:
-        total = sum(float(item.get("points") or 0) for item in active)
-        nearest = parse_iso(active[0].get("expire_at"))
-        suffix = (f"（最早 {nearest.astimezone(CST):%Y-%m-%d} 到期）"
-                  if nearest else "")
-        grace = grant_grace_at(current)
-        seal = int(grace.timestamp()) if current < grace else None
-        return CheckinResult(ok=True, credit=total, already_checked_in=True,
-                             seal_until=seal,
-                             message=f"今日额度可用 {total:g}{suffix}（本次未产生新发放）")
-
     grace = grant_grace_at(current)
     retry_at = int(grace.timestamp()) if current < grace else None
+    if relogin:
+        return CheckinResult(ok=False, retry_at=retry_at,
+                             message=f"{relogin}；今日每日积分尚未发放")
     return CheckinResult(ok=False, retry_at=retry_at,
-                         message="上游今日每日积分尚未发放（稍后重试）")
+                         message="上游今日每日积分尚未发放（需当天登录网页端；稍后重试）")
 
 
 def quota_packages(balance: dict[str, Any], items: list[Any] | None = None,
@@ -373,6 +422,27 @@ def _expired_keys(items: list[Any]) -> set[tuple[str, float]]:
             continue
         keys.add(_grant_key({**item, "points": abs(points)}))
     return keys
+
+
+#: 会话不被信任时给用户的一步动作。上游没有自愈通道（绑定接口同样 400、
+#: refresh 只换同一张 token），所以文案必须指向「重新登录 + 重新导入」。
+RELOGIN_HINT = "需在网页端重新登录后重新导入凭据"
+
+#: 心跳被拒时的业务码：`{"code":200811,"message":"device_bind_required"}`。
+#: 实测只在 `trusted_device.device_bind_state=suspicious`（如
+#: `device_session_mismatch`）时出现，与 token 是否过期无关。
+DEVICE_BIND_REQUIRED_CODE = "200811"
+_DEVICE_BIND_MARKERS = ("device_bind_required", "trusted device binding")
+
+
+def heartbeat_needs_relogin(body: bytes | str | None) -> bool:
+    """心跳失败响应体 → 是否属于「会话需重登」。"""
+    if not body:
+        return False
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
+    lowered = text.lower()
+    return DEVICE_BIND_REQUIRED_CODE in text or any(
+        marker in lowered for marker in _DEVICE_BIND_MARKERS)
 
 
 def heartbeat_headers(device_id: str) -> dict[str, str]:

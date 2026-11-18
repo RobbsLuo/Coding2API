@@ -21,9 +21,10 @@ from ..engine.compress import estimate_messages
 from ..engine.executor import Executor, StreamSink
 from ..engine.sse import SSE_COMMENT
 from ..key_quota import Lease, QuotaExceeded
+from ..provider.base import aclose_stream
 from ..runtime_settings import RuntimeSettings
 from .deps import ApiKeyPrincipal, get_services, read_json_body
-from .streaming import respond_with_keepalive, with_keepalive
+from .streaming import respond_with_keepalive, respond_with_stream_start, with_keepalive
 
 
 def ensure_model_allowed(chat_request: ChatRequest, principal: ApiKeyPrincipal,
@@ -125,13 +126,21 @@ async def dispatch_compat(
         # （Responses 无 ping 事件，未知事件类型会让严格解析器报错）。
         keepalive_frame = (translator.keepalive() if translator is not None
                            else SSE_COMMENT)
+        # 首帧探测：整条链未出帧就用尽时，`on_terminal` 记下错误码；
+        # 出口据此在发 200 头之前把请求级错误改判 400（见 streaming.py）。
+        terminal: dict[str, str] = {}
         frames = with_keepalive(executor.stream_guarded(chat_request,
                                                         username=principal.username,
                                                         translator=translator,
-                                                        provider_binding=binding),
+                                                        provider_binding=binding,
+                                                        on_terminal=(
+                                                            lambda code, message:
+                                                            terminal.update(code=code,
+                                                                            message=message))),
                                 keepalive_frame=keepalive_frame)
-        return StreamingResponse(
-            _release_when_done(frames, lease), media_type="text/event-stream")
+        return await respond_with_stream_start(
+            _release_when_done(frames, lease), terminal,
+            media_type="text/event-stream")
     # 非流式保活（`nonstream_keepalive_seconds`，默认 0 = 关闭）：宽限期内
     # 完成仍是逐字节相同的 JSONResponse，超时才转 chunked 吐空白心跳。
     keepalive = float(getattr(settings, "nonstream_keepalive_seconds", 0) or 0)
@@ -200,3 +209,6 @@ async def _release_when_done(frames, lease: Lease):
             yield frame
     finally:
         lease.release()
+        # 提前结束（如首帧改判 400）时，`async for` 不会关闭被包装的迭代器；
+        # 不显式关闭会让上游流的节流名额等 GC 才归还。
+        await aclose_stream(frames)

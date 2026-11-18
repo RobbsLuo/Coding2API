@@ -157,6 +157,7 @@ CodeBuddy `code=11134`（供应商过载）也归这一类：实测 15 分钟内
 | 并发打满 | — | — | — | CONCURRENCY（CodeArts `TM.00001041`） |
 | 该账号无此模型 | 400/404 + `code=11102` | 400/404 + `code=11102` | — | BLOCKED |
 | 请求级错误 | 400 + 11101/`Unmarshal chat params failed`/11128/11135 | — | 403 | REQUEST |
+| 工具 schema 拒收 | 400/403 + 11129 | — | — | INVALID（跳过整家上游、对外 400、绝不冷却） |
 | 上下文超限 | 400 + 11115 `prompt is too long` | — | — | CONTEXT（零动作，统计独立成类） |
 | 限流 | 429（无 6004） | 429（无 6004） | — | SOFT |
 | 不存在 | 404 | 404 | — | SOFT（CodeArts 404 亦 SOFT） |
@@ -257,7 +258,7 @@ def health_score(q: Quota | None) -> int | None:
 | `text.format` | `response_format`（委托 `normalize_response_format`，`prefix="text.format"` 只改报错路径） |
 | `temperature` / `top_p` / `parallel_tool_calls` / `prompt_cache_key` / `text.verbosity` | 同名透传 |
 
-**出站序列**（流式）：`response.created` → `output_item.added`（message / reasoning / function_call）→ `content_part.added` → `output_text.delta × N` → `output_text.done` → `content_part.done` → `output_item.done` → `response.completed | incomplete`。思考为独立 `reasoning` item（`response.reasoning_summary_text.delta/.done`），工具为 `function_call` item（`response.function_call_arguments.delta/.done`）。**无 `[DONE]` 哨兵**，终止事件即流结束（`done_sent` 对齐）。`finish_reason=length` → `response.incomplete`（`max_output_tokens`），`content_filter` 同理；流内错误 → `response.failed`（`no_healthy_credential` → `server_is_overloaded`）。
+**出站序列**（流式）：`response.created` → `output_item.added`（message / reasoning / function_call）→ `content_part.added` → `output_text.delta × N` → `output_text.done` → `content_part.done` → `output_item.done` → `response.completed | incomplete`。思考为独立 `reasoning` item（`response.reasoning_summary_text.delta/.done`），工具为 `function_call` item（`response.function_call_arguments.delta/.done`）。**无 `[DONE]` 哨兵**，终止事件即流结束（`done_sent` 对齐）。`finish_reason=length` → `response.incomplete`（`max_output_tokens`），`content_filter` 同理；流内错误 → `response.failed`（`no_healthy_credential` → `server_is_overloaded`）。**首帧即请求级错误时不再进流**：`dispatch_compat` 先拉首帧（宽限 5s），命中 `invalid_request` 直接回 400 JSON（见 §「首帧延迟发头」），`response.failed` 只用于已出帧后的失败。
 
 取舍：`include=["reasoning.encrypted_content"]` **接受并忽略**（400 打死 Codex CLI），其他 `include` 值 400。`previous_response_id` 与 `store=true` 保持 400（无状态）。`event:` 与 `data.type` 双发。回传历史 `reasoning`/`compaction` 只有密文 → **有意丢弃**；其余私有 item（`local_shell_call`/`custom_tool_call`）显式 400。**未经真实 Codex CLI 端到端验证**（开发环境无 CLI）。
 
@@ -274,6 +275,8 @@ def health_score(q: Quota | None) -> int | None:
 **心跳**：`StreamSink.keepalive()` 各出口自实现，`dispatch_compat` 交 `with_keepalive` 作空闲填充帧。Anthropic 用具名事件 `event: ping` + `data: {"type": "ping"}`（官方规范；只解析 `event:` 行的客户端会忽略注释帧）；chat / Responses 用 SSE 注释帧 `: keepalive`——Responses **不能**改 ping：协议无此事件类型，严格解析器遇未知事件直接报错。
 
 **非流式保活**（`NONSTREAM_KEEPALIVE_SECONDS`，默认 0 = 关闭）：`stream=false` 聚合完成前一个字节都不发 → CDN / 反代空闲超时切连接。`api/streaming.py::respond_with_keepalive` 用**宽限期**：先等 N 秒。
+
+**首帧延迟发头**（`api/streaming.py::respond_with_stream_start`，宽限常量 `STREAM_START_GRACE_SECONDS = 5`）：流式出口先拉上游第一帧再决定状态码。`Executor.stream(on_terminal=…)` 在**整条回退链未出帧就用尽**时回调一次，出口据此把 `invalid_request` 改判为 400 JSON（含 11128 内容风控 / 11115 上下文超限 / 11135 坏图 / 11129 工具 schema / 4001 模型不属于该上游）；其余终态（`no_healthy_credential` 等）维持 200 错误帧。宽限内无帧 → 照旧发 200，**不取消在途取帧任务**（慢上下文首字 40–71s 不能被误杀）。客户端在宽限内断开 → 取消在途任务并 `aclose` 出口迭代器（`_release_when_done` 的 finally 归还并发租约）。
 
 - 期间完成 → 普通 `JSONResponse`：状态码 / `Content-Length` / 字节内容与不开保活**全一致**；异常照常抛给异常处理器（400/503 不变）。
 - 超时 → 才提交 200 + chunked，先吐 `b"\n"` 再补正文。
@@ -474,7 +477,7 @@ class Provider(Protocol):
 **国际站指纹（2026-10-29）**：国际站自 2026-10-15 加渠道校验后，`X-Conversation-*` 三件套只是**入场券**（缺任一 → `400/11128`，补齐 → `200`，decola/9router #5005 的 A/B）；账号是否被判自动化看的是**指纹可信度**。`CodeBuddyClient(intl=True)` 只作用于国际站：
 
 - **会话 id 稳定**：`X-Conversation-ID` 由 `conversation_seed`（显式会话键 / 会话头 / 首条非 system 消息哈希，见 `client.conversation_seed`）派生 **UUID v1**，同一对话每轮同一 id、换号重试也沿用；逐请求随机等于「每问一句开一个新对话」，是最显眼的自动化特征。
-- **版本常量对齐官方现行 CLI**：`INTL_CLI_VERSION` / `INTL_OPENAI_JS_PACKAGE_VERSION` / `INTL_NODE_RUNTIME_VERSION`（UA、`X-IDE-Version`、`X-Product-Version`、`x-stainless-*` 同源）。国内站继续用 2.107.0 那套。
+- **版本常量对齐官方现行 CLI**：`INTL_CLI_VERSION` / `INTL_OPENAI_JS_PACKAGE_VERSION` / `INTL_NODE_RUNTIME_VERSION`（UA、`X-IDE-Version`、`X-Product-Version`、`x-stainless-*` 同源）。2026-11-18 升到 npm `@tencent-ai/codebuddy-code` latest = **2.185.0**（解包确认三个版本头常量名未变，仅值随包注入）；回退只改这一个常量。国内站继续用 2.107.0 那套。
 - **补官方头**：`X-Session-ID`（= 会话 id）、`X-Model-ID`（当前模型）、`X-Trace-ID`（= `X-Request-ID`）、`X-Product-Version`；值不明的 `X-Agent-Type` / `X-Data-Tag` / `X-Root-Request-ID` **不发**——发官方从不发的头本身就是信号。
 - **`X-User-Id` 回退 JWT `sub`**：本地 intl 凭证的 `user_id` / `account_uid` 都是空串，而官方 CLI 每请求都发该头（上游据此关联账号）；只在国际站回退。
 - **请求体 gzip**：官方 CLI 用 `Content-Encoding: gzip`（`gzip_body=True`，仅 intl 装配）。
@@ -518,7 +521,7 @@ class Provider(Protocol):
 - **额度口径**：`available_points` 即积分余额，`Quota.total = remaining`（上游没有总量口径，不编造），账本记 `credits`（与 CodeArts 同账）。`billing_effective_multiplier` 直接当 `credit_rate`，0 = 限免，调度器优先选。**按请求计费**（每笔 `points=-1`，与 token 量无关），故不做 token 折算。
 - **错误分类**：`user identity could not be verified` / 401 → `DEAD`（会话 JWT 过期，只能重取）；积分耗尽类文案 → `CREDIT`；`429 user_model_rate_limited` → `CONCURRENCY`（模型级；账号×模型频率窗口，实测恢复中位数 25min，故首枪 60s、同链翻倍、封顶 30min，见 §6.3）；其余 429 → `SOFT`；400/404/422 → `INVALID`。
 - **并发**：实测 5 并发放行、第 6 个 429 → `RACCOON_MAX_CONCURRENCY`（热更，默认 2）+ 独立 pacer（**不**与其他渠道共享）。
-- **签到**（`activity.py`）：上游无领取接口，每日 300 积分由服务端 00:00 自动发放；当天登录过才延期到 7 天，否则当日 24:00 清零。`checkin` = `visit`（`user_info`，页面级访问）→ `fetch_quota` → `fetch_bills` → `checkin_result()`；只认流水、不看 200。四态：本次触发（created_at 在 90s 窗口内）/ 今天早些时候已发 / 今天无新发放但仍有未过期 `daily_grant`（视为已签，凌晨封账到 01:30 再确认）/ 完全无可用积分（失败，重试推到 01:30）。
+- **签到**（`activity.py`）：上游无领取接口，每日 300 积分在**当天第一次网页登录**时补发一笔 `daily_grant`，当天没登录就没有这一笔（旧结论「00:00 自动发放、登录只延期」已于 2026-11-18 真号复测推翻）。`checkin` = `visit`（`user_info`，顺带读 `trusted_device`）→ `fetch_quota` → `fetch_bills` → `checkin_result()`；只认流水、不看 200。三态：本次触发（created_at 在 90s 窗口内）/ 今天早些时候已发 / **今天无 `daily_grant` = 失败**（账户里未花完的旧积分不算今天签到），凌晨把 `retry_at` 推到 01:30 等账单同步。**会话需重登**：`trusted_device` 出现 `trusted=false` / `device_bind_state=suspicious` / `needs_relogin` / `reason=device_session_mismatch` 时，心跳恒回 `400 200811 device_bind_required`、当天也不会发积分，且无自愈通道（`devices_current_bind` 同样 400、`refresh` 只换同一张 token），`checkin` / `activity` 都直接报「需在网页端重新登录后重新导入凭据」。
 - **活跃上报**：`POST /api/web/auth/v1/devices_current_heartbeat`；头族 `x-client-device-id`（必填，缺了 `100002 params_invalid_error`）/ `x-client-platform: web` / `x-client-version` / `x-raccoon-language`。device_id 用 `derive_device_id(uid)` 稳定派生。**心跳不算登录**（只刷 `last_seen_at`），故 `activity` 先做一次 `GET /api/web/auth/v1/user_info` 页面访问再发心跳；访问失败按活跃失败返回，让任务在同一小时窗口内重试。
 - **额度明细**：`balance` 的四个池 → `Quota.packages`（0 的池不出条目；`topup_frozen` 时标 `usable=False`）；`daily_grant.expire_at` → `Quota.expiry_ladder`（已被 `daily_expire` 消费的不计）。
 
@@ -692,10 +695,10 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 | 归一键（合并键 / 多渠道对外 id） | `normalize_model_key` | `kilo-auto`、`longcat-2.5-preview`、`nemotron-3-ultra` |
 | 展示名 `name` | `display_model_name` | `LongCat 2.5 Preview`、`Qwen3.8 Max` |
 
-- `normalize_model_key` 剥上游噪声再 slug 化（空格/下划线/冒号/括号 → 连字符、小写）。**免费标记**四形态：尾缀 `-free`/`_free`、路径段 `.../free`、冒号尾缀 `:free`、括号词 `(free)`；同类还有 `new`。**命名空间前缀**非身份：路径式取末段；冒号式（冒号后须有空白）削前缀。只删整段/整词标记（`freeplay`/`newson` 不动）。点号非分隔（`glm-5.2` → `glm-5-2` 就换了模型）；非 ASCII 字母数字保留。剥完只剩噪声 → 回退原串小写。
+- `normalize_model_key` 剥上游噪声再 slug 化（空格/下划线/冒号/括号 → 连字符、小写）。**免费标记**四形态：尾缀 `-free`/`_free`、路径段 `.../free`、冒号尾缀 `:free`、括号词 `(free)`；同类还有 `new`。**命名空间前缀**非身份：路径式取末段；冒号式（冒号后须有空白）削前缀；连字符式 `sn-`（小浣熊）通用剥掉。只删整段/整词标记（`freeplay`/`newson` 不动）。点号非分隔（`glm-5.2` → `glm-5-2` 就换了模型）；非 ASCII 字母数字保留。剥完只剩噪声 → 回退原串小写。
 - `display_model_name` 清洗可读名（`Qwen3.8-Max` → `Qwen3.8 Max`）或由 id 派生；品牌按表纠正（机械 title-case 写错 `DeepSeek`/`MiMo`/`GLM`/`GPT`）。**幂等**。
 - **合并键 = 归一键，十渠道统一**：同一模型各渠道代号互不相同（Qoder `kmodel_latest` = TRAE `kimi-k3-1` = CB `kimi-k3`）→ 纯 id 规则无法对齐，只能靠展示名。zen / kilo 也参与（Zen `nemotron-3-ultra-free` vs Kilo `nvidia/nemotron-3-ultra-550b-a55b:free`，展示名都清洗成「Nemotron 3 Ultra」）。
-- **同模型异名显式规范**（`MODEL_SYNONYMS`）：如 Qoder `dfmodel` 上游名 `DeepSeek-Flash` vs 别家 `DeepSeek-V4.1-Flash`；表把「异名归一键 → (规范归一键, 规范展示名)」。另一类是空格式厂商前缀（`Xiaomi MiMo-V2.6-Pro` → `mimo-v2.6-pro`）。**只登记人工核实的，不做模糊匹配**。
+- **同模型异名显式规范**（`MODEL_SYNONYMS`）：如 Qoder `dfmodel` 上游名 `DeepSeek-Flash` vs 别家 `DeepSeek-V4.1-Flash`；表把「异名归一键 → (规范归一键, 规范展示名)」。另一类是空格式厂商前缀（`Xiaomi MiMo-V2.6-Pro` → `mimo-v2.6-pro`）。小浣熊的 `sn-` 前缀由清洗层通用剥掉；表只登记它剩下的连字符版本号与快照日期（`glm-5-3` → `glm-5.3`、`deepseek-v4-1-flash-1017` → `deepseek-v4.1-flash`）。**只登记人工核实的，不做模糊匹配**。
 - **哨兵名不跨渠道合并**（`_SENTINEL_LABELS` = `auto` / `default`）：语义只在本渠道成立 → 退回原 id 归一键、各自单列。**同渠道内归一键重复 → 退回原 id 归一键**，且不登记歧义别名。
 - **对外 id 一律归一键**：多渠道取最短展示名的归一键；单渠道取该条；兜底/哨兵取原代号归一键。原代号不露面，转发经 `services.model_aliases` 映射回（`executor.upstream_model_name` 消费）；每渠道登记三键（对外 id、原代号、展示名及 slug 形式）。
 - **撞车消歧**（`_disambiguate`）：按 `_sort_key` 序保留先到者，后者依次取 `_fallback_ids`（原代号归一键 → 加渠道后缀 → 数字后缀）。兜底/哨兵条目用 `_scoped_key`（`渠道\0归一原代号`）隔离，对外 id 仍是原代号归一键。

@@ -57,6 +57,13 @@ def test_classify_body_markers():
     (400, b'{"code": 11128, "msg": "Illegal API invocation from an unapproved channel"}',
      ErrKind.REQUEST),
     (400, b'{"code": 11135, "msg": "Invalid image data"}', ErrKind.REQUEST),
+    # 工具 schema 拒收（11129）：客户端请求形态错误，跳过整家上游 → INVALID；
+    # 403 形态同样必须拦在 DEAD 之前（一次 schema 错误不能硬禁用整池号）
+    (400, b'{"code": 11129, "msg": "tool schema rejected"}', ErrKind.INVALID),
+    (400, b'{"code": "11129"}', ErrKind.INVALID),
+    (403, b'{"code": 11129, "msg": "invalid_function_call_parameters"}', ErrKind.INVALID),
+    # 紧凑子串不误判：111290 不是 11129 → 403 仍按凭据失效处理
+    (403, b'{"code": 111290}', ErrKind.DEAD),
     # 裸数字不误伤：111020 不是 11102（要求带 "code": 键值形态）
     (400, b'{"trace": 1110201}', ErrKind.INVALID),
     (400, b'{"code": 111020}', ErrKind.INVALID),
@@ -233,7 +240,7 @@ async def test_stream_chat_intl_gzips_body_and_keeps_conversation_id():
     assert first.headers["x-conversation-id"] == second.headers["x-conversation-id"]
     assert first.headers["x-request-id"] != second.headers["x-request-id"]
     assert first.headers["x-model-id"] == "glm-5.2"
-    assert first.headers["user-agent"].startswith("CLI/2.178.0")
+    assert first.headers["user-agent"].startswith("CLI/2.185.0")
 
 
 async def test_stream_chat_cn_keeps_plain_json_body():

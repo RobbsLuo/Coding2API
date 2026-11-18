@@ -185,7 +185,7 @@ class CheckinFakeClient(FakeClient):
     """签到/活跃用的替身：bills、visit 与 heartbeat 分别可控。"""
 
     def __init__(self, *, bills=None, heartbeat_payload=None, error=None,
-                 visit_error=None):
+                 visit_error=None, user_info=None):
         super().__init__()
         self.bills = bills if bills is not None else []
         # 显式区分「空字典」与「未传」：`or` 会把 {} 换成默认值
@@ -194,12 +194,14 @@ class CheckinFakeClient(FakeClient):
                                         "last_seen_at": "2026-11-04T23:20:49+08:00"})
         self.error = error
         self.visit_error = visit_error
+        # `user_info` 的返回：签到/活跃靠它读会话信任状态（trusted_device）
+        self.user_info = user_info if user_info is not None else {}
 
     async def visit(self, token):
         self.calls.append(("visit", token))
         if self.visit_error is not None:
             raise self.visit_error
-        return {}
+        return self.user_info
 
     async def fetch_bills(self, token, limit=60, bill_type="all"):
         self.calls.append(("bills", token, bill_type))
@@ -256,14 +258,25 @@ async def test_checkin_ignores_visit_failure(frozen_now):
     assert result.ok and result.credit == 300
 
 
-async def test_checkin_accepts_unexpired_old_grant(frozen_now):
-    """今天没有新发放，但账户里还有未过期每日积分 → 已签。"""
+async def test_checkin_fails_when_only_unexpired_old_grants(frozen_now):
+    """今天没有新发放 → 失败（昨天没花完的积分不算今天签到）。"""
     old = {**_grant(created="2026-11-03T08:00:00+08:00"),
            "grant_at": "2026-11-03T00:00:00+08:00"}
     fake = CheckinFakeClient(bills=[old])
     result = await RaccoonProvider(client=fake).checkin(DATA)
-    assert result.ok and result.already_checked_in
-    assert "今日额度可用 300" in result.message
+    assert not result.ok
+    assert "尚未发放" in result.message
+
+
+async def test_checkin_reports_relogin_when_session_untrusted(frozen_now):
+    """`user_info` 说会话不被信任 → 失败文案点名「重新登录」。"""
+    fake = CheckinFakeClient(bills=[], user_info={"trusted_device": {
+        "trusted": False, "device_bind_state": "suspicious",
+        "needs_relogin": True, "reason": "device_session_mismatch"}})
+    result = await RaccoonProvider(client=fake).checkin(DATA)
+    assert not result.ok
+    assert "重新登录" in result.message
+    assert "device_session_mismatch" in result.message
 
 
 async def test_checkin_reports_already_when_grant_is_old(frozen_now):
@@ -328,15 +341,15 @@ async def test_checkin_status_when_nothing_granted_today(frozen_now):
     assert status["today_credit"] is None
 
 
-async def test_checkin_status_counts_unexpired_old_grants(frozen_now):
-    """今天没有新发放，但未过期积分仍算已签（余额可用的真实状态）。"""
+async def test_checkin_status_ignores_unexpired_old_grants(frozen_now):
+    """今天没有新发放 → 未签。状态查询与 `checkin` 同口径，不许假绿。"""
     old = {**_grant(created="2026-11-03T08:00:00+08:00"),
            "grant_at": "2026-11-03T00:00:00+08:00"}
     provider = RaccoonProvider(client=CheckinFakeClient(bills=[old]))
     status = await provider.checkin_status(DATA)
     assert status["active"] is True
-    assert status["today_checked_in"] is True
-    assert status["today_credit"] == 300
+    assert status["today_checked_in"] is False
+    assert status["today_credit"] is None
 
 
 async def test_checkin_status_without_token():
@@ -392,7 +405,39 @@ async def test_activity_without_token():
 async def test_activity_reports_untrusted_device():
     fake = CheckinFakeClient(heartbeat_payload={"trusted_device": False})
     result = await RaccoonProvider(client=fake).activity(DATA)
-    assert result.ok and "未被上游信任" in result.message
+    assert result.ok and "重新登录" in result.message
+
+
+async def test_activity_short_circuits_when_session_needs_relogin():
+    """`user_info` 已说会话不被信任 → 不再白发心跳，直接报可操作原因。"""
+    fake = CheckinFakeClient(user_info={"trusted_device": {
+        "trusted": False, "device_bind_state": "suspicious",
+        "needs_relogin": True, "reason": "device_session_mismatch"}})
+    result = await RaccoonProvider(client=fake).activity(DATA)
+    assert not result.ok
+    assert "重新登录" in result.message
+    assert "device_session_mismatch" in result.message
+    # 心跳在这种会话下必然 400：不该再打一次上游
+    assert [call[0] for call in fake.calls] == ["visit"]
+
+
+async def test_activity_visit_error_kept_when_session_needs_relogin():
+    """访问失败但会话状态可疑：两条原因都要进一行汇报。"""
+    fake = CheckinFakeClient(user_info={"trusted_device": {
+        "trusted": False, "device_bind_state": "suspicious"}})
+    result = await RaccoonProvider(client=fake).activity(DATA)
+    assert not result.ok
+    assert "重新登录" in result.message
+
+async def test_activity_heartbeat_bind_required_names_relogin():
+    """心跳回 `200811 device_bind_required` → 汇报里要点名重新登录。"""
+    fake = CheckinFakeClient(error=UpstreamHTTPError(400, (
+        b'{"code":200811,"message":"device_bind_required",'
+        b'"details":"current session requires trusted device binding"}')))
+    result = await RaccoonProvider(client=fake).activity(DATA)
+    assert not result.ok
+    assert "心跳失败（HTTP 400）" in result.message
+    assert "重新登录" in result.message
 
 
 async def test_activity_errors():

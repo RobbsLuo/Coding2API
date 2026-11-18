@@ -10,7 +10,9 @@ from typing import Any
 
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
+from ..compat.openai.errors import error_payload
 from ..engine.sse import SSE_COMMENT
+from ..provider.base import aclose_stream
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,12 @@ KEEPALIVE_SECONDS = 15.0
 # 解析器（Python json / JS JSON.parse / Go encoding/json）都照常接受
 # `"\n\n{\"a\":1}"`。发换行比发空格更不容易被中间盒做行首嗅探改写。
 JSON_KEEPALIVE_BYTES = b"\n"
+
+# 首帧宽限（秒）：先不发 200 头，等上游第一帧到达再决定状态码。
+# 只用于「未出帧就用尽」的请求级错误（400）；等不到就照常发头继续流，
+# **不能取消在途取帧任务**——取消会穿透关闭上游流，慢上下文首字 40–71s
+# 的请求会被误杀成空回复。
+STREAM_START_GRACE_SECONDS = 5.0
 
 
 async def with_keepalive(frames: AsyncIterator[bytes],
@@ -71,6 +79,70 @@ async def with_keepalive(frames: AsyncIterator[bytes],
         if pending is not None and not pending.done():
             pending.cancel()
             await asyncio.gather(pending, return_exceptions=True)
+        # 同样要显式关闭上游迭代器：提前结束（首帧改判 400 / 客户端断开）时
+        # `async for` 不会关闭它，节流名额只能等 GC。
+        await aclose_stream(iterator)
+
+
+async def _first_then(first: bytes, iterator: AsyncIterator[bytes],
+                      ) -> AsyncIterator[bytes]:
+    yield first
+    async for frame in iterator:
+        yield frame
+
+
+async def _after_pending(pending: asyncio.Task[bytes],
+                         iterator: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """宽限期已过：先发头，再等同一个在途取帧任务（不取消、不重取）。"""
+    try:
+        first = await pending
+    except StopAsyncIteration:
+        return
+    yield first
+    async for frame in iterator:
+        yield frame
+
+
+async def respond_with_stream_start(frames: AsyncIterator[bytes],
+                                    terminal: dict[str, str],
+                                    media_type: str = "text/event-stream",
+                                    ) -> Response:
+    """拉首帧后再发响应头：请求级错误可在头阶段返回 400。
+
+    `terminal` 由 `Executor.stream(on_terminal=...)` 在整条回退链**未出帧就用尽**
+    时写入 `{"code": ..., "message": ...}`。此前 200 头先发出，随后只能吐错误帧，
+    SDK 把「内容风控 / 上下文超限 / 坏图 / 工具 schema 拒收」当成成功响应继续重试。
+
+    只改判 `invalid_request`：其余终态（`no_healthy_credential` 等）维持 200 错误帧，
+    避免改掉既有 503 / 排队语义。宽限内无首帧 → 照旧发头，取帧任务保留。
+    """
+    iterator = frames.__aiter__()
+    pending: asyncio.Task[bytes] = asyncio.ensure_future(anext(iterator))
+    grace = asyncio.ensure_future(asyncio.sleep(STREAM_START_GRACE_SECONDS))
+    try:
+        done, _ = await asyncio.wait({pending, grace},
+                                     return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:                    # 客户端断开 / 任务被取消
+        pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+        await aclose_stream(iterator)
+        raise
+    finally:
+        grace.cancel()
+    if pending not in done:                    # 宽限到点：发头，继续等原任务
+        return StreamingResponse(_after_pending(pending, iterator),
+                                 media_type=media_type)
+    try:
+        first = pending.result()
+    except StopAsyncIteration:
+        await aclose_stream(iterator)          # 空流：保持原有 200 空 body
+        return StreamingResponse(b"", media_type=media_type)
+    if terminal.get("code") == "invalid_request":
+        await aclose_stream(iterator)
+        return JSONResponse(
+            error_payload(terminal.get("message", ""), "invalid_request", 400),
+            status_code=400)
+    return StreamingResponse(_first_then(first, iterator), media_type=media_type)
 
 
 # 保活已提交 200 之后上游才失败时的正文：状态码已经发出去了，改不回来，只能

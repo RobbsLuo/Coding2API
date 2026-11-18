@@ -36,7 +36,10 @@ from ..auth.rbac import require_operator
 from ..compat.openai.request import InvalidRequest
 from ..engine.limits import day_start
 from ..provider.base import CheckinResult, GrowthResult, GrowthStep, StepStatus
-from ..provider.login_identity import login_identities_for
+from ..provider.login_identity import (
+    MANUAL_MERGE_PROVIDERS,
+    login_identities_for,
+)
 from ..provider.probe_failure import relogin_reason
 from ..provider.tos import tos_for
 from ..request_context import credential_scope
@@ -345,13 +348,15 @@ def create_router(services: Services) -> APIRouter:
                         nickname: str, principal) -> dict:
         """落库 + 审计 + 探测入队；返回凭证 id、ToS 风险与是否就地合并。
 
-        灵犀没有 OAuth 轨道，手工导入就是它的「重新登录」：`uid` 相同的凭据
-        必须更新既有行而不是新增。否则同一个账号重登一次就多一条重复凭证，
-        旧行的 Cookie 已被新登录顶掉、只能等下一次 401 才被硬禁用。
+        `MANUAL_MERGE_PROVIDERS`（灵犀 / 小浣熊）没有 OAuth 轨道，手工导入就是
+        它们的「重新登录」：`uid` 相同的凭据必须更新既有行而不是新增。否则同
+        一个账号重登一次就多一条重复凭证，旧行的会话已被新登录顶掉、只能等
+        下一次 401 才被硬禁用；小浣熊还会把同一账号当两个号并发（额度/积分
+        双份统计，且绕过节流器按账号算的并发上限）。
         """
         merged = False
         credential_id = ""
-        if provider_id == "lingxi":
+        if provider_id in MANUAL_MERGE_PROVIDERS:
             target = login_identities_for(provider_id, credential_data)
             existing = credentials.find_login_credential(
                 provider_id,

@@ -8,7 +8,8 @@
    `nvidia/nemotron-3-ultra-550b-a55b:free`），对外一律保留，由别名表在
    转发时换回去。
 2. **normalized key**（`normalize_model_key`）：同模型验证 / 合并键。
-   剥掉上游的噪声标记（免费标记 `free`、新版标记 `new`）与厂商命名空间前缀，
+   剥掉上游的噪声标记（免费标记 `free`、新版标记 `new`）与厂商命名空间前缀
+   （路径式 `vendor/`、冒号式 `Vendor: `、小浣熊的 `sn-`），
    slug 化成 `kilo-auto`、`longcat-2.5-preview`、`nemotron-3-ultra`。
 3. **display name**（`display_model_name`）：展示名。首字母大写、分隔符
    转空格、`LongCat 2.5 Preview`；品牌与缩写按表纠正大小写
@@ -63,20 +64,19 @@ MODEL_SYNONYMS: dict[str, tuple[str, str]] = {
     # `MiMo-V2.6-Pro`：`Vendor: Model` 的冒号式前缀削不到它，键会多出
     # `xiaomi-`，同一模型被拆成两条（对外多出 `xiaomi-mimo-v2.6-pro`）。
     "xiaomi-mimo-v2.6-pro": ("mimo-v2.6-pro", "MiMo V2.6 Pro"),
-    # 小浣熊（商汤）把托管模型统一加 `sn-` 前缀，且版本号用连字符（`5-3`）
-    # 而非点号（`5.3`）：不登记就是「同一模型两条对外条目」，用户得挑渠道才
-    # 路由得通。右侧取其余渠道已在用的写法（CodeArts 的 `glm-5.3` 等）。
-    "sn-glm-5-3": ("glm-5.3", "GLM 5.3"),
-    "sn-glm-5-3-flash": ("glm-5.3-flash", "GLM 5.3 Flash"),
-    "sn-kimi-k3": ("kimi-k3", "Kimi K3"),
+    # 小浣熊（商汤）的版本号用连字符（`5-3`）而非点号（`5.3`）：`sn-` 前缀由
+    # `_strip_noise` 通用剥掉，但版本号写法仍需逐项登记才能与其余渠道合并，
+    # 右侧取其余渠道已在用的写法（CodeArts 的 `glm-5.3` 等）。
+    "glm-5-3": ("glm-5.3", "GLM 5.3"),
+    "glm-5-3-flash": ("glm-5.3-flash", "GLM 5.3 Flash"),
     # `1017` 是快照日期、不是模型身份：小浣熊的这个档位就是 DeepSeek V4.1 Flash
     # 本身（与 CodeArts 的 `deepseek-v4.1-flash` 同倍率 0.18x）。不收敛会让同一
     # 模型多出一条 `deepseek-v4.1-flash-1017` 的对外条目。
-    "sn-deepseek-v4-1-flash-1017": ("deepseek-v4.1-flash",
-                                    "DeepSeek V4.1 Flash"),
-    "sn-sensenova-6-8-flash": ("sensenova-6.8-flash", "Sensenova 6.8 Flash"),
-    "sn-sensenova-6-8-flash-lite": ("sensenova-6.8-flash-lite",
-                                    "Sensenova 6.8 Flash Lite"),
+    "deepseek-v4-1-flash-1017": ("deepseek-v4.1-flash",
+                                 "DeepSeek V4.1 Flash"),
+    "sensenova-6-8-flash": ("sensenova-6.8-flash", "Sensenova 6.8 Flash"),
+    "sensenova-6-8-flash-lite": ("sensenova-6.8-flash-lite",
+                                 "Sensenova 6.8 Flash Lite"),
 }
 _SYNONYM_DISPLAY: dict[str, str] = {
     key: display for key, (_, display) in MODEL_SYNONYMS.items()}
@@ -90,6 +90,9 @@ _PATH_SEP = "/"
 # 展示名的厂商前缀 `Vendor: `：冒号后**必须有空白**才算（`a:b` 不动，避免
 # 误伤 `qwen3.8:max` 这类无空格写法）。
 _NAMESPACE_PREFIX = re.compile(r"^[^:\s][^:]*:\s+")
+# 小浣熊（商汤）给托管模型统一加 `sn-` 前缀（`sn-glm-5-3`），厂商命名空间
+# 不是模型身份的一部分：**通用剥掉**，不必逐个登记同义词。大小写都算。
+_VENDOR_PREFIX = re.compile(r"^sn-", re.IGNORECASE)
 # 尾部的噪声标记：`-free`（zen）/ `_free` / `:free`（kilo）/ ` Free` /
 # `(free)`（kilo 展示名）/ `(new)`。**必须有分隔符或括号**，故 `freeplay` 这类
 # 内嵌形式不会被误伤。比较忽略大小写。
@@ -156,14 +159,15 @@ def _is_noise_segment(segment: str) -> bool:
 def _strip_noise(value: str) -> str:
     """去掉命名空间前缀与噪声标记（free / new），留下模型名本体。
 
-    上游的噪声共三类、六种形态（实测 2026-10-01/05，kilo 一家就占四种）：
+    上游的噪声共三类、七种形态（实测 2026-10-01/05，kilo 一家就占四种）：
 
     * **命名空间前缀**，不是模型身份的一部分，留着会让同一模型在不同渠道
       因厂商写法不同而对不上：
         - 路径式 `厂商/模型`（kilo 原代号 `nvidia/nemotron-3-ultra:free`、
           `stealth/space-bunny-alpha`）→ 取**最后一段**；
         - 冒号式 `厂商: 模型`（kilo 展示名 `NVIDIA: Nemotron 3 Ultra`）→
-          削掉前缀（要求冒号后有空白，`a:b` 不动）。
+          削掉前缀（要求冒号后有空白，`a:b` 不动）；
+        - 连字符式 `厂商-模型`（小浣熊的 `sn-glm-5-3`）→ 削掉 `sn-`。
     * **免费标记**，只是可用性命名约定、不是模型名的一部分：
         - 路径段 `.../free`（kilo `kilo-auto/free`）→ 整段丢掉；
         - 尾缀 `-free` / `_free`（zen `longcat-2.5-preview-free`）/ `:free`
@@ -183,6 +187,7 @@ def _strip_noise(value: str) -> str:
     # 路径被标记段占满（`free` / `free/free`）时没有模型名可取
     stem = parts[-1] if parts else ""
     stem = _NAMESPACE_PREFIX.sub("", stem)
+    stem = _VENDOR_PREFIX.sub("", stem)
     # 循环削：标记可能叠加（kilo 展示名 `Vendor: Model (new) (free)`），单次
     # sub 只去最外层一个，残留的那个会留在归一键里。
     while True:

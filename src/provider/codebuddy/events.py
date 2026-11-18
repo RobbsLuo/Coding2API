@@ -61,6 +61,12 @@ _PLAN_EXHAUSTED_CODE = 1005         # 权益/套餐耗尽
 # 内自愈，绝不是凭证或模型的问题。归请求级 → 零动作、仅换号重试。
 # （若归 INVALID，executor 会跳过该上游全部凭证、零重试直接 400）
 _REQUEST_LEVEL_CODES = frozenset({11101, 11128, 11135})
+# 11129「工具 schema 不合规」：上游拒收的是**客户端带来的 JSON Schema**，
+# 与凭证/模型无关。400 形态落 INVALID（跳过整家上游、对外 400、绝不冷却），
+# 403 形态也必须拦在 DEAD 之前——一次 schema 错误不该把整池号硬禁用。
+# 2026-11-17 `misakano7545/workbuddy2api-panel` PR #269 实测该码存在，
+# 且紧凑子串 `111290` 会误判，故走 `business_codes` 的完整码比对。
+_TOOL_SCHEMA_CODES = frozenset({11129})
 
 # 403 上也是**请求级**的业务码：渠道/内容风控的另一种 HTTP 形态。
 # 11128 在上游同时存在 400 与 403 两种包装（2026-11-02 抓到的正是
@@ -125,6 +131,10 @@ def classify_status(status: int, body: bytes = b"") -> ErrKind:
         return ErrKind.QUEUE
     if status in (400, 404) and codes & MODEL_BLOCKED_CODES:
         return ErrKind.BLOCKED
+    if status in (400, 403) and codes & _TOOL_SCHEMA_CODES:
+        # 请求形态错误：换号解决不了，但也不能当 DEAD 硬禁用。INVALID 的处置
+        # 是「跳过整家上游 → 全部拒绝才 400」，与本类错误的作用域一致。
+        return ErrKind.INVALID
     if status >= 400 and _is_account_restricted(body):
         # 必须拦在 401/403 → DEAD 之前：11140 是上游按账号/IP 拉黑，不是凭据
         # 失效——判 DEAD 会永久硬禁用并让 executor 逐个号换着撞（实测一次

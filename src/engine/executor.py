@@ -628,15 +628,22 @@ class Executor:
 
     async def stream_guarded(self, request: ChatRequest, *, username: str = "unknown",
                              translator: StreamSink | None = None,
-                             provider_binding: str | None = None) -> AsyncIterator[bytes]:
+                             provider_binding: str | None = None,
+                             on_terminal: Callable[[str, str], None] | None = None,
+                             ) -> AsyncIterator[bytes]:
         """流式出口的最终兜底：任何逃逸异常都转成 SSE 错误帧。
 
         没有这一层时，未预期的异常（如凭证在轮换中途被删除）会让连接
         静默断开，客户端无法区分"空回复"与"服务出错"。
+
+        `on_terminal(code, message)` 在**整条链未出帧就用尽**、即将产出终帧时
+        回调一次：出口据此在响应头发出前把「请求级错误」改判为 400（见
+        `api/streaming.respond_with_stream_start`）。默认 None 时行为逐字节不变。
         """
         inner = self.stream(request, username=username,
                             translator=translator,
-                            provider_binding=provider_binding)
+                            provider_binding=provider_binding,
+                            on_terminal=on_terminal)
         try:
             async for frame in inner:
                 yield frame
@@ -652,7 +659,9 @@ class Executor:
 
     async def stream(self, request: ChatRequest, *, username: str = "unknown",
                      translator: StreamSink | None = None,
-                     provider_binding: str | None = None) -> AsyncIterator[bytes]:
+                     provider_binding: str | None = None,
+                     on_terminal: Callable[[str, str], None] | None = None,
+                     ) -> AsyncIterator[bytes]:
         """流式执行；上游错误按分类冷却并换号，最多 3 次。
 
         启用兼容组回退链时，**只有在当前链项还没产出任何响应帧之前**
@@ -714,6 +723,10 @@ class Executor:
         # 这里说明整条链都在**未出帧前**用尽——用最后链项的 translator 收尾。
         if exhausted is None:  # pragma: no cover - 按构造不可达（链非空且必抛）
             raise RuntimeError("fallback chain produced no terminal error")
+        # 出口要据此把「请求级错误」在头阶段改判 400：回调必须发生在 yield
+        # 终帧之前，否则调用方已经从流里拿到 200 错误帧，改不回状态码。
+        if on_terminal is not None:
+            on_terminal(exhausted.code, exhausted.message)
         yield state.translator.error_frame(exhausted.message, exhausted.code)
 
     async def _stream_loop(self, request: ChatRequest, target: ModelTarget,
