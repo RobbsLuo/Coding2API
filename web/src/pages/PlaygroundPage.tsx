@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   Check,
+  ImagePlus,
   Loader2,
   Send,
   TerminalSquare,
@@ -18,6 +19,9 @@ export function PlaygroundPage() {
   const session = useSessionContext();
   const [model, setModel] = useState("");
   const [prompt, setPrompt] = useState("");
+  /** 图片附件：data URL（base64），随请求以 `image_url` 块发送，浏览器本地预览。 */
+  const [images, setImages] = useState<{ id: string; url: string }[]>([]);
+  const fileInput = useRef<HTMLInputElement>(null);
   const [stream, setStream] = useState(true);
   const [temperature, setTemperature] = useState("");
   const [maxTokens, setMaxTokens] = useState("");
@@ -47,6 +51,47 @@ export function PlaygroundPage() {
   const pickModel = (value: string) => {
     if (value !== selectedModel) setEffort("");
     setModel(value);
+  };
+
+  // 图片附件上限：单张 4MB、最多 4 张。请求体上限 16MB（webapp/limits），
+  // base64 约膨胀 4/3，4 张 4MB 恰好留出提示词与 JSON 的余量。
+  const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+  const MAX_IMAGES = 4;
+
+  const addImages = (files: File[]) => {
+    const picked = files.filter((file) => file.type.startsWith("image/"));
+    if (picked.length === 0) return;
+    if (images.length + picked.length > MAX_IMAGES) {
+      setError(`最多 ${MAX_IMAGES} 张图片`);
+      return;
+    }
+    for (const file of picked) {
+      if (file.size > MAX_IMAGE_BYTES) {
+        setError(`「${file.name}」超过 4MB，请压缩后再试`);
+        return;
+      }
+      const reader = new FileReader();
+      reader.onload = () => {
+        const url = typeof reader.result === "string" ? reader.result : "";
+        if (url) {
+          setImages((prev) =>
+            prev.length >= MAX_IMAGES ? prev : [...prev, { id: crypto.randomUUID(), url }]);
+        }
+      };
+      reader.onerror = () => setError(`「${file.name}」读取失败`);
+      reader.readAsDataURL(file);
+    }
+  };
+
+  /** 有图时把提示词与附件拼成 content 块数组（OpenAI 多模态形状）。 */
+  const buildContent = () => {
+    if (images.length === 0) return prompt;
+    const blocks: { type: string; text?: string; image_url?: { url: string } }[] = [];
+    if (prompt.trim()) blocks.push({ type: "text", text: prompt });
+    for (const image of images) {
+      blocks.push({ type: "image_url", image_url: { url: image.url } });
+    }
+    return blocks;
   };
 
   const send = async (event: React.FormEvent) => {
@@ -81,7 +126,7 @@ export function PlaygroundPage() {
         credentials: "same-origin",
         body: JSON.stringify({
           model: selectedModel,
-          messages: [{ role: "user", content: prompt }],
+          messages: [{ role: "user", content: buildContent() }],
           stream,
           ...built.params,
         }),
@@ -249,8 +294,68 @@ export function PlaygroundPage() {
                   }
                 }}
                 onChange={(event) => setPrompt(event.target.value)}
+                onPaste={(event) => {
+                  const files = Array.from(event.clipboardData.files ?? []);
+                  if (files.length > 0) {
+                    event.preventDefault();
+                    addImages(files);
+                  }
+                }}
               />
             </Field>
+
+            {/* 图片附件：后端三出口已全链支持 vision，这里只补齐入口 */}
+            <div className="space-y-2" data-testid="playground-images">
+              <div className="flex flex-wrap items-center gap-2">
+                {images.map((image) => (
+                  <div
+                    key={image.id}
+                    data-testid="playground-image-preview"
+                    className="group relative size-16 overflow-hidden rounded-md border border-border"
+                  >
+                    <img src={image.url} alt="附件预览" className="size-full object-cover" />
+                    <button
+                      type="button"
+                      data-testid="playground-remove-image"
+                      aria-label="移除图片"
+                      className="absolute right-0.5 top-0.5 rounded bg-background/80 p-0.5 text-muted-foreground hover:text-destructive"
+                      onClick={() =>
+                        setImages((prev) => prev.filter((item) => item.id !== image.id))}
+                    >
+                      <X className="size-3" />
+                    </button>
+                  </div>
+                ))}
+                {images.length < MAX_IMAGES && (
+                  <Button
+                    type="button"
+                    variant="default"
+                    size="sm"
+                    className="gap-1.5"
+                    data-testid="playground-add-image"
+                    onClick={() => fileInput.current?.click()}
+                  >
+                    <ImagePlus className="size-4" />
+                    图片
+                  </Button>
+                )}
+                <input
+                  ref={fileInput}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  hidden
+                  data-testid="playground-image-input"
+                  onChange={(event) => {
+                    addImages(Array.from(event.target.files ?? []));
+                    event.target.value = "";
+                  }}
+                />
+              </div>
+              <p className="text-xs text-muted-foreground">
+                支持粘贴或选择图片（单张 ≤ 4MB，最多 {MAX_IMAGES} 张）；模型不支持图片时上游会拒绝。
+              </p>
+            </div>
             <Label className="w-fit cursor-pointer gap-2 text-sm font-normal">
               <Checkbox
                 checked={stream}

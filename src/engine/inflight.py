@@ -67,6 +67,15 @@ class InflightTracker:
         """当前活跃租约数（先回收过期租约）。"""
         return len(self._live(credential_id, self._now()))
 
+    def total(self) -> int:
+        """全池活跃租约总数（`/metrics` 的在途 gauge）。
+
+        顺带回收全部过期租约：这个方法是唯一会遍历所有凭证的入口，正好
+        承担「久不访问的凭证也要清理」的职责，避免 `_leases` 无界增长。
+        """
+        now = self._now()
+        return sum(len(self._live(cid, now)) for cid in list(self._leases))
+
     def acquire(self, credential_id: str) -> None:
         """登记一次在途：顺手回收过期租约，避免「漏释放攒满后永占」。"""
         now = self._now()
@@ -107,6 +116,10 @@ class InflightGuard:
 
     def count(self, credential_id: str) -> int:
         return self._tracker.count(credential_id)
+
+    def total(self) -> int:
+        """全池在途租约总数（`/metrics` 用）。"""
+        return self._tracker.total()
 
     def blocked(self, credential_id: str) -> bool:
         """该凭证的在途数是否已达上限（不限时为 False）。"""

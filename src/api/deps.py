@@ -122,6 +122,9 @@ class Services:
     # 同一个限流护栏实例（executor 也持它）：管理台改完限额后 invalidate()
     # 让新值立即生效，不必等选号侧的快照 TTL。
     limit_guard: LimitGuard
+    # 凭证在途租约（executor 也持同一实例）：`/metrics` 的 `inflight` gauge 从
+    # 它现读。为 None 时该指标输出 0（未装配的测试替身不该崩）。
+    inflight: Any = None
     # 模型列表缓存：provider_id → {小写模型名: Model}（含元数据）。
     # list_models 成功时更新，某上游拉取失败时用缓存兜底（v1/models 稳定返回）。
     # **存未过滤的原始表**：MODEL_BLOCKLIST 是可热更项，过滤在每个出口现做，

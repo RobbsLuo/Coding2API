@@ -839,3 +839,58 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(calls.some((item) => item.url.includes("/api/playground/chat/completions"))).toBe(false);
   });
 });
+describe("PlaygroundPage 图片附件", () => {
+  beforeEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("选图后以 image_url 块随请求发送，并可移除", async () => {
+    const spy = mockFetch({ "/api/playground/models": MODELS });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    const file = new File([new Uint8Array([137, 80, 78, 71])], "shot.png",
+                          { type: "image/png" });
+    await userEvent.upload(screen.getByTestId("playground-image-input"), file);
+    await waitFor(() =>
+      expect(screen.getAllByTestId("playground-image-preview")).toHaveLength(1));
+
+    await fillPromptAndSend("这是什么");
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+    const call = spy.mock.calls.find(([url]) => String(url).includes("/api/playground/chat"));
+    const body = JSON.parse(String((call?.[1] as RequestInit).body));
+    const content = body.messages[0].content;
+    expect(Array.isArray(content)).toBe(true);
+    expect(content[0]).toEqual({ type: "text", text: "这是什么" });
+    expect(content[1].type).toBe("image_url");
+    expect(content[1].image_url.url.startsWith("data:image/png;base64,")).toBe(true);
+
+    fireEvent.click(screen.getByTestId("playground-remove-image"));
+    await waitFor(() =>
+      expect(screen.queryAllByTestId("playground-image-preview")).toHaveLength(0));
+  });
+
+  it("没有图片时 content 仍是纯字符串（旧行为逐字节不变）", async () => {
+    const spy = mockFetch({ "/api/playground/models": MODELS });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    await fillPromptAndSend("hi");
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+    const call = spy.mock.calls.find(([url]) => String(url).includes("/api/playground/chat"));
+    const body = JSON.parse(String((call?.[1] as RequestInit).body));
+    expect(body.messages[0].content).toBe("hi");
+  });
+
+  it("超过 4 张拒绝并提示", async () => {
+    mockFetch({ "/api/playground/models": MODELS });
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+
+    const files = Array.from({ length: 5 }, (_, index) =>
+      new File([new Uint8Array([1])], `p${index}.png`, { type: "image/png" }));
+    await userEvent.upload(screen.getByTestId("playground-image-input"), files);
+    await waitFor(() =>
+      expect(screen.getByText(/最多 4 张图片/)).toBeInTheDocument());
+  });
+});

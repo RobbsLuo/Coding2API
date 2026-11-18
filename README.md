@@ -194,6 +194,10 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 可选 `temperature` / `max_tokens` / `reasoning_effort`，**留空即不发该键**。前端校验边界同后端（`temperature` ≤ 1000、`max_tokens` ≤ 4,000,000）。`reasoning_effort` 仅推理模型出现，默认「不发送」。
 
+### Playground 图片输入
+
+提示词框支持**粘贴图片**或点「图片」选择文件（单张 ≤ 4MB、最多 4 张）。有附件时 `messages[0].content` 发成 OpenAI 多模态块数组（`text` + `image_url` 的 data URL）；无附件时仍是纯字符串，请求体逐字节不变。模型不支持图片时由上游拒绝（CodeArts 归 `model_capability`，不罚号）。
+
 ## 渠道
 
 > CodeBuddy（含国际）/ TRAE / Qoder / CodeArts / OfficeAce / 小浣熊 / 灵犀 需凭证；**Zen 与 Kilo 无凭证免费层**——池里一条虚拟占位行（调度 / 冷却 / 统计照常），额度列「免费层（无额度接口）」，健康度恒「无探测」。删虚拟行重启复活；永久停用 →「暂停」。

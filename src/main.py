@@ -932,6 +932,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         # 聊天路径的倍率查询立即看到新数据
         model_list_cache=model_cache,
         schedule_probe=schedule_probe,
+        inflight=inflight_guard,
     )
     app.state.services = services
 

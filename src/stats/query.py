@@ -619,6 +619,28 @@ class StatsQuery:
         return [(row["provider"], row["model"], int(row["requests"]),
                  int(row["ok_count"])) for row in rows]
 
+    def metrics_provider_latency(self) -> list[tuple[str, float, float, int]]:
+        """按渠道汇总平均延迟 / 平均首字延迟（`/metrics` 的 latency 家族）。
+
+        返回 (provider, avg_latency_ms, avg_ttfb_ms, ok_count)，排序稳定。
+        与 requests 同为 `usage_hourly`（永久）上的累计值；`ok_count == 0` 的
+        渠道由调用方跳过（没有成功样本时平均值无意义，不能报 0 冒充）。
+
+        只给平均值、不给直方图：直方图桶边界会随渠道/模型差异失真，且本端点
+        刻意不引 `prometheus_client`（见模块文档）。平均值 + `_sum` / `_count`
+        已足够看趋势，分位仍在统计页按窗口查明细。
+        """
+        rows = self._db.connect().execute(
+            "SELECT provider, COALESCE(SUM(latency_sum), 0) AS latency_sum, "
+            "COALESCE(SUM(ttfb_sum), 0) AS ttfb_sum, "
+            "COALESCE(SUM(ok_count), 0) AS ok_count "
+            "FROM usage_hourly GROUP BY provider ORDER BY provider").fetchall()
+        return [(row["provider"],
+                 int(row["latency_sum"]) / int(row["ok_count"]),
+                 int(row["ttfb_sum"]) / int(row["ok_count"]),
+                 int(row["ok_count"]))
+                for row in rows if int(row["ok_count"]) > 0]
+
     def metrics_provider_tokens(self) -> list[tuple[str, int, int, int, int]]:
         """按渠道汇总各 token 类别（/metrics 的 tokens_total）。
 

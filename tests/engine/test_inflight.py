@@ -287,3 +287,25 @@ async def test_executor_concurrent_requests_spread_across_credentials(repo):
     for stream in streams:
         await stream.aclose()
     assert all(guard.count(cid) == 0 for cid in ids)   # 关闭后全部释放
+
+
+def test_tracker_total_counts_all_and_reclaims_expired():
+    """`total()` 汇总全池在途并顺手回收过期租约（`/metrics` 的唯一遍历入口）。"""
+    now = {"value": 0.0}
+    tracker = InflightTracker(ttl=10.0, now=lambda: now["value"])
+    tracker.acquire("a")
+    tracker.acquire("a")
+    tracker.acquire("b")
+    assert tracker.total() == 3
+
+    now["value"] = 20.0                 # 全部过期
+    assert tracker.total() == 0
+    assert tracker._leases == {}        # 键被删掉，不会无界增长
+
+
+def test_guard_total_passes_through_to_tracker():
+    guard = InflightGuard(lambda: 0)
+    guard.acquire("a")
+    assert guard.total() == 1
+    guard.release("a")
+    assert guard.total() == 0

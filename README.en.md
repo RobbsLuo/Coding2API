@@ -192,6 +192,10 @@ Streaming endpoints no longer send the 200 header immediately; they wait for the
 
 Optional `temperature` / `max_tokens` / `reasoning_effort`; **leaving one empty omits the key**. Client validation matches backend (`temperature` ≤ 1000, `max_tokens` ≤ 4,000,000). `reasoning_effort` appears only for reasoning models, starts at "not sent".
 
+### Playground image input
+
+The prompt box accepts **pasted images** or the "image" file picker (≤ 4MB each, up to 4). With attachments, `messages[0].content` becomes an OpenAI multimodal block array (`text` + `image_url` data URL); without them it stays a plain string and the request body is byte-identical to before. Models without vision are rejected upstream (CodeArts maps to `model_capability`, no credential penalty).
+
 ## Channels
 
 > CodeBuddy (incl. international) / TRAE / Qoder / CodeArts / OfficeAce / Raccoon / Lingxi need credentials; **Zen and Kilo are credential-less free tiers** — one virtual placeholder row (scheduling / cooldown / stats as usual), quota reads "free tier (no quota API)", health stays "no probe". Virtual row re-seeds on restart after deletion; *pause* disables permanently.

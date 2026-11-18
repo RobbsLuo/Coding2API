@@ -176,3 +176,39 @@ def test_metrics_enabled_is_hot_updatable(tmp_path):
         assert http.get("/metrics").status_code == 404
         runtime.reset("metrics_enabled")
         assert http.get("/metrics").status_code == 200
+
+
+def test_render_metrics_latency_and_inflight_families():
+    """延迟/在途两个后加家族：缺省不输出，给了才输出（旧调用方逐字节不变）。"""
+    base = render_metrics(requests=[], tokens=[], credentials={}, errors=[],
+                          task_failures=[])
+    assert "coding2api_latency_ms_avg" not in base
+    assert "coding2api_inflight" not in base
+
+    text = render_metrics(requests=[], tokens=[], credentials={}, errors=[],
+                          task_failures=[],
+                          latency=[("trae", 1234.567, 456.78, 9)],
+                          inflight=3)
+    samples = _samples(text)
+    assert samples['coding2api_latency_ms_avg{provider="trae"}'] == "1234.6"
+    assert samples['coding2api_ttfb_ms_avg{provider="trae"}'] == "456.8"
+    assert samples['coding2api_latency_samples{provider="trae"}'] == "9"
+    assert samples["coding2api_inflight"] == "3"
+    assert "# TYPE coding2api_inflight gauge" in text
+
+
+def test_metrics_latency_skips_provider_without_ok_samples(tmp_path):
+    """没有成功样本的渠道不输出平均值——报 0 会被读成「延迟为零」。"""
+    settings = isolated_settings(tmp_path)
+    app = build_app(settings)
+    collector = app.state.stats_collector
+    collector.record(username="root", provider="trae", model="glm-5.2", ok=True,
+                     input_tokens=7, output_tokens=3, latency_ms=900, ttfb_ms=300)
+    collector.record(username="root", provider="kilo", model="glm-5.2", ok=False,
+                     error_type="rate_limit")
+    with TestClient(app) as client:
+        text = client.get("/metrics").text
+    samples = _samples(text)
+    assert 'coding2api_latency_ms_avg{provider="trae"}' in samples
+    assert 'coding2api_latency_ms_avg{provider="kilo"}' not in samples
+    assert samples["coding2api_inflight"] == "0"
