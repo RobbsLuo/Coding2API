@@ -87,7 +87,11 @@ SCHEMA_NAME = "schema.sql"
 # 34：credentials 新增 routing_weight（调度权重）。NULL/0 = 默认，正数越大越先
 # 被选中，用于管理员的显式偏好（灰度、保留备用号）。老库补 NULL 后选号顺序与
 # 补列前完全一致（所有比较键相等时仍按原链 cid 排序）。
-SCHEMA_VERSION = 34
+# 35：credentials 新增 login_secret（账号密码是否已保存：NULL=未配置，1=已保存）。
+# 只记「有没有」——账号密码本体在 data_enc 里（导出剔除），列表页据此显示
+# 「已保存」而不必为每一行解密。老库补 NULL =「未配置」，与补列前一致
+# （补列前按需登录只能靠导入时带 phone/password，无 UI 入口可显示）。
+SCHEMA_VERSION = 35
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -111,6 +115,8 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("credentials", "web_cookie_state TEXT"),  # 网页明细源状态：NULL/ok/expired
     # 调度权重：NULL/0 = 默认；正数越大越优先（管理员显式偏好，见 Scheduler.select）
     ("credentials", "routing_weight INTEGER"),
+    # 账号密码状态：NULL=未配置，1=已保存（仅小浣熊按需登录用，见 tasks/checkin）
+    ("credentials", "login_secret INTEGER"),
     # access token 签发/到期时间：上游显式 expires_at 缺失时回落
     # JWT 的 iat/exp；NULL=老库未回填（列表读到按需派生），0=确实未知
     ("credentials", "token_expires_at INTEGER"),

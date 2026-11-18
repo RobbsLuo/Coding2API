@@ -112,6 +112,14 @@ class Settings(BaseSettings):
     officeace_allowed_endpoints: str = (
         "https://agentarts.cn-southwest-2.myhuaweicloud.com"
     )
+    # 通用 OpenAI 兼容上游（标准端点，无逆向）：留空 = 不启用该渠道。
+    # 接 Command Code / Kimi Code / MiniMax / 智谱免费档 / 自建 vLLM 等。
+    # base_url 只接受 http(s)；白名单只防误配（凭证是真实 key，发错主机等于泄密）。
+    generic_api_endpoint: str = ""
+    generic_allowed_endpoints: str = ""
+    generic_user_agent: str = ""
+    # 上游没有 `/models` 时的静态模型表（逗号分隔）；留空则只用 `/models`。
+    generic_models: str = ""
     # 按渠道出站代理（启动期项，见 provider/proxy.py）：格式
     # `渠道=代理URL;渠道2=代理URL2`，协议 http/https/socks5/socks5h；留空 = 直连。
     # 代理作用于连接池，运行中改值需重启，故不做热更。
@@ -299,6 +307,9 @@ class Settings(BaseSettings):
     # 直接放行即可；被限流时走伪 200 的 81111/81114（模型级短冷却），
     # 不需要靠本地节流兜。另有独立节流器，与其余渠道互不排队。
     officeace_chat_min_interval: float = 0
+    # 通用上游聊天最小间隔：默认 0（不节流）。配置它只用于压低自建网关/官方
+    # API 的 RPM；限流本身由上游 429（SOFT 冷却凭证）表达。可热更。
+    generic_chat_min_interval: float = 0
     # CodeArts 每账号在途并发上限：上游硬限「并发会话数 3」，超限的请求直接
     # 400 TM.00001041 并发超限（实测 77% 失败率的主因）。默认 3 对齐上游；
     # 0 关闭上限（回到「有在途就放行」，会再次击穿）。可热更。
@@ -504,9 +515,20 @@ class Settings(BaseSettings):
                      if e.strip())
 
     @cached_property
+    def generic_enabled(self) -> bool:
+        """是否启用通用上游渠道（端点为空的部署不注册这条渠道）。"""
+        return bool(self.generic_api_endpoint.strip())
+
+    @cached_property
     def kilo_allowed(self) -> tuple[str, ...]:
         return tuple(e.strip().rstrip("/") for e in self.kilo_allowed_endpoints.split(",")
                      if e.strip())
+
+    @cached_property
+    def generic_allowed(self) -> tuple[str, ...]:
+        """通用上游白名单；空元组 = 放行任意 http(s)（见校验函数注释）。"""
+        return tuple(e.strip().rstrip("/")
+                     for e in self.generic_allowed_endpoints.split(",") if e.strip())
 
     @cached_property
     def raccoon_allowed(self) -> tuple[str, ...]:
@@ -595,6 +617,21 @@ def validate_zen_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
 def validate_kilo_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
     """Kilo 端点白名单校验（防误配；Kilo 不携带真实 Token，风险面小于 CB）。"""
     return endpoint.strip().rstrip("/") in settings.kilo_allowed
+
+
+def validate_generic_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
+    """通用上游端点校验：白名单为空时只要求 http(s)（用户自己填的上游）。
+
+    之所以允许「白名单为空 = 放行任意 http(s)」：这个渠道的用途就是接任意
+    OpenAI 兼容端点（含内网自建），写死主机等于不让他用。但凭证是真实 API
+    key，所以仍拒绝非 http(s)（`file://` / `gopher://` 之类会让 httpx 出网
+    到非 HTTP 目标）。
+    """
+    text = endpoint.strip().rstrip("/")
+    if not text.startswith(("http://", "https://")):
+        return False
+    allowed = settings.generic_allowed
+    return not allowed or text in allowed
 
 
 def validate_raccoon_endpoint_allowed(endpoint: str, settings: Settings) -> bool:

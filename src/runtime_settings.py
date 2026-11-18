@@ -240,6 +240,11 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "OfficeAce 真实账号渠道专用节流（默认 0 关闭）。上游没有 CodeArts "
                "那种硬并发限，被限流时走伪 200 的模型级短冷却；与其余渠道各自"
                "独立，不共享。", minimum=0.0, group="chat_throttle"),
+    HotSetting("generic_chat_min_interval", float,
+               "通用上游聊天最小间隔（秒）",
+               "标准 OpenAI 兼容端点专用节流（默认 0 关闭）。只用于压低自建网关 / "
+               "官方 API 的 RPM；限流本身由上游 429 表达。可热更。",
+               minimum=0.0, group="chat_throttle"),
     HotSetting("codearts_max_concurrency", int, "CodeArts 每账号并发上限",
                "CodeArts 上游硬限每账号并发会话数 3，超限请求直接 400 "
                "TM.00001041（实测 77% 失败率主因）。默认 3 对齐上游；0 关闭上限"
@@ -935,6 +940,10 @@ class RuntimeSettings:
     @property
     def officeace_chat_min_interval(self) -> float:
         return float(self.get("officeace_chat_min_interval"))
+
+    @property
+    def generic_chat_min_interval(self) -> float:
+        return float(self.get("generic_chat_min_interval"))
 
     @property
     def codearts_chat_min_interval(self) -> float:

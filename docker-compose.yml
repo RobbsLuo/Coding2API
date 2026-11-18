@@ -179,6 +179,12 @@ services:
       OFFICEACE_ALLOWED_ENDPOINTS: ${OFFICEACE_ALLOWED_ENDPOINTS:-https://agentarts.cn-southwest-2.myhuaweicloud.com}
       # officeAce 聊天最小间隔（秒）：真实账号渠道，独立节流器，默认 0
       OFFICEACE_CHAT_MIN_INTERVAL: ${OFFICEACE_CHAT_MIN_INTERVAL:-0}
+      # 通用 OpenAI 兼容上游（留空 = 不启用该渠道）
+      GENERIC_API_ENDPOINT: ${GENERIC_API_ENDPOINT:-}
+      GENERIC_ALLOWED_ENDPOINTS: ${GENERIC_ALLOWED_ENDPOINTS:-}
+      GENERIC_USER_AGENT: ${GENERIC_USER_AGENT:-}
+      GENERIC_MODELS: ${GENERIC_MODELS:-}
+      GENERIC_CHAT_MIN_INTERVAL: ${GENERIC_CHAT_MIN_INTERVAL:-0}
       # 11128 内容风控自愈：中和出站正文里的伪装客户端指纹，false 关闭
       CODEBUDDY_SANITIZE_CHANNEL_MARKERS: ${CODEBUDDY_SANITIZE_CHANNEL_MARKERS:-true}
       # token 预刷新窗口（小时）

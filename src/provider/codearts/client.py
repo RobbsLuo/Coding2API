@@ -138,6 +138,14 @@ def prepare_body(payload: dict[str, Any], model: str, *,
     （会话粘性指纹与续写都读它）。
     """
     messages = copy.deepcopy(payload.get("messages"))
+    if not legacy:
+        # 上游只认 system/user/assistant/tool，OpenAI 的 `developer` 变体直接
+        # 400 `InferHub.001001044.400 Message role cannot empty`（实测 2026-11-17
+        # 同一报文 codearts 三个号相继拒绝，请求整条失败）。归一见
+        # `base.normalize_developer_role`（全渠道共用）。
+        rewritten = base.normalize_developer_role(messages)
+        if rewritten:
+            logger.debug("CodeArts 请求把 %d 条 developer 角色归一为 system", rewritten)
     if legacy:
         body: dict[str, Any] = {
             "chat_id": chat_id,

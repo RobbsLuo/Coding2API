@@ -139,6 +139,15 @@ _MODEL_CAPABILITY_MARKERS = ("001001020", "not multimodal")
 # 业务码数字匹配——`CODE.001001005.400` 这种「点分前缀 + 子码」形态里，任何
 # 裸子串判据都会误伤。
 _PARAM_INVALID_MARKERS = ("001001005", "param is invalid")
+# 消息角色不合法：`InferHub.001001044.400 Message role cannot empty`（实测
+# 2026-11-17 20:00–20:51 同一报文在 codearts 三条凭证上相继命中）。触发源是
+# OpenAI 的 `developer` 角色变体：上游只认 system/user/assistant/tool（v2 现已
+# 在 `prepare_body` 归一为 system，这里兜住其它形态）。
+#
+# 与 `001001005` 同属请求侧错误，判 INVALID：换号、换渠道都回同一条 400，
+# 必须跳过该上游并以 400 收尾。判 OTHER 的代价是累计 3 次 → 整条渠道冷却
+# 10min——一个坏报文就能打掉整个渠道（每次请求都会在 3 个号上各撞一次）。
+_ROLE_INVALID_MARKERS = ("001001044", "message role cannot empty")
 # HTTP 状态码侧的限流/并发标记。与流内业务码不同，这里判的是**响应体文本**：
 # 上游把并发超限放在 HTTP 400（不是 429），命中即应算可重试的限流。
 # 并发与否的区分见 _CONCURRENCY_MARKERS（先判并发，再判模型级限流）。
@@ -380,6 +389,10 @@ def classify_error_code(code: str | None) -> ErrKind:
     if any(marker in text for marker in _PARAM_INVALID_MARKERS):
         # 请求参数不合法（001001005）：见 _PARAM_INVALID_MARKERS 注释。必须排在
         # `"1005" in text` 之前，否则子串 `1005` 会把「参数无效」判成「权益耗尽」。
+        return ErrKind.INVALID
+    if any(marker in text for marker in _ROLE_INVALID_MARKERS):
+        # 消息角色不合法（001001044）：见 _ROLE_INVALID_MARKERS 注释。请求侧
+        # 问题，判 INVALID 跳过上游；判 OTHER 会累计成整渠道 10min 冷却。
         return ErrKind.INVALID
     if "1005" in text or "quota" in text or "insufficient" in text:
         return ErrKind.PLAN

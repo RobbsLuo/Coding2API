@@ -580,6 +580,7 @@ def build_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
     body: dict[str, Any] = {"stream": True, "model": model,
                             "messages": normalize_messages(
                                 copy.deepcopy(payload.get("messages")))}
+    base.normalize_developer_role(body["messages"])
     tools = payload.get("tools")
     if isinstance(tools, list) and tools:
         usable = [tool for tool in (_tool_of(item) for item in tools

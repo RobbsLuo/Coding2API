@@ -190,6 +190,12 @@ class ChatRequest:
     raw: dict[str, Any]
 
 
+# 入站允许的角色集合（OpenAI chat 协议全集）。`developer` 放行：它与 `system`
+# 等价、是新一代客户端（PI 等）的默认写法，出站再由各渠道统一归一
+# （见 `provider.base.normalize_developer_role`）。
+CHAT_ROLES = frozenset({"system", "user", "assistant", "tool", "developer"})
+
+
 def parse_chat_request(body: Any) -> ChatRequest:
     if not isinstance(body, dict):
         raise InvalidRequest("request body must be a JSON object")
@@ -199,8 +205,16 @@ def parse_chat_request(body: Any) -> ChatRequest:
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
             raise InvalidRequest(f"messages[{index}] must be an object")
-        if not isinstance(message.get("role"), str):
+        role = message.get("role")
+        if not isinstance(role, str):
             raise InvalidRequest(f"messages[{index}].role must be a string")
+        if role not in CHAT_ROLES:
+            # 空串 / 拼错的角色打到上游必被拒（CodeArts `001001044 Message role
+            # cannot empty`、qoder `unknown variant`），且每个号各撞一次才失败。
+            # 在入口显式 400：不发请求、不冷却凭证、不落失败明细。
+            raise InvalidRequest(
+                f"messages[{index}].role must be one of "
+                f"{', '.join(sorted(CHAT_ROLES))}")
     model = body.get("model")
     if model is not None and not isinstance(model, str):
         raise InvalidRequest("model must be a string")

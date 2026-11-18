@@ -237,6 +237,21 @@ def test_events_param_invalid_is_not_plan():
     assert classify("insufficient balance") is ErrKind.PLAN
 
 
+def test_events_role_invalid_is_request_side_not_other():
+    """`InferHub.001001044.400 Message role cannot empty` → INVALID，不是 OTHER。
+
+    触发源是 OpenAI 的 `developer` 角色（上游只认 system/user/assistant/tool）。
+    实测 2026-11-17 20:00–20:51 同一报文在 codearts 三条凭证上相继命中：判
+    OTHER 会每次请求干掉 3 个号、累计 3 次把整条渠道冷却 10min，而归因面板
+    还会把它读成「上游渠道错误」。判 INVALID 的处置是「跳过上游 + 400 收尾」。
+    """
+    classify = codearts_events.classify_error_code
+    assert classify(
+        "InferHub.001001044.400 Message role cannot empty") is ErrKind.INVALID
+    assert classify("001001044") is ErrKind.INVALID
+    assert classify("Message role cannot empty") is ErrKind.INVALID
+
+
 def test_events_param_invalid_status_path_is_invalid():
     """HTTP 400 形态的同一错误也判 INVALID（`classify_status` 与流内同口径）。"""
     body = (b'{"error_code":"InferHub.001001005.400",'

@@ -64,6 +64,7 @@ from .config import (
     validate_codearts_endpoint_allowed,
     validate_codebuddy_intl_endpoint_allowed,
     validate_endpoint_allowed,
+    validate_generic_endpoint_allowed,
     validate_kilo_endpoint_allowed,
     validate_lingxi_endpoint_allowed,
     validate_officeace_endpoint_allowed,
@@ -109,6 +110,7 @@ from .provider.codebuddy.model_access_store import (
     cache_path as model_access_cache_path,
 )
 from .provider.codebuddy.oauth import CodeBuddyOAuth
+from .provider.generic.client import GenericClient, GenericProvider, split_models
 from .provider.kilo.client import KiloClient, KiloProvider
 from .provider.lingxi import LingxiProvider
 from .provider.lingxi.client import LingxiClient
@@ -243,6 +245,22 @@ def _kilo_endpoint(config: Settings) -> str:
                              validator=validate_kilo_endpoint_allowed,
                              env_name="KILO_API_ENDPOINT",
                              allowed_name="KILO_ALLOWED_ENDPOINTS")
+
+
+def _generic_endpoint(config: Settings) -> str:
+    """解析通用上游端点；未配置（或全空白）时返回空串 = 不注册该渠道。
+
+    与其他渠道不同，这里**不强制必填**：留空 = 这个部署不启用通用上游。
+    调用方用返回值判空决定是否注册，不再自己重复判一次（两处判空会漂移，
+    且会让这里的空值分支变成不可达代码）。
+    """
+    if not config.generic_api_endpoint.strip():
+        return ""
+    return _resolve_endpoint(config, attr="generic_api_endpoint",
+                             validator=validate_generic_endpoint_allowed,
+                             env_name="GENERIC_API_ENDPOINT",
+                             allowed_name="GENERIC_ALLOWED_ENDPOINTS",
+                             strip_slash=True)
 
 
 def _raccoon_endpoint(config: Settings) -> str:
@@ -479,6 +497,14 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     officeace_pacer = Pacer(lambda: runtime.officeace_chat_min_interval,
                             lambda: runtime.officeace_chat_min_interval,
                             allow_concurrent=True)
+    # 通用上游端点：解析一次，既决定是否注册，也作为客户端 base_url。
+    # 空串 = 本部署不启用该渠道（见 `_generic_endpoint`）。
+    generic_endpoint = _generic_endpoint(config)
+    # 通用上游：用户自行配置的标准端点，默认不节流（上游限流由它自己的 429 表达，
+    # 引擎按 SOFT 冷却凭证）。单桶：一个部署只配一条通用上游。
+    generic_pacer = Pacer(lambda: runtime.generic_chat_min_interval,
+                          lambda: runtime.generic_chat_min_interval,
+                          allow_concurrent=True)
     # 按渠道出站代理：启动期解析一次，装配时注入到各 provider 的
     # httpx client；运行中改值需重启（连接池已建立，见 provider/proxy.py）。
     proxies = parse_provider_proxies(config.provider_proxies, KNOWN_PROVIDERS)
@@ -541,6 +567,16 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             client=OfficeAceClient(cloud_base=_officeace_endpoint(config),
                                    proxy=proxies.get("officeace")),
             pacer=officeace_pacer),
+        **(
+            {"generic": GenericProvider(
+                client=GenericClient(
+                    endpoint=generic_endpoint,
+                    user_agent=config.generic_user_agent,
+                    proxy=proxies.get("generic")),
+                static_models=split_models(config.generic_models),
+                pacer=generic_pacer)}
+            if generic_endpoint else {}
+        ),
     }
     # 默认装配路径（生产）才种子无凭证渠道的虚拟凭证：测试注入自定义 registry
     # 时不应凭空多出一条无对应 provider 的凭证行。

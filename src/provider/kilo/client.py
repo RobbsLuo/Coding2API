@@ -61,6 +61,7 @@ def prepare_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
     """
     body = dict(payload)
     body["messages"] = copy.deepcopy(payload.get("messages"))
+    base.normalize_developer_role(body["messages"])
     body["model"] = model
     body["stream"] = True
     return body

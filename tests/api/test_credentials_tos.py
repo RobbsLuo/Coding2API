@@ -22,6 +22,7 @@ def test_unknown_provider_falls_back_to_gray():
 def test_known_levels():
     assert tos_for("zen").level == "green"
     assert tos_for("kilo").level == "green"
+    assert tos_for("generic").level == "green"
     for provider in ("codebuddy", "codebuddy_intl", "trae", "qoder",
                      "codearts", "officeace"):
         assert tos_for(provider).level == "gray"
@@ -57,10 +58,17 @@ def test_green_import_does_not_warn(admin_client, caplog):
 
 
 def test_credentials_list_exposes_all_risks(admin_client):
-    _app, client = admin_client
+    """列表页只透出**已启用**渠道的评级（未装配的渠道也没法导入）。
+
+    `generic` 需要配 `GENERIC_API_ENDPOINT` 才注册，默认部署里不在 registry
+    里，故这里按 registry 断言；「每个 KNOWN_PROVIDERS 都有登记」由
+    `test_every_known_provider_is_registered` 独立保证。
+    """
+    app, client = admin_client
     payload = client.get("/api/credentials").json()
     risks = payload["tos_risks"]
-    assert set(risks) == set(KNOWN_PROVIDERS)
+    assert set(risks) == set(app.state.services.registry)
+    assert set(KNOWN_PROVIDERS) <= set(CHANNEL_TOS)
     assert risks["zen"]["level"] == "green"
     assert risks["trae"]["level"] == "gray"
     assert all(item["reason"] for item in risks.values())

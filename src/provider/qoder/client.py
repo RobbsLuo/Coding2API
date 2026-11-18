@@ -156,20 +156,10 @@ def _normalize_null_content(messages: list[dict[str, Any]]) -> int:
 def _normalize_developer_role(messages: list[dict[str, Any]]) -> int:
     """把 `role: "developer"` 归一为 `system`（返回改写条数）。
 
-    OpenAI 在 chat 协议里新增了 `developer`（PI 一类客户端对 reasoning 模型会
-    把 system 转成 developer），Qoder 上游不认这个变体：实测 2026-11-11 14:16
-    直接 400 `messages[0].role: unknown variant 'developer', expected one of
-    'system', 'user', 'assistant', 'tool', 'latest_reminder'`（同分钟的
-    codearts 也以 `InferHub.001001044` 拒绝同一报文）。`developer` 与 `system`
-    语义等价（开发者指令优先于用户消息），归一无损；codebuddy / trae 早已
-    各自做同一归一见两处实现。
+    实现已上收到 `provider.base.normalize_developer_role`（八条渠道共用一份，
+    见那里的实测记录）；这里保留薄封装，避免改动 qoder 内部调用点。
     """
-    rewritten = 0
-    for message in messages:
-        if isinstance(message, dict) and message.get("role") == "developer":
-            message["role"] = "system"
-            rewritten += 1
-    return rewritten
+    return base.normalize_developer_role(messages)
 
 
 def _drop_orphan_tool_messages(

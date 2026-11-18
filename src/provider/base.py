@@ -101,6 +101,31 @@ NO_PENALTY_KINDS = frozenset({ErrKind.REQUEST, ErrKind.CONTEXT, ErrKind.NETWORK}
 REJECT_KINDS = frozenset({ErrKind.INVALID, ErrKind.CAPABILITY})
 
 
+def normalize_developer_role(messages: Any) -> int:
+    """把 `role: "developer"` 归一为 `system`，返回改写条数。
+
+    OpenAI 在 chat 协议里补了 `developer`（PI 一类客户端对 reasoning 模型会把
+    system 转成 developer），与 `system` 语义等价（都是开发者指令，优先级高于
+    user）。各渠道对它的容忍度却不同，且**都是静默或错位的失败**：
+
+    * qoder：400 `messages[0].role: unknown variant 'developer'`（2026-11-11 实测）
+    * codearts：流内 `InferHub.001001044.400 Message role cannot empty`
+      （2026-11-17 实测，同一报文在三条凭证上各拒一次）
+    * codebuddy：11128 渠道风控；trae：返回空流
+
+    归一无损、幂等，且只作用于**深拷贝后的出站副本**（调用方负责拷贝）。
+    非 list（畸形报文）不动：形状交给上游裁决，本层只改已知会被拒的角色变体。
+    """
+    if not isinstance(messages, list):
+        return 0
+    rewritten = 0
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "developer":
+            message["role"] = "system"
+            rewritten += 1
+    return rewritten
+
+
 def body_hint(body: bytes, limit: int = 2048) -> str:
     """上游错误响应体的单行摘要（进日志便于定位拒绝原因）。
 

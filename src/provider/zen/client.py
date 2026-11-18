@@ -309,6 +309,7 @@ def prepare_body(payload: dict[str, Any], model: str,
     """
     body = dict(payload)
     body["messages"] = copy.deepcopy(payload.get("messages"))
+    base.normalize_developer_role(body["messages"])
     body["model"] = model
     body["stream"] = True
     injected = ensure_gate_tools(body, required)

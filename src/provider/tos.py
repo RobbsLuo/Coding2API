@@ -78,6 +78,14 @@ CHANNEL_TOS: dict[str, TosRisk] = {
         "复用网页端登录态（xhx_token 会话 JWT）调官方托管模型网关；条款未明确"
         "允许第三方转发与多用户共享，且凭据约 30 天到期需重取",
         basis="运营判断"),
+    # 通用上游是用户自己在配置里填的**标准 OpenAI 端点**（官方 API / 自建
+    # vLLM）：没有逆向、没有共享他人订阅，故登记 green。配置写错主机是运维
+    # 问题，不是条款风险。
+    "generic": TosRisk(
+        "green",
+        "标准 OpenAI 兼容端点，端点由部署者自行配置（官方 API 或自建网关），"
+        "凭证是本部署自己持有的 API key",
+        basis="运营判断"),
     "lingxi": TosRisk(
         "gray",
         "复用 WPS 灵犀桌面/网页登录态（wps_sid Cookie）调 agent-runtime 私有"

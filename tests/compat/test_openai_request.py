@@ -111,3 +111,38 @@ def test_n_error_message_explains_structural_limit():
         _parse(n=2)
     assert "single choice" in str(caught.value)
     assert "n=2" in str(caught.value)
+
+
+@pytest.mark.parametrize("role", ["system", "user", "assistant", "tool", "developer"])
+def test_known_roles_are_accepted(role):
+    """协议全集放行；`developer` 也是合法入站值（出站再归一为 system）。"""
+    assert _parse(messages=[{"role": role, "content": "x"}])["messages"][0]["role"] == role
+
+
+@pytest.mark.parametrize("role", ["", " ", "robot", "Developer", "0", "SYSTEM"])
+def test_unknown_roles_are_400_at_the_edge(role):
+    """空串 / 拼错 / 大小写不符的角色在上游必被拒，入口就地 400。
+
+    CodeArts 对空角色回 `001001044 Message role cannot empty`、qoder 回
+    `unknown variant`——都是一次请求在每个号上各撞一次才失败，还会落一条
+    `invalid_request` 明细。入口拦下后：不发上游、不冷却凭证、不记失败。
+    """
+    with pytest.raises(InvalidRequest, match=r"messages\[0\]\.role must be one of"):
+        _parse(messages=[{"role": role, "content": "x"}])
+
+
+def test_role_whitelist_reports_index_and_allowed_values():
+    """报错要指出**哪一条**消息、以及允许哪些值（多轮里定位不到就无法自查）。"""
+    with pytest.raises(InvalidRequest) as caught:
+        _parse(messages=[{"role": "user", "content": "hi"},
+                         {"role": "", "content": "boom"}])
+    text = str(caught.value)
+    assert "messages[1].role" in text
+    for role in ("system", "user", "assistant", "tool", "developer"):
+        assert role in text
+
+
+def test_non_string_role_keeps_its_own_message():
+    """非字符串角色仍报「必须是字符串」：与「取值不合法」是两个不同缺陷。"""
+    with pytest.raises(InvalidRequest, match="must be a string"):
+        _parse(messages=[{"role": None, "content": "x"}])

@@ -82,6 +82,24 @@ def test_client_prepare_body_v2_and_legacy():
                                          legacy=True)
 
 
+def test_client_prepare_body_normalizes_developer_role():
+    """`developer` 角色归一为 `system`：上游只认 system/user/assistant/tool。
+
+    不归一的话上游 400 `InferHub.001001044.400 Message role cannot empty`
+    （实测 2026-11-17 同一报文在三条凭证上各拒一次，请求整条失败）。归一必须
+    作用在深拷贝上：引擎持有的原始 payload 可能还要复用。
+    """
+    payload = {"messages": [{"role": "developer", "content": "sys"},
+                            {"role": "user", "content": "hi"}]}
+    body = prepare_body(payload, "m", chat_id="c")
+    assert body["messages"][0]["role"] == "system"
+    assert payload["messages"][0]["role"] == "developer"
+    # legacy 是内容块形状（无 role 字段），角色只作为文本前缀保留
+    legacy = prepare_body({"messages": [{"role": "developer", "content": "sys"}]},
+                          "m", chat_id="c", legacy=True)
+    assert legacy["messages"] == [{"type": "text", "text": "developer: sys"}]
+
+
 def test_client_prepare_body_forwards_sampling_and_usage_fields():
     """v2 不再用白名单：采样 / 工具 / 用量相关字段必须原样到达上游。"""
     payload = {
