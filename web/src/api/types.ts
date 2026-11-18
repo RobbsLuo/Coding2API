@@ -78,6 +78,11 @@ export interface Credential {
   quota_packages: QuotaPackage[] | null;
   /** 网页明细源状态：null=未配置/未知，ok=正常，expired=网页会话失效（仅提示） */
   web_cookie_state: "ok" | "expired" | null;
+  /**
+   * 账号密码状态（仅小浣熊）：null/undefined=未配置，1=已保存。
+   * 只表示「有没有」，密码本身不回显也不下发。
+   */
+  login_secret?: 1 | null;
   /** 生效中的模型级冷却（模型级限流/负缓存）；无则为空数组 */
   model_cooldowns: ModelCooldown[];
   quota_probed_at: number | null;

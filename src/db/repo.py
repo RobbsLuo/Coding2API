@@ -59,6 +59,19 @@ def _ladder_text(ladder: list[tuple[int, float]] | None) -> str | None:
     return json.dumps([[end, remaining] for end, remaining in ladder])
 
 
+def _login_secret_flag(credential_data: dict[str, Any]) -> int | None:
+    """账号密码齐不齐：两个都非空 → 1，否则 None（= 未配置）。
+
+    存派生标记而不是让列表页逐行解密：管理台要显示「已保存」，为一列状态把
+    十几条凭证全解一遍既慢又多一处明文面。
+    """
+    phone = credential_data.get("phone")
+    password = credential_data.get("password")
+    if isinstance(phone, str) and phone.strip() and isinstance(password, str) and password:
+        return 1
+    return None
+
+
 def _ladder_value(text: str | None) -> list[tuple[int, float]] | None:
     """读回到期阶梯。缺失、迁移前的空值或历史脏数据一律当「无到期信息」，
     不能让一行坏数据把整个选号流程拖崩。"""
@@ -237,9 +250,11 @@ class CredentialRepository:
         with self._db.transaction() as conn:
             conn.execute(
                 "INSERT INTO credentials (id, provider, nickname, data_enc, created_at, added_by, "
-                "token_expires_at, token_issued_at, tags) VALUES (?,?,?,?,?,?,?,?,?)",
+                "token_expires_at, token_issued_at, tags, login_secret) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (credential_id, provider, nickname, self._cipher.encrypt(payload),
-                 created, added_by, expires_at, issued_at, tags_text(tags or [])),
+                 created, added_by, expires_at, issued_at, tags_text(tags or []),
+                 _login_secret_flag(credential_data)),
             )
         return credential_id
 
@@ -515,8 +530,9 @@ class CredentialRepository:
         with self._db.transaction() as conn:
             conn.execute(
                 "UPDATE credentials SET data_enc = ?, token_expires_at = ?, "
-                "token_issued_at = ? WHERE id = ?",
-                (self._cipher.encrypt(payload), expires_at, issued_at, credential_id))
+                "token_issued_at = ?, login_secret = ? WHERE id = ?",
+                (self._cipher.encrypt(payload), expires_at, issued_at,
+                 _login_secret_flag(credential_data), credential_id))
 
     def set_web_cookie_state(self, credential_id: str, state: str | None) -> None:
         """写入/清除网页 Cookie 状态（管理台提示用，不参与调度）。"""
@@ -595,12 +611,13 @@ class CredentialRepository:
                            else "cooling_until = NULL, cooling_kind = NULL, ")
             conn.execute(
                 "UPDATE credentials SET data_enc = ?, token_expires_at = ?, "
-                "token_issued_at = ?, "
+                "token_issued_at = ?, login_secret = ?, "
                 f"nickname = CASE WHEN ? = '' THEN nickname ELSE ? END, "
                 f"disabled = 0, disabled_reason = NULL, {cooling_sql}"
                 "err_count = 0 WHERE id = ?",
                 (self._cipher.encrypt(payload), expires_at, issued_at,
-                 nickname, nickname, credential_id))
+                 _login_secret_flag(credential_data), nickname, nickname,
+                 credential_id))
             _clear_model_cooldowns(conn, credential_id)
         return True
 
@@ -836,6 +853,10 @@ class CredentialRepository:
         # 更宽），导出件默认不带：少一处明文泄漏面，重装后重新粘贴即可。
         if row["provider"] in ("qoder", "codearts"):
             credential.pop("web_cookie", None)
+        # 账号密码能直接登网页（可改密、可读全部账号数据），比推理 token 权限更宽：
+        # 导出件一律不带密码，重装后重新填一次。手机号保留——它是账号身份，
+        # 便于核对，且单独存在无法登录。
+        credential.pop("password", None)
         return {"provider": row["provider"], "nickname": row["nickname"],
                 "tags": tags_value(row["tags"]), "credential": credential}
 
@@ -886,7 +907,7 @@ class CredentialRepository:
             "quota_total, quota_cycle_end, "
             "quota_probed_at, growth_last_run_at, growth_last_result, created_at, added_by, "
             "quota_expiry_ladder, quota_packages, data_enc, "
-            "web_cookie_state, routing_weight, "
+            "web_cookie_state, routing_weight, login_secret, "
             "token_expires_at, token_issued_at, "
             "tags "
             "FROM credentials ORDER BY created_at").fetchall()

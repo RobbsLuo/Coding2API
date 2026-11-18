@@ -397,6 +397,19 @@ class RaccoonProvider:
         """JWT `exp`：供管理台提示「30 天后要重新取」；0 = 未知。"""
         return RaccoonCredential.from_dict(credential_data).expires_at
 
+    def set_login_secret(self, credential_data: dict, phone: str,
+                         password: str) -> dict:
+        """写入/清除按需登录用的手机号与密码（管理台入口在
+        `PUT /api/credentials/{id}/login-secret`）。
+
+        两个都空 = 清除（按需登录随之停用，签到回落到「需人工重登」提示）。
+        只动这两个字段，其余凭证内容原样保留——运营改密码不该把 token 冲掉。
+        """
+        data = dict(credential_data)
+        data["phone"] = phone
+        data["password"] = password
+        return data
+
     def classify(self, status: int, body: bytes) -> ErrKind:
         return raccoon_events.classify_status(status, body)
 

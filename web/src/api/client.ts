@@ -353,6 +353,16 @@ export const api = {
       method: "PUT",
       ...json({ cookie }),
     }),
+  /**
+   * 写入 / 清除小浣熊「按需登录」用的账号密码（两个都空 = 清除）。
+   * 密码不回显，列表里只有 `login_secret` 标记。
+   */
+  setCredentialLoginSecret: (id: string, phone: string, password: string) =>
+    request<{ ok: boolean; login_secret: 0 | 1 }>(
+      `/api/credentials/${id}/login-secret`, {
+        method: "PUT",
+        ...json({ phone, password }),
+      }),
   /** 调度权重（null = 恢复默认）；只改同健康档内的选号次序。 */
   setCredentialWeight: (id: string, weight: number | null) =>
     request<{ routing_weight: number | null }>(`/api/credentials/${id}/weight`, {

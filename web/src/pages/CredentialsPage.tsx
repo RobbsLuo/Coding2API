@@ -18,6 +18,7 @@ import {
   HeartPulse,
   History,
   Hourglass,
+  KeyRound,
   MoreHorizontal,
   Pin,
   Plus,
@@ -58,6 +59,7 @@ import { CredentialLimitsDialog } from "../components/CredentialLimitsDialog";
 import { CredentialTagsDialog } from "../components/CredentialTagsDialog";
 import { CredentialWeightDialog } from "../components/CredentialWeightDialog";
 import { CredentialWebCookieDialog } from "../components/CredentialWebCookieDialog";
+import { CredentialLoginSecretDialog } from "../components/CredentialLoginSecretDialog";
 import { groupModelsByProvider, rateLabel, rateSummary } from "../components/ModelPicker";
 import { ToastViewport, useToasts } from "../components/Toast";
 import { ColumnHint, LongTextTip } from "../components/Tip";
@@ -343,6 +345,7 @@ interface Actions {
   tags: (credential: Credential) => void;
   weight: (credential: Credential) => void;
   webCookie: (credential: Credential) => void;
+  loginSecret: (credential: Credential) => void;
   export: (credential: Credential) => void;
 }
 
@@ -378,6 +381,8 @@ export function CredentialsPage() {
   const [weightFor, setWeightFor] = useState<string | null>(null);
   // Qoder 网页 Cookie 对话框：同样存 id，取最新快照
   const [webCookieFor, setWebCookieFor] = useState<string | null>(null);
+  // 小浣熊账号密码对话框（按需登录用）：同样存 id，取最新快照
+  const [loginSecretFor, setLoginSecretFor] = useState<string | null>(null);
   // 列表筛选：池子一大就没有「找到某个号」的路径，这里收搜索 + 渠道 + 状态 + 标签四件套。
   // 筛选是纯展示层收敛，不改后端排序（后端仍按 sort/order 给全量）。
   const [filters, setFilters] = useState(DEFAULT_FILTERS);
@@ -484,6 +489,11 @@ export function CredentialsPage() {
   const webCookieCredential = useMemo(
     () => credentials.find((item) => item.id === webCookieFor) ?? null,
     [credentials, webCookieFor],
+  );
+  // 账号密码对话框当前编辑的凭证：同上
+  const loginSecretCredential = useMemo(
+    () => credentials.find((item) => item.id === loginSecretFor) ?? null,
+    [credentials, loginSecretFor],
   );
   // 是否有任何筛选生效：决定「N / 总数」计数与「清空」入口是否出现
   const filtering =
@@ -765,6 +775,7 @@ export function CredentialsPage() {
     // 单条导出：文件内容与「批量导入」的条目同形，可原样再导入。
     // 只开对话框；保存与探测由对话框/后端负责
     webCookie: (credential) => setWebCookieFor(credential.id),
+    loginSecret: (credential) => setLoginSecretFor(credential.id),
     export: (credential) =>
       void (async () => {
         try {
@@ -1499,6 +1510,19 @@ export function CredentialsPage() {
         />
       )}
 
+      {canWrite && loginSecretCredential && (
+        <CredentialLoginSecretDialog
+          credential={loginSecretCredential}
+          onClose={() => setLoginSecretFor(null)}
+          onSaved={(message) => {
+            setLoginSecretFor(null);
+            showNotice(message);
+            void refresh();
+          }}
+          onError={(message) => showError(message)}
+        />
+      )}
+
       {canWrite && webCookieCredential && (
         <CredentialWebCookieDialog
           credential={webCookieCredential}
@@ -2161,6 +2185,17 @@ function Row({
                         ? `权重 ${credential.routing_weight}`
                         : "设置权重"}
                     </DropdownMenuItem>
+                    {credential.provider === "raccoon" && (
+                      <DropdownMenuItem
+                        onSelect={() => actions.loginSecret(credential)}
+                        title="保存网页端账号密码，用于「按需登录」换新会话（上游只在登录时补发当天每日积分）"
+                      >
+                        <KeyRound className="size-4" /> 账号密码
+                        {credential.login_secret === 1 && (
+                          <span className="text-muted-foreground">（已保存）</span>
+                        )}
+                      </DropdownMenuItem>
+                    )}
                     {["qoder", "codearts"].includes(credential.provider) && (
                       <DropdownMenuItem
                         onSelect={() => actions.webCookie(credential)}

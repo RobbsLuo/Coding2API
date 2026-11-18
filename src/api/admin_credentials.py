@@ -24,6 +24,7 @@ from ..audit.actions import (
     ACTION_CREDENTIAL_EXPORT,
     ACTION_CREDENTIAL_IMPORT,
     ACTION_CREDENTIAL_LIMITS,
+    ACTION_CREDENTIAL_LOGIN_SECRET,
     ACTION_CREDENTIAL_PIN,
     ACTION_CREDENTIAL_REVIVE,
     ACTION_CREDENTIAL_SWITCH_ACCOUNT,
@@ -74,6 +75,11 @@ BATCH_IMPORT_MAX_ITEMS = 100
 # 网页 Cookie 的最大长度：正常一条 Qoder 会话 Cookie 几百字符，1 万已远超；
 # 上限只为拦住误粘贴整段请求头/文件内容，不做格式校验（Cookie 结构随上游变）。
 WEB_COOKIE_MAX_LENGTH = 10_000
+
+# 账号密码的长度上限：只为拦住误粘贴（整段 JSON / 文件），不做格式校验——
+# 手机号形态由上游登录接口裁决（见 provider/raccoon/login.py 的归一）。
+LOGIN_PHONE_MAX_LENGTH = 32
+LOGIN_PASSWORD_MAX_LENGTH = 128
 
 # 调度权重范围：正数越优先、负数越靠后，0 = 默认。上限只为拦住误输入，
 # 不参与归一化（同档内按数值稳定排序）。
@@ -594,6 +600,56 @@ def create_router(services: Services) -> APIRouter:
                               detail="已设置" if cookie else "已清除")
         schedule_probe(credential_id)
         return {"ok": True}
+
+    @router.put("/api/credentials/{credential_id}/login-secret")
+    async def set_login_secret(credential_id: str, payload: dict,
+                               _csrf: None = Depends(csrf_protected),
+                               principal=Depends(principal_from_request)):
+        """写入/清除按需登录用的手机号与密码（小浣熊）。
+
+        为什么需要入口：上游只在「当天第一次网页登录」时补发每日积分，而
+        `refresh` 换不出新会话，所以服务要能自己登录一次（见
+        `tasks/checkin.py` 的按需登录）。那种登录需要账号密码，光靠重新导入
+        整条 token 才能带上它太笨重——这里让运营就地填写。
+
+        账号密码属于凭证数据（加密落库），**绝不回显**、不进审计 detail；
+        两个都留空 = 清除（按需登录随之停用，签到回落到「需人工重登」提示）。
+        """
+        require_operator(principal)
+        provider, data = provider_for(
+            credential_id, "set_login_secret",
+            error="credential does not support login secret")
+        phone = payload.get("phone")
+        password = payload.get("password")
+        if not isinstance(phone, str) or not isinstance(password, str):
+            raise InvalidRequest("phone and password must be strings")
+        phone = phone.strip()
+        # 密码不 strip：尾部空格可能是密码的一部分（用户自己决定）
+        if not phone and not password:
+            cleared = True
+        elif not phone or not password:
+            raise InvalidRequest(
+                "phone and password must be set together (or both empty to clear)")
+        else:
+            cleared = False
+        if len(phone) > LOGIN_PHONE_MAX_LENGTH:
+            raise InvalidRequest(
+                f"phone too long (max {LOGIN_PHONE_MAX_LENGTH} characters)")
+        if len(password) > LOGIN_PASSWORD_MAX_LENGTH:
+            raise InvalidRequest(
+                f"password too long (max {LOGIN_PASSWORD_MAX_LENGTH} characters)")
+        # 走 `save_credential_data`：它同一事务里刷新 `login_secret` 派生标记
+        # （清除时 phone/password 为空 → 标记回 NULL），不必单独维护一份状态。
+        credentials.save_credential_data(
+            credential_id, provider.set_login_secret(data, phone, password))
+        logger.info("管理员 %s 设置凭证 %s 账号密码: %s",
+                    principal.username, credential_id,
+                    "已清除" if cleared else "已保存")
+        services.audit.record(actor=principal.username,
+                              action=ACTION_CREDENTIAL_LOGIN_SECRET,
+                              target=credential_id,
+                              detail="已清除" if cleared else "已保存")
+        return {"ok": True, "login_secret": 0 if cleared else 1}
 
     @router.post("/api/credentials/pin")
     async def pin_credential(payload: dict,

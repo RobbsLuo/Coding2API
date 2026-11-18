@@ -375,3 +375,40 @@ def test_routing_weight_round_trip(tmp_path):
     assert credentials.list_all()[0]["routing_weight"] is None
     assert credentials.set_routing_weight("ghost", 1) is False
     db.close()
+
+
+def test_login_secret_flag_follows_credential_data(tmp_path):
+    """`login_secret` 只记「账号密码齐不齐」，随导入/写回/合并自动刷新。"""
+    db = Database(tmp_path / "t.sqlite3")
+    apply_schema(db.connect())
+    credentials = CredentialRepository(db, CredentialCipher(SECRET))
+
+    # 导入时带齐 → 1
+    with_login = credentials.add(provider="raccoon", credential_data={
+        "access_token": "t1", "uid": "u1",
+        "phone": "13900000001", "password": "Abcd123456"})
+    # 只带手机号 → NULL（缺一半不算已配置）
+    half = credentials.add(provider="raccoon", credential_data={
+        "access_token": "t2", "uid": "u2", "phone": "13900000002"})
+    # 纯 token → NULL
+    plain = credentials.add(provider="raccoon", credential_data={
+        "access_token": "t3", "uid": "u3"})
+    rows = {row["id"]: row for row in credentials.list_all()}
+    assert rows[with_login]["login_secret"] == 1
+    assert rows[half]["login_secret"] is None
+    assert rows[plain]["login_secret"] is None
+
+    # 写回时增删账号密码，标记同步
+    credentials.save_credential_data(plain, {"access_token": "t3", "uid": "u3",
+                                             "phone": "13900000003",
+                                             "password": "Abcd123456"})
+    assert {r["id"]: r for r in credentials.list_all()}[plain]["login_secret"] == 1
+    credentials.save_credential_data(plain, {"access_token": "t3", "uid": "u3"})
+    assert {r["id"]: r for r in credentials.list_all()}[plain]["login_secret"] is None
+
+    # 重新登录合并同样刷新（新 token 里通常会带上账号密码）
+    credentials.merge_login_credential(half, {"access_token": "t2b", "uid": "u2",
+                                              "phone": "13900000002",
+                                              "password": "Abcd123456"})
+    assert {r["id"]: r for r in credentials.list_all()}[half]["login_secret"] == 1
+    db.close()

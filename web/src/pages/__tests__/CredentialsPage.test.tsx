@@ -1871,3 +1871,25 @@ describe("CredentialsPage 批量导入", () => {
     await userEvent.click(screen.getByTestId("actions-cred_1"));
     expect(screen.getByRole("menuitem", { name: "权重 -3" })).toBeInTheDocument();
   });
+
+  it("小浣熊行「更多操作」有账号密码入口，已保存时带标记", async () => {
+    mockFetch({
+      "/api/credentials": listBody([
+        makeCredential({ id: "rc", provider: "raccoon", login_secret: 1 }),
+        makeCredential({ id: "cb", provider: "codebuddy" }),
+      ]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+
+    await userEvent.click(screen.getByTestId("actions-rc"));
+    expect(await screen.findByText("账号密码")).toBeInTheDocument();
+    expect(screen.getByText("（已保存）")).toBeInTheDocument();
+    await userEvent.keyboard("{Escape}");
+
+    // 其它渠道不显示该入口
+    await userEvent.click(screen.getByTestId("actions-cb"));
+    await screen.findAllByRole("menuitem");
+    expect(screen.queryByText("账号密码")).not.toBeInTheDocument();
+  });

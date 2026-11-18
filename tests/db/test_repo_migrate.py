@@ -660,3 +660,28 @@ def test_legacy_db_upgrade_adds_routing_weight(tmp_path):
     assert db.connect().execute(
         "SELECT routing_weight FROM credentials WHERE id = 'cred_old'").fetchone()[0] is None
     db.close()
+
+
+def test_legacy_db_upgrade_adds_login_secret(tmp_path):
+    """老库升级：credentials 无 login_secret 时补列，历史行 NULL = 未配置。"""
+    db = Database(tmp_path / "legacy.sqlite3")
+    conn = sqlite3.connect(db.path)
+    conn.execute(
+        "CREATE TABLE credentials (id TEXT PRIMARY KEY, provider TEXT NOT NULL,"
+        " data_enc BLOB NOT NULL, created_at INTEGER NOT NULL)")
+    conn.execute("INSERT INTO credentials (id, provider, data_enc, created_at)"
+                 " VALUES ('cred_old', 'raccoon', x'00', 1)")
+    conn.commit()
+    conn.close()
+
+    apply_schema(db.connect())
+    columns = {row[1] for row in db.connect().execute("PRAGMA table_info(credentials)")}
+    assert "login_secret" in columns
+    assert db.connect().execute(
+        "SELECT login_secret FROM credentials WHERE id = 'cred_old'").fetchone()[0] is None
+    db.connect().execute(
+        "UPDATE credentials SET login_secret = 1 WHERE id = 'cred_old'")
+    db.connect().commit()
+    assert db.connect().execute(
+        "SELECT login_secret FROM credentials WHERE id = 'cred_old'").fetchone()[0] == 1
+    db.close()
