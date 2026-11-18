@@ -228,7 +228,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 **保活帧与排队**：上游在流中发 `body:"null"` 的保活帧（外层 200）→ 跳过、不打断输出；「排队中」包成 403 且排队标记藏在**序列化字符串**里 → 归 QUEUE 等上游点名的秒数后在原号重开，不硬禁用凭证。「每日计费次数用尽」（403 `code 110`，`Billing daily count exceeded`）→ 归额度类，冷却到次日 04:00，同样不硬禁用（HTTP 与流内信封同一判据）。
 
-**报文形状**：带 `tool_calls` 的 assistant `content: null` 归一为空串；`role:"developer"` 归一为 `system`（上游不认这个变体，实测 400 `unknown variant 'developer'`，同分钟 codearts 亦拒）。两者都是出站副本上的无损改写。
+**报文形状**：带 `tool_calls` 的 assistant `content: null` 归一为空串；`role:"developer"` 归一为 `system`（各上游都不认这个变体，失败形态各异：qoder 400 `unknown variant 'developer'`、codearts 流内 `001001044`、codebuddy 11128 风控、trae 静默空流）。归一实现在 `provider.base.normalize_developer_role`，八条渠道共用；两个改写都只在出站副本上做。
 
 ### CodeArts（`codearts`）
 
@@ -368,6 +368,14 @@ codex -c "model_providers.coding2api={ name='coding2api', base_url='http://127.0
 ### chat `response_format` 收口
 
 只放行 OpenAI 三种形状；畸形 / 未知 → 400：`{"type":"text"}`、`{"type":"json_object"}`、`{"type":"json_schema","json_schema":{name, schema, description?, strict?}}`（内部未知字段丢弃）。Responses `text.format` 与 chat 入站共用这段校验。
+
+### chat 入站 `messages[].role` 白名单
+
+只放行 `system` / `user` / `assistant` / `tool` / `developer`，其余（空串、拼错、大小写不符）**入口就地 400**：`messages[i].role must be one of ...`。
+
+理由：这类角色打到上游必被拒（CodeArts `001001044 Message role cannot empty`、qoder `unknown variant`），且每次请求要在若干个号上各撞一次才失败，最后还落一条 `invalid_request` 明细。入口拦下后不发上游、不冷却凭证、不记失败。`developer` 属协议合法值（新一代客户端默认写法），放行后由各渠道出站归一为 `system`（见 `provider.base.normalize_developer_role`）。
+
+非字符串 `role`（`null` / 数字）保留原报错 `role must be a string`——「类型错」与「取值不合法」是两个不同缺陷，文案要分开。
 
 ### Anthropic Messages API（Claude Code）
 

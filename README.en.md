@@ -224,7 +224,7 @@ Free models at [Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`), no login. St
 
 **Keepalive frames and queueing**: the upstream sends keepalive frames with `body:"null"` (outer status 200) mid-stream → skipped, never interrupting output; "queued" arrives as a 403 whose queue marker hides inside a **serialized string** → classified as QUEUE, waits the upstream's named seconds and reopens on the same credential instead of hard-disabling it. "Daily billing count exhausted" (403 `code 110`, `Billing daily count exceeded`) counts as quota → cools until 04:00 next day, likewise never hard-disabling (same predicate for HTTP and in-stream envelopes).
 
-**Message shape**: an assistant `content: null` that carries `tool_calls` is normalized to an empty string; `role:"developer"` is normalized to `system` (the upstream rejects the variant — `unknown variant 'developer'`; CodeArts rejects the same body the same minute). Both rewrites happen on the outbound copy and are lossless.
+**Message shape**: an assistant `content: null` that carries `tool_calls` is normalized to an empty string; `role:"developer"` is normalized to `system` (no upstream accepts the variant, and each fails differently: qoder 400 `unknown variant 'developer'`, CodeArts in-stream `001001044`, codebuddy 11128 risk control, trae a silently empty stream). The rewrite lives in `provider.base.normalize_developer_role` and is shared by all eight channels; both rewrites apply to the outbound copy and are lossless.
 
 ### CodeArts (`codearts`)
 
@@ -360,6 +360,14 @@ Supports text, streaming output, reasoning summaries, function tool calls, `fini
 ### chat `response_format` validation
 
 Only three OpenAI shapes pass; malformed / unknown → explicit 400: `{"type":"text"}`, `{"type":"json_object"}`, `{"type":"json_schema","json_schema":{name, schema, description?, strict?}}` (unknown inner fields dropped). Responses `text.format` reuses same validation.
+
+### chat inbound `messages[].role` allowlist
+
+Only `system` / `user` / `assistant` / `tool` / `developer` pass; anything else (empty string, typo, wrong case) is a **400 at the edge**: `messages[i].role must be one of ...`.
+
+Why: such roles are rejected by every upstream (CodeArts `001001044 Message role cannot empty`, qoder `unknown variant`), and each attempt burns one failure per credential before giving up, leaving an `invalid_request` row behind. Rejecting at the edge sends nothing upstream, cools no credential, records no failure. `developer` is a legitimate protocol value (default for newer clients); once accepted it is normalized to `system` per channel on the way out (see `provider.base.normalize_developer_role`).
+
+A non-string `role` (`null` / number) keeps the original `role must be a string` error — "wrong type" and "invalid value" are different defects and deserve different messages.
 
 ### Anthropic Messages API (Claude Code)
 

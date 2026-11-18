@@ -346,6 +346,13 @@ def health_score(q: Quota | None) -> int | None:
 - **到期**：过期与「Key 不存在」**统一 401 文案**。
 - **Key 级配额**（`key_quota.py`）：六项独立；当日类按北京自然日从 `usage_events` 聚合，速率 / 并发是进程内滑动窗口（重启清零，多副本各算各的）。超限 429 + `quota_exceeded`；**判定异常一律放行 + warning**（配额是旁路治理，安全边界在鉴权与 IP 白名单那边 fail closed）。自助查询见 `GET /v1/usage?days=1|7|30`（只读自己的明细，不暴露池结构）。
 
+### 3.10b chat 入口字段校验（`compat/openai/request.py`）
+`parse_chat_request` 是所有 chat 形状入口的收口（`/v1/chat/completions`、Playground、Gemini/Responses/Anthropic 出口映射后的内部载荷）。除数值边界与 `response_format` 外，`messages[].role` 有**白名单**：
+
+- 放行 `system` / `user` / `assistant` / `tool` / `developer`（`CHAT_ROLES`）。`developer` 是协议合法值（新一代客户端把 system 写成 developer），出站再由 `provider.base.normalize_developer_role` 归一为 `system`。
+- 其余取值（空串、拼错、大小写不符）→ 入口 400 `messages[i].role must be one of ...`。**为什么必须在入口拦**：这类角色打到上游必被拒（CodeArts `001001044 Message role cannot empty`、qoder `unknown variant 'developer'`），而轮换机制会让一次请求在每个候选号上各撞一次才失败，最后还落一条 `invalid_request` 明细。入口拦下后不发上游、不冷却凭证、不记失败。
+- 非字符串 `role`（`null` / 数字）保留原报错 `role must be a string`：「类型错」与「取值不合法」是两个不同缺陷，文案必须分开（否则用户会去查拼写而不是查序列化）。
+
 ### 3.11 reasoning 控制
 只给机制不给策略：三项默认关 / 留空。内置默认矩阵（哪个渠道认哪些档位）一律不做（未实测即编造）。
 
@@ -436,7 +443,7 @@ class Provider(Protocol):
 - **额度** `GET {openapi}/api/v2/quota/usage`：`userQuota` + `addOnQuota` 合成 `remaining`/`total`，`cycle_end` 取最早 `expiresAt`。
 - **节点故障归类**：Qoder 把自身节点故障包成 400（`{"code":"400","message":"[FAIL]node:… msg:Execution failed: null"}`，HTTP 与 `statusCodeValue` 都是 400）。`classify_error_code` 对 400/404/422 加响应体判据：命中 `NODE_FAILURE_MARKERS = ("[FAIL]node:", "Execution failed")` → `ErrKind.MODEL`；否则 `INVALID`。乱码模型名不带该标记 → 不误伤。
 - **403 判定统一（HTTP 与流内信封同一判据）**：`statusCodeValue` 403 早先由 `_decode_frame` 直接调 `classify_error_code` 判 DEAD（硬禁用），HTTP 403 却走 `classify_status` 判 SOFT——同码两后果。现信封也走 `classify_status`，优先级：排队 → QUEUE；`DAILY_QUOTA_MARKERS`（`Billing daily count exceeded`，`code 110`「每日计费次数用尽」）→ CREDIT（冷却到次日 04:00）；`SESSION_DEAD_MARKERS`（`TOKEN_EXPIRE` / `12153` / `Offline user session not found`）→ DEAD；其余 → SOFT。实测 2026-10-27 15:39 `{"code":"110","message":"Billing daily count exceeded"}` 被流内路径判死，qoder `nick5080166916` 硬禁用。
-- **`role: "developer"` 须归一为 `system`**：OpenAI 的 developer 角色（PI 一类客户端对 reasoning 模型会把 system 转成 developer）上游不认，实测 2026-11-11 14:16 直接 400 `messages[0].role: unknown variant 'developer', expected one of 'system', 'user', 'assistant', 'tool', 'latest_reminder'`（同分钟 codearts 以 `InferHub.001001044` 拒绝同一报文）。出站前 `build_chat_body._normalize_developer_role` 就地改写（语义等价、无损），codebuddy / trae 早已各自做同一归一。
+- **`role: "developer"` 须归一为 `system`**：OpenAI 的 developer 角色（PI 一类客户端对 reasoning 模型会把 system 转成 developer）各上游都不认，但失败形态各不相同：qoder 400 `messages[0].role: unknown variant 'developer'`（实测 2026-11-11 14:16）、codearts 流内 `InferHub.001001044.400 Message role cannot empty`（2026-11-17）、codebuddy 11128 渠道风控、trae 静默空流。**归一口径已上收到 `provider.base.normalize_developer_role`**（2026-11-18），八条渠道的出站深拷贝上各调一次：codearts / raccoon / officeace / zen / kilo / lingxi / qoder（薄封装）/ codebuddy / trae（各自内联）。语义等价、无损、幂等。
 - **`content: null` 须归一为空串**：Qoder 拒收带 `tool_calls` 的 assistant 把 `content` 置 `null`（OpenAI 允许）。上游把该消息当「无正文」跳过 → 紧随的 `role:"tool"` 成孤儿，报文却报 `Messages with role 'tool' must be a response to a preceding message with 'tool_calls'`——指向 tool 配对，真因在 assistant 的 null content。出站前 `build_chat_body._normalize_null_content` 把 assistant/tool 的 `null` 改成 `""`（语义等价）。2026-10-23 实测：同一请求体只把 `null` 换成 `""` 即 400 → 200，与 `reasoning_content` / 并行调用 / 轮数无关。codebuddy_intl、trae、officeace 不敏感。
 - 白名单 `QODER_ALLOWED_ENDPOINTS` 含国内 openapi+gateway 与国际版，启动时校验；`QODER_CHAT_MIN_INTERVAL`（热更，默认 5s）独立 pacer。
 
@@ -749,7 +756,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 - `ErrKind.CONTEXT`（CodeBuddy 11115 `prompt is too long`）→ `context_overflow`；处置同请求级错误（不罚号、仍换号），但不能再混进「请求无效」。
 - `ErrKind.CAPABILITY`（CodeArts 001001020 not multimodal）→ `model_capability`；处置同 INVALID（`REJECT_KINDS` 一起跳过整个上游），但「模型不支持该请求形态」不是「请求写错了」。
 - **CodeArts `InferHub.001001005.400 param is invalid` → INVALID**（2026-11-04 修）：`classify_error_code` 的 `"1005" in text` 是**裸子串**判据，而 `001001005` 是上游错误码前缀、子串里含 `1005`，于是「请求参数不合法」被判成 `PLAN` → 12h 账号级冷却（实测 2026-11-03 14:41–14:55 三条 codearts 凭证相继命中，整条渠道约 2.2 万剩余积分静默下线 12h）。现以 `_PARAM_INVALID_MARKERS = ("001001005", "param is invalid")` 前置判 INVALID（在 `_MODEL_CAPABILITY_MARKERS` 之后、`"1005" in text` 之前）；真业务码 `1005`（权益耗尽）仍判 PLAN。与 `001001020` 同一手法：点分「前缀 + 子码」形态**不能**用裸子串匹配。
-- **CodeArts `InferHub.001001044.400 Message role cannot empty` → INVALID 且出站归一角色**（2026-11-18 修）：`developer` 角色（OpenAI 新增变体）被上游拒收——每个请求在三条凭证上各撞一次，判 OTHER 会在累计 3 次后把整条渠道冷却 10min（实测 2026-11-17 20:00–20:51 16 个请求，归因面板全显示「上游渠道错误」）。`prepare_body` 现将 `developer` 就地归一为 `system`（与 qoder / codebuddy / trae 同口径，深拷贝上改写）；`classify_error_code` 以 `_ROLE_INVALID_MARKERS = ("001001044", "message role cannot empty")` 兜住其它形态 → INVALID（跳过上游 + 400 收尾，不冷却、不落 OTHER）。
+- **CodeArts `InferHub.001001044.400 Message role cannot empty` → INVALID 且出站归一角色**（2026-11-18 修）：`developer` 角色（OpenAI 新增变体）被上游拒收——每个请求在三条凭证上各撞一次，判 OTHER 会在累计 3 次后把整条渠道冷却 10min（实测 2026-11-17 20:00–20:51 16 个请求，归因面板全显示「上游渠道错误」）。归一已上收到 `provider.base.normalize_developer_role`，八条渠道统一调用（见 §3.2 的 `role: "developer"` 条）；`classify_error_code` 另以 `_ROLE_INVALID_MARKERS = ("001001044", "message role cannot empty")` 兜住其它形态 → INVALID（跳过上游 + 400 收尾，不冷却、不落 OTHER）。
 - 三个新值进 `CONTROLLED_ERROR_TYPES`（前端 `USAGE_ERROR_LABEL` 同步）；`model_capability` 计入模型可用性视图，`context_overflow` 不计（客户端上下文问题）。
 - **明细口径**：硬失败（DEAD/RESTRICTED/INVALID/CAPABILITY）每次尝试各落一行；限流 / 额度 / 超时 / 上下文等其余分类每次请求仅一行（收尾行），不逐次落——逐次落会把 `usage_hourly.requests` 与 Key 日请求额度一起刷高。
 
