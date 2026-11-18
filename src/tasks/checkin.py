@@ -7,12 +7,14 @@ import random
 import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from ..config import live
 from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
 from ..error_text import error_text
+from ..provider.base import CheckinResult, UpstreamReloginRequired
 from ..request_context import credential_scope
 from . import TaskReport
 from .account_shape import is_enterprise_account
@@ -101,6 +103,7 @@ class CheckinTask:
                  times: str | Callable[[], str] = "",
                  jitter_minutes: int | Callable[[], int] = 0,
                  skip_providers: str | Callable[[], str] = "",
+                 auto_login: bool | Callable[[], bool] = False,
                  rng: Callable[[int], int] | None = None) -> None:
         self._credentials = credentials
         self._providers = providers
@@ -115,6 +118,13 @@ class CheckinTask:
         # 跳过签到的渠道：每轮 run_once 现读。上游长期停发（raccoon 2026-11-05
         # 起 daily_grant 断供）时用它止损，不影响聊天与其它渠道。
         self._skip_providers = live(skip_providers)
+        # 按需登录（默认关，热更）：当日签到失败且凭证带 phone/password 时，
+        # 调 `provider.relogin` 换一份新会话再核一次。上游只在「新登录」时补发
+        # 当天 300（见 provider/raccoon/activity.py），refresh 换不出新会话。
+        self._auto_login = live(auto_login)
+        # done_key → 已尝试登录的日期。每天每凭证最多一次：密码错了再试只会
+        # 累积风控/锁号风险，而成功一次就已经补发了当天这笔。
+        self._login_days: dict[str, str] = {}
         # 抖动偏移的随机源：`rng(上限)` 返回 0..上限。可注入，测试不依赖真随机。
         self._rng = rng or (lambda span: random.randint(0, span))
         # done_key → 封账截止的 epoch 秒。原先是 set（只有「当天封/不封」），
@@ -209,6 +219,9 @@ class CheckinTask:
             del self._done_scopes[key]
         for key in [key for key in self._failures if not key.startswith(prefix)]:
             del self._failures[key]
+        # 按需登录的「今天试过了」记录随之清空，跨天恢复可登录
+        for key in [key for key in self._login_days if not key.startswith(prefix)]:
+            del self._login_days[key]
 
     def _sealed(self, done_key: str, now: time.struct_time) -> bool:
         """该作用域是否已封账且封账未到期。"""
@@ -241,6 +254,62 @@ class CheckinTask:
     def _clear_failure(self, done_key: str) -> None:
         """成功即清零：下次再失败从 10 分钟重新起算，不继承旧的退避档位。"""
         self._failures.pop(done_key, None)
+
+    def _can_autologin(self, provider: Any, data: dict, done_key: str,
+                       day: str) -> bool:
+        """该凭证这一轮能不能试一次按需登录。
+
+        四个前提缺一不可：开关打开、渠道提供 `relogin`、凭证带手机号+密码、
+        今天还没试过。**每天一次**是硬约束——密码错了再试只会累积风控甚至
+        锁号，而一旦成功当天这笔就已补发，没有第二次的必要。
+        """
+        if not self._auto_login():
+            return False
+        if getattr(provider, "relogin", None) is None:
+            return False
+        if not data.get("phone") or not data.get("password"):
+            return False
+        return self._login_days.get(done_key) != day
+
+    async def _try_autologin(self, provider: Any, candidate: Any, data: dict,
+                             result: Any, done_key: str,
+                             day: str) -> tuple[Any, dict]:
+        """签到失败后按需登录一次并重核；返回 (结论, 最新凭证数据)。
+
+        三种结局都要落在签到审计里，别让「登录失败」看起来像「签到没发」：
+
+        * 登录成功 → 落库新会话（`save_credential_data`，与预刷新同一写口）后
+          重新 `checkin` 一次，用第二次的结论；
+        * 上游明确拒绝（账号密码错 / 格式不符）→ 标「需重新登录」并停手，
+          不再每小时拿同一份错密码去撞；
+        * 其他异常（网络/5xx）→ 保留原结论，按既有退避下轮再试（**不改凭证**）。
+        """
+        self._login_days[done_key] = day            # 先记账：失败也不许重试
+        if self._pacer is not None:
+            await self._pacer.wait_turn()
+        with credential_scope(candidate.credential_id):
+            try:
+                refreshed = await provider.relogin(data)
+            except UpstreamReloginRequired as error:
+                reason = f"自动登录被上游拒绝，需重新登录：{error_text(error)}"
+                logger.warning("autologin rejected for %s: %s",
+                               candidate.credential_id, reason)
+                self._credentials.mark_relogin_required(candidate.credential_id,
+                                                        reason)
+                return CheckinResult(ok=False, message=reason), data
+            except Exception as error:  # noqa: BLE001 - 登录故障不该打断整轮
+                logger.warning("autologin failed for %s: %s",
+                               candidate.credential_id, error_text(error))
+                return result, data
+        if refreshed is None:                       # 没带凭据（不该发生，兜底）
+            return result, data
+        # 与预刷新/账号切换共用同一把编辑锁：整份覆写 data_enc，不能与别的
+        # 写者交错（否则后写者会用自己读到的旧快照覆盖新 token）。
+        async with self._credentials.edit_lock(candidate.credential_id):
+            self._credentials.save_credential_data(candidate.credential_id, refreshed)
+        logger.info("autologin refreshed %s", candidate.credential_id)
+        with credential_scope(candidate.credential_id):
+            return await provider.checkin(refreshed), refreshed
 
     async def run_once(self, *, now: time.struct_time | int | None = None,
                        trigger: str = "auto") -> TaskReport:
@@ -319,6 +388,11 @@ class CheckinTask:
                 self._note_failure(done_key, current)
                 report.failed += 1
                 continue
+            # 当天这笔没发时，若凭证带登录凭据就按需登录一次再核（默认关）：
+            # 上游只在「新登录」补发当天 300，而 refresh 换不出新会话。
+            if not result.ok and self._can_autologin(provider, data, done_key, day):
+                result, data = await self._try_autologin(
+                    provider, candidate, data, result, done_key, day)
             if result.ok:
                 report.succeeded += 1
                 self._clear_failure(done_key)

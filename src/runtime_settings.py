@@ -275,6 +275,12 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "逗号分隔的渠道名（如 `raccoon`）。上游长期停发每日积分时用它"
                "止损：只跳过这些渠道的签到，聊天与其它渠道不受影响。留空 = 全签。",
                task="checkin"),
+    HotSetting("raccoon_auto_login", bool, "小浣熊按需登录",
+               "当日没拿到每日积分时，用凭证里的 `phone` / `password` 登录一次换"
+               "新会话（上游只在登录时补发当天 300；`refresh` 换不出新会话）。"
+               "每天每凭证最多一次；密码被拒会把凭证标成「需重新登录」并停手。"
+               "开启等于把账号密码纳入 APP_SECRET 的信任面，按需再开。",
+               task="checkin"),
     HotSetting("log_buffer_lines", int, "日志页保留行数",
                "「任务与配置」→ 日志页的进程内环形缓冲行数（只收本进程日志，"
                "不读文件）。0 = 关闭该页（端点返回 404）。日志行发出前经脱敏"
@@ -969,6 +975,10 @@ class RuntimeSettings:
     @property
     def checkin_skip_providers(self) -> str:
         return str(self.get("checkin_skip_providers"))
+
+    @property
+    def raccoon_auto_login(self) -> bool:
+        return bool(self.get("raccoon_auto_login"))
 
     @property
     def log_buffer_lines(self) -> int:

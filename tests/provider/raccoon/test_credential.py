@@ -50,7 +50,8 @@ def test_from_dict_and_to_dict_round_trip():
     credential = RaccoonCredential.from_dict(
         {"access_token": "t", "uid": "u", "nickname": "n", "expires_at": 5})
     assert credential.to_dict() == {"access_token": "t", "uid": "u",
-                                    "nickname": "n", "expires_at": 5}
+                                    "nickname": "n", "expires_at": 5,
+                                    "phone": "", "password": ""}
 
 
 def test_from_dict_treats_bad_expiry_as_zero():
@@ -106,7 +107,7 @@ def test_from_token_falls_back_to_uid_claim_and_nickname():
     token = _jwt({"uid": "u3", "nickname": "nick", "exp": "bad"})
     credential = RaccoonCredential.from_import({})
     assert credential.to_dict() == {"access_token": "", "uid": "", "nickname": "",
-                                    "expires_at": 0}
+                                    "expires_at": 0, "phone": "", "password": ""}
     credential = RaccoonCredential.from_import({"token": token})
     assert credential.uid == "u3"
     assert credential.nickname == "nick"
@@ -126,3 +127,23 @@ def test_derive_device_id_is_stable_and_shaped_like_upstream():
     assert len(uuid_part.split("-")) == 5
     # uid 缺失时用 anonymous 占位（可用但会被关联），不是随机值
     assert derive_device_id("") == derive_device_id("")
+
+
+def test_import_keeps_optional_login_credentials():
+    """可选的 `phone` / `password` 原样落库：按需登录要用它们换新会话。
+
+    接受 `phone` / `phone_number` 两种写法（用户从后台复制的字段名不一定一致）；
+    密码不做任何格式纠错——对不对由上游登录接口裁决。
+    """
+    for key in ("phone", "phone_number"):
+        credential = RaccoonCredential.from_import(
+            {"access_token": BOX, key: "+86 139-0000-0001",
+             "password": "Abcd123456"})
+        assert credential.phone == "+86 139-0000-0001"
+        assert credential.password == "Abcd123456"
+        assert credential.to_dict()["phone"] == "+86 139-0000-0001"
+
+
+def test_from_dict_without_login_credentials_defaults_empty():
+    credential = RaccoonCredential.from_dict({"access_token": "t"})
+    assert credential.phone == "" and credential.password == ""

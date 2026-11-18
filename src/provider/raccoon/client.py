@@ -24,6 +24,7 @@ from ..lazy_clients import LazyClients
 from . import activity as raccoon_activity
 from . import credential as raccoon_credential
 from . import events as raccoon_events
+from . import login as raccoon_login
 from .credential import RaccoonCredential
 
 #: 上游主机（网页与 API 同域）
@@ -38,10 +39,17 @@ BILL_TYPE_INCOME = "income"
 EP_HEARTBEAT = "/api/web/auth/v1/devices_current_heartbeat"
 #: 网页会话级「页面访问」：每日积分延期/账单物化的触发点（心跳不算）
 EP_USER_INFO = "/api/web/auth/v1/user_info"
+#: 密码登录：`{nation_code, phone, password}`（后两者 AES-CFB 加密，见 `login.py`）。
+#: 服务端在登录时补发当天 `daily_grant`——这是「模拟登录」唯一可自动化的入口。
+EP_LOGIN = "/api/web/auth/v1/login_with_password"
 
 #: 官方 LLM 子进程的 User-Agent（openai SDK 形态）；不带也不影响调用，
 #: 带上只是为了不把自己标成脚本——本渠道没有其它指纹伪装。
 OFFICIAL_UA = "AsyncOpenAI/Python 2.8.0"
+#: 登录请求单独用浏览器 UA：这是网页表单的真实来源，用 SDK UA 提交登录态
+#: 没有先例，换来的是额外的风控风险，不值得省。
+LOGIN_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36")
 
 
 def prepare_body(payload: dict[str, Any], model: str) -> dict[str, Any]:
@@ -75,6 +83,15 @@ class UpstreamHTTPError(base.UpstreamHTTPError):
 
 class UpstreamProtocolViolation(base.UpstreamProtocolViolation):
     """上游返回了本渠道约定之外的东西（模型回显不一致等）。"""
+
+
+class LoginRejected(base.UpstreamReloginRequired):
+    """密码登录被上游拒绝（账号密码错 / 格式不符）。
+
+    继承 `UpstreamReloginRequired` 是刻意的：这类失败**重试无意义**，再试只会
+    累积风控与锁定风险。签到任务捕获它之后把凭证标成「需重新登录」并停手，
+    与「刷新令牌已作废」同一处置（见 `tasks/refresh.py` 的同名分支）。
+    """
 
 
 class RaccoonClient(LazyClients):
@@ -228,10 +245,11 @@ class RaccoonClient(LazyClients):
     async def visit(self, token: str) -> dict[str, Any]:
         """GET 网页会话 `user_info`：模拟一次页面访问（幂等、只读）。
 
-        为什么需要它：每日 300 积分在 00:00 自动发放，但只有「当天登录过」
-        才会延期到 7 天；设备心跳只刷新 `last_seen_at`，实测连续几天只发
-        心跳时每笔积分仍在当日 24:00 清零。网页加载时的 `user_info` 请求
-        是会话级访问，能触发延期与账单物化（实测调用后 4 分钟账单才出现）。
+        为什么仍然要它：**不是为了签出积分**（2026-11-18 复测：只拿旧 token 打
+        `user_info` 不会补发 `daily_grant`，见 `activity.py` 模块文档），而是为了
+        拿到 `trusted_device`——会话是否已被上游判为不可信、需不需要重登，只有
+        这个接口会说。另有一个副作用：刷新设备/会话的 `last_seen_at`，让会话
+        看起来仍是活的。积分补发只发生在**新登录会话**（`login()`）。
         """
         response = await self._short.get(
             f"{self.host}{EP_USER_INFO}",
@@ -265,6 +283,59 @@ class RaccoonClient(LazyClients):
             raise UpstreamProtocolViolation("non-JSON heartbeat response") from error
         payload = data.get("data") if isinstance(data, dict) else None
         return payload if isinstance(payload, dict) else {}
+
+    async def login(self, phone: str, password: str) -> dict[str, Any]:
+        """手机号 + 密码登录 → `{access_token, refresh_token}`（新会话）。
+
+        这是本渠道**唯一**可程序化的登录入口（短信要验证码、扫码要人扫、桌面
+        授权码要浏览器回调），也是让上游补发当天 300 分的唯一手段（见
+        `activity.py`）。加密口径见 `login.py`，已用错误密码反证过。
+
+        `refresh_token` 在网页会话下与 access 同源（实测 `POST /refresh` 原样
+        换回同一张），故只取 `access_token`，不落 refresh。
+
+        抛错口径：
+
+        * 密码短于上游下限 → `LoginRejected`（本地拦，省一次必然被拒的请求）；
+        * `200004 phone_or_password_verify_error` / `100002 param … invalid`
+          → `LoginRejected`：**重试无意义**，只会累积风控与锁定风险；
+        * 其余 4xx/5xx → `UpstreamHTTPError`（网络/上游故障，可稍后再试）。
+        """
+        if len(password) < raccoon_login.MIN_PASSWORD_LENGTH:
+            raise LoginRejected(
+                f"登录密码少于 {raccoon_login.MIN_PASSWORD_LENGTH} 位，"
+                "上游不接受（密码错误或未设置密码请改用网页登录后重贴凭据）")
+        body = {
+            "nation_code": "86",
+            "phone": raccoon_login.encrypt_param(
+                raccoon_login.normalize_phone(phone)),
+            "password": raccoon_login.encrypt_param(password),
+        }
+        response = await self._short.post(
+            f"{self.host}{EP_LOGIN}", json=body,
+            headers={"Content-Type": "application/json",
+                     "Accept": "application/json",
+                     "User-Agent": LOGIN_UA})
+        raw = await base.read_body_bounded(response)
+        if response.status_code >= 400:
+            # 账号密码错与参数格式错都属于「这张凭证自愈不了」，不能当网络故障
+            # 反复重试——上游对连续失败会加验证码甚至锁号。
+            lowered = raw.lower()
+            if b"phone_or_password_verify_error" in lowered \
+                    or b"params_invalid_error" in lowered:
+                raise LoginRejected(
+                    "上游拒绝登录（手机号或密码错误/格式不符）：请核对凭据里的 "
+                    f"phone/password，或改用网页登录后重贴 token（原始响应：{raw[:160]!r}）")
+            raise UpstreamHTTPError(response.status_code, raw)
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise UpstreamProtocolViolation("non-JSON login response") from error
+        payload = data.get("data") if isinstance(data, dict) else None
+        token = payload.get("access_token") if isinstance(payload, dict) else None
+        if not isinstance(token, str) or not token.strip():
+            raise UpstreamProtocolViolation("login response missing access_token")
+        return payload
 
 
 def _model_from_item(item: Any) -> Model | None:
@@ -401,6 +472,32 @@ class RaccoonProvider:
         """
         uid = RaccoonCredential.from_dict(credential_data).uid
         return f"raccoon|{uid}" if uid else ""
+
+    async def relogin(self, credential_data: dict) -> dict[str, Any] | None:
+        """按需登录：手机号 + 密码换一份**新会话**凭据（没有登录凭据时返回 None）。
+
+        为什么需要它：上游只在**当天第一次登录**时补发每日 300 分，而旧 token
+        无论怎么访问都不会触发（见 `activity.py`）。`RefreshTask` 的 refresh
+        轨道在这里没用——`/refresh` 只是原样换回同一张 token（sid 与 iat 都不变，
+        实测），产生不了「新登录」这一事件。所以只能真登录。
+
+        返回的 dict 沿用落库形态并保留 `phone` / `password`（否则下一次按需登录
+        就没凭据了）；`uid` / `nickname` / `expires_at` 从新 token 的 claims 重解。
+
+        `LoginRejected`（账号密码错/格式不符）向上抛：调用方应把凭证标成
+        「需重新登录」并停止重试，避免连续失败把账号打进风控或锁号。
+        """
+        credential = RaccoonCredential.from_dict(credential_data)
+        if not credential.phone or not credential.password:
+            return None
+        payload = await self.client.login(credential.phone, credential.password)
+        refreshed = RaccoonCredential.from_import({
+            "access_token": payload["access_token"],
+            "phone": credential.phone,
+            "password": credential.password,
+            "nickname": credential.nickname,
+        })
+        return refreshed.to_dict()
 
     async def activity(self, credential_data: dict) -> ActivityResult:
         """活跃上报：页面访问 + 设备心跳（都幂等、只读）。

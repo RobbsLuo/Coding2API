@@ -15,8 +15,11 @@ from src.provider.raccoon.client import (
     EP_BILLS,
     EP_CHAT,
     EP_HEARTBEAT,
+    EP_LOGIN,
     EP_MODELS,
     EP_USER_INFO,
+    LOGIN_UA,
+    LoginRejected,
     RaccoonClient,
     UpstreamHTTPError,
     UpstreamProtocolViolation,
@@ -406,3 +409,94 @@ async def test_heartbeat_errors():
 
     # 没有 data 段不算失败：心跳只要 200 就成立
     assert await _client(no_data).heartbeat("tok", "dev-x") == {}
+
+
+async def test_login_posts_encrypted_fields_and_returns_payload():
+    """登录请求：phone/password 都是 AES-CFB 密文，UA 走浏览器形态。"""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["path"] = request.url.path
+        seen["ua"] = request.headers["User-Agent"]
+        body = json.loads(request.content)
+        seen["body"] = body
+        return httpx.Response(200, json={"code": 0, "data": {
+            "access_token": "new-token", "refresh_token": "r"}})
+
+    payload = await _client(handler).login("+86 139 0000 0001", "Abcd123456")
+
+    assert seen["path"] == EP_LOGIN
+    assert seen["ua"] == LOGIN_UA
+    body = seen["body"]
+    assert isinstance(body, dict)
+    assert body["nation_code"] == "86"
+    # 字段是密文：能解回原值，但原文不出现在请求体里
+    from src.provider.raccoon.login import decrypt_param
+
+    assert decrypt_param(body["phone"]) == "13900000001"
+    assert decrypt_param(body["password"]) == "Abcd123456"
+    assert "Abcd123456" not in request_dump(seen)
+    assert payload["access_token"] == "new-token"
+
+
+def request_dump(seen: dict[str, object]) -> str:
+    return json.dumps(seen["body"], ensure_ascii=False)
+
+
+async def test_login_rejects_short_password_locally_without_http_call():
+    """密码短于上游下限：本地拦下，不发请求（省一次必然被拒的登录）。"""
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:  # pragma: no cover
+        calls["n"] += 1
+        return httpx.Response(200, json={"data": {"access_token": "t"}})
+
+    with pytest.raises(LoginRejected, match="8 位"):
+        await _client(handler).login("13900000001", "Ab1234")
+    assert calls["n"] == 0
+
+
+async def test_login_rejects_bad_credentials_as_relogin_required():
+    """账号密码错 / 参数格式错 → LoginRejected（重试无意义，别再撞风控）。"""
+    for body in (b'{"code":200004,"message":"phone_or_password_verify_error"}',
+                 b'{"code":100002,"message":"params_invalid_error"}'):
+        def handler(_request: httpx.Request, payload: bytes = body) -> httpx.Response:
+            return httpx.Response(400, content=payload)
+
+        with pytest.raises(LoginRejected):
+            await _client(handler).login("13900000001", "Abcd123456")
+
+
+async def test_login_other_errors_are_retryable():
+    def http_error(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(503, content=b'{"code":200903}')
+
+    with pytest.raises(UpstreamHTTPError):
+        await _client(http_error).login("13900000001", "Abcd123456")
+
+    # 标记大小写敏感（上游固定小写）：大写不算「账号密码错」，按可重试处理
+    def upper(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, content=b'{"CODE":200004}')
+
+    with pytest.raises(UpstreamHTTPError):
+        await _client(upper).login("13900000001", "Abcd123456")
+
+
+async def test_login_protocol_violations():
+    def non_json(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="nope")
+
+    with pytest.raises(UpstreamProtocolViolation):
+        await _client(non_json).login("13900000001", "Abcd123456")
+
+    def no_token(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 0, "data": {"refresh_token": "r"}})
+
+    with pytest.raises(UpstreamProtocolViolation, match="access_token"):
+        await _client(no_token).login("13900000001", "Abcd123456")
+
+    def blank_token(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 0, "data": {"access_token": "  "}})
+
+    with pytest.raises(UpstreamProtocolViolation, match="access_token"):
+        await _client(blank_token).login("13900000001", "Abcd123456")

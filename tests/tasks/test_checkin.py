@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from src.db.repo import CheckinEventRepository
 from src.provider.codebuddy.checkin import CheckinResult
 from src.tasks.checkin import CheckinTask, _cn_now
 from tests.helpers.scheduler import disabled_outcome as _disabled_outcome
@@ -326,8 +327,6 @@ async def test_checkin_records_audit_events(repo):
 
     「签到显示成功却没加积分」类问题要靠逐次记录定位；只记成功会让失败静默。
     """
-    from src.db.repo import CheckinEventRepository
-
     credentials, db = repo
     credentials.add(provider="codebuddy",
                     credential_data={"bearer_token": "a", "account_uid": "a"})
@@ -517,3 +516,222 @@ async def test_checkin_exception_log_includes_type_when_message_empty(repo, capl
         report = await task.run_once()
     assert report.failed == 1
     assert any("TimeoutError" in record.getMessage() for record in caplog.records)
+
+
+class AutoLoginProvider:
+    """带 `relogin` 的渠道替身：签到结果与登录结果都可控。"""
+
+    id = "raccoon"
+
+    def __init__(self, *, checkin_results=None, relogin_result=None,
+                 relogin_error=None):
+        self.checkin_results = list(checkin_results or [])
+        self.relogin_result = relogin_result
+        self.relogin_error = relogin_error
+        self.checkin_calls = 0
+        self.relogin_calls = 0
+
+    async def checkin(self, data):
+        self.checkin_calls += 1
+        if self.checkin_results:
+            return self.checkin_results.pop(0)
+        return CheckinResult(ok=True, credit=300.0, message="每日积分 +300")
+
+    async def relogin(self, data):
+        self.relogin_calls += 1
+        if self.relogin_error is not None:
+            raise self.relogin_error
+        return self.relogin_result
+
+    def checkin_scope(self, data):
+        return f"raccoon|{data.get('uid', '')}"
+
+
+def _failed_grant():
+    return CheckinResult(ok=False, message="上游今日每日积分尚未发放")
+
+
+def _raccoon_credential(credentials, *, with_login=True):
+    data = {"access_token": "tok", "uid": "u1"}
+    if with_login:
+        data.update({"phone": "13900000001", "password": "Abcd123456"})
+    return credentials.add(provider="raccoon", credential_data=data)
+
+
+async def test_checkin_autologin_off_by_default(repo):
+    """默认关：失败就失败，绝不拿用户密码去登录。"""
+    credentials, _db = repo
+    _raccoon_credential(credentials)
+    provider = AutoLoginProvider(checkin_results=[_failed_grant()])
+    report = await CheckinTask(credentials, {"raccoon": provider}).run_once()
+    assert report.failed == 1
+    assert provider.relogin_calls == 0
+
+
+async def test_checkin_autologin_needs_phone_and_password(repo):
+    """开了开关但凭证没带登录凭据 → 不登录（纯 token 用法不受影响）。"""
+    credentials, _db = repo
+    _raccoon_credential(credentials, with_login=False)
+    provider = AutoLoginProvider(checkin_results=[_failed_grant()])
+    task = CheckinTask(credentials, {"raccoon": provider}, auto_login=True)
+    assert (await task.run_once()).failed == 1
+    assert provider.relogin_calls == 0
+
+
+async def test_checkin_autologin_refreshes_and_rechecks(repo):
+    """登录成功 → 新会话落库 + 立刻重核一次，当天这笔就算签到了。"""
+    credentials, db = repo
+    cid = _raccoon_credential(credentials)
+    provider = AutoLoginProvider(
+        checkin_results=[_failed_grant()],
+        relogin_result={"access_token": "fresh", "uid": "u1",
+                        "phone": "13900000001", "password": "Abcd123456"})
+    report = await CheckinTask(credentials, {"raccoon": provider},
+                               auto_login=True).run_once()
+
+    assert report.succeeded == 1 and report.failed == 0
+    assert provider.relogin_calls == 1 and provider.checkin_calls == 2
+    # 新 token 已落库（下轮签到直接用新会话）
+    assert credentials.credential_data(cid)["access_token"] == "fresh"
+    assert credentials.credential_data(cid)["password"] == "Abcd123456"
+
+
+async def test_checkin_autologin_only_once_per_day(repo):
+    """同一凭证一天最多登一次：密码错了也不许拿同一份错密码反复撞。"""
+    credentials, _db = repo
+    _raccoon_credential(credentials)
+    provider = AutoLoginProvider(checkin_results=[_failed_grant(),
+                                                  _failed_grant()])
+    task = CheckinTask(credentials, {"raccoon": provider}, auto_login=True)
+
+    assert (await task.run_once()).failed == 1
+    assert (await task.run_once(trigger="manual")).failed == 1
+    assert provider.relogin_calls == 1
+
+
+async def test_checkin_autologin_rejection_disables_credential(repo):
+    """上游明确拒绝密码 → 标「需重新登录」并停手，而不是每小时重试。"""
+    from src.provider.base import UpstreamReloginRequired
+
+    credentials, _db = repo
+    cid = _raccoon_credential(credentials)
+    provider = AutoLoginProvider(
+        checkin_results=[_failed_grant()],
+        relogin_error=UpstreamReloginRequired("手机号或密码错误"))
+    events = CheckinEventRepository(_db)
+    report = await CheckinTask(credentials, {"raccoon": provider},
+                               auto_login=True, events=events).run_once()
+
+    assert report.failed == 1
+    row = credentials.list_all()[0]
+    assert row["disabled"] == 1 and "重新登录" in row["disabled_reason"]
+    # 失败原因落在签到审计里，别看起来像「上游没发积分」
+    assert "重新登录" in events.recent(cid)[0]["message"]
+
+
+async def test_checkin_autologin_failure_keeps_result_and_credential(repo):
+    """登录遇网络/5xx → 保留原结论、凭据不动，下轮按退避再试。"""
+    credentials, db = repo
+    cid = _raccoon_credential(credentials)
+    provider = AutoLoginProvider(checkin_results=[_failed_grant()],
+                                 relogin_error=RuntimeError("connect timeout"))
+    report = await CheckinTask(credentials, {"raccoon": provider},
+                               auto_login=True).run_once()
+
+    assert report.failed == 1
+    assert credentials.credential_data(cid)["access_token"] == "tok"
+    assert credentials.list_all()[0]["disabled"] == 0
+
+
+async def test_checkin_autologin_none_result_keeps_failure(repo):
+    """`relogin` 返回 None（渠道没登录轨道/凭据不完整）→ 按原失败处理。"""
+    credentials, _db = repo
+    _raccoon_credential(credentials)
+    provider = AutoLoginProvider(checkin_results=[_failed_grant()],
+                                 relogin_result=None)
+    report = await CheckinTask(credentials, {"raccoon": provider},
+                               auto_login=True).run_once()
+    assert report.failed == 1
+    assert provider.checkin_calls == 1
+
+
+async def test_checkin_autologin_skips_provider_without_relogin(repo):
+    """渠道没有 `relogin`（其它 8 家）→ 开关打开也不动。"""
+    credentials, _db = repo
+    credentials.add(provider="raccoon", credential_data={
+        "access_token": "tok", "uid": "u1",
+        "phone": "13900000001", "password": "Abcd123456"})
+    provider = ProbeProvider(checkin_ok=False)
+    provider.id = "raccoon"
+    report = await CheckinTask(credentials, {"raccoon": provider},
+                               auto_login=True).run_once()
+    assert report.failed == 1
+
+
+async def test_checkin_autologin_is_hot_reloadable(repo):
+    """取值器每轮现读：热更打开后下一轮就能登录。"""
+    credentials, _db = repo
+    _raccoon_credential(credentials)
+    flag = {"on": False}
+    provider = AutoLoginProvider(
+        checkin_results=[_failed_grant(), _failed_grant()],
+        relogin_result={"access_token": "fresh", "uid": "u1",
+                        "phone": "13900000001", "password": "Abcd123456"})
+    task = CheckinTask(credentials, {"raccoon": provider},
+                       auto_login=lambda: flag["on"])
+    assert (await task.run_once()).failed == 1
+    assert provider.relogin_calls == 0
+    flag["on"] = True
+    # manual 绕过失败退避（否则 10 分钟退避内本轮直接跳过）
+    assert (await task.run_once(trigger="manual")).succeeded == 1
+    assert provider.relogin_calls == 1
+
+
+async def test_checkin_autologin_records_are_pruned_across_days(repo):
+    """跨天清掉「今天已登录」记录，否则第二天永远不再尝试登录。"""
+    from src.tasks.checkin import _cn_epoch
+
+    credentials, _db = repo
+    _raccoon_credential(credentials)
+    provider = AutoLoginProvider(
+        checkin_results=[_failed_grant()],
+        relogin_result={"access_token": "fresh", "uid": "u1",
+                        "phone": "13900000001", "password": "Abcd123456"})
+    task = CheckinTask(credentials, {"raccoon": provider}, auto_login=True)
+
+    today = datetime(2026, 11, 18, 9, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+    tomorrow = today + timedelta(days=1)
+    task._login_days["stale"] = "2026-11-17"      # 前一天残留
+    task._prune(today.timetuple())
+    assert "stale" not in task._login_days
+
+    # 同一天只登一次；跨天后又能登（第二天的凭证同样失败、同样带登录凭据）
+    assert (await task.run_once(now=today.timetuple())).succeeded == 1
+    assert provider.relogin_calls == 1
+    # 第二天同样「上游没发」→ 记录已被清掉，可以再登一次
+    provider.checkin_results.append(_failed_grant())
+    assert (await task.run_once(now=tomorrow.timetuple())).succeeded == 1
+    assert provider.relogin_calls == 2
+    assert _cn_epoch(tomorrow.timetuple()) > _cn_epoch(today.timetuple())
+
+
+async def test_checkin_autologin_waits_for_pacer(repo):
+    """与签到同一 Pacer：登录也是打上游的写请求，不许绕开频率风控。"""
+    credentials, _db = repo
+    _raccoon_credential(credentials)
+    provider = AutoLoginProvider(
+        checkin_results=[_failed_grant()],
+        relogin_result={"access_token": "fresh", "uid": "u1",
+                        "phone": "13900000001", "password": "Abcd123456"})
+
+    waits = {"n": 0}
+
+    class PacerStub:
+        async def wait_turn(self) -> None:
+            waits["n"] += 1
+
+    task = CheckinTask(credentials, {"raccoon": provider}, auto_login=True,
+                       pacer=PacerStub())
+    assert (await task.run_once()).succeeded == 1
+    # 签到一次 + 按需登录一次 = 两次取轮次
+    assert waits["n"] == 2

@@ -61,6 +61,12 @@ class RaccoonCredential:
     nickname: str = ""
     #: JWT `exp`（epoch 秒）；0 表示未提供/不可解析
     expires_at: int = 0
+    #: 可选的网页登录凭据：仅在 `RACCOON_AUTO_LOGIN` 开启、且当日没拿到每日
+    #: 积分时用来换一份新会话（上游只在登录时补发当天这笔，见 `activity.py`）。
+    #: 手机号未设密码的账号（`user_info.password_status=unset`）填了也登不进，
+    #: 只能走短信/扫码，故默认留空、不影响纯 token 凭证。
+    phone: str = ""
+    password: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +74,8 @@ class RaccoonCredential:
             "uid": self.uid,
             "nickname": self.nickname,
             "expires_at": self.expires_at,
+            "phone": self.phone,
+            "password": self.password,
         }
 
     @classmethod
@@ -80,11 +88,18 @@ class RaccoonCredential:
             nickname=_text(raw.get("nickname")),
             expires_at=expires if isinstance(expires, int) and not isinstance(
                 expires, bool) else 0,
+            phone=_text(raw.get("phone")),
+            password=_text(raw.get("password")),
         )
 
     @classmethod
     def from_import(cls, raw: Any) -> RaccoonCredential:
-        """导入入参 → 凭证。空 token 由调用方（`import_credential`）报错。"""
+        """导入入参 → 凭证。空 token 由调用方（`import_credential`）报错。
+
+        除 token 外还接受可选的 `phone` / `password`：有了它们，服务才能
+        在「当天没拿到每日积分」时自己登录一次换新会话（上游只在登录时补发
+        当天 300，见 `activity.py`）。
+        """
         if isinstance(raw, str):
             return cls._from_token(raw)
         if not isinstance(raw, dict):
@@ -105,6 +120,10 @@ class RaccoonCredential:
             or credential.uid
         credential.nickname = _text(raw.get("nickname")) or _text(
             raw.get("user_name")) or credential.nickname
+        # 登录凭据原样保留（不做手机号格式纠错：调用登录前统一归一）
+        credential.phone = _text(raw.get("phone")) or _text(
+            raw.get("phone_number"))
+        credential.password = _text(raw.get("password"))
         return credential
 
     @classmethod

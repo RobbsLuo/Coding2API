@@ -471,3 +471,55 @@ async def test_activity_message_without_last_seen():
     fake = CheckinFakeClient(heartbeat_payload={})
     result = await RaccoonProvider(client=fake).activity(DATA)
     assert result.ok and result.message == "页面访问已上报；设备心跳已上报"
+
+
+class LoginFakeClient(CheckinFakeClient):
+    """带 `login` 的替身：只有按需登录路径会用到（其余用例不调用）。"""
+
+    def __init__(self, *, token="new-token", error=None, **kw):
+        super().__init__(**kw)
+        self.login_token = token
+        self.login_error = error
+        self.logins: list[tuple[str, str]] = []
+
+    async def login(self, phone, password):
+        self.logins.append((phone, password))
+        if self.login_error is not None:
+            raise self.login_error
+        return {"access_token": self.login_token}
+
+
+async def test_relogin_returns_none_without_credentials():
+    """凭证里没有 phone/password → 不登录（纯 token 导入的老用法照旧）。"""
+    fake = LoginFakeClient()
+    assert await RaccoonProvider(client=fake).relogin(DATA) is None
+    assert fake.logins == []
+
+
+async def test_relogin_returns_fresh_session_and_keeps_login_secret():
+    """登录成功 → 新 token + 从 claims 重解 uid，phone/password 必须保留。
+
+    不保留密码的话，下一次按需登录就没凭据了（每 30 天得让人重填一次）。
+    """
+    fake = LoginFakeClient(token="fresh-token")
+    data = {**DATA, "phone": "13900000001", "password": "Abcd123456",
+            "nickname": "elijah"}
+    stored = await RaccoonProvider(client=fake).relogin(data)
+
+    assert fake.logins == [("13900000001", "Abcd123456")]
+    assert stored["access_token"] == "fresh-token"
+    assert stored["phone"] == "13900000001"
+    assert stored["password"] == "Abcd123456"
+    assert stored["nickname"] == "elijah"
+    # 新 token 不是合法 JWT（测试值）→ uid/expires_at 归零，不猜
+    assert stored["uid"] == "" and stored["expires_at"] == 0
+
+
+async def test_relogin_propagates_login_rejection():
+    """账号密码错 → LoginRejected 向上抛（调用方据此停手并标需重登）。"""
+    from src.provider.raccoon.client import LoginRejected
+
+    fake = LoginFakeClient(error=LoginRejected("密码错误"))
+    data = {**DATA, "phone": "13900000001", "password": "Abcd123456"}
+    with pytest.raises(LoginRejected):
+        await RaccoonProvider(client=fake).relogin(data)
