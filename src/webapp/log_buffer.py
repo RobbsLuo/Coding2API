@@ -114,9 +114,14 @@ class LogBuffer:
 
     def __init__(self, *, capacity: Callable[[], int],
                  hub: LiveEventHub | None = None,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 persist: Any | None = None) -> None:
         self._capacity = capacity
         self._clock = clock
+        # 可选落库（`db/log_repo.LogRepository`）：None = 只保留内存环。
+        # 写内存与写库都在 append 里，页面实时性与重启后回看各取所需；
+        # 落库异常在 LogRepository 内部吞掉，不影响这里的推送。
+        self._persist = persist
         self._lines: deque[LogLine] = deque()
         self._lock = threading.Lock()
         self._seq = 0
@@ -161,6 +166,12 @@ class LogBuffer:
             while len(self._lines) > capacity:
                 self._lines.popleft()
         payload = line.as_dict()
+        # 先落库再推送：顺序反了的话，SSE 订阅者可能先看到某行、重启后却在库里
+        # 找不到它（排障时「明明看到了却没留痕」比慢几毫秒更难接受）。
+        if self._persist is not None:
+            self._persist.append(ts=line.ts, level=line.level,
+                                 logger_name=line.logger, message=line.message,
+                                 request_id=line.request_id)
         self._publish(payload)
         return payload
 

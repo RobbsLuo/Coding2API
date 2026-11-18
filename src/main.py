@@ -77,6 +77,7 @@ from .db.conn import Database
 from .db.crypto import CredentialCipher, CredentialDecryptError
 from .db.key_usage import KeyUsageRepository
 from .db.limits import LimitsRepository, day_usage
+from .db.log_repo import LogRepository
 from .db.migrate import apply_schema
 from .db.paid_models import PaidModelRepository
 from .db.repo import (
@@ -592,7 +593,11 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 日志环形缓冲（E3）：容量现读热更项 `log_buffer_lines`（0 = 关闭整页）。
     # 这里只建对象；handler 在 lifespan 里按当前值挂/摘，避免每个 build_app
     # 都往 root 上叠一个（测试会反复建 app）。
-    log_buffer = LogBuffer(capacity=lambda: runtime.log_buffer_lines)
+    # 日志落库（E3 持久化）：与内存环共用容量热更项之外的另一条上限。
+    # `LOG_PERSIST_LINES=0` 时只保留内存环（页面照常，重启即清空）。
+    log_repo = LogRepository(db, capacity=lambda: runtime.log_persist_lines)
+    log_buffer = LogBuffer(capacity=lambda: runtime.log_buffer_lines,
+                           persist=log_repo)
     # 模型目录原始表的**同一引用**交给 executor（credit_rate 查询）与 Services
     # （list_models 缓存）——这里先建空 dict，Services 装配时直接挂它
     model_cache: dict[str, dict[str, Any]] = {}
@@ -810,6 +815,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                               checkin_events=checkin_events,
                               audit=audit,
                               alerts=alerts,
+                              logs=app_.state.services.log_repo,
                               backup=BackupTask(config.db_path,
                                                 keep=lambda: runtime.backup_keep),
                               upstream_status=upstream_status_task,
@@ -963,6 +969,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
         login_throttle=app.state.login_throttle,
         live_events=live_events,
         log_buffer=log_buffer,
+        log_repo=log_repo,
         upstream_auth=app.state.upstream_auth,
         model_aliases=model_aliases,
         # executor 拿的就是这一份引用：目录恢复 / 拉取 / TTL 刷新写进来后，

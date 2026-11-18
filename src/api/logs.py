@@ -93,17 +93,42 @@ def create_router(services: Services) -> APIRouter:
 
     @router.get("/api/logs")
     async def list_logs(principal=Depends(principal_from_request),
-                        limit: int = DEFAULT_LOG_LIMIT):
-        """最近 N 行（旧→新）。`limit` 夹到 `1..当前容量`。"""
+                        limit: int = DEFAULT_LOG_LIMIT,
+                        request_id: str | None = None,
+                        since: int | None = None,
+                        level: str | None = None):
+        """最近 N 行（旧→新）；可按 `request_id` / 时间窗 / 级别过滤。
+
+        三条数据路径，按优先级：
+
+        1. **带 `request_id`** → 直接查落库表（`log_events`）。一次请求的全部
+           日志（含轮换到别的渠道的尝试）都带同一个 id，这是排障主入口。
+        2. **落库开启** → 查落库表（重启后仍有历史），内存环只用于 SSE。
+        3. **落库关闭** → 退回内存环（与旧行为逐字节一致）。
+
+        为什么 2 不合并内存环：两边是同一份数据的两种保留期，合并要去重 `seq`
+        且顺序会交错；页面只需要一份稳定的历史。
+        """
         require_admin(principal)
         sync_root_handler(buffer)          # 热更从 0 打开后无需重启即可挂上
+        repo = services.log_repo
+        if repo is not None and repo.enabled:
+            capacity = repo.capacity()
+            clamped = max(1, min(limit, capacity))
+            return {"lines": repo.query(limit=clamped, request_id=request_id,
+                                        since=since, level=level),
+                    "capacity": capacity, "limit": clamped,
+                    "persisted": True}
         if not buffer.enabled:
             return JSONResponse(status_code=404, content=_DISABLED)
         capacity = buffer.capacity()
         clamped = max(1, min(limit, capacity))
-        return {"lines": buffer.snapshot(limit=clamped),
-                "capacity": capacity,
-                "limit": clamped}
+        lines = buffer.snapshot(limit=clamped)
+        if request_id:
+            lines = [line for line in lines
+                     if line.get("request_id") == request_id]
+        return {"lines": lines, "capacity": capacity, "limit": clamped,
+                "persisted": False}
 
     @router.get("/api/logs/stream")
     async def stream_logs(request: Request,

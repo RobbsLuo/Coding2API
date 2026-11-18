@@ -35,8 +35,14 @@ class FakeRequest:
         return self.calls > self.disconnect_after
 
 
-def _app(tmp_path, *, buffer_lines: int | None = None):
+def _app(tmp_path, *, buffer_lines: int | None = None, persist_lines: int = 0):
+    """建 app；`persist_lines=0` 让端点走**内存环**（这些用例验的是旧口径）。
+
+    持久化路径的用例显式传 `persist_lines>0`，见文件末尾 `LogRepository` 一节——
+    两条数据路径的断言不混在一起，避免「到底读了哪一份」说不清。
+    """
     extra = {} if buffer_lines is None else {"LOG_BUFFER_LINES": str(buffer_lines)}
+    extra["LOG_PERSIST_LINES"] = str(persist_lines)
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root", **extra)
     return build_app(settings)

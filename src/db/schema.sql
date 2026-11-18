@@ -377,3 +377,20 @@ CREATE INDEX IF NOT EXISTS idx_alert_rule_scope ON alert_events(rule, scope);
 -- 注：resolved_at 上的索引不在这里，因为它引用的列本身是迁移补的
 -- （见 src/db/migrate.py 的 _MIGRATION_INDEXES）——老库执行到本脚本时该列
 -- 尚未补上，CREATE INDEX 会 no such column。新库由迁移循环统一建。
+
+-- 日志环形表（E3 持久化）：进程重启后仍能回看「刚刚发生了什么」。
+-- 与 audit_events 的区别：这里是**运维视图**（路由 / 上游错误文案 / 请求 ID），
+-- 不是合规流水；每行写入前已过 `redact_or_drop` 脱敏，命中敏感形态整行丢弃。
+-- 容量由 `LOG_PERSIST_LINES` 控制（0 = 不落库，只保留内存环），超出时按
+-- `seq` 从旧到新删除——保留最近 N 行而不是按时间，重启前后口径一致。
+CREATE TABLE IF NOT EXISTS log_events (
+    seq        INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts         INTEGER NOT NULL,           -- epoch 秒（整数：够排障，省空间）
+    level      TEXT NOT NULL,              -- DEBUG / INFO / WARNING / ERROR
+    logger     TEXT NOT NULL,
+    message    TEXT NOT NULL,
+    request_id TEXT                        -- 无请求上下文（后台任务）时为 NULL
+);
+
+-- 按 request_id 回溯一次请求的全部日志（`GET /api/logs?request_id=…`）
+CREATE INDEX IF NOT EXISTS idx_log_events_request_id ON log_events(request_id);

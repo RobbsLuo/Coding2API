@@ -125,6 +125,7 @@ echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-
 - 只收本进程 `logging`；不读文件、不 tail。多进程各看各的。
 - **脱敏是硬前提**：每行发出前过白名单。命中 `token` / `secret` / `authorization` / `cookie` / `password` / `api_key`、`sk-…` 形状或 `Bearer <值>` → 整行丢弃。
 - 缓冲 `LOG_BUFFER_LINES`（默认 500，可热更），环形覆盖最旧。`0` 关整页（两端点 404）。
+- **落库** `LOG_PERSIST_LINES`（默认 2000，可热更）：同一批行再写一份到 SQLite `log_events` 环形表，**重启后仍能回看**，并支持按 `request_id` 回溯（`GET /api/logs?request_id=…`、`?since=<epoch>`、`?level=ERROR`）。`0` = 只留内存环。容量按「最近 N 行」裁剪，不按时间。写库失败不上抛（日志处理器不能炸业务），只告警一次。
 - 单行上限 4000 字符；每行带 `seq`、时间、级别、logger、`request_id`。**点行尾的 `#前8位`** 即按该 request_id 过滤，收起一次请求的全部日志（executor 每次换号 / 冷却 / 降级都带同一个 ID）；也可以直接把响应头 `X-Request-ID` 粘进关键字框。stdout / journald / launchd 文件同样带 `[request_id]`（后台任务为 `-`）。订阅者上限 4，超限 429 + `Retry-After`。
 
 ## 使用
@@ -773,6 +774,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `CHECKIN_JITTER_MINUTES` | `0` | 签到抖动（分钟），时点前随机提前。可热更 |
 | `CHECKIN_SKIP_PROVIDERS` | `""` | 跳过签到的渠道（逗号分隔，如 `raccoon`）：只停签到，聊天不受影响。可热更 |
 | `LOG_BUFFER_LINES` | `500` | 服务端日志页缓冲行数；`0` 关该页。可热更 |
+| `LOG_PERSIST_LINES` | `2000` | 日志落库行数（`log_events` 环形表）；`0` = 不落库。可热更 |
 | `ALERT_ENABLED` | `true` | 运维告警开关 |
 | `ALERT_WEBHOOK_URL` | 空 | 通用 Webhook，逗号分隔（≤16，仅 http(s)，拒内网 / 回环防 SSRF），带 `X-Coding2API-Signature` |
 | `ALERT_FEISHU_WEBHOOK_URL` | 空 | 飞书群机器人地址；按 `msg_type=text` 发送，URL 校验同通用 Webhook |

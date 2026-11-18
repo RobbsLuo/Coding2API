@@ -91,7 +91,10 @@ SCHEMA_NAME = "schema.sql"
 # 只记「有没有」——账号密码本体在 data_enc 里（导出剔除），列表页据此显示
 # 「已保存」而不必为每一行解密。老库补 NULL =「未配置」，与补列前一致
 # （补列前按需登录只能靠导入时带 phone/password，无 UI 入口可显示）。
-SCHEMA_VERSION = 35
+# 36：新增 log_events（日志环形表，持久化最近 N 行）。老库由 schema.sql 的
+# CREATE TABLE IF NOT EXISTS 建表，无补列需求；`seq` 用 AUTOINCREMENT 保证
+# 跨重启单调，前端仍按它排序/去重。
+SCHEMA_VERSION = 36
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (

@@ -205,6 +205,10 @@ class Settings(BaseSettings):
     # 服务端日志页（「任务与配置」→ 日志）：进程内环形缓冲的保留行数，
     # 0 = 关闭该页（端点返回 404）。只收本进程 logging 记录，不读文件。
     log_buffer_lines: int = 500
+    # 日志**持久化**行数（`log_events` 环形表）：进程重启后仍能回看最近的日志，
+    # 也支持按 `request_id` 回溯一次请求。0 = 不落库（只保留上面的内存环）。
+    # 默认 2000 行：SQLite 单表几千行对写延迟无感，够覆盖「昨天出的问题今天查」。
+    log_persist_lines: int = 2000
     # 运维告警：周期评估七类规则，命中即落 alert_events 并可选推送
     # webhook。webhook 留空 = 只留站内记录、不外推。
     alert_enabled: bool = True

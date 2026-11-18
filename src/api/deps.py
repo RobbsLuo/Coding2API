@@ -145,6 +145,9 @@ class Services:
     model_refreshing: set[str] = field(default_factory=set)
     model_refresh_tasks: set[Any] = field(default_factory=set)
     pending_model_refreshes: list[Any] = field(default_factory=list)
+    # 日志落库（`log_events`）：`/api/logs` 在内存环为空（刚重启）或要按
+    # `request_id` 回溯时读它。None = 只有内存环（测试替身）。
+    log_repo: Any = None
 
 
 def get_services(request: Request) -> Services:

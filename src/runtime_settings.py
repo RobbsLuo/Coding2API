@@ -286,6 +286,10 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "每天每凭证最多一次；密码被拒会把凭证标成「需重新登录」并停手。"
                "开启等于把账号密码纳入 APP_SECRET 的信任面，按需再开。",
                task="checkin"),
+    HotSetting("log_persist_lines", int, "日志落库行数",
+               "日志环形表（`log_events`）保留的最近行数：重启后仍可回看，也支持按 "
+               "`request_id` 回溯一次请求。0 = 不落库（只保留内存环）。调小后旧行"
+               "在下一次写入时被裁掉。", minimum=0, group="observability"),
     HotSetting("log_buffer_lines", int, "日志页保留行数",
                "「任务与配置」→ 日志页的进程内环形缓冲行数（只收本进程日志，"
                "不读文件）。0 = 关闭该页（端点返回 404）。日志行发出前经脱敏"
@@ -992,6 +996,10 @@ class RuntimeSettings:
     @property
     def log_buffer_lines(self) -> int:
         return int(self.get("log_buffer_lines"))
+
+    @property
+    def log_persist_lines(self) -> int:
+        return int(self.get("log_persist_lines"))
 
     # ---------------------------------------------------------- 运维告警
 
