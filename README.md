@@ -22,7 +22,7 @@
 - **脱敏统计**：不存对话；明细 90 天、小时汇总永久；按人 / 渠道 / 模型 / 凭证可视化；成本按 OpenRouter 刊例价估算；速度分正文 / 总产出；明细走 SSE。
 - **月度账单**（`operator` 起）：按月按人 / 按 API Key 汇总请求、token 与成本；CSV（按人）/ JSONL（逐条明细）导出并写审计。按 Key 明细受 90 天保留期限制。
 - **工具调用健壮性**：`id` 缺失按 index 补并记忆；DeepSeek DSML 泄漏回读成结构化调用并改写 `finish_reason`；非流式坏 `arguments` fail-closed（400，不冷却凭证）。
-- **失败分流**：`11134` 供应商过载按排队语义（不罚号、原号等一轮再开）；请求级错误（内容风控 / 上下文超限 / 坏图）换号后不搬会话粘性；全池耗尽 503 带 `Retry-After`（所有候选里最早的自动恢复点）。
+- **失败分流**：`11134` 供应商过载按排队语义（不罚号、原号等一轮再开）；请求级错误（内容风控 / 上下文超限 / 坏图）换号后不搬会话粘性；全池耗尽 503 带 `Retry-After`（所有候选里最早的自动恢复点）与**池子成因拆解**（`total=25 cooling=20 disabled=3 …`，见下）。
 - **出站隐私脱敏**（可选，默认关）：`PRIVACY_RULES` 按规则对**出站副本**打码（连接串 userinfo / 邮箱 / 手机号 / 内网 IP）；`request.raw`、`tool_calls` 参数与 JSON Schema 不动，占位符单向不还原。
 - **渠道 ToS 风险登记**：导入凭证时展示 green / gray / red 与理由（运营判断），审计留等级；只提示不阻断调度。
 - **出口 IP 粘性**（可选）：`CREDENTIAL_PROXY_POOL` 非空时一号一出口（sha256 稳定分配，重启不漂移）；推理、探活、签到、预刷新、成长、管理台单条动作都走同一出口。
@@ -425,6 +425,29 @@ export GOOGLE_GENAI_BASE_URL=http://127.0.0.1:8000   # SDK 会自拼 /v1beta
 - **入站映射**：`contents[].parts` 的 `text` / `inlineData`（image_url）/ `functionCall` / `functionResponse`；`systemInstruction`、`generationConfig`（temperature / topP / maxOutputTokens / stopSequences / 采样惩罚 / `responseMimeType` / `responseSchema`）、`tools[].functionDeclarations`、`toolConfig.functionCallingConfig`。
 - **出站**：`candidates[].content.parts`（text / thought / functionCall）+ `finishReason` + `usageMetadata`；流式每帧一个完整 `GenerateContentResponse`，终止帧带 `finishReason`（无 `[DONE]`）。
 - **不支持 → 400**：服务端工具（`googleSearch` / `codeExecution` / `retrieval`）、`candidateCount != 1`、`responseMimeType` 既非 `text/plain` 也非 `application/json`。`thinkingConfig` / `topK` 丢弃（chat 无等价语义，不冒充支持）。
+
+### 内置检索（`/v1/tools/search`、`/v1/fetch`）
+
+上游 CodeBuddy 官方 CLI 本身带 web search 与网页抓取，本服务把它们开成独立出口——**不接任何第三方搜索 API**，零外部依赖、零额外费用。
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/tools/search \
+  -H "Authorization: Bearer sk-你的key" -H 'Content-Type: application/json' \
+  -d '{"query":"opencode zen free models","max_results":5}'
+
+curl -X POST http://127.0.0.1:8000/v1/fetch \
+  -H "Authorization: Bearer sk-你的key" -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/post","prompt":"提取要点"}'
+```
+
+- **搜索入参**：`query`（必填，≤1000 字）、`max_results`（默认 5，夹到 1–20）、`allowed_domains`、`blocked_domains`（拼成 `-site:` 同上游客户端）、`freshness`。
+- **搜索出参**：`{provider, results:[{title,url,snippet,site?,favicon?}], total_results, response_time_ms}`。
+- **抓取入参**：`url`（必填，仅 http/https）、`prompt`、`max_length`（默认 20 万字符）。
+- **抓取出参**：`{url, content, content_type}`；上游**只接受文本页**（非文本返回错误）。
+- **凭证与调度**：走同一公共凭证池；按健康度排候选，遇到「这个号不可用」（403）自动换下一个。
+- **失败语义**：上游业务码拒绝 → 400 / 429 / 403；无可用凭证 → 503 + `Retry-After`；上游 5xx → 502。
+- **不落用量明细**：这两个端点不消耗 token，落库会污染 token 与成本口径；访问日志仍带 `X-Request-ID`。
+- **目前仅 CodeBuddy（国内 / 国际）** 实现；其它渠道没有对应上游端点。
 
 ### CC Switch 一键导入
 

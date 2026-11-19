@@ -44,6 +44,7 @@ from .api import (
     models,
     playground,
     responses,
+    tools,
     usage,
 )
 from .api.context import build_context_compressor, build_prefix_observer
@@ -1042,6 +1043,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.include_router(responses.create_router(services))
     app.include_router(messages.create_router(services))
     app.include_router(gemini.create_router(services))
+    app.include_router(tools.create_router(services))
     app.include_router(models.create_router(services))
     app.include_router(balance.create_router(services))
     app.include_router(playground.create_router(services))

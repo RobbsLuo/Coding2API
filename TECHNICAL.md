@@ -379,6 +379,34 @@ def health_score(q: Quota | None) -> int | None:
 - **未实现**：签到 / 成长 / 活跃上报 / token 刷新 / 额度探测——标准端点不提供，任务层按方法缺失自动跳过。
 - **限制**：一个部署只配一条（渠道 id 固定 `generic`）。多接几家需把 `KNOWN_PROVIDERS` 动态化。
 
+
+### 3.12 内置检索工具与 503 成因拆解
+
+**检索工具**（`provider/codebuddy/tools.py` + `api/tools.py`）：上游端点 `/agenttool/v1/search` 与
+`/agenttool/v1/webfetch` 由官方 CLI 2.185.0 解包实证（`dist/codebuddy-headless.js` 的
+`WEB_SEARCH_API_PATH` / `WEB_FETCH_API_PATH` 常量与 `performWebSearch` / `fetchContentViaApi` 实现）。
+
+- 契约：搜索 `{query, type:"text2text", max_results:5, allowed_domains?, freshness?}`；
+  `blocked_domains` 由客户端拼成 ` -site:xxx` 并入 `query`，本模块照做。抓取
+  `{url, format:"markdown", prompt, timeout:<秒>, max_length:<字符>}`。
+- 响应是**私有信封**：`code == 0` 取 `data`，否则按业务码映射对外状态
+  （`11101/11128/11135` → 400、`14018/1005` → 429、`11140` → 403、其余 → 502）。
+- 头族复用 `CodeBuddyClient._headers`（含 intl 指纹）：`tools.py` 不直接 import
+  `client.build_headers`（那会循环导入），走实例方法保证与聊天请求**逐字节同源**。
+- 选号走 `Executor.pick_aux(providers)`：**不做模型级冷却过滤**（工具端点无模型名），
+  但账号级冷却 / 禁用 / 限额 / 在途仍生效；不占用半开探测位（工具调用既不计费，
+  也不该改变聊天侧的探测节奏）。403 视为「这个号不可用」→ 换下一个。
+- **不落 `usage_events`**：不消耗 token，落库会污染 token 与成本口径。
+
+**503 成因拆解**（`Executor._no_pick_breakdown` / `_pool_hint`）：全池耗尽时把每个候选
+按**与 `_selectable` / `_choose` 相同的判据顺序**归类计数，拼进 503 文案与 WARN 日志：
+
+    disabled → paused → cooling（账号级）→ model_cooled（模型级）→ limits → inflight → tried → selectable
+
+文案形如 `all credentials unavailable (total=25 cooling=20 tried=3)`；只列**非零**项，
+空池返回空串（原文案逐字节不变）。`selectable > 0` 而仍选不到号时说明还有本函数看不到的
+闸门（半开探测位被占 / 粘性绑定失效），按自检看待。
+
 ## 4. Provider 协议
 ```python
 class Provider(Protocol):

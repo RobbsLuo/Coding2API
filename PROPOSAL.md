@@ -124,7 +124,19 @@
 - **能力**：聊天（流式 / 非流式，走共享 `openai_chunk` 解析）、模型列表（`/models` 不可用时回落 `GENERIC_MODELS` 静态表）。无签到 / 成长 / 活跃上报 / 刷新 / 额度探测（标准端点不提供），任务层按方法缺失自动跳过。
 - **限制**：一个部署只配一条（渠道 id 固定 `generic`）。多接几家需把 `KNOWN_PROVIDERS` 动态化，未做。
 
-### 2.12 冲突与陷阱
+### 2.12 内置检索工具（`codebuddy` / `codebuddy_intl`）
+
+- 端点 `/agenttool/v1/search` 与 `/agenttool/v1/webfetch`：来源是**官方 CLI 2.185.0 解包**
+  （`dist/codebuddy-headless.js` 的常量与实现），不是第三方转述。
+- 搜索 `{query, type:"text2text", max_results:5, allowed_domains?, freshness?}`；`blocked_domains`
+  由客户端拼成 ` -site:xxx` 并入 `query`。抓取 `{url, format:"markdown", prompt, timeout, max_length}`，
+  **只接受文本页**（非文本由客户端抛 `NonTextResourceError`）。
+- 私有信封：`code != 0` 是业务失败；`401/403` 表示该凭证不可用（换号）。
+- 价值：Responses 的 `web_search` 托管工具此前被静默丢弃；有独立出口后既可直连，
+  也可作为后续把 `web_search` 映射过来的实现基础。**零外部依赖、零额外费用**。
+- 未核实：国际站是否同样挂载 `/agenttool/*`；搜索/抓取是否消耗积分。
+
+### 2.13 冲突与陷阱
 
 
 | 问题 | 事实 | 对策 |

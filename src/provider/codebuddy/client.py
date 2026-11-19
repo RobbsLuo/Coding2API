@@ -44,6 +44,7 @@ from .headers import (
     host_of,
 )
 from .model_access_store import ModelAccessStore
+from .tools import CodeBuddyTools
 
 # 写超时覆盖的是上传请求体阶段，不是首字等待：大上下文请求体可达数 MB，
 # 经代理链路 10s 会稳定超时；首字等待由 read=None +
@@ -313,6 +314,15 @@ class CodeBuddyClient(LazyClients):
         self._access_store = (
             ModelAccessStore(access_cache_path, MODEL_ACCESS_CACHE_TTL_SECONDS)
             if access_cache_path else None)
+
+    @property
+    def tools(self) -> Any:
+        """内置检索工具（search / webfetch）。懒建一次，共用 `_short` 连接池。"""
+        cached = getattr(self, "_tools", None)
+        if cached is None:
+            cached = CodeBuddyTools(self)
+            self._tools = cached
+        return cached
 
     def _headers(self, credential: CodeBuddyCredential, *,
                  conversation_seed: str | None = None,
@@ -910,6 +920,35 @@ class CodeBuddyProvider:
         async with paced(self.pacer, key):
             async for event in self.client.stream_chat(credential, payload, model):
                 yield event
+
+    # ------------------------------------------------------- 内置检索工具
+
+    async def search_web(self, credential_data: dict, *, query: str,
+                         max_results: int = 5,
+                         allowed_domains: list[str] | None = None,
+                         blocked_domains: list[str] | None = None,
+                         freshness: str | None = None) -> dict[str, Any]:
+        """上游内置 web search（`/agenttool/v1/search`）。
+
+        放在 provider 上而不是 API 层直连：只有渠道知道怎么拼自己的头族与凭证。
+        与聊天共用 `paced` 节流桶——搜索同样打同一个上游网关。
+        """
+        credential = CodeBuddyCredential.from_dict(credential_data)
+        async with paced(self.pacer, _pacer_key(self.id, credential)):
+            return await self.client.tools.search(
+                credential, query=query, max_results=max_results,
+                allowed_domains=allowed_domains, blocked_domains=blocked_domains,
+                freshness=freshness)
+
+    async def fetch_url(self, credential_data: dict, *, url: str,
+                        prompt: str = "", max_length: int | None = None,
+                        timeout: float | None = None) -> dict[str, Any]:
+        """上游内置网页抓取（`/agenttool/v1/webfetch`，只接受文本页）。"""
+        credential = CodeBuddyCredential.from_dict(credential_data)
+        async with paced(self.pacer, _pacer_key(self.id, credential)):
+            return await self.client.tools.fetch(
+                credential, url=url, prompt=prompt, max_length=max_length,
+                timeout=timeout)
 
     def host(self) -> str:
         return host_of(self.client.endpoint)

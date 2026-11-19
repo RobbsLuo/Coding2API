@@ -259,6 +259,7 @@ async def test_complete_exhausts_rotation_without_last_error(tmp_path):
     """换号次数用尽且无 last_error 时的消息分支（executor 135）。
 
     路径：唯一凭证被硬禁用 → 选不到号 → 无 last_error 的 503 消息。
+    文案末尾追加池子成因拆解（`disabled=1`），见 `_pool_hint`。
     """
     credentials, db = _repo(tmp_path)
     credential_id = credentials.add(provider="trae", credential_data={"accessToken": "a"})
@@ -267,7 +268,7 @@ async def test_complete_exhausts_rotation_without_last_error(tmp_path):
     with pytest.raises(NoHealthyCredential) as caught:
         await executor.complete(parse_chat_request(
             {"messages": [{"role": "user", "content": "hi"}]}))
-    assert str(caught.value) == "all credentials unavailable"
+    assert str(caught.value) == "all credentials unavailable (total=1 disabled=1)"
     db.close()
 
 async def test_pick_returns_none_when_all_cooling(tmp_path):

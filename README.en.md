@@ -417,6 +417,24 @@ export GOOGLE_GENAI_BASE_URL=http://127.0.0.1:8000   # SDK appends /v1beta
 - **Outbound**: `candidates[].content.parts` (text / thought / functionCall) + `finishReason` + `usageMetadata`; streaming emits one full `GenerateContentResponse` per frame and the terminating frame carries `finishReason` (no `[DONE]`).
 - **400 on unsupported**: server-side tools (`googleSearch` / `codeExecution` / `retrieval`), `candidateCount != 1`, `responseMimeType` other than `text/plain` or `application/json`. `thinkingConfig` / `topK` are dropped (no chat equivalent; not faked).
 
+### Built-in retrieval (`/v1/tools/search`, `/v1/fetch`)
+
+The upstream CodeBuddy CLI ships its own web search and page fetch. This service exposes them as standalone endpoints — **no third-party search API**, no extra dependency, no extra cost.
+
+```bash
+curl -X POST http://127.0.0.1:8000/v1/tools/search \
+  -H "Authorization: Bearer sk-your-key" -H 'Content-Type: application/json' \
+  -d '{"query":"opencode zen free models","max_results":5}'
+```
+
+- **Search input**: `query` (required, ≤1000 chars), `max_results` (default 5, clamped 1–20), `allowed_domains`, `blocked_domains` (joined as `-site:` like the official client), `freshness`.
+- **Search output**: `{provider, results:[{title,url,snippet,site?,favicon?}], total_results, response_time_ms}`.
+- **Fetch input**: `url` (required, http/https only), `prompt`, `max_length` (default 200k chars). **Fetch output**: `{url, content, content_type}`; upstream only accepts text pages.
+- **Scheduling**: same shared credential pool, ordered by health; a 403 ("this credential is unusable") falls through to the next one.
+- **Failures**: business-code rejection → 400/429/403; no credential → 503 + `Retry-After`; upstream 5xx → 502.
+- **No usage rows**: these endpoints consume no tokens; recording them would pollute token and cost accounting.
+- **CodeBuddy (CN / INTL) only** — other channels have no such upstream endpoint.
+
 ### CC Switch one-click import
 
 *API keys* page generates `ccswitch://` deep links (Claude Code / Codex CLI / OpenCode). Entry points: post-creation dialog, per-row *Import to CC Switch*. Links contain plaintext key → generated only on explicit action. Requires CC Switch v4.0.10+. Endpoint form depends on `apiFormat`: Anthropic to root (no `/v1`); OpenAI to `/v1`. No Gemini surface.

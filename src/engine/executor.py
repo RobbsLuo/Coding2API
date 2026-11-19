@@ -408,6 +408,99 @@ class Executor:
                 remaining = wait
         return remaining
 
+    def pick_aux(self, providers: tuple[str, ...]) -> list[tuple[str, dict[str, Any]]]:
+        """为「没有模型概念」的辅助端点（search / fetch）按健康度排出候选凭证。
+
+        与聊天选号的区别：这些端点不针对某个模型，所以**不做模型级冷却过滤**
+        （没有模型名可查）；账号级冷却、禁用、限额、在途仍然生效——那些是账号
+        状态，与调用哪条路径无关。
+
+        返回**有序**列表而不是单个：调用方按顺序尝试，遇到「当前号不可用」
+        （上游 401/403）就换下一个。全部候选都不可用时返回空列表，由调用方回
+        503 并带同样的 `_model_cooled` 之外的成因说明。
+
+        为什么不复用 `_pick`：`_pick` 绑定 `ModelTarget`（含模型归属收窄、
+        粘性、半开探测位），把工具调用塞进去会让「一张凭证在一次工具调用里
+        长期占着半开探测位」，而工具调用既不计费也不该影响聊天侧的探测节奏。
+        """
+        candidates = self._deps.credentials.candidates(
+            providers, selectable_only=True)
+        if not candidates:
+            return []
+        now = int(time.time())
+        ordered: list[str] = []
+        remaining = list(candidates)
+        while remaining:
+            credential_id = self._deps.scheduler.select(remaining, set(), now)
+            if credential_id is None:
+                break
+            ordered.append(credential_id)
+            remaining = [c for c in remaining if c.credential_id != credential_id]
+        result: list[tuple[str, dict[str, Any]]] = []
+        for credential_id in ordered:
+            data = self._safe_credential_data(credential_id)
+            if data is not None:
+                result.append((credential_id, data))
+        return result
+
+    def _no_pick_breakdown(self, target: ModelTarget,
+                          tried: set[str]) -> dict[str, int]:
+        """选不到号时，把**每个候选被哪道闸门挡下**归类计数。
+
+        为什么需要：503 只回一句 `unavailable_text` 时，运维看到的池子
+        「明明还有号」却一直失败——`/healthz` 的四态（ready/cooling/paused/
+        disabled）不足以区分「全在冷却」「全被在途占满」「全被限额停牌」「本轮
+        已经全试过」。同一句文案背后是五类完全不同的成因，处置也完全不同。
+
+        **判据顺序必须与 `_selectable` / `_choose` 一致**（disabled → paused →
+        账号级冷却 → 模型级冷却 → 限额 → 在途 → 本轮试过），否则「选不到」与
+        「归到哪类」会自相矛盾。`selectable` 是最后剩下的那一类：它 > 0 而
+        `_pick` 仍返回 None，说明还有本函数看不到的闸门（半开探测位被别的请求
+        占着 / 粘性绑定失效），按「自检」看待。
+        """
+        registered = self._registered(target)
+        now = int(time.time())
+        counts: dict[str, int] = {}
+        limits = self._deps.limits
+        inflight = self._deps.inflight
+
+        def bump(kind: str) -> None:
+            counts[kind] = counts.get(kind, 0) + 1
+
+        for candidate in self._deps.credentials.candidates(registered):
+            if candidate.disabled:
+                bump("disabled")
+            elif not candidate.enabled:
+                bump("paused")
+            elif candidate.cooling_until is not None and candidate.cooling_until > now:
+                bump("cooling")
+            elif (candidate.model_cooling_until(
+                    self._model_scope(candidate.provider, target.model)) or 0) > now:
+                bump("model_cooled")
+            elif limits is not None and limits.blocked(candidate, target.model):
+                bump("limits")
+            elif inflight is not None and inflight.blocked(candidate.credential_id):
+                bump("inflight")
+            elif candidate.credential_id in tried:
+                bump("tried")
+            else:
+                bump("selectable")
+        return counts
+
+    def _pool_hint(self, target: ModelTarget, tried: set[str]) -> str:
+        """`_no_pick_breakdown` 的单行文本（`total=25 cooling=20 tried=3 …`）。
+
+        只列**非零**项：全 `selectable` 时不该给一串 0 噪声；空池返回空串
+        （没有候选就没什么可拆解的）。
+        """
+        counts = self._no_pick_breakdown(target, tried)
+        total = sum(counts.values())
+        if total == 0:
+            return ""
+        parts = [f"total={total}"]
+        parts.extend(f"{kind}={value}" for kind, value in counts.items() if value)
+        return " ".join(parts)
+
     def _unavailable_text(self, target: ModelTarget, last_error: Exception | None) -> str:
         """耗尽轮换后的 503 文案。
 
@@ -800,8 +893,11 @@ class Executor:
                             error_type=self._exhaust_error_type(
                                 target, last_kind, last_error),
                             latency_ms=_elapsed_ms(state.started))
+                    hint = self._pool_hint(target, tried)
+                    if hint:
+                        logger.warning("选不到号 %s：%s", target.model, hint)
                     raise _ModelExhausted(
-                        self._unavailable_text(target, last_error),
+                        _with_pool_hint(self._unavailable_text(target, last_error), hint),
                         "no_healthy_credential")
                 credential_id, credential_data = pick
                 provider_id = self._deps.credentials.provider_of(credential_id)
@@ -1393,8 +1489,11 @@ class Executor:
                             error_type=self._exhaust_error_type(
                                 target, last_kind, last_error),
                             latency_ms=_elapsed_ms(started))
+                    hint = self._pool_hint(target, tried)
+                    if hint:
+                        logger.warning("选不到号 %s：%s", target.model, hint)
                     raise NoHealthyCredential(
-                        self._unavailable_text(target, last_error),
+                        _with_pool_hint(self._unavailable_text(target, last_error), hint),
                         retry_after=self._recovery_seconds(target))
                 credential_id, credential_data = pick
                 tried.add(credential_id)
@@ -2572,6 +2671,15 @@ def _stream_error_frame(translator: StreamSink | None, message: str, code: str) 
 def _usage_field(usage: object, name: str) -> object:
     """上游可能完全没有 usage 帧，统计字段要容忍缺失。"""
     return getattr(usage, name, None) if usage is not None else None
+
+
+def _with_pool_hint(text: str, hint: str) -> str:
+    """503 文案追加池子成因（`… (total=25 cooling=20)`）。
+
+    只在 hint 非空时追加：空池 / 无法归类时保持原文案逐字节不变。
+    放在这里而不是 `Executor` 里：纯函数，便于单独钉住格式。
+    """
+    return f"{text} ({hint})" if hint else text
 
 
 def _reject_message(model: str, last_error: Exception | None,
