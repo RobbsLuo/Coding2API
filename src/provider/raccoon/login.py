@@ -1,4 +1,4 @@
-"""小浣熊网页登录的请求参数加密（`login_with_password` 的 phone / password）。
+"""小浣熊网页登录的请求参数加密（IAM 登录接口的 phone / password）。
 
 口径抄自官方前端 `loginWithPassword({nation_code, phone, password})`：两个字段
 都过同一个 `yv()` —— **AES-CFB**、key 硬编码 `senseraccoon2023`、随机 16 字节 IV
@@ -7,11 +7,16 @@
 * 明文手机号 → `400 100003 param phone encrypted error`（密文格式不对）；
 * 按上式加密手机号 + 明文密码 → `400 100003 param password encrypted error`；
 * 两个都加密、但密码只写 6 位 → `400 100002 param password invalid`（格式校验）；
-* 两个都加密、密码 ≥8 位 → `400 200004 phone_or_password_verify_error`
+* 两个都加密、密码 ≥8 位 → `401 AUTH_ACCOUNT_OR_PASSWORD_INVALID`
   （密文被正确解开、格式通过，只是账号密码不对）。
 
 即：**加密口径正确、无验证码前置**（阿里云验证码只挂在短信表单上）。本模块
 只做「字面量 → 密文」与手机号归一，不发网络请求（在 `client.login` 里）。
+
+**2026-11-19 换链路**：上面的报文格式对 IAM 接口
+`POST /api/iam/v1/auth/login/password/phone` 同样成立（加密口径没变，只有
+`nation_code` 要带 `+`）。旧接口 `login_with_password` 仍能换 token，但不再
+补发当天 `daily_grant`——见 `client.EP_LOGIN` 的注释。
 """
 
 from __future__ import annotations
@@ -33,6 +38,10 @@ LOGIN_KEY = b"senseraccoon2023"
 #: 上游对密码长度的下限（实测 6 位回 `param password invalid`）。提前拦下来，
 #: 省一次必然被拒的登录请求，也避免无意义的失败重试。
 MIN_PASSWORD_LENGTH = 8
+
+#: IAM 登录接口的 `nation_code` 带 `+` 前缀（浏览器实测 `"+86"`）。旧接口
+#: `login_with_password` 用的是 `"86"`，换链路时一并改掉，别照抄旧值。
+NATION_CODE = "+86"
 
 #: 手机号里的分隔符：用户从通讯录复制常带 `+86`、空格、横线、括号。
 _PHONE_SEPARATORS = re.compile(r"[\s\-()（）]")

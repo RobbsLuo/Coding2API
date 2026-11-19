@@ -216,6 +216,11 @@ class CheckinFakeClient(FakeClient):
             raise self.error
         return self.heartbeat_payload
 
+    async def page_boot(self, token, device_id):
+        """页面启动序列（`checkin` 当天未到账时调用；本用例按需断言）。"""
+        self.calls.append(("page_boot", token, device_id))
+        return {"device_id": device_id}
+
 
 def _grant(points=300, created="2026-11-04T21:59:30+08:00"):
     return {"biz_type": "daily_grant", "points": points,
@@ -240,15 +245,37 @@ def frozen_now(monkeypatch):
                         types.SimpleNamespace(time=lambda: NOW.timestamp()))
 
 
-async def test_checkin_triggers_lazy_grant_then_reads_bills(frozen_now):
+async def test_checkin_returns_early_when_grant_already_present(frozen_now):
+    """首次读流水就有今天这笔 → 直接判定，不再白走页面启动（省 5~6 个请求）。"""
     fake = CheckinFakeClient(bills=[_grant()])
     provider = RaccoonProvider(client=fake)
     result = await provider.checkin(DATA)
     assert result.ok and result.credit == 300
-    # 先做页面访问（触发延期），再摸余额，最后读流水核对
+    assert fake.calls == [("visit", TOKEN), ("bills", TOKEN, "income")]
+
+
+async def test_checkin_boots_page_then_rereads_bills(frozen_now):
+    """首次读流水没有今天这笔 → 走一遍页面启动（每日积分的实际入账点）再核对。"""
+    fake = CheckinFakeClient(bills=[])
+    original = fake.fetch_bills
+    state = {"n": 0}
+
+    async def two_phase(token, limit=60, bill_type="all"):
+        state["n"] += 1
+        if state["n"] == 1:
+            fake.calls.append(("bills", token, bill_type))
+            return []
+        fake.bills = [_grant()]
+        return await original(token, limit=limit, bill_type=bill_type)
+
+    fake.fetch_bills = two_phase
+    result = await RaccoonProvider(client=fake).checkin(DATA)
+    assert result.ok and result.credit == 300
     assert fake.calls[0] == ("visit", TOKEN)
-    assert fake.calls[1] == ("quota", TOKEN)
-    assert fake.calls[2] == ("bills", TOKEN, "income")
+    assert fake.calls[1] == ("bills", TOKEN, "income")
+    # 页面启动用的是由 uid 派生的稳定设备 id
+    assert fake.calls[2][0] == "page_boot" and fake.calls[2][1] == TOKEN
+    assert fake.calls[3] == ("quota", TOKEN)
 
 
 async def test_checkin_ignores_visit_failure(frozen_now):
@@ -310,6 +337,11 @@ class BillsErrorClient(FakeClient):
         # 余额探测必须成功：签到先摸余额触发懒发放，失败的是随后的流水
         self.calls.append(("quota", token))
         return self.quota
+
+    async def page_boot(self, token, device_id):
+        """首读流水就失败 → 不会走到页面启动（本用例不调用）。"""
+        self.calls.append(("page_boot", token, device_id))
+        return {}
 
     async def fetch_bills(self, token, limit=60, bill_type="all"):
         raise self.error
@@ -491,6 +523,11 @@ class LoginFakeClient(CheckinFakeClient):
         return {"access_token": self.login_token}
 
     async def bind_device(self, token, device_id):
+        self.binds.append((token, device_id))
+        return {"device_id": device_id}
+
+    async def page_boot(self, token, device_id):
+        """按需登录后必须走的页面启动（绑设备 + 首页加载 + 活动上报）。"""
         self.binds.append((token, device_id))
         return {"device_id": device_id}
 

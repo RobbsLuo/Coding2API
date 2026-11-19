@@ -39,12 +39,34 @@ BILL_TYPE_INCOME = "income"
 EP_HEARTBEAT = "/api/web/auth/v1/devices_current_heartbeat"
 #: 网页会话级「页面访问」：每日积分延期/账单物化的触发点（心跳不算）
 EP_USER_INFO = "/api/web/auth/v1/user_info"
-#: 密码登录：`{nation_code, phone, password}`（后两者 AES-CFB 加密，见 `login.py`）。
-#: 服务端在登录时补发当天 `daily_grant`——这是「模拟登录」唯一可自动化的入口。
-EP_LOGIN = "/api/web/auth/v1/login_with_password"
+#: 密码登录（**现行**）：`{nation_code, phone, password}`，后两者 AES-CFB 加密
+#: （见 `login.py`）。`nation_code` 带 `+` 前缀（`"+86"`），与旧接口不同。
+#:
+#: 2026-11-19 更正：浏览器前端早已改用 IAM 登录链路，旧的
+#: `POST /api/web/auth/v1/login_with_password` 虽然仍回 200 并给出可用 token，
+#: 但**不再补发当天 `daily_grant`**——这是「按需登录成功却依然没积分」的根因。
+EP_LOGIN = "/api/iam/v1/auth/login/password/phone"
+#: IAM 登录后的**必需**一步：不确认的 token 打任何 `/api/web/*` 都回
+#: `400 200901 iam_confirm_required`（实测 2026-11-19）。浏览器在拿到 token 后
+#: 立刻发这一枪，之后才去 `user_info`。
+EP_IAM_CONFIRM = "/api/web/auth/v1/iam/confirm"
 #: 设备绑定：浏览器登录后立刻调用，把**新会话**绑到当前设备上。不绑的会话是
 #: `session_without_bound_device`（`trusted=false`），心跳恒 400，也不能延期。
 EP_BIND_DEVICE = "/api/web/auth/v1/devices_current_bind"
+#: 网页应用首页（`/work` 产品）。积分**真正入账**发生在这个页面启动时：
+#: 2026-11-19 实测 0347e5 用 IAM 登录后 7 分钟仍无 `daily_grant`，一打开
+#: `/work/home` 就在 09:48:16 到账；834993 同样在页面加载 6 秒后到账。
+#: 只打 `user_info`/`balance` 复现不出来（见 `activity.py` 模块文档）。
+EP_PAGE_HOME = "/work/home?lang=zh"
+#: 页面启动时前端依次拉的几个接口，按浏览器实测顺序串起来（都幂等只读）。
+EP_AGREEMENT_CHECK = "/api/iam/v1/products/work/agreement/check"
+EP_OFFICE_SETTING = "/api/web/office/v3/setting_info"
+EP_ONLINE_ACTIVITY = "/api/web/office/v3/online_activities/current"
+#: 活动上报（`event_name=activity`），前端每次页面加载都打；`machine_id` 是
+#: 官方 bundle 里写死的常量，照抄即可（服务端按它识别「真人客户端」）。
+EP_METRICS = "/api/web/b/v1/m"
+PAGE_MACHINE_ID = ("simulator-f31d2afc795804bbff66711fdc50fd44228798698e70"
+                   "438c70d4ba1501b248b8")
 
 #: 官方 LLM 子进程的 User-Agent（openai SDK 形态）；不带也不影响调用，
 #: 带上只是为了不把自己标成脚本——本渠道没有其它指纹伪装。
@@ -333,9 +355,13 @@ class RaccoonClient(LazyClients):
     async def login(self, phone: str, password: str) -> dict[str, Any]:
         """手机号 + 密码登录 → `{access_token, refresh_token}`（新会话）。
 
-        这是本渠道**唯一**可程序化的登录入口（短信要验证码、扫码要人扫、桌面
-        授权码要浏览器回调），也是让上游补发当天 300 分的唯一手段（见
-        `activity.py`）。加密口径见 `login.py`，已用错误密码反证过。
+        走**现行 IAM 链路**：`POST /api/iam/v1/auth/login/password/phone` →
+        `POST /api/web/auth/v1/iam/confirm`。加密口径见 `login.py`。
+
+        为什么必须换链路（2026-11-19 实测，勿回退）：旧接口
+        `login_with_password` 仍可用、仍发 token，但服务端**不再补发当天
+        `daily_grant`**；换成 IAM 登录 + confirm 后同样的账号当天就能拿到 300。
+        这解释了此前「自动登录成功、签到仍然没积分」。
 
         `refresh_token` 在网页会话下与 access 同源（实测 `POST /refresh` 原样
         换回同一张），故只取 `access_token`，不落 refresh。
@@ -343,7 +369,7 @@ class RaccoonClient(LazyClients):
         抛错口径：
 
         * 密码短于上游下限 → `LoginRejected`（本地拦，省一次必然被拒的请求）；
-        * `200004 phone_or_password_verify_error` / `100002 param … invalid`
+        * `401 AUTH_ACCOUNT_OR_PASSWORD_INVALID` / `400 COMMON_INVALID_ARGUMENT`
           → `LoginRejected`：**重试无意义**，只会累积风控与锁定风险；
         * 其余 4xx/5xx → `UpstreamHTTPError`（网络/上游故障，可稍后再试）。
         """
@@ -352,7 +378,7 @@ class RaccoonClient(LazyClients):
                 f"登录密码少于 {raccoon_login.MIN_PASSWORD_LENGTH} 位，"
                 "上游不接受（密码错误或未设置密码请改用网页登录后重贴凭据）")
         body = {
-            "nation_code": "86",
+            "nation_code": raccoon_login.NATION_CODE,
             "phone": raccoon_login.encrypt_param(
                 raccoon_login.normalize_phone(phone)),
             "password": raccoon_login.encrypt_param(password),
@@ -361,14 +387,17 @@ class RaccoonClient(LazyClients):
             f"{self.host}{EP_LOGIN}", json=body,
             headers={"Content-Type": "application/json",
                      "Accept": "application/json",
+                     "Accept-Language": "zh-Hans",
+                     "Origin": self.host,
+                     "Referer": f"{self.host}/login?lang=zh",
                      "User-Agent": LOGIN_UA})
         raw = await base.read_body_bounded(response)
         if response.status_code >= 400:
             # 账号密码错与参数格式错都属于「这张凭证自愈不了」，不能当网络故障
             # 反复重试——上游对连续失败会加验证码甚至锁号。
             lowered = raw.lower()
-            if b"phone_or_password_verify_error" in lowered \
-                    or b"params_invalid_error" in lowered:
+            if b"auth_account_or_password_invalid" in lowered \
+                    or b"common_invalid_argument" in lowered:
                 raise LoginRejected(
                     "上游拒绝登录（手机号或密码错误/格式不符）：请核对凭据里的 "
                     f"phone/password，或改用网页登录后重贴 token（原始响应：{raw[:160]!r}）")
@@ -381,7 +410,86 @@ class RaccoonClient(LazyClients):
         token = payload.get("access_token") if isinstance(payload, dict) else None
         if not isinstance(token, str) or not token.strip():
             raise UpstreamProtocolViolation("login response missing access_token")
+        # IAM 确认是**必需**的：不确认的 token 打 `/api/web/*` 全 400
+        # `200901 iam_confirm_required`，等于换了一张不能用的会话。
+        await self.confirm_iam(token)
         return payload
+
+    async def page_boot(self, token: str, device_id: str) -> dict[str, Any] | None:
+        """模拟浏览器打开 `/work/home` 的启动序列 —— 每日积分的**实际入账点**。
+
+        为什么登录之外还要这一步（2026-11-19 实测，勿删）：拿 IAM 登录得到的新
+        会话只打 `user_info` / `balance`，当天 `daily_grant` 依然不来；把浏览器
+        那个页面加载（首页 HTML + 一组启动 XHR + 活动上报）走一遍，积分就在几秒
+        内入账。也就是说上游把「补发」挂在**页面启动**这一事件上，而不是登录本
+        身——只做 login + bind 的旧实现因此长期「登录成功但没积分」。
+
+        全部幂等只读（`b/v1/m` 只是埋点）。**尽力而为**：每一步的失败都吞掉，
+        因为签到判定仍以流水为准，这里失败最多是这一轮少到一笔，不该把登录整体
+        判负。返回绑定响应（拿得到时），供调用方写回设备 id。
+        """
+        headers = {**request_headers(token, accept="application/json"),
+                   "Cookie": f"xhx_token={token}",
+                   "Accept-Language": "zh-CN,zh;q=0.9",
+                   "X-Client-Platform": "web",
+                   "X-Client-Version": "156.0.0.0",
+                   "X-Client-Device-ID": device_id,
+                   "X-Raccoon-Language": "zh",
+                   "Origin": self.host,
+                   "Referer": f"{self.host}/work/home?lang=zh"}
+        # ① 首页 HTML：真正的「页面加载」事件（SSR 侧才看得到浏览器会话）
+        with contextlib.suppress(httpx.HTTPError):
+            await self._short.get(f"{self.host}{EP_PAGE_HOME}",
+                                  headers={**headers, "Accept": "text/html"})
+        # ② 页面启动时的接口序列（顺序与浏览器实测一致）
+        for path in (EP_AGREEMENT_CHECK, EP_OFFICE_SETTING, EP_ONLINE_ACTIVITY):
+            with contextlib.suppress(httpx.HTTPError):
+                await self._short.get(f"{self.host}{path}", headers=headers)
+        # ③ 绑定 + 心跳：把新会话变成 trusted，同日才认「登录过」
+        bound = await self.bind_device(token, device_id)
+        if isinstance(bound, dict) and isinstance(bound.get("device_id"), str) \
+                and bound["device_id"]:
+            device_id = bound["device_id"]
+        with contextlib.suppress(httpx.HTTPError):
+            await self.heartbeat(token, device_id)
+        # ④ 活动上报：`machine_id` 是官方 bundle 写死的常量
+        with contextlib.suppress(httpx.HTTPError):
+            await self._short.post(
+                f"{self.host}{EP_METRICS}",
+                headers={**headers, "Content-Type": "application/json"},
+                json={
+                    "common_header": {"client_agent": LOGIN_UA,
+                                      "machine_id": PAGE_MACHINE_ID},
+                    "metrics": [{"metric_type": "event", "event": {
+                        "event_name": "activity",
+                        "event_params": {"id": "1", "name": "activity",
+                                         "prompt": str(int(time.time() * 1000))}}}],
+                })
+        return bound
+
+    async def confirm_iam(self, token: str) -> dict[str, Any]:
+        """IAM 登录后确认（浏览器同款第二步，幂等）。
+
+        不调这一步的会话对 `/api/web/*` 一律不可用（`400 200901
+        iam_confirm_required`），签到/绑定/流水全部读不到。失败抛
+        `UpstreamHTTPError`：确认不成功说明这次登录拿不到可用会话，调用方
+        应把它当登录失败处理，而不是把半张会话落库。
+        """
+        response = await self._short.post(
+            f"{self.host}{EP_IAM_CONFIRM}",
+            json={"registration_attribution": {"registration_source": "web"}},
+            headers={**request_headers(token, accept="application/json"),
+                     "Origin": self.host,
+                     "Referer": f"{self.host}/"})
+        if response.status_code >= 400:
+            raise UpstreamHTTPError(response.status_code,
+                                    await base.read_body_bounded(response))
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise UpstreamProtocolViolation(
+                "non-JSON iam/confirm response") from error
+        return data if isinstance(data, dict) else {}
 
 
 def _model_from_item(item: Any) -> Model | None:
@@ -467,12 +575,13 @@ class RaccoonProvider:
     # ---------------------------------------------------------- 签到 / 活跃
 
     async def checkin(self, credential_data: dict) -> CheckinResult:
-        """「签到」= 页面访问 + 摸一次积分服务 + 核对流水。
+        """「签到」= 页面访问 + （未到账时）页面启动 + 核对流水。
 
         上游没有领取接口（见 `activity.py` 模块文档），故本方法是**幂等只读**
-        的组合：`user_info`（顺带读会话信任状态）→ balance（触发余额刷新）→
-        bills 核对 `daily_grant`。只认流水，不看 HTTP 200——否则会重演
-        「界面显示签到成功、积分没到」。
+        的组合：`user_info`（顺带读会话信任状态）→ bills 先看今天有没有 →
+        没有就走一遍 `page_boot`（浏览器打开 `/work/home` 的启动序列，每日积分
+        的**实际入账点**）→ 再读 bills 核对。只认流水，不看 HTTP 200——否则会
+        重演「界面显示签到成功、积分没到」。
 
         **不能把「账户里还有旧积分」当今天已签**：上游当天没登录就不会补发
         `daily_grant`（2026-11-18 复测，见 `activity.py`）。旧实现这么做，导致
@@ -489,10 +598,28 @@ class RaccoonProvider:
         user_info: dict[str, Any] | None = None
         with contextlib.suppress(UpstreamHTTPError, UpstreamProtocolViolation):
             user_info = await self.client.visit(credential.access_token)
-        # ② 触达积分服务：服务端在此刷新余额/补写当天流水
+        # ② 先看今天到底有没有到账：已有就直接判定，不白走一遍页面启动
+        #    （页面启动有 5~6 个请求，签到每小时一轮，不该每轮都打）
+        items: list[Any] | None = None
+        with contextlib.suppress(UpstreamHTTPError, UpstreamProtocolViolation):
+            items = await self.client.fetch_bills(credential.access_token,
+                                                  bill_type=BILL_TYPE_INCOME)
+        if items is not None and raccoon_activity.pick_today_grant(
+                items, raccoon_activity.now_cst()) is not None:
+            return raccoon_activity.checkin_result(
+                items, started, user_info=user_info)
+        # ③ 还没到账 → 补一遍**页面启动**（每日积分的实际入账点，见
+        #    `client.page_boot`）。这一步而不是「重新登录」才是当天已登录却没
+        #    拿到积分时的正解：token 有效时新登录未必被上游当作「又一天登录」。
+        if not raccoon_activity.session_needs_relogin(user_info) \
+                and credential.uid:
+            with contextlib.suppress(httpx.HTTPError):
+                await self.client.page_boot(
+                    credential.access_token,
+                    raccoon_credential.derive_device_id(credential.uid))
+        # ④ 触达积分服务并重读流水核对（必须用 `income` 过滤——`all` 里消费
+        #    流水占绝大多数，活跃账号的每日发放会被挤出条数窗口）。
         await self.client.fetch_quota(credential.access_token)
-        # ③ 读流水核对：签到是否真到账。必须用 `income` 过滤——`all` 里
-        # 消费流水占绝大多数，活跃账号的每日发放会被挤出条数窗口。
         try:
             items = await self.client.fetch_bills(credential.access_token,
                                                   bill_type=BILL_TYPE_INCOME)
@@ -540,6 +667,10 @@ class RaccoonProvider:
         轨道在这里没用——`/refresh` 只是原样换回同一张 token（sid 与 iat 都不变，
         实测），产生不了「新登录」这一事件。所以只能真登录。
 
+        **登录链路必须是 IAM 那条**（`client.login` 内部已含 `iam/confirm`）：
+        旧的 `login_with_password` 能换 token 但不再补发当天积分，2026-11-19
+        三大号「自动登录成功、签到仍无积分」就是栽在这上面。
+
         返回的 dict 沿用落库形态并保留 `phone` / `password`（否则下一次按需登录
         就没凭据了）；`uid` / `nickname` / `expires_at` 从新 token 的 claims 重解。
 
@@ -556,10 +687,11 @@ class RaccoonProvider:
             "password": credential.password,
             "nickname": credential.nickname,
         })
-        # 登录后立刻绑设备（浏览器同款流程）：不绑的会话 trusted=false、心跳 400，
-        # 「当天登录 → 延期 7 天」也不成立。绑定失败不判登录失败（token 已可用）。
+        # 登录后走一遍**页面启动**（浏览器同款流程）：绑设备 + 首页加载 + 活动
+        # 上报。只 bind 不加载页面的会话 trusted 虽为 true，当天积分仍不到账
+        # （2026-11-19 实测）；页面启动失败不判登录失败（token 已可用）。
         if refreshed.uid:
-            await self.client.bind_device(
+            await self.client.page_boot(
                 refreshed.access_token,
                 raccoon_credential.derive_device_id(refreshed.uid))
         return refreshed.to_dict()

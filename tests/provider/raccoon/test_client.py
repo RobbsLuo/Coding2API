@@ -11,13 +11,18 @@ import pytest
 from src.provider.base import ErrKind, EventKind
 from src.provider.raccoon.activity import CST
 from src.provider.raccoon.client import (
+    EP_AGREEMENT_CHECK,
     EP_BALANCE,
     EP_BILLS,
     EP_BIND_DEVICE,
     EP_CHAT,
     EP_HEARTBEAT,
+    EP_IAM_CONFIRM,
     EP_LOGIN,
+    EP_METRICS,
     EP_MODELS,
+    EP_OFFICE_SETTING,
+    EP_ONLINE_ACTIVITY,
     EP_USER_INFO,
     LOGIN_UA,
     LoginRejected,
@@ -28,6 +33,7 @@ from src.provider.raccoon.client import (
     prepare_body,
     request_headers,
 )
+from src.provider.raccoon.login import NATION_CODE
 from tests.helpers.http import chunk_payload as chunk
 from tests.helpers.http import sse_text_done as _sse
 from tests.provider.raccoon._support import client as _client
@@ -412,32 +418,66 @@ async def test_heartbeat_errors():
     assert await _client(no_data).heartbeat("tok", "dev-x") == {}
 
 
-async def test_login_posts_encrypted_fields_and_returns_payload():
-    """登录请求：phone/password 都是 AES-CFB 密文，UA 走浏览器形态。"""
+async def test_login_posts_encrypted_fields_and_confirms_iam():
+    """登录：走 IAM 链路，phone/password 都是 AES-CFB 密文，且登录后必发 confirm。"""
     seen: dict[str, object] = {}
+    paths: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["path"] = request.url.path
+        paths.append(request.url.path)
+        if request.url.path == EP_IAM_CONFIRM:
+            seen["confirm_headers"] = dict(request.headers)
+            seen["confirm_body"] = json.loads(request.content)
+            return httpx.Response(200, json={"code": 0, "message": "success"})
         seen["ua"] = request.headers["User-Agent"]
-        body = json.loads(request.content)
-        seen["body"] = body
-        return httpx.Response(200, json={"code": 0, "data": {
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json={"code": "OK", "data": {
             "access_token": "new-token", "refresh_token": "r"}})
 
     payload = await _client(handler).login("+86 139 0000 0001", "Abcd123456")
 
-    assert seen["path"] == EP_LOGIN
+    # 顺序固定：先登录拿 token，再确认——反过来的话 confirm 没 token 可用
+    assert paths == [EP_LOGIN, EP_IAM_CONFIRM]
     assert seen["ua"] == LOGIN_UA
     body = seen["body"]
     assert isinstance(body, dict)
-    assert body["nation_code"] == "86"
+    # IAM 接口的 nation_code 带 `+`（旧接口是 "86"）
+    assert body["nation_code"] == NATION_CODE == "+86"
     # 字段是密文：能解回原值，但原文不出现在请求体里
     from src.provider.raccoon.login import decrypt_param
 
     assert decrypt_param(body["phone"]) == "13900000001"
     assert decrypt_param(body["password"]) == "Abcd123456"
     assert "Abcd123456" not in request_dump(seen)
+    # confirm 用新 token，且带浏览器同源的 registration_attribution
+    assert seen["confirm_headers"]["authorization"] == "Bearer new-token"
+    assert seen["confirm_body"] == {
+        "registration_attribution": {"registration_source": "web"}}
     assert payload["access_token"] == "new-token"
+
+
+async def test_confirm_iam_raises_on_upstream_error():
+    """confirm 失败 → 整次登录算失败，不能把「半张」会话落库。"""
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, content=b'{"code":200901}')
+
+    with pytest.raises(UpstreamHTTPError):
+        await _client(handler).confirm_iam("tok")
+
+
+async def test_confirm_iam_protocol_violations():
+    def non_json(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="nope")
+
+    with pytest.raises(UpstreamProtocolViolation):
+        await _client(non_json).confirm_iam("tok")
+
+    def no_body(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=["not", "a", "dict"])
+
+    # 非 dict 的 2xx 体不算失败（幂等确认，只要 200 就成立）
+    assert await _client(no_body).confirm_iam("tok") == {}
 
 
 def request_dump(seen: dict[str, object]) -> str:
@@ -459,8 +499,8 @@ async def test_login_rejects_short_password_locally_without_http_call():
 
 async def test_login_rejects_bad_credentials_as_relogin_required():
     """账号密码错 / 参数格式错 → LoginRejected（重试无意义，别再撞风控）。"""
-    for body in (b'{"code":200004,"message":"phone_or_password_verify_error"}',
-                 b'{"code":100002,"message":"params_invalid_error"}'):
+    for body in (b'{"code":"AUTH_ACCOUNT_OR_PASSWORD_INVALID"}',
+                 b'{"code":"COMMON_INVALID_ARGUMENT","message":"phone required"}'):
         def handler(_request: httpx.Request, payload: bytes = body) -> httpx.Response:
             return httpx.Response(400, content=payload)
 
@@ -475,12 +515,12 @@ async def test_login_other_errors_are_retryable():
     with pytest.raises(UpstreamHTTPError):
         await _client(http_error).login("13900000001", "Abcd123456")
 
-    # 标记大小写敏感（上游固定小写）：大写不算「账号密码错」，按可重试处理
-    def upper(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, content=b'{"CODE":200004}')
+    # 响应体里没有「账号密码错」标记 → 按可重试处理（不标需重登）
+    def unknown_code(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, content=b'{"code":"IAM_SOMETHING_ELSE"}')
 
     with pytest.raises(UpstreamHTTPError):
-        await _client(upper).login("13900000001", "Abcd123456")
+        await _client(unknown_code).login("13900000001", "Abcd123456")
 
 
 async def test_login_protocol_violations():
@@ -491,13 +531,13 @@ async def test_login_protocol_violations():
         await _client(non_json).login("13900000001", "Abcd123456")
 
     def no_token(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"code": 0, "data": {"refresh_token": "r"}})
+        return httpx.Response(200, json={"code": "OK", "data": {"refresh_token": "r"}})
 
     with pytest.raises(UpstreamProtocolViolation, match="access_token"):
         await _client(no_token).login("13900000001", "Abcd123456")
 
     def blank_token(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"code": 0, "data": {"access_token": "  "}})
+        return httpx.Response(200, json={"code": "OK", "data": {"access_token": "  "}})
 
     with pytest.raises(UpstreamProtocolViolation, match="access_token"):
         await _client(blank_token).login("13900000001", "Abcd123456")
@@ -550,3 +590,52 @@ async def test_bind_device_transport_error_returns_none():
         raise httpx.ConnectError("boom")
 
     assert await _client(boom).bind_device("tok", "dev-x") is None
+
+
+async def test_page_boot_runs_browser_startup_sequence():
+    """页面启动：首页 → 启动接口 → 绑定 → 心跳 → 活动上报，顺序与浏览器一致。"""
+    seen: list[str] = []
+    headers: dict[str, dict[str, str]] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        headers[request.url.path] = dict(request.headers)
+        if request.url.path == EP_BIND_DEVICE:
+            return httpx.Response(200, json={"code": 0,
+                                             "data": {"device_id": "dev-server"}})
+        if request.url.path == EP_HEARTBEAT:
+            return httpx.Response(200, json={"code": 0, "data": {}})
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    bound = await _client(handler).page_boot("tok", "dev-x")
+
+    assert seen == ["/work/home", EP_AGREEMENT_CHECK, EP_OFFICE_SETTING,
+                    EP_ONLINE_ACTIVITY, EP_BIND_DEVICE, EP_HEARTBEAT, EP_METRICS]
+    # 绑定响应里的服务端设备 id 会用于随后的心跳
+    assert bound == {"device_id": "dev-server"}
+    hb = headers[EP_HEARTBEAT]
+    assert hb["x-client-device-id"] == "dev-server"
+    assert hb["x-client-platform"] == "web"
+    # 首页用 text/html + 会话 cookie（SSR 侧才认得出「浏览器在加载页面」）
+    assert headers["/work/home"]["accept"] == "text/html"
+    assert headers["/work/home"]["cookie"] == "xhx_token=tok"
+
+
+async def test_page_boot_swallows_every_failure():
+    """页面启动是尽力而为：任何一步挂了都不抛（签到判定只看流水）。"""
+    def boom(_request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom")
+
+    assert await _client(boom).page_boot("tok", "dev-x") is None
+
+
+async def test_page_boot_tolerates_bind_without_device_id():
+    """绑定响应缺 device_id → 心跳退回派生 id（不因缺字段跳过心跳）。"""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    await _client(handler).page_boot("tok", "dev-x")
+    assert EP_HEARTBEAT in seen
