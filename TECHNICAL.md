@@ -941,7 +941,7 @@ PRAGMA foreign_keys = ON;      -- 库里没有任何外键：users ↔ api_keys 
 
 ```json
 {
-  "status": "ok", "service": "coding2api", "version": "0.14.0",
+  "status": "ok", "service": "coding2api", "version": "0.14.1",
   "credentials": {"total": 5, "ready": 4, "cooling": 1, "paused": 0, "disabled": 0}
 }
 ```
