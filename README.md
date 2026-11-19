@@ -650,7 +650,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `UPSTREAM_COMPLETE_TIMEOUT_SECONDS` | `600` | 非流式聚合整体超时；`≤0` 关闭 |
 | `STREAM_FIRST_EVENT_TIMEOUT_SECONDS` | `0` | 首事件超时（出帧前可换号）。**默认必须保持关闭**，推荐 60。可热更 |
 | `STREAM_IDLE_TIMEOUT_SECONDS` | `0` | 流内空闲超时（已出帧只断流不换号），推荐 300。可热更 |
-| `SHORT_COOLDOWN_WAIT_SECONDS` | `0` | 全池短冷却时等待续上（≤ 该值）；`0` = 快速失败。可热更；非流式建议同时开 `NONSTREAM_KEEPALIVE_SECONDS=15` |
+| `SHORT_COOLDOWN_WAIT_SECONDS` | `60`（compose 显式设 `0`） | 全池短冷却时原地等最短剩余冷却（≤ 该值），等到的号解禁后重取一次；`0` = 快速失败。可热更；非流式建议同时开 `NONSTREAM_KEEPALIVE_SECONDS=15` |
 | `NONSTREAM_KEEPALIVE_SECONDS` | `0` | 非流式出口 N 秒未完成 → 转 chunked 吐空白心跳；`0` = 关，仅 CDN 后需要，推荐 15。可热更 |
 | `MODEL_ALIASES` | `""` | 自定义别名；留空不启用。可热更 |
 | `MAX_INFLIGHT_PER_CREDENTIAL` | `0` | 单账号在途上限；`0` = 不限。600s TTL 兜底 |

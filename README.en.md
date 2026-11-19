@@ -650,7 +650,7 @@ The authoritative list is `src/config.py`; every item is passed through `docker-
 | `UPSTREAM_COMPLETE_TIMEOUT_SECONDS` | `600` | Non-stream aggregate timeout; `≤0` disables |
 | `STREAM_FIRST_EVENT_TIMEOUT_SECONDS` | `0` | First-event timeout (switchable before any frame). **Must stay off by default**; 60 recommended. Hot-reloadable |
 | `STREAM_IDLE_TIMEOUT_SECONDS` | `0` | In-stream idle timeout (disconnect only, no switch); 300 recommended. Hot-reloadable |
-| `SHORT_COOLDOWN_WAIT_SECONDS` | `0` | Wait out short pool-wide cooldowns (≤ this value); `0` = fail fast. Hot-reloadable; pair with `NONSTREAM_KEEPALIVE_SECONDS=15` for non-stream |
+| `SHORT_COOLDOWN_WAIT_SECONDS` | `60` (compose sets `0`) | Wait out short pool-wide cooldowns (≤ this value) then re-pick once; `0` = fail fast. Hot-reloadable; pair with `NONSTREAM_KEEPALIVE_SECONDS=15` for non-stream |
 | `NONSTREAM_KEEPALIVE_SECONDS` | `0` | Non-stream responses switch to chunked whitespace heartbeats after N seconds; `0` = off, only needed behind CDNs, 15 recommended. Hot-reloadable |
 | `MODEL_ALIASES` | `""` | Custom aliases; empty = disabled. Hot-reloadable |
 | `MAX_INFLIGHT_PER_CREDENTIAL` | `0` | Per-account in-flight cap; `0` = unlimited. 600s TTL fallback |
