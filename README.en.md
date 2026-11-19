@@ -5,139 +5,122 @@
 [![License: MIT](https://img.shields.io/github/license/RobbsLuo/Coding2API)](LICENSE)
 [![Image](https://img.shields.io/badge/image-ghcr.io%2Frobbsluo%2Fcoding2api-blue)](https://github.com/RobbsLuo/Coding2API/pkgs/container/coding2api)
 
-Ten channels — **CodeBuddy** (CN + international, two separate channels), **TRAE SOLO**, **OpenCode Zen**, **Kilo**, **Qoder**, **CodeArts**, **OfficeAce**, **Raccoon**, **Lingxi** — plus an optional **generic OpenAI-compatible upstream** — wrapped into an OpenAI-compatible API, with shared credential pool, unified model names and scheduling, per-user usage stats.
+Ten upstream channels — **CodeBuddy** (China + international, two separate channels), **TRAE SOLO**, **OpenCode Zen**, **Kilo**, **Qoder**, **CodeArts**, **OfficeAce**, **Raccoon**, **Lingxi** — plus an optional **generic OpenAI-compatible upstream**, exposed as an OpenAI-compatible API: shared credential pool, unified model names and scheduling, per-user usage accounting.
 
 > [!WARNING]
-> Reverse-engineered endpoints; study and research only, not security-audited. Public deployment needs reverse proxy + auth + IP allowlist.
+> Reverse-engineered endpoints, for study and research only, no security audit. Public deployment needs a reverse proxy + auth + IP allowlist.
 
 ## Features
 
-- **OpenAI-compatible surface**: `/v1/chat/completions` (streaming / non-streaming), `/v1/responses` (Codex CLI), `/v1/messages` (Claude Code), `/v1beta/models/{m}:generateContent` (Gemini SDK), `/v1/models` (incl. single-model lookup), `/v1/user/balance`.
-- **Unified scheduling**: bare model names route by health; `model@provider` pins upstream. Free channels first → least in-flight → expiring credits → health with tiered cooldowns → largest balance. Admins can set a per-credential **weight** (`-1000..1000`): it only reorders within the same health tier (positive first, negative as standby) and never promotes cooling or exhausted credentials. Catalog x0 rates are calibrated against actual charges in the last 24h, so an upstream that changed billing without updating its catalog can't hold the free tier forever. Model-scoped limit sidelines only that model; multi-turn sticks to one credential, rotates only on error.
-- **Expiry-aware burn**: credits expiring inside main window (default 36h) burn first; ties fall to 7-day window. Units unify to credits.
-- **Credential-gated model list**: only channels with usable credential appear; no phantom models.
-- **Shared credential pool**: admins maintain, everyone shares, encrypted at rest (`APP_SECRET`); device-code login, account switching, quota probing, daily check-in, token pre-refresh.
-- **Three roles**: `admin` / `operator` / `viewer` in SQLite; one-time activation links, forced password change on first login, role change or disable revokes sessions immediately; logins and writes audited.
-- **Growth center** (CodeBuddy only): travel gifts, Buddy dispatch, task rewards, streak repair/redemption, blind boxes; irreversible steps off via `GROWTH_IRREVERSIBLE_ACTIONS=false`.
-- **Privacy-preserving stats**: no conversation content; 90-day detail, permanent hourly rollups; per user / channel / model / credential views; cost from OpenRouter list prices; output speed in two scopes; SSE live stream in detail panel.
-- **Monthly billing** (`operator`+): requests, tokens and cost by month, per user / per API key; CSV (per user) / JSONL (row-level detail) export, audited. Key-level rows are limited by the 90-day detail retention.
-- **Tool-call robustness**: missing `id` filled from index and remembered; leaked DeepSeek DSML read back into structured calls with `finish_reason` rewritten; malformed non-streaming `arguments` fail closed (400, credential not cooled).
-- **Failure routing**: `11134` (upstream provider overloaded) uses queue semantics — no credential penalty, same credential retried after the named wait; request-level errors (content guard / context overflow / bad image) do not migrate conversation stickiness after a credential switch; pool exhaustion returns 503 with `Retry-After` (earliest recovery across all candidates).
-- **Outbound privacy masking** (optional, off by default): `PRIVACY_RULES` masks connection-string userinfo / e-mails / CN mobile numbers / private IPs in the **outbound copy** only; `request.raw`, `tool_calls` arguments and JSON Schema are untouched, placeholders are one-way.
-- **Channel ToS risk registry**: import shows green / gray / red with reasons (operational judgement) and the level is audited; advisory only, never blocks scheduling.
-- **Egress IP stickiness** (optional): with non-empty `CREDENTIAL_PROXY_POOL`, one credential per egress (sha256-stable, survives restarts); chat, probing, check-in, pre-refresh, growth and single-item console actions all use it.
-- **Upstream status aggregation**: official status pages side by side, separating "upstream outage" from "our credential / quota problem". Explanation only, never scheduling; memory only.
-- **Sidebar to-dos**: count badges (re-login / exhausted, unresolved alerts, failed tasks, abnormal upstreams, pending activations, expiring keys, stale catalog), role-filtered. See [below](#sidebar-to-dos-navigation-badges).
-- **Admin hardening**: login rate limiting, CSRF checks, body limits, Host allowlist.
-- **Responsive tables**: below 768px one row = one card; column names collapse into tappable sort chips. DOM unchanged.
+- **Multi-protocol outbound**: `/v1/chat/completions` (stream / non-stream), `/v1/responses` (Codex CLI), `/v1/messages` (Claude Code), `/v1beta/models/{m}:generateContent` (Gemini SDK), `/v1/models`, `/v1/user/balance`, built-in retrieval `/v1/tools/search` + `/v1/fetch`.
+- **Unified scheduling**: flat names pick a credential by health, `model@channel` forces one. Order: free channels → fewest in-flight → expiring quota → health + tiered cooldown → higher balance. Credential **weight** (`-1000..1000`) only reorders within the same health tier; catalog `x0` entries are calibrated by real charges from the last 24h. Model-level rate limits avoid only that model; multi-turn conversations stick to one credential until an error.
+- **Expiring quota first**: the primary window (default 36h) burns quota about to expire, ties broken by the 7-day window; units are credits throughout.
+- **Model list loaded from credentials**: only channels with a usable credential appear → no ghost models. The catalog is snapshotted to disk and ready on restart.
+- **Shared credential pool**: admin-maintained, shared by all users, encrypted with `APP_SECRET`; device-code / OAuth login, multi-account switching, quota probing, check-in, token pre-refresh.
+- **Three roles**: `admin` / `operator` / `viewer` (SQLite); one-time activation links, forced password change on first login, role change / disable revokes sessions immediately; logins and writes are audited.
+- **Growth center** (CodeBuddy only): claim gifts, dispatch Buddy, claim task rewards, make up missed logins, exchange streaks, open blind boxes. `GROWTH_IRREVERSIBLE_ACTIONS=false` disables irreversible actions; enterprise accounts are skipped.
+- **Privacy-preserving stats**: no conversations stored; 90 days of detail, permanent hourly rollups; views by user / channel / model / credential; cost estimated from OpenRouter list prices; live detail via SSE.
+- **Monthly billing** (`operator` and up): per-month, per-user / per-key requests, tokens and cost; CSV / JSONL export with an audit entry.
+- **Tool-call robustness**: missing `id` backfilled by index and remembered; leaked DeepSeek DSML is read back into structured calls; malformed non-stream `arguments` fail closed (400, no credential cooldown).
+- **Failure routing**: `11134` provider overload is queued (no penalty); request-level errors do not carry conversation stickiness across credentials; exhausted pool returns 503 with `Retry-After` and a **pool breakdown** (`total=25 cooling=20 disabled=3 …`).
+- **Hardening & ops**: login rate limiting, CSRF, body size limits, host allowlist; egress IP stickiness (`CREDENTIAL_PROXY_POOL`); optional outbound redaction (`PRIVACY_RULES`, outbound copy only); upstream status aggregation (explains, never schedules); sidebar badges; Prometheus `/metrics`.
+- **Narrow screens**: tables become cards below 768px, same DOM.
 
-Protocol-level implementation (private envelopes, signing, gate spoofing) in [`TECHNICAL.md`](TECHNICAL.md) (Chinese).
+Protocol layer (private envelopes, signing, gate spoofing) lives in [`TECHNICAL.md`](TECHNICAL.md).
 
 ## Screenshots
 
-Admin console (captured from local instance; accounts and IPs masked):
+Admin console (captured locally, accounts / IPs redacted):
 
-| Credentials: pool overview, grouped by channel | Usage: requests, tokens, cost |
+| Credentials: pool overview grouped by channel | Usage: requests / tokens / cost |
 |---|---|
 | ![Credentials](assets/screenshots/credentials.webp) | ![Usage](assets/screenshots/stats.webp) |
-| **Playground: models × channels and multipliers** | **Model list: OpenRouter list prices and ability score** |
-| ![Playground](assets/screenshots/playground.webp) | ![Model list](assets/screenshots/models.webp) |
-| **Upstream status: upstream outage vs. our problem** | **API keys: client setup and quotas** |
-| ![Upstream status](assets/screenshots/upstream.webp) | ![API keys](assets/screenshots/apikeys.webp) |
-| **Users: three roles, one-time activation** | **Audit log: successful and failed logins** |
-| ![Users](assets/screenshots/users.webp) | ![Audit log](assets/screenshots/audit.webp) |
-| **Server logs: ring buffer with redaction** | **Ops alerts: nine risk rules, periodic** |
-| ![Server logs](assets/screenshots/logs.webp) | ![Ops alerts](assets/screenshots/alerts.webp) |
+| **Playground: model × channel and multiplier** | **Model list: OpenRouter list prices and capability scores** |
+| ![Playground](assets/screenshots/playground.webp) | ![Models](assets/screenshots/models.webp) |
+| **Upstream status: upstream fault vs. our problem** | **API keys: client setup and quotas** |
+| ![Upstream](assets/screenshots/upstream.webp) | ![API keys](assets/screenshots/apikeys.webp) |
+| **Users: three roles, one-time activation** | **Audit log: every login attempt** |
+| ![Users](assets/screenshots/users.webp) | ![Audit](assets/screenshots/audit.webp) |
 
-**Tasks & settings: 85 hot options, DB overrides win over `.env`**
-
-![Tasks and settings](assets/screenshots/settings.webp)
+Tasks & settings (85 hot-reloadable items, DB overrides beat `.env`), server logs and alerts: `assets/screenshots/{settings,logs,alerts}.webp`.
 
 ## Quick start
 
-Requirements: Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 24+ and pnpm 10+ (frontend build only).
+Requires **Linux or macOS** (Windows: WSL2 / Docker, see "Deployment notes"), Python 3.12+, [uv](https://docs.astral.sh/uv/), Node.js 24+, pnpm 10+ (frontend build only).
 
 ```bash
 uv sync
 uv run python scripts/create_user.py admin --role admin   # first admin
 cd web && pnpm install && pnpm build && cd ..
-APP_SECRET="pick-a-random-string" uv run python -m src.main
+APP_SECRET="pick-your-own-random-string" uv run python -m src.main
 ```
 
-Open <http://127.0.0.1:8000>. Add rest from the *Users* page.
+Open <http://127.0.0.1:8000> and sign in; add people from the *Users* page.
 
-> Use `python -m src.main`, not `uvicorn src.main:build_app`: the former reads `HOST`/`PORT` from `.env` and holds the single-instance lock (`data/.instance.lock`). One `DATA_DIR` admits one process — two instances each run background tasks, probe the same credentials twice and overwrite each other's stats. A second instance prints "another instance is already using data (PID xxx)" and exits cleanly.
+> Use `python -m src.main`, not `uvicorn src.main:build_app`: the former reads `HOST`/`PORT` from `.env` and holds the single-instance lock (`data/.instance.lock`). Only one process per `DATA_DIR`; a second one prints "another instance is using data (PID xxx)" and exits.
 
-`scripts/create_user.py` writes SQLite directly (`--db` or `DATA_DIR`; default `data/coding2api.sqlite3`). Existing `secrets/users.txt` imported once on startup (never overwritten).
+`scripts/create_user.py` writes SQLite directly (`--db` or `DATA_DIR`, default `data/coding2api.sqlite3`); legacy `secrets/users.txt` is imported once at startup without overwriting existing users.
 
 Docker:
 
 ```bash
 cat > .env <<'EOF'
-APP_SECRET=pick-a-random-string
+APP_SECRET=pick-your-own-random-string
 PUBLIC_BASE_URL=http://127.0.0.1:8000
 EOF
 docker compose up -d --build
 docker compose exec coding2api python scripts/create_user.py admin --role admin
 ```
 
-Pull image: `docker compose pull` (or `docker pull ghcr.io/robbsluo/coding2api:v0.14.1`). Pushing `v*` tag to main triggers `.github/workflows/publish.yml`, publishing `<tag>` + `:latest`.
-
-Running the container on a **VPS with a public IP** and wanting an https edge → see [Public deployment (Docker + Caddy)](#public-deployment-docker--caddy-automatic-https).
+Pull the image: `docker compose pull` (or `docker pull ghcr.io/robbsluo/coding2api:v0.14.1`). Pushing a `v*` tag to main runs `.github/workflows/publish.yml` → publishes `<tag>` + `:latest`. For https on a VPS with a public IP see "[Public deployment](#public-deployment-docker--caddy-automatic-https)".
 
 ## Users and roles
 
-Accounts live in SQLite's `users` table; the *Users* page (admins only) handles management.
+Accounts live in the SQLite `users` table; the *Users* page (admin only) manages them.
 
 | Role | Can do |
 |---|---|
-| `admin` | User management, tasks & settings, credential read/write, all stats, audit log, server logs, upstream status, model list |
-| `operator` | Credential read/write (import / delete / pause / check-in / growth / account switch), all stats, upstream status, model list |
+| `admin` | Users, tasks & settings, credential read/write, all stats, audit log, server logs, upstream status, model list |
+| `operator` | Credential read/write (import / delete / enable / check-in / growth / switch account), all stats, upstream status, model list |
 | `viewer` | Read-only: dashboard, credential list, stats, Playground |
 
-*Monthly billing* has the same floor as *Upstream status* / *Model list* (`operator`+): billing is pool-level data, while a `viewer` only sees their own usage in their own stats.
+Monthly billing has the same `operator` gate (pool-level data; `viewer` only sees their own usage).
 
-- **Adding users**: username + role → one-time activation link (24h, shown once); user opens `/activate`, sets own password. No "admin knows initial password" secret; reset same way.
-- **Role change / disable**: all session cookies invalidated immediately. Disable = reversible default "remove" (usage stays attributed); hard delete CLI-only.
-- **Self-service password change**: user menu → *Change password*, current password required.
-- **Lockout guard**: cannot disable or demote last active admin, nor demote or disable yourself.
+- **Adding users**: username + role → one-time activation link (24h, shown once); the user opens `/activate` and sets a password. No initial password; resets work the same way.
+- **Role change / disable**: revokes all session cookies for that account immediately. Disable is the reversible default "delete" (usage stays attributed); hard delete is CLI-only.
+- **Self-service password change**: user menu → *Change password*.
+- **Anti-lockout**: you cannot disable or demote the last active admin, nor demote or disable yourself.
 
-CLI fallback:
+CLI fallback (no web / all admins lost):
 
 ```bash
-python3 scripts/create_user.py alice --role admin   # interactive password
+python3 scripts/create_user.py alice --role admin   # prompts for password
 python3 scripts/create_user.py --list
 python3 scripts/create_user.py alice --delete --force   # hard delete, irreversible
-python3 scripts/create_user.py --db data/x.sqlite3 ...
 echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-stdin
 ```
 
-`ADMIN_USERNAMES` and `secrets/users.txt` are bootstrap-only; afterwards roles come from the DB alone. "Bootstrap" means the DB has no active admin yet — once one exists, env no longer rewrites anyone's role, so a role change made in the console is not undone by the next restart.
+`ADMIN_USERNAMES` and `secrets/users.txt` only apply during bootstrap (while no active admin exists); after that roles come from the DB only.
 
-## Audit log
+## Audit and server logs
 
-*Audit log* page (admins only) records logins and writes, filterable by actor / action, paginated: logins (success and failure), account changes, credential writes, manual alert resolution. Each row: time, actor, action, target, detail, source IP. **No passwords or token plaintext** (activation tokens store only SHA-256 digest). Retention matches request detail (90 days).
-
-## Server logs
-
-*Server logs* page (`/logs`, admins only) = read-only live view of this process's logging: `GET /api/logs` returns recent lines; `GET /api/logs/stream` is SSE (replay then live). Level filter, keyword search, follow-latest, pause, clear — **no write entry point**.
-
-- This process only; it never tails file. Under multiple processes each sees its own slice.
-- **Redaction is hard precondition**: lines matching `token` / `secret` / `authorization` / `cookie` / `password` / `api_key`, an `sk-…` shape or `Bearer <value>` dropped whole.
-- Buffer `LOG_BUFFER_LINES` (default 500, hot), oldest overwritten first; `0` disables page (both endpoints 404).
-- 4000 chars per line; each carries `seq`, timestamp, level, logger, `request_id`. **Click the `#first8` chip** to filter by that request id and collapse one request's whole chain (every rotation / cooldown / downgrade in the executor shares it); pasting the `X-Request-ID` response header into the keyword box does the same. stdout / journald / launchd files carry `[request_id]` too (background tasks show `-`). Subscriber limit 4, beyond → 429 + `Retry-After`.
+- **Audit** (`/audit`, admin only): logins (success and failure) plus write operations, filterable by actor / action and paginated. Each entry: time / actor / action / object / note / source IP. **No plaintext passwords or tokens** (activation tokens are stored as SHA-256). Retained 90 days.
+- **Server logs** (`/logs`, admin only): live in-process log stream. `GET /api/logs` returns the last N lines, `GET /api/logs/stream` is SSE (replay then live); level filter, keyword filter, follow, pause, clear. **No write endpoint**.
+  - **Redaction is mandatory**: every line passes an allowlist before leaving the process; lines matching `token` / `secret` / `authorization` / `cookie` / `password` / `api_key`, `sk-…` patterns or `Bearer <value>` are dropped entirely.
+  - In-memory buffer `LOG_BUFFER_LINES` (default 500, hot-reloadable, `0` disables the page); **persistence** `LOG_PERSIST_LINES` (default 2000, hot-reloadable) writes a second copy into the SQLite `log_events` ring table, so logs survive restarts and support `?request_id=`, `?since=<epoch>`, `?level=ERROR`. Trimmed by line count, not time. Write failures warn once and never propagate.
+  - Lines are capped at 4000 chars and carry `seq` / time / level / logger / `request_id`. Click the trailing `#8hexchars` to filter by that request id (every retry / cooldown / fallback of one request shares it); you can also paste the `X-Request-ID` response header into the keyword box. Max 4 subscribers, excess gets 429.
 
 ## Usage
 
-1. **Credentials** — add credentials:
+1. Add credentials on *Credentials*:
    - **CodeBuddy** (incl. international): device-code login, or paste `{"token":"..."}`.
-   - **TRAE**: paste the credential JSON (`accessToken`/`uid`/`refreshToken`) or the callback URL (`apiHost` must be official).
-   - **Qoder / CodeArts**: device-code / OAuth2 authorization-code login (CodeArts: paste the unreachable local callback URL back).
-   - **OfficeAce**: *Log in to OfficeAce*, Huawei Cloud authorization (callback handled in the cloud).
-   - **Raccoon / Lingxi**: no login button — paste a web session credential instead (Raccoon `{"access_token":"<xhx_token>"}`, Lingxi the whole Cookie or a bare `wps_sid`).
-   - **Any channel**: the *JSON import* box also accepts a raw Cookie header and a browser DevTools → Network → right-click request → **Copy as cURL (bash)** command. The latter carries the `Cookie:` / `Authorization:` header, so HttpOnly cookies work too; unambiguous markers (`wps_sid`, `xhx_token`, TRAE fields, AK/SK) auto-select the channel, and the last used channel is remembered.
-   - **OpenCode Zen / Kilo**: nothing to add — a virtual credential is seeded at startup (re-addable from the same panel).
-2. **API keys** — create an `sk-...` (plaintext shown once).
+   - **TRAE**: paste credential JSON (`accessToken`/`uid`/`refreshToken`) or the callback link (`apiHost` must be an official host).
+   - **Qoder / CodeArts**: device code / OAuth2 authorization-code login (for CodeArts, paste the unreachable local callback link back into the page).
+   - **OfficeAce**: click *Sign in to OfficeAce*, Huawei Cloud authorization (callback handled in the cloud).
+   - **Raccoon / Lingxi**: no login button; paste a web session credential (`{"access_token":"<xhx_token>"}` for Raccoon, a full cookie or bare `wps_sid` for Lingxi).
+   - **Generic paste**: the *JSON import* box accepts a full cookie header or DevTools → Network → right-click request → **Copy as cURL (bash)** (works with HttpOnly cookies). Distinctive markers (`wps_sid` / `xhx_token` / TRAE fields / AK·SK) auto-detect the channel, and the choice is remembered.
+   - **OpenCode Zen / Kilo**: nothing to add; a virtual credential appears at startup (restore from the same panel if deleted).
+2. Create an `sk-...` key on *API keys* (plaintext shown once).
 3. Call it:
 
 ```bash
@@ -147,208 +130,128 @@ curl http://127.0.0.1:8000/v1/chat/completions \
   -d '{"model":"glm-5.2","messages":[{"role":"user","content":"hello"}]}'
 ```
 
-`model@provider` pins upstream (`glm-5.2@trae`, `mimo-v2.5-free@zen`); bare names route automatically. Any OpenAI-compatible client connects (Base URL `http://127.0.0.1:8000/v1`). *Playground* tests with session login, no API key.
+`model@channel` forces an upstream (`glm-5.2@trae`, `mimo-v2.5-free@zen`); omit it to auto-select. Any OpenAI-compatible client works (Base URL `http://127.0.0.1:8000/v1`). *Playground* uses your login session, no API key needed.
 
 ### Three model-name fields
 
-1. **Raw id** (`raw_id`): key actually sent upstream, never changed. Raw ids differ per channel (Qoder `kmodel_latest` = TRAE `kimi-k3-1`), may carry namespace prefix (Kilo `kilo-auto/free`).
-2. **Canonical key**: free-tier markers (`-free` / `free` path segment) + namespace prefixes (including Raccoon's `sn-`) stripped, then slugified (`kilo-auto`). List merges by it.
-3. **Display name** (`name`): cleaned readable text, from upstream when given, otherwise derived; brand casing normalized (`DeepSeek` / `MiMo` / `GLM` / `GPT`).
+1. **Raw id**: the key the channel actually sends, never rewritten (Qoder `kmodel_latest` = TRAE `kimi-k3-1`; Kilo may carry `kilo-auto/free`).
+2. **Normalized key**: free-tier markers (`-free` / `free` path segment) and namespace prefixes (incl. Raccoon's `sn-`) stripped, then slugified. The list merges models by it.
+3. **Display name**: human-readable (`LongCat 2.5 Preview`); used when upstream provides one, otherwise derived from the raw id with official brand casing.
 
-Every `id` in `GET /v1/models` is canonical key; requests translate back to raw id (`by_provider.{channel}.raw_id`). **All three spellings directly requestable.** Duplicate canonical keys within channel fall back to raw id.
+`GET /v1/models` returns normalized keys as `id`; forwarding maps back to the raw id, visible as `by_provider.{channel}.raw_id`. **All three forms are requestable**; duplicates within one channel fall back to the raw id. Entries may carry `cost {input, output, cache_read}` (USD per million tokens) and `reasoning_efforts`.
 
-**Cost and levels**: entries may carry `cost {input, output, cache_read}` (USD / 1M tokens, same price table as cost estimation) + `reasoning_efforts` (effective levels for that channel). Only when known.
+- **Custom aliases** (`MODEL_ALIASES`, hot-reloadable): `alias=model@channel;alias2=model`, `@channel` optional. One shared table for listing and routing; entries carry `custom_alias: true`; collisions / missing targets / channels that don't hold the model are skipped with an ERROR. No alias chains.
+- **Single-model lookup** (`GET /v1/models/{id}`): accepts all three forms plus aliases, case-insensitive. Missing or not in the key allowlist → 404 (`model_not_found`) without leaking the pool. Both models routes accept `x-api-key` and `Authorization: Bearer`.
+- **`n` must be 1**, otherwise 400.
 
-**Custom aliases** (`MODEL_ALIASES`, hot): `alias=model@channel;alias2=model`; `@channel` optional. List and request resolution share one table; entries carry `custom_alias: true`. Collisions, missing targets, or channel not holding model log ERROR and skip that segment; no alias chains.
+### Streaming details
 
-**Single-model lookup** (`GET /v1/models/{id}`): all three spellings + custom aliases, case-insensitive, namespaced raw ids work. Missing / outside key allowlist → 404 (`code=model_not_found`), so client cannot probe pool. Both models routes accept `x-api-key` and `Authorization: Bearer`.
+- **Usage tail frame**: after the finish chunk and before `data: [DONE]`, one `choices: []` frame carries usage; omitted if upstream reported none, unreported fields are `null`.
+- **Reasoning tokens**: the client must send `reasoning_effort`; CodeBuddy defaults to `medium` (otherwise thinking lands in the body), explicit values pass through.
+- **Deferred headers**: the stream does not send 200 immediately but waits for the first upstream frame (5s grace, `api/streaming.STREAM_START_GRACE_SECONDS`). A **request-level error** first frame (11128 content guard, 11115 context overflow, 11135 bad image, 11129 tool schema, 4001 model not on that upstream) returns a real **400 JSON** (`invalid_request`); no frame within the grace window → 200 as before (the pending read is not cancelled); errors after the first frame keep `200 + error frame`.
+- **Stream timeouts (off by default)**: `STREAM_FIRST_EVENT_TIMEOUT_SECONDS` (before any frame, retry another credential, recorded as `upstream_first_event_timeout`, heartbeats do not reset the timer) and `STREAM_IDLE_TIMEOUT_SECONDS` (after frames, disconnect without switching). Off by default on purpose: slow-context first tokens measured at 40–71s; enable per deployment (60 / 300 recommended).
 
-**`n` only accepts 1**: the outbound shape produces single choice; anything else is 400.
+### Playground
 
-### Streaming usage and reasoning tokens
-
-- After finish chunk, before `data: [DONE]`, a `choices: []` usage frame is appended; nothing when upstream reported no usage; unreported fields are `null`.
-- Reasoning tokens need `reasoning_effort`; CodeBuddy defaults to `medium` when absent (otherwise reasoning lands in visible answer). Explicit values pass through.
-
-### Streaming timeouts (off by default)
-
-Upstream streams have no read timeout, so the gateway supplies its own:
-
-- **First-event timeout** (`STREAM_FIRST_EVENT_TIMEOUT_SECONDS`, default 0): fires before any content reaches client → retrying on another credential is safe. Comment frames / heartbeats do not reset it.
-- **Idle timeout** (`STREAM_IDLE_TIMEOUT_SECONDS`, default 0): after first frame, stream closed with error frame, **not** retried (partial output cannot be rolled back).
-
-Both default off on purpose: slow contexts measured 40–71s to first token. Enable per deployment (recommended 60 / 300).
-
-### Deferred response headers (request-level errors return a real 400)
-
-Streaming endpoints no longer send the 200 header immediately; they wait for the upstream's first frame (5s grace, `api/streaming.STREAM_START_GRACE_SECONDS`):
-
-- If that first frame is a **request-level error** (content guard 11128, context overflow 11115, bad image 11135, tool-schema rejection 11129, model not served by that upstream 4001, …) → returns **400 JSON** (`invalid_request`) instead of `200 + data:{"error"}`. Previously SDKs treated these rejections as successful responses and kept retrying.
-- No frame within the grace window → sends 200 and keeps streaming; the in-flight frame fetch is **not** cancelled, so slow first tokens are unaffected.
-- Errors after the first emitted frame keep the old semantics (200 + error frame); partial output cannot be rolled back.
-- Other terminal states (whole pool exhausted, etc.) stay 200 error frames with unchanged `Retry-After` semantics.
-
-### Playground advanced parameters
-
-Optional `temperature` / `max_tokens` / `reasoning_effort`; **leaving one empty omits the key**. Client validation matches backend (`temperature` ≤ 1000, `max_tokens` ≤ 4,000,000). `reasoning_effort` appears only for reasoning models, starts at "not sent".
-
-### Playground image input
-
-The prompt box accepts **pasted images** or the "image" file picker (≤ 4MB each, up to 4). With attachments, `messages[0].content` becomes an OpenAI multimodal block array (`text` + `image_url` data URL); without them it stays a plain string and the request body is byte-identical to before. Models without vision are rejected upstream (CodeArts maps to `model_capability`, no credential penalty).
+- Optional `temperature` / `max_tokens` / `reasoning_effort`; **empty means the key is not sent**. Bounds match the backend (`temperature` ≤ 1000, `max_tokens` ≤ 4,000,000).
+- **Image input**: paste or pick files (≤4MB each, up to 4). With attachments `messages[0].content` becomes an OpenAI multimodal block array; without them it stays a plain string (byte-identical request). Unsupported models are rejected upstream (CodeArts maps to `model_capability`, no penalty).
 
 ## Channels
 
-> CodeBuddy (incl. international) / TRAE / Qoder / CodeArts / OfficeAce / Raccoon / Lingxi need credentials; **Zen and Kilo are credential-less free tiers** — one virtual placeholder row (scheduling / cooldown / stats as usual), quota reads "free tier (no quota API)", health stays "no probe". Virtual row re-seeds on restart after deletion; *pause* disables permanently.
+> CodeBuddy (incl. international) / TRAE / Qoder / CodeArts / OfficeAce / Raccoon / Lingxi need credentials; **Zen and Kilo are credential-free free tiers** — a single virtual row in the pool (scheduling / cooldown / stats as usual), quota column "free tier (no quota API)", health always "no probe". Deleting the row resurrects it on restart; to disable permanently use *Pause*.
 
 ### OpenCode Zen (`zen`)
 
-Free models at [opencode.ai/zen](https://opencode.ai), no login. The upstream list mixes unmarked paid models, so gateway narrows by the `-free` suffix and probes each candidate, exposing only what answers anonymously (liveness cached 30 min; free models marked **x0**).
+[opencode.ai/zen](https://opencode.ai) free models, no login. The upstream list mixes paid models without a free marker → narrow with the `-free` suffix → probe each → **drop only confirmed-unavailable** ones (paid 401 / retired 400 / region 403); `429` / 5xx / timeouts are **kept** (liveness cached 30 minutes; free models priced **x0**).
 
-**Free-tier gate**: upstream wants official client (UA version, session header, `stream:true`, `tools` with `bash`/`read`). Gateway satisfies it; injected `bash`/`read` are empty shells, their calls filtered out. UA via `ZEN_OPENCODE_VERSION`; endpoint via `ZEN_API_ENDPOINT` (inside `ZEN_ALLOWED_ENDPOINTS`). Paid models return unavailable even when pinned.
+**Free-tier gate**: upstream expects an official-client shape (UA, session headers, `stream:true`, gate tools present) → satisfied automatically; stub tools are injected and real calls filtered out. The gate is a moving target, so everything is configurable (restart to apply): `ZEN_USER_AGENT`, `ZEN_API_ROOT`, `ZEN_MODELS_ROOT`, `ZEN_GATE_TOOLS`, `ZEN_CLIENT_PROFILE` (`legacy` default / `v2`). `v2` mirrors the official 2.x header set (four session copies, `x-opencode-client/project`, `b3`/`traceparent`) and injects an `<env>` block; when 2.x splits endpoints set `ZEN_API_ROOT=/inference/openai/v1` + `ZEN_MODELS_ROOT=/inference/v1`. Paid models forced with `model@zen` still report unavailable.
 
 ### Kilo (`kilo`)
 
-Free models at [Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`), no login. Standard OpenAI protocol; `/models` carries `isFree` → gateway filters directly, **does not probe** (saves quota).
-
-**Quota**: gateway-wide ~200 requests/hour/IP. Upstream 429 and 502/503/504 are model-scoped → only named model cools. Endpoint via `KILO_API_ENDPOINT` (inside allowlist).
+[Kilo](https://kilo.ai) (`api.kilo.ai/api/gateway`) free models, no login. Standard OpenAI protocol; every `/models` entry carries `isFree` → filtered directly, **no probing** (saves quota). Gateway limit is roughly 200 requests/hour/IP; upstream 429 and 502/503/504 are model-level → only that model cools down.
 
 ### Qoder (`qoder`)
 
-[Qoder](https://qoder.com), real account: *Log in to Qoder* for device-code authorization (token never touches browser). Upstream speaks private COSY protocol, signed and unwrapped here; surface stays OpenAI.
+[Qoder](https://qoder.com), real account required: *Sign in to Qoder* uses device-code authorization. Upstream speaks a private COSY protocol → this service signs and unwraps it; outbound is still standard OpenAI.
 
-**Quota and check-in**: quota probing (`/api/v2/quota/usage`) and campaign-based check-in (credits accumulate). Campaigns (`/sash/api/v1/me/campaigns`), old `daily-check-in` as fallback. Campaigns **refresh daily at 10:00 (UTC+8)** (valid 30 days); task seals per that window. No streak count. **International site has no check-in** (404) → "no such endpoint in this region".
-
-**Endpoints**: CN by default (`openapi.qoder.com.cn` + `gateway.qoder.com.cn`); international via `QODER_API_ENDPOINT=https://openapi.qoder.sh` with allowlist extended.
-
-**Upstream node failures**: Qoder sometimes wraps own node failures in a 400 (`[FAIL]node:…`) → model-scoped transient fault, only that model cools; exhausted candidates → 503 (`no_healthy_credential`).
-
-**Keepalive frames and queueing**: the upstream sends keepalive frames with `body:"null"` (outer status 200) mid-stream → skipped, never interrupting output; "queued" arrives as a 403 whose queue marker hides inside a **serialized string** → classified as QUEUE, waits the upstream's named seconds and reopens on the same credential instead of hard-disabling it. "Daily billing count exhausted" (403 `code 110`, `Billing daily count exceeded`) counts as quota → cools until 04:00 next day, likewise never hard-disabling (same predicate for HTTP and in-stream envelopes).
-
-**Message shape**: an assistant `content: null` that carries `tool_calls` is normalized to an empty string; `role:"developer"` is normalized to `system` (no upstream accepts the variant, and each fails differently: qoder 400 `unknown variant 'developer'`, CodeArts in-stream `001001044`, codebuddy 11128 risk control, trae a silently empty stream). The rewrite lives in `provider.base.normalize_developer_role` and is shared by all eight channels; both rewrites apply to the outbound copy and are lossless.
+- **Quota & check-in**: `/api/v2/quota/usage`; check-in is campaign-based via `/sash/api/v1/me/campaigns` (accumulating credits), legacy `daily-check-in` only as fallback. **Campaigns refresh daily at 10:00 (UTC+8)**, claimed credits valid 30 days. The international site has no check-in endpoint (404).
+- **Per-package expiry (web cookie)**: `/api/v2/quota/usage` only gives two bucket totals (its top-level `expiresAt` is the period-reset sentinel `9999-12-31`). The account page's `GET {website}/api/v2/me/usages/big_model_credits` exposes per-package `expires_at` but only accepts a web session (device tokens get 401). Paste it via *More → Web cookie* and probing switches to the web API: packages expand individually and expiry feeds "expiring first" ordering. The cookie is encrypted, never echoed, excluded from exports; on 401 it silently falls back to the summary view.
+- **Endpoints**: China by default (`openapi.qoder.com.cn` + `gateway.qoder.com.cn`); for international set `QODER_API_ENDPOINT=https://openapi.qoder.sh` and extend the allowlist.
+- **Error semantics**: node faults wrapped as 400 (`[FAIL]node:…`) cool only that model; `body:"null"` keep-alive frames are skipped; "queued" arrives as 403 with the marker hidden in a serialized string → wait the named seconds and reopen on the same credential; "daily billing count exhausted" (403 `code 110`) is a quota error cooling until 04:00 next day, not a hard disable.
 
 ### CodeArts (`codearts`)
 
-[Huawei Cloud CodeArts](https://codearts.huaweicloud.com), real account: *Log in to CodeArts*, authorize, then paste the **unreachable local URL** back; server exchanges it for STS credentials (AK/SK + security_token + refresh_token + DPoP key) and stores them encrypted.
+[Huawei Cloud CodeArts](https://codearts.huaweicloud.com), real account required: *Sign in to CodeArts* → the browser lands on an unreachable local address → paste the **whole link** back to exchange for STS credentials (AK/SK + security_token + refresh_token + DPoP key), encrypted at rest.
 
-**Token refresh is rigid**: refresh_token, `client_id=codearts-agent` and DPoP key are bound and single-use; new refresh_token must be written back. Handled by pre-refresh task (DPoP ES256/P-256). Window capped at 45 minutes and must be wider than polling interval. Revoked credential marked "re-login required", stops automatic retries.
-
-**Daily check-in**: `GET /v1/ops/delivery` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`. The campaign is picked by `type=USER_LOGIN` and **`campaignId` comes from that response** (upstream switched it from 1 to 34 and the reward from 1000 to 100 credits in Nov 2026; hard-coding the id made check-in report success while the web task stayed pending and credits never grew). `CLAIMED` means claimed-but-unconfirmed, so both steps always run. **Re-login merges**: the same upstream account (`uid`) updates its existing credential row (fresh tokens, revival from "re-login required"), keeping paused/pinned/tags/stats attribution; only a different account creates a new row.
-
-**Quota = credit balance**: probing hits `GET {snap}/snap-manager/v1/statistics/plugin` (`snap-manager` prefix mandatory; header `Agent-Type: PromptCenter`). Upstream values are credits, no conversion; sub-packages go into popover, plan expiry registered (unused credits voided too).
-
-**Per-batch expiry (web cookie)**: the statistics API only gives a 7-day expiring total. Per-grant `expireAt` lives in the web console portal: `GET /portal/promptcenter/v1/ops/credit/overview` lists campaigns, `GET .../campaign/{id}?pageNum=&pageSize=` pages through grants (`claimedAmount` / `consumedAmount` / `expiredAmount` / `expireAt`). The portal accepts **console session cookies only** (AK/SK signatures do not work; `X-Requested-With: XMLHttpRequest` is required). After pasting via *More → Web Cookie*, probing uses the portal: bonus credits expand per grant and real expiry drives the expire-first ranking, while base/on-demand stay on the summary. An expired cookie or changed shape silently falls back to the 7-day window; probing is never marked failed. `expiredAmount` and `status` lag behind (observed 0 / `CLAIMED` after expiry) — death is decided by `expireAt <= now` only; expired grants are **not shown**. When the cookie dies (portal redirects to login or returns an empty body), the credential row shows "web cookie expired, paste it again"; re-pasting resets the state and quota totals are unaffected (console sessions cannot be refreshed automatically).
-
-**Signing / cumulative SSE / pacing**: Huawei `SDK-HMAC-SHA256` (AK/SK + `X-Security-Token`); allowlist needs snap engine, STS, portal. Streaming `text` is cumulative (replace semantics) → reduced to incremental events. Upstream hard-limits 3 concurrent sessions per account → `CODEARTS_MAX_CONCURRENCY` + `CODEARTS_REQUEST_WINDOW_SECONDS`.
+- **Rigid refresh**: refresh_token is bound to `client_id=codearts-agent` and the DPoP key, single-use; the new refresh_token must be written back. The pre-refresh task does this (DPoP ES256/P-256), window capped at 45 minutes. Invalid credentials → "re-login required" and retries stop.
+- **Check-in**: `GET /v1/ops/delivery?channel=IDE` → `POST /v1/ops/claim` → `POST /v1/ops/confirm`. The campaign is chosen by `type=USER_LOGIN` (falling back to `extra.triggerEvent` = `user.login`), and **`campaignId` comes from the current response** (upstream moved it from id 1 to 34 and the amount from 1000 to 100 in 2026-11; hardcoding gives "check-in succeeded, credits unchanged"). Missing `campaignId` fails the round and retries. `CLAIMED` means claimed-but-unconfirmed → run both steps; **claim success + confirm failure counts as failure**. Failures back off exponentially (10m → 20m → 40m → capped at 1h).
+- **Re-login merges**: the same `uid` updates the existing row in place and clears the hard disable; upstream-named cooldowns (rate limit / balance / entitlement / risk) are preserved. `paused` / `pinned` / tags / stats attribution unchanged; different accounts still add rows.
+- **Quota = credit balance**: `GET {snap}/snap-manager/v1/statistics/plugin` (the `snap-manager` prefix is required, header `Agent-Type: PromptCenter`), no conversion.
+- **Per-item expiry (web cookie)**: portal `GET /portal/promptcenter/v1/ops/credit/overview` plus `.../campaign/{id}?pageNum=&pageSize=` expose per-grant `expireAt`; the portal only accepts a console session cookie (and needs `X-Requested-With: XMLHttpRequest`). On failure it silently falls back to the 7-day window. `expiredAmount` / `status` lag, so death is judged solely by `expireAt <= now`; expired items are hidden.
+- **Signing / cumulative SSE / throttling**: `SDK-HMAC-SHA256` (AK/SK + `X-Security-Token`); streamed `text` is cumulative (replacement semantics) → converted to deltas. Upstream hard limit is 3 concurrent per account → `CODEARTS_MAX_CONCURRENCY` + `CODEARTS_REQUEST_WINDOW_SECONDS`.
 
 ### OfficeAce (`officeace`)
 
-[Huawei Cloud OfficeAce](https://www.huaweicloud.com/product/agentarts.html), real account: *Log in to OfficeAce* and finish Huawei Cloud authorization — **callback handled in cloud**, so no local port and no URL to paste. Backend polls `/v1/claw/auth/code` every 2.5s.
+[Huawei Cloud OfficeAce](https://www.huaweicloud.com/product/agentarts.html), real account required: *Sign in to OfficeAce* completes Huawei Cloud authorization (callback handled in the cloud); the backend polls `/v1/claw/auth/code` every 2.5s for the code.
 
-**Provisioning prerequisite**: account must first sign in to OfficeAce client and redeem invitation code. Unprovisioned account completes login but gets no model key; service names the account and says OfficeAce not activated.
-
-**Re-login merges the existing credential**: signing in again with the same account (`account_id`) updates that row in place (model keys, temporary AK/SK, refresh_token, DPoP key) and clears "re-login required"/cooldowns instead of adding a duplicate. `paused` / `pinned` / tags / stats attribution are preserved.
-
-**Two credential sets, very different lifetimes**:
-
-| Credential | Lifetime | Used for |
-|---|---|---|
-| `Basic model_app_key:model_app_secret` | never expires | chat forwarding |
-| temporary AK/SK + `security_token` + `project_id` | ~2 hours | quota lookup, check-in |
-
-Mixing them yields `APIG.0303 app not found`. Temporary half renewed by pre-refresh task; `refresh_token` single-use, bound to `client_id=pdp5_for_agentarts` + DPoP key (not interchangeable with CodeArts ticket).
-
-The upstream is plain OpenAI protocol, with three quirks:
-
-- **Rate limits arrive as fake 200s**: HTTP 200 + `data:{"error":…}`. Error frames flow to engine as usual; `81111`/`81114` cool only that credential × model.
-- **Model-level rejection must not kill credential**: `81004` / `81009` arrive as 403/404; business codes checked before status codes → model-level negative cache (cleared on success).
-- **`max_tokens` = reasoning + answer budget**: `≥16` gets 1024 headroom clamped to model ceiling; `<16` passes through; absent stays absent.
-
-**Credits are main ledger**: unit `officeace_points`; `remaining`/`total` are credits. Each reward expires independently → quota reads "per-reward expiry".
-
-**Daily check-in**: `POST /v1/subscription/bonus/claim` (a write — it really grants credits; body must be `{}` with a JSON `Content-Type`). The upstream is idempotent for repeat claims on same day. Gains are computed as remainder delta. Sealed until next Beijing midnight.
-
-**No active probing / no credit estimation**: probing burns credits; the `cost_coefficient` × `tokens_per_point` relation is undocumented. Model-level rejections are handled by real requests via the `BLOCKED` negative cache.
-
-**Signing and endpoints**: control plane `/v1/claw/*` uses `SDK-HMAC-SHA256`; model gateway accepts only `V11-HMAC-SHA256` (wrong one → `APIG.0624` or 401). `OFFICEACE_ALLOWED_ENDPOINTS` needs only control-plane host (model gateway is per-account, issued by upstream).
-
-**Single account, single user**: the official plan limits one user per account; no sharing.
-
-**Switching accounts**: *Switch account* button (`force_login=true`) clears the Huawei Cloud browser session first.
+- **Prerequisite**: the account must first sign in to the OfficeAce client and redeem an invite code, otherwise login "succeeds" but yields no model key → an explicit "account has not activated OfficeAce" error.
+- **Two credential sets**: `Basic model_app_key:model_app_secret` (never expires, chat forwarding) and temporary AK/SK + `security_token` + `project_id` (~2 hours, quota queries / check-in). Mixing them yields `APIG.0303 app not found`. Temporary credentials are renewed by pre-refresh; `refresh_token` rotates once and is bound to `client_id=pdp5_for_agentarts` + the DPoP key (not interchangeable with CodeArts).
+- **Re-login merges**: same `account_id` updates in place, clears "re-login required", preserves cooldowns, adds no duplicate.
+- **Three protocol quirks**: rate limits arrive as fake 200 (`data:{"error":…}`, `81111/81114` cool only that credential × model); `81004` / `81009` are judged by business code before HTTP status → model-level negative cache (cleared on success); `max_tokens` is the total budget for reasoning + body (`≥16` adds 1024 then clamps to the model ceiling, `<16` passes through, absent stays absent).
+- **Credits are the ledger**: unit `officeace_points`, each reward expires independently → "per-item expiry".
+- **Check-in**: `POST /v1/subscription/bonus/claim` (a write; body must be `{}` with a JSON `Content-Type`; upstream is idempotent per day). Gains are computed from the remaining-balance delta and booked until the next Beijing midnight.
+- **No active probing / no credit estimation**: probing burns real credits and the `cost_coefficient × tokens_per_point` relation is undocumented; model-level rejections are handled by real traffic through the `BLOCKED` negative cache.
+- **Signing and endpoints**: control plane `/v1/claw/*` uses `SDK-HMAC-SHA256`; the model gateway only accepts `V11-HMAC-SHA256` (wrong one → `APIG.0624` or 401). The allowlist only needs the control-plane host (each model gateway is issued per account and stored with the credential).
+- **One account, one user** (per the official plan policy); switch accounts via *Switch account* next to sign-in (`force_login=true`).
 
 ### Raccoon (`raccoon`)
 
-[SenseTime Raccoon](https://xiaohuanxiong.com), real account (web login is enough). **No login button**: the credential is a web session JWT, importable only by hand — DevTools → Application → Cookies → copy the `xhx_token` value and paste `{"access_token":"<value>"}` into *JSON import* (a bare JWT, the whole cookie string, or a *Copy as cURL* of a request to that site all work). Expires in ~30 days; grab a fresh one then.
+[SenseTime Raccoon](https://xiaohuanxiong.com), real account required. **No login button**: the credential is a web session JWT — DevTools → Application → Cookies → copy `xhx_token`, paste `{"access_token":"<value>"}` (bare JWT, full cookie header, or Copy as cURL also work). Expires in ~30 days; **just import the fresh one again**: the same `uid` (JWT `sub`) updates in place and clears the hard disable, with no duplicate row (duplicates are treated as two accounts running concurrently, doubling stats and bypassing the per-account throttle).
 
-**Protocol**: plain OpenAI-compatible (`/api/web/llm/v2/chat/completions`), no signing, no device fingerprint. Streaming/non-streaming `tool_calls`, `role=tool` echo, `include_usage` all verified; 411K-token input returned in 14.2s.
-
-**Unknown models silently fall back to the default** (observed): a bogus model name still returns 200 with a different model. Two layers of interception — validate against the catalog before sending, then compare the echoed `model` on the first frame; a mismatch fails rather than answering B for A.
-
-**Quota = credits**: each request costs 1 point regardless of tokens; 300 points granted daily at 00:00 (valid 7 days); ledger records credits. `billing_effective_multiplier` from the catalog becomes the multiplier directly, **0 = free tier** (e.g. `sn-sensenova-6-8-flash` free until 11-30) → the scheduler prefers it.
-
-**Quota breakdown**: upstream splits credits into four pools (daily / reward / monthly / top-up); per-grant expiry (7-day validity) is derived from `daily_grant.expire_at` in the bills and feeds the "expiring first" ordering. Pools (`quota_packages`) and expiry ladder (`expiry_ladder`) have different semantics and are stored separately.
-
-**Daily check-in**: there is no claim endpoint — the daily 300 is granted when the account **first logs in on the web that day**; a day with no login gets no `daily_grant` row at all (the earlier "granted at 00:00, login only extends it" reading was disproved on 2026-11-18 with real accounts). Evidence: each `daily_grant.created_at` lines up to the second with the upstream `sessions[].login_at`; 67 seconds of `user_info` / `balance` / `tasks` / `model_catalog` / `refresh` / free-model chat on an old token left the bills untouched; accounts that never logged in that day had no grant for two days running. So "check-in" = visit → balance probe → bills read; **bills are the only evidence, HTTP 200 is not**, and **no `daily_grant` today means failure** (yesterday's unspent credits do not count as today's check-in). Before 01:30 the retry is deferred to 01:30 to let bill sync catch up.
-
-**Session needs re-login**: `GET /api/web/auth/v1/user_info` states it in `trusted_device` — `trusted=false` / `device_bind_state=suspicious` / `needs_relogin=true` / `reason=device_session_mismatch`. In that state the device heartbeat always returns `400 200811 device_bind_required`, no `daily_grant` appears that day, and there is **no self-healing path** (`devices_current_bind` also returns 400 for `device_session_mismatch`; `refresh` just hands back the same token with an unchanged sid). Check-in and activity reporting both read that signal and report "re-login on the web, then re-import the credential" instead of a bare "heartbeat failed (HTTP 400)". **Logging in again grants that day's credits immediately** (settles within seconds, `grant_at` backfilled to 00:00).
-
-**On-demand login (optional, off by default)**: since only a fresh login grants the daily credits, the service can perform that login itself — either use **Credential row → More actions → Account password** (or add `{"phone":"139…","password":"…"}`, `phone_number` also accepted, to the import JSON) and enable `RACCOON_AUTO_LOGIN`; when check-in finds "nothing granted today" it calls `POST /api/web/auth/v1/login_with_password`, stores the new session, and re-checks immediately. Verified details: `phone`/`password` are **AES-CFB** (key `senseraccoon2023`, random 16-byte IV prepended, Base64), minimum 8 characters, and the endpoint needs **no captcha** (Aliyun's widget belongs to the SMS form only). Limits and cost: at most once per credential per day (retrying a wrong password only accumulates risk-control); an explicit upstream rejection (`200004 phone_or_password_verify_error`) marks the credential "re-login required" and stops; accounts with `password_status=unset` cannot log in this way at all (SMS/QR only); scripted login is further out on the ToS spectrum than pasting a cookie, hence off by default. Backing endpoint: `PUT /api/credentials/{id}/login-secret` (both fields empty = clear); the password is encrypted at rest, never echoed back, and excluded from credential export. A successful login immediately calls `devices_current_bind` to bind the **new session** to the derived device (the browser flow): an unbound session has `trusted=false`, its heartbeat always returns 400, and the daily extension never applies. A failed bind does not fail the login (the token already works). `derive_device_id` is also capped at 64 chars — `devices_current_bind` answers `500 value too long for character varying(64)`, and the old 73-char form was exactly over the limit.
-
-**Activity reporting**: `POST /api/web/auth/v1/devices_current_heartbeat` (the web client's real device heartbeat); with the `x-client-*` header family it returns 200 and is idempotent, refreshing `last_login_at`. Off by default; shares `ACTIVITY_REPORT_ENABLED` / `ACTIVITY_REPORT_HOUR` with CodeBuddy. Device id is derived stably from uid (a random one is treated as a new device); it **must be ≤64 chars** — the bind endpoint answers 500 `value too long for character varying(64)` otherwise.
-
-**Concurrency cap ~5** (the 6th concurrent request returns `429 user_model_rate_limited`) → `RACCOON_MAX_CONCURRENCY` defaults to 2, with its own pacer. That 429 is really a per-account-per-model rate window (measured recovery median 25 min), so the `CONCURRENCY` cooldown starts at 60s, doubles along a hit chain, and caps at 30 min.
+- **Protocol**: standard OpenAI-compatible (`/api/web/llm/v2/chat/completions`), no signing, no device fingerprint; `tool_calls`, `role=tool` round-trip and `include_usage` all verified (411K input tokens in 14.2s).
+- **Unknown models silently fall back to the default model** (measured) → two guards: validate against the catalog before sending, then compare the `model` echoed in the first frame and fail on mismatch.
+- **Quota = credits**: 1 credit per request (independent of tokens), 300 credits granted daily at 00:00 (valid 7 days). `billing_effective_multiplier` is used as the multiplier, **0 = free** (e.g. `sn-sensenova-6-8-flash`), preferred by the scheduler.
+- **Quota detail**: upstream splits credits into four pools (daily / reward / monthly / top-up) and expands plan detail per grant (`type=income` `daily_grant` / `reward_grant`). Upstream provides no per-grant remainder → daily credits are allocated "earliest expiry first" (inferred); reward credits are measured to be consumed only after daily quota runs out, so they are listed at face value. Falls back to the four pools when the ledger is unavailable. The expiry ladder shares this source and feeds "expiring first" ordering.
+- **Daily check-in**: there is no claim endpoint — the 300 credits are granted as a `daily_grant` on the **first web login of the day** (the earlier belief "granted at 00:00, login only extends" was disproved by a real-account retest on 2026-11-18). So "check-in" = visit the page → touch the balance → verify the ledger, **trusting the ledger and not HTTP 200**; **no `daily_grant` today means failure**; between 00:00 and 01:30 retries are pushed to 01:30 to wait for billing sync. The ledger is filtered by `type=income` (`type=all` lets spending entries push the grant out of the window).
+- **Session needs re-login**: `GET /api/web/auth/v1/user_info` reports it via `trusted_device` (`trusted=false` / `device_bind_state=suspicious` / `needs_relogin=true` / `reason=device_session_mismatch`). Once there, the device heartbeat always returns `400 200811 device_bind_required`, no `daily_grant` arrives that day, and **there is no self-healing path** (`devices_current_bind` also 400s; `refresh` returns the same token). Check-in and activity reporting read this signal and report "sign in on the web and re-import the credential" instead of a bare failure. **Re-login grants that day's credits immediately.**
+- **On-demand login (optional, off by default)**: fill phone and password under *More → Account password* (or include `phone`/`password` / `phone_number` in the import JSON), then enable `RACCOON_AUTO_LOGIN`: when check-in finds today's grant missing it calls `POST /api/web/auth/v1/login_with_password` for a fresh session and re-checks. Measured details: `phone`/`password` use **AES-CFB (key `senseraccoon2023`, 16-byte random IV prefix, Base64)**, password ≥8 chars, and **no captcha is required**. Limits: at most once per credential per day; an explicit rejection (`200004 phone_or_password_verify_error`) marks "re-login required" and stops; `password_status=unset` accounts cannot log in this way. Endpoint `PUT /api/credentials/{id}/login-secret` (both empty = clear); the password is encrypted, **never echoed**, and excluded from exports. After login it binds the new session via `devices_current_bind` (unbound sessions stay `trusted=false` and heartbeat 400s); binding failure is not a login failure. `derive_device_id` is capped at 64 chars (upstream returns `500 value too long for character varying(64)`).
+- **Activity reporting**: `POST /api/web/auth/v1/devices_current_heartbeat` with the `x-client-*` header family returns 200 and is idempotent. Off by default, sharing `ACTIVITY_REPORT_ENABLED` / `ACTIVITY_REPORT_HOUR` with CodeBuddy.
+- **Concurrency limit ~5** (the 6th returns `429 user_model_rate_limited`) → `RACCOON_MAX_CONCURRENCY` defaults to 2 with its own throttle. That 429 is really an account × model rate window (median recovery 25min); cooldowns start at 60s, double along the chain, capped at 30min.
 
 ### Lingxi (`lingxi`)
 
-[WPS Lingxi](https://lingxi.wps.cn), real WPS account required. **No login button**: the credential is the WPS account cookie `wps_sid` — log in on the web app (`lingxi.kdocs.cn` works as well), copy the whole Cookie from DevTools → Application → Cookies, and paste it into the *Login channels* panel (whole cookie string or a bare sid both work). Upstream has **no refresh endpoint**, and expiry is never guessed from age — the only real signal is a 401, after which you paste a fresh cookie.
+[WPS Lingxi](https://lingxi.wps.cn), real WPS account required. **No login button**: the credential is the WPS cookie `wps_sid` (`lingxi.kdocs.cn` also works) — after signing in, copy the whole cookie header or the bare sid into the *Sign-in channel* page. Upstream has **no refresh endpoint**; the real signal is a 401, so re-paste when it expires.
 
-**One active login per browser profile**: signing into another WPS account in the same browser profile immediately invalidates the previous `wps_sid` (verified). For multiple accounts, log in from separate browser profiles / incognito windows and capture one Cookie from each; an old credential that now returns 401 is re-probed after a new import and marked *relogin required* instead of staying in the scheduler pool.
-
-**One conversation = three requests**: create a cowork session → claim a credits run → `agent-runtime/chat/completions` (private SSE). Upstream **bills per run** (several calls inside one run charge one credit), so sessions + runs are cached per account × model for 1 hour (no sliding renewal) with in-flight single-flight; `SQLNoRows` / "session not found" drops the cache and rebuilds once.
-
-**Private SSE and usage semantics**: the text lives in `choices[].text` (not `delta.content`) and **no `[DONE]` is sent** (the stream ends on `finish_reason`); `usage.total_tokens` is the **current context size**, so it is recomputed as `prompt+completion`; `cached_tokens` / `reasoning_tokens` are flat fields with the opposite direction from OpenAI.
-
-**Tool schemas must be flattened first**: `anyOf` / `oneOf` / `$ref` / array-valued `type` make the whole round fail with a single "AI service error"; `max_tokens` goes into `base_llm_arguments`, while `reasoning_effort` is sent at top level *and* inside `llm_arguments`.
-
-**Quota = credits (智点)**: `total_balance` maps straight to remaining, bonus batches carry `bonus_credits[].expire_time` into the expiry ladder (15-day window); the ledger records credits, no token conversion. The catalog `multiplier` becomes the rate directly.
-
-**Check-in**: the task center exposes `daily_check_in`; `status=claimed` means already checked in. Upstream answers duplicate claims with a fake 200 (`result=ok` while the balance does not move), so the reward is the **balance delta before/after**, and a zero delta falls back to the task status — HTTP 200 is never trusted.
-
-**Error classification**: 401 → dead credential (re-paste cookie); 402 / quota wording → credit exhausted; 403 → transient; 404 → invalid request; 429 → named model only; audit rejection (`AuditFailed`) is not fixed by switching accounts; run expiry rebuilds once.
-
-**ToS grey area**: reuses the desktop / web login state and impersonates the desktop client (`X-Client-Type: lingxi_claw` plus `x-kso-app-name/app-version/device-id`), see `provider/tos.py`.
+- **One login per browser profile**: signing into another WPS account in the same profile makes the previous `wps_sid` 401 immediately (measured). Use separate profiles / incognito windows; old credentials are confirmed 401 on the next probe and marked "re-login required".
+- **Three requests per conversation**: create cowork session → claim credits run → `agent-runtime/chat/completions` (private SSE). Billing is **per run** → session + run are cached per "account × model" for 1 hour (no sliding renewal) with single-flight; `SQLNoRows` / "session not found" discards the cache and rebuilds once.
+- **Private SSE and usage semantics**: content is in `choices[].text` (not `delta.content`) and **no `[DONE]` is sent** (terminated by `finish_reason`); `usage.total_tokens` is the current context size → compute `prompt+completion` locally; `cached_tokens` / `reasoning_tokens` are flat fields with the opposite direction from OpenAI.
+- **Tool schemas must be flattened first**: `anyOf` / `oneOf` / `$ref` / array-typed `type` make upstream answer "AI service error"; `max_tokens` must go into `base_llm_arguments`, and `reasoning_effort` must appear both top-level and in `llm_arguments`.
+- **Quota = credits**: `total_balance` maps directly to balance, bonus batches' `bonus_credits[].expire_time` feed the expiry ladder (15-day window); the ledger records credits; `multiplier` is used as-is.
+- **Check-in**: task center `daily_check_in`, `status=claimed` means done today. Upstream fakes 200 on repeat claims (balance unchanged) → rewards are computed from the **before/after balance delta**, and a zero delta reads the task status; never trust HTTP 200.
+- **Error classification**: 401 → credential invalid; 402 / quota wording → exhausted; 403 → transient; 404 → bad request; 429 → that model; `AuditFailed` → switching credentials is useless; expired run → rebuild once.
+- **ToS grey area**: reuses the desktop/web session and impersonates the desktop client (`X-Client-Type: lingxi_claw` + fixed `x-kso-app-name/app-version/device-id`), see `provider/tos.py`.
 
 ### Generic upstream (`generic`, optional)
 
-Wraps any **standard OpenAI-compatible endpoint**: Command Code, Kimi Code, MiniMax, Zhipu free tier, self-hosted vLLM / LiteLLM. Unlike the ten channels there is no reverse engineering — you supply the endpoint and the credential is a real API key you own.
+Connects to a **standard OpenAI-compatible endpoint** (Command Code, Kimi Code, MiniMax, Zhipu free tier, self-hosted vLLM / LiteLLM, …): no reverse engineering, no private protocol; you supply the endpoint, and the credential is a real API key you own.
 
 ```bash
 # .env
 GENERIC_API_ENDPOINT=https://api.example.com/v1
 GENERIC_MODELS=gpt-6.2,kimi-k3.1-pro     # optional: static list when upstream has no /models
-GENERIC_CHAT_MIN_INTERVAL=0               # optional: throttle RPM, default off
+GENERIC_CHAT_MIN_INTERVAL=0               # optional: lower RPM
 ```
 
-- **Empty = disabled**: without `GENERIC_API_ENDPOINT` the channel does not exist (no `/v1/models` entry, no credential row, no ToS notice).
-- **Credential**: `{"api_key": "sk-…"}` (also a bare key / `token` / `accessToken`), stored encrypted and poolable.
-- **Endpoint validation**: with `GENERIC_ALLOWED_ENDPOINTS` set only listed hosts pass; empty means any `http(s)` (that's the point — internal gateways), but non-HTTP schemes are rejected since a real key would leak.
-- **Error classification is the inverse of Zen / Kilo**: those have no credential, so 401 only means "this model needs a paid key" → skip channel; here **401/403 means the key is dead → hard-disable**, otherwise a bad key keeps taking turns and burning a request each time. 402 → insufficient balance, 429 → rate limit, 5xx → other.
-- **Capabilities**: chat (streaming / non-streaming) and model list. No check-in / growth / activity reporting / token refresh / quota probe — tasks skip it automatically.
-- **Limit**: one per deployment (channel id is fixed to `generic`). For several upstreams, run several deployments.
+- **Empty = disabled**: without `GENERIC_API_ENDPOINT` the channel does not exist in that deployment (absent from `/v1/models`, credentials page and ToS notices).
+- **Credentials**: `{"api_key": "sk-…"}` (bare key / `token` / `accessToken` also accepted), encrypted, multiple keys rotate.
+- **Endpoint validation**: with `GENERIC_ALLOWED_ENDPOINTS` set only listed hosts pass; empty allows any `http(s)` (pointing at internal services is the point) but still rejects non-HTTP schemes like `file://`.
+- **Error mapping is the opposite of Zen / Kilo**: those have no credentials, so 401 just means "this model needs a paid key" → skip the channel; here **401/403 = dead key → hard disable**; 402 → out of balance, 429 → rate limited, 5xx → other.
+- **Capabilities**: chat and model listing. No check-in / growth / activity / refresh / quota queries; the corresponding tasks are skipped.
+- **Limit**: one per deployment (fixed channel id `generic`); run multiple deployments for multiple providers.
 
 ### CodeBuddy international (`codebuddy_intl`)
 
-
-[www.codebuddy.ai](https://www.codebuddy.ai), same protocol as CN site but separate account system (separate registration and billing) → separate channel. Same device-code login.
-
-Why not one channel: `CODEBUDDY_API_ENDPOINT` is single process-wide value → switching would send every existing CN credential to international site. Both sites can hold credentials simultaneously with own endpoints, pacers, login flows.
-
-**Allowlists deliberately exclude each other**: `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` defaults to international host only; adding CN host fails at startup (cross-site sending leaks credential).
-
-**Capability differences**: chat, model list, quota probing, token refresh, activity reporting enabled; **check-in and growth center are not** (no such campaign on this channel; growth center unverifiable and includes irreversible actions).
-
-**Model list probes plan**: each credential sends one minimal request per model, keeps only usable ones; `11158` (plan not allowed) and `11102` (no such model) dropped; `429` / 5xx / timeouts keep model. Results cached per account 6 hours.
-
-**Same-name models carry no channel suffix**: models on both sites are one row attached to both channels; genuinely different models (`-x` / `-sg`) get own rows.
+[www.codebuddy.ai](https://www.codebuddy.ai), same protocol as the China site but a separate account system → separate channel. Login is the same (device code). Not merged because `CODEBUDDY_API_ENDPOINT` is a single process-wide value: switching would send existing China credentials to the international site. **The allowlists deliberately exclude each other** (pointing at the China host fails at startup). Capability differences: chat, model list, quota probing, refresh and activity reporting are enabled; **check-in and growth center are not**. Model list is probed per plan (`11158` / `11102` dropped, `429` / 5xx / timeouts kept, cached per account for 6 hours). Models shared by both sites appear once in `/v1/models` attached to both channels; genuinely distinct ones (`-x` / `-sg`) get their own entry.
 
 ### Per-channel outbound proxy (optional)
 
@@ -356,17 +259,13 @@ Why not one channel: `CODEBUDDY_API_ENDPOINT` is single process-wide value → s
 PROVIDER_PROXIES="codebuddy=http://127.0.0.1:7890;qoder=socks5://127.0.0.1:1080"
 ```
 
-Format `channel=proxyURL;channel2=proxyURL2`; `http/https/socks5/socks5h`; empty = all direct. Applies to every outbound request of that channel (chat, quota, model fetch, background tasks, OAuth). **Startup-time.** Unknown channel / bad scheme / missing `=` fails startup. `HTTP_PROXY` and friends ignored (`trust_env=False`).
-
-> Inside containers `127.0.0.1` is container itself. Use `host.docker.internal` for host proxy:
-> `PROVIDER_PROXIES="codebuddy=http://host.docker.internal:7897"`
-> compose declares `extra_hosts`. Parsing validates format only, so wrong address does not fail startup.
+Format `channel=proxyURL;channel2=proxyURL2`, schemes `http/https/socks5/socks5h`, empty = direct. Applies to all egress of that channel (chat, quota, model fetch, background tasks, OAuth). **Startup-time setting**; unknown channel / bad scheme / missing `=` fails startup. `HTTP_PROXY` and friends are ignored (`trust_env=False`). Inside a container `127.0.0.1` is the container itself — for a host proxy use `host.docker.internal` (compose already declares `extra_hosts`); only the format is validated, not reachability.
 
 ## Outbound protocols
 
 ### Responses API (Codex CLI)
 
-`POST /v1/responses` provides a Responses subset; shares scheduling / cooldown / rotation / stats / stickiness with chat:
+`POST /v1/responses` implements a Responses subset sharing selection / cooldown / rotation / stats / stickiness with chat:
 
 ```bash
 export CODING2API_KEY=sk-your-key
@@ -374,19 +273,12 @@ codex -c "model_providers.coding2api={ name='coding2api', base_url='http://127.0
       -c model_provider=coding2api -c model='glm-5.2' 'your task'
 ```
 
-Supports text, streaming output, reasoning summaries, function tool calls, `finish_reason=length` → `response.incomplete`. `text.format` → chat `response_format`. Content parts: `input_text` / `text` / `output_text` → text; `input_image` → `image_url`. **Unsupported**: `store=true`, `previous_response_id`, `input_file`, Responses-private tools → explicit 400. `include=["reasoning.encrypted_content"]` accepted, ignored.
+Supports text, streamed body, reasoning summaries, function tools, and `finish_reason=length` → `response.incomplete`; `text.format` → chat `response_format`; parts `input_text` / `text` / `output_text` → text, `input_image` → `image_url`. **Unsupported**: `store=true` / `previous_response_id` / `input_file` → 400; `include=["reasoning.encrypted_content"]` is accepted and ignored. Tools: `function` passes through; `namespace` expands only the default `functions` group (others are dropped — clients look tools up by `(namespace, name)`, so flattened names would look nonexistent); hosted tools like `web_search` / `tool_search` / `custom` (freeform `apply_patch`) are **skipped without error**.
 
-### chat `response_format` validation
+### chat inbound validation
 
-Only three OpenAI shapes pass; malformed / unknown → explicit 400: `{"type":"text"}`, `{"type":"json_object"}`, `{"type":"json_schema","json_schema":{name, schema, description?, strict?}}` (unknown inner fields dropped). Responses `text.format` reuses same validation.
-
-### chat inbound `messages[].role` allowlist
-
-Only `system` / `user` / `assistant` / `tool` / `developer` pass; anything else (empty string, typo, wrong case) is a **400 at the edge**: `messages[i].role must be one of ...`.
-
-Why: such roles are rejected by every upstream (CodeArts `001001044 Message role cannot empty`, qoder `unknown variant`), and each attempt burns one failure per credential before giving up, leaving an `invalid_request` row behind. Rejecting at the edge sends nothing upstream, cools no credential, records no failure. `developer` is a legitimate protocol value (default for newer clients); once accepted it is normalized to `system` per channel on the way out (see `provider.base.normalize_developer_role`).
-
-A non-string `role` (`null` / number) keeps the original `role must be a string` error — "wrong type" and "invalid value" are different defects and deserve different messages.
+- **`response_format`**: only `{"type":"text"}`, `{"type":"json_object"}`, `{"type":"json_schema","json_schema":{name, schema, description?, strict?}}` pass; malformed / unknown → 400. Responses `text.format` shares this code.
+- **`messages[].role` allowlist**: only `system` / `user` / `assistant` / `tool` / `developer`; anything else is a local 400 (`messages[i].role must be one of ...`) with no upstream call, no cooldown, no failure record. `developer` passes and is normalized to `system` on egress (`provider.base.normalize_developer_role`). Non-string roles keep `role must be a string`.
 
 ### Anthropic Messages API (Claude Code)
 
@@ -396,52 +288,51 @@ export ANTHROPIC_AUTH_TOKEN=sk-your-key     # or ANTHROPIC_API_KEY (x-api-key he
 claude
 ```
 
-- **Auth**: both `x-api-key` and `Authorization: Bearer`. `/v1/models` and single-model lookup accept both too (Anthropic SDK `client.models.list()` always sends `x-api-key`).
-- **Streaming**: `message_start` → `content_block_*` → `message_delta` → `message_stop`; no `[DONE]`; thinking blocks get `signature_delta` before `content_block_stop`.
-- **Cache hits**: usage splits in two — `input_tokens` counts misses only, hits go to `cache_read_input_tokens`.
-- **`count_tokens`**: estimated locally, never forwarded.
-- **Images**: `image` blocks normalize to chat `image_url`; images inside `tool_result.content` are preserved.
-- **Unsupported**: `document` blocks, `source.type=file`, Anthropic server tools — explicit 400.
-- **`cache_control` passthrough** (on by default): landing spots match Anthropic (`system`, message content blocks, `tool_result` top level, `tool_calls` top level, `tools` top level). Structure validated only; values not interpreted. 6 of 10 channels accept it (codebuddy / codebuddy_intl / trae / qoder / codearts / kilo); zen, Raccoon and Lingxi unverified, OfficeAce not separately probed. Script `scripts/probe_cache_control.py`.
+- **Auth**: both `x-api-key` and `Authorization: Bearer` are accepted (`/v1/models` too).
+- **Streaming**: `message_start` → `content_block_*` → `message_delta` → `message_stop`, no `[DONE]`; thinking blocks get a `signature_delta` before `content_block_stop`.
+- **Cache hits**: usage splits into `input_tokens` (misses only) and `cache_read_input_tokens`.
+- **`count_tokens`**: estimated locally, not forwarded. **Images**: `image` blocks map to chat `image_url`.
+- **Unsupported → 400**: `document` blocks, `source.type=file`, Anthropic server-side tools.
+- **`cache_control` passthrough** (on by default): same placements as Anthropic (`system`, content blocks, `tool_result` / `tool_calls` top level, `tools` top level), structure validated only. Verified against codebuddy / codebuddy_intl / trae / qoder / codearts / kilo; zen, Raccoon and Lingxi unverified. Script: `scripts/probe_cache_control.py`.
 
 ### Gemini (google-genai / REST)
 
 ```bash
 export GEMINI_API_KEY=sk-your-key
-export GOOGLE_GENAI_BASE_URL=http://127.0.0.1:8000   # SDK appends /v1beta
+export GOOGLE_GENAI_BASE_URL=http://127.0.0.1:8000   # the SDK appends /v1beta
 ```
 
-- **Entry points**: `POST /v1beta/models/{model}:generateContent`, `:streamGenerateContent` (`?alt=sse`), `:countTokens`; `GET /v1beta/models` (the SDK calls it on startup).
-- **Auth**: `x-goog-api-key` → `?key=` → `Authorization: Bearer`.
-- **Inbound mapping**: `contents[].parts` (`text` / `inlineData` → image_url / `functionCall` / `functionResponse`), `systemInstruction`, `generationConfig` (temperature / topP / maxOutputTokens / stopSequences / penalties / `responseMimeType` / `responseSchema`), `tools[].functionDeclarations`, `toolConfig.functionCallingConfig`.
-- **Outbound**: `candidates[].content.parts` (text / thought / functionCall) + `finishReason` + `usageMetadata`; streaming emits one full `GenerateContentResponse` per frame and the terminating frame carries `finishReason` (no `[DONE]`).
-- **400 on unsupported**: server-side tools (`googleSearch` / `codeExecution` / `retrieval`), `candidateCount != 1`, `responseMimeType` other than `text/plain` or `application/json`. `thinkingConfig` / `topK` are dropped (no chat equivalent; not faked).
+- **Endpoints**: `POST /v1beta/models/{model}:generateContent`, `:streamGenerateContent` (`?alt=sse`), `:countTokens`; `GET /v1beta/models`. Auth via `x-goog-api-key` → `?key=` → `Authorization: Bearer`.
+- **Inbound mapping**: `contents[].parts` (`text` / `inlineData` / `functionCall` / `functionResponse`), `systemInstruction`, `generationConfig`, `tools[].functionDeclarations`, `toolConfig.functionCallingConfig`.
+- **Outbound**: `candidates[].content.parts` (text / thought / functionCall) + `finishReason` + `usageMetadata`; each stream frame is a complete response, the final frame carries `finishReason` (no `[DONE]`).
+- **Unsupported → 400**: server-side tools (`googleSearch` / `codeExecution` / `retrieval`), `candidateCount != 1`, `responseMimeType` other than `text/plain` / `application/json`. `thinkingConfig` / `topK` are dropped.
 
 ### Built-in retrieval (`/v1/tools/search`, `/v1/fetch`)
 
-The upstream CodeBuddy CLI ships its own web search and page fetch. This service exposes them as standalone endpoints — **no third-party search API**, no extra dependency, no extra cost.
+The official CodeBuddy CLI ships web search and page fetching; this service exposes them as standalone endpoints — **no third-party search API**, zero external dependencies.
 
 ```bash
 curl -X POST http://127.0.0.1:8000/v1/tools/search \
   -H "Authorization: Bearer sk-your-key" -H 'Content-Type: application/json' \
   -d '{"query":"opencode zen free models","max_results":5}'
+
+curl -X POST http://127.0.0.1:8000/v1/fetch \
+  -H "Authorization: Bearer sk-your-key" -H 'Content-Type: application/json' \
+  -d '{"url":"https://example.com/post","prompt":"summarize"}'
 ```
 
-- **Search input**: `query` (required, ≤1000 chars), `max_results` (default 5, clamped 1–20), `allowed_domains`, `blocked_domains` (joined as `-site:` like the official client), `freshness`.
-- **Search output**: `{provider, results:[{title,url,snippet,site?,favicon?}], total_results, response_time_ms}`.
-- **Fetch input**: `url` (required, http/https only), `prompt`, `max_length` (default 200k chars). **Fetch output**: `{url, content, content_type}`; upstream only accepts text pages.
-- **Scheduling**: same shared credential pool, ordered by health; a 403 ("this credential is unusable") falls through to the next one.
-- **Failures**: business-code rejection → 400/429/403; no credential → 503 + `Retry-After`; upstream 5xx → 502.
-- **No usage rows**: these endpoints consume no tokens; recording them would pollute token and cost accounting.
-- **CodeBuddy (CN / INTL) only** — other channels have no such upstream endpoint.
+- **Search input**: `query` (required, ≤1000 chars), `max_results` (default 5, clamped 1–20), `allowed_domains`, `blocked_domains` (combined into `-site:`), `freshness`; output `{provider, results:[{title,url,snippet,site?,favicon?}], total_results, response_time_ms}`.
+- **Fetch input**: `url` (http/https only), `prompt`, `max_length` (default 200k chars); output `{url, content, content_type}`; **text pages only**.
+- **Scheduling and failures**: same credential pool, 403 rotates; business-code rejection → 400 / 429 / 403, no usable credential → 503 + `Retry-After`, upstream 5xx → 502.
+- **No usage detail rows** (they consume no tokens and would pollute stats); implemented for CodeBuddy (China / international) only.
 
 ### CC Switch one-click import
 
-*API keys* page generates `ccswitch://` deep links (Claude Code / Codex CLI / OpenCode). Entry points: post-creation dialog, per-row *Import to CC Switch*. Links contain plaintext key → generated only on explicit action. Requires CC Switch v4.0.10+. Endpoint form depends on `apiFormat`: Anthropic to root (no `/v1`); OpenAI to `/v1`. No Gemini surface.
+The *API keys* page generates `ccswitch://` deep links (one each for Claude Code / Codex CLI / OpenCode), available in the post-creation dialog and per row. The link contains the key in plaintext → generated only on demand. Requires CC Switch v4.0.10+; the endpoint follows `apiFormat` (Anthropic at root, OpenAI at `/v1`); no Gemini target.
 
 ### Balance query
 
-`GET /v1/user/balance` is DeepSeek-shaped, Bearer `sk-...`, for Cherry Studio / cc-switch. Values from cached quota probe, aggregated over usable credentials:
+`GET /v1/user/balance` is DeepSeek-shaped so Cherry Studio / cc-switch can show a balance; data comes from the quota-probe cache:
 
 ```json
 {
@@ -453,505 +344,411 @@ curl -X POST http://127.0.0.1:8000/v1/tools/search \
 }
 ```
 
-`balance_known` is `false` when nothing has ever been probed (unknown, not 0).
+Never probed successfully → `balance_known` = `false` (unknown, not zero).
 
-### Pool health
+### Pool health and metrics
 
-- `GET /health`: `{"status":"ok"}`, for liveness probes.
-- `GET /healthz`: adds pool counts and returns 503 when `ready == 0` (readiness).
-
-Neither is authenticated; both accept `HEAD`. Four mutually exclusive counts (`ready` / `cooling` / `paused` / `disabled`) sum to `total`, same as scheduler. **Point liveness at `/health`**; `/healthz` for readiness / alerting.
-
-> Upgrade note: `/healthz` changed from always-200 to 503 when `ready=0`.
-
-### Prometheus metrics (`GET /metrics`)
-
-On by default, **unauthenticated**; `METRICS_ENABLED=false` (hot) returns 404. Set `METRICS_TOKEN` to require `Authorization: Bearer <token>` (401 otherwise).
+- `GET /health`: returns `{"status":"ok"}` — **use this for liveness**.
+- `GET /healthz`: adds pool counts, `ready == 0` → 503 (readiness / alerting).
+- Neither requires auth; both accept `HEAD`. The four counts are mutually exclusive (`ready` / `cooling` / `paused` / `disabled`) and sum to `total`. **Upgrade note**: `/healthz` changed from always-200 to 503 when `ready == 0`.
+- `GET /metrics` (Prometheus): on by default and **unauthenticated**; `METRICS_ENABLED=false` (hot-reloadable) → 404; with `METRICS_TOKEN` set, requests need `Authorization: Bearer <token>`.
 
 | Metric | Type | Labels | Source |
-| --- | --- | --- | --- |
+|---|---|---|---|
 | `coding2api_requests_total` | counter | `provider` / `model` / `status` | `usage_hourly` |
 | `coding2api_tokens_total` | counter | `provider` / `type` | `usage_hourly` |
 | `coding2api_credentials` | gauge | `state` | credential pool |
-| `coding2api_upstream_errors_total` | counter | `provider` / `kind` | in-process (resets on restart) |
-| `coding2api_task_failures_total` | counter | `task` | in-process task state |
+| `coding2api_upstream_errors_total` | counter | `provider` / `kind` | in-process (reset on restart) |
+| `coding2api_task_failures_total` | counter | `task` | in-process task state (reset on restart) |
 
-No `credential_id` / `api_key_id` / `username` (high cardinality). `requests_total` / `tokens_total` read permanently retained hourly rollup, monotonic across restarts. Rollups have no `error_type` dimension → `kind` from in-process counter.
+No `credential_id` / `api_key_id` / `username` (high cardinality). `requests_total` / `tokens_total` read permanent hourly rollups and stay monotonic across restarts.
 
-## API key policy
+## Policies and guards
 
-- **Channel binding**: the key only picks credentials from that channel; model owned by another channel returns 400 naming actual owner. Empty = cross-channel.
-- **Source IP allowlist**: comma-separated IPs or CIDR, normalized on write (`10.0.0.1` → `10.0.0.1/32`); outside → 403. `X-Forwarded-For` untrusted by default; only with `TRUST_PROXY=true`, last entry.
-- **Model allowlist**: comma-separated names or fnmatch globs (`glm-*,kimi-k3`), case-insensitive, `@channel` suffix ignored. Outside → 400; `/v1/models` filters too.
-- **Expiry**: epoch seconds; empty = never. Expired → 401 (same wording as "key not found").
-- **Quota**: six independent limits, `0` or empty = unlimited — `daily_requests` / `daily_tokens` / `daily_cost_usd` / `rpm` / `tpm` (estimated) / `max_concurrency`. Daily ones use Beijing calendar day; rate / concurrency in-process sliding windows. Over limit → 429 + `quota_exceeded`, `Retry-After` points at retry moment. Failing check always allows and logs warning.
-- **Self-service**: `GET /v1/usage?days=1|7|30` returns own usage, remaining quota, current rate usage (local detail only).
+### API keys
 
-## Credential pause
+- **Channel binding**: the key only picks credentials from that channel; a model owned by another channel → 400 naming the owner. Empty = automatic across channels.
+- **Source IP allowlist**: comma-separated IP / CIDR, normalized on write (`10.0.0.1` → `10.0.0.1/32`), outside → 403. `X-Forwarded-For` is ignored unless `TRUST_PROXY=true`, which takes the last entry.
+- **Model allowlist**: comma-separated names or fnmatch globs (`glm-*,kimi-k3`), case-insensitive, `model@channel` suffix ignored; outside → 400 and `/v1/models` only lists allowed models.
+- **Expiry**: epoch seconds, empty = never; after expiry → 401 (same message as "unknown key").
+- **Quotas**: six independent limits, `0` / empty = unlimited — `daily_requests` / `daily_tokens` / `daily_cost_usd` / `rpm` / `tpm` (estimated) / `max_concurrency`. Daily ones use Beijing calendar days; rate and concurrency are in-process sliding windows. Exceeding → 429 + `quota_exceeded` with `Retry-After`; errors fail open with a warning.
+- **Self-service**: `GET /v1/usage?days=1|7|30` returns your own usage, remaining quota and current rate usage.
 
-*Pause* removes credential from chat traffic and skips daily check-in / token pre-refresh; other background tasks (quota probe, growth center, activity reporting) keep running. Useful for "no chat, keep collecting credits". *Unpause* returns it to pool immediately. ≠ *disabled* — the channel-driven session-invalid state requiring *revive* after re-login. Same switch: `POST /api/credentials/{id}/toggle`.
+### Credential pause and batch operations
 
-> Zen / Kilo are virtual rows; **pause is the only permanent disable** (deletion re-seeds on restart). Pausing also removes channel from model list.
+- **Pause** = remove from chat plus skip check-in / pre-refresh; other background tasks (quota probe, growth, activity) continue. Intended for "no chat, keep earning credits". Different from **disabled** (system disable after the channel rejects the session; requires re-login then *Revive*). Same toggle: `POST /api/credentials/{id}/toggle`. Zen / Kilo are virtual rows, so **pause is the only way to disable them permanently**; pausing also removes the channel from the model list.
+- **Batch**: `POST /api/credentials/batch` with `{action: "probe"|"toggle"|"checkin"|"revive", ids: [...], enabled?, force?}`, ≤200 ids, duplicates removed.
+- **Batch import**: `POST /api/credentials/batch-import` with `{items: [{provider, credential, nickname?, tags?}]}`, ≤100 items; bad items go to `failed` (with `index` and reason), identical decrypted content in the same channel goes to `skipped`. Accepts JSON arrays / JSONL or a file.
+- **Single export**: `GET /api/credentials/{id}/export` returns the same shape as import (plaintext credential, admin / operator only, audited as `credential.export`).
+- **Revive ≠ unpause**: `revive` clears a system hard disable (re-login first); `toggle enabled=true` unpauses.
+- **`revive` keeps upstream-named cooldowns by default** (rate limit / balance / entitlement / risk): clearing them just hits the same limit again. Use `force=true` (UI: *Force revive*). Failed check-ins return `ok=false` with a readable message, not 500. Audit records one summary row; audit write failures only warn.
 
-## Credential batch operations
+### Credential limits and in-flight cap
 
-The credentials page offers multi-select plus batch bar (probe / check-in / pause / unpause / revive).
+- **Limit guards** (*Set limits* in the row menu; four independent, all empty = unlimited, evaluated before selection): reserve credits (remaining ≤ value → disable the whole credential, unknown balance is never guessed), daily token cap, daily credit cap, per-model token cap (`{model: limit}`, disables that model only). "Today" = Beijing calendar day. Written via `PUT /api/credentials/{id}/limits` (full replace, immediate, audited as `credential.limits`).
+- **In-flight cap** `MAX_INFLIGHT_PER_CREDENTIAL` (default 0 = unlimited, hot-reloadable): a credential stops being selected once it reaches that concurrency. Counted in-process, leases released at request end with a 600s TTL fallback. **Also acts as the load key**: placed after "free first" and before "expiring quota", so concurrency spreads to idle credentials.
+- **Exhaustion semantics**: all candidates skipped by limits / in-flight → `no_healthy_credential` 503; model-level cooldown → `model_unavailable`; upstream rate-limit / quota cooldowns are recorded as `rate_limit` in stats (external code stays `no_healthy_credential`).
 
-- **Endpoint**: `POST /api/credentials/batch`, body `{action: "probe"|"toggle"|"checkin"|"revive", ids: [...], enabled?}`. Up to 200 ids, duplicates deduped.
-- **Batch import**: `POST /api/credentials/batch-import`, body `{items: [{provider, credential, nickname?, tags?}]}`. Up to 100 items; validated one by one, bad entries only land in `failed` (with `index` and reason); identical decrypted content within one channel counts as duplicate → `skipped`. The credentials page's *Batch import* accepts a JSON array / JSONL or a file.
-- **Per-item isolation**: one failure never blocks the rest. Response `{action, total, succeeded, failed, results: [{id, ok, error?, detail?}]}`.
-- **A failed check-in is a result, not a failure**: an upstream refusal (account disabled / session expired / rate limited) returns `ok=false` with a readable `message`, never 500 — otherwise the console only says "check-in failed" and hides the real reason.
-- **Pause is explicit state, not toggle-flip**: `enabled` comes from body → bar has separate *Pause* / *Unpause* buttons.
-- **Revive ≠ unpause**: revive clears system hard-disable (needs re-login first); unpause sets `toggle enabled=true`.
-- Only actions with existing single-item endpoints: `refresh` and `delete` are excluded.
-- **Audit writes one summary row** (`toggle` / `revive`); audit failure logs warning and does not fail operation.
+### Credential pool UI
 
-## Credential limit guards
+- **Filters**: search (nickname / channel / id) × channel × state × tag, all AND, client-side; tags are not matched by the search term.
+- **Tags**: comma-separated, ≤16 tags, ≤24 chars each; filtering and display only, never affect selection.
+- **Group ordering**: reorders channel groups only (default quota descending, can switch back to fixed channel order); free tiers without a quota API sink to the bottom.
+- **Grouped by channel**: each header is a compact dashboard (icon, channel, account count, models and lowest multiplier, state distribution, total quota, expiring credits, today's check-in). All collapsed by default, expanded while filtering. Column headers render inside each expanded group and stick; tables cap at 70vh. The growth-center column appears for CodeBuddy only.
 
-Optional per-credential guards, configured from row menu. Four independent limits; all empty = unlimited. Judged before selection; background tasks keep running.
+## Model list
 
-- **Reserve credits**: account remaining ≤ the value disables whole credential. Unknown balance is never guessed.
-- **Daily token cap** / **daily credit cap**: whole credential disabled when day's total is reached.
-- **Per-model token cap**: `{model: limit}` disables only that model.
-- **"Day" = Beijing calendar day**, resetting at midnight.
-- All candidates filtered out → `no_healthy_credential` 503; model-level cooldown → `model_unavailable`.
-- Written via `PUT /api/credentials/{id}/limits` (full replace; all four off → deletes row). Effective immediately. Audit action `credential.limits`.
+`GET /v1/models` and the Playground dropdown merge only **channels with a usable credential** (cooling ones still count). Order: CodeBuddy (China → international), TRAE, Qoder, CodeArts, OfficeAce, Raccoon, Lingxi, with Zen / Kilo last; alphabetical within a group; a model on multiple channels belongs to the highest-priority one (`_PROVIDER_RANK` in `src/api/model_merge.py`).
 
-## Per-credential in-flight cap
+- **Routing only trusts this cache**: if the catalog proves ownership, only those channels are candidates, and none usable → 503; a model absent from the catalog routes across all candidates; explicit `@channel` and key channel binding are unaffected.
+- **Snapshot and startup**: besides the in-process TTL cache (300s), every successful fetch writes `DATA_DIR/model_catalog.json`, read synchronously at startup; a corrupt snapshot or one older than 7 days just drops the cache. The `MODEL_CATALOG_MINUTES` task keeps it fresh.
+- **Stale-while-revalidate**: cached lists return immediately, refresh happens in the background at TTL; failures back off as 2^(n-1)×TTL (capped at 2 hours) with WARNING only on the first failure.
+- **Admin *Model list* page** (`GET /api/model-catalog`): read-only view of the public OpenRouter catalog (list prices, context / output limits, modalities, capabilities, knowledge cutoff, three AA indices — not measured here), with `available` and an off-by-default "current channels only" toggle. Floating aliases take the score of the newest snapshot in the same family (by `canonical_slug` date).
+- **Suspected-retirement view** (`GET /api/models/availability`, operator): aggregates `upstream_blocked` / `model_not_found` / `invalid_request` over the last N days (default 7) by `(channel, model)`; *Add to blocklist* appends to `model_blocklist` with an audit entry.
+- **Active probing** (`GET /api/models/probes`, operator): probes entries still locked by a `blocked` negative cache and entries already judged dead (`state='failed'`). **Success** → clear the negative cache and relist (the only recovery path); **`failed`** → keep the cache and increment; **`inconclusive`** (quota, rate limit, network, timeout, empty stream) → never disable, reset the counter. Probes call `provider.stream_chat` directly without writing `usage_events` or touching cooldowns. A dead model is hidden for that (channel, model) only, and **the hiding never expires** — recovery requires a successful re-probe (`MODEL_PROBE_MINUTES` defaults to 0 = off). **Manual takeover** (`POST /api/models/probes/manual`) makes automatic probing skip the row without changing the negative cache.
+- **Token expiry display**: the *token remaining* column turns red below `TOKEN_EXPIRY_WARNING_SECONDS` (default 1 hour). Prefers `expires_at`, falls back to the JWT `exp`, otherwise `—`.
 
-`MAX_INFLIGHT_PER_CREDENTIAL` (default 0 = unlimited): once credential concurrency reaches cap, it stops being selected.
+### Upstream status page
 
-- In-process counting (single-instance semantics).
-- Leases release at request end, with a 600s TTL backstop.
-- All candidates saturated → 503, same as limit guards.
-- Hot.
-- **Count doubles as load key**: ordered after "free first", before expiring credits → concurrency spreads to idle credentials.
+`GET /api/upstream-status` (admin / operator) aggregates official status pages to answer "is this an upstream outage or our credential / quota problem": OpenCode Zen, Kilo, Moonshot / Kimi, MiniMax, OpenAI, Anthropic, Together AI, DeepSeek. Six normalized states (`operational` / `degraded` / `partial` / `major` / `maintenance` / `unknown`), overall takes the worst source. **Explains only, never decides**; in-memory only; fetched every `UPSTREAM_STATUS_MINUTES` (default 5), a failing source only marks its own row. HTML-only sources are not covered (Groq, Tencent Cloud, Alibaba Cloud, Huawei Cloud, SiliconFlow, Qoder, Zhipu, TRAE).
 
-## Credential pool: filtering and grouping
+### Sidebar badges
 
-- **Filter bar**: search (nickname / channel / id) × channel × state × tag, all AND, front-end only. Shows "N of total after filter" + *Clear*. Tag dropdown renders only when tags exist. Tags do not participate in text search.
-- **Tags**: comma-separated, ≤16, each ≤24 chars. Filtering / display only, never scheduling. Two shown per row, rest collapse to `+N`.
-- **Group sort**: reorders channel groups only, never rows within group. Default by total quota descending, switchable to fixed channel order. Free tiers without quota API sink to bottom.
-- **Grouping by channel**: header = compact dashboard — icon + channel + account count, models (count + lowest rate, paid only; "all free" only when whole group free; custom aliases not separate models), state distribution, quota total, expiring credits (one block per 1.5 days in main window; 7-day window only when larger). Collapsed by default; filtering auto-expands. Click header to toggle.
-- **Column headers follow expanded area**: headers render inside each expanded group and stick on scroll, sharing one sort state. *Growth* column appears only for CodeBuddy; other channels keep empty placeholder to preserve column widths.
-- **Long lists scroll**: table height 70vh, sticky headers and action button stay visible.
+One aggregate endpoint `GET /api/nav-badges`, polled every 60s:
 
-Quota numbers are underlined with dotted line; hover shows period semantics for that row.
-
-## Model list loading
-
-`GET /v1/models` and Playground dropdown merge only channels with **currently usable credential** (≥1 not paused, not session-invalid). Cooling credentials still count. Order: CodeBuddy (domestic → international), TRAE, Qoder, CodeArts, OfficeAce, Raccoon, Lingxi, then Zen / Kilo; alphabetical within group; multi-channel models take the highest-priority channel (`_PROVIDER_RANK` in `src/api/model_merge.py`).
-
-**Request routing trusts this cache**: catalog-proven ownership → only those channels are candidates; all unavailable → 503 instead of trying each. Models absent from catalog still route across all candidates; explicit pinning and key channel binding unaffected.
-
-### Catalog snapshot and startup
-
-Besides in-process TTL cache (300s), every successful fetch writes `DATA_DIR/model_catalog.json` and reads it back synchronously at startup → ownership ready the moment process restarts. Corrupt or >7-day-old snapshot just loses cache. `MODEL_CATALOG_MINUTES` background task keeps it fresh.
-
-Playground and `/v1/models` use stale-while-revalidate: cached lists return immediately and refresh in background; only channel with no cache at all waits synchronously. Repeated failures back off at 2^(n-1)×TTL (capped at 2 hours), logging WARNING on first failure only.
-
-### Admin *Model list* page
-
-(`GET /api/model-catalog`, admin / operator) read-only OpenRouter catalog: list prices, context / output limits, modalities, capabilities, knowledge cutoff, three Artificial Analysis indices (not measured here, no sorting). Each row carries `available`; default-off *only current channels* switch narrows locally.
-
-**Suspected-offline view**: `GET /api/models/availability` (operator) aggregates `upstream_blocked` / `model_not_found` / `invalid_request` failures over last N days (default 7, 1–30) by `(channel, model)`. *Add to blocklist* appends to `model_blocklist` via settings endpoint + audit row.
-
-**Floating aliases take newest snapshot score**: OpenRouter attaches both floating alias and dated snapshots to one model, declaring one release via `canonical_slug`. Gateway runs reasoning on by default, matching Max variant → takes newest snapshot in family; ids with explicit date stamp keep own score. Families derive only from canonicals carrying `-YYYYMMDD`.
-
-### Active probing and manual takeover
-
-Probe panel (`GET /api/models/probes`, operator) probes two kinds of `(channel, model)` pairs: those still locked by `blocked` negative cache, and those already declared dead (`state='failed'`).
-
-Three outcomes:
-
-- **Success** → clears that channel's `blocked` cache and returns the model to the list (the only recovery path).
-- **`failed`** (upstream says `BLOCKED` / `INVALID`) → keeps cache and increments consecutive failures.
-- **`inconclusive`** (quota, rate limit, network, timeout, empty stream, any exception) → never disables, resets consecutive counter.
-
-Probing is isolated from production: calls `provider.stream_chat` directly, writes no `usage_events`, touches no cooldown table, changes no health. Results go to separate `model_probes` table. Panel hides models matched by `MODEL_BLOCKLIST`.
-
-**Dead models also drop out of model list**: only that `(channel, model)` pair is hidden — other channels serving the same model still show it. **Hiding has no expiry** — recovery only happens on a successful re-probe, not on negative-cache `cooling_until` (nothing would re-probe after it expires, i.e. permanent hiding). The background loop does re-probe dead rows, but its interval `MODEL_PROBE_MINUTES` defaults to `0` (off), so on a default deployment the only way back is *Probe now*.
-
-**Manual takeover** (`POST /api/models/probes/manual`): skips automatic probing for that row, cache untouched. *Probe now* recovers immediately.
-
-### Admin *Upstream status* page
-
-(`GET /api/upstream-status`, admin / operator) aggregates official status pages to answer "upstream down, or my credential / quota".
-
-- **Sources**: OpenCode Zen (per-model TTFT / tps), Kilo, Moonshot / Kimi, MiniMax, OpenAI, Anthropic, Together AI, DeepSeek. Grouped by `scope`: `channel` first, `model` after.
-- **Six normalized levels**: `operational` / `degraded` / `partial` / `major` / `maintenance` / `unknown`. Overall = worst source, `unknown` last.
-- **Explanation only, never decisions**; not part of scheduling or circuit breaking.
-- **Memory only**; background task (`UPSTREAM_STATUS_MINUTES`, default 5) fetches; single failing source only marks its own row.
-- **Conclusion first, detail after**: summary bar on top, then two scope groups with abnormal sources expanded; *needs attention* strip hoists non-normal sources. Component detail beyond 6 items truncates (abnormal first).
-- **Not covered**: sources that only offer HTML (Groq, Tencent Cloud, Alibaba Cloud, Huawei Cloud, SiliconFlow, Qoder, Zhipu, TRAE).
-
-### Token expiry visibility
-
-The **token remaining** column shows how long access token lasts, red below `TOKEN_EXPIRY_WARNING_SECONDS` (default 1 hour). Prefers upstream `expires_at`, falls back to JWT `exp`; neither → `—`, never guessed local TTL.
-
-## Sidebar to-dos (navigation badges)
-
-Sidebar is on every page. To-dos you would only notice by visiting a page show as count badges, fed by one aggregate endpoint `GET /api/nav-badges`, polled every 60s.
-
-| Entry | Threshold | Badge |
+| Nav item | Gate | Badge |
 |---|---|---|
-| Credentials | operator+ | credentials with `disabled` or `health < 0` |
-| Alerts | admin | unresolved alerts |
+| Credentials | operator+ | credentials `disabled` or with `health < 0` |
+| Alerts | admin | alerts still open |
 | Tasks & settings | admin | tasks whose last run failed |
 | Upstream status | operator+ | abnormal sources (incl. maintenance) |
 | Users | admin | accounts with an activation token |
-| API keys | everyone (own only) | keys expired or expiring within 7 days |
+| API keys | everyone (own only) | expired keys or keys expiring within 7 days |
 | Model list | operator+ | stale snapshot (boolean text) |
 
-- **Role-filtered**: backend sends only keys the role may see; missing key = no permission (not 0). Credential badge withheld from viewers.
-- **Counts only to-dos**: alerts page `total` includes resolved history, badge does not; tasks use "last run failed", not "consecutive failures ≥ threshold".
-- **Credential badge ≠ `/healthz` ready count**: latter ignores health → out-of-quota credential still counts as `ready`.
-- **Alert badges self-heal**: `AlertTask` rebuilds its unresolved set from the DB at startup.
-- **Stale catalog**: never fetched is not stale; stale means 2× `OPENROUTER_CATALOG_MINUTES` without refresh.
+- **Trimmed by role**: the backend only sends keys you may see; absent = not permitted (not zero); the credential badge is not sent to viewers.
+- **Only to-dos**: the alerts page `total` includes recovered history, the badge counts only open ones; tasks use "last run failed".
+- **Credential badge ≠ `/healthz` ready count** (the latter ignores health, so quota-exhausted credentials still count as `ready`). Alert badges rebuild from unresolved DB rows at startup.
+- **Stale catalog**: never fetched does not count; more than 2× `OPENROUTER_CATALOG_MINUTES` without a refresh does.
 
 ## Stats
 
 ### Scope
 
-Default range **last 24 hours** (also 7 / 30 days, all, custom). Custom takes two `datetime-local` inputs (browser-local timezone), one side may be empty; start not earlier than end voids window with message. Every stats endpoint accepts `until` (epoch seconds, half-open `[since, until)`).
+Default is the **last 24 hours** (also 7 / 30 days, all time, custom). Custom uses two `datetime-local` inputs, either may be empty; start not earlier than end invalidates the window. Every endpoint accepts `until` (epoch seconds, half-open `[since, until)`).
 
-**Failure types** = controlled enum: exhausted model-level cooldown → `model_unavailable`; genuinely empty pool → `no_healthy_credential`; upstream explicitly says "no such model" → `model_not_found` (kept apart from `invalid_request`: one means the model was withdrawn, the other means the request was malformed) — same outbound code, different stats meaning.
+- **Failure types** (`CONTROLLED_ERROR_TYPES`): the closing row carries the **real attribution of the last error** — `model_unavailable` / `rate_limit` / `upstream_timeout` / `network_error` (local DNS / connect failure, no cooldown) / `context_overflow` (11115) / `model_capability` (CodeArts 001001020) / `model_not_found` (retired model, distinct from "bad request"). Only when **no credential was ever selected** does it fall back to `no_healthy_credential`. External codes are identical; only stats semantics differ.
+- **Request ID**: responses carry `X-Request-ID`; a valid inbound value is reused, otherwise generated (`[A-Za-z0-9._:-]`, 1–128 chars); stored in `usage_events.request_id` and **never forwarded upstream**.
+- **Credit**: CodeBuddy uses upstream truth; TRAE is derived from official unit prices and marked `≈` (`src/provider/trae/pricing.py`, unlisted models are not derived). Backfill with `scripts/backfill_trae_credit.py`.
+- **Cost (estimated ≈)**: tokens × public list price, not the actual upstream charge. `(input−cached)×input + cached×cache + output×output` in USD → converted to CNY at write time using `USD_CNY_RATE`; history is not recomputed. Unmatched models are not priced (cost is a lower bound); channel-specific ids map to base models only via explicit equivalence rules.
+- **Cache hit rate**: cached tokens ÷ input tokens (one decimal); unreported or zero input → `—`.
+- **Output speed** = total tokens ÷ total generation time (not an average of per-request ratios). Two views: **body speed** `output_tokens - reasoning_tokens` and **total throughput** including reasoning. Only successful requests routed through this service with ≥1 output token; generation time = `latency_ms - ttfb_ms`; samples under 200ms or above 1000 tok/s are dropped. No samples → estimated mode (prefixed `≈`); neither → `—`.
+- **Charts**: requests / tokens / cost / cost per request / latency / TTFB / success rate / cache hit rate. Derived metrics are `sum ÷ sum`, no samples render as `—` (gap) not 0; latency and TTFB also get a percentile chart (P50 + P95 from details, 90 days only). The time axis is filled hourly. Out-of-domain `metric` is an explicit 400; an invalid custom range pauses fetching.
 
-**Request ID**: every response carries `X-Request-ID`. Valid inbound value reused, else generated; charset `[A-Za-z0-9._:-]`, length 1–128. Lands in `usage_events.request_id`, shows on hover in detail time column. **Never forwarded upstream** (outbound header semantics differ per channel).
+### Credits and check-in records
 
-**Credit**: CodeBuddy = upstream truth; TRAE derived from official unit prices, marked `≈` (table `src/provider/trae/pricing.py`; unlisted not derived). Backfill with `scripts/backfill_trae_credit.py`.
+- **Change ledger** (arrow after the quota figure) = **net change between two quota probes**, not per-action attribution (check-in, growth and chat all move the balance and upstream logs nothing → the UI says "net change"). The first probe only establishes a baseline; unchanged balances are not recorded; a change to "unknown" is recorded without a delta; retained 90 days.
+- **Split by ledger**: entries carry `ledger` (`pool` / `credits`); CodeArts and Raccoon use `credits` (both are credit-based), everything else `pool`. `GET /api/credentials/{id}/credit-events?ledger=`.
+- **Check-in records** (*More → Check-in records*) = the check-in audit log, one row per round (time / result / credits claimed / upstream business code / message / trigger), retained 90 days; `GET /api/credentials/{id}/checkin-events?limit=`. This is the **per-action result**, independent of balance diffs, so "shows success but no credits" can be checked directly against the upstream reply.
+- **Today's check-in summary**: `GET /api/credentials` attaches `checkin_today` (the latest entry for today from the local audit log, `null` if none). `null` means "no conclusion yet" (task not due / paused / channel has no check-in), not failure.
 
-**Cost (estimated, ≈)**: tokens × public list price, not real charge. Prices from OpenRouter public catalog: `(input − cached) × input + cached × cache price + output × output price`, converted with `USD_CNY_RATE` in effect at write time.
+### Grouping
 
-- **Fixed at write time**: cost computed when detail row written, never recalculated. Pre-release rows `NULL`; backfill with `scripts/backfill_cost.py --apply`.
-- **No match, no cost**: local names match OpenRouter `id` / display name exactly (ambiguous skipped) → aggregate shows `—`, so cost is a lower bound. Channel-specific ids map to base model only via explicit equivalence rules (verified ids only, no generic date/suffix stripping).
+Four tabs (channel / model / user / credential) sharing one table (channel / requests / credit / cost / tokens / speed / average latency / P95 latency), endpoints `GET /api/stats/by-provider|by-model|by-user|by-credential`. **Latency percentiles P50 / P90 / P95 / P99** (default P95, nearest-rank). User / credential dimensions are admin / operator only.
 
-**Cache hit rate**: cached ÷ input tokens (1 decimal). `—` when unreported or input 0. Group / detail tables show it next to tokens.
+- **Scope differences**: channel / model / user read hourly rollups (permanent, last 5 minutes not yet included); credentials read the detail table (90 days only).
+- **Latency**: successful requests only. Average = `latency_sum ÷ successes`; percentiles come from details (90 days). Rows with `ttfb_ms = NULL` are ranked independently.
+- **Failure attribution** (`GET /api/stats/errors`, operator+): aggregates `ok=0` by `(channel, model, error type)`, returning failures / **unrecovered** / latest failure (desc, `limit` ≤5000). **Row policy**: hard failures (`credential_unavailable` / `account_restricted` / `invalid_request` / `model_capability`) write one row per attempt; other categories write one closing row per request. A successful row for the same user and `request_id` counts as recovered. Special cases: a 401 becomes `credential_unavailable`, **but when quota exhaustion is proven** (officeace `401 APIG.1009`) it is reclassified as `CREDIT` (cooldown to 04:00 next day, no hard disable); `11140` → `account_restricted` (2h account cooldown; a second credential on the same channel also hit escalates to a 24h channel backoff); `11102` / `11158` → `model_not_found` (negative cache, no account cooldown); `11115` → `context_overflow` and `001001020` → `model_capability` (no credential penalty); `001001044` → `invalid_request`. When no credential was selected the row names the **candidate channel**. Full taxonomy and cooldown durations: TECHNICAL.md §3.2.
+- **Drill-down**: clicking a group row filters details by it, conditions stack; `GET /api/stats/events` accepts `provider` / `model` / `credential_id` (AND) plus `ok=0`.
+- **Merged columns**: tokens, latency, speed, channel / credential are each one column, expandable on hover; the merged header offers a sub-column sort (`sort=cache_rate` / `tps_visible` / `tps` / `provider` / `credential`).
+- **CSV export**: `GET /api/stats/events?format=csv`, UTF-8 BOM, `\r\n`, ISO 8601 UTC; cells starting with `= + - @` get a leading quote to prevent formula injection. Up to 10000 rows, truncation sets `X-Export-Truncated: 1`.
+- **Live stream**: `GET /api/stats/events/stream` (SSE) pushes newly persisted requests, the UI keeps the last 50. Payloads omit credential nicknames (the server adds them for admin / operator); each subscriber has a 200-event buffer, concurrency capped at 8 (429 beyond), 15s comment keep-alive.
+- **Recompute history**: `python3 scripts/rollup_hourly.py --apply` (preview by default, backs up before writing, idempotent).
 
-**Output speed (tok/s)**: total tokens ÷ total generation time, not average of per-request ratios. Same denominator, different numerators: **visible speed** uses `output_tokens - reasoning_tokens`; **total output speed** includes reasoning. UI shows `visible / total`. Only successful requests routed here that produced ≥ 1 token. Generation time = `latency_ms - ttfb_ms`; windows under 200 ms or single samples over 1000 tok/s dropped as unmeasurable. `ttfb_ms` = `NULL` excluded from primary scope; row or group with no primary sample falls back to end-to-end time (prefixed `≈`). No samples → `—`.
+### Sorting and pagination
 
-Aggregate speed can only come from per-request detail → covers last 90 days (overview card too; other cards read hourly rollup). Detail table shows each request's own speed, no fallback; rows without generation window show `—`. Speed columns sort via `sort=tps_visible` / `sort=tps`.
+- **Sorting**: clickable headers, natural first direction (numeric desc, text asc), click again to flip; the backend accepts `sort` (allowlisted) and `order`, invalid values fall back silently. Applies to `/api/credentials`, `/api/users`, `/api/api-keys`, `/api/audit`, `/api/alerts`, `/api/model-catalog`, `/api/credentials/{id}/credit-events`, `/api/credentials/{id}/accounts`, `/api/stats/by-*`, `/api/stats/events`.
+- **Pagination**: `page N / M`, 10 / 20 / 50 / 100 per page (default 50); the backend takes `limit` + `offset` and returns the filtered `total`. Grouped tables (credentials page, stats group table) are not paginated.
 
-**Chart metrics**: requests / tokens / cost / cost per request / latency / TTFB / success rate / cache hit rate — switch to compare trends. Derived metrics (success rate, cache hit rate, cost per request) divide **after** aggregation (`sum ÷ sum`), not an average of per-hour ratios; no samples → `—` (line breaks), never 0. Latency / TTFB get an extra **percentile chart** (P50 median + P95 upper bound, read from per-request detail, 90-day window) — the mean flattens the long tail. The time axis is padded per hour (gaps keep their position instead of being squeezed out of time). A `metric` outside the accepted set returns 400 (no silent fallback to "requests" — a typo would otherwise yield a plausible-looking chart). An invalid custom range (start ≥ end) pauses fetching instead of issuing an unbounded query.
+## Background tasks and alerts
 
-### Credit record
+Twelve tasks run through `TaskRunner`, failures isolated: quota probe, token pre-refresh, check-in, growth center, activity reporting, detail cleanup, DB backup, channel model refresh, catalog refresh, ops alerts, upstream status, active model probing. The *Tasks & settings* page shows last run / result / error (30s refresh; runtime state is per-process); each card has *Run now* (admin + CSRF) which bypasses the time window but not the switch, and reports `busy=true` instead of queueing.
 
-Arrow after quota number expands change ledger = **net change between two quota probes**, not action attribution: check-in, growth and chat all change balance and upstream logs nothing → UI always says "net change". First probe only sets baseline; unchanged balances not recorded; unknown balance recorded without delta; 90-day retention.
-
-**Split by ledger**: rows carry `ledger` (`pool` / `credits`). CodeArts uses `credits`, others `pool`. Endpoint `GET /api/credentials/{id}/credit-events?ledger=` (default `pool`). Two ledgers differ in magnitude and meaning → read separately.
-
-### Grouping and re-rollup
-
-Four tabs (channel / model / user / credential) share one table (channel / requests / credit / cost / tokens / speed / average latency / P95 latency). Endpoints `GET /api/stats/by-provider|by-model|by-user|by-credential`. Default sort by requests descending; merged columns open sub-column menu. **Latency percentile: P50 / P90 / P95 / P99** (default P95, nearest-rank, n = samples with value). User / credential views admin/operator only.
-
-**Scope differences**: channel / model / user read hourly rollup (permanent; last 5 minutes not yet counted); credential reads detail table (90 days only).
-
-**Two latency scopes**: successful requests only. Average = `latency_sum ÷ successes` (hourly rollup); percentile from per-request detail (90 days). `NULL` `ttfb_ms` ranks independently in each column. No samples → `—`.
-
-**Failure attribution**: panel below group table, `GET /api/stats/errors` (operator+) aggregates `ok=0` detail by `(channel, model, error_type)` → failure count, **unrescued count**, last failure time (descending, `limit` ≤ 5000). **Row granularity**: hard failures (`credential_unavailable` / `account_restricted` / `invalid_request` / `model_capability`) land **one row per attempt**; rate-limit / quota / timeout / context-overflow and the remaining classes land **one terminal row per request** (typed by the last real error attribution) — otherwise one request with three attempts inflates `usage_hourly.requests` and every key's daily request quota. A failure row whose `request_id` also has a success row for the **same user** counts as rescued; `unrescued = failures − rescued` (a request failing twice counts twice; not the number of lost requests). Special predicates: a credential 401 lands `credential_unavailable` — **except when the quota-exhaustion evidence holds** (officeace returns the same `401 APIG.1009` when its points run out), which is downgraded to `CREDIT` (cooled until the next 04:00 CN check-in, not hard-disabled, no such row); if the local quota reading is positive or unprobed the executor re-probes once before deciding, and only a still-positive reading or a failed probe keeps it `DEAD`. An upstream account restriction (11140) lands `account_restricted` (2h account-level cooldown, stop rotating within that channel; a second distinct credential in the same window escalates to a 24h channel pause). 11102 / 11158 land `model_not_found` (writes an (account, model) negative cache, does not cool the account); 11115 lands `context_overflow` and 001001020 lands `model_capability`, neither penalizes the credential; `001001044` (invalid message role, triggered by OpenAI's `developer` role) lands `invalid_request` — CodeArts now rewrites `developer` to `system` on the way out, and the fallback classification only covers other shapes; when rotation exhausts without ever picking a credential the row records the **candidate channel** rather than `-`. Full classification and cooldown timings in TECHNICAL.md §3.2. Click row → detail with *failed only* (`GET /api/stats/events?ok=0`); admin/operator only. `/metrics` `upstream_errors_total` stays an in-process counter, not merged.
-
-**Row drill-down**: clicking group row filters detail by that row (channel / model / credential; user dimension uses scope), stacking conditions. `GET /api/stats/events` accepts `provider` / `model` / `credential_id` (AND) + `ok=0`.
-
-**Merged detail columns**: tokens, latency, speed and channel / credential each merge into one column with readable default + hover breakdown. Time column splits two lines (time / date). Clicking merged header opens sub-column sort menu (`sort=cache_rate` / `tps_visible` / `tps` / `provider` / `credential`).
-
-**CSV export**: `GET /api/stats/events?format=csv` (admin / operator only), honoring current range + drill-down filters. UTF-8 BOM, `\r\n`, ISO 8601 timestamps (UTC); text cells starting with `= + - @` get leading quote to prevent formula injection. Capped at 10000 rows with `X-Export-Truncated: 1`.
-
-**Live stream (SSE)**: `GET /api/stats/events/stream` shows requests that just landed within current filter. Events are broadcast by in-process `LiveEventHub` after `StatsCollector.record` commits; the UI keeps latest 50.
-
-- Same scope and filters as `/api/stats/events`; changing filters reconnects.
-- Broadcast payload has no credential nickname; only admin/operator connections get `credential_name` server-side.
-- Bounded buffer of 200 per subscriber (oldest dropped); 8 concurrent subscribers, beyond that 429.
-- 15s comment frames keep connection alive; `Cache-Control: no-store` + `X-Accel-Buffering: no`.
-
-History looks small → `python3 scripts/rollup_hourly.py --apply` (preview by default, backs up first, idempotent).
-
-### List sorting
-
-Click header to sort: first click uses column's natural direction (numeric descending, text ascending), second flips. Server-side; list endpoints accept `sort` (allowlisted key) + `order` (`asc` / `desc`). Unknown `sort` / invalid `order` falls back to default, no error.
-
-Applies to `/api/credentials`, `/api/users`, `/api/api-keys`, `/api/audit`, `/api/alerts`, `/api/model-catalog`, `/api/credentials/{id}/credit-events`, `/api/credentials/{id}/accounts`, `/api/stats/by-*`, `/api/stats/events`.
-
-### Pagination
-
-Shared pagination: `page N / M`, 10 / 20 / 50 / 100 per page (default 50). Flat lists paginate server-side — endpoints accept `limit` + `offset` and return filtered `total`. `/api/model-catalog` sorts in memory (sort keys include derived fields) and also accepts `q` / `only_available`.
-
-Grouped tables (credentials by channel, stats group table) are not paginated.
-
-## Background tasks
-
-Twelve task types — quota probe, token pre-refresh, daily check-in, growth center, activity reporting, detail cleanup, database backup, channel model refresh, model catalog refresh, operations alerts, upstream status, model probing — scheduled by `TaskRunner`, failures isolated. *Tasks & settings* page shows last run / result / error (30s refresh); runtime state lives only in this process.
-
-Each card has *Run now* (admin + CSRF): bypasses time window, not on/off switch; already running → `busy=true`, no queueing.
-
-**Channel model refresh** (`MODEL_CATALOG_MINUTES`, default 30) is safety net so models update even with no traffic.
-
-**Growth center** is CodeBuddy-only. Default period 60 minutes (`GROWTH_INTERVAL_MINUTES`).
-
-### Activity reporting (optional, off by default)
-
-With `ACTIVITY_REPORT_ENABLED=true`, each account gets one `chat_request_send` event per day in `ACTIVITY_REPORT_HOUR` (default 10) window to keep streak alive. Unrelated to credits or scheduling. Applies to CodeBuddy and international site.
-
-> **Risk**: official terms forbid scripted tampering with activity data; penalties include disqualification and clawing back gifts. Off by default — assess account risk first. Breaks as soon as upstream changes. Missing `userId` → upstream silently discards event; empty OAuth `user_id` falls back to JWT `sub`, skips when still missing.
+- **Activity reporting** (off by default): `ACTIVITY_REPORT_ENABLED=true` sends one `chat_request_send` per account daily at `ACTIVITY_REPORT_HOUR` (default 10) to keep streaks alive; unrelated to credits or scheduling; applies to CodeBuddy and the international site. **Risk**: upstream terms forbid scripting activity data (penalty: disqualification + clawback); off by default.
+- **Growth center** is CodeBuddy-only, period `GROWTH_INTERVAL_MINUTES` (default 60).
 
 ### Operations alerts
 
-Nine rules are evaluated periodically and written to `alert_events` (the *Alerts* page, admin-only):
+Nine rules feed `alert_events` (`/alerts`, admin only):
 
-| Rule | Trigger |
+| Rule | Condition |
 |---|---|
 | `pool_empty` | ready count below `ALERT_POOL_READY_MIN` |
-| `task_failed` | a task fails `ALERT_TASK_FAILURES` times consecutively |
+| `task_failed` | a task failed `ALERT_TASK_FAILURES` times in a row |
 | `token_expiring` | token lifetime within `ALERT_TOKEN_EXPIRY_HOURS` |
-| `error_rate` | failure share reaches `ALERT_ERROR_RATE_THRESHOLD` with enough samples |
-| `key_burst` | one API key burns `ALERT_KEY_BURST_TOKENS` within the window (abuse / leak signal, not an error) |
-| `off_hours` | requests outside `[ALERT_OFF_HOURS_START, ALERT_OFF_HOURS_END)` reach `ALERT_OFF_HOURS_MIN_REQUESTS` |
-| `budget` | monthly cost reaches a level in `ALERT_BUDGET_LEVELS` of `ALERT_BUDGET_CNY`, highest level only; 100% is critical |
-| `channel_dead` | a channel takes `ALERT_CHANNEL_DEAD_MIN_REQUESTS` requests in the window with **zero successes** (catches a whole channel dying: a batch of quota 401s gets diluted by fallback and never moves `error_rate`) |
-| `checkin_failing` | the same credential's last `ALERT_CHECKIN_FAIL_MIN_STREAK` check-in rounds all failed (one success resets; covers "task succeeded, upstream business call failed") |
+| `error_rate` | failure ratio in the window reaches the threshold with enough samples |
+| `key_burst` | one key's token usage in the window reaches the threshold (abuse / leak signal) |
+| `off_hours` | requests outside working hours reach the threshold |
+| `budget` | monthly cost reaches a level of `ALERT_BUDGET_CNY`; only the highest level is reported, 100% is critical |
+| `channel_dead` | a channel's requests in the window reach the threshold with **zero successes** (catches a whole channel dying, which fallback would dilute) |
+| `checkin_failing` | the last N check-in rounds for one credential all failed (covers "task succeeded, upstream said no") |
 
-- **Silence window**: one row / push per `(rule, target)` per window.
-- **Hysteresis**: alerts fire after N consecutive hits, resolve after M consecutive misses. Resolution stamps `resolved_at` on every unresolved row for that `(rule, target)` and emits `status="resolved"` webhook.
-- **Multiple sinks**: generic webhook (full JSON + signature) + Feishu bot (text) + Slack incoming webhook can be configured together; one failing sink does not stop the others, but the run is still recorded as undelivered.
-- **Restart self-heal**: hysteresis counters are in-process; unresolved set is rebuilt from the DB.
-- **Manual resolution**: *Mark resolved* (admin + CSRF + audit) marks that row only.
-- **Retention**: same as request detail (90 days).
+- **Silence window**: one DB row / push per `(rule, object)` per window.
+- **Hysteresis**: alert after N consecutive hits, resolve after M consecutive misses; resolving stamps `resolved_at` on all open rows for that `(rule, object)` and emits a `status="resolved"` webhook.
+- **Multiple sinks**: generic webhook (full JSON + signature), Feishu bot and Slack incoming webhook may be configured together; one failing does not block the others but marks delivery as failed overall.
+- **Self-healing**: hysteresis counters live in-process, "which alerts are open" is rebuilt from the DB. Manual *Mark resolved* needs admin + CSRF + audit. Retention matches details (90 days).
 
-### Database backup and restore
+### Backup and restore
 
-**Automatic** (`BACKUP_INTERVAL_MINUTES`, default daily) writes consistent snapshot into `DATA_DIR/backups/`, keeping newest `BACKUP_KEEP` (default 7).
-
-- Uses `VACUUM INTO`, not file copy (WAL would lose uncheckpointed transactions).
-- Runs `PRAGMA integrity_check` immediately and deletes bad snapshot. Files `0600`, directory `0700`.
-- Failures only log; service keeps running.
-
-Manual backup:
+**Automatic backup** (`BACKUP_INTERVAL_MINUTES`, default daily) writes a consistent snapshot into `DATA_DIR/backups/`, keeping the last `BACKUP_KEEP` copies (default 7). It uses `VACUUM INTO` (plain `cp` under WAL loses uncheckpointed transactions), runs `PRAGMA integrity_check` immediately and deletes the artifact on failure; files are `0600`, the directory `0700`; failures only log.
 
 ```bash
-python3 scripts/backup_db.py                 # into DATA_DIR/backups/, keep 7
+python3 scripts/backup_db.py                 # back up, keep 7
 python3 scripts/backup_db.py --keep 14       # keep 14 (0 = never prune)
 python3 scripts/backup_db.py --out /path/dir
 ```
 
-Restore (**stop service first**):
+Restore (**stop the service first**):
 
 ```bash
-python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3            # preview: verify only
-python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --apply    # verify → safety copy → atomic replace
+python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3            # preview: validate only
+python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --apply    # validate → safety copy → atomic swap
 ```
 
-Flow: verify integrity → `.pre-restore-<timestamp>` copy → atomic replace → remove stale `-wal`/`-shm`. **Restart afterwards.**
-
-The *Backup & restore* page (admin) offers the same capability:
-
-- `GET /api/backups`: lists `backups/*.sqlite3` plus the pending restore file (`pending`).
-- `POST /api/backups`: back up now.
-- `GET /api/backups/{name}` / `DELETE /api/backups/{name}`: download / delete (regular files inside the directory only; paths and symlinks rejected).
-- `POST /api/backups/restore?filename=…`: raw byte upload → integrity + core table + schema version checks → staged at `DATA_DIR/restore/pending.sqlite3`. **No live swap**: the next start replaces the DB atomically before opening connections. A pending file that fails validation is archived as `.rejected-*` and the current DB is kept, so a bad upload never pins the service in a startup-failure loop.
+Flow: integrity check → `.pre-restore-<timestamp>` copy of the live DB → atomic swap → remove `-wal` / `-shm`. **Restart afterwards.** The admin *Backup & restore* page offers the same: `GET /api/backups`, `POST /api/backups`, `GET|DELETE /api/backups/{name}`, `POST /api/backups/restore?filename=…` (upload → validate → stage at `DATA_DIR/restore/pending.sqlite3`; **the live DB is not swapped while running** — it is swapped at the next startup before connections open; a failing pending file is kept as `.rejected-*` and the current DB is used).
 
 ## Configuration
 
-Full list in `src/config.py` (authoritative); every item wired through `docker-compose.yml`. Inside containers use `HOST`/`PORT` to change listen address.
+The authoritative list is `src/config.py`; every item is passed through `docker-compose.yml`. Inside a container use `HOST` / `PORT` to change the listen address.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `APP_SECRET` | **required** | Credential encryption key, ≥16 chars; losing it voids every credential. Low-entropy values rejected. **After rotating it, old credentials no longer decrypt**: a single probe returns an actionable error code, while chat and background tasks just skip that one bad credential and carry on |
-| `ADMIN_USERNAMES` | empty | Bootstrap only (no active admin in the DB yet): promoted to `admin` on first start |
-| `USERS_FILE` | `secrets/users.txt` | Bootstrap only: legacy user file imported once |
-| `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | Browser-reachable address; TRAE login callback; HSTS when https. Does not decide the session cookie `Secure` flag |
-| `DATA_DIR` | `./data` | SQLite and runtime data |
+| `APP_SECRET` | **required** | Credential encryption key, ≥16 chars; losing it loses all credentials. Low-entropy and known placeholder values are rejected. **Changing it makes stored credentials undecryptable**: re-encrypt first with `scripts/rotate_app_secret.py` (downtime + backup) |
+| `ADMIN_USERNAMES` | empty | Bootstrap only (while no active admin exists): promoted to `admin` on first start |
+| `USERS_FILE` | `secrets/users.txt` | Bootstrap only: legacy user file, imported once |
+| `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | Browser-reachable base; TRAE login callback; HSTS over https. Does not control session cookie `Secure`. Loopback / `0.0.0.0` → callback base falls back to the request origin |
+| `DATA_DIR` | `./data` | SQLite and runtime data directory |
 | `DEFAULT_MODEL` | `deepseek-v4.1-flash` | Used when the model is empty / `auto` |
 | `QUOTA_PROBE_MINUTES` | `60` | Quota probe period (min 1) |
-| `REFRESH_INTERVAL_MINUTES` | `30` | Token pre-refresh poll period (min 5) |
-| `MODEL_CATALOG_MINUTES` | `30` | Channel model refresh period (min 5) |
-| `SHORT_COOLDOWN_WAIT_SECONDS` | `60` | When the whole pool is in short cooldown, wait in place for the shortest remaining one (≤ this value), then re-pick once with the credential released from `tried`, instead of failing with 503. Waiting holds no in-flight lease. `0` = off. Hot-reloadable; for non-streaming requests also enable `NONSTREAM_KEEPALIVE_SECONDS=15` so middleboxes don't drop the connection first |
-| `OPENROUTER_CATALOG_MINUTES` | `1440` | Model catalog refresh period (min 60) |
-| `OPENROUTER_MODELS_URL` | `https://openrouter.ai/api/v1/models` | Catalog source (anonymous); restart required |
-| `USD_CNY_RATE` | `6.70` | Cost estimation rate; hot, affects new rows only |
-| `TOOL_OUTPUT_COMPRESS_ENABLED` | `false` | Compress oversized plain-text `role=tool` output (strip ANSI, fold repeated lines). Hot |
-| `TOOL_OUTPUT_COMPRESS_MAX_CHARS` | `8000` | Char threshold for tool-output compression; `<=0` disables. Hot |
+| `REFRESH_INTERVAL_MINUTES` | `30` | Token pre-refresh period (min 5) |
+| `MODEL_CATALOG_MINUTES` | `30` | Channel model list refresh period (min 5) |
+| `OPENROUTER_CATALOG_MINUTES` | `1440` | Catalog refresh period (min 60) |
+| `OPENROUTER_MODELS_URL` | `https://openrouter.ai/api/v1/models` | Catalog source (public); restart to change |
+| `TOOL_OUTPUT_COMPRESS_ENABLED` | `false` | Compress long plain `role=tool` text (strip ANSI + fold repeats); hot-reloadable |
+| `TOOL_OUTPUT_COMPRESS_MAX_CHARS` | `8000` | Compression threshold, `≤0` disables; hot-reloadable |
+| `USD_CNY_RATE` | `6.70` | Cost estimate FX rate; hot-reloadable, affects future writes only |
 | `GROWTH_INTERVAL_MINUTES` | `60` | Growth center period (min 5) |
-| `GROWTH_IRREVERSIBLE_ACTIONS` | `true` | Allow lottery / streak redemption / blind boxes / makeup cards |
+| `GROWTH_IRREVERSIBLE_ACTIONS` | `true` | Allow lottery / streak exchange / blind boxes / makeup cards |
 | `ACTIVITY_REPORT_ENABLED` | `false` | Activity reporting, off by default |
 | `ACTIVITY_REPORT_HOUR` | `10` | Local hour window for activity reporting |
-| `CHECKIN_TIMES` | `""` | Check-in times `HH:MM`, comma-separated; empty = every 10 minutes. Hot |
-| `CHECKIN_JITTER_MINUTES` | `0` | Jitter before the time point. Hot |
-| `CHECKIN_SKIP_PROVIDERS` | `""` | Channels to skip for check-in (comma-separated, e.g. `raccoon`); chat unaffected. Hot |
-| `LOG_BUFFER_LINES` | `500` | Server log buffer lines; `0` disables the page. Hot |
-| `ALERT_ENABLED` | `true` | Operations alerts on/off |
-| `ALERT_WEBHOOK_URL` | empty | Webhooks, comma-separated (≤16, http(s) only, internal / loopback rejected), signed with `X-Coding2API-Signature` |
-| `ALERT_FEISHU_WEBHOOK_URL` | empty | Feishu bot webhook; sends `msg_type=text`, URL validated like the generic webhook |
-| `ALERT_SLACK_WEBHOOK_URL` | empty | Slack incoming webhook; sends `{text}`, URL validated like the generic webhook |
+| `CHECKIN_TIMES` | `""` | Check-in times `HH:MM` comma-separated; empty = every 10 minutes all day. Hot-reloadable |
+| `CHECKIN_JITTER_MINUTES` | `0` | Random early jitter in minutes; hot-reloadable |
+| `CHECKIN_SKIP_PROVIDERS` | `""` | Channels to skip for check-in (e.g. `raccoon`); chat unaffected. Hot-reloadable |
+| `LOG_BUFFER_LINES` | `500` | Server log page buffer; `0` disables the page. Hot-reloadable |
+| `LOG_PERSIST_LINES` | `2000` | Log persistence rows (`log_events` ring); `0` disables. Hot-reloadable |
+| `ALERT_ENABLED` | `true` | Ops alerts switch |
+| `ALERT_WEBHOOK_URL` | empty | Generic webhook, comma-separated (≤16, http(s) only, private / loopback rejected against SSRF), signed with `X-Coding2API-Signature` |
+| `ALERT_FEISHU_WEBHOOK_URL` | empty | Feishu bot (`msg_type=text`), same URL validation |
+| `ALERT_SLACK_WEBHOOK_URL` | empty | Slack incoming webhook (`{text}`), same URL validation |
 | `ALERT_INTERVAL_MINUTES` | `5` | Alert evaluation period |
-| `ALERT_SILENCE_MINUTES` | `30` | Silence window per `(rule, target)`; `0` disables |
-| `ALERT_FOR_TICKS` | `1` | Hits before firing |
+| `ALERT_SILENCE_MINUTES` | `30` | Silence window per `(rule, object)`; `0` disables |
+| `ALERT_FOR_TICKS` | `1` | Hits before alerting |
 | `ALERT_CLEAR_TICKS` | `2` | Misses before resolving |
 | `ALERT_POOL_READY_MIN` | `1` | Pool-empty threshold; `0` disables |
-| `ALERT_TASK_FAILURES` | `3` | Consecutive task failures; `0` disables |
-| `ALERT_TOKEN_EXPIRY_HOURS` | `24` | Token remaining hours; `0` disables |
-| `ALERT_ERROR_RATE_THRESHOLD` | `0.5` | Error rate threshold; `0` disables |
+| `ALERT_TASK_FAILURES` | `3` | Consecutive task failure threshold; `0` disables |
+| `ALERT_TOKEN_EXPIRY_HOURS` | `24` | Token remaining-hours threshold; `0` disables |
+| `ALERT_ERROR_RATE_THRESHOLD` | `0.5` | Error-rate threshold; `0` disables |
 | `ALERT_ERROR_RATE_MIN_REQUESTS` | `20` | Minimum samples |
-| `ALERT_ERROR_RATE_WINDOW_MINUTES` | `15` | Error rate window |
-| `ALERT_KEY_BURST_TOKENS` | `0` | Single-key burst threshold (tokens); `0` disables |
-| `ALERT_KEY_BURST_WINDOW_MINUTES` | `15` | Single-key usage window; `0` disables |
-| `ALERT_CHANNEL_DEAD_MIN_REQUESTS` | `20` | Minimum requests in the window for `channel_dead`; `0` disables |
-| `ALERT_CHANNEL_DEAD_WINDOW_MINUTES` | `60` | `channel_dead` window (minutes) |
-| `ALERT_CHECKIN_FAIL_MIN_STREAK` | `3` | Consecutive failed check-in rounds for `checkin_failing`; `0` disables |
-| `ALERT_CHECKIN_FAIL_WINDOW_HOURS` | `24` | Look-back window (hours) for `checkin_failing` |
-| `ALERT_OFF_HOURS_START` / `_END` | `0` / `0` | Working hours `[start, end)` (local time, may cross midnight); equal = off |
+| `ALERT_ERROR_RATE_WINDOW_MINUTES` | `15` | Error-rate window |
+| `ALERT_KEY_BURST_TOKENS` | `0` | Per-key burst threshold (tokens); `0` disables |
+| `ALERT_KEY_BURST_WINDOW_MINUTES` | `15` | Per-key window; `0` disables |
+| `ALERT_CHANNEL_DEAD_MIN_REQUESTS` | `20` | Minimum requests for the zero-success rule; `0` disables |
+| `ALERT_CHANNEL_DEAD_WINDOW_MINUTES` | `60` | Zero-success window |
+| `ALERT_CHECKIN_FAIL_MIN_STREAK` | `3` | Consecutive failed check-in rounds; `0` disables |
+| `ALERT_CHECKIN_FAIL_WINDOW_HOURS` | `24` | Check-in failure lookback |
+| `ALERT_OFF_HOURS_START` / `_END` | `0` / `0` | Working hours `[start, end)` local time, may wrap midnight; equal = disabled |
 | `ALERT_OFF_HOURS_MIN_REQUESTS` | `0` | Off-hours request threshold; `0` disables |
-| `ALERT_BUDGET_CNY` | `0` | Monthly cost budget (CNY); `0` disables. Priced rows only |
-| `ALERT_BUDGET_LEVELS` | `50,80,95,100` | Budget tiers; only the highest reached tier fires, 100% is critical |
+| `ALERT_BUDGET_CNY` | `0` | Monthly cost budget in CNY; `0` disables. Priced details only |
+| `ALERT_BUDGET_LEVELS` | `50,80,95,100` | Budget levels; only the highest is reported, 100% is critical |
 | `BACKUP_INTERVAL_MINUTES` | `1440` | Backup period (min 60) |
-| `BACKUP_KEEP` | `7` | Snapshots retained; `0` = never prune |
-| `UPSTREAM_STATUS_ENABLED` | `true` | Upstream status page on/off |
-| `UPSTREAM_STATUS_MINUTES` | `5` | Fetch period (min 1) |
+| `BACKUP_KEEP` | `7` | Backups retained; `0` = never prune |
+| `UPSTREAM_STATUS_ENABLED` | `true` | Upstream status page switch |
+| `UPSTREAM_STATUS_MINUTES` | `5` | Status fetch period (min 1) |
 | `UPSTREAM_STATUS_TIMEOUT_SECONDS` | `10.0` | Per-source HTTP timeout |
-| `MODEL_PROBE_MINUTES` | `0` | Probe period (`0` = off). Probes `(channel, model)` pairs locked by `blocked` cache or already declared dead; success restores the model and clears the cache, everything else never disables. Hot |
-| `QUOTA_EXPIRY_WINDOW_SECONDS` | `129600` | Main expiry window; `≤0` disables |
-| `QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS` | `604800` | Secondary window; `≤0` disables |
-| `CONVERSATION_STICKY_SECONDS` | `3600` | Stickiness TTL. Priority: body key > header > message-prefix fingerprint; pin wins. `≤0` disables |
-| `MODEL_BLOCKLIST` | `custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,default,fast,balanced,deep,primary,auto,sagitta,aquila,glm-4.*,glm-5,glm-5-turbo,glm-5.0*,glm-5.1,glm-5v-*,glm-5.2*,glm.5.2*,kimi-k2.*,kimi-k2.5,kimi-k2.6,kimi-k2-thinking,kimi-k3,minimax-m2.5,minimax-m2.7,minimax-m3,deepseek-v3-*,deepseek-v4-*,qwen3.7-*,qwen3-*,qwen3.6*,qwen3-vl-235b,gpt-5.4,gpt-5.5,gpt-5.6*,hy3*,hy4-preview,hunyuan-*,seed-2.1*,seed-2-1-turbo,doubao-seed-2.1-turbo,seed-code-pro-*,seed-evolving,space-bunny,nemotron-3-*,nemotron-3*,lfm2*,laguna*,north-mini-code,inkling-small,xing4.0-29b-a4,glyph-cluster,openrouter-models-router,deepseek-v4.1-flash-0930,deepseek-v4.1-flash-bnt,glm-5.3-test,glm-5.3-zx,kimi-k3-test-1009,kimi-k3-1019` | Model list blocklist (fnmatch, display only), matched against normalized spellings |
-| `MODEL_FALLBACK_GROUPS` | `""` | Cross-channel fallback groups: `name=member1,member2;…`. Empty = off |
-| `ALLOWED_HOSTS` | empty | Host allowlist against DNS rebinding |
-| `ALLOW_TEST_HOST` | `false` | Allow `testserver`; tests only |
+| `MODEL_PROBE_MINUTES` | `0` | Active probe period (`0` = off). Success restores the model and clears the negative cache; nothing else ever disables. Hot-reloadable |
+| `QUOTA_EXPIRY_WINDOW_SECONDS` | `129600` | Primary expiry window for ordering; `≤0` disables |
+| `QUOTA_EXPIRY_SECONDARY_WINDOW_SECONDS` | `604800` | Secondary expiry window; `≤0` disables |
+| `CONVERSATION_STICKY_SECONDS` | `3600` | Conversation stickiness TTL. Priority: body session id > request header > message-prefix fingerprint; pins win. `≤0` disables |
+| `MODEL_BLOCKLIST` | see `src/config.py` | Listing blocklist (fnmatch, display only), matched against normalized names |
+| `MODEL_FALLBACK_GROUPS` | `""` | Cross-channel fallback groups: `name=member1,member2;…`. Empty = disabled |
+| `ALLOWED_HOSTS` | empty | Host allowlist (DNS rebinding defense) |
+| `ALLOW_TEST_HOST` | `false` | Allow `testserver`, tests only |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-For`; only behind exactly one trusted proxy |
 | `ENABLE_DOCS` | `false` | Expose `/docs` and `/openapi.json` |
-| `LOG_LEVEL` | `INFO` | Log level; audit logging is INFO and disappears at WARNING |
-| `HOST` / `PORT` | `127.0.0.1` / `8000` | Listen address and port (compose defaults to `0.0.0.0`); `PORT` also sets the host mapping |
-| `CODEBUDDY_API_ENDPOINT` | `https://copilot.tencent.com` | Upstream address; update the allowlist too |
-| `CODEBUDDY_ALLOWED_ENDPOINTS` | both official sites (see compose) | Allowlist; real tokens only go to listed hosts |
-| `CODEBUDDY_INTL_API_ENDPOINT` | `https://www.codebuddy.ai` | International address |
-| `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` | `https://www.codebuddy.ai` | International allowlist, deliberately excluding the CN host |
+| `DUMP_REQUEST_BODIES` | `false` | Dump raw `/v1` request bodies (contains conversations, debugging only). Hot-reloadable, dir 0700 / files 0600 / ≤200 files and ≤24h; changes audited |
+| `GATEWAY_PAUSED` | `false` | Global kill switch: every key-authenticated `/v1` endpoint returns 503 (`code=service_paused`), admin console unaffected. Hot-reloadable, audited and logged as WARNING |
+| `GATEWAY_PAUSE_REASON` | empty | Pause reason, logs and audit only (never echoed to callers) |
+| `LOG_LEVEL` | `INFO` | Log level; audit logs are INFO, so WARNING also silences them |
+| `HOST` / `PORT` | `127.0.0.1` / `8000` | Listen address and port (compose defaults to `0.0.0.0`); `PORT` also drives the host mapping |
+| `CODEBUDDY_API_ENDPOINT` | `https://copilot.tencent.com` | Upstream address; keep the allowlist in sync |
+| `CODEBUDDY_ALLOWED_ENDPOINTS` | official hosts (see compose) | Endpoint allowlist; real tokens only go to listed hosts |
+| `CODEBUDDY_INTL_API_ENDPOINT` | `https://www.codebuddy.ai` | International site |
+| `CODEBUDDY_INTL_ALLOWED_ENDPOINTS` | `https://www.codebuddy.ai` | International allowlist, deliberately excludes the China site |
 | `ZEN_API_ENDPOINT` | `https://opencode.ai` | Zen upstream |
 | `ZEN_ALLOWED_ENDPOINTS` | `https://opencode.ai` | Zen allowlist |
-| `ZEN_OPENCODE_VERSION` | `1.18.0` | Gate-spoofing UA version (below threshold → 426) |
-| `ZEN_API_ROOT` | `/zen/v1` | Upstream API root; can switch to `/inference/v1` (both return 200 today) |
-| `ZEN_GATE_TOOLS` | `bash,read` | Gate `tools` set; switch to `bash,glob,grep,read` if upstream tightens |
-| `ZEN_USER_AGENT` | empty | UA template (`{version}` substituted); empty = `opencode/<version>` |
+| `ZEN_OPENCODE_VERSION` | `1.18.0` | Gate-spoofing UA version (below the threshold → 426) |
+| `ZEN_API_ROOT` | `/zen/v1` | Upstream API root; `/inference/v1` also works |
+| `ZEN_MODELS_ROOT` | empty | Model list root; empty = follow `ZEN_API_ROOT`. Set `/inference/v1` when 2.x splits endpoints |
+| `ZEN_CLIENT_PROFILE` | `legacy` | Client fingerprint profile: `legacy` (1.x) / `v2` (2.x) |
+| `ZEN_GATE_TOOLS` | `bash,read` | Gate tools; may switch to `bash,glob,grep,read` (v2 needs only `read`) |
+| `ZEN_USER_AGENT` | empty | UA template (`{version}` substituted); empty = legacy `opencode/<version>`, v2 `opencode/latest/<version>/cli` |
 | `KILO_API_ENDPOINT` | `https://api.kilo.ai/api/gateway` | Kilo upstream |
-| `KILO_ALLOWED_ENDPOINTS` | same | Kilo allowlist |
+| `KILO_ALLOWED_ENDPOINTS` | `https://api.kilo.ai/api/gateway` | Kilo allowlist |
 | `QODER_API_ENDPOINT` | `https://openapi.qoder.com.cn` | Qoder openapi (quota / login); international `https://openapi.qoder.sh` |
 | `QODER_GATEWAY_ENDPOINT` | `https://gateway.qoder.com.cn` | Qoder inference gateway; international `https://api1.qoder.sh` |
-| `QODER_ALLOWED_ENDPOINTS` | CN + international (see compose) | Qoder allowlist |
+| `QODER_ALLOWED_ENDPOINTS` | China + international (see compose) | Qoder allowlist |
 | `CODEARTS_API_ENDPOINT` | `https://snap-access.cn-north-4.myhuaweicloud.com` | CodeArts snap engine |
-| `CODEARTS_ALLOWED_ENDPOINTS` | snap + STS + portal (see compose) | CodeArts allowlist |
+| `CODEARTS_ALLOWED_ENDPOINTS` | snap engine + STS + portal (see compose) | CodeArts allowlist |
 | `OFFICEACE_API_ENDPOINT` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | OfficeAce control plane |
-| `OFFICEACE_ALLOWED_ENDPOINTS` | the control-plane host only | Control plane only (the model gateway is issued upstream) |
-| `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | OfficeAce chat pacing; hot-reloadable |
+| `OFFICEACE_ALLOWED_ENDPOINTS` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | Control plane only (model gateway is issued upstream) |
+| `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | OfficeAce chat min interval; hot-reloadable |
+| `GENERIC_API_ENDPOINT` | `""` | Generic OpenAI-compatible upstream; empty = channel disabled |
+| `GENERIC_ALLOWED_ENDPOINTS` | `""` | Generic allowlist; empty = any http(s) |
+| `GENERIC_MODELS` | `""` | Static model list when upstream has no `/models` (comma-separated) |
+| `GENERIC_USER_AGENT` | `""` | Override outbound UA; empty = no custom UA |
+| `GENERIC_CHAT_MIN_INTERVAL` | `0` | Generic chat min interval; hot-reloadable |
 | `PROVIDER_PROXIES` | `""` | Per-channel outbound proxy; startup-time |
-| `CREDENTIAL_PROXY_POOL` | `""` | Egress IP stickiness: global proxy pool (semicolon-separated), assigned by stable hash of credential id; startup-time |
-| `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB chat pacing (per-credential buckets); hot-reloadable |
-| `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB international pacing, independent; hot-reloadable |
-| `ZEN_CHAT_MIN_INTERVAL` | `0` | Zen pacing; hot-reloadable |
-| `KILO_CHAT_MIN_INTERVAL` | `0` | Kilo pacing; hot-reloadable |
+| `CREDENTIAL_PROXY_POOL` | `""` | Egress IP stickiness: global proxy pool (semicolon-separated), hashed per credential id; startup-time |
+| `PRIVACY_RULES` | `""` | Outbound redaction rules (conn-string userinfo / emails / phone numbers / internal IPs) applied to the outbound copy only; `request.raw`, `tool_calls` arguments and JSON schemas untouched, placeholders never restored. `""` = off |
+| `CODEBUDDY_CHAT_MIN_INTERVAL` | `5` | CB chat throttle (per credential); hot-reloadable |
+| `CODEBUDDY_INTL_CHAT_MIN_INTERVAL` | `5` | CB international throttle, independent; hot-reloadable |
+| `ZEN_CHAT_MIN_INTERVAL` | `0` | Zen throttle; hot-reloadable |
+| `KILO_CHAT_MIN_INTERVAL` | `0` | Kilo throttle; hot-reloadable |
 | `RACCOON_API_ENDPOINT` | `https://xiaohuanxiong.com` | Raccoon upstream |
 | `RACCOON_ALLOWED_ENDPOINTS` | `https://xiaohuanxiong.com` | Raccoon allowlist |
-| `RACCOON_CHAT_MIN_INTERVAL` | `0` | Raccoon chat pacing; hot-reloadable |
-| `RACCOON_MAX_CONCURRENCY` | `2` | Raccoon in-flight cap per account; `0` disables; hot-reloadable |
-| `RACCOON_AUTO_LOGIN` | `false` | Raccoon on-demand login: when today's credits were never granted, log in once with the credential's `phone`/`password` to mint a fresh session; at most once per credential per day, and an upstream rejection disables the credential as "re-login required". **Hot-reloadable**; enabling it puts the account password under the `APP_SECRET` trust boundary |
+| `RACCOON_CHAT_MIN_INTERVAL` | `0` | Raccoon chat min interval; hot-reloadable |
+| `RACCOON_MAX_CONCURRENCY` | `2` | Per-account in-flight cap; `0` disables; hot-reloadable |
+| `RACCOON_AUTO_LOGIN` | `false` | On-demand login when today's credits are missing, using the stored `phone`/`password`. Once per credential per day, stops on rejection. Hot-reloadable; enabling puts the password inside the `APP_SECRET` trust boundary |
 | `LINGXI_API_ENDPOINT` | `https://lingxi.wps.cn` | Lingxi upstream |
-| `LINGXI_ALLOWED_ENDPOINTS` | `https://lingxi.wps.cn,https://lingxi.kdocs.cn` | Lingxi allowlist (cookie/chat fall back across both hosts) |
+| `LINGXI_ALLOWED_ENDPOINTS` | `https://lingxi.wps.cn,https://lingxi.kdocs.cn` | Lingxi allowlist (chat falls back across both hosts) |
 | `LINGXI_CHAT_MIN_INTERVAL` | `0` | Lingxi chat min interval; hot-reloadable |
-| `QODER_CHAT_MIN_INTERVAL` | `5` | Qoder pacing; hot-reloadable |
-| `CODEARTS_CHAT_MIN_INTERVAL` | `5` | CodeArts pacing; hot-reloadable |
-| `CODEARTS_MAX_CONCURRENCY` | `3` | CodeArts in-flight cap per account; `0` disables; hot-reloadable |
-| `CODEARTS_REQUEST_WINDOW_SECONDS` | `60` | CodeArts sliding window; `0` disables; hot-reloadable |
-| `CODEBUDDY_SANITIZE_CHANNEL_MARKERS` | `true` | Replace "spoofed official client" fingerprints in outbound text (upstream 11128 risk control) |
+| `QODER_CHAT_MIN_INTERVAL` | `5` | Qoder throttle; hot-reloadable |
+| `CODEARTS_CHAT_MIN_INTERVAL` | `5` | CodeArts throttle; hot-reloadable |
+| `CODEARTS_MAX_CONCURRENCY` | `3` | Per-account in-flight cap; `0` disables; hot-reloadable |
+| `CODEARTS_REQUEST_WINDOW_SECONDS` | `60` | CodeArts per-account sliding window; `0` disables; hot-reloadable |
+| `CODEBUDDY_SANITIZE_CHANNEL_MARKERS` | `true` | Replace outbound text matching client-spoofing fingerprints (upstream 11128 guard) |
 | `REFRESH_SKEW_HOURS` | `24` | Pre-refresh window before expiry; short-lived channels cap it themselves |
-| `TOKEN_EXPIRY_WARNING_SECONDS` | `3600` | Token expiry warning threshold; `≤0` disables. Display only |
-| `PACER_MIN_SECONDS` / `PACER_MAX_SECONDS` | `5` / `20` | Global pacer random wait range |
-| `AUTO_CONTINUE_MAX` | `10` | Auto-continue attempts on `finish_reason=length`; `0` disables |
-| `CONTEXT_COMPRESS_ENABLED` | `true` | Trim long conversations to the model input limit |
-| `CONTEXT_COMPRESS_RESERVE_TOKENS` | `4096` | Output tokens reserved in the compression budget |
+| `TOKEN_EXPIRY_WARNING_SECONDS` | `3600` | Expiry warning threshold; `≤0` disables. Display only |
+| `PACER_MIN_SECONDS` / `PACER_MAX_SECONDS` | `5` / `20` | Global pacing random wait range |
+| `AUTO_CONTINUE_MAX` | `10` | Auto-continue count on the same credential when `finish_reason=length`; `0` disables |
+| `CONTEXT_COMPRESS_ENABLED` | `true` | Trim over-long conversations to the model input limit |
+| `CONTEXT_COMPRESS_RESERVE_TOKENS` | `4096` | Output tokens reserved for the reply |
 | `CONTEXT_COMPRESS_MIN_KEEP_MESSAGES` | `4` | Recent messages always kept |
-| `CONTEXT_COMPRESS_SAFETY_RATIO` | `0.95` | Budget share of the model limit |
-| `CONTEXT_COMPRESS_STICKY_ENABLED` | `true` | Sticky trim: cut once to 60% of budget, lock the window start, keep the cross-turn prefix stable so upstream prefix cache hits |
-| `PREFIX_DEBUG_ENABLED` | `false` | Prefix-cache diagnostics: one payload-fingerprint line per request (digests only), to locate the divergence point when hit rate is off. Hot-reloadable |
-| `DUMP_REQUEST_BODIES` | `false` | Dump the raw `/v1` request body (full conversation) to `DATA_DIR/dumps/` — diagnostics only. Hot-reloadable; dir 0700 / files 0600 / 200 files and 24h max; the toggle is audited |
-| `GATEWAY_PAUSED` | `false` | Kill switch: every API-key-authenticated `/v1` endpoint returns 503 (`code=service_paused`) while the admin console and login keep working. Hot-reloadable; audited and logged |
-| `GATEWAY_PAUSE_REASON` | empty | Why the gateway is paused — logs and audit only, never echoed to callers |
-| `UPSTREAM_COMPLETE_TIMEOUT_SECONDS` | `600` | Non-streaming aggregate timeout; `≤0` disables |
-| `STREAM_FIRST_EVENT_TIMEOUT_SECONDS` | `0` | First-event timeout (retryable before any frame). **Keep off by default**, recommended 60. Hot |
-| `STREAM_IDLE_TIMEOUT_SECONDS` | `0` | Idle timeout (closes, never retries), recommended 300. Hot |
-| `SHORT_COOLDOWN_WAIT_SECONDS` | `0` | Wait when the whole pool is in short cooldown; `0` = fail fast. Hot |
-| `NONSTREAM_KEEPALIVE_SECONDS` | `0` | Non-streaming responses switch to chunked with whitespace heartbeats after N seconds (leading whitespace is legal JSON); `0` = off, only needed behind a CDN, recommended 15. Hot |
-| `MODEL_ALIASES` | `""` | Custom aliases; empty = off. Hot |
-| `MAX_INFLIGHT_PER_CREDENTIAL` | `0` | Per-account in-flight cap; `0` = unlimited. 600s TTL backstop |
-| `METRICS_ENABLED` | `true` | Expose `/metrics`. Hot |
-| `METRICS_TOKEN` | empty | When set, `/metrics` requires `Authorization: Bearer <token>`; empty = public (same as `/healthz`). Startup-only |
-| `REQUEST_LOG_ENABLED` | `true` | Request-level logfmt logging; no query / body / username. Hot |
-| `FORCE_DISABLE_THINKING` | `false` | Strip reasoning from responses only. Hot |
-| `REASONING_EFFORT_MAP` | `""` | Outbound level mapping `channel=from:to;*=from:to`; `none` deletes the key. Hot |
-| `ANTHROPIC_THINKING_EFFORTS` | `""` | Anthropic `thinking.budget_tokens` → upstream `reasoning_effort`. Hot |
+| `CONTEXT_COMPRESS_SAFETY_RATIO` | `0.95` | Compression budget as a fraction of the model limit |
+| `CONTEXT_COMPRESS_STICKY_ENABLED` | `true` | Sticky trimming: cut to 60% of budget and pin the window start so prefixes stay stable across turns (upstream cache hits) |
+| `PREFIX_DEBUG_ENABLED` | `false` | Prefix cache diagnostics: one payload fingerprint line per request (digest only). Hot-reloadable |
+| `UPSTREAM_COMPLETE_TIMEOUT_SECONDS` | `600` | Non-stream aggregate timeout; `≤0` disables |
+| `STREAM_FIRST_EVENT_TIMEOUT_SECONDS` | `0` | First-event timeout (switchable before any frame). **Must stay off by default**; 60 recommended. Hot-reloadable |
+| `STREAM_IDLE_TIMEOUT_SECONDS` | `0` | In-stream idle timeout (disconnect only, no switch); 300 recommended. Hot-reloadable |
+| `SHORT_COOLDOWN_WAIT_SECONDS` | `0` | Wait out short pool-wide cooldowns (≤ this value); `0` = fail fast. Hot-reloadable; pair with `NONSTREAM_KEEPALIVE_SECONDS=15` for non-stream |
+| `NONSTREAM_KEEPALIVE_SECONDS` | `0` | Non-stream responses switch to chunked whitespace heartbeats after N seconds; `0` = off, only needed behind CDNs, 15 recommended. Hot-reloadable |
+| `MODEL_ALIASES` | `""` | Custom aliases; empty = disabled. Hot-reloadable |
+| `MAX_INFLIGHT_PER_CREDENTIAL` | `0` | Per-account in-flight cap; `0` = unlimited. 600s TTL fallback |
+| `METRICS_ENABLED` | `true` | Expose `/metrics`. Hot-reloadable |
+| `METRICS_TOKEN` | empty | When set, `/metrics` requires `Authorization: Bearer <token>`; empty = public. Startup-time |
+| `REQUEST_LOG_ENABLED` | `true` | Request-level structured logs (logfmt); no query, body or username. Hot-reloadable |
+| `FORCE_DISABLE_THINKING` | `false` | Strip reasoning from outbound responses; response filtering only. Hot-reloadable |
+| `REASONING_EFFORT_MAP` | `""` | Outbound effort mapping `channel=from:to;*=from:to` (`KNOWN_PROVIDERS`); `none` removes the key. Hot-reloadable |
+| `ANTHROPIC_THINKING_EFFORTS` | `""` | Anthropic `thinking.budget_tokens` → upstream `reasoning_effort`. Hot-reloadable |
 
-### Runtime settings (*Tasks & settings* page)
+### Runtime settings
 
-The console exposes **85** hot items (`HOT_SETTINGS` in `src/runtime_settings.py`; the table above tags only the common ones); they can be changed without touching `.env` or restarting.
+The table above marks only common hot-reloadable items; **89 items** in total (`HOT_SETTINGS` in `src/runtime_settings.py`) can be changed from *Tasks & settings* without touching `.env` or restarting.
 
-Key points: **DB override beats `.env`** — once overridden `.env` no longer applies to that item; page marks "DB override", *Restore default* deletes row. Values live in `runtime_settings`, so new hot settings need no migration; unknown keys and invalid types / out-of-range values rejected before writing. Startup-time items (`APP_SECRET` / `PORT` / `DATA_DIR` / `USERS_FILE` / `OPENROUTER_MODELS_URL` / upstream allowlists) not hot. `GET /api/settings` / `PUT /api/settings` (admin + CSRF); `null` restores default. Page also shows task runtime state (`GET /api/tasks`, in-process, 30s refresh).
+**Priority: DB override > `.env`.** While an override exists the `.env` value is ignored and the page shows "DB override"; *Restore default* deletes the row. Values live in `runtime_settings` (new items need no migration); keys outside the allowlist and invalid types / ranges are rejected on write. Startup-only items are excluded: `APP_SECRET` / `PORT` / `DATA_DIR` / `USERS_FILE` / `OPENROUTER_MODELS_URL` / upstream endpoint allowlists. `GET /api/settings` reads a snapshot, `PUT /api/settings` writes (admin + CSRF, `null` restores the default).
 
 ## Deployment notes
 
-- **Mount ownership**: container runs as uid 1001 (`appuser`) → `./data` and `./secrets` must be writable / readable:
+- **Platform: Linux / macOS only.** The single-instance lock (`src/instance_lock.py`) relies on `flock`; on Windows it exits with a readable Chinese message — use WSL2 / Docker. The `data/` `0700` trust boundary is enforced on Windows via `icacls` in `src/security/private_files.py`.
+- **Mount ownership**: the container runs as uid 1001 (`appuser`) → `mkdir -p data secrets && sudo chown -R 1001:1001 data secrets`.
+- **Time zone**: the image defaults to `TZ=Asia/Shanghai`; `TZ` from `.env` passes through. Check-in and quota periods key off "9am today", so it must match the host.
+- **TRAE callback**: `PUBLIC_BASE_URL` is local-only by default; remote / container deployments must set a browser-reachable address. Forgetting it fails loudly: a loopback / `0.0.0.0` base falls back to the request origin and the *Add credential* dialog shows the effective address. If the callback is unreachable from the browser (common NAS / remote "network error"), paste the whole link from the address bar into the TRAE box — login works without the browser reaching this service.
+- **Port**: in compose `PORT` drives both the container listen port and the host mapping.
+- **Rebuild after code changes**: `docker compose up -d` without `--build` runs the old image; after changing `src/` or the frontend use `docker compose up -d --build`.
 
-  ```bash
-  mkdir -p data secrets && sudo chown -R 1001:1001 data secrets
-  ```
+### Pre-flight check (doctor)
 
-- **Timezone**: image defaults `TZ=Asia/Shanghai`; `.env` `TZ` passed through. Check-in and quota cycles depend on "today at 9" → keep aligned with host.
-- **TRAE callback URL**: the default `PUBLIC_BASE_URL=http://127.0.0.1:8000` only works locally; remote / container deployments need a browser-reachable address. **Forgetting it fails loudly, not silently**: when the base is loopback / `0.0.0.0` the callback falls back to the current request origin (LAN IP or tunnel domain), *Add credential* shows the actual address, and an authorization timeout names `PUBLIC_BASE_URL`. **If the callback URL is unreachable from the browser** (common on NAS / remote hosts, where TRAE shows a network error and the refreshToken stays in the address bar), paste the whole address-bar URL into the TRAE field in *Add credential* — login completes without the browser ever reaching this service.
-- **Port**: in compose `PORT` sets both container listen port and host mapping.
-- **Rebuild after code changes**: `docker compose up -d` without `--build` reuses local image, runs old code. Use `docker compose up -d --build` after changing `src/` or frontend.
+```bash
+python3 scripts/doctor.py                 # full check, PASS/WARN/FAIL + exit code
+python3 scripts/doctor.py --skip-upstream # offline / internal network: skip upstream reachability
+python3 scripts/doctor.py --json          # machine-readable (CI / deploy gate)
+```
+
+Covers: Python version and key imports, `APP_SECRET` strength, `DATA_DIR` writability and permissions, `PUBLIC_BASE_URL` vs `ALLOWED_HOSTS`, SQLite `integrity_check` + pending migrations, port binding, whether the js/css referenced by `web/dist/index.html` exist, and per-channel endpoint reachability (no credentials sent). **Read-only** (no migrations, no `runtime_settings` writes, no plaintext credentials); exit `0` = no FAIL (WARN does not block), `1` = FAIL; upstream `401/403` counts as passing (the link works, auth is the service's job).
+
+### File permissions
+
+One implementation (`src/security/private_files.py`) is shared by `data/`, `backups/` and `dumps/`: on POSIX, `chmod` then **read back** and verify `mode & 0o077 == 0`; on Windows, `icacls /inheritance:r` replaces the DACL with "current user + SYSTEM" and verifies no inherited ACEs remain. **Why not just `os.chmod`**: on Windows it only toggles the read-only bit, while `data/` and `.env` usually inherit `Everyone:(F)` from a parent — encrypted credentials readable next to `APP_SECRET` equal plaintext.
+
+- **`data/` (trust boundary)**: verification failure **fails startup** with manual-repair instructions.
+- **backups / dumps and other side artifacts**: failures only `logger.warning`.
+
+`scripts/doctor.py` re-checks `data/` permissions read-only before startup (same rules).
+
+### Rotating APP_SECRET (only if you suspect a leak)
+
+`APP_SECRET` is the sole source of the Fernet key (unsalted SHA-256), so **changing it makes every stored credential undecryptable**; re-encrypt instead:
+
+```bash
+python3 scripts/backup_db.py                      # 1. consistent backup
+sudo systemctl stop coding2api                    # 2. stop the service
+python3 scripts/rotate_app_secret.py \
+    --db data/coding2api.sqlite3 \
+    --old-secret-file /path/to/old.env \
+    --new-secret-file /path/to/new.env            # 3. decrypt all → verify → single transaction
+# 4. swap .env, chmod 600 .env, restart
+```
+
+If any row fails to decrypt, everything rolls back. The script accepts a `.env` file or a one-line key file; never pass the key on the command line (it lands in history and `ps`).
 
 ### Restart the backend after upgrading
 
-**Changes under `src/` require process restart**, otherwise you get "new frontend + old backend": pages load but new endpoints 404. The frontend does not need restart (the backend reads `web/dist` per request); backend does.
+**Restarting is mandatory after changing `src/`**; otherwise you get "new frontend + old backend": pages load but new endpoints 404. The frontend needs no restart (the backend re-reads `web/dist` per request).
 
 ```bash
 docker compose up -d --force-recreate   # Docker / compose
 sudo systemctl restart coding2api       # systemd
 ```
 
-Confirm upgrade:
+Verify the upgrade:
 
 ```bash
 sqlite3 data/coding2api.sqlite3 "PRAGMA user_version; SELECT username, role, enabled FROM users;"
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users   # expect 401; 404 = old backend
 ```
 
-### Frontend assets on the same port
+**Frontend assets share the backend port**: the backend serves `web/dist` at `/` (re-read per request), so frontend-only changes just need a rebuild and refresh; `localhost:5173` is the Vite dev server. Build with `./scripts/build-web.sh` (`--force` to rebuild unconditionally).
 
-Backend serves built frontend at `/` (reads disk per request), so **frontend-only changes just need build + refresh**. `localhost:5173` is Vite dev server; both coexist.
+> **Do not delete `web/.npmrc`**: it disables `auto-install-peers` (otherwise `@lobehub/icons` drags in `@lobehub/ui` / `antd`) and is tightly coupled to the lockfile's `settings.autoInstallPeers`; the `Dockerfile` must `COPY web/.npmrc`, otherwise `--frozen-lockfile` fails with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`.
 
-```bash
-./scripts/build-web.sh            # build only when stale
-./scripts/build-web.sh --force    # unconditional rebuild
-```
-
-> **`web/.npmrc` must not be deleted**: it disables `auto-install-peers` (else `@lobehub/icons` drags in `@lobehub/ui` / `antd`). Coupled to `settings.autoInstallPeers` in lockfile → `Dockerfile` must `COPY web/.npmrc`, or `--frozen-lockfile` fails with `ERR_PNPM_LOCKFILE_CONFIG_MISMATCH`.
-
-> **Deployment notes for this machine**: process management, paths, tool versions in `docs/local-environment.md` (gitignored).
+> **Deployment runbook**: process management, paths, tool versions → `docs/local-environment.md` (gitignored).
 
 ## Public deployment (Docker + Caddy automatic HTTPS)
 
-For a VPS with a public IP: one compose command starts "Caddy edge + app", certificates are issued / renewed automatically, and the app port is not exposed.
+For a VPS with a public IP: one compose file starts "Caddy entry + app", certificates are issued and renewed automatically, and the app port is not exposed.
 
 ```
 client ──443/TLS──> Caddy (TLS termination) ──compose network──> coding2api:8000
 ```
 
-Prerequisites: Docker Compose ≥ 2.24 (the override uses `!override`), a DNS A / AAAA record pointing at this host for the site address (a domain, or see *Public IP only, no domain* below), ports 80 and 443 (tcp + udp) free (80 is needed for the ACME HTTP-01 challenge).
-
-Two more `.env` entries (everything else as in *Quick start*):
+Requires Docker Compose ≥ 2.24 (the override uses `!override`), A / AAAA records for the site address pointing here, and ports 80 and 443 (tcp + udp) free (80 is needed for ACME HTTP-01).
 
 ```bash
-PUBLIC_DOMAIN=ai-api.example.com     # required: the certificate is issued for it (public IP when you have no domain)
-ACME_EMAIL=ops@example.com           # required with a domain: Let's Encrypt expiry notices
-# TLS_MODE=                          # empty = automatic certificates; set internal for a public IP (see below)
-# Leave ALLOWED_HOSTS empty: empty = loopback + the PUBLIC_BASE_URL hostname
+PUBLIC_DOMAIN=ai-api.example.com     # required: certificate name
+ACME_EMAIL=ops@example.com           # required for domain mode: Let's Encrypt expiry notices
+# TLS_MODE=                          # empty = automatic certificates; set internal for a public IP
+# ALLOWED_HOSTS may stay empty: empty = loopback + the PUBLIC_BASE_URL hostname
 ```
-
-Start it and watch certificate issuance:
 
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.public.yml up -d --build
@@ -963,44 +760,42 @@ What the override (`docker-compose.public.yml`) changes:
 
 | Change | Why |
 |---|---|
-| App port bound to `127.0.0.1:${PORT}` | No plaintext-http bypass left; the only way in is Caddy |
-| `TRUST_PROXY=true` | Exactly one Caddy in front (and the app port is loopback-only, so it cannot be reached directly), so API keys' `allowed_ips` see the real client IP |
-| `ALLOWED_HOSTS` extended with the domain + `127.0.0.1` | Non-empty means *full replacement*: a value already in `.env` would drop the domain (site-wide 400); missing loopback makes the container healthcheck fail → permanently unhealthy |
-| `HOST=0.0.0.0` | `.env.example` ships `HOST=127.0.0.1`, which would make the container listen on loopback only and Caddy's upstream unreachable |
-| New Caddy service (`deploy/caddy/`) | Automatic HTTPS + HTTP→HTTPS 308; `flush_interval -1` keeps streaming frame-by-frame; `X-Forwarded-For` is overwritten so client spoofing is ignored; no proxy-level timeouts (those stay with the app's `STREAM_*` / `UPSTREAM_COMPLETE_TIMEOUT_SECONDS`) |
-| `TLS_MODE` picks the certificate source | `acme` (default, domain) requests Let's Encrypt automatically; `internal` (public IP) signs with Caddy's built-in CA |
-| `/metrics` returns 404 | That endpoint has no auth by default (`METRICS_TOKEN` can tighten it); grab it from the host with `curl 127.0.0.1:${PORT}/metrics` when needed |
+| App port bound to `127.0.0.1:${PORT}` | No plaintext-http bypass; the only entry is Caddy |
+| `TRUST_PROXY=true` | Exactly one proxy (Caddy) in front, so key `allowed_ips` sees the real source IP |
+| `ALLOWED_HOSTS` adds the domain + `127.0.0.1` | Non-empty means full replacement: values in `.env` would drop the domain (site-wide 400); omitting loopback makes the container healthcheck 400 forever |
+| `HOST=0.0.0.0` | `.env.example`'s `HOST=127.0.0.1` would bind loopback only and Caddy could not connect |
+| New Caddy service (`deploy/caddy/`) | Automatic HTTPS + HTTP→HTTPS 308; `flush_interval -1` keeps streaming per-frame; `X-Forwarded-For` overwritten (client spoofing ineffective); no proxy timeout (the app's `STREAM_*` / `UPSTREAM_COMPLETE_TIMEOUT_SECONDS` own that) |
+| `TLS_MODE` | `acme` (default, domains) issues via Let's Encrypt; `internal` (public IP) self-signs with Caddy's CA |
+| `/metrics` returns 404 | The endpoint is unauthenticated by default, so it is removed at the public entry; use `curl 127.0.0.1:${PORT}/metrics` on the host when needed |
 
 ### Public IP only, no domain
 
-Caddy's automatic certificates (ACME) only work for domain names — it will not issue for a bare IP. Two options:
+Caddy's ACME only works with domains, not bare IPs. Two options:
 
-1. **A certificate browsers trust** → use a public wildcard-DNS name such as sslip.io / nip.io: `203-0-113-10.sslip.io` (or `203.0.113.10.sslip.io` / `.nip.io` — both spellings work) resolves to `203.0.113.10` automatically. Set `PUBLIC_DOMAIN` to it and keep `ACME_EMAIL`; this is plain ACME. Trade-off: certificates are rate-limited per *registered domain*, and sslip.io / nip.io are two domains **shared by every user** (exhausted once in Feb 2026; both got quota increases since) — if issuance fails, switch to the other, or fall back to self-signed.
-2. **API clients only, untrusted certificate is fine** → `PUBLIC_DOMAIN=<public IP>` + `TLS_MODE=internal`. Caddy signs with its built-in CA: the connection is still encrypted, but the certificate is in no public trust store — browsers warn, `curl` needs `-k`, or install the root CA into the client (it lives in the `caddy_data` volume: `docker compose -f docker-compose.yml -f docker-compose.public.yml exec caddy cat /data/pki/authorities/local/root.crt`).
+1. **A browser-trusted certificate** → use a wildcard-DNS service like sslip.io / nip.io as the domain: `203-0-113-10.sslip.io` (or `203.0.113.10.sslip.io`, `.nip.io`) resolves to that IP automatically. Set `PUBLIC_DOMAIN` to it and `ACME_EMAIL` as usual; regular ACME applies. Caveat: certificates are rate-limited per registered domain and both are shared by all users — if issuance fails, try the other or fall back to self-signed.
+2. **API clients only** → `PUBLIC_DOMAIN=<public IP>` + `TLS_MODE=internal`. Caddy self-signs: traffic is still encrypted but the certificate is not publicly trusted (`curl -k`, or install the root from the `caddy_data` volume: `docker compose ... exec caddy cat /data/pki/authorities/local/root.crt`).
 
-> The self-signed mode relies on `default_sni {$PUBLIC_DOMAIN}` in the Caddyfile: browsers and curl **send no SNI for IP literals** (RFC 6066 allows hostnames only), so without it Caddy cannot pick a certificate and the client only sees `tlsv1 alert internal error`. It is already in the shipped Caddyfile.
+> Self-signed mode relies on `default_sni {$PUBLIC_DOMAIN}` in the Caddyfile: browsers and curl send **no SNI for IP literals** (RFC 6066 allows hostnames only), so without it Caddy cannot pick a certificate and clients see `tlsv1 alert internal error`. Already set by default.
 
-Notes:
-
-- **Certificates live in the named volume `caddy_data`**: never `docker compose ... down -v` — re-issuing hits the Let's Encrypt limit of 5 certificates per domain per week.
-- **After changing `src/`, rebuild the app container**: `... up -d --build`; restarting Caddy alone does nothing (restarting the app itself is covered under *Restart the backend after upgrading* above).
-- Behind CGNAT there is no inbound address, so this path is unavailable → use the frp tunnel below.
+- **Certificates live in the `caddy_data` volume**: never `down -v`, or you re-issue and hit Let's Encrypt's 5-per-domain-per-week limit.
+- **Rebuild the app container after changing `src/`** (restarting Caddy alone does nothing).
+- Home connections behind CGNAT have no inbound address → use the next section.
 
 ## Public entry point (VPS + frp reverse tunnel)
 
-Behind CGNAT there is no inbound address, so public entry must be outbound tunnel. Cloudflare Tunnel free tier routes mainland traffic via Los Angeles (measured 1.1–2.4s, ~60% loss); "offshore VPS entry + frp back to origin" gets 80–150ms. Inbound only — outbound still uses `PROVIDER_PROXIES`.
+Behind CGNAT there is no inbound address, so the public entry must dial out. Cloudflare Tunnel's free tier routes mainland traffic via Los Angeles (measured 1.1–2.4s, ~60% loss); "offshore VPS entry + frp tunnel" brings it to 80–150ms. Only ingress changes; egress still uses `PROVIDER_PROXIES`.
 
 ```
 client ──443/TLS──> VPS(nginx) ──frp tunnel──> home Mac:8000
 ```
 
-Artifacts in `deploy/frp/`, `deploy/nginx/`, `deploy/systemd/frps.service`, `deploy/launchd/com.coding2api.frpc.plist` (frp v0.71.1 TOML).
+Artifacts: `deploy/frp/`, `deploy/nginx/`, `deploy/systemd/frps.service`, `deploy/launchd/com.coding2api.frpc.plist` (frp v0.71.1 TOML).
 
 VPS side:
 
 ```bash
 sudo apt install -y nginx certbot python3-certbot-nginx
-sudo install -m 755 frps /usr/local/bin/frps          # from the frp release archive
+sudo install -m 755 frps /usr/local/bin/frps          # extracted from the frp release
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin frps
 sudo install -d -m 755 /etc/frp && sudo install -m 644 deploy/frp/frps.toml /etc/frp/
 openssl rand -hex 32 | sudo tee /etc/frp/frps-token >/dev/null
@@ -1014,62 +809,56 @@ sudo nginx -t && sudo systemctl reload nginx
 sudo certbot --nginx -d ai-api.example.com
 ```
 
-Point the DNS A record at the VPS public IP; offshore VPS needs no ICP filing.
+Point the domain's A record at the VPS public IP; an offshore VPS needs no ICP filing.
 
 Home Mac side:
 
 ```bash
 brew install frp
-./scripts/install-frpc.sh --server <VPS public address> --token <same token>
+./scripts/install-frpc.sh --server <VPS public address> --token <same token as the VPS>
 launchctl print gui/$(id -u)/com.coding2api.frpc | grep -E 'state|pid'
 ./scripts/install-frpc.sh --uninstall
 ```
 
-`frpc.toml` reads `{{ .Envs.FRP_SERVER_ADDR }}`; address + token come from plist; token lives in `secrets/frpc-token` (600, gitignored).
+`frpc.toml` templates with `{{ .Envs.FRP_SERVER_ADDR }}`; the address and token are injected by the plist, with the token stored at `secrets/frpc-token` (600, gitignored).
 
-Three `.env` values to update:
+`.env` needs three values:
 
-| Variable | Value | If missed |
+| Variable | Value | If missing |
 |---|---|---|
-| `ALLOWED_HOSTS` | add the tunnel domain | every tunnel request returns 400 `invalid host header` |
-| `PUBLIC_BASE_URL` | `https://<tunnel domain>` | wrong TRAE callback base, no HSTS |
+| `ALLOWED_HOSTS` | append the tunnel domain | everything through the tunnel returns 400 `invalid host header` |
+| `PUBLIC_BASE_URL` | `https://<tunnel domain>` | TRAE callback base wrong, no HSTS |
 | `HOST` | keep `127.0.0.1` | the tunnel only needs to reach loopback |
 
-`TRUST_PROXY`: with exactly one nginx hop on VPS set `true` so key `allowed_ips` sees real client IPs. Keep `false` if LAN direct access must stay safe.
+`TRUST_PROXY`: with exactly one nginx on the VPS you may set `true` so key `allowed_ips` sees real IPs; keep `false` if you also need direct LAN access.
 
 ## Logs
 
-The app writes **stdout / stderr** only, never files, and does not rotate.
+The app writes **stdout / stderr** only — no files, no rotation of its own.
 
-| Deployment | Where logs go | Rotation | Action |
+| Deployment | Where logs go | Rotation | What to do |
 |---|---|---|---|
-| Docker / compose | `docker logs coding2api` | json-file (10m × 5) | none |
-| Linux (systemd) | `journalctl -u coding2api` | journald | none |
-| Linux (non-systemd) | redirected to files | `logrotate` | `sudo cp deploy/logrotate/coding2api /etc/logrotate.d/` |
+| Docker / compose | `docker logs coding2api` | json-file (10m × 5) | nothing |
+| Linux (systemd) | `journalctl -u coding2api` | journald | nothing |
+| Linux (non-systemd) | redirect to a file | `logrotate` | `sudo cp deploy/logrotate/coding2api /etc/logrotate.d/` |
 | macOS (launchd) | `logs/launchd.{out,err}.log` | `scripts/rotate-logs.sh` | `./scripts/install-logrotate.sh` |
-| Bare process | terminal stderr | none | redirect and rotate yourself |
+| Bare run | terminal stderr | none | redirect and rotate yourself |
 
-> **Do not use newsyslog on macOS**: it only does rename-based rotation, but the fd launchd handed the process still points at the old inode — after rotation the process keeps writing into the archived file, the new path only appears on the next restart, and everything in between is lost (21.7h observed locally). `rotate-logs.sh` copies → compresses → truncates, matching `copytruncate` on the Linux side.
+> **Do not use newsyslog on macOS**: it renames files, but launchd's fd still points at the old inode — the process keeps writing to the archived file and the new path only appears after a restart (we lost 21.7h of logs once). `rotate-logs.sh` does copy → compress → truncate, matching Linux's `copytruncate`.
 
-Level via `LOG_LEVEL` (default `INFO`). **Audit logging is INFO** and disappears at `WARNING`.
+Level via `LOG_LEVEL` (default `INFO`); **audit logs are INFO**, so `WARNING` silences them too.
 
-### Request-level structured log
+### Request-level structured logs
 
-Every business request (`/api/*`, `/v1/*`, `/authorize`) writes one logfmt line:
+Every business request (`/api/*`, `/v1/*`, `/authorize`) emits one extra logfmt line:
 
 ```
 event=request request_id=9f2c… method=POST route=/v1/chat/completions status=200 duration_ms=1234
 ```
 
-- `route` = route template (`/api/credentials/{credential_id}`); unmatched requests fall back to sanitized raw path.
-- No query string, request body, response body, headers or username; identity recovered via `request_id` into `usage_events`.
-- `request_id` matches the `X-Request-ID` response header.
-- `5xx` logs WARNING, everything else INFO.
-- Static assets and probes (`/health`, `/healthz`, `/metrics`) are skipped.
-- uvicorn's access log is disabled.
-- Switch `REQUEST_LOG_ENABLED` (default `true`, hot).
+`route` is the route template (resource ids excluded), falling back to a sanitized raw path; no query strings, bodies, response bodies, headers or usernames (identity is linked via `request_id` in `usage_events`). `request_id` equals the `X-Request-ID` response header; `5xx` → WARNING, otherwise INFO; static assets and probes are skipped; the uvicorn access log is disabled.
 
-> `data/dumps/` (written by `DUMP_REQUEST_BODIES=true`) is outside docker log system; the app keeps at most 200 files and no longer than 24 hours (by mtime), directory 0700 / files 0600. This is the only switch that writes conversations to disk — turn it back off right after diagnosing.
+> `data/dumps/` (written when `DUMP_REQUEST_BODIES=true`) is outside docker's log system; the app keeps at most 200 files and no more than 24 hours (by mtime), directory 0700, files 0600 — this is the only switch that writes conversations to disk, turn it off right after debugging.
 
 ## Development
 
@@ -1085,22 +874,22 @@ pnpm exec vitest run
 pnpm build
 ```
 
-Contributing (issue templates, PR gates, schema rules): see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+Contribution process (issues, PR gates, schema rules) is in [`CONTRIBUTING.md`](CONTRIBUTING.md).
 
 ## Documentation
 
 | Document | Contents |
 |---|---|
 | [`PROPOSAL.md`](PROPOSAL.md) | Goals and non-goals, upstream feasibility, architecture, data model, security boundary |
-| [`TECHNICAL.md`](TECHNICAL.md) | Stack, module specs, provider protocols, request sequence, test strategy |
-| [`diagrams/coding2api-architecture.html`](diagrams/coding2api-architecture.html) | Architecture diagram |
-| [`diagrams/coding2api-request-flow.html`](diagrams/coding2api-request-flow.html) | Main request flow (`/v1/responses` and `/v1/messages` share the chain) |
+| [`TECHNICAL.md`](TECHNICAL.md) | Stack, module specs, provider protocols, request sequences, test strategy |
+| [`diagrams/coding2api-architecture.html`](diagrams/coding2api-architecture.html) | System architecture |
+| [`diagrams/coding2api-request-flow.html`](diagrams/coding2api-request-flow.html) | Main request path (shared by `/v1/responses`, `/v1/messages`) |
 | [`diagrams/coding2api-account-flow.html`](diagrams/coding2api-account-flow.html) | Account and API key lifecycle |
-| [`diagrams/coding2api-data-model.html`](diagrams/coding2api-data-model.html) | Data model (13 tables drawn + ownership; `checkin_events` not yet in the diagram — `src/db/schema.sql` has 14) |
-| [`diagrams/coding2api-permission-matrix.html`](diagrams/coding2api-permission-matrix.html) | Three-role permission matrix |
-| [`diagrams/coding2api-request-sequence.html`](diagrams/coding2api-request-sequence.html) | Main request sequence |
+| [`diagrams/coding2api-data-model.html`](diagrams/coding2api-data-model.html) | Data model and ownership (`src/db/schema.sql` is authoritative, 15 tables) |
+| [`diagrams/coding2api-permission-matrix.html`](diagrams/coding2api-permission-matrix.html) | Role permission matrix |
+| [`diagrams/coding2api-request-sequence.html`](diagrams/coding2api-request-sequence.html) | Request sequence diagram |
 | [`diagrams/coding2api-credential-lifecycle.html`](diagrams/coding2api-credential-lifecycle.html) | Credential scheduling state machine |
-| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Issue / PR flow and gates |
+| [`CONTRIBUTING.md`](CONTRIBUTING.md) | Issue / PR process and gates |
 | [`SECURITY.md`](SECURITY.md) | Vulnerability reporting and deployer trust boundary |
 | [`CITATION.cff`](CITATION.cff) | Citation metadata (GitHub "Cite this repository") |
 
