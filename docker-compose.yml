@@ -123,8 +123,10 @@ services:
       ZEN_ALLOWED_ENDPOINTS: ${ZEN_ALLOWED_ENDPOINTS:-https://opencode.ai}
       # Zen 门禁要求的 UA 版本（低于上游阈值会被 426 拒绝）
       ZEN_OPENCODE_VERSION: ${ZEN_OPENCODE_VERSION:-1.18.0}
-      # 门禁移动靶：根路径 / 工具集合 / UA 模板（默认值即仓库实测通过的形态）
+      # 门禁移动靶：根路径 / 清单根 / 工具集合 / UA 模板 / 客户端档位
       ZEN_API_ROOT: ${ZEN_API_ROOT:-/zen/v1}
+      ZEN_MODELS_ROOT: ${ZEN_MODELS_ROOT:-}
+      ZEN_CLIENT_PROFILE: ${ZEN_CLIENT_PROFILE:-legacy}
       ZEN_GATE_TOOLS: ${ZEN_GATE_TOOLS:-bash,read}
       ZEN_USER_AGENT: ${ZEN_USER_AGENT:-}
       # Kilo Gateway 免费层端点与其白名单（无凭证；白名单仅防误配）

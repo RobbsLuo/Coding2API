@@ -538,6 +538,8 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             client=ZenClient(host=_zen_endpoint(config),
                              version=config.zen_opencode_version,
                              api_root=config.zen_api_root,
+                             models_root=config.zen_models_root,
+                             profile=config.zen_client_profile,
                              gate_tools=tuple(
                                  t.strip() for t in config.zen_gate_tools.split(",")
                                  if t.strip()) or ("bash", "read"),

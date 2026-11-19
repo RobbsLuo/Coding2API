@@ -67,6 +67,12 @@ class Settings(BaseSettings):
     #   四件套，本仓仍以两件套通过 —— 冲突未复验，默认不变；
     # - UA 模板：`{version}` 占位符代入版本号；空 = `opencode/<version>`。
     zen_api_root: str = "/zen/v1"
+    # 模型清单根（空 = 跟随 zen_api_root）。官方 2.x 端点拆分后对话在
+    # `/inference/openai/v1`、清单在 `/inference/v1`，需要分别配置。
+    zen_models_root: str = ""
+    # 客户端指纹档位：`legacy`（默认，1.x 形态）或 `v2`（2.x 形态：
+    # 4 个 session 副本、client/project 头、b3/traceparent、`<env>` 块）。
+    zen_client_profile: str = "legacy"
     zen_gate_tools: str = "bash,read"
     zen_user_agent: str = ""
     # Kilo Gateway 免费层：标准 OpenAI 协议、无门禁、无凭证，端点白名单同样

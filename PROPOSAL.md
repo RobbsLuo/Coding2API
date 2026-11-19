@@ -49,8 +49,8 @@
 
 ### 2.5 OpenCode Zen（`zen`，虚拟凭证）
 
-- 端点 `https://opencode.ai`，`/zen/v1/chat/completions` 与 `/zen/v1/models`。标准 OpenAI SSE，**不逆向**。
-- 渠道私有：**免费层门禁伪装**——UA `opencode/<version>` ≥1.18.0（否则 426；无版本号 403）、`x-opencode-session`、body `stream:true`、`tools` 必须同时含 `bash` 与 `read`。只在缺失时补骨架工具；注入名改写为客户端声明的同义工具并复制 schema，无同义工具才丢弃并记 WARNING。
+- 端点 `https://opencode.ai`，`/zen/v1/chat/completions` 与 `/zen/v1/models`。标准 OpenAI SSE，**不逆向**。模型清单根 `ZEN_MODELS_ROOT` 与对话根解耦（官方 2.x 拆成 `/inference/openai/v1` 对话 + `/inference/v1` 清单）。
+- 渠道私有：**免费层门禁伪装**——UA `opencode/<version>` ≥1.18.0（否则 426；无版本号 403）、`x-opencode-session`、body `stream:true`、`tools` 必须同时含 `bash` 与 `read`。只在缺失时补骨架工具；注入名改写为客户端声明的同义工具并复制 schema，无同义工具才丢弃并记 WARNING。门禁形态是移动靶：`ZEN_CLIENT_PROFILE=legacy|v2` 切换 1.x / 2.x 指纹（v2 增 4 个 session 副本、client/project、b3/traceparent、`<env>` system 块），默认 `legacy`，待上游额度恢复后 A/B 复验再灰度。
 - **免费清单完全动态**：免鉴权 `/zen/v1/models` 返回全部模型且不带免费标记，唯一权威信号是匿名可用性（付费恒 401）；按 `-free` 后缀收窄 + 并发探活只留 2xx，缓存 30 分钟；免费模型标 **x0 倍率**。列表拉取**连续失败按 2^(n-1)×TTL 退避**（封顶 2h，成功清零），日志首次 WARNING 其后 INFO。
 - **虚拟凭证行**：无额度接口，`probe_quota` 恒 `probe_failed=True` → health「未知」而非耗尽；删除后重启复活 → 永久停用用「暂停」。401 归 `INVALID`；**403 FreeTierError 在客户端内退避重试一次**，否则单虚拟凭证下 REQUEST 类错误会耗尽轮换预算直接 503。
 

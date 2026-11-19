@@ -11,6 +11,12 @@
 * body `tools` 必须**同时**含 name 为 `bash` 与 `read` 的工具
   （只校验 name，参数留空壳即可）。
 
+2026-11 官方客户端进入 2.x：第三方抓包要求再加 4 个 session 副本头、
+`x-opencode-client/project`、`b3`/`traceparent`，并在 system 消息里带
+`<env>Working directory: …</env>`。故增加 `ZEN_CLIENT_PROFILE=v2` 档位；
+默认保持 1.x（`legacy`），因为 2026-11-19 匿名额度耗尽（429 + Retry-After
+≈19h），两档都无法端到端复验。
+
 门禁要求 tools 含 bash/read，但这两个可能是**我们伪造的**、客户端从没声明过
 （如 OpenCode 的执行工具叫 `shell`）。模型偏好调 `bash` 这个名字（实测
 mimo-v2.6 高频），若直接吞掉调用，客户端收到「空正文 + stop」会提前结束
@@ -68,6 +74,19 @@ REQUIRED_TOOLS: tuple[str, ...] = ("bash", "read")
 # `GET /models`），第三方实测称前者已死、后者可用 —— 结论冲突且免费额度耗尽
 # 无法端到端复验，故默认保持现状，另经 `ZEN_API_ROOT` 可切，随时回退。
 DEFAULT_API_ROOT = "/zen/v1"
+# 客户端指纹档位：
+# - `legacy`：1.x 形态（UA `opencode/<version>` + 时间编码 session）；
+# - `v2`：2.x 形态（额外 4 个 session 头、client/project 头、b3/traceparent，
+#   并在 system 消息注入 `<env>` 块）。
+# 2026-11-19 上游免费额度耗尽（429 + Retry-After ~19h），两档都无法端到端
+# 复验，故默认保持 `legacy`，通过 `ZEN_CLIENT_PROFILE=v2` 灰度切换。
+CLIENT_PROFILES: tuple[str, ...] = ("legacy", "v2")
+DEFAULT_CLIENT_PROFILE = "legacy"
+# v2 的 UA 默认形态（官方 2.2.2 抓包）；仍可被 ZEN_USER_AGENT 覆盖。
+V2_DEFAULT_UA = "opencode/latest/{version}/cli"
+# 上游 prompt 检查读的字面 `<env>` 块：一行、含 `<env>` / `</env>` 与
+# `Working directory:`。值本身不校验（第三方实测 `/`、`/tmp` 均可）。
+ENV_BLOCK = "<env>Working directory: /</env>"
 # 注入名 → 客户端常见同义工具名（按优先级）。模型调了我们注入的伪工具时，
 # 改写成客户端真实声明的同义工具再透传，避免「调用被吞 → 空 stop → 客户端
 # 提前结束回合」。键是门禁名，值只收录各 agent 客户端的真实工具名。
@@ -172,28 +191,64 @@ def new_session_id(*, now_ms: int | None = None) -> str:
     return f"ses_{_session_time_prefix(millis)}{suffix}"
 
 
+def _trace_headers(trace_id: str) -> dict[str, str]:
+    """v2 的 b3 / traceparent：同一条 trace，每个请求新 span。
+
+    `b3` = `{trace}-{span}-1-{parent}`（sampled），`traceparent` 是同一条
+    trace/span 的 W3C 拼写。parent 独立随机（上游只校验形态）。
+    """
+    span = secrets.token_hex(8)
+    parent = secrets.token_hex(8)
+    return {
+        "b3": f"{trace_id}-{span}-1-{parent}",
+        "traceparent": f"00-{trace_id}-{span}-01",
+    }
+
+
 def gate_headers(*, version: str = MIN_OPENCODE_VERSION,
                  session_id: str | None = None,
-                 user_agent: str = "") -> dict[str, str]:
+                 user_agent: str = "",
+                 profile: str = DEFAULT_CLIENT_PROFILE,
+                 trace_id: str | None = None) -> dict[str, str]:
     """免费层门禁头。每次请求新生成 session（门禁只校验格式，不校验归属）。
 
-    `user_agent` 为空 → `opencode/<version>`（实测通过的形态）；非空时按模板
-    渲染，模板里出现 `{version}` 就代入版本号（如
-    `opencode/latest/{version}/cli`），没有占位符则原样使用。UA 形态同样是
-    移动靶，交给 `ZEN_USER_AGENT` 配置而不是硬编码。
+    `user_agent` 为空 → 按档位取默认形态（`legacy`: `opencode/<version>`；
+    `v2`: `opencode/latest/<version>/cli`）。非空时按模板渲染，模板里出现
+    `{version}` 就代入版本号（如 `opencode/latest/{version}/cli`），没有占位符
+    则原样使用。UA 形态同样是移动靶，交给 `ZEN_USER_AGENT` 配置而不是硬编码。
+
+    `profile="v2"` 额外复刻官方 2.x 客户端的头集合（4 个 session 副本、
+    `x-opencode-client/project`、b3/traceparent）。未知名档位直接报错，避免
+    配置笔误静默退回 legacy。
     """
-    agent = user_agent or "opencode/{version}"
+    if profile not in CLIENT_PROFILES:
+        raise ValueError(f"未知 ZEN 客户端档位 {profile!r}，可选 {CLIENT_PROFILES}")
+    agent = user_agent or ("opencode/{version}" if profile == "legacy"
+                           else V2_DEFAULT_UA)
     if "{version}" in agent:
         agent = agent.replace("{version}", version)
-    return {
+    session = session_id or new_session_id()
+    headers = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
         "User-Agent": agent,
-        "x-opencode-session": session_id or new_session_id(),
+        "x-opencode-session": session,
         # 匿名也通；带公开占位符比完全省略更稳（避免网关把无 Authorization
         # 的请求路由到别的鉴权分支）
         "Authorization": "Bearer public",
     }
+    if profile == "v2":
+        headers.update({
+            "x-opencode-client": "cli",
+            "x-opencode-project": "global",
+            # 官方 2.x 把同一个 session 重复在四个头里；`x-opencode-session-id`
+            # 是实测不可省的那一份（10-14 第三方复验），其余按原样带上。
+            "x-opencode-session-id": session,
+            "x-session-affinity": session,
+            "x-session-id": session,
+            **_trace_headers(trace_id or secrets.token_hex(16)),
+        })
+    return headers
 
 
 # 展示名从上游 id 派生（上游 `/zen/v1/models` 只有 `id`/`owned_by`，后者恒为
@@ -298,20 +353,95 @@ def gate_aliases(tools: list[Any] | None,
     return aliases
 
 
+def has_env_block(content: str) -> bool:
+    """`content` 是否已含门禁读取的 `<env>` 块。
+
+    只认第一对 `<env>...</env>`，且对内必须出现 `Working directory:`；
+    空对（`<env></env>`）在前、有效对在后是上游明确拒绝的形态。
+    """
+    start = content.find("<env>")
+    if start < 0:
+        return False
+    rest = content[start + len("<env>"):]
+    end = rest.find("</env>")
+    if end < 0:
+        return False
+    return "Working directory:" in rest[:end]
+
+
+def _system_text(message: dict[str, Any]) -> str | None:
+    """system 消息的字符串正文；数组/其它形态返回 None（与官方 2.x 判定一致）。"""
+    content = message.get("content")
+    return content if isinstance(content, str) else None
+
+
+def ensure_env_block(body: dict[str, Any]) -> bool:
+    """确保第一条 system 消息带 `<env>` 块；返回本次是否发生注入。
+
+    复刻官方 2.x 客户端的形态（也是上游 prompt 检查读取的位置）：
+    * 已有 system 消息含有效块 → 不动；
+    * 没有 system 消息 → 最前面插入一条；
+    * 有 system 消息 → 追加到正文末尾；正文已出现 `<env`（但没有有效块，
+      如空对）→ 把块放到**最前面**，避免空对成为第一匹配；
+    * 数组正文 → 作为额外 text part 追加/前置，不替换客户端内容。
+    """
+    messages = body.get("messages")
+    if not isinstance(messages, list):
+        return False
+    system_indexes = [
+        index for index, message in enumerate(messages)
+        if isinstance(message, dict) and message.get("role") == "system"
+    ]
+    for index in system_indexes:
+        text = _system_text(messages[index])
+        if text is not None and has_env_block(text):
+            return False
+    if not system_indexes:
+        messages.insert(0, {"role": "system", "content": ENV_BLOCK})
+        return True
+    message = messages[system_indexes[0]]
+    content = message.get("content")
+    if isinstance(content, str):
+        if "<env" in content:
+            message["content"] = f"{ENV_BLOCK}\n\n{content}"
+        elif not content:
+            message["content"] = ENV_BLOCK
+        else:
+            message["content"] = f"{content}\n\n{ENV_BLOCK}"
+    elif isinstance(content, list):
+        holds_tag = any(
+            isinstance(part, dict) and isinstance(part.get("text"), str)
+            and "<env>" in part["text"]
+            for part in content
+        )
+        part = {"type": "text", "text": ENV_BLOCK}
+        if holds_tag:
+            content.insert(0, part)
+        else:
+            content.append(part)
+    else:
+        message["content"] = ENV_BLOCK
+    return True
+
+
 def prepare_body(payload: dict[str, Any], model: str,
                  required: tuple[str, ...] = REQUIRED_TOOLS,
+                 profile: str = DEFAULT_CLIENT_PROFILE,
                  ) -> tuple[dict[str, Any], frozenset[str]]:
     """上游请求体：深拷 messages、强制 stream、注入门禁工具。
 
     返回 `(body, injected_names)`。deepcopy 的必要性与 TRAE 相同：下游可能
     原地改写 messages，不能穿透回引擎持有的 `request.raw`（会话粘性指纹
     与续写都读它）。`stream` 无条件置 true——上游非流式会被门禁 403。
+    `profile="v2"` 时再注入官方 2.x 的 `<env>` 块。
     """
     body = dict(payload)
     body["messages"] = copy.deepcopy(payload.get("messages"))
     base.normalize_developer_role(body["messages"])
     body["model"] = model
     body["stream"] = True
+    if profile == "v2":
+        ensure_env_block(body)
     injected = ensure_gate_tools(body, required)
     return body, injected
 
@@ -374,6 +504,8 @@ class ZenClient(LazyClients):
         host: str = ZEN_HOST,
         version: str = MIN_OPENCODE_VERSION,
         api_root: str = DEFAULT_API_ROOT,
+        models_root: str = "",
+        profile: str = DEFAULT_CLIENT_PROFILE,
         gate_tools: tuple[str, ...] = REQUIRED_TOOLS,
         user_agent: str = "",
         free_suffix: str = FREE_MODEL_SUFFIX,
@@ -384,11 +516,21 @@ class ZenClient(LazyClients):
     ) -> None:
         self.host = host.rstrip("/")
         self.version = version
+        if profile not in CLIENT_PROFILES:
+            raise ValueError(
+                f"未知 ZEN 客户端档位 {profile!r}，可选 {CLIENT_PROFILES}")
+        self.profile = profile
         self.api_root = _normalize_api_root(api_root)
+        # 模型清单根与对话根解耦：`/inference/openai/v1` 只服务对话，
+        # 清单在 `/inference/v1`（官方 2.x 端点拆分）。空 = 跟随 api_root。
+        self.models_root = (_normalize_api_root(models_root)
+                            if models_root.strip() else self.api_root)
         self.gate_tools = tuple(gate_tools) or REQUIRED_TOOLS
         self.user_agent = user_agent
         self.free_suffix = free_suffix
         self.models_cache_ttl = models_cache_ttl
+        # v2 的 trace 每进程一条、span 每请求一条（官方抓包行为）
+        self._trace_id = secrets.token_hex(16)
         # 上次判活的 (monotonic 时间, 模型表)；TTL 内直接复用，不再重探。
         self._models_cache: tuple[float, list[Model]] | None = None
         self._stream_client = stream_client
@@ -399,14 +541,16 @@ class ZenClient(LazyClients):
         return f"{self.host}{self.api_root}/chat/completions"
 
     def _models_url(self) -> str:
-        return f"{self.host}{self.api_root}/models"
+        return f"{self.host}{self.models_root}/models"
 
     def _gate_headers(self) -> dict[str, str]:
-        return gate_headers(version=self.version, user_agent=self.user_agent)
+        return gate_headers(version=self.version, user_agent=self.user_agent,
+                            profile=self.profile, trace_id=self._trace_id)
 
     async def stream_chat(self, payload: dict[str, Any], model: str) -> AsyncIterator[Event]:
         """POST chat/completions 并逐事件产出中立 Event。非 2xx 抛 UpstreamHTTPError。"""
-        body, injected = prepare_body(payload, model, self.gate_tools)
+        body, injected = prepare_body(payload, model, self.gate_tools,
+                                      profile=self.profile)
         tool_filter = _InjectedToolFilter(
             injected, gate_aliases(body.get("tools"), injected))
         # 有实际（保留或改写）tool_call 时才允许 finish_reason=tool_calls；
@@ -532,7 +676,7 @@ class ZenClient(LazyClients):
         """
         body, _ = prepare_body(
             {"messages": [{"role": "user", "content": PROBE_PROMPT}]}, model_id,
-            self.gate_tools)
+            self.gate_tools, profile=self.profile)
         try:
             async with asyncio.timeout(PROBE_TIMEOUT):
                 async with self._short.stream(

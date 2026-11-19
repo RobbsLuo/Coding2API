@@ -207,7 +207,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 [opencode.ai/zen](https://opencode.ai) 免费模型，免登录。上游清单混付费、无免费标记 → `-free` 后缀收窄 → 逐个探活 → **只剔除确定不可用**（付费 401 / 下线 400 / 区域 403）者进 `/v1/models`；`429`（匿名免费额度耗尽）/ 5xx / 超时**保留**（限流或抖动不该清空整条渠道；判活缓存 30 分钟；免费模型 **x0**）。
 
-**免费层门禁**：上游要伪装官方客户端（UA 形态、会话头、`stream:true`、tools 含门禁工具）→ 自动满足。注入空壳工具，真调用被过滤。门禁是**移动靶**，三处都做成配置（改完重启即换、随时回退）：UA 形态 `ZEN_USER_AGENT`（模板，`{version}` 代入 `ZEN_OPENCODE_VERSION`）、API 根 `ZEN_API_ROOT`、工具集合 `ZEN_GATE_TOOLS`。默认值 = 本仓实测通过的形态（`opencode/<version>`、`/zen/v1`、`bash,read`）。端点 `ZEN_API_ENDPOINT`（须在 `ZEN_ALLOWED_ENDPOINTS` 内）。付费模型强制 `模型@zen` 也只报不可用。
+**免费层门禁**：上游要伪装官方客户端（UA 形态、会话头、`stream:true`、tools 含门禁工具）→ 自动满足。注入空壳工具，真调用被过滤。门禁是**移动靶**，全部做成配置（改完重启即换、随时回退）：UA 形态 `ZEN_USER_AGENT`（模板，`{version}` 代入 `ZEN_OPENCODE_VERSION`）、API 根 `ZEN_API_ROOT`、模型清单根 `ZEN_MODELS_ROOT`（空 = 跟随 API 根）、工具集合 `ZEN_GATE_TOOLS`、客户端指纹档位 `ZEN_CLIENT_PROFILE`（`legacy` 默认 / `v2`）。默认值 = 本仓实测通过的形态（`opencode/<version>`、`/zen/v1`、`bash,read`、legacy）。`v2` 额外复刻官方 2.x 头集合（4 个 session 副本、`x-opencode-client/project`、`b3`/`traceparent`）并在 system 消息注入 `<env>Working directory: …</env>` 块；官方 2.x 端点拆分时配 `ZEN_API_ROOT=/inference/openai/v1` + `ZEN_MODELS_ROOT=/inference/v1`。端点 `ZEN_API_ENDPOINT`（须在 `ZEN_ALLOWED_ENDPOINTS` 内）。付费模型强制 `模型@zen` 也只报不可用。
 
 ### Kilo（`kilo`）
 
@@ -850,8 +850,10 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `ZEN_ALLOWED_ENDPOINTS` | `https://opencode.ai` | Zen 白名单 |
 | `ZEN_OPENCODE_VERSION` | `1.18.0` | 门禁伪装 UA 版本（低于阈值 → 426） |
 | `ZEN_API_ROOT` | `/zen/v1` | 上游 API 根；可切 `/inference/v1`（两路径当前都返回 200） |
-| `ZEN_GATE_TOOLS` | `bash,read` | 门禁 tools 集合；上游收紧时可切 `bash,glob,grep,read` |
-| `ZEN_USER_AGENT` | 空 | UA 模板（`{version}` 代入版本号）；空 = `opencode/<version>` |
+| `ZEN_MODELS_ROOT` | 空 | 模型清单根；空 = 跟随 `ZEN_API_ROOT`。2.x 端点拆分时配 `/inference/v1`（与对话根分开） |
+| `ZEN_CLIENT_PROFILE` | `legacy` | 客户端指纹档位：`legacy`（1.x）/ `v2`（2.x：4 个 session 副本、client/project、b3/traceparent、`<env>` 块） |
+| `ZEN_GATE_TOOLS` | `bash,read` | 门禁 tools 集合；上游收紧时可切 `bash,glob,grep,read`（v2 实测只需 `read`） |
+| `ZEN_USER_AGENT` | 空 | UA 模板（`{version}` 代入版本号）；空 = legacy `opencode/<version>`、v2 `opencode/latest/<version>/cli` |
 | `KILO_API_ENDPOINT` | `https://api.kilo.ai/api/gateway` | Kilo 上游地址 |
 | `KILO_ALLOWED_ENDPOINTS` | `https://api.kilo.ai/api/gateway` | Kilo 白名单 |
 | `QODER_API_ENDPOINT` | `https://openapi.qoder.com.cn` | Qoder openapi（额度 / 登录）；国际站 `https://openapi.qoder.sh` |
