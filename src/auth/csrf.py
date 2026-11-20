@@ -21,9 +21,6 @@ from .rbac import Principal  # noqa: F401 - 依赖签名类型引用
 
 SESSION_COOKIE = "coding2api_session"
 
-# 前端统一携带的自定义头（web/src/api/client.ts）
-X_REQUESTED_WITH = "x-requested-with"
-
 
 class CsrfRejectedError(Exception):
     """CSRF 校验失败（跨站写请求）。"""
@@ -85,9 +82,13 @@ def check_origin(request: Request) -> None:
 
 
 def check_csrf(request: Request) -> None:
-    """管理台写操作（session 认证）调用；无会话 cookie 的请求直接跳过。"""
+    """管理台写操作（session 认证）调用；无会话 cookie 的请求直接跳过。
+
+    **不再豁免 `X-Requested-With`**：该头是「浏览器无法跨源设置」的推论，
+    一旦将来引入允许非同源自定义头的 CORS 配置，这条豁免立刻变成 CSRF
+    绕过面。前端所有请求都与本服务同源（Vite 代理 / 同域反代），浏览器
+    必然带同源 Origin/Referer，`check_origin` 的口径已经够用。
+    """
     if SESSION_COOKIE not in request.cookies:
-        return
-    if request.headers.get(X_REQUESTED_WITH, "").lower() == "xmlhttprequest":
         return
     check_origin(request)

@@ -8,7 +8,6 @@ from __future__ import annotations
 import pytest
 from fastapi.testclient import TestClient
 
-from src.auth.csrf import X_REQUESTED_WITH
 from src.auth.session import create_session_token
 from src.auth.throttle import LoginThrottle, ThrottleLimits
 from src.config import Settings
@@ -125,16 +124,32 @@ def test_csrf_allows_same_origin(admin_client):
     assert response.status_code == 200
 
 
-def test_csrf_allows_custom_header(admin_client):
+def test_csrf_custom_header_alone_does_not_bypass(admin_client):
+    """`X-Requested-With` 不再豁免同源校验。
+
+    该头此前是「浏览器无法跨源设置」的推论，一旦将来引入允许非同源自定义
+    头的 CORS，它立刻变成 CSRF 绕过面。现在只有 Origin/Referer 同源才算数，
+    跨源请求带上这个头也必须被拒。
+    """
     response = admin_client.post(
         "/api/credentials",
         json={
             "provider": "trae",
             "credential": {"accessToken": "t", "uid": "u", "refreshToken": "r"},
         },
-        headers={X_REQUESTED_WITH: "XMLHttpRequest"},
+        headers={"X-Requested-With": "XMLHttpRequest"},
     )
-    assert response.status_code == 200
+    assert response.status_code == 200          # 无 Origin/Referer：非浏览器客户端
+
+    cross = admin_client.post(
+        "/api/credentials",
+        json={
+            "provider": "trae",
+            "credential": {"accessToken": "t", "uid": "u", "refreshToken": "r"},
+        },
+        headers={"X-Requested-With": "XMLHttpRequest", "Origin": "https://evil.example"},
+    )
+    assert cross.status_code == 403
 
 
 def test_csrf_allows_headerless_non_browser(admin_client):
