@@ -34,7 +34,7 @@ from ..auth.rbac import (
     SelfTargetError,
     require_admin,
 )
-from ..auth.users import create_password_hash
+from ..auth.users import FORBIDDEN_USERNAME_CHARS, create_password_hash
 from ..compat.openai.request import InvalidRequest
 from ..key_quota import KeyQuota, parse_key_quota, quota_text
 from .admin_auth import ACTIVATION_TTL_SECONDS
@@ -42,6 +42,10 @@ from .deps import Services, csrf_protected, principal_from_request, request_ip
 
 # 激活令牌明文长度（URL 安全）。32 字节 ≈ 256 bit，足够。
 ACTIVATION_TOKEN_BYTES = 32
+
+# 用户名长度上限：用户名会进日志、审计 detail 与列表响应，无界等于给
+# 一次写操作塞进任意长度的文本。
+MAX_USERNAME_LENGTH = 64
 
 
 def digest_activation_token(token: str) -> str:
@@ -123,6 +127,15 @@ def create_router(services: Services) -> APIRouter:
         role = str(payload.get("role") or "viewer")
         if not username:
             raise InvalidRequest("username is required")
+        # 与 CLI 脚本（`scripts/create_user.py`）同一套口径：冒号会截断
+        # `用户名:hash` 字段、换行会在日志/审计里注入额外行。管理台是另一条
+        # 建号入口，缺了这道校验等于从 Web 侧绕过它。
+        for char in FORBIDDEN_USERNAME_CHARS:
+            if char in username:
+                raise InvalidRequest(f"username must not contain {char!r}")
+        if len(username) > MAX_USERNAME_LENGTH:
+            raise InvalidRequest(
+                f"username too long (max {MAX_USERNAME_LENGTH} characters)")
         if role not in ROLES:
             raise InvalidRequest(f"unknown role {role!r}")
         if services.user_repo.get(username) is not None:

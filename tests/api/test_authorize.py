@@ -313,6 +313,24 @@ def test_authorize_rejects_revoked_session(tmp_path):
     assert response.json()["error"]["code"] == "invalid_request"
 
 
+def test_authorize_rejects_when_password_change_required(tmp_path):
+    """首登强制改密期间不得建凭证（deps 的白名单同样没放行这类写路径）。"""
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings)
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "root", "password": "rootpw"})
+        started = client.post("/api/auth/upstream/start",
+                              json={"provider": "trae"}).json()
+        # 没有独立的 setter：直接改库（`must_change_password` 不参与 epoch）
+        app.state.user_repo._db.connect().execute(
+            "UPDATE users SET must_change_password = 1 WHERE username = 'root'")
+        app.state.user_repo._db.connect().commit()
+        response = client.get(f"/authorize?refreshToken=RT&state={started['state']}")
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "password change required"
+
+
 def test_dump_request_bodies_writes_file(tmp_path):
     """诊断开关：dump_request_bodies=True 时 /v1 请求体落盘（main 291-293）。"""
     import json as _json

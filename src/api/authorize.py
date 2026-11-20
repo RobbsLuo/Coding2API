@@ -141,6 +141,12 @@ def create_router(services: Services) -> APIRouter:
             candidate, epoch, issued_at = verified
             if services.users.session_valid(candidate, epoch, issued_at):
                 username = candidate
+        # 首登强制改密闸门：`deps.PASSWORD_CHANGE_ALLOWLIST` 刻意没放行
+        # 凭证登录/建号这类写路径，这里是同类的「把凭证塞进池子」，不能
+        # 只靠会话校验就放过去——否则未改密的账号可以从这个入口继续建凭证。
+        if username and services.users.must_change_password(username):
+            return _failure(request, "password change required",
+                            "请先在管理台修改初始密码，再发起上游登录。")
         entry = pending.get(username) if username else None
         if entry is None:
             # Cookie 不在回调这条入口上（LAN 发起 / 隧道回调）：按 trace 反查。

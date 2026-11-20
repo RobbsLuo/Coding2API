@@ -91,6 +91,11 @@ def test_create_user_returns_token_once_and_no_hash(tmp_path, monkeypatch):
 @pytest.mark.parametrize("payload,message", [
     ({"role": "viewer"}, "username is required"),
     ({"username": "x", "role": "superuser"}, "unknown role"),
+    # 与 scripts/create_user.py 同源：冒号截断 `用户名:hash`、换行注入日志行
+    ({"username": "a:b", "role": ROLE_VIEWER}, "must not contain"),
+    ({"username": "a\nb", "role": ROLE_VIEWER}, "must not contain"),
+    ({"username": "a\rb", "role": ROLE_VIEWER}, "must not contain"),
+    ({"username": "u" * 65, "role": ROLE_VIEWER}, "too long"),
 ])
 def test_create_user_validates(tmp_path, monkeypatch, payload, message):
     app = _app(tmp_path, monkeypatch, users=[("root", "rootpw", ROLE_ADMIN, True)])
