@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from src.config import Settings
+from src.db.conn import Database
 from src.db.log_repo import LogRepository
 from src.webapp.log_buffer import LogBuffer
 from tests.helpers.constants import SECRET
@@ -214,3 +217,59 @@ def test_retention_task_purges_logs():
 
     # 未装配时不上报该键之外的行为：值为 0 且不崩
     assert RetentionTask(Collector()).run_once(now=1)["purged_logs"] == 0
+
+
+def test_append_inside_outer_transaction_does_not_commit_it(tmp_path):
+    """事务内写日志不得提前提交外层事务。
+
+    旧实现走裸 `connect()` + `commit()`，绕过 `tx_depth` 记账：同一线程在
+    `with db.transaction()` 里产生一条日志，就把外层未提交写入提前提交了，
+    后来的异常只能回滚后半段，留下半完成状态。
+    """
+    db = Database(tmp_path / "t.sqlite3", strict_permissions=False)
+    try:
+        conn = db.connect()
+        conn.executescript(
+            "CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT);"
+            "CREATE TABLE log_events(seq INTEGER PRIMARY KEY, ts INTEGER, level TEXT,"
+            " logger TEXT, message TEXT, request_id TEXT);")
+        logs = LogRepository(db, capacity=lambda: 100)
+        conn.execute("INSERT INTO t(id, v) VALUES (1, 'first')")
+        conn.commit()
+
+        with pytest.raises(RuntimeError), db.transaction() as tx:
+            tx.execute("INSERT INTO t(id, v) VALUES (2, 'second')")
+            logs.append(ts=1, level="WARNING", logger_name="x", message="inner")
+            raise RuntimeError("boom")
+
+        remaining = [row["id"] for row in
+                     db.connect().execute("SELECT id FROM t ORDER BY id")]
+        assert remaining == [1]                       # 外层回滚完整
+        assert db.connect().execute(
+            "SELECT COUNT(*) FROM log_events").fetchone()[0] == 0
+    finally:
+        db.close()
+
+
+def test_purge_inside_outer_transaction_does_not_commit_it(tmp_path):
+    """`purge` 同样不得提前提交外层事务（与 append 同一根因）。"""
+    db = Database(tmp_path / "t.sqlite3", strict_permissions=False)
+    try:
+        conn = db.connect()
+        conn.executescript(
+            "CREATE TABLE t(id INTEGER PRIMARY KEY);"
+            "CREATE TABLE log_events(seq INTEGER PRIMARY KEY, ts INTEGER, level TEXT,"
+            " logger TEXT, message TEXT, request_id TEXT);")
+        logs = LogRepository(db, capacity=lambda: 100)
+        conn.execute("INSERT INTO t(id) VALUES (1)")
+        conn.commit()
+
+        with pytest.raises(RuntimeError), db.transaction() as tx:
+            tx.execute("INSERT INTO t(id) VALUES (2)")
+            logs.purge(keep_days=0, now=10 ** 9)
+            raise RuntimeError("boom")
+
+        assert [row["id"] for row in
+                db.connect().execute("SELECT id FROM t ORDER BY id")] == [1]
+    finally:
+        db.close()

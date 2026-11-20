@@ -322,6 +322,85 @@ def test_stage_restore_rejects_empty_and_corrupt(tmp_path):
     assert not pending_restore_path(db_path).exists()
 
 
+def test_stage_restore_uses_unique_temp_names(tmp_path):
+    """临时名带随机后缀：两个管理员同时上传时不会互相搬走半截文件。"""
+    source = _app_db(tmp_path)
+    db_path = tmp_path / "main.sqlite3"
+    staging_dir = pending_restore_path(db_path).parent
+    seen: list[str] = []
+
+    from src.db import backup as backup_module
+
+    real_verify = backup_module.verify_app_database
+
+    def spy(path):
+        real_verify(path)
+        seen.append(Path(path).name)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(backup_module, "verify_app_database", spy)
+        stage_restore(db_path, source.read_bytes())
+        stage_restore(db_path, source.read_bytes())
+
+    assert len(seen) == 2 and seen[0] != seen[1]
+    assert all(name.startswith("pending.sqlite3.") and name.endswith(".uploading")
+               for name in seen)
+    # 中间文件不残留（finally 清理）
+    assert list(staging_dir.glob("*.uploading")) == []
+
+
+def test_prune_rejected_keeps_latest_n(tmp_path):
+    """被拒留档只保留最近 N 份：否则反复上传坏库会累积整库大小的敏感副本。"""
+    from src.db.backup import REJECTED_KEEP, _prune_rejected
+
+    directory = tmp_path / "restore"
+    directory.mkdir()
+    for index in range(REJECTED_KEEP + 2):
+        path = directory / f"pending.sqlite3.rejected-2026010{index}-000000"
+        path.write_bytes(b"x")
+        os.utime(path, (index, index))          # mtime 递增，最后一份最新
+
+    assert _prune_rejected(directory) == 2
+    remaining = sorted(item.name for item in directory.iterdir())
+    assert len(remaining) == REJECTED_KEEP
+    assert remaining[-1].endswith("20260104-000000")
+
+
+def test_prune_rejected_keep_zero_is_noop(tmp_path):
+    from src.db.backup import _prune_rejected
+
+    directory = tmp_path / "restore"
+    directory.mkdir()
+    (directory / "pending.sqlite3.rejected-x").write_bytes(b"x")
+    assert _prune_rejected(directory, keep=0) == 0
+    assert len(list(directory.iterdir())) == 1
+
+
+def test_apply_pending_restore_prunes_rejected_archives(tmp_path):
+    """连续被拒的坏库不会无限堆积（只留 REJECTED_KEEP 份）。"""
+    from src.db.backup import REJECTED_KEEP
+
+    db_path = _app_db(tmp_path, "main.sqlite3")
+    pending = pending_restore_path(db_path)
+    pending.parent.mkdir(parents=True)
+    rejected_dir = pending.parent
+
+    for index in range(REJECTED_KEEP):
+        stale = rejected_dir / f"pending.sqlite3.rejected-old{index}"
+        stale.write_bytes(b"old")
+        os.utime(stale, (index, index))
+
+    pending.write_bytes(b"corrupt")
+    os.utime(pending, (100, 100))
+    assert apply_pending_restore(db_path, now=7) is None
+
+    archives = list(rejected_dir.glob("pending.sqlite3.rejected-*"))
+    assert len(archives) == REJECTED_KEEP
+    # 本次留档在，mtime 最老的旧档被删掉
+    assert (rejected_dir / "pending.sqlite3.rejected-19700101-000007").is_file()
+    assert not (rejected_dir / "pending.sqlite3.rejected-old0").exists()
+
+
 def test_pending_restore_info_falls_back_without_or_with_broken_meta(tmp_path):
     db_path = tmp_path / "main.sqlite3"
     assert pending_restore_info(db_path) is None

@@ -64,3 +64,32 @@ def test_database_skips_relative_path(tmp_path, monkeypatch):
     db = Database("plain.sqlite3")
     db.close()
     assert called == []
+
+def test_database_tightens_db_file_and_sidecars(tmp_path):
+    """库文件本身也要 0600：父目录 0700 只挡遍历，不挡直接读文件。
+
+    sqlite3 建库按 umask（实测 0644），WAL/SHM 在首个写事务里才出现，
+    所以必须在建连后收紧一次。
+    """
+    db = Database(tmp_path / "data" / "coding2api.sqlite3", strict_permissions=False)
+    try:
+        conn = db.connect()
+        conn.execute("CREATE TABLE t(a INTEGER)")
+        conn.commit()
+        for name in ("coding2api.sqlite3", "coding2api.sqlite3-wal",
+                     "coding2api.sqlite3-shm"):
+            target = tmp_path / "data" / name
+            if target.exists():
+                assert stat.S_IMODE(target.stat().st_mode) == 0o600, name
+    finally:
+        db.close()
+
+
+def test_database_secure_files_skips_missing_paths(tmp_path):
+    """WAL/SHM 尚未创建时 `_secure_files` 不报错（首次建连的常态）。"""
+    db = Database(tmp_path / "coding2api.sqlite3", strict_permissions=False)
+    try:
+        db._secure_files()          # 三件套都还不存在
+        db._secure_files()          # 幂等
+    finally:
+        db.close()

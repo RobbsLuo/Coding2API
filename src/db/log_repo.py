@@ -57,14 +57,16 @@ class LogRepository:
         if not self.enabled:
             return
         try:
-            with self._lock:
-                conn = self._db.connect()
+            with self._lock, self._db.transaction() as conn:
+                # 必须走 `Database.transaction()` 而不是裸 connect + commit：后者
+                # 会绕过 `tx_depth` 记账，在同一线程已持有外层事务时把它提前提交
+                # （外层随后的异常回滚只剩后半段，留下半完成写入）。嵌套时
+                # `transaction()` 不 BEGIN 也不 COMMIT，交由最外层统一收口。
                 conn.execute(
                     "INSERT INTO log_events (ts, level, logger, message, request_id) "
                     "VALUES (?, ?, ?, ?, ?)",
                     (int(ts), level, logger_name, message, request_id))
                 self._prune(conn)
-                conn.commit()
         except Exception:  # noqa: BLE001 - 日志落库故障不得影响业务
             # 只报一次：日志表写不进去通常意味着磁盘满 / 库锁死，重复告警没有
             # 新信息，反而会淹没真问题。
@@ -125,7 +127,9 @@ class LogRepository:
         import time
 
         cutoff = int(now if now is not None else time.time()) - keep_days * 86400
-        cursor = self._db.connect().execute(
-            "DELETE FROM log_events WHERE ts < ?", (cutoff,))
-        self._db.connect().commit()
+        # 同 `append`：走 `transaction()` 才能与同线程外层事务正确嵌套，
+        # 裸 connect + commit 会把外层未提交写入提前提交。
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "DELETE FROM log_events WHERE ts < ?", (cutoff,))
         return cursor.rowcount

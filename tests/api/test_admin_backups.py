@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from src.auth.session import create_session_token
@@ -149,6 +150,55 @@ def test_restore_upload_rejects_oversized_body(admin_client, monkeypatch):
                            headers={"Content-Type": "application/octet-stream"})
     assert response.status_code == 400
     assert "不能超过" in response.json()["error"]["message"]
+
+
+def test_restore_upload_streams_and_stops_on_overflow(monkeypatch):
+    """分块上传时边读边累加：超限立即中断，剩余 chunk 不再读。"""
+    import asyncio
+
+    from src.api import admin_backups
+    from src.compat.openai.request import InvalidRequest
+
+    consumed: list[bytes] = []
+
+    class FakeRequest:
+        async def stream(self):
+            for chunk in (b"aa", b"bb", b"cc"):
+                consumed.append(chunk)
+                yield chunk
+
+    with pytest.raises(InvalidRequest) as excinfo:
+        asyncio.run(admin_backups._read_upload_body(FakeRequest(), 3))
+    assert "不能超过" in str(excinfo.value)
+    assert consumed == [b"aa", b"bb"]       # 第二段超限即停
+
+
+def test_restore_upload_endpoint_uses_streamed_bytes(admin_client, monkeypatch):
+    """端点改走流式读取：上限判断用的是累计长度，不再 `request.body()` 全量。"""
+    from src.api import admin_backups
+
+    monkeypatch.setattr(admin_backups, "MAX_UPLOAD_BYTES", 4)
+    _app, client = admin_client
+    response = client.post("/api/backups/restore", content=b"abcdef",
+                           headers={"Content-Type": "application/octet-stream"})
+    assert response.status_code == 400
+    assert "不能超过" in response.json()["error"]["message"]
+
+
+def test_restore_upload_accepts_chunked_within_limit(admin_client):
+    """分块读取后仍按原逻辑暂存（内容校验不受影响）。"""
+    app, client = admin_client
+    created = client.post("/api/backups").json()["backup"]["name"]
+    content = client.get(f"/api/backups/{created}").content
+
+    def body():
+        for start in range(0, len(content), 4096):
+            yield content[start:start + 4096]
+
+    response = client.post("/api/backups/restore", content=body(),
+                           headers={"Content-Type": "application/octet-stream"})
+    assert response.status_code == 200
+    assert pending_restore_path(app.state.settings.db_path).is_file()
 
 
 def test_list_skips_non_files_and_symlinks(admin_client, tmp_path):

@@ -42,6 +42,16 @@ logger = logging.getLogger(__name__)
 MAX_UPLOAD_BYTES = 512 * 1024 * 1024
 
 
+async def _read_upload_body(request: Request, limit: int) -> bytes:
+    """流式读上传体：边读边累计，超限立即中断（不把 512MB 全灌进内存）。"""
+    buffer = bytearray()
+    async for chunk in request.stream():
+        buffer.extend(chunk)
+        if len(buffer) > limit:
+            raise InvalidRequest(f"备份文件不能超过 {limit // (1024 * 1024)}MB")
+    return bytes(buffer)
+
+
 def _entries(directory: Path) -> list[dict]:
     """备份目录下的普通 sqlite 文件（含手工放入的），按 mtime 倒序。"""
     if not directory.is_dir():
@@ -123,11 +133,9 @@ def create_router(services: Services) -> APIRouter:
                              principal=Depends(principal_from_request)):
         """上传备份文件 → 校验 → 暂存；响应 `restart_required=true`。"""
         require_admin(principal)
-        # 读完再判体积：Starlette 的 body() 本来就是全量读取，预检 Content-Length
-        # 只多了「客户端可撒谎」的分支；上限由下面的实际长度兜住。
-        body = await request.body()
-        if len(body) > MAX_UPLOAD_BYTES:
-            raise InvalidRequest(f"备份文件不能超过 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB")
+        # 流式累计而不是 `request.body()`：后者会先把最多 512MB 读进内存才判长度。
+        # shortcut: 仍在内存里累计（`stage_restore` 收 bytes），但超限立即中断。
+        body = await _read_upload_body(request, MAX_UPLOAD_BYTES)
         try:
             meta = await asyncio.to_thread(
                 stage_restore, db_path, body, filename=filename)

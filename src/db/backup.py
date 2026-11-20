@@ -24,6 +24,7 @@ import logging
 import os
 import sqlite3
 import time
+import uuid
 from contextlib import closing, suppress
 from datetime import UTC, datetime
 from pathlib import Path
@@ -198,12 +199,32 @@ def restore_database(db_path: str | Path, source: str | Path, *,
 PENDING_DIRNAME = "restore"
 PENDING_NAME = "pending.sqlite3"
 PENDING_META = "pending.json"
+# 被拒待恢复文件的留档前缀与保留份数：坏上传会反复累积整库大小的敏感副本。
+REJECTED_PREFIX = f"{PENDING_NAME}.rejected-"
+REJECTED_KEEP = 3
 # 恢复要求的最小表集合：一份「随便什么 sqlite 文件」不能当备份恢复
 REQUIRED_TABLES = ("credentials", "api_keys", "users")
 
 
 def pending_restore_path(db_path: str | Path) -> Path:
     return Path(db_path).resolve().parent / PENDING_DIRNAME / PENDING_NAME
+
+
+def _prune_rejected(directory: Path, keep: int = REJECTED_KEEP) -> int:
+    """只保留最近 `keep` 份被拒待恢复文件（按 mtime 倒序），其余删除。
+
+    口径同 `_prune`：坏上传会反复产生整库大小的敏感副本，不清理会无限累积。
+    """
+    if keep <= 0:
+        return 0
+    files = sorted(directory.glob(f"{REJECTED_PREFIX}*"),
+                   key=lambda path: path.stat().st_mtime, reverse=True)
+    removed = 0
+    for stale in files[keep:]:
+        with suppress(OSError):
+            stale.unlink()
+            removed += 1
+    return removed
 
 
 def verify_app_database(path: str | Path) -> None:
@@ -247,7 +268,7 @@ def stage_restore(db_path: str | Path, data: bytes, *, filename: str = "",
     pending = pending_restore_path(db_path)
     pending.parent.mkdir(parents=True, exist_ok=True)
     _chmod(pending.parent, 0o700)
-    temp = pending.with_suffix(".uploading")
+    temp = pending.with_name(f"{PENDING_NAME}.{uuid.uuid4().hex}.uploading")
     try:
         temp.write_bytes(data)
         _chmod(temp, 0o600)
@@ -301,10 +322,13 @@ def apply_pending_restore(db_path: str | Path, *,
     try:
         safety = restore_database(db_path, pending, now=now)
     except (RuntimeError, OSError, sqlite3.Error) as error:
-        rejected = pending.with_name(f"{PENDING_NAME}.rejected-{_stamp(now)}")
+        rejected = pending.with_name(f"{REJECTED_PREFIX}{_stamp(now)}")
         with suppress(OSError):
             pending.replace(rejected)
         pending.with_name(PENDING_META).unlink(missing_ok=True)
+        # 留档只为人工复查，无限累积等于把整库敏感副本越堆越多
+        with suppress(OSError):
+            _prune_rejected(pending.parent)
         logger.warning("待恢复备份不可用，已留档为 %s：%s", rejected, error)
         return None
     pending.unlink(missing_ok=True)

@@ -92,11 +92,25 @@ def _apply_windows(path: Path, *, directory: bool) -> None:
     ])
 
 
+def _current_uid() -> int | None:
+    """当前有效用户 uid；无 `os.geteuid` 的平台（如 Windows）返回 None。"""
+    geteuid = getattr(os, "geteuid", None)
+    return geteuid() if geteuid is not None else None
+
+
 def _verify_posix(path: Path, mode: int) -> str | None:
-    """读回 POSIX 权限；组/其他有任何权限位即返回问题描述。"""
-    actual = stat.S_IMODE(path.stat().st_mode)
+    """读回 POSIX 权限；组/其他有权限位或属主不符即返回问题描述。"""
+    stat_result = path.stat()
+    actual = stat.S_IMODE(stat_result.st_mode)
     if actual & 0o077:
         return f"权限 {actual:04o} 对组/其他用户开放（期望 {mode:04o}）"
+    # 属主不符 → 对方可随时替换文件内容，0600 只是纸面权限
+    euid = _current_uid()
+    if euid is None:
+        # fail closed：确认不了边界就不宣称已收紧
+        return "无法校验属主（当前平台不支持 os.geteuid）"
+    if stat_result.st_uid != euid:
+        return f"属主 uid={stat_result.st_uid} 不是当前用户 {euid}"
     return None
 
 

@@ -124,6 +124,88 @@ def test_check_private_wraps_oserror(tmp_path, monkeypatch):
     assert problem is not None and "stat failed" in problem
 
 
+# -------------------------------------------------------- POSIX 属主校验
+
+
+def test_verify_posix_accepts_matching_owner(tmp_path, monkeypatch):
+    """属主 = 当前有效用户时通过（正常部署形态）。"""
+    path = _write(tmp_path)
+    path.chmod(0o600)
+    monkeypatch.setattr(pf.os, "geteuid", lambda: path.stat().st_uid)
+    assert pf._verify_posix(path, 0o600) is None
+
+
+def test_verify_posix_reports_foreign_owner(tmp_path, monkeypatch):
+    """mode 已是 0600 但属主是别人 → 必须报问题（对方可随时换掉文件内容）。
+
+    不校验属主时，其他本地用户创建、恰好为 0700 的 `DATA_DIR` 会被放行。
+    """
+    path = _write(tmp_path)
+    path.chmod(0o600)
+    foreign_uid = path.stat().st_uid + 1
+    monkeypatch.setattr(pf.os, "geteuid", lambda: foreign_uid)
+    problem = pf._verify_posix(path, 0o600)
+    assert problem is not None and "属主" in problem
+    assert str(foreign_uid) in problem
+
+
+def test_check_private_flags_foreign_owner(tmp_path, monkeypatch):
+    """doctor 只读校验同样查属主（走既有 problem 文案路径）。"""
+    path = _write(tmp_path)
+    path.chmod(0o600)
+    monkeypatch.setattr(pf.os, "geteuid", lambda: path.stat().st_uid + 1)
+    assert "属主" in (pf.check_private(path, directory=False) or "")
+
+
+def test_secure_dir_rejects_foreign_owner(tmp_path, monkeypatch, caplog):
+    """属主不符时 `_secure` 返回 False 并告警（chmod 成功也不能放行）。"""
+    target = tmp_path / "data"
+    target.mkdir()
+    monkeypatch.setattr(pf.os, "geteuid", lambda: target.stat().st_uid + 1)
+    with caplog.at_level("WARNING"):
+        assert pf.secure_dir(target) is False
+    assert "属主" in caplog.text
+
+
+def test_secure_strict_raises_on_foreign_owner(tmp_path, monkeypatch):
+    """`strict=True`（data/ 的启动前信任边界）属主不符就阻断启动。"""
+    target = tmp_path / "data"
+    target.mkdir()
+    monkeypatch.setattr(pf.os, "geteuid", lambda: target.stat().st_uid + 1)
+    with pytest.raises(pf.PrivateAccessError) as excinfo:
+        pf.secure_dir(target, strict=True)
+    assert "属主" in str(excinfo.value)
+
+
+def test_posix_path_without_geteuid_fails_closed(tmp_path, monkeypatch, caplog):
+    """属主校验依赖 POSIX 的 `os.geteuid`：符号缺失即视为平台不支持。
+
+    Windows 走上方的 ACL 分支，从不触达这里；本用例把「符号不存在」当平台
+    差异的替身，确认缺失时按「无法收紧」处理（不宣称私有），而不是崩。
+    """
+    path = _write(tmp_path)
+    path.chmod(0o600)                       # 先过 mode 位，才能走到属主校验
+    monkeypatch.delattr(pf.os, "geteuid", raising=False)
+    with caplog.at_level("WARNING"):
+        assert pf.secure_file(path) is False
+    assert "无法校验属主" in caplog.text
+
+
+def test_check_private_without_geteuid_reports_problem(tmp_path, monkeypatch):
+    """只读校验同样 fail closed：确认不了属主就返回问题描述。"""
+    path = _write(tmp_path)
+    path.chmod(0o600)
+    monkeypatch.delattr(pf.os, "geteuid", raising=False)
+    assert "无法校验属主" in (pf.check_private(path, directory=False) or "")
+
+
+def test_windows_path_never_touches_geteuid(windows, monkeypatch):
+    """Windows 分支不得调用 `os.geteuid`（Windows 上根本没有这个函数）。"""
+    monkeypatch.delattr(pf.os, "geteuid", raising=False)
+    assert pf.secure_file("C:/data/a.txt") is True
+    assert pf.check_private("C:/data/a.txt", directory=False) is None
+
+
 # ------------------------------------------------------------- Windows 路径
 
 
