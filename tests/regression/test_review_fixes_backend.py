@@ -357,3 +357,25 @@ def test_stats_timeline_accepts_all_known_metrics(admin_client):
                    "success_rate", "cache_rate", "cost_per_request"):
         response = client.get("/api/stats/timeline", params={"metric": metric})
         assert response.status_code == 200, metric
+
+
+# ------------------------------------- 5. 超长整数 / 深嵌套 JSON → 400（非 500）
+
+
+def test_json_oversized_integer_is_400_not_500(tmp_path):
+    """>4300 位的整数字面量：CPython 抛普通 ValueError，不拦就成 500。"""
+    app, key = _chat_app(tmp_path)
+    response = _chat_with_key(
+        app, key, '{"messages":[{"role":"user","content":"hi"}],"x":'
+                  + "9" * 5000 + "}")
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_json_deeply_nested_is_400_not_500(tmp_path):
+    """极深嵌套在解析器里爆栈：客户端输入问题，必须归 400。"""
+    app, key = _chat_app(tmp_path)
+    response = _chat_with_key(app, key, '{"messages":[],"x":' + "[" * 100000
+                              + "]" * 100000 + "}")
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
