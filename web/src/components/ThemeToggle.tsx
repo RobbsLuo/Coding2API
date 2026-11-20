@@ -12,7 +12,11 @@ export function ThemeToggle() {
     const next = !dark;
     setDark(next);
     document.documentElement.classList.toggle("dark", next);
-    localStorage.setItem("theme", next ? "dark" : "light");
+    try {
+      localStorage.setItem("theme", next ? "dark" : "light");
+    } catch {
+      // 隐私模式 / 存储被禁用：本次切换照常生效，只是不能跨刷新记住
+    }
   };
 
   return (

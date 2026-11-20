@@ -106,4 +106,19 @@ describe("FirstRunWizard", () => {
     await userEvent.click(screen.getByTestId("wizard-action"));
     expect(screen.getByTestId("location")).toHaveTextContent("/api-keys?new=1");
   });
+
+  it("存储被禁用时读取不抛错（当作未引导），跳过也不崩", async () => {
+    vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new DOMException("denied", "SecurityError");
+    });
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("denied", "SecurityError");
+    });
+
+    renderWizard();
+    // getItem 抛错曾会中断整页脚本链，现在退化为「没读过」正常弹向导
+    expect(screen.getByTestId("first-run-wizard")).toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("wizard-skip"));
+    expect(screen.queryByTestId("first-run-wizard")).not.toBeInTheDocument();
+  });
 });

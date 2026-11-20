@@ -71,8 +71,14 @@ export class ApiError extends Error {
  */
 export const REQUEST_TIMEOUT_MS = 30_000;
 
+/**
+ * 批量运维超时：后端按并发 4 逐条出网探测/签到，200 条的上限远超 30s；
+ * 用默认超时会让前端先报超时而后端继续跑，用户重试即重复消耗上游额度。
+ */
+export const BATCH_TIMEOUT_MS = 10 * 60_000;
+
 /** 把「调用方 signal（react-query 取消）」与「超时」合成一个 signal，并可清理定时器。 */
-function timeoutGuard(init: RequestInit): {
+function timeoutGuard(init: RequestInit, timeoutMs = REQUEST_TIMEOUT_MS): {
   signal: AbortSignal;
   dispose: () => void;
   timedOut: () => boolean;
@@ -82,7 +88,7 @@ function timeoutGuard(init: RequestInit): {
   const timer = setTimeout(() => {
     timedOut = true;
     controller.abort();
-  }, REQUEST_TIMEOUT_MS);
+  }, timeoutMs);
   const external = init.signal;
   const forward = () => controller.abort();
   if (external) {
@@ -118,8 +124,9 @@ async function readBody(response: Response): Promise<unknown> {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const guard = timeoutGuard(init);
+async function request<T>(path: string, init: RequestInit = {},
+                          timeoutMs = REQUEST_TIMEOUT_MS): Promise<T> {
+  const guard = timeoutGuard(init, timeoutMs);
   let response: Response;
   let body: unknown;
   try {
@@ -142,7 +149,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     // 超时归一为可展示的 ApiError；调用方主动取消（切页/翻页）原样上抛，
     // react-query 依赖它是 AbortError 来判定「取消」而非「失败」。
     if (guard.timedOut()) {
-      throw new ApiError(0, "timeout", `请求超时（${REQUEST_TIMEOUT_MS / 1000} 秒）`);
+      throw new ApiError(0, "timeout", `请求超时（${timeoutMs / 1000} 秒）`);
     }
     throw error;
   } finally {
@@ -374,7 +381,7 @@ export const api = {
     request<BatchResult>("/api/credentials/batch", {
       method: "POST",
       ...json(enabled === undefined ? { action, ids } : { action, ids, enabled }),
-    }),
+    }, BATCH_TIMEOUT_MS),
   checkinCredential: (id: string) =>
     request<CheckinResult>(`/api/credentials/${id}/checkin`, { method: "POST" }),
   checkinStatus: (id: string) =>

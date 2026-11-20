@@ -48,6 +48,7 @@ import {
   tagOptions,
 } from "../lib/credentialList";
 import type { GroupSort, Ledger } from "../lib/credentialList";
+import { errorText } from "../lib/errors";
 import { api } from "../api/client";
 import { CHECKIN_PROVIDERS } from "../api/providers";
 import { useSessionContext } from "../Layout";
@@ -357,7 +358,8 @@ export function CredentialsPage() {
       token_expires_at: "asc", growth_last_run_at: "desc" });
   // 30s 轮询：冷却倒计时 / token 剩余都是「随时间变化」的观测量，页面停留
   // 时应自动刷新（与 useTasks 同口径）。
-  const { data, isLoading, isError } = useCredentials(session.username, 30_000, sort, order);
+  const { data, isLoading, isError, dataUpdatedAt } =
+    useCredentials(session.username, 30_000, sort, order);
   // 组头「模型 N 个」：与 Playground / `/v1/models` 同源（只含有可用凭证且过
   // 当前黑名单的渠道），因此组里「有凭证」与「有模型」是同一口径，不必另算一套。
   const modelsQuery = usePlaygroundModels();
@@ -435,7 +437,12 @@ export function CredentialsPage() {
   const tokenWarning = data?.token_expiry_warning_seconds ?? 0;
   // 写门槛是 admin 或 operator（与后端 require_operator 同口径）；viewer 只读。
   const canWrite = data?.is_operator ?? false;
-  const now = Date.now() / 1000;
+  // now 只在列表刷新成功（30s 轮询出结果）时推进：每次渲染取新值会让下面几个
+  // useMemo 因「输入搜索词 / 勾选」等无关 state 变化而全量重算筛选与分组。
+  const [now, setNow] = useState(() => Date.now() / 1000);
+  useEffect(() => {
+    setNow(Date.now() / 1000);
+  }, [dataUpdatedAt]);
 
   // 先筛后分组：分组只是把筛选结果按渠道归类，不改变「哪些该出现」。
   const filtered = useMemo(
@@ -552,7 +559,7 @@ export function CredentialsPage() {
         creditEvents.credentialId, creditEvents.ledger, columnKey, order);
       setCreditEvents({ ...creditEvents, events: result.events, sort: columnKey, order });
     } catch (caught) {
-      showError(caught instanceof Error ? caught.message : "流水读取失败");
+      showError(errorText(caught, "流水读取失败"));
     }
   };
 
@@ -563,7 +570,7 @@ export function CredentialsPage() {
       if (successMessage) showNotice(successMessage);
       await refresh();
     } catch (caught) {
-      showError(caught instanceof Error ? caught.message : "操作失败");
+      showError(errorText(caught, "操作失败"));
     } finally {
       setBusy(false);
     }
@@ -592,7 +599,7 @@ export function CredentialsPage() {
       setSelected(new Set());
       await refresh();
     } catch (caught) {
-      showError(caught instanceof Error ? caught.message : "批量操作失败");
+      showError(errorText(caught, "批量操作失败"));
     } finally {
       setBusy(false);
     }
@@ -666,7 +673,7 @@ export function CredentialsPage() {
           }
           await refresh();
         } catch (caught) {
-          showError(caught instanceof Error ? caught.message : "探测失败");
+          showError(errorText(caught, "探测失败"));
         } finally {
           setBusy(false);
         }
@@ -695,7 +702,7 @@ export function CredentialsPage() {
           }
           await refresh();
         } catch (caught) {
-          showError(caught instanceof Error ? caught.message : "签到失败");
+          showError(errorText(caught, "签到失败"));
         } finally {
           setBusy(false);
         }
@@ -714,7 +721,7 @@ export function CredentialsPage() {
           });
           await refresh();
         } catch (caught) {
-          showError(caught instanceof Error ? caught.message : "成长中心执行失败");
+          showError(errorText(caught, "成长中心执行失败"));
         } finally {
           setBusy(false);
         }
@@ -735,7 +742,7 @@ export function CredentialsPage() {
             sort: "ts", order: "desc",
           });
         } catch (caught) {
-          showError(caught instanceof Error ? caught.message : "流水读取失败");
+          showError(errorText(caught, "流水读取失败"));
         }
       })(),
     // 签到记录：读本地落库的审计日志（不发上游请求，故对已失效凭证也能查）。
@@ -750,7 +757,7 @@ export function CredentialsPage() {
           const result = await api.checkinEvents(credential.id);
           setCheckinLog({ credentialId: credential.id, events: result.events });
         } catch (caught) {
-          showError(caught instanceof Error ? caught.message : "签到记录读取失败");
+          showError(errorText(caught, "签到记录读取失败"));
         }
       })(),
     activity: (credential) =>
@@ -763,7 +770,7 @@ export function CredentialsPage() {
             : `活跃上报失败：${result.message || "未知原因"}`);
           await refresh();
         } catch (caught) {
-          showError(caught instanceof Error ? caught.message : "活跃上报失败");
+          showError(errorText(caught, "活跃上报失败"));
         } finally {
           setBusy(false);
         }
@@ -791,7 +798,7 @@ export function CredentialsPage() {
           URL.revokeObjectURL(url);
           showNotice("已导出凭证 JSON（含明文令牌，请妥善保管）");
         } catch (caught) {
-          showError(caught instanceof Error ? caught.message : "导出凭证失败");
+          showError(errorText(caught, "导出凭证失败"));
         }
       })(),
   };

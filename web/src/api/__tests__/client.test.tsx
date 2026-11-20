@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { api, ApiError, REQUEST_TIMEOUT_MS } from "../client";
+import { api, ApiError, BATCH_TIMEOUT_MS, REQUEST_TIMEOUT_MS } from "../client";
 import { setUnauthorizedHandler } from "../unauthorized";
 
 describe("api client", () => {
@@ -173,8 +173,39 @@ describe("api client", () => {
     vi.useRealTimers();
   });
 
-  it("调用方主动取消时原样上抛 AbortError（不被误判为超时）", async () => {
-    const controller = new AbortController();
+  it("批量端点放宽超时：30s 不砍断，10 分钟才报超时", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(new DOMException("aborted", "AbortError")),
+          );
+        })),
+    );
+    let settled = false;
+    const pending = api.batchCredentials("probe", ["a", "b"]).catch((error: unknown) => {
+      settled = true;
+      throw error;
+    });
+    const assertion = expect(pending).rejects.toMatchObject({
+      name: "ApiError",
+      status: 0,
+      code: "timeout",
+      message: `请求超时（${BATCH_TIMEOUT_MS / 1000} 秒）`,
+    });
+
+    // 普通端点的 30s 到点后批量仍在等后端逐条出网
+    await vi.advanceTimersByTimeAsync(REQUEST_TIMEOUT_MS + 1000);
+    expect(settled).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(BATCH_TIMEOUT_MS);
+    await assertion;
+    vi.useRealTimers();
+  });
+
+  it("调用方主动取消时原样上抛 AbortError（不被误判为超时）", async () => {    const controller = new AbortController();
     vi.stubGlobal(
       "fetch",
       vi.fn((_input: RequestInfo | URL, init?: RequestInit) =>

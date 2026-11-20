@@ -252,6 +252,34 @@ describe("ApiKeysPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "创建" }));
     expect(await screen.findByText(/检查渠道绑定、模型白名单、IP 白名单与到期时间格式/)).toBeInTheDocument();
   });
+
+  it("无 Clipboard API 时复制一次性 Key 失败会提示手动复制", async () => {
+    vi.stubGlobal("navigator", {});
+    Object.defineProperty(document, "execCommand", {
+      value: vi.fn(() => false),
+      configurable: true,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "POST") {
+          return jsonResponse({ ...KEY, api_key: "sk-plaintext-value" });
+        }
+        return jsonResponse({ api_keys: [] });
+      }),
+    );
+    renderPage(<ApiKeysPage />);
+    await settle();
+    await openCreateDialog();
+    await userEvent.click(screen.getByRole("button", { name: "创建" }));
+    await screen.findByTestId("new-key-plaintext");
+
+    const keyCopy = screen.getByTestId("new-key-plaintext").parentElement!.querySelector("button")!;
+    await userEvent.click(keyCopy);
+    // 一次性明文复制失败必须说清楚，否则用户关掉就再也拿不回来
+    expect(await screen.findByTestId("new-key-copy-failed")).toHaveTextContent("请手动");
+    expect(screen.queryByRole("button", { name: "已复制" })).not.toBeInTheDocument();
+  });
 });
 
 /** 打开「创建 API Key」对话框（由「我的 API Key」右上角按钮触发）。 */

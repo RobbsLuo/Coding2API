@@ -16,6 +16,7 @@ import { buildSections, displayName, modelValue } from "../components/ModelPicke
 import { PROVIDER_LABEL, PROVIDER_ORDER } from "../api/providers";
 import { buildCcSwitchLink, CCSWITCH_TARGETS } from "../lib/ccSwitch";
 import { DEFAULT_PAGE_SIZE } from "../lib/constants";
+import { copyText } from "../lib/clipboard";
 import { errorText } from "../lib/errors";
 import {
   EMPTY_QUOTA,
@@ -290,10 +291,13 @@ function OpenAIEntry({ apiKey }: { apiKey: string }) {
   const baseUrl = openaiBaseUrl();
   const examples = openaiExamples(baseUrl, apiKey);
   const [copied, setCopied] = useState<string | null>(null);
+  const [copyFailed, setCopyFailed] = useState(false);
 
   const copy = async (label: string, text: string) => {
-    await navigator.clipboard.writeText(text);
-    setCopied(label);
+    const ok = await copyText(text);
+    setCopied(ok ? label : null);
+    // 局域网 http 部署没有 Clipboard API：明确提示，别让用户以为已复制
+    setCopyFailed(!ok);
   };
 
   return (
@@ -304,6 +308,11 @@ function OpenAIEntry({ apiKey }: { apiKey: string }) {
         onCopy={() => void copy("url", baseUrl)}
         testid="openai-base-url"
       />
+      {copyFailed && (
+        <p className="mt-2 text-xs text-danger" data-testid="openai-copy-failed">
+          浏览器不允许自动复制，请手动选中内容复制。
+        </p>
+      )}
       <ul className="space-y-1 text-xs text-muted-foreground">
         <li>
           {/* 示例默认折叠：点开端点行查看 curl / SDK 调用方式 */}
@@ -348,10 +357,13 @@ function AnthropicEntry({ apiKey }: { apiKey: string }) {
   const baseUrl = anthropicBaseUrl();
   const examples = anthropicExamples(baseUrl, apiKey);
   const [copied, setCopied] = useState<string | null>(null);
+  const [copyFailed, setCopyFailed] = useState(false);
 
   const copy = async (label: string, text: string) => {
-    await navigator.clipboard.writeText(text);
-    setCopied(label);
+    const ok = await copyText(text);
+    setCopied(ok ? label : null);
+    // 局域网 http 部署没有 Clipboard API：明确提示，别让用户以为已复制
+    setCopyFailed(!ok);
   };
 
   return (
@@ -362,6 +374,11 @@ function AnthropicEntry({ apiKey }: { apiKey: string }) {
         onCopy={() => void copy("url", baseUrl)}
         testid="anthropic-base-url"
       />
+      {copyFailed && (
+        <p className="mt-2 text-xs text-danger" data-testid="anthropic-copy-failed">
+          浏览器不允许自动复制，请手动选中内容复制。
+        </p>
+      )}
       <ul className="space-y-1 text-xs text-muted-foreground">
         <li>
           <EndpointRow method="POST" path={`${baseUrl}/v1/messages`} description="对话补全（流式 / 非流式，SDK 自动拼接路径）" testid="example-details-messages">
@@ -591,6 +608,7 @@ export function ApiKeysPage() {
   const [confirming, setConfirming] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   // 创建 Key 收进对话框（低频动作不常驻占屏），由「我的 API Key」右上角触发
   // `?new=1`：首启向导的深链，进来直接开创建对话框，随后把参数清掉
   const [searchParams, setSearchParams] = useSearchParams();
@@ -668,8 +686,10 @@ export function ApiKeysPage() {
 
   const copy = async () => {
     if (!created) return;
-    await navigator.clipboard.writeText(created.api_key);
-    setCopied(true);
+    const ok = await copyText(created.api_key);
+    setCopied(ok);
+    // 复制的是一次性明文 Key，失败必须说清楚，否则关掉就再也拿不回来
+    setCopyFailed(!ok);
   };
 
   const closeCreate = () => {
@@ -679,6 +699,7 @@ export function ApiKeysPage() {
     // 否则它会继续留在 OpenAI/Anthropic 接入面板与页面内存里，与「只显示一次」不符。
     setCreated(null);
     setCopied(false);
+    setCopyFailed(false);
   };
 
   const createDialogRef = useDialogFocus<HTMLDivElement>(closeCreate, createOpen);
@@ -889,6 +910,11 @@ export function ApiKeysPage() {
                     我已保存
                   </Button>
                 </div>
+                {copyFailed && (
+                  <p className="mt-2 text-xs text-danger" data-testid="new-key-copy-failed">
+                    浏览器不允许自动复制，请手动选中上方 Key 复制后再关闭。
+                  </p>
+                )}
                 {/* 导入按钮与明文 Key 同生命周期：只在这里（对话框开着时）才有可用的深链 */}
                 <div className="mt-4 border-t border-border/70 pt-4">
                   <CcSwitchImportButtons

@@ -275,6 +275,24 @@ describe("CredentialsPage 批量运维", () => {
     expect(error).toHaveTextContent("operator only");
   });
 
+  it("网络层异常不把 Failed to fetch 原样丢给用户", async () => {
+    mockFetch({
+      "/api/credentials/batch": () => {
+        // fetch 本身失败（断网 / 反代挂了）走的是 TypeError，没有可展示文案
+        throw new TypeError("Failed to fetch");
+      },
+      "/api/credentials": listBody([makeCredential({ id: "cb1", provider: "codebuddy" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+    await userEvent.click(screen.getByTestId("select-cb1"));
+    await userEvent.click(screen.getByTestId("batch-probe"));
+    const error = await screen.findByTestId("credentials-error");
+    expect(error).toHaveTextContent("批量操作失败");
+    expect(error).not.toHaveTextContent("Failed to fetch");
+  });
+
   it("筛选隐藏的行不进入批量动作（选中集合与筛选结果求交）", async () => {
     const spy = await renderWithTwo();
     await userEvent.click(screen.getByTestId("group-select-codebuddy"));

@@ -10,6 +10,7 @@ import {
   parseCredentialInput,
 } from "../lib/credentialImport";
 import { safeHttpUrl } from "../lib/safeUrl";
+import { errorText } from "../lib/errors";
 import { Button, Field, Input, Notice, Select, Tabs, Textarea } from "../ui";
 
 /** 支持「登录渠道账号」按钮的渠道（有 poll / callback / paste 轨道的渠道）。 */
@@ -147,11 +148,28 @@ export function AddCredentialDialog({
     });
   }, []);
 
+  // 关闭即抹掉明文输入：对话框靠 `open` 渲染而不是卸载，state 会跨「开关」存活，
+  // 粘贴过 token/Cookie 却没提交的话，下次打开会原样回填。
+  const resetSensitive = () => {
+    setPasteUrl("");
+    setRaccoonToken("");
+    setLingxiCookie("");
+    setRaw("");
+    setNickname("");
+    setImportError(null);
+  };
+
   // TRAE 登录中不能关：授权完成的检测靠这里的凭证列表轮询，关了就停。
   const requestClose = () => {
     if (loginProviders.includes("trae")) return;
+    resetSensitive();
     onClose();
   };
+  // 父组件也可能直接置 open=false（导入成功后自动关闭），统一在关闭态清一次，
+  // 不指望每个关闭入口都记得调 resetSensitive。
+  useEffect(() => {
+    if (!open) resetSensitive();
+  }, [open]);
   // 对话框焦点管理：Esc/遮罩关闭都走 requestClose（TRAE 登录中会自我拦截）。
   const dialogRef = useDialogFocus<HTMLDivElement>(requestClose, open);
 
@@ -205,15 +223,21 @@ export function AddCredentialDialog({
         const deadline = Date.now() + 5 * 60 * 1000;
         const baseline = credentialCountRef.current;
         const timer = window.setInterval(async () => {
-          const after = (await api.credentials()).credentials.length;
-          if (after > baseline || Date.now() > deadline) {
+          try {
+            const after = (await api.credentials()).credentials.length;
+            if (after > baseline || Date.now() > deadline) {
+              stopPolling(provider);
+              if (after > baseline) setPasteProvider(null);
+              onNotice(after > baseline
+                ? "登录成功，凭证已保存。"
+                : "授权超时：浏览器没有回到本服务。请检查授权后地址栏是否跳转到回调地址，"
+                  + "以及服务端 PUBLIC_BASE_URL 是否为浏览器可访问的地址；"
+                  + "也可以把地址栏里的整条链接粘贴到下方完成登录。");
+            }
+          } catch (caught) {
+            // 会话过期 / 网络抖动时不能每 3 秒重复抛错，直接停下等用户重试
             stopPolling(provider);
-            if (after > baseline) setPasteProvider(null);
-            onNotice(after > baseline
-              ? "登录成功，凭证已保存。"
-              : "授权超时：浏览器没有回到本服务。请检查授权后地址栏是否跳转到回调地址，"
-                + "以及服务端 PUBLIC_BASE_URL 是否为浏览器可访问的地址；"
-                + "也可以把地址栏里的整条链接粘贴到下方完成登录。");
+            onError(errorText(caught, "授权状态检测失败，请重试。"));
           }
         }, 3000);
         loginTimersRef.current[provider] = timer;
@@ -248,16 +272,14 @@ export function AddCredentialDialog({
           stopPolling(provider);
           // 轮询失败多半是上游给的可行动原因（如「这个账号还没开通 OfficeAce」），
           // 兜底文案会把它抹掉，用户只会看到「失败」而不知道该去做什么。
-          onError(caught instanceof Error && caught.message
-            ? caught.message
-            : "登录轮询失败，请重试。");
+          onError(errorText(caught, "登录轮询失败，请重试。"));
         }
       }, interval);
       loginTimersRef.current[provider] = timer;
     } catch (caught) {
       // 启动失败：关掉占位窗口，并把授权地址给出来让用户手动打开
       popup?.close();
-      onError(caught instanceof Error ? caught.message : "无法启动登录流程");
+      onError(errorText(caught, "无法启动登录流程"));
     }
   };
 
@@ -302,7 +324,7 @@ export function AddCredentialDialog({
       onNotice(message);
       onImported(message);
     } catch (caught) {
-      onError(caught instanceof Error ? caught.message : "登录失败，请检查粘贴的链接。");
+      onError(errorText(caught, "登录失败，请检查粘贴的链接。"));
     } finally {
       setBusy(false);
     }
@@ -333,7 +355,7 @@ export function AddCredentialDialog({
         ? `凭证已导入。注意：该渠道 ToS 评级为 ${created.tos.level} —— ${created.tos.reason}`
         : "凭证已导入。");
     } catch (caught) {
-      onError(caught instanceof Error ? caught.message : "导入失败");
+      onError(errorText(caught, "导入失败"));
     } finally {
       setBusy(false);
     }
@@ -499,7 +521,7 @@ export function AddCredentialDialog({
                       setRaccoonToken("");
                       onImported("已添加小浣熊渠道");
                     } catch (caught) {
-                      onError(caught instanceof Error ? caught.message : "添加失败");
+                      onError(errorText(caught, "添加失败"));
                     } finally {
                       setBusy(false);
                     }
@@ -540,7 +562,7 @@ export function AddCredentialDialog({
                       setLingxiCookie("");
                       onImported("已添加灵犀渠道");
                     } catch (caught) {
-                      onError(caught instanceof Error ? caught.message : "添加失败");
+                      onError(errorText(caught, "添加失败"));
                     } finally {
                       setBusy(false);
                     }
@@ -567,7 +589,7 @@ export function AddCredentialDialog({
                       await api.importCredential("zen", {}, "OpenCode Zen");
                       onImported("已添加 OpenCode Zen 免费渠道");
                     } catch (caught) {
-                      onError(caught instanceof Error ? caught.message : "添加失败");
+                      onError(errorText(caught, "添加失败"));
                     } finally {
                       setBusy(false);
                     }
@@ -586,7 +608,7 @@ export function AddCredentialDialog({
                       await api.importCredential("kilo", {}, "Kilo");
                       onImported("已添加 Kilo 免费渠道");
                     } catch (caught) {
-                      onError(caught instanceof Error ? caught.message : "添加失败");
+                      onError(errorText(caught, "添加失败"));
                     } finally {
                       setBusy(false);
                     }

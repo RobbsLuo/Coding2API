@@ -40,14 +40,23 @@ export function FirstRunWizard({ username, isAdmin }: {
   isAdmin: boolean;
 }) {
   const storageKey = `${STORAGE_PREFIX}:${username}`;
-  const [dismissed, setDismissed] = useState(
-    () => localStorage.getItem(storageKey) === "done",
-  );
+  const [dismissed, setDismissed] = useState(() => {
+    try {
+      return localStorage.getItem(storageKey) === "done";
+    } catch {
+      // 隐私模式 / 存储被禁用：当作未引导，别让读取异常中断整页渲染
+      return false;
+    }
+  });
   if (!isAdmin || dismissed) return null;
   return (
     <WizardGate
       onDismiss={() => {
-        localStorage.setItem(storageKey, "done");
+        try {
+          localStorage.setItem(storageKey, "done");
+        } catch {
+          // 存不下就每次启动都提示一次，不影响使用
+        }
         setDismissed(true);
       }}
     />

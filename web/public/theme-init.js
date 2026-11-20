@@ -4,7 +4,13 @@
 // `script-src`（hash/nonce），把最强的 XSS 缓解手段换掉一次主题初始化，不划算。
 // 放在 <head> 里的同步脚本同样是渲染阻塞的，不会闪烁。
 (function () {
-  var stored = localStorage.getItem("theme");
+  var stored = null;
+  try {
+    // 隐私模式 / 存储被禁用时 getItem 会抛 SecurityError：读不到就跟随系统
+    stored = localStorage.getItem("theme");
+  } catch (e) {
+    stored = null;
+  }
   var dark =
     stored === "dark" ||
     (!stored && window.matchMedia("(prefers-color-scheme: dark)").matches);

@@ -13,6 +13,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import { Pagination } from "../components/Pagination";
 import { SortableHead } from "../components/SortableHead";
 import { DEFAULT_PAGE_SIZE } from "../lib/constants";
+import { copyText } from "../lib/clipboard";
 import { errorText } from "../lib/errors";
 import {
   Badge,
@@ -41,10 +42,13 @@ function TokenCard({
   onDismiss: () => void;
 }) {
   const [copied, setCopied] = useState(false);
+  const [copyFailed, setCopyFailed] = useState(false);
   const link = `${window.location.origin}/activate?token=${encodeURIComponent(issued.activate_token)}`;
   const copy = async () => {
-    await navigator.clipboard.writeText(link);
-    setCopied(true);
+    const ok = await copyText(link);
+    setCopied(ok);
+    // 局域网 http 部署没有 Clipboard API：必须明说，否则用户以为已经复制走
+    setCopyFailed(!ok);
   };
   return (
     <Panel title={`${issued.username} 的激活链接`}>
@@ -67,6 +71,11 @@ function TokenCard({
           我已转交
         </Button>
       </div>
+      {copyFailed && (
+        <p className="mt-2 text-xs text-danger" data-testid="copy-activation-failed">
+          浏览器不允许自动复制，请手动选中上方链接复制。
+        </p>
+      )}
     </Panel>
   );
 }

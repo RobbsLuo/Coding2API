@@ -1,5 +1,6 @@
 import { screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AddCredentialDialog } from "../AddCredentialDialog";
 import { jsonResponse, renderPage } from "@/test-utils";
@@ -290,6 +291,88 @@ it("记住上次成功导入的渠道", async () => {
     expect(screen.getByTestId("add-credential-dialog")).toBeInTheDocument();
     await userEvent.keyboard("{Escape}");
     expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("关闭对话框清除明文输入", () => {
+  /** 开关由外部 state 控制：验证「关闭后再打开」的 state 残留。 */
+  function Harness() {
+    const [open, setOpen] = useState(true);
+    return (
+      <>
+        <button type="button" data-testid="reopen" onClick={() => setOpen(true)}>重开</button>
+        <AddCredentialDialog
+          open={open}
+          onClose={() => setOpen(false)}
+          credentialCount={0}
+          hasZen={false}
+          hasKilo={false}
+          onImported={vi.fn()}
+          onNotice={vi.fn()}
+          onError={vi.fn()}
+        />
+      </>
+    );
+  }
+
+  it("粘过小浣熊 token / 灵犀 Cookie 就关闭，重开时输入框为空", async () => {
+    renderPage(<Harness />);
+    await userEvent.click(screen.getByTestId("raccoon-token"));
+    await userEvent.paste("eyJhbGciOi.payload.sig");
+    await userEvent.click(screen.getByTestId("lingxi-cookie"));
+    await userEvent.paste("wps_sid=abc; uid=42");
+    expect(screen.getByTestId("raccoon-token")).toHaveValue("eyJhbGciOi.payload.sig");
+
+    await userEvent.click(screen.getByTestId("add-credential-close"));
+    expect(screen.queryByTestId("add-credential-dialog")).not.toBeInTheDocument();
+    await userEvent.click(screen.getByTestId("reopen"));
+
+    expect(screen.getByTestId("raccoon-token")).toHaveValue("");
+    expect(screen.getByTestId("lingxi-cookie")).toHaveValue("");
+  });
+
+  it("导入页粘贴的原文与昵称也随关闭清空", async () => {
+    renderPage(<Harness />);
+    await userEvent.click(screen.getByTestId("add-credential-tab-import"));
+    await userEvent.click(screen.getByTestId("import-payload"));
+    await userEvent.paste('{"access_token":"secret"}');
+    await userEvent.click(screen.getByTestId("add-credential-close"));
+    await userEvent.click(screen.getByTestId("reopen"));
+    await userEvent.click(screen.getByTestId("add-credential-tab-import"));
+
+    // 清空后输入框不会回填明文，也不会残留上次粘贴内容
+    expect(screen.getByTestId("import-payload")).toHaveValue("");
+  });
+});
+
+describe("TRAE 授权轮询异常", () => {
+  it("轮询凭证列表失败时停止轮询并提示，不再每 3 秒重复抛错", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let credentialCalls = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/upstream/start")) {
+        return jsonResponse({
+          flow: "callback", state: "m:d", auth_url: "https://trae.example/x",
+          interval: null, callback_url: "http://127.0.0.1:8000/authorize",
+        });
+      }
+      if (url.split("?")[0].endsWith("/api/credentials")) credentialCalls += 1;
+      // 会话过期：真实失败形态是后端受控 ApiError
+      return jsonResponse({ error: { code: "unauthorized", message: "登录已过期" } }, 401);
+    }));
+    vi.stubGlobal("open", () => null);
+    const props = renderDialog();
+    await userEvent.click(screen.getByTestId("start-login-trae"));
+    await screen.findByTestId("cancel-login-trae");
+
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(props.onError).toHaveBeenCalledWith("登录已过期");
+    // 轮询已停：再过一个周期不再发请求
+    expect(credentialCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(credentialCalls).toBe(1);
+    vi.useRealTimers();
   });
 });
 

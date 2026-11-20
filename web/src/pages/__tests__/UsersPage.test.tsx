@@ -97,6 +97,32 @@ describe("UsersPage", () => {
     await waitFor(() => expect(screen.queryByTestId("activation-link")).not.toBeInTheDocument());
   });
 
+  it("无 Clipboard API（局域网 http）时提示手动复制，不抛 TypeError", async () => {
+    // 非安全上下文：navigator.clipboard 不存在，execCommand 也不可用
+    vi.stubGlobal("navigator", {});
+    Object.defineProperty(document, "execCommand", {
+      value: vi.fn(() => false),
+      configurable: true,
+    });
+    stubFetch({
+      "POST /api/users": () => jsonResponse({
+        username: "newbie", role: "viewer", activate_token: "TOK", expires_at: 1_800_000_000,
+      }),
+      "GET /api/users": () => jsonResponse(USERS),
+    });
+    renderPage(<UsersPage />, { username: "root", is_admin: true });
+    await settle();
+    await openCreateUserDialog();
+    await userEvent.type(screen.getByTestId("new-user-name"), "newbie");
+    await userEvent.click(screen.getByRole("button", { name: "创建" }));
+    await screen.findByTestId("activation-link");
+
+    await userEvent.click(screen.getByTestId("copy-activation"));
+    expect(await screen.findByTestId("copy-activation-failed")).toHaveTextContent("请手动");
+    // 没真复制成功就不能显示「已复制」
+    expect(screen.queryByText("已复制")).not.toBeInTheDocument();
+  });
+
   it("创建失败（重名）时给出提示", async () => {
     stubFetch({
       "POST /api/users": () =>
