@@ -1,5 +1,6 @@
 # 多阶段构建：前端产物 + Python 运行时
-FROM node:26-alpine AS web
+# 基础镜像按 digest 固定：浮动 tag 会在上游重建时静默换掉运行时，构建不可复现。
+FROM node:26-alpine@sha256:6bd9ab43c0ec0190ca7b2d193906cb8b7edf6e7f4afa43ddeccd6452710bffb5 AS web
 WORKDIR /web
 # pnpm-workspace.yaml 必须一起 COPY：pnpm 从这里读 allowBuilds（放行 esbuild
 # 的 postinstall），缺失会以 ERR_PNPM_IGNORED_BUILDS 退出。
@@ -24,7 +25,7 @@ RUN npm install -g corepack@0.36.0 && corepack enable \
 COPY web/ ./
 RUN pnpm exec vite build
 
-FROM python:3.15-slim AS runtime
+FROM python:3.15-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928 AS runtime
 
 # tzdata 是 CHECKIN_HOUR / 额度周期正确性的前提：任务用 time.localtime() 判断
 # "今天 9 点"，基础镜像不带 zoneinfo 时 TZ 会被静默忽略、退回 UTC。
@@ -37,8 +38,8 @@ ENV PYTHONUNBUFFERED=1 \
     UV_PROJECT_ENVIRONMENT=/app/.venv \
     PATH="/app/.venv/bin:$PATH"
 
-# uv：从官方镜像复制，避免联网安装脚本
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+# uv：从官方镜像复制，避免联网安装脚本。digest 是 latest 的多架构索引快照。
+COPY --from=ghcr.io/astral-sh/uv:latest@sha256:d3b601f0c7b118bc1753febf7c41cc80981df678445e0254284eecf84db79a7d /uv /usr/local/bin/uv
 
 WORKDIR /app
 

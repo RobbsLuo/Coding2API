@@ -112,6 +112,9 @@ services:
       # 是否采信 X-Forwarded-For 判定来源 IP（API Key 的 allowed_ips 用）。
       # 默认 false；仅在本服务前恰好一层受信反代时开启，否则客户端可伪造。
       TRUST_PROXY: ${TRUST_PROXY:-false}
+      # TRUST_PROXY=true 时只对名单内的对端解析 XFF（逗号分隔 IP/CIDR）。
+      # 留空 = 采信任意对端；端口若并非只有反代可达，必须显式配这一项。
+      TRUSTED_PROXIES: ${TRUSTED_PROXIES:-}
       # 上游端点白名单（逗号分隔）；改 CODEBUDDY_API_ENDPOINT 时必须同时含它
       CODEBUDDY_ALLOWED_ENDPOINTS: ${CODEBUDDY_ALLOWED_ENDPOINTS:-https://copilot.tencent.com,https://www.codebuddy.ai}
       # CodeBuddy 国际版（独立渠道 codebuddy_intl）的端点与**独立**白名单。
@@ -264,7 +267,8 @@ services:
       # 两侧都引用 PORT：README 承诺「PORT 同时决定宿主机映射端口」，而它同时
       # 是容器内 uvicorn 的监听端口。target 写死 8000 会让 PORT=9000 时
       # 应用监听 9000、映射却指向 8000，容器永远不 healthy。
-      - "${PORT:-8000}:${PORT:-8000}"
+      # 宿主机侧只绑回环：管理台不应直接裸暴露在公网，公网入口走 Caddy/nginx。
+      - "127.0.0.1:${PORT:-8000}:${PORT:-8000}"
     # 停机排空窗口：docker 发 SIGTERM 后等这么久再 SIGKILL。必须 >= 应用侧
     # uvicorn --timeout-graceful-shutdown(90，见 src/main.py GRACEFUL_SHUTDOWN_SECONDS)，
     # 留 5s 余量让 uvicorn 排空完成、统计落库，再被强杀。

@@ -106,11 +106,18 @@ def main(argv: list[str] | None = None) -> int:
     db_path = Path(args.db)
     if not db_path.is_file():
         parser.error(f"数据库不存在: {db_path}")
+    new_secret_file = Path(args.new_secret_file)
     count = rotate(db_path,
                    _read_secret(Path(args.old_secret_file)),
-                   _read_secret(Path(args.new_secret_file)))
+                   _read_secret(new_secret_file))
     print(f"已用新密钥重新加密 {count} 条凭证。")
-    print("下一步：把 .env 的 APP_SECRET 换成新值、chmod 600 .env、重启服务。")
+    # 含密钥的文件收紧到 600：只提示不执行的结果是权限长期留在 644。
+    # 路径由运维传入（可能不属于本用户），失败只 warn，不吞掉已完成的轮换。
+    try:
+        new_secret_file.chmod(0o600)
+    except OSError as error:
+        print(f"警告：无法把 {new_secret_file} 权限改为 600（{error}）", file=sys.stderr)
+    print("下一步：把 .env 的 APP_SECRET 换成新值、确认权限 600、重启服务。")
     return 0
 
 

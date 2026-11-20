@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -38,6 +39,11 @@ def backup(db_path: Path, *, keep: int = 5) -> Path:
             destination.close()
     finally:
         source.close()
+    # 备份含全部凭证密文与用户数据，默认 umask(022) 会落成 0644。失败只 warn 不阻断。
+    try:
+        target.chmod(0o600)
+    except OSError as error:
+        print(f"警告：无法把备份 {target} 权限改为 600（{error}）", file=sys.stderr)
     if keep > 0:
         _prune_backups(db_path, keep=keep)
     return target

@@ -50,6 +50,11 @@
     <key>ExitTimeOut</key>
     <integer>95</integer>
 
+    <!-- 进程 umask (0o077)：日志含凭证 id、上游错误正文与 OAuth 调试信息，
+         默认 022 会落成 0644，同机任何用户可读。 -->
+    <key>Umask</key>
+    <integer>63</integer>
+
     <key>StandardOutPath</key>
     <string>__PROJECT_ROOT__/logs/launchd.out.log</string>
     <key>StandardErrorPath</key>

@@ -584,6 +584,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `ALLOWED_HOSTS` | 空 | Host 白名单，防 DNS rebinding |
 | `ALLOW_TEST_HOST` | `false` | 放行 `testserver`，仅测试用 |
 | `TRUST_PROXY` | `false` | 是否采信 `X-Forwarded-For`；仅「前恰好一层受信反代」时开 |
+| `TRUSTED_PROXIES` | 空 | `TRUST_PROXY=true` 时只对名单内（IP/CIDR，逗号分隔）的对端解析 XFF；留空 = 任意对端 |
 | `ENABLE_DOCS` | `false` | 暴露 `/docs` 与 `/openapi.json` |
 | `DUMP_REQUEST_BODIES` | `false` | `/v1` 原始请求体落盘（含对话，仅排查）。可热更，目录 0700 / 文件 0600 / ≤200 份且不超 24h；改动进审计 |
 | `GATEWAY_PAUSED` | `false` | 全站暂停（kill switch）：所有 Key 鉴权的 `/v1` 端点返 503（`code=service_paused`），管理台照常。可热更，改动进审计并记 WARNING |

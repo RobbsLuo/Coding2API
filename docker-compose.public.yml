@@ -18,8 +18,11 @@ services:
       # PUBLIC_BASE_URL 决定 TRAE 登录回调基址与 HSTS 下发；https 才发 HSTS。
       # 它的主机名也自动进入 Host 白名单（ALLOWED_HOSTS 留空时的口径）。
       PUBLIC_BASE_URL: https://${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env (domain, or public IP with TLS_MODE=internal)}
-      # 前恰好一层 Caddy 且应用端口只在回环 → 采信 XFF 是安全的
+      # 前恰好一层 Caddy 且应用端口只在回环 → 采信 XFF 是安全的。
+      # TRUSTED_PROXIES 固定为 compose 网段：Caddy 是该网络内的唯一对端，
+      # 显式列出来才能在「有人临时加一条端口映射」时仍然挡住伪造 XFF。
       TRUST_PROXY: "true"
+      TRUSTED_PROXIES: "172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
       # Caddy 反代走 compose 网络，容器内必须监听 0.0.0.0；.env 里沿用
       # .env.example 的 HOST=127.0.0.1 会让容器只监听回环、Caddy 连不上。
       HOST: 0.0.0.0

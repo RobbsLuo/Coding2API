@@ -27,9 +27,14 @@
     <key>RunAtLoad</key>
     <true/>
 
-    <!-- 进程退出/崩溃后自动拉起 -->
+    <!-- 进程退出/崩溃后自动拉起。
+         SuccessfulExit=false：只在非零退出时重拉。frpc 的 loginFailExit=false
+         让它自己就地重连，进程不退出就不会再叠加 launchd 的 10s 重拉。 -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 
     <key>ThrottleInterval</key>
     <integer>10</integer>

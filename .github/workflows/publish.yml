@@ -64,10 +64,10 @@ jobs:
           fi
           echo "版本一致：$TAG"
 
-      # tag push 到 v* 时跑后端测试，避免把坏代码发到 GHCR。
-      # 前端由 Dockerfile 的 vite build 兜底，这里不重复。
-      - name: 后端测试（tag push 场景）
-        if: steps.meta.outputs.tag != 'skip' && github.event_name == 'push'
+      # 发版前必跑后端测试：手动触发的正式发版同样不能跳过，否则坏代码
+      # 会绕过 CI 直接进 GHCR。前端由 Dockerfile 的 vite build 兜底，这里不重复。
+      - name: 后端测试
+        if: steps.meta.outputs.tag != 'skip'
         run: |
           uv sync --frozen
           uv run ruff check src tests scripts
@@ -75,11 +75,11 @@ jobs:
 
       - name: Setup buildx
         if: steps.meta.outputs.tag != 'skip'
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069  # v4.4.1
 
       - name: Login to GHCR
         if: steps.meta.outputs.tag != 'skip'
-        uses: docker/login-action@v4
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550  # v4.8.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -87,7 +87,7 @@ jobs:
 
       - name: Build & push
         if: steps.meta.outputs.tag != 'skip'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc  # v7.4.0
         with:
           context: .
           push: true

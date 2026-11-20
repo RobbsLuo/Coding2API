@@ -32,6 +32,9 @@ WorkingDirectory=/opt/coding2api
 
 # 必填：凭证列加密密钥。放独立文件（权限 600，属主 coding2api），
 # 不要写在本 unit 里，否则 systemctl cat 会把密钥暴露给任何用户。
+# 启动前校验：权限靠人工 chmod 时遗忘过高（644）就是全员可读的密钥。
+# %% 是 systemd 的字面 %，写成 %a 会被当成未定义说明符。
+ExecStartPre=/bin/sh -c 'test "$(stat -c %%a /opt/coding2api/.env)" = "600" || { echo ".env 权限必须是 600" >&2; exit 1; }'
 EnvironmentFile=/opt/coding2api/.env
 Environment=HOST=127.0.0.1
 Environment=PORT=8000

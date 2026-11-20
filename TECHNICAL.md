@@ -539,7 +539,7 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8000/api/users  # 期�
 - 三层引导：导入 `users.txt` → `ADMIN_USERNAMES` 引导期提权 → 无活跃 admin 启动失败。三角色 `admin` / `operator` / `viewer`。鉴权链：签名 Cookie（HMAC，含用户名与 `session_epoch`）→ 用户存在且启用 → epoch 一致 → 角色现读 DB；角色不进 Cookie，降级立即生效。
 - 一次性激活令牌：库里只存 SHA-256 摘要 + 过期时间（24h）；`must_change_password=1` 时只放行看会话 / 改密 / 登出。审计覆盖登录、账号、凭证、Key 发 / 删、用户策略、运行时配置、明细导出；绝不记明文。
 - 用户级策略（`allowed_models` / `quota`）：Playground 与 `/v1` 都判，与 Key 白名单同时生效；配额按用户名聚合。kill switch（`gateway_paused`）拦在 API Key 鉴权依赖，返 503 `service_paused`。上游端点白名单：各渠道独立 `*_ALLOWED_ENDPOINTS`；CB 国际白名单不含国内站；TRAE `apiHost` 按 `ALLOWED_OAUTH_HOSTS` 拒。
-- 请求体上限（登录 8KB / 备份恢复 512MB / 其余 16MB）；CSP `frame-ancestors 'none'`；登录三级限流 + PBKDF2 并发上限；API Key 仅存摘要，明文只回显一次。入站解析拒绝越界数值与 `NaN` / `Infinity`（含 `1e999`）；SSE 单行与单帧缓冲有上限；非 2xx 错误体有界读取（256KB）。
+- 请求体上限（登录 8KB / 备份恢复 512MB / 其余 16MB）；CSP `frame-ancestors 'none'`；登录两级限流（IP / 用户名；全局窗口只观测，避免未认证攻击者打满后锁死全站登录）+ PBKDF2 并发上限；API Key 仅存摘要，明文只回显一次。入站解析拒绝越界数值与 `NaN` / `Infinity`（含 `1e999`）；SSE 单行与单帧缓冲有上限；非 2xx 错误体有界读取（256KB）。
 
 ## 14. 已知取舍
 

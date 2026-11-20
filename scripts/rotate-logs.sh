@@ -51,6 +51,12 @@ done
 STAMP="$(date +%Y%m%d-%H%M%S)"
 rotated=0
 
+# 日志含凭证 id、上游错误正文与 OAuth 调试信息：目录也收窄到属主专用。
+# 权限失败只 warn 不阻断——「不丢日志」比收紧权限更优先。
+if [[ -d "$LOGS" ]]; then
+    chmod 700 "$LOGS" 2>/dev/null || echo "警告：无法收紧日志目录权限 $LOGS" >&2
+fi
+
 # 取文件字节数。不用 stat：BSD 是 `-f %z`、GNU 是 `-c %s`，而 GNU 的
 # `stat -f` 会**成功**返回文件系统信息（不是报错），`||` 兜底不会触发。
 # `wc -c` 两边行为一致。本脚本只在 macOS 跑，但测试在 Linux CI 真跑，
@@ -95,10 +101,13 @@ for name in $LOGS_LIST; do
         rm -f "$archive"
         continue
     fi
+    # 归档继承原文件的 0644；compress 完再收，失败只 warn 不影响轮转结果。
+    chmod 600 "$archive.bz2" 2>/dev/null || echo "警告：无法收紧归档权限 $archive.bz2" >&2
     if ! : > "$file"; then
         echo "轮转失败（截断）：$file" >&2
         continue
     fi
+    chmod 600 "$file" 2>/dev/null || echo "警告：无法收紧日志权限 $file" >&2
     rotated=$((rotated + 1))
     echo "已轮转 $file → $(basename "$archive").bz2（${size_kb}KB）"
 done
