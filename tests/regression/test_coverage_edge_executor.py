@@ -479,3 +479,21 @@ def test_stream_error_4001_is_invalid_not_other():
     assert _event_kind(Event(kind=EventKind.ERROR, error_code=4001)) is ErrKind.OTHER
     assert _event_kind(Event(kind=EventKind.ERROR, error_code=4001,
                              error_kind=ErrKind.INVALID)) is ErrKind.INVALID
+
+def test_toggle_rejects_non_boolean_enabled(tmp_path):
+    """`{"enabled": "false"}` 必须 400。
+
+    `bool("false") is True`，放过它会把「停用」静默执行成「启用」——写操作
+    语义反转，管理员看不到任何报错。
+    """
+    app, client = _client(tmp_path)
+    app.state.credentials.add(provider="trae", credential_data={"accessToken": "a"})
+    credential_id = app.state.credentials.candidates()[0].credential_id
+    client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+    with client:
+        for bad in ("false", "0", 0, 1, None):
+            response = client.post(f"/api/credentials/{credential_id}/toggle",
+                                   json={"enabled": bad})
+            assert response.status_code == 400, bad
+        assert client.post(f"/api/credentials/{credential_id}/toggle",
+                           json={"enabled": False}).status_code == 200

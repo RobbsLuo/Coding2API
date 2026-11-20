@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from src.provider.codebuddy.client import CodeBuddyCredential, build_headers
 from src.provider.codebuddy.headers import encode_department, host_of
 
@@ -214,3 +216,44 @@ def test_conversation_uuid_cache_is_bounded(monkeypatch):
     assert len(hdrs._CONVERSATION_CREATED_AT) == 2
     hdrs.conversation_uuid("c")
     assert list(hdrs._CONVERSATION_CREATED_AT) == ["c"]
+
+
+# --------------------------------------------------- 模型名进头的字符校验
+
+
+@pytest.mark.parametrize("model", [
+    "deepseek-v4.1-flash",
+    "claude-3.5-sonnet_2026",
+    "vendor/model:free",
+    "glm-5.2@codebuddy",          # `@` 渠道后缀
+    "a" * 128,                    # 长度上界
+])
+def test_model_header_rejects_nothing_for_legal_names(model):
+    """合法模型名（含 `@` 后缀 / `/` 命名空间 / `:`）原样进 `X-Model-ID`。"""
+    headers = build_headers(
+        CodeBuddyCredential(bearer_token="t"), "https://www.codebuddy.ai",
+        intl=True, model=model)
+    assert headers["X-Model-ID"] == model
+
+
+@pytest.mark.parametrize("model", [
+    "模型-中文名",                 # 非 ASCII → httpx 抛 UnicodeEncodeError
+    "evil\r\nX-Injected: 1",      # CRLF → httpx 抛 LocalProtocolError
+    "with space",
+    "a" * 129,                    # 超长
+])
+def test_model_header_rejects_illegal_names(model):
+    """非法模型名在写头处转成 `InvalidModelName`（INVALID），不漏成 500。"""
+    from src.provider.base import ErrKind, InvalidModelName
+
+    with pytest.raises(InvalidModelName) as caught:
+        build_headers(CodeBuddyCredential(bearer_token="t"),
+                      "https://www.codebuddy.ai", intl=True, model=model)
+    assert caught.value.kind() is ErrKind.INVALID
+
+
+def test_empty_model_skips_the_header_entirely():
+    """空模型名不写头（历史行为），不必过白名单。"""
+    headers = build_headers(CodeBuddyCredential(bearer_token="t"),
+                            "https://www.codebuddy.ai", intl=True, model="")
+    assert "X-Model-ID" not in headers

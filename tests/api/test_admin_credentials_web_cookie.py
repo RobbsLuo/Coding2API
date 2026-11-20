@@ -123,3 +123,31 @@ def test_list_exposes_web_cookie_state_and_setting_resets_it(admin_client):
     rows = client.get("/api/credentials").json()["credentials"]
     assert next(item for item in rows if item["id"] == credential_id)[
         "web_cookie_state"] is None
+
+
+def test_set_web_cookie_holds_edit_lock(admin_client):
+    """写入必须持凭证编辑锁：`save_credential_data` 是整份覆盖。
+
+    不加锁时 RefreshTask 的「读 → await 上游 → 整份覆写」会把刚设置的
+    cookie 用旧快照覆盖回去（一次性 refresh_token 场景下凭证直接失效）。
+    """
+    app, client = admin_client
+    credential_id = _add_qoder(app)
+    lock = app.state.credentials.edit_lock(credential_id)
+
+    seen: list[bool] = []
+    original_set = app.state.credentials.set_web_cookie_state
+
+    def spy(*args, **kwargs):
+        seen.append(lock.locked())          # 锁内才能看到 locked()=True
+        return original_set(*args, **kwargs)
+
+    app.state.credentials.set_web_cookie_state = spy
+    try:
+        response = client.put(f"/api/credentials/{credential_id}/web-cookie",
+                              json={"cookie": "sid=1"})
+    finally:
+        app.state.credentials.set_web_cookie_state = original_set
+    assert response.status_code == 200
+    assert seen == [True]
+    assert lock.locked() is False           # 出锁归还

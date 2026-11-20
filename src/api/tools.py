@@ -18,10 +18,15 @@
 
 **不落用量明细**：这两个端点不消耗 token，落 `usage_events` 会污染 token 与
 成本口径。只写一行访问日志（中间件已有 `X-Request-ID`）。
+
+但**配额准入照判**（Key + 用户两层）：RPM/TPM/并发是请求维度的，不落明细也
+不污染成本；缺这一步时一把 0 配额 Key 就能无限消耗共享凭证池的检索额度。
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -30,11 +35,19 @@ from fastapi.responses import JSONResponse
 from ..compat.openai.errors import error_payload
 from ..compat.openai.request import InvalidRequest
 from ..engine.executor import NoHealthyCredential
+from ..key_quota import Lease, QuotaExceeded
 from ..provider.codebuddy.tools import ToolRejected
+from ..runtime_settings import blocked_webhook_host
 from .deps import ApiKeyPrincipal, Services, api_key_user, read_json_body
+from .endpoints import _CombinedLease, quota_exceeded_response
+
+logger = logging.getLogger(__name__)
 
 # 搜索/抓取只在这些渠道上有实现（其它渠道缺 `search_web` / `fetch_url` 方法）
 _TOOL_PROVIDERS = ("codebuddy", "codebuddy_intl")
+
+# 工具调用不产生模型 token，给 TPM 一个固定小预估即可：只为让速率判定有输入。
+_TOOL_TOKENS = 64
 
 
 def _require_str(body: dict[str, Any], key: str, *, maximum: int) -> str:
@@ -58,12 +71,40 @@ def _optional_domains(body: dict[str, Any], key: str) -> list[str] | None:
 
 
 def _rejection(error: ToolRejected) -> JSONResponse:
-    code = ("invalid_request" if error.status == 400
-            else "rate_limit_exceeded" if error.status == 429
-            else "credential_rejected" if error.status == 403
-            else "upstream_error")
+    """上游拒绝 → 受控文案：只给分类，不把上游正文回给 API 消费者。
+
+    上游 body 可能含内部 schema / 请求回显（进而含 query 或 credential 片段），
+    透传给任意调用方即信息泄露；原文只进服务端日志。
+    """
+    if error.status == 400:
+        code, message = "invalid_request", "upstream rejected the request"
+    elif error.status == 429:
+        code, message = "rate_limit_exceeded", "upstream rate limited the request"
+    elif error.status == 403:
+        code, message = "credential_rejected", "upstream rejected credential"
+    else:
+        code, message = "upstream_error", f"upstream error {error.status}"
+    logger.warning("工具上游拒绝 status=%s: %s", error.status, error.message)
     return JSONResponse(status_code=error.status,
-                        content=error_payload(error.message, code, error.status))
+                        content=error_payload(message, code, error.status))
+
+
+def _admit_quota(services: Services, principal: ApiKeyPrincipal) -> Lease:
+    """与聊天同一套两层配额（Key + 用户）；工具调用没有请求体可估 token。
+
+    先 Key 后用户，用户级拒绝时归还 Key 级名额；与 `endpoints._admit_quota`
+    复用 `_CombinedLease`，避免两层归还口径分叉。
+    """
+    lease = services.key_quota.admit(
+        principal.key_id, principal.quota, tokens=_TOOL_TOKENS)
+    try:
+        user_lease = services.user_quota.admit(
+            principal.username, principal.user_quota, tokens=_TOOL_TOKENS,
+            subject="user")
+    except QuotaExceeded:
+        lease.release()
+        raise
+    return _CombinedLease(lease, user_lease)
 
 
 def create_router(services: Services) -> APIRouter:
@@ -114,6 +155,10 @@ def create_router(services: Services) -> APIRouter:
         if freshness is not None and not isinstance(freshness, str):
             raise InvalidRequest("freshness must be a string")
         try:
+            lease = _admit_quota(services, principal)
+        except QuotaExceeded as error:
+            return quota_exceeded_response(error)
+        try:
             return await _call(lambda provider, data: provider.search_web(
                 data, query=query, max_results=max_results,
                 allowed_domains=_optional_domains(body, "allowed_domains"),
@@ -121,6 +166,8 @@ def create_router(services: Services) -> APIRouter:
                 freshness=freshness))
         except ToolRejected as error:
             return _rejection(error)
+        finally:
+            lease.release()
 
     @router.post("/v1/fetch")
     async def fetch_url(request: Request,
@@ -132,6 +179,10 @@ def create_router(services: Services) -> APIRouter:
         url = _require_str(body, "url", maximum=4096)
         if not url.startswith(("http://", "https://")):
             raise InvalidRequest("url must be an http(s) URL")
+        # 信任边界：URL 由调用方控制，而抓取走共享凭证，内网/保留地址必须拦。
+        if await asyncio.to_thread(blocked_webhook_host, url):
+            raise InvalidRequest(
+                "url must not point to a private, loopback or reserved address")
         prompt = body.get("prompt") or ""
         if not isinstance(prompt, str):
             raise InvalidRequest("prompt must be a string")
@@ -141,9 +192,15 @@ def create_router(services: Services) -> APIRouter:
                                        or max_length <= 0):
             raise InvalidRequest("max_length must be a positive integer")
         try:
+            lease = _admit_quota(services, principal)
+        except QuotaExceeded as error:
+            return quota_exceeded_response(error)
+        try:
             return await _call(lambda provider, data: provider.fetch_url(
                 data, url=url, prompt=prompt, max_length=max_length))
         except ToolRejected as error:
             return _rejection(error)
+        finally:
+            lease.release()
 
     return router

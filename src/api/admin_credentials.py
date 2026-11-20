@@ -459,13 +459,18 @@ def create_router(services: Services) -> APIRouter:
                                 _csrf: None = Depends(csrf_protected),
                                 principal=Depends(principal_from_request)):
         require_operator(principal)
-        if not credentials.set_enabled(credential_id, bool(payload.get("enabled", True))):
+        # 类型必须严格是布尔：`bool("false") is True`，收到字符串会把「停用」
+        # 静默执行成「启用」（写操作语义反转），管理员看不到任何报错。
+        enabled = payload.get("enabled", True)
+        if not isinstance(enabled, bool):
+            raise InvalidRequest("enabled must be a boolean")
+        if not credentials.set_enabled(credential_id, enabled):
             raise InvalidRequest("credential not found")
         logger.info("管理员 %s 开关凭证 %s -> %s", principal.username, credential_id,
-                    payload.get("enabled", True))
+                    enabled)
         services.audit.record(actor=principal.username, action=ACTION_CREDENTIAL_TOGGLE,
                               target=credential_id,
-                              detail=f"enabled={bool(payload.get('enabled', True))}")
+                              detail=f"enabled={enabled}")
         return {"ok": True}
 
     @router.post("/api/credentials/{credential_id}/revive")
@@ -576,9 +581,6 @@ def create_router(services: Services) -> APIRouter:
         清除，额度探测回退到汇总接口口径。
         """
         require_operator(principal)
-        provider, data = provider_for(
-            credential_id, "set_web_cookie",
-            error="credential does not support web cookie")
         cookie = payload.get("cookie")
         if not isinstance(cookie, str):
             raise InvalidRequest("cookie must be a string")
@@ -586,11 +588,19 @@ def create_router(services: Services) -> APIRouter:
         if len(cookie) > WEB_COOKIE_MAX_LENGTH:
             raise InvalidRequest(
                 f"cookie too long (max {WEB_COOKIE_MAX_LENGTH} characters)")
-        credentials.save_credential_data(
-            credential_id, provider.set_web_cookie(data, cookie))
-        # 新 Cookie 的有效性以下一轮探测为准：先清掉旧状态，避免「刚粘贴仍显示
-        # 已失效」；清除 Cookie 时同样回到无状态。
-        credentials.set_web_cookie_state(credential_id, None)
+        # 与 RefreshTask / 签到自动登录的「读 → await → 整份覆写」互斥：
+        # `save_credential_data` 是整份覆盖，不加锁时后写者会用旧快照把
+        # 刚轮换的 token（或刚设置的 cookie）回滚掉；一次性 refresh_token
+        # 场景下还会让凭证直接失效。锁内重读 data，别用锁外那份。
+        async with credentials.edit_lock(credential_id):
+            provider, data = provider_for(
+                credential_id, "set_web_cookie",
+                error="credential does not support web cookie")
+            credentials.save_credential_data(
+                credential_id, provider.set_web_cookie(data, cookie))
+            # 新 Cookie 的有效性以下一轮探测为准：先清掉旧状态，避免「刚粘贴仍显示
+            # 已失效」；清除 Cookie 时同样回到无状态。
+            credentials.set_web_cookie_state(credential_id, None)
         logger.info("管理员 %s 设置凭证 %s 网页 Cookie: %s",
                     principal.username, credential_id,
                     "已设置" if cookie else "已清除")
@@ -616,9 +626,6 @@ def create_router(services: Services) -> APIRouter:
         两个都留空 = 清除（按需登录随之停用，签到回落到「需人工重登」提示）。
         """
         require_operator(principal)
-        provider, data = provider_for(
-            credential_id, "set_login_secret",
-            error="credential does not support login secret")
         phone = payload.get("phone")
         password = payload.get("password")
         if not isinstance(phone, str) or not isinstance(password, str):
@@ -638,10 +645,15 @@ def create_router(services: Services) -> APIRouter:
         if len(password) > LOGIN_PASSWORD_MAX_LENGTH:
             raise InvalidRequest(
                 f"password too long (max {LOGIN_PASSWORD_MAX_LENGTH} characters)")
-        # 走 `save_credential_data`：它同一事务里刷新 `login_secret` 派生标记
-        # （清除时 phone/password 为空 → 标记回 NULL），不必单独维护一份状态。
-        credentials.save_credential_data(
-            credential_id, provider.set_login_secret(data, phone, password))
+        # 同 set_web_cookie：整份覆写必须与刷新任务互斥，锁内重读 data。
+        async with credentials.edit_lock(credential_id):
+            provider, data = provider_for(
+                credential_id, "set_login_secret",
+                error="credential does not support login secret")
+            # 走 `save_credential_data`：它同一事务里刷新 `login_secret` 派生标记
+            # （清除时 phone/password 为空 → 标记回 NULL），不必单独维护一份状态。
+            credentials.save_credential_data(
+                credential_id, provider.set_login_secret(data, phone, password))
         logger.info("管理员 %s 设置凭证 %s 账号密码: %s",
                     principal.username, credential_id,
                     "已清除" if cleared else "已保存")

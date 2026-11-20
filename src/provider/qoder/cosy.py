@@ -36,6 +36,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
+from ..base import header_model_name
 from .events import CLIENT_UA, DEFAULT_USER_TYPE
 
 # ---------------------------------------------------------------------------
@@ -325,7 +326,7 @@ class CosySession:
         if sse:
             headers["cache-control"] = "no-cache"
         if model_key:
-            headers["x-model-key"] = model_key
+            headers["x-model-key"] = header_model_name(model_key)
             headers["x-model-source"] = "system"
         return headers
 

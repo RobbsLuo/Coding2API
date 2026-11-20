@@ -109,6 +109,21 @@ def test_invalid_or_missing_headers_return_none(headers):
     assert parse_retry_after_seconds(headers, NOW) is None
 
 
+def test_absurdly_long_numeric_retry_after_falls_back():
+    """超长纯数字（>4300 位）不能让 int()/float() 的异常穿透成 500。
+
+    实测 `Retry-After: 9*4400` 抛 OverflowError、5000+ 位抛 ValueError；
+    `retry_hints` 在每个 provider 构造 `UpstreamHTTPError` 时调用，故必须
+    回落 None（本地常量冷却）而不是上抛。
+    """
+    # 1) float(int()) 溢出（400 位数字仍是合法 int，转 float 抛 OverflowError）
+    assert retry_hints({"Retry-After": "9" * 400}, NOW) == {
+        "retry_at": None, "retry_after_seconds": None}
+    # 2) int() 本身拒绝（>4300 位，抛 ValueError）
+    assert retry_hints({"Retry-After": "1" * 4400}, NOW) == {
+        "retry_at": None, "retry_after_seconds": None}
+
+
 def test_retry_hints_shape():
     """无头时两值都是 None：`**retry_hints(...)` 与旧构造逐字节等价。"""
     assert retry_hints({}, NOW) == {"retry_at": None, "retry_after_seconds": None}

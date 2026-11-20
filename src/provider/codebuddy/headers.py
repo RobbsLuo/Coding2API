@@ -17,6 +17,8 @@ import time
 import uuid
 from urllib.parse import quote, urlsplit
 
+from ..base import header_model_name
+
 CN_ENDPOINT = "https://copilot.tencent.com"
 INTL_ENDPOINT = "https://www.codebuddy.ai"
 
@@ -208,7 +210,7 @@ def generate_headers(
         headers["X-Trace-ID"] = request_id
         headers["X-Session-ID"] = conversation_id
         if model:
-            headers["X-Model-ID"] = model
+            headers["X-Model-ID"] = header_model_name(model)
     if quota_only:
         return headers
     # OAuth 凭证优先用 account_uid，否则回退 user_id；国际站再回退到 JWT `sub`

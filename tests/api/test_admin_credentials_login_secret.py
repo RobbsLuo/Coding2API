@@ -88,3 +88,26 @@ def test_export_omits_login_password(admin_client):
     # 原凭证仍完整
     assert app.state.credentials.credential_data(credential_id)["password"] == (
         "Abcd123456")
+
+def test_set_login_secret_holds_edit_lock(admin_client):
+    """账号密码写入同样走编辑锁（与 web-cookie 同一根因）。"""
+    app, client = admin_client
+    credential_id = _add_raccoon(app)
+    lock = app.state.credentials.edit_lock(credential_id)
+
+    seen: list[bool] = []
+    original_save = app.state.credentials.save_credential_data
+
+    def spy(*args, **kwargs):
+        seen.append(lock.locked())
+        return original_save(*args, **kwargs)
+
+    app.state.credentials.save_credential_data = spy
+    try:
+        response = client.put(f"/api/credentials/{credential_id}/login-secret",
+                              json={"phone": "13800000000", "password": "pw"})
+    finally:
+        app.state.credentials.save_credential_data = original_save
+    assert response.status_code == 200
+    assert seen == [True]
+    assert lock.locked() is False

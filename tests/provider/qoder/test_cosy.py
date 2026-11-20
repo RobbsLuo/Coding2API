@@ -142,3 +142,50 @@ def test_cosy_session_cache_clear_and_invalidate_missing():
     cache = CosySessionCache(temp_key_factory=lambda: "0123456789abcdef")
     cache.invalidate("nobody")                                # 不存在也不抛
     cache.clear()
+
+
+# ----------------------------------------------- x-model-key 进头的字符校验
+
+
+@pytest.mark.parametrize("model_key", [
+    "qmodel_38max",
+    "kmodel_latest",
+    "vendor/model:free",
+    "model@qoder",                # `@` 渠道后缀
+    "a" * 128,                    # 长度上界
+])
+def test_session_headers_accept_legal_model_key(model_key):
+    session = CosySession(uid="u1", access_token="t",
+                          temp_key="0123456789abcdef")
+    headers = session.headers(body="B", raw_url=GATEWAY + qoder_events.EP_CHAT,
+                              model_key=model_key, date="1700000000",
+                              request_id="rid")
+    assert headers["x-model-key"] == model_key
+    assert headers["x-model-source"] == "system"
+
+
+@pytest.mark.parametrize("model_key", [
+    "模型-中文名",                 # 非 ASCII → httpx 抛 UnicodeEncodeError
+    "evil\r\nX-Injected: 1",      # CRLF → httpx 抛 LocalProtocolError
+    "with space",
+    "a" * 129,                    # 超长
+])
+def test_session_headers_reject_illegal_model_key(model_key):
+    """非法模型名在写头处转成 `InvalidModelName`（INVALID），不漏成 500。"""
+    from src.provider.base import ErrKind, InvalidModelName
+
+    session = CosySession(uid="u1", access_token="t",
+                          temp_key="0123456789abcdef")
+    with pytest.raises(InvalidModelName) as caught:
+        session.headers(body="B", raw_url=GATEWAY + qoder_events.EP_CHAT,
+                        model_key=model_key, date="1700000000", request_id="rid")
+    assert caught.value.kind() is ErrKind.INVALID
+
+
+def test_session_headers_omit_model_key_when_empty():
+    """空 `model_key` 不写头（模型清单请求走这条），不必过白名单。"""
+    session = CosySession(uid="u1", access_token="t",
+                          temp_key="0123456789abcdef")
+    headers = session.headers(body="B", raw_url=GATEWAY + qoder_events.EP_CHAT,
+                              model_key="", date="1700000000", request_id="rid")
+    assert "x-model-key" not in headers and "x-model-source" not in headers

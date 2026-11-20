@@ -220,6 +220,18 @@ def test_parse_queue_hint_accepts_bytes():
     assert parse_queue_hint(b'{"isQueued": true, "retryAfterSeconds": 4}') == 4.0
 
 
+def test_parse_queue_hint_huge_integer_is_not_a_queue():
+    """超 4300 位整数：`json.loads` 抛 ValueError（非 JSONDecodeError），必须吞掉。
+
+    该函数在 Qoder `classify_status` 与 `client._decode_frame` 里调用，异常
+    穿透会把一次普通的坏报文变成 500。
+    """
+    huge = '{"data":' + "1" * 5000 + "}"
+    assert parse_queue_hint(huge) is None
+    # 字符串载荷分支（再序列化报文）同样要吞
+    assert parse_queue_hint(json.dumps({"message": huge})) is None
+
+
 # ------------------------------------------------------- 调度器零动作
 
 

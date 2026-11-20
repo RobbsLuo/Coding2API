@@ -100,6 +100,32 @@ NO_PENALTY_KINDS = frozenset({ErrKind.REQUEST, ErrKind.CONTEXT, ErrKind.NETWORK}
 # `_skip_provider` + 以 400 收尾；统计口径分开（invalid_request / model_capability）。
 REJECT_KINDS = frozenset({ErrKind.INVALID, ErrKind.CAPABILITY})
 
+# 写进上游 HTTP 头的模型名（`X-Model-ID` / `x-model-key`）：非 ASCII 会让 httpx 抛
+# UnicodeEncodeError、CRLF 抛 LocalProtocolError，两者都不是 TransportError，会
+# 穿透成 500。`@` / `/` 是渠道后缀与厂商命名空间，必须放行。
+_HEADER_MODEL_RE = re.compile(r"[A-Za-z0-9._:/@\-]{1,128}")
+
+
+class InvalidModelName(ValueError):
+    """模型名不能写进上游 HTTP 头（非白名单字符 / 超长）。
+
+    归类 INVALID：是请求本身的问题，换号换渠道都没用，也不该冷却凭证。
+    """
+
+    def kind(self) -> ErrKind:
+        return ErrKind.INVALID
+
+
+def header_model_name(model: str) -> str:
+    """校验要写进 HTTP 头的模型名；非法抛 `InvalidModelName`。
+
+    只校验进头的那个值：模型名本身仍原样透传给上游。
+    """
+    if not _HEADER_MODEL_RE.fullmatch(model):
+        raise InvalidModelName(
+            f"model {model!r} contains characters not allowed in upstream headers")
+    return model
+
 
 def normalize_developer_role(messages: Any) -> int:
     """把 `role: "developer"` 归一为 `system`，返回改写条数。
@@ -186,7 +212,12 @@ def _retry_after_delta(raw: str, now: int) -> float | None:
     if not text:
         return None
     if text.isdigit():
-        return float(int(text))
+        try:
+            return float(int(text))
+        except (ValueError, OverflowError):
+            # 超长数字（>4300 位）int() 抛 ValueError、超大整数 float() 抛
+            # OverflowError；坏头不该把构造异常的一方打成 500，回落本地冷却。
+            return None
     try:
         moment = parsedate_to_datetime(text)
     except (TypeError, ValueError):
@@ -344,7 +375,7 @@ def parse_queue_hint(body: bytes | str) -> float | None:
         return None
     try:
         payload = json.loads(text)
-    except json.JSONDecodeError:
+    except ValueError:  # 含 JSONDecodeError；超 4300 位整数时 json 抛 ValueError
         return None
     return _queue_wait_in(payload, depth=0)
 
@@ -404,7 +435,7 @@ def _queue_wait_in_text(text: str, depth: int) -> float | None:
         return None
     try:
         parsed = json.loads(stripped)
-    except json.JSONDecodeError:
+    except ValueError:  # 同上：超长整数抛 ValueError 而非 JSONDecodeError
         return None
     return _queue_wait_in(parsed, depth)
 

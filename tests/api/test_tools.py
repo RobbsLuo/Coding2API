@@ -20,6 +20,16 @@ from src.provider.codebuddy.tools import (
 )
 from tests.helpers.constants import SECRET
 
+# ------------------------------------------------------------------ 夹具
+
+@pytest.fixture(autouse=True)
+def _allow_fetch_hosts(monkeypatch):
+    """默认放行抓取目标：真实复核会做 DNS，用例里的占位域名解析必然失败。
+
+    SSRF 真值与分支由 `test_fetch_*` 显式覆盖（含公网放行与内网拦截）。
+    """
+    monkeypatch.setattr("src.api.tools.blocked_webhook_host", lambda url: False)
+
 # ------------------------------------------------------------------ 纯函数
 
 @pytest.mark.parametrize(("code", "status"), [
@@ -464,3 +474,123 @@ async def test_provider_search_web_and_fetch_url_go_through_pacer(repo):
     assert fetched["content"] == "c"
     assert seen == [EP_SEARCH, EP_WEBFETCH]
     db.close()
+
+
+# ------------------------------------------------------- 配额准入 / SSRF / 文案
+
+def _quota_app(tmp_path, provider, *, user_quota=None):
+    """单独建一个可按 Key/用户配额配置的 app（配额要写库，不能共用 `_app`）。"""
+    app = _app(tmp_path, provider)
+    if user_quota is not None:
+        app.state.user_repo.set_policy("root", allowed_models="", quota=user_quota)
+    return app
+
+
+def _key_headers(app, quota: str = "") -> dict:
+    return {"Authorization": f"Bearer {app.state.api_keys.create('root', quota=quota)['api_key']}"}
+
+
+def test_tools_search_applies_key_rpm_quota(tmp_path):
+    """0 配额外挂：超 RPM 必须 429，且不再打到上游。"""
+    provider = _ToolProvider()
+    app = _quota_app(tmp_path, provider)
+    with TestClient(app) as client:
+        headers = _key_headers(app, quota=json.dumps({"rpm": 1}))
+        first = client.post("/v1/tools/search", headers=headers, json={"query": "q"})
+        blocked = client.post("/v1/tools/search", headers=headers, json={"query": "q"})
+    assert first.status_code == 200
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["type"] == "quota_exceeded"
+    assert "requests per minute" in blocked.json()["error"]["message"]
+    assert int(blocked.headers["Retry-After"]) >= 1
+    assert len(provider.calls) == 1
+
+
+def test_fetch_applies_user_rpm_quota(tmp_path):
+    """用户级配额同样生效：换一把 Key 也绕不过（用户维度聚合）。"""
+    app = _quota_app(tmp_path, _ToolProvider(),
+                     user_quota=json.dumps({"rpm": 1}))
+    with TestClient(app) as client:
+        first = client.post("/v1/fetch", headers=_auth(app), json={"url": "https://a"})
+        second_headers = _key_headers(app)
+        blocked = client.post("/v1/fetch", headers=second_headers,
+                              json={"url": "https://a"})
+    assert first.status_code == 200
+    assert blocked.status_code == 429
+    assert blocked.json()["error"]["message"].startswith("user quota exceeded")
+
+
+def test_tools_quota_lease_released_after_each_request(tmp_path):
+    """并发租约必须归还：否则 max_concurrency=1 的 Key 自己就把自己锁死。"""
+    app = _quota_app(tmp_path, _ToolProvider())
+    created = app.state.api_keys.create("root", quota=json.dumps({"max_concurrency": 1}))
+    headers = {"Authorization": f"Bearer {created['api_key']}"}
+    with TestClient(app) as client:
+        for _ in range(3):
+            assert client.post("/v1/tools/search", headers=headers,
+                               json={"query": "q"}).status_code == 200
+    assert app.state.services.key_quota.inflight(created["id"]) == 0
+
+
+def test_tools_quota_user_rejection_releases_key_slot(tmp_path):
+    """用户级拒绝时 Key 级的在途名额要立刻归还（两层口径不分叉）。"""
+    from src.key_quota import KeyQuota
+
+    app = _quota_app(tmp_path, _ToolProvider(),
+                     user_quota=json.dumps({"max_concurrency": 1}))
+    created = app.state.api_keys.create("root", quota=json.dumps({"max_concurrency": 5}))
+    app.state.services.user_quota.admit("root", KeyQuota(max_concurrency=1))
+    with TestClient(app) as client:
+        blocked = client.post(
+            "/v1/tools/search",
+            headers={"Authorization": f"Bearer {created['api_key']}"},
+            json={"query": "q"})
+    assert blocked.status_code == 429
+    assert app.state.services.key_quota.inflight(created["id"]) == 0
+
+
+@pytest.mark.parametrize("url", [
+    "http://127.0.0.1/x",
+    "http://169.254.169.254/latest/meta-data",
+    "http://100.100.100.200/x",
+])
+def test_fetch_rejects_private_addresses(tmp_path, monkeypatch, url):
+    """用户可控 URL 的信任边界：内网/保留地址一律 400，不打上游。"""
+    monkeypatch.setattr("src.api.tools.blocked_webhook_host", lambda _url: True)
+    provider = _ToolProvider()
+    app = _app(tmp_path, provider)
+    with TestClient(app) as client:
+        response = client.post("/v1/fetch", headers=_auth(app), json={"url": url})
+    assert response.status_code == 400
+    assert "private, loopback or reserved" in response.text
+    assert provider.calls == []
+
+
+def test_fetch_allows_public_url(tmp_path, monkeypatch):
+    """公网地址照常放行（不误伤正常抓取）。"""
+    seen: list[str] = []
+    monkeypatch.setattr("src.api.tools.blocked_webhook_host",
+                        lambda url: seen.append(url) or False)
+    app = _app(tmp_path, _ToolProvider())
+    with TestClient(app) as client:
+        response = client.post("/v1/fetch", headers=_auth(app),
+                               json={"url": "https://example.com/a"})
+    assert response.status_code == 200
+    assert seen == ["https://example.com/a"]
+
+
+def test_tool_rejection_does_not_echo_upstream_body(tmp_path, caplog):
+    """上游拒绝正文只进日志：对外只给受控分类，避免内部 schema/请求回显外泄。"""
+    class Leaky(_ToolProvider):
+        async def search_web(self, credential_data, **kwargs):
+            raise ToolRejected(502, 'secret_body query="user input" token=abc')
+
+    app = _app(tmp_path, Leaky())
+    with TestClient(app) as client, caplog.at_level("WARNING"):
+        response = client.post("/v1/tools/search", headers=_auth(app),
+                               json={"query": "q"})
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "upstream_error"
+    assert "secret_body" not in response.text
+    assert response.json()["error"]["message"] == "upstream error 502"
+    assert "secret_body" in caplog.text

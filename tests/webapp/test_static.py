@@ -147,3 +147,27 @@ def test_unmatched_write_method_without_index_reports_missing(tmp_path, monkeypa
         response = client.post("/some-page")
     assert response.status_code == 503
     assert "pnpm build" in response.text
+
+
+def test_spa_v1beta_prefix_returns_json_404(tmp_path, monkeypatch):
+    """/v1beta（Gemini 出口）必须归 API，不能落到 SPA。
+
+    漏掉它时拼错的 Gemini 端点拿到 200 + HTML，SDK 把 HTML 当成功响应解析，
+    既掩盖了错误又被计入可用性。
+    """
+    with _spa_client(tmp_path, monkeypatch=monkeypatch) as client:
+        for path in ("/v1beta/models/x", "/v1beta", "/v1beta/"):
+            response = client.get(path)
+            assert response.status_code == 404, path
+            assert response.json()["error"]["code"] == "invalid_request"
+
+
+def test_spa_rejects_nul_byte_path(tmp_path, monkeypatch):
+    """含 NUL 的路径回 JSON 404，而不是 lstat 抛 ValueError 变 500。
+
+    未鉴权请求即可触发，且那个 500 由 ServerErrorMiddleware 直出、绕过安全头。
+    """
+    with _spa_client(tmp_path, monkeypatch=monkeypatch) as client:
+        response = client.get("/a%00b")
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "invalid_request"
