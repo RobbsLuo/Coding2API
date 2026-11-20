@@ -307,6 +307,48 @@ def test_public_detail_masks_only_present_pii():
         "nickname": "", "provider": "trae"}
 
 
+def test_public_detail_masks_username_and_api_key_id():
+    """`username` / `api_key_id` 也是内部标识 + PII：外发打码，站内留原文。"""
+    from src.tasks.alerting import _public_detail
+
+    assert _public_detail({"api_key_id": "k1", "username": "alice",
+                           "tokens": 9}) == {
+        "api_key_id": "***", "username": "***", "tokens": 9}
+    # 空值不打码（不制造多余 `***` 噪声）
+    assert _public_detail({"api_key_id": None, "username": ""}) == {
+        "api_key_id": None, "username": ""}
+
+
+async def test_alert_task_key_burst_webhook_redacts_identity(tmp_path):
+    """key_burst 外发 payload 不含 Key id / 账号名原文，站内记录仍保留。"""
+    seen: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    stats = _KeyStats([{"api_key_id": "key-internal-1", "username": "alice@corp",
+                        "requests": 5, "tokens": 900_000}])
+    task, alerts, db = _task(
+        tmp_path, stats=stats, now=lambda: 10_000,
+        key_burst_tokens=lambda: 500_000,
+        key_burst_window_minutes=lambda: 10,
+        webhook_url=lambda: "https://hook.example/a", client=client)
+    await task.run_once()
+
+    row = alerts.recent()[0]
+    assert json.loads(row["detail"])["api_key_id"] == "key-internal-1"
+    assert json.loads(row["detail"])["username"] == "alice@corp"
+    payload = seen[0]
+    assert payload["detail"]["api_key_id"] == "***"
+    assert payload["detail"]["username"] == "***"
+    assert "key-internal-1" not in json.dumps(payload, ensure_ascii=False)
+    assert "alice@corp" not in json.dumps(payload, ensure_ascii=False)
+    await client.aclose()
+    db.close()
+
+
 def test_alert_public_message_masks_pii_fragments():
     from src.tasks.alerting import Alert
 
@@ -316,6 +358,20 @@ def test_alert_public_message_masks_pii_fragments():
     # 空片段不参与替换（避免把整条文案打散）
     assert Alert(rule="r", severity=SEVERITY_WARNING, scope="s",
                  message="x", pii=("",)).public_message() == "x"
+
+
+def test_alert_public_scope_masks_pii_and_keeps_clean_scopes():
+    from src.tasks.alerting import Alert
+
+    alert = Alert(rule="key_burst", severity=SEVERITY_WARNING,
+                  scope="key-internal-1", message="x", pii=("key-internal-1",))
+    assert alert.public_scope() == "***"
+    # 无 PII 的告警 scope 原样外发
+    assert Alert(rule="pool_empty", severity=SEVERITY_CRITICAL,
+                 scope="pool", message="x").public_scope() == "pool"
+    # 空片段跳过（与 public_message 同口径）
+    assert Alert(rule="r", severity=SEVERITY_WARNING, scope="pool",
+                 message="x", pii=("",)).public_scope() == "pool"
 
 
 def test_alert_task_spec_registered():
@@ -834,3 +890,12 @@ async def test_alert_task_reports_checkin_failure_streak(tmp_path):
         checkin_fail_min_streak=lambda: 3)
     assert (await off.run_once())["evaluated"] == 0
     off_db.close()
+
+
+def test_alert_public_scope_leaves_non_matching_parts_untouched():
+    """scope 里不含该 PII 片段时原样返回（`replace` 未命中的分支）。"""
+    from src.tasks.alerting import Alert
+
+    alert = Alert(rule="r", severity=SEVERITY_WARNING, scope="pool",
+                  message="x", pii=("someone@example.com",))
+    assert alert.public_scope() == "pool"

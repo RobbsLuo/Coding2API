@@ -35,6 +35,7 @@ import logging
 from typing import Any
 
 from ..db.crypto import CredentialDecryptError
+from ..error_text import error_text
 from ..provider.base import ErrKind, EventKind, UpstreamHTTPError, event_error_kind
 from . import TaskReport
 
@@ -181,19 +182,26 @@ class ModelProbeTask:
                 async for event in provider.stream_chat(data, probe_payload(), model):
                     if event.kind is EventKind.ERROR:
                         kind = event_error_kind(event)
-                        detail = event.error_message or f"error {event.error_code}"
+                        # 上游原文只进服务端日志；落库只留受控标识（同
+                        # `engine.executor._error_summary` 口径），响应体不进管理台。
+                        logger.warning("模型探活返回上游错误（%s / %s）：%s",
+                                       provider.id, model,
+                                       event.error_message or event.error_code)
                         return ("failed" if kind in _FAILURE_KINDS else "inconclusive",
-                                _trim(detail))
+                                _event_label(event))
                     if event.kind in (EventKind.CONTENT, EventKind.FINISH):
                         return ("ok", "")
         except UpstreamHTTPError as error:
             state = "failed" if error.kind() in _FAILURE_KINDS else "inconclusive"
-            return (state, _trim(f"HTTP {error.status}: {error}"))
+            logger.warning("模型探活 HTTP 失败（%s / %s）：%s", provider.id, model,
+                           error_text(error))
+            return (state, _error_label(error))
         except TimeoutError:
             return ("inconclusive", f"探活超时（{self._timeout:.0f}s）")
         except Exception as error:  # noqa: BLE001 - 任何异常都不能打挂任务循环
-            logger.warning("模型探活异常（%s / %s）：%s", provider.id, model, error)
-            return ("inconclusive", _trim(f"{type(error).__name__}: {error}"))
+            logger.warning("模型探活异常（%s / %s）：%s", provider.id, model,
+                           error_text(error))
+            return ("inconclusive", _error_label(error))
         # 流正常结束但一个有效事件都没出：上游静默失败（TRAE 的 3003 就是这种），
         # 既不能算成功，也不能断言模型不存在。
         return ("inconclusive", "上游未返回任何内容")
@@ -202,3 +210,24 @@ class ModelProbeTask:
 def _trim(text: str, limit: int = 200) -> str:
     """错误摘要单行化并截断：进 DB 的文本不该带换行、也不该无界。"""
     return " ".join(text.split())[:limit]
+
+
+def _event_label(event) -> str:
+    """流内 error 事件 → 受控标识：只留上游业务码，不带 `error_message` 原文。"""
+    code = event.error_code
+    return _trim(f"upstream code {code}") if code is not None else "upstream error"
+
+
+def _error_label(error: BaseException) -> str:
+    """异常 → 受控标识：HTTP 状态码 / 上游业务码 / 异常类名，绝不回显上游正文。
+
+    与 `engine.executor._error_summary` 同一口径：这些值经 `/api/models/probes`
+    与审计 `detail` 回显管理台，异常文本里的上游响应体（≤2KB）不能进去。
+    """
+    status = getattr(error, "status", None)
+    if isinstance(status, int) and status > 0:
+        return _trim(f"upstream status {status}")
+    code = getattr(error, "error_code", None)
+    if code:
+        return _trim(f"upstream code {code}")
+    return _trim(type(error).__name__)

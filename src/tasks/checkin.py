@@ -35,6 +35,14 @@ _CN_TZ = ZoneInfo("Asia/Shanghai")
 _FAIL_BACKOFF_BASE = 10 * 60
 _FAIL_BACKOFF_MAX = 60 * 60
 
+#: `seal_until` 上界（48h）：签到周期可跨天（Qoder 10:00 → 次日 09:59），故不能
+#: 钳到本地当日 24:00；上界只防上游给出超长值把该凭证长期封住、永久漏签。
+_SEAL_UNTIL_MAX = 48 * 60 * 60
+
+#: 落库的「需重新登录」原因：固定文案，绝不写上游原文（同 `tasks/refresh`）。
+#: 该值经 `GET /api/credentials` 回显管理台。
+RELOGIN_REASON = "自动登录被上游拒绝，需重新登录"
+
 
 def _cn_now(now: int | None = None) -> time.struct_time:
     """当前时刻的北京时间 struct_time（测试可注入 epoch 秒）。
@@ -209,6 +217,18 @@ class CheckinTask:
         midnight = datetime(now.tm_year, now.tm_mon, now.tm_mday, tzinfo=_CN_TZ)
         return int((midnight + timedelta(days=1)).timestamp())
 
+    def _seal_deadline(self, result: Any, now: time.struct_time) -> int:
+        """成功封账截止时刻：渠道给了 `seal_until` 就用它，但不超过 48h 上界。
+
+        默认封到本地当日 24:00；跨天周期（Qoder 10:00 换窗口）按渠道给的值封。
+        上游若回一个远超现实的值，会让该作用域长期不再签到 → 只钳上界。
+        """
+        default = self._day_end(now)
+        until = result.seal_until
+        if not until:
+            return default
+        return min(int(until), _cn_epoch(now) + _SEAL_UNTIL_MAX)
+
     def _prune(self, now: time.struct_time) -> None:
         """丢掉非当天的封账记录：done_key 以日期开头，跨天后不可能再命中，
         长驻进程否则每天每账号各攒一条（无上限）。"""
@@ -284,19 +304,22 @@ class CheckinTask:
           不再每小时拿同一份错密码去撞；
         * 其他异常（网络/5xx）→ 保留原结论，按既有退避下轮再试（**不改凭证**）。
         """
-        self._login_days[done_key] = day            # 先记账：失败也不许重试
+        # 记账必须在 `wait_turn()` **之后**：Pacer 被取消/超时会抛 BaseException，
+        # 提前记账会让重启后当天不再按需登录（静默漏签）。记账点后移到真正发起
+        # 登录之前，保留「失败也不许重试」的原意。
         if self._pacer is not None:
             await self._pacer.wait_turn()
+        self._login_days[done_key] = day            # 失败也不许重试
         with credential_scope(candidate.credential_id):
             try:
                 refreshed = await provider.relogin(data)
             except UpstreamReloginRequired as error:
-                reason = f"自动登录被上游拒绝，需重新登录：{error_text(error)}"
+                # 上游原文只进日志；落库用固定文案（经 /api/credentials 回显管理台）
                 logger.warning("autologin rejected for %s: %s",
-                               candidate.credential_id, reason)
+                               candidate.credential_id, error_text(error))
                 self._credentials.mark_relogin_required(candidate.credential_id,
-                                                        reason)
-                return CheckinResult(ok=False, message=reason), data
+                                                        RELOGIN_REASON)
+                return CheckinResult(ok=False, message=RELOGIN_REASON), data
             except Exception as error:  # noqa: BLE001 - 登录故障不该打断整轮
                 logger.warning("autologin failed for %s: %s",
                                candidate.credential_id, error_text(error))
@@ -399,7 +422,8 @@ class CheckinTask:
                 # 成功即封账该作用域：封账期内不再重试，失败凭证不受影响可继续
                 # 重试。渠道给了 `seal_until` 就按它封（签到周期 ≠ 自然日，
                 # 见 `CheckinResult.seal_until`），否则封到本地当日结束。
-                self._done_scopes[done_key] = result.seal_until or self._day_end(current)
+                # 上游可能给出超长值把该凭证长期封住 → 钳到 48h 上界。
+                self._done_scopes[done_key] = self._seal_deadline(result, current)
                 if self._on_success is not None:
                     self._on_success(candidate.credential_id)
             else:

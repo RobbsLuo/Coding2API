@@ -406,7 +406,10 @@ def test_probe_now_records_failure_without_clearing(tmp_path):
         body = client.post(f"{PROBES}/probe",
                            json={"provider": "trae", "model": "glm-5.3"}).json()
     assert body["state"] == "inconclusive"
-    assert body["error"] == "rate limited"
+    # 落库只留受控分类文案：该 Event 无 error_code，统一归到 "upstream error"；
+    # 上游 error_message 原文只进服务端日志，不回显管理台。
+    assert body["error"] == "upstream error"
+    assert "rate limited" not in body["error"]
     assert len(app.state.services.credentials.blocked_cooldowns()) == 1
 
 

@@ -150,7 +150,8 @@ async def test_blocked_error_is_failed_and_keeps_cache(repo):
     row = _probes(db).get("codebuddy", "gone")
     assert row["state"] == "failed"
     assert row["failures"] == 1
-    assert row["last_error"] == "no such model"
+    # 落库只留受控分类（上游业务码），不回显 error_message 原文
+    assert row["last_error"] == "upstream code 11102"
 
 
 async def test_invalid_error_is_failed(repo):
@@ -195,7 +196,8 @@ async def test_http_blocked_error_is_failed(repo):
     assert report.failed == 1
     row = _probes(db).get("codebuddy", "m")
     assert row["state"] == "failed"
-    assert "HTTP 400" in row["last_error"]
+    # 受控标识：状态码只留数字，不带上游 body_hint 原文
+    assert row["last_error"] == "upstream status 400"
 
 
 async def test_http_soft_error_is_inconclusive(repo):
@@ -240,7 +242,80 @@ async def test_unexpected_exception_is_inconclusive(repo):
     assert report.skipped == 1
     row = _probes(db).get("codebuddy", "m")
     assert row["state"] == "inconclusive"
-    assert row["last_error"] == "RuntimeError: boom"
+    # 只留异常类名，不含异常文本（可能带 URL/凭据）
+    assert row["last_error"] == "RuntimeError"
+
+
+async def test_unexpected_exception_original_text_only_in_log(repo, caplog):
+    """上游/异常原文只进服务端日志；落库 + API 回显只留受控标识。"""
+    credentials, db = repo
+    _seed_blocked(credentials, credential_id=_add(credentials), model="m")
+    provider = FakeProvider(error=RuntimeError("upstream body echo ZZZ-123"))
+    task = ModelProbeTask(credentials, {"codebuddy": provider}, _probes(db))
+
+    with caplog.at_level("WARNING"):
+        await task.run_once()
+
+    row = _probes(db).get("codebuddy", "m")
+    assert "ZZZ-123" not in row["last_error"]
+    assert any("ZZZ-123" in record.getMessage() for record in caplog.records)
+
+
+async def test_http_error_body_not_persisted(repo, caplog):
+    """`UpstreamHTTPError` 的 body_hint 不得落库（经 API/审计回显管理台）。"""
+    credentials, db = repo
+    _seed_blocked(credentials, credential_id=_add(credentials), model="m")
+    provider = FakeProvider(error=BlockedHTTPError(400, b"upstream body echo ZZZ-999"))
+    task = ModelProbeTask(credentials, {"codebuddy": provider}, _probes(db))
+
+    with caplog.at_level("WARNING"):
+        await task.run_once()
+
+    row = _probes(db).get("codebuddy", "m")
+    assert row["last_error"] == "upstream status 400"
+    assert "ZZZ-999" not in row["last_error"]
+    assert any("ZZZ-999" in record.getMessage() for record in caplog.records)
+
+
+async def test_stream_error_message_not_persisted(repo, caplog):
+    """流内 error 事件的 `error_message`（≤2KB 上游 body）同样只进日志。"""
+    credentials, db = repo
+    _seed_blocked(credentials, credential_id=_add(credentials), model="m")
+    provider = FakeProvider([Event(EventKind.ERROR, error_code=11102,
+                                   error_message="body echo ZZZ-777",
+                                   error_kind=ErrKind.BLOCKED)])
+    task = ModelProbeTask(credentials, {"codebuddy": provider}, _probes(db))
+
+    with caplog.at_level("WARNING"):
+        await task.run_once()
+
+    row = _probes(db).get("codebuddy", "m")
+    assert row["last_error"] == "upstream code 11102"
+    assert "ZZZ-777" not in row["last_error"]
+    assert any("ZZZ-777" in record.getMessage() for record in caplog.records)
+
+
+def test_error_label_covers_code_and_class_only():
+    """受控标识三档：status → 业务码 → 异常类名（无正文）。"""
+
+    class Coded(Exception):
+        error_code = "E42"
+
+    class Plain(Exception):
+        pass
+
+    from src.tasks.model_probe import _error_label
+
+    assert _error_label(BlockedHTTPError(403, b"secret body")) == "upstream status 403"
+    assert _error_label(Coded()) == "upstream code E42"
+    assert _error_label(Plain()) == "Plain"
+
+
+def test_event_label_without_code():
+    """流内 error 事件没有业务码时给中性标识，绝不回显 error_message。"""
+    from src.tasks.model_probe import _event_label
+
+    assert _event_label(Event(EventKind.ERROR, error_message="secret")) == "upstream error"
 
 
 async def test_empty_stream_is_inconclusive(repo):
@@ -497,5 +572,5 @@ async def test_probe_now_records_inconclusive(repo):
     state, error = await task.probe_now("codebuddy", "m")
 
     assert state == "inconclusive"
-    assert "HTTP 429" in error
+    assert error == "upstream status 429"
     assert _probes(db).get("codebuddy", "m")["state"] == "inconclusive"

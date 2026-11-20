@@ -69,8 +69,9 @@ _WEBHOOK_TIMEOUT = 10.0
 _WEBHOOK_TOTAL_BUDGET = 15.0
 
 # 外发 webhook 的 detail 里需要脱敏的字段：`nickname` 是用户自定义标签，
-# 实践中常填邮箱 / 手机号，站内记录留原文、外发一律打码（同源问题）。
-_PII_DETAIL_KEYS = ("nickname",)
+# 实践中常填邮箱 / 手机号；`api_key_id` / `username` 是内部标识 + 账号名。
+# 站内记录留原文，外发一律打码（同源问题）。
+_PII_DETAIL_KEYS = ("nickname", "username", "api_key_id")
 _PII_MASK = "***"
 
 SEVERITY_CRITICAL = "critical"
@@ -115,11 +116,12 @@ def _redact_webhook_error(error: Exception) -> str:
 
 
 def _public_detail(detail: dict[str, Any]) -> dict[str, Any]:
-    """外发 webhook 的 detail：把 PII 字段打码，站内记录不受影响。
+    """外发 webhook 的 detail：把 PII/内部标识打码，站内记录不受影响。
 
-    `nickname` 是用户自填标签，实践中常是邮箱/手机号。站内 `alert_events`
-    属本机管理面，保留原文便于定位；一旦外发到第三方（Slack/飞书群）就该
-    最小化，非空值一律替换为掩码，空值保持空串以免多出噪声字段。
+    `nickname` 是用户自填标签（常是邮箱/手机号），`username` / `api_key_id`
+    是账号名与内部标识。站内 `alert_events` 属本机管理面，保留原文便于定位；
+    一旦外发到第三方（Slack/飞书群）就该最小化，非空值一律替换为掩码，
+    空值保持空串以免多出噪声字段。
     """
     public = dict(detail)
     for key in _PII_DETAIL_KEYS:
@@ -172,6 +174,14 @@ class Alert:
             if secret:
                 message = message.replace(secret, _PII_MASK)
         return message
+
+    def public_scope(self) -> str:
+        """外发 scope：同上打码。`key_burst` 的 scope 就是 api_key_id 原文。"""
+        scope = self.scope
+        for secret in self.pii:
+            if secret:
+                scope = scope.replace(secret, _PII_MASK)
+        return scope
 
 
 def _humanize(seconds: int) -> str:
@@ -328,6 +338,10 @@ def evaluate_alerts(
                         "tokens": tokens,
                         "requests": int(row.get("requests") or 0),
                         "threshold": key_burst_tokens},
+                # message 里内嵌用户名、scope 就是 api_key_id：两处外发都要打码
+                # （detail 由 `_public_detail` 按同一份键表处理）。
+                pii=tuple(str(value) for value in
+                          (row.get("username"), row.get("api_key_id")) if value),
             ))
 
     # 非工作时段仍有请求：可能是定时任务/自动化，也可能是 Key 被外部使用。
@@ -677,7 +691,8 @@ class AlertTask:
                 continue
             payload = {
                 "service": "coding2api", "rule": alert.rule,
-                "severity": alert.severity, "scope": alert.scope, "status": status,
+                "severity": alert.severity, "scope": alert.public_scope(),
+                "status": status,
                 "message": message,
                 "detail": _public_detail(alert.detail), "ts": now,
             }

@@ -13,6 +13,7 @@ import logging
 from ..config import live
 from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository, GrowthRepository
+from ..error_text import error_text
 from ..request_context import credential_scope
 from . import TaskReport
 from .account_shape import is_enterprise_account
@@ -90,7 +91,8 @@ class GrowthTask:
                 with credential_scope(candidate.credential_id):
                     result = await growth(data, allow_irreversible=self.allow_irreversible)
             except Exception as error:  # noqa: BLE001 - 一个凭证失败不拖累其余
-                logger.warning("growth failed for %s: %s", candidate.credential_id, error)
+                logger.warning("growth failed for %s: %s", candidate.credential_id,
+                               error_text(error))
                 report.failed += 1
                 continue
             if result.ok and not result.session_dead:

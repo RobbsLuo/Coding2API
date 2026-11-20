@@ -14,6 +14,7 @@ from collections.abc import Callable
 
 from ..db.crypto import CredentialDecryptError
 from ..db.repo import CredentialRepository
+from ..error_text import error_text
 from ..provider.base import UpstreamReloginRequired
 from ..request_context import credential_scope
 from . import TaskReport
@@ -91,7 +92,7 @@ class RefreshTask:
                     # 分支），不再每小时刷一条同样的 warning。
                     logger.warning(
                         "refresh for %s needs re-login, disabling credential: %s",
-                        candidate.credential_id, error)
+                        candidate.credential_id, error_text(error))
                     # 落库文案固定，不写 `str(error)`：该值经 GET /api/credentials
                     # 回显管理台，固定文案可保证「将来有人往异常里塞上游原文」时
                     # 也不会把上游响应写进凭证状态。
@@ -100,7 +101,8 @@ class RefreshTask:
                     report.failed += 1
                     continue
                 except Exception as error:  # noqa: BLE001
-                    logger.warning("refresh failed for %s: %s", candidate.credential_id, error)
+                    logger.warning("refresh failed for %s: %s",
+                                   candidate.credential_id, error_text(error))
                     report.failed += 1
                     continue
                 # 先持久化轮换后的 token，再同步账号（AGENTS.md 顺序约束）

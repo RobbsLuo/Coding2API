@@ -113,6 +113,18 @@ async def test_growth_task_failure_is_isolated_and_recorded(growth_repo):
     assert report.attempted == 2 and report.failed == 2
     assert events.latest_for(credentials.candidates()[0].credential_id) is None
 
+
+async def test_growth_task_failure_log_is_redacted(growth_repo, caplog):
+    """日志走 `error_text`：空消息至少带类名，敏感/凭据形态只留类名。"""
+    credentials, events = growth_repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t",
+                                                          "account_uid": "1"})
+    provider = _StubGrowthProvider(error=RuntimeError(""))
+    task = GrowthTask(credentials, {"codebuddy": provider}, events)
+    with caplog.at_level("WARNING"):
+        assert (await task.run_once()).failed == 1
+    assert any("RuntimeError" in record.getMessage() for record in caplog.records)
+
 async def test_growth_task_marks_session_dead_result_as_failed(growth_repo):
     """session_dead 结果记为失败（调度器据此硬禁用凭证）。"""
     credentials, events = growth_repo

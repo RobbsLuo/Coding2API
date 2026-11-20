@@ -6,6 +6,8 @@ import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from src.db.repo import CheckinEventRepository
 from src.provider.codebuddy.checkin import CheckinResult
 from src.tasks.checkin import CheckinTask, _cn_now
@@ -735,3 +737,73 @@ async def test_checkin_autologin_waits_for_pacer(repo):
     assert (await task.run_once()).succeeded == 1
     # 签到一次 + 按需登录一次 = 两次取轮次
     assert waits["n"] == 2
+
+
+async def test_checkin_autologin_reason_is_fixed_text_not_upstream(repo, caplog):
+    """落库原因用固定文案：上游原文只进 logger（该值经 /api/credentials 回显）。"""
+    from src.provider.base import UpstreamReloginRequired
+
+    credentials, _db = repo
+    _raccoon_credential(credentials)
+    provider = AutoLoginProvider(
+        checkin_results=[_failed_grant()],
+        relogin_error=UpstreamReloginRequired("upstream echo ZZZ-1: account rejected"))
+    with caplog.at_level("WARNING"):
+        await CheckinTask(credentials, {"raccoon": provider},
+                          auto_login=True).run_once()
+
+    row = credentials.list_all()[0]
+    assert row["disabled_reason"] == "自动登录被上游拒绝，需重新登录"
+    assert "ZZZ-1" not in row["disabled_reason"]
+    assert any("ZZZ-1" in record.getMessage() for record in caplog.records)
+
+
+async def test_checkin_autologin_pacer_failure_does_not_mark_attempted(repo):
+    """`wait_turn()` 抛 BaseException 时不能先记「今天登录过」——否则当天静默漏签。"""
+    credentials, _db = repo
+    _raccoon_credential(credentials)
+    provider = AutoLoginProvider(checkin_results=[_failed_grant()])
+
+    class CancellingPacer:
+        async def wait_turn(self) -> None:
+            raise KeyboardInterrupt                 # BaseException（取消/超时同族）
+
+    task = CheckinTask(credentials, {"raccoon": provider}, auto_login=True,
+                       pacer=CancellingPacer())
+    with pytest.raises(KeyboardInterrupt):
+        await task.run_once()
+    assert task._login_days == {}
+    assert provider.relogin_calls == 0
+
+
+def test_checkin_seal_until_is_capped_at_48h():
+    """上游给超长 `seal_until` 时钳到 now+48h：否则该凭证长期不再签到。"""
+    from src.tasks.checkin import _cn_epoch
+
+    task = CheckinTask.__new__(CheckinTask)
+    now = time.struct_time((2026, 10, 8, 10, 0, 0, 0, 1, -1))
+
+    class Result:
+        seal_until = 4102444800                     # 2100 年：明显超长
+
+    capped = task._seal_deadline(Result(), now)
+    assert capped == _cn_epoch(now) + 48 * 3600
+
+
+def test_checkin_seal_until_keeps_cross_day_window():
+    """正常跨天窗口（Qoder 10:00 → 次日 09:59）必须原样保留，不被钳到当日 24:00。"""
+    from src.tasks.checkin import _cn_epoch
+
+    task = CheckinTask.__new__(CheckinTask)
+    now = time.struct_time((2026, 10, 8, 0, 5, 0, 0, 1, -1))
+    window_end = _cn_epoch(time.struct_time((2026, 10, 9, 9, 59, 0, 0, 4, -1)))
+
+    class Result:
+        seal_until = window_end
+
+    assert task._seal_deadline(Result(), now) == window_end
+    # 无 seal_until 时仍封到本地当日 24:00
+    class NoSeal:
+        seal_until = None
+
+    assert task._seal_deadline(NoSeal(), now) == task._day_end(now)
