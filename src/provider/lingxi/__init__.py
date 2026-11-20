@@ -3,9 +3,9 @@
 与其余渠道的差异（决定了本包为什么这样切）：
 
 1. **三条请求才是一次对话**：建 cowork 会话 → 领 credits run → 打
-   `agent-runtime/chat/completions`。上游**按 run 计费**（一个 run 内多次调用
-   只扣一次智点），故 run 按「账号 × 模型」缓存 1 小时、并发单飞（见
-   `client.ensure_run`）。
+   `agent-runtime/chat/completions`。上游**按 run 计费**，且一个 run 只能跑
+   一次对话（第二次 chat 回 409，实测 2026-11-21），故每个请求现领 run（见
+   `client.create_run`）。
 2. **鉴权只有 cookie**：`wps_sid`，没有 refresh 接口。过期只能重新粘贴，
    真正的判据是上游 401（不按时长猜，见 `credential.py`）。
 3. **私有 SSE**：`choices[].text` 而非 `delta.content`，没有 `[DONE]`，
@@ -120,7 +120,7 @@ class LingxiProvider:
                         yield event
                     return
                 except RunExpired:
-                    self.client.forget_run(credential, model)
+                    # run 一次性：重试天生会领新 run，这里只控重试次数
                     if attempt:
                         raise UpstreamProtocolViolation(
                             "灵犀会话反复失效（重建后仍 SQLNoRows）") from None

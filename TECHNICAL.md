@@ -310,7 +310,7 @@ class Provider(Protocol):
 
 WPS 账号 cookie + 一次对话三条请求。凭据接受整段 Cookie / 裸 `wps_sid`；`uid` 从 Cookie 段取，重登合并首选 `uid`、兜底 `sid-<sha256 前 16 位>`。无 refresh，过期只能重贴，判据只看 401。
 
-- `POST /api/aioffice/v1/cowork/sessions` → `POST /api/public/v1/credits/runs` → `POST /api/public/v1/agent-runtime/chat/completions`；按 run 计费 → 会话 + run 按「账号 × 模型」缓存 1h（不滑动）+ 并发单飞。伪装桌面端：`X-Client-Type: lingxi_claw` + `x-kso-app-name/app-version/device-id`；端点默认 `https://lingxi.wps.cn`，账号面回落 `lingxi.kdocs.cn`（白名单两者都要含）。
+- `POST /api/aioffice/v1/cowork/sessions` → `POST /api/public/v1/credits/runs` → `POST /api/public/v1/agent-runtime/chat/completions`；按 run 计费，且**一个 run 只能跑一次对话**（同一 `run_id` 的第二次 chat 一律 409 `ResourceConflict`，实测 2026-11-21；并发两条只有先到的成立）→ 每个请求现领一个 run，不做跨请求缓存；重复建会话上游照收（实测连发两次均 200）。409 在出帧前换新 run 重试一次。伪装桌面端：`X-Client-Type: lingxi_claw` + `x-kso-app-name/app-version/device-id`；端点默认 `https://lingxi.wps.cn`，账号面回落 `lingxi.kdocs.cn`（白名单两者都要含）。
 - SSE：正文在 `choices[].text`（非 `delta.content`）、不发 `[DONE]`；`usage.total_tokens` 是当前上下文大小 → 自算 `prompt+completion`；每帧单行 `data:{…}`，不能空行分帧。工具 schema 压平（`anyOf` / `oneOf` / `$ref` / 数组型 `type` 会让整轮失败）；`max_tokens` 注入 `base_llm_arguments`。
 - 分类：401 → DEAD；402 / 额度文案 → CREDIT；403 → SOFT；404/422 → INVALID；429 → MODEL；`AuditFailed` → INVALID。额度＝智点；`bonus_credits[].expire_time` 进到期阶梯（15 天窗口）；签到 `daily_check_in` 按领前 / 领后余额差算，绝不看 HTTP 200。
 

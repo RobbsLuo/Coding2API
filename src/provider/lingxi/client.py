@@ -3,9 +3,15 @@
 三条请求做成一次对话（取证：magpie-wps-lingxi 1.3.31 / MiraiHub）：
 
 1. `POST /api/aioffice/v1/cowork/sessions` → `session_id`
-2. `POST /api/public/v1/credits/runs` → `run_id`（**按 run 计费**：一个 run
-   内多次调用只扣一次智点，故 run 按「账号 × 模型」缓存 1 小时、不滑动续期）
+2. `POST /api/public/v1/credits/runs` → `run_id`（**按 run 计费**）
 3. `POST /api/public/v1/agent-runtime/chat/completions`（自定义 SSE）
+
+**run 是一次性的**（实测 2026-11-21，三个账号各复现）：同一 `run_id` 的
+第二次 chat 一律回 409 `ResourceConflict 资源已存在` —— 前一条正常收尾、
+间隔 3s 也一样；并发两条则只有先到的那条成立。所以每个对话请求现领一个
+run。旧实现按「账号 × 模型」缓存 1h（前提「一个 run 内多次调用只扣一次
+智点」经实测不成立），命中缓存的那次必然 409，还会把健康账号按 OTHER
+冷却 10 分钟。会话不需要缓存：重复建会话上游照收（实测同样两个 200）。
 
 账号面（profile / plans / balance / tasks）走同一 base；`lingxi.wps.cn` 不通
 时回落 `lingxi.kdocs.cn`（kdocs 账号的集群）。
@@ -16,9 +22,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import json
+import logging
 import re
 import time
 import uuid
@@ -41,6 +47,8 @@ from ..lazy_clients import LazyClients
 from . import events as lingxi_events
 from .credential import APP_NAME, APP_VERSION, DEVICE_ID, LingxiCredential
 
+logger = logging.getLogger(__name__)
+
 #: 账号面 / 对话面主域与回落域（顺序即尝试顺序）
 BASE = "https://lingxi.wps.cn"
 FALLBACK_BASE = "https://lingxi.kdocs.cn"
@@ -54,8 +62,6 @@ EP_SESSIONS = "/api/aioffice/v1/cowork/sessions"
 EP_RUNS = "/api/public/v1/credits/runs"
 EP_CHAT = "/api/public/v1/agent-runtime/chat/completions"
 
-#: run 缓存时长：上游按 run 计费，一个 run 内多次调用只扣一次；不滑动续期。
-RUN_TTL_SECONDS = 3600
 #: 对话总时长上限：推理模型可能很久（与参考实现同口径）
 CHAT_TIMEOUT = 600.0
 #: 账号面短请求超时
@@ -132,9 +138,6 @@ class LingxiClient(LazyClients):
         self._stream_client = stream_client
         self._short_client = short_client
         self._proxy = proxy
-        # run 缓存与单飞锁：同一 (账号, 模型) 并发时只建一个 run（多建多扣智点）
-        self._runs: dict[str, dict[str, Any]] = {}
-        self._run_locks: dict[str, asyncio.Lock] = {}
         self._catalog: dict[str, Any] | None = None
 
     # ------------------------------------------------------------ 基础设施
@@ -368,41 +371,14 @@ class LingxiClient(LazyClients):
 
     # ------------------------------------------------------------ 对话通路
 
-    def _run_key(self, credential: LingxiCredential, model: str) -> str:
-        return f"{credential.identity()}|{model}"
-
-    def forget_run(self, credential: LingxiCredential, model: str) -> None:
-        """丢弃缓存的 run（上游说会话不存在时调用）。"""
-        self._runs.pop(self._run_key(credential, model), None)
-
-    def _cached_run(self, key: str) -> dict[str, Any] | None:
-        cached = self._runs.get(key)
-        if cached is None:
-            return None
-        if time.time() - float(cached.get("at") or 0) >= RUN_TTL_SECONDS:
-            self._runs.pop(key, None)
-            return None
-        return cached
-
-    async def ensure_run(self, credential: LingxiCredential, model: str,
+    async def create_run(self, credential: LingxiCredential, model: str,
                          messages: list[Any] | None = None) -> dict[str, Any]:
-        """拿一个可用 run：命中缓存（1 小时内）就用，否则建 会话 + 领 run。
+        """领一个**只用于这一次对话**的 run（会话 + run，主域失败回落一次）。
 
-        并发单飞：同一 (账号, 模型) 的并发请求共享同一把锁 —— 各建一个 run
-        会各扣一次智点。锁内重读缓存，避免等锁期间别人已经建好。
+        不做跨请求缓存，理由见模块文档：同一 run 的第二次 chat 上游回
+        409，复用它等于「缓存命中即失败」，而且失败会被当成账号故障冷却。
         """
-        key = self._run_key(credential, model)
-        cached = self._cached_run(key)
-        if cached is not None:
-            return cached
-        lock = self._run_locks.setdefault(key, asyncio.Lock())
-        async with lock:
-            cached = self._cached_run(key)
-            if cached is not None:
-                return cached
-            run = await self._create_run(credential, model, messages or [])
-            self._runs[key] = run
-            return run
+        return await self._create_run(credential, model, messages or [])
 
     async def _create_run(self, credential: LingxiCredential, model: str,
                           messages: list[Any]) -> dict[str, Any]:
@@ -418,7 +394,7 @@ class LingxiClient(LazyClients):
                 # 401/402 也换域：kdocs 账号只在自己的集群上认这份 cookie
                 last = error
                 continue
-            run.update({"base": base_host, "at": time.time()})
+            run.update({"base": base_host})
             return run
         if last is not None:
             raise last
@@ -467,50 +443,60 @@ class LingxiClient(LazyClients):
                           model: str) -> AsyncIterator[Event]:
         """跑完三步并逐帧产出中立事件；非 2xx 抛 `UpstreamHTTPError`。
 
-        `RunExpired` 只在首帧之前抛出（流已开始就无法回滚）；调用方据此丢弃
-        缓存的重建一次。
+        `RunExpired` 只在首帧之前抛出（流已开始就无法回滚）；调用方据此重建
+        一次——run 本来就是一次性，重试天然会领到新的。
+
+        409（`ResourceConflict`）在**出帧前**重建一个 run 重试一次：run 一次性，
+        撞上别人的在途请求时上游也回这个码，重试是唯一自愈路径。第二次仍 409
+        就如实上抛，由调度层决定换号。
         """
-        run = await self.ensure_run(credential, model, payload.get("messages"))
         body = build_body(payload, model)
-        headers = self.headers(credential, accept="text/event-stream")
-        headers["x-cc-session-id"] = run["session_id"]
-        headers["x-cc-run-id"] = run["run_id"]
-        url = f"{run['base']}{EP_CHAT}"
-        started = False
+        messages = payload.get("messages") or []
         try:
-            async with self._stream.stream("POST", url, json=body,
-                                           headers=headers,
-                                           timeout=CHAT_TIMEOUT) as response:
-                if response.status_code >= 400:
-                    raw = await base.read_body_bounded(response)
-                    raise UpstreamHTTPError(response.status_code, raw,
-                                            **base.retry_hints(response.headers))
-                async for line in response.aiter_lines():
-                    frame = _frame_of(line)
-                    if frame is None:
-                        continue
-                    if frame == {}:
-                        return
-                    error = lingxi_events.frame_error(frame)
-                    if error is not None:
-                        code, message = error
-                        if not started and lingxi_events.is_session_expired(message):
-                            raise RunExpired(message)
-                        yield Event(kind=EventKind.ERROR, error_message=message,
-                                    error_kind=lingxi_events.classify_code(code, message))
-                        return
-                    events = lingxi_events.parse_frame(frame)
-                    if events:
-                        started = True
-                        for event in events:
-                            yield event
-                    if any(event.kind == EventKind.FINISH for event in events):
-                        return
+            # 两轮要么 return 要么 raise，循环不会自然耗尽（按构造不可达分支）
+            for attempt in (0, 1):  # pragma: no branch
+                run = await self.create_run(credential, model, messages)
+                headers = self.headers(credential, accept="text/event-stream")
+                headers["x-cc-session-id"] = run["session_id"]
+                headers["x-cc-run-id"] = run["run_id"]
+                url = f"{run['base']}{EP_CHAT}"
+                started = False
+                async with self._stream.stream("POST", url, json=body,
+                                               headers=headers,
+                                               timeout=CHAT_TIMEOUT) as response:
+                    if response.status_code >= 400:
+                        raw = await base.read_body_bounded(response)
+                        if response.status_code == 409 and attempt == 0:
+                            logger.debug("灵犀 run 冲突（409），换新 run 重试")
+                            continue
+                        raise UpstreamHTTPError(response.status_code, raw,
+                                                **base.retry_hints(response.headers))
+                    async for line in response.aiter_lines():
+                        frame = _frame_of(line)
+                        if frame is None:
+                            continue
+                        if frame == {}:
+                            return
+                        error = lingxi_events.frame_error(frame)
+                        if error is not None:
+                            code, message = error
+                            if not started and lingxi_events.is_session_expired(message):
+                                raise RunExpired(message)
+                            yield Event(kind=EventKind.ERROR, error_message=message,
+                                        error_kind=lingxi_events.classify_code(code, message))
+                            return
+                        events = lingxi_events.parse_frame(frame)
+                        if events:
+                            started = True
+                            for event in events:
+                                yield event
+                        if any(event.kind == EventKind.FINISH for event in events):
+                            return
+                    # 上游在 finish_reason 之前断流：如实报错，不伪造成功收尾
+                    raise UpstreamProtocolViolation(
+                        "灵犀上游流在完成事件之前结束（响应被截断）")
         except httpx.TransportError as error:
             raise base.UpstreamTransportError(str(error)) from error
-        # 上游在 finish_reason 之前断流：如实报错，不伪造成功收尾
-        raise UpstreamProtocolViolation(
-            "灵犀上游流在完成事件之前结束（响应被截断）")
 
     async def aclose(self) -> None:
         await super().aclose()

@@ -1,8 +1,7 @@
-"""灵犀上游客户端：三步对话、run 缓存/单飞、账号面接口与请求体压平。"""
+"""灵犀上游客户端：三步对话、run 生命周期、账号面接口与请求体压平。"""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import time
 
@@ -270,50 +269,19 @@ def _run_mapping(*, run_id="run-1", session_id="ses-1"):
     }
 
 
-async def test_ensure_run_caches_for_ttl():
-    handler = _handler({**_run_mapping(), ("GET", EP_CHAT): "x"})
-    instance = client(handler)
-    first = await instance.ensure_run(CREDENTIAL, "m", [])
-    second = await instance.ensure_run(CREDENTIAL, "m", [])
-    assert first["run_id"] == "run-1" and first["group_id"] == "group-1"
-    assert second is first
-    # 只建一次会话 / run
-    creates = [call for call in handler.calls if call.url.path == EP_SESSIONS]
-    assert len(creates) == 1
-
-
-async def test_ensure_run_rebuilds_after_ttl(monkeypatch):
+async def test_create_run_creates_fresh_run_per_call():
+    """run 一次性：两次调用必须建两套会话/run（复用第二个必被上游 409）。"""
     handler = _handler(_run_mapping())
     instance = client(handler)
-    await instance.ensure_run(CREDENTIAL, "m")
-    monkeypatch.setattr(lingxi_client, "RUN_TTL_SECONDS", 0)
-    await instance.ensure_run(CREDENTIAL, "m")
+    first = await instance.create_run(CREDENTIAL, "m", [])
+    second = await instance.create_run(CREDENTIAL, "m", [])
+    assert first["run_id"] == "run-1" and first["group_id"] == "group-1"
+    assert second["run_id"] == "run-1" and second is not first
+    assert len([c for c in handler.calls if c.url.path == EP_SESSIONS]) == 2
     assert len([c for c in handler.calls if c.url.path == EP_RUNS]) == 2
 
 
-async def test_ensure_run_single_flight():
-    started = asyncio.Event()
-    release = asyncio.Event()
-    count = {"runs": 0}
-
-    def handler(request):
-        if request.url.path == EP_SESSIONS:
-            return httpx.Response(200, json=_ok({"session_id": "s"}))
-        count["runs"] += 1
-        return httpx.Response(200, json=_ok({"run_id": "r"}))
-
-    instance = client(handler)
-    first = asyncio.create_task(instance.ensure_run(CREDENTIAL, "m"))
-    await asyncio.sleep(0)
-    second = asyncio.create_task(instance.ensure_run(CREDENTIAL, "m"))
-    started.set()
-    release.set()
-    runs = await asyncio.gather(first, second)
-    assert runs[0]["run_id"] == "r"
-    assert count["runs"] == 1
-
-
-async def test_ensure_run_falls_back_to_second_base():
+async def test_create_run_falls_back_to_second_base():
     def handler(request):
         if request.url.host == "lingxi.test":
             return httpx.Response(500, text="down")
@@ -322,12 +290,12 @@ async def test_ensure_run_falls_back_to_second_base():
         return httpx.Response(200, json=_ok({"run_id": "r2"}))
 
     instance = client(handler)
-    run = await instance.ensure_run(CREDENTIAL, "m")
+    run = await instance.create_run(CREDENTIAL, "m")
     assert run["base"] == "https://kdocs.test"
     assert run["run_id"] == "r2"
 
 
-async def test_ensure_run_falls_back_on_401():
+async def test_create_run_falls_back_on_401():
     calls: list[str] = []
 
     def handler(request):
@@ -338,43 +306,36 @@ async def test_ensure_run_falls_back_on_401():
             return httpx.Response(200, json=_ok({"run_id": "r"}))
         return httpx.Response(401, text="no")
 
-    run = await client(handler).ensure_run(CREDENTIAL, "m")
+    run = await client(handler).create_run(CREDENTIAL, "m")
     assert run["base"] == "https://kdocs.test"
     assert calls[0] == "lingxi.test"
 
 
-async def test_ensure_run_all_bases_fail():
+async def test_create_run_all_bases_fail():
     def handler(request):
         return httpx.Response(500, text="down")
 
     with pytest.raises(UpstreamHTTPError):
-        await client(handler).ensure_run(CREDENTIAL, "m")
+        await client(handler).create_run(CREDENTIAL, "m")
 
 
-async def test_ensure_run_missing_ids_are_protocol_violations():
+async def test_create_run_missing_ids_are_protocol_violations():
     handler = _handler({("POST", EP_SESSIONS): _ok({})})
     with pytest.raises(UpstreamProtocolViolation):
-        await client(handler).ensure_run(CREDENTIAL, "m")
+        await client(handler).create_run(CREDENTIAL, "m")
 
     handler = _handler({("POST", EP_SESSIONS): _ok({"session_id": "s"}),
                         ("POST", EP_RUNS): _ok({})})
     with pytest.raises(UpstreamProtocolViolation):
-        await client(handler).ensure_run(CREDENTIAL, "m")
+        await client(handler).create_run(CREDENTIAL, "m")
 
 
-async def test_ensure_run_transport_error_on_both_bases():
+async def test_create_run_transport_error_on_both_bases():
     def handler(request):
         raise httpx.ConnectError("no")
 
     with pytest.raises(base.UpstreamTransportError):
-        await client(handler).ensure_run(CREDENTIAL, "m")
-
-
-def test_forget_run():
-    instance = LingxiClient(host="https://a.test")
-    instance._runs["k"] = {"at": time.time()}
-    instance.forget_run(CREDENTIAL, "m")
-    assert instance._runs  # key 由 identity|model 组成，这里只是覆盖调用路径
+        await client(handler).create_run(CREDENTIAL, "m")
 
 
 # ---------------------------------------------------------------- 聊天流
@@ -402,6 +363,45 @@ async def test_stream_chat_yields_events_and_headers():
     assert chat.headers["x-cc-session-id"] == "ses-1"
     assert chat.headers["x-cc-run-id"] == "run-1"
     assert json.loads(chat.content)["base_llm_arguments"] == {"max_tokens": 5}
+
+
+async def test_stream_chat_409_rebuilds_run_once():
+    """run 一次性：409 只在出帧前重试一次，重试必须换一个**新** run。"""
+    stream = lines({"code": "Success",
+                    "choices": [{"text": "hi", "finish_reason": "stop"}]})
+    seen = {"chat": 0, "runs": 0}
+
+    def handler(request):
+        if request.url.path == EP_SESSIONS:
+            return httpx.Response(200, json=_ok({"session_id": "s"}))
+        if request.url.path == EP_RUNS:
+            seen["runs"] += 1
+            return httpx.Response(200, json=_ok({"run_id": f"r{seen['runs']}"}))
+        seen["chat"] += 1
+        if seen["chat"] == 1:
+            return httpx.Response(409, json={"code": "ResourceConflict",
+                                             "message": "资源已存在"})
+        return httpx.Response(200, text=stream)
+
+    events = [event async for event in client(handler).stream_chat(
+        CREDENTIAL, {"messages": []}, "m")]
+    assert [event.kind for event in events] == [EventKind.CONTENT, EventKind.FINISH]
+    assert seen["chat"] == 2 and seen["runs"] == 2
+
+
+async def test_stream_chat_409_twice_raises():
+    def handler(request):
+        if request.url.path == EP_SESSIONS:
+            return httpx.Response(200, json=_ok({"session_id": "s"}))
+        if request.url.path == EP_RUNS:
+            return httpx.Response(200, json=_ok({"run_id": "r"}))
+        return httpx.Response(409, json={"code": "ResourceConflict",
+                                         "message": "资源已存在"})
+
+    with pytest.raises(UpstreamHTTPError) as error:
+        [event async for event in client(handler).stream_chat(
+            CREDENTIAL, {"messages": []}, "m")]
+    assert error.value.status == 409
 
 
 async def test_stream_chat_done_marker_ends_stream():
@@ -722,18 +722,6 @@ async def test_checkin_balance_http_error_other_than_401_is_swallowed():
                         ("GET", EP_TASKS): _ok({"tasks": [daily]})})
     result = await client(handler).checkin(CREDENTIAL)
     assert result.ok and result.already_checked_in
-
-
-async def test_ensure_run_recheck_under_lock_returns_cached():
-    instance = client(_handler(_run_mapping()))
-    key = instance._run_key(CREDENTIAL, "m")
-    lock = instance._run_locks.setdefault(key, asyncio.Lock())
-    async with lock:
-        task = asyncio.create_task(instance.ensure_run(CREDENTIAL, "m"))
-        await asyncio.sleep(0)
-        instance._runs[key] = {"session_id": "s", "run_id": "r", "at": time.time()}
-    run = await task
-    assert run["run_id"] == "r"
 
 
 async def test_stream_chat_empty_frame_continues_then_finish():

@@ -32,7 +32,6 @@ class FakeClient:
         self._status = status or {}
         self._errors = list(errors or [])
         self.calls: list[Any] = []
-        self.forgotten: list[Any] = []
         self.closed = False
 
     async def probe_quota(self, credential):
@@ -59,9 +58,6 @@ class FakeClient:
             raise self._errors.pop(0)
         for event in self._events:
             yield event
-
-    def forget_run(self, credential, model):
-        self.forgotten.append((credential, model))
 
     async def aclose(self):
         self.closed = True
@@ -163,7 +159,7 @@ async def test_stream_chat_rebuilds_run_once():
     provider = _provider(client)
     events = [event async for event in provider.stream_chat(
         {"wps_sid": "abc", "uid": "42"}, {}, "m")]
-    assert events and client.forgotten[0][1] == "m"
+    assert events
     assert len([call for call in client.calls if call[0] == "stream"]) == 2
 
 
