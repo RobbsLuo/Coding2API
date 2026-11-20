@@ -43,6 +43,11 @@ class Settings(BaseSettings):
     # 默认 false：XFF 由客户端可写，直连部署下信它等于白名单形同虚设。
     # 仅在「本服务前面恰好一层受信反代」时开启，届时取 XFF 最后一个条目。
     trust_proxy: bool = False
+    # 受信反代的对端地址（逗号分隔 IP/CIDR）。为空 = 采信任意对端（旧行为，
+    # 仅在服务端口只对反代开放时成立）；非空时只有对端命中白名单才解析 XFF。
+    # 有直连入口（如 docker 把 PORT 发布到 0.0.0.0）时必须显式配这一项，
+    # 否则攻击者可自带 `X-Forwarded-For: <白名单IP>` 绕过 Key 的 allowed_ips。
+    trusted_proxies: str = ""
 
     # 上游（白名单内的地址才可接收真实 Token）
     codebuddy_api_endpoint: str = _CODEBUDDY_CN

@@ -155,14 +155,18 @@ def get_services(request: Request) -> Services:
 
 
 def request_ip(request: Request, settings: Settings | RuntimeSettings) -> str:
-    """来源 IP 统一入口：受信反代（trust_proxy）取 XFF 最后条目，否则取对端。
+    """来源 IP 统一入口：受信反代（trust_proxy + trusted_proxies）取 XFF 最后条目，
+    否则取对端。
 
     限流与审计必须走这里与 api_key_user 同源：反代部署下拿裸对端地址，
     全站请求会共享同一个 IP 限流桶（互相锁死），审计里也全是代理 IP。
+    `trusted_proxies` 非空时只对名单内的对端解析 XFF：有直连入口的部署
+    （如 docker 把 PORT 发布到 0.0.0.0）必须配它，否则 XFF 可被任意伪造。
     """
     return client_ip(request.client.host if request.client else None,
                      request.headers.get("x-forwarded-for"),
-                     trust_proxy=bool(settings.trust_proxy))
+                     trust_proxy=bool(settings.trust_proxy),
+                     trusted_proxies=str(getattr(settings, "trusted_proxies", "") or ""))
 
 
 async def principal_from_request(request: Request) -> Principal:
@@ -373,3 +377,11 @@ async def read_json_body(request: Request) -> Any:
                           parse_float=_reject_non_finite)
     except (json.JSONDecodeError, UnicodeDecodeError) as error:
         raise InvalidRequest("request body is not valid JSON") from error
+    except ValueError as error:
+        # >4300 位的整数字面量：CPython 的 int 转换上限抛普通 ValueError
+        # （不是 JSONDecodeError），不拦就冒泡成 500。
+        raise InvalidRequest("JSON number is too large") from error
+    except RecursionError as error:
+        # 极深嵌套（如 10 万层数组）在解析器里爆栈。这是客户端输入问题，
+        # 不是服务端故障，必须归 400 而不是 500。
+        raise InvalidRequest("JSON nesting is too deep") from error

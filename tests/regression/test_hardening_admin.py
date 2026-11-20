@@ -544,14 +544,18 @@ def test_correct_password_not_blocked_by_username_window(app_client_and_settings
                            json={"username": "root", "password": "rootpw"})
     assert response.status_code == 200
 
-def test_transport_windows_rejects_when_global_cap_reached():
-    """全局窗口满时哈希前即拒（全局分支）。"""
-    from src.auth.throttle import LoginThrottle, ThrottledError, ThrottleLimits
+def test_transport_windows_ignores_global_cap():
+    """全局窗口满**不**在哈希前拒绝（改为仅观测）。
+
+    该窗口跨来源共享：按它拒绝等于给未认证攻击者一个「一次打满、全站登不上」
+    的开关——管理台是唯一止血入口，修复通道不能一起被关掉。
+    """
+    from src.auth.throttle import LoginThrottle, ThrottleLimits
 
     throttle = LoginThrottle(ThrottleLimits(max_global=1, max_per_ip=99, max_per_user=99))
     throttle.record_failure(ip="9.9.9.9", username="ghost")
-    with pytest.raises(ThrottledError):
-        throttle.check_transport_windows(ip="1.2.3.4")
+    throttle.check_transport_windows(ip="1.2.3.4")      # 不抛
+    throttle.check(ip="1.2.3.4", username="alice")      # 不抛
 
 def test_transport_windows_pass_within_limits():
     from src.auth.throttle import LoginThrottle, ThrottleLimits

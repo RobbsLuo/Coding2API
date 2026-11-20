@@ -137,16 +137,38 @@ def model_allowed(model: str | None, allowed_models: str | None, *,
 
 
 def client_ip(peer: str | None, forwarded_for: str | None, *,
-              trust_proxy: bool) -> str:
+              trust_proxy: bool, trusted_proxies: str = "") -> str:
     """解析请求来源 IP。
 
     TRUST_PROXY 关闭（默认）时只看 TCP 对端地址——X-Forwarded-For 由客户端
     任意填写，信它就等于白名单形同虚设。开启后取 XFF 的**最后一个**条目：
     `$proxy_add_x_forwarded_for` 语义下那是紧邻的受信代理实际看到的地址，
     而第一个条目是客户端自己写的、不可信。
+
+    `trusted_proxies`（IP/CIDR，逗号分隔）非空时，只有**对端命中白名单**才
+    解析 XFF。它堵的是「反代旁还有一条直连路径」：那种部署下任何人都能自带
+    `X-Forwarded-For: <白名单IP>` 冒充来源，把 Key 的 allowed_ips 变成摆设。
     """
-    if trust_proxy:
+    peer_text = (peer or "").strip()
+    if trust_proxy and _peer_trusted(peer_text, trusted_proxies):
         entries = [item.strip() for item in (forwarded_for or "").split(",") if item.strip()]
         if entries:
             return entries[-1]
-    return (peer or "").strip()
+    return peer_text
+
+
+def _peer_trusted(peer: str, trusted_proxies: str) -> bool:
+    """对端是否在受信反代名单内；名单为空 = 不限制（旧行为）。"""
+    raw_entries = split_entries(trusted_proxies)
+    if not raw_entries:
+        return True
+    if not peer:
+        return False
+    networks = _parse_networks(trusted_proxies)
+    if not networks:
+        return False                    # 名单写坏：fail closed，不采信 XFF
+    try:
+        address = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    return any(address in network for network in networks)

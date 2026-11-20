@@ -336,26 +336,92 @@ def test_csrf_referer_same_origin_allows_write():
 
 
 def test_login_throttle_prunes_expired_and_global_cap():
-    """过期事件被清理；全局窗口超限抛 ThrottledError；空用户名成功不清空。"""
+    """过期事件被清理；全局窗口**不再**用于拒绝（防全站登录锁死）。"""
     import time as _time
 
-    from src.auth.throttle import LoginThrottle, ThrottledError, ThrottleLimits
+    from src.auth.throttle import LoginThrottle, ThrottleLimits
 
     throttle = LoginThrottle(ThrottleLimits(max_global=40, max_per_ip=8, max_per_user=5))
     # 塞一条过期失败记录，check 的 _prune 应清理它（popleft 分支）
     throttle._events[("g", "")].append(_time.monotonic() - 61)
     throttle.check(ip="1.2.3.4", username="alice")            # 不抛
 
-    # 全局窗口：塞满 max_global 条新失败 → 任意 IP/用户都被拒
+    # 全局窗口满 ≠ 拒绝：未认证攻击者能把它打满，据它拒绝等于远程 DoS
     global_throttle = LoginThrottle(
         ThrottleLimits(max_global=1, max_per_ip=100, max_per_user=100))
     global_throttle.record_failure(ip="9.9.9.9", username="ghost")
-    with pytest.raises(ThrottledError):
-        global_throttle.check(ip="1.2.3.4", username="alice")
+    global_throttle.check(ip="1.2.3.4", username="alice")     # 干净 IP 仍放行
+    global_throttle.check_transport_windows(ip="1.2.3.4")     # 哈希前同样放行
 
     # 空用户名的成功登录不清空任何计数
     throttle.record_success(username="")
     assert len(throttle._events[("g", "")]) == 0              # 上一行 check 已清
+
+
+def test_login_throttle_per_ip_still_blocks():
+    """IP 窗口是真正的拒绝判据（全局窗口退出后仍要挡住单来源爆破）。"""
+    from src.auth.throttle import LoginThrottle, ThrottledError, ThrottleLimits
+
+    throttle = LoginThrottle(ThrottleLimits(max_per_ip=2, max_per_user=100))
+    throttle.record_failure(ip="9.9.9.9", username="a")
+    throttle.record_failure(ip="9.9.9.9", username="b")
+    with pytest.raises(ThrottledError):
+        throttle.check_transport_windows(ip="9.9.9.9")
+    with pytest.raises(ThrottledError):
+        throttle.check(ip="9.9.9.9", username="c")
+    # 同名不同 IP 不受牵连
+    throttle.check(ip="8.8.8.8", username="c")
+
+
+def test_login_throttle_loopback_never_blocked():
+    """回环地址永不被限流：反代/隧道下所有请求共用 127.0.0.1。
+
+    限它等于把所有用户塞进同一个桶——哪怕桶本身就是攻击者打满的。
+    """
+    from src.auth.throttle import LoginThrottle, ThrottleLimits
+
+    for loopback in ("127.0.0.1", "::1", "127.0.0.2"):
+        throttle = LoginThrottle(ThrottleLimits(max_per_ip=1, max_per_user=100))
+        for _ in range(10):
+            throttle.record_failure(ip=loopback, username="x")
+        throttle.check_transport_windows(ip=loopback)   # 不抛
+        throttle.check(ip=loopback, username="other")   # 用户名窗口也干净
+
+
+def test_login_throttle_loopback_helper_handles_bad_input():
+    """IP 解析失败按「非回环」处理（不能因一条脏数据把所有人当本机放行）。"""
+    from src.auth.throttle import _is_loopback
+
+    assert _is_loopback("127.0.0.1") is True
+    assert _is_loopback("::1") is True
+    assert _is_loopback("10.0.0.1") is False
+    assert _is_loopback("") is False
+    assert _is_loopback("not-an-ip") is False
+    assert _is_loopback("  ::1  ") is True
+
+
+def test_login_throttle_eviction_keeps_at_limit_keys():
+    """容量淘汰不能挤掉已限流的键。
+
+    否则攻击者先撞满目标用户名的 max_per_user，再灌一批唯一用户名把容量
+    挤爆，就能通过淘汰把它清零、继续爆破。
+    """
+    import time as _time
+
+    from src.auth.throttle import LoginThrottle, ThrottleLimits
+
+    throttle = LoginThrottle(ThrottleLimits(max_per_user=2, max_per_ip=100))
+    throttle._MAX_KEYS = 3
+    now = _time.monotonic()
+    # 目标用户名已限流，且它的最近失败时间最早（旧实现会第一个淘汰它）
+    throttle._events[("u", "target")].extend([now - 10, now - 9])
+    throttle._events[("u", "fresh1")].append(now)
+    throttle._events[("u", "fresh2")].append(now)
+    throttle._events[("u", "fresh3")].append(now)
+    throttle._evict_over_capacity(now)
+    assert len(throttle._events) == 3
+    assert ("u", "target") in throttle._events
+    assert ("u", "fresh1") not in throttle._events
 
 
 def test_login_throttle_evicts_keys_over_capacity():
@@ -506,3 +572,11 @@ def test_host_allowed_excludes_testserver_unless_enabled():
     assert _host_allowed("localhost", off) is True          # 本地回环仍放行
     on = Settings(_env_file=None, APP_SECRET=SECRET, ALLOW_TEST_HOST="true")
     assert _host_allowed("testserver", on) is True
+
+
+def test_at_limit_returns_false_for_global_key():
+    """全局键不参与淘汰降级判定（它始终保留，也不需要「已限流」标记）。"""
+    from src.auth.throttle import LoginThrottle
+
+    throttle = LoginThrottle()
+    assert throttle._at_limit(("g", "")) is False
