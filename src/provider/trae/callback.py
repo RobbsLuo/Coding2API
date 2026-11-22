@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import secrets
 from dataclasses import dataclass
@@ -17,6 +18,13 @@ LOGIN_VERSION = "1"
 PLUGIN_VERSION = "2.3.62834"
 LOGIN_HOST = "https://www.trae.cn"
 LOGIN_PATH = "/authorization"
+
+# 回调绑定令牌的派生盐：进程启动时随机生成，只活在内存里。
+# 为什么不能只靠 machine_id / device_id：它们明文在登录 URL 上（见
+# `build_login_url`），由它们推导的 trace 等于把绑定令牌一起交出去。
+# 进程重启会重建 salt，同时 pending 登录表（app.state.pending_callbacks）
+# 也整体失效——两者生命周期一致，不需要落盘。
+_TRACE_SALT = secrets.token_hex(32)
 
 
 @dataclass(slots=True)
@@ -33,23 +41,32 @@ def new_machine_identity() -> tuple[str, str]:
     return secrets.token_hex(16), secrets.token_hex(16)
 
 
-def login_trace_id(machine_id: str, device_id: str) -> str:
-    """登录 URL 的 `login_trace_id`（= `(machine_id + device_id)[-16:]`）。
+def login_trace_id(machine_id: str, device_id: str, salt: str | None = None) -> str:
+    """登录 URL 的 `login_trace_id`，同时也是 `/authorize` 的回调绑定令牌。
 
     TRAE 回跳时把它**原样回显**在回调 URL 的 `loginTraceID` 参数上（实测 3/3
-    真实回调均带），因此它同时是 `/authorize` 的回调绑定令牌：值是
-    `secrets.token_hex` 派生的 64 位、只有发起登录的那次响应里出现，攻击者
-    无从猜测，据此可把回调钉死在**那一次** pending 登录上。
-    与 `build_login_url` 共用同一函数，避免生成与校验两处公式漂移。
+    真实回调均带），因此校验必须与生成用同一个函数、同一枚 salt。
+
+    **必须掺盐**：`machine_id` / `device_id` 明文出现在登录 URL 的查询参数里
+    （截图、LAN 明文、Referer 都会带出去）。原实现
+    `(machine_id + device_id)[-16:]` 完全由这两个公开值推导——任何看到登录
+    URL 的人都能算出 trace，进而用自己的 refreshToken 完成别人进行中的登录，
+    凭证还会记在发起登录的管理员名下。
+
+    salt 是**进程级随机值**（见 `_TRACE_SALT`）：不进登录 URL、不进 state，
+    重启后 pending 本就整体失效，无需持久化。调用方也可显式传 salt（测试用）。
     """
-    return (machine_id + device_id)[-16:]
+    effective = salt if salt is not None else _TRACE_SALT
+    material = f"{effective}:{machine_id}:{device_id}".encode()
+    return hashlib.sha256(material).hexdigest()[:16]
 
 
 def build_login_url(callback_url: str, *, machine_id: str, device_id: str) -> str:
     """构造 TRAE 登录 URL（复刻原实现的参数集，勿增删）。
 
     端点是 ConsoleHost + /authorization；machine/device id 与落盘凭证共用同一对，
-    否则登录态与凭证不匹配。
+    否则登录态与凭证不匹配。`login_trace_id` 由 `_TRACE_SALT` 掺盐派生，
+    因此外泄登录 URL 不等于外泄回调绑定令牌。
     """
     trace_id = login_trace_id(machine_id, device_id)
     query = (

@@ -27,7 +27,7 @@ from fastapi.responses import StreamingResponse
 from ..audit.actions import ACTION_DATA_EXPORT
 from ..auth.rbac import require_operator
 from ..compat.openai.request import InvalidRequest
-from ..stats.csv import CSV_BOM, csv_line
+from ..stats.csv import CSV_BOM, csv_line, format_cell
 from .deps import Services, principal_from_request, request_ip
 
 # 账单 CSV 的列（与前端表格列同源；顺序固定，下游按列名解析而不是按位置）
@@ -56,7 +56,14 @@ def month_range(month: str) -> tuple[int, int]:
 
 
 def _cell(value: object) -> str:
-    return "" if value is None else str(value)
+    """单个单元格 → CSV 文本。
+
+    必须复用 `stats.csv.format_cell` 而不是裸 `str()`：用户名字符集只禁了
+    `:` 与换行，`=cmd|…` 这种用户名会被 Excel / WPS 当公式执行。`format_cell`
+    对文本加前导单引号、对数值/布尔走原生渲染（`-3.5` 仍是可计算的数字），
+    None 渲染为空串——与明细导出的口径完全一致。
+    """
+    return format_cell(value)
 
 
 def _users_csv(users: list[dict]) -> Iterator[str]:

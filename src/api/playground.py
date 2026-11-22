@@ -19,6 +19,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from ..compat.openai.request import parse_chat_request
 from ..key_quota import Lease, QuotaExceeded, load_key_quota
+from ..provider.base import aclose_stream
 from .deps import Services, csrf_protected, principal_from_request, read_json_body
 from .endpoints import (
     ensure_model_allowed_for,
@@ -36,6 +37,9 @@ async def _release_when_done(frames, lease: Lease):
             yield frame
     finally:
         lease.release()
+        # 断开时 `async for` 不会关闭被包装的迭代器；不显式关闭会让上游流的
+        # 节流名额等 GC 才归还，突发断连会把上游并发槽占满。
+        await aclose_stream(frames)
 
 
 def create_router(services: Services) -> APIRouter:
@@ -44,11 +48,19 @@ def create_router(services: Services) -> APIRouter:
 
     @router.get("/api/playground/models")
     async def playground_list_models(request: Request,
-                                     _principal=Depends(principal_from_request)):
+                                     principal=Depends(principal_from_request)):
         # 管理台入口用 stale-while-revalidate：先回缓存的旧列表，过期渠道后台刷，
         # 不把 zen 探活的十几秒压在打开页面上。request 用于把能力分表
         # （app.state.model_benchmarks）随条目透出，与 /v1/models 同一口径。
-        return await serve_models(services, request=request)
+        #
+        # 按人过滤：会话的主体是**用户**而不是 Key，所以只用用户级白名单
+        # （`users.allowed_models`，Key 级留空）。缺这一步时受限用户在列表侧
+        # 仍能枚举全池模型——调用侧虽然会拦，但模型名本身就是信息。
+        # 取不到策略行按「不限制」放行，与调用侧的宽容读路径一致。
+        policy = services.user_repo.get(principal.username) or {}
+        return await serve_models(
+            services, request=request,
+            user_allowed_models=str(policy.get("allowed_models") or ""))
 
     @router.post("/api/playground/chat/completions")
     async def playground_chat(request: Request,

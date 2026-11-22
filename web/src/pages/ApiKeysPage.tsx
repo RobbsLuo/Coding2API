@@ -1,5 +1,5 @@
 import { Check, ChevronDown, Copy, Gauge, KeyRound, Plus, Share2, Trash2, X } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { Button as RawButton } from "../components/ui/button";
@@ -607,6 +607,10 @@ export function ApiKeysPage() {
   const [created, setCreated] = useState<ApiKeyCreated | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // 创建请求进行中：按钮禁用 + 早退，避免连点重复 POST（每次都会生成不可回收的明文 Key）
+  const [creating, setCreating] = useState(false);
+  // 同帧连点读不到刚设的 state，用 ref 做真正的互斥
+  const creatingRef = useRef(false);
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
   // 创建 Key 收进对话框（低频动作不常驻占屏），由「我的 API Key」右上角触发
@@ -624,6 +628,12 @@ export function ApiKeysPage() {
 
   const create = async (event: React.FormEvent) => {
     event.preventDefault();
+    // 连点保护：成功后返回的是一次性明文 Key（不可回收），重复 POST 会白造几把。
+    // state 更新是异步的，同一帧内的第二次提交读到的 `creating` 仍是 false，
+    // 故再用 ref 兜一层真正的互斥。
+    if (creatingRef.current) return;
+    creatingRef.current = true;
+    setCreating(true);
     setError(null);
     try {
       const quotaPayload = quotaInput(quota);
@@ -652,6 +662,9 @@ export function ApiKeysPage() {
       // 已经写好的原因丢掉，用户只能对着「创建失败」猜。
       setError(errorText(caught,
         "创建失败：请检查渠道绑定、模型白名单、IP 白名单与到期时间格式（配额须为非负数字）"));
+    } finally {
+      creatingRef.current = false;
+      setCreating(false);
     }
   };
 
@@ -679,8 +692,9 @@ export function ApiKeysPage() {
       await api.deleteApiKey(id);
       setConfirming(null);
       await client.invalidateQueries({ queryKey: ["admin"] });
-    } catch {
-      setError("删除失败");
+    } catch (caught) {
+      // 裸 catch 会把后端已经写好的原因（不存在 / 权限不足）丢掉
+      setError(errorText(caught, "删除失败"));
     }
   };
 
@@ -740,6 +754,13 @@ export function ApiKeysPage() {
           </Button>
         }
       >
+        {/* 删除 / 配额等列表内操作的失败提示：两个对话框都没开时也要有落点，
+            否则后端写好的原因（不存在 / 权限不足）根本没人看得到 */}
+        {error && !createOpen && !editingQuota && (
+          <div className="mb-3" role="alert" data-testid="api-keys-error">
+            <Notice tone="danger">{error}</Notice>
+          </div>
+        )}
         {isLoading ? (
           <PageSkeleton variant="table" rows={4} />
         ) : isError ? (
@@ -989,9 +1010,10 @@ export function ApiKeysPage() {
                   <Button type="button" variant="ghost" onClick={closeCreate}>
                     取消
                   </Button>
-                  <Button type="submit" variant="primary">
+                  <Button type="submit" variant="primary" disabled={creating}
+                          data-testid="create-key-submit">
                     <Plus className="mr-1 size-4" />
-                    创建
+                    {creating ? "创建中…" : "创建"}
                   </Button>
                 </div>
               </form>

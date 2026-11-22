@@ -10,6 +10,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+import pytest
+
 from tests.helpers.paths import load_script
 
 COMMON = load_script("_common")
@@ -94,3 +96,36 @@ def test_prune_survives_stat_failure(tmp_path, monkeypatch):
         COMMON._prune_backups(db_path, keep=1)
     finally:
         monkeypatch.setattr(Path, "stat", real_stat)
+
+
+def test_backup_verifies_integrity(tmp_path, monkeypatch):
+    """备份落盘后必须校验完整性（备份的唯一用途就是回滚）。"""
+    import src.db.backup as backup_module
+
+    db_path = _make_db(tmp_path / "coding2api.sqlite3")
+    seen: list[Path] = []
+    real_verify = backup_module.verify_database
+
+    def spy(path):
+        seen.append(Path(path))
+        return real_verify(path)
+
+    monkeypatch.setattr(backup_module, "verify_database", spy)
+    target = COMMON.backup(db_path)
+    assert seen == [target]
+    assert target.exists()
+
+
+def test_backup_removes_half_written_file_when_verify_fails(tmp_path, monkeypatch):
+    """校验失败要删掉半成品再抛：坏备份比没有更危险。"""
+    import src.db.backup as backup_module
+
+    db_path = _make_db(tmp_path / "coding2api.sqlite3")
+
+    def boom(_path):
+        raise RuntimeError("integrity_check 未通过")
+
+    monkeypatch.setattr(backup_module, "verify_database", boom)
+    with pytest.raises(RuntimeError, match="integrity_check"):
+        COMMON.backup(db_path)
+    assert not list(tmp_path.glob("coding2api.sqlite3.bak-*"))

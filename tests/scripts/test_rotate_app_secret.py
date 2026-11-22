@@ -146,6 +146,72 @@ def test_main_end_to_end(tmp_path):
     assert CredentialCipher(NEW).decrypt(_rows(db_path)["c0"])
 
 
+def test_main_refuses_when_service_holds_instance_lock(tmp_path, capsys):
+    """服务在跑（实例锁被占）时轮换会让 refresh/checkin 用旧钥回写：
+
+    结果是新旧密文混存，下次轮换逐行解密必然中止。所以直接退出（码 2），
+    且**一行都不碰库**。
+    """
+    from src.instance_lock import InstanceLock
+
+    db_path = _db_with_credentials(tmp_path, count=2)
+    old_file = tmp_path / "old.env"
+    old_file.write_text(f"APP_SECRET={OLD}\n")
+    new_file = tmp_path / "new.env"
+    new_file.write_text(f"APP_SECRET={NEW}\n")
+    before = _rows(db_path)
+
+    held = InstanceLock(tmp_path)
+    held.acquire()
+    try:
+        code = SCRIPT.main(["--db", str(db_path),
+                            "--old-secret-file", str(old_file),
+                            "--new-secret-file", str(new_file)])
+    finally:
+        held.release()
+
+    assert code == 2
+    assert "服务仍在运行" in capsys.readouterr().err
+    assert _rows(db_path) == before          # 密文未变
+
+
+def test_main_rejects_unsupported_platform_lock(tmp_path, monkeypatch, capsys):
+    """无文件锁原语的平台上不能「无保护地轮换」：同样退出 2。"""
+    from src.instance_lock import LockUnsupported
+
+    db_path = _db_with_credentials(tmp_path, count=1)
+    old_file = tmp_path / "old.env"
+    old_file.write_text(f"APP_SECRET={OLD}\n")
+    new_file = tmp_path / "new.env"
+    new_file.write_text(f"APP_SECRET={NEW}\n")
+
+    def boom(_path):
+        raise LockUnsupported(tmp_path / ".instance.lock")
+
+    monkeypatch.setattr(SCRIPT, "hold_instance_lock", boom)
+    assert SCRIPT.main(["--db", str(db_path),
+                        "--old-secret-file", str(old_file),
+                        "--new-secret-file", str(new_file)]) == 2
+    assert "无法取得实例锁" in capsys.readouterr().err
+
+
+def test_rotate_vacuums_after_reencrypt(tmp_path, monkeypatch):
+    """轮换后必须 VACUUM：UPDATE 留下的旧密文页否则仍能从文件里读出来。"""
+    db_path = _db_with_credentials(tmp_path, count=1)
+    calls: list[str] = []
+    real_vacuum = SCRIPT._vacuum
+
+    def spy(conn):
+        calls.append("vacuum")
+        return real_vacuum(conn)
+
+    monkeypatch.setattr(SCRIPT, "_vacuum", spy)
+    assert SCRIPT.rotate(db_path, OLD, NEW) == 1
+    assert calls == ["vacuum"]
+    # 真跑一遍确认 VACUUM 在 SQLite 里确实可执行（事务外）
+    assert CredentialCipher(NEW).decrypt(_rows(db_path)["c0"])
+
+
 def test_main_rejects_missing_database(tmp_path):
     old_file = tmp_path / "old.env"
     old_file.write_text(f"APP_SECRET={OLD}\n")

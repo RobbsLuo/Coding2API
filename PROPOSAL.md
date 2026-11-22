@@ -27,7 +27,7 @@
 | `officeace` | 聊天 Basic 不过期 / 控制面 V11+SDK 双签名约 2h | 限流走伪 200；`81004` / `81009` 模型级；`max_tokens` 需改写 |
 | `raccoon` | 标准 OpenAI + 网页会话 JWT | 未知模型静默回落默认 → 双层校验；`429 user_model_rate_limited` → CONCURRENCY；缺 `x-client-device-id` 回 `100002 params_invalid_error`、会话不可信回 `400 200811 device_bind_required` |
 | `lingxi` | WPS `wps_sid` cookie，一次对话三条请求 | 按 run 计费 → 缓存 1h；`usage.total_tokens` 是上下文大小需自算 |
-| `zen` / `kilo` | 标准 OpenAI，虚拟凭证 | zen 需门禁伪装（UA / session / tools）；kilo 有 `isFree` 无需探活 |
+| `zen` / `kilo` | 标准 OpenAI，虚拟凭证 | zen 需门禁伪装（UA / session / tools），充值后可落 Console API Key 切付费档（单槽覆盖）；kilo 有 `isFree` 无需探活 |
 | `generic` | 标准 OpenAI，部署者自己的 key | 401/403 → `DEAD`（与 zen / kilo 相反） |
 
 **跨渠道事实**：
@@ -114,14 +114,16 @@ Provider 只管上游私有部分（发请求、解析事件、分类错误、�
 
 | 面 | 结论 |
 |---|---|
-| 上游端点 | 各渠道独立 `*_ALLOWED_ENDPOINTS`；CB 国际白名单**刻意不含国内站**（只校验「在名单里」不够，Token 会照样跨站发）；TRAE `apiHost` 用户可控 → 导入按白名单拒 |
-| 凭证加密 | Fernet + `APP_SECRET`（≥16 字符、拒低熵）；**丢失 = 凭证全部不可解**，不做轮换；解密失败给可行动错误码，批处理路径跳过该凭证 |
-| API Key | 仅存摘要，明文只回显一次；可限渠道 / IP（默认不信 `X-Forwarded-For`，仅 `TRUST_PROXY=true` 取最后一个）/ 模型（无法判定时 fail closed）/ 到期；发删与导出都进审计 |
-| 用户级策略 | 会话 Cookie 只回答「你是谁」，Playground 是免 Key 直连 → 模型白名单与配额必须落在人身上，否则 viewer 用 Cookie 就能绕过 Key 的限制 |
+| 上游端点 | 各渠道独立 `*_ALLOWED_ENDPOINTS`；CB 国际白名单**刻意不含国内站**（只校验「在名单里」不够，Token 会照样跨站发）；TRAE `apiHost` 用户可控 → 导入按白名单拒；`generic` 非回环强制 https（明文 http 只允许回环，防 API key 在链路上裸奔）；officeAce `model_base_url` **出口按 DNS 复核**（每个解析结果过 SSRF 黑名单，解析失败按阻断）——它带的是不过期的 Basic 凭证 |
+| 凭证加密 | Fernet + `APP_SECRET`（**建议 ≥32 字符随机串**，低于 16 或低熵/已知占位值拒启动）；**丢失 = 凭证全部不可解**，不做轮换；解密失败给可行动错误码，批处理路径跳过该凭证 |
+| API Key | 仅存摘要，明文只回显一次；可限渠道 / IP（默认不信 `X-Forwarded-For`，仅 `TRUST_PROXY=true` 取最后一个，且 `TRUSTED_PROXIES` 非空时只对名单内对端解析）/ 模型（无法判定时 fail closed）/ 到期；发删与导出都进审计；`daily_cost_usd` 在存在无价请求时 fail closed（量不出成本就不声称有配额） |
+| 用户级策略 | 会话 Cookie 只回答「你是谁」，Playground 是免 Key 直连 → 模型白名单与配额必须落在人身上，否则 viewer 用 Cookie 就能绕过 Key 的限制；Playground 的模型列表也按用户白名单裁剪（列表侧不能比调用侧更宽） |
 | kill switch | 拦在鉴权依赖而非各端点（新端点不会漏拦）；管理台与登录保持可用（否则开了就关不上） |
-| 会话 | `SameSite=Lax` + 写操作 CSRF；`Secure` 按实际协议；无 Cookie 的写端点也做跨站防护；吊销用 `session_epoch` 自增而非会话表 |
-| 错误与日志 | 错误响应不回流上游正文；未匹配 `/api`、`/v1` 返回 JSON 404（任何方法）；`ClientDisconnect` → 499；日志页 `redact_or_drop` 整行过滤，宁可漏一条也不把凭证推进浏览器 |
-| 输入 | 请求体上限（登录 8KB / 备份恢复 512MB / 其余 16MB）；拒绝越界数值与 `NaN` / `Infinity`（含 `1e999`）；SSE 单行 / 单帧缓冲有界；非 2xx 错误体有界读取 256KB |
+| 会话 | `SameSite=Lax` + 写操作 CSRF；`Secure` 按实际协议（登出删除 Cookie 同属性）；无 Cookie 的写端点也做跨站防护；吊销用 `session_epoch` 自增而非会话表，**登出也 bump**（被窃 Cookie 立即失效，不必等 12h 过期） |
+| 登录限流 | IP / 用户名两级固定窗口 + PBKDF2 并发上限；**回环只在没有 `X-Forwarded-For` 时豁免**（反代回源的对端恒为 127.0.0.1，无条件豁免会让 IP 维度全废） |
+| 错误与日志 | 错误响应不回流上游正文；未匹配 `/api`、`/v1` 返回 JSON 404（任何方法）；`ClientDisconnect` → 499；日志页 `redact_or_drop` 整行过滤，宁可漏一条也不把凭证推进浏览器；日志落库走**有界队列 + 后台线程**（队列满即丢，绝不在事件循环上抢写锁） |
+| 输入 | 请求体上限（登录 8KB / 备份恢复 512MB / 其余 16MB）；备份上传**流式落盘**（不把 512MB 读进内存）；拒绝越界数值与 `NaN` / `Infinity`（含 `1e999`）；SSE 单行 / 单帧缓冲有界；非 2xx 错误体与短接口成功体都有界读取 |
+| 观测出口 | `/metrics` 在 `METRICS_TOKEN` 留空时**只放行回环对端**；公网入口模板（Caddy / nginx）另已摘除该路径 |
 | 热更 | 写入即校验（float 拒 NaN/±inf、长度上限）；webhook 只接受 `http(s)` 且做 SSRF 校验（写入期 + 投递前按 DNS 复核） |
 
 **明确不做**：mTLS；管理台与端口的 IP 限制（交给反向代理）；全量请求审计。

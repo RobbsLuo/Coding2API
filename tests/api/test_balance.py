@@ -149,3 +149,46 @@ def test_balance_read_endpoint_needs_no_csrf_header(settings):
     _seed_credentials(app, [("trae", 5.0, 10.0, True)])
     with client as c:
         assert c.get(PATH, headers={"Authorization": f"Bearer {key}"}).status_code == 200
+
+
+def test_balance_admin_sees_provider_breakdown(settings):
+    """admin 的 Key 能看到池级明细（运维用）。"""
+    app, client, key = _client_with_key(settings)
+    _seed_credentials(app, [("codebuddy", 30.0, 100.0, True)])
+    with client as c:
+        body = _balance(c, key)
+    assert body["providers"] == [{"provider": "codebuddy", "remaining": 30.0,
+                                  "total": 100.0, "credentials": 1}]
+
+
+def test_balance_viewer_key_gets_no_provider_breakdown(settings):
+    """viewer 的 Key 只拿聚合值：每渠道剩余额度/凭证条数属于池级运维信息。
+
+    客户端契约不变：`balance_infos` / `is_available` / `balance_known` 与
+    admin 看到的一致，只是 `providers` 为空数组。
+    """
+    app, client, _admin_key = _client_with_key(settings)
+    viewer_key = app.state.api_keys.create("guest", "viewer")["api_key"]
+    _seed_credentials(app, [("codebuddy", 30.0, 100.0, True),
+                            ("trae", 10.0, 40.0, True)])
+    with client as c:
+        admin_body = _balance(c, _admin_key)
+        body = _balance(c, viewer_key)
+    assert body["providers"] == []
+    assert body["balance_infos"] == admin_body["balance_infos"]
+    assert body["balance_infos"][0]["total_balance"] == "40.00"
+    assert body["is_available"] is True
+    assert body["balance_known"] is True
+
+
+def test_balance_operator_sees_provider_breakdown(settings):
+    """operator 与 admin 同级：凭证写操作角色同样需要池级明细排障。"""
+    app, client, _admin_key = _client_with_key(settings)
+    app.state.user_repo.update_role("guest", "operator")
+    operator_key = app.state.api_keys.create("guest", "operator")["api_key"]
+    _seed_credentials(app, [("trae", 10.0, 40.0, True)])
+    with client as c:
+        body = _balance(c, operator_key)
+    assert body["providers"] == [{"provider": "trae", "remaining": 10.0,
+                                  "total": 40.0, "credentials": 1}]
+

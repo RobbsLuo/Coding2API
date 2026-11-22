@@ -28,7 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.config import load_settings  # noqa: E402
-from src.db.backup import restore_database, verify_database  # noqa: E402
+from src.db.backup import restore_database, verify_app_database  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -44,7 +44,9 @@ def main(argv: list[str] | None = None) -> int:
     db_path = Path(args.db) if args.db else Path(load_settings().db_path)
 
     # 预览也要先校验：坏备份越早发现越好（别等到 --apply 才失败）。
-    verify_database(source)
+    # 用 `verify_app_database` 而不是只查 integrity_check：任意完好 sqlite 都能
+    # 通过完整性校验，但缺核心表/版本更高的库换进生产会让服务启动即挂。
+    verify_app_database(source)
     print(f"备份校验通过: {source}")
     print(f"主库: {db_path}")
     if not args.apply:

@@ -684,26 +684,106 @@ async def test_alert_task_key_burst_skipped_when_window_closed(tmp_path):
     assert alerts.recent() == []
 
 
-async def test_alert_task_off_hours_rule_reads_local_clock(tmp_path):
-    """非工作时段按本地时钟判定：构造一个明确在工作时间外的时刻。"""
+async def test_alert_task_off_hours_uses_beijing_hour_not_utc(tmp_path, monkeypatch):
+    """反证：同一时刻在 UTC 下是 19 点（工作时段内）、在北京时间是 03 点。
 
-    def noon_like_utc() -> int:
-        # 取本地时区 03:00 的时刻（任何时区下 `hour == 3` 都成立）
-        local = time.localtime()
-        return int(time.mktime((local.tm_year, local.tm_mon, local.tm_mday,
-                                3, 0, 0, 0, 0, -1)))
+    只按 `time.localtime()` 判会漏报；按北京时间判才是运营配置的本意。
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
+    # 北京时间 2026-11-18 03:00 = UTC 2026-11-17 19:00
+    early = int(datetime(2026, 11, 18, 3, 0,
+                         tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+    # 工作时段 19–23：UTC 小时 19 落在区间内，北京小时 3 不在
     class _BusyStats:
         def window_error_rate(self, *, since):
             return (30, 0)
 
-    task, alerts, db = _task(
-        tmp_path, stats=_BusyStats(), now=noon_like_utc,
-        off_hours_start=lambda: 9, off_hours_end=lambda: 19,
-        off_hours_min_requests=lambda: 20,
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    try:
+        task, alerts, db = _task(
+            tmp_path, stats=_BusyStats(), now=lambda: early,
+            off_hours_start=lambda: 19, off_hours_end=lambda: 23,
+            off_hours_min_requests=lambda: 20,
+        )
+        await task.run_once()
+        assert [row["rule"] for row in alerts.recent()] == ["off_hours"]
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+def test_month_start_is_beijing_month_start(monkeypatch):
+    """预算月起点固定北京时间：TZ=UTC 也不得偏移（与签到日界同口径）。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    from src.tasks.alerting import month_start
+
+    # 北京时间 2026-11-01 00:30（UTC 2026-10-31 16:30）：必须是 11 月起点
+    early = int(datetime(2026, 11, 1, 0, 30,
+                         tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+    expected = int(datetime(2026, 11, 1, tzinfo=ZoneInfo("Asia/Shanghai")).timestamp())
+
+    monkeypatch.setenv("TZ", "UTC")
+    time.tzset()
+    try:
+        assert month_start(early) == expected
+    finally:
+        monkeypatch.undo()
+        time.tzset()
+
+
+async def test_alert_task_error_rate_ignores_client_disconnect(tmp_path):
+    """端到端：窗口内只有客户端断开时不报「上游错误率」。"""
+    from src.db.conn import Database
+    from src.db.migrate import apply_schema
+    from src.stats.collector import StatsCollector
+
+    db = Database(tmp_path / "disconnect.sqlite3")
+    apply_schema(db.connect())
+    for index in range(30):
+        StatsCollector(db).record(username="u", provider="trae", model="m",
+                                  ok=False, error_type="client_disconnect",
+                                  now=10_000 + index)
+    task, alerts, _db = _task(
+        tmp_path, stats=StatsCollector(db), now=lambda: 10_100,
+        error_rate_threshold=lambda: 0.5, error_rate_min_requests=lambda: 20,
+        error_rate_window_minutes=lambda: 15,
     )
     await task.run_once()
-    assert [row["rule"] for row in alerts.recent()] == ["off_hours"]
+    assert [row["rule"] for row in alerts.recent()] == []
+    db.close()
+
+
+async def test_alert_task_error_rate_fires_with_real_upstream_failures(tmp_path):
+    """反证：同一窗口混入真实上游错误时照常告警（排除断连不能把规则弄哑）。"""
+    from src.db.conn import Database
+    from src.db.migrate import apply_schema
+    from src.stats.collector import StatsCollector
+
+    db = Database(tmp_path / "mixed.sqlite3")
+    apply_schema(db.connect())
+    collector = StatsCollector(db)
+    for index in range(10):
+        collector.record(username="u", provider="trae", model="m", ok=False,
+                         error_type="client_disconnect", now=10_000 + index)
+    for index in range(20):
+        collector.record(username="u", provider="trae", model="m", ok=False,
+                         error_type="upstream_error", now=10_020 + index)
+    task, alerts, _db = _task(
+        tmp_path, stats=collector, now=lambda: 10_100,
+        error_rate_threshold=lambda: 0.5, error_rate_min_requests=lambda: 20,
+        error_rate_window_minutes=lambda: 15,
+    )
+    await task.run_once()
+    row = alerts.recent()[0]
+    assert row["rule"] == "error_rate"
+    # 分母是全部请求（30），分子只算上游错误（20）
+    assert "20/30" in row["message"]
+    db.close()
 
 
 class _CostStats:

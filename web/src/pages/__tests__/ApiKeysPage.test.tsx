@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiKeysPage, parseExpiresAt } from "../ApiKeysPage";
 import { jsonResponse, mockFetch, renderPage, settle, userEvent } from "@/test-utils";
@@ -133,6 +133,29 @@ describe("ApiKeysPage", () => {
     await userEvent.click(screen.getByRole("button", { name: "删除" }));
     await userEvent.click(screen.getByRole("button", { name: "取消" }));
     expect(screen.getByRole("button", { name: "删除" })).toBeInTheDocument();
+  });
+
+  it("删除失败时透出后端文案（不只一句「删除失败」）", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        if (init?.method === "DELETE") {
+          return jsonResponse(
+            { error: { code: "not_found", message: "Key 已不存在，可能已被其他会话删除" } },
+            404,
+          );
+        }
+        return jsonResponse({ api_keys: [KEY] });
+      }),
+    );
+    renderPage(<ApiKeysPage />);
+    await settle();
+
+    await userEvent.click(screen.getByRole("button", { name: "删除" }));
+    await userEvent.click(screen.getByRole("button", { name: "确认删除" }));
+
+    const alert = await screen.findByTestId("api-keys-error");
+    expect(alert).toHaveTextContent("可能已被其他会话删除");
   });
 
   it("展示渠道绑定与 IP 白名单，空值给出「自动 / 不限制」", async () => {
@@ -343,6 +366,39 @@ it("创建 Key 对话框支持 Esc 关闭", async () => {
   await openCreateDialog();
   await userEvent.keyboard("{Escape}");
   expect(screen.queryByTestId("create-key-dialog")).not.toBeInTheDocument();
+});
+
+it("创建中连点只发一次 POST（每次 POST 都会生成不可回收的明文 Key）", async () => {
+  let resolvePost: ((value: Response) => void) | null = null;
+  let posts = 0;
+  vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url === "/api/api-keys" && init?.method === "POST") {
+      posts += 1;
+      // 挂住第一次请求：给第二次点击留出窗口
+      return new Promise<Response>((resolve) => {
+        resolvePost = resolve;
+      });
+    }
+    return jsonResponse({ api_keys: [] });
+  }));
+  renderPage(<ApiKeysPage />);
+  await settle();
+  await openCreateDialog();
+
+  const submit = screen.getByTestId("create-key-submit");
+  await userEvent.click(submit);
+  // 请求未返回：按钮已禁用并显示提交中文案
+  await waitFor(() => expect(submit).toBeDisabled());
+  expect(submit).toHaveTextContent("创建中");
+  // 强行再点一次（disabled 之外还有 ref 互斥兜底）
+  fireEvent.click(submit);
+  fireEvent.submit(submit.closest("form")!);
+  expect(posts).toBe(1);
+
+  resolvePost!(jsonResponse({ ...KEY, api_key: "sk-once" }));
+  expect(await screen.findByTestId("new-key-plaintext")).toHaveTextContent("sk-once");
+  expect(posts).toBe(1);
 });
 
 describe("ApiKeysPage 首启向导深链", () => {

@@ -14,15 +14,21 @@ services:
     # 旁路（TRUST_PROXY 已开，直连还能伪造 XFF 绕过 Key 的 allowed_ips）。
     ports: !override
       - "127.0.0.1:${PORT:-8000}:${PORT:-8000}"
+    # 只接专用后端网络：固定子网才能把 TRUSTED_PROXIES 收窄到一个 /24。
+    networks:
+      - backend
     environment:
       # PUBLIC_BASE_URL 决定 TRAE 登录回调基址与 HSTS 下发；https 才发 HSTS。
       # 它的主机名也自动进入 Host 白名单（ALLOWED_HOSTS 留空时的口径）。
       PUBLIC_BASE_URL: https://${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env (domain, or public IP with TLS_MODE=internal)}
       # 前恰好一层 Caddy 且应用端口只在回环 → 采信 XFF 是安全的。
-      # TRUSTED_PROXIES 固定为 compose 网段：Caddy 是该网络内的唯一对端，
-      # 显式列出来才能在「有人临时加一条端口映射」时仍然挡住伪造 XFF。
+      # TRUSTED_PROXIES 必须**精确到本 compose 的后端子网**，不能写 RFC1918
+      # 全域（172.16/12、10/8、192.168/16）：那等于「任何同网段容器」都被采信，
+      # 谁加入该网段就能自带 X-Forwarded-For 伪造来源 IP，绕过 Key 的
+      # allowed_ips 与登录限流桶（src/auth/access.py 对命中白名单的对端直接取
+      # entries[-1]）。下方 networks.backend.ipam 把子网钉死为 172.31.250.0/24。
       TRUST_PROXY: "true"
-      TRUSTED_PROXIES: "172.16.0.0/12,192.168.0.0/16,10.0.0.0/8"
+      TRUSTED_PROXIES: "172.31.250.0/24"
       # Caddy 反代走 compose 网络，容器内必须监听 0.0.0.0；.env 里沿用
       # .env.example 的 HOST=127.0.0.1 会让容器只监听回环、Caddy 连不上。
       HOST: 0.0.0.0
@@ -33,9 +39,30 @@ services:
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-},${PUBLIC_DOMAIN:?set PUBLIC_DOMAIN in .env},127.0.0.1,localhost
 
   caddy:
-    image: caddy:2.11.7-alpine
+    # tag 保留（人读版本）+ digest 固定（构建可复现，与 Dockerfile 的三个基础
+    # 镜像同口径）。digest 是 2.11.7-alpine 多架构索引（linux/amd64+arm64）的
+    # 快照：sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
+    # 升级版本时用 `docker buildx imagetools inspect caddy:<tag>` 取新 digest。
+    image: caddy:2.11.7-alpine@sha256:e70b164da81ef698b3ad19af799ea6086ce6d9e48ed4079eb9fe26f6fbf14ee5
     container_name: coding2api-caddy
     restart: unless-stopped
+    # 只接专用后端网络（同上）。
+    networks:
+      - backend
+    # ---- 最小权限加固 ----
+    # Caddy 需要绑 80/443（特权端口）→ 只补 NET_BIND_SERVICE，其余全丢。
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - "no-new-privileges:true"
+    # 512m 是保守默认（正常 RSS < 100MB；证书签发/大量并发握手时略高）。
+    mem_limit: 512m
+    # user 刻意不改：Caddy 以 root 起，内部会自行降权到 caddy 用户处理请求，
+    # 且必须能写 /data（证书、ACME 账号）与 /config（autosave.json）。改成非
+    # root 需要先给两个具名卷 chown 到该 uid（卷首次创建时属主是 root），
+    # 否则启动即报 permission denied、证书永远签不下来。
     # 应用 healthy 后再起入口：否则 Caddy 会在应用预热期持续 502 并刷日志
     depends_on:
       coding2api:
@@ -68,3 +95,14 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+
+networks:
+  # 专用后端网络，子网钉死：TRUSTED_PROXIES 要精确到 /24，而 compose 默认
+  # 网络的子网由 Docker 随机分配（10.x/172.x 都可能），无法在配置里引用。
+  # 172.31.250.0/24 取自 RFC1918 尾部，避开 Docker 默认 bip 池
+  # （172.17–172.31 的常见分配）与本机常见 VPN 网段；若宿主已有同网段冲突，
+  # 改成任意未被占用的 /24，并同步 TRUSTED_PROXIES。
+  backend:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24

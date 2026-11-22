@@ -166,8 +166,9 @@ class LogBuffer:
             while len(self._lines) > capacity:
                 self._lines.popleft()
         payload = line.as_dict()
-        # 先落库再推送：顺序反了的话，SSE 订阅者可能先看到某行、重启后却在库里
-        # 找不到它（排障时「明明看到了却没留痕」比慢几毫秒更难接受）。
+        # 落库只**入队**（`LogRepository.append` 内部是 `put_nowait`，满即丢弃）：
+        # 这里常在事件循环线程上，同步写 SQLite 会被后台任务的写锁卡到
+        # `busy_timeout`（5s），把整个服务拖停。真正的批量落库在消费者线程上。
         if self._persist is not None:
             self._persist.append(ts=line.ts, level=line.level,
                                  logger_name=line.logger, message=line.message,

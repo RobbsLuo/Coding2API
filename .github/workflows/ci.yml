@@ -116,6 +116,22 @@ jobs:
             sleep 15
           done
           exit 1
+      - name: 依赖漏洞（全量含 devDependencies，critical 及以上告警）
+        # 为什么 dev 依赖也要扫：Dockerfile 的构建阶段真的执行 devDeps
+        # （vite / esbuild / rollup 跑 `pnpm exec vite build`），它们的漏洞在
+        # 构建期可被触发（esbuild 的 dev server / rollup 插件链是历史高发区），
+        # 只是不进运行时产物。--prod 审计看不到这一层。
+        # 门槛用 critical（比 prod 的 high 更高）且失败只告警不全红：dev 依赖
+        # 的公告噪声明显更大（多为低利用门槛的 DoS），全红会让人开始无视审计。
+        # 同样带 3 次重试（同一个审计端点，同样的网络抖动）。
+        run: |
+          for i in 1 2 3; do
+            if pnpm audit --audit-level=critical; then exit 0; fi
+            echo "::warning::全量 pnpm audit 第 $i 次失败（可能是 registry 网络抖动），15s 后重试"
+            sleep 15
+          done
+          echo "::warning::全量 pnpm audit 未通过（devDependencies 有 critical 漏洞，或审计端点持续不可用）；不阻断，请人工确认"
+          exit 0
       - run: pnpm exec tsc --noEmit
       - run: pnpm exec vitest run
       - run: pnpm build

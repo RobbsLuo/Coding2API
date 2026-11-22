@@ -94,6 +94,32 @@ def test_billing_without_month_uses_current(billing_env):
     assert body["month"] == time.strftime("%Y-%m", time.localtime())
 
 
+def test_billing_csv_escapes_formula_injection_in_username(billing_env):
+    """用户名允许 `=` 开头（只禁了 `:` 与换行）：CSV 必须加前导单引号。
+
+    否则 `=cmd|'/c calc'!A0` 这类用户名在 Excel / WPS 里会被当公式执行。
+    数值列不受影响（`-` 开头的负数仍是可计算数字）。
+    """
+    app, client, _key = billing_env
+    app.state.stats_collector.record(
+        username="=1+1", provider="trae", model="m", ok=True,
+        input_tokens=1, output_tokens=0, now=1_790_000_200)
+    app.state.stats_collector.rollup_hourly()
+    month = _month_of(1_790_000_000)
+    text = client.get("/api/billing",
+                      params={"month": month, "format": "csv"}).text
+    assert "'=1+1" in text
+    assert ",=1+1" not in text
+    # 数值列保持原生渲染（不加引号），None 渲染为空单元格
+    header, *rows = [line for line in text.splitlines() if line]
+    columns = header.lstrip("\ufeff").split(",")
+    row = next(line for line in rows if "'=1+1" in line).split(",")
+    record = dict(zip(columns, row, strict=True))
+    assert record["requests"] == "1"
+    assert record["input_tokens"] == "1"
+    assert record["cached_tokens"] == ""
+
+
 def test_billing_csv_exports_users_and_audits(billing_env):
     app, client, _key = billing_env
     month = _month_of(1_790_000_000)

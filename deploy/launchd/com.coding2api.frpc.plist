@@ -39,6 +39,12 @@
     <key>ThrottleInterval</key>
     <integer>10</integer>
 
+    <!-- 进程 umask (0o077)：frpc 的日志（logs/frpc.*.log）含隧道连接细节、
+         上游错误正文与服务器地址，默认 022 会落成 0644，同机任何用户可读。
+         与主服务 plist（com.coding2api.plist）同口径。 -->
+    <key>Umask</key>
+    <integer>63</integer>
+
     <key>StandardOutPath</key>
     <string>__PROJECT_ROOT__/logs/frpc.out.log</string>
     <key>StandardErrorPath</key>

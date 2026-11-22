@@ -9,11 +9,22 @@ import {
 } from "lucide-react";
 import { useSessionContext } from "../Layout";
 import { usePlaygroundModels } from "../api/hooks";
+import { notifyUnauthorized } from "../api/unauthorized";
 import { errorText } from "../lib/errors";
 import { PageHeader } from "../components/PageHeader";
 import { ModelPicker, modelValue, pickDefaultModel } from "../components/ModelPicker";
 import { buildSamplingParams, effortOptions } from "../lib/playgroundParams";
 import { Button, Card, Checkbox, Empty, Field, Input, Label, Notice, Panel, Select, Textarea } from "../ui";
+
+/**
+ * Playground 请求超时。
+ *
+ * 流式回答可达数分钟（长推理 + 图片），故取 120s；并且**只约束「响应头 / 首字节
+ * 之前」**：进入读流阶段后清掉定时器，否则会把正常的长时间流式回答截断。
+ * 取舍：首字迟迟不来视为后端挂死（连接池耗尽、上游不返回），宁可报错也不让
+ * `busy` 永不复位；一旦开始出字，就让流跑完。
+ */
+const PLAYGROUND_TIMEOUT_MS = 120_000;
 
 export function PlaygroundPage() {
   const session = useSessionContext();
@@ -115,6 +126,16 @@ export function PlaygroundPage() {
     setAnswer("");
     setReasoning("");
     setUsage(null);
+    // 只给「连上 + 首字节」设超时：定时器在响应头到达时清掉，读流阶段不受约束
+    // （否则长推理的流式回答会被 120s 硬砍）。后端挂死时 abort 让 finally 复位 busy。
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, PLAYGROUND_TIMEOUT_MS);
+    // 首字节之后不再受超时约束：读流用 response 自己的连接与 signal 无关
+    const stopTimer = () => clearTimeout(timer);
     try {
       const response = await fetch("/api/playground/chat/completions", {
         method: "POST",
@@ -124,6 +145,7 @@ export function PlaygroundPage() {
           "X-Requested-With": "XMLHttpRequest",
         },
         credentials: "same-origin",
+        signal: controller.signal,
         body: JSON.stringify({
           model: selectedModel,
           messages: [{ role: "user", content: buildContent() }],
@@ -131,9 +153,11 @@ export function PlaygroundPage() {
           ...built.params,
         }),
       });
+      stopTimer();
       if (response.status === 401) {
-        // 会话过期：提示重新登录而不是一句原始错误
-        window.location.href = "/login";
+        // 会话过期：走统一出口（清缓存 + 回登录页），不要裸跳转绕开它
+        notifyUnauthorized();
+        setError("会话已过期，请重新登录。");
         return;
       }
       if (!response.ok) {
@@ -157,8 +181,11 @@ export function PlaygroundPage() {
       // 后端 4xx/5xx 已在上面解析过 error.message（受控文案）；走到这里的是
       // 网络层异常（fetch 抛 TypeError 等），其 message 是英文实现细节，
       // 不该直接渲染给用户。
-      setError(errorText(caught, "请求失败，请稍后重试。"));
+      setError(timedOut
+        ? `请求超时（${PLAYGROUND_TIMEOUT_MS / 1000} 秒未收到响应），请稍后重试。`
+        : errorText(caught, "请求失败，请稍后重试。"));
     } finally {
+      stopTimer();
       setBusy(false);
     }
   };

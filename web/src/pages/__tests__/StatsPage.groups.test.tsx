@@ -332,6 +332,36 @@ describe("StatsPage 分组与明细", () => {
       .not.toBeInTheDocument();
   });
 
+  it("非当前 tab 的分组维度不发请求，切过去才发（首屏不并发 4 次重聚合）", async () => {
+    const spy = mockFetch({
+      "/api/stats/overview": OVERVIEW,
+      "/api/stats/by-provider": PROVIDERS,
+      "/api/stats/by-model": MODELS,
+      "/api/stats/by-user": USERS,
+      "/api/stats/by-credential": CREDENTIALS,
+      "/api/stats/model-timeline": MODEL_TIMELINE,
+      "/api/stats/events": EVENTS_EMPTY,
+    });
+    const calls = (fragment: string) => spy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes(fragment));
+
+    renderPage(<StatsPage />, ADMIN);
+    await settle();
+
+    // 默认 tab 是渠道：只有它（以及主图用的渠道构成）发请求
+    expect(calls("/api/stats/by-provider").length).toBeGreaterThan(0);
+    expect(calls("/api/stats/by-model")).toHaveLength(0);
+    expect(calls("/api/stats/by-user")).toHaveLength(0);
+    expect(calls("/api/stats/by-credential")).toHaveLength(0);
+
+    // 切到模型 tab 才发那一维
+    await userEvent.click(screen.getByTestId("group-tabs-model"));
+    await waitFor(() => expect(calls("/api/stats/by-model").length).toBeGreaterThan(0));
+    expect(calls("/api/stats/by-user")).toHaveLength(0);
+    expect(calls("/api/stats/by-credential")).toHaveLength(0);
+  });
+
   it("分组统计：各维度都给出成功率、命中缓存、成本与延迟", async () => {
     mockFetch({
       "/api/stats/overview": OVERVIEW,

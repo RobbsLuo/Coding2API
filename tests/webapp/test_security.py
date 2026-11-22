@@ -511,20 +511,30 @@ def test_session_cookie_secure_without_forwarded_proto():
                                  https_settings) is False
     assert session_cookie_secure(_request({}), https_settings) is False
     # https 但 base 主机解析为空（无 scheme / 无 host）→ 不 Secure
-    empty = Settings(_env_file=None, APP_SECRET=SECRET, PUBLIC_BASE_URL="https:///oops")
+    # Settings 现在会拒绝非法形态，这里模拟升级前写进 .env 的坏值
+    empty = Settings.model_construct(
+        app_secret=SECRET, public_base_url="https:///oops")
     assert session_cookie_secure(_request({"host": "oops"}), empty) is False
 
 
 def test_host_allowed_public_base_url_edge_shapes():
-    """PUBLIC_BASE_URL 无 scheme / path_host 为空时不炸也不误放行。"""
+    """PUBLIC_BASE_URL 无 scheme / path_host 为空时不炸也不误放行。
+
+    非法形态已由 `Settings` 的 field_validator 拒绝；这里用 model_construct
+    模拟升级前写入的老 `.env`，确认下游仍能安全降级。
+    """
     from src.config import Settings
     from src.main import _host_allowed
 
     # 无 scheme：startswith 分支不命中，主机仍进白名单
-    settings = Settings(_env_file=None, APP_SECRET=SECRET, PUBLIC_BASE_URL="localhost:8000")
+    settings = Settings.model_construct(
+        app_secret=SECRET, public_base_url="localhost:8000",
+        allowed_hosts="", allow_test_host=False)
     assert _host_allowed("localhost", settings)
     # base 主机为空：path_host 分支不命中，仅默认白名单生效
-    empty = Settings(_env_file=None, APP_SECRET=SECRET, PUBLIC_BASE_URL="/oops")
+    empty = Settings.model_construct(
+        app_secret=SECRET, public_base_url="/oops",
+        allowed_hosts="", allow_test_host=False)
     assert _host_allowed("localhost", empty)
     assert not _host_allowed("evil.example", empty)
 

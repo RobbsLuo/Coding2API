@@ -1582,6 +1582,21 @@ class UserRepository:
             )
         return cursor.rowcount > 0
 
+    def bump_session_epoch(self, username: str, *, now: int | None = None) -> bool:
+        """作废该用户的全部会话（登出用）。
+
+        会话 Cookie 是无状态 HMAC：只删浏览器里的那份，**被复制走的**仍能用到
+        `max_age` 到期。只有 bump epoch 能让所有旧 Cookie 在下次校验时失配。
+        返回 False 表示用户不存在（调用方仍应按登出成功处理）。
+        """
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "UPDATE users SET session_epoch = session_epoch + 1, updated_at = ? "
+                "WHERE username = ?",
+                (_now(now), username),
+            )
+        return cursor.rowcount > 0
+
     def set_activation_token(self, username: str, digest: str, expires_at: int, *,
                              now: int | None = None) -> bool:
         """挂一次性激活令牌（登录前使用，故**不** bump epoch）。"""

@@ -22,7 +22,6 @@ import type {
   GrowthEvent,
   GrowthRunResult,
   ActivityReportResult,
-  ModelCatalogResponse,
   ModelInfo,
   ModelStats,
   CredentialStats,
@@ -466,12 +465,9 @@ export const api = {
    * hook。**按角色裁剪**——缺失的键 = 无权看（见 `NavBadges`）。
    */
   navBadges: () => request<NavBadges>("/api/nav-badges"),
-  /** OpenRouter 模型目录（刊例价 + 明细元数据），模型列表页只读展示（服务端分页 + 筛选）。 */
-  modelCatalog: (sort?: string, order?: string, q?: string, onlyAvailable?: boolean,
-                 limit?: number, offset?: number) =>
-    request<ModelCatalogResponse>(
-      `/api/model-catalog${query({ sort, order, q, only_available: onlyAvailable,
-                                   limit, offset })}`),
+  // 模型目录（刊例价 + 明细元数据）不走这里：模型列表页需要额外的
+  // `only_suspected` / `availability_days` 两个筛选，统一由
+  // `api/modelExtras.ts` 的 `fetchModelCatalog` 承担（同一端点）。
 
   // ---------------------------------------------------------------- 统计
   // `since` / `until`：自定义时间窗两端（半开 `[since, until)`，epoch 秒）。

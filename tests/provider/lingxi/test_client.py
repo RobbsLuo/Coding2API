@@ -150,6 +150,18 @@ async def test_json_rejects_non_json_and_non_object():
         await client(array_json).fetch_balance(CREDENTIAL)
 
 
+async def test_json_success_path_is_bounded():
+    """成功路径也要有界：超大 body 必须按协议违规早失败，而不是整段读进内存。"""
+    def huge(request):
+        # 超过 BOUNDED_BODY_LIMIT 的合法 JSON（结构本身没问题，只是太大）
+        return httpx.Response(200, content=b'{"a": "' + b"x" * base.BOUNDED_BODY_LIMIT
+                              + b'"}')
+
+    with pytest.raises(UpstreamProtocolViolation) as caught:
+        await client(huge).fetch_balance(CREDENTIAL)
+    assert "oversized" in caught.value.public_message
+
+
 async def test_json_transport_error_is_translated():
     def handler(request):
         raise httpx.ReadTimeout("slow")

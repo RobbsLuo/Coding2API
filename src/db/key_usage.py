@@ -16,6 +16,25 @@ from __future__ import annotations
 
 from ..key_quota import KeyUsage
 
+# 成本聚合的三列口径（三处 SQL 共用，避免口径漂移）：
+# - `cost_usd`：已知成本之和，NULL（无价模型）按 0 累加，不让 NULL 污染求和。
+# - `cost_known_requests`：能定价的请求数（该行 cost_usd 非 NULL）。
+# - `cost_unknown_requests`：**拿到用量却定不了价**的请求数。调用方据此判定
+#   「成本是否可精确判定」：只把已知成本与上限比较会把无价请求当 0 元，配额
+#   永远不触发。
+#
+# 为什么要求 token 非 NULL：`cost_usd IS NULL` 还有一类是「上游没回 usage /
+# 请求在选号阶段就失败」的零 token 行，它们的成本按构造为 0。若也算无价请求，
+# 一条失败请求就会让成本配额整天 fail closed，变成误伤。
+_COST_COLUMNS = (
+    "COALESCE(SUM(cost_usd), 0) AS cost_usd, "
+    "COALESCE(SUM(CASE WHEN cost_usd IS NOT NULL THEN 1 ELSE 0 END), 0) "
+    "AS cost_known_requests, "
+    "COALESCE(SUM(CASE WHEN cost_usd IS NULL "
+    "AND (input_tokens IS NOT NULL OR output_tokens IS NOT NULL) "
+    "THEN 1 ELSE 0 END), 0) AS cost_unknown_requests "
+)
+
 
 class KeyUsageRepository:
     """`usage_events` 按 Key 的窗口聚合。"""
@@ -28,7 +47,8 @@ class KeyUsageRepository:
         """聚合某把 Key 在 `[since, until)` 内的用量；无记录返回全零。
 
         `until=None` 表示不设上界（「至今」）。`cost_usd` 为 NULL 的行按 0
-        累加——不猜成本，也不让 NULL 把整行求和污染掉。
+        累加——不猜成本，也不让 NULL 把整行求和污染掉；同时单独给出
+        `cost_unknown_requests`，让成本配额能对「无价请求」fail closed。
         """
         row = self._db.connect().execute(
             "SELECT COUNT(*) AS requests, "
@@ -36,7 +56,7 @@ class KeyUsageRepository:
             "COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS failed, "
             "COALESCE(SUM(input_tokens), 0) AS input_tokens, "
             "COALESCE(SUM(output_tokens), 0) AS output_tokens, "
-            "COALESCE(SUM(cost_usd), 0) AS cost_usd "
+            f"{_COST_COLUMNS}"
             "FROM usage_events WHERE api_key_id = ? AND ts >= ? "
             "AND (? IS NULL OR ts < ?)",
             (key_id, int(since), until, until)).fetchone()
@@ -57,7 +77,7 @@ class KeyUsageRepository:
             "COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS failed, "
             "COALESCE(SUM(input_tokens), 0) AS input_tokens, "
             "COALESCE(SUM(output_tokens), 0) AS output_tokens, "
-            "COALESCE(SUM(cost_usd), 0) AS cost_usd "
+            f"{_COST_COLUMNS}"
             "FROM usage_events WHERE username = ? AND ts >= ? "
             "AND (? IS NULL OR ts < ?)",
             (username, int(since), until, until)).fetchone()
@@ -75,7 +95,7 @@ class KeyUsageRepository:
             "COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS failed, "
             "COALESCE(SUM(input_tokens), 0) AS input_tokens, "
             "COALESCE(SUM(output_tokens), 0) AS output_tokens, "
-            "COALESCE(SUM(cost_usd), 0) AS cost_usd "
+            f"{_COST_COLUMNS}"
             f"FROM usage_events WHERE api_key_id IN ({placeholders}) AND ts >= ? "
             "GROUP BY api_key_id", (*ids, int(since))).fetchall()
         return {row["api_key_id"]: _row_usage(row) for row in rows}
@@ -89,4 +109,6 @@ def _row_usage(row) -> KeyUsage:
         input_tokens=int(row["input_tokens"] or 0),
         output_tokens=int(row["output_tokens"] or 0),
         cost_usd=float(row["cost_usd"] or 0.0),
+        cost_known_requests=int(row["cost_known_requests"] or 0),
+        cost_unknown_requests=int(row["cost_unknown_requests"] or 0),
     )

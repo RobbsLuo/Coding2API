@@ -610,14 +610,29 @@ async def test_v11_error_includes_retry_hints():
     assert caught.value.retry_after_seconds == 3
 
 
-def test_gateway_of_prefers_credential_and_strips_v2():
+async def test_gateway_of_prefers_credential_and_strips_v2():
     """两条导入路径给的形状不同：`models.json` 的 api_base 带 `/v2`，
     `client-permission-validate` 下发的不带。不归一会拼出 `/v2/v2/...`。"""
     client = OfficeAceClient(cloud_base="https://cloud.test",
                             gateway="https://default.test")
-    assert client._gateway_of(_cred()) == "https://gw.test"
-    assert client._gateway_of(_cred(model_base_url="")) == "https://default.test"
-    assert client._gateway_of(_cred(model_base_url="https://gw.test/")) == "https://gw.test"
+    assert await client._gateway_of(_cred()) == "https://gw.test"
+    assert await client._gateway_of(_cred(model_base_url="")) == "https://default.test"
+    assert await client._gateway_of(
+        _cred(model_base_url="https://gw.test/")) == "https://gw.test"
+
+
+async def test_gateway_of_rejects_host_resolving_to_private(monkeypatch):
+    """出口校验必须看解析结果：导入期只判字面量 IP，域名解析到内网照样拦。"""
+    from src.provider import base
+
+    async def private_resolve(_host: str) -> list[str]:
+        return ["10.1.2.3"]
+
+    monkeypatch.setattr(base, "_resolve_addresses", private_resolve)
+    client = OfficeAceClient(cloud_base="https://cloud.test",
+                            gateway="https://default.test")
+    with pytest.raises(UpstreamProtocolViolation):
+        await client._gateway_of(_cred())
 
 
 def test_upstream_http_error_delegates_classification():

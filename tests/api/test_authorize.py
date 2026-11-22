@@ -166,6 +166,73 @@ def test_authorize_rejects_callback_with_wrong_login_trace_id(tmp_path):
         # 被拒的回调不消费 pending：发起人仍能用正确 trace 走完流程
         assert "root" in app.state.pending_callbacks
 
+def test_authorize_rejects_trace_derived_from_login_url(tmp_path):
+    """攻击者只看得到登录 URL（machine/device 明文），算不出 loginTraceID。
+
+    旧实现 `(machine_id + device_id)[-16:]` 完全可由 URL 推导，等于把回调
+    绑定令牌一起交出去；掺入进程随机盐后这条路失效。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings)
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "root", "password": "rootpw"})
+        started = client.post("/api/auth/upstream/start", json={"provider": "trae"}).json()
+        machine_id, _, device_id = started["state"].partition(":")
+        forged = (machine_id + device_id)[-16:]      # 旧公式：从 URL 可推
+        response = client.get(f"/authorize?refreshToken=RT&loginTraceID={forged}")
+    assert response.status_code == 400
+    assert response.json()["error"]["message"] == "callback does not match the pending login"
+    assert "root" in app.state.pending_callbacks
+
+
+def test_authorize_handles_non_ascii_login_trace_id(tmp_path):
+    """`loginTraceID` 是客户端可控字符串：非 ASCII 也必须 400，不能 500。"""
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings, providers={"trae": _mock_trae()})
+    with TestClient(app) as client:
+        client.post("/api/auth/login", json={"username": "root", "password": "rootpw"})
+        started = client.post("/api/auth/upstream/start", json={"provider": "trae"}).json()
+        trace = login_trace_id(*started["state"].split(":"))
+        # 带 Cookie 的直接比对路径
+        wrong = client.get("/authorize", params={
+            "refreshToken": "RT", "loginTraceID": "令牌"})
+        assert wrong.status_code == 400
+        assert wrong.json()["error"]["message"] == "callback does not match the pending login"
+        # 无 Cookie 的按 trace 反查路径
+        client.cookies.clear()
+        found = client.get("/authorize", params={
+            "refreshToken": "RT", "loginTraceID": "令牌"})
+        assert found.status_code == 400
+        # 正确 trace 仍可用（反查路径没被上面的坏输入破坏）
+        ok = client.get("/authorize", params={
+            "refreshToken": "RT1", "loginTraceID": trace})
+        assert ok.status_code == 200
+
+
+def test_authorize_accepts_legacy_state_without_salt(tmp_path):
+    """老格式 state（`machine:device`，无第三段）继续可用。
+
+    选「向后兼容」而不是拒绝：盐是进程级随机值、不写进 state（见
+    `callback._TRACE_SALT` 的说明），因此 state 格式无需变更，升级重启后
+    旧 pending 仍能完成登录。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        ADMIN_USERNAMES="root")
+    app = build_app(settings, providers={"trae": _mock_trae()})
+    machine_id, device_id = "m" * 32, "d" * 32
+    with TestClient(app) as client:
+        app.state.pending_callbacks["root"] = (
+            time.monotonic(), f"{machine_id}:{device_id}")
+        response = client.get("/authorize", params={
+            "refreshToken": "RT1",
+            "loginTraceID": login_trace_id(machine_id, device_id)})
+        assert response.status_code == 200, response.text
+        assert response.json()["captured"] is True
+    assert app.state.services.credentials.list_all()[0]["added_by"] == "root"
+
+
 def test_upstream_start_uses_poll_track_for_codebuddy(admin_client):
     """provider 在 upstream_auth 里时走 poll 轨道（main 275-276）。"""
     app, client = admin_client
@@ -237,7 +304,7 @@ def test_authorize_reports_invalid_credential(tmp_path):
         # 有 refreshToken 但状态串损坏 → complete_callback 抛协议违规
         app.state.pending_callbacks["root"] = (time.monotonic(), "broken")
         response = client.get("/authorize?refreshToken=RT&state=broken"
-                              "&loginTraceID=broken")
+                              f"&loginTraceID={login_trace_id('broken', '')}")
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_credential"
 

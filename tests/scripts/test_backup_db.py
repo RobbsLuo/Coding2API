@@ -23,6 +23,23 @@ def _make_db(path: Path, value: str = "v") -> Path:
     return path
 
 
+def _make_app_db(path: Path, value: str = "v") -> Path:
+    """建一份**本服务的**库（核心表 + user_version），恢复用例必须用它。
+
+    `restore_db` 走 `verify_app_database`：任意完好 sqlite 都能过
+    integrity_check，但缺核心表的库换进生产会让服务启动即挂。
+    """
+    from src.db.migrate import apply_schema
+
+    conn = sqlite3.connect(str(path))
+    apply_schema(conn)
+    conn.execute("CREATE TABLE marker (x TEXT)")
+    conn.execute("INSERT INTO marker VALUES (?)", (value,))
+    conn.commit()
+    conn.close()
+    return path
+
+
 def test_backup_task_run_once_returns_report(tmp_path):
     """一轮 = 落一份快照 + 报告文件名（供管理台任务卡片展示）。"""
     db_path = _make_db(tmp_path / "coding2api.sqlite3")
@@ -67,7 +84,7 @@ def test_backup_script_rejects_missing_db(tmp_path):
 
 def test_restore_script_preview_does_not_touch_db(tmp_path, capsys):
     """默认预览：校验备份、打印计划，不动主库。"""
-    db_path = _make_db(tmp_path / "coding2api.sqlite3", "live")
+    db_path = _make_app_db(tmp_path / "coding2api.sqlite3", "live")
     assert BACKUP_SCRIPT.main(["--db", str(db_path), "--out", str(tmp_path / "b")]) == 0
     backup = next((tmp_path / "b").glob("coding2api-*.sqlite3"))
     capsys.readouterr()
@@ -76,18 +93,18 @@ def test_restore_script_preview_does_not_touch_db(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "备份校验通过" in out and "预览模式" in out
     conn = sqlite3.connect(str(db_path))
-    assert [r[0] for r in conn.execute("SELECT x FROM t")] == ["live"]
+    assert [r[0] for r in conn.execute("SELECT x FROM marker")] == ["live"]
     conn.close()
 
 
 def test_restore_script_apply_replaces_db(tmp_path, capsys):
     """--apply：主库被备份内容替换，并打印安全副本路径。"""
-    db_path = _make_db(tmp_path / "coding2api.sqlite3", "old")
+    db_path = _make_app_db(tmp_path / "coding2api.sqlite3", "old")
     assert BACKUP_SCRIPT.main(["--db", str(db_path), "--out", str(tmp_path / "b")]) == 0
     backup = next((tmp_path / "b").glob("coding2api-*.sqlite3"))
     # 备份后主库又变了，恢复应回到备份时的内容
     conn = sqlite3.connect(str(db_path))
-    conn.execute("INSERT INTO t VALUES ('new')")
+    conn.execute("INSERT INTO marker VALUES ('new')")
     conn.commit()
     conn.close()
     capsys.readouterr()
@@ -96,9 +113,30 @@ def test_restore_script_apply_replaces_db(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "已从备份恢复" in out and "安全副本" in out and "请重启服务" in out
     conn = sqlite3.connect(str(db_path))
-    assert [r[0] for r in conn.execute("SELECT x FROM t")] == ["old"]
+    assert [r[0] for r in conn.execute("SELECT x FROM marker")] == ["old"]
     conn.close()
     assert list(tmp_path.glob("coding2api.sqlite3.pre-restore-*"))
+
+
+def test_restore_script_rejects_foreign_sqlite_that_passes_integrity(
+        tmp_path, capsys):
+    """完好但不是本服务的库（缺核心表）必须拒绝，且主库保持原样。
+
+    这是最容易出的事故：拿一个随手 `.sqlite3` 覆盖生产库，完整性校验全过，
+    服务下次启动直接挂（缺表）。
+    """
+    db_path = _make_app_db(tmp_path / "coding2api.sqlite3", "live")
+    foreign = _make_db(tmp_path / "foreign.sqlite3", "other")
+
+    with pytest.raises(RuntimeError, match="不是本服务的数据库"):
+        RESTORE_SCRIPT.main([str(foreign), "--db", str(db_path)])
+
+    conn = sqlite3.connect(str(db_path))
+    assert [r[0] for r in conn.execute("SELECT x FROM marker")] == ["live"]
+    conn.close()
+    # 预览阶段就拒绝，没有留下任何安全副本/临时文件
+    assert not list(tmp_path.glob("*.pre-restore-*"))
+    assert not list(tmp_path.glob("*.restore-tmp"))
 
 
 def test_restore_script_rejects_corrupt_backup(tmp_path):

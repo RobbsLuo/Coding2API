@@ -920,17 +920,23 @@ def test_stats_events_restrict_non_admin(tmp_path):
 # ------------------------------------------------------------- CSV 导出（4.11）
 
 def test_stats_events_csv_export(admin_client):
-    """CSV 导出：带 BOM、表头、公式防护，含行数/截断响应头。"""
+    """CSV 导出：带 BOM、表头、公式防护，含行数/截断响应头。
+
+    时间戳取「刚刚」而不是 2023 年的常量：`admin_client` 建 app 会启动后台任务，
+    `start()` 现在抢先跑一轮 retention，把超出明细保留期（90 天）的固定时间戳
+    当成过期数据清掉——那会让本用例断言 3 行却拿到 0 行。
+    """
     _app, client = admin_client
     collector = client.app.state.stats_collector
+    base = int(time.time()) - 120
     collector.record(username="other", provider="trae", model="=cmd|calc", ok=True,
-                     input_tokens=10, output_tokens=5, now=1_700_000_000)
+                     input_tokens=10, output_tokens=5, now=base)
     # 有生成窗口的成功请求：速度两列应有值（正文 50 / 总产出 200 tok/s）
     collector.record(username="other", provider="trae", model="fast", ok=True,
                      output_tokens=1000, reasoning_tokens=750,
-                     latency_ms=6000, ttfb_ms=1000, now=1_700_000_050)
+                     latency_ms=6000, ttfb_ms=1000, now=base + 50)
     collector.record(username="other", provider="codebuddy", model="m2", ok=False,
-                     error_type="rate_limit", now=1_700_000_100)
+                     error_type="rate_limit", now=base + 100)
 
     response = client.get("/api/stats/events", params={"format": "csv"})
     assert response.status_code == 200

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import re
 import time
 from collections.abc import Iterable
@@ -628,18 +629,54 @@ async def fetch_source(spec: SourceSpec, *, client: httpx.AsyncClient,
     单源失败不能影响其余源（`fetch_all` 并发跑，一个坏端点不该让整页空白），
     也不能让后台任务被判失败——任务失败会触发「任务连续失败」告警，而一个
     上游状态页临时抽风不值得半夜叫人。
+
+    **成功路径也必须有界**（`_read_bounded` + `client.stream`）：原先 `.text` /
+    `.json()` 会把整个 body 读进内存，被控或畸形的状态页能直接顶爆进程内存。
     """
     now = int(time.time())
     try:
-        response = await client.get(spec.api_url, timeout=timeout,
-                                    follow_redirects=True, headers=_HEADERS)
-        response.raise_for_status()
+        async with client.stream("GET", spec.api_url, timeout=timeout,
+                                 follow_redirects=True, headers=_HEADERS) as response:
+            response.raise_for_status()
+            raw = await _read_bounded(response)
         if spec.kind == "atom":
-            return parse_atom(spec, response.text, now=now)
-        return _PARSERS[spec.kind](spec, response.json(), now=now)
+            # 与原先 `response.text` 同口径：优先用 content-type 声明的 charset。
+            # 不能读 `response.encoding`——流式读取后 body 未缓存，该属性会抛
+            # `ResponseNotRead`。
+            charset = response.charset_encoding or "utf-8"
+            return parse_atom(spec, raw.decode(charset, "replace"), now=now)
+        return _PARSERS[spec.kind](spec, json.loads(raw), now=now)
     except Exception as error:  # noqa: BLE001 - 抓取失败即降级，不能拖垮任务
         return SourceStatus(spec=spec, level=LEVEL_UNKNOWN, fetched_at=now,
                             error=_short_error(error))
+
+
+#: 状态页响应体上限：这些端点都是「几 KB 的摘要 / 事故史」，1MB 已宽松到不可能
+#: 误杀正常响应，同时挡住「回一个 GB 级 body 撑爆内存」的放大攻击。
+MAX_SOURCE_BODY = 1024 * 1024
+
+
+class OversizedBody(ValueError):
+    """状态页响应体超过 `MAX_SOURCE_BODY`（继承 ValueError，与解析失败同口径）。
+
+    不设成独立异常族：`fetch_source` 对**所有**异常都降级成 unknown，多一层
+    类型只会让「哪些失败算协议违规」多一个没人读的分类。
+    """
+
+
+async def _read_bounded(response: httpx.Response,
+                        limit: int = MAX_SOURCE_BODY) -> bytes:
+    """流式读响应体，最多 `limit` 字节；超限抛 `OversizedBody`。
+
+    必须配合 `client.stream` + `aiter_bytes`：先 `client.get` 再判长度没有
+    意义——那时 body 已经整个在内存里了。
+    """
+    collected = bytearray()
+    async for chunk in response.aiter_bytes():
+        collected.extend(chunk)
+        if len(collected) > limit:
+            raise OversizedBody(f"response body exceeds {limit} byte limit")
+    return bytes(collected)
 
 
 async def fetch_all(specs: Iterable[SourceSpec] = SOURCE_SPECS, *,

@@ -24,11 +24,16 @@ def backup(db_path: Path, *, keep: int = 5) -> Path:
     用 SQLite 在线备份 API 而不是复制文件：WAL 模式下直接 copy 主库文件会
     丢掉尚未 checkpoint 的已提交事务。
 
+    落盘后跑一次 `verify_database`（integrity_check）：备份本来就是为了回滚，
+    坏快照会把「还有救」变成「彻底没救」。校验不过就删掉半成品再抛错。
+
     `keep` 份保留：这些脚本是一次性运维工具，每跑一次落一份 40MB+ 的快照。
     早先不清理，本机实测攒到 28 份 / 870MB（同名 `.bak-*` 从不清），
     首次排障时 `du -sh data` 全是它。按 mtime 倒序只留最近 `keep` 份；
     `keep <= 0` 表示不清理。清理失败（权限/竞态）不阻断备份本身。
     """
+    from src.db.backup import verify_database
+
     target = db_path.with_name(f"{db_path.name}.bak-{time.strftime('%Y%m%d-%H%M%S')}")
     source = sqlite3.connect(str(db_path))
     try:
@@ -37,6 +42,13 @@ def backup(db_path: Path, *, keep: int = 5) -> Path:
             source.backup(destination)
         finally:
             destination.close()
+        # 落盘后立即校验：半成品备份比没有更危险——一旦主库被改坏，唯一
+        # 「可回滚」的那份也是坏的。失败先删半成品再抛。
+        try:
+            verify_database(target)
+        except BaseException:
+            target.unlink(missing_ok=True)
+            raise
     finally:
         source.close()
     # 备份含全部凭证密文与用户数据，默认 umask(022) 会落成 0644。失败只 warn 不阻断。

@@ -295,6 +295,66 @@ async def test_runner_starts_backup_loop_when_assembled(repo, tmp_path):
         await runner.stop()
 
 
+async def test_runner_start_primes_backup_and_retention(repo, tmp_path):
+    """首轮立即跑 backup / retention：先睡后跑的循环会让短命进程永远错过。
+
+    backup 默认 1440 分钟、retention 首轮 5 分钟，每天重启一次的部署若不在
+    start() 抢先跑一轮，就永远等不到备份（README 承诺「每日」）。
+    """
+    from src.tasks.backup import BackupTask
+
+    credentials, db = repo
+    provider = StubProvider()
+    runner = TaskRunner(
+        quota_probe=QuotaProbeTask(credentials, {"codebuddy": provider}, None),
+        checkin=CheckinTask(credentials, {"codebuddy": provider}),
+        refresh=RefreshTask(credentials, {"codebuddy": provider}, skew_seconds=3600),
+        retention=RetentionTask(StatsCollector(db)),
+        backup=BackupTask(db.path),
+    )
+    await runner.start()
+    try:
+        assert runner.status.runs("backup") == 1
+        assert runner.status.runs("retention") == 1
+        assert runner.status.get("backup").ok is True
+        assert list((tmp_path / "backups").glob("t-*.sqlite3"))
+        # 循环仍全部建立（首轮抢先跑不影响周期循环接线）
+        assert len(runner._tasks) == 5
+    finally:
+        await runner.stop()
+
+
+async def test_runner_start_primes_are_independent(repo, tmp_path):
+    """一个首轮抛错不影响另一个，也不影响后续循环建立。"""
+    from src.tasks.backup import BackupTask
+
+    class ExplodingRetention(RetentionTask):
+        def run_once(self, **_kwargs):
+            raise RuntimeError("retention blown up")
+
+    credentials, db = repo
+    provider = StubProvider()
+    runner = TaskRunner(
+        quota_probe=QuotaProbeTask(credentials, {"codebuddy": provider}, None),
+        checkin=CheckinTask(credentials, {"codebuddy": provider}),
+        refresh=RefreshTask(credentials, {"codebuddy": provider}, skew_seconds=3600),
+        retention=ExplodingRetention(StatsCollector(db)),
+        backup=BackupTask(db.path),
+    )
+    await runner.start()
+    try:
+        # backup 照常跑完
+        assert runner.status.get("backup").ok is True
+        # retention 失败被记成失败而不是静默跳过
+        assert runner.status.get("retention").ok is False
+        assert "blown up" in (runner.status.get("retention").error or "")
+        # 循环仍然全部建立，且没有一个已退出
+        assert len(runner._tasks) == 5
+        assert all(not task.done() for task in runner._tasks)
+    finally:
+        await runner.stop()
+
+
 def test_build_runner_wires_upstream_status(repo):
     """upstream_status 传入时接线：周期从配置读，开关与对象原样挂上。"""
     from src.tasks.upstream_status import UpstreamStatusTask

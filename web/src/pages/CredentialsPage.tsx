@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import type { ReactNode } from "react";
 import {
@@ -549,17 +549,26 @@ export function CredentialsPage() {
   const CREDIT_FIRST_ORDER: Record<string, "asc" | "desc"> = {
     ts: "desc", window_start: "desc", delta: "desc", source: "asc",
   };
+  // 连点列头会并发多个请求：只认最新一次的结果，先发后到的旧响应必须丢弃，
+  // 否则它会把刚点出来的排序覆盖回去（`sort`/`order` 与表格内容都会退化）。
+  const creditSortSeq = useRef(0);
   const sortCredits = async (columnKey: string) => {
-    if (!creditEvents) return;
-    const order = creditEvents.sort === columnKey
-      ? (creditEvents.order === "asc" ? "desc" : "asc")
+    const target = creditEvents;
+    if (!target) return;
+    const order = target.sort === columnKey
+      ? (target.order === "asc" ? "desc" : "asc")
       : (CREDIT_FIRST_ORDER[columnKey] ?? "asc");
+    const seq = ++creditSortSeq.current;
     try {
       const result = await api.creditEvents(
-        creditEvents.credentialId, creditEvents.ledger, columnKey, order);
-      setCreditEvents({ ...creditEvents, events: result.events, sort: columnKey, order });
+        target.credentialId, target.ledger, columnKey, order);
+      if (seq !== creditSortSeq.current) return;
+      // 函数式更新：抽屉可能已被关掉或切到别的账本，闭包里的旧快照不能写回去
+      setCreditEvents((previous) => (previous
+        ? { ...previous, events: result.events, sort: columnKey, order }
+        : previous));
     } catch (caught) {
-      showError(errorText(caught, "流水读取失败"));
+      if (seq === creditSortSeq.current) showError(errorText(caught, "流水读取失败"));
     }
   };
 

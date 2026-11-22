@@ -4,7 +4,6 @@ import {
   ANY,
   DEFAULT_FILTERS,
   DEFAULT_GROUP_SORT,
-  filterCredentials,
   groupByProvider,
   matchesFilters,
   providerLedger,
@@ -80,18 +79,6 @@ describe("matchesFilters", () => {
     const legacy = { ...credential(), tags: undefined } as unknown as Credential;
     expect(matchesFilters(legacy, DEFAULT_FILTERS, NOW)).toBe(true);
     expect(matchesFilters(legacy, { ...DEFAULT_FILTERS, tag: "prod" }, NOW)).toBe(false);
-  });
-});
-
-describe("filterCredentials", () => {
-  it("保持原顺序，只做剔除", () => {
-    const items = [
-      credential({ id: "a", provider: "trae" }),
-      credential({ id: "b", provider: "codebuddy" }),
-      credential({ id: "c", provider: "trae" }),
-    ];
-    const result = filterCredentials(items, { ...DEFAULT_FILTERS, provider: "trae" }, NOW);
-    expect(result.map((item) => item.id)).toEqual(["a", "c"]);
   });
 });
 

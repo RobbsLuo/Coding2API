@@ -27,6 +27,7 @@ import logging
 import time
 from collections.abc import AsyncIterator, Callable
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -38,6 +39,7 @@ from ...provider.base import (
     Quota,
     UpstreamProtocolViolation,
     UpstreamReloginRequired,
+    ensure_public_host,
 )
 from .. import naming
 from ..codearts.signer import sdk_date
@@ -154,7 +156,7 @@ class OfficeAceClient(LazyClients):
             raise UpstreamProtocolViolation(
                 "credential missing model_base_url",
                 public="该凭证缺少 officeAce 网关地址，请重新登录该账号")
-        url = f"{self._gateway_of(credential)}{EP_CHAT}"
+        url = f"{await self._gateway_of(credential)}{EP_CHAT}"
         body, bumped = prepare_body(payload, model)
         if bumped is not None and bumped != payload.get("max_tokens"):
             logger.info("officeAce 调整 max_tokens：客户端 %s → 上游 %s（model=%s）",
@@ -185,7 +187,7 @@ class OfficeAceClient(LazyClients):
             raise UpstreamProtocolViolation(
                 "credential missing model_base_url",
                 public="该凭证缺少 officeAce 网关地址，请重新登录该账号")
-        url = f"{self._gateway_of(credential)}{EP_MODELS}"
+        url = f"{await self._gateway_of(credential)}{EP_MODELS}"
         response = await self._short.get(
             url, headers={"Authorization": credential.authorization,
                           "Accept": "application/json"})
@@ -377,7 +379,7 @@ class OfficeAceClient(LazyClients):
             security_token=credential.security_token,
             project_id=credential.project_id)
 
-    def _gateway_of(self, credential: OfficeAceCredential) -> str:
+    async def _gateway_of(self, credential: OfficeAceCredential) -> str:
         """该凭证的模型网关（凭证自带优先，缺省回装配默认值）。
 
         去掉尾部的 `/v2`：两条导入路径给的地址形状不同——`client-permission-
@@ -385,13 +387,19 @@ class OfficeAceClient(LazyClients):
         `models.json` 里 `api_base` 自带 `/v2`。不归一就会拼出
         `/v2/v2/chat/completions`（实测 404）。
 
-        出口再校验一次（`validate_gateway_url`）：导入期的校验只覆盖新写入的
-        凭证，**升级前落库的旧行**没经过它，而这里每次请求都会走到。
+        出口做**两层**校验：`validate_gateway_url` 判字面量 IP（导入期校验只覆盖
+        新写入的凭证，**升级前落库的旧行**没经过它，而这里每次请求都会走到），
+        再 `ensure_public_host` 解析域名并逐个结果过 IP 黑名单。后者不能省：
+        导入期是同步的、解析不了域名，一个解析到 10.x / 169.254.169.254 的
+        `model_base_url` 会把不过期的 Basic 密钥送给内网主机（SSRF 跳板）。
+        解析结果有 60s 进程内缓存，不会每次聊天都查一次 DNS。
         """
         base = (credential.model_base_url or self.gateway).rstrip("/")
         if base.endswith("/v2"):
             base = base[:-3]
-        return validate_gateway_url(base)
+        url = validate_gateway_url(base)
+        await ensure_public_host(urlsplit(url).hostname or "")
+        return url
 
     async def _v11_json(self, method: str, path: str,
                         credential: OfficeAceCredential,
@@ -401,7 +409,7 @@ class OfficeAceClient(LazyClients):
         if not credential.has_control_plane:
             raise UpstreamProtocolViolation(
                 "credential missing access_key_id / secret_access_key")
-        url = f"{self._gateway_of(credential)}{path}"
+        url = f"{await self._gateway_of(credential)}{path}"
         signed = build_headers(
             self._credential_sign(credential), method=method, url=url,
             headers=headers or {}, payload=body or b"",

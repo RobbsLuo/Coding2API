@@ -72,14 +72,6 @@ export function matchesFilters(
   return fields.some((field) => (field ?? "").toLowerCase().includes(needle));
 }
 
-export function filterCredentials(
-  credentials: Credential[],
-  filters: CredentialFilters,
-  now: number = Date.now() / 1000,
-): Credential[] {
-  return credentials.filter((credential) => matchesFilters(credential, filters, now));
-}
-
 /**
  * 一个渠道组展示的是哪本账。
  *

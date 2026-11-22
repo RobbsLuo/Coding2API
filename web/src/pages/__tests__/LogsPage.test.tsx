@@ -222,4 +222,47 @@ describe("LogsPage", () => {
     expect(follow).not.toBeChecked();
     expect(screen.getAllByTestId("log-row")).toHaveLength(2);
   });
+
+  it("超过缓冲容量后丢弃最旧的行（长连 SSE 不会无限增长）", async () => {
+    mockFetch({
+      "/api/logs": {
+        capacity: 3, limit: 3,
+        lines: [
+          line({ seq: 1, message: "第一行" }),
+          line({ seq: 2, message: "第二行" }),
+          line({ seq: 3, message: "第三行" }),
+        ],
+      },
+    });
+    renderPage(<LogsPage />, { username: "root", is_admin: true });
+    await settle();
+    expect(screen.getAllByTestId("log-row")).toHaveLength(3);
+
+    MockEventSource.last().emit(line({ seq: 4, message: "第四行" }));
+    await waitFor(() => {
+      expect(screen.getAllByTestId("log-row")).toHaveLength(3);
+    });
+    const rows = screen.getAllByTestId("log-row");
+    expect(rows[rows.length - 1]).toHaveTextContent("第四行");
+    // 最旧的 seq=1 已被丢弃
+    expect(screen.getByTestId("logs-list")).not.toHaveTextContent("第一行");
+  });
+
+  it("乱序到达的行仍按 seq 升序展示（且同样受容量截断）", async () => {
+    mockFetch({
+      "/api/logs": { capacity: 10, limit: 10, lines: [line({ seq: 2 })] },
+    });
+    renderPage(<LogsPage />, { username: "root", is_admin: true });
+    await settle();
+    const source = MockEventSource.last();
+    source.emit(line({ seq: 5, message: "后到的更小序号" }));
+    source.emit(line({ seq: 3, message: "中间序号" }));
+    await waitFor(() => {
+      expect(screen.getAllByTestId("log-row")).toHaveLength(3);
+    });
+    const rendered = screen.getAllByTestId("log-row").map((row) => row.textContent ?? "");
+    expect(rendered[0]).toContain("请求完成");
+    expect(rendered[1]).toContain("中间序号");
+    expect(rendered[2]).toContain("后到的更小序号");
+  });
 });

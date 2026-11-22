@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import hmac
+import ipaddress
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, Response
@@ -147,6 +148,21 @@ def _token_matches(header: str, expected: str) -> bool:
     return hmac.compare_digest(supplied.encode("utf-8"), expected.encode("utf-8"))
 
 
+def _is_loopback(request: Request) -> bool:
+    """对端是否回环地址（无令牌时的唯一放行条件）。
+
+    解析失败按**不放行**处理：`request.client` 在 ASGI 里允许为 None（如 UDS
+    或测试替身），拿不到可信对端就当外部访问，宁可 401 也不裸暴露。
+    """
+    client = request.client
+    if client is None:
+        return False
+    try:
+        return ipaddress.ip_address(client.host).is_loopback
+    except ValueError:
+        return False
+
+
 def create_router(services: Services) -> APIRouter:
     router = APIRouter()
 
@@ -154,18 +170,25 @@ def create_router(services: Services) -> APIRouter:
     async def metrics(request: Request):
         """Prometheus 抓取端点。
 
-        默认**不鉴权**——与同样裸暴露的 `/healthz` 同口径，且指标已禁用高基数
-        标签（只有渠道 / 模型 / 状态等有限集合）。但端点会暴露渠道与模型清单、
-        凭证池四态计数，对外部署可设 `METRICS_TOKEN` 收口：配置后必须带
+        **未配置 `METRICS_TOKEN` 时只放行回环对端**：端点会暴露渠道与模型清单、
+        凭证池四态计数、延迟与失败分布，匿名裸暴露等于把侦察图送到公网。同机
+        抓取（Prometheus 与被抓服务共机、或经 sidecar 转发）从 `127.0.0.1` /
+        `::1` 来，天然放行；跨机抓取请显式设 `METRICS_TOKEN`，配置后必须带
         `Authorization: Bearer <token>`（缺失或错误一律 401，不回显差在哪）。
+        对端地址解析不出来（`request.client` 为空 / 非 IP 字面量）按**非回环**
+        处理——拿不到可信对端就不能当内网。
         """
         if not bool(services.settings.metrics_enabled):
             return JSONResponse(status_code=404,
                                 content=error_payload("metrics disabled",
                                                       "invalid_request", 404))
         token = str(services.settings.metrics_token or "")
-        if token and not _token_matches(
-                request.headers.get("authorization", ""), token):
+        if token:
+            if not _token_matches(request.headers.get("authorization", ""), token):
+                return JSONResponse(status_code=401,
+                                    content=error_payload("metrics unauthorized",
+                                                          "unauthorized", 401))
+        elif not _is_loopback(request):
             return JSONResponse(status_code=401,
                                 content=error_payload("metrics unauthorized",
                                                       "unauthorized", 401))

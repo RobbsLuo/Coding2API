@@ -213,11 +213,21 @@ class TaskRunner:
         refresh_token 现在只由 RefreshTask 轮转（额度探测不再保活）。服务重启时
         若凭证已落在到期窗口，不抢先刷就会带病服务到下一轮（60 分钟），期间
         聊天 401 会被硬禁用。
+
+        backup / retention 同样**首轮立即跑**，避免短命进程永远错过：
+        `_loop` 是先睡后跑，backup 默认 1440 分钟、retention 首轮也要 5 分钟，
+        每天重启一次的部署会永远等不到备份（README 承诺「每日」），retention
+        也永远清不掉过期明细。各轮互相独立（各自 `_guarded`）：一个失败既不影响
+        另一个，也不影响后面的循环建立。注意**不改变** `_loop_specs` 的接线，
+        手动触发仍走那份清单。
         """
         await self._guarded(self._quota_probe.run_once(apply_pacing=False),
                             "启动额度探测", key="quota_probe")
         await self._guarded(self._refresh.run_once(),
                             "启动 token 预刷新", key="refresh")
+        if self._backup is not None:
+            await self._guarded(self._sync_backup(), "启动数据库备份", key="backup")
+        await self._guarded(self._sync_retention(), "启动明细清理", key="retention")
         for spec in self._loop_specs():
             self._tasks.append(asyncio.create_task(
                 self._loop(TASK_BY_KEY[spec.key].name, spec.runner, spec.interval,

@@ -20,6 +20,7 @@ from src.upstream_status import (
     LEVEL_PARTIAL,
     LEVEL_UNKNOWN,
     MAX_INCIDENTS,
+    MAX_SOURCE_BODY,
     SOURCE_SPECS,
     Component,
     Incident,
@@ -538,6 +539,22 @@ async def test_fetch_source_parses_atom_as_text():
     assert status.level == LEVEL_MAJOR
 
 
+async def test_fetch_source_decodes_atom_with_declared_charset():
+    """content-type 声明了非 UTF-8 charset 时按它解码（与 `response.text` 同口径）。
+
+    流式读取后不能读 `response.encoding`（body 未缓存会抛 `ResponseNotRead`），
+    故走 `charset_encoding`。
+    """
+    feed = "<feed><entry><title>性能下降</title></entry></feed>".encode("gbk")
+
+    async with _client(lambda request: httpx.Response(
+            200, content=feed,
+            headers={"content-type": "application/xml; charset=gbk"})) as client:
+        status = await fetch_source(_spec("deepseek"), client=client)
+    assert status.level == LEVEL_DEGRADED
+    assert status.incidents[0].title == "性能下降"
+
+
 async def test_fetch_source_sends_browser_headers():
     seen: dict[str, str] = {}
 
@@ -586,6 +603,42 @@ async def test_fetch_source_error_without_message():
     async with _client(handler) as client:
         status = await fetch_source(_spec("kilo"), client=client)
     assert status.error == "Quiet"
+
+
+async def test_fetch_source_rejects_oversized_json_body():
+    """成功路径有界：超大 JSON 不解析，按 unknown + error 降级。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * (MAX_SOURCE_BODY + 1))
+
+    async with _client(handler) as client:
+        status = await fetch_source(_spec("kilo"), client=client)
+    assert status.level == LEVEL_UNKNOWN
+    assert status.error is not None and "OversizedBody" in status.error
+
+
+async def test_fetch_source_rejects_oversized_atom_body():
+    """atom 文本路径同样有界（原先 `response.text` 无上限）。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"x" * (MAX_SOURCE_BODY + 1),
+                              headers={"content-type": "application/xml"})
+
+    async with _client(handler) as client:
+        status = await fetch_source(_spec("deepseek"), client=client)
+    assert status.level == LEVEL_UNKNOWN
+    assert status.error is not None and "OversizedBody" in status.error
+
+
+async def test_fetch_source_accepts_body_at_limit():
+    """恰好等于上限是完整响应，不能被误判超限（边界不能差一）。"""
+    body = json.dumps(STATUSPAGE).encode()
+    assert len(body) < MAX_SOURCE_BODY
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=body)
+
+    async with _client(handler) as client:
+        status = await fetch_source(_spec("kilo"), client=client)
+    assert status.level == LEVEL_MAINTENANCE
 
 
 async def test_fetch_all_keeps_order_and_isolates_failures():

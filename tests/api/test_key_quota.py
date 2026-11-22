@@ -73,6 +73,27 @@ def test_for_key_respects_since_and_until(db, usage):
 def test_for_key_returns_zeros_when_absent(db, usage):
     result = usage.for_key("ghost", since=0)
     assert (result.requests, result.tokens, result.cost_usd) == (0, 0, 0.0)
+    assert (result.cost_known_requests, result.cost_unknown_requests) == (0, 0)
+
+
+def test_cost_known_and_unknown_requests_are_split(db, usage):
+    """成本聚合拆「已定价 / 无法定价」（修复：无价模型让成本配额永不触发）。
+
+    `cost_usd` 只累加已知行；无价行（价表无该模型 → NULL）单独计数，配额
+    据此 fail closed，不能把它当 0 元。
+    """
+    _record(db, key_id="k1", ts=100, cost_usd=0.25, input_tokens=10)
+    _record(db, key_id="k1", ts=110, cost_usd=None, input_tokens=10)
+    result = usage.for_key("k1", since=0)
+    assert result.cost_usd == pytest.approx(0.25)
+    assert result.cost_known_requests == 1
+    assert result.cost_unknown_requests == 1
+    # 按人聚合同口径
+    by_user = usage.for_user("root", since=0)
+    assert (by_user.cost_known_requests, by_user.cost_unknown_requests) == (1, 1)
+    # 批量聚合同口径
+    batched = usage.map_for(["k1"], since=0)["k1"]
+    assert (batched.cost_known_requests, batched.cost_unknown_requests) == (1, 1)
 
 
 def test_map_for_batches_and_ignores_blank_ids(db, usage):

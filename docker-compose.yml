@@ -10,6 +10,34 @@ services:
     # 指向容器自身，代理静默连不上（启动期只校验格式、不校验可达）。
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # ---- 最小权限加固 ----
+    # 应用全程以非 root（uid 1001）运行、只监听一个端口、不起子进程，因此
+    # 不需要任何 Linux capability：
+    #   cap_drop ALL —— 默认 root 才有的 CAP_CHOWN/CAP_SETUID 等一律不留，
+    #     镜像里被塞进来的提权路径（setuid 二进制）也走不通；
+    #   no-new-privileges —— 即使 execve 一个 setuid 程序，权限也不上升。
+    cap_drop:
+      - ALL
+    security_opt:
+      - "no-new-privileges:true"
+    # pids_limit：防 fork 炸弹把宿主 PID 打满（应用正常只 ~10 个线程/进程）。
+    pids_limit: 256
+    # 内存上限是**保守默认**：实测正常运行时 RSS 约 150–400MB（取决于模型目录与
+    # 在途长流）。库很大 / 并发很高时按需上调（如 2g），否则 OOM kill 表现为
+    # 容器反复重启、health 永远不通。
+    mem_limit: 1g
+    # read_only：只读根文件系统。可写点已逐一确认（均不是根文件系统）：
+    #   /app/data   —— bind mount，SQLite/WAL、备份、模型快照都写这里；
+    #   /app/secrets—— bind mount，只读挂载，应用只读不写；
+    #   /tmp        —— tmpfs（下方声明），给第三方库的临时文件；
+    #   /dev/shm    —— Docker 默认即为独立 tmpfs，不受 read_only 影响。
+    # Python 不会往根文件系统写字节码（Dockerfile 已设 PYTHONDONTWRITEBYTECODE=1），
+    # uv 只在构建期运行。已用真实镜像验证：read_only + 上述挂载下容器 healthy、
+    # 无任何 EROFS/EACCES。
+    read_only: true
+    tmpfs:
+      # noexec,nosuid：临时目录不需要可执行位，挡住「落一个脚本再执行」的路径。
+      - /tmp:rw,noexec,nosuid,size=64m
     environment:
       # 必填：凭证列加密密钥。丢失后已存凭证全部不可解，只能重录。
       APP_SECRET: ${APP_SECRET:?set APP_SECRET in .env}

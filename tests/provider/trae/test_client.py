@@ -10,6 +10,7 @@ import pytest
 
 from src.compat.openai.request import InvalidRequest, parse_chat_request
 from src.engine.model_resolver import UnknownModelError, resolve
+from src.provider import base
 from src.provider.base import ErrKind, Event, EventKind, Model
 from src.provider.trae import events as trae_events
 from src.provider.trae.client import (
@@ -340,6 +341,17 @@ async def test_post_json_surfaces_http_and_non_json_errors():
 
     with pytest.raises(trae_events.UpstreamProtocolViolation):
         await _client(not_object).fetch_quota(TraeCredential(access_token="a"))
+
+
+async def test_post_json_success_path_is_bounded():
+    """成功路径同样有界：超大 body 按协议违规早失败，不把整段读进内存。"""
+    def huge(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=b'{"a": "' + b"x" * base.BOUNDED_BODY_LIMIT + b'"}')
+
+    with pytest.raises(trae_events.UpstreamProtocolViolation) as caught:
+        await _client(huge).fetch_quota(TraeCredential(access_token="a"))
+    assert "oversized" in caught.value.public_message
 
 async def test_client_lazy_and_close_paths():
     client = TraeClient()

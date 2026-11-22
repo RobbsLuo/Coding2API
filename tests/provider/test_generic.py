@@ -243,13 +243,17 @@ def test_generic_allowed_whitelist_and_validation():
     assert not validate_generic_endpoint_allowed("file:///etc/passwd", settings)
 
 
-def test_generic_empty_whitelist_allows_any_http():
+def test_generic_empty_whitelist_allows_https_and_loopback_http():
+    """白名单为空 = 放行任意 https；明文 http 只限回环（凭证是真 key）。"""
     from src.config import validate_generic_endpoint_allowed
 
     settings = Settings(_env_file=None, APP_SECRET="x" * 32, DATA_DIR="/tmp",
                         GENERIC_API_ENDPOINT="http://127.0.0.1:9000/v1")
     assert settings.generic_allowed == ()
-    assert validate_generic_endpoint_allowed("http://10.0.0.5:8080/v1", settings)
+    assert validate_generic_endpoint_allowed("https://10.0.0.5:8080/v1", settings)
+    assert validate_generic_endpoint_allowed("http://127.0.0.1:9000/v1", settings)
+    # 公网明文 http 拒绝：key 会在链路上裸奔
+    assert not validate_generic_endpoint_allowed("http://10.0.0.5:8080/v1", settings)
 
 
 def test_known_providers_and_tos_include_generic():

@@ -8,11 +8,37 @@ from __future__ import annotations
 from collections.abc import Callable
 from functools import cached_property
 from typing import Any
+from urllib.parse import urlsplit
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 _CODEBUDDY_CN = "https://copilot.tencent.com"
 _CODEBUDDY_INTL = "https://www.codebuddy.ai"
+
+
+def public_base_url_problem(value: str) -> str | None:
+    """`PUBLIC_BASE_URL` 的形态问题（None = 合法）。
+
+    必须是 `http(s)://主机` 形态。它是 TRAE 回调的权威基址
+    （`admin_auth.resolve_public_callback_url`）：漏写 `://` 会让回调拼成
+    相对路径（`127.0.0.1:8000/authorize`），浏览器打开必然「网络错误」，而
+    服务本身照常 200——登录静默失败，没有报错可查。所以配置层直接挡下，
+    doctor 与运行期改写走同一份判定。
+    """
+    text = value.strip()
+    if not text.startswith(("http://", "https://")):
+        return ("PUBLIC_BASE_URL 必须以 http:// 或 https:// 开头"
+                f"（当前 {value!r}）；正确示例：https://ai.example.com")
+    try:
+        hostname = urlsplit(text).hostname
+    except ValueError as error:
+        return (f"PUBLIC_BASE_URL 无法解析（{error}）；"
+                "正确示例：https://ai.example.com")
+    if not hostname:
+        return (f"PUBLIC_BASE_URL 缺少主机名（当前 {value!r}）；"
+                "正确示例：https://ai.example.com")
+    return None
 
 
 class Settings(BaseSettings):
@@ -510,6 +536,14 @@ class Settings(BaseSettings):
     # 必须由使用者显式给出，不内置默认。可热更。
     anthropic_thinking_efforts: str = ""
 
+    @field_validator("public_base_url")
+    @classmethod
+    def _validate_public_base_url(cls, value: str) -> str:
+        problem = public_base_url_problem(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
+
     @cached_property
     def admin_set(self) -> frozenset[str]:
         return frozenset(u.strip() for u in self.admin_usernames.split(",") if u.strip())
@@ -635,18 +669,40 @@ def validate_kilo_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
 
 
 def validate_generic_endpoint_allowed(endpoint: str, settings: Settings) -> bool:
-    """通用上游端点校验：白名单为空时只要求 http(s)（用户自己填的上游）。
+    """通用上游端点校验：白名单为空时放行任意 **https**（或回环 http）。
 
-    之所以允许「白名单为空 = 放行任意 http(s)」：这个渠道的用途就是接任意
-    OpenAI 兼容端点（含内网自建），写死主机等于不让他用。但凭证是真实 API
-    key，所以仍拒绝非 http(s)（`file://` / `gopher://` 之类会让 httpx 出网
+    之所以允许「白名单为空 = 放行」：这个渠道的用途就是接任意 OpenAI 兼容
+    端点（含内网自建），写死主机等于不让他用。但凭证是真实 API key：明文
+    http 会让 key 在链路上裸奔，所以**非回环主机强制 https**；`http://` 只允许
+    回环（`localhost` / `127.0.0.1` / `::1`），且命中白名单时仍受白名单约束。
+    内网自建服务请配 https（自签证书可走反代）或只监听回环 + 隧道，不要用
+    明文 http 打内网——同网段的任何人都能抓到 key。
+
+    任何情况下都拒绝非 http(s)（`file://` / `gopher://` 之类会让 httpx 出网
     到非 HTTP 目标）。
     """
     text = endpoint.strip().rstrip("/")
     if not text.startswith(("http://", "https://")):
         return False
     allowed = settings.generic_allowed
-    return not allowed or text in allowed
+    if allowed and text not in allowed:
+        return False
+    scheme, _, rest = text.partition("://")
+    # 明文 http 仅限回环：非回环主机上的 key 会在链路上裸奔。
+    return scheme != "http" or _is_loopback_endpoint_host(rest)
+
+
+def _is_loopback_endpoint_host(rest: str) -> bool:
+    """端点 URL 的主机部分是不是回环（`localhost` / `127.0.0.1` / `::1`）。
+
+    `rest` 是去掉 scheme 后的整段（可能带端口、userinfo、路径）。
+    用 `urlsplit` 而不是字符串切分：IPv6 字面量带方括号，切分会截错。
+    """
+    try:
+        hostname = urlsplit(f"//{rest}").hostname or ""
+    except ValueError:
+        return False
+    return hostname.strip("[]").lower() in ("localhost", "127.0.0.1", "::1")
 
 
 def validate_raccoon_endpoint_allowed(endpoint: str, settings: Settings) -> bool:

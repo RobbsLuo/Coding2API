@@ -1,7 +1,9 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import { ApiError } from "../client";
 import {
   aliasTitle,
   blocklistPatterns,
+  fetchModelCatalog,
   isCustomAlias,
   modelCost,
   reasoningEfforts,
@@ -65,5 +67,35 @@ describe("黑名单文本处理", () => {
 
   it("空白模式不写入（按钮不该往黑名单里塞空项）", () => {
     expect(withBlocklistPattern("a", "   ")).toBe("a");
+  });
+});
+
+describe("非 JSON 响应", () => {
+  it("反代回 HTML 错误页时抛可读的 ApiError，而不是 SyntaxError", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "<html><body>502 Bad Gateway</body></html>",
+      { status: 200, headers: { "Content-Type": "text/html" } },
+    )));
+    const caught = await fetchModelCatalog().catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(ApiError);
+    expect((caught as ApiError).code).toBe("invalid_response");
+    expect((caught as ApiError).message).toContain("非 JSON");
+  });
+
+  it("错误状态且体不是 JSON 时仍保留真实 HTTP 状态", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      "<html>502</html>", { status: 502, headers: { "Content-Type": "text/html" } },
+    )));
+    const caught = await fetchModelCatalog().catch((error: unknown) => error);
+    expect(caught).toBeInstanceOf(ApiError);
+    expect((caught as ApiError).status).toBe(502);
+  });
+
+  it("合法 JSON 照常解析（空体按 null 处理）", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      JSON.stringify({ models: [], total: 0 }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    )));
+    await expect(fetchModelCatalog()).resolves.toMatchObject({ total: 0 });
   });
 });

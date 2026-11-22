@@ -1146,6 +1146,14 @@ class Executor:
                                 credential_id, provider_id)),
                         input_tokens=_usage_field(usage, "input_tokens"),
                         output_tokens=_usage_field(usage, "output_tokens"),
+                        # 与 `_record_success` 同款字段：漏记 reasoning/cached 会让
+                        # 缓存命中率与推理 token 偏低；漏记 credit 会让
+                        # `daily_credits` 护栏按 SUM(credit) 低估实扣（半途失败的
+                        # 上游可能已真实计费），客户端频繁中断即可绕过限额。
+                        reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
+                        cached_tokens=_usage_field(usage, "cached_tokens"),
+                        credit=_usage_field(usage, "credit"),
+                        credit_estimated=bool(_usage_field(usage, "credit_estimated")),
                         latency_ms=_elapsed_ms(state.started))
                 if isinstance(last_error, _StreamTimeout):
                     # 空闲超时（已出帧）：半截输出不可回滚，不换号，直接以错误帧
@@ -1400,7 +1408,12 @@ class Executor:
                 credential_id, model)
 
     def _record_disconnect(self, target: ModelTarget, state: _StreamState) -> None:
-        """客户端断开：按已知用量记账，标记 client_disconnect。"""
+        """客户端断开：按已知用量记账，标记 client_disconnect。
+
+        字段与 `_record_success` 同款（含 credit/credit_estimated）：断连时上游
+        往往**已经真实计费**，只记 token 会让 `daily_credits` 护栏（按
+        `SUM(credit)` 判定）系统性低估实扣——客户端频繁中断就能绕过限额。
+        """
         state.recorded = True
         usage = state.translator.usage
         self._deps.record(
@@ -1409,6 +1422,10 @@ class Executor:
             error_type="client_disconnect",
             input_tokens=_usage_field(usage, "input_tokens"),
             output_tokens=_usage_field(usage, "output_tokens"),
+            reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
+            cached_tokens=_usage_field(usage, "cached_tokens"),
+            credit=_usage_field(usage, "credit"),
+            credit_estimated=bool(_usage_field(usage, "credit_estimated")),
             ttfb_ms=state.ttfb_ms(), latency_ms=_elapsed_ms(state.started))
 
     async def complete(self, request: ChatRequest, *, username: str = "unknown",

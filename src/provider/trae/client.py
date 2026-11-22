@@ -517,12 +517,9 @@ class TraeClient(LazyClients):
         if response.status_code >= 400:
             raise UpstreamHTTPError(response.status_code,
                                     await base.read_body_bounded(response))
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation(
-                f"non-JSON response from {url}",
-                public="upstream returned a non-JSON response") from error
+        # 成功路径同样有界：被控上游回超大 body 不能把整段读进内存。
+        data = await base.read_json_bounded(
+            response, what=url, public="upstream returned a non-JSON response")
         if not isinstance(data, dict):
             raise UpstreamProtocolViolation(
                 f"unexpected response shape from {url}",

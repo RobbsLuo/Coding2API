@@ -2,13 +2,34 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
-from src.api.metrics import CONTENT_TYPE, _escape, _sample, render_metrics
+from src.api.metrics import CONTENT_TYPE, _escape, _is_loopback, _sample, render_metrics
+from src.auth.session import create_session_token
 from src.config import Settings
 from src.main import build_app
 from tests.helpers.auth import isolated_settings
 from tests.helpers.constants import SECRET
+
+# 回环对端：无令牌时只放行本机抓取（Prometheus 与被抓服务同机）。
+LOOPBACK = ("127.0.0.1", 50000)
+# 非回环对端：模拟跨机 / 经公网代理进来的匿名抓取。
+REMOTE = ("203.0.113.9", 50000)
+
+
+@pytest.fixture()
+def client(tmp_path):
+    """带 admin 会话 Cookie 的 TestClient，对端为回环地址。
+
+    覆盖全局夹具：无 `METRICS_TOKEN` 时 `/metrics` 只对回环放行，而 TestClient
+    默认对端是 `testclient`（非 IP 字面量，按非回环处理）。
+    """
+    settings = isolated_settings(tmp_path)
+    app = build_app(settings)
+    with TestClient(app, client=LOOPBACK) as test_client:
+        test_client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+        yield test_client
 
 
 def _samples(text: str) -> dict[str, str]:
@@ -80,7 +101,7 @@ def test_sample_omits_braces_without_labels():
 
 
 def test_metrics_endpoint_is_unauthenticated_and_text_plain(client):
-    """与 /healthz 同口径：不带任何凭证也能抓取。"""
+    """无令牌 + 回环对端：不带任何凭证也能抓取（同机 Prometheus 的常态）。"""
     response = client.get("/metrics")
     assert response.status_code == 200
     assert response.headers["content-type"] == CONTENT_TYPE
@@ -88,6 +109,50 @@ def test_metrics_endpoint_is_unauthenticated_and_text_plain(client):
     # 不带 Cookie 的裸请求同样 200（`client` 夹具自带 admin Cookie，这里显式清掉）
     client.cookies.clear()
     assert client.get("/metrics").status_code == 200
+
+
+def test_metrics_without_token_rejects_non_loopback_peer(tmp_path):
+    """无令牌 + 非回环对端 → 401（匿名拿不到渠道/模型清单与凭证池计数）。"""
+    app = build_app(isolated_settings(tmp_path))
+    with TestClient(app, client=REMOTE) as http:
+        response = http.get("/metrics")
+    assert response.status_code == 401
+    body = response.json()
+    assert body["error"]["code"] == "unauthorized"
+    assert body["error"]["message"] == "metrics unauthorized"
+
+
+def test_metrics_without_token_treats_unparsable_peer_as_remote(tmp_path):
+    """对端地址解析不出来（TestClient 默认 `testclient`）按非回环处理。"""
+    app = build_app(isolated_settings(tmp_path))
+    with TestClient(app) as http:                  # 默认对端 = ("testclient", 50000)
+        assert http.get("/metrics").status_code == 401
+
+
+@pytest.mark.parametrize(("host", "expected"), [
+    ("127.0.0.1", True),
+    ("127.9.9.9", True),
+    ("::1", True),
+    ("203.0.113.9", False),
+    ("not-an-ip", False),
+])
+def test_is_loopback_parses_peer_host(host, expected):
+    class Client:
+        pass
+
+    peer = Client()
+    peer.host = host
+    request = Client()
+    request.client = peer
+    assert _is_loopback(request) is expected
+
+
+def test_is_loopback_without_peer_is_false():
+    """ASGI 允许 `request.client` 为 None（UDS / 测试替身）：拿不到对端即不放行。"""
+    class Request:
+        client = None
+
+    assert _is_loopback(Request()) is False
 
 
 def test_metrics_reflects_pool_counts_and_usage(tmp_path):
@@ -98,7 +163,7 @@ def test_metrics_reflects_pool_counts_and_usage(tmp_path):
                      input_tokens=7, output_tokens=3)
     collector.record(username="root", provider="trae", model="glm-5.2", ok=False,
                      error_type="rate_limit")
-    with TestClient(app) as http:
+    with TestClient(app, client=LOOPBACK) as http:
         samples = _samples(http.get("/metrics").text)
     # 种子 zen / kilo 两条虚拟凭证 → ready=2
     assert samples['coding2api_credentials{state="ready"}'] == "2"
@@ -113,7 +178,7 @@ def test_metrics_reflects_pool_counts_and_usage(tmp_path):
 def test_metrics_disabled_returns_404(tmp_path):
     settings = isolated_settings(tmp_path, METRICS_ENABLED="false")
     app = build_app(settings)
-    with TestClient(app) as http:
+    with TestClient(app, client=LOOPBACK) as http:
         response = http.get("/metrics")
     assert response.status_code == 404
     assert response.json()["error"]["code"] == "invalid_request"
@@ -123,20 +188,20 @@ def test_metrics_without_runner_omits_task_family(tmp_path):
     """未进 lifespan（无 runner）时不 500，任务家族留空。"""
     settings = isolated_settings(tmp_path)
     app = build_app(settings)
-    http = TestClient(app)
+    http = TestClient(app, client=LOOPBACK)
     response = http.get("/metrics")
     assert response.status_code == 200
     assert "coding2api_task_failures_total{" not in response.text
 
 
 def test_metrics_token_is_optional_and_enforced_when_set(tmp_path):
-    """空令牌 = 保持公开（与 /healthz 同口径）；设了就必须带对的 Bearer。"""
+    """空令牌时回环放行；设了令牌就必须带对的 Bearer（对端无关）。"""
     public = build_app(isolated_settings(tmp_path))
-    with TestClient(public) as http:
+    with TestClient(public, client=LOOPBACK) as http:
         assert http.get("/metrics").status_code == 200
 
     guarded = build_app(isolated_settings(tmp_path, METRICS_TOKEN="s3cret"))
-    with TestClient(guarded) as http:
+    with TestClient(guarded, client=LOOPBACK) as http:
         assert http.get("/metrics").status_code == 401
         assert http.get("/metrics", headers={
             "Authorization": "Bearer wrong"}).status_code == 401
@@ -146,11 +211,17 @@ def test_metrics_token_is_optional_and_enforced_when_set(tmp_path):
         assert ok.status_code == 200
         assert "coding2api_credentials" in ok.text
 
+    # 有令牌时对端不影响判定：跨机带对令牌同样 200
+    with TestClient(guarded, client=REMOTE) as http:
+        assert http.get("/metrics", headers={
+            "Authorization": "Bearer s3cret"}).status_code == 200
+        assert http.get("/metrics").status_code == 401
+
 
 def test_metrics_token_header_is_case_insensitive_and_trimmed(tmp_path):
     """Prometheus 发 `Bearer`，但代理/客户端可能改大小写或带尾随空格。"""
     app = build_app(isolated_settings(tmp_path, METRICS_TOKEN="tok"))
-    with TestClient(app) as http:
+    with TestClient(app, client=LOOPBACK) as http:
         response = http.get("/metrics", headers={
             "Authorization": "bearer   tok   "})
     assert response.status_code == 200
@@ -160,7 +231,7 @@ def test_metrics_token_disabled_still_wins(tmp_path):
     """关闭优先于鉴权：关了就是 404，不暴露「这里有东西但要令牌」。"""
     app = build_app(isolated_settings(tmp_path, METRICS_ENABLED="false",
                                       METRICS_TOKEN="tok"))
-    with TestClient(app) as http:
+    with TestClient(app, client=LOOPBACK) as http:
         assert http.get("/metrics").status_code == 404
 
 
@@ -170,7 +241,7 @@ def test_metrics_enabled_is_hot_updatable(tmp_path):
                         ADMIN_USERNAMES="root")
     app = build_app(settings)
     runtime = app.state.runtime_settings
-    with TestClient(app) as http:
+    with TestClient(app, client=LOOPBACK) as http:
         assert http.get("/metrics").status_code == 200
         runtime.set("metrics_enabled", False)
         assert http.get("/metrics").status_code == 404
@@ -206,7 +277,7 @@ def test_metrics_latency_skips_provider_without_ok_samples(tmp_path):
                      input_tokens=7, output_tokens=3, latency_ms=900, ttfb_ms=300)
     collector.record(username="root", provider="kilo", model="glm-5.2", ok=False,
                      error_type="rate_limit")
-    with TestClient(app) as client:
+    with TestClient(app, client=LOOPBACK) as client:
         text = client.get("/metrics").text
     samples = _samples(text)
     assert 'coding2api_latency_ms_avg{provider="trae"}' in samples

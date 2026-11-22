@@ -48,8 +48,10 @@ def validate_gateway_url(url: str) -> str:
     - 必须 `https`——`http` 等于明文传长期密钥（本机调试也走 https 隧道）；
     - 必须带主机名，且拒绝内网 / 回环 / 链路本地 / 保留地址（与告警 webhook
       的 SSRF 口径一致，见 `runtime_settings._is_blocked_webhook_host`）；
-    - 域名不在此处解析（解析要 IO，且 DNS 可变）：字面量 IP 直接判，域名交给
-      运行期的出口校验。
+    - 域名**不在此处解析**（解析要 IO，本函数是同步的，且 `POST /api/credentials`
+      不该卡在 DNS 上）：这里只判字面量 IP。域名交给**出口**校验
+      `base.ensure_public_host`（异步解析 + 逐地址过同一套黑名单），见
+      `OfficeAceClient._gateway_of`——那才是真正带 Basic 密钥发请求的地方。
 
     只做校验，不改写存储形状——`/v2` 尾缀的归一仍由
     `OfficeAceClient._gateway_of` 负责（两条导入路径形状不同，见那里）。

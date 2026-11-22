@@ -16,6 +16,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends
 
+from ..auth.rbac import ROLE_ADMIN, ROLE_OPERATOR
 from .deps import ApiKeyPrincipal, Services, api_key_user
 
 
@@ -34,8 +35,14 @@ def _balance_rows(services: Services) -> Iterator[dict[str, Any]]:
             yield row
 
 
-def balance_payload(services: Services) -> dict[str, Any]:
-    """把凭证池探测缓存聚合成余额响应。"""
+def balance_payload(services: Services, *, include_providers: bool) -> dict[str, Any]:
+    """把凭证池探测缓存聚合成余额响应。
+
+    `providers` 是池级明细（每渠道剩余额度、总额、凭证条数），属于运维信息：
+    只有 admin / operator 的 Key 才返回，viewer 拿到空数组。聚合值
+    （`balance_infos` / `is_available` / `balance_known`）对所有角色一致，
+    客户端契约不变。
+    """
     per_provider: dict[str, dict[str, float]] = {}
     for row in _balance_rows(services):
         provider = row["provider"]
@@ -64,7 +71,7 @@ def balance_payload(services: Services) -> dict[str, Any]:
             {"provider": provider, "remaining": bucket["remaining"],
              "total": bucket["total"], "credentials": bucket["probed"]}
             for provider, bucket in sorted(per_provider.items())
-        ],
+        ] if include_providers else [],
     }
 
 
@@ -72,7 +79,11 @@ def create_router(services: Services) -> APIRouter:
     router = APIRouter()
 
     @router.get("/v1/user/balance")
-    async def user_balance(_principal: ApiKeyPrincipal = Depends(api_key_user)):
-        return balance_payload(services)
+    async def user_balance(principal: ApiKeyPrincipal = Depends(api_key_user)):
+        # 角色从 DB 现读（与 principal_from_request 同口径）：Key 上不带角色，
+        # 降级后下一次请求立刻只看到聚合值。
+        role = services.users.role_of(principal.username)
+        return balance_payload(
+            services, include_providers=role in (ROLE_ADMIN, ROLE_OPERATOR))
 
     return router

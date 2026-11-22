@@ -6,6 +6,8 @@ Provider 承担上游协议私有部分：发请求、解析事件、分类错�
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
 import math
 import re
@@ -337,6 +339,120 @@ async def read_body_bounded(response: Any, limit: int = BOUNDED_BODY_LIMIT) -> b
         if len(collected) >= limit:
             break
     return bytes(collected[:limit])
+
+
+async def read_json_bounded(response: Any, *, what: str,
+                            public: str | None = None,
+                            limit: int = BOUNDED_BODY_LIMIT) -> Any:
+    """有界读取成功响应体并解析 JSON。
+
+    **成功路径**原先直接 `response.json()`（= 无上限 `aread()`）：被控上游或
+    中间盒回一个超大 body 就能把进程内存撑爆。这里与错误路径走同一套有界读取，
+    超过 `limit` 直接按协议违规处理——被截断的 JSON 本来也解析不出完整语义，
+    早失败好过先分配几 GB。
+
+    `what` 只用于日志/诊断（端点路径或 URL）；`public` 是可回显给客户端的
+    文案，缺省沿用 `UpstreamProtocolViolation`「等于 message」的口径。
+    """
+    # 多读 1 字节用于判「是否超限」：刚好等于上限的完整 body 不该被误杀。
+    raw = await read_body_bounded(response, limit + 1)
+    if len(raw) > limit:
+        raise UpstreamProtocolViolation(
+            f"response body from {what} exceeds {limit} bytes",
+            public="upstream returned an oversized response")
+    try:
+        return json.loads(raw)
+    except ValueError as error:
+        raise UpstreamProtocolViolation(
+            f"non-JSON response from {what}", public=public) from error
+
+
+#: 出口 DNS 校验结果的缓存 TTL（秒）。上游网关域名变更频率远低于聊天频率，
+#: 60s 足以挡掉「每次聊天都做一次 DNS」的开销，到期重解析也能跟上 DNS 变更。
+PUBLIC_HOST_CACHE_TTL = 60.0
+
+#: `host -> 上次校验通过的 monotonic 时刻`。只缓存**通过**的结果：解析失败与
+#: 命中黑名单都必须每次都重新判（失败不缓存，否则一次 DNS 抖动会把合法域名
+#: 锁死 60s）。
+_public_host_checked: dict[str, float] = {}
+
+#: RFC 6598 运营商级 NAT 共享地址段。值与
+#: `runtime_settings._CGNAT_SHARED` 相同，理由见 `_is_blocked_host_address`。
+_CGNAT_SHARED = ipaddress.ip_network("100.64.0.0/10")
+
+
+def _is_blocked_host_address(text: str) -> bool:
+    """单个解析结果是否指向禁止出站的地址（SSRF 黑名单）。
+
+    这里**复制**了一份 `runtime_settings._is_blocked_webhook_host` 的判定而不
+    直接 import 它：`provider/base.py` 是中立协议层，被九个渠道与测试替身
+    普遍 import；`runtime_settings` 依赖 `config.Settings`（pydantic-settings），
+    反向依赖会让协议层拖上配置模块的装载链，也让「provider 不 import config」
+    这条分层约定失效。两处口径必须保持一致，改动其一要同步另一处。
+    """
+    try:
+        # IPv6 链路本地地址带 `%en0` 作用域后缀（getaddrinfo 原样返回），
+        # 不剥掉 `ip_address` 会直接抛 ValueError——那等于把链路本地当公网放过。
+        address = ipaddress.ip_address(text.split("%", 1)[0])
+    except ValueError:
+        # 解析结果不是 IP（畸形 DNS 应答）：宁可阻断也不赌它是公网地址。
+        return True
+    return (address.is_private or address.is_loopback or address.is_link_local
+            or address.is_reserved or address.is_multicast
+            or address.is_unspecified
+            # `is_private` 不覆盖 CGNAT 共享段 100.64.0.0/10（RFC 6598），
+            # 该段在部分云厂商内可达（实测 100.100.100.200 能通）。
+            or address in _CGNAT_SHARED
+            # 非 global 一律拦：覆盖 198.18.0.0/15 基准测试段等
+            # 「保留但 is_private=False」的网段。
+            or not address.is_global)
+
+
+async def _resolve_addresses(host: str) -> list[str]:
+    """异步解析主机名 → 地址文本列表（不阻塞事件循环）。
+
+    单列一个函数是为了让 TTL 缓存与测试都能围绕**一个**解析入口：
+    生产走 `loop.getaddrinfo`（由线程池执行，不占事件循环），测试替换本函数
+    即可模拟私网/混合/解析失败，不必去 patch `asyncio` 的全局状态。
+    """
+    loop = asyncio.get_running_loop()
+    infos = await loop.getaddrinfo(host, None)
+    return [info[4][0] for info in infos]
+
+
+async def ensure_public_host(host: str) -> None:
+    """出口前校验主机名解析出的**每一个**地址都不指向内网（SSRF 出口校验）。
+
+    导入期只能判字面量 IP：域名要做 DNS，同步函数里解析会阻塞事件循环，也会
+    让 `POST /api/credentials` 卡在 DNS 上。可这个地址最终要带**不过期的**
+    `Authorization: Basic app_key:app_secret` 发出去，所以真正的出口必须补上
+    解析校验——一个解析到 10.x / 169.254.169.254 的域名就是一条 SSRF 跳板，
+    顺带把长期密钥递给内网主机。
+
+    口径与告警 webhook 的投递前复核一致：每个结果各自过黑名单，**任一**命中即
+    阻断；解析失败同样按阻断处理（宁可这次请求失败，也不把密钥发给一个解析不
+    出来的名字）。IPv6 链路本地带 `%en0` 后缀时先剥后缀再判。
+    """
+    normalized = (host or "").strip().lower()
+    if not normalized:
+        raise UpstreamProtocolViolation(
+            "url has no host", public="上游地址缺少主机名，已拒绝发送凭证")
+    now = time.monotonic()
+    checked_at = _public_host_checked.get(normalized)
+    if checked_at is not None and now - checked_at < PUBLIC_HOST_CACHE_TTL:
+        return
+    try:
+        addresses = await _resolve_addresses(normalized)
+    except OSError as error:
+        raise UpstreamProtocolViolation(
+            f"cannot resolve host {normalized}: {error}",
+            public="上游网关地址无法解析，已拒绝发送凭证") from error
+    # 空结果当阻断：一次「解析成功但没有任何地址」不该被读成「干净的公网主机」。
+    if not addresses or any(_is_blocked_host_address(item) for item in addresses):
+        raise UpstreamProtocolViolation(
+            f"host {normalized} resolves to a private/loopback/reserved address",
+            public="上游网关地址指向内网/回环/保留地址，已拒绝发送凭证")
+    _public_host_checked[normalized] = now
 
 
 # 上游「排队中」信号：`isQueued` 为真，或子码点名 RESOURCE_LIMIT。

@@ -93,17 +93,25 @@ class LoginThrottle:
         for key in candidates[:excess]:
             del self._events[key]
 
-    def _at_limit(self, key: tuple[str, str]) -> bool:
-        """该键是否已触发限流（淘汰时降级为最后候选）。"""
+    def _at_limit(self, key: tuple[str, str], *, forwarded: bool = False) -> bool:
+        """该键是否已触发限流（淘汰时降级为最后候选）。
+
+        `forwarded` 与 `_ip_blocked` 同口径：回环键只有在「带 XFF、正常计数」
+        时才算已限流。淘汰路径没有请求上下文，取默认值 False（本机直连的
+        回环桶永不用于拒绝，淘汰它不损失任何防护）。
+        """
         kind, name = key
         if kind == "u":
             return bool(name) and len(self._events[key]) >= self.limits.max_per_user
         if kind == "i":
-            return not _is_loopback(name) and len(self._events[key]) >= self.limits.max_per_ip
+            return self._ip_blocked(name, forwarded=forwarded)
         return False
 
-    def check(self, *, ip: str, username: str) -> None:
+    def check(self, *, ip: str, username: str, forwarded: bool = False) -> None:
         """IP / 用户名任一窗口超限即抛 ThrottledError；调用方应在校验密码前调用。
+
+        `forwarded`：请求带了 `X-Forwarded-For`（说明有反代，真实来源不是本机），
+        此时回环对端不再豁免 IP 窗口。
 
         **不按全局窗口拒绝**：该窗口由所有来源共享，未认证攻击者每人贡献几条
         就能把它打满，一旦据此拒绝，攻击者即刻让全站登录返回 429（管理台是
@@ -113,12 +121,12 @@ class LoginThrottle:
         self._prune(("g", ""), now)
         self._prune(("i", ip), now)
         self._prune(("u", username), now)
-        if self._ip_blocked(ip):
+        if self._ip_blocked(ip, forwarded=forwarded):
             raise ThrottledError()
         if username and len(self._events.get(("u", username)) or ()) >= self.limits.max_per_user:
             raise ThrottledError()
 
-    def check_transport_windows(self, *, ip: str) -> None:
+    def check_transport_windows(self, *, ip: str, forwarded: bool = False) -> None:
         """只查 IP 窗口（哈希前调用）。
 
         威胁模型：PBKDF2-600k 是 CPU 密集操作，攻击者用无效尝试就能占满
@@ -133,17 +141,19 @@ class LoginThrottle:
         now = time.monotonic()
         self._prune(("g", ""), now)
         self._prune(("i", ip), now)
-        if self._ip_blocked(ip):
+        if self._ip_blocked(ip, forwarded=forwarded):
             raise ThrottledError()
 
-    def _ip_blocked(self, ip: str) -> bool:
+    def _ip_blocked(self, ip: str, forwarded: bool = False) -> bool:
         """该 IP 的失败窗口是否已满。
 
-        本机回环**永不限流**：反代/隧道部署下若 XFF 未被采信，所有请求的对端
-        都是同一个 127.0.0.1，限它等于把所有人塞进同一个桶。回环本身也不是
-        攻击者的可达入口（能连上就已有本机权限）。
+        **回环豁免只针对本机直连**：反代/隧道部署下若 XFF 未被采信，所有请求
+        的对端都是同一个 127.0.0.1，限它等于把所有人塞进同一个桶。但带了
+        `X-Forwarded-For` 就说明前面有反代、真实来源不是本机（docker-compose
+        端口绑 127.0.0.1 + TRUST_PROXY=false 时 peer 恒为回环），此时必须
+        正常计数，否则 IP 窗口完全失效、只剩用户名窗口可跨名撞库。
         """
-        if _is_loopback(ip):
+        if _is_loopback(ip) and not forwarded:
             return False
         return len(self._events.get(("i", ip)) or ()) >= self.limits.max_per_ip
 

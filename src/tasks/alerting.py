@@ -49,8 +49,10 @@ import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -60,6 +62,12 @@ from ..stats.collector import StatsCollector
 from .status import TASK_BY_KEY, TaskStatusStore
 
 logger = logging.getLogger(__name__)
+
+# 告警的「今天 / 非工作时段」固定北京时间：与签到（`tasks/checkin`）和活跃
+# 上报（`tasks/activity`）同一口径。此前用 `time.localtime()`，容器/宿主
+# TZ≠CN 时同一部署会出现两套日界——月初账单与预算告警错位、非工作时段
+# 判据漂移，而签到那边仍按北京时间。
+_CN_TZ = ZoneInfo("Asia/Shanghai")
 
 # webhook 单次投递超时（秒）。远端挂掉时不能拖住后台循环。
 _WEBHOOK_TIMEOUT = 10.0
@@ -194,9 +202,16 @@ def _humanize(seconds: int) -> str:
 
 
 def month_start(now: int) -> int:
-    """本地时区当月起点（epoch 秒）：预算按自然月结算，与账单页同口径。"""
-    tm = time.localtime(now)
-    return int(time.mktime((tm.tm_year, tm.tm_mon, 1, 0, 0, 0, 0, 0, -1)))
+    """北京时间的当月起点（epoch 秒）：预算按自然月结算。
+
+    固定 `Asia/Shanghai` 而非 `time.localtime()`：告警的「今天 / 非工作时段」
+    必须与签到（`tasks/checkin`）和限额护栏（`engine/limits.day_start`）同一
+    口径，否则 TZ≠CN 的部署里「本月已花」会在月初错算一段。（管理台账单页的
+    `month_range` 仍按进程本地时区，属既有行为，不在本次口径统一范围内。）
+    """
+    moment = datetime.fromtimestamp(now, _CN_TZ)
+    return int(moment.replace(day=1, hour=0, minute=0, second=0,
+                              microsecond=0).timestamp())
 
 
 def parse_levels(raw: str) -> tuple[int, ...]:
@@ -544,8 +559,10 @@ class AlertTask:
         key_usage = (self._stats.window_key_usage(since=now - burst_minutes * 60)
                      if self._key_burst_tokens() > 0 and burst_minutes > 0 else [])
         start, end = self._off_hours_start(), self._off_hours_end()
-        off_hours = in_off_hours(time.localtime(now).tm_hour, start, end)
-        # 预算按自然月（本地）：月初成本归零 → 上月的预算告警自然恢复
+        # 小时取北京时间：非工作时段是运营按 CN 作息配置的，进程 TZ 无关。
+        off_hours = in_off_hours(datetime.fromtimestamp(now, _CN_TZ).hour,
+                                 start, end)
+        # 预算按自然月（北京时间）：月初成本归零 → 上月的预算告警自然恢复
         budget_cny = max(0.0, self._budget_cny())
         budget_spent = (self._stats.window_cost(since=month_start(now))[0]
                         if budget_cny > 0 else 0.0)

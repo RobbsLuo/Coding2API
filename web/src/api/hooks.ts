@@ -27,6 +27,8 @@ export function useSession() {
 export function useCredentials(username?: string, refetchIntervalMs?: number,
                                 sort?: string, order?: string) {
   return useQuery<CredentialsResponse>({
+    // username 进 key：凭证页（session.username）与首启向导共用一套缓存，
+    // 不传就落到 "anonymous" 那套 key，等于重复拉同一份全量列表。
     queryKey: adminKey(username, "credentials", sort, order),
     queryFn: () => api.credentials(sort, order),
     // 仪表盘/凭证页的冷却倒计时是「随时间变化」的观测量；页面停留时自动
@@ -59,18 +61,6 @@ export function usePlaygroundModels() {
   return useQuery({
     queryKey: ["playground-models"],
     queryFn: ({ signal }) => api.playgroundModels(signal),
-  });
-}
-
-/** OpenRouter 模型目录（模型列表页，operator）：服务端分页 + 筛选，翻页保留上一页避免闪烁。 */
-export function useModelCatalog(username?: string, sort?: string, order?: string,
-                                q?: string, onlyAvailable?: boolean,
-                                limit?: number, offset?: number) {
-  return useQuery({
-    queryKey: adminKey(username, "model-catalog", sort, order, q, onlyAvailable,
-                       limit, offset),
-    queryFn: () => api.modelCatalog(sort, order, q, onlyAvailable, limit, offset),
-    placeholderData: keepPreviousData,
   });
 }
 
@@ -377,29 +367,6 @@ export function useStatsEventStream(options: {
   }, [enabled, username, provider, model, credentialId, ok]);
 
   return status;
-}
-
-/** 凭证相关写操作：成功后统一失效凭证与统计查询。 */export function useCredentialMutation<TArgs, TResult>(
-  mutationFn: (args: TArgs) => Promise<TResult>,
-  username?: string,
-) {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn,
-    onSuccess: () => {
-      void client.invalidateQueries({ queryKey: ["admin", username ?? "anonymous"] });
-    },
-  });
-}
-
-export function useLogout() {
-  const client = useQueryClient();
-  return useMutation({
-    mutationFn: api.logout,
-    onSuccess: () => {
-      client.clear();
-    },
-  });
 }
 
 export { useQueryClient };

@@ -233,6 +233,47 @@ def test_daily_limits_pass_when_under_quota():
     assert lease.counted is True
 
 
+def test_daily_cost_blocks_when_unknown_cost_requests_present():
+    """无价请求 → 成本配额 fail closed（否则配额永不触发）。
+
+    价表无该模型时 `cost_usd` 落库为 NULL，按 0 累加会让「已知成本」永远
+    低于上限；未知成本不能猜，只能阻断并说明原因。
+    """
+    usage = KeyUsage(requests=3, input_tokens=100, output_tokens=50,
+                     cost_usd=0.01, cost_known_requests=2,
+                     cost_unknown_requests=1)
+    guard = KeyQuotaGuard(_usage_source(usage), now_fn=lambda: NOON)
+    with pytest.raises(QuotaExceeded) as info:
+        guard.admit("k1", KeyQuota(daily_cost_usd=10.0))
+    message = str(info.value)
+    assert "无法定价" in message and "成本配额无法精确判定" in message
+    # 与「已知成本超限」文案可辨：带上括号说明，不冒充金额超限
+    assert "per day（" in message
+
+
+def test_daily_cost_blocks_on_known_amount_only():
+    """全部有价：按金额阻断，文案不带「无法定价」。"""
+    usage = KeyUsage(requests=2, cost_usd=2.5,
+                     cost_known_requests=2, cost_unknown_requests=0)
+    guard = KeyQuotaGuard(_usage_source(usage), now_fn=lambda: NOON)
+    with pytest.raises(QuotaExceeded) as info:
+        guard.admit("k1", KeyQuota(daily_cost_usd=2.0))
+    assert "无法定价" not in str(info.value)
+    assert "$2 per day" in str(info.value)
+    # 未超：放行
+    assert guard.admit("k1", KeyQuota(daily_cost_usd=3.0)).counted is True
+
+
+def test_daily_cost_unconfigured_ignores_unknown_cost_requests():
+    """`daily_cost_usd=0`（未配置）：无价请求不影响任何判定。"""
+    usage = KeyUsage(requests=1, cost_usd=0.0, cost_unknown_requests=99)
+    guard = KeyQuotaGuard(_usage_source(usage), now_fn=lambda: NOON)
+    assert guard.admit("k1", KeyQuota(daily_requests=10)).counted is True
+    # 全关（不限制）：直接放行，不查聚合也不受无价请求影响
+    assert guard.admit("k1", KeyQuota()).counted is False
+
+
+
 def test_daily_check_skipped_when_no_usage_source():
     """未装配聚合源（纯内存场景）：当日类限额无从判定，不因此拒绝。"""
     guard = KeyQuotaGuard(now_fn=lambda: NOON)

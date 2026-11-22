@@ -51,6 +51,7 @@ export function FirstRunWizard({ username, isAdmin }: {
   if (!isAdmin || dismissed) return null;
   return (
     <WizardGate
+      username={username}
       onDismiss={() => {
         try {
           localStorage.setItem(storageKey, "done");
@@ -63,9 +64,10 @@ export function FirstRunWizard({ username, isAdmin }: {
   );
 }
 
-function WizardGate({ onDismiss }: { onDismiss: () => void }) {
+function WizardGate({ username, onDismiss }: { username: string; onDismiss: () => void }) {
   const navigate = useNavigate();
-  const credentials = useCredentials();
+  // 透传 username：与凭证页同一个 query key，避免两套缓存重复拉全量凭证列表
+  const credentials = useCredentials(username);
   const [open, setOpen] = useState(true);
   const [step, setStep] = useState(0);
   const dialogRef = useDialogFocus<HTMLDivElement>(onDismiss, open);

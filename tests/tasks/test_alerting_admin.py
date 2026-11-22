@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import time
 
 import pytest
 
@@ -99,6 +100,27 @@ def test_window_error_rate_counts_requests_and_failures(repo):
     assert (requests, failed) == (3, 2)
     # 窗口外不计
     assert stats.window_error_rate(since=1150) == (1, 1)
+
+
+def test_window_error_rate_excludes_client_disconnect(repo):
+    """客户端断开不算「上游错误」（修复：关页面触发告警）。
+
+    分母仍是全部请求（含中断）：中断属于被观测总体，剔掉会让样本量凭空
+    变小、少数上游错误更容易顶过阈值。
+    """
+    _credentials, db = repo
+    stats = StatsCollector(db)
+    stats.record(username="u", provider="trae", model="m", ok=True, now=1000)
+    for index in range(3):
+        stats.record(username="u", provider="trae", model="m", ok=False,
+                     error_type="client_disconnect", now=1100 + index)
+    # 只有中断：请求数照计，失败数 0 → 不触发上游错误率告警
+    assert stats.window_error_rate(since=1000) == (4, 0)
+    # 混入一条上游错误：正常计数（NULL error_type 的成功行不被 <> 漏掉）
+    stats.record(username="u", provider="trae", model="m", ok=False,
+                 error_type="upstream_error", now=1200)
+    assert stats.window_error_rate(since=1000) == (5, 1)
+
 
 # --------------------------------------------------------- AlertRepository
 
@@ -230,9 +252,10 @@ def test_resolve_alert_unknown_or_already_resolved_is_400(admin_client):
     app, client = admin_client
     alerts = app.state.services.alerts
     assert client.post("/api/alerts/alert_missing/resolve").status_code == 400
-    alerts.record(rule="pool_empty", severity="critical", scope="pool",
-                  message="池空", now=100)
-    target = alerts.recent()[0]["id"]
+    # 用 record 返回的 id（不取 `recent()[0]`，启动后的告警循环可能落新行），
+    # 且 ts 用当前时刻：写 1970 的话会被启动期的保留期清理删掉，本用例随机 400。
+    target = alerts.record(rule="manual_test", severity="critical", scope="manual",
+                           message="手工", now=int(time.time()))
     assert client.post(f"/api/alerts/{target}/resolve").status_code == 200
     assert client.post(f"/api/alerts/{target}/resolve").status_code == 400
 

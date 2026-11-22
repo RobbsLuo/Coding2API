@@ -6,12 +6,23 @@
 
 from __future__ import annotations
 
+import sqlite3
 import stat
 
 import pytest
 
 from src.db.conn import Database
 from src.security.private_files import PrivateAccessError
+
+
+def _make_db(path):
+    """建一个普通（非 WAL）库并写入一行，供只读用例使用。"""
+    conn = sqlite3.connect(str(path))
+    conn.execute("CREATE TABLE t (x TEXT)")
+    conn.execute("INSERT INTO t VALUES ('v')")
+    conn.commit()
+    conn.close()
+    return path
 
 
 def test_database_tightens_parent_dir(tmp_path):
@@ -91,5 +102,79 @@ def test_database_secure_files_skips_missing_paths(tmp_path):
     try:
         db._secure_files()          # 三件套都还不存在
         db._secure_files()          # 幂等
+    finally:
+        db.close()
+
+
+# ------------------------------------------------------------------ 只读连接
+
+
+def test_read_only_connection_requires_existing_db(tmp_path):
+    """预览/诊断入口打开不存在的库必须报错，且**不创建**任何文件。
+
+    `cleanup_*` / `rollup_hourly` 的预览模式此前走普通连接：WAL pragma 会持久
+    改写库头并建出 `-wal`/`-shm`，等于「预览」也在改库。
+    """
+    target = tmp_path / "missing.sqlite3"
+    db = Database(target, read_only=True)
+    try:
+        with pytest.raises(sqlite3.Error):
+            db.connect()
+    finally:
+        db.close()
+    assert not target.exists()
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_read_only_connection_rejects_writes(tmp_path):
+    """只读连接上的写操作由 SQLite 拒绝（不是靠调用方自觉）。"""
+    target = _make_db(tmp_path / "coding2api.sqlite3")
+    db = Database(target, read_only=True)
+    try:
+        conn = db.connect()
+        assert conn.execute("SELECT x FROM t").fetchall()[0][0] == "v"
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO t VALUES ('w')")
+    finally:
+        db.close()
+
+
+def test_read_only_connection_does_not_set_wal(tmp_path):
+    """只读连接不执行 `PRAGMA journal_mode=WAL`：库头的 journal mode 不变。"""
+    target = _make_db(tmp_path / "coding2api.sqlite3")
+    db = Database(target, read_only=True)
+    try:
+        conn = db.connect()
+        # delete 是 SQLite 默认（未启用 WAL）的 journal mode
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
+    finally:
+        db.close()
+    # 也没有建出 WAL 边车
+    assert not (tmp_path / "coding2api.sqlite3-wal").exists()
+
+
+def test_read_only_connection_skips_permission_tightening(tmp_path, monkeypatch):
+    """只读连接不 chmod 库与边车、不建目录——预览不该有副作用。"""
+    called: list[object] = []
+    monkeypatch.setattr("src.db.conn.secure_file",
+                        lambda path, **_kwargs: called.append(path))
+    monkeypatch.setattr("src.db.conn.secure_dir",
+                        lambda path, **_kwargs: called.append(path))
+    db = Database(tmp_path / "sub" / "dir" / "x.sqlite3", read_only=True,
+                  strict_permissions=False)
+    try:
+        db._secure_files()
+    finally:
+        db.close()
+    assert called == []
+    assert not (tmp_path / "sub").exists()
+
+
+def test_default_connection_still_enables_wal(tmp_path):
+    """默认（读写）行为不变：WAL 仍然开启。"""
+    target = _make_db(tmp_path / "coding2api.sqlite3")
+    db = Database(target, strict_permissions=False)
+    try:
+        assert db.connect().execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     finally:
         db.close()

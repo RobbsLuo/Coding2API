@@ -1,6 +1,7 @@
-import { fireEvent, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { PlaygroundPage } from "../PlaygroundPage";
+import { setUnauthorizedHandler } from "@/api/unauthorized";
 import { jsonResponse, mockFetch, renderPage, userEvent } from "@/test-utils";
 
 const MODELS = {
@@ -477,22 +478,60 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     expect(await screen.findByTestId("playground-error")).toHaveTextContent("渠道不可用");
   });
 
-  it("会话过期时跳回登录页", async () => {
+  it("会话过期时走统一出口（清缓存 + 回登录页），不裸跳转", async () => {
+    const handled = vi.fn();
+    setUnauthorizedHandler(handled);
     const assign = vi.fn();
     vi.stubGlobal("location", { href: "/", assign });
+    mockFetch({
+      "/api/playground/models": MODELS,
+      "/api/playground/chat/completions": () =>
+        jsonResponse({ error: { code: "unauthorized" } }, 401),
+    });
+
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await waitForModelLoaded();
+    await fillPromptAndSend("hi");
+
+    await waitFor(() => expect(handled).toHaveBeenCalled());
+    // 不再用 window.location.href 整页跳转：那条路绕开清缓存，会留下过期数据
+    expect(assign).not.toHaveBeenCalled();
+    expect(window.location.href).toBe("/");
+    expect(await screen.findByTestId("playground-error")).toHaveTextContent("会话已过期");
+    setUnauthorizedHandler(null);
+  });
+
+  it("后端挂死（首字节迟迟不来）时超时并复位 busy", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     vi.stubGlobal(
       "fetch",
-      vi.fn(async (input: RequestInfo | URL) => {
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
         const url = String(input);
         if (url.includes("/api/playground/models")) return jsonResponse(MODELS);
-        return jsonResponse({ error: { code: "unauthorized" } }, 401);
+        // 永不返回，只在被 abort 时拒绝（与真实 fetch 同形）
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        });
       }),
     );
 
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await waitForModelLoaded();
     await fillPromptAndSend("hi");
-    await waitFor(() => expect(window.location.href).toBe("/login"));
+    await waitFor(() =>
+      expect(screen.getByTestId("send-request")).toHaveTextContent("请求中"));
+
+    await act(async () => {
+      vi.advanceTimersByTime(120_000);
+    });
+
+    expect(await screen.findByTestId("playground-error")).toHaveTextContent("请求超时");
+    // busy 必须复位，否则按钮永远停在「请求中」，页面等于废了
+    expect(screen.getByTestId("send-request")).toHaveTextContent("发送");
+    expect(screen.getByTestId("send-request")).not.toBeDisabled();
+    vi.useRealTimers();
   });
 
   it("流式请求按 chunk 累积 content 与 reasoning，遇 [DONE] 结束", async () => {

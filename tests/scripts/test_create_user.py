@@ -23,7 +23,10 @@ SCRIPT_MODULE = _load()
 
 @pytest.fixture
 def db_path(tmp_path):
-    return tmp_path / "coding2api.sqlite3"
+    """已由「服务初始化」建好表的库（脚本默认拒绝在缺失路径上静默建库）。"""
+    path = tmp_path / "coding2api.sqlite3"
+    repos(path)
+    return path
 
 
 def repos(db_path):
@@ -76,6 +79,45 @@ def test_list_requires_existing_db_and_does_not_migrate(tmp_path, capsys):
     with pytest.raises(SystemExit):
         SCRIPT_MODULE.main(["--list", "--db", str(missing)])
     assert not missing.exists()
+
+
+def test_missing_db_is_rejected_without_init(tmp_path, capsys):
+    """`--db` 写错时不能静默新建空库并「成功」建号：默认拒绝且不落文件。"""
+    missing = tmp_path / "typo.sqlite3"
+    assert SCRIPT_MODULE.main(["alice", "--password", "pw",
+                               "--db", str(missing)]) == 1
+    err = capsys.readouterr().err
+    assert "数据库不存在" in err and "--init" in err
+    assert not missing.exists()
+
+
+def test_init_flag_creates_database(tmp_path):
+    """显式 `--init` 才允许建库并建表（首次部署路径）。"""
+    fresh = tmp_path / "new.sqlite3"
+    assert SCRIPT_MODULE.main(["alice", "--password", "pw", "--init",
+                               "--db", str(fresh)]) == 0
+    users, _audit = repos(fresh)
+    assert users.get("alice") is not None
+
+
+def test_open_repos_require_existing_raises(tmp_path):
+    """直接调用 `open_repos` 同样拒绝缺失库，且不创建目录/文件。"""
+    missing = tmp_path / "sub" / "nope.sqlite3"
+    with pytest.raises(FileNotFoundError, match="数据库不存在"):
+        SCRIPT_MODULE.open_repos(missing)
+    assert not missing.exists()
+    assert not (tmp_path / "sub").exists()
+
+
+def test_open_repos_init_path_builds_schema(tmp_path):
+    fresh = tmp_path / "init.sqlite3"
+    users, _audit, database = SCRIPT_MODULE.open_repos(
+        fresh, require_existing=False)
+    try:
+        assert fresh.is_file()
+        assert users.list_all() == []
+    finally:
+        database.close()
 
 
 def test_password_stdin_avoids_argv(db_path, monkeypatch):

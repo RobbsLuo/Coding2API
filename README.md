@@ -98,6 +98,7 @@ python3 scripts/create_user.py alice --role admin   # 交互输入密码
 python3 scripts/create_user.py --list
 python3 scripts/create_user.py alice --delete --force   # 硬删，不可逆
 echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-stdin
+python3 scripts/create_user.py alice --role admin --init   # 库还不存在时先建库（缺 --init 会拒绝，避免误建空库）
 ```
 
 `ADMIN_USERNAMES` 与 `secrets/users.txt` 仅引导期生效（判据：库里还没有活跃 admin）；此后角色只来自 DB。
@@ -119,7 +120,7 @@ echo "$PASSWORD" | python3 scripts/create_user.py alice --role admin --password-
    - **OfficeAce**：点「登录 OfficeAce」走华为云授权（回调由云端承接）。
    - **小浣熊 / 灵犀**：无登录按钮，只能粘网页会话凭据（小浣熊 `{"access_token":"<xhx_token>"}`，灵犀整段 Cookie 或裸 `wps_sid`）。
    - **通用粘法**：「JSON 导入」接受整段 Cookie，或 DevTools → Network → 右键请求 → **Copy as cURL (bash)**（HttpOnly cookie 也能拿到）；有明确特征（`wps_sid` / `xhx_token` / TRAE 字段 / AK·SK）时自动识别渠道并记住。
-   - **OpenCode Zen / Kilo**：无需添加，启动自动出虚拟凭证（删了可在同面板补回）。
+   - **OpenCode Zen / Kilo**：无需添加，启动自动出虚拟凭证（删了可在同面板补回）；Zen 已充值时可在同面板粘贴 Console API Key 切付费档。
 2. 「API Key」建 `sk-...`（明文仅显示一次）。
 3. 调用：
 
@@ -165,6 +166,8 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 [opencode.ai/zen](https://opencode.ai) 免费模型，免登录。上游清单混付费、无免费标记 → `-free` 后缀收窄 → 逐个探活 → **只剔除确定不可用**（付费 401 / 下线 400 / 区域 403）；`429` / 5xx / 超时**保留**（判活缓存 30 分钟；免费模型 **x0**）。
 
 **免费层门禁**：上游要伪装官方客户端（UA、会话头、`stream:true`、tools 含门禁工具）→ 自动满足；注入空壳工具，真调用被过滤。门禁是移动靶，全部做成配置（改完重启即换）：`ZEN_USER_AGENT`、`ZEN_API_ROOT`、`ZEN_MODELS_ROOT`、`ZEN_GATE_TOOLS`、`ZEN_CLIENT_PROFILE`（`legacy` 默认 / `v2`）。`v2` 复刻官方 2.x 头集合（4 个 session 副本、`x-opencode-client/project`、`b3`/`traceparent`）并注入 `<env>` 块；2.x 端点拆分时配 `ZEN_API_ROOT=/inference/openai/v1` + `ZEN_MODELS_ROOT=/inference/v1`。付费模型强制 `模型@zen` 也只报不可用。
+
+**付费档（Console 充值 + API Key）**：凭证内容写 `{"api_key": "sk-…"}`（面板「Zen API Key」输入框，或批量导入同名字段）即切付费档——对话走 `/inference/openai/v1`、鉴权 `Bearer <key>`、不再注入门禁工具/`<env>`；模型清单走 `/inference/v1`，**摘掉 `-free` 与零价模型**（这两类带 Key 仍回 429，且那条 429 按账号记，会把付费凭证一起冷却）、不逐个探活。账号没开通任何付费模型时清单为空 → zen 不参与路由（管理台不再显示必撞的免费模型）。zen 是**单槽**渠道：带 Key 导入会更新既有虚拟凭证（不新增第二行），并清掉旧冷却——否则匿名行会先被调度选中、反复撞 429。Key 留空 = 保持匿名免费层。
 
 ### Kilo（`kilo`）
 
@@ -244,7 +247,7 @@ GENERIC_CHAT_MIN_INTERVAL=0               # 可选：压低 RPM
 
 - **留空 = 不启用**：`GENERIC_API_ENDPOINT` 为空的部署里没有这条渠道（`/v1/models`、凭证页、ToS 提示都不出现）。
 - **凭证**：`{"api_key": "sk-…"}`（也接受裸 key / `token` / `accessToken`），进加密池，可多把轮换。
-- **端点校验**：`GENERIC_ALLOWED_ENDPOINTS` 非空只放行名单内；留空放行任意 `http(s)`（接内网自建就是用途），但仍拒 `file://` 等非 HTTP scheme。
+- **端点校验**：`GENERIC_ALLOWED_ENDPOINTS` 非空只放行名单内；留空放行任意 **https** 端点。`http://` 仅允许回环（`localhost` / `127.0.0.1` / `::1`）——凭证是真实 API key，明文 http 打内网等于把 key 交给同网段任何人。内网自建请配 https（自签可走反代）或只监听回环 + 隧道。任何情况下都拒 `file://` 等非 HTTP scheme。
 - **错误分类与 Zen / Kilo 相反**：那两家无凭证，401 只是「要付费 key」→ 跳过渠道；这里 **401/403 = key 废了 → 硬禁用**；402 → 余额不足，429 → 限流，5xx → 其它。
 - **能力**：聊天、模型列表。无签到 / 成长 / 活跃上报 / 刷新 / 额度查询，对应任务自动跳过。
 - **限制**：一个部署只配一条（渠道 id 固定 `generic`）；要多接几家请拆部署。
@@ -351,7 +354,7 @@ curl -X POST http://127.0.0.1:8000/v1/fetch \
 - `GET /health`：只回 `{"status":"ok"}`，**存活探针用这个**。
 - `GET /healthz`：额外给凭证池计数，`ready == 0` → 503（就绪探针 / 告警）。
 - 两端点不鉴权、接受 `HEAD`；四类计数互斥（`ready` / `cooling` / `paused` / `disabled`），合计 = `total`。**升级注意**：`/healthz` 从「恒 200」改为「ready=0 时 503」。
-- `GET /metrics`（Prometheus）：默认开、默认**不鉴权**；`METRICS_ENABLED=false`（可热更）→ 404；设 `METRICS_TOKEN` 后须带 `Authorization: Bearer <token>`。
+- `GET /metrics`（Prometheus）：默认开；`METRICS_ENABLED=false`（可热更）→ 404。`METRICS_TOKEN` **留空时只放行回环对端**（本机 `127.0.0.1` / `::1` 抓取，公网与内网其它主机一律 401）；设了 token 则要求 `Authorization: Bearer <token>`。公网入口（Caddy / nginx 模板）另已摘掉该路径。
 
 | 指标 | 类型 | 标签 | 数据源 |
 |---|---|---|---|
@@ -371,7 +374,7 @@ curl -X POST http://127.0.0.1:8000/v1/fetch \
 - **来源 IP 白名单**：逗号分隔 IP / CIDR，写入时规范化（`10.0.0.1` → `10.0.0.1/32`），名单外 → 403。默认不采信 `X-Forwarded-For`；仅 `TRUST_PROXY=true` 按 XFF 取最后一条。
 - **模型白名单**：逗号分隔模型名或 fnmatch glob（`glm-*,kimi-k3`），大小写不敏感，`模型@渠道` 后缀不参与匹配；名单外 400，`/v1/models` 也只列名单内。
 - **到期**：epoch 秒，留空 = 永不过期；到期后 401（与「Key 不存在」同文案）。
-- **配额**：六项独立，`0` / 留空 = 不限——`daily_requests` / `daily_tokens` / `daily_cost_usd` / `rpm` / `tpm`（按预估值）/ `max_concurrency`。当日类按北京时间自然日，速率 / 并发为进程内滑动窗口；超限 429 + `quota_exceeded`，`Retry-After` 指向可重试时刻；异常一律放行 + warning。
+- **配额**：六项独立，`0` / 留空 = 不限——`daily_requests` / `daily_tokens` / `daily_cost_usd` / `rpm` / `tpm`（按预估值）/ `max_concurrency`。当日类按北京时间自然日，速率 / 并发为进程内滑动窗口；超限 429 + `quota_exceeded`，`Retry-After` 指向可重试时刻；异常一律放行 + warning。**`daily_cost_usd` 是 fail closed 口径**：窗口内只要存在「有 token 但价表里查不到价」的请求，就按已达上限阻断（成本量不出来时不能假装有配额）——所以给这个限额前先确认价表覆盖你实际在用的模型。
 - **自助查询**：`GET /v1/usage?days=1|7|30` 返回自己的用量、剩余额度、当前速率占用。
 
 ### 凭证暂停与批量运维
@@ -500,7 +503,7 @@ curl -X POST http://127.0.0.1:8000/v1/fetch \
 
 ### 数据库备份与恢复
 
-**自动备份**（`BACKUP_INTERVAL_MINUTES`，默认每日）写一致性快照到 `DATA_DIR/backups/`，只留最近 `BACKUP_KEEP` 份（默认 7）。用 `VACUUM INTO`（WAL 下直接 `cp` 会丢未 checkpoint 事务），落盘即 `PRAGMA integrity_check`，不过 → 删半成品；产物 `0600`、目录 `0700`；失败只记日志。
+**自动备份**（`BACKUP_INTERVAL_MINUTES`，默认每日）写一致性快照到 `DATA_DIR/backups/`，只留最近 `BACKUP_KEEP` 份（默认 7）。用 `VACUUM INTO`（WAL 下直接 `cp` 会丢未 checkpoint 事务），落盘即 `PRAGMA integrity_check`，不过 → 删半成品；产物 `0600`、目录 `0700`；失败只记日志。**启动时立即跑一轮**（不等第一个周期）：否则每天重启的部署永远轮不到 1440 分钟的第一次执行，等于没有自动备份。
 
 ```bash
 python3 scripts/backup_db.py                 # 备份，保留 7 份
@@ -523,8 +526,8 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `APP_SECRET` | **必填** | 凭证加密密钥，≥16 字符；丢失 = 凭证全废。拒低熵与已知占位值。**换密钥后旧凭证解不开**：先用 `scripts/rotate_app_secret.py` 重加密（停机 + 备份） |
-| `ADMIN_USERNAMES` | 空 | 仅引导期（库里还没有活跃 admin）：首次启动提权 `admin` |
+| `APP_SECRET` | **必填** | 凭证加密密钥，**建议 ≥32 字符随机串**（如 `python -c "import secrets; print(secrets.token_urlsafe(32))"`）；低于 16 字符或低熵/已知占位值拒绝启动。丢失 = 凭证全废。**换密钥后旧凭证解不开**：先用 `scripts/rotate_app_secret.py` 重加密（停机 + 备份） |
+| `ADMIN_USERNAMES` | 空 | 仅引导期（库里还没有活跃 admin）：首次启动提权 `admin`。**代码默认空，但 `.env.example` 与 `docker-compose.yml` 给 `admin`**——bootstrap 要求至少一个活跃 admin，模板留空会让首次启动直接失败 |
 | `USERS_FILE` | `secrets/users.txt` | 仅引导期：老式用户文件，启动导入一次 |
 | `PUBLIC_BASE_URL` | `http://127.0.0.1:8000` | 浏览器可达地址；TRAE 登录回调用；https 下发 HSTS。不决定会话 Cookie 的 `Secure`。配回环 / `0.0.0.0` → 回调基址取当前请求 origin |
 | `DATA_DIR` | `./data` | SQLite 与运行数据目录 |
@@ -614,7 +617,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `OFFICEACE_ALLOWED_ENDPOINTS` | `https://agentarts.cn-southwest-2.myhuaweicloud.com` | 只需控制面（模型网关由上游下发） |
 | `OFFICEACE_CHAT_MIN_INTERVAL` | `0` | OfficeAce 聊天最小间隔；可热更 |
 | `GENERIC_API_ENDPOINT` | `""` | 通用 OpenAI 兼容上游；留空 = 不启用该渠道 |
-| `GENERIC_ALLOWED_ENDPOINTS` | `""` | 通用上游白名单；留空 = 放行任意 http(s) |
+| `GENERIC_ALLOWED_ENDPOINTS` | `""` | 通用上游白名单；留空 = 放行任意 **https**（`http://` 仅回环） |
 | `GENERIC_MODELS` | `""` | 上游无 `/models` 时的静态模型表（逗号分隔） |
 | `GENERIC_USER_AGENT` | `""` | 覆盖出站 UA；空 = 不发自定义 UA |
 | `GENERIC_CHAT_MIN_INTERVAL` | `0` | 通用上游聊天最小间隔；可热更 |
@@ -656,7 +659,7 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `MODEL_ALIASES` | `""` | 自定义别名；留空不启用。可热更 |
 | `MAX_INFLIGHT_PER_CREDENTIAL` | `0` | 单账号在途上限；`0` = 不限。600s TTL 兜底 |
 | `METRICS_ENABLED` | `true` | 暴露 `/metrics`。可热更 |
-| `METRICS_TOKEN` | 空 | 设置后 `/metrics` 要求 `Authorization: Bearer <token>`；空 = 公开。启动期项 |
+| `METRICS_TOKEN` | 空 | 设置后 `/metrics` 要求 `Authorization: Bearer <token>`；**空 = 只放行回环对端**（非回环 401）。启动期项 |
 | `REQUEST_LOG_ENABLED` | `true` | 请求级结构化日志（logfmt）；不写 query / 请求体 / 用户名。可热更 |
 | `FORCE_DISABLE_THINKING` | `false` | 出站剥离思考内容；只过滤响应。可热更 |
 | `REASONING_EFFORT_MAP` | `""` | 出站档位映射 `渠道=from:to;*=from:to`（渠道取 `KNOWN_PROVIDERS`）；`none` = 删键。可热更 |
@@ -685,7 +688,7 @@ python3 scripts/doctor.py --skip-upstream # 离线 / 内网：跳过上游连通
 python3 scripts/doctor.py --json          # 机读输出（CI / 部署门禁）
 ```
 
-覆盖：Python 版本与关键依赖、`APP_SECRET` 强度、`DATA_DIR` 可写与权限、`PUBLIC_BASE_URL` 与 `ALLOWED_HOSTS` 一致性、SQLite `integrity_check` + 待执行迁移、端口 `bind`、`web/dist/index.html` 引用的 js/css 是否存在、各渠道端点连通性（不带凭证）。**只读**（不迁移、不写 `runtime_settings`、不落凭证明文）；退出码 `0` = 无 FAIL（WARN 不拦），`1` = 有 FAIL；上游 `401/403` 判为通过（链路通，鉴权由服务承担）。
+覆盖：Python 版本与关键依赖、`APP_SECRET` 强度、`DATA_DIR` 可写与权限、`PUBLIC_BASE_URL` 形态（必须 `http(s)://主机`）与 `ALLOWED_HOSTS` 一致性（`HOST` 绑通配而基址仍是回环 → FAIL）、SQLite `integrity_check` + 待执行迁移、端口 `bind`、`web/dist/index.html` 引用的 js/css 是否存在、各渠道端点连通性（不带凭证）。**只读**（不迁移、不写 `runtime_settings`、不落凭证明文）；退出码 `0` = 无 FAIL（WARN 不拦），`1` = 有 FAIL；上游 `401/403` 判为通过（链路通，鉴权由服务承担）。
 
 ### 文件权限
 
@@ -710,7 +713,7 @@ python3 scripts/rotate_app_secret.py \
 # 4. .env 换新值、chmod 600 .env、重启
 ```
 
-任一条解不开就整体回滚。脚本接受 `.env` 或只含密钥的单行文件；不要把密钥写在命令行（会进 history 与 `ps`）。
+任一条解不开就整体回滚。脚本接受 `.env` 或只含密钥的单行文件；不要把密钥写在命令行（会进 history 与 `ps`）。脚本自己会取 `DATA_DIR` 的**实例锁**——服务仍在运行时直接以退出码 2 拒绝（运行中的 refresh/checkin 会用旧钥回写，导致新旧密文混存），重写完成后对库执行 `VACUUM` 清掉旧密文残留。
 
 ### 升级后必须重启后端
 

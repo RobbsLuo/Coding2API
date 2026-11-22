@@ -17,6 +17,12 @@ import type { Tone } from "../ui";
 /** 首次加载 / 订阅回放的保留行数：与缓冲上限无关，页面只看最近这些。 */
 const INITIAL_LINES = 500;
 
+/**
+ * 还拿不到后端 capacity 时的本地行数兜底（快照请求失败、老后端不返回该字段）。
+ * 与 `INITIAL_LINES` 同量级：页面只看最近这些行，长连 SSE 也不能无限增长。
+ */
+const FALLBACK_MAX_LINES = 500;
+
 /** 行里只显示时分秒（毫秒保留三位）：跨天也够定位，又不会被日期挤掉正文。 */
 export function formatLogTime(ts: number): string {
   if (!Number.isFinite(ts)) return "—";
@@ -76,15 +82,35 @@ export function LogsPage() {
   const [keyword, setKeyword] = useState("");
   const [status, setStatus] = useState<"live" | "error" | "paused">("live");
   const [capacity, setCapacity] = useState<number | null>(null);
+  // 合并函数在 SSE 回调的闭包里执行：capacity 到得比订阅晚时读 state 会拿到旧值，
+  // 故另存一份 ref，截断始终按最新容量。
+  const capacityRef = useRef<number | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
-  // 合并新行：按 seq 去重（快照与实时推送会交叠），并保持 seq 升序。
+  // 合并新行：按 seq 去重（快照与实时推送会交叠），并保持 seq 升序；
+  // 行数按当前缓冲容量截断，只保留最近的若干行（长连 SSE 不能无限增长）。
   const merge = (incoming: LogLine[]) => {
     setLines((previous) => {
       const seen = new Set(previous.map((line) => line.seq));
       const fresh = incoming.filter((line) => !seen.has(line.seq));
       if (fresh.length === 0) return previous;
-      return [...previous, ...fresh].sort((a, b) => a.seq - b.seq);
+      // 快路径：新行整体严格递增且都大于末行（实时推送的正常形态）→ 直接追加，
+      // 省掉每次全量排序；只有补拉快照 / 乱序到达才走排序。
+      let ascending = true;
+      for (let index = 0; index < fresh.length; index += 1) {
+        const floor = index === 0
+          ? (previous.length > 0 ? previous[previous.length - 1].seq : -Infinity)
+          : fresh[index - 1].seq;
+        if (fresh[index].seq <= floor) {
+          ascending = false;
+          break;
+        }
+      }
+      const merged = ascending
+        ? [...previous, ...fresh]
+        : [...previous, ...fresh].sort((a, b) => a.seq - b.seq);
+      const limit = capacityRef.current ?? FALLBACK_MAX_LINES;
+      return merged.length > limit ? merged.slice(merged.length - limit) : merged;
     });
   };
 
@@ -99,6 +125,7 @@ export function LogsPage() {
         if (cancelled) return;
         setAvailable(true);
         setCapacity(response.capacity);
+        capacityRef.current = response.capacity;
         merge(response.lines);
       })
       .catch((caught: unknown) => {

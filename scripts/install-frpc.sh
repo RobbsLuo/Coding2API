@@ -1,8 +1,17 @@
 #!/usr/bin/env bash
 # 安装 macOS launchd 服务：frpc（反向隧道客户端，把本机 8000 映射到 VPS）。
 #
-#     ./scripts/install-frpc.sh --server <VPS 公网地址> --token <与 frps 一致的 token>
+#     ./scripts/install-frpc.sh --server <VPS 公网地址> --token-stdin
+#     FRP_TOKEN=<与 frps 一致的 token> ./scripts/install-frpc.sh --server <VPS 公网地址>
+#     ./scripts/install-frpc.sh --server <VPS 公网地址> --token <token>   # 不推荐，见下
 #     ./scripts/install-frpc.sh --uninstall
+#
+# token 的三种传法（优先级从高到低）：
+#   --token-stdin   从 stdin 读一行（`read -r -s`，不回显、不进 ps / shell 历史）
+#   FRP_TOKEN 环境变量
+#   --token <值>    仅作兼容保留：argv 对所有本机用户可见（`ps -ef` / `ps auxww`），
+#                   且会落进 shell history。脚本会往 stderr 打一条弃用警告。
+#   token 只在首次安装必须给；之后重装（只改地址）沿用 secrets/frpc-token。
 #
 # 与 install-launchd.sh 同一套路：deploy/launchd/com.coding2api.frpc.plist 是
 # **模板**（绝对路径写成 __PROJECT_ROOT__、服务器地址写成 __FRP_SERVER_ADDR__），
@@ -18,6 +27,7 @@ LABEL="com.coding2api.frpc"
 TEMPLATE="$ROOT/deploy/launchd/$LABEL.plist"
 DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 TOKEN_FILE="$ROOT/secrets/frpc-token"
+LOGS_DIR="$ROOT/logs"
 DOMAIN="gui/$(id -u)"
 
 if [[ "${1:-}" == "--uninstall" ]]; then
@@ -29,13 +39,32 @@ fi
 
 SERVER=""
 TOKEN=""
+TOKEN_FROM_STDIN=0
+TOKEN_FROM_ARGV=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --server) SERVER="${2:-}"; shift 2 ;;
-        --token)  TOKEN="${2:-}";  shift 2 ;;
+        # 仅兼容保留：argv 可被同机任意用户读到
+        --token)  TOKEN="${2:-}";  TOKEN_FROM_ARGV=1; shift 2 ;;
+        --token-stdin) TOKEN_FROM_STDIN=1; shift ;;
         *) echo "未知参数: $1（用法见脚本顶部）" >&2; exit 2 ;;
     esac
 done
+
+if [[ "$TOKEN_FROM_STDIN" -eq 1 ]]; then
+    # -s 不回显；read 失败（stdin 被关）时按「没给 token」处理。
+    IFS= read -r -s TOKEN || TOKEN=""
+fi
+if [[ -z "$TOKEN" && -n "${FRP_TOKEN:-}" ]]; then
+    TOKEN="$FRP_TOKEN"
+fi
+
+# 弃用警告：只提示「这个渠道不安全」，绝不回显 token 本身。
+if [[ "$TOKEN_FROM_ARGV" -eq 1 ]]; then
+    echo "警告：--token 已弃用——token 写在 argv 里，同机任何用户都能用" >&2
+    echo "      ps -ef 读到，也会留在 shell history。改用 --token-stdin" >&2
+    echo "      （或设 FRP_TOKEN 环境变量）。本次仍会按传入值安装。" >&2
+fi
 
 if [[ ! -f "$TEMPLATE" ]]; then
     echo "找不到模板: $TEMPLATE" >&2
@@ -52,9 +81,15 @@ if [[ -n "$TOKEN" ]]; then
     (umask 077 && printf '%s' "$TOKEN" > "$TOKEN_FILE")
 fi
 if [[ ! -f "$TOKEN_FILE" ]]; then
-    echo "缺少 token 文件 $TOKEN_FILE；用 --token <值> 传入（须与 VPS 的 /etc/frp/frps-token 一致）" >&2
+    echo "缺少 token 文件 $TOKEN_FILE；用 --token-stdin 或 FRP_TOKEN 传入" >&2
+    echo "（须与 VPS 的 /etc/frp/frps-token 一致）" >&2
     exit 2
 fi
+
+# 日志目录：frpc 的 stdout/stderr 落这里（见 plist 的 StandardOutPath），
+# 含隧道连接细节与上游错误正文 → 0700，同机其它用户不可读。
+mkdir -p "$LOGS_DIR"
+chmod 700 "$LOGS_DIR"
 
 mkdir -p "$(dirname "$DEST")"
 # 用 | 作 sed 分隔符（路径 / 地址里通常没有 |）。

@@ -335,10 +335,22 @@ class StatsCollector:
         读明细表 `usage_events` 而不是小时汇总：告警窗是分钟级（默认 15 分钟），
         小时粒度要么整点才更新、要么跨小时口径错乱。明细只保留 90 天，而告警
         只看最近几十分钟，不受保留期影响。
+
+        `failed` **排除** `client_disconnect`：那是客户端自己关掉页面/连接，
+        与上游健康无关；算进去会让「用户随手关页面」触发上游错误率告警
+        （文案明确写的是「上游错误率」）。比较用 `COALESCE(error_type,'')`
+        而不是 `<>`：`<>` 对 NULL 求值为 NULL，成功行（error_type 为 NULL，
+        但 ok=1）与「失败但无 error_type」的历史行都会被漏掉。
+
+        分母仍是**全部请求**（含 client_disconnect）：告警问的是「这窗里有多少
+        比例的请求因上游失败掉」，中断请求属于被观测的总体，把它从分母剔掉
+        会让样本量凭空变小、更容易被少数上游错误顶过阈值。
         """
         row = self._db.connect().execute(
             "SELECT COUNT(*) AS requests, "
-            "COALESCE(SUM(CASE WHEN ok = 0 THEN 1 ELSE 0 END), 0) AS failed "
+            "COALESCE(SUM(CASE WHEN ok = 0 "
+            "AND COALESCE(error_type, '') <> 'client_disconnect' "
+            "THEN 1 ELSE 0 END), 0) AS failed "
             "FROM usage_events WHERE ts >= ?", (since,)).fetchone()
         return int(row["requests"] or 0), int(row["failed"] or 0)
 

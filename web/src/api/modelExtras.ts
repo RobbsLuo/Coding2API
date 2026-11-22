@@ -89,7 +89,7 @@ export interface ModelCatalogPageResponse
   availability_days: number;
 }
 
-/** 目录页的请求参数（比既有 `api.modelCatalog` 多两项筛选）。 */
+/** 目录页的请求参数（比后端基础口径多两项筛选）。 */
 export interface ModelCatalogParams {
   sort?: string;
   order?: string;
@@ -99,6 +99,23 @@ export interface ModelCatalogParams {
   availabilityDays?: number;
   limit?: number;
   offset?: number;
+}
+
+/**
+ * 读响应体：非 JSON（反向代理 HTML 错误页、网关截断）时不抛 `SyntaxError`，
+ * 否则真实的 HTTP 状态会被解析异常掩盖成「未知错误」。与 `api/client.ts`
+ * 的 `readBody` 同口径：`NOT_JSON` 标记「体不是合法 JSON」，`null` 是合法字面量。
+ */
+const NOT_JSON = Symbol("not-json");
+
+async function readBody(response: Response): Promise<unknown> {
+  const text = await response.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return NOT_JSON;
+  }
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -111,12 +128,20 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     },
     credentials: "same-origin",
   });
-  const text = await response.text();
-  const body = text ? (JSON.parse(text) as unknown) : null;
+  const body = await readBody(response);
   if (!response.ok) {
     const error = (body as { error?: { code?: string; message?: string } } | null)?.error;
     throw new ApiError(response.status, error?.code ?? "unknown",
       error?.message ?? response.statusText);
+  }
+  // 2xx 但不是 JSON：反代/网关的 HTML 错误页、被截断的响应。不能把 `null`
+  // 当成功数据返回，不然「请求挂了」会伪装成「没有数据」。
+  if (body === NOT_JSON) {
+    throw new ApiError(
+      response.status,
+      "invalid_response",
+      "服务端返回了非 JSON 响应（可能是反向代理错误页），请检查服务是否正常。",
+    );
   }
   return body as T;
 }
@@ -130,7 +155,7 @@ function query(params: Record<string, string | number | boolean | undefined>): s
   return text ? `?${text}` : "";
 }
 
-/** 模型目录（带「疑似下线」筛选）。与 `api.modelCatalog` 同一端点，仅多一个参数。 */
+/** 模型目录（带「疑似下线」筛选）：`GET /api/model-catalog` 的唯一入口。 */
 export function fetchModelCatalog(params: ModelCatalogParams = {}): Promise<ModelCatalogPageResponse> {
   return request<ModelCatalogPageResponse>(`/api/model-catalog${query({
     sort: params.sort,

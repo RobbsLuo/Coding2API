@@ -194,6 +194,10 @@ class DbUserStore:
         row = self._repo.get(username)
         return int(row["session_epoch"]) if row else None
 
+    def bump_session_epoch(self, username: str) -> None:
+        """登出：作废该用户名下所有已签发会话（用户不存在时无操作）。"""
+        self._repo.bump_session_epoch(username)
+
     def session_valid(self, username: str, epoch: int,
                       issued_at: int | None) -> bool:
         """会话是否仍有效：存在且启用 + epoch 未作废 + 不早于账号创建。

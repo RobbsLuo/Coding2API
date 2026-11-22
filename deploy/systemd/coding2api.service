@@ -23,6 +23,10 @@
 Description=Coding2API — CodeBuddy / TRAE SOLO 统一 OpenAI 兼容出口
 After=network-online.target
 Wants=network-online.target
+# 重启风暴封顶：配合下方 Restart=always。5 分钟内超过 5 次拉起就进入 failed
+# 状态停下，避免「另一实例持锁」这类可预期的 0 退出变成无限重拉。
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=exec
@@ -41,7 +45,12 @@ Environment=PORT=8000
 Environment=DATA_DIR=/opt/coding2api/data
 
 ExecStart=/opt/coding2api/.venv/bin/python -m src.main
-Restart=on-failure
+# always 而不是 on-failure：**干净退出也要被拉起**（进程不在了却没人重启，
+# 等于服务静默消失）。与 launchd 侧 KeepAlive 的取向一致。
+# 「另一实例已持锁」时应用刻意以 0 退出（src/main.py 的 AlreadyRunning 分支），
+# always 会反复重拉——由 [Unit] 的 StartLimit*（5 分钟 5 次）封顶，进入 failed
+# 状态停下等人介入，而不是每 5s 无限重试、把日志刷满。
+Restart=always
 RestartSec=5
 
 # SIGTERM 后在途请求排空窗口：必须 >= src/main.py GRACEFUL_SHUTDOWN_SECONDS(90)，
@@ -52,9 +61,24 @@ TimeoutStopSec=95
 StandardOutput=journal
 StandardError=journal
 
-# 安全加固：只需要写 data/ 与读 secrets/
+# umask 0077：日志（journald 之外的任何落盘文件）、备份、导出的凭证文件
+# 默认 022 会落成 0644，同机其它用户可读。数据目录里已有 0600/0700 的显式
+# 收紧，这里再兜一层，覆盖应用没显式设权限的新文件。
+UMask=0077
+
+# 只需要写 data/ 与读 secrets/
 NoNewPrivileges=true
 PrivateTmp=true
+# 不访问任何物理/虚拟设备节点（/dev/null、/dev/urandom 等由 systemd 按需
+# 提供，不受影响）。应用不碰摄像头、块设备、GPU。
+PrivateDevices=true
+# 只允许 TCP/UDP/Unix socket：挡掉 raw socket 与 netlink 等非常规族
+# （SSRF 到链路层、或借 AF_PACKET 嗅探同机流量）。IPv6 也要留，否则
+# 上游只有 AAAA 记录时连不上。
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+# 内存上限是保守默认：正常 RSS 约 150–400MB，大库/高并发时按需上调。
+# 超限由内核 OOM kill 进程，再由 Restart=always 拉起。
+MemoryMax=1G
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/coding2api/data

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import time
 from html import escape
 
@@ -74,15 +75,21 @@ def _pending_by_trace(pending: dict[str, tuple[float, str]],
     """按 loginTraceID 反查发起人。
 
     管理台可能同时有 LAN 直连与 https 隧道两条入口：在 A 主机登录、回调
-    落在 B 主机时浏览器**不会**带 A 的会话 Cookie。`loginTraceID` 是
-    `(machine_id + device_id)[-16:]`、只出现在发起那次登录的 auth_url 里，
-    它本身就是一次性凭证，据此仍能把回调钉死在**那一次** pending 登录上。
+    落在 B 主机时浏览器**不会**带 A 的会话 Cookie。`loginTraceID` 由
+    `sha256(进程盐 + machine_id + device_id)` 派生、只出现在发起那次登录的
+    auth_url 里，它本身就是一次性凭证，据此仍能把回调钉死在**那一次**
+    pending 登录上。
     """
     if not trace:
         return None
     for username, entry in pending.items():
         machine_id, _, device_id = entry[1].partition(":")
-        if machine_id and device_id and login_trace_id(machine_id, device_id) == trace:
+        if not machine_id or not device_id:
+            continue
+        expected = login_trace_id(machine_id, device_id)
+        # 比 bytes：`loginTraceID` 是客户端可控字符串，含非 ASCII 时
+        # `compare_digest(str, str)` 会抛 TypeError（变成 500）。
+        if hmac.compare_digest(expected.encode(), trace.encode()):
             return username, entry
     return None
 
@@ -106,7 +113,8 @@ def create_router(services: Services) -> APIRouter:
 
         因此不能用 state 匹配回调。绑定方式两条并用：
         - **loginTraceID**（主）：TRAE 原样回显 `login_trace_id`，值是
-          `(machine_id + device_id)[-16:]`，只有发起登录那次拿得到；
+          `sha256(进程随机盐 + machine_id + device_id)[:16]`，只有发起登录
+          那次拿得到，**无法由登录 URL 上的 machine/device 反推**；
         - **发起人会话**（辅）：回调是顶层浏览器导航，SameSite=Lax 会带上
           管理台的会话 Cookie，据会话用户名找到其待完成登录；Cookie 缺失
           （例如 LAN 发起、隧道回调）时退回按 loginTraceID 反查发起人。
@@ -122,8 +130,9 @@ def create_router(services: Services) -> APIRouter:
         # 还会因协议降级/Referrer-Policy 丢掉 Referer——按 Referer 判同源
         # 既拦不住真攻击（攻击者加 no-referrer 即绕过），又可能误杀真回调。
         # 改用回调自带的 `loginTraceID` 绑定：它是 start_auth 生成的
-        # `(machine_id + device_id)[-16:]`，只出现在发起登录那次的 auth_url 里，
-        # 攻击者拿不到，故能钉死到**那一次** pending 登录。
+        # `sha256(进程随机盐 + machine_id + device_id)[:16]`，只出现在发起登录
+        # 那次的 auth_url 里；machine/device 虽在 URL 上，但盐不在，攻击者
+        # 算不出 trace，故能钉死到**那一次** pending 登录。
         raw = str(request.url)
         provider = services.registry.get("trae")
         pending: dict[str, tuple[float, str]] = request.app.state.pending_callbacks
@@ -165,10 +174,12 @@ def create_router(services: Services) -> APIRouter:
                 request, "pending TRAE login expired, start a new one",
                 "这次登录已超过 10 分钟有效期，请回到管理台重新发起登录。")
         # 回调绑定：loginTraceID 必须等于本次 pending 登录的 trace id
-        # （machine/device id 在 state 里）。缺失/不符一律拒绝——这才是
-        # 「只接受发起人本人那次登录的回调」，与 Referer 无关。
+        # （machine/device id 在 state 里，salt 是进程级随机值）。缺失/不符
+        # 一律拒绝——这才是「只接受发起人本人那次登录的回调」，与 Referer 无关。
         machine_id, _, device_id = state.partition(":")
-        if request.query_params.get("loginTraceID") != login_trace_id(machine_id, device_id):
+        if not hmac.compare_digest(
+                (request.query_params.get("loginTraceID") or "").encode(),
+                login_trace_id(machine_id, device_id).encode()):
             return _failure(
                 request, "callback does not match the pending login",
                 "这次回调与发起登录的那一次不匹配，请回到管理台重新登录。")

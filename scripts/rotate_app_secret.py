@@ -20,6 +20,12 @@ history 与 `ps`。
 
 脚本是**幂等安全**的：所有行先解密再加密，全部成功才在一个事务里提交；
 任何一条解不开就整体回滚，库保持原样。
+
+**并发保护**：真正的停机判据是 `DATA_DIR/.instance.lock`（服务自己持有它）。
+取不到锁即说明服务还在跑——此时 refresh/checkin 会用旧密钥回写，库会变成
+新旧密文混存，下一次轮换逐行解密必然中止。所以先取锁，失败直接退出（码 2），
+**一行都不碰库**。轮换成功后对库执行 `VACUUM`：重加密留下的旧密文页会进
+freelist，不回收的话旧密钥密文（及其可解出的凭证）仍留在文件里。
 """
 
 from __future__ import annotations
@@ -33,6 +39,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.db.crypto import CredentialCipher  # noqa: E402
+from src.instance_lock import (  # noqa: E402
+    AlreadyRunning,
+    LockUnsupported,
+    hold_instance_lock,
+)
 
 
 def _read_secret(path: Path) -> str:
@@ -57,7 +68,13 @@ def _read_secret(path: Path) -> str:
 
 
 def rotate(db_path: Path, old_secret: str, new_secret: str) -> int:
-    """把 `credentials.data_enc` 全部用新密钥重写；返回处理行数。"""
+    """把 `credentials.data_enc` 全部用新密钥重写；返回处理行数。
+
+    重写后执行 `VACUUM`：UPDATE 只把新密文写到新页、旧页进 freelist，
+    **旧密钥密文仍可在文件里被原样读出**——轮换的意义就不完整了。VACUUM
+    必须放在事务**外**（SQLite 不允许在事务内 VACUUM），这里在 `with conn:`
+    提交之后执行。
+    """
     old = CredentialCipher(old_secret, allow_known_weak=True)
     new = CredentialCipher(new_secret)
     if old_secret == new_secret:
@@ -89,9 +106,19 @@ def rotate(db_path: Path, old_secret: str, new_secret: str) -> int:
             for ciphertext, credential_id in prepared:
                 conn.execute("UPDATE credentials SET data_enc = ? WHERE id = ?",
                              (ciphertext, credential_id))
+        _vacuum(conn)
         return len(prepared)
     finally:
         conn.close()
+
+
+def _vacuum(conn: sqlite3.Connection) -> None:
+    """回收 freelist：UPDATE 留下的旧密文页不重写就还留在库里。
+
+    必须在事务**外**执行（SQLite 不允许在事务内 VACUUM），调用点已确保
+    `with conn:` 提交完毕。
+    """
+    conn.execute("VACUUM")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -107,9 +134,26 @@ def main(argv: list[str] | None = None) -> int:
     if not db_path.is_file():
         parser.error(f"数据库不存在: {db_path}")
     new_secret_file = Path(args.new_secret_file)
-    count = rotate(db_path,
-                   _read_secret(Path(args.old_secret_file)),
-                   _read_secret(new_secret_file))
+    old_secret = _read_secret(Path(args.old_secret_file))
+    new_secret = _read_secret(new_secret_file)
+
+    # 先取实例锁再碰库：服务在跑时轮换会让 refresh/checkin 用旧钥回写，
+    # 下次轮换逐行解密必中止（新旧密文混存）。取不到锁说明服务仍在运行，
+    # 直接退出（码 2）并且**不打开库**。
+    try:
+        lock = hold_instance_lock(db_path.parent)
+    except AlreadyRunning as error:
+        print("拒绝执行：服务仍在运行，请先停服再轮换。\n"
+              f"{error}", file=sys.stderr)
+        return 2
+    except LockUnsupported as error:
+        print(f"拒绝执行：无法取得实例锁（{error}）", file=sys.stderr)
+        return 2
+    try:
+        count = rotate(db_path, old_secret, new_secret)
+    finally:
+        lock.release()
+
     print(f"已用新密钥重新加密 {count} 条凭证。")
     # 含密钥的文件收紧到 600：只提示不执行的结果是权限长期留在 644。
     # 路径由运维传入（可能不属于本用户），失败只 warn，不吞掉已完成的轮换。

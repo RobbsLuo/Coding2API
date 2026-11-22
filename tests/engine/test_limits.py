@@ -164,3 +164,33 @@ def test_guard_blocks_per_model():
     guard = LimitGuard(limits, usage)
     assert guard.blocked(_candidate("cred_1"), "glm-5") is True
     assert guard.blocked(_candidate("cred_1"), "kimi") is False
+
+
+def test_invalidate_within_bucket_reuses_usage_aggregate():
+    """invalidate 后重读限额表，但同一 5 秒桶内的整日聚合只查一次。
+
+    热路径上的整日 GROUP BY 是请求毛刺来源：桶内复用把它从「每次 TTL 过期
+    都查」压到「每个桶最多一次」，且不改 `blocked()` 的同步签名。
+    """
+    limits = _Limits({"cred_1": CredentialLimits(credential_id="cred_1",
+                                                 daily_tokens=10)})
+    usage = _Usage({"cred_1": Usage(tokens=1)})
+    clock = {"now": 1000.0}
+    guard = LimitGuard(limits, usage, ttl=0.0, now_fn=lambda: clock["now"])
+    guard.blocked(_candidate("cred_1"), "glm-5")
+    guard.blocked(_candidate("cred_1"), "glm-5")
+    # TTL=0 → 每次都重读限额表；但用量仍在同一桶（1000//5=200）内复用
+    assert limits.calls == 2 and len(usage.sinces) == 1
+    clock["now"] += 1                      # 1001 仍在同一桶
+    guard.blocked(_candidate("cred_1"), "glm-5")
+    assert len(usage.sinces) == 1
+    clock["now"] += 5                      # 跨桶（1006//5=201）→ 重查一次
+    guard.blocked(_candidate("cred_1"), "glm-5")
+    assert len(usage.sinces) == 2
+
+
+def test_usage_bucket_seconds_is_short():
+    from src.engine.limits import USAGE_BUCKET_SECONDS
+
+    # 桶过长会让限额判定明显滞后（用量最多晚这么多秒生效）
+    assert 0 < USAGE_BUCKET_SECONDS <= 5

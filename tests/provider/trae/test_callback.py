@@ -10,6 +10,7 @@ from src.provider.trae import events as trae_events
 from src.provider.trae.callback import (
     build_login_url,
     credential_from_callback,
+    login_trace_id,
     new_machine_identity,
     parse_callback_url,
 )
@@ -44,6 +45,41 @@ def test_resolve_public_callback_url():
 def test_new_machine_identity_is_hex32():
     machine_id, device_id = new_machine_identity()
     assert len(machine_id) == 32 and len(device_id) == 32 and machine_id != device_id
+
+
+def test_login_trace_id_is_stable_for_same_salt():
+    """同一 salt 重算必得同值（回调校验靠这条一致性）。"""
+    assert login_trace_id("m" * 32, "d" * 32, "salt-a") == \
+        login_trace_id("m" * 32, "d" * 32, "salt-a")
+
+
+def test_login_trace_id_differs_per_salt():
+    """不同 salt → 不同 trace：这是修复「trace 可由 URL 推导」的核心分支。"""
+    assert login_trace_id("m" * 32, "d" * 32, "salt-a") != \
+        login_trace_id("m" * 32, "d" * 32, "salt-b")
+
+
+def test_login_trace_id_not_derivable_from_machine_and_device():
+    """machine/device 明文在登录 URL 上，但 trace 不等于它们的任何切片。"""
+    machine_id, device_id = new_machine_identity()
+    trace = login_trace_id(machine_id, device_id)
+    assert trace != (machine_id + device_id)[-16:]
+    assert trace not in machine_id and trace not in device_id
+
+
+def test_login_trace_id_uses_process_salt_by_default():
+    """不传 salt 时用进程级随机盐：值稳定，且与显式空盐不同。"""
+    first = login_trace_id("m" * 32, "d" * 32)
+    assert first == login_trace_id("m" * 32, "d" * 32)
+    assert first != login_trace_id("m" * 32, "d" * 32, "")
+
+
+def test_build_login_url_trace_matches_login_trace_id():
+    """登录 URL 里的 trace 必须与校验端同一函数、同一盐算出。"""
+    machine_id, device_id = new_machine_identity()
+    url = build_login_url("https://gw.example/authorize",
+                          machine_id=machine_id, device_id=device_id)
+    assert f"login_trace_id={login_trace_id(machine_id, device_id)}" in url
 
 def test_credential_from_callback():
     url = "http://x/authorize?refreshToken=R&userInfo=%7B%22uid%22%3A%22u%22%7D"

@@ -372,7 +372,12 @@ export function SettingsPage() {
     try {
       await api.updateSettings({ [setting.key]: null });
       setNotice(`「${setting.label}」已恢复 .env 默认值。`);
-      setDrafts({});
+      // 只丢这一项的草稿：其它 tab 里未保存的修改不能因为「恢复默认」被静默丢弃。
+      setDrafts((previous) => {
+        const next = { ...previous };
+        delete next[setting.key];
+        return next;
+      });
       await refresh();
     } catch (caught) {
       setError(errorText(caught, "恢复失败，请稍后重试。"));

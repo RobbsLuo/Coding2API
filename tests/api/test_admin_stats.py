@@ -70,26 +70,34 @@ def test_stats_requires_session(admin_client):
 def test_stats_endpoints_accept_custom_window(admin_client):
     """自定义窗口：`since` / `until` 透传到查询层（半开区间）。
 
-    用真实时刻写两条，落在不同小时桶；`until` 只留前一条，`since` 只留后一条。
+    用两个相邻整点写两条；`until` 只留前一条，`since` 只留后一条。
+    **必须用近期时间**：服务启动时 retention 会抢先跑一轮（`TaskRunner.start`），
+    90 天前的明细会在 lifespan 里被清掉，拿 1970 的 ts 写数据等于自己删自己。
     """
+    import time as _time
+
     app, client = admin_client
     collector = app.state.stats_collector
-    collector.record(username="root", provider="trae", model="m", ok=True, now=1000)
-    collector.record(username="root", provider="trae", model="m", ok=True, now=9000)
+    base = int(_time.time()) // 3600 * 3600
+    collector.record(username="root", provider="trae", model="m", ok=True,
+                     now=base - 7200)
+    collector.record(username="root", provider="trae", model="m", ok=True, now=base)
+    boundary = base - 3600
     assert client.get("/api/stats/overview",
-                      params={"until": 7200}).json()["requests"] == 1
+                      params={"until": boundary}).json()["requests"] == 1
     assert client.get("/api/stats/overview",
-                      params={"since": 7200}).json()["requests"] == 1
+                      params={"since": boundary}).json()["requests"] == 1
     assert client.get("/api/stats/by-provider",
-                      params={"until": 7200}).json()["providers"][0]["requests"] == 1
+                      params={"until": boundary}).json()["providers"][0]["requests"] == 1
     assert client.get("/api/stats/timeline",
-                      params={"until": 7200}).json()["points"][0]["trae"] == 1
+                      params={"until": boundary}).json()["points"][0]["trae"] == 1
     assert len(client.get("/api/stats/events",
-                          params={"until": 7200}).json()["events"]) == 1
+                          params={"until": boundary}).json()["events"]) == 1
     # 逐请求明细带本条速度：本用例未上报输出 → 生成窗口不可测，两列都是 None
-    row = client.get("/api/stats/events", params={"until": 7200}).json()["events"][0]
+    row = client.get("/api/stats/events", params={"until": boundary}).json()["events"][0]
     assert row["tps"] is None and row["tps_visible"] is None
-    response = client.get("/api/stats/events", params={"until": 7200, "format": "csv"})
+    response = client.get("/api/stats/events",
+                          params={"until": boundary, "format": "csv"})
     assert response.status_code == 200
     assert response.headers["x-export-row-count"] == "1"
 

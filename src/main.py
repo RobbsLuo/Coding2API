@@ -903,6 +903,9 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             # 摘掉日志缓冲处理器：否则已关闭的 app 实例仍被 root 引用，
             # 反复建 app 的测试里每条日志会写进多个死实例。
             detach_root_handler(log_buffer)
+            # 日志落库队列排空后再关库：消费者线程持自己的连接，先关库会让
+            # 最后几批日志写不进去（排障最需要的恰恰是崩溃/停机前的几条）。
+            log_repo.close()
             db.close()
 
     app = FastAPI(title="Coding2API", version=app_version(), lifespan=lifespan,

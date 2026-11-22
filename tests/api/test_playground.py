@@ -106,6 +106,28 @@ def test_v1_models_and_playground_models_are_consistent(tmp_path):
     assert v1 == playground
 
 
+def test_playground_models_filters_by_user_allowlist(tmp_path):
+    """列表侧按当前用户的白名单过滤（会话主体是用户，不是 Key）。
+
+    缺这一步时受限用户在列表里仍能枚举全池模型——调用侧会拦，但模型名本身
+    就是信息，且前端会把不该出现的模型放进选择器。
+    """
+    app = _policy_app(tmp_path, models="glm-5.3")
+    with TestClient(app) as client:
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+        body = client.get("/api/playground/models").json()
+    assert [m["id"] for m in body["data"]] == ["glm-5.3"]
+
+
+def test_playground_models_unrestricted_user_sees_all(tmp_path):
+    """不受限（白名单空串 = 不限定）用户看到全部模型。"""
+    app = _policy_app(tmp_path, models="")
+    with TestClient(app) as client:
+        client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+        body = client.get("/api/playground/models").json()
+    assert [m["id"] for m in body["data"]] == ["glm-5.3", "trae-only"]
+
+
 # ----------------------------------------------- 按人判定策略（白名单 + 配额）
 
 def _policy_app(tmp_path, *, models="", quota=None):

@@ -32,3 +32,34 @@ def test_allowed_endpoints_whitelist():
 def test_db_path_joins_data_dir():
     s = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR="/tmp/cbd")
     assert s.db_path == "/tmp/cbd/coding2api.sqlite3"
+
+
+# --------------------------------------------------------- PUBLIC_BASE_URL 形态
+
+
+@pytest.mark.parametrize("value", [
+    "http://127.0.0.1:8000",
+    "https://ai.example.com",
+    "https://ai.example.com:8443",
+    "https://ai.example.com/callback/x",
+    "http://[::1]:8000",
+])
+def test_public_base_url_accepts_legal_shapes(value):
+    s = Settings(_env_file=None, APP_SECRET=SECRET, PUBLIC_BASE_URL=value)
+    assert s.public_base_url == value
+
+
+@pytest.mark.parametrize("value", [
+    "127.0.0.1:8000",       # 缺 scheme → 回调变相对路径
+    "",                      # 空串
+    "ftp://ai.example.com",  # 非 http(s)
+    "https://",              # 无主机
+    "http:///oops",          # 有 scheme 无主机
+    "http://[::1",           # 未闭合 IPv6 → urlsplit 抛 ValueError
+])
+def test_public_base_url_rejects_illegal_shapes(value):
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError) as caught:
+        Settings(_env_file=None, APP_SECRET=SECRET, PUBLIC_BASE_URL=value)
+    assert "PUBLIC_BASE_URL" in str(caught.value)

@@ -178,10 +178,10 @@ class LingxiClient(LazyClients):
             raise UpstreamHTTPError(response.status_code,
                                     await base.read_body_bounded(response),
                                     **base.retry_hints(response.headers))
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation("non-JSON response") from error
+        # 成功路径同样有界：被控上游回超大 body 不能把整段读进内存。
+        # `public` 固定为原有文案：异常文本带上游 URL，只进日志，不回显客户端。
+        data = await base.read_json_bounded(
+            response, what=url, public="non-JSON response")
         if not isinstance(data, dict):
             raise UpstreamProtocolViolation("response is not an object")
         return data

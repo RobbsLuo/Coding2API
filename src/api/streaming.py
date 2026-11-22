@@ -86,21 +86,37 @@ async def with_keepalive(frames: AsyncIterator[bytes],
 
 async def _first_then(first: bytes, iterator: AsyncIterator[bytes],
                       ) -> AsyncIterator[bytes]:
-    yield first
-    async for frame in iterator:
-        yield frame
+    """已取到首帧：先回填，再续拉内层迭代器。
+
+    `finally` 必须显式关闭内层：消费方提前 `break` / `aclose()` 时 `async for`
+    不会关闭它，上游流的节流名额要等 GC 才归还——突发断连会把上游并发槽占满。
+    """
+    try:
+        yield first
+        async for frame in iterator:
+            yield frame
+    finally:
+        await aclose_stream(iterator)
 
 
 async def _after_pending(pending: asyncio.Task[bytes],
                          iterator: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
-    """宽限期已过：先发头，再等同一个在途取帧任务（不取消、不重取）。"""
+    """宽限期已过：先发头，再等同一个在途取帧任务（不取消、不重取）。
+
+    `finally` 显式关闭内层迭代器：消费方提前 `break` / `aclose()` 时 `async
+    for` 不会关闭它，上游流的节流名额只能等 GC 归还。客户端断开时外层任务
+    被取消，取消会穿透进 `await pending`，故这里不必再手动取消在途任务。
+    """
     try:
-        first = await pending
-    except StopAsyncIteration:
-        return
-    yield first
-    async for frame in iterator:
-        yield frame
+        try:
+            first = await pending
+        except StopAsyncIteration:
+            return
+        yield first
+        async for frame in iterator:
+            yield frame
+    finally:
+        await aclose_stream(iterator)
 
 
 async def respond_with_stream_start(frames: AsyncIterator[bytes],

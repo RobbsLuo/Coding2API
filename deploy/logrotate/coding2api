@@ -11,7 +11,18 @@
 # 而不是应用自己写文件——见 src/webapp/logging.py 的说明。
 # 因此必须配合 copytruncate（进程持有 fd 时 rename 不会让它换文件）：
 #     >> /var/log/coding2api/app.log 这种重定向下，用 copytruncate 最稳。
-
+#
+# 权限：日志含凭证 id、上游错误正文与 OAuth 调试信息，默认 umask 022 下
+# 新文件是 0644，同机任何用户可读。create 0600 让**轮转后新建**的文件只有
+# 属主可读；su 指定 logrotate 以哪个用户身份操作（root 运行时默认降到该
+# 用户做 copy/truncate，避免属主错乱）。两者与 copytruncate 共存：
+# copytruncate 负责「拷贝旧内容 + 原地截断」，create 负责截断后若文件被
+# 移除时按给定权限重建。
+#
+#   Linux 生产（systemd 用户 coding2api）：  su coding2api coding2api
+#   macOS（日志属主是登录用户，非 root）：  su <用户名> staff
+# 装到 /etc/logrotate.d/ 后 `sudo logrotate -d` 干跑校验；su 里的用户必须
+# 存在，否则 logrotate 会跳过整个规则并报 unknown user。
 /var/log/coding2api/*.log {
     daily
     rotate 7
@@ -21,4 +32,6 @@
     compress
     delaycompress
     copytruncate
+    create 0600 coding2api coding2api
+    su coding2api coding2api
 }

@@ -22,7 +22,7 @@ from ..audit.actions import (
     ACTION_USER_PASSWORD_CHANGE,
 )
 from ..auth.rbac import ROLE_ADMIN, ROLE_OPERATOR, UnauthorizedError, require_admin
-from ..auth.session import create_session_token
+from ..auth.session import create_session_token, verify_session_token
 from ..auth.users import create_password_hash, verify_password
 from ..compat.openai.request import InvalidRequest
 from ..config import Settings
@@ -201,16 +201,19 @@ def create_router(services: Services) -> APIRouter:
         password = str(payload.get("password") or "")
         ip = request_ip(request, services.settings)
         throttle = services.login_throttle
+        # 带 XFF 说明前面有反代：此时回环 peer 代表不了真实来源，IP 窗口
+        # 必须正常计数（回环豁免只针对本机直连）。
+        forwarded = bool(request.headers.get("x-forwarded-for"))
         # 哈希前先卡全局/IP 窗口：PBKDF2（600k 迭代）是 CPU 密集操作，
         # 不限流的话无效尝试就能占满线程池（DoS）。
         # 用户名窗口故意放到验证之后：它可能被他人输错用户名抬高，
         # 提前拦截会误伤合法用户。
-        throttle.check_transport_windows(ip=ip)
+        throttle.check_transport_windows(ip=ip, forwarded=forwarded)
         # PBKDF2 是 CPU 密集同步操作：线程池 + 信号量限并发，防事件循环卡死。
         verified = await throttle.verify(services.users.verify, username, password)
         if not verified:
             # 超限时抛 429 且不再计数；未超限则记一次失败并回 401
-            throttle.check(ip=ip, username=username)
+            throttle.check(ip=ip, username=username, forwarded=forwarded)
             throttle.record_failure(ip=ip, username=username)
             _record_login(services, username=username, ok=False, ip=ip)
             raise UnauthorizedError("invalid credentials")
@@ -228,10 +231,25 @@ def create_router(services: Services) -> APIRouter:
         return response
 
     @router.post("/api/auth/logout")
-    async def logout(_csrf: None = Depends(csrf_protected)):
+    async def logout(request: Request, _csrf: None = Depends(csrf_protected)):
         # 不校验 CSRF 时，任何跨站页面都能强制登出（拒绝服务式骚扰）。
+        #
+        # 不要求会话有效（会话已过期时登出也必须成功）：这里只**尽力**解析
+        # 用户名。解析出来且用户仍存在时必须 bump epoch——Cookie 是无状态
+        # HMAC，只删浏览器那份的话，被复制的 Cookie 还能全效用到 12h 后。
+        token = request.cookies.get(SESSION_COOKIE, "")
+        verified = verify_session_token(token, services.settings.app_secret)
+        if verified is not None:
+            username = verified[0]
+            if services.users.is_active(username):
+                services.users.bump_session_epoch(username)
         response = JSONResponse({"ok": True})
-        response.delete_cookie(SESSION_COOKIE, path="/")
+        # 删除 Cookie 的属性必须与 `issue_session` 完全一致：https 入口下若
+        # 发出一条同名非 Secure 过期 Cookie，浏览器会把它当作另一条记录留着
+        # （cookie tossing），登出看起来没生效。
+        response.delete_cookie(SESSION_COOKIE, httponly=True, samesite="lax",
+                               secure=session_cookie_secure(request, services.settings),
+                               path="/")
         return response
 
     @router.get("/api/auth/session")

@@ -565,20 +565,32 @@ export function StatsPage() {
     }
   };
 
+  // viewer 看不到用户/凭证 tab：状态残留时回落到渠道维度（与下面 `group` 解析同口径），
+  // 否则 enabled 会判给一个根本不渲染的维度，分组表永远是空表。
+  const effectiveGroupDimension = session.is_operator
+    || GROUP_DIMENSIONS.some(
+      (item) => !item.operatorOnly && item.value === groupDimension)
+    ? groupDimension
+    : "provider";
   const overview = useStatsOverview(session.username, undefined, effectiveSince,
                                     effectiveUntil, rangeReady);
+  // 四个维度各是一次分组聚合（多数还要扫明细表）：只取当前 tab 那一维，
+  // 否则打开页面就并发 7–8 个重查询，而其中三个的结果根本不渲染。
+  // 例外是渠道维度：主图底部的「渠道构成」在任何 tab 下都展示，请求量指标下仍需要它
+  // （`showShare` 依赖 `byProvider`，禁用会让占比块在有数据时也不出现）。
   const byProvider = useStatsByProvider(
     session.username, undefined, effectiveSince, effectiveUntil,
-    groupSort.sort, groupSort.order, rangeReady);
+    groupSort.sort, groupSort.order,
+    rangeReady && (effectiveGroupDimension === "provider" || metric === "requests"));
   const byModel = useStatsByModel(
     session.username, undefined, effectiveSince, effectiveUntil,
-    groupSort.sort, groupSort.order, rangeReady);
+    groupSort.sort, groupSort.order, rangeReady && effectiveGroupDimension === "model");
   const byUser = useStatsByUser(
     session.username, undefined, effectiveSince, effectiveUntil,
-    groupSort.sort, groupSort.order, rangeReady);
+    groupSort.sort, groupSort.order, rangeReady && effectiveGroupDimension === "user");
   const byCredential = useStatsByCredential(
     session.username, undefined, effectiveSince, effectiveUntil,
-    groupSort.sort, groupSort.order, rangeReady);
+    groupSort.sort, groupSort.order, rangeReady && effectiveGroupDimension === "credential");
   // 渠道构成卡片：只在请求量指标下出现（份额需要「请求数」这个分母）
   const showShare = metric === "requests"
     && (byProvider.data?.providers.length ?? 0) > 0;
@@ -600,8 +612,8 @@ export function StatsPage() {
   /** 失败数减去换号救回数 = 未被救回的失败尝试数（rescued 恒 ≤ failures）。 */
   const unrescued = (row: StatsErrorRow) => row.failures - row.rescued;
 
-  // 四个维度一次性取数（各维度行结构一致），切 tab 只换渲染、不再发请求；
-  // viewer 看不到用户/凭证 tab，若状态残留则回落到渠道维度
+  // 四个维度各取一维（各维度行结构一致），切 tab 才换查询、不再为不渲染的
+  // 维度白扫一遍明细表；viewer 看不到用户/凭证 tab，若状态残留则回落到渠道维度
   const groupDimensions = GROUP_DIMENSIONS.filter(
     (item) => session.is_operator || !item.operatorOnly);
   const group = groupDimensions.find((item) => item.value === groupDimension)

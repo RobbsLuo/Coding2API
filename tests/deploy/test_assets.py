@@ -119,6 +119,25 @@ def test_compose_mounts_secrets_read_only():
     assert "./secrets:/app/secrets:ro" in text
 
 
+def test_compose_hardens_container_privileges():
+    """最小权限：丢全部 capability、禁提权、限 PID/内存、只读根文件系统。
+
+    应用以非 root（uid 1001）运行、只监听一个端口、不起子进程，不需要任何
+    capability；read_only 的前提是**所有可写点都不是根文件系统**：
+    data/ 与 secrets/ 是 bind mount，/tmp 由 tmpfs 提供。
+    """
+    text = COMPOSE.read_text(encoding="utf-8")
+    assert re.search(r"^\s+cap_drop:\s*$", text, re.M)
+    assert re.search(r"^\s+- ALL\s*$", text, re.M), "必须 cap_drop: [ALL]"
+    assert '"no-new-privileges:true"' in text
+    assert re.search(r"^\s+pids_limit: \d+", text, re.M)
+    assert re.search(r"^\s+mem_limit: \d+[gm]", text, re.M)
+    assert re.search(r"^\s+read_only: true\s*$", text, re.M)
+    # read_only 下唯一还需要可写的非挂载点就是 /tmp
+    assert re.search(r"^\s+- /tmp:rw", text, re.M), "read_only 必须给 /tmp 一个 tmpfs"
+    assert "noexec" in text and "nosuid" in text
+
+
 def test_compose_publishes_same_port_as_dockerfile():
     dockerfile_port = re.search(r"^EXPOSE (\d+)", DOCKERFILE.read_text(encoding="utf-8"),
                                 re.MULTILINE)
@@ -716,13 +735,17 @@ def test_rotate_script_rejects_unknown_flag():
     assert "未知参数" in result.stderr
 
 
-def test_systemd_restart_policy_skips_already_running_exit():
-    """systemd 只在失败时重拉：退出码 0（另一实例持锁）不该触发重启循环。
+def test_systemd_restart_policy_always_restarts_but_is_rate_limited():
+    """干净退出也要被拉起（Restart=always），但重启风暴必须被封顶。
 
-    与 launchd 的 `KeepAlive.SuccessfulExit=false` 同口径。
+    历史上 `KeepAlive=true` / 无条件重拉在「另一实例持锁」时刷了 2377 条
+    traceback（2026-09-19~10-17）。所以 always 必须配 StartLimit*：
+    超限后进入 failed 停下，而不是每 5s 无限重试。
     """
     text = SYSTEMD_UNIT.read_text(encoding="utf-8")
-    assert "Restart=on-failure" in text, "Restart=always 会把「另一实例在跑」也重拉"
+    assert "Restart=always" in text, "干净退出也应被拉起（launchd 侧 KeepAlive 同口径）"
+    assert re.search(r"^StartLimitBurst=\d+$", text, re.M), "always 必须配重启次数上限"
+    assert re.search(r"^StartLimitIntervalSec=\d+$", text, re.M)
 
 
 def test_logrotate_rule_uses_copytruncate():
@@ -1060,6 +1083,79 @@ def test_install_frpc_renders_placeholders_and_installs_agent():
     assert 'TOKEN_FILE="$ROOT/secrets/frpc-token"' in text
     assert "umask 077" in text, "token 文件必须按 600 落盘"
     assert INSTALL_FRPC.stat().st_mode & 0o111, "安装脚本必须可执行"
+    # argv 会进 ps / shell history：--token-stdin 与 FRP_TOKEN 才是推荐路径，
+    # --token 保留但必须打弃用警告。
+    assert "--token-stdin" in text
+    assert "FRP_TOKEN" in text
+    assert "已弃用" in text, "--token 必须打弃用警告（argv 泄露）"
+    assert "chmod 700" in text, "logs/ 含隧道细节与上游错误正文，必须 0700"
+
+
+def _run_install_frpc(tmp_path, args, *, stdin="", env_extra=None):
+    """在沙箱里跑 install-frpc.sh：假 launchctl/plutil + 私有 HOME。
+
+    脚本会写 secrets/ 与 logs/ 到**仓库根**（= 脚本上一级），所以这里把
+    scripts/ 与 deploy/launchd/ 复制进 tmp 沙箱再跑，绝不碰真实仓库。
+    """
+    import os
+    import shutil
+    import subprocess
+
+    sandbox = tmp_path / "repo"
+    shutil.copytree(ROOT / "scripts", sandbox / "scripts")
+    (sandbox / "deploy").mkdir()
+    shutil.copytree(ROOT / "deploy" / "launchd", sandbox / "deploy" / "launchd")
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for name in ("launchctl", "plutil"):
+        stub = fake_bin / name
+        stub.write_text("#!/bin/bash\nexit 0\n", encoding="utf-8")
+        stub.chmod(0o755)
+
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+    }
+    env.pop("FRP_TOKEN", None)
+    env.update(env_extra or {})
+    return subprocess.run(
+        ["bash", str(sandbox / "scripts" / "install-frpc.sh"), *args],
+        input=stdin, capture_output=True, text=True, env=env,
+    ), sandbox
+
+
+def test_install_frpc_reads_token_from_stdin(tmp_path):
+    """--token-stdin：token 不进 argv，落盘 600。"""
+    result, sandbox = _run_install_frpc(
+        tmp_path, ["--server", "vps.example.com", "--token-stdin"],
+        stdin="tok-from-stdin\n")
+    assert result.returncode == 0, result.stderr
+    assert "已弃用" not in result.stderr, "--token-stdin 不该触发弃用警告"
+    token_file = sandbox / "secrets" / "frpc-token"
+    assert token_file.read_text(encoding="utf-8") == "tok-from-stdin"
+    assert token_file.stat().st_mode & 0o777 == 0o600
+
+
+def test_install_frpc_reads_token_from_environment(tmp_path):
+    """FRP_TOKEN 环境变量：同样不进 argv。"""
+    result, sandbox = _run_install_frpc(
+        tmp_path, ["--server", "vps.example.com"],
+        env_extra={"FRP_TOKEN": "tok-from-env"})
+    assert result.returncode == 0, result.stderr
+    assert "已弃用" not in result.stderr
+    assert (sandbox / "secrets" / "frpc-token").read_text(encoding="utf-8") == "tok-from-env"
+
+
+def test_install_frpc_warns_on_argv_token(tmp_path):
+    """--token 仍可用，但必须警告 argv 泄露；且不把 token 回显到 stderr。"""
+    result, sandbox = _run_install_frpc(
+        tmp_path, ["--server", "vps.example.com", "--token", "argv-secret"])
+    assert result.returncode == 0, result.stderr
+    assert "已弃用" in result.stderr
+    assert "argv-secret" not in result.stderr, "警告里不得回显 token 本身"
+    assert (sandbox / "secrets" / "frpc-token").read_text(encoding="utf-8") == "argv-secret"
 
 
 # ------------------------------------------------- 公网部署（Docker + Caddy 自动 HTTPS）
@@ -1130,6 +1226,50 @@ def test_public_compose_does_not_require_acme_email_for_self_signed_mode():
 def test_public_compose_requires_public_domain():
     text = PUBLIC_COMPOSE.read_text(encoding="utf-8")
     assert "${PUBLIC_DOMAIN:?" in text, "缺 PUBLIC_DOMAIN 必须直接失败，不能静默用默认值"
+
+
+def test_public_compose_pins_trusted_proxies_to_dedicated_subnet():
+    """TRUSTED_PROXIES 必须精确到专用子网，不能写 RFC1918 全域。
+
+    写 172.16/12、10/8、192.168/16 等于「任何同网段容器」都被采信：
+    src/auth/access.py 对命中白名单的对端直接取 XFF 尾条目，于是谁加入该
+    网段就能伪造来源 IP，绕过 Key 的 allowed_ips 与登录限流桶。
+    """
+    text = PUBLIC_COMPOSE.read_text(encoding="utf-8")
+    trusted = re.search(r"^\s+TRUSTED_PROXIES: (.+)$", text, re.MULTILINE)
+    assert trusted, "覆盖文件必须显式设置 TRUSTED_PROXIES"
+    value = trusted.group(1).strip().strip('"')
+    for broad in ("172.16.0.0/12", "192.168.0.0/16", "10.0.0.0/8"):
+        assert broad not in value, f"TRUSTED_PROXIES 不得含 RFC1918 全域: {broad}"
+    assert value.endswith("/24"), f"应精确到单个 /24，实际 {value!r}"
+    # 子网必须在 networks.ipam 里钉死，否则 compose 默认网络由 Docker 随机分配
+    subnet = re.search(r"^\s+- subnet: ([\d.]+/\d+)$", text, re.MULTILINE)
+    assert subnet, "必须用 networks.backend.ipam 固定子网"
+    assert subnet.group(1) == value, f"TRUSTED_PROXIES 与 ipam 子网必须一致: {value}"
+    # 两个 service 都要接到该网络（否则拿不到该子网内的地址）
+    assert text.count("- backend") >= 2
+
+
+def test_public_compose_hardens_caddy():
+    """Caddy 以 root 起但只需绑特权端口：只补 NET_BIND_SERVICE，其余全丢。"""
+    text = PUBLIC_COMPOSE.read_text(encoding="utf-8")
+    assert re.search(r"^\s+cap_add:\s*$", text, re.M)
+    assert "NET_BIND_SERVICE" in text, "绑 80/443 需要该 capability"
+    assert re.search(r"^\s+cap_drop:\s*$", text, re.M)
+    assert '"no-new-privileges:true"' in text
+    assert re.search(r"^\s+mem_limit: \d+[gm]", text, re.M)
+
+
+def test_public_compose_pins_caddy_image_by_digest():
+    """基础镜像必须按 digest 固定（与 Dockerfile 三个 FROM 同口径）。
+
+    只写 tag 时上游重建会静默换掉运行时，构建不可复现。
+    """
+    text = PUBLIC_COMPOSE.read_text(encoding="utf-8")
+    image = re.search(r"^\s+image: (caddy:\S+)$", text, re.MULTILINE)
+    assert image, "找不到 caddy 镜像行"
+    assert re.search(r"@sha256:[0-9a-f]{64}$", image.group(1)), \
+        f"caddy 镜像必须带 digest: {image.group(1)}"
 
 
 def test_public_compose_mounts_whole_caddy_dir_and_cert_volumes():
@@ -1203,3 +1343,93 @@ def test_ci_validates_public_deploy_in_both_tls_modes():
     assert 'TLS_MODE="$mode"' in workflow
     assert "-v \"$PWD/deploy/caddy:/etc/caddy:ro\"" in workflow
     assert "TLS_MODE=internal" in workflow, "compose 覆盖文件也要按自签模式拼一遍"
+
+
+# -------------------------------------------------─ 发布 workflow（publish.yml）
+#
+# 两个曾经可被利用的口子：dispatch 输入直插 shell（有 dispatch 权限即可注入
+# 命令，本 job 带 packages:write）、checkout 不带 ref（可把所选分支 HEAD 打成
+# 任意 tag 并覆盖 :latest）。这里锁死修法，防止被「顺手简化」回去。
+
+PUBLISH_WORKFLOW = ROOT / ".github" / "workflows" / "publish.yml"
+
+
+def test_publish_workflow_does_not_interpolate_inputs_into_shell():
+    """`${{ inputs.* }}` 不得出现在 run: 脚本里（只允许经 env 传递）。"""
+    text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    assert "${{ inputs.tag }}" in text, "输入仍应经 env 注入"
+    assert not re.search(r'^\s*TAG="\$\{\{ inputs\.tag \}\}"', text, re.MULTILINE), \
+        "dispatch 输入不得直插 shell 赋值（命令注入）"
+    # env 传递 + 引号引用
+    assert re.search(r"^\s+TAG: \$\{\{ inputs\.tag \}\}$", text, re.MULTILINE)
+    assert '"$TAG"' in text
+
+def test_publish_workflow_validates_tag_format():
+    """只接受 vX.Y.Z；白名单校验顺带堵住注入与畸形镜像 tag。"""
+    text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    assert re.search(r"=~ \^v\[0-9\]\+\\\.\[0-9\]\+\\\.\[0-9\]\+\$", text), \
+        "必须用锚定的 vX.Y.Z 正则校验（不能用逐行匹配的 grep）"
+
+
+def test_publish_workflow_checks_out_the_tag_itself():
+    """checkout 必须显式 ref 到 tag，否则 dispatch 会检出所选分支的 HEAD。"""
+    text = PUBLISH_WORKFLOW.read_text(encoding="utf-8")
+    start = text.find("- uses: actions/checkout@")
+    assert start != -1, "找不到 checkout 步骤"
+    # 到下一个步骤（同缩进的 `- uses:` / `- name:`）为止
+    following = re.search(r"\n\s{6}- (?:uses|name|run):", text[start + 10:])
+    block = text[start:start + 10 + following.start()] if following else text[start:]
+    assert "ref: ${{ steps.meta.outputs.tag }}" in block, \
+        "checkout 必须检出该 tag 指向的 commit"
+
+
+def test_ci_audits_dev_dependencies_too():
+    """Dockerfile 构建阶段真的执行 devDeps（vite/esbuild），只扫 --prod 有盲区。"""
+    text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    assert "pnpm audit --prod --audit-level=high" in text, "prod 审计仍须阻断"
+    assert "pnpm audit --audit-level=critical" in text, "必须补一步全量审计"
+    # 全量审计不阻断：三次失败后告警退出 0
+    full = re.search(r"- name: 依赖漏洞（全量含 devDependencies.*?(?=\n\s+- (?:name|run|uses):|\Z)",
+                     text, re.DOTALL)
+    assert full, "找不到全量审计步骤"
+    assert "exit 0" in full.group(0), "devDeps 审计失败只告警，不全红"
+
+
+def test_logrotate_rule_sets_owner_and_mode():
+    """日志含凭证 id 与上游错误正文：轮转后新建的文件必须 0600。"""
+    text = LOGROTATE.read_text(encoding="utf-8")
+    assert re.search(r"^\s+create 0[67]00 \S+ \S+$", text, re.MULTILINE), \
+        "必须 create 0600（否则轮转后回到 0644）"
+    assert re.search(r"^\s+su \S+ \S+$", text, re.MULTILINE), "必须 su 指定轮转身份"
+    # 与 copytruncate 共存：前者负责拷贝+截断，create 负责重建
+    assert "copytruncate" in text
+
+
+def test_nginx_hardening_directives():
+    """版本号不泄露、票据关闭、显式现代套件、登录限流。"""
+    text = NGINX_CONF.read_text(encoding="utf-8")
+    assert "server_tokens off;" in text
+    assert "ssl_session_tickets off;" in text
+    assert re.search(r"^\s+ssl_ciphers [A-Z0-9:+\-]+;", text, re.MULTILINE), "必须显式 ssl_ciphers"
+    # 现代套件：只要 AEAD + PFS，不得留 CBC / RSA 密钥交换
+    ciphers = re.search(r"^\s+ssl_ciphers (\S+);", text, re.MULTILINE).group(1)
+    assert "ECDHE" in ciphers and "GCM" in ciphers
+    assert "CBC" not in ciphers and "3DES" not in ciphers and "AES128-SHA" not in ciphers
+    # 登录端点限流 + http 段 zone 的安装说明
+    assert "limit_req zone=login burst=5 nodelay;" in text
+    assert "limit_req_zone $binary_remote_addr zone=login" in text, \
+        "必须在注释里给出 http 段的 zone 声明片段"
+    # HSTS 由应用下发（src/webapp/security.py），nginx 不得重复加
+    assert "Strict-Transport-Security" not in text
+
+
+def test_systemd_unit_hardening():
+    """umask / 设备 / 地址族 / 内存上限；且不得与 ReadWritePaths 冲突。"""
+    text = SYSTEMD_UNIT.read_text(encoding="utf-8")
+    assert re.search(r"^UMask=0077$", text, re.M)
+    assert re.search(r"^PrivateDevices=true$", text, re.M)
+    assert re.search(r"^RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX$", text, re.M)
+    assert re.search(r"^MemoryMax=\d+[GM]$", text, re.M)
+    # PrivateDevices 不影响文件路径；写权限仍只有 data/
+    assert re.search(r"^ReadWritePaths=/opt/coding2api/data$", text, re.M)
+    assert re.search(r"^ReadOnlyPaths=/opt/coding2api/secrets$", text, re.M)

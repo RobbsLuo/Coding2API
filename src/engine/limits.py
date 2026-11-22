@@ -122,6 +122,17 @@ def evaluate(limits: CredentialLimits | None, usage: Usage, *,
 # `invalidate()` 立即生效，所以 TTL 只兜底「别处写库」的场景。
 SNAPSHOT_TTL_SECONDS = 15.0
 
+# 当日用量聚合的复用时间桶（秒）。`_usage(since)` 是整日 `usage_events` GROUP BY，
+# 行数上去后在事件循环上是一段可观的中断；按取整时间桶复用能把「同一桶内的重复
+# 刷新」（TTL 刚过期时的并发选号、管理台改完限额后 invalidate 触发的第一批请求）
+# 合并成一次查询，桶内命中不再查库。
+#
+# 刻意**不**改成 `asyncio.to_thread`：`blocked()` 是同步签名（选号热路径与既有
+# 调用方都按同步使用），要异步化就得改整条调用链；而引入线程池又让快照缓存
+# 变成跨线程共享，必须加锁才能避免读到半更新的 (limits, usage) 对，代价远大于
+# 一次 15 秒一次的整日聚合。因此这里只限制查询频率并如实记录代价。
+USAGE_BUCKET_SECONDS = 5
+
 
 class LimitGuard:
     """选号前的限额过滤：进程内快照（限额表 + 当日用量）缓存。
@@ -129,6 +140,11 @@ class LimitGuard:
     `limits_source.map()` 给出 `{credential_id: CredentialLimits}`，
     `usage_source(since)` 给出 `{credential_id: Usage}`。两者都可注入假实现，
     判定本身不依赖数据库。
+
+    代价（业务方需知情）：用量聚合仍是**同步**查询，跑在调用方的线程/事件循环
+    上——最坏情况每 `ttl` 秒（默认 15 秒）阻塞一次，单次耗时随 `usage_events`
+    行数线性增长。`USAGE_BUCKET_SECONDS` 只把桶内重复刷新合并掉，不能消除这次
+    阻塞；彻底消除需要异步化 `blocked()`，见上面常量处的取舍说明。
     """
 
     def __init__(self, limits_source, usage_source,
@@ -141,20 +157,40 @@ class LimitGuard:
         # (载入时刻, 限额表, 当日用量)；用量只在存在限额时才查（省一次聚合）。
         self._snapshot: tuple[float, dict[str, CredentialLimits],
                               dict[str, Usage]] | None = None
+        # (时间桶序号, 当日用量)：桶内重复刷新复用同一份聚合结果。
+        self._usage_cache: tuple[int, dict[str, Usage]] | None = None
 
     def invalidate(self) -> None:
-        """丢弃快照：管理台改完限额后调用，使下一次选号立刻用上新值。"""
+        """丢弃快照：管理台改完限额后调用，使下一次选号立刻用上新值。
+
+        只丢限额快照不动用量缓存：同一时间桶内用量本来就只差几秒，重查一次
+        整日聚合换不到有用精度（真需要立刻反映新用量时等下一个桶即可）。
+        """
         self._snapshot = None
 
     def _load(self) -> tuple[dict[str, CredentialLimits], dict[str, Usage]]:
         now = self._now()
         snapshot = self._snapshot
+        # 仅在缓存过期时才查：TTL 内连限额表也不重复读。
         if snapshot is not None and now - snapshot[0] < self._ttl:
             return snapshot[1], snapshot[2]
         limits_map = self._limits.map()
-        usage_map = self._usage(day_start(int(now))) if limits_map else {}
+        usage_map = self._usage_map(limits_map, int(now))
         self._snapshot = (now, limits_map, usage_map)
         return limits_map, usage_map
+
+    def _usage_map(self, limits_map: dict[str, CredentialLimits],
+                   now: int) -> dict[str, Usage]:
+        """取当日用量：无任何限额配置时不查；同一时间桶内复用上次结果。"""
+        if not limits_map:
+            return {}
+        bucket = now // USAGE_BUCKET_SECONDS
+        cached = self._usage_cache
+        if cached is not None and cached[0] == bucket:
+            return cached[1]
+        usage_map = self._usage(day_start(now))
+        self._usage_cache = (bucket, usage_map)
+        return usage_map
 
     def blocked(self, candidate, model: str) -> bool:
         """该候选在请求 `model` 时是否因限额应被跳过。"""

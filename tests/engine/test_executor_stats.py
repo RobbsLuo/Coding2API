@@ -81,6 +81,71 @@ async def test_stream_records_success_with_usage_and_username(repo):
     assert event["latency_ms"] is not None
     assert event["ttfb_ms"] is not None
 
+async def test_client_disconnect_records_full_usage_fields(repo):
+    """断连记账必须与成功路径同款字段（修复：额度护栏可绕过）。
+
+    `daily_credits` 护栏取 `SUM(credit)`：只记 token 会让频繁中断的客户端
+    实扣积分被系统性低估，限额形同虚设；reasoning/cached 漏记则让缓存命中率
+    与推理 token 统计偏低。
+    """
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+    usage = Usage(11, 22, 3, 5, 1.5, True)
+    executor = _exec_with_stats(
+        repo, [[Event(kind=EventKind.CONTENT, content="hi"),
+                Event(kind=EventKind.USAGE, usage=usage),
+                Event(kind=EventKind.CONTENT, content="more")]], collector)
+
+    from src.compat.openai.request import parse_chat_request
+
+    stream = executor.stream(parse_chat_request(
+        {"messages": [{"role": "user", "content": "hi"}], "stream": True}),
+        username="alice")
+    await anext(stream)          # content
+    await anext(stream)          # usage 已缓冲后的 content
+    await stream.aclose()
+
+    event = collector.events[-1]
+    assert event["ok"] is False and event["error_type"] == "client_disconnect"
+    assert event["input_tokens"] == 11 and event["output_tokens"] == 22
+    assert event["reasoning_tokens"] == 3
+    assert event["cached_tokens"] == 5
+    assert event["credit"] == 1.5
+    assert event["credit_estimated"] is True
+
+
+async def test_post_frame_failure_records_full_usage_fields(repo):
+    """已出帧后收尾（半途失败）同样补齐 credit/reasoning/cached。"""
+    credentials, _db = repo
+    credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
+    collector = RecordingCollector()
+
+    class Soft(Exception):
+        def kind(self):
+            return ErrKind.SOFT
+
+    executor = _exec_with_stats(
+        repo, [[Event(kind=EventKind.CONTENT, content="part"),
+                Event(kind=EventKind.USAGE, usage=Usage(7, 4, 2, 1, 0.75, False)),
+                Soft()]], collector, max_rotate=1)
+
+    from src.compat.openai.request import parse_chat_request
+
+    async for _ in executor.stream(parse_chat_request(
+            {"messages": [{"role": "user", "content": "hi"}], "stream": True}),
+            username="alice"):
+        pass
+
+    event = collector.events[-1]
+    assert event["ok"] is False and event["error_type"] == "rate_limit"
+    assert event["input_tokens"] == 7 and event["output_tokens"] == 4
+    assert event["reasoning_tokens"] == 2
+    assert event["cached_tokens"] == 1
+    assert event["credit"] == 0.75
+    assert event["credit_estimated"] is False
+
+
 async def test_stream_without_finish_frame_records_truncated_stream(repo):
     """上游正常关闭但没走到终态：不冷却凭证，但按 truncated_stream 留痕。
 

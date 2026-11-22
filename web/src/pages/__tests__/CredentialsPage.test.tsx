@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from "@testing-library/react";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CredentialsPage } from "../CredentialsPage";
 import {
@@ -421,6 +421,53 @@ describe("CredentialsPage", () => {
     expect(single).not.toHaveTextContent("积分账");
     expect(fetch).toHaveBeenLastCalledWith(
       expect.stringContaining("ledger=pool"), expect.anything());
+  });
+
+  it("流水抽屉连续点排序：先发后到的旧响应不得覆盖新排序", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const pending: (() => void)[] = [];
+    let creditCalls = 0;
+    mockFetch({
+      "/credit-events": () => {
+        creditCalls += 1;
+        const ts = creditCalls;
+        const respond = () => jsonResponse({ events: [
+          { id: `cre_${ts}`, credential_id: "ca", ts: now + ts, window_start: null,
+            before: null, after: 100 + ts, delta: ts, source: `s${ts}`, ledger: "credits" },
+        ] });
+        // 第 1 次是打开抽屉；第 2 次（点「变化」）挂住；第 3 次（点「说明」）立即返回
+        if (ts === 2) {
+          return new Promise<Response>((resolve) => pending.push(() => resolve(respond())));
+        }
+        return respond();
+      },
+      "/api/credentials": listBody([makeCredential({ id: "ca", provider: "codearts" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+
+    await userEvent.click(screen.getByTestId("credits-ca"));
+    await screen.findByTestId("credit-drawer-table");
+
+    const sortOf = (testId: string) =>
+      within(screen.getByTestId("credit-drawer-table")).getByTestId(testId).closest("th");
+    expect(sortOf("sort-credit-ts")).toHaveAttribute("aria-sort", "descending");
+
+    await userEvent.click(screen.getByTestId("sort-credit-delta"));
+    await userEvent.click(screen.getByTestId("sort-credit-source"));
+    await waitFor(() => expect(sortOf("sort-credit-source"))
+      .toHaveAttribute("aria-sort", "ascending"));
+
+    // 旧请求这时才回来：必须被丢弃，否则排序会退回「变化」、表格内容也跟着错
+    await act(async () => {
+      pending.forEach((resolve) => resolve());
+    });
+    expect(sortOf("sort-credit-source")).toHaveAttribute("aria-sort", "ascending");
+    expect(sortOf("sort-credit-delta")).toHaveAttribute("aria-sort", "none");
+    expect(screen.getByTestId("credit-drawer-table")).toHaveTextContent("s3");
+    expect(screen.getByTestId("credit-drawer-table")).not.toHaveTextContent("s2");
+    expect(creditCalls).toBe(3);
   });
 
   it("签到记录菜单打开审计抽屉：列出结果/领取/上游码，请求 checkin-events", async () => {

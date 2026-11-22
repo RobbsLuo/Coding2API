@@ -52,6 +52,11 @@ class KeyUsage:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float = 0.0
+    # 成本口径拆三份（B4）：`cost_usd` 只累加**已定价**的行，`cost_unknown_requests`
+    # 统计「有 token 但价表无该模型 / 拿不到输入 token」无法定价的请求数。
+    # 用它做成本配额判定：只看已知成本会把无价请求当 0 元，配额永不触发。
+    cost_known_requests: int = 0
+    cost_unknown_requests: int = 0
 
     @property
     def tokens(self) -> int:
@@ -260,7 +265,22 @@ class KeyQuotaGuard:
 
     def _check_daily(self, key_id: str, quota: KeyQuota, moment: float,
                      subject: str) -> None:
-        """当日累计配额：查一次聚合（只有配了当日类限额才查）。"""
+        """当日累计配额：查一次聚合（只有配了当日类限额才查）。
+
+        成本配额（`daily_cost_usd`）**fail closed**：窗口内只要存在无法定价的
+        请求（价表无该模型，`cost_usd` 落库为 NULL），就按「已达上限」阻断。
+
+        为什么不是「已知成本 ≥ 上限才阻断」：无价请求的真实成本未知，按 0 元
+        计入等于允许无限用量——而这正是此前配额形同虚设的原因。为什么也不是
+        「按最坏估计折算」：没有任何可靠的单价可套（模型可能贵几十倍，猜出来的
+        数字既不能对外解释也无法复现）。阻断是唯一可精确解释的选择，文案里明说
+        原因，运维补价表即可恢复放行。`daily_cost_usd` 未配置（0）时该分支完全
+        不进入，不影响其他配额与放行。
+
+        注意：未装配价表（`StatsCollector` 无 `prices`）时**所有**请求都落成
+        无价行。此时配置成本配额会全天阻断——这是刻意的 fail closed（量不出来
+        就不要声称有配额），配成本配额前必须先把价表装上。
+        """
         if not (quota.daily_requests or quota.daily_tokens or quota.daily_cost_usd):
             return
         if self._usage is None:
@@ -273,9 +293,15 @@ class KeyQuotaGuard:
         if quota.daily_tokens and usage.tokens >= quota.daily_tokens:
             raise QuotaExceeded(
                 f"{subject} quota exceeded: {quota.daily_tokens} tokens per day", retry)
-        if quota.daily_cost_usd and usage.cost_usd >= quota.daily_cost_usd:
-            raise QuotaExceeded(
-                f"{subject} quota exceeded: ${quota.daily_cost_usd:g} per day", retry)
+        if quota.daily_cost_usd:
+            if usage.cost_unknown_requests > 0:
+                raise QuotaExceeded(
+                    f"{subject} quota exceeded: ${quota.daily_cost_usd:g} per day"
+                    f"（窗口内有 {usage.cost_unknown_requests} 条无法定价的模型请求，"
+                    "成本配额无法精确判定）", retry)
+            if usage.cost_usd >= quota.daily_cost_usd:
+                raise QuotaExceeded(
+                    f"{subject} quota exceeded: ${quota.daily_cost_usd:g} per day", retry)
 
     def _prune(self, key_id: str, moment: float) -> deque[tuple[float, int]]:
         """丢弃窗口外的事件；窗口空了就把该 Key 的条目一起删掉（防无界增长）。"""

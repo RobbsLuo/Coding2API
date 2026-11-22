@@ -57,17 +57,27 @@ def ensure_model_allowed_for(chat_request: ChatRequest, allowed_models: str,
             f"model {chat_request.model!r} is not allowed for {subject}")
 
 
+# 客户端没给输出上限时的保守占位：没有它，不计上限的客户端在 TPM 判定里
+# 只按输入计费，同一分钟可无限产 token（限流等于没有）。取 1024 是「宁可少放
+# 一个请求」的估值——比绝大多数真实回复长，又不至于把正常请求全判超。
+DEFAULT_OUTPUT_TOKEN_ESTIMATE = 1024
+
+
 def estimated_tokens(chat_request: ChatRequest) -> int:
     """转发前的 token 预估：输入启发式估算 + 输出上限（TPM 判定用）。
 
     真实用量要等响应结束才知道，而 TPM 必须在转发前裁决；这里取「输入估算 +
     客户端给的最大输出」，偏保守（宁可少放一个请求，也不让同一分钟超发）。
+    客户端没给（或给的不是正整数）时按 `DEFAULT_OUTPUT_TOKEN_ESTIMATE` 计：
+    否则不带上限的客户端在 TPM 口径里只算输入，等于绕过限流。
     """
     output = 0
     for key in ("max_tokens", "max_completion_tokens"):
         value = chat_request.raw.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
+        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
             output = max(output, value)
+    if output <= 0:
+        output = DEFAULT_OUTPUT_TOKEN_ESTIMATE
     return int(estimate_messages(chat_request.messages)) + output
 
 
