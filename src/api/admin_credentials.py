@@ -262,6 +262,28 @@ async def checkin_credential_once(credentials, provider, data, credential_id: st
             "status": result.status}
 
 
+def _zen_slot_target(credentials) -> str | None:
+    """挑出 zen 的单槽目标行：**最早创建**的那条（没有则 None）。
+
+    zen 是单槽渠道，正常只有一行；一旦历史遗留/并发导入留下多行，原来的
+    `candidates(["zen"])[0]` 取的是裸 `SELECT` 的第一行——顺序不确定，且
+    多余旧行无人清理。这里按 `created_at`（并列再按 id）确定性取最早一条，
+    与 `find_login_credential` 的「统计归属挂在最早 id」口径一致。
+    """
+    rows = sorted((row for row in credentials.list_all()
+                   if row["provider"] == "zen"),
+                  key=lambda row: (row["created_at"], row["id"]))
+    if not rows:
+        return None
+    if len(rows) > 1:
+        # 多行 zen 是异常状态（单槽渠道本该只有一条）：不擅自删数据，但必须
+        # 留痕，否则「合并到了哪条、剩下几条僵尸行」事后完全无法追溯。
+        logger.warning("检测到 zen 渠道有 %d 条凭证（单槽渠道应为 1 条），"
+                       "合并到最早的一条 %s：%s",
+                       len(rows), rows[0]["id"], [row["id"] for row in rows[1:]])
+    return rows[0]["id"]
+
+
 def create_router(services: Services) -> APIRouter:
     router = APIRouter()
     credentials = services.credentials
@@ -350,8 +372,8 @@ def create_router(services: Services) -> APIRouter:
             raise InvalidRequest(str(error)) from error
         return provider_id, credential_data, tags
 
-    def register_import(provider_id: str, credential_data: dict, tags: list[str],
-                        nickname: str, principal) -> dict:
+    async def register_import(provider_id: str, credential_data: dict, tags: list[str],
+                              nickname: str, principal) -> dict:
         """落库 + 审计 + 探测入队；返回凭证 id、ToS 风险与是否就地合并。
 
         `MANUAL_MERGE_PROVIDERS`（灵犀 / 小浣熊）没有 OAuth 轨道，手工导入就是
@@ -359,6 +381,9 @@ def create_router(services: Services) -> APIRouter:
         一个账号重登一次就多一条重复凭证，旧行的会话已被新登录顶掉、只能等
         下一次 401 才被硬禁用；小浣熊还会把同一账号当两个号并发（额度/积分
         双份统计，且绕过节流器按账号算的并发上限）。
+
+        `async` 是因为 zen 单槽合并要持凭证级 `edit_lock`（与账号登录
+        `credential_login.save_login_credential` 同口径）。
         """
         merged = False
         credential_id = ""
@@ -373,6 +398,23 @@ def create_router(services: Services) -> APIRouter:
                     existing, credential_data, nickname)
                 if merged:
                     credential_id = existing
+        if not merged and provider_id == "zen" and credential_data.get("api_key"):
+            # zen 是单槽渠道（一条虚拟凭证代表整条上游）：带 Key 导入不是
+            # 「再加一条号」，而是把这条虚拟凭证从匿名档换成付费档。否则会
+            # 并存两条，调度先选匿名行 → 撞 429 → 冷却 → 才轮到 Key 行，
+            # 每次换档都白丢一次请求。
+            target_id = _zen_slot_target(credentials)
+            if target_id is not None:
+                # 与账号登录同口径：「读 → 合并 → revive」整段持凭证级编辑锁，
+                # 否则预刷新/账号切换的整份覆写会与本次合互相覆盖。
+                async with credentials.edit_lock(target_id):
+                    merged = credentials.merge_login_credential(
+                        target_id, credential_data, nickname)
+                    if merged:
+                        credential_id = target_id
+                        # 换认证方式后旧的 429/额度判定不再适用（新 Key 是另一份
+                        # 配额）：不清掉会出现「刚导入 Key 却还在冷却」，被当成没生效。
+                        credentials.revive(credential_id, force=True)
         if not merged:
             credential_id = credentials.add(provider=provider_id,
                                             credential_data=credential_data,
@@ -406,8 +448,8 @@ def create_router(services: Services) -> APIRouter:
                                 principal=Depends(principal_from_request)):
         require_operator(principal)
         provider_id, credential_data, tags = prepare_import(payload)
-        return register_import(provider_id, credential_data, tags,
-                               str(payload.get("nickname") or ""), principal)
+        return await register_import(provider_id, credential_data, tags,
+                                     str(payload.get("nickname") or ""), principal)
 
     @router.post("/api/credentials/batch-import")
     async def batch_import_credentials(payload: dict,
@@ -447,8 +489,8 @@ def create_router(services: Services) -> APIRouter:
                 skipped.append({"index": index, "reason": "duplicate"})
                 continue
             seen.add(fingerprint)
-            row = register_import(provider_id, credential_data, tags,
-                                  str(item.get("nickname") or ""), principal)
+            row = await register_import(provider_id, credential_data, tags,
+                                        str(item.get("nickname") or ""), principal)
             created.append({"index": index, **row})
         logger.info("管理员 %s 批量导入：成功 %d，跳过 %d，失败 %d",
                     principal.username, len(created), len(skipped), len(failed))

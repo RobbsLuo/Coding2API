@@ -343,6 +343,18 @@ describe("关闭对话框清除明文输入", () => {
     // 清空后输入框不会回填明文，也不会残留上次粘贴内容
     expect(screen.getByTestId("import-payload")).toHaveValue("");
   });
+
+  it("Zen Console API Key 也是明文：关闭重开后输入框为空", async () => {
+    renderPage(<Harness />);
+    await userEvent.click(screen.getByTestId("zen-api-key"));
+    await userEvent.paste("sk-zen-plaintext");
+    expect(screen.getByTestId("zen-api-key")).toHaveValue("sk-zen-plaintext");
+
+    await userEvent.click(screen.getByTestId("add-credential-close"));
+    await userEvent.click(screen.getByTestId("reopen"));
+
+    expect(screen.getByTestId("zen-api-key")).toHaveValue("");
+  });
 });
 
 describe("TRAE 授权轮询异常", () => {

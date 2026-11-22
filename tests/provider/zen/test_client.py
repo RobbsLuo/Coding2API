@@ -10,7 +10,14 @@ import pytest
 
 from src.provider.base import ErrKind, EventKind
 from src.provider.zen import events as zen_events
-from src.provider.zen.client import EP_CHAT, EP_MODELS, UpstreamHTTPError, ZenClient
+from src.provider.zen.client import (
+    EP_CHAT,
+    EP_MODELS,
+    PAID_API_ROOT,
+    PAID_MODELS_ROOT,
+    UpstreamHTTPError,
+    ZenClient,
+)
 from tests.helpers.http import chunk_payload as chunk
 from tests.helpers.http import sse_text_done as _sse
 from tests.provider.zen._support import SESSION_RE
@@ -371,6 +378,139 @@ async def test_fetch_models_errors():
     with pytest.raises(zen_events.UpstreamProtocolViolation, match="liveness probe"):
         await _client(all_dead).fetch_models()
 
+async def test_stream_chat_paid_uses_paid_root_and_bearer():
+    """带 Key：换付费根 + `Bearer <key>`，且不注入门禁工具/`<env>` 块。"""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, text=_sse(chunk({"content": "x"}, finish="stop")))
+
+    client = _client(handler, profile="v2")
+    events = [e async for e in client.stream_chat(
+        {"messages": [{"role": "user", "content": "hi"}]}, "m", "sk-zen")]
+    assert any(e.kind is EventKind.CONTENT for e in events)
+
+    assert len(seen) == 1
+    request = seen[0]
+    assert request.url.path == f"{PAID_API_ROOT}/chat/completions"
+    assert request.headers["Authorization"] == "Bearer sk-zen"
+    body = json.loads(request.content)
+    assert body["stream"] is True
+    assert "tools" not in body                       # 门禁工具是免费层专用伪装
+    assert body["messages"] == [{"role": "user", "content": "hi"}]   # 无 <env> 注入
+    await client.aclose()
+
+
+async def test_stream_chat_paid_403_is_not_retried():
+    """付费档 403 是鉴权/区域判定：不套门禁抖动重试，立刻抛。"""
+    calls: list[int] = []
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(403, text="region blocked")
+
+    client = _client(handler)
+    with pytest.raises(UpstreamHTTPError) as caught:
+        _ = [e async for e in client.stream_chat({"messages": []}, "m", "sk-zen")]
+    assert caught.value.status == 403
+    assert len(calls) == 1
+    await client.aclose()
+
+
+async def test_fetch_models_paid_lists_all_models_and_caches():
+    """带 Key：清单含付费模型、不按 -free 收窄、不探活，TTL 内复用缓存。"""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        assert request.headers["Authorization"] == "Bearer sk-zen"
+        return httpx.Response(200, json={"data": [
+            {"id": "gpt-6-luna", "name": "GPT 6 Luna"},
+            {"id": "deepseek-v4.1-flash", "name": "  "},
+            {"id": ""},
+            "junk",
+        ]})
+
+    client = _client(handler)
+    models = await client.fetch_models("sk-zen")
+    assert [m.id for m in models] == ["gpt-6-luna", "deepseek-v4.1-flash"]
+    assert models[0].name == "GPT 6 Luna"
+    assert models[1].name == "DeepSeek V4.1 Flash"      # 无 name → 从 id 派生
+    assert calls == [f"{PAID_MODELS_ROOT}/models"]      # 没有逐个探活
+
+    again = await client.fetch_models("sk-zen")
+    assert [m.id for m in again] == ["gpt-6-luna", "deepseek-v4.1-flash"]
+    assert len(calls) == 1                              # 命中付费档缓存
+    await client.aclose()
+
+
+async def test_fetch_models_paid_skips_free_and_zero_price_models():
+    """带 Key 时摘掉 `-free` 与零价模型：它们仍回 429，会把付费凭证一起冷却。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [
+            {"id": "deepseek-v4.1-flash", "cost": {"text": {"input": {"price": 0.15}}}},
+            {"id": "mimo-v2.6-flash-free", "cost": {"text": {"input": {"price": 0}}}},
+            {"id": "big-pickle", "cost": {"text": {"input": {"price": 0}}}},
+            {"id": "flat-price", "cost": {"text": {"input": 0.2}}},   # 旧结构：input 直接是数字
+            {"id": "no-cost"},                                        # 缺字段 → 保留
+        ]})
+
+    client = _client(handler)
+    models = await client.fetch_models("sk-zen")
+    assert [m.id for m in models] == ["deepseek-v4.1-flash", "flat-price", "no-cost"]
+    await client.aclose()
+
+
+async def test_fetch_models_paid_empty_when_no_access():
+    """账号没开通付费模型：返回空表（而不是抛错留旧清单）。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": [{"id": "big-pickle",
+                                                   "cost": {"text": {"input": {"price": 0}}}}]})
+
+    client = _client(handler)
+    assert await client.fetch_models("sk-zen") == []
+    await client.aclose()
+
+
+async def test_fetch_models_paid_cache_expiry_and_errors():
+    calls: list[int] = []
+
+    def ok(_request: httpx.Request) -> httpx.Response:
+        calls.append(1)
+        return httpx.Response(200, json={"data": [{"id": "m",
+                                                   "cost": {"text": {"input": {"price": 1}}}}]})
+
+    client = _client(ok, models_cache_ttl=0)
+    await client.fetch_models("k")
+    await client.fetch_models("k")
+    assert len(calls) == 2                              # TTL=0 → 每次都重拉
+    await client.aclose()
+
+    def http_error(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(502, content=b"bad gateway")
+
+    with pytest.raises(UpstreamHTTPError):
+        await _client(http_error).fetch_models("k")
+
+    def non_json(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text="not json")
+
+    with pytest.raises(zen_events.UpstreamProtocolViolation):
+        await _client(non_json).fetch_models("k")
+
+    def no_list(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"object": "list"})
+
+    with pytest.raises(zen_events.UpstreamProtocolViolation):
+        await _client(no_list).fetch_models("k")
+
+    def no_models(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": ["junk", {"id": ""}]})
+
+    assert await _client(no_models).fetch_models("k") == []   # 没有可解析条目 → 空表
+
+
 async def test_client_lazy_clients_and_aclose():
     """未注入 client 时惰性创建；aclose 释放两侧连接池。"""
     client = ZenClient()
@@ -390,3 +530,16 @@ async def test_client_host_trailing_slash_stripped():
     assert client.host == "https://opencode.ai"
     _ = [e async for e in client.stream_chat({"messages": []}, "m")]
     await client.aclose()
+
+def test_input_price_shapes():
+    """单价解析的各种畸形形状：判不了的一律 None（保留模型，不误删）。"""
+    from src.provider.zen.client import input_price
+
+    assert input_price({}) is None
+    assert input_price({"cost": "junk"}) is None
+    assert input_price({"cost": {"text": "junk"}}) is None
+    assert input_price({"cost": {"text": {"input": {"price": 1.5}}}}) == 1.5
+    assert input_price({"cost": {"text": {"input": 2}}}) == 2.0
+    assert input_price({"cost": {"text": {"input": {"price": True}}}}) is None
+    assert input_price({"cost": {"text": {"input": {"price": "1"}}}}) is None
+    assert input_price({"cost": {"text": {"input": [1]}}}) is None

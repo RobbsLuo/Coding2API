@@ -713,3 +713,148 @@ def test_schedule_probe_returns_early_when_credential_undecryptable(admin_client
     assert created.status_code == 200
     time.sleep(0.05)
     assert len(app.state.pending_probes) == before
+
+def test_zen_api_key_import_replaces_single_slot(admin_client):
+    """zen 单槽：带 Key 导入更新既有虚拟凭证（匿名 → 付费），并清掉旧冷却。
+
+    不合并的话会并存「匿名行 + Key 行」，调度先选匿名行撞 429、冷却后才轮到
+    Key 行，每轮换档都白丢一次请求。
+    """
+    from src.provider.base import Quota
+    from src.provider.zen.client import ZenProvider
+
+    app, client = admin_client
+
+    class Stub:
+        id = "zen"
+
+        def import_credential(self, raw):
+            return ZenProvider().import_credential(raw)
+
+        async def probe_quota(self, _data):
+            return Quota(probe_failed=True, probed_at=1)
+
+    app.state.executor._deps.providers["zen"] = Stub()
+    seeded = app.state.credentials.candidates(["zen"])[0].credential_id
+    app.state.credentials.cool_provider("zen", until=int(time.time()) + 3600)
+
+    imported = client.post("/api/credentials", json={
+        "provider": "zen", "credential": {"api_key": "sk-zen"},
+        "nickname": "OpenCode Zen"}).json()
+
+    assert imported["merged"] is True
+    assert imported["id"] == seeded
+    rows = [r for r in app.state.credentials.list_all() if r["provider"] == "zen"]
+    assert len(rows) == 1
+    assert app.state.credentials.credential_data(seeded) == {"api_key": "sk-zen"}
+    assert app.state.credentials.candidates(["zen"])[0].cooling_until is None
+
+
+def test_zen_anonymous_import_still_adds_when_slot_absent(admin_client):
+    """不带 Key 的导入仍走「补回虚拟凭证」老路（不触发单槽合并）。"""
+    app, client = admin_client
+    seeded = app.state.credentials.candidates(["zen"])[0].credential_id
+    assert app.state.credentials.delete(seeded)
+
+    created = client.post("/api/credentials", json={
+        "provider": "zen", "credential": {}, "nickname": "OpenCode Zen"}).json()
+    assert created["merged"] is False
+    assert len(app.state.credentials.candidates(["zen"])) == 1
+
+def test_zen_api_key_import_adds_when_slot_missing(admin_client):
+    """池里没有 zen 行时，带 Key 导入直接新增（无单槽可合并）。"""
+    app, client = admin_client
+    for candidate in app.state.credentials.candidates(["zen"]):
+        assert app.state.credentials.delete(candidate.credential_id)
+
+    created = client.post("/api/credentials", json={
+        "provider": "zen", "credential": {"api_key": "sk-zen"}}).json()
+    assert created["merged"] is False
+    assert app.state.credentials.credential_data(created["id"]) == {"api_key": "sk-zen"}
+
+
+def test_zen_api_key_import_falls_back_when_merge_fails(admin_client, monkeypatch):
+    """单槽合并失败（并发删除）→ 退回新增，不能丢导入的 Key。"""
+    app, client = admin_client
+    monkeypatch.setattr(app.state.credentials, "merge_login_credential",
+                        lambda *_args, **_kwargs: False)
+
+    created = client.post("/api/credentials", json={
+        "provider": "zen", "credential": {"api_key": "sk-zen"}}).json()
+    assert created["merged"] is False
+    assert app.state.credentials.credential_data(created["id"]) == {"api_key": "sk-zen"}
+
+
+def test_zen_import_merges_earliest_row_and_warns_on_duplicates(admin_client, caplog):
+    """多行 zen 时确定性地合并到**最早创建**的那条，并留一条 warning。
+
+    原来是 `candidates(["zen"])[0]`——裸 `SELECT` 无 `ORDER BY`，插库顺序变了
+    合并目标就变；插入顺序也故意与此相反（先建晚的），确保不是「取第一行」。
+    多余旧行不删除（不擅自删数据），但必须留痕，否则僵尸行无人知晓。
+    """
+    app, client = admin_client
+    for candidate in app.state.credentials.candidates(["zen"]):
+        assert app.state.credentials.delete(candidate.credential_id)
+    later = app.state.credentials.add(provider="zen", credential_data={"stage": "b"},
+                                      now=2_000_000)
+    earlier = app.state.credentials.add(provider="zen", credential_data={"stage": "a"},
+                                        now=1_000_000)
+
+    with caplog.at_level("WARNING", logger="src.api.admin_credentials"):
+        imported = client.post("/api/credentials", json={
+            "provider": "zen", "credential": {"api_key": "sk-zen"}}).json()
+
+    assert imported["merged"] is True
+    assert imported["id"] == earlier
+    assert app.state.credentials.credential_data(earlier) == {"api_key": "sk-zen"}
+    assert app.state.credentials.credential_data(later) == {"stage": "b"}
+    warnings = [record for record in caplog.records
+                if "zen" in record.getMessage() and record.levelname == "WARNING"]
+    assert warnings and "2 条" in warnings[0].getMessage()
+
+
+def test_zen_import_single_slot_does_not_warn(admin_client, caplog):
+    """只有一条 zen 时是正常状态：不得刷「检测到多行」的告警。"""
+    app, client = admin_client
+    assert len(app.state.credentials.candidates(["zen"])) == 1
+
+    with caplog.at_level("WARNING", logger="src.api.admin_credentials"):
+        imported = client.post("/api/credentials", json={
+            "provider": "zen", "credential": {"api_key": "sk-zen"}}).json()
+
+    assert imported["merged"] is True
+    assert not [record for record in caplog.records
+                if "检测到 zen" in record.getMessage()]
+
+
+def test_zen_import_holds_edit_lock_around_merge(admin_client, monkeypatch):
+    """「读 → 合并 → revive」持凭证级编辑锁，与账号登录同口径。
+
+    否则预刷新 / 账号切换的整份覆写会在 await 点与本次合并互相覆盖。
+    """
+    app, client = admin_client
+    credentials = app.state.credentials
+    seeded = credentials.candidates(["zen"])[0].credential_id
+    acquired: list[str] = []
+    real_edit_lock = credentials.edit_lock
+    real_merge = credentials.merge_login_credential
+
+    def tracking_lock(credential_id):
+        acquired.append(credential_id)
+        return real_edit_lock(credential_id)
+
+    def tracking_merge(credential_id, data, nickname=""):
+        locked_while_merging.append(real_edit_lock(credential_id).locked())
+        return real_merge(credential_id, data, nickname)
+
+    locked_while_merging: list[bool] = []
+    monkeypatch.setattr(credentials, "edit_lock", tracking_lock)
+    monkeypatch.setattr(credentials, "merge_login_credential", tracking_merge)
+
+    imported = client.post("/api/credentials", json={
+        "provider": "zen", "credential": {"api_key": "sk-zen"}}).json()
+
+    assert imported["merged"] is True
+    assert imported["id"] == seeded
+    assert acquired and set(acquired) == {seeded}
+    assert locked_while_merging == [True]

@@ -6,6 +6,7 @@ import httpx
 import pytest
 
 from src.provider.base import ErrKind, EventKind
+from src.provider.zen import events as zen_events
 from src.provider.zen.client import EP_MODELS, MIN_OPENCODE_VERSION, Model, ZenClient, ZenProvider
 from tests.helpers.http import chunk_payload as chunk
 from tests.helpers.http import sse_text_done as _sse
@@ -22,6 +23,52 @@ async def test_provider_probe_quota_is_unknown_not_exhausted():
 
 def test_provider_import_credential_is_empty():
     assert ZenProvider().import_credential({"anything": 1}) == {}
+
+def test_provider_import_credential_api_key_variants():
+    provider = ZenProvider()
+    assert provider.import_credential({"api_key": " sk-zen "}) == {"api_key": "sk-zen"}
+    assert provider.import_credential({"apiKey": "sk-zen"}) == {"api_key": "sk-zen"}
+    assert provider.import_credential({"token": "sk-zen"}) == {"api_key": "sk-zen"}
+    assert provider.import_credential({"access_token": "sk-zen"}) == {"api_key": "sk-zen"}
+    assert provider.import_credential("sk-zen") == {"api_key": "sk-zen"}
+    # 空 / 非字符串 / 非 dict 一律回落匿名档（凭证行只是占位）
+    assert provider.import_credential({"api_key": "   "}) == {}
+    assert provider.import_credential({"api_key": 42}) == {}
+    assert provider.import_credential([]) == {}
+
+async def test_provider_passes_api_key_to_client():
+    """带 Key 的凭证 → 清单与对话都走付费根 + Bearer。"""
+    calls: list[tuple[str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append((request.url.path, request.headers["Authorization"]))
+        if request.url.path.endswith("/models"):
+            return httpx.Response(200, json={"data": [{"id": "gpt-6-luna"}]})
+        return httpx.Response(200, text=_sse(chunk({"content": "x"}, finish="stop")))
+
+    provider = ZenProvider(client=_client(handler))
+    models = await provider.list_models({"api_key": "sk-zen"})
+    assert [m.id for m in models] == ["gpt-6-luna"]
+    _ = [e async for e in provider.stream_chat(
+        {"api_key": "sk-zen"}, {"messages": []}, "gpt-6-luna")]
+    assert calls == [("/inference/v1/models", "Bearer sk-zen"),
+                     ("/inference/openai/v1/chat/completions", "Bearer sk-zen")]
+    await provider.aclose()
+
+async def test_provider_blank_key_falls_back_to_anonymous():
+    """坏数据（None / 空白 / 非字符串）不能被发成 `Bearer None`。"""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["Authorization"])
+        return httpx.Response(200, json={"data": []})
+
+    provider = ZenProvider(client=_client(handler))
+    for data in ({"api_key": None}, {"api_key": "  "}, {"api_key": 7}, {}):
+        with pytest.raises(zen_events.UpstreamProtocolViolation):
+            await provider.list_models(data)
+    assert seen == ["Bearer public"] * 4
+    await provider.aclose()
 
 def test_provider_classify_delegates():
     assert ZenProvider().classify(429, b"") is ErrKind.SOFT
@@ -140,7 +187,7 @@ def test_zen_credential_can_be_restored_after_delete(tmp_path, monkeypatch):
     from src.main import build_app
     from tests.helpers.constants import SECRET
 
-    async def fake_fetch_models(self):
+    async def fake_fetch_models(self, api_key=""):
         return [Model(id="offline-free", name="Offline")]
 
     # TestClient 进 lifespan 会预热模型列表（真连上游），这里保持离线。

@@ -428,6 +428,32 @@ describe("渠道登录入口", () => {
     expect(screen.queryByTestId("checkin-z")).not.toBeInTheDocument();
   });
 
+  it("粘贴 Zen API Key 时按付费档导入（更新既有虚拟凭证）", async () => {
+    const spy = mockFetch({
+      "/api/credentials": listBody([makeCredential({ id: "z", provider: "zen" })]),
+    });
+    renderPage(<CredentialsPage />, ADMIN);
+    await settle();
+    await expandCredentialGroups();
+    await openAddDialog();
+
+    expect(screen.getByTestId("add-zen")).toBeDisabled();
+    await userEvent.type(screen.getByTestId("zen-api-key"), "sk-zen");
+    const button = screen.getByTestId("add-zen");
+    expect(button).not.toBeDisabled();
+    expect(button).toHaveTextContent("更新 Zen API Key");
+
+    await userEvent.click(button);
+    await waitFor(() => {
+      const posted = spy.mock.calls.find(
+        ([url, init]) =>
+          String(url).includes("/api/credentials") && init?.method === "POST",
+      );
+      expect(posted).toBeTruthy();
+      expect(String(posted?.[1]?.body)).toContain('"api_key":"sk-zen"');
+    });
+  });
+
   it("管理员可一键补回 Kilo（删除后渠道不丢）", async () => {
     const spy = mockFetch({
       "/api/credentials": listBody([makeCredential({ id: "cb", provider: "codebuddy" })]),

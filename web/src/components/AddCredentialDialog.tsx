@@ -127,6 +127,8 @@ export function AddCredentialDialog({
   const [raccoonToken, setRaccoonToken] = useState("");
   // WPS 灵犀：没有 OAuth 轨道，凭据是 WPS 账号 cookie（wps_sid），直接粘贴
   const [lingxiCookie, setLingxiCookie] = useState("");
+  // OpenCode Zen：留空 = 匿名免费层；填 Console API Key = 付费档（单槽覆盖）
+  const [zenKey, setZenKey] = useState("");
   // JSON / Cookie / cURL 导入（原 ImportPanel 逻辑）
   const [importProvider, setImportProvider] = useState<Provider>(storedImportProvider);
   // 手选渠道优先于自动识别：用户改了输入就清掉，重新按内容识别
@@ -154,6 +156,8 @@ export function AddCredentialDialog({
     setPasteUrl("");
     setRaccoonToken("");
     setLingxiCookie("");
+    // Zen Console API Key 同样是明文（付费档凭据），关闭即抹掉
+    setZenKey("");
     setRaw("");
     setNickname("");
     setImportError(null);
@@ -575,19 +579,39 @@ export function AddCredentialDialog({
             <div className="border-t border-border pt-3">
               <div className="mb-2 text-xs text-muted-foreground">
                 OpenCode Zen / Kilo 免费层无需凭证/登录，删除其虚拟凭证后点下方按钮补回
-                （永久停用请改用「暂停」）。
+                （永久停用请改用「暂停」）。Zen 若已充值，可粘贴 Console 的 API Key
+                切到付费档（走 <code>/inference/openai/v1</code>，模型清单含付费模型）。
+              </div>
+              <div className="mb-2">
+                <Field label="Zen API Key（可选，sk-…）">
+                  <Input
+                    data-testid="zen-api-key"
+                    type="password"
+                    autoComplete="off"
+                    placeholder="sk-…"
+                    value={zenKey}
+                    onChange={(event) => setZenKey(event.target.value)}
+                  />
+                </Field>
               </div>
               <div className="flex flex-wrap gap-2">
                 <Button
                   size="sm"
                   variant="default"
                   data-testid="add-zen"
-                  disabled={busy || hasZen}
+                  disabled={busy || (hasZen && zenKey.trim().length === 0)}
                   onClick={async () => {
+                    const key = zenKey.trim();
                     setBusy(true);
                     try {
-                      await api.importCredential("zen", {}, "OpenCode Zen");
-                      onImported("已添加 OpenCode Zen 免费渠道");
+                      await api.importCredential(
+                        "zen",
+                        key ? { api_key: key } : {},
+                        "OpenCode Zen",
+                      );
+                      setZenKey("");
+                      onImported(key ? "已更新 OpenCode Zen API Key（付费档）"
+                                     : "已添加 OpenCode Zen 免费渠道");
                     } catch (caught) {
                       onError(errorText(caught, "添加失败"));
                     } finally {
@@ -595,7 +619,11 @@ export function AddCredentialDialog({
                     }
                   }}
                 >
-                  {hasZen ? "OpenCode Zen 已添加" : "添加 OpenCode Zen"}
+                  {hasZen
+                    ? zenKey.trim()
+                      ? "更新 Zen API Key"
+                      : "OpenCode Zen 已添加"
+                    : "添加 OpenCode Zen"}
                 </Button>
                 <Button
                   size="sm"
