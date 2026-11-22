@@ -25,6 +25,7 @@ from src.db.migrate import apply_schema
 from src.db.repo import CredentialRepository, GrowthRepository
 from src.main import build_app
 from tests.helpers.constants import SECRET, USERS
+from tests.helpers.startup import wait_for_startup
 
 # 常量迁到 tests/helpers/constants.py；此处 re-export 以兼容既有
 # `from tests.conftest import SECRET` 调用点（新代码请直接 import helpers）。
@@ -84,6 +85,10 @@ def admin_client(tmp_path):
 
     5 个文件曾各写一份逐字节等价的实现，收敛到这里；需要替身 provider 或
     自定义 Settings 的文件仍保留自己的局部 `admin_client`（会覆盖本夹具）。
+
+    **等启动任务跑完再交出**：`start()` 的首轮 retention 会删过期行，与测试体
+    并发时会让「1970 年时间戳」的测试数据随机消失（本地绿、CI 红）。见
+    `tests/helpers/startup.py`。
     """
     settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
                         ADMIN_USERNAMES="root")
@@ -91,6 +96,7 @@ def admin_client(tmp_path):
     client = TestClient(app)
     client.cookies.set("coding2api_session", create_session_token("root", SECRET))
     with client:
+        wait_for_startup(app, client)
         yield app, client
 
 
@@ -106,6 +112,7 @@ def client(tmp_path):
     app = build_app(settings)
     with TestClient(app) as test_client:
         test_client.cookies.set("coding2api_session", create_session_token("root", SECRET))
+        wait_for_startup(app, test_client)
         yield test_client
 
 

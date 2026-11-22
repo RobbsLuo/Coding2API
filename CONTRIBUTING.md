@@ -27,6 +27,7 @@ pnpm exec tsc --noEmit && pnpm exec vitest run && pnpm build
 
 - **覆盖率 100% 是硬门槛**；禁止用 `pragma: no cover` 给「该测没测」的业务分支达标。
 - **平台差异分支必须 monkeypatch 测全**：本地 macOS 通过不代表 CI（ubuntu-latest）通过。
+- **时间/时区断言必须显式固定**：同一类的坑——本地 TZ 是 Asia/Shanghai、CI 是 UTC。断言「月初 / 今天 / 非工作时段」时用 `ZoneInfo("Asia/Shanghai")` 换算，不要用 `time.localtime()`；本地验证跑一次 `TZ=UTC uv run pytest`。
 - **改过 `src/` 必须重启后端再验**，否则「老后端 + 新前端」，新端点 404。
 - 测试不得依赖本地 `.env`，构造 `Settings` 一律显式传值。
 - **schema 只加不改**；删表要在 `_MIGRATION_DROPS` 补一条并 `SCHEMA_VERSION + 1`，附老库升级测试。

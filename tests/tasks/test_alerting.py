@@ -208,14 +208,22 @@ def test_parse_levels_dedupes_sorts_and_filters():
     assert parse_levels("  ,  ") == ()
 
 
-def test_month_start_is_local_month_boundary():
+def test_month_start_is_beijing_month_boundary():
+    """预算自然月按**北京时间**结算，与签到 / 限额护栏同一口径。
+
+    不能用 `time.localtime(start)` 断言：CI（UTC）下北京月初会落在上个月
+    最后一天的 16:00，于是本地（Asia/Shanghai）绿、CI 红。
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
     from src.tasks.alerting import month_start
 
-    start = month_start(1_790_000_000)
-    import time
-
-    tm = time.localtime(start)
-    assert (tm.tm_mday, tm.tm_hour, tm.tm_min) == (1, 0, 0)
+    moment = datetime.fromtimestamp(month_start(1_790_000_000),
+                                     ZoneInfo("Asia/Shanghai"))
+    assert (moment.day, moment.hour, moment.minute, moment.second) == (1, 0, 0, 0)
+    assert moment.month == datetime.fromtimestamp(1_790_000_000,
+                                                  ZoneInfo("Asia/Shanghai")).month
 
 
 def test_evaluate_budget_reports_highest_reached_level():

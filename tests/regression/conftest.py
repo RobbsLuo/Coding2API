@@ -13,6 +13,7 @@ from src.auth.session import create_session_token
 from src.config import Settings
 from src.main import build_app
 from tests.helpers.constants import SECRET
+from tests.helpers.startup import wait_for_startup
 
 
 @pytest.fixture()
@@ -28,4 +29,7 @@ def client(settings):
     app = build_app(settings)
     with TestClient(app) as c:
         c.cookies.set("coding2api_session", create_session_token("root", SECRET))
+        # 等 runner.start() 的首轮任务收尾：否则 retention 会与用例并发，
+        # 把「早已过期时间戳」的数据随机删掉（见 tests/helpers/startup.py）。
+        wait_for_startup(app, c)
         yield c
