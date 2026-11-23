@@ -94,7 +94,11 @@ SCHEMA_NAME = "schema.sql"
 # 36：新增 log_events（日志环形表，持久化最近 N 行）。老库由 schema.sql 的
 # CREATE TABLE IF NOT EXISTS 建表，无补列需求；`seq` 用 AUTOINCREMENT 保证
 # 跨重启单调，前端仍按它排序/去重。
-SCHEMA_VERSION = 36
+# 37：新增 credential_events 表（凭证可用性时间线：冷却开始/结束、硬禁用、
+# 人工恢复、启停的逐次审计）。新增表只需进 schema.sql（CREATE TABLE IF NOT
+# EXISTS 对老库同样生效），无需迁移动作；老库升级后表为空 =「升级前没有
+# 时间线」，管理台按「还没有记录」展示，调度/选号行为完全不变。
+SCHEMA_VERSION = 37
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (

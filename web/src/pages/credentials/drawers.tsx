@@ -6,6 +6,7 @@ import {
 } from "../../api/display";
 import type { CheckinEvent, CreditEvent } from "../../api/types";
 import type { Ledger } from "../../lib/credentialList";
+import { CredentialTimeline } from "../../components/CredentialTimeline";
 import { SortableHead } from "../../components/SortableHead";
 import {
   Button,
@@ -119,6 +120,8 @@ export function CreditDrawer({
           </TableBody>
         </Table>
       )}
+      {/* 凭证详情抽屉的可用性时间线：与额度流水同一抽屉，但数据源独立（懒加载）。 */}
+      <CredentialTimeline credentialId={credentialId} />
     </Card>
   );
 }

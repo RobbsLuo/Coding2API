@@ -871,6 +871,30 @@ def create_router(services: Services) -> APIRouter:
             raise InvalidRequest("credential not found")
         return {"events": services.checkin_events.recent(credential_id, limit=limit)}
 
+    @router.get("/api/credentials/{credential_id}/timeline")
+    async def credential_timeline(credential_id: str, since: int | None = None,
+                                  until: int | None = None, limit: int = 50,
+                                  offset: int = 0,
+                                  principal=Depends(principal_from_request)):
+        """凭证可用性时间线：冷却开始/结束、硬禁用、人工恢复、启停（倒序）。
+
+        `since` / `until` 是 epoch 秒**闭区间**（None = 不限），用于只看
+        「昨天 14:00 前后」那一段；`limit` 收敛到 [1, 200]、`offset` 供翻页。
+        `has_more` 为真表示还有更早的行（下一屏用 `offset + limit` 取）。
+
+        读的是本地落库的历史，**不触发任何上游请求**：已禁用/失效的凭证也能
+        查到它当初为什么不可用（回复体只有脱敏枚举与可读短句，不含凭证明文）。
+        """
+        require_operator(principal)
+        if services.credentials.provider_of(credential_id) is None:
+            raise InvalidRequest("credential not found")
+        effective = max(1, min(200, limit))
+        events = services.credential_events.recent(
+            credential_id, since=since, until=until, limit=effective,
+            offset=max(0, offset))
+        return {"events": events, "limit": effective,
+                "has_more": len(events) == effective}
+
     @router.get("/api/credentials/{credential_id}/export")
     async def export_credential(credential_id: str,
                                 principal=Depends(principal_from_request)):

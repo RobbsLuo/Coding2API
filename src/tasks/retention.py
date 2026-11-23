@@ -39,12 +39,16 @@ class RetentionTask:
 
     `checkin_events` 非 None 时按同一保留期清理签到审计日志：每轮签到都可能
     落一行，不回收同样无界增长。
+
+    `credential_events` 非 None 时清理凭证可用性时间线：它的保留期是**独立
+    常量**（`CREDENTIAL_EVENT_RETENTION_DAYS` = 30 天），不跟随
+    `retention_days`——时间线只解释状态迁移，比请求明细短是刻意的。
     """
 
     def __init__(self, collector: StatsCollector, *, retention_days: int = 90,
                  credentials=None, credit_events=None, audit=None,
                  alerts=None, growth_events=None, checkin_events=None,
-                 logs=None) -> None:
+                 logs=None, credential_events=None) -> None:
         self._collector = collector
         self.retention_days = retention_days
         self._credentials = credentials
@@ -56,6 +60,7 @@ class RetentionTask:
         # 日志环形表同样按保留期兜底：容量只在**写入**时裁剪，一个不再产生日志
         # 的部署会一直留着很久以前的行。
         self._logs = logs
+        self._credential_events = credential_events
 
     @staticmethod
     def rollup_since(now: int | None = None) -> int:
@@ -95,6 +100,9 @@ class RetentionTask:
             if self._checkin_events is not None else 0)
         purged_logs = (self._logs.purge(keep_days=self.retention_days, now=now)
                        if self._logs is not None else 0)
+        purged_credential_events = (
+            self._credential_events.prune(now=now)
+            if self._credential_events is not None else 0)
         return {"rolled_up": rolled, "purged": purged,
                 "expired_coolings": expired_coolings,
                 "expired_account_coolings": expired_account_coolings,
@@ -103,4 +111,5 @@ class RetentionTask:
                 "purged_alerts": purged_alerts,
                 "purged_growth_events": purged_growth,
                 "purged_checkin_events": purged_checkin_events,
-                "purged_logs": purged_logs}
+                "purged_logs": purged_logs,
+                "purged_credential_events": purged_credential_events}

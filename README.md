@@ -139,7 +139,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 2. **归一键**：剥免费档标记（`-free` / `free` 路径段）与命名空间前缀（含小浣熊 `sn-`）→ slug 化。列表按它判同模型、合并。
 3. **展示名**：可读文本（`LongCat 2.5 Preview`）；上游给就用，否则从原代号派生，品牌写法从官方。
 
-`GET /v1/models` 的 `id` 全是归一键；转发自动换回原代号，`by_provider.{渠道}.raw_id` 可见。**三种写法都能请求**；同渠道内归一键重复 → 退回原代号。条目可选带 `cost {input, output, cache_read}`（USD / 百万 token）与 `reasoning_efforts`。
+`GET /v1/models` 的 `id` 全是归一键；转发自动换回原代号，`by_provider.{渠道}.raw_id` 可见。**三种写法都能请求**；同渠道内归一键重复 → 退回原代号。条目可选带 `cost {input, output, cache_read}`（USD / 百万 token）与 `reasoning_efforts`。上下文 / 输出上限同值双发：本仓字段 `max_input_tokens` / `max_output_tokens` + OpenRouter 风格别名 `context_length` / `max_completion_tokens`（源字段缺省时不发别名）。
 
 - **自定义别名**（`MODEL_ALIASES`，可热更）：`对外名=模型@渠道;对外名2=模型`，`@渠道` 可省。列表与请求解析共用一份，条目带 `custom_alias: true`；撞名 / 目标不存在 / 渠道不持有 → 该段 ERROR 跳过。无别名链。
 - **单模型查询**（`GET /v1/models/{id}`）：三种写法 + 别名都认，大小写不敏感。找不到 / 不在 Key 白名单 → 404（`model_not_found`），不泄露池内容。两个 models 路由都接受 `x-api-key` 与 `Authorization: Bearer`。
@@ -376,6 +376,8 @@ curl -X POST http://127.0.0.1:8000/v1/fetch \
 - **到期**：epoch 秒，留空 = 永不过期；到期后 401（与「Key 不存在」同文案）。
 - **配额**：六项独立，`0` / 留空 = 不限——`daily_requests` / `daily_tokens` / `daily_cost_usd` / `rpm` / `tpm`（按预估值）/ `max_concurrency`。当日类按北京时间自然日，速率 / 并发为进程内滑动窗口；超限 429 + `quota_exceeded`，`Retry-After` 指向可重试时刻；异常一律放行 + warning。**`daily_cost_usd` 是 fail closed 口径**：窗口内只要存在「有 token 但价表里查不到价」的请求，就按已达上限阻断（成本量不出来时不能假装有配额）——所以给这个限额前先确认价表覆盖你实际在用的模型。
 - **自助查询**：`GET /v1/usage?days=1|7|30` 返回自己的用量、剩余额度、当前速率占用。
+- **编辑策略**：`PUT /api/api-keys/{id}` 改名称 / 渠道绑定 / 来源 IP 白名单 / 模型白名单 / 到期时间（明文与 id 不可改，换 Key 必须重新签发）。**未提供**的字段保持原值，传空串（`expires_at` 传 `null`）= 清空该项；改的是鉴权每次现读的列，下一个请求即生效，审计 `api_key.update` 带字段 diff（不含明文）。
+- **窗口用量**：列表 `?window=today|7d|30d`（默认 `today`），按含今天在内的最近 N 个自然日聚合每把 Key 的请求数 / token / 成本；无明细返回 0。
 
 ### 凭证暂停与批量运维
 
@@ -453,6 +455,7 @@ curl -X POST http://127.0.0.1:8000/v1/fetch \
 - **变动流水**（额度数字后下箭头）= **两次额度探测之间的净变化**，非动作归因（签到、成长、对话都改余额而上游不打日志 → 界面一律写「净变化」）。首次探测只建基线，余额没变不记，变「未知」仍记但不填变化量；留 90 天。
 - **按账本分流**：流水带 `ledger`（`pool` / `credits`）；CodeArts 与小浣熊记 `credits`，其余 `pool`。`GET /api/credentials/{id}/credit-events?ledger=`。
 - **签到记录**（「更多操作 → 签到记录」）= 签到审计日志，每轮一行（时间 / 结果 / 领取积分 / 上游业务码 / 文案 / 触发方式），保留 90 天；`GET /api/credentials/{id}/checkin-events?limit=`。这是**动作的逐次结果**，不依赖余额 diff，故「显示成功却没加积分」可直接对上游答复定位。
+- **可用性时间线**（凭证详情 →「查看时间线」）= 状态迁移历史（冷却开始 / 冷却结束 / 硬失败 / 恢复 / 启停），每行带模型（模型级冷却时）、脱敏原因、可读说明与触发请求 ID；`GET /api/credentials/{id}/timeline?since=&until=&limit=`（operator+），保留 30 天。与 `credential_model_cooldowns` 的**当前态**互补：回答「昨天 14:00 这个号为什么不可用」不必再翻服务端日志。
 - **今日签到汇总**：`GET /api/credentials` 每条附 `checkin_today`（本地审计里今天最近一条，今日无记录 `null`）。`null` = 还没有结论（任务未轮到 / 暂停 / 无签到能力），不是失败。
 
 ### 分组维度

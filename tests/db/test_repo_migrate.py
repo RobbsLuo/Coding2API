@@ -174,6 +174,31 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     assert "checkins" not in tables and "model_cache" not in tables
     # 新增表（(凭证, 模型) 冷却）也由启动时的 schema.sql 全量补建
     assert "credential_model_cooldowns" in tables
+    # 凭证可用性时间线（第 37 版新增表）：老库升级后必须建好且可写——
+    # 它是「只加表」，没有补列动作，漏了建表等于时间线静默失效。
+    assert "credential_events" in tables
+    db.connect().execute(
+        "INSERT INTO credential_events "
+        "(id, credential_id, ts, event, reason, model, detail, request_id) "
+        "VALUES ('cevt_old', 'cred_1', 10, 'cooldown_start', 'soft', 'm', '旧冷却', NULL)")
+    db.connect().commit()
+    legacy_timeline = db.connect().execute(
+        "SELECT event, reason, model FROM credential_events WHERE id = 'cevt_old'"
+    ).fetchone()
+    assert tuple(legacy_timeline) == ("cooldown_start", "soft", "m")
+    # 枚举受 CHECK 约束：拼错的 event 必须被拒（写入点都是常量，这条防手滑）
+    try:
+        db.connect().execute(
+            "INSERT INTO credential_events (id, credential_id, ts, event) "
+            "VALUES ('cevt_bad', 'cred_1', 11, 'not_a_kind')")
+    except sqlite3.IntegrityError:
+        pass
+    else:
+        raise AssertionError("非法 event 未被 CHECK 拒绝")
+    # 时间线两个索引：按 (凭证, 时间窗) 翻页 + 按 ts 保留期裁剪
+    timeline_indexes = {row[1] for row in db.connect().execute(
+        "PRAGMA index_list(credential_events)")}
+    assert {"idx_credential_events_cred_ts", "idx_credential_events_ts"} <= timeline_indexes
     # 运行时配置覆盖表同样是「只加表、不加列」，老库升级后必须存在且可写
     assert "runtime_settings" in tables
     # 凭证级限额护栏表（缺行 = 不受限）也是「只加表」，老库升级后必须建好

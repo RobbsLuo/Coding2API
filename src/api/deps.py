@@ -38,6 +38,7 @@ from ..db.repo import (
     ApiKeyRepository,
     AuditRepository,
     CheckinEventRepository,
+    CredentialEventRepository,
     CredentialRepository,
     CreditEventRepository,
     GrowthRepository,
@@ -82,6 +83,10 @@ class Services:
     credit_events: CreditEventRepository
     # 签到审计日志（checkin_events）：每轮签到落一行，/api/credentials/{id}/checkin-events 回看。
     checkin_events: CheckinEventRepository
+    # 凭证可用性时间线（credential_events）：冷却开始/结束、硬禁用、人工恢复、
+    # 启停的逐次审计，/api/credentials/{id}/timeline 回看。写入在
+    # CredentialRepository 的状态迁移函数内（同事务），本仓储只读 + 裁剪。
+    credential_events: CredentialEventRepository
     api_keys: ApiKeyRepository
     executor: Executor
     registry: dict[str, Any]

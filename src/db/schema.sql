@@ -394,3 +394,43 @@ CREATE TABLE IF NOT EXISTS log_events (
 
 -- 按 request_id 回溯一次请求的全部日志（`GET /api/logs?request_id=…`）
 CREATE INDEX IF NOT EXISTS idx_log_events_request_id ON log_events(request_id);
+
+-- 凭证可用性时间线（credential_events）：每次「可用性状态迁移」落一行。
+--
+-- 为什么单独建表：`credential_model_cooldowns` / `credentials.cooling_until`
+-- 只有**当前态**（覆盖写），回答不了「昨天 14:00 这个号为什么不可用」。
+-- 把历史塞进冷却表会被下一次迁移覆盖掉；写进 `usage_events` 又会污染用量与
+-- 成本统计（那是有请求才有行的口径，冷却到期是后台事件）。故独立成表，只增
+-- 不改，保留期由 RetentionTask（30 天）裁剪。
+--
+-- `event` 取值（写入点全部在 src/db/repo.py 的状态迁移函数内，与状态
+-- UPDATE 同事务；见 `CREDENTIAL_EVENT_KINDS`）：
+--   cooldown_start —— 账号级或 (凭证, 模型) 级冷却开始
+--   cooldown_end   —— 冷却到期回收 / 负缓存被清除
+--   hard_failure   —— 硬禁用（session 死亡 / 上游风控）
+--   revived        —— 人工恢复（force 与否写在 detail）
+--   enabled        —— 管理台用户软开关：启用
+--   disabled       —— 管理台用户软开关：停用
+--
+-- `reason` 只放**脱敏枚举**（ErrKind 值 / 'model' / 'blocked' / 'expired'），
+-- **不得写上游响应正文**：正文可能回显凭证片段。`detail` 是可读短句，同样
+-- 禁止凭证明文。`model` 仅模型级事件非空（账号级为 NULL）；`request_id`
+-- 关联触发这次迁移的请求（后台任务/无请求上下文为 NULL）。
+CREATE TABLE IF NOT EXISTS credential_events (
+    id             TEXT PRIMARY KEY,
+    credential_id  TEXT NOT NULL,
+    ts             INTEGER NOT NULL,             -- 迁移发生时刻（epoch 秒）
+    event          TEXT NOT NULL                -- 见上：六类状态迁移
+                   CHECK (event IN ('cooldown_start', 'cooldown_end', 'hard_failure',
+                                    'revived', 'enabled', 'disabled')),
+    reason         TEXT NOT NULL DEFAULT '',     -- 脱敏枚举（不是上游正文）
+    model          TEXT,                         -- 模型级冷却/负缓存时非空
+    detail         TEXT NOT NULL DEFAULT '',     -- 一行可读短句（无凭证明文）
+    request_id     TEXT                          -- 触发迁移的请求 ID（可空）
+);
+
+-- 时间线按 (凭证, 时间窗) 倒序翻页：没有它会每次全表扫。
+CREATE INDEX IF NOT EXISTS idx_credential_events_cred_ts
+    ON credential_events(credential_id, ts);
+-- 保留期裁剪按 ts 从旧到新删：单列索引让 DELETE 只碰过期段。
+CREATE INDEX IF NOT EXISTS idx_credential_events_ts ON credential_events(ts);
