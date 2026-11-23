@@ -88,3 +88,13 @@ def test_classify_status_other_statuses():
         assert raccoon_events.classify_status(status) is ErrKind.INVALID
     for status in (502, 503, 504, 500):
         assert raccoon_events.classify_status(status) is ErrKind.OTHER
+
+
+def test_body_text_lowercases_and_isolates_invalid_utf8():
+    """`body_text` = UTF-8 replace + lower：标记匹配口径与各渠道内联实现一致。"""
+    from src.provider.base import body_text
+
+    assert body_text(b'{"MESSAGE":"User Identity Could Not Be Verified"}') == \
+        '{"message":"user identity could not be verified"}'
+    assert body_text(b"bad \xff bytes") == "bad \ufffd bytes"   # 非法字节换 U+FFFD
+    assert body_text(b"") == ""

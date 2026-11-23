@@ -12,7 +12,7 @@ import ssl
 import time
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Protocol
 
 import httpx
@@ -61,7 +61,7 @@ from .reasoning import (
     map_effort,
     parse_effort_map,
 )
-from .scheduler import Candidate, Scheduler
+from .scheduler import Candidate, ErrorOutcome, Scheduler
 from .sse import SSEFrameTooLarge
 
 logger = logging.getLogger(__name__)
@@ -419,6 +419,136 @@ class ExecutorDeps:
             logger.warning("usage stats write failed: %s", error)
 
 
+@dataclass(slots=True)
+class _LocalPenalty:
+    """本请求**自己写进库**的一条惩罚（冷却 / 禁用）的本地镜像。
+
+    只承载「这次请求刚做了什么」——库里的历史状态留在快照行里，两者不混。
+    `model_cooling` 按**上游原始模型名**登记，与 `credential_model_cooldowns`
+    同键（见 `_model_scope`）：模型级冷却只对那个模型生效，换模型/回退模型
+    时不能连带排除（否则回退链会平白少一个候选）。
+    """
+
+    cooling_until: int | None = None                           # 账号级冷却截止（epoch）
+    model_cooling: dict[str, int] = field(default_factory=dict)  # 上游模型名 → 截止
+    disabled: bool = False
+
+    def with_cooling(self, until: int) -> _LocalPenalty:
+        """追加一条账号级冷却（渠道级暂停用）：账号级冷却在库里会清空模型级条目。"""
+        cooling = until if self.cooling_until is None else max(self.cooling_until, until)
+        return _LocalPenalty(cooling_until=cooling, disabled=self.disabled)
+
+
+@dataclass(slots=True)
+class _CandidateSnapshot:
+    """一次请求作用域内的候选**只读快照** + 本地排除集合（P2-17）。
+
+    为什么是「快照 + 排除集合」而不是缓存候选实体 / 缓存过期状态：
+
+    * `CredentialRepository.candidates()` 每次都要全表读 credentials 与
+      credential_model_cooldowns。一次请求在选号 → 短冷却等待 → 选号耗尽
+      归因（`_pool_hint` / `_recovery_seconds`）/ DEAD 现场复探里会重复调用
+      3–5 次，读放大全在这里。请求开始读一次就够。
+    * 轮换期间的排除是**本请求自己的判断**（谁试过了、谁被本请求写坏了），
+      用集合表达即可，不必缓存实体：缓存实体就得回答「刚写进去的冷却从哪
+      一刻算生效」，还会顺带把别的请求写的新状态冻结成陈旧值。
+    * 本地写库（`note_error` / `cool_provider`）的结论就地记进排除集合，
+      下一次重试按「快照行 + 本地惩罚」合起来算，**语义与每次重读一致**
+      ——本请求刚冷却的号不会在同一请求里被再选一次，`Retry-After` 与成因
+      拆解也仍能看见它（它还在快照里，只是被标为不可选）。
+    * 跨请求不共享：`stream` / `complete` / `pick_aux` 各取一份，别的请求
+      写的新冷却不会串进本请求；代价是本请求看不到**别人**中途写的冷却，
+      这与「同请求内自己写的必须看见」是同一取舍的两面（后者由排除集合补上）。
+    """
+
+    rows: tuple[Candidate, ...]
+    excluded: dict[str, _LocalPenalty] = field(default_factory=dict)
+
+    def all_rows(self, providers: Iterable[str] | None = None, *,
+                 selectable_only: bool = False) -> list[Candidate]:
+        """快照里**全部**候选（含本请求已排除的，供归因/等待/复探使用）。
+
+        `selectable_only` 与仓储同名参数同口径（剔除硬禁用与用户暂停）：只有
+        「不该拿去打上游」的调用方（辅助端点选号）才传，选号主路径要看全量
+        才能把成因归类（disabled / paused 各计一类）。
+        """
+        rows = (list(self.rows) if providers is None else
+                [candidate for candidate in self.rows
+                 if candidate.provider in set(providers)])
+        if not selectable_only:
+            return rows
+        return [candidate for candidate in rows if candidate.enabled and not candidate.disabled]
+
+    def penalty(self, credential_id: str) -> _LocalPenalty | None:
+        return self.excluded.get(credential_id)
+
+    def penalized(self, credential_id: str, scope: str | None, now: int) -> bool:
+        """本请求是否已把该凭证在该模型作用域上排除（本地写库的镜像）。"""
+        penalty = self.excluded.get(credential_id)
+        if penalty is None:
+            return False
+        if penalty.disabled:
+            return True
+        if penalty.cooling_until is not None and penalty.cooling_until > now:
+            return True
+        if scope:
+            until = penalty.model_cooling.get(scope)
+            if until is not None and until > now:
+                return True
+        return False
+
+    def exclude(self, credential_id: str, outcome: ErrorOutcome) -> None:
+        """把本次 `note_error` 的结论记进排除集合。
+
+        没有任何时间上/状态上的惩罚（`OTHER` 未到阈值、`SOFT` 到期即恢复的
+        零动作分支）时不登记：那类错误本请求之后就不再选它（它已在 `tried`），
+        但它对**别的**判断仍然可用（例如成因拆解不该把它算成「冷却中」）。
+        """
+        model_cooling = {model: entry.cooling_until
+                         for model, entry
+                         in (getattr(outcome, "model_cooldowns", None) or {}).items()}
+        if outcome.cooling_until is None and not outcome.disabled and not model_cooling:
+            return
+        prior = self.excluded.get(credential_id, _LocalPenalty())
+        if outcome.cooling_until is not None:
+            # 账号级冷却在库里会清空该凭证的模型级条目：本地同样丢弃。
+            merged: dict[str, int] = {}
+        else:
+            merged = {**prior.model_cooling, **model_cooling}
+        self.excluded[credential_id] = _LocalPenalty(
+            cooling_until=_later(prior.cooling_until, outcome.cooling_until),
+            model_cooling=merged,
+            disabled=prior.disabled or outcome.disabled)
+
+    def exclude_provider(self, provider: str, *, until: int) -> None:
+        """渠道级暂停：该渠道全部凭证一起进排除集合（`cool_provider` 的镜像）。"""
+        for candidate in self.rows:
+            if candidate.provider != provider:
+                continue
+            prior = self.excluded.get(candidate.credential_id, _LocalPenalty())
+            self.excluded[candidate.credential_id] = prior.with_cooling(until)
+
+    def clear(self, credential_id: str) -> None:
+        """解除本地排除：短冷却等到了，那条惩罚已过期，重新放回候选。"""
+        self.excluded.pop(credential_id, None)
+
+
+def _later(first: int | None, second: int | None) -> int | None:
+    """两个可选截止时刻取较晚者（None = 无截止）。"""
+    if first is None:
+        return second
+    if second is None:
+        return first
+    return max(first, second)
+
+
+# 当前请求作用域的候选快照。请求入口（`stream` / `complete` / `pick_aux`）
+# set、结束 reset；子协程继承同一份，故一次请求自始至终只读一次候选表。
+# 不放进 Executor 实例：实例是应用级单例，放实例上等于跨请求共享（P2-17 的另一半）。
+_candidate_scope: ContextVar[_CandidateSnapshot | None] = ContextVar(
+    "candidate_scope", default=None)
+
+
 class Executor:
     def __init__(self, deps: ExecutorDeps) -> None:
         self._deps = deps
@@ -439,6 +569,55 @@ class Executor:
         # DEAD 现场复探额度的在途/最近一次结果：{credential_id: (完成时刻, 是否耗尽)}。
         # 同号并发 401 共用一次探测（见 `DEAD_QUOTA_PROBE_TTL_SECONDS`）。
         self._dead_quota_probes: dict[str, tuple[float, bool]] = {}
+
+    # ---------------------------------------------------- 请求作用域候选快照
+
+    def _new_scope(self, model: str | None = None) -> _CandidateSnapshot:
+        """读一次候选表，得到本次请求（该模型）的只读快照。
+
+        用仓储的默认口径（不传 `selectable_only`）：禁用 / 暂停由选号阶段各道
+        闸门自己判（`_selectable` / `_no_pick_breakdown` 都要看到它们才能归类
+        成因），这里只负责「读一次」，不做过滤。
+
+        **`model` 传进仓储做账号级模型白名单收窄**（v39）：过滤放在候选生成层
+        而不是 `_selectable` 里，因为候选集是「本次请求有哪些号可选」的唯一
+        出口——在这里收窄，调度器/半开探测/限额护栏/成因拆解都只看到合规的号，
+        且**不产生状态副作用**（不硬禁用、不写冷却，换别的模型照常可用）。
+        白名单列不在 `Candidate` 上、快照又不能再查库，所以一个请求对**每个
+        尝试的模型**各读一次——同模型只读一次（普通请求就是一次；只有配置了
+        `fallback_groups` 且真的切到下一个模型时才多一次）。
+        """
+        return _CandidateSnapshot(
+            rows=tuple(self._deps.credentials.candidates(model=model)))
+
+    def _scope(self) -> _CandidateSnapshot:
+        """当前请求的快照；不在请求作用域里（自检 / 直接单测）时现取一份。
+
+        现取是为了让「无作用域」的调用仍看到最新库状态——与快照前的行为一致，
+        代价只是一次读，不影响请求路径（请求路径里恒命中已有快照）。
+        """
+        scope = _candidate_scope.get()
+        return scope if scope is not None else self._new_scope()
+
+    @staticmethod
+    def _mutable_scope() -> _CandidateSnapshot | None:
+        """当前请求的快照（只用于**就地登记**本地惩罚；无作用域时为 None）。
+
+        写惩罚的旁路（`_note_upstream_error` / 渠道级暂停 / 短冷却解禁）在
+        无作用域时没有「本请求」可记，直接跳过——临时的快照对象没人再读，
+        记上去也没意义。
+        """
+        return _candidate_scope.get()
+
+    @contextlib.contextmanager
+    def _request_scope(self, model: str | None = None) -> Iterator[_CandidateSnapshot]:
+        """进入一次「请求 × 模型」作用域：取一次快照，退出时还原上层的（若有）。"""
+        scope = self._new_scope(model)
+        token = _candidate_scope.set(scope)
+        try:
+            yield scope
+        finally:
+            _candidate_scope.reset(token)
 
     def _record_invalid(self, username: str, provider_id: str, credential_id: str,
                         model: str, started: float, error: object,
@@ -474,24 +653,36 @@ class Executor:
         if not registered:
             return None
         now = int(time.time())
+        scope = self._scope()
         remaining: int | None = None
-        for candidate in self._deps.credentials.candidates(registered):
+        for candidate in scope.all_rows(registered):
+            penalty = scope.penalty(candidate.credential_id)
             if candidate.disabled or not candidate.enabled:
+                continue
+            if penalty is not None and penalty.disabled:
                 continue
             if (self._deps.limits is not None
                     and self._deps.limits.blocked(candidate, target.model)):
                 continue
-            until = candidate.cooling_until
-            model_until = candidate.model_cooling_until(
-                self._model_scope(candidate.provider, target.model))
-            if model_until is not None:
-                until = model_until if until is None else max(until, model_until)
+            until = self._unavailable_until(candidate, target, scope)
             if until is None or until <= now:
                 continue
             wait = until - now
             if remaining is None or wait < remaining:
                 remaining = wait
         return remaining
+
+    def _unavailable_until(self, candidate: Candidate, target: ModelTarget,
+                           scope: _CandidateSnapshot) -> int | None:
+        """该候选在当前模型上「最早会自己恢复」的时刻（账号级与模型级取较晚者）。
+
+        快照行 + 本请求的本地惩罚合起来算：本请求刚写进库的冷却必须算进去，
+        否则 503 的 `Retry-After` 与短冷却等待都会漏掉「自己刚打冷却的号」
+        （正是「全池都在短冷却」最需要等待续上的场景）。
+        """
+        penalty = scope.penalty(candidate.credential_id)
+        return _later(self._account_deadline(candidate, penalty),
+                      self._model_deadline(candidate, penalty, target))
 
     def pick_aux(self, providers: tuple[str, ...]) -> list[tuple[str, dict[str, Any]]]:
         """为「没有模型概念」的辅助端点（search / fetch）按健康度排出候选凭证。
@@ -507,26 +698,30 @@ class Executor:
         为什么不复用 `_pick`：`_pick` 绑定 `ModelTarget`（含模型归属收窄、
         粘性、半开探测位），把工具调用塞进去会让「一张凭证在一次工具调用里
         长期占着半开探测位」，而工具调用既不计费也不该影响聊天侧的探测节奏。
+
+        **不传 model 进快照**：辅助端点（search / fetch）没有模型名，账号级
+        模型白名单无从判定，按「不限制」处理——白名单只约束对话/推理选号，
+        不该顺手把工具调用整条链路锁死。
         """
-        candidates = self._deps.credentials.candidates(
-            providers, selectable_only=True)
-        if not candidates:
-            return []
-        now = int(time.time())
-        ordered: list[str] = []
-        remaining = list(candidates)
-        while remaining:
-            credential_id = self._deps.scheduler.select(remaining, set(), now)
-            if credential_id is None:
-                break
-            ordered.append(credential_id)
-            remaining = [c for c in remaining if c.credential_id != credential_id]
-        result: list[tuple[str, dict[str, Any]]] = []
-        for credential_id in ordered:
-            data = self._safe_credential_data(credential_id)
-            if data is not None:
-                result.append((credential_id, data))
-        return result
+        with self._request_scope():
+            candidates = self._scope().all_rows(providers, selectable_only=True)
+            if not candidates:
+                return []
+            now = int(time.time())
+            ordered: list[str] = []
+            remaining = list(candidates)
+            while remaining:
+                credential_id = self._deps.scheduler.select(remaining, set(), now)
+                if credential_id is None:
+                    break
+                ordered.append(credential_id)
+                remaining = [c for c in remaining if c.credential_id != credential_id]
+            result: list[tuple[str, dict[str, Any]]] = []
+            for credential_id in ordered:
+                data = self._safe_credential_data(credential_id)
+                if data is not None:
+                    result.append((credential_id, data))
+            return result
 
     def _no_pick_breakdown(self, target: ModelTarget,
                           tried: set[str]) -> dict[str, int]:
@@ -548,19 +743,22 @@ class Executor:
         counts: dict[str, int] = {}
         limits = self._deps.limits
         inflight = self._deps.inflight
+        scope = self._scope()
 
         def bump(kind: str) -> None:
             counts[kind] = counts.get(kind, 0) + 1
 
-        for candidate in self._deps.credentials.candidates(registered):
-            if candidate.disabled:
+        for candidate in scope.all_rows(registered):
+            penalty = scope.penalty(candidate.credential_id)
+            account_until = self._account_deadline(candidate, penalty)
+            model_until = self._model_deadline(candidate, penalty, target)
+            if candidate.disabled or (penalty is not None and penalty.disabled):
                 bump("disabled")
             elif not candidate.enabled:
                 bump("paused")
-            elif candidate.cooling_until is not None and candidate.cooling_until > now:
+            elif account_until is not None and account_until > now:
                 bump("cooling")
-            elif (candidate.model_cooling_until(
-                    self._model_scope(candidate.provider, target.model)) or 0) > now:
+            elif model_until is not None and model_until > now:
                 bump("model_cooled")
             elif limits is not None and limits.blocked(candidate, target.model):
                 bump("limits")
@@ -571,6 +769,19 @@ class Executor:
             else:
                 bump("selectable")
         return counts
+
+    def _account_deadline(self, candidate: Candidate,
+                          penalty: _LocalPenalty | None) -> int | None:
+        """账号级冷却截止：快照行与本请求本地惩罚取较晚者。"""
+        return _later(candidate.cooling_until,
+                      None if penalty is None else penalty.cooling_until)
+
+    def _model_deadline(self, candidate: Candidate, penalty: _LocalPenalty | None,
+                        target: ModelTarget) -> int | None:
+        """该模型在该凭证上的冷却截止：快照行与本地惩罚取较晚者。"""
+        model_scope = self._model_scope(candidate.provider, target.model)
+        return _later(candidate.model_cooling_until(model_scope),
+                      None if penalty is None else penalty.model_cooling.get(model_scope))
 
     def _pool_hint(self, target: ModelTarget, tried: set[str]) -> str:
         """`_no_pick_breakdown` 的单行文本（`total=25 cooling=20 tried=3 …`）。
@@ -632,15 +843,21 @@ class Executor:
         目录 / 凭证侧的问题，不是上游在限流。仅用于耗尽时的 503 文案
         分流（见 `_unavailable_text`）。
         """
-        candidates = self._deps.credentials.candidates(providers)
+        candidates = self._scope().all_rows(providers)
         if not candidates:
             return False
+        scope = self._scope()
         for candidate in candidates:
-            scope = self._model_scope(candidate.provider, target.model)
-            if candidate.is_selectable(now, scope):
+            penalty = scope.penalty(candidate.credential_id)
+            account_until = self._account_deadline(candidate, penalty)
+            model_until = self._model_deadline(candidate, penalty, target)
+            disabled = candidate.disabled or (penalty is not None and penalty.disabled)
+            account_cooled = account_until is not None and account_until > now
+            model_cooled = model_until is not None and model_until > now
+            if not disabled and candidate.enabled and not account_cooled and not model_cooled:
                 return False                        # 还有可用候选（只是都试过了）
-            if not candidate.is_selectable(now):    # 账号级原因 → 非模型故障
-                return False
+            if disabled or not candidate.enabled or account_cooled:
+                return False                        # 账号级原因 → 非模型故障
         return True
 
     def _all_model_cooled(self, target: ModelTarget) -> bool:
@@ -658,7 +875,7 @@ class Executor:
 
     def _skip_provider(self, provider_id: str, tried: set[str]) -> None:
         """INVALID 后跳过该上游：把它的全部凭证都标记为已试。"""
-        for candidate in self._deps.credentials.candidates([provider_id]):
+        for candidate in self._scope().all_rows([provider_id]):
             tried.add(candidate.credential_id)
 
     def _attribution_provider(self, target: ModelTarget, observed: str) -> str:
@@ -948,45 +1165,48 @@ class Executor:
                 # 走到第二项及以后 = 本次请求用了 fallback 兼容组：响应头
                 # X-Upstream-Degraded 据此为 true（见 webapp/upstream_headers.py）
                 _note_upstream_degraded()
-            if translator is None:
-                # 每链项自成一路出口（默认 chat 出口）：模型名随链项走。
-                # 注入的 translator（responses / anthropic）由调用方持有，
-                # 回退只在未出帧前发生，复用同一实例不会有半截状态。
-                state.translator = StreamTranslator(attempt.model)
-            loop_source = self._stream_loop(
-                self._with_model(request, attempt.model), attempt, state)
-            try:
-                async for frame in loop_source:
-                    yield frame
-            except _ModelExhausted as error:
-                exhausted = error
-                continue
-            except ContentRejected as error:
-                # 内容拒绝：循环里已记过归因/冻结命中，这里只收尾。不换号、
-                # 不转回退模型（那等于换渠道重试同一份违规内容）。
-                yield state.translator.error_frame(str(error), "invalid_request")
+            # 每个链项一个「请求 × 模型」候选快照作用域：同模型内的选号 / 等待
+            # 续上 / 成因拆解 / 归因复用同一份只读快照，不再逐次全表读库（P2-17）。
+            with self._request_scope(attempt.model):
+                if translator is None:
+                    # 每链项自成一路出口（默认 chat 出口）：模型名随链项走。
+                    # 注入的 translator（responses / anthropic）由调用方持有，
+                    # 回退只在未出帧前发生，复用同一实例不会有半截状态。
+                    state.translator = StreamTranslator(attempt.model)
+                loop_source = self._stream_loop(
+                    self._with_model(request, attempt.model), attempt, state)
+                try:
+                    async for frame in loop_source:
+                        yield frame
+                except _ModelExhausted as error:
+                    exhausted = error
+                    continue
+                except ContentRejected as error:
+                    # 内容拒绝：循环里已记过归因/冻结命中，这里只收尾。不换号、
+                    # 不转回退模型（那等于换渠道重试同一份违规内容）。
+                    yield state.translator.error_frame(str(error), "invalid_request")
+                    return
+                except (GeneratorExit, asyncio.CancelledError):
+                    if not state.recorded and (state.translator.usage is not None
+                                               or state.ttfb_ms() is not None):
+                        if state.translator.done_sent:
+                            # [DONE] 已产出：客户端收尾断开，按成功记账（tokens 如实记录）
+                            if state.credential_id is not None:
+                                self._deps.credentials.save_success(state.credential_id)
+                                self._confirm_probe(state.credential_id)
+                            self._record_success(attempt, state, state.provider,
+                                                 state.credential_id or "-",
+                                                 truncated=not state.saw_finish)
+                        else:
+                            self._record_disconnect(attempt, state)
+                    raise
+                finally:
+                    # 客户端断开（GeneratorExit / CancelledError）时上面的 async for
+                    # 不会关闭 _stream_loop，不显式关闭的话上游流的节流名额只能等
+                    # GC 回收——生产路径靠 with_keepalive 取消 task 侥幸及时，换个调用
+                    # 方就会攒满 max_concurrency 后永久阻塞
+                    await aclose_stream(loop_source)
                 return
-            except (GeneratorExit, asyncio.CancelledError):
-                if not state.recorded and (state.translator.usage is not None
-                                           or state.ttfb_ms() is not None):
-                    if state.translator.done_sent:
-                        # [DONE] 已产出：客户端收尾断开，按成功记账（tokens 如实记录）
-                        if state.credential_id is not None:
-                            self._deps.credentials.save_success(state.credential_id)
-                            self._confirm_probe(state.credential_id)
-                        self._record_success(attempt, state, state.provider,
-                                             state.credential_id or "-",
-                                             truncated=not state.saw_finish)
-                    else:
-                        self._record_disconnect(attempt, state)
-                raise
-            finally:
-                # 客户端断开（GeneratorExit / CancelledError）时上面的 async for
-                # 不会关闭 _stream_loop，不显式关闭的话上游流的节流名额只能等
-                # GC 回收——生产路径靠 with_keepalive 取消 task 侥幸及时，换个调用
-                # 方就会攒满 max_concurrency 后永久阻塞
-                await aclose_stream(loop_source)
-            return
         # 链至少一项，循环里每项要么正常 return、要么抛 _ModelExhausted；能走到
         # 这里说明整条链都在**未出帧前**用尽——用最后链项的 translator 收尾。
         if exhausted is None:  # pragma: no cover - 按构造不可达（链非空且必抛）
@@ -1701,9 +1921,12 @@ class Executor:
                 # 本次请求用了 fallback 兼容组（响应头 X-Upstream-Degraded）
                 _note_upstream_degraded()
             try:
-                return await self._complete_model(
-                    self._with_model(request, attempt.model), attempt, username,
-                    is_disconnected=is_disconnected)
+                # 每个链项一个候选快照作用域：同链项内的选号 / 等待续上 / 成因
+                # 拆解 / 归因复用同一份只读快照，不再逐次全表读库（P2-17）。
+                with self._request_scope(attempt.model):
+                    return await self._complete_model(
+                        self._with_model(request, attempt.model), attempt, username,
+                        is_disconnected=is_disconnected)
             except ContentRejected:
                 # 内容拒绝不转回退模型：那等于换渠道重试同一份违规内容
                 raise
@@ -2137,7 +2360,8 @@ class Executor:
           不做「等第二轮」，否则慢请求会在池子打满时层层排队。
         - 等到的号**从 `tried` 解禁**再重取（B1）：轮换刚把唯一/最后一个号
           打进软冷却时，不解禁的话重取仍按「本轮试过」排除它，等于白等一轮
-          再 503。
+          再 503。它在本请求候选快照上的**本地排除**也要一并解除：那条惩罚
+          正是本请求自己刚写进库的冷却，等到期后已过期，不解禁同样白等。
         """
         waited = False
         while True:
@@ -2149,7 +2373,9 @@ class Executor:
                     return None
                 waited = True
                 # 等待前被轮换拉黑的号到期后必须解禁，否则重取还是选不到它；
-                # 它若已不在候选池（并发删除）则 discard 是空操作。
+                # 它若已不在候选池（并发删除）则 discard / pop 都是空操作。
+                if (scope := self._mutable_scope()) is not None:
+                    scope.clear(retry_id)
                 tried.discard(retry_id)
                 continue
             credential_data = self._safe_credential_data(credential_id)
@@ -2209,10 +2435,14 @@ class Executor:
         if not registered:
             return None
         now = int(time.time())
+        scope = self._scope()
         remaining: int | None = None
         retry_id: str | None = None
-        for candidate in self._deps.credentials.candidates(registered):
+        for candidate in scope.all_rows(registered):
+            penalty = scope.penalty(candidate.credential_id)
             if candidate.disabled or not candidate.enabled:
+                continue
+            if penalty is not None and penalty.disabled:
                 continue
             if (self._deps.limits is not None
                     and self._deps.limits.blocked(candidate, target.model)):
@@ -2220,12 +2450,8 @@ class Executor:
             if (self._deps.inflight is not None
                     and self._deps.inflight.blocked(candidate.credential_id)):
                 continue
-            until = candidate.cooling_until
-            model_until = candidate.model_cooling_until(
-                self._model_scope(candidate.provider, target.model))
             # 账号级与模型级取**较晚**的那个：两个都过期才真的可用
-            if model_until is not None:
-                until = model_until if until is None else max(until, model_until)
+            until = self._unavailable_until(candidate, target, scope)
             # 没有冷却、或冷却已经过期却仍不可选（被别的条件挡掉）：等几秒
             # 也不会变好，跳过它——只统计「真的在冷却」的候选
             if until is None or until <= now:
@@ -2350,6 +2576,12 @@ class Executor:
         占位候选只承载「哪个渠道、哪条凭证」——`note_error` 用它算冷却时长
         与命中次数，写库那一步本来就按 credential_id 定位（行已不存在时
         写入是 no-op）。
+
+        **刻意读库、不走请求候选快照**（P2-17 的唯一例外）：这里拿到的
+        `err_count` / `model_cooldowns.hits` / `quota_remaining` 正是**本请求
+        刚刚写过的那几列**——指数退避要按最新命中次数升级（漏读会让 blocked
+        的 hits 每次从 1 重来）、额度证据要看复探刚写回的 0。快照是请求开始
+        时的只读视图，用它算这两件事会把本请求自己写进去的状态抹掉。
         """
         for candidate in self._deps.credentials.candidates():
             if candidate.credential_id == credential_id:
@@ -2462,8 +2694,9 @@ class Executor:
         if not registered:
             raise NoProviderForModel(f"no provider registered for model {target.model!r}")
         now = int(time.time())
-        usable = self._selectable(self._deps.credentials.candidates(registered),
-                                  target, now)
+        # 同一请求内复用已有快照；无作用域（自检 / 单测直接调用）现取一份。
+        scope = self._scope()
+        usable = self._selectable(scope.all_rows(registered), target, now, scope)
         if not usable:
             return None
         return self._choose(usable, target, tried, affinity_id, now)
@@ -2516,7 +2749,8 @@ class Executor:
             return (credential_id, scope)
         return None
 
-    def _selectable(self, candidates: list, target: ModelTarget, now: int) -> list:
+    def _selectable(self, candidates: list, target: ModelTarget, now: int,
+                    scope: _CandidateSnapshot | None = None) -> list:
         """按「该凭证所属上游的原始模型名」过滤出当前可选的候选。
 
         顺手把**当前模型**的消耗倍率按渠道注进候选快照（free-tier 优先档的
@@ -2531,13 +2765,20 @@ class Executor:
         凭证本轮不参与选号，避免把单账号打进上游限流/封号。同一份在途计数
         顺手注入候选快照（`Candidate.inflight`），供调度器做「最少连接」负载
         均衡——未装配时恒为 0，排序退回原链。
+
+        最后扣掉**本请求自己刚写进库**的冷却/禁用（候选快照的本地排除集合）：
+        快照行里的 `cooling_until` 是请求开始时的值，不扣的话本请求刚打冷却的
+        号会在同一请求里被再选一次（旧实现靠每次重读库来避免这点）。
         """
         rates = self._model_rates(target)
         guard = self._deps.limits
         inflight = self._deps.inflight
+        scope = self._scope() if scope is None else scope
         selected = [
             c for c in candidates
             if c.is_selectable(now, self._model_scope(c.provider, target.model))
+            and not scope.penalized(c.credential_id,
+                                    self._model_scope(c.provider, target.model), now)
             and (guard is None or not guard.blocked(c, target.model))
             and (inflight is None or not inflight.blocked(c.credential_id))
         ]
@@ -2637,6 +2878,10 @@ class Executor:
             # 看到 "session dead" 会误以为是重登能解决的事。原因由 provider 识别。
             outcome = replace(outcome, disabled_reason=self._disabled_reason(provider_id, error))
         self._deps.credentials.save_error(credential_id, outcome)
+        # 本请求刚写进库的惩罚就地记进候选快照的本地排除集合：同一请求的下一次
+        # 重试不能再选它（快照行还是请求开始时的旧值）。见 `_CandidateSnapshot`。
+        if (scope := self._mutable_scope()) is not None:
+            scope.exclude(credential_id, outcome)
         if kind is ErrKind.RESTRICTED:
             # 同渠道短时间**第二个不同凭证**受限 → 整渠道暂停
             # （见 `_pause_provider_on_burst`）。必须在这里做而不是调用方：
@@ -2700,6 +2945,9 @@ class Executor:
             return
         until = now + RESTRICTED_PROVIDER_PAUSE_SECONDS
         paused = self._deps.credentials.cool_provider(provider_id, until=until)
+        # 本地镜像：同请求的后续重试不该再从这条渠道里挑号（快照行还没被推后）
+        if (scope := self._mutable_scope()) is not None:
+            scope.exclude_provider(provider_id, until=until)
         logger.warning(
             "渠道 %s 在 %d 秒内被 %d 个凭证相继受限：整渠道暂停 %d 秒（%d 条凭证）",
             provider_id, now - window_start, len(hit),

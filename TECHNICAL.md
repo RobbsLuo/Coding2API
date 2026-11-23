@@ -352,7 +352,7 @@ ERR_THRESHOLD = 3
 
 ### 6.2 候选收窄
 
-`Executor._narrow_providers`：**候选只信模型目录缓存**。目录能证明归属 → 只保留它们；全不可用直接 503，不逐渠道试。目录未就绪或模型不在目录 → 全部候选；`模型@渠道` 与 Key 绑定不受影响。TTL 300s（`MODEL_LIST_TTL_SECONDS`）+ 后台兜底刷新。
+`Executor._narrow_providers`：**候选只信模型目录缓存**。目录能证明归属 → 只保留它们；全不可用直接 503，不逐渠道试。目录未就绪或模型不在目录 → 全部候选；`模型@渠道` 与 Key 绑定不受影响。缓存已收敛到服务层唯一一层（TTL 以服务层 `MODEL_LIST_TTL_SECONDS` 为准）+ 后台兜底刷新。
 
 ### 6.3 模型级冷却
 
@@ -409,7 +409,7 @@ ERR_THRESHOLD = 3
 
 ## 8. 数据库
 
-DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准。`SCHEMA_VERSION = 38`（v33 `web_cookie_state`、v34 `routing_weight`、v35 `login_secret`、v36 `log_events`、v37 `credential_events`、v38 `access_freezes`），17 张表：
+DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准。`SCHEMA_VERSION = 39`（v33 `web_cookie_state`、v34 `routing_weight`、v35 `login_secret`、v36 `log_events`、v37 `credential_events`、v38 `access_freezes`、v39 `credentials.updated_at` + `credentials.allowed_models`），17 张表：
 
 `api_keys` / `credentials` / `credential_limits` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `checkin_events` / `credit_events` / `credential_model_cooldowns` / `credential_events` / `access_freezes` / `model_probes` / `runtime_settings` / `alert_events` / `log_events`。
 
@@ -426,6 +426,10 @@ PRAGMA foreign_keys = ON;   -- 库里没有外键，关系全在应用层校验
 - 模型目录不占表：进程内 TTL + `DATA_DIR/model_catalog.json` / `openrouter_catalog.json`（默认 `DATA_DIR=./data`）。
 - **备份**：`VACUUM INTO` + `PRAGMA integrity_check`，产物 0600 / 目录 0700；每 `BACKUP_INTERVAL_MINUTES`（默认 1440）备份，保留 `BACKUP_KEEP`（默认 7）。恢复 `scripts/restore_db.py`：校验 → `.pre-restore-<ts>` → `os.replace`；默认预览，`--apply` 才写。
 - **凭证标签**：逗号分隔，`MAX_TAGS=16` / `MAX_TAG_LENGTH=24`；写入校验、读取容错；不参与调度与鉴权。
+- **凭证级模型白名单**：`credentials.allowed_models`（fnmatch glob，逗号分隔，`''` = 不限制，与 `api_keys` 同语法）。在 `candidates(model=...)` 生成候选时收窄，**不硬禁用、不写冷却**——换个模型立刻可用。不传 `model` 的后台路径（签到 / 刷新 / 探活 / 额度 / 模型列表）看到全量。
+- **编辑版本号**：`credentials.updated_at` 只有**人工编辑**推进（`MAX(now, 旧值+1)`），后台自动写（冷却 / 额度 / 探活 / 心跳）不推进——否则 30s 轮询会让打开中的编辑页永远 409。编辑端点带 `expected_updated_at` 做乐观并发，不匹配回 409 + 当前行快照；不传 = 兼容旧调用方（最后写入者赢）。
+- **统计写入**：`record()` 先入队、由抢到写锁的写者一次写空（每批 20 行），保持 read-after-write；停机前 `flush()` 排空。失败行回填队首并计入 `stats_write_failures_total`（不再只留一行 WARNING）。
+- **救援判定索引**：`idx_usage_request_rescue (request_id, username, ok)`。刻意不改 SQL（先聚合成功集、把全表成功行物化出来反而更慢——实测 5 个场景 4 个更慢），改用覆盖索引消掉回表。
 - **迁移纪律**：`schema.sql` 只加不改；新增列走 `_MIGRATION_COLUMNS`，删表走 `_MIGRATION_DROPS`，删列走 `_MIGRATION_COLUMN_DROPS`，均 `SCHEMA_VERSION + 1`；版本记 `PRAGMA user_version`，库版本高于程序 → 启动报错；升级只在启动时发生。
 
 ## 9. 模型目录与模型名
@@ -451,7 +455,7 @@ PRAGMA foreign_keys = ON;   -- 库里没有外键，关系全在应用层校验
 ### 9.3 用量统计与成本
 
 - `overview` / `by_provider` / `by_model` / `by_user` / `timeline` / `model-timeline` 读 `usage_hourly`（永久），`events` 读明细（90 天）；凭证维度读明细表。
-- 双写：`record()` 写明细 + 增量累加当前小时；`rollup_hourly` 每 5 分钟全量重算，幂等。
+- 双写：`record()` 写明细 + 增量累加当前小时；`rollup_hourly` 每 5 分钟只重算最近 `ROLLUP_OVERLAP_SECONDS`（2h，整点对齐）而非全量，幂等。
 - 成本 = 刊例价 × token（输入 − 命中 / 命中 / 输出三段），写入时按 `USD_CNY_RATE` 折 CNY，历史不重算；匹配不到不计（`cost_known=0`）。
 - 失败归因：`failures` 是尝试口径，`rescued` 为同用户同 `request_id` 另有成功行，`failures − rescued` 为未救回次数。`BLOCKED` → `model_not_found`；`CONTEXT` → `context_overflow`；`CAPABILITY` → `model_capability`；`NETWORK` → `network_error`；`SOFT` → `rate_limit`。
 - 时序指标在聚合后相除，无样本给 `null`；时间轴补小时（上限 `MAX_DENSE_HOURS` 92 天）。实时流 `GET /api/stats/events/stream`：进程内广播，订阅者有界 200、上限 8，超出 429 + `Retry-After: 10`。列表排序 `sort` 白名单 + `order`，未知键回落默认；分页 `limit` + `offset` + `total`。

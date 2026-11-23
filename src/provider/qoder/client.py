@@ -78,7 +78,12 @@ CHECKIN_UNAVAILABLE_STATUS = (404, 405, 410)
 CHECKIN_ALREADY_CLAIMED = "ALREADY_CLAIMED"
 # 活动制签到请求头：缺它上游静默返回空 campaign 列表（实测，见 events.EP_CAMPAIGNS）
 CAMPAIGN_HEADERS = {"Cosy-ClientType": qoder_events.COSY_CLIENT_TYPE}
-MODEL_CACHE_TTL_SECONDS = 600
+# 模型清单缓存 TTL：**只在服务层 TTL 之内做请求去重**，不是第二层生命周期。
+# 服务层 `api/models.MODEL_LIST_TTL_SECONDS`（300s）到期会重新调 `list_models`；
+# 这里若比它长（历史值 600s），服务层「到期重拉」拿到的还是旧清单，实际刷新
+# 周期被拖到 10 分钟且与服务层口径倒挂（P2-18）。取 60s：并发 / 紧邻的多次
+# 调用不重复打上游，同时恒小于服务层 TTL，刷新节奏由服务层说了算。
+MODEL_CACHE_TTL_SECONDS = 60
 
 # 上游 body 里的会话失效标记（刷新无意义，需重新登录）
 SESSION_DEAD_MARKERS = qoder_events.SESSION_DEAD_MARKERS
@@ -396,7 +401,9 @@ class QoderClient(LazyClients):
         `Authorization: Bearer COSY.<payload>.<sig>` 后 GET 正常 200 返回清单。
         签名仍覆盖 `qoder_encode("")`（与请求体一致），headers 里去掉
         x-model-key / x-model-source（清单是账号级、不针对单个模型）。
-        清单按 realm 缓存 10 分钟（模型只能由有凭证的调用方拉到，故缓存键含
+        模型清单缓存 60s：只做「同一账号的并发/紧邻调用不重复打上游」，恒短于
+        服务层的列表 TTL（300s）——否则服务层到期重拉拿到的仍是旧清单（P2-18）。
+        清单按 realm 缓存（模型只能由有凭证的调用方拉到，故缓存键含
         凭证区域而非 token）。
         """
         realm = realm_for(credential)

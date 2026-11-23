@@ -37,6 +37,7 @@ from ...provider.base import (
     Quota,
 )
 from ...tasks.pacer import paced
+from ..http_json import json_or_raise
 from ..lazy_clients import LazyClients
 from . import events as kilo_events
 
@@ -128,13 +129,9 @@ class KiloClient(LazyClients):
         """
         response = await self._short.get(
             f"{self.host}{EP_MODELS}", headers=request_headers())
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response))
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise kilo_events.UpstreamProtocolViolation("non-JSON models response") from error
+        data = await json_or_raise(
+            response, UpstreamHTTPError, "models",
+            message="non-JSON models response")
         items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list):
             raise kilo_events.UpstreamProtocolViolation("models response missing data list")

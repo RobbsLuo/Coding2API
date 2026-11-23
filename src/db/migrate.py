@@ -101,7 +101,14 @@ SCHEMA_NAME = "schema.sql"
 # 38：新增 access_freezes 表（内容拒绝的发起者归因与冻结）。新增表只需进
 # schema.sql（CREATE TABLE IF NOT EXISTS 对老库同样生效），无需迁移动作；
 # 老库升级后表为空 =「升级前没有拒绝记录」，调度/选号行为完全不变。
-SCHEMA_VERSION = 38
+# 39：credentials 新增 updated_at / allowed_models（编辑并发 + 模型白名单）。
+# - `updated_at`：管理面编辑版本号（补 0 =「从未编辑」）。编辑端点用
+#   `expected_updated_at` 做乐观并发，不一致回 409 + 当前快照；老库补 0 后
+#   首次编辑照常成功（不传版本 = 兼容口子）。
+# - `allowed_models`：账号级模型白名单（fnmatch glob，''=不限制，与 api_keys
+#   同语法）。请求模型不匹配时该凭证不参与**选号**（不硬禁用、不写冷却），
+#   后台任务（签到/刷新/探活）看不到这层过滤，故老库补 '' 后行为完全不变。
+SCHEMA_VERSION = 39
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -171,6 +178,11 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     # 冷却来源（ErrKind 值）：老库补列后为 NULL = 未知来源，人工 revive 照旧
     # 清除冷却（与补列前行为一致），不把历史冷却误判成上游点名的那种。
     ("credentials", "cooling_kind TEXT"),
+    # 编辑版本号（乐观并发）：老库补 0 =「从未编辑」，首次编辑不传版本照常成功。
+    ("credentials", "updated_at INTEGER NOT NULL DEFAULT 0"),
+    # 账号级模型白名单（''=不限制）：老库补 '' 后所有凭证参与全部模型的选号，
+    # 与补列前完全一致。
+    ("credentials", "allowed_models TEXT NOT NULL DEFAULT ''"),
 )
 
 # 已废弃的表：schema.sql 里已删定义，但老库里可能还留着，必须显式清理。
@@ -200,6 +212,11 @@ _MIGRATION_INDEXES: tuple[tuple[str, str, str], ...] = (
     # 失败归因的「换号救回」按 request_id 关联同一请求的成功行（见
     # stats.query.errors）：request_id 是第 19 版补的列，索引只能在这里建。
     ("idx_usage_request", "usage_events", "request_id"),
+    # 覆盖「救援判定」的完整关联条件（request_id + username + ok）：只带
+    # request_id 时 SQLite 取到候选行后还要回表比对 username 与 ok，热数据下
+    # 是 46k 次回表（实测 117ms → 79ms，约 1.5x）。这是**而不是**改写
+    # `errors()` 的 SQL：改成先聚合成功集全表物化反而更慢（见该函数 docstring）。
+    ("idx_usage_request_rescue", "usage_events", "request_id, username, ok"),
 )
 
 

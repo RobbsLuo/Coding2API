@@ -74,6 +74,17 @@ CREATE TABLE IF NOT EXISTS credentials (
     growth_last_result TEXT,                       -- 该轮一行中文汇报
     tags             TEXT NOT NULL DEFAULT '',     -- 逗号分隔的运维标签（纯展示筛选，不参与调度）
     created_at       INTEGER NOT NULL,
+    -- 编辑版本号（乐观并发，第 39 版补列）：管理面每次**人工编辑**该行都推进
+    -- （`MAX(now, 旧值+1)`——同一秒里的两次编辑也不会撞成同版本），编辑端点
+    -- 用请求里的 `expected_updated_at` 比对；不一致 = 别人先保存了，回 409 +
+    -- 当前快照。老库补 0 =「从未编辑」，读路径不必判空即可比较。
+    -- 后台自动写（冷却/额度/健康度/刷新续期）**不推进**：否则打开中的编辑页会被
+    -- 30s 一次的轮询写成「过期」，冲突检测退化成永远 409。
+    updated_at       INTEGER NOT NULL DEFAULT 0,
+    -- 账号级模型白名单（fnmatch glob，逗号分隔，''=不限制，与 api_keys 同语法）：
+    -- 请求模型不在列表里时该凭证**不参与本次选号**（不硬禁用、不写冷却）；只影响
+    -- 对话/推理流量的候选集，签到/刷新/探活等后台任务照常看到全部凭证。
+    allowed_models   TEXT NOT NULL DEFAULT '',
     added_by         TEXT                          -- 应用层校验存在于 users 表
 );
 
@@ -348,8 +359,9 @@ CREATE TABLE IF NOT EXISTS audit_events (
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_events(ts);
 CREATE INDEX IF NOT EXISTS idx_audit_actor ON audit_events(actor, ts);
 
--- 运维告警事件：后台周期评估七类规则（池耗尽 / 任务连续失败 / token
--- 临近到期 / 上游错误率骤升 / 单 Key 用量暴涨 / 非工作时段 / 预算分层），
+-- 运维告警事件：后台周期评估九类规则（池耗尽 / 任务连续失败 / token
+-- 临近到期 / 上游错误率骤升 / 单 Key 用量暴涨 / 非工作时段 / 预算分层 /
+-- 渠道零成功 / 签到连续失败），
 -- 命中即落一行，供管理台「站内告警记录」回看。
 --
 -- 为什么落库而不是像 TaskStatusStore 只留内存：告警的价值恰在「错过的那段

@@ -35,7 +35,7 @@ CRED_KEY = "codearts:3c4e58eff203b042"          # stable_key("codearts", access_
 class _Credentials:
     data: dict = field(default_factory=lambda: dict(CRED_DATA))
 
-    def candidates(self, providers=None, *, selectable_only=False):
+    def candidates(self, providers=None, *, selectable_only=False, model=None):
         return [Candidate(credential_id="c1", provider="codearts")]
 
     def provider_of(self, credential_id):

@@ -33,6 +33,7 @@ from ...provider import base
 from ...provider.base import ErrKind, Event, EventKind, Model, Quota, UpstreamProtocolViolation
 from ...provider.openai_chunk import openai_events, payload_of, usage_from_openai
 from ...tasks.pacer import paced
+from ..http_json import json_or_raise
 from ..lazy_clients import LazyClients
 
 EP_CHAT = "/chat/completions"
@@ -202,13 +203,9 @@ class GenericClient(LazyClients):
         headers.pop("Accept", None)
         response = await self._short.get(f"{self.endpoint}{EP_MODELS}",
                                         headers=headers)
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response))
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation("non-JSON models response") from error
+        data = await json_or_raise(
+            response, UpstreamHTTPError, "models",
+            message="non-JSON models response")
         items = data.get("data") if isinstance(data, dict) else None
         if not isinstance(items, list):
             raise UpstreamProtocolViolation("models response missing data list")

@@ -68,6 +68,7 @@ def render_metrics(
     latency: list[tuple[str, float, float, int]] | None = None,
     inflight: int | None = None,
     compress: dict[str, int] | None = None,
+    stats_write_failures: int | None = None,
 ) -> str:
     """把各数据源的聚合结果渲染成 Prometheus text 格式（纯函数）。
 
@@ -134,6 +135,15 @@ def render_metrics(
     lines.append(f"# TYPE {PREFIX}task_failures_total counter")
     for task, count in task_failures:
         lines.append(_sample(f"{PREFIX}task_failures_total", [("task", task)], count))
+
+    if stats_write_failures is not None:
+        # 统计写入失败是**看得见**的静默故障：`record()` 把异常吞掉以免拖垮
+        # 聊天响应，没有这个计数器时「用量丢了」在进程外完全不可见。
+        lines.append(f"# HELP {PREFIX}stats_write_failures_total 统计写入失败的行数"
+                     "（含重试前的每次失败；重启归零）。")
+        lines.append(f"# TYPE {PREFIX}stats_write_failures_total counter")
+        lines.append(_sample(f"{PREFIX}stats_write_failures_total", [],
+                             int(stats_write_failures)))
 
     if compress is not None:
         # 压缩收益与缓存命中率必须**同屏**：压缩省下的 token 只有在「前缀缓存
@@ -250,6 +260,9 @@ def create_router(services: Services) -> APIRouter:
                       if services.inflight is not None else 0),
             # 压缩收益与上面同一份响应：省下的 token 要跟命中率并排看
             compress=_compress_snapshot(request),
+            # 统计写失败：`record()` 吞异常是刻意的（不能拖垮聊天响应），
+            # 所以这条必须出进程，否则「用量丢了」只在日志里留一行 WARNING。
+            stats_write_failures=stats.write_failures(),
         )
         return Response(content=text, headers={"Content-Type": CONTENT_TYPE})
 

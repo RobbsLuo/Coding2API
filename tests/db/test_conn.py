@@ -178,3 +178,56 @@ def test_default_connection_still_enables_wal(tmp_path):
         assert db.connect().execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     finally:
         db.close()
+
+
+def test_close_invalidates_cached_connection(tmp_path):
+    """`close()` 后同线程再 `connect()` 拿到新句柄（代际失效，不复用死连接）。"""
+    db = Database(tmp_path / "coding2api.sqlite3", strict_permissions=False)
+    try:
+        first = db.connect()
+        db.close()
+        second = db.connect()
+        assert second is not first
+        # 新连接可用（旧句柄已关闭）
+        assert second.execute("SELECT 1").fetchone()[0] == 1
+        # 代际切换同时把事务深度归零：幂等，且让后续事务从最外层开始
+        assert getattr(db._local, "tx_depth", 0) == 0
+    finally:
+        db.close()
+
+
+def test_transaction_rolls_back_and_propagates(tmp_path):
+    """事务异常回滚并原样抛出（批量统计写失败依赖这个语义）。"""
+    db = Database(tmp_path / "coding2api.sqlite3", strict_permissions=False)
+    try:
+        conn = db.connect()
+        conn.execute("CREATE TABLE t(x INTEGER)")
+        conn.commit()
+        with pytest.raises(RuntimeError), db.transaction() as tx:
+            tx.execute("INSERT INTO t VALUES (1)")
+            raise RuntimeError("boom")
+        assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 0
+    finally:
+        db.close()
+
+
+def test_nested_transaction_only_outermost_commits(tmp_path):
+    """嵌套事务只有最外层提交/回滚（内层异常不丢外层的未提交写入）。"""
+    db = Database(tmp_path / "coding2api.sqlite3", strict_permissions=False)
+    try:
+        conn = db.connect()
+        conn.execute("CREATE TABLE t(x INTEGER)")
+        conn.commit()
+        with db.transaction() as outer:
+            outer.execute("INSERT INTO t VALUES (1)")
+            with db.transaction() as inner:
+                inner.execute("INSERT INTO t VALUES (2)")
+        assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 2
+        # 内层异常不提交外层：外层自己决定回滚
+        with pytest.raises(RuntimeError), db.transaction() as outer:
+            outer.execute("INSERT INTO t VALUES (3)")
+            with db.transaction():
+                raise RuntimeError("inner boom")
+        assert conn.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 2
+    finally:
+        db.close()

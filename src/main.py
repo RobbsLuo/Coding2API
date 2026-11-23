@@ -951,6 +951,11 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             # 日志落库队列排空后再关库：消费者线程持自己的连接，先关库会让
             # 最后几批日志写不进去（排障最需要的恰恰是崩溃/停机前的几条）。
             log_repo.close()
+            # 统计批量缓冲也要在关库前排空：`record()` 现在先入队再等本行提交，
+            # 正常稳态队列为空，但停机瞬间仍在途的行必须落库，否则「最后几个
+            # 请求」的用量永久丢失。`atexit` 钩子是兜底（那时库已关，写不进去
+            # 只会计一次 `write_failures`），所以这里先排一次。
+            stats_collector.flush()
             db.close()
 
     app = FastAPI(title="Coding2API", version=app_version(), lifespan=lifespan,

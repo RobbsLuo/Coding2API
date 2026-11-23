@@ -15,6 +15,13 @@ from ..security.private_files import secure_dir, secure_file
 
 PRAGMAS = (
     "PRAGMA journal_mode = WAL",
+    # WAL 下的官方推荐档位（SQLite 文档：WAL 模式下 NORMAL 不会损坏库）。
+    # 默认 FULL 每次提交都要 fsync 一次：`record()` 是每请求一次提交的高频
+    # 路径，一次 fsync 就是毫秒级延迟 + 写盘放大。NORMAL 只保证「事务原子、
+    # 库不损坏」，**崩溃/断电最多丢最后几条已提交事务**（OS 缓冲未落盘）。
+    # 统计是旁路数据，这个取舍是划算的；凭证/配额等强一致写入走的是同样的
+    # 连接，但它们本身也是「提交即认为成功」的语义，不会读到半写状态。
+    "PRAGMA synchronous = NORMAL",
     "PRAGMA busy_timeout = 5000",
     "PRAGMA foreign_keys = ON",
 )

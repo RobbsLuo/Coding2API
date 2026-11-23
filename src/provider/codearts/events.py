@@ -38,6 +38,7 @@ from ...provider.base import (
     EventKind,
     UpstreamProtocolViolation,
     Usage,
+    body_text,
     business_codes,
 )
 
@@ -411,7 +412,7 @@ def relogin_required(body: bytes) -> str:
     被消费/失配之后每次重试都是同一张废票。判错的代价是「一次偶发故障永久
     废掉一条好凭证」，所以只认 `_RELOGIN_MARKERS` 里上游点名的那几类。
     """
-    text = body.decode("utf-8", errors="replace").lower()
+    text = body_text(body)
     if any(marker in text for marker in _RELOGIN_MARKERS):
         return "刷新令牌已失效，需重新登录"
     return ""

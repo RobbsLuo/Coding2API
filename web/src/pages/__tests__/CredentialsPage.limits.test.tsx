@@ -19,7 +19,7 @@ function listBody(credentials: unknown[]) {
 
 async function openLimits() {
   await userEvent.click(screen.getByTestId("actions-cred_1"));
-  await userEvent.click(screen.getByRole("menuitem", { name: "设置限额" }));
+  await userEvent.click(screen.getByRole("menuitem", { name: "设置限额/模型" }));
   return screen.findByTestId("credential-limits-dialog");
 }
 
@@ -28,7 +28,7 @@ describe("CredentialsPage 限额护栏", () => {
     vi.unstubAllGlobals();
   });
 
-  it("未配置限额时菜单显示「设置限额」，保存后调用 PUT", async () => {
+  it("未配置限额时菜单显示「设置限额/模型」，保存后调用 PUT", async () => {
     const calls: { url: string; method?: string; body?: unknown }[] = [];
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -58,6 +58,9 @@ describe("CredentialsPage 限额护栏", () => {
       daily_tokens: 1000,
       daily_credits: null,
       per_model_tokens: { "glm-5": 500000 },
+      // v39：账号级模型白名单（'' 清空/不限制）+ 乐观并发版本号
+      allowed_models: "",
+      expected_updated_at: 0,
     });
     // 成功后关闭对话框并播报（对话框由父组件按 id 卸载）
     await waitFor(() => expect(dialog).not.toBeInTheDocument());
@@ -81,7 +84,7 @@ describe("CredentialsPage 限额护栏", () => {
 
     expect(screen.getByTestId("limits-badge-cred_1")).toHaveTextContent("限额");
     await userEvent.click(screen.getByTestId("actions-cred_1"));
-    await userEvent.click(screen.getByRole("menuitem", { name: "编辑限额" }));
+    await userEvent.click(screen.getByRole("menuitem", { name: "编辑限额/模型" }));
     await screen.findByTestId("credential-limits-dialog");
 
     expect(screen.getByTestId("limits-keep-credits")).toHaveValue(50);

@@ -566,6 +566,10 @@ def test_failed_probe_keeps_alias_so_narrowing_does_not_fan_out(tmp_path):
             "deepseek-v4.1-flash-1017": Model(id="deepseek-v4.1-flash-1017")}
         services.model_list_cache["codebuddy"] = {"deepseek-v4.1-flash": Model(
             id="deepseek-v4.1-flash")}
+        # 播种 TTL：否则这两条渠道算「过期」，请求出口会排后台刷新把上面手工
+        # 播种的表覆盖成 stub 的返回值（本用例要的是 officeAce 独有的模型）。
+        for provider_id in ("officeace", "codebuddy"):
+            services.model_list_fetched_at[provider_id] = time.monotonic()
 
         services.model_probes.record(provider="officeace",
                                      model="deepseek-v4.1-flash-1017", state="failed")

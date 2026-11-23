@@ -28,13 +28,12 @@
    列表本身与聊天。
 3. **能力指数是第三方数据，不是本服务实测**：透给前端 `source` 字段。
 
-快照口径（7 天上限、tmp + `os.replace` 原子写、版本不符整体退空），启动时
-同步读回（零上游请求），后台任务周期刷新。
+快照口径（7 天上限、tmp + `os.replace` 原子写、版本不符整体退空，公共实现见
+`persistence/json_snapshot.py`），启动时同步读回（零上游请求），后台任务周期刷新。
 """
 
 from __future__ import annotations
 
-import logging
 import os
 import re
 import time
@@ -42,9 +41,8 @@ from collections.abc import Mapping
 from typing import Any
 
 from .model_match import build_table
+from .persistence.json_snapshot import load_snapshot, save_snapshot
 from .pricing import PriceRecord, PriceTable
-
-logger = logging.getLogger(__name__)
 
 # OpenRouter 公开模型列表：无需 API key（2026-10-10 实测匿名 200）。它不是
 # 官方承诺稳定的接口，故拉取失败一律降级为空表（见模块 docstring 第 2 条）。
@@ -412,17 +410,7 @@ def save_catalog(data_dir: str, prices: PriceTable, benchmarks: BenchmarkTable,
         "benchmarks": dict(benchmarks),
         "models": catalog,
     }
-    path = catalog_path(data_dir)
-    try:
-        os.makedirs(data_dir, exist_ok=True)
-        tmp = f"{path}.tmp"
-        with open(tmp, "w", encoding="utf-8") as handle:
-            import json
-
-            json.dump(payload, handle, ensure_ascii=False)
-        os.replace(tmp, path)
-    except OSError as error:
-        logger.warning("模型目录落盘失败 %s: %s", path, error)
+    save_snapshot(catalog_path(data_dir), payload)
 
 
 def _valid_prices(raw: Any) -> PriceTable:
@@ -471,31 +459,29 @@ def load_catalog_snapshot(
 ) -> tuple[PriceTable, BenchmarkTable, ModelCatalog, float | None]:
     """读回 `(价表, 能力表, 模型明细, 快照保存时刻)`。
 
-    与 `load_catalog_snapshot` 的价表口径一致：文件缺失 / 损坏 / 版本不符 /
-    过旧一律退化成空表 + `None` 时刻。保存时刻供管理台展示「这份数据是什么
-    时候拉取的」。
+    文件缺失 / 损坏 / 版本不符 / 过旧一律退化成空表 + `None` 时刻。保存时刻
+    供管理台展示「这份数据是什么时候拉取的」。
     """
-    path = catalog_path(data_dir)
-    moment = time.time() if now is None else now
-    try:
-        with open(path, encoding="utf-8") as handle:
-            import json
+    return load_snapshot(
+        catalog_path(data_dir),
+        version=CATALOG_VERSION,
+        max_age=MAX_AGE_SECONDS,
+        validator=_restore_payload,
+        fallback=({}, {}, {}, None),
+        now=now,
+    )
 
-            raw = json.load(handle)
-        if raw.get("version") != CATALOG_VERSION:
-            logger.warning("模型目录版本不匹配 %s，忽略", path)
-            return {}, {}, {}, None
-        saved_at = raw["saved_at"]
-        if moment - saved_at > MAX_AGE_SECONDS:
-            return {}, {}, {}, None
-        return (_valid_prices(raw.get("prices")),
-                _valid_benchmarks(raw.get("benchmarks")),
-                _valid_catalog(raw.get("models")),
-                float(saved_at))
-    except FileNotFoundError:
+
+def _restore_payload(
+    raw: Any, now: float, max_age: float,
+) -> tuple[PriceTable, BenchmarkTable, ModelCatalog, float | None]:
+    """整份 payload → 三张表；三表共用同一个 `saved_at`，故整份判新鲜度。"""
+    saved_at = raw["saved_at"]
+    if now - saved_at > max_age:
         return {}, {}, {}, None
-    except (OSError, ValueError, TypeError, AttributeError, KeyError) as error:
-        logger.warning("模型目录读取失败 %s: %s", path, error)
-        return {}, {}, {}, None
+    return (_valid_prices(raw.get("prices")),
+            _valid_benchmarks(raw.get("benchmarks")),
+            _valid_catalog(raw.get("models")),
+            float(saved_at))
 
 

@@ -33,6 +33,7 @@ from ...provider.base import (
     EventKind,
     UpstreamProtocolViolation,  # noqa: F401 - 测试经本模块访问
     Usage,
+    body_text,
 )
 from ..openai_chunk import openai_events, usage_from_openai
 
@@ -70,7 +71,7 @@ def _usage(raw: dict[str, Any]) -> Usage:
 
 def _lower(body: bytes | str) -> str:
     if isinstance(body, bytes):
-        return body.decode("utf-8", errors="replace").lower()
+        return body_text(body)
     return body.lower()
 
 

@@ -20,6 +20,7 @@ from ...engine.sse import iter_frames
 from ...provider import base
 from ...provider.base import ActivityResult, CheckinResult, ErrKind, Event, Model, Quota
 from ...tasks.pacer import paced
+from ..http_json import json_or_raise
 from ..lazy_clients import LazyClients
 from . import activity as raccoon_activity
 from . import credential as raccoon_credential
@@ -169,13 +170,10 @@ class RaccoonClient(LazyClients):
         response = await self._short.get(
             f"{self.host}{EP_MODELS}",
             headers=request_headers(token, accept="application/json"))
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response))
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation("non-JSON models response") from error
+        data = await json_or_raise(
+            response, UpstreamHTTPError, "models",
+            message="non-JSON models response",
+            violation_cls=UpstreamProtocolViolation)
         payload = data.get("data") if isinstance(data, dict) else None
         categories = payload.get("categories") if isinstance(payload, dict) else None
         if not isinstance(categories, list):
@@ -210,13 +208,10 @@ class RaccoonClient(LazyClients):
         response = await self._short.get(
             f"{self.host}{EP_BALANCE}",
             headers=request_headers(token, accept="application/json"))
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response))
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation("non-JSON balance response") from error
+        data = await json_or_raise(
+            response, UpstreamHTTPError, "balance",
+            message="non-JSON balance response",
+            violation_cls=UpstreamProtocolViolation)
         payload = data.get("data") if isinstance(data, dict) else None
         points = payload.get("available_points") if isinstance(payload, dict) else None
         if not isinstance(points, (int, float)) or isinstance(points, bool):
@@ -255,13 +250,10 @@ class RaccoonClient(LazyClients):
             f"{self.host}{EP_BILLS}",
             params={"paging.limit": limit, "type": bill_type},
             headers=request_headers(token, accept="application/json"))
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response))
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation("non-JSON bills response") from error
+        data = await json_or_raise(
+            response, UpstreamHTTPError, "bills",
+            message="non-JSON bills response",
+            violation_cls=UpstreamProtocolViolation)
         payload = data.get("data") if isinstance(data, dict) else None
         items = payload.get("items") if isinstance(payload, dict) else None
         if not isinstance(items, list):
@@ -280,13 +272,10 @@ class RaccoonClient(LazyClients):
         response = await self._short.get(
             f"{self.host}{EP_USER_INFO}",
             headers=request_headers(token, accept="application/json"))
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response))
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation("non-JSON user_info response") from error
+        data = await json_or_raise(
+            response, UpstreamHTTPError, "user_info",
+            message="non-JSON user_info response",
+            violation_cls=UpstreamProtocolViolation)
         payload = data.get("data") if isinstance(data, dict) else None
         return payload if isinstance(payload, dict) else {}
 
@@ -300,13 +289,10 @@ class RaccoonClient(LazyClients):
         headers.update(raccoon_activity.heartbeat_headers(device_id))
         response = await self._short.post(
             f"{self.host}{EP_HEARTBEAT}", headers=headers)
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response))
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation("non-JSON heartbeat response") from error
+        data = await json_or_raise(
+            response, UpstreamHTTPError, "heartbeat",
+            message="non-JSON heartbeat response",
+            violation_cls=UpstreamProtocolViolation)
         payload = data.get("data") if isinstance(data, dict) else None
         return payload if isinstance(payload, dict) else {}
 
@@ -402,10 +388,10 @@ class RaccoonClient(LazyClients):
                     "上游拒绝登录（手机号或密码错误/格式不符）：请核对凭据里的 "
                     f"phone/password，或改用网页登录后重贴 token（原始响应：{raw[:160]!r}）")
             raise UpstreamHTTPError(response.status_code, raw)
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation("non-JSON login response") from error
+        data = await json_or_raise(
+            response, UpstreamHTTPError, "login",
+            message="non-JSON login response",
+            violation_cls=UpstreamProtocolViolation)
         payload = data.get("data") if isinstance(data, dict) else None
         token = payload.get("access_token") if isinstance(payload, dict) else None
         if not isinstance(token, str) or not token.strip():
@@ -481,14 +467,10 @@ class RaccoonClient(LazyClients):
             headers={**request_headers(token, accept="application/json"),
                      "Origin": self.host,
                      "Referer": f"{self.host}/"})
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response))
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation(
-                "non-JSON iam/confirm response") from error
+        data = await json_or_raise(
+            response, UpstreamHTTPError, "iam/confirm",
+            message="non-JSON iam/confirm response",
+            violation_cls=UpstreamProtocolViolation)
         return data if isinstance(data, dict) else {}
 
 

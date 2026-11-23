@@ -43,6 +43,7 @@ from ...provider.base import (
 )
 from .. import naming
 from ..codearts.signer import sdk_date
+from ..http_json import json_or_raise
 from ..lazy_clients import LazyClients
 from . import events as officeace_events
 from .credential import OfficeAceCredential, merge_refreshed, validate_gateway_url
@@ -191,13 +192,9 @@ class OfficeAceClient(LazyClients):
         response = await self._short.get(
             url, headers={"Authorization": credential.authorization,
                           "Accept": "application/json"})
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response))
-        try:
-            payload = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation("non-JSON models response") from error
+        payload = await json_or_raise(
+            response, UpstreamHTTPError, "models",
+            message="non-JSON models response")
         items = officeace_events.parse_models(payload)
         rates = await self._fetch_rates_quietly(credential)
         # `parse_models` 已保证每条都带 id，故此处不再筛空 id（筛了是死分支）。
@@ -416,15 +413,9 @@ class OfficeAceClient(LazyClients):
             x_sdk_date=_sdk_date(self._now()), region=self.region)
         response = await self._short.request(
             method, url, headers=signed, content=body if body is not None else None)
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response),
-                                    **base.retry_hints(response.headers))
-        try:
-            payload = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation(
-                f"non-JSON response from {path}") from error
+        payload = await json_or_raise(
+            response, UpstreamHTTPError, path,
+            message=f"non-JSON response from {path}", with_retry_hints=True)
         if not isinstance(payload, dict):
             raise UpstreamProtocolViolation(
                 f"response from {path} is not an object")

@@ -36,6 +36,7 @@ import asyncio
 import contextlib
 import logging
 import time
+import weakref
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -76,9 +77,26 @@ MODEL_LIST_TTL_SECONDS = 300
 # 最多晚 2h 知道上游恢复了（期间一直有缓存兜底）。
 MODEL_LIST_BACKOFF_MAX_SECONDS = 7200
 
-# 拉取串行锁：模块级单锁（一次只有一个进程内的列表刷新在跑）。调用方有 HTTP
-# 出口与后台兜底刷新两处，不串行就会同时打同一条渠道的上游。
-_refresh_lock = asyncio.Lock()
+# 拉取串行锁：**按事件循环**各持一把（一次只有一个进程内的列表刷新在跑）。
+# 调用方有 HTTP 出口与后台兜底刷新两处，不串行就会同时打同一条渠道的上游。
+#
+# 为什么不是模块级单把 `asyncio.Lock()`：锁在**发生竞争**时会绑定到当时的
+# 事件循环，之后再从另一个循环 acquire 就是 `RuntimeError: ... is bound to a
+# different event loop`。同一进程里存在第二个循环是真实场景（测试里每个
+# TestClient 一个；运维脚本里 asyncio.run 各起一次），而落盘改成 `to_thread`
+# 后刷新耗时变长、后台任务更容易跨进下一个循环，这条就从「潜伏」变成必现。
+# 按循环分桶后，同一循环内仍然串行（这正是要保证的），跨循环天然不共享。
+_refresh_locks: weakref.WeakKeyDictionary[Any, asyncio.Lock] = weakref.WeakKeyDictionary()
+
+
+def _refresh_lock() -> asyncio.Lock:
+    """当前事件循环对应的刷新锁（懒建；循环回收后自动失效）。"""
+    loop = asyncio.get_running_loop()
+    lock = _refresh_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _refresh_locks[loop] = lock
+    return lock
 
 
 def credential_providers(services: Services) -> set[str]:
@@ -271,7 +289,29 @@ async def _refresh_provider(services: Services, provider_id: str, provider: Any)
     services.model_list_failures.pop(provider_id, None)
     services.model_list_cache[provider_id] = {model.id.lower(): model for model in models}
     services.model_list_fetched_at[provider_id] = time.monotonic()
-    save_catalog(services.settings.data_dir, services.model_list_cache)
+    await _persist_catalog(services)
+
+
+async def _persist_catalog(services: Services) -> None:
+    """把进程内模型目录落盘；**io 部分在线程池里跑**（P2-23）。
+
+    `save_catalog` 里是 makedirs / open / json.dump / os.replace 四个同步系统
+    调用，模型多时（zen 70+ 条、CodeBuddy 全量）序列化 + 写盘能占住事件循环
+    几毫秒到十几毫秒，正好卡在其它请求的 SSE 出帧上。
+
+    传**副本**而不是活引用：worker 线程序列化期间事件循环还在跑，别的渠道可能
+    正在改同一个 dict（迭代中改大小会抛 RuntimeError，逐条改则写出「一半旧
+    一半新」的表）。`os.replace` 的原子性保证文件不会是半截，副本保证内容也是
+    同一时刻的一致快照；并发刷新最多「后写者赢」。
+
+    任何异常都在这里吞掉：缓存是加速手段，写盘失败不该让一次成功的上游拉取
+    变成「模型列表刷新失败」。
+    """
+    snapshot = {pid: dict(table) for pid, table in services.model_list_cache.items()}
+    try:
+        await asyncio.to_thread(save_catalog, services.settings.data_dir, snapshot)
+    except Exception as error:  # noqa: BLE001 - 落盘失败不影响列表刷新
+        logger.warning("模型目录落盘失败: %s", error_text(error))
 
 
 def _needs_refresh(services: Services, provider_id: str, *, now: float) -> bool:
@@ -339,7 +379,7 @@ async def _refresh_providers(services: Services, connected: set[str]) -> None:
     可能进来，无锁时会同时对同一条渠道打上游（zen 那次是十几秒真推理），后到
     的拿到的还是同一份数据，纯属白打。
     """
-    async with _refresh_lock:
+    async with _refresh_lock():
         now = time.monotonic()
         for provider_id, provider in services.registry.items():
             if provider_id not in connected:

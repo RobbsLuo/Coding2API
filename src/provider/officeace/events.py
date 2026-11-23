@@ -51,6 +51,7 @@ from ...provider.base import (
     EventKind,
     UpstreamProtocolViolation,
     Usage,
+    body_text,
     business_codes,
 )
 from ..openai_chunk import openai_event, openai_events, payload_of, usage_from_openai
@@ -139,7 +140,7 @@ def relogin_required(body: bytes) -> str:
     只认上游点名的那几类；可重试的（网络 / 5xx / 限流）返回空串。判错的
     代价是「一次偶发故障永久废掉一条好凭证」，故宁可漏判不可误判。
     """
-    text = body.decode("utf-8", errors="replace").lower()
+    text = body_text(body)
     if any(marker in text for marker in _RELOGIN_MARKERS):
         return "刷新令牌已失效，需重新登录"
     return ""

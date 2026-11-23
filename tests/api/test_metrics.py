@@ -376,3 +376,20 @@ def test_compression_endpoint_is_operator_only(tmp_path):
                          create_session_token("viewer", SECRET))
         response = http.get("/api/stats/compression")
     assert response.status_code == 403
+
+
+def test_metrics_reports_stats_write_failures(client):
+    """统计写失败必须能被外部看到：`record()` 的异常只在本进程里被吞，
+    没有计数器就等于「用量丢了但没人知道」。"""
+    client.app.state.stats_collector._write_failures = 7
+    body = client.get("/metrics").text
+    assert "coding2api_stats_write_failures_total 7" in body
+
+
+def test_metrics_omits_stats_write_failures_when_not_provided():
+    """缺省不输出该家族：直接渲染（不经路由）的调用方不应凭空多出一行 0。"""
+    from src.api.metrics import render_metrics
+
+    text = render_metrics(requests=[], tokens=[], credentials={},
+                          errors=[], task_failures=[])
+    assert "stats_write_failures" not in text

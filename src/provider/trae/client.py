@@ -30,6 +30,7 @@ from ...provider.base import (
 )
 from ...provider.token_expiry import normalize_epoch
 from ...tasks.pacer import paced
+from ..http_json import json_or_raise
 from ..lazy_clients import LazyClients
 from . import events as trae_events
 from . import pricing
@@ -514,12 +515,11 @@ class TraeClient(LazyClients):
     async def _post_json(self, url: str, body: dict[str, Any],
                          headers: dict[str, str]) -> dict[str, Any]:
         response = await self._short.post(url, json=body, headers=headers)
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response))
         # 成功路径同样有界：被控上游回超大 body 不能把整段读进内存。
-        data = await base.read_json_bounded(
-            response, what=url, public="upstream returned a non-JSON response")
+        data = await json_or_raise(
+            response, UpstreamHTTPError, url,
+            public="upstream returned a non-JSON response",
+            limit=base.BOUNDED_BODY_LIMIT)
         if not isinstance(data, dict):
             raise UpstreamProtocolViolation(
                 f"unexpected response shape from {url}",

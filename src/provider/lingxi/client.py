@@ -44,6 +44,7 @@ from ...provider.base import (
     Quota,
     UpstreamProtocolViolation,
 )
+from ..http_json import json_or_raise
 from ..lazy_clients import LazyClients
 from . import events as lingxi_events
 from .credential import APP_NAME, APP_VERSION, DEVICE_ID, LingxiCredential
@@ -182,14 +183,12 @@ class LingxiClient(LazyClients):
                 method, url, headers=headers, json=body, timeout=timeout)
         except httpx.TransportError as error:
             raise base.UpstreamTransportError(str(error)) from error
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response),
-                                    **base.retry_hints(response.headers))
         # 成功路径同样有界：被控上游回超大 body 不能把整段读进内存。
         # `public` 固定为原有文案：异常文本带上游 URL，只进日志，不回显客户端。
-        data = await base.read_json_bounded(
-            response, what=url, public="non-JSON response")
+        data = await json_or_raise(
+            response, UpstreamHTTPError, url,
+            message=f"non-JSON response from {url}", public="non-JSON response",
+            with_retry_hints=True, limit=base.BOUNDED_BODY_LIMIT)
         if not isinstance(data, dict):
             raise UpstreamProtocolViolation("response is not an object")
         return data

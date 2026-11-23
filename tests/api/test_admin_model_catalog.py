@@ -150,6 +150,36 @@ def test_catalog_path_joins_data_dir():
     assert catalog_path("/data") == f"/data/{CATALOG_FILENAME}"
 
 
+def test_save_is_byte_stable_and_keeps_chinese(tmp_path, monkeypatch):
+    """落盘 = `json.dumps(payload, ensure_ascii=False)`：中文不转义、tmp 不残留。"""
+    import src.api.model_catalog as catalog_module
+
+    class _Clock:
+        @staticmethod
+        def time() -> float:
+            return 1_700_000_000.0
+
+    monkeypatch.setattr(catalog_module, "time", _Clock)
+    save_catalog(str(tmp_path), {"kilo": {"m": Model(id="m", name="太空兔")}})
+
+    raw = (tmp_path / CATALOG_FILENAME).read_text(encoding="utf-8")
+    assert raw == json.dumps(json.loads(raw), ensure_ascii=False)
+    assert "太空兔" in raw
+    assert "1700000000.0" in raw                    # saved_at 照原样写
+    assert not (tmp_path / f"{CATALOG_FILENAME}.tmp").exists()
+
+
+def test_load_reads_hand_written_legacy_snapshot(tmp_path):
+    """老版本手写快照（多未知键、少新字段）读回不报错，id 仍按小写归键。"""
+    payload = {"version": 1, "providers": {"kilo": {
+        "saved_at": time.time(),
+        "models": [{"id": "UP-M", "name": "老字段", "retired_field": True}]}}}
+    (tmp_path / CATALOG_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
+
+    loaded = load_catalog(str(tmp_path))
+    assert loaded["kilo"][1] == {"up-m": Model(id="UP-M", name="老字段")}
+
+
 # --------------------------------------------------- 启动回灌 + 增量 publish
 
 
@@ -202,7 +232,12 @@ def test_startup_refetches_snapshot_older_than_ttl(settings):
     provider = _StubProvider("kilo", [Model(id="kilo-only/free", name="Kilo Only",
                                             credit_rate=0.0)])
     app = _app_with(settings, {"kilo": provider})
-    with TestClient(app):
+    with TestClient(app) as client:
+        # 预热是后台任务（`_warm_model_list`）：落盘走线程池后它多了一次让出，
+        # 必须显式等它跑完再断言，否则读到的是「已重拉但还没 publish」的中间态。
+        task = app.state.model_warmup_task
+        if task is not None:
+            client.portal.call(lambda: asyncio.wait_for(asyncio.shield(task), 5))
         aliases = app.state.services.model_aliases
         assert provider.calls == 1
         assert "old-free" not in aliases.get("kilo", {})

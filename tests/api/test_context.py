@@ -421,7 +421,9 @@ def test_compressor_uses_per_channel_window_and_returns_fresh_payload():
 class _FakeCredentials:
     provider = "codebuddy"
 
-    def candidates(self, providers=None, *, selectable_only=False):
+    # `model` 由 `Executor._new_scope` 传入（账号级模型白名单收窄）；本替身不
+    # 模拟白名单，一律返回同一条候选。
+    def candidates(self, providers=None, *, selectable_only=False, model=None):
         from src.engine.scheduler import Candidate
 
         return [Candidate(credential_id="c1", provider=self.provider)]

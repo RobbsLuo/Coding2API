@@ -32,6 +32,7 @@ import {
   tokenExpiryView,
 } from "../../api/display";
 import type { Credential } from "../../api/types";
+import { editMeta } from "../../api/credentials";
 import type { Ledger } from "../../lib/credentialList";
 import { ColumnHint, LongTextTip } from "../../components/Tip";
 import { SortableHead } from "../../components/SortableHead";
@@ -204,6 +205,16 @@ export function Row({
           {credential.limits && (
             <span data-testid={`limits-badge-${credential.id}`}>
               <Badge tone="muted">限额</Badge>
+            </span>
+          )}
+          {/* 账号级模型白名单（v39）：有值时给个徽章，否则「这个号为什么没被
+              选中」在列表上完全看不出来。加载态由 editMeta 兜默认值（无则空串）。 */}
+          {editMeta(credential).allowed_models !== "" && (
+            <span
+              data-testid={`models-badge-${credential.id}`}
+              title={`模型白名单：${editMeta(credential).allowed_models}`}
+            >
+              <Badge tone="muted">限模型</Badge>
             </span>
           )}
           {/* 标签紧贴昵称（它是这一行的记号）：最多显示两个，多余的收成 +N 并
@@ -431,7 +442,9 @@ export function Row({
                     </DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => actions.limits(credential)}>
                       <Gauge className="size-4" />
-                      {credential.limits ? "编辑限额" : "设置限额"}
+                      {credential.limits || editMeta(credential).allowed_models
+                        ? "编辑限额/模型"
+                        : "设置限额/模型"}
                     </DropdownMenuItem>
                     <DropdownMenuItem onSelect={() => actions.tags(credential)}>
                       <Tag className="size-4" />

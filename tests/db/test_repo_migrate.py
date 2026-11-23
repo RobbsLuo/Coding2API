@@ -713,7 +713,7 @@ def test_legacy_db_upgrade_adds_login_secret(tmp_path):
 
 
 def test_schema_v38_adds_access_freezes_on_old_db(tmp_path):
-    """老库（v37）升级：补建 access_freezes，版本推进到 38，行为可写。"""
+    """老库（v37）升级：补建 access_freezes，版本推进到当前代，行为可写。"""
     from src.db.migrate import SCHEMA_VERSION
 
     db = Database(tmp_path / "legacy38.sqlite3")
@@ -727,7 +727,7 @@ def test_schema_v38_adds_access_freezes_on_old_db(tmp_path):
     tables = {row[0] for row in db.connect().execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert "access_freezes" in tables
-    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 38
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     columns = {row[1] for row in db.connect().execute(
         "PRAGMA table_info(access_freezes)")}
     assert {"subject", "provider", "reason", "frozen_at", "frozen_by"} <= columns
@@ -738,3 +738,66 @@ def test_schema_v38_adds_access_freezes_on_old_db(tmp_path):
     assert db.connect().execute(
         "SELECT COUNT(*) FROM access_freezes").fetchone()[0] == 1
     db.close()
+
+
+def test_schema_v39_adds_edit_version_and_model_whitelist_on_old_db(tmp_path):
+    """老库（v38）升级：credentials 补 updated_at / allowed_models。
+
+    - `updated_at` 补 0 =「从未编辑」：编辑端点不带版本仍可写（兼容口子），
+      首次带版本 0 的写入也应当成功。
+    - `allowed_models` 补 '' = 不限制：该凭证继续参与**全部**模型的选号，
+      与补列前完全一致。
+    """
+    from src.db.migrate import SCHEMA_VERSION
+
+    db = Database(tmp_path / "legacy39.sqlite3")
+    apply_schema(db.connect())
+    # 模拟「升级前没有这两列」的 v38 库：先删列再回退版本号
+    db.connect().execute("ALTER TABLE credentials DROP COLUMN updated_at")
+    db.connect().execute("ALTER TABLE credentials DROP COLUMN allowed_models")
+    db.connect().execute("PRAGMA user_version = 38")
+    db.connect().commit()
+
+    apply_schema(db.connect())
+    columns = {row[1] for row in db.connect().execute(
+        "PRAGMA table_info(credentials)")}
+    assert {"updated_at", "allowed_models"} <= columns
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 39
+    defaults = {row[1]: row[4] for row in db.connect().execute(
+        "PRAGMA table_info(credentials)")}
+    assert defaults["updated_at"] in ("0", 0)
+    assert defaults["allowed_models"] in ("''", "")
+
+    # 老行补列后的取值：0 / 空串，且可正常写入新版本与新白名单
+    db.connect().execute(
+        "INSERT INTO credentials (id, provider, data_enc, created_at) "
+        "VALUES ('cred_old', 'trae', X'00', 1)")
+    db.connect().commit()
+    row = db.connect().execute(
+        "SELECT updated_at, allowed_models FROM credentials WHERE id = 'cred_old'"
+    ).fetchone()
+    assert (row["updated_at"], row["allowed_models"]) == (0, "")
+    db.connect().execute(
+        "UPDATE credentials SET updated_at = 7, allowed_models = 'glm-*' "
+        "WHERE id = 'cred_old'")
+    db.connect().commit()
+    assert db.connect().execute(
+        "SELECT updated_at, allowed_models FROM credentials WHERE id = 'cred_old'"
+    ).fetchone()[:] == (7, "glm-*")
+    db.close()
+
+
+def test_migrate_creates_rescue_covering_index(tmp_path):
+    """救援判定要按 (request_id, username, ok) 三列定位：只带 request_id 的
+    旧索引取到候选后还要回表比对两列，热数据下是几万次回表。"""
+    db = Database(tmp_path / "t.db")
+    try:
+        apply_schema(db.connect())
+        names = {row["name"] for row in db.connect().execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='usage_events'")}
+        assert "idx_usage_request_rescue" in names
+        # 幂等：再跑一次不报错
+        apply_schema(db.connect())
+    finally:
+        db.close()

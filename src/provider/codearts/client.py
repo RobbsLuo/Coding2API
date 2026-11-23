@@ -42,6 +42,7 @@ from ...provider.base import (
     Quota,
     UpstreamReloginRequired,
 )
+from ..http_json import json_or_raise
 from ..lazy_clients import LazyClients
 from . import auth as codearts_auth
 from . import events as codearts_events
@@ -689,15 +690,9 @@ class CodeArtsClient(LazyClients):
             headers=headers, payload=raw, x_sdk_date=sdk_date())
         response = await self._short.request(method, url, content=raw if body is not None
                                                else None, headers=signed)
-        if response.status_code >= 400:
-            raise UpstreamHTTPError(response.status_code,
-                                    await base.read_body_bounded(response))
-        try:
-            data = response.json()
-        except ValueError as error:
-            raise UpstreamProtocolViolation(
-                f"non-JSON response from {url}",
-                public="upstream returned a non-JSON response") from error
+        data = await json_or_raise(
+            response, UpstreamHTTPError, url,
+            public="upstream returned a non-JSON response")
         if not isinstance(data, dict):
             raise UpstreamProtocolViolation(
                 f"unexpected response shape from {url}",

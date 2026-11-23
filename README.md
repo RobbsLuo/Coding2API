@@ -392,6 +392,8 @@ curl -X POST http://127.0.0.1:8000/v1/fetch \
 ### 凭证限额与在途
 
 - **限额护栏**（行内「设置限额」，四项独立，全空 = 不受限，判定在选号前）：保留积分（剩余 ≤ 值 → 整号停用，余额未知不猜）、每日 token 上限、每日积分上限、按模型 token 上限（`{模型: 上限}`，只停该模型）。当日 = 北京时间自然日。写入 `PUT /api/credentials/{id}/limits`（整体替换，即时生效，审计 `credential.limits`）。
+- **凭证级模型白名单**（同一对话框）：`allowed_models` = fnmatch glob、逗号分隔，`''` = 不限制，语法与 API Key 的模型白名单一致。**只作用于对话 / 推理选号**：不在列表里的模型不选这个号，但不硬禁用、不写冷却，换个模型立即可用；签到 / 刷新 / 探活 / 额度探测 / 模型列表等后台路径不受限。模型名无法判定（空 / `auto`）时放行，避免把池子摘空。
+- **并发编辑冲突**：编辑端点带 `expected_updated_at`（列表每行已返回），不匹配回 `409 credential_conflict` 并附当前行快照；管理台提示「已被他人修改，请刷新」。版本号只在**人工编辑**时推进，后台轮询/冷却写入不推进，所以打开着的编辑页不会被自己刷成过期。
 - **在途上限** `MAX_INFLIGHT_PER_CREDENTIAL`（默认 0 = 不限，可热更）：同一凭证并发达到该值后不再参与选号；计数进程内，租约在请求结束时释放，另有 600s TTL 兜底。**兼作负载键**：插在「免费优先」之后、到期额度之前 → 并发自动摊到空闲号。
 - **耗尽语义**：候选全因限额 / 在途跳过 → `no_healthy_credential` 503；模型级冷却 → `model_unavailable`；上游限流 / 额度类冷却统计记 `rate_limit`（对外码仍是 `no_healthy_credential`）。
 
@@ -407,7 +409,7 @@ curl -X POST http://127.0.0.1:8000/v1/fetch \
 `GET /v1/models` 与 Playground 下拉只合并**当前有可用凭证**的渠道（冷却中仍算）。顺序：CodeBuddy（国内 → 国际）、TRAE、Qoder、CodeArts、OfficeAce、小浣熊、灵犀，Zen / Kilo 垫底；组内按名字典序；多渠道模型归最高优先级渠道（`src/api/model_merge.py` 的 `_PROVIDER_RANK`）。
 
 - **请求路由只认这份缓存**：目录能证明归属 → 候选只有那些渠道，全不可用 → 503；模型完全不在目录 → 仍按全部候选路由；直连指定与 Key 渠道绑定不受影响。
-- **落盘与启动即用**：进程内 TTL 缓存（300s）之外，每次拉取成功写 `DATA_DIR/model_catalog.json`，启动时同步读回；快照损坏或超 7 天只丢缓存。`MODEL_CATALOG_MINUTES` 任务兜底。
+- **落盘与启动即用**：进程内 TTL 缓存（只有服务层一层，TTL 见 `MODEL_LIST_TTL_SECONDS`）之外，每次拉取成功写 `DATA_DIR/model_catalog.json`，启动时同步读回；快照损坏或超 7 天只丢缓存。`MODEL_CATALOG_MINUTES` 任务兜底。
 - **stale-while-revalidate**：有缓存立刻回旧列表，TTL 到期后台刷新；连续失败按 2^(n-1)×TTL 退避（封顶 2 小时），日志只在首次失败打 WARNING。
 - **管理台「模型列表」页**（`GET /api/model-catalog`）：只读展示 OpenRouter 公开目录（刊例价、上下文 / 输出上限、模态、能力、知识截止、AA 三项指数，非本服务实测），带 `available` 与「只看当前渠道」开关。浮动别名取同族最新快照的分（按 `canonical_slug` 日期）。
 - **疑似下线视图**（`GET /api/models/availability`，operator）：最近 N 天（默认 7）的 `upstream_blocked` / `model_not_found` / `invalid_request` 按 `(渠道, 模型)` 聚合，行内可「加入黑名单」→ `model_blocklist` + 审计。

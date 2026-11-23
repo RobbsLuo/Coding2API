@@ -223,7 +223,7 @@ class FakeRepo:
     successes: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
-    def candidates(self, providers=None, *, selectable_only=False):
+    def candidates(self, providers=None, *, selectable_only=False, model=None):
         return [c for c in self.rows if providers is None or c.provider in providers]
 
     def provider_of(self, credential_id):

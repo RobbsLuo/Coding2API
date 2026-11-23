@@ -133,11 +133,17 @@ PROBE_DEAD_STATUSES = frozenset({400, 401, 403, 404})
 PROBE_PROMPT = "hi"
 # 探活结果缓存时长（秒）：探活是整条模型列表链路里最贵的一步——逐个真发一次
 # 推理，首字最慢的模型可占十几秒，而总耗时等于最慢那个。免费模型的增删却很慢，
-# 所以缓存判活结果，比服务层的 MODEL_LIST_TTL_SECONDS（300s）长一档：服务层每
-# 5 分钟到期重拉一次，此处直接复用上次判活集，只有超过本 TTL 才真的重探。
+# 所以缓存**判活结论**，比服务层的 MODEL_LIST_TTL_SECONDS（300s）长一档：服务层
+# 每 5 分钟到期重拉清单时直接复用上次判活集，只有超过本 TTL 才真的重探。
 # 代价：免费模型下线后，最多多留在列表里 30 分钟（选中会 400/401，由引擎按
 # 无效请求处理，不会误冷却凭证）。
-MODELS_CACHE_TTL_SECONDS = 1800.0
+#
+# **只给判活结论用，不给模型清单用**（P2-18）：清单本身必须跟着服务层 TTL 走，
+# 否则服务层「到期重拉」拿到的还是 30 分钟前的旧清单，两层周期倒挂。
+PROBE_CACHE_TTL_SECONDS = 1800.0
+# 清单请求去重窗口（秒）：纯粹挡「同一时刻的并发/紧邻多次调用」，恒小于服务层
+# 的 300s，故不会把列表刷新周期拖长。清单 GET 本身很便宜，不值得长缓存。
+MODEL_LIST_DEDUPE_SECONDS = 60.0
 
 # 流式无总超时防长流截断；短请求 30s 防悬挂（与 TRAE 同策略）
 # 写超时覆盖的是上传请求体阶段，不是首字等待：大上下文请求体可达数 MB，
@@ -526,7 +532,8 @@ class ZenClient(LazyClients):
         gate_tools: tuple[str, ...] = REQUIRED_TOOLS,
         user_agent: str = "",
         free_suffix: str = FREE_MODEL_SUFFIX,
-        models_cache_ttl: float = MODELS_CACHE_TTL_SECONDS,
+        models_cache_ttl: float = MODEL_LIST_DEDUPE_SECONDS,
+        probe_cache_ttl: float = PROBE_CACHE_TTL_SECONDS,
         stream_client: httpx.AsyncClient | None = None,
         short_client: httpx.AsyncClient | None = None,
         proxy: str | None = None,
@@ -545,13 +552,21 @@ class ZenClient(LazyClients):
         self.gate_tools = tuple(gate_tools) or REQUIRED_TOOLS
         self.user_agent = user_agent
         self.free_suffix = free_suffix
+        # **两层缓存，两个周期**（P2-18）：
+        # - 清单：短 TTL，只挡并发 / 紧邻调用，服务层 300s 到期即拿到新清单。
+        # - 判活：长 TTL（服务层 TTL 长一档），最贵的一步不必跟着列表重跑。
         self.models_cache_ttl = models_cache_ttl
+        self.probe_cache_ttl = probe_cache_ttl
         # v2 的 trace 每进程一条、span 每请求一条（官方抓包行为）
         self._trace_id = secrets.token_hex(16)
-        # 上次判活的 (monotonic 时间, 模型表)；TTL 内直接复用，不再重探。
+        # 上次**判活**的 (monotonic 时间, 探过的 id 集合, 其中判活的 id 集合)：
+        # TTL 内只探新增模型。与清单分开——清单必须跟着服务层刷新，判活结论可以
+        # 更长寿（探活是整条链路最贵的一步）。
+        self._probe_cache: tuple[float, frozenset[str], frozenset[str]] | None = None
+        # 上次拉到的免费档清单（单调时钟, 模型表）：只做短窗口去重。
         self._models_cache: tuple[float, list[Model]] | None = None
         # 付费档清单单独缓存：带 Key 时上游返回全部付费模型、且不需要探活，
-        # 与免费档的判活缓存语义不同，混用会让「匿名 8 条 / 付费 70 条」互相覆盖。
+        # 与免费档的缓存语义不同，混用会让「匿名 8 条 / 付费 70 条」互相覆盖。
         self._paid_models_cache: tuple[float, list[Model]] | None = None
         self._stream_client = stream_client
         self._short_client = short_client
@@ -646,8 +661,11 @@ class ZenClient(LazyClients):
         `fetch_models` 的结果同时也是引擎登记模型归属的来源，过滤后扁平名
         请求不会再被路由到 zen 的付费模型上（否则 401 会误伤虚拟凭证）。
 
-        判活集按 `models_cache_ttl` 缓存：服务层每 300s 到期重拉一次列表，此处
-        直接复用上次判活结果，避免每 5 分钟就把十几个免费候选重探一遍。
+        判活集按 `probe_cache_ttl`（默认 1800s，比服务层 TTL 长一档）缓存：
+        服务层每 300s 到期重拉**清单**时直接复用上次判活结论，避免每 5 分钟
+        就把十几个免费候选重探一遍——探活是这条链路里最贵的一步（P2-18）。
+        **清单本身不跟着判活缓存**：清单另有 `models_cache_ttl`（60s）的短窗口
+        去重，恒短于服务层 TTL，故服务层到期重拉能拿到新清单。
         """
         if api_key:
             return await self._fetch_paid_models(api_key)
@@ -684,7 +702,7 @@ class ZenClient(LazyClients):
                                         credit_rate=0.0))
         if not candidates:
             raise zen_events.UpstreamProtocolViolation("models api returned no free candidates")
-        available = await self._probe_available([model.id for model in candidates])
+        available = await self._probe_cached([model.id for model in candidates])
         models = [model for model in candidates if model.id in available]
         if not models:
             # 候选全被**确定**判死（付费 401 / 下线 400 / 区域 403）：多半是上游
@@ -692,6 +710,34 @@ class ZenClient(LazyClients):
             raise zen_events.UpstreamProtocolViolation("no free model passed liveness probe")
         self._models_cache = (time.monotonic(), list(models))
         return models
+
+    async def _probe_cached(self, model_ids: list[str]) -> set[str]:
+        """判活结论按 `probe_cache_ttl` 缓存；只探**没探过**的 id。
+
+        缓存记两套 id：「这一轮探过谁」（`probed`）与「其中谁活着」（`alive`）。
+        TTL 内再来一轮时：
+
+        * 候选全在 `probed` 里 → 直接返回 `alive ∩ 候选`，一个请求都不发
+          （稳态：免费模型增删很慢，服务层每 300s 重拉清单也不该重探）。
+        * 出现没探过的 id（上游新上架的免费模型）→ **只探新增的那几个**，
+          并合并进缓存。既不会把新模型当成死号藏 30 分钟，也不会因为多一条
+          就让十几个老候选全部重探一遍（那是旧实现每 300s 白花的代价）。
+        """
+        now = time.monotonic()
+        cached = self._probe_cache
+        if cached is not None:
+            probed_at, probed, alive = cached
+            if now - probed_at < self.probe_cache_ttl:
+                fresh = [model_id for model_id in model_ids if model_id not in probed]
+                if not fresh:
+                    return set(model_ids) & set(alive)
+                newly_alive = await self._probe_available(fresh)
+                self._probe_cache = (
+                    probed_at, probed | frozenset(fresh), alive | frozenset(newly_alive))
+                return set(model_ids) & (set(alive) | set(newly_alive))
+        alive = await self._probe_available(model_ids)
+        self._probe_cache = (now, frozenset(model_ids), frozenset(alive))
+        return alive
 
     async def _fetch_paid_models(self, api_key: str) -> list[Model]:
         """带 Key 的模型清单：全部模型、不按 `-free` 收窄、不逐个探活。

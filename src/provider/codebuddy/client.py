@@ -53,7 +53,12 @@ from .tools import CodeBuddyTools
 
 DEFAULT_MODELS: tuple[str, ...] = ("glm-5.2", "deepseek-v4-pro")
 EP_CONFIG = "/v3/config"
-MODEL_CACHE_TTL_SECONDS = 600
+# 模型清单缓存 TTL：**只在服务层 TTL 之内做请求去重**，不是第二层生命周期。
+# 服务层 `api/models.MODEL_LIST_TTL_SECONDS`（300s）到期会重新调 `list_models`；
+# 这里若比它长（历史值 600s），服务层「到期重拉」拿到的还是这份旧缓存，列表
+# 实际刷新周期被拖到 10 分钟且与服务层口径倒挂（P2-18）。取 60s：并发 / 紧邻
+# 的多次调用不重复打上游，同时恒小于服务层 TTL，刷新周期由服务层说了算。
+MODEL_CACHE_TTL_SECONDS = 60
 # 模型缓存条目上限（LOW）：key 含 token 前缀，凭证轮换后旧条目永不命中。
 MODEL_CACHE_MAX_ENTRIES = 256
 
@@ -487,7 +492,12 @@ class CodeBuddyClient(LazyClients):
                      probed_at=int(time.time()))
 
     async def fetch_models(self, credential: CodeBuddyCredential) -> list[Model]:
-        """动态拉取模型列表（/v3/config），带 10 分钟缓存。失败抛错由调用方兜底。"""
+        """动态拉取模型列表（/v3/config），带 60s 请求去重缓存。
+
+        缓存只做「同一账号的并发/紧邻调用不重复打上游」，恒短于服务层的
+        列表 TTL（300s）——否则服务层到期重拉拿到的仍是旧值（P2-18）。
+        失败抛错由调用方兜底。
+        """
         cache_key = (credential.bearer_token[:64], self.endpoint)
         cached = _MODEL_CACHE.get(cache_key)
         now = time.time()

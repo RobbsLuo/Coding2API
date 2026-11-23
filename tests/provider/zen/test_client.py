@@ -298,7 +298,7 @@ async def test_fetch_models_probe_timeout_keeps_candidates(monkeypatch):
     assert [m.id for m in models] == ["slow-free"]
 
 async def test_fetch_models_reuses_probe_result_within_ttl():
-    """判活结果在 models_cache_ttl 内复用：服务层每 300s 重拉列表不会重探上游。"""
+    """判活结论在 probe_cache_ttl 内复用：服务层每 300s 重拉清单也不会重探上游。"""
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -319,8 +319,8 @@ async def test_fetch_models_reuses_probe_result_within_ttl():
     assert [m.id for m in second] == ["a-free"]
     assert len(calls) == upstream_calls      # 命中判活缓存，没再打上游
 
-async def test_fetch_models_cache_expiry_reprobes():
-    """超过 models_cache_ttl（此处设为 0）后重新拉清单并重探。"""
+async def test_fetch_models_cache_expiry_reprobes_list_only():
+    """清单 TTL 到期只重拉**清单**，判活结论仍在 probe_cache_ttl 内复用（P2-18）。"""
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -331,9 +331,66 @@ async def test_fetch_models_cache_expiry_reprobes():
 
     client = _client(handler, models_cache_ttl=0)
     await client.fetch_models()
+    assert calls == [EP_MODELS, EP_CHAT]
+    await client.fetch_models()
+    # 清单重拉了一次；判活命中长 TTL 缓存，不再真发对话探活
+    assert calls == [EP_MODELS, EP_CHAT, EP_MODELS]
+
+
+async def test_fetch_models_probe_cache_expiry_reprobes():
+    """超过 probe_cache_ttl（此处设为 0）后重探：判活不留永久结论。"""
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == EP_MODELS:
+            return httpx.Response(200, json={"data": [{"id": "a-free"}]})
+        return httpx.Response(200, text="")
+
+    client = _client(handler, models_cache_ttl=0, probe_cache_ttl=0)
+    await client.fetch_models()
     assert len(calls) == 2
     await client.fetch_models()
     assert len(calls) == 4
+
+
+async def test_fetch_models_probes_only_newly_listed_models():
+    """TTL 内新增的免费模型只探它自己，不把老候选全部重探一遍。"""
+    listed = [{"id": "a-free"}]
+    probed: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_MODELS:
+            return httpx.Response(200, json={"data": listed})
+        import json as _json
+        probed.append(_json.loads(request.content)["model"])
+        return httpx.Response(200, text="")
+
+    client = _client(handler, models_cache_ttl=0)
+    assert [m.id for m in await client.fetch_models()] == ["a-free"]
+    assert probed == ["a-free"]
+
+    listed.append({"id": "b-free"})
+    models = await client.fetch_models()
+    assert sorted(m.id for m in models) == ["a-free", "b-free"]
+    assert probed == ["a-free", "b-free"]        # 只探新增的那个
+
+
+async def test_fetch_models_drops_model_marked_dead_within_probe_ttl():
+    """判活结论（含判死）在 TTL 内复用：清单里仍在的模型不会因为缓存而复活。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == EP_MODELS:
+            return httpx.Response(200, json={"data": [{"id": "a-free"},
+                                                      {"id": "b-free"}]})
+        # b-free 确定不可用（403 = 区域限制）
+        status = 403 if b"b-free" in request.content else 200
+        return httpx.Response(status, text="")
+
+    client = _client(handler, models_cache_ttl=0)
+    first = await client.fetch_models()
+    assert [m.id for m in first] == ["a-free"]
+    second = await client.fetch_models()
+    assert [m.id for m in second] == ["a-free"]   # 判死结论没被清单重拉洗掉
 
 async def test_fetch_models_errors():
     def http_error(_request: httpx.Request) -> httpx.Response:

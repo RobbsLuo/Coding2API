@@ -185,6 +185,16 @@ def body_hint(body: bytes, limit: int = 2048) -> str:
     return text[:limit] + "…[truncated]"
 
 
+def body_text(body: bytes) -> str:
+    """上游响应体 → 小写文本（隔离非法 UTF-8，供不区分大小写的标记匹配）。
+
+    错误正文只用来对照标记串（`_RELOGIN_MARKERS` 等），故解码即统一小写；
+    非法字节按 `replace` 换成 U+FFFD 而不是抛错——上游返回半截二进制时宁可
+    匹配不到（回落到状态码分类），也不能让错误路径自己炸掉。
+    """
+    return body.decode("utf-8", errors="replace").lower()
+
+
 # 错误响应体的读取上限：只用于生成可读诊断，超出部分丢弃。防止恶意/异常
 # 上游返回超大 body 时把代理进程读爆内存（错误路径本不需要完整正文）。
 BOUNDED_BODY_LIMIT = 256 * 1024

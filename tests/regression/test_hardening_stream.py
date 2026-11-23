@@ -19,7 +19,7 @@ class _FakeCredentials:
     provider: str = "trae"
     data: dict = field(default_factory=lambda: {"accessToken": "a"})
 
-    def candidates(self, providers=None, *, selectable_only=False):
+    def candidates(self, providers=None, *, selectable_only=False, model=None):
         from src.engine.scheduler import Candidate
 
         return [Candidate(credential_id="c1", provider=self.provider)]
