@@ -13,6 +13,10 @@ from urllib.parse import urlsplit
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# 只借用受信反代的**解析口径**（见 trusted_proxies_problem 的复用说明）。
+# access.py 不反向依赖 config，不构成循环导入。
+from .auth.access import _parse_networks, split_entries
+
 _CODEBUDDY_CN = "https://copilot.tencent.com"
 _CODEBUDDY_INTL = "https://www.codebuddy.ai"
 
@@ -38,6 +42,43 @@ def public_base_url_problem(value: str) -> str | None:
     if not hostname:
         return (f"PUBLIC_BASE_URL 缺少主机名（当前 {value!r}）；"
                 "正确示例：https://ai.example.com")
+    return None
+
+
+def trusted_proxies_problem(*, trust_proxy: bool, trusted_proxies: str,
+                            require_trusted_proxies: bool) -> str | None:
+    """`TRUST_PROXY` / `TRUSTED_PROXIES` 组合的形态问题（None = 合法）。
+
+    `require_trusted_proxies`（默认 false）是**可选的启动硬拒开关**：默认不判，
+    因为存量部署大量是「前面恰好一层受信反代、名单留空」的旧形态
+    （`src/auth/access.py` 的 `_peer_trusted` 对空名单返回 True 就是为兼容它），
+    默认改成硬拒等于升级即起不来。只有运维明确知道不该留空时置 true。
+
+    置 true 后本函数挡两类配置：
+    - `TRUST_PROXY=true` 且名单为空：采信任意对端的 `X-Forwarded-For`，
+      该头由客户端可写 → API Key 的 `allowed_ips` 与登录限流失效。
+    - 名单非空但一条都解析不出：运行期是 fail closed（不采信 XFF），可运维
+      容易误以为名单已生效，写出「安全但其实全不走反代」的静默错配。
+
+    解析口径**复用** `src/auth/access.py` 的 `split_entries` / `_parse_networks`：
+    另写一份正则必然与运行期的容错规则漂移（比如 `10.0.0.1/24` 这种
+    `strict=False` 能收的写法），doctor 说「没问题」而实际不生效比不检查更糟。
+    """
+    if not require_trusted_proxies:
+        return None
+    if not trust_proxy:
+        # 不采信 XFF 就没有这条风险面，不该因为「名单没配」被拦。
+        return None
+    if not split_entries(trusted_proxies):
+        return ("TRUST_PROXY=true 但 TRUSTED_PROXIES 为空：X-Forwarded-For 可被"
+                "任意客户端伪造，API Key 的 allowed_ips 与登录限流都会失效；"
+                "修法二选一：配置 TRUSTED_PROXIES（受信反代对端的 IP/CIDR，"
+                "逗号分隔），或关闭 TRUST_PROXY")
+    if not _parse_networks(trusted_proxies):
+        return (f"TRUSTED_PROXIES 没有任何一条能解析成 IP/CIDR（当前 "
+                f"{trusted_proxies!r}）：运行期会 fail closed（不采信 "
+                "X-Forwarded-For），但 TRUST_PROXY 仍开着、容易误以为名单已生效；"
+                "请改成受信反代对端的 IP/CIDR（如 172.31.250.0/24），或关闭 TRUST_PROXY")
     return None
 
 
@@ -74,6 +115,14 @@ class Settings(BaseSettings):
     # 有直连入口（如 docker 把 PORT 发布到 0.0.0.0）时必须显式配这一项，
     # 否则攻击者可自带 `X-Forwarded-For: <白名单IP>` 绕过 Key 的 allowed_ips。
     trusted_proxies: str = ""
+
+    # 是否把「TRUST_PROXY=true 但 TRUSTED_PROXIES 为空」当成启动失败。
+    # 环境变量 `REQUIRE_TRUSTED_PROXIES`。
+    # **默认 false = 保持旧行为**：存量部署大量是「前恰好一层受信反代 + 名单
+    # 留空」的形态（`_peer_trusted` 对空名单返回 True 正是为兼容它），默认硬拒
+    # 等于升级即起不来，只保留 doctor 的 WARN 主动提示。知道本部署不该留空时
+    # 置 true，可在启动期挡下「反代旁还有直连入口」这类配置失误。
+    require_trusted_proxies: bool = False
 
     # 上游（白名单内的地址才可接收真实 Token）
     codebuddy_api_endpoint: str = _CODEBUDDY_CN

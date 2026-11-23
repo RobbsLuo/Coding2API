@@ -357,6 +357,22 @@ def test_forwarded_for_ignored_without_trust_proxy(tmp_path):
             "X-Forwarded-For": "203.0.113.9"})
     assert response.status_code == 403
 
+def test_build_app_rejects_enforced_empty_trusted_proxies(tmp_path):
+    """REQUIRE_TRUSTED_PROXIES=true + TRUST_PROXY=true + 空名单 → 启动期硬拒。
+
+    错误要在建库/起线程之前抛出（否则进程处于「库已建、服务没起来」的半状态）。
+    """
+    with pytest.raises(RuntimeError) as caught:
+        build_app(_settings(tmp_path, TRUST_PROXY=True, REQUIRE_TRUSTED_PROXIES=True))
+    assert "TRUSTED_PROXIES" in str(caught.value)
+    assert "修正 .env 后重启" in str(caught.value)
+    assert not (tmp_path / "coding2api.sqlite3").exists()
+
+def test_build_app_tolerates_empty_trusted_proxies_by_default(tmp_path):
+    """默认未强制：同样「可疑」的配置照常构建——升级不打断存量部署是硬要求。"""
+    app = build_app(_settings(tmp_path, TRUST_PROXY=True))
+    assert app.state.settings.require_trusted_proxies is False
+
 async def test_binding_narrows_to_bound_provider(dual):
     """绑定 TRAE：只打 TRAE，即使 CB 排序更优。"""
     executor, cb, trae = _executor(dual, {"codebuddy": {"glm-5.2": "glm-5.2"},

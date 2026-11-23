@@ -62,6 +62,7 @@ from .benchmarks import (
 from .config import (
     Settings,
     load_settings,
+    trusted_proxies_problem,
     validate_codearts_endpoint_allowed,
     validate_codebuddy_intl_endpoint_allowed,
     validate_endpoint_allowed,
@@ -422,6 +423,14 @@ def _restore_model_list(services) -> None:
 def build_app(settings: Settings | None = None, *, providers: dict | None = None,
               users: object | None = None) -> FastAPI:
     config = settings or load_settings()
+    # 受信反代的**可选**硬拒（默认关，见 Settings.require_trusted_proxies）：
+    # 放在建 DB / 起线程之前——配置不合法时不该先写库、再在 lifespan 里半启动。
+    proxy_problem = trusted_proxies_problem(
+        trust_proxy=config.trust_proxy,
+        trusted_proxies=config.trusted_proxies,
+        require_trusted_proxies=config.require_trusted_proxies)
+    if proxy_problem is not None:
+        raise RuntimeError(f"{proxy_problem}；请修正 .env 后重启")
     # 与 `run()` 同一道门禁，覆盖 `uvicorn src.main:build_app --factory` 这条
     # 生产路径：它不经过 run()，若不拦，Windows 上会绕过单实例锁直接起服务
     # ——正是 issue #46 说的「升级到保护静默失效」。

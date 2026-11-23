@@ -21,7 +21,7 @@
 - **`APP_SECRET` 随机且保密**：会话签名密钥 + 凭证加密密钥派生源（`src/db/crypto.py`）。**用 ≥32 字符的随机串**（`python -c "import secrets; print(secrets.token_urlsafe(32))"`），不要用人类可记的口令——派生是无盐单次 SHA-256，库外流后可离线爆破。泄露等同凭证泄露。
 - **管理台不要裸暴露公网**。必须暴露时前置带鉴权 / 限流的反向代理，并确保 `PUBLIC_BASE_URL` 与 `ALLOWED_HOSTS` 正确（`python3 scripts/doctor.py` 启动前校验：基址必须是 `http(s)://主机`，`HOST` 绑通配而基址仍是回环会直接 FAIL）。
 - **`/metrics` 默认只允许回环抓取**：`METRICS_TOKEN` 留空时非回环对端一律 401。公网入口模板（Caddy / nginx）另已摘除该路径；自己写反代时别把它透出去。
-- **反向代理部署必须配 `TRUSTED_PROXIES`**：`TRUST_PROXY=true` 而名单为空时采信任意对端的 `X-Forwarded-For`，`allowed_ips` 与登录限流都会失效。公网 compose 覆盖文件已把入口固定到专用子网。
+- **反向代理部署必须配 `TRUSTED_PROXIES`**：`TRUST_PROXY=true` 而名单为空时采信任意对端的 `X-Forwarded-For`，`allowed_ips` 与登录限流都会失效。公网 compose 覆盖文件已把入口固定到专用子网。可置 `REQUIRE_TRUSTED_PROXIES=true` 让不合法配置（名单为空或全写坏）启动即失败，而不是只靠 doctor 的 WARN。
 - **`data/`（SQLite，含凭证密文与审计）与 `secrets/users.txt`（口令哈希）不得外流**；服务启动把 `data/` 权限收到 `0700`。
   - POSIX：`chmod` 后读回校验 `mode & 0o077 == 0`。
   - Windows：`os.chmod` 对 ACL 无效，改用 `icacls` 把 DACL 替换成「仅当前用户 + SYSTEM」并切断继承（`src/security/private_files.py`），同样读回校验。

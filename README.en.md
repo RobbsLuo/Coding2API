@@ -584,6 +584,8 @@ The authoritative list is `src/config.py`; every item is passed through `docker-
 | `ALLOWED_HOSTS` | empty | Host allowlist (DNS rebinding defense) |
 | `ALLOW_TEST_HOST` | `false` | Allow `testserver`, tests only |
 | `TRUST_PROXY` | `false` | Trust `X-Forwarded-For`; only behind exactly one trusted proxy |
+| `TRUSTED_PROXIES` | empty | With `TRUST_PROXY=true`, only parse XFF from peers in this list (IP/CIDR, comma-separated); empty = any peer |
+| `REQUIRE_TRUSTED_PROXIES` | `false` | When `true`, `TRUST_PROXY=true` with an empty/unparsable list makes startup fail. Default `false` keeps existing "empty list" deployments working; doctor still reports a WARN |
 | `ENABLE_DOCS` | `false` | Expose `/docs` and `/openapi.json` |
 | `DUMP_REQUEST_BODIES` | `false` | Dump raw `/v1` request bodies (contains conversations, debugging only). Hot-reloadable, dir 0700 / files 0600 / ≤200 files and ≤24h; changes audited |
 | `GATEWAY_PAUSED` | `false` | Global kill switch: every key-authenticated `/v1` endpoint returns 503 (`code=service_paused`), admin console unaffected. Hot-reloadable, audited and logged as WARNING |

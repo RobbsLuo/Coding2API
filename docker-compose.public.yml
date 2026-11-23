@@ -29,6 +29,10 @@ services:
       # entries[-1]）。下方 networks.backend.ipam 把子网钉死为 172.31.250.0/24。
       TRUST_PROXY: "true"
       TRUSTED_PROXIES: "172.31.250.0/24"
+      # 上面两项是本文件的硬前提（没有 Caddy 就没有入口）：开启强制校验后，
+      # 谁把 TRUSTED_PROXIES 误删/写坏，应用会启动即失败而不是静默降级到
+      # 「采信任意对端的 XFF」。
+      REQUIRE_TRUSTED_PROXIES: "true"
       # Caddy 反代走 compose 网络，容器内必须监听 0.0.0.0；.env 里沿用
       # .env.example 的 HOST=127.0.0.1 会让容器只监听回环、Caddy 连不上。
       HOST: 0.0.0.0

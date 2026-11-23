@@ -253,6 +253,58 @@ def test_host_config_ipv6_base_matches_bracketed_allowlist(tmp_path):
     assert check.status == doctor.PASS
 
 
+# ------------------------------------------------ TRUST_PROXY / TRUSTED_PROXIES
+
+
+def test_trusted_proxies_default_is_pass(tmp_path):
+    """默认配置（不信 XFF、名单空、未强制）→ PASS，不该给存量部署亮黄灯。"""
+    check = doctor.check_trusted_proxies(_settings(tmp_path))
+    assert check.status == doctor.PASS
+    assert "TRUST_PROXY=false" in check.detail
+    assert "TRUSTED_PROXIES=空" in check.detail
+
+
+def test_trusted_proxies_empty_but_unenforced_is_warn(tmp_path):
+    """TRUST_PROXY=true 且名单为空、但未强制 → WARN：遗留风险主动提示不拦门禁。"""
+    check = doctor.check_trusted_proxies(_settings(tmp_path, TRUST_PROXY=True))
+    assert check.status == doctor.WARN
+    assert "allowed_ips" in check.detail
+    assert "REQUIRE_TRUSTED_PROXIES=true" in check.detail
+
+
+def test_trusted_proxies_enforced_empty_is_fail(tmp_path):
+    """强制开启且名单为空 → 服务会拒绝启动，doctor 必须 FAIL。"""
+    check = doctor.check_trusted_proxies(_settings(
+        tmp_path, TRUST_PROXY=True, REQUIRE_TRUSTED_PROXIES=True))
+    assert check.status == doctor.FAIL
+    assert "拒绝启动" in check.detail
+
+
+def test_trusted_proxies_enforced_but_trust_proxy_off_is_pass(tmp_path):
+    """强制开启但不采信 XFF：没有风险面，不该拦。"""
+    check = doctor.check_trusted_proxies(_settings(
+        tmp_path, TRUST_PROXY=False, REQUIRE_TRUSTED_PROXIES=True))
+    assert check.status == doctor.PASS
+
+
+def test_trusted_proxies_enforced_unparsable_is_fail(tmp_path):
+    """名单非空但写坏（`not-an-ip`）：运行期 fail closed，配置层却会拦启动。"""
+    check = doctor.check_trusted_proxies(_settings(
+        tmp_path, TRUST_PROXY=True, TRUSTED_PROXIES="not-an-ip",
+        REQUIRE_TRUSTED_PROXIES=True))
+    assert check.status == doctor.FAIL
+    assert "not-an-ip" in check.detail
+
+
+def test_trusted_proxies_enforced_valid_is_pass(tmp_path):
+    check = doctor.check_trusted_proxies(_settings(
+        tmp_path, TRUST_PROXY=True, TRUSTED_PROXIES="172.31.250.0/24",
+        REQUIRE_TRUSTED_PROXIES=True))
+    assert check.status == doctor.PASS
+    assert "172.31.250.0/24" in check.detail
+    assert "REQUIRE_TRUSTED_PROXIES=true" in check.detail
+
+
 # ------------------------------------------------------------- 迁移条目计数
 
 

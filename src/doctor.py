@@ -31,7 +31,8 @@ from pathlib import Path
 
 import httpx
 
-from .config import Settings, public_base_url_problem
+from .auth.access import split_entries
+from .config import Settings, public_base_url_problem, trusted_proxies_problem
 from .db.crypto import CredentialCipher
 from .db.migrate import (
     _MIGRATION_COLUMN_DROPS,
@@ -225,6 +226,38 @@ def check_host_config(settings: Settings) -> Check:
     return Check("PUBLIC_BASE_URL / ALLOWED_HOSTS", FAIL,
                  f"{public_host} 不在 ALLOWED_HOSTS 里，管理台与回调会打不开"
                  f"（在 ALLOWED_HOSTS 加上 {host}）")
+
+
+def check_trusted_proxies(settings: Settings) -> Check:
+    """`TRUST_PROXY` / `TRUSTED_PROXIES` 组合（`SECURITY.md` 的部署须知项）。
+
+    与 `Settings.require_trusted_proxies` 同口径：那条默认 false 的开关决定
+    「不合法组合」是启动失败还是只提示，故这里的严重度跟着它走——
+
+    - 强制开启且组合不合法（空名单 / 名单全写坏）→ FAIL：服务会拒绝启动。
+    - 未强制，但 `TRUST_PROXY=true` 且名单为空 → WARN：这正是遗留风险，
+      运行期采信任意对端的 XFF（`allowed_ips` 与登录限流失效），主动提示
+      但不拦门禁（存量部署的合法形态）。
+    - 其余（未开 TRUST_PROXY，或名单已配好）→ PASS。
+    """
+    trust = "true" if settings.trust_proxy else "false"
+    raw = settings.trusted_proxies.strip()
+    listed = repr(raw) if raw else "空"
+    problem = trusted_proxies_problem(
+        trust_proxy=settings.trust_proxy,
+        trusted_proxies=settings.trusted_proxies,
+        require_trusted_proxies=settings.require_trusted_proxies)
+    if problem is not None:
+        return Check("受信反代", FAIL, f"{problem}（服务会拒绝启动，先修配置）")
+    if settings.trust_proxy and not split_entries(raw):
+        return Check("受信反代", WARN,
+                     "TRUST_PROXY=true 但 TRUSTED_PROXIES 为空：X-Forwarded-For "
+                     "可被任意客户端伪造，allowed_ips 与登录限流失效；"
+                     "配好名单后可按需置 REQUIRE_TRUSTED_PROXIES=true")
+    return Check("受信反代", PASS,
+                 f"TRUST_PROXY={trust} TRUSTED_PROXIES={listed}"
+                 f"（REQUIRE_TRUSTED_PROXIES="
+                 f"{'true' if settings.require_trusted_proxies else 'false'}）")
 
 
 def pending_migration_count(conn: sqlite3.Connection) -> int:

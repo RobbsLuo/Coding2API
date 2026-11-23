@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
-from src.config import Settings, validate_endpoint_allowed
+from src.config import Settings, trusted_proxies_problem, validate_endpoint_allowed
 from src.engine.scheduler import EXPIRY_WINDOW_SECONDS, SECONDARY_EXPIRY_WINDOW_SECONDS
 from tests.helpers.constants import SECRET
 
@@ -58,8 +59,57 @@ def test_public_base_url_accepts_legal_shapes(value):
     "http://[::1",           # 未闭合 IPv6 → urlsplit 抛 ValueError
 ])
 def test_public_base_url_rejects_illegal_shapes(value):
-    from pydantic import ValidationError
-
     with pytest.raises(ValidationError) as caught:
         Settings(_env_file=None, APP_SECRET=SECRET, PUBLIC_BASE_URL=value)
     assert "PUBLIC_BASE_URL" in str(caught.value)
+
+
+# ------------------------------------------- TRUST_PROXY / TRUSTED_PROXIES 组合
+
+
+def test_require_trusted_proxies_defaults_off():
+    """默认 false：不改变存量部署的行为（空名单照旧采信任意对端）。"""
+    s = Settings(_env_file=None, APP_SECRET=SECRET)
+    assert s.require_trusted_proxies is False
+    assert s.trust_proxy is False
+    assert s.trusted_proxies == ""
+
+
+def test_require_trusted_proxies_reads_env_name():
+    s = Settings(_env_file=None, APP_SECRET=SECRET, REQUIRE_TRUSTED_PROXIES="true")
+    assert s.require_trusted_proxies is True
+
+
+def test_trusted_proxies_problem_ignored_when_not_required():
+    """未强制时不判：空名单是存量部署的合法形态。"""
+    assert trusted_proxies_problem(
+        trust_proxy=True, trusted_proxies="", require_trusted_proxies=False) is None
+
+
+def test_trusted_proxies_problem_ignored_without_trust_proxy():
+    """不采信 XFF 就没有这条风险面，名单留空也不该拦。"""
+    assert trusted_proxies_problem(
+        trust_proxy=False, trusted_proxies="", require_trusted_proxies=True) is None
+
+
+def test_trusted_proxies_problem_flags_empty_list():
+    problem = trusted_proxies_problem(
+        trust_proxy=True, trusted_proxies="   ", require_trusted_proxies=True)
+    assert problem is not None
+    assert "TRUSTED_PROXIES" in problem and "allowed_ips" in problem
+    assert "关闭 TRUST_PROXY" in problem
+
+
+def test_trusted_proxies_problem_flags_wholly_unparsable_list():
+    """名单非空但一条都解析不出：运行期 fail closed，运维却以为已生效。"""
+    problem = trusted_proxies_problem(
+        trust_proxy=True, trusted_proxies="not-an-ip", require_trusted_proxies=True)
+    assert problem is not None
+    assert "not-an-ip" in problem and "fail closed" in problem
+
+
+def test_trusted_proxies_problem_accepts_valid_list():
+    """解析口径与运行期一致：`10.0.0.1/24` 这类 strict=False 写法也算合法。"""
+    assert trusted_proxies_problem(
+        trust_proxy=True, trusted_proxies="10.0.0.1/24, 2001:db8::/32",
+        require_trusted_proxies=True) is None
