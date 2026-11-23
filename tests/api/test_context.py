@@ -619,3 +619,113 @@ async def test_executor_reports_prefix_on_nonstream_path():
     await executor.complete(request, username="alice")
     assert len(reports) == 1
     assert reports[0][3]["messages"] is messages
+
+
+# ------------------------------------------------- 压缩收益计数（P1-13）
+
+def test_compress_counters_grow_when_tool_compression_triggers():
+    """开关开 → 触发次数 / 省下的字符都增长（验收口径一）。"""
+    from src.api.context import CompressStats
+
+    stats = CompressStats()
+    noisy = {"role": "tool", "content": "fatal\n" * 500}
+    compress = build_context_compressor(
+        {}, {}, _SettingsStub(enabled=False, tool_compress=True, tool_max_chars=100),
+        stats=stats)
+    out = compress("codebuddy", "m", {"messages": [{"role": "user", "content": "hi"},
+                                                   noisy]})
+
+    assert stats.triggers == 1
+    assert stats.tool_triggers == 1
+    assert stats.context_trims == 0
+    # 省下的字符 = 原文长度 − 压后长度（按整份 messages 的字符串 content 计）
+    before = len("hi") + len(noisy["content"])
+    after = sum(len(m["content"]) for m in out["messages"])
+    assert stats.chars_saved == before - after
+    assert stats.tokens_saved == int(stats.chars_saved * 0.25)
+
+
+def test_compress_counters_record_context_trims_separately():
+    from src.api.context import CompressStats
+
+    stats = CompressStats()
+    messages = [_user("old " * 500), _user("new")]
+    cache = {"qoder": {"m": Model(id="m", max_input_tokens=50)}}
+    compress = build_context_compressor(
+        cache, {"qoder": {"m": "m"}}, _SettingsStub(min_keep=1), stats=stats)
+    compress("qoder", "m", {"messages": messages})
+
+    assert stats.context_trims == 1
+    assert stats.triggers == 1
+    assert stats.tool_triggers == 0
+    assert stats.chars_saved == len("old " * 500)
+
+
+def test_counters_unchanged_tracks_switch_on_without_savings():
+    """开关开着但载荷未变（未超阈值 / 未知模型无窗口）→ 只记 unchanged。"""
+    from src.api.context import CompressStats
+
+    stats = CompressStats()
+    compress = build_context_compressor(
+        {}, {}, _SettingsStub(enabled=False, tool_compress=True, tool_max_chars=100),
+        stats=stats)
+    payload = {"messages": [{"role": "tool", "content": "ok"}]}
+    assert compress("codebuddy", "m", payload) is payload
+
+    assert stats.triggers == 0
+    assert stats.chars_saved == 0
+    assert stats.unchanged == 1
+
+
+def test_counters_stay_zero_when_both_switches_off():
+    """两个开关都关 → 请求体**逐字节**不变且计数器恒 0（验收口径二）。"""
+    import json
+
+    from src.api.context import CompressStats
+
+    stats = CompressStats()
+    noisy = {"role": "tool", "content": "\x1b[31mfatal\x1b[0m\n" * 500}
+    messages = [{"role": "system", "content": "s"}, _user("x" * 9000), noisy]
+    payload = {"messages": messages, "model": "m", "stream": True}
+    snapshot = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    cache = {"qoder": {"m": Model(id="m", max_input_tokens=50)}}
+
+    compress = build_context_compressor(
+        cache, {"qoder": {"m": "m"}}, _SettingsStub(enabled=False), stats=stats)
+    out = compress("qoder", "m", payload)
+
+    assert out is payload
+    assert json.dumps(out, ensure_ascii=False, sort_keys=True) == snapshot
+    assert stats.as_dict() == {"triggers": 0, "tool_triggers": 0, "context_trims": 0,
+                               "chars_saved": 0, "tokens_saved": 0, "unchanged": 0}
+
+
+def test_default_counter_is_the_process_singleton():
+    """未显式传 stats 时写进程级单例（生产装配方式），且实例可被重置隔离。"""
+    from src.api.context import COMPRESS_STATS
+
+    before = COMPRESS_STATS.unchanged
+    compress = build_context_compressor(
+        {}, {}, _SettingsStub(enabled=False, tool_compress=True, tool_max_chars=8000))
+    compress("codebuddy", "m", {"messages": [{"role": "tool", "content": "ok"}]})
+    assert COMPRESS_STATS.unchanged == before + 1
+
+
+def test_compressor_messages_missing_still_counts_unchanged():
+    """没有 messages 键（非 chat 形状）→ 不改载荷，记一次 unchanged。"""
+    from src.api.context import CompressStats
+
+    stats = CompressStats()
+    compress = build_context_compressor(
+        {}, {}, _SettingsStub(enabled=False, tool_compress=True), stats=stats)
+    payload: dict = {}
+    assert compress("codebuddy", "m", payload) is payload
+    assert stats.unchanged == 1
+
+
+def test_compress_stats_as_dict_exposes_tokens_saved():
+    from src.api.context import CompressStats
+
+    stats = CompressStats(chars_saved=8000)
+    assert stats.tokens_saved == 2000
+    assert stats.as_dict()["tokens_saved"] == 2000

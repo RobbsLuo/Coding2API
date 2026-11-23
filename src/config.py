@@ -16,6 +16,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # 只借用受信反代的**解析口径**（见 trusted_proxies_problem 的复用说明）。
 # access.py 不反向依赖 config，不构成循环导入。
 from .auth.access import _parse_networks, split_entries
+from .observability.otlp import endpoint_problem as otlp_endpoint_problem
 
 _CODEBUDDY_CN = "https://copilot.tencent.com"
 _CODEBUDDY_INTL = "https://www.codebuddy.ai"
@@ -554,11 +555,33 @@ class Settings(BaseSettings):
     # **启动期项**，不进热更表：热更值会落 DB 并被 /api/settings 回显，
     # 令牌不该出现在管理台页面上。
     metrics_token: str = ""
+    # OTLP/HTTP JSON 指标出口（默认空 = 关闭，零出站）：指向 OTel Collector
+    # 的 base URL（导出 POST 到 `{endpoint}/v1/metrics`）。只接受 http/https，
+    # 非回环主机强制 https（见 observability/otlp.py 的 SSRF 校验）。
+    # **启动期项**：与 METRICS_TOKEN 同理，采集端令牌不进热更表。
+    otlp_endpoint: str = ""
+    # 导出周期（秒），默认 60；下限 15——比 15 秒更密只会让采集端收到重复的
+    # 累计快照，不会让数据更准。
+    otlp_export_seconds: int = 60
+    # 可选请求头（`k:v;k2:v2`）：采集端的 Authorization / X-Api-Key 等。
+    # 启动期项，不落库、不回显到管理台。
+    otlp_headers: str = ""
     # 请求级结构化日志（logfmt，见 src/webapp/access_log.py）：默认开启。
     # 只记 /api、/v1、/authorize 这些业务请求，每行含 request_id / 路由模板 /
     # 状态码 / 耗时；**不写 query string、请求体、用户名**（脱敏口径见
     # PROPOSAL §6）。关闭后回到只有 uvicorn 的裸 access log。可热更。
     request_log_enabled: bool = True
+    # 上游尝试响应头（X-Upstream-Attempts / X-Upstream-Degraded）：默认**关闭**。
+    # 这两个头会泄露账号池规模（一次请求换过几个号）、成本与路由指纹——对
+    # 任何拿到 API Key 的调用方都可见，而它本来只是本仓排障用的信息。关闭时
+    # 中间件不仅不写，还会主动剥离同名响应头（防上游/中间盒回传伪造值）。
+    # 只有自建、可信客户端的部署才建议打开。可热更。
+    expose_upstream_headers: bool = False
+    # 内容拒绝的发起者冻结阈值：同一 (发起者, 渠道) 的累计拒绝次数达到该值后，
+    # 该发起者请求这个渠道在 preflight 就被 403 `provider_access_frozen`。
+    # **默认 0 = 只记录不冻结**：一次内容拒绝可能是误判/客户端偶发，第一次就
+    # 冻结会很吵，且冻结是人工才能解除。可热更。
+    access_freeze_threshold: int = 0
     # 全局剥离响应里的思考内容（`EventKind.REASONING`）：默认关闭。开启后
     # **只过滤出站响应**、不改写请求体——上游仍照常思考（`reasoning_effort`
     # 原样透传），只是不再把思考交给客户端。刻意不做请求侧改写：实测 CB
@@ -589,6 +612,27 @@ class Settings(BaseSettings):
     @classmethod
     def _validate_public_base_url(cls, value: str) -> str:
         problem = public_base_url_problem(value)
+        if problem is not None:
+            raise ValueError(problem)
+        return value
+
+    @field_validator("otlp_export_seconds")
+    @classmethod
+    def _validate_otlp_export_seconds(cls, value: int) -> int:
+        # 下限 15 秒：更密只是让采集端收到更多重复的累计快照。写错成 0/负数
+        # 会让 TaskRunner 的循环变成忙等（每轮 sleep 0），必须在启动期挡下。
+        if value < 15:
+            raise ValueError("OTLP_EXPORT_SECONDS 不能小于 15（当前 "
+                             f"{value}）；到期导出的是累计快照，更密不会更准")
+        return value
+
+    @field_validator("otlp_endpoint")
+    @classmethod
+    def _validate_otlp_endpoint(cls, value: str) -> str:
+        # 启动期就拒掉非 http(s) / 明文 http 打公网：导出请求带 OTLP_HEADERS
+        # 里的采集端令牌，配错等于把令牌明文发出去。校验实现在 otlp 模块，
+        # 幂等且纯函数（不建连接），启动期调用不增加装配负担。
+        problem = otlp_endpoint_problem(value)
         if problem is not None:
             raise ValueError(problem)
         return value

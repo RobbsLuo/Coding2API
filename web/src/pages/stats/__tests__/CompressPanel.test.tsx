@@ -1,0 +1,75 @@
+import { screen } from "@testing-library/react";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { CompressPanel } from "../CompressPanel";
+import { mockFetch, renderStandalone } from "@/test-utils";
+import { OVERVIEW } from "@/test-utils/stats";
+
+const COMPRESSION = {
+  stats: {
+    triggers: 12,
+    tool_triggers: 9,
+    context_trims: 3,
+    chars_saved: 40000,
+    tokens_saved: 10000,
+    unchanged: 7,
+  },
+  context_compress_enabled: true,
+  tool_output_compress_enabled: true,
+};
+
+describe("CompressPanel", () => {
+  beforeEach(() => vi.unstubAllGlobals());
+
+  it("同屏展示触发次数、省下 token、命中率与开关状态", async () => {
+    mockFetch({ "/api/stats/compression": COMPRESSION });
+    renderStandalone(<CompressPanel stats={OVERVIEW} isOperator />);
+
+    expect(await screen.findByText("触发次数")).toBeInTheDocument();
+    expect(screen.getByText("12")).toBeInTheDocument();
+    expect(screen.getByText("省下 token（估算）")).toBeInTheDocument();
+    expect(screen.getByText("1万")).toBeInTheDocument();
+    expect(screen.getByText("同期缓存命中率")).toBeInTheDocument();
+    // OVERVIEW.cached_tokens=400 / input_tokens=1000 → 40.0%
+    expect(screen.getByText("40.0%")).toBeInTheDocument();
+    expect(screen.getByText(/上下文裁剪 开 · tool 输出 开/)).toBeInTheDocument();
+    expect(screen.getByText(/tool 输出 9 · 上下文裁剪 3/)).toBeInTheDocument();
+  });
+
+  it("空态：本次启动以来压缩未触发且无原地不变记录", async () => {
+    mockFetch({
+      "/api/stats/compression": {
+        stats: {
+          triggers: 0, tool_triggers: 0, context_trims: 0,
+          chars_saved: 0, tokens_saved: 0, unchanged: 0,
+        },
+        context_compress_enabled: true,
+        tool_output_compress_enabled: false,
+      },
+    });
+    renderStandalone(<CompressPanel stats={OVERVIEW} isOperator />);
+
+    expect(await screen.findByTestId("compress-panel-empty")).toHaveTextContent(
+      "本次启动以来压缩未触发",
+    );
+    expect(await screen.findByText(/上下文裁剪 开 · tool 输出 关/)).toBeInTheDocument();
+  });
+
+  it("viewer 不渲染面板、也不发请求", () => {
+    const spy = mockFetch({ "/api/stats/compression": COMPRESSION });
+    renderStandalone(<CompressPanel stats={OVERVIEW} isOperator={false} />);
+
+    expect(screen.queryByTestId("compress-panel")).not.toBeInTheDocument();
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it("端点失败时降级为说明，不拖垮页面", async () => {
+    mockFetch({
+      "/api/stats/compression": () => new Response("nope", { status: 503 }),
+    });
+    renderStandalone(<CompressPanel stats={undefined} isOperator />);
+
+    expect(await screen.findByTestId("compress-panel-error")).toHaveTextContent(
+      "压缩读数不可用",
+    );
+  });
+});

@@ -252,6 +252,18 @@ services:
       METRICS_ENABLED: ${METRICS_ENABLED:-true}
       # 留空 = /metrics 公开；设置后抓取需 Authorization: Bearer <token>
       METRICS_TOKEN: ${METRICS_TOKEN:-}
+      # 上游尝试链响应头（X-Upstream-Attempts / X-Upstream-Degraded）；默认关闭：
+      # 这些头泄露账号池规模、成本与路由指纹。可热更。
+      EXPOSE_UPSTREAM_HEADERS: ${EXPOSE_UPSTREAM_HEADERS:-false}
+      # 内容拒绝冻结阈值：同一发起者对同一渠道累计命中多少次后前置 403；
+      # 0 = 只记录不冻结（默认）。可热更。
+      ACCESS_FREEZE_THRESHOLD: ${ACCESS_FREEZE_THRESHOLD:-0}
+      # OTLP/HTTP JSON 指标出口；留空 = 关闭（零出站）。只导 gen_ai.* 指标，不含提示词/回答。
+      OTLP_ENDPOINT: ${OTLP_ENDPOINT:-}
+      # OTLP 导出周期秒（下限 15）
+      OTLP_EXPORT_SECONDS: ${OTLP_EXPORT_SECONDS:-60}
+      # OTLP 自定义头，格式 `k:v;k2:v2`
+      OTLP_HEADERS: ${OTLP_HEADERS:-}
       # 请求级结构化日志（logfmt，只记 /api、/v1、/authorize；不写 query/正文/用户名）
       REQUEST_LOG_ENABLED: ${REQUEST_LOG_ENABLED:-true}
       # 签到定时：本地 HH:MM 逗号分隔，留空 = 全天每 10 分钟（旧行为）；抖动分钟

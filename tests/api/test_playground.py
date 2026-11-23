@@ -198,7 +198,7 @@ def test_playground_preflight_failure_releases_lease(tmp_path, monkeypatch):
 
     app = _policy_app(tmp_path, quota='{"max_concurrency": 1}')
 
-    def boom(self, request, provider_binding=None):
+    def boom(self, request, provider_binding=None, **_kwargs):
         raise InvalidRequest("unknown provider for model")
 
     monkeypatch.setattr(_Executor, "preflight", boom)

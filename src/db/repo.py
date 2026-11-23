@@ -1816,6 +1816,73 @@ class UserRepository:
         return int(row["n"])
 
 
+class AccessFreezeRepository:
+    """访问冻结（access_freezes）：内容拒绝的发起者归因计数。
+
+    每一行是一次命中（不是「当前冻结态」）：阈值判定按 `(subject, provider)`
+    的累计行数，阈值 0 只记录不拦截。解冻删除这两键下的全部行，删除动作由
+    调用方写 `audit_events`——本仓储只负责计数与清理，不推断操作者意图。
+    """
+
+    def __init__(self, db) -> None:
+        self._db = db
+
+    def record_hit(self, *, subject: str, provider: str, reason: str,
+                   frozen_by: str = "auto", now: int | None = None) -> None:
+        """记一次内容拒绝命中（`reason` 只放脱敏标识，禁止上游正文）。"""
+        with self._db.transaction() as conn:
+            conn.execute(
+                "INSERT INTO access_freezes (subject, provider, reason, frozen_at, frozen_by) "
+                "VALUES (?,?,?,?,?)",
+                (subject, provider, reason, _now(now), frozen_by),
+            )
+
+    def count(self, *, subject: str, provider: str) -> int:
+        """该 (发起者, 渠道) 的累计命中次数。"""
+        row = self._db.connect().execute(
+            "SELECT COUNT(*) AS n FROM access_freezes WHERE subject = ? AND provider = ?",
+            (subject, provider)).fetchone()
+        return int(row["n"])
+
+    def is_frozen(self, *, subject: str, provider: str, threshold: int) -> bool:
+        """累计命中是否已达冻结阈值；threshold ≤ 0 恒为 False（只记录）。"""
+        return threshold > 0 and self.count(subject=subject, provider=provider) >= threshold
+
+    def recent(self, *, limit: int = 100, offset: int = 0,
+               subject: str | None = None, provider: str | None = None) -> list[dict[str, Any]]:
+        """按时间倒序列出命中记录（管理台列表用）。"""
+        clauses: list[str] = []
+        params: list[Any] = []
+        if subject:
+            clauses.append("subject = ?")
+            params.append(subject)
+        if provider:
+            clauses.append("provider = ?")
+            params.append(provider)
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._db.connect().execute(
+            f"SELECT subject, provider, reason, frozen_at, frozen_by "
+            f"FROM access_freezes {where} ORDER BY frozen_at DESC LIMIT ? OFFSET ?",
+            (*params, max(1, min(500, limit)), max(0, offset))).fetchall()
+        return [dict(row) for row in rows]
+
+    def subjects(self) -> list[dict[str, Any]]:
+        """按 (subject, provider) 聚合：命中次数 + 最近一次命中时刻。"""
+        rows = self._db.connect().execute(
+            "SELECT subject, provider, COUNT(*) AS hits, MAX(frozen_at) AS last_at "
+            "FROM access_freezes GROUP BY subject, provider "
+            "ORDER BY last_at DESC").fetchall()
+        return [dict(row) for row in rows]
+
+    def unfreeze(self, *, subject: str, provider: str) -> int:
+        """解冻：删除该 (发起者, 渠道) 的全部命中行，返回删除行数。"""
+        with self._db.transaction() as conn:
+            cursor = conn.execute(
+                "DELETE FROM access_freezes WHERE subject = ? AND provider = ?",
+                (subject, provider))
+        return cursor.rowcount
+
+
 class AuditRepository:
     """审计流水（audit_events）。
 

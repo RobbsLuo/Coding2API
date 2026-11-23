@@ -409,9 +409,9 @@ ERR_THRESHOLD = 3
 
 ## 8. 数据库
 
-DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准。`SCHEMA_VERSION = 37`（v33 `web_cookie_state`、v34 `routing_weight`、v35 `login_secret`、v36 `log_events`、v37 `credential_events`），16 张表：
+DDL 以 [src/db/schema.sql](src/db/schema.sql) 为准。`SCHEMA_VERSION = 38`（v33 `web_cookie_state`、v34 `routing_weight`、v35 `login_secret`、v36 `log_events`、v37 `credential_events`、v38 `access_freezes`），17 张表：
 
-`api_keys` / `credentials` / `credential_limits` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `checkin_events` / `credit_events` / `credential_model_cooldowns` / `credential_events` / `model_probes` / `runtime_settings` / `alert_events` / `log_events`。
+`api_keys` / `credentials` / `credential_limits` / `users` / `audit_events` / `usage_events` / `usage_hourly` / `growth_events` / `checkin_events` / `credit_events` / `credential_model_cooldowns` / `credential_events` / `access_freezes` / `model_probes` / `runtime_settings` / `alert_events` / `log_events`。
 
 ```sql
 PRAGMA journal_mode = WAL;

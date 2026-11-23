@@ -34,6 +34,7 @@ from ..config import Settings
 from ..db.key_usage import KeyUsageRepository
 from ..db.limits import LimitsRepository
 from ..db.repo import (
+    AccessFreezeRepository,
     AlertRepository,
     ApiKeyRepository,
     AuditRepository,
@@ -106,6 +107,8 @@ class Services:
     user_repo: UserRepository
     # 审计流水：登录/账号变动/凭证写操作。
     audit: AuditRepository
+    # 访问冻结（内容拒绝的发起者归因）：/api/access-freezes 列表与解冻。
+    access_freezes: AccessFreezeRepository
     # 运维告警事件：后台评估命中后落库，/api/alerts 回看。
     alerts: AlertRepository
     # 凭证级限额护栏配置（/api/credentials/{id}/limits）。

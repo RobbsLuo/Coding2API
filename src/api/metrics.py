@@ -23,11 +23,13 @@ from __future__ import annotations
 import hmac
 import ipaddress
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 
+from ..auth.rbac import require_operator
 from ..compat.openai.errors import error_payload
-from .deps import Services
+from .context import COMPRESS_STATS
+from .deps import Services, principal_from_request
 
 # Prometheus 文本格式版本；抓取方据此选择解析器。
 CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8"
@@ -65,14 +67,15 @@ def render_metrics(
     task_failures: list[tuple[str, int]],
     latency: list[tuple[str, float, float, int]] | None = None,
     inflight: int | None = None,
+    compress: dict[str, int] | None = None,
 ) -> str:
     """把各数据源的聚合结果渲染成 Prometheus text 格式（纯函数）。
 
     每个指标家族输出 `# HELP` + `# TYPE` + 样本行；样本次序由调用方保证稳定
     （数据源查询已排序），这里不再重排，保持输出可复现。
 
-    `latency` / `inflight` 为后加的可选输入：缺省时不输出对应家族（旧调用方
-    与测试逐字节不变）。
+    `latency` / `inflight` / `compress` 为后加的可选输入：缺省时不输出对应
+    家族（旧调用方与测试逐字节不变）。
     """
     lines: list[str] = []
 
@@ -131,6 +134,41 @@ def render_metrics(
     lines.append(f"# TYPE {PREFIX}task_failures_total counter")
     for task, count in task_failures:
         lines.append(_sample(f"{PREFIX}task_failures_total", [("task", task)], count))
+
+    if compress is not None:
+        # 压缩收益与缓存命中率必须**同屏**：压缩省下的 token 只有在「前缀缓存
+        # 还命中」时才是净收益（每次裁剪都会让前缀边界前移）。这两个家族放在
+        # 同一份响应里，抓取端与统计页才能并排读。
+        lines.append(f"# HELP {PREFIX}compress_triggers_total 压缩实际改写载荷的次数"
+                     "（tool 输出压缩 + 上下文裁剪；重启归零）。")
+        lines.append(f"# TYPE {PREFIX}compress_triggers_total counter")
+        lines.append(_sample(f"{PREFIX}compress_triggers_total", [],
+                             int(compress.get("triggers", 0))))
+        lines.append(f"# HELP {PREFIX}compress_tool_triggers_total 其中由 tool 输出"
+                     "压缩触发的次数。")
+        lines.append(f"# TYPE {PREFIX}compress_tool_triggers_total counter")
+        lines.append(_sample(f"{PREFIX}compress_tool_triggers_total", [],
+                             int(compress.get("tool_triggers", 0))))
+        lines.append(f"# HELP {PREFIX}compress_context_trims_total 其中由上下文裁剪"
+                     "触发的次数（每次裁剪都会前移前缀边界，可能压低缓存命中率）。")
+        lines.append(f"# TYPE {PREFIX}compress_context_trims_total counter")
+        lines.append(_sample(f"{PREFIX}compress_context_trims_total", [],
+                             int(compress.get("context_trims", 0))))
+        lines.append(f"# HELP {PREFIX}compress_chars_saved_total 省下的字符数"
+                     "（整份 messages 字符串 content 长度差；重启归零）。")
+        lines.append(f"# TYPE {PREFIX}compress_chars_saved_total counter")
+        lines.append(_sample(f"{PREFIX}compress_chars_saved_total", [],
+                             int(compress.get("chars_saved", 0))))
+        lines.append(f"# HELP {PREFIX}compress_tokens_saved_total 省下的 token 估算"
+                     "（字符数 × 0.25 下界系数，仅用于量级判断）。")
+        lines.append(f"# TYPE {PREFIX}compress_tokens_saved_total counter")
+        lines.append(_sample(f"{PREFIX}compress_tokens_saved_total", [],
+                             int(compress.get("tokens_saved", 0))))
+        lines.append(f"# HELP {PREFIX}compress_unchanged_total 调用了压缩但载荷未变"
+                     "的次数（开关开着却无收益的证据）。")
+        lines.append(f"# TYPE {PREFIX}compress_unchanged_total counter")
+        lines.append(_sample(f"{PREFIX}compress_unchanged_total", [],
+                             int(compress.get("unchanged", 0))))
 
     return "\n".join(lines) + "\n"
 
@@ -210,7 +248,41 @@ def create_router(services: Services) -> APIRouter:
             # 在途从调度器的租约跟踪器现读：它是「卡住」的唯一实时信号
             inflight=(services.inflight.total()
                       if services.inflight is not None else 0),
+            # 压缩收益与上面同一份响应：省下的 token 要跟命中率并排看
+            compress=_compress_snapshot(request),
         )
         return Response(content=text, headers={"Content-Type": CONTENT_TYPE})
 
+    @router.get("/api/stats/compression")
+    async def compression_stats(request: Request,
+                                principal=Depends(principal_from_request)):
+        """压缩收益 + 开关状态（统计页「压缩」面板的数据源）。
+
+        这里**只回计数与开关**，不含任何用户/凭证维度：它是运维判断「该开还是
+        该关」的进程级读数，任何已登录用户读到的事实相同。前端把这份数据与
+        同窗口的 `/api/stats/overview`（缓存命中率）并排展示——省下的 token
+        只有在缓存仍命中时才是净收益。
+
+        刻意不做成 `/metrics` 的替代品，也不新增重型聚合：数据来自压缩闭包里的
+        进程内计数器，O(1)。
+
+        仅 operator+：计数是**池级/进程级**的，viewer 的个人视图做不了「与我的
+        命中率同窗口」的对比；给出全局数只会让两边口径错位。
+        """
+        require_operator(principal)
+        settings = services.settings
+        return {
+            "stats": _compress_snapshot(request),
+            "context_compress_enabled": bool(settings.context_compress_enabled),
+            "tool_output_compress_enabled": bool(settings.tool_output_compress_enabled),
+        }
+
     return router
+
+
+def _compress_snapshot(request: Request) -> dict[str, int]:
+    """压缩计数器快照：优先读 app.state 注入的实例（测试/多实例部署可隔离），
+    未装配时回落到进程级单例（与 `build_context_compressor` 默认值同一对象）。
+    """
+    stats = getattr(request.app.state, "compress_stats", None)
+    return (stats if stats is not None else COMPRESS_STATS).as_dict()

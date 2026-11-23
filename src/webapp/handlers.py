@@ -26,9 +26,14 @@ from ..auth.throttle import ThrottledError
 from ..compat.openai.errors import error_payload
 from ..compat.openai.request import InvalidRequest
 from ..db.crypto import CredentialDecryptError
-from ..engine.executor import NoHealthyCredential, NoProviderForModel
+from ..engine.executor import (
+    NoHealthyCredential,
+    NoProviderForModel,
+    ProviderAccessFrozen,
+)
 from ..engine.model_resolver import UnknownModelError
 from ..provider.base import UpstreamProtocolViolation
+from ..provider.proxy import EgressUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +92,17 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(status_code=400,
                             content=error_payload(str(error), "invalid_request", 400))
 
+    @app.exception_handler(ProviderAccessFrozen)
+    async def _access_frozen(_request, error: ProviderAccessFrozen):
+        """内容拒绝累计达阈值：403 + `provider_access_frozen`。
+
+        冻结是 `(发起者, 渠道)` 级：同渠道的其他用户/凭证不受影响；解冻是
+        管理端动作（见 /api/access-freezes/unfreeze）。
+        """
+        return JSONResponse(
+            status_code=403,
+            content=error_payload(str(error), "provider_access_frozen", 403))
+
     @app.exception_handler(ForbiddenError)
     async def _forbidden(_request, error: ForbiddenError):
         # 沿用异常自带文案：除了 rbac 的 "admin only"，/v1 出口还会因 API Key
@@ -141,6 +157,23 @@ def register_exception_handlers(app: FastAPI) -> None:
             status_code=UPSTREAM_ERROR_STATUS,
             content=error_payload("upstream transport failed",
                                   "upstream_unavailable", UPSTREAM_ERROR_STATUS))
+
+    @app.exception_handler(EgressUnavailable)
+    async def _egress_unavailable(_request, error: EgressUnavailable):
+        """出口代理熔断：503 + `egress_unavailable` + `Retry-After`。
+
+        必须在 `httpx.TransportError` 的 502 兜底之前被 MRO 命中（继承链是
+        `EgressUnavailable -> ProxyError -> TransportError`，Starlette 按
+        `__mro__` 查处理器，更具体的本类优先）。这不是「上游 502」，而是
+        本机出口通道已被熔断、请求根本没发出去——给 503 + 退避秒数才能让
+        客户端等熔断冷却，而不是立刻重试继续撞。
+        """
+        response = JSONResponse(
+            status_code=503,
+            content=error_payload("upstream egress proxy unavailable",
+                                  "egress_unavailable", 503))
+        response.headers["Retry-After"] = str(error.retry_after)
+        return response
 
     @app.exception_handler(ClientDisconnect)
     async def _client_disconnected(_request, _error: ClientDisconnect):

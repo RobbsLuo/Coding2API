@@ -807,3 +807,18 @@ def test_checkin_seal_until_keeps_cross_day_window():
         seal_until = None
 
     assert task._seal_deadline(NoSeal(), now) == task._day_end(now)
+
+
+async def test_checkin_skips_when_provider_not_registered(repo):
+    """凭证的渠道没有 provider（渠道下线 / 配置漂移）：跳过而不是抛。
+
+    这条分支同时覆盖 `provider is None` 的 `data`/`checkin_scope` 判断——两个
+    都是 getattr/None 检查，少一个都会让整轮签到失败。
+    """
+    credentials, _db = repo
+    credentials.add(provider="ghost_channel", credential_data={"bearer_token": "g"})
+    provider = ProbeProvider()
+    task = CheckinTask(credentials, {"codebuddy": provider})
+    report = await task.run_once()
+    assert report.attempted == 0 and report.skipped == 1
+    assert provider.checkin_calls == 0

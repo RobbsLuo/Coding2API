@@ -90,6 +90,11 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
              "归一化后存内存供「上游状态」页展示。只做解释不做决策，不参与选号；"
              "周期见「上游状态页周期」。",
              group="ops"),
+    TaskSpec("otlp_export", "OTLP 指标导出",
+             "把与 `/metrics` 同源的脱敏指标（延迟 / 首字 / token / 错误计数）"
+             "按 OTLP/HTTP JSON 推给外部采集端；未配置 `OTLP_ENDPOINT` 时每轮"
+             "都是 no-op。永不导出提示词 / 回答 / system 指令。",
+             group="ops"),
 )
 
 TASK_BY_KEY: dict[str, TaskSpec] = {spec.key: spec for spec in TASK_SPECS}

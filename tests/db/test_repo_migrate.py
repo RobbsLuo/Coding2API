@@ -710,3 +710,31 @@ def test_legacy_db_upgrade_adds_login_secret(tmp_path):
     assert db.connect().execute(
         "SELECT login_secret FROM credentials WHERE id = 'cred_old'").fetchone()[0] == 1
     db.close()
+
+
+def test_schema_v38_adds_access_freezes_on_old_db(tmp_path):
+    """老库（v37）升级：补建 access_freezes，版本推进到 38，行为可写。"""
+    from src.db.migrate import SCHEMA_VERSION
+
+    db = Database(tmp_path / "legacy38.sqlite3")
+    apply_schema(db.connect())
+    # 模拟「升级前没有这张表」的 v37 库
+    db.connect().execute("DROP TABLE access_freezes")
+    db.connect().execute("PRAGMA user_version = 37")
+    db.connect().commit()
+
+    apply_schema(db.connect())
+    tables = {row[0] for row in db.connect().execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table'")}
+    assert "access_freezes" in tables
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 38
+    columns = {row[1] for row in db.connect().execute(
+        "PRAGMA table_info(access_freezes)")}
+    assert {"subject", "provider", "reason", "frozen_at", "frozen_by"} <= columns
+    db.connect().execute(
+        "INSERT INTO access_freezes (subject, provider, reason, frozen_at, frozen_by)"
+        " VALUES ('alice', 'trae', 'code=11128', 1, 'auto')")
+    db.connect().commit()
+    assert db.connect().execute(
+        "SELECT COUNT(*) FROM access_freezes").fetchone()[0] == 1
+    db.close()

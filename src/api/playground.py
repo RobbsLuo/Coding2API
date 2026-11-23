@@ -89,7 +89,7 @@ def create_router(services: Services) -> APIRouter:
         if chat_request.stream:
             # 前置校验：在 200 响应头发出前拒绝不可能成功的请求（否则只能断流）
             try:
-                executor.preflight(chat_request)
+                executor.preflight(chat_request, username=principal.username)
             except Exception:
                 lease.release()      # 400 不该占着并发名额
                 raise
@@ -100,7 +100,8 @@ def create_router(services: Services) -> APIRouter:
                 media_type="text/event-stream")
         try:
             completion = await executor.complete(chat_request,
-                                                 username=principal.username)
+                                                 username=principal.username,
+                                                 is_disconnected=request.is_disconnected)
         finally:
             lease.release()
         return JSONResponse(completion)

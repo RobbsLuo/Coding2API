@@ -126,7 +126,8 @@ async def dispatch_compat(
     if chat_request.stream:
         # 前置校验：在 200 响应头发出前拒绝不可能成功的请求（否则只能断流）
         try:
-            target = executor.preflight(chat_request, binding)
+            target = executor.preflight(chat_request, binding,
+                                        username=principal.username)
         except Exception:
             lease.release()          # 400 不该占着并发名额
             raise
@@ -157,11 +158,13 @@ async def dispatch_compat(
     if keepalive > 0:
         return await respond_with_keepalive(
             lambda: executor.complete(chat_request, username=principal.username,
-                                      provider_binding=binding),
+                                      provider_binding=binding,
+                                      is_disconnected=request.is_disconnected),
             grace=keepalive, convert=convert, release=lease.release)
     try:
         completion = await executor.complete(chat_request, username=principal.username,
-                                             provider_binding=binding)
+                                             provider_binding=binding,
+                                             is_disconnected=request.is_disconnected)
     finally:
         lease.release()
     return JSONResponse(convert(completion) if convert else completion)

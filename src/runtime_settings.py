@@ -437,6 +437,18 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "**不写 query string、请求体、用户名**。5xx 记 WARNING、其余记 INFO。"
                "关闭后只剩 uvicorn 的裸 access log。",
                group="observability"),
+    HotSetting("expose_upstream_headers", bool, "上游尝试响应头",
+               "在响应上写 `X-Upstream-Attempts` / `X-Upstream-Degraded`，让调用方"
+               "看到本次请求换过几个号、是否走了 fallback 组。**默认关**：这两个头"
+               "会泄露账号池规模、成本与路由指纹；关闭时中间件还会主动剥离同名响应"
+               "头，防上游/中间盒回传伪造值。只建议自建、可信客户端时打开。",
+               group="observability"),
+    HotSetting("access_freeze_threshold", int, "内容拒绝冻结阈值",
+               "同一 (发起者, 渠道) 累计内容拒绝次数达到该值后，该发起者请求该渠道"
+               "在 preflight 直接 403 `provider_access_frozen`。**默认 0 = 只记录"
+               "不冻结**：一次内容拒绝可能是误判，第一次就冻结会很吵，且冻结需人工"
+               "解冻。达到阈值后只拦该发起者，不影响同渠道的其他凭证/用户。",
+               minimum=0, group="gateway_control"),
     # reasoning 控制：只给机制、不给策略（不内置默认矩阵——未核实就是编造）
     HotSetting("force_disable_thinking", bool, "剥离思考内容",
                "开启后出站响应不再包含模型的思考内容（chat 的 reasoning_content / "
@@ -1134,6 +1146,14 @@ class RuntimeSettings:
     @property
     def request_log_enabled(self) -> bool:
         return bool(self.get("request_log_enabled"))
+
+    @property
+    def expose_upstream_headers(self) -> bool:
+        return bool(self.get("expose_upstream_headers"))
+
+    @property
+    def access_freeze_threshold(self) -> int:
+        return int(self.get("access_freeze_threshold"))
 
     # ------------------------------------------------------ reasoning 控制
 

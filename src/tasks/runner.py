@@ -22,6 +22,7 @@ from .backup import BackupTask
 from .checkin import CheckinTask
 from .growth import GrowthTask
 from .model_probe import ModelProbeTask
+from .otlp_export import OtlpExportTask
 from .pacer import Pacer
 from .quota_probe import QuotaProbeTask
 from .refresh import RefreshTask
@@ -81,6 +82,9 @@ class TaskRunner:
     # 模型可用性探活：None 表示不装配该循环。即使装配了，周期为 0（默认）
     # 时也由 `_sync_model_probe` 每轮判成 no-op——探活会真发上游请求。
     model_probe: ModelProbeTask | None = None,
+    # OTLP 指标导出：None 表示不装配该循环（老调用方/测试保持原行为）。
+    # 端点未配置时 `run_once` 返回 None，每轮是 no-op。
+    otlp_export: OtlpExportTask | None = None,
     quota_probe_minutes: int | Callable[[], int] = 60,
     growth_interval_minutes: int | Callable[[], int] = 60,
     refresh_interval_minutes: int | Callable[[], int] = 60,
@@ -91,6 +95,8 @@ class TaskRunner:
     alert_interval_minutes: int | Callable[[], int] = 5,
     backup_interval_minutes: int | Callable[[], int] = 1440,
     upstream_status_minutes: int | Callable[[], int] = 5,
+    otlp_export_seconds: int | Callable[[], int] = 60,
+    otlp_export_enabled: Callable[[], bool] | None = None,
     activity_enabled: Callable[[], bool] | None = None,
     alert_enabled: Callable[[], bool] | None = None,
     upstream_status_enabled: Callable[[], bool] | None = None,
@@ -104,6 +110,7 @@ class TaskRunner:
         self._retention = retention
         self._model_catalog = model_catalog
         self._model_probe = model_probe
+        self._otlp_export = otlp_export
         self._openrouter_catalog = openrouter_catalog
         self._alert = alert
         self._backup = backup
@@ -120,6 +127,10 @@ class TaskRunner:
         self._alert_minutes = live(alert_interval_minutes)
         self._backup_minutes = live(backup_interval_minutes)
         self._upstream_status_minutes = live(upstream_status_minutes)
+        self._otlp_export_seconds = live(otlp_export_seconds)
+        # 端点未配置 = 关闭：任务卡片显示「未启用」，而不是「启用但从不运行」。
+        self._otlp_export_enabled = (
+            otlp_export_enabled or (lambda: otlp_export is not None))
         # 活跃上报是否启用也可热更：装配时恒建对象（构造成本为零），
         # 每轮由 _sync_activity 问一次，关着时是 no-op。
         self._activity_enabled = activity_enabled or (lambda: activity is not None)
@@ -194,6 +205,12 @@ class TaskRunner:
         # 下限 1 分钟与热更项 minimum 对齐：官方状态页本身就是分钟级更新的，
         # 抓得比它更新只是白打别人的接口。
         return max(60, int(self._upstream_status_minutes()) * 60)
+
+    @property
+    def _otlp_export_interval(self) -> float:
+        # 下限 15 秒与配置项校验对齐：导出的是累计快照，更密不会更准，只会让
+        # 采集端收到重复样本；写错成 0 会让循环变成忙等。
+        return max(15.0, float(self._otlp_export_seconds()))
 
     @property
     def _checkin_interval(self) -> float:
@@ -277,6 +294,8 @@ class TaskRunner:
             specs.append(self._spec("backup", self._sync_backup))
         if self._upstream_status is not None:
             specs.append(self._spec("upstream_status", self._sync_upstream_status))
+        if self._otlp_export is not None:
+            specs.append(self._spec("otlp_export", self._sync_otlp_export))
         return specs
 
     def _spec(self, key: str,
@@ -388,6 +407,14 @@ class TaskRunner:
         运行态——页面显示「未运行」，而不是「刚跑过」。
         """
         task = self._require(self._upstream_status, "upstream status")
+        return await task.run_once()
+
+    async def _sync_otlp_export(self) -> object:
+        """OTLP 指标导出：端点未配置时 `run_once` 返回 None，本轮记 no-op。
+
+        失败策略在 `OtlpExporter` 内：连续失败只告警一次、永不抛，服务照常跑。
+        """
+        task = self._require(self._otlp_export, "otlp export")
         return await task.run_once()
 
     async def _loop(self, name: str, runner: Callable[[], Awaitable[object]],
@@ -520,6 +547,7 @@ class TaskRunner:
             "alert": lambda: self._alert_interval,
             "backup": lambda: self._backup_interval,
             "upstream_status": lambda: self._upstream_status_interval,
+            "otlp_export": lambda: self._otlp_export_interval,
         }
 
     def _task_enabled(self, key: str) -> bool:
@@ -528,6 +556,7 @@ class TaskRunner:
             "activity": self._activity_enabled,
             "alert": self._alert_enabled,
             "upstream_status": self._upstream_status_enabled,
+            "otlp_export": self._otlp_export_enabled,
         }.get(key)
         return True if getter is None else bool(getter())
 
@@ -567,6 +596,9 @@ def build_runner(credentials, providers: dict, stats_collector, config,
                  upstream_status: UpstreamStatusTask | None = None,
                  model_probe: ModelProbeTask | None = None,
                  model_probe_minutes: int | Callable[[], int] = 0,
+                 otlp_export: OtlpExportTask | None = None,
+                 otlp_export_seconds: int | Callable[[], int] = 60,
+                 otlp_export_enabled: Callable[[], bool] | None = None,
                  status: TaskStatusStore | None = None,
                  on_checkin_success: Callable[[str], None] | None = None) -> TaskRunner:
     """按配置装配后台任务（Pacer 由两个 provider 共享）。
@@ -688,6 +720,9 @@ def build_runner(credentials, providers: dict, stats_collector, config,
         backup_interval_minutes=lambda: config.backup_interval_minutes,
         upstream_status=upstream_status,
         upstream_status_minutes=lambda: config.upstream_status_minutes,
+        otlp_export=otlp_export,
+        otlp_export_seconds=lambda: config.otlp_export_seconds,
+        otlp_export_enabled=otlp_export_enabled,
         model_probe=model_probe,
         model_probe_minutes=lambda: config.model_probe_minutes,
         activity_enabled=lambda: config.activity_report_enabled,

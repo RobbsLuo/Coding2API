@@ -352,6 +352,7 @@ Never probed successfully → `balance_known` = `false` (unknown, not zero).
 - `GET /healthz`: adds pool counts, `ready == 0` → 503 (readiness / alerting).
 - Neither requires auth; both accept `HEAD`. The four counts are mutually exclusive (`ready` / `cooling` / `paused` / `disabled`) and sum to `total`. **Upgrade note**: `/healthz` changed from always-200 to 503 when `ready == 0`.
 - `GET /metrics` (Prometheus): on by default and **unauthenticated**; `METRICS_ENABLED=false` (hot-reloadable) → 404; with `METRICS_TOKEN` set, requests need `Authorization: Bearer <token>`.
+- **OTLP export (optional)**: with `OTLP_ENDPOINT` set, every `OTLP_EXPORT_SECONDS` seconds the service `POST`s `{endpoint}/v1/metrics` (OTLP/HTTP JSON, **no SDK**). Only `gen_ai.*` metrics (provider / model / tokens / latency / TTFT / error type); it **never** exports `gen_ai.input.messages` / `output.messages` / `system_instructions` or any content. Non-loopback endpoints must be https; failures log once and never take the service down.
 
 | Metric | Type | Labels | Source |
 |---|---|---|---|
@@ -439,11 +440,14 @@ Default is the **last 24 hours** (also 7 / 30 days, all time, custom). Custom us
 
 - **Failure types** (`CONTROLLED_ERROR_TYPES`): the closing row carries the **real attribution of the last error** — `model_unavailable` / `rate_limit` / `upstream_timeout` / `network_error` (local DNS / connect failure, no cooldown) / `context_overflow` (11115) / `model_capability` (CodeArts 001001020) / `model_not_found` (retired model, distinct from "bad request"). Only when **no credential was ever selected** does it fall back to `no_healthy_credential`. External codes are identical; only stats semantics differ.
 - **Request ID**: responses carry `X-Request-ID`; a valid inbound value is reused, otherwise generated (`[A-Za-z0-9._:-]`, 1–128 chars); stored in `usage_events.request_id` and **never forwarded upstream**.
+- **Attempt-chain headers** (only with `EXPOSE_UPSTREAM_HEADERS=true`, off by default): `X-Upstream-Attempts` = credentials actually tried, `X-Upstream-Degraded` = whether `MODEL_FALLBACK_GROUPS` fallback was used. When off, the middleware strips same-named headers (including forged values from upstreams or middleboxes). Off by default because these headers hand out pool size, cost and routing fingerprints. For streams they only reflect attempts **before** the response head is sent; later rotations cannot rewrite an already-sent head.
+- **Content-refusal freeze**: upstream content-safety refusals (currently only CodeBuddy `11128`) do not rotate or cool a credential; a hit is attributed to the requester (username first, API Key id otherwise). Once `ACCESS_FREEZE_THRESHOLD=N` (default `0` = record only) is reached, requests from that requester × provider get `403 provider_access_frozen` before reaching upstream; `GET /api/access-freezes` shows hits/frozen state and `POST /api/access-freezes/unfreeze` clears it (operator+, audited).
 - **Credit**: CodeBuddy uses upstream truth; TRAE is derived from official unit prices and marked `≈` (`src/provider/trae/pricing.py`, unlisted models are not derived). Backfill with `scripts/backfill_trae_credit.py`.
 - **Cost (estimated ≈)**: tokens × public list price, not the actual upstream charge. `(input−cached)×input + cached×cache + output×output` in USD → converted to CNY at write time using `USD_CNY_RATE`; history is not recomputed. Unmatched models are not priced (cost is a lower bound); channel-specific ids map to base models only via explicit equivalence rules.
 - **Cache hit rate**: cached tokens ÷ input tokens (one decimal); unreported or zero input → `—`.
 - **Output speed** = total tokens ÷ total generation time (not an average of per-request ratios). Two views: **body speed** `output_tokens - reasoning_tokens` and **total throughput** including reasoning. Only successful requests routed through this service with ≥1 output token; generation time = `latency_ms - ttfb_ms`; samples under 200ms or above 1000 tok/s are dropped. No samples → estimated mode (prefixed `≈`); neither → `—`.
 - **Charts**: requests / tokens / cost / cost per request / latency / TTFB / success rate / cache hit rate. Derived metrics are `sum ÷ sum`, no samples render as `—` (gap) not 0; latency and TTFB also get a percentile chart (P50 + P95 from details, 90 days only). The time axis is filled hourly. Out-of-domain `metric` is an explicit 400; an invalid custom range pauses fetching.
+- **Compression gains panel**: trigger counts (tool output / context trimming), characters and tokens saved (lower-bound estimate), the concurrent prefix-cache hit rate, and both compression switches, on one screen. Savings must be read next to the cache cost, otherwise "keep it on or turn it off" is unanswerable; `GET /api/stats/compression` (operator+, O(1) counter read).
 
 ### Credits and check-in records
 
@@ -659,6 +663,11 @@ The authoritative list is `src/config.py`; every item is passed through `docker-
 | `MAX_INFLIGHT_PER_CREDENTIAL` | `0` | Per-account in-flight cap; `0` = unlimited. 600s TTL fallback |
 | `METRICS_ENABLED` | `true` | Expose `/metrics`. Hot-reloadable |
 | `METRICS_TOKEN` | empty | When set, `/metrics` requires `Authorization: Bearer <token>`; empty = public. Startup-time |
+| `EXPOSE_UPSTREAM_HEADERS` | `false` | Adds `X-Upstream-Attempts` / `X-Upstream-Degraded`. Off by default: leaks pool size, cost and routing fingerprint; when off, same-named headers are stripped. Hot-reloadable |
+| `ACCESS_FREEZE_THRESHOLD` | `0` | Content-refusal freeze threshold: after N hits from the same requester × provider, requests get 403 `provider_access_frozen`; `0` = record only. Hot-reloadable |
+| `OTLP_ENDPOINT` | empty | OTLP/HTTP JSON metric export (`POST {endpoint}/v1/metrics`); empty = disabled, zero egress. Only `gen_ai.*` metrics, never prompts/answers. Non-loopback requires https. Startup-time |
+| `OTLP_EXPORT_SECONDS` | `60` | OTLP export interval in seconds (min 15) |
+| `OTLP_HEADERS` | empty | Extra OTLP headers, `k:v;k2:v2` |
 | `REQUEST_LOG_ENABLED` | `true` | Request-level structured logs (logfmt); no query, body or username. Hot-reloadable |
 | `FORCE_DISABLE_THINKING` | `false` | Strip reasoning from outbound responses; response filtering only. Hot-reloadable |
 | `REASONING_EFFORT_MAP` | `""` | Outbound effort mapping `channel=from:to;*=from:to` (`KNOWN_PROVIDERS`); `none` removes the key. Hot-reloadable |

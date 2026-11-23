@@ -9,7 +9,7 @@ from src.api.metrics import CONTENT_TYPE, _escape, _is_loopback, _sample, render
 from src.auth.session import create_session_token
 from src.config import Settings
 from src.main import build_app
-from tests.helpers.auth import isolated_settings
+from tests.helpers.auth import isolated_settings, set_session_cookie
 from tests.helpers.constants import SECRET
 
 # 回环对端：无令牌时只放行本机抓取（Prometheus 与被抓服务同机）。
@@ -283,3 +283,96 @@ def test_metrics_latency_skips_provider_without_ok_samples(tmp_path):
     assert 'coding2api_latency_ms_avg{provider="trae"}' in samples
     assert 'coding2api_latency_ms_avg{provider="kilo"}' not in samples
     assert samples["coding2api_inflight"] == "0"
+
+
+# ------------------------------------------------------- 压缩可观测（P1-13）
+
+def test_render_metrics_compress_family_is_opt_in():
+    """缺省不输出压缩家族（旧调用方逐字节不变），给了才输出。"""
+    base = render_metrics(requests=[], tokens=[], credentials={}, errors=[],
+                          task_failures=[])
+    assert "coding2api_compress_triggers_total" not in base
+
+    text = render_metrics(
+        requests=[], tokens=[], credentials={}, errors=[], task_failures=[],
+        compress={"triggers": 4, "tool_triggers": 3, "context_trims": 1,
+                  "chars_saved": 8000, "tokens_saved": 2000, "unchanged": 6})
+    samples = _samples(text)
+    assert samples["coding2api_compress_triggers_total"] == "4"
+    assert samples["coding2api_compress_tool_triggers_total"] == "3"
+    assert samples["coding2api_compress_context_trims_total"] == "1"
+    assert samples["coding2api_compress_chars_saved_total"] == "8000"
+    assert samples["coding2api_compress_tokens_saved_total"] == "2000"
+    assert samples["coding2api_compress_unchanged_total"] == "6"
+    for name in ("triggers", "tool_triggers", "context_trims", "chars_saved",
+                 "tokens_saved", "unchanged"):
+        assert f"# TYPE coding2api_compress_{name}_total counter" in text
+
+
+def test_metrics_compression_counters_share_the_compressor_instance(tmp_path):
+    """`/metrics` 与压缩闭包读**同一个**计数器：省下的量能在同屏看到。"""
+    from src.api.context import CompressStats
+
+    app = build_app(isolated_settings(tmp_path))
+    stats = CompressStats()
+    app.state.compress_stats = stats
+    stats.triggers = 2
+    stats.chars_saved = 4000
+    with TestClient(app, client=LOOPBACK) as http:
+        text = http.get("/metrics").text
+    samples = _samples(text)
+    assert samples["coding2api_compress_triggers_total"] == "2"
+    assert samples["coding2api_compress_chars_saved_total"] == "4000"
+    # 省下的 token 由字符数派生（下界系数 0.25），不是独立字段
+    assert samples["coding2api_compress_tokens_saved_total"] == "1000"
+
+
+def test_metrics_compression_falls_back_to_process_singleton(tmp_path):
+    """未注入实例（一次性装配/测试替身）时回落进程级单例，不 500。"""
+    from src.api.context import COMPRESS_STATS
+
+    app = build_app(isolated_settings(tmp_path))
+    app.state.compress_stats = None
+    with TestClient(app, client=LOOPBACK) as http:
+        samples = _samples(http.get("/metrics").text)
+    expected = COMPRESS_STATS.as_dict()
+    assert samples["coding2api_compress_triggers_total"] == str(expected["triggers"])
+    assert samples["coding2api_compress_tokens_saved_total"] == str(expected["tokens_saved"])
+
+
+def test_compression_endpoint_returns_counters_and_switch_state(tmp_path):
+    """统计页面板的数据源：计数 + 两个开关的当前生效值。"""
+    from src.api.context import CompressStats
+
+    app = build_app(isolated_settings(tmp_path, TOOL_OUTPUT_COMPRESS_ENABLED="true"))
+    stats = CompressStats(triggers=3, tool_triggers=3, context_trims=0,
+                          chars_saved=9000, unchanged=5)
+    app.state.compress_stats = stats
+    with TestClient(app, client=LOOPBACK) as http:
+        set_session_cookie(http)
+        body = http.get("/api/stats/compression").json()
+    assert body["stats"]["triggers"] == 3
+    assert body["stats"]["chars_saved"] == 9000
+    assert body["stats"]["tokens_saved"] == 2250
+    assert body["stats"]["unchanged"] == 5
+    assert body["context_compress_enabled"] is True
+    assert body["tool_output_compress_enabled"] is True
+
+
+def test_compression_endpoint_requires_session(tmp_path):
+    """运维读数也要登录（匿名拿不到进程内部的开关状态）。"""
+    app = build_app(isolated_settings(tmp_path))
+    with TestClient(app, client=LOOPBACK) as http:
+        assert http.get("/api/stats/compression").status_code == 401
+
+
+def test_compression_endpoint_is_operator_only(tmp_path):
+    """池级读数只给 operator+：viewer 的个人窗口与全局计数口径对不上。"""
+    settings = isolated_settings(tmp_path)
+    app = build_app(settings)
+    app.state.user_repo.create("viewer", "hash", role="viewer")
+    with TestClient(app, client=LOOPBACK) as http:
+        http.cookies.set("coding2api_session",
+                         create_session_token("viewer", SECRET))
+        response = http.get("/api/stats/compression")
+    assert response.status_code == 403

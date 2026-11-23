@@ -113,3 +113,49 @@ def test_trusted_proxies_problem_accepts_valid_list():
     assert trusted_proxies_problem(
         trust_proxy=True, trusted_proxies="10.0.0.1/24, 2001:db8::/32",
         require_trusted_proxies=True) is None
+
+
+# ------------------------------------------------------ OTLP 指标出口配置
+
+
+def test_otlp_defaults_are_off_with_sixty_second_period():
+    s = Settings(_env_file=None, APP_SECRET=SECRET)
+    assert s.otlp_endpoint == ""
+    assert s.otlp_export_seconds == 60
+    assert s.otlp_headers == ""
+
+
+@pytest.mark.parametrize("endpoint", [
+    "http://127.0.0.1:4318",
+    "http://localhost:4318",
+    "https://collector.example.com:4318",
+])
+def test_otlp_endpoint_accepts_legitimate_shapes(endpoint):
+    s = Settings(_env_file=None, APP_SECRET=SECRET, OTLP_ENDPOINT=endpoint)
+    assert s.otlp_endpoint == endpoint
+
+
+@pytest.mark.parametrize(("endpoint", "fragment"), [
+    ("file:///etc/passwd", "只接受 http/https"),
+    ("collector.example.com:4318", "只接受 http/https"),
+    ("https://", "缺少主机名"),
+    # 明文 http 打公网 = 把 OTLP_HEADERS 里的令牌挂到链路上
+    ("http://collector.example.com:4318", "必须使用 https"),
+])
+def test_otlp_endpoint_rejects_dangerous_shapes_at_startup(endpoint, fragment):
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None, APP_SECRET=SECRET, OTLP_ENDPOINT=endpoint)
+    assert fragment in str(excinfo.value)
+
+
+@pytest.mark.parametrize("seconds", [15, 60, 3600])
+def test_otlp_export_seconds_accepts_values_at_or_above_floor(seconds):
+    s = Settings(_env_file=None, APP_SECRET=SECRET, OTLP_EXPORT_SECONDS=seconds)
+    assert s.otlp_export_seconds == seconds
+
+
+@pytest.mark.parametrize("seconds", [0, -1, 14])
+def test_otlp_export_seconds_rejects_busy_loop_values(seconds):
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None, APP_SECRET=SECRET, OTLP_EXPORT_SECONDS=seconds)
+    assert "不能小于 15" in str(excinfo.value)

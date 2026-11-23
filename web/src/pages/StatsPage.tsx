@@ -33,6 +33,7 @@ import {
   type Percentile,
 } from "./stats/constants";
 import { AuxCharts } from "./stats/AuxCharts";
+import { CompressPanel } from "./stats/CompressPanel";
 import { EventsPanel } from "./stats/EventsPanel";
 import { FailurePanel } from "./stats/FailurePanel";
 import { GroupStatsPanel } from "./stats/GroupStatsPanel";
@@ -349,6 +350,10 @@ export function StatsPage() {
       />
 
       <StatsOverviewCards overviewFailed={overviewFailed} stats={stats} />
+
+      {/* 压缩收益与上面总览的缓存命中率**同屏**：省下的 token 只有在缓存仍命中
+          时才是净收益，分开看会得出相反结论。 */}
+      <CompressPanel stats={stats} isOperator={session.is_operator} />
 
       <TrendChartPanel
         metric={metric}

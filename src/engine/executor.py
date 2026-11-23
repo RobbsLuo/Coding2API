@@ -11,10 +11,12 @@ import socket
 import ssl
 import time
 from collections.abc import AsyncIterator, Callable, Iterable, Iterator
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 import httpx
+from starlette.requests import ClientDisconnect
 
 from ..compat.openai.errors import UpstreamStreamError, stream_error_frame
 from ..compat.openai.request import ChatRequest, InvalidRequest
@@ -40,10 +42,11 @@ from ..provider.base import (
     UpstreamTransportError,
     Usage,
     aclose_stream,
+    business_codes,
     event_error_kind,
 )
 from ..provider.naming import normalize_model_key
-from ..request_context import credential_scope, set_credential_id
+from ..request_context import credential_scope, get_api_key_id, set_credential_id
 from . import privacy
 from .continuation import ContinuationStream
 from .model_resolver import (
@@ -127,6 +130,79 @@ class NoHealthyCredential(Exception):
 
 class NoProviderForModel(Exception):
     pass
+
+
+class ProviderAccessFrozen(Exception):
+    """发起者在该渠道上因内容拒绝累计达阈值而被冻结 → 403。
+
+    冻结键是 `(发起者, 渠道)` 而不是凭证：内容拒绝由请求内容触发，同池换号
+    只会在更多账号上留下同样的拒绝记录（见 `access_freezes` 表）。
+    """
+
+
+class ContentRejected(InvalidRequest):
+    """上游以内容安全理由拒绝请求：不换号、不冷却、只归因发起者。
+
+    继承 `InvalidRequest` 以便复用 400 处理器与「请求无效」的对外文案，
+    但 `complete()` 的回退链循环必须显式放行它——否则同一个违规请求会被
+    发到回退模型/渠道，等同于换号重试（本类要避免的正是这件事）。
+    """
+
+
+# 内容拒绝的识别范围：只认 CodeBuddy 的 HTTP 403 + 11128。该码是上游
+# 「渠道/内容风控」（`Illegal API invocation from an unapproved channel`），
+# 400 形态也被它同时使用；这里只在 403 上拦截——403 在 CodeBuddy 分类里
+# 原本会落 DEAD（硬禁用整池号），必须抢在换号/冷却之前。其余渠道的 403
+# （lingxi 归 SOFT 等）没有已核实的内容拒绝语义，保持原分类不动。
+CONTENT_REJECTION_CODES = frozenset({11128})
+
+
+@dataclass
+class UpstreamTrace:
+    """本次请求的上游尝试轨迹（响应头用）。
+
+    用 contextvar 持有**同一个可变对象**：中间件在请求入口创建并读取，
+    executor 在流式/非流式的子任务里就地更新。之所以不直接把字段放
+    contextvar 再 set（contextvar 的 set 在子任务里不会回流到父任务），
+    是因为 StreamingResponse 的响应体迭代发生在 anyio 子任务中；共享对象
+    引用才能让父级中间件在 `http.response.start` 时读到最新值。
+    """
+
+    attempts: int = 0
+    degraded: bool = False
+
+
+_upstream_trace: ContextVar[UpstreamTrace | None] = ContextVar(
+    "upstream_trace", default=None)
+
+
+def begin_upstream_trace() -> UpstreamTrace:
+    """请求入口创建轨迹（中间件调用；返回对象供就地读取）。"""
+    trace = UpstreamTrace()
+    _upstream_trace.set(trace)
+    return trace
+
+
+def clear_upstream_trace() -> None:
+    """请求结束复原（中间件 finally 调用）。"""
+    _upstream_trace.set(None)
+
+
+def get_upstream_trace() -> UpstreamTrace | None:
+    """读当前请求的轨迹；无请求上下文返回 None。"""
+    return _upstream_trace.get()
+
+
+def _note_upstream_attempts(count: int) -> None:
+    trace = _upstream_trace.get()
+    if trace is not None:
+        trace.attempts = count
+
+
+def _note_upstream_degraded() -> None:
+    trace = _upstream_trace.get()
+    if trace is not None:
+        trace.degraded = True
 
 
 class _ModelExhausted(Exception):
@@ -327,6 +403,11 @@ class ExecutorDeps:
     # messages 正文与 tools 描述，`request.raw` / `tool_calls` 参数 / JSON schema
     # 都不动（见 src/engine/privacy.py）。零参 callable 时每次请求现读（热更）。
     privacy_rules: Any | None = None
+    # 访问冻结仓储（`db/repo.py` 的 AccessFreezeRepository）：内容拒绝按
+    # (发起者, 渠道) 计数 / 冻结。None = 不启用（向后兼容，行为与旧版一致）。
+    access_freezes: Any | None = None
+    # 冻结阈值（整数；0 = 只记录不冻结）。标量或零参 callable（热更）。
+    access_freeze_threshold: Any = 0
 
     def record(self, **fields: Any) -> None:
         """统计写入失败绝不能影响聊天响应。"""
@@ -706,7 +787,8 @@ class Executor:
         return ModelTarget(model=target.model, providers=(binding,), forced=True)
 
     def preflight(self, request: ChatRequest,
-                  provider_binding: str | None = None) -> ModelTarget:
+                  provider_binding: str | None = None,
+                  *, username: str = "unknown") -> ModelTarget:
         """流式路由建立 StreamingResponse 之前的前置校验。
 
         生成器体内的异常发生在响应头（200）已发出之后，只能表现为连接被
@@ -716,12 +798,92 @@ class Executor:
 
         回退链启用时按整条链判断：链首无注册上游但有回退项可用时放行，交给
         `stream` 逐链项尝试。
+
+        内容拒绝冻结也在这里前置：冻结是「该发起者在该渠道被停用」，
+        必须在建流之前给 403，而不是等上游再拒一次才报错。
         """
         target = self.resolve_target(request, provider_binding)
-        for attempt in self._fallback_chain(target):
+        chain = self._fallback_chain(target)
+        self._ensure_access_allowed(chain, username)
+        for attempt in chain:
             if self._registered(attempt):
                 return target
         raise NoProviderForModel(f"no provider registered for model {target.model!r}")
+
+    # ------------------------------------------------------- 内容拒绝 / 冻结
+
+    def _freeze_subject(self, username: str) -> str:
+        """冻结键里的「发起者」：用户名优先，无用户名回落 API Key id。
+
+        用户名来自鉴权结果；Key id 只在 `username` 缺失（后台/测试直调）时
+        兜底——绝不读入站头（那是客户端可写的，信它等于把冻结权交给调用方）。
+        """
+        if username and username != "unknown":
+            return username
+        return get_api_key_id() or "unknown"
+
+    def _ensure_access_allowed(self, chain: tuple[ModelTarget, ...],
+                               username: str) -> None:
+        """冻结达阈值时前置 403；阈值 ≤0 或无仓储时完全不动（旧行为）。
+
+        判定粒度是「链项的所有候选渠道都被冻结」才拦：多上游模型里只冻结
+        其中一家时，另一个渠道仍然可用，不该整体拒绝。绑定渠道/`@渠道`
+        只有一个候选，命中即拦。
+        """
+        freezes = self._deps.access_freezes
+        if freezes is None:
+            return
+        threshold = int(live(self._deps.access_freeze_threshold)() or 0)
+        if threshold <= 0:
+            return
+        subject = self._freeze_subject(username)
+        blocked: list[str] = []
+        for attempt in chain:
+            providers = self._registered(attempt)
+            if not providers:
+                continue
+            allowed = [provider for provider in providers
+                       if not freezes.is_frozen(subject=subject, provider=provider,
+                                                threshold=threshold)]
+            if allowed:
+                return
+            blocked.extend(providers)
+        if blocked:
+            raise ProviderAccessFrozen(
+                f"access to provider {blocked[0]!r} is frozen for this caller "
+                "after repeated content policy violations; contact an operator")
+
+    def _record_content_rejection(self, *, username: str, provider_id: str,
+                                  credential_id: str | None, model: str,
+                                  started: float, error: Exception,
+                                  usage: Usage | None = None,
+                                  ttfb_ms: int | None = None) -> str:
+        """内容拒绝只归因、不罚号：记冻结命中 + 一行 usage，返回原因标识。
+
+        不写凭证冷却、不累计错误数、不换号——这三个动作都属于「账号有问题」，
+        而内容拒绝属于「这次请求内容有问题」。统计 error_type 复用
+        `invalid_request`（受控白名单；真正的归因在 `access_freezes` 表）。
+        """
+        reason = _content_rejection_reason(error) or "content_rejected"
+        freezes = self._deps.access_freezes
+        if freezes is not None:
+            try:
+                freezes.record_hit(subject=self._freeze_subject(username),
+                                   provider=provider_id, reason=reason)
+            except Exception as failure:  # noqa: BLE001 - 记录失败不影响主响应
+                logger.warning("access freeze record failed: %s", failure)
+        self._deps.record(
+            username=username, provider=provider_id,
+            credential_id=credential_id, model=model, ok=False,
+            error_type="invalid_request",
+            input_tokens=_usage_field(usage, "input_tokens"),
+            output_tokens=_usage_field(usage, "output_tokens"),
+            reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
+            cached_tokens=_usage_field(usage, "cached_tokens"),
+            credit=_usage_field(usage, "credit"),
+            credit_estimated=bool(_usage_field(usage, "credit_estimated")),
+            ttfb_ms=ttfb_ms, latency_ms=_elapsed_ms(started))
+        return reason
 
     async def stream_guarded(self, request: ChatRequest, *, username: str = "unknown",
                              translator: StreamSink | None = None,
@@ -781,7 +943,11 @@ class Executor:
         if self._deps.affinity is not None:
             state.affinity_id = self._deps.affinity.pin_for(request.raw, username)
         exhausted: _ModelExhausted | None = None
-        for attempt in chain:
+        for index, attempt in enumerate(chain):
+            if index:
+                # 走到第二项及以后 = 本次请求用了 fallback 兼容组：响应头
+                # X-Upstream-Degraded 据此为 true（见 webapp/upstream_headers.py）
+                _note_upstream_degraded()
             if translator is None:
                 # 每链项自成一路出口（默认 chat 出口）：模型名随链项走。
                 # 注入的 translator（responses / anthropic）由调用方持有，
@@ -795,6 +961,11 @@ class Executor:
             except _ModelExhausted as error:
                 exhausted = error
                 continue
+            except ContentRejected as error:
+                # 内容拒绝：循环里已记过归因/冻结命中，这里只收尾。不换号、
+                # 不转回退模型（那等于换渠道重试同一份违规内容）。
+                yield state.translator.error_frame(str(error), "invalid_request")
+                return
             except (GeneratorExit, asyncio.CancelledError):
                 if not state.recorded and (state.translator.usage is not None
                                            or state.ttfb_ms() is not None):
@@ -857,6 +1028,9 @@ class Executor:
         # 原号重试一次；`effort_cap` 覆盖后续轮次的出站档位。
         effort_cap: str | None = None
         effort_retried = False
+        # 内容拒绝（可识别的上游内容/渠道风控）：不换号、不冷却、不转回退
+        # 模型；本项直接收尾。真正记账/冻结命中在 `_record_content_rejection`。
+        content_rejected = False
 
         def terminal(message: str, code: str) -> bytes:
             """终帧：本项未出帧时抛信号让外层试下一链项；已出帧则写错误帧收尾。"""
@@ -908,6 +1082,7 @@ class Executor:
                 state.provider, state.credential_id = provider_id or "-", credential_id
                 tried.add(credential_id)
                 attempts += 1
+                _note_upstream_attempts(attempts)
             # 按实际服务渠道压缩（未启用/未知窗口/未超限时原样返回）：窗口
             # 取该渠道自己的上限，不再被更小窗口的兄弟渠道拖累误裁
             payload = self._compress_payload(request, provider_id, target.model)
@@ -949,6 +1124,22 @@ class Executor:
                         self._check_model_substitution(
                             target.model, event.model, provider_id, credential_id)
                     if event.kind is EventKind.ERROR:
+                        if _event_content_rejection(event):
+                            # 内容拒绝：不换号、不冷却、不占轮换预算；记账在
+                            # `_record_content_rejection`（冻结命中 + usage 行）。
+                            rejection = UpstreamStreamError(event)
+                            self._record_content_rejection(
+                                username=state.username, provider_id=provider_id,
+                                credential_id=credential_id, model=target.model,
+                                started=state.started, error=rejection,
+                                usage=state.translator.usage,
+                                ttfb_ms=state.ttfb_ms())
+                            last_error = ContentRejected(
+                                "upstream rejected the request content "
+                                f"({_content_rejection_reason(rejection)})")
+                            content_rejected = True
+                            broken = True
+                            break
                         kind = await self._credit_if_exhausted(
                             _event_kind(event), credential_id, provider_id)
                         if kind is ErrKind.QUEUE:
@@ -1048,81 +1239,93 @@ class Executor:
                         yield frame
                     return
             except Exception as error:  # noqa: BLE001 - 统一转为冷却或上抛
-                kind = await self._credit_if_exhausted(
-                    _classify(error), credential_id, provider_id)
-                if kind is None:
-                    # 未归类的逃逸异常：`stream_guarded` 会把它兜成 500
-                    # internal_error。必须先留一行明细（已出帧时上游可能已真实
-                    # 计费）再原样上抛——不冷却凭证（无从判断是谁的问题）。
-                    # 已由 DEAD/RESTRICTED 尝试行覆盖本请求且未出帧时不重复
-                    # 记账，避免 `requests` 虚高（与下面收尾行同一口径）。
-                    if emitted or not attributed:
-                        self._record_unclassified_failure(
-                            username=state.username, provider_id=provider_id,
-                            credential_id=credential_id, model=target.model,
-                            started=state.started, error=error, state=state)
-                    raise
-                if kind is ErrKind.QUEUE:
-                    # 排队也可能以 HTTP 403 + 排队 body 的形式抛出（见
-                    # qoder.events.classify_status）：同样在原号上等后重开。
-                    plan = self._plan_queue_restart(
-                        getattr(error, "retry_after_seconds", None),
-                        emitted=emitted, rounds=queue_rounds, attempts=attempts,
-                        provider_id=provider_id, credential_id=credential_id,
-                        credential_data=credential_data)
-                    if plan is not None:
-                        queue_rounds = plan.rounds
-                        attempts = plan.attempts
-                        pinned = plan.pinned
-                        queued_wait = plan.wait
-                    else:
-                        kind = ErrKind.SOFT
-                        logger.warning("上游 %s 排队但无法重开（凭证 %s）: %s",
-                                       provider_id, credential_id, _error_detail(error))
-                        self._note_upstream_error(credential_id, kind, provider_id,
-                                                  target.model, error,
-                                                  username=state.username,
-                                                  started=state.started)
-                        last_error, last_kind = error, kind
-                elif kind in REJECT_KINDS:
-                    # 请求无效（如该上游不认识模型 / 模型不支持该请求形态）：
-                    # 不冷却凭证，跳过该上游继续试其他上游；全部拒绝才以 400 结束
-                    # 推理档位被拒：原号降一档重试一次（HTTP 400 形态，
-                    # 与流内 error 事件同一套语义）
-                    lower = (None if emitted else self._downgrade_effort(
-                        payload, _error_detail(error), effort_retried))
-                    if lower is not None:
-                        logger.warning(
-                            "上游 %s 不认推理档位 %s（凭证 %s）→ 降到 %s 原号重试",
-                            provider_id, payload.get("reasoning_effort"),
-                            credential_id, lower)
-                        effort_cap, effort_retried = lower, True
-                        pinned = (credential_id, credential_data)
-                        continue
-                    logger.warning("上游 %s 拒绝模型 %s（凭证 %s 跳过）: %s",
-                                   provider_id, target.model, credential_id,
-                                   _error_detail(error))
-                    self._record_invalid(state.username, provider_id, credential_id,
-                                         target.model, state.started, error, kind)
-                    last_error, last_kind = error, kind
-                    self._skip_provider(provider_id, tried)
-                elif kind is ErrKind.RESTRICTED:
-                    # 账号被上游风控限制：跳过该渠道，别让同渠道其它号继续撞
-                    attributed = self._handle_restricted(
-                        provider_id=provider_id, credential_id=credential_id,
-                        model=target.model, error=error,
-                        username=state.username, started=state.started,
-                        attributed=attributed, tried=tried)
-                    last_error, last_kind = error, kind
+                reason = _content_rejection_reason(error)
+                if reason is not None:
+                    # 内容拒绝：不进入任何冷却/换号分支（见 `_record_content_rejection`）。
+                    self._record_content_rejection(
+                        username=state.username, provider_id=provider_id,
+                        credential_id=credential_id, model=target.model,
+                        started=state.started, error=error,
+                        usage=state.translator.usage, ttfb_ms=state.ttfb_ms())
+                    last_error = ContentRejected(
+                        f"upstream rejected the request content ({reason})")
+                    content_rejected = True
                 else:
-                    logger.warning("上游 %s 错误（凭证 %s，kind=%s）: %s",
-                                   provider_id, credential_id, kind,
-                                   _error_detail(error))
-                    attributed = self._note_upstream_error(
-                        credential_id, kind, provider_id, target.model,
-                        error, username=state.username,
-                        started=state.started) or attributed
-                    last_error, last_kind = error, kind
+                    kind = await self._credit_if_exhausted(
+                        _classify(error), credential_id, provider_id)
+                    if kind is None:
+                        # 未归类的逃逸异常：`stream_guarded` 会把它兜成 500
+                        # internal_error。必须先留一行明细（已出帧时上游可能已真实
+                        # 计费）再原样上抛——不冷却凭证（无从判断是谁的问题）。
+                        # 已由 DEAD/RESTRICTED 尝试行覆盖本请求且未出帧时不重复
+                        # 记账，避免 `requests` 虚高（与下面收尾行同一口径）。
+                        if emitted or not attributed:
+                            self._record_unclassified_failure(
+                                username=state.username, provider_id=provider_id,
+                                credential_id=credential_id, model=target.model,
+                                started=state.started, error=error, state=state)
+                        raise
+                    if kind is ErrKind.QUEUE:
+                        # 排队也可能以 HTTP 403 + 排队 body 的形式抛出（见
+                        # qoder.events.classify_status）：同样在原号上等后重开。
+                        plan = self._plan_queue_restart(
+                            getattr(error, "retry_after_seconds", None),
+                            emitted=emitted, rounds=queue_rounds, attempts=attempts,
+                            provider_id=provider_id, credential_id=credential_id,
+                            credential_data=credential_data)
+                        if plan is not None:
+                            queue_rounds = plan.rounds
+                            attempts = plan.attempts
+                            pinned = plan.pinned
+                            queued_wait = plan.wait
+                        else:
+                            kind = ErrKind.SOFT
+                            logger.warning("上游 %s 排队但无法重开（凭证 %s）: %s",
+                                           provider_id, credential_id, _error_detail(error))
+                            self._note_upstream_error(credential_id, kind, provider_id,
+                                                      target.model, error,
+                                                      username=state.username,
+                                                      started=state.started)
+                            last_error, last_kind = error, kind
+                    elif kind in REJECT_KINDS:
+                        # 请求无效（如该上游不认识模型 / 模型不支持该请求形态）：
+                        # 不冷却凭证，跳过该上游继续试其他上游；全部拒绝才以 400 结束
+                        # 推理档位被拒：原号降一档重试一次（HTTP 400 形态，
+                        # 与流内 error 事件同一套语义）
+                        lower = (None if emitted else self._downgrade_effort(
+                            payload, _error_detail(error), effort_retried))
+                        if lower is not None:
+                            logger.warning(
+                                "上游 %s 不认推理档位 %s（凭证 %s）→ 降到 %s 原号重试",
+                                provider_id, payload.get("reasoning_effort"),
+                                credential_id, lower)
+                            effort_cap, effort_retried = lower, True
+                            pinned = (credential_id, credential_data)
+                            continue
+                        logger.warning("上游 %s 拒绝模型 %s（凭证 %s 跳过）: %s",
+                                       provider_id, target.model, credential_id,
+                                       _error_detail(error))
+                        self._record_invalid(state.username, provider_id, credential_id,
+                                             target.model, state.started, error, kind)
+                        last_error, last_kind = error, kind
+                        self._skip_provider(provider_id, tried)
+                    elif kind is ErrKind.RESTRICTED:
+                        # 账号被上游风控限制：跳过该渠道，别让同渠道其它号继续撞
+                        attributed = self._handle_restricted(
+                            provider_id=provider_id, credential_id=credential_id,
+                            model=target.model, error=error,
+                            username=state.username, started=state.started,
+                            attributed=attributed, tried=tried)
+                        last_error, last_kind = error, kind
+                    else:
+                        logger.warning("上游 %s 错误（凭证 %s，kind=%s）: %s",
+                                       provider_id, credential_id, kind,
+                                       _error_detail(error))
+                        attributed = self._note_upstream_error(
+                            credential_id, kind, provider_id, target.model,
+                            error, username=state.username,
+                            started=state.started) or attributed
+                        last_error, last_kind = error, kind
             finally:
                 # break / 异常 / 客户端断开都走到这里：先清掉在途的取帧任务
                 # （超时后它可能还在等上游），再关闭上游流归还节流名额。
@@ -1131,6 +1334,14 @@ class Executor:
                 await reader.aclose()
                 await aclose_stream(iterator)
                 self._release(credential_id)
+            if content_rejected:
+                # 已出帧：只能以错误帧收尾；未出帧：抛给外层 `stream()` 由它
+                # 用同一 translator 写首帧（不换号、不转回退模型）。
+                message = str(last_error)
+                if emitted:
+                    yield state.translator.error_frame(message, "invalid_request")
+                    return
+                raise ContentRejected(message)
             if queued_wait is not None:
                 # 在租约与上游流都释放**之后**才等：等待期间不占并发名额，
                 # 也不让上游连接白挂着。等完回到 while 顶部用 `pinned` 重开。
@@ -1442,20 +1653,60 @@ class Executor:
             credit_estimated=bool(_usage_field(usage, "credit_estimated")),
             ttfb_ms=state.ttfb_ms(), latency_ms=_elapsed_ms(state.started))
 
+    def _record_complete_disconnect(self, *, username: str, provider_id: str,
+                                    credential_id: str, model: str,
+                                    events: list[Event], started: float,
+                                    first_event_at: float | None) -> None:
+        """非流式客户端断开：与流式 `_record_disconnect` 同一口径记账。
+
+        流式断开由生成器关闭/任务取消触发；非流式只能靠 `is_disconnected`
+        探测。两种路径的落库口径必须一致（`ok=False` + `client_disconnect`
+        + 已知用量），否则「客户端主动中断」在两边的成功率里各算一套。
+        不调 `save_error`、不冷却凭证：断开的不是上游/账号的问题。
+        """
+        usage = _last_usage(events)
+        self._deps.record(
+            username=username, provider=provider_id,
+            credential_id=credential_id, model=model, ok=False,
+            error_type="client_disconnect",
+            input_tokens=_usage_field(usage, "input_tokens"),
+            output_tokens=_usage_field(usage, "output_tokens"),
+            reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
+            cached_tokens=_usage_field(usage, "cached_tokens"),
+            credit=_usage_field(usage, "credit"),
+            credit_estimated=bool(_usage_field(usage, "credit_estimated")),
+            ttfb_ms=(int((first_event_at - started) * 1000)
+                     if first_event_at is not None else None),
+            latency_ms=_elapsed_ms(started))
+
     async def complete(self, request: ChatRequest, *, username: str = "unknown",
-                       provider_binding: str | None = None) -> dict[str, Any]:
+                       provider_binding: str | None = None,
+                       is_disconnected: Callable[[], Any] | None = None,
+                       ) -> dict[str, Any]:
         """非流式：按兼容组回退链依次尝试，逐链项走完整的换号重试。
 
         回退只在**整条链**都用尽时以最后一个链项的 503/400 收尾；单链项内部
         的选号 / 冷却 / 轮换 / 会话粘性 / 统计全部沿用既有路径。
+
+        `is_disconnected`：客户端连接探测（`Request.is_disconnected`）。非流式
+        没有 SSE 的断开信号，聚合期间客户端早断只靠它发现；断开按与流式同一
+        口径记 `client_disconnect`（能拿到多少用量记多少）且绝不冷却凭证。
         """
         target = self.resolve_target(request, provider_binding)
         chain = self._fallback_chain(target)
+        self._ensure_access_allowed(chain, username)
         last_error: Exception | None = None
-        for attempt in chain:
+        for index, attempt in enumerate(chain):
+            if index:
+                # 本次请求用了 fallback 兼容组（响应头 X-Upstream-Degraded）
+                _note_upstream_degraded()
             try:
                 return await self._complete_model(
-                    self._with_model(request, attempt.model), attempt, username)
+                    self._with_model(request, attempt.model), attempt, username,
+                    is_disconnected=is_disconnected)
+            except ContentRejected:
+                # 内容拒绝不转回退模型：那等于换渠道重试同一份违规内容
+                raise
             except (NoHealthyCredential, InvalidRequest) as error:
                 last_error = error
         if last_error is None:  # pragma: no cover - 按构造不可达（链非空且必抛）
@@ -1463,7 +1714,9 @@ class Executor:
         raise last_error
 
     async def _complete_model(self, request: ChatRequest, target: ModelTarget,
-                              username: str) -> dict[str, Any]:
+                              username: str, *,
+                              is_disconnected: Callable[[], Any] | None = None,
+                              ) -> dict[str, Any]:
         """单个模型的非流式执行（原 complete 主体）。"""
         tried: set[str] = set()
         # 真正打过的凭证数（与 tried 分开），理由同 _stream_loop：INVALID 的
@@ -1529,6 +1782,7 @@ class Executor:
                 credential_id, credential_data = pick
                 tried.add(credential_id)
                 attempts += 1
+                _note_upstream_attempts(attempts)
                 provider_id = self._deps.credentials.provider_of(credential_id)
                 last_provider, last_credential = provider_id or "-", credential_id
             # 与 _stream_loop 同理：按实际服务渠道压缩（对同一请求可能压多次，
@@ -1550,6 +1804,10 @@ class Executor:
             self._lease(credential_id)
             queued_wait: float | None = None
             try:
+                # 非流式没有 SSE 的断开信号：进聚合前先探一次，避免客户端
+                # 已经走了还白打上游并占着凭证。
+                if is_disconnected is not None and await is_disconnected():
+                    raise ClientDisconnect()
                 # 聚合整体超时兜底（见 ExecutorDeps.complete_timeout_seconds）
                 async with (asyncio.timeout(self._deps.complete_timeout_seconds)
                             if self._deps.complete_timeout_seconds > 0
@@ -1564,6 +1822,21 @@ class Executor:
                             observed_model = event.model
                             self._check_model_substitution(
                                 target.model, event.model, provider_id, credential_id)
+                        if (event.kind is EventKind.ERROR
+                                and _event_content_rejection(event)):
+                            # 内容拒绝：不换号、不冷却、不转回退模型。记账在
+                            # `_record_content_rejection`（冻结命中 + usage 行）。
+                            rejection = UpstreamStreamError(event)
+                            self._record_content_rejection(
+                                username=username, provider_id=provider_id,
+                                credential_id=credential_id, model=target.model,
+                                started=started, error=rejection,
+                                usage=_last_usage(events),
+                                ttfb_ms=(int((first_event_at - started) * 1000)
+                                         if first_event_at is not None else None))
+                            raise ContentRejected(
+                                "upstream rejected the request content "
+                                f"({_content_rejection_reason(rejection)})")
                         if (event.kind is EventKind.ERROR
                                 and _event_kind(event) is ErrKind.QUEUE):
                             # 排队信号必须在入 events **之前**拦下：进了 events
@@ -1584,6 +1857,27 @@ class Executor:
                                 and len(events) > self._deps.complete_max_events):
                             raise _AggregateOverflow(
                                 self._deps.complete_max_events)
+                        # 聚合期间每拿到一个事件探一次断开：非流式没有框架
+                        # 取消信号，不探就会把整个上游调用跑完再发现没人收。
+                        if is_disconnected is not None and await is_disconnected():
+                            raise ClientDisconnect()
+            except ContentRejected:
+                # 已记账；直接交给上层（不进入冷却/换号/回退）
+                raise
+            except ClientDisconnect:
+                self._record_complete_disconnect(
+                    username=username, provider_id=provider_id,
+                    credential_id=credential_id, model=target.model,
+                    events=events, started=started, first_event_at=first_event_at)
+                raise
+            except asyncio.CancelledError:
+                # 保持连接超时/非流式保活包装取消工作协程时走这里：与流式
+                # 同一口径记 client_disconnect（上游可能已真实计费），不冷却。
+                self._record_complete_disconnect(
+                    username=username, provider_id=provider_id,
+                    credential_id=credential_id, model=target.model,
+                    events=events, started=started, first_event_at=first_event_at)
+                raise
             except _Queued as queued:
                 queue_rounds = queued.plan.rounds
                 attempts = queued.plan.attempts
@@ -1612,72 +1906,85 @@ class Executor:
                     error_message=(f"upstream complete exceeded "
                                    f"{overflow.limit} events")))
             except Exception as error:  # noqa: BLE001
-                kind = await self._credit_if_exhausted(
-                    _classify(error), credential_id, provider_id)
-                if kind is None:
-                    # 同 `_stream_loop`：留痕后原样上抛，不冷却凭证。
-                    if not attributed:
-                        self._record_unclassified_failure(
-                            username=username, provider_id=provider_id,
-                            credential_id=credential_id, model=target.model,
-                            started=started, error=error)
-                    raise
-                if kind is ErrKind.QUEUE:
-                    # HTTP 级排队（403 + 排队 body）：与流内排队同一套语义
-                    plan = self._plan_queue_restart(
-                        getattr(error, "retry_after_seconds", None),
-                        emitted=False, rounds=queue_rounds, attempts=attempts,
-                        provider_id=provider_id, credential_id=credential_id,
-                        credential_data=credential_data)
-                    if plan is not None:
-                        queue_rounds = plan.rounds
-                        attempts = plan.attempts
-                        pinned = plan.pinned
-                        queued_wait = plan.wait
-                    else:
-                        logger.warning("上游 %s 排队但无法重开（凭证 %s）: %s",
-                                       provider_id, credential_id, _error_detail(error))
-                        self._note_upstream_error(credential_id, ErrKind.SOFT,
-                                                  provider_id, target.model, error,
-                                                  username=username, started=started)
-                        last_error, last_kind = error, ErrKind.SOFT
-                elif kind in REJECT_KINDS:
-                    # 推理档位被拒：原号降一档重试一次（非流式同一口径）
-                    lower = self._downgrade_effort(
-                        payload, _error_detail(error), effort_retried)
-                    if lower is not None:
-                        logger.warning(
-                            "上游 %s 不认推理档位 %s（凭证 %s）→ 降到 %s 原号重试",
-                            provider_id, payload.get("reasoning_effort"),
-                            credential_id, lower)
-                        effort_cap, effort_retried = lower, True
-                        pinned = (credential_id, credential_data)
-                        continue
-                    # 请求无效（如该上游不认识模型 / 模型不支持该请求形态）：
-                    # 不冷却凭证，跳过该上游继续试其他上游；全部拒绝才以 400 结束
-                    logger.warning("上游 %s 拒绝模型 %s（凭证 %s 跳过）: %s",
-                                   provider_id, target.model, credential_id,
-                                   _error_detail(error))
-                    self._record_invalid(username, provider_id, credential_id,
-                                         target.model, started, error, kind)
-                    last_error, last_kind = error, kind
-                    self._skip_provider(provider_id, tried)
-                elif kind is ErrKind.RESTRICTED:
-                    # 账号被上游风控限制：跳过该渠道，别让同渠道其它号继续撞
-                    attributed = self._handle_restricted(
-                        provider_id=provider_id, credential_id=credential_id,
-                        model=target.model, error=error,
-                        username=username, started=started,
-                        attributed=attributed, tried=tried)
-                    last_error, last_kind = error, kind
+                reason = _content_rejection_reason(error)
+                if reason is not None:
+                    # 内容拒绝：不换号、不冷却、不转回退模型（见 `_record_content_rejection`）。
+                    self._record_content_rejection(
+                        username=username, provider_id=provider_id,
+                        credential_id=credential_id, model=target.model,
+                        started=started, error=error,
+                        usage=_last_usage(events),
+                        ttfb_ms=(int((first_event_at - started) * 1000)
+                                 if first_event_at is not None else None))
+                    raise ContentRejected(
+                        f"upstream rejected the request content ({reason})") from None
                 else:
-                    logger.warning("上游 %s 错误（凭证 %s，kind=%s）: %s",
-                                   provider_id, credential_id, kind,
-                                   _error_detail(error))
-                    attributed = self._note_upstream_error(
-                        credential_id, kind, provider_id, target.model,
-                        error, username=username, started=started) or attributed
-                    last_error, last_kind = error, kind
+                    kind = await self._credit_if_exhausted(
+                        _classify(error), credential_id, provider_id)
+                    if kind is None:
+                        # 同 `_stream_loop`：留痕后原样上抛，不冷却凭证。
+                        if not attributed:
+                            self._record_unclassified_failure(
+                                username=username, provider_id=provider_id,
+                                credential_id=credential_id, model=target.model,
+                                started=started, error=error)
+                        raise
+                    if kind is ErrKind.QUEUE:
+                        # HTTP 级排队（403 + 排队 body）：与流内排队同一套语义
+                        plan = self._plan_queue_restart(
+                            getattr(error, "retry_after_seconds", None),
+                            emitted=False, rounds=queue_rounds, attempts=attempts,
+                            provider_id=provider_id, credential_id=credential_id,
+                            credential_data=credential_data)
+                        if plan is not None:
+                            queue_rounds = plan.rounds
+                            attempts = plan.attempts
+                            pinned = plan.pinned
+                            queued_wait = plan.wait
+                        else:
+                            logger.warning("上游 %s 排队但无法重开（凭证 %s）: %s",
+                                           provider_id, credential_id, _error_detail(error))
+                            self._note_upstream_error(credential_id, ErrKind.SOFT,
+                                                      provider_id, target.model, error,
+                                                      username=username, started=started)
+                            last_error, last_kind = error, ErrKind.SOFT
+                    elif kind in REJECT_KINDS:
+                        # 推理档位被拒：原号降一档重试一次（非流式同一口径）
+                        lower = self._downgrade_effort(
+                            payload, _error_detail(error), effort_retried)
+                        if lower is not None:
+                            logger.warning(
+                                "上游 %s 不认推理档位 %s（凭证 %s）→ 降到 %s 原号重试",
+                                provider_id, payload.get("reasoning_effort"),
+                                credential_id, lower)
+                            effort_cap, effort_retried = lower, True
+                            pinned = (credential_id, credential_data)
+                            continue
+                        # 请求无效（如该上游不认识模型 / 模型不支持该请求形态）：
+                        # 不冷却凭证，跳过该上游继续试其他上游；全部拒绝才以 400 结束
+                        logger.warning("上游 %s 拒绝模型 %s（凭证 %s 跳过）: %s",
+                                       provider_id, target.model, credential_id,
+                                       _error_detail(error))
+                        self._record_invalid(username, provider_id, credential_id,
+                                             target.model, started, error, kind)
+                        last_error, last_kind = error, kind
+                        self._skip_provider(provider_id, tried)
+                    elif kind is ErrKind.RESTRICTED:
+                        # 账号被上游风控限制：跳过该渠道，别让同渠道其它号继续撞
+                        attributed = self._handle_restricted(
+                            provider_id=provider_id, credential_id=credential_id,
+                            model=target.model, error=error,
+                            username=username, started=started,
+                            attributed=attributed, tried=tried)
+                        last_error, last_kind = error, kind
+                    else:
+                        logger.warning("上游 %s 错误（凭证 %s，kind=%s）: %s",
+                                       provider_id, credential_id, kind,
+                                       _error_detail(error))
+                        attributed = self._note_upstream_error(
+                            credential_id, kind, provider_id, target.model,
+                            error, username=username, started=started) or attributed
+                        last_error, last_kind = error, kind
             else:
                 try:
                     result = aggregate(events, target.model)
@@ -2614,6 +2921,64 @@ _PROTOCOL_VIOLATION_ERRORS: tuple[type[BaseException], ...] = (
     json.JSONDecodeError,
     UnicodeDecodeError,
 )
+
+
+def _event_content_rejection(event: Event) -> bool:
+    """流内 error 事件是不是可识别的内容拒绝（无 HTTP 状态，按业务码认）。
+
+    与 HTTP 形态的差别：流内没有 403 可供区分，11128 就是上游点名的
+    「渠道/内容风控」；400 形态在 CodeBuddy 里同码同源，一并归内容拒绝。
+    """
+    parsed = _business_code(event.error_code)
+    return parsed is not None and parsed in CONTENT_REJECTION_CODES
+
+
+def _content_rejection_reason(error: Exception) -> str | None:
+    """错误是否可识别为「上游内容/渠道风控拒绝」；是则返回脱敏标识。
+
+    只认 CodeBuddy 11128：
+    - HTTP 形态必须带 `status == 403`（400 + 11128 也被上游当请求级错误，
+      但语义混杂着普通参数问题，保持原分类）；403 在 CodeBuddy 里原本落
+      `DEAD`，必须抢在硬禁用之前识别。
+    - 流内形态（`UpstreamStreamError.event.error_code`）没有 HTTP 状态，
+      该码本身就是上游点名的拒绝，直接认可。
+
+    其余渠道的 403（lingxi → SOFT 等）没有已核实的内容拒绝语义，返回 None
+    保持原分类——宁可漏判让一次普通失败走旧路径，也不误冻结整家渠道。
+    """
+    event = getattr(error, "event", None)
+    codes: set[int] = set()
+    event_code = getattr(event, "error_code", None) if event is not None else None
+    if event_code is not None:
+        parsed = _business_code(event_code)
+        if parsed is not None:
+            codes.add(parsed)
+    body = getattr(error, "body", None)
+    if isinstance(body, (bytes, bytearray)):
+        codes |= business_codes(body.decode("utf-8", errors="replace"))
+    elif isinstance(body, str):
+        codes |= business_codes(body)
+    status = getattr(error, "status", None)
+    if status is not None and status != 403:
+        return None
+    hit = codes & CONTENT_REJECTION_CODES
+    if not hit:
+        return None
+    return f"code={min(hit)}"
+
+
+def _business_code(value: object) -> int | None:
+    """业务码归一：整数直接用；字符串去掉连字符/非数字后再转（`11-128` → 11128）。"""
+    if isinstance(value, int):
+        return value
+    digits = re.sub(r"\D", "", str(value))
+    return int(digits) if digits else None
+
+
+def _last_usage(events: list[Event]) -> Usage | None:
+    """事件流里最后一个 usage（收尾帧才有真值；与成功路径同一口径）。"""
+    return next((event.usage for event in reversed(events)
+                 if event.kind is EventKind.USAGE and event.usage is not None), None)
 
 
 def _classify(error: Exception) -> ErrKind | None:

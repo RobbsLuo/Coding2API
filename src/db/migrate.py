@@ -98,7 +98,10 @@ SCHEMA_NAME = "schema.sql"
 # 人工恢复、启停的逐次审计）。新增表只需进 schema.sql（CREATE TABLE IF NOT
 # EXISTS 对老库同样生效），无需迁移动作；老库升级后表为空 =「升级前没有
 # 时间线」，管理台按「还没有记录」展示，调度/选号行为完全不变。
-SCHEMA_VERSION = 37
+# 38：新增 access_freezes 表（内容拒绝的发起者归因与冻结）。新增表只需进
+# schema.sql（CREATE TABLE IF NOT EXISTS 对老库同样生效），无需迁移动作；
+# 老库升级后表为空 =「升级前没有拒绝记录」，调度/选号行为完全不变。
+SCHEMA_VERSION = 38
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (

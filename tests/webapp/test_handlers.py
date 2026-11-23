@@ -111,3 +111,47 @@ def test_credential_decrypt_error_returns_actionable_500(tmp_path, monkeypatch):
     assert response.status_code == 500
     assert response.json()["error"]["code"] == "credential_decrypt_failed"
     assert response.headers["x-request-id"] == "req-decrypt"
+
+
+def test_egress_unavailable_returns_503_with_retry_after(tmp_path, monkeypatch):
+    """出口代理熔断 → 503 `egress_unavailable` + `Retry-After`（不是 502）。"""
+    from src.engine.executor import Executor
+    from src.provider.proxy import EgressUnavailable
+
+    settings = isolated_settings(tmp_path)
+    app = build_app(settings)
+    key = app.state.api_keys.create("root")["api_key"]
+
+    async def _egress(_self, *_args, **_kwargs):
+        raise EgressUnavailable("http://127.0.0.1:7897", 37)
+
+    monkeypatch.setattr(Executor, "complete", _egress)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"messages": [{"role": "user", "content": "hi"}]})
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "37"
+    assert response.json()["error"]["code"] == "egress_unavailable"
+
+
+def test_provider_access_frozen_returns_403(tmp_path, monkeypatch):
+    """内容拒绝累计达阈值 → 403 `provider_access_frozen`（仅该人该渠道）。"""
+    from src.engine.executor import Executor, ProviderAccessFrozen
+
+    settings = isolated_settings(tmp_path)
+    app = build_app(settings)
+    key = app.state.api_keys.create("root")["api_key"]
+
+    async def _frozen(_self, *_args, **_kwargs):
+        raise ProviderAccessFrozen("access to provider 'trae' is frozen")
+
+    monkeypatch.setattr(Executor, "complete", _frozen)
+    with TestClient(app) as client:
+        response = client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": f"Bearer {key}"},
+            json={"messages": [{"role": "user", "content": "hi"}]})
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == "provider_access_frozen"

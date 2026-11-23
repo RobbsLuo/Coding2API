@@ -434,3 +434,26 @@ CREATE INDEX IF NOT EXISTS idx_credential_events_cred_ts
     ON credential_events(credential_id, ts);
 -- 保留期裁剪按 ts 从旧到新删：单列索引让 DELETE 只碰过期段。
 CREATE INDEX IF NOT EXISTS idx_credential_events_ts ON credential_events(ts);
+
+-- 访问冻结（access_freezes）：上游内容拒绝的**发起者**归因计数。
+--
+-- 为什么按发起者而不是凭证：内容安全拒绝（如 CodeBuddy 403 + 11128）是
+-- 请求内容触发的，同池换号只会在更多账号上留下同样的拒绝记录。把发起者
+-- （API Key 所属用户名；无用户名时用 Key id）与渠道组合成冻结键，才能
+-- 「一个人违规只停他自己」，不连累其他租户。
+--
+-- 本表**只增不改**：每一行是一次内容拒绝的命中记录（同一 subject×provider
+-- 可有多行），阈值 `ACCESS_FREEZE_THRESHOLD` 按累计行数判定是否冻结；
+-- 阈值 0 = 只记录不拦截。解冻 = 删除该 (subject, provider) 的全部行并写审计。
+-- `reason` 只入脱敏标识（上游业务码 / HTTP 状态），不得写上游正文。
+CREATE TABLE IF NOT EXISTS access_freezes (
+    subject   TEXT NOT NULL,              -- 发起者：用户名，无则 API Key id
+    provider  TEXT NOT NULL,              -- 渠道 id（与 credentials.provider 同域）
+    reason    TEXT NOT NULL DEFAULT '',   -- 脱敏标识（code=11128 / status=403）
+    frozen_at INTEGER NOT NULL,           -- 命中时刻（epoch 秒）
+    frozen_by TEXT NOT NULL DEFAULT 'auto' -- auto=自动命中；解冻不留行，审计在 audit_events
+);
+
+-- 判定是否冻结按 (subject, provider) 计数；列出/解冻也按这两个键过滤。
+CREATE INDEX IF NOT EXISTS idx_access_freezes_subject_provider
+    ON access_freezes(subject, provider, frozen_at);

@@ -272,7 +272,8 @@ def test_transport_error_maps_to_502(client, monkeypatch):
     key = client.post("/api/api-keys", json={"name": "t"}).json()["api_key"]
     executor = client.app.state.executor
 
-    async def boom(request, *, username="unknown", provider_binding=None):
+    async def boom(request, *, username="unknown", provider_binding=None,
+                   is_disconnected=None):
         raise httpx.ConnectError("no route to host")
 
     monkeypatch.setattr(executor, "complete", boom)

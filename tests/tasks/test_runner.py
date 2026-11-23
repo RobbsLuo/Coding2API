@@ -1129,3 +1129,26 @@ async def test_runner_model_probe_runs_task_when_enabled(repo):
     assert runner.status.runs("model_probe") == 1
     assert runner.status.get("model_probe").report == {
         "attempted": 0, "succeeded": 0, "failed": 0, "skipped": 0}
+
+
+async def test_sync_growth_delegates_to_task(repo):
+    """成长中心装配后 `_sync_growth` 委托给任务对象（返回值原样透传）。"""
+    credentials, db = repo
+    collector = StatsCollector(db)
+
+    class FakeGrowth:
+        calls = 0
+
+        async def run_once(self):
+            FakeGrowth.calls += 1
+            return {"gifts": 1}
+
+    runner = TaskRunner(
+        quota_probe=QuotaProbeTask(credentials, {}, None),
+        checkin=CheckinTask(credentials, {}),
+        refresh=RefreshTask(credentials, {}, skew_seconds=3600),
+        retention=RetentionTask(collector),
+        growth=FakeGrowth(),
+    )
+    assert await runner._sync_growth() == {"gifts": 1}
+    assert FakeGrowth.calls == 1

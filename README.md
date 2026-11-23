@@ -355,6 +355,7 @@ curl -X POST http://127.0.0.1:8000/v1/fetch \
 - `GET /healthz`：额外给凭证池计数，`ready == 0` → 503（就绪探针 / 告警）。
 - 两端点不鉴权、接受 `HEAD`；四类计数互斥（`ready` / `cooling` / `paused` / `disabled`），合计 = `total`。**升级注意**：`/healthz` 从「恒 200」改为「ready=0 时 503」。
 - `GET /metrics`（Prometheus）：默认开；`METRICS_ENABLED=false`（可热更）→ 404。`METRICS_TOKEN` **留空时只放行回环对端**（本机 `127.0.0.1` / `::1` 抓取，公网与内网其它主机一律 401）；设了 token 则要求 `Authorization: Bearer <token>`。公网入口（Caddy / nginx 模板）另已摘掉该路径。
+- **OTLP 导出（可选）**：`OTLP_ENDPOINT` 非空即每 `OTLP_EXPORT_SECONDS` 秒 `POST {endpoint}/v1/metrics`（OTLP/HTTP JSON，**不引入 SDK**）。只导 `gen_ai.*` 指标（供应商 / 模型 / token / 延迟 / TTFT / 错误类型），**绝不导出** `gen_ai.input.messages` / `output.messages` / `system_instructions` 或任何正文；非回环端点强制 https，失败只告警一次、不拖垮服务。
 
 | 指标 | 类型 | 标签 | 数据源 |
 |---|---|---|---|
@@ -444,11 +445,14 @@ curl -X POST http://127.0.0.1:8000/v1/fetch \
 
 - **失败类型**（`CONTROLLED_ERROR_TYPES`）：收尾行取**最后一次错误的真实归因**——`model_unavailable` / `rate_limit` / `upstream_timeout` / `network_error`（本机 DNS / 连接失败，不冷却凭证）/ `context_overflow`（11115）/ `model_capability`（CodeArts 001001020）/ `model_not_found`（模型下线，与「请求无效」分开）。只有**一次都没选中凭证**才回落 `no_healthy_credential`。对外码相同，仅统计口径不同。
 - **请求 ID**：响应带 `X-Request-ID`，入站合法沿用否则自生成（`[A-Za-z0-9._:-]`、1–128 字符）；落 `usage_events.request_id`，**不透传上游**。
+- **尝试链响应头**（`EXPOSE_UPSTREAM_HEADERS=true` 才开，默认关）：`X-Upstream-Attempts` = 本次请求实际用过的凭证数，`X-Upstream-Degraded` = 是否走了 `MODEL_FALLBACK_GROUPS` 回退。关闭时中间件主动剥离同名头（含上游或中间盒回传的伪造值）。默认关的原因：这两个头等于把账号池规模、成本与路由指纹递给调用方。流式场景只反映**发响应头之前**的尝试，首帧之后的轮换无法回改已发出的头。
+- **内容拒绝冻结**：上游内容安全拒绝（当前只识别 CodeBuddy `11128`）不换号、不冷却，按发起者（用户名优先，无用户名用 API Key id）记一次。`ACCESS_FREEZE_THRESHOLD=N`（默认 `0` = 只记录）达到后对该「发起者 × 渠道」在发往上游前回 `403 provider_access_frozen`；`GET /api/access-freezes` 看命中与冻结状态，`POST /api/access-freezes/unfreeze` 解冻（operator+，写审计）。
 - **Credit**：CodeBuddy = 上游真值；TRAE 按官方单价推算并标 `≈`（`src/provider/trae/pricing.py`，未收录不推算）。历史用 `scripts/backfill_trae_credit.py` 补。
 - **成本（估算 ≈）**：token × 公开刊例价，非上游真实扣费。`(输入−命中)×输入价 + 命中×缓存价 + 输出×输出价` 折 USD → 写入时按 `USD_CNY_RATE` 折 CNY，历史不重算。匹配不到就不计（成本是下限），渠道分发代号按显式等价规则归到基础模型。
 - **缓存命中率**：命中 token ÷ 输入 token（1 位小数），未上报或输入 0 → `—`。
 - **输出速度** = `token 总量 ÷ 生成时间总和`（非逐条比值平均）。两口径：**正文速度** `output_tokens - reasoning_tokens`、**总产出速度**含思考。仅算经本服务路由、产出 ≥1 token 的成功请求；生成时间 = `latency_ms - ttfb_ms`，剔除窗口 <200ms 或单条 >1000 tok/s。无样本 → 估算口径（前置 `≈`），两口径皆无 → `—`。
 - **图表**：请求次数 / Token / 成本 / 单请求成本 / 耗时 / 首字延迟 / 成功率 / 缓存命中率。派生指标按 `sum ÷ sum` 算，无样本给 `—`（断线）不画 0；耗时 / 首字另配分位图（P50 + P95，读明细，仅 90 天）。时间轴按小时补齐。`metric` 取值域外显式 400；自定义范围非法时暂停取数。
+- **压缩收益面板**：触发次数（tool 输出 / 上下文体裁剪）、省下的字符与 token（下界估算）、同期前缀缓存命中率、两个压缩开关状态，同屏展示。省 token 必须与缓存代价一起看，否则无法判断「该开还是该关」；`GET /api/stats/compression`（operator+，O(1) 只读计数）。
 
 ### 积分与签到记录
 
@@ -664,6 +668,11 @@ python3 scripts/restore_db.py data/backups/coding2api-20261014-030000.sqlite3 --
 | `MAX_INFLIGHT_PER_CREDENTIAL` | `0` | 单账号在途上限；`0` = 不限。600s TTL 兜底 |
 | `METRICS_ENABLED` | `true` | 暴露 `/metrics`。可热更 |
 | `METRICS_TOKEN` | 空 | 设置后 `/metrics` 要求 `Authorization: Bearer <token>`；**空 = 只放行回环对端**（非回环 401）。启动期项 |
+| `EXPOSE_UPSTREAM_HEADERS` | `false` | 响应头 `X-Upstream-Attempts` / `X-Upstream-Degraded`。**默认关**：泄露账号池规模、成本与路由指纹；关闭时主动剥离同名头。可热更 |
+| `ACCESS_FREEZE_THRESHOLD` | `0` | 内容拒绝（CodeBuddy 11128）冻结阈值：同一发起者 × 渠道累计命中多少次后前置 403 `provider_access_frozen`；`0` = 只记录不冻结。可热更 |
+| `OTLP_ENDPOINT` | 空 | OTLP/HTTP JSON 指标出口（`POST {endpoint}/v1/metrics`）；空 = 关闭零出站。只导 `gen_ai.*` 指标，不含提示词/回答。非回环强制 https。启动期项 |
+| `OTLP_EXPORT_SECONDS` | `60` | OTLP 导出周期秒（下限 15） |
+| `OTLP_HEADERS` | 空 | OTLP 自定义头，`k:v;k2:v2` |
 | `REQUEST_LOG_ENABLED` | `true` | 请求级结构化日志（logfmt）；不写 query / 请求体 / 用户名。可热更 |
 | `FORCE_DISABLE_THINKING` | `false` | 出站剥离思考内容；只过滤响应。可热更 |
 | `REASONING_EFFORT_MAP` | `""` | 出站档位映射 `渠道=from:to;*=from:to`（渠道取 `KNOWN_PROVIDERS`）；`none` = 删键。可热更 |
