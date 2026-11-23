@@ -1,6 +1,5 @@
 import { useMemo, useState } from "react";
-import { Activity, BarChart3, ChevronDown, Coins, Download, Gauge, Timer, Wallet, X } from "lucide-react";
-import { cn } from "cn";
+import { BarChart3 } from "lucide-react";
 import { useSessionContext } from "../Layout";
 import { useSort } from "../hooks/useSort";
 import {
@@ -15,381 +14,32 @@ import {
   useStatsPercentileTimeline,
   useStatsTimeline,
 } from "../api/hooks";
-import { formatCacheRate, formatCompact, formatCredit, formatLatency, formatMoney, formatNumber, formatSpeed, formatSpeedPair, formatTime, formatTimeParts, usageErrorLabel } from "../api/display";
-import { useStatsErrors, type StatsErrorRow } from "../api/statsErrors";
-import { ModelLegend, ModelTrendChart, modelTrendAxis } from "../components/ModelTrendChart";
-import { LatencyChart } from "../components/LatencyChart";
+import { useStatsErrors } from "../api/statsErrors";
+import { modelTrendAxis } from "../components/ModelTrendChart";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
-import { Pagination } from "../components/Pagination";
-import { ProviderIcon } from "../components/ProviderIcon";
-import { SortableHead } from "../components/SortableHead";
-import { SortMenuHead } from "../components/SortMenuHead";
-import { Tip } from "../components/Tip";
-import { ProviderShare, UsageChart, chartProviders, hasData } from "../components/UsageChart";
+import { chartProviders, hasData } from "../components/UsageChart";
 import { providerLabel } from "../api/providers";
 import { api } from "../api/client";
 import { buildCustomRange, toLocalInput } from "../lib/customRange";
-import type { GroupStats, StatsDrill, StatsEventFilters, UsageEventRow } from "../api/types";
+import type { StatsEventFilters, UsageEventRow } from "../api/types";
 import {
-  Button,
-  Checkbox,
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-  Empty,
-  Field,
-  Footnote,
-  Input,
-  Label,
-  Metric,
-  Notice,
-  Panel,
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-  Tabs,
-} from "../ui";
-
-/** 实时流前端缓冲上限：只保留最近 50 条（新→旧），页面长开也不会无限增长。 */
-const LIVE_MAX_ROWS = 50;
-
-const RANGES = [
-  { value: "24h", label: "最近 24 小时", seconds: 86400 },
-  { value: "7d", label: "最近 7 天", seconds: 7 * 86400 },
-  { value: "30d", label: "最近 30 天", seconds: 30 * 86400 },
-  { value: "all", label: "全部", seconds: 0 },
-  // 自定义：两个 datetime-local 输入，起止任意。以「本地时区、精确到分钟」为准。
-  { value: "custom", label: "自定义", seconds: -1 },
-];
-
-/**
- * 图表指标：按「要回答什么问题」分组。
- *
- * 请求次数 / Token 回答「用量」；成本 / 单请求成本回答「花得值不值」；
- * 耗时 / 首字回答「快不快」；成功率 / 缓存命中率回答「稳不稳、省不省」。
- * 八个指标共用一张主图（切换而非叠加），渠道拆分由主图下方的渠道切换控制。
- */
-const METRICS = [
-  { value: "requests", label: "请求次数", icon: <BarChart3 className="size-3.5" /> },
-  { value: "tokens", label: "Token", icon: <Coins className="size-3.5" /> },
-  { value: "cost", label: "成本", icon: <Wallet className="size-3.5" /> },
-  { value: "cost_per_request", label: "单请求成本", icon: <Wallet className="size-3.5" /> },
-  { value: "latency", label: "耗时", icon: <Timer className="size-3.5" /> },
-  { value: "ttfb", label: "首字延迟", icon: <Gauge className="size-3.5" /> },
-  { value: "success_rate", label: "成功率", icon: <Activity className="size-3.5" /> },
-  { value: "cache_rate", label: "缓存命中率", icon: <Coins className="size-3.5" /> },
-] as const;
-
-/** 延迟类指标：主图之外再画一张分位图（P50 中位数 + P95 上界）。 */
-const LATENCY_METRICS = new Set(["latency", "ttfb"]);
-
-/**
- * 请求明细的合并列：把同类列并成一列，默认值一眼可读，悬停展开全部子项。
- *
- * Token = 输入 / 输出 / 命中 / 命中率；延迟 = 耗时 / 首字。合并把列数从 14 压到
- * 约 10（窄屏卡片也少一半字段），排序能力靠列头下拉选子列保留（见 SortMenuHead）。
- */
-const TOKEN_COLUMNS = [
-  { key: "input_tokens", label: "输入" },
-  { key: "output_tokens", label: "输出" },
-  { key: "cached_tokens", label: "命中" },
-  { key: "cache_rate", label: "命中率" },
-] as const;
-
-const LATENCY_COLUMNS = [
-  { key: "latency_ms", label: "耗时" },
-  { key: "ttfb_ms", label: "首字" },
-] as const;
-
-/**
- * 明细「渠道 / 凭证」合并列的子列：渠道 / 凭证。
- *
- * 单元格主行给凭证、副行给渠道（同渠道常挂多个账号，先认账号）；排序能力靠列头
- * 下拉保留（两个子键都还在），故列头同时写明两列。
- */
-const SOURCE_COLUMNS = [
-  { key: "provider", label: "渠道" },
-  { key: "credential", label: "凭证" },
-] as const;
-
-/**
- * 分组表请求合并列的子列：请求数 / 成功数（成功率是派生只读值，不可排序）。
- * 与 Token 列同例：默认只显示请求数，悬停补全成功数与成功率。
- */
-const GROUP_REQUEST_COLUMNS = [
-  { key: "requests", label: "请求数" },
-  { key: "ok_count", label: "成功数" },
-] as const;
-
-/**
- * 分组表 Token 合并列的子列：输入 / 输出 / 命中（+命中率，派生列不可排序）。
- * 只取明细表同名集合的前三项——`cache_rate` 后端没有分组排序键。
- */
-const GROUP_TOKEN_COLUMNS = [
-  { key: "input_tokens", label: "输入" },
-  { key: "output_tokens", label: "输出" },
-  { key: "cached_tokens", label: "命中" },
-] as const;
-
-/** 分组表两种延迟口径：均值读小时汇总，分位读明细（菜单即排序键白名单）。 */
-const GROUP_AVG_LATENCY_COLUMNS = [
-  { key: "avg_latency_ms", label: "平均耗时" },
-  { key: "avg_ttfb_ms", label: "平均首字" },
-] as const;
-
-/**
- * 分组表分位档：后端一次算好 P50/P90/P95/P99，前端只切展示哪一档。
- *
- * 四档全铺成列会把表头撑爆，故合并成一列 + 档位切换；默认 P95 保持既有
- * 观感与 testId（`group-p95-latency` / `group-sort-p95-latency`）。
- */
-const PERCENTILES = ["p50", "p90", "p95", "p99"] as const;
-type Percentile = (typeof PERCENTILES)[number];
-
-const PERCENTILE_TABS = PERCENTILES.map((value) => ({
-  value, label: value.toUpperCase(),
-}));
-
-/**
- * 分组统计的维度。后端各维度的行结构一致（分组键 + 同一组公共指标），
- * 前端按 key 取出分组键列即可，表格本身不分叉。
- *
- * 用户/凭证维度标记 operatorOnly：viewer 只能看自己，恒是「我」一行，
- * 给这个 tab 只是噪音。
- */
-const GROUP_DIMENSIONS = [
-  { value: "provider", label: "按渠道", groupKey: "provider", label2: "渠道", operatorOnly: false },
-  { value: "model", label: "按模型", groupKey: "model", label2: "模型", operatorOnly: false },
-  { value: "user", label: "按用户", groupKey: "username", label2: "用户", operatorOnly: true },
-  { value: "credential", label: "按凭证", groupKey: "credential_id", label2: "凭证", operatorOnly: true },
-] as const;
-
-/** 分位列名（后端按 PERCENTILES 下发；types.ts 的 GroupStats 只写死了 P95）。 */
-type PercentileField = `${Percentile}_latency_ms` | `${Percentile}_ttfb_ms`;
-
-/** 公共指标 + 分位列 + 至多一个分组键（键名随维度变化，用可选字段统一承载）。 */
-type GroupRow = GroupStats & Partial<Record<PercentileField, number | null>> & {
-  provider?: string;
-  model?: string;
-  username?: string;
-  credential_id?: string;
-  credential_name?: string | null;
-};
-
-/**
- * 页面级钻取状态 = 既有 `StatsDrill` + 成功/失败过滤。
- *
- * `ok` 不进 `types.ts` 的 `StatsDrill`（那个类型描述的是「分组表点行」的通用
- * 形态）：只有失败归因卡片需要它。这里本地扩展，`applyDrill` 合并时一并带上。
- */
-type PageDrill = StatsDrill & { ok?: number };
-
-/** 凭证文案：昵称优先，回落 ID 前 12 位（ID 很长）。分组表与明细表共用，
- *  保证同一凭证在两处显示成同一个名字。 */
-function credentialCellLabel(name: string | null | undefined, id: string | null | undefined) {
-  return name ?? (id ? id.slice(0, 12) : "—");
-}
-
-/**
- * 明细时间列：时刻与日期摞成两行（`20:17:09` / `2026-10-21`）。
- *
- * **具体时刻优先**（第一行、正常色），日期降为第二行次要色：看明细时先关心
- * 「几点几分」，日期只在跨天对比时才用得上。两行等宽数字各自纵向对齐，扫读更快，
- * 也避免一行 `toLocaleString` 在窄屏把整行撑宽。
- */
-function timeCell(row: UsageEventRow) {
-  const [date, clock] = formatTimeParts(row.ts);
-  return (
-    <TableCell label="时间" className="whitespace-nowrap tabular-nums leading-tight"
-               title={row.request_id ? `请求 ID：${row.request_id}` : undefined}>
-      {/* 两行包进同一个块：卡片模式里 td 是 flex 且 space-between，两块子元素会被
-          拉到卡片两端（时刻靠左、日期靠右），读起来像两个字段。 */}
-      <span className="block">
-        <span className="block">{clock}</span>
-        <span className="block text-xs text-muted-foreground">{date}</span>
-      </span>
-    </TableCell>
-  );
-}
-
-/**
- * 明细「渠道 / 凭证」合并列：凭证名一行（第一行、正常色），渠道 icon + 名称一行（次要色）。
- *
- * **凭证优先**：同渠道下往往挂着多个账号，出问题时先要认出是哪个账号；渠道由图标
- * 一眼可辨，降为第二行次要色即可。两列都是「这条请求打在哪」，拆成两列时凭证列常
- * 只有几个字白占宽度；合并后排序能力靠列头下拉保留（渠道 / 凭证两个子键），
- * 完整凭证 ID 放 title。
- */
-function sourceCell(row: UsageEventRow) {
-  return (
-    <TableCell label="渠道 / 凭证" className="leading-tight"
-               title={row.credential_id ?? undefined}>
-      <span className="block min-w-0">
-        {/* 固定宽度 + truncate 必须落在内层块元素上：`table-cell` 上的 max-width /
-            truncate 不生效，长邮箱（如 hongsheng900805@gmail.com）会把整列撑到
-            192px，逼得最后两列横向滚动。窄屏卡片里交给列宽，不再截断。 */}
-        <span className="block w-32 truncate max-md:w-auto">
-          {credentialCellLabel(row.credential_name, row.credential_id)}
-        </span>
-        <span className="inline-flex items-center gap-1.5 text-xs whitespace-nowrap text-muted-foreground">
-          <ProviderIcon provider={row.provider} size={13} />
-          {providerLabel(row.provider)}
-        </span>
-      </span>
-    </TableCell>
-  );
-}
-
-/**
- * 明细状态列：成功固定文案；失败展示受控错误类型的中文说明（脱敏，不含原始错误体）。
- *
- * 成功是默认态、一屏十行都是它，用绿色文字会满屏噪点，故降为「绿点 + 次要色文字」；
- * 失败反过来用语义色文字 + 红点，让异常行在扫读时先跳出来（色不单独表意，文字始终在）。
- */
-function statusCell(row: UsageEventRow) {
-  if (row.ok) {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-muted-foreground">
-        <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-ok" />
-        成功
-      </span>
-    );
-  }
-  return (
-    <span className="inline-flex items-center gap-1.5 text-danger-ink">
-      <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-destructive" />
-      {usageErrorLabel(row.error_type)}
-    </span>
-  );
-}
-
-/**
- * 失败行整行标记：左侧 2px 色条 + 极淡语义底。
- *
- * 明细表按时间流排列，失败行散落在成功行之间；只靠状态列一个字上色，扫一屏
- * 十几行时容易漏。整行标记把「这条坏了」变成行级信号，同时保持文字为主信息。
- */
-function rowToneClass(row: UsageEventRow) {
-  return row.ok
-    ? undefined
-    // hover 也要保住色条与底色：基类 TableRow 的 hover:bg-muted/50 会把语义底洗掉，
-    // 鼠标停在失败行上时正好失去「这条坏了」的信号。cn 合并时本行覆盖基类。
-    : "bg-destructive/[0.04] hover:bg-destructive/10 shadow-[inset_2px_0_0_var(--destructive)]";
-}
-
-/**
- * Token 合并列：默认「输入 / 输出 · 命中率」，悬停展开命中 token。
- *
- * 命中率复用 `formatCacheRate`（未上报 / 输入为 0 显示 —）；悬停详情用 `Tip`，
- * 窄屏卡片模式下同样可用（点击单元格即可唤出）。
- */
-function tokenCell(row: UsageEventRow) {
-  const rate = formatCacheRate(row.cached_tokens, row.input_tokens);
-  return (
-    <Tip content={
-      `输入 ${formatCompact(row.input_tokens)} · 输出 ${formatCompact(row.output_tokens)}`
-      + ` · 命中 ${formatCompact(row.cached_tokens)} · 命中率 ${rate}`
-    }>
-      <span className="tabular-nums">
-        {formatCompact(row.input_tokens)} / {formatCompact(row.output_tokens)}
-        <span className="text-muted-foreground"> · {rate}</span>
-      </span>
-    </Tip>
-  );
-}
-
-/** 延迟合并列：默认「耗时 / 首字」，悬停补字段名（两个都是 ms/s 的数字，靠提示消歧）。 */
-function latencyCell(row: UsageEventRow) {
-  return (
-    <Tip content={`耗时 ${formatLatency(row.latency_ms)} · 首字延迟 ${formatLatency(row.ttfb_ms)}`}>
-      <span className="tabular-nums">
-        {formatLatency(row.latency_ms)}
-        <span className="text-muted-foreground"> / {formatLatency(row.ttfb_ms)}</span>
-      </span>
-    </Tip>
-  );
-}
-
-/**
- * 数值列的空值弱化：整格都是占位符（—）时降到次要色。
- *
- * 明细表里空值很多（失败的请求没有 token / 成本，Qoder 不上报 credit）。占位符与
- * 真值同色时，一列「—」和一列数字的视觉重量一样，扫读数字反而更费劲。降一档色
- * 让真值浮起来——用 `text-muted-foreground`（不透明度不低于 60%），保证占位符
- * 仍是可读文本而不是装饰。
- */
-function dashTone(empty: boolean) {
-  return empty ? "text-muted-foreground" : undefined;
-}
-
-/**
- * 明细行单元格（分页表与实时表共用）：两处结构完全一致，抽出来保证同一行
- * 在「历史」与「实时」里显示成同一副样子（列宽、空值色、合并列规则都不会走偏）。
- */
-function eventRowCells(row: UsageEventRow, showUser: boolean) {
-  return (
-    <>
-      {timeCell(row)}
-      {showUser && <TableCell label="用户">{row.username}</TableCell>}
-      {sourceCell(row)}
-      <TableCell label="模型">
-        <span className="block max-w-44 truncate" title={row.model}>{row.model}</span>
-      </TableCell>
-      <TableCell label="状态">{statusCell(row)}</TableCell>
-      <TableCell label="Token"
-                 className={cn("text-right", dashTone(
-                   row.input_tokens == null && row.output_tokens == null))}>
-        {tokenCell(row)}
-      </TableCell>
-      <TableCell label="Credit"
-                 className={cn("text-right tabular-nums", dashTone(row.credit == null))}>
-        {formatCredit(row.credit, row.credit_estimated)}
-      </TableCell>
-      <TableCell label="成本"
-                 className={cn("text-right tabular-nums", dashTone(row.cost_cny == null))}
-                 title={row.cost_usd == null ? undefined : `美元 ${formatMoney(row.cost_usd, "USD")}`}>
-        {formatMoney(row.cost_cny, "CNY")}
-      </TableCell>
-      <TableCell label="延迟"
-                 className={cn("text-right", dashTone(
-                   row.latency_ms == null && row.ttfb_ms == null))}>
-        {latencyCell(row)}
-      </TableCell>
-      <TableCell label="速度"
-                 className={cn("text-right", dashTone(
-                   row.tps == null && row.tps_visible == null))}>
-        {eventSpeedCell(row)}
-      </TableCell>
-    </>
-  );
-}
-
-/**
- * 速度合并列的子列（分组表与明细表共用同一组排序键）：正文 / 总产出。
- *
- * 两列同分母（生成时间总和），分子不同——正文贴合屏幕刷新速度，总产出含思考
- * token（思考成批快速吐出，数字明显更高），故并成一列 + 下拉选排序键。
- */
-const SPEED_COLUMNS = [
-  { key: "tps_visible", label: "正文速度" },
-  { key: "tps", label: "总产出速度" },
-] as const;
-
-/** 明细速度单元格（分页明细表与实时表共用，保证两处同口径同文案）。 */
-function eventSpeedCell(row: UsageEventRow) {
-  return (
-    <Tip content={row.tps === null
-      ? "该请求的生成窗口不可测（无首字数据 / 没有输出 token / 生成窗口短于 200ms 或快得不合物理），不计算速度"
-      : `正文 ${formatSpeed(row.tps_visible)} · 总产出（含思考）${formatSpeed(row.tps)}`}>
-      {/* 单位交给列头（tok/s），行内只留数字：10 列的表里每行重复单位要多占 45px */}
-      <span className="tabular-nums">{formatSpeedPair(row.tps_visible, row.tps, false, false)}</span>
-    </Tip>
-  );
-}
+  GROUP_DIMENSIONS,
+  LATENCY_METRICS,
+  LIVE_MAX_ROWS,
+  RANGES,
+  type GroupRow,
+  type PageDrill,
+  type Percentile,
+} from "./stats/constants";
+import { AuxCharts } from "./stats/AuxCharts";
+import { EventsPanel } from "./stats/EventsPanel";
+import { FailurePanel } from "./stats/FailurePanel";
+import { GroupStatsPanel } from "./stats/GroupStatsPanel";
+import { PrivacyNotice } from "./stats/PrivacyNotice";
+import { StatsFilters } from "./stats/StatsFilters";
+import { StatsOverviewCards } from "./stats/StatsOverviewCards";
+import { TrendChartPanel } from "./stats/TrendChartPanel";
 
 export function StatsPage() {
   const session = useSessionContext();
@@ -502,6 +152,19 @@ export function StatsPage() {
     setCursors([undefined]);
   };
 
+  /** 自定义时间窗逐字编辑同样算「换数据集」：回第一页并清游标栈。 */
+  const changeCustomFrom = (value: string) => {
+    setCustomFrom(value);
+    setPageIndex(0);
+    setCursors([undefined]);
+  };
+
+  const changeCustomTo = (value: string) => {
+    setCustomTo(value);
+    setPageIndex(0);
+    setCursors([undefined]);
+  };
+
   const changePageSize = (size: number) => {
     setPageSize(size);
     setPageIndex(0);
@@ -606,11 +269,6 @@ export function StatsPage() {
   const errors = useStatsErrors(session.username, effectiveSince, effectiveUntil,
                                 undefined, session.is_operator);
   const errorRows = errors.data?.errors ?? [];
-  // 计数条按本批最大值归一（相对长度才有意义）；全 0 时给 1 避免除零
-  const maxFailures = Math.max(1, ...errorRows.map((row) => row.failures));
-  const barWidth = (failures: number) => Math.round((failures / maxFailures) * 100);
-  /** 失败数减去换号救回数 = 未被救回的失败尝试数（rescued 恒 ≤ failures）。 */
-  const unrescued = (row: StatsErrorRow) => row.failures - row.rescued;
 
   // 四个维度各取一维（各维度行结构一致），切 tab 才换查询、不再为不渲染的
   // 维度白扫一遍明细表；viewer 看不到用户/凭证 tab，若状态残留则回落到渠道维度
@@ -618,8 +276,6 @@ export function StatsPage() {
     (item) => session.is_operator || !item.operatorOnly);
   const group = groupDimensions.find((item) => item.value === groupDimension)
     ?? groupDimensions[0];
-  const groupKey = group.groupKey;
-  const groupLabel = group.label2;
   const groupRows: GroupRow[] = group.value === "provider"
     ? (byProvider.data?.providers ?? [])
     : group.value === "model"
@@ -656,23 +312,20 @@ export function StatsPage() {
   // 的正常空数据——用户以为真的没有用量，而故障被完全吞掉。
   const overviewFailed = overview.isError;
   const stats = overview.data;
-  const rate =
-    stats?.success_rate === null || stats?.success_rate === undefined
-      ? null
-      : stats.success_rate;
-  const rateText = rate === null ? "—" : `${(rate * 100).toFixed(1)}%`;
-  const totalTokens = (stats?.input_tokens ?? 0) + (stats?.output_tokens ?? 0);
-  // 输入缓存：命中 = 上报的 cached_tokens；未命中 = 输入 − 命中（缺上报则显示 —）
-  const cached = stats?.cached_tokens ?? null;
-  const hitText = cached === null ? "—" : formatCompact(cached);
-  const missText =
-    cached === null || stats?.input_tokens === null || stats?.input_tokens === undefined
-      ? "—"
-      : formatCompact(stats.input_tokens - cached);
-  const tokenHint =
-    `输入 ${formatCompact(stats?.input_tokens)}（命中 ${hitText} · 未命中 ${missText}）`
-    + ` · 输出 ${formatCompact(stats?.output_tokens)} · 推理 ${formatCompact(stats?.reasoning_tokens)}`
-    + ` · 缓存命中率 ${formatCacheRate(cached, stats?.input_tokens)}`;
+
+  /** 游标分页的翻页动作：向下翻页时先把本页 next_before 压栈，下一页才有游标可发。 */
+  const changePage = (next: number) => {
+    if (next > pageIndex && cursorMode) {
+      const nextBefore = events.data?.next_before;
+      if (nextBefore === null || nextBefore === undefined) return;
+      setCursors((prev) => {
+        const updated = prev.slice();
+        updated[pageIndex + 1] = nextBefore;
+        return updated;
+      });
+    }
+    setPageIndex(next);
+  };
 
   return (
     <div className="space-y-6" data-testid="stats-page">
@@ -683,765 +336,81 @@ export function StatsPage() {
         icon={<BarChart3 className="size-5" />}
       />
 
-      {/* 筛选条：时间范围与图表指标合并在同一张卡里——两者都是「决定下面看什么」
-          的全局开关，分成两张卡会白占一整块高度和一条分隔线。 */}
-      <Panel>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <span className="text-sm font-medium text-muted-foreground">时间范围</span>
-          <Tabs
-            value={range}
-            options={RANGES.map(({ value, label }) => ({ value, label }))}
-            onChange={changeRange}
-            testId="range-tabs"
-          />
-          <span aria-hidden className="hidden h-4 w-px bg-border sm:block" />
-          <span className="text-sm font-medium text-muted-foreground">图表指标</span>
-          <Tabs
-            value={metric}
-            options={METRICS.map(({ value, label }) => ({ value, label }))}
-            onChange={setMetric}
-            testId="metric-tabs"
-          />
-        </div>
-        {/* 自定义范围：两个 datetime-local，精确到分钟、按浏览器本地时区解析。
-            起点晚于终点时提示并暂停取数（见 buildCustomRange）。 */}
-        {range === "custom" && (
-          <div className="mt-3 flex flex-wrap items-end gap-3" data-testid="custom-range">
-            <Field label="开始时间" htmlFor="custom-from-input">
-              <Input
-                id="custom-from-input"
-                type="datetime-local"
-                value={customFrom}
-                data-testid="custom-from"
-                className="w-52"
-                onChange={(event) => {
-                  setCustomFrom(event.target.value);
-                  setPageIndex(0);
-                  setCursors([undefined]);
-                }}
-              />
-            </Field>
-            <Field label="结束时间" htmlFor="custom-to-input">
-              <Input
-                id="custom-to-input"
-                type="datetime-local"
-                value={customTo}
-                data-testid="custom-to"
-                className="w-52"
-                onChange={(event) => {
-                  setCustomTo(event.target.value);
-                  setPageIndex(0);
-                  setCursors([undefined]);
-                }}
-              />
-            </Field>
-            {customInvalid && (
-              <p className="pb-2 text-xs text-destructive" data-testid="custom-range-invalid">
-                开始时间须早于结束时间，且格式有效；已暂停取数。
-              </p>
-            )}
-          </div>
-        )}
-      </Panel>
+      <StatsFilters
+        range={range}
+        metric={metric}
+        customFrom={customFrom}
+        customTo={customTo}
+        customInvalid={customInvalid}
+        onRangeChange={changeRange}
+        onMetricChange={setMetric}
+        onCustomFromChange={changeCustomFrom}
+        onCustomToChange={changeCustomTo}
+      />
 
-      {overviewFailed && (
-        <div data-testid="stats-overview-error">
-          <Notice tone="danger">
-            总览数据加载失败：服务可能暂时不可用或会话已过期。
-            下方指标显示为「—」是取不到数，不是真的没有用量。
-          </Notice>
-        </div>
-      )}
+      <StatsOverviewCards overviewFailed={overviewFailed} stats={stats} />
 
-      <section
-        aria-label="用量概览统计"
-        className="grid grid-cols-2 gap-3 lg:grid-cols-4"
-      >
-        {/* 四张主卡：请求数 / Token / 成本 / 耗时——正好对应「用了多少、花了多少、
-            快不快」三个问题。其余指标（输出速度、Credit、成功率）降为下方一条
-            状态条：它们的 hint 太长，占满六张卡会把每张压到 180px、hint 排成六行，
-            反而让主指标看不见。 */}
-        <Metric label="请求数" value={formatNumber(stats?.requests)} tone="ok"
-                hint={`成功 ${formatNumber(stats?.ok_count)} · 成功率 ${rateText}`}
-                icon={<Activity className="size-4" />} />
-        <Metric
-          label="Token 消耗"
-          value={formatCompact(totalTokens)}
-          hint={tokenHint}
-          icon={<Coins className="size-4" />}
-        />
-        <Metric
-          label="成本（估算）"
-          value={formatMoney(stats?.cost_cny, "CNY")}
-          hint={`美元 ${formatMoney(stats?.cost_usd, "USD")} · 按 OpenRouter 刊例价折算`}
-          icon={<Wallet className="size-4" />}
-        />
-        <Metric
-          label="平均耗时"
-          value={formatLatency(stats?.avg_latency_ms)}
-          hint={`首字延迟 ${formatLatency(stats?.avg_ttfb_ms)}`}
-          icon={<Timer className="size-4" />}
-        />
-      </section>
+      <TrendChartPanel
+        metric={metric}
+        points={timeline.data?.points ?? []}
+        scope={effectiveScope}
+        scopeProviders={timelineProviders}
+        onScopeChange={setChartScope}
+        showShare={showShare}
+        providers={byProvider.data?.providers ?? []}
+      />
 
-      {/* 次要指标条：输出速度 / Credit / 缓存命中率。用一条分隔条而不是三张卡，
-          避免与上面四张主卡抢视觉权重。 */}
-      <section
-        aria-label="次要指标"
-        className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border/70 bg-border/70 text-sm sm:grid-cols-3"
-      >
-        <div className="bg-panel px-4 py-3" data-testid="stat-speed">
-          <div className="text-xs text-muted-foreground">输出速度</div>
-          <div className="mt-1 text-base font-semibold tabular-nums">
-            {formatSpeed(stats?.tps_visible, stats?.tps_estimated)}
-          </div>
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            {stats?.tps === null
-              ? "该范围内没有可用的生成时间样本"
-              : `总产出（含思考）${formatSpeed(stats?.tps, stats?.tps_estimated)}`}
-          </div>
-        </div>
-        <div className="bg-panel px-4 py-3" data-testid="stat-cache">
-          <div className="text-xs text-muted-foreground">缓存命中率</div>
-          <div className="mt-1 text-base font-semibold tabular-nums">
-            {formatCacheRate(cached, stats?.input_tokens)}
-          </div>
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            命中 {hitText} · 未命中 {missText}
-          </div>
-        </div>
-        <div className="bg-panel px-4 py-3 col-span-2 sm:col-span-1" data-testid="stat-credit">
-          <div className="text-xs text-muted-foreground">Credit 消耗</div>
-          <div className="mt-1 text-base font-semibold tabular-nums">
-            {formatCredit(stats?.credit, stats?.credit_estimated)}
-          </div>
-          <div className="mt-0.5 text-xs text-muted-foreground">
-            渠道可选字段；≈ 为推算值
-          </div>
-        </div>
-      </section>
+      <AuxCharts
+        metric={metric}
+        percentile={latencyPercentile.data}
+        modelTimeline={modelTimeline.data}
+        modelAxisTruncated={modelAxis.truncated}
+      />
 
-      <Panel
-        title="指标趋势"
-        action={
-          /* 渠道切换：一次只画一条线。默认「全部渠道」读后端的 `__total`
-             （均值/比率按同一小时的 sum/count 重新相除，不能前端相加）。 */
-          timelineProviders.length > 1 ? (
-            <Tabs
-              value={effectiveScope}
-              compact
-              options={[
-                { value: "total", label: "全部渠道" },
-                ...timelineProviders.map((provider) => ({
-                  value: provider, label: providerLabel(provider),
-                })),
-              ]}
-              onChange={setChartScope}
-              testId="chart-scope-tabs"
-            />
-          ) : undefined
-        }
-      >
-        {(timeline.data?.points.length ?? 0) === 0 ? (
-          <Empty>该范围内没有小时汇总数据</Empty>
-        ) : (
-          <>
-            <UsageChart points={timeline.data?.points ?? []} metric={metric}
-                        scope={effectiveScope} />
-            {/* 渠道构成只在请求量指标下出现（份额需要「请求数」这个分母）。
-                放在主图卡片底部而不是单独一张卡：它只有一行高度，独立成卡会多出
-                标题栏 + 上下内边距 + 外框，把一行内容撑成 123px。 */}
-            {showShare && (
-              <div className="mt-3 border-t border-border/70 pt-2.5" data-testid="provider-share-block">
-                <div className="mb-1.5 flex items-baseline justify-between">
-                  <span className="text-xs font-medium text-muted-foreground">渠道构成</span>
-                  <span className="text-xs text-muted-foreground">按请求数占比</span>
-                </div>
-                <ProviderShare
-                  rows={(byProvider.data?.providers ?? []).map((row) => ({
-                    provider: row.provider, value: row.requests,
-                  }))}
-                  total={(byProvider.data?.providers ?? []).reduce(
-                    (sum, row) => sum + row.requests, 0)}
-                />
-              </div>
-            )}
-          </>
-        )}
-      </Panel>
+      <GroupStatsPanel
+        groupDimension={groupDimension}
+        groupDimensions={groupDimensions}
+        onGroupDimensionChange={setGroupDimension}
+        onPercentileChange={(value) => setPercentile(value as Percentile)}
+        percentile={percentile}
+        groupSort={groupSort}
+        group={group}
+        groupRows={groupRows}
+        onDrill={applyDrill}
+      />
 
-      {/* 主图之外的两张辅助图：延迟类指标多一张分位图。
-          单张时必须占满整行——否则 `lg:grid-cols-2` 只放一个子元素，
-          右半边整块留白（900–1200px 下尤其明显）。 */}
-      {/* 辅助图区：延迟类指标并排「分位图 + 模型趋势」；其余指标只有模型趋势，
-          独占整行（否则 `lg:grid-cols-2` 只放一个子元素，右半边整块留白）。 */}
-      <section className={cn(
-        "grid gap-4",
-        LATENCY_METRICS.has(metric) && "lg:grid-cols-2",
-      )}>
-        {/* 延迟类指标：主图之外再给一张分位图（P50 中位数 + P95 上界）。
-            均值会摊平长尾，分位才看得出「有多少请求在受苦」。 */}
-        {LATENCY_METRICS.has(metric) && (
-          <Panel title={metric === "ttfb" ? "首字延迟分位" : "耗时分位"} action={
-            <span className="text-xs text-muted-foreground">
-              P50 中位数 · P95 上界 · 成功请求
-            </span>
-          }>
-            {(latencyPercentile.data?.points.length ?? 0) === 0 ? (
-              <Empty data-testid="no-latency-percentile">该范围内没有可用的延迟样本</Empty>
-            ) : (
-              <LatencyChart
-                points={latencyPercentile.data?.points ?? []}
-                metric={latencyPercentile.data?.metric ?? "latency"}
-                windowDays={latencyPercentile.data?.window_days ?? 90}
-              />
-            )}
-          </Panel>
-        )}
+      <FailurePanel
+        isOperator={session.is_operator}
+        isError={errors.isError}
+        errorRows={errorRows}
+        onDrill={applyDrill}
+      />
 
-        <Panel title="按模型趋势" action={
-          modelTimeline.data?.models.length ? (
-            <span className="text-xs text-muted-foreground">
-              请求量 Top {Math.min(3, modelTimeline.data.models.length)} 模型
-            </span>
-          ) : undefined
-        }>
-          {(modelTimeline.data?.points.length ?? 0) === 0 ? (
-            <Empty data-testid="no-model-trend">该范围内没有小时汇总数据</Empty>
-          ) : (
-            <>
-              <ModelTrendChart
-                points={modelTimeline.data?.points ?? []}
-                models={modelTimeline.data?.models ?? []}
-                metric={metric}
-              />
-              <ModelLegend
-                models={modelTimeline.data?.models ?? []}
-                note={modelAxis.truncated ? "Y 轴自 90% 起（便于看清窄幅波动）" : undefined}
-              />
-            </>
-          )}
-        </Panel>
-      </section>
+      <EventsPanel
+        totalRequests={overview.data?.requests}
+        live={live}
+        toggleLive={toggleLive}
+        isOperator={session.is_operator}
+        exporting={exporting}
+        exportCsv={exportCsv}
+        exportNotice={exportNotice}
+        drillLabels={drillLabels}
+        clearDrill={clearDrill}
+        liveStatus={liveStatus}
+        liveRows={liveRows}
+        isError={events.isError}
+        isFetching={events.isFetching}
+        eventRows={eventRows}
+        eventSort={eventSort}
+        toggleEventSort={toggleEventSort}
+        pageIndex={pageIndex}
+        pageSize={pageSize}
+        hasNextPage={hasNextPage}
+        changePageSize={changePageSize}
+        onPageChange={changePage}
+      />
 
-      <Panel title="分组统计" action={
-        <Tabs
-          value={groupDimension}
-          options={groupDimensions.map(({ value, label }) => ({ value, label }))}
-          onChange={setGroupDimension}
-          testId="group-tabs"
-        />
-      }>
-        {/* 分位档切换：四档后端一次算好，这里只决定展示哪一档（避免四列撑爆表头） */}
-        <div className="mb-3 flex flex-wrap items-center gap-2">
-          <span className="text-xs text-muted-foreground">延迟分位</span>
-          <Tabs value={percentile} options={PERCENTILE_TABS}
-                onChange={(value) => setPercentile(value as Percentile)}
-                testId="percentile-tabs" compact />
-          <span className="text-xs text-muted-foreground">
-            取自逐请求明细（仅 90 天），只统计成功请求
-          </span>
-        </div>
-        {groupRows.length === 0 ? (
-          <Empty data-testid="no-group-stats">该范围内没有请求</Empty>
-        ) : (
-          <Table data-testid="group-table" cards>
-            <TableHeader>
-              <TableRow>
-                <SortableHead label={group.value === "provider" ? "渠道" : groupLabel}
-                              columnKey="group" active={groupSort.sort === "group"}
-                              direction={groupSort.order} onToggle={groupSort.toggle}
-                              testId="sort-group" />
-                <SortMenuHead label="请求" options={[...GROUP_REQUEST_COLUMNS]}
-                              activeKey={groupSort.sort} direction={groupSort.order}
-                              onToggle={groupSort.toggle} testId="group-sort-requests" />
-                <SortableHead label="Credit" columnKey="credit"
-                              active={groupSort.sort === "credit"} direction={groupSort.order}
-                              onToggle={groupSort.toggle} align="right" testId="sort-credit" />
-                <SortableHead label="成本" columnKey="cost_cny"
-                              active={groupSort.sort === "cost_cny"} direction={groupSort.order}
-                              onToggle={groupSort.toggle} align="right" testId="sort-cost_cny" />
-                {/* Token 合并列：输入 / 输出 · 命中率，悬停展开命中 token。
-                    列头下拉仍可分别按输入 / 输出 / 命中排序。 */}
-                <SortMenuHead label="Token" options={[...GROUP_TOKEN_COLUMNS]}
-                              activeKey={groupSort.sort} direction={groupSort.order}
-                              onToggle={groupSort.toggle} testId="group-sort-token" />
-                {/* 速度合并列：正文 / 总产出（含思考）——同分母（生成时间总和，
-                    读明细、仅 90 天），分子不同：正文贴近屏幕上看到的刷新速度，
-                    总产出含思考 token（思考成批快速吐出，数字会明显更高）。无首字
-                    数据时回落估算并标 ≈。列头下拉可分别按两个分子排序。 */}
-                <SortMenuHead label="速度" options={[...SPEED_COLUMNS]}
-                              activeKey={groupSort.sort} direction={groupSort.order}
-                              onToggle={groupSort.toggle} testId="group-sort-speed" />
-                {/* 延迟两列：均值读小时汇总（与总览同口径），分位读明细表（仅 90 天）。
-                    两套口径各自合并成一列，靠表尾说明与悬停文案区分。 */}
-                <SortMenuHead label="平均延迟" options={[...GROUP_AVG_LATENCY_COLUMNS]}
-                              activeKey={groupSort.sort} direction={groupSort.order}
-                              onToggle={groupSort.toggle} testId="group-sort-avg-latency" />
-                <SortMenuHead label={`${percentile.toUpperCase()} 延迟`}
-                              options={[
-                                { key: `${percentile}_latency_ms`,
-                                  label: `${percentile.toUpperCase()} 耗时` },
-                                { key: `${percentile}_ttfb_ms`,
-                                  label: `${percentile.toUpperCase()} 首字` },
-                              ]}
-                              activeKey={groupSort.sort} direction={groupSort.order}
-                              onToggle={groupSort.toggle}
-                              testId={`group-sort-${percentile}-latency`} />
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {groupRows.map((row) => {
-                // 点行 = 钻取到该维度的明细；分组键 → 明细过滤字段的映射：
-                // provider/model/credential_id 直接同名，用户维度走作用域 username
-                const keyValue = String(row[groupKey]);
-                const next: StatsDrill = group.value === "user"
-                  ? { username: keyValue }
-                  : group.value === "provider" ? { provider: keyValue }
-                    : group.value === "model" ? { model: keyValue }
-                      : { credential_id: keyValue };
-                return (
-                <TableRow key={keyValue}
-                          data-testid={`group-row-${keyValue}`}
-                          className="cursor-pointer"
-                          tabIndex={0}
-                          role="button"
-                          aria-label={`查看 ${keyValue} 的请求明细`}
-                          onClick={() => applyDrill(next)}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter" || event.key === " ") {
-                              event.preventDefault();
-                              applyDrill(next);
-                            }
-                          }}>
-                  <TableCell label={group.value === "provider" ? "渠道" : groupLabel}
-                             className="max-w-48 truncate"
-                             title={groupKey === "credential_id"
-                               ? (row.credential_id ?? undefined)
-                               : keyValue}>
-                    {groupKey === "provider" ? (
-                      <span className="inline-flex items-center gap-1.5">
-                        <ProviderIcon provider={String(row.provider)} size={13} />
-                        {providerLabel(String(row.provider))}
-                      </span>
-                    ) : groupKey === "credential_id" ? (
-                      // 渠道 icon + 凭证名：与请求明细的凭证列同口径
-                      <span className="inline-flex items-center gap-1.5">
-                        <ProviderIcon provider={String(row.provider)} size={13} />
-                        {credentialCellLabel(row.credential_name, row.credential_id)}
-                      </span>
-                    ) : (
-                      keyValue
-                    )}
-                  </TableCell>
-                  {/* 请求合并列：默认「请求数 · 成功率」，悬停补成功数。
-                      成功率 = 成功 ÷ 请求，请求数为 0 时给 —（不渲染 0% 冒充数据）。 */}
-                  <TableCell label="请求" className="text-right">
-                    <Tip content={`请求 ${formatNumber(row.requests)}`
-                      + ` · 成功 ${formatNumber(row.ok_count)}`
-                      + ` · 成功率 ${row.requests > 0
-                        ? `${((row.ok_count / row.requests) * 100).toFixed(1)}%`
-                        : "—"}`}>
-                      <span className="tabular-nums">
-                        {formatNumber(row.requests)}
-                        <span className="text-muted-foreground" data-testid="group-success-rate">
-                          {" · "}{row.requests > 0
-                            ? `${((row.ok_count / row.requests) * 100).toFixed(1)}%`
-                            : "—"}
-                        </span>
-                      </span>
-                    </Tip>
-                  </TableCell>
-                  <TableCell label="Credit" className="text-right tabular-nums">
-                    {formatCredit(row.credit, row.credit_estimated)}
-                  </TableCell>
-                  <TableCell label="成本" className="text-right tabular-nums"
-                             title={`美元 ${formatMoney(row.cost_usd, "USD")}`}>
-                    {formatMoney(row.cost_cny, "CNY")}
-                  </TableCell>
-                  <TableCell label="Token" className="text-right"
-                             data-testid="group-token">
-                    <Tip content={
-                      `输入 ${formatCompact(row.input_tokens)}`
-                      + ` · 输出 ${formatCompact(row.output_tokens)}`
-                      + ` · 命中 ${formatCompact(row.cached_tokens)}`
-                    }>
-                      <span className="tabular-nums">
-                        {formatCompact(row.input_tokens)} / {formatCompact(row.output_tokens)}
-                        <span className="text-muted-foreground" data-testid="group-cache-rate">
-                          {" · "}{formatCacheRate(row.cached_tokens, row.input_tokens)}
-                        </span>
-                      </span>
-                    </Tip>
-                  </TableCell>
-                  {/* 速度合并列：正文 / 总产出；无合格样本整格 —（估算口径前置 ≈）。
-                      正文为 0（整段输出都是思考）时正文侧显示 —，不拿 0 冒充速度。 */}
-                  <TableCell label="速度" className="text-right tabular-nums"
-                             data-testid="group-tps">
-                    <Tip content={row.tps === null && row.tps_visible === null
-                      ? "该组没有产出了 token 的成功请求，或生成窗口不可测，不计算速度"
-                      : `正文 ${formatSpeed(row.tps_visible, row.tps_estimated)}`
-                        + ` · 总产出（含思考）${formatSpeed(row.tps, row.tps_estimated)}`}>
-                      <span>{formatSpeedPair(row.tps_visible, row.tps, row.tps_estimated)}</span>
-                    </Tip>
-                  </TableCell>
-                  {/* 延迟两列：均值与分位都只算成功请求；无成功请求显示 — */}
-                  <TableCell label="平均延迟" className="text-right"
-                             data-testid="group-avg-latency">
-                    <Tip content={`平均耗时 ${formatLatency(row.avg_latency_ms)}`
-                      + ` · 平均首字 ${formatLatency(row.avg_ttfb_ms)}`}>
-                      <span className="tabular-nums">
-                        {formatLatency(row.avg_latency_ms)}
-                        <span className="text-muted-foreground" data-testid="group-avg-ttfb">
-                          {" / "}{formatLatency(row.avg_ttfb_ms)}
-                        </span>
-                      </span>
-                    </Tip>
-                  </TableCell>
-                  <TableCell label={`${percentile.toUpperCase()} 延迟`} className="text-right"
-                             data-testid={`group-${percentile}-latency`}>
-                    <Tip content={`${percentile.toUpperCase()} 耗时 `
-                      + `${formatLatency(row[`${percentile}_latency_ms`])}`
-                      + ` · ${percentile.toUpperCase()} 首字 `
-                      + `${formatLatency(row[`${percentile}_ttfb_ms`])}`}>
-                      <span className="tabular-nums">
-                        {formatLatency(row[`${percentile}_latency_ms`])}
-                        <span className="text-muted-foreground"
-                              data-testid={`group-${percentile}-ttfb`}>
-                          {" / "}{formatLatency(row[`${percentile}_ttfb_ms`])}
-                        </span>
-                      </span>
-                    </Tip>
-                  </TableCell>
-                </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
-        )}
-        <Footnote summary="口径说明（数据源 · 延迟 · 速度）" testId="group-footnote">
-          <p>
-            {groupKey === "credential_id"
-              ? "凭证分组取自逐请求明细（仅保留 90 天），无凭证的预热失败等请求不计入。"
-              : "各维度数据源为小时汇总（永久保留），最近 5 分钟内的请求可能尚未计入。"}
-            {" "}点任意一行可钻取到下方「请求明细」。
-          </p>
-          {/* 延迟列的两套口径必须写明：均值永久、分位只覆盖 90 天，
-              混在同一行里不说明会被读成「同一个范围」。 */}
-          <p>
-            延迟列只统计成功请求。平均耗时 / 平均首字取自小时汇总（与总览卡片同口径）；
-            分位为第 P50/P90/P95/P99 百分位（向上取整名次，默认 P95），取自逐请求明细，
-            只覆盖最近 90 天。速度列两个分子分母相同（生成时间总和，不是逐条平均），正文
-            token（output − reasoning）贴近屏幕上看到的刷新速度，总产出 token（含思考）
-            含思考成批吐出的部分；成功请求只要有产出就计入（不设输出量下限），并剔除生成
-            窗口 &lt;200ms 或单条 &gt;1000 tok/s 的样本——那是上游把内容攒成一批吐出、生成
-            时长根本不可测，不是「很快」。无首字数据时按端到端耗时估算（同样不设输出门槛，
-            分母含首字等待，前置 ≈），同样取自逐请求明细（仅 90 天）。
-          </p>
-        </Footnote>
-      </Panel>
-
-      {/* 失败归因（operator+）：跨用户看「哪里在坏」。点行 → 钻取到该渠道+模型
-          的失败明细（ok=0），与下方「请求明细」联动。
-          无失败时整张卡不渲染：一张只有「该范围内没有失败请求」的空卡仍占 239px
-          （标题栏 + 空态 + 口径说明），而「没有失败」本身就是好消息，不必占版面。
-          错误态仍要显示，否则加载失败会被误读成「零失败」。 */}
-      {session.is_operator && (errors.isError || (errors.data?.errors.length ?? 0) > 0) && (
-        <Panel data-testid="error-panel" title="失败归因" action={
-          <span className="text-xs text-muted-foreground">
-            按渠道 / 模型 / 错误类型分组 · 取自逐请求明细（仅 90 天）
-          </span>
-        }>
-          {errors.isError ? (
-            <div data-testid="errors-error">
-              <Notice tone="danger">
-                失败归因加载失败，请刷新重试；若刚升级服务，请确认后端已重启加载新端点。
-              </Notice>
-            </div>
-          ) : (
-            <Table data-testid="error-table" cards>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>渠道</TableHead>
-                  <TableHead>模型</TableHead>
-                  <TableHead>错误类型</TableHead>
-                  <TableHead className="text-right">失败数</TableHead>
-                  <TableHead className="text-right">未救回</TableHead>
-                  <TableHead className="text-right">最近失败</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {errorRows.map((row) => (
-                  <TableRow
-                    key={`${row.provider}/${row.model}/${row.error_type ?? "null"}`}
-                    data-testid={`error-row-${row.provider}-${row.model}-${row.error_type ?? "unknown"}`}
-                    className="cursor-pointer"
-                    tabIndex={0}
-                    role="button"
-                    aria-label={`查看 ${row.provider} / ${row.model} 的失败明细`}
-                    onClick={() => applyDrill({ provider: row.provider, model: row.model,
-                                                ok: 0 })}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        applyDrill({ provider: row.provider, model: row.model, ok: 0 });
-                      }
-                    }}>
-                    <TableCell label="渠道">
-                      <span className="inline-flex items-center gap-1.5">
-                        <ProviderIcon provider={row.provider} size={13} />
-                        {providerLabel(row.provider)}
-                      </span>
-                    </TableCell>
-                    <TableCell label="模型" className="max-w-48 truncate" title={row.model}>
-                      {row.model}
-                    </TableCell>
-                    <TableCell label="错误类型" className="text-destructive">
-                      {usageErrorLabel(row.error_type)}
-                    </TableCell>
-                    <TableCell label="失败数" className="text-right">
-                      <span className="inline-flex items-center gap-2 tabular-nums">
-                        <span className="hidden h-1.5 w-16 overflow-hidden rounded-full bg-muted sm:block">
-                          <span className="block h-full rounded-full bg-destructive"
-                                style={{ width: `${barWidth(row.failures)}%` }} />
-                        </span>
-                        {formatNumber(row.failures)}
-                      </span>
-                    </TableCell>
-                    {/* 失败数是「尝试」口径：换号成功后失败行照样留着。
-                        未救回 = failures − rescued，是未被救回的失败尝试数。 */}
-                    <TableCell label="未救回" className="text-right tabular-nums">
-                      <span data-testid={`error-unrescued-${row.provider}-${row.model}-${row.error_type ?? "unknown"}`}
-                            className={unrescued(row) > 0 ? "text-destructive" : "text-muted-foreground"}>
-                        {formatNumber(unrescued(row))}
-                      </span>
-                    </TableCell>
-                    <TableCell label="最近失败"
-                               className="whitespace-nowrap text-right tabular-nums">
-                      {formatTime(row.last_ts)}
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-          <Footnote summary="口径说明（失败数按尝试计）" testId="error-footnote">
-            窗口缺省为最近 24 小时（与上方时间范围一致时按所选范围统计）；
-            未上报错误类型的历史行显示为「失败」。失败数是<strong>尝试</strong>口径：
-            换号重试每次上游拒绝都记一行，「未救回」是未被救回的失败尝试数
-            （同一请求多次失败会算多次；同请求另有成功行即算救回）。点任意一行可钻取到下方「请求明细」（只看失败）。
-          </Footnote>
-        </Panel>
-      )}
-
-      <Panel data-testid="events-panel" title="请求明细" action={
-        <div className="flex items-center gap-3 text-xs text-muted-foreground">
-          <span>共 {formatNumber(overview.data?.requests)} 条 · 保留 90 天</span>
-          {/* 实时流：默认关闭（翻页看历史是常态），打开后追加「刚落库」的行 */}
-          <Label className="w-fit cursor-pointer gap-1.5 text-xs font-normal text-muted-foreground">
-            <Checkbox checked={live} data-testid="events-live-toggle"
-                      onCheckedChange={(value) => toggleLive(value === true)} />
-            实时
-          </Label>
-          {/* 导出限 admin/operator：整份明细落盘比翻页浏览的暴露面大 */}
-          {session.is_operator && (
-            <Button size="sm" variant="ghost" data-testid="events-export"
-                    disabled={exporting} onClick={exportCsv}>
-              <Download className="size-3.5" />
-              {exporting ? "导出中…" : "导出 CSV"}
-            </Button>
-          )}
-        </div>
-      }>
-        {drillLabels.length > 0 && (
-          <div className="mb-3 flex flex-wrap items-center gap-2" data-testid="drill-filters">
-            <span className="text-xs text-muted-foreground">钻取过滤</span>
-            {drillLabels.map((label) => (
-              <span key={label}
-                    className="inline-flex items-center rounded-md bg-secondary px-2 py-0.5 text-xs text-secondary-foreground">
-                {label}
-              </span>
-            ))}
-            <Button size="sm" variant="ghost" data-testid="drill-clear"
-                    onClick={clearDrill}>
-              <X className="size-3.5" />
-              清除
-            </Button>
-          </div>
-        )}
-        {exportNotice && (
-          <div data-testid="export-notice">
-            <Notice tone="muted" className="mb-3 text-xs">{exportNotice}</Notice>
-          </div>
-        )}
-        {live && (
-          <div className="mb-4 rounded-md border border-border/70" data-testid="events-live">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-border/70 px-3 py-2 text-xs text-muted-foreground">
-              <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
-                <span aria-hidden
-                      className={liveStatus === "live"
-                        ? "size-1.5 rounded-full bg-ok" : "size-1.5 rounded-full bg-muted-foreground"} />
-                实时明细
-              </span>
-              <span role="status">
-                {liveStatus === "error"
-                  ? "实时连接已断开（可能订阅数已满或会话过期），请刷新重试。"
-                  : liveRows.length === 0
-                    ? "已连接，等待新的请求…"
-                    : `已收到 ${liveRows.length} 条（最多保留 ${LIVE_MAX_ROWS} 条）`}
-              </span>
-              <span className="ml-auto">仅推送本页当前筛选范围内的新请求</span>
-            </div>
-            {liveRows.length > 0 && (
-              <Table data-testid="events-live-table" cards>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>时间</TableHead>
-                    {session.is_operator && <TableHead>用户</TableHead>}
-                    <TableHead>渠道 / 凭证</TableHead>
-                    <TableHead>模型</TableHead>
-                    <TableHead>状态</TableHead>
-                    <TableHead className="text-right">Token</TableHead>
-                    <TableHead className="text-right">Credit</TableHead>
-                    <TableHead className="text-right">成本</TableHead>
-                    <TableHead className="text-right">延迟</TableHead>
-                    <TableHead className="text-right">速度</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {liveRows.map((row) => (
-                    <TableRow key={`live-${row.rowid}`} data-testid="live-row"
-                              className={rowToneClass(row)}>
-                      {eventRowCells(row, session.is_operator)}
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            )}
-          </div>
-        )}
-        {events.isError ? (
-          <Notice tone="danger" data-testid="events-error">
-            请求明细加载失败，请刷新重试；若刚升级服务，请确认后端已重启加载新端点。
-          </Notice>
-        ) : eventRows.length === 0 ? (
-          <Empty data-testid="no-events">该范围内没有请求明细</Empty>
-        ) : (
-          <>
-            {/* 明细表列多（时间/用户/渠道凭证/模型/状态/Token/Credit/成本/延迟/速度），
-                默认单元格内边距在 1280px 下会让表比容器宽十几像素、逼出横向滚动。
-                这里收窄到 px-1.5：省下的正是最后两列被裁掉的宽度。 */}
-            <Table data-testid="events-table" cards
-                   className="[&_td]:px-1.5 [&_th]:px-1.5">
-              <TableHeader>
-                <TableRow>
-                  <SortableHead label="时间" columnKey="ts" active={eventSort.sort === "ts"}
-                                direction={eventSort.order} onToggle={toggleEventSort}
-                                testId="event-sort-ts" />
-                  {session.is_operator && (
-                    <SortableHead label="用户" columnKey="username"
-                                  active={eventSort.sort === "username"}
-                                  direction={eventSort.order} onToggle={toggleEventSort}
-                                  testId="event-sort-username" />
-                  )}
-                  {/* 渠道 / 凭证合并列：凭证在上、渠道在下（同渠道常挂多个账号，先认账号）。
-                      排序能力靠列头下拉保留（provider / credential 两个子键）。 */}
-                  <SortMenuHead label="渠道 / 凭证" options={[...SOURCE_COLUMNS]}
-                                activeKey={eventSort.sort} direction={eventSort.order}
-                                onToggle={toggleEventSort} align="left"
-                                testId="event-sort-source" />
-                  <SortableHead label="模型" columnKey="model" active={eventSort.sort === "model"}
-                                direction={eventSort.order} onToggle={toggleEventSort}
-                                testId="event-sort-model" />
-                  <SortableHead label="状态" columnKey="ok" active={eventSort.sort === "ok"}
-                                direction={eventSort.order} onToggle={toggleEventSort}
-                                testId="event-sort-ok" />
-                  {/* Token 合并列：输入/输出/命中/命中率，列头下拉选子列排序 */}
-                  <SortMenuHead label="Token" options={[...TOKEN_COLUMNS]}
-                                activeKey={eventSort.sort} direction={eventSort.order}
-                                onToggle={toggleEventSort} testId="event-sort-token" />
-                  <SortableHead label="Credit" columnKey="credit"
-                                active={eventSort.sort === "credit"}
-                                direction={eventSort.order} onToggle={toggleEventSort}
-                                align="right" testId="event-sort-credit" />
-                  <SortableHead label="成本" columnKey="cost_cny"
-                                active={eventSort.sort === "cost_cny"}
-                                direction={eventSort.order} onToggle={toggleEventSort}
-                                align="right" testId="event-sort-cost_cny" />
-                  {/* 延迟合并列：耗时/首字，列头下拉选子列排序 */}
-                  <SortMenuHead label="延迟" options={[...LATENCY_COLUMNS]}
-                                activeKey={eventSort.sort} direction={eventSort.order}
-                                onToggle={toggleEventSort} testId="event-sort-latency" />
-                  {/* 速度合并列：正文 / 总产出（逐行按生成窗口算，无首字数据的
-                      请求不回落估算，直接 —）。列头下拉可选子列排序。
-                      单位写进列头，行内只留数字（10 列的表每行重复 tok/s 要多占 45px）。
-                      用「速度」+ 小字 tok/s 两行，避免列头被撑宽挤掉数据列。 */}
-                  <SortMenuHead label="速度" unit="tok/s" options={[...SPEED_COLUMNS]}
-                                activeKey={eventSort.sort} direction={eventSort.order}
-                                onToggle={toggleEventSort} testId="event-sort-speed" />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {eventRows.map((row) => (
-                  <TableRow key={row.rowid} data-testid="event-row"
-                            className={rowToneClass(row)}>
-                    {eventRowCells(row, session.is_operator)}
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-            <Pagination
-              testId="events"
-              page={pageIndex}
-              pageSize={pageSize}
-              hasNext={hasNextPage}
-              busy={events.isFetching}
-              onPageSizeChange={changePageSize}
-              onPageChange={(next) => {
-                // 游标模式向下翻页：先把本页的 next_before 压栈，下一页才有游标可发
-                if (next > pageIndex && cursorMode) {
-                  const nextBefore = events.data?.next_before;
-                  if (nextBefore === null || nextBefore === undefined) return;
-                  setCursors((prev) => {
-                    const updated = prev.slice();
-                    updated[pageIndex + 1] = nextBefore;
-                    return updated;
-                  });
-                }
-                setPageIndex(next);
-              }}
-            />
-            <Footnote summary="口径说明（速度的分子与分母）" testId="events-footnote">
-              速度 = 输出 token ÷ 生成时间（耗时 − 首字）：左侧正文（不含思考）、右侧总产出
-              （含思考），与分组表同规则（有输出 token、生成窗口 ≥200ms、单条 ≤1000 tok/s）。
-              逐行不按端到端耗时估算——单条样本摊不平首字等待，故无生成窗口的请求显示 —。
-            </Footnote>
-          </>
-        )}
-      </Panel>
-
-      <Notice tone="muted" className="items-start px-3 py-2.5 text-xs" data-testid="stats-privacy">
-        <Collapsible className="w-full">
-          <CollapsibleTrigger className="flex w-full cursor-pointer select-none items-center gap-1.5 text-left transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none">
-            <ChevronDown className="size-3.5 shrink-0" />
-            <span className="font-medium">隐私与统计口径</span>
-            <span className="text-muted-foreground">
-              不保存提示词与回答 · 明细保留 90 天 · 成本为刊例价估算
-            </span>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="mt-2 space-y-1.5 leading-relaxed">
-            <p>
-              隐私：不保存提示词、回答、请求头、Token、工具参数与原始错误体；逐请求明细保留 90 天，小时汇总永久保留；按 API Key 归属用户统计。
-            </p>
-            <p>
-              credit 为渠道可选字段，经常不返回；TRAE 上游不给单请求积分，带 ≈ 的数值是按官方单价折算（CodeBuddy 为上游返回的真值）。健康度只依赖额度探测接口，主指标是 token 数。缓存命中率 = 命中 token ÷ 输入 token，仅在上报过缓存时展示。
-            </p>
-            <p>
-              成本为估算：按 OpenRouter 的模型刊例价（USD / 百万 token）与本服务写入时生效的美元汇率折算，展示人民币、括号内为美元；不是上游真实扣费，未匹配到定价的模型不计入（显示 —）。汇率可在「任务与配置」页热更，仅影响之后写入的请求，历史成本不重算。
-            </p>
-          </CollapsibleContent>
-        </Collapsible>
-      </Notice>
+      <PrivacyNotice />
     </div>
   );
 }

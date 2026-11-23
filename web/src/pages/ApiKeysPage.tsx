@@ -1,41 +1,21 @@
-import { Check, ChevronDown, Copy, Gauge, KeyRound, Plus, Share2, Trash2, X } from "lucide-react";
+import { Gauge, KeyRound, Plus, Share2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
-import { Button as RawButton } from "../components/ui/button";
-import { useApiKeys, usePlaygroundModels, useQueryClient } from "../api/hooks";
-import { formatTime } from "../api/display";
-import { cn } from "../lib/utils";
-import { useDialogFocus } from "../hooks/useDialogFocus";
-import { useSort } from "../hooks/useSort";
+import { useApiKeys, useQueryClient } from "../api/hooks";
+import { EMPTY_QUOTA, type KeyQuota, quotaInput, quotaOf, setApiKeyQuota } from "../api/keyQuota";
+import type { ApiKey, ApiKeyCreated } from "../api/types";
 import { PageHeader } from "../components/PageHeader";
 import { PageSkeleton } from "../components/PageSkeleton";
 import { Pagination } from "../components/Pagination";
 import { SortableHead } from "../components/SortableHead";
-import { buildSections, displayName, modelValue } from "../components/ModelPicker";
-import { PROVIDER_LABEL, PROVIDER_ORDER } from "../api/providers";
-import { buildCcSwitchLink, CCSWITCH_TARGETS } from "../lib/ccSwitch";
-import { DEFAULT_PAGE_SIZE } from "../lib/constants";
 import { copyText } from "../lib/clipboard";
+import { DEFAULT_PAGE_SIZE } from "../lib/constants";
 import { errorText } from "../lib/errors";
+import { useDialogFocus } from "../hooks/useDialogFocus";
+import { useSort } from "../hooks/useSort";
 import {
-  EMPTY_QUOTA,
-  QUOTA_FIELDS,
-  type KeyQuota,
-  quotaInput,
-  quotaOf,
-  quotaSummary,
-  setApiKeyQuota,
-  usageTodayLabel,
-  usageTodayOf,
-} from "../api/keyQuota";
-import type { ApiKey, ApiKeyCreated } from "../api/types";
-import {
-  Badge,
   Button,
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
   EmptyState,
   Field,
   Input,
@@ -45,539 +25,31 @@ import {
   Select,
   Table,
   TableBody,
-  TableCell,
   TableHead,
   TableHeader,
   TableRow,
 } from "../ui";
+import { AnthropicEntry, OpenAIEntry } from "./apikeys/clientEntry";
+import { CcSwitchImportButtons } from "./apikeys/ccSwitch";
+import { KeyRow } from "./apikeys/KeyRow";
+import { PROVIDER_BINDING_OPTIONS, parseExpiresAt } from "./apikeys/meta";
+import { QuotaFields, QuotaSection } from "./apikeys/quota";
+import { CopyButton } from "./apikeys/shared";
 
-/** 渠道绑定的下拉选项：值与后端 KNOWN_PROVIDERS 对齐，空串 = 自动。 */
-export const PROVIDER_BINDING_OPTIONS: { value: string; label: string }[] = [
-  { value: "", label: "自动（不限定渠道）" },
-  // 渠道集合与展示名都来自 providers.ts 的单一来源，新增渠道不再改这里
-  ...PROVIDER_ORDER.map((provider) => ({ value: provider, label: PROVIDER_LABEL[provider] })),
-];
-
-/** 列表里展示绑定渠道：空串 → 「自动」 */
-export function providerBindingLabel(binding: string | null | undefined): string {
-  if (!binding) return "自动";
-  return PROVIDER_BINDING_OPTIONS.find((o) => o.value === binding)?.label ?? binding;
-}
-
-/** `datetime-local` 值（本地时区的 `YYYY-MM-DDTHH:mm`）→ epoch 秒；空串 = 永不过期。 */
-export function parseExpiresAt(value: string): number | null {
-  const raw = value.trim();
-  if (!raw) return null;
-  const ms = new Date(raw).getTime();
-  if (!Number.isFinite(ms)) throw new Error("invalid expires_at");
-  return Math.floor(ms / 1000);
-}
-
-/** OpenAI 兼容入口的 Base URL：本服务地址 + /v1 */
-export const openaiBaseUrl = (): string => `${window.location.origin}/v1`;
-
-/** 接入示例代码；apiKey 占位时用 sk-… */
-export function openaiExamples(baseUrl: string, apiKey: string): {
-  curl: string;
-  python: string;
-  balance: string;
-  responses: string;
-} {
-  const key = apiKey || "sk-…";
-  return {
-    curl: `curl ${baseUrl}/chat/completions \\
-  -H "Authorization: Bearer ${key}" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "model": "glm-5.2",
-    "messages": [{"role": "user", "content": "你好"}],
-    "stream": true
-  }'`,
-    python: `from openai import OpenAI
-
-client = OpenAI(base_url="${baseUrl}", api_key="${key}")
-resp = client.chat.completions.create(
-    model="glm-5.2",
-    messages=[{"role": "user", "content": "你好"}],
-)
-print(resp.choices[0].message.content)`,
-    balance: `curl ${baseUrl}/user/balance \\
-  -H "Authorization: Bearer ${key}"`,
-    // Codex CLI 用 env_key 引用环境变量名（不是 Key 本身），故先 export 再引用
-    responses: `export CODING2API_KEY=${key}
-codex -c "model_providers.coding2api={ name='coding2api', base_url='${baseUrl}', wire_api='responses', env_key='CODING2API_KEY' }" \\
-      -c model_provider=coding2api \\
-      -c model='glm-5.2' \\
-      '你的任务'`,
-  };
-}
-
-/** Anthropic 客户端接入的 Base URL：SDK 自己拼 /v1/messages，填到根 */
-export const anthropicBaseUrl = (): string => window.location.origin;
-
-/** Claude Code 接入示例；ANTHROPIC_AUTH_TOKEN 走 Bearer，ANTHROPIC_API_KEY 走 x-api-key */
-export function anthropicExamples(baseUrl: string, apiKey: string): { messages: string } {
-  const key = apiKey || "sk-…";
-  return {
-    messages: `export ANTHROPIC_BASE_URL=${baseUrl}
-export ANTHROPIC_AUTH_TOKEN=${key}
-claude`,
-  };
-}
-
-function CopyButton({
-  label,
-  onCopy,
-  testid,
-}: {
-  label: string;
-  onCopy: () => void;
-  testid?: string;
-}) {
-  return (
-    <Button
-      size="sm"
-      variant="ghost"
-      data-testid={testid}
-      onClick={onCopy}
-      className="gap-1"
-    >
-      {label === "已复制" ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-      {label}
-    </Button>
-  );
-}
-
-/** 端点展开后的单条调用示例：标题 + 复制按钮 + 代码块 */
-function CodeExample({
-  label,
-  text,
-  copied,
-  onCopy,
-  testid,
-  copyTestid,
-}: {
-  label: string;
-  text: string;
-  copied: boolean;
-  onCopy: () => void;
-  testid: string;
-  copyTestid?: string;
-}) {
-  return (
-    <div>
-      <div className="mb-1 flex items-center justify-between text-foreground">
-        <span>{label}</span>
-        <CopyButton label={copied ? "已复制" : "复制"} onCopy={onCopy} testid={copyTestid} />
-      </div>
-      <pre data-testid={testid} className="overflow-x-auto rounded-lg border border-input bg-muted/40 p-3 font-mono text-xs">
-        {text}
-      </pre>
-    </div>
-  );
-}
-
-/** 折叠的端点行：trigger 显示方法与说明，展开后可复制调用示例 */
-function EndpointRow({
-  method,
-  path,
-  description,
-  children,
-  testid,
-}: {
-  method: string;
-  path: string;
-  description: string;
-  children: React.ReactNode;
-  testid: string;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <Collapsible
-      open={open}
-      onOpenChange={setOpen}
-      data-testid={testid}
-      className="group rounded-lg border border-border px-3 py-2"
-    >
-      <CollapsibleTrigger
-        data-testid={`${testid}-trigger`}
-        aria-expanded={open}
-        className="flex w-full cursor-pointer select-none flex-wrap items-center gap-2"
-      >
-        <Badge>{method}</Badge> <code>{path}</code>
-        <span>{description}</span>
-        <span className="ml-auto inline-flex items-center gap-1 text-muted-foreground group-data-[state=open]:hidden">
-          <Plus className="size-3" />调用示例
-        </span>
-      </CollapsibleTrigger>
-      <CollapsibleContent forceMount className="mt-3 space-y-3 data-[state=closed]:hidden">
-        {children}
-      </CollapsibleContent>
-    </Collapsible>
-  );
-}
-
-/** 客户端接入面板的公共骨架：卡片 header 的「说明 / 收起」按钮切换内容，
- *  默认收起，不引入动画。 */
-function ClientEntryPanel({
-  title,
-  testid,
-  children,
-}: {
-  title: string;
-  testid: string;
-  children: React.ReactNode;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <Panel
-      title={title}
-      action={
-        <Button
-          size="sm"
-          variant="ghost"
-          data-testid={`${testid}-toggle`}
-          aria-expanded={open}
-          onClick={() => setOpen((value) => !value)}
-        >
-          <ChevronDown className={cn("size-4 transition-transform", open && "rotate-180")} />
-          {open ? "收起" : "说明"}
-        </Button>
-      }
-    >
-      {open ? (
-        <div className="space-y-4 text-sm" data-testid={testid}>
-          {children}
-        </div>
-      ) : (
-        <p className="text-sm text-muted-foreground">
-          展开查看 Base URL、端点列表与可复制的接入示例。
-        </p>
-      )}
-    </Panel>
-  );
-}
-
-/** Base URL 行：代码框 + 复制按钮 */
-function BaseUrlRow({
-  baseUrl,
-  copied,
-  onCopy,
-  testid,
-}: {
-  baseUrl: string;
-  copied: boolean;
-  onCopy: () => void;
-  testid: string;
-}) {
-  return (
-    <div>
-      <div className="mb-1 text-xs text-muted-foreground">Base URL</div>
-      <div className="flex items-center gap-2">
-        <code
-          data-testid={testid}
-          className="flex-1 truncate rounded-lg border border-input bg-muted/40 px-3 py-2 font-mono text-xs transition-colors hover:border-ring"
-        >
-          {baseUrl}
-        </code>
-        <CopyButton label={copied ? "已复制" : "复制"} onCopy={onCopy} />
-      </div>
-    </div>
-  );
-}
-
-/** OpenAI 客户端接入面板：Base URL + 端点 + 可复制的示例。 */
-function OpenAIEntry({ apiKey }: { apiKey: string }) {
-  const baseUrl = openaiBaseUrl();
-  const examples = openaiExamples(baseUrl, apiKey);
-  const [copied, setCopied] = useState<string | null>(null);
-  const [copyFailed, setCopyFailed] = useState(false);
-
-  const copy = async (label: string, text: string) => {
-    const ok = await copyText(text);
-    setCopied(ok ? label : null);
-    // 局域网 http 部署没有 Clipboard API：明确提示，别让用户以为已复制
-    setCopyFailed(!ok);
-  };
-
-  return (
-    <ClientEntryPanel title="OpenAI 客户端接入" testid="openai-entry">
-      <BaseUrlRow
-        baseUrl={baseUrl}
-        copied={copied === "url"}
-        onCopy={() => void copy("url", baseUrl)}
-        testid="openai-base-url"
-      />
-      {copyFailed && (
-        <p className="mt-2 text-xs text-danger" data-testid="openai-copy-failed">
-          浏览器不允许自动复制，请手动选中内容复制。
-        </p>
-      )}
-      <ul className="space-y-1 text-xs text-muted-foreground">
-        <li>
-          {/* 示例默认折叠：点开端点行查看 curl / SDK 调用方式 */}
-          <EndpointRow method="POST" path={`${baseUrl}/chat/completions`} description="对话补全（流式 / 非流式）" testid="example-details">
-            <CodeExample label="curl 示例" text={examples.curl} copied={copied === "curl"} onCopy={() => void copy("curl", examples.curl)} testid="example-curl" copyTestid="copy-curl" />
-            <CodeExample label="OpenAI Python SDK" text={examples.python} copied={copied === "python"} onCopy={() => void copy("python", examples.python)} testid="example-python" copyTestid="copy-python" />
-          </EndpointRow>
-        </li>
-        <li>
-          <EndpointRow method="GET" path={`${baseUrl}/user/balance`} description="余额查询（上游额度，DeepSeek 兼容结构）" testid="example-details-balance">
-            <CodeExample label="curl 示例" text={examples.balance} copied={copied === "balance"} onCopy={() => void copy("balance", examples.balance)} testid="example-balance-curl" copyTestid="copy-balance-curl" />
-          </EndpointRow>
-        </li>
-        <li>
-          <EndpointRow method="POST" path={`${baseUrl}/responses`} description="Responses 子集（供 Codex CLI 接入）" testid="example-details-responses">
-            <CodeExample label="Codex CLI 配置" text={examples.responses} copied={copied === "responses"} onCopy={() => void copy("responses", examples.responses)} testid="example-responses" copyTestid="copy-responses" />
-          </EndpointRow>
-        </li>
-        <li>
-          <Badge>GET</Badge> <code>{baseUrl}/models</code>　模型列表
-        </li>
-      </ul>
-      <Notice tone="muted">
-        任何兼容 OpenAI 协议的客户端（ChatGPT Next Web、LobeChat、Cursor 等）
-        都可以按上面的 Base URL + API Key 接入。模型名从 /v1/models 获取。
-      </Notice>
-      <Notice tone="muted">
-        {/* 整段包一层 span：ShadAlert 是 grid 容器，直接放多个行内元素会被拆成多行 */}
-        <span>
-          <code>POST /v1/responses</code> 只实现 Codex CLI 用到的子集，与{" "}
-          <code>/v1/chat/completions</code> 共用同一套选号、冷却、轮换与会话粘性。
-          <code>store=true</code>、<code>previous_response_id</code> 与{" "}
-          <code>web_search</code> 等服务端私有工具会被显式拒绝（400），不静默降级。
-        </span>
-      </Notice>
-    </ClientEntryPanel>
-  );
-}
-
-/** Anthropic 客户端接入面板：Claude Code 等只走 Anthropic 协议的客户端从这里抄配置。 */
-function AnthropicEntry({ apiKey }: { apiKey: string }) {
-  const baseUrl = anthropicBaseUrl();
-  const examples = anthropicExamples(baseUrl, apiKey);
-  const [copied, setCopied] = useState<string | null>(null);
-  const [copyFailed, setCopyFailed] = useState(false);
-
-  const copy = async (label: string, text: string) => {
-    const ok = await copyText(text);
-    setCopied(ok ? label : null);
-    // 局域网 http 部署没有 Clipboard API：明确提示，别让用户以为已复制
-    setCopyFailed(!ok);
-  };
-
-  return (
-    <ClientEntryPanel title="Anthropic 客户端接入" testid="anthropic-entry">
-      <BaseUrlRow
-        baseUrl={baseUrl}
-        copied={copied === "url"}
-        onCopy={() => void copy("url", baseUrl)}
-        testid="anthropic-base-url"
-      />
-      {copyFailed && (
-        <p className="mt-2 text-xs text-danger" data-testid="anthropic-copy-failed">
-          浏览器不允许自动复制，请手动选中内容复制。
-        </p>
-      )}
-      <ul className="space-y-1 text-xs text-muted-foreground">
-        <li>
-          <EndpointRow method="POST" path={`${baseUrl}/v1/messages`} description="对话补全（流式 / 非流式，SDK 自动拼接路径）" testid="example-details-messages">
-            <CodeExample label="Claude Code 配置" text={examples.messages} copied={copied === "messages"} onCopy={() => void copy("messages", examples.messages)} testid="example-messages" copyTestid="copy-messages" />
-          </EndpointRow>
-        </li>
-        <li>
-          <Badge>POST</Badge> <code>{baseUrl}/v1/messages/count_tokens</code>　输入 token 估算
-        </li>
-      </ul>
-      <Notice tone="muted">
-        Claude Code 等 Anthropic 协议客户端按上面的 Base URL + API Key 接入；
-        与 OpenAI 出口共用同一套 Key、选号、冷却、轮换与会话粘性。
-      </Notice>
-      <Notice tone="muted">
-        {/* 整段包一层 span：ShadAlert 是 grid 容器，直接放多个行内元素会被拆成多行 */}
-        <span>
-          鉴权同时接受 <code>x-api-key</code>（<code>ANTHROPIC_API_KEY</code>）与{" "}
-          <code>Authorization: Bearer</code>（<code>ANTHROPIC_AUTH_TOKEN</code>）。
-          只实现 Anthropic Messages 子集：图片 / 文档块与 Anthropic 服务端工具
-          （<code>web_search</code> / <code>computer</code> 等）一律显式 400，不静默降级。
-        </span>
-      </Notice>
-    </ClientEntryPanel>
-  );
-}
-
-/**
- * 默认模型下拉：数据源与 Playground 同源（`/api/playground/models`），
- * 按渠道分组（多渠道置顶 + 「仅 XX」），值语义与 Playground 一致
- * （多渠道裸 id 走自动路由、单渠道 `id@provider` 强制指定）。
- */
-function ModelSelect({
-  value,
-  onChange,
-  testid,
-  id,
-}: {
-  value: string;
-  onChange: (value: string) => void;
-  testid: string;
-  /** 供外层 `Field` 的 htmlFor 关联（读屏报字段名、点 label 聚焦控件）。 */
-  id?: string;
-}) {
-  const modelsQuery = usePlaygroundModels();
-  const fetched = modelsQuery.data?.data ?? [];
-  const models = fetched.map((item) => ({ ...item, value: modelValue(item) }));
-  const sections = buildSections(models);
-
-  return (
-    <Select
-      id={id}
-      value={value}
-      data-testid={testid}
-      onChange={(event) => onChange(event.target.value)}
-    >
-      <option value="">不写入（留空）</option>
-      {sections.map((section) => (
-        <optgroup key={section.key} label={section.label}>
-          {section.items.map((item) => (
-            <option key={item.value} value={item.value}>
-              {displayName(item)}
-            </option>
-          ))}
-        </optgroup>
-      ))}
-    </Select>
-  );
-}
-
-/**
- * CC Switch 导入按钮组：渲染在「明文 Key 存活」的上下文里——创建成功后的对话框，
- * 或列表行的导入对话框（用户自己粘贴 Key）。深链含 Key 明文，故只在用户主动
- * 打开、且已给出 Key 时生成。
- */
-export function CcSwitchImportButtons({
-  apiKey,
-  testidPrefix = "ccswitch",
-  warning = "深链含 API Key 明文，勿分享、勿在不可信环境使用。",
-}: {
-  apiKey: string;
-  /** data-testid 前缀：列表行导入对话框用 `ccswitch-row`，避免与创建对话框撞名。 */
-  testidPrefix?: string;
-  warning?: string;
-}) {
-  const [model, setModel] = useState("");
-  const origin = window.location.origin;
-  const ready = apiKey.trim() !== "";
-
-  return (
-    <div className="space-y-3" data-testid={`${testidPrefix}-import`}>
-      <Field
-        label="默认模型（可选）"
-        htmlFor={`${testidPrefix}-model-select`}
-        hint="留空不写入。Claude Code 无模型名时回落内置列表；非原生模型建议选本服务模型。"
-      >
-        <ModelSelect
-          value={model}
-          onChange={setModel}
-          testid={`${testidPrefix}-model`}
-          id={`${testidPrefix}-model-select`}
-        />
-      </Field>
-      <div className="flex flex-wrap gap-2">
-        {CCSWITCH_TARGETS.map((target) =>
-          ready ? (
-            <RawButton key={target.app} size="sm" variant="default" asChild>
-              <a
-                href={buildCcSwitchLink(target, { origin, apiKey, model })}
-                data-testid={`${testidPrefix}-${target.app}`}
-              >
-                导入到 {target.label}
-              </a>
-            </RawButton>
-          ) : (
-            <Button
-              key={target.app}
-              size="sm"
-              variant="default"
-              disabled
-              data-testid={`${testidPrefix}-${target.app}`}
-            >
-              导入到 {target.label}
-            </Button>
-          ),
-        )}
-      </div>
-      <Notice tone="warn">{warning}</Notice>
-    </div>
-  );
-}
-
-/** 六项配额输入：创建对话框与「改配额」对话框共用。 */
-function QuotaFields({
-  value,
-  onChange,
-  testidPrefix,
-}: {
-  value: KeyQuota;
-  onChange: (next: KeyQuota) => void;
-  testidPrefix: string;
-}) {
-  return (
-    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2" data-testid={`${testidPrefix}-fields`}>
-      {QUOTA_FIELDS.map((field) => (
-        <Field key={field.key} label={field.label} hint={field.hint}
-               htmlFor={`${testidPrefix}-${field.key}`}>
-          <Input
-            id={`${testidPrefix}-${field.key}`}
-            type="number"
-            min={0}
-            step={field.step ?? "1"}
-            value={value[field.key] === 0 ? "" : String(value[field.key])}
-            placeholder="0"
-            data-testid={`${testidPrefix}-${field.key}`}
-            onChange={(event) => {
-              const raw = event.target.value.trim();
-              const numeric = raw === "" ? 0 : Number(raw);
-              onChange({ ...value, [field.key]: Number.isFinite(numeric) && numeric > 0 ? numeric : 0 });
-            }}
-          />
-        </Field>
-      ))}
-    </div>
-  );
-}
-
-/** 配额区块的折叠外壳（低频配置，默认收起，避免创建对话框过长）。 */
-function QuotaSection({
-  title,
-  value,
-  onChange,
-  testid,
-}: {
-  title: string;
-  value: KeyQuota;
-  onChange: (next: KeyQuota) => void;
-  testid: string;
-}) {
-  return (
-    <Collapsible data-testid={testid} className="rounded-lg border border-border px-3 py-2">
-      <CollapsibleTrigger
-        data-testid={`${testid}-trigger`}
-        className="flex w-full cursor-pointer select-none items-center gap-2 text-sm"
-      >
-        <span>{title}</span>
-        <span className="text-xs text-muted-foreground">{quotaSummary(value)}</span>
-        <ChevronDown className="ml-auto size-4" />
-      </CollapsibleTrigger>
-      <CollapsibleContent className="mt-3">
-        <QuotaFields value={value} onChange={onChange} testidPrefix={`${testid}-input`} />
-        <p className="mt-2 text-xs text-muted-foreground">
-          0 = 不限制。每日类按北京时间自然日统计（与凭证限额同一口径）；
-          RPM/TPM/并发是进程内计数，重启清零。
-        </p>
-      </CollapsibleContent>
-    </Collapsible>
-  );
-}
+// 这些纯函数 / 组件原先是本文件的顶层导出，拆分后原样从这里再导出，
+// 保持 `import { … } from "../ApiKeysPage"` 的既有调用方不变。
+export {
+  anthropicBaseUrl,
+  anthropicExamples,
+  openaiBaseUrl,
+  openaiExamples,
+} from "./apikeys/clientEntry";
+export { CcSwitchImportButtons } from "./apikeys/ccSwitch";
+export {
+  PROVIDER_BINDING_OPTIONS,
+  parseExpiresAt,
+  providerBindingLabel,
+} from "./apikeys/meta";
 
 export function ApiKeysPage() {
   const { sort, order, toggle } = useSort("created_at", "asc", { last_used_at: "desc" });
@@ -804,71 +276,16 @@ export function ApiKeysPage() {
             </TableHeader>
             <TableBody>
               {keys.map((key) => (
-                <TableRow key={key.id}>
-                  <TableCell label="名称">{key.name || "—"}</TableCell>
-                  <TableCell label="Key" className="font-mono text-xs">{key.preview}</TableCell>
-                  <TableCell label="渠道" className="text-xs" data-testid={`key-binding-${key.id}`}>
-                    {providerBindingLabel(key.provider_binding)}
-                  </TableCell>
-                  <TableCell label="到期" className="text-xs tabular-nums" data-testid={`key-expires-${key.id}`}>
-                    {key.expires_at ? formatTime(key.expires_at) : "永不过期"}
-                  </TableCell>
-                  <TableCell label="最后使用" className="text-xs tabular-nums">
-                    {key.last_used_at ? formatTime(key.last_used_at) : "从未使用"}
-                  </TableCell>
-                  <TableCell label="来源 IP" className="font-mono text-xs" data-testid={`key-ips-${key.id}`}>
-                    {key.allowed_ips || "不限制"}
-                  </TableCell>
-                  <TableCell label="模型白名单" className="font-mono text-xs" data-testid={`key-models-${key.id}`}>
-                    {key.allowed_models || "不限制"}
-                  </TableCell>
-                  <TableCell label="配额" className="text-xs" data-testid={`key-quota-${key.id}`}>
-                    {quotaSummary(quotaOf(key))}
-                  </TableCell>
-                  <TableCell label="当日已用" className="text-xs" data-testid={`key-usage-${key.id}`}>
-                    {usageTodayLabel(usageTodayOf(key))}
-                  </TableCell>
-                  <TableCell label="创建时间" className="text-xs tabular-nums">
-                    {formatTime(key.created_at)}
-                  </TableCell>
-                  <TableCell label="操作" className="text-right">
-                    {confirming === key.id ? (
-                      <span className="inline-flex gap-2">
-                        <Button size="sm" variant="danger" onClick={() => remove(key.id)}>
-                          确认删除
-                        </Button>
-                        <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
-                          取消
-                        </Button>
-                      </span>
-                    ) : (
-                      <span className="inline-flex flex-wrap justify-end gap-2">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          data-testid={`edit-quota-${key.id}`}
-                          onClick={() => openQuotaEditor(key)}
-                        >
-                          <Gauge className="mr-1 size-3.5" />
-                          配额
-                        </Button>
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          data-testid={`import-ccswitch-${key.id}`}
-                          onClick={() => setImporting(key)}
-                        >
-                          <Share2 className="mr-1 size-3.5" />
-                          导入 CC Switch
-                        </Button>
-                        <Button size="sm" variant="ghost" onClick={() => setConfirming(key.id)}>
-                          <Trash2 className="mr-1 size-3.5" />
-                          删除
-                        </Button>
-                      </span>
-                    )}
-                  </TableCell>
-                </TableRow>
+                <KeyRow
+                  key={key.id}
+                  item={key}
+                  confirming={confirming === key.id}
+                  onRemove={remove}
+                  onCancelDelete={() => setConfirming(null)}
+                  onEditQuota={openQuotaEditor}
+                  onImport={setImporting}
+                  onConfirmDelete={setConfirming}
+                />
               ))}
             </TableBody>
           </Table>
