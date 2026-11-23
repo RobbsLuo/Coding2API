@@ -1,8 +1,9 @@
-"""API Key 管理：列出 / 创建 / 改配额 / 删除（明文只在创建时返回一次）。"""
+"""API Key 管理：列出 / 创建 / 编辑策略 / 改配额 / 删除（明文只在创建时返回一次）。"""
 
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 from fastapi import APIRouter, Depends, Request
 
@@ -10,13 +11,20 @@ from ..audit.actions import (
     ACTION_API_KEY_CREATE,
     ACTION_API_KEY_DELETE,
     ACTION_API_KEY_QUOTA,
+    ACTION_API_KEY_UPDATE,
 )
 from ..auth.access import normalize_allowed_ips, normalize_allowed_models
 from ..compat.openai.request import InvalidRequest
+from ..db.key_update import EDITABLE_COLUMNS, update_api_key_fields
 from ..engine.limits import day_start
 from ..engine.model_resolver import KNOWN_PROVIDERS
 from ..key_quota import KeyQuota, parse_key_quota, quota_text
 from .deps import Services, csrf_protected, principal_from_request, request_ip
+
+# 列表「窗口用量」：值是窗口覆盖的**自然日**数（含今天）。日界与配额判定同一
+# 口径（北京时间 0 点，`day_start`）——`today` 只是 N=1 的退化情形，不引入
+# 第二套边界（滚动 N×86400 会在「今天 00:30 查 7 天」时把 7 天前的半天算进来）。
+USAGE_WINDOWS: dict[str, int] = {"today": 1, "7d": 7, "30d": 30}
 
 
 def _parse_binding(raw: object) -> str:
@@ -94,6 +102,69 @@ def _policy_detail(name: str, binding: str, allowed_ips: str,
     return "；".join(parts)
 
 
+# 编辑接口的字段解析器：与创建共用同一套校验/规范化（渠道绑定小写化、IP
+# 网段收敛、模型名去重、到期时间正数化），两处口径不会漂移。
+_KEY_FIELD_PARSERS: dict[str, Callable[[object], object]] = {
+    "name": lambda raw: str(raw or ""),
+    "provider_binding": _parse_binding,
+    "allowed_ips": _parse_allowed_ips,
+    "allowed_models": _parse_allowed_models,
+    "expires_at": _parse_expires_at,
+}
+
+# 审计 detail 里的字段名与「空值」文案：`''` 直接打印读不出含义
+# （`来源 IP → ` 到底是不限制还是没改？）。
+_FIELD_LABELS: dict[str, str] = {
+    "name": "名称",
+    "provider_binding": "绑定渠道",
+    "allowed_ips": "来源 IP",
+    "allowed_models": "模型白名单",
+    "expires_at": "到期",
+}
+_FIELD_EMPTY_TEXT: dict[str, str] = {
+    "name": "(未命名)",
+    "provider_binding": "自动",
+    "allowed_ips": "不限制",
+    "allowed_models": "不限制",
+    "expires_at": "永不过期",
+}
+
+
+def _field_text(field: str, value: object) -> str:
+    """审计 detail 的单字段展示形态（空值给语义化文案）。"""
+    if field == "expires_at":
+        return f"到期 {value}" if value else _FIELD_EMPTY_TEXT[field]
+    return str(value or "") or _FIELD_EMPTY_TEXT[field]
+
+
+def _change_detail(before: dict, changes: dict) -> list[tuple[str, str]]:
+    """实际变化的字段 → `[(字段名, 一行可读 diff)]`。
+
+    值没变的字段不算变化：「名称 laptop → laptop」这种记录只会把真实改动淹没。
+    """
+    detail: list[tuple[str, str]] = []
+    for field in EDITABLE_COLUMNS:
+        if field not in changes or changes[field] == before.get(field):
+            continue
+        detail.append((field, f"{_FIELD_LABELS[field]} "
+                              f"{_field_text(field, before.get(field))} → "
+                              f"{_field_text(field, changes[field])}"))
+    return detail
+
+
+def _usage_since(window: str, now: int) -> int:
+    """窗口起点：含今天在内的最近 N 个自然日（北京时间 0 点起，`today` 即 N=1）。
+
+    `day_start` 是 UTC+8 固定偏移（无夏令时），因此「前 N-1 天」直接减
+    `(N-1) * 86400` 秒，不会跨时区算错。
+    """
+    days = USAGE_WINDOWS.get(window)
+    if days is None:
+        raise InvalidRequest(f"window must be one of {', '.join(USAGE_WINDOWS)}")
+    return day_start(now) - (days - 1) * 86400
+
+
+
 def create_router(services: Services) -> APIRouter:
     router = APIRouter()
     api_keys = services.api_keys
@@ -101,22 +172,25 @@ def create_router(services: Services) -> APIRouter:
     @router.get("/api/api-keys")
     async def list_keys(sort: str | None = None, order: str | None = None,
                         limit: int = 50, offset: int = 0,
+                        window: str = "today",
                         principal=Depends(principal_from_request)):
         # 分页：total 供前端算页数
         rows = api_keys.list_for(principal.username, sort=sort, order=order,
                                  limit=limit, offset=offset)
-        # 列表「当日已用」：一次批量聚合（不是逐行查库）。只算当前页的 Key，
-        # 口径与配额判定同一自然日（北京时间 0 点起）。
+        # 列表「窗口用量」：一次批量聚合（不是逐行查库）。只算当前页的 Key，
+        # 口径与配额判定同一自然日边界（北京时间 0 点起）；窗口只是把起点
+        # 往前挪 N-1 天，明细保留 90 天，30d 完全在留存范围内。
+        since = _usage_since(window, int(time.time()))
         usage_map = services.key_usage.map_for(
-            [row["id"] for row in rows], since=day_start(int(time.time())))
+            [row["id"] for row in rows], since=since)
         for row in rows:
             used = usage_map.get(row["id"])
-            row["usage_today"] = {
+            row["usage"] = {
                 "requests": used.requests if used else 0,
                 "tokens": used.tokens if used else 0,
                 "cost_usd": round(used.cost_usd, 6) if used else 0.0,
             }
-        return {"api_keys": rows,
+        return {"api_keys": rows, "window": window,
                 "total": api_keys.count_for(principal.username)}
 
     @router.post("/api/api-keys")
@@ -144,6 +218,53 @@ def create_router(services: Services) -> APIRouter:
                                   allowed_ips, allowed_models, expires_at, quota),
             ip=request_ip(request, services.settings))
         return created          # 明文只在此返回一次
+
+    @router.put("/api/api-keys/{key_id}")
+    async def update_key(key_id: str, payload: dict, request: Request,
+                         _csrf: None = Depends(csrf_protected),
+                         principal=Depends(principal_from_request)):
+        """按字段增量更新一把 Key 的策略（名称 / 渠道绑定 / 两个白名单 / 到期时间）。
+
+        **「未提供」与「显式清空」**：字段不在请求体里 = 保持原值；在请求体里
+        给空串（`expires_at` 给 `null`）= 清空该项（名称清空、绑定回到自动、
+        白名单恢复不限制、永不过期）。刻意不用 `None` 当「未提供」的哨兵——
+        `null` 本身就是 `expires_at` 的合法清空值，两者在 JSON 上无法区分，
+        只能逐字段 `in payload` 判断。
+
+        改的是鉴权路径**每次现读**的那几列，因此改完下一个请求即生效：鉴权
+        (`ApiKeyRepository.authenticate`) 不缓存策略。若将来给鉴权加缓存，
+        必须在这里同步失效，否则撤销白名单要等缓存过期。
+
+        明文 Key 与 id 不可改：明文只在创建响应里返回一次，id 是审计归属；
+        换策略不需要「删键重建」（重建会签发新明文并让旧 Key 立即失效）。
+        """
+        # 先取原值：既做存在性/归属校验，也是审计 diff 的 before 侧。
+        row = next((item for item in api_keys.list_for(principal.username)
+                    if item["id"] == key_id), None)
+        if row is None:
+            raise InvalidRequest("api key not found")
+        unknown = sorted(set(payload) - set(EDITABLE_COLUMNS))
+        if unknown:
+            # 静默忽略会让「用 PUT 改配额」看起来成功了：明确指回专用端点。
+            raise InvalidRequest(
+                f"不可编辑的字段: {', '.join(unknown)}"
+                f"（可编辑: {', '.join(EDITABLE_COLUMNS)}；"
+                "配额请用 PUT /api/api-keys/{key_id}/quota）")
+        changes = {field: _KEY_FIELD_PARSERS[field](payload[field])
+                   for field in EDITABLE_COLUMNS if field in payload}
+        diffs = _change_detail(row, changes)
+        if not diffs:
+            # 没提供字段 / 提供了但值没变：不写库、不留审计（空改动记录只会
+            # 把真实变更淹没在审计流水里）。
+            return {"ok": True, "changed": []}
+        # 并发删除的竞态兜底：上面的 SELECT 到 UPDATE 之间 Key 可能已被删。
+        if not update_api_key_fields(api_keys, key_id, principal.username, changes):
+            raise InvalidRequest("api key not found")
+        services.audit.record(
+            actor=principal.username, action=ACTION_API_KEY_UPDATE, target=key_id,
+            detail="；".join(text for _, text in diffs),
+            ip=request_ip(request, services.settings))
+        return {"ok": True, "changed": [field for field, _ in diffs]}
 
     @router.put("/api/api-keys/{key_id}/quota")
     async def set_key_quota(key_id: str, payload: dict,

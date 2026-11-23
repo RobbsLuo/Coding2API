@@ -10,6 +10,7 @@
  * 失败按不限制处理，与服务端 `load_key_quota` 同一方针）。
  */
 
+import { type ApiKeyWindow, requestApiKeyJson, USAGE_WINDOW_LABELS } from "./apiKeys";
 import { formatCompact, formatMoney, formatNumber } from "./display";
 
 /** 六项配额；0 或缺省 = 该项关闭。与服务端 `src/key_quota.py` 一一对应。 */
@@ -99,10 +100,10 @@ export function quotaOf(row: unknown): KeyQuota {
   return parseQuota((row as { quota?: unknown }).quota);
 }
 
-/** 列表行里的 `usage_today`（老后端没这字段时按 0 处理）。 */
-export function usageTodayOf(row: unknown): KeyUsageToday {
+/** 列表行里的 `usage`（老后端没这字段时按 0 处理）。 */
+export function usageOf(row: unknown): KeyUsageToday {
   if (!row || typeof row !== "object") return { ...ZERO_USAGE };
-  const raw = (row as { usage_today?: unknown }).usage_today;
+  const raw = (row as { usage?: unknown }).usage;
   if (!raw || typeof raw !== "object") return { ...ZERO_USAGE };
   const record = raw as Record<string, unknown>;
   return {
@@ -113,44 +114,28 @@ export function usageTodayOf(row: unknown): KeyUsageToday {
 }
 
 /**
- * 「当日已用」文案：请求数 + token（有成本时附上）。
+ * 「窗口用量」文案：请求数 + token（有成本时附上）。
  *
  * 三个量级差得远，一律过格式化：请求数千分位（`2,974 次`）、token 走紧凑
  * 单位（`3.7亿 token`，原样 `365309724` 会把这一列撑到几百 px）、成本按
  * 绝对值自适应小数位（`$7.49` / 小额 `$0.0042`）。原样透传原始数字会让
  * 表格在窄屏下被这一列挤变形。
+ *
+ * 窗口进文案（`今日未用` / `近 7 天未用`）：同一列在不同档位下含义不同，
+ * 不说清窗口就会把「今日 0」误读成「一直没用」。
  */
-export function usageTodayLabel(usage: KeyUsageToday): string {
-  if (!usage.requests) return "今日未用";
+export function usageLabel(usage: KeyUsageToday, window: ApiKeyWindow): string {
+  if (!usage.requests) return `${USAGE_WINDOW_LABELS[window]}未用`;
   const parts = [`${formatNumber(usage.requests)} 次`, `${formatCompact(usage.tokens)} token`];
   if (usage.cost_usd) parts.push(formatMoney(usage.cost_usd, "USD", false));
   return parts.join(" · ");
 }
 
-/**
- * 写入一把 Key 的配额（整体替换；全 0 = 清除）。
- *
- * 不复用 `api/client.ts` 的 `request`（未导出）：这里只多发一个自定义头
- * `X-Requested-With`（服务端 CSRF 纵深要求），行为与它一致。
- */
+/** 写入一把 Key 的配额（整体替换；全 0 = 清除）。 */
 export async function setApiKeyQuota(id: string, quota: KeyQuota): Promise<void> {
-  const response = await fetch(`/api/api-keys/${id}/quota`, {
+  await requestApiKeyJson(`/api/api-keys/${id}/quota`, {
     method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Requested-With": "XMLHttpRequest",
-    },
-    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ quota: quotaInput(quota) ?? {} }),
   });
-  if (!response.ok) {
-    const text = await response.text();
-    let message = response.statusText;
-    try {
-      message = (JSON.parse(text) as { error?: { message?: string } }).error?.message ?? message;
-    } catch {
-      // 非 JSON 错误体：保留 statusText
-    }
-    throw new Error(message);
-  }
 }

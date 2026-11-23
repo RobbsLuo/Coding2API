@@ -1,5 +1,6 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
+import { type ApiKeyWindow, listApiKeys } from "../api/apiKeys";
 import { api } from "../api/client";
 import type {
   CredentialsResponse,
@@ -38,10 +39,11 @@ export function useCredentials(username?: string, refetchIntervalMs?: number,
 }
 
 export function useApiKeys(username?: string, sort?: string, order?: string,
-                           limit?: number, offset?: number) {
+                           limit?: number, offset?: number, window?: ApiKeyWindow) {
   return useQuery({
-    queryKey: adminKey(username, "api-keys", sort, order, limit, offset),
-    queryFn: () => api.apiKeys(sort, order, limit, offset),
+    // window 进 query key：切档位就是换数据集，不重新取数会显示上一档的用量
+    queryKey: adminKey(username, "api-keys", sort, order, limit, offset, window),
+    queryFn: () => listApiKeys({ sort, order, limit, offset, window }),
     placeholderData: keepPreviousData,
   });
 }

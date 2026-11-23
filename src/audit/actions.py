@@ -31,6 +31,9 @@ ACTION_CREDENTIAL_LOGIN_SECRET = "credential.login_secret"
 ACTION_CREDENTIAL_WEIGHT = "credential.weight"
 ACTION_API_KEY_QUOTA = "api_key.quota"
 ACTION_API_KEY_CREATE = "api_key.create"
+# 编辑策略（名称 / 渠道绑定 / 两个白名单 / 到期时间）：改白名单不再「删键重建」，
+# 因此必须单独留痕——重建会换明文并让旧 Key 立即失效，两者的追责语义不同。
+ACTION_API_KEY_UPDATE = "api_key.update"
 ACTION_API_KEY_DELETE = "api_key.delete"
 ACTION_DATA_EXPORT = "data.export"
 ACTION_ALERT_RESOLVE = "alert.resolve"
@@ -55,7 +58,7 @@ ACTIONS: tuple[str, ...] = (
     ACTION_CREDENTIAL_WEIGHT,
     ACTION_USER_POLICY,
     ACTION_API_KEY_QUOTA,
-    ACTION_API_KEY_CREATE, ACTION_API_KEY_DELETE,
+    ACTION_API_KEY_CREATE, ACTION_API_KEY_UPDATE, ACTION_API_KEY_DELETE,
     ACTION_DATA_EXPORT,
     ACTION_ALERT_RESOLVE,
     ACTION_MODEL_PROBE, ACTION_MODEL_PROBE_MANUAL,
@@ -91,6 +94,7 @@ ACTION_LABELS: dict[str, str] = {
     ACTION_CREDENTIAL_WEIGHT: "设置调度权重",
     ACTION_API_KEY_QUOTA: "设置 Key 配额",
     ACTION_API_KEY_CREATE: "创建 API Key",
+    ACTION_API_KEY_UPDATE: "编辑 API Key",
     ACTION_API_KEY_DELETE: "删除 API Key",
     ACTION_DATA_EXPORT: "导出数据",
     ACTION_ALERT_RESOLVE: "标记告警恢复",

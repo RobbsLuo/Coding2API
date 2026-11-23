@@ -1,6 +1,7 @@
-import { Gauge, KeyRound, Plus, Share2, X } from "lucide-react";
+import { Gauge, KeyRound, Pencil, Plus, Share2, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import { type ApiKeyWindow, updateApiKey, USAGE_WINDOWS, USAGE_WINDOW_LABELS } from "../api/apiKeys";
 import { api } from "../api/client";
 import { useApiKeys, useQueryClient } from "../api/hooks";
 import { EMPTY_QUOTA, type KeyQuota, quotaInput, quotaOf, setApiKeyQuota } from "../api/keyQuota";
@@ -32,7 +33,7 @@ import {
 import { AnthropicEntry, OpenAIEntry } from "./apikeys/clientEntry";
 import { CcSwitchImportButtons } from "./apikeys/ccSwitch";
 import { KeyRow } from "./apikeys/KeyRow";
-import { PROVIDER_BINDING_OPTIONS, parseExpiresAt } from "./apikeys/meta";
+import { expiresAtInput, PROVIDER_BINDING_OPTIONS, parseExpiresAt } from "./apikeys/meta";
 import { QuotaFields, QuotaSection } from "./apikeys/quota";
 import { CopyButton } from "./apikeys/shared";
 
@@ -55,8 +56,10 @@ export function ApiKeysPage() {
   const { sort, order, toggle } = useSort("created_at", "asc", { last_used_at: "desc" });
   const [page, setPage] = useState(0);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const { data, isLoading, isError, error: queryError, refetch, isFetching } = useApiKeys(undefined, sort, order,
-                                                     pageSize, page * pageSize);
+  // 列表用量窗口（今日 / 近 7 天 / 近 30 天）：切档 = 换数据集，回第一页
+  const [usageWindow, setUsageWindow] = useState<ApiKeyWindow>("today");
+  const { data, isLoading, isError, error: queryError, refetch, isFetching } = useApiKeys(
+    undefined, sort, order, pageSize, page * pageSize, usageWindow);
   const client = useQueryClient();
   // 换排序 = 换数据集：回到第一页，避免停在越界页码上（空白）
   const toggleSort = (columnKey: string) => {
@@ -65,6 +68,10 @@ export function ApiKeysPage() {
   };
   const changePageSize = (size: number) => {
     setPageSize(size);
+    setPage(0);
+  };
+  const changeWindow = (window: ApiKeyWindow) => {
+    setUsageWindow(window);
     setPage(0);
   };
   const [name, setName] = useState("");
@@ -76,6 +83,14 @@ export function ApiKeysPage() {
   // 列表行「改配额」对话框：整体替换一把 Key 的配额
   const [editingQuota, setEditingQuota] = useState<ApiKey | null>(null);
   const [quotaDraft, setQuotaDraft] = useState<KeyQuota>({ ...EMPTY_QUOTA });
+  // 列表行「编辑」对话框：按字段改名称 / 渠道绑定 / 两个白名单 / 到期时间
+  const [editingKey, setEditingKey] = useState<ApiKey | null>(null);
+  const [editName, setEditName] = useState("");
+  const [editBinding, setEditBinding] = useState("");
+  const [editIps, setEditIps] = useState("");
+  const [editModels, setEditModels] = useState("");
+  const [editExpiresAt, setEditExpiresAt] = useState("");
+  const [savingEdit, setSavingEdit] = useState(false);
   const [created, setCreated] = useState<ApiKeyCreated | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -158,6 +173,45 @@ export function ApiKeysPage() {
     }
   };
 
+  const openEdit = (key: ApiKey) => {
+    setEditingKey(key);
+    setEditName(key.name);
+    setEditBinding(key.provider_binding);
+    setEditIps(key.allowed_ips);
+    setEditModels(key.allowed_models);
+    setEditExpiresAt(expiresAtInput(key.expires_at));
+    setError(null);
+  };
+
+  const closeEdit = () => {
+    setEditingKey(null);
+    setError(null);
+  };
+
+  const saveEdit = async () => {
+    // 保存中早退：PUT 是幂等的，但连点会叠出多条「值相同」的审计判定
+    if (!editingKey || savingEdit) return;
+    setSavingEdit(true);
+    setError(null);
+    try {
+      // 五个字段全量提交：未改的字段值与原值相同，服务端只按**实际差异**
+      // 写库与审计（`changed` 为空不发记录），因此不需要前端算 diff。
+      await updateApiKey(editingKey.id, {
+        name: editName,
+        provider_binding: editBinding,
+        allowed_ips: editIps.trim(),
+        allowed_models: editModels.trim(),
+        expires_at: parseExpiresAt(editExpiresAt),
+      });
+      setEditingKey(null);
+      await client.invalidateQueries({ queryKey: ["admin"] });
+    } catch (caught) {
+      setError(errorText(caught, "保存失败：请检查渠道绑定、模型白名单与 IP 白名单格式"));
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
   const remove = async (id: string) => {
     setError(null);
     try {
@@ -201,6 +255,7 @@ export function ApiKeysPage() {
   // 配额对话框也要焦点管理与 Esc 关闭（MASTER §6「对话框焦点管理与 Esc 关闭」）：
   // 此前只有「创建」「导入」两个对话框接了 useDialogFocus，配额这个漏了。
   const quotaDialogRef = useDialogFocus<HTMLDivElement>(closeQuota, editingQuota !== null);
+  const editDialogRef = useDialogFocus<HTMLDivElement>(closeEdit, editingKey !== null);
 
   return (
     <div className="space-y-6" data-testid="api-keys-page">
@@ -216,19 +271,40 @@ export function ApiKeysPage() {
       <Panel
         title="我的 API Key"
         action={
-          <Button
-            size="sm"
-            variant="primary"
-            data-testid="open-create-key-dialog"
-            onClick={() => setCreateOpen(true)}
-          >
-            <Plus className="size-4" /> 创建 API Key
-          </Button>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {/* 用量窗口切换：三档对应服务端 `window` 参数（今日 / 近 7 天 / 近 30 天） */}
+            <div
+              className="inline-flex rounded-lg border border-border p-0.5"
+              role="group"
+              aria-label="用量窗口"
+            >
+              {USAGE_WINDOWS.map((option) => (
+                <Button
+                  key={option.value}
+                  size="sm"
+                  variant={usageWindow === option.value ? "primary" : "ghost"}
+                  aria-pressed={usageWindow === option.value}
+                  data-testid={`usage-window-${option.value}`}
+                  onClick={() => changeWindow(option.value)}
+                >
+                  {option.label}
+                </Button>
+              ))}
+            </div>
+            <Button
+              size="sm"
+              variant="primary"
+              data-testid="open-create-key-dialog"
+              onClick={() => setCreateOpen(true)}
+            >
+              <Plus className="size-4" /> 创建 API Key
+            </Button>
+          </div>
         }
       >
-        {/* 删除 / 配额等列表内操作的失败提示：两个对话框都没开时也要有落点，
+        {/* 删除 / 配额 / 编辑等列表内操作的失败提示：各对话框都没开时也要有落点，
             否则后端写好的原因（不存在 / 权限不足）根本没人看得到 */}
-        {error && !createOpen && !editingQuota && (
+        {error && !createOpen && !editingQuota && !editingKey && (
           <div className="mb-3" role="alert" data-testid="api-keys-error">
             <Notice tone="danger">{error}</Notice>
           </div>
@@ -268,7 +344,7 @@ export function ApiKeysPage() {
                 <TableHead>来源 IP</TableHead>
                 <TableHead>模型白名单</TableHead>
                 <TableHead>配额</TableHead>
-                <TableHead>当日已用</TableHead>
+                <TableHead>用量 · {USAGE_WINDOW_LABELS[usageWindow]}</TableHead>
                 <SortableHead label="创建时间" columnKey="created_at" active={sort === "created_at"}
                               direction={order} onToggle={toggleSort} testId="sort-created_at" />
                 <TableHead className="text-right">操作</TableHead>
@@ -279,9 +355,11 @@ export function ApiKeysPage() {
                 <KeyRow
                   key={key.id}
                   item={key}
+                  window={usageWindow}
                   confirming={confirming === key.id}
                   onRemove={remove}
                   onCancelDelete={() => setConfirming(null)}
+                  onEdit={openEdit}
                   onEditQuota={openQuotaEditor}
                   onImport={setImporting}
                   onConfirmDelete={setConfirming}
@@ -491,6 +569,119 @@ export function ApiKeysPage() {
                 </Button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 列表行「编辑」对话框：名称 / 渠道绑定 / 两个白名单 / 到期时间（明文与 id 不可改） */}
+      {editingKey && (
+        <div
+          className="fixed inset-0 z-50 grid place-items-center bg-black/50 p-4 backdrop-blur-sm"
+          onClick={closeEdit}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="编辑 API Key"
+            data-testid="edit-key-dialog"
+            ref={editDialogRef}
+            onClick={(event) => event.stopPropagation()}
+            className="max-h-[90vh] w-full max-w-lg animate-in overflow-y-auto rounded-xl border border-border bg-card p-5 shadow-xl fade-in-0 zoom-in-95"
+          >
+            <div className="mb-4 flex items-center justify-between">
+              <h2 className="flex items-center gap-2 text-sm font-semibold">
+                <Pencil className="size-4 text-muted-foreground" />
+                编辑 · {editingKey.name || editingKey.preview}
+              </h2>
+              <Button
+                size="icon"
+                variant="ghost"
+                aria-label="关闭"
+                data-testid="edit-key-close"
+                onClick={closeEdit}
+              >
+                <X className="size-4" />
+              </Button>
+            </div>
+            <form
+              className="space-y-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveEdit();
+              }}
+            >
+              <Field label="名称（可选）" htmlFor="edit-key-name-input">
+                <Input
+                  id="edit-key-name-input"
+                  value={editName}
+                  data-testid="edit-key-name"
+                  placeholder="例如 laptop"
+                  onChange={(event) => setEditName(event.target.value)}
+                />
+              </Field>
+              <Field label="渠道绑定" htmlFor="edit-key-binding-select">
+                <Select
+                  id="edit-key-binding-select"
+                  value={editBinding}
+                  data-testid="edit-key-binding"
+                  onChange={(event) => setEditBinding(event.target.value)}
+                >
+                  {PROVIDER_BINDING_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="来源 IP 白名单（逗号分隔 IP/CIDR，留空不限制）"
+                     htmlFor="edit-key-allowed-ips-input">
+                <Input
+                  id="edit-key-allowed-ips-input"
+                  value={editIps}
+                  data-testid="edit-key-allowed-ips"
+                  placeholder="例如 203.0.113.9,10.0.0.0/8"
+                  onChange={(event) => setEditIps(event.target.value)}
+                />
+              </Field>
+              <Field label="模型白名单（逗号分隔模型名或 glob，留空不限制）"
+                     htmlFor="edit-key-allowed-models-input">
+                <Input
+                  id="edit-key-allowed-models-input"
+                  value={editModels}
+                  data-testid="edit-key-allowed-models"
+                  placeholder="例如 glm-*,kimi-k3"
+                  onChange={(event) => setEditModels(event.target.value)}
+                />
+              </Field>
+              <Field label="到期时间（留空永不过期）" htmlFor="edit-key-expires-at-input">
+                <Input
+                  id="edit-key-expires-at-input"
+                  type="datetime-local"
+                  value={editExpiresAt}
+                  data-testid="edit-key-expires-at"
+                  onChange={(event) => setEditExpiresAt(event.target.value)}
+                />
+              </Field>
+              <p className="text-xs text-muted-foreground">
+                明文 Key 与 id 不可修改；改完下一个请求立即按新策略鉴权。配额请用「配额」按钮。
+              </p>
+              <div aria-live="polite">
+                {error && (
+                  <div role="alert">
+                    <Notice tone="danger">{error}</Notice>
+                  </div>
+                )}
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button type="button" variant="ghost" onClick={closeEdit}>
+                  取消
+                </Button>
+                <Button type="submit" variant="primary" disabled={savingEdit}
+                        data-testid="edit-key-save">
+                  {savingEdit ? "保存中…" : "保存"}
+                </Button>
+              </div>
+            </form>
           </div>
         </div>
       )}

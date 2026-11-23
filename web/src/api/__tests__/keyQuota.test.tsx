@@ -10,8 +10,8 @@ import {
   quotaOf,
   quotaSummary,
   setApiKeyQuota,
-  usageTodayLabel,
-  usageTodayOf,
+  usageLabel,
+  usageOf,
 } from "../keyQuota";
 import { ApiKeysPage } from "../../pages/ApiKeysPage";
 import { jsonResponse, renderPage, settle, userEvent } from "@/test-utils";
@@ -76,22 +76,26 @@ describe("keyQuota 纯函数", () => {
     ).toBe("100 次/日 · 1000 token/日 · $2/日 · 10 RPM · 5000 TPM · 3 并发");
   });
 
-  it("usageTodayOf / usageTodayLabel 兼容缺字段与零值", () => {
-    expect(usageTodayOf({})).toEqual({ requests: 0, tokens: 0, cost_usd: 0 });
-    expect(usageTodayOf(null)).toEqual({ requests: 0, tokens: 0, cost_usd: 0 });
-    expect(usageTodayOf({ usage_today: { requests: 2, tokens: 30, cost_usd: 0.5 } }))
+  it("usageOf / usageLabel 兼容缺字段与零值", () => {
+    expect(usageOf({})).toEqual({ requests: 0, tokens: 0, cost_usd: 0 });
+    expect(usageOf(null)).toEqual({ requests: 0, tokens: 0, cost_usd: 0 });
+    expect(usageOf({ usage: { requests: 2, tokens: 30, cost_usd: 0.5 } }))
       .toEqual({ requests: 2, tokens: 30, cost_usd: 0.5 });
-    expect(usageTodayLabel({ requests: 0, tokens: 0, cost_usd: 0 })).toBe("今日未用");
-    expect(usageTodayLabel({ requests: 2, tokens: 30, cost_usd: 0 })).toBe("2 次 · 30 token");
-    expect(usageTodayLabel({ requests: 2, tokens: 30, cost_usd: 0.5 }))
+    expect(usageLabel({ requests: 0, tokens: 0, cost_usd: 0 }, "today")).toBe("今日未用");
+    expect(usageLabel({ requests: 2, tokens: 30, cost_usd: 0 }, "today"))
+      .toBe("2 次 · 30 token");
+    expect(usageLabel({ requests: 2, tokens: 30, cost_usd: 0.5 }, "today"))
       .toBe("2 次 · 30 token · $0.5");
+    // 窗口进文案：0 用量在不同档位下不能都显示「今日未用」
+    expect(usageLabel({ requests: 0, tokens: 0, cost_usd: 0 }, "7d")).toBe("近 7 天未用");
+    expect(usageLabel({ requests: 0, tokens: 0, cost_usd: 0 }, "30d")).toBe("近 30 天未用");
   });
 
-  it("usageTodayLabel 格式化大数：请求数千分位、token 紧凑、成本按量级取位数", () => {
-    expect(usageTodayLabel({ requests: 2974, tokens: 365_309_724, cost_usd: 7.4879 }))
+  it("usageLabel 格式化大数：请求数千分位、token 紧凑、成本按量级取位数", () => {
+    expect(usageLabel({ requests: 2974, tokens: 365_309_724, cost_usd: 7.4879 }, "today"))
       .toBe("2,974 次 · 3.7亿 token · $7.49");
     // 小额成本不能被两位小数抹成 $0
-    expect(usageTodayLabel({ requests: 1, tokens: 100, cost_usd: 0.0042 }))
+    expect(usageLabel({ requests: 1, tokens: 100, cost_usd: 0.0042 }, "today"))
       .toBe("1 次 · 100 token · $0.0042");
   });
 });
@@ -153,7 +157,7 @@ describe("ApiKeysPage 配额 UI", () => {
       ...KEY,
       id: "key_2",
       quota: JSON.stringify({ daily_requests: 100, rpm: 5 }),
-      usage_today: { requests: 3, tokens: 1200, cost_usd: 0.25 },
+      usage: { requests: 3, tokens: 1200, cost_usd: 0.25 },
     };
     vi.stubGlobal(
       "fetch",

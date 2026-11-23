@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.audit.actions import ACTION_API_KEY_QUOTA, ACTION_LABELS, ACTIONS
+from src.engine.limits import day_start
 from src.main import build_app
 from tests.helpers.auth import isolated_settings, set_session_cookie
 
@@ -110,7 +112,7 @@ def test_put_quota_requires_session(app):
                         json={"quota": {"rpm": 1}}).status_code == 401
 
 
-def test_list_includes_usage_today(client, app):
+def test_list_includes_usage_window(client, app):
     from src.request_context import set_api_key_id
 
     created = _create(client)
@@ -123,12 +125,57 @@ def test_list_includes_usage_today(client, app):
         set_api_key_id(None)
     row = client.get("/api/api-keys").json()["api_keys"][0]
     # 没有装配价表/汇率时成本为 NULL → 按 0 累加（不猜）
-    assert row["usage_today"] == {"requests": 1, "tokens": 10, "cost_usd": 0.0}
+    assert row["usage"] == {"requests": 1, "tokens": 10, "cost_usd": 0.0}
     # 没有任何明细的 Key 显示 0（而不是缺键）
     _create(client, name="idle")
     idle = [item for item in client.get("/api/api-keys").json()["api_keys"]
             if item["name"] == "idle"][0]
-    assert idle["usage_today"] == {"requests": 0, "tokens": 0, "cost_usd": 0.0}
+    assert idle["usage"] == {"requests": 0, "tokens": 0, "cost_usd": 0.0}
+
+
+def _record_at(app, key_id: str, ts: int) -> None:
+    """在指定时刻写一条明细（`now` 注入让窗口边界可测）。"""
+    from src.request_context import set_api_key_id
+
+    set_api_key_id(key_id)
+    try:
+        app.state.stats_collector.record(username="root", provider="trae",
+                                         model="glm-5.2", ok=True,
+                                         input_tokens=7, output_tokens=3, now=ts)
+    finally:
+        set_api_key_id(None)
+
+
+def test_list_usage_window_today_7d_30d(client, app):
+    """三档窗口：含今天在内的最近 N 个自然日（北京时间 0 点起）——边界都按秒卡。"""
+    created = _create(client)
+    start = day_start(int(time.time()))
+    _record_at(app, created["id"], start)                    # 今天 00:00
+    _record_at(app, created["id"], start - 1)                # 昨天 23:59:59
+    _record_at(app, created["id"], start - 6 * 86400)        # 6 天前 00:00（7d 内）
+    _record_at(app, created["id"], start - 6 * 86400 - 1)    # 7d 外一秒
+    _record_at(app, created["id"], start - 29 * 86400)       # 29 天前 00:00（30d 内）
+    _record_at(app, created["id"], start - 29 * 86400 - 1)   # 30d 外一秒
+
+    def usage(window: str) -> dict:
+        payload = client.get("/api/api-keys", params={"window": window}).json()
+        assert payload["window"] == window
+        return payload["api_keys"][0]["usage"]
+
+    assert usage("today")["requests"] == 1
+    assert usage("7d") == {"requests": 3, "tokens": 30, "cost_usd": 0.0}
+    assert usage("30d") == {"requests": 5, "tokens": 50, "cost_usd": 0.0}
+    # 不传 window 时口径与「今日」一致（老前端向后兼容）
+    default = client.get("/api/api-keys").json()
+    assert default["window"] == "today"
+    assert default["api_keys"][0]["usage"]["requests"] == 1
+
+
+@pytest.mark.parametrize("window", ["1d", "week", "", "7D"])
+def test_list_rejects_unknown_window(client, window):
+    response = client.get("/api/api-keys", params={"window": window})
+    assert response.status_code == 400
+    assert "window" in response.json()["error"]["message"]
 
 
 def test_quota_action_registered_with_label():
