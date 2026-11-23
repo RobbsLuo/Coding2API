@@ -78,6 +78,13 @@ _META_FIELDS = ("name", "credit_rate", "max_input_tokens", "max_output_tokens",
                 "supports_images", "supports_tool_call",
                 "supports_reasoning", "default_effort")
 
+# OpenRouter 风格别名 → 本仓字段（同值双发，内部模型不变）。OpenRouter 生态的
+# 客户端（Claude Code 的 auto-compact 窗口、各家 SDK 的 max_completion_tokens）
+# 只认这两个名字；只发本仓字段时它们只能按 id 猜，别名模型（`kilo-auto/free`、
+# `kmodel_latest`）的窗口最容易被猜错。
+_META_ALIASES = {"context_length": "max_input_tokens",
+                 "max_completion_tokens": "max_output_tokens"}
+
 # 展示排序权重：CodeBuddy / TRAE 优先，其余渠道（zen / kilo 等）在后；
 # 多渠道模型取所有渠道里的最小权重（含 CB 即进第一段）。
 _PROVIDER_RANK = {"codebuddy": 0, "codebuddy_intl": 1, "trae": 2, "qoder": 3,
@@ -560,13 +567,17 @@ def _entry_response(entry: dict[str, Any],
     用户自定义别名条目额外带 `custom_alias: true`（前端据此打「自定义别名」
     徽章）与 `alias_target`（别名指向的真实对外 id，排障用）。
     """
+    # 空串按「无该字段」处理：`name`/`default_effort` 未提供时是 ""，
+    # 透传空串会让前端显示空模型名或多余的 `default_effort: ""`。
+    meta = {field: value for field, value in entry["meta"].items()
+            if value is not None and value != ""}
     result: dict[str, Any] = {
         "id": entry["id"], "object": "model", "owned_by": "Coding2API",
         "providers": sorted(entry["providers"]),
-        # 空串按「无该字段」处理：`name`/`default_effort` 未提供时是 ""，
-        # 透传空串会让前端显示空模型名或多余的 `default_effort: ""`。
-        **{field: value for field, value in entry["meta"].items()
-           if value is not None and value != ""},
+        **meta,
+        # OpenRouter 风格别名与内部字段同值双发；源字段缺省时不发别名（不填假值）。
+        **{alias: meta[field] for alias, field in _META_ALIASES.items()
+           if field in meta},
     }
     if entry.get("custom_alias"):
         result["custom_alias"] = True

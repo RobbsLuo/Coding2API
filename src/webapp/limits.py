@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import json
+
 # 请求体上限：登录 8KB（PBKDF2 是 CPU 密集操作，超大 body 无意义）；
 # 其余 16MB（聊天请求可能带图片 base64）。
 LOGIN_BODY_LIMIT = 8 * 1024
@@ -33,12 +35,15 @@ def _body_limit(path: str) -> int:
     return DEFAULT_BODY_LIMIT
 
 
-async def _send_too_large(send) -> None:
+async def _send_too_large(send, size: int, limit: int) -> None:
+    # 回填实测大小与配置上限：只有「too large」时用户无法判断是哪个限制、
+    # 差多少——调大请求体或改配置都需要这两个数字。
+    message = f"request body {size} bytes exceeds limit {limit} bytes"
+    body = json.dumps({"error": {"message": message, "type": "api_error",
+                                 "code": "invalid_request", "status": 413}})
     await send({"type": "http.response.start", "status": 413,
                 "headers": [(b"content-type", b"application/json")]})
-    await send({"type": "http.response.body",
-                "body": b'{"error":{"message":"request body too large",'
-                        b'"type":"api_error","code":"invalid_request","status":413}}'})
+    await send({"type": "http.response.body", "body": body.encode()})
 
 
 class BodySizeLimitMiddleware:
@@ -62,7 +67,8 @@ class BodySizeLimitMiddleware:
             if name == b"content-length":
                 try:
                     if int(value) > limit:
-                        await _send_too_large(send)
+                        # 未读 body，回填的是声明的 content-length（与实际一致）
+                        await _send_too_large(send, int(value), limit)
                         return
                 except ValueError:
                     break
@@ -92,6 +98,7 @@ class BodySizeLimitMiddleware:
                 return                      # 丢弃下游 body
             if not replaced:
                 replaced = True
-                await _send_too_large(send)
+                # 分块请求没有 content-length，回填的是累计读到的实际字节数
+                await _send_too_large(send, received, limit)
 
         await self.app(scope, limited_receive, guarded_send)

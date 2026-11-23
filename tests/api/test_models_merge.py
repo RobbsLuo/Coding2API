@@ -585,3 +585,75 @@ def test_entry_response_omits_by_provider_when_empty():
     result = _entry_response(entry)
     assert "by_provider" not in result
     assert result["id"] == "m"
+
+
+def test_models_exposes_openrouter_token_aliases(tmp_path):
+    """`/v1/models` 每个条目同值双发 OpenRouter 风格别名。
+
+    Claude Code 的 auto-compact 窗口按 `context_length` 定、各家 SDK 用
+    `max_completion_tokens` 作输出上限；只发本仓字段时它们只能按模型 id 猜，
+    别名模型（`kilo-auto/free`、`kmodel_latest`）最容易被猜错。别名与内部字段
+    **同值**，任一缺失都算丢字段。
+    """
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path),
+                        MODEL_BLOCKLIST="")
+
+    class Stub:
+        def __init__(self, pid: str, models):
+            self.id = pid
+            self._models = models
+
+        async def list_models(self, _data):
+            return list(self._models)
+
+        def import_credential(self, raw):  # pragma: no cover - 未使用
+            return raw
+
+    from src.provider.base import Model
+
+    app = build_app(settings, providers={
+        "kilo": Stub("kilo", [Model(id="kilo-auto/free", name="Auto Free",
+                                    max_input_tokens=131072,
+                                    max_output_tokens=8192)]),
+        "qoder": Stub("qoder", [Model(id="kmodel_latest", name="Kimi K3",
+                                      max_input_tokens=180000,
+                                      max_output_tokens=16384)]),
+    })
+    for provider_id in ("kilo", "qoder"):
+        app.state.credentials.add(provider=provider_id, credential_data={"t": "x"})
+    key = app.state.api_keys.create("root")["api_key"]
+    with TestClient(app) as client:
+        data = {m["id"]: m for m in client.get(
+            "/v1/models", headers={"Authorization": f"Bearer {key}"}).json()["data"]}
+
+    assert set(data) == {"kilo-auto", "kimi-k3"}
+    for item in data.values():
+        # 三个键同时存在：内部输入字段 + 两个 OpenRouter 风格别名
+        assert {"max_input_tokens", "context_length",
+                "max_completion_tokens"} <= set(item)
+        assert item["context_length"] == item["max_input_tokens"]
+        assert item["max_completion_tokens"] == item["max_output_tokens"]
+    assert (data["kilo-auto"]["context_length"],
+            data["kilo-auto"]["max_completion_tokens"]) == (131072, 8192)
+    assert (data["kimi-k3"]["context_length"],
+            data["kimi-k3"]["max_completion_tokens"]) == (180000, 16384)
+
+
+def test_entry_response_omits_token_aliases_when_absent():
+    """源字段缺省（None / 空串）时不发别名——不填 0 或空值。
+
+    解析器会把 `context_length: 0` 读成「窗口为零」，比缺字段更糟。
+    """
+    from src.api.model_merge import _entry_response
+
+    entry = {
+        "id": "m", "providers": {"codebuddy"},
+        "meta": {"name": "M", "credit_rate": None, "max_input_tokens": None,
+                 "max_output_tokens": "", "supports_images": None,
+                 "supports_tool_call": None, "supports_reasoning": None,
+                 "default_effort": None},
+        "provider_meta": {}, "raw_ids": {}, "labels": {"M"},
+    }
+    result = _entry_response(entry)
+    assert "context_length" not in result
+    assert "max_completion_tokens" not in result

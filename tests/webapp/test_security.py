@@ -188,6 +188,9 @@ def test_login_body_limit_8kb(app):
         "/api/auth/login", content=payload, headers={"Content-Type": "application/json"}
     )
     assert response.status_code == 413
+    # content-length 路径：回填声明的字节数与配置上限
+    assert response.json()["error"]["message"] == (
+        f"request body {len(payload)} bytes exceeds limit 8192 bytes")
 
 
 def test_chat_body_limit_16mb(app):
@@ -197,6 +200,28 @@ def test_chat_body_limit_16mb(app):
         "/v1/chat/completions", content=oversized, headers={"Content-Type": "application/json"}
     )
     assert response.status_code == 413
+    assert response.json()["error"]["message"] == (
+        f"request body {len(oversized)} bytes exceeds limit 16777216 bytes")
+
+
+def test_chunked_body_limit_reports_actual_size(app):
+    """分块请求没有 content-length：回填 receive 层累计的实际字节数。
+
+    httpx 对迭代器形式的 body 走 `Transfer-Encoding: chunked`，中间件只能靠
+    receive 计数发现超限——这条路径的 size 是实测值，不是声明值。
+    """
+    _app, client = app
+
+    def chunks():
+        yield b"x" * (8 * 1024)      # 刚好到上限，不触发
+        yield b"y"                   # 超 1 字节 → 413
+
+    response = client.post(
+        "/api/auth/login", content=chunks(), headers={"Content-Type": "application/json"}
+    )
+    assert response.status_code == 413
+    assert response.json()["error"]["message"] == (
+        "request body 8193 bytes exceeds limit 8192 bytes")
 
 
 # -------------------------------------------------------------- 安全响应头

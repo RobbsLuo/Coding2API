@@ -285,7 +285,10 @@ async def test_body_limit_middleware_discards_downstream_body_when_exceeded():
     await middleware({"type": "http", "path": "/api/auth/login", "headers": []},
                      receive, send)
     body_messages = [m for m in sent if m["type"] == "http.response.body"]
-    assert body_messages and b"request body too large" in body_messages[0]["body"]
+    assert body_messages
+    # 实测大小与配置上限都回填（分块路径没有 content-length）
+    assert (b"request body 8193 bytes exceeds limit 8192 bytes"
+            in body_messages[0]["body"])
     assert all(b"downstream" not in m.get("body", b"") for m in sent)
 
 @pytest.mark.asyncio
