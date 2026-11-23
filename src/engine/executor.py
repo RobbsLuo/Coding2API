@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import re
 import socket
@@ -34,6 +35,8 @@ from ..provider.base import (
     ErrKind,
     Event,
     EventKind,
+    UpstreamProtocolViolation,
+    UpstreamReloginRequired,
     UpstreamTransportError,
     Usage,
     aclose_stream,
@@ -56,6 +59,7 @@ from .reasoning import (
     parse_effort_map,
 )
 from .scheduler import Candidate, Scheduler
+from .sse import SSEFrameTooLarge
 
 logger = logging.getLogger(__name__)
 
@@ -1047,6 +1051,16 @@ class Executor:
                 kind = await self._credit_if_exhausted(
                     _classify(error), credential_id, provider_id)
                 if kind is None:
+                    # 未归类的逃逸异常：`stream_guarded` 会把它兜成 500
+                    # internal_error。必须先留一行明细（已出帧时上游可能已真实
+                    # 计费）再原样上抛——不冷却凭证（无从判断是谁的问题）。
+                    # 已由 DEAD/RESTRICTED 尝试行覆盖本请求且未出帧时不重复
+                    # 记账，避免 `requests` 虚高（与下面收尾行同一口径）。
+                    if emitted or not attributed:
+                        self._record_unclassified_failure(
+                            username=state.username, provider_id=provider_id,
+                            credential_id=credential_id, model=target.model,
+                            started=state.started, error=error, state=state)
                     raise
                 if kind is ErrKind.QUEUE:
                     # 排队也可能以 HTTP 403 + 排队 body 的形式抛出（见
@@ -1601,6 +1615,12 @@ class Executor:
                 kind = await self._credit_if_exhausted(
                     _classify(error), credential_id, provider_id)
                 if kind is None:
+                    # 同 `_stream_loop`：留痕后原样上抛，不冷却凭证。
+                    if not attributed:
+                        self._record_unclassified_failure(
+                            username=username, provider_id=provider_id,
+                            credential_id=credential_id, model=target.model,
+                            started=started, error=error)
                     raise
                 if kind is ErrKind.QUEUE:
                     # HTTP 级排队（403 + 排队 body）：与流内排队同一套语义
@@ -2323,6 +2343,33 @@ class Executor:
             latency_ms=_elapsed_ms(started))
         return True
 
+    def _record_unclassified_failure(self, *, username: str, provider_id: str,
+                                     credential_id: str, model: str,
+                                     started: float, error: Exception,
+                                     state: _StreamState | None = None) -> None:
+        """未归类异常（`_classify` 返回 None）的**留痕**行。
+
+        这类异常会一路逃到 `stream_guarded` 变成 500 `internal_error`：无法
+        判断是账号 / 上游 / 本机哪一侧的问题，所以**不冷却凭证**（惩罚一个
+        完全健康的号只会把一次上游抖动放大成整池不可用）；但也绝不能不留
+        记录——归因面板看不到，已出帧的 token（上游可能已真实计费）全部漏记。
+        字段口径与 `_record_success` / 收尾行保持一致。
+        """
+        usage = state.translator.usage if state is not None else None
+        self._deps.record(
+            username=username, provider=provider_id, credential_id=credential_id,
+            model=model, ok=False,
+            # kind 为 None 时 `_failure_type` 落到受控兜底值 `upstream_protocol`
+            # （与「上游响应不符合协议」同一归因口径）。
+            error_type=_failure_type(None, error),
+            input_tokens=_usage_field(usage, "input_tokens"),
+            output_tokens=_usage_field(usage, "output_tokens"),
+            reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
+            cached_tokens=_usage_field(usage, "cached_tokens"),
+            credit=_usage_field(usage, "credit"),
+            credit_estimated=bool(_usage_field(usage, "credit_estimated")),
+            latency_ms=_elapsed_ms(started))
+
     def _pause_provider_on_burst(self, provider_id: str, credential_id: str) -> None:
         """同渠道窗口内第二个**不同凭证**被上游限制 → 整渠道冷却。
 
@@ -2554,8 +2601,23 @@ def _model_mismatch(requested: str, observed: str) -> bool:
     return not (left.startswith(right) or right.startswith(left))
 
 
+# 上游响应「不符合协议」的异常族：统一归 `UPSTREAM_PROTOCOL`（零冷却、不罚号，
+# 但调用点必须留痕）。
+# 只列协议语义的具体类，**不**放开到 `ValueError` 整体：同为空值错误的
+# `InvalidModelName` 自带 `kind()`（INVALID），放开会改掉它的语义。
+# 渠道私有的「会话/票据过期」（lingxi `RunExpired`、codearts `_WebCookieExpired`）
+# 在各自客户端里实现 `kind()`——engine 不反向依赖具体渠道模块。
+_PROTOCOL_VIOLATION_ERRORS: tuple[type[BaseException], ...] = (
+    UpstreamProtocolViolation,
+    UpstreamReloginRequired,
+    SSEFrameTooLarge,
+    json.JSONDecodeError,
+    UnicodeDecodeError,
+)
+
+
 def _classify(error: Exception) -> ErrKind | None:
-    """上游错误 → ErrKind；不认识的原样上抛。
+    """上游错误 → ErrKind；不认识的原样上抛（由调用点负责先留痕再上抛）。
 
     本机网络/DNS 失败（`ConnectError` / `gaierror`）先单独归 `NETWORK`：它不是
     凭证或上游服务的问题，冷却凭证只会把网络抖动放大成「整池无可用凭证」。
@@ -2581,6 +2643,11 @@ def _classify(error: Exception) -> ErrKind | None:
     layer failure` 直接逃到 `stream_guarded`，表现为一帧 `internal_error`：
     不换号、不冷却、不记统计，失败归因面板里连痕迹都没有。TLS 中断与读中断
     同属链路瞬态，归 SOFT。仍然只认**具体类**，不放开到 `OSError` 整体。
+
+    **末段兜住「上游响应不符合协议」**（见 `_PROTOCOL_VIOLATION_ERRORS`）：
+    它们此前落到 `return None`，调用点直接 `raise`，最终被 `stream_guarded`
+    兜成 500 `internal_error`——不冷却、不落 `usage_events`、已出帧的 token
+    全部漏记。归 `UPSTREAM_PROTOCOL` 后零冷却（不罚号）但**必须留痕**。
     """
     kind_method = getattr(error, "kind", None)
     if _is_network_error(error):
@@ -2592,6 +2659,8 @@ def _classify(error: Exception) -> ErrKind | None:
         return kind_method()
     if isinstance(error, (httpx.TransportError, ssl.SSLError)):
         return ErrKind.SOFT
+    if isinstance(error, _PROTOCOL_VIOLATION_ERRORS):
+        return ErrKind.UPSTREAM_PROTOCOL
     return None
 
 
@@ -2810,6 +2879,11 @@ def _error_type_for(kind: ErrKind) -> str:
     """
     if kind is ErrKind.NETWORK:
         return "network_error"
+    if kind is ErrKind.UPSTREAM_PROTOCOL:
+        # 上游响应不符合协议（非 JSON / 形状不符 / SSE 帧超限 / 会话票据
+        # 失效）：既不是额度也不是请求参数写错，独立成「渠道响应异常」。
+        # 零冷却，但必须出现在归因面板与 usage_events 里（见 ErrKind 注释）。
+        return "upstream_protocol"
     if kind in (ErrKind.PLAN, ErrKind.CREDIT, ErrKind.MODEL,
                 ErrKind.CONCURRENCY, ErrKind.QUEUE, ErrKind.SOFT):
         # MODEL / CONCURRENCY 都是模型级限流，展示口径同为额度类；

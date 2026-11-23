@@ -85,6 +85,17 @@ class ErrKind(StrEnum):
     # 打成「无可用凭证」）。与 REQUEST/CONTEXT 同为**零动作**，但统计口径单独
     # 成类，避免归因面板把本机故障读成「上游超时」。
     NETWORK = "network"
+    # 上游响应不符合协议（非 JSON / 字段缺失 / 形状不符 / SSE 帧超限 /
+    # 会话票据失效）。
+    # **为什么这类错误不罚号**：坏的是上游这一路的响应，不是这个账号的额度、
+    # 状态或请求参数——冷却凭证只会把一个健康号打成不可用，六渠道同时抖动时
+    # 还会放大成「整池无可用凭证」（与 NETWORK 同一教训）。换号重试即可。
+    # **为什么必须留痕**：这类异常此前从 `_classify` 返回 None 直接上抛，被
+    # `stream_guarded` 兜成 500 `internal_error`：不冷却、不写 `usage_events`，
+    # 归因面板里连痕迹都没有，已出帧的 token（上游可能已真实计费）全部漏记。
+    # 零动作不等于零记录：与 REQUEST/CONTEXT 同为零惩罚，但统计必须单独成类，
+    # 让运维一眼看出是「渠道响应异常」而非自己参数写错。
+    UPSTREAM_PROTOCOL = "upstream_protocol"
 
 
 # 冷却作用域是「(凭证, 模型)」而非整个凭证的错误类别。
@@ -94,9 +105,13 @@ MODEL_SCOPED_KINDS = frozenset({ErrKind.MODEL, ErrKind.BLOCKED, ErrKind.CONCURRE
 
 # 零动作分类：不是账号/凭证的错，不冷却、不累计，只换号重试。
 # REQUEST = 请求体坏 / 渠道风控；CONTEXT = 上下文超限（11115）；
-# NETWORK = 本机 DNS/连接失败（连上游之前就失败，惩罚凭证只会放大网络抖动）。
+# NETWORK = 本机 DNS/连接失败（连上游之前就失败，惩罚凭证只会放大网络抖动）；
+# UPSTREAM_PROTOCOL = 上游响应不符合协议（非 JSON / 形状不符 / SSE 帧超限 /
+# 会话票据失效）——同样不罚号，但调用点仍要落一行 `usage_events` 留痕。
 # 与 INVALID 的区别：INVALID 跳过**整个上游**（换号也回同一条），这些只换号。
-NO_PENALTY_KINDS = frozenset({ErrKind.REQUEST, ErrKind.CONTEXT, ErrKind.NETWORK})
+NO_PENALTY_KINDS = frozenset({
+    ErrKind.REQUEST, ErrKind.CONTEXT, ErrKind.NETWORK, ErrKind.UPSTREAM_PROTOCOL,
+})
 
 # 「这次请求形态上游不接受」→ 换号无用，跳过整个上游。EXECUTOR 对这两类都
 # `_skip_provider` + 以 400 收尾；统计口径分开（invalid_request / model_capability）。

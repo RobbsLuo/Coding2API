@@ -37,6 +37,7 @@ import httpx
 from ...provider import base
 from ...provider.base import (
     CheckinResult,
+    ErrKind,
     Event,
     EventKind,
     Model,
@@ -118,7 +119,14 @@ class RunExpired(RuntimeError):
     """run / 会话在上游侧失效（`SQLNoRows` /「会话不存在」）：重建一次即可。
 
     只在**首个有效帧之前**抛出：流已经开始就无法回滚已下发的内容。
+
+    分类为 `UPSTREAM_PROTOCOL`（零冷却、不罚号）而不是 SOFT：失效的是
+    一次性的 run（上游协议状态），不是账号额度或状态；惩罚凭证只会把一次
+    上游抖动放大成整池不可用。留痕由 executor 的失败行负责。
     """
+
+    def kind(self) -> ErrKind:
+        return ErrKind.UPSTREAM_PROTOCOL
 
 
 class LingxiClient(LazyClients):

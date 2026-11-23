@@ -35,7 +35,13 @@ from urllib.parse import urlsplit
 import httpx
 
 from ...provider import base
-from ...provider.base import Event, Model, Quota, UpstreamReloginRequired
+from ...provider.base import (
+    ErrKind,
+    Event,
+    Model,
+    Quota,
+    UpstreamReloginRequired,
+)
 from ..lazy_clients import LazyClients
 from . import auth as codearts_auth
 from . import events as codearts_events
@@ -258,7 +264,13 @@ class _WebCookieExpired(Exception):
     页面导航请求回 SPA HTML，登录跳转则回 3xx 到 `auth.huaweicloud.com`。
     这些形态都归「需要重贴 Cookie」，与 5xx/网络/形状变化（只是暂时拿不到
     明细）分开，前者才在管理台打「已失效」标记。
+
+    分类为 `UPSTREAM_PROTOCOL`（零冷却、不罚号）：响应形态不符合协议，
+    不是账号额度/状态问题；留痕由 executor 的失败行负责。
     """
+
+    def kind(self) -> ErrKind:
+        return ErrKind.UPSTREAM_PROTOCOL
 
 
 class CodeArtsClient(LazyClients):

@@ -39,7 +39,7 @@ MAX_ROTATE = 3
 # 冷却来源属于「上游点名恢复时刻」的分类：人工 `revive` **保留**这些冷却
 # （清掉只会立刻再撞一次上游），要强制清除须显式 `force=True`。
 # 不含 MODEL/BLOCKED/CONCURRENCY（模型级条目，revive 一律清）、REQUEST/CONTEXT/
-# NETWORK/CAPABILITY/QUEUE（零冷却）、OTHER（本地累计冷却，清掉无害）。
+# NETWORK/UPSTREAM_PROTOCOL/CAPABILITY/QUEUE（零冷却）、OTHER（本地累计冷却，清掉无害）。
 # 与 `note_error` 里写 `cooling_kind` 的分支必须同步：漏一处，该类的冷却
 # 就会被 revive 静默解掉。
 UPSTREAM_COOLDOWN_KINDS = frozenset({
@@ -453,6 +453,9 @@ class Scheduler:
                            见 `concurrency_cooldown_duration`）
                           账号级冷却出现时清空模型级条目（防豁免泄漏）
         REQUEST → 零动作：不是账号的问题，换号但绝不惩罚凭证
+        UPSTREAM_PROTOCOL → 零动作：上游响应不符合协议（非 JSON / 形状不符 /
+                            SSE 帧超限 / 会话票据失效），坏的是这一路响应而不是
+                            账号，换号重试；留痕由 executor 落 `usage_events`
         QUEUE   → 零动作：上游只是排队，等 `retryAfterSeconds` 后原号重开；
                            写冷却会让「等 5 秒」变成「锁 60 秒并换号」
 
