@@ -260,7 +260,7 @@ async def test_oauth_lazy_http_and_aclose_without_client(monkeypatch):
         async def aclose(self):
             created.append("closed")
 
-    monkeypatch.setattr(qoder_auth.httpx, "AsyncClient", _Stub)
+    monkeypatch.setattr(qoder_auth, "build_client", _Stub)
     assert oauth._http is oauth._http                          # noqa: SLF001
     assert len(created) == 1
     await oauth.aclose()

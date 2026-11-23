@@ -5,8 +5,13 @@ Code、MiniMax、智谱、自建 vLLM / LiteLLM 这些**本身就是标准 OpenA
 不需要逆向。这个渠道把它们接进来，一个部署配置一条（`GENERIC_API_ENDPOINT`）。
 
 与 Zen / Kilo 的区别：**有真实凭证**（Bearer API key，进加密凭证池，可多把
-轮换），所以 401 是**凭据真的坏了**（判 DEAD 硬禁用），而 Zen/Kilo 的 401 只是
-「这个模型要付费 key」（判 INVALID）。这是两套完全相反的处置，不能共用分类。
+轮换），所以 401 默认是**凭据真的坏了**（判 DEAD 硬禁用），而 Zen/Kilo 的 401
+只是「这个模型要付费 key」（判 INVALID）。这是两套完全相反的处置，不能共用分类。
+
+但免费池（OpenRouter `:free`、ModelScope）的**模型级限额**也回 401/402，
+只看状态码会一次限额就硬禁用整池 key，故 401/403 按响应体证据拆分（见
+`_body_kind`）：模型级限额归 INVALID / CREDIT，明确的鉴权失败才 DEAD，
+**判不出时保持 DEAD**。
 
 **一个部署只配一条**：本渠道 id 固定 `generic`，模型表、统计、凭证池都按渠道
 聚合。要同时接两家官方 API，拆成两个部署（或等后续把 `KNOWN_PROVIDERS`
@@ -54,23 +59,69 @@ class UpstreamHTTPError(base.UpstreamHTTPError):
     classify_status = staticmethod(lambda status, body: classify_status(status, body))
 
 
+def _body_kind(body: bytes) -> ErrKind | None:
+    """从 401/403 响应体里识别「免费池的模型级限额」；无法判定返回 None。
+
+    免费池（OpenRouter `:free`、ModelScope）在「该模型没额度 / 免费额度用完 /
+    模型不存在」时回 401/402 而不是 429，与「key 失效」同码。只看状态码会把
+    一次模型级限额升级成「整池 key 硬禁用」——恢复要人工 revive，且期间所有
+    模型都不能用。故按响应体证据拆分：
+
+    * 模型不存在 / 不支持该模型 → `INVALID`（跳过上游，不回退）
+    * 限流 / 额度 / 余额文案 → `CREDIT`（等额度恢复，到次日 04:00）
+    * 明确的鉴权失败码 → `DEAD`（key 真废了）
+
+    **多类命中或一个都没命中 → None（保持现状 DEAD）**：证据自相矛盾时按
+    「key 坏了」处理。宁可是坏 key 留在池里白撞一次，也不要因为一句模糊文案
+    把整池好 key 放回轮换——两者的代价不对称。
+    """
+    text = body.decode("utf-8", "ignore").lower()
+    if not text:
+        return None
+    hints: tuple[tuple[ErrKind, tuple[str, ...]], ...] = (
+        (ErrKind.INVALID, (
+            "model_not_found", "model not found", "model_not_supported",
+            "model not supported", "no such model", "model_not_available",
+            "model not available", "unsupported model", "does not exist",
+        )),
+        (ErrKind.CREDIT, (
+            "rate_limit", "rate limit", "insufficient_quota", "insufficient quota",
+            "insufficient_credit", "insufficient credit", "quota", "billing",
+            "daily limit", "free tier", "out of credits", "credit balance",
+            "额度", "余额",
+        )),
+        (ErrKind.DEAD, (
+            "invalid_api_key", "invalid api key", "incorrect api key",
+            "unauthorized", "authentication", "invalid_token", "invalid token",
+            "api key", "apikey",
+        )),
+    )
+    matched = [kind for kind, needles in hints
+               if any(needle in text for needle in needles)]
+    return matched[0] if len(matched) == 1 else None
+
+
 def classify_status(status: int, body: bytes = b"") -> ErrKind:
     """标准 OpenAI 端点 + 真实 API key 的状态码分类。
 
-    与 Zen / Kilo 的**无凭证**渠道相反：这里的 401/403 就是「这把 key 废了」，
-    判 DEAD 让刷新任务/人工 revive 处理；归 INVALID 会让坏 key 一直留在池里
-    参与轮换，每次请求白撞一次。
+    与 Zen / Kilo 的**无凭证**渠道相反：这里的 401/403 默认就是「这把 key
+    废了」，判 DEAD 让刷新任务/人工 revive 处理；归 INVALID 会让坏 key 一直
+    留在池里参与轮换，每次请求白撞一次。
 
-    * 401/403 → DEAD（key 失效 / 无权限）
-    * 402 → CREDIT（余额不足）
+    但**只看状态码不够**：免费池的模型级限额也回 401/402（见 `_body_kind`），
+    一次限额就硬禁用整池 key。故 401/403 先拿响应体证据，判不出才回落 DEAD；
+    402 已是 CREDIT，只有响应体点名「没有这个模型」才改判 INVALID。
+
+    * 401/403 → DEAD（key 失效 / 无权限）；响应体证明是模型级限额 → INVALID / CREDIT
+    * 402 → CREDIT（余额不足）；响应体点名模型不存在 → INVALID
     * 404/400/422 → INVALID（模型不存在 / 请求写错）
     * 429 → SOFT（限流；标准端点通常不点名模型，故账号级）
     * 5xx → OTHER（累计后冷却）
     """
     if status in (401, 403):
-        return ErrKind.DEAD
+        return _body_kind(body) or ErrKind.DEAD
     if status == 402:
-        return ErrKind.CREDIT
+        return ErrKind.INVALID if _body_kind(body) is ErrKind.INVALID else ErrKind.CREDIT
     if status in (400, 404, 422):
         return ErrKind.INVALID
     if status == 429:

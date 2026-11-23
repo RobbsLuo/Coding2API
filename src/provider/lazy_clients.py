@@ -11,6 +11,10 @@
 一份池（`_pools[(流/短, 代理)]`）——不能在同一 client 上按请求换代理。
 上下文里的凭证 id 由 engine 层设置（`request_context.get_credential_id`）。
 未配置池时行为与之前逐字节一致（始终只有一条池）。
+
+**出口熔断**（C1）：健康状态挂在池上而不是这里——`build_client` 返回的 client
+自带 `EgressBreaker` 钩子（按代理 URL 记失败/到期），所以「取哪条池」这层
+不需要任何健康判断，也不会因为某个出口坏了而重建/丢弃连接池。
 """
 
 from __future__ import annotations
