@@ -7,7 +7,9 @@
  * 没用」），所以它们放在同一块面板里。
  *
  * 数据源：
- * - 压缩计数：`GET /api/stats/compression`（进程内计数器，重启归零）；
+ * - 压缩计数：`GET /api/stats/compression?since=&until=`（进程内按小时分桶，
+ *   重启从磁盘快照续接、保留 90 天）；把当前时间窗传下去，数字才与同屏缓存
+ *   命中率同口径；
  * - 缓存命中率：与上方总览**同一个** `/api/stats/overview` 响应（同一时间窗），
  *   由父组件以 `stats` 传入，避免两处各查一次导致口径/窗口不一致。
  *
@@ -37,8 +39,15 @@ export interface CompressionResponse {
 }
 
 /** 进程内计数器端点：失败不重试（面板是辅助读数，别拖慢页面）。 */
-async function fetchCompression(): Promise<CompressionResponse> {
-  const response = await fetch("/api/stats/compression", {
+async function fetchCompression(
+  since?: number,
+  until?: number,
+): Promise<CompressionResponse> {
+  const query = new URLSearchParams();
+  if (since !== undefined) query.set("since", String(since));
+  if (until !== undefined) query.set("until", String(until));
+  const suffix = query.toString() ? `?${query.toString()}` : "";
+  const response = await fetch(`/api/stats/compression${suffix}`, {
     credentials: "same-origin",
     headers: { "X-Requested-With": "XMLHttpRequest" },
   });
@@ -61,18 +70,30 @@ interface CompressPanelProps {
   stats: StatsOverview | undefined;
   /** 计数是池级/进程级的，只有 operator+ 能看到（viewer 的窗口口径对不上）。 */
   isOperator: boolean;
+  /** 当前时间窗起点（秒）；与总览同源，undefined = 「全部」。 */
+  since?: number;
+  /** 当前时间窗终点（秒，半开区间）；undefined = 至今。 */
+  until?: number;
+  /** 自定义范围非法（暂停取数）时不请求，避免把「全量」当成窗口结果。 */
+  rangeReady?: boolean;
 }
 
-export function CompressPanel({ stats, isOperator }: CompressPanelProps) {
+export function CompressPanel({
+  stats,
+  isOperator,
+  since,
+  until,
+  rangeReady = true,
+}: CompressPanelProps) {
   const compression = useQuery({
-    queryKey: ["stats-compression"],
-    queryFn: fetchCompression,
+    queryKey: ["stats-compression", since ?? null, until ?? null],
+    queryFn: () => fetchCompression(since, until),
     retry: false,
-    enabled: isOperator,
+    enabled: isOperator && rangeReady,
   });
   const data = compression.data;
   const counters = data?.stats;
-  // 空态判据：本次启动以来一次压缩都没触发（不是「没有请求」——unchanged 也会
+  // 空态判据：所选时间窗内一次压缩都没触发（不是「没有请求」——unchanged 也会
   // 记数，两者都是 0 才说明压缩路径根本没被调用过）。必须等数据到手再判：
   // undefined 时同样「都是 0」，否则加载中会先闪一下「未触发」的假空态。
   const idle = data !== undefined
@@ -108,7 +129,7 @@ export function CompressPanel({ stats, isOperator }: CompressPanelProps) {
       ) : idle ? (
         <div data-testid="compress-panel-empty">
           <Notice tone="muted">
-            本次启动以来压缩未触发，也没有可压的 tool 输出或裁掉的历史；上方「缓存命中率」即为当前代价。
+            所选时间窗内压缩未触发，也没有可压的 tool 输出或裁掉的历史；上方「缓存命中率」即为当前代价。
           </Notice>
         </div>
       ) : (
@@ -140,7 +161,8 @@ export function CompressPanel({ stats, isOperator }: CompressPanelProps) {
           </section>
           <p className="text-xs text-muted-foreground">
             判断口径：省下的 token 要大于「缓存命中率下降造成的未命中 token」才值得开。
-            上下文裁剪会让前缀边界前移，命中率异常时优先看「上下文裁剪」次数；计数为进程内累计，重启归零。
+            上下文裁剪会让前缀边界前移，命中率异常时优先看「上下文裁剪」次数；计数按小时分桶、
+            保留 90 天（重启后从磁盘快照续接），「全部」显示终身累计。
           </p>
         </div>
       )}

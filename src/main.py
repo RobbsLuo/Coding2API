@@ -111,6 +111,7 @@ from .engine.scheduler import Scheduler
 from .instance_lock import AlreadyRunning, hold_instance_lock
 from .key_quota import KeyQuotaGuard
 from .observability.otlp import OtlpExporter, metrics_snapshot
+from .persistence.compress_buckets import snapshot_path as compress_buckets_path
 from .platform_support import require_supported_platform
 from .provider.codearts import CodeArtsProvider
 from .provider.codearts.client import CodeArtsClient
@@ -676,9 +677,10 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     # 重启丢失只会让每个号多探一次）。
     half_open_guard = HalfOpenGuard()
     # 压缩收益计数器：与 `/metrics`、`/api/stats/compression` 共用同一个实例
-    # （统计页要「省下的 token」与「同期命中率」并排读）。挂到 app.state 是为了
-    # 测试可以注入独立实例，不影响进程级单例。
-    compress_stats = CompressStats()
+    # （统计页要「省下的 token」与「同期命中率」并排读）。启动从
+    # `DATA_DIR/compress_buckets.json` 读回小时桶，重启不再清空窗口差异；
+    # 挂到 app.state 是为了测试可以注入独立实例，不影响进程级单例。
+    compress_stats = CompressStats.load(compress_buckets_path(config.data_dir))
     executor = Executor(ExecutorDeps(providers=registry, credentials=credentials,
                                      scheduler=Scheduler(
                                          expiry_window=lambda: runtime.quota_expiry_window_seconds,
@@ -956,6 +958,9 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
             # 请求」的用量永久丢失。`atexit` 钩子是兜底（那时库已关，写不进去
             # 只会计一次 `write_failures`），所以这里先排一次。
             stats_collector.flush()
+            # 压缩收益的小时桶同理：正常路径有 60s 节流落盘，停机补一次，
+            # 否则最后一次落盘到停机之间的收益会丢。
+            compress_stats.flush()
             db.close()
 
     app = FastAPI(title="Coding2API", version=app_version(), lifespan=lifespan,

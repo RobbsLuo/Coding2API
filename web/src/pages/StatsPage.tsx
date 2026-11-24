@@ -353,7 +353,9 @@ export function StatsPage() {
 
       {/* 压缩收益与上面总览的缓存命中率**同屏**：省下的 token 只有在缓存仍命中
           时才是净收益，分开看会得出相反结论。 */}
-      <CompressPanel stats={stats} isOperator={session.is_operator} />
+      <CompressPanel stats={stats} isOperator={session.is_operator}
+                     since={effectiveSince} until={effectiveUntil}
+                     rangeReady={rangeReady} />
 
       <TrendChartPanel
         metric={metric}

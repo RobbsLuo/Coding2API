@@ -359,6 +359,32 @@ def test_compression_endpoint_returns_counters_and_switch_state(tmp_path):
     assert body["tool_output_compress_enabled"] is True
 
 
+def test_compression_endpoint_filters_by_window(tmp_path):
+    """`since`/`until` 只汇总窗口内的小时桶；不传则回终身累计。"""
+    from src.api.context import CompressStats
+
+    app = build_app(isolated_settings(tmp_path))
+    clock = {"t": 1_700_000_000.0}
+    stats = CompressStats(clock=lambda: clock["t"])
+    stats._bump(triggers=1, tool_triggers=1, chars_saved=4000)
+    first_hour = int(clock["t"] // 3600) * 3600
+    clock["t"] += 3600
+    stats._bump(triggers=1, context_trims=1, chars_saved=4000)
+    app.state.compress_stats = stats
+    with TestClient(app, client=LOOPBACK) as http:
+        set_session_cookie(http)
+        windowed = http.get("/api/stats/compression", params={
+            "since": first_hour, "until": first_hour + 3600}).json()
+        everything = http.get("/api/stats/compression").json()
+    assert windowed["stats"]["triggers"] == 1
+    assert windowed["stats"]["tool_triggers"] == 1
+    assert windowed["stats"]["context_trims"] == 0
+    assert windowed["stats"]["chars_saved"] == 4000
+    assert windowed["stats"]["tokens_saved"] == 1000
+    assert everything["stats"]["triggers"] == 2
+    assert everything["stats"]["context_trims"] == 1
+
+
 def test_compression_endpoint_requires_session(tmp_path):
     """运维读数也要登录（匿名拿不到进程内部的开关状态）。"""
     app = build_app(isolated_settings(tmp_path))

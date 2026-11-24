@@ -268,7 +268,9 @@ def create_router(services: Services) -> APIRouter:
 
     @router.get("/api/stats/compression")
     async def compression_stats(request: Request,
-                                principal=Depends(principal_from_request)):
+                                principal=Depends(principal_from_request),
+                                since: int | None = None,
+                                until: int | None = None):
         """压缩收益 + 开关状态（统计页「压缩」面板的数据源）。
 
         这里**只回计数与开关**，不含任何用户/凭证维度：它是运维判断「该开还是
@@ -276,8 +278,12 @@ def create_router(services: Services) -> APIRouter:
         同窗口的 `/api/stats/overview`（缓存命中率）并排展示——省下的 token
         只有在缓存仍命中时才是净收益。
 
+        `since` / `until`：与其它统计端点同口径的半开小时窗 `[since, until)`，
+        只汇总落在窗口内的小时桶；两端都不给 → 本次进程运行的终身累计
+        （「全部」）。不传窗口就等于旧行为，`/metrics` 始终读终身累计。
+
         刻意不做成 `/metrics` 的替代品，也不新增重型聚合：数据来自压缩闭包里的
-        进程内计数器，O(1)。
+        进程内计数器，按小时桶求和（最多 90 天 × 24 桶），O(桶数)。
 
         仅 operator+：计数是**池级/进程级**的，viewer 的个人视图做不了「与我的
         命中率同窗口」的对比；给出全局数只会让两边口径错位。
@@ -285,7 +291,7 @@ def create_router(services: Services) -> APIRouter:
         require_operator(principal)
         settings = services.settings
         return {
-            "stats": _compress_snapshot(request),
+            "stats": _compress_snapshot(request, since=since, until=until),
             "context_compress_enabled": bool(settings.context_compress_enabled),
             "tool_output_compress_enabled": bool(settings.tool_output_compress_enabled),
         }
@@ -293,9 +299,13 @@ def create_router(services: Services) -> APIRouter:
     return router
 
 
-def _compress_snapshot(request: Request) -> dict[str, int]:
+def _compress_snapshot(request: Request, *, since: int | None = None,
+                       until: int | None = None) -> dict[str, int]:
     """压缩计数器快照：优先读 app.state 注入的实例（测试/多实例部署可隔离），
     未装配时回落到进程级单例（与 `build_context_compressor` 默认值同一对象）。
+
+    `since` / `until` 透传 `CompressStats.as_dict`：给了就只汇总窗口内的小时桶。
     """
     stats = getattr(request.app.state, "compress_stats", None)
-    return (stats if stats is not None else COMPRESS_STATS).as_dict()
+    return (stats if stats is not None else COMPRESS_STATS).as_dict(
+        since=since, until=until)

@@ -19,14 +19,24 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..engine.compress import compress_messages, estimate_messages
 from ..engine.prefix_debug import PrefixDebugTracker
 from ..engine.sticky_trim import StickyTrimmer, conversation_key
 from ..engine.tool_output import compress_tool_outputs
+from ..persistence.compress_buckets import (
+    COUNTER_FIELDS,
+    HOUR_SECONDS,
+    PERSIST_INTERVAL_SECONDS,
+    RETENTION_DAYS,
+    VERSION,
+    load_buckets,
+    save_buckets,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +52,21 @@ class CompressStats:
     """压缩收益的进程内计数器（随 `/metrics` 输出 `coding2api_compress_*`）。
 
     为什么只存进程内：收益是「这次部署开没开、开了省多少」的运维判断，不是
-    需要长期回溯的账单；落库会引入新表与保留期清理。重启归零与 Prometheus
-    的 counter reset 语义相容。
+    需要长期回溯的账单；落库会引入新表与保留期清理。默认实例的语义与
+    Prometheus counter reset 相容；装配侧给 `persist_path` 后按小时桶落盘
+    续接（见 `persistence/compress_buckets.py`）。
 
     `unchanged` 是「调用过压缩、但载荷逐字节没动」的次数——它才是「开关开着
     却毫无收益」的证据；只看 `triggers` 会把「读了开关但没命中」也算成收益。
+
+    上方标量是**终身累计**（`/metrics` 的 counter 口径，不随小时桶裁剪倒退）；
+    `buckets` 是**按小时分桶**的同名计数，供统计页按所选时间窗求和——否则
+    面板的「省下 token」永远是「自本次启动以来」，与同屏按窗口计算的缓存
+    命中率口径错位。
+
+    `persist_path` 非空时按 `persist_interval` 节流写盘、启动经 `load()` 读回：
+    重启不再丢整段历史。落盘是可选的**续接**手段，纯内存实例（测试/单次装配）
+    语义不变。
     """
 
     triggers: int = 0            # 压缩实际改写了载荷的次数（tool + 上下文合计）
@@ -54,16 +74,98 @@ class CompressStats:
     context_trims: int = 0       # 其中由上下文裁剪触发的
     chars_saved: int = 0         # 省下的字符数（压缩前后 content 长度差）
     unchanged: int = 0           # 调用了压缩但载荷未变的次数
+    #: hour_utc（桶起点秒）→ 同名字段计数。超过保留期的桶在写入时丢弃。
+    buckets: dict[int, dict[str, int]] = field(default_factory=dict)
+    #: 时钟可注入：测试按整点定位桶，不必 sleep。
+    clock: Callable[[], float] = time.time
+    #: 上次裁剪到的小时（同一小时内不重复扫描；不参与比较/展示）。
+    _pruned_hour: int | None = field(default=None, repr=False, compare=False)
+    #: 落盘快照路径；None = 纯内存（测试与单次装配默认）。
+    persist_path: str | None = None
+    #: 两次落盘的最小间隔（秒）：长会话里压缩每轮都触发，逐次写盘不划算。
+    persist_interval: float = PERSIST_INTERVAL_SECONDS
+    #: 上次成功落盘的时钟；None = 本次启动还没写过。
+    _last_persist_at: float | None = field(default=None, repr=False, compare=False)
+    #: 是否有未落盘的变化：关机补写与失败重试都靠它。
+    _dirty: bool = field(default=False, repr=False, compare=False)
 
-    def as_dict(self) -> dict[str, Any]:
+    @classmethod
+    def load(cls, path: str, *,
+             clock: Callable[[], float] = time.time) -> CompressStats:
+        """从落盘快照恢复小时桶与终身累计；缺失/损坏时回到全新计数器。"""
+        buckets, lifetime = load_buckets(path, now=clock())
+        stats = cls(clock=clock, persist_path=path, **lifetime)
+        stats.buckets = buckets
+        return stats
+
+    def as_dict(self, *, since: int | None = None,
+                until: int | None = None) -> dict[str, Any]:
+        """快照；给 `since`/`until` 就只汇总落在该窗口内的小时桶。
+
+        窗口两端与 `usage_hourly.hour_utc` 的过滤同口径（整点对齐、闭下界
+        开上界 `[since, until)`）：这样「省下的 token」与同屏的缓存命中率
+        覆盖同一批小时。两端都不给 → 终身累计（「全部」与 `/metrics`）。
+        """
+        if since is None and until is None:
+            values = {name: getattr(self, name) for name in COUNTER_FIELDS}
+        else:
+            values = dict.fromkeys(COUNTER_FIELDS, 0)
+            for hour, bucket in self.buckets.items():
+                if since is not None and hour < since:
+                    continue
+                if until is not None and hour >= until:
+                    continue
+                for name in COUNTER_FIELDS:
+                    values[name] += bucket[name]
         return {
-            "triggers": self.triggers,
-            "tool_triggers": self.tool_triggers,
-            "context_trims": self.context_trims,
-            "chars_saved": self.chars_saved,
-            "tokens_saved": self.tokens_saved,
-            "unchanged": self.unchanged,
+            **values,
+            "tokens_saved": int(values["chars_saved"] * _TOKENS_PER_CHAR),
         }
+
+    def _bump(self, **deltas: int) -> None:
+        """把增量同时累加到终身标量与当前小时桶，并按需裁剪过期桶。"""
+        hour = int(self.clock() // HOUR_SECONDS) * HOUR_SECONDS
+        bucket = self.buckets.setdefault(hour, dict.fromkeys(COUNTER_FIELDS, 0))
+        for name, delta in deltas.items():
+            setattr(self, name, getattr(self, name) + delta)
+            bucket[name] += delta
+        if self._pruned_hour != hour:
+            # 只在跨小时时扫一次：一条长会话里压缩是逐轮调用的常态，
+            # 每次请求都遍历全部桶是纯浪费。
+            self._pruned_hour = hour
+            cutoff = hour - RETENTION_DAYS * 24 * HOUR_SECONDS
+            for key in [key for key in self.buckets if key < cutoff]:
+                del self.buckets[key]
+        self._dirty = True
+        self._maybe_persist()
+
+    def _payload(self) -> dict[str, Any]:
+        """落盘载荷：终身累计与小时桶分开存，加载时只有桶会按保留期裁剪。"""
+        return {
+            "version": VERSION,
+            "saved_at": self.clock(),
+            "lifetime": {name: getattr(self, name) for name in COUNTER_FIELDS},
+            "buckets": {str(hour): dict(bucket)
+                        for hour, bucket in self.buckets.items()},
+        }
+
+    def _maybe_persist(self) -> None:
+        """节流落盘：首次变化立即写，之后至少隔 `persist_interval` 秒。"""
+        if self.persist_path is None:
+            return
+        moment = self.clock()
+        if (self._last_persist_at is not None
+                and moment - self._last_persist_at < self.persist_interval):
+            return
+        self.flush()
+
+    def flush(self) -> None:
+        """无条件补写未落盘的变化（关机 / 节流窗口外）；无变化时是空操作。"""
+        if self.persist_path is None or not self._dirty:
+            return
+        if save_buckets(self.persist_path, self._payload()):
+            self._dirty = False
+            self._last_persist_at = self.clock()
 
     @property
     def tokens_saved(self) -> int:
@@ -178,8 +280,7 @@ def build_context_compressor(
                     logger.debug(
                         "tool 输出压缩 provider=%s model=%s messages=%d 字符 %d→%d",
                         provider_id, model, len(messages), before, after)
-                    counters.triggers += 1
-                    counters.tool_triggers += 1
+                    counters._bump(triggers=1, tool_triggers=1)
                     triggered = True
                     payload = {**payload, "messages": squashed}
         window = (context_window_for(cache, aliases, provider_id, model)
@@ -206,8 +307,7 @@ def build_context_compressor(
                 trimmed = compressed is not messages
                 sticky_reason = "off"
             if compressed is not messages:
-                counters.triggers += 1
-                counters.context_trims += 1
+                counters._bump(triggers=1, context_trims=1)
                 triggered = True
                 # 每次裁剪都会让前缀边界前移一条消息 ⇒ 上游前缀缓存只剩
                 # system 段。命中率异常时先看这里：同一条流连续多轮都在裁，
@@ -226,13 +326,13 @@ def build_context_compressor(
         if triggered:
             # 收益按「整份 messages 的字符串 content 长度差」记：tool 压缩与
             # 上下文裁剪可能叠加，逐段相加会把被裁掉的消息重复扣一次。
-            counters.chars_saved += max(
-                original_chars - _string_content_chars(payload.get("messages")), 0)
+            counters._bump(chars_saved=max(
+                original_chars - _string_content_chars(payload.get("messages")), 0))
         else:
             # 开关开着但载荷没动（未超阈值 / 未知模型没有窗口）：这是「开了
             # 却没收益」的证据，与 `triggers` 分开记，面板才能区分「省了」与
             # 「白开」。未启用的情况上面已早退，不会进这里。
-            counters.unchanged += 1
+            counters._bump(unchanged=1)
         return payload
     return compress
 
