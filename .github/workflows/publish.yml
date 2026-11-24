@@ -68,7 +68,7 @@ jobs:
         with:
           ref: ${{ steps.meta.outputs.tag }}
 
-      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2  # v10.3.3
+      - uses: astral-sh/setup-uv@1db35dd8eee11c5894872e0b383ae6c406cf738d  # v10.4.0
         if: steps.meta.outputs.tag != 'skip'
 
       # tag 与 pyproject.toml 的 project.version 必须一致，否则镜像 tag 会与
