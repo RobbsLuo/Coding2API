@@ -72,7 +72,7 @@ docker compose up -d --build
 docker compose exec coding2api python scripts/create_user.py admin --role admin
 ```
 
-Pull the image: `docker compose pull` (or `docker pull ghcr.io/robbsluo/coding2api:v0.14.2`). Pushing a `v*` tag to main runs `.github/workflows/publish.yml` → publishes `<tag>` + `:latest`. For https on a VPS with a public IP see "[Public deployment](#public-deployment-docker--caddy-automatic-https)".
+Pull the image: `docker compose pull` (or `docker pull ghcr.io/robbsluo/coding2api:v0.14.3`). Pushing a `v*` tag to main runs `.github/workflows/publish.yml` → publishes `<tag>` + `:latest`. For https on a VPS with a public IP see "[Public deployment](#public-deployment-docker--caddy-automatic-https)".
 
 ## Users and roles
 

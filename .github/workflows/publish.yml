@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '要打的版本号（如 v0.14.2，留空则跳过）'
+        description: '要打的版本号（如 v0.14.3，留空则跳过）'
         required: false
         default: ''
 
@@ -43,13 +43,13 @@ jobs:
             exit 0
           fi
           # 只接受语义版本 vX.Y.Z：白名单式校验顺带堵住注入（含空格、分号、
-          # 换行的输入一律不合法），也拦住 v0.14 / 0.14.2 这类会打出畸形镜像
+          # 换行的输入一律不合法），也拦住 v0.14 / 0.14.3 这类会打出畸形镜像
           # tag 的写法。
           # 用 bash 的 `[[ =~ ]]` 而不是 `grep -E`：grep 逐行匹配，多行输入
           # （"v1.2.3\n恶意命令"）的第一行就能命中、整体放行；bash 正则对
           # 整个字符串做锚定匹配，$ 后面多一个换行也判不合法。
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::tag 格式非法: $TAG（应为 vX.Y.Z，例如 v0.14.2）"
+            echo "::error::tag 格式非法: $TAG（应为 vX.Y.Z，例如 v0.14.3）"
             exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
@@ -59,8 +59,8 @@ jobs:
         run: echo "skip publish"
 
       # ref 必须显式指到该 tag：workflow_dispatch 默认检出**所选分支的 HEAD**，
-      # 于是「在 main 上点一下、输入 v0.14.2」就能把 main 上尚未发布的 commit
-      # 打成 v0.14.2 并覆盖 :latest，绕过 tag 本身指向的代码。
+      # 于是「在 main 上点一下、输入 v0.14.3」就能把 main 上尚未发布的 commit
+      # 打成 v0.14.3 并覆盖 :latest，绕过 tag 本身指向的代码。
       # push 触发时 github.ref_name 就是标签名，带 ref 同样正确（切到 tag 指向
       # 的 commit）。
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
