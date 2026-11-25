@@ -263,11 +263,8 @@ async def _refresh_provider(services: Services, provider_id: str, provider: Any)
         # **不该让整页模型列表 500**（实测 2026-10-26 14:48：一条坏凭证
         # 连累所有渠道）。按「本次拉取失败」处理：保留旧缓存、记负缓存
         # （避免每次请求都重试同一个坏凭证），其余上游照常。
-        logger.error("模型列表获取失败 %s: 凭证解密失败（APP_SECRET 是否被更换过？）",
-                     provider_id)
-        services.model_list_failures[provider_id] = (
-            services.model_list_failures.get(provider_id, 0) + 1)
-        services.model_list_fetched_at[provider_id] = time.monotonic()
+        _note_failure(services, provider_id, "凭证解密失败（APP_SECRET 是否被更换过？）",
+                      has_cache=bool(services.model_list_cache.get(provider_id)))
         return
     try:
         models = await provider.list_models(credential_data)
@@ -276,20 +273,56 @@ async def _refresh_provider(services: Services, provider_id: str, provider: Any)
         # 连续失败按 `_needs_refresh` 的退避拉长下一次尝试；日志只在**首次**
         # 失败打 WARNING，其后降 INFO——长期封禁下同样内容的 WARNING 刷屏
         # 只会淹没真问题，连续次数仍留在消息里供排查。
-        failures = services.model_list_failures.get(provider_id, 0) + 1
-        services.model_list_failures[provider_id] = failures
-        services.model_list_fetched_at[provider_id] = time.monotonic()
-        log = logger.warning if failures == 1 else logger.info
-        if services.model_list_cache.get(provider_id):
-            log("模型列表获取失败 %s（连续 %d 次），使用上次缓存: %s",
-                provider_id, failures, error)
-        else:
-            log("模型列表获取失败 %s（连续 %d 次）: %s", provider_id, failures, error)
+        _note_failure(services, provider_id, str(error),
+                      has_cache=bool(services.model_list_cache.get(provider_id)))
         return
-    services.model_list_failures.pop(provider_id, None)
+    # 渠道自己能拉、但本次回的是**静态兜底表**（TRAE / CodeBuddy 在内部吞异常
+    # 后照常返回）：按失败记账并标记降级，否则管理台与 `/metrics` 看不到
+    # 「这个渠道一直没拿到动态模型」（issue #56 第三条）。
+    degraded, reason = _model_list_source(provider)
+    if degraded:
+        _note_failure(services, provider_id, reason, has_cache=False)
+    else:
+        services.model_list_failures.pop(provider_id, None)
+        services.model_list_failure_reason.pop(provider_id, None)
+    services.model_list_degraded[provider_id] = degraded
     services.model_list_cache[provider_id] = {model.id.lower(): model for model in models}
     services.model_list_fetched_at[provider_id] = time.monotonic()
     await _persist_catalog(services)
+
+
+def _model_list_source(provider: Any) -> tuple[bool, str]:
+    """provider 申报的表来源；未实现该方法 = 本次就是上游真值（不降级）。
+
+    可选协议而非必选：只有自带静态兜底表的渠道需要申报，其余渠道的
+    `list_models` 抛错即失败，服务层本来就看得见。
+    """
+    probe = getattr(provider, "model_list_source", None)
+    if probe is None:
+        return False, ""
+    degraded, reason = probe()
+    return bool(degraded), str(reason or "")
+
+
+def _note_failure(services: Services, provider_id: str, reason: str, *,
+                  has_cache: bool) -> None:
+    """记一次模型列表失败：连续次数 + 原因 + 降级标记 + 分级日志。
+
+    降级标记与失败计数分开维护：计数会被退避拉长，标记回答的是「现在对外展示
+    的表是不是上游真值」——provider 回了静态兜底表、或本次抛错后沿用旧缓存，
+    两者都算降级（用户看到的都可能缺少上游新模型）。
+    """
+    failures = services.model_list_failures.get(provider_id, 0) + 1
+    services.model_list_failures[provider_id] = failures
+    services.model_list_failure_reason[provider_id] = reason
+    services.model_list_degraded[provider_id] = True
+    services.model_list_fetched_at[provider_id] = time.monotonic()
+    log = logger.warning if failures == 1 else logger.info
+    if has_cache:
+        log("模型列表获取失败 %s（连续 %d 次），使用上次缓存: %s",
+            provider_id, failures, reason)
+    else:
+        log("模型列表获取失败 %s（连续 %d 次）: %s", provider_id, failures, reason)
 
 
 async def _persist_catalog(services: Services) -> None:

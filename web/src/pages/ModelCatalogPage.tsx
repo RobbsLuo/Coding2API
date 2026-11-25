@@ -15,7 +15,12 @@ import {
   useProbeModel,
   useSetProbeManual,
 } from "../api/modelExtrasHooks";
-import { probeStateLabel, type ModelCatalogRow, type ModelProbeRow } from "../api/modelExtras";
+import {
+  probeStateLabel,
+  type ModelCatalogRow,
+  type ModelListDegraded,
+  type ModelProbeRow,
+} from "../api/modelExtras";
 import {
   formatAgo,
   formatCompact,
@@ -183,6 +188,7 @@ function AvailabilityCell({
  */
 function ProbePanel({
   rows,
+  degraded,
   loading,
   error,
   busy,
@@ -190,6 +196,7 @@ function ProbePanel({
   onManual,
 }: {
   rows: ModelProbeRow[];
+  degraded: ModelListDegraded[];
   loading: boolean;
   error: boolean;
   busy: boolean;
@@ -205,6 +212,23 @@ function ProbePanel({
         限流 / 网络一律「无法判定」，不禁用。判死即从模型列表摘掉且没有到期时间，
         复探成功是唯一恢复入口。
       </p>
+      {degraded.length > 0 && (
+        <div className="mt-2 space-y-1" data-testid="model-list-degraded">
+          <Notice tone="warn">
+            以下渠道的动态模型拉取一直失败，当前列表用的是**内置静态表**（可能缺少
+            上游新模型）：
+          </Notice>
+          <ul className="text-xs text-muted-foreground">
+            {degraded.map((item) => (
+              <li key={item.provider} className="break-all">
+                <span className="font-mono">{item.provider}</span>
+                {item.failures > 0 && ` · 连续 ${item.failures} 次`}
+                {item.reason && ` · ${item.reason}`}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {error ? (
         <div data-testid="model-probe-error">
           <Notice tone="danger">探活记录加载失败，请刷新重试。</Notice>
@@ -532,6 +556,7 @@ export function ModelCatalogPage() {
 
       <ProbePanel
         rows={probes.data?.rows ?? []}
+        degraded={probes.data?.degraded ?? []}
         loading={probes.isLoading}
         error={probes.isError}
         busy={probeNow.isPending || probeManual.isPending}

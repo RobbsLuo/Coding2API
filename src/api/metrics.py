@@ -69,14 +69,15 @@ def render_metrics(
     inflight: int | None = None,
     compress: dict[str, int] | None = None,
     stats_write_failures: int | None = None,
+    model_list_degraded: list[str] | None = None,
 ) -> str:
     """把各数据源的聚合结果渲染成 Prometheus text 格式（纯函数）。
 
     每个指标家族输出 `# HELP` + `# TYPE` + 样本行；样本次序由调用方保证稳定
     （数据源查询已排序），这里不再重排，保持输出可复现。
 
-    `latency` / `inflight` / `compress` 为后加的可选输入：缺省时不输出对应
-    家族（旧调用方与测试逐字节不变）。
+    `latency` / `inflight` / `compress` / `model_list_degraded` 为后加的可选
+    输入：缺省时不输出对应家族（旧调用方与测试逐字节不变）。
     """
     lines: list[str] = []
 
@@ -135,6 +136,18 @@ def render_metrics(
     lines.append(f"# TYPE {PREFIX}task_failures_total counter")
     for task, count in task_failures:
         lines.append(_sample(f"{PREFIX}task_failures_total", [("task", task)], count))
+
+    if model_list_degraded is not None:
+        # 「渠道模型表来自静态兜底」是**看得见**的静默故障：provider 内部把
+        # 动态拉取失败转成静态表并照常返回，只靠日志（还会被退避压成 INFO）
+        # 时，管理台完全看不出这个渠道一直没拿到上游真值（issue #56）。
+        lines.append(f"# HELP {PREFIX}model_list_degraded 当前模型表来自静态兜底"
+                     "（非上游真值）的渠道，1=降级。")
+        lines.append(f"# TYPE {PREFIX}model_list_degraded gauge")
+        degraded = set(model_list_degraded)
+        for provider in sorted(degraded):
+            lines.append(_sample(f"{PREFIX}model_list_degraded",
+                                 [("provider", provider)], 1))
 
     if stats_write_failures is not None:
         # 统计写入失败是**看得见**的静默故障：`record()` 把异常吞掉以免拖垮
@@ -263,6 +276,10 @@ def create_router(services: Services) -> APIRouter:
             # 统计写失败：`record()` 吞异常是刻意的（不能拖垮聊天响应），
             # 所以这条必须出进程，否则「用量丢了」只在日志里留一行 WARNING。
             stats_write_failures=stats.write_failures(),
+            # 模型表降级的渠道：静态兜底在 provider 内部是「正常返回」，
+            # 不出这个 gauge 时外部完全看不到（issue #56 第三条）。
+            model_list_degraded=sorted(
+                pid for pid, flag in services.model_list_degraded.items() if flag),
         )
         return Response(content=text, headers={"Content-Type": CONTENT_TYPE})
 

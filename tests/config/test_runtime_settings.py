@@ -645,3 +645,28 @@ def test_kilo_pacer_is_independent_and_disabled_by_default(admin_app):
     assert kilo.min_seconds == 3 and kilo.max_seconds == 3  # 热更不烘焙
     assert cb.min_seconds == 5                              # 改 kilo 不影响 CB/TRAE
     assert registry["zen"].pacer.disabled is True           # 也不影响 zen
+
+
+# ------------------------------------------------ TRAE 账号身份（issue #56）
+
+def test_base_settings_trae_identities_parses_numbers():
+    """默认 `0`（免费档）；留空 = 不过滤（None）。"""
+    assert _base().trae_identities == frozenset({0})
+    assert _base(TRAE_ACCOUNT_IDENTITIES="").trae_identities is None
+    assert _base(TRAE_ACCOUNT_IDENTITIES="0,1,2,3,5").trae_identities == \
+        frozenset({0, 1, 2, 3, 5})
+
+
+def test_base_settings_trae_identities_tolerates_typos():
+    """手写逗号串的笔误不该让整条渠道的清单拉取失败；全非法等价于没配。"""
+    assert _base(TRAE_ACCOUNT_IDENTITIES="0, 1 , x").trae_identities == frozenset({0, 1})
+    assert _base(TRAE_ACCOUNT_IDENTITIES="免费").trae_identities is None
+
+
+def test_trae_identities_recomputed_from_effective_value(runtime):
+    """热更：改完身份下一次拉取即生效（不能缓存 env 值）。"""
+    assert runtime.trae_identities == frozenset({0})
+    runtime.set("trae_account_identities", "0, 2")
+    assert runtime.trae_identities == frozenset({0, 2})
+    runtime.reset("trae_account_identities")
+    assert runtime.trae_identities == frozenset({0})

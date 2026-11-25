@@ -186,7 +186,10 @@ def zen_models_offline(monkeypatch, request):
     if "zen" not in real:
         from src.provider.zen.client import ZenClient
 
-        async def fake_zen_models(self) -> list[_Model]:
+        # 签名必须与 `ZenClient.fetch_models(api_key="")` 一致：少一个参数时
+        # `ZenProvider.list_models` 调用会 TypeError，被服务层记成「拉取失败」
+        # 而静默跳过 zen——测试里曾经一直是这样（实测 2026-11-25）。
+        async def fake_zen_models(self, _api_key: str = "") -> list[_Model]:
             return [_Model(id="offline-free", name="opencode")]
 
         monkeypatch.setattr(ZenClient, "fetch_models", fake_zen_models)

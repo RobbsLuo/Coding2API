@@ -88,6 +88,12 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "fnmatch glob，逗号分隔；只影响 /v1/models 与 Playground 列表，"
                "直连指定不受影响。留空表示不过滤。",
                group="model_routing"),
+    HotSetting("trae_account_identities", str, "TRAE 账号身份",
+               "本账号拥有的访问身份编号（逗号分隔，`0`=免费档，`1/2/3/5/100` 为"
+               "付费会员/团队/内部档）。上游按身份授权模型：白名单不含本账号身份的"
+               "模型选中必回 1005，故拉取时直接过滤。默认 `0`；留空 = 不按身份过滤"
+               "（上游给什么就展示什么）。开通会员后填 `0,1,2,3,5` 即可放出会员模型。",
+               group="model_routing"),
     HotSetting("context_compress_enabled", bool, "上下文压缩",
                "按模型目录里的输入上限裁剪过长对话，避免撞上游硬限制"
                "（CodeBuddy 11115 prompt is too long）。目录里查不到上限的模型"
@@ -795,6 +801,21 @@ class RuntimeSettings:
     @property
     def model_blocklist(self) -> str:
         return str(self.get("model_blocklist"))
+
+    @property
+    def trae_account_identities(self) -> str:
+        return str(self.get("trae_account_identities"))
+
+    @property
+    def trae_identities(self):
+        """TRAE 身份集合：与 `Settings.trae_identities` 同口径，但基于生效值重算。
+
+        不能委托 `Settings` 的 `cached_property`（那会把 env 值永久缓存，管理台
+        改完身份，模型列表仍按旧身份过滤）。
+        """
+        from .config import parse_identity_set
+
+        return parse_identity_set(self.trae_account_identities)
 
     @property
     def model_fallback_groups(self) -> str:

@@ -553,6 +553,32 @@ describe("ModelCatalogPage（模型列表）", () => {
     expect(never).toHaveTextContent("未探过");
   });
 
+  it("模型表降级：静态兜底渠道在探活面板上方列原因与连续失败次数", async () => {
+    // provider 内部把动态拉取失败转成静态表是「正常返回」，不展示这段时
+    // 用户只看到「模型少了几个」，查不到原因（issue #56）。
+    stubProbePage({
+      ...PROBES,
+      degraded: [{ provider: "trae", reason: "response body exceeds 8388608 bytes",
+                   failures: 4 }],
+    });
+    renderPage(<ModelCatalogPage />);
+    await settle();
+
+    const notice = screen.getByTestId("model-list-degraded");
+    expect(notice).toHaveTextContent("内置静态表");
+    expect(notice).toHaveTextContent("trae");
+    expect(notice).toHaveTextContent("连续 4 次");
+    expect(notice).toHaveTextContent("response body exceeds 8388608 bytes");
+  });
+
+  it("模型表降级：没有降级渠道时不渲染提示块", async () => {
+    stubProbePage();
+    renderPage(<ModelCatalogPage />);
+    await settle();
+
+    expect(screen.queryByTestId("model-list-degraded")).toBeNull();
+  });
+
   it("探活面板：错误摘要限宽单行截断，hover 看全文", async () => {
     stubProbePage();
     renderPage(<ModelCatalogPage />);

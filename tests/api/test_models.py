@@ -855,3 +855,160 @@ def test_models_accepts_anthropic_style_x_api_key(tmp_path):
     assert "glm-5.3" in {item["id"] for item in listing.json()["data"]}
     assert detail.status_code == 200
     assert rejected.status_code == 401
+
+
+def test_models_refresh_notes_static_fallback_as_degraded(tmp_path):
+    """渠道自报「本次回的是静态表」→ 记失败 + 降级标记，不能当成功。
+
+    TRAE / CodeBuddy 会在 provider 内部把动态拉取失败转成静态表并**照常返回**，
+    服务层原先以为拉取成功：管理台看不到渠道一直降级，`/metrics` 也没有信号
+    （issue #56 第三条）。
+    """
+    import asyncio
+
+    from src.api.models import _refresh_provider
+
+    class Degraded:
+        id = "trae"
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            return [Model(id="Doubao-Seed-2.1-Pro")]
+
+        def model_list_source(self):
+            return True, "response body from /api/ide/v1/get_detail_param exceeds 8388608 bytes"
+
+        def import_credential(self, raw):  # pragma: no cover - 本用例不调用
+            return raw
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+    app = build_app(settings, providers={"trae": Degraded()})
+    services = app.state.services
+
+    asyncio.run(_refresh_provider(services, "trae", Degraded()))
+    assert services.model_list_degraded["trae"] is True
+    assert services.model_list_failures["trae"] == 1
+    assert "exceeds 8388608" in services.model_list_failure_reason["trae"]
+    # 静态表照常进缓存：兜底语义不变，只是**如实标记**来源
+    assert "doubao-seed-2.1-pro" in services.model_list_cache["trae"]
+
+
+def test_models_refresh_clears_degraded_flag_on_real_upstream_data(tmp_path):
+    """下一次拿到上游真值即清除降级标记与原因（恢复要能被看见）。"""
+    import asyncio
+
+    from src.api.models import _refresh_provider
+
+    class Healthy:
+        id = "trae"
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            return [Model(id="glm-5.3")]
+
+        def model_list_source(self):
+            return False, ""
+
+        def import_credential(self, raw):  # pragma: no cover - 本用例不调用
+            return raw
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+    app = build_app(settings, providers={"trae": Healthy()})
+    services = app.state.services
+    services.model_list_degraded["trae"] = True
+    services.model_list_failures["trae"] = 3
+    services.model_list_failure_reason["trae"] = "old error"
+
+    asyncio.run(_refresh_provider(services, "trae", Healthy()))
+    assert services.model_list_degraded["trae"] is False
+    assert "trae" not in services.model_list_failures
+    assert "trae" not in services.model_list_failure_reason
+    assert set(services.model_list_cache["trae"]) == {"glm-5.3"}
+
+
+def test_models_refresh_without_source_hook_is_not_degraded(tmp_path):
+    """没有 `model_list_source` 的渠道（多数）按上游真值处理，行为不变。"""
+    import asyncio
+
+    from src.api.models import _refresh_provider
+
+    class Plain:
+        id = "kilo"
+
+        async def list_models(self, _data):
+            from src.provider.base import Model
+
+            return [Model(id="kilo-free")]
+
+        def import_credential(self, raw):  # pragma: no cover - 本用例不调用
+            return raw
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+    app = build_app(settings, providers={"kilo": Plain()})
+    services = app.state.services
+
+    asyncio.run(_refresh_provider(services, "kilo", Plain()))
+    assert services.model_list_degraded["kilo"] is False
+    assert "kilo" not in services.model_list_failures
+
+
+def test_models_refresh_keeps_old_cache_and_marks_degraded(tmp_path):
+    """本次抛错但沿用旧缓存：同样算降级（用户看到的可能缺少上游新模型）。"""
+    import asyncio
+
+    from src.api.models import _refresh_provider
+    from src.provider.base import Model
+
+    class Broken:
+        id = "trae"
+
+        async def list_models(self, _data):
+            raise RuntimeError("upstream down")
+
+        def import_credential(self, raw):  # pragma: no cover - 本用例不调用
+            return raw
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+    app = build_app(settings, providers={"trae": Broken()})
+    services = app.state.services
+    services.model_list_cache["trae"] = {"glm-5.3": Model(id="glm-5.3")}
+
+    asyncio.run(_refresh_provider(services, "trae", Broken()))
+    assert services.model_list_degraded["trae"] is True
+    assert "upstream down" in services.model_list_failure_reason["trae"]
+    # 旧缓存不被清空（兜底语义不变）
+    assert set(services.model_list_cache["trae"]) == {"glm-5.3"}
+
+
+def test_models_refresh_decrypt_failure_records_reason(tmp_path):
+    """凭证解密失败也要留下原因（原先只有一条 ERROR 日志，看板看不到）。"""
+    import asyncio
+
+    from src.api.models import _refresh_provider
+    from src.db.crypto import CredentialCipher
+
+    settings = Settings(_env_file=None, APP_SECRET=SECRET, DATA_DIR=str(tmp_path))
+
+    class Trae:
+        id = "trae"
+
+        async def list_models(self, _data):  # pragma: no cover - 解密先失败
+            raise AssertionError("不应打上游")
+
+        def import_credential(self, raw):
+            return raw
+
+    app = build_app(settings, providers={"trae": Trae()})
+    services = app.state.services
+    credential_id = services.credentials.add(provider="trae",
+                                             credential_data={"accessToken": "a"})
+    other = CredentialCipher("a-completely-different-secret")
+    db = services.credentials._db
+    db.connect().execute("UPDATE credentials SET data_enc = ? WHERE id = ?",
+                         (other.encrypt(b'{"accessToken": "a"}'), credential_id))
+
+    asyncio.run(_refresh_provider(services, "trae", Trae()))
+    assert services.model_list_failures["trae"] == 1
+    assert "凭证解密失败" in services.model_list_failure_reason["trae"]

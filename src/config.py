@@ -220,6 +220,15 @@ class Settings(BaseSettings):
     # 默认模型：六条渠道都已上架 `deepseek-v4.1-flash`（CB / TRAE / CodeArts /
     # codebuddy_intl 同名，Qoder 走别名 `dfmodel`），故默认值取它而不是老模型
     default_model: str = "deepseek-v4.1-flash"
+    # TRAE 本账号拥有的访问身份（逗号分隔；`0` = 免费档，`1/2/3/5/100` 是各档
+    # 付费会员 / 团队 / 内部身份）。上游 `get_detail_param` 的每个模型带
+    # `display_contact_config.access.data.identity_list`：白名单不含 `0` 的模型
+    # 对免费账号一律回 1005（权益不足）——出现在列表里比看不到更糟，用户选中必失败。
+    # 因此按本值过滤：留空 = **不做身份过滤**（上游给什么就展示什么，老行为）；
+    # 默认 `0` = 免费档口径。开通会员后改成 `0,1,2,3,5` 即可把会员模型放出来。
+    # 只在 TRAE 渠道内生效——身份是渠道内属性，不能写进全局 MODEL_BLOCKLIST
+    # （同名模型在别的渠道可能正常可用，issue #56）。
+    trae_account_identities: str = "0"
     # token 预刷新的提前量（小时）：距 access token 到期 ≤ 该值就提前换新。
     # 注意它对**短寿命渠道**会被自行封顶（CodeArts STS 只有 2h，见
     # `CodeArtsCredential.refresh_skew_cap_seconds`），所以调大它不会让短寿命
@@ -438,8 +447,8 @@ class Settings(BaseSettings):
     #      kimi-k3（→ kimi-k3.1-pro）、minimax-m2.5/m2.7/m3（→ m3.1-flash）、
     #      deepseek-v3-* / deepseek-v4-*（→ v4.1-flash）、qwen3.7-* / qwen3-* /
     #      qwen3.6*（→ qwen3.8-max）、gpt-5.4/5.5/5.6*（→ gpt-6-sol / 6.1-sol）、
-    #      hy3* / hy4-preview / hunyuan-*、seed-2.1* / seed-code-pro-* /
-    #      seed-evolving（豆包整族已停售，无后继）、qwen3-vl-235b。
+    #      hy3* / hy4-preview / hunyuan-*、seed-code-pro-*（TRAE 内部代号）、
+    #      qwen3-vl-235b。
     #   3. 已下架的免费池与开源小模型：space-bunny（Kilo 已退役）、
     #      nemotron-3* / lfm2* / laguna* / north-mini-code / inkling-small /
     #      xing4.0-29b-a4 / glyph-cluster（Kilo 两次 121s 后 408）/
@@ -453,6 +462,11 @@ class Settings(BaseSettings):
     #   openpangu-2.0-* / gpt-6-* / grok-4.7 / gemini-3.8-flash（在售）。
     #   `qwen3.8-flash`（Qoder qfmodel）2026-10-27 实测 chat 成功（63→117 token），
     #   原先按「400 Execution failed」滤掉的判断已失效，故移出黑名单。
+    #   豆包 Seed 2.1 族（`Seed-2.1-Pro-0915` / `Seed-2.1-Turbo` /
+    #   `Seed-Evolving`）2026-11-24 实测仍是客户端主推的在售模型，原先的
+    #   「整族已停售」判断已失效，故移出黑名单（issue #56）。内部代号
+    #   `seed-code-pro-*` / `Doubao-Seed-2.0-Code` 改由上游
+    #   `is_invisible_to_user` 过滤，不再靠这里兜。
     model_blocklist: str = (
         # ① 内部 / 代理模型与自动路由占位
         "custom_model_*,*sub*agent*,summary,browser_use_*,file_search_agent,"
@@ -463,8 +477,7 @@ class Settings(BaseSettings):
         "minimax-m2.5,minimax-m2.7,minimax-m3,deepseek-v3-*,deepseek-v4-*,"
         "qwen3.7-*,qwen3-*,qwen3.6*,qwen3-vl-235b,"
         "gpt-5.4,gpt-5.5,gpt-5.6*,hy3*,hy4-preview,hunyuan-*,"
-        "seed-2.1*,seed-2-1-turbo,doubao-seed-2.1-turbo,seed-code-pro-*,"
-        "seed-evolving,"
+        "seed-code-pro-*,"
         # ③ 已下架的免费池 / 开源小模型
         "space-bunny,nemotron-3-*,nemotron-3*,lfm2*,laguna*,north-mini-code,"
         "inkling-small,xing4.0-29b-a4,glyph-cluster,openrouter-models-router,"
@@ -701,6 +714,11 @@ class Settings(BaseSettings):
     def blocklist_patterns(self) -> tuple[str, ...]:
         return tuple(p.strip() for p in self.model_blocklist.split(",") if p.strip())
 
+    @cached_property
+    def trae_identities(self) -> frozenset[int] | None:
+        """TRAE 本账号身份集合；留空 = None（不做身份过滤，老行为）。"""
+        return parse_identity_set(self.trae_account_identities)
+
     def is_admin(self, username: str) -> bool:
         return username in self.admin_set
 
@@ -716,6 +734,18 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     if env is None:
         return Settings()  # type: ignore[call-arg]
     return Settings(_env_file=None, **env)  # type: ignore[call-arg]
+
+
+def parse_identity_set(text: str) -> frozenset[int] | None:
+    """身份白名单配置 → 集合；空串 / 全是非法项 = None（不做身份过滤）。
+
+    非整数项静默丢弃而不是报错：这是运维手写的逗号串，一个笔误（`0, 1,2`、
+    `0、1`）不该让整条渠道的模型列表拉取失败。全非法（等价于没配）按「不过滤」
+    处理，与留空同口径——宁可多展示几个模型，也不要静默清空清单。
+    """
+    parsed = {int(chunk) for chunk in (part.strip() for part in text.split(","))
+              if chunk.lstrip("+-").isdigit()}
+    return frozenset(parsed) if parsed else None
 
 
 def validate_endpoint_allowed(endpoint: str, settings: Settings) -> bool:

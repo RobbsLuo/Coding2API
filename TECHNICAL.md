@@ -130,7 +130,8 @@ UNKNOWN = None; EXHAUSTED = -1   # 0-100 已知；None 未知；-1 已耗尽
 ### 3.6 模型元数据与黑名单
 
 - 元数据：`name` / `context_length` / 上下文窗口 / `supported_parameters` / `architecture.input_modalities` / 价格倍率；CB、TRAE 各自映射。
-- 黑名单 `MODEL_BLOCKLIST`（fnmatch glob，只影响展示）：内部 / 代理模型、被取代的老模型、已下架免费池与小模型、测试号与日期快照代号；在售主力刻意不加。
+- 黑名单 `MODEL_BLOCKLIST`（fnmatch glob，只影响展示）：内部 / 代理模型、被取代的老模型、已下架免费池与小模型、测试号与日期快照代号；在售主力刻意不加。**渠道内部的可见性 / 身份门槛不走黑名单**（黑名单是全局且可热更的，会误伤别的渠道的同名模型）：TRAE 按上游 `is_invisible_to_user` 与 `display_contact_config.access.data.identity_list` 在 `fetch_models` 里过滤，本账号身份由 `TRAE_ACCOUNT_IDENTITIES` 配置（默认 `0` 免费档，留空 = 不过滤）。
+- 静态兜底要**申报来源**：TRAE / CodeBuddy 动态拉取失败时回退内置静态表并照常返回，服务层据此记失败 + `coding2api_model_list_degraded{provider}` + `/api/models/probes` 的 `degraded`，否则「渠道一直没拿到上游真值」只能靠翻日志发现。
 - 自定义别名 `MODEL_ALIASES`（热更）：`对外名=模型@渠道;对外名2=模型`；解析宽容，注入期判撞名 / 目标不存在 → 该段 ERROR 跳过；无别名链。
 
 ### 3.7 Responses 出口（Codex CLI）
@@ -230,7 +231,7 @@ class Provider(Protocol):
 ```
 
 - 与 `src/provider/base.py` 严格一致；凭证以 dict 传递（解密后的 `data_enc`），provider 不接触 sqlite。
-- 可选能力**不实现即不定义**：调用方 `getattr` 探测，缺失 → 400「该凭证不支持此操作」。当前可选集：`start_auth`/`poll_auth`、`complete_callback`（仅 TRAE）、`list_accounts`/`switch_account`（仅 CB）、`credential_from`/`checkin_scope`、`checkin`/`checkin_status`、`growth`（仅 CB）、`host`。
+- **可选能力不实现即不定义**：调用方 `getattr` 探测，缺失 → 400「该凭证不支持此操作」。当前可选集：`start_auth`/`poll_auth`、`complete_callback`（仅 TRAE）、`list_accounts`/`switch_account`（仅 CB）、`credential_from`/`checkin_scope`、`checkin`/`checkin_status`、`growth`（仅 CB）、`host`、`model_list_source`（自带静态兜底表的渠道申报「本次是否降级 + 原因」）。
 - CodeBuddy / TRAE / Zen / Kilo / Qoder / OfficeAce 共用 `engine/sse.py`；CodeArts 自实现 `iter_data_lines`，只复用 `MAX_SSE_LINE_BYTES` / `SSEFrameTooLarge`。
 
 ## 5. 各渠道协议实现
@@ -324,6 +325,7 @@ WPS 账号 cookie + 一次对话三条请求。凭据接受整段 Cookie / 裸 `
 ### 5.10 TRAE SOLO（`trae`）
 
 - Host：Agent `https://trae-api-cn.mchost.guru`、UG `https://api.trae.cn`、OAuth `https://api.trae.com.cn`；聊天 `POST /api/agent/v3/llm_utils_chat`、模型 `POST /api/ide/v1/get_detail_param`，均仅流式。`apiHost` 用户可控 → 导入按白名单校验。
+- 模型清单：`get_detail_param` 的响应体是**正常业务数据**（实测 54 条 / 535,796 字节、无 `content-length`），成功路径上限独立为 `MODELS_BODY_LIMIT`（8MB），不复用错误体的 `BOUNDED_BODY_LIMIT`（256KB，否则动态拉取恒失败并静默回退静态表）。拉取时按上游权威字段过滤：`is_invisible_to_user is True`（内部模型）+ `identity_list` 不含本账号身份（会员模型，选中必回 1005）。静态兜底表只收客户端可见模型，且沿用上次的过滤结论。
 - 认证：浏览器登录 → 302 回调 → `ExchangeToken` → `GetUserInfo`；刷新 `POST /cloudide/api/v3/trae/oauth/ExchangeToken`（refreshToken 轮换）。签到 `/trae/api/v2/ug/checkin_credits/{status,claim}`；额度 `/trae/api/v2/pay/ide_user_ent_usage`。签到须确认到账：`claim` 对当天已签也回 `code:0` → `checked_in` 为真且回查 `credits` 有增加；`9074` 每次换 16 位数字串，一轮最多重试 2 次。
 - SSE 序列 `metadata` → `timing_cost` → `output`×N → `extra_info` → `token_usage` → `done`；`cache_read_input_tokens` / `cache_creation_input_tokens` → `cached_tokens`，无 per-request credit。流内 `1005` 权益不足、`4008` 配额耗尽（CREDIT，冷却到次日签到）、`4001` 参数 / 模型不可用；`developer` 归一 system。
 

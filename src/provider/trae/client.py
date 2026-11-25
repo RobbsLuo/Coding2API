@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import math
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -67,19 +68,35 @@ CHECKIN_ATTEMPTS = 2
 # 经代理链路 10s 会稳定超时；首字等待由 read=None +
 # stream_first_event_timeout_seconds 负责，两者不要混为一谈。
 
+logger = logging.getLogger(__name__)
 
-# SOLO 静态模型表（继承 trae2api-web；动态拉取失败时回退）
+
+# `get_detail_param` 成功路径的 body 上限：**独立于错误体的 256KB**。
+# 该端点一次返回全部模型配置（2026-11-24 实测 54 条 / 535,796 字节，且不带
+# `content-length`、分块传输），是正常业务数据而不是诊断用的错误信封。复用
+# `base.BOUNDED_BODY_LIMIT` 会让动态模型拉取 100% 失败并静默回退静态表
+# （issue #56）。8MB 仍是有界的：模型数翻十倍也够，同时挡住被控上游灌内存。
+MODELS_BODY_LIMIT = 8 * 1024 * 1024
+
+# SOLO 静态模型表（动态拉取失败时回退）。
+#
+# **只收客户端可见的模型**（上游 `is_invisible_to_user=false`，2026-11-24 实测）。
+# 回退表是「上游拿不到时至少还能用」的兜底，收进内部模型（`*_subagent`、
+# `summary`、`custom_model_*` 槽位、已隐藏的旧型号）等于把内部代号暴露给客户端，
+# 而且是靠可热更的黑名单兜——用户精简黑名单（默认值误杀太多真实模型时很常见）
+# 就会漏出去。可见性由上游权威字段判定（见 `fetch_models`），静态表跟它对齐。
 STATIC_MODELS: tuple[str, ...] = (
-    "Doubao-Seed-2.1-Pro", "seed-code-pro-0430", "Doubao-Seed-2.1-Turbo",
-    "Doubao-Seed-2.0-Code", "DeepSeek-V4-Flash-Official", "browser_use_subagent",
-    "glm-5.2", "glm-5-turbo", "glm-5", "DeepSeek-V4-Pro", "DeepSeek-V4-Flash",
-    "kimi-k3", "kimi-k2.7-code", "kimi-k2.6", "minimax-m3", "qwen-3.7-plus",
-    "sagitta", "aquila", "custom_model_gemini", "custom_model_placeholder",
-    "custom_model_1M_text", "custom_model_1M", "custom_model_kimi",
-    "custom_model_claude", "custom_model_gpt-5", "custom_model_no-fc",
-    "custom_model_deepseek_chat", "custom_model_deepseek_reasoner",
-    "custom_model_deepseek_v4", "explore_sub_agent_v13", "explore_sub_agent_v2",
-    "summary",
+    # 豆包（Seed 2.1 族在售）
+    "Doubao-Seed-2.1-Pro", "Doubao-Seed-2.1-Turbo", "Doubao-Seed-Evolving",
+    # 智谱
+    "glm-5.4", "glm-5.3", "glm-5.3-flash", "glm-5.3-flashx",
+    # DeepSeek
+    "deepseek-v4.1-flash", "DeepSeek-V4-Pro-Official",
+    # Kimi
+    "kimi-k3.1-pro", "kimi-k3.1-pro-highspeed", "kimi-k3",
+    # 小米 / MiniMax / StepFun / Qwen
+    "mimo-v2.6-flash", "mimo-v2.6-pro", "minimax-m3.1-flash", "minimax-m3",
+    "step-5-preview", "qwen4-max", "qwen3.8-max",
 )
 
 
@@ -353,7 +370,27 @@ class TraeClient(LazyClients):
 
     # ---------------------------------------------------------- 短请求接口
 
-    async def fetch_models(self, credential: TraeCredential) -> list[Model]:
+    async def fetch_models(self, credential: TraeCredential,
+                           *, identities: frozenset[int] | None = None,
+                           excluded: set[str] | None = None) -> list[Model]:
+        """拉取模型清单，按上游权威字段过滤**客户端看不到 / 本账号用不了**的条目。
+
+        两道过滤都基于上游字段，不依赖命名约定（黑名单是用户可热更的，且它
+        是**全局**的——用它兜内部模型会误伤其他渠道的同名模型）：
+
+        1. `is_invisible_to_user is True`：内部模型（`*_subagent` / `summary` /
+           `custom_model_*` 槽位 / 已隐藏的旧型号），Trae 客户端根本不展示。
+        2. `display_contact_config.access.data.identity_list` 不含本账号拥有的
+           身份：免费档（`0`）看不到会员模型，选中必回 1005。`identities=None`
+           表示不按身份过滤（老调用方 / 不做身份判定的场景）。
+
+        `excluded` 是**输出参数**：被过滤掉的 config_name（小写）会写进去。
+        调用方（`TraeProvider.list_models`）用它把静态兜底表里同样的条目也摘掉
+        ——否则「动态拉取成功但该模型被身份过滤」时，静态骨架又把它补回来，
+        客户端照样看到一个一调用就 1005 的模型。
+
+        过滤后为空仍抛协议违规：那说明上游形状变了，回退静态表比返回空表好。
+        """
         body = {
             "function": FUNCTION, "config_names": None, "need_prompt": False,
             "current_config_info": None, "poly_prompt": True,
@@ -361,19 +398,41 @@ class TraeClient(LazyClients):
         }
         data = await self._post_json(
             f"{self.agent_host}{EP_MODELS}", body, solo_headers(credential, stream=False),
+            limit=MODELS_BODY_LIMIT,
         )
         configs = data.get("config_info_list")
         if not isinstance(configs, list):
             raise UpstreamProtocolViolation("models response missing config_info_list")
-        models = [self._to_model(c) for c in configs
-                  if isinstance(c, dict) and c.get("config_name")]
-        models = [m for m in models if m is not None]
+        hidden: list[str] = []
+        unavailable: list[str] = []
+        models: list[Model] = []
+        for config in configs:
+            if not isinstance(config, dict) or not config.get("config_name"):
+                continue
+            name = str(config["config_name"])
+            if config.get("is_invisible_to_user") is True:
+                hidden.append(name)
+                continue
+            if identities is not None:
+                allowed = _identity_list(config)
+                if allowed and not (allowed & identities):
+                    unavailable.append(name)
+                    continue
+            models.append(self._to_model(config))
+        if excluded is not None:
+            excluded.update(name.lower() for name in hidden + unavailable)
+        if hidden or unavailable:
+            logger.info(
+                "TRAE 模型清单过滤：隐藏 %d 条（is_invisible_to_user），"
+                "本账号身份无权 %d 条（identity_list）: %s",
+                len(hidden), len(unavailable),
+                ",".join(unavailable) or "-")
         if not models:
             raise UpstreamProtocolViolation("models api returned empty list")
         return models
 
     @staticmethod
-    def _to_model(config: dict) -> Model | None:
+    def _to_model(config: dict) -> Model:
         """config 条目 → Model：解析消耗倍率与上下文窗口（缺失留空）。
 
         倍率在 display_contact_config（JSON 字符串）里：
@@ -513,13 +572,20 @@ class TraeClient(LazyClients):
         return str(result.get("UserID") or ""), str(result.get("ScreenName") or "")
 
     async def _post_json(self, url: str, body: dict[str, Any],
-                         headers: dict[str, str]) -> dict[str, Any]:
+                         headers: dict[str, str], *,
+                         limit: int = base.BOUNDED_BODY_LIMIT) -> dict[str, Any]:
+        """短请求 → JSON。成功路径同样有界（被控上游回超大 body 不能撑爆内存）。
+
+        `limit` 默认沿用错误体那档 256KB：绝大多数短接口（refresh / quota /
+        checkin / userinfo）的响应只有几百字节，用小上限是对的。**模型清单
+        例外**——它一次返回全部配置（实测 535KB，且不带 content-length），
+        必须由调用点传 `MODELS_BODY_LIMIT`，否则动态拉取恒失败（issue #56）。
+        """
         response = await self._short.post(url, json=body, headers=headers)
-        # 成功路径同样有界：被控上游回超大 body 不能把整段读进内存。
         data = await json_or_raise(
             response, UpstreamHTTPError, url,
             public="upstream returned a non-JSON response",
-            limit=base.BOUNDED_BODY_LIMIT)
+            limit=limit)
         if not isinstance(data, dict):
             raise UpstreamProtocolViolation(
                 f"unexpected response shape from {url}",
@@ -567,6 +633,42 @@ def _positive_int(value: Any) -> int | None:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         return None
     return value
+
+
+def _identity_list(config: dict[str, Any]) -> frozenset[int]:
+    """上游给该模型配置的访问身份白名单（空集 = 未声明，不过滤）。
+
+    `display_contact_config` 是 **JSON 字符串**（不是 dict），需要二次解析；
+    里面 `access.data.identity_list` 是身份编号数组：`0` 免费档，`1/2/3/5/100`
+    是各档付费会员 / 团队 / 内部身份。白名单不含 `0` 的模型对免费账号一律回
+    1005（权益不足），选中必失败——比看不到更糟，故在拉取时按本账号身份过滤。
+
+    任何一层形状不符都返回空集（**不过滤**）：宁可按老行为全部展示，也不要
+    因为上游加字段/改结构把整个清单误滤空。
+    """
+    contact = config.get("display_contact_config")
+    if isinstance(contact, str) and contact:
+        try:
+            parsed = json.loads(contact)
+        except ValueError:
+            return frozenset()
+    elif isinstance(contact, dict):
+        parsed = contact
+    else:
+        return frozenset()
+    if not isinstance(parsed, dict):
+        return frozenset()
+    access = parsed.get("access")
+    if not isinstance(access, dict):
+        return frozenset()
+    data = access.get("data")
+    if not isinstance(data, dict):
+        return frozenset()
+    raw = data.get("identity_list")
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(item for item in raw
+                     if isinstance(item, int) and not isinstance(item, bool))
 
 
 def _pack_name(pack: dict[str, Any]) -> str:
@@ -630,6 +732,11 @@ class TraeProvider:
 
     client: TraeClient = field(default_factory=TraeClient)
     pacer: Any | None = None
+    # 本账号拥有的身份集合（`display_contact_config.access.data.identity_list`
+    # 里的编号，`0` = 免费档）。取值为 None 表示**不做身份过滤**——老调用方与
+    # 不关心身份的场景保持「上游给什么就展示什么」的行为。
+    # 传取值器而不是快照：这是热更项，改完下一次拉取立即生效。
+    identities: Callable[[], frozenset[int] | None] | None = None
 
     id: str = "trae"
 
@@ -639,6 +746,14 @@ class TraeProvider:
     _dynamic_models_blocked_until: float | None = field(default=None, init=False)
     # 上次成功动态拉取的元数据（lower 名 → 字段表），静态表兜底时填倍率不丢
     _last_dynamic_meta: dict[str, dict] = field(default_factory=dict, init=False)
+    # 上次成功拉取时被上游判为「隐藏 / 本账号无权」的模型（小写 config_name）。
+    # 与 `_last_dynamic_meta` 同生命周期：负缓存期间沿用上次结论，静态骨架不会
+    # 把它们补回来；改身份（会员开通）后下一次成功拉取即刷新。
+    _last_excluded: set[str] = field(default_factory=set, init=False)
+    # 上次动态拉取失败的原因（一行文本）；成功即清空。供 `model_list_source`
+    # 把「本次回的是静态表」申报给服务层（issue #56：provider 内部吞掉异常后，
+    # 服务层以为拉取成功，管理台完全看不出渠道一直在降级）。
+    _last_dynamic_error: str = field(default="", init=False)
 
     def import_credential(self, raw: dict) -> dict:
         credential = parse_credential(raw)
@@ -672,16 +787,29 @@ class TraeProvider:
         因此重名条目的 id 用静态表的实测大小写，但保留动态条目的
         倍率 / token 上限等元数据。动态拉取失败（负缓存期）时，
         静态表条目用上次成功动态拉取的元数据填充，倍率不丢。
+
+        动态结果已按 `is_invisible_to_user` 与本账号身份过滤过（见
+        `TraeClient.fetch_models`），静态表也只收可见模型，两边口径一致——
+        兜底不会把内部模型或会员专属模型漏给客户端。
         """
         by_lower: dict[str, Model] = {}
+        excluded: set[str] = set(self._last_excluded)
         credential = TraeCredential.from_dict(credential_data)
         blocked_until = self._dynamic_models_blocked_until
+        if not credential.access_token:
+            # 无 token 时压根打不了上游：如实申报降级，别让服务层以为这是真值
+            self._last_dynamic_error = "凭证缺少 accessToken，未拉取动态模型"
+            logger.warning("TRAE 凭证缺少 accessToken，模型列表直接使用静态表")
         if credential.access_token and (blocked_until is None
                                         or time.monotonic() >= blocked_until):
             try:
-                for model in await self.client.fetch_models(credential):
+                identities = self.identities() if self.identities is not None else None
+                for model in await self.client.fetch_models(
+                        credential, identities=identities, excluded=excluded):
                     by_lower.setdefault(model.id.lower(), model)
                 self._dynamic_models_blocked_until = None   # 成功即清除负缓存
+                self._last_dynamic_error = ""
+                self._last_excluded = excluded
                 self._last_dynamic_meta = {
                     lower: {"name": m.name, "credit_rate": m.credit_rate,
                             "max_input_tokens": m.max_input_tokens,
@@ -690,16 +818,19 @@ class TraeProvider:
                             "supports_tool_call": m.supports_tool_call}
                     for lower, m in by_lower.items()}
             except Exception as error:  # noqa: BLE001 - 回退不是静默：错误带上日志
-                import logging
-
                 self._dynamic_models_blocked_until = time.monotonic() + 300
-                logging.getLogger(__name__).warning(
+                self._last_dynamic_error = error_text(error)
+                logger.warning(
                     "TRAE 动态模型拉取失败，回退静态表 5 分钟: %s", error_text(error))
         # 静态表：重名时 id 用实测大小写，元数据优先取动态结果，
         # 其次取上次成功的动态拉取（负缓存期倍率不丢）
         merged: list[Model] = []
         for mid in STATIC_MODELS:
             lower = mid.lower()
+            if lower in excluded:
+                # 上游已明确把它标成隐藏 / 本账号无权：静态骨架不能再把它补回来
+                # （否则「修好动态拉取」反而多出几个一调用就 1005 的模型）
+                continue
             existing = by_lower.get(lower)
             if existing is not None:
                 merged.append(Model(id=mid, name=existing.name,
@@ -729,6 +860,16 @@ class TraeProvider:
         async with paced(self.pacer, key):
             async for event in self.client.stream_chat(credential, payload, model):
                 yield event
+
+    def model_list_source(self) -> tuple[bool, str]:
+        """最近一次 `list_models` 的表来源：`(是否静态兜底, 失败原因)`。
+
+        服务层用它在「拉取成功」时识别降级（issue #56 第三条）：TRAE 在内部把
+        动态拉取失败转成静态表并照常返回，服务层否则会把这次当成功，管理台与
+        `/metrics` 都看不出渠道一直在降级。
+        """
+        error = self._last_dynamic_error
+        return (bool(error), error)
 
     async def refresh(self, credential_data: dict) -> dict:
         refreshed = await self.client.refresh_token(TraeCredential.from_dict(credential_data))

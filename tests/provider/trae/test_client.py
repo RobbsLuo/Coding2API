@@ -194,6 +194,108 @@ async def test_fetch_models_rejects_bad_shapes(payload):
     with pytest.raises(trae_events.UpstreamProtocolViolation):
         await _client(handler).fetch_models(TraeCredential(access_token="a"))
 
+async def test_fetch_models_accepts_body_far_above_error_body_limit(caplog):
+    """模型清单是**正常业务数据**，不该被错误体那档 256KB 卡住（issue #56）。
+
+    实测上游 54 条 config / 535,796 字节且不带 `content-length`；原先复用
+    `BOUNDED_BODY_LIMIT` 让动态拉取 100% 失败、静默回退静态表。
+    """
+    configs = [{"config_name": f"m{i}"} for i in range(20)]
+    # 用填充字段把 body 撑到 256KB 以上（真实上游是 54 条富配置）
+    configs[0]["blob"] = "x" * (base.BOUNDED_BODY_LIMIT + 1024)
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"config_info_list": configs})
+
+    models = await _client(handler).fetch_models(TraeCredential(access_token="a"))
+    assert len(models) == 20
+
+async def test_fetch_models_rejects_body_above_models_limit():
+    """放宽到 `MODELS_BODY_LIMIT` 仍是有界的：超过它就按协议违规早失败。"""
+    from src.provider.trae.client import MODELS_BODY_LIMIT
+
+    def huge(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=b'{"blob": "' + b"x" * MODELS_BODY_LIMIT + b'"}')
+
+    with pytest.raises(trae_events.UpstreamProtocolViolation) as caught:
+        await _client(huge).fetch_models(TraeCredential(access_token="a"))
+    assert "oversized" in caught.value.public_message
+
+async def test_fetch_models_filters_invisible_and_unavailable():
+    """按上游权威字段过滤：内部模型 + 本账号身份无权的会员模型。
+
+    `is_invisible_to_user` 是客户端是否展示的权威位；`identity_list` 决定该
+    模型对哪些身份开放（不含 `0` 的免费账号必回 1005）。两者都不该靠黑名单兜
+    ——黑名单是全局且用户可热更的（issue #56 追加）。
+    """
+    def contact(identities):
+        return json.dumps({"access": {"data": {"identity_list": identities}}})
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"config_info_list": [
+            {"config_name": "glm-5.4"},
+            # 内部模型：客户端不展示
+            {"config_name": "computer_use_subagent", "is_invisible_to_user": True},
+            # 免费档不可用：白名单不含 0
+            {"config_name": "kimi-k3.1-pro", "display_contact_config": contact([1, 2, 3, 100])},
+            # 白名单含 0：免费档可用
+            {"config_name": "glm-5.3", "display_contact_config": contact([0, 5, 1])},
+            # 未声明身份：不过滤（形状缺失按老行为）
+            {"config_name": "qwen3.8-max", "display_contact_config": ""},
+        ]})
+
+    excluded: set[str] = set()
+    models = await _client(handler).fetch_models(
+        TraeCredential(access_token="a"), identities=frozenset({0}),
+        excluded=excluded)
+    assert [m.id for m in models] == ["glm-5.4", "glm-5.3", "qwen3.8-max"]
+    assert excluded == {"computer_use_subagent", "kimi-k3.1-pro"}
+
+async def test_fetch_models_identity_filter_passes_when_account_has_identity():
+    """会员账号（身份含 1/2/3）看到会员模型：过滤只看交集，不写死免费档。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"config_info_list": [
+            {"config_name": "kimi-k3.1-pro",
+             "display_contact_config": json.dumps(
+                 {"access": {"data": {"identity_list": [1, 2, 3, 100]}}})},
+        ]})
+
+    models = await _client(handler).fetch_models(
+        TraeCredential(access_token="a"), identities=frozenset({0, 2}))
+    assert [m.id for m in models] == ["kimi-k3.1-pro"]
+
+async def test_fetch_models_without_identity_filter_keeps_everything():
+    """不传 identities（老调用方）= 不做身份过滤，只滤内部模型。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"config_info_list": [
+            {"config_name": "kimi-k3.1-pro",
+             "display_contact_config": json.dumps(
+                 {"access": {"data": {"identity_list": [1, 2, 3]}}})},
+        ]})
+
+    models = await _client(handler).fetch_models(TraeCredential(access_token="a"))
+    assert [m.id for m in models] == ["kimi-k3.1-pro"]
+
+@pytest.mark.parametrize("contact", [
+    None, 123, "{bad json", json.dumps([]),
+    json.dumps({"access": "no"}), json.dumps({"access": {"data": "no"}}),
+    json.dumps({"access": {"data": {"identity_list": "no"}}}),
+    json.dumps({"access": {"data": {"identity_list": ["0", True, None]}}}),
+])
+async def test_identity_list_malformed_shapes_do_not_filter(contact):
+    """任何一层形状不符都返回空集（不过滤）：宁可多展示，也别把清单误滤空。"""
+    from src.provider.trae.client import _identity_list
+
+    assert _identity_list({"display_contact_config": contact}) == frozenset()
+
+def test_identity_list_accepts_dict_contact_and_drops_non_int():
+    """`display_contact_config` 在个别回包里是 dict 而非 JSON 字符串，也要认。"""
+    from src.provider.trae.client import _identity_list
+
+    assert _identity_list({"display_contact_config": {
+        "access": {"data": {"identity_list": [0, True, "1", 5]}}}}) == frozenset({0, 5})
+
 async def test_fetch_quota_skips_zero_and_bad_packs():
     def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"user_entitlement_pack_list": [
@@ -441,7 +543,7 @@ async def test_provider_model_success_clears_negative_cache():
         if calls["n"] == 1:
             return httpx.Response(500)
         return httpx.Response(200, json={"config_info_list": [
-            {"config_name": "glm-5.2",
+            {"config_name": "glm-5.3",
              "display_config": {"display_name": "GLM"}}]})
 
     provider = TraeProvider(client=_client(handler))
@@ -450,12 +552,62 @@ async def test_provider_model_success_clears_negative_cache():
     # 缓存过期后重试成功 → 清除负缓存
     provider._dynamic_models_blocked_until = 0
     models = await provider.list_models({"accessToken": "a", "uid": "u"})
-    assert any(m.id == "glm-5.2" for m in models)
+    assert any(m.id == "glm-5.3" for m in models)
     assert provider._dynamic_models_blocked_until is None
     # 负缓存已清除：再次调用重新拉取（成功路径）
     before = calls["n"]
     await provider.list_models({"accessToken": "a", "uid": "u"})
     assert calls["n"] == before + 1
+
+async def test_provider_static_fallback_skips_excluded_models():
+    """动态拉取成功但某模型被上游判为隐藏/无权 → 静态骨架不能再把它补回来。
+
+    否则「修好动态拉取」反而多出几个一调用就 1005 的模型（issue #56 追加）。
+    负缓存期间沿用上次结论：静态兜底同样干净。
+    """
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(200, json={"config_info_list": [
+                {"config_name": "kimi-k3.1-pro",  # 属于 STATIC_MODELS
+                 "display_contact_config": json.dumps(
+                     {"access": {"data": {"identity_list": [1, 2, 3]}}})},
+                {"config_name": "glm-5.3"},
+            ]})
+        return httpx.Response(500)
+
+    provider = TraeProvider(client=_client(handler), identities=lambda: frozenset({0}))
+    first = await provider.list_models({"accessToken": "a", "uid": "u"})
+    assert "kimi-k3.1-pro" not in [m.id for m in first]
+    assert "glm-5.3" in [m.id for m in first]
+    # 第二次失败（负缓存）：静态骨架同样不含被身份过滤掉的条目
+    provider._dynamic_models_blocked_until = 0
+    second = await provider.list_models({"accessToken": "a", "uid": "u"})
+    assert "kimi-k3.1-pro" not in [m.id for m in second]
+    assert calls["n"] == 2
+
+async def test_provider_identities_getter_is_read_per_fetch():
+    """身份是热更项：每次拉取现读取值器，开通会员后下一轮即放出会员模型。"""
+    identities = {"value": frozenset({0})}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"config_info_list": [
+            {"config_name": "kimi-k3.1-pro",
+             "display_contact_config": json.dumps(
+                 {"access": {"data": {"identity_list": [1, 2, 3]}}})},
+        ]})
+
+    provider = TraeProvider(client=_client(handler),
+                            identities=lambda: identities["value"])
+    first = await provider.list_models({"accessToken": "a", "uid": "u"})
+    assert "kimi-k3.1-pro" not in [m.id for m in first]
+    # 模拟管理台把身份改成会员档（热更）
+    identities["value"] = frozenset({0, 1, 2, 3})
+    provider._dynamic_models_blocked_until = 0
+    second = await provider.list_models({"accessToken": "a", "uid": "u"})
+    assert "kimi-k3.1-pro" in [m.id for m in second]
 
 async def test_provider_stream_and_refresh_via_client():
     def handler(_request: httpx.Request) -> httpx.Response:
@@ -567,7 +719,7 @@ async def test_client_stamps_metadata_model_hint_on_later_events():
 async def test_provider_model_failure_log_includes_type_when_message_empty(caplog):
     """裸 `TimeoutError` 消息为空 → 回退日志仍要带类名，不能只剩「: 」。"""
     class _Client:
-        async def fetch_models(self, _credential):
+        async def fetch_models(self, _credential, **_kwargs):
             raise TimeoutError()
 
     provider = TraeProvider(client=_Client())

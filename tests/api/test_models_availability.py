@@ -445,3 +445,35 @@ def test_manual_takeover_requires_target(tmp_path):
     with client:
         response = client.post(f"{PROBES}/manual", json={"manual": "on"})
     assert response.status_code == 400
+
+
+# ------------------------------------------------- 模型表降级（issue #56）
+
+def test_probes_expose_degraded_model_list(admin_client):
+    """静态兜底的渠道在探活面板透出原因与连续失败次数。
+
+    provider 内部把动态拉取失败转成静态表是「正常返回」，不在这里露出来，
+    用户只会看到「模型少了几个」却查不到原因。
+    """
+    app, client = admin_client
+    services = app.state.services
+    services.model_list_degraded["trae"] = True
+    services.model_list_degraded["kilo"] = False
+    services.model_list_failures["trae"] = 4
+    services.model_list_failure_reason["trae"] = "response body exceeds 8388608 bytes"
+
+    response = client.get("/api/models/probes")
+    assert response.status_code == 200, response.text
+    assert response.json()["degraded"] == [{
+        "provider": "trae",
+        "reason": "response body exceeds 8388608 bytes",
+        "failures": 4,
+    }]
+
+
+def test_probes_degraded_is_empty_without_static_fallback(admin_client):
+    """没有降级的渠道不出行（而不是出一串 `degraded=false`）。"""
+    _app, client = admin_client
+    response = client.get("/api/models/probes")
+    assert response.status_code == 200, response.text
+    assert response.json()["degraded"] == []

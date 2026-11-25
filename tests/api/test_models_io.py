@@ -44,6 +44,8 @@ def _services(tmp_path) -> SimpleNamespace:
         model_list_cache={},
         model_list_fetched_at={},
         model_list_failures={},
+        model_list_failure_reason={},
+        model_list_degraded={},
     )
 
 

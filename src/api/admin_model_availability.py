@@ -205,7 +205,17 @@ def create_router(services: Services) -> APIRouter:
         items = sorted(merged.values(), key=lambda item: (
             item["state"] != "failed", -int(item.get("until") or 0),
             item["provider"], item["model"]))
-        return {"rows": items}
+        # 模型表降级的渠道一并透出：静态兜底在 provider 内部是「正常返回」，
+        # 不在这里露出来，用户只会看到「模型列表少了几个」却查不到原因
+        # （issue #56：该渠道其实一直没拿到动态模型）。
+        degraded = [
+            {"provider": provider_id,
+             "reason": services.model_list_failure_reason.get(provider_id, ""),
+             "failures": services.model_list_failures.get(provider_id, 0)}
+            for provider_id, flag in sorted(services.model_list_degraded.items())
+            if flag
+        ]
+        return {"rows": items, "degraded": degraded}
 
     @router.post("/api/models/probes/probe")
     async def probe_model(payload: dict, request: Request,

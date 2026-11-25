@@ -147,6 +147,14 @@ class Services:
     # `MODEL_LIST_BACKOFF_MAX_SECONDS`），一次成功即清零。上游被长期封禁时
     # 避免每 5 分钟重探 + 刷一条同样内容的 WARNING。
     model_list_failures: dict[str, int] = field(default_factory=dict)
+    # 上次失败的原因摘要（provider_id → 一行文本），供管理台 / `/metrics` 显示
+    # 「这个渠道其实一直没拿到动态模型」。只留最近一次的失败文本：这里要回答
+    # 「为什么降级」，不是做历史归档（那在日志与 `log_events` 里）。
+    model_list_failure_reason: dict[str, str] = field(default_factory=dict)
+    # 该渠道当前的表是否**不是本次上游真值**（provider 回了静态兜底表 / 服务层
+    # 保留旧缓存）。与 `model_list_failures` 不同：失败计数会按退避拉长，这个
+    # 标记回答「现在对外展示的表可不可信」，`/metrics` 与看板都按它报警。
+    model_list_degraded: dict[str, bool] = field(default_factory=dict)
     # stale-while-revalidate：正在后台刷新的渠道（`_schedule_refresh` 去重用，
     # 同一渠道同一时刻只跑一个刷新任务）；任务句柄与 all-tasks 列表供 lifespan
     # 关闭时取消，避免把 in-flight 的上游请求带出事件循环。

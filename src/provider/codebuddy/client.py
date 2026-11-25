@@ -898,6 +898,10 @@ class CodeBuddyProvider:
 
     id: str = "codebuddy"
 
+    # 上次动态拉取失败的原因（一行文本）；成功即清空。供 `model_list_source`
+    # 把「本次回的是静态表」申报给服务层（与 TRAE 同口径）。
+    _last_dynamic_error: str = field(default="", init=False)
+
     def import_credential(self, raw: dict) -> dict:
         return parse_credential(raw, auth_source="manual").to_dict()
 
@@ -912,16 +916,25 @@ class CodeBuddyProvider:
         return await self.client.fetch_quota(CodeBuddyCredential.from_dict(credential_data))
 
     async def list_models(self, credential_data: dict) -> list[Model]:
-        """动态拉取上游模型；失败回退静态表（保证 Play grounds/客户端始终有列表）。"""
+        """动态拉取上游模型；失败回退静态表（保证 Playground/客户端始终有列表）。
+
+        回退走静态表时记下原因，`model_list_source` 会把它申报给服务层——否则
+        服务层以为拉取成功，管理台与 `/metrics` 看不出渠道一直在降级。
+        """
         try:
-            return await self.client.fetch_models(
+            models = await self.client.fetch_models(
                 CodeBuddyCredential.from_dict(credential_data))
         except Exception as error:  # noqa: BLE001 - 兜底不是静默：错误会带上抛路径
-            import logging
-
-            logging.getLogger(__name__).warning("动态模型拉取失败，回退静态表: %s",
-                                                error_text(error))
+            self._last_dynamic_error = error_text(error)
+            logger.warning("动态模型拉取失败，回退静态表: %s", error_text(error))
             return [Model(id=mid) for mid in DEFAULT_MODELS]
+        self._last_dynamic_error = ""
+        return models
+
+    def model_list_source(self) -> tuple[bool, str]:
+        """最近一次 `list_models` 的表来源：`(是否静态兜底, 失败原因)`。"""
+        error = self._last_dynamic_error
+        return (bool(error), error)
 
     async def stream_chat(self, credential_data: dict, payload: dict,
                           model: str) -> AsyncIterator[Event]:

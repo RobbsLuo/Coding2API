@@ -229,6 +229,20 @@ export interface ModelProbeRow {
 
 export interface ModelProbeResponse {
   rows: ModelProbeRow[];
+  /**
+   * 模型表当前来自**静态兜底**（非上游真值）的渠道。
+   *
+   * provider 内部把动态拉取失败转成静态表是「正常返回」，不出这段时页面只能
+   * 看到「模型少了几个」，查不到原因（issue #56）。
+   */
+  degraded: ModelListDegraded[];
+}
+
+/** 一个降级渠道：原因 + 连续失败次数（与 `/metrics` 的 gauge 同源）。 */
+export interface ModelListDegraded {
+  provider: string;
+  reason: string;
+  failures: number;
 }
 
 export interface ProbeResult {

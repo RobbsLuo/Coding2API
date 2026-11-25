@@ -419,3 +419,34 @@ def test_metrics_omits_stats_write_failures_when_not_provided():
     text = render_metrics(requests=[], tokens=[], credentials={},
                           errors=[], task_failures=[])
     assert "stats_write_failures" not in text
+
+
+# ------------------------------------------------- 模型表降级（issue #56）
+
+def test_render_metrics_model_list_degraded_is_opt_in():
+    """缺省不输出降级家族（旧调用方逐字节不变），给了才输出。"""
+    base = render_metrics(requests=[], tokens=[], credentials={}, errors=[],
+                          task_failures=[])
+    assert "coding2api_model_list_degraded" not in base
+
+    text = render_metrics(requests=[], tokens=[], credentials={}, errors=[],
+                          task_failures=[], model_list_degraded=["trae"])
+    samples = _samples(text)
+    assert samples['coding2api_model_list_degraded{provider="trae"}'] == "1"
+    assert "# TYPE coding2api_model_list_degraded gauge" in text
+
+
+def test_metrics_reports_degraded_channels_from_services(tmp_path):
+    """provider 把静态兜底当成功返回时，`/metrics` 仍要出这个 gauge。
+
+    这是该故障唯一能出进程的信号（日志会被退避压成 INFO）。
+    """
+    settings = isolated_settings(tmp_path)
+    app = build_app(settings)
+    app.state.services.model_list_degraded["trae"] = True
+    app.state.services.model_list_degraded["kilo"] = False
+    with TestClient(app, client=LOOPBACK) as client:
+        text = client.get("/metrics").text
+    samples = _samples(text)
+    assert samples.get('coding2api_model_list_degraded{provider="trae"}') == "1"
+    assert 'coding2api_model_list_degraded{provider="kilo"}' not in samples

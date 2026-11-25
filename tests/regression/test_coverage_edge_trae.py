@@ -232,12 +232,12 @@ def test_solo_headers_include_uid_when_present():
     assert "X-Uid" not in no_uid
 
 async def test_trae_dynamic_models_with_valid_credential():
-    """有 access_token → 动态拉取；失败回退静态（trae client 375-381）。"""
+    """有 access_token → 动态拉取；静态表骨架在前，动态独有条目附后。"""
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("get_detail_param"):
             return httpx.Response(200, json={"config_info_list": [
                 {"config_name": "DeepSeek-V4-Flash"},
-                {"config_name": "glm-5.2"},
+                {"config_name": "glm-5.3"},
             ]})
         return httpx.Response(200, json={})
 
@@ -246,7 +246,7 @@ async def test_trae_dynamic_models_with_valid_credential():
     provider = TraeProvider(client=_trae_client(handler))
     models = await provider.list_models({"accessToken": "a"})
     # 静态表为骨架（实测大小写），动态独有模型附后；重名不重复出现
-    assert [m.id for m in models] == list(STATIC_MODELS)
+    assert [m.id for m in models] == list(STATIC_MODELS) + ["DeepSeek-V4-Flash"]
 
 async def test_trae_list_models_merges_metadata_and_dedupes():
     """重名条目：id 用静态表实测大小写，元数据继承动态结果；
@@ -257,7 +257,7 @@ async def test_trae_list_models_merges_metadata_and_dedupes():
         calls["n"] += 1
         if calls["n"] == 1:
             return httpx.Response(200, json={"config_info_list": [
-                {"config_name": "glm-5.2",
+                {"config_name": "glm-5.3",
                  "display_contact_config": json.dumps({
                      "consumption_rate": {"enable": True, "data": {"rate": 0.78}}}),
                 "context_window_tokens": {"dev": 128000}},
@@ -271,15 +271,15 @@ async def test_trae_list_models_merges_metadata_and_dedupes():
     first = {m.id: m for m in await provider.list_models(
         {"accessToken": "a", "uid": "u"})}
     # 重名：id 用静态表实测大小写，倍率继承动态
-    assert first["glm-5.2"].credit_rate == 0.78
-    assert first["glm-5.2"].max_input_tokens == 128000
+    assert first["glm-5.3"].credit_rate == 0.78
+    assert first["glm-5.3"].max_input_tokens == 128000
     assert "New-Dynamic-Model" in first          # 动态独有附后
     # 第二次拉取失败（负缓存）：只剩静态表骨架，但重名模型的倍率不丢
     second_list = await provider.list_models({"accessToken": "a", "uid": "u"})
     assert len(second_list) == len(STATIC_MODELS)
     second = {m.id: m for m in second_list}
-    assert second["glm-5.2"].credit_rate == 0.78
-    assert second["glm-5.2"].max_input_tokens == 128000
+    assert second["glm-5.3"].credit_rate == 0.78
+    assert second["glm-5.3"].max_input_tokens == 128000
 
     def failing(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, content=b"down")

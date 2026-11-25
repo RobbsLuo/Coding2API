@@ -536,7 +536,9 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     set_proxy_pool(CredentialProxyPool(parse_proxy_pool(config.credential_proxy_pool)))
     registry = providers if providers is not None else {
         "trae": TraeProvider(
-            client=TraeClient(proxy=proxies.get("trae")), pacer=chat_pacer),
+            client=TraeClient(proxy=proxies.get("trae")), pacer=chat_pacer,
+            # 身份取热更值：会员开通后改配置即生效，不必重启（issue #56）
+            identities=lambda: runtime.trae_identities),
         "codebuddy": CodeBuddyProvider(
             client=CodeBuddyClient(
                 endpoint=_codebuddy_endpoint(config),
