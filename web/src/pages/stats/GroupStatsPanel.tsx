@@ -126,6 +126,17 @@ export function GroupStatsPanel(props: GroupStatsPanelProps) {
               // 点行 = 钻取到该维度的明细；分组键 → 明细过滤字段的映射：
               // provider/model/credential_id 直接同名，用户维度走作用域 username
               const keyValue = String(row[groupKey]);
+              // 命中率分母只含「上报过缓存」的请求（cached_input_tokens）；
+              // 老接口没有该字段时才回落到总输入。null 命中 = 未上报 → 显示 —。
+              const cacheRate = formatCacheRate(
+                row.cached_tokens,
+                row.cached_input_tokens ?? row.input_tokens,
+              );
+              const cachePartial =
+                row.cached_tokens !== null
+                && row.cached_input_tokens !== null
+                && row.cached_input_tokens !== undefined
+                && row.cached_input_tokens < row.input_tokens;
               const next: StatsDrill = group.value === "user"
                 ? { username: keyValue }
                 : group.value === "provider" ? { provider: keyValue }
@@ -196,11 +207,13 @@ export function GroupStatsPanel(props: GroupStatsPanelProps) {
                     `输入 ${formatCompact(row.input_tokens)}`
                     + ` · 输出 ${formatCompact(row.output_tokens)}`
                     + ` · 命中 ${formatCompact(row.cached_tokens)}`
+                    + (row.cached_tokens === null ? "（上游未上报缓存字段）" : "")
+                    + (cachePartial ? " · 命中率按已上报请求计算" : "")
                   }>
                     <span className="tabular-nums">
                       {formatCompact(row.input_tokens)} / {formatCompact(row.output_tokens)}
                       <span className="text-muted-foreground" data-testid="group-cache-rate">
-                        {" · "}{formatCacheRate(row.cached_tokens, row.input_tokens)}
+                        {" · "}{cacheRate}
                       </span>
                     </span>
                   </Tip>

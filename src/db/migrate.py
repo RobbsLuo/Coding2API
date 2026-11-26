@@ -108,7 +108,13 @@ SCHEMA_NAME = "schema.sql"
 # - `allowed_models`：账号级模型白名单（fnmatch glob，''=不限制，与 api_keys
 #   同语法）。请求模型不匹配时该凭证不参与**选号**（不硬禁用、不写冷却），
 #   后台任务（签到/刷新/探活）看不到这层过滤，故老库补 '' 后行为完全不变。
-SCHEMA_VERSION = 39
+# 40：usage_hourly 新增 cached_input_tokens（缓存命中率分母：只累加上报过
+# cached_tokens 的明细的 input_tokens）。NULL 语义：`usage_events.cached_tokens`
+# 为 NULL = 上游未上报（TRAE 2026-10-24 起），0 = 真实未命中；未上报的输入量
+# 不进分母，避免把全站命中率稀释。**迁移不做回填**：老库补 0，查询侧对
+# 「cached_input_tokens=0 且 cached_known>0」的历史小时回退用 input_tokens 兜底
+# （旧口径就是 input_tokens 作分母）；下次 rollup 会按明细精确重算。
+SCHEMA_VERSION = 40
 
 # (表, 列定义)：历史库升级时逐条补列
 _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
@@ -123,6 +129,10 @@ _MIGRATION_COLUMNS: tuple[tuple[str, str], ...] = (
     ("usage_hourly", "reasoning_tokens INTEGER NOT NULL DEFAULT 0"),
     ("usage_hourly", "cached_tokens INTEGER NOT NULL DEFAULT 0"),
     ("usage_hourly", "cached_known INTEGER NOT NULL DEFAULT 0"),
+    # 缓存命中率分母（只含上报过 cached_tokens 的明细输入量）。老库补 0 =
+    # 「未采集」，查询侧对 cached_known>0 的行回退用 input_tokens（见 query.py）；
+    # 不回填历史数据，下次 rollup 自然按明细重算。
+    ("usage_hourly", "cached_input_tokens INTEGER NOT NULL DEFAULT 0"),
     # 成长中心最近一次运行结果（列表页直接显示，不必再查 events 表）
     ("credentials", "growth_last_run_at INTEGER"),
     ("credentials", "growth_last_result TEXT"),

@@ -123,10 +123,13 @@ export function rowToneClass(row: UsageEventRow) {
  */
 export function tokenCell(row: UsageEventRow) {
   const rate = formatCacheRate(row.cached_tokens, row.input_tokens);
+  // 逐请求没有「已上报缓存的输入」这一列：本行要么上报（input_tokens 即分母），
+  // 要么没上报（cached_tokens 为 null）。未上报时说明 — 不是「0 命中」。
+  const cacheNote = row.cached_tokens === null ? "（上游未上报缓存字段）" : "";
   return (
     <Tip content={
       `输入 ${formatCompact(row.input_tokens)} · 输出 ${formatCompact(row.output_tokens)}`
-      + ` · 命中 ${formatCompact(row.cached_tokens)} · 命中率 ${rate}`
+      + ` · 命中 ${formatCompact(row.cached_tokens)} · 命中率 ${rate}${cacheNote}`
     }>
       <span className="tabular-nums">
         {formatCompact(row.input_tokens)} / {formatCompact(row.output_tokens)}

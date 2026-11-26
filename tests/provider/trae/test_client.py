@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 
 import httpx
@@ -11,8 +12,9 @@ import pytest
 from src.compat.openai.request import InvalidRequest, parse_chat_request
 from src.engine.model_resolver import UnknownModelError, resolve
 from src.provider import base
-from src.provider.base import ErrKind, Event, EventKind, Model
+from src.provider.base import ErrKind, Event, EventKind, Model, Usage
 from src.provider.trae import events as trae_events
+from src.provider.trae import pricing
 from src.provider.trae.client import (
     STATIC_MODELS,
     TraeClient,
@@ -689,6 +691,174 @@ async def test_client_stream_chat_fills_estimated_credit():
     usage = next(e.usage for e in events if e.kind is EventKind.USAGE)
     assert usage.credit is not None
     assert usage.credit_estimated is True
+
+
+# ------------------------------------------------ 缓存上报归一（TRAE 停止上报）
+
+class _Clock:
+    """可手动推进的注入时钟。"""
+
+    def __init__(self, at: float = 0.0) -> None:
+        self.at = at
+
+    def __call__(self) -> float:
+        return self.at
+
+
+def _cache_event(cached: object, input_tokens: object = 1000) -> Event:
+    return Event(kind=EventKind.USAGE, usage=Usage(
+        input_tokens=input_tokens, cached_tokens=cached))
+
+
+def _normalizing_client(ratio: float = 0.5, clock: _Clock | None = None) -> TraeClient:
+    return TraeClient(assumed_cache_ratio=lambda: ratio,
+                      now=clock or _Clock())
+
+
+def test_cache_reporting_positive_hit_keeps_real_value():
+    """上游报了 >0 → 真值保留，effective 同值，并记下命中时刻。"""
+    clock = _Clock(100.0)
+    client = _normalizing_client(clock=clock)
+    event = _cache_event(30)
+    client._normalize_cache_reporting(event)
+    assert event.usage.cached_tokens == 30
+    assert event.usage.cached_tokens_effective == 30
+    assert client._last_cache_hit_at == 100.0
+
+
+def test_cache_reporting_zero_within_fresh_window_is_real_zero():
+    """最近见过命中 → 随后的 0 当真正未命中，不推算。"""
+    clock = _Clock(100.0)
+    client = _normalizing_client(clock=clock)
+    client._normalize_cache_reporting(_cache_event(30))
+    clock.at += 60
+    event = _cache_event(0)
+    client._normalize_cache_reporting(event)
+    assert event.usage.cached_tokens == 0
+    assert event.usage.cached_tokens_effective == 0
+    assert client._cache_unreported_logged is False
+
+
+def test_cache_reporting_zero_after_stale_window_is_unreported():
+    """超出新鲜窗口的 0 → 视为未上报：落 NULL，按比例推算有效命中。"""
+    clock = _Clock(0.0)
+    client = _normalizing_client(clock=clock)
+    client._normalize_cache_reporting(_cache_event(30))
+    clock.at = TraeClient.CACHE_REPORT_STALE_SECONDS       # 恰好到期即失效
+    event = _cache_event(0)
+    client._normalize_cache_reporting(event)
+    assert event.usage.cached_tokens is None
+    assert event.usage.cached_tokens_effective == 500
+
+
+def test_cache_reporting_none_is_unreported():
+    """上游从未给该字段 → 未上报，按比例推算。"""
+    client = _normalizing_client()
+    event = _cache_event(None)
+    client._normalize_cache_reporting(event)
+    assert event.usage.cached_tokens is None
+    assert event.usage.cached_tokens_effective == 500
+
+
+def test_cache_reporting_bool_is_not_a_count():
+    """bool 不是有效 token 数（isinstance(True, int) 的陷阱）→ 按未上报处理。"""
+    client = _normalizing_client()
+    event = _cache_event(True)
+    client._normalize_cache_reporting(event)
+    assert event.usage.cached_tokens is None
+    assert event.usage.cached_tokens_effective == 500
+
+
+@pytest.mark.parametrize("ratio, effective", [
+    (0.0, None),          # 未配置假定比例：不推算
+    (-0.5, None),         # 非法负比例：不推算
+    (2.0, 1000),          # >1 钳到 1（全命中）
+])
+def test_cache_reporting_ratio_bounds(ratio, effective):
+    client = _normalizing_client(ratio=ratio)
+    event = _cache_event(None)
+    client._normalize_cache_reporting(event)
+    assert event.usage.cached_tokens is None
+    assert event.usage.cached_tokens_effective == effective
+
+
+@pytest.mark.parametrize("ratio", ["0.5", float("nan"), float("inf"), True])
+def test_cache_reporting_bad_ratio_config_is_inert(ratio, caplog):
+    """热更配置传进坏值（字符串/NaN/inf/bool）→ 不推算也不抛，日志可读。"""
+    client = _normalizing_client(ratio=ratio)
+    event = _cache_event(None)
+    with caplog.at_level(logging.INFO):
+        client._normalize_cache_reporting(event)
+    assert event.usage.cached_tokens is None
+    assert event.usage.cached_tokens_effective is None
+    message = next(r.getMessage() for r in caplog.records if "未上报" in r.getMessage())
+    assert repr(ratio) in message
+
+
+@pytest.mark.parametrize("input_tokens", [None, -1, True, "100"])
+def test_cache_reporting_non_int_input_has_no_estimate(input_tokens):
+    client = _normalizing_client()
+    event = _cache_event(None, input_tokens=input_tokens)
+    client._normalize_cache_reporting(event)
+    assert event.usage.cached_tokens is None
+    assert event.usage.cached_tokens_effective is None
+
+
+def test_cache_reporting_ignores_non_usage_events():
+    """非 USAGE / 无 usage 的事件不写任何字段。"""
+    client = _normalizing_client()
+    content = Event(kind=EventKind.CONTENT, content="hi")
+    client._normalize_cache_reporting(content)
+    assert content.usage is None
+
+    missing = Event(kind=EventKind.USAGE, usage=None)
+    client._normalize_cache_reporting(missing)
+    assert missing.usage is None
+
+    finish = Event(kind=EventKind.FINISH, usage=Usage(input_tokens=10, cached_tokens=0))
+    client._normalize_cache_reporting(finish)
+    assert finish.usage.cached_tokens == 0
+    assert finish.usage.cached_tokens_effective is None
+
+
+def test_cache_reporting_logs_once_and_recovers(caplog):
+    """进入未上报状态只打一条 INFO；恢复上报也打一条并重置标记。"""
+    client = _normalizing_client(ratio=0.5)
+    with caplog.at_level(logging.INFO):
+        client._normalize_cache_reporting(_cache_event(None))
+        client._normalize_cache_reporting(_cache_event(None))
+        unreported = [r for r in caplog.records if "未上报缓存命中" in r.getMessage()]
+        assert len(unreported) == 1
+        assert "0.50" in unreported[0].getMessage()
+        assert client._cache_unreported_logged is True
+
+        client._normalize_cache_reporting(_cache_event(42))
+        recovered = [r for r in caplog.records if "恢复上报缓存命中" in r.getMessage()]
+        assert len(recovered) == 1
+        assert client._cache_unreported_logged is False
+
+        # 再次中断：允许再报一次，而不是永久静音
+        client._normalize_cache_reporting(_cache_event(None))
+        unreported = [r for r in caplog.records if "未上报缓存命中" in r.getMessage()]
+        assert len(unreported) == 2
+
+
+async def test_stream_chat_estimates_cache_hits_when_unreported():
+    """端到端：上游 token_usage 不报缓存 → cached NULL + effective 按比例推算。"""
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=(
+            'event:token_usage\n'
+            'data:{"prompt_tokens":1000,"completion_tokens":10}\n\n'
+            'event:done\ndata:{"finish_reason":"stop"}\n\n'))
+
+    events = [e async for e in _client(handler, assumed_cache_ratio=lambda: 0.5)
+              .stream_chat(TraeCredential(access_token="a"), {"messages": []},
+                           "glm-5.2")]
+    usage = next(e.usage for e in events if e.kind is EventKind.USAGE)
+    assert usage.cached_tokens is None
+    assert usage.cached_tokens_effective == 500
+    assert usage.credit == pricing.estimate_credit(
+        "glm-5.2", input_tokens=1000, output_tokens=10, cached_tokens=500)
 
 
 async def test_client_stamps_metadata_model_hint_on_later_events():

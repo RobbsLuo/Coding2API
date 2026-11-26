@@ -76,6 +76,36 @@ def test_stats_rollup_preserves_estimated_known(stats):
     assert row["credit_estimated_known"] == 2
     assert row["credit_known"] == 3
 
+def test_stats_hourly_cache_denominator_counts_reported_input_only(stats):
+    """小时分母只累加上报过缓存的输入量；NULL（TRAE 未上报）不计入。
+
+    增量写入（`_bump_hourly`）与全量重算（`rollup_hourly`）必须给出同一结果。
+    """
+    collector, query = stats
+    now = int(time.time())
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     input_tokens=900, now=now)                     # 未上报（NULL）
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     input_tokens=100, cached_tokens=40, now=now)   # 上报命中
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     input_tokens=50, cached_tokens=0, now=now)     # 上报未命中
+
+    def hourly():
+        return query._db.connect().execute(
+            "SELECT input_tokens, cached_tokens, cached_known, cached_input_tokens"
+            " FROM usage_hourly").fetchone()
+
+    expected = (1050, 40, 2, 150)       # 分母 = 100 + 50，不含未上报的 900
+    row = hourly()
+    assert (row["input_tokens"], row["cached_tokens"], row["cached_known"],
+            row["cached_input_tokens"]) == expected
+    # rollup 重算路径与增量路径等价
+    collector.rollup_hourly()
+    row = hourly()
+    assert (row["input_tokens"], row["cached_tokens"], row["cached_known"],
+            row["cached_input_tokens"]) == expected
+
+
 def test_stats_normalizes_model_and_error_type(stats):
     collector, query = stats
     collector.record(username="u", provider="trae", model="x" * 100, ok=False,

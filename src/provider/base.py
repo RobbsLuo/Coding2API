@@ -747,6 +747,10 @@ class Usage:
     output_tokens: int | None = None
     reasoning_tokens: int | None = None
     cached_tokens: int | None = None   # 输入中命中缓存的 token（上游可选，缺省 None）
+    # 供**积分/成本估算**使用的有效命中数：上游不报缓存时由 provider 按假定
+    # 比例推算（如 TRAE）。只影响定价，不落 `usage_events.cached_tokens`
+    # ——报表仍显示上游真值/未上报。None = 用 cached_tokens。
+    cached_tokens_effective: int | None = None
     credit: float | None = None   # 上游可选字段，两边都经常为 None
     # credit 是否为本服务推算（TRAE 按官方单价折算）。
     # True 时展示层标 ≈；上游真给 credit 的渠道恒为 False。

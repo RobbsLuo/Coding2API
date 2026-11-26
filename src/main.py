@@ -148,6 +148,7 @@ from .stats.collector import StatsCollector
 from .stats.live import LiveEventHub
 from .stats.query import StatsQuery
 from .tasks.backup import BackupTask
+from .tasks.cache_ratio import CacheRatioTask
 from .tasks.model_probe import ModelProbeTask
 from .tasks.otlp_export import OtlpExportTask
 from .tasks.pacer import Pacer
@@ -536,7 +537,13 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     set_proxy_pool(CredentialProxyPool(parse_proxy_pool(config.credential_proxy_pool)))
     registry = providers if providers is not None else {
         "trae": TraeProvider(
-            client=TraeClient(proxy=proxies.get("trae")), pacer=chat_pacer,
+            client=TraeClient(proxy=proxies.get("trae"),
+                              # 上游不报缓存命中时按假定比例推算有效命中（只影响
+                              # 积分/成本估算，报表仍记 NULL）；取热更值，校准
+                              # 任务回写后下一帧即生效。
+                              assumed_cache_ratio=(
+                                  lambda: runtime.trae_assumed_cache_ratio)),
+            pacer=chat_pacer,
             # 身份取热更值：会员开通后改配置即生效，不必重启（issue #56）
             identities=lambda: runtime.trae_identities),
         "codebuddy": CodeBuddyProvider(
@@ -868,6 +875,7 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
                               backup=BackupTask(config.db_path,
                                                 keep=lambda: runtime.backup_keep),
                               upstream_status=upstream_status_task,
+                              cache_ratio=CacheRatioTask(db, runtime),
                               model_probe=model_probe_task,
                               model_probe_minutes=lambda: runtime.model_probe_minutes,
                               otlp_export=otlp_task,

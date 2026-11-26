@@ -229,6 +229,12 @@ class Settings(BaseSettings):
     # 只在 TRAE 渠道内生效——身份是渠道内属性，不能写进全局 MODEL_BLOCKLIST
     # （同名模型在别的渠道可能正常可用，issue #56）。
     trae_account_identities: str = "0"
+    # TRAE 假定缓存命中率（0..1）：上游自 2026-10 起不再上报缓存命中
+    # （`cache_read_input_tokens` 恒 0 / `prompt_cache_pool_record` 恒 null），
+    # 但计费仍按缓存折扣。未上报时用该比例推算有效命中，供积分 / 成本估算；
+    # 报表仍记 NULL（不撒谎）。默认 0.95 是上线时的保守起点；后台「缓存命中率
+    # 校准」任务会用近 7 天余额差整窗反解并自动回写（生产实测 0.98）。
+    trae_assumed_cache_ratio: float = 0.95
     # token 预刷新的提前量（小时）：距 access token 到期 ≤ 该值就提前换新。
     # 注意它对**短寿命渠道**会被自行封顶（CodeArts STS 只有 2h，见
     # `CodeArtsCredential.refresh_skew_cap_seconds`），所以调大它不会让短寿命
@@ -271,6 +277,10 @@ class Settings(BaseSettings):
     # 负缓存本身 6h 起步，比它更密只是白耗额度。判死行也靠这条周期复探恢复
     # （判死即从列表摘掉，没有到期时间）。
     model_probe_minutes: int = 0
+    # 缓存命中率校准周期（分钟）：用 `credit_events` 余额差对 `usage_events`
+    # token 反推上游实际缓存命中率，回写 `TRAE_ASSUMED_CACHE_RATIO`。样本以
+    # (凭证, 天) 为单位，默认 6 小时一轮足够（余额探测本身约每小时一次）。
+    cache_ratio_interval_minutes: int = 360
     # 成长中心（仅 CodeBuddy 有）：一轮领取的周期，以及是否允许不可逆动作
     # （抽奖/连登兑换/开 Buddy 盲盒/消耗补登卡）。这些动作无法撤销，
     # 需要保守部署时可关闭：关闭后仍会领取旅行礼物与任务奖励。
@@ -627,6 +637,17 @@ class Settings(BaseSettings):
         problem = public_base_url_problem(value)
         if problem is not None:
             raise ValueError(problem)
+        return value
+
+    @field_validator("trae_assumed_cache_ratio")
+    @classmethod
+    def _validate_trae_assumed_cache_ratio(cls, value: float) -> float:
+        # 比例是「输入 token 中命中缓存的部分」，只能在 [0,1]。越界多半是手滑
+        # （把百分比 95 当成 0.95 写），启动期直接拒绝，避免离谱的成本估算。
+        if not (0.0 <= value <= 1.0):
+            raise ValueError(
+                "TRAE_ASSUMED_CACHE_RATIO 必须在 [0,1] 之间"
+                f"（当前 {value}）；0.95 表示 95% 的输入 token 命中缓存")
         return value
 
     @field_validator("otlp_export_seconds")

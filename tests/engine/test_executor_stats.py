@@ -91,7 +91,7 @@ async def test_client_disconnect_records_full_usage_fields(repo):
     credentials, _db = repo
     credentials.add(provider="codebuddy", credential_data={"bearer_token": "t"})
     collector = RecordingCollector()
-    usage = Usage(11, 22, 3, 5, 1.5, True)
+    usage = Usage(11, 22, 3, 5, credit=1.5, credit_estimated=True)
     executor = _exec_with_stats(
         repo, [[Event(kind=EventKind.CONTENT, content="hi"),
                 Event(kind=EventKind.USAGE, usage=usage),
@@ -127,7 +127,8 @@ async def test_post_frame_failure_records_full_usage_fields(repo):
 
     executor = _exec_with_stats(
         repo, [[Event(kind=EventKind.CONTENT, content="part"),
-                Event(kind=EventKind.USAGE, usage=Usage(7, 4, 2, 1, 0.75, False)),
+                Event(kind=EventKind.USAGE, usage=Usage(
+                    7, 4, 2, 1, credit=0.75, credit_estimated=False)),
                 Soft()]], collector, max_rotate=1)
 
     from src.compat.openai.request import parse_chat_request

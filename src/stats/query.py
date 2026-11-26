@@ -22,18 +22,33 @@ METRIC_KINDS: dict[str, str] = {
     "cost_per_request": "per_request_cost",
 }
 
+# 缓存命中率的分母（小时汇总）：只累加**上报过** cached_tokens 的明细输入量。
+#
+# `usage_events.cached_tokens` 为 NULL = 上游未上报（TRAE 2026-10-24 起），0 = 真实
+# 未命中；未上报的输入量若进分母，TRAE 的巨大输入量会把全站命中率稀释成接近 0。
+#
+# 老库回退：`cached_input_tokens` 是第 40 版补的列，历史小时补 0（迁移不回填）。
+# 这类行若 `cached_known > 0` 说明当时确实统计过命中，旧口径的分母就是
+# `input_tokens`，回退用它保持历史图表口径不变；下次 rollup 会按明细精确重算。
+def _cache_denominator() -> str:
+    """小时汇总的命中率分母表达式（all call sites read `usage_hourly` unaliased）。"""
+    return ("CASE WHEN cached_input_tokens > 0 THEN cached_input_tokens "
+            "WHEN cached_known > 0 THEN input_tokens ELSE 0 END")
+
+
 # 三个图表查询（timeline / model_timeline）共用的聚合列。
 #
 # 为什么一次取全：派生指标要的是**多个 sum 相除**，只选 `SUM(expr)` 一个值就
 # 得为每个 metric 拼不同的 SQL，三处（timeline、model_timeline、将来新增的）
-# 迟早会分叉。这里固定取齐 10 列，取值语义留给 `_metric_value` 决定。
-_METRIC_AGGREGATES = """
+# 迟早会分叉。这里固定取齐 11 列，取值语义留给 `_metric_value` 决定。
+_METRIC_AGGREGATES = f"""
                    SUM(requests) AS requests,
                    SUM(ok_count) AS ok_count,
                    SUM(input_tokens) AS input_tokens,
                    SUM(output_tokens) AS output_tokens,
                    SUM(cached_tokens) AS cached_tokens,
                    SUM(cached_known) AS cached_known,
+                   COALESCE(SUM({_cache_denominator()}), 0) AS cached_input_tokens,
                    SUM(cost_cny_sum) AS cost_cny_sum,
                    SUM(cost_known) AS cost_known,
                    SUM(latency_sum) AS latency_sum,
@@ -436,7 +451,7 @@ class StatsQuery:
     def _metric_value(self, metric: str, row: Any) -> Any:
         """把一行聚合结果按 metric 归一成图表值；无有效样本给 `None`。
 
-        入参是**整行**（`_METRIC_AGGREGATES` 的 10 列），不再只给单个
+        入参是**整行**（`_METRIC_AGGREGATES` 的 11 列），不再只给单个
         `SUM(expr)`：成功率、缓存命中率、单请求成本都是两个 sum 相除，先聚合
         后相除才是池级口径（先逐小时相除再平均会被低量小时等权带偏）。
 
@@ -448,7 +463,9 @@ class StatsQuery:
           「0 ms」的假低谷，与「该小时没有成功请求」是两件事）
         - `cost`：仅含可定价明细的小时才有值（部分可定价时按已定价部分求和）
         - `success_rate`：ok_count / requests，requests 为 0 → None
-        - `cache_rate`：cached / input，无上报（cached_known=0）或输入为 0 → None
+        - `cache_rate`：cached / **上报过的输入量**（未上报 cached 的输入不进分母，
+          否则会被 TRAE 那种「不报缓存但输入巨大」的渠道稀释成接近 0）；
+          无上报（cached_known=0）或分母为 0 → None
         - `cost_per_request`：cost / requests，无定价或请求为 0 → None
         """
         kind = METRIC_KINDS.get(metric, "sum_requests")
@@ -465,9 +482,10 @@ class StatsQuery:
         if kind == "ratio_ok":
             return round(row["ok_count"] / row["requests"], 4) if row["requests"] else None
         if kind == "ratio_cache":
-            if not row["cached_known"] or not row["input_tokens"]:
+            denominator = row["cached_input_tokens"]
+            if not row["cached_known"] or not denominator:
                 return None
-            return round(row["cached_tokens"] / row["input_tokens"], 4)
+            return round(row["cached_tokens"] / denominator, 4)
         if kind == "per_request_cost":
             if not row["cost_known"] or not row["requests"]:
                 return None
@@ -540,6 +558,10 @@ class StatsQuery:
 
         `since` / `until`：自定义时间窗两端（半开 `[since, until)`），按小时桶
         过滤，与 `timeline` 同口径。
+
+        缓存两项：`cached_tokens`（命中 token，无上报时 None）、
+        `cached_input_tokens`（命中率分母，只含上报过缓存的请求输入量）与
+        `cache_rate`（两者相除；无上报或分母为 0 时 None——不是 0%）。
         """
         where, params = self._where(username=username, provider=provider,
                                     since=since, since_col="hour_utc",
@@ -554,6 +576,7 @@ class StatsQuery:
                    COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
                    SUM(cached_tokens) AS cached_tokens,
                    SUM(cached_known) AS cached_known,
+                   COALESCE(SUM({_cache_denominator()}), 0) AS cached_input_tokens,
                    SUM(credit_sum) AS credit_sum,
                    SUM(credit_known) AS credit_known,
                    SUM(credit_estimated_known) AS credit_estimated_known,
@@ -580,6 +603,8 @@ class StatsQuery:
             speed["est_tokens"], speed["est_visible_tokens"], speed["est_ms"])
         requests = row["requests"] or 0
         ok_count = row["ok_count"] or 0
+        # 命中率分母：上报过缓存的输入量（未上报的不进分母，见 _cache_denominator）
+        cached_input = row["cached_input_tokens"] or 0
         # 均值口径：只除成功请求（失败请求的 latency 会拉偏"典型耗时"，
         # 且与图表 latency_sum/ok_count 同一致），无成功则 None
         return {
@@ -591,6 +616,10 @@ class StatsQuery:
             "reasoning_tokens": row["reasoning_tokens"],
             # 缓存命中：任一明细上报过才可信，否则 None（前端显示 —）
             "cached_tokens": row["cached_tokens"] if row["cached_known"] else None,
+            "cached_input_tokens": cached_input,
+            # 命中率：无上报或分母为 0 时 None（不是 0%，前端断线）
+            "cache_rate": (round(row["cached_tokens"] / cached_input, 4)
+                           if row["cached_known"] and cached_input else None),
             "credit": row["credit_sum"] if row["credit_known"] else None,
             # 汇总 credit 中含推算值时标 ≈（全部渠道任一为推算即标，保守）
             "credit_estimated": bool(row["credit_estimated_known"]),
@@ -718,6 +747,9 @@ class StatsQuery:
             "output_tokens": row["output_tokens"],
             # 缓存命中：任一明细上报过才可信，否则 None（前端显示 —）
             "cached_tokens": row["cached_tokens"] if row["cached_known"] else None,
+            # 命中率分母（只含上报过的输入量）：分组行不单独下发 rate，
+            # 需要时用 cached_tokens / cached_input_tokens 自行相除
+            "cached_input_tokens": row["cached_input_tokens"] or 0,
             "credit": row["credit_sum"] if row["credit_known"] else None,
             "credit_estimated": bool(row["credit_estimated_known"]),
             "cost_usd": row["cost_usd_sum"] if row["cost_known"] else None,
@@ -755,6 +787,7 @@ class StatsQuery:
                    COALESCE(SUM(output_tokens), 0) AS output_tokens,
                    SUM(cached_tokens) AS cached_tokens,
                    SUM(cached_known) AS cached_known,
+                   COALESCE(SUM({_cache_denominator()}), 0) AS cached_input_tokens,
                    SUM(credit_sum) AS credit_sum,
                    SUM(credit_known) AS credit_known,
                    SUM(credit_estimated_known) AS credit_estimated_known,
@@ -812,6 +845,8 @@ class StatsQuery:
                    COALESCE(SUM(e.output_tokens), 0) AS output_tokens,
                    SUM(e.cached_tokens) AS cached_tokens,
                    SUM(CASE WHEN e.cached_tokens IS NULL THEN 0 ELSE 1 END) AS cached_known,
+                   COALESCE(SUM(CASE WHEN e.cached_tokens IS NOT NULL
+                                     THEN e.input_tokens ELSE 0 END), 0) AS cached_input_tokens,
                    COALESCE(SUM(e.credit), 0) AS credit_sum,
                    SUM(CASE WHEN e.credit IS NULL THEN 0 ELSE 1 END) AS credit_known,
                    SUM(CASE WHEN e.credit_estimated = 1 AND e.credit IS NOT NULL

@@ -102,10 +102,12 @@ def test_stats_by_credential_aggregates(stats):
     assert cred_a["requests"] == 2 and cred_a["ok_count"] == 2
     assert cred_a["input_tokens"] == 110 and cred_a["output_tokens"] == 55
     assert cred_a["cached_tokens"] == 30
+    assert cred_a["cached_input_tokens"] == 110      # 两条都上报过（含 0）
     assert cred_a["credit"] == 1.5
     assert rows["cred_b"]["requests"] == 1
-    # 无缓存上报时 cached_tokens 回 None（不把 0 当成真值）
+    # 无缓存上报时 cached_tokens 回 None（不把 0 当成真值），分母也是 0
     assert rows["cred_b"]["cached_tokens"] is None
+    assert rows["cred_b"]["cached_input_tokens"] == 0
     # 按用户/时间过滤同样生效（_where 拼的子句与 hourly 维度共用）
     assert query.by_credential(username="nobody") == []
 
@@ -173,13 +175,19 @@ def test_stats_by_credential_endpoint_gates_credential_name(admin_client, tmp_pa
     assert seen["credential_name"] is None and seen["provider"] == "codebuddy"
 
 def test_stats_groups_report_cached_tokens_and_known(stats):
-    """各维度的缓存命中：任一明细上报过才给值，否则 None。"""
+    """各维度的缓存命中：任一明细上报过才给值，否则 None；分母只含上报输入。"""
     collector, query = stats
-    collector.record(username="u", provider="trae", model="m", ok=True, cached_tokens=40)
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     input_tokens=100, cached_tokens=40)
     for rows in (query.by_provider(), query.by_model(), query.by_user()):
         assert rows[0]["cached_tokens"] == 40
-    collector.record(username="v", provider="trae", model="m", ok=True)
-    assert query.by_provider(username="v")[0]["cached_tokens"] is None
+        assert rows[0]["cached_input_tokens"] == 100
+        assert "cache_rate" not in rows[0]      # 分组行不单独下发 rate
+    # 未上报：cached_tokens 回 None，分母 0（不把未上报输入算进去）
+    collector.record(username="v", provider="trae", model="m", ok=True, input_tokens=900)
+    row = query.by_provider(username="v")[0]
+    assert row["cached_tokens"] is None
+    assert row["cached_input_tokens"] == 0
 
 def test_stats_overview_empty_and_filters(stats):
     _collector, query = stats
@@ -367,10 +375,71 @@ def test_overview_reasoning_and_cached_aggregate_from_hourly(stats):
     collected = query.overview(username="u")
     assert collected["reasoning_tokens"] == 10
     assert collected["cached_tokens"] == 40      # 只有上报过的那条计入
+    assert collected["cached_input_tokens"] == 100   # 分母不含未上报那条的 50
+    assert collected["cache_rate"] == pytest.approx(0.4)
     assert collected["input_tokens"] == 150
     # 未上报过 cached 的时段 → None，不能当成 0
     collector.record(username="v", provider="trae", model="m", ok=True)
     assert query.overview(username="v")["cached_tokens"] is None
+
+def test_overview_cache_rate_excludes_unreported_input(stats):
+    """命中率分母只含上报过的输入量；全未上报时 cached_tokens / cache_rate 均 None。"""
+    collector, query = stats
+    # 全未上报（TRAE 场景）：有输入但没有命中数据 → 不给命中率
+    collector.record(username="v", provider="trae", model="m", ok=True, input_tokens=100)
+    overview = query.overview(username="v")
+    assert overview["cached_tokens"] is None
+    assert overview["cached_input_tokens"] == 0
+    assert overview["cache_rate"] is None
+
+    # 混合：上报 40/100，另有 900 未上报 → 分母 100 不被稀释，rate 0.4
+    collector.record(username="u", provider="trae", model="m", ok=True,
+                     input_tokens=100, cached_tokens=40)
+    collector.record(username="u", provider="trae", model="m", ok=True, input_tokens=900)
+    overview = query.overview(username="u")
+    assert overview["cached_tokens"] == 40
+    assert overview["cached_input_tokens"] == 100
+    assert overview["cache_rate"] == pytest.approx(0.4)
+
+    # 上报但真实未命中（cached_tokens=0）：分母含其输入，rate 是 0 而不是 None
+    collector.record(username="w", provider="trae", model="m", ok=True,
+                     input_tokens=50, cached_tokens=0)
+    overview = query.overview(username="w")
+    assert overview["cached_tokens"] == 0
+    assert overview["cached_input_tokens"] == 50
+    assert overview["cache_rate"] == 0.0
+
+    # 有上报但输入未上报（input_tokens=NULL）：分母 0 → rate None，不除零
+    collector.record(username="x", provider="trae", model="m", ok=True, cached_tokens=5)
+    overview = query.overview(username="x")
+    assert overview["cached_tokens"] == 5
+    assert overview["cached_input_tokens"] == 0
+    assert overview["cache_rate"] is None
+
+
+def test_hourly_cache_denominator_falls_back_for_old_rows(stats):
+    """老小时行（cached_input_tokens=0 但 cached_known>0）回退用 input_tokens。"""
+    _collector, query = stats
+    db = query._db.connect()
+    db.execute(
+        "INSERT INTO usage_hourly (hour_utc, username, provider, model, requests,"
+        " input_tokens, cached_tokens, cached_known) VALUES (0, 'old', 'trae', 'm', 2,"
+        " 100, 40, 1)")
+    db.execute(
+        "INSERT INTO usage_hourly (hour_utc, username, provider, model, requests,"
+        " input_tokens) VALUES (3600, 'old', 'trae', 'm', 3, 900)")
+    db.commit()
+
+    overview = query.overview(username="old")
+    # 老行回退 input_tokens（100），未上报的小时（900）不进分母
+    assert overview["cached_input_tokens"] == 100
+    assert overview["cache_rate"] == pytest.approx(0.4)
+    assert query.by_provider(username="old")[0]["cached_input_tokens"] == 100
+
+    timeline = query.timeline(username="old", metric="cache_rate")
+    assert timeline[0]["trae"] == pytest.approx(0.4)
+    assert timeline[1]["trae"] is None        # 该小时全未上报 → 断线
+
 
 def test_overview_latency_averages_only_successful_requests(stats):
     """均值口径与图表一致：除以 ok_count，失败请求不拉偏「典型耗时」。"""
@@ -520,8 +589,9 @@ def test_stats_timeline_derived_metrics(stats):
     # 3 请求 2 成功 → 0.6667（不是逐小时平均，而是 sum/sum）
     assert rate["codebuddy"] == pytest.approx(0.6667)
     cache = query.timeline(username="u", metric="cache_rate")[0]
-    # 命中 40 / 输入 100 → 0.4
-    assert cache["codebuddy"] == pytest.approx(0.4)
+    # 命中 40 / **上报过缓存的输入量**（40+40=80）→ 0.5。
+    # 未上报缓存那条的 20 输入不进分母（旧口径 40/100=0.4 会被未上报量稀释）
+    assert cache["codebuddy"] == pytest.approx(0.5)
 
 
 def test_stats_timeline_derived_metrics_no_sample_is_none(stats):

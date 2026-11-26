@@ -19,6 +19,7 @@ from ..config import live
 from .activity import ActivityTask
 from .alerting import AlertTask
 from .backup import BackupTask
+from .cache_ratio import CacheRatioTask
 from .checkin import CheckinTask
 from .growth import GrowthTask
 from .model_probe import ModelProbeTask
@@ -79,6 +80,9 @@ class TaskRunner:
     backup: BackupTask | None = None,
     # 上游状态页聚合：None 表示不装配该循环（老调用方/测试保持原行为）。
     upstream_status: UpstreamStatusTask | None = None,
+    # 缓存命中率校准：None 表示不装配该循环（老调用方/测试保持原行为）。
+    # 只读查询 + 漂移足够才回写运行时配置，无样本时是 no-op。
+    cache_ratio: CacheRatioTask | None = None,
     # 模型可用性探活：None 表示不装配该循环。即使装配了，周期为 0（默认）
     # 时也由 `_sync_model_probe` 每轮判成 no-op——探活会真发上游请求。
     model_probe: ModelProbeTask | None = None,
@@ -95,6 +99,7 @@ class TaskRunner:
     alert_interval_minutes: int | Callable[[], int] = 5,
     backup_interval_minutes: int | Callable[[], int] = 1440,
     upstream_status_minutes: int | Callable[[], int] = 5,
+    cache_ratio_interval_minutes: int | Callable[[], int] = 360,
     otlp_export_seconds: int | Callable[[], int] = 60,
     otlp_export_enabled: Callable[[], bool] | None = None,
     activity_enabled: Callable[[], bool] | None = None,
@@ -115,6 +120,7 @@ class TaskRunner:
         self._alert = alert
         self._backup = backup
         self._upstream_status = upstream_status
+        self._cache_ratio = cache_ratio
         # 周期可热更：存取值器，每轮 sleep 前读当前值（否则改配置
         # 要等到下一次重启才生效）。下限与业务语义同前，不变。
         self._quota_probe_minutes = live(quota_probe_minutes)
@@ -127,6 +133,7 @@ class TaskRunner:
         self._alert_minutes = live(alert_interval_minutes)
         self._backup_minutes = live(backup_interval_minutes)
         self._upstream_status_minutes = live(upstream_status_minutes)
+        self._cache_ratio_minutes = live(cache_ratio_interval_minutes)
         self._otlp_export_seconds = live(otlp_export_seconds)
         # 端点未配置 = 关闭：任务卡片显示「未启用」，而不是「启用但从不运行」。
         self._otlp_export_enabled = (
@@ -213,6 +220,12 @@ class TaskRunner:
         return max(15.0, float(self._otlp_export_seconds()))
 
     @property
+    def _cache_ratio_interval(self) -> float:
+        # 下限 60 分钟与热更项 minimum 对齐：样本以 (凭证, 天) 为单位，更密
+        # 只会反复读到同一批窗口，算不出新东西。
+        return max(3600, int(self._cache_ratio_minutes()) * 60)
+
+    @property
     def _checkin_interval(self) -> float:
         """签到循环的醒转周期：留空（旧行为）10 分钟，配了时点则 1 分钟。
 
@@ -296,6 +309,8 @@ class TaskRunner:
             specs.append(self._spec("upstream_status", self._sync_upstream_status))
         if self._otlp_export is not None:
             specs.append(self._spec("otlp_export", self._sync_otlp_export))
+        if self._cache_ratio is not None:
+            specs.append(self._spec("cache_ratio", self._sync_cache_ratio))
         return specs
 
     def _spec(self, key: str,
@@ -416,6 +431,15 @@ class TaskRunner:
         """
         task = self._require(self._otlp_export, "otlp export")
         return await task.run_once()
+
+    async def _sync_cache_ratio(self) -> object:
+        """缓存命中率校准一轮：只读 SQLite 聚合，放线程池跑。
+
+        无 TRAE 样本时 `run_once` 返回 `applied=False` 的报告（仍是真实跑过
+        一轮，记运行态）；漂移不足同样不入库，报告里带样本数供页面查看。
+        """
+        task = self._require(self._cache_ratio, "cache ratio")
+        return await asyncio.to_thread(task.run_once)
 
     async def _loop(self, name: str, runner: Callable[[], Awaitable[object]],
                     interval: float | Callable[[], float],
@@ -548,6 +572,7 @@ class TaskRunner:
             "backup": lambda: self._backup_interval,
             "upstream_status": lambda: self._upstream_status_interval,
             "otlp_export": lambda: self._otlp_export_interval,
+            "cache_ratio": lambda: self._cache_ratio_interval,
         }
 
     def _task_enabled(self, key: str) -> bool:
@@ -594,6 +619,7 @@ def build_runner(credentials, providers: dict, stats_collector, config,
                  alerts=None,
                  backup: BackupTask | None = None,
                  upstream_status: UpstreamStatusTask | None = None,
+                 cache_ratio: CacheRatioTask | None = None,
                  model_probe: ModelProbeTask | None = None,
                  model_probe_minutes: int | Callable[[], int] = 0,
                  otlp_export: OtlpExportTask | None = None,
@@ -630,6 +656,9 @@ def build_runner(credentials, providers: dict, stats_collector, config,
 
     upstream_status 同理：None 时不装配上游状态页抓取循环（老调用方与测试保持
     原行为）；生产路径传入 UpstreamStatusTask（快照挂在 app.state 供路由读取）。
+
+    cache_ratio 同理：None 时不装配缓存命中率校准循环（老调用方与测试保持原
+    行为）；生产路径传入 CacheRatioTask（只读查询，漂移足够才回写运行时配置）。
 
     model_probe 同理：None 时不装配模型探活循环。周期默认 0（关闭）——探活
     会真发上游请求、消耗额度，开不开由部署者按余量决定；管理台把「模型探活
@@ -720,6 +749,8 @@ def build_runner(credentials, providers: dict, stats_collector, config,
         backup_interval_minutes=lambda: config.backup_interval_minutes,
         upstream_status=upstream_status,
         upstream_status_minutes=lambda: config.upstream_status_minutes,
+        cache_ratio=cache_ratio,
+        cache_ratio_interval_minutes=lambda: config.cache_ratio_interval_minutes,
         otlp_export=otlp_export,
         otlp_export_seconds=lambda: config.otlp_export_seconds,
         otlp_export_enabled=otlp_export_enabled,

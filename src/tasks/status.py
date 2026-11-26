@@ -96,6 +96,12 @@ TASK_SPECS: tuple[TaskSpec, ...] = (
              "按 OTLP/HTTP JSON 推给外部采集端；未配置 `OTLP_ENDPOINT` 时每轮"
              "都是 no-op。永不导出提示词 / 回答 / system 指令。",
              group="ops"),
+    TaskSpec("cache_ratio", "缓存命中率校准",
+             "按积分余额差反推上游实际缓存命中率：TRAE 不再上报缓存命中，"
+             "但计费仍按缓存折扣。用 `credit_events` 的负向 delta 对 "
+             "`usage_events` 的 token 整窗合并反解，漂移 ≥0.01 时回写"
+             "「TRAE 假定缓存命中率」。非 TRAE 部署无样本，恒 no-op。",
+             group="ops"),
 )
 
 TASK_BY_KEY: dict[str, TaskSpec] = {spec.key: spec for spec in TASK_SPECS}

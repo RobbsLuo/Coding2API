@@ -214,6 +214,7 @@ class StatsCollector:
         output_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         cached_tokens: int | None = None,
+        cached_tokens_effective: int | None = None,
         credit: float | None = None,
         credit_estimated: bool = False,
         latency_ms: int | None = None,
@@ -234,6 +235,7 @@ class StatsCollector:
             credential_id=credential_id, error_type=error_type,
             input_tokens=input_tokens, output_tokens=output_tokens,
             reasoning_tokens=reasoning_tokens, cached_tokens=cached_tokens,
+            cached_tokens_effective=cached_tokens_effective,
             credit=credit, credit_estimated=credit_estimated,
             latency_ms=latency_ms, ttfb_ms=ttfb_ms, now=now,
         )
@@ -255,6 +257,7 @@ class StatsCollector:
         output_tokens: int | None = None,
         reasoning_tokens: int | None = None,
         cached_tokens: int | None = None,
+        cached_tokens_effective: int | None = None,
         credit: float | None = None,
         credit_estimated: bool = False,
         latency_ms: int | None = None,
@@ -266,7 +269,10 @@ class StatsCollector:
         cost_usd, cost_cny = self._cost(
             safe_model, input_tokens=_int_or_none(input_tokens),
             output_tokens=_int_or_none(output_tokens),
-            cached_tokens=_int_or_none(cached_tokens))
+            # 定价可用 provider 推算的有效命中数；落库仍是上游真值
+            cached_tokens=_int_or_none(cached_tokens_effective)
+            if cached_tokens_effective is not None
+            else _int_or_none(cached_tokens))
         return UsageEvent(
             id=f"evt_{uuid.uuid4().hex[:16]}",
             ts=int(now if now is not None else time.time()),
@@ -466,11 +472,11 @@ class StatsCollector:
             """
             INSERT INTO usage_hourly (hour_utc, username, provider, model, requests, ok_count,
                                       input_tokens, output_tokens, reasoning_tokens,
-                                      cached_tokens, cached_known,
+                                      cached_tokens, cached_known, cached_input_tokens,
                                       credit_sum, credit_known, credit_estimated_known,
                                       cost_usd_sum, cost_cny_sum, cost_known,
                                       latency_sum, ttfb_sum)
-            VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            VALUES (?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(hour_utc, username, provider, model) DO UPDATE SET
                 requests = requests + 1,
                 ok_count = ok_count + excluded.ok_count,
@@ -479,6 +485,7 @@ class StatsCollector:
                 reasoning_tokens = reasoning_tokens + excluded.reasoning_tokens,
                 cached_tokens = cached_tokens + excluded.cached_tokens,
                 cached_known = cached_known + excluded.cached_known,
+                cached_input_tokens = cached_input_tokens + excluded.cached_input_tokens,
                 credit_sum = COALESCE(credit_sum, 0) + excluded.credit_sum,
                 credit_known = credit_known + excluded.credit_known,
                 credit_estimated_known = credit_estimated_known + excluded.credit_estimated_known,
@@ -489,13 +496,16 @@ class StatsCollector:
                 ttfb_sum = ttfb_sum + excluded.ttfb_sum
             """,
             # NULL 一律折成 0 参与累加：列定义是 NOT NULL DEFAULT 0，
-            # `x + NULL` 会交出 NULL，把整行污染掉
+            # `x + NULL` 会交出 NULL，把整行污染掉。
+            # `cached_input_tokens` 只累加**上报过**缓存的明细输入量（分母
+            # 不能被未上报的量稀释，见 schema.sql 注释）。
             ((event.ts // 3600) * 3600, event.username, event.provider, event.model,
              int(event.ok),
              event.input_tokens or 0, event.output_tokens or 0,
              event.reasoning_tokens or 0,
              event.cached_tokens or 0,
              0 if event.cached_tokens is None else 1,
+             0 if event.cached_tokens is None else (event.input_tokens or 0),
              event.credit or 0.0,
              0 if event.credit is None else 1,
              1 if event.credit_estimated else 0,
@@ -632,7 +642,7 @@ class StatsCollector:
                 """
                 INSERT INTO usage_hourly (hour_utc, username, provider, model, requests, ok_count,
                                           input_tokens, output_tokens, reasoning_tokens,
-                                          cached_tokens, cached_known,
+                                          cached_tokens, cached_known, cached_input_tokens,
                                           credit_sum, credit_known, credit_estimated_known,
                                           cost_usd_sum, cost_cny_sum, cost_known,
                                           latency_sum, ttfb_sum)
@@ -642,6 +652,8 @@ class StatsCollector:
                        COALESCE(SUM(reasoning_tokens), 0),
                        COALESCE(SUM(cached_tokens), 0),
                        SUM(CASE WHEN cached_tokens IS NULL THEN 0 ELSE 1 END),
+                       COALESCE(SUM(CASE WHEN cached_tokens IS NOT NULL
+                                         THEN input_tokens END), 0),
                        COALESCE(SUM(credit), 0), SUM(CASE WHEN credit IS NULL THEN 0 ELSE 1 END),
                        SUM(CASE WHEN credit_estimated = 1 AND credit IS NOT NULL THEN 1 ELSE 0 END),
                        COALESCE(SUM(cost_usd), 0), COALESCE(SUM(cost_cny), 0),
@@ -658,6 +670,7 @@ class StatsCollector:
                     reasoning_tokens = excluded.reasoning_tokens,
                     cached_tokens = excluded.cached_tokens,
                     cached_known = excluded.cached_known,
+                    cached_input_tokens = excluded.cached_input_tokens,
                     credit_sum = excluded.credit_sum,
                     credit_known = excluded.credit_known,
                     credit_estimated_known = excluded.credit_estimated_known,

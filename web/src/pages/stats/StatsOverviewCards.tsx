@@ -7,12 +7,12 @@
 import { Activity, Coins, Timer, Wallet } from "lucide-react";
 import { Metric, Notice } from "../../ui";
 import {
-  formatCacheRate,
   formatCompact,
   formatCredit,
   formatLatency,
   formatMoney,
   formatNumber,
+  formatRate,
   formatSpeed,
 } from "../../api/display";
 import type { StatsOverview } from "../../api/types";
@@ -29,17 +29,33 @@ export function StatsOverviewCards({ overviewFailed, stats }: StatsOverviewCards
       : stats.success_rate;
   const rateText = rate === null ? "—" : `${(rate * 100).toFixed(1)}%`;
   const totalTokens = (stats?.input_tokens ?? 0) + (stats?.output_tokens ?? 0);
-  // 输入缓存：命中 = 上报的 cached_tokens；未命中 = 输入 − 命中（缺上报则显示 —）
+  // 输入缓存：命中 = 上报的 cached_tokens；未命中 = 已上报请求的输入 − 命中。
+  // null（上游未上报，如 TRAE）= 没有数据，不是「0 命中」——三项都显示 —。
   const cached = stats?.cached_tokens ?? null;
+  const cachedInput = stats?.cached_input_tokens ?? null;
+  const cacheReported = cached !== null;
   const hitText = cached === null ? "—" : formatCompact(cached);
   const missText =
-    cached === null || stats?.input_tokens === null || stats?.input_tokens === undefined
-      ? "—"
-      : formatCompact(stats.input_tokens - cached);
+    cached === null || cachedInput === null ? "—" : formatCompact(cachedInput - cached);
+  // 命中率用后端算好的 cache_rate（分母只含已上报请求）；不在前端重算，
+  // 否则拿总输入当分母会把不上报缓存的渠道稀释成假低值。
+  const cacheRateText = cacheReported ? formatRate(stats?.cache_rate) : "—";
+  // 部分渠道不上报缓存字段：命中率只覆盖已上报的那部分请求，得说清楚。
+  const partialCache =
+    cachedInput !== null
+    && stats?.input_tokens !== null
+    && stats?.input_tokens !== undefined
+    && cachedInput < stats.input_tokens;
   const tokenHint =
     `输入 ${formatCompact(stats?.input_tokens)}（命中 ${hitText} · 未命中 ${missText}）`
     + ` · 输出 ${formatCompact(stats?.output_tokens)} · 推理 ${formatCompact(stats?.reasoning_tokens)}`
-    + ` · 缓存命中率 ${formatCacheRate(cached, stats?.input_tokens)}`;
+    + ` · 缓存命中率 ${cacheRateText}`
+    + (cacheReported && partialCache ? "（按已上报请求计算）" : "");
+  const cacheNotice = stats === undefined
+    ? null
+    : cacheReported
+      ? (partialCache ? "命中率按已上报请求计算" : null)
+      : "上游未上报缓存字段，显示 — 不代表未命中";
 
   return (
     <>
@@ -103,11 +119,16 @@ export function StatsOverviewCards({ overviewFailed, stats }: StatsOverviewCards
         <div className="bg-panel px-4 py-3" data-testid="stat-cache">
           <div className="text-xs text-muted-foreground">缓存命中率</div>
           <div className="mt-1 text-base font-semibold tabular-nums">
-            {formatCacheRate(cached, stats?.input_tokens)}
+            {cacheRateText}
           </div>
           <div className="mt-0.5 text-xs text-muted-foreground">
             命中 {hitText} · 未命中 {missText}
           </div>
+          {cacheNotice && (
+            <div className="mt-0.5 text-xs text-muted-foreground" data-testid="stat-cache-note">
+              {cacheNotice}
+            </div>
+          )}
         </div>
         <div className="bg-panel px-4 py-3 col-span-2 sm:col-span-1" data-testid="stat-credit">
           <div className="text-xs text-muted-foreground">Credit 消耗</div>

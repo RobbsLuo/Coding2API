@@ -159,3 +159,33 @@ def test_otlp_export_seconds_rejects_busy_loop_values(seconds):
     with pytest.raises(ValidationError) as excinfo:
         Settings(_env_file=None, APP_SECRET=SECRET, OTLP_EXPORT_SECONDS=seconds)
     assert "不能小于 15" in str(excinfo.value)
+
+
+# ------------------------------------------------------ TRAE 缓存命中率配置
+
+
+def test_trae_assumed_cache_ratio_defaults_to_production_evidence():
+    s = Settings(_env_file=None, APP_SECRET=SECRET)
+    assert s.trae_assumed_cache_ratio == 0.95
+    assert s.cache_ratio_interval_minutes == 360
+
+
+@pytest.mark.parametrize("ratio", [0.0, 0.5, 0.95, 1.0])
+def test_trae_assumed_cache_ratio_accepts_unit_interval(ratio):
+    s = Settings(_env_file=None, APP_SECRET=SECRET,
+                 TRAE_ASSUMED_CACHE_RATIO=ratio)
+    assert s.trae_assumed_cache_ratio == ratio
+
+
+@pytest.mark.parametrize("ratio", [-0.01, 1.01, 95])
+def test_trae_assumed_cache_ratio_rejects_out_of_range(ratio):
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None, APP_SECRET=SECRET,
+                 TRAE_ASSUMED_CACHE_RATIO=ratio)
+    assert "必须在 [0,1] 之间" in str(excinfo.value)
+
+
+def test_cache_ratio_interval_override_parses():
+    s = Settings(_env_file=None, APP_SECRET=SECRET,
+                 CACHE_RATIO_INTERVAL_MINUTES=120)
+    assert s.cache_ratio_interval_minutes == 120

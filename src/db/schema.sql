@@ -159,6 +159,11 @@ CREATE TABLE IF NOT EXISTS usage_hourly (
     reasoning_tokens INTEGER NOT NULL DEFAULT 0,
     cached_tokens INTEGER NOT NULL DEFAULT 0,      -- 命中缓存的输入 token 之和
     cached_known  INTEGER NOT NULL DEFAULT 0,      -- 上报过 cached_tokens 的条数（=0 时该值不可信）
+    -- 缓存命中率的分母：只累加**上报过** cached_tokens 的明细的 input_tokens。
+    -- 上游未上报（NULL，如 TRAE 2026-10-24 起）的输入量不进分母，否则该渠道
+    -- 巨大的输入量会把全站命中率稀释成接近 0。老库补列后历史行为 0，查询侧
+    -- 对「cached_input_tokens=0 且 cached_known>0」回退用 input_tokens 兜底。
+    cached_input_tokens INTEGER NOT NULL DEFAULT 0,
     credit_sum    REAL,
     credit_known  INTEGER NOT NULL DEFAULT 0,
     credit_estimated_known INTEGER NOT NULL DEFAULT 0,  -- 其中推算值条数（>0 时该值标 ≈）

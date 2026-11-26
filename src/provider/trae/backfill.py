@@ -20,10 +20,29 @@ from __future__ import annotations
 from . import pricing
 
 
-def backfill_estimated_credit(db) -> int:
+def _effective_cached(cached_tokens, input_tokens, assumed_cache_ratio: float | None):
+    """行内缓存命中数 → 定价用有效命中数。
+
+    `cached_tokens is None` 表示上游未上报（TRAE 2026-10 起）。给了假定命中率
+    就按 `input × ratio` 推算，与实时链路（`TraeClient`）同口径；否则保持
+    None（`pricing.estimate_credit` 按 0 处理，即全价——宁可高估不低估）。
+    """
+    if cached_tokens is not None or assumed_cache_ratio is None:
+        return cached_tokens
+    if not isinstance(input_tokens, int) or isinstance(input_tokens, bool):
+        return None
+    if input_tokens < 0 or not (0 < assumed_cache_ratio <= 1):
+        return None
+    return min(int(input_tokens * assumed_cache_ratio), input_tokens)
+
+
+def backfill_estimated_credit(db, *, assumed_cache_ratio: float | None = None) -> int:
     """补齐 / 重算 trae 明细的推算积分，返回更新条数（0=无需处理）。
 
     处理「credit 为空」或「credit_estimated=1」的行；后者在单价表调整后重算。
+    `assumed_cache_ratio` 用于 `cached_tokens IS NULL`（上游未上报）的行：
+    与实时链路一致地按假定命中率折算，避免历史行按全价高估。传 None 保持
+    旧行为（按 0 命中）。
     `db` 只用到 `Database` 的 `transaction()` 形态（鸭子类型），便于测试与脚本
     注入裸连接适配器。调用方在返回值 > 0 时应重算小时汇总
     （`StatsCollector.rollup_hourly`），本函数只管明细，不碰汇总。
@@ -38,7 +57,9 @@ def backfill_estimated_credit(db) -> int:
         for row in rows:
             credit = pricing.estimate_credit(
                 row["model"], input_tokens=row["input_tokens"],
-                output_tokens=row["output_tokens"], cached_tokens=row["cached_tokens"])
+                output_tokens=row["output_tokens"],
+                cached_tokens=_effective_cached(
+                    row["cached_tokens"], row["input_tokens"], assumed_cache_ratio))
             if credit is None:
                 continue
             if row["credit"] is not None and row["credit"] == credit:

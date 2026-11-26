@@ -236,18 +236,41 @@ def _stringify_tool_parameters(body: dict[str, Any]) -> None:
     body["tools"] = normalized
 
 
+def _assumed_cache_tokens(input_tokens: object, ratio: object) -> int | None:
+    """按假定命中比例推算缓存命中 token；参数不成立时返回 None。
+
+    只在 `input_tokens` 是**非负 int**（bool 不算）且 `ratio` 是正的有限数时
+    推算，比例 >1 先钳到 1，结果再钳到 `[0, input_tokens]`：上游不报缓存时
+    给定价一个合理的命中假设，但绝不能推出比输入总量还大的命中数。
+    ratio 来自运行期热更配置，NaN / inf / 字符串都可能传进来，一律不推算
+    ——宁可少估，也不能让一次流请求因为坏配置崩掉。
+    """
+    if not isinstance(input_tokens, int) or isinstance(input_tokens, bool):
+        return None
+    if not isinstance(ratio, (int, float)) or isinstance(ratio, bool):
+        return None
+    if not math.isfinite(ratio) or ratio <= 0 or input_tokens < 0:
+        return None
+    effective_ratio = min(float(ratio), 1.0)
+    return max(0, min(int(input_tokens * effective_ratio), input_tokens))
+
+
 def _fill_estimated_credit(event: Event, model: str) -> None:
     """USAGE 事件补推算积分：上游不给单请求积分，按官方单价折算并标 estimated。
 
     只在该事件确实带 token 且未携带上游 credit 时补（上游将来若返回真值，
     不覆盖）。模型未收录时 pricing 返回 None，保持 credit 为 None。
+    缓存命中优先用 `cached_tokens_effective`（上游不报时由 provider 按假定
+    比例推算，只影响定价），缺省才回落到上游真值 `cached_tokens`。
     """
     usage = event.usage
     if event.kind is not EventKind.USAGE or usage is None or usage.credit is not None:
         return
+    cached = (usage.cached_tokens_effective if usage.cached_tokens_effective is not None
+              else usage.cached_tokens)
     credit = pricing.estimate_credit(
         model, input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
-        cached_tokens=usage.cached_tokens)
+        cached_tokens=cached)
     if credit is not None:
         usage.credit = credit
         usage.credit_estimated = True
@@ -323,6 +346,13 @@ def oauth_headers() -> dict[str, str]:
 class TraeClient(LazyClients):
     """上游 HTTP 客户端。host 可覆盖，便于测试。"""
 
+    # 上游「最近一次报过缓存命中」距今超过这个窗口，就把随后的 0 当**未上报**
+    # 而不是真 0：TRAE 自 2026-10-24 起 `cache_read_input_tokens` 恒为 0、
+    # `prompt_cache_pool_record` 恒为 null，但计费仍按缓存折扣（用本账号
+    # credit_events 余额差反解确认）。窗口内保留 0 是给「同一会话偶发未命中」
+    # 留余地，避免把真 0 误判成未上报。
+    CACHE_REPORT_STALE_SECONDS = 6 * 3600
+
     def __init__(
         self,
         *,
@@ -332,6 +362,8 @@ class TraeClient(LazyClients):
         stream_client: httpx.AsyncClient | None = None,
         short_client: httpx.AsyncClient | None = None,
         proxy: str | None = None,
+        assumed_cache_ratio: Callable[[], float] | None = None,
+        now: Callable[[], float] = time.monotonic,
     ) -> None:
         self.agent_host = agent_host
         self.ug_host = ug_host
@@ -339,6 +371,12 @@ class TraeClient(LazyClients):
         self._stream_client = stream_client
         self._short_client = short_client
         self._proxy = proxy
+        # 热读回调：运行期改配置立刻生效，不必重建客户端。缺省 0 表示
+        # 「不推算」，此时未上报的缓存只落 NULL，定价按 0 命中算。
+        self._assumed_cache_ratio = assumed_cache_ratio or (lambda: 0.0)
+        self._now = now
+        self._last_cache_hit_at: float | None = None
+        self._cache_unreported_logged = False
 
     # ------------------------------------------------------------- 聊天流
 
@@ -365,8 +403,59 @@ class TraeClient(LazyClients):
                 for event in trae_events.parse_all_events(frame):
                     if event.model is None and model_hint is not None:
                         event.model = model_hint
+                    self._normalize_cache_reporting(event)
                     _fill_estimated_credit(event, model)
                     yield event
+
+    # ---------------------------------------------------------- 缓存命中归一
+
+    def _normalize_cache_reporting(self, event: Event) -> None:
+        """USAGE 事件的缓存上报归一：把「上游不报」与「真 0」区分开。
+
+        TRAE 自 2026-10-24 起不再报缓存命中（恒 0 / null），但计费仍按缓存
+        折扣。直接信 0 会让成本估算系统性偏高，所以：
+
+        - `>0`：上游确实报了命中 → 记时刻，`cached_tokens_effective` 取真值。
+        - `==0`：仅当最近 `CACHE_REPORT_STALE_SECONDS` 内见过 `>0` 才当真 0；
+          否则视为「上游不再上报」。
+        - `None`：上游从未给该字段 → 未上报。
+
+        未上报时把 `usage.cached_tokens` 置 None（DB 落 NULL = 未上报，报表
+        不撒谎），再按 `assumed_cache_ratio` 推算 `cached_tokens_effective`
+        供定价使用。比例是热读回调，每次事件都重新取。
+        """
+        usage = event.usage
+        if event.kind is not EventKind.USAGE or usage is None:
+            return
+        cached = usage.cached_tokens
+        if isinstance(cached, int) and not isinstance(cached, bool) and cached > 0:
+            self._last_cache_hit_at = self._now()
+            usage.cached_tokens_effective = cached
+            if self._cache_unreported_logged:
+                # 恢复上报：只打一次，重置标记好让下一次中断能再报一次
+                self._cache_unreported_logged = False
+                logger.info("TRAE 恢复上报缓存命中，停止按假定比例推算")
+            return
+        if isinstance(cached, int) and not isinstance(cached, bool):
+            # == 0：窗口内见过命中就当真 0（effective=0），否则按未上报处理
+            hit_at = self._last_cache_hit_at
+            if hit_at is not None and self._now() - hit_at < self.CACHE_REPORT_STALE_SECONDS:
+                usage.cached_tokens_effective = 0
+                return
+        # 未上报（0 且已过窗口 / None）：清空真值，按比例推算有效命中
+        usage.cached_tokens = None
+        ratio = self._assumed_cache_ratio()
+        usage.cached_tokens_effective = _assumed_cache_tokens(usage.input_tokens, ratio)
+        if not self._cache_unreported_logged:
+            self._cache_unreported_logged = True
+            # 比例来自热更配置，可能是坏值（字符串/NaN）：日志只做安全格式化，
+            # 绝不让一条 INFO 把流请求带崩（logging 内部也只吞掉格式化异常）
+            shown = (f"{ratio:.2f}"
+                     if isinstance(ratio, (int, float)) and not isinstance(ratio, bool)
+                     else repr(ratio))
+            logger.info(
+                "TRAE 未上报缓存命中，按假定比例 %s 推算有效命中用于定价"
+                "（报表仍记为未上报）", shown)
 
     # ---------------------------------------------------------- 短请求接口
 

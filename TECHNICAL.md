@@ -328,6 +328,7 @@ WPS 账号 cookie + 一次对话三条请求。凭据接受整段 Cookie / 裸 `
 - 模型清单：`get_detail_param` 的响应体是**正常业务数据**（实测 54 条 / 535,796 字节、无 `content-length`），成功路径上限独立为 `MODELS_BODY_LIMIT`（8MB），不复用错误体的 `BOUNDED_BODY_LIMIT`（256KB，否则动态拉取恒失败并静默回退静态表）。拉取时按上游权威字段过滤：`is_invisible_to_user is True`（内部模型）+ `identity_list` 不含本账号身份（会员模型，选中必回 1005）。静态兜底表只收客户端可见模型，且沿用上次的过滤结论。
 - 认证：浏览器登录 → 302 回调 → `ExchangeToken` → `GetUserInfo`；刷新 `POST /cloudide/api/v3/trae/oauth/ExchangeToken`（refreshToken 轮换）。签到 `/trae/api/v2/ug/checkin_credits/{status,claim}`；额度 `/trae/api/v2/pay/ide_user_ent_usage`。签到须确认到账：`claim` 对当天已签也回 `code:0` → `checked_in` 为真且回查 `credits` 有增加；`9074` 每次换 16 位数字串，一轮最多重试 2 次。
 - SSE 序列 `metadata` → `timing_cost` → `output`×N → `extra_info` → `token_usage` → `done`；`cache_read_input_tokens` / `cache_creation_input_tokens` → `cached_tokens`，无 per-request credit。流内 `1005` 权益不足、`4008` 配额耗尽（CREDIT，冷却到次日签到）、`4001` 参数 / 模型不可用；`developer` 归一 system。
+- **缓存不再上报（2026-10 起）**：`cache_read_input_tokens` 恒 0、`prompt_cache_pool_record` 恒 null，但**缓存折扣仍生效**（本账号 `credit_events` 余额差反解确认）。客户端把「未上报」记为 `cached_tokens=NULL`（报表缓存率显示 `—`，不撒谎），另按 `TRAE_ASSUMED_CACHE_RATIO`（默认 `0.95`）推算 `cached_tokens_effective` **仅供定价 / 成本估算**。比例可热更；后台「缓存命中率校准」任务每 `CACHE_RATIO_INTERVAL_MINUTES`（默认 6h）用近 7 天 `credit_events` 负向 delta 对 `usage_events` token **整窗合并**反解（按 UTC 天切会让余额差与 token 错位：生产实测按天 0.934 / 整窗 0.979），漂移 ≥0.01 才回写。**历史明细**用 `scripts/normalize_trae_cache.py`（默认预览）把最后一条真实命中之后的 0 置 NULL，再跑 `backfill_trae_credit.py --apply` 与 `backfill_cost.py --provider trae --apply` 按假定比例重估。
 
 ## 6. 调度器
 
@@ -480,6 +481,7 @@ PRAGMA foreign_keys = ON;   -- 库里没有外键，关系全在应用层校验
 | 运维告警 | 每 `ALERT_INTERVAL_MINUTES`（5） | 九类规则；命中落 `alert_events` + webhook；静默窗去重 |
 | 上游状态聚合 | 每 `UPSTREAM_STATUS_MINUTES`（5） | 并发抓状态 → 归一 → 原子替换内存快照；整轮永不抛 |
 | 模型主动探活 | 每 `MODEL_PROBE_MINUTES`（0 关闭） | 只探仍被 blocked 的 (渠道, 模型)，`max_tokens=16` |
+| 缓存命中率校准 | 每 `CACHE_RATIO_INTERVAL_MINUTES`（360，下限 60） | TRAE 用近 7 天 `credit_events` 负向余额差对 `usage_events` token 整窗合并反解命中率，漂移 ≥0.01 回写 `TRAE_ASSUMED_CACHE_RATIO` |
 
 - 签到 / 成长隔离键 `checkin_scope(data) or f"credential|{credential_id}"`；`_guarded` 在任务返回 `None` 时不入账；运行态只在本进程，重启归零。
 - 手动 `POST /api/tasks/{key}/run`（admin + CSRF）返回 `{…, ran, busy}`；运行中撞上回 `busy=true`。

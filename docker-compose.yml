@@ -52,6 +52,11 @@ services:
       # TRAE 本账号拥有的访问身份（`0`=免费档）。白名单不含本账号身份的模型
       # 选中必回 1005，故拉取时按它过滤；留空 = 不过滤。
       TRAE_ACCOUNT_IDENTITIES: ${TRAE_ACCOUNT_IDENTITIES:-0}
+      # TRAE 未上报缓存命中（2026-10 起恒 0/null）时的假定命中率，只影响积分 /
+      # 成本估算；取值 [0,1]，缓存命中率校准任务会用生产余额差自动回写
+      TRAE_ASSUMED_CACHE_RATIO: ${TRAE_ASSUMED_CACHE_RATIO:-0.95}
+      # 缓存命中率校准周期（分钟，下限 60）
+      CACHE_RATIO_INTERVAL_MINUTES: ${CACHE_RATIO_INTERVAL_MINUTES:-360}
       QUOTA_PROBE_MINUTES: ${QUOTA_PROBE_MINUTES:-60}
       # token 预刷新轮询周期（分钟）：短寿命渠道（CodeArts STS 2h）的预刷新
       # 窗口会被封顶，窗口必须窄于该周期才不会整轮漏过、拖到到期才刷

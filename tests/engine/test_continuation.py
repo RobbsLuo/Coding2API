@@ -284,3 +284,19 @@ async def test_usage_accumulation_with_missing_fields():
     est = _add_usage(base, Usage(input_tokens=1, credit=0.2, credit_estimated=True))
     assert est.credit_estimated is True
     assert _add_usage(est, Usage(input_tokens=1, credit=0.1)).credit_estimated is True
+
+
+def test_usage_accumulation_sums_cached_tokens_effective():
+    """多轮续写：有效命中与其它 usage 字段同口径累加，保住定价依据。"""
+    from src.engine.continuation import _add_usage
+
+    first = _add_usage(Usage(), Usage(input_tokens=100, cached_tokens_effective=60))
+    assert first.cached_tokens_effective == 60
+    second = _add_usage(first, Usage(input_tokens=50, cached_tokens_effective=20))
+    assert second.cached_tokens_effective == 80
+    assert second.input_tokens == 150
+    # 某轮未上报（None）不把累计清零
+    assert _add_usage(second, Usage(input_tokens=10)).cached_tokens_effective == 80
+    # 真 0 也要算进累计（_sum 的 None/0 区分）
+    assert _add_usage(Usage(cached_tokens_effective=0),
+                      Usage(cached_tokens_effective=7)).cached_tokens_effective == 7

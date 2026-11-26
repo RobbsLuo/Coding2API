@@ -24,25 +24,45 @@ from typing import Any
 from ..pricing import PriceTable, estimate_cost_usd, to_cny
 
 
-def _row_cost(table: PriceTable, rate: float, row: Any) -> tuple[float | None, float | None]:
-    """单行 (cost_usd, cost_cny)；无法定价时 (None, None)。"""
+def _row_cost(table: PriceTable, rate: float, row: Any,
+              *, trae_cache_ratio: float | None = None) -> tuple[float | None, float | None]:
+    """单行 (cost_usd, cost_cny)；无法定价时 (None, None)。
+
+    `trae_cache_ratio`：TRAE 行 `cached_tokens IS NULL`（上游不上报）时按
+    `input × 比例` 折算有效命中，与实时写入路径同口径；None = 按 0 命中
+    （宁可高估不低估）。其他渠道不受影响。
+    """
+    cached = row["cached_tokens"]
+    if (cached is None and trae_cache_ratio is not None
+            and row["provider"] == "trae"
+            and isinstance(row["input_tokens"], int) and row["input_tokens"] >= 0
+            and 0 < trae_cache_ratio <= 1):
+        cached = min(int(row["input_tokens"] * trae_cache_ratio), row["input_tokens"])
     usd = estimate_cost_usd(
         table, row["model"], input_tokens=row["input_tokens"],
-        output_tokens=row["output_tokens"], cached_tokens=row["cached_tokens"])
+        output_tokens=row["output_tokens"], cached_tokens=cached)
     if usd is None:
         return None, None
     return usd, to_cny(usd, rate)
 
 
-def _changes(conn, table: PriceTable, rate: float):
+def _changes(conn, table: PriceTable, rate: float,
+             *, trae_cache_ratio: float | None = None,
+             provider: str | None = None):
     """产出 (rowid, model, cost_usd, cost_cny)，只含会被改写的行（生成器）。
 
     不能定价的行跳过（保持原样）；已经是当前口径的行也跳过（保证幂等）。
+    `provider` 非空时只处理该渠道——按「今天口径」重估会改写历史成本，
+    只想修正某一个渠道（如 TRAE 缓存不再上报）时不该波及其他渠道。
     """
-    for row in conn.execute(
-            "SELECT rowid, model, input_tokens, output_tokens, cached_tokens, "
-            "cost_usd, cost_cny FROM usage_events"):
-        usd, cny = _row_cost(table, rate, row)
+    sql = ("SELECT rowid, provider, model, input_tokens, output_tokens, cached_tokens, "
+           "cost_usd, cost_cny FROM usage_events")
+    params: tuple[Any, ...] = ()
+    if provider is not None:
+        sql += " WHERE provider = ?"
+        params = (provider,)
+    for row in conn.execute(sql, params):
+        usd, cny = _row_cost(table, rate, row, trae_cache_ratio=trae_cache_ratio)
         if usd is None:
             continue
         if row["cost_usd"] == usd and row["cost_cny"] == cny:
@@ -50,10 +70,13 @@ def _changes(conn, table: PriceTable, rate: float):
         yield row["rowid"], row["model"], usd, cny
 
 
-def pending_cost(conn, table: PriceTable, rate: float) -> list[tuple[str, int, float]]:
+def pending_cost(conn, table: PriceTable, rate: float, *,
+                 trae_cache_ratio: float | None = None,
+                 provider: str | None = None) -> list[tuple[str, int, float]]:
     """预览：[(model, 条数, 合计人民币)]，只含会被改写的行。"""
     counts: dict[str, list[Any]] = {}
-    for _rowid, model, _usd, cny in _changes(conn, table, rate):
+    for _rowid, model, _usd, cny in _changes(
+            conn, table, rate, trae_cache_ratio=trae_cache_ratio, provider=provider):
         entry = counts.setdefault(model, [0, 0.0])
         entry[0] += 1
         entry[1] += cny
@@ -61,7 +84,9 @@ def pending_cost(conn, table: PriceTable, rate: float) -> list[tuple[str, int, f
             for model, (count, total) in sorted(counts.items())]
 
 
-def recompute_costs(db, table: PriceTable, rate: float) -> int:
+def recompute_costs(db, table: PriceTable, rate: float, *,
+                    trae_cache_ratio: float | None = None,
+                    provider: str | None = None) -> int:
     """按当前价表 / 汇率重算全部明细成本，返回改写条数（0 = 无需处理）。
 
     `db` 只用到 `Database` 的 `transaction()` 形态（鸭子类型），便于脚本注入
@@ -69,7 +94,9 @@ def recompute_costs(db, table: PriceTable, rate: float) -> int:
     """
     with db.transaction() as conn:
         updates = [(usd, cny, rowid)
-                   for rowid, _model, usd, cny in _changes(conn, table, rate)]
+                   for rowid, _model, usd, cny in _changes(
+                       conn, table, rate, trae_cache_ratio=trae_cache_ratio,
+                       provider=provider)]
         if updates:
             conn.executemany(
                 "UPDATE usage_events SET cost_usd = ?, cost_cny = ? WHERE rowid = ?",
@@ -88,6 +115,7 @@ _GAP_MISMATCH_SQL = """
     OR h.input_tokens != ev.input_tokens
     OR h.output_tokens != ev.output_tokens
     OR h.cached_tokens != ev.cached_tokens
+    OR h.cached_input_tokens != ev.cached_input_tokens
 """
 
 # 明细按 (小时, 用户, 渠道, 模型) 聚合——与 usage_hourly 的主键同粒度
@@ -96,7 +124,9 @@ _EVENT_HOURLY_SQL = """
            COUNT(*) AS requests, SUM(ok) AS ok_count,
            COALESCE(SUM(input_tokens), 0) AS input_tokens,
            COALESCE(SUM(output_tokens), 0) AS output_tokens,
-           COALESCE(SUM(cached_tokens), 0) AS cached_tokens
+           COALESCE(SUM(cached_tokens), 0) AS cached_tokens,
+           COALESCE(SUM(CASE WHEN cached_tokens IS NOT NULL
+                             THEN input_tokens ELSE 0 END), 0) AS cached_input_tokens
     FROM usage_events GROUP BY 1, 2, 3, 4
 """
 

@@ -152,6 +152,8 @@ def test_migrate_adds_cached_tokens_to_legacy_db(tmp_path):
     assert {"cost_usd_sum", "cost_cny_sum", "cost_known"} <= hourly_columns
     # 总览改读小时汇总后新增的三列（老库历史行补 0，数值无法回填）
     assert {"reasoning_tokens", "cached_tokens", "cached_known"} <= hourly_columns
+    # 命中率分母（v40）：老库补 0 = 未采集，查询侧回落 input_tokens
+    assert "cached_input_tokens" in hourly_columns
     legacy_hourly = db.connect().execute(
         "SELECT requests, reasoning_tokens, cached_known FROM usage_hourly "
         "WHERE hour_utc = 1").fetchone()
@@ -762,7 +764,7 @@ def test_schema_v39_adds_edit_version_and_model_whitelist_on_old_db(tmp_path):
     columns = {row[1] for row in db.connect().execute(
         "PRAGMA table_info(credentials)")}
     assert {"updated_at", "allowed_models"} <= columns
-    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 39
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
     defaults = {row[1]: row[4] for row in db.connect().execute(
         "PRAGMA table_info(credentials)")}
     assert defaults["updated_at"] in ("0", 0)
@@ -784,6 +786,42 @@ def test_schema_v39_adds_edit_version_and_model_whitelist_on_old_db(tmp_path):
     assert db.connect().execute(
         "SELECT updated_at, allowed_models FROM credentials WHERE id = 'cred_old'"
     ).fetchone()[:] == (7, "glm-*")
+    db.close()
+
+
+def test_schema_v40_adds_cached_input_tokens_on_old_db(tmp_path):
+    """老库（v39）升级：usage_hourly 补 cached_input_tokens，既有值保留。
+
+    NULL 语义（`usage_events.cached_tokens` NULL=未上报 / 0=真实未命中）要求
+    命中率分母只含上报过的输入量；迁移**不回填**，老行补 0 后由查询侧对
+    「cached_input_tokens=0 且 cached_known>0」回退用 input_tokens。
+    """
+    from src.db.migrate import SCHEMA_VERSION
+
+    db = Database(tmp_path / "legacy40.sqlite3")
+    apply_schema(db.connect())
+    # 模拟「升级前没有这列」的 v39 库：先删列再回退版本号，同时留一行历史汇总
+    db.connect().execute(
+        "INSERT INTO usage_hourly (hour_utc, username, provider, model, requests,"
+        " ok_count, input_tokens, output_tokens, cached_tokens, cached_known)"
+        " VALUES (1, 'u', 'trae', 'm', 5, 4, 900, 100, 30, 2)")
+    db.connect().execute("ALTER TABLE usage_hourly DROP COLUMN cached_input_tokens")
+    db.connect().execute("PRAGMA user_version = 39")
+    db.connect().commit()
+
+    apply_schema(db.connect())
+    columns = {row[1] for row in db.connect().execute(
+        "PRAGMA table_info(usage_hourly)")}
+    assert "cached_input_tokens" in columns
+    assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 40
+    # 既有值原样保留；新列取默认 0（不做数据回填）
+    row = db.connect().execute(
+        "SELECT requests, ok_count, input_tokens, output_tokens, cached_tokens,"
+        " cached_known, cached_input_tokens FROM usage_hourly WHERE hour_utc = 1"
+    ).fetchone()
+    assert tuple(row[:]) == (5, 4, 900, 100, 30, 2, 0)
+    # 幂等：再跑一次不报错
+    apply_schema(db.connect())
     db.close()
 
 

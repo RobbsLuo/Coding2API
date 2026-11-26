@@ -128,6 +128,24 @@ def test_fill_estimated_credit_only_when_missing():
     assert filled.usage.credit == 216.0
     assert filled.usage.credit_estimated is True
 
+
+def test_fill_estimated_credit_prefers_effective_cached_tokens():
+    """上游不报缓存时用 provider 推算的有效命中定价，而不是把 0 当真。"""
+    from src.provider.trae.client import _fill_estimated_credit
+
+    event = Event(kind=EventKind.USAGE, usage=Usage(
+        input_tokens=1_000_000, output_tokens=0, cached_tokens=0,
+        cached_tokens_effective=500_000))
+    _fill_estimated_credit(event, "glm-5.2")
+    # glm-5.2 有效价 (216, 756, 54)：50 万命中 → 108 + 27
+    assert event.usage.credit == 135.0
+    assert event.usage.credit_estimated is True
+
+    fallback = Event(kind=EventKind.USAGE, usage=Usage(
+        input_tokens=1_000_000, output_tokens=0, cached_tokens=1_000_000))
+    _fill_estimated_credit(fallback, "glm-5.2")
+    assert fallback.usage.credit == 54.0            # effective 为 None → 用真值
+
 def test_backfill_estimated_credit_fills_history(repo):
     """历史 trae 明细补推算：只动 credit 为 NULL / credit_estimated=1 的 trae 行，幂等。"""
     from src.provider.trae.backfill import backfill_estimated_credit

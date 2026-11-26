@@ -1110,6 +1110,7 @@ class Executor:
             output_tokens=_usage_field(usage, "output_tokens"),
             reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
             cached_tokens=_usage_field(usage, "cached_tokens"),
+            cached_tokens_effective=_usage_field(usage, "cached_tokens_effective"),
             credit=_usage_field(usage, "credit"),
             credit_estimated=bool(_usage_field(usage, "credit_estimated")),
             ttfb_ms=ttfb_ms, latency_ms=_elapsed_ms(started))
@@ -1610,6 +1611,7 @@ class Executor:
                         # 上游可能已真实计费），客户端频繁中断即可绕过限额。
                         reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
                         cached_tokens=_usage_field(usage, "cached_tokens"),
+                        cached_tokens_effective=_usage_field(usage, "cached_tokens_effective"),
                         credit=_usage_field(usage, "credit"),
                         credit_estimated=bool(_usage_field(usage, "credit_estimated")),
                         latency_ms=_elapsed_ms(state.started))
@@ -1823,6 +1825,7 @@ class Executor:
             output_tokens=_usage_field(usage, "output_tokens"),
             reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
             cached_tokens=_usage_field(usage, "cached_tokens"),
+            cached_tokens_effective=_usage_field(usage, "cached_tokens_effective"),
             credit=_usage_field(usage, "credit"),
             credit_estimated=bool(_usage_field(usage, "credit_estimated")),
             ttfb_ms=state.ttfb_ms(), latency_ms=_elapsed_ms(state.started))
@@ -1882,6 +1885,7 @@ class Executor:
             output_tokens=_usage_field(usage, "output_tokens"),
             reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
             cached_tokens=_usage_field(usage, "cached_tokens"),
+            cached_tokens_effective=_usage_field(usage, "cached_tokens_effective"),
             credit=_usage_field(usage, "credit"),
             credit_estimated=bool(_usage_field(usage, "credit_estimated")),
             ttfb_ms=state.ttfb_ms(), latency_ms=_elapsed_ms(state.started))
@@ -1906,6 +1910,7 @@ class Executor:
             output_tokens=_usage_field(usage, "output_tokens"),
             reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
             cached_tokens=_usage_field(usage, "cached_tokens"),
+            cached_tokens_effective=_usage_field(usage, "cached_tokens_effective"),
             credit=_usage_field(usage, "credit"),
             credit_estimated=bool(_usage_field(usage, "credit_estimated")),
             ttfb_ms=(int((first_event_at - started) * 1000)
@@ -2286,6 +2291,8 @@ class Executor:
                         .get("reasoning_tokens"),
                         cached_tokens=(usage.get("prompt_tokens_details") or {})
                         .get("cached_tokens"),
+                        cached_tokens_effective=(usage_event.cached_tokens_effective
+                                                 if usage_event else None),
                         credit=(usage_event.credit if usage_event else None),
                         credit_estimated=bool(usage_event.credit_estimated)
                         if usage_event else False,
@@ -2931,6 +2938,7 @@ class Executor:
             output_tokens=_usage_field(usage, "output_tokens"),
             reasoning_tokens=_usage_field(usage, "reasoning_tokens"),
             cached_tokens=_usage_field(usage, "cached_tokens"),
+            cached_tokens_effective=_usage_field(usage, "cached_tokens_effective"),
             credit=_usage_field(usage, "credit"),
             credit_estimated=bool(_usage_field(usage, "credit_estimated")),
             latency_ms=_elapsed_ms(started))

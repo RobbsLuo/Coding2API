@@ -670,3 +670,58 @@ def test_trae_identities_recomputed_from_effective_value(runtime):
     assert runtime.trae_identities == frozenset({0, 2})
     runtime.reset("trae_account_identities")
     assert runtime.trae_identities == frozenset({0})
+
+
+# ------------------------------------------------------ TRAE 缓存命中率校准
+
+def test_cache_ratio_settings_defaults_and_parse(runtime):
+    """两项的类型 / 范围 / 分组：比例 [0,1]、周期下限 60 分钟。"""
+    assert runtime.trae_assumed_cache_ratio == 0.95
+    assert runtime.cache_ratio_interval_minutes == 360
+    assert parse_value("trae_assumed_cache_ratio", "0.8") == 0.8
+    assert parse_value("cache_ratio_interval_minutes", "120") == 120
+    with pytest.raises(InvalidSetting, match="不能大于"):
+        parse_value("trae_assumed_cache_ratio", "1.2")
+    with pytest.raises(InvalidSetting, match="不能小于"):
+        parse_value("trae_assumed_cache_ratio", "-0.1")
+    with pytest.raises(InvalidSetting, match="不能小于"):
+        parse_value("cache_ratio_interval_minutes", "30")
+    # 比例是网关计费项，周期归到校准任务卡片
+    assert HOT_BY_KEY["trae_assumed_cache_ratio"].group == "gateway_control"
+    assert HOT_BY_KEY["trae_assumed_cache_ratio"].task is None
+    assert HOT_BY_KEY["cache_ratio_interval_minutes"].task == "cache_ratio"
+
+
+def test_cache_ratio_override_round_trip():
+    """覆盖值生效、恢复默认后回落 env。"""
+    store = MemoryStore()
+    runtime = RuntimeSettings(_base(), store)
+    runtime.set("trae_assumed_cache_ratio", 0.72)
+    assert runtime.trae_assumed_cache_ratio == 0.72
+    assert runtime.is_overridden("trae_assumed_cache_ratio")
+    runtime.reset("trae_assumed_cache_ratio")
+    assert runtime.trae_assumed_cache_ratio == 0.95
+
+
+def test_cache_ratio_interval_floor_clamps_stale_override():
+    stale = RuntimeSettings(_base(), MemoryStore({"cache_ratio_interval_minutes": "5"}))
+    assert stale.cache_ratio_interval_minutes == 360     # 非法行被丢弃回落默认
+    clamped = RuntimeSettings(_base(CACHE_RATIO_INTERVAL_MINUTES=1), MemoryStore())
+    assert clamped.cache_ratio_interval_minutes == 60    # 钳到 floor
+
+
+def test_trae_assumed_cache_ratio_reaches_client_and_runner(admin_app):
+    """比例必须热更到 TRAE 客户端与校准任务周期（装配传 lambda，不是快照）。"""
+    app, client = admin_app
+    runner = app.state.task_runner
+    trae_client = app.state.services.registry["trae"].client
+
+    client.put("/api/settings", json={"values": {
+        "trae_assumed_cache_ratio": 0.61,
+        "cache_ratio_interval_minutes": 90,
+    }})
+
+    # 客户端每帧现读取值器（不重建连接）
+    assert trae_client._assumed_cache_ratio() == 0.61       # noqa: SLF001
+    assert runner._cache_ratio_interval == 90 * 60           # noqa: SLF001
+    assert "cache_ratio" in {item["key"] for item in runner.task_status()}

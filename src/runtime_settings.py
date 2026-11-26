@@ -198,6 +198,11 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "0 = 关闭（默认）：探活会真发上游请求、消耗额度，是否开启按余量"
                "决定；负缓存本身 6 小时起步，开启后建议 ≥60 分钟。",
                minimum=0, task="model_probe"),
+    HotSetting("cache_ratio_interval_minutes", int, "缓存命中率校准周期（分钟）",
+               "用 `credit_events` 余额差对 `usage_events` token 反推 TRAE 上游"
+               "实际缓存命中率、回写「TRAE 假定缓存命中率」的一轮间隔。样本以"
+               "(凭证, 天) 为单位，默认 6 小时足够。下限 60 分钟。",
+               minimum=60, task="cache_ratio", floor=60),
     HotSetting("openrouter_catalog_minutes", int, "模型目录刷新周期（分钟）",
                "后台拉取 OpenRouter 公开模型列表的间隔：一次抓取代刊例价（成本"
                "估算）、明细元数据（「模型列表」页）与 Artificial Analysis 能力"
@@ -419,6 +424,13 @@ HOT_SETTINGS: tuple[HotSetting, ...] = (
                "配合「网关暂停」使用：写清为什么停（事故编号 / 上游状态页链接），"
                "只进服务端日志与审计。留空按「未填原因」记录。",
                group="gateway_control"),
+    HotSetting("trae_assumed_cache_ratio", float, "TRAE 假定缓存命中率",
+               "上游自 2026-10 起不再上报缓存命中（`cache_read_input_tokens` 恒 0、"
+               "`prompt_cache_pool_record` 恒 null），但计费仍按缓存折扣。未上报时"
+               "用该比例推算有效命中，供积分 / 成本估算（报表仍记 NULL）。默认 0.95"
+               " 来自生产 `credit_events` 余额差实测；「缓存命中率校准」任务会用新"
+               "数据自动回写此值。只在未上报缓存时生效。",
+               minimum=0.0, maximum=1.0, group="gateway_control"),
     HotSetting("dump_request_bodies", bool, "请求体诊断落盘",
                "把每次 `/v1/chat/completions` 的**原始请求体**（含完整对话内容）"
                "写到 `DATA_DIR/dumps/`，目录 0700、文件 0600、保留 200 个且不超过 "
@@ -807,6 +819,10 @@ class RuntimeSettings:
         return str(self.get("trae_account_identities"))
 
     @property
+    def trae_assumed_cache_ratio(self) -> float:
+        return float(self.get("trae_assumed_cache_ratio"))
+
+    @property
     def trae_identities(self):
         """TRAE 身份集合：与 `Settings.trae_identities` 同口径，但基于生效值重算。
 
@@ -933,6 +949,10 @@ class RuntimeSettings:
     @property
     def model_probe_minutes(self) -> int:
         return int(self.get("model_probe_minutes"))
+
+    @property
+    def cache_ratio_interval_minutes(self) -> int:
+        return int(self.get("cache_ratio_interval_minutes"))
 
     @property
     def openrouter_catalog_minutes(self) -> int:

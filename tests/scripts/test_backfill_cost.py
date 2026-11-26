@@ -40,6 +40,14 @@ def _set_rate(db, value: str) -> None:
             (value,))
 
 
+def _set_ratio(db, value: str) -> None:
+    """写 TRAE 假定命中率覆盖：老断言按「不折算」的 0 值保持稳定。"""
+    with db.transaction() as conn:
+        conn.execute(
+            "INSERT INTO runtime_settings (key, value, updated_at)"
+            " VALUES ('trae_assumed_cache_ratio', ?, 0)", (value,))
+
+
 def test_pending_lists_only_changed_priced_rows(db):
     """只统计「能定价且与当前口径不同」的行：未收录 / 无输入 / 已最新都跳过。"""
     _insert(db, id="a", model="glm-5.2")                              # 补：无 cost
@@ -67,6 +75,7 @@ def test_recompute_costs_writes_and_is_idempotent(db):
 def test_main_preview_does_not_write(db, tmp_path, capsys):
     """默认预览：不写库，打印待补统计。"""
     save_catalog(str(tmp_path), TABLE, {}, {})
+    _set_ratio(db, "0")
     _set_rate(db, "7.0")
     _insert(db, id="a", model="glm-5.2")
     assert BACKFILL.main(["--db", db.path]) == 0
@@ -93,6 +102,7 @@ def test_main_empty_price_table_aborts(db, tmp_path, capsys):
 def test_main_apply_backfills_and_rolls_up(db, tmp_path, capsys):
     """--apply：备份 + 补明细 + 重算小时汇总。"""
     save_catalog(str(tmp_path), TABLE, {}, {})
+    _set_ratio(db, "0")
     _set_rate(db, "7.0")
     _insert(db, id="a", model="glm-5.2")
     assert BACKFILL.main(["--db", db.path, "--apply"]) == 0
@@ -109,6 +119,7 @@ def test_main_apply_backfills_and_rolls_up(db, tmp_path, capsys):
 def test_main_apply_is_idempotent(db, tmp_path, capsys):
     """--apply 重跑：明细已是当前口径，无待处理行。"""
     save_catalog(str(tmp_path), TABLE, {}, {})
+    _set_ratio(db, "0")
     _set_rate(db, "7.0")
     _insert(db, id="a", model="glm-5.2")
     assert BACKFILL.main(["--db", db.path, "--apply"]) == 0
@@ -122,10 +133,45 @@ def test_main_uses_explicit_data_dir(db, tmp_path, capsys):
     other = tmp_path / "snap"
     other.mkdir()
     save_catalog(str(other), TABLE, {}, {})
+    _set_ratio(db, "0")
     _set_rate(db, "7.0")
     _insert(db, id="a", model="glm-5.2")
     assert BACKFILL.main(["--db", db.path, "--data-dir", str(other)]) == 0
     assert "共 1 条明细待处理" in capsys.readouterr().out
+
+
+def test_main_applies_ratio_to_unreported_trae_rows(db, tmp_path, capsys):
+    """TRAE 行 cached_tokens=NULL（上游未上报）时按假定命中率折算成本。"""
+    save_catalog(str(tmp_path), TABLE, {}, {})
+    _set_rate(db, "7.0")
+    _set_ratio(db, "0.95")
+    _insert(db, id="a", model="glm-5.2")                       # provider="trae"
+    assert BACKFILL.main(["--db", db.path, "--apply"]) == 0
+    event = db.connect().execute(
+        "SELECT cost_usd, cost_cny FROM usage_events WHERE id = 'a'").fetchone()
+    assert event["cost_usd"] == pytest.approx(0.525)
+    assert event["cost_cny"] == pytest.approx(3.675)
+
+
+def test_ratio_does_not_apply_to_other_providers(db):
+    """实价渠道（非 TRAE）的 NULL 命中不套用假定比例。"""
+    _insert(db, id="a", provider="zen", model="glm-5.2")
+    assert BACKFILL.pending_cost(db.connect(), TABLE, 7.0,
+                                 trae_cache_ratio=0.95) == [("glm-5.2", 1, 7.0)]
+
+
+def test_provider_filter_limits_rewrite(db, tmp_path, capsys):
+    """--provider 只重算该渠道，不按「今天口径」改写其他渠道历史成本。"""
+    save_catalog(str(tmp_path), TABLE, {}, {})
+    _set_rate(db, "7.0")
+    _set_ratio(db, "0.95")
+    _insert(db, id="t", provider="trae", model="glm-5.2")
+    _insert(db, id="z", provider="zen", model="glm-5.2")
+    assert BACKFILL.main(["--db", db.path, "--apply", "--provider", "trae"]) == 0
+    rows = {r["id"]: r["cost_usd"] for r in db.connect().execute(
+        "SELECT id, cost_usd FROM usage_events")}
+    assert rows["t"] == pytest.approx(0.525)
+    assert rows["z"] is None                    # 未触及
 
 
 def test_main_rejects_missing_db(tmp_path):

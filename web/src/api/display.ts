@@ -323,9 +323,13 @@ export function formatCompact(value: number | null | undefined): string {
 }
 
 /**
- * 缓存命中率：命中 token ÷ 输入 token。
+ * 缓存命中率：命中 token ÷ **已上报缓存的请求**的输入 token。
  *
- * 输入为 0 或缓存未上报时返回 `—`——不能算比率，也不该拿 0 冒充「0%」。
+ * 第二个参数必须传 `cached_input_tokens`（只统计上报过缓存字段的请求），
+ * 不能传总 `input_tokens`：部分渠道（如 TRAE）不上报缓存，用总输入当分母会把
+ * 命中率稀释成假低值。老接口没有该字段时才回落到总输入。
+ *
+ * 输入为 0 或缓存未上报（null）时返回 `—`——不能算比率，也不该拿 0 冒充「0%」。
  * 命中理论上不会超过输入，超出时按 100% 截断，避免出现 >100% 的怪值。
  */
 export function formatCacheRate(

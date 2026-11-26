@@ -31,17 +31,36 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scripts._common import DbAdapter, backup  # noqa: E402
+from src.config import Settings, load_settings  # noqa: E402
 from src.db.conn import Database  # noqa: E402
+from src.db.repo import RuntimeSettingsRepository  # noqa: E402
 from src.provider.trae import pricing  # noqa: E402
-from src.provider.trae.backfill import backfill_estimated_credit  # noqa: E402
+from src.provider.trae.backfill import _effective_cached, backfill_estimated_credit  # noqa: E402
+from src.runtime_settings import load_runtime_settings  # noqa: E402
 from src.stats.collector import StatsCollector  # noqa: E402
 
 
-def pending(conn) -> list[tuple[str, int, float, int]]:
+def assumed_cache_ratio(database: Database) -> float:
+    """当前生效的 TRAE 假定缓存命中率（DB 热更 > env 默认）。
+
+    与实时链路同口径：`cached_tokens IS NULL` 的行按该比例折算，避免历史
+    明细按 0 命中（全价）高估。脚本可在无 `.env` 的环境跑，读配置失败时
+    退回最小底座的自带默认值。
+    """
+    try:
+        base = load_settings()
+    except Exception:  # noqa: BLE001 - 脚本容错：拿不到 env 就用默认值
+        base = Settings(_env_file=None, app_secret="backfill-trae-credit-script")
+    runtime = load_runtime_settings(base, RuntimeSettingsRepository(database))
+    return runtime.trae_assumed_cache_ratio
+
+
+def pending(conn, ratio: float | None = None) -> list[tuple[str, int, float, int]]:
     """待处理行列表：(model, 条数, 合计推算积分, 其中重算条数)，只含模型已收录的行。
 
     「重算」指 `credit_estimated = 1` 的旧推算值（单价表调整后需刷新）；
-    其余为 `credit IS NULL` 的历史明细。
+    其余为 `credit IS NULL` 的历史明细。`ratio` 用于 `cached_tokens IS NULL`
+    的行（上游未上报），与实时链路一致。
     """
     counts: dict[str, list] = {}
     for model, input_tokens, output_tokens, cached_tokens, credit, estimated in conn.execute(
@@ -50,7 +69,7 @@ def pending(conn) -> list[tuple[str, int, float, int]]:
             "AND (credit IS NULL OR credit_estimated = 1)"):
         new = pricing.estimate_credit(
             model, input_tokens=input_tokens, output_tokens=output_tokens,
-            cached_tokens=cached_tokens)
+            cached_tokens=_effective_cached(cached_tokens, input_tokens, ratio))
         if new is None:
             continue
         if credit is not None and credit == new:
@@ -68,9 +87,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", help="SQLite 路径（默认 DATA_DIR/coding2api.sqlite3）")
     parser.add_argument("--apply", action="store_true",
                         help="实际写库（默认只预览）")
+    parser.add_argument("--trae-cache-ratio", type=float, default=None,
+                        help="上游未上报缓存时的假定命中率 0..1（默认取运行时配置）")
     args = parser.parse_args(argv)
-
-    from src.config import load_settings
 
     db_path = Path(args.db) if args.db else Path(load_settings().db_path)
     if not db_path.is_file():
@@ -78,7 +97,10 @@ def main(argv: list[str] | None = None) -> int:
 
     database = Database(db_path)
     conn = database.connect()
-    todo = pending(conn)
+    ratio = (args.trae_cache_ratio if args.trae_cache_ratio is not None
+             else assumed_cache_ratio(database))
+    print(f"TRAE 假定缓存命中率 {ratio:.3f}（用于未上报 cache 的历史明细）")
+    todo = pending(conn, ratio)
     if not todo:
         print("没有需要处理的 TRAE 历史明细")
         return 0
@@ -94,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     target = backup(db_path)
-    updated = backfill_estimated_credit(DbAdapter(conn))
+    updated = backfill_estimated_credit(DbAdapter(conn), assumed_cache_ratio=ratio)
     StatsCollector(DbAdapter(conn)).rollup_hourly()
     print(f"已处理 {updated} 条明细，小时汇总已重算（备份: {target}）")
     return 0

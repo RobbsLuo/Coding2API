@@ -1152,3 +1152,78 @@ async def test_sync_growth_delegates_to_task(repo):
     )
     assert await runner._sync_growth() == {"gifts": 1}
     assert FakeGrowth.calls == 1
+
+
+# ------------------------------------------------------ 缓存命中率校准任务
+
+def _cache_ratio_runner(repo, *, task=None, interval=None):
+    """装配一条只含必需任务的 runner，可选挂上缓存命中率校准。"""
+    credentials, db = repo
+    kwargs = {}
+    if task is not None:
+        kwargs["cache_ratio"] = task
+    if interval is not None:
+        kwargs["cache_ratio_interval_minutes"] = interval
+    return TaskRunner(
+        quota_probe=QuotaProbeTask(credentials, {}, None),
+        checkin=CheckinTask(credentials, {}),
+        refresh=RefreshTask(credentials, {}, skew_seconds=3600),
+        retention=RetentionTask(StatsCollector(db)),
+        **kwargs,
+    )
+
+
+def test_build_runner_wires_cache_ratio(repo):
+    """cache_ratio 传入时接线：周期从配置读，循环、间隔与任务卡片都挂上。"""
+    from src.tasks.cache_ratio import CacheRatioTask
+
+    credentials, db = repo
+    runtime, _store = _runtime(CACHE_RATIO_INTERVAL_MINUTES=120)
+    task = CacheRatioTask(db, runtime)
+    runner = build_runner(credentials, {}, StatsCollector(db), runtime,
+                          cache_ratio=task)
+
+    assert runner._cache_ratio is task
+    assert runner._cache_ratio_interval == 120 * 60
+    assert "cache_ratio" in {spec.key for spec in runner._loop_specs()}
+    assert runner._interval_seconds("cache_ratio") == 120 * 60
+    items = {item["key"]: item for item in runner.task_status()}
+    assert "cache_ratio" in items
+    assert items["cache_ratio"]["group"] == "ops"
+
+
+def test_cache_ratio_interval_floor(repo):
+    """周期下限 60 分钟：填 1 也被钳到 3600 秒，避免反复读同一批窗口。"""
+    runner = _cache_ratio_runner(repo, interval=1)
+    assert runner._cache_ratio_interval == 3600
+
+
+def test_cache_ratio_not_assembled_by_default(repo):
+    """老调用方不传 cache_ratio 时整条循环不出现（保持原行为）。"""
+    runner = _cache_ratio_runner(repo)
+    assert runner._cache_ratio is None
+    assert "cache_ratio" not in {spec.key for spec in runner._loop_specs()}
+    assert "cache_ratio" not in {item["key"] for item in runner.task_status()}
+
+
+async def test_runner_cache_ratio_without_task_raises(repo):
+    """未装配时 _sync_cache_ratio 报错（不会被静默当 no-op）。"""
+    runner = _cache_ratio_runner(repo)
+    with pytest.raises(RuntimeError, match="cache ratio task not configured"):
+        await runner._sync_cache_ratio()
+
+
+async def test_runner_cache_ratio_reports_and_records_run(repo):
+    """装配后手动跑一轮：报告透传进运行态（无样本 → applied=False）。"""
+    from src.tasks.cache_ratio import CacheRatioTask
+
+    credentials, db = repo
+    runtime, _store = _runtime()
+    runner = _cache_ratio_runner(repo, task=CacheRatioTask(db, runtime))
+
+    result = await runner.run_task("cache_ratio")
+
+    assert result["ran"] is True and result["busy"] is False
+    assert result["last_report"]["applied"] is False
+    assert result["last_report"]["samples"] == 0
+    assert runner.status.runs("cache_ratio") == 1

@@ -223,8 +223,8 @@ def test_schema_v14_adds_users_and_audit_tables(tmp_path):
     tables = {row[0] for row in db.connect().execute(
         "SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"users", "audit_events"} <= tables
+    # 版本号与常量一致即可（不写死具体代数：每次加列都会 +1）
     assert db.connect().execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
-    assert SCHEMA_VERSION == 39
     db.close()
 
 

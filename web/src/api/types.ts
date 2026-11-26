@@ -157,8 +157,13 @@ export interface StatsOverview {
   input_tokens: number;
   output_tokens: number;
   reasoning_tokens: number;
-  /** 输入中命中缓存的 token；任一明细上报过才非 null */
+  /** 输入中命中缓存的 token；null = 上游未上报（**不是** 0 命中，展示必须给 —） */
   cached_tokens: number | null;
+  /** 命中率分母：**上报过缓存字段**的请求的输入 token 之和；null = 无上报。
+   *  与 input_tokens 不同——部分渠道不上报缓存时它更小，命中率只能按它算。 */
+  cached_input_tokens: number | null;
+  /** 缓存命中率（0..1，后端按 cached_tokens ÷ cached_input_tokens 算好）；null = 不可用 */
+  cache_rate: number | null;
   /** 渠道可选字段，两边都经常为 null */
   credit: number | null;
   /** credit 是否为推算值（TRAE 按官方单价折算），展示加 ≈ */
@@ -193,8 +198,10 @@ export interface GroupStats {
   ok_count: number;
   input_tokens: number;
   output_tokens: number;
-  /** 输入中命中缓存的 token；该维度任一明细上报过才非 null */
+  /** 输入中命中缓存的 token；null = 上游未上报（**不是** 0 命中，展示给 —） */
   cached_tokens: number | null;
+  /** 命中率分母：该维度内**上报过缓存字段**的请求的输入 token 之和；null = 无上报 */
+  cached_input_tokens: number | null;
   credit: number | null;
   /** credit 是否为推算值（含推算即为 true），展示加 ≈ */
   credit_estimated: boolean;

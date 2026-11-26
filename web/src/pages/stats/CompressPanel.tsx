@@ -99,7 +99,11 @@ export function CompressPanel({
   const idle = data !== undefined
     && (counters?.triggers ?? 0) === 0
     && (counters?.unchanged ?? 0) === 0;
-  const hitRate = formatCacheRate(stats?.cached_tokens, stats?.input_tokens);
+  // 分母只含上报过缓存的请求；老接口没有该字段时才回落到总输入
+  const hitRate = formatCacheRate(
+    stats?.cached_tokens,
+    stats?.cached_input_tokens ?? stats?.input_tokens,
+  );
 
   if (!isOperator) return null;
 

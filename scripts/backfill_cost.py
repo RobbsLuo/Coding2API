@@ -41,17 +41,22 @@ from src.stats.backfill import pending_cost, recompute_costs  # noqa: E402
 from src.stats.collector import StatsCollector  # noqa: E402
 
 
-def effective_rate(database: Database) -> float:
-    """当前生效汇率：DB 热更覆盖 > env/.env 默认（与运行时同口径）。
+def runtime_settings(database: Database):
+    """运行时覆盖层（热更值优先于 env）：汇率与 TRAE 假定命中率共用。
 
     `--db` 显式指定时可能不在有 `.env` 的环境里跑；`load_settings()` 失败就退回
     最小底座读默认值，不让脚本因为一个非必填配置而整体失败。
     """
     try:
         base = load_settings()
-    except Exception:  # noqa: BLE001 - 脚本容错：拿不到 env 就用默认汇率
+    except Exception:  # noqa: BLE001 - 脚本容错：拿不到 env 就用默认值
         base = Settings(_env_file=None, app_secret="backfill-cost-script")
-    return load_runtime_settings(base, RuntimeSettingsRepository(database)).usd_cny_rate
+    return load_runtime_settings(base, RuntimeSettingsRepository(database))
+
+
+def effective_rate(database: Database) -> float:
+    """当前生效汇率：DB 热更覆盖 > env/.env 默认（与运行时同口径）。"""
+    return runtime_settings(database).usd_cny_rate
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -59,6 +64,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--db", help="SQLite 路径（默认 DATA_DIR/coding2api.sqlite3）")
     parser.add_argument("--data-dir", help="价表快照目录（默认数据库所在目录）")
     parser.add_argument("--apply", action="store_true", help="实际写库（默认只预览）")
+    parser.add_argument("--trae-cache-ratio", type=float, default=None,
+                        help="TRAE 未上报缓存时的假定命中率 0..1（默认取运行时配置）")
+    parser.add_argument("--provider", default=None,
+                        help="只重算该渠道（默认全部）；只修 TRAE 缓存时用它限定范围")
     args = parser.parse_args(argv)
 
     db_path = Path(args.db) if args.db else Path(load_settings().db_path)
@@ -73,10 +82,15 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     database = Database(db_path)
-    rate = effective_rate(database)
-    print(f"价表 {len(table)} 个模型，汇率 1 USD = {rate} CNY")
+    runtime = runtime_settings(database)
+    rate = runtime.usd_cny_rate
+    trae_ratio = (args.trae_cache_ratio if args.trae_cache_ratio is not None
+                  else runtime.trae_assumed_cache_ratio)
+    print(f"价表 {len(table)} 个模型，汇率 1 USD = {rate} CNY，"
+          f"TRAE 假定命中率 {trae_ratio:.3f}")
 
-    todo = pending_cost(database.connect(), table, rate)
+    todo = pending_cost(database.connect(), table, rate, trae_cache_ratio=trae_ratio,
+                        provider=args.provider)
     if not todo:
         print("没有需要处理的成本明细")
         return 0
@@ -91,7 +105,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     target = backup(db_path)
-    updated = recompute_costs(database, table, rate)
+    updated = recompute_costs(database, table, rate, trae_cache_ratio=trae_ratio,
+                              provider=args.provider)
     StatsCollector(database).rollup_hourly()
     print(f"已重算 {updated} 条明细，小时汇总已重算（备份: {target}）")
     return 0

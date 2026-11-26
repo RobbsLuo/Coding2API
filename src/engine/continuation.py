@@ -148,6 +148,8 @@ def _add_usage(total: Usage, part: Usage | None) -> Usage:
         output_tokens=_sum(total.output_tokens, part.output_tokens),
         reasoning_tokens=_sum(total.reasoning_tokens, part.reasoning_tokens),
         cached_tokens=_sum(total.cached_tokens, part.cached_tokens),
+        cached_tokens_effective=_sum(total.cached_tokens_effective,
+                                     part.cached_tokens_effective),
         credit=_sum(total.credit, part.credit),
         # 任一轮为推算值即整体标推算（TRAE 每轮都推算，语义一致）
         credit_estimated=total.credit_estimated or part.credit_estimated,
