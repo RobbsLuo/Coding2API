@@ -62,10 +62,17 @@ def backup(db_path: Path, *, keep: int = 5) -> Path:
 
 
 def _prune_backups(db_path: Path, *, keep: int) -> None:
-    """只保留最近 `keep` 份 `.bak-*`，按 mtime 倒序（名字带时间戳但 mtime 更稳）。"""
+    """只保留最近 `keep` 份 `.bak-*`，按 mtime 倒序（名字带时间戳但 mtime 更稳）。
+
+    **必须排除 WAL sidecar**（`…-shm` / `…-wal`）：SQLite 在线备份打开目标库时
+    会在旁边建这两个文件，名字同样匹配 `.bak-*`。算进份数会让 `keep` 名义上留
+    5 份、实际只留 3 份真备份（本机实测 2026-11-25 命中）。sidecar 的 mtime 还
+    随访问变化，会把排序也搅乱；它们由 SQLite 自己管理，不归这里清理。
+    """
     try:
         existing = sorted(
-            db_path.parent.glob(f"{db_path.name}.bak-*"),
+            (path for path in db_path.parent.glob(f"{db_path.name}.bak-*")
+             if not path.name.endswith(("-shm", "-wal"))),
             key=lambda path: path.stat().st_mtime,
             reverse=True,
         )

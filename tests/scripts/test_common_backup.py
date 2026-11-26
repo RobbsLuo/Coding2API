@@ -52,6 +52,38 @@ def test_backup_prunes_to_keep(tmp_path):
     assert len(remaining) == 5
 
 
+def test_backup_prune_excludes_wal_sidecars(tmp_path):
+    """sidecar（`-shm` / `-wal`）不能占用保留名额。
+
+    SQLite 在线备份打开目标库时会在旁边建 `…bak-…-shm` / `…-wal`，名字同样
+    匹配 `.bak-*`。若算进份数，`keep=2` 名义留 2 份、实际只会留下 0–1 份真
+    备份（本机实测 2026-11-25 触发）。
+    """
+    db_path = _make_db(tmp_path / "coding2api.sqlite3")
+    for index in range(3):
+        stale = tmp_path / f"coding2api.sqlite3.bak-2026010{index + 1}-000000"
+        stale.write_text("old", encoding="utf-8")
+        time.sleep(0.01)
+    # sidecar 比任何真备份都新：若被算进份数会挤掉真备份
+    (tmp_path / "coding2api.sqlite3.bak-20260109-000000-shm").write_text(
+        "", encoding="utf-8")
+    (tmp_path / "coding2api.sqlite3.bak-20260109-000000-wal").write_text(
+        "", encoding="utf-8")
+    time.sleep(0.01)
+
+    COMMON._prune_backups(db_path, keep=2)
+
+    remaining = sorted(p.name for p in tmp_path.glob("coding2api.sqlite3.bak-*")
+                       if not p.name.endswith(("-shm", "-wal")))
+    assert remaining == [
+        "coding2api.sqlite3.bak-20260102-000000",
+        "coding2api.sqlite3.bak-20260103-000000",
+    ]
+    # sidecar 不归本函数清理：既不算份数，也不被删
+    assert (tmp_path / "coding2api.sqlite3.bak-20260109-000000-shm").exists()
+    assert (tmp_path / "coding2api.sqlite3.bak-20260109-000000-wal").exists()
+
+
 def test_backup_keep_zero_disables_pruning(tmp_path):
     """`keep <= 0` = 不清理（保留全部，给需要人工比对的场景）。"""
     db_path = _make_db(tmp_path / "coding2api.sqlite3")
