@@ -363,6 +363,38 @@ def test_request_scope_restores_outer_scope(repo):
     assert executor._mutable_scope() is None    # noqa: SLF001 - 已还原
 
 
+def test_request_scope_survives_cross_context(repo):
+    """回归 2026-11-24：生成器跨 Context 恢复时不能抛「created in a different Context」。
+
+    生产路径（`with_keepalive`）每取一帧都 `ensure_future(anext(iterator))`，
+    每帧一个新 Task、各自 copy 一份 Context：进入作用域与退出作用域落在不同
+    Context，`reset(token)` 必炸（线上 99.5% 的流式请求在收尾时命中）。
+    这里按同款驱动方式复现：两帧各用一个 Task 取，收尾也必须正常停下。
+    """
+    credentials, _db = repo
+    _add(credentials, "a")
+    executor = _executor(credentials, [_good()])
+
+    async def frames():
+        with executor._request_scope():        # noqa: SLF001
+            yield executor._scope()             # noqa: SLF001
+            yield executor._scope()             # noqa: SLF001
+
+    async def drive() -> list[object]:
+        iterator = frames().__aiter__()
+        # 与 with_keepalive 同款：每帧一个新 Task，Context 各是副本
+        got = [await asyncio.ensure_future(anext(iterator))]
+        got.append(await asyncio.ensure_future(anext(iterator)))
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.ensure_future(anext(iterator))
+        return got
+
+    scopes = asyncio.run(drive())
+
+    assert [len(scope.rows) for scope in scopes] == [1, 1]
+    assert executor._mutable_scope() is None    # noqa: SLF001 - 退出后不泄漏
+
+
 def test_scope_without_context_reads_live_state(repo):
     """无作用域（自检 / 单测直接调用）时现取一份：仍看到最新库状态。"""
     credentials, db = repo

@@ -543,7 +543,10 @@ def _later(first: int | None, second: int | None) -> int | None:
 
 
 # 当前请求作用域的候选快照。请求入口（`stream` / `complete` / `pick_aux`）
-# set、结束 reset；子协程继承同一份，故一次请求自始至终只读一次候选表。
+# set、结束还原；同一 Context 内的子协程继承同一份。
+# 注意流式出口的驱动方式：`with_keepalive` 每取一帧都新建 Task（各自 copy
+# 一份 Context），所以快照只覆盖「一帧内」的多次读，跨帧仍按需现读——这是
+# 取帧实现决定的，不是缓存失效；还原也正因此不能用 token（见 `_request_scope`）。
 # 不放进 Executor 实例：实例是应用级单例，放实例上等于跨请求共享（P2-17 的另一半）。
 _candidate_scope: ContextVar[_CandidateSnapshot | None] = ContextVar(
     "candidate_scope", default=None)
@@ -611,13 +614,23 @@ class Executor:
 
     @contextlib.contextmanager
     def _request_scope(self, model: str | None = None) -> Iterator[_CandidateSnapshot]:
-        """进入一次「请求 × 模型」作用域：取一次快照，退出时还原上层的（若有）。"""
+        """进入一次「请求 × 模型」作用域：取一次快照，退出时还原上层的（若有）。
+
+        **还原用 `set(previous)` 而不是 `reset(token)`**：流式出口每取一帧都由
+        `with_keepalive` 新建 Task 驱动（`ensure_future(anext(...))`，各自 copy
+        一份 Context），进入与退出落在不同 Context，`reset(token)` 会抛
+        `ValueError: ... was created in a different Context`——2026-11-23 起
+        全量流式请求在收尾时命中（见 `test_request_scope_survives_cross_context`）。
+        `set()` 不校验 Context 归属：在哪个 Context 退出，就把那个 Context
+        还原成进入前读到的值。
+        """
         scope = self._new_scope(model)
-        token = _candidate_scope.set(scope)
+        previous = _candidate_scope.get()
+        _candidate_scope.set(scope)
         try:
             yield scope
         finally:
-            _candidate_scope.reset(token)
+            _candidate_scope.set(previous)
 
     def _record_invalid(self, username: str, provider_id: str, credential_id: str,
                         model: str, started: float, error: object,
