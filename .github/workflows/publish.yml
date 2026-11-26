@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '要打的版本号（如 v0.14.3，留空则跳过）'
+        description: '要打的版本号（如 v0.15.0，留空则跳过）'
         required: false
         default: ''
 
@@ -49,7 +49,7 @@ jobs:
           # （"v1.2.3\n恶意命令"）的第一行就能命中、整体放行；bash 正则对
           # 整个字符串做锚定匹配，$ 后面多一个换行也判不合法。
           if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::tag 格式非法: $TAG（应为 vX.Y.Z，例如 v0.14.3）"
+            echo "::error::tag 格式非法: $TAG（应为 vX.Y.Z，例如 v0.15.0）"
             exit 1
           fi
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
