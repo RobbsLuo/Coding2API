@@ -162,7 +162,7 @@ def test_checkin_result_grant_wins_over_untrusted_session():
 
 
 def test_session_needs_relogin_reads_only_explicit_signals():
-    """只在字段明确说「不信任」时才报重登；缺字段/正常一律空串。"""
+    """只在字段明确说「不可自愈」时才报重登；缺字段/正常一律空串。"""
     is_relogin = raccoon_activity.session_needs_relogin
 
     assert is_relogin(None) == ""
@@ -175,12 +175,76 @@ def test_session_needs_relogin_reads_only_explicit_signals():
 
     reason = is_relogin({"trusted_device": {"trusted": False}})
     assert "重新登录" in reason
-    # 有 state/reason 就带上，便于对日志定位上游到底怎么判的
-    assert "unbound" in is_relogin(
-        {"trusted_device": {"device_bind_state": "unbound"}})
     assert "device_session_mismatch" in is_relogin(
         {"trusted_device": {"needs_relogin": True,
                             "reason": "device_session_mismatch"}})
+    # suspicious：会话绑在别的设备上，bind 恒 400，只能重登
+    assert "suspicious" in is_relogin(
+        {"trusted_device": {"trusted": False,
+                            "device_bind_state": "suspicious",
+                            "reason": "device_session_mismatch"}})
+
+
+def test_session_needs_relogin_exempts_unbound_session():
+    """`unbound` 只差一次绑定（绑完即 trusted），绝不能判成需重登（issue #57）。
+
+    否则 `checkin` 里唯一的 bind 入口被挡死，账号永远停在「需重登」。
+    """
+    is_relogin = raccoon_activity.session_needs_relogin
+
+    # 实测上游对 unbound 的完整形态：trusted=false + needs_bind=true
+    assert is_relogin({"trusted_device": {
+        "trusted": False, "bound": False, "needs_bind": True,
+        "needs_relogin": False,
+        "device_bind_state": "unbound",
+        "reason": "session_without_bound_device"}}) == ""
+    # 只有 state 也照样放过
+    assert is_relogin({"trusted_device": {
+        "device_bind_state": "unbound"}}) == ""
+    assert is_relogin({"trusted_device": {"needs_bind": True}}) == ""
+    # needs_relogin 明确为 true 时仍判重登（优先级最高）
+    assert is_relogin({"trusted_device": {
+        "device_bind_state": "unbound", "needs_relogin": True}}) != ""
+
+
+def test_session_needs_bind_only_when_upstream_says_unbound():
+    """只在上游明说「还差一次绑定」时为真；读不到时不猜（盲绑会锁死账号）。"""
+    needs_bind = raccoon_activity.session_needs_bind
+
+    assert needs_bind(None) is False
+    assert needs_bind({}) is False
+    assert needs_bind({"trusted_device": "junk"}) is False
+    assert needs_bind({"trusted_device": {
+        "device_bind_state": "unbound"}}) is True
+    assert needs_bind({"trusted_device": {"needs_bind": True}}) is True
+    # 已绑 / 可疑 都不该再绑：可疑态任何 device_id 都 400
+    assert needs_bind({"trusted_device": {
+        "device_bind_state": "bound", "needs_bind": False}}) is False
+    assert needs_bind({"trusted_device": {
+        "device_bind_state": "suspicious", "needs_bind": True}}) is False
+    assert needs_bind({"trusted_device": {
+        "device_bind_state": "unbound", "needs_relogin": True}}) is False
+    assert needs_bind({"trusted_device": {"trusted": True}}) is False
+
+
+def test_bound_device_id_returns_upstream_assigned_device():
+    """已绑会话沿用上游那台设备；未绑/字段坏时返回空串（调用方回落派生值）。"""
+    bound_id = raccoon_activity.bound_device_id
+
+    assert bound_id(None) == ""
+    assert bound_id({}) == ""
+    assert bound_id({"trusted_device": "junk"}) == ""
+    assert bound_id({"trusted_device": {
+        "bound": True, "device_id": "dev-server"}}) == "dev-server"
+    assert bound_id({"trusted_device": {
+        "device_bind_state": "bound", "device_id": "dev661248"}}) == "dev661248"
+    # bound=false / 缺 bound 时不认 device_id
+    assert bound_id({"trusted_device": {
+        "bound": False, "device_id": "dev-x"}}) == ""
+    assert bound_id({"trusted_device": {"device_id": "dev-x"}}) == ""
+    # bound 但 id 空/非字符串 → 空串
+    assert bound_id({"trusted_device": {"bound": True, "device_id": ""}}) == ""
+    assert bound_id({"trusted_device": {"bound": True, "device_id": 42}}) == ""
 
 
 def test_heartbeat_needs_relogin_matches_bind_required_body():

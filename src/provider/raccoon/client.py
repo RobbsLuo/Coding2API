@@ -401,7 +401,27 @@ class RaccoonClient(LazyClients):
         await self.confirm_iam(token)
         return payload
 
-    async def page_boot(self, token: str, device_id: str) -> dict[str, Any] | None:
+    async def ensure_device(self, token: str, device_id: str, *,
+                            bind: bool) -> str:
+        """需要时把会话绑到设备，返回**本次请求该用的** device id。
+
+        `bind=False` 原样返回（已绑会话：再报一个不同 id 会被判
+        `device_session_mismatch` 永久锁死，见 `activity.session_needs_bind`）。
+        `bind=True` 走 `devices_current_bind`，并**优先采用上游分配的 id**——
+        上游首次绑定自己发一台，与传入值无关；后续心跳/页面启动都得沿用那台。
+        绑定失败（返回 None / 缺 device_id）时退回传入值，不阻断调用方。
+        """
+        if not bind:
+            return device_id
+        bound = await self.bind_device(token, device_id)
+        if isinstance(bound, dict):
+            assigned = bound.get("device_id")
+            if isinstance(assigned, str) and assigned:
+                return assigned
+        return device_id
+
+    async def page_boot(self, token: str, device_id: str, *,
+                        bind: bool = True) -> str:
         """模拟浏览器打开 `/work/home` 的启动序列 —— 每日积分的**实际入账点**。
 
         为什么登录之外还要这一步（2026-11-19 实测，勿删）：拿 IAM 登录得到的新
@@ -410,9 +430,12 @@ class RaccoonClient(LazyClients):
         内入账。也就是说上游把「补发」挂在**页面启动**这一事件上，而不是登录本
         身——只做 login + bind 的旧实现因此长期「登录成功但没积分」。
 
+        `bind` 默认 True（新登录会话必须绑一次）；已绑会话必须传 False，否则
+        重复 bind 会把账号打成 `device_session_mismatch`（见 `ensure_device`）。
+
         全部幂等只读（`b/v1/m` 只是埋点）。**尽力而为**：每一步的失败都吞掉，
         因为签到判定仍以流水为准，这里失败最多是这一轮少到一笔，不该把登录整体
-        判负。返回绑定响应（拿得到时），供调用方写回设备 id。
+        判负。返回心跳实际使用的 device id，供调用方对齐后续请求。
         """
         headers = {**request_headers(token, accept="application/json"),
                    "Cookie": f"xhx_token={token}",
@@ -431,11 +454,8 @@ class RaccoonClient(LazyClients):
         for path in (EP_AGREEMENT_CHECK, EP_OFFICE_SETTING, EP_ONLINE_ACTIVITY):
             with contextlib.suppress(httpx.HTTPError):
                 await self._short.get(f"{self.host}{path}", headers=headers)
-        # ③ 绑定 + 心跳：把新会话变成 trusted，同日才认「登录过」
-        bound = await self.bind_device(token, device_id)
-        if isinstance(bound, dict) and isinstance(bound.get("device_id"), str) \
-                and bound["device_id"]:
-            device_id = bound["device_id"]
+        # ③ 绑定（仅当上游说还差一次）+ 心跳：把会话变成 trusted，同日才认「登录过」
+        device_id = await self.ensure_device(token, device_id, bind=bind)
         with contextlib.suppress(httpx.HTTPError):
             await self.heartbeat(token, device_id)
         # ④ 活动上报：`machine_id` 是官方 bundle 写死的常量
@@ -451,7 +471,7 @@ class RaccoonClient(LazyClients):
                         "event_params": {"id": "1", "name": "activity",
                                          "prompt": str(int(time.time() * 1000))}}}],
                 })
-        return bound
+        return device_id
 
     async def confirm_iam(self, token: str) -> dict[str, Any]:
         """IAM 登录后确认（浏览器同款第二步，幂等）。
@@ -593,12 +613,20 @@ class RaccoonProvider:
         # ③ 还没到账 → 补一遍**页面启动**（每日积分的实际入账点，见
         #    `client.page_boot`）。这一步而不是「重新登录」才是当天已登录却没
         #    拿到积分时的正解：token 有效时新登录未必被上游当作「又一天登录」。
+        #
+        #    设备 id 与「要不要绑」都由上游的 `trusted_device` 决定（issue #57）：
+        #    * 已 bound → 沿用上游那台，**绝不再 bind**（重复 bind 会判
+        #      `device_session_mismatch` 永久锁死）；
+        #    * unbound → 绑一次即 trusted，这才是新导入账号的自愈路径；
+        #    * `user_info` 读不到（visit 失败）→ 不盲绑，只用派生 id 打心跳。
         if not raccoon_activity.session_needs_relogin(user_info) \
                 and credential.uid:
+            device_id = (raccoon_activity.bound_device_id(user_info)
+                         or raccoon_credential.derive_device_id(credential.uid))
             with contextlib.suppress(httpx.HTTPError):
                 await self.client.page_boot(
-                    credential.access_token,
-                    raccoon_credential.derive_device_id(credential.uid))
+                    credential.access_token, device_id,
+                    bind=raccoon_activity.session_needs_bind(user_info))
         # ④ 触达积分服务并重读流水核对（必须用 `income` 过滤——`all` 里消费
         #    流水占绝大多数，活跃账号的每日发放会被挤出条数窗口）。
         await self.client.fetch_quota(credential.access_token)
@@ -672,6 +700,7 @@ class RaccoonProvider:
         # 登录后走一遍**页面启动**（浏览器同款流程）：绑设备 + 首页加载 + 活动
         # 上报。只 bind 不加载页面的会话 trusted 虽为 true，当天积分仍不到账
         # （2026-11-19 实测）；页面启动失败不判登录失败（token 已可用）。
+        # 新登录会话天然是 `unbound`，故这里保持 `bind=True`（绑一次即 trusted）。
         if refreshed.uid:
             await self.client.page_boot(
                 refreshed.access_token,
@@ -706,9 +735,14 @@ class RaccoonProvider:
             # 走到这里说明 visit 成功并拿到了 trusted_device，故没有 visit_error
             # 可拼（visit 抛异常时 user_info 为空，relogin 也必为空）。
             return ActivityResult(ok=False, user_id=credential.uid, message=relogin)
+        # 设备 id 与签到同一口径：已绑沿用上游那台；unbound 先绑一次（心跳在
+        # 未绑会话下必然 400，绑定才是自愈路径，见 `activity.session_needs_bind`）。
+        device_id = (raccoon_activity.bound_device_id(user_info)
+                     or raccoon_credential.derive_device_id(credential.uid))
+        if raccoon_activity.session_needs_bind(user_info):
+            device_id = await self.client.ensure_device(token, device_id, bind=True)
         try:
-            payload = await self.client.heartbeat(
-                token, raccoon_credential.derive_device_id(credential.uid))
+            payload = await self.client.heartbeat(token, device_id)
         except UpstreamHTTPError as error:
             message = f"心跳失败（HTTP {error.status}）"
             if raccoon_activity.heartbeat_needs_relogin(error.body):

@@ -30,17 +30,28 @@
 
 ## 会话需要重登的信号
 
-上游在 `GET /api/web/auth/v1/user_info` 的 `trusted_device` 里直说会话状态：
+上游在 `GET /api/web/auth/v1/user_info` 的 `trusted_device` 里直说会话状态，
+**但 `unbound` 与 `suspicious` 是两回事**（issue #57 实测，勿再合并判定）：
 
 ```json
 {"device_bind_state": "suspicious", "trusted": false,
  "needs_relogin": true, "needs_bind": true, "reason": "device_session_mismatch"}
 ```
 
-进入这个状态后设备心跳恒回 `400 200811 device_bind_required`，且**当天不会再
-有 `daily_grant`**（绑定接口本身也拒绝自愈：实测 `devices_current_bind` 对
-`device_session_mismatch` 一律 400）。这正是「网页上重新登录一次才有积分」
-的机器可读版本，故 `checkin` / `activity` 都要读它并如实上报。
+* `suspicious` / `device_session_mismatch` —— 会话已绑在**另一台**设备上。
+  设备心跳恒回 `400 200811 device_bind_required`，绑定接口本身也拒绝自愈
+  （`devices_current_bind` 对任何 device_id 一律 400），当天不会再有
+  `daily_grant`。只能网页重登后重新导入 —— 这才是 `session_needs_relogin`。
+* `unbound` / `session_without_bound_device` —— 新导入的会话只差一次绑定。
+  此时 `trusted` 必然为 `false`，但**绑一次就 trusted**，当天积分随之到账。
+  判成「需重登」会让唯一 bind 入口被挡死，形成永久自锁。交给
+  `session_needs_bind` 驱动。
+
+**重复 bind 会永久锁死账号**：上游首次绑定会**自行分配** device_id（与传入值
+无关）。之后若再拿派生值去绑，上游判 `device_session_mismatch`，此后 bind 恒
+400、心跳恒 `400 200811`，没有任何自愈通道。故只在 `session_needs_bind` 为真
+时绑，且之后一律沿用 `bound_device_id`（心跳本身不校验 device_id，但同账号
+必须始终报同一台）。
 
 流水用**上游的服务端过滤** `type=income`（只留 `daily_grant` /
 `reward_grant`）。用 `type=all` 时消费流水会挤占条数窗口：实测 2026-11-10
@@ -157,34 +168,83 @@ def grant_grace_at(now: datetime) -> datetime:
                            second=0, microsecond=0)
 
 
+def _trusted_device(user_info: dict[str, Any] | None) -> dict[str, Any] | None:
+    """取 `user_info.data.trusted_device`；不是 dict（缺失 / 上游改版）返回 None。"""
+    if not isinstance(user_info, dict):
+        return None
+    device = user_info.get("trusted_device")
+    return device if isinstance(device, dict) else None
+
+
 def session_needs_relogin(user_info: dict[str, Any] | None) -> str:
     """`user_info.data` → 「会话需重登」的可操作原因；不需要时返回空串。
 
-    上游 `trusted_device` 是这块唯一可信的信号源（实测 2026-11-18）：
+    上游 `trusted_device` 是这块唯一可信的信号源。两种「设备对不上」必须
+    分开，否则会把能自愈的账号钉死（issue #57）：
 
-    * `needs_relogin=true` / `trusted=false` / `device_bind_state` ∈
-      {`suspicious`, `unbound`} —— 会话与设备对不上，上游拒绝心跳
-      （`400 200811 device_bind_required`），当天也不会补发 `daily_grant`；
-    * 此时**没有**自愈通道：`devices_current_bind` 对 `device_session_mismatch`
-      同样回 400，`refresh` 也只是原样换同一张 token（sid 不变）。只能让用户
-      在网页重新登录后重新导入凭据。
+    * `device_bind_state=suspicious`（`reason=device_session_mismatch`）/
+      `needs_relogin=true` —— 会话已绑在**另一台**设备上，`devices_current_bind`
+      对任何 device_id 都回 400，心跳恒 `400 200811 device_bind_required`，
+      `refresh` 也只换同一张 token。**无自愈通道**，只能网页重登后重新导入。
+    * `device_bind_state=unbound`（`session_without_bound_device`）/
+      `needs_bind=true` —— 只差一次绑定，**绑一次即 trusted**（实测 bind 回
+      `trusted_device: true`，随后当天 `daily_grant` 到账）。这种不能判重登，
+      交给 `session_needs_bind` 驱动自愈。
+    * 老字段/上游改版只有 `trusted=false` 时保守判重登。
 
-    字段缺失（老账号 / 上游改版）时不猜，返回空串走原有判定。
+    字段缺失时不猜，返回空串走原有判定。
     """
-    if not isinstance(user_info, dict):
+    device = _trusted_device(user_info)
+    if device is None:
         return ""
-    device = user_info.get("trusted_device")
-    if not isinstance(device, dict):
-        return ""
-    reason = device.get("reason")
     state = device.get("device_bind_state")
-    needs = bool(device.get("needs_relogin")) or device.get("trusted") is False \
-        or state in ("suspicious", "unbound")
+    if device.get("needs_relogin") is True or state == "suspicious":
+        needs = True
+    elif state == "unbound" or device.get("needs_bind") is True:
+        needs = False                       # 可自愈：绑一次即 trusted
+    else:
+        needs = device.get("trusted") is False
     if not needs:
         return ""
-    detail = "、".join(str(item) for item in (state, reason) if item)
+    detail = "、".join(str(item) for item in (state, device.get("reason")) if item)
     suffix = f"（上游 {detail}）" if detail else ""
     return ("会话已不被上游信任，需在网页端重新登录后重新导入凭据" + suffix)
+
+
+def session_needs_bind(user_info: dict[str, Any] | None) -> bool:
+    """会话是否**还差一次设备绑定**（`unbound` / `needs_bind=true`）。
+
+    为真时签到应走一遍 `devices_current_bind`：上游首次绑定会自行分配
+    device_id，绑完即 `trusted=true`。为假（已 bound、或 `user_info` 读不到）
+    时**绝不能**再绑——对已绑会话报一个不同的 device_id 会被判
+    `device_session_mismatch`，此后 bind 恒 400、心跳恒 400，**永久锁死**。
+    """
+    device = _trusted_device(user_info)
+    if device is None:
+        return False
+    state = device.get("device_bind_state")
+    # suspicious 时上游同样给 `needs_bind=true`（issue #57 原始响应就是这样），
+    # 但那种会话任何 device_id 都 400，绑只会白打一次请求——必须先排除。
+    if state == "suspicious" or device.get("needs_relogin") is True:
+        return False
+    if state == "unbound":
+        return True
+    return device.get("needs_bind") is True
+
+
+def bound_device_id(user_info: dict[str, Any] | None) -> str:
+    """上游记住的那台设备 id；未绑定 / 读不到时返回空串。
+
+    绑过之后心跳与页面启动都必须沿用这个值：拿派生值去绑会触发
+    `device_session_mismatch`（见 `session_needs_bind`）。
+    """
+    device = _trusted_device(user_info)
+    if device is None:
+        return ""
+    if device.get("bound") is not True and device.get("device_bind_state") != "bound":
+        return ""
+    device_id = device.get("device_id")
+    return device_id if isinstance(device_id, str) and device_id else ""
 
 
 def pick_active_grants(items: list[Any], now: datetime) -> list[dict[str, Any]]:

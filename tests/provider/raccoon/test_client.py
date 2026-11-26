@@ -607,12 +607,12 @@ async def test_page_boot_runs_browser_startup_sequence():
             return httpx.Response(200, json={"code": 0, "data": {}})
         return httpx.Response(200, json={"code": 0, "data": {}})
 
-    bound = await _client(handler).page_boot("tok", "dev-x")
+    device_id = await _client(handler).page_boot("tok", "dev-x")
 
     assert seen == ["/work/home", EP_AGREEMENT_CHECK, EP_OFFICE_SETTING,
                     EP_ONLINE_ACTIVITY, EP_BIND_DEVICE, EP_HEARTBEAT, EP_METRICS]
-    # 绑定响应里的服务端设备 id 会用于随后的心跳
-    assert bound == {"device_id": "dev-server"}
+    # 绑定响应里上游分配的设备 id 会用于随后的心跳，并作为返回值交给调用方
+    assert device_id == "dev-server"
     hb = headers[EP_HEARTBEAT]
     assert hb["x-client-device-id"] == "dev-server"
     assert hb["x-client-platform"] == "web"
@@ -626,7 +626,8 @@ async def test_page_boot_swallows_every_failure():
     def boom(_request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("boom")
 
-    assert await _client(boom).page_boot("tok", "dev-x") is None
+    # 全程失败也不抛，退回传入的派生 id
+    assert await _client(boom).page_boot("tok", "dev-x") == "dev-x"
 
 
 async def test_page_boot_tolerates_bind_without_device_id():
@@ -637,5 +638,74 @@ async def test_page_boot_tolerates_bind_without_device_id():
         seen.append(request.url.path)
         return httpx.Response(200, json={"code": 0, "data": {}})
 
-    await _client(handler).page_boot("tok", "dev-x")
+    assert await _client(handler).page_boot("tok", "dev-x") == "dev-x"
     assert EP_HEARTBEAT in seen
+
+
+async def test_page_boot_without_bind_skips_bind_request():
+    """已绑会话（bind=False）：绝不再打 `devices_current_bind`。
+
+    重复 bind 会让上游判 `device_session_mismatch`，此后 bind 与心跳恒 400，
+    账号永久锁死（issue #57）。
+    """
+    seen: list[str] = []
+    heartbeat_id: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == EP_HEARTBEAT:
+            heartbeat_id["id"] = request.headers["x-client-device-id"]
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    device_id = await _client(handler).page_boot("tok", "dev-bound", bind=False)
+
+    assert EP_BIND_DEVICE not in seen
+    # 心跳沿用上游记住的那台
+    assert device_id == "dev-bound" and heartbeat_id["id"] == "dev-bound"
+
+
+async def test_ensure_device_bind_false_is_passthrough():
+    """`bind=False` 不发请求，原样返回（调用方已从 user_info 取到上游设备 id）。"""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(200, json={"code": 0, "data": {}})
+
+    assert await _client(handler).ensure_device("tok", "dev-bound",
+                                               bind=False) == "dev-bound"
+    assert seen == []
+
+
+async def test_ensure_device_prefers_upstream_assigned_id():
+    """首次绑定：上游自行分配 device_id，之后必须沿用那台（与传入值无关）。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == EP_BIND_DEVICE
+        return httpx.Response(200, json={"code": 0,
+                                         "data": {"device_id": "dev-server",
+                                                  "trusted_device": True}})
+
+    assert await _client(handler).ensure_device("tok", "dev-x",
+                                               bind=True) == "dev-server"
+
+
+async def test_ensure_device_falls_back_when_bind_fails():
+    """绑定失败（None / 缺 id / 空 id）退回传入值，不阻断调用方。"""
+    def none_bind(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"code": 200811})
+
+    assert await _client(none_bind).ensure_device("tok", "dev-x",
+                                                 bind=True) == "dev-x"
+
+    def empty_id(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 0,
+                                         "data": {"device_id": ""}})
+
+    assert await _client(empty_id).ensure_device("tok", "dev-x",
+                                                bind=True) == "dev-x"
+
+    def non_dict(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"code": 0, "data": "junk"})
+
+    assert await _client(non_dict).ensure_device("tok", "dev-x",
+                                                bind=True) == "dev-x"

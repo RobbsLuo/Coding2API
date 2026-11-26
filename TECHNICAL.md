@@ -304,7 +304,7 @@ class Provider(Protocol):
 
 - **未知模型防护**：发请求前按最近目录校验，流首帧再比对上游回显 `model`，不一致即失败（上游会静默回落默认模型并回 200）。额度 `available_points` 即积分，`Quota.total = remaining`；`billing_effective_multiplier` 当 `credit_rate`；按请求计费（`points=-1`）。
 - 分类：401 / `user identity could not be verified` → DEAD；积分耗尽 → CREDIT；`429 user_model_rate_limited` → CONCURRENCY（首枪 60s、同链翻倍、封顶 30min）；其余 429 → SOFT；400/404/422 → INVALID。并发 `RACCOON_MAX_CONCURRENCY`（默认 2）+ 独立 pacer。
-- 签到＝`user_info` → `fetch_quota` → `fetch_bills` → `checkin_result()`；只认流水 `daily_grant`，今天没有 = 失败；会话需重登信号无自愈通道。按需登录（`raccoon_auto_login`，默认关）：密码经 `PUT /api/credentials/{id}/login-secret` 录入；登录成功后 `devices_current_bind` 绑设备；`derive_device_id` 必须 ≤ 64 字符。
+- 签到＝`user_info` → `fetch_quota` → `fetch_bills` → `checkin_result()`；只认流水 `daily_grant`，今天没有 = 失败。`trusted_device` 三态分流：`suspicious`（不可自愈，只能重登）/ `unbound`（差一次 bind，绑完即 trusted）/ 缺字段（保守按 `trusted=false`）。设备 id 取 `bound_device_id(user_info)`，**仅 `session_needs_bind` 为真时 bind**（重复 bind 会判 `device_session_mismatch` 永久锁死），心跳沿用上游那台。按需登录（`raccoon_auto_login`，默认关）：密码经 `PUT /api/credentials/{id}/login-secret` 录入；登录成功后 `devices_current_bind` 绑设备；`derive_device_id` 必须 ≤ 64 字符。
 - 活跃上报：`GET /api/web/auth/v1/user_info` → `POST /api/web/auth/v1/devices_current_heartbeat`，头族 `x-client-device-id` 等；心跳不补积分。
 
 ### 5.8 灵犀（`lingxi`）

@@ -216,10 +216,15 @@ class CheckinFakeClient(FakeClient):
             raise self.error
         return self.heartbeat_payload
 
-    async def page_boot(self, token, device_id):
+    async def page_boot(self, token, device_id, *, bind=True):
         """页面启动序列（`checkin` 当天未到账时调用；本用例按需断言）。"""
-        self.calls.append(("page_boot", token, device_id))
-        return {"device_id": device_id}
+        self.calls.append(("page_boot", token, device_id, bind))
+        return device_id
+
+    async def ensure_device(self, token, device_id, *, bind):
+        """绑定口径同真客户端：`bind=False` 原样返回，否则上游分配 id 生效。"""
+        self.calls.append(("ensure_device", token, device_id, bind))
+        return "dev-bound" if bind else device_id
 
 
 def _grant(points=300, created="2026-11-04T21:59:30+08:00"):
@@ -273,9 +278,34 @@ async def test_checkin_boots_page_then_rereads_bills(frozen_now):
     assert result.ok and result.credit == 300
     assert fake.calls[0] == ("visit", TOKEN)
     assert fake.calls[1] == ("bills", TOKEN, "income")
-    # 页面启动用的是由 uid 派生的稳定设备 id
+    # 页面启动用派生设备 id；`user_info` 为空 → 不盲绑（bind=False）
     assert fake.calls[2][0] == "page_boot" and fake.calls[2][1] == TOKEN
+    assert fake.calls[2][2].startswith("dev") and fake.calls[2][3] is False
     assert fake.calls[3] == ("quota", TOKEN)
+
+
+async def test_checkin_binds_when_session_is_unbound(frozen_now):
+    """`unbound` 会话 → 绑一次即 trusted（issue #57：这是唯一自愈路径）。"""
+    fake = CheckinFakeClient(bills=[], user_info={"trusted_device": {
+        "trusted": False, "bound": False, "needs_bind": True,
+        "needs_relogin": False, "device_bind_state": "unbound",
+        "reason": "session_without_bound_device"}})
+    await RaccoonProvider(client=fake).checkin(DATA)
+    boots = [call for call in fake.calls if call[0] == "page_boot"]
+    assert len(boots) == 1
+    # 未绑时没有上游设备 id → 用派生值，且必须绑
+    assert boots[0][2].startswith("dev") and boots[0][3] is True
+
+
+async def test_checkin_reuses_bound_device_without_rebinding(frozen_now):
+    """已绑会话 → 沿用上游那台，绝不重复 bind（重复 bind 会永久锁死账号）。"""
+    fake = CheckinFakeClient(bills=[], user_info={"trusted_device": {
+        "trusted": True, "bound": True, "device_id": "dev661248",
+        "device_bind_state": "bound", "needs_bind": False}})
+    await RaccoonProvider(client=fake).checkin(DATA)
+    boots = [call for call in fake.calls if call[0] == "page_boot"]
+    assert len(boots) == 1
+    assert boots[0][2] == "dev661248" and boots[0][3] is False
 
 
 async def test_checkin_ignores_visit_failure(frozen_now):
@@ -305,6 +335,8 @@ async def test_checkin_reports_relogin_when_session_untrusted(frozen_now):
     assert not result.ok
     assert "重新登录" in result.message
     assert "device_session_mismatch" in result.message
+    # suspicious 态任何 device_id 都 400：不该白发一次 bind
+    assert [call[0] for call in fake.calls] == ["visit", "bills", "quota", "bills"]
 
 
 async def test_checkin_reports_already_when_grant_is_old(frozen_now):
@@ -338,10 +370,10 @@ class BillsErrorClient(FakeClient):
         self.calls.append(("quota", token))
         return self.quota
 
-    async def page_boot(self, token, device_id):
+    async def page_boot(self, token, device_id, *, bind=True):
         """首读流水就失败 → 不会走到页面启动（本用例不调用）。"""
-        self.calls.append(("page_boot", token, device_id))
-        return {}
+        self.calls.append(("page_boot", token, device_id, bind))
+        return device_id
 
     async def fetch_bills(self, token, limit=60, bill_type="all"):
         raise self.error
@@ -454,6 +486,30 @@ async def test_activity_short_circuits_when_session_needs_relogin():
     assert [call[0] for call in fake.calls] == ["visit"]
 
 
+async def test_activity_binds_unbound_session_then_heartbeats():
+    """`unbound` 会话：心跳前先绑一次（否则心跳恒 400，报「需重登」误导用户）。"""
+    fake = CheckinFakeClient(user_info={"trusted_device": {
+        "trusted": False, "bound": False, "needs_bind": True,
+        "needs_relogin": False, "device_bind_state": "unbound"}})
+    result = await RaccoonProvider(client=fake).activity(DATA)
+    assert result.ok
+    calls = [call[0] for call in fake.calls]
+    assert calls == ["visit", "ensure_device", "heartbeat"]
+    # 心跳用的是上游分配的那台，不是派生值
+    assert fake.calls[2][2] == "dev-bound"
+
+
+async def test_activity_reuses_bound_device_for_heartbeat():
+    """已绑会话：心跳直接用上游那台，不再 bind。"""
+    fake = CheckinFakeClient(user_info={"trusted_device": {
+        "trusted": True, "bound": True, "device_id": "dev661248",
+        "device_bind_state": "bound"}})
+    result = await RaccoonProvider(client=fake).activity(DATA)
+    assert result.ok
+    assert [call[0] for call in fake.calls] == ["visit", "heartbeat"]
+    assert fake.calls[1][2] == "dev661248"
+
+
 async def test_activity_visit_error_kept_when_session_needs_relogin():
     """访问失败但会话状态可疑：两条原因都要进一行汇报。"""
     fake = CheckinFakeClient(user_info={"trusted_device": {
@@ -514,7 +570,7 @@ class LoginFakeClient(CheckinFakeClient):
         self.login_token = token
         self.login_error = error
         self.logins: list[tuple[str, str]] = []
-        self.binds: list[tuple[str, str]] = []
+        self.binds: list[tuple[str, str, bool]] = []
 
     async def login(self, phone, password):
         self.logins.append((phone, password))
@@ -523,13 +579,21 @@ class LoginFakeClient(CheckinFakeClient):
         return {"access_token": self.login_token}
 
     async def bind_device(self, token, device_id):
-        self.binds.append((token, device_id))
+        self.binds.append((token, device_id, True))
         return {"device_id": device_id}
 
-    async def page_boot(self, token, device_id):
+    async def ensure_device(self, token, device_id, *, bind):
+        """与真客户端同口径：`bind=False` 原样返回，否则走 bind_device。"""
+        if not bind:
+            self.binds.append((token, device_id, False))
+            return device_id
+        bound = await self.bind_device(token, device_id)
+        return bound.get("device_id") or device_id
+
+    async def page_boot(self, token, device_id, *, bind=True):
         """按需登录后必须走的页面启动（绑设备 + 首页加载 + 活动上报）。"""
-        self.binds.append((token, device_id))
-        return {"device_id": device_id}
+        self.binds.append((token, device_id, bind))
+        return device_id
 
 
 async def test_relogin_returns_none_without_credentials():
@@ -590,6 +654,7 @@ async def test_relogin_binds_device_after_login():
 
     assert stored["uid"] == "pu-01a1"
     assert len(fake.binds) == 1
-    bound_token, device_id = fake.binds[0]
+    bound_token, device_id, bind = fake.binds[0]
     assert bound_token == token
+    assert bind is True
     assert device_id.startswith("dev") and len(device_id) <= 64
