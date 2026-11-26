@@ -7,6 +7,8 @@
  * 2. 命中率用后端算好的 `cache_rate`，前端不拿总输入重算。
  * 3. 分组行的分母是 `cached_input_tokens`（只含上报过缓存的请求），
  *    不是总输入。
+ * 4. 未上报但该渠道有校准命中率（`cache_rate_assumed`，TRAE）时显示 `≈`，
+ *    明确是推算，不是上游回传。
  */
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
@@ -120,8 +122,7 @@ describe("StatsOverviewCards 缓存口径", () => {
       .toHaveTextContent("上游未上报缓存字段，显示 — 不代表未命中");
   });
 
-  it("部分渠道未上报：命中率按已上报请求计算，未命中用 cached_input_tokens", () => {
-    // 400 命中 ÷ 600 已上报输入 = 66.7%；若拿总输入 1000 会稀释成 40.0%
+  it("部分渠道未上报：命中率按已上报请求计算，未命中用 cached_input_tokens", () => {    // 400 命中 ÷ 600 已上报输入 = 66.7%；若拿总输入 1000 会稀释成 40.0%
     render(
       <StatsOverviewCards
         overviewFailed={false}
@@ -209,5 +210,88 @@ describe("分组行 / 明细行缓存口径", () => {
     expect(cell).not.toHaveTextContent("0.0%");
     await userEvent.hover(cell);
     expect(await screen.findByRole("tooltip")).toHaveTextContent("上游未上报缓存字段");
+  });
+});
+
+describe("未上报但带校准命中率（TRAE ≈ 推算）", () => {
+  it("总览：显示 ≈ 实测校准值，并说明是推算", () => {
+    render(
+      <StatsOverviewCards
+        overviewFailed={false}
+        stats={overview({
+          input_tokens: 1000,
+          cached_tokens: null,
+          cached_input_tokens: null,
+          cache_rate: null,
+          cache_rate_assumed: 0.98,
+        })}
+      />,
+    );
+
+    const card = screen.getByTestId("stat-cache");
+    expect(card).toHaveTextContent("≈98.0%");
+    expect(card).not.toHaveTextContent("0.0%");
+    // 命中 / 未命中是 input × 校准比例的推算值
+    expect(card).toHaveTextContent("命中 ≈980 · 未命中 ≈20");
+    expect(within(card).getByTestId("stat-cache-note"))
+      .toHaveTextContent("按校准比例的推算");
+  });
+
+  it("分组行：显示 ≈ 命中率并提示上游未上报", async () => {
+    renderGroups([
+      groupRow({
+        input_tokens: 1000,
+        cached_tokens: null,
+        cached_input_tokens: null,
+        cache_rate_assumed: 0.98,
+      }),
+    ]);
+
+    const row = screen.getByTestId("group-row-trae");
+    const rate = within(row).getByTestId("group-cache-rate");
+    expect(rate).toHaveTextContent("≈98.0%");
+    await userEvent.hover(rate);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("按校准命中率推算");
+  });
+
+  it("明细行：显示 ≈ 命中率而不是 —", async () => {
+    render(
+      <table>
+        <tbody>
+          <tr>
+            {tokenCell({
+              rowid: 1,
+              ts: 1_700_000_000,
+              username: "root",
+              provider: "trae",
+              model: "deepseek-v4",
+              credential_id: null,
+              credential_name: null,
+              ok: 1,
+              error_type: null,
+              input_tokens: 1000,
+              output_tokens: 100,
+              cached_tokens: null,
+              cache_rate_assumed: 0.98,
+              credit: null,
+              credit_estimated: 0,
+              cost_usd: null,
+              cost_cny: null,
+              latency_ms: 300,
+              ttfb_ms: 150,
+              tps: null,
+              tps_visible: null,
+              request_id: "req",
+            })}
+          </tr>
+        </tbody>
+      </table>,
+    );
+
+    const cell = document.querySelector<HTMLElement>('[data-slot="tooltip-trigger"]')!;
+    expect(cell).toHaveTextContent("≈98.0%");
+    expect(cell).not.toHaveTextContent(" · —");
+    await userEvent.hover(cell);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("按校准命中率推算");
   });
 });

@@ -343,6 +343,18 @@ export function formatCacheRate(
 }
 
 /**
+ * 未上报缓存时的假定命中率（≈）：上游不报（如 TRAE），后端按校准比例给值。
+ * 与 `formatCacheRate` 区分，前缀 ≈ 明确是推算而非上游回传。
+ */
+export function formatAssumedCacheRate(
+  value: number | null | undefined,
+): string {
+  if (value === null || value === undefined) return "—";
+  const percent = Math.min(100, Math.max(0, value * 100));
+  return `≈${percent.toFixed(1)}%`;
+}
+
+/**
  * Credit 展示：null 显示 —；推算值（TRAE 按官方单价折算）前置
  * ≈ 表示约等于，提醒是估算而非上游回传的真实扣费。
  */

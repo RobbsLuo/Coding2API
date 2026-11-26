@@ -19,7 +19,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Gauge, ArrowDownRight, ToggleLeft, ToggleRight } from "lucide-react";
 import { Metric, Panel, Notice } from "../../ui";
-import { formatCacheRate, formatCompact, formatNumber } from "../../api/display";
+import { formatAssumedCacheRate, formatCacheRate, formatCompact, formatNumber } from "../../api/display";
 import type { StatsOverview } from "../../api/types";
 
 /** `/api/stats/compression` 的响应形状（端点只回计数，不回任何用户维度）。 */
@@ -99,11 +99,16 @@ export function CompressPanel({
   const idle = data !== undefined
     && (counters?.triggers ?? 0) === 0
     && (counters?.unchanged ?? 0) === 0;
-  // 分母只含上报过缓存的请求；老接口没有该字段时才回落到总输入
-  const hitRate = formatCacheRate(
-    stats?.cached_tokens,
-    stats?.cached_input_tokens ?? stats?.input_tokens,
-  );
+  // 分母只含上报过缓存的请求；老接口没有该字段时才回落到总输入。
+  // 未上报但后端给了校准命中率（TRAE）时显示 ≈ 推算值。
+  const hitRate = stats?.cached_tokens === null
+    && stats?.cache_rate_assumed !== null
+    && stats?.cache_rate_assumed !== undefined
+    ? formatAssumedCacheRate(stats.cache_rate_assumed)
+    : formatCacheRate(
+      stats?.cached_tokens,
+      stats?.cached_input_tokens ?? stats?.input_tokens,
+    );
 
   if (!isOperator) return null;
 

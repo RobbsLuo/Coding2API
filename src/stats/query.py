@@ -445,8 +445,25 @@ def _group_order(sort: str | None, order: str | None) -> str:
 
 
 class StatsQuery:
-    def __init__(self, db) -> None:
+    def __init__(self, db, *, cache_assumption=None) -> None:
+        """`cache_assumption(provider) -> 0..1 | None`：上游不上报缓存时的
+        假定命中率（TRAE 由校准任务回写）。只用于**展示**的 `≈` 值，不改变
+        `cached_tokens`（仍为 NULL = 未上报），也不进任何聚合分母。
+        """
         self._db = db
+        self._cache_assumption = cache_assumption
+
+    def _assumed_cache_rate(self, provider: str | None,
+                            cached_tokens: int | None) -> float | None:
+        """未上报缓存时按假定命中率给一个展示值；已上报 / 无假设返回 None。"""
+        if self._cache_assumption is None or cached_tokens is not None:
+            return None
+        if not provider:
+            return None
+        ratio = self._cache_assumption(provider)
+        if ratio is None or not (0 < ratio <= 1):
+            return None
+        return round(ratio, 4)
 
     def _metric_value(self, metric: str, row: Any) -> Any:
         """把一行聚合结果按 metric 归一成图表值；无有效样本给 `None`。
@@ -620,6 +637,9 @@ class StatsQuery:
             # 命中率：无上报或分母为 0 时 None（不是 0%，前端断线）
             "cache_rate": (round(row["cached_tokens"] / cached_input, 4)
                            if row["cached_known"] and cached_input else None),
+            # 上游不上报时的展示用假定值（TRAE）：前端加 ≈，不参与聚合
+            "cache_rate_assumed": self._assumed_cache_rate(
+                provider, row["cached_tokens"] if row["cached_known"] else None),
             "credit": row["credit_sum"] if row["credit_known"] else None,
             # 汇总 credit 中含推算值时标 ≈（全部渠道任一为推算即标，保守）
             "credit_estimated": bool(row["credit_estimated_known"]),
@@ -750,6 +770,8 @@ class StatsQuery:
             # 命中率分母（只含上报过的输入量）：分组行不单独下发 rate，
             # 需要时用 cached_tokens / cached_input_tokens 自行相除
             "cached_input_tokens": row["cached_input_tokens"] or 0,
+            # 上游不上报时的展示用假定值；由 _annotate_assumed 按渠道填充
+            "cache_rate_assumed": None,
             "credit": row["credit_sum"] if row["credit_known"] else None,
             "credit_estimated": bool(row["credit_estimated_known"]),
             "cost_usd": row["cost_usd_sum"] if row["cost_known"] else None,
@@ -802,7 +824,19 @@ class StatsQuery:
             {join}
             {where} GROUP BY {key} ORDER BY {_group_order(sort, order)}
             """, [*join_params, *params]).fetchall()
-        return [self._group_row(row, key) for row in rows]
+        return self._annotate_assumed(
+            [self._group_row(row, key) for row in rows])
+
+    def _annotate_assumed(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """给分组行补 `cache_rate_assumed`：未上报缓存且有假定命中率的渠道。
+
+        只有渠道 / 凭证维度带 `provider`；模型 / 用户维度可能跨渠道，无法把
+        单个渠道的假定值套到整行上，保持 None（展示 —）。
+        """
+        for row in rows:
+            row["cache_rate_assumed"] = self._assumed_cache_rate(
+                row.get("provider"), row["cached_tokens"])
+        return rows
 
     def _group_events(self, key: str, *, username: str | None = None,
                       since: int | None = None, until: int | None = None,
@@ -866,7 +900,9 @@ class StatsQuery:
             {clause}
             GROUP BY e.{key} ORDER BY {_group_order(sort, order)}
             """, [*join_params, *params]).fetchall()
-        return [self._group_row(row, key, ("provider", "credential_name")) for row in rows]
+        return self._annotate_assumed(
+            [self._group_row(row, key, ("provider", "credential_name"))
+             for row in rows])
 
     def by_provider(self, *, username: str | None = None,
                     since: int | None = None, until: int | None = None,
@@ -1092,7 +1128,7 @@ class StatsQuery:
             has_more = len(rows) > limit
             page = rows[:limit]
             return {
-                "events": [dict(row) for row in page],
+                "events": self._annotate_events([dict(row) for row in page]),
                 "next_before": page[-1]["rowid"] if has_more and page else None,
                 "total": None,
             }
@@ -1110,10 +1146,17 @@ class StatsQuery:
             ORDER BY {clause} LIMIT ? OFFSET ?
             """, [*params, limit, max(0, offset)]).fetchall()
         return {
-            "events": [dict(row) for row in rows],
+            "events": self._annotate_events([dict(row) for row in rows]),
             "next_before": None,
             "total": int(total),
         }
+
+    def _annotate_events(self, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """给逐请求行补 `cache_rate_assumed`（未上报缓存且有假定命中率的渠道）。"""
+        for row in rows:
+            row["cache_rate_assumed"] = self._assumed_cache_rate(
+                row.get("provider"), row.get("cached_tokens"))
+        return rows
 
     def export_events(self, *, username: str | None = None, since: int | None = None,
                       until: int | None = None,

@@ -164,6 +164,8 @@ export interface StatsOverview {
   cached_input_tokens: number | null;
   /** 缓存命中率（0..1，后端按 cached_tokens ÷ cached_input_tokens 算好）；null = 不可用 */
   cache_rate: number | null;
+  /** 上游不上报缓存时的假定命中率（TRAE 校准值，展示加 ≈）；已上报或无关渠道为 null */
+  cache_rate_assumed?: number | null;
   /** 渠道可选字段，两边都经常为 null */
   credit: number | null;
   /** credit 是否为推算值（TRAE 按官方单价折算），展示加 ≈ */
@@ -202,6 +204,11 @@ export interface GroupStats {
   cached_tokens: number | null;
   /** 命中率分母：该维度内**上报过缓存字段**的请求的输入 token 之和；null = 无上报 */
   cached_input_tokens: number | null;
+  /**
+   * 上游不上报缓存时的假定命中率（0..1，后端按渠道校准值给，展示加 ≈）。
+   * 只有渠道 / 凭证维度有；模型 / 用户维度可能跨渠道，恒为 null。
+   */
+  cache_rate_assumed?: number | null;
   credit: number | null;
   /** credit 是否为推算值（含推算即为 true），展示加 ≈ */
   credit_estimated: boolean;
@@ -317,6 +324,11 @@ export interface UsageEventRow {
   input_tokens: number | null;
   output_tokens: number | null;
   cached_tokens: number | null;
+  /**
+   * 上游不上报缓存时的假定命中率（TRAE 校准值，展示加 ≈）。
+   * 已上报或没有校准值的渠道为 null。
+   */
+  cache_rate_assumed?: number | null;
   credit: number | null;
   /** credit 是否为推算值（TRAE 按官方单价折算），展示加 ≈ */
   credit_estimated: number;

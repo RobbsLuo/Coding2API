@@ -998,7 +998,12 @@ def build_app(settings: Settings | None = None, *, providers: dict | None = None
     app.state.growth_events = growth_events
     app.state.checkin_events = checkin_events
     app.state.credential_events = credential_events
-    app.state.stats_query = StatsQuery(db)
+    app.state.stats_query = StatsQuery(
+        db,
+        # TRAE 上游不再上报缓存命中：展示层按校准后的假定命中率给 ≈ 值
+        # （只影响显示，不改变 cached_tokens / 聚合口径）
+        cache_assumption=lambda provider: (
+            runtime.trae_assumed_cache_ratio if provider == "trae" else None))
     # SSE 实时流的订阅中心（与 StatsCollector 的 on_record 同源）
     app.state.live_events = live_events
     app.state.log_buffer = log_buffer

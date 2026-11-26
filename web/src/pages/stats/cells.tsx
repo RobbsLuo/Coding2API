@@ -9,6 +9,7 @@ import { TableCell } from "../../ui";
 import { Tip } from "../../components/Tip";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import {
+  formatAssumedCacheRate,
   formatCacheRate,
   formatCompact,
   formatCredit,
@@ -122,14 +123,27 @@ export function rowToneClass(row: UsageEventRow) {
  * 窄屏卡片模式下同样可用（点击单元格即可唤出）。
  */
 export function tokenCell(row: UsageEventRow) {
-  const rate = formatCacheRate(row.cached_tokens, row.input_tokens);
+  // 本行未上报缓存时，后端若给出该渠道的校准命中率（TRAE），显示 ≈ 推算值。
+  const assumed = row.cached_tokens === null
+    ? row.cache_rate_assumed ?? null
+    : null;
+  const rate = assumed !== null
+    ? formatAssumedCacheRate(assumed)
+    : formatCacheRate(row.cached_tokens, row.input_tokens);
   // 逐请求没有「已上报缓存的输入」这一列：本行要么上报（input_tokens 即分母），
   // 要么没上报（cached_tokens 为 null）。未上报时说明 — 不是「0 命中」。
-  const cacheNote = row.cached_tokens === null ? "（上游未上报缓存字段）" : "";
+  const cacheNote = row.cached_tokens === null
+    ? (assumed !== null
+      ? "（上游未上报，按校准命中率推算 ≈）"
+      : "（上游未上报缓存字段）")
+    : "";
+  const hitText = assumed !== null && row.input_tokens !== null
+    ? `≈${formatCompact(Math.round(row.input_tokens * assumed))}`
+    : formatCompact(row.cached_tokens);
   return (
     <Tip content={
       `输入 ${formatCompact(row.input_tokens)} · 输出 ${formatCompact(row.output_tokens)}`
-      + ` · 命中 ${formatCompact(row.cached_tokens)} · 命中率 ${rate}${cacheNote}`
+      + ` · 命中 ${hitText} · 命中率 ${rate}${cacheNote}`
     }>
       <span className="tabular-nums">
         {formatCompact(row.input_tokens)} / {formatCompact(row.output_tokens)}

@@ -11,6 +11,7 @@ import { ProviderIcon } from "../../components/ProviderIcon";
 import { SortableHead } from "../../components/SortableHead";
 import { SortMenuHead } from "../../components/SortMenuHead";
 import {
+  formatAssumedCacheRate,
   formatCacheRate,
   formatCompact,
   formatCredit,
@@ -127,11 +128,21 @@ export function GroupStatsPanel(props: GroupStatsPanelProps) {
               // provider/model/credential_id 直接同名，用户维度走作用域 username
               const keyValue = String(row[groupKey]);
               // 命中率分母只含「上报过缓存」的请求（cached_input_tokens）；
-              // 老接口没有该字段时才回落到总输入。null 命中 = 未上报 → 显示 —。
-              const cacheRate = formatCacheRate(
-                row.cached_tokens,
-                row.cached_input_tokens ?? row.input_tokens,
-              );
+              // 老接口没有该字段时才回落到总输入。null 命中 = 未上报 → 显示 —，
+              // 但后端给了该渠道的校准命中率（cache_rate_assumed）时显示 ≈ 值。
+              const cacheRate = row.cached_tokens === null
+                && row.cache_rate_assumed !== null
+                && row.cache_rate_assumed !== undefined
+                ? formatAssumedCacheRate(row.cache_rate_assumed)
+                : formatCacheRate(
+                  row.cached_tokens,
+                  row.cached_input_tokens ?? row.input_tokens,
+                );
+              const cacheHitText = row.cached_tokens === null
+                && row.cache_rate_assumed !== null
+                && row.cache_rate_assumed !== undefined
+                ? `≈${formatCompact(Math.round(row.input_tokens * row.cache_rate_assumed))}`
+                : formatCompact(row.cached_tokens);
               const cachePartial =
                 row.cached_tokens !== null
                 && row.cached_input_tokens !== null
@@ -206,8 +217,13 @@ export function GroupStatsPanel(props: GroupStatsPanelProps) {
                   <Tip content={
                     `输入 ${formatCompact(row.input_tokens)}`
                     + ` · 输出 ${formatCompact(row.output_tokens)}`
-                    + ` · 命中 ${formatCompact(row.cached_tokens)}`
-                    + (row.cached_tokens === null ? "（上游未上报缓存字段）" : "")
+                    + ` · 命中 ${cacheHitText}`
+                    + (row.cached_tokens === null
+                      ? (row.cache_rate_assumed !== null
+                        && row.cache_rate_assumed !== undefined
+                        ? "（上游未上报，按校准命中率推算 ≈）"
+                        : "（上游未上报缓存字段）")
+                      : "")
                     + (cachePartial ? " · 命中率按已上报请求计算" : "")
                   }>
                     <span className="tabular-nums">

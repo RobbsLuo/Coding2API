@@ -24,7 +24,7 @@ def test_stats_endpoints_scope_by_principal(admin_client):
     assert client.get("/api/stats/by-user").json()["users"] == [
         {"username": "other", "requests": 1, "ok_count": 1, "input_tokens": 0,
          "output_tokens": 0, "cached_tokens": None, "cached_input_tokens": 0,
-         "credit": None,
+         "cache_rate_assumed": None, "credit": None,
          "credit_estimated": False, "cost_usd": None, "cost_cny": None,
          "avg_latency_ms": 0, "avg_ttfb_ms": 0,
          "tps": None, "tps_visible": None, "tps_estimated": False,
@@ -34,7 +34,7 @@ def test_stats_endpoints_scope_by_principal(admin_client):
          "p99_latency_ms": None, "p99_ttfb_ms": None},
         {"username": "root", "requests": 1, "ok_count": 1, "input_tokens": 0,
          "output_tokens": 0, "cached_tokens": None, "cached_input_tokens": 0,
-         "credit": None,
+         "cache_rate_assumed": None, "credit": None,
          "credit_estimated": False, "cost_usd": None, "cost_cny": None,
          "avg_latency_ms": 0, "avg_ttfb_ms": 0,
          "tps": None, "tps_visible": None, "tps_estimated": False,

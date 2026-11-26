@@ -7,6 +7,7 @@
 import { Activity, Coins, Timer, Wallet } from "lucide-react";
 import { Metric, Notice } from "../../ui";
 import {
+  formatAssumedCacheRate,
   formatCompact,
   formatCredit,
   formatLatency,
@@ -30,16 +31,26 @@ export function StatsOverviewCards({ overviewFailed, stats }: StatsOverviewCards
   const rateText = rate === null ? "—" : `${(rate * 100).toFixed(1)}%`;
   const totalTokens = (stats?.input_tokens ?? 0) + (stats?.output_tokens ?? 0);
   // 输入缓存：命中 = 上报的 cached_tokens；未命中 = 已上报请求的输入 − 命中。
-  // null（上游未上报，如 TRAE）= 没有数据，不是「0 命中」——三项都显示 —。
+  // null（上游未上报，如 TRAE）= 没有数据，不是「0 命中」。后端给了该渠道的
+  // 校准命中率（cache_rate_assumed）时，展示 ≈ 推算值，明确不是上游回传。
   const cached = stats?.cached_tokens ?? null;
   const cachedInput = stats?.cached_input_tokens ?? null;
   const cacheReported = cached !== null;
-  const hitText = cached === null ? "—" : formatCompact(cached);
-  const missText =
-    cached === null || cachedInput === null ? "—" : formatCompact(cachedInput - cached);
-  // 命中率用后端算好的 cache_rate（分母只含已上报请求）；不在前端重算，
-  // 否则拿总输入当分母会把不上报缓存的渠道稀释成假低值。
-  const cacheRateText = cacheReported ? formatRate(stats?.cache_rate) : "—";
+  const assumed = cacheReported ? null : (stats?.cache_rate_assumed ?? null);
+  const hitText = cached !== null
+    ? formatCompact(cached)
+    : assumed !== null && stats?.input_tokens != null
+      ? `≈${formatCompact(Math.round(stats.input_tokens * assumed))}`
+      : "—";
+  const missText = cached !== null
+    ? (cachedInput === null ? "—" : formatCompact(cachedInput - cached))
+    : assumed !== null && stats?.input_tokens != null
+      ? `≈${formatCompact(Math.round(stats.input_tokens * (1 - assumed)))}`
+      : "—";
+  // 命中率用后端算好的 cache_rate（分母只含已上报请求）；未上报时用校准值加 ≈。
+  const cacheRateText = cacheReported
+    ? formatRate(stats?.cache_rate)
+    : formatAssumedCacheRate(assumed);
   // 部分渠道不上报缓存字段：命中率只覆盖已上报的那部分请求，得说清楚。
   const partialCache =
     cachedInput !== null
@@ -55,7 +66,9 @@ export function StatsOverviewCards({ overviewFailed, stats }: StatsOverviewCards
     ? null
     : cacheReported
       ? (partialCache ? "命中率按已上报请求计算" : null)
-      : "上游未上报缓存字段，显示 — 不代表未命中";
+      : assumed !== null
+        ? "上游未上报缓存字段，命中数与命中率为按校准比例的推算（≈）"
+        : "上游未上报缓存字段，显示 — 不代表未命中";
 
   return (
     <>

@@ -1445,3 +1445,57 @@ def test_row_speed_python_matches_sql_guards():
                      latency_ms=1100, ttfb_ms=1000) == (None, None)
     assert row_speed(ok=True, output_tokens=2000, reasoning_tokens=0,
                      latency_ms=1400, ttfb_ms=1200) == (None, None)
+
+
+# ------------------------------------------------------- 未上报缓存的假定命中率
+
+def test_assumed_cache_rate_branches(repo):
+    """展示用假定值：只在「未上报 + 该渠道有校准值」时给出。"""
+    _credentials, db = repo
+    query = StatsQuery(db, cache_assumption=lambda p: 0.98 if p == "trae" else None)
+    assert query._assumed_cache_rate("trae", None) == 0.98
+    assert query._assumed_cache_rate("trae", 0) is None        # 已上报
+    assert query._assumed_cache_rate("codebuddy", None) is None
+    assert query._assumed_cache_rate(None, None) is None
+    assert StatsQuery(db)._assumed_cache_rate("trae", None) is None
+    # 越界 / 非法比例不展示（避免把 95 当成 0.95 这类错误放大到界面）
+    assert StatsQuery(db, cache_assumption=lambda _p: 1.5)._assumed_cache_rate(
+        "trae", None) is None
+    assert StatsQuery(db, cache_assumption=lambda _p: 0)._assumed_cache_rate(
+        "trae", None) is None
+
+
+def test_assumed_rate_in_overview_groups_and_events(repo):
+    """TRAE 未上报时，总览 / 渠道行 / 明细都带校准命中率，用于前端加 ≈。"""
+    _credentials, db = repo
+    collector = StatsCollector(db)
+    collector.record(username="u", provider="trae", model="deepseek-v4.1-flash",
+                     ok=True, input_tokens=1000, output_tokens=100,
+                     cached_tokens=None)
+    collector.record(username="u", provider="codebuddy", model="glm-5.2",
+                     ok=True, input_tokens=1000, output_tokens=100,
+                     cached_tokens=800)
+    query = StatsQuery(db, cache_assumption=lambda p: 0.98 if p == "trae" else None)
+
+    overview = query.overview(provider="trae")
+    assert overview["cached_tokens"] is None
+    assert overview["cache_rate"] is None
+    assert overview["cache_rate_assumed"] == 0.98
+
+    by_provider = {row["provider"]: row for row in query.by_provider()}
+    assert by_provider["trae"]["cache_rate_assumed"] == 0.98
+    assert by_provider["codebuddy"]["cache_rate_assumed"] is None
+
+    # 模型 / 用户维度可能跨渠道，无法套用单渠道假定值
+    assert all(row["cache_rate_assumed"] is None for row in query.by_model())
+    assert all(row["cache_rate_assumed"] is None for row in query.by_user())
+
+    events = query.events()["events"]
+    trae_event = next(row for row in events if row["provider"] == "trae")
+    cb_event = next(row for row in events if row["provider"] == "codebuddy")
+    assert trae_event["cache_rate_assumed"] == 0.98
+    assert cb_event["cache_rate_assumed"] is None
+
+    # 分页（offset）路径同样带该字段
+    offset_page = query.events(sort="latency", order="asc")["events"]
+    assert all("cache_rate_assumed" in row for row in offset_page)
