@@ -68,7 +68,9 @@ export function CredentialTable({
     <Table
       data-testid="credentials-table"
       cards
-      containerClassName="max-h-[70vh] overflow-auto"
+      // 窄屏是卡片流，由页面滚动即可；再套一层 70vh 内滚会出现「滚中滚」，
+      // 手指在卡片上滑到底也不知道还有内容。宽屏才限高吸顶。
+      containerClassName="overflow-visible sm:max-h-[70vh] sm:overflow-auto"
     >
       <TableBody>
         {groups.map((group) => {

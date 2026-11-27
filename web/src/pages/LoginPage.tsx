@@ -46,12 +46,15 @@ export function LoginPage() {
 
   return (
     <div className="grid min-h-full lg:grid-cols-[1.1fr_1fr]">
-      {/* 品牌区（桌面显示）：产品故事 + 卖点 */}
-      <aside className="relative hidden flex-col justify-between overflow-hidden bg-[var(--surface-sunken)] p-10 lg:flex">
-        {/* 细微网格纹理：控制台质感，不喧宾夺主 */}
+      {/* 品牌区（桌面显示）：产品故事 + 卖点。
+          构图：品牌标识贴顶、标题+卖点作为一组在剩余空间里居中、页脚贴底。
+          原先 `justify-between` 把三块拉到上下两端，1440 下中间空出一大片，
+          标题离视口中心很远。 */}
+      <aside className="relative hidden flex-col overflow-hidden bg-[var(--surface-sunken)] p-10 lg:flex">
+        {/* 细微网格纹理：控制台质感，不喧宾夺主（比正文低一档，避免抢注意力） */}
         <div
           aria-hidden
-          className="pointer-events-none absolute inset-0 opacity-[0.5]"
+          className="pointer-events-none absolute inset-0 opacity-[0.35]"
           style={{
             backgroundImage:
               "radial-gradient(color-mix(in oklch, var(--primary) 22%, transparent) 1px, transparent 1px)",
@@ -62,23 +65,25 @@ export function LoginPage() {
           <BrandMark className="size-9" />
           <span className="text-lg font-semibold tracking-tight">Coding2API</span>
         </div>
-        <div className="relative max-w-md space-y-6">
-          <p className="text-2xl leading-snug font-semibold tracking-tight">
-            多路渠道，一个出口。
-          </p>
-          <ul className="space-y-5">
-            {HIGHLIGHTS.map((item) => (
-              <li key={item.title} className="flex gap-3">
-                <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
-                  <item.icon className="size-4" />
-                </span>
-                <div>
-                  <div className="text-sm font-medium">{item.title}</div>
-                  <p className="text-xs leading-relaxed text-muted-foreground">{item.text}</p>
-                </div>
-              </li>
-            ))}
-          </ul>
+        <div className="relative flex flex-1 items-center py-8">
+          <div className="w-full max-w-md space-y-6">
+            <p className="text-2xl leading-snug font-semibold tracking-tight">
+              多路渠道，一个出口。
+            </p>
+            <ul className="space-y-5">
+              {HIGHLIGHTS.map((item) => (
+                <li key={item.title} className="flex gap-3">
+                  <span className="mt-0.5 grid size-8 shrink-0 place-items-center rounded-lg bg-primary/10 text-primary">
+                    <item.icon className="size-4" />
+                  </span>
+                  <div>
+                    <div className="text-sm font-medium">{item.title}</div>
+                    <p className="text-xs leading-relaxed text-muted-foreground">{item.text}</p>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </div>
         </div>
         <p className="relative text-xs text-muted-foreground">
           仅供学习研究，未做安全审计。

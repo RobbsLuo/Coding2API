@@ -1,12 +1,5 @@
 import { useEffect, useState } from "react";
-import {
-  Ban,
-  Boxes,
-  CircleDollarSign,
-  RefreshCw,
-  Search,
-  Trophy,
-} from "lucide-react";
+import { Ban, Boxes, RefreshCw, Search } from "lucide-react";
 import { useSessionContext } from "../Layout";
 import {
   useBlockModel,
@@ -215,8 +208,11 @@ function ProbePanel({
       {degraded.length > 0 && (
         <div className="mt-2 space-y-1" data-testid="model-list-degraded">
           <Notice tone="warn">
-            以下渠道的动态模型拉取一直失败，当前列表用的是**内置静态表**（可能缺少
-            上游新模型）：
+            {/* 整段包一层 span：ShadAlert 是 grid 容器，多个子元素会被拆成多行 */}
+            <span>
+              以下渠道的动态模型拉取一直失败，当前列表用的是
+              <strong className="font-semibold">内置静态表</strong>（可能缺少上游新模型）：
+            </span>
           </Notice>
           <ul className="text-xs text-muted-foreground">
             {degraded.map((item) => (
@@ -287,32 +283,40 @@ function ProbePanel({
                       )}
                     </TableCell>
                     <TableCell label="最近探活" className="text-xs">
-                      {row.last_probe_at ? (
-                        <>
-                          <div title={formatTime(row.last_probe_at)}>
-                            {formatAgo(row.last_probe_at)}
-                          </div>
-                          {row.last_ok_at > 0 && (
-                            <div className="text-muted-foreground">
-                              上次成功 {formatAgo(row.last_ok_at)}
+                      {/* 整格包一层：卡片模式下 td 是 flex 横排，时间 / 错误各自成
+                          子项会被压成逐字折行（日期列只剩 10px 宽） */}
+                      <div className="min-w-0 space-y-1">
+                        {row.last_probe_at ? (
+                          <>
+                            <div title={formatTime(row.last_probe_at)}>
+                              {formatAgo(row.last_probe_at)}
                             </div>
-                          )}
-                        </>
-                      ) : (
-                        <span className="text-muted-foreground">未探过</span>
-                      )}
-                      {row.last_error && (
-                        // 错误摘要可能很长（上游原文）：限宽单行截断，hover 看全文。
-                        // 不折行是必要的——折行会把整列撑宽，挤掉右侧操作列。
-                        <LongTextTip content={row.last_error}>
-                          <div
-                            className="max-w-[16rem] truncate text-muted-foreground"
-                            data-testid={`probe-error-${key}`}
-                          >
-                            {row.last_error}
-                          </div>
-                        </LongTextTip>
-                      )}
+                            {row.last_ok_at > 0 && (
+                              <div className="text-muted-foreground">
+                                上次成功 {formatAgo(row.last_ok_at)}
+                              </div>
+                            )}
+                          </>
+                        ) : (
+                          <span className="text-muted-foreground">未探过</span>
+                        )}
+                        {row.last_error && (
+                          // 错误摘要可能很长（上游原文，常是带转义引号的 JSON）：
+                          // 限宽两行折行 + break-words（单词优先断行，超长 token 也
+                          // 会断），完整原文走 title 与悬浮层。不折行会把整列撑宽、
+                          // 挤掉右侧操作列，故保留 truncate 兜底（单行），窄屏卡片
+                          // 模式也不会横向溢出。
+                          <LongTextTip content={row.last_error}>
+                            <div
+                              className="max-w-[16rem] truncate whitespace-normal break-words text-muted-foreground line-clamp-2"
+                              title={row.last_error}
+                              data-testid={`probe-error-${key}`}
+                            >
+                              {row.last_error}
+                            </div>
+                          </LongTextTip>
+                        )}
+                      </div>
                     </TableCell>
                     <TableCell label="操作" className="text-xs">
                       <div className="flex flex-wrap gap-1">
@@ -538,19 +542,16 @@ export function ModelCatalogPage() {
           hint={data?.saved_at
             ? `${formatTime(data.saved_at)} · 价格 / 明细 / 能力分同一次抓取`
             : "尚无目录快照，成本与能力分将显示 —"}
-          icon={<RefreshCw className="size-4" />}
         />
         <Metric
           label="能力分来源"
           value="Artificial Analysis"
           hint="经 OpenRouter 公开接口分发，非本服务实测"
-          icon={<Trophy className="size-4" />}
         />
         <Metric
           label="汇率"
           value={`1 USD = ${formatNumber(rate)} CNY`}
           hint="可在「任务与配置」热更，仅影响之后写入的请求"
-          icon={<CircleDollarSign className="size-4" />}
         />
       </section>
 

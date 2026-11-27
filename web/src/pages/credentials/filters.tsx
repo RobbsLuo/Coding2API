@@ -30,7 +30,11 @@ export function CredentialFilterBar({
 }) {
   return (
             <div className="flex flex-wrap items-center gap-2 pb-3" data-testid="credentials-toolbar">
-              <div className="relative">
+              {/* 窄屏：搜索独占一行，三个下拉两列排满；宽屏三者回到同一行顺排
+                  （`sm:contents` 让这个栅格在宽屏消失、子项直接参与外层 flex）。
+                  原先每个控件都 flex-1，390 下只剩 ~100px，「额度从高到低」被截成
+                  「额度从高…」。 */}
+              <div className="relative w-full sm:w-auto">
                 <Search className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   value={filters.query}
@@ -41,11 +45,12 @@ export function CredentialFilterBar({
                   onChange={(event) => onFiltersChange({ ...filters, query: event.target.value })}
                 />
               </div>
+              <div className="grid w-full grid-cols-2 gap-2 sm:contents">
               <Select
                 value={filters.provider}
                 data-testid="credential-provider-filter"
                 aria-label="按渠道筛选"
-                className="h-8 w-40 text-xs"
+                className="h-8 min-w-0 text-xs sm:w-40"
                 onChange={(event) => onFiltersChange({ ...filters, provider: event.target.value })}
               >
                 <option value={ANY}>全部渠道（{total}）</option>
@@ -59,7 +64,7 @@ export function CredentialFilterBar({
                 value={filters.state}
                 data-testid="credential-state-filter"
                 aria-label="按状态筛选"
-                className="h-8 w-36 text-xs"
+                className="h-8 min-w-0 text-xs sm:w-40"
                 onChange={(event) => onFiltersChange({ ...filters, state: event.target.value })}
               >
                 <option value={ANY}>全部状态（{total}）</option>
@@ -76,7 +81,7 @@ export function CredentialFilterBar({
                   value={filters.tag}
                   data-testid="credential-tag-filter"
                   aria-label="按标签筛选"
-                  className="h-8 w-40 text-xs"
+                  className="h-8 min-w-0 text-xs sm:w-40"
                   onChange={(event) => onFiltersChange({ ...filters, tag: event.target.value })}
                 >
                   <option value={ANY}>全部标签（{total}）</option>
@@ -94,12 +99,13 @@ export function CredentialFilterBar({
                 value={groupSort}
                 data-testid="credential-group-sort"
                 aria-label="渠道分组排序"
-                className="h-8 w-40 text-xs"
+                className="h-8 min-w-0 text-xs sm:w-40"
                 onChange={(event) => onGroupSortChange(event.target.value as GroupSort)}
               >
                 <option value="quota">额度从高到低</option>
                 <option value="provider">渠道顺序</option>
               </Select>
+              </div>
               {filtering && (
                 <>
                   <span

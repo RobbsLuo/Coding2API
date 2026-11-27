@@ -133,7 +133,10 @@ export function CredentialGroupHeader({
                                 焦点都会打架（点 checkbox 会连带展开/折叠该组）。
                                 只在**会话可写**时渲染（viewer 整张表都没有选择列，组头
                                 也不该多出这一格）。 */}
-                            <div className="flex items-center">
+                            {/* 窄屏整块竖排：身份 / 指标 / 右簇各占一行。
+                                外层不换行时，「今日签到 + 模型」是 shrink-0 的 320px，
+                                会把中间的展开按钮压成一条 24px 的竖条（文字逐字竖排）。 */}
+                            <div className="flex flex-wrap items-center">
                               {canWrite && (
                                 <span className="pl-3">
                                   <Checkbox
@@ -153,7 +156,7 @@ export function CredentialGroupHeader({
                                 className="flex min-w-0 flex-1 cursor-pointer flex-wrap items-center gap-x-4 gap-y-2 px-3 py-2 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
                               >
                               {/* 身份：折叠箭头 + 品牌图标 + 渠道名 + 账号数 */}
-                              <span className="flex w-48 shrink-0 items-center gap-2">
+                              <span className="flex w-44 min-w-0 shrink-0 items-center gap-2 max-md:w-full">
                                 <ChevronRight
                                   className={cn(
                                     "size-4 shrink-0 text-muted-foreground transition-transform",
@@ -165,7 +168,12 @@ export function CredentialGroupHeader({
                                   <ProviderIcon provider={group.provider} size={16} />
                                 </span>
                                 <span className="min-w-0">
-                                  <span className="block truncate text-[13px] leading-tight font-semibold text-foreground">
+                                  {/* 组头是固定宽度的列首：1440 下 7 块挤一行，渠道名放不下。
+                                      截断保留单行高度，悬浮给全名（窄屏整行宽，不截断）。 */}
+                                  <span
+                                    className="block truncate text-[13px] leading-tight font-semibold text-foreground"
+                                    title={group.label}
+                                  >
                                     {group.label}
                                   </span>
                                   <span className="block text-xs leading-tight text-muted-foreground tabular-nums">
@@ -177,11 +185,11 @@ export function CredentialGroupHeader({
                               {/* 指标区：状态 / 额度 / 到期，每个都是「图标 + 标签 + 数值」。
                                   每块**固定宽度**（`w-* shrink-0`），否则内容宽度随渠道变化，
                                   各组的「状态 / 额度 / 到期」起点会各错各的、读起来不成列。
-                                  窄屏放不下时按整块换行，块内仍保持同一套对齐。
-                                  （今日签到在右簇，与模型一起贴右，见折叠按钮之后。） */}
-                              <span className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                                  窄屏两列网格（固定宽度放不下会各自换行、留出参差的空档），
+                                  宽屏恢复一行。（今日签到在右簇，与模型一起贴右。） */}
+                              <span className="flex flex-wrap items-center gap-x-3 gap-y-2 max-md:grid max-md:w-full max-md:grid-cols-2">
                                 {/* 状态分布：只列出现过的态，图标语义与行内状态徽章同源 */}
-                                <span className="flex w-40 shrink-0 items-center gap-2">
+                                <span className="flex w-24 min-w-0 shrink-0 items-center gap-2 max-md:w-auto">
                                   <span className="grid size-7 shrink-0 place-items-center rounded-md bg-background text-muted-foreground ring-1 ring-border/70">
                                     <Activity className="size-3.5" aria-hidden />
                                   </span>
@@ -219,7 +227,7 @@ export function CredentialGroupHeader({
                                 {/* 额度合计：占比环 + 剩余 / 总量（标签行带精确百分比）。
                                     免费层（zen / kilo）无额度接口，null 显示 — 且不出环，
                                     退回一个中性图标位保持各块对齐。 */}
-                                <span className="flex w-48 shrink-0 items-center gap-2">
+                                <span className="flex w-48 min-w-0 shrink-0 items-center gap-2 max-md:w-auto">
                                   {quotaPct !== null ? (
                                     <span data-testid={`group-${group.key}-quota-pct`}>
                                       <QuotaRing pct={quotaPct} />
@@ -261,7 +269,7 @@ export function CredentialGroupHeader({
                                     缺席的窗口不渲染（轨道留空），前几块的对齐不受影响。 */}
                                 {hasExpiring && (
                                   <span
-                                    className="flex w-36 shrink-0 items-center gap-2"
+                                    className="flex w-32 min-w-0 shrink-0 items-center gap-2 max-md:w-auto"
                                     data-testid={`group-${group.key}-expiring`}
                                     title={`组内各号主窗口（${formatDuration(expiryWindow)}）内将到期的积分合计（调度窗口，非单笔到期时刻）`}
                                   >
@@ -280,7 +288,7 @@ export function CredentialGroupHeader({
                                 )}
                                 {hasExpiringSecondary && (
                                   <span
-                                    className="flex w-36 shrink-0 items-center gap-2"
+                                    className="flex w-32 min-w-0 shrink-0 items-center gap-2 max-md:w-auto"
                                     data-testid={`group-${group.key}-expiring-secondary`}
                                     title={`组内各号次窗口（${formatDuration(expirySecondaryWindow)}）内将到期的积分合计，含主窗口的部分（调度窗口，非单笔到期时刻）`}
                                   >
@@ -306,10 +314,10 @@ export function CredentialGroupHeader({
                                 签到「已签 / 该签」是主数字；失败单独标红——那才是要处置
                                 的东西（失败在 30s 轮询里会随下一轮补签自动回落）。
                                 最近时刻只给 HH:MM，日期对「今天」是冗余的。 */}
-                            <span className="flex shrink-0 items-center">
+                            <span className="flex w-full shrink-0 items-center gap-1 max-md:pb-1 max-md:gap-2 lg:w-auto">
                               {showCheckin && (
                                 <span
-                                  className="flex w-40 shrink-0 items-center gap-2 pr-3"
+                                  className="flex w-28 min-w-0 items-center gap-2 pr-2 max-md:w-auto max-md:flex-1 max-lg:shrink-0"
                                   data-testid={`group-${group.key}-checkin`}
                                   title={checkinTitle}
                                 >
@@ -407,7 +415,7 @@ export function CredentialGroupHeader({
                                 >
                                   <button
                                     type="button"
-                                    className="flex w-40 shrink-0 cursor-help items-center gap-2 rounded-md py-2 pr-3 pl-1 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+                                    className="flex w-44 min-w-0 cursor-help items-center gap-2 rounded-md py-2 pr-1 pl-1 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none max-md:w-auto max-md:flex-1 max-lg:shrink-0"
                                     data-testid={`group-${group.key}-model-count`}
                                   >
                                     <span className="grid size-7 shrink-0 place-items-center rounded-md bg-background text-muted-foreground ring-1 ring-border/70">

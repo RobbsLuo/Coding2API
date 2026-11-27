@@ -252,14 +252,22 @@ function ComponentList({ source }: { source: UpstreamSource }) {
       <div className="mb-1 text-xs font-medium text-muted-foreground">
         组件明细（{total}）
       </div>
-      <ul className="space-y-1">
+      {/* 两列网格：名称占满剩余宽度、状态列右对齐，行与行在列边界上对齐；
+          展开全部时限制高度并内部滚动，避免 25 项的源把页面撑到几屏高。 */}
+      <ul
+        className={cn(
+          "divide-y divide-border/60",
+          showAll && "max-h-80 overflow-y-auto",
+        )}
+      >
         {shown.map((component) => (
           <li
             key={component.name}
-            className="flex flex-wrap items-baseline justify-between gap-2 text-xs"
+            className="grid grid-cols-[1fr_auto] items-center gap-x-3 py-1 text-xs"
           >
             <span
               className={cn(
+                "min-w-0 break-words",
                 component.level === "operational"
                   ? "text-muted-foreground"
                   : "text-foreground",
@@ -267,7 +275,7 @@ function ComponentList({ source }: { source: UpstreamSource }) {
             >
               {component.name}
             </span>
-            <span className="flex items-baseline gap-2">
+            <span className="flex items-center justify-end gap-2 text-right">
               {component.detail && (
                 <span className="text-muted-foreground tabular-nums">{component.detail}</span>
               )}
@@ -438,35 +446,32 @@ function OverviewStrip({
       </div>
 
       {/* 分布条与图例同源（都从 `upstreamLevelTone` 派生）：分段只是图例的视觉
-          强化，含义由图例文字与 aria-label 承担（颜色不单独表意）。 */}
+          强化，含义由图例文字与 aria-label 承担（颜色不单独表意）。分段用
+          `flex-grow` 按占比分配宽度而非百分比，2px 间隙才不会被算进总宽。 */}
       <div
         role="img"
-        aria-label={`上游档位分布：${barLabel || "暂无数据"}，共 ${total} 个源`}
-        className="mt-3 flex h-2.5 w-full overflow-hidden rounded-full bg-muted"
+        aria-label={`${total} 个源：${barLabel || "暂无数据"}`}
+        className="mt-3 flex h-2.5 w-full gap-[2px] overflow-hidden rounded-full bg-muted"
       >
         {TONE_ORDER.map((tone) =>
           toneCounts[tone] > 0 ? (
             <div
               key={tone}
               className={cn("transition-all", TONE_BAR[tone])}
-              style={{ width: `${(toneCounts[tone] / Math.max(1, total)) * 100}%` }}
+              style={{ flexGrow: toneCounts[tone], flexBasis: 0 }}
             />
           ) : null,
         )}
       </div>
 
-      <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1.5 text-sm">
+      <div className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1.5">
         {legend.map((level) => (
-          <span key={level} className="inline-flex items-center gap-1.5">
-            <span
-              className={cn("size-2 rounded-full", TONE_BAR[upstreamLevelTone(level)])}
-              aria-hidden
-            />
-            <span className="text-muted-foreground">{upstreamLevelLabel(level)}</span>
-            <strong className="tabular-nums">{counts.get(level) ?? 0}</strong>
-          </span>
+          <Badge key={level} tone={upstreamLevelTone(level)} dot>
+            {upstreamLevelLabel(level)}
+            <strong className="ml-1 tabular-nums">{counts.get(level) ?? 0}</strong>
+          </Badge>
         ))}
-        {total === 0 && <span className="text-muted-foreground">尚未抓取到任何源</span>}
+        {total === 0 && <span className="text-xs text-muted-foreground">尚未抓取到任何源</span>}
       </div>
 
       <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-border/70 pt-3 text-xs text-muted-foreground">

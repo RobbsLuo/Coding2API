@@ -265,9 +265,7 @@ export function ApiKeysPage() {
         description="创建外部客户端（ChatGPT Next Web、LobeChat、Cursor 等）接入用的 Key，协议与 OpenAI 兼容。Key 仅在创建时完整显示一次，请立即保存；用量按 Key 归属用户统计。"
         icon={<KeyRound className="size-5" />}
       />
-      <OpenAIEntry apiKey={created?.api_key ?? ""} />
-      <AnthropicEntry apiKey={created?.api_key ?? ""} />
-
+      {/* 主任务是 Key 管理，接入说明是辅助文档：Key 面板在前，两个接入面板在后并排 */}
       <Panel
         title="我的 API Key"
         action={
@@ -379,6 +377,12 @@ export function ApiKeysPage() {
           </>
         )}
       </Panel>
+
+      {/* 接入说明是辅助文档：xl 下并排省纵向空间，小屏堆叠 */}
+      <div className="grid items-start gap-6 xl:grid-cols-2">
+        <OpenAIEntry apiKey={created?.api_key ?? ""} />
+        <AnthropicEntry apiKey={created?.api_key ?? ""} />
+      </div>
 
       {/* 创建 Key 对话框：创建成功后仍停留在对话框内展示一次性明文，由用户主动关闭 */}
       {createOpen && (

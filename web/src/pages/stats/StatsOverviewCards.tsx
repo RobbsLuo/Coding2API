@@ -4,7 +4,6 @@
  * 派生文案（成功率 / token 提示 / 缓存命中与未命中）就在本组件算，
  * 与搬出前同址同式，不跨组件传中间值。
  */
-import { Activity, Coins, Timer, Wallet } from "lucide-react";
 import { Metric, Notice } from "../../ui";
 import {
   formatAssumedCacheRate,
@@ -88,27 +87,25 @@ export function StatsOverviewCards({ overviewFailed, stats }: StatsOverviewCards
         {/* 四张主卡：请求数 / Token / 成本 / 耗时——正好对应「用了多少、花了多少、
             快不快」三个问题。其余指标（输出速度、Credit、成功率）降为下方一条
             状态条：它们的 hint 太长，占满六张卡会把每张压到 180px、hint 排成六行，
-            反而让主指标看不见。 */}
-        <Metric label="请求数" value={formatNumber(stats?.requests)} tone="ok"
-                hint={`成功 ${formatNumber(stats?.ok_count)} · 成功率 ${rateText}`}
-                icon={<Activity className="size-4" />} />
+            反而让主指标看不见。
+            不带 icon、不带 tone：请求量不是「成功」语义，绿色留给真正的成功状态。
+            装饰性图标不传达信息，label 已说明一切。 */}
+        <Metric label="请求数" value={formatNumber(stats?.requests)}
+                hint={`成功 ${formatNumber(stats?.ok_count)} · 成功率 ${rateText}`} />
         <Metric
           label="Token 消耗"
           value={formatCompact(totalTokens)}
           hint={tokenHint}
-          icon={<Coins className="size-4" />}
         />
         <Metric
           label="成本（估算）"
           value={formatMoney(stats?.cost_cny, "CNY")}
           hint={`美元 ${formatMoney(stats?.cost_usd, "USD")} · 按 OpenRouter 刊例价折算`}
-          icon={<Wallet className="size-4" />}
         />
         <Metric
           label="平均耗时"
           value={formatLatency(stats?.avg_latency_ms)}
           hint={`首字延迟 ${formatLatency(stats?.avg_ttfb_ms)}`}
-          icon={<Timer className="size-4" />}
         />
       </section>
 

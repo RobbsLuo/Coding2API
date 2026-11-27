@@ -294,6 +294,11 @@ body,
   table[data-table-cards] > thead th:empty {
     display: none;
   }
+  /* 不可排序的列名不摆片：卡片里每格已有 `data-label` 字段名，再顶一排
+     长得像按钮、点了却没反应的圆片只会误导。只保留带按钮的排序片。 */
+  table[data-table-cards] > thead th:not(:has(button, [role="button"])) {
+    display: none;
+  }
 
   /* ---- 行 → 卡片；行内的列头（凭证表按渠道分组）也走「片」这一套 ---- */
   table[data-table-cards] > tbody {
@@ -376,6 +381,13 @@ body,
     font-weight: 500;
     color: var(--ink-muted);
     white-space: nowrap;
+  }
+  /* 选择列只有一枚勾选框，写「选择 : ☐」是噪声；右对齐即可 */
+  table[data-table-cards] > tbody td[data-label="选择"]::before {
+    content: none;
+  }
+  table[data-table-cards] > tbody td[data-label="选择"] {
+    justify-content: flex-end;
   }
   /* 值靠右对齐、允许换行；数字格仍自带 tabular-nums */
   table[data-table-cards] > tbody td > * {

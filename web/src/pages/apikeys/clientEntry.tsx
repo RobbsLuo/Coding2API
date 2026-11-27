@@ -135,7 +135,10 @@ function EndpointRow({
 }
 
 /** 客户端接入面板的公共骨架：卡片 header 的「说明 / 收起」按钮切换内容，
- *  默认收起，不引入动画。 */
+ *  默认收起，不引入动画。
+ *
+ *  收起态只留标题行 + 按钮：此前还挂一句「展开查看 Base URL…」的说明，
+ *  每张卡片平白占 ~100px，把下面的 Key 列表挤出首屏。 */
 function ClientEntryPanel({
   title,
   testid,
@@ -149,6 +152,11 @@ function ClientEntryPanel({
   return (
     <Panel
       title={title}
+      // 收起态收掉内容区间距与 header 下边框：只留标题行 + 切换按钮，
+      // 否则空内容区仍撑出 ~100px 的卡片，把下面的 Key 列表挤出首屏
+      className={open
+        ? undefined
+        : "gap-0 pb-0 [&>[data-slot=card-header]]:border-b-0 [&>[data-slot=card-header]]:pb-0"}
       action={
         <Button
           size="sm"
@@ -166,11 +174,7 @@ function ClientEntryPanel({
         <div className="space-y-4 text-sm" data-testid={testid}>
           {children}
         </div>
-      ) : (
-        <p className="text-sm text-muted-foreground">
-          展开查看 Base URL、端点列表与可复制的接入示例。
-        </p>
-      )}
+      ) : null}
     </Panel>
   );
 }

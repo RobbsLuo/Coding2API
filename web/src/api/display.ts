@@ -309,6 +309,13 @@ export const ALERT_RULE_LABEL: Record<string, string> = {
   task_failed: "后台任务连续失败",
   token_expiring: "token 临近到期",
   error_rate: "上游错误率骤升",
+  // 后三类此前没进表：告警页「规则」列直接显示 channel_dead / checkin_failing
+  // 这种内部 kebab key，与同列的「token 临近到期」混排，读起来像两套系统。
+  channel_dead: "渠道零成功",
+  checkin_failing: "连续签到失败",
+  key_burst: "单 Key 用量暴涨",
+  off_hours: "非工作时段请求",
+  budget: "当月成本预算",
 };
 
 export function formatNumber(value: number | null | undefined): string {

@@ -39,7 +39,7 @@ function Table({
           data-slot="table"
           data-table-cards={cards ? "" : undefined}
           role={cards ? "table" : undefined}
-          className={cn("w-full caption-bottom text-sm", className)}
+          className={cn("w-full caption-bottom text-sm tabular-nums", className)}
           {...props}
         />
       </TableCardsContext.Provider>

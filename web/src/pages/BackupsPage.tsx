@@ -183,7 +183,7 @@ export function BackupsPage() {
             description="后台任务会按配置周期自动备份；也可以点右上角「立即备份」。"
           />
         ) : (
-          <Table data-testid="backups-table">
+          <Table data-testid="backups-table" cards>
             <TableHeader>
               <TableRow>
                 <TableHead>文件名</TableHead>
@@ -195,12 +195,19 @@ export function BackupsPage() {
             <TableBody>
               {backups.map((item: BackupEntry) => (
                 <TableRow key={item.name} data-testid={`backup-row-${item.name}`}>
-                  <TableCell className="font-mono text-xs">{item.name}</TableCell>
-                  <TableCell>{formatBytes(item.size)}</TableCell>
-                  <TableCell>{formatTime(item.created_at)}</TableCell>
-                  <TableCell className="text-right">
-                    <div className="flex justify-end gap-1">
-                      <RawButton size="sm" variant="ghost" asChild>
+                  <TableCell label="文件名" className="font-mono text-xs">{item.name}</TableCell>
+                  <TableCell label="大小">{formatBytes(item.size)}</TableCell>
+                  <TableCell label="时间">{formatTime(item.created_at)}</TableCell>
+                  <TableCell label="操作" className="text-right">
+                    {/* 操作列：三枚同重 ghost 按钮，只有下载用前景色作为主操作；
+                        删除走 destructive 文字色，区分「可恢复」与「不可撤销」。 */}
+                    <div className="flex flex-wrap justify-end gap-1">
+                      <RawButton
+                        size="sm"
+                        variant="ghost"
+                        asChild
+                        className="text-foreground hover:text-foreground"
+                      >
                         <a
                           href={`/api/backups/${encodeURIComponent(item.name)}`}
                           download
@@ -221,6 +228,7 @@ export function BackupsPage() {
                       <Button
                         size="sm"
                         variant="ghost"
+                        className="text-destructive hover:text-destructive"
                         data-testid={`delete-${item.name}`}
                         disabled={busy}
                         onClick={() => setPending({ kind: "delete", name: item.name })}

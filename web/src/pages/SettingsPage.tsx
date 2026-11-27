@@ -4,6 +4,7 @@ import type { ReactNode } from "react";
 import { api } from "../api/client";
 import { formatAgo, formatDuration, taskReportLabel } from "../api/display";
 import { errorText } from "../lib/errors";
+import { cn } from "@/lib/utils";
 import { useQueryClient, useRunTask, useSettings, useTasks } from "../api/hooks";
 import { useSessionContext } from "../Layout";
 import type { RuntimeSetting, TaskRunResult, TaskStatus } from "../api/types";
@@ -86,8 +87,8 @@ function SettingRow({
           </div>
           <p className="mt-1 text-xs text-muted-foreground">{setting.description}</p>
         </div>
-        <div className="flex items-end gap-2">
-          <div className="w-44">
+        <div className="flex items-end gap-2 max-sm:w-full">
+          <div className="w-44 max-sm:min-w-0 max-sm:flex-1">
             {/* 输入控件的可读名称：Field 的 label 未与控件 id 关联，读屏拿不到「生效值」属于哪一项 */}
             <Field label={`${setting.label} 生效值`} htmlFor={`input-${setting.key}`}>
               {setting.kind === "bool" ? (
@@ -245,6 +246,88 @@ function TaskCard({
         </p>
       )}
     </Card>
+  );
+}
+
+/** 二级切换：下划线 tab。容器只有底部一条线，与一级分段胶囊、三级小 chip 拉开层级。 */
+function GroupTabs({
+  value,
+  options,
+  onChange,
+  testId,
+}: {
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (value: string) => void;
+  testId: string;
+}) {
+  return (
+    <div
+      role="tablist"
+      data-testid={testId}
+      className="flex max-w-full flex-wrap gap-x-1 border-b border-border"
+    >
+      {options.map((option) => {
+        const active = option.value === value;
+        return (
+          <button
+            key={option.value}
+            role="tab"
+            type="button"
+            aria-selected={active}
+            data-testid={`${testId}-${option.value}`}
+            onClick={() => onChange(option.value)}
+            className={cn(
+              "-mb-px shrink-0 rounded-t-sm border-b-2 px-3 py-2 text-sm font-medium whitespace-nowrap transition-colors focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
+              active
+                ? "border-primary text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** 三级切换：小 chip，尺寸小于上面两级，激活用浅品牌底。 */
+function ChipTabs({
+  value,
+  options,
+  onChange,
+  testId,
+}: {
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (value: string) => void;
+  testId: string;
+}) {
+  return (
+    <div role="tablist" data-testid={testId} className="flex max-w-full flex-wrap gap-1">
+      {options.map((option) => {
+        const active = option.value === value;
+        return (
+          <button
+            key={option.value}
+            role="tab"
+            type="button"
+            aria-selected={active}
+            data-testid={`${testId}-${option.value}`}
+            onClick={() => onChange(option.value)}
+            className={cn(
+              "shrink-0 rounded-md px-2 py-1 text-xs font-medium whitespace-nowrap transition-colors focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
+              active
+                ? "bg-primary/10 text-primary-ink"
+                : "text-muted-foreground hover:bg-muted hover:text-foreground",
+            )}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -514,7 +597,7 @@ export function SettingsPage() {
             ) : (
               <>
                 {hasSections && (
-                  <div className="mb-3 overflow-x-auto pb-1">
+                  <div className="mb-3">
                     <Tabs
                       value={activeSection}
                       options={[
@@ -530,20 +613,19 @@ export function SettingsPage() {
 
                 {activeSection === "tasks" ? (
                   <>
-                    <div className="mb-3 overflow-x-auto pb-1">
-                      <Tabs
+                    <div className="mb-3">
+                      <GroupTabs
                         value={activeTaskGroup ?? ""}
                         options={taskGroupOptions}
                         onChange={setTaskGroupKey}
                         testId="settings-task-groups"
-                        compact
                       />
                     </div>
 
                     {/* 组内只有一个任务时不摆第三排 tab：一排只有一个选项只是噪音 */}
                     {taskGroupTasks.length > 1 && (
-                      <div className="mb-3 overflow-x-auto pb-1">
-                        <Tabs
+                      <div className="mb-3">
+                        <ChipTabs
                           value={activeTask?.key ?? ""}
                           options={taskGroupTasks.map((task) => ({
                             value: task.key,
@@ -551,7 +633,6 @@ export function SettingsPage() {
                           }))}
                           onChange={setTaskKey}
                           testId="settings-task-tabs"
-                          compact
                         />
                       </div>
                     )}
@@ -580,13 +661,12 @@ export function SettingsPage() {
                   </>
                 ) : (
                   <>
-                    <div className="mb-3 overflow-x-auto pb-1">
-                      <Tabs
+                    <div className="mb-3">
+                      <GroupTabs
                         value={activeGatewayGroup ?? ""}
                         options={gatewayGroupOptions}
                         onChange={setGatewayGroupKey}
                         testId="settings-gateway-groups"
-                        compact
                       />
                     </div>
                     {activeRows.length > 0 ? (

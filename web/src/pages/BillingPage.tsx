@@ -8,6 +8,7 @@ import { PageSkeleton } from "../components/PageSkeleton";
 import {
   Button,
   EmptyState,
+  Metric,
   Notice,
   Panel,
   Table,
@@ -134,49 +135,48 @@ export function BillingPage() {
 
       {!loading && report && (
         <>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4" data-testid="billing-totals">
-            <Panel className="p-4">
-              <div className="text-xs text-muted-foreground">请求数</div>
-              <div className="mt-1 text-xl font-semibold">{formatNumber(totals?.requests)}</div>
-            </Panel>
-            <Panel className="p-4">
-              <div className="text-xs text-muted-foreground">输入 / 输出 token</div>
-              <div className="mt-1 text-xl font-semibold">
-                {formatCompact(totals?.input_tokens)} / {formatCompact(totals?.output_tokens)}
-              </div>
-            </Panel>
-            <Panel className="p-4">
-              <div className="text-xs text-muted-foreground">成本（人民币）</div>
-              <div className="mt-1 text-xl font-semibold">{formatMoney(totals?.cost_cny)}</div>
-            </Panel>
-            <Panel className="p-4">
-              <div className="text-xs text-muted-foreground">成功率</div>
-              <div className="mt-1 text-xl font-semibold">{percent(totals?.success_rate)}</div>
-            </Panel>
+          {/* 汇总 KPI 复用 ui 的 Metric，与「用量统计」页同一套字号/内边距，
+              不再手拼 Panel，否则两页的 KPI 卡高矮与字号对不上。
+              hint 只写数据能支撑的事实（totals 没有 ok_count，不编造「成功 N」）。 */}
+          <div
+            className="grid grid-cols-2 gap-3 lg:grid-cols-4"
+            data-testid="billing-totals"
+          >
+            <Metric label="请求数" value={formatNumber(totals?.requests)} />
+            <Metric
+              label="输入 / 输出 token"
+              value={`${formatCompact(totals?.input_tokens)} / ${formatCompact(totals?.output_tokens)}`}
+            />
+            <Metric
+              label="成本（人民币）"
+              value={formatMoney(totals?.cost_cny)}
+              hint={`美元 ${formatMoney(totals?.cost_usd, "USD")}`}
+            />
+            <Metric label="成功率" value={percent(totals?.success_rate)} />
           </div>
 
           <Panel title="按用户" data-testid="billing-users">
             {report.users.length === 0 ? (
               <EmptyState title="该月没有请求记录" description="换一个月，或确认明细是否已过保留期。" />
             ) : (
-              <Table>
+              <Table cards>
                 <TableHeader>
                   <TableRow>
                     <TableHead>用户</TableHead>
-                    <TableHead>请求</TableHead>
-                    <TableHead>成功</TableHead>
-                    <TableHead>输入 / 输出 token</TableHead>
-                    <TableHead>成本</TableHead>
+                    <TableHead className="text-right">请求</TableHead>
+                    <TableHead className="text-right">成功</TableHead>
+                    <TableHead className="text-right">输入 / 输出 token</TableHead>
+                    <TableHead className="text-right">成本</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {report.users.map((row) => (
                     <TableRow key={row.username ?? "-"}>
-                      <TableCell>{row.username ?? "—"}</TableCell>
-                      <TableCell>{formatNumber(row.requests)}</TableCell>
-                      <TableCell>{formatNumber(row.ok_count)}</TableCell>
-                      <TableCell>{tokenCell(row)}</TableCell>
-                      <TableCell>{formatMoney(row.cost_cny)}</TableCell>
+                      <TableCell label="用户">{row.username ?? "—"}</TableCell>
+                      <TableCell label="请求" className="text-right">{formatNumber(row.requests)}</TableCell>
+                      <TableCell label="成功" className="text-right">{formatNumber(row.ok_count)}</TableCell>
+                      <TableCell label="输入 / 输出 token" className="text-right">{tokenCell(row)}</TableCell>
+                      <TableCell label="成本" className="text-right">{formatMoney(row.cost_cny)}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -189,26 +189,26 @@ export function BillingPage() {
               <EmptyState title="该月没有带 Key 的请求"
                 description="明细只保留 90 天；更早的月份按 Key 聚合为空，按人汇总仍来自小时表。" />
             ) : (
-              <Table>
+              <Table cards>
                 <TableHeader>
                   <TableRow>
                     <TableHead>Key</TableHead>
                     <TableHead>归属用户</TableHead>
-                    <TableHead>请求</TableHead>
-                    <TableHead>输入 / 输出 token</TableHead>
-                    <TableHead>成本</TableHead>
+                    <TableHead className="text-right">请求</TableHead>
+                    <TableHead className="text-right">输入 / 输出 token</TableHead>
+                    <TableHead className="text-right">成本</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {report.keys.map((row) => (
                     <TableRow key={row.api_key_id ?? "-"}>
-                      <TableCell>
+                      <TableCell label="Key">
                         {row.key_name || (row.api_key_id ?? "").slice(0, 12) || "—"}
                       </TableCell>
-                      <TableCell>{row.username ?? "—"}</TableCell>
-                      <TableCell>{formatNumber(row.requests)}</TableCell>
-                      <TableCell>{tokenCell(row)}</TableCell>
-                      <TableCell>{formatMoney(row.cost_cny)}</TableCell>
+                      <TableCell label="归属用户">{row.username ?? "—"}</TableCell>
+                      <TableCell label="请求" className="text-right">{formatNumber(row.requests)}</TableCell>
+                      <TableCell label="输入 / 输出 token" className="text-right">{tokenCell(row)}</TableCell>
+                      <TableCell label="成本" className="text-right">{formatMoney(row.cost_cny)}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

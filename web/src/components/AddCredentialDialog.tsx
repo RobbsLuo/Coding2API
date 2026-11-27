@@ -408,28 +408,33 @@ export function AddCredentialDialog({
 
         {tab === "login" ? (
           <div className="mt-4 space-y-4" data-testid="add-credential-login">
-            <div className="flex flex-wrap items-center gap-3">
+            {/* 六个渠道是平级选项，不是六个主操作：用 2 列网格 + 描边按钮，
+                只让「渠道图标 + 名称」承担识别；全用实底主色会变成一排同样的
+                青绿按钮，谁也看不出该点哪个。 */}
+            <div className="grid grid-cols-2 gap-2">
               {LOGIN_PROVIDERS.map((item) => {
                 const pending = loginProviders.includes(item);
                 return pending ? (
-                  <span key={item} className="inline-flex items-center gap-2">
-                    <span className="text-xs text-muted-foreground">
+                  <div key={item} className="col-span-2 flex items-center justify-between gap-2 rounded-lg bg-muted/60 px-3 py-1.5">
+                    <span className="inline-flex items-center gap-2 text-xs text-muted-foreground">
+                      <span className="size-1.5 animate-pulse rounded-full bg-primary" aria-hidden />
                       {PROVIDER_LABEL[item]} 登录中…
                     </span>
                     <Button
                       size="sm"
-                      variant="danger"
+                      variant="ghost"
                       data-testid={`cancel-login-${item}`}
                       onClick={() => void cancelLogin(item)}
                     >
                       取消登录
                     </Button>
-                  </span>
+                  </div>
                 ) : (
-                  <span key={item} className="inline-flex items-center gap-1">
+                  <div key={item} className="flex items-center gap-1">
                     <Button
                       size="sm"
-                      variant="primary"
+                      variant="default"
+                      className="min-w-0 flex-1 justify-start"
                       data-testid={`start-login-${item}`}
                       disabled={busy}
                       onClick={() => void startLogin(item)}
@@ -442,6 +447,7 @@ export function AddCredentialDialog({
                       <Button
                         size="sm"
                         variant="ghost"
+                        className="shrink-0 px-2 text-xs"
                         data-testid="switch-login-officeace"
                         disabled={busy}
                         onClick={() => void startLogin(item, true)}
@@ -449,18 +455,17 @@ export function AddCredentialDialog({
                         换账号
                       </Button>
                     )}
-                  </span>
+                  </div>
                 );
               })}
             </div>
-            <p className="text-xs text-muted-foreground">
-              CodeBuddy 走设备码轮询（自动检测完成）；TRAE 走浏览器回调
-              （授权后由 <code>/authorize</code> 直接落库，本对话框轮询凭证列表，
-              期间勿关闭对话框；浏览器打不开回调地址时把地址栏整条链接粘回来）；
-              Qoder 走设备码登录；CodeArts 走 OAuth2 授权码登录
-              （授权后把地址栏打不开的 127.0.0.1 回调链接粘回本对话框）；
-              OfficeAce 由云端承接回调（本对话框轮询，多账号请用「换账号」）。
-            </p>
+            <ul className="space-y-1 text-xs leading-relaxed text-muted-foreground">
+              <li>CodeBuddy：设备码轮询，自动检测完成。</li>
+              <li>TRAE：浏览器回调，授权后直接落库；期间勿关闭对话框。</li>
+              <li>Qoder：设备码登录。</li>
+              <li>CodeArts：OAuth2 授权码；把打不开的 127.0.0.1 回调链接粘回本对话框。</li>
+              <li>OfficeAce：云端承接回调，多账号用「换账号」。</li>
+            </ul>
             {pasteProvider && (
               <div className="space-y-2" data-testid="paste-callback">
                 <Field label={`${PROVIDER_LABEL[pasteProvider]} 授权回调链接`} htmlFor="paste-callback-input-el">

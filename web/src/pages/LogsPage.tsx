@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { FileTerminal, Pause, Play, Trash2 } from "lucide-react";
 import { ApiError } from "../api/client";
 import {
@@ -57,6 +57,42 @@ export function filterLines(lines: LogLine[], levels: ReadonlySet<string>,
       || line.logger.toLowerCase().includes(needle)
       || (line.request_id ?? "").toLowerCase().includes(bare);
   });
+}
+
+/**
+ * 关键字高亮：按大小写不敏感切分消息文本，命中片段包 `<mark>`。
+ *
+ * 用 React 节点切分而不是 `dangerouslySetInnerHTML`——日志消息来自运行时，
+ * 拼 HTML 就等于把上游响应体当脚本执行。关键字为空 / 未命中时原样返回字符串，
+ * 调用方不必分支。
+ */
+function highlightText(text: string, keyword: string): ReactNode {
+  // 页面上按 request_id 过滤时输入的是 `#ab12cd34`，`#` 不属于文本本身
+  const needle = keyword.trim().replace(/^#/, "").toLowerCase();
+  if (!needle) return text;
+  const lower = text.toLowerCase();
+  if (!lower.includes(needle)) return text;
+
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  while (cursor < text.length) {
+    const hit = lower.indexOf(needle, cursor);
+    if (hit === -1) {
+      parts.push(text.slice(cursor));
+      break;
+    }
+    if (hit > cursor) parts.push(text.slice(cursor, hit));
+    parts.push(
+      <mark
+        key={`${hit}-${parts.length}`}
+        className="rounded-[2px] bg-warn/30 px-0.5 text-inherit"
+      >
+        {text.slice(hit, hit + needle.length)}
+      </mark>,
+    );
+    cursor = hit + needle.length;
+  }
+  return parts;
 }
 
 /**
@@ -293,27 +329,31 @@ export function LogsPage() {
                   data-testid="log-row"
                   className="flex items-start gap-2 rounded px-1.5 py-0.5 hover:bg-muted"
                 >
-                  <span className="shrink-0 text-muted-foreground tabular-nums">
+                  {/* 时间固定宽 + 等宽数字：纵向扫读时列不错位 */}
+                  <span className="w-[5.5rem] shrink-0 text-muted-foreground tabular-nums">
                     {formatLogTime(line.ts)}
                   </span>
-                  <span className="w-16 shrink-0">
+                  {/* 级别固定宽：DEBUG/CRITICAL 长度不同，宽度不锁会让消息起点抖动 */}
+                  <span className="w-[4.5rem] shrink-0">
                     <Badge tone={LEVEL_TONE[line.level] ?? "muted"}>{line.level}</Badge>
                   </span>
-                  <span className="shrink-0 text-muted-foreground">{line.logger}</span>
-                  <span className="min-w-0 flex-1 break-words whitespace-pre-wrap">
-                    {line.message}
+                  <span className="min-w-0 flex-1">
+                    <span className="whitespace-pre-wrap break-all">
+                      {highlightText(line.message, keyword)}
+                    </span>
+                    {line.request_id && (
+                      <button
+                        type="button"
+                        className="ml-2 shrink-0 rounded px-1 text-muted-foreground/80 underline-offset-2 hover:text-foreground hover:underline"
+                        title={`只看这条请求的全部日志（request_id=${line.request_id}）`}
+                        data-testid="log-request-id"
+                        onClick={() => setKeyword(line.request_id ?? "")}
+                      >
+                        #{line.request_id.slice(0, 8)}
+                      </button>
+                    )}
+                    <span className="ml-2 text-muted-foreground/70 break-all">{line.logger}</span>
                   </span>
-                  {line.request_id && (
-                    <button
-                      type="button"
-                      className="shrink-0 rounded px-1 text-muted-foreground/80 underline-offset-2 hover:text-foreground hover:underline"
-                      title={`只看这条请求的全部日志（request_id=${line.request_id}）`}
-                      data-testid="log-request-id"
-                      onClick={() => setKeyword(line.request_id ?? "")}
-                    >
-                      #{line.request_id.slice(0, 8)}
-                    </button>
-                  )}
                 </li>
               ))}
             </ol>

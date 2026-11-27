@@ -17,8 +17,8 @@
  * CSRF 头即可；共享 `api/client.ts` 会增加一层与页面生命周期无关的耦合。
  */
 import { useQuery } from "@tanstack/react-query";
-import { Gauge, ArrowDownRight, ToggleLeft, ToggleRight } from "lucide-react";
-import { Metric, Panel, Notice } from "../../ui";
+import { ToggleLeft, ToggleRight } from "lucide-react";
+import { Panel, Notice } from "../../ui";
 import { formatAssumedCacheRate, formatCacheRate, formatCompact, formatNumber } from "../../api/display";
 import type { StatsOverview } from "../../api/types";
 
@@ -143,30 +143,47 @@ export function CompressPanel({
         </div>
       ) : (
         <div className="space-y-3">
-          <section aria-label="压缩收益指标" className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-            <Metric
-              label="触发次数"
-              value={formatNumber(counters?.triggers)}
-              tone="ok"
-              hint={`tool 输出 ${formatNumber(counters?.tool_triggers)} · 上下文裁剪 ${formatNumber(counters?.context_trims)}`}
-              icon={<Gauge className="size-4" />}
-            />
-            <Metric
-              label="省下 token（估算）"
-              value={formatCompact(counters?.tokens_saved)}
-              hint={`字符 ${formatCompact(counters?.chars_saved)} · 按 0.25 token/字符下界估算`}
-              icon={<ArrowDownRight className="size-4" />}
-            />
-            <Metric
-              label="同期缓存命中率"
-              value={hitRate}
-              hint={`命中 ${formatCompact(stats?.cached_tokens ?? null)} · 输入 ${formatCompact(stats?.input_tokens)}`}
-            />
-            <Metric
-              label="原地不变"
-              value={formatNumber(counters?.unchanged)}
-              hint="开关开着但载荷逐字节没变：这是「白开」的证据"
-            />
+          {/* 指标条：四格并进一条细分隔线的栅格，不再在 Panel 里套四张卡
+              （卡片套卡片会多出一层边框/阴影，读数也抢走标题的权重）。
+              每格自撑内容，窄屏两列、lg 四列，不固定宽度。 */}
+          <section
+            aria-label="压缩收益指标"
+            className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border/70 bg-border/70 lg:grid-cols-4"
+          >
+            <div className="bg-panel px-4 py-3">
+              <div className="text-xs text-muted-foreground">触发次数</div>
+              <div className="mt-1 text-base font-semibold tabular-nums">
+                {formatNumber(counters?.triggers)}
+              </div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                tool 输出 {formatNumber(counters?.tool_triggers)} · 上下文裁剪 {formatNumber(counters?.context_trims)}
+              </div>
+            </div>
+            <div className="bg-panel px-4 py-3">
+              <div className="text-xs text-muted-foreground">省下 token（估算）</div>
+              <div className="mt-1 text-base font-semibold tabular-nums">
+                {formatCompact(counters?.tokens_saved)}
+              </div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                字符 {formatCompact(counters?.chars_saved)} · 按 0.25 token/字符下界估算
+              </div>
+            </div>
+            <div className="bg-panel px-4 py-3">
+              <div className="text-xs text-muted-foreground">同期缓存命中率</div>
+              <div className="mt-1 text-base font-semibold tabular-nums">{hitRate}</div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                命中 {formatCompact(stats?.cached_tokens ?? null)} · 输入 {formatCompact(stats?.input_tokens)}
+              </div>
+            </div>
+            <div className="bg-panel px-4 py-3">
+              <div className="text-xs text-muted-foreground">原地不变</div>
+              <div className="mt-1 text-base font-semibold tabular-nums">
+                {formatNumber(counters?.unchanged)}
+              </div>
+              <div className="mt-0.5 text-xs text-muted-foreground">
+                开关开着但载荷逐字节没变：这是「白开」的证据
+              </div>
+            </div>
           </section>
           <p className="text-xs text-muted-foreground">
             判断口径：省下的 token 要大于「缓存命中率下降造成的未命中 token」才值得开。

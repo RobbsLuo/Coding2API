@@ -247,7 +247,10 @@ function ChannelPill({
       className={cn(
         // overflow-hidden 让两段的背景被父级 rounded-full 裁齐；父级只负责外轮廓，
         // 两段各自铺底色，接缝处由右段的 border-l 画分隔线。
-        "inline-flex items-stretch overflow-hidden rounded-full border text-[10px] leading-4 font-medium transition-colors",
+        // 固定 `h-5`：与行内「智 xx」能力分徽章、「自定义别名」徽章同高（20px），
+        // 一排徽章落在同一基线上；`shrink-0` + `whitespace-nowrap` 保证折行时
+        // 整颗徽章换行，不会被挤成半个。
+        "inline-flex h-5 shrink-0 items-stretch overflow-hidden rounded-full border text-[10px] leading-4 font-medium whitespace-nowrap transition-colors",
       )}
       style={{
         // 未选中也留一条很淡的渠道色描边：纯底色在白底上几乎看不见，徽章会散成
@@ -321,7 +324,7 @@ function BenchmarkBadge({ item }: { item: { benchmarks?: ModelBenchmarks } }) {
       data-testid="model-benchmark"
       title={benchmarkTitle(item)}
       className={cn(
-        "inline-flex items-center gap-0.5 rounded-md border px-1.5 py-0.5 text-[11px] font-semibold tabular-nums",
+        "inline-flex h-5 items-center gap-0.5 rounded-md border px-1.5 py-0 text-[11px] font-semibold tabular-nums",
         tone,
       )}
     >
@@ -378,7 +381,7 @@ function ModelRow({
       {/* 渠道 + 倍率常驻右侧：名称 `flex-1` 占满左侧后徽章组自然贴右；徽章组
           自身 `flex-wrap`，多渠道放不下时**在右侧区域内折行**，而不是整组掉到
           名称下方独占一行（内层 `justify-end` 让每行都贴右）。 */}
-      <span className="flex min-w-0 flex-wrap items-center justify-end gap-1.5">
+      <span className="flex min-w-0 flex-wrap items-center justify-end gap-1">
         {isCustomAlias(item) && (
           <span data-testid="model-alias-badge" title={aliasTitle(item)}>
             <Badge tone="accent">自定义别名</Badge>
@@ -402,8 +405,9 @@ function ModelRow({
  * 可视化模型选择器：搜索框 + 渠道筛选 chips + 品牌着色的模型卡片列表。
  *
  * 每行展示模型名与该模型可用的**全部渠道徽章**及各自倍率，多渠道模型因此
- * 一眼可辨；单渠道模型归入「仅 XX」分组。顶部常驻「当前选择」条，滚动时
- * 也能看清选中项。选中值语义见 `modelValue`。
+ * 一眼可辨；单渠道模型归入「仅 XX」分组。顶部是「当前选择」条，列表按内容
+ * 自然增高（不限高，避免把最后一行卡片切成半张），模型多时由页面滚动。
+ * 选中值语义见 `modelValue`。
  */
 export function ModelPicker({
   models,
@@ -529,7 +533,7 @@ export function ModelPicker({
                   aria-pressed={pinnedProvider === ""}
                   onClick={() => onPin(baseValue)}
                   className={cn(
-                    "mr-0.5 inline-flex items-center gap-1 rounded-full border px-2 py-0 text-[10px] leading-4 font-medium transition-colors focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:outline-none",
+                    "mr-0.5 inline-flex h-5 items-center gap-1 rounded-full border px-2 py-0 text-[10px] leading-4 font-medium transition-colors focus-visible:ring-2 focus-visible:ring-primary/60 focus-visible:outline-none",
                     pinnedProvider === ""
                       ? "border-primary/50 bg-primary/15 text-primary-ink"
                       : "border-transparent bg-muted/60 text-muted-foreground hover:bg-muted hover:text-foreground",
@@ -574,7 +578,7 @@ export function ModelPicker({
           {showPin && (
             <div className="flex items-center gap-1.5" data-testid="model-current-pinned">
               <span className="text-[10px] font-medium text-muted-foreground">强制</span>
-              <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/50 pr-2 pl-1 py-0 text-[10px] leading-4 font-semibold text-foreground">
+              <span className="inline-flex h-5 items-center gap-1 rounded-full border border-border bg-muted/50 pr-2 pl-1 py-0 text-[10px] leading-4 font-semibold text-foreground">
                 <ProviderIcon provider={pinnedProvider} size={11} />
                 {providerLabel(pinnedProvider)}
               </span>
@@ -591,13 +595,26 @@ export function ModelPicker({
         </div>
       )}
 
+      {/* 列表不做固定限高：行高随名称/徽章折行变化，`max-h` 一定落在某一行中间，
+          把卡片切掉一半（1440 下最后一行只剩半张）。改为自然增长，模型多时由页面
+          滚动，宁可页面长一点也不出现半张卡片。 */}
       <div
         role="listbox"
         data-testid="model-list"
-        className="max-h-80 space-y-4 overflow-y-auto rounded-lg border border-border/60 p-2"
+        className="space-y-4 rounded-lg border border-border/60 p-2"
       >
         {sections.length === 0 ? (
-          <p className="py-6 text-center text-sm text-muted-foreground">没有匹配的模型</p>
+          // 首屏还没拿到模型列表时，空态文案会先闪一下「没有匹配的模型」，
+          // 看起来像「这个池子没有可用模型」。加载态优先。
+          loading ? (
+            <div className="space-y-2 py-2" aria-hidden>
+              {[0, 1, 2].map((row) => (
+                <div key={row} className="h-16 animate-pulse rounded-lg bg-muted/60" />
+              ))}
+            </div>
+          ) : (
+            <p className="py-6 text-center text-sm text-muted-foreground">没有匹配的模型</p>
+          )
         ) : (
           sections.map((section) => (
             <div key={section.key}>
@@ -628,7 +645,7 @@ export function ModelPicker({
         )}
       </div>
 
-      {loading && (
+      {loading && sections.length > 0 && (
         <span className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
           <RefreshCw className="size-3 animate-spin" />
           载入模型中…

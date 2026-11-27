@@ -79,13 +79,13 @@ export function AuditPage() {
 
       <Panel title="筛选">
         <form
-          className="flex flex-wrap items-end gap-3"
+          className="flex flex-wrap items-end gap-2"
           onSubmit={(event) => {
             event.preventDefault();
             reset(() => setActor(actorDraft.trim()));
           }}
         >
-          <div className="w-56">
+          <div className="w-full max-w-xs">
             <Field label="操作者" htmlFor="audit-actor-input">
               <Input
                 id="audit-actor-input"
@@ -96,7 +96,7 @@ export function AuditPage() {
               />
             </Field>
           </div>
-          <div className="w-56">
+          <div className="w-full max-w-xs">
             <Field label="动作" htmlFor="audit-action-select">
               <Select
                 id="audit-action-select"
@@ -113,12 +113,14 @@ export function AuditPage() {
               </Select>
             </Field>
           </div>
-          <Button type="submit" variant="default">
+          <Button type="submit" variant="default" size="sm" className="h-8">
             应用筛选
           </Button>
           <Button
             type="button"
             variant="ghost"
+            size="sm"
+            className="h-8"
             data-testid="audit-clear"
             onClick={() => {
               setActorDraft("");
@@ -177,7 +179,7 @@ export function AuditPage() {
                     <TableCell label="操作者" className="text-xs">{event.actor}</TableCell>
                     <TableCell label="动作">
                       {/* 失败动作对读屏不可见（颜色语义）：加「失败」文案 */}
-                      <Badge tone={event.ok ? "muted" : "danger"}>
+                      <Badge tone={event.ok ? "ok" : "danger"} dot>
                         {labels[event.action] ?? event.action}
                         {!event.ok && "（失败）"}
                       </Badge>

@@ -26,11 +26,13 @@ export function PageHeader({
     <div className={cn("flex flex-wrap items-start justify-between gap-3", className)}>
       <div className="min-w-0 flex-1 space-y-1">
         {eyebrow && (
-          <div className="text-[11px] font-semibold tracking-widest text-primary uppercase">
+          // 分组标签退到灰阶：品牌青绿只留给「可操作 / 品牌标识」，否则每页标题上方
+          // 都先亮一下，和主操作按钮抢注意力。
+          <div className="text-[11px] font-medium tracking-wide text-muted-foreground">
             {eyebrow}
           </div>
         )}
-        <h1 className="flex items-center gap-2 text-xl font-semibold tracking-tight">
+        <h1 className="flex items-center gap-2 text-xl leading-tight font-semibold tracking-tight">
           {icon && (
             <span className="grid size-8 place-items-center rounded-lg bg-primary/10 text-primary">
               {icon}

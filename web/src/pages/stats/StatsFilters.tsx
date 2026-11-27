@@ -28,22 +28,32 @@ export function StatsFilters(props: StatsFiltersProps) {
       {/* 筛选条：时间范围与图表指标合并在同一张卡里——两者都是「决定下面看什么」
           的全局开关，分成两张卡会白占一整块高度和一条分隔线。 */}
       <Panel>
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <span className="text-sm font-medium text-muted-foreground">时间范围</span>
-          <Tabs
-            value={range}
-            options={RANGES.map(({ value, label }) => ({ value, label }))}
-            onChange={onRangeChange}
-            testId="range-tabs"
-          />
-          <span aria-hidden className="hidden h-4 w-px bg-border sm:block" />
-          <span className="text-sm font-medium text-muted-foreground">图表指标</span>
-          <Tabs
-            value={metric}
-            options={METRICS.map(({ value, label }) => ({ value, label }))}
-            onChange={onMetricChange}
-            testId="metric-tabs"
-          />
+        {/* 两组筛选各占一行：标签左对齐固定宽度，分段器贴在其后。窄屏（<sm）
+            标签落回控件上方——两组标签一旦挤在同一行，第二组就会换行并把标签
+            丢到行尾，分组关系就看不出来了。行距 gap-3 只做轻分隔，不再套卡片。 */}
+        <div className="space-y-3">
+          <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+            <span className="shrink-0 text-sm font-medium text-muted-foreground sm:w-20">
+              时间范围
+            </span>
+            <Tabs
+              value={range}
+              options={RANGES.map(({ value, label }) => ({ value, label }))}
+              onChange={onRangeChange}
+              testId="range-tabs"
+            />
+          </div>
+          <div className="flex flex-col gap-1.5 sm:flex-row sm:items-center sm:gap-3">
+            <span className="shrink-0 text-sm font-medium text-muted-foreground sm:w-20">
+              图表指标
+            </span>
+            <Tabs
+              value={metric}
+              options={METRICS.map(({ value, label }) => ({ value, label }))}
+              onChange={onMetricChange}
+              testId="metric-tabs"
+            />
+          </div>
         </div>
         {/* 自定义范围：两个 datetime-local，精确到分钟、按浏览器本地时区解析。
             起点晚于终点时提示并暂停取数（见 buildCustomRange）。 */}

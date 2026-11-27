@@ -352,7 +352,7 @@ export function UsersPage() {
                     {formatTime(user.created_at)}
                   </TableCell>
                   <TableCell label="操作" className="text-right">
-                    <span className="inline-flex gap-1.5">
+                    <span className="inline-flex flex-wrap gap-1">
                       <Button
                         size="sm"
                         variant="ghost"
@@ -375,7 +375,14 @@ export function UsersPage() {
                       </Button>
                       <Button
                         size="sm"
-                        variant={user.enabled ? "danger" : "default"}
+                        variant="ghost"
+                        // 停用默认不红色：7 行 6 个红按钮会让红色变成背景噪声，
+                        // 只在 hover / 聚焦时给 destructive 提示。
+                        className={
+                          user.enabled
+                            ? "text-muted-foreground hover:bg-destructive/10 hover:text-destructive"
+                            : undefined
+                        }
                         disabled={busy === user.username}
                         data-testid={`toggle-${user.username}`}
                         onClick={() => void toggleEnabled(user)}

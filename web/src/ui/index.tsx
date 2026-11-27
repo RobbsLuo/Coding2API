@@ -331,7 +331,10 @@ export function Notice({
       role={tone === "danger" ? "alert" : "status"}
       className={cn("items-center", cls[tone], className)}
     >
-      {children}
+      {/* ShadAlert 是 grid 容器：直接把「文字 + <strong>/<code> + 文字」塞进去，
+          每个节点会各自占一行（设置页「覆盖优先级」就因此断成三行）。
+          统一包一层，让内联标记回到正常的行内流。 */}
+      <div className="min-w-0 leading-relaxed">{children}</div>
     </ShadAlert>
   );
 }
@@ -482,17 +485,13 @@ export function Metric({
 }) {
   return (
     <Card className={cn("gap-0 px-4 py-3.5 shadow-sm", className)}>
-      <div className="flex items-center justify-between gap-2">
-        <div className="text-xs font-medium text-muted-foreground">{label}</div>
-        {icon && (
-          <span className="grid size-7 place-items-center rounded-lg bg-muted text-muted-foreground">
-            {icon}
-          </span>
-        )}
+      <div className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        {icon && <span className="inline-flex shrink-0 opacity-70">{icon}</span>}
+        <span className="truncate">{label}</span>
       </div>
       <div
         className={cn(
-          "mt-2 text-2xl leading-none font-bold tracking-tight tabular-nums",
+          "mt-2 text-2xl leading-none font-semibold tracking-tight tabular-nums",
           tone === "ok" && "text-ok",
           tone === "danger" && "text-destructive",
           tone === "warn" && "text-warn",

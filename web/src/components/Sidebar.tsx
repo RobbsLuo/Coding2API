@@ -105,9 +105,11 @@ function NavEntry({
       onClick={onNavigate}
       className={({ isActive }) =>
         cn(
-          "group/nav flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors",
+          "group/nav relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-sm transition-colors",
           isActive
-            ? "bg-primary/10 font-medium text-primary ring-1 ring-primary/20"
+            // 当前页：淡品牌底 + 左侧 2px 色条。色条比整圈描边更能一眼定位「我在哪」，
+            // 也不与表格里的 ring 抢注意力。
+            ? "bg-primary/10 font-medium text-primary before:absolute before:inset-y-1.5 before:left-0 before:w-0.5 before:rounded-full before:bg-primary"
             : "text-muted-foreground hover:bg-muted hover:text-foreground",
         )
       }
@@ -119,10 +121,10 @@ function NavEntry({
   );
 }
 
-/** 分组标题。 */
+/** 分组标题。中文不用 uppercase + 大字距（那是拉丁小标题的做法，汉字会被拉散）。 */
 function GroupLabel({ children }: { children: React.ReactNode }) {
   return (
-    <div className="px-2.5 pt-4 pb-1.5 text-[11px] font-semibold tracking-widest text-muted-foreground/80 uppercase">
+    <div className="px-2.5 pt-4 pb-1.5 text-[11px] font-medium tracking-wide text-muted-foreground/75">
       {children}
     </div>
   );

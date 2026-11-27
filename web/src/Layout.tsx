@@ -63,39 +63,49 @@ export function Layout({ session }: { session: SessionInfo }) {
 
   return (
     <div className="flex min-h-full bg-[var(--surface)]">
+      {/* 跳过导航：键盘用户第一次 Tab 就能直达主内容，不必逐项穿过 13 个导航链接 */}
+      <a
+        href="#main"
+        className="sr-only rounded-md bg-primary px-3 py-2 text-sm font-medium text-primary-foreground focus:not-sr-only focus:absolute focus:top-3 focus:left-3 focus:z-50"
+      >
+        跳到主内容
+      </a>
       {/* 顶栏：全尺寸一致（汉堡仅移动端可见），账号与主题常驻右侧 */}
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-20 flex h-14 items-center gap-2 border-b border-border bg-[color:color-mix(in_oklch,var(--background)_88%,transparent)] px-3 backdrop-blur sm:px-5">
-          <Button
-            variant="ghost"
-            size="icon"
-            className="lg:hidden"
-            aria-label="打开导航菜单"
-            aria-expanded={drawerOpen}
-            onClick={() => setDrawerOpen(true)}
-          >
-            <Menu />
-          </Button>
-          <Brand />
-          <div className="ml-auto flex items-center gap-1">
-            <Button variant="ghost" size="icon" asChild>
-              <a
-                href="https://github.com/RobbsLuo/coding2api"
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-label="项目仓库"
-                title="项目仓库"
-              >
-                <GitBranch />
-              </a>
+        <header className="sticky top-0 z-20 border-b border-border bg-[color:color-mix(in_oklch,var(--background)_88%,transparent)] backdrop-blur">
+          {/* 顶栏内容与下方主体同一容器宽度/同一左边界，品牌标记和侧栏对齐 */}
+          <div className="mx-auto flex h-14 w-full max-w-[100rem] items-center gap-2 px-3 sm:px-5 lg:px-8">
+            <Button
+              variant="ghost"
+              size="icon"
+              className="lg:hidden"
+              aria-label="打开导航菜单"
+              aria-expanded={drawerOpen}
+              onClick={() => setDrawerOpen(true)}
+            >
+              <Menu />
             </Button>
-            <ThemeToggle />
-            <UserMenu
-              username={session.username}
-              role={session.role}
-              onChangePassword={() => setChangingPassword(true)}
-              onLogout={logout}
-            />
+            <Brand />
+            <div className="ml-auto flex items-center gap-1">
+              <Button variant="ghost" size="icon" asChild>
+                <a
+                  href="https://github.com/RobbsLuo/coding2api"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="项目仓库"
+                  title="项目仓库"
+                >
+                  <GitBranch />
+                </a>
+              </Button>
+              <ThemeToggle />
+              <UserMenu
+                username={session.username}
+                role={session.role}
+                onChangePassword={() => setChangingPassword(true)}
+                onLogout={logout}
+              />
+            </div>
           </div>
         </header>
 
@@ -105,13 +115,13 @@ export function Layout({ session }: { session: SessionInfo }) {
             <SidebarNav session={session} badges={badges} />
           </aside>
           <div className="flex min-w-0 flex-1 flex-col">
-            <main ref={mainRef} tabIndex={-1} className="flex-1 focus:outline-none">
+            <main id="main" ref={mainRef} tabIndex={-1} className="flex-1 focus:outline-none">
               {/* key=pathname：切换页面即重建边界，把上一页的错误态清掉 */}
               <ErrorBoundary key={location.pathname}>
                 <Outlet context={session} />
               </ErrorBoundary>
             </main>
-            <footer className="pt-6 pb-2 text-xs text-muted-foreground">
+            <footer className="pt-6 pb-2 text-xs text-muted-foreground/70">
               Coding2API · 仅供学习研究，未做安全审计
             </footer>
           </div>

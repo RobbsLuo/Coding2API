@@ -659,7 +659,33 @@ describe("PlaygroundPage（会话鉴权，无需 API Key）", () => {
     mockFetch({ "/api/playground/models": { object: "list", data: [] } });
     renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
     await screen.findByTestId("model-picker");
+    // 首屏请求未落地时先给骨架，空态要等 loading 结束——否则「没有匹配的模型」
+    // 会先闪一下，看起来像池子里真没模型。
+    expect(await screen.findByText("没有匹配的模型")).toBeInTheDocument();
     expect(screen.getByText("没有匹配的模型")).toBeInTheDocument();
+  });
+
+  it("模型请求未落地时给骨架，不先渲染「没有匹配的模型」", async () => {
+    let resolve!: (value: Response) => void;
+    const pending = new Promise<Response>((done) => {
+      resolve = done;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) =>
+        String(url).includes("/api/playground/models")
+          ? pending
+          : Promise.resolve(jsonResponse({})),
+      ),
+    );
+    renderPage(<PlaygroundPage />, { username: "root", is_admin: true });
+    await screen.findByTestId("model-picker");
+    expect(screen.queryByText("没有匹配的模型")).toBeNull();
+
+    await act(async () => {
+      resolve(jsonResponse({ object: "list", data: [] }));
+    });
+    expect(await screen.findByText("没有匹配的模型")).toBeInTheDocument();
   });
 
   it("展示上游人类可读名（Qoder 代号 id 显示为 Qwen3.8-Max）", async () => {
