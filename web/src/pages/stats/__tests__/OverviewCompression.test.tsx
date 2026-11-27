@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { CompressPanel } from "../CompressPanel";
+import { StatsOverviewCards } from "../StatsOverviewCards";
 import { makeClient, mockFetch, renderStandalone } from "@/test-utils";
 import { OVERVIEW } from "@/test-utils/stats";
 
@@ -18,22 +18,30 @@ const COMPRESSION = {
   tool_output_compress_enabled: true,
 };
 
-describe("CompressPanel", () => {
+/** 概览面板里的压缩读数（operator 才渲染）：与缓存命中率同屏、同一时间窗。 */
+describe("概览面板 · 压缩读数", () => {
   beforeEach(() => vi.unstubAllGlobals());
 
   it("同屏展示触发次数、省下 token、命中率与开关状态", async () => {
     const spy = mockFetch({ "/api/stats/compression": COMPRESSION });
     renderStandalone(
-      <CompressPanel stats={OVERVIEW} isOperator since={1700000000} until={1700086400} />,
+      <StatsOverviewCards
+        overviewFailed={false}
+        stats={OVERVIEW}
+        isOperator
+        since={1700000000}
+        until={1700086400}
+      />,
     );
 
-    expect(await screen.findByText("触发次数")).toBeInTheDocument();
-    expect(screen.getByText("12")).toBeInTheDocument();
+    expect(await screen.findByText("压缩触发次数")).toBeInTheDocument();
+    expect(await screen.findByText("12")).toBeInTheDocument();
     expect(screen.getByText("省下 token（估算）")).toBeInTheDocument();
     expect(screen.getByText("1万")).toBeInTheDocument();
     expect(screen.getByText("同期缓存命中率")).toBeInTheDocument();
-    // OVERVIEW.cached_tokens=400 / input_tokens=1000 → 40.0%
-    expect(screen.getByText("40.0%")).toBeInTheDocument();
+    // OVERVIEW.cached_tokens=400 / input_tokens=1000 → 40.0%；总览的缓存格同值，
+    // 同屏出现两次正是「压缩没有把命中率拉低」的证据。
+    expect(screen.getAllByText("40.0%")).toHaveLength(2);
     expect(screen.getByText(/上下文裁剪 开 · tool 输出 开/)).toBeInTheDocument();
     expect(screen.getByText(/tool 输出 9 · 上下文裁剪 3/)).toBeInTheDocument();
     // 时间窗必须随请求下发，否则后端回的是进程终身累计，与同屏命中率口径错位
@@ -48,13 +56,13 @@ describe("CompressPanel", () => {
     const client = makeClient();
     const { rerender } = render(
       <QueryClientProvider client={client}>
-        <CompressPanel stats={OVERVIEW} isOperator since={1000} />
+        <StatsOverviewCards overviewFailed={false} stats={OVERVIEW} isOperator since={1000} />
       </QueryClientProvider>,
     );
-    await screen.findByText("触发次数");
+    await screen.findByText("压缩触发次数");
     rerender(
       <QueryClientProvider client={client}>
-        <CompressPanel stats={OVERVIEW} isOperator since={2000} />
+        <StatsOverviewCards overviewFailed={false} stats={OVERVIEW} isOperator since={2000} />
       </QueryClientProvider>,
     );
 
@@ -77,7 +85,9 @@ describe("CompressPanel", () => {
         tool_output_compress_enabled: false,
       },
     });
-    renderStandalone(<CompressPanel stats={OVERVIEW} isOperator />);
+    renderStandalone(
+      <StatsOverviewCards overviewFailed={false} stats={OVERVIEW} isOperator />,
+    );
 
     expect(await screen.findByTestId("compress-panel-empty")).toHaveTextContent(
       "所选时间窗内压缩未触发",
@@ -87,17 +97,27 @@ describe("CompressPanel", () => {
 
   it("自定义范围非法（暂停取数）时不发请求", () => {
     const spy = mockFetch({ "/api/stats/compression": COMPRESSION });
-    renderStandalone(<CompressPanel stats={undefined} isOperator rangeReady={false} />);
+    renderStandalone(
+      <StatsOverviewCards
+        overviewFailed={false}
+        stats={undefined}
+        isOperator
+        rangeReady={false}
+      />,
+    );
 
     expect(screen.getByTestId("compress-panel")).toBeInTheDocument();
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it("viewer 不渲染面板、也不发请求", () => {
+  it("viewer 不渲染压缩读数、也不发请求", () => {
     const spy = mockFetch({ "/api/stats/compression": COMPRESSION });
-    renderStandalone(<CompressPanel stats={OVERVIEW} isOperator={false} />);
+    renderStandalone(
+      <StatsOverviewCards overviewFailed={false} stats={OVERVIEW} isOperator={false} />,
+    );
 
     expect(screen.queryByTestId("compress-panel")).not.toBeInTheDocument();
+    expect(screen.queryByText("压缩触发次数")).not.toBeInTheDocument();
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -105,7 +125,9 @@ describe("CompressPanel", () => {
     mockFetch({
       "/api/stats/compression": () => new Response("nope", { status: 503 }),
     });
-    renderStandalone(<CompressPanel stats={undefined} isOperator />);
+    renderStandalone(
+      <StatsOverviewCards overviewFailed={false} stats={undefined} isOperator />,
+    );
 
     expect(await screen.findByTestId("compress-panel-error")).toHaveTextContent(
       "压缩读数不可用",

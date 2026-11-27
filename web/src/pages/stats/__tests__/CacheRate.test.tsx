@@ -12,7 +12,7 @@
  */
 import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
-import { userEvent } from "@/test-utils";
+import { renderStandalone, userEvent } from "@/test-utils";
 import type { StatsOverview } from "../../../api/types";
 import { StatsOverviewCards } from "../StatsOverviewCards";
 import { GroupStatsPanel } from "../GroupStatsPanel";
@@ -96,7 +96,9 @@ function renderGroups(rows: GroupRow[]) {
 
 describe("StatsOverviewCards 缓存口径", () => {
   it("正常上报：命中 / 未命中按已上报输入算，命中率用后端 cache_rate", () => {
-    render(<StatsOverviewCards overviewFailed={false} stats={BASE_OVERVIEW} />);
+    renderStandalone(
+      <StatsOverviewCards overviewFailed={false} stats={BASE_OVERVIEW} isOperator={false} />,
+    );
 
     const card = screen.getByTestId("stat-cache");
     expect(card).toHaveTextContent("40.0%");
@@ -107,10 +109,11 @@ describe("StatsOverviewCards 缓存口径", () => {
   });
 
   it("上游未上报（TRAE 式）：三项全 —，并说明不代表未命中", () => {
-    render(
+    renderStandalone(
       <StatsOverviewCards
         overviewFailed={false}
         stats={overview({ cached_tokens: null, cached_input_tokens: null, cache_rate: null })}
+        isOperator={false}
       />,
     );
 
@@ -122,8 +125,9 @@ describe("StatsOverviewCards 缓存口径", () => {
       .toHaveTextContent("上游未上报缓存字段，显示 — 不代表未命中");
   });
 
-  it("部分渠道未上报：命中率按已上报请求计算，未命中用 cached_input_tokens", () => {    // 400 命中 ÷ 600 已上报输入 = 66.7%；若拿总输入 1000 会稀释成 40.0%
-    render(
+  it("部分渠道未上报：命中率按已上报请求计算，未命中用 cached_input_tokens", () => {
+    // 400 命中 ÷ 600 已上报输入 = 66.7%；若拿总输入 1000 会稀释成 40.0%
+    renderStandalone(
       <StatsOverviewCards
         overviewFailed={false}
         stats={overview({
@@ -131,6 +135,7 @@ describe("StatsOverviewCards 缓存口径", () => {
           cached_input_tokens: 600,
           cache_rate: 0.6667,
         })}
+        isOperator={false}
       />,
     );
 
@@ -215,7 +220,7 @@ describe("分组行 / 明细行缓存口径", () => {
 
 describe("未上报但带校准命中率（TRAE ≈ 推算）", () => {
   it("总览：显示 ≈ 实测校准值，并说明是推算", () => {
-    render(
+    renderStandalone(
       <StatsOverviewCards
         overviewFailed={false}
         stats={overview({
@@ -225,6 +230,7 @@ describe("未上报但带校准命中率（TRAE ≈ 推算）", () => {
           cache_rate: null,
           cache_rate_assumed: 0.98,
         })}
+        isOperator={false}
       />,
     );
 
